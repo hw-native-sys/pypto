@@ -178,7 +178,7 @@ def _redirect_prog_build_dir(tmp_path, monkeypatch):
     """Redirect ir.compile() / @pl.jit artifacts into pytest's per-test tmp dir.
 
     Without an explicit ``output_dir``, ``ir.compile()`` writes generated
-    kernels and pass dumps to ``build_output/<name>_<timestamp>`` relative to
+    kernels and pass dumps to ``build_output/<name>_<unique>`` relative to
     the working directory. Under pytest that accumulates stale directories in
     the repo / build tree. Pointing ``PYPTO_PROG_BUILD_DIR`` at a
     ``build_output`` dir inside pytest's per-test ``tmp_path`` keeps every

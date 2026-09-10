@@ -60,7 +60,7 @@ move. All are keyword-only — only `program` is positional.
 | Parameter | Default | What it decides |
 | --------- | ------- | --------------- |
 | `program` | — | The `ir.Program` to compile |
-| `output_dir` | `None` | Where artifacts land; `None` means `<base>/<name>_<timestamp>` under `PYPTO_PROG_BUILD_DIR` or `build_output` |
+| `output_dir` | `None` | Where artifacts land; `None` means a fresh `<base>/<name>_<unique>` per call, under `PYPTO_PROG_BUILD_DIR` or `build_output`. The suffix is opaque — read `compiled.output_dir` rather than deriving it |
 | `strategy` | `Default` | The pass pipeline. `Default` is the only strategy |
 | `dump_passes` | `True` | IR snapshot after every pass — see below |
 | `backend_type` | `Ascend910B` | Target for passes and codegen (`Ascend910B` / `Ascend950`) |

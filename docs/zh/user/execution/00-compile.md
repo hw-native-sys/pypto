@@ -51,7 +51,7 @@ assert compiled.param_names == ["a", "b", "out"]
 | 参数 | 默认 | 决定什么 |
 | ---- | ---- | -------- |
 | `program` | — | 要编译的 `ir.Program` |
-| `output_dir` | `None` | 产物落点；`None` 表示 `PYPTO_PROG_BUILD_DIR` 或 `build_output` 下的 `<name>_<timestamp>` |
+| `output_dir` | `None` | 产物落点；`None` 表示每次调用在 `PYPTO_PROG_BUILD_DIR` 或 `build_output` 下新建一个 `<name>_<unique>`。后缀不可推导 —— 请读 `compiled.output_dir` |
 | `strategy` | `Default` | pass 流水。`Default` 是唯一策略 |
 | `dump_passes` | `True` | 每个 pass 之后的 IR 快照 —— 见下 |
 | `backend_type` | `Ascend910B` | pass 与 codegen 的目标（`Ascend910B` / `Ascend950`） |
