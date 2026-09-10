@@ -4,6 +4,16 @@
       "function": "_temporary_env",
       "path": "python/pypto/runtime/device_runner.py",
       "reason": "Restores caller-provided runtime overrides; each actual compilation input still needs classification at its consumer."
+    },
+    {
+      "function": "_elf_inputs",
+      "path": "python/pypto/jit/_toolchain.py",
+      "reason": "Copies the compiler subprocess environment; explicit dependency overrides are rejected and effective semantic/tool selections are captured by the adapter."
+    },
+    {
+      "function": "_ptoas_inputs",
+      "path": "python/pypto/jit/_toolchain.py",
+      "reason": "Copies the compiler subprocess environment; explicit dependency overrides are rejected and effective semantic/tool selections are captured by the adapter."
     }
   ],
   "schema": 1,
@@ -80,6 +90,10 @@
       "category": "tool_resolution",
       "reason": "Executable search input; fingerprint resolved tools and their resources."
     },
+    "PTOAS_PYTHON": {
+      "category": "tool_resolution",
+      "reason": "Packaged PTOAS launcher interpreter selection; inventory interpreter resources and native dependencies."
+    },
     "PTOAS_ROOT": {
       "category": "tool_resolution",
       "reason": "Use the shared ptoas resolver; inventory the selected launcher and its dependencies."
@@ -95,6 +109,18 @@
     "PYPTO_AUTO_DEPS_LOOP_CARRY_DEBUG": {
       "category": "nonsemantic",
       "reason": "Diagnostic tracing of loop carry dependency analysis only."
+    },
+    "PYPTO_CACHE": {
+      "category": "nonsemantic",
+      "reason": "Persistent storage policy; does not change generated code."
+    },
+    "PYPTO_CACHE_DIR": {
+      "category": "nonsemantic",
+      "reason": "Persistent storage location, captured separately from content identity."
+    },
+    "PYPTO_CACHE_READONLY": {
+      "category": "nonsemantic",
+      "reason": "Persistent storage write policy, captured per request."
     },
     "PYPTO_CODEGEN_MAX_WORKERS": {
       "category": "nonsemantic",
@@ -148,9 +174,25 @@
       "category": "tool_resolution",
       "reason": "Interpreter resource selection; inventory the actual interpreter installation."
     },
+    "PYTHONNOUSERSITE": {
+      "category": "tool_resolution",
+      "reason": "Python console-script import selection; inventory the effective wheel and interpreter inputs."
+    },
+    "PYTHONOPTIMIZE": {
+      "category": "semantic",
+      "reason": "Changes Python compiler execution semantics; captured in the persistent specialization identity."
+    },
     "PYTHONPATH": {
       "category": "tool_resolution",
       "reason": "Import search input; inventory actual imported compiler and runtime modules."
+    },
+    "PYTHONSAFEPATH": {
+      "category": "tool_resolution",
+      "reason": "Python console-script import selection; inventory the effective wheel and interpreter inputs."
+    },
+    "PYTHONUSERBASE": {
+      "category": "tool_resolution",
+      "reason": "Python console-script import selection; inventory the effective wheel and interpreter inputs."
     },
     "SOURCE_DATE_EPOCH": {
       "category": "semantic",

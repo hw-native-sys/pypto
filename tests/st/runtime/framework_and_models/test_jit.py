@@ -14,6 +14,10 @@ serve from cache on subsequent calls, and execute correctly on device.
 """
 
 import ast
+import multiprocessing
+import os
+import traceback
+from pathlib import Path
 
 import pypto.language as pl
 import pytest
@@ -55,8 +59,84 @@ def copy_dyn_batch(
     return out
 
 
+@pl.jit
+def persistent_add(x: pl.Tensor[[16, 16], pl.FP32], out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        pl.store(pl.add(pl.load(x, [0, 0], [16, 16]), 3.0), [0, 0], out)
+    return out
+
+
+def _persistent_process(root, platform, device_id, consume, connection):
+    """Fresh interpreter: ordinary execution publishes, then readonly reuse executes."""
+    try:
+        from pypto import CacheConfig, cache_stats  # noqa: PLC0415
+        from pypto.runtime import RunConfig  # noqa: PLC0415
+        from pypto.runtime.kernel_compiler import KernelCompiler  # noqa: PLC0415
+
+        os.environ.pop("PYPTO_PROG_BUILD_DIR", None)
+        config = RunConfig(
+            platform=platform,
+            device_id=device_id,
+            cache_config=CacheConfig(enabled=True, root=Path(root), readonly=consume),
+        )
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("READY execution invoked a compiler stage")
+
+        with pytest.MonkeyPatch.context() as guard:
+            if consume:
+                guard.setattr(persistent_add, "_compile", forbidden)
+                guard.setattr(KernelCompiler, "compile_incore", forbidden)
+                guard.setattr(KernelCompiler, "compile_orchestration", forbidden)
+                guard.setattr("pypto.backend.pto_backend._run_ptoas", forbidden)
+            x = torch.full((16, 16), 2.0)
+            out = torch.zeros_like(x)
+            persistent_add(x, out, config=config)
+            torch.testing.assert_close(out, torch.full_like(out, 5.0))
+            compiled = persistent_add.compile(config=config)
+            assert compiled._artifact_runtime is not None
+            assert compiled._artifact_runtime.handle.spec.state.value == "ready"
+            assert (compiled.program is None) == consume
+            stats = cache_stats()
+            assert stats.ready_hits == int(consume)
+            assert stats.generation_builds == int(not consume)
+            assert stats.binary_builds == int(not consume)
+        connection.send(None)
+    except BaseException:
+        connection.send(traceback.format_exc())
+    finally:
+        connection.close()
+
+
 class TestJITExecution:
     """End-to-end tests for @pl.jit compile + execute on device."""
+
+    def test_persistent_cache_across_processes(self, test_config, tmp_path):
+        """READY reuses every stage in a new process and executes numerically."""
+        if test_config.codegen_only:
+            pytest.skip("Persistent artifact acceptance requires compiler and runtime")
+        root = tmp_path / "persistent-cache"
+        context = multiprocessing.get_context("spawn")
+        for consume in (False, True):
+            receiving, sending = context.Pipe(duplex=False)
+            process = context.Process(
+                target=_persistent_process,
+                args=(str(root), test_config.platform, test_config.device_id, consume, sending),
+            )
+            process.start()
+            sending.close()
+            try:
+                assert receiving.poll(240), "Cache acceptance child timed out"
+                error = receiving.recv()
+                process.join(timeout=20)
+                assert error is None, error
+                assert process.exitcode == 0
+            finally:
+                receiving.close()
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=20)
+        assert not list(root.rglob("__pycache__"))
 
     def test_warmup_then_execute_without_recompiling(self, test_config, monkeypatch):
         """Prepare from annotations without a worker, then execute those binaries."""

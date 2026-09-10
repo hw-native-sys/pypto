@@ -38,6 +38,8 @@ Example::
     tile_add(a, b, c)  # no recompilation
 """
 
+from pypto._cache_config import CacheConfig, CacheStats, cache_stats, configure_cache
+
 from .decorator import JITFunction, jit
 
-__all__ = ["JITFunction", "jit"]
+__all__ = ["CacheConfig", "CacheStats", "JITFunction", "cache_stats", "configure_cache", "jit"]

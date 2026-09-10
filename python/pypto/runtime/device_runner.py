@@ -466,7 +466,11 @@ def _compile_and_assemble(
     with binary_context_lock(work_dir):
         if save_prebuilt:
             return _compile_and_assemble_locked(work_dir, platform, save_prebuilt=True)
-        return _compile_and_assemble_locked(work_dir, platform)
+        from pypto._cache_config import record_stats, time_stage  # noqa: PLC0415
+
+        record_stats(binary_builds=1)
+        with time_stage("build_ns"):
+            return _compile_and_assemble_locked(work_dir, platform)
 
 
 def _compile_and_assemble_locked(

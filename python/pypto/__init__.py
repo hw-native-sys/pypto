@@ -15,6 +15,8 @@ This package provides Python bindings for the PyPTO C++ library.
 
 from typing import cast
 
+from pypto._cache_config import CacheConfig, CacheStats, cache_stats, configure_cache
+
 # Import IR module (includes operations and core IR types)
 from . import compile_profiling, ir, language, runtime
 from .pypto_core import (
@@ -62,6 +64,10 @@ DT_HF8: DataType = cast(DataType, DataType.HF8)
 DT_INDEX: DataType = cast(DataType, DataType.INDEX)
 
 __all__ = [
+    "CacheConfig",
+    "CacheStats",
+    "cache_stats",
+    "configure_cache",
     # Modules
     "codegen",
     "ir",

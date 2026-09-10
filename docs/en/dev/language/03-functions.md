@@ -55,8 +55,8 @@ source dependency hash without a separate closure-key component.
 
 The snapshot copies bindings only: mutating arbitrary configuration objects
 or editing compiler/source files during compilation is not supported by this
-constant-tracking mechanism. This behavior does not enable persistent artifact
-caching; compiled objects are still reused within the process.
+constant-tracking mechanism. Persistent reuse additionally requires the full
+[artifact identity and cache policy](../10-jit-cache.md).
 
 ### Compile options and diagnostic requests
 
@@ -140,12 +140,13 @@ multi-orchestration `CompiledProgram`. It does not call the distributed object's
 propagate to the caller; a failed binary build can be retried by calling warmup
 again. Diagnostic/output requests still compile afresh as described above.
 
-This initial warmup API does not enable automatic persistent lookup or promise
-shared-cache publication. Ordinary objects retain their private build directories
-and existing binary-cache behavior. An internally attached artifact uses the
-[artifact runtime protocol](../09-artifact-store.md), including complete READY
-promotion or read-only loading; automatic attachment, public cache policy, and
-CLI warmup remain follow-up work.
+With [persistent caching](../10-jit-cache.md) enabled, warmup automatically
+publishes or reuses READY artifacts through the [runtime protocol](../09-artifact-store.md).
+Persistence is disabled by default. Read-only misses, unsupported inputs and
+storage failures can prepare private results. A restored result has
+`.program is None`; disable persistence or use `specialize()`/`lower()` to require IR.
+The public cache policy, statistics and metadata-only warmup CLI are documented
+in [Persistent JIT Cache](../10-jit-cache.md).
 
 ## Functions
 

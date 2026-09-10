@@ -22,14 +22,14 @@ from unittest.mock import Mock, patch
 
 import pypto.language as pl
 import pytest
-from pypto import ir
+from pypto import CacheConfig, cache_stats, ir, passes
 from pypto._identity import ToolchainIdentity, digest_record
 from pypto.ir.compiled_program import _COMPILED_META_SCHEMA, CompiledProgram
 from pypto.ir.distributed_compiled_program import _META_SCHEMA, DistributedCompiledProgram
 from pypto.jit import _artifact_manifest
 from pypto.jit._artifact_manifest import ArtifactKey, ArtifactSpec, ArtifactState, BuildKind
 from pypto.jit.artifact_cache import ArtifactStore, BuildDisposition, LookupStatus
-from pypto.runtime import _prebuilt
+from pypto.runtime import RunConfig, _prebuilt
 from pypto.runtime._artifact_runtime import ArtifactRuntime, bind_artifact, restore_artifact
 from pypto.runtime._artifact_sources import (
     UnsupportedArtifactInput,
@@ -713,6 +713,164 @@ def test_ready_spec_drops_declared_legacy_outputs_but_retains_sources(tmp_path, 
     assert source in runtime.handle.spec.required_files
     assert (runtime.directory / source).is_file()
     assert store.lookup(runtime.handle.key, runtime.handle.spec).status is LookupStatus.HIT
+
+
+@pytest.mark.parametrize("kind", list(BuildKind))
+def test_automatic_jit_publication_ready_restore_and_disabled_ir(tmp_path, fake_runtime, monkeypatch, kind):
+    factory = pl.jit.host if kind is BuildKind.DISTRIBUTED else pl.jit
+
+    @factory
+    def kernel():
+        pass
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PYPTO_PROG_BUILD_DIR", raising=False)
+    monkeypatch.setattr("pypto.jit._persistent.capture_toolchain", lambda *args: _key().environment)
+    builds = []
+
+    def compile_(*args, **kwargs):
+        root = Path(kwargs.get("output_dir", tmp_path / f"private-{len(builds)}"))
+        _generated(root, kind)
+        cls = CompiledProgram if kind is BuildKind.SINGLE_CHIP else DistributedCompiledProgram
+        compiled = cls.from_dir(root)
+        compiled._program = ir.Program([], "fixture", ir.Span.unknown())
+        builds.append(compiled)
+        return compiled
+
+    monkeypatch.setattr(kernel, "_compile", compile_)
+    config = RunConfig(platform="a2a3sim", cache_config=CacheConfig(enabled=True, root=tmp_path / "cache"))
+    # Runtime UTs install verification instruments, which intentionally bypass caches.
+    with passes.PassContext([]):
+        before = cache_stats()
+        fresh = kernel.compile(config=config)
+        assert fresh.program is not None
+        assert fresh._artifact_runtime.handle.spec.state is ArtifactState.GENERATED
+        assert kernel.warmup(config=config) is fresh
+        assert fresh._artifact_runtime.handle.spec.state is ArtifactState.BINARY_READY
+        assert len(builds) == 1
+        count = 1 if kind is BuildKind.SINGLE_CHIP else 2
+        assert fake_runtime.runner._compile_and_assemble.call_count == count
+        # Independent JIT object caches exercise the same path used in a new process.
+        kernel._artifact_objects.clear()
+        fake_runtime.runner._compile_and_assemble.side_effect = AssertionError(
+            "unexpected binary compilation"
+        )
+        restored = kernel.warmup(config=config)
+        assert restored.program is None
+        assert len(builds) == 1
+        delta = cache_stats()
+        assert delta.requests - before.requests == 3
+        assert delta.generation_builds - before.generation_builds == 1
+        assert delta.binary_builds - before.binary_builds == 1
+        assert delta.ready_hits - before.ready_hits == 1
+        assert delta.object_hits - before.object_hits == 1
+        readonly = RunConfig(
+            platform="a2a3sim", cache_config=CacheConfig(enabled=True, readonly=True, root=tmp_path / "cache")
+        )
+        files_before = {p: p.read_bytes() for p in (tmp_path / "cache").rglob("*") if p.is_file()}
+        assert kernel.warmup(config=readonly).program is None
+        assert files_before == {p: p.read_bytes() for p in (tmp_path / "cache").rglob("*") if p.is_file()}
+        assert not list((tmp_path / "cache").rglob("__pycache__"))
+        private_config = RunConfig(platform="a2a3sim", cache_config=CacheConfig(enabled=False))
+        private = kernel.compile(config=private_config)
+        assert private.program is not None and len(builds) == 2
+        assert kernel.compile(config=private_config) is private
+
+
+@pytest.fixture
+def automatic_jit_case(tmp_path, fake_runtime, monkeypatch):
+    @pl.jit
+    def kernel():
+        pass
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PYPTO_PROG_BUILD_DIR", raising=False)
+    monkeypatch.setattr("pypto.jit._persistent.capture_toolchain", lambda *args: _key().environment)
+    builds = []
+
+    def compile_(*args, **kwargs):
+        root = Path(kwargs.get("output_dir", tmp_path / f"private-{len(builds)}"))
+        _generated(root, BuildKind.SINGLE_CHIP)
+        compiled = CompiledProgram.from_dir(root)
+        compiled._program = ir.Program([], "fixture", ir.Span.unknown())
+        builds.append(compiled)
+        return compiled
+
+    monkeypatch.setattr(kernel, "_compile", compile_)
+    return kernel, builds
+
+
+def test_automatic_jit_refreshes_sources_before_object_hit(tmp_path, automatic_jit_case):
+    kernel, builds = automatic_jit_case
+    source = tmp_path / "extra.py"
+    source.write_text("value = 1")
+    config = RunConfig(
+        cache_config=CacheConfig(enabled=True, root=tmp_path / "cache", extra_source_paths=(source,))
+    )
+    with passes.PassContext([]):
+        first = kernel.compile(config=config)
+        source.write_text("value = 2")
+        second = kernel.compile(config=config)
+        assert first is not second and len(builds) == 2
+        assert kernel.compile(config=config) is second
+        source.unlink()
+        private = kernel.compile(config=config)
+        assert private.program is not None and private._artifact_runtime is None
+        assert len(builds) == 3
+
+
+@pytest.mark.parametrize("fallback", ["readonly", "invalid", "storage_error"])
+def test_automatic_jit_private_fallback_reuses_concurrent_object(tmp_path, automatic_jit_case, fallback):
+    kernel, builds = automatic_jit_case
+    root = tmp_path / "cache"
+    config = RunConfig(cache_config=CacheConfig(enabled=True, root=root, readonly=fallback == "readonly"))
+    if fallback == "storage_error":
+        root.write_text("not a directory")
+    elif fallback == "invalid":
+        with passes.PassContext([]):
+            first = kernel.compile(config=config)
+        handle = first._artifact_runtime.handle
+        (handle.directory / "compiled_meta.json").write_text("corrupt payload")
+        kernel._artifact_objects.clear()
+    count_before = len(builds)
+
+    def compile_(_):
+        with passes.PassContext([]):
+            return kernel.compile(config=config)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(compile_, range(8)))
+    assert len(builds) - count_before == 1
+    assert all(result is results[0] for result in results)
+    assert results[0].program is not None and results[0]._artifact_runtime is None
+    if fallback == "readonly":
+        assert not root.exists()
+    elif fallback == "storage_error":
+        assert root.read_text() == "not a directory"
+    else:
+        assert (handle.directory / "compiled_meta.json").read_text() == "corrupt payload"
+
+
+def test_automatic_jit_changing_source_during_build_stays_private(tmp_path, automatic_jit_case, monkeypatch):
+    kernel, builds = automatic_jit_case
+    source = tmp_path / "extra.py"
+    source.write_text("before")
+    original = kernel._compile
+
+    def compile_(*args, **kwargs):
+        compiled = original(*args, **kwargs)
+        source.write_text("after")
+        return compiled
+
+    monkeypatch.setattr(kernel, "_compile", compile_)
+    root = tmp_path / "cache"
+    config = RunConfig(cache_config=CacheConfig(enabled=True, root=root, extra_source_paths=(source,)))
+    with passes.PassContext([]):
+        private = kernel.compile(config=config)
+        assert private._artifact_runtime is None
+        assert not list(root.rglob("artifact_manifest.json"))
+        published = kernel.compile(config=config)
+        assert published._artifact_runtime is not None and len(builds) == 2
 
 
 if __name__ == "__main__":

@@ -2,13 +2,10 @@
 
 The internal `pypto._identity` module provides content hashing and deterministic
 record encoding for the persistent JIT cache proposed in [RFC #2653](https://github.com/hw-native-sys/pypto/issues/2653).
-It is not connected to JIT dispatch or artifact lookup. Existing in-process
-cache behavior and dispatch cost are unchanged.
-
-This is the first part of the identity milestone. Automatic inventories of the
-selected compilers, SDK resources, and dynamic dependencies remain a follow-up.
-The runtime's existing compiler-version tokens are not complete content
-identities and must not be promoted to persistent-cache keys.
+The opt-in [JIT integration](10-jit-cache.md) supplies automatic inventories for
+supported Linux toolchains. Unsupported dependency discovery remains unavailable.
+Runtime compiler-version tokens are not content identities and are never used
+as a substitute for dependency contents.
 
 ## Typed records
 
@@ -54,7 +51,7 @@ cycles, non-regular files, unreadable inputs, and detected read-time changes
 produce an unavailable digest with a reason. Errors are not silently treated as
 empty files or omitted dependencies. File metadata helps detect races but never
 substitutes for content in an identity. This is not an atomic filesystem
-snapshot: later integration must revalidate mutable source inputs before
+snapshot: the JIT adapter revalidates mutable source inputs before
 publication, and installation inputs must remain immutable within a process.
 
 Additional application sources are reread for each request. An application's
@@ -114,4 +111,4 @@ arbitrary reflective Python code. The registry also records non-`PYPTO_*`
 inputs such as `PATH`, compiler include/library search variables, loader
 injection, and locale; the toolchain adapters must account for these before
 claiming complete identity. Unsupported dependency discovery must remain
-unavailable when persistent lookup is eventually connected.
+unavailable during persistent lookup.

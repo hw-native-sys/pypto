@@ -51,6 +51,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from pypto._cache_config import CacheConfig
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassDumpLevel
 from pypto.pypto_core import backend as _backend_core
@@ -235,6 +236,7 @@ class RunConfig:
     does not execute or write compilation artifacts.
 
     Attributes:
+        cache_config: Complete per-call persistent-cache policy. None uses process or environment defaults.
         arch: Target architecture, as the codegen backend that names it —
             ``BackendType.Ascend910B`` (a2a3) or ``BackendType.Ascend950`` (a5).
         execution_mode: :class:`ExecutionMode.SIM` or ``ONBOARD``.
@@ -433,6 +435,7 @@ class RunConfig:
     ring_task_window: int | list[int] | tuple[int, ...] | None = None
     ring_heap: int | list[int] | tuple[int, ...] | None = None
     ring_dep_pool: int | list[int] | tuple[int, ...] | None = None
+    cache_config: CacheConfig | None = None
     distributed_config: "DistributedConfig | None" = None
     analyze_auto_scopes_for_deps: bool = False
     memory_planner: MemoryPlanner | None = None
@@ -595,6 +598,7 @@ class RunConfig:
     def run_options(self) -> "RunOptions":
         """Return the dispatch-side half as a :class:`RunOptions`."""
         return RunOptions(
+            cache_config=self.cache_config,
             platform=self.platform,
             device_id=self.device_id,
             aicpu_thread_num=self.aicpu_thread_num,
@@ -831,8 +835,9 @@ class DfxOptions:
 class RunOptions:
     """What a dispatch reads: where it runs, how big its rings are, what it collects.
 
-    Everything here is per-launch. Nothing here reaches compilation — an
-    artifact compiled once can be dispatched under any number of these.
+    Everything here is per-launch. Cache policy selects artifact reuse before
+    JIT dispatch; the remaining fields control execution. These fields do not
+    change generated code.
 
     ``platform`` appears in both halves because it is genuinely two decisions
     that must agree: the target codegen builds for, and the device the worker
@@ -848,6 +853,7 @@ class RunOptions:
     """
 
     platform: str = "a2a3sim"
+    cache_config: CacheConfig | None = None
     device_id: int = 0
     aicpu_thread_num: int | None = None
     # Scalar (broadcast to every scope-depth ring) or a list of ``_RING_DEPTH``

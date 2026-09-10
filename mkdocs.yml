@@ -270,6 +270,7 @@ nav:
       - en/dev/01-compile-profiling.md
       - en/dev/08-artifact-identity.md
       - en/dev/09-artifact-store.md
+      - en/dev/10-jit-cache.md
       - en/dev/02-error-handling.md
       - en/dev/03-logging.md
       - en/dev/03-runtime-dfx.md

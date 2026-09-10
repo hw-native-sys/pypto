@@ -66,11 +66,14 @@ import os
 import re
 import tempfile
 import textwrap
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
+from pypto._cache_config import capture_cache_config, record_stats, time_stage
 from pypto._external_source import external_source_digest
+from pypto._identity import digest_record
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import emit_source_loc_default
 from pypto.compile_profiling import get_active_profiler
@@ -79,6 +82,7 @@ from pypto.ir.pass_manager import PassDumpLevel, coerce_dump_level
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
 from pypto.pypto_core import passes as _passes
+from pypto.pypto_core.passes import runtime_kind_to_name
 
 from ._source import cache_in_snapshot, capture_namespaces
 from .cache import CacheKey, compute_source_hash, make_cache_key
@@ -1812,8 +1816,9 @@ def _resolve_compile_request(run_config: Any) -> tuple[dict[str, Any], bool]:
 
     RunConfig's compile mapping is the source for both codegen and cache keys.
     Diagnostics are requests to run the compiler, so decide bypass before any
-    cache lookup (including source-key construction). Tool discovery remains
-    on the compile path and adds no filesystem probes to ordinary cache hits.
+    cache lookup (including source-key construction). With persistence disabled,
+    tool discovery remains on the compile path; persistent hits additionally
+    require a verified installation identity.
     """
     if run_config is None:
         from pypto.runtime import CompileOptions  # noqa: PLC0415
@@ -1837,6 +1842,8 @@ def _resolve_compile_request(run_config: Any) -> tuple[dict[str, Any], bool]:
         or get_active_profiler() is not None
         or kwargs.get("output_dir") is not None
         or bool(os.environ.get("PYPTO_PROG_BUILD_DIR"))
+        or os.environ.get("PYPTO_EMIT_DEBUG_RUNNER") is not None
+        or os.environ.get("PYPTO_REBUILD_FROM_PTO") is not None
         or kwargs.get("verification_level") is not None
         or kwargs["diagnostic_phase"] is not None
         or kwargs["disabled_diagnostics"] is not None
@@ -1856,6 +1863,11 @@ def _resolve_compile_request(run_config: Any) -> tuple[dict[str, Any], bool]:
 
 
 # ---------------------------------------------------------------------------
+
+
+@functools.lru_cache(maxsize=512)
+def _persistent_dynamic_digest(static: str, values: tuple[tuple[int, str, str], ...]) -> str:
+    return digest_record(("source", static, values))
 
 
 class _DepGraph(NamedTuple):
@@ -1883,6 +1895,7 @@ class _CachedDepGraph:
     source_hash: str | None
     layout_dependencies: tuple[tuple[Any, tuple[str, ...]], ...]
     layouts: _CachedLayouts | None = None
+    persistent_source_hash: str | None = None
 
 
 @functools.lru_cache(maxsize=512)
@@ -1963,6 +1976,8 @@ class JITFunction:
         self._external_include_dirs = external_include_dirs
         self._dep_graph_state: _CachedDepGraph | None = None
         self._cache: dict[CacheKey, Any] = {}  # CacheKey → CompiledProgram
+        self._artifact_objects: dict[Any, Any] = {}
+        self._cache_lock = threading.RLock()
 
         # Preserve function metadata
         self.__name__ = func.__name__
@@ -2494,19 +2509,27 @@ class JITFunction:
         )
 
         compile_kwargs, bypass_cache = _resolve_compile_request(run_config)
+        cache_config = capture_cache_config(getattr(run_config, "cache_config", None))
+        record_stats(requests=1)
         ordered_args = [
             specialization.arguments[n] for n in specialization.param_names if n in specialization.arguments
         ]
+
+        def build(**overrides: Any) -> Any:
+            record_stats(generation_builds=1)
+            with time_stage("build_ns"):
+                return self._compile(
+                    specialization.tensor_meta,
+                    specialization.scalar_values,
+                    specialization.scalar_dtypes,
+                    specialization.per_func_dyn,
+                    pl,
+                    **(compile_kwargs | overrides),
+                )
+
         if bypass_cache:
-            compiled = self._compile(
-                specialization.tensor_meta,
-                specialization.scalar_values,
-                specialization.scalar_dtypes,
-                specialization.per_func_dyn,
-                pl,
-                **compile_kwargs,
-            )
-            return compiled, ordered_args, run_config
+            record_stats(bypasses=1)
+            return build(), ordered_args, run_config
 
         key = make_cache_key(
             source_hash=self._get_source_hash(),
@@ -2529,28 +2552,76 @@ class JITFunction:
             runtime=_resolve_runtime(),
         )
 
-        # L1 cache lookup
-        if key not in self._cache:
-            self._cache[key] = self._compile(
-                specialization.tensor_meta,
-                specialization.scalar_values,
-                specialization.scalar_dtypes,
-                specialization.per_func_dyn,
-                pl,
-                **compile_kwargs,
-            )
+        with self._cache_lock:
+            if cache_config.enabled:
+                from ._persistent import resolve_persistent  # noqa: PLC0415
 
-        return self._cache[key], ordered_args, run_config
+                compiled = resolve_persistent(
+                    self,
+                    key,
+                    cache_config,
+                    build,
+                    self._persistent_source_digest,
+                    platform=compile_kwargs["platform"],
+                    runtime_name=runtime_kind_to_name(_resolve_runtime()),
+                    distributed=self._func_type == "host",
+                )
+            elif key in self._cache:
+                record_stats(object_hits=1)
+                compiled = self._cache[key]
+            else:
+                record_stats(bypasses=1)
+                compiled = self._cache[key] = build()
+        return compiled, ordered_args, run_config
+
+    def _persistent_source_digest(self) -> str:
+        """Memoize immutable graph content; refresh folded constants and externs."""
+        state = self._get_dep_graph_state()
+        functions = [self, *state.graph.deps]
+        if state.persistent_source_hash is None:
+            state.persistent_source_hash = digest_record(
+                [
+                    (
+                        _python_source(fn._func),
+                        fn._func.__module__,
+                        fn._func.__qualname__,
+                        fn._func.__code__.co_filename,
+                        fn._func.__code__.co_firstlineno,
+                        fn._func_type,
+                        str(fn._level),
+                        fn._auto_scope,
+                        fn._external_core_type,
+                        fn._external_dual_aiv_dispatch,
+                        tuple(fn._external_source_paths()),
+                        tuple(fn._external_include_dirs),
+                    )
+                    for fn in functions
+                ]
+            )
+        values = []
+        for index, fn in enumerate(functions):
+            namespace = func_name_lookup(fn._func)
+            for name in _constant_dependency_names(fn._func):
+                folded = free_name_source(name, namespace)
+                if folded is not None:
+                    values.append((index, name, folded))
+            if fn._func_type == "extern":
+                external = external_source_digest(
+                    fn._external_source_paths(),
+                    include_dirs=fn._external_include_dirs,
+                    metadata=(*fn._external_source_paths(), *fn._external_include_dirs),
+                )
+                values.append((index, "<extern>", external))
+        return _persistent_dynamic_digest(state.persistent_source_hash, tuple(values))
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """Specialize, compile (or serve from cache), and execute on device.
 
-        On the first call for a given shape/dtype combination the function is
-        specialized into ``@pl.program`` source, parsed, and compiled via
-        ``ir.compile()`` (passes + codegen).  The resulting ``CompiledProgram``
-        is stored in the L1 in-memory cache so subsequent calls with the same
-        specialization key skip compilation entirely. Diagnostic and explicit
-        output requests bypass both cache lookup and insertion on every call.
+        A compatible compiled object is reused in process. When persistent
+        caching is enabled, a disk hit restores generated code or complete
+        binaries; a miss specializes into ``@pl.program`` and runs passes and
+        codegen. Execution publishes missing binaries automatically. Diagnostic
+        and explicit output requests bypass lookup and insertion on every call.
 
         The compiled kernel is then executed on the NPU device with the given
         torch tensor arguments (Triton-like API).
@@ -2602,8 +2673,10 @@ class JITFunction:
         they affect dispatch, not the compiled artefact.
 
         Subsequent calls (either ``__call__`` or [`compile`][pypto.language.JITFunction.compile]) with the
-        same specialization key hit the L1 cache and return the same
-        ``CompiledProgram`` instance. Dump, compile-profiling, explicit output,
+        same specialization and compatible cache policy return the same
+        ``CompiledProgram`` instance. With persistence enabled, a disk-restored
+        object has ``program is None``; disable persistence when IR is required.
+        Dump, compile-profiling, explicit output,
         and custom pass-diagnostic requests always compile afresh, preserving
         ordinary cached entries. Omitting ``config`` uses ``RunConfig`` defaults,
         including disabled dumps.

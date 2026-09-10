@@ -44,7 +44,8 @@ second = slice_kernel.compile()  # A distinct specialization with 64 rows.
 被引用的闭包常量由源码依赖哈希覆盖，无需单独的闭包键组件。
 
 快照仅复制绑定：此常量跟踪机制不支持编译期间修改任意配置对象
-内部状态，或修改编译器/源码文件。本改动不启用持久产物缓存，编译对象仍在进程内复用。
+内部状态，或修改编译器/源码文件。持久复用还需要完整的
+[产物身份与缓存策略](../10-jit-cache.md)。
 
 ### 编译选项与诊断请求
 
@@ -118,10 +119,11 @@ prepared = add_three.warmup(config=config)  # No sample tensor allocation.
 `prepare()`，后者用于创建执行所需的活动 worker。编译错误直接传递给调用方；
 二进制构建失败后，可以再次调用 warmup 重试。诊断和显式输出请求仍按上文规则重新编译。
 
-本阶段的 warmup API 不会启用自动持久缓存查找，也不保证发布到共享缓存。
-普通对象保留私有构建目录及现有二进制缓存行为。通过内部接口附加的产物遵循
-[产物运行时协议](../09-artifact-store.md)，可完成 READY 阶段发布或只读加载；
-自动附加、公共缓存配置和 CLI 预热留待后续实现。
+启用[持久缓存](../10-jit-cache.md) 后，warmup 通过[运行时协议](../09-artifact-store.md)
+自动发布或复用 READY 产物。持久缓存默认关闭；只读未命中、不支持的输入和存储故障
+可以生成私有结果。从缓存恢复的结果 `.program is None`；需要 IR 时关闭持久缓存，
+或使用 `specialize()`/`lower()`。公共缓存策略、统计和仅用元数据预热的 CLI 参见
+[JIT 持久缓存](../10-jit-cache.md)。
 
 ## 函数
 

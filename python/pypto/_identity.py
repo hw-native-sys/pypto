@@ -23,6 +23,7 @@ import stat
 import struct
 import threading
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -216,12 +217,21 @@ def fingerprint_content(roots: tuple[ContentRoot, ...]) -> ContentIdentity:
     return ContentIdentity(digest_record(("content", records)))
 
 
+@lru_cache(maxsize=128)
+def _empty_extra_sources(extra_fingerprint: str | None) -> ContentIdentity:
+    return ContentIdentity(
+        digest_record(("extra_sources", digest_record(("content", [])), extra_fingerprint))
+    )
+
+
 def fingerprint_extra_sources(
     paths: tuple[Path, ...], extra_fingerprint: str | None = None
 ) -> ContentIdentity:
     """Refresh application sources on every request, outside installation memoization."""
+    if not paths:
+        return _empty_extra_sources(extra_fingerprint)
     roots = tuple(ContentRoot(path, python_only=True) for path in paths)
-    content = fingerprint_content(roots) if roots else ContentIdentity(digest_record(("content", [])))
+    content = fingerprint_content(roots)
     if content.digest is None:
         return content
     return ContentIdentity(digest_record(("extra_sources", content.digest, extra_fingerprint)))
