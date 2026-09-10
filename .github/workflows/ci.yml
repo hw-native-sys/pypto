@@ -1825,10 +1825,12 @@ jobs:
     # Qwen3 weights the steps below read from the runner config, which the rest
     # of the npu pool does not stage.
     runs-on: [self-hosted, linux, npu-xp]
-    # Matches pypto-serving's own job, which carries the same four guards over
-    # a from-source pypto build. Its comment records that 90 left no headroom
-    # once the two DeepSeek steps (2400s client wait under a 3600s task cap)
-    # and a cold pip cache landed in one run.
+    # Matches pypto-serving's own job, which carries these guards over a
+    # from-source pypto build. Its comment records that 90 left no headroom once
+    # the DeepSeek steps (2400s client wait under a 3600s task cap) and a cold
+    # pip cache landed in one run. Kept at 120 with DSpark dropped: the margin
+    # covers a cold build plus the 8-card matrix, and shrinking it would only
+    # trade headroom for nothing.
     timeout-minutes: 120
     defaults:
       run:
@@ -1883,8 +1885,7 @@ jobs:
           bad=0
           for key in \
             PYPTO_QWEN3_MODEL_DIR \
-            PYPTO_DSV4_MODEL_DIR \
-            PYPTO_DSV4_DSPARK_MODEL_DIR; do
+            PYPTO_DSV4_MODEL_DIR; do
             value="${!key:-}"
             if [ -z "$value" ]; then
               echo "::error::$key is not set — add it to this runner's .env"
@@ -1994,14 +1995,21 @@ jobs:
       #   qwen3_accuracy    generated tokens vs a reference          1 card
       #   qwen3_serving     prefix cache / chunked prefill / batch   1 card
       #   deepseek_v4       MTP HTTP matrix                          8 cards
-      #   deepseek_dspark   DSpark target HTTP guard                16 cards
       #
       # DeepSeek earns its cards here: it is the model the cache-policy work
       # this pin exists for targets, and it exercises MoE / MTP / cross-rank
       # collectives that Qwen3-14B never touches, so a Qwen-only guard would
       # miss a whole class of regression. The gate fires only when the pin
-      # moves, so the cost is paid rarely -- which is what buys the two
-      # multi-card steps their room.
+      # moves, so the cost is paid rarely -- which is what buys the multi-card
+      # step its room.
+      #
+      # serving's fourth guard, the 16-card DSpark target
+      # (`test_deepseek_dspark_accuracy.py`), is deliberately NOT here. It fails
+      # on this runner independently of the pin -- red on plain main at v0.60 as
+      # well as at v0.61 -- and it is red on pypto-serving's own `unit-tests` job
+      # on its main branch too. Carrying it would make this job permanently red
+      # and so unable to report on the thing it exists to watch. Add it back once
+      # it passes upstream.
       #
       - name: Run pypto-serving Qwen3 accuracy guard
         env:
@@ -2031,18 +2039,6 @@ jobs:
           task-submit --device auto --device-num 8 --ignore-whitelist \
             --timeout 2400 --max-time 3600 \
             --run "source $GITHUB_WORKSPACE/serving-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-serving && TASK_DEVICE=\$TASK_DEVICE PYTHONPATH=$GITHUB_WORKSPACE/pypto-serving PYPTO_DSV4_MODEL_DIR=$PYPTO_DSV4_MODEL_DIR PYPTO_RUNTIME_LOG=$PYPTO_RUNTIME_LOG python -m pytest tests/test_deepseek_v4_accuracy.py -q -s"
-
-      - name: Run pypto-serving DSpark target HTTP guard
-        # Sixteen cards — the widest step in this workflow. Same shape as the
-        # MTP matrix above, and last so a failure here cannot strand the
-        # cheaper guards behind it.
-        env:
-          PYPTO_RUNTIME_LOG: error
-        run: |
-          source activate.sh
-          task-submit --device auto --device-num 16 --ignore-whitelist \
-            --timeout 2400 --max-time 3600 \
-            --run "source $GITHUB_WORKSPACE/serving-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-serving && TASK_DEVICE=\$TASK_DEVICE PYTHONPATH=$GITHUB_WORKSPACE/pypto-serving PYPTO_DSV4_DSPARK_MODEL_DIR=$PYPTO_DSV4_DSPARK_MODEL_DIR PYPTO_RUNTIME_LOG=$PYPTO_RUNTIME_LOG python -m pytest tests/test_deepseek_dspark_accuracy.py -q -s"
 
       - name: Kill orphaned task-submit tasks
         if: always()
