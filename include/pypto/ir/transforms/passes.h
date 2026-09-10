@@ -161,6 +161,9 @@ Pass InitMemRef();
  */
 Pass MaterializeSemanticAliases();
 
+/// Verify and establish TileStorageLegalized after shared storage repair, before address placement.
+Pass VerifyTileStorage();
+
 /**
  * @brief Create a memory reuse pass
  *

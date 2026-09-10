@@ -182,6 +182,15 @@ Pass RunVerifier(const IRPropertySet& properties) {
       "IRVerifier");
 }
 
+Pass VerifyTileStorage() {
+  return CreateProgramPass(
+      [](const ProgramPtr& program) -> ProgramPtr {
+        PropertyVerifierRegistry::GetInstance().VerifyOrThrow({IRProperty::TileStorageLegalized}, program);
+        return program;
+      },
+      "VerifyTileStorage", PassProperties{.produced = {IRProperty::TileStorageLegalized}});
+}
+
 void VerifyProperties(const IRPropertySet& properties, const ProgramPtr& program,
                       const std::string& pass_name) {
   auto& registry = PropertyVerifierRegistry::GetInstance();

@@ -72,6 +72,8 @@
 | **IncoreTileOps** | IncoreTileOps | InCore 函数使用 tile 操作（无张量级操作残留） |
 | **HasMemRefs** | HasMemRefs | 所有 TileType 变量已初始化 MemRef |
 | **BufferIR** | BufferIR | 显式设备 buffer 表示与注册调用契约验证；组合 SSA、定义支配关系及赋值类型对称性，不证明生命周期或初始化 |
+| **TileStorageLegalized** | TileStorageLegalized | 设备区域边界使用统一的符号存储，同时存活的循环 carry 窗口互不重叠 |
+| **TileStorageAllocated** | TileStorageAllocated | 区域存储统一，并按实际地址检查同时存活的目标窗口及显式复制的重叠 |
 | **AllocatedMemoryAddr** | AllocatedMemoryAddr | 所有 MemRef 在缓冲区限制内具有有效地址 |
 | **OutParamNotShadowed** | OutParamNotShadowed | Out/InOut 参数未被张量创建操作重新赋值 |
 | **NoNestedInCore** | NoNestedInCore | 无嵌套 InCore 作用域（`InCoreScopeStmt` 内含 `InCoreScopeStmt`） |
@@ -235,6 +237,32 @@ Buffer 句柄来自函数参数，或声明了分配、别名、借用结果行�
 错误使用 `BufferIR` 规则。本阶段**不证明**借用生命周期、存储重叠安全性、
 读取数据的初始化覆盖范围或异步副作用的顺序；这些需要后续存储分析。
 合法分配本身不表示数据已初始化。
+
+### Tile 存储属性
+
+`TileStorageLegalized` 在共享存储协调后检查 `InCore`、`AIC` 和 `AIV` 函数。
+每个 tile 变量都需要已定义的 MemRef 和内存空间。分支的 tile yield 必须指向
+结果声明的存储窗口。`ForStmt` 和 `WhileStmt` 的初始值、iter_arg、yield 和结果
+必须指向同一窗口，同时存活的 carry 窗口不能重叠。标量和 GM 值保持原有语义，
+嵌套的 tile 元组必须先展平。
+
+`pass::VerifyTileStorage()` / `passes.verify_tile_storage()` 会显式验证并产生该
+属性，即使关闭自动验证也会执行。开发阶段的 `enable_buffer_ir=True` 流水线
+在共享协调及复用后协调完成后、`AllocateMemoryAddr` 之前运行它；PTOAS 跳过
+地址分配 pass 时仍运行此检查。构建和执行 `PassManager` 时必须使用相同的
+Buffer IR 选项。
+
+符号检查区分 allocation 身份。PYPTO 和 DSA_RP 使用 `TileStorageAllocated`
+追加物理检查：同一内存空间中的窗口按实际字节地址检查重叠，base 变量不同也
+不能证明互不重叠。非完全相同而重叠的 `tile.move` 操作数会被拒绝；完全相同的
+自复制允许由最终 lowering 删除。PTOAS 使用符号存储身份。无法证明同时存活
+窗口互不重叠时，检查会报错。边界还必须保留声明的 slot 数量和 slot 索引表达式。
+区间检查使用已解析的字节偏移和大小，不展开 slot 声明，也不证明循环 slot 的
+生命周期调度。
+
+这些属性通过固定次数遍历和排序窗口索引完成，复杂度为 O(N log N)。它们验证
+存储边界一致性和上述重叠约束，不证明分配支配关系、通用读取初始化覆盖或异步
+生命周期安全。结构检查、地址范围检查和后续 buffer 生命周期检查仍是独立要求。
 
 ### SSAVerify
 

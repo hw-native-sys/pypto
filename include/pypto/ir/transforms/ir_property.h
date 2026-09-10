@@ -137,7 +137,9 @@ enum class IRProperty : uint64_t {
                          ///< boundary
   BufferIR,              ///< InCore/AIC/AIV use explicit buffer handles and valid registered buffer calls;
              ///< composes SSA, dominance, and assignment symmetry, not lifetime or initialization checks
-  kCount  ///< Sentinel (must be last)
+  TileStorageLegalized,  ///< Device If/For/While boundaries use canonical, nonoverlapping allocation windows
+  TileStorageAllocated,  ///< Canonical device storage also has nonoverlapping effective address windows
+  kCount                 ///< Sentinel (must be last)
 };
 
 static_assert(
