@@ -584,3 +584,9 @@ print(p.get_produced_properties())   # {SSAForm}
 - `tests/ut/ir/transforms/test_pass_pipeline.py` — Pipeline, PassContext, instruments, and automatic verification tests
 - `tests/ut/ir/transforms/test_pass_manager.py` — PassManager backward compatibility
 - `tests/ut/conftest.py` — Autouse fixture enabling AFTER verification for all tests
+
+### AIV split verification handoff
+
+`LowerAutoVectorSplit` requires `AivSplitValid` and produces `AivSplitLoweredValid`.
+`ExpandMixedKernel` consumes retained/synthesized regions and the supported flat
+fallback, then invalidates the lowered property. Pass order is unchanged.

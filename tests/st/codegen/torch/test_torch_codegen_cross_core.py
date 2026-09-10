@@ -850,5 +850,106 @@ def test_lower_auto_vector_split_golden(
     _run_split_auto_golden(program, codegen_tensors, arg_order, out_name, expected)
 
 
+@pytest.mark.parametrize("mode", [pl.SplitMode.UP_DOWN, pl.SplitMode.LEFT_RIGHT])
+@pytest.mark.parametrize("manual", [True, False], ids=["manual", "auto"])
+def test_split_singleton_broadcast_golden(mode, manual):
+    """Issue #2697: replicated scale data multiplies each lane's own shard."""
+    rows, cols, inner = 32, 128, 64
+    scale_rows, scale_cols = (1, cols) if mode == pl.SplitMode.UP_DOWN else (rows, 1)
+    row_step, col_step = (rows // 2, 0) if mode == pl.SplitMode.UP_DOWN else (0, cols // 2)
+
+    if mode == pl.SplitMode.UP_DOWN:
+
+        @pl.program
+        class Manual:
+            @pl.function
+            def main(
+                a: pl.Tensor[[rows, inner], pl.FP16],
+                b: pl.Tensor[[inner, cols], pl.FP16],
+                scale: pl.Tensor[[scale_rows, scale_cols], pl.FP32],
+                out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+            ) -> pl.Tensor[[rows, cols], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="broadcast"):
+                    acc = pl.matmul(a, b, out_dtype=pl.FP32)
+                    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                        half = pl.aiv_shard(acc)
+                        factors = scale[0:scale_rows, 0:scale_cols]
+                        y = pl.mul(half, factors)
+                        out = pl.assemble(out, y, [aiv_id * row_step, aiv_id * col_step])
+                return out
+
+        @pl.program
+        class Auto:
+            @pl.function
+            def main(
+                a: pl.Tensor[[rows, inner], pl.FP16],
+                b: pl.Tensor[[inner, cols], pl.FP16],
+                scale: pl.Tensor[[scale_rows, scale_cols], pl.FP32],
+                out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+            ) -> pl.Tensor[[rows, cols], pl.FP32]:
+                with pl.at(
+                    level=pl.Level.CORE_GROUP,
+                    name_hint="broadcast",
+                    optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
+                ):
+                    acc = pl.matmul(a, b, out_dtype=pl.FP32)
+                    factors = scale[0:scale_rows, 0:scale_cols]
+                    y = pl.mul(acc, factors)
+                    out = pl.assemble(out, y, [0, 0])
+                return out
+
+    else:
+
+        @pl.program
+        class Manual:
+            @pl.function
+            def main(
+                a: pl.Tensor[[rows, inner], pl.FP16],
+                b: pl.Tensor[[inner, cols], pl.FP16],
+                scale: pl.Tensor[[scale_rows, scale_cols], pl.FP32],
+                out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+            ) -> pl.Tensor[[rows, cols], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="broadcast"):
+                    acc = pl.matmul(a, b, out_dtype=pl.FP32)
+                    for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.LEFT_RIGHT):
+                        half = pl.aiv_shard(acc)
+                        factors = scale[0:scale_rows, 0:scale_cols]
+                        y = pl.mul(half, factors)
+                        out = pl.assemble(out, y, [aiv_id * row_step, aiv_id * col_step])
+                return out
+
+        @pl.program
+        class Auto:
+            @pl.function
+            def main(
+                a: pl.Tensor[[rows, inner], pl.FP16],
+                b: pl.Tensor[[inner, cols], pl.FP16],
+                scale: pl.Tensor[[scale_rows, scale_cols], pl.FP32],
+                out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+            ) -> pl.Tensor[[rows, cols], pl.FP32]:
+                with pl.at(
+                    level=pl.Level.CORE_GROUP,
+                    name_hint="broadcast",
+                    optimizations=[pl.split(pl.SplitMode.LEFT_RIGHT)],
+                ):
+                    acc = pl.matmul(a, b, out_dtype=pl.FP32)
+                    factors = scale[0:scale_rows, 0:scale_cols]
+                    y = pl.mul(acc, factors)
+                    out = pl.assemble(out, y, [0, 0])
+                return out
+
+    torch.manual_seed(42)
+    tensors = {
+        "a": torch.randn(rows, inner, dtype=torch.float16),
+        "b": torch.randn(inner, cols, dtype=torch.float16),
+        "scale": torch.randn(scale_rows, scale_cols),
+        "out": torch.zeros(rows, cols),
+    }
+    expected = (tensors["a"].float() @ tensors["b"].float()) * tensors["scale"]
+    _run_split_aiv_default_and_check(
+        Manual if manual else Auto, tensors, ["a", "b", "scale", "out"], "broadcast", expected
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

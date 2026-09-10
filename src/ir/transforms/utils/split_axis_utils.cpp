@@ -45,6 +45,7 @@
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -105,6 +106,20 @@ bool IsSingletonDim(const ExprPtr& dim_size) {
   }
   return false;
 }
+
+}  // namespace
+
+bool IsSingletonSplitAxis(const TileType& type, int split_dim) {
+  return split_dim >= 0 && split_dim < static_cast<int>(type.shape_.size()) &&
+         IsSingletonDim(type.shape_[split_dim]);
+}
+
+bool IsBroadcastOnSplitAxis(const TileType& operand, int result_split_dim, int result_rank) {
+  const int axis = static_cast<int>(operand.shape_.size()) - result_rank + result_split_dim;
+  return axis < 0 || IsSingletonSplitAxis(operand, axis);
+}
+
+namespace {
 
 bool IsUnsupportedAutoSplitGenerator(const CallPtr& call) {
   return IsOp(call, "tile.ci") || IsOp(call, "tile.random");
@@ -307,12 +322,9 @@ FullWidthOperand FindFullWidthOperand(const CallPtr& call, int result_split_dim,
     if (DeclaredLaneInvariantKind(call, i).has_value()) continue;
     const int arg_rank = static_cast<int>(arg_tt->shape_.size());
     const int arg_split_dim = arg_rank - (result_rank - result_split_dim);
-    // Out of range below: the operand is shorter than the result's leading axes,
-    // so it has no axis here at all and is replicated along the whole split axis.
-    if (arg_split_dim < 0 || arg_split_dim >= arg_rank) continue;
-    // A singleton split axis is replicated, not partitioned: both lanes read it
-    // whole, so leaving it full width is correct.
-    if (IsSingletonDim(arg_tt->shape_[arg_split_dim])) continue;
+    // Share the broadcast rule with explicit-region admission.
+    if (IsBroadcastOnSplitAxis(*arg_tt, result_split_dim, result_rank)) continue;
+    if (arg_split_dim >= arg_rank) continue;
     // Through OperandSplitInfo: this gate is about operands that stayed FULL WIDTH, and
     // an inline projection of a halved tuple did not. Matching only Var flagged one as
     // full width -- a false rejection, safe but wrong, and the same Var-only assumption
@@ -1037,8 +1049,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
     // Singleton split-dim tiles (e.g. broadcast [1, 128] under UP_DOWN) are preserved as-is.
     if (is_aiv && IsOp(call, "tile.load") && call->args_.size() >= 4) {
       auto tt = std::dynamic_pointer_cast<const TileType>(call->GetType());
-      bool is_singleton =
-          tt && split_dim < static_cast<int>(tt->shape_.size()) && IsSingletonDim(tt->shape_[split_dim]);
+      bool is_singleton = tt && IsSingletonSplitAxis(*tt, split_dim);
 
       if (is_singleton) {
         return stmt;
@@ -2853,6 +2864,9 @@ class TransposeSplitHazardFinder : public IRVisitor {
   [[nodiscard]] const std::string& ResultName() const { return result_name_; }
 
  protected:
+  // Each child region is checked separately against its own mode.
+  void VisitStmt_(const SplitAivScopeStmtPtr&) override {}
+
   void VisitStmt_(const AssignStmtPtr& op) override {
     Consider(As<Call>(op->value_), op->var_ ? op->var_->name_hint_ : "");
     IRVisitor::VisitStmt_(op);
@@ -2902,6 +2916,282 @@ TransposeSplitHazard FindTransposeSplitHazard(const StmtPtr& body, int split_dim
   TransposeSplitHazardFinder finder(split_dim);
   finder.VisitStmt(body);
   return {finder.Offending(), finder.ResultName()};
+}
+
+namespace {
+
+// True iff any Var / IterArg referenced anywhere in ``exprs`` is lane-derived.
+// One collector over all of them: the walk covers each whole expression tree, so
+// a lane reference nested inside a MakeTuple offset list or an arithmetic
+// sub-expression is found. VarDefUseCollector overrides both the Var and the
+// IterArg handler (see var_collectors.h) — a loop-carried lane offset is a
+// reference too.
+bool ReferencesLaneIndex(const std::vector<ExprPtr>& exprs,
+                         const std::unordered_set<const Var*>& lane_scalars) {
+  if (lane_scalars.empty()) return false;
+  var_collectors::VarDefUseCollector collector;
+  for (const auto& e : exprs) {
+    if (e) collector.VisitExpr(e);
+  }
+  for (const auto* v : collector.var_uses) {
+    if (lane_scalars.count(v) != 0) return true;
+  }
+  return false;
+}
+
+// The positional args that carry an op's ADDRESS — the base offset selecting
+// which window of the source this call reads. Empty for anything that is not an
+// addressing op.
+//
+// Only these args are consulted for a lane reference. A lane-derived scalar
+// anywhere ELSE in an addressing op — a shape, a valid_shape — does not localize
+// the window: ``tile.load(data, [0, 0], [64, 128], valid_shape=[aiv_id + 1,
+// 128])`` mentions aiv_id, yet both lanes still read the same base rows. Scanning
+// every arg would admit it and then trust its consumers as half-width.
+std::vector<ExprPtr> AddressArgs(const CallPtr& call) {
+  const auto& args = call->args_;
+  auto at = [&args](size_t i) -> ExprPtr { return i < args.size() ? args[i] : nullptr; };
+  if (IsOp(call, "tile.load")) return {at(1)};            // (tensor, offsets, shapes, valid_shape)
+  if (IsOp(call, "tile.slice")) return {at(2)};           // (input, shape, offset, valid_shape, drop_dims)
+  if (IsOp(call, "tile.extract")) return {at(1), at(2)};  // (src, index_row, index_col, shape)
+  // (dst, src, dst_offset, src_offset, shapes[, valid_shape]) — DPS: the op reads
+  // a GM row window at ``src_offset`` and writes it into its own accumulator at
+  // ``dst_offset``. Only ``src_offset`` is the READ window, so only it localizes:
+  // a lane-derived src_offset means the two lanes gather DIFFERENT rows (the
+  // per-lane scattered gather). A lane-derived dst_offset with a lane-invariant
+  // src is the opposite shape — both lanes fetch the same rows into different
+  // slots of a FULL-width accumulator — which is exactly what this scan must
+  // still reject.
+  if (IsOp(call, "tile.gather_row")) return {at(3)};
+  return {};
+}
+
+// Replicated singleton arithmetic is neutral, just like a broadcast load. Only
+// read-only tile/scalar inputs qualify; a singleton result cannot excuse writes.
+bool IsBroadcastComputation(const CallPtr& call, int split_dim) {
+  auto result = As<TileType>(call->GetType());
+  if (!result || !IsSingletonSplitAxis(*result, split_dim) || core_affinity::IsNoDuplicateCall(call))
+    return false;
+  const auto& entry = OpRegistry::GetInstance().GetEntry(call->op_->name_);
+  bool has_tile = false;
+  for (size_t i = 0; i < call->args_.size(); ++i) {
+    if (entry.GetArgEffect(i, call->kwargs_) != ArgEffect::Read) return false;
+    if (auto tile = As<TileType>(call->args_[i]->GetType())) {
+      has_tile = true;
+      if (!IsBroadcastOnSplitAxis(*tile, split_dim, static_cast<int>(result->shape_.size()))) return false;
+    } else if (!As<ScalarType>(call->args_[i]->GetType())) {
+      return false;
+    }
+  }
+  return has_tile;
+}
+
+using TupleHalfFacts = std::unordered_map<const Var*, std::shared_ptr<const std::vector<bool>>>;
+
+bool IsHalfExpr(const ExprPtr& expr, const SplitBodyAnalysis& scan, const TupleHalfFacts& tuples) {
+  if (auto var = AsVarLike(expr)) return scan.half_tiles.count(var.get()) != 0;
+  if (auto item = As<TupleGetItemExpr>(expr)) {
+    if (auto tuple = AsVarLike(item->tuple_)) {
+      auto it = tuples.find(tuple.get());
+      return it != tuples.end() && item->index_ < it->second->size() && (*it->second)[item->index_];
+    }
+    if (auto tuple = As<MakeTuple>(item->tuple_)) {
+      return item->index_ < tuple->elements_.size() &&
+             IsHalfExpr(tuple->elements_[item->index_], scan, tuples);
+    }
+  }
+  return false;
+}
+
+void CopySplitFact(const VarPtr& target, const ExprPtr& value, SplitBodyAnalysis& scan,
+                   TupleHalfFacts& tuples) {
+  if (IsHalfExpr(value, scan, tuples)) scan.half_tiles.insert(target.get());
+  if (auto var = AsVarLike(value)) {
+    if (auto it = tuples.find(var.get()); it != tuples.end()) {
+      tuples[target.get()] = it->second;
+    }
+  } else if (auto tuple = As<MakeTuple>(value)) {
+    std::vector<bool> facts;
+    for (const auto& element : tuple->elements_) facts.push_back(IsHalfExpr(element, scan, tuples));
+    tuples[target.get()] = std::make_shared<const std::vector<bool>>(std::move(facts));
+  }
+}
+
+// Track tiles that are part of the half-width boundary dataflow: results of
+// tile.aiv_shard, plus results of VECTOR-affine ops that consume such a half
+// tile. Any VECTOR-affine op consuming NONE of them operates on full-width data
+// — exactly what the implicit affinity gate would have halved. Records the names
+// of such full-width vector ops in a single ordered walk.
+void ScanSplitBody(const std::vector<StmtPtr>& stmts, int split_dim, SplitBodyAnalysis& scan,
+                   TupleHalfFacts& tuples) {
+  for (const auto& stmt : stmts) {
+    CallPtr leaf;
+    VarPtr def_var;
+    auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt);
+    if (assign) {
+      leaf = std::dynamic_pointer_cast<const Call>(assign->value_);
+      def_var = assign->var_;
+      CopySplitFact(def_var, assign->value_, scan, tuples);
+    } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
+      leaf = std::dynamic_pointer_cast<const Call>(eval->expr_);
+    }
+
+    // --- Lane-index dataflow (SCALARS) --------------------------------------
+    // SEED: the region's own lane index, bound by ``aiv_id =
+    // tile.get_subblock_idx()`` (the parser emits it as the region body's first
+    // statement — ast_parser.py::_emit_split_aiv_region). Matched by OP, not by
+    // position, so a re-injected or reordered binding is still found. The parser
+    // emits it unconditionally, so the set is normally non-empty from statement
+    // one; it stays empty only if the binding is absent (e.g. DCE stripped an
+    // unused aiv_id, or hand-built IR omits it), in which case nothing is
+    // admitted below and the guard behaves exactly as before.
+    // PROPAGATE: any scalar bound from an expression referencing a lane-derived
+    // scalar (``kv_lane0 = kv0 + aiv_id * 64``). Program order + SSA put every
+    // def before its uses, so one forward pass reaches the fixpoint. A lane value
+    // carried through a loop iter_arg is NOT propagated (the walk does not visit
+    // loop phi defs) — conservative: it rejects rather than wrongly admits.
+    if (def_var && As<ScalarType>(def_var->GetType()) &&
+        (IsOp(leaf, "tile.get_subblock_idx") ||
+         // ``assign &&`` is defensive: def_var is currently only set in the
+         // AssignStmt arm above, so def_var non-null already implies it.
+         (assign && ReferencesLaneIndex({assign->value_}, scan.lane_scalars)))) {
+      scan.lane_scalars.insert(def_var.get());
+    }
+
+    if (leaf && leaf->op_) {
+      // aiv_shard produces a HALF tile (the C->V boundary); seed the dataflow.
+      if (IsOp(leaf, "tile.aiv_shard")) {
+        if (def_var) scan.half_tiles.insert(def_var.get());
+        continue;
+      }
+      // aic_gather doubles HALF -> FULL (the V->C boundary back to cube); its
+      // result leaves the half-width dataflow, so it is not tracked.
+      if (IsOp(leaf, "tile.aic_gather")) {
+        continue;
+      }
+      // A singleton broadcast read is replicated, not partitioned. Do not
+      // seed half_tiles: accepting this producer does not prove its users half-width.
+      if (auto tile = As<TileType>(leaf->GetType());
+          IsOp(leaf, "tile.load") && tile &&
+          (tile->shape_.size() < 2 || split_axis::IsSingletonSplitAxis(*tile, split_dim))) {
+        continue;
+      }
+      if (IsBroadcastComputation(leaf, split_dim)) continue;
+      // Pure generators are lane-invariant ROOTS: the result is a function of the
+      // op's ATTRIBUTES ONLY -- they read no tile and no memory, so there is no
+      // "which half do I read?" question for them to get wrong, and replicating
+      // one on both lanes is correct by construction at whatever extent the
+      // author wrote.
+      //
+      // Deliberately NOT inserted into half_tiles: being lane-invariant makes a
+      // generator SAFE, it does not make it HALF-WIDTH. Admitting it would let a
+      // full-width generator vouch for its consumers and silently suppress a real
+      // rejection -- e.g. `z = tile.full([128,128]); y = tile.add(z, z);
+      // tile.store(y, [0,0], out, atomic)`, where both lanes would atomically add
+      // the same full tile (double-counted result). Leaving it NEUTRAL keeps each
+      // consumer judged on its own merits.
+      //
+      // (tile.create is listed for category completeness; it also classifies
+      // SHARED, so the VECTOR arm below would never report it anyway. For
+      // tile.random, replication means both lanes draw the SAME stream from the
+      // same key/counter -- identical to what the implicit path produces, since
+      // halving shrinks the shape, not the stream. Per-lane independence is the
+      // author's job: vary the counter with aiv_id.)
+      if (IsOp(leaf, "tile.full") || IsOp(leaf, "tile.create") || IsOp(leaf, "tile.ci") ||
+          IsOp(leaf, "tile.random")) {
+        continue;
+      }
+      // Dataflow propagation over tile-producing ops. An op that consumes a half
+      // tile STAYS in the half-width dataflow regardless of its affinity
+      // classification -- crucially this includes a Vec->Vec tile.move between the
+      // shard and the compute, which classifies MIXED/SHARED (not VECTOR). Only a
+      // VECTOR-affine tile op that consumes NONE of the half tiles is genuinely
+      // full-width: that is exactly what the implicit affinity gate would halve,
+      // and what the explicit-passthrough path would leave un-localized (both AIV
+      // lanes computing the full tile). A scalar-producing VECTOR op (e.g.
+      // tile.get_subblock_idx) is not a tile op, so it never flags.
+      if (As<TileType>(leaf->GetType()) || As<TupleType>(leaf->GetType())) {
+        bool consumes_half = def_var && scan.half_tiles.count(def_var.get()) != 0;
+        for (const auto& arg : leaf->args_) consumes_half |= IsHalfExpr(arg, scan, tuples);
+        // Stays in the half-width dataflow when it either consumes a half tile,
+        // or is AUTHOR-LOCALIZED: an op whose ADDRESS args reference the region's
+        // lane index, so the author explicitly wrote it per-lane — e.g. a GM load
+        // at ``[kv0 + aiv_id * 64, 0]``. That is the same trust the pass already
+        // extends to tile.store, whose lane-dependent offset it never checks (a
+        // store returns a TensorType, so it never reaches this branch).
+        //
+        // Localization is trusted only via AddressArgs, and so only on addressing
+        // ops. On any other op a lane-derived scalar is just an operand and proves
+        // nothing about width; without that restriction
+        // ``tile.set_validshape(full_width_tile, 1, valid_aiv)`` would launder a
+        // full-width tile into the half-width dataflow and silence every
+        // downstream check.
+        if (consumes_half ||
+            (!scan.lane_scalars.empty() && ReferencesLaneIndex(AddressArgs(leaf), scan.lane_scalars))) {
+          if (def_var) {
+            if (auto tuple = As<TupleType>(leaf->GetType())) {
+              std::vector<bool> facts;
+              for (const auto& type : tuple->types_) facts.push_back(As<TileType>(type) != nullptr);
+              tuples[def_var.get()] = std::make_shared<const std::vector<bool>>(std::move(facts));
+            } else {
+              scan.half_tiles.insert(def_var.get());
+            }
+          }
+        } else if (IsOp(leaf, "tile.reshape") || IsOp(leaf, "tile.reinterpret_view")) {
+          // A full view may stage a later lane-local slice. It remains neutral;
+          // a full-width arithmetic consumer still has to establish its own split.
+          continue;
+        } else if (core_affinity::ClassifyCallAffinity(leaf) == core_affinity::CoreAffinity::VECTOR) {
+          scan.full_width_vec_ops.push_back(leaf->op_->name_);
+        }
+        continue;
+      }
+    }
+    if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+      for (const auto& arg : for_stmt->iter_args_) CopySplitFact(arg, arg->initValue_, scan, tuples);
+      ScanSplitBody(transform_utils::FlattenToStmts(for_stmt->body_), split_dim, scan, tuples);
+      auto yield = transform_utils::GetLastYieldStmt(for_stmt->body_);
+      if (yield) {
+        for (size_t i = 0; i < for_stmt->return_vars_.size() && i < yield->value_.size(); ++i)
+          CopySplitFact(for_stmt->return_vars_[i], yield->value_[i], scan, tuples);
+      }
+    } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+      ScanSplitBody(transform_utils::FlattenToStmts(if_stmt->then_body_), split_dim, scan, tuples);
+      if (if_stmt->else_body_.has_value()) {
+        ScanSplitBody(transform_utils::FlattenToStmts(*if_stmt->else_body_), split_dim, scan, tuples);
+        auto lhs = transform_utils::GetLastYieldStmt(if_stmt->then_body_);
+        auto rhs = transform_utils::GetLastYieldStmt(*if_stmt->else_body_);
+        if (lhs && rhs) {
+          for (size_t i = 0;
+               i < if_stmt->return_vars_.size() && i < lhs->value_.size() && i < rhs->value_.size(); ++i) {
+            if (IsHalfExpr(lhs->value_[i], scan, tuples) && IsHalfExpr(rhs->value_[i], scan, tuples))
+              scan.half_tiles.insert(if_stmt->return_vars_[i].get());
+          }
+        }
+      }
+    } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+      for (const auto& arg : while_stmt->iter_args_) CopySplitFact(arg, arg->initValue_, scan, tuples);
+      ScanSplitBody(transform_utils::FlattenToStmts(while_stmt->body_), split_dim, scan, tuples);
+      auto yield = transform_utils::GetLastYieldStmt(while_stmt->body_);
+      if (yield) {
+        for (size_t i = 0; i < while_stmt->return_vars_.size() && i < yield->value_.size(); ++i)
+          CopySplitFact(while_stmt->return_vars_[i], yield->value_[i], scan, tuples);
+      }
+    } else if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
+      ScanSplitBody(seq->stmts_, split_dim, scan, tuples);
+    }
+  }
+}
+
+}  // namespace
+
+SplitBodyAnalysis AnalyzeSplitBody(const std::vector<StmtPtr>& stmts, int split_dim,
+                                   const std::unordered_map<const Var*, TileInfo>& known_tiles) {
+  SplitBodyAnalysis analysis;
+  for (const auto& [var, info] : known_tiles) analysis.half_tiles.insert(var);
+  TupleHalfFacts tuples;
+  ScanSplitBody(stmts, split_dim, analysis, tuples);
+  return analysis;
 }
 
 }  // namespace split_axis

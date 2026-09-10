@@ -135,6 +135,7 @@ enum class IRProperty : uint64_t {
                          ///< written FunctionType::Inline and spliced away by InlineFunctions. Decidable
                          ///< on the user's own IR, so it is a structural property verified at every pass
                          ///< boundary
+  AivSplitLoweredValid,  ///< Lowered split regions or flat split bodies have valid cross-core boundaries
   kCount                 ///< Sentinel (must be last)
 };
 
@@ -267,7 +268,7 @@ enum class VerificationLevel {
  * Returns {SSAForm, TypeChecked, MixedKernelExpanded, AllocatedMemoryAddr,
  * BreakContinueValid, NoRedundantBlocks, InOutUseValid,
  * CallDirectionsResolved, ManualDepsOnSubmitOnly, ReturnParamsExplicit,
- * AivSplitValid, TileMemoryInferred, TileOps2D, HardSyncallOccupancyValid,
+ * AivSplitValid, AivSplitLoweredValid, TileMemoryInferred, TileOps2D, HardSyncallOccupancyValid,
  * IterArgCarryClassified, RuntimeScopesMaterialized,
  * DistTensorCtxMaterialized, GraphBoundaryLegalized, AccToGmStoreValid,
  * AccCompactValid, AtomicAddDtypeValid, AccStorePhaseValid} —

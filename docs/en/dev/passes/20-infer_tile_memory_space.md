@@ -254,7 +254,7 @@ The pass also registers a `TileMemoryInferred` `PropertyVerifier` (defined in th
 
 The `TileMemoryInferred` property is the contract this pass establishes. Downstream passes (notably `ExpandMixedKernel` and `InitMemRef`) rely on it, and the matching property verifier guards regressions.
 
-`AccToGmStoreValid` becomes decidable only here: whether a `tile.store` narrows from Acc into GM depends on the memory space this pass resolves. `AivSplitValid` is invalidated and re-produced for the same reason — this is the last verification point at which an AIV-split boundary whose operand space was still unresolved at `ConvertTensorToTileOps` becomes observable, before `LowerAutoVectorSplit` erases the region node.
+`AccToGmStoreValid` becomes decidable only here: whether a `tile.store` narrows from Acc into GM depends on the memory space this pass resolves. `AivSplitValid` is invalidated and re-produced for the same reason — this is the last verification point at which an AIV-split boundary whose operand space was still unresolved at `ConvertTensorToTileOps` becomes observable, before `LowerAutoVectorSplit` switches to the lowered-stage contract.
 
 ## Scope
 

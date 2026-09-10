@@ -202,7 +202,7 @@ for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 | **ClusterScopeStmt** | `name_hint_`, `body_` | Cluster 区域；由 `OutlineClusterScopes` 提取为 `Function(Group)` |
 | **HierarchyScopeStmt** | `name_hint_`, `body_`, `level_`, `role_`（可选） | 给定 Level/Role 的流水线阶段区域 |
 | **SpmdScopeStmt** | `name_hint_`, `body_`, `core_num_`（整型 `Expr`）, `sync_start_` | SPMD 启动区域；提取为 `Function(Spmd)` |
-| **SplitAivScopeStmt** | `name_hint_`, `body_`, `split_`（`SplitMode`，永不为 `None`）, `count_`（= 2） | 显式 AIV 切分区域（`pl.split_aiv`）；可嵌套；由 `LowerAutoVectorSplit`（pass 23）消费并擦除 |
+| **SplitAivScopeStmt** | `name_hint_`, `body_`, `split_`（`SplitMode`，永不为 `None`）, `count_`（= 2） | 显式 AIV 切分区域（`pl.split_aiv`）；可嵌套；由 `LowerAutoVectorSplit` 下降、`ExpandMixedKernel` 消费并擦除 |
 | **GraphScopeStmt** | `name_hint_`, `body_` | 可录制的编排区域（`pl.graph`）；`name_hint_` 必填 —— 它决定 `OutlineGraphScopes` 提取出的函数名，进而决定运行时的 graph key |
 | **RuntimeScopeStmt** | `name_hint_`, `body_`, `manual_` | Orchestrator 运行时区域（`SIMPLER_SCOPE`）；`manual_=true` 选择手工依赖模式 |
 | **YieldStmt** | `values_` | 在循环迭代中产出值 |

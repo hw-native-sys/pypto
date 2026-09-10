@@ -89,6 +89,70 @@ using tpop_tfree::FinalizeTpopTfrees;
 // Use the shared utility; local alias preserves call sites.
 const auto& FlattenBody = transform_utils::FlattenToStmts;
 
+using AivPlacement = std::unordered_set<const Call*>;
+
+// Consume the lexical contract once. All later analyses use this same body and
+// placement map; neither is serialized or shared between pass invocations.
+class SplitRegionConsumer : public IRMutator {
+ public:
+  AivPlacement aiv_only_calls;
+  bool had_regions = false;
+
+ protected:
+  StmtPtr VisitStmt_(const SplitAivScopeStmtPtr& op) override {
+    std::vector<StmtPtr> body;
+    AppendConsumed(op, body);
+    return MakeBody(body, op->span_);
+  }
+
+  StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
+    std::vector<StmtPtr> body;
+    AppendConsumed(op, body);
+    auto result = MutableCopy(op);
+    result->stmts_ = std::move(body);
+    return result;
+  }
+
+  ExprPtr VisitExpr_(const CallPtr& op) override {
+    auto result = IRMutator::VisitExpr_(op);
+    auto call = As<Call>(result);
+    if (region_depth_ > 0 && call && !core_affinity::HasStatedLane(call) &&
+        core_affinity::ClassifyIntrinsicCallAffinity(call) == CoreAffinity::SHARED &&
+        core_affinity::IsNoDuplicateCall(call)) {
+      aiv_only_calls.insert(call.get());
+    }
+    return result;
+  }
+
+ private:
+  // Append straight-line contents directly into their enclosing statement list.
+  // Nested wrappers therefore do not repeatedly copy the same descendants.
+  void AppendConsumed(const StmtPtr& stmt, std::vector<StmtPtr>& body) {
+    if (auto region = As<SplitAivScopeStmt>(stmt)) {
+      had_regions = true;
+      if (region->split_ != SplitMode::None) {
+        auto hazard =
+            split_axis::FindTransposeSplitHazard(region->body_, split_axis::SplitDimension(region->split_));
+        CHECK_SPAN(!hazard.call, region->span_)
+            << "ExpandMixedKernel: a pl.split_aiv region contains a transpose that swaps its split axis";
+      }
+      ++region_depth_;
+      AppendConsumed(region->body_, body);
+      --region_depth_;
+    } else if (auto seq = As<SeqStmts>(stmt)) {
+      for (const auto& child : seq->stmts_) AppendConsumed(child, body);
+    } else {
+      body.push_back(VisitStmt(stmt));
+    }
+  }
+
+  int region_depth_ = 0;
+};
+
+CoreAffinity ClassifyPlacedCall(const CallPtr& call, const AivPlacement& placement) {
+  return placement.count(call.get()) ? CoreAffinity::VECTOR : ClassifyCallAffinity(call);
+}
+
 /// Validate that a deferred waiter is reached only through the task-level
 /// orchestration dispatch shape produced by ScopeOutliner. The marker is
 /// printable and therefore cannot be treated as provenance by itself.
@@ -286,28 +350,29 @@ TpopDefs CollectTpopDefs(const std::vector<StmtPtr>& stmts) {
 // Forward declare
 CoreAffinity AnalyzeStmtAffinity(const StmtPtr& stmt, std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
                                  std::unordered_map<const Var*, CoreAffinity>& var_affinity,
-                                 const TpopDefs& tpop_defs);
+                                 const TpopDefs& tpop_defs, const AivPlacement& placement);
 
 CoreAffinity AnalyzeStmtsAffinity(const std::vector<StmtPtr>& stmts,
                                   std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
                                   std::unordered_map<const Var*, CoreAffinity>& var_affinity,
-                                  const TpopDefs& tpop_defs = {}) {
+                                  const TpopDefs& tpop_defs = {}, const AivPlacement& placement = {}) {
   CoreAffinity combined = CoreAffinity::SHARED;
   for (const auto& stmt : stmts) {
-    combined = CombineAffinity(combined, AnalyzeStmtAffinity(stmt, stmt_map, var_affinity, tpop_defs));
+    combined =
+        CombineAffinity(combined, AnalyzeStmtAffinity(stmt, stmt_map, var_affinity, tpop_defs, placement));
   }
   return combined;
 }
 
 CoreAffinity AnalyzeStmtAffinity(const StmtPtr& stmt, std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
                                  std::unordered_map<const Var*, CoreAffinity>& var_affinity,
-                                 const TpopDefs& tpop_defs) {
+                                 const TpopDefs& tpop_defs, const AivPlacement& placement) {
   CoreAffinity result = CoreAffinity::SHARED;
 
   if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
     auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
     if (call) {
-      result = ClassifyCallAffinity(call);
+      result = ClassifyPlacedCall(call, placement);
       // tile.move from a tpop result is not a cross-core boundary: the data already
       // arrived via tpop, so the move is just internal data placement on the consuming
       // core. ClassifyCallAffinity returns MIXED for *any* C/V-crossing tile.move,
@@ -330,20 +395,22 @@ CoreAffinity AnalyzeStmtAffinity(const StmtPtr& stmt, std::unordered_map<const S
     var_affinity[assign->var_.get()] = result;
   } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
     auto call = std::dynamic_pointer_cast<const Call>(eval->expr_);
-    if (call) result = ClassifyCallAffinity(call);
+    if (call) result = ClassifyPlacedCall(call, placement);
   } else if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-    result = AnalyzeStmtsAffinity(FlattenBody(for_stmt->body_), stmt_map, var_affinity, tpop_defs);
+    result = AnalyzeStmtsAffinity(FlattenBody(for_stmt->body_), stmt_map, var_affinity, tpop_defs, placement);
   } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-    result = AnalyzeStmtsAffinity(FlattenBody(if_stmt->then_body_), stmt_map, var_affinity, tpop_defs);
+    result =
+        AnalyzeStmtsAffinity(FlattenBody(if_stmt->then_body_), stmt_map, var_affinity, tpop_defs, placement);
     const auto& else_body = if_stmt->else_body_;
     if (else_body.has_value()) {
-      result = CombineAffinity(
-          result, AnalyzeStmtsAffinity(FlattenBody(*else_body), stmt_map, var_affinity, tpop_defs));
+      result = CombineAffinity(result, AnalyzeStmtsAffinity(FlattenBody(*else_body), stmt_map, var_affinity,
+                                                            tpop_defs, placement));
     }
   } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-    result = AnalyzeStmtsAffinity(FlattenBody(while_stmt->body_), stmt_map, var_affinity, tpop_defs);
+    result =
+        AnalyzeStmtsAffinity(FlattenBody(while_stmt->body_), stmt_map, var_affinity, tpop_defs, placement);
   } else if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
-    result = AnalyzeStmtsAffinity(seq->stmts_, stmt_map, var_affinity, tpop_defs);
+    result = AnalyzeStmtsAffinity(seq->stmts_, stmt_map, var_affinity, tpop_defs, placement);
   }
 
   stmt_map[stmt.get()] = result;
@@ -1494,19 +1561,20 @@ struct ExpandedKernel {
   std::optional<FunctionPtr> group_func;  // nullopt when existing Group caller will be rewritten
 };
 
-ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = true) {
+ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, const AivPlacement& placement,
+                                   bool had_regions) {
   // A tile.transpose that swaps the split axis cannot be split correctly:
   // SplitVectorKernel halves the original split axis, but the transpose moves
   // that data to the other dimension, mis-typing the result. Reject the split
   // request with an actionable error rather than silently miscompiling — the
   // user controls this perf decision (drop the split, or remove the transpose).
   //
-  // Explicit ``pl.split_aiv`` regions are validated per-region by
-  // LowerAutoVectorSplit (pass 23), where each region's mode is unambiguous; skip
+  // SplitRegionConsumer already validated each lexical region using its own
+  // mode; skip
   // the single-func-mode check for them. A multi-mode function carries no single
   // ``func->GetSplitMode()`` and this whole-function check would mis-check the
-  // other region's axis (critique #2).
-  if (!func->HasAttr(kAttrSplitAivRegionValidated)) {
+  // other region's axis.
+  if (!had_regions) {
     if (auto mode = func->GetSplitMode(); mode.has_value() && *mode != SplitMode::None) {
       int split_dim = (*mode == SplitMode::UpDown) ? 0 : 1;
       auto hazard = split_axis::FindTransposeSplitHazard(func->body_, split_dim);
@@ -1541,7 +1609,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   // Recursive affinity analysis (descends into ForStmt/IfStmt/WhileStmt)
   std::unordered_map<const Stmt*, CoreAffinity> stmt_map;
   std::unordered_map<const Var*, CoreAffinity> var_affinity;
-  AnalyzeStmtsAffinity(stmts, stmt_map, var_affinity, tpop_defs);
+  AnalyzeStmtsAffinity(stmts, stmt_map, var_affinity, tpop_defs, placement);
 
   std::map<const Stmt*, CVBoundaryMove> boundary_moves;
   CollectCVBoundaryMoves(stmts, boundary_moves, tpop_defs);
@@ -2254,32 +2322,6 @@ NormalizedGroups NormalizeHandWrittenGroupAbis(const ProgramPtr& program,
   return {std::move(result)};
 }
 
-// Removes the pl.split_aiv region placement stamp LowerAutoVectorSplit left on
-// each region call once this pass has consumed it (see the Phase 5 comment in
-// ExpandMixedKernel, and kCorePlacementAttr in attrs.h for the full lifecycle).
-//
-// Returns the input Call unchanged when the attr is absent, so a program with
-// no regions in it walks through at the cost of the traversal alone.
-class CorePlacementStripper : public IRMutator {
- protected:
-  ExprPtr VisitExpr_(const CallPtr& op) override {
-    auto mutated = IRMutator::VisitExpr_(op);
-    auto call = As<Call>(mutated);
-    if (!call || !call->HasAttr(kCorePlacementAttr)) return mutated;
-    return std::make_shared<Call>(call->op_, call->args_, call->kwargs_,
-                                  StripAttr(call->attrs_, kCorePlacementAttr), call->GetType(), call->span_);
-  }
-};
-
-FunctionPtr StripCorePlacement(const FunctionPtr& func) {
-  if (!func || !func->body_) return func;
-  auto new_body = CorePlacementStripper().VisitStmt(func->body_);
-  if (new_body.get() == func->body_.get()) return func;
-  auto stripped = MutableCopy(func);
-  stripped->body_ = new_body;
-  return stripped;
-}
-
 }  // namespace
 
 namespace pass {
@@ -2361,18 +2403,25 @@ Pass ExpandMixedKernel() {
     std::unordered_map<std::string, RewriteInfo> rewrite_map;
     std::vector<FunctionPtr> new_functions;
 
-    for (const auto& [gvar, func] : program->functions_) {
+    for (const auto& [gvar, original_func] : program->functions_) {
+      auto func = original_func;
       if (func->func_type_ != FunctionType::InCore) {
         new_functions.push_back(func);
         continue;
       }
+
+      SplitRegionConsumer consumer;
+      auto consumed = MutableCopy(func);
+      consumed->body_ = consumer.VisitStmt(func->body_);
+      func = consumed;
+      const auto& placement = consumer.aiv_only_calls;
 
       // Check if function is mixed (recursive analysis detects ops inside loops/conditionals)
       auto stmts = FlattenBody(func->body_);
       auto tpop_defs = CollectTpopDefs(stmts);
       std::unordered_map<const Stmt*, CoreAffinity> stmt_map;
       std::unordered_map<const Var*, CoreAffinity> var_affinity;
-      auto combined = AnalyzeStmtsAffinity(stmts, stmt_map, var_affinity, tpop_defs);
+      auto combined = AnalyzeStmtsAffinity(stmts, stmt_map, var_affinity, tpop_defs, placement);
 
       const bool is_deferred_waiter = deferred_waiter_names.count(func->name_) != 0;
 
@@ -2409,7 +2458,8 @@ Pass ExpandMixedKernel() {
       // original function name to resolve to a callable wrapper.
       bool has_group_caller = incore_with_group_caller.count(func->name_) > 0;
       bool needs_preserved_name = incore_with_preserved_name_caller.count(func->name_) > 0;
-      auto expanded = ExpandMixedFunction(func, /*create_group=*/needs_preserved_name || !has_group_caller);
+      auto expanded = ExpandMixedFunction(func, /*create_group=*/needs_preserved_name || !has_group_caller,
+                                          placement, consumer.had_regions);
 
       new_functions.push_back(expanded.aic_func);
       new_functions.push_back(expanded.aiv_func);
@@ -2437,25 +2487,6 @@ Pass ExpandMixedKernel() {
     // callee scan sees the final AIC/AIV functions.
     auto rewritten_program = std::make_shared<Program>(new_functions, program->name_, program->span_);
     new_functions = NormalizeHandWrittenGroupAbis(rewritten_program, new_functions).functions;
-
-    // Phase 5: the region placement stamp is consumed — drop it.
-    //
-    // ``core_placement`` exists solely to carry pl.split_aiv region membership
-    // across the wrapper erasure in LowerAutoVectorSplit, and every reader of
-    // it (ClassifyCallAffinity, via the affinity roll-up above) has now run. It
-    // is stripped rather than left in place because Call::attrs_ is a
-    // reflection UsualField and the python printer serialises attrs open-world:
-    // an un-stripped stamp would show up in every downstream pass dump, in the
-    // print -> parse round-trip, and in every ir.assert_structural_equal a
-    // later pass's tests make — noise that describes a region that no longer
-    // exists. Same lifecycle as ``pipeline_stages`` (set by LowerPipelineLoops,
-    // stripped by CanonicalizeIOOrder).
-    //
-    // The sweep covers EVERY emitted function, not just the split pair: a
-    // region in a function that turned out not to be mixed (converted straight
-    // to AIV, or left alone because it was not InCore) carries the same stamp
-    // and must not keep it either.
-    for (auto& func : new_functions) func = StripCorePlacement(func);
 
     // Phase 6: finalize V->C pushes in every emitted AIV function.
     //

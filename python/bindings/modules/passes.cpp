@@ -154,7 +154,9 @@ void BindPass(nb::module_& m) {
              "mean a dispatchable task, and the runtime passes scalars in by value while returning "
              "only tensors, so such a return has no carrier -- write the value into a [1] tensor "
              "output and read it back with pl.tensor.read. Scalar[TASK_ID] is exempt, and a "
-             "device-side scalar helper belongs in an Inline function");
+             "device-side scalar helper belongs in an Inline function")
+      .value("AivSplitLoweredValid", IRProperty::AivSplitLoweredValid,
+             "Lowered AIV split regions and compatible flat bodies have valid cross-core boundaries");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");

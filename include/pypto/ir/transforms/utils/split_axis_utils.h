@@ -31,6 +31,12 @@ namespace pypto {
 namespace ir {
 namespace split_axis {
 
+/// True only for a statically singleton physical split axis.
+bool IsSingletonSplitAxis(const TileType& type, int split_dim);
+
+/// Right-align an operand to its result; missing leading axes broadcast.
+bool IsBroadcastOnSplitAxis(const TileType& operand, int result_split_dim, int result_rank);
+
 /**
  * @brief Map a SplitMode to the tile dimension it partitions.
  *
@@ -248,6 +254,17 @@ struct TileInfo {
   // rms_norm [N,1]<->[1,N] column reshape), so each tracked tile carries its own.
   int split_dim = 0;
 };
+
+/// Admission facts for a lowered data-parallel body. Broadcast roots remain
+/// neutral: allowing a replicated producer does not prove its consumers split.
+struct SplitBodyAnalysis {
+  std::unordered_set<const Var*> half_tiles;
+  std::unordered_set<const Var*> lane_scalars;
+  std::vector<std::string> full_width_vec_ops;
+};
+
+SplitBodyAnalysis AnalyzeSplitBody(const std::vector<StmtPtr>& stmts, int split_dim,
+                                   const std::unordered_map<const Var*, TileInfo>& known_tiles = {});
 
 /**
  * @brief Result of injecting the per-subblock index at the top of a body.

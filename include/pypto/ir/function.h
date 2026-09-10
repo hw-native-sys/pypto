@@ -447,22 +447,10 @@ inline constexpr const char* kAttrDualAivDispatch = "dual_aiv_dispatch";
  *
  * ``MemoryReuse`` keys on this marker rather than on ``Function::GetSplitMode``
  * precisely because a multi-mode region function has no single function-level
- * mode once pass 23 has lowered and erased the per-region ones — dropping the
+ * mode after region consumption in ExpandMixedKernel — dropping the
  * marker there silently disables a hardware-correctness guard.
  */
 inline constexpr const char* kAttrSplitAiv = "split_aiv";
-
-/**
- * @brief Reserved Function attr key recording that ``pl.split_aiv`` regions were
- * already transpose-hazard-checked per region.
- *
- * Value type: ``bool``. Written by ``LowerAutoVectorSplit`` (pass 23), which
- * validates each region against its own unambiguous mode. Read by
- * ``ExpandMixedKernel`` (pass 24) to skip its single-function-mode transpose
- * check, which would otherwise mis-check a multi-mode function against whichever
- * mode happened to be stamped function-level. Never stripped.
- */
-inline constexpr const char* kAttrSplitAivRegionValidated = "split_aiv_region_validated";
 
 /**
  * @brief Reserved Function attr key naming a hand-written external C++ kernel

@@ -540,6 +540,6 @@ built `Function`) still prints in the canonical, re-parsable form.
 
 `AivSplitValid` opens here. The pass preserves the first-class `SplitAivScopeStmt` regions inside
 each outlined InCore function, so the structural region verifier can run from this point until
-[`LowerAutoVectorSplit`](23-lower_auto_vector_split.md) erases the node and invalidates the
-property. `ConvertTensorToTileOps` and `InferTileMemorySpace` re-verify it in between, once the
+[`LowerAutoVectorSplit`](23-lower_auto_vector_split.md) lowers the body and replaces the
+property with `AivSplitLoweredValid`. `ConvertTensorToTileOps` and `InferTileMemorySpace` re-verify it in between, once the
 boundary's memory side becomes observable.

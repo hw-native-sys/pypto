@@ -1686,3 +1686,36 @@ def test_dsl_up_down_and_left_right_regions_pass():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize("in_region", [False, True])
+def test_lowered_boundary_accepts_shared_parameter_memory(in_region):
+    """Lowered parameter availability is independent of source memory authoring."""
+    span = ir.Span.unknown()
+    source = ir.Var("source", _tile([32, 128], MS.Vec), span)
+    shard = T.aiv_shard(source, split=1, span=span)
+    half = ir.Var("half", shard.type, span)
+    body = ir.AssignStmt(half, shard, span)
+    if in_region:
+        body = _region(ir.SplitMode.UP_DOWN, [body])
+    func = ir.Function(
+        "kernel", [(source, _IN)], [], body, span, ir.FunctionType.InCore, attrs={"split_aiv": True}
+    )
+    program = ir.Program([func], "lowered_boundary", span)
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.AivSplitLoweredValid)
+    assert passes.PropertyVerifierRegistry.verify(props, program) == []
+    assert _errors(program)  # Source boundary scope / operand contract remains strict.
+
+
+def test_lowered_boundary_still_checks_consuming_memory():
+    span = ir.Span.unknown()
+    source = ir.Var("source", _tile([32, 128], MS.Acc), span)
+    shard = ir.Call(ir.get_op("tile.aiv_shard"), [source], {"split": 1}, _tile([16, 128], MS.Acc), span)
+    body = ir.AssignStmt(ir.Var("half", shard.type, span), shard, span)
+    program = _program(body, ir.FunctionType.InCore)
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.AivSplitLoweredValid)
+    diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
+    assert any("result is in Acc" in d.message for d in diagnostics)
+    assert all(d.rule_name == "AivSplitLoweredValid" for d in diagnostics)

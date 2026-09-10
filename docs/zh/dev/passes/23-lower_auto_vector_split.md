@@ -10,10 +10,8 @@ vector→cube 边界插入 `tile.aic_gather`，仅对**向量子区域**沿拆�
 `split_aiv` 标记，因此该 pass 只打属性（其 split_aiv 分支）——其旧的逐算子折半驱动
 已被删除，折半机制现仅存于 `split_axis_utils`，由本 pass 共享。
 
-本 pass 同时是一等公民区域节点 `SplitAivScopeStmt`（`for aiv_id in
-pl.split_aiv(...)`）的**唯一消费者**。该区域作为结构节点存活于 parse → SSA →
-`ResolveBackendOpLayouts`；在此处每个区域被就地下降，作用域包装被**擦除**，因此没有
-任何 `SplitAivScopeStmt` 会到达 `ExpandMixedKernel`（pass 24）或 codegen。
+本 pass 就地下降一等公民区域节点 `SplitAivScopeStmt` 并保留其包装；
+`ExpandMixedKernel` 在 codegen 前消费该结构。
 
 ## 为什么需要本 pass
 
@@ -31,6 +29,8 @@ pl.split_aiv(...)`）的**唯一消费者**。该区域作为结构节点存活�
 方式 2 是当前路径。它与旧的逐算子折半逐字节一致（分阶段收敛期间已验证），因为两者调用
 同一套 `split_axis::ProcessStmts` 机制，仅入口与边界处理不同。
 
+物理切分轴长度为 1 的 load 是可复制的广播读取，保持原形状，与 AUTO 一致。它不会被标记为半宽值，不能为无关消费者提供半宽依据。
+
 ## API
 
 | C++ | Python | 层级 |
@@ -47,10 +47,11 @@ result = passes.lower_auto_vector_split()(program)
 | 属性 | 值 |
 | ---- | -- |
 | Required | `SSAForm`、`IncoreTileOps`、`SplitIncoreOrch`、`TileOps2D`、`TileMemoryInferred`、`NormalizedStmtStructure`、`AivSplitValid` |
-| Produced | `SSAForm`、`IncoreTileOps`、`SplitIncoreOrch`、`TileOps2D`、`TileMemoryInferred`、`NormalizedStmtStructure` |
+| Produced | `SSAForm`、`IncoreTileOps`、`SplitIncoreOrch`、`TileOps2D`、`TileMemoryInferred`、`NormalizedStmtStructure`、`AivSplitLoweredValid` |
 | Invalidated | `AivSplitValid` |
 
-本 pass 关闭了由 `OutlineIncoreScopes` 打开的 `AivSplitValid` 验证窗口：它消费并擦除第一类 `SplitAivScopeStmt` 区域，此后结构化区域 verifier 无法再运行。因此该属性在入口被要求、在出口被失效。其余属性在 pass 前后保持不变——仍是混合形态的 InCore 函数体被就地改写。
+本 pass 以 `AivSplitLoweredValid` 接替源阶段的 `AivSplitValid`。共享验证器继续检查
+区域结构，同时允许受支持的 flat lowered 形式。
 
 来源：`include/pypto/ir/transforms/pass_properties.h`
 （`kLowerAutoVectorSplitProperties`）。
@@ -86,9 +87,23 @@ pass 能区分「被 scope 包裹的混合函数」与「纯向量函数」，�
 路径**之前**判定。每个区域携带各自的 `split_` 模式，因此可处理单一函数级模式无法表达
 的多模式情形。区域局部的 `tile_vars` / `var_replacements` 映射保证折半后的变量不会泄漏
 到同级区域或区域外的算子。任何区域**之外**的语句以全宽发出，且永不折半。所有区域下降后，
-作用域包装被丢弃，函数被打上 `split_aiv` + `split_aiv_region_validated`（后者通知
-[`ExpandMixedKernel`](24-expand_mixed_kernel.md) 跳过其单一函数级模式的转置检查——
-改由本 pass 用每个区域正确的拆分轴校验各自的转置风险）。
+区域包装保留，函数标记为 `split_aiv`。`ExpandMixedKernel` 根据每个区域自身的模式
+检查转置风险，并消费区域。
+
+### 共享函数体检查与 AUTO 区域
+
+`AnalyzeSplitBody` 同时检查变换后的 AUTO body 和显式 manual body。AUTO 在替换与克隆
+之前提供形状变换已建立的 tile 事实；manual 从 shard、lane 地址、别名、tuple projection
+和循环结果重建数据流。广播读取与只读 singleton 计算保持中立，不会替无关的全宽消费者
+证明已分片。rank-1 load 与全宽 reshape/reinterpret view 可作为后续 lane-local slice
+的中间值，但不会因此成为半宽事实。
+
+AUTO 完成下降后，只在同一结构验证器认可时包装单个直线向量阶段，保留计算顺序和 lane 变量身份，仅在区域外没有使用者时把 lane 绑定移入区域。
+向量阶段之后、下一个计算阶段或 return 之前的 SHARED 调用归入该向量阶段。交错的 cube/vector 阶段、控制流、带 `lane_stride` 的重平衡边界、迁移后的边界轴
+继续使用 flat lowered 形式。fallback 保留折半、偏移本地化与边界检查。
+
+本 pass 消费源阶段的 `AivSplitValid`，产生 `AivSplitLoweredValid`；后者同时支持保留/合成
+区域与 flat fallback，由 `ExpandMixedKernel` 要求并失效。
 
 ### 区域外契约（手动模式）
 
@@ -118,37 +133,22 @@ pass 能区分「被 scope 包裹的混合函数」与「纯向量函数」，�
 都运行，把只应发生一次的副作用在两条子 lane 之间分片是作者的职责，`None` 区域 V→C 跨越的
 lane 规则同理（见[作用域与放置](../../user/language/04-scopes.md)）。
 
-### 把区域放置信息带过擦除点（`core_placement`）
+### ExpandMixedKernel 消费区域放置
 
-擦除包装的同时也丢失了唯一记录“作者把语句写在哪里”的信息，而紧随其后的
-[`ExpandMixedKernel`](24-expand_mixed_kernel.md) 会把每条 `SHARED` 语句复制到**两条**
-lane 上。于是被作者放在区域内、与核无关的算子（`pld.system.notify`：TNOTIFY 未声明任何
-core affinity）同样会落到 cube lane 上，而它可能在向量 lane 的 TPUT 把该信号所释放的数据
-落盘之前就发布信号。
+区域本身保留放置信息。`ExpandMixedKernel` 每个函数只擦除一次包装，并在消费后的 body
+上用 pass 内临时映射记录需要 AIV 放置的调用，不再序列化放置或验证属性。
 
-因此在把区域体拼接出去之前，本 pass 会给即将失去归属的调用打上
-`attrs["core_placement"] = "aiv"`；`ClassifyCallAffinity` 把它视为**放置权威**并将这些调用
-解析为 `VECTOR`。该属性断言的是一个放置结论，因此只写在“区域确实**决定**其 lane”的调用上：
+| 固有亲和性 | 区域的作用 |
+| ---------- | ---------- |
+| `SHARED`、未声明 lane、`set_no_duplicate()`（notify） | 仅 AIV |
+| 可安全复制的 `SHARED`（wait） | 保留两侧 |
+| `VECTOR` | 已属于 AIV |
+| 显式声明 lane（`tile.create`、`core_type`） | 尊重声明 |
+| `MIXED` 边界 | 保留传输两端 |
+| `CUBE` 计算 | 区域内拒绝 |
 
-| 调用的本征亲和性 | 是否打标 | 原因 |
-| ---------------- | -------- | ---- |
-| `SHARED` **且**带有 `set_no_duplicate()` 标记（`pld.system.notify`） | **是** | 只有区域能决定其放置，`SHARED` 正是 pass 24 会复制的那一类，而复制对它来说是错的 |
-| `SHARED` 但*未*标记（`pld.system.wait` 等与核无关的算子） | 否 | 钉住会把它从 cube 通路上**移除**。对阻塞类算子而言这是误编译——matmul 会越过该 wait 本应等待的对端数据 |
-| `VECTOR`（普通向量计算） | 否 | 其内存规格已把它放在 AIV lane 上 |
-| **自述** lane（`tile.create`、`system.syncall(core_type=…)`） | 否 | 由其自身声明决定，区域不凌驾于声明之上 |
-| `MIXED`（`aiv_shard` / `aic_gather`、跨 C/V 的 `tile.move`） | 否 | 它们**就是**那次传输——一侧 tpush、另一侧 tpop |
-| `CUBE` | 否 | 区域内的 cube 计算已被检查 (a) 拒绝；覆盖逻辑也拒绝改写它 |
-
-因此一个混合通信 kernel 只会多出一个属性，就打在 notify 上。该标记买到的恰恰只有一件事：
-该算子不会被复制到 **cube** lane 上；它对“有多少条 AIV 子 lane 会执行它”只字未言。该遍历会下降进
-`for` / `if` / `while` / `seq`，且是幂等的（嵌套区域不会重复打标），并作用在每个区域分支的
-**最终**语句上，即在折半机制改写完调用之后。
-
-**生命周期：本 pass → pass 24，到此为止。** `ExpandMixedKernel` 一旦消费完即剥除该属性——
-`Call::attrs_` 是反射的 `UsualField`，printer 又以开放世界方式序列化 attrs，未剥除的标记会
-出现在后续每一次 pass dump、往返与 `assert_structural_equal` 中，描述一个已不存在的区域。
-其生命周期与 `pipeline_stages` 相同（[`LowerPipelineLoops`](31-lower_pipeline_loops.md) →
-[`CanonicalizeIOOrder`](32-canonicalize_io_order.md)）。
+该规则同时适用于 AUTO 合成区域、manual 区域与纯 AIV 函数。它不保证副作用在两条 AIV
+子 lane 中只执行一次，作者仍需通过 lane 索引分配工作。
 
 函数级 AUTO split（`optimizations=[pl.split(mode)]`，包括 `SplitMode.NONE`）与显式
 `pl.split_aiv` 区域是**互斥**的；若需在携带区域的作用域上指定自定义跨核槽位数，请使用
@@ -275,22 +275,16 @@ def f(self, a: pl.Tensor[[128, 128], pl.FP32],
     return c
 ```
 
-下降完成后，`LowerExplicitRegionFunction` 会重新扫描函数体，对任何存活下来的区域抛出
+下降完成后，`LowerExplicitRegionFunction` 会重新扫描函数体，对隐藏在非 split scope 后的区域抛出
 `ValueError`，并把源位置指向 `pl.split_aiv` 那一行。修复方式：删掉这层多余的 scope，或改用
 普通的 `@pl.function` / `@pl.jit`（Opaque）让 pass 8 提取它。
 
 该重新扫描还会拒绝**其他任何**存活下来的 `ScopeStmt`，以覆盖对称情形：scope 嵌套在区域体
-*内部*。此时区域本身已被消费，故上一条检查会通过——但内层遍历（`LowerStmts`、
-`CheckNoCubeTileHalved`、`ScanRegionHalfWidth`）会跨过该 scope 而不进入，其中的向量算子会以
+*内部*。此时 split 区域包装本身允许保留，故上一条检查会通过——但内层遍历（`LowerStmts`、
+`CheckNoCubeTileHalved`、`AnalyzeSplitBody`）会跨过该 scope 而不进入，其中的向量算子会以
 全宽被拼接出去，导致两条 AIV lane 都计算整块 tile。该情形从 DSL 不可达（pass 8 会把区域内的
 `with pl.at(...)` 提取为独立函数，检查 (h) 又会拒绝在非提取器产生的 InCore 函数中书写区域），
 因此它守护的是绕过 pass 8 的 IR——手工构造的，或反序列化的 `.pto`。
-
-该守卫也正是 `split_aiv_region_validated` 标记可信的依据：只有当每个区域都确实被消费后才写入
-attrs，因此 [`ExpandMixedKernel`](24-expand_mixed_kernel.md) 凭该标记跳过自身的 func-mode
-检查时，背后总有一次真实的逐区域校验。若无此守卫，被 scope 包裹的区域会既未下降、又未校验，
-却仍被标记为“已完成区域校验”，问题要到很晚才以 PTO codegen 的内部断言
-（`SplitAivScopeStmt reached PTO codegen`）暴露。
 
 ## 拆分轴分派
 

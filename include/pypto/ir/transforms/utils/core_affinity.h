@@ -52,17 +52,7 @@ CVDirection ClassifyMoveDirection(const CallPtr& call);
 /// operator and states nothing.
 bool HasStatedLane(const CallPtr& call);
 
-/// True when this call was spliced out of a `pl.split_aiv` region by
-/// LowerAutoVectorSplit, i.e. the author placed it on the vector lane. See
-/// `kCorePlacementAttr` (transforms/utils/attrs.h) for the carrier and its
-/// pass 23 -> pass 24 lifetime.
-bool IsAivRegionPlaced(const CallPtr& call);
-
-/// The lane this call runs on, BEFORE the `pl.split_aiv` region placement
-/// override — i.e. what the op itself, its kwargs and its operand/result memory
-/// spaces imply. `ClassifyCallAffinity` is this plus the override, and is what
-/// passes should use; this form exists for the override to consult, and for
-/// diagnostics that need to explain what changed.
+/// Intrinsic lane from the operator, kwargs and operand/result memory spaces.
 CoreAffinity ClassifyIntrinsicCallAffinity(const CallPtr& call);
 
 /// True when this call's operator declares `set_no_duplicate()`, i.e. running

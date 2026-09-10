@@ -778,7 +778,7 @@ class _PlacedNotifyBefore:
     ) -> pl.Tensor[[64, 128], pl.FP32]:
         half: pl.Tile[[64, 128], pl.FP32, pl.Mem.Vec] = pl.tile.aiv_shard(qk, split=1)
         y: pl.Tile[[64, 128], pl.FP32, pl.Mem.Vec] = pl.tile.add(half, half)
-        pld.system.notify(sig, peer, [0, 0], 1, op=pld.NotifyOp.AtomicAdd, attrs={"core_placement": "aiv"})
+        pld.system.notify(sig, peer, [0, 0], 1, op=pld.NotifyOp.AtomicAdd)
         out_store = pl.tile.store(y, [0, 0], out_0)
         return out_store
 
@@ -798,6 +798,25 @@ class _UnplacedNotifyBefore:
         pld.system.notify(sig, peer, [0, 0], 1, op=pld.NotifyOp.AtomicAdd)
         out_store = pl.tile.store(y, [0, 0], out_0)
         return out_store
+
+
+class _WrapNotifyBody(ir.IRMutator):
+    """Model pass 24 output using a region, preserving the existing golden body."""
+
+    def visit_function(self, op):
+        stmts = list(op.body.stmts)
+        region = ir.SplitAivScopeStmt(
+            split=ir.SplitMode.UP_DOWN, body=ir.SeqStmts(stmts[:-1], op.span), span=op.span
+        )
+        return ir.Function(
+            op.name,
+            list(zip(op.params, op.param_directions)),
+            op.return_types,
+            ir.SeqStmts([region, stmts[-1]], op.span),
+            op.span,
+            op.func_type,
+            attrs=dict(op.attrs),
+        )
 
 
 def test_region_placed_notify_lands_on_aiv_lane_only():
@@ -876,7 +895,7 @@ def test_region_placed_notify_lands_on_aiv_lane_only():
             self.split_aiv_aiv(qk, sig, peer, out_0)
             return out_0
 
-    after = _expand(_PlacedNotifyBefore)
+    after = _expand(_WrapNotifyBody().visit_program(_PlacedNotifyBefore))
     ir.assert_structural_equal(after, Expected)
     _assert_no_free_var(after)
 

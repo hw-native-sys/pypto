@@ -73,15 +73,16 @@ points at the offending transpose with two fix directions:
 carries no split data — the no-op broadcast case — and is left split; a dynamic,
 non-`ConstInt` extent is treated as non-singleton and flagged conservatively).
 
-This whole-function check reads a **single** `func->GetSplitMode()`, so it cannot
-represent a multi-mode function. By the time `ExpandMixedKernel` runs, any
-first-class `SplitAivScopeStmt` regions have already been consumed and erased by
-[`LowerAutoVectorSplit`](23-lower_auto_vector_split.md) (pass 23), which validates
-**each region's** transpose hazard with that region's own split axis and stamps
-`split_aiv_region_validated` on the function. So this pass skips the single-func-mode
-transpose check for functions carrying `split_aiv_region_validated` (the AUTO
-whole-function path is unchanged); the scope node never reaches here — only the
-per-op `aiv_shard` / `aic_gather` markers remain.
+`SplitRegionConsumer` validates each retained or synthesized region using its
+own split axis, erases the wrapper, and records placement on the same consumed
+body used by both mixed-function classification and expansion. Pure-AIV functions
+also consume their regions here. Functions with no regions retain the existing
+whole-function transpose check.
+
+The pass requires `AivSplitLoweredValid`. Source boundaries use strict operand
+memory rules; lowered transport checks operand availability on the producing
+lane, so parameters shared by both lanes remain valid regardless of their memory
+annotation. Boundary result memory still describes the consuming lane.
 
 Cross-core data transfer at CV boundaries is handled by splitting explicit `tile.move` ops into `tpush`/`tpop` pairs:
 
@@ -365,14 +366,12 @@ Phase 4 — Normalize hand-written mixed Group ABIs:
 | SHARED | Non-tile ops, function calls, control flow, scalar ops | — |
 | SHARED | `pld.system.notify`, `pld.system.wait` | Core-agnostic by ISA (pure scalar/GM), so no affinity is declared. `notify` also declares `set_no_duplicate()` (both `NotifyOp` forms) — a cube-lane copy can release the peer before the vector lane's TPUT lands the data; `wait` does not, since it *blocks* and its cube-lane copy is load-bearing |
 | MIXED | Compound statements containing both CUBE and VECTOR children | — |
-| VECTOR | any call stamped `attrs["core_placement"] = "aiv"` | Region placement — outranks every rule above |
+| VECTOR | Region-local, intrinsically SHARED no-duplicate call without a stated lane | Pass-local lexical placement |
 
-**Region placement outranks inference.** A call stamped
-`attrs["core_placement"] = "aiv"` resolves to `VECTOR`, keeping a
-`pld.system.notify` off the cube lane. The stamp, its carve-outs and its lifetime
-are documented at [`LowerAutoVectorSplit`](23-lower_auto_vector_split.md); this
-pass reads it, then **strips** it. It does not make the op run *once* — see
-[Scopes and Placement](../../user/language/04-scopes.md).
+Region placement keeps `pld.system.notify` off AIC. It preserves duplicate-safe
+`wait`, stated lane affinity, and both boundary endpoints. The map is internal to
+this pass; no call attributes carry placement. See
+[`LowerAutoVectorSplit`](23-lower_auto_vector_split.md) for the shared contract.
 
 **CV boundary detection**: A `tile.move` is a CV boundary when its source tile memory and target memory are on different core sides. Cube-side memory: Mat, Left, Right, Acc, Bias. Vector-side memory: Vec. Same-side moves (e.g. Mat→Left) are classified by their source memory as usual. Boundary leaf moves are tagged `MIXED` for affinity purposes and are also recorded in a separate `boundary_moves` map; the cross-core direction (Cube→Vector vs Vector→Cube) is recovered via `ClassifyMoveDirection` at the call sites that need it (`CollectCVBoundaryMoves`, `BuildCoreBody`).
 
@@ -540,9 +539,9 @@ class After:
 
 | Property | Value |
 | -------- | ----- |
-| Required | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D, TileMemoryInferred, NormalizedStmtStructure |
+| Required | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D, TileMemoryInferred, NormalizedStmtStructure, AivSplitLoweredValid |
 | Produced | SSAForm, MixedKernelExpanded, NormalizedStmtStructure, HardSyncallOccupancyValid, AccCompactValid |
-| Invalidated | AccCompactValid |
+| Invalidated | AccCompactValid, AivSplitLoweredValid |
 
 `HardSyncallOccupancyValid` is produced here not by anything this pass rewrites, but because resolving each kernel's `FunctionType` to AIV/AIC/Group is the precondition the hard-syncall occupancy verifier depends on. That verifier fires once, right after this pass.
 

@@ -168,27 +168,8 @@ def test_remote_load_is_placed_only_on_the_vector_lane():
     assert remote_load not in _op_names(expanded.get_function("kernel_aic"))
 
 
-# ---------------------------------------------------------------------------
-# `pl.split_aiv` region placement override
-#
-# LowerAutoVectorSplit erases the region wrapper, so it leaves the author's
-# placement behind as ``attrs["core_placement"] = "aiv"`` on the calls whose
-# lane the region decides. ClassifyCallAffinity reads that as the placement
-# authority, ahead of every rule above — which is what keeps a core-agnostic
-# comm op off the cube lane instead of being duplicated onto both.
-#
-# The override refuses in three cases, each because the region is not what
-# decides that call's lane. Every one is paired with its unstamped counterpart
-# so the tests distinguish "the override did nothing" from "the override was
-# never reached".
-# ---------------------------------------------------------------------------
-
-_PLACED = {"core_placement": "aiv"}
-
-
-def _placed(call: ir.Call) -> ir.Call:
-    """Re-mint ``call`` with the region placement stamp."""
-    return ir.Call(call.op, call.args, call.kwargs, _PLACED, call.type, call.span)
+# Intrinsic affinity is independent of lexical region placement. The latter is
+# covered by the ExpandMixedKernel region-consumption tests.
 
 
 def _tile(shape, mem):
@@ -205,79 +186,43 @@ def _notify(span) -> ir.Call:
     )
 
 
-def test_region_placement_moves_a_core_agnostic_op_to_the_vector_lane():
-    """SHARED + region placement -> VECTOR. The case the carrier exists for.
-
-    ``pld.system.notify`` declares no core affinity (TNOTIFY is core-agnostic by
-    ISA), so nothing but the region can place it — and SHARED is precisely what
-    ExpandMixedKernel duplicates onto both lanes.
-    """
+def test_notify_has_intrinsic_shared_affinity():
     span = ir.Span.unknown()
     notify = _notify(span)
 
     assert testing.classify_call_affinity(notify) == "shared"
-    assert testing.classify_call_affinity(_placed(notify)) == "vector"
 
 
-def test_region_placement_leaves_a_stated_lane_alone():
-    """A lane the op DECLARES outranks region placement.
-
-    ``tile.create`` is SHARED by policy via ``set_core_affinity`` so both lanes
-    can declare the buffer. Overriding it to VECTOR would drop the declaration
-    from the cube lane. Note this is SHARED like the notify above, so it pins
-    that the carve-out keys on *how* the lane was decided, not on the value.
-    """
+def test_create_declares_shared_affinity():
     span = ir.Span.unknown()
     create = T.create([16, 16], pl.FP16, ir.MemorySpace.Vec, span=span)
 
     assert testing.classify_call_affinity(create) == "shared"
-    assert testing.classify_call_affinity(_placed(create)) == "shared"
 
 
-def test_region_placement_leaves_the_cross_core_boundary_alone():
-    """MIXED means "this call IS the transfer" — it really does need both lanes.
-
-    ``tile.aiv_shard`` lowers to a tpush on the cube lane plus a tpop on the
-    vector lane. Forcing it to VECTOR would leave the tpush without its tpop.
-    """
+def test_boundary_has_mixed_affinity():
     span = ir.Span.unknown()
     src = ir.Var("qk", _tile([128, 128], ir.MemorySpace.Acc), span)
     shard = ir.create_op_call("tile.aiv_shard", [src], {"split": 1}, span)
 
     assert testing.classify_call_affinity(shard) == "mixed"
-    assert testing.classify_call_affinity(_placed(shard)) == "mixed"
 
 
-def test_region_placement_does_not_drag_cube_work_onto_the_vector_lane():
-    """CUBE stays CUBE — the verifier reports it, the classifier does not guess.
-
-    Cube compute inside a region is an authoring error that AivSplitValid check
-    (a) rejects. If verification is off, declining the override leaves the op on
-    the cube lane exactly as before, rather than newly miscompiling a matmul
-    onto the vector lane.
-    """
+def test_matmul_has_cube_affinity():
     span = ir.Span.unknown()
     lhs = ir.Var("lhs", _tile([16, 128], ir.MemorySpace.Left), span)
     rhs = ir.Var("rhs", _tile([128, 16], ir.MemorySpace.Right), span)
     matmul = ir.create_op_call("tile.matmul", [lhs, rhs], {"out_dtype": pl.FP32}, span)
 
     assert testing.classify_call_affinity(matmul) == "cube"
-    assert testing.classify_call_affinity(_placed(matmul)) == "cube"
 
 
-def test_region_placement_is_a_no_op_for_ordinary_vector_compute():
-    """VECTOR is already the answer; the stamp only confirms it.
-
-    Pass 23 does not stamp these (their memory spec already places them), but
-    the attr is ordinary IR that a hand-written program may carry, so the
-    override must still give a defined — and unchanged — answer.
-    """
+def test_add_has_vector_affinity():
     span = ir.Span.unknown()
     src = ir.Var("v", _tile([16, 128], ir.MemorySpace.Vec), span)
     add = ir.create_op_call("tile.add", [src, src], {}, span)
 
     assert testing.classify_call_affinity(add) == "vector"
-    assert testing.classify_call_affinity(_placed(add)) == "vector"
 
 
 if __name__ == "__main__":

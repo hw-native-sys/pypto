@@ -274,6 +274,9 @@ PropertyVerifierPtr CreateMixedKernelExpandedPropertyVerifier();
  */
 PropertyVerifierPtr CreateAivSplitValidPropertyVerifier();
 
+/// Verify the post-LowerAutoVectorSplit region/flat compatibility contract.
+PropertyVerifierPtr CreateAivSplitLoweredValidPropertyVerifier();
+
 /**
  * @brief Factory function for creating AllocatedMemoryAddr property verifier
  *

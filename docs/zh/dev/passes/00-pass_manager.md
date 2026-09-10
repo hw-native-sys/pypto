@@ -576,3 +576,9 @@ print(p.get_produced_properties())   # {SSAForm}
 - `tests/ut/ir/transforms/test_pass_pipeline.py` — Pipeline、PassContext、插桩和自动验证测试
 - `tests/ut/ir/transforms/test_pass_manager.py` — PassManager 向后兼容性测试
 - `tests/ut/conftest.py` — 为所有测试启用 BEFORE_AND_AFTER 验证的 autouse fixture
+
+### AIV split 验证属性交接
+
+`LowerAutoVectorSplit` 要求 `AivSplitValid` 并产生 `AivSplitLoweredValid`。
+`ExpandMixedKernel` 消费保留/合成的区域以及受支持的 flat fallback，然后使 lowered
+属性失效。pass 顺序不变。

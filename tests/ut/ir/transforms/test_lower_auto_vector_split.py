@@ -90,7 +90,41 @@ def _tensor(shape):
     return ir.TensorType(shape, FP32)
 
 
-def _lower(program):
+class _EraseSplitRegions(ir.IRMutator):
+    """Project out region wrappers for the existing per-op shape/offset goldens.
+
+    Region structure is tested separately on the unprojected pass output.
+    The pass's roundtrip instrument always sees that unprojected output.
+    """
+
+    def visit_split_aiv_scope_stmt(self, op):
+        return self.visit_stmt(op.body)
+
+    def visit_seq_stmts(self, op):
+        stmts = []
+        for stmt in op.stmts:
+            rewritten = self.visit_stmt(stmt)
+            if isinstance(rewritten, ir.SeqStmts):
+                stmts.extend(rewritten.stmts)
+            else:
+                stmts.append(rewritten)
+        return ir.SeqStmts(stmts, op.span)
+
+
+def _split_region_count(program):
+    class Counter(ir.IRVisitor):
+        count = 0
+
+        def visit_split_aiv_scope_stmt(self, op):
+            self.count += 1
+            self.visit_stmt(op.body)
+
+    counter = Counter()
+    counter.visit_program(program)
+    return counter.count
+
+
+def _lower(program, *, keep_regions=False):
     """Run the pass with the print->parse roundtrip instrument kept ON.
 
     The programs here are minimal and hand-shaped rather than pipeline-produced,
@@ -105,7 +139,8 @@ def _lower(program):
     test noticed until the DSL conversion tripped over it.
     """
     with passes.PassContext([make_roundtrip_instrument()]):
-        return passes.lower_auto_vector_split()(program)
+        result = passes.lower_auto_vector_split()(program)
+    return result if keep_regions else _EraseSplitRegions().visit_program(result)
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +193,11 @@ def test_c2v_boundary_becomes_aiv_shard_and_vector_region_is_halved():
             return out_store
 
     ir.assert_structural_equal(_lower(Before), Expected)
+    raw = _lower(Before, keep_regions=True)
+    assert _split_region_count(raw) == 1
+    with passes.PassContext([make_roundtrip_instrument()]):
+        expanded = passes.expand_mixed_kernel()(raw)
+    assert _split_region_count(expanded) == 0
 
 
 def test_auto_c2v_boundary_localizes_a_ragged_split_axis():
@@ -3090,40 +3130,37 @@ def _notify(span, sig, peer, notify_op=0):
 
 
 def _placements(program, op_name):
-    """The ``core_placement`` attr of every call to ``op_name``, in body order.
-
-    ``None`` for an unstamped call, so a list like ``["aiv", None]`` states both
-    which calls the region placed and which it left alone.
-    """
+    """Whether each call is lexically inside a retained AIV region."""
     found = []
 
-    def walk(node):
-        if node is None:
-            return
-        if isinstance(node, ir.Call) and isinstance(node.op, ir.Op) and node.op.name == op_name:
-            found.append(node.attrs.get("core_placement"))
-        if isinstance(node, ir.SeqStmts):
-            for stmt in node.stmts:
-                walk(stmt)
-            return
-        if isinstance(node, ir.AssignStmt):
-            walk(node.value)
-        if isinstance(node, ir.EvalStmt):
-            walk(node.expr)
-        walk(getattr(node, "body", None))
+    class Membership(ir.IRVisitor):
+        def __init__(self):
+            super().__init__()
+            self.depth = 0
 
-    for func in program.functions.values():
-        walk(func.body)
+        def visit_split_aiv_scope_stmt(self, op):
+            self.depth += 1
+            self.visit_stmt(op.body)
+            self.depth -= 1
+
+        def visit_call(self, op):
+            assert "core_placement" not in op.attrs
+            if isinstance(op.op, ir.Op) and op.op.name == op_name:
+                found.append("aiv" if self.depth else None)
+            super().visit_call(op)
+
+    visitor = Membership()
+    visitor.visit_program(program)
     return found
 
 
 # ---------------------------------------------------------------------------
 # Explicit SplitAivScopeStmt region path (RFC #1300 nestable first-class node).
 #
-# LowerAutoVectorSplit is the SOLE consumer of SplitAivScopeStmt: it injects a
+# LowerAutoVectorSplit retains SplitAivScopeStmt while it injects a
 # per-region subblock index, halves ONLY the vector compute INSIDE each region
 # (region-local maps so no leak to sibling regions or out-of-region full-width
-# ops), validates a per-region transpose hazard, then DROPS the scope wrapper.
+# ops), and validates a per-region transpose hazard. ExpandMixedKernel erases it.
 # The AUTO whole-function path above is unchanged.
 #
 # These ``Before`` programs are hand-built rather than DSL-authored (the AUTO
@@ -3145,7 +3182,7 @@ def _placements(program, op_name):
 # each region carries its own ``split_``). Same for every mode, including the
 # task-parallel ``None``: the ``split_aiv`` marker alone routes the function to the
 # both-lanes split path downstream (never the lane-0-only no-split replay).
-_REGION_ATTRS = {"split_aiv": True, "split_aiv_region_validated": True}
+_REGION_ATTRS = {"split_aiv": True}
 
 
 def _vec_load_region(span, mode, data, out, *, full_shape=(128, 128)):
@@ -3225,9 +3262,7 @@ def _explicit_region_program(stmts, params, return_types, *, name="split_explici
 
 
 def _expected_region_program(stmts, params, return_types, *, name="split_explicit", attrs=None):
-    """Lowered counterpart of ``_explicit_region_program``: the scope wrapper is
-    erased and the function is stamped ``split_aiv`` + ``split_aiv_region_validated``
-    (unless ``attrs`` overrides)."""
+    """Projected body golden: omit the retained wrapper and keep ``split_aiv``."""
     span = ir.Span.unknown()
     func = ir.Function(
         name,
@@ -3241,7 +3276,25 @@ def _expected_region_program(stmts, params, return_types, *, name="split_explici
     return ir.Program([func], name, span)
 
 
-def test_explicit_region_erased():
+def test_explicit_region_survives_lowering_and_is_consumed_by_expansion():
+    """The structural placement carrier lives exactly through pass 24."""
+    span = ir.Span.unknown()
+    before = _notify_region_program(span, ir.SplitMode.NONE, in_region=True)
+    lowered = _lower(before, keep_regions=True)
+    assert "pl.split_aiv" in ir.python_print(lowered)
+    assert "core_placement" not in ir.python_print(lowered)
+    assert "split_aiv_region_validated" not in ir.python_print(lowered)
+    with passes.PassContext([]):
+        expanded = passes.expand_mixed_kernel()(lowered)
+    assert "pl.split_aiv" not in ir.python_print(expanded)
+    aic = [f for f in expanded.functions.values() if f.func_type == ir.FunctionType.AIC]
+    aiv = [f for f in expanded.functions.values() if f.func_type == ir.FunctionType.AIV]
+    assert aic and aiv
+    assert "pld.system.notify" not in ir.python_print(aic[0])
+    assert "pld.system.notify" in ir.python_print(aiv[0])
+
+
+def test_explicit_region_body_is_lowered():
     """Pass 23 consumes the region: no SplitAivScopeStmt survives, and the func is
     stamped split_aiv + split_aiv_region_validated. The region body keeps its own
     ``aiv_id`` and gains the injected ``subblock_idx`` + halved load (Expected)."""
@@ -3958,7 +4011,7 @@ def test_mixed_explicit_implicit_region_in_while_rejected():
 # ---------------------------------------------------------------------------
 
 
-def _admission_program(span, body_fn, *, wrap, nest_in_loop=False):
+def _admission_program(span, body_fn, *, wrap, nest_in_loop=False, mode=ir.SplitMode.UP_DOWN):
     """matmul -> explicit region -> store, with ``body_fn`` supplying the middle.
 
     ``wrap=True`` nests the region statements in a SplitAivScopeStmt (the Before).
@@ -3977,7 +4030,7 @@ def _admission_program(span, body_fn, *, wrap, nest_in_loop=False):
     matmul = T.matmul(a_left, b_right, span=span)
     qk = ir.Var("qk", matmul.type, span)
     aiv_id = _sub_var("aiv_id")
-    shard = T.aiv_shard(qk, split=1, span=span)  # UP_DOWN => [64, 128] Vec
+    shard = T.aiv_shard(qk, split=1 if mode == ir.SplitMode.UP_DOWN else 2, span=span)
     qk_h = ir.Var("qk_h", shard.type, span)
 
     inner: list[ir.Stmt] = []
@@ -4005,9 +4058,7 @@ def _admission_program(span, body_fn, *, wrap, nest_in_loop=False):
 
     params = [(a_left, _IN), (b_right, _IN), (data, _IN), (out_0, _OUT)]
     if wrap:
-        region = ir.SplitAivScopeStmt(
-            split=ir.SplitMode.UP_DOWN, body=ir.SeqStmts(region_stmts, span), span=span
-        )
+        region = ir.SplitAivScopeStmt(split=mode, body=ir.SeqStmts(region_stmts, span), span=span)
         return _explicit_region_program(
             [ir.AssignStmt(qk, matmul, span), region, ir.ReturnStmt([out_store], span)],
             params,
@@ -4167,6 +4218,69 @@ def _laundering_body(span, stmts, aiv_id, qk_h, data):
         ir.AssignStmt(y, add, span),
     ]
     return y
+
+
+def _singleton_broadcast_body(span, stmts, aiv_id, qk_h, data):
+    """Both lanes read the same broadcast row, then multiply their own shard."""
+    load = T.load(data, [0, 0], [1, 128], target_memory=MS.Vec, span=span)
+    scale = ir.Var("scale", load.type, span)
+    mul = T.col_expand_mul(qk_h, scale, span=span)
+    y = ir.Var("scaled", mul.type, span)
+    stmts.extend([ir.AssignStmt(scale, load, span), ir.AssignStmt(y, mul, span)])
+    return y
+
+
+def test_explicit_region_admits_singleton_broadcast_load():
+    """A singleton split axis is replicated, not an unlocalized full-width load."""
+    span = ir.Span.unknown()
+    ir.assert_structural_equal(
+        _lower(_admission_program(span, _singleton_broadcast_body, wrap=True)),
+        _admission_program(span, _singleton_broadcast_body, wrap=False),
+    )
+
+
+def _singleton_column_body(span, stmts, aiv_id, qk_h, data):
+    """LEFT_RIGHT keeps each row's multiplier replicated across column shards."""
+    load = T.load(data, [0, 0], [128, 1], target_memory=MS.Vec, span=span)
+    scale = ir.Var("scale", load.type, span)
+    mul = T.row_expand_mul(qk_h, scale, span=span)
+    y = ir.Var("scaled", mul.type, span)
+    stmts.extend([ir.AssignStmt(scale, load, span), ir.AssignStmt(y, mul, span)])
+    return y
+
+
+def test_explicit_region_admits_singleton_column_load():
+    """LEFT_RIGHT admits the singleton column without halving it again."""
+    span = ir.Span.unknown()
+    ir.assert_structural_equal(
+        _lower(_admission_program(span, _singleton_column_body, wrap=True, mode=ir.SplitMode.LEFT_RIGHT)),
+        _admission_program(span, _singleton_column_body, wrap=False, mode=ir.SplitMode.LEFT_RIGHT),
+    )
+
+
+def _broadcast_expanded_to_full_width_body(span, stmts, aiv_id, qk_h, data):
+    """A replicated row must not make a full-width expansion count as a shard."""
+    load = T.load(data, [0, 0], [1, 128], target_memory=MS.Vec, span=span)
+    scale = ir.Var("scale", load.type, span)
+    full = T.full([128, 128], FP32, 0.0, span=span)
+    target = ir.Var("target", full.type, span)
+    expand = T.col_expand(target, scale, span=span)
+    y = ir.Var("expanded", expand.type, span)
+    stmts.extend(
+        [
+            ir.AssignStmt(scale, load, span),
+            ir.AssignStmt(target, full, span),
+            ir.AssignStmt(y, expand, span),
+        ]
+    )
+    return y
+
+
+def test_broadcast_load_does_not_prove_a_full_width_consumer_is_sharded():
+    """The broadcast producer is accepted, but the full-width consumer is not."""
+    span = ir.Span.unknown()
+    with pytest.raises(ValueError, match=r"vector op\(s\) \[tile.col_expand\]"):
+        _lower(_admission_program(span, _broadcast_expanded_to_full_width_body, wrap=True))
 
 
 def test_region_admits_half_width_generator():
@@ -4472,23 +4586,8 @@ def test_outlined_region_still_lowers_and_stamps():
 
 
 # ---------------------------------------------------------------------------
-# Region placement stamp (``attrs["core_placement"] = "aiv"``)
-#
-# The pass ERASES the SplitAivScopeStmt wrapper, so ExpandMixedKernel — which
-# runs next and duplicates every SHARED statement onto both lanes — would
-# otherwise have no way to tell that the author placed a statement on the vector
-# lane. The stamp is that carrier.
-#
-# It is written only on calls whose lane the region DECIDES: a call that states
-# its own lane (``tile.get_subblock_idx`` declares SHARED by policy) or whose
-# memory spec already fixes one (any vector op is VECTOR; the aiv_shard /
-# aic_gather boundary is MIXED because it genuinely runs on both lanes) is
-# placed without it. So a comm op is stamped and the compute around it is not —
-# which is what the ``[..., None]`` expectations below pin.
-#
-# All three region arms are covered (task-parallel splice, explicit-boundary
-# splice, data-parallel halving), plus nesting inside a loop, plus the
-# out-of-region negative.
+# Retained lexical membership. Calls do not carry placement attributes; actual
+# AIC/AIV routing is covered by ExpandMixedKernel and full-pipeline tests.
 # ---------------------------------------------------------------------------
 
 
@@ -4547,8 +4646,8 @@ def _notify_region_program(span, mode, *, in_region, nest_in_loop=False):
 _NOTIFY = ir.get_op("pld.system.notify").name
 
 
-def test_none_region_stamps_comm_op_with_aiv_placement():
-    """Task-parallel (NONE) splice arm: the in-region notify is stamped.
+def test_none_region_retains_comm_op():
+    """Task-parallel (NONE) retains its notify inside the region.
 
     This is the arm the mixed comm kernels use — ``pl.split_aiv(2,
     mode=pl.SplitMode.NONE)`` runs the full body on both AIV lanes — and the one
@@ -4557,10 +4656,10 @@ def test_none_region_stamps_comm_op_with_aiv_placement():
     span = ir.Span.unknown()
     program = _notify_region_program(span, ir.SplitMode.NONE, in_region=True)
 
-    assert _placements(_lower(program), _NOTIFY) == ["aiv"]
+    assert _placements(_lower(program, keep_regions=True), _NOTIFY) == ["aiv"]
 
 
-def test_data_parallel_region_stamps_comm_op_with_aiv_placement():
+def test_data_parallel_region_retains_comm_op():
     """Data-parallel (UP_DOWN) halving arm: the stamp survives the rewriting.
 
     The halving machinery replaces calls as it localizes offsets and halves
@@ -4570,10 +4669,10 @@ def test_data_parallel_region_stamps_comm_op_with_aiv_placement():
     span = ir.Span.unknown()
     program = _notify_region_program(span, ir.SplitMode.UP_DOWN, in_region=True)
 
-    assert _placements(_lower(program), _NOTIFY) == ["aiv"]
+    assert _placements(_lower(program, keep_regions=True), _NOTIFY) == ["aiv"]
 
 
-def test_explicit_boundary_region_stamps_comm_op_with_aiv_placement():
+def test_explicit_boundary_region_retains_comm_op():
     """Explicit-boundary splice arm: a body the author already half-widthed.
 
     A user-written ``tile.aiv_shard`` routes the region through the pass-through
@@ -4618,14 +4717,14 @@ def test_explicit_boundary_region_stamps_comm_op_with_aiv_placement():
         [out_0.type],
     )
 
-    after = _lower(program)
+    after = _lower(program, keep_regions=True)
     assert _placements(after, _NOTIFY) == ["aiv"]
     # The boundary op itself is NOT stamped: it runs on BOTH lanes (tpush on the
     # cube side, tpop on the vector side), so "aiv" would be false of it.
-    assert _placements(after, ir.get_op("tile.aiv_shard").name) == [None]
+    assert _placements(after, ir.get_op("tile.aiv_shard").name) == ["aiv"]
 
 
-def test_comm_op_nested_in_loop_inside_region_is_stamped():
+def test_region_retains_nested_comm_op():
     """The stamp walk descends into compound statements.
 
     A notify buried in a ForStmt inside the region is as region-placed as one at
@@ -4635,10 +4734,10 @@ def test_comm_op_nested_in_loop_inside_region_is_stamped():
     span = ir.Span.unknown()
     program = _notify_region_program(span, ir.SplitMode.NONE, in_region=True, nest_in_loop=True)
 
-    assert _placements(_lower(program), _NOTIFY) == ["aiv"]
+    assert _placements(_lower(program, keep_regions=True), _NOTIFY) == ["aiv"]
 
 
-def test_comm_op_outside_region_is_not_stamped():
+def test_outside_comm_op_stays_outside_region():
     """The negative: an out-of-region notify keeps no placement.
 
     The region is authoritative only for what it contains. Stamping outside it
@@ -4647,24 +4746,17 @@ def test_comm_op_outside_region_is_not_stamped():
     span = ir.Span.unknown()
     program = _notify_region_program(span, ir.SplitMode.NONE, in_region=False)
 
-    assert _placements(_lower(program), _NOTIFY) == [None]
+    assert _placements(_lower(program, keep_regions=True), _NOTIFY) == [None]
 
 
-def test_region_compute_is_not_stamped():
-    """Only calls whose lane the region decides are stamped.
-
-    ``tile.load`` is VECTOR from its own memory spec and
-    ``tile.get_subblock_idx`` declares SHARED by policy (both lanes need the
-    lane index), so neither needs — or gets — a placement. Pins that the stamp
-    is a placement decision rather than a region-membership marker sprayed over
-    the whole body.
-    """
+def test_region_membership_does_not_add_call_attributes():
+    """Intrinsic compute stays in the region without placement attributes."""
     span = ir.Span.unknown()
-    after = _lower(_notify_region_program(span, ir.SplitMode.NONE, in_region=True))
+    after = _lower(_notify_region_program(span, ir.SplitMode.NONE, in_region=True), keep_regions=True)
 
-    assert _placements(after, ir.get_op("tile.load").name) == [None]
-    assert _placements(after, ir.get_op("tile.store").name) == [None]
-    assert _placements(after, ir.get_op("tile.get_subblock_idx").name) == [None]
+    assert _placements(after, ir.get_op("tile.load").name) == ["aiv"]
+    assert _placements(after, ir.get_op("tile.store").name) == ["aiv"]
+    assert _placements(after, ir.get_op("tile.get_subblock_idx").name) == ["aiv"]
 
 
 # ---------------------------------------------------------------------------
@@ -5043,3 +5135,123 @@ def test_slice_dropping_the_tracked_split_axis_is_rejected():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def _singleton_arithmetic_body(span, stmts, aiv_id, qk_h, data):
+    load = T.load(data, [0, 0], [1, 128], target_memory=MS.Vec, span=span)
+    scale = ir.Var("scale", load.type, span)
+    add = T.add(scale, scale, span=span)
+    doubled = ir.Var("doubled", add.type, span)
+    mul = T.col_expand_mul(qk_h, doubled, span=span)
+    y = ir.Var("scaled", mul.type, span)
+    stmts.extend(
+        [
+            ir.AssignStmt(scale, load, span),
+            ir.AssignStmt(doubled, add, span),
+            ir.AssignStmt(y, mul, span),
+        ]
+    )
+    return y
+
+
+def test_singleton_arithmetic_stays_replicated():
+    span = ir.Span.unknown()
+    ir.assert_structural_equal(
+        _lower(_admission_program(span, _singleton_arithmetic_body, wrap=True)),
+        _admission_program(span, _singleton_arithmetic_body, wrap=False),
+    )
+
+
+def _alias_projection_body(span, stmts, aiv_id, qk_h, data):
+    alias = ir.Var("alias", qk_h.type, span)
+    pair = ir.MakeTuple([alias, alias], span)
+    pair_var = ir.Var("pair", pair.type, span)
+    item = ir.TupleGetItemExpr(pair_var, 1, span)
+    add = T.add(item, item, span=span)
+    result = ir.Var("result", add.type, span)
+    stmts.extend(
+        [
+            ir.AssignStmt(alias, qk_h, span),
+            ir.AssignStmt(pair_var, pair, span),
+            ir.AssignStmt(result, add, span),
+        ]
+    )
+    return result
+
+
+def test_manual_alias_and_tuple_projection_preserve_shard_facts():
+    span = ir.Span.unknown()
+    ir.assert_structural_equal(
+        _lower(_admission_program(span, _alias_projection_body, wrap=True)),
+        _admission_program(span, _alias_projection_body, wrap=False),
+    )
+
+
+def test_auto_region_keeps_notify_on_aiv_and_wait_on_both_lanes():
+    span = ir.Span.unknown()
+    source = _notify_region_program(span, ir.SplitMode.UP_DOWN, in_region=True)
+    flat = _EraseSplitRegions().visit_program(source)
+    func = next(iter(flat.functions.values()))
+    sig = next(p for p in func.params if p.name_hint == "sig")
+    zero = ir.ConstInt(0, DataType.INDEX, span)
+    wait = ir.create_op_call(
+        "pld.system.wait",
+        [sig, ir.MakeTuple([zero, zero], span), ir.ConstInt(1, DataType.INT32, span)],
+        {"cmp": 0},
+        span,
+    )
+    assert isinstance(func.body, ir.SeqStmts)
+    stmts = list(func.body.stmts)
+    stmts.insert(-1, ir.EvalStmt(wait, span))
+    auto = ir.Function(
+        func.name,
+        list(zip(func.params, func.param_directions)),
+        func.return_types,
+        ir.SeqStmts(stmts, span),
+        span,
+        ir.FunctionType.InCore,
+        attrs={"split": ir.SplitMode.UP_DOWN},
+    )
+    lowered = _lower(ir.Program([auto], "auto_notify", span), keep_regions=True)
+    assert _split_region_count(lowered) == 1
+    assert _placements(lowered, _NOTIFY) == ["aiv"]
+    with passes.PassContext([make_roundtrip_instrument()]):
+        expanded = passes.expand_mixed_kernel()(lowered)
+    assert _split_region_count(expanded) == 0
+    for function in expanded.functions.values():
+        if function.func_type not in (ir.FunctionType.AIC, ir.FunctionType.AIV):
+            continue
+        lane = ir.Program([function], "lane", span)
+        assert len(_placements(lane, _NOTIFY)) == (function.func_type == ir.FunctionType.AIV)
+        assert len(_placements(lane, ir.get_op("pld.system.wait").name)) == 1
+
+
+def test_nested_none_region_owns_its_transpose_mode():
+    """The outer data-parallel region must not validate the child's full tile."""
+    span = ir.Span.unknown()
+    data = ir.Var("data", _tensor([16, 16]), span)
+    out = ir.Var("out", _tensor([16, 16]), span)
+    load = T.load(data, [0, 0], [16, 16], target_memory=MS.Vec, span=span)
+    value = ir.Var("value", load.type, span)
+    transpose = T.transpose(value, 0, 1, span=span)
+    transposed = ir.Var("transposed", transpose.type, span)
+    store = T.store(transposed, [0, 0], out, span=span)
+    stored = ir.Var("stored", store.type, span)
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(value, load, span),
+            ir.AssignStmt(transposed, transpose, span),
+            ir.AssignStmt(stored, store, span),
+        ],
+        span,
+    )
+    inner = ir.SplitAivScopeStmt(split=ir.SplitMode.NONE, body=body, span=span)
+    outer = ir.SplitAivScopeStmt(split=ir.SplitMode.UP_DOWN, body=inner, span=span)
+    program = _explicit_region_program(
+        [outer, ir.ReturnStmt([stored], span)], [(data, _IN), (out, _OUT)], [out.type]
+    )
+    # Hand-built lowered input: nested source split loops are not DSL syntax.
+    with passes.PassContext([make_roundtrip_instrument()]):
+        expanded = passes.expand_mixed_kernel()(program)
+    assert _split_region_count(expanded) == 0
+    assert len(_placements(expanded, ir.get_op("tile.transpose").name)) == 1

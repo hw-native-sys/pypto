@@ -279,7 +279,7 @@ inline const PassProperties kCanonicalizeTileSliceProperties{
 // pass is what finally resolves every tile memory space, so an AIV-split boundary
 // whose operand space was still unresolved at pass 10 — and therefore skipped by
 // check (d) — becomes observable here, the last verification point before
-// LowerAutoVectorSplit erases the region node.
+// LowerAutoVectorSplit establishes the lowered-stage contract.
 inline const PassProperties kInferTileMemorySpaceProperties{
     .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
                  IRProperty::NormalizedStmtStructure},
@@ -329,16 +329,15 @@ inline const PassProperties kResolveBackendOpLayoutsProperties{
 // place without changing the structural property set (and is a no-op for
 // functions with no split mode or already in explicit split_aiv form).
 //
-// This pass closes the AivSplitValid verification window: it consumes and erases
-// the first-class SplitAivScopeStmt regions (so the structural region verifier
-// can no longer run afterwards), hence it requires AivSplitValid on entry and
-// invalidates it on exit.
+// Source authoring and lowered bodies have distinct contracts: the latter
+// retains regions but also admits AUTO's flat compatibility representation.
 inline const PassProperties kLowerAutoVectorSplitProperties{
     .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
                  IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure,
                  IRProperty::AivSplitValid},
     .produced = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
-                 IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure},
+                 IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure,
+                 IRProperty::AivSplitLoweredValid},
     .invalidated = {IRProperty::AivSplitValid}};
 
 // -- Mixed kernel expansion pass ----------------------------------------------
@@ -349,13 +348,14 @@ inline const PassProperties kLowerAutoVectorSplitProperties{
 // once, right after this pass.
 inline const PassProperties kExpandMixedKernelProperties{
     .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
-                 IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure},
+                 IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure,
+                 IRProperty::AivSplitLoweredValid},
     .produced = {IRProperty::SSAForm, IRProperty::MixedKernelExpanded, IRProperty::NormalizedStmtStructure,
                  IRProperty::HardSyncallOccupancyValid, IRProperty::AccCompactValid},
     // The Cube->Vector boundary `tile.move` is rebuilt here as a tpush/tpop
     // pair with a freshly built consumer type, so the Acc compact contract has
     // to be re-checked on that new IR rather than trusted from pass 20.
-    .invalidated = {IRProperty::AccCompactValid}};
+    .invalidated = {IRProperty::AccCompactValid, IRProperty::AivSplitLoweredValid}};
 
 // -- GM pipe buffer injection pass (backend-gated; extracted from ExpandMixedKernel) --
 

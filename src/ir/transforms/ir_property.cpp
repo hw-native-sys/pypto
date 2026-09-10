@@ -115,6 +115,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "AccStorePhaseValid";
     case IRProperty::NoScalarKernelReturn:
       return "NoScalarKernelReturn";
+    case IRProperty::AivSplitLoweredValid:
+      return "AivSplitLoweredValid";
     default:
       return "Unknown";
   }
@@ -161,6 +163,7 @@ const IRPropertySet& GetVerifiedProperties() {
                                    IRProperty::ManualDepsOnSubmitOnly,
                                    IRProperty::ReturnParamsExplicit,
                                    IRProperty::AivSplitValid,
+                                   IRProperty::AivSplitLoweredValid,
                                    IRProperty::TileMemoryInferred,
                                    IRProperty::TileOps2D,
                                    IRProperty::HardSyncallOccupancyValid,

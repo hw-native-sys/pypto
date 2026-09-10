@@ -283,3 +283,16 @@ class TestIRPropertySetEnumeration:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_aiv_split_property_handoff():
+    source = passes.IRProperty.AivSplitValid
+    lowered = passes.IRProperty.AivSplitLoweredValid
+    lower = passes.lower_auto_vector_split()
+    expand = passes.expand_mixed_kernel()
+    assert lower.get_required_properties().contains(source)
+    assert lower.get_invalidated_properties().contains(source)
+    assert lower.get_produced_properties().contains(lowered)
+    assert expand.get_required_properties().contains(lowered)
+    assert expand.get_invalidated_properties().contains(lowered)
+    assert passes.get_verified_properties().contains(lowered)

@@ -26,9 +26,6 @@ DUAL_AIV_DISPATCH_ATTR = "dual_aiv_dispatch"
 # InCore function outlined from a scope holding ``pl.split_aiv`` region(s) (bool).
 SPLIT_AIV_ATTR = "split_aiv"
 
-# ``pl.split_aiv`` regions already transpose-hazard-checked per region (bool).
-SPLIT_AIV_REGION_VALIDATED_ATTR = "split_aiv_region_validated"
-
 # Absolute path to a hand-written external C++ kernel source (str). When present
 # on an AIC/AIV function the DSL body is empty (``...``): the compiler assigns the
 # function a kernel func_id and emits the orchestration submit as usual, but skips
@@ -58,5 +55,4 @@ __all__ = [
     "DUAL_AIV_DISPATCH_ATTR",
     "EXTERNAL_SOURCE_ATTR",
     "SPLIT_AIV_ATTR",
-    "SPLIT_AIV_REGION_VALIDATED_ATTR",
 ]

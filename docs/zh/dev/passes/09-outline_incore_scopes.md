@@ -480,5 +480,5 @@ print → parse 有损（`Kwargs size mismatch`）。权威的逐区域模式始
 
 `AivSplitValid` 的验证窗口从这里打开。本 Pass 在每个被外提的 InCore 函数内保留第一类
 `SplitAivScopeStmt` 区域，因此结构化区域 verifier 可以从此处一直运行到
-[`LowerAutoVectorSplit`](23-lower_auto_vector_split.md) 擦除该节点并使属性失效为止。
+[`LowerAutoVectorSplit`](23-lower_auto_vector_split.md) 下降函数体，并以 `AivSplitLoweredValid` 接替该属性为止。
 其间 `ConvertTensorToTileOps` 与 `InferTileMemorySpace` 会在边界内存变得可观察后各重新验证一次。

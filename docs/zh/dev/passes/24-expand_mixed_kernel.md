@@ -53,7 +53,13 @@ task 的 subslot，而 `sync_start` 控制的是多 block SPMD 启动准入。
 
 `split_axis::FindTransposeSplitHazard` 在 `ExpandMixedFunction` 开头检测:标记**第一个**在切分轴上非 singleton 的 `tile.transpose` 源(若源在切分轴上是 singleton,则不携带切分数据 —— 即广播 no-op 情形 —— 保持切分;动态的非 `ConstInt` extent 视为非 singleton,保守标记)。
 
-该整函数检查只读取**单个** `func->GetSplitMode()`,无法表达多模式函数。当 `ExpandMixedKernel` 运行时,任何一等公民 `SplitAivScopeStmt` 区域均已被 [`LowerAutoVectorSplit`](23-lower_auto_vector_split.md)(pass 23)消费并擦除,后者已用**每个区域**各自的切分轴校验其转置风险,并在函数上打 `split_aiv_region_validated`。因此本 pass 对携带 `split_aiv_region_validated` 的函数跳过单一函数级模式的转置检查(AUTO 整函数路径保持不变);作用域节点永不到达此处 —— 只剩逐算子的 `aiv_shard` / `aic_gather` 标记。
+`SplitRegionConsumer` 按保留或合成区域自身的切分轴检查转置风险，擦除包装，并在同一份
+消费后的 body 上记录临时放置信息，供 mixed 判定和展开共用。纯 AIV 函数也在此消费区域。
+没有区域的函数保留原有的整函数转置检查。
+
+本 pass 要求 `AivSplitLoweredValid`。源阶段严格检查边界操作数内存；lowered 传输根据
+生产 lane 是否拥有操作数进行检查，因此两侧共享的参数不受其内存注解限制。边界结果
+内存仍必须属于消费侧 lane。
 
 CV 边界的跨核心数据传输通过将显式 `tile.move` 操作拆分为 `tpush`/`tpop` 对来处理：
 
@@ -315,33 +321,11 @@ program_expanded = expand_pass(program)
 | SHARED | 非 tile 操作、函数调用、控制流、标量操作 | — |
 | SHARED | `pld.system.notify`、`pld.system.wait` | 按 ISA 属于核无关操作（纯标量/GM），因此不声明亲和性。`notify` 额外声明了 `set_no_duplicate()`（对两种 `NotifyOp` 形式都生效）—— cube 侧的副本可能在向量 lane 的 TPUT 落盘数据之前就释放对端。`wait` 则不声明：它会*阻塞*，其 cube 侧副本是有实际作用的 |
 | MIXED | 包含 CUBE 和 VECTOR 子语句的复合语句 | — |
-| VECTOR | **任何打上 `attrs["core_placement"] = "aiv"` 的调用** | 区域放置——凌驾于上述所有规则之上。见下文 |
+| VECTOR | 区域内、固有亲和性为 SHARED、未声明 lane 的 no-duplicate 调用 | pass 内的区域放置 |
 
-**区域放置凌驾于推断之上。** `SHARED` 不再无条件复制到两条 lane 上。作者写在 `pl.split_aiv`
-区域内的语句会携带 `attrs["core_placement"] = "aiv"`——由
-[`LowerAutoVectorSplit`](23-lower_auto_vector_split.md) 在擦除区域包装前打上（该文档说明了
-打标范围与理由）——`ClassifyCallAffinity` 将这类调用解析为 `VECTOR`，因此它只落在 AIV lane
-上。正是这一点阻止了 `pld.system.notify`（核无关，因而 `SHARED`）同样落到 cube lane 上——
-在那里它可能在向量 lane 的 TPUT 把该信号所释放的数据落盘之前就发布信号。
-
-对*未被放置*的那一类，没有任何检查会拒绝：写在所有区域之外的通信算子会被复制到两条 lane 上，
-且不会有任何诊断。该标记也不能让它只运行一次——本 pass 发出的 AIV 函数带有
-`dual_aiv_dispatch`（当后端确实需要两条子 lane 时，即 Ascend910B 的 no-split 混合 kernel），
-此时其函数体会在两条 AIV 子 lane 上都运行，把只应发生一次的副作用在两条子
-lane 之间分片是作者的职责（见[作用域与放置](../../user/language/04-scopes.md)）。
-
-该覆盖是完备的，并在三种情况下拒绝覆盖——每种都是因为“该调用的 lane 并非由区域决定”：
-
-| 本征亲和性 | 结果 | 原因 |
-| ---------- | ---- | ---- |
-| **自述** lane（`set_core_affinity` 或 `core_type` kwarg） | 保持不变 | `tile.create` 按策略为 `SHARED`，以便两条 lane 都能声明该缓冲；`system.syncall(core_type="mix")` 需要两核会合。声明优先于放置 |
-| `MIXED` | 保持不变 | `aiv_shard` / `aic_gather` 与跨 C/V 的 `tile.move` **就是**那次传输——强制为 `VECTOR` 会让 tpush 失去配对的 tpop |
-| `CUBE` | 保持不变 | 区域内的 cube 计算是作者错误，由检查 (a) 报告；不覆盖即让它照旧留在 cube lane 上，而不是在关闭验证时把它错误地搬到向量 lane |
-
-pass 23 只给不属于上述三类的调用打标，因此编译器产出的 IR 中这些分支永不触发；写成完备形式
-是因为该属性就是能经受 print → parse 往返的普通 IR。亲和性汇总读取完毕后，本 pass 会把该
-属性从它发出的每个函数上**剥除**（包括仅被改型或原样透传的函数），因此它不会到达任何后续
-pass 或打印输出。
+区域将 notify 放在 AIV，保留 wait 的双侧行为、显式 lane 声明和边界两端。
+放置映射只存在于本 pass 内，不写入调用属性。共享契约见
+[`LowerAutoVectorSplit`](23-lower_auto_vector_split.md)。
 
 **CV 边界检测**：当 `tile.move` 的源 tile 内存和目标内存位于不同核心侧时，该移动为 CV 边界。Cube 侧内存：Mat、Left、Right、Acc、Bias。Vector 侧内存：Vec。同侧移动（如 Mat→Left）按其源内存照常分类。边界叶子移动在亲和性上被标记为 `MIXED`，并额外记录在独立的 `boundary_moves` 映射中；跨核方向（Cube→Vector vs Vector→Cube）由 `CollectCVBoundaryMoves`、`BuildCoreBody` 等调用点通过 `ClassifyMoveDirection` 即时恢复。
 
@@ -503,9 +487,9 @@ class After:
 
 | 属性 | 值 |
 | ---- | -- |
-| 所需 | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D, TileMemoryInferred, NormalizedStmtStructure |
+| 所需 | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D, TileMemoryInferred, NormalizedStmtStructure, AivSplitLoweredValid |
 | 产生 | SSAForm, MixedKernelExpanded, NormalizedStmtStructure, HardSyncallOccupancyValid, AccCompactValid |
-| 失效 | AccCompactValid |
+| 失效 | AccCompactValid, AivSplitLoweredValid |
 
 `HardSyncallOccupancyValid` 在此产生，并非因为本 pass 做了什么改写，而是因为它把每个 kernel 的 `FunctionType` 解析为 AIV/AIC/Group——这正是硬 syncall 占用率 verifier 所依赖的前置条件。该 verifier 只在本 pass 之后触发一次。
 
