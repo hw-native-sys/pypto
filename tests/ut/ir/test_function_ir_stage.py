@@ -121,3 +121,7 @@ def test_buffer_printer_marker_is_diagnostic_and_functional_output_stays_unchang
     printed = _function(ir.FunctionIRStage.Buffer).as_python()
     assert "# ir_stage: Buffer\n" in printed
     assert "ir_stage=" not in printed
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
