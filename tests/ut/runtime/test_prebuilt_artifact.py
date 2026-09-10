@@ -20,6 +20,7 @@ from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest.mock import Mock, patch
 
+import pypto.language as pl
 import pytest
 from pypto import ir
 from pypto._identity import ToolchainIdentity, digest_record
@@ -191,6 +192,44 @@ def test_promote_all_children_and_restore_readonly(tmp_path, fake_runtime, monke
     assert restored.program is None
     assert restored._artifact_runtime.load() == chips
     assert not list(store.root.rglob("__pycache__"))
+    assert not (tmp_path / "readonly-runs").exists()
+
+
+@pytest.mark.parametrize("kind", list(BuildKind))
+def test_jit_warmup_promotes_and_reuses_readonly_ready(tmp_path, fake_runtime, monkeypatch, kind):
+    store, generated = _publish(tmp_path, kind)
+    compiled = restore_artifact(store, generated, tmp_path / "runs")
+
+    @pl.jit
+    def kernel():
+        pass
+
+    # Automatic JIT artifact lookup remains separate; exercise the explicit
+    # adapter when it supplies the compiled object to the public warmup path.
+    monkeypatch.setattr(kernel, "compile", lambda *args, **kwargs: compiled)
+    monkeypatch.setitem(sys.modules, "simpler.worker", None)
+    assert kernel.warmup() is compiled
+    runtime = compiled._artifact_runtime
+    assert runtime is not None
+    assert runtime.handle.spec.state is ArtifactState.BINARY_READY
+    expected = 1 if kind is BuildKind.SINGLE_CHIP else 2
+    assert fake_runtime.runner._compile_and_assemble.call_count == expected
+    assert len(runtime.load()) == expected
+    assert kernel.warmup() is compiled
+    assert fake_runtime.runner._compile_and_assemble.call_count == expected
+    fake_runtime.runner._execute_on_device.assert_not_called()
+
+    monkeypatch.setitem(sys.modules, "pypto.runtime.device_runner", None)
+    monkeypatch.setitem(sys.modules, "pypto.runtime.kernel_compiler", None)
+    monkeypatch.setitem(sys.modules, "simpler_setup", None)
+    readonly = ArtifactStore(store.root, readonly=True)
+    compiled = restore_artifact(readonly, runtime.handle, tmp_path / "readonly-runs")
+    before = {path: path.read_bytes() for path in store.root.rglob("*") if path.is_file()}
+    assert kernel.warmup() is compiled
+    assert compiled.program is None
+    assert len(compiled._artifact_runtime.load()) == expected
+    after = {path: path.read_bytes() for path in store.root.rglob("*") if path.is_file()}
+    assert after == before
     assert not (tmp_path / "readonly-runs").exists()
 
 

@@ -58,6 +58,45 @@ def copy_dyn_batch(
 class TestJITExecution:
     """End-to-end tests for @pl.jit compile + execute on device."""
 
+    def test_warmup_then_execute_without_recompiling(self, test_config, monkeypatch):
+        """Prepare from annotations without a worker, then execute those binaries."""
+        if test_config.codegen_only:
+            pytest.skip("Warmup acceptance requires the device compiler and runtime")
+
+        from pypto.runtime import ChipWorker  # noqa: PLC0415
+        from pypto.runtime.kernel_compiler import KernelCompiler  # noqa: PLC0415
+        from simpler.worker import Worker  # noqa: PLC0415
+
+        @pl.jit
+        def warm_add(
+            x: pl.Tensor[[16, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            value: pl.Scalar[pl.FP32] = 3.0,
+        ):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                tile = pl.load(x, [0, 0], [16, 16])
+                pl.store(pl.add(tile, value), [0, 0], out)
+            return out
+
+        def forbidden_worker(*args, **kwargs):
+            pytest.fail("warmup initialized a runtime worker")
+
+        with monkeypatch.context() as warmup_guard:
+            warmup_guard.setattr(ChipWorker, "__init__", forbidden_worker)
+            warmup_guard.setattr(Worker, "__init__", forbidden_worker)
+            prepared = warm_add.warmup(config=test_config)
+            assert prepared._chip_callable is not None
+
+        def forbidden_compile(*args, **kwargs):
+            pytest.fail("execution recompiled a binary after warmup")
+
+        monkeypatch.setattr(KernelCompiler, "compile_incore", forbidden_compile)
+        monkeypatch.setattr(KernelCompiler, "compile_orchestration", forbidden_compile)
+        x = torch.full((16, 16), 2.0)
+        out = torch.zeros_like(x)
+        prepared(x, out, 3.0, config=test_config)
+        torch.testing.assert_close(out, torch.full_like(out, 5.0))
+
     def test_inplace_add(self, test_config):
         """@pl.jit: first call compiles and executes correctly on device."""
         add_kernel._cache.clear()

@@ -96,6 +96,57 @@ slice_kernel.compile(config=RunConfig(dump_passes=True, save_kernels_dir="debug_
 assert slice_kernel.compile() is cached
 ```
 
+### Prepare binaries without executing
+
+`kernel.warmup()` uses the same specialization, configuration, and in-process
+object cache as `kernel.compile()`, and also prepares every kernel and
+orchestration binary before returning. It initializes no NPU and creates no
+runtime worker. The build host still needs the target compiler, SDK, and runtime
+Python/native dependencies.
+
+```python
+import pypto.language as pl
+from pypto.runtime import RunConfig
+
+@pl.jit
+def add_three(
+    x: pl.Tensor[[16, 16], pl.FP32],
+    out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        tile = pl.load(x, [0, 0], [16, 16])
+        pl.store(pl.add(tile, 3.0), [0, 0], out)
+    return out
+
+config = RunConfig(platform="a2a3")
+prepared = add_three.warmup(config=config)  # No sample tensor allocation.
+# Later, on a host with an available NPU:
+# prepared(x, out, config=config)
+```
+
+You can supply sample tensors as with `compile()`; warmup reads their metadata,
+not their contents. With complete tensor annotations, omit the tensors and use
+scalar defaults or keyword values. `pl.RUNTIME` keeps a scalar unspecialized in
+annotation-driven mode, and dynamic extents retain the existing compile rules.
+When calling the returned compiled object, supply its full parameter list,
+including scalar arguments; JIT defaults are resolved during compilation.
+Execution-only settings such as `codegen_only` do not suppress binary preparation.
+
+The result is the same compiled object selected by `compile()`, with live IR
+retained for fresh compilation. Warmup prepares every chip-level child of a
+`DistributedCompiledProgram` and every orchestration sub-build of a
+multi-orchestration `CompiledProgram`. It does not call the distributed object's
+`prepare()`: that method creates a live worker for execution. Compilation errors
+propagate to the caller; a failed binary build can be retried by calling warmup
+again. Diagnostic/output requests still compile afresh as described above.
+
+This initial warmup API does not enable automatic persistent lookup or promise
+shared-cache publication. Ordinary objects retain their private build directories
+and existing binary-cache behavior. An internally attached artifact uses the
+[artifact runtime protocol](../09-artifact-store.md), including complete READY
+promotion or read-only loading; automatic attachment, public cache policy, and
+CLI warmup remain follow-up work.
+
 ## Functions
 
 ```python

@@ -79,6 +79,50 @@ slice_kernel.compile(config=RunConfig(dump_passes=True, save_kernels_dir="debug_
 assert slice_kernel.compile() is cached
 ```
 
+### 预备二进制而不执行
+
+`kernel.warmup()` 与 `kernel.compile()` 使用相同的特化、配置和进程内对象缓存，
+并在返回前完成所有 kernel 与 orchestration 二进制的准备。它不会初始化 NPU，
+也不会创建运行时 worker。构建主机仍需安装目标编译器、SDK，以及运行时的 Python
+和原生依赖。
+
+```python
+import pypto.language as pl
+from pypto.runtime import RunConfig
+
+@pl.jit
+def add_three(
+    x: pl.Tensor[[16, 16], pl.FP32],
+    out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        tile = pl.load(x, [0, 0], [16, 16])
+        pl.store(pl.add(tile, 3.0), [0, 0], out)
+    return out
+
+config = RunConfig(platform="a2a3")
+prepared = add_three.warmup(config=config)  # No sample tensor allocation.
+# Later, on a host with an available NPU:
+# prepared(x, out, config=config)
+```
+
+与 `compile()` 一样，可以提供样本张量；预热只读取元数据，不读取张量内容。
+张量注解完整时可省略张量实参，通过标量默认值或关键字值完成特化。
+在注解驱动模式下，`pl.RUNTIME` 保留未特化的标量，动态维度沿用现有编译规则。
+调用返回的编译对象时，需提供包含标量实参在内的完整参数列表；JIT 默认值在编译时解析。
+`codegen_only` 等仅影响执行的设置不会禁止二进制准备。
+
+返回值是 `compile()` 选中的同一个编译对象，新编译对象仍保留 IR。
+预热覆盖 `DistributedCompiledProgram` 的所有芯片级子构建，以及多 orchestration
+`CompiledProgram` 的每个 orchestration 子构建。它不会调用分布式对象的
+`prepare()`，后者用于创建执行所需的活动 worker。编译错误直接传递给调用方；
+二进制构建失败后，可以再次调用 warmup 重试。诊断和显式输出请求仍按上文规则重新编译。
+
+本阶段的 warmup API 不会启用自动持久缓存查找，也不保证发布到共享缓存。
+普通对象保留私有构建目录及现有二进制缓存行为。通过内部接口附加的产物遵循
+[产物运行时协议](../09-artifact-store.md)，可完成 READY 阶段发布或只读加载；
+自动附加、公共缓存配置和 CLI 预热留待后续实现。
+
 ## 函数
 
 ```python

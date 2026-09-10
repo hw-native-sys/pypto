@@ -2674,6 +2674,57 @@ class JITFunction:
         compiled, _ordered_args, _run_config = self._resolve_compiled(args, kwargs, allow_signature_mode=True)
         return compiled
 
+    def warmup(self, *args: Any, **kwargs: Any) -> Any:
+        """Compile and prepare all device binaries without executing the kernel.
+
+        Uses the same arguments, configuration, specialization, and in-process
+        cache as :meth:`compile`. Fully annotated tensors need no sample
+        allocation; scalar defaults, keyword values, and ``pl.RUNTIME`` follow
+        the same rules as annotation-driven compilation.
+
+        Unlike :meth:`compile`, this also assembles the kernel and orchestration
+        binaries for every chip-level build before returning. It creates no
+        runtime worker, initializes no NPU, and executes no kernel. The build
+        host still needs the target compiler, SDK, and runtime dependencies.
+        This method does not enable automatic persistent caching.
+
+        Args:
+            *args: Optional sample arguments accepted by :meth:`compile`.
+                Tensor contents are not read.
+            **kwargs: Kernel arguments and an optional ``config=RunConfig(...)``.
+                Omit tensor arguments to use the complete tensor annotations.
+
+        Returns:
+            The same ``CompiledProgram`` or ``DistributedCompiledProgram``
+            selected by :meth:`compile`, with all device binaries prepared.
+            Execution remains a separate operation on the returned object.
+
+        Raises:
+            TypeError: The compiled result does not support device-free warmup.
+            RuntimeError: A required binary cannot be prepared. Compiler and
+                configuration errors propagate; a later warmup can retry.
+        """
+        from pypto.ir.compiled_program import CompiledProgram  # noqa: PLC0415
+        from pypto.ir.distributed_compiled_program import DistributedCompiledProgram  # noqa: PLC0415
+
+        compiled = self.compile(*args, **kwargs)
+        if isinstance(compiled, DistributedCompiledProgram):
+            from pypto.runtime.distributed_runner import _assemble_chip_callables  # noqa: PLC0415
+
+            _assemble_chip_callables(compiled)
+        elif isinstance(compiled, CompiledProgram):
+            if compiled.orchestration_names:
+                for name in compiled.orchestration_names:
+                    compiled[name].load()
+            else:
+                compiled.load()
+        else:
+            raise TypeError(
+                f"@pl.jit function '{self.__name__}': device-free warmup is not supported "
+                f"for compiled result {type(compiled).__name__}"
+            )
+        return compiled
+
     @capture_namespaces()
     def specialize(self, *args: Any, **kwargs: Any) -> _ir.Program:
         """Specialize this JIT function and return its **pre-pass** IR.
