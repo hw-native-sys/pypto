@@ -151,6 +151,20 @@ def pytest_addoption(parser):
         ),
     )
     parser.addoption(
+        "--device-group-size",
+        action="store",
+        default=0,
+        type=int,
+        help=(
+            "Split --device into groups of this many cards and give each xdist "
+            "worker one group, so several groups run at once. Only useful with "
+            "-n: the group is the unit the distributed device lock serializes, "
+            "so N groups give N independent lanes. 0 (default) hands every "
+            "worker the whole --device list, which is what a single-group run "
+            "and the multi-card tests outside tests/st/distributed expect."
+        ),
+    )
+    parser.addoption(
         "--strategy",
         action="store",
         default="Default",
@@ -586,13 +600,23 @@ def test_config(request) -> RunConfig:
 
 @pytest.fixture(scope="session")
 def device_ids(request) -> list[int]:
-    """Session-scoped fixture returning the full ``--device`` list.
+    """Session-scoped fixture returning the cards this worker may use.
 
     Distributed tests need access to all allocated device ids (not just the
     first one stored in ``RunConfig.device_id``) so they can pick a slice
     that matches the CI runner's dynamic allocation rather than hardcoding.
+
+    With ``--device-group-size`` that is this xdist worker's group rather than
+    the whole ``--device`` list, so several groups drive their own cards at once
+    (see ``harness.cards``). Without it -- the default, and every non-xdist run
+    -- it is the whole list, exactly as before.
     """
-    return _parse_device_option(request.config.getoption("--device"))
+    from harness.cards import group_for_worker  # noqa: PLC0415
+
+    return group_for_worker(
+        _parse_device_option(request.config.getoption("--device")),
+        request.config.getoption("--device-group-size"),
+    )
 
 
 def _resolve_item_platform(node: pytest.Item | pytest.FixtureRequest, config: pytest.Config) -> str:
