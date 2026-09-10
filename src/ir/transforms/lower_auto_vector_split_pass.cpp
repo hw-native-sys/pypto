@@ -624,38 +624,39 @@ void ValidateTransposeSplitHazard(const std::vector<StmtPtr>& stmts, int split_d
   }
 }
 
-// Reject a region that MIXES explicit half-width boundary ops (tile.aiv_shard /
-// tile.aic_gather) with a plain full-width VECTOR-affine op the implicit
-// affinity-gated path would otherwise halve (user-facing limitation). The
-// explicit boundary keeps the whole region in half-width form and the
-// passthrough path splices the body UNCHANGED, so a full-width vector op would be
-// left un-localized and BOTH AIV lanes would compute the full tile (a silent
-// miscompile). A purely-explicit region — every vector op derived from the
-// aiv_shard result — passes through unchanged.
+std::string JoinDiagnosticNames(const std::vector<std::string>& names) {
+  std::string joined;
+  for (const auto& name : names) {
+    if (!joined.empty()) joined += ", ";
+    joined += name;
+  }
+  return joined;
+}
+
+// Check both explicit-boundary and implicitly lowered bodies. Report a lost
+// loop-entry fact separately from an unlocalized vector op: the former needs a
+// consistent yield, while the latter needs per-lane operand/address dataflow.
 void ValidateSplitBody(const std::vector<StmtPtr>& stmts, int split_dim, const Span& region_span,
                        const std::unordered_map<const Var*, TileInfo>& known_tiles,
                        const std::unordered_map<const Var*, VarPtr>& replacements) {
   auto scan = split_axis::AnalyzeSplitBody(stmts, split_dim, known_tiles, replacements);
+  CHECK_SPAN(scan.carry_mismatches.empty(), region_span)
+      << "LowerAutoVectorSplit: inconsistent loop-carried value(s) ["
+      << JoinDiagnosticNames(scan.carry_mismatches)
+      << "]. The loop's initial value is lane-local, but a yielded backedge value (or tuple element) "
+         "is not. The next iteration would lose a shard fact required by the loop body. Keep each "
+         "corresponding yield lane-local, including each carried tuple element that is lane-local "
+         "at entry.";
   if (scan.full_width_vec_ops.empty()) return;
 
-  std::string ops;
-  for (size_t i = 0; i < scan.full_width_vec_ops.size(); ++i) {
-    if (i != 0) ops += ", ";
-    ops += scan.full_width_vec_ops[i];
-  }
   CHECK_SPAN(false, region_span)
-      << "LowerAutoVectorSplit: a pl.split_aiv region mixes explicit "
-         "tile.aiv_shard/tile.aic_gather boundary ops with plain full-width vector op(s) ["
-      << ops
-      << "] that operate outside the per-lane half-width dataflow. The explicit boundary keeps the "
-         "region in half-width form, so these full-width ops would be left un-localized and both AIV "
-         "lanes would compute the full tile. Fix it one of three ways: (1) derive the op from the "
-         "tile.aiv_shard result; (2) localize it yourself with the region's lane index, e.g. load at "
-         "'base + aiv_id * HALF' at the half extent — an op whose READ address references aiv_id is "
-         "per-lane by construction and is accepted. The lane reference must land in that read "
-         "address (the offset selecting which window the op reads), not in a shape, a valid_shape, "
-         "or a destination slot; or (3) remove the explicit tile.aiv_shard/tile.aic_gather and let "
-         "the implicit affinity-gated path halve the region.";
+      << "LowerAutoVectorSplit: an AIV split body contains full-width vector op(s) ["
+      << JoinDiagnosticNames(scan.full_width_vec_ops)
+      << "] outside the per-lane half-width dataflow. Leaving these ops un-localized would make both "
+         "AIV lanes compute the full tile. Derive the op from a lane-local tile (for example, a "
+         "tile.aiv_shard result), or localize its read address with the lane index, e.g. load at "
+         "'base + aiv_id * HALF' at the half extent. The lane reference must select the window read, "
+         "not just appear in a shape, a valid_shape, or a destination slot.";
 }
 
 // Top-level walk for the explicit ``SplitAivScopeStmt`` path. Statements OUTSIDE

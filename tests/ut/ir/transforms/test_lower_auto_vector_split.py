@@ -3786,7 +3786,7 @@ def test_mixed_explicit_implicit_region_rejected():
         [(a_left, _IN), (b_right, _IN), (data, _IN), (out_0, _OUT)],
         [out_0.type],
     )
-    with pytest.raises(ValueError, match="mixes explicit"):
+    with pytest.raises(ValueError, match="full-width vector op"):
         _lower(program)
 
 
@@ -3993,7 +3993,7 @@ def test_mixed_explicit_implicit_region_in_while_rejected():
         [(a_left, _IN), (b_right, _IN), (data, _IN), (out_0, _OUT)],
         [out_0.type],
     )
-    with pytest.raises(ValueError, match="mixes explicit"):
+    with pytest.raises(ValueError, match="full-width vector op"):
         _lower(program)
 
 
@@ -4367,7 +4367,7 @@ def test_region_rejects_gather_row_localized_only_on_dst():
     lanes fetch the SAME GM row — full-width work replicated — so it must still be
     reported. This is what pins ``AddressArgs`` to src_offset alone. NEGATIVE
     test: no ``After`` IR."""
-    with pytest.raises(ValueError, match=r"mixes explicit.*tile\.gather_row"):
+    with pytest.raises(ValueError, match=r"full-width vector op.*tile\.gather_row"):
         _lower(_admission_program(ir.Span.unknown(), _gather_row_dst_only_localized_body, wrap=True))
 
 
@@ -4376,7 +4376,7 @@ def test_region_rejects_lane_reference_outside_address_args():
     tile.load at offset [0, 0] that mentions aiv_id only in its valid_shape has
     BOTH lanes reading the same base rows, so it must still be reported —
     otherwise its consumers would be trusted as half-width. NEGATIVE test."""
-    with pytest.raises(ValueError, match=r"mixes explicit.*tile\.load"):
+    with pytest.raises(ValueError, match=r"full-width vector op.*tile\.load"):
         _lower(_admission_program(ir.Span.unknown(), _lane_ref_in_non_address_arg_body, wrap=True))
 
 
@@ -4386,7 +4386,7 @@ def test_region_rejects_consumer_of_full_width_generator():
     shard is still reported. Without this, ``z = tile.full([128,128]);
     y = tile.add(z, z)`` would be silently accepted and BOTH AIV lanes would
     compute (and store) the full tile. NEGATIVE test: no ``After`` IR."""
-    with pytest.raises(ValueError, match=r"mixes explicit.*tile\.add"):
+    with pytest.raises(ValueError, match=r"full-width vector op.*tile\.add"):
         _lower(_admission_program(ir.Span.unknown(), _full_width_generator_body, wrap=True))
 
 
@@ -4397,7 +4397,7 @@ def test_region_rejects_lane_reference_on_non_addressing_op():
     full-width tile into the half-width dataflow. NEGATIVE test: no ``After``
     IR. (A full-width load with NO lane reference is covered by
     test_mixed_explicit_implicit_region_rejected above.)"""
-    with pytest.raises(ValueError, match=r"mixes explicit.*tile\.set_validshape"):
+    with pytest.raises(ValueError, match=r"full-width vector op.*tile\.set_validshape"):
         _lower(_admission_program(ir.Span.unknown(), _laundering_body, wrap=True))
 
 
@@ -5196,6 +5196,7 @@ def test_manual_singleton_function_call_does_not_use_operator_effects(callee_nam
 
     # Isolate admission of a GlobalVar call; the external callee is deliberately
     # absent, so this fixture is not a self-contained printer/parser program.
+    # If callee resolution is added, replace it with a real Inline callee.
     with passes.PassContext([]):
         lowered = passes.lower_auto_vector_split()(_admission_program(span, body, wrap=True))
     ir.assert_structural_equal(
@@ -5294,8 +5295,20 @@ def test_manual_loop_checks_shard_carry_uses(loop_kind, initial_half, consume_ex
         return result
 
     if initial_half or consume_exit:
-        with pytest.raises(ValueError, match="full-width|loop-carried"):
+        with pytest.raises(ValueError, match="full-width|loop-carried") as exc:
             _lower(_admission_program(span, body, wrap=True))
+        message = str(exc.value)
+        if initial_half:
+            assert "loop-carried value(s) [carry]" in message
+            assert "backedge" in message
+            assert "corresponding yield lane-local" in message
+            assert "full-width vector op(s)" not in message
+            assert "read address" not in message
+        else:
+            assert "full-width vector op(s) [tile.add]" in message
+            assert "read address" in message
+            assert "loop-carried" not in message
+            assert "mixes explicit" not in message
     else:
         ir.assert_structural_equal(
             _lower(_admission_program(span, body, wrap=True)),

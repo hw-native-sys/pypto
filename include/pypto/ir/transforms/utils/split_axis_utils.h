@@ -260,7 +260,8 @@ struct TileInfo {
 struct SplitBodyAnalysis {
   std::unordered_set<const Var*> half_tiles;
   std::unordered_set<const Var*> lane_scalars;
-  std::vector<std::string> full_width_vec_ops;
+  std::vector<std::string> full_width_vec_ops;  ///< Operator names without proven per-lane dataflow.
+  std::vector<std::string> carry_mismatches;    ///< Carry names whose backedge loses an entry shard fact.
 };
 
 SplitBodyAnalysis AnalyzeSplitBody(const std::vector<StmtPtr>& stmts, int split_dim,

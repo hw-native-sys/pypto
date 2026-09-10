@@ -3030,7 +3030,7 @@ void CopySplitFact(const VarPtr& target, const ExprPtr& value, SplitBodyAnalysis
 // must preserve any entry fact used to admit the body. A neutral entry may gain
 // a lane-local value, but the carry and exit stay neutral for zero iterations.
 void MergeSplitFacts(const VarPtr& target, const ExprPtr& lhs, const ExprPtr& rhs, SplitBodyAnalysis& scan,
-                     TupleHalfFacts& tuples, bool loop_carry = false) {
+                     TupleHalfFacts& tuples, const VarPtr& loop_carry = nullptr) {
   bool mismatch = false;
   if (auto tuple = As<TupleType>(target->GetType())) {
     auto left = TupleSplitFacts(lhs, scan, tuples);
@@ -3051,7 +3051,7 @@ void MergeSplitFacts(const VarPtr& target, const ExprPtr& lhs, const ExprPtr& rh
     if (a && b) scan.half_tiles.insert(target.get());
   }
   if (loop_carry && mismatch) {
-    scan.full_width_vec_ops.push_back("inconsistent loop-carried value '" + target->name_hint_ + "'");
+    scan.carry_mismatches.push_back(loop_carry->name_hint_);
   }
 }
 
@@ -3194,7 +3194,7 @@ void ScanSplitBody(const std::vector<StmtPtr>& stmts, int split_dim, SplitBodyAn
              i < for_stmt->return_vars_.size() && i < for_stmt->iter_args_.size() && i < yield->value_.size();
              ++i) {
           MergeSplitFacts(for_stmt->return_vars_[i], for_stmt->iter_args_[i]->initValue_, yield->value_[i],
-                          scan, tuples, true);
+                          scan, tuples, for_stmt->iter_args_[i]);
         }
       }
     } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
@@ -3219,7 +3219,7 @@ void ScanSplitBody(const std::vector<StmtPtr>& stmts, int split_dim, SplitBodyAn
                            i < yield->value_.size();
              ++i) {
           MergeSplitFacts(while_stmt->return_vars_[i], while_stmt->iter_args_[i]->initValue_,
-                          yield->value_[i], scan, tuples, true);
+                          yield->value_[i], scan, tuples, while_stmt->iter_args_[i]);
         }
       }
     } else if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
