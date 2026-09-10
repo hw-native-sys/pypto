@@ -290,6 +290,7 @@ nav:
           - en/dev/ir/03-structural_comparison.md
           - en/dev/ir/04-serialization.md
           - en/dev/ir/05-operators.md
+          - en/dev/ir/05-tensor-tile-ops.md
           - en/dev/ir/06-builder.md
           - en/dev/ir/07-parser.md
           - en/dev/ir/08-param-directions.md

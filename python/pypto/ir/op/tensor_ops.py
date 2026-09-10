@@ -2189,6 +2189,12 @@ def gather(  # noqa: PLR0913
         tiles with 32-byte-aligned rows (or a single row); strided windows are
         materialized into packed tiles first (TEXTRACT for floating point,
         exact integer addition of zero for INT16/INT32).
+        GM source/index operands also accept local distributed windows. Tile
+        indices must be in Vec; explicitly non-Vec indices are rejected.
+        Physical index columns must be positive static multiples of 16 for
+        FP16/INT16 sources, or 8 for FP32/INT32 (32-byte-aligned index/output
+        rows, even for one row). Pad the index tensor and use ``set_validshape``
+        for narrower valid regions; valid row/column counts need not be aligned.
 
     Axis form (``dim`` + ``index``) → ``tensor.gather``, for example ``dim=1``::
 

@@ -1181,5 +1181,63 @@ def test_flat_gather_partial(case_run):
     case_run.assert_passed()
 
 
+def _flat_gather_narrow_case(valid_shape, dtype, computed_index):
+    valid_rows, valid_cols = valid_shape
+    # Both index and output physical rows satisfy the flat gather contract.
+    alignment = 16 if dtype in (torch.float16, torch.int16) else 8
+    shape = (2, (valid_cols + alignment - 1) // alignment * alignment)
+    rows, cols = shape
+
+    @pl.jit
+    def narrow_gather(src: pl.Tensor, idx: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            if computed_index:
+                indices = pl.add(idx, 1)
+            else:
+                indices = idx
+            valid_indices = pl.set_validshape(indices, valid_rows, valid_cols)
+            out = pl.assemble(out, pl.gather(src, index=valid_indices), [0, 0])
+        return out
+
+    src = torch.arange(256, dtype=torch.int32).to(dtype)
+    idx = torch.arange(rows * cols, dtype=torch.int32).reshape(shape) * 3
+    idx[0, 0] = 254
+    # Invalid lanes must neither read these out-of-bounds offsets nor overwrite output padding.
+    idx[valid_rows:, :] = -100000
+    idx[:, valid_cols:] = -100000
+
+    def golden(tensors):
+        expected = torch.full_like(tensors["out"], -123)
+        indices = tensors["idx"][:valid_rows, :valid_cols].long() + int(computed_index)
+        expected[:valid_rows, :valid_cols] = torch.take(tensors["src"], indices)
+        return expected
+
+    return st.case(
+        narrow_gather,
+        src,
+        idx,
+        torch.full(shape, -123, dtype=dtype),
+        name=f"flat_gather_narrow_{valid_rows}x{valid_cols}_{str(dtype).removeprefix('torch.')}_computed{computed_index}",
+        golden=golden,
+        rtol=0,
+        atol=0,
+    )
+
+
+@pytest.mark.platforms(
+    "a2a3", "a2a3sim", reason="Flat MGATHER accepts unaligned valid regions in aligned tiles."
+)
+@st.cases(
+    *(
+        _flat_gather_narrow_case(valid_shape, dtype, computed_index)
+        for valid_shape in ((1, 8), (2, 5), (2, 17), (1, 3))
+        for dtype in (torch.float16, torch.float32, torch.int16, torch.int32)
+        for computed_index in (False, True)
+    )
+)
+def test_flat_gather_narrow(case_run):
+    case_run.assert_passed()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

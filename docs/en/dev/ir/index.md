@@ -14,6 +14,7 @@ the page covering what you are changing.
 | [Structural Comparison](03-structural_comparison.md) | Comparing IR nodes by structure rather than pointer identity |
 | [Serialization](04-serialization.md) | MessagePack-based `.pto` serialization |
 | [Operator System](05-operators.md) | Type-safe operator definitions with automatic type deduction |
+| [Tensor and Tile Operators](05-tensor-tile-ops.md) | Data-operator APIs, gather forms, valid regions, and tile layouts |
 | [IR Builder](06-builder.md) | Constructing IR incrementally — context managers in Python, Begin/End in C++ |
 | [IR Parser](07-parser.md) | Converting Python DSL to IR via `@pl.function` / `@pl.program`, and the SSA properties it enforces |
 | [Parameter Directions](08-param-directions.md) | How `In`/`Out`/`InOut` is inferred — the registry declaration every stage reads, and the four passes that build on it |

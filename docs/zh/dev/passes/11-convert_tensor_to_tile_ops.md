@@ -433,11 +433,17 @@ flat_idx[k, c] = index.flat[k] * d + c          # d = 特征宽度（= src 列�
 
 | 转换时的源 | 下沉方式 |
 | ---------- | -------- |
-| GM `TensorType` | 源保留在 GM，仅在必要时加载索引；生成 `tile.mgather(..., coalesce="elem")`，结果位于 Vec |
+| GM `TensorType` / 本地 `DistributedTensorType` 窗口 | 源保留在 GM，仅在必要时加载索引；生成 `tile.mgather(..., coalesce="elem")`，结果位于 Vec |
 | 片上 `TileType` | 紧凑物化逻辑源；分配索引同形状的 INT32 scratch；生成 `tile.gather` |
 
 扁平 gather 自行加载操作数：通用桥接逻辑不能把整个 GM 源加载到片上。
-已在 Vec 的运行时计算索引直接复用。输出 shape 与 valid shape 跟随二维
+GM 索引也接受本地分布式窗口。已在 Vec 的运行时计算索引直接复用；显式位于
+其他内存空间的索引会被拒绝，并提示先搬移到 Vec。前端要求物理索引列数为正的
+编译期常量：FP16/INT16 源要求为 16 的倍数，FP32/INT32 要求为 8 的倍数。
+索引与输出的物理行均须按 32 字节对齐，包括单行 tile。未对齐的物理行会被提前
+拒绝，因为 PTOAS 也会拒绝未对齐的索引与结果 tile，仅补齐 MGATHER 不足以解决。
+调用方可补齐物理索引 tensor，再设置未对齐的 `valid_shape`；有效区域没有对齐要求。
+输出 shape 与 valid shape 跟随二维
 INT32 索引；`tile.gather` 路径显式恢复 scratch 和结果的 valid shape。
 源 dtype 支持 FP16/FP32/INT16/INT32。GM 源必须是连续 ND；片上源必须是
 静态二维行主序 Vec，每行按 32 字节对齐（单行除外）。带 stride 的视图先

@@ -121,24 +121,75 @@ class TestTensorGatherFlat:
         assert isinstance(call.type, ir.TensorType)
         assert call.type.dtype == dtype
 
-    @pytest.mark.parametrize("source_type", [ir.TensorType, ir.TileType])
-    @pytest.mark.parametrize("index_type", [ir.TensorType, ir.TileType])
+    @pytest.mark.parametrize("source_type", [ir.TensorType, ir.TileType, ir.DistributedTensorType])
+    @pytest.mark.parametrize("index_type", [ir.TensorType, ir.TileType, ir.DistributedTensorType])
     def test_flat_index_form(self, source_type, index_type):
         span = ir.Span.unknown()
-        src = ir.Var("src", source_type([4, 32], DataType.FP32), span)
-        idx = ir.Var("idx", index_type([2, 16], DataType.INT32), span)
+        src_shape = [ir.ConstInt(n, DataType.INDEX, span) for n in (4, 32)]
+        idx_shape = [ir.ConstInt(n, DataType.INDEX, span) for n in (2, 16)]
+        src = ir.Var("src", source_type(src_shape, DataType.FP32), span)
+        idx = ir.Var("idx", index_type(idx_shape, DataType.INT32), span)
         call = tensor.gather(src, index=idx)
         assert call.op.name == ir.get_op("tensor.gather").name
         assert "dim" not in call.kwargs
         assert isinstance(call.type, ir.TensorType)
         ir.assert_structural_equal(call.type, ir.TensorType([2, 16], DataType.FP32))
         assert call.type.dtype == DataType.FP32
+        ir.assert_structural_equal(tensor.gather(src, idx), call)
+
+    @pytest.mark.parametrize("memory", [ir.MemorySpace.Mat, ir.MemorySpace.Left, ir.MemorySpace.Right])
+    @pytest.mark.parametrize("source_type", [ir.TensorType, ir.TileType])
+    def test_flat_rejects_non_vec_index(self, memory, source_type):
+        span = ir.Span.unknown()
+        src = ir.Var("src", source_type([4, 32], DataType.FP32), span)
+        idx = ir.Var("idx", ir.TileType([1, 16], DataType.INT32, memory_space=memory), span)
+        with pytest.raises(ValueError, match="indices in Vec"):
+            tensor.gather(src, index=idx)
+
+    @pytest.mark.parametrize("wrapper", [tensor.gather, pl.gather])
+    @pytest.mark.parametrize("options", [{"offset": 4}, {"count_dtype": DataType.INT32}])
+    def test_mask_rejects_compare_options(self, wrapper, options):
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TensorType([1, 32], DataType.FP32), span)
+        if wrapper is pl.gather:
+            src = pl.Tensor(expr=src)
+        with pytest.raises(ValueError, match="only valid for the compare form"):
+            wrapper(src, mask_pattern=1, **options)
 
     def test_flat_positional_indices(self):
         span = ir.Span.unknown()
         src = ir.Var("src", ir.TensorType([1024], DataType.FP16), span)
         idx = ir.Var("idx", ir.TensorType([1, 32], DataType.INT32), span)
         ir.assert_structural_equal(tensor.gather(src, idx), tensor.gather(src, index=idx))
+
+    @pytest.mark.parametrize("wrapper", [tensor.gather, pl.gather])
+    @pytest.mark.parametrize("source_type", [ir.TensorType, ir.TileType])
+    @pytest.mark.parametrize(
+        ("dtype", "cols"),
+        [
+            (dtype, cols)
+            for dtype in (DataType.FP16, DataType.FP32, DataType.INT16, DataType.INT32)
+            for cols in (5, 17)
+        ]
+        + [(DataType.FP16, 8), (DataType.INT16, 8)],
+    )
+    def test_flat_rejects_unaligned_physical_rows(self, wrapper, source_type, dtype, cols):
+        span = ir.Span.unknown()
+        src = ir.Var("src", source_type([4, 32], dtype), span)
+        idx = ir.Var("idx", ir.TensorType([1, cols], DataType.INT32), span)
+        if wrapper is pl.gather:
+            src = (pl.Tile if source_type is ir.TileType else pl.Tensor)(expr=src)
+            idx = pl.Tensor(expr=idx)
+        with pytest.raises(ValueError, match="32-byte aligned physical index/output rows"):
+            wrapper(src, index=idx)
+
+    def test_flat_rejects_dynamic_index_columns(self):
+        span = ir.Span.unknown()
+        cols = ir.Var("cols", ir.ScalarType(DataType.INDEX), span)
+        src = ir.Var("src", ir.TensorType([1024], DataType.FP32), span)
+        idx = ir.Var("idx", ir.TensorType([ir.ConstInt(1, DataType.INDEX, span), cols], DataType.INT32), span)
+        with pytest.raises(ValueError, match="positive static index column count"):
+            tensor.gather(src, index=idx)
 
     @pytest.mark.parametrize("dtype", [DataType.INT16, DataType.FP32])
     def test_flat_requires_int32_indices(self, dtype):
@@ -167,9 +218,10 @@ class TestTensorGatherFlat:
         with pytest.raises(ValueError, match="contiguous ND"):
             tensor.gather(src, index=idx)
 
-    def test_flat_preserves_index_valid_shape(self):
+    @pytest.mark.parametrize("dtype", [DataType.FP16, DataType.FP32, DataType.INT16, DataType.INT32])
+    def test_flat_preserves_index_valid_shape(self, dtype):
         span = ir.Span.unknown()
-        src = ir.Var("src", ir.TensorType([1024], DataType.FP32), span)
+        src = ir.Var("src", ir.TensorType([1024], dtype), span)
         idx = ir.Var(
             "idx",
             ir.TensorType(
@@ -181,7 +233,7 @@ class TestTensorGatherFlat:
         ir.assert_structural_equal(
             call.type,
             ir.TensorType(
-                [2, 32], DataType.FP32, None, ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[1, 13])
+                [2, 32], dtype, None, ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[1, 13])
             ),
         )
 

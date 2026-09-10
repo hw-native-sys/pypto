@@ -5382,6 +5382,50 @@ class TestConvertSortOps:
 
 
 class TestConvertFlatGatherOp:
+    @pytest.mark.parametrize("source_type", [ir.TensorType, ir.DistributedTensorType])
+    @pytest.mark.parametrize("index_type", [ir.TensorType, ir.DistributedTensorType])
+    def test_tensor_like_operands_use_gm_lowering(self, source_type, index_type):
+        span = ir.Span.unknown()
+        extra_specs = [
+            ("src", source_type([ir.ConstInt(65536, DataType.INDEX, span)], DataType.FP32)),
+            ("idx", index_type([ir.ConstInt(n, DataType.INDEX, span) for n in (1, 16)], DataType.INT32)),
+        ]
+        before = _make_before(
+            in_specs=[],
+            extra_specs=extra_specs,
+            out_shape=[1, 16],
+            out_dtype=DataType.FP32,
+            body=lambda ib, ins, extras: ib.let("y", tensor_ops.gather(extras[0], extras[1])),
+        )
+
+        def expected_body(ib, ins, extras):
+            idx = ib.let(
+                "gather_idx",
+                tile_ops.load(extras[1], [0, 0], [1, 16], [1, 16], target_memory=MemorySpace.Vec),
+            )
+            return ib.let("y_tile", tile_ops.mgather(extras[0], idx, coalesce="elem"))
+
+        expected = _make_expected(
+            in_specs=[],
+            extra_specs=extra_specs,
+            out_shape=[1, 16],
+            out_dtype=DataType.FP32,
+            body=expected_body,
+            preload=False,
+        )
+        ir.assert_structural_equal(passes.convert_tensor_to_tile_ops()(before), expected)
+
+    def test_tensor_index_lowered_to_mat_is_rejected(self):
+        def body(ib, ins):
+            idx = ib.let("idx", tensor_ops.create_l1([1, 16], DataType.INT32))
+            return ib.let("y", tensor_ops.gather(ins[0], index=idx))
+
+        before = _make_before(
+            in_specs=[("src", [65536], DataType.FP32)], out_shape=[1, 16], out_dtype=DataType.FP32, body=body
+        )
+        with pytest.raises(ValueError, match="indices in Vec"):
+            passes.convert_tensor_to_tile_ops()(before)
+
     def test_gm_source_is_not_loaded(self):
         specs = [("src", [65536], DataType.FP32), ("idx", [1, 16], DataType.INT32)]
         before = _make_before(

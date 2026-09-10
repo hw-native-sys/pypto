@@ -143,7 +143,7 @@ ConversionResult ConvertFlatGather(const std::vector<ExprPtr>& args, const Span&
     return var;
   };
   ExprPtr index = args[1];
-  if (auto tensor = As<TensorType>(index->GetType())) {
+  if (auto tensor = AsTensorTypeLike(index->GetType())) {
     const auto& valid = tensor->tensor_view_ && !tensor->tensor_view_->valid_shape.empty()
                             ? tensor->tensor_view_->valid_shape
                             : tensor->shape_;
@@ -155,7 +155,9 @@ ConversionResult ConvertFlatGather(const std::vector<ExprPtr>& args, const Span&
   }
   auto index_type = As<TileType>(index->GetType());
   INTERNAL_CHECK_SPAN(index_type, span) << "flat gather conversion requires a tile index after loading";
-  if (As<TensorType>(args[0]->GetType())) {
+  CHECK_SPAN(!index_type->memory_space_ || *index_type->memory_space_ == MemorySpace::Vec, span)
+      << "flat gather requires indices in Vec; move the index tile to Vec first";
+  if (AsTensorTypeLike(args[0]->GetType())) {
     return ConversionResult{std::move(prologue),
                             reg.Create("tile.mgather", {args[0], index}, {{"coalesce", 1}}, span)};
   }

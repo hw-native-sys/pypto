@@ -45,7 +45,7 @@ namespace ir {
 namespace {
 TypePtr DeduceFlatGatherType(const std::vector<ExprPtr>& args, const std::string& op_name) {
   auto get_tensor_type = [&](const ExprPtr& arg) -> std::shared_ptr<const TensorType> {
-    if (auto tensor = As<TensorType>(arg->GetType())) return tensor;
+    if (auto tensor = AsTensorTypeLike(arg->GetType())) return tensor;
     if (auto tile = As<TileType>(arg->GetType())) {
       TensorView view;
       view.valid_shape = tile_view_semantics::GetEffectiveTileView(*tile).valid_shape;
@@ -64,6 +64,18 @@ TypePtr DeduceFlatGatherType(const std::vector<ExprPtr>& args, const std::string
   CHECK(index->dtype_ == DataType::INT32) << op_name << " flat form requires INT32 indices";
   CHECK(index->shape_.size() == 2) << op_name << " flat form requires a 2D index, got rank "
                                    << index->shape_.size();
+  auto cols = As<ConstInt>(index->shape_[1]);
+  CHECK_SPAN(cols && cols->value_ > 0, args[1]->span_)
+      << op_name << " flat form requires a positive static index column count";
+  const int64_t alignment = input->dtype_.GetBit() == 16 ? 16 : 8;
+  CHECK_SPAN(cols->value_ % alignment == 0, args[1]->span_)
+      << op_name << " flat form requires 32-byte aligned physical index/output rows: index columns must "
+      << "be a multiple of " << alignment << " for " << input->dtype_.ToString()
+      << "; pad the index tensor and use set_validshape for a narrower valid region";
+  if (auto tile = As<TileType>(args[1]->GetType())) {
+    CHECK_SPAN(!tile->memory_space_ || *tile->memory_space_ == MemorySpace::Vec, args[1]->span_)
+        << op_name << " flat form requires indices in Vec; move the index tile to Vec first";
+  }
   if (input->tensor_view_) {
     const auto& view = *input->tensor_view_;
     CHECK(view.layout == TensorLayout::ND) << op_name << " flat form requires a contiguous ND source";

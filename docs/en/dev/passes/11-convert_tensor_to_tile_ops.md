@@ -491,11 +491,19 @@ producers have been lowered:
 
 | Source at conversion | Lowering |
 | -------------------- | -------- |
-| GM `TensorType` | Keep the source in GM; load only the indices if necessary; emit `tile.mgather(..., coalesce="elem")` into Vec |
+| GM `TensorType` / local `DistributedTensorType` window | Keep the source in GM; load only the indices if necessary; emit `tile.mgather(..., coalesce="elem")` into Vec |
 | On-chip `TileType` | Pack the logical source; allocate index-shaped INT32 scratch; emit `tile.gather` |
 
 Flat gather is self-loading: generic operand bridging must not load the whole GM
-source. Runtime-computed indices already in Vec are reused. Result shape and
+source. GM indices also accept local distributed windows. Runtime-computed indices
+already in Vec are reused; explicitly non-Vec indices are rejected with a diagnostic
+to move them to Vec first. The frontend requires positive static physical index
+columns: multiples of 16 for FP16/INT16 sources, or 8 for FP32/INT32. Both index
+and output rows must be 32-byte aligned, including single-row tiles. Unaligned
+physical rows are rejected early because PTOAS also rejects unaligned index and
+result tiles; padding only MGATHER would not suffice. Callers may pad the physical
+index tensor and set an unaligned `valid_shape`; no valid-region alignment is required.
+Result shape and
 valid shape follow the 2D INT32 indices; scratch/result valid shapes are restored
 explicitly for `tile.gather`. Source dtypes are FP16/FP32/INT16/INT32. GM sources
 must be contiguous ND. On-chip sources must be static 2D row-major Vec with

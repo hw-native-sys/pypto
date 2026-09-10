@@ -2276,6 +2276,12 @@ def gather(
         scratch. On-chip sources must be static 2D row-major Vec tiles with 32-byte-aligned
         rows (or a single row); strided windows are materialized into packed tiles first
         (TEXTRACT for floating point, exact integer addition of zero for INT16/INT32).
+        GM source/index operands also accept local distributed windows. Tile
+        indices must be in Vec; explicitly non-Vec indices are rejected.
+        Physical index columns must be positive static multiples of 16 for
+        FP16/INT16 sources, or 8 for FP32/INT32 (32-byte-aligned index/output
+        rows, even for one row). Pad the index tensor and use ``set_validshape``
+        for narrower valid regions; valid row/column counts need not be aligned.
 
     Axis form (``dim`` + ``index``) → [`pl.tile.gather`][pypto.language.tile.gather],
     for example ``dim=1``::
@@ -2340,6 +2346,8 @@ def gather(
             "compare form (kvalue=..., cmp_mode=..., out_cols=...) are mutually "
             "exclusive; do not mix kwargs from different forms"
         )
+    if (offset != 0 or count_dtype is not None) and not is_compare:
+        raise ValueError("gather() offset/count_dtype are only valid for the compare form")
     if is_mask:
         call_expr = _ir_ops.gather(input.unwrap(), mask_pattern=mask_pattern, output_dtype=output_dtype)
         return Tensor(expr=call_expr)
@@ -2373,8 +2381,6 @@ def gather(
         )
     if index is None:
         raise ValueError("gather() index form requires index")
-    if offset != 0 or count_dtype is not None:
-        raise ValueError("gather() offset/count_dtype are only valid for the compare form")
     call_expr = _ir_ops.gather(input.unwrap(), dim, index.unwrap())
     return Tensor(expr=call_expr)
 
