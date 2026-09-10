@@ -1198,6 +1198,7 @@ class Submit : public Expr {
    * Validates that, when present, ``attrs[kAttrArgDirections]`` is a
    * ``std::vector<ArgDirection>`` whose length matches ``args``, and that the
    * launch spec is well-formed (``sync_start`` implies ``core_num``).
+   * Expressions in attrs and kwargs must produce a value.
    */
   Submit(OpPtr op, std::vector<ExprPtr> args, std::vector<ExprPtr> deps,
          std::vector<std::pair<std::string, std::any>> kwargs,
@@ -1217,6 +1218,8 @@ class Submit : public Expr {
     detail::CheckValueType(type_, span_, "Submit result type");
     detail::CheckValueOperands(args_, span_, "Submit argument");
     detail::CheckValueOperands(deps_, span_, "Submit dependency");
+    detail::CheckValueAttrs(attrs_, span_, "Submit attribute");
+    detail::CheckValueAttrs(kwargs_, span_, "Submit keyword argument");
     ValidateArgDirectionsAttr();
     ValidateLaunchSpec();
     ValidatePredicate();

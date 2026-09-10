@@ -224,6 +224,40 @@ def test_submit_rejects_void_values(field: str, void_call: ir.Call, span: ir.Spa
         ir.Submit(ir.GlobalVar("kernel"), args, deps, result_type, span)
 
 
+def _submit_with_metadata(field: str, metadata: dict[str, object], span: ir.Span):
+    kwargs = metadata if field == "kwargs" else {}
+    attrs = metadata if field == "attrs" else {}
+    return ir.Submit(ir.GlobalVar("kernel"), [], [], kwargs, attrs, ir.ScalarType(DataType.TASK_ID), span)
+
+
+@pytest.mark.parametrize("field", ["attrs", "kwargs"])
+@pytest.mark.parametrize("key", ["device", "core_num", "custom_expr"])
+@pytest.mark.parametrize("explicit_span", [False, True])
+def test_submit_metadata_rejects_void_at_construction(field, key, explicit_span, void_call):
+    """Reject void metadata at Submit construction, before conversion to a Call view."""
+    span = ir.Span("submit_test.py", 2, 1) if explicit_span else ir.Span.unknown()
+    context = "Submit attribute" if field == "attrs" else "Submit keyword argument"
+    with pytest.raises(ValueError, match=f"{context} '{key}'.*VoidType") as error:
+        _submit_with_metadata(field, {key: void_call}, span)
+    assert ("submit_test.py" if explicit_span else "void_test.py") in str(error.value)
+
+
+@pytest.mark.parametrize("field", ["attrs", "kwargs"])
+def test_submit_value_metadata_round_trips(field, span):
+    """Value expressions and plain metadata remain valid on a task launch."""
+    device = ir.Var("device", ir.ScalarType(DataType.INDEX), span)
+    metadata = {
+        "device": device,
+        "core_num": ir.Add(device, ir.ConstInt(1, DataType.INDEX, span), DataType.INDEX, span),
+        "custom_expr": ir.Call(ir.Op("test.unknown"), [], span),
+        "dump_vars": [device],
+        "label": "launch",
+        "enabled": True,
+    }
+    submit = _submit_with_metadata(field, metadata, span)
+    ir.assert_structural_equal(submit, ir.deserialize(ir.serialize(submit)), enable_auto_mapping=True)
+
+
 def test_unknown_values_keep_their_existing_construction_contract(span: ir.Span):
     unknown = ir.Call(ir.Op("test.unresolved"), [], span)
     var = ir.Var("value", ir.UnknownType(), span)

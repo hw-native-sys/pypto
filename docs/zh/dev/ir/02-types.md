@@ -45,8 +45,8 @@ multi_type = ir.MultiBufferType(buffer_type, slot_count=2)
 Void call 应放在 `EvalStmt` 中，不能绑定变量、用作操作数、放入 tuple，
 也不能作为值 yield 或 return。分配大小表达式（包括 `WindowBuffer.size`）
 也必须产生一个值。
-`Call.attrs` 和 `Call.kwargs` 中的表达式值同样遵循此规则，
-通过 `ir.set_call_attrs` 附加属性时也会校验。
+`Call` 和 `Submit` 的 attrs、kwargs 中的表达式值同样遵循此规则，
+在构造时即进行校验，通过 `ir.set_call_attrs` 附加属性时也会校验。
 
 这些类型支持构造、结构比较和二进制序列化。Buffer 类型 dump 使用原生
 `pypto.ir.BufferType(...)` 构造表达式，并保留完整描述符。Buffer 算子、

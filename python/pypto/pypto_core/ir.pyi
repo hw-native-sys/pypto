@@ -1571,6 +1571,8 @@ class Submit(Expr):
     ``Scalar[TASK_ID]`` when the callee has no value return); callers unpack
     as ``out, tid = pl.submit(...)``.
 
+    Expressions in attrs and kwargs must produce a value.
+
     ``deps`` is a first-class field carrying the explicit cross-task
     dependencies passed as ``deps=[tid1, tid2, ...]``.
     """
@@ -1619,7 +1621,7 @@ class Submit(Expr):
     def attrs(self) -> Mapping[str, Any]:
         """Compiler-internal node metadata (see :attr:`Call.attrs`)."""
 
-    kwargs: Final[Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue]]
+    kwargs: Final[Mapping[str, Any]]
     """Keyword arguments (metadata)."""
 
     @overload
@@ -1648,7 +1650,7 @@ class Submit(Expr):
         op: Op,
         args: Sequence[Expr],
         deps: Sequence[Expr],
-        kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue],
+        kwargs: Mapping[str, object],
         attrs: Mapping[str, object] | Sequence[tuple[str, object]] | None,
         type: Type,
         span: Span,

@@ -48,8 +48,9 @@ nested tuple elements, across branch results and loop-carried values.
 Void calls belong in `EvalStmt`; they cannot be bound to variables, passed as
 operands, packed into tuples, yielded, or returned as values. Allocation-size
 expressions, including `WindowBuffer.size`, must also produce a value.
-Expression values in `Call.attrs` and `Call.kwargs` follow the same rule,
-including when attributes are attached with `ir.set_call_attrs`.
+Expression values in `Call` and `Submit` attrs and kwargs follow the same
+rule at construction, including when attributes are attached with
+`ir.set_call_attrs`.
 
 These types support construction, structural comparison, and binary serialization.
 Buffer type dumps use native `pypto.ir.BufferType(...)` constructors and preserve
