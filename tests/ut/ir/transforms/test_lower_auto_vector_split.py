@@ -5133,10 +5133,6 @@ def test_slice_dropping_the_tracked_split_axis_is_rejected():
     assert "drops dim 0" in str(exc_info.value)
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
-
-
 def _singleton_arithmetic_body(span, stmts, aiv_id, qk_h, data):
     load = T.load(data, [0, 0], [1, 128], target_memory=MS.Vec, span=span)
     scale = ir.Var("scale", load.type, span)
@@ -5184,6 +5180,26 @@ def test_manual_alias_and_tuple_projection_preserve_shard_facts():
     ir.assert_structural_equal(
         _lower(_admission_program(span, _alias_projection_body, wrap=True)),
         _admission_program(span, _alias_projection_body, wrap=False),
+    )
+
+
+@pytest.mark.parametrize("callee_name", ["broadcast_helper", "tile.add"])
+def test_manual_singleton_function_call_does_not_use_operator_effects(callee_name):
+    """A function name, even one colliding with an op, has no registry entry."""
+    span = ir.Span.unknown()
+
+    def body(span, stmts, aiv_id, qk_h, data):
+        call = ir.Call(ir.GlobalVar(callee_name), [qk_h], {}, _tile([1, 128], mem=MS.Vec), span)
+        result = ir.Var("called", call.type, span)
+        stmts.append(ir.AssignStmt(result, call, span))
+        return qk_h
+
+    # Isolate admission of a GlobalVar call; the external callee is deliberately
+    # absent, so this fixture is not a self-contained printer/parser program.
+    with passes.PassContext([]):
+        lowered = passes.lower_auto_vector_split()(_admission_program(span, body, wrap=True))
+    ir.assert_structural_equal(
+        _EraseSplitRegions().visit_program(lowered), _admission_program(span, body, wrap=False)
     )
 
 
@@ -5349,3 +5365,7 @@ def test_nested_none_region_owns_its_transpose_mode():
         expanded = passes.expand_mixed_kernel()(program)
     assert _split_region_count(expanded) == 0
     assert len(_placements(expanded, ir.get_op("tile.transpose").name)) == 1
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

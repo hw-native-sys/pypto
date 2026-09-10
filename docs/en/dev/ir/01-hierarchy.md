@@ -376,8 +376,9 @@ runtime = ir.RuntimeScopeStmt(manual=True, name_hint="", body=body, span=span)
     scope form and `@pl.jit.graph` converge before any later pass sees them
   - `SplitAivScopeStmt` is **non-outlined**: it is transparent to SSA and to the
     outliners (it survives inside an outlined `Function(InCore)` body), then is
-    consumed and **erased** by `LowerAutoVectorSplit` (pass 23). It never reaches
-    `ExpandMixedKernel` (pass 24) or codegen — those see only the per-op
+    lowered in place by `LowerAutoVectorSplit` (pass 23), which retains the
+    wrapper. `ExpandMixedKernel` (pass 24) consumes and **erases** it; subsequent
+    passes and codegen see only the per-op
     `aiv_shard` / `aic_gather` / `tpush` / `tpop` markers. A PTO codegen guard
     fails loudly if a `SplitAivScopeStmt` ever survives that far.
   - `SplitAivScopeStmt` is **nestable**: built via the generic

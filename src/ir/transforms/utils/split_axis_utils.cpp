@@ -2973,10 +2973,11 @@ bool IsBroadcastComputation(const CallPtr& call, int split_dim) {
   if (!result || !IsSingletonSplitAxis(*result, split_dim) || core_affinity::IsNoDuplicateCall(call)) {
     return false;
   }
-  const auto& entry = OpRegistry::GetInstance().GetEntry(call->op_->name_);
+  const auto* entry = LookupOpEntry(call->op_);
+  if (!entry) return false;
   bool has_tile = false;
   for (size_t i = 0; i < call->args_.size(); ++i) {
-    if (entry.GetArgEffect(i, call->kwargs_) != ArgEffect::Read) return false;
+    if (entry->GetArgEffect(i, call->kwargs_) != ArgEffect::Read) return false;
     if (auto tile = As<TileType>(call->args_[i]->GetType())) {
       has_tile = true;
       if (!IsBroadcastOnSplitAxis(*tile, split_dim, static_cast<int>(result->shape_.size()))) return false;

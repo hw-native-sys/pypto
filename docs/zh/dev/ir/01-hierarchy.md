@@ -336,8 +336,8 @@ runtime = ir.RuntimeScopeStmt(manual=True, name_hint="", body=body, span=span)
     与 `@pl.jit.graph` 在任何后续 Pass 看到它们之前就已汇聚
   - `SplitAivScopeStmt` **不被提取**：它对 SSA 与各 outliner 透明（保留在被
     提取出的 `Function(InCore)` 体内），随后由 `LowerAutoVectorSplit`
-    （pass 23）消费并**擦除**。它永不到达 `ExpandMixedKernel`（pass 24）或
-    codegen——下游只看到逐算子的 `aiv_shard` / `aic_gather` / `tpush` /
+    （pass 23）原地下降并保留包装。`ExpandMixedKernel`（pass 24）消费并
+    **擦除**它；后续 pass 与 codegen 只看到逐算子的 `aiv_shard` / `aic_gather` / `tpush` /
     `tpop` 标记；若有 `SplitAivScopeStmt` 残留到此，PTO codegen 守卫会显式
     报错。
   - `SplitAivScopeStmt` **可嵌套**：经由通用的 `BeginScope`/`EndScope` 构建，

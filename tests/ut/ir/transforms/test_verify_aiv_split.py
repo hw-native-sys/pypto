@@ -1684,10 +1684,6 @@ def test_dsl_up_down_and_left_right_regions_pass():
     assert _errors(Prog) == []
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
-
-
 @pytest.mark.parametrize("in_region", [False, True])
 def test_lowered_boundary_accepts_shared_parameter_memory(in_region):
     """Lowered parameter availability is independent of source memory authoring."""
@@ -1719,3 +1715,22 @@ def test_lowered_boundary_still_checks_consuming_memory():
     diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
     assert any("result is in Acc" in d.message for d in diagnostics)
     assert all(d.rule_name == "AivSplitLoweredValid" for d in diagnostics)
+
+
+@pytest.mark.parametrize("op_name", ["tile.aiv_shard", "tile.aic_gather"])
+def test_lowered_flat_boundary_requires_explicit_split(op_name):
+    """Missing split metadata must not silently turn into no-split transport."""
+    span = ir.Span.unknown()
+    source_space, result_space = (MS.Acc, MS.Vec) if op_name == "tile.aiv_shard" else (MS.Vec, MS.Mat)
+    source = ir.Var("source", _tile([32, 128], source_space), span)
+    call = ir.Call(ir.get_op(op_name), [source], {}, _tile([32, 128], result_space), span)
+    body = ir.AssignStmt(ir.Var("result", call.type, span), call, span)
+    program = _program(body, ir.FunctionType.InCore)
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.AivSplitLoweredValid)
+    diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
+    assert any("requires an explicit split" in d.message for d in diagnostics)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

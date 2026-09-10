@@ -626,8 +626,12 @@ class SplitAivStructuralVerifier : public IRVisitor {
       } else {
         // Outside every region.
         if (boundary && allow_flat_ && tile_boundary) {
-          const int split = op->GetKwarg<int>("split", 0);
-          if (split < 0 || split > 2) Err(op->span_, "invalid lowered AIV boundary split mode");
+          if (!op->HasKwarg("split")) {
+            Err(op->span_, "lowered AIV boundary requires an explicit split mode");
+          } else {
+            const int split = op->GetKwarg<int>("split", 0);
+            if (split < 0 || split > 2) Err(op->span_, "invalid lowered AIV boundary split mode");
+          }
           CheckBoundaryMemory(op);
         } else if (boundary) {
           // (c) The AIV-split boundary op escaped its region.
