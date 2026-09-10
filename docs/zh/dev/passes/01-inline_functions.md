@@ -126,16 +126,21 @@ scope 被原样保留,稍后由 `OutlineIncoreScopes` 提取为独立的 InCore 
 
 ## 丢弃返回值
 
-`EvalStmt` 调用点(`self.wrapper(x, out)`,没有 LHS)无处安放被调用者的尾部返回值。丢弃那个**值**是对的,丢弃它的**求值**则不对 —— 求值过程可能通过 `Out` / `InOut` 参数写入。因此每个被丢弃的值都要分类:
+`EvalStmt` 调用点(`self.wrapper(x, out)`,没有 LHS)无处安放被调用者的尾部返回值。丢弃那个**值**是对的,丢弃它的**求值**则不对 —— 求值过程可能通过 `Out` / `InOut` 参数写入、启动任务、阻塞等待信号,或完成硬件设置。因此每个被丢弃的值都要分类:
 
 | 被丢弃的值 | 行为 |
 | ---------- | ---- |
-| 算子注册表未正面判定为"不写入"的 `Call` —— 跨函数派发、`tile.store` 这类会写的 builtin,或任何尚无人分类的算子 | 按 return 顺序重新发出为 `EvalStmt`。若跨函数调用的被调用者同样是 Inline,不动点循环会在下一轮展开它;否则它就保持为一次普通派发,与作者在调用点直接写出来完全一致。 |
+| `Call` —— 无论被调用者是跨函数还是 builtin | 按 return 顺序重新发出为 `EvalStmt`。若跨函数调用的被调用者同样是 Inline,不动点循环会在下一轮展开它;否则它就保持为一次普通派发,与作者在调用点直接写出来完全一致。 |
 | `Submit` | 重新发出为 `EvalStmt`。任务启动本身就是有副作用的,与被调用者做什么无关。 |
-| 算子已声明"不通过任何参数写入"的 `Call`,或其它不藏有副作用的值(`Var`、常量) | 丢弃。 |
-| 本身不是 call-like、但**包裹**了有副作用内容的值 —— `self.bump(n) + 1` 这类标量算术、`MakeTuple`、`TupleGetItemExpr` | 抛出 `pypto::ValueError`。它无法变成 `EvalStmt`,而删除它会连带删除内层调用的写入。请直接返回该调用,或在调用点绑定 wrapper 的结果。 |
+| 其它不藏有调用的值 —— `Var`、常量 | 丢弃。 |
+| 本身不是 call-like、但**包裹**了调用的值 —— `self.bump(n) + 1` 这类标量算术、`MakeTuple`、`TupleGetItemExpr` | 抛出 `pypto::ValueError`。它无法变成 `EvalStmt`,而删除它会连带删除内层的调用。请直接返回该调用,或在调用点绑定 wrapper 的结果。 |
 
-注册表刻意区分"已声明不通过任何参数写入"与"尚无人分类此算子"(`OpRegistryEntry::HasDeclaredArgEffects`),而目前大多数算子仍属于后者 —— 其中包括 `tile.tpush_to_aiv`、`system.aic_initialize_pipe` 这些明显有副作用、被 `dce::IsSideEffectOp` 列为副作用算子的项。只有正面判定才允许删除,因此未分类的纯算子会被保守地保留为一条无用但无害的 `EvalStmt`。
+**为什么是"所有调用",而不只是"会写的调用"。** IR 里没有任何东西能回答"这次调用可以安全删除吗"。最接近的注册表数据 `OpRegistryEntry::WritesAnyArg` 回答的是另一个问题 —— 算子是否**通过参数**写入 —— 以它为删除依据在两个方向上都会出错:
+
+- 大多数算子根本没有分类 —— 撰写时 315 个里有 263 个,其中就包括被 `dce::IsSideEffectOp` 列为副作用算子的 `tile.tpush_to_aiv` 和 `system.aic_initialize_pipe`。`OpRegistryEntry::HasDeclaredArgEffects` 存在的意义正是让分析能区分"已声明不写"和"尚无人查看"。
+- **正面**的 `no_arg_writes()` 判定也不等于可删除。`pld.system.wait` 会阻塞直到信号槽满足阈值,`pld.system.defer_wait` 注册任务完成条件,`system.set_ffts` 把 workspace 指针交给 FFTS 单元 —— 三者都声明了 `no_arg_writes()`,却都承担同步或硬件设置语义。
+
+因此该 pass 保留所有调用。被丢弃的真·纯调用会留下一条无用的 `EvalStmt`,流水线可以无害地带着它走完。要收窄这一点,需要一个真正的"可安全删除"算子属性 —— 逐算子声明,而不是从写入行为反推。
 
 **变换前**:
 

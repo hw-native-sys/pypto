@@ -24,7 +24,6 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
-#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
@@ -190,34 +189,32 @@ class NestedReturnCounter : public IRVisitor {
   }
 };
 
-// May this Call be deleted without losing an effect?
+// Counts call-like nodes whose *evaluation* must survive even when the value
+// they produce is thrown away — which, deliberately, is every Call and every
+// Submit.
 //
-// Only a *positively classified* non-writing operator qualifies. The registry
-// keeps "declared to write through no argument" and "nobody has classified this
-// operator yet" apart on purpose (`HasDeclaredArgEffects`), and today most
-// operators sit in the second group — including plainly effectful ones such as
-// `tile.tpush_to_aiv` and `system.aic_initialize_pipe`, which the shared DCE
-// lists as side-effecting (see dead_code_elimination.cpp::IsSideEffectOp).
-// Reading an unclassified operator as read-only would silently delete those, so
-// anything short of a positive verdict counts as effectful here.
+// Nothing in the IR answers "is this call safe to delete". The nearest
+// registry data, `OpRegistryEntry::WritesAnyArg`, answers a different question:
+// whether the operator writes *through an argument*. Deleting on that basis is
+// wrong in both directions. Most operators are simply unclassified — 263 of 315
+// at the time of writing, among them `tile.tpush_to_aiv` and
+// `system.aic_initialize_pipe`, which the shared DCE lists as side-effecting
+// (dead_code_elimination.cpp::IsSideEffectOp). And a *positive*
+// `no_arg_writes()` verdict does not mean deletable either: `pld.system.wait`
+// blocks until a signal slot satisfies a threshold, `pld.system.defer_wait`
+// registers a completion condition, and `system.set_ffts` hands the FFTS unit
+// its workspace pointer — all three declare `no_arg_writes()` while carrying
+// synchronization or hardware-setup semantics that deleting would break.
 //
-// `LookupOpEntry` answers null for a `GlobalVar` callee and for an unregistered
-// name, so a cross-function call and an unknown operator both stay effectful.
-bool IsProvablyPureCall(const CallPtr& call) {
-  if (!call) return false;
-  const auto* entry = LookupOpEntry(call->op_);
-  if (entry == nullptr) return false;
-  return entry->HasDeclaredArgEffects() && !entry->WritesAnyArg();
-}
-
-// Counts call-like nodes whose *evaluation* is observable even when the value
-// they produce is thrown away: any Call we cannot prove pure, plus every Submit
-// (a task launch is intrinsically effectful, whatever its callee does).
+// So the pass keeps every call. The cost is that a discarded genuinely pure call
+// survives as a dead EvalStmt, which the pipeline carries harmlessly; the
+// alternative costs correctness. Narrowing this needs a real "safely deletable"
+// operator property, declared per operator, not an inference from writes.
 class EffectfulCallCounter : public IRVisitor {
  public:
   int count = 0;
   void VisitExpr_(const CallPtr& op) override {
-    if (op && !IsProvablyPureCall(op)) ++count;
+    if (op) ++count;
     IRVisitor::VisitExpr_(op);
   }
   void VisitExpr_(const SubmitPtr& op) override {
@@ -226,12 +223,10 @@ class EffectfulCallCounter : public IRVisitor {
   }
 };
 
-// Is `value` ITSELF a call-like node whose evaluation must survive, as opposed
-// to merely wrapping one? Only such a value can be re-emitted verbatim as an
-// EvalStmt.
+// Is `value` ITSELF a call-like node, as opposed to merely wrapping one? Only
+// such a value can be re-emitted verbatim as an EvalStmt.
 bool IsEffectfulCallLike(const ExprPtr& value) {
-  if (auto call = As<Call>(value)) return !IsProvablyPureCall(call);
-  return As<Submit>(value) != nullptr;
+  return As<Call>(value) != nullptr || As<Submit>(value) != nullptr;
 }
 
 // Result of splicing an inline call's body without yet wiring up its return
@@ -346,23 +341,23 @@ SplicedInlineBody CloneInlineBody(const FunctionPtr& callee, const std::vector<E
 // has no destination, but *evaluating* it can still be observable, so the value
 // may not simply be discarded along with the ReturnStmt that carried it.
 //
-// A discarded Call we cannot prove pure — a cross-function dispatch, a writing
-// builtin such as `tile.store`, or any unclassified operator — is re-emitted as
-// an EvalStmt, in return order, as is every discarded Submit. The fixpoint loop
+// A discarded Call or Submit is re-emitted as an EvalStmt, in return order —
+// every one of them, for the reasons on EffectfulCallCounter. The fixpoint loop
 // in InlineFunctions() picks a cross-function EvalStmt up on the next iteration
 // and expands it when the callee is itself Inline; a non-Inline callee stays an
 // ordinary dispatch, exactly as if the author had written `self.inner(...)` at
 // the call site. Without this, an ignored wrapper whose body is
 // `return self.inner(x, out)` silently lost `inner`'s write to `out` (#2705),
-// and one whose body is `return pl.tile.store(t, [0, 0], out)` lost the store —
+// one whose body is `return pl.tile.store(t, [0, 0], out)` lost the store, and
+// one whose body is `return pl.system.set_ffts(ws)` lost the hardware setup —
 // the assign and return call-site forms never had the hole, because they re-emit
 // the value into an AssignStmt / ReturnStmt.
 //
-// A provably pure Call is dropped, as is any other value that hides nothing
-// effectful — a Var, a constant. But such a value may *wrap* something effectful
-// (`return (self.inner(x, out), x)` reaching here as one MakeTuple), whose write
-// we can neither keep nor honestly discard — reject that loudly instead of
-// deleting it.
+// Any other value is dropped: a Var or a constant hides nothing. But such a
+// value may *wrap* a call (`return self.bump(n) + 1` reaching here as one `Add`,
+// or a MakeTuple / TupleGetItemExpr over a call), and that cannot become an
+// EvalStmt the way a call-like value can — reject it loudly instead of deleting
+// the nested call with it.
 std::vector<StmtPtr> SpliceInlineCallAsEval(const FunctionPtr& callee, const std::vector<ExprPtr>& args) {
   auto body = CloneInlineBody(callee, args);
   for (const auto& value : body.return_values) {
@@ -376,9 +371,9 @@ std::vector<StmtPtr> SpliceInlineCallAsEval(const FunctionPtr& callee, const std
     CHECK_SPAN(counter.count == 0, value->span_)
         << "Inline function '" << callee->name_
         << "' is called for its side effects only (its result is discarded), but its return "
-           "expression wraps a call whose writes cannot be preserved once the value is dropped. "
-           "Either return that call directly ('return self.inner(...)'), or bind the result at "
-           "the call site ('result = self."
+           "expression wraps a call whose evaluation cannot be preserved once the value is "
+           "dropped. Either return that call directly ('return self.inner(...)'), or bind the "
+           "result at the call site ('result = self."
         << callee->name_ << "(...)').";
   }
   return std::move(body.stmts);
@@ -789,11 +784,10 @@ namespace pass {
  *    cloned pre-return body followed by a fresh ReturnStmt over the cloned
  *    trailing values (single or multi).
  *  - `EvalStmt(inline_call(...))` discards the callee's trailing return value,
- *    but not its evaluation: a discarded Call that the operator registry does
- *    not positively classify as non-writing, and every discarded Submit, is
- *    re-emitted as an EvalStmt (see `SpliceInlineCallAsEval`) so an ignored
- *    wrapper ending in `return self.inner(...)` or
- *    `return pl.tile.store(...)` keeps its writes.
+ *    but not its evaluation: every discarded Call and Submit is re-emitted as
+ *    an EvalStmt (see `SpliceInlineCallAsEval`) so an ignored wrapper ending in
+ *    `return self.inner(...)`, `return pl.tile.store(...)` or
+ *    `return pl.system.set_ffts(...)` keeps its write, store or hardware setup.
  *  - Nested Call to inline (e.g. inside a binary expression) is left alone in
  *    v1; the verifier flags any surviving Calls to Inline functions.
  *  - Inline function with no callers is silently dropped in step (5) — that

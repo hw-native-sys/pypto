@@ -126,16 +126,21 @@ The scope is preserved verbatim and gets outlined by `OutlineIncoreScopes` later
 
 ## Discarding a return value
 
-An `EvalStmt` call site — `self.wrapper(x, out)` with no LHS — has nowhere to put the callee's trailing return value. Dropping that **value** is correct; dropping its **evaluation** is not, because evaluating it can write through `Out` / `InOut` arguments. Each discarded value is therefore classified:
+An `EvalStmt` call site — `self.wrapper(x, out)` with no LHS — has nowhere to put the callee's trailing return value. Dropping that **value** is correct; dropping its **evaluation** is not, because evaluating it can write through `Out` / `InOut` arguments, launch a task, block on a signal, or set up hardware. Each discarded value is therefore classified:
 
 | Discarded value | Behaviour |
 | --------------- | --------- |
-| A `Call` the operator registry does not positively classify as non-writing — a cross-function dispatch, a writing builtin such as `tile.store`, or any operator nobody has classified yet | Re-emitted as an `EvalStmt`, in return order. The fixpoint loop expands a cross-function one on its next iteration when that callee is also Inline; otherwise it stays an ordinary dispatch, exactly as if the author had written it at the call site. |
+| A `Call` — any callee, cross-function or builtin | Re-emitted as an `EvalStmt`, in return order. The fixpoint loop expands a cross-function one on its next iteration when that callee is also Inline; otherwise it stays an ordinary dispatch, exactly as if the author had written it at the call site. |
 | A `Submit` | Re-emitted as an `EvalStmt`. A task launch is effectful whatever its callee does. |
-| A `Call` whose operator declared it writes through no argument, or any other value that hides nothing effectful (`Var`, constant) | Dropped. |
-| A value that is not itself call-like but *wraps* something effectful — scalar arithmetic such as `self.bump(n) + 1`, a `MakeTuple`, a `TupleGetItemExpr` | `pypto::ValueError`. It cannot become an `EvalStmt`, and deleting it would delete the nested call's write. Return that call directly, or bind the wrapper's result at the call site. |
+| Anything else that hides no call — a `Var`, a constant | Dropped. |
+| A value that is not itself call-like but *wraps* a call — scalar arithmetic such as `self.bump(n) + 1`, a `MakeTuple`, a `TupleGetItemExpr` | `pypto::ValueError`. It cannot become an `EvalStmt`, and deleting it would delete the nested call with it. Return that call directly, or bind the wrapper's result at the call site. |
 
-The registry distinguishes "declared to write through no argument" from "nobody has classified this operator yet" (`OpRegistryEntry::HasDeclaredArgEffects`), and most operators are still in the second group — including plainly effectful ones such as `tile.tpush_to_aiv` and `system.aic_initialize_pipe`, which `dce::IsSideEffectOp` lists as side-effecting. Only a positive verdict allows deletion, so an unclassified pure operator is conservatively kept as a dead-but-harmless `EvalStmt`.
+**Why every call, rather than only the ones that write.** Nothing in the IR answers "is this call safe to delete". The nearest registry data, `OpRegistryEntry::WritesAnyArg`, answers whether an operator writes *through an argument*, and keying deletion on it is wrong in both directions:
+
+- Most operators are simply unclassified — 263 of 315 at the time of writing, among them `tile.tpush_to_aiv` and `system.aic_initialize_pipe`, which `dce::IsSideEffectOp` lists as side-effecting. `OpRegistryEntry::HasDeclaredArgEffects` exists precisely so an analysis can tell "declared to write nothing" from "nobody looked yet".
+- A *positive* `no_arg_writes()` verdict does not mean deletable either. `pld.system.wait` blocks until a signal slot satisfies a threshold, `pld.system.defer_wait` registers a completion condition, and `system.set_ffts` hands the FFTS unit its workspace pointer — all three declare `no_arg_writes()` while carrying synchronization or hardware-setup semantics.
+
+So the pass keeps every call. A discarded genuinely pure call survives as a dead `EvalStmt`, which the pipeline carries harmlessly. Narrowing this needs a real "safely deletable" operator property, declared per operator rather than inferred from writes.
 
 **Before**:
 

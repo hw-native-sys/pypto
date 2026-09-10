@@ -306,17 +306,63 @@ class TestInlineFunctionsCallSiteForms:
         After = passes.inline_functions()(Before)
         ir.assert_structural_equal(After, Expected)
 
-    def test_eval_stmt_call_site_keeps_unclassified_builtin(self):
-        """An operator the registry has never classified is kept, not dropped.
+    def test_eval_stmt_call_site_keeps_returned_sync_op(self):
+        """An operator that writes through no argument is still not deletable.
 
-        ``OpRegistryEntry`` distinguishes "declared to write through no argument"
-        from "nobody has classified this operator yet", and most operators are
-        still in the second group — including plainly effectful ones such as
-        ``tile.tpush_to_aiv`` and ``system.aic_initialize_pipe``, which
-        ``dce::IsSideEffectOp`` lists as side-effecting. Deleting an unclassified
-        call would therefore be unsound, so the pass keeps it. ``tensor.add``
-        happens to be pure, and the resulting `EvalStmt` is dead but harmless;
-        that is the deliberate cost of not guessing."""
+        ``system.set_ffts`` declares ``no_arg_writes()`` — it moves no data —
+        yet it hands the FFTS unit its workspace pointer, and the same holds for
+        ``pld.system.wait`` (blocks on a signal threshold) and
+        ``pld.system.defer_wait`` (registers a completion condition). "Writes
+        through no argument" is not "safe to delete", so the discarded-value
+        classification cannot key deletion on
+        ``OpRegistryEntry::WritesAnyArg``; the pass keeps every call until a real
+        deletability property exists."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def setup(self, ws: pl.Tensor[[256], pl.INT64]) -> pl.Tensor[[256], pl.INT64]:
+                # The DSL return annotation is parser metadata for the IR, while
+                # the Python surface types `set_ffts` as `-> Call`; the two never
+                # meet at runtime because the body is parsed, not executed.
+                return pl.system.set_ffts(ws)  # type: ignore[reportReturnType]
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def main(
+                self,
+                ws: pl.Tensor[[256], pl.INT64],
+                x: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                self.setup(ws)  # EvalStmt call site — return value ignored
+                return x
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main(
+                self,
+                ws: pl.Tensor[[256], pl.INT64],
+                x: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                pl.system.set_ffts(ws)
+                return x
+
+        After = passes.inline_functions()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_eval_stmt_call_site_keeps_side_effect_free_builtin(self):
+        """Even a builtin that happens to be pure is kept, because nothing in the
+        IR can prove it.
+
+        No operator property answers "is this call safe to delete".
+        ``OpRegistryEntry::WritesAnyArg`` answers a narrower question and is
+        wrong in both directions here: 263 of 315 operators are unclassified
+        (among them ``tile.tpush_to_aiv`` and ``system.aic_initialize_pipe``,
+        which ``dce::IsSideEffectOp`` lists as side-effecting), and a positive
+        ``no_arg_writes()`` verdict covers synchronization ops as well — see
+        ``test_eval_stmt_call_site_keeps_returned_sync_op``. So the pass keeps
+        every call. ``tensor.add`` is genuinely pure and its `EvalStmt` is dead
+        but harmless; that is the deliberate cost of not guessing."""
 
         @pl.program
         class Before:
