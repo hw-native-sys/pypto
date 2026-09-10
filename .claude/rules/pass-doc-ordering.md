@@ -27,7 +27,7 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 12 | `12-optimize_orch_tensors.md` | 12th pass |
 | 13 | `13-lower_composite_ops.md` | 13th pass (first tile_pto pass) |
 | 14 | `14-flatten_tile_nd_to_2d.md` | 14th pass |
-| 15 | `15-block_nz_tensor_views.md` | Rewrites a logical `pl.NZ` tensor into pto-isa's blocked rank-(r+2) shape `[..., C/c0, R/16, 16, c0]` and retargets its `tile.load` coordinates, keeping the destination tile logical 2D. Runs immediately after `FlattenTileNdTo2D` (which skips its ND2NZ window collapse for NZ sources) and before `MaterializeTensorStrides`, whose plain row-major rule then yields pto-isa's NZ strides |
+| 15 | `15-block_nz_tensor_views.md` | Rewrites a logical `pl.NZ` tensor into pto-isa's blocked rank-5 shape `[B, C/c0, R/16, 16, c0]` (batch materialised as 1 for a logical rank-2 tensor; logical rank 4+ rejected) and retargets its `tile.load` coordinates, keeping the destination tile logical 2D. Runs immediately after `FlattenTileNdTo2D` (which skips its ND2NZ window collapse for NZ sources) and before `MaterializeTensorStrides`, whose plain row-major rule then yields pto-isa's NZ strides |
 | 16 | `16-block_mx_scale_tensor_views.md` | Physicalizes logical MX scale tensor views into A5's packed rank-5 SFractal form and retargets their `tile.load` coordinates; runs independently after `BlockNzTensorViews` and before `LegalizeTileCast` |
 | 17 | `17-legalize_tile_cast.md` | Expands `tile.cast` pairs the target ISA cannot emit as one `pto.tcvt` into the shortest chain of native casts (A5 `INT32->FP16` becomes `INT32->FP32->FP16`); runs between `BlockMxScaleTensorViews` and `AutoTileMatmulL0` |
 | 18 | `18-auto_tile_matmul_l0.md` | 18th pass |
