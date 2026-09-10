@@ -338,16 +338,17 @@ void BindPass(nb::module_& m) {
                           "verification and the diagnostic channel (warnings + performance\n"
                           "hints) for PassPipeline.")
       .def(nb::init<std::vector<PassInstrumentPtr>, VerificationLevel, DiagnosticPhase, DiagnosticCheckSet,
-                    MemoryPlanner, bool, RuntimeKind>(),
+                    MemoryPlanner, bool, RuntimeKind, bool>(),
            nb::arg("instruments"), nb::arg("verification_level") = VerificationLevel::Basic,
            nb::arg("diagnostic_phase") = DiagnosticPhase::PrePipeline,
            nb::arg("disabled_diagnostics") = DiagnosticCheckSet{DiagnosticCheck::UnusedControlFlowResult},
            nb::arg("memory_planner") = MemoryPlanner::PyPTO,
            nb::arg("enable_pypto_l0c_double_buffer") = false, nb::arg("runtime") = kDefaultRuntimeKind,
+           nb::arg("enable_buffer_ir") = false,
            "Create a PassContext with instruments, verification level, diagnostic phase gate, "
            "optional disabled diagnostic checks, memory planner selection, the experimental "
            "legacy-PyPTO chooser-emitted L0C double-buffer (dbC=2) opt-in, and the target Simpler "
-           "runtime ABI")
+           "runtime ABI, and the staged Buffer IR development opt-in")
       .def("__enter__",
            [](PassContext& self) -> PassContext& {
              self.EnterContext();
@@ -367,6 +368,8 @@ void BindPass(nb::module_& m) {
            "Whether chooser-emitted L0C double-buffering (dbC=2) is enabled under the legacy PyPTO "
            "memory planner")
       .def("get_runtime", &PassContext::GetRuntime, "Get the target Simpler runtime ABI for this context")
+      .def("get_enable_buffer_ir", &PassContext::GetEnableBufferIR,
+           "Whether the staged Buffer IR development pipeline is enabled")
       .def_static("current", &PassContext::Current, nb::rv_policy::reference,
                   "Get the currently active context, or None if no context is active");
 

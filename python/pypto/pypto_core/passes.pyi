@@ -293,6 +293,7 @@ class PassContext:
         memory_planner: MemoryPlanner = MemoryPlanner.PYPTO,
         enable_pypto_l0c_double_buffer: bool = False,
         runtime: RuntimeKind = RuntimeKind.TENSORMAP_AND_RINGBUFFER,
+        enable_buffer_ir: bool = False,
     ) -> None:
         """Create a PassContext with instruments and pass configuration (incl. memory planner).
 
@@ -305,6 +306,9 @@ class PassContext:
         what lands in ``RUNTIME_CONFIG["runtime"]`` in the generated
         ``kernel_config.py``. Passes that legalize runtime-specific IR read it
         from the context.
+
+        ``enable_buffer_ir`` enables the staged Buffer IR development pipeline.
+        It defaults to false while the migration is incomplete.
         """
         ...
 
@@ -333,6 +337,10 @@ class PassContext:
 
     def get_runtime(self) -> RuntimeKind:
         """Get the target Simpler runtime ABI for this context."""
+        ...
+
+    def get_enable_buffer_ir(self) -> bool:
+        """Whether the staged Buffer IR development pipeline is enabled."""
         ...
 
     def get_enable_pypto_l0c_double_buffer(self) -> bool:

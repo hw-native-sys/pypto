@@ -75,6 +75,47 @@ rewrites), and skips `Orchestration` functions (no TileType variables).
 
 ## Relationship to codegen
 
+### Staged Buffer IR pipeline
+
+`PassContext(enable_buffer_ir=True)` enables the storage-legalization portion of
+the Buffer IR migration. The temporary development option defaults to false;
+it does not by itself promise that every Tile operation or control-flow form
+can be lowered to Buffer IR. The C++ accessor is `GetEnableBufferIR()` and the
+Python accessor is `get_enable_buffer_ir()`. Compilation, IR dumping and
+profiling preserve the active option, and JIT cache keys distinguish its value
+for every memory planner.
+
+With this option, `MaterializeSemanticAliases` also establishes explicit branch
+destinations before `PYPTO`, `DSA_RP`, or `PTOAS` performs memory planning:
+
+1. If both arms already yield the same physical window, retain that window.
+2. Otherwise allocate an independent canonical destination for the result. An
+   input yielded from outside a branch keeps its original storage, including
+   when it remains live after the `IfStmt`.
+3. A direct branch-local producer with unaliased, unpinned output storage may
+   write the new destination when its registered operation contract allows it.
+   Views and operations with a required input/output alias retain their storage.
+4. Insert explicit `tile.move` operations in each remaining arm before its
+   yield. Remove allocations made unused by producer retargeting. Branch copies
+   and the existing For-carry fixups run before all three planners; `PYPTO`
+   reconciles any new mismatch after reuse, retaining the declared phi target.
+
+For example, `if flag: yield a; else: yield b` with `a` and `b` still live after
+the branch receives a separate result allocation and one copy in each arm.
+Two independent branch-local elementwise producers can instead write that same
+result allocation directly, without a copy. PTOAS therefore receives explicit
+branch transfers and does not need codegen to select destinations or add them.
+
+The added branch analysis uses fixed IR walks and indexed lookups, with
+O(N log N) work and O(N) storage. No persistent alias table is attached to IR.
+Accumulator branches still use the existing guarded coalescing; a remaining
+divergent `Acc` branch is rejected because Acc-to-Acc copying is unsupported.
+This slice does not establish a complete storage property: live incoming loop
+values, general parallel carry transfers, While carries, and post-reuse storage
+verification require the following migration slice.
+
+### Default pipeline
+
 PTO codegen renders variables that resolve to the *same* physical MemRef window
 (`base` + `byte_offset` + `size` + pipeline-slot metadata) as a single
 `tile_buf` handle, so after this

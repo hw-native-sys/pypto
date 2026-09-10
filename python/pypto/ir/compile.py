@@ -213,6 +213,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
             else outer.get_enable_pypto_l0c_double_buffer()
         )
         rt = runtime if runtime is not None else outer.get_runtime()
+        buffer_ir = outer.get_enable_buffer_ir()
     else:
         instruments = list(extra_instruments)
         vlevel = (
@@ -223,7 +224,8 @@ def _run_pass_pipeline(  # noqa: PLR0913
         mplan = memory_planner if memory_planner is not None else _passes.MemoryPlanner.PYPTO
         dbc_flag = enable_pypto_l0c_double_buffer if enable_pypto_l0c_double_buffer is not None else False
         rt = runtime if runtime is not None else _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
-    ctx = _passes.PassContext(instruments, vlevel, dphase, disabled, mplan, dbc_flag, rt)
+        buffer_ir = False
+    ctx = _passes.PassContext(instruments, vlevel, dphase, disabled, mplan, dbc_flag, rt, buffer_ir)
 
     if mplan == _passes.MemoryPlanner.PTOAS:
         logger.warning(
