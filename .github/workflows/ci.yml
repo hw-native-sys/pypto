@@ -64,6 +64,7 @@ jobs:
     outputs:
       docs_only: ${{ steps.classify.outputs.docs_only }}
       docs_changed: ${{ steps.classify.outputs.docs_changed }}
+      toolchain_changed: ${{ steps.classify.outputs.toolchain_changed }}
     steps:
       - name: Classify changed paths
         id: classify
@@ -80,6 +81,16 @@ jobs:
           if [ "$EVENT_NAME" != 'pull_request' ]; then
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
             echo "docs_changed=true" >> "$GITHUB_OUTPUT"
+            # `toolchain_changed` gates the serving guard, which is opt-in on
+            # cost rather than conservative on correctness: the pin only ever
+            # moves through a pull request, so a push to main re-running it
+            # would buy no signal. workflow_dispatch stays true so the guard can
+            # be forced by hand.
+            if [ "$EVENT_NAME" = 'workflow_dispatch' ]; then
+              echo "toolchain_changed=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "toolchain_changed=false" >> "$GITHUB_OUTPUT"
+            fi
             echo "event '$EVENT_NAME' is not a pull request -> full pipeline"
             exit 0
           fi
@@ -92,6 +103,10 @@ jobs:
           fail_open() {
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
             echo "docs_changed=true" >> "$GITHUB_OUTPUT"
+            # Also open for the serving guard: an unreadable file list cannot
+            # prove the pin did not move, and a toolchain bump reaching serving
+            # unguarded is worth more than the cards a spurious run costs.
+            echo "toolchain_changed=true" >> "$GITHUB_OUTPUT"
             echo "$1 -> full pipeline"
             exit 0
           }
@@ -150,13 +165,26 @@ jobs:
           # One full pass, no early exit: `docs_only` and `docs_changed` are
           # independent questions, and short-circuiting on the first
           # non-documentation path would answer the second by file order alone.
+          # `toolchain_changed` is a third, independent question: did this PR
+          # move the pinned external toolchain? `toolchain/versions.env` holds
+          # nothing else (PTOAS_VERSION + the two wheel sha256s; pto-isa is
+          # derived from the runtime submodule), so the path IS the question.
+          # It gates `serving-guard`, which is skipped by default because it
+          # borrows cards for a downstream repo's model tests.
           docs_only=true
           docs_changed=false
+          toolchain_changed=false
           while IFS="$(printf '\t')" read -r new_path old_path; do
             for f in "$new_path" "$old_path"; do
               [ -n "$f" ] || continue
               case "$f" in
                 docs/*) docs_changed=true ;;
+              esac
+              case "$f" in
+                toolchain/versions.env)
+                  toolchain_changed=true
+                  echo "pinned toolchain moved: $f -> serving guard enabled"
+                  ;;
               esac
               case "$f" in
                 docs/*|*.md|mkdocs.yml) ;;
@@ -172,6 +200,7 @@ jobs:
 
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
           echo "docs_changed=$docs_changed" >> "$GITHUB_OUTPUT"
+          echo "toolchain_changed=$toolchain_changed" >> "$GITHUB_OUTPUT"
           if [ "$docs_only" = 'true' ]; then
             echo "all $expected changed paths are documentation:"
             printf '%s\n' "$files" | cut -f1 | sed 's/^/  /'
@@ -1763,6 +1792,263 @@ jobs:
         uses: ./.github/actions/kill-orphaned-tasks
         with:
           checkout-path: lib-checkout
+
+  serving-guard:
+    # Does a toolchain bump break generation in pypto-serving?
+    #
+    # `pypto-lib-model` proves the models still compile and run; it does not
+    # prove the tokens come out right end to end. An assembler change can leave
+    # every kernel compiling and still corrupt what the model emits, and the
+    # first place that shows is serving's accuracy guards.
+    #
+    # WHY THIS LIVES HERE AND NOT IN pypto-serving. serving's own `unit-tests`
+    # job clones pypto from `origin HEAD` -- it always tests against pypto main,
+    # so it cannot see an unmerged pin. Running it from this side instead builds
+    # THIS pull request's pypto and points serving at it, which is the same
+    # inversion `pypto-lib-model` already does for pypto-lib.
+    #
+    # SKIPPED BY DEFAULT. Gated on `toolchain/versions.env`, the single file
+    # that carries the pinned assembler. It borrows cards to run a downstream
+    # repo's model tests, which is far too expensive for every pull request,
+    # and the risk it covers only exists when the pin moves. `workflow_dispatch`
+    # forces it (see the `changes` job).
+    #
+    # Lint gate + docs-only gate, as every other device job here.
+    needs: [changes, toolchain, pre-commit, clang-tidy]
+    if: >-
+      needs.changes.outputs.docs_only != 'true' &&
+      needs.changes.outputs.toolchain_changed == 'true'
+    # Checkout + clone pypto-serving + test only.
+    permissions:
+      contents: read
+    # `npu-xp` selects the runners provisioned for this guard: they carry the
+    # Qwen3 weights the steps below read from the runner config, which the rest
+    # of the npu pool does not stage.
+    runs-on: [self-hosted, linux, npu-xp]
+    # Matches pypto-serving's own job, which carries the same four guards over
+    # a from-source pypto build. Its comment records that 90 left no headroom
+    # once the two DeepSeek steps (2400s client wait under a 3600s task cap)
+    # and a cold pip cache landed in one run.
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: serving-checkout
+    env:
+      PTOAS_ROOT: ${{ github.workspace }}/serving-checkout/ptoas-bin
+      PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
+      PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_X86_64: ${{ needs.toolchain.outputs.ptoas_sha256_x86_64 }}
+      CMAKE_BUILD_PARALLEL_LEVEL: 16
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_MAXSIZE: 30G
+      # See pypto-lib-model: the shared ci-cache still holds root-owned entries.
+      CCACHE_UMASK: '000'
+    steps:
+      - name: Fetch composite action definitions
+        # Same bootstrap as pypto-lib-model: local `uses: ./...` resolves against
+        # $GITHUB_WORKSPACE, but the repo is checked out into ./serving-checkout.
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/actions
+          clean: false
+          persist-credentials: false
+
+      - name: Resolve runner card and model dir
+        # Checked before the setup on purpose, mirroring serving's own job: this
+        # reads nothing but the runner's own env, while behind it lie a
+        # checkout, a toolchain install and a from-source pypto build. A host
+        # missing either must say so now, not forty minutes later as an opaque
+        # missing-path error inside pytest.
+        #
+        # Runs at the workspace root, overriding this job's `defaults`: that
+        # directory is what the setup step below creates, so a step ordered
+        # ahead of it cannot start there.
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -uo pipefail
+          # DEVICE_ID is how the steps below claim a card, passed straight to
+          # `task-submit --device`. The runner config decides what it means: a
+          # card id on a runner that pins one, or `auto` to borrow per step (the
+          # `xp` runners). Only emptiness is wrong -- `task-submit --device ""`
+          # auto-borrows silently, so an unset value would look like it worked
+          # (see system-tests, which guards the same way).
+          echo "[device] DEVICE_ID=${DEVICE_ID:-}"
+          if [ -z "${DEVICE_ID:-}" ]; then
+            echo "::error::DEVICE_ID is empty in the runner env — set it to a card id or 'auto'"
+            echo "The runner declares its host layout in <runner-root>/.env, one bare"
+            echo "KEY=VALUE per line; restart the runner service after editing it."
+            exit 1
+          fi
+          bad=0
+          for key in \
+            PYPTO_QWEN3_MODEL_DIR \
+            PYPTO_DSV4_MODEL_DIR \
+            PYPTO_DSV4_DSPARK_MODEL_DIR; do
+            value="${!key:-}"
+            if [ -z "$value" ]; then
+              echo "::error::$key is not set — add it to this runner's .env"
+              bad=1
+            elif [ ! -d "$value" ]; then
+              echo "::error::$key points at a missing directory: $value"
+              bad=1
+            fi
+          done
+          if [ "$bad" -ne 0 ]; then
+            echo "The runner declares its host layout in <runner-root>/.env, one bare"
+            echo "KEY=VALUE per line (no quotes, no trailing comments); restart the"
+            echo "runner service after editing it. pypto-serving's own unit-tests job"
+            echo "reads the same variables."
+            exit 1
+          fi
+          echo "model dirs resolved from the runner config"
+
+      - name: Setup CI job
+        # pypto's own setup, not serving's: this builds the pull request under
+        # test. `pip-cache-name` is distinct so this job never shares a pip dir
+        # with `pypto-lib-model` or the system-test jobs.
+        uses: ./.github/actions/setup-ci-job
+        with:
+          checkout-path: serving-checkout
+          needs-device: 'true'
+          toolchain: bundle
+          pip-cache-name: pip-serving-guard
+          pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+
+      - name: Clone pypto-serving
+        # A sibling of serving-checkout, so actions/checkout leaves it alone on
+        # this persistent runner — and a leftover dir would make `git clone`
+        # fail, so remove it first (mirrors pypto-lib-model).
+        #
+        # WITH SUBMODULES. pypto-lib is a submodule of pypto-serving, and the
+        # Qwen3-14B kernels the executor loads come from it. A non-recursive
+        # clone leaves it empty, and the model then resolves from whatever
+        # pypto-lib happens to be lying in this runner's workspace — which is
+        # a different revision from the one serving pins, and the ring sizing
+        # baked into serving's tests is tuned against the pinned one. That
+        # mismatch reaches the card as HEAP_RING_DEADLOCK.
+        run: |
+          set -euo pipefail
+          rm -rf "$GITHUB_WORKSPACE/pypto-serving"
+          git clone --depth 1 --recurse-submodules --shallow-submodules \
+            https://github.com/hw-native-sys/pypto-serving.git \
+            "$GITHUB_WORKSPACE/pypto-serving"
+          echo "pypto-serving under test: $(git -C "$GITHUB_WORKSPACE/pypto-serving" rev-parse HEAD)"
+          git -C "$GITHUB_WORKSPACE/pypto-serving" submodule status --recursive
+          # An empty submodule dir is the failure mode above, and it is silent:
+          # the model still loads, from the wrong revision.
+          test -f "$GITHUB_WORKSPACE/pypto-serving/pypto-lib/models/qwen3_14b/prefill_fwd.py" || {
+            echo "::error::pypto-serving's pypto-lib submodule is empty — the Qwen3 kernels would resolve elsewhere"
+            exit 1
+          }
+
+      - name: Install pypto-serving and its dependencies
+        # pypto's `setup-ci-job` installs what pypto needs; serving carries its
+        # own runtime stack (msgspec for the engine<->worker IPC, transformers
+        # for the tokenizer, fastapi/uvicorn for the HTTP surface). Mirrors the
+        # equivalent step in pypto-serving's own setup action -- keep the two in
+        # step, since a dependency added there fails here as a bare
+        # ModuleNotFoundError.
+        #
+        # `--no-deps -e .`: serving's pyproject declares no dependencies, and
+        # the stack around it (CPU torch, from-source pypto) is assembled by
+        # hand above, so resolution must not be allowed to replace it.
+        #
+        # NOT `pip`. This job runs on `toolchain: bundle`, whose venv is built
+        # by `uv venv` and contains no pip at all -- a bare `pip install` there
+        # resolves to the one outside the venv, reports success, and installs
+        # where the venv cannot see it. That is exactly how msgspec went missing
+        # at import time while this step stayed green. `setup-ci-job` states the
+        # split in PYPTO_USE_UV; its own `py_install` is action-local, so mirror
+        # it here.
+        run: |
+          set -euo pipefail
+          source activate.sh
+          py_install() {
+            if [ "${PYPTO_USE_UV:-false}" = "true" ]; then
+              uv pip install "$@"
+            else
+              pip install "$@"
+            fi
+          }
+          py_install 'nanobind<3' transformers safetensors numpy fastapi uvicorn pytest msgspec
+          py_install --no-deps -e "$GITHUB_WORKSPACE/pypto-serving"
+          # Prove the venv can see them, so a silent install into the wrong
+          # interpreter fails here rather than as a ModuleNotFoundError inside
+          # a task-submit child forty lines of traceback later.
+          python -c 'import msgspec, transformers, pypto_serving' \
+            || { echo "::error::serving dependencies are not importable from $(command -v python)"; exit 1; }
+          # Which pypto and which pypto-serving the tests will actually load.
+          # This runner's workspace can hold a sibling pypto-lib left by another
+          # job, so print the resolved paths rather than assuming.
+          python - <<'PY'
+          import pypto, pypto_serving
+          print(f"[resolved] pypto         {pypto.__file__}")
+          print(f"[resolved] pypto_serving {pypto_serving.__file__}")
+          PY
+
+      # The generation guards from serving's `unit-tests`. Each answers "does it
+      # still produce correct text", which is what an assembler change threatens
+      # without necessarily breaking a compile:
+      #
+      #   qwen3_accuracy    generated tokens vs a reference          1 card
+      #   qwen3_serving     prefix cache / chunked prefill / batch   1 card
+      #   deepseek_v4       MTP HTTP matrix                          8 cards
+      #   deepseek_dspark   DSpark target HTTP guard                16 cards
+      #
+      # DeepSeek earns its cards here: it is the model the cache-policy work
+      # this pin exists for targets, and it exercises MoE / MTP / cross-rank
+      # collectives that Qwen3-14B never touches, so a Qwen-only guard would
+      # miss a whole class of regression. The gate fires only when the pin
+      # moves, so the cost is paid rarely -- which is what buys the two
+      # multi-card steps their room.
+      #
+      - name: Run pypto-serving Qwen3 accuracy guard
+        env:
+          PYTHONPATH: ${{ github.workspace }}/pypto-serving
+        run: |
+          source activate.sh
+          task-submit --device "$DEVICE_ID" --timeout 1200 --max-time 1800 \
+            --run "source $GITHUB_WORKSPACE/serving-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-serving && DEVICE_ID=\$TASK_DEVICE PYTHONPATH=$PYTHONPATH PYPTO_QWEN3_MODEL_DIR=$PYPTO_QWEN3_MODEL_DIR python -m pytest tests/test_qwen3_accuracy.py -q -s"
+
+      - name: Run pypto-serving Qwen3 serving guard
+        env:
+          PYTHONPATH: ${{ github.workspace }}/pypto-serving
+        run: |
+          source activate.sh
+          task-submit --device "$DEVICE_ID" --timeout 1200 --max-time 1800 \
+            --run "source $GITHUB_WORKSPACE/serving-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-serving && DEVICE_ID=\$TASK_DEVICE PYTHONPATH=$PYTHONPATH PYPTO_QWEN3_MODEL_DIR=$PYPTO_QWEN3_MODEL_DIR python -m pytest tests/test_qwen3_serving.py -q -s"
+
+      - name: Run pypto-serving DeepSeek V4 MTP HTTP matrix
+        # Multi-card, so it borrows its own eight rather than using this
+        # runner's single card, and --ignore-whitelist because the pool the
+        # whitelist exposes is smaller than that. Timeouts follow serving's own
+        # job: the matrix client waits up to 2400s under a 3600s cap.
+        env:
+          PYPTO_RUNTIME_LOG: error
+        run: |
+          source activate.sh
+          task-submit --device auto --device-num 8 --ignore-whitelist \
+            --timeout 2400 --max-time 3600 \
+            --run "source $GITHUB_WORKSPACE/serving-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-serving && TASK_DEVICE=\$TASK_DEVICE PYTHONPATH=$GITHUB_WORKSPACE/pypto-serving PYPTO_DSV4_MODEL_DIR=$PYPTO_DSV4_MODEL_DIR PYPTO_RUNTIME_LOG=$PYPTO_RUNTIME_LOG python -m pytest tests/test_deepseek_v4_accuracy.py -q -s"
+
+      - name: Run pypto-serving DSpark target HTTP guard
+        # Sixteen cards — the widest step in this workflow. Same shape as the
+        # MTP matrix above, and last so a failure here cannot strand the
+        # cheaper guards behind it.
+        env:
+          PYPTO_RUNTIME_LOG: error
+        run: |
+          source activate.sh
+          task-submit --device auto --device-num 16 --ignore-whitelist \
+            --timeout 2400 --max-time 3600 \
+            --run "source $GITHUB_WORKSPACE/serving-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-serving && TASK_DEVICE=\$TASK_DEVICE PYTHONPATH=$GITHUB_WORKSPACE/pypto-serving PYPTO_DSV4_DSPARK_MODEL_DIR=$PYPTO_DSV4_DSPARK_MODEL_DIR PYPTO_RUNTIME_LOG=$PYPTO_RUNTIME_LOG python -m pytest tests/test_deepseek_dspark_accuracy.py -q -s"
+
+      - name: Kill orphaned task-submit tasks
+        if: always()
+        uses: ./.github/actions/kill-orphaned-tasks
+        with:
+          checkout-path: serving-checkout
 
   onboard-tests-a5:
     # A5 (Ascend950) on-board coverage. Formerly `tests-a5`; renamed
