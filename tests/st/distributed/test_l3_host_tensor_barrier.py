@@ -171,13 +171,17 @@ def _build_host_barrier_signal_reuse_program():
                 peer = (r + 1) % pld.world_size()
                 self.consume_orch(data, outputs[0, r], peer, device=r)
 
-            # Round 2 — reuse the same signal.
+            # Round 2 reuses the signal, but needs separate data storage: the
+            # first barrier orders publish-before-consume, not every peer's
+            # consume-before-next-publish. A fast rank must not overwrite data
+            # that a slower peer is still reading from round 1.
+            next_data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
             for r in pl.range(pld.world_size()):
-                data = pld.window(data_buf, [1, SIZE], dtype=pl.FP32)
+                data = pld.window(next_data_buf, [1, SIZE], dtype=pl.FP32)
                 self.publish_orch(inputs[1, r], data, signal, device=r)
             pld.tensor.barrier(signal)
             for r in pl.range(pld.world_size()):
-                data = pld.window(data_buf, [1, SIZE], dtype=pl.FP32)
+                data = pld.window(next_data_buf, [1, SIZE], dtype=pl.FP32)
                 peer = (r + 1) % pld.world_size()
                 self.consume_orch(data, outputs[1, r], peer, device=r)
 
