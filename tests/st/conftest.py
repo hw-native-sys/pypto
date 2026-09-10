@@ -528,7 +528,7 @@ def _redirect_prog_build_dir(request, tmp_path, monkeypatch):
     """Redirect default ir.compile() output into pytest's per-test tmp dir.
 
     Direct ``ir.compile()`` calls and the inline-compile fallback in
-    ``TestRunner`` otherwise write to ``build_output/<name>_<timestamp>``
+    ``TestRunner`` otherwise write to ``build_output/<name>_<unique>``
     relative to the working directory, leaving stale dirs behind. The
     precompile pipeline already passes an explicit ``output_dir`` and so is
     unaffected by ``PYPTO_PROG_BUILD_DIR``.
