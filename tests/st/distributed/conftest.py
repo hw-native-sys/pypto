@@ -12,6 +12,30 @@
 from typing import Any
 
 import pytest
+from harness import card_lock
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Serialize the device phase so xdist workers can overlap their compiles.
+
+    Installed unconditionally: with one worker the lock is uncontended and costs
+    a file open per dispatch, and it still keeps two concurrent runs that were
+    lent the same cards from driving them at once. See ``card_lock`` for what the
+    guarded region deliberately excludes and why.
+
+    ``--codegen-only`` layers its own patches over these per test, so no lock is
+    taken on a run that never reaches a card.
+    """
+    if config.getoption("--codegen-only"):
+        return
+    device_ids = [int(part) for part in str(config.getoption("--device")).split(",") if part.strip()]
+    card_lock.install(device_ids)
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    """Restore the runtime and drop the lock, however deep this worker left it."""
+    del config
+    card_lock.uninstall()
 
 
 @pytest.fixture(autouse=True)

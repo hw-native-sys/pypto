@@ -1574,10 +1574,22 @@ jobs:
         # (comma-separated), passed to --device. The job no longer pins an
         # npu-2-device runner. activate.sh already unset PTO2_RING_* (they break
         # HCCL); task-submit preserves that env into the child.
+        #
+        # `-n 3` because most of a distributed test is card-free compilation: the
+        # dist conftest installs a lock that serializes only the device phase, so
+        # while one worker drives the cards the other two compile. Measured on an
+        # a2a3 pair, identical results at every width: 669s serial, 377s at
+        # -n 3, where a worker is on the cards for ~95% of the wall clock and a
+        # fourth would have nothing left to overlap. Still two cards, held for
+        # less than half as long as before.
+        #
+        # xdist's default `--dist load` is left alone: no fixture here is scoped
+        # wider than a test, and `--dist loadfile` measured 388s against 377s --
+        # inside this suite's own run-to-run variance.
         run: |
           source activate.sh
           task-submit --device "$DEVICE_ID" --device-num 2 --timeout 3600 --max-time 1800 \
-            --run "cd $GITHUB_WORKSPACE/dist-checkout && source activate.sh && python -m pytest tests/st/distributed -v --device=\$TASK_DEVICE --ignore=tests/st/distributed/test_l2_multi_orch.py"
+            --run "cd $GITHUB_WORKSPACE/dist-checkout && source activate.sh && python -m pytest tests/st/distributed -v -n 3 --device=\$TASK_DEVICE --ignore=tests/st/distributed/test_l2_multi_orch.py"
 
       - name: Test multi-card cases outside tests/st/distributed
         # Multi-card used to be selected by directory, so a test needing two
