@@ -29,9 +29,10 @@ the PTO IR manual, ``pto.tgather`` index-form checks):
 * ``dst`` dtype equals ``src``; ``dst`` shape equals ``indices``.
 """
 
+import pypto.language as pl
 import pytest
 from pypto import DataType, ir
-from pypto.ir.op import tile
+from pypto.ir.op import tensor, tile
 
 
 def _gather(src_dtype: DataType, idx_dtype: DataType, tmp_dtype: DataType):
@@ -108,6 +109,100 @@ class TestTileGatherIndexTypes:
         tmp = ir.Var("tmp", ir.TileType([1, 64], DataType.INT32), span)
         with pytest.raises(ValueError, match="TileType"):
             tile.gather(src, scalar_idx, tmp)
+
+
+class TestTensorGatherFlat:
+    @pytest.mark.parametrize("dtype", [DataType.FP16, DataType.FP32, DataType.INT16, DataType.INT32])
+    def test_flat_source_dtype(self, dtype):
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TensorType([2, 3, 32], dtype), span)
+        idx = ir.Var("idx", ir.TensorType([1, 16], DataType.INT32), span)
+        call = tensor.gather(src, index=idx)
+        assert isinstance(call.type, ir.TensorType)
+        assert call.type.dtype == dtype
+
+    @pytest.mark.parametrize("source_type", [ir.TensorType, ir.TileType])
+    @pytest.mark.parametrize("index_type", [ir.TensorType, ir.TileType])
+    def test_flat_index_form(self, source_type, index_type):
+        span = ir.Span.unknown()
+        src = ir.Var("src", source_type([4, 32], DataType.FP32), span)
+        idx = ir.Var("idx", index_type([2, 16], DataType.INT32), span)
+        call = tensor.gather(src, index=idx)
+        assert call.op.name == ir.get_op("tensor.gather").name
+        assert "dim" not in call.kwargs
+        assert isinstance(call.type, ir.TensorType)
+        ir.assert_structural_equal(call.type, ir.TensorType([2, 16], DataType.FP32))
+        assert call.type.dtype == DataType.FP32
+
+    def test_flat_positional_indices(self):
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TensorType([1024], DataType.FP16), span)
+        idx = ir.Var("idx", ir.TensorType([1, 32], DataType.INT32), span)
+        ir.assert_structural_equal(tensor.gather(src, idx), tensor.gather(src, index=idx))
+
+    @pytest.mark.parametrize("dtype", [DataType.INT16, DataType.FP32])
+    def test_flat_requires_int32_indices(self, dtype):
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TensorType([1024], DataType.FP16), span)
+        idx = ir.Var("idx", ir.TensorType([1, 32], dtype), span)
+        with pytest.raises(ValueError, match="INT32"):
+            tensor.gather(src, index=idx)
+
+    @pytest.mark.parametrize("shape", [[32], [1, 2, 16]])
+    def test_flat_requires_2d_indices(self, shape):
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TensorType([1024], DataType.FP32), span)
+        idx = ir.Var("idx", ir.TensorType(shape, DataType.INT32), span)
+        with pytest.raises(ValueError, match="2D index"):
+            tensor.gather(src, index=idx)
+
+    @pytest.mark.parametrize(
+        "view",
+        [ir.TensorView([64, 1], ir.TensorLayout.ND), ir.TensorView([1, 4], ir.TensorLayout.DN)],
+    )
+    def test_flat_rejects_noncontiguous_gm_source(self, view):
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TensorType([4, 32], DataType.FP32, None, view), span)
+        idx = ir.Var("idx", ir.TensorType([1, 16], DataType.INT32), span)
+        with pytest.raises(ValueError, match="contiguous ND"):
+            tensor.gather(src, index=idx)
+
+    def test_flat_preserves_index_valid_shape(self):
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TensorType([1024], DataType.FP32), span)
+        idx = ir.Var(
+            "idx",
+            ir.TensorType(
+                [2, 32], DataType.INT32, None, ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[1, 13])
+            ),
+            span,
+        )
+        call = tensor.gather(src, index=idx)
+        ir.assert_structural_equal(
+            call.type,
+            ir.TensorType(
+                [2, 32], DataType.FP32, None, ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[1, 13])
+            ),
+        )
+
+    @pytest.mark.parametrize("wrapper", [tensor.gather, pl.gather])
+    def test_flat_wrapper_forms_and_validation(self, wrapper):
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TensorType([1024], DataType.FP32), span)
+        idx = ir.Var("idx", ir.TensorType([1, 16], DataType.INT32), span)
+        if wrapper is pl.gather:
+            src, idx = pl.Tensor(expr=src), pl.Tensor(expr=idx)
+        positional, keyword = wrapper(src, idx), wrapper(src, index=idx)
+        if wrapper is pl.gather:
+            assert isinstance(positional, pl.Tensor)
+            positional, keyword = positional.unwrap(), keyword.unwrap()
+        ir.assert_structural_equal(positional, keyword)
+        with pytest.raises(ValueError, match="both positionally"):
+            wrapper(src, idx, index=idx)
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            wrapper(src, index=idx, mask_pattern=1)
+        with pytest.raises(ValueError, match="requires index"):
+            wrapper(src, dim=0)
 
 
 if __name__ == "__main__":

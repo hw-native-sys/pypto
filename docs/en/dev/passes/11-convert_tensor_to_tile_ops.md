@@ -480,6 +480,32 @@ Generated PTO op sequence (FP32 `[32, 32]` input, `[2, 8]` index, `[16, 32]` src
 
 `tile.sel` (not `input * mask`) reconstructs the preserve blend so the lowering emits no `pto.tmul`, which A2/A3 reject for bf16/i8. The index `reshape [b, s] → [n, 1]` is a buffer-view realias, not a separate PTO op.
 
+## Flat Gather Lowering
+
+`pl.gather(src, index=idx)` and `pl.gather(src, idx)` emit the existing
+`tensor.gather` **without a `dim` attribute**. This means flat element indexing,
+`out = src.reshape(-1)[idx]`; an explicit `dim` keeps the existing axis semantics.
+
+The converter chooses the operation from the source's type after earlier
+producers have been lowered:
+
+| Source at conversion | Lowering |
+| -------------------- | -------- |
+| GM `TensorType` | Keep the source in GM; load only the indices if necessary; emit `tile.mgather(..., coalesce="elem")` into Vec |
+| On-chip `TileType` | Pack the logical source; allocate index-shaped INT32 scratch; emit `tile.gather` |
+
+Flat gather is self-loading: generic operand bridging must not load the whole GM
+source. Runtime-computed indices already in Vec are reused. Result shape and
+valid shape follow the 2D INT32 indices; scratch/result valid shapes are restored
+explicitly for `tile.gather`. Source dtypes are FP16/FP32/INT16/INT32. GM sources
+must be contiguous ND. On-chip sources must be static 2D row-major Vec with
+32-byte-aligned rows (or one row). Before interpreting flat offsets, strided views
+are packed using `tile.extract` for floating point or exact integer
+`tile.adds(..., 0)` for INT16/INT32 (A2/A3 TEXTRACT does not support these integer types).
+Indices must point to valid source elements; there is no bounds check or negative
+index normalization. This interface does not expose the tile-level Mat, row-coalesce,
+or alternate out-of-bounds modes.
+
 ## Paged Gather Lowering
 
 `tensor.paged_gather(src, indices, block_table, ...)` gathers scattered rows of a paged KV pool directly into an on-chip buffer (L1 / `Mem.Mat` by default, or UB / `Mem.Vec`). The hardware `pto.tgather` instruction can only write UB, so paged-gather-to-L1 is **not** an indexed gather instruction — it is a fully-scalar per-row `GM → on-chip` DMA loop on the **Cube core (AIC)**. `src`, `indices`, and `block_table` are kept as GM tensors (the op is registered self-loading, so the framework does not preload them into Vec tiles).

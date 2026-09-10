@@ -423,6 +423,29 @@ flat_idx[k, c] = index.flat[k] * d + c          # d = 特征宽度（= src 列�
 
 用 `tile.sel`（而非 `input * mask`）重建保留混合，使下沉不产生 `pto.tmul`（A2/A3 对 bf16/i8 拒绝 `tmul`）。index 的 `reshape [b, s] → [n, 1]` 是 buffer 视图重命名，不是单独的 PTO 算子。
 
+## 扁平 Gather 下沉
+
+`pl.gather(src, index=idx)` 和 `pl.gather(src, idx)` 生成已有的
+`tensor.gather`，但**不携带 `dim` 属性**，表示扁平元素索引
+`out = src.reshape(-1)[idx]`；显式指定 `dim` 时保持原有的按维索引语义。
+
+前序生产者下降后，转换器根据源的实际类型选择底层操作：
+
+| 转换时的源 | 下沉方式 |
+| ---------- | -------- |
+| GM `TensorType` | 源保留在 GM，仅在必要时加载索引；生成 `tile.mgather(..., coalesce="elem")`，结果位于 Vec |
+| 片上 `TileType` | 紧凑物化逻辑源；分配索引同形状的 INT32 scratch；生成 `tile.gather` |
+
+扁平 gather 自行加载操作数：通用桥接逻辑不能把整个 GM 源加载到片上。
+已在 Vec 的运行时计算索引直接复用。输出 shape 与 valid shape 跟随二维
+INT32 索引；`tile.gather` 路径显式恢复 scratch 和结果的 valid shape。
+源 dtype 支持 FP16/FP32/INT16/INT32。GM 源必须是连续 ND；片上源必须是
+静态二维行主序 Vec，每行按 32 字节对齐（单行除外）。带 stride 的视图先
+物化为紧凑 tile 再应用扁平偏移：浮点使用 `tile.extract`，INT16/INT32 使用
+保持数值不变的整数 `tile.adds(..., 0)`（A2/A3 TEXTRACT 不支持这两种整数类型）。
+索引必须指向源的有效元素，不做越界检查或负索引
+归一化。此接口不暴露 tile 层的 Mat、按行 coalesce 或其他越界处理模式。
+
 ## Paged Gather 下沉
 
 `tensor.paged_gather(src, indices, block_table, ...)` 把分页 KV 池中分散的行直接聚合到片上 buffer（默认 L1 / `Mem.Mat`，也可 UB / `Mem.Vec`）。硬件 `pto.tgather` 指令只能写 UB，因此“聚合到 L1”**不是**索引 gather 指令，而是 **Cube 核（AIC）** 上一段全标量的逐行 `GM → 片上` DMA 循环。`src`、`indices`、`block_table` 保持为 GM 张量（该算子注册为 self-loading，框架不会把它们预加载成 Vec tile）。

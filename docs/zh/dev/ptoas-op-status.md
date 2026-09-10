@@ -170,7 +170,7 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 | pto.tgather | TGATHER | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tgatherb | TGATHERB | tile | ✅ | ✅ | ❌ | ✅ | — | 32-byte 块偏移前端 + 精确 codegen + 同名 ST；A2/A3 真机 8/8 通过；A5 真机待验证 |
 | pto.tscatter | TSCATTER | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.mgather | MGATHER | tile | ✅ | ✅ | ❌ | ✅ | — | 规范 Vec/Mat overload，并显式携带 row/elem coalesce；Vec 子集已通过 A2/A3 真机，扩展后的 Vec/Mat 矩阵待验证 |
+| pto.mgather | MGATHER | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | 源仍在 GM 时，通过 `pl.gather(src, index=idx)` 提供 tensor 层扁平元素 Vec 接口；tile 层保留规范 Vec/Mat overload 及 row/elem coalesce；扩展后的 Vec/Mat 矩阵待验证 |
 | pto.mscatter | MSCATTER | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.treshape | TRESHAPE | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tinsert | TINSERT | tile | ✅ | ❌ | ❌ | ✅ | — | 由 `tile.assemble` / auto matmul lowering 发射 |

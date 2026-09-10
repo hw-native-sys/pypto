@@ -40,6 +40,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/storage_size.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/utils/tile_conversion_utils.h"
@@ -131,6 +132,72 @@ VarPtr AppendScratchTile(std::vector<StmtPtr>* prologue, const std::shared_ptr<c
   auto tmp_var = std::make_shared<Var>(name, create_call->GetType(), span);
   prologue->push_back(std::make_shared<AssignStmt>(tmp_var, create_call, span));
   return tmp_var;
+}
+
+ConversionResult ConvertFlatGather(const std::vector<ExprPtr>& args, const Span& span) {
+  auto& reg = OpRegistry::GetInstance();
+  std::vector<StmtPtr> prologue;
+  auto emit = [&](const CallPtr& call, const std::string& name) -> VarPtr {
+    auto var = std::make_shared<Var>(name, call->GetType(), span);
+    prologue.push_back(std::make_shared<AssignStmt>(var, call, span));
+    return var;
+  };
+  ExprPtr index = args[1];
+  if (auto tensor = As<TensorType>(index->GetType())) {
+    const auto& valid = tensor->tensor_view_ && !tensor->tensor_view_->valid_shape.empty()
+                            ? tensor->tensor_view_->valid_shape
+                            : tensor->shape_;
+    index = emit(reg.Create("tile.load",
+                            {index, MakeZeroOffsets(2, span), MakeShapeTuple(tensor->shape_, span),
+                             MakeShapeTuple(valid, span)},
+                            {{"target_memory", MemorySpace::Vec}}, span),
+                 "gather_idx");
+  }
+  auto index_type = As<TileType>(index->GetType());
+  INTERNAL_CHECK_SPAN(index_type, span) << "flat gather conversion requires a tile index after loading";
+  if (As<TensorType>(args[0]->GetType())) {
+    return ConversionResult{std::move(prologue),
+                            reg.Create("tile.mgather", {args[0], index}, {{"coalesce", 1}}, span)};
+  }
+
+  auto source = As<TileType>(args[0]->GetType());
+  INTERNAL_CHECK_SPAN(source, span) << "flat gather conversion requires a GM tensor or on-chip tile";
+  CHECK_SPAN(source->shape_.size() == 2, span) << "flat gather on-chip source must be a 2D Vec tile";
+  CHECK_SPAN(!source->memory_space_ || *source->memory_space_ == MemorySpace::Vec, span)
+      << "flat gather on-chip source must be in Vec; move it to Vec or gather from GM";
+  const auto source_view = tile_view_semantics::GetEffectiveTileView(*source);
+  CHECK_SPAN(source_view.blayout == TileLayout::row_major && source_view.slayout == TileLayout::none_box,
+             span)
+      << "flat gather on-chip source must have an unboxed row-major layout";
+  auto rows = As<ConstInt>(source->shape_[0]);
+  auto cols = As<ConstInt>(source->shape_[1]);
+  CHECK_SPAN(rows && cols, span) << "flat gather on-chip source must have a static shape";
+  CHECK_SPAN(rows->value_ == 1 || (cols->value_ * source->dtype_.GetByte()) % 32 == 0, span)
+      << "flat gather on-chip source rows must be 32-byte aligned; gather directly from the GM tensor "
+         "for unaligned rows";
+
+  // A tile.slice may retain its parent's stride. Materialize the logical source
+  // into a packed tile before applying flat element offsets.
+  auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+  // A2/A3 TEXTRACT cannot copy INT16/INT32. Integer addition of zero is an
+  // exact identity and packs the result without a lossy float conversion.
+  auto packed =
+      source->dtype_.IsInt()
+          ? emit(
+                reg.Create("tile.adds", {args[0], std::make_shared<ConstInt>(0, source->dtype_, span)}, span),
+                "gather_src")
+          : emit(reg.Create("tile.extract", {args[0], zero, zero, MakeShapeTuple(source->shape_, span)},
+                            {{"target_memory", MemorySpace::Vec}}, span),
+                 "gather_src");
+  auto tmp = AppendScratchTile(&prologue, index_type, "gather_tmp", span);
+  const auto view = tile_view_semantics::GetEffectiveTileView(*index_type);
+  auto valid_tmp =
+      emit(reg.Create("tile.set_validshape", {tmp, view.valid_shape[0], view.valid_shape[1]}, span),
+           "gather_tmp_valid");
+  auto result = emit(reg.Create("tile.gather", {packed, index, valid_tmp}, span), "gather_flat");
+  return ConversionResult{
+      std::move(prologue),
+      reg.Create("tile.set_validshape", {result, view.valid_shape[0], view.valid_shape[1]}, span)};
 }
 
 // The space one operator's argument is declared to require, straight from its
@@ -1533,6 +1600,9 @@ void OpConversionRegistry::RegisterGatherOps() {
          const Span& span) -> ConversionResult {
         INTERNAL_CHECK_SPAN(args.size() == 2, span)
             << "tensor.gather conversion expects 2 args (input, index), got " << args.size();
+        const bool has_dim =
+            std::any_of(kwargs.begin(), kwargs.end(), [](const auto& kwarg) { return kwarg.first == "dim"; });
+        if (!has_dim) return ConvertFlatGather(args, span);
         auto& op_reg = OpRegistry::GetInstance();
 
         const auto& input = args[0];

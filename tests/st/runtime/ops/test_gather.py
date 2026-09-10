@@ -7,12 +7,13 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""End-to-end tests for ``pl.tensor.gather`` — all three forms.
+"""End-to-end tests for ``pl.gather`` — flat / axis / mask / compare forms.
 
 The tensor layer exposes a single unified ``pl.tensor.gather`` that dispatches
-to one of three tile-level ops based on the kwargs passed:
+to tile-level ops based on the kwargs and source residency:
 
-Index form  (``dim`` + ``index``)                       → ``tile.gather``
+Flat form   (``index``, no ``dim``)                     → ``tile.mgather`` / ``tile.gather``
+Axis form   (``dim`` + ``index``)                       → ``tile.gather``
 Mask form   (``mask_pattern=<int>``)                    → ``tile.gather_mask``
 Compare form (``kvalue`` + ``cmp_mode`` + ``out_cols``) → ``tile.gather_compare``
 
@@ -42,6 +43,7 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
+from harness import st
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto.ir.pass_manager import OptimizationStrategy
 
@@ -1057,6 +1059,126 @@ class TestGatherCompare:
     def test_gather_compare_gt_fp16(self, test_runner, platform):
         result = test_runner.run(GatherCompareGtFP16TestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
+
+
+@pl.jit
+def _flat_gather_gm(src: pl.Tensor, idx: pl.Tensor, out: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        indices = pl.add(idx, 1)
+        out = pl.assemble(out, pl.gather(src, indices), [0, 0])
+    return out
+
+
+@pl.jit
+def _flat_gather_local(src: pl.Tensor, idx: pl.Tensor, out: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        local = pl.add(src, 1)
+        out = pl.assemble(out, pl.gather(local, index=idx), [0, 0])
+    return out
+
+
+@pl.jit
+def _flat_gather_strided_local(src: pl.Tensor, idx: pl.Tensor, out: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        local = pl.add(src, 1)
+        window = pl.slice(local, [4, 32], [0, 16])
+        out = pl.assemble(out, pl.gather(window, index=idx), [0, 0])
+    return out
+
+
+def _flat_gather_case(mode, dtype):
+    generator = torch.Generator().manual_seed(2665)
+    # The GM table is larger than UB even in FP16. Only the selected values
+    # and runtime-computed indices should be resident on-chip.
+    shape = (131072,) if mode == "gm" else (4, 64)
+    src = (
+        torch.randn(shape, generator=generator).to(dtype)
+        if dtype.is_floating_point
+        else torch.randint(-100, 100, shape, generator=generator, dtype=dtype)
+    )
+    limit = 131071 if mode == "gm" else 128 if mode == "strided" else 256
+    idx = torch.randint(0, limit, (2, 32), generator=generator, dtype=torch.int32)
+    idx[0, :8] = torch.tensor([0, limit - 1, 31, 32, 63, 64, 0, limit - 1], dtype=torch.int32)
+    kernel = {"gm": _flat_gather_gm, "local": _flat_gather_local, "strided": _flat_gather_strided_local}[mode]
+
+    def golden(tensors):
+        values = tensors["src"]
+        indices = tensors["idx"].long()
+        if mode == "gm":
+            indices = indices + 1
+        else:
+            values = values + 1
+            if mode == "strided":
+                values = values[:, 16:48]
+        return torch.take(values, indices)
+
+    return st.case(
+        kernel,
+        src,
+        idx,
+        torch.zeros((2, 32), dtype=dtype),
+        name=f"flat_gather_{mode}_{str(dtype).removeprefix('torch.')}",
+        golden=golden,
+        rtol=0,
+        atol=0,
+    )
+
+
+@pytest.mark.platforms("a2a3", "a2a3sim", reason="Tensor flat gather MGATHER/TGATHER lowering on A2/A3.")
+@st.cases(
+    *(
+        _flat_gather_case(mode, dtype)
+        for mode in ("gm", "local", "strided")
+        for dtype in (torch.float16, torch.float32, torch.int16, torch.int32)
+    )
+)
+def test_flat_gather(case_run):
+    case_run.assert_passed()
+
+
+@pl.jit
+def _flat_gather_partial_gm(src: pl.Tensor, idx: pl.Tensor, out: pl.InOut[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        indices = pl.set_validshape(idx, 1, 13)
+        out = pl.assemble(out, pl.gather(src, index=indices), [0, 0])
+    return out
+
+
+@pl.jit
+def _flat_gather_partial_local(src: pl.Tensor, idx: pl.Tensor, out: pl.InOut[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        local = pl.add(src, 1)
+        indices = pl.set_validshape(idx, 1, 13)
+        out = pl.assemble(out, pl.gather(local, index=indices), [0, 0])
+    return out
+
+
+def _flat_gather_partial_case(local_source):
+    src = torch.arange(256, dtype=torch.float32).reshape(4, 64)
+    idx = torch.arange(64, dtype=torch.int32).reshape(2, 32) * 3
+
+    def golden(tensors):
+        expected = torch.full_like(tensors["out"], -123)
+        values = tensors["src"] + 1 if local_source else tensors["src"]
+        expected[:1, :13] = torch.take(values, tensors["idx"][:1, :13].long())
+        return expected
+
+    return st.case(
+        _flat_gather_partial_local if local_source else _flat_gather_partial_gm,
+        src,
+        idx,
+        torch.full((2, 32), -123, dtype=torch.float32),
+        name=f"flat_gather_partial_local{local_source}",
+        golden=golden,
+        rtol=0,
+        atol=0,
+    )
+
+
+@pytest.mark.platforms("a2a3", "a2a3sim", reason="Flat gather preserves the index valid region.")
+@st.cases(*(_flat_gather_partial_case(local) for local in (False, True)))
+def test_flat_gather_partial(case_run):
+    case_run.assert_passed()
 
 
 if __name__ == "__main__":

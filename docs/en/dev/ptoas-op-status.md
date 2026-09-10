@@ -184,7 +184,7 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.tgather | TGATHER | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tgatherb | TGATHERB | tile | ✅ | ✅ | ❌ | ✅ | — | 32-byte block-offset frontend + exact codegen + same-name ST; verified on A2/A3 hardware (8/8); A5 hardware pending |
 | pto.tscatter | TSCATTER | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.mgather | MGATHER | tile | ✅ | ✅ | ❌ | ✅ | — | canonical Vec and Mat overloads with explicit row/elem coalesce; Vec subset verified on A2/A3 hardware, expanded Vec/Mat matrix pending |
+| pto.mgather | MGATHER | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | tensor flat-element Vec interface via `pl.gather(src, index=idx)` when src remains in GM; canonical tile Vec/Mat overloads with row/elem coalesce; expanded Vec/Mat matrix pending |
 | pto.mscatter | MSCATTER | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.treshape | TRESHAPE | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tinsert | TINSERT | tile | ✅ | ❌ | ❌ | ✅ | — | emitted by `tile.assemble` / automatic matmul lowering |

@@ -13,13 +13,16 @@
  * @file gather.cpp
  * @brief Tensor-level gather operator.
  *
- * Supports rank >= 2 and any dim (including negative). Lowered to a sequence
- * of tile.transpose + tile.reshape + tile.gather by ConvertTensorToTileOps.
+ * Supports axis indexing with dim, and flat element indexing without dim.
+ * ConvertTensorToTileOps chooses tile.mgather for a flat GM source or
+ * tile.gather for an on-chip source; axis indexing retains its existing lowering.
  */
 
 #include <any>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -27,20 +30,74 @@
 #include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
+
+namespace {
+TypePtr DeduceFlatGatherType(const std::vector<ExprPtr>& args, const std::string& op_name) {
+  auto get_tensor_type = [&](const ExprPtr& arg) -> std::shared_ptr<const TensorType> {
+    if (auto tensor = As<TensorType>(arg->GetType())) return tensor;
+    if (auto tile = As<TileType>(arg->GetType())) {
+      TensorView view;
+      view.valid_shape = tile_view_semantics::GetEffectiveTileView(*tile).valid_shape;
+      return std::make_shared<TensorType>(tile->shape_, tile->dtype_, std::nullopt, view);
+    }
+    CHECK(false) << op_name << " flat form requires Tensor or Tile operands, got "
+                 << arg->GetType()->TypeName();
+    return nullptr;
+  };
+  auto input = get_tensor_type(args[0]);
+  auto index = get_tensor_type(args[1]);
+  CHECK(input->dtype_ == DataType::FP16 || input->dtype_ == DataType::FP32 ||
+        input->dtype_ == DataType::INT16 || input->dtype_ == DataType::INT32)
+      << op_name << " flat form requires input dtype FP16, FP32, INT16, or INT32";
+  CHECK(!input->shape_.empty()) << op_name << " flat form requires a non-scalar input";
+  CHECK(index->dtype_ == DataType::INT32) << op_name << " flat form requires INT32 indices";
+  CHECK(index->shape_.size() == 2) << op_name << " flat form requires a 2D index, got rank "
+                                   << index->shape_.size();
+  if (input->tensor_view_) {
+    const auto& view = *input->tensor_view_;
+    CHECK(view.layout == TensorLayout::ND) << op_name << " flat form requires a contiguous ND source";
+    if (!view.stride.empty()) {
+      auto packed = tensor_view_semantics::BuildRowMajorStrides(input->shape_);
+      CHECK(view.stride.size() == packed.size()) << op_name << " flat form requires a contiguous ND source";
+      for (size_t i = 0; i < packed.size(); ++i) {
+        CHECK(IsConstValue(input->shape_[i], 1) || AreExprsEqual(view.stride[i], packed[i]))
+            << op_name << " flat form requires a contiguous ND source";
+      }
+    }
+  }
+  TensorView result_view;
+  if (index->tensor_view_) result_view.valid_shape = index->tensor_view_->valid_shape;
+  return std::make_shared<TensorType>(index->shape_, input->dtype_, std::nullopt, result_view);
+}
+}  // namespace
 
 TypePtr DeduceTensorGatherType(const std::vector<ExprPtr>& args,
                                const std::vector<std::pair<std::string, std::any>>& kwargs,
                                const std::string& op_name) {
   CHECK(args.size() == 2) << "The operator " << op_name << " requires 2 arguments (input, index), but got "
                           << args.size();
+
+  int dim_val = -1;
+  bool dim_seen = false;
+  for (const auto& [key, value] : kwargs) {
+    if (key == "dim") {
+      dim_val = AnyCast<int>(value, "kwarg key: dim");
+      dim_seen = true;
+      break;
+    }
+  }
+  if (!dim_seen) return DeduceFlatGatherType(args, op_name);
 
   auto input_type = As<TensorType>(args[0]->GetType());
   CHECK(input_type) << "The operator " << op_name << " requires input to be a TensorType, but got "
@@ -75,17 +132,6 @@ TypePtr DeduceTensorGatherType(const std::vector<ExprPtr>& args,
       << "The operator " << op_name << " requires index rank (" << index_type->shape_.size()
       << ") to match input rank (" << rank << ")";
 
-  int dim_val = -1;
-  bool dim_seen = false;
-  for (const auto& [key, value] : kwargs) {
-    if (key == "dim") {
-      dim_val = AnyCast<int>(value, "kwarg key: dim");
-      dim_seen = true;
-      break;
-    }
-  }
-  CHECK(dim_seen) << "The operator " << op_name << " requires a 'dim' keyword argument";
-
   // Normalize negative dim.
   int norm_dim = dim_val < 0 ? dim_val + static_cast<int>(rank) : dim_val;
   CHECK(norm_dim >= 0 && norm_dim < static_cast<int>(rank))
@@ -110,11 +156,11 @@ TypePtr DeduceTensorGatherType(const std::vector<ExprPtr>& args,
 REGISTER_OP("tensor.gather")
     .set_op_category("TensorOp")
     .set_description(
-        "Gather elements of input along the specified dimension using the index tensor "
-        "(tensor-level). Supports rank>=2 and any dim; lowered via tile.transpose + "
-        "tile.reshape + tile.gather by ConvertTensorToTileOps.")
-    .add_argument("input", "Input tensor (TensorType; FP16, FP32, INT16, or INT32)")
-    .add_argument("index", "Index tensor (TensorType; INT32 any input, or INT16 with a 16-bit input)")
+        "Gather by axis when dim is specified, or by flat element index when dim is omitted. "
+        "Flat indexing selects tile.mgather for GM sources and tile.gather for on-chip sources "
+        "during ConvertTensorToTileOps.")
+    .add_argument("input", "Input tensor (FP16, FP32, INT16, or INT32); flat form also accepts a Tile")
+    .add_argument("index", "Index tensor; flat form also accepts a 2D INT32 Tile")
     .set_attr<int>("dim")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
