@@ -54,6 +54,32 @@ _ELEMENT_BYTES = {
 }
 
 
+# PTOAS v0.61 narrowed `pto.tgatherb`'s A2/A3 destination width from {1, 2, 4}
+# bytes to {2, 4} in the shared op verifier (PTOAS#971), to match a new VPTO
+# lowering path whose `llvm.hivm.VGATHERB` intrinsics only come in `.b16` and
+# `.b32`. The EmitC path these tests take lowers a 1-byte destination through
+# the ISA's dedicated `GatherBInstrB8`, and every case below passed on real
+# A2/A3 hardware under v0.60 — so this is an assembler regression, not a pypto
+# limitation, and nothing in pypto can make them compile again.
+#
+# Tracked as hw-native-sys/PTOAS#1495. Drop these marks (do not "fix" the
+# tests) once the verifier accepts 1-byte destinations again.
+_PTOAS_1495 = (
+    "PTOAS >= v0.61 rejects a 1-byte pto.tgatherb destination on A2/A3, which the "
+    "ISA implements via GatherBInstrB8 and hardware computes correctly "
+    "(hw-native-sys/PTOAS#1495)"
+)
+
+
+def _skip_one_byte_dst(dtype: DataType) -> list[pytest.MarkDecorator]:
+    """Collection-time skip marks for a destination PTOAS >= v0.61 refuses.
+
+    A collection-time mark rather than a ``pytest.skip`` in the body, so the
+    case is not pre-compiled either — compilation is where it fails.
+    """
+    return [pytest.mark.skip(reason=_PTOAS_1495)] if _ELEMENT_BYTES[dtype] == 1 else []
+
+
 def _byte_offsets(pattern: str, rows: int, offsets_per_row: int) -> torch.Tensor:
     source_blocks = rows * offsets_per_row
     indices = torch.arange(source_blocks, dtype=torch.int64)
@@ -172,13 +198,20 @@ class TestGatherb:
     """TGATHERB dtype, block permutation, and valid-shape branches."""
 
     @pytest.mark.parametrize("platform", ONBOARD_PLATFORMS)
-    @pytest.mark.parametrize("dtype", list(_PL_DTYPE))
+    @pytest.mark.parametrize(
+        "dtype",
+        [pytest.param(dt, marks=_skip_one_byte_dst(dt), id=str(dt)) for dt in _PL_DTYPE],
+    )
     def test_dtypes(self, test_runner, platform, dtype):
         result = test_runner.run(GatherbTestCase(dtype=dtype, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
+    # Both patterns gather into UINT8, so both are refused by PTOAS >= v0.61.
     @pytest.mark.parametrize("platform", ONBOARD_PLATFORMS)
-    @pytest.mark.parametrize("pattern", ["reverse", "roll3"])
+    @pytest.mark.parametrize(
+        "pattern",
+        [pytest.param(p, marks=_skip_one_byte_dst(DataType.UINT8), id=p) for p in ("reverse", "roll3")],
+    )
     def test_byte_offset_patterns(self, test_runner, platform, pattern):
         result = test_runner.run(GatherbTestCase(dtype=DataType.UINT8, pattern=pattern, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
@@ -187,11 +220,14 @@ class TestGatherb:
     @pytest.mark.parametrize(
         ("dtype", "output_dtype"),
         [
-            (DataType.INT16, DataType.INT32),
-            (DataType.UINT8, DataType.UINT16),
-            (DataType.INT32, DataType.INT8),
-            (DataType.FP32, DataType.UINT8),
-            (DataType.UINT32, DataType.FP16),
+            pytest.param(src, dst, marks=_skip_one_byte_dst(dst), id=f"{src}-{dst}")
+            for src, dst in (
+                (DataType.INT16, DataType.INT32),
+                (DataType.UINT8, DataType.UINT16),
+                (DataType.INT32, DataType.INT8),
+                (DataType.FP32, DataType.UINT8),
+                (DataType.UINT32, DataType.FP16),
+            )
         ],
     )
     def test_cross_dtype_byte_reinterpretation(self, test_runner, platform, dtype, output_dtype):
