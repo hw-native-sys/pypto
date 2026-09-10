@@ -72,6 +72,8 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 | **IncoreTileOps** | IncoreTileOps | InCore functions use tile ops (no tensor-level ops remain) |
 | **HasMemRefs** | HasMemRefs | All TileType variables have MemRef initialized |
 | **BufferIR** | BufferIR | Explicit device buffer representation and registered-call validity; composes SSA, dominance, and assignment symmetry, without lifetime or initialization proofs |
+| **TileStorageLegalized** | TileStorageLegalized | Device region boundaries share canonical symbolic storage, with independent simultaneous carry windows |
+| **TileStorageAllocated** | TileStorageAllocated | Canonical region storage plus effective-address nonoverlap for simultaneous destinations and explicit moves |
 | **AllocatedMemoryAddr** | AllocatedMemoryAddr | All MemRefs have valid addresses within buffer limits |
 | **OutParamNotShadowed** | OutParamNotShadowed | Out/InOut params not reassigned with tensor-creating ops |
 | **NoNestedInCore** | NoNestedInCore | No nested InCore scopes (`InCoreScopeStmt` inside `InCoreScopeStmt`) |
@@ -274,6 +276,37 @@ Representation and registered-call errors use the
 safety, initialized read coverage, or ordering of asynchronous effects; those
 require subsequent storage analyses. A valid allocation alone does not imply
 initialized data.
+
+### Tile storage properties
+
+`TileStorageLegalized` checks `InCore`, `AIC`, and `AIV` functions after shared
+storage reconciliation. Every tile variable needs a defined MemRef and memory
+space. Each tile branch yield names its declared result window. Each `ForStmt`
+and `WhileStmt` initializer, iter_arg, yield, and result names one canonical
+window; simultaneous carry windows must be disjoint. Scalar and GM values are
+unchanged. Nested tile tuples must first be flattened.
+
+`pass::VerifyTileStorage()` / `passes.verify_tile_storage()` explicitly verifies
+and produces this property even with automatic verification disabled. The staged
+`enable_buffer_ir=True` pipeline runs it after shared/post-reuse reconciliation
+and before `AllocateMemoryAddr`; PTOAS also runs it while skipping that allocator.
+Build and execute a `PassManager` under the same Buffer IR option.
+
+Symbolic checks distinguish allocation identities. `TileStorageAllocated` adds
+physical checks for PYPTO and DSA_RP: windows in one memory space must not overlap
+by effective byte address, even when their base variables differ. Non-identical
+overlapping `tile.move` operands are rejected; exact self-copies are permitted
+for final lowering to eliminate. PTOAS uses symbolic storage identity instead.
+Unknown overlap between simultaneous windows fails closed. Canonical boundaries also
+preserve the declared slot count and slot-index expression. Range checks use
+resolved byte offsets and sizes; they do not expand slot declarations or prove
+cyclic-slot lifetime scheduling.
+
+These properties use fixed walks and sorted window indexes, with O(N log N)
+work. They verify storage boundary closure and the stated overlap constraints;
+they do not establish allocation dominance, general initialized-read coverage,
+or asynchronous lifetime safety. Existing structural, address-bound, and later
+buffer lifetime verifiers remain separate obligations.
 
 ### SSAVerify
 

@@ -539,6 +539,12 @@ PropertyVerifierPtr CreateTileTypeCoherencePropertyVerifier();
  */
 PropertyVerifierPtr CreateBufferIRPropertyVerifier();
 
+/// Verify canonical device region storage before allocation addresses are assigned.
+PropertyVerifierPtr CreateTileStorageLegalizedPropertyVerifier();
+
+/// Verify canonical region storage and transfer overlap using effective physical addresses.
+PropertyVerifierPtr CreateTileStorageAllocatedPropertyVerifier();
+
 /**
  * @brief Factory function for creating OrchestrationReferencesResolved property verifier
  *
