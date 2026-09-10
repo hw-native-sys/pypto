@@ -1834,6 +1834,23 @@ void ValidateCarryBackedge(const StmtPtr& new_body, const std::vector<IterArgPtr
     if (!carry_is_lane_local && !yielded.has_value()) continue;
     if (carry_is_lane_local && yielded.has_value() && SameTileInfo(carry_it->second, *yielded)) continue;
 
+    // An UNBOUND yielded expression is its own diagnosis, and by far the more common
+    // one: this pass halves STATEMENTS, and the parser does not hoist an expression
+    // passed to pl.yield_, so `pl.yield_(pl.tile.add(acc, acc))` leaves the call inline
+    // in the Yield where nothing ever halves it. Saying the carry and the backedge were
+    // "derived differently" sends the author looking at the two ends of a carry that is
+    // fine; the fix is to bind the value first.
+    if (!AsVarLike(yield->value_[i]) &&
+        !std::dynamic_pointer_cast<const TupleGetItemExpr>(yield->value_[i])) {
+      CHECK_SPAN(false, span)
+          << "LowerAutoVectorSplit: the loop carry '" << new_iter_args[i]->name_hint_
+          << "' inside the automatically split vector region is fed an expression computed inline in "
+             "the Yield. This pass halves statements, so a value that is never bound to a name is "
+             "never halved, and it cannot match a per-lane carry. Bind it first -- `tmp = <expr>` on "
+             "its own line, then `pl.yield_(tmp)` -- or move the loop outside the automatically split "
+             "region.";
+    }
+
     auto yielded_var = AsVarLike(yield->value_[i]);
     const std::string yielded_name =
         yielded_var ? " '" + yielded_var->name_hint_ + "'" : std::string(" the yielded value");

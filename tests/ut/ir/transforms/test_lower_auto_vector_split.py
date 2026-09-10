@@ -2752,7 +2752,10 @@ def test_scatter_update_partitioned_destination_is_rejected():
         @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
         def split_auto(
             x: pl.Tensor[[256, 128], pl.FP32],
-            index: pl.Tile[[256, 128], pl.INT32, pl.Mem.Vec],
+            # `index` is [b, s] naming b*s rows, and `values` supplies one row each, so
+            # b*s must equal its row count -- the relation tile.scatter_update documents
+            # and ConvertTensorToTileOps already enforces on the way to pto.tscatter.
+            index: pl.Tile[[256, 1], pl.INT32, pl.Mem.Vec],
             values: pl.Tile[[256, 128], pl.FP32, pl.Mem.Vec],
             rhs: pl.Tile[[128, 128], pl.FP32, pl.Mem.Right],
             out_0: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
@@ -5045,6 +5048,39 @@ def test_loop_backedge_yielding_a_lane_local_value_into_a_shared_carry_is_reject
     with pytest.raises(ValueError, match="is full width, but the body yields") as exc_info:
         _lower(Before)
     assert "'halved'" in str(exc_info.value)
+
+
+def test_loop_backedge_yielding_an_inline_expression_names_the_inline_expression():
+    """An unbound backedge is its own diagnosis, not a carry mismatch.
+
+    The parser does not hoist an expression passed to ``pl.yield_``, so the call
+    stays inline in the ``Yield`` where this pass -- which halves *statements* --
+    never reaches it. The generic message blames the two ends of the carry, which
+    sends the author auditing a carry that is fine; the actionable instruction is
+    to bind the value first.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def split_auto(
+            cube_seed: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+            data: pl.Tensor[[128, 128], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            seed_vec = pl.tile.move(cube_seed, target_memory=pl.Mem.Vec)  # noqa: F841
+            accum = pl.tile.load(data, [0, 0], [128, 128], target_memory=pl.Mem.Vec)
+            for i, (acc_it,) in pl.range(2, init_values=(accum,)):  # noqa: B007
+                acc_loop = pl.yield_(pl.tile.add(acc_it, acc_it))
+            out_store = pl.tile.store(acc_loop, [0, 0], out_0)
+            return out_store
+
+    with pytest.raises(ValueError, match="computed inline in the Yield") as exc_info:
+        _lower(Before)
+    message = str(exc_info.value)
+    assert "Bind it first" in message
+    # The generic carry-mismatch wording would misdirect here, so it must not fire.
+    assert "is full width, but the body yields" not in message
 
 
 def test_slice_drop_dims_maps_the_tracked_source_axis_onto_the_result_axis():
