@@ -38,11 +38,13 @@ multi_type = ir.MultiBufferType(buffer_type, slot_count=2)
 静态有效长度，也可以用 `-1` 标记由算子操作数提供的运行时有效长度；
 省略时使用完整物理形状。布局、以字节为单位的 fractal 大小、padding
 和 compact mode 都是显式描述符字段。`MultiBufferType` 描述一次
-多缓冲分配中的相同槽位，槽位数必须为正数。
+多缓冲分配中的相同槽位，槽位数必须为正数。控制流类型检查会在分支结果
+和循环携带值之间比较完整描述符，包括槽位数及嵌套 tuple 中的元素。
 
 `VoidType` 表示确定没有 SSA 结果，与 `UnknownType` 不同。
 Void call 应放在 `EvalStmt` 中，不能绑定变量、用作操作数、放入 tuple，
-也不能作为值 yield 或 return。
+也不能作为值 yield 或 return。分配大小表达式（包括 `WindowBuffer.size`）
+也必须产生一个值。
 
 这些类型支持构造、结构比较和二进制序列化。Buffer 类型 dump 使用原生
 `pypto.ir.BufferType(...)` 构造表达式，并保留完整描述符。Buffer 算子、

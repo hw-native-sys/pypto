@@ -61,7 +61,8 @@ enum class ErrorType : int {
   CONDITION_MUST_BE_BOOL = 108,                // IfStmt/WhileStmt condition dtype must be BOOL
   TENSOR_PADDING_MISMATCH = 109,               // Tensor pad metadata mismatch
   DISTRIBUTED_WINDOW_IDENTITY_MISMATCH = 110,  // Distributed tensors refer to different window buffers
-  TILE_VIEW_MISMATCH = 111                     // Effective TileView metadata mismatch
+  TILE_VIEW_MISMATCH = 111,                    // Effective TileView metadata mismatch
+  BUFFER_DESCRIPTOR_MISMATCH = 112             // Buffer descriptor or multi-buffer slot count mismatch
 };
 
 /**

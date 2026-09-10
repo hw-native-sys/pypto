@@ -127,6 +127,18 @@ def test_void_cannot_be_hidden_in_memref_addressing(void_call: ir.Call, span: ir
         ir.MemRef(base, 0, 128, span, slots=2, slot=void_call)
 
 
+@pytest.mark.parametrize("explicit_span", [False, True])
+def test_void_cannot_size_a_window_buffer(void_call: ir.Call, span: ir.Span, explicit_span: bool):
+    """Window allocation sizes must produce a value, with a useful source location."""
+    base = ir.Var("base", ir.PtrType(), span)
+    with pytest.raises(ValueError, match="WindowBuffer size.*VoidType") as error:
+        if explicit_span:
+            ir.WindowBuffer(base, void_call, span=span)
+        else:
+            ir.WindowBuffer(base, void_call)
+    assert "void_test.py" in str(error.value)
+
+
 def test_void_cannot_be_wrapped_in_scalar_expressions(void_call: ir.Call, span: ir.Span):
     scalar = ir.ConstInt(1, DataType.INT64, span)
     with pytest.raises(ValueError, match="BinaryExpr left operand.*VoidType"):

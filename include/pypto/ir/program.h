@@ -59,7 +59,9 @@ class WindowBuffer : public Var {
         base_(std::move(base)),
         size_(std::move(size)),
         load_from_host_(load_from_host),
-        store_to_host_(store_to_host) {}
+        store_to_host_(store_to_host) {
+    detail::CheckValueOperand(size_, span_, "WindowBuffer size");
+  }
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::WindowBuffer; }
   [[nodiscard]] std::string TypeName() const override { return "WindowBuffer"; }

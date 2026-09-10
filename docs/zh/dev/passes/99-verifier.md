@@ -231,6 +231,7 @@ lineage **不**跨 phi（`return_vars_` / `iter_args_`）传递，因此分支�
 | 109 | `TENSOR_PADDING_MISMATCH` | Tensor 填充元数据不匹配 |
 | 110 | `DISTRIBUTED_WINDOW_IDENTITY_MISMATCH` | DistributedTensor 引用了不同的窗口缓冲区 |
 | 111 | `TILE_VIEW_MISMATCH` | 有效 TileView 元数据不匹配 |
+| 112 | `BUFFER_DESCRIPTOR_MISMATCH` | Buffer 描述符或多缓冲槽位数量不匹配 |
 
 ### NoNestedCall
 

@@ -450,7 +450,9 @@ void BindPass(nb::module_& m) {
              typecheck::ErrorType::DISTRIBUTED_WINDOW_IDENTITY_MISMATCH,
              "Distributed tensors refer to different window buffers")
       .value("TILE_VIEW_MISMATCH", typecheck::ErrorType::TILE_VIEW_MISMATCH,
-             "Effective TileView metadata mismatch");
+             "Effective TileView metadata mismatch")
+      .value("BUFFER_DESCRIPTOR_MISMATCH", typecheck::ErrorType::BUFFER_DESCRIPTOR_MISMATCH,
+             "Buffer descriptor or multi-buffer slot count mismatch");
 
   // Bind NestedCallErrorType enum
   nb::enum_<nested_call::ErrorType>(passes, "NestedCallErrorType", "Nested call verification error types")

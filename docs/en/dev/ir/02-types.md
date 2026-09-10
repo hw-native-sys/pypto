@@ -40,11 +40,14 @@ contains static extents between zero and the physical extent, or `-1` to mark
 a runtime valid extent supplied as an operator operand. Omitting it means the
 full physical shape. Layout, fractal size in bytes, padding, and compact mode
 are explicit descriptor fields. `MultiBufferType` describes identical slots of
-one multi-buffer allocation; its slot count must be positive.
+one multi-buffer allocation; its slot count must be positive. Control-flow
+type checking compares the complete descriptors, including slot counts and
+nested tuple elements, across branch results and loop-carried values.
 
 `VoidType` means a known absence of an SSA result, distinct from `UnknownType`.
 Void calls belong in `EvalStmt`; they cannot be bound to variables, passed as
-operands, packed into tuples, yielded, or returned as values.
+operands, packed into tuples, yielded, or returned as values. Allocation-size
+expressions, including `WindowBuffer.size`, must also produce a value.
 
 These types support construction, structural comparison, and binary serialization.
 Buffer type dumps use native `pypto.ir.BufferType(...)` constructors and preserve
