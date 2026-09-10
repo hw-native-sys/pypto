@@ -1433,7 +1433,7 @@ class ConstBool(Expr):
         """Data type of the expression (always DataType.BOOL)."""
 
 class Call(Expr):
-    """Function call expression."""
+    """Function call expression. Expressions in args, attrs, and kwargs must produce a value."""
 
     op: Final[Op]
     """Operation/function."""
@@ -1461,7 +1461,7 @@ class Call(Expr):
           :attr:`arg_directions` shortcut for typed access).
         """
 
-    kwargs: Final[Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue]]
+    kwargs: Final[Mapping[str, Any]]
     """Keyword arguments (metadata)."""
 
     @overload
@@ -1499,7 +1499,7 @@ class Call(Expr):
         self,
         op: Op,
         args: Sequence[Expr],
-        kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue],
+        kwargs: Mapping[str, object],
         span: Span,
     ) -> None:
         """Create a function call expression with kwargs.
@@ -1517,7 +1517,7 @@ class Call(Expr):
         self,
         op: Op,
         args: Sequence[Expr],
-        kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue],
+        kwargs: Mapping[str, object],
         type: Type,
         span: Span,
     ) -> None:
@@ -1537,7 +1537,7 @@ class Call(Expr):
         self,
         op: Op,
         args: Sequence[Expr],
-        kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue],
+        kwargs: Mapping[str, object],
         attrs: Mapping[str, object] | Sequence[tuple[str, object]] | None,
         type: Type,
         span: Span,

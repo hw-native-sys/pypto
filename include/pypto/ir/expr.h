@@ -85,6 +85,8 @@ namespace detail {
 /// Validate only the VoidType no-value contract for a value-bearing operand.
 void CheckValueOperand(const ExprPtr& expr, const Span& span, const char* context);
 void CheckValueOperands(const std::vector<ExprPtr>& exprs, const Span& span, const char* context);
+void CheckValueAttrs(const std::vector<std::pair<std::string, std::any>>& attrs, const Span& span,
+                     const char* context);
 
 }  // namespace detail
 
@@ -501,6 +503,7 @@ class Call : public Expr {
    *
    * Validates that, when present, `attrs[kAttrArgDirections]` is a
    * `std::vector<ArgDirection>` with the same length as `args`.
+   * Expressions in args, attrs, and kwargs must produce a value.
    */
   Call(OpPtr op, std::vector<ExprPtr> args, std::vector<std::pair<std::string, std::any>> kwargs,
        std::vector<std::pair<std::string, std::any>> attrs, TypePtr type, Span span)
@@ -510,6 +513,8 @@ class Call : public Expr {
         attrs_(std::move(attrs)),
         kwargs_(std::move(kwargs)) {
     detail::CheckValueOperands(args_, span_, "Call argument");
+    detail::CheckValueAttrs(attrs_, span_, "Call attribute");
+    detail::CheckValueAttrs(kwargs_, span_, "Call keyword argument");
     ValidateArgDirectionsAttr();
   }
 

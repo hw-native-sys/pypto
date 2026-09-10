@@ -10,6 +10,7 @@
  */
 #include "pypto/ir/expr.h"
 
+#include <any>
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -35,6 +36,15 @@ void detail::CheckValueOperand(const ExprPtr& expr, const Span& span, const char
 void detail::CheckValueOperands(const std::vector<ExprPtr>& exprs, const Span& span, const char* context) {
   for (const auto& expr : exprs) {
     CheckValueOperand(expr, span, context);
+  }
+}
+
+void detail::CheckValueAttrs(const std::vector<std::pair<std::string, std::any>>& attrs, const Span& span,
+                             const char* context) {
+  for (const auto& entry : attrs) {
+    ForEachAttrExpr(entry.second, [&](const ExprPtr& expr) {
+      CheckValueOperand(expr, span, (std::string(context) + " '" + entry.first + "'").c_str());
+    });
   }
 }
 

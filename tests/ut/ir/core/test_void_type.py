@@ -79,6 +79,51 @@ def test_every_call_constructor_rejects_void_arguments(constructor: str, void_ca
             ir.Call(op, [void_call], {}, {}, result_type, span)
 
 
+def _call_with_metadata(constructor: str, metadata: dict[str, object], result_type: ir.Type, span: ir.Span):
+    op = ir.Op("test.launch")
+    if constructor == "kwargs":
+        return ir.Call(op, [], metadata, span)
+    if constructor == "kwargs_typed":
+        return ir.Call(op, [], metadata, result_type, span)
+    if constructor == "kwargs_attrs":
+        return ir.Call(op, [], metadata, {}, result_type, span)
+    if constructor == "attrs":
+        return ir.Call(op, [], {}, metadata, result_type, span)
+    return ir.set_call_attrs(ir.Call(op, [], result_type, span), metadata)
+
+
+@pytest.mark.parametrize("constructor", ["kwargs", "kwargs_typed", "kwargs_attrs", "attrs", "set_attrs"])
+@pytest.mark.parametrize("key", ["core_num", "predicate", "custom_expr"])
+@pytest.mark.parametrize("explicit_span", [False, True])
+def test_call_metadata_rejects_void_expressions(constructor, key, explicit_span, void_call, span):
+    """All metadata construction paths reject void values and retain a useful location."""
+    location = span if explicit_span else ir.Span.unknown()
+    context = "Call keyword argument" if constructor.startswith("kwargs") else "Call attribute"
+    with pytest.raises(ValueError, match=f"{context} '{key}'.*VoidType") as error:
+        _call_with_metadata(constructor, {key: void_call}, ir.ScalarType(DataType.INT64), location)
+    assert "void_test.py" in str(error.value)
+
+
+@pytest.mark.parametrize("constructor", ["kwargs", "kwargs_typed", "kwargs_attrs", "attrs", "set_attrs"])
+@pytest.mark.parametrize("result_type", [ir.ScalarType(DataType.INT64), ir.UnknownType(), ir.VoidType()])
+def test_call_metadata_accepts_value_expressions_and_plain_metadata(constructor, result_type, span):
+    """Value metadata stays valid even for a call with no result, including after serialization."""
+    var = ir.Var("task", ir.ScalarType(DataType.INDEX), span)
+    metadata = {
+        "core_num": ir.Add(var, ir.ConstInt(1, DataType.INDEX, span), DataType.INDEX, span),
+        "predicate": ir.ConstBool(True, span),
+        "custom_expr": ir.Call(ir.Op("test.unknown"), [], span),
+        "task_id_var": var,
+        "dump_vars": [var],
+        "arg_direction_overrides": [],
+        "enabled": True,
+        "label": "launch",
+        "dtype": DataType.FP32,
+    }
+    call = _call_with_metadata(constructor, metadata, result_type, span)
+    ir.assert_structural_equal(call, ir.deserialize(ir.serialize(call)), enable_auto_mapping=True)
+
+
 def test_void_cannot_be_a_tuple_element(void_call: ir.Call, span: ir.Span):
     with pytest.raises(ValueError, match="MakeTuple element.*VoidType"):
         ir.MakeTuple([void_call], span)
