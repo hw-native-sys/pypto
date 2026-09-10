@@ -2970,8 +2970,9 @@ std::vector<ExprPtr> AddressArgs(const CallPtr& call) {
 // read-only tile/scalar inputs qualify; a singleton result cannot excuse writes.
 bool IsBroadcastComputation(const CallPtr& call, int split_dim) {
   auto result = As<TileType>(call->GetType());
-  if (!result || !IsSingletonSplitAxis(*result, split_dim) || core_affinity::IsNoDuplicateCall(call))
+  if (!result || !IsSingletonSplitAxis(*result, split_dim) || core_affinity::IsNoDuplicateCall(call)) {
     return false;
+  }
   const auto& entry = OpRegistry::GetInstance().GetEntry(call->op_->name_);
   bool has_tile = false;
   for (size_t i = 0; i < call->args_.size(); ++i) {
@@ -3003,17 +3004,52 @@ bool IsHalfExpr(const ExprPtr& expr, const SplitBodyAnalysis& scan, const TupleH
   return false;
 }
 
-void CopySplitFact(const VarPtr& target, const ExprPtr& value, SplitBodyAnalysis& scan,
-                   TupleHalfFacts& tuples) {
-  if (IsHalfExpr(value, scan, tuples)) scan.half_tiles.insert(target.get());
+std::shared_ptr<const std::vector<bool>> TupleSplitFacts(const ExprPtr& value, const SplitBodyAnalysis& scan,
+                                                         const TupleHalfFacts& tuples) {
   if (auto var = AsVarLike(value)) {
     if (auto it = tuples.find(var.get()); it != tuples.end()) {
-      tuples[target.get()] = it->second;
+      return it->second;
     }
   } else if (auto tuple = As<MakeTuple>(value)) {
     std::vector<bool> facts;
+    facts.reserve(tuple->elements_.size());
     for (const auto& element : tuple->elements_) facts.push_back(IsHalfExpr(element, scan, tuples));
-    tuples[target.get()] = std::make_shared<const std::vector<bool>>(std::move(facts));
+    return std::make_shared<const std::vector<bool>>(std::move(facts));
+  }
+  return nullptr;
+}
+
+void CopySplitFact(const VarPtr& target, const ExprPtr& value, SplitBodyAnalysis& scan,
+                   TupleHalfFacts& tuples) {
+  if (IsHalfExpr(value, scan, tuples)) scan.half_tiles.insert(target.get());
+  if (auto facts = TupleSplitFacts(value, scan, tuples)) tuples[target.get()] = std::move(facts);
+}
+
+// A merge is lane-local only on every incoming edge. For a loop, also check
+// equality: a carry used in the body must retain its entry fact on the backedge.
+void MergeSplitFacts(const VarPtr& target, const ExprPtr& lhs, const ExprPtr& rhs, SplitBodyAnalysis& scan,
+                     TupleHalfFacts& tuples, bool loop_carry = false) {
+  bool mismatch = false;
+  if (auto tuple = As<TupleType>(target->GetType())) {
+    auto left = TupleSplitFacts(lhs, scan, tuples);
+    auto right = TupleSplitFacts(rhs, scan, tuples);
+    std::vector<bool> merged;
+    merged.reserve(tuple->types_.size());
+    for (size_t i = 0; i < tuple->types_.size(); ++i) {
+      const bool a = left && i < left->size() && (*left)[i];
+      const bool b = right && i < right->size() && (*right)[i];
+      mismatch |= a != b;
+      merged.push_back(a && b);
+    }
+    tuples[target.get()] = std::make_shared<const std::vector<bool>>(std::move(merged));
+  } else {
+    const bool a = IsHalfExpr(lhs, scan, tuples);
+    const bool b = IsHalfExpr(rhs, scan, tuples);
+    mismatch = a != b;
+    if (a && b) scan.half_tiles.insert(target.get());
+  }
+  if (loop_carry && mismatch) {
+    scan.full_width_vec_ops.push_back("inconsistent loop-carried value '" + target->name_hint_ + "'");
   }
 }
 
@@ -3152,8 +3188,12 @@ void ScanSplitBody(const std::vector<StmtPtr>& stmts, int split_dim, SplitBodyAn
       ScanSplitBody(transform_utils::FlattenToStmts(for_stmt->body_), split_dim, scan, tuples);
       auto yield = transform_utils::GetLastYieldStmt(for_stmt->body_);
       if (yield) {
-        for (size_t i = 0; i < for_stmt->return_vars_.size() && i < yield->value_.size(); ++i)
-          CopySplitFact(for_stmt->return_vars_[i], yield->value_[i], scan, tuples);
+        for (size_t i = 0;
+             i < for_stmt->return_vars_.size() && i < for_stmt->iter_args_.size() && i < yield->value_.size();
+             ++i) {
+          MergeSplitFacts(for_stmt->return_vars_[i], for_stmt->iter_args_[i]->initValue_, yield->value_[i],
+                          scan, tuples, true);
+        }
       }
     } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
       ScanSplitBody(transform_utils::FlattenToStmts(if_stmt->then_body_), split_dim, scan, tuples);
@@ -3164,8 +3204,7 @@ void ScanSplitBody(const std::vector<StmtPtr>& stmts, int split_dim, SplitBodyAn
         if (lhs && rhs) {
           for (size_t i = 0;
                i < if_stmt->return_vars_.size() && i < lhs->value_.size() && i < rhs->value_.size(); ++i) {
-            if (IsHalfExpr(lhs->value_[i], scan, tuples) && IsHalfExpr(rhs->value_[i], scan, tuples))
-              scan.half_tiles.insert(if_stmt->return_vars_[i].get());
+            MergeSplitFacts(if_stmt->return_vars_[i], lhs->value_[i], rhs->value_[i], scan, tuples);
           }
         }
       }
@@ -3174,8 +3213,12 @@ void ScanSplitBody(const std::vector<StmtPtr>& stmts, int split_dim, SplitBodyAn
       ScanSplitBody(transform_utils::FlattenToStmts(while_stmt->body_), split_dim, scan, tuples);
       auto yield = transform_utils::GetLastYieldStmt(while_stmt->body_);
       if (yield) {
-        for (size_t i = 0; i < while_stmt->return_vars_.size() && i < yield->value_.size(); ++i)
-          CopySplitFact(while_stmt->return_vars_[i], yield->value_[i], scan, tuples);
+        for (size_t i = 0; i < while_stmt->return_vars_.size() && i < while_stmt->iter_args_.size() &&
+                           i < yield->value_.size();
+             ++i) {
+          MergeSplitFacts(while_stmt->return_vars_[i], while_stmt->iter_args_[i]->initValue_,
+                          yield->value_[i], scan, tuples, true);
+        }
       }
     } else if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
       ScanSplitBody(seq->stmts_, split_dim, scan, tuples);
@@ -3186,10 +3229,30 @@ void ScanSplitBody(const std::vector<StmtPtr>& stmts, int split_dim, SplitBodyAn
 }  // namespace
 
 SplitBodyAnalysis AnalyzeSplitBody(const std::vector<StmtPtr>& stmts, int split_dim,
-                                   const std::unordered_map<const Var*, TileInfo>& known_tiles) {
+                                   const std::unordered_map<const Var*, TileInfo>& known_tiles,
+                                   const std::unordered_map<const Var*, VarPtr>& replacements) {
   SplitBodyAnalysis analysis;
   for (const auto& [var, info] : known_tiles) analysis.half_tiles.insert(var);
   TupleHalfFacts tuples;
+  // Loop repair can already reference replacement Vars while other uses still
+  // name the originals. Both identities describe the same transformed value;
+  // retain per-element tuple facts before the final Substitute/DeepClone.
+  for (const auto& [before, after] : replacements) {
+    if (analysis.half_tiles.count(before)) analysis.half_tiles.insert(after.get());
+    auto before_tuple = As<TupleType>(before->GetType());
+    auto after_tuple = As<TupleType>(after->GetType());
+    if (!before_tuple || !after_tuple || before_tuple->types_.size() != after_tuple->types_.size()) {
+      continue;
+    }
+    std::vector<bool> facts;
+    facts.reserve(before_tuple->types_.size());
+    for (size_t i = 0; i < before_tuple->types_.size(); ++i) {
+      facts.push_back(SplitInfoFromHalvedType(before_tuple->types_[i], after_tuple->types_[i]).has_value());
+    }
+    auto shared = std::make_shared<const std::vector<bool>>(std::move(facts));
+    tuples[before] = shared;
+    tuples[after.get()] = std::move(shared);
+  }
   ScanSplitBody(stmts, split_dim, analysis, tuples);
   return analysis;
 }

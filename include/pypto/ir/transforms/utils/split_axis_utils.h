@@ -264,7 +264,8 @@ struct SplitBodyAnalysis {
 };
 
 SplitBodyAnalysis AnalyzeSplitBody(const std::vector<StmtPtr>& stmts, int split_dim,
-                                   const std::unordered_map<const Var*, TileInfo>& known_tiles = {});
+                                   const std::unordered_map<const Var*, TileInfo>& known_tiles = {},
+                                   const std::unordered_map<const Var*, VarPtr>& replacements = {});
 
 /**
  * @brief Result of injecting the per-subblock index at the top of a body.

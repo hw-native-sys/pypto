@@ -98,6 +98,8 @@ pass 能区分「被 scope 包裹的混合函数」与「纯向量函数」，�
 证明已分片。rank-1 load 与全宽 reshape/reinterpret view 可作为后续 lane-local slice
 的中间值，但不会因此成为半宽事实。
 
+控制流合并会逐 tuple 元素取两个分支的 shard 事实交集。循环携带值的初值与回边必须一致，避免仅根据 yield 将零次迭代的出口误判为按 lane 切分。
+
 AUTO 完成下降后，只在同一结构验证器认可时包装单个直线向量阶段，保留计算顺序和 lane 变量身份，仅在区域外没有使用者时把 lane 绑定移入区域。
 向量阶段之后、下一个计算阶段或 return 之前的 SHARED 调用归入该向量阶段。交错的 cube/vector 阶段、控制流、带 `lane_stride` 的重平衡边界、迁移后的边界轴
 继续使用 flat lowered 形式。fallback 保留折半、偏移本地化与边界检查。

@@ -113,6 +113,8 @@ read-only singleton arithmetic remain neutral, so accepting them cannot certify
 an unrelated full-width consumer. Rank-1 loads and full reshape/reinterpret views
 may stage a subsequent lane-local slice; they do not become half-width facts.
 
+At control-flow merges, shard facts are intersected per tuple element across both branches. A loop carry must agree at its initial value and backedge; this also prevents a zero-iteration exit from being classified using only its yield.
+
 After lowering, AUTO wraps a single straight-line vector phase when the same
 structural verifier accepts its region boundaries. It preserves compute order and the lane variable identity. The lane binding moves
 into the region only when no outside statement uses it. Trailing SHARED calls

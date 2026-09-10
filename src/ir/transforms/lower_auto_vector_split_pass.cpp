@@ -53,6 +53,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
@@ -63,12 +64,10 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
-#include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/structural_comparison.h"
-#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
@@ -103,7 +102,8 @@ void CheckNoCubeTileHalved(const std::vector<StmtPtr>& stmts,
                            const std::unordered_map<const Var*, TileInfo>& halved, bool& cube_halved);
 void ValidateTransposeSplitHazard(const std::vector<StmtPtr>& stmts, int split_dim, const Span& region_span);
 void ValidateSplitBody(const std::vector<StmtPtr>& stmts, int split_dim, const Span& span,
-                       const std::unordered_map<const Var*, TileInfo>& known_tiles = {});
+                       const std::unordered_map<const Var*, TileInfo>& known_tiles = {},
+                       const std::unordered_map<const Var*, VarPtr>& replacements = {});
 std::vector<StmtPtr> LowerExplicitRegions(const std::vector<StmtPtr>& stmts,
                                           std::unordered_set<std::string>& used_names);
 
@@ -282,7 +282,7 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
           << "Internal error: LowerAutoVectorSplit halved a CUBE-affinity op inside a pl.split_aiv "
              "region — the vector-sub-region affinity gate leaked into a cube operand.";
 
-      ValidateSplitBody(lowered, rdim, reg->span_, r_tile_vars);
+      ValidateSplitBody(lowered, rdim, reg->span_, r_tile_vars, r_var_repl);
       StmtPtr region_body =
           (lowered.size() == 1) ? lowered[0] : std::make_shared<SeqStmts>(lowered, reg->span_);
       if (!r_var_repl.empty()) {
@@ -633,8 +633,9 @@ void ValidateTransposeSplitHazard(const std::vector<StmtPtr>& stmts, int split_d
 // miscompile). A purely-explicit region — every vector op derived from the
 // aiv_shard result — passes through unchanged.
 void ValidateSplitBody(const std::vector<StmtPtr>& stmts, int split_dim, const Span& region_span,
-                       const std::unordered_map<const Var*, TileInfo>& known_tiles) {
-  auto scan = split_axis::AnalyzeSplitBody(stmts, split_dim, known_tiles);
+                       const std::unordered_map<const Var*, TileInfo>& known_tiles,
+                       const std::unordered_map<const Var*, VarPtr>& replacements) {
+  auto scan = split_axis::AnalyzeSplitBody(stmts, split_dim, known_tiles, replacements);
   if (scan.full_width_vec_ops.empty()) return;
 
   std::string ops;
@@ -866,8 +867,9 @@ FunctionPtr SynthesizeSplitRegion(const FunctionPtr& func, SplitMode mode) {
     if (IsOp(call, "tile.aiv_shard") || IsOp(call, "tile.aic_gather")) {
       // The region syntax derives split from its mode and cannot express a
       // rebalanced lane_stride or an axis migrated by a view. Keep these flat.
-      if (call->HasKwarg("lane_stride") || call->GetKwarg<int>("split", 0) != static_cast<int>(mode))
+      if (call->HasKwarg("lane_stride") || call->GetKwarg<int>("split", 0) != static_cast<int>(mode)) {
         return func;
+      }
     }
     const auto affinity = call ? ClassifyCallAffinity(call) : CoreAffinity::SHARED;
     affinities.push_back(affinity);
@@ -880,8 +882,9 @@ FunctionPtr SynthesizeSplitRegion(const FunctionPtr& func, SplitMode mode) {
   // A trailing SHARED signal belongs to this vector phase up to the next
   // compute phase or return. In particular a post-store notify stays with AIV.
   while (last + 1 < stmts.size() && affinities[last + 1] == CoreAffinity::SHARED &&
-         !As<ReturnStmt>(stmts[last + 1]))
+         !As<ReturnStmt>(stmts[last + 1])) {
     ++last;
+  }
   for (size_t i = first; i <= last; ++i) {
     if (affinities[i] == CoreAffinity::CUBE || As<ReturnStmt>(stmts[i])) return func;
   }
@@ -892,13 +895,15 @@ FunctionPtr SynthesizeSplitRegion(const FunctionPtr& func, SplitMode mode) {
     if (i < first || i > last) outside.VisitStmt(stmts[i]);
   }
   if (outside.var_uses.count(lane_binding->var_.get())) return func;
+  const auto region_begin = stmts.begin() + static_cast<std::ptrdiff_t>(first);
+  const auto region_end = stmts.begin() + static_cast<std::ptrdiff_t>(last + 1);
   std::vector<StmtPtr> region_stmts{lane_binding};
-  region_stmts.insert(region_stmts.end(), stmts.begin() + first, stmts.begin() + last + 1);
+  region_stmts.insert(region_stmts.end(), region_begin, region_end);
   auto region = std::make_shared<SplitAivScopeStmt>(
       mode, 2, "", std::make_shared<SeqStmts>(region_stmts, func->span_), func->span_);
-  std::vector<StmtPtr> body(stmts.begin(), stmts.begin() + first);
+  std::vector<StmtPtr> body(stmts.begin(), region_begin);
   body.push_back(region);
-  body.insert(body.end(), stmts.begin() + last + 1, stmts.end());
+  body.insert(body.end(), region_end, stmts.end());
   auto candidate = MutableCopy(func);
   candidate->body_ = std::make_shared<SeqStmts>(body, func->span_);
 
@@ -943,7 +948,7 @@ FunctionPtr LowerFunction(const FunctionPtr& func, SplitMode mode) {
       << "Internal error: LowerAutoVectorSplit halved a CUBE-affinity op in '" << func->name_
       << "' — the vector-sub-region affinity gate leaked into a cube operand.";
 
-  ValidateSplitBody(new_stmts, split_dim, func->span_, tile_vars);
+  ValidateSplitBody(new_stmts, split_dim, func->span_, tile_vars, var_replacements);
   StmtPtr new_body =
       (new_stmts.size() == 1) ? new_stmts[0] : std::make_shared<SeqStmts>(new_stmts, func->span_);
   if (!var_replacements.empty()) {

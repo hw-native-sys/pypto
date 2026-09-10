@@ -21,7 +21,6 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
-#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {

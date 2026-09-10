@@ -5187,6 +5187,100 @@ def test_manual_alias_and_tuple_projection_preserve_shard_facts():
     )
 
 
+def _tuple_merge_body(span, stmts, aiv_id, qk_h, data, *, element=0):
+    full = T.full([64, 128], DataType.FP32, 1.0, span=span)
+    neutral = ir.Var("neutral", full.type, span)
+    stmts.append(ir.AssignStmt(neutral, full, span))
+    pair = ir.MakeTuple([qk_h, qk_h], span)
+    other = ir.MakeTuple([qk_h, neutral], span)
+    merged = ir.Var("merged", pair.type, span)
+    stmts.append(
+        ir.IfStmt(
+            ir.ConstInt(1, DataType.BOOL, span),
+            ir.YieldStmt([pair], span),
+            ir.YieldStmt([other], span),
+            [merged],
+            span,
+        )
+    )
+    item = ir.TupleGetItemExpr(merged, element, span)
+    add = T.add(item, item, span=span)
+    result = ir.Var("result", add.type, span)
+    stmts.append(ir.AssignStmt(result, add, span))
+    return result
+
+
+def test_manual_tuple_merge_preserves_shard_facts():
+    span = ir.Span.unknown()
+    ir.assert_structural_equal(
+        _lower(_admission_program(span, _tuple_merge_body, wrap=True)),
+        _admission_program(span, _tuple_merge_body, wrap=False),
+    )
+
+
+def test_manual_tuple_merge_requires_both_branches_to_shard_the_element():
+    span = ir.Span.unknown()
+
+    def body(span, stmts, aiv_id, qk_h, data):
+        return _tuple_merge_body(span, stmts, aiv_id, qk_h, data, element=1)
+
+    with pytest.raises(ValueError, match="full-width"):
+        _lower(_admission_program(span, body, wrap=True))
+
+
+@pytest.mark.parametrize("loop_kind", ["for", "while"])
+@pytest.mark.parametrize("initial_half", [False, True])
+@pytest.mark.parametrize("tuple_carry", [False, True])
+def test_manual_loop_rejects_inconsistent_shard_carry(loop_kind, initial_half, tuple_carry):
+    """The initial value and backedge must both support the carry's shard fact."""
+    span = ir.Span.unknown()
+
+    def body(span, stmts, aiv_id, qk_h, data):
+        full = T.full([64, 128], DataType.FP32, 1.0, span=span)
+        neutral = ir.Var("neutral", full.type, span)
+        stmts.append(ir.AssignStmt(neutral, full, span))
+        initial, backedge = (qk_h, neutral) if initial_half else (neutral, qk_h)
+        if tuple_carry:
+            initial = ir.MakeTuple([initial, qk_h], span)
+            backedge = ir.MakeTuple([backedge, qk_h], span)
+        carry = ir.IterArg("carry", initial.type, initial, span)
+        returned = ir.Var("returned", initial.type, span)
+        carried = ir.TupleGetItemExpr(carry, 0, span) if tuple_carry else carry
+        add = T.add(carried, carried, span=span)
+        used = ir.Var("used", add.type, span)
+        # A neutral initial value is not used in the body; the unsafe admission
+        # occurs at the exit when zero iterations return that initial value.
+        body_stmts: list[ir.Stmt] = [ir.AssignStmt(used, add, span)] if initial_half else []
+        body_stmts.append(ir.YieldStmt([backedge], span))
+        loop_body = ir.SeqStmts(body_stmts, span)
+        if loop_kind == "for":
+            loop = ir.ForStmt(
+                ir.Var("i", _IDX, span),
+                ir.ConstInt(0, DataType.INDEX, span),
+                ir.ConstInt(2 if initial_half else 0, DataType.INDEX, span),
+                ir.ConstInt(1, DataType.INDEX, span),
+                [carry],
+                loop_body,
+                [returned],
+                span,
+            )
+        else:
+            loop = ir.WhileStmt(
+                ir.ConstInt(int(initial_half), DataType.BOOL, span), [carry], loop_body, [returned], span
+            )
+        stmts.append(loop)
+        if initial_half:
+            return qk_h
+        exited = ir.TupleGetItemExpr(returned, 0, span) if tuple_carry else returned
+        result_call = T.add(exited, exited, span=span)
+        result = ir.Var("result", result_call.type, span)
+        stmts.append(ir.AssignStmt(result, result_call, span))
+        return result
+
+    with pytest.raises(ValueError, match="full-width|loop-carried"):
+        _lower(_admission_program(span, body, wrap=True))
+
+
 def test_auto_region_keeps_notify_on_aiv_and_wait_on_both_lanes():
     span = ir.Span.unknown()
     source = _notify_region_program(span, ir.SplitMode.UP_DOWN, in_region=True)
