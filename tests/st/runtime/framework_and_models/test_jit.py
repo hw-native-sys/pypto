@@ -14,6 +14,7 @@ serve from cache on subsequent calls, and execute correctly on device.
 """
 
 import ast
+import logging
 import multiprocessing
 import os
 import traceback
@@ -68,6 +69,11 @@ def persistent_add(x: pl.Tensor[[16, 16], pl.FP32], out: pl.Out[pl.Tensor[[16, 1
 
 def _persistent_process(root, platform, device_id, consume, connection):
     """Fresh interpreter: ordinary execution publishes, then readonly reuse executes."""
+    phase = "consumer" if consume else "producer"
+    cache_logger = logging.getLogger("pypto.jit._persistent")
+    cache_logger.setLevel(logging.INFO)
+    handler = logging.StreamHandler()
+    cache_logger.addHandler(handler)
     try:
         from pypto import CacheConfig, cache_stats  # noqa: PLC0415
         from pypto.runtime import RunConfig  # noqa: PLC0415
@@ -103,8 +109,9 @@ def _persistent_process(root, platform, device_id, consume, connection):
             assert stats.binary_builds == int(not consume)
         connection.send(None)
     except BaseException:
-        connection.send(traceback.format_exc())
+        connection.send(f"Persistent cache {phase} failed:\n{traceback.format_exc()}")
     finally:
+        cache_logger.removeHandler(handler)
         connection.close()
 
 
@@ -112,7 +119,11 @@ class TestJITExecution:
     """End-to-end tests for @pl.jit compile + execute on device."""
 
     def test_persistent_cache_across_processes(self, test_config, tmp_path):
-        """READY reuses every stage in a new process and executes numerically."""
+        """READY reuses every stage in a new process and executes numerically.
+
+        Run in a standalone pytest invocation, before its parent initializes
+        any device. CI selects this node separately from the direct-test shard.
+        """
         if test_config.codegen_only:
             pytest.skip("Persistent artifact acceptance requires compiler and runtime")
         root = tmp_path / "persistent-cache"

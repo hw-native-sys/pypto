@@ -1357,7 +1357,20 @@ jobs:
               --ignore=tests/st/codegen \
               --ignore=tests/st/runtime/framework_and_models/test_perf_swimlane.py \
               --ignore=tests/st/runtime/framework_and_models/test_graph_execution.py \
+              --deselect=tests/st/runtime/framework_and_models/test_jit.py::TestJITExecution::test_persistent_cache_across_processes \
               --device=\$TASK_DEVICE --platform=a2a3"
+
+      - name: Test persistent cache across processes (isolated pytest invocation)
+        # The parent must never have initialized the card: earlier direct tests
+        # retain process-level device state even after Worker.close(), so spawned
+        # consumers cannot map registers (halMemCtl EACCES). A per-test fork does
+        # not release that parent's state. Keep both fresh-process cache checks.
+        run: |
+          source activate.sh
+          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 600 \
+            --run "cd $GITHUB_WORKSPACE/st-direct-checkout && source activate.sh && python -m pytest \
+              tests/st/runtime/framework_and_models/test_jit.py::TestJITExecution::test_persistent_cache_across_processes \
+              -v --device=\$TASK_DEVICE --platform=a2a3"
 
       - name: Test paged-attention codegen (numeric compare, in device env)
         # tests/st/codegen runs device-free in the CPU codegen-tests job, but this
