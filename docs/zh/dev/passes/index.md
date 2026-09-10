@@ -29,7 +29,7 @@ pass；`91` 及以后保留给"在多个位置运行的 pass"以及"根本不是
 | 12 | [OptimizeOrchTensors](12-optimize_orch_tensors.md) | 消除编排层冗余分配并改善数据流 |
 | 13 | [LowerCompositeOps](13-lower_composite_ops.md) | 把复合 tile / 分布式算子分解为基础原语 |
 | 13 | [FlattenTileNdTo2D](14-flatten_tile_nd_to_2d.md) | 合并除最后一维外的所有维度，把 3D+ tile 操作拍平为 2D |
-| 15 | [BlockNzTensorViews](15-block_nz_tensor_views.md) | 把逻辑 `pl.NZ` 张量改写为 pto-isa 的分块 rank-(r+2) 形式，并同步改写其 `tile.load` 坐标 |
+| 15 | [BlockNzTensorViews](15-block_nz_tensor_views.md) | 把逻辑 `pl.NZ` 张量改写为 pto-isa 的分块 rank-5 形式，并同步改写其 `tile.load` 坐标 |
 | 16 | [BlockMxScaleTensorViews](16-block_mx_scale_tensor_views.md) | 将逻辑 MX scale 视图迁移为规范的 rank-5 物理分块形式 |
 | 17 | [LegalizeTileCast](17-legalize_tile_cast.md) | 把 ISA 无法单条指令完成的 `tile.cast` 展开为最短的原生 cast 链 |
 | 18 | [AutoTileMatmulL0](18-auto_tile_matmul_l0.md) | 依据后端 L0 容量选择 L0 tile 形状 `(m, n, k)` 并据此分块 matmul |

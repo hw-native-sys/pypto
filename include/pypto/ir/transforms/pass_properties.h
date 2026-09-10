@@ -208,7 +208,7 @@ inline const PassProperties kOptimizeOrchTensorsProperties{
 
 // -- Blocked NZ tensor views ---------------------------------------------------
 //
-// Rewrites a logical ``pl.NZ`` tensor into pto-isa's blocked rank-(r+2) form
+// Rewrites a logical ``pl.NZ`` tensor into pto-isa's blocked rank-5 form
 // and retargets its ``tile.load`` coordinates. It changes shapes and load
 // coordinates inside the existing tile-op vocabulary without establishing or
 // destroying an IRProperty of its own.

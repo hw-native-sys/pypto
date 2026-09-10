@@ -340,8 +340,8 @@ def test_strided_dn_subview_unchanged():
 # An *unblocked* NZ TensorType is rejected by the pass itself
 # ============================================================================
 #
-# NZ is legal on a TensorType, but only in the blocked rank-(r+2) form that
-# ``BlockNzTensorViews`` produces — ``[..., C/c0, R/16, 16, c0]``, whose plain
+# NZ is legal on a TensorType, but only in the blocked rank-5 form that
+# ``BlockNzTensorViews`` produces — ``[B, C/c0, R/16, 16, c0]``, whose plain
 # row-major strides are exactly pto-isa's ``BaseShape2D<..., Layout::NZ>``.
 # A logical-shaped NZ view reaching this pass means BlockNzTensorViews did not
 # run or missed a slot, so the rejection is a pass invariant (INTERNAL_CHECK,
@@ -424,14 +424,15 @@ def test_unblocked_nz_rejected_under_verification_disabled():
 def test_blocked_nz_gets_row_major_strides():
     # The positive counterpart: once the shape is blocked, NZ is an ordinary
     # row-major family member. For [256, 512] INT8 (c0 = 32) the blocked shape
-    # is [16, 16, 16, 32] and pto-isa's BaseShape2D<int8_t, 256, 512, NZ> is
-    # Stride<256*32, 16*32, 32, 1> = [8192, 512, 32, 1].
+    # is the canonical rank-5 [1, 16, 16, 16, 32] and pto-isa's
+    # BaseShape2D<int8_t, 256, 512, NZ> is Stride<512*256, 256*32, 16*32, 32, 1>
+    # = [131072, 8192, 512, 32, 1].
     @pl.program
     class Before:
         @pl.function
         def f(
             self,
-            x: pl.Tensor[[16, 16, 16, 32], pl.INT8, pl.TensorView(stride=[], layout=pl.TensorLayout.NZ)],
+            x: pl.Tensor[[1, 16, 16, 16, 32], pl.INT8, pl.TensorView(stride=[], layout=pl.TensorLayout.NZ)],
         ):
             pl.const(0, pl.INT64)
 
@@ -441,7 +442,7 @@ def test_blocked_nz_gets_row_major_strides():
     view = param_type.tensor_view
     assert view is not None
     assert view.layout == ir.TensorLayout.NZ
-    assert _values_of(view.stride) == [8192, 512, 32, 1]
+    assert _values_of(view.stride) == [131072, 8192, 512, 32, 1]
 
 
 # ============================================================================

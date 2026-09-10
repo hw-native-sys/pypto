@@ -67,9 +67,10 @@ bool HasKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const
 
 /// True when a `tile.load`'s source tensor carries the NZ layout.
 ///
-/// `BlockNzTensorViews` has already put such a load into its final form — a
-/// blocked rank-(r+2) GM window feeding a logical 2D tile — so this pass must
-/// leave it alone rather than collapse the window or re-deduce the tile type.
+/// `BlockNzTensorViews` runs right after this pass and will put such a load
+/// into its final form — a blocked rank-5 GM window feeding a logical 2D tile —
+/// so this pass must leave it alone rather than collapse the window or
+/// re-deduce the tile type.
 bool IsNzSourceLoad(const std::vector<ExprPtr>& args) {
   if (args.empty()) return false;
   auto tensor = AsVarLike(args[0]);
@@ -996,7 +997,7 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         // The collapse below exists because a natural Mat load lowers to ND2NZ,
         // which pto-isa only accepts on a 2D GlobalTensor. An NZ *source* takes
         // the NZ2NZ path instead, and BlockNzTensorViews (which runs right after
-        // this pass) will give it the blocked rank-(r+2) window that path wants.
+        // this pass) will give it the blocked rank-5 window that path wants.
         // Collapsing here would flatten the fractal dims into a row count and
         // destroy that structure, so leave the window at tensor rank and only
         // flatten the tile.

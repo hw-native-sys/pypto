@@ -9,9 +9,9 @@
 
 """Tests for the BlockNzTensorViews pass.
 
-``pl.Tensor[[..., R, C], dtype, pl.NZ]`` asserts that the GM bytes are already
+``pl.Tensor[[R, C], dtype, pl.NZ]`` (or ``[[B, R, C], ...]``) asserts that the GM bytes are already
 in PTO-native NZ fractal order. pto-isa describes such a buffer with a blocked
-rank-(r+2) GlobalTensor (``pto/common/pto_tile.hpp``)::
+rank-5 GlobalTensor (``pto/common/pto_tile.hpp``)::
 
     TileShape2D<T, R, C, Layout::NZ> = Shape< 1, C/c0, R/16, 16, c0>
     BaseShape2D<T, R, C, Layout::NZ> = Stride<C*R, R*c0, 16*c0, c0, 1>
@@ -214,9 +214,14 @@ class NdMatmul:
 
 
 def test_nz_tensor_shape_is_blocked():
-    """[256, 512] INT8 becomes [512/32, 256/16, 16, 32] = [16, 16, 16, 32]."""
+    """[256, 512] INT8 becomes [1, 512/32, 256/16, 16, 32] = [1, 16, 16, 16, 32].
+
+    The leading 1 is pto-isa's batch slot, materialised because the logical
+    tensor has no leading axis. Blocking to rank 4 instead yields a view PTOAS
+    rejects outright ("layout=nz requires a rank-5 view").
+    """
     param_type = _nz_param(_run(NzMatmul))
-    assert _values(param_type.shape) == [16, 16, 16, 32]
+    assert _values(param_type.shape) == [1, 16, 16, 16, 32]
 
 
 def test_leading_dims_are_preserved():
@@ -250,10 +255,10 @@ def test_nd_tensor_is_untouched():
 
 
 def test_tile_load_coordinates_are_blocked_and_tile_stays_2d():
-    """The GM window becomes rank-4; the destination tile stays [256, 512]."""
+    """The GM window becomes rank-5; the destination tile stays [256, 512]."""
     call = _nz_load(_run(NzMatmul))
-    assert _values(_elements(call.args[1])) == [0, 0, 0, 0]  # offsets
-    assert _values(_elements(call.args[2])) == [16, 16, 16, 32]  # shapes
+    assert _values(_elements(call.args[1])) == [0, 0, 0, 0, 0]  # offsets
+    assert _values(_elements(call.args[2])) == [1, 16, 16, 16, 32]  # shapes
     # The tile the load produces is the logical 2-D operand, not the GM window.
     tile_type = call.type
     assert isinstance(tile_type, ir.TileType)
@@ -261,7 +266,7 @@ def test_tile_load_coordinates_are_blocked_and_tile_stays_2d():
 
 
 def test_slice_offsets_are_mapped_to_fractal_coordinates():
-    """A logical [n0, k0] offset becomes [k0/c0, n0/16, 0, 0]."""
+    """A logical [n0, k0] offset becomes [0, k0/c0, n0/16, 0, 0]."""
 
     @pl.program
     class Sliced:
@@ -280,8 +285,8 @@ def test_slice_offsets_are_mapped_to_fractal_coordinates():
 
     call = _nz_load(_run(Sliced))
     # n0 = 256 -> 256/16 = 16 ; k0 = 512 -> 512/32 = 16
-    assert _values(_elements(call.args[1])) == [16, 16, 0, 0]
-    assert _values(_elements(call.args[2])) == [16, 16, 16, 32]
+    assert _values(_elements(call.args[1])) == [0, 16, 16, 0, 0]
+    assert _values(_elements(call.args[2])) == [1, 16, 16, 16, 32]
 
 
 def test_maps_an_spmd_derived_slice_offset():
@@ -309,7 +314,8 @@ def test_maps_an_spmd_derived_slice_offset():
 
     _, _, tm, sv, sd, dyn = _spmd_offset._bind_args_from_signature({})
     call = _nz_load(_run(_spmd_offset._compile_to_program(tm, sv, sd, dyn, pl)))
-    col_off, row_off, in_fractal_row, in_c0_line = _elements(call.args[1])
+    batch_off, col_off, row_off, in_fractal_row, in_c0_line = _elements(call.args[1])
+    assert _const(batch_off) == 0
     assert _const(col_off) == 0
     assert isinstance(row_off, ir.FloorDiv)
     assert isinstance(row_off.left, ir.Var) and row_off.left.name_hint.startswith("n0")
@@ -350,7 +356,8 @@ def test_does_not_reassociate_the_offset_arithmetic():
 
     _, _, tm, sv, sd, dyn = _no_reassoc._bind_args_from_signature({})
     after = _run(_no_reassoc._compile_to_program(tm, sv, sd, dyn, pl))
-    row_off = _elements(_nz_load(after).args[1])[1]
+    # Blocked offsets are [batch, C/c0, R/16, 0, 0] — index 2 is the row axis.
+    row_off = _elements(_nz_load(after).args[1])[2]
 
     # A division of the offset itself, not a product of the block index.
     assert isinstance(row_off, ir.FloorDiv), f"offset was re-associated into {type(row_off).__name__}"
@@ -404,12 +411,14 @@ def test_maps_a_loop_variable_slice_offset():
     assert len(offsets) == 2, f"expected two NZ loads, got {len(offsets)}"
 
     prologue, in_loop = offsets
-    assert _values(prologue) == [0, 0, 0, 0]
-    col_off = in_loop[0]
+    assert _values(prologue) == [0, 0, 0, 0, 0]
+    # [batch, C/c0, R/16, 0, 0] — index 1 is the column-block axis k0 divides.
+    assert _const(in_loop[0]) == 0
+    col_off = in_loop[1]
     assert isinstance(col_off, ir.FloorDiv)
     assert isinstance(col_off.left, ir.Var) and col_off.left.name_hint.startswith("k0")
     assert _const(col_off.right) == 32  # c0 for INT8
-    assert _values(in_loop[1:]) == [0, 0, 0]
+    assert _values(in_loop[2:]) == [0, 0, 0]
 
 
 # ============================================================================
@@ -421,8 +430,10 @@ def test_blocked_nz_strides_match_pto_isa():
     """Row-major over the blocked shape == pto-isa's BaseShape2D<..., NZ>.
 
     For [256, 512] INT8 (c0 = 32) pto-isa gives ``Stride<C*R, R*c0, 16*c0, c0, 1>``
-    which, with the leading batch dim dropped, is
-    ``[256*32, 16*32, 32, 1] = [8192, 512, 32, 1]``.
+    = ``[512*256, 256*32, 16*32, 32, 1] = [131072, 8192, 512, 32, 1]`` — all five,
+    including the leading batch stride. The batch extent is the materialised 1,
+    so that stride is never multiplied by a non-zero coordinate; it still has to
+    be *present*, because pto-isa reads NZ strides at a fixed arity.
 
     If this ever diverges, NZ can no longer reuse the ND row-major stride rule
     and the premise of the whole design is broken — hence a dedicated test.
@@ -434,7 +445,7 @@ def test_blocked_nz_strides_match_pto_isa():
     param_type = _nz_param(optimized)
     view = param_type.tensor_view
     assert view is not None
-    assert _values(view.stride) == [8192, 512, 32, 1]
+    assert _values(view.stride) == [131072, 8192, 512, 32, 1]
 
 
 # ============================================================================
@@ -449,33 +460,36 @@ def test_codegen_emits_blocked_nz_descriptor():
     ]
     assert len(view_lines) == 1, text
     line = view_lines[0]
-    assert "%c16_index, %c16_index, %c16_index, %c32_index" in line  # shape
-    assert "%c8192_index, %c512_index, %c32_index, %c1_index" in line  # pto-isa NZ strides
+    assert "%c1_index, %c16_index, %c16_index, %c16_index, %c32_index" in line  # shape
+    # pto-isa NZ strides, batch stride included
+    assert "%c131072_index, %c8192_index, %c512_index, %c32_index, %c1_index" in line
 
 
 def test_codegen_rank_is_consistent_across_all_three_sites():
     """make_tensor_view, its !pto.tensor_view type and partition_view must agree.
 
     Each is derived independently from ``TensorType::shape_``; a disagreement is
-    what PTOAS rejects outright.
+    what PTOAS rejects outright. The rank they must agree *on* is 5 — PTOAS
+    checks the NZ arity itself, so three mutually consistent rank-4 sites would
+    still be refused.
     """
     text = _emit_pto(NzMatmul)
     nz_view_line = next(
         line for line in text.splitlines() if "make_tensor_view" in line and "layout<nz>" in line
     )
-    assert "!pto.tensor_view<?x?x?x?xi8>" in nz_view_line
+    assert "!pto.tensor_view<?x?x?x?x?xi8>" in nz_view_line
     ssa = nz_view_line.strip().split(" ")[0]
     pview_line = next(line for line in text.splitlines() if "partition_view" in line and f"{ssa}," in line)
-    assert "offsets = [%c0_index, %c0_index, %c0_index, %c0_index]" in pview_line
-    assert "sizes = [%c16_index, %c16_index, %c16_index, %c32_index]" in pview_line
-    assert "!pto.partition_tensor_view<16x16x16x32xi8>" in pview_line
+    assert "offsets = [%c0_index, %c0_index, %c0_index, %c0_index, %c0_index]" in pview_line
+    assert "sizes = [%c1_index, %c16_index, %c16_index, %c16_index, %c32_index]" in pview_line
+    assert "!pto.partition_tensor_view<1x16x16x16x32xi8>" in pview_line
 
 
 def test_codegen_emits_the_divided_offset():
     """The blocked coordinate reaches `partition_view` as the divided offset.
 
     This is the end-to-end statement of the rewrite: the descriptor is the
-    blocked rank-4 NZ one, and the row-fractal coordinate is `n0 / 16` — the
+    blocked rank-5 NZ one, and the row-fractal coordinate is `n0 / 16` — the
     offset the kernel computed, divided, rather than a re-derived index.
     """
 
@@ -498,22 +512,23 @@ def test_codegen_emits_the_divided_offset():
     lines = text.splitlines()
 
     nz_view_line = next(line for line in lines if "make_tensor_view" in line and "layout<nz>" in line)
-    assert "%c16_index, %c32_index, %c16_index, %c32_index" in nz_view_line  # [C/c0, R/16, 16, c0]
+    # [batch, C/c0, R/16, 16, c0]
+    assert "%c1_index, %c16_index, %c32_index, %c16_index, %c32_index" in nz_view_line
 
     ssa = nz_view_line.strip().split(" ")[0]
     pview_line = next(line for line in lines if "partition_view" in line and f"{ssa}," in line)
-    assert "sizes = [%c16_index, %c16_index, %c16_index, %c32_index]" in pview_line
-    # offsets = [c0-block, row-fractal, 0, 0] — only the row fractal is symbolic.
+    assert "sizes = [%c1_index, %c16_index, %c16_index, %c16_index, %c32_index]" in pview_line
+    # offsets = [batch, c0-block, row-fractal, 0, 0] — only the row fractal is symbolic.
     offsets = pview_line.split("offsets = [", 1)[1].split("]", 1)[0].split(", ")
-    assert [offsets[0], offsets[2], offsets[3]] == ["%c0_index"] * 3, pview_line
+    assert [offsets[0], offsets[1], offsets[3], offsets[4]] == ["%c0_index"] * 4, pview_line
 
-    # The NZ coordinate is the kernel's own offset divided: offsets[1] traces
+    # The NZ coordinate is the kernel's own offset divided: offsets[2] traces
     # back through the negative clamp to a division by 16, whose dividend is the
     # `n0 = nb * 256` the ND store on `out` also uses.
     def defining_line(operand: str) -> str:
         return next(line for line in lines if line.strip().startswith(f"{operand} = "))
 
-    clamp = defining_line(offsets[1])
+    clamp = defining_line(offsets[2])
     assert "arith.maxsi" in clamp, clamp
     divide = defining_line(clamp.split("arith.maxsi ", 1)[1].split(",", 1)[0])
     assert "arith.divsi" in divide and "%c16_index" in divide, divide
@@ -536,6 +551,34 @@ def test_codegen_tile_keeps_logical_2d_nz_layout():
 # ============================================================================
 # Rejections — never silently mis-address
 # ============================================================================
+
+
+def test_rejects_logical_rank_above_three():
+    """Rank 4+ has no canonical blocked form — reject it here, not in PTOAS.
+
+    pto-isa's NZ ``GlobalTensor`` has exactly one batch slot, so a logical
+    ``[G, E, N, K]`` weight would need its two leading axes folded into it. The
+    fold is sound on the shape and unsound on the offsets (it would have to
+    re-associate ``[g, e, ...]`` into ``g*E + e``), so the front end names the
+    restriction instead of emitting a view the assembler refuses.
+    """
+
+    @pl.jit
+    def _rank4_nz(
+        x: pl.Tensor[[64, 512], pl.INT8],
+        w: pl.Tensor[[2, 4, 256, 512], pl.INT8, pl.NZ],
+        out: pl.Out[pl.Tensor[[64, 256], pl.INT32]],
+    ):
+        for _ in pl.spmd(1, name_hint="rank4_nz"):
+            xt = pl.slice(x, [64, 512], [0, 0])
+            wt = w[0:1, 0:1, 0:256, 0:512]
+            acc = pl.matmul(xt, wt, b_trans=True, out_dtype=pl.INT32)
+            out[0:64, 0:256] = pl.reshape(acc, [64, 256])
+        return out
+
+    _, _, tm, sv, sd, dyn = _rank4_nz._bind_args_from_signature({})
+    with pytest.raises(ValueError, match="logical rank of at most 3"):
+        _run(_rank4_nz._compile_to_program(tm, sv, sd, dyn, pl))
 
 
 def test_rejects_unaligned_rows():
@@ -766,9 +809,9 @@ def test_c0_is_derived_from_bit_width():
             pl.store(acc, [0, 0], out)
             return out
 
-    # FP16: c0 = 256/16 = 16, so [256, 512] -> [512/16, 256/16, 16, 16].
+    # FP16: c0 = 256/16 = 16, so [256, 512] -> [1, 512/16, 256/16, 16, 16].
     param_type = _nz_param(_run(Fp16Nz))
-    assert _values(param_type.shape) == [32, 16, 16, 16]
+    assert _values(param_type.shape) == [1, 32, 16, 16, 16]
 
 
 def test_rejects_nz_store_destination():

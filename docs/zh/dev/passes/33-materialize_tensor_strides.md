@@ -50,7 +50,7 @@ Pass 使用带 Var 替换缓存的 `IRMutator`，结构与 `InferTileMemorySpace
      - `VisitStmt_(AssignStmtPtr)`：先重建 RHS；若 RHS Call 的返回类型比 LHS Var 当前类型更显式（已物化），同步 LHS Var。
 
 2. **类型重写** —— `MaterializeType(type, span)`：
-   - `TensorType` / `DistributedTensorType` 且 `layout == NZ` 但 shape **未分块**：无论 stride 是否显式，一律用 `INTERNAL_CHECK_SPAN` **拒绝**。NZ 在 tensor 类型上是合法的，但只允许 [BlockNzTensorViews](15-block_nz_tensor_views.md) 产出的分块 rank-(r+2) 形式 `[..., C/c0, R/16, 16, c0]` —— 只有这个 shape 下，下面构建的行主序 stride 才真正描述 NZ 字节序。未分块就到达这里意味着 pass 15 没有运行或漏掉了槽位，因此这是 pass 顺序不变量而非用户错误（面向用户的对齐诊断在 `BlockNzShape` 中）。`span` 参数（携带该类型的 `Var` / `IterArg` / `Call` / `Submit` / 形参 / 函数节点）用于在报错信息中定位出问题的标注。
+   - `TensorType` / `DistributedTensorType` 且 `layout == NZ` 但 shape **未分块**：无论 stride 是否显式，一律用 `INTERNAL_CHECK_SPAN` **拒绝**。NZ 在 tensor 类型上是合法的，但只允许 [BlockNzTensorViews](15-block_nz_tensor_views.md) 产出的分块 rank-5 形式 `[B, C/c0, R/16, 16, c0]` —— 只有这个 shape 下，下面构建的行主序 stride 才真正描述 NZ 字节序。未分块就到达这里意味着 pass 15 没有运行或漏掉了槽位，因此这是 pass 顺序不变量而非用户错误（面向用户的对齐诊断在 `BlockNzShape` 中）。`span` 参数（携带该类型的 `Var` / `IterArg` / `Call` / `Submit` / 形参 / 函数节点）用于在报错信息中定位出问题的标注。
    - `TensorType` / `DistributedTensorType` 满足 `view.has_value() && view.stride.empty()`：用 `BuildLogicalStridesFromLayout(shape, layout)` 重建，并保留 distributed wrapper 与可选元数据（`memref`、`TensorView.pad`、`window_buffer`）。其他 tensor 形态原样返回（保持指针身份）。
    - `TupleType`：递归处理元素类型（沿用同一个 `span`）；任一子类型变化时重建。
    - 其它：原样返回。
@@ -104,7 +104,7 @@ ND 情况下公式退化为标准行主序 packed stride。
 | ------ | ---- |
 | `ND` | `stride[n-1] = 1; stride[k] = stride[k+1] * shape[k+1]`，`k = n-2 .. 0` |
 | `DN`（`n ≥ 2`） | `stride[n-2] = 1`；`stride[n-1] = shape[n-2]`；`stride[n-3] = shape[n-2] * shape[n-1]`；`stride[k] = stride[k+1] * shape[k+1]`，`k = n-4 .. 0` |
-| `NZ` | 对*分块* shape 求行主序 —— 与 ND 规则相同。对 `[..., C/c0, R/16, 16, c0]` 求行主序精确复现 pto-isa 的 `BaseShape2D<..., Layout::NZ>`，因此 NZ 不需要自己的规则。未分块的 NZ shape 在此之前已被拒绝。 |
+| `NZ` | 对*分块* shape 求行主序 —— 与 ND 规则相同。对 `[B, C/c0, R/16, 16, c0]` 求行主序精确复现 pto-isa 的 `BaseShape2D<..., Layout::NZ>`，因此 NZ 不需要自己的规则。未分块的 NZ shape 在此之前已被拒绝。 |
 
 `MakeIndexMul` 对 `ConstInt * ConstInt` 做常量折叠（带 `__builtin_mul_overflow` 守卫，溢出时回退到符号 `Mul` 而不是静默 wrap），并消除 `× 1` 单位元；这样符号维保留为 `Mul` 表达式，静态常量链折叠为单个 `ConstInt`。
 

@@ -179,7 +179,8 @@ matmul weight load can skip the online ND→NZ conversion. It is an assertion ab
 bytes, not a request to convert: the shape and slicing you write stay logical, and the
 compiler derives the blocked physical descriptor. It currently requires a statically shaped,
 fractal-aligned tensor with a whole-byte dtype (`shape[-2] % 16 == 0`,
-`shape[-1] % (256 / dtype bits) == 0`) read
+`shape[-1] % (256 / dtype bits) == 0`) of **logical rank 2 or 3** — `[R, C]` or `[B, R, C]`,
+since the underlying NZ descriptor has exactly one batch slot — read
 into a matmul operand; anything else is rejected with a diagnostic.
 
 When a tensor's rows are not contiguous — a window into a larger buffer, a strided slice

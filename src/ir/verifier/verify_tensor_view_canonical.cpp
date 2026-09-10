@@ -90,13 +90,13 @@ class TensorViewCanonicalVisitor : public IRVisitor {
     }
     const TensorView& view = *tensor_type->tensor_view_;
 
-    // NZ is legal on a TensorType, but only in the blocked rank-(r+2) form that
+    // NZ is legal on a TensorType, but only in the blocked rank-5 form that
     // BlockNzTensorViews produces — that is the only shape for which the
     // row-major stride below actually describes the NZ byte order.
     if (view.layout == TensorLayout::NZ &&
         !tensor_view_semantics::IsBlockedNzShape(tensor_type->shape_, tensor_type->dtype_)) {
       Emit(span,
-           "TensorType has an unblocked NZ layout (expected the blocked rank-(r+2) shape with "
+           "TensorType has an unblocked NZ layout (expected the blocked rank-5 shape with "
            "trailing dims [16, c0] produced by BlockNzTensorViews)");
       return;
     }

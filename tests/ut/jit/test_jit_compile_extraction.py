@@ -651,7 +651,7 @@ class TestNzOnTensorIsNotJitSpecific:
 
     NZ on a TensorType asserts that the GM bytes are already in PTO-native NZ
     fractal order; ``BlockNzTensorViews`` later rewrites the shape into the
-    blocked rank-(r+2) form pto-isa needs. What matters here is only that the
+    blocked rank-5 form pto-isa needs. What matters here is only that the
     annotation *survives specialization* — dropping it is what silently produced
     an ND buffer from an NZ annotation.
 

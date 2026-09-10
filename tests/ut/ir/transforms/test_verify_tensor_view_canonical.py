@@ -151,7 +151,7 @@ def test_empty_stride_fails_strict():
 
 
 def test_unblocked_nz_layout_rejected_weak():
-    # NZ is legal on a TensorType, but only in the blocked rank-(r+2) form.
+    # NZ is legal on a TensorType, but only in the blocked rank-5 form.
     # A logical 2-D NZ shape has no row-major stride that describes the fractal
     # byte order, so the verifier flags it.
     view = ir.TensorView(_stride(16, 1), ir.TensorLayout.NZ)
@@ -171,12 +171,22 @@ def test_unblocked_nz_layout_rejected_strict():
 
 
 def test_blocked_nz_layout_accepted():
-    # The positive counterpart: [256, 512] INT8 blocked to [16, 16, 16, 32]
-    # with pto-isa's NZ strides [8192, 512, 32, 1] is canonical.
+    # The positive counterpart: [256, 512] INT8 blocked to the canonical rank-5
+    # [1, 16, 16, 16, 32] with pto-isa's NZ strides [131072, 8192, 512, 32, 1].
+    view = ir.TensorView(_stride(131072, 8192, 512, 32, 1), ir.TensorLayout.NZ)
+    t = ir.TensorType(_shape(1, 16, 16, 16, 32), DataType.INT8, None, view)
+    diags = _verify(_program_with_param_type(t), require_materialized=True)
+    assert diags == []
+
+
+def test_rank4_nz_layout_rejected():
+    # Trailing dims alone do not make a shape canonical: pto-isa reads NZ at a
+    # fixed rank-5 arity, so the rank-4 form — which PTOAS refuses with
+    # "layout=nz requires a rank-5 view" — must not pass the verifier either.
     view = ir.TensorView(_stride(8192, 512, 32, 1), ir.TensorLayout.NZ)
     t = ir.TensorType(_shape(16, 16, 16, 32), DataType.INT8, None, view)
     diags = _verify(_program_with_param_type(t), require_materialized=True)
-    assert diags == []
+    assert any("NZ" in d.message and "unblocked" in d.message for d in diags)
 
 
 # ============================================================================

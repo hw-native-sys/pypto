@@ -5,7 +5,7 @@
 `BlockNzTensorViews` 把*逻辑* `pl.NZ` 张量改写成 pto-isa `Layout::NZ`
 GlobalTensor 所要求的*分块*形式，并同步改写读取它的 `tile.load`。
 
-`pl.Tensor[[..., R, C], dtype, pl.NZ]` 标注是一条**关于 GM 中现有字节的断言**：
+`pl.Tensor[[R, C], dtype, pl.NZ]`（或 `[[B, R, C], ...]`）标注是一条**关于 GM 中现有字节的断言**：
 这些字节已经按 PTO 原生 NZ 分形序存放。它**不是**"请帮我转换"的请求。DSL 层保持
 逻辑 shape 和逻辑切片不变，本 pass 负责补上后端需要的物理描述。
 
@@ -19,14 +19,20 @@ GlobalTensor 所要求的*分块*形式，并同步改写读取它的 `tile.load
 `Layout::NZ` 特化）：
 
 ```text
-shape   = [..., C/c0, R/16, 16, c0]
-strides = [..., C*R,  R*c0, 16*c0, c0, 1]
+shape   = [B, C/c0, R/16, 16, c0]
+strides = [C*R, R*c0, 16*c0, c0, 1]
 ```
 
 从内往外读：`c0` 个连续元素构成一条 32 字节 C0 线，16 行构成一个 `16 x c0` 分形
-（512 字节），`R/16` 个分形沿行轴排列，**最外层**才在列块之间步进。即"列块在外、
+（512 字节），`R/16` 个分形沿行轴排列，`C/c0` 在列块之间步进。即"列块在外、
 行分形在内"——与 tile 侧的 `blayout=col_major, slayout=row_major, fractal=512`
 描述的是同一个字节序。
+
+**秩固定为 5，不是"逻辑秩 + 2"。** 前导 batch 槽位 `B` 始终存在，与逻辑张量是否
+有前导轴无关。因此逻辑 rank-2 的 `[N, K]` 权重会分块成 `[1, K/c0, N/16, 16, c0]`，
+batch 具化为 `1`。PTOAS 直接校验这个 arity——rank-4 的 view 会被
+`'pto.make_tensor_view' op user-specified layout=nz requires a rank-5 view` 拒绝，
+无论周围 IR 内部多么自洽。
 
 ### 为什么 NZ 不需要自己的 stride 规则
 
@@ -45,7 +51,7 @@ strides = [..., C*R,  R*c0, 16*c0, c0, 1]
 它。stride 由 `MaterializeTensorStrides`（pass 33）稍后填充；本 pass 只改写 shape。
 
 这修正了 RFC #1300 中"NZ 没有 logical-stride 表示"的结论——该结论对逻辑 2-D shape
-成立，对分块后的 rank-(r+2) shape 不成立。
+成立，对分块后的 rank-5 shape 不成立。
 
 ## 在流水线中的位置
 
@@ -76,6 +82,16 @@ w: pl.Tensor[[32, 2048, 4096], pl.INT8, pl.NZ]
 
 # after  (c0 = 32:  4096/32 = 128,  2048/16 = 128)
 w: pl.Tensor[[32, 128, 128, 16, 32], pl.INT8, pl.NZ]
+```
+
+逻辑 rank-2 的权重落到同样的秩上，batch 由编译器合成：
+
+```text
+# before
+w: pl.Tensor[[256, 512], pl.INT8, pl.NZ]
+
+# after  (c0 = 32:  512/32 = 16,  256/16 = 16;  batch 具化为 1)
+w: pl.Tensor[[1, 16, 16, 16, 32], pl.INT8, pl.NZ]
 ```
 
 **阶段 2 —— 改写消费它的 `tile.load`。**
@@ -152,9 +168,9 @@ x * (256 / 16)   ==  268435456    # 重组后：不回绕，读到错误的 frac
 
 [#2543]: https://github.com/hw-native-sys/pypto/pull/2543
 
-目标 `TileType` **原样保留**：GM 分区变成 rank-(r+2)，而 tile 保持逻辑 2-D 操作数。
+目标 `TileType` **原样保留**：GM 分区变成 rank-5，而 tile 保持逻辑 2-D 操作数。
 因此该 load 使用显式类型的 `Call` 构造函数重建，而不是 `OpRegistry::Create`——后者
-会从分块后的 shapes 参数重新推导出 rank-(r+2) 的 tile。
+会从分块后的 shapes 参数重新推导出 rank-5 的 tile。
 
 本 pass 之后不再有逻辑 shape 的 NZ `TensorType` 存活，因此下游（包括 codegen）
 都不需要知道 NZ 的特殊性——codegen 会分别从 `TensorType::shape_` 推导
@@ -163,17 +179,30 @@ x * (256 / 16)   ==  268435456    # 重组后：不回绕，读到错误的 frac
 
 ## 生成代码
 
+以上文逻辑 rank-2 的 `w: pl.Tensor[[256, 512], pl.INT8, pl.NZ]` 为例——注意前导的
+`%c1` / `%c131072` / `1x` 把具化出来的 batch 一路带到三个站点：
+
 ```mlir
 %w_view = pto.make_tensor_view %arg1,
-    shape = [%c16, %c16, %c16, %c32], strides = [%c8192, %c512, %c32, %c1]
-    {layout = #pto.layout<nz>} : !pto.tensor_view<?x?x?x?xi8>
+    shape = [%c1, %c16, %c16, %c16, %c32],
+    strides = [%c131072, %c8192, %c512, %c32, %c1]
+    {layout = #pto.layout<nz>} : !pto.tensor_view<?x?x?x?x?xi8>
 %w_pview = pto.partition_view %w_view,
-    offsets = [%c0, %c0, %c0, %c0], sizes = [%c16, %c16, %c16, %c32]
-    : !pto.tensor_view<?x?x?x?xi8> -> !pto.partition_tensor_view<16x16x16x32xi8>
-pto.tload ins(%w_pview : !pto.partition_tensor_view<16x16x16x32xi8>)
+    offsets = [%c0, %c0, %c0, %c0, %c0], sizes = [%c1, %c16, %c16, %c16, %c32]
+    : !pto.tensor_view<?x?x?x?x?xi8> -> !pto.partition_tensor_view<1x16x16x16x32xi8>
+pto.tload ins(%w_pview : !pto.partition_tensor_view<1x16x16x16x32xi8>)
           outs(%wt : !pto.tile_buf<loc=mat, dtype=i8, rows=256, cols=512,
                                    blayout=col_major, slayout=row_major, fractal=512, ...>)
 ```
+
+**PTOAS 0.61 及以后**由此生成真正的 NZ `GlobalTensor`：
+
+```cpp
+GlobalTensor<int8_t, pto::Shape<1, 16, 16, 16, 32>,
+             pto::Stride<131072, 8192, 512, 32, 1>, pto::Layout::NZ> ...;
+```
+
+在 0.60 及更早版本上，同样的 IR 无法汇编——见下文[汇编器版本](#汇编器版本)。
 
 ## 范围与拒绝项
 
@@ -189,12 +218,27 @@ pto.tload ins(%w_pview : !pto.partition_tensor_view<16x16x16x32xi8>)
 | 末尾切片偏移为符号形式且对齐与符号均可证明 | 映射——见[符号形式的末尾 offset](#符号形式的末尾-offset) |
 | 末尾切片偏移为符号形式但对齐无法证明 | 拒绝——绝不基于「大概是对齐的」去做除法 |
 | 末尾切片偏移为符号形式但符号无法证明 | 拒绝——负 offset 在 partition view 上会被钳位而不是报错 |
-| rank < 2 | 拒绝 |
+| 逻辑 rank 2 | 分块为 `[1, C/c0, R/16, 16, c0]`——batch 具化 |
+| 逻辑 rank 3 | 分块为 `[B, C/c0, R/16, 16, c0]`——前导轴即 batch |
+| 逻辑 rank < 2 | 拒绝——末尾两维是分形平面 |
+| 逻辑 rank > 3 | 拒绝——一个 batch 槽位装不下两个前导轴（见下） |
 | `target_memory != Mat`（或缺省） | 拒绝——NZ→NZ 是 cube 操作数路径 |
 | `tile.load` 之外的消费者 | 拒绝——此处 NZ 是只读的 |
 | 显式 stride 或部分 `valid_shape` | 拒绝 |
 | 分布式张量 | 拒绝——`remote_load` 没有 NZ 分块 |
 | 对 NZ 做 `tensor.view` / `tensor.reinterpret_view` | 在算子构造期拒绝 |
+
+### 为什么拒绝逻辑 rank 4+
+
+pto-isa 的 NZ `GlobalTensor` 只有**一个** batch 槽位，因此逻辑 `[G, E, N, K]` 权重
+必须把两个前导轴折叠进去。这个折叠在 *shape* 上是可证的——稠密行主序张量的前导
+stride 恰好塌缩为 `G*E`、stride 为 `C*R`——但在 *offsets* 上不成立：切片
+`w[g, e, ...]` 需要把坐标重结合成 `g*E + e`，而这正是 `BlockNzOffsets` 拒绝凭空
+造出的算术（重结合为何在一般情况下不可靠，见[符号形式的末尾
+offset](#符号形式的末尾-offset)）。在标注处拒绝可以点名这条限制；否则得到的是一个
+PTOAS 拒绝、且报错指向用户从未写过的 SSA 名的 view。
+
+请在 NZ 标注前 reshape 成 `[B, R, C]`，或把该张量标注为 `pl.ND`。
 
 sub-byte dtype（INT4 / UINT4 / FP4 / HF4 / BOOL）被拒绝，这是 **PyPTO 里程碑 1 的
 范围限制，不是硬件限制**——pto-isa 的 NZ 机制确实处理 FP4（`tload_common.hpp` 中有
@@ -213,14 +257,23 @@ sub-byte dtype（INT4 / UINT4 / FP4 / HF4 / BOOL）被拒绝，这是 **PyPTO �
 shape"。因此本 pass 会在每个改写过的函数上打 `nz_tensor_views_blocked` 标记，
 再次进入时直接返回。
 
-## 下游依赖
+## 汇编器版本
 
-PTOAS 通过结构推断 `make_tensor_view` 的 layout。分块 NZ 与 ND 在结构上完全相同
-（都是行主序），因此 PTOAS 目前会推断出 `nd` 并覆盖显式的 `nz` 标注，报
-`layout mismatch: user-specified layout=nz but inferred=nd`。这个失败是安全的而非
-静默的：在分块 shape 下，pto-isa 的 ND→NZ `TLOAD` 路径要求
-`staticShape[0..2] == 1`，而分块维度违反了它，所以生成的 C++ 会在 `static_assert`
-上编译失败，而不是算出错误结果。端到端可用需要等 PTOAS 信任显式标注。
+本 pass 的输出能否汇编取决于 PTOAS 版本，而仓库当前钉住的版本还不是能工作的那个。
+
+| PTOAS | 行为 |
+| ----- | ---- |
+| ≤ 0.60 | 通过结构推断 layout。分块 NZ 与 ND 在结构上完全相同（都是行主序），因此推断出 `nd` 并覆盖显式的 `nz` 标注，报 `layout mismatch: user-specified layout=nz but inferred=nd`。任何秩的 NZ view 都无法汇编。 |
+| ≥ 0.61 | 把显式的 `ND` / `DN` / `NZ` 标注视为权威并加以校验，因此上面的描述符可以汇编。它同时直接强制 NZ 的 arity：秩不为 5 的 view 会被 `'pto.make_tensor_view' op user-specified layout=nz requires a rank-5 view` 拒绝。 |
+
+`toolchain/versions.env` 目前钉的是 **v0.60**，所以在钉住的工具链上 `pl.NZ` 尚未端到端可用，
+仓库里也没有任何测试会带着 NZ 张量走到汇编器。要走通这条路径，请把 `PTOAS_ROOT`
+指向 0.61 或更高的安装。
+
+0.60 上的失败在两个方向上都是安全而非静默的：它先停在上面的 layout mismatch；
+即便越过那一步，pto-isa 的 ND→NZ `TLOAD` 路径要求 `staticShape[0..2] == 1`，
+而分块维度违反了它，所以生成的 C++ 会在 `static_assert` 上编译失败，
+而不是算出错误结果。
 
 ## 相关文档
 

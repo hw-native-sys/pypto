@@ -50,7 +50,7 @@ The pass uses an `IRMutator` with a Var-substitution cache, mirroring the patter
      - `VisitStmt_(AssignStmtPtr)`: rebuild RHS first; if the RHS Call's return type is more specific than the current LHS Var type, sync the Var.
 
 2. **Type rewriting** — `MaterializeType(type, span)`:
-   - `TensorType` / `DistributedTensorType` with `layout == NZ` whose shape is **not blocked**: **rejected** with an `INTERNAL_CHECK_SPAN`, whether or not the stride is explicit. NZ is legal on a tensor type, but only in the blocked rank-(r+2) form `[..., C/c0, R/16, 16, c0]` that [BlockNzTensorViews](15-block_nz_tensor_views.md) produces — that is the only shape for which the row-major stride built below actually describes the NZ byte order. Reaching here unblocked means pass 15 did not run or missed a slot, so this is a pass-ordering invariant, not a user error (the user-facing alignment diagnostics live in `BlockNzShape`). The `span` argument (the `Var` / `IterArg` / `Call` / `Submit` / param / function node carrying the type) locates the offending annotation in the message.
+   - `TensorType` / `DistributedTensorType` with `layout == NZ` whose shape is **not blocked**: **rejected** with an `INTERNAL_CHECK_SPAN`, whether or not the stride is explicit. NZ is legal on a tensor type, but only in the blocked rank-5 form `[B, C/c0, R/16, 16, c0]` that [BlockNzTensorViews](15-block_nz_tensor_views.md) produces — that is the only shape for which the row-major stride built below actually describes the NZ byte order. Reaching here unblocked means pass 15 did not run or missed a slot, so this is a pass-ordering invariant, not a user error (the user-facing alignment diagnostics live in `BlockNzShape`). The `span` argument (the `Var` / `IterArg` / `Call` / `Submit` / param / function node carrying the type) locates the offending annotation in the message.
    - `TensorType` / `DistributedTensorType` with `view.has_value() && view.stride.empty()`: rebuild with `BuildLogicalStridesFromLayout(shape, layout)` filled in. The distributed wrapper and optional metadata (`memref`, `TensorView.pad`, `window_buffer`) are preserved. Other tensor shapes pass through unchanged (identity preserved).
    - `TupleType`: recurse into element types (same `span`); rebuild only if any sub-type changed.
    - Anything else: pass through.
@@ -105,7 +105,7 @@ See `BuildLogicalStridesFromLayout` in [`tensor_view_semantics.h`](../../../../i
 | ------ | ------- |
 | `ND` | `stride[n-1] = 1; stride[k] = stride[k+1] * shape[k+1]` for `k = n-2 .. 0` |
 | `DN` (`n ≥ 2`) | `stride[n-2] = 1`; `stride[n-1] = shape[n-2]`; `stride[n-3] = shape[n-2] * shape[n-1]`; `stride[k] = stride[k+1] * shape[k+1]` for `k = n-4 .. 0` |
-| `NZ` | row-major over the *blocked* shape — identical to the ND rule. Row-major over `[..., C/c0, R/16, 16, c0]` reproduces pto-isa's `BaseShape2D<..., Layout::NZ>` exactly, so NZ needs no rule of its own. An unblocked NZ shape is rejected before this point. |
+| `NZ` | row-major over the *blocked* shape — identical to the ND rule. Row-major over `[B, C/c0, R/16, 16, c0]` reproduces pto-isa's `BaseShape2D<..., Layout::NZ>` exactly, so NZ needs no rule of its own. An unblocked NZ shape is rejected before this point. |
 
 `MakeIndexMul` folds `ConstInt * ConstInt` (with `__builtin_mul_overflow` guard so an overflow falls back to a symbolic `Mul` rather than silently wrapping) and the multiplicative identity, so symbolic dims are preserved as `Mul` expressions while static chains collapse to a single `ConstInt`.
 

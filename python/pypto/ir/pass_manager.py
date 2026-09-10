@@ -177,7 +177,7 @@ class PassManager:
         tile_pto_passes: tuple[PassFactory, ...] = (
             passes.lower_composite_ops,
             passes.flatten_tile_nd_to_2d,
-            # Rewrite `pl.NZ` tensors into pto-isa's blocked rank-(r+2) form and
+            # Rewrite `pl.NZ` tensors into pto-isa's blocked rank-5 form and
             # retarget their tile.load coordinates. Runs immediately after
             # FlattenTileNdTo2D so the destination tile is already the logical 2D
             # operand: blocking a still-ND-rank tile would leave a tile.load whose

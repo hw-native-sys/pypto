@@ -62,7 +62,7 @@ namespace {
 /// Assert that an NZ view has already been rewritten into its blocked form.
 ///
 /// ``BlockNzTensorViews`` turns every logical ``pl.Tensor[..., pl.NZ]``
-/// annotation into the blocked rank-(r+2) shape whose trailing dims are
+/// annotation into the blocked rank-5 shape whose trailing dims are
 /// ``[16, c0]`` (see ``BlockNzShape``). Only in that form does NZ have a
 /// canonical stride — the plain row-major one this pass is about to build.
 ///
@@ -81,8 +81,9 @@ void CheckNzViewIsBlocked(const TensorView& view, const std::vector<ExprPtr>& sh
   if (view.layout != TensorLayout::NZ) return;
   INTERNAL_CHECK_SPAN(tensor_view_semantics::IsBlockedNzShape(shape, dtype), span)
       << "Internal error: MaterializeTensorStrides found an NZ tensor whose shape is not blocked "
-      << "(expected rank >= 4 with trailing dims [" << tensor_view_semantics::kNzFractalRow << ", "
-      << tensor_view_semantics::NzC0Elems(dtype) << "]) — BlockNzTensorViews did not run or missed it";
+      << "(expected rank " << tensor_view_semantics::kNzBlockedRank << " with trailing dims ["
+      << tensor_view_semantics::kNzFractalRow << ", " << tensor_view_semantics::NzC0Elems(dtype)
+      << "]), got rank " << shape.size() << " — BlockNzTensorViews did not run or missed it";
 }
 
 /// Assert that an MX scale view has already been rewritten into its packed

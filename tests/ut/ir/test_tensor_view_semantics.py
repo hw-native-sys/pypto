@@ -103,14 +103,19 @@ def test_build_nz_is_row_major_over_the_blocked_shape():
     """NZ joins the row-major family once its shape is blocked.
 
     RFC #1300 originally declared NZ unrepresentable as logical strides. That
-    holds for a logical 2-D shape but not for the blocked rank-(r+2) form
-    ``[..., C/c0, R/16, 16, c0]``: row-major over it reproduces pto-isa's
+    holds for a logical 2-D shape but not for the blocked rank-5 form
+    ``[B, C/c0, R/16, 16, c0]``: row-major over it reproduces pto-isa's
     ``BaseShape2D<T, R, C, Layout::NZ>`` exactly. For [256, 512] INT8 (c0 = 32)
-    the blocked shape is [16, 16, 16, 32] and the strides are
-    ``[256*32, 16*32, 32, 1] = [8192, 512, 32, 1]``.
+    the blocked shape is [1, 16, 16, 16, 32] and the strides are
+    ``[512*256, 256*32, 16*32, 32, 1] = [131072, 8192, 512, 32, 1]``.
+
+    The shape passed here is the canonical rank-5 one on purpose. This helper
+    builds row-major strides for whatever rank it is given, so a rank-4 shape
+    would still return four plausible strides and assert cleanly — while
+    pinning a form ``BlockNzShape`` no longer produces and PTOAS refuses.
     """
-    strides = tvs.build_logical_strides_from_layout(_shape(16, 16, 16, 32), ir.TensorLayout.NZ)
-    assert _values_of(strides) == [8192, 512, 32, 1]
+    strides = tvs.build_logical_strides_from_layout(_shape(1, 16, 16, 16, 32), ir.TensorLayout.NZ)
+    assert _values_of(strides) == [131072, 8192, 512, 32, 1]
 
 
 def test_build_dn_rank1_rejected():

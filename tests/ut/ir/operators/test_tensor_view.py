@@ -220,7 +220,7 @@ def test_dsl_view_preserves_distributed_tensor_wrapper():
 def test_nz_target_rejected():
     """tensor.view cannot mint an NZ layout.
 
-    NZ is legal on a TensorType, but only in the blocked rank-(r+2) form that
+    NZ is legal on a TensorType, but only in the blocked rank-5 form that
     BlockNzTensorViews derives from the source tensor — it is not a layout a
     view site gets to choose.
     """

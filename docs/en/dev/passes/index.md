@@ -32,7 +32,7 @@ a pipeline pass at all.
 | 12 | [OptimizeOrchTensors](12-optimize_orch_tensors.md) | Eliminates redundant orchestration allocations and improves data flow |
 | 13 | [LowerCompositeOps](13-lower_composite_ops.md) | Decomposes composite tile / distributed ops into primitives |
 | 13 | [FlattenTileNdTo2D](14-flatten_tile_nd_to_2d.md) | Flattens 3D+ tile operations to 2D by merging all but the last dimension |
-| 15 | [BlockNzTensorViews](15-block_nz_tensor_views.md) | Rewrites logical `pl.NZ` tensors into pto-isa's blocked rank-(r+2) form and retargets their `tile.load` coordinates |
+| 15 | [BlockNzTensorViews](15-block_nz_tensor_views.md) | Rewrites logical `pl.NZ` tensors into pto-isa's blocked rank-5 form and retargets their `tile.load` coordinates |
 | 16 | [BlockMxScaleTensorViews](16-block_mx_scale_tensor_views.md) | Migrates logical MX scale views into canonical packed rank-5 physical form |
 | 17 | [LegalizeTileCast](17-legalize_tile_cast.md) | Expands `tile.cast` pairs the ISA cannot emit as one instruction into the shortest native chain |
 | 18 | [AutoTileMatmulL0](18-auto_tile_matmul_l0.md) | Picks an L0 tile shape `(m, n, k)` from the backend's L0 capacities and tiles matmuls to it |
