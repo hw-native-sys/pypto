@@ -1520,6 +1520,7 @@ def _generate_swimlane(
     swimlane_dir: Path,
     perf_file: Path | None,
     func_names: Path | None = None,
+    deps_json: Path | None = None,
 ) -> None:
     """Run ``python -m simpler_setup.tools.swimlane_converter`` to generate ``merged_swimlane_*.json``.
 
@@ -1536,6 +1537,13 @@ def _generate_swimlane(
         func_names: Optional ``name_map_*.json`` (see :func:`_write_name_map`)
             passed to the converter via ``--func-names``. Takes precedence over
             the ``-k kernel_config.py`` fallback for label resolution.
+        deps_json: Optional ``deps.json`` passed to the converter via
+            ``--deps-json``. Only needed when the task graph does not sit beside
+            the records — the converter's own default is the sibling file — which
+            is the L3 two-pass case, where the graph and timing passes are
+            separate captures in separate directories (see
+            :func:`~pypto.runtime.distributed_runner._collect_l3_swimlane`).
+            Without it the swimlane renders with no dependency edges.
     """
     converter_module = "simpler_setup.tools.swimlane_converter"
     try:
@@ -1572,6 +1580,10 @@ def _generate_swimlane(
     # for label resolution; ``-k`` stays as the fallback when no map was written.
     if func_names is not None:
         cmd += ["--func-names", str(func_names)]
+    # The converter defaults to the records' sibling ``deps.json``; pass the
+    # path only when the caller located the graph elsewhere.
+    if deps_json is not None:
+        cmd += ["--deps-json", str(deps_json)]
 
     try:
         subprocess.run(cmd, check=True)
