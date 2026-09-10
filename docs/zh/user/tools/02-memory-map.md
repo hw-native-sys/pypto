@@ -28,7 +28,7 @@ print(compiled.output_dir)
 然后把工具指向那个目录：
 
 ```bash
-OUT=build_output/<program>_<timestamp>          # 上一行打印出来的路径
+OUT=build_output/<program>_<unique>             # 上一行打印出来的路径
 python -m pypto.tools.memory_map "$OUT/passes_dump/NN_after_SomePass.py" -o map.html
 ```
 

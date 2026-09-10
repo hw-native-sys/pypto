@@ -32,7 +32,7 @@ print(compiled.output_dir)
 Then point the tool at that directory:
 
 ```bash
-OUT=build_output/<program>_<timestamp>          # what the line above printed
+OUT=build_output/<program>_<unique>             # what the line above printed
 python -m pypto.tools.memory_map "$OUT/passes_dump/NN_after_SomePass.py" -o map.html
 ```
 
