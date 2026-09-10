@@ -888,16 +888,13 @@ TypePtr DeduceTileScatterUpdateType(const std::vector<ExprPtr>& args,
       << "tile.scatter_update: src's last dimension must match input's (the row width d), but got src "
       << FormatShape(src_shape) << " against input " << FormatShape(in_shape);
   if (in_shape.size() == 2) {
-    // 2D: src is [b*s, d] -- one flat row per index entry.
-    auto b = As<ConstInt>(idx_shape[0]);
-    auto s_dim = As<ConstInt>(idx_shape[1]);
-    auto rows = As<ConstInt>(src_shape[0]);
-    if (b && s_dim && rows) {
-      CHECK(rows->value_ == b->value_ * s_dim->value_)
-          << "tile.scatter_update: 2D src must have b*s rows, one per index entry, but got src "
-          << FormatShape(src_shape) << " against index " << FormatShape(idx_shape)
-          << " (b*s = " << b->value_ * s_dim->value_ << ")";
-    }
+    // 2D: src is [b*s, d] -- one flat row per index entry. Prove against the PRODUCT
+    // rather than three literals, so a symbolic-but-decidable pair (`[n, 1]` index
+    // against an `[n + 1, d]` src) is still caught.
+    auto rows_needed = MakeMul(idx_shape[0], idx_shape[1]);
+    CHECK(ProveValidExtentEqual(src_shape[0], rows_needed) != ProofResult::kFalse)
+        << "tile.scatter_update: 2D src must have b*s rows, one per index entry, but got src "
+        << FormatShape(src_shape) << " against index " << FormatShape(idx_shape);
   } else {
     // 4D: src is [b, s, 1, d] -- its leading two axes ARE the index shape.
     for (size_t d = 0; d < 2; ++d) {

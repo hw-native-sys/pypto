@@ -6471,7 +6471,11 @@ class TestTileScatterUpdateOps:
             )
 
     def test_tile_scatter_update_symbolic_extent_is_not_rejected(self):
-        """An undecidable relation is left to the backend rather than refused here."""
+        """An undecidable relation is left to the backend rather than refused here.
+
+        The row relation also holds *symbolically* here: `index` is ``[rows, 1]``, so
+        ``b * s`` simplifies back to ``rows`` and the check must not over-reject it.
+        """
         span = ir.Span.unknown()
         rows = ir.Var("rows", ir.ScalarType(DataType.INDEX), span)
         d_a = ir.Var("d_a", ir.ScalarType(DataType.INDEX), span)
@@ -6483,6 +6487,45 @@ class TestTileScatterUpdateOps:
             -2,
             ir.Var("idx", ir.TileType([rows, one], DataType.INT32), span),
             ir.Var("src", ir.TileType([rows, d_b], DataType.FP16), span),
+        ).type
+        assert isinstance(result, ir.TileType)
+
+    def test_tile_scatter_update_provably_wrong_symbolic_row_count_is_rejected(self):
+        """Provable is not the same as literal.
+
+        Comparing three `ConstInt`s would skip this entirely: `index` is ``[n, 1]`` so
+        ``b * s == n``, and an ``n + 1`` row count is a mismatch the analyzer can settle
+        without knowing ``n``. Proving against the product catches it here rather than
+        letting it reach lowering, where a dynamic dimension surfaces as an unrelated
+        internal-check failure.
+        """
+        span = ir.Span.unknown()
+        n = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
+        d = ir.Var("d", ir.ScalarType(DataType.INDEX), span)
+        one = ir.ConstInt(1, DataType.INDEX, span)
+        n_plus_1 = ir.add(n, one, span)
+
+        with pytest.raises(ValueError, match=r"2D src must have b\*s rows"):
+            tile.scatter_update(
+                ir.Var("inp", ir.TileType([n, d], DataType.FP16), span),
+                -2,
+                ir.Var("idx", ir.TileType([n, one], DataType.INT32), span),
+                ir.Var("src", ir.TileType([n_plus_1, d], DataType.FP16), span),
+            )
+
+    def test_tile_scatter_update_undecidable_symbolic_row_count_is_accepted(self):
+        """Two unrelated symbols say nothing, so the relation stays the backend's call."""
+        span = ir.Span.unknown()
+        n = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
+        m = ir.Var("m", ir.ScalarType(DataType.INDEX), span)
+        d = ir.Var("d", ir.ScalarType(DataType.INDEX), span)
+        one = ir.ConstInt(1, DataType.INDEX, span)
+
+        result = tile.scatter_update(
+            ir.Var("inp", ir.TileType([n, d], DataType.FP16), span),
+            -2,
+            ir.Var("idx", ir.TileType([n, one], DataType.INT32), span),
+            ir.Var("src", ir.TileType([m, d], DataType.FP16), span),
         ).type
         assert isinstance(result, ir.TileType)
 
