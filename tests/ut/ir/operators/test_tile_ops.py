@@ -6470,6 +6470,41 @@ class TestTileScatterUpdateOps:
                 ir.Var("src", bad_src, span),
             )
 
+    def test_tile_scatter_update_4d_src_axis_2_must_be_the_declared_singleton(self):
+        """Axis 2 is structural, not a data extent.
+
+        Both declared 4D layouts pin it to one -- input ``[blockNum, blockSize, 1, d]``
+        and src ``[b, s, 1, d]`` -- so a non-unit value is not a bigger scatter, it is a
+        shape that means nothing.
+        """
+        span = ir.Span.unknown()
+        input_type = ir.TileType(_const_dims(span, 4, 4, 1, 64), DataType.BF16)
+        index_type = ir.TileType(_const_dims(span, 2, 4), DataType.INT32)
+        bad_src = ir.TileType(_const_dims(span, 2, 4, 2, 64), DataType.BF16)  # axis 2 = 2
+
+        with pytest.raises(ValueError, match=r"4D src's axis 2 must be the singleton"):
+            tile.scatter_update(
+                ir.Var("inp", input_type, span),
+                -2,
+                ir.Var("idx", index_type, span),
+                ir.Var("src", bad_src, span),
+            )
+
+    def test_tile_scatter_update_4d_input_axis_2_must_be_the_declared_singleton(self):
+        """The same defect one operand over -- the input's layout pins axis 2 too."""
+        span = ir.Span.unknown()
+        bad_input = ir.TileType(_const_dims(span, 4, 4, 2, 64), DataType.BF16)  # axis 2 = 2
+        index_type = ir.TileType(_const_dims(span, 2, 4), DataType.INT32)
+        src_type = ir.TileType(_const_dims(span, 2, 4, 1, 64), DataType.BF16)
+
+        with pytest.raises(ValueError, match=r"4D input's axis 2 must be the singleton"):
+            tile.scatter_update(
+                ir.Var("inp", bad_input, span),
+                -2,
+                ir.Var("idx", index_type, span),
+                ir.Var("src", src_type, span),
+            )
+
     def test_tile_scatter_update_symbolic_extent_is_not_rejected(self):
         """An undecidable relation is left to the backend rather than refused here.
 

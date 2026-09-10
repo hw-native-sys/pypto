@@ -902,6 +902,17 @@ TypePtr DeduceTileScatterUpdateType(const std::vector<ExprPtr>& args,
           << "tile.scatter_update: 4D src's leading dimensions must match index's [b, s], but got src "
           << FormatShape(src_shape) << " against index " << FormatShape(idx_shape);
     }
+    // Axis 2 is a structural singleton in BOTH declared 4D layouts -- input
+    // [blockNum, blockSize, 1, d] and src [b, s, 1, d]. It is not a data extent, so a
+    // non-unit value is not a bigger scatter, it is a shape that means nothing.
+    auto one = std::make_shared<ConstInt>(1, DataType::INDEX, args[0]->span_);
+    CHECK(ProveValidExtentEqual(src_shape[2], one) != ProofResult::kFalse)
+        << "tile.scatter_update: 4D src's axis 2 must be the singleton of [b, s, 1, d], but got src "
+        << FormatShape(src_shape);
+    CHECK(ProveValidExtentEqual(in_shape[2], one) != ProofResult::kFalse)
+        << "tile.scatter_update: 4D input's axis 2 must be the singleton of "
+           "[blockNum, blockSize, 1, d], but got input "
+        << FormatShape(in_shape);
   }
 
   for (const auto& [key, val] : kwargs) {
