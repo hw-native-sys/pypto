@@ -7,13 +7,15 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Branch storage contracts established before all three memory planners."""
+"""Canonical branch and carry storage established before all three memory planners."""
 
 from textwrap import indent
 
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
+
+from .buffer_test_utils import statements
 
 _PLANNERS = [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
 _TILE = "pl.Tile[[4, 8], pl.FP32, pl.Mem.Vec]"
@@ -53,23 +55,20 @@ def _legalize(program: ir.Program, planner: passes.MemoryPlanner) -> ir.Program:
         return passes.materialize_semantic_aliases()(passes.init_mem_ref()(program))
 
 
-class _Storage(ir.IRVisitor):
+class _Storage:
     def __init__(self, program: ir.Program):
-        super().__init__()
         self.assigns: dict[str, ir.AssignStmt] = {}
         self.statements: list[ir.AssignStmt] = []
         self.branches: list[ir.IfStmt] = []
-        for function in program.functions.values():
-            self.visit_stmt(function.body)
-
-    def visit_assign_stmt(self, op: ir.AssignStmt) -> None:
-        self.assigns[op.var.name_hint] = op
-        self.statements.append(op)
-        super().visit_assign_stmt(op)
-
-    def visit_if_stmt(self, op: ir.IfStmt) -> None:
-        self.branches.append(op)
-        super().visit_if_stmt(op)
+        self.loops: list[ir.ForStmt | ir.WhileStmt] = []
+        for statement in statements(program):
+            if isinstance(statement, ir.AssignStmt):
+                self.assigns[statement.var.name_hint] = statement
+                self.statements.append(statement)
+            elif isinstance(statement, ir.IfStmt):
+                self.branches.append(statement)
+            elif isinstance(statement, (ir.ForStmt, ir.WhileStmt)):
+                self.loops.append(statement)
 
     def calls(self, name: str) -> list[ir.AssignStmt]:
         return [op for op in self.statements if isinstance(op.value, ir.Call) and op.value.op.name == name]
@@ -208,6 +207,262 @@ def test_ptoas_legacy_branch_path_remains_the_default():
     storage = _Storage(after)
     assert not storage.calls(_MOVE)
     assert _base(storage.branches[0].return_vars[0]) == _base(storage.assigns["a"].var)
+
+
+def _loop_program(
+    body, *, while_loop=False, initializers=("a", "b"), observe_initial=False, view_result=False, prelude=""
+):
+    carries = ["left", "right", "third"][: len(initializers)]
+    values = ", ".join(initializers)
+    names = ", ".join(carries)
+    header = (
+        f"for ({names},) in pl.while_(init_values=({values},)):\n            pl.cond(flag)"
+        if while_loop
+        else f"for _i, ({names},) in pl.range(0, 3, init_values=({values},)):"
+    )
+    view = f"viewed: {_TILE} = pl.tile.reshape(r_left, [4, 8])" if view_result else ""
+    left_result = "viewed" if view_result else "r_left"
+    observe = (
+        f"observed: {_TILE} = pl.tile.add(combined, a)"
+        if observe_initial
+        else f"observed: {_TILE} = combined"
+    )
+    return pl.parse_program(f"""
+@pl.program
+class LoopStorage:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, a_gm: pl.Tensor[[4, 8], pl.FP32],
+               b_gm: pl.Tensor[[4, 8], pl.FP32],
+               out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+               flag: pl.Scalar[pl.BOOL]) -> pl.Tensor[[4, 8], pl.FP32]:
+        a: {_TILE} = pl.tile.load(a_gm, [0, 0], [4, 8])
+        b: {_TILE} = pl.tile.load(b_gm, [0, 0], [4, 8])
+{indent(prelude, "        ")}
+        {header}
+{indent(body, "            ")}
+        {view}
+        combined: {_TILE} = pl.tile.add({left_result}, r_right)
+        {observe}
+        result: pl.Tensor[[4, 8], pl.FP32] = pl.tile.store(observed, [0, 0], out)
+        return result
+""")
+
+
+def _verify_storage(program, *, physical=False):
+    properties = passes.IRPropertySet()
+    properties.insert(
+        passes.IRProperty.TileStorageAllocated if physical else passes.IRProperty.TileStorageLegalized
+    )
+    assert passes.PropertyVerifierRegistry.verify(properties, program) == []
+
+
+def _simulate_parallel_moves(loop, expected):
+    """Execute the explicit transfer writes using distinct old carry payloads."""
+    memory = {_base(argument): i for i, argument in enumerate(loop.iter_args)}
+    assert len(memory) == len(loop.iter_args)
+    statements = loop.body.stmts if isinstance(loop.body, ir.SeqStmts) else [loop.body]
+    moves = []
+    for statement in statements:
+        if not isinstance(statement, ir.AssignStmt):
+            continue
+        if not isinstance(statement.var.type, ir.TileType):
+            continue
+        assert isinstance(statement.value, ir.Call) and statement.value.op.name == _MOVE
+        source = _base(statement.value.args[0])
+        assert source in memory, "a scratch read must be preceded by its explicit snapshot"
+        memory[_base(statement.var)] = memory[source]
+        moves.append(statement)
+    assert moves, "the permutation must exercise explicit writes"
+    assert [memory[_base(value)] for value in _yield(loop.body).value] == expected
+    assert all(
+        _base(result) == _base(argument)
+        for result, argument in zip(loop.return_vars, loop.iter_args, strict=True)
+    )
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("while_loop", [False, True])
+def test_live_loop_input_is_copied_before_any_iteration(planner, while_loop):
+    program = _loop_program(
+        f"next_left: {_TILE} = pl.tile.add(left, a)\nr_left, r_right = pl.yield_(next_left, right)",
+        while_loop=while_loop,
+        observe_initial=True,
+    )
+    after = _legalize(program, planner)
+    storage = _Storage(after)
+    loop = storage.loops[0]
+    original = _base(storage.assigns["a"].var)
+    assert _base(loop.iter_args[0]) != original
+    initial = loop.iter_args[0].initValue
+    assert isinstance(initial, ir.Var)
+    entry = next(
+        statement for statement in storage.statements if statement.var.unique_id == initial.unique_id
+    )
+    assert isinstance(entry.value, ir.Call) and entry.value.op.name == _MOVE
+    assert _base(entry.value.args[0]) == original
+    # The entry copy is outside the body, so a zero-trip For/While still has the
+    # original carried value. Neither a body producer nor a writeback may clobber a.
+    body_statements = loop.body.stmts if isinstance(loop.body, ir.SeqStmts) else [loop.body]
+    assert all(statement is not entry for statement in body_statements)
+    assert all(
+        _base(statement.var) != original
+        for statement in body_statements
+        if isinstance(statement, ir.AssignStmt) and isinstance(statement.var.type, ir.TileType)
+    )
+    _verify_storage(after)
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=True):
+        ir.assert_structural_equal(passes.materialize_semantic_aliases()(after), after)
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("while_loop", [False, True])
+@pytest.mark.parametrize("fanout", [False, True])
+def test_carry_cycles_and_fanout_preserve_parallel_values(planner, while_loop, fanout):
+    body = (
+        "keep_third: pl.Tensor[[4, 8], pl.FP32] = pl.tile.store(third, [0, 0], out)\n"
+        "r_left, r_right, r_third = pl.yield_(right, left, left)"
+        if fanout
+        else "r_left, r_right = pl.yield_(right, left)"
+    )
+    initializers = ("a", "b", "a") if fanout else ("a", "b")
+    after = _legalize(_loop_program(body, while_loop=while_loop, initializers=initializers), planner)
+    storage = _Storage(after)
+    loop = storage.loops[0]
+    _simulate_parallel_moves(loop, [1, 0, 0] if fanout else [1, 0])
+    _verify_storage(after)
+    # Scratch and entry allocations are already visible before any planner.
+    function = next(iter(after.functions.values()))
+    assert isinstance(function.body, ir.SeqStmts)
+    allocations = storage.calls(_ALLOC)
+    assert allocations and all(
+        any(statement is allocation for statement in function.body.stmts) for allocation in allocations
+    )
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=True):
+        if planner == passes.MemoryPlanner.PYPTO:
+            after = passes.memory_reuse()(after)
+        _verify_storage(after)
+        if planner != passes.MemoryPlanner.PTOAS:
+            allocation_count = len(_Storage(after).calls(_ALLOC))
+            addressed = passes.allocate_memory_addr()(after)
+            assert len(_Storage(addressed).calls(_ALLOC)) == allocation_count
+            _verify_storage(addressed, physical=True)
+
+
+def test_repeated_initializer_gets_two_independent_entry_copies():
+    after = _legalize(
+        _loop_program("r_left, r_right = pl.yield_(right, left)", initializers=("a", "a")),
+        passes.MemoryPlanner.PTOAS,
+    )
+    storage = _Storage(after)
+    loop = storage.loops[0]
+    assert _base(loop.iter_args[0]) != _base(loop.iter_args[1])
+    entry_ids = set()
+    for argument in loop.iter_args:
+        initial = argument.initValue
+        assert isinstance(initial, ir.Var)
+        entry_ids.add(initial.unique_id)
+    entries = [statement for statement in storage.statements if statement.var.unique_id in entry_ids]
+    assert len(entries) == 2 and len({statement.var.name_hint for statement in entries}) == 2
+    assert all(
+        isinstance(statement.value, ir.Call)
+        and _base(statement.value.args[0]) == _base(storage.assigns["a"].var)
+        for statement in entries
+    )
+    _simulate_parallel_moves(loop, [1, 0])
+    _verify_storage(after)
+
+
+def test_while_result_views_follow_the_canonical_carry():
+    program = _loop_program("r_left, r_right = pl.yield_(right, left)", while_loop=True, view_result=True)
+    # The view must follow the While result after InitMemRef originally gave
+    # that result fresh storage.
+    after = _legalize(program, passes.MemoryPlanner.PTOAS)
+    storage = _Storage(after)
+    loop = storage.loops[0]
+    _verify_storage(after)
+    assert all(
+        _base(result) == _base(argument)
+        for result, argument in zip(loop.return_vars, loop.iter_args, strict=True)
+    )
+    combined = storage.assigns["combined"].value
+    assert isinstance(combined, ir.Call)
+    assert [_base(value) for value in combined.args] == [_base(value) for value in loop.return_vars]
+    assert _base(storage.assigns["viewed"].var) == _base(loop.return_vars[0])
+
+
+def test_nested_loop_preserves_input_read_on_the_next_outer_iteration():
+    program = pl.parse_program(f"""
+@pl.program
+class NestedStorage:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, a_gm: pl.Tensor[[4, 8], pl.FP32],
+               b_gm: pl.Tensor[[4, 8], pl.FP32],
+               out: pl.Out[pl.Tensor[[4, 8], pl.FP32]]) -> pl.Tensor[[4, 8], pl.FP32]:
+        a: {_TILE} = pl.tile.load(a_gm, [0, 0], [4, 8])
+        b: {_TILE} = pl.tile.load(b_gm, [0, 0], [4, 8])
+        for _i, (outer,) in pl.range(0, 2, init_values=(b,)):
+            observed: {_TILE} = pl.tile.add(a, outer)
+            for _j, (inner,) in pl.range(0, 2, init_values=(a,)):
+                next_inner: {_TILE} = pl.tile.add(inner, 1.0)
+                inner_result = pl.yield_(next_inner)
+            next_outer: {_TILE} = pl.tile.add(observed, inner_result)
+            outer_result = pl.yield_(next_outer)
+        result: pl.Tensor[[4, 8], pl.FP32] = pl.tile.store(outer_result, [0, 0], out)
+        return result
+""")
+    storage = _Storage(_legalize(program, passes.MemoryPlanner.PTOAS))
+    assert len(storage.loops) == 2
+    inner = storage.loops[1]
+    assert _base(inner.iter_args[0]) != _base(storage.assigns["a"].var)
+    assert _base(storage.assigns["next_inner"].var) != _base(storage.assigns["a"].var)
+
+
+def test_metadata_only_preloop_view_does_not_force_an_entry_copy():
+    program = _loop_program(
+        f"next_left: {_TILE} = pl.tile.add(left, right)\nr_left, r_right = pl.yield_(next_left, right)",
+        initializers=("alias_seed", "b"),
+        prelude=f"alias_seed: {_TILE} = pl.tile.reshape(a, [4, 8])",
+    )
+    storage = _Storage(_legalize(program, passes.MemoryPlanner.PTOAS))
+    assert _base(storage.loops[0].iter_args[0]) == _base(storage.assigns["a"].var)
+    assert not any(statement.var.name_hint.startswith("carry_input_") for statement in storage.statements)
+
+
+def test_view_created_inside_loop_still_observes_old_input_data():
+    program = _loop_program(
+        f"old_view: {_TILE} = pl.tile.reshape(a, [4, 8])\n"
+        f"next_left: {_TILE} = pl.tile.add(left, old_view)\n"
+        "r_left, r_right = pl.yield_(next_left, right)",
+    )
+    storage = _Storage(_legalize(program, passes.MemoryPlanner.PTOAS))
+    original = _base(storage.assigns["a"].var)
+    assert _base(storage.loops[0].iter_args[0]) != original
+    assert _base(storage.assigns["old_view"].var) == original
+
+
+def test_prior_read_does_not_isolate_a_local_top_level_accumulator():
+    program = pl.parse_program("""
+@pl.program
+class AccStorage:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, left: pl.Tile[[16, 16], pl.FP16, pl.Mem.Left],
+               right: pl.Tile[[16, 16], pl.FP16, pl.Mem.Right],
+               out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+        acc: pl.Tile[[16, 16], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(left, right)
+        previous: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.move(acc, target_memory=pl.Mem.Vec)
+        saved: pl.Tensor[[16, 16], pl.FP32] = pl.tile.store(previous, [0, 0], out)
+        for _i, (current,) in pl.range(0, 2, init_values=(acc,)):
+            updated: pl.Tile[[16, 16], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(current, left, right)
+            accumulated = pl.yield_(updated)
+        final: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.move(accumulated, target_memory=pl.Mem.Vec)
+        result: pl.Tensor[[16, 16], pl.FP32] = pl.tile.store(final, [0, 0], saved)
+        return result
+""")
+    after = _legalize(program, passes.MemoryPlanner.PTOAS)
+    storage = _Storage(after)
+    assert _base(storage.loops[0].iter_args[0]) == _base(storage.assigns["acc"].var)
+    assert not any(statement.var.name_hint.startswith("carry_input_") for statement in storage.statements)
+    _verify_storage(after)
 
 
 if __name__ == "__main__":
