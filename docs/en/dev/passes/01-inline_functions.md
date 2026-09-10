@@ -122,7 +122,44 @@ The scope is preserved verbatim and gets outlined by `OutlineIncoreScopes` later
 | Recursive Inline (self or mutual) | `pypto::ValueError` raised before any splicing, with the cycle named (`a -> b -> a`). |
 | Multi-return inline | No `LHS = MakeTuple([rets...])` is emitted — orchestration codegen cannot lower `MakeTuple`. The cloned return values are recorded against the LHS `Var` and downstream `TupleGetItemExpr(LHS, i)` uses are rewritten to value `i`, leaving the LHS binding unreferenced (see `SpliceInlineCallAsTupleSub`). |
 | Nested call to Inline (e.g. `pl.add(inline_fn(x), y)`) | Not handled in v1 — left as-is. The `InlineFunctionsEliminated` verifier flags any surviving Call. |
-| `EvalStmt(inline_call(...))` — return value ignored | The value is discarded, its **evaluation** is not. A discarded cross-function `Call` / `Submit` is re-emitted as an `EvalStmt` (then expanded by the fixpoint loop when its callee is also Inline), so an ignored wrapper ending in `return self.inner(x, out)` keeps `inner`'s write to `out`. A pure value (`Var`, constant, builtin op `Call`) is dropped. A value that merely *wraps* a cross-function call raises `pypto::ValueError` rather than silently deleting the write — return that call directly, or bind the wrapper's result at the call site. |
+| `EvalStmt(inline_call(...))` — return value ignored | The value is discarded, its **evaluation** is not. See [Discarding a return value](#discarding-a-return-value) below. |
+
+## Discarding a return value
+
+An `EvalStmt` call site — `self.wrapper(x, out)` with no LHS — has nowhere to put the callee's trailing return value. Dropping that **value** is correct; dropping its **evaluation** is not, because evaluating it can write through `Out` / `InOut` arguments. Each discarded value is therefore classified:
+
+| Discarded value | Behaviour |
+| --------------- | --------- |
+| A `Call` the operator registry does not positively classify as non-writing — a cross-function dispatch, a writing builtin such as `tile.store`, or any operator nobody has classified yet | Re-emitted as an `EvalStmt`, in return order. The fixpoint loop expands a cross-function one on its next iteration when that callee is also Inline; otherwise it stays an ordinary dispatch, exactly as if the author had written it at the call site. |
+| A `Submit` | Re-emitted as an `EvalStmt`. A task launch is effectful whatever its callee does. |
+| A `Call` whose operator declared it writes through no argument, or any other value that hides nothing effectful (`Var`, constant) | Dropped. |
+| A value that is not itself call-like but *wraps* something effectful — scalar arithmetic such as `self.bump(n) + 1`, a `MakeTuple`, a `TupleGetItemExpr` | `pypto::ValueError`. It cannot become an `EvalStmt`, and deleting it would delete the nested call's write. Return that call directly, or bind the wrapper's result at the call site. |
+
+The registry distinguishes "declared to write through no argument" from "nobody has classified this operator yet" (`OpRegistryEntry::HasDeclaredArgEffects`), and most operators are still in the second group — including plainly effectful ones such as `tile.tpush_to_aiv` and `system.aic_initialize_pipe`, which `dce::IsSideEffectOp` lists as side-effecting. Only a positive verdict allows deletion, so an unclassified pure operator is conservatively kept as a dead-but-harmless `EvalStmt`.
+
+**Before**:
+
+```python
+@pl.function(type=pl.FunctionType.Inline)
+def writeout(self, t, out: pl.Out[...]):
+    return pl.tile.store(t, [0, 0], out)   # the write IS the return expression
+
+@pl.function(type=pl.FunctionType.InCore)
+def kernel(self, a, out: pl.Out[...]):
+    t = pl.tile.load(a, [0, 0], [64, 64])
+    self.writeout(t, out)                  # return value ignored
+    return out
+```
+
+**After** — the store survives:
+
+```python
+@pl.function(type=pl.FunctionType.InCore)
+def kernel(self, a, out: pl.Out[...]):
+    t = pl.tile.load(a, [0, 0], [64, 64])
+    pl.tile.store(t, [0, 0], out)
+    return out
+```
 
 ## Verification
 

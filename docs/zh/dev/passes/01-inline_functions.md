@@ -122,7 +122,44 @@ scope 被原样保留,稍后由 `OutlineIncoreScopes` 提取为独立的 InCore 
 | 递归 Inline(自递归或互相调用) | 在任何展开发生之前抛出 `pypto::ValueError`,消息中标明环路径(`a -> b -> a`)。 |
 | 多返回值 Inline | **不**发出 `LHS = MakeTuple([rets...])` — 编排层 codegen 无法 lower `MakeTuple`。改为把克隆后的返回值记录在 LHS `Var` 上,并把下游 `TupleGetItemExpr(LHS, i)` 的使用改写为第 `i` 个值,使该 LHS 绑定最终无人引用(参见 `SpliceInlineCallAsTupleSub`)。 |
 | 嵌套 Call 到 Inline(如 `pl.add(inline_fn(x), y)`) | v1 不处理 — 保持原样。`InlineFunctionsEliminated` verifier 会标记任何残留的 Call。 |
-| `EvalStmt(inline_call(...))` — 返回值被忽略 | 被丢弃的是返回**值**,不是它的**求值**。被丢弃的跨函数 `Call` / `Submit` 会重新发出为 `EvalStmt`(其被调用者同样是 Inline 时,由不动点循环继续展开),因此以 `return self.inner(x, out)` 结尾的被忽略 wrapper 仍会保留 `inner` 对 `out` 的写入。纯值(`Var`、常量、builtin op `Call`)照旧丢弃。若某个值只是**包裹**了跨函数调用,则抛出 `pypto::ValueError` 而不是静默删除该写入 — 请直接返回该调用,或在调用点绑定 wrapper 的结果。 |
+| `EvalStmt(inline_call(...))` — 返回值被忽略 | 被丢弃的是返回**值**,不是它的**求值**。参见下方[丢弃返回值](#丢弃返回值)。 |
+
+## 丢弃返回值
+
+`EvalStmt` 调用点(`self.wrapper(x, out)`,没有 LHS)无处安放被调用者的尾部返回值。丢弃那个**值**是对的,丢弃它的**求值**则不对 —— 求值过程可能通过 `Out` / `InOut` 参数写入。因此每个被丢弃的值都要分类:
+
+| 被丢弃的值 | 行为 |
+| ---------- | ---- |
+| 算子注册表未正面判定为"不写入"的 `Call` —— 跨函数派发、`tile.store` 这类会写的 builtin,或任何尚无人分类的算子 | 按 return 顺序重新发出为 `EvalStmt`。若跨函数调用的被调用者同样是 Inline,不动点循环会在下一轮展开它;否则它就保持为一次普通派发,与作者在调用点直接写出来完全一致。 |
+| `Submit` | 重新发出为 `EvalStmt`。任务启动本身就是有副作用的,与被调用者做什么无关。 |
+| 算子已声明"不通过任何参数写入"的 `Call`,或其它不藏有副作用的值(`Var`、常量) | 丢弃。 |
+| 本身不是 call-like、但**包裹**了有副作用内容的值 —— `self.bump(n) + 1` 这类标量算术、`MakeTuple`、`TupleGetItemExpr` | 抛出 `pypto::ValueError`。它无法变成 `EvalStmt`,而删除它会连带删除内层调用的写入。请直接返回该调用,或在调用点绑定 wrapper 的结果。 |
+
+注册表刻意区分"已声明不通过任何参数写入"与"尚无人分类此算子"(`OpRegistryEntry::HasDeclaredArgEffects`),而目前大多数算子仍属于后者 —— 其中包括 `tile.tpush_to_aiv`、`system.aic_initialize_pipe` 这些明显有副作用、被 `dce::IsSideEffectOp` 列为副作用算子的项。只有正面判定才允许删除,因此未分类的纯算子会被保守地保留为一条无用但无害的 `EvalStmt`。
+
+**变换前**:
+
+```python
+@pl.function(type=pl.FunctionType.Inline)
+def writeout(self, t, out: pl.Out[...]):
+    return pl.tile.store(t, [0, 0], out)   # 写入本身就是返回表达式
+
+@pl.function(type=pl.FunctionType.InCore)
+def kernel(self, a, out: pl.Out[...]):
+    t = pl.tile.load(a, [0, 0], [64, 64])
+    self.writeout(t, out)                  # 返回值被忽略
+    return out
+```
+
+**变换后** —— store 被保留:
+
+```python
+@pl.function(type=pl.FunctionType.InCore)
+def kernel(self, a, out: pl.Out[...]):
+    t = pl.tile.load(a, [0, 0], [64, 64])
+    pl.tile.store(t, [0, 0], out)
+    return out
+```
 
 ## 验证
 

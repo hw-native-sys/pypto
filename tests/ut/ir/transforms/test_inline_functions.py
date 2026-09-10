@@ -260,16 +260,93 @@ class TestInlineFunctionsCallSiteForms:
         After = passes.inline_functions()(Before)
         ir.assert_structural_equal(After, Expected)
 
-    def test_eval_stmt_call_site_wrapping_a_call_errors(self):
-        """A discarded return value that only *wraps* a cross-function call
-        cannot keep that call's write, so the pass raises instead of deleting it.
+    def test_eval_stmt_call_site_preserves_returned_builtin_store(self):
+        """An ignored wrapper that directly returns an effectful *builtin* keeps
+        its write too — the callee does not have to be a cross-function call.
 
-        ``pl.add(self.inner(x, out), x)`` is a builtin op Call — a pure value,
-        which the EvalStmt call site is free to drop. But dropping it here would
-        also drop the nested ``Call(inner, x, out)`` and its write to ``out``,
-        with no verifier to catch it (``inner`` is not Inline, so
-        ``InlineFunctionsEliminated`` sees nothing wrong). Reject it loudly
-        instead; the message names both workarounds."""
+        ``return pl.tile.store(t, [0, 0], out)`` is a supported return form, and
+        ``tile.store`` declares argument 2 as ``ArgEffect::Write`` /
+        ``ReadWrite`` (``src/ir/op/tile_ops/memory.cpp``). The write lives in the
+        return expression itself, not in a preceding ``AssignStmt``, so the
+        discarded-value classification has to consult the operator registry
+        rather than assume every builtin call is a pure value."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def writeout(
+                self,
+                t: pl.Tile[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                return pl.tile.store(t, [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(a, [0, 0], [64, 64])
+                self.writeout(t, out)  # EvalStmt call site — return value ignored
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(a, [0, 0], [64, 64])
+                pl.tile.store(t, [0, 0], out)
+                return out
+
+        After = passes.inline_functions()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_eval_stmt_call_site_keeps_unclassified_builtin(self):
+        """An operator the registry has never classified is kept, not dropped.
+
+        ``OpRegistryEntry`` distinguishes "declared to write through no argument"
+        from "nobody has classified this operator yet", and most operators are
+        still in the second group — including plainly effectful ones such as
+        ``tile.tpush_to_aiv`` and ``system.aic_initialize_pipe``, which
+        ``dce::IsSideEffectOp`` lists as side-effecting. Deleting an unclassified
+        call would therefore be unsound, so the pass keeps it. ``tensor.add``
+        happens to be pure, and the resulting `EvalStmt` is dead but harmless;
+        that is the deliberate cost of not guessing."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def compute(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+                return pl.add(x, x)
+
+            @pl.function
+            def main(self, a: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+                self.compute(a)  # EvalStmt call site — return value ignored
+                return a
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, a: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+                pl.add(a, a)
+                return a
+
+        After = passes.inline_functions()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_eval_stmt_call_site_keeps_call_wrapping_a_call(self):
+        """A discarded builtin op Call that *wraps* a cross-function call is kept
+        whole, so the nested call's write rides along inside it.
+
+        ``pl.add`` is an unclassified operator, so the outer Call is preserved by
+        the same rule as any other non-provably-pure call — and preserving it
+        preserves the nested ``Call(inner, x, out)`` verbatim. Nothing is
+        deleted and nothing has to be rejected."""
 
         @pl.program
         class Before:
@@ -299,7 +376,62 @@ class TestInlineFunctionsCallSiteForms:
                 self.forward(x, out)
                 return x
 
-        with pytest.raises(ValueError, match="wraps a cross-function call"):
+        @pl.program
+        class Expected:
+            @pl.function
+            def inner(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                out: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                out = pl.tensor.assemble(out, x, [0])
+                return out
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                out: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                pl.add(self.inner(x, out), x)
+                return x
+
+        After = passes.inline_functions()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_eval_stmt_call_site_wrapping_a_call_errors(self):
+        """A discarded return value that is *not itself call-like* but hides a
+        call cannot keep that call's evaluation, so the pass raises instead of
+        deleting it.
+
+        Scalar arithmetic is a dedicated Expr kind (`Add`), not a `Call`, so
+        ``self.bump(n) + 1`` cannot be re-emitted as an `EvalStmt` the way a
+        call-like value can. Dropping it would drop the nested
+        ``Call(bump, n)`` with no verifier to catch it (``bump`` is not Inline,
+        so ``InlineFunctionsEliminated`` sees nothing wrong). Reject it loudly
+        instead; the message names both workarounds."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def bump(self, n: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                m: pl.Scalar[pl.INDEX] = n + 1
+                return m
+
+            @pl.function(type=pl.FunctionType.Inline)
+            def forward(self, n: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                return self.bump(n) + 1
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                n: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                self.forward(n)
+                return x
+
+        with pytest.raises(ValueError, match="wraps a call"):
             passes.inline_functions()(Before)
 
     def test_self_aliasing_assign_skips_redundant_copy(self):

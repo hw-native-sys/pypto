@@ -24,6 +24,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
@@ -189,18 +190,34 @@ class NestedReturnCounter : public IRVisitor {
   }
 };
 
+// May this Call be deleted without losing an effect?
+//
+// Only a *positively classified* non-writing operator qualifies. The registry
+// keeps "declared to write through no argument" and "nobody has classified this
+// operator yet" apart on purpose (`HasDeclaredArgEffects`), and today most
+// operators sit in the second group — including plainly effectful ones such as
+// `tile.tpush_to_aiv` and `system.aic_initialize_pipe`, which the shared DCE
+// lists as side-effecting (see dead_code_elimination.cpp::IsSideEffectOp).
+// Reading an unclassified operator as read-only would silently delete those, so
+// anything short of a positive verdict counts as effectful here.
+//
+// `LookupOpEntry` answers null for a `GlobalVar` callee and for an unregistered
+// name, so a cross-function call and an unknown operator both stay effectful.
+bool IsProvablyPureCall(const CallPtr& call) {
+  if (!call) return false;
+  const auto* entry = LookupOpEntry(call->op_);
+  if (entry == nullptr) return false;
+  return entry->HasDeclaredArgEffects() && !entry->WritesAnyArg();
+}
+
 // Counts call-like nodes whose *evaluation* is observable even when the value
-// they produce is thrown away: a cross-function Call can write through its
-// Out/InOut arguments, and a Submit launches a task. Builtin op Calls (OpExpr
-// callee) are deliberately not counted — they are value-producing, and the
-// observable write of an in-place op is the AssignStmt that rebinds a param
-// (`out = pl.tensor.assemble(out, ...)`), which lives in
-// SplicedInlineBody::stmts and is never dropped.
+// they produce is thrown away: any Call we cannot prove pure, plus every Submit
+// (a task launch is intrinsically effectful, whatever its callee does).
 class EffectfulCallCounter : public IRVisitor {
  public:
   int count = 0;
   void VisitExpr_(const CallPtr& op) override {
-    if (op && As<GlobalVar>(op->op_)) ++count;
+    if (op && !IsProvablyPureCall(op)) ++count;
     IRVisitor::VisitExpr_(op);
   }
   void VisitExpr_(const SubmitPtr& op) override {
@@ -209,10 +226,11 @@ class EffectfulCallCounter : public IRVisitor {
   }
 };
 
-// Is `value` ITSELF an effectful call-like node, as opposed to merely wrapping
-// one? Only such a value can be re-emitted verbatim as an EvalStmt.
+// Is `value` ITSELF a call-like node whose evaluation must survive, as opposed
+// to merely wrapping one? Only such a value can be re-emitted verbatim as an
+// EvalStmt.
 bool IsEffectfulCallLike(const ExprPtr& value) {
-  if (auto call = As<Call>(value)) return As<GlobalVar>(call->op_) != nullptr;
+  if (auto call = As<Call>(value)) return !IsProvablyPureCall(call);
   return As<Submit>(value) != nullptr;
 }
 
@@ -328,18 +346,21 @@ SplicedInlineBody CloneInlineBody(const FunctionPtr& callee, const std::vector<E
 // has no destination, but *evaluating* it can still be observable, so the value
 // may not simply be discarded along with the ReturnStmt that carried it.
 //
-// A discarded cross-function Call / Submit is re-emitted as an EvalStmt, in
-// return order. The fixpoint loop in InlineFunctions() picks that EvalStmt up on
-// the next iteration and expands it when the callee is itself Inline; a
-// non-Inline callee stays an ordinary dispatch, exactly as if the author had
-// written `self.inner(...)` at the call site. Without this, an ignored wrapper
-// whose body is `return self.inner(x, out)` silently lost `inner`'s write to
-// `out` (#2705) — the assign and return call-site forms never had the hole
-// because they re-emit the value into an AssignStmt / ReturnStmt.
+// A discarded Call we cannot prove pure — a cross-function dispatch, a writing
+// builtin such as `tile.store`, or any unclassified operator — is re-emitted as
+// an EvalStmt, in return order, as is every discarded Submit. The fixpoint loop
+// in InlineFunctions() picks a cross-function EvalStmt up on the next iteration
+// and expands it when the callee is itself Inline; a non-Inline callee stays an
+// ordinary dispatch, exactly as if the author had written `self.inner(...)` at
+// the call site. Without this, an ignored wrapper whose body is
+// `return self.inner(x, out)` silently lost `inner`'s write to `out` (#2705),
+// and one whose body is `return pl.tile.store(t, [0, 0], out)` lost the store —
+// the assign and return call-site forms never had the hole, because they re-emit
+// the value into an AssignStmt / ReturnStmt.
 //
-// A value that is not itself call-like is dropped, as before: a Var, a constant
-// or a builtin op Call produces a value and nothing else. But such a value may
-// *wrap* a cross-function call (`return pl.add(self.inner(x), x)`), whose write
+// A provably pure Call is dropped, as is any other value that hides nothing
+// effectful — a Var, a constant. But such a value may *wrap* something effectful
+// (`return (self.inner(x, out), x)` reaching here as one MakeTuple), whose write
 // we can neither keep nor honestly discard — reject that loudly instead of
 // deleting it.
 std::vector<StmtPtr> SpliceInlineCallAsEval(const FunctionPtr& callee, const std::vector<ExprPtr>& args) {
@@ -355,9 +376,9 @@ std::vector<StmtPtr> SpliceInlineCallAsEval(const FunctionPtr& callee, const std
     CHECK_SPAN(counter.count == 0, value->span_)
         << "Inline function '" << callee->name_
         << "' is called for its side effects only (its result is discarded), but its return "
-           "expression wraps a cross-function call whose writes cannot be preserved once the "
-           "value is dropped. Either return that call directly ('return self.inner(...)'), or "
-           "bind the result at the call site ('result = self."
+           "expression wraps a call whose writes cannot be preserved once the value is dropped. "
+           "Either return that call directly ('return self.inner(...)'), or bind the result at "
+           "the call site ('result = self."
         << callee->name_ << "(...)').";
   }
   return std::move(body.stmts);
@@ -768,9 +789,11 @@ namespace pass {
  *    cloned pre-return body followed by a fresh ReturnStmt over the cloned
  *    trailing values (single or multi).
  *  - `EvalStmt(inline_call(...))` discards the callee's trailing return value,
- *    but not its evaluation: a discarded cross-function Call / Submit is
+ *    but not its evaluation: a discarded Call that the operator registry does
+ *    not positively classify as non-writing, and every discarded Submit, is
  *    re-emitted as an EvalStmt (see `SpliceInlineCallAsEval`) so an ignored
- *    wrapper ending in `return self.inner(...)` keeps `inner`'s writes.
+ *    wrapper ending in `return self.inner(...)` or
+ *    `return pl.tile.store(...)` keeps its writes.
  *  - Nested Call to inline (e.g. inside a binary expression) is left alone in
  *    v1; the verifier flags any surviving Calls to Inline functions.
  *  - Inline function with no callers is silently dropped in step (5) — that
