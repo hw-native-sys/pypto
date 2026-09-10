@@ -1569,27 +1569,37 @@ jobs:
         # so leave the step budget above that or the runner kills the task
         # before task-submit can report the cap cleanly.
         timeout-minutes: 45
-        # Mechanism B (multi-card): borrow 2 NPUs via `task-submit --device auto
-        # --device-num 2` for the whole pytest run; $TASK_DEVICE is the lent set
+        # Mechanism B (multi-card): borrow 4 NPUs via `task-submit --device auto
+        # --device-num 4` for the whole pytest run; $TASK_DEVICE is the lent set
         # (comma-separated), passed to --device. The job no longer pins an
         # npu-2-device runner. activate.sh already unset PTO2_RING_* (they break
         # HCCL); task-submit preserves that env into the child.
         #
-        # `-n 3` because most of a distributed test is card-free compilation: the
-        # dist conftest installs a lock that serializes only the device phase, so
-        # while one worker drives the cards the other two compile. Measured on an
-        # a2a3 pair, identical results at every width: 669s serial, 377s at
-        # -n 3, where a worker is on the cards for ~95% of the wall clock and a
-        # fourth would have nothing left to overlap. Still two cards, held for
-        # less than half as long as before.
+        # Most of a distributed test is card-free compilation, so the dist
+        # conftest installs a lock that serializes only the device phase: while
+        # one worker drives the cards the others compile. Measured on an a2a3
+        # pair, identical results at every width -- 669s serial, 377s at -n 3,
+        # where a worker is on the cards for ~95% of the wall clock and a fourth
+        # would have nothing left to overlap.
+        #
+        # `--device-group-size 2` then splits the four cards into two such lanes
+        # and deals the six workers between them, three each. The lock is named
+        # after the cards it protects, so the lanes never wait on each other.
+        # Two lanes measured 247s and three 165s against 377s for one -- 76%
+        # efficiency at both widths, so the loss is the lane count, not something
+        # that compounds. Card *time* barely moves (753 -> 833 card-seconds at
+        # two lanes): a lane returns its cards as it finishes, so this is the
+        # same work in half the wall clock, not more work.
         #
         # xdist's default `--dist load` is left alone: no fixture here is scoped
-        # wider than a test, and `--dist loadfile` measured 388s against 377s --
-        # inside this suite's own run-to-run variance.
+        # wider than a test, it measured 377s against `--dist loadfile`'s 388s,
+        # and dealing tests to whichever worker is free is what keeps the lanes
+        # balanced -- splitting the suite by hand cost 25% to imbalance at both
+        # two and three ways.
         run: |
           source activate.sh
-          task-submit --device "$DEVICE_ID" --device-num 2 --timeout 3600 --max-time 1800 \
-            --run "cd $GITHUB_WORKSPACE/dist-checkout && source activate.sh && python -m pytest tests/st/distributed -v -n 3 --device=\$TASK_DEVICE --ignore=tests/st/distributed/test_l2_multi_orch.py"
+          task-submit --device "$DEVICE_ID" --device-num 4 --timeout 3600 --max-time 1800 \
+            --run "cd $GITHUB_WORKSPACE/dist-checkout && source activate.sh && python -m pytest tests/st/distributed -v -n 6 --device-group-size 2 --device=\$TASK_DEVICE --ignore=tests/st/distributed/test_l2_multi_orch.py"
 
       - name: Test multi-card cases outside tests/st/distributed
         # Multi-card used to be selected by directory, so a test needing two

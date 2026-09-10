@@ -12,11 +12,17 @@
 from typing import Any
 
 import pytest
-from harness import card_lock
+from harness import card_lock, cards
 
 
 def pytest_configure(config: pytest.Config) -> None:
     """Serialize the device phase so xdist workers can overlap their compiles.
+
+    The lock is installed for **this worker's card group**, not for the whole
+    ``--device`` list, so under ``--device-group-size`` each group is its own
+    lane: the workers sharing a group take turns on its cards while the rest
+    compile, and groups never wait on each other. It must agree with the
+    ``device_ids`` fixture, which is why both go through ``harness.cards``.
 
     Installed unconditionally: with one worker the lock is uncontended and costs
     a file open per dispatch, and it still keeps two concurrent runs that were
@@ -29,7 +35,7 @@ def pytest_configure(config: pytest.Config) -> None:
     if config.getoption("--codegen-only"):
         return
     device_ids = [int(part) for part in str(config.getoption("--device")).split(",") if part.strip()]
-    card_lock.install(device_ids)
+    card_lock.install(cards.group_for_worker(device_ids, config.getoption("--device-group-size")))
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:
