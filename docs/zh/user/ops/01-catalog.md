@@ -119,7 +119,7 @@
 
 | 算子 | 可达 | 作用 |
 | ---- | ---- | ---- |
-| `quant_mx` | `pl.` (t) | Ascend950 MXFP8 block-32 动态量化，生成 FP8E4M3FN 数据及 FP8E8M0 scale（`group_axis` 对齐 PTOAS `grpAxis`）。本版本不含 MXFP4 quant。可在同一 InCore mixed task 内通过 data+scale 的直接 V2C 传输供 `matmul_mx` 使用（见 [类型](../language/00-types.md)） |
+| `quant_mx` | `pl.` (T/t) | Ascend950 MXFP8 block-32 动态量化，生成 FP8E4M3FN 数据及 FP8E8M0 scale（`group_axis` 对齐 PTOAS `grpAxis`）。Tensor 调用物化 GM data 和 MX layout scale，tile 调用保留在片上；本版本不含 MXFP4 quant。直接的 tensor quant→matmul 链可使用 data+scale 的 V2C 传输（见 [类型](../language/00-types.md)） |
 | `tmov_x2zz` | `pl.` (t) | Ascend950 指数 X-to-ZZ 布局转换（UINT8）。`tmp` 为只写 workspace；axis1 需 `dst_rows`/`dst_cols` 指定 ZZ `[M,G]`（相对 TQUANT 扁平 exp）。通常由 `quant_mx` 降级使用，而非直接调用 |
 
 ## 线性代数
@@ -131,7 +131,7 @@
 | [`matmul_bias`][pypto.language.tile.matmul_bias] | `pl.` (t) | 带 bias 操作数的乘法 |
 | [`batch_matmul`][pypto.language.batch_matmul] | `pl.` (t) | 批量矩阵乘，**只接受 tile 操作数**。张量请调 `pl.matmul` —— rank > 2 会在降级时派发到 `tile.batch_matmul` |
 | [`gemv`][pypto.language.tile.gemv] [`gemv_acc`][pypto.language.tile.gemv_acc] [`gemv_bias`][pypto.language.tile.gemv_bias] | `pl.` (t) | 矩阵-向量形式 |
-| [`matmul_mx`][pypto.language.tile.matmul_mx] [`matmul_mx_acc`][pypto.language.tile.matmul_mx_acc] [`matmul_mx_bias`][pypto.language.tile.matmul_mx_bias] | `pl.` (t) | A5 MX 块缩放矩阵乘 —— 进入算子的两块 data tile 必须为 FP8E4M3FN；支持的 FP4 输入形式仅为 FP4×FP8，且左侧 FP4 必须先显式 cast 为 FP8；不支持原生 FP4×FP4 |
+| [`matmul_mx`][pypto.language.matmul_mx] [`matmul_mx_acc`][pypto.language.tile.matmul_mx_acc] [`matmul_mx_bias`][pypto.language.tile.matmul_mx_bias] | `pl.` (T/t) | A5 MX 块缩放矩阵乘。Tensor `matmul_mx` 使用定向的 2D data/scale tensor 并返回 FP32；`_acc` / `_bias` 仍只支持 tile。进入算子的 data 必须为 FP8E4M3FN；不支持原生 FP4×FP4 |
 
 分阶段 GEMV 累加通过 `pl.AccPhase` 选择生产者阶段。以 `pl.AccPhase.Final`
 结束的生产者必须与使用 `pl.STPhase.Final` 的 store 配对：

@@ -65,6 +65,8 @@ __all__ = [
     "fillpad",
     "fillpad_expand",
     "matmul",
+    "quant_mx",
+    "matmul_mx",
     "batch_matmul",
     "matmul_acc",
     "row_max",
@@ -977,6 +979,42 @@ def fillpad_expand(
 # ---------------------------------------------------------------------------
 # Different-signature ops (accept superset of kwargs)
 # ---------------------------------------------------------------------------
+
+
+@overload
+def quant_mx(src: Tensor, *, group_axis: int, dtype: DataType = ...) -> tuple[Tensor, Tensor]: ...
+@overload
+def quant_mx(src: Tile, *, group_axis: int, dtype: DataType = ...) -> tuple[Tile, Tile]: ...
+
+
+def quant_mx(src, *, group_axis: int, dtype: DataType = DataType.FP8E4M3FN):
+    """MXFP8 quantization, dispatched for GM tensors and tiles.
+
+    Tensor calls materialize data and correctly laid-out scale tensors in GM;
+    tile calls retain the existing on-chip behavior. Both forms use
+    ``group_axis=1`` for A-oriented input and ``group_axis=0`` for B-oriented
+    input.
+    """
+    if isinstance(src, Tensor):
+        return _tensor.quant_mx(src, group_axis=group_axis, dtype=dtype)
+    if isinstance(src, Tile):
+        return _tile.quant_mx(src, group_axis=group_axis, dtype=dtype)
+    _raise_type_dispatch_error("quant_mx", src)
+
+
+@overload
+def matmul_mx(lhs: Tensor, lhs_scale: Tensor, rhs: Tensor, rhs_scale: Tensor) -> Tensor: ...
+@overload
+def matmul_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile: ...
+
+
+def matmul_mx(lhs, lhs_scale, rhs, rhs_scale):
+    """MXFP8 matrix multiplication, dispatched for tensors and tiles."""
+    if all(isinstance(value, Tensor) for value in (lhs, lhs_scale, rhs, rhs_scale)):
+        return _tensor.matmul_mx(lhs, lhs_scale, rhs, rhs_scale)
+    if all(isinstance(value, Tile) for value in (lhs, lhs_scale, rhs, rhs_scale)):
+        return _tile.matmul_mx(lhs, lhs_scale, rhs, rhs_scale)
+    _raise_type_dispatch_error("matmul_mx", lhs, lhs_scale, rhs, rhs_scale)
 
 
 @overload

@@ -47,6 +47,8 @@ For every MX_A_ZZ or MX_B_NN tensor, the pass rewrites:
 - `TensorType` slots recursively inside parameters, returns, tuples, variables,
   iteration arguments, Calls, and Submits;
 - `tile.load` offsets and shapes into rank-5 coordinates;
+- `tile.store` MX-scale destinations and optional partition shapes into the
+  matching rank-5 coordinates; stores require complete FP8E8M0 16x2 boxes;
 - physical `valid_shape` arguments to the complete aligned load box while
   preserving a narrowed logical `TileType.valid_shape` as tile metadata;
 - shaped FP8E8M0 `tensor.view` aliases in both ND-to-MX and MX-to-ND directions;
@@ -94,7 +96,8 @@ fixed-width expression's evaluation before division.
 | partial tensor-level `valid_shape` | rejected |
 | narrowed load-level `valid_shape` | kept as tile metadata; physical box stays complete |
 | `target_memory != Mat` or missing in raw IR | rejected; public `pl.load` fills omitted target with `Mat` |
-| MX tensor used by an unsupported operator or store | rejected |
+| MX tensor used by an unsupported operator | rejected |
+| `tile.store` of complete FP8E8M0 16x2 scale boxes | rewritten to a rank-5 MX destination |
 | shaped FP8E8M0 ND/MX backing alias | rewritten |
 | distributed MX tensor | rejected |
 

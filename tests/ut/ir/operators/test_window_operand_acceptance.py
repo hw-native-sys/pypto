@@ -54,6 +54,14 @@ def T(name="t", shape=(16, 32), dtype=DT.FP32):
     return ir.Var(name, ir.TensorType(_dims(list(shape)), dtype), SPAN)
 
 
+def MX_T(name, shape, layout):
+    return ir.Var(
+        name,
+        ir.TensorType(_dims(list(shape)), DT.FP8E8M0, tensor_view=ir.TensorView([], layout)),
+        SPAN,
+    )
+
+
 def S(name="s", dtype=DT.FP32):
     return ir.Var(name, ir.ScalarType(dtype), SPAN)
 
@@ -162,6 +170,8 @@ WINDOW_OK = _ops(
     # cube
     "tensor.matmul",
     "tensor.matmul_acc",
+    "tensor.matmul_mx",
+    "tensor.quant_mx",
 )
 
 #: Operators that *should* accept a window (they read or write plain GM) but do not yet.
@@ -299,6 +309,13 @@ PROBES.update(
         # path from GM into L0C), and the deducer rejects it there with its own message.
         ir.get_op("tensor.matmul_acc").name: lambda: t.matmul_acc(
             T(shape=(16, 16)), W(dtype=DT.BF16), T(shape=(32, 16), dtype=DT.BF16)
+        ),
+        ir.get_op("tensor.quant_mx").name: lambda: t.quant_mx(W(shape=(16, 64), dtype=DT.BF16), group_axis=1),
+        ir.get_op("tensor.matmul_mx").name: lambda: t.matmul_mx(
+            W(shape=(16, 64), dtype=DT.FP8E4M3FN),
+            MX_T("lhs_scale", (16, 2), ir.TensorLayout.MX_A_ZZ),
+            T(shape=(64, 32), dtype=DT.FP8E4M3FN),
+            MX_T("rhs_scale", (2, 32), ir.TensorLayout.MX_B_NN),
         ),
         ir.get_op("tensor.slice").name: lambda: t.slice(W(), [8, 32], [0, 0]),
         ir.get_op("tensor.assemble").name: lambda: t.assemble(W(), T(shape=(8, 32)), [0, 0]),

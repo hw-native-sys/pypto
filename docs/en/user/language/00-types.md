@@ -214,6 +214,12 @@ reverse FP8×FP4 form are not supported. Standalone `pl.quant_mx` (MXFP8-only in
 `group_axis` matching PTOAS `grpAxis`) is available. On Ascend950 it can share one InCore mixed
 task with `matmul_mx`; the generated data and scale cross directly over V2C, with a generated
 Vec-to-Mat-to-scale-memory path for the scale.
+`pl.quant_mx(tensor, group_axis=1)` returns GM A data `[M,K]` plus an
+`MX_A_ZZ[M,K/32]` scale tensor. `group_axis=0` accepts `[N,K]` and returns
+Cube-oriented data `[K,N]` plus `MX_B_NN[K/32,N]`. Those two tensor pairs are
+the required inputs to tensor `pl.matmul_mx`, which is 2-D-only and returns
+FP32; tensor MX accumulation, bias, transpose flags, batches, dynamic shapes,
+and FP4 are intentionally not part of this interface.
 
 ### Dynamic shapes
 
