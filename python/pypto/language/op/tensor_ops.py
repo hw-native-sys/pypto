@@ -395,12 +395,10 @@ def set_cache_policy(tensor: Tensor, policy: CachePolicy) -> None:
       ``cache=pl.CachePolicy.DEFAULT`` opts a single read back into the cache
       inside a bypassing scope.
 
-    Current status: PTOAS has no L2-bypass path yet
-    (https://github.com/hw-native-sys/PTOAS/issues/1356). The declaration is
-    carried all the way to codegen, but codegen emits a warning and compiles it
-    as an ordinary cached access, so generated code is unchanged today. Writing
-    the declaration now is what makes the kernel pick the bypass up for free
-    once that lands.
+    Requires PTOAS >= v0.61: a declared read compiles to
+    a ``cache_policy`` attribute on ``pto.tload``, which the assembler lowers to
+    pto-isa's own L2 hint. ``CachePolicy.DEFAULT`` emits nothing, so a read that
+    declares no policy generates exactly the code it did before.
 
     Args:
         tensor: The tensor whose reads the policy applies to. Must be a

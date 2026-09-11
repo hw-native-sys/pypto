@@ -39,7 +39,6 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/tile_view_semantics.h"
-#include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "src/backend/common/pto_ops_internal.h"
@@ -110,20 +109,12 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   INTERNAL_CHECK_SPAN(!shapes_tuple->elements_.empty(), op->span_)
       << "tile.load shapes tuple must have at least one element";
 
-  // TEMPORARY (pypto #2534): PTOAS has no L2-bypass path yet
-  // (https://github.com/hw-native-sys/PTOAS/issues/1356), so a BYPASS request is
-  // carried through the IR but compiles as an ordinary cached access. When that
-  // issue closes, this warn is REPLACED in place by
-  // `GetOrCreateTensorView(tensor, policy)` against an addptr-rooted view — the
-  // declaration already reaches here, so nothing upstream changes.
+  // The declared GM cache-access policy (pypto #2680). PTOAS >= v0.61 carries a
+  // streaming read as a `cache_policy` attribute on `pto.tload`, which lowers to
+  // pto-isa's own L2 hint (`TLOAD<pto::TLoadL2Hint::NotAllocKeep>`), so there is
+  // no architecture-specific address alias to build here. It is attached below,
+  // alongside the MX layout attribute when both apply.
   const auto policy = static_cast<ir::CachePolicy>(op->GetKwarg<int>("cache", 0));
-  if (policy == ir::CachePolicy::kBypass && codegen.NoteCacheBypassWarned(tensor.get())) {
-    LOG_WARN << "[warning] [CacheBypassUnsupported] tensor '"
-             << ir::auto_name::GetBaseName(tensor->name_hint_)
-             << "' requests CachePolicy.BYPASS, but PTOAS has no L2-bypass path yet "
-             << "(https://github.com/hw-native-sys/PTOAS/issues/1356); compiling as an "
-             << "ordinary cached access" << (op->span_.is_valid() ? " at " + op->span_.to_string() : "");
-  }
 
   std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);
   std::string tile_buf = codegen.GetCurrentResultTarget();
@@ -169,8 +160,25 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   std::ostringstream tload_line;
   tload_line << "pto.tload ins(" << partition_view << " : " << partition_type << ") outs(";
   tload_line << tile_buf << " : " << tile_buf_type << ")";
+
+  std::vector<std::string> attrs;
   if (is_mx_load) {
-    tload_line << " {layout = #pto.layout<" << pto_layout << ">}";
+    attrs.push_back("layout = #pto.layout<" + pto_layout + ">");
+  }
+  if (policy == ir::CachePolicy::kBypass) {
+    attrs.emplace_back("cache_policy = #pto.load_cache_policy<l2_bypass>");
+  }
+
+  // Default-valued attributes are omitted so an undeclared load keeps its
+  // byte-identical PTO form. PTOAS expects all present attributes in one dict
+  // (same contract as tile.store below).
+  if (!attrs.empty()) {
+    tload_line << " {";
+    for (size_t i = 0; i < attrs.size(); ++i) {
+      if (i != 0) tload_line << ", ";
+      tload_line << attrs[i];
+    }
+    tload_line << "}";
   }
   codegen.Emit(tload_line.str());
 

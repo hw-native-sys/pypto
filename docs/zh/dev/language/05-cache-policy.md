@@ -7,10 +7,9 @@
 该策略是*作者声明的契约（contract）*，绝不是编译器推断出来的提示（hint）。因此它必须
 显式书写，粒度二选一，并且从 DSL 一路原样传递到代码生成（codegen）。
 
-> **当前状态**：PTOAS 尚未提供 L2 bypass 通路
-> （[PTOAS#1356](https://github.com/hw-native-sys/PTOAS/issues/1356)），因此
-> `BYPASS` 声明目前会**告警，并按普通缓存访问编译**。生成代码在有无该声明时逐字节
-> 一致。参见[当前状态](#当前状态)。
+> **要求 PTOAS >= v0.61**（`toolchain/versions.env` 中的 `PTOAS_VERSION`）。`BYPASS`
+> 声明会变成 `pto.tload` 上的一个 `cache_policy` 属性，由汇编器降级为 pto-isa 自带的
+> L2 hint。参见[codegen 发射什么](#codegen-发射什么)。
 
 ## 两个书写面
 
@@ -133,7 +132,7 @@ pl.set_cache_policy(b, BYPASS)                 statement, consumed at parse
   -> ScopeStmt.attrs_["cache_policy_vars"]     parse .. pass 9   (Var identity)
   -> Function attr "cache_policy"              pass 9 .. pass 11 (param INDICES)
   -> tile.load kwarg "cache"                   pass 11 .. codegen
-  -> codegen: warn, emit an ordinary cached access
+  -> codegen: `cache_policy` attribute on each emitted `pto.tload`
 ```
 
 | 跳 | 载体 | 负载类型 | 写入方 | 消费方 |
@@ -179,22 +178,38 @@ with pl.at(level=pl.Level.CORE_GROUP, name_hint="mm"):
 | 其余为空的作用域 | 只含一条声明的作用域打印该标记，而不是 `pass` |
 | 函数 attr（`cache_policy`） | 打印为 `(索引, 策略)` 元组列表，因此在 pass 9 与 pass 11 之间 —— 它唯一存在的窗口 —— 抓取的 pass dump 可以重新解析 |
 
-## 当前状态
+## codegen 发射什么
 
-PTOAS 尚未提供 L2 bypass 通路
-（[PTOAS#1356](https://github.com/hw-native-sys/PTOAS/issues/1356)）。因此 codegen 会把
-该请求一路携带下来，然后按普通缓存访问编译，并按"每 kernel 每张量一次"告警（而不是
-每条发射出的 load 一次 —— 展开后的循环会发射同一条 load 很多次）：
+一次 `BYPASS` 读取只会变成发射出的那条 load 上的一个属性 —— 没有额外的操作、没有第二个
+tensor view，也没有与架构绑定的地址别名：
 
-```text
-[warning] [CacheBypassUnsupported] tensor 'b' requests CachePolicy.BYPASS, but PTOAS
-has no L2-bypass path yet (https://github.com/hw-native-sys/PTOAS/issues/1356);
-compiling as an ordinary cached access at <file>:<line>
+```mlir
+pto.tload ins(%b__ssa_v0_pview : !pto.partition_tensor_view<256x256xf32>)
+          outs(%b__ssa_v0_mat  : !pto.tile_buf<loc=mat, ...>)
+          {cache_policy = #pto.load_cache_policy<l2_bypass>}
 ```
 
-生成的 MLIR 在有无该声明时**逐字节一致**。今天就写上它的意义在于：等 PTOAS 侧落地
-后，kernel 可以零成本地享受到 bypass —— 届时告警点会被原地替换为一个以 bypass 为根的
-tensor view，codegen 之上的一切都无需改动。
+PTOAS >= v0.61 会把它降级为 pto-isa 自带的 L2 hint，这也是生成的 CCE 中唯一的差异：
+
+```diff
+-  TLOAD(v45, v50);
++  TLOAD<pto::TLoadL2Hint::NotAllocKeep>(v45, v50);
+```
+
+这次发射有三条性质值得写明，因为每一条都在
+`tests/ut/codegen/test_cache_policy_codegen.py` 中有对应断言：
+
+| 性质 | 原因 |
+| ---- | ---- |
+| `CachePolicy.DEFAULT` **什么都不发射** | 未声明策略的 kernel 保持本特性出现之前的 PTO 形态，因此该属性就是两个在其余方面完全相同的 kernel 之间唯一的差异 |
+| 该属性按 **load** 发射，而不是按张量 | 它是指令的性质；若两条 load 只有第一条带 hint，第二条仍会在 L2 中分配（被取代的 `[CacheBypassUnsupported]` 诊断刻意是"每张量一次"—— 粒度正好相反） |
+| 它与 MX 的 `layout` 合并进**同一个**属性字典，且排在其后 | PTOAS 要求所有存在的属性在同一个字典里；把 `layout` 留在前面可使未声明策略的 MX load 保持逐字节一致 |
+
+### 更旧的汇编器
+
+该发射是无条件的：没有版本门控，代码树中也没有任何机制在编译期读取所固定的汇编器版本。
+指向比本仓库所固定 `PTOAS_VERSION` 更旧的汇编器的构建因此处于契约之外 —— `cache_policy`
+是 v0.61 新增的，预期会在那里无法通过 `pto.tload` 的校验。
 
 ### 限制
 
