@@ -174,8 +174,8 @@ Python 变量上。`@pl.jit` 会在一个新的模块命名空间里重新解析
 不属于 Vec / Mat / Acc、valid shape 是运行期值,或某个槽位作为 phi 被带出 `if` / 循环。这些都
 会报出指明具体形态的错误,而不是静默回退,因为回退就等于把你声明的隔离抹掉。
 
-默认的 PyPTO 规划器不受影响:它烘焙地址,而在 `--pto-level=level3` 下 ptoas 不会折叠逐槽位的
-地址展开,区域形式反而会丢掉它赖以存在的槽位分析
+进程内 planner（默认的 `DSA_RP` 与旧版 `PYPTO`）不受影响：它们烘焙地址，而在
+`--pto-level=level3` 下 ptoas 不会折叠逐槽位的地址展开，区域形式反而会丢掉它赖以存在的槽位分析
 （[PTOAS#1106](https://github.com/hw-native-sys/PTOAS/issues/1106)）。
 
 声明的名字自成命名空间——不会解析到恰好同名的 Python 变量。内存空间**必须**写（`TileType`

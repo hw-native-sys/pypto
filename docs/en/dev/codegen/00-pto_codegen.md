@@ -355,13 +355,13 @@ Based on TileType variables collected from the function body. Each tile variable
 
 Who assigns the physical `addr` is selected by the `memory_planner` option
 (`ir.compile(..., memory_planner=passes.MemoryPlanner.PYPTO | DSA_RP | PTOAS)`,
-default `PYPTO`). It threads to both the pass pipeline (via `PassContext`) and
+default `DSA_RP`). It threads to both the pass pipeline (via `PassContext`) and
 codegen:
 
 | Mode | Pipeline | `pto.alloc_tile` | `pto.reserve_buffer` | ptoas |
 | ---- | -------- | ---------------- | -------------------- | ----- |
-| `PYPTO` (default) | runs `MaterializeSemanticAliases` + `MemoryReuse` + `AllocateMemoryAddr` | emits `addr = <const>` (from `MemRef.byte_offset_`) | `auto = false, base = <const>` | `--pto-level=level3` (trusts baked addresses) |
-| `DSA_RP` | runs `MaterializeSemanticAliases` + `AllocateMemoryAddr`; skips `MemoryReuse` | emits the in-process canonical-greedy DSA-RP `addr = <const>` | `auto = false, base = <const>` | `--pto-level=level3` (trusts baked addresses) |
+| `PYPTO` | runs `MaterializeSemanticAliases` + `MemoryReuse` + `AllocateMemoryAddr` | emits `addr = <const>` (from `MemRef.byte_offset_`) | `auto = false, base = <const>` | `--pto-level=level3` (trusts baked addresses) |
+| `DSA_RP` (default) | runs `MaterializeSemanticAliases` + `AllocateMemoryAddr`; skips `MemoryReuse` | emits the in-process canonical-greedy DSA-RP `addr = <const>` | `auto = false, base = <const>` | `--pto-level=level3` (trusts baked addresses) |
 | `PTOAS` | runs `MaterializeSemanticAliases`; **skips** `MemoryReuse` + `AllocateMemoryAddr` | omits `addr` (`PTOCodegen.generate(emit_tile_addr=False)`) | `auto = true` (no `base`) | `--pto-level=level2` (ptoas `PlanMemory` does reuse + addresses) |
 
 Memory planning is split into two passes: **`MaterializeSemanticAliases`**

@@ -55,14 +55,16 @@ uint64_t SaturatingAdd(uint64_t first, uint64_t second) {
                                                                : first + second;
 }
 
-dsa::Interval ConvertLifetime(const LifetimeInterval& lifetime) {
+dsa::Interval ConvertLifetime(const LifetimeInterval& lifetime, bool allow_read_before_write_reuse) {
   INTERNAL_CHECK(lifetime.def_point >= 0 && lifetime.last_use_point >= lifetime.def_point)
       << "Invalid allocation lifetime [" << lifetime.def_point << ", " << lifetime.last_use_point << "]";
 
-  // Reads happen at 2*p and writes at 2*p+1. Thus an input whose final read is
-  // at statement p may share storage with an output written by that statement.
+  // Reads happen at 2*p and writes at 2*p+1. Inputs remain live through the
+  // write by default. Only an explicitly supported in-place candidate may end
+  // at the intervening boundary, guarded by a same-base-or-disjoint relation.
   const int64_t begin = 2 * static_cast<int64_t>(lifetime.def_point) + 1;
-  const int64_t final_read_end = 2 * static_cast<int64_t>(lifetime.last_use_point) + 1;
+  const int64_t final_read_end =
+      2 * static_cast<int64_t>(lifetime.last_use_point) + (allow_read_before_write_reuse ? 1 : 2);
   return {begin, std::max(begin + 1, final_read_end)};
 }
 
@@ -101,7 +103,8 @@ PreparedProblem BuildProblem(const FunctionPtr& func, const AllocationPlan& allo
 
     const uint64_t alignment = std::max<uint64_t>(1, policy.AlignAddress(1, lifetime.memory_space));
     prepared.strict_problem.buffers.push_back(
-        {id, lifetime.size, alignment, ToPoolId(lifetime.memory_space), ConvertLifetime(lifetime)});
+        {id, lifetime.size, alignment, ToPoolId(lifetime.memory_space),
+         ConvertLifetime(lifetime, allocation_plan.read_before_write_inputs.count(index) != 0)});
     buffer_by_interval[index] = id;
 
     const auto inserted = prepared.buffer_id_by_base.emplace(memref->base_.get(), id);
@@ -133,11 +136,10 @@ PreparedProblem BuildProblem(const FunctionPtr& func, const AllocationPlan& allo
     INTERNAL_CHECK(separation.first < buffer_by_interval.size() &&
                    separation.second < buffer_by_interval.size())
         << "DSA-RP separation references an out-of-range interval";
-    if (!buffer_by_interval[separation.first] || !buffer_by_interval[separation.second]) {
-      continue;
-    }
-    const BufferPair pair =
-        CanonicalPair(*buffer_by_interval[separation.first], *buffer_by_interval[separation.second]);
+    const auto& first_id = buffer_by_interval[separation.first];
+    const auto& second_id = buffer_by_interval[separation.second];
+    if (!first_id.has_value() || !second_id.has_value()) continue;
+    const BufferPair pair = CanonicalPair(first_id.value(), second_id.value());
     // Physical memory spaces are independent DSA problems. A relation between
     // two spaces cannot constrain reuse because those addresses never alias.
     if (prepared.strict_problem.buffers[pair.first].pool !=
@@ -161,29 +163,45 @@ PreparedProblem BuildProblem(const FunctionPtr& func, const AllocationPlan& allo
     }
   }
 
-  std::map<BufferPair, uint64_t> penalty_weights;
-  const std::vector<RecognizedReusePenalty> recognized =
-      backend != nullptr ? RecognizeReusePenalties(func, allocation_plan, *backend)
-                         : std::vector<RecognizedReusePenalty>{};
-  for (const RecognizedReusePenalty& penalty : recognized) {
-    INTERNAL_CHECK(penalty.first_interval < buffer_by_interval.size() &&
-                   penalty.second_interval < buffer_by_interval.size())
-        << "DSA-RP recognizer returned an out-of-range interval";
-    if (!buffer_by_interval[penalty.first_interval] || !buffer_by_interval[penalty.second_interval]) {
-      continue;
-    }
-    const BufferPair pair = CanonicalPair(*buffer_by_interval[penalty.first_interval],
-                                          *buffer_by_interval[penalty.second_interval]);
+  std::set<BufferPair> same_base_or_disjoint;
+  for (const AllocationSameBaseOrDisjoint& relation : allocation_plan.same_base_or_disjoint) {
+    INTERNAL_CHECK(relation.first < buffer_by_interval.size() && relation.second < buffer_by_interval.size())
+        << "DSA-RP same-base-or-disjoint relation references an out-of-range interval";
+    const auto& first_id = buffer_by_interval[relation.first];
+    const auto& second_id = buffer_by_interval[relation.second];
+    if (!first_id.has_value() || !second_id.has_value()) continue;
+    const BufferPair pair = CanonicalPair(first_id.value(), second_id.value());
     if (prepared.strict_problem.buffers[pair.first].pool !=
         prepared.strict_problem.buffers[pair.second].pool) {
       continue;
     }
-    penalty_weights[pair] = SaturatingAdd(penalty_weights[pair], penalty.cost);
+    same_base_or_disjoint.insert(pair);
   }
-  for (const auto& [pair, weight] : penalty_weights) {
-    if (weight != 0) {
-      prepared.strict_problem.reuse_penalties.push_back({pair.first, pair.second, weight});
+  for (const BufferPair& pair : same_base_or_disjoint) {
+    prepared.strict_problem.same_base_or_disjoint.push_back({pair.first, pair.second});
+  }
+
+  // The recognizer already returns one relation per unordered pair, sorted and
+  // normalized, and interval -> buffer is injective, so distinct interval
+  // pairs cannot collide into one buffer pair. Accumulating them through a map
+  // would merge nothing and re-derive an order we were handed.
+  const std::vector<RecognizedReusePenalty> recognized =
+      backend != nullptr ? RecognizeReusePenalties(func, allocation_plan, *backend)
+                         : std::vector<RecognizedReusePenalty>{};
+  prepared.strict_problem.reuse_penalties.reserve(recognized.size());
+  for (const RecognizedReusePenalty& penalty : recognized) {
+    INTERNAL_CHECK(penalty.first_interval < buffer_by_interval.size() &&
+                   penalty.second_interval < buffer_by_interval.size())
+        << "DSA-RP recognizer returned an out-of-range interval";
+    const auto& first_id = buffer_by_interval[penalty.first_interval];
+    const auto& second_id = buffer_by_interval[penalty.second_interval];
+    if (!first_id.has_value() || !second_id.has_value() || penalty.cost == 0) continue;
+    const BufferPair pair = CanonicalPair(first_id.value(), second_id.value());
+    if (prepared.strict_problem.buffers[pair.first].pool !=
+        prepared.strict_problem.buffers[pair.second].pool) {
+      continue;
     }
+    prepared.strict_problem.reuse_penalties.push_back({pair.first, pair.second, penalty.cost});
   }
 
   return prepared;

@@ -226,10 +226,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         scalar_infos.append(ScalarCacheInfo(name=name, value=scalar_values[name]))
 
     dist_key = _freeze(distributed_config) if distributed_config is not None else None
-    effective_pypto_dbc = enable_pypto_l0c_double_buffer and memory_planner in (
-        None,
-        MemoryPlanner.PYPTO,
-    )
+    effective_pypto_dbc = enable_pypto_l0c_double_buffer and memory_planner == MemoryPlanner.PYPTO
     compile_opts = (
         ("analyze_auto_scopes_for_deps", analyze_auto_scopes_for_deps),
         ("emit_source_loc", emit_source_loc),

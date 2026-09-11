@@ -340,12 +340,12 @@ tile 调用 `set_validshape`。
 
 物理 `addr` 由谁分配，通过 `memory_planner` 选项选择
 （`ir.compile(..., memory_planner=passes.MemoryPlanner.PYPTO | DSA_RP | PTOAS)`，
-默认 `PYPTO`）。它同时作用于 pass 流水线（经 `PassContext`）与 codegen：
+默认 `DSA_RP`）。它同时作用于 pass 流水线（经 `PassContext`）与 codegen：
 
 | 模式 | 流水线 | `pto.alloc_tile` | `pto.reserve_buffer` | ptoas |
 | ---- | ------ | ---------------- | -------------------- | ----- |
-| `PYPTO`（默认） | 运行 `MaterializeSemanticAliases` + `MemoryReuse` + `AllocateMemoryAddr` | 发射 `addr = <const>`（来自 `MemRef.byte_offset_`） | `auto = false, base = <const>` | `--pto-level=level3`（信任已烘焙地址） |
-| `DSA_RP` | 运行 `MaterializeSemanticAliases` + `AllocateMemoryAddr`；跳过 `MemoryReuse` | 发射进程内 canonical-greedy DSA-RP 的 `addr = <const>` | `auto = false, base = <const>` | `--pto-level=level3`（信任已烘焙地址） |
+| `PYPTO` | 运行 `MaterializeSemanticAliases` + `MemoryReuse` + `AllocateMemoryAddr` | 发射 `addr = <const>`（来自 `MemRef.byte_offset_`） | `auto = false, base = <const>` | `--pto-level=level3`（信任已烘焙地址） |
+| `DSA_RP`（默认） | 运行 `MaterializeSemanticAliases` + `AllocateMemoryAddr`；跳过 `MemoryReuse` | 发射进程内 canonical-greedy DSA-RP 的 `addr = <const>` | `auto = false, base = <const>` | `--pto-level=level3`（信任已烘焙地址） |
 | `PTOAS` | 运行 `MaterializeSemanticAliases`；**跳过** `MemoryReuse` + `AllocateMemoryAddr` | 省略 `addr`（`PTOCodegen.generate(emit_tile_addr=False)`） | `auto = true`（不带 `base`） | `--pto-level=level2`（ptoas `PlanMemory` 做复用 + 定址） |
 
 内存规划拆成两个 pass：**`MaterializeSemanticAliases`** 把**语义强制**的别名

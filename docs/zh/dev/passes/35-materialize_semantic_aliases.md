@@ -81,8 +81,9 @@ pipeline-slot 元数据）的变量渲染成同一个 `tile_buf` handle，因此
   每个成员的相对偏移。仅共享 `base` 不足以建立 must-alias 关系：互不相交的 byte
   window 和不同 pipeline slot 会保持独立，直到 producer 被安全地重定向到精确的
   canonical window。
-- 在默认（`PYPTO`）流水线里,本 pass 加上 `MemoryReuse` 组合起来等于原来单个
-  `MemoryReuse` pass 的行为。
+- 在旧版 `PYPTO` 流水线里，本 pass 加上 `MemoryReuse` 组合起来等于原来单个
+  `MemoryReuse` pass 的行为。默认 `DSA_RP` 流水线跳过机会性合并，并在
+  `AllocateMemoryAddr` 中放置独立的 allocation identity。
 - `DSA_RP` 与 `PTOAS` 都跳过这里的机会性 MemRef 合并；二者都不能撤销本 pass
   建立的强制别名关系。
 - accumulator-phi 规范化会在 lifetime planning 之前对所有 memory planner 运行。

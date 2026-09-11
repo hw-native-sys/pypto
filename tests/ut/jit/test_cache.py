@@ -437,6 +437,18 @@ class TestMakeCacheKey:
         key_on = self._make_key(**kwargs, enable_pypto_l0c_double_buffer=True)
         assert key_off == key_on
 
+    def test_dbc_double_buffer_flag_does_not_split_unresolved_default_key(self):
+        """A None planner means DSA_RP, so the legacy-only flag is inert."""
+        kwargs = {
+            "param_names": ["a"],
+            "tensor_shapes": {"a": (8, 8)},
+            "tensor_dtypes": {"a": DataType.FP32},
+            "memory_planner": None,
+        }
+        key_off = self._make_key(**kwargs, enable_pypto_l0c_double_buffer=False)
+        key_on = self._make_key(**kwargs, enable_pypto_l0c_double_buffer=True)
+        assert key_off == key_on
+
     def test_runtime_splits_key(self):
         """The runtime is baked into the artifact's ``kernel_config.py`` and decides
         which worker can bind it, so a ``host_build_graph`` call must not reuse a
@@ -467,8 +479,8 @@ class TestResolveRuntime:
 class TestResolveMemoryPlanner:
     """The planner the JIT keys on must match the one ``ir.compile()`` will use."""
 
-    def test_defaults_to_pypto(self):
-        assert _resolve_memory_planner(None) == MemoryPlanner.PYPTO
+    def test_defaults_to_dsa_rp(self):
+        assert _resolve_memory_planner(None) == MemoryPlanner.DSA_RP
 
     @pytest.mark.parametrize("planner", [MemoryPlanner.DSA_RP, MemoryPlanner.PTOAS])
     def test_reads_the_active_pass_context(self, planner):
@@ -477,7 +489,7 @@ class TestResolveMemoryPlanner:
         call reuse a PYPTO-compiled artifact."""
         with passes.PassContext([], memory_planner=planner):
             assert _resolve_memory_planner(None) == planner
-        assert _resolve_memory_planner(None) == MemoryPlanner.PYPTO
+        assert _resolve_memory_planner(None) == MemoryPlanner.DSA_RP
 
 
 class TestResolveEnablePyptoL0cDoubleBuffer:

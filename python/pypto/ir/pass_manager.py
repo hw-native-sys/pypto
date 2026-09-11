@@ -360,7 +360,7 @@ class PassManager:
         # PassManager built outside PTOAS but run inside a PTOAS context would keep
         # MemoryReuse yet still select dbC=2, coalescing the two co-live L0C accumulators
         # into one shrunk single-buffer tile (see _check_planner_consistency).
-        self._construction_planner = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
+        self._construction_planner = ctx.get_memory_planner() if ctx else passes.get_default_memory_planner()
         skipped_mem_planning_passes: tuple[str, ...]
         if self._construction_planner == passes.MemoryPlanner.PTOAS:
             skipped_mem_planning_passes = ("MemoryReuse", "AllocateMemoryAddr")
@@ -405,7 +405,7 @@ class PassManager:
         context, so this guard only catches direct PassManager misuse.
         """
         ctx = passes.PassContext.current()
-        run_planner = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
+        run_planner = ctx.get_memory_planner() if ctx else passes.get_default_memory_planner()
         if run_planner != self._construction_planner:
             raise RuntimeError(
                 f"PassManager was constructed under memory_planner={self._construction_planner!r} "
@@ -548,7 +548,7 @@ class PassManager:
         # disables planner-gated pass behaviour (AutoTileMatmulL0's dbC=2 tile
         # selection reads GetMemoryPlanner() + GetEnablePyptoL0cDoubleBuffer()
         # *during* pass execution) whenever the pipeline dumps IR.
-        mplan = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
+        mplan = ctx.get_memory_planner() if ctx else passes.get_default_memory_planner()
         dbc_flag = ctx.get_enable_pypto_l0c_double_buffer() if ctx else False
         runtime = ctx.get_runtime() if ctx else passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
         outer_phase = ctx.get_diagnostic_phase() if ctx else passes.get_default_diagnostic_phase()
@@ -593,7 +593,7 @@ class PassManager:
         # Propagate the outer memory planner, the legacy-PYPTO dbC=2 opt-in and the
         # runtime ABI (see run_passes) so profiling doesn't silently reset them and
         # disable planner- or runtime-gated behaviour.
-        mplan = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
+        mplan = ctx.get_memory_planner() if ctx else passes.get_default_memory_planner()
         dbc_flag = ctx.get_enable_pypto_l0c_double_buffer() if ctx else False
         runtime = ctx.get_runtime() if ctx else passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
         dphase = ctx.get_diagnostic_phase() if ctx else passes.get_default_diagnostic_phase()

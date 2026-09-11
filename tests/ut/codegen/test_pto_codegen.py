@@ -24,7 +24,7 @@ import re
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
-from pypto import DataType, backend, codegen, ir
+from pypto import DataType, backend, codegen, ir, passes
 from pypto.backend import BackendType, pto_backend
 from pypto.backend.pto_backend import (
     _emit_group_output,
@@ -2092,6 +2092,7 @@ AICORE void split_vec() {
             "unused grouped pto",
             str(tmp_path),
             skip_ptoas=False,
+            memory_planner=passes.MemoryPlanner.DSA_RP,
         )
 
         split_cube_wrapper = next(

@@ -500,8 +500,8 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 21. [`MaterializeTensorStrides`](33-materialize_tensor_strides.md) —— 自 RFC #1300 P6 起接入默认 pipeline
 22. `InitMemRef`
 23. [`MaterializeSemanticAliases`](35-materialize_semantic_aliases.md)（语义强制别名：循环 carry / 原地；总是运行）
-24. `MemoryReuse`
-25. `AllocateMemoryAddr`
+24. `MemoryReuse`（仅用于旧版 `PYPTO` 规划器；`DSA_RP` 和 `PTOAS` 跳过）
+25. `AllocateMemoryAddr`（默认使用 `DSA_RP`；`PTOAS` 将放置工作交给下游）
 26. [`FoldNoOpReshape`](38-fold_no_op_reshape.md)
 27. [`FuseCreateAssembleToSlice`](39-fuse_create_assemble_to_slice.md)
 28. [`LowerL2TensorCollectives`](40-lower_l2_tensor_collectives.md)（分布式：写在 CHIP orchestration 函数体里的托管集合通信 -> 一个本地 builtin AIV task；放在此处是为了让改写后的调用像任何 kernel 调用一样推导出实参方向与 TensorMap 任务依赖边）

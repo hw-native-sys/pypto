@@ -397,7 +397,7 @@ class RunConfig:
             capacity-constrained DSA-RP planner), or ``PTOAS`` (the PyPTO
             allocation passes are skipped and ptoas ``PlanMemory`` owns reuse
             and addressing). ``None`` (default) defers to the active
-            ``PassContext``, or to ``PYPTO`` when none is active.
+            ``PassContext``, or to ``DSA_RP`` when none is active.
             Forwarded to ``ir.compile()``, which rejects it when a
             ``PassContext`` is already active — set it on that context instead.
     """

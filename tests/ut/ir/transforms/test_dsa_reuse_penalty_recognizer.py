@@ -19,14 +19,30 @@ def _plan_with_dsa_rp(program):
         return passes.allocate_memory_addr()(initialized)
 
 
-def _recognized_edges(program) -> set[tuple[str, str, int]]:
-    """Inspect recognizer output before placement or solver tie-breaking."""
-    initialized = passes.init_mem_ref()(program)
-    function = next(iter(initialized.functions.values()))
+def _edge_set(function, reference_enumeration: bool) -> set[tuple[str, str, int]]:
     return {
         (edge["first_name"], edge["second_name"], edge["cost"])
-        for edge in testing.recognize_dsa_reuse_penalties(function)
+        for edge in testing.recognize_dsa_reuse_penalties(
+            function, reference_enumeration=reference_enumeration
+        )
     }
+
+
+def _recognized_edges(program) -> set[tuple[str, str, int]]:
+    """Inspect recognizer output before placement or solver tie-breaking.
+
+    The compiler enumerates candidate pairs with a lifetime sweep indexed by
+    access resource, which visits far fewer pairs than the all-pairs
+    specification of the same promotion policy. Every case in this file checks
+    that the two agree, so the optimization cannot silently drop a relation.
+    """
+    initialized = passes.init_mem_ref()(program)
+    function = next(iter(initialized.functions.values()))
+    edges = _edge_set(function, reference_enumeration=False)
+    assert edges == _edge_set(function, reference_enumeration=True), (
+        "indexed sweep and all-pairs enumeration disagree"
+    )
+    return edges
 
 
 def _recognized_pairs(program) -> set[frozenset[str]]:
@@ -101,8 +117,11 @@ def test_dsa_rp_recognizes_cross_pipe_war(ascend_backend):
             next_value = pl.load(input_b, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             return pl.store(next_value, [0, 0], output)
 
+    # `prior` and `_consumed` are the source and result of one add. `prior`'s
+    # only maximal access is that add's own read, so overlapping the two is an
+    # in-place aliasing question for the operation's contract, not an optional
+    # reuse the allocator may price.
     assert _recognized_edges(Before) == {
-        ("prior", "_consumed", 1),
         ("prior", "next_value", 1),
         ("_consumed", "next_value", 1),
     }
@@ -166,6 +185,30 @@ def test_dsa_rp_preserves_not_inplace_safe_semantic_separation():
 
     ranges = _tile_ranges(_plan_with_dsa_rp(Before))
     assert not _overlap(ranges["source"], ranges["result"])
+
+
+def test_dsa_rp_inplace_safe_narrowing_cast_is_same_base_or_disjoint(ascend_backend):
+    """A narrowing cast may reuse its input at the same base, but not staggered.
+
+    The FP32 input plus BF16 result exceed the A2A3 Vec capacity when disjoint,
+    so this also covers the model-sized case that requires safe in-place reuse.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            input_a: pl.Tensor[[128, 256], pl.FP32],
+            output: pl.Tensor[[128, 256], pl.BF16],
+        ) -> pl.Tensor[[128, 256], pl.BF16]:
+            source = pl.load(input_a, [0, 0], [128, 256], target_memory=pl.Mem.Vec)
+            result = pl.cast(source, target_type=pl.BF16)
+            return pl.store(result, [0, 0], output)
+
+    ranges = _tile_ranges(_plan_with_dsa_rp(Before))
+    assert ranges["source"][0] == ranges["result"][0]
+    assert ranges["result"][1] < ranges["source"][1]
 
 
 def test_dsa_rp_preserves_tile_move_semantic_separation():
@@ -819,7 +862,13 @@ def test_dsa_rp_recognizes_l0_to_l1_route(ascend_backend):
     indirect=["ascend_backend"],
 )
 def test_dsa_rp_uses_backend_memory_graph_for_acc_to_vec_route(ascend_backend, expect_edge):
-    """Acc-to-Vec is an A5 FIX route; A2/A3 must conservatively skip it."""
+    """Acc-to-Vec is an A5 FIX route; A2/A3 must conservatively skip it.
+
+    The probe is the later inbound load rather than the move's own consumer:
+    `_moved`'s write is ordered before that consumer's read, so the read is its
+    only maximal access. An unsupported route leaves `_moved` unpenalized
+    entirely, which is what distinguishes the two targets.
+    """
 
     @pl.program
     class Before:
@@ -841,7 +890,7 @@ def test_dsa_rp_uses_backend_memory_graph_for_acc_to_vec_route(ascend_backend, e
             later = pl.load(later_input, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
             return pl.store(later, [0, 0], output)
 
-    pair = frozenset(("_moved", "_consumed"))
+    pair = frozenset(("_moved", "later"))
     assert (pair in _recognized_pairs(Before)) is expect_edge
 
 

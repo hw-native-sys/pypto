@@ -502,8 +502,8 @@ The PTO-oriented tile stage of `Default` is:
 21. [`MaterializeTensorStrides`](33-materialize_tensor_strides.md) — wired into the default pipeline starting from RFC #1300 P6
 22. `InitMemRef`
 23. [`MaterializeSemanticAliases`](35-materialize_semantic_aliases.md) (semantics-required must-alias: loop-carry / in-place; always runs)
-24. `MemoryReuse`
-25. `AllocateMemoryAddr`
+24. `MemoryReuse` (legacy `PYPTO` planner only; skipped by `DSA_RP` and `PTOAS`)
+25. `AllocateMemoryAddr` (`DSA_RP` is the default; `PTOAS` delegates placement downstream)
 26. [`FoldNoOpReshape`](38-fold_no_op_reshape.md)
 27. [`FuseCreateAssembleToSlice`](39-fuse_create_assemble_to_slice.md)
 28. [`LowerL2TensorCollectives`](40-lower_l2_tensor_collectives.md) (distributed: a managed collective written in a CHIP orchestration body -> one local builtin AIV task; runs here so the emitted call gets its argument directions and TensorMap task edges derived like any kernel call)

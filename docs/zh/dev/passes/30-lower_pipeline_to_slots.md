@@ -37,7 +37,8 @@ for i in pl.range(64):
 
 ## 自门控于 `memory_planner=PTOAS`
 
-在默认的 PyPTO planner 下，本 pass 对每个函数都原样返回，因此那条路径保持**字节一致**。
+在进程内 planner（默认的 `DSA_RP` 或旧版 `PYPTO`）下，本 pass 对每个函数都原样返回，
+因此这些路径保持**字节一致**。
 
 这个门控划的是"region 在哪里被**发出**"，而不是"ptoas 在哪里**能用** region"。PTO codegen 的 `PlanMultiBufferRegions` 在 PyPTO planner 下直接返回，所以在那条路上合成的轮转只会落成一条运行时地址的普通 `alloc_tile`——正确，但拿不到本变换赖以生效的 slot 分析。
 

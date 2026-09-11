@@ -80,8 +80,17 @@ def raise_internal_error_with_span(message: str, filename: str, line: int, col: 
 def rethrow_with_message(kind: str, original: str, replacement: str) -> NoReturn:
     """Raise `kind` and rethrow it via Error::RethrowWithMessage for testing"""
 
-def recognize_dsa_reuse_penalties(function: Function) -> list[DsaReusePenaltyEdge]:
-    """Return recognized DSA-RP edges without running placement."""
+def recognize_dsa_reuse_penalties(
+    function: Function, reference_enumeration: bool = False
+) -> list[DsaReusePenaltyEdge]:
+    """Return recognized DSA-RP edges without running placement.
+
+    Args:
+        function: Function to analyze
+        reference_enumeration: Enumerate every allocation pair instead of the
+            compiler's indexed sweep. Both apply the same promotion policy, so
+            tests use this to pin one strategy against the other.
+    """
 
 def try_infer_pipe(call: Call) -> int | None:
     """Return the exact backend pipe for a Call, or None."""

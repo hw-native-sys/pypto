@@ -47,7 +47,8 @@ alloc_pass = passes.allocate_memory_addr()
 program_with_addrs = alloc_pass(program)
 ```
 
-编译时显式选择 DSA-RP：
+`DSA_RP` 是默认 planner。当编译不能继承外层 `PassContext` 的策略时，
+可以显式选择它：
 
 ```python
 from pypto.ir import compile
@@ -76,35 +77,66 @@ buffer，带有字节大小、对齐和保守的半开生命周期。问题包�
 - 生命周期干涉、预留范围、语义 no-alias、目标 hazard 和请求的流水线 stage
   分离等**硬约束**；作者声明的 `pl.MemRef`
   分配还会与同一内存空间中的其他所有分配建立硬分离。多 slot 声明会作为覆盖完整
-  声明范围的单个 buffer 放置，同时每个成员保留其常量或运行时选择的 slot 偏移；
-- 对生命周期兼容的物理复用，如果内置 recognizer 将其识别为跨 pipe WAR 或 WAW
+  声明范围的单个 buffer 放置，同时每个成员保留其常量或运行时选择的 slot 偏移。
+  对于注册为支持函数式原地执行的算子，输入的最后一次读可以与输出写共享算子边界，
+  但两个分配必须使用相同基址或完全分离。相同基址允许窄化转换等安全的不同大小操作；
+  交错重叠仍被禁止；
+- 对生命周期兼容的物理复用，如果内置 recognizer 将其识别为跨 resource WAR 或 WAW
   handoff，则加入**单位权重软边**；
 - 硬 arena 容量。容量与正确性绝不会为了降低复用代价而放宽。
 
-识别规则是保守的：它要求完整访问信息、覆盖整个分配的 handoff 端点，以及经验证的
-首次写入。相同 pipe、部分 view 或不确定情形不加惩罚。当前 backend 根据算子、已解析的
-源/目标 memory space 和所选 SoC 的直接 memory graph，将每个受支持的可执行 call
-映射到硬件 pipe；不能唯一推导的 route 由算子专属的 backend hook 处理。不受支持或
-有歧义的 route 会被跳过。recognizer 只消费这些 backend 元数据，不在 IR
-transform 中重复维护架构 route 表，也不调用或模拟 ptoas 的同步 pass。
+### 识别 handoff
 
-显式 pair 模型是 output-sensitive 的：对于 `B` 个可复用 buffer，一个 kernel 最坏可包含
-`Theta(B^2)` 个生命周期冲突或候选 penalty pair，因此 recognizer 与 solver graph 构造
-最坏为二次复杂度。该复杂度例外仅限 opt-in 的 `DSA_RP` planner；默认 planner 不变。
+只有当较早分配的访问尚未被保证在较晚分配的首次写入之前完成时，复用才值得计费。
+因此 recognizer 为每个分配保留在保证执行顺序下的 **maximal access** 以及完整的
+**minimal initial-write frontier**，而不是每个 resource 只保留一个访问。把 maximal
+access 排在新的首次写入之前，也就排好了其余所有访问；已经排在同一分配的另一个访问
+之前的访问不可能产生 handoff，会被丢弃。
+
+当较早分配的某个 maximal access 与较晚分配的某个首次写入使用**两个不同的抽象
+resource**，且两个分配的访问集合完整、已分类、覆盖整个分配，并且首次写入已验证时，
+该 pair 会被晋升。相同 resource、部分 view、结构有歧义以及访问不完整的情形不加惩罚；
+已因正确性或流水线意图分离的 pair 同样不加惩罚。同一算子的两个端点属于该算子契约的
+原地别名问题，而不是可选复用，交由上面的 same-base-or-disjoint 关系处理。
+
+访问由与目标无关的 route 标识，即其源和目标 memory class，它指明必须完成的引擎类别。
+当前 backend 只判断所选 SoC 能否执行该算子的传输；无法分类的算子会让其分配不加惩罚。
+recognizer 不调用也不模拟 ptoas。
+
+顺序来自 chain-cover 可达性索引，而不是逐语句的传递前驱集合。每个抽象 resource 被建模
+为一条按完成顺序排列的 issue chain，因此把该 chain 顺序加入语句依赖边后，这些 resource
+构成 happens-before 顺序的一个 chain cover，每条语句一个 vector clock 即可通过读取单个
+分量回答顺序查询。组合这两类边正是完成模型已有的假设：若两个访问在同一 resource 上有序，
+且数据依赖把第二个排在第三个之前，则第一个也排在第三个之前。
+
+显式 pair 模型是 output-sensitive 的：对于一个 InCore 函数内的 `B` 个可复用 buffer，
+一个 kernel 最坏可包含 `Theta(B^2)` 个生命周期冲突或候选 penalty pair，任何 pair 枚举
+都不可能比它必须报告的 pair 更省。识别本身对 IR 不是二次的：在 resource 数量固定时，
+顺序索引耗费 `O(V + E)` 乘以控制嵌套深度（用于按区域构造依赖图），pair 由按 resource
+建索引的生命周期 sweep 枚举。该 sweep 只检查那些已经共享 memory space、生命周期兼容且
+提供两个不同 resource 的 pair，因此在没有跨 resource 复用的 kernel 上几乎不检查任何 pair，
+而 all-pairs 扫描仍需付出 `Theta(B^2)`。被检查的数量不等于被报告的数量：一个被检查的 pair
+仍可能因 separation、同一算子或控制路径互斥而被拒绝。每个 allocation 的 completion frontier
+按 (resource, 控制路径, 字节范围) 各取一个代表做两两比较。固定数量的 canonical 放置顺序需要
+`O(B^2 log B)` 时间和 `O(B^2)` 空间。若所有构造式顺序都失败，一个仅检查可行性的精确
+fallback 会在固定的 100,000 个候选放置工作预算内枚举对齐放置。这是默认 `DSA_RP`
+planner 对通用 pass 复杂度策略的已记录例外；其范围限于单个函数，使用固定数量的构造式 restart，
+并对原本可能呈指数复杂度的 fallback 设置明确上界。显式选择的旧版 `PYPTO` planner 仍使用顺序分配路径。
 
 Canonical greedy 尝试偏移 `0`、预留范围末尾，以及已放置硬/软邻居的对齐顶部。
 每个 buffer 先选择增量惩罚最低的候选，再选最低地址。它评估多种确定性顺序，并保留
 一个可行的、惩罚盲的 first-fit 放置作为 incumbent。写回前由独立 validator
-检查最终放置。
+检查最终放置。若没有构造式顺序找到放置，精确 fallback 会返回可行见证、证明不存在放置，
+或报告固定搜索预算已耗尽。预算耗尽会被单独诊断，不会被报告为内存不足。
 
 流水线意图采用先硬后软策略：
 
-1. 先在所有请求的跨 stage 分离均为硬约束时运行有界 canonical-greedy 搜索。
-2. 若该搜索未找到可放置方案——这并不证明严格数学问题不可行——则仅放宽唯一硬
-   理由为流水线意图的 pair，把它们改为单位复用惩罚后再次搜索。
+1. 先在所有请求的跨 stage 分离均为硬约束时运行 canonical greedy 及其有界精确 fallback。
+2. 若严格问题被证明无法放置，或精确 fallback 到达工作预算，则仅放宽唯一硬理由为
+   流水线意图的 pair，把它们改为单位复用惩罚后再次搜索。
 3. 若最终放置重叠了放宽的 pair，发出 `PH-DSA-001` 性能诊断。所有语义与目标
-   hazard 分离始终保持为硬约束。若放宽后的有界搜索仍未找到可放置方案，则报告
-   OOM/no-fit 编译错误；这仍表示搜索失败，并非不可行性证明。
+   hazard 分离始终保持为硬约束。若放宽后的精确搜索证明无解，则报告编译期 OOM/no-fit。
+   若它先到达固定工作预算，则报告搜索耗尽，而不声称容量不足。
 
 > **工具链要求：** `DSA_RP` 依赖 ptoas InsertSync 识别不同分配根之间的物理范围
 > 重叠。应使用包含 tile-native 内存规划器及其跨根本地范围重叠分析的现代 ptoas
@@ -209,7 +241,8 @@ passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
 - 测试 DSA-RP 几何、容量、硬约束、惩罚激活、确定性 canonical-greedy 放置、
   以及独立验证
 - 直接测试 solver 之前的精确 recognizer edge 集合，并测试最终放置几何
-- 刻画 canonical-greedy `kNoFit` 只是有界搜索结果，而不是不可行性证明
+- 测试精确 fallback 的可行见证、已证明 no-fit 和有界搜索耗尽结果
+- 测试可选原地执行的同基址或完全分离放置，包括不同大小的窄化转换
 
 ## 分配策略
 

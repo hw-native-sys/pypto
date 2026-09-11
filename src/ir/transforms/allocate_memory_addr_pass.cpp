@@ -13,6 +13,7 @@
 #include <any>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -64,6 +65,13 @@ namespace pypto {
 namespace ir {
 
 namespace {
+
+// Complexity: the legacy sequential policy is O(N log N). The default DSA-RP
+// policy builds an explicit conflict/penalty graph for the B reusable buffers
+// of one InCore function and invokes a fixed-order canonical search, requiring
+// O(N log N + B^2 log B) time and O(B^2) space. A function can genuinely expose
+// Theta(B^2) pair relations, so this is the documented graph-model exception
+// to the pass-complexity policy; the search has a fixed restart bound.
 
 using MemRefWithSpace = std::pair<MemRefPtr, MemorySpace>;
 // ReserveBufferBaseMap / ReservedEndBySpace / ResolveReserveBufferBases now live in the shared
@@ -495,9 +503,72 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
   return memref_pairs;
 }
 
+std::string ObviousDsaCapacityOverflow(const dsa::DsaProblem& problem,
+                                       const ReserveBufferResolution& reserve_resolution,
+                                       const std::string& func_name) {
+  for (const dsa::Pool& pool : problem.pools) {
+    uint64_t reserved_end = 0;
+    for (const dsa::AddressRange& range : pool.reserved_ranges) {
+      reserved_end = std::max(reserved_end, range.end);
+    }
+
+    uint64_t minimum_end = reserved_end;
+    for (const dsa::Buffer& buffer : problem.buffers) {
+      if (buffer.pool != pool.id) continue;
+      const uint64_t alignment = std::max<uint64_t>(1, buffer.alignment);
+      const uint64_t remainder = reserved_end % alignment;
+      const uint64_t padding = remainder == 0 ? 0 : alignment - remainder;
+      if (reserved_end > std::numeric_limits<uint64_t>::max() - padding ||
+          reserved_end + padding > std::numeric_limits<uint64_t>::max() - buffer.size) {
+        minimum_end = std::numeric_limits<uint64_t>::max();
+        break;
+      }
+      minimum_end = std::max(minimum_end, reserved_end + padding + buffer.size);
+    }
+
+    // One buffer at a time only proves the pool must hold the largest of them.
+    // Buffers that are live at the same instant must also be pairwise
+    // disjoint, so the pool must additionally hold their combined size at the
+    // busiest instant. That peak is a proof of infeasibility, and finding it
+    // here keeps a genuinely oversized kernel out of the bounded search, which
+    // would otherwise exhaust its budget and report an inconclusive result for
+    // a capacity problem the user can act on.
+    std::vector<std::pair<int64_t, int64_t>> events;
+    for (const dsa::Buffer& buffer : problem.buffers) {
+      if (buffer.pool != pool.id || buffer.lifetime.end <= buffer.lifetime.begin) continue;
+      events.emplace_back(buffer.lifetime.begin, static_cast<int64_t>(buffer.size));
+      events.emplace_back(buffer.lifetime.end, -static_cast<int64_t>(buffer.size));
+    }
+    // A lifetime is half-open, so a buffer ending where another begins is not
+    // co-live: releases must be applied before acquisitions at one position.
+    std::sort(events.begin(), events.end());
+    int64_t live = 0;
+    int64_t peak_live = 0;
+    for (const auto& [position, delta] : events) {
+      static_cast<void>(position);
+      live += delta;
+      peak_live = std::max(peak_live, live);
+    }
+    const auto peak = static_cast<uint64_t>(peak_live);
+    if (reserved_end <= std::numeric_limits<uint64_t>::max() - peak) {
+      minimum_end = std::max(minimum_end, reserved_end + peak);
+    }
+
+    if (minimum_end <= pool.capacity) continue;
+
+    const auto space = static_cast<MemorySpace>(pool.id);
+    std::ostringstream message;
+    message << MemorySpaceToString(space) << " buffer usage (" << minimum_end
+            << " bytes) exceeds platform limit (" << pool.capacity << " bytes)"
+            << ReservedBytesNote(reserve_resolution, space, func_name);
+    return message.str();
+  }
+  return "";
+}
+
 std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithDsaRP(
     const FunctionPtr& func, const MemoryAllocatorPolicy& policy,
-    const ReservedEndBySpace& reserved_end_by_space, const std::vector<MemRefWithSpace>& memrefs) {
+    const ReserveBufferResolution& reserve_resolution, const std::vector<MemRefWithSpace>& memrefs) {
   const dsa_adapter::AllocationPlan allocation_plan = dsa_adapter::BuildDsaAllocationPlan(func);
   if (allocation_plan.intervals.empty()) return {};
 
@@ -513,19 +584,34 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithDsaRP(
   }
 
   const dsa_adapter::PreparedProblem prepared = dsa_adapter::BuildProblem(
-      func, allocation_plan, policy, reserved_end_by_space, pool_caps, active_backend);
+      func, allocation_plan, policy, reserve_resolution.reserved_end_by_space, pool_caps, active_backend);
   if (prepared.strict_problem.buffers.empty()) return {};
+
+  // Reject capacity failures that are provable without searching before they
+  // reach the solver. In particular, a reserve_buffer prefix may itself exceed
+  // the pool capacity, which is an invalid DSA problem but a user-facing
+  // allocation error. Keeping this check at the compiler boundary also
+  // preserves the reserve-buffer attribution in the diagnostic.
+  const std::string obvious_overflow =
+      ObviousDsaCapacityOverflow(prepared.strict_problem, reserve_resolution, func->name_);
+  CHECK_SPAN(obvious_overflow.empty(), func->span_) << obvious_overflow;
 
   const dsa::CanonicalGreedySolver solver;
   dsa::DsaProblem solved_problem = prepared.strict_problem;
   dsa::DsaResult result = solver.Solve(solved_problem);
-  if (result.status == dsa::SolveStatus::kNoFit && !prepared.pipeline_pairs.empty()) {
+  const bool strict_search_failed =
+      result.status == dsa::SolveStatus::kNoFit || result.status == dsa::SolveStatus::kSearchExhausted;
+  if (strict_search_failed && !prepared.pipeline_pairs.empty()) {
     solved_problem = dsa_adapter::RelaxPipelineIntent(prepared);
     result = solver.Solve(solved_problem);
   }
 
   INTERNAL_CHECK_SPAN(result.status != dsa::SolveStatus::kInvalidProblem, func->span_)
       << "DSA-RP constructed or produced invalid state for '" << func->name_ << "'"
+      << (result.diagnostics.empty() ? std::string() : ": " + result.diagnostics.front());
+  CHECK_SPAN(result.status != dsa::SolveStatus::kSearchExhausted, func->span_)
+      << "DSA-RP placement search reached its bounded work limit for '" << func->name_
+      << "'; this does not prove that the on-chip memory capacity is insufficient"
       << (result.diagnostics.empty() ? std::string() : ": " + result.diagnostics.front());
   CHECK_SPAN(result.status == dsa::SolveStatus::kFeasible, func->span_)
       << "DSA-RP could not find a placement for '" << func->name_ << "' within the on-chip memory capacities"
@@ -584,12 +670,12 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
   auto memrefs = memref_collectors::CollectMemRefsWithSpace(func->body_);
 
   const PassContext* context = PassContext::Current();
-  const MemoryPlanner planner = context == nullptr ? MemoryPlanner::PyPTO : context->GetMemoryPlanner();
+  const MemoryPlanner planner = context == nullptr ? kDefaultMemoryPlanner : context->GetMemoryPlanner();
 
   // Step 3: use the selected in-tree allocator. PTOAS never reaches this pass.
   std::vector<std::pair<const MemRef*, MemRefPtr>> memref_pairs;
   if (planner == MemoryPlanner::DsaRP) {
-    memref_pairs = PlanWithDsaRP(func, *policy, reserve_resolution.reserved_end_by_space, memrefs);
+    memref_pairs = PlanWithDsaRP(func, *policy, reserve_resolution, memrefs);
   } else {
     // Declared allocations are the only ones that may take a dynamic address
     // (a runtime slot index).

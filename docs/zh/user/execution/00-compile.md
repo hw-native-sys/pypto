@@ -58,7 +58,7 @@ assert compiled.param_names == ["a", "b", "out"]
 | `platform` | `None` | 产物面向的执行平台；必须与派发它的 worker 一致 |
 | `skip_ptoas` | `False` | 停在 `.pto`（MLIR），不构建设备二进制 |
 | `verification_level` | `None` | `NONE` / `BASIC` / `ROUNDTRIP`；`None` 交给 `PYPTO_VERIFY_LEVEL`，否则 `BASIC` |
-| `memory_planner` | `None` | `PYPTO` / `DSA_RP` / `PTOAS` —— 谁规划片上缓冲（[内存](../performance/05-memory.md)） |
+| `memory_planner` | `None` → `DSA_RP` | `PYPTO` / `DSA_RP` / `PTOAS` —— 谁规划片上缓冲（[内存](../performance/05-memory.md)）；当前 `PassContext` 可覆盖该回退值 |
 | `diagnostic_phase` | `None` | 警告与性能提示在哪个阶段设门 |
 | `disabled_diagnostics` | `None` | 关掉特定检查，而不是全部 |
 | `profiling` | `False` | 逐阶段编译计时写入 `report/pipeline_profile.{txt,json}` |
