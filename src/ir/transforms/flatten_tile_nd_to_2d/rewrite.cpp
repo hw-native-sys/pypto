@@ -1121,10 +1121,21 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         // part of deciding that — see ComputeStorePartitionShape for why
         // aligning the tile's dims against the tensor's trailing dims is not
         // enough once the tile's leading extent collapses several tensor dims.
+        //
+        // Derived from the tile's VALID shape, not its physical shape: the
+        // partition describes the region the store actually transfers, which is
+        // what the 2D path in codegen also sizes it from (`tile.store` reads
+        // GetEffectiveTileView(...).valid_shape there). A chunked tail block —
+        // physical [1, 16, 512] carrying valid [1, 10, 512] — writes 10 rows,
+        // and deriving the window from 16 would both overstate the destination
+        // region and refuse the store outright when 16 does not divide the axis
+        // it would have to span. GetEffectiveTileView falls back to the physical
+        // shape when no valid_shape is set, so the aligned case is unchanged.
+        const auto store_tile_view = tile_view_semantics::GetEffectiveTileView(*orig_tile_type);
         auto store_offsets = As<MakeTuple>(new_args[1]);
         INTERNAL_CHECK_SPAN(store_offsets, span) << "Internal error: tile.store offsets must be a tuple";
         new_args.push_back(std::make_shared<MakeTuple>(
-            ComputeStorePartitionShape(orig_tile_type->shape_, out_tensor_type->shape_,
+            ComputeStorePartitionShape(store_tile_view.valid_shape, out_tensor_type->shape_,
                                        store_offsets->elements_, span),
             span));
       }

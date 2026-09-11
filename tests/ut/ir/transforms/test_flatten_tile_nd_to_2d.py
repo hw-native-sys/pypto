@@ -1188,6 +1188,65 @@ class TestFlattenTileNdTo2DReshapedStore:
 # ----------------------------------------------------------------------------
 
 
+def _store_partition_window(program: ir.Program, func_name: str) -> list:
+    """The ``shapes`` partition operand FlattenTileNdTo2D injects on ``tile.store``.
+
+    Returned as plain ints where the dim is a constant, and as the Expr itself
+    where it is not, so a test can assert on either.
+    """
+    func = program.get_function(func_name)
+    assert func is not None, f"no function {func_name!r} in the rewritten program"
+
+    found: list[ir.Call] = []
+
+    def walk(node) -> None:
+        if node is None:
+            return
+        if isinstance(node, ir.Call):
+            if node.op.name == _OP_TILE_STORE:
+                found.append(node)
+            for arg in node.args:
+                walk(arg)
+        elif isinstance(node, ir.SeqStmts):
+            for stmt in node.stmts:
+                walk(stmt)
+        elif isinstance(node, ir.AssignStmt):
+            walk(node.value)
+        elif isinstance(node, ir.EvalStmt):
+            walk(node.expr)
+
+    walk(func.body)
+    assert len(found) == 1, f"expected exactly one tile.store, found {len(found)}"
+    store = found[0]
+    assert len(store.args) > 3, "FlattenTileNdTo2D injected no shapes operand"
+    elements = cast(ir.MakeTuple, store.args[3]).elements
+    return [d.value if isinstance(d, ir.ConstInt) else d for d in elements]
+
+
+def _collapsed_store_into_dynamic_cols(last_dim) -> ir.Program:
+    """``load [2, 3, 8] -> reshape [6, 8] -> store`` into a ``[2, 3, last_dim]`` tensor.
+
+    The collapse is detected on the static leading axis (6 rows over an extent
+    of 3), so the window has to be derived even though the innermost tensor dim
+    is symbolic. Built via IRBuilder because a hand-made dynamic Var does not
+    survive the ``@pl.program`` print/parse roundtrip.
+    """
+    span = ir.Span.unknown()
+    in_type = ir.TensorType(_shape_exprs([2, 3, 8]), DataType.FP32)
+    out_type = ir.TensorType(_shape_exprs([2, 3, last_dim]), DataType.FP32)
+
+    ib = IRBuilder()
+    with ib.function("collapsed_incore", type=ir.FunctionType.InCore) as f:
+        x = f.param("x", in_type)
+        out_p = f.param("out", out_type, direction=ir.ParamDirection.Out)
+        f.return_type(out_type)
+        x_tile = ib.let("x_tile", tile_ops.load(x, [0, 0, 0], [2, 3, 8], span=span))
+        flat = ib.let("flat", tile_ops.reshape(x_tile, [6, 8], span=span))
+        out_r = ib.let("out_0", tile_ops.store(flat, [0, 0, 0], out_p, span=span))
+        ib.return_stmt(out_r)
+    return ir.Program([f.get_result()], "test_collapsed_dyn_cols", span)
+
+
 class TestFlattenTileNdTo2DCollapsedStore:
     """A 2D tile whose rows are a COLLAPSE of several leading tensor dims.
 
@@ -1352,6 +1411,31 @@ class TestFlattenTileNdTo2DCollapsedStore:
 
         with pytest.raises(ValueError, match=r"must fill axis 1 \(extent 4\) a whole number of times"):
             passes.flatten_tile_nd_to_2d()(Before)
+
+    def test_valid_tail_block_smaller_than_the_physical_tile_is_not_rejected(self):
+        """Physical ``[1, 16, 512]`` with valid ``[1, 10, 512]`` into ``[1, 10, 512]``.
+
+        Only the valid rows are transferred — ``tile.store`` codegen sizes the
+        partition from the tile's valid_shape — so the window is ``[1, 10, 512]``
+        and the store is legal. Deriving it from the PHYSICAL 16 rows instead
+        asks for 16 rows of an axis whose extent is 10, and ``16 % 10 != 0``
+        then rejects a store the hardware performs correctly.
+        """
+        before = _incore_cast_chain(shapes=[1, 16, 512], valid=[1, 10, 512], tensor_shape=[1, 10, 512])
+        after = passes.flatten_tile_nd_to_2d()(before)
+        assert _store_partition_window(after, "cast_incore") == [1, 10, 512]
+
+    def test_dynamic_innermost_tensor_dim_does_not_block_the_window(self):
+        """A ``[6, 8]`` tile into ``[2, 3, D]``: the rows decompose over 2 x 3 whatever D is.
+
+        The innermost axis carries the tile's columns and takes no part in the
+        row decomposition, so demanding a static extent there rejects a store
+        that has a perfectly good window, ``[2, 3, 8]``. The column bound is
+        only checkable when both sides are static, and here D is not.
+        """
+        before = _collapsed_store_into_dynamic_cols(_dyn("D"))
+        after = passes.flatten_tile_nd_to_2d()(before)
+        assert _store_partition_window(after, "collapsed_incore") == [2, 3, 8]
 
 
 # ----------------------------------------------------------------------------

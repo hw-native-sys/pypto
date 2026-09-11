@@ -125,9 +125,15 @@ ExprPtr MakeShapeTupleFromInts(const std::vector<int64_t>& dims, const Span& spa
 ///
 /// The innermost axis is exempt from the consecutiveness rule: it carries the
 /// tile's columns, so a partial column range is still rectangular. It only has
-/// to fit.
+/// to fit, and its extent may be symbolic — it takes no part in distributing
+/// the rows, so a dynamic destination width does not prevent a window.
 ///
-/// @param tile_shape Pre-substitution tile dims (static; see ComputeMergedShape)
+/// @param tile_shape The tile's VALID dims, not its physical ones: the window
+///        describes the region the store transfers, which is what codegen's
+///        2D path also sizes the partition from. Callers pass
+///        `GetEffectiveTileView(tile_type).valid_shape`, which falls back to
+///        the physical shape when no valid_shape is set. Static, except where
+///        the aligned window is returned untouched (see ComputeMergedShape).
 /// @param tensor_shape Output tensor dims, possibly dynamic
 /// @param offsets Store offsets, one per tensor dim, possibly dynamic
 /// @param span Source location for the emitted ConstInts
@@ -179,12 +185,17 @@ std::vector<ExprPtr> ComputeStorePartitionShape(const std::vector<ExprPtr>& tile
     return ci && ci->value_ == 0;
   };
 
-  // The innermost axis carries the tile's columns and only has to fit.
-  const int64_t last_extent = GetStaticDim(tensor_shape.back(), context);
-  if (auto last_offset = As<ConstInt>(offsets.back())) {
-    CHECK_SPAN(last_offset->value_ + cols <= last_extent, span)
-        << "tile.store writes " << cols << " columns at offset " << last_offset->value_
-        << " of an axis whose extent is " << last_extent << "; the write runs past the tensor";
+  // The innermost axis carries the tile's columns and only has to fit. It takes
+  // no part in the row decomposition below, so a symbolic extent there is fine
+  // -- demanding a constant would reject a store whose window is fully
+  // determined anyway ([6, 8] into [2, 3, D] still gives [2, 3, 8]). Check the
+  // bound only where both sides are static enough to prove it violated.
+  if (auto last_extent = As<ConstInt>(tensor_shape.back())) {
+    if (auto last_offset = As<ConstInt>(offsets.back())) {
+      CHECK_SPAN(last_offset->value_ + cols <= last_extent->value_, span)
+          << "tile.store writes " << cols << " columns at offset " << last_offset->value_
+          << " of an axis whose extent is " << last_extent->value_ << "; the write runs past the tensor";
+    }
   }
 
   // Walk the leading axes outward from the innermost. While the row count is
