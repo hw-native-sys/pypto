@@ -2219,7 +2219,12 @@ class HazardInputCollector : public IRVisitor {
   }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
-    if (GetTileTypeWithMemRef(op->var_->GetType())) {
+    // Any tile-typed def can carry taint, with or without a MemRef of its own.
+    // `tile.tpop_from_aic` reads the cross-core ring rather than an allocation,
+    // so after InitMemRef its result has no MemRef. Requiring one here dropped
+    // the tpop taint exactly on the pipeline the hazard guard exists for, and
+    // the guard then produced no separation at all.
+    if (As<TileType>(op->var_->GetType())) {
       if (auto call = As<Call>(op->value_)) {
         // AsVarLike, not As<Var>: an operand may be an enclosing loop's IterArg
         // — the loop-carry shape of `tile.add(x, c_iter)` / `tile.matmul_acc(
