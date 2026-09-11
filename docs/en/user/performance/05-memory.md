@@ -265,11 +265,9 @@ coherency bug, which is why this is never a default and never inferred. The
 compiler rejects the case it can see — declaring `BYPASS` on a tensor the scope
 writes is an error — but it cannot prove the general case.
 
-**Current status:** the toolchain has no bypass path yet
-([PTOAS#1356](https://github.com/hw-native-sys/PTOAS/issues/1356)). A `BYPASS`
-declaration is accepted and carried, warns at compile time, and generates exactly
-the same code as an ordinary cached read. Declaring it now costs nothing and
-starts working when that lands.
+**Requires PTOAS >= v0.61.** A `BYPASS` read compiles to
+a real L2 hint on the load instruction (`TLOAD<pto::TLoadL2Hint::NotAllocKeep>`);
+a read that declares nothing is unaffected, byte for byte.
 
 ## See also
 
