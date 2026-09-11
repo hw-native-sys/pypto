@@ -3338,7 +3338,19 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
         assert len(acc_bases) == 2, f"expected two L0C ping-pong buffers, got: {acc_bases}"
 
     def test_dsa_rp_preserves_existing_pipeline_ping_pong_ranges(self):
-        """The default DSA-RP planner retains two physical operand/Acc slots."""
+        """The default DSA-RP planner retains the operand ping-pong and separates accumulators.
+
+        L0A holds the loop-invariant operand in one buffer and L0B keeps the
+        moving operand's two ping-pong slots, so the pipeline shape survives
+        placement.
+
+        The four accumulator values each get their own L0C range. Two of them
+        are the same pipeline stage in consecutive iterations: the earlier
+        value's last access drains it on a transfer resource while the later
+        one's first write is a matmul, so sharing their storage would make the
+        matmul wait for that drain. The recognizer reports that cross-resource
+        handoff and the planner spends the extra L0C rather than serialize.
+        """
         from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
         _backend.reset_for_testing()
@@ -3352,7 +3364,11 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
         assert ir.python_print(tiled).count("pipeline_double_buffer_c") == 1
         assert len(self._physical_ranges(allocated, ir.MemorySpace.Left)) == 1
         assert len(self._physical_ranges(allocated, ir.MemorySpace.Right)) == 2
-        assert len(self._physical_ranges(allocated, ir.MemorySpace.Acc)) == 2
+        accumulators = self._physical_ranges(allocated, ir.MemorySpace.Acc)
+        assert len(accumulators) == 4
+        # Distinct ranges, not merely distinct buffers: the point is that no two
+        # accumulators were given the same address.
+        assert len({offset for offset, _ in accumulators}) == 4
 
     @pytest.mark.parametrize(
         ("inner_stage", "width", "expected"),

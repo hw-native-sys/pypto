@@ -623,19 +623,25 @@ class TestSlots:
             "PYPTO": passes.allocate_memory_addr()(_run_memory_pipeline(Before)),
             "DSA_RP": _run_dsa_rp_pipeline(Before),
         }
+        # Two slots of one 64x64 FP32 tile. The declaration sorts first, so it
+        # owns the bottom of the space and every other allocation must start
+        # above it; a reservation sized from the largest member would cover
+        # only slot 0 and let the next allocation land on top of slot 1.
+        declared_extent = 2 * 64 * 64 * 4
         for planner, after in placements.items():
             ranges = _tile_byte_ranges(after)
             assert len(ranges) >= 4, f"{planner}: expected addressed tiles, got {ranges}"
-            # Slot 1 must sit inside its own allocation's reservation, so nothing
-            # on a different base may overlap it.
-            for name_a, base_a, start_a, end_a in ranges:
-                for name_b, base_b, start_b, end_b in ranges:
-                    if base_a >= base_b:
-                        continue
-                    assert not (start_a < end_b and start_b < end_a), (
-                        f"{planner}: {name_a} [{start_a}, {end_a}) on '{base_a}' overlaps "
-                        f"{name_b} [{start_b}, {end_b}) on '{base_b}'"
-                    )
+            # Ordinary tiles may share an address with each other: an operation
+            # registered as in-place-safe can alias its input and result
+            # exactly, and DSA-RP takes that when nothing in the model forbids
+            # it. Only landing inside the declaration is a defect.
+            for name, base, start, end in ranges:
+                if base == "aaa":
+                    continue
+                assert start >= declared_extent, (
+                    f"{planner}: {name} [{start}, {end}) on '{base}' lands inside the "
+                    f"declaration's two-slot reservation [0, {declared_extent})"
+                )
 
     def test_slots_round_trip(self):
         """The printed form carries both `slots=` and the subscript.

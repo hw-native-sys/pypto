@@ -94,24 +94,55 @@ and a conservative half-open lifetime. The problem has:
   disjoint. A shared base permits safe unequal-size operations such as
   narrowing casts; staggered overlap remains forbidden;
 - **soft unit-weight pairs** for lifetime-compatible physical reuse that the
-  built-in recognizer identifies as a cross-pipe WAR or WAW handoff; and
+  built-in recognizer identifies as a cross-resource WAR or WAW handoff; and
 - a hard arena-capacity bound. Capacity and correctness are never traded for a
   lower reuse cost.
 
-Recognition is conservative. It requires complete access information,
-full-allocation handoff endpoints, and a verified initial write. Same-pipe,
-partial-view, or uncertain cases receive no penalty. The active backend maps
-each supported executable call to a hardware pipe from its operation, resolved
-source/destination memory spaces, and the selected SoC's direct memory graph;
-an op-specific backend hook handles routes that are not uniquely inferable.
-Unsupported or ambiguous routes are skipped. The recognizer consumes that backend metadata
-and does not duplicate an architecture route table, invoke ptoas, or simulate
-its synchronization pass.
+### Recognizing a handoff
+
+Reuse is safe to charge only when the earlier allocation's accesses are not
+already guaranteed to finish before the later allocation's first write. The
+recognizer therefore keeps, for each allocation, the **maximal accesses** under
+the guaranteed execution order and the complete **minimal initial-write
+frontier**, rather than one access per resource. Ordering the maximal accesses
+before the new first write also orders every other access, so an access that is
+already ordered before another one of the same allocation cannot create a
+handoff and is dropped.
+
+A pair is promoted when some maximal access of the earlier allocation and some
+first write of the later one use **two different abstract resources**, both
+allocations have a complete, classified, full-allocation access set, and the
+initial write is verified. Same-resource, partial-view, structurally ambiguous,
+and incomplete cases stay unpenalized, as do pairs already separated for
+correctness or pipeline intent. Two endpoints of one operation are an
+in-place aliasing question for that operation's contract, not an optional
+reuse, so they are left to the same-base-or-disjoint relation above.
+
+An access is identified by a target-independent route — its source and
+destination memory classes — which names the engine class that must complete.
+The active backend decides only whether the selected SoC can perform an
+operation's transfer at all; an operation it cannot classify leaves its
+allocations unpenalized. The recognizer never invokes or simulates ptoas.
+
+Ordering comes from a chain-cover reachability index rather than per-statement
+transitive predecessor sets. Each abstract resource is one completion-ordered
+issue chain, so adding that chain order to the statement dependency edges makes
+the resources a chain cover of the happens-before order, and one vector clock
+per statement answers a query by reading a single component. Composing the two
+kinds of edge is what the completion model already assumes: if two accesses are
+ordered on one resource and a data dependence orders the second before a third,
+the first is ordered before the third as well.
 
 The explicit pair model is output-sensitive. With `B` reusable buffers in one
 InCore function, a kernel can contain `Theta(B^2)` lifetime conflicts or
-candidate penalty pairs. Recognition and graph construction therefore take
-`O(N log N + B^2)` time, while the fixed set of canonical placement orders
+candidate penalty pairs, and no pair enumeration can be cheaper than the pairs
+it must report. Recognition itself is not quadratic in the IR: the ordering
+index costs `O(V + E)` for a fixed resource count, the frontiers cost
+`O(A)` in the recorded accesses, and pairs are enumerated by a lifetime sweep
+indexed by resource, which visits only pairs that already share a memory space,
+have compatible lifetimes, and offer two different resources. Recognition and
+graph construction therefore take
+`O(N log N + P)` time in the reported pair count `P`, while the fixed set of canonical placement orders
 takes `O(B^2 log B)` time and `O(B^2)` space. If every constructive order
 fails, a feasibility-only exact fallback explores aligned placements up to a
 fixed 100,000-candidate work budget. This is a documented exception to the
@@ -250,6 +281,8 @@ passes.def("allocate_memory_addr", &pass::AllocateMemoryAddr,
 - Tests DSA-RP geometry, capacity, hard constraints, penalty activation,
   deterministic canonical-greedy placement, and independent validation
 - Tests exact pre-solver recognized-edge sets as well as their final placement geometry
+- Tests that the indexed pair sweep and the all-pairs specification of the same
+  promotion policy report identical relations on every recognizer case
 - Tests the exact fallback's feasible witness, proven-no-fit, and bounded
   search-exhaustion outcomes
 - Tests same-base-or-disjoint placement for optional in-place execution,

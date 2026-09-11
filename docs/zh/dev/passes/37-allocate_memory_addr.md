@@ -81,20 +81,41 @@ buffer，带有字节大小、对齐和保守的半开生命周期。问题包�
   对于注册为支持函数式原地执行的算子，输入的最后一次读可以与输出写共享算子边界，
   但两个分配必须使用相同基址或完全分离。相同基址允许窄化转换等安全的不同大小操作；
   交错重叠仍被禁止；
-- 对生命周期兼容的物理复用，如果内置 recognizer 将其识别为跨 pipe WAR 或 WAW
+- 对生命周期兼容的物理复用，如果内置 recognizer 将其识别为跨 resource WAR 或 WAW
   handoff，则加入**单位权重软边**；
 - 硬 arena 容量。容量与正确性绝不会为了降低复用代价而放宽。
 
-识别规则是保守的：它要求完整访问信息、覆盖整个分配的 handoff 端点，以及经验证的
-首次写入。相同 pipe、部分 view 或不确定情形不加惩罚。当前 backend 根据算子、已解析的
-源/目标 memory space 和所选 SoC 的直接 memory graph，将每个受支持的可执行 call
-映射到硬件 pipe；不能唯一推导的 route 由算子专属的 backend hook 处理。不受支持或
-有歧义的 route 会被跳过。recognizer 只消费这些 backend 元数据，不在 IR
-transform 中重复维护架构 route 表，也不调用或模拟 ptoas 的同步 pass。
+### 识别 handoff
+
+只有当较早分配的访问尚未被保证在较晚分配的首次写入之前完成时，复用才值得计费。
+因此 recognizer 为每个分配保留在保证执行顺序下的 **maximal access** 以及完整的
+**minimal initial-write frontier**，而不是每个 resource 只保留一个访问。把 maximal
+access 排在新的首次写入之前，也就排好了其余所有访问；已经排在同一分配的另一个访问
+之前的访问不可能产生 handoff，会被丢弃。
+
+当较早分配的某个 maximal access 与较晚分配的某个首次写入使用**两个不同的抽象
+resource**，且两个分配的访问集合完整、已分类、覆盖整个分配，并且首次写入已验证时，
+该 pair 会被晋升。相同 resource、部分 view、结构有歧义以及访问不完整的情形不加惩罚；
+已因正确性或流水线意图分离的 pair 同样不加惩罚。同一算子的两个端点属于该算子契约的
+原地别名问题，而不是可选复用，交由上面的 same-base-or-disjoint 关系处理。
+
+访问由与目标无关的 route 标识，即其源和目标 memory class，它指明必须完成的引擎类别。
+当前 backend 只判断所选 SoC 能否执行该算子的传输；无法分类的算子会让其分配不加惩罚。
+recognizer 不调用也不模拟 ptoas。
+
+顺序来自 chain-cover 可达性索引，而不是逐语句的传递前驱集合。每个抽象 resource 被建模
+为一条按完成顺序排列的 issue chain，因此把该 chain 顺序加入语句依赖边后，这些 resource
+构成 happens-before 顺序的一个 chain cover，每条语句一个 vector clock 即可通过读取单个
+分量回答顺序查询。组合这两类边正是完成模型已有的假设：若两个访问在同一 resource 上有序，
+且数据依赖把第二个排在第三个之前，则第一个也排在第三个之前。
 
 显式 pair 模型是 output-sensitive 的：对于一个 InCore 函数内的 `B` 个可复用 buffer，
-一个 kernel 最坏可包含 `Theta(B^2)` 个生命周期冲突或候选 penalty pair。因此识别与
-graph 构造需要 `O(N log N + B^2)` 时间，固定数量的 canonical 放置顺序需要
+一个 kernel 最坏可包含 `Theta(B^2)` 个生命周期冲突或候选 penalty pair，任何 pair 枚举
+都不可能比它必须报告的 pair 更省。识别本身对 IR 不是二次的：在 resource 数量固定时，
+顺序索引耗费 `O(V + E)`，frontier 耗费与记录访问数成正比的 `O(A)`，pair 由按 resource
+建索引的生命周期 sweep 枚举，只访问那些已经共享 memory space、生命周期兼容且提供两个
+不同 resource 的 pair。因此识别与 graph 构造需要 `O(N log N + P)` 时间（`P` 为报告的
+pair 数），固定数量的 canonical 放置顺序需要
 `O(B^2 log B)` 时间和 `O(B^2)` 空间。若所有构造式顺序都失败，一个仅检查可行性的精确
 fallback 会在固定的 100,000 个候选放置工作预算内枚举对齐放置。这是默认 `DSA_RP`
 planner 对通用 pass 复杂度策略的已记录例外；其范围限于单个函数，使用固定数量的构造式 restart，
