@@ -137,12 +137,16 @@ The explicit pair model is output-sensitive. With `B` reusable buffers in one
 InCore function, a kernel can contain `Theta(B^2)` lifetime conflicts or
 candidate penalty pairs, and no pair enumeration can be cheaper than the pairs
 it must report. Recognition itself is not quadratic in the IR: the ordering
-index costs `O(V + E)` for a fixed resource count, the frontiers cost
-`O(A)` in the recorded accesses, and pairs are enumerated by a lifetime sweep
-indexed by resource, which visits only pairs that already share a memory space,
-have compatible lifetimes, and offer two different resources. Recognition and
-graph construction therefore take
-`O(N log N + P)` time in the reported pair count `P`, while the fixed set of canonical placement orders
+index costs `O(V + E)` for a fixed resource count, times the control nesting
+depth for the per-region dependency graphs, and pairs are enumerated by a
+lifetime sweep indexed by resource. That sweep examines only pairs that
+already share a memory space, have compatible lifetimes, and offer two
+different resources, so on a kernel with no cross-resource reuse it examines
+almost none where an all-pairs scan would still pay `Theta(B^2)`. The count it
+examines is not the count it reports: an examined pair can still be rejected
+for a separation, a shared operation, or incompatible control paths. The
+per-allocation completion frontiers are pairwise over one entry per
+(resource, control path, byte range). The fixed set of canonical placement orders
 takes `O(B^2 log B)` time and `O(B^2)` space. If every constructive order
 fails, a feasibility-only exact fallback explores aligned placements up to a
 fixed 100,000-candidate work budget. This is a documented exception to the

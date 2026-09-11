@@ -177,17 +177,21 @@ PreparedProblem BuildProblem(const FunctionPtr& func, const AllocationPlan& allo
     prepared.strict_problem.same_base_or_disjoint.push_back({pair.first, pair.second});
   }
 
-  std::map<BufferPair, uint64_t> penalty_weights;
+  // The recognizer already returns one relation per unordered pair, sorted and
+  // normalized, and interval -> buffer is injective, so distinct interval
+  // pairs cannot collide into one buffer pair. Accumulating them through a map
+  // would merge nothing and re-derive an order we were handed.
   const std::vector<RecognizedReusePenalty> recognized =
       backend != nullptr ? RecognizeReusePenalties(func, allocation_plan, *backend)
                          : std::vector<RecognizedReusePenalty>{};
+  prepared.strict_problem.reuse_penalties.reserve(recognized.size());
   for (const RecognizedReusePenalty& penalty : recognized) {
     INTERNAL_CHECK(penalty.first_interval < buffer_by_interval.size() &&
                    penalty.second_interval < buffer_by_interval.size())
         << "DSA-RP recognizer returned an out-of-range interval";
     const std::optional<dsa::BufferId> first_buffer = buffer_by_interval[penalty.first_interval];
     const std::optional<dsa::BufferId> second_buffer = buffer_by_interval[penalty.second_interval];
-    if (!first_buffer.has_value() || !second_buffer.has_value()) {
+    if (!first_buffer.has_value() || !second_buffer.has_value() || penalty.cost == 0) {
       continue;
     }
     const BufferPair pair = CanonicalPair(*first_buffer, *second_buffer);
@@ -195,12 +199,7 @@ PreparedProblem BuildProblem(const FunctionPtr& func, const AllocationPlan& allo
         prepared.strict_problem.buffers[pair.second].pool) {
       continue;
     }
-    penalty_weights[pair] = SaturatingAdd(penalty_weights[pair], penalty.cost);
-  }
-  for (const auto& [pair, weight] : penalty_weights) {
-    if (weight != 0) {
-      prepared.strict_problem.reuse_penalties.push_back({pair.first, pair.second, weight});
-    }
+    prepared.strict_problem.reuse_penalties.push_back({pair.first, pair.second, penalty.cost});
   }
 
   return prepared;
