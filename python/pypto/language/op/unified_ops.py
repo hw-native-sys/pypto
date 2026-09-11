@@ -64,6 +64,7 @@ __all__ = [
     "slice",
     "fillpad",
     "fillpad_expand",
+    "img2col",
     "matmul",
     "batch_matmul",
     "matmul_acc",
@@ -1817,3 +1818,36 @@ def mrgsort(  # noqa: PLR0913
     if isinstance(src0, Tile):
         return _tile.mrgsort(src0, src1, src2, src3, tmp, exhausted, block_len=block_len)
     raise TypeError(f"pl.mrgsort: expected Tensor or Tile, got {type(src0).__name__}")
+
+
+def img2col(
+    src: T,
+    pos_m: IntLike,
+    pos_k: IntLike,
+    shape: Sequence[IntLike],
+    *,
+    image_shape: Sequence[IntLike],
+    kernel_size: Sequence[IntLike],
+    stride: Sequence[IntLike] = (1, 1),
+    padding: Sequence[IntLike] = (0, 0, 0, 0),
+    dilation: Sequence[IntLike] = (1, 1),
+) -> T:
+    """Unfold an image window, dispatching on ``src`` being a Tensor or Tile.
+
+    Tensor inputs are staged in Mat automatically during lowering; Tile
+    inputs must already be full NZ Mat tiles. Both paths use the same geometry
+    and return the same level as their input. See ``pl.tensor.img2col`` and
+    ``pl.tile.img2col`` for packing, alignment and runtime-position requirements.
+    """
+    kwargs = dict(
+        image_shape=image_shape,
+        kernel_size=kernel_size,
+        stride=stride,
+        padding=padding,
+        dilation=dilation,
+    )
+    if isinstance(src, Tensor):
+        return _tensor.img2col(src, pos_m, pos_k, shape, **kwargs)
+    if isinstance(src, Tile):
+        return _tile.img2col(src, pos_m, pos_k, shape, **kwargs)
+    _raise_type_dispatch_error("img2col", src)

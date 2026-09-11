@@ -1373,6 +1373,24 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     }
   }
 
+  // TIMG2COL stores scalar instruction attributes, while the DSL groups them
+  // into geometry tuples. Preserve that public signature in executable IR.
+  if (IsOp(op, "tile.img2col") || IsOp(op, "tensor.img2col")) {
+    const auto print_pair = [&](const char* public_name, const char* h, const char* w, int fallback) {
+      stream_ << ", " << public_name << "=(" << op->GetKwarg<int>(h, fallback) << ", "
+              << op->GetKwarg<int>(w, fallback) << ")";
+    };
+    print_pair("image_shape", "fmap_h", "fmap_w", 0);
+    print_pair("kernel_size", "kernel_h", "kernel_w", 0);
+    print_pair("stride", "stride_h", "stride_w", 1);
+    print_pair("dilation", "dilation_h", "dilation_w", 1);
+    stream_ << ", padding=(" << op->GetKwarg<int>("pad_top") << ", " << op->GetKwarg<int>("pad_bottom")
+            << ", " << op->GetKwarg<int>("pad_left") << ", " << op->GetKwarg<int>("pad_right") << ")";
+    print_serialized_attrs(/*need_comma=*/true);
+    stream_ << ")";
+    return;
+  }
+
   // Print kwargs as keyword arguments
   bool need_comma = !op->args_.empty();
   if (gather_row_kw_valid) {

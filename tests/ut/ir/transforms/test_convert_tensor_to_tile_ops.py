@@ -8096,5 +8096,43 @@ class TestTensorCastConversion:
         assert "saturation_mode" not in cast_calls[0].kwargs
 
 
+def test_img2col_loads_mat_and_preserves_left_result():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[64, 32], pl.FP16],
+            w: pl.Tensor[[32, 32], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+        ) -> pl.Tensor[[16, 32], pl.FP32]:
+            lhs = pl.img2col(
+                x, 16, 32, [16, 32], image_shape=(8, 8), kernel_size=(3, 3), padding=(1, 1, 1, 1)
+            )
+            result = pl.matmul(lhs, w)
+            out = pl.assemble(out, result, [0, 0])
+            return out
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[64, 32], pl.FP16],
+            w: pl.Tensor[[32, 32], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+        ) -> pl.Tensor[[16, 32], pl.FP32]:
+            x_mat = pl.load(x, [0, 0], [64, 32], valid_shape=[64, 32], target_memory=pl.MemorySpace.Mat)
+            lhs_tile = pl.tile.img2col(
+                x_mat, 16, 32, [16, 32], image_shape=(8, 8), kernel_size=(3, 3), padding=(1, 1, 1, 1)
+            )
+            w_mat = pl.load(w, [0, 0], [32, 32], valid_shape=[32, 32], target_memory=pl.MemorySpace.Mat)
+            result_tile = pl.tile.matmul(lhs_tile, w_mat)
+            stored = pl.store(result_tile, [0, 0], out)
+            return stored
+
+    _assert_convert_equal(Before, Expected)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

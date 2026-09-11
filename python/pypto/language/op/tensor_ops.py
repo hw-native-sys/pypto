@@ -33,6 +33,7 @@ __all__ = [
     "ci",
     "arange",
     "random",
+    "img2col",
     "matmul",
     "matmul_acc",
     "mul",
@@ -160,6 +161,61 @@ def _unwrap_rhs(rhs: "_RhsT | Tensor | Scalar") -> "_RhsT | Expr":
 def _normalize_intlike(seq: Sequence[IntLike]) -> list[int | Expr]:
     """Unwrap Scalar elements to Expr so the sequence matches C++ binding types."""
     return [elem.unwrap() if isinstance(elem, Scalar) else elem for elem in seq]
+
+
+def img2col(
+    src: Tensor,
+    pos_m: IntLike,
+    pos_k: IntLike,
+    shape: Sequence[IntLike],
+    *,
+    image_shape: Sequence[IntLike],
+    kernel_size: Sequence[IntLike],
+    stride: Sequence[IntLike] = (1, 1),
+    padding: Sequence[IntLike] = (0, 0, 0, 0),
+    dilation: Sequence[IntLike] = (1, 1),
+) -> Tensor:
+    """Unfold a tensor image window for matmul using ISA TIMG2COL.
+
+    Pass an NHWC image flattened to ``[H*W, C]``. Lowering stages it in
+    NZ Mat memory automatically and produces a Left tile for matmul. The result
+    ``[M, K]`` selects a window starting at ``(pos_m, pos_k)`` in the unfolded
+    matrix. M enumerates output (H, W); K enumerates (C1, KH, KW, C0), with
+    C0=32/sizeof(dtype). Pack matmul weights in that same K order.
+
+    Geometry pairs use (H, W); zero padding uses (top, bottom, left, right).
+    H*W and M must be multiples of 16; C, K and pos_k must be C0-aligned.
+    The source must be fully valid. Runtime positions must fit uint16 and
+    keep the entire destination window within the unfolded matrix.
+
+    Args:
+        src: Full feature map tensor with FP16, BF16, FP32 or INT8 elements.
+        pos_m: Starting flattened output spatial position.
+        pos_k: Starting position along the packed reduction axis.
+        shape: Static destination shape (M, K).
+        image_shape: Static source image (H, W).
+        kernel_size: Static spatial filter (KH, KW).
+        stride: Static spatial stride (H, W).
+        padding: Static zero padding (top, bottom, left, right).
+        dilation: Static spatial dilation (H, W).
+
+    Returns:
+        Tensor expression for consumption by ``pl.matmul`` or ``pl.matmul_acc``.
+    """
+    m, k = _normalize_intlike([pos_m, pos_k])
+    return Tensor(
+        expr=_ir_ops.img2col(
+            src.unwrap(),
+            m,
+            k,
+            _normalize_intlike(shape),
+            image_shape=_normalize_intlike(image_shape),
+            kernel_size=_normalize_intlike(kernel_size),
+            stride=_normalize_intlike(stride),
+            padding=_normalize_intlike(padding),
+            dilation=_normalize_intlike(dilation),
+        )
+    )
 
 
 def create(

@@ -524,6 +524,28 @@ void OpConversionRegistry::RegisterElementwiseBinaryOps() {
 // ============================================================================
 
 void OpConversionRegistry::RegisterMemoryOps() {
+  // GM inputs use the standard Mat bridge. A vector-compute result needs the
+  // same placement before img2col's deducer checks the physical source layout.
+  RegisterCustom(
+      "tensor.img2col",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        auto& registry = OpRegistry::GetInstance();
+        auto src = As<TileType>(args[0]->GetType());
+        INTERNAL_CHECK_SPAN(src, span) << "tensor.img2col source must be bridged to a tile";
+        const auto space = BridgeSpaceOf({"tile.img2col"}, 0).Get();
+        if (src->memory_space_ == space) {
+          return ConversionResult(registry.Create("tile.img2col", args, kwargs, span));
+        }
+        auto move = registry.Create("tile.move", {args[0]}, {{"target_memory", space}}, span);
+        auto moved = std::make_shared<Var>("img2col_mat", move->GetType(), span);
+        auto tile_args = args;
+        tile_args[0] = moved;
+        return ConversionResult({std::make_shared<AssignStmt>(moved, move, span)},
+                                registry.Create("tile.img2col", tile_args, kwargs, span));
+      },
+      {{0, {BridgeSpaceOf({"tile.img2col"}, 0), std::nullopt}}});
+
   // tensor.slice → tile.load (gm_tensor) or tile.slice (local_tensor)
   RegisterCustom(
       "tensor.slice",

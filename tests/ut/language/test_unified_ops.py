@@ -2172,5 +2172,31 @@ class TestCastSaturationMode:
         ir.assert_structural_equal(pl.parse(printed), kernel)
 
 
+@pytest.mark.parametrize("is_tile", [False, True])
+def test_img2col_dispatch(is_tile):
+    shape = [64, 32]
+    dtype = DataType.FP16
+    if is_tile:
+        ty = ir.TileType(shape, dtype, memory_space=ir.MemorySpace.Mat)
+        src = Tile(expr=ir.Var("image", ty, ir.Span.unknown()))
+    else:
+        src = Tensor(expr=ir.Var("image", ir.TensorType(shape, dtype), ir.Span.unknown()))
+    kwargs = dict(image_shape=(8, 8), kernel_size=(3, 3), stride=(2, 2), padding=(1, 1, 1, 1))
+    result = pl.img2col(src, 0, 32, (16, 32), **kwargs)
+    assert isinstance(result, Tile if is_tile else Tensor)
+    if isinstance(src, Tile):
+        expected = pl.tile.img2col(src, 0, 32, (16, 32), **kwargs)
+    else:
+        expected = pl.tensor.img2col(src, 0, 32, (16, 32), **kwargs)
+    ir.assert_structural_equal(result.unwrap(), expected.unwrap())
+    assert pl.img2col is language_op.img2col is unified_ops.img2col
+
+
+@pytest.mark.parametrize("src", [1, "invalid"])
+def test_img2col_rejects_unsupported_input(src):
+    with pytest.raises(TypeError, match="pl.img2col: expected Tensor or Tile"):
+        pl.img2col(src, 0, 0, (16, 32), image_shape=(8, 8), kernel_size=(1, 1))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -36,8 +36,46 @@ from ..utils import (
     resolve_cast_mode,
     resolve_saturation_deviation,
 )
+from ._img2col import create_img2col_call
 from ._pad_value import normalize_pad_value
 from .tile_ops import resolve_gather_compare_cmp_mode
+
+
+def img2col(
+    src: Expr,
+    pos_m: int | Expr,
+    pos_k: int | Expr,
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple,
+    *,
+    image_shape: Sequence[int | Expr],
+    kernel_size: Sequence[int | Expr],
+    stride: Sequence[int | Expr] = (1, 1),
+    padding: Sequence[int | Expr] = (0, 0, 0, 0),
+    dilation: Sequence[int | Expr] = (1, 1),
+    span: Span | None = None,
+) -> Call:
+    """Unfold a full ``[H*W, C]`` tensor into a packed ``[M, K]`` matrix window.
+
+    Uses the same geometry, window bounds and C0 packing as ``tile.img2col``.
+    Tensor-to-tile lowering stages the image in NZ Mat memory and emits
+    TIMG2COL into Left memory for a following matmul. The source must be fully
+    valid with static H*W divisible by 16 and C divisible by 32/sizeof(dtype).
+    ``padding`` is (top, bottom, left, right); all other geometry pairs are (H, W).
+    Runtime positions must keep the whole window in bounds and fit uint16;
+    pos_k must be C0-aligned. Output M/K must be aligned to (16, C0).
+    """
+    return create_img2col_call(
+        "tensor.img2col",
+        src,
+        (pos_m, pos_k),
+        shape,
+        image_shape=image_shape,
+        kernel_size=kernel_size,
+        stride=stride,
+        padding=padding,
+        dilation=dilation,
+        span=span,
+    )
 
 
 def create(

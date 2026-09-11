@@ -24,7 +24,8 @@
 | ---- | ---- | ---- |
 | [`load`][pypto.language.tile.load] | `pl.` (t) | DDR → `Vec`（默认）或 `Mat`，经由 `target_memory=` |
 | [`store`][pypto.language.tile.store] | `pl.` (t) | 片上 → DDR |
-| [`move`][pypto.language.tile.move] | `pl.` (t) | 片上 → 片上；进入 `Left` / `Right` / `Bias` 的唯一途径 |
+| [`move`][pypto.language.tile.move] | `pl.` (t) | 片上 → 片上传输，包括 `Left` / `Right` / `Bias` |
+| [`img2col`][pypto.language.img2col] | `pl.` | A2/A3 TIMG2COL：按 Tensor/Tile 输入自动选择层级。Tensor 输入自动装载到 NZ Mat，Tile 输入须为完整的 NZ Mat Tile。将 `[H*W, C]` 展开为同层级的 `[M, K]`，降级后生成供 matmul 使用的 Left Tile。几何参数使用 `(H, W)`，零填充使用 `(上, 下, 左, 右)`。K 轴顺序为 `(C1, KH, KW, C0)`，其中 `C0=32/sizeof(dtype)`。H*W/M 必须按 16 对齐，C/K/pos_k 必须按 C0 对齐 |
 | [`reserve_buffer`][pypto.language.system.reserve_buffer] | `pl.` | 预留跨核缓冲区 |
 | [`import_peer_buffer`][pypto.language.system.import_peer_buffer] | `pl.` | 引用对端核的缓冲区 |
 

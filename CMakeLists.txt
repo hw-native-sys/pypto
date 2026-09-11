@@ -128,6 +128,7 @@ set(PYPTO_SOURCES
     src/ir/op/tile_ops/matmul.cpp
     src/ir/op/tile_ops/matmul_mx.cpp
     src/ir/op/tile_ops/memory.cpp
+    src/ir/op/tile_ops/img2col.cpp
     src/ir/op/tile_ops/quant_mx.cpp
     src/ir/op/tile_ops/reduction.cpp
     src/ir/op/tile_ops/transform.cpp
@@ -155,6 +156,7 @@ set(PYPTO_SOURCES
     src/ir/op/prefetch/prefetch_async.cpp
     src/ir/op/tensor_ops/broadcast.cpp
     src/ir/op/tensor_ops/elementwise.cpp
+    src/ir/op/tensor_ops/img2col.cpp
     src/ir/op/tensor_ops/matmul.cpp
     src/ir/op/tensor_ops/memory.cpp
     src/ir/op/tensor_ops/scatter_update.cpp

@@ -29,7 +29,8 @@ this page does not repeat them.
 | -------- | ----- | ------------ |
 | [`load`][pypto.language.tile.load] | `pl.` (t) | DDR → `Vec` (default) or `Mat`, via `target_memory=` |
 | [`store`][pypto.language.tile.store] | `pl.` (t) | On-chip → DDR |
-| [`move`][pypto.language.tile.move] | `pl.` (t) | On-chip → on-chip; the only path into `Left` / `Right` / `Bias` |
+| [`move`][pypto.language.tile.move] | `pl.` (t) | On-chip → on-chip transfer, including `Left` / `Right` / `Bias` |
+| [`img2col`][pypto.language.img2col] | `pl.` | A2/A3 TIMG2COL: dispatch on Tensor/Tile input. Tensor inputs are staged in NZ Mat automatically; Tile inputs must already be full NZ Mat tiles. Unfold `[H*W, C]` into `[M, K]` at the input level; lowering produces a Left tile for matmul. Geometry uses `(H, W)` pairs; zero padding uses `(top, bottom, left, right)`. K order is `(C1, KH, KW, C0)`, with `C0=32/sizeof(dtype)`. H*W/M require 16 alignment; C/K/pos_k require C0 alignment |
 | [`reserve_buffer`][pypto.language.system.reserve_buffer] | `pl.` | Reserve a cross-core buffer |
 | [`import_peer_buffer`][pypto.language.system.import_peer_buffer] | `pl.` | Reference a peer core's buffer |
 

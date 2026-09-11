@@ -45,6 +45,7 @@ from ..utils import (
     resolve_cast_mode,
     resolve_saturation_deviation,
 )
+from ._img2col import create_img2col_call
 from ._pad_value import normalize_pad_value
 
 
@@ -3000,6 +3001,58 @@ def extract(
         [src, row_expr, col_expr, shape_tuple],
         {"target_memory": target_memory},
         actual_span,
+    )
+
+
+def img2col(
+    src: Expr,
+    pos_m: int | Expr,
+    pos_k: int | Expr,
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple,
+    *,
+    image_shape: Sequence[int | Expr],
+    kernel_size: Sequence[int | Expr],
+    stride: Sequence[int | Expr] = (1, 1),
+    padding: Sequence[int | Expr] = (0, 0, 0, 0),
+    dilation: Sequence[int | Expr] = (1, 1),
+    span: Span | None = None,
+) -> Call:
+    """Build TIMG2COL: full NZ ``[H*W, C]`` in Mat to ``[M, K]`` in Left.
+
+    ``image_shape``, ``kernel_size``, ``stride`` and ``dilation`` use (H, W).
+    ``padding`` is (top, bottom, left, right), filled with zero. The unfolded
+    axes are (output H, output W) and (C1, kernel H, kernel W, C0), where
+    C0=32/sizeof(dtype). Source H*W and output M must be multiples of 16;
+    C, output K and pos_k must be C0-aligned. Positions may be runtime
+    index-like expressions; callers must keep their complete output window
+    within the unfolded image and positions within uint16 range.
+
+    Args:
+        src: Full NZ Mat tile expression with FP16, BF16, FP32 or INT8 elements.
+        pos_m: Starting flattened output spatial position.
+        pos_k: Starting position along the packed reduction axis.
+        shape: Static destination shape (M, K).
+        image_shape: Static source image (H, W).
+        kernel_size: Static spatial filter (KH, KW).
+        stride: Static spatial stride (H, W).
+        padding: Static zero padding (top, bottom, left, right).
+        dilation: Static spatial dilation (H, W).
+        span: Optional source span; captured automatically when omitted.
+
+    Returns:
+        Call expression with the destination TileType in Left memory.
+    """
+    return create_img2col_call(
+        "tile.img2col",
+        src,
+        (pos_m, pos_k),
+        shape,
+        image_shape=image_shape,
+        kernel_size=kernel_size,
+        stride=stride,
+        padding=padding,
+        dilation=dilation,
+        span=span,
     )
 
 

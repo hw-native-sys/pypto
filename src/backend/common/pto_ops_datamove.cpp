@@ -1407,6 +1407,39 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     return std::string("");
   });
 
+  reg("tile.img2col", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+    auto& codegen = AsPto(codegen_base);
+    INTERNAL_CHECK_SPAN(op->args_.size() == 4, op->span_) << "tile.img2col requires four arguments";
+    auto result = codegen.GetCurrentResultTarget();
+    const auto result_type = codegen.GetCurrentResultTileBufTypeStringFromTileType();
+    if (codegen.GetSSATileBufType(result) != result_type) {
+      result = codegen.AllocNewTileBuf(result_type, "img2col_buf");
+      codegen.SetCurrentResultBuf(result);
+    }
+    std::ostringstream oss;
+    oss << "pto.timg2col ins(";
+    for (size_t i = 0; i < 3; ++i) {
+      if (i != 0) oss << ", ";
+      oss << codegen.GetExprAsCode(op->args_[i]);
+    }
+    oss << " : ";
+    for (size_t i = 0; i < 3; ++i) {
+      if (i != 0) oss << ", ";
+      oss << codegen.GetExprTypeAnnotation(op->args_[i]);
+    }
+    oss << ") outs(" << result << " : " << result_type << ") {";
+    bool first = true;
+    for (const char* name : {"fmap_h", "fmap_w", "kernel_h", "kernel_w", "stride_h", "stride_w", "dilation_h",
+                             "dilation_w", "pad_top", "pad_bottom", "pad_left", "pad_right"}) {
+      if (!first) oss << ", ";
+      first = false;
+      oss << name << " = " << op->GetKwarg<int>(name, name[0] == 's' || name[0] == 'd' ? 1 : 0) << " : i64";
+    }
+    oss << "}";
+    codegen.Emit(oss.str());
+    return std::string("");
+  });
+
   reg("tile.reshape", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = AsPto(codegen_base);
     INTERNAL_CHECK_SPAN(op->args_.size() == 2, op->span_)
