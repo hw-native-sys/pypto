@@ -156,7 +156,10 @@ void BindPass(nb::module_& m) {
              "output and read it back with pl.tensor.read. Scalar[TASK_ID] is exempt, and a "
              "device-side scalar helper belongs in an Inline function")
       .value("AivSplitLoweredValid", IRProperty::AivSplitLoweredValid,
-             "Lowered AIV split regions and compatible flat bodies have valid cross-core boundaries");
+             "Lowered AIV split regions and compatible flat bodies have valid cross-core boundaries")
+      .value("BufferIR", IRProperty::BufferIR,
+             "InCore/AIC/AIV use explicit buffer handles and valid registered buffer calls; "
+             "includes SSA, dominance, and assignment symmetry, not lifetime or initialization proofs");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");
