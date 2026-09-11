@@ -105,9 +105,10 @@ def test_nested_allocation_must_first_define_an_ssa_handle():
 
 def test_nested_buffer_write_must_be_a_direct_eval():
     source = _var("source")
-    write = _call("buffer.copy", [source, source])
-    # Void cannot be a positional operand. An Expr-valued compiler attribute
-    # still exercises the verifier's exact direct-statement Call identity.
+    # Give this malformed stored call a value type so construction accepts it
+    # in an attribute. The verifier must use the registered zero-result contract
+    # to require a direct EvalStmt, independently of the stored result type.
+    write = _call("buffer.copy", [source, source], ir.ScalarType(DataType.INDEX))
     wrapper = _call("scalar_helper", [], ir.ScalarType(DataType.INDEX), attrs={"hidden_write": write})
     _assert_error(_program(ir.EvalStmt(wrapper, SPAN), [source]), "require a direct EvalStmt")
 
