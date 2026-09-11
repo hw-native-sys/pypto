@@ -437,26 +437,17 @@ flat_idx[k, c] = index.flat[k] * d + c          # d = 特征宽度（= src 列�
 | 片上 `TileType` | 复用已证明紧凑的源，否则先紧凑物化；分配索引同形状的 INT32 scratch；生成 `tile.gather` |
 
 扁平 gather 自行加载操作数：通用桥接逻辑不能把整个 GM 源加载到片上。
-GM 索引也接受本地分布式窗口。已在 Vec 的运行时计算索引直接复用；显式位于
-其他内存空间的索引会被拒绝，并提示先搬移到 Vec。索引 tile 必须为无分形的行主序
-布局；前端和转换器都会拒绝转置/分形索引布局。前端要求物理索引列数为正的
-编译期常量：FP16/INT16 源要求为 16 的倍数，FP32/INT32 要求为 8 的倍数。
-索引与输出的物理行均须按 32 字节对齐，包括单行 tile。未对齐的物理行会被提前
-拒绝，因为 PTOAS 也会拒绝未对齐的索引与结果 tile，仅补齐 MGATHER 不足以解决。
-调用方可补齐物理索引 tensor，再设置未对齐的 `valid_shape`；有效区域没有对齐要求。
-输出 shape 与 valid shape 跟随二维
-INT32 索引；`tile.gather` 路径显式恢复 scratch 和结果的 valid shape。
-源 dtype 支持 FP16/FP32/INT16/INT32。GM 源必须是连续 ND；片上源必须是
-静态二维行主序 Vec，每行按 32 字节对齐（单行除外）。带 stride 的视图先
-物化为紧凑 tile 再应用扁平偏移：浮点使用 `tile.extract`，INT16/INT32 使用
-保持数值不变的整数 `tile.adds(..., 0)`（A2/A3 TEXTRACT 不支持这两种整数类型）。
+Vec 索引直接复用；生产者下降后，重新检查其内存空间及无分形行主序布局。
+`tile.gather` 路径显式恢复 scratch 和结果的 valid shape。dtype、shape、对齐和
+索引边界要求见[算子契约](../ir/05-tensor-tile-ops.md)。
+
+带 stride 的源通过 `tile.extract`（浮点）或保持数值不变的整数 `tile.adds(..., 0)`
+（INT16/INT32）物化为紧凑 tile；A2/A3 TEXTRACT 无法复制这两种整数类型。
 转换器通过只读 `ConversionContext` 获取前序生产者的紧凑存储证明，信息在一次
 SSA 遍历中收集。已注册的 functional tile 算子若生成独立存储，可证明结果紧凑；
 普通别名和 `tile.set_validshape` 保留该证明。其他视图、参数及控制流结果仍视为
 未知并保留复制。仅凭 `TileView.stride` 为空不能证明紧凑：`tile.slice` 可能继承
 父 tile 的物理行跨度，却不将其记录在该字段中。
-索引必须指向源的有效元素，不做越界检查或负索引
-归一化。此接口不暴露 tile 层的 Mat、按行 coalesce 或其他越界处理模式。
 
 ## Paged Gather 下沉
 

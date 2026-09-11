@@ -7,19 +7,10 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Complete gather-dependent scenarios from issue #2665, using existing ops.
+"""Conv2D, causal Conv3D, and bilinear GridSample coverage for issue #2665.
 
-These are small correctness kernels, not a public or optimized operator library.
-Conv2D uses stride 2, a 3x3 kernel, and zero padding. Causal Conv3D uses a 3x3x3
-kernel, temporal stride 1, two zero/first-frame-padded past frames, and spatial
-zero padding 1.
-Both build im2col on-device with pl.gather before FP16 matmul/FP32 accumulation.
-The gathered patches are checked independently as well as the convolution output.
-
-GridSample implements normalized coordinates, four-neighbor bilinear sampling,
-zeros/border padding, and both align_corners settings. Its coordinates are runtime
-inputs; no gather indices or interpolation weights are computed by the host.
-Goldens use torch.nn.functional, including independent unfold-based patch checks.
+Gather indices and interpolation weights are computed on-device; PyTorch goldens check
+gathered patches and final outputs. These are correctness tests, not library ops.
 """
 
 import pypto.language as pl
@@ -35,10 +26,9 @@ pytestmark = pytest.mark.platforms(
 
 def _conv_kernel(shape: tuple[int, ...], kernel_depth: int, stride: int, padding: int, replicate_past: bool):
     batches, channels, depth, height, width = shape
-    out_depth = depth
     out_height = (height + 2 * padding - 3) // stride + 1
     out_width = (width + 2 * padding - 3) // stride + 1
-    positions = batches * out_depth * out_height * out_width
+    positions = batches * depth * out_height * out_width
     reduction = channels * kernel_depth * 3 * 3
     temporal_mask = 0.0 if replicate_past else 1.0
 
@@ -54,9 +44,9 @@ def _conv_kernel(shape: tuple[int, ...], kernel_depth: int, stride: int, padding
         with pl.at(level=pl.Level.CORE_GROUP):
             p = pl.cast(pl.arange(0, [1, padded_positions]), pl.FP32)
             batch = pl.cast(
-                pl.cast(pl.div(p, out_depth * out_height * out_width), pl.INT32, mode="floor"), pl.FP32
+                pl.cast(pl.div(p, depth * out_height * out_width), pl.INT32, mode="floor"), pl.FP32
             )
-            spatial = pl.sub(p, pl.mul(batch, out_depth * out_height * out_width))
+            spatial = pl.sub(p, pl.mul(batch, depth * out_height * out_width))
             oz = pl.cast(pl.cast(pl.div(spatial, out_height * out_width), pl.INT32, mode="floor"), pl.FP32)
             spatial = pl.sub(spatial, pl.mul(oz, out_height * out_width))
             oy = pl.cast(pl.cast(pl.div(spatial, out_width), pl.INT32, mode="floor"), pl.FP32)
@@ -73,8 +63,7 @@ def _conv_kernel(shape: tuple[int, ...], kernel_depth: int, stride: int, padding
                 z = pl.add(oz, pl.cast(pl.cast(kz - (kernel_depth - 1), pl.INT32), pl.FP32))
                 y = pl.add(base_y, pl.cast(pl.cast(ky, pl.INT32), pl.FP32))
                 x = pl.add(base_x, pl.cast(pl.cast(kx, pl.INT32), pl.FP32))
-                # Clamp EACH coordinate before linearization. A spatially invalid
-                # coordinate can otherwise alias a valid pixel in the next row.
+                # Clamp before linearization to prevent cross-row aliases.
                 safe_batch = pl.minimum(batch, batches - 1)
                 safe_z = pl.minimum(pl.maximum(z, 0.0), depth - 1)
                 safe_y = pl.minimum(pl.maximum(y, 0.0), height - 1)
@@ -142,8 +131,7 @@ def _conv_case(causal: bool, padding: int = 1, future_impulse: bool = False, rep
         return {"patches": expected_patches, "out": expected}
 
     def compare(actual, expected):
-        # Gather and masking must preserve FP16 data exactly; only matmul has
-        # a reduction-order tolerance against the FP32 torch convolution.
+        # Gather is exact; only matmul needs a reduction-order tolerance.
         torch.testing.assert_close(actual["patches"], expected["patches"], rtol=0, atol=0)
         torch.testing.assert_close(actual["out"], expected["out"], rtol=1e-4, atol=1e-4)
 
@@ -186,9 +174,7 @@ def _grid_kernel(align_corners: bool, border: bool):
     batches, channels, height, width = 2, 2, 5, 7
     scale_x = (width - 1) / 2.0 if align_corners else width / 2.0
     scale_y = (height - 1) / 2.0 if align_corners else height / 2.0
-    # With zero padding, samples outside this one-pixel halo are identically
-    # zero. Clipping to the halo preserves bilinear results for finite grids
-    # and keeps floor-to-INT32 conversion bounded even for distant coordinates.
+    # The one-pixel halo preserves zero-padding interpolation and bounds the INT32 cast.
     lower_bound = 0.0 if border else -1.0
     upper_x = float(width - 1) if border else float(width)
     upper_y = float(height - 1) if border else float(height)
@@ -237,8 +223,7 @@ def _grid_kernel(align_corners: bool, border: bool):
 def _grid_case(align_corners: bool, padding_mode: str):
     generator = torch.Generator().manual_seed(2665)
     image = torch.randn((2, 2, 5, 7), generator=generator)
-    # Nonzero, distinct batch/channel/row values expose cross-row and cross-image
-    # aliases when an invalid coordinate happens to produce an in-bounds flat index.
+    # Distinct rows and images expose aliases from incorrectly flattened coordinates.
     image += torch.arange(20, dtype=torch.float32).reshape(2, 2, 5, 1)
     grid = torch.rand((2, 4, 8, 2), generator=generator) * 3.0 - 1.5
     boundary_points = torch.tensor(

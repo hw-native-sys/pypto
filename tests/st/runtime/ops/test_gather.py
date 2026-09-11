@@ -1099,8 +1099,7 @@ def _flat_gather_strided_valid(src: pl.Tensor, idx: pl.Tensor, out: pl.Out[pl.Te
 
 def _flat_gather_case(mode, dtype):
     generator = torch.Generator().manual_seed(2665)
-    # The GM table is larger than UB even in FP16. Only the selected values
-    # and runtime-computed indices should be resident on-chip.
+    # The GM table exceeds UB capacity even in FP16.
     shape = (131072,) if mode == "gm" else (4, 64)
     src = (
         torch.randn(shape, generator=generator).to(dtype)
@@ -1154,24 +1153,18 @@ def test_flat_gather(case_run):
     case_run.assert_passed()
 
 
-@pl.jit
-def _flat_gather_partial_gm(src: pl.Tensor, idx: pl.Tensor, out: pl.InOut[pl.Tensor]):
-    with pl.at(level=pl.Level.CORE_GROUP):
-        indices = pl.set_validshape(idx, 1, 13)
-        out = pl.assemble(out, pl.gather(src, index=indices), [0, 0])
-    return out
-
-
-@pl.jit
-def _flat_gather_partial_local(src: pl.Tensor, idx: pl.Tensor, out: pl.InOut[pl.Tensor]):
-    with pl.at(level=pl.Level.CORE_GROUP):
-        local = pl.add(src, 1)
-        indices = pl.set_validshape(idx, 1, 13)
-        out = pl.assemble(out, pl.gather(local, index=indices), [0, 0])
-    return out
-
-
 def _flat_gather_partial_case(local_source):
+    @pl.jit
+    def partial_gather(src: pl.Tensor, idx: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            if local_source:
+                values = pl.add(src, 1)
+            else:
+                values = src
+            indices = pl.set_validshape(idx, 1, 13)
+            out = pl.assemble(out, pl.gather(values, index=indices), [0, 0])
+        return out
+
     src = torch.arange(256, dtype=torch.float32).reshape(4, 64)
     idx = torch.arange(64, dtype=torch.int32).reshape(2, 32) * 3
 
@@ -1182,7 +1175,7 @@ def _flat_gather_partial_case(local_source):
         return expected
 
     return st.case(
-        _flat_gather_partial_local if local_source else _flat_gather_partial_gm,
+        partial_gather,
         src,
         idx,
         torch.full((2, 32), -123, dtype=torch.float32),
@@ -1201,7 +1194,6 @@ def test_flat_gather_partial(case_run):
 
 def _flat_gather_narrow_case(valid_shape, dtype, computed_index):
     valid_rows, valid_cols = valid_shape
-    # Both index and output physical rows satisfy the flat gather contract.
     alignment = 16 if dtype in (torch.float16, torch.int16) else 8
     shape = (2, (valid_cols + alignment - 1) // alignment * alignment)
     rows, cols = shape

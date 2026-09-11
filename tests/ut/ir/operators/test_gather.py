@@ -132,9 +132,7 @@ class TestTensorGatherFlat:
         call = tensor.gather(src, index=idx)
         assert call.op.name == ir.get_op("tensor.gather").name
         assert "dim" not in call.kwargs
-        assert isinstance(call.type, ir.TensorType)
         ir.assert_structural_equal(call.type, ir.TensorType([2, 16], DataType.FP32))
-        assert call.type.dtype == DataType.FP32
         ir.assert_structural_equal(tensor.gather(src, idx), call)
 
     @pytest.mark.parametrize("memory", [ir.MemorySpace.Mat, ir.MemorySpace.Left, ir.MemorySpace.Right])
@@ -182,12 +180,6 @@ class TestTensorGatherFlat:
             src = pl.Tensor(expr=src)
         with pytest.raises(ValueError, match="only valid for the compare form"):
             wrapper(src, mask_pattern=1, **options)
-
-    def test_flat_positional_indices(self):
-        span = ir.Span.unknown()
-        src = ir.Var("src", ir.TensorType([1024], DataType.FP16), span)
-        idx = ir.Var("idx", ir.TensorType([1, 32], DataType.INT32), span)
-        ir.assert_structural_equal(tensor.gather(src, idx), tensor.gather(src, index=idx))
 
     @pytest.mark.parametrize("wrapper", [tensor.gather, pl.gather])
     @pytest.mark.parametrize("source_type", [ir.TensorType, ir.TileType])

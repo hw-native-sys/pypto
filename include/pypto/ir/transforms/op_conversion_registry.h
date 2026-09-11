@@ -247,7 +247,6 @@ class OpConversionRegistry {
   void RegisterCustom(const std::string& from_op, ConversionFunc func,
                       std::unordered_map<size_t, InputSpaceReq> input_reqs = {});
 
-  /// Context-aware converters can use facts about earlier lowered producers.
   void RegisterCustom(const std::string& from_op, ContextualConversionFunc func,
                       std::unordered_map<size_t, InputSpaceReq> input_reqs = {});
 

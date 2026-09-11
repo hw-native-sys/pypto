@@ -1095,6 +1095,12 @@ class TestArgEffects:
         assert ir.get_op_arg_effect("pld.system.notify", 0) == ir.ArgEffect.ReadWrite
         assert ir.get_op_arg_effect("pld.system.notify", 0, op=int(ir.NotifyOp.Set)) == ir.ArgEffect.Write
 
+    def test_gather_scratch_is_a_written_workspace(self):
+        assert ir.get_op_arg_effect("tile.gather", 0) == ir.ArgEffect.Read
+        assert ir.get_op_arg_effect("tile.gather", 1) == ir.ArgEffect.Read
+        assert ir.get_op_arg_effect("tile.gather", 2) == ir.ArgEffect.Write
+        assert ir.op_arg_is_workspace("tile.gather", 2)
+
     def test_mgather_scratch_only_in_mat_elem_mode(self):
         """`tile.mgather`'s argument 2 is a written GM scratch tensor only when
         the gather stages through one.

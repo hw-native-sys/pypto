@@ -2179,23 +2179,18 @@ def gather(  # noqa: PLR0913
 
         output = input.reshape(-1)[index]
 
-        Also accepts ``gather(input, index)``. Indices are 2D INT32 tensors or
-        tiles, may be computed at runtime, and must be in bounds (no negative
-        indexing or bounds checking). Output shape and valid shape follow
-        ``index``; dtype follows ``input`` (FP16/FP32/INT16/INT32).
-        A contiguous ND source still in GM lowers to ``tile.mgather`` without
-        loading the entire source. An on-chip source lowers to ``tile.gather``
-        with compiler-managed scratch. On-chip sources must be static 2D row-major Vec
-        tiles with 32-byte-aligned rows (or a single row); strided windows are
-        materialized into packed tiles first (TEXTRACT for floating point,
-        exact integer addition of zero for INT16/INT32).
-        GM source/index operands also accept local distributed windows. Tile
-        indices must be in Vec with an unboxed row-major layout; explicitly
-        non-Vec or transposed/boxed indices are rejected.
-        Physical index columns must be positive static multiples of 16 for
-        FP16/INT16 sources, or 8 for FP32/INT32 (32-byte-aligned index/output
-        rows, even for one row). Pad the index tensor and use ``set_validshape``
-        for narrower valid regions; valid row/column counts need not be aligned.
+        Also accepts ``gather(input, index)``. Runtime indices are 2D INT32;
+        shape and valid shape follow ``index``, dtype follows ``input``
+        (FP16/FP32/INT16/INT32). Indices must address valid source elements;
+        negative indexing and bounds checking are unsupported.
+        Contiguous ND GM sources use ``tile.mgather``; static 2D unboxed
+        row-major Vec sources use ``tile.gather`` with managed packing/scratch.
+        On-chip source rows must be 32-byte aligned unless there is only one row.
+        GM operands accept local distributed windows; tile indices must be
+        unboxed row-major Vec. Physical index columns must be positive static
+        multiples of 16 for FP16/INT16, or 8 for FP32/INT32, including single-row
+        tiles. Pad physical storage and use ``set_validshape`` for narrower
+        valid regions, which need not be aligned.
 
     Axis form (``dim`` + ``index``) → ``tensor.gather``, for example ``dim=1``::
 

@@ -1262,9 +1262,7 @@ class TensorToTileMutator : public TypePropagatingMutator {
   }
 
  private:
-  /// Propagate only proven packed storage in one SSA traversal, O(N). Views,
-  /// function results and control-flow values stay unknown unless explicitly
-  /// handled here; an empty TileView stride is not proof of packed storage.
+  /// Track packed storage in O(N); views can inherit pitch absent from TileView.
   void RecordPackedTile(const VarPtr& var, const ExprPtr& value) {
     auto type = As<TileType>(var->GetType());
     if (!type) return;
@@ -1274,14 +1272,12 @@ class TensorToTileMutator : public TypePropagatingMutator {
       return;
     }
     bool packed = conversion_context_.packed_tiles.count(value) != 0;
-    if (auto call = As<Call>(value); call && std::dynamic_pointer_cast<const Op>(call->op_) &&
-                                     op_registry_.IsRegistered(call->op_->name_)) {
-      // Registry ownership is the source of truth, not a list of arithmetic ops.
-      const auto& entry = op_registry_.GetEntry(call->op_->name_);
-      packed = entry.GetOpCategory() == "TileOp" &&
-               entry.GetExecutionMemoryAccessEvidence() == ExecutionMemoryAccessEvidence::Functional &&
+    if (auto call = As<Call>(value)) {
+      const auto* entry = LookupOpEntry(call->op_);
+      packed = entry && entry->GetOpCategory() == "TileOp" &&
+               entry->GetExecutionMemoryAccessEvidence() == ExecutionMemoryAccessEvidence::Functional &&
                !op_predicates::OutputInheritsSourceBuffer(call->op_->name_);
-      if (IsOp(call, "tile.set_validshape")) {
+      if (entry && IsOp(call, "tile.set_validshape")) {
         packed = conversion_context_.packed_tiles.count(call->args_[0]) != 0;
       }
     }
