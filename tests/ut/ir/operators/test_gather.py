@@ -146,6 +146,33 @@ class TestTensorGatherFlat:
         with pytest.raises(ValueError, match="indices in Vec"):
             tensor.gather(src, index=idx)
 
+    @pytest.mark.parametrize("source_type", [ir.TensorType, ir.TileType])
+    @pytest.mark.parametrize("wrapper", [tensor.gather, pl.gather])
+    @pytest.mark.parametrize(
+        "view",
+        [ir.TileView(blayout=ir.TileLayout.col_major), ir.TileView(slayout=ir.TileLayout.row_major)],
+    )
+    def test_flat_rejects_unsupported_index_layout(self, source_type, wrapper, view):
+        span = ir.Span.unknown()
+        src = ir.Var("src", source_type([4, 32], DataType.FP32), span)
+        idx = ir.Var(
+            "idx",
+            ir.TileType([16, 16], DataType.INT32, tile_view=view, memory_space=ir.MemorySpace.Vec),
+            span,
+        )
+        if wrapper is pl.gather:
+            src = (pl.Tile if source_type is ir.TileType else pl.Tensor)(expr=src)
+            idx = pl.Tile(expr=idx)
+        with pytest.raises(ValueError, match="indices with an unboxed row-major layout"):
+            wrapper(src, index=idx)
+
+    def test_flat_rejects_transpose_view_index(self):
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TensorType([1024], DataType.FP32), span)
+        idx = ir.Var("idx", ir.TileType([16, 16], DataType.INT32, memory_space=ir.MemorySpace.Vec), span)
+        with pytest.raises(ValueError, match="indices with an unboxed row-major layout"):
+            tensor.gather(src, tile.transpose_view(idx))
+
     @pytest.mark.parametrize("wrapper", [tensor.gather, pl.gather])
     @pytest.mark.parametrize("options", [{"offset": 4}, {"count_dtype": DataType.INT32}])
     def test_mask_rejects_compare_options(self, wrapper, options):
@@ -219,13 +246,19 @@ class TestTensorGatherFlat:
             tensor.gather(src, index=idx)
 
     @pytest.mark.parametrize("dtype", [DataType.FP16, DataType.FP32, DataType.INT16, DataType.INT32])
-    def test_flat_preserves_index_valid_shape(self, dtype):
+    @pytest.mark.parametrize("index_type", [ir.TensorType, ir.TileType, ir.DistributedTensorType])
+    def test_flat_preserves_index_valid_shape(self, dtype, index_type):
         span = ir.Span.unknown()
         src = ir.Var("src", ir.TensorType([1024], dtype), span)
         idx = ir.Var(
             "idx",
-            ir.TensorType(
-                [2, 32], DataType.INT32, None, ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[1, 13])
+            index_type(
+                [2, 32],
+                DataType.INT32,
+                None,
+                ir.TileView(valid_shape=[1, 13])
+                if index_type is ir.TileType
+                else ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=[1, 13]),
             ),
             span,
         )
@@ -255,6 +288,55 @@ class TestTensorGatherFlat:
             wrapper(src, index=idx, mask_pattern=1)
         with pytest.raises(ValueError, match="requires index"):
             wrapper(src, dim=0)
+
+
+class TestGatherWrapperDelegation:
+    @pytest.mark.parametrize(
+        "options", [{"dim": -1}, {}, {"mask_pattern": 1, "output_dtype": DataType.UINT32}]
+    )
+    def test_single_result_forms_match_ir_wrapper(self, options):
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TensorType([2, 32], DataType.FP32), span)
+        idx = ir.Var("idx", ir.TensorType([2, 16], DataType.INT32), span)
+        ir_options = options if "mask_pattern" in options else {**options, "index": idx}
+        dsl_options = options if "mask_pattern" in options else {**options, "index": pl.Tensor(expr=idx)}
+        actual = pl.gather(pl.Tensor(expr=src), **dsl_options)
+        assert isinstance(actual, pl.Tensor)
+        ir.assert_structural_equal(actual.unwrap(), tensor.gather(src, **ir_options))
+
+    @pytest.mark.parametrize("scalar_form", ["dsl", "ir", "literal"])
+    def test_compare_normalizes_scalar_and_wraps_tuple(self, scalar_form):
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TensorType([2, 32], DataType.FP32), span)
+        kv = ir.ConstFloat(1.0, DataType.FP32, span)
+        threshold = {"dsl": pl.Scalar(expr=kv), "ir": kv, "literal": 1.0}[scalar_form]
+        options = {"cmp_mode": "gt", "out_cols": 8, "offset": 4, "count_dtype": DataType.UINT32}
+        actual = pl.gather(pl.Tensor(expr=src), kvalue=threshold, **options)
+        expected = tensor.gather(src, kvalue=kv, **options)
+        assert isinstance(actual, tuple) and len(actual) == 2
+        for i, value in enumerate(actual):
+            ir.assert_structural_equal(value.unwrap(), ir.TupleGetItemExpr(expected, i, span))
+
+    @pytest.mark.parametrize(
+        "options",
+        [
+            {},
+            {"dim": 0},
+            {"offset": 4},
+            {"count_dtype": DataType.UINT32},
+            {"cmp_mode": "gt"},
+            {"mask_pattern": 1, "out_cols": 8},
+            {"cmp_mode": "gt", "out_cols": 8, "output_dtype": DataType.UINT32},
+        ],
+    )
+    def test_invalid_forms_share_ir_diagnostics(self, options):
+        span = ir.Span.unknown()
+        src = ir.Var("src", ir.TensorType([2, 32], DataType.FP32), span)
+        with pytest.raises(ValueError) as expected:
+            tensor.gather(src, **options)
+        with pytest.raises(ValueError) as actual:
+            pl.gather(pl.Tensor(expr=src), **options)
+        assert str(actual.value) == str(expected.value)
 
 
 if __name__ == "__main__":

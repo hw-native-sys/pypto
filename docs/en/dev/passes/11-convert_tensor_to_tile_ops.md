@@ -492,12 +492,13 @@ producers have been lowered:
 | Source at conversion | Lowering |
 | -------------------- | -------- |
 | GM `TensorType` / local `DistributedTensorType` window | Keep the source in GM; load only the indices if necessary; emit `tile.mgather(..., coalesce="elem")` into Vec |
-| On-chip `TileType` | Pack the logical source; allocate index-shaped INT32 scratch; emit `tile.gather` |
+| On-chip `TileType` | Reuse a proven packed source, otherwise pack it; allocate index-shaped INT32 scratch; emit `tile.gather` |
 
 Flat gather is self-loading: generic operand bridging must not load the whole GM
 source. GM indices also accept local distributed windows. Runtime-computed indices
 already in Vec are reused; explicitly non-Vec indices are rejected with a diagnostic
-to move them to Vec first. The frontend requires positive static physical index
+to move them to Vec first. Index tiles must have an unboxed row-major layout;
+the frontend and converter both reject transposed/boxed layouts. The frontend requires positive static physical index
 columns: multiples of 16 for FP16/INT16 sources, or 8 for FP32/INT32. Both index
 and output rows must be 32-byte aligned, including single-row tiles. Unaligned
 physical rows are rejected early because PTOAS also rejects unaligned index and
@@ -510,6 +511,12 @@ must be contiguous ND. On-chip sources must be static 2D row-major Vec with
 32-byte-aligned rows (or one row). Before interpreting flat offsets, strided views
 are packed using `tile.extract` for floating point or exact integer
 `tile.adds(..., 0)` for INT16/INT32 (A2/A3 TEXTRACT does not support these integer types).
+The converter receives a read-only `ConversionContext` containing packed-storage
+facts collected from earlier lowered producers in one SSA traversal. Registered
+functional tile results with fresh storage are proven packed; plain aliases and
+`tile.set_validshape` preserve that proof. Other views, parameters, and control-flow
+results remain unknown and keep the copy. An empty `TileView.stride` alone is not
+proof: `tile.slice` can retain its parent's physical pitch without storing it there.
 Indices must point to valid source elements; there is no bounds check or negative
 index normalization. This interface does not expose the tile-level Mat, row-coalesce,
 or alternate out-of-bounds modes.

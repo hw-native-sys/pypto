@@ -45,6 +45,7 @@
 #include "pypto/ir/transforms/utils/buffer_root_collector.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/narrow_loop_carry.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/result_alias_utils.h"
 #include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -1202,7 +1203,7 @@ class TensorToTileMutator : public TypePropagatingMutator {
     auto [bridged_args, bridge_stmts] = BridgeInputSpaces(call, entry->input_reqs);
 
     // Run the converter with bridged args
-    auto conv_result = entry->func(bridged_args, call->kwargs_, call->span_);
+    auto conv_result = entry->func(bridged_args, call->kwargs_, call->span_, conversion_context_);
 
     // Collect all statements: bridge prologue + converter prologue + final assignment
     std::vector<StmtPtr> stmts;
@@ -1222,6 +1223,7 @@ class TensorToTileMutator : public TypePropagatingMutator {
 
     auto tile_name = MakeTileValueName(op->var_->name_hint_);
     auto tile_var = std::make_shared<Var>(tile_name, new_result->GetType(), op->var_->span_);
+    RecordPackedTile(tile_var, new_result);
     stmts.push_back(std::make_shared<AssignStmt>(tile_var, new_result, op->span_));
     var_remap_[op->var_.get()] = tile_var;
 
@@ -1246,7 +1248,7 @@ class TensorToTileMutator : public TypePropagatingMutator {
     if (!entry) return maybe_update();
 
     auto [bridged_args, bridge_stmts] = BridgeInputSpaces(call, entry->input_reqs);
-    auto conv_result = entry->func(bridged_args, call->kwargs_, call->span_);
+    auto conv_result = entry->func(bridged_args, call->kwargs_, call->span_, conversion_context_);
 
     std::vector<StmtPtr> stmts;
     stmts.reserve(bridge_stmts.size() + conv_result.prologue.size() + 1);
@@ -1260,6 +1262,41 @@ class TensorToTileMutator : public TypePropagatingMutator {
   }
 
  private:
+  /// Propagate only proven packed storage in one SSA traversal, O(N). Views,
+  /// function results and control-flow values stay unknown unless explicitly
+  /// handled here; an empty TileView stride is not proof of packed storage.
+  void RecordPackedTile(const VarPtr& var, const ExprPtr& value) {
+    auto type = As<TileType>(var->GetType());
+    if (!type) return;
+    const auto view = tile_view_semantics::GetEffectiveTileView(*type);
+    if (view.blayout != TileLayout::row_major || view.slayout != TileLayout::none_box ||
+        !view.stride.empty()) {
+      return;
+    }
+    bool packed = conversion_context_.packed_tiles.count(value) != 0;
+    if (auto call = As<Call>(value); call && std::dynamic_pointer_cast<const Op>(call->op_) &&
+                                     op_registry_.IsRegistered(call->op_->name_)) {
+      // Registry ownership is the source of truth, not a list of arithmetic ops.
+      const auto& entry = op_registry_.GetEntry(call->op_->name_);
+      packed = entry.GetOpCategory() == "TileOp" &&
+               entry.GetExecutionMemoryAccessEvidence() == ExecutionMemoryAccessEvidence::Functional &&
+               !op_predicates::OutputInheritsSourceBuffer(call->op_->name_);
+      if (IsOp(call, "tile.set_validshape")) {
+        packed = conversion_context_.packed_tiles.count(call->args_[0]) != 0;
+      }
+    }
+    if (packed) conversion_context_.packed_tiles.insert(var);
+  }
+
+  StmtPtr HandlePassThroughAssign(const AssignStmtPtr& op, const ExprPtr& new_value) {
+    auto result = TypePropagatingMutator::HandlePassThroughAssign(op, new_value);
+    auto assign = As<AssignStmt>(result);
+    INTERNAL_CHECK_SPAN(assign, op->span_)
+        << "Internal error: pass-through assignment must stay an assignment";
+    RecordPackedTile(assign->var_, assign->value_);
+    return result;
+  }
+
   void SetYieldTileTargets(const std::vector<VarPtr>& vars) {
     yield_tile_targets_.clear();
     for (const auto& var : vars) yield_tile_targets_.push_back(tile_values_.IsTile(var));
@@ -1317,6 +1354,7 @@ class TensorToTileMutator : public TypePropagatingMutator {
     auto tile =
         std::make_shared<Var>(MakeTileValueName(var ? var->name_hint_ : "operand"), load->GetType(), span);
     stmts.push_back(std::make_shared<AssignStmt>(tile, load, span));
+    RecordPackedTile(tile, load);
     return tile;
   }
 
@@ -1349,8 +1387,9 @@ class TensorToTileMutator : public TypePropagatingMutator {
     const auto* entry = conv_registry_.Lookup("tensor.create");
     INTERNAL_CHECK_SPAN(entry, call->span_)
         << "Internal error: tensor.create has no registered tile conversion";
-    auto converted =
-        As<Call>(entry->func({MakeShapeTuple(boxed, call->span_)}, call->kwargs_, call->span_).result);
+    auto converted = As<Call>(
+        entry->func({MakeShapeTuple(boxed, call->span_)}, call->kwargs_, call->span_, conversion_context_)
+            .result);
     INTERNAL_CHECK_SPAN(converted, call->span_)
         << "Internal error: the tensor.create conversion must produce a Call";
 
@@ -1611,6 +1650,7 @@ class TensorToTileMutator : public TypePropagatingMutator {
   const ConsumerSpaceCollector& consumer_collector_;
   const TensorConversionAnalysis& tile_values_;
   std::unordered_map<const Expr*, ExprPtr> preloaded_tiles_;
+  ConversionContext conversion_context_;
   std::vector<bool> yield_tile_targets_;
   /// Declared GM cache policies of this function's params (empty when the
   /// function carries no ``pl.set_cache_policy`` declaration).

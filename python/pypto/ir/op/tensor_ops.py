@@ -2190,7 +2190,8 @@ def gather(  # noqa: PLR0913
         materialized into packed tiles first (TEXTRACT for floating point,
         exact integer addition of zero for INT16/INT32).
         GM source/index operands also accept local distributed windows. Tile
-        indices must be in Vec; explicitly non-Vec indices are rejected.
+        indices must be in Vec with an unboxed row-major layout; explicitly
+        non-Vec or transposed/boxed indices are rejected.
         Physical index columns must be positive static multiples of 16 for
         FP16/INT16 sources, or 8 for FP32/INT32 (32-byte-aligned index/output
         rows, even for one row). Pad the index tensor and use ``set_validshape``

@@ -1086,6 +1086,17 @@ def _flat_gather_strided_local(src: pl.Tensor, idx: pl.Tensor, out: pl.Out[pl.Te
     return out
 
 
+@pl.jit
+def _flat_gather_strided_valid(src: pl.Tensor, idx: pl.Tensor, out: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        local = pl.add(src, 1)
+        # Keep both view bases 32-byte aligned even for 16-bit elements.
+        outer = pl.slice(local, [4, 48], [0, 16])
+        window = pl.slice(outer, [4, 32], [0, 0], valid_shape=[3, 32])
+        out = pl.assemble(out, pl.gather(window, index=idx), [0, 0])
+    return out
+
+
 def _flat_gather_case(mode, dtype):
     generator = torch.Generator().manual_seed(2665)
     # The GM table is larger than UB even in FP16. Only the selected values
@@ -1096,10 +1107,15 @@ def _flat_gather_case(mode, dtype):
         if dtype.is_floating_point
         else torch.randint(-100, 100, shape, generator=generator, dtype=dtype)
     )
-    limit = 131071 if mode == "gm" else 128 if mode == "strided" else 256
+    limit = {"gm": 131071, "local": 256, "strided": 128, "strided_valid": 96}[mode]
     idx = torch.randint(0, limit, (2, 32), generator=generator, dtype=torch.int32)
     idx[0, :8] = torch.tensor([0, limit - 1, 31, 32, 63, 64, 0, limit - 1], dtype=torch.int32)
-    kernel = {"gm": _flat_gather_gm, "local": _flat_gather_local, "strided": _flat_gather_strided_local}[mode]
+    kernel = {
+        "gm": _flat_gather_gm,
+        "local": _flat_gather_local,
+        "strided": _flat_gather_strided_local,
+        "strided_valid": _flat_gather_strided_valid,
+    }[mode]
 
     def golden(tensors):
         values = tensors["src"]
@@ -1110,6 +1126,8 @@ def _flat_gather_case(mode, dtype):
             values = values + 1
             if mode == "strided":
                 values = values[:, 16:48]
+            elif mode == "strided_valid":
+                values = values[:3, 16:48]
         return torch.take(values, indices)
 
     return st.case(
@@ -1128,7 +1146,7 @@ def _flat_gather_case(mode, dtype):
 @st.cases(
     *(
         _flat_gather_case(mode, dtype)
-        for mode in ("gm", "local", "strided")
+        for mode in ("gm", "local", "strided", "strided_valid")
         for dtype in (torch.float16, torch.float32, torch.int16, torch.int32)
     )
 )

@@ -2277,7 +2277,8 @@ def gather(
         rows (or a single row); strided windows are materialized into packed tiles first
         (TEXTRACT for floating point, exact integer addition of zero for INT16/INT32).
         GM source/index operands also accept local distributed windows. Tile
-        indices must be in Vec; explicitly non-Vec indices are rejected.
+        indices must be in Vec with an unboxed row-major layout; explicitly
+        non-Vec or transposed/boxed indices are rejected.
         Physical index columns must be positive static multiples of 16 for
         FP16/INT16 sources, or 8 for FP32/INT32 (32-byte-aligned index/output
         rows, even for one row). Pad the index tensor and use ``set_validshape``
@@ -2333,55 +2334,28 @@ def gather(
         out = gather(input, mask_pattern=pl.tile.MaskPattern.P1010, output_dtype=pl.UINT32)
         dst, cdst = gather(input, kvalue=kv, cmp_mode="eq", out_cols=8)
     """
-    if isinstance(dim, (Tensor, Tile)):
-        if index is not None:
-            raise ValueError("gather() received indices both positionally and through index")
-        index, dim = dim, None
-    is_index = dim is not None or index is not None
-    is_mask = mask_pattern is not None
-    is_compare = kvalue is not None or cmp_mode is not None or out_cols is not None
-    if int(is_index) + int(is_mask) + int(is_compare) > 1:
-        raise ValueError(
-            "gather() index form (dim, index), mask form (mask_pattern=...) and "
-            "compare form (kvalue=..., cmp_mode=..., out_cols=...) are mutually "
-            "exclusive; do not mix kwargs from different forms"
-        )
-    if (offset != 0 or count_dtype is not None) and not is_compare:
-        raise ValueError("gather() offset/count_dtype are only valid for the compare form")
-    if is_mask:
-        call_expr = _ir_ops.gather(input.unwrap(), mask_pattern=mask_pattern, output_dtype=output_dtype)
-        return Tensor(expr=call_expr)
-    if is_compare:
-        if kvalue is None or cmp_mode is None or out_cols is None:
-            raise ValueError("gather() compare form requires kvalue, cmp_mode and out_cols all set")
-        if output_dtype is not None:
-            raise ValueError(
-                "output_dtype is only valid for the mask form of gather(); use mask_pattern=<int>"
-            )
+    # Normalize DSL values only; the IR wrapper owns form selection and validation.
+    kv_expr = None
+    if kvalue is not None:
         kv_expr = kvalue.unwrap() if isinstance(kvalue, Scalar) else _normalize_expr(kvalue)
-        call_expr = _ir_ops.gather(
-            input.unwrap(),
-            kvalue=kv_expr,
-            cmp_mode=cmp_mode,
-            out_cols=out_cols,
-            offset=offset,
-            count_dtype=count_dtype,
-        )
+    call_expr = _ir_ops.gather(
+        input.unwrap(),
+        dim.unwrap() if isinstance(dim, (Tensor, Tile)) else dim,
+        index.unwrap() if index is not None else None,
+        mask_pattern=mask_pattern,
+        output_dtype=output_dtype,
+        kvalue=kv_expr,
+        cmp_mode=cmp_mode,
+        out_cols=out_cols,
+        offset=offset,
+        count_dtype=count_dtype,
+    )
+    if isinstance(call_expr.type, _ir_core.TupleType):
         span = call_expr.span
         return (
             Tensor(expr=_ir_core.TupleGetItemExpr(call_expr, 0, span)),
             Tensor(expr=_ir_core.TupleGetItemExpr(call_expr, 1, span)),
         )
-    if output_dtype is not None:
-        raise ValueError("output_dtype is only valid for the mask form of gather(); use mask_pattern=<int>")
-    if not is_index:
-        raise ValueError(
-            "gather() requires index (optionally dim), mask_pattern=<int> for mask form, "
-            "or (kvalue=..., cmp_mode=..., out_cols=...) for compare form"
-        )
-    if index is None:
-        raise ValueError("gather() index form requires index")
-    call_expr = _ir_ops.gather(input.unwrap(), dim, index.unwrap())
     return Tensor(expr=call_expr)
 
 

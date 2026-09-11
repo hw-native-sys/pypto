@@ -18,8 +18,9 @@
 动态计算。结果为 Tensor，shape 和 valid shape 跟随索引，dtype 跟随源
 （FP16/FP32/INT16/INT32）。索引必须指向源的有效元素，不支持负索引或越界检查。
 仍位于 GM 的连续 ND 源直接下降为 `tile.mgather`，不会把整个源加载进 UB。
-GM 源与索引均可使用本地 `DistributedTensor` 窗口。Tile 索引必须位于 Vec；
-显式位于其他内存空间的索引会被拒绝，并提示先搬移到 Vec。物理索引列数须为
+GM 源与索引均可使用本地 `DistributedTensor` 窗口。Tile 索引必须位于 Vec，且为
+无分形的行主序布局；其他内存空间的索引需要先搬移到 Vec，转置/分形索引布局
+会在 codegen 前被拒绝。物理索引列数须为
 正的编译期常量：FP16/INT16 源要求为 16 的倍数，FP32/INT32 要求为 8 的倍数，
 从而使索引与输出的物理行均按 32 字节对齐。单行同样受此约束，且会在 flat gather
 入口检查，而不是延迟到 codegen。调用方应补齐物理索引 tensor，再通过
@@ -34,6 +35,7 @@ values = pl.gather(src, index=indices)  # Physical [1, 16], valid [1, 8].
 片上源下降为 `tile.gather`，scratch 由编译器管理；源必须为静态二维行主序 Vec，
 每行按 32 字节对齐（单行除外）。带 stride 的片上窗口先物化为紧凑 tile：
 浮点使用 `tile.extract`，INT16/INT32 使用保持数值不变的整数 `tile.adds(..., 0)`。
+已证明紧凑的计算结果直接复用，不再复制；存储情况未知时仍进行紧凑物化。
 指定 `dim` 时仍按维索引（二维/三维、任意轴），mask/compare
 形式保持不变。详见 [gather 下沉](../passes/11-convert_tensor_to_tile_ops.md#扁平-gather-下沉)。
 

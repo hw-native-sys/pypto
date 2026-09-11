@@ -20,6 +20,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -62,6 +63,16 @@ struct ConversionResult {
 using ConversionFunc = std::function<ConversionResult(
     const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
     const Span& span)>;
+
+/// Facts about already-lowered values. Absence means unknown, not strided.
+/// Keep owning references so replaced SSA values cannot leave recycled pointer keys.
+struct ConversionContext {
+  std::unordered_set<ExprPtr> packed_tiles;
+};
+
+using ContextualConversionFunc = std::function<ConversionResult(
+    const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+    const Span& span, const ConversionContext& context)>;
 
 /**
  * @brief A memory space that was *derived* from an operator's own declaration.
@@ -188,7 +199,7 @@ struct InputSpaceReq {
  * @brief Full conversion entry: converter function + per-input space requirements.
  */
 struct ConversionEntry {
-  ConversionFunc func;
+  ContextualConversionFunc func;
   std::unordered_map<size_t, InputSpaceReq> input_reqs;  ///< Per-input space requirements (key = arg index)
 };
 
@@ -234,6 +245,10 @@ class OpConversionRegistry {
    * @param input_reqs Per-input memory space requirements (default: none)
    */
   void RegisterCustom(const std::string& from_op, ConversionFunc func,
+                      std::unordered_map<size_t, InputSpaceReq> input_reqs = {});
+
+  /// Context-aware converters can use facts about earlier lowered producers.
+  void RegisterCustom(const std::string& from_op, ContextualConversionFunc func,
                       std::unordered_map<size_t, InputSpaceReq> input_reqs = {});
 
   /**

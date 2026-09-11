@@ -5426,6 +5426,29 @@ class TestConvertFlatGatherOp:
         with pytest.raises(ValueError, match="indices in Vec"):
             passes.convert_tensor_to_tile_ops()(before)
 
+    def test_converter_rechecks_index_layout(self):
+        def body(ib, ins):
+            idx = ib.let("idx", tile_ops.load(ins[1], [0, 0], [16, 16], target_memory=MemorySpace.Vec))
+            idx = ib.let("transposed", tile_ops.transpose_view(idx))
+            # A typed call models IR supplied by an earlier transform; the
+            # converter must check the actual lowered operand as well.
+            call = ir.Call(
+                ir.get_op("tensor.gather"),
+                [ins[0], idx],
+                ir.TensorType([16, 16], DataType.FP32),
+                ir.Span.unknown(),
+            )
+            return ib.let("y", call)
+
+        before = _make_before(
+            in_specs=[("src", [1024], DataType.FP32), ("idx", [16, 16], DataType.INT32)],
+            out_shape=[16, 16],
+            out_dtype=DataType.FP32,
+            body=body,
+        )
+        with pytest.raises(ValueError, match="indices with an unboxed row-major layout"):
+            passes.convert_tensor_to_tile_ops()(before)
+
     def test_gm_source_is_not_loaded(self):
         specs = [("src", [65536], DataType.FP32), ("idx", [1, 16], DataType.INT32)]
         before = _make_before(
@@ -5453,11 +5476,23 @@ class TestConvertFlatGatherOp:
         ir.assert_structural_equal(parse(str(before)), before)
 
     @pytest.mark.parametrize("dtype", [DataType.FP16, DataType.FP32, DataType.INT16, DataType.INT32])
-    def test_computed_source_uses_tile_gather(self, dtype):
+    @pytest.mark.parametrize(
+        "source_mode", ["computed", "alias", "valid", "strided", "strided_alias", "strided_valid"]
+    )
+    def test_computed_source_uses_tile_gather(self, dtype, source_mode):
         specs = [("src", [4, 32], dtype), ("idx", [1, 16], DataType.INT32)]
 
         def before_body(ib, ins):
             local = ib.let("local", tensor_ops.add(ins[0], 1))
+            if source_mode.startswith("strided"):
+                local = ib.let("window", tensor_ops.slice(local, [4, 16], [0, 16]))
+            if source_mode.endswith("alias"):
+                local = ib.let("alias", local)
+            if source_mode.endswith("valid"):
+                local = ib.let(
+                    "valid",
+                    tensor_ops.set_validshape(local, 3, 16 if source_mode.startswith("strided") else 32),
+                )
             return ib.let("y", tensor_ops.gather(local, index=ins[1]))
 
         before = _make_before(in_specs=specs, out_shape=[1, 16], out_dtype=dtype, body=before_body)
@@ -5465,15 +5500,24 @@ class TestConvertFlatGatherOp:
         def expected_body(ib, ins):
             src = ib.let("src_tile", tile_ops.load(ins[0], [0, 0], [4, 32]))
             local = ib.let("local_tile", tile_ops.add(src, 1))
+            shape = [4, 16] if source_mode.startswith("strided") else [4, 32]
+            if source_mode.startswith("strided"):
+                local = ib.let("window_tile", tile_ops.slice(local, shape, [0, 16]))
+            if source_mode.endswith("alias"):
+                local = ib.let("alias", local)
+            if source_mode.endswith("valid"):
+                local = ib.let("valid_tile", tile_ops.set_validshape(local, 3, shape[1]))
             idx = ib.let(
                 "gather_idx", tile_ops.load(ins[1], [0, 0], [1, 16], [1, 16], target_memory=MemorySpace.Vec)
             )
-            packed = ib.let(
-                "gather_src",
-                tile_ops.adds(local, 0)
-                if dtype in (DataType.INT16, DataType.INT32)
-                else tile_ops.extract(local, 0, 0, [4, 32], target_memory=MemorySpace.Vec),
-            )
+            packed = local
+            if source_mode.startswith("strided"):
+                packed = ib.let(
+                    "gather_src",
+                    tile_ops.adds(local, 0)
+                    if dtype in (DataType.INT16, DataType.INT32)
+                    else tile_ops.extract(local, 0, 0, shape, target_memory=MemorySpace.Vec),
+                )
             tmp = ib.let("gather_tmp", tile_ops.create([1, 16], DataType.INT32, MemorySpace.Vec))
             valid_tmp = ib.let("gather_tmp_valid", tile_ops.set_validshape(tmp, 1, 16))
             result = ib.let("gather_flat", tile_ops.gather(packed, idx, valid_tmp))
@@ -5488,6 +5532,43 @@ class TestConvertFlatGatherOp:
         )
         after = passes.convert_tensor_to_tile_ops()(before)
         ir.assert_structural_equal(after, expected)
+
+    @pytest.mark.parametrize("dtype", [DataType.FP32, DataType.INT32])
+    def test_unknown_tile_parameter_keeps_packing(self, dtype):
+        specs = [("idx", [1, 16], DataType.INT32)]
+        extras: list[ExtraSpec] = [("src", ir.TileType([4, 32], dtype, memory_space=MemorySpace.Vec))]
+        before = _make_before(
+            in_specs=specs,
+            extra_specs=extras,
+            out_shape=[1, 16],
+            out_dtype=dtype,
+            body=lambda ib, ins, extra: ib.let("y", tensor_ops.gather(extra[0], ins[0])),
+        )
+
+        def expected_body(ib, ins, extra):
+            idx = ib.let(
+                "gather_idx", tile_ops.load(ins[0], [0, 0], [1, 16], [1, 16], target_memory=MemorySpace.Vec)
+            )
+            packed = ib.let(
+                "gather_src",
+                tile_ops.adds(extra[0], 0)
+                if dtype == DataType.INT32
+                else tile_ops.extract(extra[0], 0, 0, [4, 32], target_memory=MemorySpace.Vec),
+            )
+            tmp = ib.let("gather_tmp", tile_ops.create([1, 16], DataType.INT32, MemorySpace.Vec))
+            valid_tmp = ib.let("gather_tmp_valid", tile_ops.set_validshape(tmp, 1, 16))
+            result = ib.let("gather_flat", tile_ops.gather(packed, idx, valid_tmp))
+            return ib.let("y_tile", tile_ops.set_validshape(result, 1, 16))
+
+        expected = _make_expected(
+            in_specs=specs,
+            extra_specs=extras,
+            out_shape=[1, 16],
+            out_dtype=dtype,
+            body=expected_body,
+            preload=False,
+        )
+        ir.assert_structural_equal(passes.convert_tensor_to_tile_ops()(before), expected)
 
     def test_unaligned_on_chip_rows_rejected(self):
         specs = [("src", [4, 15], DataType.FP32), ("idx", [1, 16], DataType.INT32)]

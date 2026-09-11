@@ -20,8 +20,9 @@ valid shape, and the source's dtype (FP16/FP32/INT16/INT32). Indices must refer 
 valid source elements; negative indexing and bounds checking are not provided.
 A contiguous ND source still in GM lowers directly to `tile.mgather`, without
 loading the entire source into UB. Both GM sources and indices may be local
-`DistributedTensor` windows. Tile indices must be in Vec; explicitly non-Vec
-indices are rejected with a request to move them first. Physical index columns
+`DistributedTensor` windows. Tile indices must be in Vec with an unboxed row-major
+layout; non-Vec indices must be moved first, and transposed/boxed index layouts
+are rejected before codegen. Physical index columns
 must be a positive static multiple of 16 for FP16/INT16 sources, or 8 for
 FP32/INT32, so both index and output rows are 32-byte aligned. This restriction
 applies even to a single row and is checked at the flat-gather boundary, not
@@ -37,7 +38,8 @@ values = pl.gather(src, index=indices)  # Physical [1, 16], valid [1, 8].
 An on-chip source lowers to `tile.gather`
 with compiler-managed scratch; it must be static 2D row-major Vec with 32-byte-aligned
 rows (or one row). Strided on-chip windows are packed first: `tile.extract` for
-floating point, exact integer `tile.adds(..., 0)` for INT16/INT32.
+floating point, exact integer `tile.adds(..., 0)` for INT16/INT32. Proven packed
+computed sources are reused without a copy; unknown storage still gets packed.
 Specifying `dim` retains axis indexing (rank 2/3, any axis), and mask/compare
 forms are unchanged. See [gather lowering](../passes/11-convert_tensor_to_tile_ops.md#flat-gather-lowering).
 

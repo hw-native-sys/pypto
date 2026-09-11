@@ -38,25 +38,22 @@
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
 
 namespace {
 TypePtr DeduceFlatGatherType(const std::vector<ExprPtr>& args, const std::string& op_name) {
-  auto get_tensor_type = [&](const ExprPtr& arg) -> std::shared_ptr<const TensorType> {
+  auto get_shaped_type = [&](const ExprPtr& arg) -> std::shared_ptr<const ShapedType> {
     if (auto tensor = AsTensorTypeLike(arg->GetType())) return tensor;
-    if (auto tile = As<TileType>(arg->GetType())) {
-      TensorView view;
-      view.valid_shape = tile_view_semantics::GetEffectiveTileView(*tile).valid_shape;
-      return std::make_shared<TensorType>(tile->shape_, tile->dtype_, std::nullopt, view);
-    }
-    CHECK(false) << op_name << " flat form requires Tensor or Tile operands, got "
-                 << arg->GetType()->TypeName();
+    if (auto tile = As<TileType>(arg->GetType())) return tile;
+    CHECK_SPAN(false, arg->span_) << op_name << " flat form requires Tensor or Tile operands, got "
+                                  << arg->GetType()->TypeName();
     return nullptr;
   };
-  auto input = get_tensor_type(args[0]);
-  auto index = get_tensor_type(args[1]);
+  auto input = get_shaped_type(args[0]);
+  auto index = get_shaped_type(args[1]);
   CHECK(input->dtype_ == DataType::FP16 || input->dtype_ == DataType::FP32 ||
         input->dtype_ == DataType::INT16 || input->dtype_ == DataType::INT32)
       << op_name << " flat form requires input dtype FP16, FP32, INT16, or INT32";
@@ -75,9 +72,12 @@ TypePtr DeduceFlatGatherType(const std::vector<ExprPtr>& args, const std::string
   if (auto tile = As<TileType>(args[1]->GetType())) {
     CHECK_SPAN(!tile->memory_space_ || *tile->memory_space_ == MemorySpace::Vec, args[1]->span_)
         << op_name << " flat form requires indices in Vec; move the index tile to Vec first";
+    const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
+    CHECK_SPAN(view.blayout == TileLayout::row_major && view.slayout == TileLayout::none_box, args[1]->span_)
+        << op_name << " flat form requires indices with an unboxed row-major layout";
   }
-  if (input->tensor_view_) {
-    const auto& view = *input->tensor_view_;
+  if (auto tensor = AsTensorTypeLike(args[0]->GetType()); tensor && tensor->tensor_view_) {
+    const auto& view = *tensor->tensor_view_;
     CHECK(view.layout == TensorLayout::ND) << op_name << " flat form requires a contiguous ND source";
     if (!view.stride.empty()) {
       auto packed = tensor_view_semantics::BuildRowMajorStrides(input->shape_);
@@ -88,9 +88,10 @@ TypePtr DeduceFlatGatherType(const std::vector<ExprPtr>& args, const std::string
       }
     }
   }
-  TensorView result_view;
-  if (index->tensor_view_) result_view.valid_shape = index->tensor_view_->valid_shape;
-  return std::make_shared<TensorType>(index->shape_, input->dtype_, std::nullopt, result_view);
+  auto index_tensor = AsTensorTypeLike(args[1]->GetType());
+  auto valid_shape =
+      index_tensor ? GetValidShape(index_tensor) : GetValidShape(As<TileType>(args[1]->GetType()));
+  return MakeFreshTensorType(index->shape_, input->dtype_, std::move(valid_shape));
 }
 }  // namespace
 
