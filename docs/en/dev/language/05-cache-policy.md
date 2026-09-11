@@ -8,11 +8,10 @@ The policy is a *contract the author states*, never a hint the compiler infers.
 It is therefore written explicitly, at one of two granularities, and is carried
 unchanged from the DSL to codegen.
 
-> **Current status**: PTOAS has no L2-bypass path yet
-> ([PTOAS#1356](https://github.com/hw-native-sys/PTOAS/issues/1356)), so a
-> `BYPASS` declaration currently **warns and compiles as an ordinary cached
-> access**. Generated code is byte-identical with and without it. See
-> [Current status](#current-status).
+> **Requires PTOAS >= v0.61**, which is what `toolchain/versions.env` pins. A
+> `BYPASS` declaration becomes a `cache_policy` attribute on `pto.tload`, which
+> the assembler lowers to pto-isa's own L2 hint. See
+> [What codegen emits](#what-codegen-emits).
 
 ## Two surfaces
 
@@ -195,24 +194,41 @@ with pl.at(level=pl.Level.CORE_GROUP, name_hint="mm"):
 | Otherwise-empty scope | A scope holding only a declaration prints the marker instead of `pass` |
 | Function attr (`cache_policy`) | Prints as a list of `(index, policy)` tuples, so a pass dump taken between pass 9 and pass 11 — the only window where it exists — re-parses |
 
-## Current status
+## What codegen emits
 
-PTOAS has no L2-bypass path yet
-([PTOAS#1356](https://github.com/hw-native-sys/PTOAS/issues/1356)). Codegen
-therefore carries the request all the way down, then compiles it as an ordinary
-cached access and warns once per tensor per kernel (not once per emitted load —
-an unrolled loop emits the same load many times):
+A `BYPASS` read becomes one attribute on the emitted load — there is no extra
+operation, no second tensor view, and no architecture-specific address alias:
 
-```text
-[warning] [CacheBypassUnsupported] tensor 'b' requests CachePolicy.BYPASS, but PTOAS
-has no L2-bypass path yet (https://github.com/hw-native-sys/PTOAS/issues/1356);
-compiling as an ordinary cached access at <file>:<line>
+```mlir
+pto.tload ins(%b__ssa_v0_pview : !pto.partition_tensor_view<256x256xf32>)
+          outs(%b__ssa_v0_mat  : !pto.tile_buf<loc=mat, ...>)
+          {cache_policy = #pto.load_cache_policy<l2_bypass>}
 ```
 
-The generated MLIR is **byte-identical** with and without the declaration.
-Writing it today is what makes a kernel pick the bypass up for free when the
-PTOAS side lands: at that point the warn site is replaced in place by a
-bypass-rooted tensor view, and nothing upstream of codegen changes.
+PTOAS >= v0.61 lowers that to pto-isa's own L2 hint, which is the whole
+difference in the generated CCE:
+
+```diff
+-  TLOAD(v45, v50);
++  TLOAD<pto::TLoadL2Hint::NotAllocKeep>(v45, v50);
+```
+
+Three properties of the emit are worth stating, because each one is asserted in
+`tests/ut/codegen/test_cache_policy_codegen.py`:
+
+| Property | Why |
+| -------- | --- |
+| `CachePolicy.DEFAULT` emits **nothing** | A kernel that states no policy keeps the PTO form it had before this existed, so the attribute is the only difference between two otherwise identical kernels |
+| The attribute is emitted **per load**, not per tensor | It is a property of the instruction; a hint on only the first of two loads would leave the second one allocating in L2 (the superseded `[CacheBypassUnsupported]` diagnostic was deliberately once-per-tensor — the opposite granularity) |
+| It joins the MX `layout` in **one** attribute dict, after it | PTOAS takes all present attributes in a single dict; keeping `layout` first leaves an MX load that declares no policy byte-identical |
+
+### Older assemblers
+
+`toolchain/versions.env` pins PTOAS >= v0.61, so the emit is unconditional —
+there is no version gate, and no mechanism in the tree reads the pinned
+assembler version at compile time. A build pointed at an older assembler is
+therefore out of contract: `cache_policy` is a v0.61 addition, so expect it to
+fail the `pto.tload` verifier there.
 
 ### Limits
 

@@ -439,9 +439,9 @@ def load(
             the full contract). An explicit value here always wins over a
             scope-level ``pl.set_cache_policy`` declaration for the same tensor,
             in both directions: ``cache=CachePolicy.DEFAULT`` opts this one read
-            back into the cache inside a bypassing scope. PTOAS has no L2-bypass
-            path yet (https://github.com/hw-native-sys/PTOAS/issues/1356), so a
-            BYPASS request warns and compiles as an ordinary cached access today.
+            back into the cache inside a bypassing scope. Requires PTOAS >= v0.61
+            (the pinned version), where a BYPASS read compiles to an L2 hint on
+            the emitted load; DEFAULT emits nothing.
 
     Returns:
         Tile wrapping the load operation

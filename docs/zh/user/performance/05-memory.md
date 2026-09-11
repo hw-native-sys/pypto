@@ -217,10 +217,8 @@ load 上显式的 `cache=` 永远优先于作用域声明，两个方向都成�
 （coherency）缺陷 —— 这正是它绝不作为默认、也绝不由编译器推断的原因。编译器会拒绝它能看见的
 那种情况（在作用域会写入的张量上声明 `BYPASS` 是错误），但无法证明一般情形。
 
-**当前状态：** 工具链尚无 bypass 通路
-（[PTOAS#1356](https://github.com/hw-native-sys/PTOAS/issues/1356)）。`BYPASS` 声明会被接受
-并向下传递，在编译期给出告警，生成的代码与普通带缓存读取完全一致。现在就写上不会有任何代价，
-等该 issue 落地后即可自动生效。
+**要求 PTOAS >= v0.61**，即 PyPTO 所固定的版本。`BYPASS` 读取会编译成 load 指令上一个真实的
+L2 hint（`TLOAD<pto::TLoadL2Hint::NotAllocKeep>`）；未作声明的读取逐字节不受影响。
 
 ## 参见
 
