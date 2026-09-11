@@ -28,6 +28,11 @@
 - 步骤 16 在一个 kernel 中**组合** `broadcast` + `allreduce` + `allgather`——
   收官之作。
 
+```text
+01-03 底层原语 ──► 04 barrier ──► 05-06 点对点 ──► 07 动态 rank 数
+    ──► 08-11 all-reduce 三种实现 + 揭示 ──► 12-15 其余集合通信 ──► 16 压轴
+```
+
 > **揭示纪律（Reveal discipline）：** 教程页面在揭示它们的步骤之前，不会引入
 > 内置原语（`pld.tensor.barrier`、`pld.tensor.allreduce` 等）——本索引仅预告
 > 即将出现的内容。等到内置原语出现时，你已经写出手工版本，并知道它们 lower

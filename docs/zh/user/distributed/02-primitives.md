@@ -212,6 +212,12 @@ Python future、host callback 或等待信号的 host thread。需要在同一�
 单边批量传输——rank A 写入或读取 rank B 的 window，rank B 无需参与传输
 （除了 signal 屏障）。
 
+```text
+put(dst, peer=B, src, ...)   本 rank：src (In)  --写入-->  对端 B：dst (InOut)
+get(dst, peer=B, src, ...)   本 rank：dst (Out) <--读取--  对端 B：src (In)
+                             （调用方始终是"本 rank"；对端始终是 B）
+```
+
 ### Put（写入对端）
 
 | 名称 | 签名 | 变更 | 描述 |

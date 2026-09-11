@@ -33,6 +33,11 @@ idea from the primitives before a builtin replaces it:
 - Step 16 **composes** `broadcast` + `allreduce` + `allgather` in one kernel —
   the capstone.
 
+```text
+01-03 substrate ──► 04 barrier ──► 05-06 p2p ──► 07 dynamic-P
+    ──► 08-11 all-reduce x3 + reveal ──► 12-15 remaining collectives ──► 16 capstone
+```
+
 > **Reveal discipline:** the walkthrough pages do not introduce a builtin
 > (`pld.tensor.barrier`, `pld.tensor.allreduce`, …) before the step that
 > reveals it — this index only previews what is coming. By the time a builtin

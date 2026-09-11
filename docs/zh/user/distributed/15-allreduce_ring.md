@@ -71,6 +71,20 @@ for s in pl.range(nranks - 1):
 # 复制进本地块。
 ```
 
+Reduce-scatter，P=4：每一轮，rank `r` 把**左**邻居某个块的副本加到自己对应
+同一块的副本上；每轮参与的块索引都会偏移一位：
+
+```text
+第 s=0 轮：  R0 += C2(R3)   R1 += C3(R0)   R2 += C0(R1)   R3 += C1(R2)
+第 s=1 轮：  R0 += C1(R3)   R1 += C2(R0)   R2 += C3(R1)   R3 += C0(R2)
+第 s=2 轮：  R0 += C0(R3)   R1 += C1(R0)   R2 += C2(R1)   R3 += C3(R2)
+            （最后一轮：每个 rank 的块索引都等于它自己的 rank 编号）
+
+经过 P-1 = 3 轮后，rank r 拥有归约完成的块 r
+（R0 -> C0、R1 -> C1、R2 -> C2、R3 -> C3）——随后 all-gather 把每个块
+分发给每个 rank。
+```
+
 - **`left = (my_rank - 1 + nranks) % nranks`。** `+ nranks` 保证被除数非负——
   裸写 `(my_rank - 1) % nranks` 在 rank 0 处截断取模得 `-1`（步骤 06 的教训，
   这次在索引一侧）。

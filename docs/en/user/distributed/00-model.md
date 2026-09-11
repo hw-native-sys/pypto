@@ -130,8 +130,10 @@ process per device (per `device_ids`) from this single Python process.
 
 ## What Is Distributed Programming in PyPTO?
 
-PyPTO's distributed model is **symmetric-memory + signals**. Each rank has a
-per-rank **window buffer** with symmetric address spaces across peers.
+This is the full model behind the [chapter intro](index.md)'s one-line
+summary: PyPTO's distributed model is **symmetric-memory + signals**. Each
+rank has a per-rank **window buffer** with symmetric address spaces across
+peers.
 Communication happens through one-sided `put`/`get`/`remote_load` plus
 **signal synchronisation** (`notify`/`wait`). A **comm domain** is a subset
 of ranks sharing a symmetric window pool; the full world is the default

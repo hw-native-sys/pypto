@@ -77,6 +77,21 @@ for s in pl.range(nranks - 1):
 # left neighbour's send chunk into the local chunk.
 ```
 
+Reduce-scatter, P=4: each round, rank `r` adds its **left** neighbour's copy
+of one chunk into its own copy of that same chunk; which chunk index shifts
+by one every round:
+
+```text
+round s=0:  R0 += C2(R3)   R1 += C3(R0)   R2 += C0(R1)   R3 += C1(R2)
+round s=1:  R0 += C1(R3)   R1 += C2(R0)   R2 += C3(R1)   R3 += C0(R2)
+round s=2:  R0 += C0(R3)   R1 += C1(R0)   R2 += C2(R1)   R3 += C3(R2)
+            (last round: each rank's chunk index matches its own rank number)
+
+After P-1 = 3 rounds, rank r owns the fully-reduced chunk r
+(R0 -> C0, R1 -> C1, R2 -> C2, R3 -> C3) — all-gather then spreads every
+chunk to every rank.
+```
+
 - **`left = (my_rank - 1 + nranks) % nranks`.** The `+ nranks` keeps the
   dividend non-negative — a bare `(my_rank - 1) % nranks` yields `-1` at
   rank 0 under truncating modulo (the step-06 lesson, now on the index side).

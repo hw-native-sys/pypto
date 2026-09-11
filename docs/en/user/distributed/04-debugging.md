@@ -3,6 +3,13 @@
 Distributed bugs rarely leave a local stack trace — the symptom shows up on
 one rank while the cause is on another.
 
+This page is the **canonical index of every distributed pitfall** in this
+chapter. The failure patterns and fatal pitfalls below are chapter-wide
+(model, primitives, collectives); each tutorial-ladder step additionally has
+its own narrower "Edge cases" section for bugs specific to that step's
+algorithm — see [Per-Step Pitfalls](#per-step-pitfalls) for the full
+cross-reference.
+
 ## Common Failure Patterns
 
 | Symptom | Likely Cause | Fix |
@@ -36,6 +43,31 @@ one rank while the cause is on another.
 > `range(2)` — leaves 2 cards un-dispatched and causes undefined behaviour
 > (`MaterializeCommDomainScopes` requires the `device=r` loop range to be
 > `[0, N)`).
+
+## Per-Step Pitfalls
+
+Each tutorial-ladder step has its own "Edge cases" section covering the bug
+specific to that step's algorithm. This table is the single index into all
+sixteen — the chapter-wide patterns above are common to every step:
+
+| Step | Page | Fatal pitfall |
+| ---- | ---- | ------------- |
+| 01 | [06-hello_rank](06-hello_rank.md) | Scalar argument placed before a tensor argument — `TaskArgs: cannot add tensor after scalar` |
+| 02 | [07-programming_model](07-programming_model.md) | Reading rank identity outside the host dispatch loop gives every rank the same value |
+| 03 | [08-window_buffer](08-window_buffer.md) | Treating a window-bound `DistributedTensor` as a plain `Tensor` (or vice versa) — compile-time type error |
+| 04 | [09-barrier](09-barrier.md) | `Set`/`Eq` on a shared-cell barrier silently clobbers earlier arrivals |
+| 05 | [10-remote_load_store](10-remote_load_store.md) | RMA before the ordering barrier — reading window memory the peer hasn't staged yet |
+| 06 | [11-put_get](11-put_get.md) | `put` without a paired notify/wait — the read races the transfer |
+| 07 | [12-dynamic_rank_count](12-dynamic_rank_count.md) | Leaving a hardcoded rank count in the host shape defeats `pl.dynamic("NR")` |
+| 08 | [13-allreduce_mesh](13-allreduce_mesh.md) | Missing barrier lets a load race the store — timing-dependent, may pass at P=2 and fail at P=4 |
+| 09 | [14-allreduce_two_phase](14-allreduce_two_phase.md) | Reusing one signal row for both barriers — the monotonic counter lets the second barrier return early |
+| 10 | [15-allreduce_ring](15-allreduce_ring.md) | Negative left-neighbour index at rank 0 under truncating modulo |
+| 11 | [16-allreduce_reveal](16-allreduce_reveal.md) | Wrong signal shape for the builtin's mode (`ring` vs `mesh`) |
+| 12 | [17-broadcast](17-broadcast.md) | Broadcasting from `my_rank`'s own slice instead of the root's |
+| 13 | [18-allgather](18-allgather.md) | Gathering into the wrong output slot — offset doesn't match the peer's rank |
+| 14 | [19-reduce_scatter](19-reduce_scatter.md) | Omitting your own window row from the reduction |
+| 15 | [20-all_to_all](20-all_to_all.md) | Reusing one window buffer for both source and result |
+| 16 | [21-putting_it_together](21-putting_it_together.md) | Pointing one shared window at two different signal layouts (mesh vs ring) |
 
 ## Diagnostic Flags
 

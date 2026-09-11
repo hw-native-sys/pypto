@@ -253,6 +253,12 @@ dispatches between the two on the operand you pass.
 One-sided bulk transfer — rank A writes to or reads from rank B's window
 without rank B participating in the transfer (beyond the signal barrier).
 
+```text
+put(dst, peer=B, src, ...)   this rank: src (In)  --write-->  peer B: dst (InOut)
+get(dst, peer=B, src, ...)   this rank: dst (Out) <--read---  peer B: src (In)
+                             (caller is always "this rank"; peer is always B)
+```
+
 ### Put (Write to Peer)
 
 | Name | Signature | Mutation | Description |

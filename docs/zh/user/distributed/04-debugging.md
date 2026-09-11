@@ -3,6 +3,11 @@
 分布式 bug 很少留下本地堆栈——症状出现在某个 rank 上，而原因却在另一个
 rank 上。
 
+本页是本章**所有分布式陷阱的权威索引**。下面的常见故障模式和致命陷阱是
+章节级的（模型、原语、集合通信）；教程阶梯的每个步骤还各自有一节更窄的
+"边界情况"，覆盖该步骤算法特有的 bug——完整交叉引用见
+[分步陷阱](#分步陷阱)。
+
 ## 常见故障模式
 
 | 症状 | 可能原因 | 修复 |
@@ -31,6 +36,30 @@ rank 上。
 > `device_ids=[0, 1, 2, 3]`（4 张卡）但分发循环只覆盖 `range(2)`，会让
 > 2 张卡未被派发，导致未定义行为（`MaterializeCommDomainScopes` 要求
 > `device=r` 循环的范围必须是 `[0, N)`）。
+
+## 分步陷阱
+
+教程阶梯的每个步骤都有自己的"边界情况"一节，覆盖该步骤算法特有的 bug。
+下表是全部十六个步骤的统一索引——上面的章节级模式对每个步骤都通用：
+
+| 步骤 | 页面 | 致命陷阱 |
+| ---- | ---- | -------- |
+| 01 | [06-hello_rank](06-hello_rank.md) | 标量参数排在张量参数之前——`TaskArgs: cannot add tensor after scalar` |
+| 02 | [07-programming_model](07-programming_model.md) | 在主机分发循环之外读取 rank 身份，会让所有 rank 得到相同的值 |
+| 03 | [08-window_buffer](08-window_buffer.md) | 把 window 绑定的 `DistributedTensor` 当作普通 `Tensor`（或反之）——编译期类型错误 |
+| 04 | [09-barrier](09-barrier.md) | 在共享单元 barrier 上使用 `Set`/`Eq`，会静默覆盖更早到达的对端 |
+| 05 | [10-remote_load_store](10-remote_load_store.md) | 在排序 barrier 之前做 RMA——读取对端尚未 staging 好的 window 内存 |
+| 06 | [11-put_get](11-put_get.md) | `put` 不配对 notify/wait——读取会与传输竞争 |
+| 07 | [12-dynamic_rank_count](12-dynamic_rank_count.md) | 主机形状里留下写死的 rank 数量，使 `pl.dynamic("NR")` 失效 |
+| 08 | [13-allreduce_mesh](13-allreduce_mesh.md) | 缺少 barrier 让读取与 store 竞争——与时序相关，可能 P=2 通过而 P=4 失败 |
+| 09 | [14-allreduce_two_phase](14-allreduce_two_phase.md) | 两个 barrier 复用同一行信号——单调计数器让第二个 barrier 提前返回 |
+| 10 | [15-allreduce_ring](15-allreduce_ring.md) | rank 0 处左邻居索引在截断取模下取负 |
+| 11 | [16-allreduce_reveal](16-allreduce_reveal.md) | 内置原语的信号形状与模式（`ring` 还是 `mesh`）不匹配 |
+| 12 | [17-broadcast](17-broadcast.md) | 从 `my_rank` 自己的 slice 而非根的 slice 广播 |
+| 13 | [18-allgather](18-allgather.md) | gather 到错误的输出槽位——偏移与对端 rank 不匹配 |
+| 14 | [19-reduce_scatter](19-reduce_scatter.md) | 归约时遗漏自己的 window 行 |
+| 15 | [20-all_to_all](20-all_to_all.md) | 源和结果复用同一个 window 缓冲 |
+| 16 | [21-putting_it_together](21-putting_it_together.md) | 让同一个共享 window 对应两种不同的信号布局（mesh 与 ring） |
 
 ## 诊断标志
 
