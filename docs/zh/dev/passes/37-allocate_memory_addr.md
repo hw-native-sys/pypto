@@ -112,10 +112,12 @@ recognizer 不调用也不模拟 ptoas。
 显式 pair 模型是 output-sensitive 的：对于一个 InCore 函数内的 `B` 个可复用 buffer，
 一个 kernel 最坏可包含 `Theta(B^2)` 个生命周期冲突或候选 penalty pair，任何 pair 枚举
 都不可能比它必须报告的 pair 更省。识别本身对 IR 不是二次的：在 resource 数量固定时，
-顺序索引耗费 `O(V + E)`，frontier 耗费与记录访问数成正比的 `O(A)`，pair 由按 resource
-建索引的生命周期 sweep 枚举，只访问那些已经共享 memory space、生命周期兼容且提供两个
-不同 resource 的 pair。因此识别与 graph 构造需要 `O(N log N + P)` 时间（`P` 为报告的
-pair 数），固定数量的 canonical 放置顺序需要
+顺序索引耗费 `O(V + E)` 乘以控制嵌套深度（用于按区域构造依赖图），pair 由按 resource
+建索引的生命周期 sweep 枚举。该 sweep 只检查那些已经共享 memory space、生命周期兼容且
+提供两个不同 resource 的 pair，因此在没有跨 resource 复用的 kernel 上几乎不检查任何 pair，
+而 all-pairs 扫描仍需付出 `Theta(B^2)`。被检查的数量不等于被报告的数量：一个被检查的 pair
+仍可能因 separation、同一算子或控制路径互斥而被拒绝。每个 allocation 的 completion frontier
+按 (resource, 控制路径, 字节范围) 各取一个代表做两两比较。固定数量的 canonical 放置顺序需要
 `O(B^2 log B)` 时间和 `O(B^2)` 空间。若所有构造式顺序都失败，一个仅检查可行性的精确
 fallback 会在固定的 100,000 个候选放置工作预算内枚举对齐放置。这是默认 `DSA_RP`
 planner 对通用 pass 复杂度策略的已记录例外；其范围限于单个函数，使用固定数量的构造式 restart，
