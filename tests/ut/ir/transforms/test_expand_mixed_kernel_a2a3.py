@@ -64,6 +64,25 @@ def _op_name(stmt: ir.Stmt) -> str:
     return ""
 
 
+def test_automatic_mx_scale_v2c_requires_a5_backend():
+    """A2A3 rejects the A5-only MX byte-preserving V2C transport."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main_incore_0(self, src: pl.Tensor[[16, 64], pl.FP32]):
+            _quant, scale = pl.quant_mx(pl.load(src, [0, 0], [16, 64]), group_axis=1)
+            _scale_mat = pl.move(
+                scale,
+                target_memory=pl.Mem.Mat,
+                blayout=pl.TileLayout.row_major,
+                slayout=pl.TileLayout.row_major,
+            )
+
+    with pytest.raises(ValueError, match="requires an A5 backend"):
+        _run_pipeline(Before)
+
+
 def test_direct_incore_defer_wait_requires_task_level_waiter_contract():
     """A direct InCore helper must not bypass task-level waiter validation."""
 

@@ -65,8 +65,6 @@ namespace ir {
 
 namespace {
 
-constexpr const char* kMxScaleV2CPushAttr = "__mx_scale_v2c_push";
-
 using core_affinity::ClassifyCallAffinity;
 using core_affinity::ClassifyMoveDirection;
 using core_affinity::CombineAffinity;
@@ -724,13 +722,8 @@ int BoundaryTransportSplitCode(const CVBoundaryMove& bm, const Span& span) {
 }
 
 CallPtr CreateTpush(const std::string& op_name, const ExprPtr& tile, const Span& span, int split = 0,
-                    int lane_stride = 0, bool mx_scale_v2c = false) {
-  auto call = OpRegistry::GetInstance().Create(op_name, {tile}, MakeSplitKwargs(split, lane_stride), span);
-  if (!mx_scale_v2c) return call;
-  return std::make_shared<Call>(
-      call->op_, call->args_, call->kwargs_,
-      std::vector<std::pair<std::string, std::any>>{{kMxScaleV2CPushAttr, std::any(true)}}, call->GetType(),
-      call->span_);
+                    int lane_stride = 0) {
+  return OpRegistry::GetInstance().Create(op_name, {tile}, MakeSplitKwargs(split, lane_stride), span);
 }
 
 CallPtr CreateTpop(const std::string& op_name, const TypePtr& result_type, const Span& span,
@@ -753,41 +746,26 @@ CallPtr CreateMove(const ExprPtr& tile, MemorySpace target_memory, const TypePtr
   return std::make_shared<Call>(op, std::vector<ExprPtr>{tile}, std::move(kwargs), result_type, span);
 }
 
-CallPtr CreateTransposeView(const ExprPtr& tile, const Span& span) {
-  return OpRegistry::GetInstance().Create("tile.transpose_view", {tile}, {}, span);
-}
-
-bool IsCompleteMxScaleTile(const TileType& type) {
-  if (type.dtype_ != DataType::FP8E8M0) return false;
+bool IsMxScaleView(const TileType& type) {
   const TileView view = tile_view_semantics::GetEffectiveTileView(type);
-  return view.fractal == tile_view_semantics::kMXScaleFractal && view.blayout == view.slayout &&
+  return type.dtype_ == DataType::FP8E8M0 && view.fractal == tile_view_semantics::kMXScaleFractal &&
+         view.blayout == view.slayout &&
          (view.blayout == TileLayout::row_major || view.blayout == TileLayout::col_major);
 }
 
-void CheckMxScaleNdPushHasFullValidColumns(const ExprPtr& source, const Span& span) {
-  auto type = As<TileType>(source->GetType());
-  INTERNAL_CHECK_SPAN(type, span) << "Internal error: MX-scale V2C push source must have TileType";
-  const TileView view = tile_view_semantics::GetEffectiveTileView(*type);
-  INTERNAL_CHECK_SPAN(!type->shape_.empty() && view.valid_shape.size() == type->shape_.size(), span)
-      << "Internal error: MX-scale V2C push requires matching non-empty shape and valid_shape ranks";
-  INTERNAL_CHECK_SPAN(AreExprsEqual(view.valid_shape.back(), type->shape_.back()), span)
-      << "Internal error: automatic MX-scale V2C ND transport requires a full-valid final dimension";
-}
-
-bool IsAutomaticMxScaleBoundary(const CVBoundaryMove& boundary) {
+// Route every FP8E8M0 scale-view V2C boundary through the dedicated MX carrier
+// planner. It handles both matching layouts and real producer-to-consumer
+// layout conversion before constructing the physical row/row carrier.
+bool IsMxScaleBoundary(const CVBoundaryMove& boundary) {
   if (boundary.op_driven || boundary.direction != CVDirection::VECTOR_TO_CUBE) return false;
   auto source_type = As<TileType>(boundary.source_tile->GetType());
   auto dest_type = As<TileType>(boundary.dest_var->GetType());
-  if (!source_type || !dest_type ||
+  if (!source_type || !dest_type || !IsMxScaleView(*source_type) || !IsMxScaleView(*dest_type) ||
       (source_type->memory_space_.has_value() && source_type->memory_space_ != MemorySpace::Vec) ||
       dest_type->memory_space_ != MemorySpace::Mat) {
     return false;
   }
-
-  const TileView source_view = tile_view_semantics::GetEffectiveTileView(*source_type);
-  const TileView dest_view = tile_view_semantics::GetEffectiveTileView(*dest_type);
-  return IsCompleteMxScaleTile(*source_type) && IsCompleteMxScaleTile(*dest_type) &&
-         source_view.blayout == dest_view.blayout;
+  return true;
 }
 
 MemorySpace GetBoundaryTpopMemory(CoreSide side) {
@@ -798,8 +776,389 @@ MemorySpace GetBoundaryTpopMemory(CoreSide side) {
 // Hand-written cross-core pipe: V->C push layout adaptation
 // ============================================================================
 
-/// Finalize V->C pushes that were authored directly rather than synthesized
-/// from a boundary move.
+struct MxV2CContract {
+  std::shared_ptr<const TileType> consumer_type;
+  int pipe_id = 0;
+  int split = 0;
+  int slot_size = 0;
+};
+
+using MxV2CContracts = std::unordered_map<const Call*, MxV2CContract>;
+
+struct PipeFunctionFacts {
+  FunctionPtr function;
+  std::unordered_map<const Var*, CallPtr> definitions;
+  std::vector<CallPtr> initializes;
+  std::vector<CallPtr> v2c_pushes;
+  std::vector<std::pair<CallPtr, std::shared_ptr<const TileType>>> v2c_pops;
+};
+
+struct PipePopEndpoint {
+  CallPtr call;
+  std::shared_ptr<const TileType> type;
+};
+
+struct PipeFunctionIndex {
+  std::unordered_map<int, std::vector<CallPtr>> v2c_initializes;
+  std::unordered_map<int, std::vector<CallPtr>> v2c_pushes;
+  std::unordered_map<const Call*, size_t> v2c_push_ordinals;
+  std::unordered_map<int, std::vector<PipePopEndpoint>> v2c_pops;
+};
+
+class PipeFunctionFactsCollector : public IRVisitor {
+ public:
+  explicit PipeFunctionFactsCollector(FunctionPtr function) { facts_.function = std::move(function); }
+
+  [[nodiscard]] PipeFunctionFacts Take() { return std::move(facts_); }
+
+ protected:
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (auto call = As<Call>(op->value_)) {
+      facts_.definitions[op->var_.get()] = call;
+      if (IsOp(call, "tile.tpop_from_aiv")) {
+        auto type = As<TileType>(op->var_->GetType());
+        INTERNAL_CHECK_SPAN(type, op->span_) << "tile.tpop_from_aiv result must be a TileType";
+        facts_.v2c_pops.emplace_back(call, type);
+      }
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const EvalStmtPtr& op) override {
+    if (auto call = As<Call>(op->expr_)) {
+      if (IsOp(call, "system.aic_initialize_pipe") || IsOp(call, "system.aiv_initialize_pipe")) {
+        facts_.initializes.push_back(call);
+      } else if (IsOp(call, "tile.tpush_to_aic")) {
+        facts_.v2c_pushes.push_back(call);
+      }
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  PipeFunctionFacts facts_;
+};
+
+bool SameMxTypeContract(const TileType& lhs, const TileType& rhs) {
+  const TileView lhs_view = tile_view_semantics::GetEffectiveTileView(lhs);
+  const TileView rhs_view = tile_view_semantics::GetEffectiveTileView(rhs);
+  return lhs.dtype_ == rhs.dtype_ && tile_view_semantics::ShapeExprListsEquivalent(lhs.shape_, rhs.shape_) &&
+         tile_view_semantics::ShapeExprListsEquivalent(lhs_view.valid_shape, rhs_view.valid_shape) &&
+         lhs_view == rhs_view;
+}
+
+PipeFunctionIndex BuildPipeFunctionIndex(const PipeFunctionFacts& facts) {
+  PipeFunctionIndex index;
+  for (const auto& call : facts.initializes) {
+    if ((call->GetKwarg<int>("dir_mask", 0) & core_affinity::kDirMaskV2C) == 0) continue;
+    index.v2c_initializes[call->GetKwarg<int>("id", 0)].push_back(call);
+  }
+  for (const auto& call : facts.v2c_pushes) {
+    auto& pushes = index.v2c_pushes[call->GetKwarg<int>("id", 0)];
+    index.v2c_push_ordinals.emplace(call.get(), pushes.size());
+    pushes.push_back(call);
+  }
+  for (const auto& [call, type] : facts.v2c_pops) {
+    index.v2c_pops[call->GetKwarg<int>("id", 0)].push_back(PipePopEndpoint{call, type});
+  }
+  return index;
+}
+
+const CallPtr& GetUniqueV2CInitialize(const PipeFunctionIndex& index, int pipe_id, const Span& span,
+                                      const std::string& side) {
+  auto it = index.v2c_initializes.find(pipe_id);
+  CHECK_SPAN(it != index.v2c_initializes.end(), span)
+      << "MX V2C pipe id " << pipe_id << " has no matching " << side << " initialize_pipe call";
+  CHECK_SPAN(it->second.size() == 1, span)
+      << "MX V2C pipe id " << pipe_id << " has ambiguous " << side << " initialize_pipe calls";
+  const auto& match = it->second.front();
+  CHECK_SPAN(match->args_.size() == 2, span)
+      << "MX V2C " << side << " initialize_pipe must carry c2v and v2c buffer arguments";
+  return match;
+}
+
+CallPtr ResolveBufferDefinition(const PipeFunctionFacts& facts, const ExprPtr& buffer, const Span& span,
+                                const std::string& expected_op) {
+  auto var = AsVarLike(buffer);
+  CHECK_SPAN(var, span) << "MX V2C initialize_pipe requires an SSA v2c buffer";
+  auto it = facts.definitions.find(var.get());
+  CHECK_SPAN(it != facts.definitions.end() && IsOp(it->second, expected_op), span)
+      << "MX V2C initialize_pipe v2c buffer must come from " << expected_op;
+  return it->second;
+}
+
+MxV2CContracts BuildMxV2CContracts(const std::vector<FunctionPtr>& functions) {
+  std::vector<PipeFunctionFacts> all_facts;
+  std::vector<PipeFunctionIndex> all_indexes;
+  std::unordered_map<std::string, size_t> function_index;
+  bool has_mx_push = false;
+  for (const auto& function : functions) {
+    PipeFunctionFactsCollector collector(function);
+    collector.VisitStmt(function->body_);
+    auto facts = collector.Take();
+    for (const auto& push : facts.v2c_pushes) {
+      if (push->args_.size() == 1) {
+        auto source_type = As<TileType>(push->args_[0]->GetType());
+        has_mx_push = has_mx_push || (source_type && IsMxScaleView(*source_type));
+      }
+    }
+    CHECK(function_index.emplace(function->name_, all_facts.size()).second)
+        << "ExpandMixedKernel found duplicate function name while pairing MX V2C pipes: " << function->name_;
+    all_facts.push_back(std::move(facts));
+  }
+  all_indexes.reserve(all_facts.size());
+  for (const auto& facts : all_facts) {
+    all_indexes.push_back(BuildPipeFunctionIndex(facts));
+  }
+
+  MxV2CContracts contracts;
+  if (!has_mx_push || !PassContext::Current()->GetBackendHandler()->RequiresVtoCFractalAdapt()) {
+    return contracts;
+  }
+
+  for (size_t producer_index = 0; producer_index < all_facts.size(); ++producer_index) {
+    const auto& producer = all_facts[producer_index];
+    const auto& producer_pipe_index = all_indexes[producer_index];
+    if (producer.function->func_type_ != FunctionType::AIV) continue;
+    for (const auto& push : producer.v2c_pushes) {
+      if (push->args_.size() != 1) continue;
+      auto source_type = As<TileType>(push->args_[0]->GetType());
+      if (!source_type || !IsMxScaleView(*source_type)) continue;
+
+      const int pipe_id = push->GetKwarg<int>("id", 0);
+      const int split = push->GetKwarg<int>("split", 0);
+      CHECK_SPAN(IsValidSplitCode(split), push->span_)
+          << "MX V2C pipe id " << pipe_id << " has invalid tpush split code " << split;
+      const auto& producer_init = GetUniqueV2CInitialize(producer_pipe_index, pipe_id, push->span_, "AIV");
+      const int producer_slot_size = producer_init->GetKwarg<int>("slot_size", -1);
+      CHECK_SPAN(producer_slot_size > 0, push->span_)
+          << "MX V2C pipe id " << pipe_id << " requires a positive AIV slot_size";
+      auto import = ResolveBufferDefinition(producer, producer_init->args_[1], push->span_,
+                                            "system.import_peer_buffer");
+      const std::string buffer_name = import->GetKwarg<std::string>("name");
+      const std::string peer_name = import->GetKwarg<std::string>("peer_func");
+      auto peer_it = function_index.find(peer_name);
+      CHECK_SPAN(peer_it != function_index.end(), push->span_)
+          << "MX V2C pipe id " << pipe_id << " imports buffer '" << buffer_name
+          << "' from missing peer function '" << peer_name << "'";
+      const auto& consumer = all_facts[peer_it->second];
+      const auto& consumer_pipe_index = all_indexes[peer_it->second];
+      CHECK_SPAN(consumer.function->func_type_ == FunctionType::AIC, push->span_)
+          << "MX V2C pipe id " << pipe_id << " peer function '" << peer_name << "' is not AIC";
+
+      const auto& consumer_init = GetUniqueV2CInitialize(consumer_pipe_index, pipe_id, push->span_, "AIC");
+      const int consumer_slot_size = consumer_init->GetKwarg<int>("slot_size", -1);
+      CHECK_SPAN(consumer_slot_size == producer_slot_size, push->span_)
+          << "MX V2C pipe id " << pipe_id << " has mismatched AIV/AIC slot_size values " << producer_slot_size
+          << " and " << consumer_slot_size;
+      auto reserve =
+          ResolveBufferDefinition(consumer, consumer_init->args_[1], push->span_, "system.reserve_buffer");
+      CHECK_SPAN(reserve->GetKwarg<std::string>("name") == buffer_name, push->span_)
+          << "MX V2C pipe id " << pipe_id << " imports buffer '" << buffer_name
+          << "' but the AIC initializer reserves '" << reserve->GetKwarg<std::string>("name") << "'";
+
+      auto pushes_it = producer_pipe_index.v2c_pushes.find(pipe_id);
+      INTERNAL_CHECK_SPAN(pushes_it != producer_pipe_index.v2c_pushes.end(), push->span_)
+          << "Internal error: indexed MX V2C push is missing from its pipe group";
+      auto ordinal_it = producer_pipe_index.v2c_push_ordinals.find(push.get());
+      INTERNAL_CHECK_SPAN(ordinal_it != producer_pipe_index.v2c_push_ordinals.end(), push->span_)
+          << "Internal error: indexed MX V2C push has no pipe ordinal";
+      const size_t push_ordinal = ordinal_it->second;
+      const size_t push_count = pushes_it->second.size();
+      auto pops_it = consumer_pipe_index.v2c_pops.find(pipe_id);
+      const size_t pop_count = (pops_it == consumer_pipe_index.v2c_pops.end()) ? 0 : pops_it->second.size();
+      CHECK_SPAN(pop_count == push_count, push->span_)
+          << "MX V2C pipe id " << pipe_id << " has " << push_count << " tpush calls but " << pop_count
+          << " tpop calls";
+      const auto& [pop, consumer_type] = pops_it->second[push_ordinal];
+      const int pop_split = pop->GetKwarg<int>("split", 0);
+      CHECK_SPAN(pop_split == split, push->span_)
+          << "MX V2C pipe id " << pipe_id << " has mismatched tpush/tpop split codes " << split << " and "
+          << pop_split;
+      CHECK_SPAN(IsMxScaleView(*consumer_type), push->span_)
+          << "MX V2C pipe id " << pipe_id << " pairs an MX push with a non-MX tpop";
+      contracts.emplace(push.get(), MxV2CContract{consumer_type, pipe_id, split, producer_slot_size});
+    }
+  }
+  return contracts;
+}
+
+using TileDefMap = std::unordered_map<const Var*, CallPtr>;
+
+TileDefMap BuildTileDefMap(const StmtPtr& body) {
+  class Collector : public IRVisitor {
+   public:
+    TileDefMap definitions;
+
+   protected:
+    void VisitStmt_(const AssignStmtPtr& op) override {
+      if (auto call = As<Call>(op->value_)) definitions[op->var_.get()] = call;
+      IRVisitor::VisitStmt_(op);
+    }
+  } collector;
+  collector.VisitStmt(body);
+  return std::move(collector.definitions);
+}
+
+bool IsFullValid(const TileType& type) {
+  return tile_view_semantics::ShapeExprListsEquivalent(
+      tile_view_semantics::GetEffectiveTileView(type).valid_shape, type.shape_);
+}
+
+bool SameMxLogicalTile(const TileType& lhs, const TileType& rhs) {
+  const TileView lhs_view = tile_view_semantics::GetEffectiveTileView(lhs);
+  const TileView rhs_view = tile_view_semantics::GetEffectiveTileView(rhs);
+  return lhs.dtype_ == rhs.dtype_ && lhs.shape_.size() == 2 && rhs.shape_.size() == 2 &&
+         tile_view_semantics::ShapeExprListsEquivalent(lhs.shape_, rhs.shape_) &&
+         tile_view_semantics::ShapeExprListsEquivalent(lhs_view.valid_shape, rhs_view.valid_shape);
+}
+
+std::shared_ptr<const TileType> RequireMxCallType(const CallPtr& call, const TileType& expected,
+                                                  const Span& span, const std::string& op_name) {
+  auto actual = As<TileType>(call->GetType());
+  CHECK_SPAN(actual && actual->dtype_ == expected.dtype_ &&
+                 tile_view_semantics::ShapeExprListsEquivalent(actual->shape_, expected.shape_) &&
+                 tile_view_semantics::GetEffectiveTileView(*actual) ==
+                     tile_view_semantics::GetEffectiveTileView(expected) &&
+                 actual->memory_space_ == MemorySpace::Vec,
+             span)
+      << op_name << " could not construct the required MX V2C carrier type";
+  return actual;
+}
+
+bool IsCanonicalMxCarrier(const ExprPtr& source, const TileType& consumer, const TileDefMap& definitions) {
+  auto source_type = As<TileType>(source->GetType());
+  if (!source_type || !IsFullValid(*source_type)) return false;
+  const TileView consumer_view = tile_view_semantics::GetEffectiveTileView(consumer);
+  const TileView source_view = tile_view_semantics::GetEffectiveTileView(*source_type);
+  if (source_view.blayout != TileLayout::row_major || source_view.slayout != TileLayout::row_major ||
+      source_view.fractal != tile_view_semantics::kMXScaleFractal) {
+    return false;
+  }
+
+  auto carrier_expr = source;
+  auto carrier_var = AsVarLike(carrier_expr);
+  if (!carrier_var) return false;
+  auto carrier_def = definitions.find(carrier_var.get());
+  bool widened_valid_shape = false;
+  if (carrier_def != definitions.end() && IsOp(carrier_def->second, "tile.set_validshape")) {
+    widened_valid_shape = true;
+    carrier_expr = carrier_def->second->args_[0];
+    carrier_var = AsVarLike(carrier_expr);
+    if (!carrier_var) return false;
+    carrier_def = definitions.find(carrier_var.get());
+  }
+
+  if (consumer_view.blayout == TileLayout::row_major) {
+    auto logical_type = As<TileType>(carrier_expr->GetType());
+    return logical_type && SameMxTypeContract(*logical_type, consumer) &&
+           logical_type->memory_space_ == MemorySpace::Vec && (IsFullValid(consumer) || widened_valid_shape);
+  }
+
+  if (carrier_def == definitions.end() || !IsOp(carrier_def->second, "tile.transpose_view") ||
+      carrier_def->second->args_.size() != 1) {
+    return false;
+  }
+  auto logical_type = As<TileType>(carrier_def->second->args_[0]->GetType());
+  return logical_type && SameMxTypeContract(*logical_type, consumer) &&
+         logical_type->memory_space_ == MemorySpace::Vec;
+}
+
+void ValidateMxCarrierSize(const TileType& carrier_type, const MxV2CContract& contract, const Span& span) {
+  const auto carrier_bytes =
+      cross_core_pipe::TryGetTileSlotSizeBytes(std::make_shared<TileType>(carrier_type));
+  CHECK_SPAN(carrier_bytes.has_value(), span)
+      << "MX V2C pipe id " << contract.pipe_id << " requires a static carrier shape";
+  CHECK_SPAN(*carrier_bytes > 0 && *carrier_bytes % 32 == 0, span)
+      << "MX V2C pipe id " << contract.pipe_id << " carrier size " << *carrier_bytes
+      << " bytes is not a positive 32-byte multiple";
+  CHECK_SPAN(*carrier_bytes <= contract.slot_size, span)
+      << "MX V2C pipe id " << contract.pipe_id << " carrier needs " << *carrier_bytes
+      << " bytes but slot_size is " << contract.slot_size;
+}
+
+StmtPtr AdaptMxV2CPush(const EvalStmtPtr& stmt, const CallPtr& push, const MxV2CContract& contract,
+                       const TileDefMap& definitions) {
+  const ExprPtr& source = push->args_[0];
+  auto source_type = As<TileType>(source->GetType());
+  const auto& consumer_type = contract.consumer_type;
+  INTERNAL_CHECK_SPAN(source_type && consumer_type, stmt->span_) << "MX V2C contract requires tile types";
+
+  CHECK_SPAN(IsMxScaleView(*source_type) && IsMxScaleView(*consumer_type), stmt->span_)
+      << "MX V2C pipe id " << contract.pipe_id << " requires FP8E8M0 fractal-32 scale views";
+  CHECK_SPAN(source_type->shape_.size() == 2 && consumer_type->shape_.size() == 2, stmt->span_)
+      << "MX V2C pipe id " << contract.pipe_id << " requires rank-2 scale views";
+  CHECK_SPAN(
+      source_type->memory_space_ == MemorySpace::Vec && consumer_type->memory_space_ == MemorySpace::Mat,
+      stmt->span_)
+      << "MX V2C pipe id " << contract.pipe_id << " requires a Vec producer and Mat consumer";
+  if (IsCanonicalMxCarrier(source, *consumer_type, definitions)) {
+    ValidateMxCarrierSize(*source_type, contract, stmt->span_);
+    return stmt;
+  }
+  CHECK_SPAN(SameMxLogicalTile(*source_type, *consumer_type), stmt->span_)
+      << "MX V2C pipe id " << contract.pipe_id
+      << " requires producer and consumer to have identical logical shape and valid_shape";
+
+  const TileView consumer_view = tile_view_semantics::GetEffectiveTileView(*consumer_type);
+  TileView target_view = consumer_view;
+  auto logical_target = std::make_shared<TileType>(source_type->shape_, source_type->dtype_, std::nullopt,
+                                                   target_view, MemorySpace::Vec);
+  ExprPtr carrier = source;
+  std::vector<StmtPtr> output;
+  auto current_type = source_type;
+  std::string source_name = "scale";
+  if (auto source_var = AsVarLike(source)) source_name = source_var->name_hint_;
+
+  if (tile_view_semantics::GetEffectiveTileView(*current_type) != target_view) {
+    auto move = OpRegistry::GetInstance().Create("tile.move", {carrier},
+                                                 {{"target_memory", std::any(MemorySpace::Vec)},
+                                                  {"blayout", std::any(target_view.blayout)},
+                                                  {"slayout", std::any(target_view.slayout)}},
+                                                 stmt->span_);
+    current_type = RequireMxCallType(move, *logical_target, stmt->span_, "tile.move");
+    auto moved = std::make_shared<Var>(source_name + "_mx_layout", current_type, stmt->span_);
+    output.push_back(std::make_shared<AssignStmt>(moved, move, stmt->span_));
+    carrier = moved;
+  }
+
+  if (consumer_view.blayout == TileLayout::col_major) {
+    auto transpose = OpRegistry::GetInstance().Create("tile.transpose_view", {carrier}, {}, stmt->span_);
+    auto transpose_type = As<TileType>(transpose->GetType());
+    CHECK_SPAN(transpose_type, stmt->span_) << "tile.transpose_view must produce an MX tile";
+    const TileView transpose_view = tile_view_semantics::GetEffectiveTileView(*transpose_type);
+    CHECK_SPAN(transpose_type->shape_.size() == 2 && transpose_view.blayout == TileLayout::row_major &&
+                   transpose_view.slayout == TileLayout::row_major && IsMxScaleView(*transpose_type),
+               stmt->span_)
+        << "tile.transpose_view could not construct the row/row MX V2C carrier";
+    auto transposed = std::make_shared<Var>(source_name + "_mx_nd", transpose_type, stmt->span_);
+    output.push_back(std::make_shared<AssignStmt>(transposed, transpose, stmt->span_));
+    carrier = transposed;
+    current_type = transpose_type;
+  }
+
+  if (!IsFullValid(*current_type)) {
+    auto full = OpRegistry::GetInstance().Create(
+        "tile.set_validshape", {carrier, current_type->shape_[0], current_type->shape_[1]}, {}, stmt->span_);
+    auto full_type = As<TileType>(full->GetType());
+    CHECK_SPAN(full_type && IsFullValid(*full_type), stmt->span_)
+        << "tile.set_validshape could not construct a full-box MX V2C carrier";
+    auto full_var = std::make_shared<Var>(source_name + "_mx_full", full_type, stmt->span_);
+    output.push_back(std::make_shared<AssignStmt>(full_var, full, stmt->span_));
+    carrier = full_var;
+    current_type = full_type;
+  }
+
+  ValidateMxCarrierSize(*current_type, contract, stmt->span_);
+
+  auto adapted_push = std::make_shared<Call>(push->op_, std::vector<ExprPtr>{carrier}, push->kwargs_,
+                                             push->attrs_, push->GetType(), push->span_);
+  output.push_back(std::make_shared<EvalStmt>(adapted_push, stmt->span_));
+  return SeqStmts::Flatten(std::move(output), stmt->span_);
+}
+
+/// Give a hand-written `pl.tpush_to_aic` the same fractal adapter the compiler
+/// inserts for the pipes it builds itself.
 ///
 /// The boundary-move path below adapts every V->C push on a backend whose
 /// cross-core boundary carries fractal layout (BackendHandler::
@@ -814,43 +1173,36 @@ MemorySpace GetBoundaryTpopMemory(CoreSide side) {
 /// Ascend910B (which needs no adapter: push/pop goes ub -> gm -> mat and takes
 /// ND directly).
 ///
-/// The legacy adapter below assumes the Mat/NZ carrier used by existing manual
-/// data-tile pipes; it does not locate the matching tpop or derive its view.
-/// FP8E8M0 MX-scale tiles invalidate that assumption because their consumer may
-/// require row/row/32 or col/col/32. Such hand-written pushes are rejected
-/// until pipe-id-based producer/consumer view pairing is available. Compiler-
-/// generated MX pushes carry a temporary marker and arrive here with their
-/// carrier already planned, so this phase only strips that marker.
 class AdaptManualVtoCPush : public IRMutator {
+ public:
+  AdaptManualVtoCPush(const MxV2CContracts& mx_contracts, TileDefMap definitions)
+      : mx_contracts_(mx_contracts), definitions_(std::move(definitions)) {}
+
  protected:
   StmtPtr VisitStmt_(const EvalStmtPtr& op) override {
     auto call = As<Call>(op->expr_);
     if (!call || !IsOp(call, "tile.tpush_to_aic") || call->args_.size() != 1) {
       return IRMutator::VisitStmt_(op);
     }
-    for (const auto& attr : call->attrs_) {
-      if (attr.first != kMxScaleV2CPushAttr) continue;
-      std::vector<std::pair<std::string, std::any>> attrs;
-      attrs.reserve(call->attrs_.size() - 1);
-      for (const auto& attr : call->attrs_) {
-        if (attr.first != kMxScaleV2CPushAttr) attrs.push_back(attr);
-      }
-      auto clean_push = std::make_shared<Call>(call->op_, call->args_, call->kwargs_, std::move(attrs),
-                                               call->GetType(), call->span_);
-      return std::make_shared<EvalStmt>(clean_push, op->span_);
-    }
     const ExprPtr& source = call->args_[0];
     auto src_type = As<TileType>(source->GetType());
     INTERNAL_CHECK_SPAN(src_type, op->span_) << "Internal error: tile.tpush_to_aic source must be a TileType";
-    CHECK_SPAN(src_type->dtype_ != DataType::FP8E8M0, op->span_)
-        << "Hand-written tile.tpush_to_aic does not support FP8E8M0 MX-scale tiles; "
-           "use an automatic mixed-kernel boundary or stage the scale through GM";
 
     // Backend gate lives here, not around the caller's loop: a program with no
     // hand-written push must not require a configured backend to walk this phase.
     const auto* handler = PassContext::Current()->GetBackendHandler();
     if (!handler->RequiresVtoCFractalAdapt()) {
+      CHECK_SPAN(src_type->dtype_ != DataType::FP8E8M0, op->span_)
+          << "Hand-written tile.tpush_to_aic does not support FP8E8M0 MX-scale tiles on this backend";
       return IRMutator::VisitStmt_(op);
+    }
+    CHECK_SPAN(src_type->dtype_ != DataType::FP8E8M0 || IsMxScaleView(*src_type), op->span_)
+        << "FP8E8M0 V2C transport requires a rank-2 row/row or col/col fractal-32 MX scale view";
+    if (IsMxScaleView(*src_type)) {
+      auto contract = mx_contracts_.find(call.get());
+      CHECK_SPAN(contract != mx_contracts_.end(), op->span_)
+          << "MX V2C tpush has no unique direction/id consumer contract";
+      return AdaptMxV2CPush(op, call, contract->second, definitions_);
     }
     const TileView src_view = tile_view_semantics::GetEffectiveTileView(*src_type);
     const TileView fractal_view =
@@ -883,6 +1235,10 @@ class AdaptManualVtoCPush : public IRMutator {
                              std::make_shared<EvalStmt>(adapted_push, op->span_)};
     return SeqStmts::Flatten(std::move(out), op->span_);
   }
+
+ private:
+  const MxV2CContracts& mx_contracts_;
+  TileDefMap definitions_;
 };
 
 // ============================================================================
@@ -1224,13 +1580,10 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
         // transport carries the stride.
         const int op_lane_stride =
             (bm.op_driven && bm.direction == CVDirection::CUBE_TO_VECTOR) ? bm.lane_stride : 0;
-        const bool is_mx_scale_boundary = IsAutomaticMxScaleBoundary(bm);
-        if (is_mx_scale_boundary) {
-          CHECK_SPAN(handler->GetPtoTargetArch() == "a5", stmt->span_)
-              << "Automatic quant_mx-to-matmul_mx scale transport requires the Ascend950 ('a5') "
-                 "backend, but got '"
-              << handler->GetPtoTargetArch() << "'";
-        }
+        const bool has_mx_scale_boundary = IsMxScaleBoundary(bm);
+        CHECK_SPAN(!has_mx_scale_boundary || handler->RequiresVtoCFractalAdapt(), stmt->span_)
+            << "Automatic quant_mx-to-matmul_mx scale transport requires an A5 backend";
+        const bool is_mx_scale_boundary = has_mx_scale_boundary && handler->RequiresVtoCFractalAdapt();
         if (bm.direction == push_direction) {
           ExprPtr push_source = bm.source_tile;
           // AIV V->C push: insert tile.move (tmov) to adapt the source into
@@ -1241,19 +1594,7 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
           // Mat -> Right tile.move, one step past this boundary.
           // On Ascend910B: don't need to adapt layout! push/pop will be ub -> gm -> mat, ub -> gm can
           // directly use nd
-          if (side == CoreSide::AIV && is_mx_scale_boundary) {
-            auto src_type = As<TileType>(push_source->GetType());
-            INTERNAL_CHECK_SPAN(src_type, stmt->span_) << "MX-scale V2C source must have TileType";
-            const TileView source_view = tile_view_semantics::GetEffectiveTileView(*src_type);
-            if (source_view.blayout == TileLayout::col_major) {
-              auto transpose_call = CreateTransposeView(push_source, stmt->span_);
-              auto transpose_var =
-                  std::make_shared<Var>("mx_scale_v2c_view", transpose_call->GetType(), stmt->span_);
-              result.push_back(std::make_shared<AssignStmt>(transpose_var, transpose_call, stmt->span_));
-              push_source = transpose_var;
-            }
-            CheckMxScaleNdPushHasFullValidColumns(push_source, stmt->span_);
-          } else if (side == CoreSide::AIV && handler->RequiresVtoCFractalAdapt()) {
+          if (side == CoreSide::AIV && handler->RequiresVtoCFractalAdapt() && !is_mx_scale_boundary) {
             auto src_type = std::dynamic_pointer_cast<const TileType>(bm.source_tile->GetType());
             INTERNAL_CHECK_SPAN(src_type, stmt->span_) << "V->C tpush source must have TileType";
             // For op-driven boundaries the cube-side transfer memory is Mat
@@ -1288,8 +1629,7 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
             push_source = tmov_var;
           }
           result.push_back(std::make_shared<EvalStmt>(
-              CreateTpush(push_op, push_source, stmt->span_, op_split, op_lane_stride, is_mx_scale_boundary),
-              stmt->span_));
+              CreateTpush(push_op, push_source, stmt->span_, op_split, op_lane_stride), stmt->span_));
         } else {
           // Op-driven pop: the half/full shape comes from the op result type and
           // the memory from this side's transfer memory; the explicit follow-on
@@ -1307,7 +1647,8 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
             INTERNAL_CHECK_SPAN(shape_tt->memory_space_.has_value(), stmt->span_)
                 << "Boundary move destination must have TileType and MemSpace";
             view_ms = shape_tt->memory_space_.value();  // NOLINT(bugprone-unchecked-optional-access)
-            needs_post_move = NeedsPostTpopMove(side, *shape_tt);
+            // The MX scale tpop already uses the consumer's final Mat view.
+            needs_post_move = !is_mx_scale_boundary && NeedsPostTpopMove(side, *shape_tt);
           }
           auto tpop_type = BuildBoundaryTpopType(side, shape_source);
           // Consumer-side transfer view. For op-driven boundaries the cross-core
@@ -1326,6 +1667,7 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
           } else {
             boundary_view = tile_view_semantics::GetEffectiveTileView(*shape_tt);
           }
+          // Preserve the logical MX scale view; ordinary boundaries use the transfer view.
           auto fractal_view = is_mx_scale_boundary ? tile_view_semantics::GetEffectiveTileView(*shape_tt)
                                                    : BuildCrossCoreTransferView(view_ms, boundary_view);
           std::string tpop_name = needs_post_move ? BuildBoundaryTpopName(side, bm.dest_var->name_hint_)
@@ -2554,7 +2896,10 @@ Pass ExpandMixedKernel() {
     auto rewritten_program = std::make_shared<Program>(new_functions, program->name_, program->span_);
     new_functions = NormalizeHandWrittenGroupAbis(rewritten_program, new_functions).functions;
 
-    // Phase 6: finalize V->C pushes in every emitted AIV function.
+    // Phase 6: pair MX V->C endpoints by direction and pipe id, then give every
+    // hand-written V->C push its backend boundary layout. Automatic MX pushes
+    // deliberately reach this phase in their logical form so the same paired,
+    // byte-safe carrier planner serves both automatic and hand-written pipes.
     //
     // The sweep covers EVERY emitted AIV function rather than only the ones
     // that were already typed AIV on entry. `tile.tpush_to_aic` declares
@@ -2564,19 +2909,17 @@ Pass ExpandMixedKernel() {
     // AIV function after the per-function loop, so a hook there would leave
     // exactly the bare ND push this adapter exists to prevent.
     //
-    // Compiler-generated MX pushes carry a temporary marker: their carrier was
-    // already planned from the boundary destination, so the sweep strips the
-    // marker and leaves the source unchanged. An unmarked FP8E8M0 MX-scale push
-    // is hand-written (or was produced without the required contract) and
-    // is rejected instead of being silently rewritten to NZ. Other manual V->C
-    // pushes retain the legacy fractal adapter above.
+    // Running last also makes the boundary-move path's own adapters harmless:
+    // AdaptManualVtoCPush leaves a push whose source already carries the
+    // boundary view alone, so the pushes that path staged are not touched twice.
     // The backend is consulted inside the mutator, on the first V->C push it
     // meets, rather than as a guard around this loop: a program with no
     // hand-written push must not require a configured backend just to walk past
     // this phase.
+    const MxV2CContracts mx_contracts = BuildMxV2CContracts(new_functions);
     for (auto& func : new_functions) {
       if (func->func_type_ != FunctionType::AIV) continue;
-      AdaptManualVtoCPush adapter;
+      AdaptManualVtoCPush adapter(mx_contracts, BuildTileDefMap(func->body_));
       auto adapted_body = adapter.VisitStmt(func->body_);
       if (adapted_body == func->body_) continue;
       auto adapted = std::make_shared<Function>(*func);
