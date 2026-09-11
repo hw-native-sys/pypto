@@ -43,8 +43,11 @@ _AUTO_TFREE_OPS = {
 }
 
 _TILE_MOVE = ir.get_op("tile.move").name
+_TILE_RESHAPE = ir.get_op("tile.reshape").name
+_TILE_SET_VALIDSHAPE = ir.get_op("tile.set_validshape").name
 _TILE_TRANSPOSE_VIEW = ir.get_op("tile.transpose_view").name
 _TILE_TPOP_FROM_AIV = ir.get_op("tile.tpop_from_aiv").name
+_TILE_TPUSH_TO_AIC = ir.get_op("tile.tpush_to_aic").name
 
 
 def _expand_raw(program):
@@ -1480,8 +1483,8 @@ class TestCrossCoreBoundaries:
 
         ir.assert_structural_equal(After, Expected)
 
-    def test_mx_a_scale_uses_matching_row_major_v2c_view(self):
-        """A matching MX_A scale crosses V2C without a producer adapter."""
+    def test_mx_a_scale_uses_direct_row_major_v2c_carrier(self):
+        """A matching MX_A scale crosses V2C directly as row/row bytes."""
 
         @pl.program
         class Before:
@@ -1527,16 +1530,40 @@ class TestCrossCoreBoundaries:
         assert aiv is not None
         assert aic is not None
 
-        producer_adapters = [
+        forbidden_aliases = [
             stmt
             for stmt in _flatten_top_level_stmts(aiv.body)
             if isinstance(stmt, ir.AssignStmt)
             and isinstance(stmt.value, ir.Call)
-            and stmt.value.op.name in {_TILE_MOVE, _TILE_TRANSPOSE_VIEW}
+            and stmt.value.op.name == _TILE_RESHAPE
             and isinstance(stmt.var.type, ir.TileType)
             and stmt.var.type.dtype == pl.FP8E8M0
         ]
-        assert producer_adapters == []
+        assert not forbidden_aliases
+        generated_pushes: list[ir.Call] = []
+        for stmt in _flatten_top_level_stmts(aiv.body):
+            if not isinstance(stmt, ir.EvalStmt):
+                continue
+            call = stmt.expr
+            if isinstance(call, ir.Call) and call.op.name == _TILE_TPUSH_TO_AIC:
+                generated_pushes.append(call)
+        assert len(generated_pushes) == 2
+        assert all("__mx_scale_v2c_push" not in push.attrs for push in generated_pushes)
+        scale_pushes = [
+            push
+            for push in generated_pushes
+            if isinstance(push.args[0].type, ir.TileType) and push.args[0].type.dtype == pl.FP8E8M0
+        ]
+        assert len(scale_pushes) == 1
+        carrier_type = scale_pushes[0].args[0].type
+        assert isinstance(carrier_type, ir.TileType)
+        assert _const_tile_shape(carrier_type) == [16, 2]
+        carrier_view = carrier_type.get_effective_tile_view()
+        assert (carrier_view.blayout, carrier_view.slayout, carrier_view.fractal) == (
+            pl.TileLayout.row_major,
+            pl.TileLayout.row_major,
+            32,
+        )
 
         scale_tpops = [
             stmt
@@ -1567,8 +1594,8 @@ class TestCrossCoreBoundaries:
             for stmt in _flatten_top_level_stmts(aic.body)
         )
 
-    def test_mx_b_scale_uses_transpose_view_for_v2c_push(self):
-        """MX_B keeps its logical col/col tpop and pushes a row/row transpose view."""
+    def test_mx_b_scale_uses_transposed_row_major_v2c_carrier(self):
+        """MX_B keeps its logical col/col tpop through a zero-copy row/row transpose view."""
 
         @pl.program
         class Before:
@@ -1619,7 +1646,7 @@ class TestCrossCoreBoundaries:
             for stmt in _flatten_top_level_stmts(aiv.body)
             if isinstance(stmt, ir.AssignStmt)
             and isinstance(stmt.value, ir.Call)
-            and stmt.value.op.name in {_TILE_MOVE, _TILE_TRANSPOSE_VIEW}
+            and stmt.value.op.name in {_TILE_MOVE, _TILE_RESHAPE, _TILE_TRANSPOSE_VIEW}
             and isinstance(stmt.var.type, ir.TileType)
             and stmt.var.type.dtype == pl.FP8E8M0
         ]
@@ -1630,13 +1657,6 @@ class TestCrossCoreBoundaries:
         push_type = adapter.var.type
         assert isinstance(push_type, ir.TileType)
         assert _const_tile_shape(push_type) == [32, 2]
-        push_view = push_type.get_effective_tile_view()
-        assert (push_view.blayout, push_view.slayout, push_view.fractal) == (
-            pl.TileLayout.row_major,
-            pl.TileLayout.row_major,
-            32,
-        )
-
         scale_tpops = [
             stmt
             for stmt in _flatten_top_level_stmts(aic.body)
@@ -1666,8 +1686,8 @@ class TestCrossCoreBoundaries:
             for stmt in _flatten_top_level_stmts(aic.body)
         )
 
-    def test_mx_scale_v2c_rejects_partial_valid_columns(self):
-        """The byte-exact ND push requires the physical final extent to be fully valid."""
+    def test_mx_scale_v2c_partial_valid_uses_full_physical_carrier(self):
+        """A partial logical scale transports its full physical box while tpop stays partial."""
 
         @pl.program
         class Before:
@@ -1685,8 +1705,38 @@ class TestCrossCoreBoundaries:
                     slayout=pl.TileLayout.row_major,
                 )
 
-        with pytest.raises(pypto.InternalError, match="full-valid final dimension"):
-            _expand_raw(Before)
+        After = _expand_raw(Before)
+        aiv = After.get_function("main_incore_0_aiv")
+        assert aiv is not None
+        adapters = [
+            stmt
+            for stmt in _flatten_top_level_stmts(aiv.body)
+            if isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name == _TILE_SET_VALIDSHAPE
+            and isinstance(stmt.var.type, ir.TileType)
+            and stmt.var.type.dtype == pl.FP8E8M0
+        ]
+        assert len(adapters) == 1
+        adapter_type = adapters[0].var.type
+        assert isinstance(adapter_type, ir.TileType)
+        assert list(adapter_type.get_effective_tile_view().valid_shape) == [16, 2]
+        aic = After.get_function("main_incore_0_aic")
+        assert aic is not None
+        scale_tpops = [
+            stmt
+            for stmt in _flatten_top_level_stmts(aic.body)
+            if isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name == _TILE_TPOP_FROM_AIV
+            and isinstance(stmt.var.type, ir.TileType)
+            and stmt.var.type.dtype == pl.FP8E8M0
+        ]
+        assert len(scale_tpops) == 1
+        tpop_type = scale_tpops[0].var.type
+        assert isinstance(tpop_type, ir.TileType)
+        assert list(tpop_type.get_effective_tile_view().valid_shape) == [16, 1]
+        ir.assert_structural_equal(passes.expand_mixed_kernel()(After), After)
 
 
 # ---------------------------------------------------------------------------
@@ -4409,10 +4459,10 @@ class TestDCERegression:
 
 
 class TestManualPipeVtoCFractalAdapt:
-    """A non-MX hand-written pl.tpush_to_aic gets the V->C fractal adapter.
+    """A hand-written pl.tpush_to_aic gets the V->C fractal adapter.
 
-    The push is staged into an NZ Vec tile exactly as the boundary-move path
-    stages the pipes this pass builds itself, and the original call's kwargs
+    MX pushes use a byte-safe row/row carrier selected from the paired AIC
+    consumer contract, and the original call's kwargs
     ride along -- an `id` reset to the CreateTpush default would collapse a
     multi-pipe program onto one FIFO, and the Expected programs below pin it.
 
@@ -4422,13 +4472,13 @@ class TestManualPipeVtoCFractalAdapt:
     which fails as soon as the gate stops being consulted.
     """
 
-    def test_fp8e8m0_mx_scale_push_is_rejected(self):
-        """Manual MX-scale pipes fail instead of guessing the consumer layout."""
+    def test_fp8e8m0_mx_scale_push_is_adapted(self):
+        """Manual row/row is direct; col/col uses a zero-copy transpose view."""
 
         @pl.program
         class RowMajorBefore:
             @pl.function(type=pl.FunctionType.AIC)
-            def manual_aic(self, scale_data: pl.Tensor[[32, 2], pl.FP8E8M0]):
+            def manual_aic(self, scale_data: pl.Tensor[[32, 2], pl.FP8E8M0, pl.MX_A_ZZ]):
                 v2c = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=pl.AUTO)
                 pl.aic_initialize_pipe(pl.const(0, pl.INT32), v2c, dir_mask=2, slot_size=512)
                 scale_mat: pl.Tile[
@@ -4444,21 +4494,27 @@ class TestManualPipeVtoCFractalAdapt:
                 pl.tfree_to_aiv(scale_mat)
 
             @pl.function(type=pl.FunctionType.AIV)
-            def manual_aiv(self, scale_data: pl.Tensor[[32, 2], pl.FP8E8M0]):
+            def manual_aiv(self, scale_data: pl.Tensor[[32, 2], pl.FP8E8M0, pl.MX_A_ZZ]):
                 v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="manual_aic")
                 pl.aiv_initialize_pipe(pl.const(0, pl.INT32), v2c_peer, dir_mask=2, slot_size=512)
-                scale = pl.load(scale_data, [0, 0], [32, 2], target_memory=pl.Mem.Vec)
+                scale_mat = pl.load(scale_data, [0, 0], [32, 2], target_memory=pl.Mem.Mat)
+                scale = pl.move(
+                    scale_mat,
+                    target_memory=pl.Mem.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.row_major,
+                )
                 pl.tpush_to_aic(scale, split=0)
 
             @pl.function(type=pl.FunctionType.Group)
-            def manual_group(self, scale_data: pl.Tensor[[32, 2], pl.FP8E8M0]):
+            def manual_group(self, scale_data: pl.Tensor[[32, 2], pl.FP8E8M0, pl.MX_A_ZZ]):
                 self.manual_aic(scale_data)
                 self.manual_aiv(scale_data)
 
         @pl.program
         class ColMajorBefore:
             @pl.function(type=pl.FunctionType.AIC)
-            def manual_aic(self, scale_data: pl.Tensor[[32, 2], pl.FP8E8M0]):
+            def manual_aic(self, scale_data: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN]):
                 v2c = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=pl.AUTO)
                 pl.aic_initialize_pipe(pl.const(0, pl.INT32), v2c, dir_mask=2, slot_size=512)
                 scale_mat: pl.Tile[
@@ -4474,21 +4530,203 @@ class TestManualPipeVtoCFractalAdapt:
                 pl.tfree_to_aiv(scale_mat)
 
             @pl.function(type=pl.FunctionType.AIV)
-            def manual_aiv(self, scale_data: pl.Tensor[[32, 2], pl.FP8E8M0]):
+            def manual_aiv(self, scale_data: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN]):
                 v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="manual_aic")
                 pl.aiv_initialize_pipe(pl.const(0, pl.INT32), v2c_peer, dir_mask=2, slot_size=512)
-                scale_row_major = pl.load(scale_data, [0, 0], [32, 2], target_memory=pl.Mem.Vec)
-                scale = pl.tile.transpose_view(scale_row_major)
+                scale_mat = pl.load(scale_data, [0, 0], [2, 32], target_memory=pl.Mem.Mat)
+                scale = pl.move(
+                    scale_mat,
+                    target_memory=pl.Mem.Vec,
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.col_major,
+                )
                 pl.tpush_to_aic(scale, split=0)
 
             @pl.function(type=pl.FunctionType.Group)
-            def manual_group(self, scale_data: pl.Tensor[[32, 2], pl.FP8E8M0]):
+            def manual_group(self, scale_data: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN]):
                 self.manual_aic(scale_data)
                 self.manual_aiv(scale_data)
 
-        for program in (RowMajorBefore, ColMajorBefore):
-            with pytest.raises(ValueError, match="Hand-written tile.tpush_to_aic does not support.*MX-scale"):
-                _expand_raw(program)
+        for program, expected_adapter_count in (
+            (RowMajorBefore, 0),
+            (ColMajorBefore, 1),
+        ):
+            After = _expand_raw(program)
+            aiv = After.get_function("manual_aiv")
+            assert aiv is not None
+            adapters = [
+                stmt
+                for stmt in _flatten_top_level_stmts(aiv.body)
+                if isinstance(stmt, ir.AssignStmt)
+                and isinstance(stmt.value, ir.Call)
+                and stmt.value.op.name == _TILE_TRANSPOSE_VIEW
+                and isinstance(stmt.var.type, ir.TileType)
+                and stmt.var.type.dtype == pl.FP8E8M0
+            ]
+            assert len(adapters) == expected_adapter_count
+            pushes: list[ir.Call] = []
+            for stmt in _flatten_top_level_stmts(aiv.body):
+                if not isinstance(stmt, ir.EvalStmt):
+                    continue
+                call = stmt.expr
+                if isinstance(call, ir.Call) and call.op.name == _TILE_TPUSH_TO_AIC:
+                    pushes.append(call)
+            assert len(pushes) == 1
+            carrier_type = pushes[0].args[0].type
+            assert isinstance(carrier_type, ir.TileType)
+            assert _const_tile_shape(carrier_type) == [32, 2]
+            carrier_view = carrier_type.get_effective_tile_view()
+            assert (carrier_view.blayout, carrier_view.slayout, carrier_view.fractal) == (
+                pl.TileLayout.row_major,
+                pl.TileLayout.row_major,
+                32,
+            )
+            assert "__mx_scale_v2c_push" not in pushes[0].attrs
+
+    def test_mx_pairing_uses_pipe_id_and_consumer_layout(self):
+        """Each MX push follows the consumer contract of its own V2C pipe id."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIC)
+            def manual_aic(
+                self,
+                scale_a: pl.Tensor[[32, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                scale_b: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
+            ):
+                v2c_0 = pl.reserve_buffer(name="v2c_0", size=4096, base=pl.AUTO)
+                pl.aic_initialize_pipe(pl.const(0, pl.INT32), v2c_0, dir_mask=2, slot_size=512, id=0)
+                v2c_1 = pl.reserve_buffer(name="v2c_1", size=4096, base=pl.AUTO)
+                pl.aic_initialize_pipe(pl.const(0, pl.INT32), v2c_1, dir_mask=2, slot_size=512, id=1)
+                popped_0: pl.Tile[
+                    [32, 2],
+                    pl.FP8E8M0,
+                    pl.Mem.Mat,
+                    pl.TileView(
+                        blayout=pl.TileLayout.col_major,
+                        slayout=pl.TileLayout.col_major,
+                        fractal=32,
+                    ),
+                ] = pl.tpop_from_aiv(split=0, id=0)
+                pl.tfree_to_aiv(popped_0, id=0)
+                popped_1: pl.Tile[
+                    [2, 32],
+                    pl.FP8E8M0,
+                    pl.Mem.Mat,
+                    pl.TileView(
+                        blayout=pl.TileLayout.row_major,
+                        slayout=pl.TileLayout.row_major,
+                        fractal=32,
+                    ),
+                ] = pl.tpop_from_aiv(split=0, id=1)
+                pl.tfree_to_aiv(popped_1, id=1)
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def manual_aiv(
+                self,
+                scale_a: pl.Tensor[[32, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                scale_b: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
+            ):
+                peer_0 = pl.import_peer_buffer(name="v2c_0", peer_func="manual_aic")
+                pl.aiv_initialize_pipe(pl.const(0, pl.INT32), peer_0, dir_mask=2, slot_size=512, id=0)
+                peer_1 = pl.import_peer_buffer(name="v2c_1", peer_func="manual_aic")
+                pl.aiv_initialize_pipe(pl.const(0, pl.INT32), peer_1, dir_mask=2, slot_size=512, id=1)
+                mat_0 = pl.load(scale_a, [0, 0], [32, 2], target_memory=pl.Mem.Mat)
+                producer_0 = pl.move(
+                    mat_0,
+                    target_memory=pl.Mem.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.row_major,
+                )
+                pl.tpush_to_aic(producer_0, split=0, id=0)
+                mat_1 = pl.load(scale_b, [0, 0], [2, 32], target_memory=pl.Mem.Mat)
+                producer_1 = pl.move(
+                    mat_1,
+                    target_memory=pl.Mem.Vec,
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.col_major,
+                )
+                pl.tpush_to_aic(producer_1, split=0, id=1)
+
+            @pl.function(type=pl.FunctionType.Group)
+            def manual_group(
+                self,
+                scale_a: pl.Tensor[[32, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                scale_b: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
+            ):
+                self.manual_aic(scale_a, scale_b)
+                self.manual_aiv(scale_a, scale_b)
+
+        Once = _expand_raw(Before)
+        aiv = Once.get_function("manual_aiv")
+        assert aiv is not None
+        pushes = [
+            stmt.expr
+            for stmt in _flatten_top_level_stmts(aiv.body)
+            if isinstance(stmt, ir.EvalStmt)
+            and isinstance(stmt.expr, ir.Call)
+            and stmt.expr.op.name == _TILE_TPUSH_TO_AIC
+        ]
+        assert {push.kwargs["id"] for push in pushes} == {0, 1}
+        for push in pushes:
+            carrier_type = push.args[0].type
+            assert isinstance(carrier_type, ir.TileType)
+            assert _const_tile_shape(carrier_type) == [2, 32]
+            carrier_view = carrier_type.get_effective_tile_view()
+            assert (carrier_view.blayout, carrier_view.slayout) == (
+                pl.TileLayout.row_major,
+                pl.TileLayout.row_major,
+            )
+        transpose_count = sum(
+            isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name == _TILE_TRANSPOSE_VIEW
+            for stmt in _flatten_top_level_stmts(aiv.body)
+        )
+        assert transpose_count == 1
+        ir.assert_structural_equal(passes.expand_mixed_kernel()(Once), Once)
+
+    def test_mx_pipe_rejects_undersized_slot(self):
+        """The MX carrier must fit the slot selected by the paired initializer."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIC)
+            def manual_aic(self, scale_data: pl.Tensor[[32, 2], pl.FP8E8M0, pl.MX_A_ZZ]):
+                v2c = pl.reserve_buffer(name="v2c", size=256, base=pl.AUTO)
+                pl.aic_initialize_pipe(pl.const(0, pl.INT32), v2c, dir_mask=2, slot_size=32)
+                scale: pl.Tile[
+                    [32, 2],
+                    pl.FP8E8M0,
+                    pl.Mem.Mat,
+                    pl.TileView(
+                        blayout=pl.TileLayout.row_major,
+                        slayout=pl.TileLayout.row_major,
+                        fractal=32,
+                    ),
+                ] = pl.tpop_from_aiv(split=0)
+                pl.tfree_to_aiv(scale)
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def manual_aiv(self, scale_data: pl.Tensor[[32, 2], pl.FP8E8M0, pl.MX_A_ZZ]):
+                peer = pl.import_peer_buffer(name="v2c", peer_func="manual_aic")
+                pl.aiv_initialize_pipe(pl.const(0, pl.INT32), peer, dir_mask=2, slot_size=32)
+                scale_mat = pl.load(scale_data, [0, 0], [32, 2], target_memory=pl.Mem.Mat)
+                scale = pl.move(
+                    scale_mat,
+                    target_memory=pl.Mem.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.row_major,
+                )
+                pl.tpush_to_aic(scale, split=0)
+
+            @pl.function(type=pl.FunctionType.Group)
+            def manual_group(self, scale_data: pl.Tensor[[32, 2], pl.FP8E8M0, pl.MX_A_ZZ]):
+                self.manual_aic(scale_data)
+                self.manual_aiv(scale_data)
+
+        with pytest.raises(ValueError, match=r"carrier needs 64 bytes but slot_size is 32"):
+            _expand_raw(Before)
 
     def test_push_in_a_hand_written_aiv_function_is_adapted(self):
         """The author already typed the function AIV, so the pass only adapts."""
