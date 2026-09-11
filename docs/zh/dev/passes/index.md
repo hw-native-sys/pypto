@@ -65,7 +65,7 @@ pass；`91` 及以后保留给"在多个位置运行的 pass"以及"根本不是
 | 48 | [LegalizeGraphBoundary](48-legalize_graph_boundary.md) | 把 `Graph` 函数体内派生的边界标量外提到调用点，并拒绝 `host_build_graph` runtime 无法录制的边界 |
 | 49 | [MaterializeRuntimeScopes](49-materialize_runtime_scopes.md) | 插入 AUTO `RuntimeScopeStmt` 使编排 codegen 能 1:1 发射 `SIMPLER_SCOPE` |
 | 50 | [ClassifyIterArgCarry](50-classify_iter_arg_carry.md) | 把编排层 `ForStmt` 的每个 iter_arg 分类为平凡别名或需物化的重绑定携带 |
-| 51 | [InsertCommFence](51-insert_comm_fence.md) | 为每个发布性写入打标记（本地：region `system.cacheinvalid` + `system.fence`；远端写：仅 fence；opaque 写：whole-GM），并为每个 wait 插入 whole-GM `system.cacheinvalid`；notify 本身不加任何标记 |
+| 51 | [InsertCommFence](51-insert_comm_fence.md) | 阶段 A：在 InCore 体内为发布写和 wait 打标记；阶段 B：编排层不透明集合 dispatch 之后，在 InCore 消费者入口 prepend whole-GM `system.cacheinvalid` + `system.fence`；notify 本身不加标记 |
 | 52 | [MaterializeValidShapeSymbols](52-materialize_valid_shape_symbols.md) | 将设备 kernel 中无法绑定的 `valid_shape` 符号转换为前置的 `Scalar[INDEX]` 参数，并传入调用方的实际有效范围 |
 
 ## 默认流水线之外

@@ -31,6 +31,7 @@ from pypto import DataType, ir
 from pypto.ir.op.distributed import system_ops as dist_system_ops
 from pypto.ir.op.distributed import tensor_ops as dist_tensor_ops
 from pypto.ir.op.distributed import tile_ops as dist_tile_ops
+from pypto.ir.op.distributed.launch_width import cal_all_to_all_v_blocks
 from pypto.language.distributed.op import tensor_ops as dsl_tensor_ops
 from pypto.language.distributed.op import unified_ops as dsl_unified
 from pypto.language.distributed.op.tensor_ops import _validate_chunk, _validate_pipeline
@@ -2606,6 +2607,38 @@ def test_all_to_all_v_rejects_non_positive_core_num(core_num):
         ir.create_op_call(
             "pld.tensor.all_to_all_v", _make_all_to_all_v_args(span), {"core_num": core_num}, span
         )
+
+
+@pytest.mark.parametrize(
+    ("p", "req_l", "expected_b"),
+    [
+        (8, 1, 1),
+        (8, 7, 7),
+        (8, 8, 8),
+        (8, 10, 8),
+        (8, 15, 8),
+        (8, 16, 16),
+        (16, 7, 7),
+        (16, 16, 16),
+    ],
+)
+def test_cal_all_to_all_v_blocks_worked_examples(p, req_l, expected_b):
+    """RFC #2521 frozen contract item 3's own worked-example table."""
+    assert cal_all_to_all_v_blocks(p, req_l) == expected_b
+
+
+@pytest.mark.parametrize(("p", "req_l"), [(0, 8), (-1, 8), (8, 0), (8, -1)])
+def test_cal_all_to_all_v_blocks_rejects_non_positive(p, req_l):
+    """Neither the rank count nor the requested width may be non-positive."""
+    with pytest.raises(ValueError, match="must be positive"):
+        cal_all_to_all_v_blocks(p, req_l)
+
+
+@pytest.mark.parametrize(("p", "req_l"), [(2.5, 6), (8, 3.0), (True, 8), (8, False)])
+def test_cal_all_to_all_v_blocks_rejects_non_integer(p, req_l):
+    """Admission mapping is an int→int contract; reject bools and floats."""
+    with pytest.raises(TypeError, match="must be int"):
+        cal_all_to_all_v_blocks(p, req_l)
 
 
 def test_all_to_all_v_rejects_input_target_alias():

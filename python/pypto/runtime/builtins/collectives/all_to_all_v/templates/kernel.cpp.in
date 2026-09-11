@@ -39,6 +39,53 @@ AICORE inline __gm__ T *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T *local_p
   return reinterpret_cast<__gm__ T *>(ctx->windowsIn[pe] + offset);
 }
 
+// Publishes preceding GM/window writes before a notify that another rank
+// waits on. Applies whenever a notify releases writes this rank just made —
+// remote push completion, a local-window ready-notify for a pull, or a
+// count/meta publish riding the same notify as the payload.
+AICORE inline void PublishFence() {
+  pipe_barrier(PIPE_ALL);
+  dsb(DSB_DDR);
+}
+
+// Full exchange barrier on `signal_base`: every non-self peer is notified
+// (AtomicAdd +1), then waited on (>= 1), then self-cleared (AtomicAdd -1) so
+// the window is back at 0 and reusable by the next call. Symmetric in both
+// directions, so calling it once per rank rendezvous-blocks every
+// participant until all have reached this call site.
+//
+// This kernel invokes it twice per round on the SAME `signal_base` window
+// (start-of-call sync, then end-of-call completion) — safe because a rank
+// cannot enter occurrence K+1 before its own occurrence K's wait+self-clear
+// returns, and cannot complete occurrence K until the peer has entered its
+// own occurrence K. Ranks can therefore drift by at most one occurrence
+// relative to each other; a NOTIFY from one occurrence can never satisfy a
+// WAIT belonging to a different occurrence. This differs from
+// `allreduce_ring`'s per-round barrier, which indexes a distinct signal
+// column per round (`signal_base + round * signal_cols`): that barrier only
+// synchronizes ring-adjacent neighbours per step, so non-adjacent ranks are
+// not bounded to one round apart the way a full N-way rendezvous bounds
+// every pair here — column separation is required there, not here.
+AICORE inline void ExchangeBarrier(__gm__ CommContext *comm_ctx, __gm__ int32_t *signal_base, int my_rank,
+                                    int nranks) {
+  for (int peer = 0; peer < nranks; ++peer) {
+    if (peer == my_rank) continue;
+    __gm__ int32_t *remote_signal = CommRemotePtr(comm_ctx, signal_base + my_rank, peer);
+    pto::comm::Signal sig(remote_signal);
+    pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
+  }
+  for (int peer = 0; peer < nranks; ++peer) {
+    if (peer == my_rank) continue;
+    pto::comm::Signal sig(signal_base + peer);
+    pto::comm::TWAIT(sig, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
+  }
+  for (int peer = 0; peer < nranks; ++peer) {
+    if (peer == my_rank) continue;
+    pto::comm::Signal self_sig(signal_base + peer);
+    pto::comm::TNOTIFY(self_sig, static_cast<int32_t>(-1), pto::comm::NotifyOp::AtomicAdd);
+  }
+}
+
 }  // namespace
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
@@ -64,6 +111,12 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[5]);
   int nranks = static_cast<int>(comm_ctx->rankNum);
 
+  // This guard, and the two below it (max_recv, row_numel), must evaluate
+  // identically on every participating rank for the same call: each derives
+  // from comm_ctx/target_tensor shapes that are set up symmetrically across
+  // the domain, but if that symmetry were ever broken, one rank taking the
+  // early return while its peers reach ExchangeBarrier() below would leave
+  // those peers' TWAIT blocked forever (a hang, not data corruption).
   if (nranks <= 0 || nranks > kMaxSupportedRanks) {
     pipe_barrier(PIPE_ALL);
     return;
@@ -112,9 +165,48 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   using Global = pto::GlobalTensor<{{dtype_cpp}}, ShapeDyn, StrideDyn, pto::Layout::ND>;
   using TileData = pto::Tile<pto::TileType::Vec, {{dtype_cpp}}, 1, kTileCount, pto::BLayout::RowMajor, -1, -1>;
 
-  int tile_cols = static_cast<int>(row_numel < kTileCount ? row_numel : kTileCount);
-  TileData send_tile(1, tile_cols);
+  // UB staging-tile column capacity: fixed at kTileCount regardless of
+  // row_numel. TPUT_IMPL reads this once (TileData::GetValidCol()) and
+  // slides its own 2D chunked transfer against it for any larger extent —
+  // the transport chunk size must depend only on total contiguous payload
+  // length, never on the logical row width.
+  TileData send_tile(1, kTileCount);
   TASSIGN(send_tile, 0x10000);
+
+  // Start-of-call global sync: under persistent execution with
+  // reset_persistent_windows=False, this call's TPUTs below must not begin
+  // until every rank has actually reached this call — otherwise this rank's
+  // round-N+1 write can race a peer still finishing round N. This kernel has
+  // no block_idx today (single AIV block only), so the cross-rank exchange
+  // below is the whole story; a multi-block launch would additionally need
+  // every block_idx != 0 to wait on block 0 via a soft sync_call before
+  // pushing (block 0's start point stands for the whole launch cohort, since
+  // launch is require_sync_start) — not implemented, no-op until block_num>1.
+  ExchangeBarrier(comm_ctx, signal_base, my_rank, nranks);
+
+  // Snapshot peer send_counts[my_rank] now (after start barrier, before any
+  // peer can exit the end barrier and rewrite its counts window for a later
+  // round). Phase 2 uses these clamped values — not a post-completion remote
+  // re-read — so recv_counts always matches the payload transferred this call.
+  int32_t peer_recv_rows[kMaxSupportedRanks];
+  for (int src = 0; src < nranks; ++src) {
+    if (src == my_rank) {
+      peer_recv_rows[src] = 0;
+      continue;
+    }
+    __gm__ int32_t *remote_send_slot = CommRemotePtr(comm_ctx, send_counts_base + my_rank, src);
+    __asm__ __volatile__("");
+    dcci(reinterpret_cast<__gm__ void *>(remote_send_slot), SINGLE_CACHE_LINE);
+    __asm__ __volatile__("");
+    int64_t rows64 = static_cast<int64_t>(*remote_send_slot);
+    if (rows64 > max_recv) rows64 = max_recv;
+    if (rows64 < 0) rows64 = 0;
+    peer_recv_rows[src] = static_cast<int32_t>(rows64);
+  }
+
+  // Self-slot clamped count, captured in the dest loop below and written to
+  // local recv_counts after the completion barrier (see Phase 2).
+  int32_t self_rows = 0;
 
   // ==================================================================
   // Phase 1: per-destination push + inline count publish. Include self
@@ -127,6 +219,11 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   //          HOST and InCore agree bit-for-bit on every input, including a
   //          negative send_counts.
   //   TNOTIFY(recv_counts[dest]'s window, slot my_rank) = rows  (Set)
+  //        — best-effort early publish (matches InCore); NOT authoritative on
+  //        HOST/L2. Remote NotifyOp::Set is a posted GM store; barrier
+  //        AtomicAdd on a different address does not prove it is visible
+  //        (CI flake: peer recv_counts=0). Phase 2 re-derives every local
+  //        slot after the completion barrier.
   //   TPUT input[dest*max_recv : dest*max_recv + rows, :]
   //        -> target[my_rank*max_recv : my_rank*max_recv + rows, :]
   //
@@ -162,7 +259,13 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     if (rows64 < 0) rows64 = 0;
     int32_t rows = static_cast<int32_t>(rows64);
 
-    __gm__ int32_t *remote_recv_slot = CommRemotePtr(comm_ctx, recv_counts_base + my_rank, dest);
+    if (dest == my_rank) {
+      self_rows = rows;
+    }
+    // Best-effort early count publish (InCore wire parity). Phase 2 overwrites
+    // every local recv_counts slot from register / peer send_counts.
+    __gm__ int32_t *remote_recv_slot =
+        CommRemotePtr(comm_ctx, recv_counts_base + my_rank, dest);
     pto::comm::Signal count_sig(remote_recv_slot);
     pto::comm::TNOTIFY(count_sig, rows, pto::comm::NotifyOp::Set);
 
@@ -171,54 +274,65 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     __gm__ {{dtype_cpp}} *remote_block = CommRemotePtr(comm_ctx, target + dst_row_offset, dest);
 
     // The pushed block [rows, SIZE] is contiguous in the dense row-major
-    // [NR*max_recv, SIZE] layout, so it is flattened into one 1D-chunked TPUT
-    // loop (same tiling shape as symmetric all_to_all's single-row loop,
-    // generalized to rows*row_numel elements). rows == 0 makes block_numel 0
-    // and the loop below simply does not execute, so no TPUT is issued for a
-    // destination getting nothing — matching the InCore rail's rows > 0 guard.
+    // [NR*max_recv, SIZE] layout, so it is one flat 1D transfer (same shape
+    // as symmetric all_to_all's single-row transfer, generalized to
+    // rows*row_numel elements). One TPUT call covers the whole block: for
+    // block_numel > kTileCount, TPUT_IMPL's own TputProcessSlice re-chunks
+    // internally at kTileCount granularity — the same granularity we used to
+    // hand-chunk at whenever row_numel >= kTileCount (below that, the old
+    // code's tile_cols was min(row_numel, kTileCount), a smaller chunk) —
+    // via TLOAD -> event-flag sync -> TSTORE per chunk (TputTransferOnce) —
+    // this halves the pipe_barrier(PIPE_ALL) count per chunk (was 2 from our
+    // own bracketing; TPUT_IMPL's TputTransferOnce still issues 1 of its own),
+    // it does not eliminate chunking or engage ping-pong: this tile's Rows=1
+    // fails TPUT_IMPL's canSplitTile Rows%2==0 gate, so intra-tile ping-pong
+    // never triggers for this kernel's shape regardless of chunk count.
+    // rows == 0 makes block_numel 0 and the guard below skips the TPUT
+    // entirely — matching the InCore rail's rows > 0 guard.
     int64_t block_numel = rows64 * row_numel;
-    for (int64_t base = 0; base < block_numel; base += tile_cols) {
-      int64_t chunk64 = block_numel - base;
-      if (chunk64 > tile_cols) chunk64 = tile_cols;
-      int chunk = static_cast<int>(chunk64);
-      send_tile.ColMaskInternal = chunk;
+    if (block_numel > 0) {
+      // Re-set ColMaskInternal before every destination's TPUT — two distinct
+      // reasons, both mandatory:
+      //  (1) TPUT_IMPL's internal chunk loop (TputProcessSlice) writes the
+      //      caller's tile ColMaskInternal to each ragged tail chunk and never
+      //      restores it; send_tile is reused across the whole dest loop, so a
+      //      prior destination's remainder would shrink every later dest's
+      //      chunk size (order-dependent perf/correctness drift).
+      //  (2) GetValidCol() at TPUT_IMPL entry sizes the hardware fast path —
+      //      without capping to block_numel, a short payload (e.g. rows==1)
+      //      would DMA the full kTileCount width off GM.
+      send_tile.ColMaskInternal =
+          static_cast<int>(block_numel <= kTileCount ? block_numel : kTileCount);
+      ShapeDyn shape(1, 1, 1, 1, block_numel);
+      StrideDyn stride(block_numel, block_numel, block_numel, block_numel, 1);
+      Global src_g(input_local + src_row_offset, shape, stride);
+      Global dst_g(remote_block, shape, stride);
 
-      ShapeDyn shape(1, 1, 1, 1, chunk);
-      StrideDyn stride(chunk, chunk, chunk, chunk, 1);
-      Global src_g(input_local + src_row_offset + base, shape, stride);
-      Global dst_g(remote_block + base, shape, stride);
-
-      pipe_barrier(PIPE_ALL);
       pto::comm::TPUT(dst_g, src_g, send_tile);
-      pipe_barrier(PIPE_ALL);
     }
   }
 
   // ==================================================================
-  // Phase 2: barrier — notify peers and wait for all (NotifyOp::AtomicAdd).
+  // Phase 2: publish fence, then notify peers and wait for all
+  // (NotifyOp::AtomicAdd) via the same self-clearing exchange barrier used
+  // at start-of-call — this occurrence releases this call's completion to
+  // its peers, rather than gating this call's start.
   // ==================================================================
+  PublishFence();
+  ExchangeBarrier(comm_ctx, signal_base, my_rank, nranks);
+  // Authoritative local recv_counts fill (Phase 2). Do NOT rely on the Phase 1
+  // remote TNOTIFY(Set) being visible here: that path races under NPU load.
+  // Self: register-captured clamped rows. Peers: use peer_recv_rows snapshotted
+  // after the start barrier (not a post-completion remote re-read — a fast peer
+  // may already be staging the next round's send_counts). Local stores + local
+  // TNOTIFY(Set) + consume-side Phase B invalidate close both self and peer
+  // recv_counts=0 flakes without spinning on remote Sets.
+  for (int src = 0; src < nranks; ++src) {
+    int32_t rows = (src == my_rank) ? self_rows : peer_recv_rows[src];
+    recv_counts_base[src] = rows;
+    pto::comm::Signal count_sig(recv_counts_base + src);
+    pto::comm::TNOTIFY(count_sig, rows, pto::comm::NotifyOp::Set);
+  }
   pipe_barrier(PIPE_ALL);
   dsb(DSB_DDR);
-  for (int peer = 0; peer < nranks; ++peer) {
-    if (peer == my_rank) continue;
-    __gm__ int32_t *remote_signal = CommRemotePtr(comm_ctx, signal_base + my_rank, peer);
-    pto::comm::Signal sig(remote_signal);
-    pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
-  }
-  for (int peer = 0; peer < nranks; ++peer) {
-    if (peer == my_rank) continue;
-    pto::comm::Signal sig(signal_base + peer);
-    pto::comm::TWAIT(sig, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
-  }
-
-  // Self-clearing epilogue: each peer's AtomicAdd(+1) left its cell satisfied;
-  // a local self-notify (TNOTIFY on a local address is the same st_atomic the
-  // remote path uses) restores every cell to 0 so the signal is reusable
-  // across calls.
-  for (int peer = 0; peer < nranks; ++peer) {
-    if (peer == my_rank) continue;
-    pto::comm::Signal self_sig(signal_base + peer);
-    pto::comm::TNOTIFY(self_sig, static_cast<int32_t>(-1), pto::comm::NotifyOp::AtomicAdd);
-  }
-  pipe_barrier(PIPE_ALL);
 }

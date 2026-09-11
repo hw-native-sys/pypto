@@ -65,6 +65,36 @@ rules** — the *notify* itself needs no marker. A single structural traversal
   flushes);
 - **notify** — nothing.
 
+### Phase B — orchestration → InCore consumer entry prologue
+
+Phase A runs only on **InCore** bodies. Orchestration / Graph codegen cannot emit
+InCore `system.cacheinvalid` / `system.fence`, yet L2/HOST pipelines routinely
+split **collective dispatch** and **InCore consume** across separate AIV tasks.
+After a peer's opaque GM publish (collective kernel, `builtin.tensor.*` dispatch,
+`Submit`, …) the consumer's first cacheable GM read needs the same whole-GM
+invalidate the pass already inserts after an in-function `pld.system.wait` or
+opaque InCore call.
+
+A second phase (`OrchPostCollectiveScanner`) scans every orchestration-like body
+— `Orchestration` / `Graph`, and HOST `Opaque` functions with
+`Role::Orchestrator` (the real L3 `host_orch` shape) — with a sequential
+`seen_publish` flag:
+
+| Step | Action |
+| ---- | ------ |
+| Opaque publish | Any `builtin.tensor.*` call, callee with `builtin_template_dir`, or `Submit` sets `seen_publish`. |
+| Later InCore dispatch | While `seen_publish`, record the InCore callee reached by a plain `Call` **or** a `Submit` (`pl.submit` / `pl.manual_scope`); the scan recurses into `ScopeStmt` bodies so nested launches are visible; unwrap one-hop orchestration wrappers like `consume_orch → consume_step` (peeling `RuntimeScopeStmt` / single-stmt `SeqStmts` after `MaterializeRuntimeScopes`). |
+| Apply | Prepend `system.cacheinvalid(); system.fence()` at the recorded InCore function entry. Orchestration IR is unchanged. |
+
+Whole-GM at function entry matches the opaque cross-InCore-call rule. It is
+**function-granular** (every entry to a marked consumer gets the prologue) and
+**conservative** on control flow (an `if` that may publish keeps `seen_publish`
+true for code after the `if`). Sequential `for` / `while` bodies that publish
+are re-scanned once with `seen_publish=true` so a loop-carried
+`consume; collective` still marks the consumer; `pl.parallel` skips that rescan
+(no back-edge order). Idempotent: an entry that already starts with whole-GM
+`cacheinvalid` + `fence` is left alone.
+
 A region `system.cacheinvalid(target)` addresses `target`'s **local** base, which
 is correct for a local-window store. The **remote** writes `remote_store` / `put`
 write to a **peer-offset** GM address (`local_ptr + delems(peer)`) that the local
@@ -171,9 +201,9 @@ A `remote_load` (result is a tile, no GM write) and a `tile.store` / `tensor.wri
 / `get` whose destination is a plain `Tensor` rather than a window-bound
 `DistributedTensor` are **not** publishing writes — no marker at all.
 
-## Algorithm — one structural traversal, with consume-side batching
+## Algorithm — phase A: one structural traversal, with consume-side batching
 
-The pass carries one piece of control-flow state — a flag that suppresses the
+Phase A (`InsertCommMarkers`) carries one piece of control-flow state — a flag that suppresses the
 per-wait invalidate while visiting the body of a **pure wait-loop** (a `for`/`while`
 whose body contains only `pld.system.wait` through seq/if nesting — **at least
 one** — with memory-inert control expressions; a wait-free loop is not a pure
@@ -208,6 +238,17 @@ for: { notify; store(win) }           -> for: { notify; store(win); cacheinvalid
 An existing region `cacheinvalid` **immediately followed by a fence** after a
 write, and an existing whole-GM cacheinvalid immediately after a wait, are
 recognized and **not duplicated**, so the pass is idempotent.
+
+## Algorithm — phase B: orchestration scan + InCore entry prepend
+
+1. Scan every `Orchestration` / `Graph` function and every HOST `Opaque`
+   `Role::Orchestrator` body; union the InCore consumer names that appear after
+   an opaque publish dispatch (one-hop unwrap peels `RuntimeScopeStmt`).
+2. For each program function: run phase A on InCore bodies; prepend the consume
+   prologue on any function whose name was recorded in step 1.
+
+No orchestration statement is rewritten — markers land on the InCore consumer
+kernel where codegen can emit them.
 
 ## Codegen interaction
 

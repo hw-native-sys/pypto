@@ -25,7 +25,8 @@ Layering (mirrors the ``pl.<ns>.<op>`` stack):
   3-segment helper and `pld.<op>` through the unified-dispatch path.
 """
 
-from . import system_ops, tensor_ops, tile_ops
+from . import launch_width, system_ops, tensor_ops, tile_ops
+from .launch_width import cal_all_to_all_v_blocks
 from .system_ops import get_comm_ctx, nranks, rank, world_size
 from .tensor_ops import (
     allgather,
@@ -46,8 +47,10 @@ __all__ = [
     "allreduce",
     "barrier",
     "broadcast",
+    "cal_all_to_all_v_blocks",
     "get",
     "get_comm_ctx",
+    "launch_width",
     "nranks",
     "put",
     "rank",

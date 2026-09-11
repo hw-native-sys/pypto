@@ -52,6 +52,26 @@
   pass 里反而引入回归）；
 - **notify** —— 什么都不插。
 
+### 阶段 B —— 编排 → InCore 消费者入口序言
+
+阶段 A 只处理 **InCore** 函数体。Orchestration / Graph codegen 无法发射 InCore 的
+`system.cacheinvalid` / `system.fence`，但 L2/HOST 流水线常把**集合通信 dispatch** 与
+**InCore consume** 拆成独立的 AIV 任务。在 peer 的不透明 GM 发布（集合 kernel、
+`builtin.tensor.*` dispatch、`Submit` 等）之后，消费者的第一次可缓存 GM 读需要与
+pass 在 InCore 内 `pld.system.wait` 或不透明 InCore 调用之后插入的整 GM 失效相同的契约。
+
+第二阶段（`OrchPostCollectiveScanner`）用顺序的 `seen_publish` 标志扫描每个编排类函数体
+—— `Orchestration` / `Graph`，以及 HOST 上带 `Role::Orchestrator` 的 `Opaque` 函数
+（真实 L3 `host_orch` 形态）：
+
+| 步骤 | 行为 |
+| ---- | ---- |
+| 不透明发布 | 任何 `builtin.tensor.*` 调用、带 `builtin_template_dir` 的被调函数、或 `Submit` 置位 `seen_publish`。 |
+| 后续 InCore dispatch | `seen_publish` 为真时记录 InCore 被调函数（普通 `Call` **或** `Submit`/`pl.submit`/`pl.manual_scope` 均可；扫描会递归进入 `ScopeStmt` body；可 unwrap 一层编排包装，如 `consume_orch → consume_step`，并剥掉 `MaterializeRuntimeScopes` 插入的 `RuntimeScopeStmt`）。 |
+| 应用 | 在记录的 InCore 函数入口 prepend `system.cacheinvalid(); system.fence()`。编排 IR 不变。 |
+
+函数入口处的整 GM 失效与不透明跨 InCore 调用规则一致。标记是**函数粒度**的（被标记消费者的每次入口都会执行序言），控制流上**保守**（`if` 任一分支可能发布则 `if` 之后的代码仍视为已发布）。顺序 `for` / `while` 若在体内发布，会再以 `seen_publish=true` 扫描一次，使循环回边带来的 `consume; collective` 仍能标记消费者；`pl.parallel` 不做该重扫（无回边次序）。幂等：入口已以整 GM `cacheinvalid` + `fence` 开头则跳过。
+
 区域 `system.cacheinvalid(target)` 寻址的是 `target` 的**本地** base，这对本地窗口写是对的。
 但**远端写** `remote_store` / `put` 写到的是 **peer 偏移** GM 地址（`local_ptr +
 delems(peer)`），本地 target view 寻址不到。peer 偏移只有在 codegen 里才知道
@@ -140,9 +160,9 @@ codegen 最终降级的 IR。
 `remote_load`（结果是 tile、不写 GM），以及目标是普通 `Tensor` 而非 window-bound
 `DistributedTensor` 的 `tile.store` / `tensor.write` / `get`，**不是**发布写 —— 完全不插标记。
 
-## 算法 —— 一趟结构遍历，带消费侧批处理
+## 算法 —— 阶段 A：一趟结构遍历，带消费侧批处理
 
-本 pass 只携带一项控制流状态 —— 一个标志位：在访问**纯 wait 循环**（`for`/`while` 的 body
+阶段 A（`InsertCommMarkers`）只携带一项控制流状态 —— 一个标志位：在访问**纯 wait 循环**（`for`/`while` 的 body
 经 seq/if 嵌套后只含 `pld.system.wait` —— **至少一条** —— 且控制表达式不触达内存；无 wait
 的循环不算纯 wait 循环）的 body 时抑制逐 wait 的 invalidate：
 
@@ -168,6 +188,15 @@ for: { notify; store(win) }           -> for: { notify; store(win); cacheinvalid
 
 写之后**紧跟一条 fence** 的已存在区域 `cacheinvalid`、以及紧接 wait 之后已存在的全 GM
 cacheinvalid，都会被识别且**不重复插入**，故本 pass 幂等。
+
+## 算法 —— 阶段 B：编排扫描 + InCore 入口 prepend
+
+1. 扫描每个 `Orchestration` / `Graph` 函数以及 HOST `Opaque` + `Role::Orchestrator`
+   函数体，合并「在不透明发布 dispatch 之后出现」的 InCore 消费者名称（一层 unwrap 会剥掉
+   `RuntimeScopeStmt`）。
+2. 对程序中每个函数：在 InCore 体上运行阶段 A；对步骤 1 记录到的函数 prepend consume 序言。
+
+不 rewrite 任何编排语句 —— 标记落在 codegen 能发射它们的 InCore 消费者 kernel 上。
 
 ## 与 Codegen 的关系
 
