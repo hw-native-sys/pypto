@@ -1656,6 +1656,7 @@ class TestExpandMixedKernelCodegen:
         pipeline.add_pass(passes.outline_incore_scopes())
         pipeline.add_pass(passes.outline_cluster_scopes())
         pipeline.add_pass(passes.convert_tensor_to_tile_ops())
+        pipeline.add_pass(passes.lower_composite_ops())
         pipeline.add_pass(passes.flatten_tile_nd_to_2d())
         pipeline.add_pass(passes.infer_tile_memory_space())
         pipeline.add_pass(passes.expand_mixed_kernel())
@@ -1806,6 +1807,35 @@ class TestExpandMixedKernelCodegen:
         aiv_body = _extract_func_section(codes["main_incore_0_aiv"], "main_incore_0_aiv")
         assert "pto.tpop_from_aic" in aiv_body, "AIV should pop the sliced row from AIC"
         assert "pto.tstore" in aiv_body, "AIV should store the popped row to the output tensor"
+
+    def test_partial_mx_scale_v2c_materializes_before_widening(self):
+        """Partial MX slice carriers must reach PTO codegen without set_validshape on a view."""
+
+        @pl.program
+        class PartialMxScaleV2C:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                src: pl.Tensor[[16, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP8E4M3FN]],
+            ) -> pl.Tensor[[16, 64], pl.FP8E4M3FN]:
+                quant, scale = pl.quant_mx(pl.load(src, [0, 0], [16, 64]), group_axis=1)
+                partial_scale = pl.slice(scale, [16, 2], [0, 0], valid_shape=[16, 1])
+                _scale_mat = pl.move(
+                    partial_scale,
+                    target_memory=pl.Mem.Mat,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.row_major,
+                )
+                return pl.store(quant, [0, 0], out)
+
+        codes = self._expand_and_generate(PartialMxScaleV2C)
+        aiv_body = _extract_func_section(codes["main_incore_0_aiv"], "main_incore_0_aiv")
+        subview_pos = aiv_body.index("pto.subview")
+        materialize_pos = aiv_body.index("pto.tmov", subview_pos)
+        widen_pos = aiv_body.index("pto.set_validshape")
+        push_pos = aiv_body.index("pto.tpush_to_aic")
+        assert subview_pos < materialize_pos < widen_pos < push_pos, aiv_body
 
     def test_bidirectional_mixed_kernel_keeps_combined_pipe(self):
         """Automatic bidirectional mixed kernels keep the legacy combined pipe."""
