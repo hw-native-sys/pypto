@@ -55,9 +55,11 @@ def chip_pipeline(self, inp, out, stage, data, signal, counts, recv):
 
 ```python
 data = self.__builtin_all_to_all_v__fp32(stage, data, signal, counts, recv)
+# INT8（RFC #2521 A1 规范负载）合成为 __builtin_all_to_all_v__int8，
+# builtin_template_vars = "dtype_cpp=int8_t"
 ```
 
-其中 `__builtin_all_to_all_v__fp32` 是新增到 program 中的合成
+其中 `__builtin_all_to_all_v__{fp32,int8}` 是新增到 program 中的合成
 `FunctionType.AIV` 函数：
 
 | 方面 | 取值 |
@@ -124,7 +126,7 @@ rank 数，`pld.system.nranks` 只有 InCore 代码生成，没有 orchestration
 | 条件 | 诊断 |
 | ---- | ---- |
 | `core_num != 1` | 拒绝 —— 多 AIV 启动尚未实现 |
-| `dtype != FP32` | 拒绝 —— 与 HOST 通路声明的单 dtype 支持一致 |
+| `dtype != FP32 && dtype != INT8` | 拒绝 —— 支持 FP32 与 INT8（与 HOST 通路的 allowlist 一致） |
 | 集合通信残留在非 HOST 的 orchestration 函数体中 | 被本 pass 自身的后置条件检查拒绝 |
 
 残留检查覆盖除 HOST orchestrator 之外的每个 orchestration 函数体（HOST 交由自己的
@@ -172,7 +174,10 @@ pass 之前就已运行，在这里重复报告会指向错误的 pass。
 ## 测试
 
 - `tests/ut/ir/transforms/test_lower_l2_tensor_collectives.py` —— 改写后的形态、
-  合成签名与方向、模板 attrs、variant 共享、InCore 透传、`core_num > 1` 拒绝。
+  合成签名与方向、模板 attrs、variant 共享、InCore 透传、`core_num > 1` 拒绝、
+  INT8 variant。
+- `tests/ut/codegen/distributed/test_builtin_collective_kernel_source.py` ——
+  HOST 与 CHIP 通路对 FP32 / INT8 渲染逐字节相同的 kernel。
 - `tests/ut/ir/transforms/test_lower_composite_ops.py` —— composite 通路把
   CHIP orchestration 中的集合通信交给本 pass，并在 InCore 函数体中拒绝
   `core_num != 1`。

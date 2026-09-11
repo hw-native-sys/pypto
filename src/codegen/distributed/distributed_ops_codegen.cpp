@@ -408,10 +408,10 @@ REGISTER_DISTRIBUTED_OP(builtin_tensor_all_to_all_v, "builtin.tensor.all_to_all_
   auto* dist_codegen = dynamic_cast<DistributedCodegen*>(&codegen);
   INTERNAL_CHECK(dist_codegen) << "builtin.tensor.all_to_all_v codegen requires DistributedCodegen";
   const auto dtype = op->GetAttr<DataType>("dtype");
-  const std::string variant = op->op_->name_ + "__" + Fp32VariantSuffix(dtype);
+  const std::string variant = op->op_->name_ + "__" + dtype.ToString();
 
   if (dist_codegen->MarkBuiltinEmitted(variant)) {
-    dist_codegen->RecordBuiltinNextLevel(op, variant, {{"dtype_cpp", Fp32TypeCpp(dtype)}});
+    dist_codegen->RecordBuiltinNextLevel(op, variant, {{"dtype_cpp", dtype.ToCTypeString()}});
   }
   // No rank-count scalar: this kernel reads CommContext::rankNum, which is the
   // same number (see EmitBuiltinWindowCollectiveDispatch). Dropping it makes

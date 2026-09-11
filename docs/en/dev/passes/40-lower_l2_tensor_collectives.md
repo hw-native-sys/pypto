@@ -59,9 +59,11 @@ the collective becomes:
 
 ```python
 data = self.__builtin_all_to_all_v__fp32(stage, data, signal, counts, recv)
+# INT8 (RFC #2521 A1 canonical payload) synthesizes __builtin_all_to_all_v__int8
+# with builtin_template_vars = "dtype_cpp=int8_t"
 ```
 
-where `__builtin_all_to_all_v__fp32` is a synthesized `FunctionType.AIV`
+where `__builtin_all_to_all_v__{fp32,int8}` is a synthesized `FunctionType.AIV`
 function added to the program:
 
 | Aspect | Value |
@@ -137,7 +139,7 @@ since every operand of one collective belongs to one comm domain.
 | Condition | Diagnostic |
 | --------- | ---------- |
 | `core_num != 1` | rejected — the multi-AIV launch is not implemented yet |
-| `dtype != FP32` | rejected — the same single-dtype support the HOST rail declares |
+| `dtype != FP32 && dtype != INT8` | rejected — FP32 and INT8 are supported (same allowlist as the HOST rail) |
 | collective left in a non-HOST orchestration body | rejected by the pass's own postcondition check |
 
 The residual check runs over every orchestration body except a HOST
@@ -197,7 +199,9 @@ passes earlier, so re-reporting them here would blame the wrong pass.
 
 - `tests/ut/ir/transforms/test_lower_l2_tensor_collectives.py` — lowered shape,
   synthesized signature and directions, template attrs, variant sharing,
-  InCore pass-through, `core_num > 1` rejection.
+  InCore pass-through, `core_num > 1` rejection, INT8 variant.
+- `tests/ut/codegen/distributed/test_builtin_collective_kernel_source.py` —
+  HOST and CHIP rails render a byte-identical kernel for FP32 and INT8.
 - `tests/ut/ir/transforms/test_lower_composite_ops.py` — the composite rail
   defers a CHIP-orchestration collective to this pass and rejects
   `core_num != 1` in an InCore body.

@@ -364,7 +364,8 @@ pld.tensor.all_to_all_v(
 - `recv_counts` — DistributedTensor INT32 `[NR, 1]`（InOut recvcounts）
 
 `input` 和 `target` 都以扁平元素算术寻址，因此两者都必须是紧凑行主序视图，且必须是
-两个不同的 buffer。静态可证的违规——非 ND 布局、与紧凑步长不符的 stride 向量、比
+两个不同的 buffer。HOST / CHIP builtin 通路支持的负载 dtype 为 **FP32 与 INT8**
+（INT8 是 RFC #2521 A1 规范基准 dtype）。静态可证的违规——非 ND 布局、与紧凑步长不符的 stride 向量、比
 shape 更窄的 `valid_shape`，或同一个操作数同时充当两种角色——由类型推导直接拒绝。
 但同一块 allocation 上的两个**不同** `pld.window()` 视图**不会**被拒绝：类型推导在
 构造 Call 时运行，早于 `DistributedTensorType::window_buffer_` 被绑定。只有 HOST

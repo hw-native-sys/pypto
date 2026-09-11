@@ -114,7 +114,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
   int tile_cols = static_cast<int>(row_numel < kTileCount ? row_numel : kTileCount);
   TileData send_tile(1, tile_cols);
-  TASSIGN(send_tile, 0x10000);
+  TASSIGN(send_tile, 0x0);
 
   // ==================================================================
   // Phase 1: per-destination push + inline count publish. Include self

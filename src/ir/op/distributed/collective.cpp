@@ -77,6 +77,11 @@ void CheckSupportedFp32BuiltinVariant(DataType dtype, const std::string& op_name
                                  << dtype.ToString();
 }
 
+void CheckSupportedAllToAllVBuiltinVariant(DataType dtype, const std::string& op_name) {
+  CHECK(dtype == DataType::FP32 || dtype == DataType::INT8)
+      << op_name << " currently supports only dtype=FP32 or INT8; got " << dtype.ToString();
+}
+
 void CheckSignalDistributedTensor(const DistributedTensorTypePtr& signal_type, const std::string& op_name) {
   CHECK(signal_type) << op_name << " signal must be a DistributedTensor";
   CHECK(signal_type->dtype_ == DataType::INT32)
@@ -1310,7 +1315,7 @@ TypePtr DeduceBuiltinTensorAllToAllVType(const std::vector<ExprPtr>& args,
   CHECK(dtype == target_type->dtype_)
       << kOpName << " dtype kwarg (" << dtype.ToString() << ") must match target dtype ("
       << target_type->dtype_.ToString() << ")";
-  CheckSupportedFp32BuiltinVariant(dtype, kOpName);
+  CheckSupportedAllToAllVBuiltinVariant(dtype, kOpName);
 
   return args[1]->GetType();
 }

@@ -412,7 +412,9 @@ Variable-size all-to-all (MPI_Alltoallv). Flat 2D layouts:
 - `recv_counts` — DistributedTensor INT32 `[NR, 1]` (InOut recvcounts)
 
 `input` and `target` are addressed by flat element arithmetic, so both must be
-packed row-major views and must be two distinct buffers. A statically provable
+packed row-major views and must be two distinct buffers. Supported payload
+dtypes on the HOST and CHIP builtin rails are **FP32 and INT8** (INT8 is the
+RFC #2521 A1 canonical benchmark dtype). A statically provable
 violation — a non-ND layout, a stride vector that is not the packed one, a
 `valid_shape` narrower than the shape, or the same operand in both roles — is
 rejected by the type deducer. Two *distinct* `pld.window()` views of one
@@ -741,7 +743,8 @@ dispatches before the final `Simplify`.
   `test_l3_ep_dispatch_combine.py`, `test_l3_notify_wait.py`,
   `test_l3_tensor_all_to_all_v_intrinsic.py` (InCore composite),
   `test_l3_host_tensor_all_to_all_v.py` (HOST builtin),
-  `test_l2_tensor_all_to_all_v.py` (CHIP builtin), and related L3 STs
+  `test_l2_tensor_all_to_all_v.py` (CHIP builtin),
+  and related L3 STs
   under `tests/st/distributed/`. **Put/get canonical e2e contracts** are now
   enabled: `test_l3_put.py` (ring overwrite, row-offset put, atomic-add put, and
   chunked/pipelined transfers ✅), `test_l3_get.py` (ring read, row-offset get ✅),

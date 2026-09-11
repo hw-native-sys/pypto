@@ -63,42 +63,54 @@ NR = 2
 MAX_RECV = 4
 TOTAL = NR * MAX_RECV
 
-_VARIANT = "builtin.tensor.all_to_all_v__fp32"
-_L2_KERNEL = "__builtin_all_to_all_v__fp32.cpp"
+
+def _dtype_of(name: str):
+    return {"fp32": pl.FP32, "int8": pl.INT8}[name]
 
 
-def _build_chip_rail_program():
+def _variant_of(name: str) -> str:
+    return f"builtin.tensor.all_to_all_v__{name}"
+
+
+def _l2_kernel_of(name: str) -> str:
+    return f"__builtin_all_to_all_v__{name}.cpp"
+
+
+def _build_chip_rail_program(dtype_name: str = "fp32"):
     """CHIP/L2 rail: the collective written in a CHIP orchestration body.
 
     Identical to the HOST program below except for *where* the collective is
     written — same five windows, same host allocation, same comm domain. That
     one difference is the whole point of the comparison.
     """
+    dtype = _dtype_of(dtype_name)
+    payload_bytes = TOTAL * SIZE * dtype.get_byte()
+    i32_bytes = NR * pl.INT32.get_byte()
 
     @pl.program
     class ChipRail:
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_pipeline(
             self,
-            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
-            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], dtype]],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], dtype]],
             signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
             counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
             recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
-        ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], dtype]:
             return pld.tensor.all_to_all_v(stage, data, signal, counts, recv, core_num=1)
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            stage_buf = pld.alloc_window_buffer(TOTAL * SIZE * pl.FP32.get_byte())
-            data_buf = pld.alloc_window_buffer(TOTAL * SIZE * pl.FP32.get_byte())
-            signal_buf = pld.alloc_window_buffer(NR * pl.INT32.get_byte())
-            counts_buf = pld.alloc_window_buffer(NR * pl.INT32.get_byte())
-            recv_buf = pld.alloc_window_buffer(NR * pl.INT32.get_byte())
+            stage_buf = pld.alloc_window_buffer(payload_bytes)
+            data_buf = pld.alloc_window_buffer(payload_bytes)
+            signal_buf = pld.alloc_window_buffer(i32_bytes)
+            counts_buf = pld.alloc_window_buffer(i32_bytes)
+            recv_buf = pld.alloc_window_buffer(i32_bytes)
 
             for r in pl.range(pld.world_size()):
-                stage = pld.window(stage_buf, [TOTAL, SIZE], dtype=pl.FP32)
-                data = pld.window(data_buf, [TOTAL, SIZE], dtype=pl.FP32)
+                stage = pld.window(stage_buf, [TOTAL, SIZE], dtype=dtype)
+                data = pld.window(data_buf, [TOTAL, SIZE], dtype=dtype)
                 sig = pld.window(signal_buf, [NR, 1], dtype=pl.INT32)
                 counts = pld.window(counts_buf, [NR, 1], dtype=pl.INT32)
                 recv = pld.window(recv_buf, [NR, 1], dtype=pl.INT32)
@@ -107,7 +119,7 @@ def _build_chip_rail_program():
     return ChipRail
 
 
-def _build_host_rail_program():
+def _build_host_rail_program(dtype_name: str = "fp32"):
     """HOST/L3 rail: the collective written in the host orchestrator.
 
     Mirrors the CHIP program: same five windows, same one dispatch per rank.
@@ -116,14 +128,17 @@ def _build_host_rail_program():
     ``MaterializeCommDomainScopes`` infers a window's comm domain from the
     dispatches that consume it.
     """
+    dtype = _dtype_of(dtype_name)
+    payload_bytes = TOTAL * SIZE * dtype.get_byte()
+    i32_bytes = NR * pl.INT32.get_byte()
 
     @pl.program
     class HostRail:
         @pl.function(type=pl.FunctionType.InCore)
         def touch_step(
             self,
-            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
-            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], dtype]],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], dtype]],
             signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
             counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
             recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
@@ -143,8 +158,8 @@ def _build_host_rail_program():
         @pl.function(type=pl.FunctionType.Orchestration)
         def touch_orch(
             self,
-            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
-            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
+            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], dtype]],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], dtype]],
             signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
             counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
             recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
@@ -153,21 +168,21 @@ def _build_host_rail_program():
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
-            stage_buf = pld.alloc_window_buffer(TOTAL * SIZE * pl.FP32.get_byte())
-            data_buf = pld.alloc_window_buffer(TOTAL * SIZE * pl.FP32.get_byte())
-            signal_buf = pld.alloc_window_buffer(NR * pl.INT32.get_byte())
-            counts_buf = pld.alloc_window_buffer(NR * pl.INT32.get_byte())
-            recv_buf = pld.alloc_window_buffer(NR * pl.INT32.get_byte())
+            stage_buf = pld.alloc_window_buffer(payload_bytes)
+            data_buf = pld.alloc_window_buffer(payload_bytes)
+            signal_buf = pld.alloc_window_buffer(i32_bytes)
+            counts_buf = pld.alloc_window_buffer(i32_bytes)
+            recv_buf = pld.alloc_window_buffer(i32_bytes)
 
-            stage = pld.window(stage_buf, [TOTAL, SIZE], dtype=pl.FP32)
-            data = pld.window(data_buf, [TOTAL, SIZE], dtype=pl.FP32)
+            stage = pld.window(stage_buf, [TOTAL, SIZE], dtype=dtype)
+            data = pld.window(data_buf, [TOTAL, SIZE], dtype=dtype)
             sig = pld.window(signal_buf, [NR, 1], dtype=pl.INT32)
             counts = pld.window(counts_buf, [NR, 1], dtype=pl.INT32)
             recv = pld.window(recv_buf, [NR, 1], dtype=pl.INT32)
 
             for r in pl.range(pld.world_size()):
-                r_stage = pld.window(stage_buf, [TOTAL, SIZE], dtype=pl.FP32)
-                r_data = pld.window(data_buf, [TOTAL, SIZE], dtype=pl.FP32)
+                r_stage = pld.window(stage_buf, [TOTAL, SIZE], dtype=dtype)
+                r_data = pld.window(data_buf, [TOTAL, SIZE], dtype=dtype)
                 r_sig = pld.window(signal_buf, [NR, 1], dtype=pl.INT32)
                 r_counts = pld.window(counts_buf, [NR, 1], dtype=pl.INT32)
                 r_recv = pld.window(recv_buf, [NR, 1], dtype=pl.INT32)
@@ -195,14 +210,19 @@ def _sole_file(directory, pattern):
     return matches[0]
 
 
-def test_both_rails_render_a_byte_identical_builtin_kernel(tmp_path):
+@pytest.mark.parametrize("dtype_name", ["fp32", "int8"])
+def test_both_rails_render_a_byte_identical_builtin_kernel(tmp_path, dtype_name):
     """The two rails' rendered kernel sources must match exactly."""
-    chip = _compile(_build_chip_rail_program(), tmp_path, "chip")
-    host = _compile(_build_host_rail_program(), tmp_path, "host")
+    chip = _compile(_build_chip_rail_program(dtype_name), tmp_path, f"chip_{dtype_name}")
+    host = _compile(_build_host_rail_program(dtype_name), tmp_path, f"host_{dtype_name}")
 
-    chip_kernel = chip.output_dir / "next_levels" / "chip_pipeline" / "kernels" / "aiv" / _L2_KERNEL
+    chip_kernel = (
+        chip.output_dir / "next_levels" / "chip_pipeline" / "kernels" / "aiv" / _l2_kernel_of(dtype_name)
+    )
     assert chip_kernel.is_file(), f"expected the rendered CHIP kernel at {chip_kernel}"
-    host_kernel = _sole_file(host.output_dir / "next_levels" / _VARIANT / "kernels" / "aiv", "*.cpp")
+    host_kernel = _sole_file(
+        host.output_dir / "next_levels" / _variant_of(dtype_name) / "kernels" / "aiv", "*.cpp"
+    )
 
     assert host_kernel.read_text() == chip_kernel.read_text(), (
         "HOST and CHIP rails must render the same builtin kernel source; a difference means "
@@ -232,7 +252,7 @@ def test_host_rail_still_emits_its_builtin_chip_dispatch(tmp_path):
     host = _compile(_build_host_rail_program(), tmp_path, "host")
 
     next_levels = sorted(p.name for p in (host.output_dir / "next_levels").iterdir())
-    assert _VARIANT in next_levels, next_levels
+    assert _variant_of("fp32") in next_levels, next_levels
 
 
 if __name__ == "__main__":

@@ -352,5 +352,29 @@ def test_multi_core_request_is_rejected():
         passes.lower_l2_tensor_collectives()(_build_program(core_num=2))
 
 
+def test_int8_synthesizes_int8_variant():
+    """INT8 is the RFC #2521 A1 canonical payload and must share the CHIP rail."""
+
+    @pl.program
+    class Int8Exchange:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.INT8]],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.INT8]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.INT8]:
+            return pld.tensor.all_to_all_v(stage, data, signal, counts, recv)
+
+    result = passes.lower_l2_tensor_collectives()(Int8Exchange)
+    kernel = _get_func(result, "__builtin_all_to_all_v__int8")
+    assert kernel is not None
+    attrs = dict(kernel.attrs)
+    template_vars = dict(item.split("=", 1) for item in attrs["builtin_template_vars"].split(","))
+    assert template_vars == {"dtype_cpp": "int8_t"}
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
