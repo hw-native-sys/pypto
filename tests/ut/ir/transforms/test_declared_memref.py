@@ -642,6 +642,17 @@ class TestSlots:
                     f"{planner}: {name} [{start}, {end}) on '{base}' lands inside the "
                     f"declaration's two-slot reservation [0, {declared_extent})"
                 )
+            # Two ordinary tiles may share an address, but only exactly: an
+            # operation registered as in-place-safe can alias its input and its
+            # result, while a staggered overlap would corrupt one of them.
+            for name_a, base_a, start_a, end_a in ranges:
+                for name_b, base_b, start_b, end_b in ranges:
+                    if base_a >= base_b or not (start_a < end_b and start_b < end_a):
+                        continue
+                    assert (start_a, end_a) == (start_b, end_b), (
+                        f"{planner}: {name_a} [{start_a}, {end_a}) on '{base_a}' partially "
+                        f"overlaps {name_b} [{start_b}, {end_b}) on '{base_b}'"
+                    )
 
     def test_slots_round_trip(self):
         """The printed form carries both `slots=` and the subscript.

@@ -181,28 +181,27 @@ PreparedProblem BuildProblem(const FunctionPtr& func, const AllocationPlan& allo
     prepared.strict_problem.same_base_or_disjoint.push_back({pair.first, pair.second});
   }
 
-  std::map<BufferPair, uint64_t> penalty_weights;
+  // The recognizer already returns one relation per unordered pair, sorted and
+  // normalized, and interval -> buffer is injective, so distinct interval
+  // pairs cannot collide into one buffer pair. Accumulating them through a map
+  // would merge nothing and re-derive an order we were handed.
   const std::vector<RecognizedReusePenalty> recognized =
       backend != nullptr ? RecognizeReusePenalties(func, allocation_plan, *backend)
                          : std::vector<RecognizedReusePenalty>{};
+  prepared.strict_problem.reuse_penalties.reserve(recognized.size());
   for (const RecognizedReusePenalty& penalty : recognized) {
     INTERNAL_CHECK(penalty.first_interval < buffer_by_interval.size() &&
                    penalty.second_interval < buffer_by_interval.size())
         << "DSA-RP recognizer returned an out-of-range interval";
     const auto& first_id = buffer_by_interval[penalty.first_interval];
     const auto& second_id = buffer_by_interval[penalty.second_interval];
-    if (!first_id.has_value() || !second_id.has_value()) continue;
+    if (!first_id.has_value() || !second_id.has_value() || penalty.cost == 0) continue;
     const BufferPair pair = CanonicalPair(first_id.value(), second_id.value());
     if (prepared.strict_problem.buffers[pair.first].pool !=
         prepared.strict_problem.buffers[pair.second].pool) {
       continue;
     }
-    penalty_weights[pair] = SaturatingAdd(penalty_weights[pair], penalty.cost);
-  }
-  for (const auto& [pair, weight] : penalty_weights) {
-    if (weight != 0) {
-      prepared.strict_problem.reuse_penalties.push_back({pair.first, pair.second, weight});
-    }
+    prepared.strict_problem.reuse_penalties.push_back({pair.first, pair.second, penalty.cost});
   }
 
   return prepared;

@@ -803,11 +803,28 @@ DsaResult CanonicalGreedySolver::Solve(const DsaProblem& problem) const {
     result.statistics.selected_first_fit_seed = true;
   }
 
+  // Capacity is hard and a reuse penalty is only a preference, so a penalty
+  // must never be the reason a placement is not found. The constructive search
+  // picks the lowest-penalty offset for each buffer, which can push later
+  // buffers past the pool bound; if every order fails that way, repeat the
+  // same bounded search over a penalty-free copy of the relation graph. The
+  // objective is always evaluated against the original problem, so a placement
+  // found this way still reports the reuse cost it actually pays.
+  SearchSpace geometry_only = search;
+  geometry_only.soft_weights.clear();
+  for (auto& neighbors : geometry_only.soft_neighbors) neighbors.clear();
+
   const std::vector<std::vector<size_t>> orders = CanonicalOrders(search, options_);
-  for (size_t order_index = 0; order_index < orders.size(); ++order_index) {
+  const size_t penalty_aware_orders = orders.size();
+  for (size_t order_index = 0; order_index < 2 * penalty_aware_orders; ++order_index) {
+    const bool geometry_pass = order_index >= penalty_aware_orders;
+    // Only fall back to geometry once the penalty-aware orders are exhausted
+    // without a placement.
+    if (geometry_pass && result.solution) break;
     ++result.statistics.orders_evaluated;
     const std::optional<DsaSolution> placement = PlaceCanonicalOrder(
-        problem, search, orders[order_index], &result.statistics.candidate_offsets_evaluated);
+        problem, geometry_pass ? geometry_only : search, orders[order_index % penalty_aware_orders],
+        &result.statistics.candidate_offsets_evaluated);
     if (!placement) continue;
 
     const std::vector<std::string> errors = ValidateSolution(problem, *placement);
@@ -825,8 +842,12 @@ DsaResult CanonicalGreedySolver::Solve(const DsaProblem& problem) const {
       result.status = SolveStatus::kFeasible;
       result.solution = *placement;
       result.objective = objective;
-      result.statistics.selected_order = order_index;
+      result.statistics.selected_order = order_index % penalty_aware_orders;
       result.statistics.selected_first_fit_seed = false;
+      if (geometry_pass) {
+        result.diagnostics.emplace_back(
+            "canonical greedy fell back to a penalty-free order to stay within capacity");
+      }
     }
   }
 

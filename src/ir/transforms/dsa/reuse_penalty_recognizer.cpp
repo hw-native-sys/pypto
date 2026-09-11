@@ -50,24 +50,36 @@ namespace dsa_adapter {
 namespace {
 
 // Complexity. Let V be the statements of one InCore function, E its
-// dependency edges, A its recorded allocation accesses, k the fixed number of
-// abstract access resources (`kResourceCount`), and P the number of
-// lifetime-compatible cross-resource allocation pairs this function actually
-// contains.
+// dependency edges, D its control nesting depth, A its recorded allocation
+// accesses, a_i the accesses of allocation i, k the fixed number of abstract
+// access resources (`kResourceCount`), and C the allocation pairs the sweep
+// examines.
 //
-//   access collection + ordering index   O(k * (V + E))
-//   completion frontiers                 O(A * k)
-//   pair enumeration (indexed sweep)     O(B log B + k^2 * P)
+//   access collection + ordering index   O(D * (V + E) + k * (V + E))
+//   completion frontiers                 O(sum_i a_i^2)
+//   pair enumeration (indexed sweep)     O(B log B + k^2 * C)
+//
+// The D factor is the per-region dependency graph: one region's construction
+// aggregates the uses and defs of each top-level statement's whole subtree, so
+// a statement is walked once per enclosing region. The DSL caps nesting well
+// below 20, so this is a small constant in practice.
 //
 // Ordering is answered in O(1) by a chain-cover reachability index rather than
-// by per-statement transitive predecessor sets, and the sweep only visits
-// allocation pairs that already share a memory space, have compatible
-// lifetimes, and carry two different resources. The analysis is therefore
-// O(N log N) in the size of the IR; the residual `P` term is the size of the
-// model's own output. The explicit pairwise DSA-RP model is output-sensitive
-// by construction: a kernel can genuinely contain Theta(B^2) penalty pairs for
-// B reusable buffers, and no pair enumeration can be cheaper than the pairs it
-// must report. Nothing here performs a nested scan over IR nodes.
+// by per-statement transitive predecessor sets. The frontier scans are
+// pairwise because a chain runs through both arms of a branch: reachability
+// alone would order two accesses that never execute together, so each pair
+// also needs its control paths compared. They run over one entry per
+// (resource, control path, byte range), not over every access.
+//
+// C counts the pairs the sweep *examines*, which is not the number of
+// relations it reports: a pair is examined once it shares a memory space, has
+// compatible lifetimes, and offers two different resources, and it can still
+// be rejected for a separation, a shared statement, or incompatible control
+// paths. C is Theta(B^2) in the worst case for B reusable buffers, and so is
+// the reported set, which no pair enumeration can beat. The sweep's value is
+// that C collapses to near zero when the kernel has no cross-resource reuse,
+// where an all-pairs scan would still pay Theta(B^2). Nothing here performs a
+// nested scan over IR nodes.
 
 enum class AccessKind : uint8_t {
   Read,
@@ -219,11 +231,7 @@ class OrderIndex {
     return clocks_[later][chain] > chain_index_[earlier];
   }
 
-  [[nodiscard]] size_t ChainOf(size_t node) const { return chain_[node]; }
   [[nodiscard]] uint64_t ChainIndexOf(size_t node) const { return chain_index_[node]; }
-  [[nodiscard]] uint64_t ClockComponent(size_t node, size_t component) const {
-    return clocks_[node][component];
-  }
 
  private:
   std::vector<std::array<uint64_t, kResourceCount>> clocks_;
@@ -580,6 +588,7 @@ class AccessCollector : public IRVisitor {
   /// happens-before order, and let its own body statements nest below it.
   void VisitRegionStatement(const StmtPtr& stmt, const std::unordered_set<const Stmt*>* predecessors) {
     const size_t node = order_.AddNode();
+    node_statement_.resize(node + 1, nullptr);
     node_statement_[node] = stmt.get();
     if (predecessors != nullptr) {
       for (const Stmt* predecessor : *predecessors) {
@@ -605,6 +614,7 @@ class AccessCollector : public IRVisitor {
     size_t representative = node;
     if (!frame.children.empty()) {
       representative = order_.AddNode();
+      node_statement_.resize(representative + 1, nullptr);
       node_statement_[representative] = stmt.get();
       order_.AddEdge(node, representative);
       for (size_t child : frame.children) order_.AddEdge(child, representative);
@@ -839,7 +849,7 @@ class AccessCollector : public IRVisitor {
 
     AccessEndpoint read_endpoint;
     read_endpoint.node = node;
-    read_endpoint.statement = node_statement_.at(node);
+    read_endpoint.statement = node_statement_[node];
     read_endpoint.global_order = global_order_;
     read_endpoint.route = *route;
     read_endpoint.access_kind = AccessKind::Read;
@@ -860,7 +870,7 @@ class AccessCollector : public IRVisitor {
   /// Node a later dependant observes in place of a statement: its own node,
   /// or its exit node when it has a body.
   std::unordered_map<const Stmt*, size_t> representative_of_stmt_;
-  std::unordered_map<size_t, const Stmt*> node_statement_;
+  std::vector<const Stmt*> node_statement_;
   std::vector<size_t> node_stack_;
   std::vector<CompoundFrame> compound_stack_;
   std::array<std::optional<size_t>, kResourceCount> last_node_on_resource_;
@@ -889,15 +899,14 @@ struct AllocationFrontier {
   std::vector<size_t> initial_resources;
 };
 
-/// Extreme values of one clock component over a set, with the node attaining
-/// them, so an element can be compared against the set excluding itself.
-struct ComponentExtremes {
-  uint64_t best = 0;
-  size_t best_node = 0;
-  uint64_t second = 0;
-  bool has_best = false;
-  bool has_second = false;
-};
+/// True when `earlier`'s access is guaranteed to finish before `later`'s
+/// begins. Reachability alone is not enough: a resource's issue chain runs
+/// through both arms of a branch, so it can connect two accesses that never
+/// execute together. Mutually exclusive accesses order neither way.
+bool CompletionOrdered(const OrderIndex& order, const AccessEndpoint& earlier, const AccessEndpoint& later) {
+  if (!ControlPathsCompatible(earlier, later, std::nullopt)) return false;
+  return order.HappensBefore(earlier.node, later.node);
+}
 
 /// Maximal accesses under happens-before: those no other access follows.
 std::vector<AccessEndpoint> BuildTerminalFrontier(const std::vector<AccessEndpoint>& accesses,
@@ -924,38 +933,16 @@ std::vector<AccessEndpoint> BuildTerminalFrontier(const std::vector<AccessEndpoi
     candidates.push_back(std::move(access));
   }
 
-  // `candidate` is dominated when some other candidate's clock already covers
-  // the candidate's own chain position, which is one component lookup.
-  std::array<ComponentExtremes, kResourceCount> maxima{};
-  for (const AccessEndpoint& candidate : candidates) {
-    for (size_t component = 0; component < kResourceCount; ++component) {
-      const uint64_t value = order.ClockComponent(candidate.node, component);
-      ComponentExtremes& extremes = maxima[component];
-      if (!extremes.has_best || value > extremes.best) {
-        if (extremes.has_best && extremes.best_node != candidate.node) {
-          extremes.second = extremes.best;
-          extremes.has_second = true;
-        }
-        extremes.best = value;
-        extremes.best_node = candidate.node;
-        extremes.has_best = true;
-      } else if (candidate.node != extremes.best_node && (!extremes.has_second || value > extremes.second)) {
-        extremes.second = value;
-        extremes.has_second = true;
-      }
-    }
-  }
-
+  // A candidate is maximal when no other candidate follows it. The set is one
+  // entry per (resource, control path, byte range), so it is far smaller than
+  // the access list and this stays cheap even though it is pairwise.
   std::vector<AccessEndpoint> maximal;
   maximal.reserve(candidates.size());
   for (const AccessEndpoint& candidate : candidates) {
-    const size_t chain = order.ChainOf(candidate.node);
-    INTERNAL_CHECK(chain != OrderIndex::kNoChain)
-        << "Internal error: a recorded DSA access has no resource chain";
-    const ComponentExtremes& extremes = maxima[chain];
-    const uint64_t reach = extremes.best_node == candidate.node ? (extremes.has_second ? extremes.second : 0)
-                                                                : (extremes.has_best ? extremes.best : 0);
-    if (reach <= order.ChainIndexOf(candidate.node)) maximal.push_back(candidate);
+    const bool dominated =
+        std::any_of(candidates.begin(), candidates.end(),
+                    [&](const AccessEndpoint& other) { return CompletionOrdered(order, candidate, other); });
+    if (!dominated) maximal.push_back(candidate);
   }
   return maximal;
 }
@@ -967,44 +954,20 @@ std::vector<AccessEndpoint> BuildInitialWriteFrontier(const std::vector<AccessEn
   if (conservative_anchor != nullptr) *conservative_anchor = false;
   if (accesses.empty()) return {};
 
-  std::array<ComponentExtremes, kResourceCount> minima{};
-  for (const AccessEndpoint& access : accesses) {
-    const size_t chain = order.ChainOf(access.node);
-    INTERNAL_CHECK(chain != OrderIndex::kNoChain)
-        << "Internal error: a recorded DSA access has no resource chain";
-    const uint64_t index = order.ChainIndexOf(access.node);
-    ComponentExtremes& extremes = minima[chain];
-    if (!extremes.has_best || index < extremes.best) {
-      if (extremes.has_best && extremes.best_node != access.node) {
-        extremes.second = extremes.best;
-        extremes.has_second = true;
-      }
-      extremes.best = index;
-      extremes.best_node = access.node;
-      extremes.has_best = true;
-    } else if (access.node != extremes.best_node && (!extremes.has_second || index < extremes.second)) {
-      extremes.second = index;
-      extremes.has_second = true;
-    }
-  }
-
   // A source-order "first access" is not sufficient inside structured control:
   // two writes in opposite branches are both minimal. Keep the whole antichain.
   std::vector<AccessEndpoint> minimal;
   for (const AccessEndpoint& access : accesses) {
-    bool has_predecessor = false;
-    for (size_t component = 0; component < kResourceCount && !has_predecessor; ++component) {
-      const ComponentExtremes& extremes = minima[component];
-      if (!extremes.has_best) continue;
-      const bool self = extremes.best_node == access.node;
-      if (self && !extremes.has_second) continue;
-      const uint64_t index = self ? extremes.second : extremes.best;
-      has_predecessor = order.ClockComponent(access.node, component) > index;
-    }
+    const bool has_predecessor =
+        std::any_of(accesses.begin(), accesses.end(),
+                    [&](const AccessEndpoint& other) { return CompletionOrdered(order, other, access); });
     if (!has_predecessor) minimal.push_back(access);
   }
 
   INTERNAL_CHECK(!minimal.empty()) << "Internal error: a finite access order has no minimal access";
+  // Axiom A3 requires every minimal access to define the allocation. A minimal
+  // read leaves initialization unproven, so the allocation must not be reused
+  // as a penalty target.
   if (conservative_anchor != nullptr) {
     *conservative_anchor = std::any_of(minimal.begin(), minimal.end(), [](const AccessEndpoint& access) {
       return access.access_kind != AccessKind::Write;

@@ -525,6 +525,35 @@ std::string ObviousDsaCapacityOverflow(const dsa::DsaProblem& problem,
       }
       minimum_end = std::max(minimum_end, reserved_end + padding + buffer.size);
     }
+
+    // One buffer at a time only proves the pool must hold the largest of them.
+    // Buffers that are live at the same instant must also be pairwise
+    // disjoint, so the pool must additionally hold their combined size at the
+    // busiest instant. That peak is a proof of infeasibility, and finding it
+    // here keeps a genuinely oversized kernel out of the bounded search, which
+    // would otherwise exhaust its budget and report an inconclusive result for
+    // a capacity problem the user can act on.
+    std::vector<std::pair<int64_t, int64_t>> events;
+    for (const dsa::Buffer& buffer : problem.buffers) {
+      if (buffer.pool != pool.id || buffer.lifetime.end <= buffer.lifetime.begin) continue;
+      events.emplace_back(buffer.lifetime.begin, static_cast<int64_t>(buffer.size));
+      events.emplace_back(buffer.lifetime.end, -static_cast<int64_t>(buffer.size));
+    }
+    // A lifetime is half-open, so a buffer ending where another begins is not
+    // co-live: releases must be applied before acquisitions at one position.
+    std::sort(events.begin(), events.end());
+    int64_t live = 0;
+    int64_t peak_live = 0;
+    for (const auto& [position, delta] : events) {
+      static_cast<void>(position);
+      live += delta;
+      peak_live = std::max(peak_live, live);
+    }
+    const auto peak = static_cast<uint64_t>(peak_live);
+    if (reserved_end <= std::numeric_limits<uint64_t>::max() - peak) {
+      minimum_end = std::max(minimum_end, reserved_end + peak);
+    }
+
     if (minimum_end <= pool.capacity) continue;
 
     const auto space = static_cast<MemorySpace>(pool.id);
