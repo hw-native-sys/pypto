@@ -68,7 +68,7 @@ a pipeline pass at all.
 | 48 | [LegalizeGraphBoundary](48-legalize_graph_boundary.md) | Hoists the boundary scalars a `Graph` body derives out to its call sites, and rejects boundaries the `host_build_graph` runtime could not record |
 | 49 | [MaterializeRuntimeScopes](49-materialize_runtime_scopes.md) | Inserts AUTO `RuntimeScopeStmt` nodes so orchestration codegen emits `SIMPLER_SCOPE` 1:1 |
 | 50 | [ClassifyIterArgCarry](50-classify_iter_arg_carry.md) | Classifies each orchestration `ForStmt` iter_arg as a trivial alias or a materialised rebind carry |
-| 51 | [InsertCommFence](51-insert_comm_fence.md) | Marks each publishing write (region `system.cacheinvalid` + `system.fence` locally, fence only for a remote write, whole-GM for an opaque one) and each wait (whole-GM `system.cacheinvalid`); the notify itself gets no marker |
+| 51 | [InsertCommFence](51-insert_comm_fence.md) | Phase A: marks each publishing write and each wait inside InCore bodies; phase B: prepends whole-GM `system.cacheinvalid` + `system.fence` at InCore consumer entry after orchestration opaque collective dispatch; notify itself gets no marker |
 | 52 | [MaterializeValidShapeSymbols](52-materialize_valid_shape_symbols.md) | Turns each device-kernel `valid_shape` symbol the kernel cannot bind into a leading `Scalar[INDEX]` parameter, fed the caller's actual valid extent |
 
 ## Outside the default pipeline

@@ -23,6 +23,14 @@ The pass enforces the ptoas data-before-signal contract with purely-local rules
   unregistered user function: a whole-GM ``pl.system.cacheinvalid()`` followed by
   ``pl.system.fence()``.
 * **After every wait**: a whole-GM ``pl.system.cacheinvalid()`` (no args).
+* **Phase B (orchestration → InCore consumer)**: after an opaque collective
+  dispatch in an orchestration / graph body **or** a HOST ``Opaque``
+  ``Role.Orchestrator`` body (plain ``Call`` or ``Submit`` from
+  ``pl.manual_scope`` / ``pl.submit``), prepend whole-GM
+  ``pl.system.cacheinvalid()`` + ``pl.system.fence()`` at the separate InCore
+  consumer's function entry (orchestration IR unchanged). One-hop wrappers
+  still resolve after ``MaterializeRuntimeScopes`` wraps them in
+  ``RuntimeScopeStmt``.
 
 The **remote** writes land at a peer-offset address that a local-target
 cacheinvalid cannot address, so the pass inserts only their release fence — the
@@ -38,7 +46,8 @@ mirroring ``test_stamp_tfree_split.py``.
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
-from pypto import ir
+from pypto import backend, ir
+from pypto.backend import BackendType
 from pypto.pypto_core import passes
 
 N = 8
@@ -866,6 +875,758 @@ def test_bare_barrier_notify_no_marker():
             pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
 
     ir.assert_structural_equal(_apply(Before), Before)
+
+
+def test_orch_collective_then_consume_prepends_incore_prologue():
+    # An orchestration pipeline that dispatches an opaque collective kernel task
+    # and then a separate InCore consumer must prepend whole-GM cacheinvalid +
+    # fence to the consumer's entry — orchestration codegen cannot host InCore
+    # system ops, so the markers land on the callee (same pattern as the manual
+    # workaround formerly in the all_to_all_v ST consume_step).
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def collective_kernel(
+            self,
+            inp: pl.Tensor[[1, N], pl.FP32],
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            recv: pld.DistributedTensor[[1, 1], pl.INT32],
+        ) -> pld.DistributedTensor[[1, N], pl.FP32]:
+            pl.func_attr({"builtin_template_dir": ":pypto.runtime.builtins.collectives.all_to_all_v"})
+            return data
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
+            pl.write(out, [0, 0], val)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            inp: pl.Tensor[[1, N], pl.FP32],
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            recv: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            data = self.collective_kernel(inp, data, signal, counts, recv)
+            return self.consume_step(recv, out)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def collective_kernel(
+            self,
+            inp: pl.Tensor[[1, N], pl.FP32],
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            recv: pld.DistributedTensor[[1, 1], pl.INT32],
+        ) -> pld.DistributedTensor[[1, N], pl.FP32]:
+            pl.func_attr({"builtin_template_dir": ":pypto.runtime.builtins.collectives.all_to_all_v"})
+            return data
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            pl.system.cacheinvalid()
+            pl.system.fence()
+            val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
+            pl.write(out, [0, 0], val)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            inp: pl.Tensor[[1, N], pl.FP32],
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            recv: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            data = self.collective_kernel(inp, data, signal, counts, recv)
+            return self.consume_step(recv, out)
+
+    ir.assert_structural_equal(_apply(Before), Expected)
+
+
+def test_host_builtin_tensor_collective_then_consume():
+    # After LowerHostTensorCollectives, HOST pipelines dispatch ``builtin.tensor.*``
+    # directly from orchestration. Phase B must treat that as an opaque publish
+    # and prepend the consume prologue to the later InCore callee.
+    #
+    # Both sides use ``pl.parse_program`` — ``pl.builtin.*`` is a machine-only
+    # printer surface with no typed DSL wrapper, so a ``@pl.program`` Expected
+    # would fail pyright (reportAttributeAccessIssue on ``pl.builtin``).
+    _builtin_call = """
+        data = pl.builtin.tensor.all_to_all_v(
+            inp,
+            data,
+            signal,
+            counts,
+            recv,
+            dtype=pl.FP32,
+            attrs={
+                "device": 0,
+                "dtype": pl.FP32,
+                "arg_directions": [
+                    pl.adir.input,
+                    pl.adir.inout,
+                    pl.adir.inout,
+                    pl.adir.input,
+                    pl.adir.inout,
+                ],
+            },
+        )
+"""
+    _program_src = """
+import pypto.language as pl
+import pypto.language.distributed as pld
+
+N = 8
+
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.InCore)
+    def consume_step(
+        self,
+        recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+        out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+    ) -> pl.Tensor[[1, 1], pl.INT32]:
+{consume_body}
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def host_pipeline(
+        self,
+        inp: pld.DistributedTensor[[1, N], pl.FP32],
+        data: pld.DistributedTensor[[1, N], pl.FP32],
+        signal: pld.DistributedTensor[[1, 1], pl.INT32],
+        counts: pld.DistributedTensor[[1, 1], pl.INT32],
+        recv: pld.DistributedTensor[[1, 1], pl.INT32],
+        out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+    ) -> pl.Tensor[[1, 1], pl.INT32]:
+{builtin_call}
+        return self.consume_step(recv, out)
+"""
+    _consume_body = (
+        "        val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])\n"
+        "        pl.write(out, [0, 0], val)\n"
+    )
+    Before = pl.parse_program(
+        _program_src.format(
+            consume_body=_consume_body,
+            builtin_call=_builtin_call,
+        )
+    )
+    Expected = pl.parse_program(
+        _program_src.format(
+            consume_body=(
+                "        pl.system.cacheinvalid()\n"
+                "        pl.system.fence()\n"
+                "        val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])\n"
+                "        pl.write(out, [0, 0], val)\n"
+            ),
+            builtin_call=_builtin_call,
+        )
+    )
+
+    ir.assert_structural_equal(_apply(Before), Expected)
+
+
+def test_host_opaque_orchestrator_collective_then_consume():
+    # Real L3 host_orch shape: ``@pl.function(level=HOST, role=Orchestrator)``
+    # defaults to FunctionType.Opaque. Phase B must still scan it (same eligibility
+    # as IsHostOrch in the HOST collective lowers) and mark the later InCore
+    # consumer through the one-hop consume_orch wrapper.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def collective_kernel(
+            self,
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+        ) -> pld.DistributedTensor[[1, N], pl.FP32]:
+            pl.func_attr({"builtin_template_dir": ":pypto.runtime.builtins.collectives.all_to_all_v"})
+            return data
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
+            pl.write(out, [0, 0], val)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def consume_orch(
+            self,
+            recv: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            return self.consume_step(recv, out)
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(
+            self,
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+            recv: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            data = self.collective_kernel(data)
+            return self.consume_orch(recv, out)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def collective_kernel(
+            self,
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+        ) -> pld.DistributedTensor[[1, N], pl.FP32]:
+            pl.func_attr({"builtin_template_dir": ":pypto.runtime.builtins.collectives.all_to_all_v"})
+            return data
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            pl.system.cacheinvalid()
+            pl.system.fence()
+            val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
+            pl.write(out, [0, 0], val)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def consume_orch(
+            self,
+            recv: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            return self.consume_step(recv, out)
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(
+            self,
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+            recv: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            data = self.collective_kernel(data)
+            return self.consume_orch(recv, out)
+
+    ir.assert_structural_equal(_apply(Before), Expected)
+
+
+def test_orch_consume_wrapper_unwraps_after_materialize_runtime_scopes():
+    # Default pipeline runs MaterializeRuntimeScopes before InsertCommFence, so
+    # consume_orch's body is wrapped in an AUTO RuntimeScopeStmt. Phase B's
+    # one-hop unwrap must peel that scope or the prologue is silently skipped.
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+    try:
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def collective_kernel(
+                self,
+                data: pld.DistributedTensor[[1, N], pl.FP32],
+            ) -> pld.DistributedTensor[[1, N], pl.FP32]:
+                pl.func_attr({"builtin_template_dir": ":pypto.runtime.builtins.collectives.all_to_all_v"})
+                return data
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume_step(
+                self,
+                recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+                out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+            ) -> pl.Tensor[[1, 1], pl.INT32]:
+                val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
+                pl.write(out, [0, 0], val)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def consume_orch(
+                self,
+                recv: pld.DistributedTensor[[1, 1], pl.INT32],
+                out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+            ) -> pl.Tensor[[1, 1], pl.INT32]:
+                return self.consume_step(recv, out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def host_pipeline(
+                self,
+                data: pld.DistributedTensor[[1, N], pl.FP32],
+                recv: pld.DistributedTensor[[1, 1], pl.INT32],
+                out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+            ) -> pl.Tensor[[1, 1], pl.INT32]:
+                data = self.collective_kernel(data)
+                return self.consume_orch(recv, out)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV)
+            def collective_kernel(
+                self,
+                data: pld.DistributedTensor[[1, N], pl.FP32],
+            ) -> pld.DistributedTensor[[1, N], pl.FP32]:
+                pl.func_attr({"builtin_template_dir": ":pypto.runtime.builtins.collectives.all_to_all_v"})
+                return data
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume_step(
+                self,
+                recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+                out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+            ) -> pl.Tensor[[1, 1], pl.INT32]:
+                pl.system.cacheinvalid()
+                pl.system.fence()
+                val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
+                pl.write(out, [0, 0], val)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def consume_orch(
+                self,
+                recv: pld.DistributedTensor[[1, 1], pl.INT32],
+                out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+            ) -> pl.Tensor[[1, 1], pl.INT32]:
+                return self.consume_step(recv, out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def host_pipeline(
+                self,
+                data: pld.DistributedTensor[[1, N], pl.FP32],
+                recv: pld.DistributedTensor[[1, 1], pl.INT32],
+                out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+            ) -> pl.Tensor[[1, 1], pl.INT32]:
+                data = self.collective_kernel(data)
+                return self.consume_orch(recv, out)
+
+        def _prepare(program):
+            return passes.materialize_runtime_scopes()(passes.derive_call_directions()(program))
+
+        ir.assert_structural_equal(_apply(_prepare(Before)), _prepare(Expected))
+    finally:
+        backend.reset_for_testing()
+
+
+def test_orch_submit_collective_then_submit_consume():
+    # Under pl.manual_scope, task launches lower to Submit (not Call). Phase B
+    # must still mark the InCore consumer when both the opaque collective and
+    # the later consume are dispatched via pl.submit — otherwise the prologue
+    # is silently skipped (pass-submit-awareness).
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def collective_kernel(
+            self,
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+        ) -> pld.DistributedTensor[[1, N], pl.FP32]:
+            pl.func_attr({"builtin_template_dir": ":pypto.runtime.builtins.collectives.all_to_all_v"})
+            return data
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
+            pl.write(out, [0, 0], val)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+            recv: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            with pl.manual_scope():
+                data, _pub_tid = pl.submit(self.collective_kernel, data)
+                out, _con_tid = pl.submit(self.consume_step, recv, out)
+            return out
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def collective_kernel(
+            self,
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+        ) -> pld.DistributedTensor[[1, N], pl.FP32]:
+            pl.func_attr({"builtin_template_dir": ":pypto.runtime.builtins.collectives.all_to_all_v"})
+            return data
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            pl.system.cacheinvalid()
+            pl.system.fence()
+            val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
+            pl.write(out, [0, 0], val)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+            recv: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            with pl.manual_scope():
+                data, _pub_tid = pl.submit(self.collective_kernel, data)
+                out, _con_tid = pl.submit(self.consume_step, recv, out)
+            return out
+
+    ir.assert_structural_equal(_apply(Before), Expected)
+
+
+def test_orch_consume_wrapper_unwraps_to_incore():
+    # HOST fan-out uses a one-hop orchestration wrapper (consume_orch) that
+    # delegates to the real InCore consumer — phase B must mark consume_step,
+    # not the wrapper.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def collective_kernel(
+            self,
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+        ) -> pld.DistributedTensor[[1, N], pl.FP32]:
+            pl.func_attr({"builtin_template_dir": ":pypto.runtime.builtins.collectives.all_to_all_v"})
+            return data
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
+            pl.write(out, [0, 0], val)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def consume_orch(
+            self,
+            recv: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            return self.consume_step(recv, out)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def host_pipeline(
+            self,
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+            recv: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            data = self.collective_kernel(data)
+            return self.consume_orch(recv, out)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def collective_kernel(
+            self,
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+        ) -> pld.DistributedTensor[[1, N], pl.FP32]:
+            pl.func_attr({"builtin_template_dir": ":pypto.runtime.builtins.collectives.all_to_all_v"})
+            return data
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            pl.system.cacheinvalid()
+            pl.system.fence()
+            val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
+            pl.write(out, [0, 0], val)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def consume_orch(
+            self,
+            recv: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            return self.consume_step(recv, out)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def host_pipeline(
+            self,
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+            recv: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            data = self.collective_kernel(data)
+            return self.consume_orch(recv, out)
+
+    ir.assert_structural_equal(_apply(Before), Expected)
+
+
+def test_orch_stage_between_collective_and_consume():
+    # Intermediate non-publish InCore helpers must not get the prologue; only
+    # the post-collective consumer does.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def collective_kernel(
+            self,
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+        ) -> pld.DistributedTensor[[1, N], pl.FP32]:
+            pl.func_attr({"builtin_template_dir": ":pypto.runtime.builtins.collectives.all_to_all_v"})
+            return data
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def stage_step(
+            self,
+            x: pl.Tensor[[1, N], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, N], pl.FP32]],
+        ) -> pl.Tensor[[1, N], pl.FP32]:
+            local = pl.load(x, [0, 0], [1, N])
+            pl.store(local, [0, 0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
+            pl.write(out, [0, 0], val)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            staged: pl.Tensor[[1, N], pl.FP32],
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+            recv: pld.DistributedTensor[[1, 1], pl.INT32],
+            stage_out: pl.Out[pl.Tensor[[1, N], pl.FP32]],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            staged = self.stage_step(staged, stage_out)
+            data = self.collective_kernel(data)
+            return self.consume_step(recv, out)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def collective_kernel(
+            self,
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+        ) -> pld.DistributedTensor[[1, N], pl.FP32]:
+            pl.func_attr({"builtin_template_dir": ":pypto.runtime.builtins.collectives.all_to_all_v"})
+            return data
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def stage_step(
+            self,
+            x: pl.Tensor[[1, N], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, N], pl.FP32]],
+        ) -> pl.Tensor[[1, N], pl.FP32]:
+            local = pl.load(x, [0, 0], [1, N])
+            pl.store(local, [0, 0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            pl.system.cacheinvalid()
+            pl.system.fence()
+            val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
+            pl.write(out, [0, 0], val)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            staged: pl.Tensor[[1, N], pl.FP32],
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+            recv: pld.DistributedTensor[[1, 1], pl.INT32],
+            stage_out: pl.Out[pl.Tensor[[1, N], pl.FP32]],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            staged = self.stage_step(staged, stage_out)
+            data = self.collective_kernel(data)
+            return self.consume_step(recv, out)
+
+    ir.assert_structural_equal(_apply(Before), Expected)
+
+
+def test_orch_consume_before_collective_unmarked():
+    # Sequential scan: a consumer dispatched before any opaque publish must not
+    # be marked (within the same orchestration body).
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def collective_kernel(
+            self,
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+        ) -> pld.DistributedTensor[[1, N], pl.FP32]:
+            pl.func_attr({"builtin_template_dir": ":pypto.runtime.builtins.collectives.all_to_all_v"})
+            return data
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
+            pl.write(out, [0, 0], val)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+            recv: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            out = self.consume_step(recv, out)
+            data = self.collective_kernel(data)
+            return out
+
+    ir.assert_structural_equal(_apply(Before), Before)
+
+
+def test_orch_collective_in_if_then_consume_after():
+    # Conservative if/else merge: a collective in either branch keeps
+    # seen_publish true for code after the if, so consume_step is marked even
+    # when the collective ran only on one path at runtime.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def collective_kernel(
+            self,
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+        ) -> pld.DistributedTensor[[1, N], pl.FP32]:
+            pl.func_attr({"builtin_template_dir": ":pypto.runtime.builtins.collectives.all_to_all_v"})
+            return data
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
+            pl.write(out, [0, 0], val)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+            recv: pld.DistributedTensor[[1, 1], pl.INT32],
+            run: pl.Scalar[pl.BOOL],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            if run:
+                data = self.collective_kernel(data)
+            else:
+                pass
+            return self.consume_step(recv, out)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def collective_kernel(
+            self,
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+        ) -> pld.DistributedTensor[[1, N], pl.FP32]:
+            pl.func_attr({"builtin_template_dir": ":pypto.runtime.builtins.collectives.all_to_all_v"})
+            return data
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            pl.system.cacheinvalid()
+            pl.system.fence()
+            val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
+            pl.write(out, [0, 0], val)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+            recv: pld.DistributedTensor[[1, 1], pl.INT32],
+            run: pl.Scalar[pl.BOOL],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            if run:
+                data = self.collective_kernel(data)
+            else:
+                pass
+            return self.consume_step(recv, out)
+
+    ir.assert_structural_equal(_apply(Before), Expected)
+
+
+def test_orch_collective_consume_prologue_idempotent():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def collective_kernel(
+            self,
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+        ) -> pld.DistributedTensor[[1, N], pl.FP32]:
+            pl.func_attr({"builtin_template_dir": ":pypto.runtime.builtins.collectives.all_to_all_v"})
+            return data
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
+            pl.write(out, [0, 0], val)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+            recv: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            data = self.collective_kernel(data)
+            return self.consume_step(recv, out)
+
+    once = _apply(Before)
+    twice = _apply(once)
+    ir.assert_structural_equal(twice, once)
 
 
 def test_orchestration_function_untouched():
