@@ -329,10 +329,31 @@ class TestMxScaleMemSpaces:
         with pytest.raises(ValueError, match="tensor.slice does not support MX-layout tensors"):
             tensor.slice(source, [8, 8], [1, 0])
 
-    def test_store_rejects_mx_destination(self):
+    @pytest.mark.parametrize(
+        ("destination_layout", "shape", "source_memory", "message"),
+        [
+            (ir.TensorLayout.MX_A_ZZ, (16, 16), ir.MemorySpace.RightScale, "row_major/row_major/32"),
+            (ir.TensorLayout.MX_B_NN, (16, 16), ir.MemorySpace.LeftScale, "col_major/col_major/32"),
+        ],
+    )
+    def test_store_rejects_cross_side_mx_scale_orientation(
+        self, destination_layout, shape, source_memory, message
+    ):
+        destination = _mx_tensor_var("destination", *shape, layout=destination_layout)
+        source = _tile_var(_const_shape(*shape), DataType.FP8E8M0, memory=source_memory)
+        with pytest.raises(ValueError, match=message):
+            tile.store(source, [0, 0], destination)
+
+    def test_store_rejects_non_scale_tile_for_mx_destination(self):
+        destination = _mx_tensor_var("destination", 16, 8)
+        source = _tile_var(_const_shape(16, 8), DataType.FP16, memory=ir.MemorySpace.LeftScale)
+        with pytest.raises(ValueError, match="requires an FP8E8M0 source tile"):
+            tile.store(source, [0, 0], destination)
+
+    def test_store_rejects_unboxed_tile_for_mx_destination(self):
         destination = _mx_tensor_var("destination", 16, 8)
         source = _tile_var(_const_shape(16, 8), DataType.FP8E8M0, memory=ir.MemorySpace.Vec)
-        with pytest.raises(ValueError, match="tile.store does not support MX-layout"):
+        with pytest.raises(ValueError, match="requires a fractal-32 source tile"):
             tile.store(source, [0, 0], destination)
 
     def test_mscatter_rejects_mx_destination(self):

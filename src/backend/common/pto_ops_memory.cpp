@@ -235,6 +235,28 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     partition_view = EmitPartitionViewPTO(output_tensor->name_hint_, tensor_view, tensor_view_type,
                                           partition_type, GetIndexOffsetCodes(offset_elems, codegen),
                                           GetSizeCodes(shape_elems, codegen), codegen);
+  } else if (tensor_type->tensor_view_.has_value() &&
+             ir::IsMxTensorLayout(tensor_type->tensor_view_->layout)) {
+    // MX scale tiles are logically [M,G] / [G,N], while their GM destination
+    // is the rank-5 SFractal view made explicit by BlockMxScaleTensorViews.
+    // A DMA store addresses that physical box directly. Each source scale
+    // tile must cover complete 16x2 boxes, so its logical valid extents map
+    // one-to-one onto a rank-5 partition with the same byte count.
+    auto height = As<ir::ConstInt>(valid_shape[0]);
+    auto width = As<ir::ConstInt>(valid_shape[1]);
+    INTERNAL_CHECK_SPAN(height && width && height->value_ > 0 && width->value_ > 0, op->span_)
+        << "MX tile.store requires static positive scale-tile valid dimensions";
+    const bool is_a = tensor_type->tensor_view_->layout == ir::TensorLayout::MX_A_ZZ;
+    const int64_t row_extent = is_a ? height->value_ : width->value_;
+    const int64_t group_extent = is_a ? width->value_ : height->value_;
+    INTERNAL_CHECK_SPAN(row_extent % 16 == 0 && group_extent % 2 == 0, op->span_)
+        << "MX tile.store requires complete 16x2 scale boxes";
+    const std::vector<std::string> physical_shape = {"1", std::to_string(row_extent / 16),
+                                                     std::to_string(group_extent / 2), "16", "2"};
+    partition_type = MakePartitionTensorViewType(physical_shape, dtype_str);
+    partition_view =
+        EmitPartitionViewPTO(output_tensor->name_hint_, tensor_view, tensor_view_type, partition_type,
+                             GetIndexOffsetCodes(offsets_tuple->elements_, codegen), physical_shape, codegen);
   } else {
     // Standard 1D/2D path
     std::string height_dim = "?", width_dim = "?";

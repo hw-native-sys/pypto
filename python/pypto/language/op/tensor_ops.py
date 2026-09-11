@@ -34,6 +34,8 @@ __all__ = [
     "arange",
     "random",
     "matmul",
+    "quant_mx",
+    "matmul_mx",
     "matmul_acc",
     "mul",
     "muls",
@@ -737,6 +739,69 @@ def matmul(
     rhs_expr = rhs.unwrap()
     call_expr = _ir_ops.matmul(lhs_expr, rhs_expr, out_dtype, a_trans, b_trans, c_matrix_nz)
     return Tensor(expr=call_expr)
+
+
+def quant_mx(
+    src: Tensor,
+    *,
+    group_axis: int,
+    dtype: DataType = DataType.FP8E4M3FN,
+) -> tuple[Tensor, Tensor]:
+    """Quantize a 2D tensor to MXFP8 data and its packed FP8E8M0 scale.
+
+    ``group_axis=1`` produces A-oriented ``[M, K]`` data and an
+    ``MX_A_ZZ`` scale tensor ``[M, K/32]``. ``group_axis=0`` accepts B input
+    ``[N, K]`` and produces Cube-oriented ``[K, N]`` data plus ``MX_B_NN``
+    scale ``[K/32, N]``.
+
+    Args:
+        src: Source tensor. Must be a static-rank 2D FP32 tensor.
+        group_axis: Quantization group axis. Use ``1`` for A/LHS data and ``0``
+            for B/RHS data.
+        dtype: Quantized MX data dtype. Defaults to ``FP8E4M3FN``.
+
+    Returns:
+        A pair ``(data, scale)``. ``data`` is the quantized MX tensor and
+        ``scale`` is the packed FP8E8M0 MX scale tensor with the orientation
+        implied by ``group_axis``.
+
+    Raises:
+        ValueError: If ``src`` is not a supported static 2D FP32 tensor, the
+            grouped dimension is not divisible by 32, ``group_axis`` is not
+            supported, or ``dtype`` is not a supported MX data dtype.
+    """
+    call_expr = _ir_ops.quant_mx(src.unwrap(), group_axis=group_axis, dtype=dtype)
+    span = call_expr.span
+    return (
+        Tensor(expr=_ir_core.TupleGetItemExpr(call_expr, 0, span)),
+        Tensor(expr=_ir_core.TupleGetItemExpr(call_expr, 1, span)),
+    )
+
+
+def matmul_mx(lhs: Tensor, lhs_scale: Tensor, rhs: Tensor, rhs_scale: Tensor) -> Tensor:
+    """MXFP8 matrix multiplication returning an FP32 tensor.
+
+    Inputs must use the oriented outputs of :func:`quant_mx`: A data/scale as
+    ``[M, K]`` / ``MX_A_ZZ[M, K/32]`` and B data/scale as
+    ``[K, N]`` / ``MX_B_NN[K/32, N]``.
+
+    Args:
+        lhs: A-side quantized data tensor with shape ``[M, K]``.
+        lhs_scale: A-side ``MX_A_ZZ`` FP8E8M0 scale tensor with shape
+            ``[M, K/32]``.
+        rhs: B-side quantized data tensor with shape ``[K, N]``.
+        rhs_scale: B-side ``MX_B_NN`` FP8E8M0 scale tensor with shape
+            ``[K/32, N]``.
+
+    Returns:
+        FP32 result tensor with shape ``[M, N]``.
+
+    Raises:
+        ValueError: If the operands are not supported static 2D MX tensors, the
+            M/N/K dimensions are inconsistent, K is not divisible by 32, or the
+            scale tensors have the wrong dtype, shape, or MX layout.
+    """
+    return Tensor(expr=_ir_ops.matmul_mx(lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap()))
 
 
 def matmul_acc(

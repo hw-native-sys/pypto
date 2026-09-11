@@ -411,9 +411,43 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
       << "The operator " << op_name
       << " requires third argument to be a TensorType or DistributedTensorType, but got "
       << args[2]->GetType()->TypeName();
-  CHECK_SPAN(!output_tensor_type->tensor_view_ || !IsMxTensorLayout(output_tensor_type->tensor_view_->layout),
-             args[2]->span_)
-      << "The operator " << op_name << " does not support MX-layout output tensors";
+  // MX scale tensors are written in their logical 2-D coordinates here. The
+  // BlockMxScaleTensorViews pass converts both the destination and these
+  // coordinates to the packed rank-5 SFractal representation before codegen.
+  // Validate the hardware-facing source contract here so malformed authored
+  // stores remain user errors rather than surfacing as pass/codegen invariants.
+  if (output_tensor_type->tensor_view_ && IsMxTensorLayout(output_tensor_type->tensor_view_->layout)) {
+    const TensorLayout destination_layout = output_tensor_type->tensor_view_->layout;
+    const TileView source_view = tile_view_semantics::GetEffectiveTileView(*tile_type);
+    CHECK_SPAN(tile_type->dtype_ == DataType::FP8E8M0, args[0]->span_)
+        << "The operator " << op_name << " into an MX-layout tensor requires an FP8E8M0 source tile, but got "
+        << tile_type->dtype_.ToString();
+    CHECK_SPAN(source_view.fractal == tile_view_semantics::kMXScaleFractal, args[0]->span_)
+        << "The operator " << op_name << " into an MX-layout tensor requires a fractal-32 source tile";
+
+    const bool is_a = destination_layout == TensorLayout::MX_A_ZZ;
+    const TileLayout required_layout = is_a ? TileLayout::row_major : TileLayout::col_major;
+    CHECK_SPAN(source_view.blayout == required_layout && source_view.slayout == required_layout,
+               args[0]->span_)
+        << "The operator " << op_name << " requires source "
+        << (is_a ? "row_major/row_major/32" : "col_major/col_major/32") << " for "
+        << TensorLayoutToString(destination_layout) << " destination";
+
+    CHECK_SPAN(source_view.valid_shape.size() == 2, args[0]->span_)
+        << "The operator " << op_name << " into an MX-layout tensor requires a 2D source tile";
+    auto rows = As<ConstInt>(source_view.valid_shape[0]);
+    auto cols = As<ConstInt>(source_view.valid_shape[1]);
+    CHECK_SPAN(rows && cols && rows->value_ > 0 && cols->value_ > 0, args[0]->span_)
+        << "The operator " << op_name
+        << " into an MX-layout tensor requires static positive source valid dimensions";
+    const int64_t row_alignment =
+        is_a ? tile_view_semantics::kMXSFractalRows : tile_view_semantics::kMXSFractalCols;
+    const int64_t col_alignment =
+        is_a ? tile_view_semantics::kMXSFractalCols : tile_view_semantics::kMXSFractalRows;
+    CHECK_SPAN(rows->value_ % row_alignment == 0 && cols->value_ % col_alignment == 0, args[0]->span_)
+        << "The operator " << op_name << " requires complete " << row_alignment << "x" << col_alignment
+        << " MX scale boxes, but got source valid shape [" << rows->value_ << ", " << cols->value_ << "]";
+  }
 
   // Optional fourth argument (when 4 args total) must be a shapes tuple
   MakeTuplePtr shapes_tuple;
