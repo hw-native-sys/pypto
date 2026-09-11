@@ -44,6 +44,8 @@ stride 就得到物理 GlobalTensor stride，因此本 pass 之后
 - 参数、返回值、tuple、变量、迭代参数、Call 与 Submit 中递归出现的
   `TensorType` 槽位；
 - `tile.load` 的 offset 和 shape，使其使用 rank-5 坐标；
+- `tile.store` 的 MX-scale 目标和可选 partition shape，使其使用对应的 rank-5
+  坐标；store 必须写完整的 FP8E8M0 16x2 box；
 - 物理 `valid_shape` 参数，使其保持完整对齐 load box，同时把缩窄的逻辑
   `TileType.valid_shape` 保留为 tile 元数据；
 - 两个方向的 FP8E8M0 有 shape `tensor.view` 别名：ND-to-MX 与 MX-to-ND；
@@ -86,7 +88,8 @@ callee 参数必须在每一个 caller 中都可证明。调用映射缺失或�
 | tensor 级部分 `valid_shape` | 拒绝 |
 | load 级缩窄 `valid_shape` | 保留为 tile 元数据；物理 box 仍完整 |
 | 原始 IR 中 `target_memory != Mat` 或缺失 | 拒绝；公开 `pl.load` 会将省略的 target 补为 `Mat` |
-| MX tensor 被不支持的算子使用或作为 store 目标 | 拒绝 |
+| MX tensor 被不支持的算子使用 | 拒绝 |
+| 写入完整 FP8E8M0 16x2 scale box 的 `tile.store` | 改写为 rank-5 MX 目标 |
 | 有 shape 的 FP8E8M0 ND/MX backing alias | 改写 |
 | distributed MX tensor | 拒绝 |
 

@@ -1323,6 +1323,41 @@ void OpConversionRegistry::RegisterMatmulOps() {
         {BridgeSpaceOf({"tile.matmul", "tile.batch_matmul"}, 1), "b_trans", /*cube_m_axis=*/false,
          /*m_align_from_arg=*/std::nullopt, /*cube_n_axis=*/true}}});
 
+  // tensor.quant_mx: materialize the source in Vec and preserve the paired
+  // tuple result. The normal return-store path writes each projection to its
+  // own GM output when the values leave the InCore function; when they feed a
+  // tensor.matmul_mx below, the bridge instead keeps them on chip and the
+  // mixed-kernel expansion recognizes the direct V2C hand-off.
+  RegisterCustom(
+      "tensor.quant_mx",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        INTERNAL_CHECK_SPAN(args.size() == 1, span) << "tensor.quant_mx conversion expects one source";
+        return ConversionResult{OpRegistry::GetInstance().Create("tile.tquant_mx", args, kwargs, span)};
+      },
+      {{0, {BridgeSpaceOf({"tile.tquant_mx"}, 0), std::nullopt}}});
+
+  // tensor.matmul_mx: all four operands are loaded to Mat. InferTileMemorySpace
+  // then promotes data to Left/Right and scale tiles to LeftScale/RightScale.
+  // Keeping the scale inputs explicit is important: their MX TensorLayout
+  // selects TLoadMxCube* rather than an ordinary byte load.
+  RegisterCustom(
+      "tensor.matmul_mx",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        INTERNAL_CHECK_SPAN(args.size() == 4, span)
+            << "tensor.matmul_mx conversion expects lhs, lhs_scale, rhs, rhs_scale";
+        INTERNAL_CHECK_SPAN(kwargs.empty(), span)
+            << "tensor.matmul_mx conversion accepts no keyword arguments";
+        return ConversionResult{OpRegistry::GetInstance().Create("tile.matmul_mx", args, span)};
+      },
+      {{0, {BridgeSpaceOf({"tile.matmul_mx"}, 0), std::nullopt, /*cube_m_axis=*/true}},
+       {1, {BridgeSpaceOf({"tile.matmul_mx"}, 1), std::nullopt}},
+       {2,
+        {BridgeSpaceOf({"tile.matmul_mx"}, 2), std::nullopt, /*cube_m_axis=*/false,
+         /*m_align_from_arg=*/std::nullopt, /*cube_n_axis=*/true}},
+       {3, {BridgeSpaceOf({"tile.matmul_mx"}, 3), std::nullopt}}});
+
   // tensor.matmul_acc: 2D × 2D × 2D → tile.matmul_acc; any operand ≥3D →
   // tile.batch_matmul_acc. Same a_trans/b_trans handling as tensor.matmul.
   RegisterCustom(

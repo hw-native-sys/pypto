@@ -451,16 +451,19 @@ class BlockMxMutator : public IRMutator {
 
     const bool is_function_call = static_cast<bool>(As<GlobalVar>(op->op_));
     if (!mx_args.empty() && !is_function_call) {
-      CHECK_SPAN(!IsOp(op, "tile.store"), op->span_)
-          << "MX layout is read-only: an MX scale tensor cannot be a store destination.";
+      const bool is_store_destination = IsOp(op, "tile.store") && mx_args.size() == 1 && mx_args[0] == 2;
       const bool is_load_source = IsOp(op, "tile.load") && mx_args.size() == 1 && mx_args[0] == 0;
       const bool is_backing_alias = IsOp(op, "tensor.view") && mx_args.size() == 1 && mx_args[0] == 0;
-      CHECK_SPAN(is_load_source || is_backing_alias, op->span_)
-          << "MX layout currently supports only 'tile.load' and shaped FP8E8M0 'tensor.view' backing "
-          << "aliases reading the tensor as their source, but it is used by '" << op->op_->name_
-          << "' at argument " << mx_args[0] << ".";
+      CHECK_SPAN(is_load_source || is_store_destination || is_backing_alias, op->span_)
+          << "MX layout currently supports only 'tile.load', 'tile.store', and shaped FP8E8M0 "
+             "'tensor.view' backing aliases, but it is used by '"
+          << op->op_->name_ << "' at argument " << mx_args[0] << ".";
       if (is_load_source) {
         new_args = BlockMxTileLoadArgs(op, std::move(new_args));
+        args_changed = true;
+      }
+      if (is_store_destination) {
+        new_args = BlockMxTileStoreArgs(op, std::move(new_args));
         args_changed = true;
       }
     }
@@ -553,6 +556,30 @@ class BlockMxMutator : public IRMutator {
     args[1] = BlockMxTupleArg(args[1], layout, op->span_, /*is_offsets=*/true, facts_);
     args[2] = BlockMxTupleArg(args[2], layout, op->span_, /*is_offsets=*/false, facts_);
     if (args.size() >= 4) args[3] = args[2];
+    return args;
+  }
+
+  std::vector<ExprPtr> BlockMxTileStoreArgs(const CallPtr& op, std::vector<ExprPtr> args) {
+    INTERNAL_CHECK_SPAN(args.size() == 3 || args.size() == 4, op->span_)
+        << "Internal error: tile.store expects (tile, offsets, tensor[, shapes])";
+    auto src = As<TileType>(args[0]->GetType());
+    INTERNAL_CHECK_SPAN(src && src->dtype_ == DataType::FP8E8M0, op->span_)
+        << "MX tile.store requires an FP8E8M0 scale tile source";
+    const TileView src_view = tile_view_semantics::GetEffectiveTileView(*src);
+    INTERNAL_CHECK_SPAN(src_view.fractal == tile_view_semantics::kMXScaleFractal, op->span_)
+        << "MX tile.store requires a fractal-32 scale tile source";
+    auto tensor = AsVarLike(args[2]);
+    auto tensor_type = AsTensorTypeLike(tensor->GetType());
+    INTERNAL_CHECK_SPAN(tensor_type, op->span_)
+        << "Internal error: MX tile.store destination must carry a TensorType";
+    const auto& maybe_view = tensor_type->tensor_view_;
+    INTERNAL_CHECK_SPAN(maybe_view.has_value(), op->span_)
+        << "Internal error: MX tile.store destination must carry a TensorView";
+    const TensorLayout layout = maybe_view->layout;
+    INTERNAL_CHECK_SPAN(IsMxTensorLayout(layout), op->span_)
+        << "Internal error: MX tile.store destination must use an MX layout";
+    args[1] = BlockMxTupleArg(args[1], layout, op->span_, /*is_offsets=*/true, facts_);
+    if (args.size() == 4) args[3] = BlockMxTupleArg(args[3], layout, op->span_, /*is_offsets=*/false, facts_);
     return args;
   }
 

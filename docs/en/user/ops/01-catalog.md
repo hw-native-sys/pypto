@@ -128,7 +128,7 @@ tile depend on the pad value; see
 
 | Operator | Reach | What it does |
 | -------- | ----- | ------------ |
-| `quant_mx` | `pl.` (t) | Ascend950 MXFP8 block-32 dynamic quantization to FP8E4M3FN data plus FP8E8M0 scales (`group_axis` = PTOAS `grpAxis`). MXFP4 quant is out of scope for this release. May feed `matmul_mx` in one InCore mixed task through direct data+scale V2C transport (see [types](../language/00-types.md)) |
+| `quant_mx` | `pl.` (T/t) | Ascend950 MXFP8 block-32 dynamic quantization to FP8E4M3FN data plus FP8E8M0 scales (`group_axis` = PTOAS `grpAxis`). Tensor calls materialize GM data and MX-layout scales; tile calls stay on-chip. MXFP4 quant is out of scope. A direct tensor quant→matmul chain may use data+scale V2C transport (see [types](../language/00-types.md)) |
 | `tmov_x2zz` | `pl.` (t) | Ascend950 exponent X-to-ZZ layout conversion (UINT8). Workspace `tmp` is write-only; axis1 needs `dst_rows`/`dst_cols` for ZZ `[M,G]` over flat TQUANT exp. Typically used via `quant_mx` lowering rather than directly |
 
 ## Linear algebra
@@ -140,7 +140,7 @@ tile depend on the pad value; see
 | [`matmul_bias`][pypto.language.tile.matmul_bias] | `pl.` (t) | Multiply with a bias operand |
 | [`batch_matmul`][pypto.language.batch_matmul] | `pl.` (t) | Batched multiply, **tile operands only**. For tensors call `pl.matmul` — rank > 2 dispatches to `tile.batch_matmul` during lowering |
 | [`gemv`][pypto.language.tile.gemv] [`gemv_acc`][pypto.language.tile.gemv_acc] [`gemv_bias`][pypto.language.tile.gemv_bias] | `pl.` (t) | Matrix-vector forms |
-| [`matmul_mx`][pypto.language.tile.matmul_mx] [`matmul_mx_acc`][pypto.language.tile.matmul_mx_acc] [`matmul_mx_bias`][pypto.language.tile.matmul_mx_bias] | `pl.` (t) | A5 MX block-scale multiply — data tiles reaching the op must be FP8E4M3FN; the supported FP4-input form is FP4×FP8, with the FP4 lhs explicitly cast to FP8 first; native FP4×FP4 is unsupported |
+| [`matmul_mx`][pypto.language.matmul_mx] [`matmul_mx_acc`][pypto.language.tile.matmul_mx_acc] [`matmul_mx_bias`][pypto.language.tile.matmul_mx_bias] | `pl.` (T/t) | A5 MX block-scale multiply. Tensor `matmul_mx` consumes oriented 2D data/scale tensors and returns FP32; `_acc` / `_bias` remain tile-only. Data reaching the op must be FP8E4M3FN; native FP4×FP4 is unsupported |
 
 For phased GEMV accumulation, select producer phases with `pl.AccPhase`. A producer
 ending with `pl.AccPhase.Final` must be paired with a store using `pl.STPhase.Final`:

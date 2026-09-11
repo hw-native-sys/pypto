@@ -452,6 +452,67 @@ def matmul(
     return _ir_core.create_op_call("tensor.matmul", args, kwargs, actual_span)
 
 
+def quant_mx(
+    src: Expr,
+    *,
+    group_axis: int,
+    dtype: DataType = DataType.FP8E4M3FN,
+    span: Span | None = None,
+) -> Call:
+    """Quantize a 2D GM tensor into MXFP8 data and an MX scale tensor.
+
+    Args:
+        src: Source tensor expression. Must be a static-rank 2D FP32 tensor.
+        group_axis: Quantization group axis. ``1`` produces A-oriented data
+            and an ``MX_A_ZZ`` scale tensor; ``0`` produces B-oriented data
+            and an ``MX_B_NN`` scale tensor.
+        dtype: Quantized data dtype. Defaults to ``FP8E4M3FN``.
+        span: Optional source span for debugging (auto-captured if not provided).
+
+    Returns:
+        Call expression whose result is ``(quantized_data, scale)``.
+
+    Raises:
+        ValueError: If ``src`` is not a supported 2D floating tensor, the
+            grouped dimension is not statically divisible by 32, ``group_axis``
+            is not supported, or ``dtype`` is not a supported MX data dtype.
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(
+        "tensor.quant_mx", [src], {"group_axis": group_axis, "dtype": dtype}, actual_span
+    )
+
+
+def matmul_mx(
+    lhs: Expr,
+    lhs_scale: Expr,
+    rhs: Expr,
+    rhs_scale: Expr,
+    span: Span | None = None,
+) -> Call:
+    """MXFP8 matrix multiplication of oriented GM data and scale tensors.
+
+    Args:
+        lhs: A-side quantized data tensor with shape ``[M, K]``.
+        lhs_scale: A-side ``MX_A_ZZ`` FP8E8M0 scale tensor with shape
+            ``[M, K/32]``.
+        rhs: B-side quantized data tensor with shape ``[K, N]``.
+        rhs_scale: B-side ``MX_B_NN`` FP8E8M0 scale tensor with shape
+            ``[K/32, N]``.
+        span: Optional source span for debugging (auto-captured if not provided).
+
+    Returns:
+        Call expression for the FP32 ``[M, N]`` result tensor.
+
+    Raises:
+        ValueError: If data tensors are not static 2D MX data tensors, the inner
+            dimensions do not agree, the K dimension is not divisible by 32, or
+            either scale tensor has the wrong dtype, shape, or MX layout.
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.matmul_mx", [lhs, lhs_scale, rhs, rhs_scale], {}, actual_span)
+
+
 def matmul_acc(
     acc: Expr,
     lhs: Expr,

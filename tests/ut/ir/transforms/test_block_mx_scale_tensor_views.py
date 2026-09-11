@@ -136,6 +136,42 @@ def test_blocks_mx_a_and_b_shapes_and_load_windows():
         assert _values(_elements(load.args[2])) == [1, 1, 1, 16, 2]
 
 
+def test_tensor_quant_mx_scale_return_materializes_a_blocked_store():
+    @pl.program
+    class Input:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(self, src: pl.Tensor[[16, 64], pl.FP16]) -> pl.Tensor[[16, 2], pl.FP8E8M0, pl.MX_A_ZZ]:
+            _data, scale = pl.quant_mx(src, group_axis=1)
+            return scale
+
+    result = _run(Input)
+    (store,) = _calls_named(result, "tile.store")
+    assert isinstance(store.args[2].type, ir.TensorType)
+    assert store.args[2].type.tensor_view is not None
+    assert store.args[2].type.tensor_view.layout == ir.TensorLayout.MX_A_ZZ
+    assert _values(store.args[2].type.shape) == [1, 1, 1, 16, 2]
+    assert _values(_elements(store.args[1])) == [0, 0, 0, 0, 0]
+
+
+def test_tensor_quant_mx_feeds_tensor_matmul_mx_as_tiles():
+    @pl.program
+    class Input:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            lhs: pl.Tensor[[16, 64], pl.FP16],
+            rhs: pl.Tensor[[32, 64], pl.BF16],
+        ) -> pl.Tensor[[16, 32], pl.FP32]:
+            lhs_data, lhs_scale = pl.quant_mx(lhs, group_axis=1)
+            rhs_data, rhs_scale = pl.quant_mx(rhs, group_axis=0)
+            return pl.matmul_mx(lhs_data, lhs_scale, rhs_data, rhs_scale)
+
+    result = _run(Input)
+    (matmul,) = _calls_named(result, "tile.matmul_mx")
+    assert len(matmul.args) == 4
+    assert all(isinstance(arg.type, ir.TileType) for arg in matmul.args)
+
+
 def test_remaps_dump_vars_when_blocking_mx_call_argument():
     @pl.program
     class Input:

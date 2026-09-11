@@ -81,7 +81,6 @@ from .tile_ops import (
     load,
     lrelu,
     matmul_bias,
-    matmul_mx,
     matmul_mx_acc,
     matmul_mx_bias,
     max,
@@ -101,9 +100,6 @@ from .tile_ops import (
     subc,
     subsc,
     tri,
-)
-from .tile_ops import (
-    quant_mx as quant_mx,
 )
 from .tile_ops import (
     tmov_x2zz as tmov_x2zz,
@@ -151,6 +147,7 @@ from .unified_ops import (
     log,
     matmul,
     matmul_acc,
+    matmul_mx,
     maximum,
     minimum,
     mrgsort,
@@ -163,6 +160,7 @@ from .unified_ops import (
     part_max,
     part_min,
     part_mul,
+    quant_mx,
     read,
     recip,
     reinterpret_view,
@@ -227,6 +225,8 @@ __all__ = [
     "transpose",
     "slice",
     "matmul",
+    "matmul_mx",
+    "quant_mx",
     "matmul_acc",
     "row_max",
     "row_sum",
@@ -273,7 +273,6 @@ __all__ = [
     "abs",
     "relu",
     "matmul_bias",
-    "matmul_mx",
     "matmul_mx_acc",
     "matmul_mx_bias",
     "gemv",
@@ -320,8 +319,7 @@ __all__ = [
     "scatter_update",
     "sin",
     "sort32",
-    # MX quantization
-    "quant_mx",
+    # MX helpers
     "tmov_x2zz",
     # Promoted tensor-only
     "arange",

@@ -110,6 +110,32 @@ class TestDtypeAndMemorySpace:
         assert ir.MemorySpace.RightScale.value == 9
 
 
+class TestTensorMatmulMx:
+    def test_tensor_matmul_mx_requires_oriented_scale_layouts(self):
+        span = ir.Span.unknown()
+        lhs = ir.Var("lhs", ir.TensorType([16, 64], pl.FP8E4M3FN), span)
+        lhs_scale = ir.Var(
+            "lhs_scale",
+            ir.TensorType([16, 2], pl.FP8E8M0, tensor_view=ir.TensorView([], ir.TensorLayout.MX_A_ZZ)),
+            span,
+        )
+        rhs = ir.Var("rhs", ir.TensorType([64, 32], pl.FP8E4M3FN), span)
+        rhs_scale = ir.Var(
+            "rhs_scale",
+            ir.TensorType([2, 32], pl.FP8E8M0, tensor_view=ir.TensorView([], ir.TensorLayout.MX_B_NN)),
+            span,
+        )
+
+        call = ir.op.tensor.matmul_mx(lhs, lhs_scale, rhs, rhs_scale)
+        assert isinstance(call.type, ir.TensorType)
+        assert call.type.dtype == pl.FP32
+        assert tuple(dim.value for dim in call.type.shape if isinstance(dim, ir.ConstInt)) == (16, 32)
+
+        bad_scale = ir.Var("bad_scale", ir.TensorType([16, 2], pl.FP8E8M0), span)
+        with pytest.raises(ValueError, match="lhs_scale layout MX_A_ZZ"):
+            ir.op.tensor.matmul_mx(lhs, bad_scale, rhs, rhs_scale)
+
+
 class TestPackedFp4Shape:
     @pytest.mark.parametrize("type_constructor", [ir.TensorType, ir.TileType, ir.DistributedTensorType])
     @pytest.mark.parametrize("shape", [[], [8, 0], [8, 15]])
