@@ -254,6 +254,14 @@ tile 调用 `set_validshape`。
   box 只有 16 行有效时，fractal `j` 会读到 `4j`（issue #2510）。超出 `validRow` 的行
   会在 slot 中保留旧数据，这正是窄化 `valid_shape` 对其无效区域给出的承诺，同时传输
   量也从整个 box 降到 `validRow` 行。
+- Vector-to-Cube 遵循同样的 producer/consumer frame 规则。非切分 dual-AIV producer
+  会按逻辑行数、完整物理列宽传输，因此 `tpop_from_aiv` 使用相同的传输范围，并在
+  `tmatmul` 或其他 cube consumer 读取之前，通过纯元数据的 `pto.treshape` 恢复 Mat tile
+  的逻辑 `valid_shape`。真正的 split 则在两个轴上都传输完整 box。该区别对带 padding 的
+  contraction tail 至关重要：若只把逻辑 K 范围 pop 到更宽的 Mat frame 中，frame 会只被
+  部分填充，随后 matmul 除第一行外的所有输出行都会静默出错。静态空 lane 仍为空，奇数
+  split 保留逐 lane operand，动态范围继续使用直接 TPOP 路径，因为 PTO 目前没有针对 pipe
+  entry 的动态纯元数据重绑定操作。
 - **切分**的 Acc-to-Vec 传输走不了这条路：lane 1 从 box 一半处开始读自己的数据段，而
   该数据段只有在 producer 写满整个 box 时才存在——但写满 box 就意味着按物理 pitch 读
   L0C，而那并不是 `mad` 使用的 pitch。二者互斥，因此行窄化的 compact 累加器跨
@@ -261,7 +269,7 @@ tile 调用 `set_validshape`。
   （窄化结果而非操作数，或让累加器经 GM 中转），而不是下降成静默错位的数据——在加入该
   拒绝之前，设备上实测 8192 个元素中有 1808 个是错的。该拒绝以 pitch 确实不同为前提，
   因此单个 fractal 行块的累加器（`ceil(validRow/16)*16 == Rows`）仍可照常跨越。
-- 当 tpop 结果的 `TileView.valid_shape` 与物理 tile shape 不一致时，PTO codegen 会生成 PTOAS 前端操作数：`%buf = pto.tpop_from_*(%valid_row, %valid_col) {[id = I, ]split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`。这同时覆盖动态表达式和 `[0, 0]` 这类静态非满形状；operand 携带后续计算和 store 使用的逻辑范围。对于静态形状、非空的部分 pop，上述 Cube-to-Vector 完整 box 传输优先，因为 `pto.treshape` 不带 valid-row/valid-col operand，只能恢复*静态*逻辑范围。
+- 当 tpop 结果的 `TileView.valid_shape` 与物理 tile shape 不一致时，PTO codegen 会生成 PTOAS 前端操作数：`%buf = pto.tpop_from_*(%valid_row, %valid_col) {[id = I, ]split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`。这同时覆盖动态表达式和 `[0, 0]` 这类静态非满形状；operand 携带后续计算和 store 使用的逻辑范围。对于静态形状、非空的部分 pop，上述 Cube-to-Vector 与 Vector-to-Cube frame 传输优先，因为 `pto.treshape` 不带 valid-row/valid-col operand，只能恢复*静态*逻辑范围。
 - 对于手写 pop 的 split consumer，`SplitVectorKernel` 会按 subblock 本地化这些动态
   tpop valid-shape operand（例如 `[16, 16]` tile 做上下切分时，全局
   `[8, 16]` 会变成 `[8, 16]` 和 `[0, 16]`）。奇数切分轴走同一条路径——`[17, 128]`
