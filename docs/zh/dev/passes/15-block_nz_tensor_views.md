@@ -266,9 +266,11 @@ shape"。因此本 pass 会在每个改写过的函数上打 `nz_tensor_views_bl
 | ≤ 0.60 | 通过结构推断 layout。分块 NZ 与 ND 在结构上完全相同（都是行主序），因此推断出 `nd` 并覆盖显式的 `nz` 标注，报 `layout mismatch: user-specified layout=nz but inferred=nd`。任何秩的 NZ view 都无法汇编。 |
 | ≥ 0.61 | 把显式的 `ND` / `DN` / `NZ` 标注视为权威并加以校验，因此上面的描述符可以汇编。它同时直接强制 NZ 的 arity：秩不为 5 的 view 会被 `'pto.make_tensor_view' op user-specified layout=nz requires a rank-5 view` 拒绝。 |
 
-`toolchain/versions.env` 目前钉的是 **v0.60**，所以在钉住的工具链上 `pl.NZ` 尚未端到端可用，
-仓库里也没有任何测试会带着 NZ 张量走到汇编器。要走通这条路径，请把 `PTOAS_ROOT`
-指向 0.61 或更高的安装。
+`toolchain/versions.env` 钉的是 **v0.61**，所以在钉住的工具链上 `pl.NZ` 已经端到端可用。
+`tests/st/runtime/ops/test_matmul_nz.py` 是这一点的保障：ND 激活乘 NZ 权重，配套的 host
+packer 负责生成 fractal 字节；此外还有切片用例分别钉住两个偏移轴——行 fractal
+(`n0 // 16`) 和 C0 列块 (`k0 // c0`)。整张量 load 的所有偏移都是 0，因此仅靠基线用例
+两者都覆盖不到。
 
 0.60 上的失败在两个方向上都是安全而非静默的：它先停在上面的 layout mismatch；
 即便越过那一步，pto-isa 的 ND→NZ `TLOAD` 路径要求 `staticShape[0..2] == 1`，
