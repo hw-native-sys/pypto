@@ -36,6 +36,70 @@ TPUT/TGET 在该侧只需要一段可读/可写的*本地* GM 区域。窗口绑
 [`UnknownType`](ir/02-types.md)：它们因跨 rank 副作用而存在，而非为消费者读取的
 SSA 值而存在。
 
+## 便捷集合通信 API —— 自动管理信号
+
+`pld.tensor.*` 集合通信每次调用都需要显式提供窗口绑定的 INT32 信号缓冲。
+便捷短形式（`pld.all_reduce`、`pld.all_gather`、`pld.reduce_scatter`、
+`pld.broadcast`、`pld.all_to_all`、`pld.all_to_all_v`、`pld.barrier`）会自动
+分配**全新且形状正确**的信号，并委托给对应的 `pld.tensor.*` HOST 内建算子：
+
+```python
+data = pld.all_reduce(data, op=pld.ReduceOp.Sum)          # mesh：无需信号（host 综合）
+data = pld.all_reduce(data, mode="ring", nranks=2)        # ring：自动分配 [2*(NR-1)+1, NR] 信号
+data = pld.all_gather(local, target)
+data = pld.reduce_scatter(target, op=pld.ReduceOp.Sum)
+data = pld.broadcast(target, root=0)
+data = pld.all_to_all(input, target)
+data = pld.all_to_all_v(input, target, send_counts, recv_counts, nranks=NR)
+sig  = pld.barrier(sig)                                    # 需要显式且已覆盖的信号
+```
+
+语义与约束：
+
+- **仅限 HOST 编排。** 这些包装基于仅 HOST 可用的 `alloc_window_buffer` /
+  `window` / `world_size` 原语；操作数为窗口绑定的 `DistributedTensor`，与
+  `pld.tensor.*` 完全一致。
+- **信号形状**按算子选择，并与 HOST 内建算子的要求一致：`broadcast` /
+  `reduce_scatter` 使用一维 `[world_size]` 信号；`all_gather` / `all_to_all`
+  使用二维 `[world_size, 1]` 信号；`all_to_all_v` 使用二维 `[nranks, 1]`
+  信号（必须提供静态 `nranks`）；`allreduce mode="mesh"` 无需信号（编译器自动
+  综合），而 `mode="ring"` 需要静态的 `[2*(NR-1)+1, NR]` 信号，因此必须提供
+  `nranks`。
+- **每次调用全新分配。** 信用屏障协议（pypto #2175，已合并）使信号自清零，可安全
+  地在连续调用间复用；包装仍每次分配新缓冲，这依然正确且是最简单的安全默认。
+- **`pld.barrier(sig)` 需要显式、已覆盖的信号**——屏障没有可继承通信域覆盖的
+  数据缓冲，自动分配的信号会被 `MaterializeCommDomainScopes` 拒绝。请传入一个
+  同时被设备标记派发消费的 INT32 窗口（参见
+  `tests/st/distributed/test_l3_host_tensor_barrier.py`）；零参自动 barrier
+  随 pypto #2243（计划 65）落地。
+- **循环（HOST 轨道）。** 包装是循环安全的：HOST 内建 kernel 会在每次调用后自清零屏障 cell（#2279 / plan 83），而 mesh `all_reduce` 的信号是编译器合成的共享信号（#2504 / plan 88）——`for` / `while` 循环内的隐式信号 allreduce 已被接受。ring 及兄弟包装会分配可复用的信号。
+- **`pld.all_to_all_v`**（HOST）需要 `builtin.tensor.all_to_all_v` 轨道
+  （pypto #2243，计划 65）；在合并之前，HOST 路径会被拒绝。
+
+### 完整流程：发布 → 集合通信 → 消费
+
+包装仅自动管理**信号**；**数据**窗口、各 rank 的发布派发与读回仍需显式编写。
+一个完整的 HOST 编排 allreduce 如下：
+
+```python
+data_buf = pld.alloc_window_buffer(64 * pl.FP32.get_byte())
+for r in pl.range(pld.world_size()):
+    data = pld.window(data_buf, [1, 64], dtype=pl.FP32)
+    self.publish_orch(inputs[r], data, device=r)   # 用户 InCore 发布步骤
+data = pld.window(data_buf, [1, 64], dtype=pl.FP32)
+data = pld.all_reduce(data, op=pld.ReduceOp.Sum)   # mesh：信号自动综合
+for r in pl.range(pld.world_size()):
+    self.consume_orch(data, outputs[r], device=r)  # 用户 InCore 消费步骤
+```
+
+只有 `pld.all_reduce` 一行与集合通信相关；发布 / 消费步骤是每个内核编写一次的
+普通跨作用域派发（完整程序见 `tests/st/distributed/test_l3_ergonomic_api.py`）。
+
+**mesh 与 ring：** 默认的 `mode="mesh"` 是直接的全对全交换 —— 最简单，适合小
+数据量。`mode="ring"` 以 `2*(NR-1)` 步流水传输数据，信号占用更小，通常在大
+数据量 / 高 NR 时更优；它需要 `nranks`（静态世界大小），目前仅支持
+`ReduceOp.Sum` + FP32。
+
 ## 命名空间：为何区分 `tile.*` / `tensor.*` / `system.*`
 
 命名空间编码的是算子所在的 IR 层级，而非随意分组：
@@ -128,7 +192,7 @@ deducer 会校验打包的 `int` 落在枚举范围内,使 codegen 无需二次�
 ## 屏障-信号协议
 
 每个 `pld.tensor.*` 集合通信算子（`allreduce`、`barrier`、`broadcast`、
-`reduce_scatter`、`allgather`、`all_to_all`）都使用同一个**自清理信用屏障**
+`reduce_scatter`、`allgather`、`all_to_all`、`all_to_all_v`）都使用同一个**自清理信用屏障**
 （self-clearing credit barrier）进行同步，该屏障由 `pld.system.notify` /
 `pld.system.wait` 构建：
 
