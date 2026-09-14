@@ -32,9 +32,40 @@ PyPTO (pronounced: pai p-t-o) is a high-performance programming framework for AI
 - **nanobind**: Version 2.0.0 or higher (automatically installed during build)
 - **scikit-build-core**: Version 0.10.0 or higher (automatically installed during build)
 
+These apply to a from-source install. The development container below carries all of
+them, and needs none of them on the host.
+
 ### Installation
 
-#### Install from Source
+#### Option A: Development Container (Ascend A2/A3)
+
+The fastest path on a machine with an Ascend card. CANN, PyPTO, `simpler`, and ptoas are
+already built into the image, so there is no toolchain to assemble.
+
+The host has to supply three things first: an Ascend NPU driver (26.0.rc1), Docker Engine,
+and Ascend Docker Runtime — the plugin that makes `--runtime=ascend` below work at all.
+[Development Container](docs/en/user/04-dev-container.md) carries the install and
+verification steps for each, and is also where card selection, keeping your source across
+containers, and device troubleshooting are covered.
+
+With those in place, pull the image and start a container on card 0. The registry allows
+anonymous pulls, so no login is needed:
+
+```bash
+export PYPTO_IMAGE=swr.cn-east-3.myhuaweicloud.com/cloud-pypto/pypto-dev:a3-dist
+docker pull "$PYPTO_IMAGE"
+
+docker run --rm -it \
+  --runtime=ascend \
+  -e ASCEND_VISIBLE_DEVICES=0 \
+  --shm-size=16g \
+  "$PYPTO_IMAGE"
+```
+
+Inside the container, `pypto-doctor` checks the environment and
+`python $PYPTO_SRC/examples/beginner/01_hello_world.py` runs a kernel on the card.
+
+#### Option B: Install from Source
 
 1. **Clone the repository**:
 
