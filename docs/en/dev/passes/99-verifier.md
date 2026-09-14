@@ -262,13 +262,14 @@ remain, but cannot consume or produce buffer handles. Buffer references in call,
 function, scope, or loop attributes are rejected, including references nested
 inside expression-valued attributes, because storage effects must name ordinary operands.
 The same restriction applies to expression-valued type metadata (shapes, views,
-and GM MemRef bases, offsets, and slot indices) and the SPMD core count.
+GM MemRef bases, offsets, and slot indices, and WindowBuffer back-reference
+bases and sizes) and the SPMD core count.
 Scalar GM metadata and its ordinary pointer carrier remain valid.
 `Submit` cannot consume or produce device buffer handles either.
 
 The check composes the existing `SSAVerify`, `UseAfterDefCheck`, and
 `AssignTypeSymmetry` verifiers on device functions only. These diagnostics retain
-their existing rule names. Dominance uses strict lexical scopes: definitions
+their existing rule names. Use-after-definition checks use strict lexical scopes: definitions
 inside a branch cannot escape through the legacy form without region results.
 Representation and registered-call errors use the
 `BufferIR` rule. This foundation does **not** prove borrow lifetimes, overlap

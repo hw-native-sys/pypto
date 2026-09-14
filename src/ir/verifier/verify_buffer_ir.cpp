@@ -273,6 +273,16 @@ class BufferIRVisitor : public IRVisitor {
 
   bool ContainsBuffer(const TypePtr& type) { return (SummarizeType(type) & kBuffer) != 0; }
 
+  // Exempt only the allocation's own Ptr carrier. Child expressions still
+  // undergo representation checks and cannot hide buffer references.
+  void VisitStorageBase(const ExprPtr& base) {
+    if (base && As<PtrType>(base->GetType())) {
+      IRVisitor::VisitExpr(base);
+    } else {
+      VisitExpr(base);
+    }
+  }
+
   void CheckTypeMetadata(const TypePtr& type) {
     if (!type || !checked_metadata_types_.insert(type.get()).second) return;
     // Traverse tuple elements through this memoized entry point: a shared
@@ -289,15 +299,18 @@ class BufferIRVisitor : public IRVisitor {
     if (auto tensor = AsTensorTypeLike(type); tensor && tensor->memref_ && *tensor->memref_) {
       const auto& memref = *tensor->memref_;
       if (checked_gm_memrefs_.insert(memref.get()).second) {
-        // Exempt only the GM allocation's own Ptr carrier. Its child
-        // expressions, and every offset expression, still use the ordinary
-        // representation checks and cannot hide buffer references.
-        if (memref->base_ && As<PtrType>(memref->base_->GetType())) {
-          IRVisitor::VisitExpr(memref->base_);
-        } else {
-          VisitExpr(memref->base_);
-        }
+        VisitStorageBase(memref->base_);
         VisitExpr(memref->byte_offset_);
+      }
+    }
+    if (auto tensor = As<DistributedTensorType>(type);
+        tensor && tensor->window_buffer_ && *tensor->window_buffer_) {
+      const auto& window = *tensor->window_buffer_;
+      // WindowBuffer is a leaf in the base visitor. Inspect its back-reference
+      // fields explicitly, once even when several tensor views share it.
+      if (checked_window_buffers_.insert(window.get()).second) {
+        VisitStorageBase(window->base_);
+        VisitExpr(window->size_);
       }
     }
     attribute_context_ = std::move(previous_context);
@@ -333,6 +346,7 @@ class BufferIRVisitor : public IRVisitor {
   std::unordered_map<const Type*, uint8_t> type_flags_;
   std::unordered_set<const Type*> checked_metadata_types_;
   std::unordered_set<const MemRef*> checked_gm_memrefs_;
+  std::unordered_set<const WindowBuffer*> checked_window_buffers_;
   std::unordered_set<const Var*> buffer_parameters_;
   const Call* statement_call_ = nullptr;
   bool statement_assigns_result_ = false;
@@ -357,7 +371,7 @@ class BufferIRPropertyVerifierImpl : public PropertyVerifier {
       if (!visitor.HasMalformedStructure()) functions.push_back(function);
     }
     if (functions.empty()) return;
-    // Existing verifiers own binding and dominance algorithms. Restrict their
+    // Existing verifiers own binding and lexical definition checks. Restrict their
     // input to device functions so this property leaves orchestration alone.
     auto device_program = std::make_shared<Program>(functions, program->name_, program->span_);
     CreateSSAPropertyVerifier()->Verify(device_program, diagnostics);

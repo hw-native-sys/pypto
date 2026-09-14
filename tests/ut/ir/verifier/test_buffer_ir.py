@@ -182,6 +182,40 @@ def test_gm_pointer_carrier_exemption_does_not_hide_child_buffer_reference():
     _assert_error(_program(params=[tensor]), "Type metadata cannot carry buffer handles")
 
 
+@pytest.mark.parametrize("multi", [False, True])
+@pytest.mark.parametrize("field", ["base", "size", "wrapped_base", "wrapped_size"])
+@pytest.mark.parametrize("nested_return", [False, True])
+def test_window_buffer_metadata_cannot_hide_buffer_references(multi, field, nested_return):
+    """Check shared window back-references in parameters and nested return types."""
+    hidden_type = ir.MultiBufferType(_buffer_type(), 2) if multi else _buffer_type()
+    hidden = _var("hidden", hidden_type)
+    base = hidden if field == "base" else _var("window_base", ir.PtrType())
+    size = hidden if field == "size" else _int(2048)
+    if field == "wrapped_base":
+        base = ir.IterArg("window_base", ir.PtrType(), hidden, SPAN)
+    elif field == "wrapped_size":
+        size = ir.Add(hidden, _int(4), DataType.INDEX, SPAN)
+    window = ir.WindowBuffer(base, size, span=SPAN)
+    first = ir.DistributedTensorType([_int(16)], DataType.FP32, window)
+    second = ir.DistributedTensorType([_int(32)], DataType.FP32, window)
+    if nested_return:
+        program = _program(returns=[ir.TupleType([ir.TupleType([first, second])])])
+    else:
+        program = _program(params=[_var("first", first), _var("second", second)])
+    _assert_error(program, "Type metadata cannot carry buffer handles")
+
+
+@pytest.mark.parametrize("symbolic_size", [False, True])
+def test_window_buffer_pointer_and_scalar_metadata_remain_valid(symbolic_size):
+    """Window allocation pointers and scalar sizes stay legal for shared views."""
+    size = _var("bytes", ir.ScalarType(DataType.INDEX)) if symbolic_size else _int(2048)
+    window = ir.WindowBuffer(_var("window_base", ir.PtrType()), size, span=SPAN)
+    first = _var("first", ir.DistributedTensorType([_int(16)], DataType.FP32, window))
+    second = _var("second", ir.DistributedTensorType([_int(32)], DataType.FP32, window))
+    params = [size, first, second] if symbolic_size else [first, second]
+    assert _verify(_program(ir.ReturnStmt([first], SPAN), params, [first.type])) == []
+
+
 @pytest.mark.parametrize("tensor_type", [ir.TensorType, ir.DistributedTensorType])
 def test_scalar_gm_type_metadata_remains_valid(tensor_type):
     extent = _var("extent", ir.ScalarType(DataType.INDEX))

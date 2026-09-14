@@ -137,7 +137,8 @@ enum class IRProperty : uint64_t {
                          ///< boundary
   AivSplitLoweredValid,  ///< Lowered split regions or flat split bodies have valid cross-core boundaries
   BufferIR,              ///< InCore/AIC/AIV use explicit buffer handles and valid registered buffer calls;
-             ///< composes SSA, dominance, and assignment symmetry, not lifetime or initialization checks
+             ///< composes SSA, lexical use-after-definition, and assignment symmetry, not lifetime or
+             ///< initialization checks
   kCount  ///< Sentinel (must be last)
 };
 
