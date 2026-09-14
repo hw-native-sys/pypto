@@ -337,6 +337,40 @@ def test_non_index_for_induction_fails_before_emission(dtype):
         _emit(_program([loop]))
 
 
+@pytest.mark.parametrize("dtype", [DataType.INDEX, DataType.INT32, DataType.INT64])
+@pytest.mark.parametrize("expression", [False, True])
+def test_runtime_for_step_fails_before_emission(dtype, expression):
+    step_param = _scalar("step", dtype)
+    step = ir.Add(step_param, _int(1, dtype), dtype, SPAN) if expression else step_param
+    _, allocation = _alloc("storage")
+    loop = ir.ForStmt(_scalar("i"), _int(0), _int(16), step, [], allocation, [], SPAN)
+    with pytest.raises(ValueError, match="requires a provably positive constant for-loop step"):
+        _emit(_program([loop], [step_param]))
+
+
+@pytest.mark.parametrize("step", [_int(0), _int(-1), ir.Neg(_int(1), DataType.INDEX, SPAN)])
+def test_nonpositive_for_step_fails_before_emission(step):
+    _, allocation = _alloc("storage")
+    loop = ir.ForStmt(_scalar("i"), _int(0), _int(16), step, [], allocation, [], SPAN)
+    with pytest.raises(ValueError, match="requires a provably positive constant for-loop step"):
+        _emit(_program([loop]))
+
+
+@pytest.mark.parametrize("dtype", [DataType.INDEX, DataType.INT32, DataType.INT64])
+@pytest.mark.parametrize("negated", [False, True])
+def test_native_positive_constant_for_step_with_runtime_bounds(tmp_path, dtype, negated):
+    start, stop = _scalar("start", dtype), _scalar("stop", dtype)
+    step = ir.Neg(_int(-2, dtype), dtype, SPAN) if negated else _int(2, dtype)
+    source, source_alloc = _alloc("source")
+    destination, destination_alloc = _alloc("destination")
+    loop = ir.ForStmt(
+        _scalar("i"), start, stop, step, [], _eval("buffer.copy", source, destination), [], SPAN
+    )
+    text = _emit(_program([source_alloc, destination_alloc, loop], [start, stop]))
+    assert text.index("scf.for") < text.index("pto.tmov")
+    _compile_native(tmp_path, text, False)
+
+
 def test_unsigned_for_bound_fails_before_emission():
     stop = _scalar("stop", DataType.UINT8)
     _, allocation = _alloc("storage")

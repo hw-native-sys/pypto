@@ -35,6 +35,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -233,6 +234,10 @@ class BufferEmissionPreflight : public ir::IRVisitor {
         CHECK_SPAN(dtype == DataType::INDEX || dtype.IsSignedInt(), bound->span_)
             << "Direct Buffer IR codegen requires INDEX or signed integer for-loop bounds";
       }
+      const auto step = ir::transform_utils::EvalConstInt(loop->step_);
+      CHECK_SPAN(step && *step > 0, loop->step_->span_)
+          << "Direct Buffer IR codegen requires a provably positive constant for-loop step; "
+             "rewrite the loop with a positive constant step before emission";
     }
     if (region) ++depth_;
     IRVisitor::VisitStmt(stmt);

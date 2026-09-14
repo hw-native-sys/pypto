@@ -148,7 +148,8 @@ addresses or valid extents, preserving their unsigned value when widening.
 Unsigned arithmetic and casts other than index-to-integer and same-width
 integer conversions require a future native recipe and are rejected before
 emission. For loops require an `INDEX` induction variable and `INDEX` or signed
-integer bounds. These are emitter limits, not restrictions on the Buffer IR
+integer bounds, with a provably positive constant step. Runtime-valued, zero,
+and negative steps are rejected before emission. These are emitter limits, not restrictions on the Buffer IR
 representation itself.
 
 ### TensorType

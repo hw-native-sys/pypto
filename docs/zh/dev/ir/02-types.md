@@ -127,7 +127,8 @@ destination 并返回 `VoidType`，目前要求所有参数的 Vec buffer 描述
 初始 emitter 支持将无符号标量直接作为分配地址或 valid extent，扩展位宽时
 保留其无符号数值。无符号算术以及除 index 到整数、同位宽整数转换之外的
 无符号转换，需要后续补充原生发射规则，目前会在发射前拒绝。For 循环要求
-归纳变量为 `INDEX`，边界为 `INDEX` 或有符号整数。这些是 emitter 的限制，
+归纳变量为 `INDEX`，边界为 `INDEX` 或有符号整数，步长必须可证明为正的常量。
+运行时步长、零步长和负步长均在发射前拒绝。这些是 emitter 的限制，
 并非 Buffer IR 表示本身的限制。
 
 ### TensorType
