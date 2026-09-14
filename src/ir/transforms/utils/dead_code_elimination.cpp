@@ -25,6 +25,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
@@ -55,18 +56,39 @@ std::string GetStmtOpName(const StmtPtr& stmt) {
 }
 
 bool IsSideEffectOp(const StmtPtr& stmt) {
-  static const std::unordered_set<std::string> side_effect_ops = {"tile.tpush_to_aiv",
-                                                                  "tile.tpush_to_aic",
-                                                                  "tile.tpop_from_aic",
-                                                                  "tile.tpop_from_aiv",
-                                                                  "tile.store",
-                                                                  "tile.assemble",
-                                                                  "system.tfree_to_aic",
-                                                                  "system.tfree_to_aiv",
-                                                                  "system.reserve_buffer",
-                                                                  "system.import_peer_buffer",
-                                                                  "system.aic_initialize_pipe",
-                                                                  "system.aiv_initialize_pipe"};
+  // The operators whose execution is observable, so a statement carrying one is
+  // never a removal candidate.
+  //
+  // Every name is routed through the registry getter instead of being compared
+  // as a bare literal: `GetOp` throws on a name no operator registers, so a typo
+  // or a renamed operator fails loudly the first time this runs, rather than
+  // silently evaluating to "not side-effecting" and letting DCE delete the
+  // statement (.claude/rules/operator-identity-checks.md). The validated names
+  // are cached so the predicate itself stays one hash lookup per statement —
+  // `IsOp` is the right helper for testing a single operator, not a twelve-way
+  // membership test on a hot path.
+  //
+  // The list is hand-maintained and is not derived from operator metadata,
+  // because no registry property answers "is a call to this operator
+  // removable"; the write predicates (`WritesAnyArg` and friends) answer
+  // whether an operator writes *through an argument*, which is a different
+  // question and unsound as a stand-in.
+  static const std::unordered_set<std::string> side_effect_ops = [] {
+    const auto& registry = OpRegistry::GetInstance();
+    auto validated = [&registry](const char* op_name) { return registry.GetOp(op_name)->name_; };
+    return std::unordered_set<std::string>{validated("tile.tpush_to_aiv"),
+                                           validated("tile.tpush_to_aic"),
+                                           validated("tile.tpop_from_aic"),
+                                           validated("tile.tpop_from_aiv"),
+                                           validated("tile.store"),
+                                           validated("tile.assemble"),
+                                           validated("system.tfree_to_aic"),
+                                           validated("system.tfree_to_aiv"),
+                                           validated("system.reserve_buffer"),
+                                           validated("system.import_peer_buffer"),
+                                           validated("system.aic_initialize_pipe"),
+                                           validated("system.aiv_initialize_pipe")};
+  }();
   // A Submit launches an asynchronous task — intrinsically side-effecting
   // regardless of the kernel's body. Short-circuit so a Submit assignment is
   // never classified as a removal candidate.
