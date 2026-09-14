@@ -238,6 +238,56 @@ def test_shared_window_fields_are_checked_once_across_metadata_and_operands(meta
     assert "WindowBuffer metadata cannot carry buffer handles" in errors[0].message
 
 
+@pytest.mark.parametrize("use", ["eval", "call"])
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_window_size_requires_a_definition(use, wrapped):
+    """Direct windows cannot hide undefined scalar sizes inside expressions."""
+    size = _var("undefined_size", ir.ScalarType(DataType.INDEX))
+    size_expr = ir.Add(size, _int(4), DataType.INDEX, SPAN) if wrapped else size
+    window = ir.WindowBuffer(_var("pointer", ir.PtrType()), size_expr, span=SPAN)
+    operand = _call("ordinary", [window]) if use == "call" else window
+    _assert_error(
+        _program(ir.EvalStmt(operand, SPAN)), "'undefined_size' used before definition", "UseAfterDefCheck"
+    )
+
+
+@pytest.mark.parametrize("use", ["eval", "call"])
+@pytest.mark.parametrize("escape", ["after_branch", "sibling_branch"])
+def test_shared_window_size_is_rechecked_in_each_lexical_scope(use, escape):
+    """A valid branch-local use must not cache success for later window uses."""
+    size = _var("branch_size", ir.ScalarType(DataType.INDEX))
+    window = ir.WindowBuffer(
+        _var("pointer", ir.PtrType()), ir.Add(size, _int(4), DataType.INDEX, SPAN), span=SPAN
+    )
+    operand = _call("ordinary", [window]) if use == "call" else window
+    use_stmt = ir.EvalStmt(operand, SPAN)
+    then_body = ir.SeqStmts([ir.AssignStmt(size, _int(2048), SPAN), use_stmt], SPAN)
+    branch = ir.IfStmt(
+        ir.ConstBool(True, SPAN), then_body, use_stmt if escape == "sibling_branch" else None, [], SPAN
+    )
+    body = ir.SeqStmts([branch, use_stmt], SPAN) if escape == "after_branch" else branch
+    diagnostics = _verify(_program(body))
+    assert len(diagnostics) == 1
+    assert diagnostics[0].rule_name == "UseAfterDefCheck"
+    assert "'branch_size' used before definition" in diagnostics[0].message
+
+
+@pytest.mark.parametrize("use", ["eval", "call"])
+@pytest.mark.parametrize("binding", ["parameter", "assignment"])
+def test_defined_window_size_preserves_pointer_carrier_exemption(use, binding):
+    """A defined scalar size is valid without binding the allocation pointer."""
+    size = _var("size", ir.ScalarType(DataType.INDEX))
+    window = ir.WindowBuffer(_var("pointer", ir.PtrType()), size, span=SPAN)
+    operand = _call("ordinary", [window]) if use == "call" else window
+    use_stmt = ir.EvalStmt(operand, SPAN)
+    body = (
+        ir.SeqStmts([ir.AssignStmt(size, _int(2048), SPAN), use_stmt], SPAN)
+        if binding == "assignment"
+        else use_stmt
+    )
+    assert _verify(_program(body, [size] if binding == "parameter" else [])) == []
+
+
 @pytest.mark.parametrize("tensor_type", [ir.TensorType, ir.DistributedTensorType])
 def test_scalar_gm_type_metadata_remains_valid(tensor_type):
     extent = _var("extent", ir.ScalarType(DataType.INDEX))

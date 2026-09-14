@@ -75,6 +75,12 @@ class UseAfterDefChecker : public IRVisitor {
   }
 
  protected:
+  void VisitExpr_(const WindowBufferPtr& op) override {
+    // Window sizes are uses at each lexical site, even for shared windows.
+    // The allocation's pointer carrier is not a lexical variable binding.
+    if (lexical_scopes_) VisitExpr(op->size_);
+  }
+
   void VisitVarLike_(const VarPtr& op) override {
     if (!op) return;
     if (!in_scope_.count(op.get())) {

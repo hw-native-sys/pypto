@@ -489,6 +489,18 @@ def test_lexical_mode_preserves_while_carry_and_outer_bindings():
     assert "'carry' used before definition" in errors[0].message
 
 
+@pytest.mark.parametrize("lexical", [False, True])
+def test_window_size_uses_are_checked_only_in_strict_mode(lexical):
+    """Strict size checks preserve the standalone legacy window-leaf behavior."""
+    span = ir.Span.unknown()
+    size = ir.Var("undefined_size", ir.ScalarType(DataType.INDEX), span)
+    window = ir.WindowBuffer(ir.Var("pointer", ir.PtrType(), span), size, span=span)
+    errors = _scope_mode_errors(ir.EvalStmt(window, span), [], lexical=lexical)
+    assert len(errors) == int(lexical)
+    if lexical:
+        assert "'undefined_size' used before definition" in errors[0].message
+
+
 def test_lexical_mode_still_checks_type_metadata_uses():
     span = ir.Span.unknown()
     extent = ir.Var("missing_extent", ir.ScalarType(DataType.INDEX), span)

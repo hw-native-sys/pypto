@@ -265,7 +265,7 @@ The same restriction applies to expression-valued type metadata (shapes, views,
 GM MemRef bases, offsets, and slot indices, and WindowBuffer back-reference
 bases and sizes) and the SPMD core count.
 WindowBuffer fields are also checked when the window appears directly in an
-expression, including `EvalStmt` and call arguments; shared windows are checked once.
+expression, including `EvalStmt` and call arguments; their representation is checked once per shared window.
 Scalar GM metadata and its ordinary pointer carrier remain valid.
 `Submit` cannot consume or produce device buffer handles either.
 
@@ -273,6 +273,9 @@ The check composes the existing `SSAVerify`, `UseAfterDefCheck`, and
 `AssignTypeSymmetry` verifiers on device functions only. These diagnostics retain
 their existing rule names. Use-after-definition checks use strict lexical scopes: definitions
 inside a branch cannot escape through the legacy form without region results.
+For a `WindowBuffer` expression, the strict checker visits its size at every use
+site, so a shared window cannot hide an undefined or out-of-scope size. Its allocation
+pointer carrier remains exempt; standalone legacy `UseAfterDef` behavior is unchanged.
 Representation and registered-call errors use the
 `BufferIR` rule. This foundation does **not** prove borrow lifetimes, overlap
 safety, initialized read coverage, or ordering of asynchronous effects; those
