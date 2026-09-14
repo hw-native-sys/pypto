@@ -85,7 +85,11 @@ data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum, core_num=4)
 - An explicit `signal` needs one lane per block: `[world_size(), stride]` with
   `stride >= core_num`. A rank-1 `[world_size()]` signal only works for
   `core_num=1`.
-- InCore kernels keep `core_num=1` and use an enclosing `pl.spmd(...)` instead.
+- InCore kernels keep `core_num=1`. An enclosing `pl.spmd(...)` is **not** a multi-core
+  path for a collective: the lowering never reads the block index, so every block repeats
+  the whole transfer (`N`x duplicate traffic) and the barrier — expecting a compile-time
+  `1` while `N` blocks each notify `+1` — releases after a peer's *first* block. Issue the
+  collective from a single-block scope; use `core_num` on the HOST rail for multi-core.
 
 ### Mutation
 

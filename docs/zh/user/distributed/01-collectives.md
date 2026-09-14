@@ -77,7 +77,10 @@ data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum, core_num=4)
   block 同时准入，因此超额请求会在编译期被拒绝。
 - 显式 `signal` 需要每个 block 一条 lane：`[world_size(), stride]` 且
   `stride >= core_num`。rank-1 的 `[world_size()]` signal 只适用于 `core_num=1`。
-- InCore kernel 保持 `core_num=1`，改用外层 `pl.spmd(...)`。
+- InCore kernel 保持 `core_num=1`。外层 `pl.spmd(...)` **并不能**并行化集合通信：lowering 不读取
+  block index，因此每个 block 都会重复执行整个传输（`N` 倍冗余流量），且 barrier 的期望值是编译期常量
+  `1` 而 `N` 个 block 各自 notify `+1`，会在对端**第一个** block 通知后就放行。请在单 block 作用域内
+  发起集合通信；多核请在 HOST 侧使用 `core_num`。
 
 ### 变更
 
