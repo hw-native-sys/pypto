@@ -1,0 +1,72 @@
+name: Notify central documentation
+
+on:
+  workflow_run:
+    workflows: [Docs]
+    branches: [main]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    if: >-
+      github.repository == 'hw-native-sys/pypto' &&
+      vars.DOCS_SITE_NOTIFY_ENABLED == 'true' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == 'hw-native-sys/pypto' &&
+      (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # No source checkout: this workflow only authenticates and sends metadata.
+      - name: Check notification configuration
+        env:
+          APP_ID: ${{ vars.DOCS_SITE_APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.DOCS_SITE_APP_PRIVATE_KEY }}
+        run: |
+          if [ -z "$APP_ID" ] || [ -z "$APP_PRIVATE_KEY" ]; then
+            echo '::error::Configure DOCS_SITE_APP_ID and DOCS_SITE_APP_PRIVATE_KEY before enabling notifications.'
+            exit 1
+          fi
+      - name: Create a website-scoped token
+        uses: actions/create-github-app-token@v2
+        id: app
+        with:
+          app-id: ${{ vars.DOCS_SITE_APP_ID }}
+          private-key: ${{ secrets.DOCS_SITE_APP_PRIVATE_KEY }}
+          owner: hw-native-sys
+          repositories: hw-native-sys.github.io
+          permission-actions: write
+      - name: Request the central documentation build
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.app.outputs.token }}
+          retries: 3
+          script: |
+            const run = context.payload.workflow_run;
+            if (run.path !== '.github/workflows/docs.yml') {
+              throw new Error('Only the configured Docs workflow can request publication');
+            }
+            await github.rest.actions.createWorkflowDispatch({
+              owner: 'hw-native-sys',
+              repo: 'hw-native-sys.github.io',
+              workflow_id: 'docs-site.yml',
+              ref: 'main',
+              inputs: {
+                source_repository: context.repo.owner + '/' + context.repo.repo,
+                source_sha: run.head_sha,
+                source_run_id: String(run.id),
+                source_run_attempt: String(run.run_attempt)
+              }
+            });
+            await core.summary
+              .addHeading('Central documentation build requested')
+              .addLink('Source Docs run', run.html_url)
+              .addBreak()
+              .addLink('Central build and publication status',
+                'https://github.com/hw-native-sys/hw-native-sys.github.io/actions/workflows/docs-site.yml')
+              .addRaw('\nNotification acceptance does not mean the website is published.\n')
+              .write();

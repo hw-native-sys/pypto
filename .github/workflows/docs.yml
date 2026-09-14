@@ -16,6 +16,10 @@ name: Docs
 #
 # The site is a build artifact and is never committed; the markdown under `docs/`
 # stays the single source of truth.
+#
+# The central pilot can observe successful runs without changing publication.
+# Set DOCS_SITE_PUBLISHER=central only after the website's artifact and route
+# handoff are verified; notify-docs-site.yml controls the independent CI trigger.
 
 on:
   push:
@@ -91,14 +95,19 @@ jobs:
         run: mkdocs build --strict
 
       - name: Upload artifact
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        if: >-
+          github.event_name != 'pull_request' && github.ref == 'refs/heads/main' &&
+          vars.DOCS_SITE_PUBLISHER != 'central'
         uses: actions/upload-pages-artifact@v3
         with:
           path: site
 
   deploy:
     # Only main publishes; a pull request builds to prove the docs still compile.
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    # Switch only after the central artifact and Pages route have been verified.
+    if: >-
+      github.event_name != 'pull_request' && github.ref == 'refs/heads/main' &&
+      vars.DOCS_SITE_PUBLISHER != 'central'
     needs: build
     runs-on: ubuntu-latest
     permissions:
