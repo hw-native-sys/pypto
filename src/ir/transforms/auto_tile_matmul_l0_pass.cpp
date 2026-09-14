@@ -1991,13 +1991,17 @@ std::optional<CanonicalSplitKFold> TryFoldCanonicalSplitKAcc(const CanonicalSpli
     return std::nullopt;
   }
   // The source loop already realizes output-stationary accumulation across its
-  // K blocks. Use the conservative output-stationary chooser regime for the
-  // output grid. Account for the same Mat boxing that RebuildLoad will apply to
+  // K blocks. Use the conservative single-Acc output-stationary chooser regime
+  // for the output grid. This rewrite clones one complete K reduction followed
+  // by its drain for each output tile; unlike BuildFullKPipelined, it does not
+  // emit the two-Acc ``matmul, matmul, drain, drain`` schedule required by a dbC
+  // candidate. Account for the same Mat boxing that RebuildLoad will apply to
   // every physical output window, so chooser capacity cannot admit a logical
   // tile that becomes oversized after padding. The recursively visited
   // narrowed calls independently choose their legal inner K blocking.
-  auto tiling =
-      AnalyzeMatmul(match.shape_source(), hints, /*force_output_stationary=*/true, output_box_alignment);
+  auto tiling = AnalyzeMatmul(match.shape_source(), hints, /*force_output_stationary=*/true,
+                              output_box_alignment, /*direct_defs=*/nullptr,
+                              /*disable_double_buffer_c=*/true);
   if (!tiling || !tiling->needs_mn_tiling()) return std::nullopt;
 
   auto store_call = As<Call>(match.store->value_);
