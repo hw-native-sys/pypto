@@ -89,6 +89,8 @@ class BufferIRVisitor : public IRVisitor {
   // including distributed tensor views. Avoid repeating the base shape walk.
   void VisitVarLike_(const VarPtr&) override {}
 
+  void VisitExpr_(const WindowBufferPtr& op) override { CheckWindowBuffer(op); }
+
   // CheckAttrs already visits every scope attribute, including scope kinds
   // whose default visitor omits attrs. Do not traverse those references twice.
   [[nodiscard]] bool ShouldVisitScopeAttr(const std::string&) const override { return false; }
@@ -283,6 +285,16 @@ class BufferIRVisitor : public IRVisitor {
     }
   }
 
+  void CheckWindowBuffer(const WindowBufferPtr& window) {
+    if (!window || !checked_window_buffers_.insert(window.get()).second) return;
+    // The base visitor treats windows as leaves. Check shared back-references
+    // once, whether reached through tensor metadata or as ordinary expressions.
+    auto previous_context = std::exchange(attribute_context_, "WindowBuffer metadata");
+    VisitStorageBase(window->base_);
+    VisitExpr(window->size_);
+    attribute_context_ = std::move(previous_context);
+  }
+
   void CheckTypeMetadata(const TypePtr& type) {
     if (!type || !checked_metadata_types_.insert(type.get()).second) return;
     // Traverse tuple elements through this memoized entry point: a shared
@@ -305,13 +317,7 @@ class BufferIRVisitor : public IRVisitor {
     }
     if (auto tensor = As<DistributedTensorType>(type);
         tensor && tensor->window_buffer_ && *tensor->window_buffer_) {
-      const auto& window = *tensor->window_buffer_;
-      // WindowBuffer is a leaf in the base visitor. Inspect its back-reference
-      // fields explicitly, once even when several tensor views share it.
-      if (checked_window_buffers_.insert(window.get()).second) {
-        VisitStorageBase(window->base_);
-        VisitExpr(window->size_);
-      }
+      CheckWindowBuffer(*tensor->window_buffer_);
     }
     attribute_context_ = std::move(previous_context);
   }

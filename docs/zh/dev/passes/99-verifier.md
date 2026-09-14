@@ -229,6 +229,8 @@ Buffer 句柄来自函数参数，或声明了分配、别名、借用结果行�
 表达式形式的类型元数据（shape、view、GM MemRef 的 base、偏移、槽位索引，
 以及 WindowBuffer 反向引用的 base 和 size）
 及 SPMD 核数遵循相同限制；标量 GM 元数据及其普通指针载体仍然合法。
+WindowBuffer 直接出现在表达式中时（包括 `EvalStmt` 和调用参数），也会检查其字段；
+多个位置共享的窗口只检查一次。
 `Submit` 同样不能消费或产生设备 buffer 句柄。
 
 该检查仅针对设备函数组合已有的 `SSAVerify`、`UseAfterDefCheck` 和

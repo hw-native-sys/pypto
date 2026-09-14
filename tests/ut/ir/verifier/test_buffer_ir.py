@@ -184,9 +184,9 @@ def test_gm_pointer_carrier_exemption_does_not_hide_child_buffer_reference():
 
 @pytest.mark.parametrize("multi", [False, True])
 @pytest.mark.parametrize("field", ["base", "size", "wrapped_base", "wrapped_size"])
-@pytest.mark.parametrize("nested_return", [False, True])
-def test_window_buffer_metadata_cannot_hide_buffer_references(multi, field, nested_return):
-    """Check shared window back-references in parameters and nested return types."""
+@pytest.mark.parametrize("use", ["parameter", "nested_return", "eval", "call"])
+def test_window_buffer_cannot_hide_buffer_references(multi, field, use):
+    """Check window back-references in type metadata and direct operands."""
     hidden_type = ir.MultiBufferType(_buffer_type(), 2) if multi else _buffer_type()
     hidden = _var("hidden", hidden_type)
     base = hidden if field == "base" else _var("window_base", ir.PtrType())
@@ -198,22 +198,44 @@ def test_window_buffer_metadata_cannot_hide_buffer_references(multi, field, nest
     window = ir.WindowBuffer(base, size, span=SPAN)
     first = ir.DistributedTensorType([_int(16)], DataType.FP32, window)
     second = ir.DistributedTensorType([_int(32)], DataType.FP32, window)
-    if nested_return:
+    if use == "nested_return":
         program = _program(returns=[ir.TupleType([ir.TupleType([first, second])])])
-    else:
+    elif use == "parameter":
         program = _program(params=[_var("first", first), _var("second", second)])
-    _assert_error(program, "Type metadata cannot carry buffer handles")
+    else:
+        operand = _call("ordinary", [window]) if use == "call" else window
+        program = _program(ir.EvalStmt(operand, SPAN), [hidden])
+    _assert_error(program, "WindowBuffer metadata cannot carry buffer handles")
 
 
 @pytest.mark.parametrize("symbolic_size", [False, True])
-def test_window_buffer_pointer_and_scalar_metadata_remain_valid(symbolic_size):
-    """Window allocation pointers and scalar sizes stay legal for shared views."""
+@pytest.mark.parametrize("direct", [False, True])
+def test_window_buffer_pointer_and_scalar_metadata_remain_valid(symbolic_size, direct):
+    """Window pointers and scalar sizes stay legal in views and direct operands."""
     size = _var("bytes", ir.ScalarType(DataType.INDEX)) if symbolic_size else _int(2048)
     window = ir.WindowBuffer(_var("window_base", ir.PtrType()), size, span=SPAN)
+    if direct:
+        body = ir.SeqStmts([ir.EvalStmt(window, SPAN), ir.EvalStmt(_call("ordinary", [window]), SPAN)], SPAN)
+        assert _verify(_program(body, [size] if symbolic_size else [])) == []
+        return
     first = _var("first", ir.DistributedTensorType([_int(16)], DataType.FP32, window))
     second = _var("second", ir.DistributedTensorType([_int(32)], DataType.FP32, window))
     params = [size, first, second] if symbolic_size else [first, second]
     assert _verify(_program(ir.ReturnStmt([first], SPAN), params, [first.type])) == []
+
+
+@pytest.mark.parametrize("metadata_first", [False, True])
+def test_shared_window_fields_are_checked_once_across_metadata_and_operands(metadata_first):
+    """Both traversal orders report a shared hidden handle exactly once."""
+    hidden = _var("hidden")
+    window = ir.WindowBuffer(hidden, _int(2048), span=SPAN)
+    tensor = _var("gm", ir.DistributedTensorType([_int(16)], DataType.FP32, window))
+    operands = [tensor, window] if metadata_first else [window, tensor]
+    body = ir.SeqStmts([ir.EvalStmt(operand, SPAN) for operand in operands], SPAN)
+    diagnostics = _verify(_program(body, [hidden]))
+    errors = [d for d in diagnostics if d.rule_name == "BufferIR"]
+    assert len(errors) == 1
+    assert "WindowBuffer metadata cannot carry buffer handles" in errors[0].message
 
 
 @pytest.mark.parametrize("tensor_type", [ir.TensorType, ir.DistributedTensorType])

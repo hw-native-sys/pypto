@@ -264,6 +264,8 @@ inside expression-valued attributes, because storage effects must name ordinary 
 The same restriction applies to expression-valued type metadata (shapes, views,
 GM MemRef bases, offsets, and slot indices, and WindowBuffer back-reference
 bases and sizes) and the SPMD core count.
+WindowBuffer fields are also checked when the window appears directly in an
+expression, including `EvalStmt` and call arguments; shared windows are checked once.
 Scalar GM metadata and its ordinary pointer carrier remain valid.
 `Submit` cannot consume or produce device buffer handles either.
 
