@@ -1542,5 +1542,288 @@ def test_aiv_gm_write_in_loop_consumed_by_cube_resolves_to_param():
     _assert_aic_loads_reference_params(After)
 
 
+# ---------------------------------------------------------------------------
+# Regression (issue #2716): a multi-entry FIFO's carries survive the split.
+#
+# A two-entry FIFO rotates: slot 0's next value IS slot 1's iter_arg, so slot 1
+# is read nowhere but the loop's own yield. StripDeadIterArgs seeds liveness from
+# the body *excluding* that yield, so it used to call slot 1 dead and drop it --
+# while the positional yield filter kept slot 0's value naming the iter_arg it
+# had just deleted. Two outcomes, same defect: where no repair reached the loop
+# the free Var survived to PTO codegen ("no MLIR mapping for MemRef base ..."),
+# and where one did the rotation was silently rewritten into a self-carry, which
+# freezes the FIFO and computes the wrong answer.
+# ---------------------------------------------------------------------------
+
+
+def _first_carry_loop(stmt: ir.Stmt) -> ir.ForStmt:
+    """The first ForStmt with iter_args in `stmt`, searched depth-first."""
+    for inner in ir.flatten_to_stmts(stmt):
+        if isinstance(inner, ir.ForStmt):
+            if inner.iter_args:
+                return inner
+            return _first_carry_loop(inner.body)
+    raise AssertionError("no loop with iter_args found")
+
+
+def _assert_fifo_rotation_intact(after: ir.Program) -> None:
+    """The AIV lane keeps all three carries and still rotates slot 1 into slot 0.
+
+    Checking the yield operand by identity is the point: a dropped slot 1 leaves
+    slot 0 yielding either a free Var (crash) or its own iter_arg (silent
+    self-carry), and only an identity comparison separates the latter from the
+    rotation the author wrote.
+    """
+    aiv = next(f for f in after.functions.values() if f.func_type == ir.FunctionType.AIV)
+    loop = _first_carry_loop(aiv.body)
+    assert len(loop.iter_args) == 3, (
+        f"expected the 3 authored carries to survive, got {[a.name_hint for a in loop.iter_args]}"
+    )
+    tail = ir.flatten_to_stmts(loop.body)[-1]
+    assert isinstance(tail, ir.YieldStmt), f"loop body must end with YieldStmt, got {type(tail).__name__}"
+    assert len(tail.value) == 3, f"expected 3 yielded values, got {len(tail.value)}"
+    rotated = tail.value[1]
+    assert isinstance(rotated, ir.Var), f"slot 1 must yield the slot-2 carry, got {type(rotated).__name__}"
+    assert rotated.unique_id == loop.iter_args[2].unique_id, (
+        f"slot 1 must yield carry '{loop.iter_args[2].name_hint}' (the FIFO rotation), "
+        f"got '{rotated.name_hint}'"
+    )
+
+
+def test_two_entry_fifo_rotation_survives_split_inside_carry_less_loop():
+    """FIFO loop nested in a carry-less loop -- the form that reached codegen.
+
+    No repair descends into a loop without iter_args, so a dropped carry leaves
+    the surviving slot's yield naming a Var the loop no longer binds, and that
+    free Var is only caught ~30 passes later by PTO codegen.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def fifo_nested(
+            self,
+            a: pl.Tensor[[16, 128], pl.BF16],
+            b: pl.Tensor[[128, 128], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            for _t in pl.range(2):  # noqa: B007 - carry-less by design, see docstring
+                a_mat = pl.load(a, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                a_left = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
+                b_mat = pl.load(b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                b_right = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
+                acc = pl.matmul(a_left, b_right)  # AIC
+                acc_vec = pl.move(acc, target_memory=pl.MemorySpace.Vec)  # C->V boundary
+                p0 = pl.add(acc_vec, acc_vec)  # AIV: FIFO entry 0
+                p1 = pl.add(p0, p0)  # AIV: FIFO entry 1
+                s = pl.add(p0, p1)
+                for _i, (s_it, p0_it, p1_it) in pl.range(4, init_values=(s, p0, p1)):  # noqa: B007
+                    s_next = pl.add(s_it, p0_it)  # only entry 0 is consumed
+                    p_new = pl.add(acc_vec, acc_vec)
+                    s, p0, p1 = pl.yield_(s_next, p1_it, p_new)  # rotate 1 -> 0
+                _sink = pl.store(s, [0, 0], out_0)  # noqa: F841 - keeps the outer loop carry-less
+            return out_0
+
+    After = _expand_no_verify(Before)
+    _assert_no_free_var(After)
+    _assert_fifo_rotation_intact(After)
+
+
+def test_two_entry_fifo_rotation_not_rewritten_to_self_carry():
+    """FIFO loop at function top level -- the form that compiled but was wrong.
+
+    Here FixupDanglingYieldValues does reach the loop, and its per-slot fallback
+    (yield the slot's own iter_arg) turns the rotation into a self-carry: entry 0
+    never advances and the freshly computed entry is dead-coded away. No error is
+    raised, so only an identity check on the yield operand catches it.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def fifo_toplevel(
+            self,
+            a: pl.Tensor[[16, 128], pl.BF16],
+            b: pl.Tensor[[128, 128], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            a_mat = pl.load(a, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+            a_left = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
+            b_mat = pl.load(b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+            b_right = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
+            acc = pl.matmul(a_left, b_right)  # AIC
+            acc_vec = pl.move(acc, target_memory=pl.MemorySpace.Vec)  # C->V boundary
+            p0 = pl.add(acc_vec, acc_vec)
+            p1 = pl.add(p0, p0)
+            s = pl.add(p0, p1)
+            for _i, (s_it, p0_it, p1_it) in pl.range(4, init_values=(s, p0, p1)):  # noqa: B007
+                s_next = pl.add(s_it, p0_it)
+                p_new = pl.add(acc_vec, acc_vec)
+                s, p0, p1 = pl.yield_(s_next, p1_it, p_new)  # rotate 1 -> 0
+            out_0 = pl.store(s, [0, 0], out_0)
+            return out_0
+
+    After = _expand_no_verify(Before)
+    _assert_no_free_var(After)
+    _assert_fifo_rotation_intact(After)
+
+
+def test_nested_yield_of_an_enclosing_scope_value_is_not_rewritten():
+    """A nested loop may legitimately yield a value bound outside its own body.
+
+    `FixupDanglingYieldValues` walks a block accumulating the definitions it has
+    passed, and every recursion used to restart that set empty. A loop reached
+    through one therefore could not see the enclosing loop's variable or
+    anything defined before it, so a perfectly valid yield looked dangling and
+    was replaced by the slot's own carry -- the same silent self-carry this file
+    guards against above, arriving by a different route.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def outer_scope_yield(
+            self,
+            a: pl.Tensor[[16, 128], pl.BF16],
+            b: pl.Tensor[[128, 128], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            a_mat = pl.load(a, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+            a_left = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
+            b_mat = pl.load(b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+            b_right = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
+            acc = pl.matmul(a_left, b_right)  # AIC
+            acc_vec = pl.move(acc, target_memory=pl.MemorySpace.Vec)  # C->V boundary
+            outer_val = pl.add(acc_vec, acc_vec)  # bound before the carry-less loop
+            for _t in pl.range(2):  # noqa: B007 - carry-less, so the repair recurses
+                seed = pl.add(outer_val, outer_val)
+                for _i, (s_it,) in pl.range(4, init_values=(seed,)):  # noqa: B007
+                    s = pl.yield_(outer_val)  # legitimate: bound two scopes up
+                _sink = pl.store(s, [0, 0], out_0)  # noqa: F841 - keeps the outer loop carry-less
+            return out_0
+
+    After = _expand_no_verify(Before)
+    _assert_no_free_var(After)
+
+    aiv = next(f for f in After.functions.values() if f.func_type == ir.FunctionType.AIV)
+    loop = _first_carry_loop(aiv.body)
+    tail = ir.flatten_to_stmts(loop.body)[-1]
+    assert isinstance(tail, ir.YieldStmt), f"loop body must end with YieldStmt, got {type(tail).__name__}"
+    assert len(tail.value) == 1, f"expected 1 yielded value, got {len(tail.value)}"
+    yielded = tail.value[0]
+    assert isinstance(yielded, ir.Var), f"expected a Var operand, got {type(yielded).__name__}"
+    carry_ids = {a.unique_id for a in loop.iter_args}
+    assert yielded.unique_id not in carry_ids, (
+        f"the enclosing-scope value was rewritten into a self-carry on '{yielded.name_hint}'"
+    )
+
+
+def test_nested_yield_of_a_function_parameter_is_not_rewritten():
+    """A parameter is bound by the signature, so no statement in the body defines it.
+
+    The scope threaded into the walk starts at the function body, so a yield
+    naming a parameter has nothing backing it unless the parameters are seeded
+    in -- and it would be replaced by the slot's own carry, dropping the update.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def param_yield(
+            self,
+            a: pl.Tensor[[16, 128], pl.BF16],
+            b: pl.Tensor[[128, 128], pl.BF16],
+            scratch: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            a_mat = pl.load(a, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+            a_left = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
+            b_mat = pl.load(b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+            b_right = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
+            acc = pl.matmul(a_left, b_right)  # AIC
+            acc_vec = pl.move(acc, target_memory=pl.MemorySpace.Vec)  # C->V boundary
+            for _t in pl.range(2):  # noqa: B007 - carry-less, so the repair recurses
+                for _i, (s_it,) in pl.range(4, init_values=(scratch,)):  # noqa: B007
+                    s = pl.yield_(scratch)  # legitimate: bound by the signature
+                _sink = pl.store(acc_vec, [0, 0], s)  # noqa: F841 - keeps the outer loop carry-less
+            return out_0
+
+    After = _expand_no_verify(Before)
+    _assert_no_free_var(After)
+
+    aiv = next(f for f in After.functions.values() if f.func_type == ir.FunctionType.AIV)
+    loop = _first_carry_loop(aiv.body)
+    tail = ir.flatten_to_stmts(loop.body)[-1]
+    assert isinstance(tail, ir.YieldStmt), f"loop body must end with YieldStmt, got {type(tail).__name__}"
+    assert len(tail.value) == 1, f"expected 1 yielded value, got {len(tail.value)}"
+    yielded = tail.value[0]
+    assert isinstance(yielded, ir.Var), f"expected a Var operand, got {type(yielded).__name__}"
+    carry_ids = {c.unique_id for c in loop.iter_args}
+    assert yielded.unique_id not in carry_ids, (
+        f"the parameter yield was rewritten into a self-carry on '{yielded.name_hint}'"
+    )
+    param_ids = {p.unique_id for p in aiv.params}
+    assert yielded.unique_id in param_ids, (
+        f"expected the yield to keep naming the parameter, got '{yielded.name_hint}'"
+    )
+
+
+def test_nested_yield_of_a_cross_core_result_is_not_rewritten():
+    """A boundary move's destination has no defining statement left on either lane.
+
+    `BuildCoreBody` replaces the C->V ``tile.move`` with a ``tpop`` that defines a
+    fresh Var and records the original in ``tpop_var_remap``; references to it are
+    repointed later by ``apply_tpop_remap``. Between those two steps the original
+    looks undefined, so a yield naming it directly must not be "repaired" -- once
+    the reference is replaced by the slot's own carry there is nothing left for
+    the remap to fix, and the loop silently stops updating.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def xcore_yield(
+            self,
+            a: pl.Tensor[[16, 128], pl.BF16],
+            b: pl.Tensor[[128, 128], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            a_mat = pl.load(a, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+            a_left = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
+            b_mat = pl.load(b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+            b_right = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
+            # An independent Vec seed, so the carry's init is not itself a
+            # boundary result.
+            seed = pl.cast(pl.load(a, [0, 0], [16, 128]), target_type=pl.FP32)
+            for _t in pl.range(2):  # noqa: B007 - carry-less, so the repair recurses
+                for _i, (v_it,) in pl.range(4, init_values=(seed,)):  # noqa: B007
+                    acc = pl.matmul(a_left, b_right)  # AIC
+                    acc_vec = pl.move(acc, target_memory=pl.MemorySpace.Vec)  # C->V boundary
+                    v = pl.yield_(acc_vec)  # yields the transfer result directly
+                _sink = pl.store(v, [0, 0], out_0)  # noqa: F841 - keeps the outer loop carry-less
+            return out_0
+
+    After = _expand_no_verify(Before)
+    _assert_no_free_var(After)
+
+    aiv = next(f for f in After.functions.values() if f.func_type == ir.FunctionType.AIV)
+    loop = _first_carry_loop(aiv.body)
+    body_stmts = ir.flatten_to_stmts(loop.body)
+    tail = body_stmts[-1]
+    assert isinstance(tail, ir.YieldStmt), f"loop body must end with YieldStmt, got {type(tail).__name__}"
+    assert len(tail.value) == 1, f"expected 1 yielded value, got {len(tail.value)}"
+    yielded = tail.value[0]
+    assert isinstance(yielded, ir.Var), f"expected a Var operand, got {type(yielded).__name__}"
+    carry_ids = {c.unique_id for c in loop.iter_args}
+    assert yielded.unique_id not in carry_ids, (
+        f"the cross-core transfer result was rewritten into a self-carry on '{yielded.name_hint}'"
+    )
+    # After apply_tpop_remap the operand must be the tpop this lane defines.
+    defined_ids = {s.var.unique_id for s in body_stmts if isinstance(s, ir.AssignStmt)}
+    assert yielded.unique_id in defined_ids, (
+        f"yield operand '{yielded.name_hint}' is not defined in the loop body"
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

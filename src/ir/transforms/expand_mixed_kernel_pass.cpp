@@ -2072,17 +2072,20 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
     for (const auto& kv : m) keys.insert(kv.first);
     return keys;
   };
+  // `func->params_`: both split bodies still reference the original function's
+  // Var pointers at this point (DeepClone has not run yet), so the source
+  // signature is what makes a yield of a parameter resolvable on either lane.
   auto aic_final = FinalizeTpopTfrees(
-      FinalizeSplitCoreBody(aic_stmts_no_return, original_def_map, remap_keys(aic_tpop_remap)), CoreSide::AIC,
-      aic_tpop_remap);
+      FinalizeSplitCoreBody(aic_stmts_no_return, original_def_map, remap_keys(aic_tpop_remap), func->params_),
+      CoreSide::AIC, aic_tpop_remap);
 
   // Build AIV body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aiv_tpop_remap;
   auto aiv_stmts = BuildCoreBody(CoreSide::AIV, stmts, stmt_map, boundary_moves, aiv_tpop_remap,
                                  superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
-  auto aiv_final =
-      FinalizeTpopTfrees(FinalizeSplitCoreBody(aiv_stmts, original_def_map, remap_keys(aiv_tpop_remap)),
-                         CoreSide::AIV, aiv_tpop_remap);
+  auto aiv_final = FinalizeTpopTfrees(
+      FinalizeSplitCoreBody(aiv_stmts, original_def_map, remap_keys(aiv_tpop_remap), func->params_),
+      CoreSide::AIV, aiv_tpop_remap);
 
   // Every explicit split-reshape op must have been folded into a cross-core
   // tpush/tpop boundary on both lanes. A survivor means the boundary machinery

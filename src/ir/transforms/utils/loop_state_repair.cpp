@@ -105,6 +105,96 @@ void CollectBodyRefsSkippingYield(const std::vector<StmtPtr>& stmts, std::unorde
   }
 }
 
+/// Mark every carry slot reachable from an already-live slot through the body's
+/// own trailing yield.
+///
+/// Yield slot `i` binds carry slot `i`, so its value is only evaluated while
+/// that slot survives. A live slot's value is therefore a real use of every
+/// iter_arg it names — including a *different* slot's carry, which is exactly
+/// how a multi-entry FIFO rotates (`yield(slot1_iter, fresh_value)`). Seeding
+/// liveness from the body alone misses that use, and dropping the slot it feeds
+/// from leaves the surviving slot's yield naming a Var the loop no longer binds
+/// (issue #2716).
+///
+/// Only the body's top-level YieldStmts are walked: those are precisely the
+/// statements `CollectBodyRefsSkippingYield` leaves out of the seed. A yield
+/// nested in a trailing IfStmt belongs to that IfStmt and is already counted
+/// there, so its operands are seeded live without needing propagation.
+void PropagateYieldLiveness(const std::vector<StmtPtr>& body_stmts, const std::vector<IterArgPtr>& iter_args,
+                            std::vector<bool>& live) {
+  std::unordered_map<const Var*, size_t> slot_of;
+  for (size_t i = 0; i < iter_args.size(); ++i) {
+    slot_of.emplace(iter_args[i].get(), i);
+  }
+
+  // deps[i] = slots whose iter_arg is named by the value yielded into slot i.
+  std::vector<std::vector<size_t>> deps(iter_args.size());
+  for (const auto& stmt : body_stmts) {
+    auto yield_stmt = std::dynamic_pointer_cast<const YieldStmt>(stmt);
+    if (!yield_stmt) continue;
+    const size_t slots = std::min(yield_stmt->value_.size(), iter_args.size());
+    for (size_t i = 0; i < slots; ++i) {
+      var_collectors::VarDefUseCollector collector;
+      collector.VisitExpr(yield_stmt->value_[i]);
+      for (const Var* ref : collector.var_uses) {
+        auto it = slot_of.find(ref);
+        if (it != slot_of.end()) deps[i].push_back(it->second);
+      }
+    }
+  }
+
+  std::vector<size_t> worklist;
+  for (size_t i = 0; i < live.size(); ++i) {
+    if (live[i]) worklist.push_back(i);
+  }
+  while (!worklist.empty()) {
+    const size_t slot = worklist.back();
+    worklist.pop_back();
+    for (size_t dep : deps[slot]) {
+      if (live[dep]) continue;
+      live[dep] = true;
+      worklist.push_back(dep);
+    }
+  }
+}
+
+/// Fail loudly if filtering the yield left a surviving value naming an iter_arg
+/// this loop no longer binds.
+///
+/// Only the top-level YieldStmts need checking: a slot is dropped only when its
+/// iter_arg is absent from `body_refs`, and that set already covers every other
+/// statement in the body.
+///
+/// `PropagateYieldLiveness` makes a hit unreachable, but the alternative to
+/// checking is shipping malformed IR: the free variable survives every later
+/// pass and only surfaces ~30 passes downstream as an opaque PTO codegen assert
+/// ("no MLIR mapping for MemRef base ..."), or — where a repair happens to
+/// reach it — as a silently rewritten carry.
+void CheckNoDroppedIterArgSurvives(const std::vector<StmtPtr>& filtered_body,
+                                   const std::vector<IterArgPtr>& iter_args, const std::vector<bool>& live,
+                                   const Span& span) {
+  std::unordered_map<const Var*, size_t> dropped;
+  for (size_t i = 0; i < iter_args.size(); ++i) {
+    if (!live[i]) dropped.emplace(iter_args[i].get(), i);
+  }
+  if (dropped.empty()) return;
+
+  for (const auto& stmt : filtered_body) {
+    auto yield_stmt = std::dynamic_pointer_cast<const YieldStmt>(stmt);
+    if (!yield_stmt) continue;
+    for (const auto& value : yield_stmt->value_) {
+      var_collectors::VarDefUseCollector collector;
+      collector.VisitExpr(value);
+      for (const Var* ref : collector.var_uses) {
+        auto it = dropped.find(ref);
+        INTERNAL_CHECK_SPAN(it == dropped.end(), span)
+            << "Internal error: loop carry '" << iter_args[it->second]->name_hint_ << "' (slot " << it->second
+            << ") was dropped as dead but a surviving yield value still reads it";
+      }
+    }
+  }
+}
+
 StmtPtr FilterYieldStmt(const StmtPtr& stmt, const std::vector<size_t>& kept_indices) {
   return TransformLastStmt(stmt, [&](const StmtPtr& s) -> StmtPtr {
     auto yield_stmt = std::dynamic_pointer_cast<const YieldStmt>(s);
@@ -259,16 +349,21 @@ void PullDefinitionChain(const Var* var_ptr, const std::unordered_map<const Var*
 // ============================================================================
 
 std::vector<StmtPtr> StripDeadIterArgs(const std::vector<StmtPtr>& stmts) {
-  std::vector<std::unordered_set<const Var*>> suffix_refs(stmts.size());
-  for (size_t i = stmts.size(); i-- > 0;) {
-    if (i + 1 < stmts.size()) {
-      suffix_refs[i] = suffix_refs[i + 1];
-    }
+  // The only question asked below is "is this Var referenced by any statement
+  // after index `idx`", so record the last index that references each Var. A
+  // per-statement suffix set answers the same question but copies a set that
+  // grows to O(N) once per statement, which is quadratic on a long block.
+  std::unordered_map<const Var*, size_t> last_ref_index;
+  for (size_t i = 0; i < stmts.size(); ++i) {
     var_collectors::VarDefUseCollector collector;
     collector.VisitStmt(stmts[i]);
-    auto all_refs = collector.GetAllVarRefs();
-    suffix_refs[i].insert(all_refs.begin(), all_refs.end());
+    for (const Var* ref : collector.var_defs) last_ref_index[ref] = i;
+    for (const Var* ref : collector.var_uses) last_ref_index[ref] = i;
   }
+  auto referenced_after = [&last_ref_index](const Var* var, size_t idx) {
+    auto it = last_ref_index.find(var);
+    return it != last_ref_index.end() && it->second > idx;
+  };
 
   std::vector<StmtPtr> result;
 
@@ -304,16 +399,22 @@ std::vector<StmtPtr> StripDeadIterArgs(const std::vector<StmtPtr>& stmts) {
     std::unordered_set<const Var*> body_refs;
     CollectBodyRefsSkippingYield(processed_body, body_refs);
 
-    static const std::unordered_set<const Var*> kEmptyRefs;
-    const auto& after_refs = (idx + 1 < stmts.size()) ? suffix_refs[idx + 1] : kEmptyRefs;
+    // Seed liveness from real body statements and post-loop uses. `body_refs`
+    // deliberately skips the body's own trailing yield, so a carry that is only
+    // ever rotated into another slot starts out unseeded.
+    std::vector<bool> live(iter_args.size(), false);
+    for (size_t i = 0; i < iter_args.size(); ++i) {
+      bool used_in_body = body_refs.count(iter_args[i].get()) > 0;
+      bool return_var_used = i < return_vars.size() && referenced_after(return_vars[i].get(), idx);
+      live[i] = used_in_body || return_var_used;
+    }
+    // ... then close over the yield, so the second entry of a multi-entry FIFO
+    // is kept alive by the live slot it rotates into (issue #2716).
+    PropagateYieldLiveness(processed_body, iter_args, live);
 
     std::vector<size_t> kept_indices;
     for (size_t i = 0; i < iter_args.size(); ++i) {
-      bool used_in_body = body_refs.count(iter_args[i].get()) > 0;
-      bool return_var_used = i < return_vars.size() && after_refs.count(return_vars[i].get()) > 0;
-      if (used_in_body || return_var_used) {
-        kept_indices.push_back(i);
-      }
+      if (live[i]) kept_indices.push_back(i);
     }
 
     std::vector<IterArgPtr> new_iter_args;
@@ -332,6 +433,7 @@ std::vector<StmtPtr> StripDeadIterArgs(const std::vector<StmtPtr>& stmts) {
       } else {
         processed_body.pop_back();
       }
+      CheckNoDroppedIterArgSurvives(processed_body, iter_args, live, span);
     }
 
     result.push_back(
@@ -418,8 +520,56 @@ std::vector<StmtPtr> FixupIterArgInitValues(const std::vector<StmtPtr>& stmts,
   return result;
 }
 
-std::vector<StmtPtr> FixupDanglingYieldValues(const std::vector<StmtPtr>& stmts) {
-  std::unordered_set<const Var*> defined_so_far;
+namespace {
+
+/// `FixupDanglingYieldValues` carrying the definitions visible to the caller.
+///
+/// `defined_so_far` only ever accumulates the statements preceding a loop
+/// *within its own block*, so a recursion that restarts it empty hides every
+/// enclosing binding from the nested loop's dangling check.
+/// `ReplaceDanglingYieldValues` then reads a yield of an outer loop variable —
+/// or of anything defined before the enclosing loop — as dangling and swaps in
+/// the slot's own carry, silently turning an update into a self-carry. Threading
+/// the scope keeps the check honest at every depth.
+///
+/// A loop contributes its `loop_var_` and `iter_args_` to the scope it opens:
+/// the header binds them, so no body statement defines them and the body walk
+/// alone never sees them.
+/// Bindings a nesting level added, removed again when that level returns.
+///
+/// One mutable set is threaded through the whole traversal rather than copied
+/// per scope. Copying costs O(levels x |visible set|) — a block that defines N
+/// values and then opens N loops copies an N-element set N times — which the
+/// repository's O(N log N) pass bound does not allow. Recording what a level
+/// added and erasing exactly that on the way out costs one insert and one erase
+/// per binding instead.
+class ScopedDefs {
+ public:
+  explicit ScopedDefs(std::unordered_set<const Var*>* scope) : scope_(scope) {}
+  ScopedDefs(const ScopedDefs&) = delete;
+  ScopedDefs& operator=(const ScopedDefs&) = delete;
+  ScopedDefs(ScopedDefs&&) = delete;
+  ScopedDefs& operator=(ScopedDefs&&) = delete;
+  ~ScopedDefs() {
+    for (const Var* var : added_) scope_->erase(var);
+  }
+
+  /// Bind `var` for this level. A name an outer scope already bound stays that
+  /// scope's to unbind, so shadowing cannot make this level erase it early.
+  void Add(const Var* var) {
+    if (var != nullptr && scope_->insert(var).second) added_.push_back(var);
+  }
+
+ private:
+  std::unordered_set<const Var*>* scope_;
+  std::vector<const Var*> added_;
+};
+
+std::vector<StmtPtr> FixupDanglingYieldValuesScoped(const std::vector<StmtPtr>& stmts,
+                                                    std::unordered_set<const Var*>* scope) {
+  // Everything this level binds is unwound on return, so a sibling block never
+  // inherits definitions that are not visible to it.
+  ScopedDefs level(scope);
 
   std::vector<StmtPtr> result;
   for (const auto& stmt : stmts) {
@@ -430,17 +580,23 @@ std::vector<StmtPtr> FixupDanglingYieldValues(const std::vector<StmtPtr>& stmts)
       const auto& iter_args = for_stmt ? for_stmt->iter_args_ : while_stmt->iter_args_;
       const auto& body = for_stmt ? for_stmt->body_ : while_stmt->body_;
 
+      // The recursion sees only what the header binds on top of the enclosing
+      // scope. It walks the body in order and picks up each definition as it
+      // passes, so pre-loading the body's definitions would let a statement see
+      // ones that follow it and mask a genuinely dangling forward reference.
+      ScopedDefs header(scope);
+      if (for_stmt) header.Add(for_stmt->loop_var_.get());
+      for (const auto& iter_arg : iter_args) header.Add(iter_arg.get());
+
+      auto body_stmts = FixupDanglingYieldValuesScoped(FlattenBody(body), scope);
+
+      // The loop's own yield closes the body, so every body definition does
+      // precede it — add them for that one check.
       var_collectors::VarDefUseCollector body_def_collector;
       body_def_collector.VisitStmt(body);
-      auto all_defined = defined_so_far;
-      all_defined.insert(body_def_collector.var_defs.begin(), body_def_collector.var_defs.end());
-      // iter_args are bound by the loop header, not by a body statement, so the
-      // body walk above never sees them. Without this a yield that just passes a
-      // carry through would be misread as dangling and rewritten.
-      for (const auto& iter_arg : iter_args) all_defined.insert(iter_arg.get());
-
-      auto body_stmts = FixupDanglingYieldValues(FlattenBody(body));
-      body_stmts = FixDanglingLoopBodyYields(body_stmts, iter_args, all_defined);
+      ScopedDefs body_defs(scope);
+      for (const Var* def : body_def_collector.var_defs) body_defs.Add(def);
+      body_stmts = FixDanglingLoopBodyYields(body_stmts, iter_args, *scope);
 
       const auto& span = for_stmt ? for_stmt->span_ : while_stmt->span_;
       if (for_stmt) {
@@ -448,10 +604,31 @@ std::vector<StmtPtr> FixupDanglingYieldValues(const std::vector<StmtPtr>& stmts)
       } else {
         result.push_back(RebuildWhileStmt(while_stmt, MakeBody(body_stmts, span)));
       }
+    } else if (for_stmt || while_stmt) {
+      // A carry-less loop has no yield of its own to repair, but the loops
+      // nested inside it do. Descending here keeps this walk as deep as
+      // StripDeadIterArgs's: without it a FIFO loop written inside a plain
+      // `for task in pl.range(...)` gets no repair at all (issue #2716).
+      const auto& body = for_stmt ? for_stmt->body_ : while_stmt->body_;
+      const auto& span = for_stmt ? for_stmt->span_ : while_stmt->span_;
+
+      // Only the loop variable: this arm is reached exactly when the loop binds
+      // no iter_args.
+      ScopedDefs header(scope);
+      if (for_stmt) header.Add(for_stmt->loop_var_.get());
+
+      auto body_stmts = FixupDanglingYieldValuesScoped(FlattenBody(body), scope);
+      if (for_stmt) {
+        result.push_back(RebuildForStmt(for_stmt, MakeBody(body_stmts, span)));
+      } else {
+        result.push_back(RebuildWhileStmt(while_stmt, MakeBody(body_stmts, span)));
+      }
     } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-      auto new_then = FixupDanglingYieldValues(FlattenBody(if_stmt->then_body_));
-      auto new_else = ProcessElseBranch(
-          if_stmt, [](const std::vector<StmtPtr>& es) { return FixupDanglingYieldValues(es); });
+      // A branch binds no new name of its own, so both see this scope unchanged.
+      auto new_then = FixupDanglingYieldValuesScoped(FlattenBody(if_stmt->then_body_), scope);
+      auto new_else = ProcessElseBranch(if_stmt, [scope](const std::vector<StmtPtr>& es) {
+        return FixupDanglingYieldValuesScoped(es, scope);
+      });
       result.push_back(RebuildIfStmt(if_stmt, new_then, new_else));
     } else {
       result.push_back(stmt);
@@ -459,10 +636,33 @@ std::vector<StmtPtr> FixupDanglingYieldValues(const std::vector<StmtPtr>& stmts)
 
     var_collectors::VarDefUseCollector stmt_defs;
     stmt_defs.VisitStmt(stmt);
-    defined_so_far.insert(stmt_defs.var_defs.begin(), stmt_defs.var_defs.end());
+    for (const Var* def : stmt_defs.var_defs) level.Add(def);
   }
 
   return result;
+}
+
+}  // namespace
+
+std::vector<StmtPtr> FixupDanglingYieldValues(const std::vector<StmtPtr>& stmts,
+                                              const std::vector<VarPtr>& params,
+                                              const std::unordered_set<const Var*>& extra_defined) {
+  // Two kinds of name the body walk cannot discover on its own, both of which
+  // read as dangling and get replaced by the slot's own carry if left unseeded:
+  //
+  //   * parameters, bound by the signature rather than by a statement;
+  //   * `extra_defined`, whose defining statement this split replaced (a
+  //     boundary `tile.move` became a `tpop` defining a fresh Var) and whose
+  //     references a later remap repoints. Rewriting one here deletes the
+  //     reference the remap was going to fix, so the loop stops updating with
+  //     nothing left to point at.
+  std::unordered_set<const Var*> scope;
+  scope.reserve(params.size() + extra_defined.size());
+  for (const auto& param : params) {
+    if (param) scope.insert(param.get());
+  }
+  scope.insert(extra_defined.begin(), extra_defined.end());
+  return FixupDanglingYieldValuesScoped(stmts, &scope);
 }
 
 namespace {
@@ -629,16 +829,21 @@ std::vector<StmtPtr> StripDanglingIfReturnVars(const std::vector<StmtPtr>& stmts
 
 std::vector<StmtPtr> FinalizeSplitCoreBody(const std::vector<StmtPtr>& stmts,
                                            const std::unordered_map<const Var*, StmtPtr>& original_def_map,
-                                           const std::unordered_set<const Var*>& extra_defined) {
+                                           const std::unordered_set<const Var*>& extra_defined,
+                                           const std::vector<VarPtr>& params) {
   // FixupDanglingYieldValues runs first so that dangling yield refs inside
   // IfStmts nested in a loop are rewritten to the loop's iter_arg when one is
   // available (issue #534 pattern). StripDanglingIfReturnVars then mops up the
   // genuinely orphan IfStmt return_vars that remain — those whose enclosing
   // loop has no matching iter_arg fallback (issue #1501 pattern: outer loop's
   // iter_args have themselves already been stripped by an earlier pass).
+  //
+  // Both decide whether a Var is defined here, so both need `extra_defined`:
+  // those names are pending a remap, not dangling, and only one of the two
+  // knowing that would leave the other free to destroy the reference.
   auto repaired = StripDeadIterArgs(stmts);
   repaired = FixupIterArgInitValues(repaired, original_def_map);
-  repaired = FixupDanglingYieldValues(repaired);
+  repaired = FixupDanglingYieldValues(repaired, params, extra_defined);
   repaired = StripDanglingIfReturnVars(repaired, extra_defined);
   repaired = dce::EliminateDeadCode(repaired);
   repaired = StripDeadIterArgs(repaired);

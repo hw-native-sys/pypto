@@ -326,7 +326,9 @@ Phase 2 — Expand each InCore function F:
       - Ascend950: Left→NZ, Right→ZN, Mat/Vec→preserve
       - Ascend910B: Left→NZ, Right→NZ (Mat only supports NZ), Mat/Vec→preserve
   6. Repair loop-carried state on both bodies
-     - Strip dead iter_args whose carried values are unused on this side
+     - Strip dead iter_args whose carried values are unused on this side —
+       "used" closes over the loop's own yield, so a carry read only to feed
+       another live slot (a multi-entry FIFO rotation) stays alive
      - Pull back missing init-value definitions for surviving iter_args
      - Rewrite dangling yields to identity yields when a branch-local value was stripped
      - Remap dangling tile.store result vars (SSA versions stripped by AIC-side splitting) to the corresponding output parameter
@@ -385,6 +387,14 @@ this pass; no call attributes carry placement. See
 **Nested structure handling**: ForStmt, IfStmt, and WhileStmt containing mixed ops are duplicated into both AIC and AIV bodies with recursively pruned contents.
 
 **Loop-state repair after splitting**: mixed-loop control flow is intentionally preserved during body construction, which can leave one side with extra iter_args, missing init-value definitions, or yields that reference stripped branch-local values. The pass repairs those cases before DCE, then normalizes loop-carried state once more after DCE because dead shared aliases can disappear and make an iter_arg removable only at that stage. A final DCE pass cleans up any init-value chains that become dead after the second strip.
+
+**Which carries count as live**: an iter_arg read only by the loop's own trailing
+yield is still live when the slot it feeds is live — that is exactly the shape of
+a multi-entry FIFO, whose entry `N` is read nowhere but the yield that rotates it
+into entry `N-1`. Liveness therefore closes over the yield instead of being read
+off the body alone, and the strip asserts that no surviving yield value names a
+carry it just dropped. Dropping such a carry would leave a free Var that no later
+pass rejects and PTO codegen reports as "no MLIR mapping for MemRef base ...".
 
 **Group wrapper param-returns**: a newly created Group wrapper
 returns its own parameters when every return position traces to a param

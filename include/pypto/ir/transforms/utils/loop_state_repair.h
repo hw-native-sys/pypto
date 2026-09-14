@@ -71,7 +71,22 @@ void BuildDefMap(const std::vector<StmtPtr>& stmts, std::unordered_map<const Var
 std::vector<StmtPtr> FixupIterArgInitValues(const std::vector<StmtPtr>& stmts,
                                             const std::unordered_map<const Var*, StmtPtr>& original_def_map);
 
-std::vector<StmtPtr> FixupDanglingYieldValues(const std::vector<StmtPtr>& stmts);
+/// Rewrite each trailing yield value that names a Var no longer visible at that
+/// point to the carry backing its slot, so a producer pruned by an earlier split
+/// leaves the incoming value flowing through instead of a dangling reference.
+///
+/// `params` are the enclosing function's parameters. They are bound by the
+/// signature rather than by a body statement, so the walk cannot discover them:
+/// pass them or a yield that legitimately forwards a parameter is mistaken for a
+/// dangling one and silently replaced by its slot's own carry.
+///
+/// `extra_defined` carries the same meaning as in `StripDanglingIfReturnVars`:
+/// Vars whose defining statement this split replaced and whose references a
+/// later remap repoints. They are pending, not dangling — rewriting one here
+/// deletes the very reference the remap would have fixed.
+std::vector<StmtPtr> FixupDanglingYieldValues(const std::vector<StmtPtr>& stmts,
+                                              const std::vector<VarPtr>& params,
+                                              const std::unordered_set<const Var*>& extra_defined);
 
 /// Strip IfStmt return_vars whose corresponding yield value (in either
 /// branch) references a Var not visible at that branch — i.e. the producer
@@ -92,9 +107,12 @@ std::vector<StmtPtr> FixupDanglingYieldValues(const std::vector<StmtPtr>& stmts)
 std::vector<StmtPtr> StripDanglingIfReturnVars(const std::vector<StmtPtr>& stmts,
                                                const std::unordered_set<const Var*>& extra_defined = {});
 
+/// `params` are the split function's parameters, forwarded to
+/// `FixupDanglingYieldValues` — see its note on why the walk cannot find them.
 std::vector<StmtPtr> FinalizeSplitCoreBody(const std::vector<StmtPtr>& stmts,
                                            const std::unordered_map<const Var*, StmtPtr>& original_def_map,
-                                           const std::unordered_set<const Var*>& extra_defined = {});
+                                           const std::unordered_set<const Var*>& extra_defined,
+                                           const std::vector<VarPtr>& params);
 
 // ============================================================================
 // Template implementations (must be in header)
