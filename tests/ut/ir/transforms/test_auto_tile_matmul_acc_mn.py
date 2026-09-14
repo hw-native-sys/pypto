@@ -45,6 +45,15 @@ WIDE_K_TILE = 128
 COMPOSE_K_TOTAL = 768
 COMPOSE_K_TILE = 384
 
+# Qwen-like canonical split-K dimensions that previously let the DSA-RP
+# planner's automatic dbC policy shrink N from 256 to 64. The enclosing rewrite
+# emits output tiles sequentially, so that four-tile choice cannot realize the
+# two-Acc schedule the chooser scored.
+DBC_REG_M = 16
+DBC_REG_N = 256
+DBC_REG_K_TOTAL = 1024
+DBC_REG_K_TILE = 256
+
 # Full-pipeline counterpart to the reviewer's (656,80,768) chooser case. The
 # old logical candidate (576,48,32) boxes to physical Acc [576,64] = 144 KiB,
 # while these smaller source panels also fit together in the 512 KiB Mat arena.
@@ -170,6 +179,24 @@ def canonical_split_k_n_boundary_retiles_k_predicated(
             bt = b[k0 : k0 + COMPOSE_K_TILE, 0:WIDE_N]
             acc = pl.matmul_acc(acc, at, bt, init_cond=(k0 == 0))
         c[0:WIDE_M, 0:WIDE_N] = acc
+    return c
+
+
+@pl.jit
+def canonical_split_k_dsa_rp_dbc_regression(
+    a: pl.Tensor[[DBC_REG_M, DBC_REG_K_TOTAL], pl.BF16],
+    b: pl.Tensor[[DBC_REG_K_TOTAL, DBC_REG_N], pl.BF16],
+    c: pl.Out[pl.Tensor[[DBC_REG_M, DBC_REG_N], pl.FP32]],
+):
+    """Qwen-like split-K chain whose full output fits one L0C accumulator."""
+    for _ in pl.spmd(1):
+        acc = pl.create_tensor([DBC_REG_M, DBC_REG_N], dtype=pl.FP32)
+        for kb in pl.pipeline(0, DBC_REG_K_TOTAL // DBC_REG_K_TILE, stage=2):
+            k0 = kb * DBC_REG_K_TILE
+            at = a[0:DBC_REG_M, k0 : k0 + DBC_REG_K_TILE]
+            bt = b[k0 : k0 + DBC_REG_K_TILE, 0:DBC_REG_N]
+            acc = pl.matmul_acc(acc, at, bt, init_cond=(k0 == 0))
+        c[0:DBC_REG_M, 0:DBC_REG_N] = acc
     return c
 
 
@@ -490,6 +517,26 @@ def test_predicated_issue_2232_loop_level_mn_tiling():
     assert "target_memory=pl.Mem.Right" in printed
     assert "pl.tile.matmul_acc(" in printed
     assert "if " not in printed
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS])
+def test_canonical_split_k_output_grid_does_not_select_unrealized_dbc(planner):
+    """The enclosing split-K rewrite must not size its grid from a dbC plan.
+
+    For this Qwen-like shape, enabling dbC in the output-grid chooser selects
+    four 16x64 output tiles so full K=256 fits the double-buffered Right pool.
+    The rewrite drains each tile before starting the next one, so it cannot
+    realize the two-Acc schedule that choice assumes. Keep the one 16x256
+    output tile and let the nested matmul calls select their legal K blocking.
+    """
+    before = _lower_to_auto_tile_input(_jit_program(canonical_split_k_dsa_rp_dbc_regression))
+    with _planner_context(planner):
+        after = passes.auto_tile_matmul_l0()(before)
+
+    printed = ir.python_print(after)
+    assert printed.count("pl.tile.store(") == 1
+    assert "pl.Tile[[16, 256], pl.FP32, pl.Mem.Acc]" in printed
+    assert "pl.Tile[[256, 64], pl.BF16, pl.Mem.Right]" not in printed
 
 
 def test_canonical_split_k_tiles_both_m_and_n_with_boundaries():
