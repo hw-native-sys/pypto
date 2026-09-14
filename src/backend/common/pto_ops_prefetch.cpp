@@ -188,8 +188,8 @@ void RegisterPrefetchOps(Backend& backend, const std::unordered_set<std::string>
     const std::string session = GetHandleSSA(op, 1, cg);
 
     const std::string done = ResultSSA(cg);
-    cg.Emit(done + " = pto.comm.wait_async_event(" + event + ", " + session + " : " + kEventType + ", " +
-            kSessionType + ") -> i1");
+    // Shared with pld.system.wait_async_event: one PTOAS op, one emission site.
+    pto_ops_detail::EmitWaitAsyncEventPTO(cg, done, event, session);
     cg.SetCurrentExprValue(done);
     return "";
   });

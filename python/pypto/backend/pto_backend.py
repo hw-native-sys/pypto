@@ -676,7 +676,12 @@ _AIV_FIFO_ENDPOINT_OPS = frozenset(
         _ir_core.get_op("tile.tpush_to_aic").name,
     }
 )
-_SDMA_WORKSPACE_OPS = frozenset({_ir_core.get_op("prefetch.make_context").name})
+_SDMA_WORKSPACE_OPS = frozenset(
+    {
+        _ir_core.get_op("prefetch.make_context").name,
+        _ir_core.get_op("pld.tile.async_session").name,
+    }
+)
 _DEFERRED_COMPLETION_OPS = frozenset({_ir_core.get_op("pld.system.defer_wait").name})
 
 

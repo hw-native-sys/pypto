@@ -2832,6 +2832,73 @@ void OpConversionRegistry::RegisterDistributedOps() {
   RegisterSimple("pld.tensor.remote_store", "pld.tile.remote_store",
                  {{0, {BridgeSpaceOf({"pld.tile.remote_store"}, 0), std::nullopt}}});
 
+  // pld.tensor.put_async -> pld.tile.put_async: a pure rename. Unlike the
+  // synchronous put there is no staging tile to materialize — PTOAS
+  // `pto.comm.tput_async` moves GM->GM on the SDMA engine and takes no
+  // `buf(...)` operand group — so the tile-level form carries exactly the same
+  // operands. The rename still happens because backend codegen registers
+  // transfer emitters at the tile level (`reg("pld.tile.put")` / `"pld.tile.get"`).
+  //
+  // Reject a TileType src before the rename: a computed producer already lowered
+  // to a tile has no GM address, and deferring to pld.tile.put_async's deducer
+  // would name the internal op in the diagnostic.
+  RegisterCustom(
+      "pld.tensor.put_async",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        INTERNAL_CHECK_SPAN(args.size() == 4 || args.size() == 7, span)
+            << "pld.tensor.put_async conversion expects 4 args (dst, peer, src, session) or 7 "
+               "(+ dst_offsets, src_offsets, shape), got "
+            << args.size();
+        CHECK_SPAN(!As<TileType>(args[2]->GetType()), span)
+            << "pld.tensor.put_async src must be a GM tensor, but got a computed value that lowers "
+               "to a tile: tput_async transfers between two GM regions, and a UB tile has no GM "
+               "address. Store the value to a tensor first, or use pld.tensor.remote_store for a "
+               "synchronous tile push.";
+        auto& op_reg = OpRegistry::GetInstance();
+        auto put_call = op_reg.Create("pld.tile.put_async", args, kwargs, span);
+        return ConversionResult{{}, put_call};
+      });
+
+  // pld.system.async_session -> tile.create(scratch) + pld.tile.async_session(scratch).
+  //
+  // The Vec(UB) scratch is a real allocation, not a formality: pto-isa
+  // `MakeTmpBufferFromTile` requires a Vec tile of at least 8 bytes, and
+  // `BuildSdmaSession` bounces descriptor and completion words through it on
+  // every issue AND every wait. 256 B matches `kUbAlignSize` and the shape both
+  // pto-isa's own a2a3 ST kernel and `PrefetchAsyncContext` declare.
+  //
+  // It is created here rather than in codegen for the same reason put's staging
+  // tile is: the memory allocator must assign its UB address before PTO emission
+  // (required at --pto-level=level3). `AsyncWaitScratchBinder`, which runs after
+  // the conversions in ConvertTensorToTileOps, then threads this same scratch Var
+  // into every `wait_async_event` on the session so its live range spans the whole
+  // async window — see that class for why that is a correctness requirement.
+  RegisterCustom(
+      "pld.system.async_session",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        INTERNAL_CHECK_SPAN(args.empty(), span)
+            << "pld.system.async_session conversion expects no positional args, got " << args.size();
+        auto& op_reg = OpRegistry::GetInstance();
+
+        constexpr int64_t kScratchRows = 1;
+        constexpr int64_t kScratchCols = 256;  // pto-isa kUbAlignSize
+        auto shape_tuple = std::make_shared<MakeTuple>(
+            std::vector<ExprPtr>{std::make_shared<ConstInt>(kScratchRows, DataType::INDEX, span),
+                                 std::make_shared<ConstInt>(kScratchCols, DataType::INDEX, span)},
+            span);
+        std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", DataType::INT8},
+                                                                       {"target_memory", MemorySpace::Vec}};
+        auto create_call = op_reg.Create("tile.create", {shape_tuple}, create_kwargs, span);
+        auto scratch = std::make_shared<Var>("sdma_session_scratch", create_call->GetType(), span);
+
+        std::vector<StmtPtr> prologue;
+        prologue.push_back(std::make_shared<AssignStmt>(scratch, create_call, span));
+        auto session_call = op_reg.Create("pld.tile.async_session", {scratch}, kwargs, span);
+        return ConversionResult{std::move(prologue), session_call};
+      });
+
   // pld.tensor.put -> tile.create(stage) + pld.tile.put(dst, peer, src, stage).
   // Stage shape is [rows, cols] with rows = product(leading dims), cols =
   // innermost dim: the 2-D-flattened transfer extent codegen previously
