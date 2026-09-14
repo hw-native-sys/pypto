@@ -123,6 +123,9 @@ target 规范化为 `target_memory=Mat`。原始 `tile.load` IR 仍必须携带�
 4. **Retargetable 生产者 kwarg 重写（`VisitStmt_(AssignStmt)`）** —— 对注册了 `HasRetargetableMemoryKwarg()` 的算子，若阶段 1 把输出解析到与 kwarg 不同的 space（或 kwarg 缺失），则重写 `Call` 的 `target_memory` kwarg 与结果 `TileType`，使之匹配。这让 codegen 与赋值左侧 `Var` 的注解保持一致；这是必要的，因为阶段 1 可能基于反向需求做出解析，而 kwarg 永远看不到这些需求。
 5. **LHS / RHS 类型同步** —— 当 `VisitExpr_(Call)` 在替换被 move 后的参数后，借由 `OpRegistry` 重建 `Call`，结果类型可能与 LHS `Var` 的原类型不同（重建的 call 会看到布局变化后的输入）。Mutator 把 LHS `Var` 的 `TileType` 同步到重建 call 的 shape / dtype / memref / view，同时保留变量重写阶段选定的 `memory_space_`，保证 roundtrip 等价。
 
+   同样的同步也适用于普通 `Var` / `IterArg` 别名：别名必须描述重写后的值，不能保留生产者在 move 之前的布局。
+6. **循环布局传播（Loop layout propagation）** —— 在访问循环体之前，`ForStmt` 和 `WhileStmt` 的携带值继承重写后初始值的物理布局（`blayout`、`slayout`、`fractal`）；循环结果继承该携带值布局，包括零次迭代的情况。携带值和结果各自的 shape、dtype、分配及 valid-shape 元数据保持不变。显式的非默认布局会被继承，而不是被内存空间的默认布局替代。
+
 ### 阶段 4 — 循环不变量 Mat 驻留（`loop_invariant_mat_residency`）
 
 所有 space 显式化后，一个独立的内部 transform 会识别形如 `tile.load(GM → Mat) → tile.transpose_view* → tile.move/tile.extract(Mat → Left/Right)` 的不变量前缀。对于精确的单一使用链，它会把整个不变前缀移到循环 preheader。它也会识别由编译器生成的 Mat panel：该 panel 的完整只读使用图可经过 `transpose_view` 和一个或多个 `move` / `extract` 分支到 matmul 的匹配操作数位置。在这种情况下，只会移动整个 panel 的 GM→Mat load；依赖 K 的 Left/Right 分级仍保留在原始循环或 pipeline 中。这样可将优化严格限定为驻留 matmul 操作数，而不是通用 tile LICM。因此静止 tensor-level 操作数只从 GM 加载一次，而依赖循环的对端操作数仍正常流式加载。

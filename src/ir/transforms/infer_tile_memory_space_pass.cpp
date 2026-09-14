@@ -686,18 +686,19 @@ class TileMemorySpaceMutator : public IRMutator {
       return it->second;
     }
 
-    auto new_type_opt = ComputeRewrittenType(op);
     auto new_init_value = VisitExpr(op->initValue_);
+    auto new_type =
+        InheritTileLayout(ComputeRewrittenType(op).value_or(op->GetType()), new_init_value->GetType());
 
-    bool type_changed = new_type_opt.has_value();
+    bool type_changed = new_type.get() != op->GetType().get();
     bool init_changed = new_init_value.get() != op->initValue_.get();
     if (!type_changed && !init_changed) {
       var_cache_[op] = op;
       return op;
     }
 
-    auto new_iter_arg = std::make_shared<const IterArg>(
-        op->name_hint_, type_changed ? *new_type_opt : op->GetType(), std::move(new_init_value), op->span_);
+    auto new_iter_arg = std::make_shared<const IterArg>(op->name_hint_, std::move(new_type),
+                                                        std::move(new_init_value), op->span_);
     var_cache_[op] = new_iter_arg;
     return new_iter_arg;
   }
@@ -899,15 +900,15 @@ class TileMemorySpaceMutator : public IRMutator {
       }
     }
 
-    // Sync LHS Var type with the rebuilt Call's result type.  When VisitExpr_(CallPtr)
-    // rebuilds the Call via OpRegistry after substituting moved arguments, the deduced
-    // result type may differ from the LHS Var's original type (e.g. tile_view changes
-    // because the inputs now have different layouts).  Without this sync, the Var
-    // annotation and the Call result type disagree, which breaks roundtrip equality.
+    // Sync LHS Var type with the rewritten RHS type, including Var/IterArg aliases.
+    // When VisitExpr_(CallPtr) rebuilds the Call via OpRegistry after substituting moved arguments, the
+    // deduced result type may differ from the LHS Var's original type (e.g. tile_view changes because the
+    // inputs now have different layouts).  Without this sync, the Var annotation and the Call result type
+    // disagree, which breaks roundtrip equality.
     auto new_call = As<Call>(new_value);
     auto old_tile_type = As<TileType>(new_var->GetType());
-    if (new_call && old_tile_type) {
-      auto new_tile_type = As<TileType>(new_call->GetType());
+    if ((new_call || AsVarLike(new_value)) && old_tile_type) {
+      auto new_tile_type = As<TileType>(new_value->GetType());
       if (new_tile_type && new_tile_type.get() != old_tile_type.get()) {
         // Preserve the Var's memory_space (set by VisitExpr_(VarPtr) based on var_memory_)
         // and, for the same reason, its MemRef: a re-deduced Call type carries neither,
@@ -926,7 +927,7 @@ class TileMemorySpaceMutator : public IRMutator {
         // the Call does not, so a print->parse roundtrip — which re-derives the
         // Call type from the LHS annotation — sees a memory_space presence
         // mismatch on body[*].value.type.
-        if (new_tile_type->memory_space_ != old_tile_type->memory_space_) {
+        if (new_call && new_tile_type->memory_space_ != old_tile_type->memory_space_) {
           new_value = std::make_shared<Call>(new_call->op_, new_call->args_, new_call->kwargs_,
                                              new_call->attrs_, synced_type, new_call->span_);
         }
@@ -947,7 +948,55 @@ class TileMemorySpaceMutator : public IRMutator {
     return SeqStmts::Flatten(std::move(new_stmts), op->span_);
   }
 
+  StmtPtr VisitStmt_(const ForStmtPtr& op) override { return RewriteLoop(op); }
+
+  StmtPtr VisitStmt_(const WhileStmtPtr& op) override { return RewriteLoop(op); }
+
  private:
+  // A carry has its own data metadata (in particular valid_shape expressions),
+  // but must use the physical layout of its rewritten initializer. Do not reset
+  // it to the space's default: explicitly boxed Vec tiles are legal too.
+  static TypePtr InheritTileLayout(const TypePtr& type, const TypePtr& source_type) {
+    auto tile = As<TileType>(type);
+    auto source = As<TileType>(source_type);
+    if (!tile || !source || tile->memory_space_ != source->memory_space_) return type;
+
+    auto view = tile_view_semantics::GetEffectiveTileView(*tile);
+    auto source_view = tile_view_semantics::GetEffectiveTileView(*source);
+    if (view.blayout == source_view.blayout && view.slayout == source_view.slayout &&
+        view.fractal == source_view.fractal) {
+      return type;
+    }
+    view.blayout = source_view.blayout;
+    view.slayout = source_view.slayout;
+    view.fractal = source_view.fractal;
+    return std::make_shared<TileType>(tile->shape_, tile->dtype_, tile->memref_, std::move(view),
+                                      tile->memory_space_);
+  }
+
+  template <typename Loop>
+  StmtPtr RewriteLoop(const std::shared_ptr<const Loop>& op) {
+    auto rewritten = IRMutator::VisitStmt_(op);
+    auto loop = As<Loop>(rewritten);
+    INTERNAL_CHECK_SPAN(loop, op->span_) << "Loop rewrite changed the statement kind";
+    INTERNAL_CHECK_SPAN(loop->return_vars_.size() <= loop->iter_args_.size(), op->span_)
+        << "Loop has more results than iter_args";
+    auto result = MutableCopy(loop);
+    bool changed = false;
+    // Use the carry, not just the final yield: a zero-trip loop returns its init.
+    // The base visitor has already rewritten each carry before visiting the body.
+    for (size_t i = 0; i < result->return_vars_.size(); ++i) {
+      const auto& var = result->return_vars_[i];
+      auto type = InheritTileLayout(var->GetType(), result->iter_args_[i]->GetType());
+      if (type.get() == var->GetType().get()) continue;
+      auto new_var = std::make_shared<Var>(var->name_hint_, std::move(type), var->span_);
+      var_cache_[op->return_vars_[i]] = new_var;
+      result->return_vars_[i] = std::move(new_var);
+      changed = true;
+    }
+    return changed ? result : rewritten;
+  }
+
   const std::map<VarPtr, MemorySpace>& var_memory_;
   const std::set<MoveKey, MoveKeyLess>& needed_moves_;
   std::set<VarPtr> params_;
