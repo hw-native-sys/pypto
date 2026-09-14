@@ -28,6 +28,7 @@ right thing" are the same check.
 
 Usage:
     python tests/docs/run_doc_examples.py [--pages docs/en/user/performance] [-p a2a3sim]
+    python tests/docs/run_doc_examples.py --jobs 16     # run N blocks at once
     python tests/docs/run_doc_examples.py --list        # show what would run
     python tests/docs/run_doc_examples.py --check-parity  # zh code == en code
 """
@@ -37,6 +38,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -132,7 +134,18 @@ def main() -> int:
     parser.add_argument("--list", action="store_true", help="list runnable blocks and exit")
     parser.add_argument("--check-parity", action="store_true", help="also verify zh code matches en")
     parser.add_argument("--keep", action="store_true", help="keep the generated .py files")
+    parser.add_argument(
+        "-j",
+        "--jobs",
+        type=int,
+        default=1,
+        help="how many blocks to run at once (default: 1). Each block is an independent process.",
+    )
     args = parser.parse_args()
+
+    if args.jobs < 1:
+        print(f"--jobs must be at least 1, got {args.jobs}", file=sys.stderr)
+        return 1
 
     root = (REPO_ROOT / args.pages).resolve()
     pages = [root] if root.is_file() else sorted(root.rglob("*.md"))
@@ -148,24 +161,35 @@ def main() -> int:
             return 1
         print("parity OK: every zh marked block matches its en counterpart")
 
-    failures = []
-    total = 0
+    # A run block is composed with its own page's setup blocks and executed as
+    # its own process, so no two of them share anything -- `--jobs` just runs N
+    # at once. The width belongs to the caller, who knows what else the machine
+    # is doing, so it defaults to 1 and CI passes it explicitly.
+    todo: list[tuple[list[Block], Block]] = []
     for page in pages:
         blocks = extract(page)
-        runs = [b for b in blocks if b.kind == "run"]
-        for block in runs:
-            total += 1
-            if args.list:
-                print(f"  would run  {block.label}")
-                continue
-            ok, tail = run_block(blocks, block, args.platform, args.keep)
-            print(f"{'PASS' if ok else 'FAIL'}  {block.label}")
-            if not ok:
-                failures.append((block.label, tail))
+        todo.extend((blocks, b) for b in blocks if b.kind == "run")
+    total = len(todo)
 
     if args.list:
+        for _, block in todo:
+            print(f"  would run  {block.label}")
         print(f"\n{total} runnable block(s)")
         return 0
+
+    # Printed as they land so a long run shows progress; the failing tails are
+    # replayed below, where they are not buried under later passes.
+    failures = []
+    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+        futures = {
+            pool.submit(run_block, blocks, block, args.platform, args.keep): block for blocks, block in todo
+        }
+        for future in as_completed(futures):
+            block = futures[future]
+            ok, tail = future.result()
+            print(f"{'PASS' if ok else 'FAIL'}  {block.label}", flush=True)
+            if not ok:
+                failures.append((block.label, tail))
 
     for label, tail in failures:
         print(f"\n=== {label}\n{tail}", file=sys.stderr)

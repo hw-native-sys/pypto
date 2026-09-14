@@ -861,7 +861,8 @@ jobs:
         run: |
           source activate.sh
           set -e
-          python tests/docs/run_doc_examples.py --pages docs/en/user --check-parity -p a2a3sim
+          python tests/docs/run_doc_examples.py --pages docs/en/user --check-parity \
+            -p a2a3sim --jobs 16
 
   examples-tests:
     # The distributed examples ladder — every example must compile
@@ -921,6 +922,11 @@ jobs:
       # The cache *paths* (CCACHE_DIR / PIP_CACHE_DIR) and CCACHE_NAMESPACE are
       # derived by setup-ci-job from the runner config's CI_CACHE_ROOT.
       CCACHE_UMASK: '000'
+      # How many examples / doc blocks run at once. One example is one process
+      # that spends most of its life on a single core (its own compiles fan out
+      # to 1 + len(kernels) threads for a fraction of the run), so this is far
+      # cheaper to the shared host than the number suggests.
+      EXAMPLE_JOBS: 16
     steps:
       - name: Fetch composite action definitions
         # Local `uses: ./.github/actions/...` resolves against $GITHUB_WORKSPACE,
@@ -943,98 +949,28 @@ jobs:
           pip-cache-name: pip-examples
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
 
-      - name: Run distributed examples on the simulator
+      # Every example and every documented alternate invocation, plus the
+      # manual's runnable blocks. All three ladders are lists of independent
+      # processes -- a fresh mkdtemp under build_output each, reusable binaries
+      # guarded by binary_context_lock, and a distributed run's shm segment
+      # named after its own driver PID -- so they are run several at a time.
+      # The matrix itself moved into tests/docs/run_examples.py, where a
+      # developer can reproduce one leg without reading YAML.
+      - name: Run every example on the simulator
         run: |
           source activate.sh
           set -e
-          for ex in examples/distributed/*.py; do
-            case "$ex" in */__init__.py) continue ;; esac
-            echo "=== $ex ==="
-            python "$ex" -p a2a3sim -d 0,1
-          done
-          # Alternate modes documented in the walkthroughs — every documented
-          # invocation must be CI-validated too, or the teaching material rots.
-          echo "=== examples/distributed/04_barrier.py --use-builtin ==="
-          python examples/distributed/04_barrier.py -p a2a3sim -d 0,1 --use-builtin
-          echo "=== examples/distributed/05_remote_load_store.py --mode store ==="
-          python examples/distributed/05_remote_load_store.py -p a2a3sim -d 0,1 --mode store
-          echo "=== examples/distributed/06_put_get.py --mode get ==="
-          python examples/distributed/06_put_get.py -p a2a3sim -d 0,1 --mode get
-          # Step 07 is rank-count-agnostic: the P=3 and P=4 legs are the
-          # committed >=3-rank coverage for the general ring pattern (P=2 ran
-          # in the default-mode loop above).
-          echo "=== examples/distributed/07_dynamic_rank_count.py -d 0,1,2 ==="
-          python examples/distributed/07_dynamic_rank_count.py -p a2a3sim -d 0,1,2
-          echo "=== examples/distributed/07_dynamic_rank_count.py -d 0,1,2,3 ==="
-          python examples/distributed/07_dynamic_rank_count.py -p a2a3sim -d 0,1,2,3
-          # Steps 08-11: the all-reduce comparisons are only observable
-          # at P=4 (P=2 collapses mesh/two-phase/ring into the same exchange); the
-          # reveal runs both modes.
-          echo "=== examples/distributed/08_allreduce_mesh.py -d 0,1,2,3 ==="
-          python examples/distributed/08_allreduce_mesh.py -p a2a3sim -d 0,1,2,3
-          echo "=== examples/distributed/09_allreduce_two_phase.py -d 0,1,2,3 ==="
-          python examples/distributed/09_allreduce_two_phase.py -p a2a3sim -d 0,1,2,3
-          echo "=== examples/distributed/10_allreduce_ring.py -d 0,1,2,3 ==="
-          python examples/distributed/10_allreduce_ring.py -p a2a3sim -d 0,1,2,3
-          echo "=== examples/distributed/11_allreduce_reveal.py -d 0,1,2,3 ==="
-          python examples/distributed/11_allreduce_reveal.py -p a2a3sim -d 0,1,2,3
-          echo "=== examples/distributed/11_allreduce_reveal.py --mode ring -d 0,1,2,3 ==="
-          python examples/distributed/11_allreduce_reveal.py -p a2a3sim -d 0,1,2,3 --mode ring
-          # Steps 12-15: the collective zoo — every documented invocation must
-          # be CI-validated. P=2 default ran in the loop above; add the P=2
-          # builtin reveal and the P=4 legs (both modes; the per-rank patterns
-          # are most distinct at P=4).
-          echo "=== examples/distributed/12_broadcast.py --mode builtin -d 0,1 ==="
-          python examples/distributed/12_broadcast.py -p a2a3sim -d 0,1 --mode builtin
-          echo "=== examples/distributed/12_broadcast.py -d 0,1,2,3 ==="
-          python examples/distributed/12_broadcast.py -p a2a3sim -d 0,1,2,3
-          echo "=== examples/distributed/12_broadcast.py --mode builtin -d 0,1,2,3 ==="
-          python examples/distributed/12_broadcast.py -p a2a3sim -d 0,1,2,3 --mode builtin
-          echo "=== examples/distributed/13_allgather.py --mode builtin -d 0,1 ==="
-          python examples/distributed/13_allgather.py -p a2a3sim -d 0,1 --mode builtin
-          echo "=== examples/distributed/13_allgather.py -d 0,1,2,3 ==="
-          python examples/distributed/13_allgather.py -p a2a3sim -d 0,1,2,3
-          echo "=== examples/distributed/13_allgather.py --mode builtin -d 0,1,2,3 ==="
-          python examples/distributed/13_allgather.py -p a2a3sim -d 0,1,2,3 --mode builtin
-          echo "=== examples/distributed/14_reduce_scatter.py --mode builtin -d 0,1 ==="
-          python examples/distributed/14_reduce_scatter.py -p a2a3sim -d 0,1 --mode builtin
-          echo "=== examples/distributed/14_reduce_scatter.py -d 0,1,2,3 ==="
-          python examples/distributed/14_reduce_scatter.py -p a2a3sim -d 0,1,2,3
-          echo "=== examples/distributed/14_reduce_scatter.py --mode builtin -d 0,1,2,3 ==="
-          python examples/distributed/14_reduce_scatter.py -p a2a3sim -d 0,1,2,3 --mode builtin
-          echo "=== examples/distributed/15_all_to_all.py --mode builtin -d 0,1 ==="
-          python examples/distributed/15_all_to_all.py -p a2a3sim -d 0,1 --mode builtin
-          echo "=== examples/distributed/15_all_to_all.py -d 0,1,2,3 ==="
-          python examples/distributed/15_all_to_all.py -p a2a3sim -d 0,1,2,3
-          echo "=== examples/distributed/15_all_to_all.py --mode builtin -d 0,1,2,3 ==="
-          python examples/distributed/15_all_to_all.py -p a2a3sim -d 0,1,2,3 --mode builtin
-          # Step 16: the composition capstone at P=4.
-          echo "=== examples/distributed/16_putting_it_together.py -d 0,1,2,3 ==="
-          python examples/distributed/16_putting_it_together.py -p a2a3sim -d 0,1,2,3
-
-      # The teaching ladders. These carry the manual's beginner/intermediate/
-      # advanced/utils citations, so leaving them unrun let the pages point at
-      # code nothing checked — the gap that let a silent no-write kernel sit in
-      # the docs. They default to a2a3sim and need no arguments.
-      - name: Run the teaching examples on the simulator
-        run: |
-          source activate.sh
-          set -e
-          for ex in examples/beginner/*.py examples/intermediate/*.py \
-                    examples/advanced/*.py examples/utils/*.py; do
-            case "$ex" in */__init__.py) continue ;; esac
-            echo "=== $ex ==="
-            python "$ex"
-          done
+          python tests/docs/run_examples.py --jobs "$EXAMPLE_JOBS"
 
       # The user manual's runnable blocks. Teaching code that is never executed
-      # rots silently — a kernel can compile, run, write nothing, and still read
-      # correctly on the page — so the manual itself is executed here.
+      # rots silently -- a kernel can compile, run, write nothing, and still read
+      # correctly on the page -- so the manual itself is executed here.
       - name: Run the user manual's runnable code blocks
         run: |
           source activate.sh
           set -e
-          python tests/docs/run_doc_examples.py --pages docs/en/user --check-parity -p a2a3sim
+          python tests/docs/run_doc_examples.py --pages docs/en/user --check-parity \
+            -p a2a3sim --jobs "$EXAMPLE_JOBS"
 
   codegen-tests:
     # Codegen-only: verifies IR → kernel/orch C++ generation without going
