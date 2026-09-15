@@ -27,7 +27,7 @@ class ArtifactExecutionMode(Enum):
 
 @dataclass(frozen=True)
 class ExecutionCapabilities:
-    """Validated, immutable capabilities; current producers emit program only."""
+    """Validated, immutable capabilities for program and internal kernel producers."""
 
     modes: tuple[ArtifactExecutionMode, ...] = (ArtifactExecutionMode.PROGRAM,)
 

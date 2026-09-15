@@ -53,7 +53,7 @@ subsequent private requests build again. This is not a private-object cache.
 
 ## Execution capabilities and complete argument binding
 
-Current compilers emit `supported_execution_modes: ["program"]` in
+Public compilers emit `supported_execution_modes: ["program"]` in
 `compiled_meta.json` (schema 3) and `distributed_meta.json` (schema 4).
 `ExecutionCapabilities` in `pypto._artifact_contract` is immutable and validated;
 `CompiledProgram`, its orchestration children, and `DistributedCompiledProgram`
@@ -125,10 +125,11 @@ IR parameter metadata. `bind_kernel_args` requires every argument and preserves
 original tensor objects, aliases and current scalar values. It performs no
 allocation, scalar encoding, compilation or device work.
 
-A future kernel compiler adapter uses `write_kernel_metadata` for each generated
-orchestration directory, including each child with its own signature. It must
-supply aliases established from IR, not infer them from output order. This
-writer does not convert a program binary into a kernel binary. The sidecar
+The internal kernel compiler uses `write_kernel_metadata` after generating a fresh
+single-chip variant. It derives aliases from pre-pipeline IR using the existing
+return-lineage analysis, never from output order. Allocated or scalar returns
+and distributed/multiple-entry programs are rejected. This writer does not
+convert a previously compiled program binary into a kernel binary. The sidecar
 stores the descriptor beside existing parameter metadata; recovery cross-checks
 names, types, directions, shapes, platform/backend and return count.
 `load_kernel_metadata` restores it without constructing a program executor.
@@ -139,14 +140,49 @@ spec construction preserves it. `restore_kernel_metadata` validates the manifest
 sidecar and requested ABI before handing metadata to a later kernel consumer.
 Missing or inconsistent descriptors require recompilation. Runtime scalar
 values, addresses, streams, callable handles and Worker generations never enter
-these records. The later kernel compiler must also include any ABI-dependent
-code-generation inputs in its specialization identity.
+these records. The descriptor also separates kernel/program object-cache entries
+and participates in the persistent stage identity.
 
-This milestone provides descriptor persistence, binding and validation. Current
-JIT/compiler producers still emit program artifacts. Kernel wrapper generation,
-Worker ownership, registration, native launch and capture are subsequent work.
-Describing an HBG or A5 target does not claim its kernel execution works; the
-pinned simpler implementation's supported matrix must be checked separately.
+### Internal kernel compilation and recovery
+
+`JITFunction._resolve_kernel_artifact` is an internal producer for subsequent JIT
+integration. It reuses specialization, the pass pipeline, PTO code generation,
+and PyPTO-owned binary compilation. Public `compile()` and direct calls retain
+their program behavior; no decorator mode or public kernel compilation API is
+added. Compilation yields `KernelArtifact`, which exposes device-free `load()`
+and `chip_callable` for internal consumers, with no execution method.
+
+At the pinned Simpler revision, both execution paths invoke
+`aicpu_orchestration_entry(const ChipTaskArgs&)`. Simpler converts the
+`ChipStorageTaskArgs` wire pools into that entry view. The producer checks the
+lowered entry's parameter order/types/shapes and generated per-tensor directions
+against the descriptor, retains the existing orchestration wrapper, and adds a
+function-type static assertion and an exported descriptor digest string. Kernel
+assembly and recovery require that digest in the orchestration binary, so a
+program binary or a different kernel signature cannot silently be relabeled.
+This is a compatibility check, not a signature proving artifact provenance.
+
+Kernel builds require the descriptor's exact clean Simpler SDK revision and
+matching native callable builder. `KernelCompiler` owns compiler/linker execution;
+Simpler supplies metadata and `CoreCallable.build`/`ChipCallable.build` assemble
+bytes without Worker initialization. HBG and TRB retain their SDK-selected
+host/device orchestration placement. A2/A3 and A5 binary compilation can be
+validated without running kernels; simulator descriptors are not yet supported.
+
+Kernel requests reuse `resolve_persistent`, `ArtifactStore` and `ArtifactRuntime`.
+The mode/descriptor separates object and persistent stage entries; runtime scalar
+values do not select new artifacts. GENERATED promotion compiles required binaries
+in a private copy and validates the complete binary contract before publishing
+READY. As with program promotion, inherited mutable binaries are not treated as
+verified READY payloads. Compiler, native revision or binary-contract failures
+publish no READY entry. Read-only misses use private builds outside the cache.
+
+`restore_kernel_artifact` validates the manifest, sidecar and expected ABI before
+attachment. READY loading verifies recorded bytes, target, signature and embedded
+descriptor before assembly; it neither executes generated configuration nor
+constructs a compiler. Concurrent loads on one artifact share the assembled callable. Worker
+ownership, prepare deduplication, native launch and capture remain later work;
+successful HBG/A5 compilation does not establish kernel execution support.
 
 ## Layout and validation
 

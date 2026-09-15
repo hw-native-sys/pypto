@@ -75,6 +75,7 @@ from typing import Any, NamedTuple
 from pypto._cache_config import capture_cache_config, record_stats, time_stage
 from pypto._external_source import external_source_digest
 from pypto._identity import digest_record
+from pypto._kernel_abi import KernelABI
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import emit_source_loc_default
 from pypto.compile_profiling import get_active_profiler
@@ -2277,7 +2278,7 @@ class JITFunction:
         self._external_dual_aiv_dispatch = external_dual_aiv_dispatch
         self._external_include_dirs = external_include_dirs
         self._dep_graph_state: _CachedDepGraph | None = None
-        self._cache: dict[CacheKey, Any] = {}  # CacheKey → CompiledProgram
+        self._cache: dict[CacheKey | tuple[CacheKey, KernelABI], Any] = {}
         self._artifact_objects: dict[Any, Any] = {}
         self._cache_lock = threading.RLock()
 
@@ -2867,8 +2868,10 @@ class JITFunction:
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
         allow_signature_mode: bool = False,
+        *,
+        _kernel: bool = False,
     ) -> tuple[Any, list[Any], Any | None]:
-        """Look up or build a specialized CompiledProgram.
+        """Look up or build a specialized program or internal kernel artifact.
 
         Shared by ``__call__`` (which then dispatches) and [`compile`][pypto.language.JITFunction.compile]
         (which then returns the CompiledProgram). Cache keys include all inputs
@@ -2895,9 +2898,36 @@ class JITFunction:
             specialization.arguments[n] for n in specialization.param_names if n in specialization.arguments
         ]
 
+        kernel_abi = None
+        kernel_program = None
+        if _kernel:
+            from pypto.ir._kernel_compile import kernel_abi_for_program  # noqa: PLC0415
+
+            kernel_program = self._compile_to_program(
+                specialization.tensor_meta,
+                specialization.scalar_dtypes,
+                specialization.constexpr_values,
+                specialization.per_func_dyn,
+                pl,
+            )
+            kernel_abi = kernel_abi_for_program(
+                kernel_program,
+                platform=compile_kwargs["platform"],
+                runtime=runtime_kind_to_name(_resolve_runtime()),
+            )
+
         def build(**overrides: Any) -> Any:
             record_stats(generation_builds=1)
             with time_stage("build_ns"):
+                if kernel_abi is not None:
+                    assert kernel_program is not None
+                    from pypto.ir.compile import _compile_impl  # noqa: PLC0415
+
+                    return _compile_impl(
+                        kernel_program,
+                        _kernel_abi=kernel_abi,
+                        **(compile_kwargs | overrides),
+                    )
                 return self._compile(
                     specialization.tensor_meta,
                     specialization.scalar_dtypes,
@@ -2938,6 +2968,7 @@ class JITFunction:
             runtime=_resolve_runtime(),
         )
 
+        memory_key = key if kernel_abi is None else (key, kernel_abi)
         with self._cache_lock:
             if cache_config.enabled:
                 from ._persistent import resolve_persistent  # noqa: PLC0415
@@ -2951,13 +2982,22 @@ class JITFunction:
                     platform=compile_kwargs["platform"],
                     runtime_name=runtime_kind_to_name(_resolve_runtime()),
                     distributed=self._func_type == "host",
+                    **({} if kernel_abi is None else {"kernel_abi": kernel_abi}),
                 )
-            elif key in self._cache:
+            elif memory_key in self._cache:
                 record_stats(object_hits=1)
-                compiled = self._cache[key]
+                compiled = self._cache[memory_key]
             else:
-                compiled = self._cache[key] = build()
+                compiled = self._cache[memory_key] = build()
         return compiled, ordered_args, run_config
+
+    @capture_namespaces()
+    def _resolve_kernel_artifact(
+        self, args: tuple[Any, ...], kwargs: dict[str, Any], *, allow_signature_mode: bool = False
+    ) -> Any:
+        """Resolve an internal kernel variant; public JIT dispatch is connected separately."""
+        artifact, _, _ = self._resolve_compiled(args, kwargs, allow_signature_mode, _kernel=True)
+        return artifact
 
     def _persistent_source_digest(self) -> str:
         """Memoize immutable graph content; refresh folded constants and externs."""

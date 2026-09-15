@@ -11,6 +11,10 @@
 
 from pypto.pypto_core.ir import CoreType, Expr, Function, Program, Var
 
+def _returned_param_indices(func: Function, program: Program) -> list[int | None]:
+    """Trace pre-pipeline return values to their external parameter indices."""
+    ...
+
 class PTOCodegen:
     """Code generator that transforms PyPTO IR to PTO assembly (.pto format).
 

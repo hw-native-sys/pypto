@@ -40,7 +40,7 @@ SHA-256 源码和特化摘要。其记录保留每个环境组件摘要和两个
 
 ## 执行能力与完整参数绑定
 
-当前编译器在 `compiled_meta.json`（schema 3）和 `distributed_meta.json`
+公开编译器在 `compiled_meta.json`（schema 3）和 `distributed_meta.json`
 （schema 4）中写入 `supported_execution_modes: ["program"]`。
 `pypto._artifact_contract` 中的 `ExecutionCapabilities` 是经过校验的不可变记录；
 `CompiledProgram`、其 orchestration 子对象和 `DistributedCompiledProgram`
@@ -96,21 +96,52 @@ Scalar 表示示例。
 派生描述符；`bind_kernel_args` 要求完整参数，保留原 Tensor 对象、别名和本次 Scalar 值，
 不分配内存、不编码 Scalar、不编译或操作设备。
 
-后续 kernel compiler adapter 对每个生成的 orchestration 目录调用
-`write_kernel_metadata`，子目录使用各自的签名。alias 必须来自 IR，不能根据输出顺序猜测。
-该 writer 不会把 program binary 转换成 kernel binary。sidecar 在现有参数 metadata
-旁保存描述符；恢复时交叉核对名称、类型、方向、shape、platform/backend 和返回数量。
-`load_kernel_metadata` 不构造 program executor。
+内部 kernel 编译器生成新的单芯片变体后调用 `write_kernel_metadata`。它通过现有
+return-lineage 分析从 pass 前 IR 推导返回别名，不按输出参数顺序猜测。内部新分配的
+返回 Tensor、Scalar 返回、分布式及多入口程序均会拒绝。此 writer 不会把已有 program
+二进制转换为 kernel 二进制。sidecar 同时保存描述符与参数 metadata，恢复时核对名称、
+类型、方向、shape、platform/backend 及返回数量；`load_kernel_metadata` 不创建 program
+执行对象。
 
 `ArtifactSpec.kernel_abi` 进入 stage digest 与 manifest；target、runtime、参数映射或
 alias 改变会选择不同 slot。ready spec 构造保留描述符。`restore_kernel_metadata` 在向后续
 kernel consumer 返回 metadata 前校验 manifest、sidecar 和请求的 ABI。缺失或不一致时要求
 重新编译。运行时 Scalar 值、地址、stream、callable handle、Worker generation 均不入盘。
-后续 kernel compiler 还必须将影响代码生成的 ABI 输入纳入 specialization identity。
+描述符还隔离 kernel/program 的对象缓存，并参与持久 stage identity。
 
-本阶段交付描述符持久化、参数绑定和校验；当前 JIT/compiler 仍生成 program 产物。
-kernel wrapper、Worker 持有、注册、native launch、capture 属于后续工作。
-描述 HBG 或 A5 target 不代表其 kernel 执行已可用，必须另行核对固定 simpler 版本的支持矩阵。
+### 内部 kernel 编译与恢复
+
+`JITFunction._resolve_kernel_artifact` 是供后续 JIT 接线使用的内部产物入口，复用
+specialization、pass pipeline、PTO codegen 和 PyPTO 自有二进制编译。公开 `compile()`
+与直接调用保持 program 行为，不增加 decorator mode 或公开 kernel 编译接口。
+返回的 `KernelArtifact` 为内部消费者提供无设备工作的 `load()` 和 `chip_callable`，
+不提供执行方法。
+
+固定 simpler 版本的两条执行路径都调用
+`aicpu_orchestration_entry(const ChipTaskArgs&)`；simpler 将线上
+`ChipStorageTaskArgs` 参数池转换为该入口视图。producer 核对 lowering 后入口参数的
+顺序、类型、shape 及生成配置中的 Tensor 方向，复用原 orchestration wrapper，并加入
+函数类型静态断言和导出的描述符摘要字符串。kernel 组装与恢复要求 orchestration
+二进制包含该摘要，防止 program 二进制或另一份 kernel 签名被静默重标记。
+这是兼容性校验，不是证明产物来源的数字签名。
+
+kernel 构建要求描述符对应的精确、干净的 simpler SDK revision，以及匹配的 native
+callable builder。`KernelCompiler` 负责实际编译与链接；simpler 提供元数据，
+`CoreCallable.build`/`ChipCallable.build` 从字节组装对象，不初始化 Worker。
+HBG/TRB 继续采用 SDK 选择的 Host/device orchestration 位置。A2/A3、A5 二进制可在
+不执行 kernel 的情况下验证；当前描述符尚不支持 simulator。
+
+kernel 请求复用 `resolve_persistent`、`ArtifactStore`、`ArtifactRuntime`。
+mode/descriptor 隔离对象缓存及持久 stage，runtime Scalar 值不会选择新产物。
+GENERATED 晋升在私有副本中补齐所需二进制，完整二进制契约校验成功后才发布 READY。
+与 program 晋升相同，继承的可变缓存不能视为已验证的 READY payload。
+编译失败、native revision 不匹配或二进制契约错误均不发布 READY；只读 miss 在缓存外
+私有构建。
+
+`restore_kernel_artifact` 在绑定前核对 manifest、sidecar 和预期 ABI。READY 加载先验证
+字节清单、目标、签名与嵌入描述符，再组装 callable；不执行生成配置、不构造编译器。
+同一 artifact 的并发 load 复用组装后的 callable。进程唯一 Worker、去重 prepare、native launch
+与 capture 留给后续 PR；HBG/A5 编译成功不代表 kernel 执行已获支持。
 
 ## 布局与校验
 

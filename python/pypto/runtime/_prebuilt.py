@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 from types import ModuleType
 from typing import Any
 
+from pypto._kernel_abi import KernelABI
 from pypto.jit._artifact_manifest import (
     ArtifactSpec,
     ArtifactState,
@@ -121,13 +122,24 @@ def chip_directories(directory: Path, kind: BuildKind) -> dict[str, Path]:
     return result
 
 
-def prepare_prebuilt(directory: Path, platform: str, kind: BuildKind) -> None:
+def prepare_prebuilt(
+    directory: Path, platform: str, kind: BuildKind, *, kernel_abi: KernelABI | None = None
+) -> None:
     """Finish every chip binary without constructing a device or executing kernels."""
     from .device_runner import _compile_and_assemble  # noqa: PLC0415
 
+    if kernel_abi is not None:
+        from ._kernel_artifact import require_kernel_native  # noqa: PLC0415
+
+        require_kernel_native(kernel_abi)
     chips = chip_directories(directory, kind)
     for chip in chips.values():
-        _compile_and_assemble(chip, platform, save_prebuilt=True)
+        if kernel_abi is None:
+            _compile_and_assemble(chip, platform, save_prebuilt=True)
+        else:
+            if kind is not BuildKind.SINGLE_CHIP:
+                raise ValueError("Kernel artifacts must be single chip")
+            _compile_and_assemble(chip, platform, save_prebuilt=True, kernel_abi=kernel_abi)
         # The compiler's lock has been released. READY only consumes prebuilt
         # bytes; legacy caches, lock files and intermediate binaries are dead data.
         _prune_build_outputs(chip)
@@ -135,7 +147,11 @@ def prepare_prebuilt(directory: Path, platform: str, kind: BuildKind) -> None:
         record = {"schema": _BINARY_SCHEMA, "platform": platform, "chips": list(chips)}
         (directory / BINARY_MANIFEST).write_bytes(encode_manifest(record))
     # Verify completeness before the caller is allowed to publish READY.
-    read_prebuilt(directory, platform, kind)
+    records = read_prebuilt(directory, platform, kind)
+    if kernel_abi is not None:
+        from ._kernel_artifact import validate_kernel_record  # noqa: PLC0415
+
+        validate_kernel_record(records["."], kernel_abi)
 
 
 def _build_outputs(config: ModuleType) -> set[Path]:
@@ -292,6 +308,7 @@ def load_prebuilt(
     kind: BuildKind,
     *,
     _validated_files: dict[Path, dict[str, Any]] | None = None,
+    kernel_abi: KernelABI | None = None,
 ) -> dict[str, tuple[Any, str, dict[str, Any]]]:
     """Assemble validated bytes without compiler resolution, locks, or filesystem writes.
 
@@ -300,6 +317,13 @@ def load_prebuilt(
     files. Without it, this helper hashes binaries (including private fallback).
     """
     records = read_prebuilt(directory, platform, kind, _validated_files=_validated_files)
+    if kernel_abi is not None:
+        from ._kernel_artifact import require_kernel_native, validate_kernel_record  # noqa: PLC0415
+
+        if kind is not BuildKind.SINGLE_CHIP:
+            raise ValueError("Kernel artifacts must be single chip")
+        validate_kernel_record(records["."], kernel_abi)
+        require_kernel_native(kernel_abi)
     # Simpler's optional native interface has no static stubs (as in task_interface.py).
     from simpler.task_interface import ArgDirection  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
 

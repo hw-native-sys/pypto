@@ -13,6 +13,8 @@ These records contain no device state. They do not expose or call runtime C
 symbols; the Worker/native adapter owns that boundary in later integration.
 """
 
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -123,6 +125,11 @@ class KernelABI:
                 raise ValueError(f"Kernel return alias {index} must name an external tensor")
         object.__setattr__(self, "parameters", params)
         object.__setattr__(self, "return_aliases", aliases)
+
+    def binary_tag(self) -> bytes:
+        """Identify this descriptor inside the generated orchestration binary."""
+        encoded = json.dumps(self.record(), sort_keys=True, separators=(",", ":")).encode()
+        return f"pypto-kernel-abi-v1:{hashlib.sha256(encoded).hexdigest()}\0".encode("ascii")
 
     def record(self) -> dict[str, Any]:
         """Return the canonical descriptor, including independently indexed pools."""

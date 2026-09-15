@@ -57,5 +57,69 @@ def test_program_binary_build_without_worker(test_config, monkeypatch, tmp_path,
     assert chips["."][0] is not None
 
 
+@pl.jit
+def kernel_with_scalar(
+    x: pl.Tensor[[16, 16], pl.FP32],
+    scale: pl.Scalar[pl.FP32],
+    out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+):
+    """Exercise interleaved pools and a returned external output in real codegen."""
+    with pl.at(level=pl.Level.CORE_GROUP):
+        pl.store(pl.mul(pl.load(x, [0, 0], [16, 16]), scale), [0, 0], out)
+    return out
+
+
+@pytest.mark.parametrize(
+    "runtime", [passes.RuntimeKind.HOST_BUILD_GRAPH, passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER]
+)
+def test_kernel_binary_build_without_worker(test_config, monkeypatch, tmp_path, runtime):
+    """Build actual kernel bytes, then restore them with every compiler/Worker forbidden."""
+    from pypto import CacheConfig  # noqa: PLC0415
+    from pypto.ir.compiled_program import CompiledProgram  # noqa: PLC0415
+    from pypto.jit._artifact_manifest import BuildKind  # noqa: PLC0415
+    from pypto.runtime._artifact_sources import package_generated_sources  # noqa: PLC0415
+    from pypto.runtime._prebuilt import load_prebuilt, read_prebuilt  # noqa: PLC0415
+    from pypto.runtime.kernel_compiler import KernelCompiler  # noqa: PLC0415
+    from simpler.task_interface import ChipWorker  # noqa: PLC0415
+    from simpler.worker import Worker  # noqa: PLC0415
+    from simpler_setup import KernelCompiler as SDKCompiler  # noqa: PLC0415
+
+    if test_config.codegen_only or test_config.platform.endswith("sim"):
+        pytest.skip("The kernel descriptor currently targets a2a3/a5 device binaries")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("kernel build/restore initialized a Worker or invoked a forbidden compiler")
+
+    monkeypatch.setattr(Worker, "__init__", forbidden)
+    monkeypatch.setattr(ChipWorker, "__init__", forbidden)
+    monkeypatch.setattr(SDKCompiler, "compile_incore", forbidden)
+    monkeypatch.setattr(SDKCompiler, "compile_orchestration", forbidden)
+    monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(tmp_path / "generated"))
+    test_config.cache_config = CacheConfig(enabled=False)
+    with passes.PassContext([], runtime=runtime):
+        artifact = kernel_with_scalar._resolve_kernel_artifact(
+            (), {"config": test_config}, allow_signature_mode=True
+        )
+    assert artifact.kernel_abi.return_aliases == (2,)
+    package_generated_sources(artifact.output_dir, BuildKind.SINGLE_CHIP)
+    callable_ = artifact.load()
+    assert callable_ is artifact.load()
+    record = read_prebuilt(artifact.output_dir, artifact.platform, BuildKind.SINGLE_CHIP)["."]
+    assert record["orchestration"]["binary"].startswith(b"\x7fELF")
+    assert artifact.kernel_abi.binary_tag() in record["orchestration"]["binary"]
+    assert record["kernels"] and all(k["binary"] for k in record["kernels"])
+    with pytest.raises(ValueError, match="requires 'program'"):
+        CompiledProgram.from_dir(artifact.output_dir)
+    monkeypatch.setattr(KernelCompiler, "compile_incore", forbidden)
+    monkeypatch.setattr(KernelCompiler, "compile_orchestration", forbidden)
+    # No config execution, SDK discovery, compilation, or Worker is allowed on recovery.
+    monkeypatch.setattr("pypto.runtime._artifact_sources.read_kernel_config", forbidden)
+    monkeypatch.setattr(KernelCompiler, "__init__", forbidden)
+    restored = load_prebuilt(
+        artifact.output_dir, artifact.platform, BuildKind.SINGLE_CHIP, kernel_abi=artifact.kernel_abi
+    )["."][0]
+    assert restored is not None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -13,8 +13,10 @@ import logging
 import os
 import tempfile
 from contextlib import AbstractContextManager, nullcontext
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from pypto._kernel_abi import KernelABI
 from pypto.backend import BackendType
 from pypto.backend.pto_backend import PartialCodegenError, generate, multi_chip_orch_names
 from pypto.compile_profiling import CompileProfiler, get_active_profiler
@@ -380,6 +382,51 @@ def compile(  # noqa: PLR0913
         >>> c = compiled(a, b)          # return style
         >>> compiled(a, b, c, config=RunConfig(device_id=1))  # specify device
     """
+    return _compile_impl(
+        program,
+        output_dir=output_dir,
+        strategy=strategy,
+        dump_passes=dump_passes,
+        backend_type=backend_type,
+        skip_ptoas=skip_ptoas,
+        verification_level=verification_level,
+        diagnostic_phase=diagnostic_phase,
+        disabled_diagnostics=disabled_diagnostics,
+        memory_planner=memory_planner,
+        enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
+        profiling=profiling,
+        platform=platform,
+        distributed_config=distributed_config,
+        analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
+        emit_source_loc=emit_source_loc,
+        dump_ptoas_passes=dump_ptoas_passes,
+        runtime=runtime,
+    )
+
+
+def _compile_impl(  # noqa: PLR0913
+    program: _ir_core.Program,
+    *,
+    output_dir: str | None = None,
+    strategy: OptimizationStrategy = OptimizationStrategy.Default,
+    dump_passes: bool | PassDumpLevel = True,
+    backend_type: BackendType = BackendType.Ascend910B,
+    skip_ptoas: bool = False,
+    verification_level: _passes.VerificationLevel | None = None,
+    diagnostic_phase: _passes.DiagnosticPhase | None = None,
+    disabled_diagnostics: _passes.DiagnosticCheckSet | None = None,
+    memory_planner: _passes.MemoryPlanner | None = None,
+    enable_pypto_l0c_double_buffer: bool | None = None,
+    profiling: bool = False,
+    platform: str | None = None,
+    distributed_config: Any = None,
+    analyze_auto_scopes_for_deps: bool = False,
+    emit_source_loc: bool | None = None,
+    dump_ptoas_passes: bool = False,
+    runtime: _passes.RuntimeKind | None = None,
+    _kernel_abi: KernelABI | None = None,
+) -> Any:
+    """Shared pipeline; an internal kernel request selects a separate artifact producer."""
     _select_backend(backend_type=backend_type, platform=platform)
 
     if output_dir is None:
@@ -470,6 +517,11 @@ def compile(  # noqa: PLR0913
         if owns_profiler and prof is not None:
             prof.__exit__(None, None, None)
             prof.write_report(report_dir)
+
+    if _kernel_abi is not None:
+        from ._kernel_compile import finish_kernel_artifact  # noqa: PLC0415
+
+        return finish_kernel_artifact(program, transformed_program, Path(output_dir), _kernel_abi)
 
     from .compiled_program import CompiledProgram  # noqa: PLC0415
 

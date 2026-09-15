@@ -16,6 +16,7 @@ import subprocess
 from dataclasses import replace
 from pathlib import Path
 
+import pypto.language as pl
 import pytest
 from pypto._artifact_contract import ArtifactExecutionMode, ExecutionCapabilities
 from pypto._identity import ToolchainIdentity, digest_record
@@ -362,3 +363,42 @@ def test_store_rejects_manifest_sidecar_abi_disagreement(tmp_path, params, abi):
     assert handle is not None
     with pytest.raises(ValueError, match="does not match"):
         restore_kernel_metadata(handle, abi)
+
+
+def test_compiler_derives_return_aliases_from_ir_not_output_order():
+    from pypto.ir._kernel_compile import kernel_abi_for_program  # noqa: PLC0415
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            x: pl.Tensor[[8], pl.FP32],
+            scale: pl.Scalar[pl.FP32],
+            out: pl.Out[pl.Tensor[[8], pl.FP32]],
+        ) -> tuple[pl.Tensor[[8], pl.FP32], pl.Tensor[[8], pl.FP32], pl.Tensor[[8], pl.FP32]]:
+            alias = out
+            return alias, x, out
+
+    abi = kernel_abi_for_program(Program, platform="a2a3", runtime="tensormap_and_ringbuffer")
+    assert abi.return_aliases == (2, 0, 2)
+    assert [p.shape is None for p in abi.parameters] == [False, True, False]
+    assert abi.binary_tag() != replace(abi, return_aliases=(0, 2, 2)).binary_tag()
+
+
+def test_kernel_compiler_rejects_allocated_return():
+    from pypto.ir._kernel_compile import kernel_abi_for_program  # noqa: PLC0415
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, x: pl.Tensor[[8], pl.FP32]) -> pl.Tensor[[8], pl.FP32]:
+            result = pl.create_tensor([8], pl.FP32)
+            return result
+
+    with pytest.raises(ValueError, match="returns must alias external"):
+        kernel_abi_for_program(Program, platform="a2a3", runtime="tensormap_and_ringbuffer")
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
