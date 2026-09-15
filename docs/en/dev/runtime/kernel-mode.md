@@ -65,14 +65,58 @@ read `npu_stream`, synchronize, or enqueue commands. These context queries can
 initialize torch_npu's own framework context; they do not create or initialize a
 Simpler/PyPTO Worker.
 
+## Internal schema and Fake/Meta helpers
+
+`pypto.torch.registration.RegistrationSignature` copies the same `ParamInfo` carrier
+shapes and return-slot indices. Its `schema(name)` method marks Out/InOut tensor
+arguments writable and connects each tensor return to the corresponding input
+alias set. All arguments remain required; no output allocation is inferred.
+Scalar inputs map to dispatcher `int`, `float` or `bool`. Read-only input
+identity returns, scalar outputs, scalar-only operators, invalid names and
+aliases, and UINT64 scalars are rejected:
+the dispatcher's signed integer type cannot represent the full UINT64 range.
+Return aliases must name Out/InOut tensors: the dispatcher schema checker
+rejects returning a read-only input object directly.
+
+`fake(*args)` accepts FakeTensor or Meta tensors, validates dtype, rank, static
+shape, contiguity, device consistency and inference-only use, then returns the
+exact declared input objects. Dynamic dimensions and symbolic integer scalars
+remain symbolic. Returning an input preserves its strides, storage offset and
+alias identity, including empty slices. This helper never reads storage or data
+pointers, queries NPU formats/device/stream, allocates business outputs or invokes
+a Worker. Physical NPU format and overlapping-storage checks stay in the real
+call adapter because abstract tensors do not establish those facts.
+
+`define(library, name)` installs only the schema and fake kernel into a
+caller-owned `torch.library.Library`. The caller must keep that library alive
+and owns its registration lifetime. Repeated definitions, including a different
+signature with the same name, raise PyTorch's duplicate-definition error;
+existing definitions are not replaced. Importing or reloading this module does
+not register an operator. `pypto.torch` exports no new public registration API,
+and PyPTO installs no real device kernel in this foundation. If the installed
+PyTorch lacks `torch.library.register_fake`, definition fails before installing
+a schema.
+
+The tests use temporary namespaces and CPU fixture implementations. On PyTorch
+2.6, mutation-only schemas with no dispatcher return pass all
+[`torch.library.opcheck`](https://docs.pytorch.org/docs/2.6/library.html#torch.library.opcheck)
+checks and `torch.compile(backend="aot_eager", fullgraph=True, dynamic=True)`;
+the test wrapper returns the caller's output tensor after the operator call.
+Schemas with aliased returns are checked for schema correctness and Fake/Meta
+behavior separately. These checks do not establish functionalization or compiled
+execution of aliased-return operators. Actual kernel registration, device
+execution, autograd and the final compiler integration remain later work.
+
 ## Optional dependencies and scope
 
 `import pypto.torch` exports no execution API. Importing it or its `interop`
-module does not request torch_npu, Simpler or a native launch extension.
+or `registration` module does not request torch_npu, Simpler or a native launch
+extension.
 `torch` remains a normal PyPTO dependency. A real call description loads
 `torch_npu` on demand and reports a targeted error if it is unavailable.
 
-This foundation covers metadata validation and Python call-frame ownership.
+This foundation covers metadata validation, Python call-frame ownership, and
+internal schema/Fake helpers.
 It does not claim kernel launch, taskQueue ordering, allocator safety, eager
 numerical execution or ACLGraph support. Those need the native adapter and
 runtime integration before a public entry-point switch.
@@ -88,3 +132,7 @@ imports with optional runtime dependencies forbidden.
 non-default streams, offset views and noncontiguous-input rejection. It skips
 when a real NPU is unavailable or the selected platform is a simulator. These
 are metadata tests, not PyPTO kernel-execution tests.
+
+`tests/ut/torch/test_registration.py` covers schema mutation/alias contracts,
+Fake/Meta and symbolic inputs, isolated imports, duplicate definitions, and
+test-only dispatcher/compiler integration without a real kernel executor.
