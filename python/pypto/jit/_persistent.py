@@ -22,8 +22,10 @@ from pathlib import Path
 from time import perf_counter_ns
 from typing import Any
 
+from pypto._artifact_contract import ArtifactExecutionMode, ExecutionCapabilities
 from pypto._cache_config import CacheConfig, record_bypass, record_stats, time_stage
 from pypto._identity import digest_record, fingerprint_extra_sources
+from pypto._kernel_abi import KernelABI
 from pypto.pypto_core import DataType
 
 from ._artifact_manifest import ArtifactKey, ArtifactSpec, ArtifactState, BuildKind
@@ -158,12 +160,23 @@ def resolve_persistent(
     platform: str,
     runtime_name: str,
     distributed: bool,
+    kernel_abi: KernelABI | None = None,
 ) -> Any:
     """Capture identity before object lookup; keep policy out of content keys."""
     from pypto.runtime._artifact_runtime import bind_artifact, restore_artifact  # noqa: PLC0415
     from pypto.runtime._artifact_sources import package_generated_sources  # noqa: PLC0415
     from pypto.runtime._extern_includes import UnsupportedArtifactInput  # noqa: PLC0415
     from pypto.runtime._prebuilt import ready_spec  # noqa: PLC0415
+
+    if kernel_abi is not None and distributed:
+        raise ValueError("Distributed kernel artifacts are not supported")
+
+    def restore(store: ArtifactStore, handle: Any, run_directory: Path) -> Any:
+        if kernel_abi is None:
+            return restore_artifact(store, handle, run_directory)
+        from pypto.runtime._artifact_runtime import restore_kernel_artifact  # noqa: PLC0415
+
+        return restore_kernel_artifact(store, handle, kernel_abi)
 
     with time_stage("lookup_ns"):
         identity = capture_toolchain(platform, runtime_name)
@@ -195,6 +208,7 @@ def resolve_persistent(
             semantic,
             config.root,
             config.readonly,
+            kernel_abi,
         )
         cached = owner._artifact_objects.get(compatible)
         if cached is not None:
@@ -219,6 +233,10 @@ def resolve_persistent(
             ("distributed_meta.json", "orchestration/host_orch.py")
             if distributed
             else ("compiled_meta.json", "kernel_config.py"),
+            ExecutionCapabilities()
+            if kernel_abi is None
+            else ExecutionCapabilities((ArtifactExecutionMode.KERNEL,)),
+            kernel_abi,
         )
         initial = store.lookup(key, spec)
         _event(initial.status)
@@ -228,7 +246,7 @@ def resolve_persistent(
             _event(ready.status)
             record_stats(**{"ready_hits" if ready.handle is not None else "generated_hits": 1})
             handle = ready.handle or handle
-            compiled = restore_artifact(store, handle, private_root / f"run-{uuid.uuid4().hex}")
+            compiled = restore(store, handle, private_root / f"run-{uuid.uuid4().hex}")
             owner._artifact_objects[compatible] = compiled
             return compiled
         record_stats(misses=1)
@@ -260,10 +278,10 @@ def resolve_persistent(
                 record_stats(storage_errors=1)
                 logger.info(f"Persistent JIT publication unavailable: {result.reason}")
             compiled = result.value
-        elif result.value is not None:
+        elif result.value is not None and kernel_abi is None:
             compiled = result.value
             bind_artifact(compiled, store, result.handle, private_root / f"run-{uuid.uuid4().hex}")
         else:
-            compiled = restore_artifact(store, result.handle, private_root / f"run-{uuid.uuid4().hex}")
+            compiled = restore(store, result.handle, private_root / f"run-{uuid.uuid4().hex}")
         owner._artifact_objects[compatible] = compiled
         return compiled

@@ -21,6 +21,7 @@ from unittest.mock import Mock
 
 import pypto.runtime._binary_cache as binary_cache
 import pytest
+from pypto._kernel_abi import KernelABI
 from pypto.jit._artifact_manifest import BuildKind
 from pypto.runtime._binary_cache import (
     BinaryCacheContext,
@@ -378,17 +379,20 @@ def test_failed_matching_cache_is_invalidated_before_retry(
     )
 
 
+@pytest.mark.parametrize("abi", [None, KernelABI("a2a3", "tensormap_and_ringbuffer", ())])
 def test_compile_and_assemble_serializes_same_work_dir(
     device_runner,
     monkeypatch,
     tmp_path: Path,
+    abi,
 ) -> None:
     _write_minimal_artifact(tmp_path)
     process_context = multiprocessing.get_context("fork")
     entered = process_context.Event()
     release = process_context.Event()
 
-    def assemble_locked(_work_dir, _platform):
+    def assemble_locked(_work_dir, _platform, *, kernel_abi=None):
+        assert kernel_abi == abi
         entered.set()
         if not release.wait(timeout=5):
             raise TimeoutError("assembly was not released")
@@ -397,7 +401,8 @@ def test_compile_and_assemble_serializes_same_work_dir(
     monkeypatch.setattr(device_runner, "_compile_and_assemble_locked", assemble_locked)
     process = process_context.Process(
         target=device_runner._compile_and_assemble,
-        args=(tmp_path, "a2a3sim"),
+        args=(tmp_path, "a2a3sim" if abi is None else abi.platform),
+        kwargs={"kernel_abi": abi},
     )
     process.start()
     try:

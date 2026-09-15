@@ -20,6 +20,7 @@
 #include "pypto/codegen/distributed/distributed_codegen.h"
 #include "pypto/codegen/orchestration/orchestration_codegen.h"
 #include "pypto/codegen/pto/pto_codegen.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
 
 namespace nb = nanobind;
 
@@ -34,6 +35,10 @@ void BindCodegen(nb::module_& m) {
   // Create a new 'codegen' submodule
   nb::module_ codegen_module =
       m.def_submodule("codegen", "Code generation module for converting IR to pto-isa C++");
+
+  codegen_module.def("_returned_param_indices", &return_lineage::ReturnedParamIndices, nb::arg("func"),
+                     nb::arg("program"),
+                     "Trace pre-pipeline returns to external parameters for the kernel artifact contract.");
 
   // PTOCodegen - PTO assembly code generator
   nb::class_<PTOCodegen>(

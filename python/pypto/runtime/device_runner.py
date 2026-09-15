@@ -47,6 +47,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from pypto._external_source import kernel_binary_cache_path
+from pypto._kernel_abi import KernelABI
 from pypto.pypto_core.passes import RuntimeKind, runtime_kind_to_name
 
 from . import _callable_identity
@@ -454,6 +455,7 @@ def _compile_and_assemble(
     platform: str,
     *,
     save_prebuilt: bool = False,
+    kernel_abi: KernelABI | None = None,
 ) -> tuple[ChipCallable, str, dict[str, Any]]:
     """Compile and assemble one chip artifact under a work-directory lock.
 
@@ -465,12 +467,12 @@ def _compile_and_assemble(
         raise _missing_kernel_config_error(work_dir)
     with binary_context_lock(work_dir):
         if save_prebuilt:
-            return _compile_and_assemble_locked(work_dir, platform, save_prebuilt=True)
+            return _compile_and_assemble_locked(work_dir, platform, save_prebuilt=True, kernel_abi=kernel_abi)
         from pypto._cache_config import record_stats, time_stage  # noqa: PLC0415
 
         record_stats(binary_builds=1)
         with time_stage("build_ns"):
-            return _compile_and_assemble_locked(work_dir, platform)
+            return _compile_and_assemble_locked(work_dir, platform, kernel_abi=kernel_abi)
 
 
 def _compile_and_assemble_locked(
@@ -478,6 +480,7 @@ def _compile_and_assemble_locked(
     platform: str,
     *,
     save_prebuilt: bool = False,
+    kernel_abi: KernelABI | None = None,
 ) -> tuple[ChipCallable, str, dict[str, Any]]:
     """Compile kernels + orchestration from *work_dir*, assemble ``ChipCallable``.
 
@@ -521,6 +524,14 @@ def _compile_and_assemble_locked(
         kernel_config = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(kernel_config)
 
+    if kernel_abi is not None:
+        from ._kernel_artifact import require_kernel_native, validate_kernel_config  # noqa: PLC0415
+
+        if platform != kernel_abi.platform:
+            raise ValueError("Kernel build platform does not match its descriptor")
+        validate_kernel_config(kernel_config, kernel_abi)
+        require_kernel_native(kernel_abi)
+
     kernels = kernel_config.KERNELS
     orchestration = kernel_config.ORCHESTRATION
     runtime_config = getattr(kernel_config, "RUNTIME_CONFIG", {})
@@ -534,6 +545,8 @@ def _compile_and_assemble_locked(
 
     # Create compiler
     compiler = KernelCompiler(platform=platform)
+    if kernel_abi is not None and _runtime_revision(compiler) != kernel_abi.simpler_revision:
+        raise ValueError("Kernel compilation requires the exact clean Simpler SDK revision in its descriptor")
 
     # Generated binaries include runtime and PTO-ISA headers. A runtime bump can
     # therefore make both cache/*.bin and source-adjacent .so/.o files ABI
@@ -629,6 +642,9 @@ def _compile_and_assemble_locked(
 
         orch_so_binary = fut_orch.result()
         kernel_binaries = [f.result() for f in fut_kernels]
+
+    if kernel_abi is not None and kernel_abi.binary_tag() not in orch_so_binary:
+        raise ValueError("Compiled kernel orchestration is missing its ABI descriptor tag")
 
     # Assemble ChipCallable
     orch_sig = orchestration.get("signature", [])

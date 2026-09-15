@@ -29,13 +29,26 @@ class ArtifactRuntime:
     Private build results also remain alive for this object's entire lifetime.
     """
 
-    def __init__(self, store: ArtifactStore, handle: ArtifactHandle, platform: str, run_directory: Path):
-        handle.spec.execution_capabilities.require(ArtifactExecutionMode.PROGRAM)
+    def __init__(
+        self,
+        store: ArtifactStore,
+        handle: ArtifactHandle,
+        platform: str,
+        run_directory: Path | None,
+        *,
+        kernel_abi: KernelABI | None = None,
+    ):
+        mode = ArtifactExecutionMode.PROGRAM if kernel_abi is None else ArtifactExecutionMode.KERNEL
+        handle.spec.execution_capabilities.require(mode)
+        self.kernel_abi = kernel_abi
         if store.root != handle.cache_root:
             raise ValueError("Artifact handle and store have different cache roots")
-        run_directory = run_directory.resolve()
-        if run_directory == store.root or store.root in run_directory.parents:
-            raise ValueError(f"Runtime output must be outside the artifact cache: {run_directory}")
+        if run_directory is not None:
+            run_directory = run_directory.resolve()
+            if run_directory == store.root or store.root in run_directory.parents:
+                raise ValueError(f"Runtime output must be outside the artifact cache: {run_directory}")
+        elif kernel_abi is None:
+            raise ValueError("Program artifact loading requires a runtime output directory")
         self.store = store
         self.handle = handle
         self.platform = platform
@@ -53,9 +66,14 @@ class ArtifactRuntime:
         """
         if self._manifest is None:
             manifest = read_manifest(self.handle.directory, self.handle.key, self.handle.spec)
-            _restore_program_metadata(self.handle)
+            self._restore_metadata(self.handle)
             self._manifest = manifest
         return self._manifest
+
+    def _restore_metadata(self, handle: ArtifactHandle) -> Any:
+        if self.kernel_abi is None:
+            return _restore_program_metadata(handle)
+        return _read_kernel_metadata(handle, self.kernel_abi)
 
     def load(self) -> dict[str, tuple[Any, str, dict[str, Any]]]:
         """Promote once if needed, then return reusable callables; never execute."""
@@ -72,13 +90,18 @@ class ArtifactRuntime:
                     from ._artifact_sources import validate_generated_sources  # noqa: PLC0415
 
                     validate_generated_sources(directory, handle.spec.build_kind)
-                    prepare_prebuilt(directory, self.platform, handle.spec.build_kind)
+                    if self.kernel_abi is None:
+                        prepare_prebuilt(directory, self.platform, handle.spec.build_kind)
+                    else:
+                        prepare_prebuilt(
+                            directory, self.platform, handle.spec.build_kind, kernel_abi=self.kernel_abi
+                        )
 
                 result = self.store.get_or_build(handle.key, spec, build)
                 if result.handle is not None:
                     handle = result.handle
                     manifest = read_manifest(handle.directory, handle.key, handle.spec)
-                    _restore_program_metadata(handle)
+                    self._restore_metadata(handle)
                     self.handle = handle
                     self.directory = handle.directory
                     self._manifest = manifest
@@ -91,8 +114,13 @@ class ArtifactRuntime:
                 if manifest is not None
                 else None
             )
+            kernel_options = {} if self.kernel_abi is None else {"kernel_abi": self.kernel_abi}
             chips = load_prebuilt(
-                self.directory, self.platform, handle.spec.build_kind, _validated_files=files
+                self.directory,
+                self.platform,
+                handle.spec.build_kind,
+                _validated_files=files,
+                **kernel_options,
             )
             self._chips = chips
             return chips
@@ -181,11 +209,27 @@ def restore_kernel_metadata(handle: ArtifactHandle, expected_abi: KernelABI) -> 
     Both generated and ready handles retain the same contract. A ready marker
     still does not imply that a callable has been registered in this process.
     """
+    read_manifest(handle.directory, handle.key, handle.spec)
+    return _read_kernel_metadata(handle, expected_abi)
+
+
+def _read_kernel_metadata(handle: ArtifactHandle, expected_abi: KernelABI) -> dict[str, Any]:
+    """Cross-check a sidecar after the caller has validated the manifest inventory."""
     handle.spec.execution_capabilities.require(ArtifactExecutionMode.KERNEL)
     if handle.spec.kernel_abi is None:
         raise ValueError("Kernel artifact is missing its ABI descriptor")
     handle.spec.kernel_abi.require_compatible(expected_abi)
-    read_manifest(handle.directory, handle.key, handle.spec)
     from pypto.ir.compiled_program import load_kernel_metadata  # noqa: PLC0415
 
     return load_kernel_metadata(handle.directory, expected_abi)
+
+
+def restore_kernel_artifact(store: ArtifactStore, handle: ArtifactHandle, abi: KernelABI) -> Any:
+    """Attach an immutable kernel stage to the shared promotion machinery."""
+    from ._kernel_artifact import KernelArtifact  # noqa: PLC0415
+
+    runtime = ArtifactRuntime(store, handle, abi.platform, store.private_root, kernel_abi=abi)
+    runtime._validate()
+    artifact = KernelArtifact(handle.directory, abi)
+    artifact._artifact_runtime = runtime
+    return artifact

@@ -145,7 +145,7 @@ def fake_runtime(monkeypatch):
     monkeypatch.setattr("pypto.runtime._callable_identity.register_callable_identity", Mock())
     runner._execute_on_device = Mock()
 
-    def compile_(root, platform, *, save_prebuilt=False):
+    def compile_(root, platform, *, save_prebuilt=False, kernel_abi=None):
         assert save_prebuilt
         config = read_kernel_config(root / "kernel_config.py")
         _prebuilt.write_chip_binaries(
@@ -153,8 +153,8 @@ def fake_runtime(monkeypatch):
             platform,
             config.ORCHESTRATION,
             [(k, b"kernel bytes") for k in config.KERNELS],
-            b"orchestration bytes",
-            "test_runtime",
+            b"orchestration bytes" + (kernel_abi.binary_tag() if kernel_abi is not None else b""),
+            config.RUNTIME_CONFIG["runtime"],
             config.RUNTIME_CONFIG,
         )
 
@@ -1173,6 +1173,172 @@ def test_generated_hit_checks_capabilities_of_ready_payload(tmp_path, fake_runti
         with pytest.raises(ValueError, match="requires 'program'"):
             ArtifactRuntime(store, generated, "a2a3sim", tmp_path / "next-run").load()
     load.assert_not_called()
+
+
+@pytest.fixture
+def kernel_stage(tmp_path, fake_runtime, monkeypatch):
+    from pypto._kernel_abi import SIMPLER_KERNEL_REVISION  # noqa: PLC0415
+    from pypto.ir.compiled_program import write_kernel_metadata  # noqa: PLC0415
+    from pypto.ir.param_info import ParamInfo, kernel_abi_from_params  # noqa: PLC0415
+    from pypto.pypto_core import DataType  # noqa: PLC0415
+
+    monkeypatch.setitem(
+        sys.modules, "_task_interface", SimpleNamespace(__build_commit__=SIMPLER_KERNEL_REVISION)
+    )
+    params = [ParamInfo("out", ir.ParamDirection.InOut, [8], DataType.FP32)]
+    abi = kernel_abi_from_params(
+        params, platform="a2a3", runtime="tensormap_and_ringbuffer", return_aliases=(0,)
+    )
+    store = ArtifactStore(tmp_path / "cache", private_root=tmp_path / "private")
+    spec = ArtifactSpec(
+        ArtifactState.GENERATED,
+        BuildKind.SINGLE_CHIP,
+        ("compiled_meta.json", "kernel_config.py"),
+        ExecutionCapabilities((ArtifactExecutionMode.KERNEL,)),
+        abi,
+    )
+
+    def generate(root):
+        _chip(root)
+        config = root / "kernel_config.py"
+        config.write_text(
+            config.read_text()
+            .replace("test_runtime", abi.runtime)
+            .replace("function_name='entry'", "function_name='aicpu_orchestration_entry'")
+        )
+        write_kernel_metadata(root, params, abi)
+        package_generated_sources(root, BuildKind.SINGLE_CHIP)
+
+    build = store.get_or_build(_key(), spec, generate)
+    assert build.handle is not None
+    return store, build.handle, abi
+
+
+def test_kernel_promotes_once_and_restores_without_compiler(
+    kernel_stage, fake_runtime, monkeypatch, tmp_path
+):
+    from pypto.runtime._artifact_runtime import restore_kernel_artifact  # noqa: PLC0415
+
+    store, generated, abi = kernel_stage
+    artifact = restore_kernel_artifact(store, generated, abi)
+    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        callables = list(executor.map(lambda _: artifact.load(), range(4)))
+    assert all(c is callables[0] for c in callables)
+    assert fake_runtime.runner._compile_and_assemble.call_count == 1
+    ready = artifact._artifact_runtime.handle
+    assert ready.spec.kernel_abi == abi and ready.spec.state is ArtifactState.BINARY_READY
+    fake_runtime.runner._compile_and_assemble.side_effect = AssertionError("unexpected compilation")
+    monkeypatch.setitem(sys.modules, "pypto.runtime.kernel_compiler", None)
+    monkeypatch.setitem(sys.modules, "simpler_setup", None)
+    monkeypatch.setattr(
+        "pypto.runtime._artifact_sources.read_kernel_config", Mock(side_effect=AssertionError)
+    )
+    readonly = ArtifactStore(store.root, readonly=True)
+    restored = restore_kernel_artifact(readonly, ready, abi)
+    assert restored.load() == callables[0]
+    fake_runtime.runner._execute_on_device.assert_not_called()
+    assert not list(store.root.rglob("__pycache__"))
+    assert not (tmp_path / "readonly-private").exists()
+
+
+@pytest.mark.parametrize("failure", ["compiler", "binary_tag", "native_revision"])
+def test_kernel_failed_build_never_publishes_ready(kernel_stage, fake_runtime, monkeypatch, failure):
+    from pypto.runtime._artifact_runtime import restore_kernel_artifact  # noqa: PLC0415
+    from pypto.runtime._prebuilt import ready_spec  # noqa: PLC0415
+
+    store, generated, abi = kernel_stage
+    spec = ready_spec(generated.directory, generated.spec)
+    if failure == "compiler":
+        fake_runtime.runner._compile_and_assemble.side_effect = RuntimeError("compiler failed")
+        expected = RuntimeError
+    elif failure == "binary_tag":
+        original = fake_runtime.runner._compile_and_assemble.side_effect
+
+        def wrong_binary(root, platform, *, save_prebuilt=False, kernel_abi=None):
+            original(root, platform, save_prebuilt=save_prebuilt)
+
+        fake_runtime.runner._compile_and_assemble.side_effect = wrong_binary
+        expected = ValueError
+    else:
+        monkeypatch.setitem(sys.modules, "_task_interface", SimpleNamespace(__build_commit__="wrong"))
+        expected = ValueError
+    with pytest.raises(expected):
+        restore_kernel_artifact(store, generated, abi).load()
+    assert store.lookup(generated.key, spec).status is LookupStatus.MISS
+    assert store.lookup(generated.key, generated.spec).status is LookupStatus.HIT
+
+
+def test_kernel_readonly_generated_miss_builds_privately(kernel_stage, fake_runtime, tmp_path):
+    from pypto.runtime._artifact_runtime import restore_kernel_artifact  # noqa: PLC0415
+
+    store, generated, abi = kernel_stage
+    before = {p.relative_to(store.root): p.read_bytes() for p in store.root.rglob("*") if p.is_file()}
+    readonly = ArtifactStore(store.root, readonly=True, private_root=tmp_path / "readonly-private")
+    artifact = restore_kernel_artifact(readonly, generated, abi)
+    assert artifact.load() is artifact.load()
+    assert fake_runtime.runner._compile_and_assemble.call_count == 1
+    after = {p.relative_to(store.root): p.read_bytes() for p in store.root.rglob("*") if p.is_file()}
+    assert before == after
+    assert artifact._artifact_runtime.directory.is_relative_to(readonly.private_root)
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_internal_kernel_jit_cache_is_distinct_and_scalar_values_reuse(
+    tmp_path, fake_runtime, monkeypatch, persistent
+):
+    from pypto.ir.compiled_program import _extract_func_param_infos, write_kernel_metadata  # noqa: PLC0415
+    from pypto.runtime._kernel_artifact import KernelArtifact  # noqa: PLC0415
+
+    @pl.jit
+    def kernel(out: pl.InOut[pl.Tensor[[8], pl.FP32]], scale: pl.Scalar[pl.FP32]):
+        return out
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PYPTO_PROG_BUILD_DIR", raising=False)
+    monkeypatch.setattr("pypto.jit._persistent.capture_toolchain", lambda *args: _key().environment)
+    builds = []
+
+    def compile_kernel(program, *, _kernel_abi, output_dir=None, **kwargs):
+        root = Path(output_dir) if output_dir is not None else tmp_path / f"private-{len(builds)}"
+        _chip(root)
+        config = root / "kernel_config.py"
+        config.write_text(
+            config.read_text()
+            .replace("test_runtime", _kernel_abi.runtime)
+            .replace("function_name='entry'", "function_name='aicpu_orchestration_entry'")
+        )
+        entry = next(iter(program.functions.values()))
+        params, _, _ = _extract_func_param_infos(entry)
+        write_kernel_metadata(root, params, _kernel_abi)
+        builds.append(_kernel_abi)
+        return KernelArtifact(root, _kernel_abi)
+
+    monkeypatch.setattr(importlib.import_module("pypto.ir.compile"), "_compile_impl", compile_kernel)
+    config = RunConfig(platform="a2a3", cache_config=CacheConfig(enabled=persistent, root=tmp_path / "cache"))
+    torch = pytest.importorskip("torch")
+    tensor = torch.empty(8)
+    with passes.PassContext([]):
+        first = kernel._resolve_kernel_artifact((tensor, 1.25), {"config": config})
+        second = kernel._resolve_kernel_artifact((tensor, -2.5), {"config": config})
+        assert first is second and len(builds) == 1
+        if persistent:
+            kernel._artifact_objects.clear()
+            restored = kernel._resolve_kernel_artifact((tensor, 3.75), {"config": config})
+            assert restored is not first and restored.kernel_abi == first.kernel_abi
+            assert len(builds) == 1
+
+        def compile_program(*args, **kwargs):
+            root = Path(kwargs.get("output_dir", tmp_path / "program"))
+            _generated(root, BuildKind.SINGLE_CHIP)
+            return CompiledProgram.from_dir(root)
+
+        monkeypatch.setattr(kernel, "_compile", compile_program)
+        program = kernel.compile(tensor, 1.25, config=config)
+    assert isinstance(program, CompiledProgram)
+    assert program.output_dir != first.output_dir
+    assert program.execution_capabilities != first.execution_capabilities
 
 
 if __name__ == "__main__":
