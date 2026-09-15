@@ -16,6 +16,8 @@ Commands, temporary outputs, linking and returned bytes belong to PyPTO.
 
 import importlib.util
 import logging
+import math
+import os
 import subprocess
 import sys
 import tempfile
@@ -36,6 +38,20 @@ class KernelCompiler:
     _sanitizers = ""
 
     def __init__(self, platform: str = "a2a3"):
+        """Load SDK metadata and the per-process compiler timeout in seconds.
+
+        ``PYPTO_COMPILER_TIMEOUT`` defaults to 900 seconds and must be positive
+        and finite. Invalid configuration raises ``ValueError`` before SDK setup.
+        """
+        timeout = os.environ.get("PYPTO_COMPILER_TIMEOUT", "900")
+        try:
+            self._timeout_s = float(timeout)
+        except ValueError as exc:
+            raise ValueError(
+                f"PYPTO_COMPILER_TIMEOUT must be positive finite seconds, got {timeout!r}"
+            ) from exc
+        if not math.isfinite(self._timeout_s) or self._timeout_s <= 0:
+            raise ValueError(f"PYPTO_COMPILER_TIMEOUT must be positive finite seconds, got {timeout!r}")
         self.platform = platform
         self.sdk = _SimplerCompilerSDK(platform)
         self._sanitizers = self._sanitizers or getattr(self.sdk, "_sanitizers", "")
@@ -52,9 +68,11 @@ class KernelCompiler:
         return self.sdk.get_orchestration_cache_inputs(runtime_name)
 
     def _orchestration_toolchain(self, runtime_name: str) -> Any:
+        """Select the SDK toolchain for the runtime's orchestration target."""
         return self.sdk._orchestration_toolchain(runtime_name)
 
     def _sanitizer_flags(self, toolchain: Any) -> list[str]:
+        """Return sanitizer options only for builds using a host toolchain."""
         if not self._sanitizers or not toolchain.is_host:
             return []
         return [f"-fsanitize={self._sanitizers}", "-fno-omit-frame-pointer", "-O1"]
@@ -101,6 +119,7 @@ class KernelCompiler:
 
     @staticmethod
     def _source_path(source_path: str) -> Path:
+        """Resolve a build input and reject missing source files."""
         source = Path(source_path).absolute()
         if not source.is_file():
             raise FileNotFoundError(f"Source file not found: {source}")
@@ -108,12 +127,23 @@ class KernelCompiler:
 
     @staticmethod
     def _include_flags(include_dirs: list[str]) -> list[str]:
+        """Translate include directories to paths visible to the SDK compiler."""
         return [f"-I{compiler_visible_path(Path(path).absolute())}" for path in include_dirs]
 
     def _run(self, cmd: list[str], output: Path, label: str) -> bytes:
+        """Run a bounded compiler process and return its nonempty binary output."""
         logger.debug(f"[{label}] Command: {cmd}")
         try:
-            result = subprocess.run(cmd, cwd=self.project_root, capture_output=True, text=True, check=False)
+            result = subprocess.run(
+                cmd,
+                cwd=self.project_root,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=self._timeout_s,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"{label}: compiler timed out after {self._timeout_s:g} seconds") from exc
         except OSError as exc:
             raise RuntimeError(f"{label}: cannot run compiler {cmd[0]!r}: {exc}") from exc
         if result.returncode:

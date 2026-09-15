@@ -473,6 +473,7 @@ def _ptoas_inputs(launcher: Path, ancestors: frozenset[Path] = frozenset()) -> s
 
 
 def _discover(compiler: Any, ptoas: str, runtime_name: str) -> ToolchainInputs:
+    """Collect the compiler, linker, SDK and PTO assembler inputs for cache identity."""
     if sys.platform != "linux":
         raise ValueError(f"Unsupported dependency discovery platform: {sys.platform}")
     ptoas_paths = _ptoas_inputs(Path(ptoas))

@@ -16,6 +16,7 @@ from pypto import passes
 
 @pl.jit
 def add_scalar(x: pl.Tensor[[16, 16], pl.FP32], out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]):
+    """Add a scalar through the DSL to exercise real program binary generation."""
     with pl.at(level=pl.Level.CORE_GROUP):
         pl.store(pl.add(pl.load(x, [0, 0], [16, 16]), 3.0), [0, 0], out)
     return out
@@ -36,6 +37,7 @@ def test_program_binary_build_without_worker(test_config, monkeypatch, tmp_path,
     from simpler_setup import KernelCompiler as SDKCompiler  # noqa: PLC0415
 
     def forbidden(*args, **kwargs):
+        """Fail if building or restoring crosses a forbidden SDK or Worker boundary."""
         pytest.fail("program binary build used an SDK build or initialized a Worker")
 
     monkeypatch.setattr(Worker, "__init__", forbidden)

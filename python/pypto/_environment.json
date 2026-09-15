@@ -126,6 +126,10 @@
       "category": "nonsemantic",
       "reason": "Bounds parallel codegen workers; does not select generated operations."
     },
+    "PYPTO_COMPILER_TIMEOUT": {
+      "category": "nonsemantic",
+      "reason": "Bounds compiler and linker execution time; successful binary contents are unchanged."
+    },
     "PYPTO_COMPILE_PROFILING": {
       "category": "fresh_request",
       "reason": "Enabled compilation profiling must run compiler stages on each request."

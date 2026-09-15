@@ -78,6 +78,12 @@ Compiler commands retain the SDK's relative path spelling and working directory.
 All generated outputs reside in PyPTO-owned temporary or artifact directories.
 Build and restoration do not initialize a Worker or execute business logic.
 
+Each compiler or linker invocation has a 900-second timeout. Set
+`PYPTO_COMPILER_TIMEOUT` to a positive, finite number of seconds before creating
+the compiler to override it. This is a limit per invocation, not for the whole
+program build. A timeout raises `RuntimeError` identifying the build stage;
+temporary outputs are cleaned up and failed builds do not publish a cache stamp.
+
 Mutable program output directories use binary-context schema 2. A successful
 transaction records the context plus SHA-256 hashes of reusable binary files.
 The next transaction preserves verified files and discards changed or unrecorded

@@ -107,6 +107,7 @@ def test_runtime_revision_change_invalidates_both_orchestration_caches(tmp_path:
 
 
 def test_matching_context_preserves_binaries_but_discards_stamp(tmp_path: Path) -> None:
+    """Keep verified binaries while withholding the stamp until assembly succeeds."""
     context = _context()
     orch_prebuild = _touch(tmp_path / "cache" / "orch_main.bin")
     orch_sidecar = _touch(tmp_path / "orchestration" / "main.so")
@@ -190,6 +191,7 @@ def test_invalidation_discards_stamp_before_removing_artifacts(
 
 
 def test_record_binary_context_writes_schema_and_cleans_temp_file(tmp_path: Path) -> None:
+    """Publish the context and artifact hashes without leaving temporary stamp files."""
     context = _context()
 
     record_binary_context(tmp_path, context)
@@ -350,6 +352,7 @@ def test_failed_matching_cache_is_invalidated_before_retry(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
+    """Discard binaries after an interrupted transaction before attempting assembly again."""
     context = _context()
     cached_binary = _touch(tmp_path / "cache" / "orch_main.bin", b"cached orchestration")
     record_binary_context(tmp_path, context)
@@ -515,6 +518,7 @@ def test_ready_compiler_retains_only_one_copy_of_final_binaries(
 
 @pytest.mark.parametrize("damage", ["missing", "corrupt", "unrecorded"])
 def test_partial_binary_cache_preserves_verified_files(tmp_path: Path, damage: str) -> None:
+    """Invalidate only unusable artifacts while retaining independently verified binaries."""
     context = _context()
     good = _touch(tmp_path / "cache" / "kernel.bin", b"verified kernel")
     damaged = _touch(tmp_path / "orchestration" / "main.so", b"original orchestration")
@@ -534,6 +538,7 @@ def test_partial_binary_cache_preserves_verified_files(tmp_path: Path, damage: s
 
 @pytest.mark.parametrize("damage", ["none", "missing", "corrupt"])
 def test_assembly_rebuilds_only_unusable_binaries(device_runner, monkeypatch, tmp_path, damage):
+    """Reuse valid kernel bytes and rebuild orchestration only when its cache is unusable."""
     context = _stub_assembly(device_runner, monkeypatch, tmp_path, Mock(return_value=object()))
     source = _touch(tmp_path / "kernels/kernel.cpp", b"// kernel")
     with (tmp_path / "kernel_config.py").open("a") as stream:
@@ -559,6 +564,7 @@ def test_assembly_rebuilds_only_unusable_binaries(device_runner, monkeypatch, tm
 
 
 def test_old_stamp_requires_rebuild(tmp_path: Path) -> None:
+    """Reject schema-one stamps that do not authenticate individual binary files."""
     binary = _touch(tmp_path / "cache" / "kernel.bin")
     stamp = binary_context_path(tmp_path)
     stamp.write_text(json.dumps(_context(schema=1).to_dict()))

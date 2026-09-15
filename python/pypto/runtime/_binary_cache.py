@@ -35,6 +35,7 @@ class BinaryCacheContext:
     schema: int = _BINARY_CONTEXT_SCHEMA
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the ABI context stored in a binary-cache stamp."""
         return asdict(self)
 
 
@@ -103,6 +104,7 @@ def invalidate_binary_context(work_dir: Path | str) -> int:
 
 
 def _read_binary_context(path: Path) -> dict[str, Any] | None:
+    """Read a JSON stamp, treating unreadable or malformed metadata as a cache miss."""
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
