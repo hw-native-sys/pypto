@@ -772,8 +772,10 @@ struct MatmulTiling {
   bool os_holds_a = true;
   /// True when the chooser picked dbC=2 (double-buffered L0C): the accumulator is
   /// budgeted at L0C/2 so two co-live [m, n] Acc tiles fit, and BuildFullKPipelined
-  /// tags the moving loop with kPipelineDoubleBufferCAttr so CanonicalizeIOOrder
-  /// floats the drains past the next matmul, keeping the two tiles co-live.
+  /// tags the moving loop with kPipelineDoubleBufferCAttr, which makes
+  /// LowerPipelineLoops stamp the cube accumulator's pipeline_membership and
+  /// CanonicalizeIOOrder rotate it to stage % 2 — the two-slot separation. The
+  /// statement order is already the ping-pong and is not changed.
   /// Under PTOAS, InitMemRef keeps the overlapping-live-range buffers distinct
   /// and ptoas places them. Under PYPTO, flat depth-2 pipeline membership keeps
   /// MemoryReuse from coalescing them; DSA_RP consumes the same relation as a
@@ -1247,17 +1249,20 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   t.output_valid_n = output_valid_shape[1];
   t.stationarity = res.stationarity;
   t.os_holds_a = res.os_holds_a;
-  // dbC=2 is realized only by the full-K emitter: BuildFullKPipelined attaches
-  // kPipelineDoubleBufferCAttr, BuildSplitKGrid never does.  The chooser already
-  // guarantees dbC ⇒ k == K (l0_tile_chooser's require_full_k), and it applied the
-  // L0C/2 accumulator budget on that promise.  Assert the invariant here rather
-  // than silently clamping (`&& k == K`): a clamp would drop the attr but keep the
-  // L0C/2 budget, shipping a shrunk single-buffer tile — the exact regression this
-  // feature exists to avoid.  A future chooser change that sets dbC on a split-K
-  // tile must fail loudly instead.
+  // This is a chooser<->emitter REALIZABILITY contract, not a restatement of the
+  // chooser's own condition. Only BuildFullKPipelined attaches
+  // kPipelineDoubleBufferCAttr; BuildSplitKGrid does not, and without that attr
+  // LowerPipelineLoops deliberately skips cube accumulators, so no
+  // pipeline_membership is stamped and the two accumulators coalesce. A dbC plan
+  // routed to the split-K emitter is therefore not partially realized -- it is
+  // not realized at all, while the tile has already been shrunk to the L0C/2
+  // budget that paid for it. Assert rather than silently clamping (`&& k == K`):
+  // a clamp would drop the ping-pong but keep the halved budget, shipping a
+  // shrunk single-buffer tile -- the exact regression this feature exists to
+  // avoid. Widen this only together with the emitter that can realize it.
   INTERNAL_CHECK_SPAN(!res.double_buffer_c || res.k == K, assign->span_)
       << "Internal error: chooser set double_buffer_c on a split-K tile (k=" << res.k << ", K=" << K
-      << "); dbC=2 requires the full-K emitter";
+      << "); only the full-K emitter attaches the dbC marker";
   t.double_buffer_c = res.double_buffer_c;
   return t;
 }
@@ -2247,12 +2252,12 @@ std::pair<std::vector<StmtPtr>, VarPtr> BuildFullKPipelined(const MatmulTiling& 
     inner_body.push_back(std::make_shared<AssignStmt>(c_var, c_call, sp));
     VarPtr inner_chain = placer.PlaceAt(inner_body, c_var, mi, ni, out_inner, /*step=*/0);
     inner_body.push_back(std::make_shared<YieldStmt>(std::vector<ExprPtr>{inner_chain}, sp));
-    // overlap_stores stays false: the one-accumulator schedule
-    // (matmul_i, store_i, matmul_{i+1}, store_{i+1}) drains each L0C result before
-    // the next matmul overwrites it.  dbC=2 (double_buffer_c) instead sets the
-    // stronger double_buffer_c attr, which floats *both* stores below *both*
-    // matmuls (matmul c, matmul c₁, store c, store c₁) so the two [m, n] Acc tiles
-    // stay co-live; the chooser budgeted them at L0C/2 so both fit. Under PTOAS,
+    // overlap_stores stays false: stores sit in the compute tier, so the body is
+    // emitted as (matmul_i, store_i, matmul_{i+1}, store_{i+1}).  With a single
+    // accumulator that drains each L0C result before the next matmul overwrites
+    // it; with dbC=2 the SAME order is the ping-pong, because the two tiles land
+    // in different L0C slots and store_i therefore runs under matmul_{i+1}.  The
+    // dbC attr adds the slot separation (membership), not a reorder. Under PTOAS,
     // ptoas places the distinct live ranges. Under PYPTO, flat depth-2 pipeline
     // membership keeps MemoryReuse from coalescing the pair; DSA_RP initially
     // exports it as a strict separation. In all cases tile i's FIXPIPE drain
@@ -2520,8 +2525,9 @@ std::optional<std::pair<std::vector<StmtPtr>, VarPtr>> TryFoldMatScratch(const M
   // integer-division proxy K/k < 2 — which would mis-route a split-K tile to the
   // full-K [m,K]/[K,n] emitter and blow the L0A/L0B budget.
   // dbC=2 works on the Mat-scratch path too: the Acc->Mat drain is `tile.assemble`,
-  // which CanonicalizeIOOrder floats above the compute tier under the dbC attr (same
-  // as tile.store for the direct-store path), keeping the two accumulators co-live.
+  // which is emitted directly after its producing matmul exactly like tile.store on
+  // the direct-store path, so it drains under the next tile's MAD once the dbC
+  // membership puts the two accumulators in different slots.
   // BuildFullKPipelined attaches the attr when t.double_buffer_c; the split-K grid
   // never carries it.  (The Acc->Mat drain is cheaper than Acc->GM, so the hiding
   // upside is smaller here, but the mechanism is the same.)

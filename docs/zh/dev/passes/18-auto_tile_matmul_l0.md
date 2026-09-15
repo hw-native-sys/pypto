@@ -77,7 +77,7 @@ program_tiled = l0_tile_pass(program)
    > **旧版 PYPTO planner 的限制 —— operand-stationary 链式生产者 + L0 打包。** 链式 matmul（Mat-scratch）的生产者与其消费者共享 L0（顺序执行；中间结果留在 L1，绝不经 DDR —— `L0C→L1→L0A` 往返）。A/B-stationary 的生产者钉住一块占满 L0 的整块操作数缓冲，而流水化消费者需要多块较小缓冲。旧版 PYPTO planner 的 `AllocateMemoryAddr` 只是把复用类顺序堆叠、从不细分已释放区域（例如，一块 64 KB 生产者缓冲被复用给一块 32 KB 消费者 slot 会浪费 32 KB，另一块 slot 溢出 → L0 超限），因此本 pass 仅在该 planner 下强制 Mat-scratch 生产者使用 **output-stationary**。启用实验性 dbC opt-in 后，某些 output-stationary 链仍会暴露该限制；当前一个复现会在 64 KB L0B 上请求 96 KB。`DSA_RP` 与 `PTOAS` 已按实际生命周期放置缓冲，可保留 chooser 选出的 operand-stationary 调度，并把消费者的较小缓冲打包到已释放的整块范围中。为旧版 allocator 增加等价的按生命周期细分能力仍由 [issue #1908](https://github.com/hw-native-sys/pypto/issues/1908) 跟踪。
 7. **改写所在 `SeqStmts`** —— 把原 matmul 的 `Var`（K 切分）或消费 store 的结果（M/N 切分）用法改成新的 `return_var`。替换作用域只限当前 `SeqStmts`，不会泄漏到兄弟区域。
 
-8. **识别已有的 L0 流水线** —— 独立于 chooser 驱动的改写，检查每个由 PyPTO 规划、静态、`pipeline_stages=F ≥ 2` 且迭代数能被 `F` 整除的 `ForKind::Pipeline`。要求完整 stage 组可避免单独 lowering 的尾组需要额外 Acc slot。其平坦循环体必须恰有一个普通 `tile.matmul` 和静态 `Left`/`Right` 操作数；选中的移动操作数必须有一个可识别、直接的每迭代 Mat→L0 生产者，而固定操作数定义在循环外。循环体还必须包含一条规范 drain 链，其结果需通过匹配的 iter-arg yield 回去：direct-to-GM `tile.store(acc, ..., iter_arg_i)` 或 Acc→Mat `tile.assemble(iter_arg_i, acc, ...)`。Direct 路径至少需要四次迭代；Mat-scratch 路径至少需要八次迭代，且按分配规则对齐后的 Acc 占用至少为 `ceil(L0C/4)`。后者是独立的保守门限，因为共享的 direct-GM roofline 尚未表达其更便宜的 drain。存在任何其他 Acc 定义/读取或 store-like 操作时都不处理该循环。附加 `pipeline_double_buffer_c=true` 与 `pipeline_overlap_stores=false` 前，本 pass 会保守求和函数中的每个静态 Acc 值。普通 cube 累加器因 lowering 将其串行化而只计一份；其他 Acc 生产者则按其所有外层源 pipeline stage 深度的乘积计数，与 lowering 可能请求的物理 membership 数一致。随后为每个盈利循环增加一块按分配规则对齐的 slot。只有该 lowering 后上界能放入 L0C 时才同时启用这些循环，从而避免 dbC 因漏计其他流水线复制的 Acc 占用而迫使其降低 buffering depth。已有显式属性的循环保持不变。对于 `F > 2`，lowering 重复发射两级 `MMSS` 分组，并把 Acc membership 对 2 取模，而操作数 membership 仍保留深度 `F`。
+8. **识别已有的 L0 流水线** —— 独立于 chooser 驱动的改写，检查每个由 PyPTO 规划、静态、`pipeline_stages=F ≥ 2` 且迭代数能被 `F` 整除的 `ForKind::Pipeline`。要求完整 stage 组可避免单独 lowering 的尾组需要额外 Acc slot。其平坦循环体必须恰有一个普通 `tile.matmul` 和静态 `Left`/`Right` 操作数；选中的移动操作数必须有一个可识别、直接的每迭代 Mat→L0 生产者，而固定操作数定义在循环外。循环体还必须包含一条规范 drain 链，其结果需通过匹配的 iter-arg yield 回去：direct-to-GM `tile.store(acc, ..., iter_arg_i)` 或 Acc→Mat `tile.assemble(iter_arg_i, acc, ...)`。Direct 路径至少需要四次迭代；Mat-scratch 路径至少需要八次迭代，且按分配规则对齐后的 Acc 占用至少为 `ceil(L0C/4)`。后者是独立的保守门限，因为共享的 direct-GM roofline 尚未表达其更便宜的 drain。存在任何其他 Acc 定义/读取或 store-like 操作时都不处理该循环。附加 `pipeline_double_buffer_c=true` 与 `pipeline_overlap_stores=false` 前，本 pass 会保守求和函数中的每个静态 Acc 值。普通 cube 累加器因 lowering 将其串行化而只计一份；其他 Acc 生产者则按其所有外层源 pipeline stage 深度的乘积计数，与 lowering 可能请求的物理 membership 数一致。随后为每个盈利循环增加一块按分配规则对齐的 slot。只有该 lowering 后上界能放入 L0C 时才同时启用这些循环，从而避免 dbC 因漏计其他流水线复制的 Acc 占用而迫使其降低 buffering depth。已有显式属性的循环保持不变。对于 `F > 2`，lowering 在每个 stage 都保持交错的 `MS` 顺序，并把 Acc membership 对 2 取模，而操作数 membership 仍保留深度 `F`。
 
 本 pass 是 `ProgramPass`，对每个函数走 `IRMutator`；当函数内没有触发任何改写时，返回原函数（不会发生 `MutableCopy` 开销）。
 
@@ -107,9 +107,11 @@ program_tiled = l0_tile_pass(program)
 `memory_planner=PTOAS` 下自动开启。旧版 `PYPTO` planner 仍保留实验性显式
 开关（`PassContext(enable_pypto_l0c_double_buffer=True)`，默认关闭），因为
 issue #1908 在某些链式 Mat-scratch 布局下仍可能导致操作数缓冲溢出。
-`BuildFullKPipelined` 给移动循环加上 `kPipelineDoubleBufferCAttr`，
-`CanonicalizeIOOrder` 把两个 store 都浮到两个 matmul 之后
-（`matmul, matmul, store, store`），从而让两个累加器生命周期共存。
+`BuildFullKPipelined` 给移动循环加上 `kPipelineDoubleBufferCAttr`（该标记使
+`LowerPipelineLoops` 为 cube 累加器打上 `pipeline_membership`，并由
+`CanonicalizeIOOrder` 对 2 取模，从而让两个 tile 落在**不同的 L0C slot**；语句顺序不变），
+`CanonicalizeIOOrder` 保持 `matmul, store, matmul, store` 的交错顺序，并把 cube
+累加器的 membership 对 2 取模，从而让两块累加器分居不同 L0C slot。
 
 三种 planner 以不同方式保留该意图。对符合条件的 PTOAS 流水线，
 [`LowerPipelineToSlots`](30-lower_pipeline_to_slots.md) 把各 stage 表示成同一分配的

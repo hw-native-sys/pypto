@@ -63,33 +63,46 @@ inline constexpr const char* kPipelineStagesAttr = "pipeline_stages";
 inline constexpr const char* kPipelineOverlapStoresAttr = "pipeline_overlap_stores";
 
 /// Optional ``bool`` policy attr on a ``ForKind::Pipeline`` ``ForStmt`` (absent ⇒
-/// ``false``): when ``true``, ``CanonicalizeIOOrder`` floats the Acc-draining ops
-/// into a tier *above all compute* in the loop body, so every sibling-iteration
-/// drain sorts after every matmul — ``matmul_i, matmul_{i+1}, drain_i, drain_{i+1}``
-/// instead of ``matmul_i, drain_i, matmul_{i+1}, drain_{i+1}``. For a source
-/// pipeline deeper than two, this ordering repeats in depth-two chunks
-/// (``MMSS MMSS ...``), so operand prefetch depth remains user-selected while
-/// L0C membership still rotates over two stage residues in each fully
-/// replicated group. The drain op is ``tile.store`` on the direct-store
-/// (Acc→GM) path and ``tile.assemble`` on the Mat-scratch (Acc→Mat) path.
+/// ``false``): when ``true``, the loop's cube accumulator is double-buffered —
+/// two L0C slots ping-pong so output tile i's FIXPIPE drain overlaps tile i+1's
+/// MAD. The drain op is ``tile.store`` on the direct-store (Acc→GM) path and
+/// ``tile.assemble`` on the Mat-scratch (Acc→Mat) path.
 ///
-/// This is a *stronger* float than ``pipeline_overlap_stores`` (which only orders
-/// store-after-compute *within* a stage — the compute/store tier is shared and
-/// sorted by stage, so a stage-i store still precedes the stage-{i+1} matmul).
-/// It keeps the two iterations' L0C accumulators genuinely co-live, which is the
-/// dbC=2 (double-buffered L0C) ping-pong: overlapping their live ranges forces any
-/// correct allocator to give them distinct L0C offsets, so tile i's FIXPIPE drain
-/// overlaps tile i+1's MAD. Under ``memory_planner=PTOAS``, InitMemRef keeps the
-/// co-live buffers distinct and ptoas places them. Under the PyPTO planner,
-/// ``LowerPipelineLoops`` adds a depth-2 pipeline membership and MemoryReuse
-/// preserves the pair. ``AutoTileMatmulL0`` sets the attr either when the chooser
-/// picked ``double_buffer_c`` (with the accumulator budgeted at L0C/2), or when it
+/// The attr's content is *buffer separation*, not statement order. It makes
+/// ``LowerPipelineLoops``' membership tagger stamp the cube accumulator (which it
+/// otherwise skips, because the cube serializes MADs), and makes
+/// ``CanonicalizeIOOrder`` rotate that membership to ``stage % 2`` — so a source
+/// pipeline deeper than two keeps its user-selected operand prefetch depth while
+/// L0C still uses exactly two slots. MemoryReuse / AllocateMemoryAddr consume the
+/// membership and keep the pair in distinct buffers; under
+/// ``memory_planner=PTOAS`` MemoryReuse is skipped and InitMemRef keeps them
+/// distinct anyway.
+///
+/// It deliberately does NOT reorder the body. The ordinary stage-major order
+/// already emits ``matmul_i, drain_i, matmul_{i+1}, drain_{i+1}``, which *is* the
+/// ping-pong: each drain is issued directly after the MAD that produced it and
+/// runs while the next MAD executes on the other slot. An earlier version lifted
+/// every drain above all compute (``matmul_i, matmul_{i+1}, drain_i,
+/// drain_{i+1}``, repeating in ``MMSS`` chunks) to force the live ranges to
+/// overlap; that defers each drain past the very compute it should hide behind,
+/// and an Ascend 910B2 campaign measured the reorder alone as worth ≤ 0.08 µs
+/// (nothing) once the buffers were already distinct. Separation is carried by the
+/// membership constraint above, so the reorder bought no separation either.
+///
+/// ``AutoTileMatmulL0`` sets the attr either when the chooser picked
+/// ``double_buffer_c`` (with the accumulator budgeted at L0C/2), or when it
 /// recognizes a user-authored pipeline containing one canonical directly drained
 /// L0 matmul whose path-specific trip-count/Acc-size gate is profitable and whose
 /// conservative whole-function Acc footprint still fits after adding the extra
 /// slot. Direct-to-GM ``tile.store`` and Acc-to-Mat ``tile.assemble`` have
-/// separate conservative admission thresholds. Consumed (stripped) by
-/// ``CanonicalizeIOOrder`` alongside ``pipeline_stages`` and
+/// separate conservative admission thresholds.
+///
+/// REALIZABILITY: only ``BuildFullKPipelined`` attaches this attr. A dbC plan
+/// routed to ``BuildSplitKGrid`` gets no attr, hence no membership, hence one
+/// coalesced accumulator — while the tile has already been shrunk to the L0C/2
+/// budget. ``AnalyzeMatmul`` asserts ``dbC ⇒ k == K`` for exactly that reason;
+/// widen it only together with an emitter that can realize the plan. Consumed
+/// (stripped) by ``CanonicalizeIOOrder`` alongside ``pipeline_stages`` and
 /// ``pipeline_overlap_stores``.
 inline constexpr const char* kPipelineDoubleBufferCAttr = "pipeline_double_buffer_c";
 
