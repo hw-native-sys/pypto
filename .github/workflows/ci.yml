@@ -1586,13 +1586,15 @@ jobs:
           checkout-path: dist-checkout
 
   pypto-lib-model:
-    # No container: each model run borrows an NPU from the host-level
+    # No container: each model run borrows its cards from the host-level
     # `task-submit --device auto` queue (mechanism B — the whole `python
     # models/...` invocation, which compiles + runs in one process, is wrapped).
+    # Several leases are in flight at once, bounded by MODEL_CARD_BUDGET below.
     # Host setup mirrors dist-system-tests (conda py310 + venv + activate.sh);
-    # the job holds no card and runs on a CPU runner. task-submit preserves the
-    # caller's environment (per daily_ci.yml `a5-system-tests`), so sourcing
-    # activate.sh before the wrap is enough — the child inherits the venv + env.
+    # the job holds no card itself and runs on a CPU runner. task-submit
+    # preserves the caller's environment (per daily_ci.yml `a5-system-tests`),
+    # so sourcing activate.sh before the wrap is enough — the child inherits the
+    # venv + env, which is also how PYPTO_GOLDEN_NUM_THREADS below reaches torch.
     #
     # Lint gate (see the pre-commit job) — never claim an NPU slot for a tree
     # that doesn't lint. `toolchain` is ungated and runs alongside the gate.
@@ -1607,21 +1609,28 @@ jobs:
     #
     # Runs on the whole `npu` pool, x86_64 half included. It was pinned to
     # aarch64 as a PRECAUTION alongside dist-system-tests, on weaker evidence
-    # than that job's: one step here is multi-card -- the DeepSeek moe example
-    # at `--ep 2` -- and a failing multi-card run is known to leave the cards it
-    # borrowed unusable (see dist-system-tests for the 507018 -> 507033 cascade
-    # and the failing force_reset), on a host whose ten runner instances share
-    # ONE set of cards.
+    # than that job's: some of its leases are multi-card -- the three
+    # context-parallel prefills and decode_moe at `--ep 2` -- and a failing
+    # multi-card run is known to leave the cards it borrowed unusable (see
+    # dist-system-tests for the 507018 -> 507033 cascade and the failing
+    # force_reset), on a host whose ten runner instances share ONE set of cards.
     #
     # It was always the first of the two to unpin, and it goes with
     # dist-system-tests now that the x86_64 npu host has been repaired (see that
     # job for the health data). Nothing here was ever shown to wedge anything:
-    # the moe step has never itself failed (1 pass on x86_64; otherwise skipped
-    # behind an earlier step), and the two red runs were both single-card Qwen3
-    # steps during a host-wide x86_64 npu failure wave that also took down
-    # single-card jobs. If multi-card runs start wedging cards again, split the
-    # moe step into its own job rather than reaching for an arch label -- nine
-    # single-card steps should not pay for one multi-card one.
+    # the two red runs were both single-card Qwen3 steps during a host-wide
+    # x86_64 npu failure wave that also took down single-card jobs.
+    #
+    # Overlapping the leases raises the exposure from one multi-card run at a
+    # time to at most three, since MODEL_CARD_BUDGET is 6. If multi-card runs
+    # start wedging cards again, lower that budget -- 4 costs ~50s and 2 falls
+    # back to today's serial shape -- or give the multi-card legs their own job,
+    # rather than reaching for an arch label.
+    #
+    # The overlap is real only while the runner sets DEVICE_ID=auto (it does; a
+    # job log's `[device] DEVICE_ID=` line says so). A runner pinning a fixed
+    # card id serialises every lease on that card's lock: still correct, just
+    # back to the old wall clock.
     runs-on: [self-hosted, linux, npu]
     defaults:
       run:
@@ -1641,6 +1650,20 @@ jobs:
       # *paths* (CCACHE_DIR / PIP_CACHE_DIR) and CCACHE_NAMESPACE are derived by
       # setup-ci-job from the runner config's CI_CACHE_ROOT.
       CCACHE_UMASK: '000'
+      # Cards this job may hold at once, summed over every in-flight lease.
+      # List-scheduling the measured per-model times says 6 already reaches the
+      # critical path (prefill_csa, ~250s) and that 8 or 13 are not faster — so
+      # this is the smallest width that costs nothing, and it leaves 10 of the
+      # host's 16 cards to the nine other runner instances sharing them.
+      MODEL_CARD_BUDGET: 6
+      # torch threads per reference golden. pypto-lib's own default is 16; the
+      # golden is the largest single phase of this job (~400s of ~615s serial,
+      # and ~200s of the prefill_csa lease that now sets the wall clock), and it
+      # runs on the CPU while holding NPUs. The budget caps this job at six
+      # concurrent leases, so 32 bounds it at 192 threads. This is the knob to
+      # move if prefill_csa stays the critical path — raise it and watch that
+      # lease's `[RUN] compute golden done (Ns)` line.
+      PYPTO_GOLDEN_NUM_THREADS: 32
     steps:
       - name: Fetch composite action definitions
         # Local `uses: ./.github/actions/...` resolves against $GITHUB_WORKSPACE,
@@ -1673,101 +1696,43 @@ jobs:
           rm -rf "$GITHUB_WORKSPACE/pypto-lib"
           git clone --depth 1 https://github.com/hw-native-sys/pypto-lib.git "$GITHUB_WORKSPACE/pypto-lib"
 
-      # Each model run borrows a card via task-submit for the whole `python ...`
-      # invocation (compile + run). task-submit propagates the inner exit code,
-      # so a model crash fails the step. $TASK_DEVICE is the lent card.
+      # Every model is one task-submit lease that borrows its own cards for the
+      # whole `python models/...` invocation (compile + run); task-submit
+      # propagates the inner exit code, so a model crash fails the step.
+      #
+      # WHY ONE STEP AND NOT NINE. A lease holds its cards through venv boot,
+      # compile, the torch reference golden, the device run and validation, but
+      # only the device run needs a card. Measured over four main runs, 63-83%
+      # of the held time was card-free -- the golden alone was ~400s of a ~615s
+      # job -- while the wait for a card was ~0. So the nine leases overlap
+      # instead of queueing behind each other, bounded by MODEL_CARD_BUDGET.
       #
       # HOW MANY CARDS. pypto-lib states each model's requirement in the model
-      # file itself, as a `# ci: devices=N` marker on its own line, and the
-      # --device-num below must match it. On main today that is one card for the
-      # two Qwen3 examples and for decode_swa / decode_hca / decode_csa, and two
-      # for the three context-parallel prefill examples plus decode_moe. Borrowing too
-      # few does not degrade gracefully -- the model aborts before it computes
-      # anything, e.g. `CP2 requires 2 devices, got [1]` -- so when a step here
-      # starts failing that way, re-read the marker rather than the model code:
-      # this job clones pypto-lib main, so its requirements move without any
-      # change on this side.
-      - name: Run pypto-lib Qwen3-14B decode example
-        env:
-          PYTHONPATH: ${{ github.workspace }}/pypto-lib
-        run: |
-          source activate.sh
-          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 1800 \
-            --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/qwen3_14b/decode_fwd.py -p a2a3 -d \$TASK_DEVICE"
-
-      # Prefill exercises the dynamic-shape host path that decode does not: its
-      # token axis is a `pl.dynamic()` symbol, the per-layer temp is sized from
-      # `pl.tensor.dim(...)`, and the layer result is reassigned to the same
-      # loop-carried var. Regressions in cross-function dynamic-shape typing
-      # surface here (and only here) before they reach pypto-serving.
-      - name: Run pypto-lib Qwen3-14B prefill example
-        env:
-          PYTHONPATH: ${{ github.workspace }}/pypto-lib
-        run: |
-          source activate.sh
-          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 1800 \
-            --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/qwen3_14b/prefill_fwd.py -p a2a3 -d \$TASK_DEVICE"
-
+      # file itself, as a `# ci: devices=N` marker, and the runner reads it from
+      # the clone rather than hard-coding it here: borrowing too few does not
+      # degrade gracefully -- the model aborts before it computes anything, e.g.
+      # `CP2 requires 2 devices, got [1]`. The matrix records the count that was
+      # last reviewed and the runner reports any drift, so pypto-lib can move a
+      # model's requirement without breaking this job, and cannot move it past
+      # the per-model ceiling without a deliberate change on this side.
+      #
+      # The matrix itself, and the reason each leg exists, live in
+      # tests/models/run_lib_models.py, where a developer can reproduce one leg
+      # without reading YAML.
+      #
       # NOTE: Qwen3-14B decode performance monitoring (L2-swimlane makespan +
       # perf_guard) lives in the daily_ci.yml `qwen3-perf` job, not here. Per-PR
       # CI only checks functional correctness; perf is noisy (~8.5% jitter) and
       # is sampled daily with multiple runs averaged to keep the signal stable.
-
-      - name: Run pypto-lib DeepSeek-V4-Flash decode_swa example
-        env:
-          PYTHONPATH: ${{ github.workspace }}/pypto-lib
+      # That also means overlapping the leases here cannot perturb a perf
+      # number: nothing in this job measures one.
+      - name: Run the pypto-lib model matrix
         run: |
           source activate.sh
-          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 1800 \
-            --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek_v4_flash_mtp/decode_swa.py -p a2a3 -d \$TASK_DEVICE"
-
-      - name: Run pypto-lib DeepSeek-V4-Flash decode_hca example
-        env:
-          PYTHONPATH: ${{ github.workspace }}/pypto-lib
-        run: |
-          source activate.sh
-          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 1800 \
-            --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek_v4_flash_mtp/decode_hca.py -p a2a3 -d \$TASK_DEVICE"
-
-      - name: Run pypto-lib DeepSeek-V4-Flash decode_csa example
-        env:
-          PYTHONPATH: ${{ github.workspace }}/pypto-lib
-        run: |
-          source activate.sh
-          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 1800 \
-            --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek_v4_flash_mtp/decode_csa.py -p a2a3 -d \$TASK_DEVICE"
-
-      - name: Run pypto-lib DeepSeek-V4-Flash prefill_csa example
-        env:
-          PYTHONPATH: ${{ github.workspace }}/pypto-lib
-        run: |
-          source activate.sh
-          task-submit --device "$DEVICE_ID" --device-num 2 --timeout 3600 --max-time 1800 \
-            --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek_v4_flash_mtp/prefill_csa.py -p a2a3 -d \$TASK_DEVICE"
-
-      - name: Run pypto-lib DeepSeek-V4-Flash prefill_hca example
-        env:
-          PYTHONPATH: ${{ github.workspace }}/pypto-lib
-        run: |
-          source activate.sh
-          task-submit --device "$DEVICE_ID" --device-num 2 --timeout 3600 --max-time 1800 \
-            --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek_v4_flash_mtp/prefill_hca.py -p a2a3 -d \$TASK_DEVICE"
-
-      - name: Run pypto-lib DeepSeek-V4-Flash prefill_swa example
-        env:
-          PYTHONPATH: ${{ github.workspace }}/pypto-lib
-        run: |
-          source activate.sh
-          task-submit --device "$DEVICE_ID" --device-num 2 --timeout 3600 --max-time 1800 \
-            --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek_v4_flash_mtp/prefill_swa.py -p a2a3 -d \$TASK_DEVICE"
-
-      - name: Run pypto-lib DeepSeek-V4-Flash decode_moe example
-        env:
-          PYTHONPATH: ${{ github.workspace }}/pypto-lib
-        run: |
-          source activate.sh
-          task-submit --device "$DEVICE_ID" --device-num 2 --timeout 3600 --max-time 1800 \
-            --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek_v4_flash_mtp/decode_moe.py -p a2a3 -d \$TASK_DEVICE --ep 2"
+          python tests/models/run_lib_models.py \
+            --lib-root "$GITHUB_WORKSPACE/pypto-lib" \
+            --activate "$GITHUB_WORKSPACE/lib-checkout/activate.sh" \
+            --device "$DEVICE_ID" --cards "$MODEL_CARD_BUDGET" -p a2a3
 
       - name: Kill orphaned task-submit tasks
         if: always()
