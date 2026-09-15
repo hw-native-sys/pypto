@@ -164,8 +164,8 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | **Comparison and Selection (4)** |  |  |  |  |  |  |  |  |
 | pto.tcmp | TCMP | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tcmps | TCMPS | tile | ✅ | ✅ | ❌ | ✅ | — |  |
-| pto.tsel | TSEL | tile | ✅ | ✅ | ❌ | ✅ | — |  |
-| pto.tsels | TSELS | tile | ✅ | ✅ | ❌ | ✅ | — | canonical 4-input path; verified on A2/A3 hardware, A5 hardware verification pending |
+| pto.tsel | TSEL | tile | ✅ | ✅ | ❌ | ✅ | — | also the target of `tile.select` when either branch is a scalar TSELS cannot take |
+| pto.tsels | TSELS | tile | ✅ | ✅ | ❌ | ✅ | — | canonical 4-input path; verified on A2/A3 hardware, A5 hardware verification pending. The composite `tile.select` lowers here for `mask ? tile : scalar` — it has no same-name `pto.*` op of its own |
 | **Bitwise Operations (11)** |  |  |  |  |  |  |  |  |
 | pto.tand | TAND | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 hardware passes signed/unsigned 8/16-bit patterns across full, row-tail, column-tail, and combined-tail shapes; A5 hardware verification pending |
 | pto.tor | TOR | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 hardware passes signed/unsigned 8/16-bit patterns across full, row-tail, column-tail, and combined-tail shapes; A5 hardware verification pending |

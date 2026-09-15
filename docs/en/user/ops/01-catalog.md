@@ -61,7 +61,8 @@ See [Memory and Data Movement](../language/03-memory.md) for which moves are leg
 | [`maximum`][pypto.language.maximum] [`minimum`][pypto.language.minimum] | `pl.` | Elementwise max / min of two operands |
 | [`maximums`][pypto.language.tile.maximums] [`minimums`][pypto.language.tile.minimums] | `pl.` (t) | Elementwise max / min against a scalar |
 | [`max`][pypto.language.tile.max] [`min`][pypto.language.tile.min] | `pl.` (t) | Scalar max / min of two values — **not** a tile reduction. To reduce a tile use `row_max` / `col_max` (and the `min` forms) |
-| [`sel`][pypto.language.tile.sel] [`sels`][pypto.language.tile.sels] | `pl.` (t) | Select by mask, tensor and scalar forms |
+| [`select`][pypto.language.tile.select] | `pl.` (t) | `out[i] = cond[i] ? a[i] : b[i]`. The condition is a `cmp` / `cmps` mask (for a 0/1 value, compare it first: `cmps(v, 0, cmp_type=1)`); either branch may be a constant scalar. No scratch tile — it is filled in during lowering. Two tile branches must share shape, valid extents, and dtype |
+| [`sel`][pypto.language.tile.sel] [`sels`][pypto.language.tile.sels] | `pl.` (t) | The 1:1 TSEL / TSELS forms behind `select`: mask required, scratch tile supplied by the caller |
 
 ## Activations
 

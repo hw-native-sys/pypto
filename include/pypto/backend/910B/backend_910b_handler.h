@@ -43,6 +43,25 @@ class Ascend910BHandler : public BackendHandler {
   [[nodiscard]] bool RequiresGMPipeBuffer() const override { return true; }
   [[nodiscard]] bool RequiresSplitLoadTpopWorkaround() const override { return true; }
   [[nodiscard]] bool RequiresLevel3TmpScratch() const override { return true; }
+
+  // A2/A3 TSEL takes a level-3 explicit scratch of UINT32 [1, 16].
+  [[nodiscard]] backend::TileScratchSpec GetTselScratchSpec() const override {
+    return {DataType::UINT32, 1, 16};
+  }
+
+  // PTOAS verifies the A2/A3 TSELS scratch against one complete physical source
+  // row, in the source dtype (see tests/st/runtime/ops/test_sels.py).
+  [[nodiscard]] backend::TileScratchSpec GetTselsScratchSpec(DataType src_dtype,
+                                                             int64_t src_cols) const override {
+    return {src_dtype, 1, src_cols};
+  }
+
+  // A2/A3 TSELS covers 16/32-bit integers, FP16, and FP32 -- no 8-bit form.
+  [[nodiscard]] bool SupportsTselsDataType(const DataType& src_dtype) const override {
+    return src_dtype == DataType::INT16 || src_dtype == DataType::UINT16 || src_dtype == DataType::INT32 ||
+           src_dtype == DataType::UINT32 || src_dtype == DataType::FP16 || src_dtype == DataType::FP32;
+  }
+
   [[nodiscard]] bool RequiresVtoCFractalAdapt() const override { return false; }
   [[nodiscard]] bool RequiresRuntimeSubblockBridge() const override { return true; }
   [[nodiscard]] bool RequiresNoSplitDualAivDispatch() const override { return true; }

@@ -87,6 +87,11 @@ UNSEEDED_OPS = {
     # Raw UINT8 src/tmp plus a `dst_rows`/`dst_cols` pair that must agree with the source's static
     # valid shape.
     ir.get_op("tile.tmov_x2zz").name,
+    # `cond` must be the packed predicate mask for the result the other two operands imply:
+    # UINT8, columns `roundup(ceil(N/8), 32)`, valid columns `ceil(valid_N/8)`. That is a
+    # derived relation between operands, not an independent shape the uniform search can guess.
+    # It lowers to tile.sel / tile.sels, whose own blind arguments are already listed below.
+    ir.get_op("tile.select").name,
 }
 
 # (operator, argument index) pairs whose extent the operator's own type deduction never reads, so
