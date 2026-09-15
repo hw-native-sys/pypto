@@ -214,10 +214,12 @@ void ValidateOpTypeRegistrationForTesting(ir::OpIRStage stage, bool internal_onl
  * consume the same recognizer through MemRefDsaAdapter, while unit tests need
  * to distinguish edge construction from solver tie-breaking.
  */
-nb::list RecognizeDsaReusePenaltiesForTesting(const ir::FunctionPtr& func) {
+nb::list RecognizeDsaReusePenaltiesForTesting(const ir::FunctionPtr& func, bool reference_enumeration) {
   const ir::dsa_adapter::AllocationPlan plan = ir::dsa_adapter::BuildDsaAllocationPlan(func);
-  const auto penalties =
-      ir::dsa_adapter::RecognizeReusePenalties(func, plan, *backend::BackendConfig::GetBackend());
+  const auto penalties = ir::dsa_adapter::RecognizeReusePenalties(
+      func, plan, *backend::BackendConfig::GetBackend(),
+      reference_enumeration ? ir::dsa_adapter::ReuseEnumeration::ReferenceAllPairs
+                            : ir::dsa_adapter::ReuseEnumeration::IndexedSweep);
 
   nb::list result;
   for (const auto& penalty : penalties) {
@@ -231,6 +233,68 @@ nb::list RecognizeDsaReusePenaltiesForTesting(const ir::FunctionPtr& func) {
     edge["cost"] = penalty.cost;
     result.append(std::move(edge));
   }
+  return result;
+}
+
+/**
+ * @brief Return the DSA allocation plan's lifetimes and hard relations.
+ *
+ * Placement tests can otherwise only observe final addresses, which cannot
+ * distinguish "the model forbade this overlap" from "the search happened to
+ * avoid it".
+ */
+nb::dict GetDsaAllocationPlanForTesting(const ir::FunctionPtr& func) {
+  const ir::dsa_adapter::AllocationPlan plan = ir::dsa_adapter::BuildDsaAllocationPlan(func);
+
+  const auto name_of = [&](size_t index) {
+    INTERNAL_CHECK(index < plan.intervals.size()) << "Internal error: allocation index out of range";
+    return plan.intervals[index].variable->name_hint_;
+  };
+
+  nb::list intervals;
+  for (size_t index = 0; index < plan.intervals.size(); ++index) {
+    const ir::LifetimeInterval& interval = plan.intervals[index];
+    nb::dict record;
+    record["name"] = interval.variable->name_hint_;
+    record["size"] = interval.size;
+    record["def_point"] = interval.def_point;
+    record["last_use_point"] = interval.last_use_point;
+    record["read_before_write_input"] = plan.read_before_write_inputs.count(index) != 0;
+    intervals.append(std::move(record));
+  }
+
+  nb::list separations;
+  for (const ir::dsa_adapter::AllocationSeparation& separation : plan.separations) {
+    nb::list reasons;
+    for (const ir::dsa_adapter::AllocationSeparationReason reason : separation.reasons) {
+      switch (reason) {
+        case ir::dsa_adapter::AllocationSeparationReason::PipelineStage:
+          reasons.append("pipeline_stage");
+          break;
+        case ir::dsa_adapter::AllocationSeparationReason::TargetHazard:
+          reasons.append("target_hazard");
+          break;
+        case ir::dsa_adapter::AllocationSeparationReason::SemanticNoAlias:
+          reasons.append("semantic_no_alias");
+          break;
+        case ir::dsa_adapter::AllocationSeparationReason::DeclaredAllocation:
+          reasons.append("declared_allocation");
+          break;
+      }
+    }
+    separations.append(
+        nb::make_tuple(name_of(separation.first), name_of(separation.second), std::move(reasons)));
+  }
+
+  nb::list same_base_or_disjoint;
+  for (const ir::dsa_adapter::AllocationSameBaseOrDisjoint& relation : plan.same_base_or_disjoint) {
+    same_base_or_disjoint.append(nb::make_tuple(name_of(relation.first), name_of(relation.second)));
+  }
+
+  nb::dict result;
+  result["intervals"] = std::move(intervals);
+  result["separations"] = std::move(separations);
+  result["same_base_or_disjoint"] = std::move(same_base_or_disjoint);
   return result;
 }
 
@@ -371,7 +435,13 @@ void BindTesting(nb::module_& m) {
               "Raise `kind` and rethrow it via Error::RethrowWithMessage for testing");
 
   testing.def("recognize_dsa_reuse_penalties", &RecognizeDsaReusePenaltiesForTesting, nb::arg("function"),
-              "Return recognized DSA-RP edges without running placement");
+              nb::arg("reference_enumeration") = false,
+              "Return recognized DSA-RP edges without running placement. Set "
+              "reference_enumeration to compare the compiler's indexed sweep against the "
+              "all-pairs specification of the same promotion policy.");
+
+  testing.def("get_dsa_allocation_plan", &GetDsaAllocationPlanForTesting, nb::arg("function"),
+              "Return DSA allocation lifetimes, hard separations, and in-place relations");
 
   testing.def("try_infer_pipe", &TryInferPipeForTesting, nb::arg("call"),
               "Return the exact backend pipe for a Call, or None");

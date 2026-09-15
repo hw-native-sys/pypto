@@ -45,6 +45,15 @@ WIDE_K_TILE = 128
 COMPOSE_K_TOTAL = 768
 COMPOSE_K_TILE = 384
 
+# Qwen-like canonical split-K dimensions that previously let the DSA-RP
+# planner's automatic dbC policy shrink N from 256 to 64. The enclosing rewrite
+# emits output tiles sequentially, so that four-tile choice cannot realize the
+# two-Acc schedule the chooser scored.
+DBC_REG_M = 16
+DBC_REG_N = 256
+DBC_REG_K_TOTAL = 1024
+DBC_REG_K_TILE = 256
+
 # Full-pipeline counterpart to the reviewer's (656,80,768) chooser case. The
 # old logical candidate (576,48,32) boxes to physical Acc [576,64] = 144 KiB,
 # while these smaller source panels also fit together in the 512 KiB Mat arena.
@@ -170,6 +179,24 @@ def canonical_split_k_n_boundary_retiles_k_predicated(
             bt = b[k0 : k0 + COMPOSE_K_TILE, 0:WIDE_N]
             acc = pl.matmul_acc(acc, at, bt, init_cond=(k0 == 0))
         c[0:WIDE_M, 0:WIDE_N] = acc
+    return c
+
+
+@pl.jit
+def canonical_split_k_dsa_rp_dbc_regression(
+    a: pl.Tensor[[DBC_REG_M, DBC_REG_K_TOTAL], pl.BF16],
+    b: pl.Tensor[[DBC_REG_K_TOTAL, DBC_REG_N], pl.BF16],
+    c: pl.Out[pl.Tensor[[DBC_REG_M, DBC_REG_N], pl.FP32]],
+):
+    """Qwen-like split-K chain whose full output fits one L0C accumulator."""
+    for _ in pl.spmd(1):
+        acc = pl.create_tensor([DBC_REG_M, DBC_REG_N], dtype=pl.FP32)
+        for kb in pl.pipeline(0, DBC_REG_K_TOTAL // DBC_REG_K_TILE, stage=2):
+            k0 = kb * DBC_REG_K_TILE
+            at = a[0:DBC_REG_M, k0 : k0 + DBC_REG_K_TILE]
+            bt = b[k0 : k0 + DBC_REG_K_TILE, 0:DBC_REG_N]
+            acc = pl.matmul_acc(acc, at, bt, init_cond=(k0 == 0))
+        c[0:DBC_REG_M, 0:DBC_REG_N] = acc
     return c
 
 
@@ -302,6 +329,28 @@ def _jit_program(kernel):
     """Specialize a fully annotated JIT function without running passes."""
     _, _, tensor_meta, scalar_dtypes, per_func_dyn = kernel._bind_args_from_signature({})
     return kernel._compile_to_program(tensor_meta, scalar_dtypes, per_func_dyn, pl)
+
+
+def _planner_context(planner):
+    """Preserve the verification fixture while selecting a test's planner policy."""
+    current = passes.PassContext.current()
+    if current is None:
+        return passes.PassContext([], memory_planner=planner)
+    return passes.PassContext(
+        current.get_instruments(),
+        current.get_verification_level(),
+        current.get_diagnostic_phase(),
+        current.get_disabled_diagnostics(),
+        planner,
+        current.get_enable_pypto_l0c_double_buffer(),
+        current.get_runtime(),
+    )
+
+
+def _run_legacy_auto_tile(program):
+    """Run exact rewrite-shape assertions under the policy they were authored for."""
+    with _planner_context(passes.MemoryPlanner.PYPTO):
+        return passes.auto_tile_matmul_l0()(program)
 
 
 def _lower_to_auto_tile_input(program):
@@ -438,7 +487,7 @@ def test_issue_2232_loop_level_mn_tiling():
     eight K blocks, and only then stores that output tile."""
     before = _lower_to_auto_tile_input(_jit_program(issue_2232_repro))
     with passes.PassContext([ir.make_roundtrip_instrument()]):
-        after = passes.auto_tile_matmul_l0()(before)
+        after = _run_legacy_auto_tile(before)
 
     printed = ir.python_print(after)
     assert "pl.Tile[[16, 1152], pl.INT32" not in printed
@@ -457,7 +506,7 @@ def test_predicated_issue_2232_loop_level_mn_tiling():
     same stores as the peeled spelling, and no branch in the result."""
     before = _lower_to_auto_tile_input(_jit_program(issue_2232_repro_predicated))
     with passes.PassContext([ir.make_roundtrip_instrument()]):
-        after = passes.auto_tile_matmul_l0()(before)
+        after = _run_legacy_auto_tile(before)
 
     printed = ir.python_print(after)
     assert "pl.Tile[[16, 1152], pl.INT32" not in printed
@@ -470,13 +519,33 @@ def test_predicated_issue_2232_loop_level_mn_tiling():
     assert "if " not in printed
 
 
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS])
+def test_canonical_split_k_output_grid_does_not_select_unrealized_dbc(planner):
+    """The enclosing split-K rewrite must not size its grid from a dbC plan.
+
+    For this Qwen-like shape, enabling dbC in the output-grid chooser selects
+    four 16x64 output tiles so full K=256 fits the double-buffered Right pool.
+    The rewrite drains each tile before starting the next one, so it cannot
+    realize the two-Acc schedule that choice assumes. Keep the one 16x256
+    output tile and let the nested matmul calls select their legal K blocking.
+    """
+    before = _lower_to_auto_tile_input(_jit_program(canonical_split_k_dsa_rp_dbc_regression))
+    with _planner_context(planner):
+        after = passes.auto_tile_matmul_l0()(before)
+
+    printed = ir.python_print(after)
+    assert printed.count("pl.tile.store(") == 1
+    assert "pl.Tile[[16, 256], pl.FP32, pl.Mem.Acc]" in printed
+    assert "pl.Tile[[256, 64], pl.BF16, pl.Mem.Right]" not in printed
+
+
 def test_canonical_split_k_tiles_both_m_and_n_with_boundaries():
     """The enclosing-loop rewrite is a general 2D output grid, not an N-only
     special case for issue #2232. Every generated output tile reruns both source
     K blocks; no full-shape Acc or operand load survives."""
     before = _lower_to_auto_tile_input(_jit_program(canonical_split_k_mn))
     with passes.PassContext([ir.make_roundtrip_instrument()]):
-        after = passes.auto_tile_matmul_l0()(before)
+        after = _run_legacy_auto_tile(before)
 
     printed = ir.python_print(after)
     assert "pl.Tile[[272, 144], pl.INT32, pl.Mem.Acc]" not in printed
@@ -502,7 +571,7 @@ def test_predicated_canonical_split_k_tiles_both_m_and_n_with_boundaries():
     same for the predicated spelling."""
     before = _lower_to_auto_tile_input(_jit_program(canonical_split_k_mn_predicated))
     with passes.PassContext([ir.make_roundtrip_instrument()]):
-        after = passes.auto_tile_matmul_l0()(before)
+        after = _run_legacy_auto_tile(before)
 
     printed = ir.python_print(after)
     assert "pl.Tile[[272, 144], pl.INT32, pl.Mem.Acc]" not in printed
@@ -525,7 +594,7 @@ def test_padded_n_boundary_retains_valid_shape_through_inner_k_rewrite():
     initializer must not widen its valid N extent back to the physical 32."""
     before = _lower_to_auto_tile_input(_jit_program(canonical_split_k_n_boundary_retiles_k))
     with passes.PassContext([ir.make_roundtrip_instrument()]):
-        after = passes.auto_tile_matmul_l0()(before)
+        after = _run_legacy_auto_tile(before)
 
     printed = ir.python_print(after)
     assert printed.count("in pl.pipeline(2, stage=2") == 4
@@ -544,7 +613,7 @@ def test_predicated_padded_n_boundary_retains_valid_shape_through_inner_k_rewrit
     16-column logical tail, exactly as the peeled spelling does."""
     before = _lower_to_auto_tile_input(_jit_program(canonical_split_k_n_boundary_retiles_k_predicated))
     with passes.PassContext([ir.make_roundtrip_instrument()]):
-        after = passes.auto_tile_matmul_l0()(before)
+        after = _run_legacy_auto_tile(before)
 
     printed = ir.python_print(after)
     assert printed.count("in pl.pipeline(2, stage=2") == 4
@@ -581,7 +650,7 @@ def test_peeled_and_predicated_retile_to_structurally_equal_output():
     for kernel in (canonical_split_k_mn, canonical_split_k_mn_predicated):
         before = _lower_to_auto_tile_input(_jit_program(kernel))
         with passes.PassContext([ir.make_roundtrip_instrument()]):
-            outputs.append(passes.auto_tile_matmul_l0()(before))
+            outputs.append(_run_legacy_auto_tile(before))
     after_peeled, after_predicated = outputs
 
     assert "if " in ir.python_print(after_peeled)
@@ -622,7 +691,7 @@ def test_peeled_and_predicated_emit_the_same_output_grid(peeled, predicated):
     for kernel in (peeled, predicated):
         before = _lower_to_auto_tile_input(_jit_program(kernel))
         with passes.PassContext([ir.make_roundtrip_instrument()]):
-            grids.append(_collect_store_calls(passes.auto_tile_matmul_l0()(before)))
+            grids.append(_collect_store_calls(_run_legacy_auto_tile(before)))
     peeled_stores, predicated_stores = grids
 
     assert len(peeled_stores) >= 2
@@ -674,7 +743,7 @@ def test_already_padded_output_localizes_valid_shape_across_mn_grid():
             out = pl.tile.store(product, [0, 0], out)
             return out
 
-    after = passes.auto_tile_matmul_l0()(Before)
+    after = _run_legacy_auto_tile(Before)
     printed = ir.python_print(after)
     assert printed.count("pl.tile.store(") >= 4
     assert "pl.TileView(valid_shape=[" in printed
@@ -728,7 +797,7 @@ def test_symbolic_padded_output_localizes_valid_shape_across_mn_grid():
             out = pl.tile.store(product, [0, 0], out)
             return out
 
-    after = passes.auto_tile_matmul_l0()(Before)
+    after = _run_legacy_auto_tile(Before)
     printed = ir.python_print(after)
     assert "pl.max(valid_n, pl.cast(256, pl.UINT64)) - pl.cast(256, pl.UINT64)" in printed
     assert "valid_n - pl.cast(256, pl.UINT64)" not in printed
@@ -739,7 +808,7 @@ def test_canonical_split_k_preserves_store_attrs_on_every_output_tile():
     compiler metadata carried in ``Call.attrs``."""
     before = _lower_to_auto_tile_input(_jit_program(canonical_split_k_mn))
     stamped = _StampStoreAttrs().visit_program(before)
-    after = passes.auto_tile_matmul_l0()(stamped)
+    after = _run_legacy_auto_tile(stamped)
 
     collector = _StoreAttrCollector()
     collector.visit_program(after)
@@ -791,7 +860,7 @@ def test_non_seed_predicate_leaves_the_reduction_untouched(capfd):
     _backend.reset_for_testing()
     _backend.set_backend_type(BackendType.Ascend910B)
     before = _lower_to_auto_tile_input(OpaquePredicateBefore)
-    after = passes.auto_tile_matmul_l0()(before)
+    after = _run_legacy_auto_tile(before)
 
     ir.assert_structural_equal(after, before)
     assert "PH-AT-006" in capfd.readouterr().err
@@ -813,12 +882,11 @@ def test_canonical_split_k_chooser_accounts_for_full_window_boxing(planner, sour
     _backend.reset_for_testing()
     _backend.set_backend_type(BackendType.Ascend910B)
     before = _lower_to_auto_tile_input(source)
-    after_auto_tile = passes.auto_tile_matmul_l0()(before)
-    printed = ir.python_print(after_auto_tile)
-
-    assert "pl.Tile[[576, 64], pl.INT32, pl.Mem.Acc" not in printed
-    assert "pl.Tile[[576, 48], pl.INT32, pl.Mem.Acc" not in printed
     with passes.PassContext([], memory_planner=planner):
+        after_auto_tile = passes.auto_tile_matmul_l0()(before)
+        printed = ir.python_print(after_auto_tile)
+        assert "pl.Tile[[576, 64], pl.INT32, pl.Mem.Acc" not in printed
+        assert "pl.Tile[[576, 48], pl.INT32, pl.Mem.Acc" not in printed
         assert PassManager.get_strategy(OptimizationStrategy.Default).run_passes(source) is not None
 
 
@@ -829,9 +897,10 @@ def test_canonical_split_k_boundary_codegen_uses_box_aligned_physical_width():
 
     _backend.reset_for_testing()
     _backend.set_backend_type(BackendType.Ascend910B)
-    optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
-        _jit_program(canonical_split_k_n_boundary_retiles_k)
-    )
+    with _planner_context(passes.MemoryPlanner.PYPTO):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
+            _jit_program(canonical_split_k_n_boundary_retiles_k)
+        )
     incore = [func for func in optimized.functions.values() if func.func_type == pl.FunctionType.AIC]
     assert len(incore) == 1
     single = ir.Program([incore[0]], incore[0].name, optimized.span)
@@ -853,12 +922,15 @@ def test_canonical_split_k_boundary_codegen_uses_box_aligned_physical_width():
     assert tail_store, pto
     tail_acc = re.escape(tail_store.group("acc"))
     tail_rows = tail_store.group("rows")
-    assert re.search(
-        rf"{tail_acc} = pto\.alloc_tile [^\n]*: !pto\.tile_buf<loc=acc, dtype=i32, "
+    tail_alloc = re.search(
+        rf"{tail_acc} = pto\.alloc_tile (?P<args>[^\n]*): !pto\.tile_buf<loc=acc, dtype=i32, "
         rf"rows={tail_rows}, cols=32,",
         pto,
-    ), pto
-    assert re.search(
+    )
+    assert tail_alloc, pto
+    # DSA-RP can write the logical extent directly on the final alias's alloc;
+    # legacy coalescing may instead narrow the shared storage with set_validshape.
+    assert "valid_col = %c16_index" in tail_alloc.group("args") or re.search(
         rf"pto\.set_validshape {tail_acc}, %c{tail_rows}_index, %c16_index : "
         rf"!pto\.tile_buf<loc=acc, dtype=i32, rows={tail_rows}, cols=32,",
         pto,
@@ -917,7 +989,7 @@ def test_row_narrowed_matmul_declares_a_compact_accumulator_seed():
             out = pl.tile.store(product, [0, 0], out)
             return out
 
-    after = passes.auto_tile_matmul_l0()(Before)
+    after = _run_legacy_auto_tile(Before)
     printed = ir.python_print(after)
 
     assert re.search(r"pl\.tile\.create\(\s*\[64, 128\][^)]*compact=True", printed, re.S), (

@@ -37,7 +37,8 @@ This mirrors [`SkewCrossCorePipeline`](29-skew_cross_core_pipeline.md), which ha
 
 ## Gated on `memory_planner=PTOAS`
 
-Under the default PyPTO planner the pass returns every function untouched, so that path stays byte-identical.
+Under either in-tree planner (`DSA_RP`, the default, or legacy `PYPTO`) the pass
+returns every function untouched, so those paths stay byte-identical.
 
 The gate tracks where a region is *emitted*, not where ptoas can use one. PTO codegen's `PlanMultiBufferRegions` bails under the PyPTO planner, so a rotation synthesized there would resolve to a runtime address on an ordinary `alloc_tile` — correct, but with none of the slot analysis this transform exists to trigger.
 

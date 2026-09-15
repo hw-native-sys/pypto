@@ -235,6 +235,10 @@ enum class MemoryPlanner {
   DsaRP = 2,  ///< In-tree DSA with automatically recognized reuse penalties.
 };
 
+inline constexpr MemoryPlanner kDefaultMemoryPlanner = MemoryPlanner::DsaRP;
+
+[[nodiscard]] constexpr MemoryPlanner GetDefaultMemoryPlanner() { return kDefaultMemoryPlanner; }
+
 /**
  * @brief Which Simpler runtime ABI a compilation targets.
  *
@@ -290,7 +294,7 @@ class PassContext {
    *        DiagnosticCheck enum (default: UnusedControlFlowResult).
    *        Performance hints are on by default; disable individual hints by
    *        adding their DiagnosticCheck values here.
-   * @param memory_planner Who plans on-chip buffer memory (default: PyPTO).
+   * @param memory_planner Who plans on-chip buffer memory (default: DsaRP).
    *        DsaRP replaces MemoryReuse with in-tree capacity-constrained DSA-RP.
    *        PtoAS skips PyPTO address allocation so ptoas PlanMemory owns it.
    * @param enable_pypto_l0c_double_buffer Opt the legacy PyPTO planner in to
@@ -307,7 +311,7 @@ class PassContext {
                        VerificationLevel verification_level = VerificationLevel::Basic,
                        DiagnosticPhase diagnostic_phase = DiagnosticPhase::PrePipeline,
                        DiagnosticCheckSet disabled_diagnostics = {DiagnosticCheck::UnusedControlFlowResult},
-                       MemoryPlanner memory_planner = MemoryPlanner::PyPTO,
+                       MemoryPlanner memory_planner = kDefaultMemoryPlanner,
                        bool enable_pypto_l0c_double_buffer = false,
                        RuntimeKind runtime = kDefaultRuntimeKind);
 

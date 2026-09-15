@@ -19,7 +19,7 @@ drain overlaps tile i+1's MAD. It is reachable under all three memory planners:
     (experimental opt-in): MemoryReuse runs, but its capacity gate (#1475) keeps the
     two co-live accumulators in distinct buffers via their flat depth-2
     ``pipeline_membership``, then AllocateMemoryAddr places them.
-Under the default PyPTO planner (flag off) these shapes get one accumulator and
+Under the explicit legacy PyPTO planner (flag off) these shapes get one accumulator and
 would not exercise the feature.
 
 Coverage:

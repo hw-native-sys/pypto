@@ -23,7 +23,7 @@ TENSOR_ONLY_PASSES = [
     "OptimizeOrchTensors",
 ]
 
-TENSOR_OPTIMIZATION_PASSES = [
+DEFAULT_TENSOR_OPTIMIZATION_PASSES = [
     "InlineFunctions",
     "UnrollLoops",
     "CtrlFlowTransform",
@@ -55,7 +55,6 @@ TENSOR_OPTIMIZATION_PASSES = [
     "MaterializeTensorStrides",
     "InitMemRef",
     "MaterializeSemanticAliases",
-    "MemoryReuse",
     "AllocateMemoryAddr",
     "FoldNoOpReshape",
     "FuseCreateAssembleToSlice",
@@ -92,7 +91,7 @@ class TestPassManagerBasics:
         pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
         assert pm is not None
         assert pm.strategy == ir.OptimizationStrategy.Default
-        assert pm.pass_names == TENSOR_OPTIMIZATION_PASSES
+        assert pm.pass_names == DEFAULT_TENSOR_OPTIMIZATION_PASSES
 
     def test_pass_manager_rejects_unknown_strategy(self):
         """An unsupported strategy value raises instead of silently running Default."""
@@ -261,47 +260,47 @@ class TestPassManagerPlannerGate:
         func = ir.Function("f", [x], [ir.ScalarType(dt)], ir.AssignStmt(z, x, span), span)
         return ir.Program([func], "p", span)
 
-    def test_construct_pypto_run_ptoas_raises(self):
-        """Built outside PTOAS (default PYPTO, so MemoryReuse is IN the pipeline), then
+    def test_construct_dsa_rp_run_ptoas_raises(self):
+        """Built outside PTOAS (default DSA_RP, so AllocateMemoryAddr is in the pipeline), then
         run inside a PTOAS context -> the mismatch must raise, not silently mis-schedule."""
         pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
         with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
             with pytest.raises(RuntimeError, match="memory_planner"):
                 pm.run_passes(self._trivial_program())
 
-    def test_construct_ptoas_run_pypto_raises(self):
+    def test_construct_ptoas_run_dsa_rp_raises(self):
         """The converse: built under PTOAS (MemoryReuse dropped) then run under the
-        default PYPTO planner leaves no memory planning at all -> also a mismatch."""
+        default DSA_RP planner leaves no address assignment -> also a mismatch."""
         with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
             pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
         with pytest.raises(RuntimeError, match="memory_planner"):
             pm.run_passes(self._trivial_program())
 
-    def test_construct_pypto_run_dsa_rp_raises(self):
-        """A pipeline built for legacy PyPTO cannot silently switch to DSA-RP."""
+    def test_construct_dsa_rp_run_pypto_raises(self):
+        """A pipeline built for DSA-RP cannot silently switch to legacy PyPTO."""
         pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
-        with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA_RP):
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
             with pytest.raises(RuntimeError, match="memory_planner"):
                 pm.run_passes(self._trivial_program())
 
-    def test_construct_dsa_rp_run_pypto_raises(self):
-        """A pipeline built for DSA-RP cannot silently switch to legacy PyPTO."""
-        with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA_RP):
+    def test_construct_pypto_run_dsa_rp_raises(self):
+        """A pipeline built for legacy PyPTO cannot silently switch to DSA-RP."""
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
             pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
         with pytest.raises(RuntimeError, match="memory_planner"):
             pm.run_passes(self._trivial_program())
 
     def test_construct_and_run_same_planner_ok(self):
         """Matched planner at construction and run -> the guard does not fire (both the
-        default PYPTO and an explicit PTOAS context)."""
-        pm_pypto = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
-        pm_pypto._check_planner_consistency()  # PYPTO == PYPTO, no raise
+        default DSA_RP and an explicit PTOAS context)."""
+        pm_dsa_rp = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
+        pm_dsa_rp._check_planner_consistency()  # DSA_RP == DSA_RP, no raise
         with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
             pm_ptoas = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
             pm_ptoas._check_planner_consistency()  # PTOAS == PTOAS, no raise
-        with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA_RP):
-            pm_dsa_rp = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
-            pm_dsa_rp._check_planner_consistency()  # DSA_RP == DSA_RP, no raise
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
+            pm_pypto = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
+            pm_pypto._check_planner_consistency()  # PYPTO == PYPTO, no raise
 
 
 class TestPassManagerDumpIR:

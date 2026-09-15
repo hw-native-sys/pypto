@@ -94,8 +94,10 @@ physical address for ptoas `PlanMemory`. See
   must-alias relation: disjoint byte windows and different pipeline slots remain
   distinct until the producer is safely retargeted to the exact canonical
   window.
-- In the default (`PYPTO`) pipeline this pass plus `MemoryReuse` compose to the
-  behavior of the former single `MemoryReuse` pass.
+- In the legacy `PYPTO` pipeline this pass plus `MemoryReuse` compose to the
+  behavior of the former single `MemoryReuse` pass. The default `DSA_RP`
+  pipeline skips opportunistic coalescing and places the independent identities
+  in `AllocateMemoryAddr`.
 - `DSA_RP` and `PTOAS` both skip opportunistic MemRef coalescing here; neither
   may undo a must-alias relation established by this pass.
 - Accumulator-phi normalization runs for every memory planner before lifetime

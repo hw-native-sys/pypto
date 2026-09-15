@@ -31,6 +31,22 @@ from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 _LOAD_LIKE_OPS = frozenset({ir.get_op("tile.load").name, ir.get_op("tile.read").name})
 
 
+def _planner_context(planner):
+    """Preserve the verification fixture while selecting a test's planner policy."""
+    current = passes.PassContext.current()
+    if current is None:
+        return passes.PassContext([], memory_planner=planner)
+    return passes.PassContext(
+        current.get_instruments(),
+        current.get_verification_level(),
+        current.get_diagnostic_phase(),
+        current.get_disabled_diagnostics(),
+        planner,
+        current.get_enable_pypto_l0c_double_buffer(),
+        current.get_runtime(),
+    )
+
+
 def _run_pipeline(program: ir.Program) -> ir.Program:
     """Run init_mem_ref + materialize_semantic_aliases + memory_reuse pipeline.
 
@@ -39,7 +55,8 @@ def _run_pipeline(program: ir.Program) -> ir.Program:
     memory_reuse in the real pipeline — compose all three here so these unit
     tests exercise the same combined transformation.
     """
-    return passes.memory_reuse()(passes.materialize_semantic_aliases()(passes.init_mem_ref()(program)))
+    with _planner_context(passes.MemoryPlanner.PYPTO):
+        return passes.memory_reuse()(passes.materialize_semantic_aliases()(passes.init_mem_ref()(program)))
 
 
 def _collect_allocated_tile_ranges(program: ir.Program) -> dict[str, tuple[int, int]]:
@@ -6798,6 +6815,12 @@ class TestCapacityGatedReuse:
     docs/en/dev/passes/35-memory_reuse.md). The operands are ``tile.move``
     results (not loads), so the legacy load-only guard never protected them either.
     """
+
+    @pytest.fixture(autouse=True)
+    def _legacy_planner_policy(self):
+        """This class tests the legacy MemoryReuse capacity gate by default."""
+        with _planner_context(passes.MemoryPlanner.PYPTO):
+            yield
 
     @staticmethod
     def _collect_bases(program: ir.Program, names: tuple[str, ...]) -> dict[str, ir.Var]:
