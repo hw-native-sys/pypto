@@ -77,6 +77,63 @@ It does not claim kernel launch, taskQueue ordering, allocator safety, eager
 numerical execution or ACLGraph support. Those need the native adapter and
 runtime integration before a public entry-point switch.
 
+## Process kernel Worker and registration
+
+The internal `runtime.kernel.context.get_process_kernel_state()` owns one lazy
+kernel Worker for the process. All operators share that manager; changing the
+operator, scalar values or caller stream does not create another Worker.
+`KernelConfig` fixes platform, runtime, device and AICPU thread count. Other
+context resources currently use Simpler defaults. An incompatible configuration
+is rejected instead of opening another Worker.
+
+The integration SDK is pinned to
+`29a1cd405645ab65e8f26c1b1f18c8622e5bf8b9`. Its supported Python surface is
+`simpler.task_interface.ChipWorker.kernel_init`, `kernel_prepare_callable` and
+`finalize`; the proposed L2 `Worker(execution_mode="kernel")` API is not present.
+PyPTO's private adapter uses these existing methods. Init and prepare take no
+caller stream; Simpler mints the native context generation and callable IDs.
+The calling thread must already hold the framework's current device. Init uses
+installed runtime binaries and checks capability; it does not compile an
+operator or allocate business outputs. HBG kernel initialization is unsupported
+at this pin even though HBG binary compilation works.
+
+The manager transitions through UNINITIALIZED, INITIALIZING, READY, FAILED,
+CLOSING and CLOSED. Concurrent initialization shares one result. An init failure
+retains its error and any partial Worker for cleanup, and never silently creates
+a replacement. A PID check runs before taking inherited locks; a forked child
+cannot use an initialized manager or its registrations. Forking before any
+kernel initialization replaces only the unused Python state. Use a fresh spawned
+process after native initialization.
+
+`ensure_callable(artifact, config)` loads the artifact and hashes its full
+serialized ChipCallable, tensor signature, target/runtime and PyPTO ABI
+descriptor using Simpler's existing descriptor helper. It does not use an ELF
+display hash, file path or Python object address as registration identity.
+Concurrent requests for the same identity share one prepare result or error;
+distinct identities register separately on the same Worker. A failed prepare
+publishes no registration and can be retried. Prepare never warms up the operator
+by executing it. Each `KernelRegistration` retains the callable, artifact and
+manager, and validates its PID, manager generation and registry membership.
+Native handles and registrations never enter the disk cache.
+
+PyPTO program initialization paths (explicit chip/distributed Workers and
+one-shot runners) claim program mode before native initialization; kernel init
+claims kernel mode. The claim is process-wide and remains after failure or
+close, so switching modes requires a separate process. Simpler supplies native
+per-context mode checks and duplicate kernel-context rejection. Direct use of
+third-party Simpler objects bypasses PyPTO's process gate; it is not a supported
+way to combine program and kernel execution in one process.
+
+`close()` on the internal manager is terminal and must run on the thread that
+initialized it, after the caller has drained launches and graph use. It stops
+new registration, waits for in-flight prepare, then finalizes the Worker. A
+failed close retains ownership and registration records for an owner-thread
+retry; it does not leave handles usable. Successful close clears registrations,
+invalidates handles and cannot reinitialize. Closing an unused manager performs
+no native work. No destructor or bare `atexit` hook closes the Worker; framework
+exit ordering remains a separate integration step. These methods are internal
+foundations, not a manual lifecycle required of ordinary operator users.
+
 ## Verification
 
 `tests/ut/torch/test_interop.py` uses real CPU storage with an emulated NPU device
@@ -88,3 +145,11 @@ imports with optional runtime dependencies forbidden.
 non-default streams, offset views and noncontiguous-input rejection. It skips
 when a real NPU is unavailable or the selected platform is a simulator. These
 are metadata tests, not PyPTO kernel-execution tests.
+
+`tests/ut/runtime/test_kernel_context.py` covers shared initialization and
+registration, configuration conflicts, shared prepare failures, stale/forked
+handles, ownership, owner-thread shutdown and retry. The isolated cases in
+`tests/st/runtime/kernel/test_kernel_context.py` exercise real A2/A3 TRB
+init/prepare/close with two DSL callables, duplicate native kernel-context
+rejection and HBG capability refusal. They require the pinned runtime binaries
+and a reserved NPU. They do not launch a PyPTO kernel or validate capture.

@@ -63,6 +63,47 @@ Simpler 或 native launch 扩展；`torch` 仍是 PyPTO 的常规依赖。真正
 taskQueue 顺序、allocator 安全、eager 数值执行或 ACLGraph 已可用。公开入口切换
 必须等待 native adapter 和 runtime 集成完成。
 
+## 进程 kernel Worker 与注册
+
+内部 `runtime.kernel.context.get_process_kernel_state()` 持有进程唯一的延迟初始化
+kernel Worker。所有算子共享此管理器；算子、Scalar 值或 caller stream 变化不会新建
+Worker。`KernelConfig` 固定 platform、runtime、device 和 AICPU 线程数，其他常驻资源
+暂用 simpler 默认值。配置不兼容时报错，不额外创建 Worker。
+
+集成 SDK 固定为 `29a1cd405645ab65e8f26c1b1f18c8622e5bf8b9`。实际 Python 接口为
+`simpler.task_interface.ChipWorker.kernel_init`、`kernel_prepare_callable` 和
+`finalize`，目标 L2 `Worker(execution_mode="kernel")` 尚未提供。PyPTO 内部 adapter
+使用这些已有方法；init/prepare 不接收 caller stream，native context generation 和
+callable ID 均由 simpler 分配。调用线程须已绑定框架当前设备。初始化使用已安装的
+runtime 二进制并检查能力，不编译业务算子、不分配业务输出。该 pin 的 HBG kernel
+初始化不受支持，HBG 二进制编译成功不代表可执行。
+
+管理器状态包括 UNINITIALIZED、INITIALIZING、READY、FAILED、CLOSING、CLOSED。
+并发初始化共享结果；初始化失败保留错误及部分 Worker 供清理，不自动重建。PID 检查在
+获取可能继承的锁之前执行：fork 子进程不得使用已初始化的管理器或注册项。若 fork 前
+完全未初始化 kernel，仅重建未使用的 Python 状态；native 初始化后应使用独立 spawn
+进程。
+
+`ensure_callable(artifact, config)` 加载产物后，使用 simpler 既有 descriptor helper
+对完整序列化 ChipCallable、Tensor 签名、target/runtime 及 PyPTO ABI 描述符求摘要。
+注册 identity 不使用 ELF 展示用短 hash、路径或 Python 对象地址。同 identity 的并发
+请求共享一次 prepare 的结果或错误，不同 identity 在同一 Worker 分别注册。prepare
+失败不发布注册项，可重试；不通过执行一次算子来 warmup。每个 `KernelRegistration`
+保持 callable、artifact、manager 的强引用，并检查 PID、管理器 generation 和注册表
+成员关系；native handle 和注册项不写入磁盘缓存。
+
+PyPTO 的显式 chip/distributed Worker 和一次性 program runner 在 native 初始化前
+声明 program mode，kernel 初始化声明 kernel mode。该声明属于整个进程，在失败或
+close 后仍保留；切换模式须使用独立进程。simpler 提供 native 单 context 模式防护及
+重复 kernel context 拒绝。直接使用第三方 simpler 对象会绕过 PyPTO 的进程检查，不能
+据此在同一进程混用 program/kernel 执行。
+
+内部管理器 `close()` 为终止操作，须在初始化线程执行，且调用方已排空 launch 和图使用。
+它停止新增注册、等待在途 prepare，然后 finalize Worker。close 失败保留 owner 与
+注册记录供初始化线程重试，但 handle 已不可用；成功后清空注册、使 handle 失效，不能
+重新初始化。关闭未初始化的管理器不做 native 工作。不增加析构或裸 `atexit` close，
+框架退出时序另行接入；这些是内部基础原语，不要求普通算子用户手动管理生命周期。
+
 ## 验证
 
 `tests/ut/torch/test_interop.py` 使用真实 CPU storage 和模拟的 NPU device 标签，
@@ -72,3 +113,10 @@ taskQueue 顺序、allocator 安全、eager 数值执行或 ACLGraph 已可用�
 `tests/st/runtime/kernel/test_torch_interop.py` 核对真实 NPU Tensor、非默认 stream、
 offset view 和非连续输入拒绝行为。没有真实 NPU 或所选平台为模拟器时跳过。
 这些是 metadata 测试，不是 PyPTO kernel 执行测试。
+
+`tests/ut/runtime/test_kernel_context.py` 覆盖共享初始化/注册、配置冲突、并发 prepare
+失败传播、过期/fork handle、owner 保活、初始化线程关闭与重试。
+`tests/st/runtime/kernel/test_kernel_context.py` 在隔离进程中使用真实 A2/A3 TRB
+对两个 DSL callable 执行 init/prepare/close，并验证 native 重复 kernel context 拒绝
+和 HBG 能力拒绝。测试要求固定版本 runtime 二进制及已预留的 NPU，不执行 PyPTO
+kernel，也不验证 capture。

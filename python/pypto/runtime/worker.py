@@ -283,6 +283,9 @@ class ChipWorker(Worker):
         # rebuilds once, as before. No-op without a prebuilt arena.
         try:
             with _device_init_lock:
+                from ._execution_mode import claim_program_mode  # noqa: PLC0415
+
+                claim_program_mode()
                 self._impl.init(prewarm_config=_get_simpler_call_config_cls()())
         except BaseException:
             # Simpler marks a partially failed startup terminal. Drive its

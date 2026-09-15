@@ -34,7 +34,7 @@ void submit_allreduce_kernel(const ChipTaskArgs &orch_args) {
   params.add_inout(signal);
   params.add_scalar(orch_args.scalar(0));  // nranks
   params.add_scalar(orch_args.scalar(1));  // CommContext device pointer
-  int32_t core_num = static_cast<int32_t>(orch_args.scalar(2));
+  int32_t core_num = orch_args.scalar<int32_t>(2);
   params.launch_spec.{{launch_core_count_method}}(core_num);
   params.launch_spec.set_require_sync_start(true);
   rt_submit_aiv_task(0, params);
