@@ -16,7 +16,10 @@ from dataclasses import replace
 import pytest
 from pypto import backend, ir
 
-from .buffer_migration_inventory import HISTORICAL_CALLBACKS, MIGRATION_FAMILIES, MigrationFamily
+if __package__:
+    from .buffer_migration_inventory import HISTORICAL_CALLBACKS, MIGRATION_FAMILIES, MigrationFamily
+else:
+    from buffer_migration_inventory import HISTORICAL_CALLBACKS, MIGRATION_FAMILIES, MigrationFamily
 
 _TARGETS = tuple(backend.BackendType.__members__.values())
 
@@ -151,3 +154,7 @@ def test_incomplete_target_snapshot_is_rejected(registry_snapshots):
         {backend.BackendType.Ascend910B: registry_snapshots[backend.BackendType.Ascend910B]}
     )
     assert "Runtime snapshot must include all supported targets" in issues
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))
