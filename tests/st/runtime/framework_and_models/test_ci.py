@@ -499,6 +499,27 @@ class CiUint16AscendTestCase(_CiBaseTestCase):
 # --- Tests ---
 
 
+# PyPTO emits the three-operand (scratch) form of `pto.tci`, which pto-isa implements
+# with vector instructions only. `pto-insert-sync` nevertheless classifies the op as
+# PIPE_S, so the store that consumes it waits on `set_flag(PIPE_S, PIPE_MTE3)` — a flag
+# that fires when the scalar unit *issues* the sequence rather than when the vector pipe
+# retires it. MTE3 can therefore copy out a half-written destination. Descending is the
+# most visible victim: its last two vector writes are `-(start + i)` then `start - i`, so
+# a racing store lands the intermediate, uniformly off by `2 * start`. Ascending is
+# equally unsynchronised, but at `start = 0` the racing intermediate happens to equal the
+# correct answer, which is why those cases never went red.
+#
+# The emitted MLIR is correct and nothing in pypto can order the store, so these are
+# skipped rather than "fixed". Drop the mark once the assembler classifies the
+# scratch form as PIPE_V.
+_PTOAS_1532 = (
+    "pto-insert-sync classifies the scratch form of pto.tci as PIPE_S although pto-isa "
+    "implements it with vector instructions, so the store races the sequence and can "
+    "copy out an intermediate value (hw-native-sys/pypto#2722, hw-native-sys/PTOAS#1532)"
+)
+
+
+@pytest.mark.skip(reason=_PTOAS_1532)
 class TestCi:
     """Verify tile.ci / tensor.ci produce correct integer sequences on device."""
 
