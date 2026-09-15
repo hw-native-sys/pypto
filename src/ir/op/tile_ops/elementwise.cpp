@@ -87,13 +87,6 @@ static bool IsTSelsDataType(DataType dtype) {
          dtype == DataType::FP16 || dtype == DataType::FP32;
 }
 
-static DataType GetTSelsScalarDataType(DataType src_dtype) {
-  if (src_dtype == DataType::UINT8) return DataType::INT8;
-  if (src_dtype == DataType::UINT16) return DataType::INT16;
-  if (src_dtype == DataType::UINT32) return DataType::INT32;
-  return src_dtype;
-}
-
 static bool IsTSelsMaskDataType(DataType dtype) {
   return dtype == DataType::INT8 || dtype == DataType::UINT8 || dtype == DataType::INT16 ||
          dtype == DataType::UINT16 || dtype == DataType::INT32 || dtype == DataType::UINT32;
@@ -1448,7 +1441,7 @@ TypePtr DeduceTileSelsType(const std::vector<ExprPtr>& args,
   CHECK_SPAN(tmp_type->shape_.size() == 2, args[2]->span_)
       << "The operator " << op_name << " requires a rank-2 tmp tile, but got rank "
       << tmp_type->shape_.size();
-  const DataType expected_scalar_dtype = GetTSelsScalarDataType(src_type->dtype_);
+  const DataType expected_scalar_dtype = GetTselsScalarDataType(src_type->dtype_);
   CHECK_SPAN(scalar_type->dtype_ == expected_scalar_dtype, args[3]->span_)
       << "The operator " << op_name << " requires scalar dtype " << expected_scalar_dtype.ToString()
       << " for src dtype " << src_type->dtype_.ToString() << ", but got " << scalar_type->dtype_.ToString();
@@ -1571,6 +1564,145 @@ REGISTER_OP("tile.cmps")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileCmpType(args, kwargs, "tile.cmps", true);
+    });
+
+// Type deduction for tile.select (Cond x (Tile|Scalar) x (Tile|Scalar) -> Tile).
+//
+// Composite op: LowerCompositeOps expands it into the cmps?/create/sel|sels
+// chain, so unlike tile.sel/tile.sels it carries no `tmp` scratch operand --
+// the scratch geometry is architecture-defined and the lowering synthesizes it.
+// Shape and dtype come from the shaped operand(s) only; a scalar operand adopts
+// them, matching the tile-vs-scalar convention of DeduceTileOpScalarBinaryType.
+TypePtr DeduceTileSelectType(const std::vector<ExprPtr>& args,
+                             const std::vector<std::pair<std::string, std::any>>& kwargs,
+                             const std::string& op_name) {
+  CHECK(args.size() == 3) << "The operator " << op_name
+                          << " requires exactly 3 arguments (cond, on_true, on_false), but got "
+                          << args.size();
+
+  auto cond_type = As<TileType>(args[0]->GetType());
+  CHECK_SPAN(cond_type, args[0]->span_)
+      << "The operator " << op_name << " requires cond to be a TileType, but got "
+      << args[0]->GetType()->TypeName();
+
+  auto true_tile = As<TileType>(args[1]->GetType());
+  auto false_tile = As<TileType>(args[2]->GetType());
+  for (size_t i = 1; i < args.size(); ++i) {
+    CHECK_SPAN(As<TileType>(args[i]->GetType()) || As<ScalarType>(args[i]->GetType()), args[i]->span_)
+        << "The operator " << op_name << " requires argument " << i << " ("
+        << (i == 1 ? "on_true" : "on_false") << ") to be a TileType or ScalarType, but got "
+        << args[i]->GetType()->TypeName();
+  }
+  CHECK_SPAN(true_tile || false_tile, args[1]->span_)
+      << "The operator " << op_name
+      << " requires at least one of on_true/on_false to be a TileType, but both are scalars -- "
+         "there is no shape to select into";
+
+  // No rank restriction here. `tile.sels` takes only rank 2, but that is the
+  // lowering's problem to route around (it falls back to tile.full + tile.sel,
+  // neither of which restricts rank), and `FlattenTileNdTo2D` collapses whatever
+  // survives to 2D before codegen. Rejecting ND at this level would refuse
+  // programs the pipeline compiles fine.
+
+  // Shape and valid extents come from the shaped operand(s); a lone scalar
+  // adopts them. Two shaped branches must agree on BOTH, because TSEL reads its
+  // two sources element-wise and does not broadcast: accepting a `[1, N]`
+  // against an `[M, N]` here would promise semantics the instruction cannot
+  // deliver, and it would also make the result depend on which side the narrow
+  // operand sat -- the shape would broadcast to `[M, N]` while the valid extents
+  // came from whichever branch was consulted. Broadcast explicitly first
+  // (tile.expands / row_expand / col_expand) when that is what is wanted.
+  const auto& shape_model = true_tile ? true_tile : false_tile;
+  DataType result_dtype = shape_model->dtype_;
+  if (true_tile && false_tile) {
+    CHECK_SPAN(PhysicalShapesEqual(true_tile->shape_, false_tile->shape_), args[1]->span_)
+        << "The operator " << op_name << " requires on_true and on_false to have the same shape, but got "
+        << FormatShape(true_tile->shape_) << " and " << FormatShape(false_tile->shape_)
+        << "; broadcast the narrower operand explicitly (tile.expands / row_expand / col_expand) first";
+    const auto true_valid = GetValidShape(true_tile);
+    const auto false_valid = GetValidShape(false_tile);
+    CHECK_SPAN(ValidExtentsEqual(true_valid, false_valid), args[1]->span_)
+        << "The operator " << op_name
+        << " requires on_true and on_false to have the same valid extents, but got "
+        << FormatShape(true_valid) << " and " << FormatShape(false_valid)
+        << "; the result has one valid region, so the two branches must agree on it";
+    // Equal, not merely promotable: TSEL has one element type for src0, src1 and
+    // dst, and the lowering hands both branches straight through. Promoting here
+    // would declare an FP32 result for an FP16/FP32 pair and then emit a TSEL
+    // ptoas rejects with "expects src0, src1, and dst to have the same element
+    // type". Cast the narrower branch at the call site.
+    CHECK_SPAN(true_tile->dtype_ == false_tile->dtype_, args[1]->span_)
+        << "The operator " << op_name << " requires on_true and on_false to have the same dtype, but got "
+        << true_tile->dtype_.ToString() << " and " << false_tile->dtype_.ToString()
+        << "; the lowered TSEL has a single element type for both sources and the result, so cast one "
+           "branch first";
+  } else {
+    // A scalar branch is materialized by the lowering with `tile.full`, the only
+    // scalar broadcast the tile pipeline can emit (`tile.expands` has no PTO
+    // codegen). That constrains the operand to a literal and the shape to static
+    // extents. Both are checked here rather than in the pass, so the diagnostic
+    // lands on the user's call site instead of surfacing as a `tile.full` error
+    // from inside LowerCompositeOps.
+    const ExprPtr& scalar_arg = true_tile ? args[2] : args[1];
+    const char* scalar_name = true_tile ? "on_false" : "on_true";
+    CHECK_SPAN(As<ConstInt>(scalar_arg) || As<ConstFloat>(scalar_arg), scalar_arg->span_)
+        << "The operator " << op_name << " requires the scalar " << scalar_name
+        << " branch to be a compile-time constant, but got " << scalar_arg->TypeName()
+        << "; materialize a runtime scalar into a tile before selecting on it";
+    for (size_t i = 0; i < shape_model->shape_.size(); ++i) {
+      CHECK_SPAN(As<ConstInt>(shape_model->shape_[i]), args[0]->span_)
+          << "The operator " << op_name
+          << " requires a statically shaped result when one branch is a scalar, but dimension " << i << " of "
+          << FormatShape(shape_model->shape_) << " is dynamic";
+    }
+  }
+
+  const std::vector<ExprPtr>& result_shape = shape_model->shape_;
+  TileView tile_view;
+  tile_view.valid_shape = GetValidShape(shape_model);
+  InheritTileViewLayout(tile_view, shape_model);
+  auto result_type = std::make_shared<TileType>(result_shape, result_dtype, std::nullopt, tile_view);
+
+  // The condition must be the packed predicate mask tile.cmp/cmps produce, for
+  // the result's own geometry. A plain 0/1 value tile is deliberately NOT a
+  // second accepted form: a mask's valid extent counts carrier bytes while a
+  // value's counts elements, so the two are different units that can coincide
+  // (a [M, 32] UINT8 mask over a fully valid source has valid [M, 4], exactly
+  // like a [M, 32] value tile with 4 valid columns), and guessing wrong
+  // re-compares the carrier bytes and silently drops the packed bits. Convert a
+  // value explicitly with tile.cmps(value, 0, cmp_type=1).
+  auto mask_model = MakePackedPredicateTileType(result_shape, result_type);
+  CHECK_SPAN(IsPackedPredicateMask(cond_type, mask_model), args[0]->span_)
+      << "The operator " << op_name
+      << " requires cond to be the packed predicate mask for this result: " << FormatShape(mask_model->shape_)
+      << " " << mask_model->dtype_.ToString() << " with valid_shape "
+      << FormatShape(GetValidShape(mask_model)) << ", as produced by tile.cmp/tile.cmps; but got "
+      << FormatShape(cond_type->shape_) << " " << cond_type->dtype_.ToString() << " with valid_shape "
+      << FormatShape(GetValidShape(cond_type))
+      << ". For a 0/1 value tile, compare it first: tile.cmps(value, 0, cmp_type=1)";
+  return result_type;
+}
+
+REGISTER_OP("tile.select")
+    .set_op_category("TileOp")
+    .functional_execution_memory_access()
+    .set_description(
+        "Per-element selection: dst[i,j] = cond[i,j] ? on_true[i,j] : on_false[i,j]. Composite op; "
+        "LowerCompositeOps expands it into tile.cmps/tile.create/tile.sel/tile.sels.")
+    .add_argument("cond",
+                  "Value tile (truth = non-zero) or packed predicate mask from tile.cmp/cmps (TileType)")
+    .add_argument("on_true", "Value selected where cond is true (TileType or ScalarType)")
+    .add_argument("on_false", "Value selected where cond is false (TileType or ScalarType)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_input_memory(2, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    // Mirrors tile.sel: the lowered TSEL/TSELS reads the predicate while writing
+    // dst, so the condition may never alias the output.
+    .forbid_output_alias(0)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileSelectType(args, kwargs, "tile.select");
     });
 
 REGISTER_OP("tile.fillpad")

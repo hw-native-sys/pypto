@@ -149,6 +149,7 @@ __all__ = [
     "lrelu",
     "sel",
     "sels",
+    "select",
     "tpush_to_aiv",
     "tpush_to_aic",
     "tpop_from_aic",
@@ -2984,6 +2985,55 @@ def sels(mask: Tile, src: Tile, tmp: Tile, scalar: int | float | Expr | Scalar) 
     """
     scalar_expr = scalar.unwrap() if isinstance(scalar, Scalar) else scalar
     call_expr = _ir_ops.sels(mask.unwrap(), src.unwrap(), tmp.unwrap(), scalar_expr)
+    return Tile(expr=call_expr)
+
+
+def select(
+    cond: Tile,
+    on_true: Tile | int | float | Expr | Scalar,
+    on_false: Tile | int | float | Expr | Scalar,
+) -> Tile:
+    """Per-element value selection: ``out[i] = cond[i] ? on_true[i] : on_false[i]``.
+
+    The scratch-free counterpart of :func:`sel` / :func:`sels`: the mask geometry
+    and the architecture's scratch tile are derived during lowering, so neither
+    appears in the call.
+
+    Both branches are evaluated. This selects values -- it is not a branch, and
+    it applies no memory-access or tail masking of its own.
+
+    Two Tile branches must share a shape, valid extents, and dtype; the lowered TSEL reads both sources
+    element-wise, does not broadcast, and has one element type for both sources
+    and the result. A scalar branch must be a compile-time
+    constant and requires a statically shaped result, because the lowering
+    materializes it with ``tile.full``.
+
+    Example — clamp, composing two selects::
+
+        hi_clamped = pl.tile.select(pl.tile.cmps(v, upper, cmp_type=3), v, upper)   # v <= upper
+        clamped = pl.tile.select(pl.tile.cmps(v, lower, cmp_type=5), hi_clamped, lower)  # v >= lower
+
+    Args:
+        cond: The packed predicate mask returned by :func:`cmp` / :func:`cmps`
+            for this result's geometry. For a 0/1 value tile, compare it first:
+            ``pl.tile.cmps(value, 0, cmp_type=1)``
+        on_true: Value selected where cond is true; a Tile or a constant scalar
+        on_false: Value selected where cond is false; same forms as on_true
+
+    Returns:
+        Tile wrapping the select operation
+
+    Raises:
+        ValueError: If cond is not this result's packed predicate mask, if both
+            on_true and on_false are scalars, if two Tile branches disagree on
+            shape, valid extents, or dtype, or if a scalar branch is not a
+            compile-time constant
+    """
+
+    def _unwrap(value: Tile | int | float | Expr | Scalar) -> int | float | Expr:
+        return value.unwrap() if isinstance(value, (Tile, Scalar)) else value
+
+    call_expr = _ir_ops.select(cond.unwrap(), _unwrap(on_true), _unwrap(on_false))
     return Tile(expr=call_expr)
 
 

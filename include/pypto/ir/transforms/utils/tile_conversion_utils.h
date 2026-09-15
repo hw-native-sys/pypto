@@ -18,12 +18,16 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/backend_config.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 
 namespace pypto::ir::tile_conversion_utils {
@@ -107,6 +111,36 @@ inline ExprPtr MakeSignalOffsets(const ExprPtr& rank_expr, const Span& span) {
 inline ExprPtr MakeSignalOffsets(const ExprPtr& rank_expr, const ExprPtr& row_expr, const Span& span) {
   std::vector<ExprPtr> elements = {row_expr, rank_expr};
   return std::make_shared<MakeTuple>(std::move(elements), span);
+}
+
+/// The BackendHandler a conversion should consult, or nullptr when no backend
+/// is configured (the plain-IR unit-test paths).
+inline const backend::BackendHandler* ActiveBackendHandler() {
+  if (!backend::BackendConfig::IsConfigured()) return nullptr;
+  const auto* ctx = PassContext::Current();
+  return ctx != nullptr ? ctx->GetBackendHandler() : backend::BackendConfig::GetBackend()->GetHandler();
+}
+
+/// Geometry of the scratch tile `pto.tsel` takes as its 4th operand.
+///
+/// `tile.sel` / `tile.sels` make the *tile* caller supply that operand, because
+/// tile buffer lifetimes are user-managed there. Every lowering that synthesizes
+/// one instead — the tensor conversions, `tile.select` — has to size it the same
+/// way, and the sizing is architecture-defined, so it lives on BackendHandler.
+/// Without a configured backend, fall back to the A5 geometry.
+inline backend::TileScratchSpec TselScratchSpec() {
+  const auto* handler = ActiveBackendHandler();
+  if (handler != nullptr) return handler->GetTselScratchSpec();
+  return {DataType::UINT8, 1, 32};
+}
+
+/// Geometry of the scratch tile `pto.tsels` takes as its 3rd operand. Unlike
+/// TSEL's it depends on the source tile — A2/A3 sizes it against one complete
+/// physical source row, in the source dtype.
+inline backend::TileScratchSpec TselsScratchSpec(DataType src_dtype, int64_t src_cols) {
+  const auto* handler = ActiveBackendHandler();
+  if (handler != nullptr) return handler->GetTselsScratchSpec(src_dtype, src_cols);
+  return {DataType::UINT8, 1, 32};
 }
 
 }  // namespace pypto::ir::tile_conversion_utils

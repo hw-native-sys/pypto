@@ -870,6 +870,76 @@ inline std::vector<ExprPtr> GetValidShape(const std::shared_ptr<const TensorType
 }
 
 /**
+ * @brief The scalar element type `pto.tsels` pairs with a given source dtype.
+ *
+ * PTOAS spells the TSELS scalar operand with the same-width *signed* type for an
+ * unsigned source, preserving the bit pattern. Both `tile.sels`' type deduction
+ * and the `tile.select` lowering that synthesizes the operand must agree.
+ */
+inline DataType GetTselsScalarDataType(DataType src_dtype) {
+  if (src_dtype == DataType::UINT8) return DataType::INT8;
+  if (src_dtype == DataType::UINT16) return DataType::INT16;
+  if (src_dtype == DataType::UINT32) return DataType::INT32;
+  return src_dtype;
+}
+
+/**
+ * @brief Whether two physical shapes are provably identical, dimension by dimension.
+ *
+ * Stricter than `BroadcastShapes`: no size-1 dimension is stretched. Use it where
+ * an operator reads its operands element-wise and the hardware cannot broadcast.
+ */
+inline bool PhysicalShapesEqual(const std::vector<ExprPtr>& lhs, const std::vector<ExprPtr>& rhs) {
+  if (lhs.size() != rhs.size()) return false;
+  for (size_t i = 0; i < lhs.size(); ++i) {
+    if (!DimensionsEqual(lhs[i], rhs[i])) return false;
+  }
+  return true;
+}
+
+/**
+ * @brief Whether two valid-extent vectors are provably identical.
+ *
+ * Valid extents can be symbolic, so they go through `ProveValidExtentEqual`
+ * rather than the structural `DimensionsEqual` used for physical dimensions.
+ */
+inline bool ValidExtentsEqual(const std::vector<ExprPtr>& lhs, const std::vector<ExprPtr>& rhs) {
+  if (lhs.size() != rhs.size()) return false;
+  for (size_t i = 0; i < lhs.size(); ++i) {
+    if (ProveValidExtentEqual(lhs[i], rhs[i]) != ProofResult::kTrue) return false;
+  }
+  return true;
+}
+
+/**
+ * @brief Whether `cond_type` is the packed predicate mask for a `mask_model`.
+ *
+ * `tile.select` accepts exactly one condition form: the `tile.cmp` / `tile.cmps`
+ * result type, `[M, roundup(ceil(N/8), 32)] UINT8` with
+ * `valid_shape[1] = ceil(valid_N/8)`. Both the op's type deduction and the
+ * LowerCompositeOps rule ask this one predicate, so they cannot disagree.
+ *
+ * It deliberately does **not** also accept a plain value condition ("truth is
+ * element != 0"). A packed mask's valid extent counts carrier *bytes* while a
+ * value tile's counts *elements*, so the two are different units that can match
+ * by coincidence — e.g. a `[M, 32]` UINT8 mask over a fully valid source has
+ * valid `[M, 4]`, which is indistinguishable from a `[M, 32]` value tile that
+ * happens to have 4 valid columns. Classifying by geometry therefore cannot be
+ * made sound, and guessing wrong silently re-compares the mask's carrier bytes
+ * instead of using its packed bits. Callers who hold a 0/1 value convert it
+ * explicitly with `tile.cmps(value, 0, cmp_type=1)`.
+ *
+ * @param cond_type  Condition operand's TileType
+ * @param mask_model Mask type built from the result via MakePackedPredicateTileType
+ */
+inline bool IsPackedPredicateMask(const std::shared_ptr<const TileType>& cond_type,
+                                  const std::shared_ptr<const TileType>& mask_model) {
+  return cond_type->dtype_ == mask_model->dtype_ &&
+         PhysicalShapesEqual(cond_type->shape_, mask_model->shape_) &&
+         ValidExtentsEqual(GetValidShape(cond_type), GetValidShape(mask_model));
+}
+
+/**
  * @brief Build the TensorType for a freshly computed (non-alias) tensor result.
  *
  * A computed tensor is a new allocation rather than a view of its source, so it carries only

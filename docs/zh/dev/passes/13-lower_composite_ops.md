@@ -1,6 +1,6 @@
 # LowerCompositeOps Pass
 
-把组合 (composite) tile / distributed 算子降级 (lower) 为基础操作，使代码生成 (codegen) 不再需要发射其高层形式。当前支持 `tile.sin` / `tile.cos`（FP32 Cody-Waite + Horner）、packed `tile.tquant_mx`，以及 `pld.tensor.*` 分布式集合通信算子（`allreduce`（mesh 与 ring）、`allgather`、`reduce_scatter`、`broadcast`、`barrier`、`all_to_all`、`all_to_all_v`）。mesh 和 ring allreduce 还可能创建保留元数据的 `tensor.view`，让 tile load/remote/store 操作一个 2D 展平目标窗口。
+把组合 (composite) tile / distributed 算子降级 (lower) 为基础操作，使代码生成 (codegen) 不再需要发射其高层形式。当前支持 `tile.sin` / `tile.cos`（FP32 Cody-Waite + Horner）、`tile.select`（packed predicate mask + TSEL / TSELS）、packed `tile.tquant_mx`，以及 `pld.tensor.*` 分布式集合通信算子（`allreduce`（mesh 与 ring）、`allgather`、`reduce_scatter`、`broadcast`、`barrier`、`all_to_all`、`all_to_all_v`）。mesh 和 ring allreduce 还可能创建保留元数据的 `tensor.view`，让 tile load/remote/store 操作一个 2D 展平目标窗口。
 
 ## 概览 (Overview)
 
@@ -58,6 +58,34 @@ src/ir/transforms/lower_composite_ops_pass.cpp
 在 Ascend950 上，公开的 quant data 与 scale 可以在同一个 InCore mixed task 内直接供 `matmul_mx` 使用；[ExpandMixedKernel](24-expand_mixed_kernel.md#mx-scale-的-v2c-传输) 会把两个结果直接经 V2C 传递。
 
 mutator 把本 Pass 产出的 `MakeTuple`（及其 SSA alias）记入私有 `composite_tuples_`，再折叠 `TupleGetItem`，避免滥用全局 `var_remap_` 去 inline 任意 `v = (a, b)`。内部 `tile.tquant_mx_raw` / `tile.tmov_x2zz` 不注册为组合规则，Pass 仍然幂等。
+
+## 算法（`tile.select` 规则）
+
+`tile.select(cond, on_true, on_false)` 是免 scratch 的选择接口；`tile.sel` / `tile.sels` 仍是与 PTO 指令 1:1 对应、由调用方自行管理 scratch 的形式。
+
+**条件恒为 packed predicate mask** —— 即针对*当前*结果几何的 `tile.cmp` / `tile.cmps` 结果类型：`[M, roundup(ceil(N/8), 32)] UINT8`，`valid_shape[1] = ceil(valid_N/8)`。`IsPackedPredicateMask`（`include/pypto/ir/type_inference.h`）是唯一的判定点，由 `DeduceTileSelectType` 与本规则共用，因此掩码到达时对 TSEL 和 TSELS 都已就绪，规则完全不再合成比较。
+
+普通的 0/1 值 tile **刻意不作为**第二种可接受形式。掩码的 valid 范围计的是承载**字节**，而值的 valid 范围计的是**元素** —— 两者单位不同却可能数值巧合：全有效源上的 `[M, 32]` UINT8 掩码 valid 为 `[M, 4]`，与一个只有 4 列有效的 `[M, 32]` 值 tile 完全一样。因此任何基于几何的分类器都存在猜错的情形，一旦猜错就会对承载字节重新比较，悄悄丢弃其中打包的谓词位。持有值的调用方请用 `tile.cmps(value, 0, cmp_type=1)` 显式转换。
+
+**按两个值分支选择 PTO 形式：**
+
+| `on_true` | `on_false` | 发射 | 原因 |
+| --------- | ---------- | ---- | ---- |
+| tile | tile | `tile.create`(TSEL scratch) + `tile.sel(mask, T, F, tmp)` | TSEL 直接接受两个 tile 源，无需物化任何东西 |
+| tile | 标量 | `tile.create`(TSELS scratch) + `tile.sels(mask, T, tmp, F)` | 正好是 TSELS 的形态 `dst = mask ? src : scalar`，一条指令 |
+| 标量 | tile | `tile.full(T)` + `tile.create`(TSEL scratch) + `tile.sel(mask, full, F, tmp)` | TSELS 没有"标量在真值侧"的形式，只能物化标量后走 TSEL |
+
+有两种情况会把 tile/标量那一行也推到最后这条路径上，因为目标架构没有对应的 TSELS 形式：**A2/A3 的 8 位整数**（`BackendHandler::SupportsTselsDataType`，与 `pto.tsels` 发射器检查的是同一个谓词，因此 pass 与发射器不会走偏），以及 dtype 无法与源配对的标量。在 pass 里判掉这一点，才能保证程序可编译 —— 发射 `tile.sels` 只会在很晚的发射器 dtype 检查处失败。
+
+`tile.full` 是 tile 流水线唯一能降级的标量广播：`tile.expands` 没有 PTO 发射器，`pl.expands` 自身就过不了 codegen。这就把标量分支限制为**字面量**、把结果限制为**静态** extent；两者都由 `DeduceTileSelectType` 校验，因此诊断落在用户的调用点上，而不是以 `tile.full` 报错的形式从本 Pass 内部冒出来。
+
+`tile.full` 还会把结果标成全部有效，而 `tile.sel` 从它的 `lhs` 读取结果的 valid 范围，所以被物化的分支会把尾部收窄的 select 重新放宽。规则会用另一分支的 view 给新建的调用重新定型 —— 只覆盖 view，这样改写后的调用仍能通过 print → parse 往返。
+
+**scratch 形状由后端拥有。** 由 `BackendHandler::GetTselScratchSpec` / `GetTselsScratchSpec` 提供：A2/A3 的 TSEL 用 `UINT32 [1, 16]`，TSELS 则按一整行完整物理源、以源 dtype 计算（`src_dtype [1, N]`）；A5 两者都用 `UINT8 [1, 32]`。与 `tile.tquant_mx` 规则一样，scratch 的 `tile.create` 显式标注 `MemorySpace::Vec`，因为本 Pass 在 `InferTileMemorySpace` 之前运行。
+
+**ND 操作数走 TSEL 路径。** `DeduceTileSelsType` 写死要求 rank 2 —— 它的掩码覆盖算术直接索引 `valid_shape[0]` 和 `[1]` —— 而本 Pass 跑在 `FlattenTileNdTo2D` **之前**（slot 13 vs 14），所以 ND 到这里还是 ND。规则因此把 TSELS 用 rank 2 门控住，让 ND 落到 `tile.full` + `tile.sel`（两者都不限制 rank），再由 `FlattenTileNdTo2D` 和其余算子一起折叠。不因 rank 拒绝任何输入。
+
+**两个 tile 分支必须在物理 shape、valid 范围和 dtype 上都一致。** TSEL 逐元素读取两个源、不做广播，且 `src0` / `src1` / `dst` 只有一种元素类型。接受 `[1, N]` 对 `[M, N]` 等于承诺指令给不出的语义 —— 而且结果会取决于窄的那个操作数在哪一侧：shape 会广播成 `[M, N]`，valid 范围却来自被查询的那个分支。把 FP16/FP32 提升成 FP32 结果则会发射一条 ptoas 拒绝的 TSEL：`expects src0, src1, and dst to have the same element type`。因此 `tile.select` 在类型推导阶段就拒绝这三类不一致，并提示改用显式的广播与 cast 算子。
 
 ## 算法 (Algorithm，sin / cos 规则)
 

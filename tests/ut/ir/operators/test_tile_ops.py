@@ -47,6 +47,18 @@ def _tile_result_dtype(call: ir.Call) -> DataType:
     return result_type.dtype
 
 
+def _shape_ints(shape):
+    """A static shape as plain ints."""
+    return [_const_int(dim) for dim in shape]
+
+
+def _tile_result_shape(call: ir.Call):
+    """A tile call's result shape as plain ints, narrowing ``Type``."""
+    result_type = call.type
+    assert isinstance(result_type, ir.TileType)
+    return _shape_ints(result_type.shape)
+
+
 def _partial_tile(shape, valid_shape, pad=ir.PadValue.null, name="src", **view_kwargs):
     """A tile Var whose tile_view narrows it to `valid_shape`.
 
@@ -352,6 +364,197 @@ class TestTileElementwiseOps:
 
         ir_str = str(Program)
         assert "tile.cmps" in ir_str
+
+
+class TestTileSelect:
+    """Type deduction for ``tile.select``, the scratch-free selection surface."""
+
+    @staticmethod
+    def _tile(shape, dtype=DataType.FP32, name="t"):
+        return ir.Var(name, ir.TileType(shape, dtype), ir.Span.unknown())
+
+    def test_select_two_tiles_with_mask_condition(self):
+        """A packed predicate mask from tile.cmp is accepted as the condition."""
+        lhs = self._tile([16, 128], name="lhs")
+        rhs = self._tile([16, 128], name="rhs")
+        mask = tile.cmp(lhs, rhs, cmp_type=4)
+
+        call = tile.select(mask, lhs, rhs)
+
+        assert call.op.name == ir.get_op("tile.select").name
+        assert _tile_result_dtype(call) == DataType.FP32
+        assert _tile_result_shape(call) == [16, 128]
+
+    def test_select_rejects_a_plain_value_condition(self):
+        """A 0/1 value tile is not a second accepted form; it must be compared first.
+
+        A mask's valid extent counts carrier bytes while a value's counts
+        elements, so the two units can coincide and no geometry test can tell
+        them apart soundly. Requiring the compare makes the intent explicit.
+        """
+        cond = self._tile([16, 128], name="cond")
+        lhs = self._tile([16, 128], name="lhs")
+        rhs = self._tile([16, 128], name="rhs")
+
+        with pytest.raises(ValueError, match=r"tile\.cmps\(value, 0, cmp_type=1\)"):
+            tile.select(cond, lhs, rhs)
+
+        # ... and that is exactly the accepted spelling.
+        assert _tile_result_shape(tile.select(tile.cmps(cond, 0.0, cmp_type=1), lhs, rhs)) == [16, 128]
+
+    @pytest.mark.parametrize(
+        ("on_true", "on_false"),
+        [("tile", "scalar"), ("scalar", "tile")],
+        ids=["scalar-on-false", "scalar-on-true"],
+    )
+    def test_select_broadcasts_a_scalar_branch(self, on_true, on_false):
+        """A scalar branch adopts the shaped branch's shape and dtype."""
+        src = self._tile([16, 128], DataType.FP16, name="src")
+        mask = tile.cmps(src, 0.0, cmp_type=4)
+        args = {"tile": src, "scalar": 1.5}
+
+        call = tile.select(mask, args[on_true], args[on_false])
+
+        assert _tile_result_dtype(call) == DataType.FP16
+        assert _tile_result_shape(call) == [16, 128]
+
+    def test_select_rejects_two_scalar_branches(self):
+        """With no shaped branch there is nothing to select into."""
+        src = self._tile([16, 128], name="src")
+        mask = tile.cmps(src, 0.0, cmp_type=4)
+
+        with pytest.raises(ValueError, match=r"at least one of on_true/on_false"):
+            tile.select(mask, 1.0, 0.0)
+
+    def test_select_rejects_a_condition_that_is_neither_form(self):
+        """A condition matching neither the value nor the mask geometry is an error."""
+        cond = self._tile([16, 64], DataType.UINT8, name="cond")
+        lhs = self._tile([16, 128], name="lhs")
+        rhs = self._tile([16, 128], name="rhs")
+
+        with pytest.raises(ValueError, match=r"packed predicate mask"):
+            tile.select(cond, lhs, rhs)
+
+    def test_select_rejects_a_mask_whose_valid_extents_are_not_the_result_s(self):
+        """A mask built over a different valid region is refused, not reinterpreted.
+
+        This is the case a geometry-based value-vs-mask classifier got wrong: a
+        ``[16, 32]`` UINT8 mask over a fully valid source carries ``ceil(32/8) = 4``
+        valid columns, which is numerically identical to a ``[16, 32]`` value tile
+        with 4 valid columns. Classified as a value, the lowering would compare the
+        4 carrier bytes and discard the 32 predicate bits they pack -- silently
+        selecting the wrong elements. Requiring the mask to match *this result's*
+        mask model (valid ``[16, 1]`` here) rejects it instead.
+        """
+        src = self._tile([16, 32], name="src")
+        mask = tile.cmps(src, 0.0, cmp_type=4)
+        mask_type = mask.type
+        assert isinstance(mask_type, ir.TileType)
+        assert _shape_ints(mask_type.shape) == [16, 32]
+        assert mask_type.dtype == DataType.UINT8
+        assert _valid_of(mask_type) == [16, 4]
+
+        # Branches narrowed to 4 valid columns: the result's own mask model is
+        # valid [16, 1], so this mask no longer describes it.
+        narrowed = _partial_tile([16, 32], [16, 4], name="narrowed")
+        other = _partial_tile([16, 32], [16, 4], name="other")
+
+        with pytest.raises(ValueError, match=r"packed predicate mask for this result"):
+            tile.select(mask, narrowed, other)
+
+        # Against fully valid branches the same mask is exactly right.
+        lhs = self._tile([16, 32], name="lhs")
+        rhs = self._tile([16, 32], name="rhs")
+        assert _tile_result_shape(tile.select(mask, lhs, rhs)) == [16, 32]
+
+    def test_select_propagates_the_valid_shape_of_its_value_branch(self):
+        """A tail-narrowed branch keeps its valid extents on the result."""
+        src = _partial_tile([16, 128], [16, 100], name="src")
+        mask = tile.cmps(src, 0.0, cmp_type=4)
+
+        call = tile.select(mask, src, 0.0)
+
+        assert _valid_of(call.type) == [16, 100]
+
+    @pytest.mark.parametrize(
+        ("narrow_on_true", "expected"),
+        [
+            (True, r"same shape.*\[1, 128\] and \[16, 128\]"),
+            (False, r"same shape.*\[16, 128\] and \[1, 128\]"),
+        ],
+        ids=["narrow-on-true", "narrow-on-false"],
+    )
+    def test_select_rejects_branches_of_differing_shape_symmetrically(self, narrow_on_true, expected):
+        """TSEL reads both sources element-wise, so a broadcast pair is refused.
+
+        Accepting it would promise semantics the instruction cannot deliver, and
+        the result would depend on which side the narrow operand sat: the shape
+        would broadcast to [16, 128] while the valid extents came from whichever
+        branch was consulted. Rejecting is symmetric — both orders raise.
+        """
+        narrow = self._tile([1, 128], name="narrow")
+        wide = self._tile([16, 128], name="wide")
+        cond = self._tile([16, 128], name="cond")
+        args = (narrow, wide) if narrow_on_true else (wide, narrow)
+
+        with pytest.raises(ValueError, match=expected):
+            tile.select(cond, *args)
+
+    def test_select_accepts_rank_3_operands(self):
+        """ND is not rejected here: the lowering routes around TSELS's rank limit.
+
+        `tile.sels` takes only rank 2 -- its mask-coverage arithmetic indexes
+        ``valid_shape[0]`` and ``[1]`` directly -- but `tile.full` and `tile.sel`
+        do not, so an ND select falls back to those and `FlattenTileNdTo2D`
+        collapses the result with everything else. Rejecting ND at this level
+        would refuse programs the pipeline compiles.
+        """
+        nd = self._tile([2, 16, 128], name="nd")
+        mask = tile.cmps(nd, 0.0, cmp_type=4)
+
+        assert _tile_result_shape(tile.select(mask, nd, 0.0)) == [2, 16, 128]
+        assert _tile_result_shape(tile.select(mask, 0.0, nd)) == [2, 16, 128]
+        assert _tile_result_shape(tile.select(mask, nd, nd)) == [2, 16, 128]
+
+    def test_select_rejects_branches_of_differing_dtype(self):
+        """TSEL has one element type for src0, src1 and dst.
+
+        Promoting FP16/FP32 to an FP32 result and handing both originals to
+        ``tile.sel`` produced a TSEL ptoas rejects with "expects src0, src1, and
+        dst to have the same element type" — a failure that only appeared at
+        assembly time.
+        """
+        half = self._tile([16, 128], DataType.FP16, name="half")
+        single = self._tile([16, 128], DataType.FP32, name="single")
+        mask = tile.cmps(single, 0.0, cmp_type=4)
+
+        with pytest.raises(ValueError, match=r"same dtype.*fp16 and fp32"):
+            tile.select(mask, half, single)
+
+    def test_select_rejects_branches_of_differing_valid_extents(self):
+        """One result means one valid region, so the branches must agree on it."""
+        full = self._tile([16, 128], name="full")
+        narrowed = _partial_tile([16, 128], [16, 100], name="narrowed")
+        cond = self._tile([16, 128], name="cond")
+
+        with pytest.raises(ValueError, match=r"same valid extents"):
+            tile.select(cond, full, narrowed)
+
+    def test_select_rejects_a_runtime_scalar_branch_at_the_call_site(self):
+        """A non-literal scalar branch is refused here, not deep inside the pass.
+
+        The lowering materializes a scalar branch with ``tile.full``, the only
+        scalar broadcast the tile pipeline can emit — ``tile.expands`` has no PTO
+        codegen. ``tile.full`` demands a literal, so accepting a runtime scalar
+        would surface as a confusing ``tile.full`` error from LowerCompositeOps
+        rather than a diagnostic on the user's own call.
+        """
+        src = self._tile([16, 128], name="src")
+        mask = tile.cmps(src, 0.0, cmp_type=4)
+        runtime = ir.Var("s", ir.ScalarType(DataType.FP32), ir.Span.unknown())
+
+        with pytest.raises(ValueError, match=r"compile-time constant"):
+            tile.select(mask, runtime, src)
 
 
 class TestTileUnaryOps:
