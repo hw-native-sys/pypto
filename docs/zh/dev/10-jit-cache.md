@@ -41,6 +41,35 @@ print(pypto.cache_stats())
 只读未命中不提供跨进程私有构建去重。编译错误向调用方传播，允许重试。不支持的 extern
 打包或构建期间变化的应用源码保留为私有结果。
 
+## Program 构建职责
+
+`pypto.runtime.kernel_compiler.KernelCompiler` 负责调用编译器、链接、临时输出目录
+和二进制校验。它查询已安装 Simpler SDK 的元数据，不再继承 SDK 编译器或调用其
+构建方法。这些行为适用于现有 runtime pin，不引入 kernel 执行，也不改变 program 调用语义。
+
+| 原来继承的职责 | 当前负责方 |
+| -------------- | ---------- |
+| SDK 根目录、工具选择、目标参数、runtime 头文件和辅助源码 | Simpler 元数据查询，由 PyPTO 消费 |
+| AICore 编译和 `kernel_entry` 链接 | PyPTO `KernelCompiler.compile_incore` |
+| 模拟器 kernel 共享库 | PyPTO `KernelCompiler.compile_incore` |
+| Orchestration 共享库、Build-ID 和 Host 线程参数 | PyPTO `KernelCompiler.compile_orchestration` |
+| 成功或失败后的临时输出校验与清理 | PyPTO；可选 `build_dir` 指定临时目录的父目录，不保留中间文件 |
+| Callable 组装、二进制发布与恢复 | 现有 PyPTO device runner、prebuilt loader 和 artifact store |
+
+HBG orchestration 使用 Host 编译器；TRB 在模拟器上使用 Host 编译器，在真实设备目标上
+使用 AArch64 编译器。SDK 声明的辅助源码必须存在，缺失时在调用编译器前报错。
+编译命令保留 SDK 的相对路径形式和工作目录，生成的输出均放在 PyPTO 管理的临时目录
+或产物目录中。构建和恢复不初始化 Worker，也不执行业务逻辑。
+
+可变 program 输出目录使用 binary-context schema 2。成功的事务记录构建上下文和可复用
+二进制文件的 SHA-256 摘要。下一次事务保留校验通过的文件，删除内容变化或未记录的文件，
+按需重建缺失文件。旧格式需要重建一次。组装前删除有效标记，成功后才重新发布，因此失败
+或中断的事务不能让部分输出被视为有效产物。
+
+持久 GENERATED 条目仍只证明源码身份，晋升时在私有目录中构建二进制，不信任继承来的
+可变二进制作为 READY 依据。完整 READY 条目沿用已有清单校验，恢复时不调用编译器，
+也不写缓存，包括只读恢复。目录锁和 key 锁保留现有并发契约，不引入第二套缓存存储。
+
 ## 配置
 
 `CacheConfig` 不可变。完整的每次调用 `RunConfig.cache_config` 优先于

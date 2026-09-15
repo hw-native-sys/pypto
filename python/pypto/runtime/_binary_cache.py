@@ -11,6 +11,7 @@
 
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import tempfile
@@ -19,7 +20,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-_BINARY_CONTEXT_SCHEMA = 1
+_BINARY_CONTEXT_SCHEMA = 2
 _BINARY_CONTEXT_FILENAME = "binary_context.json"
 
 
@@ -60,8 +61,8 @@ def binary_context_lock(work_dir: Path | str) -> Iterator[None]:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
-def _invalidate_binary_artifacts(work_dir: Path | str) -> int:
-    """Delete reusable binaries for one chip sub-build, preserving all sources."""
+def _binary_artifacts(work_dir: Path | str) -> list[Path]:
+    """List reusable binaries without following paths supplied by a stamp."""
     work_dir = Path(work_dir)
     candidates: list[Path] = []
     cache_dir = work_dir / "cache"
@@ -74,8 +75,13 @@ def _invalidate_binary_artifacts(work_dir: Path | str) -> int:
         for extension in ("*.so", "*.o"):
             candidates.extend(root.rglob(extension))
 
+    return candidates
+
+
+def _invalidate_binary_artifacts(work_dir: Path | str) -> int:
+    """Delete reusable binaries for one chip sub-build, preserving all sources."""
     removed = 0
-    for path in candidates:
+    for path in _binary_artifacts(work_dir):
         try:
             path.unlink()
         except FileNotFoundError:
@@ -117,10 +123,27 @@ def prepare_binary_context(work_dir: Path | str, context: BinaryCacheContext | N
     """
     stamp_path = binary_context_path(work_dir)
     cached = _read_binary_context(stamp_path)
-    if context is not None and cached == context.to_dict():
+    if (
+        context is not None
+        and cached is not None
+        and cached.get("context") == context.to_dict()
+        and isinstance(cached.get("files"), dict)
+    ):
         with contextlib.suppress(FileNotFoundError):
             stamp_path.unlink()
-        return 0
+        # Missing files are normal partial hits. Reject altered or unrecorded
+        # files independently so the remaining verified binaries can be reused.
+        removed = 0
+        for path in _binary_artifacts(work_dir):
+            expected = cached["files"].get(path.relative_to(work_dir).as_posix())
+            try:
+                valid = not path.is_symlink() and hashlib.sha256(path.read_bytes()).hexdigest() == expected
+            except OSError:
+                valid = False
+            if not valid:
+                path.unlink(missing_ok=True)
+                removed += 1
+        return removed
 
     return invalidate_binary_context(work_dir)
 
@@ -130,6 +153,14 @@ def record_binary_context(work_dir: Path | str, context: BinaryCacheContext | No
     if context is None:
         return
 
+    payload = {
+        "context": context.to_dict(),
+        "files": {
+            path.relative_to(work_dir).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in _binary_artifacts(work_dir)
+            if not path.is_symlink()
+        },
+    }
     path = binary_context_path(work_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
@@ -137,7 +168,7 @@ def record_binary_context(work_dir: Path | str, context: BinaryCacheContext | No
         file = os.fdopen(fd, "w", encoding="utf-8")
         fd = -1
         with file:
-            json.dump(context.to_dict(), file, indent=2, sort_keys=True)
+            json.dump(payload, file, indent=2, sort_keys=True)
             file.write("\n")
         os.replace(tmp_name, path)
     except BaseException:

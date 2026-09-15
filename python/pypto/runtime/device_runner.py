@@ -21,7 +21,7 @@ These functions keep orchestration in PyPTO while relying on the installed
 runtime packages for two integration surfaces:
 
 - ``simpler`` provides the ``_task_interface`` nanobind C++ module.
-- ``simpler_setup`` provides the kernel compiler plus packaged runtime sources,
+- ``simpler_setup`` provides SDK toolchain metadata plus packaged runtime sources,
   binaries, and ``pto_isa.pin`` for non-source installs, and owns the only
   PTO-ISA resolver. In a source checkout, those assets come from the
   ``runtime/`` git submodule instead.

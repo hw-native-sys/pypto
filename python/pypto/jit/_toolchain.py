@@ -510,18 +510,20 @@ def _discover(compiler: Any, ptoas: str, runtime_name: str) -> ToolchainInputs:
     orchestration = compiler._orchestration_toolchain(runtime_name)
     device = _gcc_inputs(_executable(orchestration.cxx_path))
     if compiler.platform.endswith("sim"):
-        device.update(_gcc_inputs(_executable(compiler.gxx15.cxx_path)))
+        device.update(_gcc_inputs(_executable(compiler.sdk.gxx15.cxx_path)))
     else:
-        ccec = _executable(compiler.ccec.cxx_path)
+        ccec = _executable(compiler.sdk.ccec.cxx_path)
         device.update(_elf_inputs(ccec))
-        device.update(_elf_inputs(_executable(compiler.ccec.linker_path)))
+        device.update(_elf_inputs(_executable(compiler.sdk.ccec.linker_path)))
         # CANN's BiSheng installation contains its resource headers, device
         # libraries and subprograms; the SDK supplies AscendC headers as well.
         if ccec.parent.name != "bin" or ccec.parent.parent.name != "bisheng_compiler":
             raise ValueError(f"Unsupported CCEC installation layout: {ccec}")
         device.add(ccec.parent.parent)
         for core_type in ("aiv", "aic"):
-            flags = [flag for flag in compiler.ccec.get_compile_flags(core_type=core_type) if flag != "-c"]
+            flags = [
+                flag for flag in compiler.sdk.ccec.get_compile_flags(core_type=core_type) if flag != "-c"
+            ]
             output = _run([str(ccec), *flags, "-E", "-v", os.devnull])
             device.update(_include_roots(output, ccec))
     return ToolchainInputs(
