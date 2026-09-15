@@ -215,6 +215,32 @@ def test_gm_transfer_rejects_invalid_types_and_windows(name, field, value, messa
 
 
 @pytest.mark.parametrize("name", ["buffer.load", "buffer.store"])
+@pytest.mark.parametrize("valid_shape", [[23, 48], [24, 47]])
+def test_gm_transfer_rejects_windows_outside_tensor_valid_region(name, valid_shape):
+    args = transfer_args(name)
+    tensor_type = ir.TensorType(
+        [32, 64], DataType.FP32, tensor_view=ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=valid_shape)
+    )
+    args[0 if name == "buffer.load" else 3] = ir.Var("gm", tensor_type, ir.Span.unknown())
+    with pytest.raises(ValueError, match="exceeds GM tensor physical or valid dimension"):
+        internal_call(name, args)
+
+
+@pytest.mark.parametrize("name", ["buffer.load", "buffer.store"])
+@pytest.mark.parametrize("valid_shape", [[24, 48], [32, 64]])
+def test_gm_transfer_accepts_windows_within_tensor_valid_region(name, valid_shape):
+    args = transfer_args(name)
+    tensor_type = ir.TensorType(
+        [32, 64], DataType.FP32, tensor_view=ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=valid_shape)
+    )
+    args[0 if name == "buffer.load" else 3] = ir.Var("gm", tensor_type, ir.Span.unknown())
+    call = internal_call(name, args)
+    assert isinstance(call.type, ir.VoidType)
+    restored = ir.deserialize(ir.serialize(call))
+    ir.assert_structural_equal(call, restored, enable_auto_mapping=True)
+
+
+@pytest.mark.parametrize("name", ["buffer.load", "buffer.store"])
 def test_gm_transfer_requires_exact_operand_count_and_tuple_windows(name):
     args = transfer_args(name)
     for malformed in (args[:-1], [*args, args[-1]], [args[0], args[0], *args[2:]]):

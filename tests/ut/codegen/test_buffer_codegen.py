@@ -83,8 +83,11 @@ def _window(*values):
     return ir.MakeTuple([_int(value) if isinstance(value, int) else value for value in values], SPAN)
 
 
-def _gm_program(addressed=False, source_name="input"):
-    tensor_type = ir.TensorType([32, 64], DataType.FP32)
+def _gm_program(addressed=False, source_name="input", valid_shape=None):
+    view = (
+        ir.TensorView(layout=ir.TensorLayout.ND, valid_shape=valid_shape) if valid_shape is not None else None
+    )
+    tensor_type = ir.TensorType([32, 64], DataType.FP32, tensor_view=view)
     source = ir.Var(source_name, tensor_type, SPAN)
     other = ir.Var("other", tensor_type, SPAN)
     output = ir.Var("output", tensor_type, SPAN)
@@ -157,6 +160,16 @@ def test_native_gm_program_round_trip_preserves_abi_and_explicit_destinations(tm
     assert not re.search(r"= pto\.t(load|store|mul|add|mov)", text)
     # ABI emission must not mutate the caller's IR signature or output aliases.
     ir.assert_structural_equal(program, restored, enable_auto_mapping=True)
+    _compile_native(tmp_path, text, addressed)
+
+
+@pytest.mark.parametrize("addressed", [False, True])
+def test_native_gm_transfers_within_partial_valid_region(tmp_path, addressed):
+    program = _gm_program(addressed, valid_shape=[24, 48])
+    restored = ir.deserialize(ir.serialize(program))
+    text = _emit(restored)
+    assert text.count("pto.tload ins(") == 2
+    assert text.count("pto.tstore ins(") == 1
     _compile_native(tmp_path, text, addressed)
 
 

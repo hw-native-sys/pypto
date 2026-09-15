@@ -157,7 +157,9 @@ These initial transfer schemas require ordinary rank-2 FP32 Tensor/Vec Buffer
 operands. Offsets are nonnegative element indices. The tuples contain two
 integer or `INDEX` scalars. Each transfer extent must equal the buffer's current
 valid extent; a static descriptor axis requires that exact constant. Constant
-extents and windows are checked against buffer capacity and GM physical shape.
+extents and windows are checked against buffer capacity, GM physical shape,
+and the tensor's effective valid region (`TensorView.valid_shape`, or the full
+shape when omitted). Transfers cannot expand the tensor's valid metadata.
 Dynamic equality, nonnegativity, and bounds are lowering/runtime preconditions.
 Neither transfer changes buffer valid metadata or initializes untouched data.
 The source has data-read/metadata-read effects and the destination has

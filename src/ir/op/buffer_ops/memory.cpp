@@ -24,6 +24,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -116,6 +117,8 @@ TypePtr DeduceBufferTransfer(const std::vector<ExprPtr>& args, bool load) {
   auto valid = As<MakeTuple>(args[2]);
   CHECK(offsets && offsets->elements_.size() == 2 && valid && valid->elements_.size() == 2)
       << name << " requires rank-2 MakeTuple offsets and valid extents";
+  const auto& tensor_valid = GetEffectiveTensorValidShape(*tensor);
+  CHECK(tensor_valid.size() == 2) << name << " requires a rank-2 GM tensor valid shape";
   for (size_t axis = 0; axis < 2; ++axis) {
     const auto& offset = offsets->elements_[axis];
     const auto& extent = valid->elements_[axis];
@@ -128,11 +131,12 @@ TypePtr DeduceBufferTransfer(const std::vector<ExprPtr>& args, bool load) {
       CHECK(constant_extent && constant_extent->value_ == buffer->valid_shape_[axis])
           << name << " valid extent must equal the buffer's static valid dimension " << axis;
     }
-    if (auto dimension = As<ConstInt>(tensor->shape_[axis]);
-        dimension && constant_offset && constant_extent) {
-      CHECK(constant_offset->value_ <= dimension->value_ &&
-            constant_extent->value_ <= dimension->value_ - constant_offset->value_)
-          << name << " transfer window exceeds GM tensor dimension " << axis;
+    for (const auto& bound : {tensor->shape_[axis], tensor_valid[axis]}) {
+      if (auto dimension = As<ConstInt>(bound); dimension && constant_offset && constant_extent) {
+        CHECK(constant_offset->value_ <= dimension->value_ &&
+              constant_extent->value_ <= dimension->value_ - constant_offset->value_)
+            << name << " transfer window exceeds GM tensor physical or valid dimension " << axis;
+      }
     }
   }
   return GetVoidType();

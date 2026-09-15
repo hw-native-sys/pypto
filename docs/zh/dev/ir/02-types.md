@@ -136,7 +136,9 @@ buffer.store(src_buffer, offsets_tuple, valid_extents_tuple, tensor) : Void
 首批传输契约要求普通二维 FP32 Tensor/Vec Buffer 操作数。偏移量是非负的
 元素索引，两个 tuple 均包含两个整数或 `INDEX` 标量。传输长度必须等于
 buffer 当前的 valid extent；静态描述符维度必须使用完全相同的常量。
-常量长度和窗口会对照 buffer 容量及 GM 物理形状检查，动态值的一致性、
+常量长度和窗口会对照 buffer 容量、GM 物理形状及 Tensor 的有效区域检查；
+有效区域取 `TensorView.valid_shape`，省略时取完整形状，传输不会扩展 Tensor 的 valid 元数据。
+动态值的一致性、
 非负性和边界则是 lowering/运行时前提。传输不修改 buffer valid 元数据，
 也不初始化未触及的数据。源操作数声明数据读/元数据读效应，目标声明
 数据写/元数据读效应；两个 tuple 都是非内存操作数。GM store 写入选定
