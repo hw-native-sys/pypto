@@ -50,6 +50,17 @@ def fake_worker_cls():
         yield cls
 
 
+def test_kernel_mode_blocks_program_native_init(fake_simpler_worker, monkeypatch):
+    from pypto.runtime import _execution_mode  # noqa: PLC0415
+
+    monkeypatch.setattr(_execution_mode, "_gate", _execution_mode._ModeGate())
+    _execution_mode.claim_kernel_mode()
+    worker = ChipWorker(config=RunConfig(platform="a2a3"), auto_init=False)
+    with pytest.raises(RuntimeError, match="already claimed kernel"):
+        worker.init()
+    fake_simpler_worker.init.assert_not_called()
+
+
 class TestSdmaCapability:
     def test_constructor_forwards_enabled_sdma(self, fake_worker_cls):
         ChipWorker(config=RunConfig(platform="a2a3"), enable_sdma=True)

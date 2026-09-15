@@ -158,8 +158,8 @@ std::string GenerateScalarUnpack(const std::string& var_name, int scalar_index,
                                  const ScalarTypePtr& scalar_type) {
   std::ostringstream oss;
   std::string cpp_type = scalar_type->dtype_.ToCTypeString();
-  oss << "    " << cpp_type << " " << var_name << " = from_u64<" << cpp_type << ">(orch_args.scalar("
-      << scalar_index << "));\n";
+  oss << "    " << cpp_type << " " << var_name << " = orch_args.scalar<" << cpp_type << ">(" << scalar_index
+      << ");\n";
   return oss.str();
 }
 
@@ -4913,7 +4913,8 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
       } else {
         INTERNAL_CHECK(IsA<CommCtxType>(scalar_params[i].type))
             << "Unexpected non-scalar orchestration scalar param type: " << scalar_params[i].type->TypeName();
-        oss << "    uint64_t " << scalar_params[i].emit_name << " = orch_args.scalar(" << i << ");\n";
+        oss << "    uint64_t " << scalar_params[i].emit_name << " = orch_args.scalar<uint64_t>(" << i
+            << ");\n";
       }
     }
   }

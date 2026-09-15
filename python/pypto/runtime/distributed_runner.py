@@ -1615,6 +1615,9 @@ def _execute_distributed(
             # Prewarm with this dispatch's own config so the single run below hits
             # the prebuilt runtime-arena cache instead of paying the ~800ms cold
             # build inside the timed dispatch. No-op without a prebuilt arena.
+            from ._execution_mode import claim_program_mode  # noqa: PLC0415
+
+            claim_program_mode()
             w.init(prewarm_config=call_config)
             _dispatch(w, entry_fn, tensors, chip_cids, sub_ids, call_config, len(dc.device_ids))
         except BaseException:  # noqa: BLE001 - cleanup must also run for interruption
@@ -1996,6 +1999,9 @@ class DistributedWorker(Worker):
                 prewarm_cc = _make_call_config(
                     primary._distributed_config, config, dfx_base=_run_directory(primary) / "dfx_outputs"
                 )
+            from ._execution_mode import claim_program_mode  # noqa: PLC0415
+
+            claim_program_mode()
             self._w.init(prewarm_config=prewarm_cc)
 
             # ``Worker.init()`` eagerly starts the chip/sub-worker hierarchy, so

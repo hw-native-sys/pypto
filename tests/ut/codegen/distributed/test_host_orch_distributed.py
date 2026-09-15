@@ -1086,7 +1086,7 @@ def test_backend_materializes_builtin_next_level_files(tmp_path):
     entry_cpp = files[f"{base}/orchestration/builtin_tensor_allreduce__sum__fp32.cpp"]
     assert "builtin_tensor_allreduce__sum__fp32" in entry_cpp
     assert "submit_allreduce_kernel<ReduceOp::kSum>" in entry_cpp
-    assert "orch_args.scalar(2)" in entry_cpp
+    assert "orch_args.scalar<int32_t>(2)" in entry_cpp
     assert "params.launch_spec.set_block_num(core_num)" in entry_cpp
     assert "params.launch_spec.set_require_sync_start(true)" in entry_cpp
     assert ".expected_arg_count = 5" in entry_cpp

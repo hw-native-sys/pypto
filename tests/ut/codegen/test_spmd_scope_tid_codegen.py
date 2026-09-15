@@ -333,7 +333,7 @@ class TestSpmdScopeTaskIdCodegen:
 
         transformed = self._mixed_spmd_pipeline(P)
         code = self._codegen(transformed)
-        assert "uint64_t signal_ctx = orch_args.scalar(0);" in code, code
+        assert "uint64_t signal_ctx = orch_args.scalar<uint64_t>(0);" in code, code
         assert code.count("params_t0.add_scalar(signal_ctx);") == 1, code
         assert "ext_signal_ctx" not in code, code
 

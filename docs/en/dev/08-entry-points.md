@@ -39,6 +39,12 @@ into loadable binaries. It is internal and has no supported entry point.
 | A build directory on disk | One dispatch, no recompile | `CompiledProgram.from_dir(work_dir)(*args, config=...)` |
 | A `CompiledProgram` | Timed dispatches | `benchmark(compiled, args, ...)` |
 
+## Internal torch adaptation
+
+The [kernel-mode integration foundation](runtime/kernel-mode.md) validates NPU
+metadata and captures per-call frames. It does not change the public entry
+points above or provide a kernel launch interface.
+
 ## Compile
 
 | Entry | Layer | Location |

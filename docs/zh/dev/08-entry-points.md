@@ -36,6 +36,11 @@ PyPTO 的编译与执行入口比它拥有的概念要多，而且好几个名�
 | 磁盘上的一个构建目录 | 派发一次，不重新编译 | `CompiledProgram.from_dir(work_dir)(*args, config=...)` |
 | 一个 `CompiledProgram` | 计时派发 | `benchmark(compiled, args, ...)` |
 
+## 内部 torch 适配
+
+[Kernel mode 集成基础](runtime/kernel-mode.md) 校验 NPU metadata 并构造每次调用
+的 frame，不改变上面的公开入口，也不提供 kernel launch 接口。
+
 ## 编译
 
 | 入口 | 层 | 位置 |

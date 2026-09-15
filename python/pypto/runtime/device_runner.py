@@ -846,6 +846,9 @@ def _execute_on_device(  # noqa: PLR0913
         # The one-shot path opens its own device context, so it takes the same
         # lock ChipWorker.init() does -- see _device_init_lock's rationale.
         with _device_init_lock:
+            from ._execution_mode import claim_program_mode  # noqa: PLC0415
+
+            claim_program_mode()
             worker = Worker(
                 level=level,
                 device_id=device_id,

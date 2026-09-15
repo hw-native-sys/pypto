@@ -61,6 +61,7 @@ from pypto.runtime.device_tensor import DeviceTensor, StackedDeviceTensor
 # Re-exported: these moved to a leaf module so a consumer of the metadata can
 # depend on it without depending on this module. See ``param_info``.
 from .param_info import (  # noqa: F401  -- re-export
+    _DATATYPE_TO_CTYPE,
     _DATATYPE_TO_TORCH,
     ParamInfo,
     _ParamInfo,
@@ -116,26 +117,6 @@ _BUILD_KIND_MARKERS = (
     "kernel_config.py",
     "orchestration/host_orch.py",
 )
-
-# IR DataType -> ctypes scalar constructor mapping.
-# Used to wrap Python int/float/bool values into the correct ctypes scalar
-# when calling a compiled program with scalar parameters.
-_DATATYPE_TO_CTYPE: dict[str, type[ctypes._SimpleCData]] = {
-    "fp16": ctypes.c_float,  # no native half; promote to float
-    "fp32": ctypes.c_float,
-    "fp64": ctypes.c_double,
-    "bfloat16": ctypes.c_float,  # no native bfloat16; promote to float
-    "int8": ctypes.c_int8,
-    "int16": ctypes.c_int16,
-    "int32": ctypes.c_int32,
-    "int64": ctypes.c_int64,
-    "uint8": ctypes.c_uint8,
-    "uint16": ctypes.c_uint16,
-    "uint32": ctypes.c_uint32,
-    "uint64": ctypes.c_uint64,
-    "bool": ctypes.c_bool,
-    "index": ctypes.c_int64,
-}
 
 
 def _to_runtime_shape(shape: list[int], dtype: DataType) -> list[int]:
