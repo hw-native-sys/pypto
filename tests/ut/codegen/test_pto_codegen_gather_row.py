@@ -65,10 +65,10 @@ def _build_program(*, transpose: bool):
     return Program
 
 
-def _codegen_incore(program) -> str:
+def _codegen_incore(program, backend_type=BackendType.Ascend910B) -> str:
     """Run the Default pipeline + PTO codegen, returning the InCore kernel's MLIR."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(backend_type)
     pm = PassManager.get_strategy(OptimizationStrategy.Default)
     optimized = pm.run_passes(program)
     gen = codegen.PTOCodegen()
@@ -109,6 +109,33 @@ def test_gather_row_no_transpose_keeps_nd_source_view():
     assert "pto.subview" in mlir
     # No DN-strided source view is built for the straight ND2NZ row load.
     assert "layout = #pto.layout<dn>" not in mlir
+
+
+def test_gather_row_packed_fp4_row_offset_uses_carrier_pointer():
+    """An FP4 source row offset advances by x2 carriers, not logical elements."""
+
+    @pl.program
+    class PackedFp4Gather:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            src: pl.Tensor[[2, 512], pl.FP4],
+            out: pl.Out[pl.Tensor[[1, 64], pl.FP4]],
+        ) -> pl.Tensor[[1, 64], pl.FP4]:
+            gathered: pl.Tile[[1, 64], pl.FP4, pl.Mem.Vec] = pl.tile.create(
+                [1, 64], dtype=pl.FP4, target_memory=pl.Mem.Vec
+            )
+            gathered = pl.tile.gather_row(gathered, src, [0, 0], [1, 0], [1, 64])
+            return pl.tile.store(gathered, [0, 0], out)
+
+    mlir = _codegen_incore(PackedFp4Gather, BackendType.Ascend950)
+    assert "arith.muli %c1_index, %c256_index" in mlir
+    assert len([line for line in mlir.splitlines() if "pto.addptr %arg0" in line]) == 1
+    source_partitions = [
+        line for line in mlir.splitlines() if "pto.partition_view" in line and "_logical_view" in line
+    ]
+    assert len(source_partitions) == 1
+    assert "offsets = [%c0_index, %c0_index]" in source_partitions[0]
 
 
 STATIC_ROWS = ROWS // 2

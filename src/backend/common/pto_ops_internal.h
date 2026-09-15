@@ -76,6 +76,11 @@ std::string EmitPartitionViewPTO(const std::string& name_hint, const std::string
                                  const std::string& tensor_view_type, const std::string& partition_type,
                                  const std::vector<std::string>& offset_codes,
                                  const std::vector<std::string>& size_codes, codegen::PTOCodegen& codegen);
+std::string EmitTensorPartitionViewPTO(const ir::VarPtr& tensor, const ir::TensorTypePtr& tensor_type,
+                                       const std::string& partition_type,
+                                       const std::vector<ir::ExprPtr>& offsets,
+                                       const std::vector<std::string>& size_codes, const ir::Span& span,
+                                       codegen::PTOCodegen& codegen);
 std::string EmitFlatOffsetSSAFromValues(const std::vector<std::string>& indices,
                                         const std::vector<ir::ExprPtr>& shape, codegen::PTOCodegen& codegen,
                                         const std::string& name_hint);

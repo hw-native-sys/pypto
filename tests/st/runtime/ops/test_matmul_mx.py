@@ -239,7 +239,7 @@ class MatmulMxTestCase(PTOTestCase):
                 "Supported MX matmul pairs are FP8E4M3FN×FP8E4M3FN and "
                 f"FP4×FP8E4M3FN with an explicit lhs cast; got {lhs_dtype}, {rhs_dtype}"
             )
-        super().__init__(RunConfig(rtol=0.0, atol=0.0), platform="a5")
+        super().__init__(RunConfig(rtol=0.0, atol=0.0, aicpu_thread_num=3), platform="a5")
         self._lhs_dtype = lhs_dtype
         self._rhs_dtype = rhs_dtype
         self._lhs_fp4 = lhs_dtype == DataType.FP4

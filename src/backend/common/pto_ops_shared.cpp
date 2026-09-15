@@ -35,6 +35,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "src/backend/common/pto_ops_internal.h"
 
@@ -287,6 +288,156 @@ std::string EmitPartitionViewPTO(const std::string& name_hint, const std::string
   oss << " : " << tensor_view_type << " -> " << partition_type;
   codegen.Emit(oss.str());
   return partition_view;
+}
+
+// PTO-ISA's FP4 TLOAD/TSTORE implementations consume logical strides and
+// convert them to bytes internally.  Pointer arithmetic is different: the
+// f4E2M1x2 pointer advances in byte-sized carrier elements.  For a non-zero
+// packed-FP4 origin, shift the raw pointer in carrier units, create a logical
+// view at that pointer, and partition it at an all-zero origin.  This keeps the
+// two units separate instead of making one tensor-view stride serve both.
+std::string EmitTensorPartitionViewPTO(const ir::VarPtr& tensor, const ir::TensorTypePtr& tensor_type,
+                                       const std::string& partition_type,
+                                       const std::vector<ir::ExprPtr>& offsets,
+                                       const std::vector<std::string>& size_codes, const ir::Span& span,
+                                       codegen::PTOCodegen& codegen) {
+  const std::string tensor_view = codegen.GetOrCreateTensorView(tensor);
+  const std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
+  std::vector<std::string> offset_codes = GetIndexOffsetCodes(offsets, codegen);
+  if (tensor_type->dtype_ != DataType::FP4 || offsets.empty()) {
+    return EmitPartitionViewPTO(tensor->name_hint_, tensor_view, tensor_view_type, partition_type,
+                                offset_codes, size_codes, codegen);
+  }
+
+  const size_t rank = tensor_type->shape_.size();
+  INTERNAL_CHECK_SPAN(offsets.size() == rank, span)
+      << "Packed FP4 partition offset rank " << offsets.size() << " does not match tensor rank " << rank;
+  const ir::TensorLayout layout =
+      tensor_type->tensor_view_.has_value() ? tensor_type->tensor_view_->layout : ir::TensorLayout::ND;
+  CHECK_SPAN(layout == ir::TensorLayout::ND, span)
+      << "Packed FP4 tensor views only support ND layout because the logical last axis is the "
+         "x2-carrier packed axis";
+
+  bool has_nonzero_origin = false;
+  for (const auto& offset : offsets) {
+    auto constant = As<ir::ConstInt>(offset);
+    if (!constant || constant->value_ > 0) {
+      has_nonzero_origin = true;
+      break;
+    }
+  }
+  if (!has_nonzero_origin) {
+    return EmitPartitionViewPTO(tensor->name_hint_, tensor_view, tensor_view_type, partition_type,
+                                offset_codes, size_codes, codegen);
+  }
+
+  const auto& packed_offset = offsets.back();
+  const auto constant_packed_offset = As<ir::ConstInt>(packed_offset);
+  CHECK_SPAN(constant_packed_offset, span)
+      << "Packed FP4 last-axis offset must be a statically known even value; a dynamic offset "
+         "cannot be proven byte-aligned";
+  const int64_t non_negative_packed = std::max(constant_packed_offset->value_, static_cast<int64_t>(0));
+  CHECK_SPAN(non_negative_packed % 2 == 0, span)
+      << "Packed FP4 last-axis offset must be byte-aligned (even), but got " << non_negative_packed;
+
+  const auto canonical_strides =
+      ir::tensor_view_semantics::BuildLogicalStridesFromLayout(tensor_type->shape_, layout);
+  const bool has_tensor_view = tensor_type->tensor_view_.has_value();
+  const std::vector<ir::ExprPtr> logical_strides =
+      has_tensor_view ? tensor_type->tensor_view_->stride : canonical_strides;
+  INTERNAL_CHECK_SPAN(logical_strides.size() == rank, span)
+      << "Packed FP4 tensor stride rank " << logical_strides.size() << " does not match tensor rank " << rank;
+  // MaterializeTensorStrides populates body-created views with their canonical
+  // strides.  Those strides are no more user-defined than the implicit strides
+  // of a bare tensor, so dynamic carrier conversion is safe for both.  Keep
+  // rejecting genuinely non-canonical dynamic strides: their divisibility by
+  // two cannot be established from the layout alone.
+  const bool has_noncanonical_stride = has_tensor_view && !ir::tile_view_semantics::ShapeExprListsEquivalent(
+                                                              logical_strides, canonical_strides);
+
+  const std::string zero = codegen.GetOrEmitConstant(static_cast<int64_t>(0), DataType::INDEX);
+  std::string carrier_offset = zero;
+  for (size_t axis = 0; axis + 1 < rank; ++axis) {
+    auto constant_offset = As<ir::ConstInt>(offsets[axis]);
+    if (constant_offset && constant_offset->value_ <= 0) continue;
+
+    std::string carrier_stride;
+    if (auto constant_stride = As<ir::ConstInt>(logical_strides[axis])) {
+      CHECK_SPAN(constant_stride->value_ > 0 && constant_stride->value_ % 2 == 0, span)
+          << "Packed FP4 outer stride must be a positive even logical extent, got " << constant_stride->value_
+          << " at axis " << axis;
+      carrier_stride = codegen.GetOrEmitConstant(constant_stride->value_ / 2, DataType::INDEX);
+    } else {
+      CHECK_SPAN(!has_noncanonical_stride, span)
+          << "Packed FP4 explicit outer stride must be statically known and even at axis " << axis;
+      const std::string logical_stride =
+          codegen.EmitCastToIndex(logical_strides[axis], codegen.GetExprAsCode(logical_strides[axis]));
+      carrier_stride = codegen.NewNamedTemp(tensor->name_hint_ + "_carrier_s" + std::to_string(axis));
+      codegen.Emit(carrier_stride + " = arith.divui " + logical_stride + ", " +
+                   codegen.GetOrEmitConstant(static_cast<int64_t>(2), DataType::INDEX) + " : index");
+    }
+
+    std::string term = offset_codes[axis];
+    if (!As<ir::ConstInt>(logical_strides[axis]) || As<ir::ConstInt>(logical_strides[axis])->value_ != 2) {
+      term = codegen.NewNamedTemp(tensor->name_hint_ + "_carrier_off" + std::to_string(axis));
+      codegen.Emit(term + " = arith.muli " + offset_codes[axis] + ", " + carrier_stride + " : index");
+    }
+    if (carrier_offset == zero) {
+      carrier_offset = term;
+    } else {
+      const std::string sum = codegen.NewNamedTemp(tensor->name_hint_ + "_carrier_offset");
+      codegen.Emit(sum + " = arith.addi " + carrier_offset + ", " + term + " : index");
+      carrier_offset = sum;
+    }
+  }
+  if (non_negative_packed > 0) {
+    const std::string packed_carrier = codegen.GetOrEmitConstant(non_negative_packed / 2, DataType::INDEX);
+    if (carrier_offset == zero) {
+      carrier_offset = packed_carrier;
+    } else {
+      const std::string sum = codegen.NewNamedTemp(tensor->name_hint_ + "_carrier_offset");
+      codegen.Emit(sum + " = arith.addi " + carrier_offset + ", " + packed_carrier + " : index");
+      carrier_offset = sum;
+    }
+  }
+
+  auto emit_dim = [&](const ir::ExprPtr& dim) {
+    if (auto constant = As<ir::ConstInt>(dim)) {
+      return codegen.GetOrEmitConstant(constant->value_, DataType::INDEX);
+    }
+    return codegen.EmitCastToIndex(dim, codegen.GetExprAsCode(dim));
+  };
+  std::vector<std::string> shape_codes(rank);
+  std::vector<std::string> stride_codes(rank);
+  for (size_t axis = 0; axis < rank; ++axis) {
+    shape_codes[axis] = emit_dim(tensor_type->shape_[axis]);
+    stride_codes[axis] = emit_dim(logical_strides[axis]);
+  }
+
+  const std::string dtype = codegen.GetTypeString(tensor_type->dtype_);
+  const std::string ptr_type = "!pto.ptr<" + dtype + ">";
+  const std::string shifted_ptr = codegen.NewNamedTemp(tensor->name_hint_ + "_carrier_ptr");
+  codegen.Emit(shifted_ptr + " = pto.addptr " + codegen.GetTensorBasePtr(tensor) + ", " + carrier_offset +
+               " : " + ptr_type + " -> " + ptr_type);
+
+  const std::string shifted_view = codegen.NewNamedTemp(tensor->name_hint_ + "_logical_view");
+  std::ostringstream view_line;
+  view_line << shifted_view << " = pto.make_tensor_view " << shifted_ptr << ", shape = [";
+  for (size_t axis = 0; axis < rank; ++axis) {
+    if (axis > 0) view_line << ", ";
+    view_line << shape_codes[axis];
+  }
+  view_line << "], strides = [";
+  for (size_t axis = 0; axis < rank; ++axis) {
+    if (axis > 0) view_line << ", ";
+    view_line << stride_codes[axis];
+  }
+  view_line << "] {layout = #pto.layout<nd>} : " << tensor_view_type;
+  codegen.Emit(view_line.str());
+
+  std::vector<std::string> zero_offsets(rank, zero);
+  return EmitPartitionViewPTO(tensor->name_hint_, shifted_view, tensor_view_type, partition_type,
+                              zero_offsets, size_codes, codegen);
 }
 
 // Emit SSA ops that compute a row-major flat offset from lowered SSA index

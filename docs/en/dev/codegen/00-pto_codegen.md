@@ -352,6 +352,15 @@ Example for a `[16, 1]` column vector (no DN annotation in DSL):
     : !pto.tensor_view<?x?xf32>
 ```
 
+#### Packed FP4 Carrier Addressing (A5)
+
+FP4 shapes and strides stay logical in PyPTO IR and PTO-ISA transfers. Thus a
+logical `[2, 512]` tensor view keeps shape `[2, 512]`, strides `[512, 1]`. For a
+non-zero partition origin, A5 codegen computes the flattened x2-carrier offset,
+emits `pto.addptr`, then creates a logical-stride view and an all-zero
+`pto.partition_view`. The packed-axis origin must be statically known and even.
+This split makes pointer arithmetic use the physical 256-byte row pitch.
+
 ### Allocation Generation
 
 Based on TileType variables collected from the function body. Each tile variable gets its own `pto.alloc_tile` instruction with an explicit `addr` attribute derived from the variable's MemRef. Variables sharing the same MemRef share the same address:

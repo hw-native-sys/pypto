@@ -333,6 +333,14 @@ tile 调用 `set_validshape`。
     : !pto.tensor_view<?x?xf32>
 ```
 
+#### Packed FP4 Carrier 寻址（A5）
+
+FP4 的 shape 和 stride 在 PyPTO IR 与 PTO-ISA 传输中都保持逻辑单位，因此逻辑
+张量 `[2, 512]` 的 view 仍为 shape `[2, 512]`、strides `[512, 1]`。当 partition
+起点非零时，A5 代码生成会计算 x2-carrier 单位的扁平 offset，输出 `pto.addptr`，再
+创建逻辑 stride view 和全零起点的 `pto.partition_view`。packed 轴起点必须是静态
+已知的偶数。这样指针算术会使用物理的 256 字节行距。
+
 ### 分配生成
 
 基于附加到 TileType 变量的 MemRef 对象。代码生成器从关联的 TileType 推导 Tile 维度和数据类型:

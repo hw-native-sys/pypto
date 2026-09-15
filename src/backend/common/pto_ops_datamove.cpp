@@ -54,6 +54,7 @@ using ir::Var;
 using pto_ops_detail::AsPto;
 using pto_ops_detail::CheckSubviewTileCompat;
 using pto_ops_detail::EmitPartitionViewPTO;
+using pto_ops_detail::EmitTensorPartitionViewPTO;
 using pto_ops_detail::EnsureStaticViewTileSsa;
 using pto_ops_detail::EnsureTileViewSsa;
 using pto_ops_detail::GetDimStrings;
@@ -515,9 +516,8 @@ static std::string MakeGatherRowCodegenPTO(const CallPtr& op, codegen::CodegenBa
     src_pview = EmitPartitionViewPTO(src->name_hint_, dn_view, src_view_type, partition_type,
                                      GetIndexOffsetCodes(tr_off, codegen), xfer_codes, codegen);
   } else {
-    std::string src_view = codegen.GetOrCreateTensorView(src);
-    src_pview = EmitPartitionViewPTO(src->name_hint_, src_view, src_view_type, partition_type,
-                                     GetIndexOffsetCodes(soff_elems, codegen), xfer_codes, codegen);
+    src_pview = EmitTensorPartitionViewPTO(src, src_tensor_type, partition_type, soff_elems, xfer_codes,
+                                           op->span_, codegen);
   }
 
   std::ostringstream tload_line;

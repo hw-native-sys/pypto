@@ -3297,6 +3297,174 @@ def test_pto_codegen_view_output_uses_physical_stride():
     assert "strides = [%c128_index, %c1_index]" in a_view_lines[0]
 
 
+def test_pto_codegen_packed_fp4_uses_carrier_pointer_offsets():
+    """Packed FP4 partitions shift pointers in x2-carrier units.
+
+    PTO-ISA consumes logical strides when it performs a multi-row FP4 transfer,
+    while ``pto.addptr`` consumes byte-sized x2 carriers.  Keep the logical
+    views and move each non-zero partition origin onto a carrier pointer before
+    creating an all-zero partition.
+    """
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend950)
+
+    @pl.program
+    class PackedFp4Copy:
+        @pl.function(type=pl.FunctionType.InCore)
+        def copy(
+            self,
+            src: pl.Tensor[[2, 512], pl.FP4],
+            out: pl.Out[pl.Tensor[[2, 512], pl.FP4]],
+        ) -> pl.Tensor[[2, 512], pl.FP4]:
+            row = pl.load(src, [1, 64], [1, 64])
+            return pl.store(row, [1, 128], out)
+
+    mlir_code = _generate_default_mlir(PackedFp4Copy)
+    lines = _get_mlir_lines(mlir_code)
+
+    views = _find_lines(lines, "pto.make_tensor_view")
+    assert len(views) == 4
+    for view in views:
+        assert "shape = [%c2_index, %c512_index]" in view
+        assert "strides = [%c512_index, %c1_index]" in view
+        assert "layout = #pto.layout<nd>" in view
+
+    addptrs = _find_lines(lines, "pto.addptr")
+    assert len(addptrs) == 2
+    assert any("arith.muli %c1_index, %c256_index" in line for line in lines)
+    assert any("arith.addi" in line and ", %c32_index" in line for line in lines)
+    assert any("arith.addi" in line and ", %c64_index" in line for line in lines)
+
+    partitions = _find_lines(lines, "pto.partition_view")
+    assert len(partitions) == 2
+    assert all("offsets = [%c0_index, %c0_index]" in partition for partition in partitions)
+
+
+def test_pto_codegen_packed_fp4_multirow_transfer_keeps_logical_stride():
+    """A zero-origin multi-row FP4 transfer must not double-convert its row stride."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend950)
+
+    @pl.program
+    class PackedFp4MultirowCopy:
+        @pl.function(type=pl.FunctionType.InCore)
+        def copy(
+            self,
+            src: pl.Tensor[[64, 128], pl.FP4],
+            out: pl.Out[pl.Tensor[[64, 128], pl.FP4]],
+        ) -> pl.Tensor[[64, 128], pl.FP4]:
+            value = pl.load(src, [0, 0], [64, 128])
+            return pl.store(value, [0, 0], out)
+
+    lines = _get_mlir_lines(_generate_default_mlir(PackedFp4MultirowCopy))
+    fp4_views = [line for line in lines if "pto.make_tensor_view" in line and "f4E2M1x2" in line]
+    assert len(fp4_views) == 2
+    assert all("strides = [%c128_index, %c1_index]" in view for view in fp4_views)
+    assert not _find_lines(lines, "pto.addptr")
+
+
+def test_pto_codegen_packed_fp4_tensor_view_uses_carrier_pointer_offset():
+    """A body-created FP4 tensor.view follows the same split address lowering."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend950)
+
+    @pl.program
+    class PackedFp4BodyView:
+        @pl.function(type=pl.FunctionType.InCore)
+        def load_view(
+            self,
+            src: pl.Tensor[[4, 128], pl.FP4],
+            out: pl.Out[pl.Tensor[[1, 256], pl.FP4]],
+        ) -> pl.Tensor[[1, 256], pl.FP4]:
+            viewed: pl.Tensor[
+                [2, 256],
+                pl.FP4,
+                pl.TensorView(stride=[256, 1], layout=pl.TensorLayout.ND),
+            ] = pl.tensor.view(src, [2, 256])
+            value = pl.load(viewed, [1, 0], [1, 256])
+            return pl.store(value, [0, 0], out)
+
+    lines = _get_mlir_lines(_generate_default_mlir(PackedFp4BodyView))
+    body_view = _single_line(lines, "pto.make_tensor_view %arg0, shape = [%c2_index, %c256_index]")
+    assert "strides = [%c256_index, %c1_index]" in body_view
+    assert any("arith.muli %c1_index, %c128_index" in line for line in lines)
+    shifted_view = _single_line(lines, "pto.make_tensor_view %viewed__ssa_v0_carrier_ptr")
+    assert "strides = [%c256_index, %c1_index]" in shifted_view
+
+
+def test_pto_codegen_packed_fp4_dynamic_tensor_view_uses_carrier_pointer_offset():
+    """A materialized canonical dynamic view permits carrier-address lowering."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend950)
+    logical_k = pl.dynamic("FP4_VIEW_K")
+
+    @pl.program
+    class PackedFp4DynamicBodyView:
+        @pl.function(type=pl.FunctionType.InCore)
+        def load_view(
+            self,
+            src: pl.Tensor[[4, logical_k], pl.FP4],
+            out: pl.Out[pl.Tensor[[1, 64], pl.FP4]],
+        ) -> pl.Tensor[[1, 64], pl.FP4]:
+            viewed: pl.Tensor[[2, logical_k * 2], pl.FP4] = pl.tensor.view(src, [2, logical_k * 2])
+            value = pl.load(viewed, [1, 0], [1, 64])
+            return pl.store(value, [0, 0], out)
+
+    lines = _get_mlir_lines(_generate_default_mlir(PackedFp4DynamicBodyView))
+    assert any("carrier_s0 = arith.divui" in line for line in lines)
+    assert _find_lines(lines, "pto.addptr")
+    partitions = _find_lines(lines, "pto.partition_view")
+    assert partitions
+    assert all("offsets = [%c0_index, %c0_index]" in partition for partition in partitions)
+
+
+def test_pto_codegen_packed_fp4_rejects_noncanonical_dynamic_view_stride():
+    """A user-defined dynamic stride is not assumed to be carrier-aligned."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend950)
+    logical_k = pl.dynamic("FP4_STRIDED_K")
+
+    @pl.program
+    class PackedFp4DynamicStridedView:
+        @pl.function(type=pl.FunctionType.InCore)
+        def load_view(
+            self,
+            src: pl.Tensor[[8, logical_k], pl.FP4],
+            out: pl.Out[pl.Tensor[[1, 64], pl.FP4]],
+        ) -> pl.Tensor[[1, 64], pl.FP4]:
+            viewed: pl.Tensor[
+                [2, logical_k * 2],
+                pl.FP4,
+                pl.TensorView(stride=[logical_k * 4, 1], layout=pl.TensorLayout.ND),
+            ] = pl.tensor.view(src, [2, logical_k * 2])
+            value = pl.load(viewed, [1, 0], [1, 64])
+            return pl.store(value, [0, 0], out)
+
+    with pytest.raises(ValueError, match="explicit outer stride must be statically known and even"):
+        _generate_default_mlir(PackedFp4DynamicStridedView)
+
+
+def test_pto_codegen_packed_fp4_rejects_dynamic_packed_axis_offset():
+    """A dynamic nibble origin cannot be silently rounded to a carrier boundary."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend950)
+
+    @pl.program
+    class PackedFp4DynamicOffset:
+        @pl.function(type=pl.FunctionType.InCore)
+        def load(
+            self,
+            src: pl.Tensor[[2, 512], pl.FP4],
+            packed_offset: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[2, 512], pl.FP4]],
+        ) -> pl.Tensor[[2, 512], pl.FP4]:
+            value = pl.load(src, [0, packed_offset], [1, 64])
+            return pl.store(value, [0, 0], out)
+
+    with pytest.raises(ValueError, match="statically known even value"):
+        _generate_default_mlir(PackedFp4DynamicOffset)
+
+
 def test_pto_codegen_make_tensor_view_accepts_dynamic_shape_expressions():
     """make_tensor_view should lower non-Var dynamic shape/stride expressions via index casts."""
     span = ir.Span.unknown()
