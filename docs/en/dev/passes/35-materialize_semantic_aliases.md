@@ -164,7 +164,10 @@ metadata alias can require an entry copy; the copy runs before a `ForStmt` or
 windows receive independent storage. Metadata-only views do not read data.
 For nested loops, earlier data observations are conservatively included in the
 indexed liveness decision to protect the next enclosing-loop iteration. A
-top-level loop does not need isolation solely because its input was read earlier.
+top-level loop does not need isolation solely because its input was read earlier
+or is read only in a mutually exclusive sibling branch. Reachability is indexed
+in both branch orders; nested loops retain conservative observations across
+enclosing iterations.
 
 For and While initializers, iter_args, results, and result views are aligned
 before producers are retargeted. Branch and loop yields use the same parallel
@@ -175,7 +178,8 @@ before placement. Post-reuse reconciliation repeats the same scheduling, and
 address placement cannot add new scratch or transfers.
 
 Storage requiring a same-space copy that the target cannot implement is rejected
-with an early diagnostic; in particular, a live Acc input cannot be preserved
+before any entry copy, yield transfer, or snapshot is synthesized. Same-space
+Mat, Left, Right, and Acc transfers receive an early diagnostic; a live Acc input cannot be preserved
 by an Acc-to-Acc move. The existing guarded accumulator producer coalescing
 remains available for compatible carries. Ambiguous view addresses and
 simultaneously overlapping destination windows must be resolved before final

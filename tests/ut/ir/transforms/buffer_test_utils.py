@@ -27,5 +27,5 @@ def statements(program: ir.Program) -> Iterator[ir.Stmt]:
                 if statement.else_body is not None:
                     pending.append(statement.else_body)
                 pending.append(statement.then_body)
-            elif isinstance(statement, (ir.ForStmt, ir.WhileStmt)):
+            elif isinstance(statement, (ir.ForStmt, ir.WhileStmt, ir.SplitAivScopeStmt, ir.RuntimeScopeStmt)):
                 pending.append(statement.body)

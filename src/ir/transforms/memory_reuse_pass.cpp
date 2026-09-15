@@ -424,7 +424,7 @@ class ExprReadBaseCollector : public IRVisitor {
 /// and is also after the lower bound in the reverse ordering.
 class ReachableEventIndex {
  public:
-  void Build(std::vector<std::pair<size_t, size_t>> events) {
+  void Build(std::vector<std::pair<size_t, size_t>> events, bool active = true) {
     if (events.empty()) return;
     std::sort(events.begin(), events.end());
     events.erase(std::unique(events.begin(), events.end()), events.end());
@@ -434,10 +434,21 @@ class ReachableEventIndex {
     max_reverse_.assign(size_ * 2, 0);
     for (size_t i = 0; i < events.size(); ++i) {
       primary_.push_back(events[i].first);
-      max_reverse_[size_ + i] = events[i].second + 1;
+      max_reverse_[size_ + i] = active ? events[i].second + 1 : 0;
     }
     for (size_t i = size_; i-- > 1;) {
       max_reverse_[i] = std::max(max_reverse_[i * 2], max_reverse_[i * 2 + 1]);
+    }
+  }
+
+  // Activate observations in logical-definition order for loop-entry queries.
+  void Activate(size_t primary, size_t reverse) {
+    size_t node = size_ + static_cast<size_t>(std::lower_bound(primary_.begin(), primary_.end(), primary) -
+                                              primary_.begin());
+    max_reverse_[node] = std::max(max_reverse_[node], reverse + 1);
+    while (node > 1) {
+      node /= 2;
+      max_reverse_[node] = std::max(max_reverse_[node * 2], max_reverse_[node * 2 + 1]);
     }
   }
 
@@ -562,21 +573,46 @@ class LoopInputIsolation : public IRVisitor {
 
   void Plan(const StmtPtr& body, const std::vector<VarPtr>& parameters) {
     names_.Collect(body, parameters);
+    ReverseBranchOrderVisitor reverse;
+    reverse.Run(body);
+    reverse_order_ = std::move(reverse.stmt_order);
     for (const auto& parameter : parameters) {
       if (auto tile = GetTileTypeWithMemRef(parameter->GetType())) {
         incoming_bases_.insert(GetDefinedMemRef(tile)->base_.get());
       }
     }
     VisitStmt(body);
+    struct Observation {
+      const Var* base;
+      size_t position;
+      size_t reverse;
+      size_t definition;
+    };
+    std::vector<Observation> observations;
+    std::map<const Var*, std::vector<std::pair<size_t, size_t>>> reachable_events;
     std::map<const Var*, std::vector<VersionedReachableEventIndex::Event>> events;
     for (const auto& [position, var] : reads_) {
       const auto tile = GetTileTypeWithMemRef(var->GetType());
       auto definition = definitions_.find(var.get());
-      events[GetDefinedMemRef(tile)->base_.get()].push_back(
-          {position, definition == definitions_.end() ? 0 : definition->second});
+      const auto* base = GetDefinedMemRef(tile)->base_.get();
+      const size_t version = definition == definitions_.end() ? 0 : definition->second;
+      const size_t reverse = read_reverse_.at(position);
+      events[base].push_back({position, version});
+      reachable_events[base].emplace_back(position, reverse);
+      observations.push_back({base, position, reverse, version});
     }
     for (auto& [base, values] : events) indexes_[base].Build(std::move(values));
+    for (auto& [base, values] : reachable_events) reachable_indexes_[base].Build(std::move(values), false);
+    std::sort(observations.begin(), observations.end(),
+              [](const auto& a, const auto& b) { return a.definition < b.definition; });
+    size_t next = 0;
     for (const auto& loop : loops_) {
+      // The preorder loop sweep activates only handles naming older values.
+      // A range maximum then tests both branch orderings in O(log N).
+      while (next < observations.size() && observations[next].definition < positions_.at(loop.get())) {
+        const auto& event = observations[next++];
+        reachable_indexes_[event.base].Activate(event.position, event.reverse);
+      }
       if (auto for_loop = As<ForStmt>(loop)) PlanLoop(for_loop);
       if (auto while_loop = As<WhileStmt>(loop)) PlanLoop(while_loop);
     }
@@ -585,10 +621,13 @@ class LoopInputIsolation : public IRVisitor {
  protected:
   void VisitStmt(const StmtPtr& statement) override {
     auto saved = current_;
+    const auto saved_reverse = current_reverse_;
+    current_reverse_ = reverse_order_.at(statement.get()) + 1;
     current_ = ++order_;
     positions_[statement.get()] = current_;
     IRVisitor::VisitStmt(statement);
     current_ = saved;
+    current_reverse_ = saved_reverse;
   }
   void VisitStmt_(const AssignStmtPtr& statement) override {
     auto source = AsVarLike(statement->value_);
@@ -621,7 +660,10 @@ class LoopInputIsolation : public IRVisitor {
   void VisitStmt_(const WhileStmtPtr& loop) override { VisitLoop(loop); }
   void VisitExpr_(const IterArgPtr& value) override { VisitVarLike_(value); }
   void VisitVarLike_(const VarPtr& value) override {
-    if (GetTileTypeWithMemRef(value->GetType())) reads_.emplace_back(current_, value);
+    if (GetTileTypeWithMemRef(value->GetType())) {
+      reads_.emplace_back(current_, value);
+      read_reverse_[current_] = current_reverse_;
+    }
   }
 
  private:
@@ -657,11 +699,17 @@ class LoopInputIsolation : public IRVisitor {
       const auto memref = GetDefinedMemRef(tile);
       const auto* base = memref->base_.get();
       auto index = indexes_.find(base);
-      if (incoming_bases_.count(base) != 0 ||
-          (index != indexes_.end() &&
-           ((nested_loops_.count(loop.get()) != 0 &&
-             index->second.HasAfterFromHandleDefinedBefore(0, position - 1, position)) ||
-            index->second.HasAfterFromHandleDefinedBefore(position + 1, order_, position)))) {
+      const auto reachable = reachable_indexes_.find(base);
+      // Sibling arms cannot observe a top-level loop's writes. Within another
+      // loop, retain conservative observations across later iterations, where
+      // the enclosing branch may take a different arm.
+      const bool nested_observation =
+          nested_loops_.count(loop.get()) != 0 && index != indexes_.end() &&
+          (index->second.HasAfterFromHandleDefinedBefore(0, position - 1, position) ||
+           index->second.HasAfterFromHandleDefinedBefore(position + 1, order_, position));
+      if (incoming_bases_.count(base) != 0 || nested_observation ||
+          (reachable != reachable_indexes_.end() &&
+           reachable->second.HasAfter(position + 1, order_, reverse_order_.at(loop.get())))) {
         isolate.insert(i);
       }
       auto offset = As<ConstInt>(memref->byte_offset_);
@@ -721,6 +769,10 @@ class LoopInputIsolation : public IRVisitor {
 
   size_t order_ = 0;
   size_t current_ = 0;
+  size_t current_reverse_ = 0;
+  std::map<const Stmt*, size_t> reverse_order_;
+  std::map<size_t, size_t> read_reverse_;
+  std::map<const Var*, ReachableEventIndex> reachable_indexes_;
   size_t loop_depth_ = 0;
   std::set<const Stmt*> nested_loops_;
   StorageNameSupply names_;
@@ -4322,6 +4374,11 @@ class YieldFixupMutator : public StorageBoundaryMutator {
       if (SamePhysicalWindow(source_memref, target)) continue;
       CHECK_SPAN(CompareBaseAddress(source_memref, target) == AddressRelation::kDifferent, span)
           << "Buffer IR storage legalization cannot reconcile ambiguous views of one destination";
+      const auto source_memory = source_tile->GetMemorySpace();
+      const auto target_memory = target_tile->GetMemorySpace();
+      CHECK_SPAN(source_memory && target_memory && IsTileMoveEverSupported(*source_memory, *target_memory),
+                 span)
+          << "Buffer IR cannot reconcile region storage with an unsupported tile.move memory-space pair";
       auto [moved, move] = CreateTileMove(source, target, target_tile->GetMemorySpace());
       copies.push_back({i, source, moved, move, source_memref, target, target_tile->GetMemorySpace()});
     }
@@ -4760,6 +4817,10 @@ class YieldFixupMutator : public StorageBoundaryMutator {
         << "Internal error: a loop-carry copy source must be a TileType with a MemRef";
     auto src_memref = GetDefinedMemRef(src_tile);
     auto src_memory = src_tile->GetMemorySpace();
+    if (canonical_branch_storage_) {
+      CHECK_SPAN(src_memory && IsTileMoveEverSupported(*src_memory, *src_memory), copy->source->span_)
+          << "Buffer IR cannot snapshot a transfer source without a supported same-space tile.move";
+    }
     INTERNAL_CHECK_SPAN(src_memory.has_value(), copy->source->span_)
         << "Internal error: a loop-carry copy source must carry a memory space to spill";
 
