@@ -86,11 +86,8 @@ def _base(expr: ir.Expr) -> int:
 
 
 def _yield(body: ir.Stmt) -> ir.YieldStmt:
-    if isinstance(body, ir.YieldStmt):
-        return body
-    assert isinstance(body, ir.SeqStmts)
-    result = body.stmts[-1]
-    assert isinstance(result, ir.YieldStmt)
+    result = ir.get_last_yield_stmt(body)
+    assert result is not None
     return result
 
 
@@ -208,6 +205,80 @@ def test_ptoas_legacy_branch_path_remains_the_default():
     storage = _Storage(after)
     assert not storage.calls(_MOVE)
     assert _base(storage.branches[0].return_vars[0]) == _base(storage.assigns["a"].var)
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("scope_kind", ["split", "runtime", "nested"])
+@pytest.mark.parametrize("fresh_producer", [False, True])
+def test_branch_yields_inside_transparent_scopes(planner, scope_kind, fresh_producer):
+    if fresh_producer:
+        before = _program(
+            f"then_value: {_TILE} = pl.tile.add(a, 1.0)\nchosen: {_TILE} = pl.yield_(then_value)",
+            f"else_value: {_TILE} = pl.tile.mul(b, 2.0)\nchosen: {_TILE} = pl.yield_(else_value)",
+        )
+    else:
+        before = _program(f"chosen: {_TILE} = pl.yield_(a)", f"chosen: {_TILE} = pl.yield_(b)")
+
+    class WrapArms(ir.IRMutator):
+        def visit_if_stmt(self, op: ir.IfStmt) -> ir.Stmt:
+            def wrap(body: ir.Stmt) -> ir.Stmt:
+                # An unrelated region's yields must not receive the outer copies.
+                nested = ir.IfStmt(
+                    op.condition, ir.YieldStmt([], op.span), ir.YieldStmt([], op.span), [], op.span
+                )
+                body = ir.SeqStmts([nested, body], op.span)
+                if scope_kind in ("split", "nested"):
+                    body = ir.SplitAivScopeStmt(
+                        ir.SplitMode.UP_DOWN, count=2, name_hint="split_arm", body=body, span=op.span
+                    )
+                if scope_kind in ("runtime", "nested"):
+                    body = ir.RuntimeScopeStmt(manual=True, name_hint="runtime_arm", body=body, span=op.span)
+                return ir.SeqStmts([body], op.span)
+
+            assert op.else_body is not None
+            return ir.IfStmt(op.condition, wrap(op.then_body), wrap(op.else_body), op.return_vars, op.span)
+
+    after = _legalize(WrapArms().visit_program(before), planner)
+    storage = _Storage(after)
+    _assert_canonical_arms(storage)
+    branch = storage.branches[0]
+    assert _base(branch.return_vars[0]) not in {_base(storage.assigns[name].var) for name in ("a", "b")}
+    assert len(storage.calls(_MOVE)) == (0 if fresh_producer else 2)
+    if fresh_producer:
+        assert _base(storage.assigns["then_value"].var) == _base(branch.return_vars[0])
+        assert _base(storage.assigns["else_value"].var) == _base(branch.return_vars[0])
+
+    nested_branches = 0
+    for body in (branch.then_body, branch.else_body):
+        assert body is not None
+        scopes = []
+        while isinstance(body, (ir.SeqStmts, ir.SplitAivScopeStmt, ir.RuntimeScopeStmt)):
+            if isinstance(body, ir.SeqStmts):
+                for child in body.stmts:
+                    if isinstance(child, ir.IfStmt):
+                        assert not _yield(child.then_body).value
+                        assert child.else_body is not None and not _yield(child.else_body).value
+                        nested_branches += 1
+                if not fresh_producer and isinstance(body.stmts[-1], ir.YieldStmt):
+                    move = body.stmts[-2]
+                    assert isinstance(move, ir.AssignStmt) and isinstance(move.value, ir.Call)
+                    assert move.value.op.name == _MOVE
+                    assert _yield(body).value[0].same_as(move.var)
+                    assert scopes  # Transfer remains inside the branch's transparent scope.
+                body = body.stmts[-1]
+            else:
+                if isinstance(body, ir.SplitAivScopeStmt):
+                    assert body.split == ir.SplitMode.UP_DOWN and body.count == 2
+                    assert body.name_hint == "split_arm"
+                else:
+                    assert body.manual and body.name_hint == "runtime_arm"
+                scopes.append(type(body))
+                body = body.body
+        assert len(scopes) == (2 if scope_kind == "nested" else 1)
+        assert isinstance(body, ir.YieldStmt)
+    assert nested_branches == 2
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=True):
+        ir.assert_structural_equal(passes.materialize_semantic_aliases()(after), after)
 
 
 if __name__ == "__main__":

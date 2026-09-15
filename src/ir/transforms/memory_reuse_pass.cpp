@@ -641,8 +641,8 @@ class TopDownRetargeter {
       VisitBranchStorage(branch->then_body_, allocations);
       const auto else_body = branch->else_body_;
       if (else_body) VisitBranchStorage(*else_body, allocations);
-      auto then_yield = FindYieldStmt(branch->then_body_);
-      auto else_yield = else_body ? FindYieldStmt(*else_body) : nullptr;
+      auto then_yield = transform_utils::GetLastYieldStmt(branch->then_body_);
+      auto else_yield = else_body ? transform_utils::GetLastYieldStmt(*else_body) : nullptr;
       for (size_t i = 0; i < branch->return_vars_.size(); ++i) {
         auto result = branch->return_vars_[i];
         auto result_tile = CurrentTileType(result);
@@ -3906,7 +3906,7 @@ class YieldFixupMutator : public IRMutator {
   // after the IfStmt. Both arms must explicitly write the declared destination.
   StmtPtr FixupCanonicalIf(const IfStmtPtr& branch) {
     auto fix_arm = [&](const StmtPtr& body) -> StmtPtr {
-      auto yield = FindYieldStmt(body);
+      auto yield = transform_utils::GetLastYieldStmt(body);
       std::vector<StmtPtr> moves;
       std::vector<ExprPtr> values = yield ? yield->value_ : std::vector<ExprPtr>{};
       for (size_t i = 0; i < branch->return_vars_.size(); ++i) {
@@ -4461,9 +4461,8 @@ class YieldFixupMutator : public IRMutator {
     return new_for;
   }
 
-  // Replace YieldStmt in body and insert move AssignStmts before it.
-  // Body structure is typically SeqStmts([...assigns..., YieldStmt]).
-  // Move stmts go directly into the SeqStmts before the yield.
+  // Follow the same trailing path as GetLastYieldStmt. Keep transfers inside
+  // transparent scopes and leave yields of nested control-flow regions alone.
   static StmtPtr InsertMovesAndReplaceYield(const StmtPtr& body, const YieldStmtPtr& new_yield,
                                             const std::vector<StmtPtr>& move_stmts) {
     if (As<YieldStmt>(body)) {
@@ -4474,17 +4473,20 @@ class YieldFixupMutator : public IRMutator {
       return SeqStmts::Flatten(std::move(stmts), body->span_);
     }
     if (auto seq = As<SeqStmts>(body)) {
-      std::vector<StmtPtr> new_children;
-      for (const auto& child : seq->stmts_) {
-        if (As<YieldStmt>(child)) {
-          // Insert move stmts directly before the new yield
-          new_children.insert(new_children.end(), move_stmts.begin(), move_stmts.end());
-          new_children.push_back(new_yield);
-        } else {
-          new_children.push_back(child);
-        }
-      }
+      if (seq->stmts_.empty()) return body;
+      std::vector<StmtPtr> new_children = seq->stmts_;
+      new_children.back() = InsertMovesAndReplaceYield(new_children.back(), new_yield, move_stmts);
       return SeqStmts::Flatten(std::move(new_children), body->span_);
+    }
+    if (auto scope = As<SplitAivScopeStmt>(body)) {
+      auto result = MutableCopy(scope);
+      result->body_ = InsertMovesAndReplaceYield(scope->body_, new_yield, move_stmts);
+      return result;
+    }
+    if (auto scope = As<RuntimeScopeStmt>(body)) {
+      auto result = MutableCopy(scope);
+      result->body_ = InsertMovesAndReplaceYield(scope->body_, new_yield, move_stmts);
+      return result;
     }
     return body;
   }

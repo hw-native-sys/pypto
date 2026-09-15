@@ -100,6 +100,10 @@ destinations before `PYPTO`, `DSA_RP`, or `PTOAS` performs memory planning:
    and the existing For-carry fixups run before all three planners; `PYPTO`
    reconciles any new mismatch after reuse, retaining the declared phi target.
 
+Trailing yields inside transparent `SplitAivScopeStmt` and `RuntimeScopeStmt`
+wrappers are supported. Transfers stay inside the same scope immediately before
+the yield; yields belonging to nested control-flow regions are left unchanged.
+
 For example, `if flag: yield a; else: yield b` with `a` and `b` still live after
 the branch receives a separate result allocation and one copy in each arm.
 Two independent branch-local elementwise producers can instead write that same

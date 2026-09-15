@@ -86,6 +86,9 @@ program = passes.materialize_semantic_aliases()(program)
    使用的分配。分支复制和已有的 For carry 修复会在三种规划器之前执行；
    `PYPTO` 在复用后修复新增的不一致，同时保留已声明的 phi 目标。
 
+支持透明作用域 `SplitAivScopeStmt` 和 `RuntimeScopeStmt` 中的末尾 yield。
+传输保留在同一作用域内，紧邻 yield 之前；嵌套控制流区域的 yield 不会被替换。
+
 例如，`if flag: yield a; else: yield b` 的 `a` 和 `b` 在分支后仍然存活时，
 会新增一个结果分配，并在两个分支各复制一次。两个独立的分支内逐元素 producer
 则可以直接写入同一个结果分配，无需复制。PTOAS 因此收到显式分支传输，不需要
