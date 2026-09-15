@@ -536,5 +536,144 @@ class AccStorage:
     _verify_storage(after)
 
 
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("while_loop", [False, True])
+@pytest.mark.parametrize("memory", ["Mat", "Left", "Right", "Acc"])
+def test_unsupported_same_space_carry_swap_is_diagnosed(planner, while_loop, memory):
+    tile = f"pl.Tile[[16, 16], pl.FP16, pl.Mem.{memory}]"
+    if memory == "Acc":
+        tile = "pl.Tile[[16, 16], pl.FP32, pl.Mem.Acc]"
+        producer = "pl.tile.matmul(left, right)"
+    elif memory == "Mat":
+        producer = "pl.tile.load(gm, [0, 0], [16, 16], target_memory=pl.Mem.Mat)"
+    else:
+        producer = f"pl.tile.move(mat, target_memory=pl.Mem.{memory})"
+    header = (
+        "for (a, b) in pl.while_(init_values=(first, second)):\n            pl.cond(flag)"
+        if while_loop
+        else "for _i, (a, b) in pl.range(0, 2, init_values=(first, second)):"
+    )
+    program = pl.parse_program(f"""
+@pl.program
+class UnsupportedSwap:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, gm: pl.Tensor[[16, 16], pl.FP16],
+               left: pl.Tile[[16, 16], pl.FP16, pl.Mem.Left],
+               right: pl.Tile[[16, 16], pl.FP16, pl.Mem.Right],
+               flag: pl.Scalar[pl.BOOL]) -> pl.Tensor[[16, 16], pl.FP16]:
+        mat: pl.Tile[[16, 16], pl.FP16, pl.Mem.Mat] = pl.tile.load(
+            gm, [0, 0], [16, 16], target_memory=pl.Mem.Mat
+        )
+        first: {tile} = {producer}
+        second: {tile} = {producer}
+        {header}
+            r_a, r_b = pl.yield_(b, a)
+        return gm
+""")
+    with pytest.raises(ValueError, match="unsupported tile.move memory-space pair"):
+        _legalize(program, planner)
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("while_loop", [False, True])
+@pytest.mark.parametrize("loop_in_then", [False, True])
+def test_sibling_branch_read_does_not_isolate_local_accumulator(planner, while_loop, loop_in_then):
+    header = (
+        "for (current,) in pl.while_(init_values=(acc,)):\n    pl.cond(flag)"
+        if while_loop
+        else "for _i, (current,) in pl.range(0, 2, init_values=(acc,)):"
+    )
+    loop_arm = f"""{header}
+    updated: pl.Tile[[16, 16], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(current, left, right)
+    accumulated = pl.yield_(updated)
+final: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.move(accumulated, target_memory=pl.Mem.Vec)
+stored: pl.Tensor[[16, 16], pl.FP32] = pl.tile.store(final, [0, 0], out)
+result = pl.yield_(stored)"""
+    read_arm = """\
+previous: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.move(acc, target_memory=pl.Mem.Vec)
+saved: pl.Tensor[[16, 16], pl.FP32] = pl.tile.store(previous, [0, 0], out)
+result = pl.yield_(saved)"""
+    then_arm, else_arm = (loop_arm, read_arm) if loop_in_then else (read_arm, loop_arm)
+    program = pl.parse_program(f"""
+@pl.program
+class SiblingRead:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, left: pl.Tile[[16, 16], pl.FP16, pl.Mem.Left],
+               right: pl.Tile[[16, 16], pl.FP16, pl.Mem.Right],
+               out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+               flag: pl.Scalar[pl.BOOL]) -> pl.Tensor[[16, 16], pl.FP32]:
+        acc: pl.Tile[[16, 16], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(left, right)
+        if flag:
+{indent(then_arm, "            ")}
+        else:
+{indent(else_arm, "            ")}
+        return result
+""")
+    after = _legalize(program, planner)
+    storage = _Storage(after)
+    assert _base(storage.loops[0].iter_args[0]) == _base(storage.assigns["acc"].var)
+    assert not any(statement.var.name_hint.startswith("carry_input_") for statement in storage.statements)
+    _verify_storage(after)
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("outer_while", [False, True])
+@pytest.mark.parametrize("inner_while", [False, True])
+@pytest.mark.parametrize("local_seed", [False, True])
+@pytest.mark.parametrize("alias", [False, True])
+def test_nested_accumulator_isolation_respects_definition_scope(
+    planner, outer_while, inner_while, local_seed, alias
+):
+    """A recreated seed is reusable; a seed surviving outer iterations is live."""
+    acc_type = "pl.Tile[[16, 16], pl.FP32, pl.Mem.Acc]"
+    seed = f"acc: {acc_type} = pl.tile.matmul(left, right)"
+    outer_header = (
+        "for (dst,) in pl.while_(init_values=(out,)):\n            pl.cond(flag)"
+        if outer_while
+        else "for _outer, (dst,) in pl.range(0, 2, init_values=(out,)):"
+    )
+    inner_header = (
+        "for (current,) in pl.while_(init_values=(initial,)):\n                pl.cond(flag)"
+        if inner_while
+        else "for _inner, (current,) in pl.range(0, 2, init_values=(initial,)):"
+    )
+    initial = "pl.tile.reshape(acc, [16, 16])" if alias else "acc"
+    program = pl.parse_program(f"""
+@pl.program
+class NestedAccumulator:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, left: pl.Tile[[16, 16], pl.FP16, pl.Mem.Left],
+               right: pl.Tile[[16, 16], pl.FP16, pl.Mem.Right],
+               out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+               flag: pl.Scalar[pl.BOOL]) -> pl.Tensor[[16, 16], pl.FP32]:
+{indent(seed if not local_seed else "", "        ")}
+        {outer_header}
+{indent(seed if local_seed else "", "            ")}
+            initial: {acc_type} = {initial}
+            previous: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.move(acc, target_memory=pl.Mem.Vec)
+            saved: pl.Tensor[[16, 16], pl.FP32] = pl.tile.store(previous, [0, 0], dst)
+            {inner_header}
+                updated: {acc_type} = pl.tile.matmul_acc(current, left, right)
+                accumulated = pl.yield_(updated)
+            final: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.move(
+                accumulated, target_memory=pl.Mem.Vec
+            )
+            stored: pl.Tensor[[16, 16], pl.FP32] = pl.tile.store(final, [0, 0], saved)
+            result = pl.yield_(stored)
+        return result
+""")
+    if not local_seed:
+        with pytest.raises(ValueError, match="independently live loop input without a same-space copy"):
+            _legalize(program, planner)
+        return
+    after = _legalize(program, planner)
+    storage = _Storage(after)
+    assert _base(storage.loops[1].iter_args[0]) == _base(storage.assigns["acc"].var)
+    assert not any(statement.var.name_hint.startswith("carry_input_") for statement in storage.statements)
+    _verify_storage(after)
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=True):
+        ir.assert_structural_equal(passes.materialize_semantic_aliases()(after), after)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

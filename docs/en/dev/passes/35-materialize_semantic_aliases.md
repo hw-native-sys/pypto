@@ -162,9 +162,14 @@ that remain independently observable. A read through the original input or a
 metadata alias can require an entry copy; the copy runs before a `ForStmt` or
 `WhileStmt`, preserving zero-iteration behavior. Overlapping initial carry
 windows receive independent storage. Metadata-only views do not read data.
-For nested loops, earlier data observations are conservatively included in the
-indexed liveness decision to protect the next enclosing-loop iteration. A
-top-level loop does not need isolation solely because its input was read earlier.
+A read can recur across iterations only in an enclosing loop entered after the
+read handle's logical definition. Indexed recurrence intervals protect such
+reads, including those before an inner loop or in a sibling branch. A seed
+recreated inside each outer iteration does not need isolation merely because it
+was read earlier in that iteration; bare aliases and metadata views inherit the
+seed's definition. Reads outside a repeating region cannot recur within it.
+Forward observations still use both branch orders to exclude mutually exclusive
+sibling arms. The analysis remains O(N log N) without ancestor walks.
 
 For and While initializers, iter_args, results, and result views are aligned
 before producers are retargeted. Branch and loop yields use the same parallel
@@ -175,7 +180,8 @@ before placement. Post-reuse reconciliation repeats the same scheduling, and
 address placement cannot add new scratch or transfers.
 
 Storage requiring a same-space copy that the target cannot implement is rejected
-with an early diagnostic; in particular, a live Acc input cannot be preserved
+before any entry copy, yield transfer, or snapshot is synthesized. Same-space
+Mat, Left, Right, and Acc transfers receive an early diagnostic; a live Acc input cannot be preserved
 by an Acc-to-Acc move. The existing guarded accumulator producer coalescing
 remains available for compatible carries. Ambiguous view addresses and
 simultaneously overlapping destination windows must be resolved before final
