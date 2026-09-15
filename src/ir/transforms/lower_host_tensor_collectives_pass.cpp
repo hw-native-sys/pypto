@@ -562,6 +562,10 @@ StmtPtr EmitPerDeviceBuiltinCalls(const CallPtr& call, const HostCollectiveRule&
     if (IsOp(call, "pld.tensor.allreduce")) {
       CheckAllReduceSignalCapacity(call, rule.signal_expr(call), scope->devices_.size(),
                                    /*world_size_known=*/true);
+    } else if (IsOp(call, "pld.tensor.all_to_all_v")) {
+      // Barrier signal [NR, 1]; counts publish on recv_counts (may be wider unused).
+      CheckStaticSignalCapacity(call, rule.signal_expr(call), scope->devices_.size(),
+                                /*required_lanes=*/1, /*allow_wider_lanes=*/true);
     } else {
       CheckStaticSignalCapacity(call, rule.signal_expr(call), scope->devices_.size());
     }
@@ -587,6 +591,9 @@ StmtPtr EmitPerDeviceBuiltinCalls(const CallPtr& call, const HostCollectiveRule&
   // checked; pass 0 so only the world-size-independent constraints apply.
   if (IsOp(call, "pld.tensor.allreduce")) {
     CheckAllReduceSignalCapacity(call, rule.signal_expr(call), 0, /*world_size_known=*/false);
+  } else if (IsOp(call, "pld.tensor.all_to_all_v")) {
+    CheckStaticSignalCapacity(call, rule.signal_expr(call), 0, /*required_lanes=*/1,
+                              /*allow_wider_lanes=*/true);
   } else {
     CheckStaticSignalCapacity(call, rule.signal_expr(call), 0);
   }

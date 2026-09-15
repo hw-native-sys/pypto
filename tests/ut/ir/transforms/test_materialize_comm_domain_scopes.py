@@ -1284,7 +1284,7 @@ def test_all_to_all_v_signal_and_recv_counts_inherit_data_comm_domain():
         def host_orch(self):
             input_buf = pld.alloc_window_buffer(8 * 64 * pl.FP32.get_byte())
             data_buf = pld.alloc_window_buffer(8 * 64 * pl.FP32.get_byte())
-            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * 2 * pl.INT32.get_byte())
             counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             inp = pld.window(input_buf, [8, 64], dtype=pl.FP32)
@@ -1307,7 +1307,7 @@ def test_all_to_all_v_signal_and_recv_counts_inherit_data_comm_domain():
         [
             _expected_slot("input_buf", _mul(8 * 64, 4)),
             _expected_slot("data_buf", _mul(8 * 64, 4)),
-            _expected_slot("signal_buf", _mul(4, 4)),
+            _expected_slot("signal_buf", _mul(8, 4)),
             _expected_slot("counts_buf", _mul(4, 4)),
             _expected_slot("recv_buf", _mul(4, 4)),
         ],
@@ -1332,7 +1332,7 @@ def test_all_to_all_v_in_loop_is_rejected():
         def host_orch(self):
             input_buf = pld.alloc_window_buffer(8 * 64 * pl.FP32.get_byte())
             data_buf = pld.alloc_window_buffer(8 * 64 * pl.FP32.get_byte())
-            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * 2 * pl.INT32.get_byte())
             counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             inp = pld.window(input_buf, [8, 64], dtype=pl.FP32)
@@ -1368,7 +1368,7 @@ def test_all_to_all_v_in_while_loop_is_rejected():
         def host_orch(self):
             input_buf = pld.alloc_window_buffer(8 * 64 * pl.FP32.get_byte())
             data_buf = pld.alloc_window_buffer(8 * 64 * pl.FP32.get_byte())
-            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * 2 * pl.INT32.get_byte())
             counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             inp = pld.window(input_buf, [8, 64], dtype=pl.FP32)

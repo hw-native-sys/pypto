@@ -489,7 +489,12 @@ def all_to_all_v(
     count is floored at ``0`` — so a negative ``send_counts[dest]`` publishes
     ``recv_counts = 0`` rather than the negative value. The barrier signal is
     self-clearing (restored to zero after each call) and safe to reuse inside a
-    ``for``/``while`` loop.
+    ``for``/``while`` loop. It is also exchanged twice **within** a single call
+    on the HOST/L2 kernel — a start-of-call rendezvous before any payload push,
+    then the end-of-call completion barrier — both on the barrier signal.
+    Counts are published on ``recv_counts`` (not on ``signal``): the HOST/L2
+    kernel uses Set(0)+AtomicAdd(rows+1) / Wait on each peer's slot so a zero
+    count still unblocks and prior-call residue cannot accumulate.
 
     .. warning::
 
