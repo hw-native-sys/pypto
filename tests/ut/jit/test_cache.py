@@ -1214,6 +1214,37 @@ class TestConstexprParameters:
         with pytest.raises(TypeError, match=r"'N' is bound to 'n'.*no compile-time value"):
             _shadowed_entry.specialize(x, torch.zeros_like(x), 4)
 
+    def test_every_specialization_of_a_split_dep_reaches_the_key(self):
+        """A dep emitted twice contributes both bindings to the identity.
+
+        One record per *function* was enough while a dep had one binding. Now
+        that two call sites compile it separately, a key carrying only the
+        first would let a program calling the dep at 16 and 32 collide with one
+        calling it twice at 16 — different programs, and the second would be
+        served the first's artifact.
+        """
+
+        def folded(entry):
+            plan = entry._resolve_constexpr_bindings({})
+            return sorted(text for *_, name, text in entry._constexpr_identity_records(plan) if name == "N")
+
+        @pl.jit
+        def split(a: pl.Tensor[[32, 32], pl.FP32], o: pl.Out[pl.Tensor[[32, 32], pl.FP32]]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                pass
+            o = _constexpr_tile_dep(a, o, 16)
+            return _constexpr_tile_dep(a, o, 32)
+
+        @pl.jit
+        def same(a: pl.Tensor[[32, 32], pl.FP32], o: pl.Out[pl.Tensor[[32, 32], pl.FP32]]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                pass
+            o = _constexpr_tile_dep(a, o, 16)
+            return _constexpr_tile_dep(a, o, 16)
+
+        assert folded(split) == ["16", "32"]
+        assert folded(same) == ["16"]
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

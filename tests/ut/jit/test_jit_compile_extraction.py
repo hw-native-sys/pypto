@@ -16,6 +16,7 @@ Closes hw-native-sys/pypto#1455.
 
 import ctypes
 import importlib
+import re
 import warnings
 
 import pypto.language as pl
@@ -1049,6 +1050,25 @@ def _rebind_loop_target(
     return out
 
 
+def _generated_functions(source: str) -> dict[str, str]:
+    """Split generated ``@pl.program`` source into ``{function name: body text}``.
+
+    Lets a test assert which *specific* generated function a constant folded
+    into, rather than only that the constant appears somewhere in the program —
+    the distinction that matters once one dep is emitted once per binding.
+    """
+    bodies: dict[str, str] = {}
+    current: str | None = None
+    for line in source.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("def ") and "(" in stripped:
+            current = stripped[len("def ") : stripped.index("(")]
+            bodies[current] = ""
+        elif current is not None:
+            bodies[current] += line + "\n"
+    return bodies
+
+
 class TestConstexprThroughDeps:
     """A compile-time parameter keeps its meaning across a JIT call (issue #2759)."""
 
@@ -1096,11 +1116,12 @@ class TestConstexprThroughDeps:
 
         assert "[8, 8]" in entry.specialize(x, out).as_python()
 
-    def test_two_call_sites_with_different_constants_are_rejected(self, samples):
-        """One generated function per dep, so its constants must agree.
+    def test_two_call_sites_with_different_constants_each_get_a_function(self, samples):
+        """One generated function per *binding*, so both constants survive.
 
-        Resolving from the first call site would silently give the second the
-        wrong constant; multi-specialization is tracked separately.
+        The value is folded into the body, so a single generated function
+        cannot serve both call sites. Each binding is emitted separately and
+        each site is rewritten to reach its own.
         """
         x, out = samples
 
@@ -1111,8 +1132,35 @@ class TestConstexprThroughDeps:
             out = _module_constant_dep(x, out, 4)
             return _module_constant_dep(x, out, 16)
 
-        with pytest.raises(TypeError, match=r"'N' is called with two different values"):
-            entry.specialize(x, out)
+        source = entry.specialize(x, out).as_python()
+        bodies = _generated_functions(source)
+
+        assert "[4, 4]" in bodies["_module_constant_dep"]
+        assert "[16, 16]" in bodies["_module_constant_dep__2"]
+        # Each site reaches its own compilation, in source order — the first
+        # keeps the unsuffixed name.
+        called = re.findall(r"self\.(_module_constant_dep(?:__\d+)?)\(", source)
+        assert called == ["_module_constant_dep", "_module_constant_dep__2"]
+
+    def test_call_sites_that_agree_still_share_one_function(self, samples):
+        """Two sites at the same value must not split into two functions.
+
+        The binding is the identity, not the call site, so agreeing sites
+        collapse — otherwise every repeated call would duplicate the callee.
+        """
+        x, out = samples
+
+        @jit
+        def entry(x: pl.Tensor[[32, 32], pl.FP32], out: pl.Out[pl.Tensor[[32, 32], pl.FP32]]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                pass
+            out = _module_constant_dep(x, out, 16)
+            return _module_constant_dep(x, out, 16)
+
+        source = entry.specialize(x, out).as_python()
+
+        assert "def _module_constant_dep(" in source
+        assert "def _module_constant_dep__2(" not in source
 
     def test_every_documented_literal_form_binds_at_a_dep_call_site(self, samples):
         """A dep must accept the value forms the entry path accepts.
@@ -1128,12 +1176,12 @@ class TestConstexprThroughDeps:
         assert "Mem.Vec" in source
         assert "-1" in source
 
-    def test_two_callers_of_one_dep_disagreeing_are_rejected(self, samples):
-        """Divergence across *callers*, not just within one body, is caught.
+    def test_two_callers_of_one_dep_each_get_a_function(self, samples):
+        """Divergence across *callers*, not just within one body, splits too.
 
-        In a diamond the dep still gets one generated function, so resolving
-        from the first-recorded caller would fold its value and hand the other
-        branch the wrong constant with no diagnostic.
+        A diamond reaches the dep down two branches. Resolving from the
+        first-recorded caller would fold its value and hand the other branch
+        the wrong constant, so each branch gets its own compilation.
         """
         x, out = samples
 
@@ -1161,8 +1209,112 @@ class TestConstexprThroughDeps:
             o = left(a, o)
             return right(a, o)
 
-        with pytest.raises(TypeError, match=r"16 in 'left' and 32 in 'right'"):
-            diamond.specialize(x, out)
+        bodies = _generated_functions(diamond.specialize(x, out).as_python())
+
+        assert "[16, 16]" in bodies["shared"]
+        assert "[32, 32]" in bodies["shared__2"]
+
+    def test_splitting_survives_an_aliased_call_name(self, samples):
+        """The alias and the split resolve the callee together, not in turn.
+
+        ``dep_func_names`` maps a call name onto the generated function it
+        reaches; the split needs a *different* function per site of that same
+        name. Resolving either one alone gives the wrong callee.
+        """
+        x, out = samples
+        aliased = _module_constant_dep
+
+        @jit
+        def entry(a: pl.Tensor[[32, 32], pl.FP32], o: pl.Out[pl.Tensor[[32, 32], pl.FP32]]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                pass
+            o = aliased(a, o, 8)
+            return aliased(a, o, 24)
+
+        source = entry.specialize(x, out).as_python()
+        bodies = _generated_functions(source)
+
+        # Named after the callee, not the alias, and one per binding.
+        assert "[8, 8]" in bodies["_module_constant_dep"]
+        assert "[24, 24]" in bodies["_module_constant_dep__2"]
+        called = re.findall(r"self\.(_module_constant_dep(?:__\d+)?)\(", source)
+        assert called == ["_module_constant_dep", "_module_constant_dep__2"]
+
+    def test_a_forwarded_constant_splits_the_whole_chain(self, samples):
+        """Splitting a dep splits everything it forwards the value to.
+
+        ``entry -> mid(N) -> leaf(N)`` at two values needs two ``mid``s *and*
+        two ``leaf``s, with each ``mid`` calling its own ``leaf`` — one shared
+        ``leaf`` would serve one of them the other's constant.
+        """
+        x, out = samples
+
+        @jit.incore
+        def leaf(
+            a: pl.Tensor[[32, 32], pl.FP32],
+            o: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            N: pl.constexpr,
+        ):
+            pl.store(pl.load(a, [0, 0], [N, N]), [0, 0], o)
+            return o
+
+        @jit.incore
+        def mid(
+            a: pl.Tensor[[32, 32], pl.FP32],
+            o: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            N: pl.constexpr,
+        ):
+            return leaf(a, o, N)
+
+        @jit
+        def entry(a: pl.Tensor[[32, 32], pl.FP32], o: pl.Out[pl.Tensor[[32, 32], pl.FP32]]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                pass
+            o = mid(a, o, 8)
+            return mid(a, o, 24)
+
+        bodies = _generated_functions(entry.specialize(x, out).as_python())
+
+        assert "[8, 8]" in bodies["leaf"]
+        assert "[24, 24]" in bodies["leaf__2"]
+        assert "self.leaf(" in bodies["mid"]
+        assert "self.leaf__2(" in bodies["mid__2"]
+
+    def test_each_specialization_reads_its_own_call_site_metadata(self, samples):
+        """A split dep must take its tensors from the call that produced it.
+
+        Call-site arguments were resolved from the first call bearing the
+        name. That was sound while one binding meant one function; once the
+        second binding compiles separately it would fold its own constant over
+        the *first* site's tensors — here a ``[32, 32]`` extent loaded from a
+        ``[16, 16]`` parameter.
+        """
+        x, out = samples
+
+        @jit.incore
+        def sized(a: pl.Tensor, o: pl.Out[pl.Tensor], N: pl.constexpr):
+            pl.store(pl.load(a, [0, 0], [N, N]), [0, 0], o)
+            return o
+
+        @jit
+        def entry(a: pl.Tensor[[32, 32], pl.FP32], o: pl.Out[pl.Tensor[[32, 32], pl.FP32]]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                pass
+            small = pl.create_tensor([16, 16], dtype=pl.FP32)
+            big = pl.create_tensor([32, 32], dtype=pl.FP32)
+            sized(small, small, 16)
+            sized(big, big, 32)
+            return o
+
+        source = entry.specialize(x, out).as_python()
+        signatures = {
+            line.strip()[len("def ") : line.strip().index("(")]: line.strip()
+            for line in source.splitlines()
+            if line.strip().startswith("def sized")
+        }
+
+        assert "pl.Tensor[[16, 16], pl.FP32]" in signatures["sized"]
+        assert "pl.Tensor[[32, 32], pl.FP32]" in signatures["sized__2"]
 
     def test_assigning_to_a_constexpr_parameter_is_rejected(self, samples):
         """A rebind cannot take effect, so it must not compile silently.
