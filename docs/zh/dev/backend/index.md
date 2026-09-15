@@ -28,10 +28,11 @@ names = target.get_registered_op_names()
 列表也包含 IR 算子定义已不存在的历史后端条目；检视当前 IR 时，
 可通过 `ir.is_op_registered(name)` 区分这些条目。
 
-`tests/ut/backend/test_buffer_migration_inventory.py` 中的 Buffer 迁移检查
-将两个实际后端注册表与显式审核清单比较：22 个算子族、168 个有效名称和 8 个历史回调。
-它会检测名称的新增与删除、重复分类、目标架构变化，以及重新获得 IR 定义的历史回调。
-注册范围变化时，需要同步更新该测试的审核清单。
+审核清单位于 `tests/ut/backend/buffer_migration_inventory.py`：
+`MIGRATION_FAMILIES` 将 168 个有效名称分为 22 个算子族，
+`HISTORICAL_CALLBACKS` 记录 8 个历史回调。注册范围变化时，需要同步更新此模块。
+其校验文件 `tests/ut/backend/test_buffer_migration_inventory.py` 将清单与两个实际后端注册表比较，
+检测名称的新增与删除、重复分类、目标架构变化，以及重新获得 IR 定义的历史回调。
 
 清单中的 `PLANNED` 和 `RESTRICTED` 状态描述已声明的迁移成熟度。
 `RESTRICTED` 表示部分形式已实现，不保证所有数据类型、布局、属性或目标架构形式都受支持。

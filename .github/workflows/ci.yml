@@ -1745,7 +1745,7 @@ jobs:
       # file itself, as a `# ci: devices=N` marker on its own line, and the
       # --device-num below must match it. On main today that is one card for the
       # two Qwen3 examples and for decode_swa / decode_hca / decode_csa, and two
-      # for the three context-parallel prefill examples plus moe. Borrowing too
+      # for the three context-parallel prefill examples plus decode_moe. Borrowing too
       # few does not degrade gracefully -- the model aborts before it computes
       # anything, e.g. `CP2 requires 2 devices, got [1]` -- so when a step here
       # starts failing that way, re-read the marker rather than the model code:
@@ -1825,13 +1825,13 @@ jobs:
           task-submit --device "$DEVICE_ID" --device-num 2 --timeout 3600 --max-time 1800 \
             --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek_v4_flash_mtp/prefill_swa.py -p a2a3 -d \$TASK_DEVICE"
 
-      - name: Run pypto-lib DeepSeek-V4-Flash moe example
+      - name: Run pypto-lib DeepSeek-V4-Flash decode_moe example
         env:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
         run: |
           source activate.sh
           task-submit --device "$DEVICE_ID" --device-num 2 --timeout 3600 --max-time 1800 \
-            --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek_v4_flash_mtp/moe.py -p a2a3 -d \$TASK_DEVICE --ep 2"
+            --run "source $GITHUB_WORKSPACE/lib-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-lib && python models/deepseek_v4_flash_mtp/decode_moe.py -p a2a3 -d \$TASK_DEVICE --ep 2"
 
       - name: Kill orphaned task-submit tasks
         if: always()

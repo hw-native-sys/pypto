@@ -30,12 +30,14 @@ Registration alone does not guarantee support for every dtype, shape, or layout.
 The list also includes legacy backend entries whose IR operators no longer exist;
 use `ir.is_op_registered(name)` to distinguish those when auditing current IR.
 
-The Buffer migration guard in
-`tests/ut/backend/test_buffer_migration_inventory.py` compares both runtime
-registries with an explicit audit of 168 live names in 22 families and eight
-historical callbacks. It detects new or deleted names, duplicate classifications,
-target changes, and historical callbacks that acquire an IR definition. Update
-the test's audit ledger whenever the registered surface changes.
+The audit ledger lives in `tests/ut/backend/buffer_migration_inventory.py`:
+`MIGRATION_FAMILIES` classifies 168 live names in 22 families, and
+`HISTORICAL_CALLBACKS` records eight historical callbacks. Update this module
+whenever the registered surface changes. Its validator,
+`tests/ut/backend/test_buffer_migration_inventory.py`, compares the ledger with
+both runtime registries. It detects new or deleted names, duplicate
+classifications, target changes, and historical callbacks that acquire an IR
+definition.
 
 The ledger's `PLANNED` and `RESTRICTED` statuses describe declared migration
 maturity. `RESTRICTED` means some forms are implemented; it does not promise
