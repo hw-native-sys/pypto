@@ -47,6 +47,23 @@ class Ascend950Handler : public BackendHandler {
   [[nodiscard]] bool RequiresGMPipeBuffer() const override { return false; }
   [[nodiscard]] bool RequiresSplitLoadTpopWorkaround() const override { return false; }
   [[nodiscard]] bool RequiresLevel3TmpScratch() const override { return false; }
+
+  // A5 sizes both select scratches as one 32-byte block, source-independent.
+  [[nodiscard]] backend::TileScratchSpec GetTselScratchSpec() const override {
+    return {DataType::UINT8, 1, 32};
+  }
+  [[nodiscard]] backend::TileScratchSpec GetTselsScratchSpec(DataType /*src_dtype*/,
+                                                             int64_t /*src_cols*/) const override {
+    return {DataType::UINT8, 1, 32};
+  }
+
+  // A5 TSELS additionally covers the 8-bit integer forms.
+  [[nodiscard]] bool SupportsTselsDataType(const DataType& src_dtype) const override {
+    return src_dtype == DataType::INT8 || src_dtype == DataType::UINT8 || src_dtype == DataType::INT16 ||
+           src_dtype == DataType::UINT16 || src_dtype == DataType::INT32 || src_dtype == DataType::UINT32 ||
+           src_dtype == DataType::FP16 || src_dtype == DataType::FP32;
+  }
+
   [[nodiscard]] bool RequiresVtoCFractalAdapt() const override { return true; }
   [[nodiscard]] bool RequiresRuntimeSubblockBridge() const override { return false; }
   [[nodiscard]] bool RequiresNoSplitDualAivDispatch() const override { return false; }

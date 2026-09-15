@@ -765,11 +765,7 @@ static std::string MakeSelsCodegenPTO(const CallPtr& op, codegen::CodegenBase& c
   INTERNAL_CHECK(mask_type && src_type && tmp_type);
   const auto* handler = codegen.GetBackendHandler();
   const bool is_a5 = handler->GetPtoTargetArch() == "a5";
-  const auto dtype = src_type->dtype_;
-  const bool supported_on_a2a3 = dtype == DataType::INT16 || dtype == DataType::UINT16 ||
-                                 dtype == DataType::INT32 || dtype == DataType::UINT32 ||
-                                 dtype == DataType::FP16 || dtype == DataType::FP32;
-  CHECK_SPAN(supported_on_a2a3 || is_a5, op->span_)
+  CHECK_SPAN(handler->SupportsTselsDataType(src_type->dtype_), op->span_)
       << "tile.sels with integer src dtype " << src_type->dtype_.ToString()
       << " is only supported on the 'a5' backend; A2/A3 supports 16/32-bit integers, FP16, and FP32";
 

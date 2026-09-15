@@ -1534,6 +1534,83 @@ def sels(
     return _ir_core.create_op_call("tile.sels", [mask, src, tmp, scalar_expr], {}, actual_span)
 
 
+def select(
+    cond: Expr,
+    on_true: int | float | Expr,
+    on_false: int | float | Expr,
+    span: Span | None = None,
+) -> Call:
+    """Per-element value selection between two operands.
+
+    For each element (i, j): ``dst[i,j] = on_true[i,j] if cond[i,j] else on_false[i,j]``.
+
+    Unlike :func:`sel` / :func:`sels` this is a composite op: it carries no
+    ``tmp`` operand, and ``LowerCompositeOps`` expands it into the
+    ``tile.create`` / ``tile.sel`` / ``tile.sels`` chain with the architecture's
+    scratch geometry filled in.
+
+    Both branches are evaluated -- this selects values, it does not branch.
+
+    Operands must be rank 2; reshape an ND tile first. Two tile branches must
+    share a physical shape, valid extents, and dtype: the lowered TSEL reads both
+    sources element-wise, does not broadcast, and has one element type for both
+    sources and the result. Widen with :func:`expands` /
+    :func:`row_expand` / :func:`col_expand`, or :func:`cast`, first.
+
+    Args:
+        cond: The packed predicate mask returned by :func:`cmp` / :func:`cmps`
+            for this result's geometry. A 0/1 value tile is not accepted -- a
+            mask's valid extent counts carrier bytes where a value's counts
+            elements, so the two cannot be told apart reliably; convert one with
+            ``cmps(value, 0, cmp_type=1)``
+        on_true: Value selected where cond is true; a tile or a constant scalar
+        on_false: Value selected where cond is false; same forms as on_true
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for per-element selection
+
+    Raises:
+        ValueError: If both on_true and on_false are scalars -- there is no
+            shape to select into -- if two tile branches disagree on shape,
+            valid extents, or dtype, or if a scalar branch is not a compile-time
+            constant (it is materialized with ``tile.full``, which needs one)
+    """
+    actual_span = _get_span_or_capture(span)
+
+    def as_tile(value: int | float | Expr) -> Expr | None:
+        """The operand as a tile Expr, or None when it is a scalar branch."""
+        if isinstance(value, _ir_core.Expr) and isinstance(value.type, _ir_core.TileType):
+            return value
+        return None
+
+    true_tile = as_tile(on_true)
+    false_tile = as_tile(on_false)
+    shaped = true_tile if true_tile is not None else false_tile
+    if shaped is None:
+        raise ValueError(
+            "tile.select requires at least one of on_true/on_false to be a Tile, but both are "
+            f"scalars ({on_true!r}, {on_false!r}); there is no shape to select into"
+        )
+    # Re-stamp a scalar branch to the selected tile's element type, matching how
+    # tile.sels normalizes its own scalar operand.
+    true_arg: Expr = (
+        true_tile
+        if true_tile is not None
+        else _normalize_signless_same_width_scalar_operand(
+            shaped, on_true, actual_span, retype_constants=True
+        )
+    )
+    false_arg: Expr = (
+        false_tile
+        if false_tile is not None
+        else _normalize_signless_same_width_scalar_operand(
+            shaped, on_false, actual_span, retype_constants=True
+        )
+    )
+    return _ir_core.create_op_call("tile.select", [cond, true_arg, false_arg], {}, actual_span)
+
+
 def muls(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise multiplication of tile and scalar.
 

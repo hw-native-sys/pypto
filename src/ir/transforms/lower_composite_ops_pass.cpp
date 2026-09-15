@@ -22,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/comm.h"
@@ -959,6 +960,126 @@ ExprPtr LowerSinRule(const CallPtr& call, const std::vector<ExprPtr>& args, Lowe
 ExprPtr LowerCosRule(const CallPtr& call, const std::vector<ExprPtr>& args, LoweringBuilder& builder) {
   ValidateTrigArgs(args, call->span_, "tile.cos");
   return LowerSinCos(args[0], /*is_cos=*/true, builder, call->span_);
+}
+
+// ============================================================================
+// ``tile.select`` lowering — packed predicate mask + TSEL / TSELS.
+//
+// `tile.select(cond, on_true, on_false)` is the scratch-free selection surface;
+// `tile.sel` / `tile.sels` stay the 1:1 PTO forms where the caller owns the
+// scratch buffer.
+//
+// `cond` is already the packed predicate mask both TSEL and TSELS want --
+// `DeduceTileSelectType` accepts nothing else -- so the rule only has to pick
+// the PTO form and synthesize the scratch. TSELS covers `mask ? tile : scalar`
+// in one instruction; everything else materializes the scalar with `tile.full`
+// and uses TSEL, which is also where the dtypes with no TSELS form land (bf16 on
+// either arch, 8-bit integers on A2/A3).
+// ============================================================================
+
+/// Rebuild `scalar` as `dtype` when it is a literal, so the TSELS operand can
+/// satisfy the dtype pairing `tile.sels` requires. Returns nullptr for a
+/// non-literal of the wrong dtype, which routes the caller to the TSEL path.
+ExprPtr RetypeSelectScalar(const ExprPtr& scalar, DataType dtype, const Span& span) {
+  auto scalar_type = As<ScalarType>(scalar->GetType());
+  if (scalar_type && scalar_type->dtype_ == dtype) return scalar;
+  if (auto c = As<ConstInt>(scalar)) {
+    return std::make_shared<ConstInt>(c->value_, dtype, span);
+  }
+  if (auto c = As<ConstFloat>(scalar)) {
+    return std::make_shared<ConstFloat>(c->value_, dtype, span);
+  }
+  return nullptr;
+}
+
+/// Materialize `scalar` as a tile shaped like `model`, the other (shaped) branch.
+///
+/// `tile.full` is the only broadcast the tile pipeline can actually lower today:
+/// `tile.expands` has no PTO emitter (`pl.expands` fails codegen on main), so it
+/// is not an option here. That constrains the operand to a literal and the shape
+/// to static extents; `DeduceTileSelectType` enforces both at the user's call
+/// site, so reaching this function with anything else is a compiler bug.
+///
+/// `tile.full` stamps its result fully valid, which would widen a tail-narrowed
+/// select — `tile.sel` takes the result's valid extents from its `lhs`. Re-type
+/// the created call with `model`'s view so the materialized branch carries the
+/// same valid region as the branch it is standing in for.
+ExprPtr MaterializeSelectScalar(const ExprPtr& scalar, const std::shared_ptr<const TileType>& model,
+                                const std::string& name, LoweringBuilder& b, const Span& span) {
+  auto value = RetypeSelectScalar(scalar, model->dtype_, span);
+  INTERNAL_CHECK_SPAN(value, span)
+      << "Internal error: tile.select scalar operand is not a literal of the selected dtype";
+  std::vector<std::pair<std::string, std::any>> kwargs = {{"dtype", model->dtype_}};
+  auto shape = tile_conversion_utils::MakeShapeTuple(model->shape_, span);
+  auto created = As<Call>(OpRegistry::GetInstance().Create("tile.full", {shape, value}, kwargs, span));
+  INTERNAL_CHECK_SPAN(created, span) << "Internal error: tile.full did not produce a Call";
+  TileView view;
+  view.valid_shape = GetValidShape(model);
+  InheritTileViewLayout(view, model);
+  // Override only the view; every other field stays as tile.full deduced it, so
+  // the rewritten call still round-trips through print -> parse.
+  auto deduced = As<TileType>(created->GetType());
+  INTERNAL_CHECK_SPAN(deduced, span) << "Internal error: tile.full did not produce a TileType";
+  auto typed = std::make_shared<TileType>(deduced->shape_, deduced->dtype_, deduced->memref_, view,
+                                          deduced->memory_space_);
+  return b.Bind(
+      name,
+      std::make_shared<Call>(created->op_, created->args_, created->kwargs_, created->attrs_, typed, span),
+      span);
+}
+
+/// Bind a freshly created Vec scratch tile matching `spec`.
+ExprPtr BindSelectScratch(const backend::TileScratchSpec& spec, LoweringBuilder& b, const Span& span) {
+  std::vector<ExprPtr> dims = {std::make_shared<ConstInt>(spec.rows, DataType::INDEX, span),
+                               std::make_shared<ConstInt>(spec.cols, DataType::INDEX, span)};
+  std::vector<std::pair<std::string, std::any>> kwargs = {{"dtype", spec.dtype},
+                                                          {"target_memory", MemorySpace::Vec}};
+  auto shape = tile_conversion_utils::MakeShapeTuple(dims, span);
+  return b.Bind("sel_tmp", OpRegistry::GetInstance().Create("tile.create", {shape}, kwargs, span), span);
+}
+
+ExprPtr LowerTileSelectRule(const CallPtr& call, const std::vector<ExprPtr>& args, LoweringBuilder& b) {
+  const Span span = call->span_;
+  auto& reg = OpRegistry::GetInstance();
+
+  INTERNAL_CHECK_SPAN(args.size() == 3, span)
+      << "Internal error: tile.select lowering expects 3 args, got " << args.size();
+  auto result_type = As<TileType>(call->GetType());
+  INTERNAL_CHECK_SPAN(result_type, span) << "Internal error: tile.select lowering requires a TileType result";
+
+  // Type deduction already required cond to be the packed predicate mask for
+  // this result, which is what both TSEL and TSELS take.
+  const ExprPtr& mask = args[0];
+
+  // ---- TSELS where it applies, TSEL otherwise ------------------------------
+  auto true_tile = As<TileType>(args[1]->GetType());
+  auto false_tile = As<TileType>(args[2]->GetType());
+  const auto* handler = tile_conversion_utils::ActiveBackendHandler();
+
+  if (true_tile && !false_tile) {
+    // dst = mask ? src : scalar is exactly TSELS -- if the target has a form for
+    // this dtype, the source column count is static (A2/A3 sizes the scratch
+    // against one physical source row), and the scalar can carry the dtype
+    // `tile.sels` pairs with the source. Rank is not re-checked: this pass runs
+    // before FlattenTileNdTo2D, so `DeduceTileSelectType` already required the
+    // rank 2 `tile.sels` needs.
+    auto src_cols = As<ConstInt>(true_tile->shape_.back());
+    const bool dtype_ok = handler == nullptr || handler->SupportsTselsDataType(true_tile->dtype_);
+    ExprPtr scalar = RetypeSelectScalar(args[2], GetTselsScalarDataType(true_tile->dtype_), span);
+    if (dtype_ok && src_cols && scalar) {
+      auto tmp = BindSelectScratch(
+          tile_conversion_utils::TselsScratchSpec(true_tile->dtype_, src_cols->value_), b, span);
+      return reg.Create("tile.sels", {mask, args[1], tmp, scalar}, span);
+    }
+  }
+
+  // Type deduction guarantees at least one shaped branch, so the scalar side
+  // always has the other one to take its shape and valid extents from.
+  const auto& shaped = true_tile ? true_tile : false_tile;
+  ExprPtr on_true = true_tile ? args[1] : MaterializeSelectScalar(args[1], shaped, "sel_true", b, span);
+  ExprPtr on_false = false_tile ? args[2] : MaterializeSelectScalar(args[2], shaped, "sel_false", b, span);
+  auto tmp = BindSelectScratch(tile_conversion_utils::TselScratchSpec(), b, span);
+  return reg.Create("tile.sel", {mask, on_true, on_false, tmp}, span);
 }
 
 // ============================================================================
@@ -2602,6 +2723,9 @@ CompositeLoweringFn LookupCompositeRule(const std::string& op_name) {
       // tile.tquant_mx → tile.tquant_mx_raw + tile.tmov_x2zz (value-returning SSA).
       // Scratch tiles are created with MemorySpace::Vec before InferTileMemorySpace.
       {"tile.tquant_mx", &LowerTileTQuantMxRule},
+      // tile.select → [tile.cmps] + tile.create(scratch) + tile.sel|tile.sels.
+      // Scratch tiles are created with MemorySpace::Vec before InferTileMemorySpace.
+      {"tile.select", &LowerTileSelectRule},
       {"pld.tensor.allreduce", &LowerTensorAllReduceRule},
       {"pld.tensor.allgather", &LowerTensorAllGatherRule},
       {"pld.tensor.reduce_scatter", &LowerTensorReduceScatterRule},

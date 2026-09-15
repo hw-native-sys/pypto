@@ -56,7 +56,8 @@
 | [`maximum`][pypto.language.maximum] [`minimum`][pypto.language.minimum] | `pl.` | 两个操作数的逐元素最大 / 最小 |
 | [`maximums`][pypto.language.tile.maximums] [`minimums`][pypto.language.tile.minimums] | `pl.` (t) | 与标量的逐元素最大 / 最小 |
 | [`max`][pypto.language.tile.max] [`min`][pypto.language.tile.min] | `pl.` (t) | 两个标量取最大 / 最小 —— **不是** tile 规约。规约 tile 请用 `row_max` / `col_max`（以及对应的 `min` 形式） |
-| [`sel`][pypto.language.tile.sel] [`sels`][pypto.language.tile.sels] | `pl.` (t) | 按掩码选择，张量与标量形式 |
+| [`select`][pypto.language.tile.select] | `pl.` (t) | `out[i] = cond[i] ? a[i] : b[i]`。条件是 `cmp` / `cmps` 的掩码（若持有 0/1 值，请先比较：`cmps(v, 0, cmp_type=1)`）；任一分支可以是常量标量。不需要 scratch tile，由 lowering 补齐。两个 tile 分支的 shape、valid 范围与 dtype 必须一致 |
+| [`sel`][pypto.language.tile.sel] [`sels`][pypto.language.tile.sels] | `pl.` (t) | `select` 背后 1:1 对应 TSEL / TSELS 的形式：必须传掩码，scratch tile 由调用方提供 |
 
 ## 激活
 

@@ -1,6 +1,6 @@
 # LowerCompositeOps Pass
 
-Decomposes composite tile / distributed ops into primitive operations so codegen does not need to emit their high-level forms. Today the pass handles `tile.sin` / `tile.cos` (FP32 Cody-Waite + Horner), packed `tile.tquant_mx`, and `pld.tensor.*` distributed collectives (`allreduce` (mesh and ring), `allgather`, `reduce_scatter`, `broadcast`, `barrier`, `all_to_all`, `all_to_all_v`). Mesh and ring allreduce may also create a metadata-preserving `tensor.view` so tile load/remote/store operate on a 2D flattened target window.
+Decomposes composite tile / distributed ops into primitive operations so codegen does not need to emit their high-level forms. Today the pass handles `tile.sin` / `tile.cos` (FP32 Cody-Waite + Horner), `tile.select` (packed predicate mask + TSEL / TSELS), packed `tile.tquant_mx`, and `pld.tensor.*` distributed collectives (`allreduce` (mesh and ring), `allgather`, `reduce_scatter`, `broadcast`, `barrier`, `all_to_all`, `all_to_all_v`). Mesh and ring allreduce may also create a metadata-preserving `tensor.view` so tile load/remote/store operate on a 2D flattened target window.
 
 ## Overview
 
@@ -58,6 +58,34 @@ The lowering creates source-dtype `max` / `scaling` write-only workspace tiles, 
 On Ascend950, the public quant data and scale may feed `matmul_mx` in the same InCore mixed task. [ExpandMixedKernel](24-expand_mixed_kernel.md#mx-scale-v2c-transport) carries both results directly over V2C.
 
 The mutator records composite-produced `MakeTuple`s (and SSA aliases of those tuples) in a private `composite_tuples_` map so `TupleGetItem` projections fold without abusing global `var_remap_` for arbitrary `v = (a, b)` assignments. The internal `tile.tquant_mx_raw` / `tile.tmov_x2zz` ops are not registered as composite rules, preserving pass idempotency.
+
+## Algorithm (`tile.select` rule)
+
+`tile.select(cond, on_true, on_false)` is the scratch-free selection surface; `tile.sel` / `tile.sels` remain the 1:1 PTO forms where the caller owns the scratch buffer.
+
+**The condition is always the packed predicate mask** — the `tile.cmp` / `tile.cmps` result type for *this* result's geometry, `[M, roundup(ceil(N/8), 32)] UINT8` with `valid_shape[1] = ceil(valid_N/8)`. `IsPackedPredicateMask` (`include/pypto/ir/type_inference.h`) is the single check, shared by `DeduceTileSelectType` and this rule, so the mask arrives ready for both TSEL and TSELS and the rule synthesizes no compare at all.
+
+A plain 0/1 value tile is deliberately **not** a second accepted form. A mask's valid extent counts carrier *bytes* while a value's counts *elements*, so the two are different units that can match by coincidence: a `[M, 32]` UINT8 mask over a fully valid source has valid `[M, 4]`, exactly like a `[M, 32]` value tile with 4 valid columns. Any geometry-based classifier therefore has a case where it guesses wrong and re-compares the carrier bytes, silently discarding the packed predicate bits. Callers holding a value convert it explicitly with `tile.cmps(value, 0, cmp_type=1)`.
+
+**Pick the PTO form** from the two value branches:
+
+| `on_true` | `on_false` | Emitted | Why |
+| --------- | ---------- | ------- | --- |
+| tile | tile | `tile.create`(TSEL scratch) + `tile.sel(mask, T, F, tmp)` | TSEL takes two tile sources directly; nothing is materialized |
+| tile | scalar | `tile.create`(TSELS scratch) + `tile.sels(mask, T, tmp, F)` | exactly TSELS's shape, `dst = mask ? src : scalar`, one instruction |
+| scalar | tile | `tile.full(T)` + `tile.create`(TSEL scratch) + `tile.sel(mask, full, F, tmp)` | TSELS has no scalar-on-true form, so the scalar is materialized and TSEL used |
+
+Two cases push the tile/scalar row onto that last path too, because the target has no TSELS form for them: **A2/A3 8-bit integers** (`BackendHandler::SupportsTselsDataType`, the same predicate the `pto.tsels` emitter checks, so pass and emitter cannot drift) and a scalar whose dtype does not pair with the source. Deciding this in the pass is what keeps the program compilable — emitting `tile.sels` would only fail much later, at the emitter's own dtype check.
+
+`tile.full` is the only scalar broadcast the tile pipeline can lower: `tile.expands` has no PTO emitter, so `pl.expands` itself fails codegen. That constrains a scalar branch to a **literal** and the result to **static** extents, and `DeduceTileSelectType` enforces both so the diagnostic lands on the user's call rather than surfacing as a `tile.full` error from inside this pass.
+
+`tile.full` also stamps its result fully valid, and `tile.sel` reads the result's valid extents from its `lhs`, so a materialized branch would widen a tail-narrowed select. The rule re-types the created call with the other branch's view — overriding the view only, so the rewritten call still round-trips through print → parse.
+
+**Scratch geometry is backend-owned.** `BackendHandler::GetTselScratchSpec` / `GetTselsScratchSpec` supply it: A2/A3 uses `UINT32 [1, 16]` for TSEL and sizes TSELS against one complete physical source row in the source dtype (`src_dtype [1, N]`); A5 uses `UINT8 [1, 32]` for both. As with the `tile.tquant_mx` rule, the scratch `tile.create` stamps `MemorySpace::Vec` explicitly because this pass runs before `InferTileMemorySpace`.
+
+**Operands are rank 2.** `tile.sels` accepts nothing else, and `FlattenTileNdTo2D` — which would otherwise collapse an ND operand — runs *after* this pass (slot 14 vs 13) and does not cover the cmp/sel family, so an ND select would fail either in this rule or later at the `TileOps2D` verifier. `DeduceTileSelectType` rejects it up front and points at `tile.reshape`.
+
+**Two tile branches must agree on physical shape, valid extents, and dtype.** TSEL reads its two sources element-wise, does not broadcast, and has a single element type for `src0` / `src1` / `dst`. Accepting a `[1, N]` against an `[M, N]` would promise semantics the instruction cannot deliver — and would make the result depend on which side the narrow operand sat, since the shape would broadcast to `[M, N]` while the valid extents came from whichever branch was consulted. Promoting an FP16/FP32 pair to an FP32 result would emit a TSEL ptoas rejects with `expects src0, src1, and dst to have the same element type`. `tile.select` rejects all three mismatches at deduction and points at the explicit broadcast and cast ops.
 
 ## Algorithm (sin / cos rule)
 

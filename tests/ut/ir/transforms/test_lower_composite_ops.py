@@ -25,7 +25,9 @@ import re
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
-from pypto import ir, passes
+from pypto import DataType, ir, passes
+from pypto.backend import BackendType
+from pypto.ir.op import tile as _ir_ops_tile
 from pypto.language.parser.diagnostics.exceptions import ParserError
 from pypto.pypto_core import ir as _ir_core
 
@@ -3562,6 +3564,249 @@ def test_all_to_all_v_stage_tile_is_capped_to_one_chunk(size):
 
     After = passes.lower_composite_ops()(_build_all_to_all_v_before(size=size))
     assert (rows, cols) in _stage_tile_shapes(After)
+
+
+_OP_TILE_SELECT = ir.get_op("tile.select").name
+_OP_TILE_SEL = ir.get_op("tile.sel").name
+_OP_TILE_SELS = ir.get_op("tile.sels").name
+_OP_TILE_CMPS = ir.get_op("tile.cmps").name
+_OP_TILE_CMP = ir.get_op("tile.cmp").name
+_OP_TILE_FULL = ir.get_op("tile.full").name
+_OP_TILE_CREATE = ir.get_op("tile.create").name
+
+
+def _build_select_before(*, rows=16, cols=128, dtype=pl.FP32, form="mask-tile-scalar"):
+    """A one-``tile.select`` InCore program in each of the operand forms.
+
+    The body cannot branch on ``form`` -- the DSL parser has no way to capture a
+    ``str`` closure variable -- so each form gets its own program and the caller
+    picks one by name.
+    """
+    # LowerCompositeOps rewrites statement-level calls; in the real pipeline
+    # FlattenCallExpr (pass 06) has already bound every nested call by then, so
+    # these programs bind their intermediates the same way.
+    mask_cols = ((cols + 7) // 8 + 31) // 32 * 32
+
+    @pl.program
+    class MaskTileScalar:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main_incore_0(
+            self,
+            src: pl.Tensor[[rows, cols], dtype],
+            out: pl.Out[pl.Tensor[[rows, cols], dtype]],
+        ) -> pl.Tensor[[rows, cols], dtype]:
+            tv: pl.Tile[[rows, cols], dtype] = pl.load(src, [0, 0], [rows, cols])
+            mask: pl.Tile[[rows, mask_cols], pl.UINT8] = pl.tile.cmps(tv, 0, cmp_type=4)
+            selected: pl.Tile[[rows, cols], dtype] = pl.tile.select(mask, tv, 1)
+            return pl.store(selected, [0, 0], out)
+
+        @pl.function
+        def main(self, src: pl.Tensor[[rows, cols], dtype]) -> pl.Tensor[[rows, cols], dtype]:
+            out = pl.create_tensor([rows, cols], dtype=dtype)
+            return self.main_incore_0(src, out)
+
+    @pl.program
+    class MaskScalarTile:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main_incore_0(
+            self,
+            src: pl.Tensor[[rows, cols], dtype],
+            out: pl.Out[pl.Tensor[[rows, cols], dtype]],
+        ) -> pl.Tensor[[rows, cols], dtype]:
+            tv: pl.Tile[[rows, cols], dtype] = pl.load(src, [0, 0], [rows, cols])
+            mask: pl.Tile[[rows, mask_cols], pl.UINT8] = pl.tile.cmps(tv, 0, cmp_type=4)
+            selected: pl.Tile[[rows, cols], dtype] = pl.tile.select(mask, 1, tv)
+            return pl.store(selected, [0, 0], out)
+
+        @pl.function
+        def main(self, src: pl.Tensor[[rows, cols], dtype]) -> pl.Tensor[[rows, cols], dtype]:
+            out = pl.create_tensor([rows, cols], dtype=dtype)
+            return self.main_incore_0(src, out)
+
+    @pl.program
+    class MaskTileTile:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main_incore_0(
+            self,
+            src: pl.Tensor[[rows, cols], dtype],
+            out: pl.Out[pl.Tensor[[rows, cols], dtype]],
+        ) -> pl.Tensor[[rows, cols], dtype]:
+            tv: pl.Tile[[rows, cols], dtype] = pl.load(src, [0, 0], [rows, cols])
+            mask: pl.Tile[[rows, mask_cols], pl.UINT8] = pl.tile.cmp(tv, tv, cmp_type=4)
+            selected: pl.Tile[[rows, cols], dtype] = pl.tile.select(mask, tv, tv)
+            return pl.store(selected, [0, 0], out)
+
+        @pl.function
+        def main(self, src: pl.Tensor[[rows, cols], dtype]) -> pl.Tensor[[rows, cols], dtype]:
+            out = pl.create_tensor([rows, cols], dtype=dtype)
+            return self.main_incore_0(src, out)
+
+    return {
+        "mask-tile-scalar": MaskTileScalar,
+        "mask-scalar-tile": MaskScalarTile,
+        "mask-tile-tile": MaskTileTile,
+    }[form]
+
+
+def _select_scratch_shapes(prog):
+    """(rows, cols, dtype) of every ``tile.create`` result in the program."""
+    shapes = []
+
+    class Collector(ir.IRVisitor):
+        def visit_call(self, call: ir.Call) -> None:
+            if call.op.name == _OP_TILE_CREATE and isinstance(call.type, ir.TileType):
+                dims = [d.value for d in call.type.shape if isinstance(d, ir.ConstInt)]
+                shapes.append((tuple(dims), call.type.dtype))
+            super().visit_call(call)
+
+    Collector().visit_program(prog)
+    return shapes
+
+
+@pytest.mark.parametrize(
+    ("form", "expected_select_op", "materializes_scalar"),
+    [
+        ("mask-tile-scalar", _OP_TILE_SELS, False),
+        ("mask-scalar-tile", _OP_TILE_SEL, True),
+        ("mask-tile-tile", _OP_TILE_SEL, False),
+    ],
+)
+def test_tile_select_lowers_to_the_matching_pto_form(form, expected_select_op, materializes_scalar):
+    """Each operand form picks its one-instruction PTO counterpart where one exists.
+
+    ``dst = mask ? src : scalar`` is exactly TSELS. A scalar on the *true* side
+    has no TSELS form, so the scalar is materialized with ``tile.full`` and the
+    selection becomes TSEL.
+    """
+    After = passes.lower_composite_ops()(_build_select_before(form=form))
+    names = _collect_op_names(After)
+
+    assert _OP_TILE_SELECT not in names
+    assert expected_select_op in names
+    assert (_OP_TILE_FULL in names) == materializes_scalar
+    # The scratch operand tile.select does not carry is synthesized here.
+    assert _OP_TILE_CREATE in names
+
+
+@pytest.mark.parametrize("form", ["mask-tile-scalar", "mask-scalar-tile", "mask-tile-tile"])
+def test_tile_select_never_synthesizes_a_compare(form):
+    """The condition is already the mask both TSEL and TSELS take.
+
+    `tile.select` accepts only the packed predicate mask, so the lowering reuses
+    it verbatim and the compare count is unchanged. Asserting on the *delta*
+    rather than the total keeps this sharp: each program already contains exactly
+    one compare, so a total-count assertion would still hold if the lowering
+    re-derived a mask it had been handed.
+    """
+    Before = _build_select_before(form=form)
+
+    def compares(prog):
+        names = _collect_op_names(prog)
+        return names.count(_OP_TILE_CMPS) + names.count(_OP_TILE_CMP)
+
+    After = passes.lower_composite_ops()(Before)
+
+    assert compares(After) == compares(Before)
+
+
+def test_tile_select_keeps_a_narrowed_tail_on_a_materialized_scalar_branch():
+    """The materialized branch must carry the tail of the branch it stands in for.
+
+    ``tile.full`` stamps its result fully valid and ``tile.sel`` reads the result's
+    valid extents from its ``lhs``, so a scalar on the *true* side would otherwise
+    widen a tail-narrowed select back to the full tile.
+    """
+    rows, cols, valid_cols = 16, 128, 100
+    span = ir.Span.unknown()
+    view = ir.TileView(valid_shape=[rows, valid_cols], stride=[], start_offset=None)
+    src = ir.Var("src", ir.TileType([rows, cols], DataType.FP32, tile_view=view), span)
+    mask = _ir_ops_tile.cmps(src, 0.0, cmp_type=4)
+    # Scalar on the true side: no TSELS form, so this takes the tile.full path.
+    selected = _ir_ops_tile.select(mask, 0.0, src)
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(ir.Var("m", mask.type, span), mask, span),
+            ir.AssignStmt(ir.Var("o", selected.type, span), selected, span),
+        ],
+        span,
+    )
+    Before = ir.Program([ir.Function("f", [src], [], body, span)], "f", span)
+
+    After = passes.lower_composite_ops()(Before)
+    names = _collect_op_names(After)
+    assert _OP_TILE_SELECT not in names
+    assert _OP_TILE_FULL in names
+
+    full_valids = []
+
+    class Collector(ir.IRVisitor):
+        def visit_call(self, call: ir.Call) -> None:
+            if call.op.name == _OP_TILE_FULL and isinstance(call.type, ir.TileType):
+                valid = call.type.get_effective_tile_view().valid_shape
+                full_valids.append([d.value for d in valid if isinstance(d, ir.ConstInt)])
+            super().visit_call(call)
+
+    Collector().visit_program(After)
+    assert full_valids == [[rows, valid_cols]]
+
+
+@pytest.mark.parametrize("form", ["mask-tile-scalar", "mask-scalar-tile", "mask-tile-tile"], ids=lambda f: f)
+def test_tile_select_survives_the_default_pipeline(form, default_pass_manager, ascend_backend):
+    """Every operand form reaches the end of the pipeline, not just this pass.
+
+    `LowerCompositeOps` runs at slot 13 and `FlattenTileNdTo2D` at 14, so an
+    operand shape this rule emits has to be one the rest of the pipeline accepts.
+    Checking only this pass in isolation would miss that: the ND case that
+    prompted this test lowered cleanly here and then failed at the `TileOps2D`
+    verifier, which is why `tile.select` now requires rank 2 up front.
+    """
+    optimized = default_pass_manager.run_passes(_build_select_before(form=form))
+    names = _collect_op_names(optimized)
+
+    assert _OP_TILE_SELECT not in names
+    assert (_OP_TILE_SEL in names) or (_OP_TILE_SELS in names)
+
+
+@pytest.mark.parametrize(
+    ("ascend_backend", "expected_scratch"),
+    [
+        (BackendType.Ascend910B, ((1, 128), pl.FP16)),
+        (BackendType.Ascend950, ((1, 32), pl.UINT8)),
+    ],
+    indirect=["ascend_backend"],
+    ids=["a2a3", "a5"],
+)
+def test_tile_select_takes_the_tsels_scratch_geometry_from_the_backend(ascend_backend, expected_scratch):
+    """A2/A3 sizes the TSELS scratch against one complete physical source row, in
+    the source dtype; A5 uses one fixed 32-byte block."""
+    After = passes.lower_composite_ops()(_build_select_before(cols=128, dtype=pl.FP16))
+
+    assert _OP_TILE_SELS in _collect_op_names(After)
+    assert expected_scratch in _select_scratch_shapes(After)
+
+
+@pytest.mark.parametrize(
+    ("ascend_backend", "has_8bit_tsels"),
+    [(BackendType.Ascend910B, False), (BackendType.Ascend950, True)],
+    indirect=["ascend_backend"],
+    ids=["a2a3", "a5"],
+)
+def test_tile_select_routes_8bit_integers_around_the_missing_a2a3_tsels(ascend_backend, has_8bit_tsels):
+    """A2/A3 has no 8-bit TSELS, so the scalar is materialized and TSEL used instead.
+
+    Deciding this in the pass is what keeps the program compilable: emitting
+    ``tile.sels`` here would only fail much later, at the ``pto.tsels`` emitter's
+    own dtype check. A5 does have the 8-bit form and stays on the scalar path.
+    """
+    After = passes.lower_composite_ops()(_build_select_before(dtype=pl.INT8))
+    names = _collect_op_names(After)
+
+    assert (_OP_TILE_SELS in names) == has_8bit_tsels
+    assert (_OP_TILE_SEL in names) != has_8bit_tsels
+    # The fallback materializes the scalar branch and switches to TSEL's scratch.
+    assert (_OP_TILE_FULL in names) != has_8bit_tsels
+    expected_scratch = ((1, 32), pl.UINT8) if has_8bit_tsels else ((1, 16), pl.UINT32)
+    assert expected_scratch in _select_scratch_shapes(After)
 
 
 if __name__ == "__main__":

@@ -36,6 +36,20 @@ struct TcvtAdjacency {
 };
 
 /**
+ * @brief Shape and dtype of a compiler-synthesized scratch tile.
+ *
+ * Several PTO instructions take a scratch buffer as an explicit operand whose
+ * size and element type are architecture-defined. The tile frontend makes the
+ * caller supply it (`tile.sel` / `tile.sels`), but composite ops synthesize it,
+ * so the arch-specific sizing has to be reachable from a pass.
+ */
+struct TileScratchSpec {
+  DataType dtype;
+  int64_t rows;
+  int64_t cols;
+};
+
+/**
  * @brief Closed-form GEMM cost-model parameters consumed by ChooseL0Tile.
  *
  * Bandwidths are in BYTES PER CORE CYCLE, so the chooser can weight L1->L0
@@ -209,6 +223,33 @@ class BackendHandler {
    * PTOAS level-2 PlanMemory owns implicit tmp instead.
    */
   [[nodiscard]] virtual bool RequiresLevel3TmpScratch() const = 0;
+
+  /**
+   * @brief Shape and dtype of the scratch tile `pto.tsel` takes as operand 3.
+   *
+   * TSEL's scratch is source-independent, so the spec is a per-arch constant.
+   */
+  [[nodiscard]] virtual TileScratchSpec GetTselScratchSpec() const = 0;
+
+  /**
+   * @brief Shape and dtype of the scratch tile `pto.tsels` takes as operand 2.
+   *
+   * Unlike TSEL's, this one depends on the source tile: A2/A3 sizes it against
+   * one complete physical source row, in the source dtype.
+   *
+   * @param src_dtype Element type of the TSELS source tile.
+   * @param src_cols  Physical column count of the TSELS source tile.
+   */
+  [[nodiscard]] virtual TileScratchSpec GetTselsScratchSpec(DataType src_dtype, int64_t src_cols) const = 0;
+
+  /**
+   * @brief Whether `pto.tsels` accepts this source element type on this arch.
+   *
+   * A2/A3 has no 8-bit TSELS. A `tile.select` against a scalar therefore has to
+   * fall back to materializing the scalar and using TSEL instead, which the
+   * LowerCompositeOps rule decides by asking this.
+   */
+  [[nodiscard]] virtual bool SupportsTselsDataType(const DataType& src_dtype) const = 0;
 
   /**
    * @brief Whether AIV-side V-to-C tpush must materialise a fractal-layout
