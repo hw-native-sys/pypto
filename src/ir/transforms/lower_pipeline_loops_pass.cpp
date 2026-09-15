@@ -95,10 +95,11 @@ int64_t GetConstIntValue(const ExprPtr& expr, const std::string& what) {
 ///
 /// One loop *does* tag its cube accumulator: the moving loop of a dbC=2
 /// double-buffered-L0C emit (kPipelineDoubleBufferCAttr), which genuinely co-lives
-/// two accumulators. The tag initially records the full source stage so
-/// CanonicalizeIOOrder can schedule a deeper operand pipeline in depth-two
-/// compute/drain chunks; that pass then rotates each replicated group's Acc
-/// membership modulo two before MemoryReuse consumes it. See
+/// two accumulators. The tag initially records the full source stage; that pass
+/// then rotates each replicated group's Acc membership modulo two before
+/// MemoryReuse consumes it, so a deeper operand pipeline keeps its depth while
+/// L0C uses exactly two slots. The statement order is NOT changed -- the ordinary
+/// stage-major order already issues each drain after its own MAD. See
 /// `loop_double_buffers_c_` in the tagger.
 ///
 /// `SkewCrossCorePipeline::MembershipTagger` stamps the same attr but is NOT a
