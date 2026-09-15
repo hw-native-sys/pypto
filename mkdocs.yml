@@ -215,11 +215,15 @@ nav:
           - en/user/ops/00-dispatch.md
           - en/user/ops/01-catalog.md
       - en/user/00-getting_started.md
-      - Tools:
+      - DFX Tools:
           - en/user/tools/index.md
           - en/user/tools/00-debugging.md
           - en/user/tools/01-torch-codegen.md
           - en/user/tools/02-memory-map.md
+          - en/user/tools/03-ir-trace.md
+          - en/user/tools/04-runtime-dfx.md
+          - en/user/tools/05-replay.md
+          - en/user/tools/06-incore-trace.md
       - Appendix:
           - en/user/appendix/index.md
           - en/user/appendix/00-feature-matrix.md

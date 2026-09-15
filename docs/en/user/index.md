@@ -30,7 +30,7 @@ constrain execution order.
 
 [Programming Model § memory hierarchy](03-programming-model.md#memory-hierarchy) →
 [Diagnostics](../dev/passes/92-diagnostics.md) →
-[Runtime DFX](../dev/03-runtime-dfx.md)
+[Runtime DFX](tools/04-runtime-dfx.md)
 
 Check `report/perf_hints.log` from your compile output before measuring anything — the
 compiler may already have told you. [Performance](performance/index.md) is the dedicated
@@ -56,7 +56,7 @@ cross-rank overlap.
 | [Operations](ops/index.md) | Choosing between the `pl.*`, `pl.tensor.*`, and `pl.tile.*` namespaces, plus the operator catalog |
 | [Compiling a Program](execution/00-compile.md) | `ir.compile()` and `JITFunction.compile()`, and inspecting the result |
 | [Running on Device](execution/01-run.md) | Resident device tensors, explicit dispatch, and the `RunConfig` fields that affect dispatch |
-| [Torch Codegen Debug Guide](tools/01-torch-codegen.md) | Generating a PyTorch reference implementation from the IR to isolate accuracy problems |
+| [DFX Tools](tools/index.md) | The observability surface: error types and pass dumps, torch codegen, the memory map, the IR trace, the five runtime collection flags, replay, and in-core traces |
 | [Distributed Programming](distributed/index.md) | Symmetric-memory model, collectives, primitives, execution, and debugging for cross-rank programs |
 
 ## What PyPTO gives you
@@ -73,8 +73,9 @@ cross-rank overlap.
 | Distributed (multi-card) programs and collectives | [Distributed Programming](distributed/index.md) |
 | Accuracy debugging against a PyTorch reference | [Torch Codegen Debug Guide](tools/01-torch-codegen.md) |
 | Compile-time diagnostics and performance hints | [Diagnostics](../dev/passes/92-diagnostics.md) |
-| Runtime DFX: swimlane, PMU, dependency graph, scope stats | [Runtime DFX](../dev/03-runtime-dfx.md) |
-| On-chip memory map visualization | [Memory Map](../dev/07-memory-map.md) |
+| Runtime DFX: swimlane, args dump, PMU, dependency graph, scope stats | [Runtime DFX](tools/04-runtime-dfx.md) |
+| On-chip memory map visualization | [Memory Map](tools/02-memory-map.md) |
+| Per-pass IR diffs, replaying a build, in-core instruction traces | [IR trace](tools/03-ir-trace.md), [Replay](tools/05-replay.md), [In-core trace](tools/06-incore-trace.md) |
 
 ## What is not here yet
 
@@ -87,7 +88,7 @@ corresponding material lives in the [developer documentation](../dev/index.md):
 | ----- | ---------------- |
 | Mixed kernels (AIC + AIV in one function) | [LowerAutoVectorSplit](../dev/passes/23-lower_auto_vector_split.md), [ExpandMixedKernel](../dev/passes/24-expand_mixed_kernel.md), [TPUSH/TPOP](../reference/pto-isa/01-tpush_tpop.md) |
 | Performance hints and diagnostics | [Diagnostics](../dev/passes/92-diagnostics.md), [Compile Profiling](../dev/01-compile-profiling.md) |
-| Runtime DFX flags, ring sizing, memory map | [Runtime DFX](../dev/03-runtime-dfx.md), [Per-Task Ring Sizing](../dev/05-runtime-ring-sizing.md), [Memory Map](../dev/07-memory-map.md) |
+| Ring sizing | [Per-Task Ring Sizing](../dev/05-runtime-ring-sizing.md) |
 | External C++ kernels | [Integrating Hand-Written C++ Kernels](../dev/language/04-external-kernels.md) |
 
 ## See Also

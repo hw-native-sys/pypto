@@ -26,7 +26,7 @@
 
 [编程模型 § 内存层次](03-programming-model.md) →
 [诊断](../dev/passes/92-diagnostics.md) →
-[运行时 DFX](../dev/03-runtime-dfx.md)
+[运行期 DFX](tools/04-runtime-dfx.md)
 
 在动手测量之前，先看编译产物里的 `report/perf_hints.log` —— 编译器可能已经告诉你了。
 性能专章见 [性能](performance/index.md)。
@@ -50,7 +50,7 @@
 | [算子](ops/index.md) | 在 `pl.*`、`pl.tensor.*`、`pl.tile.*` 之间取舍，以及算子目录 |
 | [编译程序](execution/00-compile.md) | `ir.compile()` 与 `JITFunction.compile()`，以及检视结果 |
 | [在设备上运行](execution/01-run.md) | 常驻设备张量、显式派发，以及影响派发的 `RunConfig` 字段 |
-| [Torch Codegen 调试指南](tools/01-torch-codegen.md) | 从 IR 生成 PyTorch 参考实现，用于定位精度问题 |
+| [DFX 工具](tools/index.md) | 可观测面：错误类型与 pass dump、torch codegen、内存图、IR trace、五个运行期采集开关、回放,以及 in-core trace |
 | [分布式编程](distributed/index.md) | 跨 rank 程序的对称内存模型、集合通信、底层原语、执行与调试 |
 
 ## PyPTO 提供了什么
@@ -67,8 +67,9 @@
 | 分布式（多卡）程序与集合通信 | [分布式编程](distributed/index.md) |
 | 对照 PyTorch 参考实现做精度定位 | [Torch Codegen 调试指南](tools/01-torch-codegen.md) |
 | 编译期诊断与性能提示 | [诊断](../dev/passes/92-diagnostics.md) |
-| 运行时 DFX：swimlane、PMU、依赖图、scope stats | [运行时 DFX](../dev/03-runtime-dfx.md) |
-| 片上内存图可视化 | [内存图](../dev/07-memory-map.md) |
+| 运行期 DFX：swimlane、参数 dump、PMU、依赖图、scope stats | [运行期 DFX](tools/04-runtime-dfx.md) |
+| 片上内存图可视化 | [内存图](tools/02-memory-map.md) |
+| 逐 pass IR diff、回放一次构建、in-core 指令 trace | [IR trace](tools/03-ir-trace.md)、[回放](tools/05-replay.md)、[In-core trace](tools/06-incore-trace.md) |
 
 ## 尚未收录的内容
 
@@ -79,7 +80,7 @@
 | ---- | -------- |
 | 混合 kernel（AIC + AIV 同一函数） | [LowerAutoVectorSplit](../dev/passes/23-lower_auto_vector_split.md)、[ExpandMixedKernel](../dev/passes/24-expand_mixed_kernel.md)、[TPUSH/TPOP](../reference/pto-isa/01-tpush_tpop.md) |
 | 性能提示与诊断 | [诊断](../dev/passes/92-diagnostics.md)、[编译性能剖析](../dev/01-compile-profiling.md) |
-| 运行时 DFX 开关、ring sizing、memory map | [运行时 DFX](../dev/03-runtime-dfx.md)、[逐任务 Ring Sizing](../dev/05-runtime-ring-sizing.md)、[内存图](../dev/07-memory-map.md) |
+| Ring sizing | [逐任务 Ring Sizing](../dev/05-runtime-ring-sizing.md) |
 | 外部 C++ kernel | [集成手写 C++ Kernel](../dev/language/04-external-kernels.md) |
 
 ## 另请参阅

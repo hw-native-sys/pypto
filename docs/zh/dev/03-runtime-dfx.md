@@ -212,7 +212,7 @@ with pl.manual_scope():
 
 两种情况都无需任何 tag 迁移；多层内联在 pass 的 fixpoint 内被正确处理。
 
-### 限制
+### 限制 {#limitations}
 
 | 标记位置 / 目标 | 状态 |
 | --------------- | ---- |
