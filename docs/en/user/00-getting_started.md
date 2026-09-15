@@ -213,8 +213,10 @@ Details:
   default.
 - **Through a dep**, the value forwards (`helper(x, out, BLOCK)`) or is written
   at the call site (`helper(x, out, 64)`). One generated function is emitted per
-  dependency, so every call site of one dep must agree; calling it with two
-  different constants is an error that names both.
+  *binding*, not per dependency: call sites that agree share one, and a dep
+  called at two different constants is compiled once for each, with each call
+  site wired to its own. Splitting propagates — a dep that forwards the value
+  onward splits everything downstream of it too.
 
 Compared with the alternatives: a module-level constant is still right for a
 fixed configuration, and a closure factory still works for several. `constexpr`

@@ -12,6 +12,7 @@
 import ast
 import importlib
 import inspect
+import re
 import types
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event, current_thread
@@ -1071,6 +1072,21 @@ def _attr_cfg_entry(a: pl.Tensor[[32, 32], pl.FP32], out: pl.Out[pl.Tensor[[32, 
     return _constexpr_tile_dep(a, out, _CONSTEXPR_SETTINGS.BLOCK)
 
 
+# Three call sites, two of them pinned to literals and the third steered by a
+# config attribute. Flipping the attribute leaves the binding *set* at {16, 32}
+# and only moves which specialization the third site reaches.
+_TARGET_SWITCH_SETTINGS = types.SimpleNamespace(N=16)
+
+
+@pl.jit
+def _target_switch_entry(a: pl.Tensor[[32, 32], pl.FP32], out: pl.Out[pl.Tensor[[32, 32], pl.FP32]]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        pass
+    out = _constexpr_tile_dep(a, out, 16)
+    out = _constexpr_tile_dep(a, out, 32)
+    return _constexpr_tile_dep(a, out, _TARGET_SWITCH_SETTINGS.N)
+
+
 @pl.jit
 def _shadowed_entry(
     a: pl.Tensor[[32, 32], pl.FP32],
@@ -1213,6 +1229,87 @@ class TestConstexprParameters:
 
         with pytest.raises(TypeError, match=r"'N' is bound to 'n'.*no compile-time value"):
             _shadowed_entry.specialize(x, torch.zeros_like(x), 4)
+
+    def test_every_specialization_of_a_split_dep_reaches_the_key(self):
+        """A dep emitted twice contributes both bindings to the identity.
+
+        One record per *function* was enough while a dep had one binding. Now
+        that two call sites compile it separately, a key carrying only the
+        first would let a program calling the dep at 16 and 32 collide with one
+        calling it twice at 16 — different programs, and the second would be
+        served the first's artifact.
+        """
+
+        def folded(entry):
+            plan = entry._resolve_constexpr_bindings({})
+            return sorted(text for *_, name, text in entry._constexpr_identity_records(plan) if name == "N")
+
+        @pl.jit
+        def split(a: pl.Tensor[[32, 32], pl.FP32], o: pl.Out[pl.Tensor[[32, 32], pl.FP32]]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                pass
+            o = _constexpr_tile_dep(a, o, 16)
+            return _constexpr_tile_dep(a, o, 32)
+
+        @pl.jit
+        def same(a: pl.Tensor[[32, 32], pl.FP32], o: pl.Out[pl.Tensor[[32, 32], pl.FP32]]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                pass
+            o = _constexpr_tile_dep(a, o, 16)
+            return _constexpr_tile_dep(a, o, 16)
+
+        assert folded(split) == ["16", "32"]
+        assert folded(same) == ["16"]
+
+    def test_retargeting_a_call_site_moves_the_key(self):
+        """Which specialization a site reaches is identity, not just which exist.
+
+        With calls at ``16``, ``32`` and ``cfg.N``, flipping ``cfg.N`` between
+        the two literals leaves the binding set at ``{16, 32}`` and only moves
+        the third call's target. Recording the bindings alone left the key
+        still while the generated program changed, and an attribute is
+        invisible to ``_get_source_hash``, so the artifact compiled for the
+        other target was served.
+        """
+        from pypto.jit.decorator import _request_source_hash  # noqa: PLC0415
+
+        torch = pytest.importorskip("torch")
+        x = torch.zeros(32, 32, dtype=torch.float32)
+        out = torch.zeros_like(x)
+
+        def probe():
+            entry = _target_switch_entry
+            plan = entry._resolve_constexpr_bindings({})
+            key = _request_source_hash(entry._get_source_hash(), entry._constexpr_identity_records(plan))
+            source = entry.specialize(x, out).as_python()
+            return key, re.findall(r"self\.(_constexpr_tile_dep(?:__\d+)?)\(", source)
+
+        original = _TARGET_SWITCH_SETTINGS.N
+        try:
+            _TARGET_SWITCH_SETTINGS.N = 16
+            key_16, calls_16 = probe()
+            _TARGET_SWITCH_SETTINGS.N = 32
+            key_32, calls_32 = probe()
+        finally:
+            _TARGET_SWITCH_SETTINGS.N = original
+
+        # Only the third site moves; the first two stay pinned to their literals.
+        assert calls_16 == ["_constexpr_tile_dep", "_constexpr_tile_dep__2", "_constexpr_tile_dep"]
+        assert calls_32 == ["_constexpr_tile_dep", "_constexpr_tile_dep__2", "_constexpr_tile_dep__2"]
+        assert key_16 != key_32
+
+    def test_an_unsplit_program_records_no_call_wiring(self):
+        """The wiring is redundant until something splits, so it is not emitted.
+
+        With one binding per function each call name has a single possible
+        target, so adding wiring records there would invalidate every existing
+        key and its artifacts to say nothing new.
+        """
+        plan = _attr_cfg_entry._resolve_constexpr_bindings({})
+        records = _attr_cfg_entry._constexpr_identity_records(plan)
+
+        assert records, "the dep's own binding must still be recorded"
+        assert all(len(record) == 5 for record in records)
 
 
 if __name__ == "__main__":
