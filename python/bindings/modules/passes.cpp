@@ -400,8 +400,8 @@ void BindPass(nb::module_& m) {
              "accumulator producers write directly into the carried buffer. Split out of MemoryReuse\n"
              "so it can run without legacy opportunistic reuse (memory_planner=DSA_RP or PTOAS).");
 
-  passes.def("verify_tile_storage", &pass::VerifyTileStorage,
-             "Verify canonical device region storage before address placement");
+  passes.def("verify_tile_storage", &pass::VerifyTileStorage, nb::arg("allocated") = false,
+             "Verify canonical device storage; allocated=True also checks effective address overlap");
 
   passes.def("memory_reuse", &pass::MemoryReuse,
              "Create a memory reuse pass\n\n"

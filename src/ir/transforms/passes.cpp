@@ -182,13 +182,14 @@ Pass RunVerifier(const IRPropertySet& properties) {
       "IRVerifier");
 }
 
-Pass VerifyTileStorage() {
+Pass VerifyTileStorage(bool allocated) {
+  const auto property = allocated ? IRProperty::TileStorageAllocated : IRProperty::TileStorageLegalized;
   return CreateProgramPass(
-      [](const ProgramPtr& program) -> ProgramPtr {
-        PropertyVerifierRegistry::GetInstance().VerifyOrThrow({IRProperty::TileStorageLegalized}, program);
+      [property](const ProgramPtr& program) -> ProgramPtr {
+        PropertyVerifierRegistry::GetInstance().VerifyOrThrow({property}, program);
         return program;
       },
-      "VerifyTileStorage", PassProperties{.produced = {IRProperty::TileStorageLegalized}});
+      allocated ? "VerifyTileStorageAllocated" : "VerifyTileStorage", PassProperties{.produced = {property}});
 }
 
 void VerifyProperties(const IRPropertySet& properties, const ProgramPtr& program,

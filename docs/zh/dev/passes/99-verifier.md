@@ -259,6 +259,11 @@ WindowBuffer 直接出现在表达式中时（包括 `EvalStmt` 和调用参数�
 地址分配 pass 时仍运行此检查。构建和执行 `PassManager` 时必须使用相同的
 Buffer IR 选项。
 
+对于 PYPTO 和 DSA_RP，启用后的流水线还会在 `AllocateMemoryAddr` 之后立即运行
+`passes.verify_tile_storage(allocated=True)`。该 `VerifyTileStorageAllocated` pass
+即使在关闭自动验证时也会显式检查并产生 `TileStorageAllocated` 属性。PTOAS
+没有地址分配 pass，因此只运行符号存储检查。
+
 符号检查区分 allocation 身份。PYPTO 和 DSA_RP 使用 `TileStorageAllocated`
 追加物理检查：同一内存空间中的窗口按实际字节地址检查重叠，base 变量不同也
 不能证明互不重叠。非完全相同而重叠的 `tile.move` 操作数会被拒绝；完全相同的

@@ -299,6 +299,13 @@ and produces this property even with automatic verification disabled. The staged
 and before `AllocateMemoryAddr`; PTOAS also runs it while skipping that allocator.
 Build and execute a `PassManager` under the same Buffer IR option.
 
+For PYPTO and DSA_RP, the enabled pipeline also runs
+`passes.verify_tile_storage(allocated=True)` immediately after
+`AllocateMemoryAddr`. This named `VerifyTileStorageAllocated` pass explicitly
+checks and establishes `TileStorageAllocated` even when automatic verification
+is disabled. PTOAS has no address-placement pass and keeps only the symbolic
+check.
+
 Symbolic checks distinguish allocation identities. `TileStorageAllocated` adds
 physical checks for PYPTO and DSA_RP: windows in one memory space must not overlap
 by effective byte address, even when their base variables differ. Non-identical

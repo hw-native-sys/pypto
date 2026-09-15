@@ -385,6 +385,8 @@ class PassManager:
             if pass_obj.get_name() in skipped_mem_planning_passes:
                 continue
             self._pipeline.add_pass(pass_obj)
+            if self._construction_buffer_ir and pass_obj.get_name() == "AllocateMemoryAddr":
+                self._pipeline.add_pass(passes.verify_tile_storage(allocated=True))
 
     @property
     def passes(self) -> tuple[passes.Pass, ...]:

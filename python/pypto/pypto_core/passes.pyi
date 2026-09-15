@@ -385,8 +385,8 @@ def init_mem_ref() -> Pass:
 def materialize_semantic_aliases() -> Pass:
     """Create the semantic must-alias materialization pass (loop-carry / in-place)."""
 
-def verify_tile_storage() -> Pass:
-    """Verify canonical device region storage before address placement."""
+def verify_tile_storage(allocated: bool = False) -> Pass:
+    """Verify canonical storage; allocated=True also checks effective address overlap."""
 
 def memory_reuse() -> Pass:
     """Create a memory reuse pass."""

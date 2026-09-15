@@ -161,8 +161,8 @@ Pass InitMemRef();
  */
 Pass MaterializeSemanticAliases();
 
-/// Verify and establish TileStorageLegalized after shared storage repair, before address placement.
-Pass VerifyTileStorage();
+/// Verify canonical storage; allocated=true additionally checks effective address overlap.
+Pass VerifyTileStorage(bool allocated = false);
 
 /**
  * @brief Create a memory reuse pass

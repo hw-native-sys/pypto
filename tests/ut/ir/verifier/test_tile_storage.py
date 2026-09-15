@@ -180,7 +180,37 @@ def test_named_storage_check_precedes_address_placement_for_every_planner(planne
     if "MemoryReuse" in names:
         assert names.index("MemoryReuse") < names.index("VerifyTileStorage")
     if "AllocateMemoryAddr" in names:
-        assert names.index("VerifyTileStorage") < names.index("AllocateMemoryAddr")
+        placement = names.index("AllocateMemoryAddr")
+        assert names.index("VerifyTileStorage") == placement - 1
+        assert names.index("VerifyTileStorageAllocated") == placement + 1
+    else:
+        assert "VerifyTileStorageAllocated" not in names
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+def test_pipeline_allocated_check_rejects_unsafe_placement_without_automatic_verification(planner):
+    source, destination = _tile("source"), _tile("destination", offset=64)
+    move = ir.Call(
+        ir.get_op("tile.move"), [source], {"target_memory": ir.MemorySpace.Vec}, destination.type, SPAN
+    )
+    program = _program(ir.AssignStmt(destination, move, SPAN), [source])
+    with passes.PassContext([], passes.VerificationLevel.NONE, memory_planner=planner, enable_buffer_ir=True):
+        manager = PassManager(OptimizationStrategy.Default)
+        checks = [step for step in manager.passes if step.get_name().startswith("VerifyTileStorage")]
+        assert len(checks) == 2
+        # Distinct allocation identities are valid before placement, but the
+        # allocator must not place these copy operands at overlapping addresses.
+        checks[0](program)
+        with pytest.raises(Error, match="windows overlap"):
+            checks[1](program)
+
+
+@pytest.mark.parametrize("planner", PLANNERS)
+def test_default_pipeline_keeps_storage_verification_opt_in(planner):
+    with passes.PassContext([], memory_planner=planner):
+        names = PassManager(OptimizationStrategy.Default).get_pass_names()
+    assert "VerifyTileStorage" not in names
+    assert "VerifyTileStorageAllocated" not in names
 
 
 def test_pipeline_rejects_changing_buffer_mode_after_construction():
