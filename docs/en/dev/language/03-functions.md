@@ -127,9 +127,12 @@ prepared = add_three.warmup(config=config)  # No sample tensor allocation.
 You can supply sample tensors as with `compile()`; warmup reads their metadata,
 not their contents. With complete tensor annotations, omit the tensors entirely:
 scalar parameters are runtime values, so they need no value here, and dynamic
-extents retain the existing compile rules. When calling the returned compiled
-object, supply its full parameter list, including scalar arguments — that is
-where each scalar's value is read.
+extents retain the existing compile rules. A `pl.constexpr` parameter is the
+exception: its value selects the artifact, so it must be supplied as a keyword
+or a signature default. When calling the returned compiled object, supply its
+full parameter list, including scalar arguments — that is where each scalar's
+value is read. A constexpr parameter is absent from that list; the artifact
+already resolved it.
 Execution-only settings such as `codegen_only` do not suppress binary preparation.
 
 The result is the same compiled object selected by `compile()`, with live IR

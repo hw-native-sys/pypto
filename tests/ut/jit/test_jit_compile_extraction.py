@@ -368,9 +368,9 @@ class TestCompileFromSignature:
         any concrete extent (dynamic dim marked, static dim/dtype identical)."""
         torch = pytest.importorskip("torch")
 
-        _, _, meta_sig, _, _ = sig_kernel._bind_args_from_signature({})
+        _, _, meta_sig, _, cx, _ = sig_kernel._bind_args_from_signature({})
         t = torch.zeros(512, 128, dtype=torch.float32)
-        _, _, meta_tensor, _, _ = sig_kernel._bind_args((t, t), {})
+        _, _, meta_tensor, _, cx, _ = sig_kernel._bind_args((t, t), {})
         for name in ("a", "c"):
             assert meta_sig[name].dynamic_dim_indices() == meta_tensor[name].dynamic_dim_indices() == {0}
             assert meta_sig[name].static_shape()[1] == meta_tensor[name].static_shape()[1] == 128
@@ -380,12 +380,12 @@ class TestCompileFromSignature:
         """Specializing from the signature yields the same IR as from tensors."""
         torch = pytest.importorskip("torch")
 
-        _, _, tm_s, sd_s, dyn_s = sig_kernel._bind_args_from_signature({})
-        prog_sig = sig_kernel._compile_to_program(tm_s, sd_s, dyn_s, pl)
+        _, _, tm_s, sd_s, cx, dyn_s = sig_kernel._bind_args_from_signature({})
+        prog_sig = sig_kernel._compile_to_program(tm_s, sd_s, cx, dyn_s, pl)
 
         t = torch.zeros(64, 128, dtype=torch.float32)
-        _, _, tm_t, sd_t, dyn_t = sig_kernel._bind_args((t, t), {})
-        prog_tensor = sig_kernel._compile_to_program(tm_t, sd_t, dyn_t, pl)
+        _, _, tm_t, sd_t, cx, dyn_t = sig_kernel._bind_args((t, t), {})
+        prog_tensor = sig_kernel._compile_to_program(tm_t, sd_t, cx, dyn_t, pl)
 
         ir.assert_structural_equal(prog_sig, prog_tensor)
 
@@ -414,11 +414,11 @@ class TestCompileFromSignature:
             c = a
             return c
 
-        _, _, _, scalar_dtypes, _ = scalar_sig_kernel._bind_args_from_signature({})
+        _, _, _, scalar_dtypes, cx, _ = scalar_sig_kernel._bind_args_from_signature({})
         assert scalar_dtypes == {"n": pl.INT32}
 
         with pytest.warns(DeprecationWarning, match="no longer folds that value"):
-            _, _, _, kw_dtypes, _ = scalar_sig_kernel._bind_args_from_signature({"n": 7})
+            _, _, _, kw_dtypes, cx, _ = scalar_sig_kernel._bind_args_from_signature({"n": 7})
         assert kw_dtypes == {"n": pl.INT32}
 
     def test_runtime_marker_still_accepted(self):
@@ -427,8 +427,8 @@ class TestCompileFromSignature:
         It stays accepted so existing signatures keep working; the resulting
         metadata is the dtype alone, exactly as when nothing is passed.
         """
-        _, _, _, marked, _ = rt_scalar_kernel._bind_args_from_signature({"n": pl.RUNTIME})
-        _, _, _, unmarked, _ = rt_scalar_kernel._bind_args_from_signature({})
+        _, _, _, marked, cx, _ = rt_scalar_kernel._bind_args_from_signature({"n": pl.RUNTIME})
+        _, _, _, unmarked, cx, _ = rt_scalar_kernel._bind_args_from_signature({})
         assert marked == unmarked == {"n": pl.FP32}
 
     def test_scalar_stays_symbolic_in_program_whatever_was_passed(self):
@@ -443,8 +443,8 @@ class TestCompileFromSignature:
         for kwargs in ({"n": pl.RUNTIME}, {"n": 7.0}, {}):
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", DeprecationWarning)
-                _, _, tm, sd, dyn = rt_scalar_kernel._bind_args_from_signature(kwargs)
-            programs.append(str(rt_scalar_kernel._compile_to_program(tm, sd, dyn, pl)))
+                _, _, tm, sd, cx, dyn = rt_scalar_kernel._bind_args_from_signature(kwargs)
+            programs.append(str(rt_scalar_kernel._compile_to_program(tm, sd, cx, dyn, pl)))
 
         for prog in programs:
             # 'n' is a parameter of both the entry and the dep, and every use
@@ -457,8 +457,8 @@ class TestCompileFromSignature:
     def test_runtime_scalar_forwards_dtype_to_dep(self):
         """A runtime scalar carries no value, but its dtype still reaches the dep
         it is forwarded to."""
-        _, _, tm, sd, dyn = rt_scalar_kernel._bind_args_from_signature({"n": pl.RUNTIME})
-        contexts = rt_scalar_kernel._build_contexts(tm, sd, dyn)
+        _, _, tm, sd, cx, dyn = rt_scalar_kernel._bind_args_from_signature({"n": pl.RUNTIME})
+        contexts = rt_scalar_kernel._build_contexts(tm, sd, cx, dyn)
         dep_ctx = next(c for c in contexts if c.func_name == "_rt_add_scalar_incore")
         assert dep_ctx.scalar_dtypes == {"n": pl.FP32}
 
@@ -466,10 +466,10 @@ class TestCompileFromSignature:
         """``pl.RUNTIME`` as the signature default makes the parameter runtime
         without the caller passing anything — through to the generated program
         (the specializer drops Python defaults, so the marker never leaks)."""
-        _, _, tm, sd, dyn = rt_scalar_default_kernel._bind_args_from_signature({})
+        _, _, tm, sd, cx, dyn = rt_scalar_default_kernel._bind_args_from_signature({})
         assert sd == {"n": pl.FP32}
 
-        prog = str(rt_scalar_default_kernel._compile_to_program(tm, sd, dyn, pl))
+        prog = str(rt_scalar_default_kernel._compile_to_program(tm, sd, cx, dyn, pl))
         assert "n: pl.Scalar[pl.FP32]" in prog
         assert "pl.RUNTIME" not in prog
         assert "pl.tile.adds(tile, n)" in prog
@@ -533,7 +533,7 @@ class TestCompileFromSignature:
         spec.loader.exec_module(module)
 
         kernel = module.make_closure_kernel()
-        _, _, tensor_meta, _, _ = kernel._bind_args_from_signature({})
+        _, _, tensor_meta, _, cx, _ = kernel._bind_args_from_signature({})
         assert tensor_meta["a"].dynamic_dim_indices() == {0}
         assert tensor_meta["a"].static_shape()[1] == 64
         assert tensor_meta["a"].dtype == pl.FP32
@@ -570,8 +570,8 @@ class TestAnnotationLayoutReachesTheProgram:
     """
 
     def _entry_param_type(self, kernel):
-        _, _, tm, sd, dyn = kernel._bind_args_from_signature({})
-        program = kernel._compile_to_program(tm, sd, dyn, pl)
+        _, _, tm, sd, cx, dyn = kernel._bind_args_from_signature({})
+        program = kernel._compile_to_program(tm, sd, cx, dyn, pl)
         return list(program.functions.values())[0].params[0].type
 
     def test_layout_reaches_the_param_type(self):
@@ -582,8 +582,8 @@ class TestAnnotationLayoutReachesTheProgram:
 
     def test_unannotated_layout_stays_absent(self):
         """The plain two-slot form must not gain a view."""
-        _, _, tm, sd, dyn = _mx_kernel._bind_args_from_signature({})
-        program = _mx_kernel._compile_to_program(tm, sd, dyn, pl)
+        _, _, tm, sd, cx, dyn = _mx_kernel._bind_args_from_signature({})
+        program = _mx_kernel._compile_to_program(tm, sd, cx, dyn, pl)
         out_param = list(program.functions.values())[0].params[1]
         assert out_param.type.tensor_view is None
 
@@ -625,8 +625,8 @@ class TestDepDeclaredLayout:
     """
 
     def test_dep_layout_survives_when_caller_declares_none(self):
-        _, _, tm, sd, dyn = _calls_mx_dep._bind_args_from_signature({})
-        program = _calls_mx_dep._compile_to_program(tm, sd, dyn, pl)
+        _, _, tm, sd, cx, dyn = _calls_mx_dep._bind_args_from_signature({})
+        program = _calls_mx_dep._compile_to_program(tm, sd, cx, dyn, pl)
         views = [
             p.type.tensor_view
             for f in program.functions.values()
@@ -683,9 +683,9 @@ class TestNzOnTensorIsNotJitSpecific:
             pl.store(t, [0, 0], c)
             return c
 
-        _, _, tm, sd, dyn = kernel._bind_args_from_signature({})
+        _, _, tm, sd, cx, dyn = kernel._bind_args_from_signature({})
         assert tm["a"].layout == ir.TensorLayout.NZ
-        program = kernel._compile_to_program(tm, sd, dyn, pl)
+        program = kernel._compile_to_program(tm, sd, cx, dyn, pl)
         view = list(program.functions.values())[0].params[0].type.tensor_view
         assert view is not None and view.layout == ir.TensorLayout.NZ
 
@@ -933,6 +933,305 @@ def test_warm_cache_hit_does_not_probe_toolchain(kernel, monkeypatch):
 
     monkeypatch.setattr(importlib.import_module("pypto.jit.decorator"), "find_ptoas_binary", fail_discovery)
     assert kernel.compile() is cached
+
+
+@jit.incore
+def _constexpr_dep(
+    x: pl.Tensor[[32, 32], pl.FP32],
+    out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+    scale: pl.Scalar[pl.FP32],
+    BLOCK: pl.constexpr,
+):
+    tile = pl.load(x, [0, 0], [BLOCK, BLOCK])
+    pl.store(pl.add(tile, scale), [0, 0], out)
+    return out
+
+
+@jit
+def _constexpr_entry(
+    x: pl.Tensor[[32, 32], pl.FP32],
+    out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+    scale: pl.Scalar[pl.FP32],
+    BLOCK: pl.constexpr,
+):
+    return _constexpr_dep(x, out, scale, BLOCK)
+
+
+_DEP_TILE = 8
+
+
+@jit.incore
+def _module_constant_dep(
+    x: pl.Tensor[[32, 32], pl.FP32], out: pl.Out[pl.Tensor[[32, 32], pl.FP32]], N: pl.constexpr
+):
+    pl.store(pl.load(x, [0, 0], [N, N]), [0, 0], out)
+    return out
+
+
+@jit.incore
+def _literal_forms_dep(
+    a: pl.Tensor[[32, 32], pl.FP32],
+    o: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+    BIAS: pl.constexpr,
+    SHAPE: pl.constexpr,
+    MEM: pl.constexpr,
+):
+    tile = pl.load(a, [0, 0], SHAPE, target_memory=MEM)
+    pl.store(pl.add(tile, BIAS), [0, 0], o)
+    return o
+
+
+@jit
+def _literal_forms_entry(a: pl.Tensor[[32, 32], pl.FP32], o: pl.Out[pl.Tensor[[32, 32], pl.FP32]]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        pass
+    return _literal_forms_dep(a, o, -1, [16, 32], pl.Mem.Vec)
+
+
+@jit
+def _slice_write_literal(x: pl.Tensor[[128, 128], pl.FP32], out: pl.Out[pl.Tensor[[128, 128], pl.FP32]]):
+    out[0:64, 0:128] = pl.add(x[0:64, 0:128], 1.0)
+    return out
+
+
+@jit
+def _slice_write_constexpr(
+    x: pl.Tensor[[128, 128], pl.FP32],
+    out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+    BLOCK: pl.constexpr,
+):
+    out[0:BLOCK, 0:128] = pl.add(x[0:BLOCK, 0:128], 1.0)
+    return out
+
+
+@jit
+def _rebind_plain(
+    x: pl.Tensor[[128, 128], pl.FP32],
+    out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+    BLOCK: pl.constexpr,
+):
+    BLOCK = 32
+    out[0:BLOCK, 0:128] = pl.add(x[0:BLOCK, 0:128], 1.0)
+    return out
+
+
+@jit
+def _rebind_augmented(
+    x: pl.Tensor[[128, 128], pl.FP32],
+    out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+    BLOCK: pl.constexpr,
+):
+    BLOCK += 1
+    out[0:BLOCK, 0:128] = pl.add(x[0:BLOCK, 0:128], 1.0)
+    return out
+
+
+@jit
+def _rebind_unpacked(
+    x: pl.Tensor[[128, 128], pl.FP32],
+    out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+    BLOCK: pl.constexpr,
+):
+    _unused, BLOCK = 1, 32
+    out[0:BLOCK, 0:128] = pl.add(x[0:BLOCK, 0:128], 1.0)
+    return out
+
+
+@jit
+def _rebind_loop_target(
+    x: pl.Tensor[[128, 128], pl.FP32],
+    out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+    BLOCK: pl.constexpr,
+):
+    # PLR1704 is the point: this fixture exists to be refused by the specializer.
+    for BLOCK in pl.range(2):  # noqa: PLR1704
+        out[0:64, 0:128] = pl.add(x[0:64, 0:128], 1.0)
+    return out
+
+
+class TestConstexprThroughDeps:
+    """A compile-time parameter keeps its meaning across a JIT call (issue #2759)."""
+
+    @pytest.fixture
+    def samples(self):
+        torch = pytest.importorskip("torch")
+        x = torch.zeros(32, 32, dtype=torch.float32)
+        return x, torch.zeros_like(x)
+
+    def test_forwarded_constant_folds_in_the_dep(self, samples):
+        """The entry's constant reaches the dep body, and the call drops the arg.
+
+        The dep no longer declares the parameter, so a forwarded argument would
+        be an arity mismatch at the generated call site.
+        """
+        x, out = samples
+        source = _constexpr_entry.specialize(x, out, 1.0, 16).as_python()
+
+        assert "pl.tile.load(x, [0, 0], [16, 16]" in source
+        assert "self._constexpr_dep(x, out, scale)" in source
+        assert "BLOCK" not in source
+
+        other = _constexpr_entry.specialize(x, out, 1.0, 32).as_python()
+        assert "pl.tile.load(x, [0, 0], [32, 32]" in other
+
+    def test_a_literal_at_the_dep_call_site_binds_it(self, samples):
+        x, out = samples
+
+        @jit
+        def entry(x: pl.Tensor[[32, 32], pl.FP32], out: pl.Out[pl.Tensor[[32, 32], pl.FP32]]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                pass
+            return _module_constant_dep(x, out, 4)
+
+        assert "[4, 4]" in entry.specialize(x, out).as_python()
+
+    def test_a_module_constant_at_the_dep_call_site_binds_it(self, samples):
+        x, out = samples
+
+        @jit
+        def entry(x: pl.Tensor[[32, 32], pl.FP32], out: pl.Out[pl.Tensor[[32, 32], pl.FP32]]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                pass
+            return _module_constant_dep(x, out, _DEP_TILE)
+
+        assert "[8, 8]" in entry.specialize(x, out).as_python()
+
+    def test_two_call_sites_with_different_constants_are_rejected(self, samples):
+        """One generated function per dep, so its constants must agree.
+
+        Resolving from the first call site would silently give the second the
+        wrong constant; multi-specialization is tracked separately.
+        """
+        x, out = samples
+
+        @jit
+        def entry(x: pl.Tensor[[32, 32], pl.FP32], out: pl.Out[pl.Tensor[[32, 32], pl.FP32]]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                pass
+            out = _module_constant_dep(x, out, 4)
+            return _module_constant_dep(x, out, 16)
+
+        with pytest.raises(TypeError, match=r"'N' is called with two different values"):
+            entry.specialize(x, out)
+
+    def test_every_documented_literal_form_binds_at_a_dep_call_site(self, samples):
+        """A dep must accept the value forms the entry path accepts.
+
+        Only ``ast.Constant`` reached the renderer at first, so a negative
+        number, a list and an enum member — ``UnaryOp`` / ``List`` /
+        ``Attribute`` nodes — were rejected as having no compile-time value.
+        """
+        x, out = samples
+        source = _literal_forms_entry.specialize(x, out).as_python()
+
+        assert "[16, 32]" in source
+        assert "Mem.Vec" in source
+        assert "-1" in source
+
+    def test_two_callers_of_one_dep_disagreeing_are_rejected(self, samples):
+        """Divergence across *callers*, not just within one body, is caught.
+
+        In a diamond the dep still gets one generated function, so resolving
+        from the first-recorded caller would fold its value and hand the other
+        branch the wrong constant with no diagnostic.
+        """
+        x, out = samples
+
+        @jit.incore
+        def shared(
+            a: pl.Tensor[[32, 32], pl.FP32],
+            o: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            N: pl.constexpr,
+        ):
+            pl.store(pl.load(a, [0, 0], [N, N]), [0, 0], o)
+            return o
+
+        @jit.inline
+        def left(a: pl.Tensor[[32, 32], pl.FP32], o: pl.Out[pl.Tensor[[32, 32], pl.FP32]]):
+            return shared(a, o, 16)
+
+        @jit.inline
+        def right(a: pl.Tensor[[32, 32], pl.FP32], o: pl.Out[pl.Tensor[[32, 32], pl.FP32]]):
+            return shared(a, o, 32)
+
+        @jit
+        def diamond(a: pl.Tensor[[32, 32], pl.FP32], o: pl.Out[pl.Tensor[[32, 32], pl.FP32]]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                pass
+            o = left(a, o)
+            return right(a, o)
+
+        with pytest.raises(TypeError, match=r"16 in 'left' and 32 in 'right'"):
+            diamond.specialize(x, out)
+
+    def test_assigning_to_a_constexpr_parameter_is_rejected(self, samples):
+        """A rebind cannot take effect, so it must not compile silently.
+
+        Every load folds to the call-site value, so ``BLOCK = BLOCK // 2``
+        left the later loads on the original constant and leaked the
+        assignment into the body as a stray runtime local.
+        """
+        x, out = samples
+
+        @jit
+        def rebind(
+            a: pl.Tensor[[32, 32], pl.FP32],
+            o: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            BLOCK: pl.constexpr,
+        ):
+            BLOCK = BLOCK // 2
+            with pl.at(level=pl.Level.CORE_GROUP):
+                pl.store(pl.load(a, [0, 0], [BLOCK, BLOCK]), [0, 0], o)
+            return o
+
+        with pytest.raises(ValueError, match=r"'BLOCK' is a 'pl.constexpr' parameter"):
+            rebind.specialize(x, out, 32)
+
+    def test_a_constexpr_read_in_a_slice_assign_target_is_not_a_rebind(self):
+        """Reading a constexpr inside a store target must stay legal.
+
+        ``out[0:BLOCK, ...] = ...`` stores through a subscript whose *slice*
+        loads ``BLOCK``. Walking the target for any occurrence rejected it,
+        refusing the most natural use of a compile-time extent while the same
+        statement written with a literal compiled.
+        """
+        torch = pytest.importorskip("torch")
+        a = torch.zeros(128, 128, dtype=torch.float32)
+        out = torch.zeros_like(a)
+
+        literal = _slice_write_literal.specialize(a, out).as_python()
+        folded = _slice_write_constexpr.specialize(a, out, 64).as_python()
+        assert "64" in literal
+        assert "64" in folded
+
+    @pytest.mark.parametrize(
+        "kernel",
+        ["_rebind_plain", "_rebind_augmented", "_rebind_unpacked", "_rebind_loop_target"],
+    )
+    def test_every_binding_form_of_a_constexpr_is_rejected(self, kernel):
+        """The Store-only rule must still catch each way a name can be bound."""
+        torch = pytest.importorskip("torch")
+        a = torch.zeros(128, 128, dtype=torch.float32)
+
+        with pytest.raises(ValueError, match=r"'BLOCK' is a 'pl.constexpr' parameter"):
+            globals()[kernel].specialize(a, torch.zeros_like(a), 64)
+
+    def test_a_runtime_scalar_at_the_dep_call_site_is_rejected(self, samples):
+        """A value that only exists at dispatch cannot fill a compile-time slot."""
+        x, out = samples
+
+        @jit
+        def entry(
+            x: pl.Tensor[[32, 32], pl.FP32],
+            out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            n: pl.Scalar[pl.INT32],
+        ):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                pass
+            return _module_constant_dep(x, out, n)
+
+        with pytest.raises(TypeError, match=r"no compile-time value"):
+            entry.specialize(x, out, 4)
 
 
 if __name__ == "__main__":

@@ -191,6 +191,34 @@ class TestJITExecution:
             prepared(x, out, value, config=test_config)
             torch.testing.assert_close(out, torch.full_like(out, 2.0 + value))
 
+    def test_constexpr_selects_the_tile_and_scalar_stays_runtime(self, test_config):
+        """A compile-time constant shapes the kernel; a scalar still varies per run.
+
+        The pair on one kernel is the point: ``TILE`` picks which artifact runs,
+        ``value`` is read at dispatch, and only ``TILE`` recompiles (issue #2759).
+        """
+
+        @pl.jit
+        def tiled_add(
+            x: pl.Tensor[[16, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            value: pl.Scalar[pl.FP32],
+            TILE: pl.constexpr,
+        ):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                tile = pl.load(x, [0, 0], [TILE, TILE])
+                pl.store(pl.add(tile, value), [0, 0], out)
+            return out
+
+        x = torch.full((16, 16), 2.0)
+        for tile_size in (8, 16):
+            for value in (3.0, -1.5):
+                out = torch.zeros_like(x)
+                tiled_add(x, out, value, tile_size, config=test_config)
+                # Only the leading tile_size x tile_size block is written.
+                written = out[:tile_size, :tile_size]
+                torch.testing.assert_close(written, torch.full_like(written, 2.0 + value))
+
     def test_inplace_add(self, test_config):
         """@pl.jit: first call compiles and executes correctly on device."""
         add_kernel._cache.clear()

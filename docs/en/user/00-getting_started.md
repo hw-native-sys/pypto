@@ -163,12 +163,76 @@ throwaway `torch.empty(...)` buffers. Details:
   and `kernel(x, out, 256)` reuse one compilation.
   `pl.RUNTIME` is still accepted (it is what every scalar now does) and passing
   a literal to `compile()` warns, because it used to mean the opposite.
+- **`pl.constexpr` parameters** are the opposite end of that axis — see
+  "Compile-time parameters" below.
 - A **bare `pl.Tensor`** parameter (no shape) has nothing to read and raises a
   clear error; give it a full `pl.Tensor[[...], dtype]` annotation, or fall back
   to `compile(*sample_tensors)`.
 
 See `examples/runtime/explicit_dispatch.py` for three end-to-end patterns
 (inference service, training loop, register/dispatch overhead check).
+
+### Compile-time parameters (`pl.constexpr`)
+
+A `pl.Scalar[dtype]` parameter is a runtime value. Some values cannot be: a tile
+shape, an unroll extent, or a branch the compiler must resolve away. Annotate
+those `pl.constexpr` and the compiler folds the call site's value into the body,
+keys the artifact on it, and drops the parameter — a constexpr parameter reaches
+neither the generated program nor the dispatch ABI.
+
+```python
+@pl.jit
+def kernel(
+    x: pl.Tensor[[32, 32], pl.FP32],
+    out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+    scale: pl.Scalar[pl.FP32],   # runtime: one artifact serves every value
+    BLOCK: pl.constexpr,         # compile-time: one artifact per value
+):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        pl.store(pl.add(pl.load(x, [0, 0], [BLOCK, BLOCK]), scale), [0, 0], out)
+    return out
+
+kernel(x, out, scale=1.0, BLOCK=16)
+kernel(x, out, scale=2.0, BLOCK=16)   # same artifact — only the scalar changed
+kernel(x, out, scale=2.0, BLOCK=32)   # a second artifact
+```
+
+Details:
+
+- **The annotation** is the `pl.constexpr` singleton, an instance of
+  `pl.ConstexprMarker`; use the singleton rather than the class.
+- **Supported values** are exactly those a module-level constant may hold, since
+  the two fold by the same rule: `int`, `float`, `bool`, `str`, a dtype such as
+  `pl.FP32`, an enum member such as `pl.Mem.Vec`, and lists of those. A value
+  with no source form is rejected and names the parameter.
+- **Cache identity** is the folded source text, so two values that emit the same
+  text share an artifact and any difference splits it — in process and in the
+  [persistent cache](../dev/10-jit-cache.md) alike.
+- **A value is required.** Unlike a scalar there is no dispatch to fall back on,
+  so `compile()` / `lower()` / `warmup()` need it as a keyword or a signature
+  default.
+- **Through a dep**, the value forwards (`helper(x, out, BLOCK)`) or is written
+  at the call site (`helper(x, out, 64)`). One generated function is emitted per
+  dependency, so every call site of one dep must agree; calling it with two
+  different constants is an error that names both.
+
+Compared with the alternatives: a module-level constant is still right for a
+fixed configuration, and a closure factory still works for several. `constexpr`
+is for when the configuration belongs in the call:
+
+```python
+# Before: a factory per configuration, and callers juggle the kernel objects.
+def build(block: int):
+    BLOCK = block
+    @pl.jit
+    def kernel(x, out): ...   # BLOCK folds from the closure
+    return kernel
+kernels = {b: build(b) for b in (64, 128, 256)}
+kernels[128](x, out)
+
+# After: one kernel, the configuration is an argument.
+kernel(x, out, BLOCK=128)
+```
 
 ### Reading per-launch timing
 

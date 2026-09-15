@@ -256,6 +256,7 @@ from .typing import (
     Array,
     AsyncEvent,
     AsyncSession,
+    ConstexprMarker,
     DynVar,
     InOut,
     IntLike,
@@ -267,6 +268,7 @@ from .typing import (
     Tensor,
     Tile,
     Tuple,
+    constexpr,
     dynamic,
 )
 
@@ -323,6 +325,8 @@ __all__ = [
     "Tensor",
     "Tile",
     "Scalar",
+    "constexpr",
+    "ConstexprMarker",
     "Array",
     "Tuple",
     "DynVar",

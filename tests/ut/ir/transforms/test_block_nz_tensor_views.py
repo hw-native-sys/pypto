@@ -232,8 +232,8 @@ def test_leading_dims_are_preserved():
     rank-3 tile, which ``tile.matmul`` rejects at parse time — before this pass
     ever runs.
     """
-    _, _, tm, sd, dyn = _batched_nz_mm._bind_args_from_signature({})
-    program = _batched_nz_mm._compile_to_program(tm, sd, dyn, pl)
+    _, _, tm, sd, cx, dyn = _batched_nz_mm._bind_args_from_signature({})
+    program = _batched_nz_mm._compile_to_program(tm, sd, cx, dyn, pl)
     param_type = _nz_param(_run(program))
     assert _values(param_type.shape) == [4, 16, 16, 16, 32]
 
@@ -312,8 +312,8 @@ def test_maps_an_spmd_derived_slice_offset():
             out[0:64, n0 : n0 + 256] = pl.reshape(acc, [64, 256])
         return out
 
-    _, _, tm, sd, dyn = _spmd_offset._bind_args_from_signature({})
-    call = _nz_load(_run(_spmd_offset._compile_to_program(tm, sd, dyn, pl)))
+    _, _, tm, sd, cx, dyn = _spmd_offset._bind_args_from_signature({})
+    call = _nz_load(_run(_spmd_offset._compile_to_program(tm, sd, cx, dyn, pl)))
     batch_off, col_off, row_off, in_fractal_row, in_c0_line = _elements(call.args[1])
     assert _const(batch_off) == 0
     assert _const(col_off) == 0
@@ -354,8 +354,8 @@ def test_does_not_reassociate_the_offset_arithmetic():
             out[0:64, n0 : n0 + 256] = pl.reshape(acc, [64, 256])
         return out
 
-    _, _, tm, sd, dyn = _no_reassoc._bind_args_from_signature({})
-    after = _run(_no_reassoc._compile_to_program(tm, sd, dyn, pl))
+    _, _, tm, sd, cx, dyn = _no_reassoc._bind_args_from_signature({})
+    after = _run(_no_reassoc._compile_to_program(tm, sd, cx, dyn, pl))
     # Blocked offsets are [batch, C/c0, R/16, 0, 0] — index 2 is the row axis.
     row_off = _elements(_nz_load(after).args[1])[2]
 
@@ -403,8 +403,8 @@ def test_maps_a_loop_variable_slice_offset():
             out[0:64, 0:256] = pl.reshape(acc, [64, 256])
         return out
 
-    _, _, tm, sd, dyn = _loop_offset._bind_args_from_signature({})
-    after = _run(_loop_offset._compile_to_program(tm, sd, dyn, pl))
+    _, _, tm, sd, cx, dyn = _loop_offset._bind_args_from_signature({})
+    after = _run(_loop_offset._compile_to_program(tm, sd, cx, dyn, pl))
 
     # Two NZ loads share the weight: the k0 = 0 prologue and the loop body.
     offsets = [_elements(call.args[1]) for call in _nz_loads(after)]
@@ -507,8 +507,8 @@ def test_codegen_emits_the_divided_offset():
             out[0:64, n0 : n0 + 256] = pl.reshape(acc, [64, 256])
         return out
 
-    _, _, tm, sd, dyn = _spmd_offset._bind_args_from_signature({})
-    text = _emit_pto(_spmd_offset._compile_to_program(tm, sd, dyn, pl))
+    _, _, tm, sd, cx, dyn = _spmd_offset._bind_args_from_signature({})
+    text = _emit_pto(_spmd_offset._compile_to_program(tm, sd, cx, dyn, pl))
     lines = text.splitlines()
 
     nz_view_line = next(line for line in lines if "make_tensor_view" in line and "layout<nz>" in line)
@@ -576,9 +576,9 @@ def test_rejects_logical_rank_above_three():
             out[0:64, 0:256] = pl.reshape(acc, [64, 256])
         return out
 
-    _, _, tm, sd, dyn = _rank4_nz._bind_args_from_signature({})
+    _, _, tm, sd, cx, dyn = _rank4_nz._bind_args_from_signature({})
     with pytest.raises(ValueError, match="logical rank of at most 3"):
-        _run(_rank4_nz._compile_to_program(tm, sd, dyn, pl))
+        _run(_rank4_nz._compile_to_program(tm, sd, cx, dyn, pl))
 
 
 def test_rejects_unaligned_rows():
@@ -671,8 +671,8 @@ def test_rejects_a_slice_offset_whose_alignment_cannot_be_proven():
             out[0:64, 0:256] = pl.reshape(acc, [64, 256])
         return out
 
-    _, _, tm, sd, dyn = _unprovable._bind_args_from_signature({})
-    program = _unprovable._compile_to_program(tm, sd, dyn, pl)
+    _, _, tm, sd, cx, dyn = _unprovable._bind_args_from_signature({})
+    program = _unprovable._compile_to_program(tm, sd, cx, dyn, pl)
     with pytest.raises(ValueError, match=r"offset on shape\[-2\] to be a multiple of 16"):
         _run(program)
 
@@ -702,8 +702,8 @@ def test_rejects_a_slice_offset_whose_sign_cannot_be_proven():
             out[0:64, 0:256] = pl.reshape(acc, [64, 256])
         return out
 
-    _, _, tm, sd, dyn = _maybe_negative._bind_args_from_signature({})
-    program = _maybe_negative._compile_to_program(tm, sd, dyn, pl)
+    _, _, tm, sd, cx, dyn = _maybe_negative._bind_args_from_signature({})
+    program = _maybe_negative._compile_to_program(tm, sd, cx, dyn, pl)
     with pytest.raises(ValueError, match=r"offset on shape\[-2\] to be non-negative"):
         _run(program)
 
@@ -730,8 +730,8 @@ def test_rejects_a_loop_variable_whose_step_breaks_alignment():
                 out[0:64, 0:256] = pl.reshape(acc, [64, 256])
         return out
 
-    _, _, tm, sd, dyn = _bad_step._bind_args_from_signature({})
-    program = _bad_step._compile_to_program(tm, sd, dyn, pl)
+    _, _, tm, sd, cx, dyn = _bad_step._bind_args_from_signature({})
+    program = _bad_step._compile_to_program(tm, sd, cx, dyn, pl)
     with pytest.raises(ValueError, match=r"offset on shape\[-1\] to be a multiple of c0 = 32"):
         _run(program)
 

@@ -104,6 +104,32 @@ def test_warmup_shares_one_preparation_across_scalar_values(kernel, assembly):
     assert len(assembly) == 1
 
 
+def test_warmup_prepares_one_binary_per_constexpr_value(assembly):
+    """A ``pl.constexpr`` value splits the warmup where a scalar does not.
+
+    Warming a tuning sweep must produce one prepared binary per configuration,
+    and the prepared object must take only the runtime arguments.
+    """
+
+    @pl.jit
+    def scale(
+        x: pl.Tensor[[16, 16], pl.FP32],
+        out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        factor: pl.Scalar[pl.FP32],
+        TILE: pl.constexpr,
+    ):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            tile = pl.load(x, [0, 0], [TILE, TILE])
+            pl.store(pl.mul(tile, factor), [0, 0], out)
+        return out
+
+    small = scale.warmup(TILE=8)
+    assert scale.warmup(TILE=8) is small
+    large = scale.warmup(TILE=16)
+    assert large is not small
+    assert len(assembly) == 2
+
+
 def test_warmup_preserves_dynamic_extents(assembly):
     rows = pl.dynamic("rows")
 

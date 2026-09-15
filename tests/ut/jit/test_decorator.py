@@ -302,8 +302,8 @@ class TestHostDiscoversOrchestrationDep:
 
         a = torch.empty(128, 128)
         c = torch.empty(128, 128)
-        _, _, tensor_meta, scalar_dtypes, per_func_dyn = host_orch._bind_args((a, c), {})
-        contexts = host_orch._build_contexts(tensor_meta, scalar_dtypes, per_func_dyn)
+        _, _, tensor_meta, scalar_dtypes, cx, per_func_dyn = host_orch._bind_args((a, c), {})
+        contexts = host_orch._build_contexts(tensor_meta, scalar_dtypes, cx, per_func_dyn)
         dep_ctx = next(ctx for ctx in contexts if ctx.func_name == "chip_orch")
         assert dep_ctx.auto_scope is False
 
@@ -323,8 +323,8 @@ class TestHostDiscoversOrchestrationDep:
 
         a = torch.empty(128, 128)
         c = torch.empty(128, 128)
-        _, _, tensor_meta, scalar_dtypes, per_func_dyn = entry._bind_args((a, c), {})
-        contexts = entry._build_contexts(tensor_meta, scalar_dtypes, per_func_dyn)
+        _, _, tensor_meta, scalar_dtypes, cx, per_func_dyn = entry._bind_args((a, c), {})
+        contexts = entry._build_contexts(tensor_meta, scalar_dtypes, cx, per_func_dyn)
         dep_ctx = next(ctx for ctx in contexts if ctx.func_name == "inline_fn")
         assert dep_ctx.auto_scope is False
         entry_ctx = next(ctx for ctx in contexts if ctx.func_name == "entry")
@@ -720,8 +720,8 @@ class TestAliasedDepCallName:
         entry, _ = self._aliased_entry()
         a = torch.empty(64, 64)
         c = torch.empty(64, 64)
-        _pn, _, tmeta, sd, pfd = entry._bind_args((a, c), {})
-        contexts = entry._build_contexts(tmeta, sd, pfd)
+        _pn, _, tmeta, sd, cx, pfd = entry._bind_args((a, c), {})
+        contexts = entry._build_contexts(tmeta, sd, cx, pfd)
 
         dep_ctx = next(ctx for ctx in contexts if ctx.func_name == "copy_incore")
         assert dep_ctx.tensor_meta["src"].shape == (64, 64)
@@ -736,8 +736,8 @@ class TestAliasedDepCallName:
         entry, _ = self._aliased_entry()
         a = torch.empty(64, 64)
         c = torch.empty(64, 64)
-        _pn, _, tmeta, sd, pfd = entry._bind_args((a, c), {})
-        contexts = entry._build_contexts(tmeta, sd, pfd)
+        _pn, _, tmeta, sd, cx, pfd = entry._bind_args((a, c), {})
+        contexts = entry._build_contexts(tmeta, sd, cx, pfd)
         source = Specializer("_jit_entry", contexts).specialize()
 
         assert "self.copy_incore(a, c)" in source
@@ -766,8 +766,8 @@ class TestAliasedDepCallName:
 
         a = torch.empty(64, 64)
         c = torch.empty(64, 64)
-        _pn, _, tmeta, sd, pfd = entry._bind_args((a, c), {})
-        contexts = entry._build_contexts(tmeta, sd, pfd)
+        _pn, _, tmeta, sd, cx, pfd = entry._bind_args((a, c), {})
+        contexts = entry._build_contexts(tmeta, sd, cx, pfd)
         entry_ctx = next(ctx for ctx in contexts if ctx.func_name == "entry")
         assert entry_ctx.dep_func_names == {"first": "copy_incore", "second": "copy_incore"}
 
@@ -815,8 +815,8 @@ class TestAliasedDepCallName:
 
         a = torch.empty(64, 64)
         c = torch.empty(64, 64)
-        _pn, _, tmeta, sd, pfd = entry._bind_args((a, c), {})
-        contexts = entry._build_contexts(tmeta, sd, pfd)
+        _pn, _, tmeta, sd, cx, pfd = entry._bind_args((a, c), {})
+        contexts = entry._build_contexts(tmeta, sd, cx, pfd)
 
         dep_ctx = next(ctx for ctx in contexts if ctx.func_name == "copy_incore")
         assert dep_ctx.tensor_meta["src"].shape == (64, 64)
@@ -890,8 +890,8 @@ class TestDuplicateDepNames:
         torch = pytest.importorskip("torch")
         a = torch.empty(64, 64)
         c = torch.empty(64, 64)
-        _pn, _, tmeta, sd, pfd = entry._bind_args((a, c), {})
-        return entry._build_contexts(tmeta, sd, pfd)
+        _pn, _, tmeta, sd, cx, pfd = entry._bind_args((a, c), {})
+        return entry._build_contexts(tmeta, sd, cx, pfd)
 
     def test_same_named_deps_get_distinct_generated_names(self):
         contexts = self._contexts_for(self._factory_entry())
@@ -2937,6 +2937,7 @@ class TestVariableRebinding:
                 "out": TensorMeta((128, 128), DataType.FP32),
             },
             scalar_dtypes={},
+            constexpr_values={},
             per_func_dyn={id(kernel._func): {}},
             pl=pl,
         )
@@ -3205,6 +3206,7 @@ class TestCompileKwargForwarding:
                 "out": TensorMeta((128, 128), DataType.FP32),
             },
             scalar_dtypes={},
+            constexpr_values={},
             per_func_dyn={id(fwd_kernel._func): {}},
             pl=pl,
             **cfg.compile_kwargs(),
@@ -3245,6 +3247,7 @@ class TestCompileKwargForwarding:
                 "out": TensorMeta((128, 128), DataType.FP32),
             },
             scalar_dtypes={},
+            constexpr_values={},
             per_func_dyn={id(plain_kernel._func): {}},
             pl=pl,
         )
@@ -3303,6 +3306,7 @@ class TestJitSourceProvenance:
                 "out": TensorMeta((128, 128), DataType.FP32),
             },
             scalar_dtypes={},
+            constexpr_values={},
             per_func_dyn={id(_provenance_kernel._func): {}},
             pl=pl,
         )
@@ -3327,6 +3331,7 @@ class TestJitSourceProvenance:
                 "out": TensorMeta((128, 128), DataType.FP32),
             },
             scalar_dtypes={},
+            constexpr_values={},
             per_func_dyn={id(_provenance_kernel._func): {}},
             pl=pl,
         )
@@ -3349,8 +3354,8 @@ class TestClosureConstantFolding:
 
     @staticmethod
     def _specialize(entry, *args) -> str:
-        _pn, _, tmeta, sd, pfd = entry._bind_args(args, {})
-        contexts = entry._build_contexts(tmeta, sd, pfd)
+        _pn, _, tmeta, sd, cx, pfd = entry._bind_args(args, {})
+        contexts = entry._build_contexts(tmeta, sd, cx, pfd)
         return Specializer(f"_jit_{entry.__name__}", contexts).specialize()
 
     @staticmethod

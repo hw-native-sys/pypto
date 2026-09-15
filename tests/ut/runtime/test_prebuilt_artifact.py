@@ -840,6 +840,47 @@ def test_published_artifact_is_restored_for_a_different_scalar_value(tmp_path, f
     assert len(builds) == 1
 
 
+def test_constexpr_values_publish_separate_artifacts(tmp_path, fake_runtime, monkeypatch):
+    """Two constants publish two artifacts, and each is restored on its own key.
+
+    A scalar would share one entry (issue #2751); a ``pl.constexpr`` must not,
+    or a second process would restore the artifact built for the other constant.
+    """
+
+    @pl.jit
+    def kernel(BLOCK: pl.constexpr):
+        pass
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PYPTO_PROG_BUILD_DIR", raising=False)
+    monkeypatch.setattr("pypto.jit._persistent.capture_toolchain", lambda *args: _key().environment)
+    builds = []
+
+    def compile_(*args, **kwargs):
+        root = Path(kwargs.get("output_dir", tmp_path / f"private-{len(builds)}"))
+        _generated(root, BuildKind.SINGLE_CHIP)
+        compiled = CompiledProgram.from_dir(root)
+        compiled._program = ir.Program([], "fixture", ir.Span.unknown())
+        builds.append(compiled)
+        return compiled
+
+    monkeypatch.setattr(kernel, "_compile", compile_)
+    config = RunConfig(platform="a2a3sim", cache_config=CacheConfig(enabled=True, root=tmp_path / "cache"))
+    # Runtime UTs install verification instruments, which intentionally bypass caches.
+    with passes.PassContext([]):
+        small = kernel.compile(BLOCK=16, config=config)
+        large = kernel.compile(BLOCK=32, config=config)
+        assert small is not large
+        assert len(builds) == 2
+        # Clearing the object cache is the path a new process takes.
+        kernel._artifact_objects.clear()
+        restored_small = kernel.compile(BLOCK=16, config=config)
+        restored_large = kernel.compile(BLOCK=32, config=config)
+    assert restored_small is not restored_large
+    assert restored_small.program is None and restored_large.program is None
+    assert len(builds) == 2, "restoration must not rebuild either constant"
+
+
 def test_automatic_jit_refreshes_sources_before_object_hit(tmp_path, automatic_jit_case):
     kernel, builds = automatic_jit_case
     source = tmp_path / "extra.py"
