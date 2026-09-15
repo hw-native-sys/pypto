@@ -399,7 +399,7 @@ class PassManager:
         return self._pipeline.get_pass_names()
 
     def _check_planner_consistency(self) -> None:
-        """Fail loud if the run-time memory planner differs from the construction-time one.
+        """Reject memory-planner or Buffer IR mode changes after construction.
 
         The pass list is fixed at construction: DSA_RP drops ``MemoryReuse`` and
         PTOAS also drops ``AllocateMemoryAddr``. Planner-gated pass behaviour,
@@ -407,7 +407,8 @@ class PassManager:
         ``GetMemoryPlanner()`` at execution time. Constructing under one planner
         and running under another would therefore combine the wrong pass list
         with the chosen lowering. ``compile()`` builds and runs under one
-        context, so this guard only catches direct PassManager misuse.
+        context, so this guard only catches direct PassManager misuse. The Buffer
+        IR mode also fixes which storage verifiers are present and must match.
         """
         ctx = passes.PassContext.current()
         run_planner = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
@@ -447,8 +448,9 @@ class PassManager:
 
         Raises:
             ValueError: If dumping is enabled but output_dir is None
-            RuntimeError: If the run-time memory planner differs from the one the
-                PassManager was constructed under (see _check_planner_consistency)
+            RuntimeError: If the run-time memory planner or Buffer IR mode differs
+                from the configuration used to construct the PassManager
+                (see _check_planner_consistency).
         """
         self._check_planner_consistency()
         dump_level = coerce_dump_level(dump_ir)

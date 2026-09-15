@@ -308,9 +308,9 @@ check.
 
 Symbolic checks distinguish allocation identities. `TileStorageAllocated` adds
 physical checks for PYPTO and DSA_RP: windows in one memory space must not overlap
-by effective byte address, even when their base variables differ. Non-identical
-overlapping `tile.move` operands are rejected; exact self-copies are permitted
-for final lowering to eliminate. PTOAS uses symbolic storage identity instead.
+by effective byte address, even when their base variables differ. Overlapping
+`tile.move` operands are rejected, including exact self-copies: allocated TMOV
+requires distinct addresses. PTOAS uses symbolic storage identity instead.
 Unknown overlap between simultaneous windows fails closed. Canonical boundaries also
 preserve the declared slot count and slot-index expression. Range checks use
 resolved byte offsets and sizes; they do not expand slot declarations or prove

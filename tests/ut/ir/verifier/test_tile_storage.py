@@ -140,10 +140,38 @@ def test_allocated_move_checks_effective_overlap(offset):
         ir.get_op("tile.move"), [source], {"target_memory": ir.MemorySpace.Vec}, destination.type, SPAN
     )
     program = _program(ir.AssignStmt(destination, call, SPAN), [source])
-    if offset == 64:
+    if offset in (0, 64):
         _assert_error(program, "windows overlap", physical=True)
     else:
         assert _verify(program, physical=True) == []
+
+
+def test_allocated_move_cannot_reuse_the_source_allocation():
+    source = _tile("source")
+    destination = _tile("destination", base=_memref(source).base_)
+    move = ir.Call(
+        ir.get_op("tile.move"), [source], {"target_memory": ir.MemorySpace.Vec}, destination.type, SPAN
+    )
+    program = _program(ir.AssignStmt(destination, move, SPAN), [source])
+    assert _verify(program) == []
+    _assert_error(program, "windows overlap", physical=True)
+
+
+@pytest.mark.parametrize("symbolic", [False, True])
+def test_allocated_check_reports_conflicts_in_each_memory_space(symbolic):
+    offset = ir.Var("offset", ir.ScalarType(DataType.INDEX), SPAN)
+    initial = []
+    for space in (ir.MemorySpace.Vec, ir.MemorySpace.Mat):
+        initial.extend(
+            [
+                _tile(f"{space}_a", space=space),
+                _tile(f"{space}_b", space=space, offset=offset if symbolic else 64),
+            ]
+        )
+    diagnostics = _verify(_program(_loop(initial), [*initial, offset]), physical=True)
+    message = "unprovable symbolic overlap" if symbolic else "windows overlap"
+    assert len(diagnostics) == 2
+    assert all(message in diagnostic.message for diagnostic in diagnostics)
 
 
 def test_tiles_without_storage_and_nested_tile_tuples_are_rejected():
@@ -188,8 +216,9 @@ def test_named_storage_check_precedes_address_placement_for_every_planner(planne
 
 
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
-def test_pipeline_allocated_check_rejects_unsafe_placement_without_automatic_verification(planner):
-    source, destination = _tile("source"), _tile("destination", offset=64)
+@pytest.mark.parametrize("offset", [0, 64])
+def test_pipeline_allocated_check_rejects_unsafe_placement_without_automatic_verification(planner, offset):
+    source, destination = _tile("source"), _tile("destination", offset=offset)
     move = ir.Call(
         ir.get_op("tile.move"), [source], {"target_memory": ir.MemorySpace.Vec}, destination.type, SPAN
     )

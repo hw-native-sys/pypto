@@ -43,15 +43,14 @@
 namespace pypto::ir {
 namespace {
 
-bool SameWindow(const TileTypePtr& lhs, const TileTypePtr& rhs, bool physical = false) {
+bool SameWindow(const TileTypePtr& lhs, const TileTypePtr& rhs) {
   if (!lhs || !rhs || lhs->GetMemorySpace() != rhs->GetMemorySpace()) return false;
   const auto a = GetDefinedMemRef(lhs);
   const auto b = GetDefinedMemRef(rhs);
-  return (physical || MemRef::SameAllocation(a, b)) && a->size_ == b->size_ &&
-         structural_equal(a->byte_offset_, b->byte_offset_) &&
-         (physical ||
-          (a->slot_count_ == b->slot_count_ && a->slot_index_.has_value() == b->slot_index_.has_value() &&
-           (!a->slot_index_.has_value() || structural_equal(*a->slot_index_, *b->slot_index_))));
+  return MemRef::SameAllocation(a, b) && a->size_ == b->size_ &&
+         structural_equal(a->byte_offset_, b->byte_offset_) && a->slot_count_ == b->slot_count_ &&
+         a->slot_index_.has_value() == b->slot_index_.has_value() &&
+         (!a->slot_index_.has_value() || structural_equal(*a->slot_index_, *b->slot_index_));
 }
 
 // A fixed walk checks storage closure; sorted windows detect conflicts in
@@ -122,8 +121,9 @@ class TileStorageVisitor : public IRVisitor {
     if (physical_ && IsOp(call, "tile.move") && !call->args_.empty()) {
       auto source = CheckTile(call->args_[0]);
       auto target = CheckTile(statement->var_);
-      // An exact self-copy is a no-op that final lowering can eliminate.
-      if (source && target && !SameWindow(source, target, /*physical=*/true)) {
+      // Allocated TMOV requires distinct, nonoverlapping addresses, including
+      // when source and destination name exactly the same storage window.
+      if (source && target) {
         CheckDestinations({source, target}, statement->span_, /*allow_identical=*/false);
       }
     }
@@ -217,10 +217,12 @@ class TileStorageVisitor : public IRVisitor {
         auto offset = As<ConstInt>(GetDefinedMemRef(tile)->byte_offset_);
         if (!offset) {
           Error("Simultaneous tile storage windows have unprovable symbolic overlap", span);
-          return;
+          windows.clear();
+          break;
         }
         windows.emplace_back(offset->value_, tile);
       }
+      if (windows.empty()) continue;
       std::sort(windows.begin(), windows.end(),
                 [](const auto& a, const auto& b) { return a.first < b.first; });
       auto previous = windows.front();
@@ -229,7 +231,7 @@ class TileStorageVisitor : public IRVisitor {
         const auto& current = windows[i];
         if (current.first < end && !(allow_identical && SameWindow(previous.second, current.second))) {
           Error("Simultaneous tile storage windows overlap", span);
-          return;
+          break;
         }
         const __int128 current_end =
             static_cast<__int128>(current.first) + GetDefinedMemRef(current.second)->size_;

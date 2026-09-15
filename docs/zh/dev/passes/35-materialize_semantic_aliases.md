@@ -98,7 +98,7 @@ program = passes.materialize_semantic_aliases()(program)
 空间复杂度为 O(N)，不在 IR 上附加持久化别名表。累加器分支仍使用已有的受保护
 合并逻辑；剩余分歧 `Acc` 分支会报错，因为不支持 Acc 到 Acc 的复制。
 这一片尚不建立完整的存储属性：仍存活的循环初始值、一般的并行 carry 传输、
-While carry 以及复用后的存储验证由后续迁移片完成。
+While carry 由后续迁移片完成。
 
 ### 默认流水线
 

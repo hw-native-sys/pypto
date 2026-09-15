@@ -115,8 +115,8 @@ O(N log N) work and O(N) storage. No persistent alias table is attached to IR.
 Accumulator branches still use the existing guarded coalescing; a remaining
 divergent `Acc` branch is rejected because Acc-to-Acc copying is unsupported.
 This slice does not establish a complete storage property: live incoming loop
-values, general parallel carry transfers, While carries, and post-reuse storage
-verification require the following migration slice.
+values, general parallel carry transfers, and While carries require the following
+migration slice.
 
 ### Default pipeline
 
