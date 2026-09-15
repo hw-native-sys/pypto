@@ -52,6 +52,24 @@
   pass 里反而引入回归）；
 - **notify** —— 什么都不插。
 
+### 阶段 B —— InCore 入口：DistributedTensor 标量读的整 GM 失效
+
+阶段 A 只处理 **InCore** 函数体。跨任务消费者若对带 **`DistributedTensorType`**
+的值做 **可缓存标量读**（`tensor.read` / `pl.read`），需要在函数入口插入整 GM
+失效 —— peer 可能在另一个 AIV 任务里写过该窗口（例如集合通信的 `recv_counts`），
+而编排 codegen 无法承载 InCore 的 `system.cacheinvalid`。
+
+阶段 B 是**纯本地、按 InCore 函数**的规则（不再扫描编排体）：
+
+| 步骤 | 行为 |
+| ---- | ---- |
+| 扫描函数体 | 若存在第一实参精确为 `DistributedTensorType` 的 `tensor.read`（含控制流内；store 后的 SSA 重绑定仍保留该类型）则为真。 |
+| 应用 | 在函数入口 prepend 无参 `system.cacheinvalid()`。**仅失效** —— 不插入口 `system.fence`（fence 属于发布侧）。 |
+
+带 `builtin_template_dir` 的合成集合 AIV kernel 跳过。标记是**函数粒度**且幂等
+（入口已以整 GM `cacheinvalid` 开头则跳过）。仅 `pl.load` / tile load **不会**触发
+阶段 B —— 只有 DistTensor 类型值上的标量 `tensor.read` 对应本阶段要修的陈旧 cache 行场景。
+
 区域 `system.cacheinvalid(target)` 寻址的是 `target` 的**本地** base，这对本地窗口写是对的。
 但**远端写** `remote_store` / `put` 写到的是 **peer 偏移** GM 地址（`local_ptr +
 delems(peer)`），本地 target view 寻址不到。peer 偏移只有在 codegen 里才知道
@@ -140,9 +158,9 @@ codegen 最终降级的 IR。
 `remote_load`（结果是 tile、不写 GM），以及目标是普通 `Tensor` 而非 window-bound
 `DistributedTensor` 的 `tile.store` / `tensor.write` / `get`，**不是**发布写 —— 完全不插标记。
 
-## 算法 —— 一趟结构遍历，带消费侧批处理
+## 算法 —— 阶段 A：一趟结构遍历，带消费侧批处理
 
-本 pass 只携带一项控制流状态 —— 一个标志位：在访问**纯 wait 循环**（`for`/`while` 的 body
+阶段 A（`InsertCommMarkers`）只携带一项控制流状态 —— 一个标志位：在访问**纯 wait 循环**（`for`/`while` 的 body
 经 seq/if 嵌套后只含 `pld.system.wait` —— **至少一条** —— 且控制表达式不触达内存；无 wait
 的循环不算纯 wait 循环）的 body 时抑制逐 wait 的 invalidate：
 
@@ -168,6 +186,14 @@ for: { notify; store(win) }           -> for: { notify; store(win); cacheinvalid
 
 写之后**紧跟一条 fence** 的已存在区域 `cacheinvalid`、以及紧接 wait 之后已存在的全 GM
 cacheinvalid，都会被识别且**不重复插入**，故本 pass 幂等。
+
+## 算法 —— 阶段 B：本地 DistributedTensor 标量读规则
+
+1. 对每个 InCore 函数（跳过带 `builtin_template_dir` 的 AIV stub）：收集
+   `DistributedTensorType` 参数；在函数体中查找以这些参数为第一实参的 `tensor.read`。
+2. 若匹配，则在入口 prepend 无参 `system.cacheinvalid()`（幂等）。
+
+不 rewrite 任何编排语句 —— 阶段 B 从不离开当前 InCore 函数。
 
 ## 与 Codegen 的关系
 

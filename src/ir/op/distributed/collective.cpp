@@ -681,9 +681,8 @@ TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
         << (*target_type->window_buffer_)->name_hint_ << "'";
   }
 
-  // signal: DistributedTensor INT32 [NR, 1].  Restricted to the 2-D form because
-  // the composite lowering always emits MakeSignalOffsets(rank) → [rank, 0];
-  // pld.system.notify/wait reject a rank mismatch against a 1-D signal.
+  // signal: DistributedTensor INT32 [NR, 1] — barrier only. Counts publish on
+  // the recv_counts window (see recv_counts comment below).
   auto signal_type = As<DistributedTensorType>(args[2]->GetType());
   CHECK(signal_type) << "pld.tensor.all_to_all_v signal must be a DistributedTensor (window-bound), got "
                      << args[2]->GetType()->TypeName();
@@ -1240,10 +1239,8 @@ TypePtr DeduceBuiltinTensorAllToAllVType(const std::vector<ExprPtr>& args,
       << kOpName << " target dtype " << target_type->dtype_.ToString() << " must match input dtype "
       << input_type->dtype_.ToString();
 
-  // signal: 2D [NR, 1] only — the composite's own deducer already enforces
-  // this exact shape on the pld.tensor.all_to_all_v call this builtin is
-  // constructed from, so there is no 1D case to additionally support here,
-  // unlike builtin.tensor.all_to_all which pre-dates that constraint.
+  // signal: 2D [NR, 1] barrier only. Matches the public pld.tensor.all_to_all_v
+  // deducer; counts publish on recv_counts.
   auto signal_type = As<DistributedTensorType>(args[2]->GetType());
   CHECK(signal_type) << kOpName << " signal must be a DistributedTensor (window-bound), got "
                      << args[2]->GetType()->TypeName();

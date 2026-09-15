@@ -2523,11 +2523,20 @@ def test_all_to_all_v_accepts_window_bound_input():
 
 
 def test_all_to_all_v_rejects_1d_signal():
-    """Signal must be 2D [NR, 1] — lowering emits 2-D MakeSignalOffsets."""
+    """Signal must be 2D [NR, 1]."""
     span = ir.Span.unknown()
     args = _make_all_to_all_v_args(span)
     args[2] = _make_distributed_tensor_var("signal_1d", [_AAV_NR], DataType.INT32, span)
     with pytest.raises(ValueError, match="signal must be 2D"):
+        ir.create_op_call("pld.tensor.all_to_all_v", args, {}, span)
+
+
+def test_all_to_all_v_rejects_wide_signal_s2():
+    """Barrier signal is [NR, 1]; counts publish on recv_counts, not a second signal column."""
+    span = ir.Span.unknown()
+    args = _make_all_to_all_v_args(span)
+    args[2] = _make_distributed_tensor_var("signal_wide", [_AAV_NR, 2], DataType.INT32, span)
+    with pytest.raises(ValueError, match="signal second dimension must be 1"):
         ir.create_op_call("pld.tensor.all_to_all_v", args, {}, span)
 
 
