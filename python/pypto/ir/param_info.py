@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Orchestration parameter metadata, and the IR-dtype to torch-dtype map.
+"""Orchestration parameter metadata and shared torch/ctypes dtype maps.
 
 A leaf: it imports nothing from ``pypto.runtime`` and nothing from the rest of
 ``pypto.ir`` beyond the core bindings, so anything may depend on it.
@@ -22,6 +22,7 @@ the metadata out removes the back edge; ``compiled_program`` re-exports these
 names, so nothing else has to know they moved.
 """
 
+import ctypes
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TypeVar
@@ -66,6 +67,27 @@ for _ir_name, _torch_name in (
     if _torch_dtype is not None:
         _DATATYPE_TO_TORCH[_ir_name] = _torch_dtype
 del _ir_name, _torch_name, _torch_dtype
+
+
+# IR DataType -> ctypes scalar constructor mapping.
+# Used to wrap Python int/float/bool values into the correct ctypes scalar
+# when calling a compiled program with scalar parameters.
+_DATATYPE_TO_CTYPE: dict[str, type[ctypes._SimpleCData]] = {
+    "fp16": ctypes.c_float,  # no native half; promote to float
+    "fp32": ctypes.c_float,
+    "fp64": ctypes.c_double,
+    "bfloat16": ctypes.c_float,  # no native bfloat16; promote to float
+    "int8": ctypes.c_int8,
+    "int16": ctypes.c_int16,
+    "int32": ctypes.c_int32,
+    "int64": ctypes.c_int64,
+    "uint8": ctypes.c_uint8,
+    "uint16": ctypes.c_uint16,
+    "uint32": ctypes.c_uint32,
+    "uint64": ctypes.c_uint64,
+    "bool": ctypes.c_bool,
+    "index": ctypes.c_int64,
+}
 
 
 def _to_torch_dtype(dtype: DataType) -> torch.dtype | None:
