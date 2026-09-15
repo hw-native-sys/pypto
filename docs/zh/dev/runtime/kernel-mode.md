@@ -38,6 +38,8 @@ frame 使用期间，调用方不能 resize 或使借用的 storage 失效。
 - 要求 base NCHW (0) 或 ND (2) 格式的连续 strided view，保留非零 storage offset
   和逻辑地址。其他格式、转置 view、未解析的 conjugate/negative view 及无效 storage
   边界明确报错，不进行复制或格式转换。
+- 空 view 不访问任何元素，因此非负 storage offset 可以超过 storage 容量；
+  仅对非空 view 校验访问范围上界。
 - 允许完全相同的 Tensor view 别名、同一 storage 上互不相交的 view，以及重叠的
   只读 view。涉及 Out/InOut 的部分重叠需要更丰富的别名契约，当前明确拒绝。
 - 使用 program Scalar 类型映射复制 Python 或类型匹配的 ctypes Scalar。

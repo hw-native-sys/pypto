@@ -45,6 +45,9 @@ borrowed storage while a frame is in use.
   nonzero storage offsets and logical data pointers. Other formats, transposed
   views, unresolved conjugate/negative views and invalid storage bounds fail
   explicitly, without copying or format conversion.
+- Empty views access no elements, so their nonnegative storage offsets may
+  exceed storage capacity. The accessed-range upper bound applies only to
+  nonempty views.
 - Accept exact tensor-view aliases and disjoint views of shared storage.
   Overlapping read-only views are allowed. Partially overlapping views involving
   Out/InOut require a richer alias contract and are rejected.

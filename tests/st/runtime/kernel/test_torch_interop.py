@@ -60,6 +60,23 @@ def test_real_npu_offset_alias_and_stream_snapshots(npu_context):
     assert first.alias_result() is out and second.alias_result() is out
 
 
+@pytest.mark.parametrize("column_start", [0, 1, 3])
+def test_real_npu_empty_slice_storage_offset(npu_context, column_start):
+    """Legal empty NPU slices may point at or beyond their storage's end."""
+    base = torch.empty((2, 3), device="npu")
+    view = base[2:, column_start:]
+    signature = CallSignature(
+        [ParamInfo("x", ParamDirection.In, [-1, -1], DataType.FP32)], return_aliases=(0,)
+    )
+    frame = signature.describe_call((view,))
+    metadata = frame.tensors[0].metadata
+    assert metadata.shape == (0, 3 - column_start)
+    assert metadata.storage_offset == 6 + column_start
+    assert metadata.nbytes == 0
+    assert metadata.storage_ptr == base.untyped_storage().data_ptr()
+    assert frame.alias_result() is view
+
+
 def test_real_npu_rejects_transposed_input(npu_context):
     """A noncontiguous NPU view is rejected rather than copied or normalized."""
     value = torch.empty((3, 2), device="npu").t()

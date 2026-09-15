@@ -163,7 +163,8 @@ def _describe_tensor(tensor: torch.Tensor, info: ParamInfo, index: int, npu: Any
     pointer, base = tensor.data_ptr(), storage.data_ptr()
     offset, itemsize = int(tensor.storage_offset()), tensor.element_size()
     nbytes, capacity = tensor.numel() * itemsize, storage.nbytes()
-    if offset < 0 or offset * itemsize + nbytes > capacity:
+    # Empty slices may have offsets beyond capacity because they access no elements.
+    if offset < 0 or (nbytes and offset * itemsize + nbytes > capacity):
         raise ValueError(f"Parameter {info.name!r} has a view outside its storage bounds")
     if nbytes and (base <= 0 or pointer != base + offset * itemsize):
         raise ValueError(

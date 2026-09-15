@@ -140,6 +140,23 @@ def test_dynamic_carrier_dimensions(npu, shape):
     assert frame.tensors[0].metadata.shape == shape
 
 
+@pytest.mark.parametrize("column_start", [0, 1, 3])
+def test_empty_slice_can_have_offset_at_or_beyond_storage(npu, column_start):
+    """Empty slices access no elements even when their offset exceeds capacity."""
+    base = _tensor()
+    view = base[2:, column_start:]
+    assert view.is_contiguous() and view.numel() == 0
+    frame = interop.CallSignature([_param(shape=(-1, -1))], return_aliases=(0,)).describe_call((view,))
+    metadata = frame.tensors[0].metadata
+    assert metadata.shape == (0, 3 - column_start)
+    assert metadata.storage_offset == 6 + column_start
+    assert metadata.storage_nbytes == 6 * base.element_size()
+    assert metadata.nbytes == 0
+    assert metadata.data_ptr == view.data_ptr()
+    assert frame.tensors[0].storage.data_ptr() == base.untyped_storage().data_ptr()
+    assert frame.alias_result() is view
+
+
 def test_signature_copies_mutable_parameter_metadata(npu):
     """Mutating the caller's ParamInfo later does not change the prepared signature."""
     param = _param()
