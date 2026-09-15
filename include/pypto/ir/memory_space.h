@@ -32,6 +32,7 @@ namespace ir {
  * - LeftScale: L0A-side MX block-scale buffer (A5)
  * - RightScale: L0B-side MX block-scale buffer (A5)
  * - ScalarLocal: On-core scalar register file / C stack (for ArrayType)
+ * - SRAM: Cluster-shared on-chip SRAM — DMA-reachable staging between GM and the per-core buffers
  */
 enum class MemorySpace {
   DDR = 0,          ///< DDR memory (off-chip)
@@ -44,6 +45,7 @@ enum class MemorySpace {
   ScalarLocal = 7,  ///< On-core scalar register file / C stack (for ArrayType)
   LeftScale = 8,    ///< L0A-side MX block-scale buffer (A5)
   RightScale = 9,   ///< L0B-side MX block-scale buffer (A5)
+  SRAM = 10,        ///< Cluster-shared on-chip SRAM
 };
 
 /**
@@ -104,13 +106,14 @@ MemorySpace StringToMemorySpace(const std::string& str);
  * @brief The on-chip buffer a DDR-facing producer must fill so that an operand
  *        demanded in @p demand becomes reachable.
  *
- * `tile.load` drives MTE2, which fills only `{Vec, Mat}`. A cube operand is
- * demanded in `Left` / `Right` / `Bias` (or their A5 scale siblings), and no
- * `tload` writes those: the operand is staged in `Mat` and an `MTE1` `tile.move`
- * carries it the last hop. L1 is the only correct staging buffer for them --
- * routing through `Vec` instead would send the operand `GM -> UB -> L1 -> L0`
- * and put a cube-only value on the vector core, which `ExpandMixedKernel` then
- * reads as a mixed kernel and splits across AIC/AIV.
+ * `tile.load` drives MTE2, which fills `{Vec, Mat}` — and, the cluster
+ * `SRAM`. A cube operand is demanded in `Left` / `Right` / `Bias` (or their A5
+ * scale siblings), and no `tload` writes those: the operand is staged in `Mat`
+ * and an `MTE1` `tile.move` carries it the last hop. L1 is the only correct
+ * staging buffer for them — routing through `Vec` instead would send the
+ * operand `GM -> UB -> L1 -> L0` and put a cube-only value on the vector core,
+ * which `ExpandMixedKernel` then reads as a mixed kernel and splits across
+ * AIC/AIV.
  *
  * This is the single answer to "a consumer wants the operand *there*; where does
  * the load put it?", shared by the two places that ask: the `input_reqs` bridge

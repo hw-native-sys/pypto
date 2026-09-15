@@ -489,11 +489,22 @@ std::optional<ir::PipeType> InferTransferPipe(const Backend& backend, ir::Memory
   if (!HasDirectMemoryRoute(backend, source, destination)) return std::nullopt;
 
   if (source == ir::MemorySpace::DDR &&
+      (destination == ir::MemorySpace::Vec || destination == ir::MemorySpace::Mat ||
+       destination == ir::MemorySpace::SRAM)) {
+    return Pipe::MTE2;
+  }
+  if ((source == ir::MemorySpace::Vec || source == ir::MemorySpace::SRAM) &&
+      destination == ir::MemorySpace::DDR) {
+    return Pipe::MTE3;
+  }
+  // Cluster SRAM <-> per-core buffers: the DMA reads/writes SRAM the same
+  // way it does GM, on the same pipes.
+  if (source == ir::MemorySpace::SRAM &&
       (destination == ir::MemorySpace::Vec || destination == ir::MemorySpace::Mat)) {
     return Pipe::MTE2;
   }
   if ((source == ir::MemorySpace::Vec || source == ir::MemorySpace::Mat) &&
-      destination == ir::MemorySpace::DDR) {
+      destination == ir::MemorySpace::SRAM) {
     return Pipe::MTE3;
   }
   if (source == ir::MemorySpace::Acc &&

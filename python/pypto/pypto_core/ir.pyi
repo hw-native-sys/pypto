@@ -1063,6 +1063,9 @@ class MemorySpace(enum.Enum):
     ScalarLocal = ...
     """On-core scalar register file / C stack (ArrayType)."""
 
+    SRAM = ...
+    """Cluster-shared on-chip SRAM."""
+
 Mem = MemorySpace
 """Short alias for MemorySpace (e.g., Mem.Vec instead of MemorySpace.Vec)."""
 

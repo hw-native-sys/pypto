@@ -212,6 +212,7 @@ class TypeResolver:
         # Must mirror MemorySpaceToString (src/ir/memref.cpp) exactly: any name the
         # printer can emit has to parse back, or the round trip loses the space.
         "ScalarLocal": ir.MemorySpace.ScalarLocal,
+        "SRAM": ir.MemorySpace.SRAM,
     }
 
     def __init__(

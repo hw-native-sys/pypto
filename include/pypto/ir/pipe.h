@@ -80,6 +80,9 @@ enum CoreType : int {
  * - Mat (L1): staging buffer
  * - LeftScale / RightScale: L0A/L0B MX block-scale sidecars (A5)
  *
+ * SRAM is deliberately NOT in this set: it is cluster-shared staging
+ * whose DMA transfers run from the vector lane, so it classifies like Vec.
+ *
  * @param space Memory space to check
  * @return true if the memory space is used by the CUBE core
  */

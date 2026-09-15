@@ -41,6 +41,7 @@ _SPACES = [
     MS.Bias,
     MS.LeftScale,
     MS.RightScale,
+    MS.SRAM,
 ]
 
 _TARGETS = [backend.BackendType.Ascend910B, backend.BackendType.Ascend950]
@@ -103,6 +104,26 @@ def test_targets_disagree_on_some_edges():
     assert "Vec->Mat" not in a2a3
     assert "Acc->Vec" in a5
     assert "Acc->Vec" not in a2a3
+
+
+def test_sram_transfer_edges():
+    """The cluster SRAM edges exist on the 950 SoC.
+
+    SRAM is the cluster staging space: MTE2/MTE3 reach it both ways from GM
+    and from the per-core buffers {Vec, Mat}, so DDR / SRAM / Vec / Mat form
+    one DMA-interconnected group.
+    """
+    expected = {"DDR->SRAM", "SRAM->DDR", "Vec->SRAM", "Mat->SRAM", "SRAM->Vec", "SRAM->Mat"}
+    edges = _direct_edges(backend.BackendType.Ascend950)
+    assert expected <= edges, f"950 SoC lost SRAM edges: {sorted(expected - edges)}"
+    backend.reset_for_testing()
+
+
+def test_sram_capacity_is_modeled():
+    """The 950 SoC models an SRAM allocation pool."""
+    backend.set_backend_type(backend.BackendType.Ascend950)
+    be = backend.get_backend_instance(backend.BackendType.Ascend950)
+    assert be.get_mem_size(MS.SRAM) > 0
 
 
 if __name__ == "__main__":

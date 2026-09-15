@@ -257,6 +257,22 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
              << "ordinary cached access" << (op->span_.is_valid() ? " at " + op->span_.to_string() : "");
   }
 
+  // source_memory is a presentational declaration validated at type deduction:
+  // the declared source end may name any DMA-interconnected space
+  // {DDR, SRAM, Vec, Mat}. The tload source below is a GM partition view by
+  // construction regardless of the declaration, so a value outside that set
+  // here means a pass mangled the kwargs — assert the invariant instead of
+  // re-deriving it.
+  const auto declared_source =
+      op->GetKwarg<ir::MemorySpace>("source_memory", ir::MemorySpace::DDR);
+  INTERNAL_CHECK_SPAN(declared_source == ir::MemorySpace::DDR ||
+                          declared_source == ir::MemorySpace::SRAM ||
+                          declared_source == ir::MemorySpace::Vec ||
+                          declared_source == ir::MemorySpace::Mat,
+                      op->span_)
+      << "tile.load source_memory must be one of the DMA-interconnected spaces "
+         "DDR / SRAM / Vec / Mat (enforced at type deduction)";
+
   std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);
   std::string tile_buf = codegen.GetCurrentResultTarget();
   INTERNAL_CHECK_SPAN(!tile_buf.empty(), op->span_) << "tile.load requires assignment target (tile_buf)";
@@ -333,6 +349,34 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
   const auto tile_view = ir::tile_view_semantics::GetEffectiveTileView(*tile_type);
   const auto& valid_shape = tile_view.valid_shape;
   INTERNAL_CHECK_SPAN(valid_shape.size() == 2, op->span_) << "tile.store tile valid_shape must be 2D";
+
+  // Optional source_memory / target_memory declarations (both ends of the
+  // move, mirroring tile.load). Type deduction validated the value set
+  // ({Vec, Acc, SRAM} for the source, {DDR, SRAM, Vec, Mat} for
+  // the target); here the declared source is additionally checked against
+  // the tile's FINAL resolved space, which is decidable only now that every
+  // memory pass has run. An unresolved space at this point is a compiler
+  // bug (InferTileMemorySpace resolves all device-function tiles), but a
+  // *disagreement* is a user error: the declaration was legal when the
+  // tile's space was still open.
+  if (op->HasKwarg("source_memory")) {
+    const auto declared_source = op->GetKwarg<ir::MemorySpace>("source_memory");
+    CHECK_SPAN(tile_type->memory_space_.has_value(), op->span_)
+        << "tile.store source_memory is declared but the tile's memory space is unresolved "
+           "after InferTileMemorySpace";
+    CHECK_SPAN(declared_source == *tile_type->memory_space_, op->span_)
+        << "tile.store source_memory (" << ir::MemorySpaceToString(declared_source)
+        << ") disagrees with the tile's resolved memory space ("
+        << ir::MemorySpaceToString(*tile_type->memory_space_)
+        << "); drop the source_memory kwarg or align it with the space the tile landed in";
+  }
+  {
+    const auto declared_target = op->GetKwarg<ir::MemorySpace>("target_memory", ir::MemorySpace::DDR);
+    INTERNAL_CHECK_SPAN(declared_target == ir::MemorySpace::DDR || declared_target == ir::MemorySpace::SRAM ||
+                            declared_target == ir::MemorySpace::Vec || declared_target == ir::MemorySpace::Mat,
+                        op->span_)
+        << "tile.store target_memory must be one of {DDR, SRAM, Vec, Mat} (enforced at type deduction)";
+  }
 
   auto height_code = codegen.GetExprAsCode(valid_shape[0]);
   auto width_code = codegen.GetExprAsCode(valid_shape[1]);

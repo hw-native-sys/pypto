@@ -45,13 +45,18 @@ bool IsTileMoveEverSupported(MemorySpace src, MemorySpace dst) {
       // MTE1 feeds the cube operand and scale buffers. Mat -> Mat is absent:
       // there is no L1 -> L1 tmov.
       return dst == MemorySpace::Left || dst == MemorySpace::Right || dst == MemorySpace::Bias ||
-             dst == MemorySpace::LeftScale || dst == MemorySpace::RightScale;
+             dst == MemorySpace::LeftScale || dst == MemorySpace::RightScale || dst == MemorySpace::SRAM;
     case MemorySpace::Vec:
       // Vec -> Mat is A5-only; included because this is the union over targets.
-      return dst == MemorySpace::Vec || dst == MemorySpace::Mat;
+      return dst == MemorySpace::Vec || dst == MemorySpace::Mat || dst == MemorySpace::SRAM;
     case MemorySpace::Acc:
       // FIXPIPE drains L0C outward only.
       return dst == MemorySpace::Mat || dst == MemorySpace::Vec;
+    case MemorySpace::SRAM:
+      // The cluster SRAM is DMA-reachable both ways with the per-core buffers
+      // MTE2/MTE3 touch. L0 buffers (Left/Right/Bias/scales) are fed from Mat
+      // by MTE1, never directly from SRAM.
+      return dst == MemorySpace::Vec || dst == MemorySpace::Mat;
     default:
       return false;
   }
@@ -64,7 +69,7 @@ bool IsTileMoveEverPossibleInto(MemorySpace dst) {
   // value has to be created there instead.
   for (MemorySpace src :
        {MemorySpace::Vec, MemorySpace::Mat, MemorySpace::Acc, MemorySpace::Left, MemorySpace::Right,
-        MemorySpace::Bias, MemorySpace::LeftScale, MemorySpace::RightScale}) {
+        MemorySpace::Bias, MemorySpace::LeftScale, MemorySpace::RightScale, MemorySpace::SRAM}) {
     if (IsTileMoveEverSupported(src, dst)) return true;
   }
   return false;
@@ -76,6 +81,10 @@ std::optional<MemorySpace> StagingSpaceForLoad(MemorySpace demand) {
     case MemorySpace::Mat:
       // MTE2 fills both directly; the load already lands where it is wanted.
       return demand;
+    case MemorySpace::SRAM:
+      // MTE2 also reaches the cluster SRAM, so a DDR load can land there
+      // directly — the staging hop is the load itself.
+      return MemorySpace::SRAM;
     case MemorySpace::Left:
     case MemorySpace::Right:
     case MemorySpace::Bias:
@@ -113,6 +122,8 @@ std::string MemorySpaceToString(MemorySpace space) {
       return "RightScale";
     case MemorySpace::ScalarLocal:
       return "ScalarLocal";
+    case MemorySpace::SRAM:
+      return "SRAM";
     default:
       return "Unknown";
   }
@@ -129,6 +140,7 @@ MemorySpace StringToMemorySpace(const std::string& str) {
   if (str == "LeftScale") return MemorySpace::LeftScale;
   if (str == "RightScale") return MemorySpace::RightScale;
   if (str == "ScalarLocal") return MemorySpace::ScalarLocal;
+  if (str == "SRAM") return MemorySpace::SRAM;
   throw pypto::ValueError("Unknown MemorySpace: " + str);
 }
 

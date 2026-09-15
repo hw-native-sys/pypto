@@ -206,6 +206,7 @@ def load(
     clamp: bool = False,
     span: Span | None = None,
     cache: int | None = None,
+    source_memory: MemorySpace | None = None,
 ) -> Call:
     """Copy data from tensor to specified memory level.
 
@@ -229,10 +230,11 @@ def load(
             narrows the tile, but cannot widen it past what the source has. Every
             element must be an integer scalar — one extent per dimension, never a
             nested tuple.
-        target_memory: Target memory space (MemorySpace.Vec or MemorySpace.Mat).
-            ``None`` (the default) leaves the space unset so InferTileMemorySpace
-            places the tile from consumer demand; the kwarg is then omitted from
-            the op entirely. MX-layout tensors require an explicit MemorySpace.Mat.
+        target_memory: Target memory space (MemorySpace.Vec, .Mat, or .SRAM —
+            the on-chip spaces the tload path can land in). ``None`` (the
+            default) leaves the space unset so InferTileMemorySpace places the
+            tile from consumer demand; the kwarg is then omitted from the op
+            entirely. MX-layout tensors require an explicit MemorySpace.Mat.
         clamp: Sanction a read that runs off the end of the source. By default a
             load asserts that ``offsets + valid_shape`` stays inside the source
             and is rejected when that provably fails; with ``clamp=True`` the
@@ -245,6 +247,15 @@ def load(
             stamp one later. An explicit 0 is NOT the same as ``None``: it is
             recorded, and it is what makes ``cache=CachePolicy.DEFAULT`` opt a
             single read back into the cache inside a bypassing scope.
+        source_memory: Source memory space of the transfer — the space the
+            tensor is read from. Any of ``MemorySpace.DDR`` /
+            ``MemorySpace.SRAM`` / ``MemorySpace.Vec`` / ``MemorySpace.Mat``
+            may be declared (a presentational statement of the source end;
+            the load itself always reads the GM tensor).
+            ``None`` (the default) leaves the source unstated, which is
+            equivalent to DDR and omits the kwarg so existing loads keep their
+            canonical encoding. Together with ``target_memory`` this presents
+            both ends of the move on the call.
 
     Returns:
         Call expression that returns a TileType with the copied data
@@ -263,11 +274,31 @@ def load(
             f"(MX scale loads are L1/Mat only); got {target_memory}"
         )
 
-    # Validate target_memory: only Vec and Mat are allowed for load. ``None``
-    # leaves the space unset so InferTileMemorySpace places the tile.
-    if target_memory is not None and target_memory not in (MemorySpace.Vec, MemorySpace.Mat):
+    # Validate target_memory: only the on-chip spaces {Vec, Mat, SRAM} are
+    # allowed for load. ``None`` leaves the space unset so InferTileMemorySpace
+    # places the tile.
+    if target_memory is not None and target_memory not in (
+        MemorySpace.Vec,
+        MemorySpace.Mat,
+        MemorySpace.SRAM,
+    ):
         raise ValueError(
-            f"target_memory for tile.load must be MemorySpace.Vec or MemorySpace.Mat, got {target_memory}"
+            "target_memory for tile.load must be one of MemorySpace.Vec, "
+            f"MemorySpace.Mat, or MemorySpace.SRAM, got {target_memory}"
+        )
+
+    # Validate source_memory: any of {DDR, SRAM, Vec, Mat} may be declared —
+    # a presentational statement of the source end. ``None`` (the default)
+    # omits the kwarg so ordinary loads keep their canonical encoding.
+    if source_memory is not None and source_memory not in (
+        MemorySpace.DDR,
+        MemorySpace.Vec,
+        MemorySpace.Mat,
+        MemorySpace.SRAM,
+    ):
+        raise ValueError(
+            "source_memory for tile.load must be one of MemorySpace.DDR, MemorySpace.Vec, "
+            f"MemorySpace.Mat, or MemorySpace.SRAM, got {source_memory}"
         )
 
     actual_span = _get_span_or_capture(span)
@@ -286,6 +317,8 @@ def load(
     # survive into the IR. Only an unstated policy omits the kwarg.
     if cache is not None:
         kwargs["cache"] = cache
+    if source_memory is not None:
+        kwargs["source_memory"] = source_memory
 
     valid_shape_tuple = shapes_tuple
     if valid_shape is not None:
@@ -313,6 +346,8 @@ def store(
     *,
     atomic: int = 0,
     st_phase: STPhase = STPhase.Unspecified,
+    source_memory: MemorySpace | None = None,
+    target_memory: MemorySpace | None = None,
 ) -> Call:
     """Copy data from unified buffer (tile) to tensor.
 
@@ -331,6 +366,21 @@ def store(
             preserves ordinary stores; ``STPhase.Final`` checks and clears the
             flag published by a final phased accumulator producer. The kwarg is
             omitted entirely for the default so existing stores remain unchanged.
+        source_memory: Source memory space of the transfer — the space the tile
+            is read from. Must be one of the op's registered tile-input spaces
+            (``MemorySpace.Vec`` / ``MemorySpace.Acc`` /
+            ``MemorySpace.SRAM``); when the tile's space is already resolved
+            the declaration must agree with it. ``None`` (the default) leaves
+            the source unstated and omits the kwarg so existing stores keep
+            their canonical encoding.
+        target_memory: Target memory space of the transfer — the space the
+            output tensor is written to. Any of ``MemorySpace.DDR`` /
+            ``MemorySpace.SRAM`` / ``MemorySpace.Vec`` / ``MemorySpace.Mat``
+            may be declared (a presentational statement of the destination
+            end; the store itself always writes the GM tensor).
+            ``None`` (the default) is equivalent to DDR and omits the kwarg.
+            Together with ``source_memory`` this presents both ends of the move
+            on the call.
 
     Returns:
         Call expression that returns the output tensor
@@ -345,6 +395,32 @@ def store(
     kwargs: dict[str, Any] = {"atomic": atomic} if atomic else {}
     if st_phase != STPhase.Unspecified:
         kwargs["st_phase"] = int(st_phase)
+    # Validate source_memory / target_memory: they state both ends of the move
+    # on the call, mirroring tile.load. ``None`` omits the kwarg so ordinary
+    # stores keep their canonical encoding.
+    if source_memory is not None:
+        if source_memory not in (
+            MemorySpace.Vec,
+            MemorySpace.Acc,
+            MemorySpace.SRAM,
+        ):
+            raise ValueError(
+                "source_memory for tile.store must be one of MemorySpace.Vec, MemorySpace.Acc, "
+                f"or MemorySpace.SRAM, got {source_memory}"
+            )
+        kwargs["source_memory"] = source_memory
+    if target_memory is not None:
+        if target_memory not in (
+            MemorySpace.DDR,
+            MemorySpace.Vec,
+            MemorySpace.Mat,
+            MemorySpace.SRAM,
+        ):
+            raise ValueError(
+                "target_memory for tile.store must be one of MemorySpace.DDR, MemorySpace.Vec, "
+                f"MemorySpace.Mat, or MemorySpace.SRAM, got {target_memory}"
+            )
+        kwargs["target_memory"] = target_memory
     return _ir_core.create_op_call("tile.store", args, kwargs, actual_span)
 
 

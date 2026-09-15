@@ -161,7 +161,11 @@ const SoC& Create910BSoC() {
 const SoC& Create950SoC() {
   // Singleton instance for 950 backend
   static SoC soc = []() {
-    // AIC (CUBE) core configuration
+    // AIC (CUBE) core configuration. SRAM is modeled on both core kinds
+    // because it is a *cluster-shared* buffer (not per-core): the SoC model
+    // has no cluster-level Mem slot, and GetMemSize only needs one entry to
+    // enforce the capacity. TODO: replace the placeholder size with the real
+    // cluster SRAM capacity once the spec is final.
     Core aic_core(ir::CoreType::CUBE, {
                                           Mem(ir::MemorySpace::Mat, 512ULL * 1024, 128),     // 512KB Mat
                                           Mem(ir::MemorySpace::Left, 64ULL * 1024, 64),      // 64KB Left
@@ -169,7 +173,8 @@ const SoC& Create950SoC() {
                                           Mem(ir::MemorySpace::Acc, 256ULL * 1024, 128),     // 256KB Acc
                                           Mem(ir::MemorySpace::Bias, 4ULL * 1024, 64),       // 4KB Bias
                                           Mem(ir::MemorySpace::LeftScale, 4ULL * 1024, 32),  // 4KB L0A scale
-                                          Mem(ir::MemorySpace::RightScale, 4ULL * 1024, 32)  // 4KB L0B scale
+                                          Mem(ir::MemorySpace::RightScale, 4ULL * 1024, 32),  // 4KB L0B scale
+                                          Mem(ir::MemorySpace::SRAM, 4ULL * 1024 * 1024, 128)  // 4MB shared
                                       });
 
     // AIV (VECTOR) core configuration.
@@ -180,19 +185,27 @@ const SoC& Create950SoC() {
     // TODO(pto-isa#170): restore to 248ULL * 1024 (physical size) once PTO-ISA is fixed.
     Core aiv_core(ir::CoreType::VECTOR,
                   {
-                      Mem(ir::MemorySpace::Vec, 240ULL * 1024, 128),  // 240KB safe (248KB physical)
+                      Mem(ir::MemorySpace::Vec, 240ULL * 1024, 128),        // 240KB safe (248KB physical)
+                      Mem(ir::MemorySpace::SRAM, 4ULL * 1024 * 1024, 128),  // 4MB shared, cluster-level
                   });
 
     Cluster mix_cluster({{aic_core, 1}, {aiv_core, 2}});  // 1 AIC core and 2 AIV cores per cluster
 
     Die die({{mix_cluster, 18}});  // 18 mix clusters per die
 
-    // Memory hierarchy graph for path finding
+    // Memory hierarchy graph for path finding. The cluster staging space
+    // SRAM is DMA-reachable both ways between GM and the per-core buffers
+    // {Vec, Mat}, so DDR / SRAM / Vec / Mat form one interconnected group.
     std::map<ir::MemorySpace, std::vector<ir::MemorySpace>> mem_graph;
-    mem_graph[ir::MemorySpace::DDR] = {ir::MemorySpace::Vec, ir::MemorySpace::Mat};
-    mem_graph[ir::MemorySpace::Vec] = {ir::MemorySpace::Mat, ir::MemorySpace::DDR};
+    mem_graph[ir::MemorySpace::DDR] = {ir::MemorySpace::Vec, ir::MemorySpace::Mat,
+                                       ir::MemorySpace::SRAM};
+    mem_graph[ir::MemorySpace::Vec] = {ir::MemorySpace::Mat, ir::MemorySpace::DDR,
+                                       ir::MemorySpace::SRAM};
     mem_graph[ir::MemorySpace::Mat] = {ir::MemorySpace::Left, ir::MemorySpace::Right, ir::MemorySpace::Bias,
-                                       ir::MemorySpace::LeftScale, ir::MemorySpace::RightScale};
+                                       ir::MemorySpace::LeftScale, ir::MemorySpace::RightScale,
+                                       ir::MemorySpace::SRAM};
+    mem_graph[ir::MemorySpace::SRAM] = {ir::MemorySpace::Vec, ir::MemorySpace::Mat,
+                                        ir::MemorySpace::DDR};
     mem_graph[ir::MemorySpace::Acc] = {ir::MemorySpace::Vec, ir::MemorySpace::Mat, ir::MemorySpace::DDR};
 
     return SoC(die, 2, std::move(mem_graph));

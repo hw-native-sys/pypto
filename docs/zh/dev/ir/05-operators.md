@@ -594,9 +594,9 @@ with ib.function("tensor_example") as f:
 | 分类 | 操作 | 描述 |
 | ---- | ---- | ---- |
 | **内存** | `tile.get_block_idx` | 获取 block 索引（返回 UINT64 标量） |
-| - | `tile.load` | TensorType → TileType（DDR 到统一缓冲区） |
-| - | `tile.store` | TileType → TensorType（统一缓冲区到 DDR） |
-| - | `tile.move` | 在 memory space 之间搬移 tile（`target_memory`）—— 见 [tile.move 的结果 view](#tilemove-的结果-view) |
+| - | `tile.load` | TensorType → TileType（tensor 到 tile）。可选的 `source_memory` / `target_memory` kwargs 在调用上呈现搬运的两端：`source_memory` 是 GM 侧的呈现性声明（`DDR` / `SRAM` / `Vec` / `Mat` 任一；`None` 等价于 DDR），`target_memory` 指明片上落点空间 `Vec` / `Mat` / `SRAM`（`None` 交给 InferTileMemorySpace 推断）。MX layout 的 tensor 必须显式 `target_memory=Mat` |
+| - | `tile.store` | TileType → TensorType（tile 到 tensor）。可选的 `source_memory` / `target_memory` kwargs 在调用上呈现搬运的两端：`source_memory` 必须是算子注册的 tile 输入空间之一（`Vec` / `Acc` / `SRAM`），且与 tile 已解析的空间一致（最终放置在 codegen 复检）；`target_memory` 是 GM 侧的呈现性声明（`DDR` / `SRAM` / `Vec` / `Mat` 任一；`None` 等价于 DDR） |
+| - | `tile.move` | 在 memory space 之间搬移 tile（`target_memory`）。支持 `SRAM` ↔ `Vec` / `Mat`（cluster 级中转空间，GM ↔ SRAM 有保证的直连路径）—— 见 [tile.move 的结果 view](#tilemove-的结果-view) |
 | **逐元素** | `tile.add/sub/mul/div` | Tile-Tile 操作 |
 | - | `tile.adds/subs/muls/divs` | Tile-Scalar 操作。**常量**标量操作数会采用 tile 的元素 dtype（裸整数字面量否则会被解析为 `index`，而任何 `pto.t*s` 算子都不接受它）——但整数 tile 上的浮点字面量仍保持 FP32，以保留类型提升语义。显式的 `pl.const(v, dtype)` 属于用户的有意标注，与任何非常量表达式一样保持不变；非常量的 `index` 标量（循环变量、`pl.dim`）会被拒绝——需用 `pl.cast` 转换。`tensor.*s` 同理。 |
 | **一元** | `tile.sqrt` | 逐元素平方根 |

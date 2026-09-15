@@ -664,9 +664,9 @@ with ib.function("tensor_example") as f:
 | Category | Operations | Description |
 | -------- | ---------- | ----------- |
 | **Memory** | `tile.get_block_idx` | Get hardware block index (→ ScalarType(DataType::UINT64)) |
-| - | `tile.load` | TensorType → TileType (DDR to unified buffer) |
-| - | `tile.store` | TileType → TensorType (unified buffer to DDR) |
-| - | `tile.move` | Move a tile between memory spaces (`target_memory`) — see [Result view of tile.move](#result-view-of-tilemove) |
+| - | `tile.load` | TensorType → TileType (tensor to tile). Optional `source_memory` / `target_memory` kwargs present both ends of the move on the call: `source_memory` is a presentational declaration of the GM end (any of `DDR` / `SRAM` / `Vec` / `Mat`; `None` is equivalent to DDR), while `target_memory` names the on-chip landing space `Vec` / `Mat` / `SRAM` (`None` leaves it to InferTileMemorySpace placement). MX-layout tensors require an explicit `target_memory=Mat` |
+| - | `tile.store` | TileType → TensorType (tile to tensor). Optional `source_memory` / `target_memory` kwargs present both ends of the move: `source_memory` must be one of the op's registered tile-input spaces (`Vec` / `Acc` / `SRAM`) and agrees with the tile's resolved space when one exists (the final placement is re-checked at codegen), `target_memory` is a presentational declaration of the GM end (any of `DDR` / `SRAM` / `Vec` / `Mat`; `None` is equivalent to DDR) |
+| - | `tile.move` | Move a tile between memory spaces (`target_memory`). Bridges `SRAM` ↔ `Vec` / `Mat` (the cluster staging space, with a guaranteed direct GM ↔ SRAM path) — see [Result view of tile.move](#result-view-of-tilemove) |
 | **Element-wise** | `tile.add/sub/mul/div` | Tile-Tile operations |
 | - | `tile.adds/subs/muls/divs` | Tile-Scalar operations. A **constant** scalar operand adopts the tile's element dtype (a bare int literal is otherwise parsed as `index`, which no `pto.t*s` op accepts) — except a float literal on an integer tile, which keeps FP32 so promotion is preserved. An explicit `pl.const(v, dtype)` is a deliberate annotation and is left as-is, as is any non-constant expression; a non-constant `index` scalar (loop var, `pl.dim`) is rejected — convert it with `pl.cast`. Same rule for `tensor.*s`. |
 | **Unary** | `tile.sqrt` | Element-wise square root |
