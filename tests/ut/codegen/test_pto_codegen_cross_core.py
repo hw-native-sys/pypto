@@ -347,6 +347,51 @@ class TestCrossCoreTpushTpopCodegen:
     """Tests for cross-core TPUSH/TPOP PTO code generation."""
 
     @staticmethod
+    def _generate_v2c_tpop(
+        physical_cols: int,
+        valid_cols: int | ir.Var,
+        *,
+        physical_rows: int = 16,
+        valid_rows: int | ir.Var = 16,
+        split: int = 0,
+    ) -> str:
+        """Generate one AIC-side V2C TPOP with distinct physical/logical extents."""
+        span = ir.Span.unknown()
+
+        def dim(value: int | ir.Var) -> ir.Expr:
+            return ir.ConstInt(value, pl.INDEX, span) if isinstance(value, int) else value
+
+        rows_expr = ir.ConstInt(physical_rows, pl.INDEX, span)
+        cols_expr = ir.ConstInt(physical_cols, pl.INDEX, span)
+        valid_rows_expr = dim(valid_rows)
+        valid_cols_expr = dim(valid_cols)
+        tile_type = ir.TileType(
+            [rows_expr, cols_expr],
+            pl.FP16,
+            None,
+            ir.TileView(valid_shape=[valid_rows_expr, valid_cols_expr]),
+            ir.MemorySpace.Mat,
+        )
+        popped = ir.Var("popped", tile_type, span)
+        pop_call = ir.Call(ir.Op("tile.tpop_from_aiv"), [], {"split": split}, tile_type, span)
+        params = []
+        for value in (valid_rows, valid_cols):
+            if isinstance(value, ir.Var) and all(existing[0] is not value for existing in params):
+                params.append((value, ir.ParamDirection.In))
+        func = ir.Function(
+            "v2c_consumer",
+            params,
+            [],
+            ir.SeqStmts([ir.AssignStmt(popped, pop_call, span)], span),
+            span,
+            ir.FunctionType.AIC,
+        )
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        return codegen.PTOCodegen().generate(ir.Program([func], "v2c_tpop_program", span))
+
+    @staticmethod
     def _compile_and_generate(program) -> dict[str, str]:
         """Compile program and return dict of {func_name: mlir_code}.
 
@@ -466,6 +511,78 @@ class TestCrossCoreTpushTpopCodegen:
         codes = self._compile_and_generate(CrossCoreTpushTpopProgram)
         assert "slot_num" not in codes["vector_producer"], "Default path must not emit slot_num"
         assert "slot_num" not in codes["cube_consumer"], "Default path must not emit slot_num"
+
+    @pytest.mark.parametrize(
+        ("physical_k", "valid_k"),
+        [(160, 160), (160, 96), (32, 16), (16, 1)],
+    )
+    def test_v2c_tpop_uses_physical_frame_then_restores_logical_k(self, physical_k, valid_k):
+        """A padded V2C matmul operand is popped as its box, then narrowed logically.
+
+        TPUSH transports the physical frame. Popping only ``valid_k`` into a
+        wider Mat buffer leaves all but the first fractal row unpopulated, so a
+        following matmul silently computes one correct row and fifteen wrong
+        rows. The exact case needs neither explicit extents nor a reshape; the
+        three padded discriminators must pop the full box and restore the
+        logical K extent without copying.
+        """
+        mlir_code = self._generate_v2c_tpop(physical_k, valid_k)
+        lines = [line.strip() for line in mlir_code.splitlines()]
+        tpop_line = next(line for line in lines if "pto.tpop_from_aiv" in line)
+        reshape_lines = [line for line in lines if "pto.treshape" in line]
+
+        if physical_k == valid_k:
+            assert "pto.tpop_from_aiv {split = 0}" in tpop_line
+            assert not reshape_lines
+            return
+
+        assert f"pto.tpop_from_aiv(%c16_index, %c{physical_k}_index) {{split = 0}}" in tpop_line
+        assert len(reshape_lines) == 1
+        assert f"rows=16, cols={physical_k}, v_row=16, v_col={valid_k}" in reshape_lines[0]
+        assert "pto.set_validshape" not in mlir_code
+
+    def test_v2c_tpop_preserves_dynamic_logical_extent(self):
+        """A dynamic V2C extent stays directly on TPOP until PTO has a dynamic metadata rebind."""
+        span = ir.Span.unknown()
+        valid_k = ir.Var("valid_k", ir.ScalarType(pl.INDEX), span)
+        mlir_code = self._generate_v2c_tpop(160, valid_k)
+        tpop_line = next(line.strip() for line in mlir_code.splitlines() if "pto.tpop_from_aiv" in line)
+
+        assert "pto.tpop_from_aiv(%c16_index, %arg0) {split = 0}" in tpop_line
+        assert "pto.treshape" not in mlir_code
+
+    def test_v2c_tpop_preserves_statically_empty_extent(self):
+        """An empty V2C lane remains empty instead of being widened into a real transfer."""
+        mlir_code = self._generate_v2c_tpop(32, 16, valid_rows=0)
+        tpop_line = next(line.strip() for line in mlir_code.splitlines() if "pto.tpop_from_aiv" in line)
+
+        assert "pto.tpop_from_aiv(%c0_index, %c16_index) {split = 0}" in tpop_line
+        assert "pto.treshape" not in mlir_code
+
+    def test_v2c_no_split_transport_preserves_logical_rows(self):
+        """No-split V2C mirrors the producer's valid rows while widening columns."""
+        mlir_code = self._generate_v2c_tpop(32, 16, physical_rows=32, valid_rows=16)
+        lines = [line.strip() for line in mlir_code.splitlines()]
+        tpop_line = next(line for line in lines if "pto.tpop_from_aiv" in line)
+        reshape_line = next(line for line in lines if "pto.treshape" in line)
+
+        assert "pto.tpop_from_aiv(%c16_index, %c32_index) {split = 0}" in tpop_line
+        assert "rows=32, cols=32, v_row=16, v_col=16" in reshape_line
+
+    def test_v2c_tpop_restores_lane_local_logical_extent(self):
+        """A statically localized split lane keeps its logical extent after full-box transport."""
+        mlir_code = self._generate_v2c_tpop(32, 16, split=2)
+        lines = [line.strip() for line in mlir_code.splitlines()]
+        tpop_line = next(line for line in lines if "pto.tpop_from_aiv" in line)
+        reshape_line = next(line for line in lines if "pto.treshape" in line)
+
+        assert "pto.tpop_from_aiv(%c16_index, %c32_index) {split = 2}" in tpop_line
+        assert "rows=16, cols=32, v_row=16, v_col=16" in reshape_line
+
+    def test_v2c_tpop_still_rejects_odd_split(self):
+        """V2C keeps rejecting odd split codes that pto-isa cannot represent."""
+        with pytest.raises(ValueError, match="no odd split for the Vector -> Cube direction"):
+            self._generate_v2c_tpop(32, 16, split=4)
 
     def test_tpop_dynamic_valid_shape_operands(self):
         """Dynamic tpop result valid_shape should emit PTOAS frontend operands."""

@@ -306,21 +306,21 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
   std::string result_type = codegen.GetCurrentResultTileBufTypeString();
   auto [logical_row, logical_col] = codegen.GetCurrentResultTpopValidShapeOperands();
 
-  // PTO's Cube->Vector FIFO copies the physical consumer box, at EVERY split.
-  // pto-isa builds the GM slot view from the popped tile's compile-time
-  // rows/cols and the producer's box row pitch (a2a3 TPush.hpp
-  // popVecTileFromGMFiFo: gmValidR/gmValidC = ConsM/ConsN, gmStrideR = ProdN),
-  // then strides that view with the tile's RUNTIME validCol (TLoadGm2ubNd2nd:
-  // lenBurst = validCol, but gmGap = gStride3 - gShape4). A narrowed validCol
-  // therefore collapses the GM gap to zero and the pop reads one contiguous
-  // run instead of one box row per burst -- silently, since the matching
-  // PTO_ASSERT(validCol == gShape4) is compiled out in release builds. Give
-  // TPOP the full-box extent, mirroring the producer-side widening in
-  // EmitTpushTransportValidShape, then restore the logical result shape before
-  // any vector consumer sees it. Keep a statically empty pop empty: the
-  // dual-AIV no-split path uses such a replay only to balance the pipe, and a
-  // split lane whose localized valid extent is statically 0 must likewise
-  // move nothing.
+  // Cross-core FIFO transport owns a physical frame, while the result TileType
+  // owns the logical valid extent. Cube-to-Vector already uses its ISA-specific
+  // full consumer box. Vector-to-Cube must mirror the producer frame selected
+  // by EmitTpushTransportValidShape: genuine split transfers use the full box,
+  // while no-split dual-AIV transfers widen columns but preserve producer-valid
+  // rows. The logical view is restored after the pop.
+  //
+  // This is observable in both directions. For Cube->Vector, pto-isa builds
+  // the GM slot view from the popped tile's compile-time rows/cols and the
+  // producer's box row pitch, then strides it with the tile's runtime
+  // validCol. For Vector->Cube, popping only a logical K extent into a wider
+  // Mat box leaves all but the first fractal row unpopulated before matmul.
+  // Both failures are silent in release builds. Pop the producer's transport
+  // frame and expose the original logical extent through a zero-copy treshape.
+  // Keep a statically empty pop empty: replay/empty lanes must move no data.
   auto result_tile_type = codegen.GetCurrentResultTileType();
   bool statically_empty = false;
   bool has_static_logical_shape = false;
@@ -347,11 +347,18 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
   // validCol). Widening either lane to the box would place lane 1 one cell past
   // the producer's band. Such a tile carries a per-lane (non-static) valid
   // extent anyway, so this only makes the requirement explicit.
-  const bool use_full_box =
-      std::string_view(target) == "aic" && !ir::IsOddSplitCode(split) && !logical_row.empty() &&
+  bool is_cross_core_transfer_memory = false;
+  if (result_tile_type) {
+    const auto memory_space = result_tile_type->GetMemorySpace();
+    is_cross_core_transfer_memory =
+        (std::string_view(target) == "aic" && memory_space == ir::MemorySpace::Vec) ||
+        (std::string_view(target) == "aiv" && memory_space == ir::MemorySpace::Mat);
+  }
+  const bool can_restore_transport_frame =
+      is_cross_core_transfer_memory && !ir::IsOddSplitCode(split) && !logical_row.empty() &&
       !logical_col.empty() && has_static_logical_shape && !statically_empty && result_tile_type &&
-      result_tile_type->GetMemorySpace() == ir::MemorySpace::Vec && result_tile_type->shape_.size() >= 2 &&
-      As<ir::ConstInt>(result_tile_type->shape_[0]) && As<ir::ConstInt>(result_tile_type->shape_[1]);
+      result_tile_type->shape_.size() >= 2 && As<ir::ConstInt>(result_tile_type->shape_[0]) &&
+      As<ir::ConstInt>(result_tile_type->shape_[1]);
   // PTOAS enforces the same contract from the other side ("expects odd C2V
   // split tpop to provide per-sub-core valid_row and valid_col operands"), so
   // fail here with the op's own span rather than in the assembler.
@@ -361,23 +368,38 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
          "localization in LowerAutoVectorSplit produces them";
   std::string transport_row = logical_row;
   std::string transport_col = logical_col;
-  if (use_full_box) {
-    transport_row = EmitIndexOperand(codegen, result_tile_type->shape_[0], "tpop transport row");
-    transport_col = EmitIndexOperand(codegen, result_tile_type->shape_[1], "tpop transport col");
+  bool restore_logical_view = false;
+  if (can_restore_transport_frame) {
+    const auto result_view = ir::tile_view_semantics::GetEffectiveTileView(*result_tile_type);
+    const auto& physical_shape = result_tile_type->shape_;
+    const auto& logical_shape = result_view.valid_shape;
+    // A genuine split transports the complete box so the second lane's band
+    // exists at the box half. A no-split V2C producer deliberately retains
+    // validRow (see EmitTpushTransportValidShape) and widens only validCol.
+    // Keep the established C2V full-row TPOP contract unchanged.
+    const bool no_split_v2c = split == 0 && std::string_view(target) == "aiv";
+    const ExprPtr& transport_row_expr = no_split_v2c ? logical_shape[0] : physical_shape[0];
+    const ExprPtr& transport_col_expr = physical_shape[1];
+    restore_logical_view = !IsSameDimExpr(transport_row_expr, logical_shape[0]) ||
+                           !IsSameDimExpr(transport_col_expr, logical_shape[1]);
+    if (restore_logical_view) {
+      transport_row = EmitIndexOperand(codegen, transport_row_expr, "tpop transport row");
+      transport_col = EmitIndexOperand(codegen, transport_col_expr, "tpop transport col");
+    }
   }
 
   // A frontend tpop result is not itself a locally bound tile in PTOAS, so
-  // pto.set_validshape cannot mutate it directly. When transport uses the
-  // full physical box, pop into a temporary and expose the logical result via
+  // pto.set_validshape cannot mutate it directly. When transport uses a
+  // wider physical frame, pop into a temporary and expose the logical result via
   // pto.treshape. PTOAS has a dedicated zero-copy treshape-over-tpop lowering
   // that preserves the FIFO tile handle while rebuilding its static valid
-  // metadata. A full-box pto.subview is not equivalent here: PTOAS lowers that
+  // metadata. A full-frame pto.subview is not equivalent here: PTOAS lowers that
   // path through a disconnected tile handle on A2/A3.
   //
   // Treshape carries no valid-row/valid-col operands, so it can restore only
   // static logical extents. Keep the existing direct TPOP behavior for dynamic
   // valid shapes until PTO exposes a dynamic metadata rebind for pipe entries.
-  std::string transport_buf = use_full_box ? codegen.NewNamedTemp("tpop_transport") : result_buf;
+  std::string transport_buf = restore_logical_view ? codegen.NewNamedTemp("tpop_transport") : result_buf;
   std::ostringstream oss;
   oss << transport_buf << " = pto.tpop_from_" << target;
   if (!transport_row.empty() || !transport_col.empty()) {
@@ -390,13 +412,13 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
     oss << " -> " << result_type;
   }
   codegen.Emit(oss.str());
-  if (use_full_box) {
+  if (restore_logical_view) {
     const auto& shape = result_tile_type->shape_;
     INTERNAL_CHECK_SPAN(As<ir::ConstInt>(shape[0]) && As<ir::ConstInt>(shape[1]), op->span_)
-        << "Internal error: full-box tpop localization requires a compile-time constant physical shape";
+        << "Internal error: framed tpop localization requires a compile-time constant physical shape";
     std::string logical_type = codegen.GetViewTileBufTypeStringFromTileType(result_tile_type);
     INTERNAL_CHECK_SPAN(!logical_type.empty(), op->span_)
-        << "Internal error: full-box tpop localization requires a logical tile type";
+        << "Internal error: framed tpop localization requires a logical tile type";
     std::string logical_buf = codegen.NewNamedTemp("tpop_logical");
     codegen.Emit(logical_buf + " = pto.treshape " + transport_buf + " : " + result_type + " -> " +
                  logical_type);
