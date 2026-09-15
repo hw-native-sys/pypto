@@ -185,6 +185,7 @@ def ready_spec(directory: Path, generated: ArtifactSpec) -> ArtifactSpec:
         generated.build_kind,
         tuple(sorted(required)),
         generated.execution_capabilities,
+        generated.kernel_abi,
     )
 
 

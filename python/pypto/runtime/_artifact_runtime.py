@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from pypto._artifact_contract import ArtifactExecutionMode
+from pypto._kernel_abi import KernelABI
 from pypto.jit._artifact_manifest import ArtifactState, BuildKind, read_manifest
 from pypto.jit.artifact_cache import ArtifactHandle, ArtifactStore
 
@@ -172,3 +173,19 @@ def runtime_output_directory(compiled: Any) -> Path:
     """Return writable run storage without changing the immutable artifact root."""
     runtime = vars(compiled).get("_artifact_runtime")
     return compiled.output_dir if runtime is None else runtime.run_directory
+
+
+def restore_kernel_metadata(handle: ArtifactHandle, expected_abi: KernelABI) -> dict[str, Any]:
+    """Validate a kernel stage and its sidecar without assembly or device work.
+
+    Both generated and ready handles retain the same contract. A ready marker
+    still does not imply that a callable has been registered in this process.
+    """
+    handle.spec.execution_capabilities.require(ArtifactExecutionMode.KERNEL)
+    if handle.spec.kernel_abi is None:
+        raise ValueError("Kernel artifact is missing its ABI descriptor")
+    handle.spec.kernel_abi.require_compatible(expected_abi)
+    read_manifest(handle.directory, handle.key, handle.spec)
+    from pypto.ir.compiled_program import load_kernel_metadata  # noqa: PLC0415
+
+    return load_kernel_metadata(handle.directory, expected_abi)
