@@ -51,6 +51,40 @@ Compiler errors, including cancellation, wake all waiters and propagate. Results
 and errors are removed from the coordinator when the operation finishes;
 subsequent private requests build again. This is not a private-object cache.
 
+## Execution capabilities and complete argument binding
+
+Current compilers emit `supported_execution_modes: ["program"]` in
+`compiled_meta.json` (schema 2) and `distributed_meta.json` (schema 3).
+`ExecutionCapabilities` in `pypto._artifact_contract` is immutable and validated;
+`CompiledProgram`, its orchestration children, and `DistributedCompiledProgram`
+retain it across `from_dir()` without loading binaries or starting workers.
+A program consumer rejects a kernel-only capability list. The `kernel` name is
+reserved for a future producer; declaring it does not implement a kernel ABI.
+There is no new user mode selector, and normal JIT/program calls are unchanged.
+
+`ArtifactSpec.execution_capabilities` records the same declaration in the
+schema-2 artifact manifest and participates in the spec digest. Different
+capabilities cannot reuse the same stage slot. Generated-to-ready promotion
+preserves them, and program attachment rejects a mismatch between the manifest
+and compiled metadata. Capabilities are separate from generated/ready state:
+permission to use a program executor does not establish binary readiness.
+
+Older sidecar schemas are rejected with a recompilation instruction; missing,
+empty, duplicate, unknown, or incompatible capability declarations are not
+inferred. Artifact schema 2 also changes the compilation-key namespace, so
+old persistent entries miss cleanly and remain untouched. Runtime scalar values,
+tensor addresses and streams are still excluded from specialization identity.
+`execute_artifact` validates a present single-chip sidecar before assembly;
+legacy directories without a sidecar retain their existing program-only path.
+
+`pypto.ir.param_info.bind_complete_args` is an internal shared binding facility:
+it requires all positional parameters, including Out/InOut, and returns the
+original objects in signature order. It never allocates, copies, coerces scalars,
+or initializes a runtime, so aliases and each call's scalar values survive.
+Executors retain responsibility for tensor/storage and ABI validation. Existing
+program return-style calls still allocate omitted Out tensors before execution;
+this helper does not change their behavior or introduce a kernel calling API.
+
 ## Layout and validation
 
 ```text

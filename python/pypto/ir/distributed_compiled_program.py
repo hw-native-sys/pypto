@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from pypto._artifact_contract import ArtifactExecutionMode, ExecutionCapabilities
 from pypto.backend import BackendType
 from pypto.pypto_core.ir import ParamDirection, Program, Role, level_to_linqu_level
 from pypto.runtime.device_tensor import DeviceTensor, StackedDeviceTensor
@@ -44,12 +45,13 @@ from .compiled_program import (
     _write_debug_runner,
     _write_meta_atomically,
 )
+from .param_info import bind_complete_args
 
 # The sidecar filename itself lives beside its L2 counterpart in
 # ``compiled_program`` (both feed the build-kind marker table there) and is
 # re-exported here, where the rest of the L3 metadata contract lives. Bump
 # ``_META_SCHEMA`` on any incompatible format change.
-_META_SCHEMA = 2
+_META_SCHEMA = 3
 
 if TYPE_CHECKING:
     from pypto.runtime._artifact_runtime import ArtifactRuntime
@@ -204,6 +206,7 @@ class DistributedCompiledProgram:
         _param_infos: list[_ParamInfo] | None = None,
         _output_indices: list[int] | None = None,
         _return_types: list[Any] | None = None,
+        _execution_capabilities: ExecutionCapabilities = ExecutionCapabilities(),
     ) -> None:
         # ``program`` is the post-pass IR. The runtime needs post-pass IR for
         # orchestrator metadata (post-SSA names that match the generated
@@ -215,6 +218,8 @@ class DistributedCompiledProgram:
         # ``_output_indices`` / ``_return_types`` kwargs (read back from
         # ``distributed_meta.json``), and chip-callable assembly is driven by
         # the on-disk ``next_levels/`` layout — so no live IR is needed.
+        _execution_capabilities.require(ArtifactExecutionMode.PROGRAM)
+        self._execution_capabilities = _execution_capabilities
         self._program = program
         self._output_dir = Path(output_dir).resolve()
         self._backend_type = backend_type
@@ -265,6 +270,7 @@ class DistributedCompiledProgram:
         dc = self._distributed_config
         meta = {
             "schema": _META_SCHEMA,
+            "supported_execution_modes": self.execution_capabilities.record(),
             "params": [_param_info_to_dict(p) for p in param_infos],
             "num_return_types": len(return_types),
             "platform": self._platform,
@@ -345,7 +351,13 @@ class DistributedCompiledProgram:
             _param_infos=param_infos,
             _output_indices=output_indices,
             _return_types=return_types,
+            _execution_capabilities=meta["execution_capabilities"],
         )
+
+    @property
+    def execution_capabilities(self) -> ExecutionCapabilities:
+        """Artifact consumers declared at compilation, without initializing workers."""
+        return self._execution_capabilities
 
     @property
     def output_dir(self) -> Path:
@@ -444,7 +456,7 @@ class DistributedCompiledProgram:
             )
 
         if len(args) == n_params:
-            all_args: list[CallArg] = list(args)
+            all_args = bind_complete_args(args, param_infos, caller_name="DistributedCompiledProgram")
         elif return_style:
             all_args = self._build_full_args(args, param_infos, output_indices)
         else:

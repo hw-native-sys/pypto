@@ -180,7 +180,12 @@ def ready_spec(directory: Path, generated: ArtifactSpec) -> ArtifactSpec:
         required = {p for p in required if p not in sidecars and not Path(p).is_relative_to(cache)}
         required.update(str(prefix / path) for path in (BINARY_MANIFEST, "prebuilt/orchestration.bin"))
         required.update(str(prefix / "prebuilt" / f"kernel_{i}.bin") for i in range(len(config.KERNELS)))
-    return ArtifactSpec(ArtifactState.BINARY_READY, generated.build_kind, tuple(sorted(required)))
+    return ArtifactSpec(
+        ArtifactState.BINARY_READY,
+        generated.build_kind,
+        tuple(sorted(required)),
+        generated.execution_capabilities,
+    )
 
 
 def _read_json(root: Path) -> dict[str, Any]:

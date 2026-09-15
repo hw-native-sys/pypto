@@ -38,6 +38,33 @@ SHA-256 源码和特化摘要。其记录保留每个环境组件摘要和两个
 操作结束后，协调器删除对应结果或错误；后续独立的私有构建请求仍会重新构建。
 这不是私有对象缓存。
 
+## 执行能力与完整参数绑定
+
+当前编译器在 `compiled_meta.json`（schema 2）和 `distributed_meta.json`
+（schema 3）中写入 `supported_execution_modes: ["program"]`。
+`pypto._artifact_contract` 中的 `ExecutionCapabilities` 是经过校验的不可变记录；
+`CompiledProgram`、其 orchestration 子对象和 `DistributedCompiledProgram`
+在 `from_dir()` 后保留该记录，无需加载二进制或初始化 Worker。
+program 消费者拒绝仅声明 kernel 的产物。`kernel` 名称为后续生产者保留，
+声明它不等于实现 kernel ABI。本次不增加用户 mode 选择，普通 JIT/program 调用保持原行为。
+
+`ArtifactSpec.execution_capabilities` 将同一声明写入 schema 2 的 artifact manifest，
+并纳入 spec 摘要；不同能力不会复用同一阶段 slot。generated 到 ready 晋级保留能力声明，
+绑定 program 时会拒绝 manifest 与 compiled metadata 的能力不一致。
+能力与 generated/ready 状态独立：允许 program executor 消费不代表二进制已就绪。
+
+旧 sidecar schema 报错并提示重新编译；缺失、空列表、重复、未知或不兼容的能力声明
+不通过猜测补齐。artifact schema 2 同时改变编译 key 的命名空间，因此旧持久条目正常
+未命中且不被修改。运行时 Scalar 值、Tensor 地址和 stream 仍不进入特化 identity。
+`execute_artifact` 在组装前校验已有的单芯片 sidecar；没有 sidecar 的历史目录
+保留既有 program 专用执行路径。
+
+`pypto.ir.param_info.bind_complete_args` 是内部共享绑定设施：要求全部位置参数，
+包括 Out/InOut，并按签名顺序返回原对象。它不分配、不复制、不转换 Scalar，也不初始化
+runtime，因此保留参数别名和每次调用的 Scalar 值。Tensor/storage 与 ABI 校验仍由
+各执行器负责。已有 program return-style 调用仍会在执行前分配省略的 Out Tensor；
+该 helper 不切换已有行为，也不提供 kernel 调用接口。
+
 ## 布局与校验
 
 ```text

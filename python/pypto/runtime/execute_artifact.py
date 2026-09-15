@@ -47,6 +47,7 @@ import warnings
 from pathlib import Path
 from typing import Any
 
+from pypto.ir.compiled_program import _COMPILED_META_FILENAME, _COMPILED_META_SCHEMA, _load_meta
 from pypto.runtime.runner import (
     _SWIMLANE_CLI_HELP,
     _SWIMLANE_FULL_LEVEL,
@@ -130,9 +131,12 @@ def _reconstruct_artifact(work_dir: Path, platform: str) -> tuple[Any, str, bool
     setup problem, so it is wrapped as :class:`ArtifactSetupError` (the CLI reports
     ``PYPTO_EXEC_RESULT=INFRA``) rather than a device test failure.
     """
-    from pypto.runtime.device_runner import _compile_and_assemble  # noqa: PLC0415
-
     try:
+        meta_path = work_dir / _COMPILED_META_FILENAME
+        if meta_path.exists():
+            _load_meta(meta_path, filename=_COMPILED_META_FILENAME, schema=_COMPILED_META_SCHEMA)
+        from pypto.runtime.device_runner import _compile_and_assemble  # noqa: PLC0415
+
         chip_callable, runtime_name, runtime_config = _compile_and_assemble(work_dir, platform)
     except Exception as exc:  # noqa: BLE001 — reclassified as infra, re-raised below
         raise ArtifactSetupError(f"artifact reconstruction failed for {work_dir}: {exc}") from exc

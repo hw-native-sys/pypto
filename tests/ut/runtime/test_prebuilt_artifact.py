@@ -23,6 +23,7 @@ from unittest.mock import Mock, patch
 import pypto.language as pl
 import pytest
 from pypto import CacheConfig, cache_stats, ir, passes
+from pypto._artifact_contract import ArtifactExecutionMode, ExecutionCapabilities
 from pypto._identity import ToolchainIdentity, digest_record
 from pypto.ir.compiled_program import _COMPILED_META_SCHEMA, CompiledProgram
 from pypto.ir.distributed_compiled_program import _META_SCHEMA, DistributedCompiledProgram
@@ -90,6 +91,7 @@ def _chip(root: Path) -> None:
 def _generated(root: Path, kind: BuildKind) -> None:
     meta: dict[str, Any] = dict(
         schema=_COMPILED_META_SCHEMA,
+        supported_execution_modes=["program"],
         params=[],
         num_return_types=0,
         platform="a2a3sim",
@@ -1084,6 +1086,60 @@ def test_unresolved_linker_dependency_compiles_privately(tmp_path, automatic_jit
             assert "requires search-path resolution" in cache_stats().last_bypass_reason
     assert len(builds) == 2 and not root.exists()
     assert cache_stats().bypasses - before.bypasses == 2
+
+
+@pytest.mark.parametrize("kind", list(BuildKind))
+def test_promotion_preserves_execution_capabilities(tmp_path, fake_runtime, kind):
+    store = ArtifactStore(tmp_path / "cache", private_root=tmp_path / "private")
+    generated = store.get_or_build(_key(), _spec(kind), lambda root: _generated(root, kind)).handle
+    assert generated is not None
+    compiled = restore_artifact(store, generated, tmp_path / "run")
+    assert compiled.execution_capabilities == generated.spec.execution_capabilities
+    compiled._artifact_runtime.load()
+    ready = compiled._artifact_runtime.handle
+    assert ready.spec.state is ArtifactState.BINARY_READY
+    assert ready.spec.execution_capabilities == generated.spec.execution_capabilities
+    restored = restore_artifact(store, ready, tmp_path / "second-run")
+    assert restored.execution_capabilities == compiled.execution_capabilities
+
+
+@pytest.mark.parametrize("direct", [False, True])
+def test_runtime_rejects_manifest_metadata_capability_mismatch(tmp_path, fake_runtime, direct):
+    store = ArtifactStore(tmp_path / "cache", private_root=tmp_path / "private")
+    spec = ArtifactSpec(
+        ArtifactState.GENERATED,
+        BuildKind.SINGLE_CHIP,
+        _spec().required_files,
+        ExecutionCapabilities((ArtifactExecutionMode.PROGRAM, ArtifactExecutionMode.KERNEL)),
+    )
+    handle = store.get_or_build(_key(), spec, lambda root: _generated(root, BuildKind.SINGLE_CHIP)).handle
+    assert handle is not None
+    with pytest.raises(ValueError, match="capabilities do not match"):
+        if direct:
+            ArtifactRuntime(store, handle, "a2a3sim", tmp_path / "run").load()
+        else:
+            restore_artifact(store, handle, tmp_path / "run")
+
+
+def test_generated_hit_checks_capabilities_of_ready_payload(tmp_path, fake_runtime):
+    store, generated = _publish(tmp_path, BuildKind.SINGLE_CHIP)
+    first = ArtifactRuntime(store, generated, "a2a3sim", tmp_path / "first-run")
+    first.load()
+    ready = first.handle
+    meta_path = ready.directory / "compiled_meta.json"
+    meta = json.loads(meta_path.read_text())
+    meta["supported_execution_modes"] = ["kernel"]
+    meta_path.write_text(json.dumps(meta))
+    # A producer can write a self-consistent inventory with an incompatible
+    # consumer contract. Both must be checked when promoting a generated hit.
+    marker = _artifact_manifest.make_manifest(ready.directory, ready.key, ready.spec)
+    (ready.directory / _artifact_manifest.MANIFEST_NAME).write_bytes(
+        _artifact_manifest.encode_manifest(marker)
+    )
+    with patch("pypto.runtime._artifact_runtime.load_prebuilt") as load:
+        with pytest.raises(ValueError, match="requires 'program'"):
+            ArtifactRuntime(store, generated, "a2a3sim", tmp_path / "next-run").load()
+    load.assert_not_called()
 
 
 if __name__ == "__main__":

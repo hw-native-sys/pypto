@@ -18,9 +18,10 @@ from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from pypto._artifact_contract import ExecutionCapabilities
 from pypto._identity import IDENTITY_SCHEMA, ToolchainIdentity, _file_digest, digest_record
 
-ARTIFACT_SCHEMA = 1
+ARTIFACT_SCHEMA = 2
 MANIFEST_NAME = "artifact_manifest.json"
 _MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 
@@ -112,10 +113,13 @@ class ArtifactSpec:
     state: ArtifactState
     build_kind: BuildKind
     required_files: tuple[str, ...]
+    execution_capabilities: ExecutionCapabilities = ExecutionCapabilities()
 
     def __post_init__(self) -> None:
         if not isinstance(self.state, ArtifactState) or not isinstance(self.build_kind, BuildKind):
             raise ValueError("Artifact spec requires ArtifactState and BuildKind enum values")
+        if not isinstance(self.execution_capabilities, ExecutionCapabilities):
+            raise ValueError("Artifact spec requires ExecutionCapabilities")
         required = tuple(sorted(_relative_path(path) for path in self.required_files))
         if not required or len(set(required)) != len(required):
             raise ValueError(f"Artifact required files must be nonempty and unique, got {required!r}")
@@ -124,7 +128,14 @@ class ArtifactSpec:
     @property
     def digest(self) -> str:
         """Address distinct stage contracts independently of the caller's key."""
-        return digest_record((self.state.value, self.build_kind.value, self.required_files))
+        return digest_record(
+            (
+                self.state.value,
+                self.build_kind.value,
+                self.required_files,
+                self.execution_capabilities.record(),
+            )
+        )
 
 
 def check_directory(path: Path) -> None:
@@ -181,6 +192,7 @@ def make_manifest(directory: Path, key: ArtifactKey, spec: ArtifactSpec) -> dict
         "components": key.record(),
         "state": spec.state.value,
         "build_kind": spec.build_kind.value,
+        "supported_execution_modes": spec.execution_capabilities.record(),
         "required_files": list(spec.required_files),
         "files": files,
     }

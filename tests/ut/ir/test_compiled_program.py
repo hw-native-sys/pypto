@@ -22,6 +22,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from pypto import DataType, backend, ir
+from pypto._artifact_contract import ArtifactExecutionMode, ExecutionCapabilities
 from pypto.backend import BackendType
 from pypto.ir.compiled_program import (
     _COMPILED_META_FILENAME,
@@ -34,6 +35,7 @@ from pypto.ir.distributed_compiled_program import (
     _DISTRIBUTED_META_FILENAME,
     DistributedCompiledProgram,
 )
+from pypto.ir.param_info import bind_complete_args
 from pypto.runtime import DeviceTensor, RunConfig
 
 
@@ -1574,6 +1576,78 @@ class TestCompiledMetaOutputDirReuse:
         """The atomic write leaves no ``.tmp`` residue next to the sidecar."""
         CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
         assert not list(tmp_path.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("count", [0, 1, 2, 4])
+def test_complete_binding_requires_out_and_inout_without_allocation(count):
+    infos, _, _ = _extract_param_infos(_make_program_with_inout())
+    args = tuple(object() for _ in range(count))
+    with patch("torch.zeros") as allocate:
+        with pytest.raises(TypeError, match="including all Out/InOut"):
+            bind_complete_args(args, infos, caller_name="complete call")
+    allocate.assert_not_called()
+
+
+def test_complete_binding_preserves_aliases_and_runtime_scalar_values():
+    infos, _, _ = _extract_param_infos(_make_program_with_scalar())
+    tensor = torch.ones(128, 128)
+    for value in (3, 9):
+        bound = bind_complete_args((tensor, value, tensor), infos, caller_name="complete call")
+        assert bound[0] is tensor and bound[2] is tensor
+        assert bound[1] == value
+
+
+def test_execution_capabilities_round_trip_without_runtime(tmp_path):
+    program = _make_program_with_orchestration(has_return=True)
+    with _fake_compile_and_assemble(None) as assemble:
+        compiled = CompiledProgram(program, str(tmp_path))
+        restored = CompiledProgram.from_dir(tmp_path)
+        assert compiled.program is program
+        assert restored.execution_capabilities == compiled.execution_capabilities == ExecutionCapabilities()
+        assert restored.has_return == compiled.has_return
+        with pytest.raises(ValueError, match="requires 'kernel'"):
+            restored.execution_capabilities.require(ArtifactExecutionMode.KERNEL)
+    assemble.assert_not_called()
+    meta = json.loads((tmp_path / _COMPILED_META_FILENAME).read_text())
+    assert meta["supported_execution_modes"] == ["program"]
+
+
+@pytest.mark.parametrize(
+    "modes", [None, [], "program", [True], ["unknown"], ["program", "program"], ["kernel"]]
+)
+def test_from_dir_rejects_invalid_or_incompatible_capabilities(tmp_path, modes):
+    CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+    path = tmp_path / _COMPILED_META_FILENAME
+    meta = json.loads(path.read_text())
+    meta["supported_execution_modes"] = modes
+    path.write_text(json.dumps(meta))
+    with _fake_compile_and_assemble(None) as assemble:
+        with pytest.raises(ValueError, match="recompile"):
+            CompiledProgram.from_dir(tmp_path)
+    assemble.assert_not_called()
+
+
+def test_from_dir_rejects_legacy_metadata_instead_of_guessing_capabilities(tmp_path):
+    CompiledProgram(_make_program_with_orchestration(), str(tmp_path))
+    path = tmp_path / _COMPILED_META_FILENAME
+    meta = json.loads(path.read_text())
+    meta["schema"] = 1
+    del meta["supported_execution_modes"]
+    path.write_text(json.dumps(meta))
+    with pytest.raises(ValueError, match="Incompatible.*schema.*recompile"):
+        CompiledProgram.from_dir(tmp_path)
+
+
+def test_multi_orchestration_preserves_capabilities_in_children_and_reload(tmp_path):
+    for name in ("orch_a", "orch_b"):
+        (tmp_path / "next_levels" / name / "orchestration").mkdir(parents=True)
+    compiled = CompiledProgram(_make_multi_orch_program(), str(tmp_path))
+    for name in compiled.orchestration_names:
+        child = compiled[name]
+        restored = CompiledProgram.from_dir(child.output_dir)
+        assert child.execution_capabilities == compiled.execution_capabilities
+        assert restored.execution_capabilities == child.execution_capabilities
+        assert restored.param_names == child.param_names
 
 
 if __name__ == "__main__":

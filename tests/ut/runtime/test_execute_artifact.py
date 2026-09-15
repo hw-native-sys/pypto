@@ -20,6 +20,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pypto.ir.compiled_program import _COMPILED_META_SCHEMA
 from pypto.runtime.runner import DfxOptions
 
 execute_artifact = importlib.import_module("pypto.runtime.execute_artifact")
@@ -383,6 +384,20 @@ def test_execute_batch_setup_failure_marks_infra_not_fail(tmp_path, capsys, stub
         f"PYPTO_EXEC_RESULT=PASS work_dir={wd1} device=0",
         f"PYPTO_EXEC_RESULT=INFRA work_dir={wd2}",
     ]
+
+
+def test_kernel_metadata_is_setup_failure_before_assembly(tmp_path, stub_compile_and_assemble):
+    (tmp_path / "compiled_meta.json").write_text(
+        json.dumps(
+            {
+                "schema": _COMPILED_META_SCHEMA,
+                "supported_execution_modes": ["kernel"],
+            }
+        )
+    )
+    with pytest.raises(execute_artifact.ArtifactSetupError, match="requires 'program'"):
+        execute_artifact_dir(tmp_path, "a2a3", 0)
+    stub_compile_and_assemble.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@ import pypto.language as pl
 import pytest
 import torch
 from pypto import DataType, ir
+from pypto._artifact_contract import ArtifactExecutionMode, ExecutionCapabilities
 from pypto.backend import BackendType
 from pypto.ir.distributed_compiled_program import (
     _DISTRIBUTED_META_FILENAME,
@@ -399,6 +400,29 @@ def test_distributed_types_are_reexported_from_pypto_ir():
     assert ir.DistributedConfig is DistributedConfig
     assert "DistributedCompiledProgram" in ir.__all__
     assert "DistributedConfig" in ir.__all__
+
+
+def test_distributed_capabilities_round_trip_without_workers(compiled, tmp_path):
+    with patch("pypto.runtime.distributed_runner._execute_distributed") as execute:
+        restored = DistributedCompiledProgram.from_dir(tmp_path)
+        assert restored.execution_capabilities == compiled.execution_capabilities == ExecutionCapabilities()
+        with pytest.raises(ValueError, match="requires 'kernel'"):
+            restored.execution_capabilities.require(ArtifactExecutionMode.KERNEL)
+    execute.assert_not_called()
+
+
+@pytest.mark.parametrize("legacy", [True, False])
+def test_distributed_reload_rejects_legacy_or_kernel_metadata(compiled, tmp_path, legacy):
+    path = tmp_path / _DISTRIBUTED_META_FILENAME
+    meta = json.loads(path.read_text())
+    if legacy:
+        meta["schema"] = 2
+        del meta["supported_execution_modes"]
+    else:
+        meta["supported_execution_modes"] = ["kernel"]
+    path.write_text(json.dumps(meta))
+    with pytest.raises(ValueError, match="recompile"):
+        DistributedCompiledProgram.from_dir(tmp_path)
 
 
 if __name__ == "__main__":

@@ -22,7 +22,9 @@ the metadata out removes the back edge; ``compiled_program`` re-exports these
 names, so nothing else has to know they moved.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import TypeVar
 
 import torch
 
@@ -84,3 +86,23 @@ class _ParamInfo:
 # Public spelling for code outside ``pypto.ir`` (the replay-script writer, and
 # harnesses that bind arguments themselves).
 ParamInfo = _ParamInfo
+
+
+_Arg = TypeVar("_Arg")
+
+
+def bind_complete_args(
+    args: Sequence[_Arg], param_infos: Sequence[_ParamInfo], *, caller_name: str
+) -> list[_Arg]:
+    """Bind every positional parameter without allocating outputs or converting values.
+
+    Out and InOut slots are mandatory, even when the IR has return values.
+    Tensor aliases and runtime scalar values are preserved. Consumer-specific
+    dtype, shape, storage and ABI validation happens after this shared binding.
+    """
+    if len(args) != len(param_infos):
+        raise TypeError(
+            f"{caller_name} expects {len(param_infos)} arguments including all Out/InOut parameters, "
+            f"got {len(args)}. Parameters: {[p.name for p in param_infos]}"
+        )
+    return list(args)
