@@ -2893,13 +2893,16 @@ class TestAutoTileMatmulL0MNTiling:
     def test_dbc2_ptoas_co_lives_two_l0c_accumulators(self):
         """Golden co-live check for dbC=2 (companion to the dbC=1 test above).
 
-        Under ``memory_planner=PTOAS`` a dbC=2-eligible full-K grid emits the
-        two-accumulator ping-pong: ``CanonicalizeIOOrder`` floats **both** stores below
-        **both** matmuls (``matmul, matmul, store, store``), so two L0C accumulators are
-        live at once. Under the default PyPTO planner the *same shape* stays dbC=1 and
-        interleaves each store with its matmul (``matmul, store, …``). This pins the
-        co-live ordering (subtle -- the nested-context bug silently disabled it once) and
-        the planner gate in one test.
+        Both planners emit the SAME interleaved order -- each drain directly after
+        its own MAD -- because that order *is* the ping-pong: with the two tiles in
+        different L0C slots, store_i runs while matmul_{i+1} executes. What dbC=2
+        changes is the number of slots, so this test pins the planner gate on the
+        **allocation**, which is the property, rather than on statement order.
+
+        (It previously asserted ``matmul, matmul, store, store`` under PTOAS. That
+        order lifted every drain above all compute, deferring each drain past the
+        MAD it should overlap; separation comes from the rotated
+        ``pipeline_membership``, not from the reorder. See attrs.h.)
 
         256x64x256 BF16: chooser picks a 2x2 dbC=2 grid; each accumulator (128x128 or
         smaller, <= L0C/2) leaves room for two co-live buffers.
@@ -2926,28 +2929,38 @@ class TestAutoTileMatmulL0MNTiling:
                 out = pl.store(c, [0, 0], out)
                 return out
 
-        # PTOAS: dbC=2 -> at least one adjacent matmul,matmul (two co-live accumulators),
-        # and the stores float below (a matmul,matmul,store,store window exists).
-        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
-            ptoas_seq = self._colive_seq(Before)
-        mm = [i for i, op in enumerate(ptoas_seq) if op == "matmul"]
-        assert mm, f"expected matmuls under PTOAS: {ptoas_seq}"
-        assert any(i + 1 < len(ptoas_seq) and ptoas_seq[i + 1] == "matmul" for i in mm), (
-            f"dbC=2 (PTOAS) must co-live two accumulators (adjacent matmul,matmul), got: {ptoas_seq}"
-        )
-        assert any(
-            ptoas_seq[i : i + 4] == ["matmul", "matmul", "store", "store"] for i in range(len(ptoas_seq) - 3)
-        ), f"dbC=2 (PTOAS) must float both stores below both matmuls (matmul,matmul,store,store): {ptoas_seq}"
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
-        # Default PyPTO planner: dbC=1 -> every matmul is immediately followed by its store
-        # (no two co-live accumulators), for the SAME shape.
-        pypto_seq = self._colive_seq(Before)
-        mm2 = [i for i, op in enumerate(pypto_seq) if op == "matmul"]
-        assert mm2, f"expected matmuls under PyPTO: {pypto_seq}"
-        for i in mm2:
-            assert i + 1 < len(pypto_seq) and pypto_seq[i + 1] == "store", (
-                f"dbC=1 (PyPTO) must interleave matmul,store (one accumulator), got: {pypto_seq}"
-            )
+        def acc_buffers(planner) -> set[str]:
+            _backend.reset_for_testing()
+            _backend.set_backend_type(BackendType.Ascend910B)
+            with passes.PassContext([], memory_planner=planner):
+                allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+            return {
+                line.strip().split(":")[0]
+                for line in ir.python_print(allocated).splitlines()
+                if "tile.alloc(pl.Mem.Acc" in line
+            }
+
+        # Both planners emit the ping-pong order: every matmul is followed by its
+        # own store, so each drain runs under the next tile's MAD.
+        for planner in (passes.MemoryPlanner.PTOAS, passes.MemoryPlanner.PYPTO):
+            with passes.PassContext([], memory_planner=planner):
+                seq = self._colive_seq(Before)
+            mm = [i for i, op in enumerate(seq) if op == "matmul"]
+            assert mm, f"expected matmuls under {planner}: {seq}"
+            for i in mm:
+                assert i + 1 < len(seq) and seq[i + 1] == "store", (
+                    f"{planner} must emit the ping-pong order (matmul, store, ...), got: {seq}"
+                )
+
+        # The planner gate shows up in the SLOT COUNT: PTOAS takes the dbC=2 plan
+        # and keeps two co-live accumulators; the default PyPTO planner stays dbC=1
+        # on the same shape and coalesces to one.
+        ptoas_accs = acc_buffers(passes.MemoryPlanner.PTOAS)
+        assert len(ptoas_accs) == 2, f"dbC=2 (PTOAS) must keep two co-live L0C buffers, got: {ptoas_accs}"
+        pypto_accs = acc_buffers(passes.MemoryPlanner.PYPTO)
+        assert len(pypto_accs) == 1, f"dbC=1 (PyPTO default) must use one L0C buffer, got: {pypto_accs}"
 
     def test_dbc2_pypto_flag_allocates_ping_pong(self):
         """The experimental ``enable_pypto_l0c_double_buffer`` opt-in makes the PyPTO
@@ -3247,8 +3260,9 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
         assert '"pipeline_overlap_stores": False' in printed
         _assert_ssa_valid(After, "test_existing_pipeline_dbc_marker")
 
-        # The existing lowering machinery must realize the marker as two
-        # co-live accumulators: matmul, matmul, drain, drain.
+        # The existing lowering machinery must realize the marker as a two-slot
+        # ping-pong: each drain issued directly after its own MAD, so it runs
+        # while the next MAD executes on the other accumulator.
         lowered = passes.infer_tile_memory_space()(After)
         lowered = passes.lower_pipeline_loops()(lowered)
         lowered = passes.canonicalize_io_order()(lowered)
@@ -3259,8 +3273,8 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
                 seq.append("matmul")
             elif ".store(" in text and "=" in text:
                 seq.append("store")
-        assert any(seq[i : i + 4] == ["matmul", "matmul", "store", "store"] for i in range(len(seq) - 3)), (
-            f"expected the dbC drain-overlap schedule, got: {seq}"
+        assert all(seq[i + 1] == "store" for i, op in enumerate(seq[:-1]) if op == "matmul"), (
+            f"expected the dbC ping-pong schedule (every matmul followed by its store), got: {seq}"
         )
 
         # PyPTO must preserve the two Acc slots without requiring the chooser's
@@ -3282,15 +3296,23 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
 
     @pytest.mark.parametrize(
         ("inner_stage", "width", "expected"),
-        [(3, 384, "MMSSMS"), (4, 512, "MMSSMMSS")],
+        [(3, 384, "MSMSMS"), (4, 512, "MSMSMSMS")],
     )
-    def test_deeper_pipeline_keeps_two_accumulators_and_chunks_the_drain_schedule(
+    def test_deeper_pipeline_keeps_two_accumulators_in_a_ping_pong_schedule(
         self, inner_stage, width, expected
     ):
         """A deeper operand pipeline remains a two-slot L0C ping-pong.
 
-        Complete pairs are scheduled as ``MMSS`` and an odd final stage as
-        ``MS``; they must not become ``inner_stage`` co-live accumulators.
+        Every stage issues its drain directly after its own MAD (``MS`` repeated),
+        so each drain runs while the next stage's MAD executes on the other slot.
+        The operand pipeline keeps its full depth while L0C rotates over two
+        residues; they must not become ``inner_stage`` co-live accumulators.
+
+        This replaces an earlier ``MMSS``-chunk expectation. That order lifted
+        every drain above all compute, which defers each drain past the very MAD
+        it is meant to overlap -- it forced the accumulator live ranges to
+        overlap, but separation is carried by the rotated ``pipeline_membership``,
+        not by the reorder. See ``kPipelineDoubleBufferCAttr`` in attrs.h.
         """
         from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
@@ -3313,7 +3335,7 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
                 sequence.append("M")
             elif ".store(" in text and "=" in text:
                 sequence.append("S")
-        assert expected in "".join(sequence), f"expected depth-two dbC chunks, got: {sequence}"
+        assert expected in "".join(sequence), f"expected the dbC ping-pong schedule, got: {sequence}"
 
         allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
         acc_allocs = {
