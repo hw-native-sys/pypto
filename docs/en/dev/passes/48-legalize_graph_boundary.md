@@ -306,6 +306,14 @@ the map is all-nullopt and the hoists silently do nothing.
 
 ## Step D — boundary legality
 
+Scalar-only control flow that submits no tasks may still read boundary values,
+for example `for i in pl.range(n)`. Codegen emits explicit typed reads such as
+`n.to<int64_t>()` in value contexts, including loop bounds and scalar carry
+initializers. Task argument forwarding keeps the `InheritableScalar` wrapper,
+including for floating-point parameters, so replay retains the parameter origin.
+The orchestration entry reads its scalar inputs with `orch_args.scalar<T>(i)`,
+which decodes values directly in both supported runtimes.
+
 | Check | Why |
 | ----- | --- |
 | The compilation targets `host_build_graph` | `GraphTaskArgs` and `rt_submit_graph` exist only in that runtime's orchestration API, and codegen emits them unconditionally, so a Graph built against the default `tensormap_and_ringbuffer` yields orchestration C++ that names undeclared symbols. Reported here, against the function the user wrote, rather than as a C++ error in generated code |

@@ -257,6 +257,13 @@ c_1` —— 返回的是重绑定而不是形参本身，所以 Graph 一直依�
 
 ## Step D —— 边界合法性
 
+不提交任务的纯标量控制流仍可以读取边界数值，例如 `for i in pl.range(n)`。
+代码生成在循环边界、标量循环携带值的初始值等数值上下文中，显式生成
+`n.to<int64_t>()` 这样的按类型读取。转发任务参数时则保留 `InheritableScalar`
+包装对象，浮点参数也一样，从而让回放保留形参来源。
+编排入口使用 `orch_args.scalar<T>(i)` 读取标量输入；这一接口在两种受支持的
+runtime 中都能直接按类型解码数值。
+
 | 检查 | 原因 |
 | ---- | ---- |
 | 编译目标必须是 `host_build_graph` | `GraphTaskArgs` 与 `rt_submit_graph` 只存在于该 runtime 的 orchestration API，而 codegen 无条件发射它们；因此在默认的 `tensormap_and_ringbuffer` 下编译 Graph，产物会引用未声明的符号。在这里报错、指向用户自己写的函数，而不是让它变成生成代码里的 C++ 编译错误 |

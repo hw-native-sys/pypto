@@ -1585,7 +1585,7 @@ class TestOrchestrationMore:
         assert t2_alloc_line > n_line, "t2 alloc must come after n definition"
 
     def test_scalar_taskarg(self):
-        """Scalar params get ChipTaskArgs scalar slots (0-indexed) via from_u64<T>()."""
+        """Scalar params read ChipTaskArgs scalar slots (0-indexed) via scalar<T>()."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
@@ -1621,9 +1621,9 @@ class TestOrchestrationMore:
         # Tensors at orch_args.tensor(0..1), scalars at orch_args.scalar(0..2)
         assert "orch_args.tensor(0).ref()" in code
         assert "orch_args.tensor(1).ref()" in code
-        assert "from_u64<int64_t>(orch_args.scalar(0))" in code
-        assert "from_u64<int32_t>(orch_args.scalar(1))" in code
-        assert "from_u64<float>(orch_args.scalar(2))" in code
+        assert "orch_args.scalar<int64_t>(0)" in code
+        assert "orch_args.scalar<int32_t>(1)" in code
+        assert "orch_args.scalar<float>(2)" in code
         assert ".expected_arg_count = 5," in code
 
     def test_dump_tag_emits_toggle_and_per_task_dump(self):

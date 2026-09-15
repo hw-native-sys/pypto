@@ -256,8 +256,12 @@ def test_generated_orchestration_compiles_against_the_pinned_runtime(artifact_ro
     hard compile error in the generated file that a string assertion happily
     confirms instead of catching.
     """
+    _assert_orchestration_compiles(artifact_root / "orchestration" / "main.cpp")
+
+
+def _assert_orchestration_compiles(main_cpp: Path) -> None:
+    """Type-check generated orchestration against the checked-out runtime."""
     repo_root = Path(__file__).resolve().parents[3]
-    main_cpp = artifact_root / "orchestration" / "main.cpp"
     assert main_cpp.is_file(), f"no orchestration emitted at {main_cpp}"
 
     if not (repo_root / "runtime" / "src" / "a2a3" / "runtime" / "host_build_graph").is_dir():
@@ -507,6 +511,79 @@ def _compile_orch(program) -> str:
     ):
         ir_compile(program, skip_ptoas=False, platform="a2a3", output_dir=out_dir, dump_passes=False)
     return (Path(out_dir) / "orchestration" / "main.cpp").read_text()
+
+
+@pl.program
+class _ScalarValueReads:
+    """Read boundary scalar values without changing the graph's task topology."""
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self,
+        a: pl.Tensor[[512, 128], pl.FP32],
+        c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+        start: pl.Scalar[pl.INDEX],
+        n: pl.Scalar[pl.INDEX],
+        step: pl.Scalar[pl.INDEX],
+        enabled: pl.Scalar[pl.BOOL],
+        scale: pl.Scalar[pl.FP32],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        for _ in pl.range(n):
+            pass
+        for _ in pl.range(start, n + 1, step):
+            pass
+        if enabled:
+            for _ in pl.range(n):
+                pass
+        if scale > 0.0:
+            for _ in pl.range(n):
+                pass
+        acc = scale
+        for _ in pl.range(2):
+            acc = acc + 1.0
+        if acc > 0.0:
+            for _ in pl.range(n):
+                pass
+        with pl.at(level=pl.Level.CORE_GROUP):
+            t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [n, 0], [128, 128])
+            t = pl.mul(t, scale)
+            pl.store(t, [0, 0], c)
+        return c
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        a: pl.Tensor[[512, 128], pl.FP32],
+        c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+        start: pl.Scalar[pl.INDEX],
+        n: pl.Scalar[pl.INDEX],
+        step: pl.Scalar[pl.INDEX],
+        enabled: pl.Scalar[pl.BOOL],
+        scale: pl.Scalar[pl.FP32],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        c = self.layer(a, c, start, n, step, enabled, scale)
+        return c
+
+
+def test_graph_scalar_value_reads_compile_and_preserve_task_forwarding(tmp_path):
+    orch = _compile_orch(_ScalarValueReads)
+    main_cpp = tmp_path / "main.cpp"
+    main_cpp.write_text(orch)
+    _assert_orchestration_compiles(main_cpp)
+
+    body = _graph_body(orch)
+    for name, cpp_type in (
+        ("start", "int64_t"),
+        ("n", "int64_t"),
+        ("step", "int64_t"),
+        ("enabled", "bool"),
+        ("scale", "float"),
+    ):
+        assert f"{name}.to<{cpp_type}>()" in body, body
+    # Reading a value elsewhere must not discard its origin when forwarding it.
+    assert re.search(r"float \w+ = scale\.to<float>\(\);", body), body
+    assert ".add_scalar(n)" in body, body
+    assert ".add_scalar(scale)" in body, body
 
 
 def test_graph_helper_defines_the_dynamic_dims_its_body_reads():
