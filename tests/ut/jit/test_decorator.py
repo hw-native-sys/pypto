@@ -302,8 +302,8 @@ class TestHostDiscoversOrchestrationDep:
 
         a = torch.empty(128, 128)
         c = torch.empty(128, 128)
-        _, _, tensor_meta, scalar_values, scalar_dtypes, per_func_dyn = host_orch._bind_args((a, c), {})
-        contexts = host_orch._build_contexts(tensor_meta, scalar_values, scalar_dtypes, per_func_dyn)
+        _, _, tensor_meta, scalar_dtypes, per_func_dyn = host_orch._bind_args((a, c), {})
+        contexts = host_orch._build_contexts(tensor_meta, scalar_dtypes, per_func_dyn)
         dep_ctx = next(ctx for ctx in contexts if ctx.func_name == "chip_orch")
         assert dep_ctx.auto_scope is False
 
@@ -323,8 +323,8 @@ class TestHostDiscoversOrchestrationDep:
 
         a = torch.empty(128, 128)
         c = torch.empty(128, 128)
-        _, _, tensor_meta, scalar_values, scalar_dtypes, per_func_dyn = entry._bind_args((a, c), {})
-        contexts = entry._build_contexts(tensor_meta, scalar_values, scalar_dtypes, per_func_dyn)
+        _, _, tensor_meta, scalar_dtypes, per_func_dyn = entry._bind_args((a, c), {})
+        contexts = entry._build_contexts(tensor_meta, scalar_dtypes, per_func_dyn)
         dep_ctx = next(ctx for ctx in contexts if ctx.func_name == "inline_fn")
         assert dep_ctx.auto_scope is False
         entry_ctx = next(ctx for ctx in contexts if ctx.func_name == "entry")
@@ -709,9 +709,7 @@ class TestAliasedDepCallName:
             "a": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
             "c": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
         }
-        dep_meta, _, _ = _resolve_dep_call_metadata(
-            dep, entry._func, caller_meta, {}, {}, {}, dep_call_name="kern"
-        )
+        dep_meta, _ = _resolve_dep_call_metadata(dep, entry._func, caller_meta, {}, {}, dep_call_name="kern")
         # Positional call-site mapping, not the name-based fallback: the dep's
         # own parameter names appear nowhere in the caller.
         assert dep_meta["src"].shape == (64, 64)
@@ -722,8 +720,8 @@ class TestAliasedDepCallName:
         entry, _ = self._aliased_entry()
         a = torch.empty(64, 64)
         c = torch.empty(64, 64)
-        _pn, _, tmeta, sv, sd, pfd = entry._bind_args((a, c), {})
-        contexts = entry._build_contexts(tmeta, sv, sd, pfd)
+        _pn, _, tmeta, sd, pfd = entry._bind_args((a, c), {})
+        contexts = entry._build_contexts(tmeta, sd, pfd)
 
         dep_ctx = next(ctx for ctx in contexts if ctx.func_name == "copy_incore")
         assert dep_ctx.tensor_meta["src"].shape == (64, 64)
@@ -738,8 +736,8 @@ class TestAliasedDepCallName:
         entry, _ = self._aliased_entry()
         a = torch.empty(64, 64)
         c = torch.empty(64, 64)
-        _pn, _, tmeta, sv, sd, pfd = entry._bind_args((a, c), {})
-        contexts = entry._build_contexts(tmeta, sv, sd, pfd)
+        _pn, _, tmeta, sd, pfd = entry._bind_args((a, c), {})
+        contexts = entry._build_contexts(tmeta, sd, pfd)
         source = Specializer("_jit_entry", contexts).specialize()
 
         assert "self.copy_incore(a, c)" in source
@@ -768,8 +766,8 @@ class TestAliasedDepCallName:
 
         a = torch.empty(64, 64)
         c = torch.empty(64, 64)
-        _pn, _, tmeta, sv, sd, pfd = entry._bind_args((a, c), {})
-        contexts = entry._build_contexts(tmeta, sv, sd, pfd)
+        _pn, _, tmeta, sd, pfd = entry._bind_args((a, c), {})
+        contexts = entry._build_contexts(tmeta, sd, pfd)
         entry_ctx = next(ctx for ctx in contexts if ctx.func_name == "entry")
         assert entry_ctx.dep_func_names == {"first": "copy_incore", "second": "copy_incore"}
 
@@ -817,8 +815,8 @@ class TestAliasedDepCallName:
 
         a = torch.empty(64, 64)
         c = torch.empty(64, 64)
-        _pn, _, tmeta, sv, sd, pfd = entry._bind_args((a, c), {})
-        contexts = entry._build_contexts(tmeta, sv, sd, pfd)
+        _pn, _, tmeta, sd, pfd = entry._bind_args((a, c), {})
+        contexts = entry._build_contexts(tmeta, sd, pfd)
 
         dep_ctx = next(ctx for ctx in contexts if ctx.func_name == "copy_incore")
         assert dep_ctx.tensor_meta["src"].shape == (64, 64)
@@ -892,8 +890,8 @@ class TestDuplicateDepNames:
         torch = pytest.importorskip("torch")
         a = torch.empty(64, 64)
         c = torch.empty(64, 64)
-        _pn, _, tmeta, sv, sd, pfd = entry._bind_args((a, c), {})
-        return entry._build_contexts(tmeta, sv, sd, pfd)
+        _pn, _, tmeta, sd, pfd = entry._bind_args((a, c), {})
+        return entry._build_contexts(tmeta, sd, pfd)
 
     def test_same_named_deps_get_distinct_generated_names(self):
         contexts = self._contexts_for(self._factory_entry())
@@ -1833,15 +1831,13 @@ class TestSliceAndDepReturnMetadata:
             "src": TensorMeta(shape=(32,), dtype=DataType.FP32),
             "out": TensorMeta(shape=(4, 8), dtype=DataType.FP32),
         }
-        tensor_meta, scalar_values, scalar_dtypes = _resolve_dep_call_metadata(
+        tensor_meta, scalar_dtypes = _resolve_dep_call_metadata(
             _callsite_metadata_kernel,
             caller,
             seed,
             {},
             {},
-            {},
         )
-        assert scalar_values == {}
         assert scalar_dtypes == {}
         return tensor_meta
 
@@ -2249,11 +2245,10 @@ class TestSlicedDispatchMetadata:
             "inputs": TensorMeta(shape=(2, 1, 256), dtype=DataType.FP32),
             "outputs": TensorMeta(shape=(2, 1, 256), dtype=DataType.FP32),
         }
-        tensor_meta, _, _ = _resolve_dep_call_metadata(
+        tensor_meta, _ = _resolve_dep_call_metadata(
             _sliced_chip,
             _per_rank_dispatch_body,
             seed,
-            {},
             {},
             {},
             caller_func_type="host",
@@ -2268,11 +2263,10 @@ class TestSlicedDispatchMetadata:
             "inputs": TensorMeta(shape=(2,), dtype=DataType.FP32),
             "outputs": TensorMeta(shape=(2,), dtype=DataType.FP32),
         }
-        tensor_meta, _, _ = _resolve_dep_call_metadata(
+        tensor_meta, _ = _resolve_dep_call_metadata(
             _sliced_chip,
             _per_rank_dispatch_body,
             seed,
-            {},
             {},
             {},
             caller_func_type="host",
@@ -2942,7 +2936,6 @@ class TestVariableRebinding:
                 "x": TensorMeta((128, 128), DataType.FP32),
                 "out": TensorMeta((128, 128), DataType.FP32),
             },
-            scalar_values={},
             scalar_dtypes={},
             per_func_dyn={id(kernel._func): {}},
             pl=pl,
@@ -3025,7 +3018,6 @@ class TestCompileKwargForwarding:
                 tensor_shapes={"x": (128, 128)},
                 tensor_dtypes={"x": DataType.FP32},
                 dynamic_dims=set(),
-                scalar_values={},
                 platform="a2a3",
                 strategy=OptimizationStrategy.Default,
                 distributed_config=distributed_config,
@@ -3054,7 +3046,6 @@ class TestCompileKwargForwarding:
                 tensor_shapes={"x": (128, 128)},
                 tensor_dtypes={"x": DataType.FP32},
                 dynamic_dims=set(),
-                scalar_values={},
                 platform="a2a3",
                 strategy=OptimizationStrategy.Default,
                 analyze_auto_scopes_for_deps=enabled,
@@ -3213,7 +3204,6 @@ class TestCompileKwargForwarding:
                 "x": TensorMeta((128, 128), DataType.FP32),
                 "out": TensorMeta((128, 128), DataType.FP32),
             },
-            scalar_values={},
             scalar_dtypes={},
             per_func_dyn={id(fwd_kernel._func): {}},
             pl=pl,
@@ -3254,7 +3244,6 @@ class TestCompileKwargForwarding:
                 "x": TensorMeta((128, 128), DataType.FP32),
                 "out": TensorMeta((128, 128), DataType.FP32),
             },
-            scalar_values={},
             scalar_dtypes={},
             per_func_dyn={id(plain_kernel._func): {}},
             pl=pl,
@@ -3313,7 +3302,6 @@ class TestJitSourceProvenance:
                 "x": TensorMeta((128, 128), DataType.FP32),
                 "out": TensorMeta((128, 128), DataType.FP32),
             },
-            scalar_values={},
             scalar_dtypes={},
             per_func_dyn={id(_provenance_kernel._func): {}},
             pl=pl,
@@ -3338,7 +3326,6 @@ class TestJitSourceProvenance:
                 "x": TensorMeta((128, 128), DataType.FP32),
                 "out": TensorMeta((128, 128), DataType.FP32),
             },
-            scalar_values={},
             scalar_dtypes={},
             per_func_dyn={id(_provenance_kernel._func): {}},
             pl=pl,
@@ -3362,8 +3349,8 @@ class TestClosureConstantFolding:
 
     @staticmethod
     def _specialize(entry, *args) -> str:
-        _pn, _, tmeta, sv, sd, pfd = entry._bind_args(args, {})
-        contexts = entry._build_contexts(tmeta, sv, sd, pfd)
+        _pn, _, tmeta, sd, pfd = entry._bind_args(args, {})
+        contexts = entry._build_contexts(tmeta, sd, pfd)
         return Specializer(f"_jit_{entry.__name__}", contexts).specialize()
 
     @staticmethod
@@ -3613,9 +3600,7 @@ class TestRuntimeSizedLocalExtents:
             "cfg": TensorMeta(shape=(1,), dtype=DataType.INT64),
             "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
         }
-        metas, _, _ = _resolve_dep_call_metadata(
-            _synth_dim_kernel, _runtime_create_then_dep, seed, {}, {}, {}
-        )
+        metas, _ = _resolve_dep_call_metadata(_synth_dim_kernel, _runtime_create_then_dep, seed, {}, {})
         dim = self._leading_dim(metas, "t")
         assert isinstance(dim, DynDim)
         assert dim.synthesized
@@ -3631,8 +3616,8 @@ class TestRuntimeSizedLocalExtents:
             "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
         }
         dep_dyn_map = {"t": {0: DynDim(name="NR", literal="NR", static_bound=0)}}
-        metas, _, _ = _resolve_dep_call_metadata(
-            _synth_dim_kernel, _runtime_create_then_dep, seed, {}, {}, dep_dyn_map
+        metas, _ = _resolve_dep_call_metadata(
+            _synth_dim_kernel, _runtime_create_then_dep, seed, {}, dep_dyn_map
         )
         dim = self._leading_dim(metas, "t")
         assert isinstance(dim, DynDim)
@@ -3689,8 +3674,8 @@ class TestRuntimeSizedLocalExtents:
             "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
         }
         dep_dyn_map = {"t": {0: DynDim(name="NR", literal="NR", static_bound=0)}}
-        metas, _, _ = _resolve_dep_call_metadata(
-            _synth_dim_kernel, _dyn_alias_create_then_dep, seed, {}, {}, dep_dyn_map
+        metas, _ = _resolve_dep_call_metadata(
+            _synth_dim_kernel, _dyn_alias_create_then_dep, seed, {}, dep_dyn_map
         )
         dim = self._leading_dim(metas, "t")
         assert isinstance(dim, DynDim)

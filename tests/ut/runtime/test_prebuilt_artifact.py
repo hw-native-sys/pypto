@@ -800,6 +800,44 @@ def automatic_jit_case(tmp_path, fake_runtime, monkeypatch):
     return kernel, builds
 
 
+def test_published_artifact_is_restored_for_a_different_scalar_value(tmp_path, fake_runtime, monkeypatch):
+    """A second process reuses the published artifact when only a scalar differs.
+
+    A scalar parameter is a runtime value (issue #2751), so it is absent from
+    both the in-process key and the persisted specialization identity. Clearing
+    the object cache is the same path a new process takes.
+    """
+
+    @pl.jit
+    def kernel(n: pl.Scalar[pl.INT32]):
+        pass
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PYPTO_PROG_BUILD_DIR", raising=False)
+    monkeypatch.setattr("pypto.jit._persistent.capture_toolchain", lambda *args: _key().environment)
+    builds = []
+
+    def compile_(*args, **kwargs):
+        root = Path(kwargs.get("output_dir", tmp_path / f"private-{len(builds)}"))
+        _generated(root, BuildKind.SINGLE_CHIP)
+        compiled = CompiledProgram.from_dir(root)
+        compiled._program = ir.Program([], "fixture", ir.Span.unknown())
+        builds.append(compiled)
+        return compiled
+
+    monkeypatch.setattr(kernel, "_compile", compile_)
+    config = RunConfig(platform="a2a3sim", cache_config=CacheConfig(enabled=True, root=tmp_path / "cache"))
+    # Runtime UTs install verification instruments, which intentionally bypass caches.
+    with passes.PassContext([]):
+        published = kernel.compile(n=1, config=config)
+        assert published.program is not None
+        kernel._artifact_objects.clear()
+        restored = kernel.compile(n=999, config=config)
+    assert restored is not published
+    assert restored.program is None  # came back from the store, not from a build
+    assert len(builds) == 1
+
+
 def test_automatic_jit_refreshes_sources_before_object_hit(tmp_path, automatic_jit_case):
     kernel, builds = automatic_jit_case
     source = tmp_path / "extra.py"

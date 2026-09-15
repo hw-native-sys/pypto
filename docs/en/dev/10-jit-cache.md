@@ -21,8 +21,8 @@ prepared = decode.warmup(config=RunConfig(platform="a2a3"))
 print(pypto.cache_stats())
 ```
 
-`decode` has complete tensor annotations and scalar defaults. Alternatively,
-pass sample tensors and scalars using the ordinary `compile()` argument rules.
+`decode` has complete tensor annotations. Alternatively, pass sample tensors and
+scalars using the ordinary `compile()` argument rules.
 Warmup builds every required binary without initializing an NPU or executing a
 kernel. The build host still needs the target compiler, SDK and host runtime.
 
@@ -183,7 +183,9 @@ module-level JIT functions. It validates the complete list before any build.
 Paths are relative to the configuration file. Tensor metadata uses allocation-free
 meta tensors; omit it when annotations fully determine tensor parameters. Dtypes
 are `FP16`, `BF16`, `FP32`, `INT8`, `INT16`, `INT32`, `INT64`, and `BOOL`. Scalars
-are finite JSON numbers or booleans. The usual scalar defaults are honored.
+are finite JSON numbers or booleans; they complete the binding but no longer
+select an artifact, since a scalar parameter is a runtime value. Omit them
+unless the request also names sample tensors, which makes the binding positional.
 
 Serializable `run_config` fields are `platform`, `strategy`, `memory_planner`,
 `distributed_config`, `dump_passes`, `dump_ptoas_passes`, `save_kernels`, and

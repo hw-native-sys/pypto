@@ -16,6 +16,7 @@ Closes hw-native-sys/pypto#1455.
 
 import ctypes
 import importlib
+import warnings
 
 import pypto.language as pl
 import pytest
@@ -367,9 +368,9 @@ class TestCompileFromSignature:
         any concrete extent (dynamic dim marked, static dim/dtype identical)."""
         torch = pytest.importorskip("torch")
 
-        _, _, meta_sig, _, _, _ = sig_kernel._bind_args_from_signature({})
+        _, _, meta_sig, _, _ = sig_kernel._bind_args_from_signature({})
         t = torch.zeros(512, 128, dtype=torch.float32)
-        _, _, meta_tensor, _, _, _ = sig_kernel._bind_args((t, t), {})
+        _, _, meta_tensor, _, _ = sig_kernel._bind_args((t, t), {})
         for name in ("a", "c"):
             assert meta_sig[name].dynamic_dim_indices() == meta_tensor[name].dynamic_dim_indices() == {0}
             assert meta_sig[name].static_shape()[1] == meta_tensor[name].static_shape()[1] == 128
@@ -379,12 +380,12 @@ class TestCompileFromSignature:
         """Specializing from the signature yields the same IR as from tensors."""
         torch = pytest.importorskip("torch")
 
-        _, _, tm_s, sv_s, sd_s, dyn_s = sig_kernel._bind_args_from_signature({})
-        prog_sig = sig_kernel._compile_to_program(tm_s, sv_s, sd_s, dyn_s, pl)
+        _, _, tm_s, sd_s, dyn_s = sig_kernel._bind_args_from_signature({})
+        prog_sig = sig_kernel._compile_to_program(tm_s, sd_s, dyn_s, pl)
 
         t = torch.zeros(64, 128, dtype=torch.float32)
-        _, _, tm_t, sv_t, sd_t, dyn_t = sig_kernel._bind_args((t, t), {})
-        prog_tensor = sig_kernel._compile_to_program(tm_t, sv_t, sd_t, dyn_t, pl)
+        _, _, tm_t, sd_t, dyn_t = sig_kernel._bind_args((t, t), {})
+        prog_tensor = sig_kernel._compile_to_program(tm_t, sd_t, dyn_t, pl)
 
         ir.assert_structural_equal(prog_sig, prog_tensor)
 
@@ -394,8 +395,13 @@ class TestCompileFromSignature:
         with pytest.raises(TypeError, match="bare 'pl.Tensor'"):
             add_kernel.compile()
 
-    def test_scalar_param_needs_value(self):
-        """Scalar params carry no value in the signature; must be supplied."""
+    def test_scalar_param_needs_no_value(self):
+        """A scalar parameter is a runtime value, so the signature needs none.
+
+        Its value arrives at dispatch (issue #2751), so only the declared dtype
+        is read here. A keyword is still accepted — it used to mean "specialize
+        this value", so it warns rather than changing meaning silently.
+        """
 
         s_m = pl.dynamic("SM")
 
@@ -408,61 +414,62 @@ class TestCompileFromSignature:
             c = a
             return c
 
-        with pytest.raises(TypeError, match="scalar parameter 'n'"):
-            scalar_sig_kernel._bind_args_from_signature({})
+        _, _, _, scalar_dtypes, _ = scalar_sig_kernel._bind_args_from_signature({})
+        assert scalar_dtypes == {"n": pl.INT32}
 
-        # Supplied via keyword: value flows into scalar_values.
-        _, _, _, scalar_values, _, _ = scalar_sig_kernel._bind_args_from_signature({"n": 7})
-        assert scalar_values == {"n": 7}
+        with pytest.warns(DeprecationWarning, match="no longer folds that value"):
+            _, _, _, kw_dtypes, _ = scalar_sig_kernel._bind_args_from_signature({"n": 7})
+        assert kw_dtypes == {"n": pl.INT32}
 
-    def test_runtime_scalar_left_unspecialized(self):
-        """``pl.RUNTIME`` keeps a scalar out of ``scalar_values`` (issue #2283):
-        the value is supplied at dispatch, not baked into the artifact. The
-        dtype is still recorded — only the value is withheld."""
-        _, _, _, scalar_values, scalar_dtypes, _ = rt_scalar_kernel._bind_args_from_signature(
-            {"n": pl.RUNTIME}
-        )
-        assert scalar_values == {}
-        assert scalar_dtypes == {"n": pl.FP32}
+    def test_runtime_marker_still_accepted(self):
+        """``pl.RUNTIME`` (issue #2283) is now what every scalar does by default.
 
-    def test_runtime_scalar_keeps_symbolic_param_in_program(self):
-        """A ``pl.RUNTIME`` scalar survives specialization as a real parameter
-        reference — in the entry *and* in the incore dep it is forwarded to.
-        A literal is folded into a constant in both instead."""
-        _, _, tm_r, sv_r, sd_r, dyn_r = rt_scalar_kernel._bind_args_from_signature({"n": pl.RUNTIME})
-        prog_runtime = str(rt_scalar_kernel._compile_to_program(tm_r, sv_r, sd_r, dyn_r, pl))
+        It stays accepted so existing signatures keep working; the resulting
+        metadata is the dtype alone, exactly as when nothing is passed.
+        """
+        _, _, _, marked, _ = rt_scalar_kernel._bind_args_from_signature({"n": pl.RUNTIME})
+        _, _, _, unmarked, _ = rt_scalar_kernel._bind_args_from_signature({})
+        assert marked == unmarked == {"n": pl.FP32}
 
-        _, _, tm_s, sv_s, sd_s, dyn_s = rt_scalar_kernel._bind_args_from_signature({"n": 7.0})
-        prog_specialized = str(rt_scalar_kernel._compile_to_program(tm_s, sv_s, sd_s, dyn_s, pl))
+    def test_scalar_stays_symbolic_in_program_whatever_was_passed(self):
+        """A scalar is symbolic end to end — in the entry *and* in the incore dep
+        it is forwarded to — whether the caller marked it ``pl.RUNTIME``, passed
+        a literal, or passed nothing (issue #2751).
 
-        # Both keep 'n' in the entry *and* dep signatures — the parameter list
-        # comes from the annotations either way. What differs is every *use*:
-        # runtime forwards and consumes the symbol, specialized folds a constant.
-        assert prog_runtime.count("n: pl.Scalar[pl.FP32]") == 2
-        assert prog_specialized.count("n: pl.Scalar[pl.FP32]") == 2
-        assert "self._rt_add_scalar_incore(a, n, c)" in prog_runtime
-        assert "self._rt_add_scalar_incore(a, 7.0, c)" in prog_specialized
-        assert "pl.tile.adds(tile, n)" in prog_runtime
-        assert "pl.tile.adds(tile, 7.0)" in prog_specialized
+        A literal used to be folded here, which is what made one artifact per
+        value and left the declared parameter unused.
+        """
+        programs = []
+        for kwargs in ({"n": pl.RUNTIME}, {"n": 7.0}, {}):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                _, _, tm, sd, dyn = rt_scalar_kernel._bind_args_from_signature(kwargs)
+            programs.append(str(rt_scalar_kernel._compile_to_program(tm, sd, dyn, pl)))
+
+        for prog in programs:
+            # 'n' is a parameter of both the entry and the dep, and every use
+            # forwards or consumes the symbol rather than a constant.
+            assert prog.count("n: pl.Scalar[pl.FP32]") == 2
+            assert "self._rt_add_scalar_incore(a, n, c)" in prog
+            assert "pl.tile.adds(tile, n)" in prog
+        assert programs[0] == programs[1] == programs[2]
 
     def test_runtime_scalar_forwards_dtype_to_dep(self):
         """A runtime scalar carries no value, but its dtype still reaches the dep
         it is forwarded to."""
-        _, _, tm, sv, sd, dyn = rt_scalar_kernel._bind_args_from_signature({"n": pl.RUNTIME})
-        contexts = rt_scalar_kernel._build_contexts(tm, sv, sd, dyn)
+        _, _, tm, sd, dyn = rt_scalar_kernel._bind_args_from_signature({"n": pl.RUNTIME})
+        contexts = rt_scalar_kernel._build_contexts(tm, sd, dyn)
         dep_ctx = next(c for c in contexts if c.func_name == "_rt_add_scalar_incore")
-        assert dep_ctx.scalar_values == {}
         assert dep_ctx.scalar_dtypes == {"n": pl.FP32}
 
     def test_runtime_scalar_default_needs_no_keyword(self):
         """``pl.RUNTIME`` as the signature default makes the parameter runtime
         without the caller passing anything — through to the generated program
         (the specializer drops Python defaults, so the marker never leaks)."""
-        _, _, tm, sv, sd, dyn = rt_scalar_default_kernel._bind_args_from_signature({})
-        assert sv == {}
+        _, _, tm, sd, dyn = rt_scalar_default_kernel._bind_args_from_signature({})
         assert sd == {"n": pl.FP32}
 
-        prog = str(rt_scalar_default_kernel._compile_to_program(tm, sv, sd, dyn, pl))
+        prog = str(rt_scalar_default_kernel._compile_to_program(tm, sd, dyn, pl))
         assert "n: pl.Scalar[pl.FP32]" in prog
         assert "pl.RUNTIME" not in prog
         assert "pl.tile.adds(tile, n)" in prog
@@ -480,14 +487,19 @@ class TestCompileFromSignature:
         with pytest.raises(TypeError, match=r"'n' received pl\.RUNTIME"):
             rt_scalar_kernel._bind_args((t, pl.RUNTIME, t), {})
 
-    def test_runtime_scalar_and_literal_do_not_share_cache(self):
-        """Specializing the value and leaving it runtime are different artifacts."""
+    def test_scalar_value_never_splits_the_cache(self):
+        """One artifact serves every scalar value (issue #2751).
+
+        A literal used to compile its own artifact, so a caller that varied a
+        token count or an offset paid a compilation per value.
+        """
         from_runtime = rt_scalar_kernel.compile(n=pl.RUNTIME)
-        from_literal = rt_scalar_kernel.compile(n=7.0)
         assert isinstance(from_runtime, CompiledProgram)
-        assert from_runtime is not from_literal
-        # Re-requesting the runtime specialization hits the same cache entry.
-        assert rt_scalar_kernel.compile(n=pl.RUNTIME) is from_runtime
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            assert rt_scalar_kernel.compile(n=7.0) is from_runtime
+            assert rt_scalar_kernel.compile(n=9.0) is from_runtime
+        assert rt_scalar_kernel.compile() is from_runtime
 
     def test_unsupported_scalar_value_points_at_runtime_marker(self):
         """A value that is neither a literal nor ``pl.RUNTIME`` names both paths."""
@@ -521,7 +533,7 @@ class TestCompileFromSignature:
         spec.loader.exec_module(module)
 
         kernel = module.make_closure_kernel()
-        _, _, tensor_meta, _, _, _ = kernel._bind_args_from_signature({})
+        _, _, tensor_meta, _, _ = kernel._bind_args_from_signature({})
         assert tensor_meta["a"].dynamic_dim_indices() == {0}
         assert tensor_meta["a"].static_shape()[1] == 64
         assert tensor_meta["a"].dtype == pl.FP32
@@ -558,8 +570,8 @@ class TestAnnotationLayoutReachesTheProgram:
     """
 
     def _entry_param_type(self, kernel):
-        _, _, tm, sv, sd, dyn = kernel._bind_args_from_signature({})
-        program = kernel._compile_to_program(tm, sv, sd, dyn, pl)
+        _, _, tm, sd, dyn = kernel._bind_args_from_signature({})
+        program = kernel._compile_to_program(tm, sd, dyn, pl)
         return list(program.functions.values())[0].params[0].type
 
     def test_layout_reaches_the_param_type(self):
@@ -570,8 +582,8 @@ class TestAnnotationLayoutReachesTheProgram:
 
     def test_unannotated_layout_stays_absent(self):
         """The plain two-slot form must not gain a view."""
-        _, _, tm, sv, sd, dyn = _mx_kernel._bind_args_from_signature({})
-        program = _mx_kernel._compile_to_program(tm, sv, sd, dyn, pl)
+        _, _, tm, sd, dyn = _mx_kernel._bind_args_from_signature({})
+        program = _mx_kernel._compile_to_program(tm, sd, dyn, pl)
         out_param = list(program.functions.values())[0].params[1]
         assert out_param.type.tensor_view is None
 
@@ -613,8 +625,8 @@ class TestDepDeclaredLayout:
     """
 
     def test_dep_layout_survives_when_caller_declares_none(self):
-        _, _, tm, sv, sd, dyn = _calls_mx_dep._bind_args_from_signature({})
-        program = _calls_mx_dep._compile_to_program(tm, sv, sd, dyn, pl)
+        _, _, tm, sd, dyn = _calls_mx_dep._bind_args_from_signature({})
+        program = _calls_mx_dep._compile_to_program(tm, sd, dyn, pl)
         views = [
             p.type.tensor_view
             for f in program.functions.values()
@@ -671,9 +683,9 @@ class TestNzOnTensorIsNotJitSpecific:
             pl.store(t, [0, 0], c)
             return c
 
-        _, _, tm, sv, sd, dyn = kernel._bind_args_from_signature({})
+        _, _, tm, sd, dyn = kernel._bind_args_from_signature({})
         assert tm["a"].layout == ir.TensorLayout.NZ
-        program = kernel._compile_to_program(tm, sv, sd, dyn, pl)
+        program = kernel._compile_to_program(tm, sd, dyn, pl)
         view = list(program.functions.values())[0].params[0].type.tensor_view
         assert view is not None and view.layout == ir.TensorLayout.NZ
 

@@ -17,7 +17,7 @@ extents do not create unnecessary specializations.
 import dataclasses
 import hashlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core.passes import MemoryPlanner, RuntimeKind, runtime_kind_to_name
@@ -33,6 +33,20 @@ try:
     from pypto import __version__ as _PYPTO_VERSION
 except Exception:
     _PYPTO_VERSION = "unknown"
+
+SCALAR_SEMANTICS: Final[int] = 2
+"""Version of the scalar-parameter contract this key was built under.
+
+Bumped whenever the meaning of a scalar parameter changes, so an artifact
+compiled under an older contract can never be served to a newer request.
+
+- 1: a numeric argument to a ``pl.Scalar`` parameter was folded into the body
+  and keyed by value, so each value compiled its own artifact.
+- 2: a ``pl.Scalar`` parameter is a runtime value — it stays symbolic in the
+  generated program, its value arrives at dispatch, and it takes no part in
+  this key. Compile-time constants come from module-level or closure names,
+  which ``compute_source_hash`` already folds into ``source_hash``.
+"""
 
 
 @dataclass(frozen=True)
@@ -56,27 +70,17 @@ class TensorCacheInfo:
     layout: "TensorLayout | None" = None
 
 
-@dataclass(frozen=True)
-class ScalarCacheInfo:
-    """Per-scalar-param component of a cache key.
-
-    Attributes:
-        name: Parameter name.
-        value: Concrete scalar value passed at this call site.
-    """
-
-    name: str
-    value: int | float | bool
-
-
 class CacheKey(NamedTuple):
-    """Named specialization components, retaining tuple equality and hashing."""
+    """Named specialization components, retaining tuple equality and hashing.
+
+    Scalar parameters are deliberately absent: they are runtime values, so one
+    artifact serves every value (see :data:`SCALAR_SEMANTICS`).
+    """
 
     source_hash: str
     platform: str | None
     strategy: "OptimizationStrategy | None"
     tensor_infos: tuple[TensorCacheInfo, ...]
-    scalar_infos: tuple[ScalarCacheInfo, ...]
     dist_config: tuple[Any, ...] | None
     compile_opts: tuple[Any, ...] | None
 
@@ -123,7 +127,6 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
     tensor_shapes: dict[str, tuple[int, ...]],
     tensor_dtypes: dict[str, DataType],
     dynamic_dims: set[tuple[str, int]],
-    scalar_values: dict[str, int | float | bool],
     platform: str | None = None,
     strategy: "OptimizationStrategy | None" = None,
     distributed_config: Any = None,
@@ -155,7 +158,6 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         dynamic_dims: Set of (param_name, dim_index) pairs that are dynamic.
             Dynamic dims are stored as None in the cache key so different
             concrete values for that dimension produce the same cache entry.
-        scalar_values: Concrete value per scalar parameter name.
         platform: Target platform string (e.g. "a2a3sim"). Included in the key
             because compiled artifacts are platform-specific; a cache entry
             compiled for one platform must not be reused for another.
@@ -219,18 +221,13 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
             )
         )
 
-    scalar_infos = []
-    for name in param_names:
-        if name not in scalar_values:
-            continue
-        scalar_infos.append(ScalarCacheInfo(name=name, value=scalar_values[name]))
-
     dist_key = _freeze(distributed_config) if distributed_config is not None else None
     effective_pypto_dbc = enable_pypto_l0c_double_buffer and memory_planner in (
         None,
         MemoryPlanner.PYPTO,
     )
     compile_opts = (
+        ("scalar_semantics", SCALAR_SEMANTICS),
         ("analyze_auto_scopes_for_deps", analyze_auto_scopes_for_deps),
         ("emit_source_loc", emit_source_loc),
         ("memory_planner", None if memory_planner is None else str(memory_planner)),
@@ -243,15 +240,14 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         platform,
         strategy,
         tuple(tensor_infos),
-        tuple(scalar_infos),
         dist_key,
         compile_opts,
     )
 
 
 __all__ = [
+    "SCALAR_SEMANTICS",
     "CacheKey",
-    "ScalarCacheInfo",
     "TensorCacheInfo",
     "compute_source_hash",
     "make_cache_key",

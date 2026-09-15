@@ -10,6 +10,7 @@
 """Device-free JIT warmup shares specialization and prepares every chip build."""
 
 import sys
+import warnings
 from types import ModuleType
 from typing import Any
 
@@ -86,13 +87,21 @@ def test_sample_arguments_share_annotation_specialization(kernel, assembly):
     assert len(assembly) == 1
 
 
-def test_warmup_preserves_scalar_specialization_and_runtime_marker(kernel, assembly):
+def test_warmup_shares_one_preparation_across_scalar_values(kernel, assembly):
+    """A scalar value never splits the warmup (issue #2751).
+
+    Each distinct value used to prepare its own artifact, so warming a kernel
+    for a range of token counts assembled one binary per count.
+    """
     default = kernel.warmup()
-    specialized = kernel.warmup(factor=3.0)
-    dynamic = kernel.warmup(factor=pl.RUNTIME)
-    assert len({id(default), id(specialized), id(dynamic)}) == 3
-    assert kernel.compile(factor=pl.RUNTIME) is dynamic
-    assert len(assembly) == 3
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        literal = kernel.warmup(factor=3.0)
+    marked = kernel.warmup(factor=pl.RUNTIME)
+    assert literal is default
+    assert marked is default
+    assert kernel.compile(factor=pl.RUNTIME) is default
+    assert len(assembly) == 1
 
 
 def test_warmup_preserves_dynamic_extents(assembly):

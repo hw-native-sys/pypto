@@ -20,8 +20,7 @@ prepared = decode.warmup(config=RunConfig(platform="a2a3"))
 print(pypto.cache_stats())
 ```
 
-这里 `decode` 有完整张量注解及标量默认值。也可以按 `compile()` 的参数规则传入
-样例张量和标量。预热（warmup）构建所有必要二进制，不初始化 NPU、不执行 kernel；
+这里 `decode` 有完整张量注解。也可以按 `compile()` 的参数规则传入样例张量和标量。预热（warmup）构建所有必要二进制，不初始化 NPU、不执行 kernel；
 构建机器仍需要目标编译器、SDK 和主机运行时。
 
 ## 请求流程
@@ -150,7 +149,8 @@ python -m pypto.jit stat --root kernel-cache
 CLI 导入指定的可信模块，只解析显式列出的模块级 JIT 函数，在任何构建前校验完整列表。
 路径相对于配置文件；张量元数据使用无需数据分配的 meta tensor，注解完整时可以省略。
 支持 `FP16`、`BF16`、`FP32`、`INT8`、`INT16`、`INT32`、`INT64`、`BOOL`。
-标量为有限 JSON 数值或布尔值，遵循普通标量默认值规则。
+标量为有限 JSON 数值或布尔值；它们只用于完成绑定，不再选择产物——标量参数是运行期值。
+除非请求同时给出样例张量（此时绑定按位置进行），否则可以省略标量。
 
 可序列化的 `run_config` 字段为 `platform`、`strategy`、`memory_planner`、
 `distributed_config`、`dump_passes`、`dump_ptoas_passes`、`save_kernels`、

@@ -135,8 +135,11 @@ class SpecializeContext:
         level: pl.Level value or None.
         param_names: Ordered parameter names (excluding 'self').
         tensor_meta: TensorMeta per tensor param name.
-        scalar_values: Concrete value per scalar param name.
-        scalar_dtypes: DataType annotation per scalar param name.
+        scalar_dtypes: DataType annotation per scalar param name. A scalar
+            parameter is a runtime value: it survives into the generated
+            program as a real ``pl.Scalar`` parameter and is never folded, so
+            only its type is carried here. Compile-time constants come from
+            ``py_globals`` instead.
         dep_names: Names this function's source calls its deps by. Under an
             aliased import (``from mod import kernel as kern``) that is the
             alias, not the callee's ``__name__`` — see ``dep_func_names``.
@@ -170,7 +173,6 @@ class SpecializeContext:
     level: Any
     param_names: list[str]
     tensor_meta: dict[str, TensorMeta]
-    scalar_values: dict[str, int | float | bool]
     scalar_dtypes: dict[str, DataType]
     dep_names: list[str] = field(default_factory=list)
     py_globals: Mapping[str, Any] = field(default_factory=dict)
@@ -695,7 +697,6 @@ class _BodyTransformer(ast.NodeTransformer):
     def __init__(
         self,
         tensor_meta: dict[str, TensorMeta],
-        scalar_values: dict[str, int | float | bool],
         dep_names: set[str],
         param_names: list[str] | None = None,
         initial_used_names: set[str] | None = None,
@@ -705,7 +706,6 @@ class _BodyTransformer(ast.NodeTransformer):
     ) -> None:
         super().__init__()
         self._meta = tensor_meta
-        self._scalars = scalar_values
         self._dep_names = dep_names
         # Call name → generated function name, for deps this body reaches
         # under a different name (an aliased import). ``visit_Call`` resolves
@@ -1003,14 +1003,18 @@ class _BodyTransformer(ast.NodeTransformer):
     # ------------------------------------------------------------------
 
     def visit_Name(self, node: ast.Name) -> ast.expr:
-        """Replace scalar param references, inlined shape constants, renamed rebindings,
-        DynVar runtime references, and free names bound to renderable values."""
+        """Replace inlined shape constants, renamed rebindings, DynVar runtime
+        references, and free names bound to renderable values.
+
+        Scalar *parameters* are deliberately not replaced: they are runtime
+        values and must survive as real ``pl.Scalar`` parameters. A body that
+        needs a compile-time constant reads a module-level or closure name,
+        which the free-name folding below inlines.
+        """
         if isinstance(node.ctx, ast.Load):
             # Check active renames first — a rebinding supersedes any earlier inlining.
             if node.id in self._var_renames:
                 return ast.Name(id=self._var_renames[node.id], ctx=ast.Load())
-            if node.id in self._scalars:
-                return ast.Constant(value=self._scalars[node.id])
             if node.id in self._shape_inlined:
                 return ast.Constant(value=self._shape_inlined[node.id])
             # DynVar runtime references — e.g. pl.create_tensor([M, HIDDEN], ...).
@@ -1963,7 +1967,6 @@ class Specializer:
         }
         transformer = _BodyTransformer(
             tensor_meta=ctx.tensor_meta,
-            scalar_values=ctx.scalar_values,
             dep_names=dep_names,
             param_names=all_param_names,
             initial_used_names=all_defined,
@@ -2241,7 +2244,6 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
     func_type: str | None,
     level: Any,
     tensor_meta: dict[str, TensorMeta],
-    scalar_values: dict[str, int | float | bool],
     scalar_dtypes: dict[str, DataType],
     dep_names: list[str],
     auto_scope: bool = True,
@@ -2263,7 +2265,6 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
         func_type: 'orchestration', 'incore', or None.
         level: pl.Level enum or None.
         tensor_meta: TensorMeta per tensor param name.
-        scalar_values: Concrete scalar values from the call site.
         scalar_dtypes: DataType per scalar param name.
         dep_names: Names this function's source calls its @pl.jit deps by
             (the alias, under an aliased import).
@@ -2310,7 +2311,6 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
         level=level,
         param_names=param_names,
         tensor_meta=tensor_meta,
-        scalar_values=scalar_values,
         scalar_dtypes=scalar_dtypes,
         dep_names=dep_names,
         dep_func_names=dep_func_names or {},

@@ -11,7 +11,6 @@
 
 import logging
 import os
-import struct
 import tempfile
 import uuid
 from collections.abc import Callable
@@ -73,17 +72,16 @@ def _record(value: Any) -> Any:
 
 
 @lru_cache(maxsize=1024)
-def _specialization_digest(key: Any, scalar_tags: tuple[Any, ...]) -> str:
-    # scalar_tags guards Python's True == 1 == 1.0 and signed-zero equality.
+def _specialization_digest(key: CacheKey) -> str:
+    """Digest one specialization key, memoized on the key's own equality.
+
+    Every component is a string, enum, or tuple of ints/None, so the memo needs
+    no type tag to separate them. It used to: scalar values keyed by value, and
+    Python's ``True == 1 == 1.0`` (plus ``-0.0 == 0.0``) let two distinct
+    specializations share a memo entry. Scalars are runtime values now and no
+    longer appear in the key, so that hazard is gone with them.
+    """
     return digest_record(_record(key))
-
-
-def _typed_specialization(key: CacheKey) -> str:
-    tags = tuple(
-        (s.name, type(s.value).__name__, struct.pack(">d", s.value) if type(s.value) is float else s.value)
-        for s in key.scalar_infos
-    )
-    return _specialization_digest(key, tags)
 
 
 class JITArtifactStore(ArtifactStore):
@@ -178,7 +176,7 @@ def resolve_persistent(
         kind = BuildKind.DISTRIBUTED if distributed else BuildKind.SINGLE_CHIP
         source_before = source()
         try:
-            specialization = _typed_specialization(object_key)
+            specialization = _specialization_digest(object_key)
         except Exception as exc:
             identity_failure = f"Specialization identity unavailable: {exc}"
         else:

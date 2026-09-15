@@ -300,8 +300,8 @@ def _incore_bodies(program):
 
 def _jit_program(kernel):
     """Specialize a fully annotated JIT function without running passes."""
-    _, _, tensor_meta, scalar_values, scalar_dtypes, per_func_dyn = kernel._bind_args_from_signature({})
-    return kernel._compile_to_program(tensor_meta, scalar_values, scalar_dtypes, per_func_dyn, pl)
+    _, _, tensor_meta, scalar_dtypes, per_func_dyn = kernel._bind_args_from_signature({})
+    return kernel._compile_to_program(tensor_meta, scalar_dtypes, per_func_dyn, pl)
 
 
 def _lower_to_auto_tile_input(program):

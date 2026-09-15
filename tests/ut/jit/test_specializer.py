@@ -51,7 +51,6 @@ def _make_ctx(
     func_type: str = "orchestration",
     param_names: list[str] | None = None,
     tensor_meta: dict[str, TensorMeta] | None = None,
-    scalar_values: dict | None = None,
     scalar_dtypes: dict | None = None,
     dep_names: list[str] | None = None,
     auto_scope: bool = True,
@@ -65,7 +64,6 @@ def _make_ctx(
         level=None,
         param_names=param_names or [],
         tensor_meta=tensor_meta or {},
-        scalar_values=scalar_values or {},
         scalar_dtypes=scalar_dtypes or {},
         dep_names=dep_names or [],
         auto_scope=auto_scope,
@@ -366,7 +364,6 @@ class TestBodyTransformer:
         # directly when needed (see test_shape_unpack_expanded_dynamic / etc.).
         transformer = _BodyTransformer(
             tensor_meta=tensor_meta,
-            scalar_values={},
             dep_names=dep_names or set(),
         )
         new_body = []
@@ -468,50 +465,18 @@ class TestBodyTransformer:
         assert "self.pl.add" not in out
         assert "pl.add" in out
 
-    def _transform_with_scalars(self, src: str, tensor_meta: dict, scalar_values: dict):
-        src = textwrap.dedent(src)
-        tree = ast.parse(src)
-        func_def = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef))
-        transformer = _BodyTransformer(
-            tensor_meta=tensor_meta,
-            scalar_values=scalar_values,
-            dep_names=set(),
-        )
-        new_body = []
-        for stmt in func_def.body:
-            result = transformer.visit(stmt)
-            if result is None:
-                continue
-            if isinstance(result, list):
-                new_body.extend(result)
-            else:
-                new_body.append(result)
-        new_func = ast.FunctionDef(
-            name="f",
-            args=func_def.args,
-            body=new_body or [ast.Pass()],
-            decorator_list=[],
-            returns=None,
-            lineno=1,
-            col_offset=0,
-        )
-        ast.fix_missing_locations(new_func)
-        return ast.unparse(new_func)
+    def test_scalar_param_is_not_substituted_in_body(self):
+        """A scalar parameter is a runtime value: the body keeps the symbolic name.
 
-    def test_scalar_param_substituted_in_body(self):
-        """Scalar param references in the body should be replaced by their concrete value."""
-        src = """
-            def f(a: pl.Tensor, BLOCK_M: pl.INDEX):
-                tile = pl.load(a, [0], [BLOCK_M])
+        Folding it would bake one call site's value into the artifact and split
+        the specialization cache by value (issue #2751).
         """
-        out = self._transform_with_scalars(
-            src,
-            tensor_meta={"a": TensorMeta((256,), DataType.FP32)},
-            scalar_values={"BLOCK_M": 64},
-        )
-        assert "64" in out
-        # Substitution happens in the body; parameter name stays in the signature
-        assert "pl.load(a, [0], [64])" in out
+        src = """
+            def f(a: pl.Tensor, block_m: pl.INDEX):
+                tile = pl.load(a, [0], [block_m])
+        """
+        out = self._transform(src, tensor_meta={"a": TensorMeta((256,), DataType.FP32)})
+        assert "pl.load(a, [0], [block_m])" in out
 
     def _transform_with_globals(self, src: str, tensor_meta: dict, py_globals: dict):
         src = textwrap.dedent(src)
@@ -519,7 +484,6 @@ class TestBodyTransformer:
         func_def = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef))
         transformer = _BodyTransformer(
             tensor_meta=tensor_meta,
-            scalar_values={},
             dep_names=set(),
             py_globals=py_globals,
         )
@@ -1300,7 +1264,6 @@ class TestVariableRebinding:
         }
         transformer = _BodyTransformer(
             tensor_meta=tensor_meta or {},
-            scalar_values={},
             dep_names=set(),
             param_names=param_names,
             initial_used_names=all_defined,
@@ -1954,7 +1917,6 @@ class TestArrayParamAnnotation:
             level=None,
             param_names=param_names,
             tensor_meta=tensor_meta,
-            scalar_values={},
             scalar_dtypes={},
             py_globals=py_globals,
         )

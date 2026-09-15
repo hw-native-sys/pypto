@@ -154,18 +154,15 @@ throwaway `torch.empty(...)` buffers. Details:
 - **Dynamic dims** (`pl.dynamic` / `bind_dynamic`) need no value — the compiled
   artifact is extent-independent, and `compile()` shares one cache entry with an
   equivalent `compile(sample_tensors)` call.
-- **Scalar parameters** carry no value in the signature — pass them as keyword
-  args. A literal **specializes** the value into the artifact, e.g.
-  `kernel.compile(num_tokens=128)` compiles a kernel that only ever sees 128.
-  Pass `pl.RUNTIME` instead — `kernel.compile(num_tokens=pl.RUNTIME)` — to leave
-  the parameter **unspecialized**: it stays a real `pl.Scalar` parameter whose
-  value arrives at dispatch and, like a dynamic dim, drops out of the cache key,
-  so one artifact serves every value. Supply that value through the compiled
-  artifact — `compiled(...)` or a `worker.register(compiled)` handle — not by
-  calling the kernel eagerly: `kernel(x, out, 128)` re-specializes on 128 and
-  compiles a separate artifact. `pl.RUNTIME` also works as the signature default
-  (`num_tokens: pl.Scalar[pl.INT32] = pl.RUNTIME`), which makes the keyword
-  unnecessary at every `compile()` call site.
+- **Scalar parameters** need no value at all. A `pl.Scalar[...]` parameter is a
+  **runtime value**: it stays a real parameter in the compiled artifact, its
+  value arrives at dispatch, and — like a dynamic dim — it drops out of the
+  cache key, so one artifact serves every value. `kernel.compile()` is enough;
+  the value goes to `compiled(x, out, 128)` or to a `worker.register(compiled)`
+  handle. Calling the kernel eagerly works the same way: `kernel(x, out, 128)`
+  and `kernel(x, out, 256)` reuse one compilation.
+  `pl.RUNTIME` is still accepted (it is what every scalar now does) and passing
+  a literal to `compile()` warns, because it used to mean the opposite.
 - A **bare `pl.Tensor`** parameter (no shape) has nothing to read and raises a
   clear error; give it a full `pl.Tensor[[...], dtype]` annotation, or fall back
   to `compile(*sample_tensors)`.

@@ -263,17 +263,18 @@ class Scalar(metaclass=ScalarMeta):
 
 
 class RuntimeScalarMarker(Scalar):
-    """Marker for a scalar parameter whose value is supplied at dispatch.
+    """Retained marker asking for the behavior every scalar parameter now has.
 
-    A ``pl.Scalar[dtype]`` annotation carries a type but no value, so
-    annotation-driven signature mode (``compile()`` / ``lower()`` with no
-    tensor arguments) needs one value per scalar parameter. Passing a literal
-    **specializes** that value into the compiled artifact; passing
-    [`RUNTIME`][pypto.language.RUNTIME] leaves the parameter **unspecialized** — it stays a real
-    ``pl.Scalar`` parameter in the generated program and its value is supplied
-    at dispatch, exactly like a ``pl.dynamic`` dimension extent. Unspecialized
-    scalars also drop out of the specialization cache key, so one artifact
-    serves every runtime value.
+    Every ``pl.Scalar[dtype]`` parameter is a runtime value: it stays a real
+    ``pl.Scalar`` parameter in the generated program, its value is supplied at
+    dispatch exactly like a ``pl.dynamic`` dimension extent, and it drops out
+    of the specialization cache key so one artifact serves every value.
+    ``RUNTIME`` therefore asks for the default and is a no-op.
+
+    It remains accepted so that signatures and ``compile()`` call sites written
+    against the earlier contract — where a literal specialized the value into
+    the artifact and this marker was the way to opt out — keep working
+    unchanged. New code needs neither the keyword nor the default.
 
     Subclasses [`Scalar`][pypto.language.Scalar] so that a type checker accepts it as the default
     of a scalar parameter — ``n: pl.Scalar[dtype] = pl.RUNTIME`` — for the same
@@ -286,7 +287,7 @@ class RuntimeScalarMarker(Scalar):
     Examples:
         >>> import pypto.language as pl
         >>>
-        >>> # num_tokens varies per step: keep it out of the artifact.
+        >>> # Equivalent to prefill_fwd.compile(): num_tokens arrives at dispatch.
         >>> compiled = prefill_fwd.compile(num_tokens=pl.RUNTIME)  # doctest: +SKIP
     """
 
@@ -308,9 +309,9 @@ class RuntimeScalarMarker(Scalar):
             RuntimeError: Always — the marker has no value to unwrap.
         """
         raise RuntimeError(
-            "pl.RUNTIME is a compile-time marker with no value. Pass it to compile() or "
-            "lower() to leave a scalar parameter unspecialized; it cannot take part in an "
-            "expression."
+            "pl.RUNTIME is a compile-time marker with no value. A scalar parameter is "
+            "already a runtime value, so the marker is only accepted by compile() / lower() "
+            "for compatibility; it cannot take part in an expression."
         )
 
     def __repr__(self) -> str:

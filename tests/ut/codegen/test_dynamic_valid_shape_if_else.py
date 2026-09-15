@@ -359,18 +359,18 @@ def test_jit_loop_valid_col_is_runtime(jit_loop_mlir: str):
     )
 
 
-def test_jit_scalar_param_valid_col_is_constant(jit_scalar_param_mlir: str):
-    """A scalar *parameter* is a specialization constant, so valid_col folds.
+def test_jit_scalar_param_valid_col_is_runtime(jit_scalar_param_mlir: str):
+    """A scalar *parameter* is a runtime value, so valid_col stays symbolic.
 
-    Counterpart to :func:`test_jit_if_else_valid_col_is_runtime`: the
-    specializer inlines scalar arguments at their use sites, so ``vlen=48``
-    reaches codegen as a literal and each distinct value compiles its own
-    kernel. Runtime selection requires reading the value from a tensor.
+    Companion to :func:`test_jit_if_else_valid_col_is_runtime`, which reads the
+    length out of a tensor to get the same effect. The parameter used to be
+    folded at its use sites — ``vlen=48`` reached codegen as a literal and each
+    distinct length compiled its own kernel (issue #2751).
     """
     alloc = _s_tile_alloc(jit_scalar_param_mlir)
     operand = _valid_col_operand(alloc)
-    assert re.fullmatch(r"%c48(_\w+)?", operand), (
-        f"expected valid_col folded to the constant 48, got {operand}: {alloc}"
+    assert not re.fullmatch(r"%c\d+(_\w+)?", operand), (
+        f"valid_col was constant-folded to {operand}; expected a runtime operand: {alloc}"
     )
 
 

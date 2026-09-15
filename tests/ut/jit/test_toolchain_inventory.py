@@ -86,18 +86,19 @@ def test_implicit_include_roots_are_resolved_and_required(tmp_path):
         _toolchain._include_roots("unrecognized output", Path("compiler"))
 
 
-@pytest.mark.parametrize("left,right", [(True, 1), (1, 1.0), (0.0, -0.0)])
-def test_persistent_specialization_preserves_scalar_types(left, right):
-    from pypto._identity import digest_record  # noqa: PLC0415
-    from pypto.jit._persistent import _record, _typed_specialization  # noqa: PLC0415
-    from pypto.jit.cache import CacheKey, ScalarCacheInfo  # noqa: PLC0415
+def test_persistent_specialization_separates_scalar_semantics():
+    """The scalar contract version reaches the persisted specialization digest.
 
-    assert digest_record(_record(ScalarCacheInfo("value", left))) != digest_record(
-        _record(ScalarCacheInfo("value", right))
-    )
-    left_key = CacheKey("source", None, None, (), (ScalarCacheInfo("value", left),), None, None)
-    right_key = CacheKey("source", None, None, (), (ScalarCacheInfo("value", right),), None, None)
-    assert _typed_specialization(left_key) != _typed_specialization(right_key)
+    Scalar *values* no longer appear in the key at all (issue #2751), so what
+    has to stay distinguishable is the contract that built the artifact, not
+    the individual values.
+    """
+    from pypto.jit._persistent import _specialization_digest  # noqa: PLC0415
+    from pypto.jit.cache import CacheKey  # noqa: PLC0415
+
+    v1 = CacheKey("source", None, None, (), None, (("scalar_semantics", 1),))
+    v2 = CacheKey("source", None, None, (), None, (("scalar_semantics", 2),))
+    assert _specialization_digest(v1) != _specialization_digest(v2)
 
 
 def test_persistent_specialization_preserves_tensor_dtype():

@@ -185,8 +185,11 @@ class TestJITExecution:
         monkeypatch.setattr(KernelCompiler, "compile_orchestration", forbidden_compile)
         x = torch.full((16, 16), 2.0)
         out = torch.zeros_like(x)
-        prepared(x, out, 3.0, config=test_config)
-        torch.testing.assert_close(out, torch.full_like(out, 5.0))
+        # A scalar parameter is a runtime value (issue #2751): the same prepared
+        # binaries serve every value, and each dispatch reads the one passed.
+        for value in (3.0, -1.5, 10.0):
+            prepared(x, out, value, config=test_config)
+            torch.testing.assert_close(out, torch.full_like(out, 2.0 + value))
 
     def test_inplace_add(self, test_config):
         """@pl.jit: first call compiles and executes correctly on device."""

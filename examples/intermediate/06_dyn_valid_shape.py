@@ -25,20 +25,23 @@ three kernels below cover the spectrum:
 3. ``dyn_valid_shape_loop`` -- the ragged-tail idiom: loop over blocks and
    take the partial length on the last iteration.
 
-Scalar parameters are specialization constants
-----------------------------------------------
+Scalar parameters are runtime values
+------------------------------------
 Under ``@pl.jit`` a scalar argument (``pl.INDEX``, ``pl.FP32``, ...) is a
-*specialization constant*: the specializer inlines its value at every use
-site, so ``dyn_valid_shape`` compiles a separate kernel per distinct ``vlen``
-and the generated ``pto.alloc_tile`` carries a constant ``valid_col``.  That
-is the right trade when the caller knows ``vlen`` at dispatch time -- it is
-the simplest form and it constant-folds cleanly.
+*runtime value*: it stays a real parameter in the generated program, its value
+arrives at dispatch, and the generated ``pto.alloc_tile`` carries a symbolic
+``valid_col``.  So ``dyn_valid_shape`` compiles **once** and serves every
+``vlen`` -- the simplest of the three forms, and the one to reach for when the
+caller already knows the length.
 
-It also means an ``if``/``else`` over scalar *parameters* is resolved at
-specialization time, not at runtime.  For a branch that survives to the
-device, the selected values must be genuinely dynamic -- read them from a
-tensor, as kernels 2 and 3 do.  Those lower to a real ``scf.if`` whose result
-feeds the tile's ``valid_col``.
+Kernels 2 and 3 differ only in where the length comes from, not in how free it
+is: they read it out of a tensor, which is what you need when the choice is
+made on device rather than by the caller.
+
+When a value must be a *compile-time* constant -- a tile shape, an unrolled
+extent -- do not make it a parameter at all.  Read it from a module-level or
+closure name; the specializer folds those at their use sites and the folded
+text is part of the compilation key, so changing it compiles a new kernel.
 
 Note: ``__main__`` runs ``lower`` only (no code generation or device
 execution).  Lowering is also exercised by
@@ -72,9 +75,9 @@ def dyn_valid_shape(
 ):
     """Load with a caller-provided valid_shape, fillpad, then scale.
 
-    ``vlen`` is a scalar parameter and therefore a specialization constant:
-    each distinct value compiles its own kernel with a constant ``valid_col``.
-    Use this form when the caller already knows the valid length.
+    ``vlen`` is a scalar parameter and therefore a runtime value: one compiled
+    kernel serves every length, and the value arrives with each dispatch. Use
+    this form when the caller already knows the valid length.
     """
     with pl.at(level=pl.Level.CORE_GROUP):
         s_tile = pl.load(

@@ -22,6 +22,7 @@ import pytest
 from pypto.ir import DistributedConfig, OptimizationStrategy
 from pypto.jit._source import capture_namespaces, function_namespace
 from pypto.jit.cache import (
+    SCALAR_SEMANTICS,
     compute_source_hash,
     make_cache_key,
 )
@@ -71,7 +72,6 @@ class TestMakeCacheKey:
         tensor_shapes=None,
         tensor_dtypes=None,
         dynamic_dims=None,
-        scalar_values=None,
         platform=None,
         strategy=None,
         distributed_config=None,
@@ -88,7 +88,6 @@ class TestMakeCacheKey:
             tensor_shapes=tensor_shapes or {},
             tensor_dtypes=tensor_dtypes or {},
             dynamic_dims=dynamic_dims or set(),
-            scalar_values=scalar_values or {},
             platform=platform,
             strategy=strategy,
             distributed_config=distributed_config,
@@ -107,15 +106,15 @@ class TestMakeCacheKey:
             tensor_dtypes={"a": DataType.FP32},
         )
         assert isinstance(key, tuple)
-        assert len(key) == 7
-        source_hash, platform, strategy, tensor_part, scalar_part, dist_part, compile_opts = key
+        assert len(key) == 6
+        source_hash, platform, strategy, tensor_part, dist_part, compile_opts = key
         assert source_hash == "abc"
         assert platform is None
         assert strategy is None
         assert isinstance(tensor_part, tuple)
-        assert isinstance(scalar_part, tuple)
         assert dist_part is None  # single-chip default
         assert compile_opts == (
+            ("scalar_semantics", 2),
             ("analyze_auto_scopes_for_deps", False),
             ("emit_source_loc", True),
             ("memory_planner", None),
@@ -130,7 +129,7 @@ class TestMakeCacheKey:
             tensor_shapes={"a": (128, 64)},
             tensor_dtypes={"a": DataType.FP32},
         )
-        _, _, _, tensor_part, _, _, _ = key
+        _, _, _, tensor_part, _, _ = key
         assert len(tensor_part) == 1
         info = tensor_part[0]
         assert info.name == "a"
@@ -144,7 +143,7 @@ class TestMakeCacheKey:
             tensor_dtypes={"a": DataType.FP32},
             dynamic_dims={("a", 0)},
         )
-        _, _, _, tensor_part, _, _, _ = key
+        _, _, _, tensor_part, _, _ = key
         assert tensor_part[0].shape == (None, 128)
 
     def test_dynamic_dim_cache_hit_on_different_concrete_value(self):
@@ -155,7 +154,6 @@ class TestMakeCacheKey:
             tensor_shapes={"a": (256, 128)},
             tensor_dtypes={"a": DataType.FP32},
             dynamic_dims={("a", 0)},
-            scalar_values={},
         )
         key_512 = make_cache_key(
             source_hash="x",
@@ -163,7 +161,6 @@ class TestMakeCacheKey:
             tensor_shapes={"a": (512, 128)},
             tensor_dtypes={"a": DataType.FP32},
             dynamic_dims={("a", 0)},
-            scalar_values={},
         )
         assert key_256 == key_512
 
@@ -175,7 +172,6 @@ class TestMakeCacheKey:
             tensor_shapes={"a": (256, 128)},
             tensor_dtypes={"a": DataType.FP32},
             dynamic_dims={("a", 0)},
-            scalar_values={},
         )
         key_256 = make_cache_key(
             source_hash="x",
@@ -183,24 +179,18 @@ class TestMakeCacheKey:
             tensor_shapes={"a": (256, 256)},
             tensor_dtypes={"a": DataType.FP32},
             dynamic_dims={("a", 0)},
-            scalar_values={},
         )
         assert key_128 != key_256
 
-    def test_scalar_values_in_key(self):
-        key = self._make_key(
-            param_names=["BLOCK_M"],
-            scalar_values={"BLOCK_M": 64},
-        )
-        _, _, _, _, scalar_part, _, _ = key
-        assert len(scalar_part) == 1
-        assert scalar_part[0].name == "BLOCK_M"
-        assert scalar_part[0].value == 64
+    def test_scalar_semantics_version_is_in_key(self):
+        """The key states which scalar contract built it (issue #2751).
 
-    def test_different_scalar_values_cause_miss(self):
-        k1 = self._make_key(param_names=["B"], scalar_values={"B": 64})
-        k2 = self._make_key(param_names=["B"], scalar_values={"B": 128})
-        assert k1 != k2
+        Without the stamp, an artifact compiled when a numeric argument was
+        folded into the body could be served to a request that expects the
+        parameter to stay symbolic.
+        """
+        _, _, _, _, _, compile_opts = self._make_key(param_names=["B"])
+        assert ("scalar_semantics", SCALAR_SEMANTICS) in compile_opts
 
     def test_param_order_preserved(self):
         """Tensor infos should follow param_names order."""
@@ -210,9 +200,8 @@ class TestMakeCacheKey:
             tensor_shapes={"a": (16,), "b": (32,)},
             tensor_dtypes={"a": DataType.FP16, "b": DataType.FP32},
             dynamic_dims=set(),
-            scalar_values={},
         )
-        _, _, _, tensor_part, _, _, _ = key
+        _, _, _, tensor_part, _, _ = key
         assert tensor_part[0].name == "b"
         assert tensor_part[1].name == "a"
 
@@ -961,6 +950,70 @@ class TestGlobalDependencies:
         )
         kernel = pl.jit(implementation)
         assert kernel._get_source_hash() == kernel._get_source_hash()
+
+
+def _scalar_kernel(
+    x: pl.Tensor[[16, 16], pl.FP32],
+    out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+    row: pl.Scalar[pl.INT32],
+    bias: pl.Scalar[pl.FP32],
+    flag: pl.Scalar[pl.BOOL],
+):
+    """One parameter per supported scalar kind; ``flag`` is carried, not read."""
+    with pl.at(level=pl.Level.CORE_GROUP):
+        tile = pl.load(x, [row, 0], [16, 16])
+        pl.store(pl.add(tile, bias), [0, 0], out)
+    return out
+
+
+class TestRuntimeScalarParameters:
+    """A scalar parameter is a runtime value, not a specialization (issue #2751).
+
+    Changing a token count, an offset, or a scale must reuse the compiled
+    artifact and pass the new value at execution time.
+    """
+
+    @pytest.fixture
+    def compile_programs(self, monkeypatch):
+        """Run real specialization and parsing without invoking toolchains."""
+        programs = []
+
+        def compile_program(program, **kwargs):
+            programs.append(program)
+            return program
+
+        monkeypatch.setattr(importlib.import_module("pypto.ir.compile"), "compile", compile_program)
+        return programs
+
+    def test_one_compilation_serves_every_value(self, compile_programs):
+        torch = pytest.importorskip("torch")
+
+        kernel = pl.jit(_scalar_kernel)
+        x = torch.zeros(16, 16, dtype=torch.float32)
+        out = torch.zeros_like(x)
+
+        first = kernel.compile(x, out, 0, 1.0, False)
+        for row, bias, flag in ((1, 2.0, True), (2, -0.0, False), (3, 0.5, True)):
+            assert kernel.compile(x, out, row, bias, flag) is first
+        assert len(compile_programs) == 1
+
+    def test_generated_program_keeps_each_scalar_symbolic(self):
+        """Every scalar survives as a parameter and every use reads the symbol.
+
+        A folded value would leave the declared parameter unused and bake one
+        call site's number into the artifact.
+        """
+        torch = pytest.importorskip("torch")
+
+        kernel = pl.jit(_scalar_kernel)
+        x = torch.zeros(16, 16, dtype=torch.float32)
+        source = kernel.specialize(x, torch.zeros_like(x), 7, 3.5, True).as_python()
+
+        assert "row: pl.Scalar[pl.INT32]" in source
+        assert "bias: pl.Scalar[pl.FP32]" in source
+        assert "flag: pl.Scalar[pl.BOOL]" in source
+        assert "pl.tile.load(x, [row, 0]" in source
+        assert "pl.tile.adds(tile, bias)" in source
 
 
 if __name__ == "__main__":
