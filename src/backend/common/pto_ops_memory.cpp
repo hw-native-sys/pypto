@@ -60,6 +60,7 @@ using pto_ops_detail::CheckArity;
 using pto_ops_detail::EmitFlatOffsetSSAFromValues;
 using pto_ops_detail::EmitIndexOperand;
 using pto_ops_detail::EmitPartitionViewPTO;
+using pto_ops_detail::EmitTensorPartitionViewPTO;
 using pto_ops_detail::GetDimStrings;
 using pto_ops_detail::GetIndexOffsetCodes;
 using pto_ops_detail::GetSizeCodes;
@@ -148,14 +149,11 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   // fractal-aligned blocked shapes window when logical valid_shape was
   // narrowed, so partition sizes stay SFractal-safe.
   std::vector<std::string> partition_dims = GetDimStrings(valid_shape_tuple->elements_);
-  std::vector<std::string> offset_codes = GetIndexOffsetCodes(offsets_tuple->elements_, codegen);
   std::vector<std::string> size_codes = GetSizeCodes(valid_shape_tuple->elements_, codegen);
-  std::string tensor_view = codegen.GetOrCreateTensorView(tensor);
-  std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
 
   std::string partition_type = MakePartitionTensorViewType(partition_dims, dtype_str);
-  std::string partition_view = EmitPartitionViewPTO(tensor->name_hint_, tensor_view, tensor_view_type,
-                                                    partition_type, offset_codes, size_codes, codegen);
+  std::string partition_view = EmitTensorPartitionViewPTO(
+      tensor, tensor_type, partition_type, offsets_tuple->elements_, size_codes, op->span_, codegen);
 
   std::ostringstream tload_line;
   tload_line << "pto.tload ins(" << partition_view << " : " << partition_type << ") outs(";
@@ -240,9 +238,8 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     const auto& shape_elems = shapes_tuple->elements_;
     const auto& offset_elems = offsets_tuple->elements_;
     partition_type = MakePartitionTensorViewType(GetDimStrings(shape_elems), dtype_str);
-    partition_view = EmitPartitionViewPTO(output_tensor->name_hint_, tensor_view, tensor_view_type,
-                                          partition_type, GetIndexOffsetCodes(offset_elems, codegen),
-                                          GetSizeCodes(shape_elems, codegen), codegen);
+    partition_view = EmitTensorPartitionViewPTO(output_tensor, tensor_type, partition_type, offset_elems,
+                                                GetSizeCodes(shape_elems, codegen), op->span_, codegen);
   } else if (tensor_type->tensor_view_.has_value() &&
              ir::IsMxTensorLayout(tensor_type->tensor_view_->layout)) {
     // MX scale tiles are logically [M,G] / [G,N], while their GM destination
@@ -271,9 +268,9 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     if (auto h = As<ir::ConstInt>(valid_shape[0])) height_dim = std::to_string(h->value_);
     if (auto w = As<ir::ConstInt>(valid_shape[1])) width_dim = std::to_string(w->value_);
     partition_type = MakePartitionTensorViewType({height_dim, width_dim}, dtype_str);
-    partition_view = EmitPartitionViewPTO(
-        output_tensor->name_hint_, tensor_view, tensor_view_type, partition_type,
-        GetIndexOffsetCodes(offsets_tuple->elements_, codegen), {height_code, width_code}, codegen);
+    partition_view =
+        EmitTensorPartitionViewPTO(output_tensor, tensor_type, partition_type, offsets_tuple->elements_,
+                                   {height_code, width_code}, op->span_, codegen);
   }
 
   std::ostringstream tstore_line;
