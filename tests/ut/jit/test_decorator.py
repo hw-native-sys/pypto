@@ -1082,24 +1082,29 @@ class TestAllocateGeneratedNames:
         _f.__name__ = name
         return JITFunction(_f, func_type=func_type, external_core_type=external_core_type)
 
+    @staticmethod
+    def _per_function(entry, deps):
+        """Allocate one name per function — the caller shape used for layouts."""
+        return _allocate_generated_names([(id(f._func), f) for f in [entry, *deps]])
+
     def test_entry_is_named_first(self):
         entry = self._jit_named("k")
         dep = self._jit_named("k")
-        names = _allocate_generated_names(entry, [dep])
+        names = self._per_function(entry, [dep])
         assert names[id(entry._func)] == "k"
         assert names[id(dep._func)] == "k__2"
 
     def test_three_way_clash_counts_up(self):
         entry = self._jit_named("e")
         deps = [self._jit_named("k") for _ in range(3)]
-        names = _allocate_generated_names(entry, deps)
+        names = self._per_function(entry, deps)
         assert [names[id(d._func)] for d in deps] == ["k", "k__2", "k__3"]
 
     def test_suffix_shaped_user_name_does_not_collide(self):
         """A user function literally named ``k__2`` still gets its own slot."""
         entry = self._jit_named("e")
         deps = [self._jit_named("k__2"), self._jit_named("k"), self._jit_named("k")]
-        names = _allocate_generated_names(entry, deps)
+        names = self._per_function(entry, deps)
         generated = [names[id(d._func)] for d in deps]
         assert generated == ["k__2", "k", "k__3"]
         assert len(set(generated)) == len(generated)
@@ -1109,7 +1114,7 @@ class TestAllocateGeneratedNames:
         entry = self._jit_named("e")
         mixed = self._jit_named("k", func_type="extern", external_core_type="mixed")
         plain = self._jit_named("k_aic")
-        names = _allocate_generated_names(entry, [mixed, plain])
+        names = self._per_function(entry, [mixed, plain])
         assert names[id(mixed._func)] == "k"
         assert names[id(plain._func)] == "k_aic__2"
 
@@ -1117,9 +1122,27 @@ class TestAllocateGeneratedNames:
         """A diamond dep appears once in the map, not twice."""
         entry = self._jit_named("e")
         dep = self._jit_named("k")
-        names = _allocate_generated_names(entry, [dep, dep])
+        names = self._per_function(entry, [dep, dep])
         assert names[id(dep._func)] == "k"
         assert len(names) == 2
+
+    def test_two_constexpr_bindings_of_one_function_get_two_names(self):
+        """Keying by ``(function, binding)`` splits one function into two members.
+
+        This is what lets a dep be called at two different ``pl.constexpr``
+        values: each binding is its own generated ``@pl.function``.
+        """
+        entry = self._jit_named("e")
+        dep = self._jit_named("k")
+        names = _allocate_generated_names(
+            [
+                (id(entry._func), entry),
+                ((id(dep._func), (("BLOCK", "16"),)), dep),
+                ((id(dep._func), (("BLOCK", "32"),)), dep),
+            ]
+        )
+        assert names[(id(dep._func), (("BLOCK", "16"),))] == "k"
+        assert names[(id(dep._func), (("BLOCK", "32"),))] == "k__2"
 
 
 class TestMultiFuncIntegration:

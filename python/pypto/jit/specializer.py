@@ -151,6 +151,9 @@ class SpecializeContext:
             call name that differs from the function it resolves to. The body
             transformer consults it when rewriting ``kern(...)`` into
             ``self.kernel(...)``; an absent entry means the two agree.
+        dep_call_variants: ``(call name, ordinal) -> generated function name``,
+            consulted before ``dep_func_names`` so two call sites of one name
+            can reach different generated functions. See the field comment.
         py_globals: A snapshot of the originating function's globals and closure
             bindings. During JIT compilation this is the same namespace used
             for cache-key construction and annotation resolution. The specializer
@@ -208,6 +211,14 @@ class SpecializeContext:
     # Also appended at the tail (see above): ``pl.constexpr`` param name -> the
     # generated-source text its call-site value folds to.
     constexpr_values: dict[str, str] = field(default_factory=dict)
+    # Also appended at the tail (see above): ``(call name, ordinal) -> generated
+    # function name``, where the ordinal is the call's position among
+    # same-named calls in source order. A dep called at two different
+    # ``pl.constexpr`` values is compiled once per value, so the two call sites
+    # resolve to different generated functions and the call name alone no
+    # longer identifies the callee. Empty when every call site of a name
+    # reaches the same function, which ``dep_func_names`` already covers.
+    dep_call_variants: dict[tuple[str, int], str] = field(default_factory=dict)
 
     @property
     def source_def_name(self) -> str:
@@ -587,6 +598,36 @@ def _collect_dynamic_dims(
     return result
 
 
+def _resolve_dep_call_targets(
+    func_def: ast.FunctionDef,
+    dep_names: set[str],
+    per_site: Mapping[tuple[str, int], str],
+) -> dict[int, str]:
+    """Map ``id(call node)`` → the generated function that call site reaches.
+
+    The JIT layer folds each dep call site's ``pl.constexpr`` arguments
+    separately, so two calls to one name can be compiled against different
+    constants and must be rewritten to different generated functions. It cannot
+    hand over the call nodes themselves — it parsed its own copy of the source
+    — so it keys its answer by ``(call name, ordinal)``, the call's position
+    among same-named calls in source order. Both sides enumerate ``ast.walk``
+    matches sorted by position over the same dedented source, so the Nth call
+    of a name means the same call in both. See ``_dep_call_nodes`` in
+    ``decorator.py``; this resolves that answer back onto local nodes.
+    """
+    by_name: dict[str, list[ast.Call]] = {}
+    for node in ast.walk(func_def):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in dep_names:
+            by_name.setdefault(node.func.id, []).append(node)
+    targets: dict[int, str] = {}
+    for name, calls in by_name.items():
+        for index, call in enumerate(sorted(calls, key=lambda call: (call.lineno, call.col_offset))):
+            generated = per_site.get((name, index))
+            if generated is not None:
+                targets[id(call)] = generated
+    return targets
+
+
 def _collect_dynvar_names(func_def: ast.FunctionDef) -> dict[str, str]:
     """Collect dynvar assignments from pl.dynamic(...) calls in the function body.
 
@@ -778,6 +819,7 @@ class _BodyTransformer(ast.NodeTransformer):
         dep_func_names: dict[str, str] | None = None,
         constexpr_values: Mapping[str, str] | None = None,
         dep_constexpr_params: dict[str, set[str]] | None = None,
+        dep_call_targets: Mapping[int, str] | None = None,
     ) -> None:
         super().__init__()
         self._meta = tensor_meta
@@ -789,6 +831,12 @@ class _BodyTransformer(ast.NodeTransformer):
         # through it so ``kern(...)`` becomes ``self.kernel(...)``; a name
         # absent from the map is its own generated name.
         self._dep_func_names = dep_func_names or {}
+        # ``id(call node) → generated function name``. Consulted first, so two
+        # call sites of one name that were compiled against different
+        # ``pl.constexpr`` values reach their own generated function instead of
+        # both resolving to whichever one the name happens to map to. Empty
+        # unless some name really does reach more than one function.
+        self._dep_call_targets = dict(dep_call_targets or {})
         # DynVar name → (anchor_param, anchor_dim_idx). ``visit_Name`` uses
         # this to rewrite runtime references like ``pl.create_tensor([M, ...])``
         # via ``_dyn_dim_expr`` so the annotation-only DynVar doesn't leak past
@@ -1162,7 +1210,11 @@ class _BodyTransformer(ast.NodeTransformer):
 
         The attribute is the dep's *generated* function name, which differs
         from the name at the call site when the body reaches the dep through
-        an aliased import (``kern(...)`` → ``self.kernel(...)``).
+        an aliased import (``kern(...)`` → ``self.kernel(...)``) and when this
+        site's ``pl.constexpr`` values select one of several compilations of
+        the same dep (``helper(x, 16)`` → ``self.helper(...)`` while
+        ``helper(x, 32)`` → ``self.helper__2(...)``). The per-site map is
+        consulted first for exactly that reason.
 
         Keyword args are normalised to positional based on the dep's
         parameter order (so ``dep(a, out=out)`` becomes ``self.dep(a, out)``).
@@ -1170,7 +1222,9 @@ class _BodyTransformer(ast.NodeTransformer):
         args — preserving keyword form would make the parser reject the call.
         """
         if isinstance(node.func, ast.Name) and node.func.id in self._dep_names:
-            dep_name = self._dep_func_names.get(node.func.id, node.func.id)
+            dep_name = self._dep_call_targets.get(
+                id(node), self._dep_func_names.get(node.func.id, node.func.id)
+            )
             new_func = ast.Attribute(
                 value=ast.Name(id="self", ctx=ast.Load()),
                 attr=dep_name,
@@ -2088,6 +2142,11 @@ class Specializer:
             dep_param_names=self._dep_param_names,
             dep_constexpr_params=self._dep_constexpr_params,
             dep_func_names=ctx.dep_func_names,
+            dep_call_targets=(
+                _resolve_dep_call_targets(func_def, dep_names, ctx.dep_call_variants)
+                if ctx.dep_call_variants
+                else {}
+            ),
         )
         new_body = [transformer.visit(stmt) for stmt in func_def.body]
         # Accumulate alias→original renames for error message rewriting.
@@ -2369,6 +2428,7 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
     external_include_dirs: tuple[str, ...] = (),
     dep_func_names: dict[str, str] | None = None,
     constexpr_values: dict[str, str] | None = None,
+    dep_call_variants: dict[tuple[str, int], str] | None = None,
 ) -> SpecializeContext:
     """Build a SpecializeContext from a Python function and call-site data.
 
@@ -2392,6 +2452,10 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
             this function reaches under a different name; names that agree may
             be omitted.
         constexpr_values: Folded source text per ``pl.constexpr`` param name.
+        dep_call_variants: ``(call name, ordinal) -> generated function name``
+            for bodies where one call name reaches more than one generated
+            function, which happens when a dep is compiled once per
+            ``pl.constexpr`` value it is called with.
 
     Dynamic dims live inside ``tensor_meta`` as :class:`DynDim` entries —
     no separate set is passed in.
@@ -2432,6 +2496,7 @@ def build_specialize_context(  # noqa: PLR0913 — pass-through assembler; each 
         constexpr_values=constexpr_values or {},
         dep_names=dep_names,
         dep_func_names=dep_func_names or {},
+        dep_call_variants=dep_call_variants or {},
         auto_scope=auto_scope,
         py_globals=func_name_lookup(func),
         orig_file=orig_file,
