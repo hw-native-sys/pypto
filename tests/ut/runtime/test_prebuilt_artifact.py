@@ -1144,22 +1144,14 @@ def test_promotion_preserves_execution_capabilities(tmp_path, fake_runtime, kind
     assert restored.execution_capabilities == compiled.execution_capabilities
 
 
-@pytest.mark.parametrize("direct", [False, True])
-def test_runtime_rejects_manifest_metadata_capability_mismatch(tmp_path, fake_runtime, direct):
-    store = ArtifactStore(tmp_path / "cache", private_root=tmp_path / "private")
-    spec = ArtifactSpec(
-        ArtifactState.GENERATED,
-        BuildKind.SINGLE_CHIP,
-        _spec().required_files,
-        ExecutionCapabilities((ArtifactExecutionMode.PROGRAM, ArtifactExecutionMode.KERNEL)),
-    )
-    handle = store.get_or_build(_key(), spec, lambda root: _generated(root, BuildKind.SINGLE_CHIP)).handle
-    assert handle is not None
-    with pytest.raises(ValueError, match="capabilities do not match"):
-        if direct:
-            ArtifactRuntime(store, handle, "a2a3sim", tmp_path / "run").load()
-        else:
-            restore_artifact(store, handle, tmp_path / "run")
+def test_unverified_shared_binary_capabilities_are_rejected():
+    with pytest.raises(ValueError, match="no verified ABI"):
+        ArtifactSpec(
+            ArtifactState.GENERATED,
+            BuildKind.SINGLE_CHIP,
+            _spec().required_files,
+            ExecutionCapabilities((ArtifactExecutionMode.PROGRAM, ArtifactExecutionMode.KERNEL)),
+        )
 
 
 def test_generated_hit_checks_capabilities_of_ready_payload(tmp_path, fake_runtime):

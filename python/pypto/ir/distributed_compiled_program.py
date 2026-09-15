@@ -51,7 +51,7 @@ from .param_info import bind_complete_args
 # ``compiled_program`` (both feed the build-kind marker table there) and is
 # re-exported here, where the rest of the L3 metadata contract lives. Bump
 # ``_META_SCHEMA`` on any incompatible format change.
-_META_SCHEMA = 3
+_META_SCHEMA = 4
 
 if TYPE_CHECKING:
     from pypto.runtime._artifact_runtime import ArtifactRuntime
@@ -219,6 +219,8 @@ class DistributedCompiledProgram:
         # ``distributed_meta.json``), and chip-callable assembly is driven by
         # the on-disk ``next_levels/`` layout — so no live IR is needed.
         _execution_capabilities.require(ArtifactExecutionMode.PROGRAM)
+        if _execution_capabilities.modes != (ArtifactExecutionMode.PROGRAM,):
+            raise ValueError("Distributed kernel artifacts are not supported")
         self._execution_capabilities = _execution_capabilities
         self._program = program
         self._output_dir = Path(output_dir).resolve()

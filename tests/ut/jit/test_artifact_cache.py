@@ -22,6 +22,7 @@ import pytest
 from pypto._artifact_contract import ArtifactExecutionMode, ExecutionCapabilities
 from pypto._fslock import file_lock
 from pypto._identity import ToolchainIdentity, digest_record
+from pypto._kernel_abi import KernelABI
 from pypto.jit import artifact_cache
 from pypto.jit._artifact_manifest import MANIFEST_NAME, ArtifactKey, ArtifactSpec, ArtifactState, BuildKind
 from pypto.jit.artifact_cache import (
@@ -772,7 +773,11 @@ def test_spawned_processes_deduplicate_and_dead_process_releases_lock(store):
 @pytest.mark.parametrize("state", list(ArtifactState))
 def test_capabilities_select_separate_artifact_slots(store, state):
     program = _spec(state)
-    kernel = replace(program, execution_capabilities=ExecutionCapabilities((ArtifactExecutionMode.KERNEL,)))
+    kernel = replace(
+        program,
+        execution_capabilities=ExecutionCapabilities((ArtifactExecutionMode.KERNEL,)),
+        kernel_abi=KernelABI("a2a3", "tensormap_and_ringbuffer", ()),
+    )
     first = store.get_or_build(_key(), program, _builder).handle
     assert store.lookup(_key(), kernel).status is LookupStatus.MISS
     second = store.get_or_build(_key(), kernel, _builder).handle
@@ -801,10 +806,9 @@ def test_execution_capabilities_are_canonical_and_immutable():
     record = capabilities.record()
     record.clear()
     assert capabilities.modes == (kernel, program)
-    assert (
-        replace(_spec(), execution_capabilities=capabilities).digest
-        == replace(_spec(), execution_capabilities=ExecutionCapabilities((kernel, program))).digest
-    )
+    assert capabilities == ExecutionCapabilities((kernel, program))
+    with pytest.raises(ValueError, match="no verified ABI"):
+        replace(_spec(), execution_capabilities=capabilities)
 
 
 if __name__ == "__main__":

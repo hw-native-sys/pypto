@@ -18,10 +18,11 @@ from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from pypto._artifact_contract import ExecutionCapabilities
+from pypto._artifact_contract import ArtifactExecutionMode, ExecutionCapabilities
 from pypto._identity import IDENTITY_SCHEMA, ToolchainIdentity, _file_digest, digest_record
+from pypto._kernel_abi import KernelABI
 
-ARTIFACT_SCHEMA = 2
+ARTIFACT_SCHEMA = 3
 MANIFEST_NAME = "artifact_manifest.json"
 _MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 
@@ -114,12 +115,23 @@ class ArtifactSpec:
     build_kind: BuildKind
     required_files: tuple[str, ...]
     execution_capabilities: ExecutionCapabilities = ExecutionCapabilities()
+    kernel_abi: KernelABI | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.state, ArtifactState) or not isinstance(self.build_kind, BuildKind):
             raise ValueError("Artifact spec requires ArtifactState and BuildKind enum values")
         if not isinstance(self.execution_capabilities, ExecutionCapabilities):
             raise ValueError("Artifact spec requires ExecutionCapabilities")
+        kernel = ArtifactExecutionMode.KERNEL in self.execution_capabilities.modes
+        if kernel:
+            if self.build_kind is not BuildKind.SINGLE_CHIP:
+                raise ValueError("Distributed kernel artifacts are not supported")
+            if self.execution_capabilities.modes != (ArtifactExecutionMode.KERNEL,):
+                raise ValueError("Shared program/kernel binaries have no verified ABI contract")
+            if not isinstance(self.kernel_abi, KernelABI):
+                raise ValueError("Kernel artifact spec requires an explicit KernelABI")
+        elif self.kernel_abi is not None:
+            raise ValueError("Program artifact spec cannot carry a kernel ABI")
         required = tuple(sorted(_relative_path(path) for path in self.required_files))
         if not required or len(set(required)) != len(required):
             raise ValueError(f"Artifact required files must be nonempty and unique, got {required!r}")
@@ -134,6 +146,7 @@ class ArtifactSpec:
                 self.build_kind.value,
                 self.required_files,
                 self.execution_capabilities.record(),
+                self.kernel_abi.record() if self.kernel_abi is not None else None,
             )
         )
 
@@ -193,6 +206,7 @@ def make_manifest(directory: Path, key: ArtifactKey, spec: ArtifactSpec) -> dict
         "state": spec.state.value,
         "build_kind": spec.build_kind.value,
         "supported_execution_modes": spec.execution_capabilities.record(),
+        "kernel_abi": spec.kernel_abi.record() if spec.kernel_abi is not None else None,
         "required_files": list(spec.required_files),
         "files": files,
     }

@@ -40,21 +40,21 @@ SHA-256 源码和特化摘要。其记录保留每个环境组件摘要和两个
 
 ## 执行能力与完整参数绑定
 
-当前编译器在 `compiled_meta.json`（schema 2）和 `distributed_meta.json`
-（schema 3）中写入 `supported_execution_modes: ["program"]`。
+当前编译器在 `compiled_meta.json`（schema 3）和 `distributed_meta.json`
+（schema 4）中写入 `supported_execution_modes: ["program"]`。
 `pypto._artifact_contract` 中的 `ExecutionCapabilities` 是经过校验的不可变记录；
 `CompiledProgram`、其 orchestration 子对象和 `DistributedCompiledProgram`
 在 `from_dir()` 后保留该记录，无需加载二进制或初始化 Worker。
-program 消费者拒绝仅声明 kernel 的产物。`kernel` 名称为后续生产者保留，
-声明它不等于实现 kernel ABI。本次不增加用户 mode 选择，普通 JIT/program 调用保持原行为。
+program 消费者拒绝声明 kernel 的产物。kernel compiler adapter 必须提供下文的显式 ABI 描述符。
+本次不增加用户 mode 选择，普通 JIT/program 调用保持原行为。
 
-`ArtifactSpec.execution_capabilities` 将同一声明写入 schema 2 的 artifact manifest，
+`ArtifactSpec.execution_capabilities` 将同一声明写入 schema 3 的 artifact manifest，
 并纳入 spec 摘要；不同能力不会复用同一阶段 slot。generated 到 ready 晋级保留能力声明，
 绑定 program 时会拒绝 manifest 与 compiled metadata 的能力不一致。
 能力与 generated/ready 状态独立：允许 program executor 消费不代表二进制已就绪。
 
 旧 sidecar schema 报错并提示重新编译；缺失、空列表、重复、未知或不兼容的能力声明
-不通过猜测补齐。artifact schema 2 同时改变编译 key 的命名空间，因此旧持久条目正常
+不通过猜测补齐。artifact schema 3 同时改变编译 key 的命名空间，因此旧持久条目正常
 未命中且不被修改。运行时 Scalar 值、Tensor 地址和 stream 仍不进入特化 identity。
 `execute_artifact` 在组装前校验已有的单芯片 sidecar；没有 sidecar 的历史目录
 保留既有 program 专用执行路径。
@@ -64,6 +64,53 @@ program 消费者拒绝仅声明 kernel 的产物。`kernel` 名称为后续生�
 runtime，因此保留参数别名和每次调用的 Scalar 值。Tensor/storage 与 ABI 校验仍由
 各执行器负责。已有 program return-style 调用仍会在执行前分配省略的 Out Tensor；
 该 helper 不切换已有行为，也不提供 kernel 调用接口。
+
+## Kernel ABI 描述符（集成分支）
+
+集成分支将 simpler 固定到 `5b2a5a5c7b4758314410009bed26a829a0988924`。
+`pypto._kernel_abi.KernelABI` 描述该版本的 `ChipStorageTaskArgs` 参数协议。
+其 schema 1 是 **PyPTO 描述符版本**，并非 simpler 导出的版本号。
+升级 runtime pin 必须重新核对 ABI 并通过一致性测试；未知版本会被拒绝。
+这里记录已有的底层描述符契约，方案中的 L2 Worker/native adapter API 仍是独立依赖。
+
+kernel spec 必须是 single-chip、仅声明 `["kernel"]`，并携带 `kernel_abi`。
+program spec 不能携带该描述符。尚未验证共同的二进制 ABI，因此拒绝声明
+program/kernel 共用二进制；本契约也不支持 distributed kernel。这些检查不选择 JIT mode。
+
+描述符包含 platform（`a2a3` 或 `a5`）、runtime（`host_build_graph` 或
+`tensormap_and_ringbuffer`）、固定版本和完整逻辑签名。Tensor 与 Scalar 分池，
+各自保持签名顺序，允许 Python 参数交错排列。Tensor 记录池索引、原生 dtype tag、
+shape 和 In/Out/InOut 方向。rank 为 1–5，`-1` 表示动态维，其余维度为正 uint32。
+协议采用正的元素 stride；实际 stride、底层存储范围和逻辑起点仍需由每次调用的
+Tensor adapter 在提交前校验。
+
+上限为 256 个 Tensor、128 个 Scalar。Scalar 的声明类型对象字节放入小端 uint64
+槽位，高位补零：FP32 保留位表示，不转成整数；负 INT32 保留低 32 位表示，高位为零。
+支持 FP32、INT8/16/32/64、UINT8/16/32/64、bool 和 index（INT64）。FP64、FP16 Scalar
+等未支持类型明确报错。一致性测试编译并核对固定 simpler 版本的 C++ 定义、布局和
+Scalar 表示示例。
+
+`return_aliases` 存储外部 Tensor 的逻辑参数索引，允许重复索引。
+例如 `(x, scale, out, step, cache)` 分成 `(x, out, cache)` 和 `(scale, step)` 两个池；
+`[2, 4, 2]` 返回 `(out, cache, out)`。`kernel_abi_from_params` 从已有 IR 参数 metadata
+派生描述符；`bind_kernel_args` 要求完整参数，保留原 Tensor 对象、别名和本次 Scalar 值，
+不分配内存、不编码 Scalar、不编译或操作设备。
+
+后续 kernel compiler adapter 对每个生成的 orchestration 目录调用
+`write_kernel_metadata`，子目录使用各自的签名。alias 必须来自 IR，不能根据输出顺序猜测。
+该 writer 不会把 program binary 转换成 kernel binary。sidecar 在现有参数 metadata
+旁保存描述符；恢复时交叉核对名称、类型、方向、shape、platform/backend 和返回数量。
+`load_kernel_metadata` 不构造 program executor。
+
+`ArtifactSpec.kernel_abi` 进入 stage digest 与 manifest；target、runtime、参数映射或
+alias 改变会选择不同 slot。ready spec 构造保留描述符。`restore_kernel_metadata` 在向后续
+kernel consumer 返回 metadata 前校验 manifest、sidecar 和请求的 ABI。缺失或不一致时要求
+重新编译。运行时 Scalar 值、地址、stream、callable handle、Worker generation 均不入盘。
+后续 kernel compiler 还必须将影响代码生成的 ABI 输入纳入 specialization identity。
+
+本阶段交付描述符持久化、参数绑定和校验；当前 JIT/compiler 仍生成 program 产物。
+kernel wrapper、Worker 持有、注册、native launch、capture 属于后续工作。
+描述 HBG 或 A5 target 不代表其 kernel 执行已可用，必须另行核对固定 simpler 版本的支持矩阵。
 
 ## 布局与校验
 

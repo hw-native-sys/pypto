@@ -54,16 +54,16 @@ subsequent private requests build again. This is not a private-object cache.
 ## Execution capabilities and complete argument binding
 
 Current compilers emit `supported_execution_modes: ["program"]` in
-`compiled_meta.json` (schema 2) and `distributed_meta.json` (schema 3).
+`compiled_meta.json` (schema 3) and `distributed_meta.json` (schema 4).
 `ExecutionCapabilities` in `pypto._artifact_contract` is immutable and validated;
 `CompiledProgram`, its orchestration children, and `DistributedCompiledProgram`
 retain it across `from_dir()` without loading binaries or starting workers.
-A program consumer rejects a kernel-only capability list. The `kernel` name is
-reserved for a future producer; declaring it does not implement a kernel ABI.
+A program consumer rejects a kernel capability list. Kernel compiler adapters
+must supply the explicit ABI descriptor described below.
 There is no new user mode selector, and normal JIT/program calls are unchanged.
 
 `ArtifactSpec.execution_capabilities` records the same declaration in the
-schema-2 artifact manifest and participates in the spec digest. Different
+schema-3 artifact manifest and participates in the spec digest. Different
 capabilities cannot reuse the same stage slot. Generated-to-ready promotion
 preserves them, and program attachment rejects a mismatch between the manifest
 and compiled metadata. Capabilities are separate from generated/ready state:
@@ -71,7 +71,7 @@ permission to use a program executor does not establish binary readiness.
 
 Older sidecar schemas are rejected with a recompilation instruction; missing,
 empty, duplicate, unknown, or incompatible capability declarations are not
-inferred. Artifact schema 2 also changes the compilation-key namespace, so
+inferred. Artifact schema 3 also changes the compilation-key namespace, so
 old persistent entries miss cleanly and remain untouched. Runtime scalar values,
 tensor addresses and streams are still excluded from specialization identity.
 `execute_artifact` validates a present single-chip sidecar before assembly;
@@ -84,6 +84,69 @@ or initializes a runtime, so aliases and each call's scalar values survive.
 Executors retain responsibility for tensor/storage and ABI validation. Existing
 program return-style calls still allocate omitted Out tensors before execution;
 this helper does not change their behavior or introduce a kernel calling API.
+
+## Kernel ABI descriptors (integration branch)
+
+The integration branch pins simpler to
+`5b2a5a5c7b4758314410009bed26a829a0988924`. `pypto._kernel_abi.KernelABI`
+describes that revision's `ChipStorageTaskArgs` argument protocol. Its schema 1
+is a **PyPTO descriptor version**, not a version exported by simpler. Updating
+the runtime pin requires a fresh ABI audit and conformance test; an unknown
+revision is rejected. This records the existing low-level descriptor contract;
+the planned L2 Worker/native adapter API is still a separate dependency.
+
+A kernel spec must be single-chip, declare exactly `["kernel"]`, and carry a
+`kernel_abi`. Program specs cannot carry one. Shared program/kernel binaries
+are rejected until a shared binary ABI is verified. Distributed kernel
+execution is outside this contract. These checks do not select a JIT mode.
+
+The descriptor records platform (`a2a3` or `a5`), runtime (`host_build_graph` or
+`tensormap_and_ringbuffer`), the pinned revision, and the complete logical
+signature. Tensor and scalar pools each preserve signature order, even when
+Python parameters interleave them. Each tensor has its pool index, native dtype
+tag, shape and In/Out/InOut direction. Shapes have rank 1–5; `-1` marks a dynamic
+dimension and other dimensions must be positive uint32 values. The protocol
+uses positive element strides. Actual strides, backing extent and logical
+origin must be validated by the per-call tensor adapter before submission.
+
+There are at most 256 tensors and 128 scalars. Scalars occupy zero-extended,
+little-endian uint64 slots containing their declared type's object bytes:
+FP32 is bit-preserved, not converted to an integer; negative INT32 uses its
+32-bit representation with zero high bits. Supported scalars are FP32,
+INT8/16/32/64, UINT8/16/32/64, bool and index (INT64). Unsupported types such as
+FP64 or FP16 scalars fail explicitly. The dtype/header conformance test checks
+the actual pinned C++ definitions, layout and sample scalar representations.
+
+`return_aliases` stores logical parameter indices for external tensors;
+repeated indices preserve repeated returns. For `(x, scale, out, step, cache)`,
+the pools are `(x, out, cache)` and `(scale, step)`; aliases `[2, 4, 2]` return
+`(out, cache, out)`. `kernel_abi_from_params` derives this descriptor from existing
+IR parameter metadata. `bind_kernel_args` requires every argument and preserves
+original tensor objects, aliases and current scalar values. It performs no
+allocation, scalar encoding, compilation or device work.
+
+A future kernel compiler adapter uses `write_kernel_metadata` for each generated
+orchestration directory, including each child with its own signature. It must
+supply aliases established from IR, not infer them from output order. This
+writer does not convert a program binary into a kernel binary. The sidecar
+stores the descriptor beside existing parameter metadata; recovery cross-checks
+names, types, directions, shapes, platform/backend and return count.
+`load_kernel_metadata` restores it without constructing a program executor.
+
+`ArtifactSpec.kernel_abi` participates in the stage digest and manifest; target,
+runtime, parameter mapping or alias changes select different slots. Ready-stage
+spec construction preserves it. `restore_kernel_metadata` validates the manifest,
+sidecar and requested ABI before handing metadata to a later kernel consumer.
+Missing or inconsistent descriptors require recompilation. Runtime scalar
+values, addresses, streams, callable handles and Worker generations never enter
+these records. The later kernel compiler must also include any ABI-dependent
+code-generation inputs in its specialization identity.
+
+This milestone provides descriptor persistence, binding and validation. Current
+JIT/compiler producers still emit program artifacts. Kernel wrapper generation,
+Worker ownership, registration, native launch and capture are subsequent work.
+Describing an HBG or A5 target does not claim its kernel execution works; the
+pinned simpler implementation's supported matrix must be checked separately.
 
 ## Layout and validation
 
