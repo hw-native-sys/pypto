@@ -43,6 +43,13 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+#: Where a block's generated script is written. `--keep` retains it here rather
+#: than in the repository root, which AGENTS.md keeps free of stray scripts.
+_SCRATCH_DIR = Path(__file__).resolve().parent / "generated"
+
+_TIMEOUT_SECONDS = 1800
+_FAILURE_TAIL_LINES = 12
+
 _BLOCK = re.compile(
     r"<!--\s*doctest:\s*(?P<kind>setup|run)\s*-->\s*\n```python\n(?P<code>.*?)\n```",
     re.S,
@@ -79,22 +86,50 @@ def page_program(blocks: list[Block], run_block: Block) -> str:
     return f"{setup}\n\n{run_block.code}\n" if setup else f"{run_block.code}\n"
 
 
+def _tail(stdout: str | bytes | None, stderr: str | bytes | None) -> str:
+    """Join the last few lines of a finished or abandoned process's output."""
+    parts = []
+    for stream in (stdout, stderr):
+        if stream is None:
+            continue
+        parts.append(stream.decode("utf-8", "replace") if isinstance(stream, bytes) else stream)
+    lines = "".join(parts).strip().splitlines()
+    return "\n".join(lines[-_FAILURE_TAIL_LINES:])
+
+
 def run_block(blocks: list[Block], block: Block, platform: str, keep: bool) -> tuple[bool, str]:
     """Execute one run block; return (passed, output tail)."""
     program = page_program(blocks, block).replace("__PLATFORM__", platform)
-    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=not keep, dir=REPO_ROOT) as fh:
+    # `--keep` leaves the generated file behind, so it is written under this
+    # directory rather than the repository root, which AGENTS.md keeps free of
+    # stray scripts. The block still runs with the repository root as its
+    # working directory; no doc block imports anything by repository-relative
+    # path, so the script's own directory never has to be the root.
+    _SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=not keep, dir=_SCRATCH_DIR) as fh:
         fh.write(program)
         fh.flush()
-        proc = subprocess.run(  # noqa: S603 - fixed argv, path from tempfile
-            [sys.executable, fh.name],
-            capture_output=True,
-            text=True,
-            cwd=REPO_ROOT,
-            timeout=1800,
-            check=False,
-        )
-    tail = (proc.stdout + proc.stderr).strip().splitlines()
-    return proc.returncode == 0, "\n".join(tail[-12:])
+        try:
+            proc = subprocess.run(  # noqa: S603 - fixed argv, path from tempfile
+                [sys.executable, fh.name],
+                capture_output=True,
+                text=True,
+                cwd=REPO_ROOT,
+                timeout=_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as expired:
+            # A timeout is a failed block, not a reason to abandon the run:
+            # letting it escape the worker takes down every other result and
+            # the summary with it. Keep whatever the block printed before it
+            # hung -- that is the most useful part of the report.
+            captured = _tail(expired.stdout, expired.stderr)
+            return False, (
+                f"TIMED OUT after {_TIMEOUT_SECONDS}s -- output before the timeout:\n{captured}"
+                if captured
+                else f"TIMED OUT after {_TIMEOUT_SECONDS}s -- no output captured"
+            )
+    return proc.returncode == 0, _tail(proc.stdout, proc.stderr)
 
 
 def check_parity(pages: list[Path]) -> list[str]:

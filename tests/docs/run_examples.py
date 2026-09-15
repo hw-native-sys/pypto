@@ -130,20 +130,43 @@ def invocations(platform: str) -> list[list[str]]:
     return out
 
 
+def _tail(stdout: str | bytes | None, stderr: str | bytes | None) -> str:
+    """Join the last few lines of a finished or abandoned process's output."""
+    parts = []
+    for stream in (stdout, stderr):
+        if stream is None:
+            continue
+        parts.append(stream.decode("utf-8", "replace") if isinstance(stream, bytes) else stream)
+    lines = "".join(parts).strip().splitlines()
+    return "\n".join(lines[-_FAILURE_TAIL_LINES:])
+
+
 def run_one(argv: list[str]) -> tuple[bool, float, str]:
     """Execute one invocation; return (passed, seconds, output tail)."""
     started = time.monotonic()
-    proc = subprocess.run(  # noqa: S603 - fixed argv, paths from the repo tree
-        [sys.executable, *argv],
-        capture_output=True,
-        text=True,
-        cwd=REPO_ROOT,
-        timeout=_TIMEOUT_SECONDS,
-        check=False,
-    )
-    elapsed = time.monotonic() - started
-    tail = (proc.stdout + proc.stderr).strip().splitlines()
-    return proc.returncode == 0, elapsed, "\n".join(tail[-_FAILURE_TAIL_LINES:])
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, paths from the repo tree
+            [sys.executable, *argv],
+            capture_output=True,
+            text=True,
+            cwd=REPO_ROOT,
+            timeout=_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as expired:
+        # A timeout is a failed invocation, not a reason to abandon the run:
+        # letting it escape the worker takes down every other result and the
+        # summary with it, which is precisely what running N at once makes
+        # expensive. Whatever the process printed before it hung is the most
+        # useful part of the report, so keep it.
+        captured = _tail(expired.stdout, expired.stderr)
+        report = (
+            f"TIMED OUT after {_TIMEOUT_SECONDS}s -- output before the timeout:\n{captured}"
+            if captured
+            else f"TIMED OUT after {_TIMEOUT_SECONDS}s -- no output captured"
+        )
+        return False, time.monotonic() - started, report
+    return proc.returncode == 0, time.monotonic() - started, _tail(proc.stdout, proc.stderr)
 
 
 def main() -> int:
