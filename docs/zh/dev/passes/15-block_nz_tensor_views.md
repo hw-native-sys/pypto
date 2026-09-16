@@ -227,7 +227,7 @@ GlobalTensor<int8_t, pto::Shape<1, 16, 16, 16, 32>,
 | 显式 stride 或部分 `valid_shape` | 拒绝 |
 | 分布式张量 | 拒绝——`remote_load` 没有 NZ 分块 |
 | 对 NZ 做 `tensor.view` / `tensor.reinterpret_view` | 在算子构造期拒绝 |
-| GM 行间隔超过 65535 个 block | 拒绝——**临时**，见 [GM 行间隔：一道临时防护](#gm-行间隔一道临时防护) |
+| 多列块 load 的 GM 行间隔超过 65535 个 block | 拒绝——**临时**，见 [GM 行间隔：一道临时防护](#gm-行间隔一道临时防护) |
 
 ### GM 行间隔：一道临时防护
 
@@ -261,6 +261,12 @@ gmGap = (gStride1 - gShape2*gShape3*gShape4) * sizeof(T) / 32
 另一种绕过方式是把按层堆叠的权重标注为 rank-3、以堆叠轴作为 batch
 （`[LAYERS, K, N]`），其范围随即由 `gStride0` 和一个真正的 `for` 循环承载，而不再
 经过 burst 间隔。
+
+**单列块 load 不受此限制。** `TLoadGm2L1Nz2nz` 把 load 自身的列块数作为 `nBurst`
+传入，而 DMA 只在从一个 burst 跨到下一个时才使用 `gmGap`，因此只有一个 burst 时那个
+被截断的字段根本不会被读取。已在设备上于 pto-isa 自带的 `tload_gm2mat` ST 中确认：
+`gShape1 = 1`、间隔为 65536 的 NZ `int16` load 返回逐位正确的数据，而同一个 load 在
+`gShape1 = 2` 时会损坏 1837/4096 个元素。
 
 [hw-native-sys/pto-isa#317]: https://github.com/hw-native-sys/pto-isa/issues/317
 

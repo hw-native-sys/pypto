@@ -869,7 +869,7 @@ def test_rejects_tensor_view_of_nz():
 
 
 def _gap_program(rows: int, tile_rows: int):
-    """A whole-column NZ load of *tile_rows* out of a *rows*-row weight.
+    """A 16-column-block NZ load of *tile_rows* out of a *rows*-row weight.
 
     The GM gap ``TLoadGm2L1Nz2nz`` computes for it is exactly ``rows -
     tile_rows`` 32-byte blocks, for every dtype.
@@ -891,6 +891,31 @@ def _gap_program(rows: int, tile_rows: int):
             return out
 
     return GmGap
+
+
+def _single_column_block_program(rows: int, tile_rows: int):
+    """The same load narrowed to one C0 column block (32 INT8 columns).
+
+    ``TLoadGm2L1Nz2nz`` passes the column-block extent as ``nBurst``, so this
+    load issues a single burst and never consumes ``gmGap``.
+    """
+
+    @pl.program
+    class OneBlock:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            x: pl.Tensor[[64, 32], pl.INT8],
+            w: pl.Tensor[[rows, 32], pl.INT8, pl.NZ],
+            out: pl.Tensor[[64, tile_rows], pl.INT32],
+        ):
+            xt = pl.load(x, [0, 0], [64, 32], target_memory=pl.Mem.Mat)
+            wt = pl.load(w, [0, 0], [tile_rows, 32], target_memory=pl.Mem.Mat)
+            acc = pl.matmul(xt, pl.tile.transpose_view(wt), out_dtype=pl.INT32)
+            pl.store(acc, [0, 0], out)
+            return out
+
+    return OneBlock
 
 
 def test_accepts_the_largest_encodable_gm_gap():
@@ -924,6 +949,18 @@ def test_a_taller_row_tile_rescues_the_same_tensor():
     """
     assert 65552 - 32 == 65520
     _run(_gap_program(rows=65552, tile_rows=32))
+
+
+def test_a_single_column_block_load_is_exempt_from_the_gap_limit():
+    """``gmGap`` is the stride *between* bursts, so one burst never reads it.
+
+    Verified on device in pto-isa's own tload_gm2mat ST suite: an NZ int16 load
+    with ``gShape1 = 1`` and a 65536-block gap returns bit-exact data, while the
+    identical load at ``gShape1 = 2`` corrupts 1837/4096 elements. Rejecting the
+    single-block case would refuse a load that is actually correct.
+    """
+    assert 65552 - 16 == 65536
+    _run(_single_column_block_program(rows=65552, tile_rows=16))
 
 
 if __name__ == "__main__":

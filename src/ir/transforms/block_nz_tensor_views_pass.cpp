@@ -263,8 +263,8 @@ class NzOffsetFactStore {
   std::unordered_set<VarPtr> non_negative_vars_;
 };
 
-/// Position of the row-fractal extent ``R/16`` in a blocked NZ shape
-/// ``[B, C/c0, R/16, 16, c0]``.
+/// Positions in a blocked NZ shape ``[B, C/c0, R/16, 16, c0]``.
+constexpr size_t kNzColumnBlockDim = 1;
 constexpr size_t kNzRowFractalDim = 2;
 
 /// Largest inter-burst source gap the strided GM->L1 copy can encode: its
@@ -293,6 +293,10 @@ constexpr int64_t kNzMaxGmGapBlocks = 65535;
 /// because ``c0 * sizeof(T) == 32`` holds for every NZ view by construction —
 /// so the bound is dtype-independent, and a *wider* row tile is what lowers the
 /// gap, not a narrower one.
+///
+/// The gap is the stride *between* bursts, and ``nBurst`` is the load's own
+/// column-block extent, so a single-column-block load never consumes it — it
+/// is exempt no matter how large the gap computes to.
 void CheckNzGmGapFitsBurstStride(const std::vector<ExprPtr>& blocked_shape, const ExprPtr& blocked_sizes,
                                  const Span& span) {
   auto sizes = As<MakeTuple>(blocked_sizes);
@@ -309,6 +313,18 @@ void CheckNzGmGapFitsBurstStride(const std::vector<ExprPtr>& blocked_shape, cons
   auto loaded = As<ConstInt>(sizes->elements_[kNzRowFractalDim]);
   INTERNAL_CHECK_SPAN(whole && loaded, span)
       << "Internal error: blocked NZ row-fractal extents must be static";
+
+  // ``TLoadGm2L1Nz2nz`` passes the load's column-block extent as ``nBurst``,
+  // and the DMA applies ``gmGap`` only when stepping from one burst to the
+  // next. At one burst the field is never read, so the truncation cannot reach
+  // any source address and the load is correct however large the gap is.
+  // Confirmed on device: the 65536-block gap that corrupts a two-column-block
+  // load returns bit-exact data at one (pto-isa tload_gm2mat ST, NZ int16
+  // 1_1_8_16_16 / 1_1_4104_16_16).
+  auto column_blocks = As<ConstInt>(sizes->elements_[kNzColumnBlockDim]);
+  INTERNAL_CHECK_SPAN(column_blocks, span)
+      << "Internal error: the blocked NZ column-block extent must be static";
+  if (column_blocks->value_ <= 1) return;
 
   const int64_t whole_rows = whole->value_ * tensor_view_semantics::kNzFractalRow;
   const int64_t loaded_rows = loaded->value_ * tensor_view_semantics::kNzFractalRow;
