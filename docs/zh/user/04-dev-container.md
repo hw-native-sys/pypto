@@ -17,10 +17,10 @@ IR。真要跑起来还需要更多：配套的 CANN、针对它构建的 `simpl
 | Ascend Docker Runtime | 宿主机 | 把驱动库和设备节点注入容器 |
 | CANN 用户态 | 镜像 | 9.0.0 |
 | CPython 3.10、torch、ptoas | 镜像 | `/opt/pypto/venv`、`/opt/pypto/ptoas` |
-| 已构建的 PyPTO + `simpler` | 镜像 | `/workspace/pypto`，已编译完成 |
+| 已构建的 PyPTO + `simpler` | 镜像 | `/workspace/pypto`，已编译完成，可通过 `$PYPTO_SRC` 访问 |
 | `pypto-lib` 模型与示例 | 镜像 | `/workspace/pypto-lib`，可通过 `$PYPTO_LIB_SRC` 访问 |
 
-**宿主机驱动版本不是自由项。** 镜像带的是 CANN 用户态，不带驱动。AICPU 的 device 侧包由容器内的
+**宿主机驱动版本不能随意选。** 镜像带的是 CANN 用户态，不带驱动。AICPU 的 device 侧包由容器内的
 CANN 在运行时经 TSD 下发给 device，驱动会在接收前做一次版本校验。这道校验只出现在 AICPU 路径
 上 —— 所以驱动不配套时，编译、显存分配、`aclrtSetDevice` 全部正常，直到第一次 AICPU 初始化才
 以 `507018` 失败。受支持的组合是 `driver 26.0.rc1 + CANN 9.0.0`，与运行时在

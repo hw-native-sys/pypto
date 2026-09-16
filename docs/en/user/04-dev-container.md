@@ -19,7 +19,7 @@ The split between image and host is the thing to understand before anything else
 | Ascend Docker Runtime | Host | Injects the driver libraries and device nodes into the container |
 | CANN user space | Image | 9.0.0 |
 | CPython 3.10, torch, ptoas | Image | `/opt/pypto/venv`, `/opt/pypto/ptoas` |
-| PyPTO + `simpler`, built | Image | `/workspace/pypto`, already compiled |
+| PyPTO + `simpler`, built | Image | `/workspace/pypto`, already compiled, reachable as `$PYPTO_SRC` |
 | `pypto-lib` models and examples | Image | `/workspace/pypto-lib`, reachable as `$PYPTO_LIB_SRC` |
 
 **The host driver version is not a free choice.** The image carries CANN user space but
