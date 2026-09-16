@@ -76,7 +76,8 @@ def _native_case(case, platform, device_id, directory, queue):
                         registrations.append(registration)
                     assert registrations[0].handle != registrations[1].handle
                     assert registrations[0].owner is registrations[1].owner is state
-                    assert len(worker.worker._callable_registry) == 2
+                    assert set(worker.worker._kernel_callables) == {r.handle for r in registrations}
+                    assert not worker.worker._callable_registry
                     program = ProgramWorker(config=build_config, auto_init=False)
                     with pytest.raises(RuntimeError, match="already claimed kernel"):
                         program.init()

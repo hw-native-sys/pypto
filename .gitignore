@@ -205,6 +205,8 @@ gen/
 
 # Test outputs
 test-results/
+# CANN creates this cache when initializing Torch NPU in the checkout.
+/kernel_meta/
 coverage.xml
 *.profraw
 *.profdata
