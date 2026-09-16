@@ -363,42 +363,28 @@ store 保护——它的消费者由折半遍历重建，而非本遍历。
   `_ODD` 模式下是 `e1 + 1`。因此可摆放的形态只有三种：`e0 == e1`（偶数 code）、
   `e0 == e1 + 1`（奇数 code），以及 `e1 == 0`（lane 1 不弹出任何数据，其数据段永远不会
   被解引用，偶数 code 依然精确）。box 分区对 ragged 边界并不保证这一点——16 行 box 上
-  `V = 13` 会得到 8 与 5——这正是下文均分分区要解决的问题。均分不适用时，接下来的行为取决于
-  **是谁选定了这个分区**（`split_axis::SplitOrigin`）：由本 pass 切分的 `tile.aiv_shard`
-  属于 `kCompilerPartition`，`ShardSplitCode` 会报错并给出可行的取值，以便修正分区；手写的
-  传输算子属于 `kManualTransport`——作者写下 `tpush`/`tpop` 对时就把两个 lane 固定在 box
-  一半处，没有可再协商的均分器，因此边界改为延后其 extent（见下一条）。
-  `BoundaryCarriesLaneExtent` 是两者共用的判定。
-- **传输无法摆放的 extent 一律弹出完整 box。** split code 是编译期属性，而两个 lane
+  `V = 13` 会得到 8 与 5——这正是下文均分分区要解决的问题；均分不适用时，
+  `ShardSplitCode` 会报错并给出可行的取值。
+- **运行期的切分轴 valid extent 弹出完整 box。** split code 是编译期属性，而两个 lane
   需要哪一个取决于它们的**运行期** extent：16 行的轴上 valid 12 会让两 lane 变成 8 与 4，
   valid 16 则是 8 与 8，没有哪个 code 对两者都正确。因此边界算子干脆不携带逐 lane
-  extent——改为取完整 box（`split_axis::WithFullSplitAxisValid`），并把 lane 的 extent
-  移到它的消费者上。这与偶数 code 恰好配套：生产者搬运的是完整物理 box，lane 1 的数据段就
-  落在 box 的一半处，偶数 code 正好指向那里，与运行期 extent 无关。已在 a2a3 上对 16 行
-  边界的 1..16 全部 extent 验证。[pto-isa 的
-  pop](https://github.com/hw-native-sys/pto-isa/issues/263) 确实按被弹出 tile 自身的
-  extent 放置 lane 1，与其源码读法一致——此前得出相反结论的实测，其探针两个操作数都是常量，
-  乘积的每一行每一列都相同，落位错误因而无法分辨。
-
-  **两种边界形态都按同一条件延后**，即 `BoundaryCarriesLaneExtent`：区域内的
-  `tile.aiv_shard` 走 `LocalizeExplicitBoundaryValid`，手写的 `tile.tpop_from_aic` 走
-  `RebuildTpopWithHalvedShape`（由
-  [`SplitVectorKernel`](26-split_vector_kernel.md) 的 standalone 分支进入）。**可摆放**的
-  lane 组合仍然由传输承载，因此全 valid 或奇数边界会把逐 lane extent 留在 pop 上，并一并
-  保留 `_ODD` code。
-
-  有两类消费者无法接收被延后的 extent，在两种形态下都会被拒绝：直接读取边界的
-  `tile.store`（它不向后传递任何 extent，会把传输的 padding 当作数据写出），以及填充
-  padding 的 FILL 类算子（其结果按构造即为全 valid，已无边界可填）。手写路径由
-  `ValidateManualDeferredTpopConsumers` 在折半之前完成该检查，因此报错引用的是作者自己
-  写下的算子。
+  extent——`LocalizeExplicitBoundaryValid` 给它完整 box
+  （`split_axis::WithFullSplitAxisValid`），并把 lane 的 extent 放到第一个消费者上。
+  这与偶数 code 恰好配套：生产者搬运的是完整物理 box，lane 1 的数据段就落在 box 的一半处，
+  偶数 code 正好指向那里，与运行期 extent 无关。已在 a2a3 上对 16 行边界的 1..16 全部
+  extent 验证。[pto-isa 的 pop](https://github.com/hw-native-sys/pto-isa/issues/263)
+  确实按被弹出 tile 自身的 extent 放置 lane 1，与其源码读法一致——此前得出相反结论的实测，
+  其探针两个操作数都是常量，乘积的每一行每一列都相同，落位错误因而无法分辨。
+- **手写 `tile.tpop_from_aic` 上的同类行 extent 仍会落位错误。** `SplitVectorKernel` 的
+  折半会把用户声明的 `valid_shape` 局部化到 pop 自身，而 pto-isa 正是从这里读取数据段偏移。
+  仅加宽 pop 并不能修复该路径：其消费者继承作者的声明，随后从完整来源写入部分目标，实测
+  结果更差。`tests/st/runtime/cross_core/test_cross_core_split_parity.py` 中标记 xfail
+  的参数记录了受影响的取值范围：`UP_DOWN` 下 `half < V < box`。
 - **被收窄的列 extent 在所有路径上一律拒绝。** 它根本没有承载者——槽位按生产者的物理列
   间距写入，而 pop 依据 tile 自身的 `validCol` 重建读取几何——并且在 `LeftRight` 下它就是
   切分轴，必须逐 lane 取值。该契约由 `CheckSplitBoundaryCarriesValid`
   （`src/ir/op/tile_ops/cross_core.cpp`）统一持有：它既在边界算子的类型推导中运行，也由
   `ShardSplitCode` 调用，因此手写的 `tile.tpush_to_aiv` / `tile.tpop_from_aic` 同样受其约束。
-  与上面的 lane 组合规则不同，该契约**不**受 `SplitOrigin` 影响：它是传输指令本身的性质，
-  而非分区的性质，因此无论怎样切分 lane、无论是谁编写，收窄的列 extent 都没有载体。
 - **空 lane 的 store 被保护。** ragged extent 覆盖不到的 lane，其 extent 为 `0`，而
   零行 `TSTORE` 超出 pto-isa 契约（`TSTORE_IMPL` 断言 `GetValidRow() > 0`）。store
   被加上运行时 `extent > 0` 判断；`tpop` 与 `tfree` 保持**无条件**——两个 lane 都占用

@@ -255,11 +255,10 @@ or call `set_validshape` on the source tile before taking the view.
   tpop result is not a locally bound PTOAS tile, so `pto.set_validshape` cannot restore it in place).
   The split-axis extent is one exception: it stays per-lane on the TPOP operands, because that is
   what tells the ISA where lane 1's band begins — which is also why a per-lane extent the compiler
-  could not verify must never get there. A boundary whose lane pair the transport has no code for
-  (`split_axis::BoundaryCarriesLaneExtent`) keeps the FULL box on the popped tile
-  (`split_axis::WithFullSplitAxisValid`) so the even code's band lands on the box half, and carries
-  the lane's own extent on the consumers instead. That holds for a `pl.split_aiv` boundary and for a
-  hand-written `tile.tpop_from_aic` alike — a runtime split-axis extent is the common case on both.
+  could not verify must never get there. A `pl.split_aiv` boundary whose split-axis extent is a
+  runtime value keeps the FULL box on the popped tile (`split_axis::WithFullSplitAxisValid`) so the
+  even code's band lands on the box half, and carries the lane's own extent on the consumers
+  instead.
 - The **row** extent of a *no-split* Acc-to-Vec TPUSH is the other exception: it stays exactly as the
   producer wrote it. TPUSH runs `TStoreAccNz2nd` out of L0C, whose source pitch is
   `ceil(validRow/16)*16` for a compact tile and `TileData::Rows` otherwise, while `mad` laid the

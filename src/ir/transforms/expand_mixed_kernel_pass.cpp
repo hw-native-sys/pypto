@@ -716,12 +716,8 @@ int BoundaryTransportSplitCode(const CVBoundaryMove& bm, const Span& span) {
     // a ragged boundary across the lanes.
     ExprPtr lane_stride =
         bm.lane_stride > 0 ? std::make_shared<ConstInt>(bm.lane_stride, DataType::INDEX, span) : nullptr;
-    // kCompilerPartition: this boundary's lanes were cut by LowerAutoVectorSplit,
-    // which can rebalance a ragged one (ResolveLaneStride). An unplaceable pair
-    // here therefore names a partition decision the compiler still owns, and is
-    // reported rather than deferred.
     return split_axis::ShardSplitCode(mode, bm.source_tile->GetType(), split_dim, lane_stride,
-                                      split_axis::SplitOrigin::kCompilerPartition, "tile.aiv_shard", span);
+                                      "tile.aiv_shard", span);
   }
   return split_axis::GatherSplitCode(mode, bm.result_type, split_dim, "tile.aic_gather", span);
 }

@@ -1,7 +1,6 @@
 # SplitVectorKernel Pass
 
-经过分阶段收敛重构后，`SplitVectorKernel` 只剩三项窄职责。它**不再折半 InCore 函数体**——
-职责 3 是仅存的折半分支，只服务于 `LowerAutoVectorSplit` 看不到的那类函数：
+经过分阶段收敛重构后，`SplitVectorKernel` 只剩两项窄职责，**不再折半任何函数体**：
 
 1. **`split_aiv` 属性打标** —— 本 pass 唯一的拆分路径。`split_aiv` 核（手写，或由上游
    [`LowerAutoVectorSplit`](23-lower_auto_vector_split.md) 产生）已经把其显式
@@ -15,23 +14,6 @@
    `ExpandMixedKernel` 判断混合核不可拆分时，会给 AIV 函数打 `dual_aiv_dispatch=True`。
    本 pass 据此把函数体包装为按 lane 的 `if subblock_idx == 0 ... else` 重放，使
    AIC↔AIV 跨核握手在两条 lane 上仍对称（即使只有 lane 0 做真实计算）。
-
-3. **手写 standalone 拆分核**（`ProcessStandaloneSplitFunction`）—— 指相互独立的 AIC/AIV
-   函数，其跨核拆分由函数级 `split` 属性、或其自身 `tile.tpush_to_aiv` /
-   `tile.tpop_from_aic` 上的 `split=N` kwarg 给出。这类函数从不经过
-   `LowerAutoVectorSplit`（后者只处理 InCore），到达本 pass 时尚未折半，因此本分支注入
-   `get_subblock_idx`，并把函数体交给**共享的** `split_axis::ProcessStmts` 折半驱动——与
-   `LowerAutoVectorSplit` 调用的是同一套机制，产出的逐 lane 函数体完全一致。该分支以「非
-   `split_aiv`」为前提，因此已下降的自动拆分函数永远不会进入。
-
-   手写这一点只改变 Cube→Vector 边界的一件事：作者写下传输算子时就把两个 lane 固定在 box
-   一半处，编译器已无分区可重切。因此 `ShardSplitCode` 以
-   `split_axis::SplitOrigin::kManualTransport` 调用——遇到无法摆放的 lane 组合时**延后**而
-   非报错：pop 声明传输的整 box，lane 的 extent 落到它的消费者上。FIFO 自身的 valid_shape
-   契约不受影响，见
-   [跨边界的部分有效操作数](23-lower_auto_vector_split.md#跨边界的部分有效partially-valid操作数)。
-   `split_axis::ValidateManualDeferredTpopConsumers` 先在作者自己的语句上运行，拒绝那些接
-   不住被延后 extent 的消费者。
 
 > **历史说明。** 本 pass 曾驱动逐算子 AIV 折半（`ProcessFunction` /
 > `ResolveSplitMode` / `CrossCoreSplitCollector`）。该驱动在

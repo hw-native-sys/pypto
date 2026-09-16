@@ -102,76 +102,6 @@ ExprPtr ComputeHalfDimSize(const ExprPtr& dim_size);
 ExprPtr ResolveLaneStride(const std::vector<StmtPtr>& stmts, int split_dim);
 
 /**
- * @brief Who fixed the two AIV lanes' partition behind a Cube -> Vector boundary.
- *
- * The split CODE is a lowering fact either way — pto-isa's band geometry does
- * not care who chose the partition. The lanes' *extents* are not: they follow
- * from the partition stride, and only one of these two owns that choice.
- */
-enum class SplitOrigin {
-  /// ``tile.aiv_shard``: the compiler owns the partition. ResolveLaneStride can
-  /// re-cut a ragged boundary onto its valid region (13 of 16 -> 7 / 6 rather
-  /// than the box partition's 8 / 5), so a lane pair pto-isa cannot place is a
-  /// partition the compiler must be told to fix — it is reported, not worked
-  /// around.
-  kCompilerPartition,
-  /// A hand-written ``tile.tpush_to_aiv`` / ``tile.tpop_from_aic`` pair. The
-  /// author fixed the partition at the box half by writing the transport, and
-  /// there is no rebalancer to appeal to, so an unplaceable lane pair is not a
-  /// decision anyone can revisit. The boundary DEFERS its extent instead (see
-  /// BoundaryCarriesLaneExtent / WithFullSplitAxisValid), which places both
-  /// bands for every extent.
-  kManualTransport,
-};
-
-/**
- * @brief Whether the per-lane split-axis extent may ride ON the boundary tile.
- *
- * pto-isa reads lane 1's band offset off the popped tile's own RUNTIME valid
- * extents while the producer always transports the full physical box, so the
- * two agree only for the lane pairs ShardSplitCode has a code for: equal,
- * differing by exactly one, or an empty lane 1. This is that predicate, and it
- * is the condition under which the halving may materialize the lane's extent
- * onto the boundary op at all.
- *
- * When it is false the extent must be DEFERRED — the boundary declares its box
- * (WithFullSplitAxisValid), which puts lane 1's band at the box half where the
- * producer wrote it, and the lane's own extent is carried by the boundary's
- * consumers instead.
- *
- * @param full_type The PRE-split (full-width) boundary tile type.
- * @param split_dim The partitioned tile dimension (see SplitDimension).
- * @param lane_stride The body's partition stride; null for the box partition.
- * @return ``true`` when the boundary tile may carry the lane's own extent.
- */
-[[nodiscard]] bool BoundaryCarriesLaneExtent(const TypePtr& full_type, int split_dim,
-                                             const ExprPtr& lane_stride);
-
-/**
- * @brief Refuse the consumers a DEFERRED hand-written ``tile.tpop_from_aic``
- *        cannot hand its split-axis extent to.
- *
- * When BoundaryCarriesLaneExtent declines a pop, RebuildTpopWithHalvedShape
- * gives it the transport's box and the lane's extent lands on the pop's
- * consumers instead — the halving localizes each of them from its own declared
- * pre-split type. Two consumers have nowhere to put it and would silently write
- * the transport's padding as data: a ``tile.store`` reading the pop directly,
- * and a pad FILL (``tile.fillpad`` and friends), whose result is fully valid by
- * construction. This is the hand-written counterpart of the checks
- * LocalizeExplicitBoundaryValid makes for a ``pl.split_aiv`` region.
- *
- * Runs on the AUTHOR's statements, BEFORE the halving, so the diagnostic quotes
- * the ops they wrote. A body with no deferred pop is a single linear scan.
- *
- * @param stmts The function body's statements (recursed into).
- * @param split_dim The partitioned tile dimension (see SplitDimension).
- * @param lane_stride The body's partition stride; null for the box partition.
- * @throws pypto::ValueError naming the consumer and the authoring that works.
- */
-void ValidateManualDeferredTpopConsumers(const std::vector<StmtPtr>& stmts, int split_dim,
-                                         const ExprPtr& lane_stride = nullptr);
-
-/**
  * @brief The pto-isa split code a Cube -> Vector boundary op must carry.
  *
  * pto-isa derives lane 1's band inside the FIFO slot from the popped tile's own
@@ -191,43 +121,30 @@ void ValidateManualDeferredTpopConsumers(const std::vector<StmtPtr>& stmts, int 
  * ``k + 1`` / ``k``) and an odd valid extent inside an even box (``V == box - 1``
  * gives ``half`` / ``half - 1``). An empty lane 1 (``e1 == 0``, i.e.
  * ``V <= half``) reads nothing wherever it is pointed, so it keeps the even
- * code. Those are exactly the pairs BoundaryCarriesLaneExtent admits.
- *
- * Any other ragged extent has no expressible band pair, and what happens then
- * depends on @p origin — the one place the two differ:
- *
- * | ``origin``            | unplaceable lane pair                          |
- * | --------------------- | ---------------------------------------------- |
- * | ``kCompilerPartition`` | rejected, naming the partition to fix          |
- * | ``kManualTransport``   | the even code, paired with a DEFERRED extent   |
+ * code. Any other ragged extent has no expressible band pair and is rejected
+ * with an actionable message rather than silently popping the wrong rows.
  *
  * A dynamic (non-ConstInt) box or valid extent has no compile-time lane extents,
- * so no code can be verified against them either; it takes the same deferred
- * pairing. The even code is exact whenever the boundary tile declares the full
- * split-axis box rather than the lane's extent: the producer transports that box,
- * so lane 1's band sits at the box half and the even code points there whatever
- * the extent turns out to be. LocalizeExplicitBoundaryValid establishes that
- * pairing for a ``pl.split_aiv`` region's boundary op and
- * RebuildTpopWithHalvedShape for a hand-written ``tile.tpop_from_aic``; both go
- * through WithFullSplitAxisValid, and both move the lane's own extent onto the
- * boundary's consumers.
- *
- * The FIFO's own valid-shape contract (CheckSplitBoundaryCarriesValid) is a
- * property of the transport instruction, not of the partition, so it is enforced
- * for BOTH origins.
+ * so no code can be verified against them. It keeps the even code, which is exact
+ * only when the boundary tile also declares the full split-axis box: the producer
+ * transports that box, so lane 1's band sits at the box half and the even code
+ * points there whatever the extent turns out to be. LocalizeExplicitBoundaryValid
+ * establishes that pairing for a ``pl.split_aiv`` region (WithFullSplitAxisValid)
+ * and moves the lane's own extent onto the boundary's consumers. A hand-written
+ * ``tile.tpop_from_aic`` keeps its declared per-lane extent and is still
+ * misplaced for such a boundary — see RebuildTpopWithHalvedShape.
  *
  * @param mode The split mode (``None`` yields ``kSplitNone``).
  * @param full_type The PRE-split (full-width) boundary tile type.
  * @param split_dim The partitioned tile dimension (see SplitDimension).
  * @param lane_stride The body's partition stride (see ResolveLaneStride); null
  *        for the default box partition, where ``S = ceil(box / 2)``.
- * @param origin Who chose the partition (see SplitOrigin).
  * @param op_name Op name for diagnostics.
  * @param span Span for diagnostics.
  * @return The split code to stamp on the boundary / tpush / tpop op.
  */
 int ShardSplitCode(SplitMode mode, const TypePtr& full_type, int split_dim, const ExprPtr& lane_stride,
-                   SplitOrigin origin, const std::string& op_name, const Span& span);
+                   const std::string& op_name, const Span& span);
 
 /**
  * @brief The pto-isa split code a Vector -> Cube boundary op must carry.
@@ -286,17 +203,13 @@ bool HasStaticLaneExtents(const TypePtr& full_type, int split_dim, const ExprPtr
  * pto-isa finds lane 1's band inside the FIFO slot from the POPPED tile's own
  * split-axis extent, while the producer always transports the full physical box
  * (PTO codegen's ``EmitTpushTransportValidShape`` widens every split tpush). The
- * two agree only for the lane pairs the transport has a code for — the balanced
- * partition and the odd codes exist exactly to produce such a pair. When the
- * pair is not one of them (see BoundaryCarriesLaneExtent), the boundary tile
- * must declare the box instead, which puts lane 1's band at the box half, where
- * the producer wrote it. The lane's real extent is then carried by the
- * boundary's consumers: the halving localizes each of them from its own
- * pre-split type, and the explicit-region walk stamps it on the first one it
- * reaches. Both boundary forms take this route —
- * LocalizeExplicitBoundaryValid for a ``pl.split_aiv`` region's
- * ``tile.aiv_shard``, RebuildTpopWithHalvedShape for a hand-written
- * ``tile.tpop_from_aic``.
+ * two agree only when the lanes' extents were verifiable at compile time — the
+ * balanced partition and the odd codes exist exactly to make them agree. When
+ * they were not (see HasStaticLaneExtents), the boundary tile must declare the
+ * box instead, which puts lane 1's band at the box half, where the producer
+ * wrote it. The lane's real extent is then carried by the boundary's consumers:
+ * the halving localizes each of them from its own pre-split type, and the
+ * explicit-region walk stamps it on the first one it reaches.
  *
  * @param type The (already halved) boundary tile type.
  * @param split_dim The partitioned tile dimension (see SplitDimension).
