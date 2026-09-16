@@ -793,6 +793,161 @@ class TestInlineFunctionsInDefaultPipeline:
         assert "helper" not in names
 
 
+class TestInlineFunctionsNestedCallSites:
+    """A call in a nested expression position is hoisted, then spliced.
+
+    `HandleTopLevelInlineCall` only recognises a Call that *is* the whole
+    statement value, but the pass drops every Inline function regardless — so a
+    nested call used to survive as a reference to a deleted function and fail
+    only at `GenerateOrchestration preconditions`. Each case below is the shape
+    the parser produces from ordinary DSL.
+    """
+
+    def test_nested_in_call_argument(self):
+        """`arr[i] = helper(x)` desugars to `array.update_element(arr, i, helper(x))`."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def helper(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+                y: pl.Tensor[[1], pl.INT32] = pl.mul(x, x)
+                return y
+
+            @pl.function
+            def main(self, a: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+                z: pl.Tensor[[1], pl.INT32] = pl.add(self.helper(a), a)
+                return z
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, a: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+                y_inline: pl.Tensor[[1], pl.INT32] = pl.mul(a, a)
+                t_arg: pl.Tensor[[1], pl.INT32] = y_inline
+                z: pl.Tensor[[1], pl.INT32] = pl.add(t_arg, a)
+                return z
+
+        After = passes.inline_functions()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_nested_in_binary_operand(self):
+        """`k = helper(a) + a` — the call is an operand, not the whole value."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def half(self, n: pl.Scalar[pl.INT32]) -> pl.Scalar[pl.INT32]:
+                m: pl.Scalar[pl.INT32] = n // 2
+                return m
+
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INT32]) -> pl.Scalar[pl.INT32]:
+                k: pl.Scalar[pl.INT32] = self.half(n) + 1
+                return k
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INT32]) -> pl.Scalar[pl.INT32]:
+                m_inline: pl.Scalar[pl.INT32] = n // 2
+                t_arg: pl.Scalar[pl.INT32] = m_inline
+                k: pl.Scalar[pl.INT32] = t_arg + 1
+                return k
+
+        After = passes.inline_functions()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_inline_call_as_argument_of_inline_call(self):
+        """`half(half(n))` — the pass's transitive-inline feature, written as one expression."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def half(self, n: pl.Scalar[pl.INT32]) -> pl.Scalar[pl.INT32]:
+                m: pl.Scalar[pl.INT32] = n // 2
+                return m
+
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INT32]) -> pl.Scalar[pl.INT32]:
+                k: pl.Scalar[pl.INT32] = self.half(self.half(n))
+                return k
+
+        After = passes.inline_functions()(Before)
+        printed = ir.python_print(After)
+        assert "half" not in printed, printed
+        assert printed.count("// 2") == 2, printed
+
+    def test_nested_in_loop_bound(self):
+        """A loop bound is evaluated once before the loop, so hoisting it is semantics-preserving."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def half(self, n: pl.Scalar[pl.INT32]) -> pl.Scalar[pl.INT32]:
+                m: pl.Scalar[pl.INT32] = n // 2
+                return m
+
+            @pl.function
+            def main(self, a: pl.Tensor[[1], pl.INT32], n: pl.Scalar[pl.INT32]) -> pl.Scalar[pl.INT32]:
+                for _i in pl.range(self.half(n)):
+                    _t: pl.Tensor[[1], pl.INT32] = pl.mul(a, a)
+                return n
+
+        After = passes.inline_functions()(Before)
+        printed = ir.python_print(After)
+        assert "half" not in printed, printed
+        # The hoisted bound precedes the loop it feeds.
+        assert printed.index("// 2") < printed.index("pl.range"), printed
+
+    def test_top_level_call_site_gains_no_temporary(self):
+        """`z = helper(a)` already splices; hoisting must not add a redundant copy."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def helper(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+                y: pl.Tensor[[1], pl.INT32] = pl.mul(x, x)
+                return y
+
+            @pl.function
+            def main(self, a: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+                z: pl.Tensor[[1], pl.INT32] = self.helper(a)
+                return z
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, a: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+                y_inline: pl.Tensor[[1], pl.INT32] = pl.mul(a, a)
+                z: pl.Tensor[[1], pl.INT32] = y_inline
+                return z
+
+        After = passes.inline_functions()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_verifier_silent_after_nested_call_site(self):
+        """The nested form leaves nothing for InlineFunctionsEliminated to report."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def helper(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+                y: pl.Tensor[[1], pl.INT32] = pl.mul(x, x)
+                return y
+
+            @pl.function
+            def main(self, a: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+                z: pl.Tensor[[1], pl.INT32] = pl.add(self.helper(a), a)
+                return z
+
+        After = passes.inline_functions()(Before)
+        ps = core_passes.IRPropertySet()
+        ps.insert(core_passes.IRProperty.InlineFunctionsEliminated)
+        diagnostics = core_passes.PropertyVerifierRegistry.verify(ps, After)
+        errors = [d for d in diagnostics if d.severity == core_passes.DiagnosticSeverity.Error]
+        assert errors == [], f"Expected no survivors, got {[d.message for d in errors]}"
+
+
 class TestInlineFunctionsEliminatedVerifier:
     """The PropertyVerifier catches surviving Inline functions / Calls."""
 

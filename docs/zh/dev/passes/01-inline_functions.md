@@ -121,8 +121,38 @@ scope 被原样保留,稍后由 `OutlineIncoreScopes` 提取为独立的 InCore 
 | Inline 调用 Inline(传递) | 迭代到不动点。 |
 | 递归 Inline(自递归或互相调用) | 在任何展开发生之前抛出 `pypto::ValueError`,消息中标明环路径(`a -> b -> a`)。 |
 | 多返回值 Inline | **不**发出 `LHS = MakeTuple([rets...])` — 编排层 codegen 无法 lower `MakeTuple`。改为把克隆后的返回值记录在 LHS `Var` 上,并把下游 `TupleGetItemExpr(LHS, i)` 的使用改写为第 `i` 个值,使该 LHS 绑定最终无人引用(参见 `SpliceInlineCallAsTupleSub`)。 |
-| 嵌套 Call 到 Inline(如 `pl.add(inline_fn(x), y)`) | v1 不处理 — 保持原样。`InlineFunctionsEliminated` verifier 会标记任何残留的 Call。 |
+| 嵌套 Call 到 Inline(如 `pl.add(inline_fn(x), y)`,以及解析器把 `arr[i] = inline_fn(x)` 脱糖成的 `array.update_element(arr, i, inline_fn(x))`) | 先提升为独立的 `AssignStmt`,并在同一轮迭代中展开 — 参见[嵌套调用点](#嵌套调用点)。 |
+| 位于 `WhileStmt` 条件、`IterArg` 初值,或裸(非 `SeqStmts`)`ForStmt` / `IfStmt` body 中的嵌套 Call | 不提升。`InlineFunctionsEliminated` verifier 会在本 pass 之后立即在其源码行上报告残留的 Call。 |
 | `EvalStmt(inline_call(...))` — 返回值被忽略 | 被丢弃的是返回**值**,不是它的**求值**。参见下方[丢弃返回值](#丢弃返回值)。 |
+
+## 嵌套调用点
+
+`HandleTopLevelInlineCall` 只在 `Call` **就是**整个语句值时才识别调用点 —— `LHS = f(...)`、`EvalStmt(f(...))`、`return f(...)`。位于其他位置的 `Call` 会被跳过,而第 5 步仍会删除被调用函数,于是留下一个指向已删除函数的引用,直到 `GenerateOrchestration preconditions` 才以 `references undefined function` 失败。
+
+这类调用来自普通 DSL,有时用户根本没有写嵌套调用。`arr[i] = f(x)` 没有对应的 IR 语句,解析器将其脱糖为函数式更新:
+
+```python
+arr[i] = f(x)                              # 用户写的
+arr = pl.array.update_element(arr, i, f(x))  # 解析器存下的 —— f 变成了实参
+```
+
+因此 `NestedInlineCallHoister` 会在调用点匹配之前遍历每条语句自身的表达式,把每个嵌套的 inline `Call` 提升到该语句之前的新绑定 `t__inline_arg_vN` 上:
+
+```python
+# 之前                                      # 提升之后、展开之前
+k = self.half(n) + 1                       t__inline_arg_v0 = self.half(n)
+                                           k = t__inline_arg_v0 + 1
+```
+
+随后 `SpliceHoisted` 立即展开每个提升出来的绑定,使提升与它所触发的展开落在同一轮不动点迭代中,`inline_fns.size() + 1` 的迭代上界仍然成立。
+
+修改这部分时需要记住三点:
+
+- **已处于顶层位置的 Call 保持原样**(`HoistInArgs` 只改写它的实参)。否则每个已有调用点都会多出一次冗余拷贝,并打乱所有 before/after 测试。
+- **不触碰 body。** 提升器只改写语句自身的表达式;`InlineCallsMutator` 仍会递归进入循环与分支 body,因此 body 内的提升落在该 body 内。
+- **每个被提升的位置都只求值一次**,即提升后语句所在的位置 —— 调用实参、二元操作数、循环边界、`if` 条件、`yield` 值。`WhileStmt` 条件不是如此,因此被排除:提升它会把展开后的 body 变成只求值一次,而非每轮迭代求值。
+
+这比 `FlattenCallExpr`(pass 06)有意更窄,后者对**所有**调用执行同样的提升。该 pass 声明 `.required = {SSAForm, NormalizedStmtStructure}`,两者都在本 pass 之后才建立,因此它无法直接提前运行。
 
 ## 丢弃返回值
 

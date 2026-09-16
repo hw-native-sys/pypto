@@ -157,9 +157,16 @@ std::string IRPropertySet::ToString() const {
   return oss.str();
 }
 
+// InlineFunctionsEliminated is listed here, not merely declared by
+// InlineFunctions' `produced` set: the pipeline verifies a produced property
+// only when it also appears in this set. Without it, a Call the pass could not
+// splice survives as a reference to the function it then drops, and the failure
+// surfaces ~40 passes later as OrchestrationReferencesResolved's "references
+// undefined function" instead of at the call site's own line after pass 01.
 const IRPropertySet& GetVerifiedProperties() {
   static const IRPropertySet props{IRProperty::SSAForm,
                                    IRProperty::TypeChecked,
+                                   IRProperty::InlineFunctionsEliminated,
                                    IRProperty::MixedKernelExpanded,
                                    IRProperty::AllocatedMemoryAddr,
                                    IRProperty::BreakContinueValid,

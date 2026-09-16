@@ -597,6 +597,82 @@ class InlineDumpVarTransfer : public IRMutator {
 };
 
 // =============================================================================
+// NestedInlineCallHoister — moves a Call to an inline callee out of a nested
+// expression position into an AssignStmt of its own.
+// =============================================================================
+
+// `InlineCallsMutator` recognises a call site only when the Call *is* the whole
+// statement value (`LHS = f(...)`, `EvalStmt(f(...))`, `return f(...)`), yet the
+// pass drops every Inline function unconditionally when it finishes. A Call in
+// any other position therefore survives as a reference to a deleted function,
+// and the failure only surfaces 40 passes later as
+// "references undefined function" from the orchestration codegen precondition.
+//
+// Such calls come straight from ordinary DSL. The parser desugars
+// `arr[i] = f(x)` into `arr = array.update_element(arr, i, f(x))`, so the call
+// is nested even though the user never wrote a nested call; `k = f(n) + 1`,
+// `for i in pl.range(f(n))` and `k = f(f(n))` reach the same place.
+//
+// FlattenCallExpr (pass 06) already performs exactly this hoist for *all*
+// calls, but it declares `.required = {SSAForm, NormalizedStmtStructure}`, both
+// established after this pass, so it cannot simply run first. Hoist the inline
+// callees here instead; the general job stays with pass 06.
+class NestedInlineCallHoister : public IRMutator {
+ public:
+  NestedInlineCallHoister(const std::unordered_map<std::string, FunctionPtr>& inline_fns,
+                          std::vector<StmtPtr>* pending)
+      : inline_fns_(inline_fns), pending_(pending) {}
+
+  /// Hoist every nested inline call inside @p expr, returning @p expr itself
+  /// when nothing moved.
+  ExprPtr Hoist(const ExprPtr& expr) { return VisitExpr(expr); }
+
+  /// Hoist inside @p call's *arguments* while leaving the call itself in place.
+  /// Used when the call already sits where `HandleTopLevelInlineCall` splices
+  /// it, so hoisting it too would only insert a redundant copy (and churn the
+  /// output of every existing call site).
+  ExprPtr HoistInArgs(const CallPtr& call) {
+    std::vector<ExprPtr> new_args;
+    new_args.reserve(call->args_.size());
+    bool changed = false;
+    for (const auto& arg : call->args_) {
+      auto new_arg = VisitExpr(arg);
+      if (new_arg.get() != arg.get()) changed = true;
+      new_args.push_back(std::move(new_arg));
+    }
+    if (!changed) return call;
+    return std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_, call->attrs_,
+                                  call->GetType(), call->span_);
+  }
+
+  ExprPtr VisitExpr_(const CallPtr& op) override {
+    // Recurse first, so the innermost call hoists first and `f(g(x))` yields
+    // `t0 = g(x); t1 = f(t0)` in evaluation order.
+    auto visited = IRMutator::VisitExpr_(op);
+    auto call = As<Call>(visited);
+    if (!call) return visited;
+    auto gvar = As<GlobalVar>(call->op_);
+    if (!gvar || inline_fns_.count(gvar->name_) == 0) return visited;
+
+    VarPtr tmp = std::make_shared<Var>(HoistTempName(), call->GetType(), call->span_);
+    pending_->push_back(std::make_shared<const AssignStmt>(tmp, call, call->span_));
+    return tmp;
+  }
+
+ private:
+  // Distinct role from FlattenCallExpr's `t__tmp_vN`: both passes mint temps
+  // into the same pre-SSA function, and a name collision would be merged by
+  // ConvertToSSA into one versioned variable.
+  static std::string HoistTempName() {
+    static int counter = 0;
+    return auto_name::BuildName("t", "", "inline_arg", counter++);
+  }
+
+  const std::unordered_map<std::string, FunctionPtr>& inline_fns_;
+  std::vector<StmtPtr>* pending_;
+};
+
+// =============================================================================
 // InlineCallsMutator — walks a function body and replaces top-level inline-call
 // statements with the spliced inline body.
 // =============================================================================
@@ -612,6 +688,14 @@ class InlineCallsMutator : public IRMutator {
     std::vector<StmtPtr> new_stmts;
     bool any_changed = false;
     for (const auto& stmt : op->stmts_) {
+      // Pull nested inline calls onto statements of their own first; SpliceHoisted
+      // then treats each as an ordinary call site, so a hoist and the splice it
+      // enables land in the same fixpoint iteration.
+      if (auto hoisted = HoistNestedInlineCalls(stmt)) {
+        new_stmts.push_back(SpliceHoisted(std::move(*hoisted), stmt->span_));
+        any_changed = true;
+        continue;
+      }
       auto handled = HandleTopLevelInlineCall(stmt);
       if (handled.has_value()) {
         for (auto& s : *handled) new_stmts.push_back(std::move(s));
@@ -633,6 +717,7 @@ class InlineCallsMutator : public IRMutator {
   // the splice in a SeqStmts so the parent body remains a single Stmt;
   // SeqStmts::Flatten collapses any redundant nesting later.
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    if (auto hoisted = HoistNestedInlineCalls(op)) return SpliceHoisted(std::move(*hoisted), op->span_);
     auto handled = HandleTopLevelInlineCall(op);
     if (!handled.has_value()) return IRMutator::VisitStmt_(op);
     changed_ = true;
@@ -640,6 +725,7 @@ class InlineCallsMutator : public IRMutator {
   }
 
   StmtPtr VisitStmt_(const EvalStmtPtr& op) override {
+    if (auto hoisted = HoistNestedInlineCalls(op)) return SpliceHoisted(std::move(*hoisted), op->span_);
     auto handled = HandleTopLevelInlineCall(op);
     if (!handled.has_value()) return IRMutator::VisitStmt_(op);
     changed_ = true;
@@ -650,6 +736,7 @@ class InlineCallsMutator : public IRMutator {
   // EvalStmt: a function body that is a bare ReturnStmt (no enclosing
   // SeqStmts) reaches this override directly.
   StmtPtr VisitStmt_(const ReturnStmtPtr& op) override {
+    if (auto hoisted = HoistNestedInlineCalls(op)) return SpliceHoisted(std::move(*hoisted), op->span_);
     auto handled = HandleTopLevelInlineCall(op);
     if (!handled.has_value()) return IRMutator::VisitStmt_(op);
     changed_ = true;
@@ -679,6 +766,127 @@ class InlineCallsMutator : public IRMutator {
   }
 
  private:
+  // Rewrite @p stmt's OWN expressions, hoisting every nested Call to an inline
+  // callee onto a fresh AssignStmt placed before it. Bodies are deliberately
+  // left alone — the caller still recurses into them, so a hoist inside a loop
+  // or branch body lands inside that body rather than escaping to here.
+  //
+  // Returns the replacement sequence (hoisted assignments, then the rewritten
+  // statement) or std::nullopt when nothing moved.
+  //
+  // Out of scope on purpose, each reported by
+  // IRProperty::InlineFunctionsEliminated right after this pass rather than
+  // silently mis-lowered:
+  //  - WhileStmt condition: re-evaluated every iteration, so hoisting it would
+  //    evaluate the spliced body exactly once. The other positions handled here
+  //    are all evaluated exactly once at the point the hoisted statement lands,
+  //    so hoisting them preserves semantics.
+  //  - IterArg init values, and a bare (non-SeqStmts) ForStmt / IfStmt body:
+  //    not intercepted, matching the pass's existing bare-body coverage.
+  std::optional<std::vector<StmtPtr>> HoistNestedInlineCalls(const StmtPtr& stmt) {
+    std::vector<StmtPtr> pending;
+    NestedInlineCallHoister hoister(inline_fns_, &pending);
+
+    // A Call already sitting where HandleTopLevelInlineCall splices it stays
+    // put; only its arguments are hoisted.
+    auto rewrite = [&](const ExprPtr& value) -> ExprPtr {
+      auto call = As<Call>(value);
+      if (call && LookupInlineCallee(call)) {
+        return hoister.HoistInArgs(call);
+      }
+      return hoister.Hoist(value);
+    };
+    auto rewrite_all = [&](const std::vector<ExprPtr>& values, std::vector<ExprPtr>* out) {
+      bool changed = false;
+      out->reserve(values.size());
+      for (const auto& v : values) {
+        auto nv = hoister.Hoist(v);
+        if (nv.get() != v.get()) changed = true;
+        out->push_back(std::move(nv));
+      }
+      return changed;
+    };
+
+    StmtPtr rewritten = stmt;
+    if (auto assign = As<AssignStmt>(stmt)) {
+      auto new_value = rewrite(assign->value_);
+      if (new_value.get() != assign->value_.get()) {
+        auto copy = MutableCopy(assign);
+        copy->value_ = std::move(new_value);
+        rewritten = copy;
+      }
+    } else if (auto eval = As<EvalStmt>(stmt)) {
+      auto new_expr = rewrite(eval->expr_);
+      if (new_expr.get() != eval->expr_.get()) {
+        auto copy = MutableCopy(eval);
+        copy->expr_ = std::move(new_expr);
+        rewritten = copy;
+      }
+    } else if (auto ret = As<ReturnStmt>(stmt)) {
+      std::vector<ExprPtr> new_values;
+      bool changed = false;
+      if (ret->value_.size() == 1) {
+        // `return inline_call(...)` is a splice site; anything else is hoisted.
+        new_values.push_back(rewrite(ret->value_[0]));
+        changed = new_values[0].get() != ret->value_[0].get();
+      } else {
+        changed = rewrite_all(ret->value_, &new_values);
+      }
+      if (changed) {
+        auto copy = MutableCopy(ret);
+        copy->value_ = std::move(new_values);
+        rewritten = copy;
+      }
+    } else if (auto loop = As<ForStmt>(stmt)) {
+      auto new_start = hoister.Hoist(loop->start_);
+      auto new_stop = hoister.Hoist(loop->stop_);
+      auto new_step = loop->step_ ? hoister.Hoist(loop->step_) : loop->step_;
+      if (new_start.get() != loop->start_.get() || new_stop.get() != loop->stop_.get() ||
+          new_step.get() != loop->step_.get()) {
+        auto copy = MutableCopy(loop);
+        copy->start_ = std::move(new_start);
+        copy->stop_ = std::move(new_stop);
+        copy->step_ = std::move(new_step);
+        rewritten = copy;
+      }
+    } else if (auto branch = As<IfStmt>(stmt)) {
+      auto new_condition = hoister.Hoist(branch->condition_);
+      if (new_condition.get() != branch->condition_.get()) {
+        auto copy = MutableCopy(branch);
+        copy->condition_ = std::move(new_condition);
+        rewritten = copy;
+      }
+    } else if (auto yield = As<YieldStmt>(stmt)) {
+      std::vector<ExprPtr> new_values;
+      if (rewrite_all(yield->value_, &new_values)) {
+        auto copy = MutableCopy(yield);
+        copy->value_ = std::move(new_values);
+        rewritten = copy;
+      }
+    }
+
+    if (pending.empty()) return std::nullopt;
+    pending.push_back(std::move(rewritten));
+    return pending;
+  }
+
+  // Splice each statement of a hoisted sequence as an ordinary call site. Doing
+  // it here rather than deferring to the next fixpoint iteration keeps the
+  // pass within its `inline_fns.size() + 1` iteration bound.
+  StmtPtr SpliceHoisted(std::vector<StmtPtr> work, const Span& span) {
+    changed_ = true;
+    std::vector<StmtPtr> out;
+    out.reserve(work.size());
+    for (const auto& s : work) {
+      if (auto handled = HandleTopLevelInlineCall(s)) {
+        for (auto& h : *handled) out.push_back(std::move(h));
+        continue;
+      }
+      out.push_back(VisitStmt(s));
+    }
+    return SeqStmts::Flatten(std::move(out), span);
+  }
+
   // Recognise `LHS = inline_call(args...)`, `EvalStmt(inline_call(args...))`,
   // or `ReturnStmt({inline_call(args...)})` and return the spliced sequence;
   // otherwise return std::nullopt.
