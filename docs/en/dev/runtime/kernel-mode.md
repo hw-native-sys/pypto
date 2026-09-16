@@ -497,6 +497,45 @@ or queue-blocking entry is shipped in the production adapter.
 
 ## Verification
 
+### Integration-branch CI
+
+Pull requests targeting `feat/kernel-mode-integration-test` run the
+`Kernel Mode CI` workflow. Its required stages are pre-commit (without
+clang-tidy), the full CPU unit suite with the native adapter disabled, pinned
+toolchain resolution, and a native adapter build plus targeted device tests.
+The CPU suite includes the optional-import guard from PR #2785 (09A).
+
+The device job uses the verified `[self-hosted, linux, ARM64, npu-xp]` pool,
+the existing `setup-ci-job` bundle environment, and `task-submit` with the
+runner's `DEVICE_ID`. It installs Torch 2.6.0 and torch_npu 2.6.0.post2 in its
+isolated environment, requires C++11 ABI, and builds both the adapter and the
+test-only queue gate from the checked-out source. Simpler and pto-isa come from
+the submodule pin; ptoas comes from `toolchain/versions.env`. CANN comes from the
+runner's `CANN_ROOT` and must satisfy the adapter's documented prerequisites.
+No device work runs outside a task allocation.
+
+Two serial allocations run the eager/stream/lifecycle/program regression cases
+and the warmed capture/replay cases. Both JIT and registered entries, taskQueue
+settings, cold-call rejection, and the `aot_eager` graph path are included.
+The delayed host-queue test with taskQueue disabled is explicitly deselected
+because it has no blocked callback to test; every selected device case must
+pass without skips. Pytest runs serially on the allocated card; its cases
+create isolated processes as needed.
+
+Artifacts retain JUnit reports, the actual chip name/device id, source and SDK
+revisions, Python/Torch/torch_npu/nanobind versions, `npu-smi` output, and CANN
+version metadata when provided by the installation. Missing, empty, malformed,
+failed or skipped device reports fail the report check. The final
+`Kernel Mode required results` job runs even after upstream failures and
+requires every stage to succeed; skipped or cancelled jobs cannot satisfy it.
+Configure that check in the integration branch's merge rules if it should be
+enforced by GitHub; defining a workflow alone does not change repository rules.
+
+This is CI wiring for the current A2/A3-family TRB implementation, not full
+platform acceptance. Each artifact records the actual chip tested; a pass on
+one chip does not establish separate A2 and A3 results. A5, HBG and the complete
+platform matrix remain pending in 09C. Capture still requires prior warmup.
+
 The shared `run_without_optional_runtime` unit-test fixture runs a fresh Python
 process with `torch_npu`, `simpler`, `simpler_setup`, `_task_interface` and
 `pypto._torch_npu` blocked by an import finder. It detects both import statements and dynamic

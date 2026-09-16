@@ -315,6 +315,37 @@ torch_npu 2.6.0.post2 上首次有效 capture 包装 `NPUGraph.capture_end`、`r
 
 ## 验证
 
+### 集成分支 CI
+
+目标为 `feat/kernel-mode-integration-test` 的 PR 会运行 `Kernel Mode CI`。
+必验阶段包括 pre-commit（不含 clang-tidy）、关闭 native adapter 的完整 CPU UT、
+固定工具链解析，以及 native adapter 构建和定向设备测试。
+CPU UT 包含 PR #2785（09A）的可选依赖导入隔离检查。
+
+设备任务使用已核实的 `[self-hosted, linux, ARM64, npu-xp]` runner 池、现有
+`setup-ci-job` bundle 环境，以及通过 runner 的 `DEVICE_ID` 分配设备的 `task-submit`。
+独立环境安装 Torch 2.6.0 和 torch_npu 2.6.0.post2，要求 C++11 ABI，
+并从当前检出的源码构建 adapter 和仅供测试的队列 gate。Simpler 与 pto-isa
+来自 submodule pin，ptoas 来自 `toolchain/versions.env`。CANN 使用 runner 的
+`CANN_ROOT`，须满足 adapter 已说明的环境前提。设备操作均在任务分配范围内执行。
+
+两次串行设备分配分别运行 eager、stream、生命周期及 program 回归，和 warmup 后的
+capture/replay。覆盖直接 JIT、注册入口、taskQueue 设置、冷调用拒绝及 `aot_eager`
+图执行。关闭 taskQueue 时的 delayed host-queue 用例显式取消选择，因为该组合没有
+可阻塞的回调；所有已选择的设备用例均须通过，不能跳过。Pytest 在分配的卡上串行运行，
+用例按需创建隔离进程。
+
+制品保留 JUnit、实际芯片名称和 device id、源码及 SDK revision、
+Python/Torch/torch_npu/nanobind 版本、`npu-smi` 输出，以及安装环境提供的 CANN
+版本文件。设备报告缺失、为空、格式错误、失败或存在跳过都会使报告检查失败。
+最终 `Kernel Mode required results` 即使上游失败仍会运行，并要求全部阶段成功；
+跳过或取消的 job 不能满足该检查。若需由 GitHub 强制限制合入，应将其配置到
+集成分支的合入规则；仅定义 workflow 不会修改仓库规则。
+
+这里交付当前 A2/A3 平台族 TRB 的 CI 接线，不代表完整平台验收。制品记录实际测试的
+芯片，一种芯片通过不能同时充当 A2 和 A3 两份结果。A5、HBG 和完整平台矩阵仍待
+09C 完成；capture 继续要求事先 warmup。
+
 共享 UT fixture `run_without_optional_runtime` 启动独立 Python 进程，通过导入查找器
 （import finder）阻止 `torch_npu`、`simpler`、`simpler_setup`、`_task_interface` 和
 `pypto._torch_npu`。

@@ -4,6 +4,10 @@ on:
   pull_request:
     branches: [ "feat/kernel-mode-integration-test" ]
 
+defaults:
+  run:
+    shell: bash
+
 permissions:
   contents: read
 
@@ -28,3 +32,176 @@ jobs:
         uses: pre-commit/action@v3.0.0
         with:
           extra_args: --all-files
+
+  unit-tests:
+    needs: pre-commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PIP_CONSTRAINT: ${{ github.workspace }}/build-constraints.txt
+      PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/build-constraints.txt
+      PYPTO_BUILD_JOBS: '2'
+      PYPTO_TEST_JOBS: '2'
+      TORCH_DEVICE_BACKEND_AUTOLOAD: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Build without optional runtimes
+        run: |
+          source .claude/skills/testing/load-env.sh
+          python -m pip install --upgrade pip
+          python -m pip install 'torch==2.6.0' --index-url https://download.pytorch.org/whl/cpu
+          CMAKE_ARGS='-DPYPTO_BUILD_TORCH_NPU=OFF' python -m pip install -v '.[dev]'
+          python -c "import importlib.util; assert importlib.util.find_spec('pypto._torch_npu') is None"
+      - name: Full unit suite including optional import isolation
+        run: |
+          source .claude/skills/testing/load-env.sh
+          mkdir -p test-results/kernel-mode
+          python -m pytest tests/ut -n "$PYPTO_TEST_JOBS" -q --junitxml=test-results/kernel-mode/unit.xml
+      - name: Unit test report
+        if: always()
+        run: python .github/scripts/kernel_ci_results.py --allow-skips test-results/kernel-mode/unit.xml >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kernel-unit-results
+          path: test-results/kernel-mode/
+          if-no-files-found: error
+
+  toolchain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      pto_isa_commit: ${{ steps.read.outputs.PTO_ISA_COMMIT }}
+      ptoas_version: ${{ steps.read.outputs.PTOAS_VERSION }}
+      ptoas_sha256_aarch64: ${{ steps.read.outputs.PTOAS_SHA256_AARCH64 }}
+      ptoas_sha256_x86_64: ${{ steps.read.outputs.PTOAS_SHA256_X86_64 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          persist-credentials: false
+      - name: Read pinned versions
+        id: read
+        run: |
+          grep -E '^[A-Z0-9_]+=' toolchain/versions.env >> "$GITHUB_OUTPUT"
+          commit="$(tr -d '[:space:]' < runtime/pto_isa.pin)"
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
+          echo "PTO_ISA_COMMIT=$commit" >> "$GITHUB_OUTPUT"
+
+  device-tests:
+    needs: [pre-commit, unit-tests, toolchain]
+    # Verified online ARM64 pool; Torch 2.6's ARM64 wheel uses the required
+    # C++11 ABI. Record the actual chip, rather than treating this as A2 AND A3.
+    runs-on: [self-hosted, linux, ARM64, npu-xp]
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: kernel-mode-checkout
+    env:
+      PTOAS_ROOT: ${{ github.workspace }}/kernel-mode-checkout/ptoas-bin
+      PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
+      PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_X86_64: ${{ needs.toolchain.outputs.ptoas_sha256_x86_64 }}
+      PYPTO_BUILD_JOBS: '8'
+      PYPTO_TEST_JOBS: '2'
+      CMAKE_BUILD_PARALLEL_LEVEL: '8'
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_MAXSIZE: 30G
+      CCACHE_UMASK: '000'
+      TORCH_DEVICE_BACKEND_AUTOLOAD: '0'
+    steps:
+      - name: Fetch composite action definitions
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/actions
+          clean: false
+          persist-credentials: false
+      - name: Setup pinned SDK and toolchain
+        uses: ./.github/actions/setup-ci-job
+        with:
+          checkout-path: kernel-mode-checkout
+          needs-device: 'true'
+          toolchain: bundle
+          pip-cache-name: pip-kernel-mode
+          pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+      - name: Build the optional native adapter and test gate
+        id: adapter
+        run: |
+          source activate.sh
+          source .claude/skills/testing/load-env.sh
+          # The shared setup uses the program CI's Torch version. Replace it
+          # only in this job's isolated venv; leave shared wheels unchanged.
+          uv pip install 'torch==2.6.0' --index-url https://download.pytorch.org/whl/cpu
+          uv pip install 'torch-npu==2.6.0.post2'
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DPYPTO_BUILD_TORCH_NPU=ON -DPYPTO_BUILD_TORCH_NPU_TESTS=ON
+          cmake --build build --parallel "$PYPTO_BUILD_JOBS"
+      - name: Eager, program regression, stream and lifecycle cases
+        if: ${{ !cancelled() && steps.adapter.outcome == 'success' }}
+        run: |
+          source activate.sh
+          test -n "$DEVICE_ID"
+          printf -v command 'cd %q && source activate.sh && bash .github/scripts/kernel-mode-device.sh eager' "$PWD"
+          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 1800 --run "$command"
+      - name: Warmed capture and replay through both entries
+        if: ${{ !cancelled() && steps.adapter.outcome == 'success' }}
+        run: |
+          source activate.sh
+          test -n "$DEVICE_ID"
+          printf -v command 'cd %q && source activate.sh && bash .github/scripts/kernel-mode-device.sh capture' "$PWD"
+          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 2400 --run "$command"
+      - name: Require complete device results
+        if: ${{ always() && steps.adapter.outcome == 'success' }}
+        run: |
+          source activate.sh
+          python .github/scripts/kernel_ci_results.py test-results/kernel-mode/eager.xml test-results/kernel-mode/capture.xml >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload device evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kernel-device-results
+          path: kernel-mode-checkout/test-results/kernel-mode/
+          if-no-files-found: error
+      - name: Kill orphaned device tasks
+        if: always()
+        uses: ./.github/actions/kill-orphaned-tasks
+        with:
+          checkout-path: kernel-mode-checkout
+
+  summary:
+    name: Kernel Mode required results
+    if: always()
+    needs: [pre-commit, unit-tests, toolchain, device-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check every required job
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python - <<'PYTHON'
+          import json
+          import os
+          from pathlib import Path
+
+          results = json.loads(os.environ["RESULTS"])
+          required = {"pre-commit", "unit-tests", "toolchain", "device-tests"}
+          lines = ["## Kernel mode integration checks", "", "| Job | Result |", "| --- | --- |"]
+          for name in sorted(required):
+              outcome = results.get(name, {}).get("result", "missing")
+              lines.append(f"| {name} | {outcome} |")
+          lines += ["", "Device scope: A2/A3-family TRB on the chip recorded in the artifacts.",
+                    "Capture requires warmup. A2 and A3 are not interchangeable coverage records.",
+                    "HBG, A5, and full platform acceptance remain pending (09C)."]
+          Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text("\n".join(lines) + "\n")
+          raise SystemExit(0 if all(results.get(name, {}).get("result") == "success" for name in required) else 1)
+          PYTHON
