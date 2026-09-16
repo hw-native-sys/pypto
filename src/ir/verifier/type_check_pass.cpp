@@ -221,6 +221,15 @@ void TypeChecker::CheckCallArgLayouts(const OpPtr& callee_op, const std::vector<
     auto want = TensorLayoutOf(param->GetType());
     auto got = TensorLayoutOf(args[i]->GetType());
     if (!want || !got || *want == *got) continue;
+    // DN is the one layout a parameter cannot declare: ``pl.Tensor[..., pl.DN]``
+    // is rejected by the parser, and a DN value is *derived* at the use site
+    // (``pl.transpose(x, -2, -1)``, or a slice of such a view) rather than
+    // annotated. An ND parameter is therefore not making a competing claim
+    // about those bytes -- it is the only thing the author is able to write --
+    // so a DN argument binding it is the documented workflow, not a mismatch.
+    // ``OptimizeOrchTensors`` also rewrites such a parameter's view with
+    // explicit strides, which is what makes the pattern lower correctly.
+    if (*want == TensorLayout::DN || *got == TensorLayout::DN) continue;
     std::ostringstream msg;
     msg << "Layout mismatch at argument " << i << " of call to '" << callee->name_ << "': parameter '"
         << param->name_hint_ << "' is declared " << TensorLayoutToString(*want) << " but the argument is "

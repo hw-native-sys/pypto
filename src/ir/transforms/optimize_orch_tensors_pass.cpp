@@ -995,7 +995,13 @@ class AssembleParentStridesOptimizer {
         std::vector<ExprPtr> strides(full_strides.end() - static_cast<std::ptrdiff_t>(out_rank),
                                      full_strides.end());
 
-        TensorView view(std::move(strides), TensorLayout::ND);
+        // Materialising the parent's strides says nothing about byte order, so
+        // keep whatever layout the parameter already declared. Hard-coding ND
+        // silently retyped an NZ or MX parameter and left the call site's
+        // argument disagreeing with it.
+        const TensorLayout param_layout =
+            tensor_type->tensor_view_ ? tensor_type->tensor_view_->layout : TensorLayout::ND;
+        TensorView view(std::move(strides), param_layout);
         auto new_type = std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_,
                                                      tensor_type->memref_, std::move(view));
         auto new_param = std::make_shared<Var>(func->params_[opm.param_index]->name_hint_, new_type,
@@ -1561,7 +1567,13 @@ class SliceInputStridesOptimizer {
         std::vector<ExprPtr> strides(full_strides.end() - static_cast<std::ptrdiff_t>(in_rank),
                                      full_strides.end());
 
-        TensorView view(std::move(strides), TensorLayout::ND);
+        // Materialising the parent's strides says nothing about byte order, so
+        // keep whatever layout the parameter already declared. Hard-coding ND
+        // silently retyped an NZ or MX parameter and left the call site's
+        // argument disagreeing with it.
+        const TensorLayout param_layout =
+            tensor_type->tensor_view_ ? tensor_type->tensor_view_->layout : TensorLayout::ND;
+        TensorView view(std::move(strides), param_layout);
         auto new_type = std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_,
                                                      tensor_type->memref_, std::move(view));
         auto new_param = std::make_shared<Var>(func->params_[param_idx]->name_hint_, new_type,

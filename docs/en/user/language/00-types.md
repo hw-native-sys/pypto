@@ -177,9 +177,11 @@ source layout whenever its trailing two axes survive intact, so a leading-axis s
 
 **A layout annotation must agree on both sides of a call.** It is a claim about byte order in
 memory, not a conversion request, so passing an ND-typed argument to a parameter declared
-`pl.NZ` (or `pl.DN`) is rejected by the type checker before the first pass runs:
+`pl.NZ` (or an MX scale layout) is rejected by the type checker before the first pass runs:
 `Layout mismatch at argument 1 of call to 'nz_helper': parameter 'b' is declared NZ but the
-argument is ND.` Annotate both ends, or neither.
+argument is ND.` Annotate both ends, or neither. DN is exempt, because a parameter cannot
+declare it: a DN value is derived at the use site with `pl.transpose`, so handing one to an
+ND-declared parameter is the intended workflow, not a disagreement.
 
 `pl.ND` is the default row-major layout and never needs writing. `pl.NZ` asserts that the
 tensor's bytes in global memory are *already* stored in PTO-native NZ fractal order, so a

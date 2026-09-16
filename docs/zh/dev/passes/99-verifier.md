@@ -308,7 +308,7 @@ Buffer IR 选项。
 | 110 | `DISTRIBUTED_WINDOW_IDENTITY_MISMATCH` | DistributedTensor 引用了不同的窗口缓冲区 |
 | 111 | `TILE_VIEW_MISMATCH` | 有效 TileView 元数据不匹配 |
 | 112 | `BUFFER_DESCRIPTOR_MISMATCH` | Buffer 描述符或多缓冲槽位数量不匹配 |
-| 113 | `TENSOR_LAYOUT_MISMATCH` | Call/Submit 实参的 layout 与被调用函数形参不一致 |
+| 113 | `TENSOR_LAYOUT_MISMATCH` | Call/Submit 实参的 layout 与被调用函数形参不一致（DN 例外——形参无法声明 DN） |
 
 ### NoNestedCall
 

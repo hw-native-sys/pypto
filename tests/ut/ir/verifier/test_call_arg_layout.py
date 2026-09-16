@@ -67,14 +67,58 @@ def test_rejects_nd_argument_for_an_nz_parameter():
     assert "parameter 'b' is declared NZ but the argument is ND" in diagnostics[0].message
 
 
-def test_rejects_nd_argument_for_a_dn_parameter():
-    """Not NZ-specific: any layout is a byte-order claim both ends must share."""
-    callee = _callee("dn_helper", _tensor_type([16, 32], ir.TensorLayout.DN))
+def test_rejects_nd_argument_for_an_mx_parameter():
+    """Not NZ-specific: every layout a parameter *can* declare is checked."""
+    callee = _callee("mx_helper", _tensor_type([16, 32], ir.TensorLayout.MX_B_NN))
     diagnostics = _verify(_program(callee, _tensor_type([16, 32])))
 
     assert len(diagnostics) == 1
     assert diagnostics[0].error_code == _LAYOUT_MISMATCH
-    assert "declared DN but the argument is ND" in diagnostics[0].message
+    assert "declared MX_B_NN but the argument is ND" in diagnostics[0].message
+
+
+def test_accepts_a_dn_argument_for_an_nd_parameter():
+    """DN is the carve-out: a parameter cannot declare it, so ND is not a rival claim.
+
+    `pl.Tensor[..., pl.DN]` raises ParserTypeError -- DN is *derived* at the use
+    site by `pl.transpose`, never annotated. An ND parameter is simply the only
+    thing the author can write, and `OptimizeOrchTensors` materialises the
+    strides that make the pattern lower correctly.
+    """
+    callee = _callee("nd_helper", _tensor_type([16, 32]))
+    assert _verify(_program(callee, _tensor_type([16, 32], ir.TensorLayout.DN))) == []
+
+
+def test_accepts_an_nd_argument_for_a_dn_parameter():
+    """The carve-out is symmetric, for DN parameters that only printed IR can carry."""
+    callee = _callee("dn_helper", _tensor_type([16, 32], ir.TensorLayout.DN))
+    assert _verify(_program(callee, _tensor_type([16, 32]))) == []
+
+
+def test_accepts_a_transposed_view_passed_to_an_nd_parameter():
+    """The DSL form the carve-out exists for: `pl.transpose` produces a DN view."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def add_kernel(
+            self,
+            a: pl.Tensor[[32, 16], pl.FP32],
+            c: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+        ) -> pl.Tensor[[32, 16], pl.FP32]:
+            tile = pl.load(a, [0, 0], [32, 16], target_memory=pl.MemorySpace.Vec)
+            return pl.store(pl.add(tile, tile), [0, 0], c)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def orchestrator(
+            self,
+            a: pl.Tensor[[16, 32], pl.FP32],
+            c: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+        ) -> pl.Tensor[[32, 16], pl.FP32]:
+            a_t: pl.Tensor[[32, 16], pl.FP32] = pl.transpose(a, axis1=0, axis2=1)
+            return self.add_kernel(a_t, c)
+
+    assert _verify(Prog) == []
 
 
 def test_rejects_nz_argument_for_an_nd_parameter():

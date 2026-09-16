@@ -354,7 +354,7 @@ buffer lifetime verifiers remain separate obligations.
 | 110 | `DISTRIBUTED_WINDOW_IDENTITY_MISMATCH` | Distributed tensors refer to different window buffers |
 | 111 | `TILE_VIEW_MISMATCH` | Effective TileView metadata mismatch |
 | 112 | `BUFFER_DESCRIPTOR_MISMATCH` | Buffer descriptor or multi-buffer slot count mismatch |
-| 113 | `TENSOR_LAYOUT_MISMATCH` | Call/Submit argument layout differs from the callee parameter's |
+| 113 | `TENSOR_LAYOUT_MISMATCH` | Call/Submit argument layout differs from the callee parameter's (DN exempt — a parameter cannot declare it) |
 
 ### NoNestedCall
 
