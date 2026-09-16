@@ -316,9 +316,11 @@ torch_npu 2.6.0.post2 上首次有效 capture 包装 `NPUGraph.capture_end`、`r
 ## 验证
 
 共享 UT fixture `run_without_optional_runtime` 启动独立 Python 进程，通过导入查找器
-（import finder）阻止 `torch_npu`、`simpler`、`simpler_setup` 和 `pypto._torch_npu`。
+（import finder）阻止 `torch_npu`、`simpler`、`simpler_setup`、`_task_interface` 和
+`pypto._torch_npu`。
 同时捕获 import 语句与 `importlib.import_module()` 动态导入，即使调用方捕获了
-`ImportError`，该次尝试仍使检查失败。子进程关闭 PyTorch backend 自动加载，以隔离
+`ImportError`，该次尝试仍使检查失败。显式检查在 `PYTHONOPTIMIZE=1` 和 `2` 下仍然生效，
+负对照覆盖这两种优化级别及普通执行。子进程关闭 PyTorch backend 自动加载，以隔离
 PyPTO 自身行为与已安装的框架插件。查找器的负向测试确保 CPU runner 即使原本就未安装
 这些依赖，也不会把导入尝试误报为通过。
 

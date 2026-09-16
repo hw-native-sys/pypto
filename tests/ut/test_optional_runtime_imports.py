@@ -12,10 +12,16 @@
 import pytest
 
 
-@pytest.mark.parametrize("module", ["torch_npu", "simpler", "simpler_setup", "pypto._torch_npu"])
+@pytest.mark.parametrize(
+    "module", ["torch_npu", "simpler", "simpler_setup", "_task_interface", "pypto._torch_npu"]
+)
+@pytest.mark.parametrize("optimize", ["0", "1", "2"])
 @pytest.mark.parametrize("route", ["statement", "dynamic", "caught_dynamic"])
-def test_optional_runtime_import_attempt_is_detected(run_without_optional_runtime, module, route):
+def test_optional_runtime_import_attempt_is_detected(
+    run_without_optional_runtime, monkeypatch, module, route, optimize
+):
     """Both import APIs must fail the guard, even when the caller catches ImportError."""
+    monkeypatch.setenv("PYTHONOPTIMIZE", optimize)
     if route == "statement":
         source = f"import {module}"
     elif route == "dynamic":
