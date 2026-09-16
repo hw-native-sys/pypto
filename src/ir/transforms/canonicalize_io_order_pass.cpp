@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -45,13 +46,34 @@ namespace {
 
 /// Rotate the innermost pipeline membership stage modulo @p depth.
 ///
-/// LowerPipelineLoops lowers nested pipelines inside-out, so the innermost
-/// membership is appended first: it is the stage controlled by the nearest
-/// enclosing pipeline currently being canonicalized.
+/// LowerPipelineLoops lowers nested pipelines inside-out, so the first membership
+/// it appends is the innermost: the stage controlled by the nearest enclosing
+/// pipeline currently being canonicalized.
+///
+/// "First appended" is not the same as "first in the list", because
+/// LowerPipelineLoops is no longer the only producer that can have run by now:
+/// AutoTileMatmulL0 stamps a split-K dbC accumulator with a group in its reserved
+/// range (starting at ``kAutoTileGroupBase``) before this pass, and that pair would
+/// sit ahead of every loop-derived one. Skip that range so the loop's own stage is
+/// the one rotated. Today the two cannot
+/// co-occur -- a split-K grid is emitted straight-line, and the existing-pipeline
+/// recognizer only matches an already-L0-resident matmul that AnalyzeMatmul
+/// declines -- so this is a guard against a silent wrong rotation, not a live fix.
+///
+/// Deliberately ``< kAutoTileGroupBase`` and not ``< kSkewGroupBase``:
+/// SkewCrossCorePipeline (pass 24) also runs before LowerPipelineLoops (25) and
+/// APPENDS its pair, so a cube accumulator inside a skewed cross-core loop carries
+/// ``skew;lpl`` and ``front()`` is the skew stage. Whether the skew or the dbC
+/// stage is the right one to rotate there is a real question, but it is a separate
+/// one with no test behind it -- so keep today's behaviour and change only what
+/// this milestone introduced.
 std::string RotateInnermostPipelineStage(const std::string& packed, int32_t depth) {
   auto memberships = ParsePipelineMembership(packed);
   if (memberships.empty() || depth <= 0) return packed;
-  auto& stage = memberships.front().second;
+  auto innermost = std::find_if(memberships.begin(), memberships.end(),
+                                [](const auto& m) { return m.first < kAutoTileGroupBase; });
+  if (innermost == memberships.end()) return packed;
+  auto& stage = innermost->second;
   stage = ((stage % depth) + depth) % depth;
   std::string result;
   for (const auto& [group, member_stage] : memberships) {

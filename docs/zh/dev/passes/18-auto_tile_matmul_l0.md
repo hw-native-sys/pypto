@@ -8,7 +8,7 @@
 
 已经放入 `Left` 或 `Right` 的操作数表示程序员手工做出的 L0 调度决策，因此 AutoTile 不会静默替换或再次切分它；合法的手工 tile 保持不变。若一个静态操作数自身就超过 backend 对应空间的容量——例如 FP16 `Right[256, 256]` 需要 131072 字节，而 L0B 只有 65536 字节——本 pass 会在该操作数处报错，给出变量名、物理形状、dtype、所需/可用字节数以及两种修复方式：让操作数保留在 `Mat` 并直接传给 matmul，由 AutoTile 选择合法的 L0 tile；或手工抽取更小的 L0 tile。这个更早、面向具体算子的错误也避免了随后出现无关的 MemoryReuse 回退 warning。
 
-本 pass 在 PyPTO 内存规划器下也处理已经切好 L0 tile 的形式：用户编写的静态 `pl.pipeline(stage=F)`（`F ≥ 2`，且迭代数能被 `F` 整除），每次迭代恰有一个 `tile.matmul(Left, Right)`，且具有一条规范的循环携带 drain 链。选中的移动操作数必须由每次迭代中直接的 Mat→L0 传输产生，另一个矩阵乘操作数则定义在循环外。只有当对应 drain 路径的盈利性门限通过，且整个函数中 Acc 的保守占用量（包括 pipeline lowering 可能为其他 Acc 生产者请求的物理 stage 副本数）再加上每个合格循环的一块额外 slot 仍能放入 L0C 时，AutoTile 才启用两槽 L0C ping-pong。Direct-to-GM `tile.store` 至少需要四次迭代；更便宜的 Acc→Mat `tile.assemble` 路径至少需要八次迭代，且按分配规则对齐后的单块 Acc 必须至少占 L0C 的四分之一。在 128 KiB L0C 上，该门限会接纳两组独立实测获益的 32/40 KiB Mat-scratch case，同时排除实测回退的 8 KiB case 和打平的 16 KiB case。Pipeline lowering 随后按两级一组发射 `matmul, matmul, drain, drain`，使 tile *i* 的 FIXPIPE drain 与 tile *i+1* 的 MAD 重叠。更深的操作数流水线保留原有 stage membership（仍受分配器常规容量门限约束），而 Acc membership 在两块 slot 间轮转。若存在多个 Acc、额外 store、嵌套控制流、间接使用、循环携带的矩阵操作数、单独 lowering 的尾组，或非规范的 drain/yield 链，则保持不变。PTOAS 保持原样，因为其规划器已为复现循环分离物理 Acc，且设备计时未显示该源级标记带来收益。
+本 pass 在 PyPTO 内存规划器下也处理已经切好 L0 tile 的形式：用户编写的静态 `pl.pipeline(stage=F)`（`F ≥ 2`，且迭代数能被 `F` 整除），每次迭代恰有一个 `tile.matmul(Left, Right)`，且具有一条规范的循环携带 drain 链。选中的移动操作数必须由每次迭代中直接的 Mat→L0 传输产生，另一个矩阵乘操作数则定义在循环外。只有当对应 drain 路径的盈利性门限通过，且整个函数中 Acc 的保守占用量（包括 pipeline lowering 可能为其他 Acc 生产者请求的物理 stage 副本数）再加上每个合格循环的一块额外 slot 仍能放入 L0C 时，AutoTile 才启用两槽 L0C ping-pong。Direct-to-GM `tile.store` 至少需要四次迭代；更便宜的 Acc→Mat `tile.assemble` 路径至少需要八次迭代，且按分配规则对齐后的单块 Acc 必须至少占 L0C 的四分之一。在 128 KiB L0C 上，该门限会接纳两组独立实测获益的 32/40 KiB Mat-scratch case，同时排除实测回退的 8 KiB case 和打平的 16 KiB case。Pipeline lowering 保持普通的 `matmul, drain, matmul, drain` 交错顺序，并让 Acc membership 在两个 slot 间轮转，因此 tile *i* 的 FIXPIPE drain 可与另一块累加器上 tile *i+1* 的 MAD 重叠。更深的操作数流水线保留原有 stage membership（仍受分配器常规容量门限约束），而 Acc membership 在两块 slot 间轮转。若存在多个 Acc、额外 store、嵌套控制流、间接使用、循环携带的矩阵操作数、单独 lowering 的尾组，或非规范的 drain/yield 链，则保持不变。PTOAS 保持原样，因为其规划器已为复现循环分离物理 Acc，且设备计时未显示该源级标记带来收益。
 
 **K 切分 vs M/N 切分。** 当 chooser 返回 `m == M` 且 `n == N` 时，输出的**物理**分配能放进 L0c，因此只切分 K 维（一个 K-loop）。常规容量按 `AlignUp(M, GetL0cMAlignment(dtype)) × N × bytes_c` 计算；例如 Ascend910B 上逻辑 `M = 16` 的 INT32 累加器会占用 32 个物理行。规范 split-K 路径还会把操作数布局的 Mat box 粒度传给 chooser，在选择 tile 前按 `AlignUp(AlignUp(m, box_m), l0c_align_m) × AlignUp(n, box_n) × bytes_c` 计入容量，并同样按补齐后的尺寸检查 L0A/L0B。当返回 `m < M` 或 `n < N` 时，输出会超过 L0c。由于操作数已经是 Mat-resident，*只有*输出溢出：本 pass 把**输出**切成 `ceil(M/m) × ceil(N/n)` 的 `[m, n]` 子块网格（边界处为部分块——`m`/`n` 不必整除 `M`/`N`）。新的普通或带 bias 的 matmul 直接逐子块计算和放置；带 bias 的 matmul 会把仅使用一次、且到 matmul 之间只有同层 load 的完整 bias load，替换为同一无 effect 观测区间内的 `[1,n]` 窗口 load，并且只在每个输出块的第一个 K block 上加一次 bias。对于前端规范的 split-K 形式，则为每个输出子块克隆完整的源 K 归约，使一块 `[m, n]` 累加器完成全部 K block 并 store 后，才开始下一块。因而不会实例化超大的完整 `[M, N]` Acc。输出张量以 SSA 形式在各子块 store 间串联（`out → out_t0 → out_t1 → …`）。
 
@@ -86,7 +86,15 @@ program_tiled = l0_tile_pass(program)
 `ChooseL0Tile` 通过**穷举式 roofline 搜索**挑选 L0 GEMM tile，而非闭式公式。对每个合法且对齐的 `(m, n, k)`（每维都是 `GetL0FractalAlignment()` 的倍数，L0C 预算按 `AlignUp(m, l0c_align_m) × n` 计算），它以核心 cycle 估算 wall-clock 并返回最小者：
 
 - 当 FIXPIPE 的 L0C→L1 drain 暴露在外（单 L0C）时，`wall ≈ max(C_load, C_mad) + C_drain`；
-- 当 drain 被计算掩盖（L0C 双缓冲，`T` 个输出 tile）时，`wall ≈ max(C_load, C_mad, C_drain) + min(compute, C_drain) / T`。其中 `+ min(…)/T` 是流水线的**填充/排空气泡**——第一个 tile 的计算（或最后一个 tile 的 drain）没有可重叠的对象，因此理想的全掩盖 `T·max` roofline 会少算一个 tile 的非主导流水（两个输出 tile 时为较小流水的 50%，在 2×2 网格上约为 25%）。这可避免在小网格上过度选择 dbC=2。
+- 当 L0C 双缓冲时，按实际发射路径计算完整调度代价。令
+  `C=max(C_load,C_mad)`、`D=C_drain`、`T` 为输出 tile 数，并令
+  `c=C/T`、`d=D/T`。展开网格只有一条流水线，代价为
+  `T·max(c,d)+min(c,d)`。full-K 嵌套网格则在固定外层的每次迭代重启内层
+  流水线，而且 peeled 边界 tile 无法重叠，代价为
+  `I·max(c,d)+R·min(c,d)+E·(c+d)`；其中 `I` 是完整内部 tile 数，`R` 是
+  内层流水线重启次数，`E=T-I` 是暴露的边界 tile 数。这样不会把嵌套网格
+  误算成一条扁平流水线。只有当该完整发射代价**严格低于**最佳单-C 方案时才
+  选择 dbC；wall 相等时保留单 C buffer。
 
 `C_load` 是所选循环序下 L1→L0A/L0B 的操作数流量，按 `GetL0CostModel()` 给出的各 buffer 带宽缩放（设备 MTE1 实测：`bw_l0a≈130`、`bw_l0b≈85` B/cyc，约 1.52:1）；`C_mad` 是 cube MAD 代价（每条 `TMATMUL` 的发射开销 × K-fractal 数）。`C_drain` 是 FIXPIPE 的 L0C 回写，**按每个输出 tile 计费**、且为**按 M-行**的代价：`⌈M/m⌉·⌈N/n⌉ · (drain_fixed + m·(max(drain_row, bytes_c·n/bw_drain) + drain_penalty·(odd(⌈n/N0⌉)−1)))`。这是对设备 FIXPIPE 实测的直接拟合：FIXPIPE 每次只处理 `N1 M1 M0 N0` FRACTAL_NZ 累加器的一个 M-行（故代价 ∝ `m`），每行用分组 `nburst`/`loop` 遍历 `N1 = ⌈n/N0⌉` 个 N-fractal（`N0 = 32/bytes_c = 8`，fp32 L0C）。每行代价是 `max(floor, throughput)`——一个与 N 无关的固定 burst-issue **下限** `drain_row`（窄 N 时主导），或按字节的 **吞吐** `bytes_c·n/bw_drain`（宽 N 时主导，交叉点约 n=131）——再加**非对齐**残差：非 2 的幂的 fractal 数会把奇部 `odd(N1)−1` 串行成额外 pass，每 M-行按 `drain_penalty` 计费（判据是 **`N1` 非 2 的幂**，而非字面的 `N%32`：`n=80 → odd(10)=5` 被惩罚，`n=96 → odd(12)=3` 也被惩罚，尽管 `96%32=0`；对齐的 2 的幂 `N1`（如 `n=128 → 16`）不计费）。由于 drain 数为 `⌈M/m⌉·⌈N/n⌉`，**拆分输出（M/N）会增加 drain 数，而拆分 K 不会**（部分和在单块 L0C 上累加，每个 `(m,n)` 块只回写一次）。按-M-行的形式使 chooser 倾向**宽-N / 小-M** 的 tile（每次 drain 的 FIXPIPE 行更少），并把非对齐-N tile 正确定价从而不被过度选择——例如 `320×320` 选到对齐的 `(160,128,64)`，而非 drain-bound 的 `160×80`。设备验证（drain 0.93–1.09×，load R²=0.993）。搜索对每个 `(m, n)` 的**所有**合法 `k` 都穷举（不是只取最大合法 k —— 当 `kt ≠ align_k` 时 `⌈K/k⌉·⌈k/kt⌉` 关于 `k` 非单调）。wall 平局时按 `(padded_compute, ⌈K/k⌉, C_load, …)` 字典序决出；其中 `C_load` 键在 MAD-bound 的 `(m,n)`↔`(n,m)` 平局中挑出隐藏 load 更低的那一侧（L0B 带宽更慢，故 m-block 更少者更省）。
 
@@ -121,16 +129,39 @@ PTOAS 自行把对应 stage buffer 放到不同 offset。`PYPTO` 使用
 `MemoryReuse` 的容量门控（#1475）在可负担深度内保持 buffer 分离。`DSA_RP`
 也跳过 `MemoryReuse`；它把流水线 stage 分离表示为硬约束，
 先运行有界严格搜索，仅当该搜索未找到满足容量的放置时才把流水线意图分离放宽为软
-惩罚。dbC=2 要求 full-K，且移动的内层轴至少有两个**完整** tile；固定的外层轴
-可以只有一个 tile。发射的循环方向遵循 chooser 的 stationarity/hoist 决策，
-peeled 的部分边界不计作 ping-pong stage。因此，以行作为外层时允许 1×2 网格，
-以列作为外层时允许 2×1 网格。Mat-scratch（`Acc→Mat`，`tile.assemble`）的
+惩罚。dbC=2 需要两个**相互独立的输出 tile**——相邻的 K 块累加到同一个 L0C
+tile 上，彼此串行依赖，因此只有 M/N 切分才能提供第二个 ping/pong stage。两个
+发射器都能提供它。差异在于发射出的**形态**，因此是三个发射器、两条计数规则：
+
+- **流水线循环**（`BuildFullKPipelined`）：dbC 标记挂在移动的**内层**
+  循环上，因此仅该循环就必须含有至少两个**完整** tile；固定的外层轴可以只有
+  一个 tile。发射的循环方向遵循 chooser 的 stationarity/hoist 决策，因此以行
+  作为外层时允许 1×2 网格，以列作为外层时允许 2×1 网格。peeled 的部分边界
+  **不**计入：它被直线发射在流水线循环之外，`CanonicalizeIOOrder` 触及不到。
+- **展开网格**（`BuildSplitKGrid`、`TryFoldCanonicalSplitKAcc`）：
+  `ceil(M/m) × ceil(N/n)` 网格被展开发射，每个 tile 一个 K 循环加一次 drain，
+  因此没有可供 `LowerPipelineLoops` 复制的循环。发射器为每个网格从 AutoTile
+  的保留区间分配唯一 group，并直接在每个 tile 的累加器上打上
+  `pipeline_membership` `(group, tile 序号 % 2)`。每个 tile 都会被打标，包括
+  部分边界 tile——它是展开序列中的普通成员，而非 peeled 尾部——因此任意两个
+  输出 tile 都能 ping-pong。PyPTO 与 DSA-RP 直接消费该关系；PTOAS 不消费它，
+  因此同一路径还把 accumulator seed（带 bias 的归约没有 seed 时则为第一个
+  cube 结果）绑定到一个显式固定的 `MemRef(slots=2)`，并选择 slot
+  `tile 序号 % 2`。
+
+调用方显式传入实际发射路径。普通 chooser 驱动的切分对 `k == K` 传入
+pipelined-inner，对 `k < K` 传入 unrolled-grid。重新切分用户手写
+`create`/K 循环/`store` 归约的 `TryFoldCanonicalSplitKAcc` 则对所有候选都传入
+unrolled-grid，与 `k` 无关。chooser 使用该路径同时判断可实现性和计算代价，
+无需再从 `k` 推断 canonical fold 的 lowering。
+
+Mat-scratch（`Acc→Mat`，`tile.assemble`）的
 drain 也以相同方式浮动。若 `PassManager` 在一个 planner
 下构造却在另一个下运行，会显式报错，因为 pass 列表与 chooser gate 必须一致。
 代价模型公式本身与 gate 无关。共存浮动与 `{0, L0C/2}` 不同 offset 的运行时验证
 见 [`31-canonicalize_io_order.md`](32-canonicalize_io_order.md)。
 
-上段的 full-K 与移动内层限制只适用于 chooser 发射的 M/N 切分。独立的已有流水线识别器不改变 chooser 的设计空间：它仅在 PyPTO 下，对上文的规范 stationary-panel 模式执行函数级 Acc 保守容量检查后复用相同的双 Acc 机制。
+上段的移动内层限制只适用于 chooser 发射的 **full-K** M/N 切分。独立的已有流水线识别器不改变 chooser 的设计空间：它仅在 PyPTO 下，对上文的规范 stationary-panel 模式执行函数级 Acc 保守容量检查后复用相同的双 Acc 机制。
 
 > **这是模型驱动的 tile 选择变更，并非行为中立的重构。** roofline 目标替换了此前以流量最小化为目标的闭式 chooser，因此对 MAD-bound 形状所选的 `(m, n, k)` 与之前不同。代表性形状的前后 tile 在 `test_l0_tile_chooser.py::TestL0TilingRooflineMigration` 中固定下来。
 

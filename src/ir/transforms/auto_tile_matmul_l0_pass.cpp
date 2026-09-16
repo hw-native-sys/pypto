@@ -179,6 +179,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_allocator_policy.h"
 #include "pypto/ir/memory_space.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
@@ -196,6 +197,7 @@
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/l0_tile_chooser.h"
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
@@ -771,22 +773,54 @@ struct MatmulTiling {
   /// for A/B-stationary (loop order comes from `stationarity`) and split-K.
   bool os_holds_a = true;
   /// True when the chooser picked dbC=2 (double-buffered L0C): the accumulator is
-  /// budgeted at L0C/2 so two co-live [m, n] Acc tiles fit, and BuildFullKPipelined
-  /// tags the moving loop with kPipelineDoubleBufferCAttr, which makes
-  /// LowerPipelineLoops stamp the cube accumulator's pipeline_membership and
-  /// CanonicalizeIOOrder rotate it to stage % 2 — the two-slot separation. The
-  /// statement order is already the ping-pong and is not changed.
-  /// Under PTOAS, InitMemRef keeps the overlapping-live-range buffers distinct
-  /// and ptoas places them. Under PYPTO, flat depth-2 pipeline membership keeps
-  /// MemoryReuse from coalescing them; DSA_RP consumes the same relation as a
-  /// strict placement separation before its capacity fallback. Set from
-  /// L0TileResult::double_buffer_c; only true for full-K tiles (see the assert
-  /// in AnalyzeMatmul).
+  /// budgeted at L0C/2 so two co-live [m, n] Acc tiles fit, and the emitted output
+  /// tiles alternate between them so tile i's FIXPIPE drain runs under tile i+1's
+  /// MAD. Both emitters realize this, through the same `pipeline_membership`
+  /// relation but from opposite directions:
+  ///   - BuildFullKPipelined (k == K) tags the moving loop with
+  ///     kPipelineDoubleBufferCAttr; LowerPipelineLoops then stamps the cube
+  ///     accumulator's membership per replicated stage and CanonicalizeIOOrder
+  ///     rotates it to stage % 2.
+  ///   - BuildSplitKGrid (k < K) has no loop over output tiles to replicate, so it
+  ///     allocates a unique group and stamps `(group, tile index % 2)` on each
+  ///     unrolled tile's accumulator itself (DbcSlotStamper).
+  /// In both cases the statement order is already the ping-pong and is not
+  /// changed; the attr/stamp carries buffer SEPARATION only.
+  /// Under PTOAS, the unrolled route additionally emits an explicit two-slot
+  /// MemRef; loop-based dbC reaches PTOAS through ordinary pipeline lowering.
+  /// Under PYPTO, flat depth-2 pipeline membership keeps MemoryReuse from
+  /// coalescing the slots; DSA_RP consumes the same relation as a strict placement
+  /// separation before its capacity fallback. Set from
+  /// L0TileResult::double_buffer_c; requires at least two output tiles (see the
+  /// assert in AnalyzeMatmul).
   bool double_buffer_c = false;
+  utils::DbcEmissionRoute dbc_emission_route = utils::DbcEmissionRoute::kUnsupported;
+  int32_t dbc_group = -1;
+  /// PTOAS does not consume pipeline_membership. For that route only, carry an
+  /// explicit two-slot allocation base so InitMemRef preserves both slots.
+  /// PyPTO and DSA-RP use the unique pipeline group instead, which still lets
+  /// unrelated, non-overlapping grids reuse their L0C storage.
+  VarPtr dbc_slot_base = nullptr;
   [[nodiscard]] bool is_acc() const { return kind == MatmulKind::kAccumulate; }
   /// True when the chosen L0 tile is smaller than the [M, N] output on either
   /// axis — the output Acc would overflow L0c, so the output must be tiled.
   [[nodiscard]] bool needs_mn_tiling() const { return m != M || n != N; }
+};
+
+/// Function-local source of unique groups for unrolled dbC output grids.
+/// LowerPipelineLoops and SkewCrossCorePipeline occupy lower reserved ranges;
+/// one group per grid prevents unrelated stage-0/stage-1 accumulators from
+/// acquiring false cross-grid separation constraints.
+class AutoTileDbcGroupAllocator {
+ public:
+  int32_t Next(const Span& span) {
+    INTERNAL_CHECK_SPAN(next_ < kAutoTileGroupLimit, span)
+        << "Internal error: AutoTile emitted more dbC grids than its reserved pipeline_membership range";
+    return next_++;
+  }
+
+ private:
+  int32_t next_ = kAutoTileGroupBase;
 };
 
 /// Build the K-loop descriptor for one output sub-tile ``[mi : mi + m_eff,
@@ -852,7 +886,9 @@ KLoopRewrite MakeKLoop(const MatmulTiling& t, ExprPtr mi, ExprPtr ni, int64_t m_
 /// otherwise nullopt and (when useful) appends a PerfHint.  The caller
 /// dispatches K-only vs M/N tiling on ``MatmulTiling::needs_mn_tiling()``.
 std::optional<MatmulTiling> AnalyzeMatmul(
-    const AssignStmtPtr& assign, std::vector<Diagnostic>& hints, bool force_output_stationary = false,
+    const AssignStmtPtr& assign, std::vector<Diagnostic>& hints, AutoTileDbcGroupAllocator& dbc_groups,
+    utils::DbcEmissionRoute full_k_dbc_route = utils::DbcEmissionRoute::kPipelinedInner,
+    bool force_output_stationary = false,
     std::optional<tile_view_semantics::BoxedTileAlignment> output_box_alignment = std::nullopt,
     const DirectDefMap* direct_defs = nullptr) {
   auto call = As<Call>(assign->value_);
@@ -1157,6 +1193,8 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   const bool pypto_dbc =
       memory_planner == MemoryPlanner::PyPTO && ctx && ctx->GetEnablePyptoL0cDoubleBuffer();
   cfg.allow_double_buffer_c = memory_planner != MemoryPlanner::PyPTO || pypto_dbc;
+  cfg.full_k_dbc_route = full_k_dbc_route;
+  cfg.split_k_dbc_route = utils::DbcEmissionRoute::kUnrolledGrid;
   // tile.matmul_acc threads the caller's accumulator into the K-loop's
   // iter-arg, so each invocation reads C from L1 at start and writes back at
   // end (gamma_c = 2 in the chooser's traffic model).  Plain tile.matmul
@@ -1250,20 +1288,34 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   t.stationarity = res.stationarity;
   t.os_holds_a = res.os_holds_a;
   // This is a chooser<->emitter REALIZABILITY contract, not a restatement of the
-  // chooser's own condition. Only BuildFullKPipelined attaches
-  // kPipelineDoubleBufferCAttr; BuildSplitKGrid does not, and without that attr
-  // LowerPipelineLoops deliberately skips cube accumulators, so no
-  // pipeline_membership is stamped and the two accumulators coalesce. A dbC plan
-  // routed to the split-K emitter is therefore not partially realized -- it is
-  // not realized at all, while the tile has already been shrunk to the L0C/2
-  // budget that paid for it. Assert rather than silently clamping (`&& k == K`):
-  // a clamp would drop the ping-pong but keep the halved budget, shipping a
-  // shrunk single-buffer tile -- the exact regression this feature exists to
-  // avoid. Widen this only together with the emitter that can realize it.
-  INTERNAL_CHECK_SPAN(!res.double_buffer_c || res.k == K, assign->span_)
-      << "Internal error: chooser set double_buffer_c on a split-K tile (k=" << res.k << ", K=" << K
-      << "); only the full-K emitter attaches the dbC marker";
+  // chooser's own condition -- it is deliberately the SAME predicate, asserted on
+  // the far side of the interface so the two cannot drift. Both emitters realize
+  // the two-slot ping-pong (BuildFullKPipelined via kPipelineDoubleBufferCAttr on
+  // its moving loop, BuildSplitKGrid by stamping each unrolled tile's accumulator
+  // directly), but each needs its own tile count for it, and a plan that reaches
+  // the emitter it does not fit is not partially realized -- it is not realized at
+  // all, while the tile has already been shrunk to the L0C/2 budget that paid for
+  // it. Assert rather than silently clamping: a clamp would drop the ping-pong but
+  // keep the halved budget, shipping a shrunk single-buffer tile -- the exact
+  // regression this feature exists to avoid.
+  //
+  // Restating the condition locally is what to avoid here. A weaker local
+  // paraphrase (e.g. "at least two output tiles", which both routes imply) admits
+  // a full-K plan whose moving inner loop holds ONE full tile plus a peel, and the
+  // peel is emitted outside the pipelined loops -- precisely the case this guards.
+  INTERNAL_CHECK_SPAN(!res.double_buffer_c || utils::DbcRealizable(cfg, res), assign->span_)
+      << "Internal error: chooser set double_buffer_c on a tile the emitter cannot ping-pong (M=" << M
+      << ", N=" << N << ", K=" << K << ", m=" << res.m << ", n=" << res.n << ", k=" << res.k
+      << "); dbC needs two independent output tiles on the selected emission route";
   t.double_buffer_c = res.double_buffer_c;
+  t.dbc_emission_route = res.dbc_emission_route;
+  if (res.double_buffer_c && res.dbc_emission_route == utils::DbcEmissionRoute::kUnrolledGrid) {
+    t.dbc_group = dbc_groups.Next(assign->span_);
+    if (memory_planner == MemoryPlanner::PtoAS) {
+      t.dbc_slot_base =
+          std::make_shared<Var>(assign->var_->name_hint_ + "_dbc_slots", GetPtrType(), assign->span_);
+    }
+  }
   return t;
 }
 
@@ -1984,8 +2036,110 @@ struct CanonicalSplitKFold {
   VarPtr old_store_result;
 };
 
+/// Stamp one dbC=2 accumulator slot onto every Acc-producing cube MAD in @p stmts.
+///
+/// Used by the two UNROLLED output-grid emitters -- ``BuildSplitKGrid`` (chooser
+/// M/N tiling at k < K) and ``TryFoldCanonicalSplitKAcc`` (retiling a user-written
+/// create/K-loop/store reduction). Each emits one K-loop plus drain per output
+/// tile with no loop over the tiles, so there is nothing for ``LowerPipelineLoops``
+/// to replicate and therefore nothing that would tag the accumulators. The emitted
+/// ORDER is already the ping-pong (tile i's drain precedes tile i+1's K-loop, and
+/// the two are independent), so the only missing piece is the declaration that
+/// consecutive tiles must live in DIFFERENT L0C buffers -- without it the allocator
+/// coalesces them and tile i+1's first MAD waits on tile i's drain, while the tile
+/// has already been shrunk to the L0C/2 budget that paid for the overlap.
+///
+/// ``pipeline_membership`` is exactly that declaration, and consumers key on
+/// ``(space, group, stage)`` + lifetimes rather than on which pass wrote it.
+/// ``stage = tile index % 2``, so the grid rotates over two slots however many
+/// tiles it has. Each unrolled grid receives a unique group: stage separation is
+/// local to that grid and cannot accidentally couple two unrelated matmuls.
+/// Same-stage tiles within a grid may share storage when their lifetimes do not
+/// overlap -- tile 0 and tile 2 are the ordinary rotation.
+///
+/// The per-tile K-loop never carries the dbC attr, so ``LowerPipelineLoops`` skips
+/// its cube accumulator (see its PipelineMembershipTagger) and this stamp is the
+/// only membership the K-loop contributes -- no cross-product with its own stages.
+/// That holds for the canonical fold too, where the K-loop is user-written and may
+/// be a ``pl.pipeline``: the tagger's cube-accumulator skip is unconditional without
+/// the attr, so every OTHER tile producer in the body picks up the loop's own groups
+/// (in the canonical body, the two operand loads) while the accumulator does not.
+///
+/// PTOAS does not consume ``pipeline_membership`` on this route, so its fresh
+/// accumulator seed (or the first cube result when no seed exists) additionally
+/// receives an explicit pinned ``MemRef(slots=2)``.
+/// PyPTO and DSA-RP consume the group relation directly and deliberately keep an
+/// ordinary seed, allowing storage reuse with unrelated non-overlapping grids.
+///
+/// The op test mirrors that tagger: a prefix match over the cube MAD family
+/// (``tile.matmul`` and its ``_acc`` / ``_bias`` / ``_mx*`` variants), gated on
+/// the result actually living in Acc so a data-movement op targeting Acc is not
+/// mistaken for an accumulator.
+class DbcSlotStamper : public IRMutator {
+ public:
+  DbcSlotStamper(int32_t group, int32_t slot, VarPtr slot_base)
+      : group_(group), slot_(slot), slot_base_(std::move(slot_base)) {
+    INTERNAL_CHECK(group_ >= kAutoTileGroupBase && group_ < kAutoTileGroupLimit)
+        << "Internal error: unrolled dbC group is outside AutoTile's reserved range";
+    INTERNAL_CHECK(slot_ == 0 || slot_ == 1) << "Internal error: dbC slot must be 0 or 1";
+  }
+
+ protected:
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    auto visited = IRMutator::VisitStmt_(op);
+    auto assign = As<AssignStmt>(visited);
+    auto call = assign ? As<Call>(assign->value_) : nullptr;
+    if (!call || !call->op_) return visited;
+    auto tile = As<TileType>(assign->var_->GetType());
+    if (!tile || tile->GetMemorySpace() != MemorySpace::Acc) return visited;
+    const bool is_cube_accumulator = call->op_->name_.rfind("tile.matmul", 0) == 0;
+    const bool is_acc_storage = call->op_->name_ == "tile.create";
+    if (!is_cube_accumulator && !is_acc_storage) return visited;
+
+    auto attrs = call->attrs_;
+    if (is_cube_accumulator) {
+      auto packed = call->GetAttr<std::string>(kPipelineMembershipAttr, std::string());
+      packed = AppendPipelineMembership(packed, group_, slot_);
+      attrs = StripAttr(std::move(attrs), kPipelineMembershipAttr);
+      attrs.emplace_back(kPipelineMembershipAttr, std::move(packed));
+      auto stamped = std::make_shared<Call>(call->op_, call->args_, call->kwargs_, std::move(attrs),
+                                            call->GetType(), call->span_);
+      if (slot_base_ && !slot_bound_) return BindFirstSlot(assign, stamped);
+      return std::make_shared<AssignStmt>(assign->var_, stamped, assign->span_);
+    }
+
+    if (!slot_base_ || slot_bound_) return visited;
+    return BindFirstSlot(assign, call);
+  }
+
+ private:
+  StmtPtr BindFirstSlot(const AssignStmtPtr& assign, const CallPtr& call) {
+    // Prefer the fresh tile.create seed when one exists. Biased and rare
+    // one-full-block-plus-tail rewrites mint the accumulator directly with their
+    // first cube op instead; binding that result is equivalent because every
+    // later matmul_acc inherits its source allocation by operation contract.
+    auto slot_index = std::make_shared<ConstInt>(slot_, DataType::INDEX, assign->span_);
+    auto memref = std::make_shared<MemRef>(slot_base_, int64_t{0}, uint64_t{0}, assign->span_,
+                                           /*is_pinned=*/true, /*slot_count=*/uint64_t{2},
+                                           std::make_optional<ExprPtr>(slot_index));
+    TypePtr slotted_type = CloneTypeWithMemRef(call->GetType(), std::optional<MemRefPtr>(memref));
+    auto slotted_var = std::make_shared<Var>(assign->var_->name_hint_, slotted_type, assign->var_->span_);
+    var_remap_[assign->var_.get()] = slotted_var;
+    auto stamped = std::make_shared<Call>(call->op_, call->args_, call->kwargs_, call->attrs_, slotted_type,
+                                          call->span_);
+    slot_bound_ = true;
+    return std::make_shared<AssignStmt>(slotted_var, stamped, assign->span_);
+  }
+
+  int32_t group_;
+  int32_t slot_;
+  VarPtr slot_base_;
+  bool slot_bound_ = false;
+};
+
 std::optional<CanonicalSplitKFold> TryFoldCanonicalSplitKAcc(const CanonicalSplitKAccMatch& match,
-                                                             std::vector<Diagnostic>& hints) {
+                                                             std::vector<Diagnostic>& hints,
+                                                             AutoTileDbcGroupAllocator& dbc_groups) {
   const auto output_box_alignment = GetCanonicalOutputBoxAlignment(match);
   if (!output_box_alignment) {
     hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-006",
@@ -2000,8 +2154,8 @@ std::optional<CanonicalSplitKFold> TryFoldCanonicalSplitKAcc(const CanonicalSpli
   // every physical output window, so chooser capacity cannot admit a logical
   // tile that becomes oversized after padding. The recursively visited
   // narrowed calls independently choose their legal inner K blocking.
-  auto tiling =
-      AnalyzeMatmul(match.shape_source(), hints, /*force_output_stationary=*/true, output_box_alignment);
+  auto tiling = AnalyzeMatmul(match.shape_source(), hints, dbc_groups, utils::DbcEmissionRoute::kUnrolledGrid,
+                              /*force_output_stationary=*/true, output_box_alignment);
   if (!tiling || !tiling->needs_mn_tiling()) return std::nullopt;
 
   auto store_call = As<Call>(match.store->value_);
@@ -2035,7 +2189,6 @@ std::optional<CanonicalSplitKFold> TryFoldCanonicalSplitKAcc(const CanonicalSpli
                                              MakeIndex(window.valid_m, match.init->span_),
                                              MakeIndex(window.valid_n, match.init->span_), out_ty->dtype_,
                                              match.init->var_->name_hint_ + suffix, match.init->span_);
-      for (auto& init_stmt : init.stmts) stmts.push_back(std::move(init_stmt));
 
       std::unordered_map<const Var*, ExprPtr> seed = {{match.init->var_.get(), init.value}};
       auto clone = DeepClone(match.loop, seed, /*clone_def_vars=*/true);
@@ -2046,7 +2199,18 @@ std::optional<CanonicalSplitKFold> TryFoldCanonicalSplitKAcc(const CanonicalSpli
       auto narrowed = As<ForStmt>(retiler.VisitStmt(cloned_loop));
       INTERNAL_CHECK_SPAN(narrowed, match.loop->span_)
           << "Internal error: canonical split-K retiling did not return a ForStmt";
-      stmts.push_back(narrowed);
+      std::vector<StmtPtr> tile_stmts = std::move(init.stmts);
+      tile_stmts.push_back(narrowed);
+      // dbC=2: bind the seed and stamp the MADs with one persistent mutator so
+      // the seed's slotted Var is substituted through the cloned K-loop.
+      if (tiling->double_buffer_c) {
+        DbcSlotStamper stamper(tiling->dbc_group, static_cast<int32_t>(step % 2), tiling->dbc_slot_base);
+        for (auto& stmt : tile_stmts) stmt = stamper.VisitStmt(stmt);
+      }
+      narrowed = As<ForStmt>(tile_stmts.back());
+      INTERNAL_CHECK_SPAN(narrowed, match.loop->span_)
+          << "Internal error: dbC slot stamping did not preserve the canonical split-K ForStmt";
+      for (auto& stmt : tile_stmts) stmts.push_back(std::move(stmt));
       chain = placer.PlaceAt(stmts, narrowed->return_vars_[0], MakeIndex(mi, match.store->span_),
                              MakeIndex(ni, match.store->span_), chain, step);
       ++step;
@@ -2062,7 +2226,7 @@ std::optional<CanonicalSplitKFold> TryFoldCanonicalSplitKAcc(const CanonicalSpli
 /// siblings.
 StmtPtr RewriteCanonicalSplitKSeq(const SeqStmtsPtr& seq,
                                   const std::unordered_map<const Var*, size_t>& use_counts,
-                                  std::vector<Diagnostic>& hints) {
+                                  std::vector<Diagnostic>& hints, AutoTileDbcGroupAllocator& dbc_groups) {
   if (!seq || seq->stmts_.size() < 3) return seq;
   std::vector<StmtPtr> out;
   out.reserve(seq->stmts_.size());
@@ -2078,7 +2242,7 @@ StmtPtr RewriteCanonicalSplitKSeq(const SeqStmtsPtr& seq,
       auto match = MatchCanonicalSplitKAcc(As<AssignStmt>(current), As<ForStmt>(next), As<AssignStmt>(third),
                                            use_counts, &hints);
       if (match) {
-        if (auto fold = TryFoldCanonicalSplitKAcc(*match, hints)) {
+        if (auto fold = TryFoldCanonicalSplitKAcc(*match, hints, dbc_groups)) {
           for (auto& stmt : fold->stmts) out.push_back(std::move(stmt));
           remap[fold->old_store_result.get()] = fold->final_output;
           i += 3;
@@ -2100,8 +2264,8 @@ StmtPtr RewriteCanonicalSplitKSeq(const SeqStmtsPtr& seq,
 class CanonicalSplitKPreMutator : public IRMutator {
  public:
   CanonicalSplitKPreMutator(const std::unordered_map<const Var*, size_t>& use_counts,
-                            std::vector<Diagnostic>& hints)
-      : use_counts_(use_counts), hints_(hints) {}
+                            std::vector<Diagnostic>& hints, AutoTileDbcGroupAllocator& dbc_groups)
+      : use_counts_(use_counts), hints_(hints), dbc_groups_(dbc_groups) {}
 
  protected:
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
@@ -2110,7 +2274,7 @@ class CanonicalSplitKPreMutator : public IRMutator {
     // then reaches canonical triplets in nested source regions; newly generated
     // loops do not match because their fresh Vars are absent from that index and
     // wait for the ordinary AutoTile phase to K-tile their narrowed calls.
-    auto rewritten = As<SeqStmts>(RewriteCanonicalSplitKSeq(op, use_counts_, hints_));
+    auto rewritten = As<SeqStmts>(RewriteCanonicalSplitKSeq(op, use_counts_, hints_, dbc_groups_));
     INTERNAL_CHECK_SPAN(rewritten, op->span_)
         << "Internal error: canonical split-K pre-phase did not preserve SeqStmts";
     return IRMutator::VisitStmt_(rewritten);
@@ -2119,12 +2283,14 @@ class CanonicalSplitKPreMutator : public IRMutator {
  private:
   const std::unordered_map<const Var*, size_t>& use_counts_;
   std::vector<Diagnostic>& hints_;
+  AutoTileDbcGroupAllocator& dbc_groups_;
 };
 
-FunctionPtr RewriteCanonicalSplitKAcc(const FunctionPtr& func, std::vector<Diagnostic>& hints) {
+FunctionPtr RewriteCanonicalSplitKAcc(const FunctionPtr& func, std::vector<Diagnostic>& hints,
+                                      AutoTileDbcGroupAllocator& dbc_groups) {
   CanonicalReadCounter counter;
   counter.VisitStmt(func->body_);
-  CanonicalSplitKPreMutator mutator(counter.counts, hints);
+  CanonicalSplitKPreMutator mutator(counter.counts, hints, dbc_groups);
   auto new_body = mutator.VisitStmt(func->body_);
   if (new_body == func->body_) return func;
   auto rewritten = MutableCopy(func);
@@ -2337,6 +2503,12 @@ std::pair<std::vector<StmtPtr>, VarPtr> BuildSplitKGrid(const MatmulTiling& t, S
       const std::string tbase = base + "_t" + std::to_string(step);
 
       auto inner = BuildKLoopRewrite(MakeKLoop(t, MakeIndex(mi, sp), MakeIndex(ni, sp), m_eff, n_eff, tbase));
+      // dbC=2: consecutive output tiles must occupy different L0C buffers, declared
+      // per tile because this grid has no loop for LowerPipelineLoops to replicate.
+      if (t.double_buffer_c) {
+        DbcSlotStamper stamper(t.dbc_group, static_cast<int32_t>(step % 2), t.dbc_slot_base);
+        for (auto& stmt : inner.stmts) stmt = stamper.VisitStmt(stmt);
+      }
       for (auto& s : inner.stmts) stmts.push_back(std::move(s));
       chain = placer.PlaceAt(stmts, inner.return_var, MakeIndex(mi, sp), MakeIndex(ni, sp), chain, step);
       ++step;
@@ -2528,9 +2700,10 @@ std::optional<std::pair<std::vector<StmtPtr>, VarPtr>> TryFoldMatScratch(const M
   // which is emitted directly after its producing matmul exactly like tile.store on
   // the direct-store path, so it drains under the next tile's MAD once the dbC
   // membership puts the two accumulators in different slots.
-  // BuildFullKPipelined attaches the attr when t.double_buffer_c; the split-K grid
-  // never carries it.  (The Acc->Mat drain is cheaper than Acc->GM, so the hiding
-  // upside is smaller here, but the mechanism is the same.)
+  // Both routes below carry it: BuildFullKPipelined attaches
+  // kPipelineDoubleBufferCAttr to its moving loop, BuildSplitKGrid stamps each
+  // unrolled tile's accumulator itself.  (The Acc->Mat drain is cheaper than
+  // Acc->GM, so the hiding upside is smaller here, but the mechanism is the same.)
   const bool full_k = t.k == t.K;
   auto [stmts, scratch] = full_k ? BuildFullKPipelined(t, placer) : BuildSplitKGrid(t, placer);
   return std::make_pair(std::move(stmts), scratch);
@@ -2990,8 +3163,8 @@ std::unordered_set<const ForStmt*> BuildPipelineDbCPlan(const FunctionPtr& func)
 
 class AutoTileMutator : public IRMutator {
  public:
-  explicit AutoTileMutator(std::unordered_set<const ForStmt*> pipeline_dbc_plan)
-      : pipeline_dbc_plan_(std::move(pipeline_dbc_plan)) {}
+  AutoTileMutator(std::unordered_set<const ForStmt*> pipeline_dbc_plan, AutoTileDbcGroupAllocator& dbc_groups)
+      : pipeline_dbc_plan_(std::move(pipeline_dbc_plan)), dbc_groups_(dbc_groups) {}
 
   std::vector<Diagnostic> hints;
 
@@ -3206,7 +3379,8 @@ class AutoTileMutator : public IRMutator {
       // visitation happens after rewrite-rejection so nested matmuls inside
       // ForStmt bodies still get rewritten by the recursive visit.
       if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(current)) {
-        if (auto tiling = AnalyzeMatmul(assign, hints, /*force_output_stationary=*/false,
+        if (auto tiling = AnalyzeMatmul(assign, hints, dbc_groups_, utils::DbcEmissionRoute::kPipelinedInner,
+                                        /*force_output_stationary=*/false,
                                         /*output_box_alignment=*/std::nullopt, &direct_defs)) {
           if (!tiling->needs_mn_tiling()) {
             // Whole output fits L0c — tile K only.  k < K here (k == K with
@@ -3287,7 +3461,8 @@ class AutoTileMutator : public IRMutator {
           if (planner == MemoryPlanner::PyPTO &&
               tiling->stationarity != utils::Stationarity::kOutputStationary) {
             std::vector<Diagnostic> discard;  // the first AnalyzeMatmul already emitted the hints
-            os_tiling = AnalyzeMatmul(assign, discard, /*force_output_stationary=*/true,
+            os_tiling = AnalyzeMatmul(assign, discard, dbc_groups_, utils::DbcEmissionRoute::kPipelinedInner,
+                                      /*force_output_stationary=*/true,
                                       /*output_box_alignment=*/std::nullopt, &direct_defs);
             if (os_tiling) fold_tiling = &*os_tiling;
           }
@@ -3357,6 +3532,7 @@ class AutoTileMutator : public IRMutator {
 
  private:
   std::unordered_set<const ForStmt*> pipeline_dbc_plan_;
+  AutoTileDbcGroupAllocator& dbc_groups_;
 };
 
 FunctionPtr TransformFunction(const FunctionPtr& func, std::vector<Diagnostic>& hints) {
@@ -3365,8 +3541,9 @@ FunctionPtr TransformFunction(const FunctionPtr& func, std::vector<Diagnostic>& 
   // Canonical loop-carried split-K output tiling changes both the Acc inventory
   // and loop identities. Rewrite it first so the #2131 dbC capacity/placement
   // plan is computed from the exact IR the ordinary AutoTile phase will visit.
-  auto canonical = RewriteCanonicalSplitKAcc(func, hints);
-  AutoTileMutator mutator(BuildPipelineDbCPlan(canonical));
+  AutoTileDbcGroupAllocator dbc_groups;
+  auto canonical = RewriteCanonicalSplitKAcc(func, hints, dbc_groups);
+  AutoTileMutator mutator(BuildPipelineDbCPlan(canonical), dbc_groups);
   auto new_body = mutator.VisitStmt(canonical->body_);
   for (auto& d : mutator.hints) hints.push_back(std::move(d));
   if (new_body == canonical->body_) return canonical;

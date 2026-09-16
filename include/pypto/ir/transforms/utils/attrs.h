@@ -97,13 +97,22 @@ inline constexpr const char* kPipelineOverlapStoresAttr = "pipeline_overlap_stor
 /// slot. Direct-to-GM ``tile.store`` and Acc-to-Mat ``tile.assemble`` have
 /// separate conservative admission thresholds.
 ///
-/// REALIZABILITY: only ``BuildFullKPipelined`` attaches this attr. A dbC plan
-/// routed to ``BuildSplitKGrid`` gets no attr, hence no membership, hence one
-/// coalesced accumulator — while the tile has already been shrunk to the L0C/2
-/// budget. ``AnalyzeMatmul`` asserts ``dbC ⇒ k == K`` for exactly that reason;
-/// widen it only together with an emitter that can realize the plan. Consumed
-/// (stripped) by ``CanonicalizeIOOrder`` alongside ``pipeline_stages`` and
-/// ``pipeline_overlap_stores``.
+/// REALIZABILITY: only ``BuildFullKPipelined`` attaches this attr — it is the
+/// full-K route's mechanism, not dbC's definition. That route has no accumulator
+/// to stamp at emit time: the two co-live values do not exist as two SSA values
+/// until ``LowerPipelineLoops`` replicates the marked loop, so the attr is how
+/// AutoTile asks for that replication-time stamp. ``BuildSplitKGrid`` (k < K) has
+/// the opposite problem — it emits the output grid UNROLLED, so there is no loop
+/// to replicate and nothing to mark — and therefore stamps ``pipeline_membership``
+/// ``(unique AutoTile group, tile index % 2)`` on each tile's accumulator directly.
+/// Both routes end at the same relation; neither is the general mechanism.
+///
+/// What a dbC plan must NOT do is reach an emitter that realizes neither, because
+/// the tile has by then already been shrunk to the L0C/2 budget that paid for the
+/// ping-pong: that ships a shrunk SINGLE-buffered tile. ``AnalyzeMatmul`` asserts
+/// route-aware realizability (``utils::DbcRealizable``) for exactly that reason.
+/// Consumed (stripped) by ``CanonicalizeIOOrder`` alongside ``pipeline_stages``
+/// and ``pipeline_overlap_stores``.
 inline constexpr const char* kPipelineDoubleBufferCAttr = "pipeline_double_buffer_c";
 
 /// Attribute key marking a tile-producing ``Call`` with the pipeline-stage
@@ -141,6 +150,37 @@ inline std::string AppendPipelineMembership(const std::string& packed, int32_t g
   std::string pair = std::to_string(group) + ":" + std::to_string(stage);
   return packed.empty() ? pair : packed + ";" + pair;
 }
+
+/// Reserved ``pipeline_membership`` group bases, one per producer.
+///
+/// Three passes write ``pipeline_membership``: ``LowerPipelineLoops`` (0-based
+/// group ids), ``SkewCrossCorePipeline`` (one fresh group per skewed loop from
+/// ``kSkewGroupBase``), and ``AutoTileMatmulL0`` for a dbC=2 split-K output grid.
+/// That grid is emitted UNROLLED -- there is no loop over output tiles for
+/// ``LowerPipelineLoops`` to replicate -- so the two-slot L0C separation has to be
+/// declared directly on the accumulator of each tile.
+///
+/// Consumers key on ``(space, group, stage)`` plus lifetimes and do not care which
+/// pass wrote the tag, but two PRODUCERS sharing a group id would make
+/// ``MemoryReuse`` conflate unrelated pipelines, so each non-``LowerPipelineLoops``
+/// producer takes its own base. The bases live here, together and ordered, so the
+/// ranges cannot silently overlap; ``SkewCrossCorePipeline`` checks its counter
+/// against the next base as it hands out groups.
+///
+/// ``AutoTileMatmulL0`` allocates one group per unrolled output grid from the
+/// half-open range [kAutoTileGroupBase, kAutoTileGroupLimit). Tiles inside one
+/// grid rotate over stages 0/1; unrelated grids never acquire a false shared
+/// separation constraint. Their physical storage may still be reused when their
+/// ordinary lifetimes permit it -- group identity expresses which stages must be
+/// distinct, not a permanent allocation identity.
+inline constexpr int32_t kSkewGroupBase = 1 << 20;
+inline constexpr int32_t kAutoTileGroupBase = 1 << 21;
+inline constexpr int32_t kAutoTileGroupLimit = 1 << 22;
+static_assert(kSkewGroupBase < kAutoTileGroupBase,
+              "pipeline_membership group bases must be ordered so each producer's range is bounded "
+              "by the next base");
+static_assert(kAutoTileGroupBase < kAutoTileGroupLimit,
+              "AutoTile pipeline_membership group range must be non-empty");
 
 /// Parse a ``pipeline_membership`` string into ``(group, stage)`` pairs.
 ///
