@@ -14,6 +14,7 @@ GM-pipe-buffer injection is exercised separately in
 own a2a3 boundary behaviour without running InjectGMPipeBuffer.
 """
 
+import pypto
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
@@ -1206,6 +1207,50 @@ def test_split_slot_num_override_sizes_c2v_ring_on_a2a3():
 
     After = _run_pipeline(Before)
     ir.assert_structural_equal(After, Expected)
+
+
+# ---------------------------------------------------------------------------
+# Backstop: direct invocation that skips LowerAutoVectorSplit.
+#
+# This pass is documented as invocable on its own after InferTileMemorySpace
+# ("building a custom pass pipeline"), and a bare pass call does NOT enforce
+# `required` properties — only PassPipeline does. So AivSplitLoweredValid can be
+# unmet here even though it is declared. The authoring diagnostic for an
+# unsplittable transpose lives in LowerAutoVectorSplit (see
+# test_lower_auto_vector_split.py), but without a guard here that flow expands
+# the kernel silently and SplitVectorKernel mis-shapes it.
+# ---------------------------------------------------------------------------
+
+
+def test_transpose_hazard_backstopped_when_lowering_is_skipped():
+    """Skipping pass 23 must not silently expand an unsplittable transpose."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def t_hazard(
+            self,
+            x: pl.Tensor[[16, 128], pl.BF16],
+            y: pl.Tensor[[128, 8], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
+        ) -> pl.Tensor[[8, 16], pl.FP32]:
+            x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+            x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+            y_mat = pl.load(y, [0, 0], [128, 8], target_memory=pl.MemorySpace.Mat)
+            y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+            z = pl.matmul(x_left, y_right)  # [16, 8] (cube result)
+            z_vec = pl.move(z, target_memory=pl.MemorySpace.Vec)
+            zt = pl.transpose(z_vec, axis1=0, axis2=1)  # swaps split dim 0 (extent 16)
+            out_0 = pl.store(zt, [0, 0], out_0)
+            return out_0
+
+    p = passes.convert_to_ssa()(Before)
+    p = passes.lower_composite_ops()(p)
+    p = passes.flatten_tile_nd_to_2d()(p)
+    p = passes.infer_tile_memory_space()(p)
+    # No lower_auto_vector_split() — the documented direct-invocation flow.
+    with pytest.raises(pypto.InternalError, match="swaps the split axis"):
+        passes.expand_mixed_kernel()(p)
 
 
 # ---------------------------------------------------------------------------

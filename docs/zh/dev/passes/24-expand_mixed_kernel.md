@@ -59,6 +59,13 @@ task 的 subslot，而 `sync_start` 控制的是多 block SPMD 启动准入。
 `LowerAutoVectorSplit` 不予下降的纯向量 `pl.split` 内核；那个 pass 现在会校验它的透传分支，
 从而在不依赖迟到诊断的前提下补上这一缺口。
 
+**此处仍保留一条整函数的兜底检查，形式为 `INTERNAL_CHECK_SPAN`。** 下文说明本 pass 可以在
+`InferTileMemorySpace` 之后被单独调用，而单独调用**不会**校验 `required` 属性——只有
+`PassPipeline` 才会。因此跳过 `LowerAutoVectorSplit` 的调用方会在 `AivSplitLoweredValid`
+未成立的情况下到达这里；没有该兜底，内核会被静默展开，随后由 `SplitVectorKernel` 算出错误
+形状。它是 internal 而非面向用户的：该失败是「pass 前置条件未满足」，而不是作者能从自己源码
+读出的事实，因此消息指出被跳过的步骤，而不给出改写建议。
+
 `split_axis::FindTransposeSplitHazard` 仍是共用的检测器：标记**第一个**在切分轴上非 singleton
 的 `tile.transpose` 源（若源在切分轴上是 singleton，则不携带切分数据——即广播 no-op 情形——
 保持切分；动态的非 `ConstInt` extent 视为非 singleton，保守标记）。

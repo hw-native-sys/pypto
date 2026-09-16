@@ -1968,13 +1968,37 @@ struct ExpandedKernel {
 
 ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, const AivPlacement& placement,
                                    bool had_regions) {
-  // The whole-function transpose-split hazard is NOT checked here. It is an
-  // authoring limitation of the split the user requested, so LowerAutoVectorSplit
-  // (pass 23) reports it — including for the pure-vector pl.split functions that
-  // pass declines to lower, which is the only reason this check used to have to
-  // live so late. Regions carry their own per-mode check in the AivSplitValid
-  // verifier (l).
-  (void)had_regions;
+  // Whole-function transpose-split hazard: BACKSTOP only.
+  //
+  // The AUTHORING report moved to LowerAutoVectorSplit (pass 23), which reaches
+  // the pure-vector pl.split functions too and can name both fix directions. But
+  // this pass is documented as directly invocable after InferTileMemorySpace
+  // ("building a custom pass pipeline"), and a bare pass call does not enforce
+  // `required` properties — only PassPipeline does. So a caller who skips pass 23
+  // lands here with AivSplitLoweredValid unmet, and without this guard the kernel
+  // expands silently and SplitVectorKernel mis-shapes it.
+  //
+  // Internal rather than user-facing: the failure is an unmet pass prerequisite,
+  // not something about the kernel the author can read off their source. The
+  // message says which step was skipped instead of offering authoring advice.
+  //
+  // Regions carry their own per-mode check in the AivSplitValid verifier (l), and
+  // a multi-mode function has no single GetSplitMode() for this whole-function
+  // form to read, so regions are skipped here exactly as before.
+  if (!had_regions) {
+    if (auto mode = func->GetSplitMode(); mode.has_value() && *mode != SplitMode::None) {
+      const int split_dim = split_axis::SplitDimension(*mode);
+      auto hazard = split_axis::FindTransposeSplitHazard(func->body_, split_dim);
+      if (hazard.call) {
+        INTERNAL_CHECK_SPAN(false, hazard.call->span_)
+            << "Internal error: kernel '" << func->name_ << "' carries split mode "
+            << (split_dim == 0 ? "UP_DOWN" : "LEFT_RIGHT")
+            << " and a tile.transpose that swaps the split axis (dim " << split_dim
+            << "), which LowerAutoVectorSplit rejects — this IR did not pass that step, so "
+               "AivSplitLoweredValid does not hold";
+      }
+    }
+  }
 
   const bool needs_dual_aiv_dispatch =
       PassContext::Current()->GetBackendHandler()->RequiresNoSplitDualAivDispatch() &&

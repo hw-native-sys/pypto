@@ -66,6 +66,16 @@ this pass sees **every** function, including the pure-vector `pl.split` kernels
 `LowerAutoVectorSplit` declines to lower; that pass now validates its
 pass-through branch, which closes the gap without the late diagnostic.
 
+**A whole-function backstop remains here, as an `INTERNAL_CHECK_SPAN`.** This
+pass is documented below as invocable on its own after `InferTileMemorySpace`,
+and a bare pass call does **not** enforce `required` properties — only
+`PassPipeline` does. So a caller who skips `LowerAutoVectorSplit` arrives with
+`AivSplitLoweredValid` unmet, and without the guard the kernel expands silently
+and `SplitVectorKernel` mis-shapes it. It is internal rather than user-facing
+because the failure is an unmet pass prerequisite, not a fact the author can
+read off their source, so the message names the skipped step instead of giving
+authoring advice.
+
 `split_axis::FindTransposeSplitHazard` is still the shared detector: it flags the
 first `tile.transpose` whose source is **non-singleton on the split axis** (a
 singleton source carries no split data — the no-op broadcast case — and is left
