@@ -424,8 +424,7 @@ def load(
             the tile; cannot widen it past what the source has. Each element must
             be an integer scalar — one extent per dimension, not a nested
             ``[start, extent]`` pair.
-        target_memory: Target memory space (MemorySpace.Vec, .Mat, or .SRAM —
-            the on-chip spaces the tload path can land in). ``None`` (the
+        target_memory: On-chip target memory space (MemorySpace.Vec or .Mat). ``None`` (the
             default) leaves the space unset for the compiler to place.
             MX-layout tensors require an explicit MemorySpace.Mat.
         clamp: Sanction a read that runs off the end of the source. By default a
@@ -444,16 +443,12 @@ def load(
             back into the cache inside a bypassing scope. PTOAS has no L2-bypass
             path yet (https://github.com/hw-native-sys/PTOAS/issues/1356), so a
             BYPASS request warns and compiles as an ordinary cached access today.
-        source_memory: Source memory space of the transfer — the space the
-            tensor is read from. Any of ``MemorySpace.DDR`` /
-            ``MemorySpace.SRAM`` / ``MemorySpace.Vec`` / ``MemorySpace.Mat``
-            may be declared (a presentational statement of the source end;
-            the load itself always reads the GM tensor). ``None`` (the
-            default) leaves the source unstated, which is equivalent to DDR.
-            Together with ``target_memory`` this presents both ends of the
-            move on the call:
-            ``pl.load(x, [0, 0], [32, 32], source_memory=pl.Mem.DDR,
-            target_memory=pl.Mem.Vec)``.
+        source_memory: External source medium, ``MemorySpace.DDR`` or
+            ``MemorySpace.SRAM``. Both share the global address space; the
+            tensor pointer must already address the intended memory. This
+            declaration emits ``source_memory = "sram"`` (or ``"gm"`` for DDR)
+            on ``pto.tload`` without changing pointer addressing or placement.
+            ``None`` omits the marker and uses ordinary global addressing.
 
     Returns:
         Tile wrapping the load operation
@@ -516,22 +511,14 @@ def store(
         st_phase: Consumer-side unit-flag phase. A producer that finishes with
             ``acc_phase=pl.AccPhase.Final`` must be consumed by a store with
             ``st_phase=pl.STPhase.Final`` so the unit flag is cleared.
-        source_memory: Source memory space of the transfer — the space the tile
-            is read from. Must be one of the store's registered tile-input
-            spaces (``MemorySpace.Vec`` / ``MemorySpace.Acc`` /
-            ``MemorySpace.SRAM``); when the tile's space is already resolved
-            the declaration must agree with it. ``None`` (the default) leaves
-            the source unstated, deferring to the tile's own space.
-        target_memory: Target memory space of the transfer — the space the
-            output tensor is written to. Any of ``MemorySpace.DDR`` /
-            ``MemorySpace.SRAM`` / ``MemorySpace.Vec`` / ``MemorySpace.Mat``
-            may be declared (a presentational statement of the destination
-            end; the store itself always writes the GM tensor). ``None``
-            (the default) is equivalent to DDR. Together with
-            ``source_memory`` this presents both ends of the move on the
-            call:
-            ``pl.store(t, [0, 0], out, source_memory=pl.Mem.Vec,
-            target_memory=pl.Mem.DDR)``.
+        source_memory: On-chip source location, ``MemorySpace.Vec`` or
+            ``MemorySpace.Acc``. Must agree with the tile's resolved location.
+            ``None`` leaves the source unstated.
+        target_memory: External destination medium, ``MemorySpace.DDR`` or
+            ``MemorySpace.SRAM``. Both share the global address space; the
+            output tensor pointer must already address the intended memory.
+            This declaration emits ``target_memory = "sram"`` (or ``"gm"`` for
+            DDR) on ``pto.tstore`` without relocating data. ``None`` omits the marker.
 
     Returns:
         Tensor wrapping the store operation

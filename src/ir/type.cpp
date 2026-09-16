@@ -39,6 +39,9 @@ namespace {
 
 std::optional<MemorySpace> ValidateTileMemorySpaceConsistency(const std::optional<MemRefPtr>& memref,
                                                               std::optional<MemorySpace> memory_space) {
+  CHECK(memory_space != MemorySpace::SRAM)
+      << "SRAM is external memory in the DDR address space, not a TileType memory space; "
+         "use tile.load source_memory or tile.store target_memory with a tensor";
   if (!memref.has_value()) {
     return memory_space;
   }

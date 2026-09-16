@@ -538,12 +538,12 @@ class TestOpMemorySpecRegistry:
         assert spec["input_constraints"] == []
 
     def test_store_spec(self):
-        """tile.store input 0 accepts Vec, Acc, or SRAM."""
+        """tile.store input 0 accepts Vec or Acc."""
         spec = ir.get_op_memory_spec("tile.store")
         assert spec is not None
         constraints = spec["input_constraints"]
         assert len(constraints) == 1
-        assert set(constraints[0]) == {ir.MemorySpace.Vec, ir.MemorySpace.Acc, ir.MemorySpace.SRAM}
+        assert set(constraints[0]) == {ir.MemorySpace.Vec, ir.MemorySpace.Acc}
 
     @pytest.mark.parametrize(
         "op_name",

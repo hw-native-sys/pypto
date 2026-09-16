@@ -210,6 +210,28 @@ static std::string MakeStoreFPCodegenPTO(const std::string& pto_op_name, const C
   return "";
 }
 
+// Preserve the physical tensor endpoint independently of its global pointer
+// type. The marker belongs to the transfer, not the cached tensor view: the
+// same view can be used by calls with different explicit declarations.
+static void AppendExternalMemoryAttribute(const CallPtr& op, const std::string& kwarg_name,
+                                          std::vector<std::string>& attrs) {
+  if (!op->HasKwarg(kwarg_name)) return;
+  const auto medium = op->GetKwarg<ir::MemorySpace>(kwarg_name);
+  INTERNAL_CHECK_SPAN(medium == ir::MemorySpace::DDR || medium == ir::MemorySpace::SRAM, op->span_)
+      << kwarg_name << " must be DDR or SRAM (enforced at type deduction)";
+  attrs.push_back(kwarg_name + " = \"" + codegen::MemorySpaceToMLIR(medium) + "\"");
+}
+
+static void AppendMemoryOpAttributes(std::ostringstream& line, const std::vector<std::string>& attrs) {
+  if (attrs.empty()) return;
+  line << " {";
+  for (size_t i = 0; i < attrs.size(); ++i) {
+    if (i != 0) line << ", ";
+    line << attrs[i];
+  }
+  line << "}";
+}
+
 // tile.load: emit pto.subview + pto.tload
 static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
@@ -256,22 +278,6 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
              << "(https://github.com/hw-native-sys/PTOAS/issues/1356); compiling as an "
              << "ordinary cached access" << (op->span_.is_valid() ? " at " + op->span_.to_string() : "");
   }
-
-  // source_memory is a presentational declaration validated at type deduction:
-  // the declared source end may name any DMA-interconnected space
-  // {DDR, SRAM, Vec, Mat}. The tload source below is a GM partition view by
-  // construction regardless of the declaration, so a value outside that set
-  // here means a pass mangled the kwargs — assert the invariant instead of
-  // re-deriving it.
-  const auto declared_source =
-      op->GetKwarg<ir::MemorySpace>("source_memory", ir::MemorySpace::DDR);
-  INTERNAL_CHECK_SPAN(declared_source == ir::MemorySpace::DDR ||
-                          declared_source == ir::MemorySpace::SRAM ||
-                          declared_source == ir::MemorySpace::Vec ||
-                          declared_source == ir::MemorySpace::Mat,
-                      op->span_)
-      << "tile.load source_memory must be one of the DMA-interconnected spaces "
-         "DDR / SRAM / Vec / Mat (enforced at type deduction)";
 
   std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);
   std::string tile_buf = codegen.GetCurrentResultTarget();
@@ -323,9 +329,12 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   std::ostringstream tload_line;
   tload_line << "pto.tload ins(" << partition_view << " : " << partition_type << ") outs(";
   tload_line << tile_buf << " : " << tile_buf_type << ")";
+  std::vector<std::string> attrs;
+  AppendExternalMemoryAttribute(op, "source_memory", attrs);
   if (is_mx_load) {
-    tload_line << " {layout = #pto.layout<" << pto_layout << ">}";
+    attrs.push_back("layout = #pto.layout<" + pto_layout + ">");
   }
+  AppendMemoryOpAttributes(tload_line, attrs);
   codegen.Emit(tload_line.str());
 
   // No follow-up `pto.set_validshape` is emitted: every `pto.alloc_tile`
@@ -350,18 +359,12 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
   const auto& valid_shape = tile_view.valid_shape;
   INTERNAL_CHECK_SPAN(valid_shape.size() == 2, op->span_) << "tile.store tile valid_shape must be 2D";
 
-  // Optional source_memory / target_memory declarations (both ends of the
-  // move, mirroring tile.load). Type deduction validated the value set
-  // ({Vec, Acc, SRAM} for the source, {DDR, SRAM, Vec, Mat} for
-  // the target); here the declared source is additionally checked against
-  // the tile's FINAL resolved space, which is decidable only now that every
-  // memory pass has run. An unresolved space at this point is a compiler
-  // bug (InferTileMemorySpace resolves all device-function tiles), but a
-  // *disagreement* is a user error: the declaration was legal when the
-  // tile's space was still open.
+  // Check the tile source against final placement. The external destination
+  // medium (DDR or SRAM) keeps global addressing and is emitted as a transfer
+  // attribute below, independently of the tile source and other store flags.
   if (op->HasKwarg("source_memory")) {
     const auto declared_source = op->GetKwarg<ir::MemorySpace>("source_memory");
-    CHECK_SPAN(tile_type->memory_space_.has_value(), op->span_)
+    INTERNAL_CHECK_SPAN(tile_type->memory_space_.has_value(), op->span_)
         << "tile.store source_memory is declared but the tile's memory space is unresolved "
            "after InferTileMemorySpace";
     CHECK_SPAN(declared_source == *tile_type->memory_space_, op->span_)
@@ -369,13 +372,6 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
         << ") disagrees with the tile's resolved memory space ("
         << ir::MemorySpaceToString(*tile_type->memory_space_)
         << "); drop the source_memory kwarg or align it with the space the tile landed in";
-  }
-  {
-    const auto declared_target = op->GetKwarg<ir::MemorySpace>("target_memory", ir::MemorySpace::DDR);
-    INTERNAL_CHECK_SPAN(declared_target == ir::MemorySpace::DDR || declared_target == ir::MemorySpace::SRAM ||
-                            declared_target == ir::MemorySpace::Vec || declared_target == ir::MemorySpace::Mat,
-                        op->span_)
-        << "tile.store target_memory must be one of {DDR, SRAM, Vec, Mat} (enforced at type deduction)";
   }
 
   auto height_code = codegen.GetExprAsCode(valid_shape[0]);
@@ -436,6 +432,7 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
   tstore_line << ") outs(" << partition_view << " : " << partition_type << ")";
 
   std::vector<std::string> attrs;
+  AppendExternalMemoryAttribute(op, "target_memory", attrs);
 
   const int st_phase = op->GetKwarg<int>("st_phase", static_cast<int>(ir::STPhase::kUnspecified));
   INTERNAL_CHECK_SPAN(ir::IsValidSTPhase(st_phase), op->span_)
@@ -458,16 +455,9 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     attrs.emplace_back("atomicType = #pto<atomic_type atomic_add>");
   }
 
-  // Default-valued attributes are omitted so ordinary stores keep their
-  // byte-identical PTO form. PTOAS expects all present attributes in one dict.
-  if (!attrs.empty()) {
-    tstore_line << " {";
-    for (size_t i = 0; i < attrs.size(); ++i) {
-      if (i != 0) tstore_line << ", ";
-      tstore_line << attrs[i];
-    }
-    tstore_line << "}";
-  }
+  // Unstated/default flags preserve the existing form; all attributes share
+  // one dictionary, including external memory, phase, and atomic mode.
+  AppendMemoryOpAttributes(tstore_line, attrs);
   codegen.Emit(tstore_line.str());
 
   auto result_var = codegen.GetCurrentResultVar();

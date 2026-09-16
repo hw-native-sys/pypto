@@ -99,6 +99,9 @@ std::string FormatLocalArrayTypeString(const ir::ArrayType& array_type) {
 std::string MemorySpaceToMLIR(ir::MemorySpace space) {
   if (space == ir::MemorySpace::DDR) {
     return "gm";
+  } else if (space == ir::MemorySpace::SRAM) {
+    // External endpoint identity; SRAM pointers still use global addressing.
+    return "sram";
   } else if (space == ir::MemorySpace::Vec) {
     return "vec";
   } else if (space == ir::MemorySpace::Mat) {
@@ -115,10 +118,6 @@ std::string MemorySpaceToMLIR(ir::MemorySpace space) {
     // PTOAS v0.48 exposes a single MLIR loc `scaling` for scale / fixpipe buffers
     // (TileType::ScaleLeft/ScaleRight are not yet distinct tile_buf locs).
     return "scaling";
-  } else if (space == ir::MemorySpace::SRAM) {
-    // Cluster SRAM. PTOAS predates this loc; a PTOAS release that grows it
-    // accepts the emitted `loc=sram` tile_buf as-is.
-    return "sram";
   } else {
     throw ValueError("Invalid MemorySpace value");
   }

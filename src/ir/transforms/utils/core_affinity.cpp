@@ -28,13 +28,9 @@ namespace pypto {
 namespace ir {
 namespace core_affinity {
 
-// SRAM joins the non-cube side: it is a cluster-shared staging space whose
-// transfers (DDR<->SRAM on MTE2/MTE3, SRAM<->Vec/Mat) are driven from the
-// vector lane, same as a plain Vec tile. Keeping it out of the cube set also
-// keeps a SRAM tile from being classified as cube-only data and split across
-// AIC/AIV by ExpandMixedKernel.
 bool IsCubeMemorySpace(MemorySpace ms) {
-  return ms != MemorySpace::DDR && ms != MemorySpace::Vec && ms != MemorySpace::SRAM;
+  // External memory is not owned by either compute core.
+  return ms != MemorySpace::DDR && ms != MemorySpace::SRAM && ms != MemorySpace::Vec;
 }
 
 std::optional<MemorySpace> GetFirstTileArgMemory(const CallPtr& call) {

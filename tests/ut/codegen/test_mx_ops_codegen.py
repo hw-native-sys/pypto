@@ -89,7 +89,8 @@ class TestMxMatmulCodegen:
         with pytest.raises(ValueError, match=r"matmul_mx.*only supported.*Ascend950.*a5.*a2a3"):
             _run_default_pipeline(Program, BackendType.Ascend910B)
 
-    def test_mx_scale_load_accepts_narrowed_valid_shape(self):
+    @pytest.mark.parametrize("source_memory", [None, pl.Mem.SRAM])
+    def test_mx_scale_load_accepts_narrowed_valid_shape(self, source_memory):
         """Physical shapes stay fractal-aligned; valid_shape may narrow M."""
 
         @pl.program
@@ -105,11 +106,17 @@ class TestMxMatmulCodegen:
                     [16, 2],
                     valid_shape=[8, 2],
                     target_memory=pl.Mem.Mat,
+                    source_memory=source_memory,
                 )
 
         mlir = _emit_incore_mlir(Program)
         assert "mx5d_view" in mlir
         assert "pto.tload" in mlir
+        load = next(line for line in mlir.splitlines() if "pto.tload " in line)
+        if source_memory == pl.Mem.SRAM:
+            assert '{source_memory = "sram", layout = #pto.layout<mx_a_zz>}' in load
+        else:
+            assert "source_memory" not in load
         partitions = [line for line in mlir.splitlines() if "partition_view" in line]
         # Physical TLoad box remains shapes=[16,2] -> one SFractal block row.
         assert any(

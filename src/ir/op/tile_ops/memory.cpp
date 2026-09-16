@@ -190,11 +190,13 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
     }
   }
 
-  // source_memory is optional and presentational: it states the space the
-  // transfer reads from, so both ends of the move are visible on the call.
-  // Any of {DDR, SRAM, Vec, Mat} may be declared; anything outside that set
-  // is rejected at the operator boundary, where the diagnostic still carries
-  // the user's span.
+  CHECK_SPAN(!target_memory_opt.has_value() || *target_memory_opt == MemorySpace::Vec ||
+                 *target_memory_opt == MemorySpace::Mat,
+             args[0]->span_)
+      << "tile.load target_memory must be Vec or Mat; external memory is the tensor source";
+
+  // The tensor pointer selects external DDR or SRAM in the same global address
+  // space. This declaration does not relocate the tensor or change tile placement.
   std::optional<MemorySpace> source_memory_opt;
   for (const auto& [k, v] : kwargs) {
     if (k == "source_memory") {
@@ -203,11 +205,10 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
     }
   }
   CHECK_SPAN(!source_memory_opt.has_value() || *source_memory_opt == MemorySpace::DDR ||
-                 *source_memory_opt == MemorySpace::SRAM || *source_memory_opt == MemorySpace::Vec ||
-                 *source_memory_opt == MemorySpace::Mat,
+                 *source_memory_opt == MemorySpace::SRAM,
              args[0]->span_)
       << "The operator " << op_name
-      << " reads from the transfer source spaces {DDR, SRAM, Vec, Mat}: source_memory must be "
+      << " reads from external memory {DDR, SRAM}: source_memory must be "
          "one of those, but got "
       << (source_memory_opt.has_value() ? MemorySpaceToString(*source_memory_opt) : std::string("none"));
 
@@ -461,13 +462,9 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
       << "The operator " << op_name
       << " requires st_phase to be STPhase.Unspecified or STPhase.Final, but got int " << st_phase;
 
-  // Optional source_memory / target_memory declarations: they state both ends
-  // of the move on the call, mirroring tile.load. The source tile may live in
-  // any of the op's registered tile-input spaces {Vec, Acc, SRAM}, and when
-  // the tile's space is already resolved the declaration must agree with it
-  // (an unresolved space is checked against the final placement at codegen).
-  // The target may be any of {DDR, SRAM, Vec, Mat} — a presentational
-  // statement of the destination end (the store always writes the GM tensor).
+  // source_memory asserts the resolved on-chip tile location. target_memory
+  // declares the external medium selected by the output tensor pointer; DDR
+  // and SRAM share the same global address space.
   std::optional<MemorySpace> source_memory_opt;
   std::optional<MemorySpace> target_memory_opt;
   for (const auto& [k, v] : kwargs) {
@@ -478,12 +475,11 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
     }
   }
   if (source_memory_opt.has_value()) {
-    CHECK_SPAN(*source_memory_opt == MemorySpace::Vec || *source_memory_opt == MemorySpace::Acc ||
-                   *source_memory_opt == MemorySpace::SRAM,
+    CHECK_SPAN(*source_memory_opt == MemorySpace::Vec || *source_memory_opt == MemorySpace::Acc,
                args[0]->span_)
         << "The operator " << op_name
-        << " stores from the vector, accumulator, or SRAM buffers: source_memory must be "
-           "MemorySpace.Vec, MemorySpace.Acc, or MemorySpace.SRAM, but got "
+        << " stores from the vector or accumulator buffers: source_memory must be "
+           "MemorySpace.Vec or MemorySpace.Acc, but got "
         << MemorySpaceToString(*source_memory_opt);
     CHECK_SPAN(!tile_type->memory_space_.has_value() || *source_memory_opt == *tile_type->memory_space_,
                args[0]->span_)
@@ -493,11 +489,10 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
         << MemorySpaceToString(*tile_type->memory_space_) << ")";
   }
   CHECK_SPAN(!target_memory_opt.has_value() || *target_memory_opt == MemorySpace::DDR ||
-                 *target_memory_opt == MemorySpace::SRAM || *target_memory_opt == MemorySpace::Vec ||
-                 *target_memory_opt == MemorySpace::Mat,
+                 *target_memory_opt == MemorySpace::SRAM,
              args[2]->span_)
       << "The operator " << op_name
-      << " writes to the transfer destination spaces {DDR, SRAM, Vec, Mat}: target_memory must be "
+      << " writes to external memory {DDR, SRAM}: target_memory must be "
          "one of those, but got "
       << (target_memory_opt.has_value() ? MemorySpaceToString(*target_memory_opt) : std::string("none"));
 
@@ -1293,8 +1288,7 @@ REGISTER_OP("tile.load")
         "valid_shape",
         "Valid shape of tile in each dimension, in source tensor coordinates (TupleType of ScalarType). ")
     .set_attr<MemorySpace>("target_memory")
-    // Presentational: states the space the transfer reads from — any of the
-    // transfer source spaces {DDR, SRAM, Vec, Mat}. See DeduceTileLoadType.
+    // External source medium (DDR or SRAM); the tensor retains global addressing.
     .set_attr<MemorySpace>("source_memory")
     .set_attr<bool>("clamp")
     // Declared GM cache-access policy, carried as an int (``ir::CachePolicy``)
@@ -1319,13 +1313,10 @@ REGISTER_OP("tile.store")
                   "Injected by FlattenTileNdTo2D for ND tensors.")
     .set_attr<int>("atomic")
     .set_attr<int>("st_phase")
-    // Presentational: state both ends of the move on the call, mirroring
-    // tile.load. source_memory is the tile's space (one of the registered
-    // tile-input spaces {Vec, Acc, SRAM}); target_memory may be any of
-    // {DDR, SRAM, Vec, Mat} — see DeduceTileStoreType.
+    // Tile source location and external tensor destination medium.
     .set_attr<MemorySpace>("source_memory")
     .set_attr<MemorySpace>("target_memory")
-    .set_input_memory(0, {MemorySpace::Vec, MemorySpace::Acc, MemorySpace::SRAM})
+    .set_input_memory(0, {MemorySpace::Vec, MemorySpace::Acc})
     .set_output_reuses_input(2)
     // A plain store overwrites the region it lands on: the untouched remainder
     // is neither loaded nor re-stored, so nothing moves *into* the kernel and
@@ -1665,7 +1656,7 @@ REGISTER_OP("tile.mgather")
 REGISTER_OP("tile.move")
     .set_op_category("TileOp")
     .functional_execution_memory_access()
-    .set_description("Move tile between memory levels (Vec/Mat/Left/Right/LeftScale/RightScale/SRAM)")
+    .set_description("Move tile between memory levels (Vec/Mat/Left/Right/LeftScale/RightScale)")
     .add_argument("tile", "Input tile (TileType)")
     .set_attr<MemorySpace>("target_memory")
     .set_attr<TileLayout>("blayout")

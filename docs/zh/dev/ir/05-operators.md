@@ -594,9 +594,9 @@ with ib.function("tensor_example") as f:
 | 分类 | 操作 | 描述 |
 | ---- | ---- | ---- |
 | **内存** | `tile.get_block_idx` | 获取 block 索引（返回 UINT64 标量） |
-| - | `tile.load` | TensorType → TileType（tensor 到 tile）。可选的 `source_memory` / `target_memory` kwargs 在调用上呈现搬运的两端：`source_memory` 是 GM 侧的呈现性声明（`DDR` / `SRAM` / `Vec` / `Mat` 任一；`None` 等价于 DDR），`target_memory` 指明片上落点空间 `Vec` / `Mat` / `SRAM`（`None` 交给 InferTileMemorySpace 推断）。MX layout 的 tensor 必须显式 `target_memory=Mat` |
-| - | `tile.store` | TileType → TensorType（tile 到 tensor）。可选的 `source_memory` / `target_memory` kwargs 在调用上呈现搬运的两端：`source_memory` 必须是算子注册的 tile 输入空间之一（`Vec` / `Acc` / `SRAM`），且与 tile 已解析的空间一致（最终放置在 codegen 复检）；`target_memory` 是 GM 侧的呈现性声明（`DDR` / `SRAM` / `Vec` / `Mat` 任一；`None` 等价于 DDR） |
-| - | `tile.move` | 在 memory space 之间搬移 tile（`target_memory`）。支持 `SRAM` ↔ `Vec` / `Mat`（cluster 级中转空间，GM ↔ SRAM 有保证的直连路径）—— 见 [tile.move 的结果 view](#tilemove-的结果-view) |
+| - | `tile.load` | TensorType → TileType。`source_memory` 声明外部内存介质（`DDR` 或 `SRAM`），两者共享全局地址空间（global address space），实际位置由 tensor 指针决定。`target_memory` 指定片上 tile 缓冲区（`Vec` 或 `Mat`），省略时由编译器推断。MX 布局要求显式指定 `Mat`。 |
+| - | `tile.store` | TileType → TensorType。可选 `source_memory`（`Vec` 或 `Acc`）必须与 tile 最终位置一致。`target_memory` 声明外部内存介质（`DDR` 或 `SRAM`），实际位置由输出 tensor 指针决定。 |
+| - | `tile.move` | 在片上内存空间之间搬运 tile（`target_memory`）。SRAM 是外部内存，不是 tile 存储位置，应通过 tensor load/store 访问。 |
 | **逐元素** | `tile.add/sub/mul/div` | Tile-Tile 操作 |
 | - | `tile.adds/subs/muls/divs` | Tile-Scalar 操作。**常量**标量操作数会采用 tile 的元素 dtype（裸整数字面量否则会被解析为 `index`，而任何 `pto.t*s` 算子都不接受它）——但整数 tile 上的浮点字面量仍保持 FP32，以保留类型提升语义。显式的 `pl.const(v, dtype)` 属于用户的有意标注，与任何非常量表达式一样保持不变；非常量的 `index` 标量（循环变量、`pl.dim`）会被拒绝——需用 `pl.cast` 转换。`tensor.*s` 同理。 |
 | **一元** | `tile.sqrt` | 逐元素平方根 |
@@ -614,6 +614,8 @@ with ib.function("tensor_example") as f:
 | - | `tile.mgather` | 从 GM tensor 聚集到新 Vec 或 Mat tile。Vec 输出使用 INT32 index tile（`[1,R]`，A5 也支持 `[R,1]`）；Mat 输出使用 ND-layout GM source 与 INT32 index tensor，并采用规范 NZ layout，物理行数按 16 对齐、列数按 `C0 = 32 / sizeof(dtype)` 对齐；可通过较小的二维 `valid_shape` 表达 padding tail。`coalesce="row"` 聚集整行；`"elem"` 按扁平元素索引聚集，且 Mat 输出要求同 dtype、连续 ND、元素数不少于物理输出的 GM `scratch` tensor。`gather_oob` 可选择 `undefined`、`clamp`、`wrap` 或 `zero`。payload dtype 支持 I8/U8/I16/U16/I32/U32/FP16/BF16/FP32，以及仅 A5 支持的 FP8E4M3FN/FP8E5M2/HF8。 |
 | **散布** | `tile.scatter` | 按行索引把 `src` 散布到 `dst`（`pto.tscatter` 索引形式；DPS：`dst` 为 in/out，结果别名为 `dst`）。`src` / `dst` dtype ∈ {I8, I16, I32, FP16, FP32, BF16}；`indexes` dtype ∈ {I16, I32}；元素宽度匹配规则：4 字节 dst ↔ INT32，2 字节 dst ↔ INT16，1 字节 dst ↔ INT16。 |
 | - | `tile.scatter_mask` | 按掩码模式把 `src` 行写入 `dst` 中由掩码选中的列（DPS：`dst` 为 in/out）。这是 PyPTO codegen 层形式，下降为 `pto.tscatter` 掩码发射 —— **并非**独立的 pto-isa 指令（与 `tile.gather_mask` 不同）。掩码语义见[掩码模式](#掩码模式)。 |
+
+SRAM 表示与 DDR 共享全局地址空间的外部内存介质。端点声明不会分配 SRAM、转换指针或在 DDR 与 SRAM 之间复制数据；调用方必须传入由目标内存支持的 tensor。两种介质使用相同的全局 tensor 视图和指针寻址方式。显式端点声明生成字符串属性（string attribute）：`pto.tload` 对 SRAM 输出 `source_memory = "sram"`，对 DDR 输出 `source_memory = "gm"`；`pto.tstore` 输出对应的 `target_memory` 属性。`None` 省略属性，保持原有全局内存编码。这些标志描述外部 tensor 端点，不是 tile 缓冲区，不会生成 `loc=sram` tile；当前不按物理地址范围校验介质声明。 DDR 与 SRAM 在 `mem_graph` 中保留独立节点，load/store 管线推断（pipe inference）按声明的端点查询，不将 SRAM 映射为 DDR。模拟拓扑包含直接双向连接 `DDR <-> SRAM`。SRAM 与 DDR 到 `Vec`、`Mat` 的连接方向完全一致：均可读入 `Vec/Mat`，并接受来自 `Vec` 的写回；当前均无 `Mat` 写回边。同时保留 `Acc -> SRAM`。外部内存之间的图边表示连通性，不会自动增加 tensor 复制操作或指定其执行管线。这些外部路径不会启用 SRAM tile 或指向 SRAM 的 `tile.move`。 标志逐条搬运生成，不修改缓存的 tensor 视图；与 MX 的 `layout`、store 的 `stPhase` 和 `atomicType` 共用一个属性字典。这是提供给后续 SRAM 支持的输出协议，当前 codegen 验证不要求汇编器或硬件识别它。
 
 当前暂不支持把 `quant_mx` 与 `matmul_mx` 放在同一个 InCore mixed task 中。
 请拆成 AIV 量化 kernel 与 AIC 矩阵乘 kernel，并通过 GM 暂存量化数据和

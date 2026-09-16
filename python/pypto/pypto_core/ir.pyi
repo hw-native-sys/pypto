@@ -1064,7 +1064,7 @@ class MemorySpace(enum.Enum):
     """On-core scalar register file / C stack (ArrayType)."""
 
     SRAM = ...
-    """Cluster-shared on-chip SRAM."""
+    """External SRAM medium sharing DDR addressing; not a tile storage location."""
 
 Mem = MemorySpace
 """Short alias for MemorySpace (e.g., Mem.Vec instead of MemorySpace.Vec)."""

@@ -4270,6 +4270,7 @@ class TestTileStoreAttrsCodegen:
         *,
         atomic=pl.AtomicType.None_,
         st_phase=pl.STPhase.Unspecified,
+        target_memory=None,
     ) -> str:
         """Generate one fp32 store with the requested optional attributes.
 
@@ -4292,7 +4293,14 @@ class TestTileStoreAttrsCodegen:
                     lhs = pl.load(lhs_gm, [0, 0], [1, 128], target_memory=pl.MemorySpace.Mat)
                     rhs = pl.load(rhs_gm, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
                     result = pl.tile.gemv(lhs, rhs, acc_phase=pl.AccPhase.Final)
-                    pl.store(result, [0, 0], out, atomic=atomic, st_phase=pl.STPhase.Final)
+                    pl.store(
+                        result,
+                        [0, 0],
+                        out,
+                        atomic=atomic,
+                        st_phase=pl.STPhase.Final,
+                        target_memory=target_memory,
+                    )
 
             return self._generate_mlir(FinalProg)
 
@@ -4301,7 +4309,7 @@ class TestTileStoreAttrsCodegen:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(self, x: pl.Tensor[[16, 16], pl.FP32], out: pl.Tensor[[16, 16], pl.FP32]):
                 t = pl.load(x, [0, 0], [16, 16])
-                pl.store(t, [0, 0], out, atomic=atomic, st_phase=st_phase)
+                pl.store(t, [0, 0], out, atomic=atomic, st_phase=st_phase, target_memory=target_memory)
 
         return self._generate_mlir(Prog)
 
@@ -4382,6 +4390,18 @@ class TestTileStoreAttrsCodegen:
         assert all(expected in line for line in tstore_lines), (
             f"expected one combined store attribute dictionary, got:\n{tstore_lines}"
         )
+
+    def test_sram_marker_composes_with_phase_and_atomic(self):
+        mlir = self._generate_fp32_store(
+            atomic=pl.AtomicType.Add, st_phase=pl.STPhase.Final, target_memory=pl.Mem.SRAM
+        )
+        stores = [line for line in mlir.splitlines() if "pto.tstore " in line]
+        assert len(stores) == 1
+        expected = (
+            '{target_memory = "sram", stPhase = #pto<st_phase final>, '
+            'atomicType = #pto<atomic_type atomic_add>}'
+        )
+        assert expected in stores[0]
 
     def test_atomic_add_bf16_rejected_on_ascend950(self):
         """bf16 atomic-add is A2/A3-only; on Ascend950 (A5) the program is rejected.
@@ -5766,6 +5786,93 @@ class TestB03TriAndGatherCodegen:
 
         with pytest.raises(ValueError, match="scratch must not overlap idx"):
             self._generate_mlir(Prog)
+
+
+class TestExternalSramCodegen:
+    """External-medium markers survive lowering without changing global addressing."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_backend_after_test(self):
+        yield
+        backend.reset_for_testing()
+
+    @staticmethod
+    def _generate_mlir(program, backend_type):
+        backend.reset_for_testing()
+        backend.set_backend_type(backend_type)
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+        funcs = [f for f in optimized.functions.values() if ir.is_incore_type(f.func_type)]
+        assert len(funcs) == 1, "External SRAM must not introduce cross-core splitting"
+        single = ir.Program(funcs, funcs[0].name, optimized.span)
+        return "\n".join(strip_loc(line) for line in codegen.PTOCodegen().generate(single).splitlines())
+
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+    @pytest.mark.parametrize("source", [None, "DDR", "SRAM"])
+    @pytest.mark.parametrize("target", [None, "DDR", "SRAM"])
+    @pytest.mark.parametrize("nd", [False, True])
+    def test_endpoint_markers_preserve_addressing(self, backend_type, source, target, nd):
+        template = """
+import pypto.language as pl
+
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.InCore)
+    def main(self, x: pl.Tensor[SHAPE, pl.FP32],
+             out: pl.Out[pl.Tensor[SHAPE, pl.FP32]]) -> pl.Tensor[SHAPE, pl.FP32]:
+        t = pl.load(x, OFFSETS, SHAPE, target_memory=pl.Mem.Vec, source_memory=SOURCE)
+        return pl.store(t, OFFSETS, out, source_memory=pl.Mem.Vec, target_memory=TARGET)
+"""
+        template = template.replace("SHAPE", "[1, 16, 128]" if nd else "[16, 128]")
+        template = template.replace("OFFSETS", "[0, 0, 0]" if nd else "[0, 0]")
+
+        def generate(source_medium, target_medium):
+            source_expr = "None" if source_medium is None else f"pl.Mem.{source_medium}"
+            target_expr = "None" if target_medium is None else f"pl.Mem.{target_medium}"
+            program = pl.parse(template.replace("SOURCE", source_expr).replace("TARGET", target_expr))
+            return self._generate_mlir(program, backend_type)
+
+        expected = generate(None, None)
+        actual = generate(source, target)
+        load_lines = [line for line in actual.splitlines() if "pto.tload " in line]
+        store_lines = [line for line in actual.splitlines() if "pto.tstore " in line]
+        assert len(load_lines) == len(store_lines) == 1
+        for line, key, medium in (
+            (load_lines[0], "source_memory", source),
+            (store_lines[0], "target_memory", target),
+        ):
+            if medium is None:
+                assert key not in line
+            else:
+                marker = "gm" if medium == "DDR" else "sram"
+                assert f'{key} = "{marker}"' in line
+        assert "target_memory" not in load_lines[0]
+        assert "source_memory" not in store_lines[0]
+        assert "loc=sram" not in actual
+        # Strip only the endpoint attributes: pointers, offsets, views, tile
+        # locations and transfer instructions must otherwise be byte-identical.
+        without_markers = re.sub(r' \{(?:source|target)_memory = "(?:gm|sram)"\}', "", actual)
+        assert without_markers == expected
+
+    def test_reused_tensor_view_does_not_leak_medium(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, x: pl.Tensor[[32, 16], pl.FP32], out: pl.Tensor[[16, 16], pl.FP32]):
+                a = pl.load(x, [0, 0], [16, 16], source_memory=pl.Mem.SRAM)
+                b = pl.load(x, [16, 0], [16, 16])
+                pl.store(pl.add(a, b), [0, 0], out, target_memory=pl.Mem.SRAM)
+
+        mlir = self._generate_mlir(Prog, BackendType.Ascend950)
+        loads = [line for line in mlir.splitlines() if "pto.tload " in line]
+        assert len(loads) == 2
+        assert sum('source_memory = "sram"' in line for line in loads) == 1
+        assert sum("source_memory" not in line for line in loads) == 1
+        views = [line for line in mlir.splitlines() if "pto.partition_view " in line]
+        bases = [line.split("pto.partition_view ", 1)[1].split(",", 1)[0] for line in views]
+        assert bases[0] == bases[1]
+        assert all("source_memory" not in line and "target_memory" not in line for line in views)
+        stores = [line for line in mlir.splitlines() if "pto.tstore " in line]
+        assert len(stores) == 1 and 'target_memory = "sram"' in stores[0]
 
 
 if __name__ == "__main__":
