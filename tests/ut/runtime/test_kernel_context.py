@@ -286,5 +286,116 @@ def test_process_mode_claim_is_mutually_exclusive(setup, first):
         claims[other]()
 
 
+class _Ticket:
+    def __init__(self, calls, error=None):
+        self.calls = calls
+        self.error = error
+        self.finished = False
+
+    def enqueue(self):
+        self.calls.append("enqueue")
+        if self.error:
+            raise self.error
+
+    def done(self):
+        return self.finished
+
+    def quiesce(self):
+        self.wait()
+
+    def wait(self):
+        self.calls.append("wait")
+        if self.error:
+            raise self.error
+        self.finished = True
+
+
+def test_launch_ownership_reaping_and_close_order(setup, monkeypatch):
+    state, config, calls, _ = setup
+    registration = state.ensure_callable(artifact(), config)
+    order = []
+    ticket = _Ticket(order)
+    owner = weakref.ref(ticket)
+    state.submit(registration, lambda worker, ticket=ticket: ticket)
+    del ticket
+    assert owner() is not None
+    second = _Ticket(order)
+    state.submit(registration, lambda worker: second)
+    assert order == ["enqueue", "enqueue"]
+    monkeypatch.setattr(calls.workers[0], "close", lambda: order.append("close"))
+    state.close()
+    assert order == ["enqueue", "enqueue", "wait", "wait", "close"]
+    assert owner() is None
+
+
+def test_completed_launch_is_reaped_on_next_call(setup):
+    state, config, _, _ = setup
+    registration = state.ensure_callable(artifact(), config)
+    ticket = _Ticket([])
+    state.submit(registration, lambda worker, ticket=ticket: ticket)
+    ticket.finished = True
+    owner = weakref.ref(ticket)
+    del ticket
+    state.submit(registration, lambda worker: _Ticket([]))
+    assert owner() is None
+    state.close()
+
+
+def test_partial_enqueue_failure_retains_owners_and_refuses_new_work(setup):
+    state, config, calls, _ = setup
+    registration = state.ensure_callable(artifact(), config)
+    ticket = _Ticket([], RuntimeError("partial enqueue"))
+    owner = weakref.ref(ticket)
+    with pytest.raises(RuntimeError, match="partial enqueue"):
+        state.submit(registration, lambda worker, ticket=ticket: ticket)
+    del ticket
+    assert owner() is not None
+    with pytest.raises(RuntimeError, match="failed"):
+        state.submit(registration, lambda worker: pytest.fail("must not submit"))
+    with pytest.raises(RuntimeError, match="partial enqueue"):
+        state.close()
+    assert not calls.closes and owner() is not None
+
+
+def test_close_waits_for_in_progress_admission(setup, monkeypatch):
+    state, config, calls, _ = setup
+    registration = state.ensure_callable(artifact(), config)
+    entered, release = threading.Event(), threading.Event()
+    order = []
+    ticket = _Ticket(order)
+
+    def enqueue():
+        entered.set()
+        assert release.wait(5)
+        order.append("enqueue")
+
+    monkeypatch.setattr(ticket, "enqueue", enqueue)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        submit = pool.submit(state.submit, registration, lambda worker, ticket=ticket: ticket)
+        assert entered.wait(5)
+        unblock = pool.submit(lambda: (release.set()))
+        state.close()
+        submit.result()
+        unblock.result()
+    assert order == ["enqueue", "wait"]
+    assert len(calls.closes) == 1
+
+
+def test_close_reports_submission_error_after_proven_quiescence(setup, monkeypatch):
+    state, config, calls, _ = setup
+    registration = state.ensure_callable(artifact(), config)
+    ticket = _Ticket([], RuntimeError("native rejection"))
+    with pytest.raises(RuntimeError, match="native rejection"):
+        state.submit(registration, lambda worker: ticket)
+    quiescence = []
+    monkeypatch.setattr(ticket, "quiesce", lambda: quiescence.append("all streams idle"))
+    with pytest.raises(RuntimeError, match="native rejection"):
+        state.close()
+    assert quiescence == ["all streams idle"]
+    assert len(calls.closes) == 1 and not state._submissions
+    assert state.state is KernelState.CLOSED
+    state.close()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

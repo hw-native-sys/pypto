@@ -534,6 +534,16 @@ def _compile_and_assemble_locked(
 
     kernels = kernel_config.KERNELS
     orchestration = kernel_config.ORCHESTRATION
+    if kernel_abi is not None:
+        from ._kernel_artifact import kernel_callable_signature  # noqa: PLC0415
+
+        # Program codegen describes tensor directions only. Kernel invocation
+        # packets additionally derive their scalar count from the ChipCallable.
+        orchestration = dict(orchestration)
+        orchestration["signature"] = [
+            getattr(importlib.import_module("simpler.task_interface").ArgDirection, name)
+            for name in kernel_callable_signature(kernel_abi)
+        ]
     runtime_config = getattr(kernel_config, "RUNTIME_CONFIG", {})
     # Default to the runtime that ``pto_backend`` bakes into every generated
     # ``kernel_config.py``; only legacy / hand-written configs omit the key.

@@ -43,9 +43,15 @@ def require_kernel_native(abi: KernelABI) -> None:
         )
 
 
+def kernel_callable_signature(abi: KernelABI) -> list[str]:
+    """Describe both independently indexed native pools, including scalar slots."""
+    tensors = [p.direction.upper() for p in abi.parameters if p.shape is not None]
+    return tensors + ["SCALAR" for p in abi.parameters if p.shape is None]
+
+
 def validate_kernel_record(record: dict[str, Any], abi: KernelABI) -> None:
     """Require the correct target, pooled signature and descriptor-bearing binary."""
-    expected = [p.direction.upper() for p in abi.parameters if p.shape is not None]
+    expected = kernel_callable_signature(abi)
     orch = record["orchestration"]
     if (
         record["platform"] != abi.platform

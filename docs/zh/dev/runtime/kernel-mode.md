@@ -1,7 +1,7 @@
 # Kernel mode 集成基础
 
-内部 torch 适配器为后续 kernel executor 描述借用的 NPU 参数，不新增公开 kernel
-执行入口。已有 JIT、编译 program 和 Worker 调用保持当前行为。
+内部 torch 适配器校验借用的 NPU 参数，并通过可选 native torch_npu 扩展提交已准备好的
+kernel 注册项，不新增公开 kernel 执行入口。已有 JIT、编译 program 和 Worker 调用保持当前行为。
 
 ## 调用元数据与所有权
 
@@ -26,7 +26,7 @@ Tensor/Scalar 的排列不定义 native ABI 布局。后续 native 参数编码�
 
 frame 持有每个 Tensor 及其 storage 对象。`alias_result()` 返回 `None`、单个已有
 Tensor 或已有 Tensor 元组，不分配业务输出。仅有 Python 引用不能保护 frame 释放后
-的设备异步使用；native 队列所有权和 allocator stream 记录属于独立的 launch 层工作。
+的设备异步使用；native 队列所有权和 allocator stream 记录由下文 launch 层提供。
 frame 使用期间，调用方不能 resize 或使借用的 storage 失效。
 
 ## 校验规则
@@ -59,9 +59,8 @@ frame 使用期间，调用方不能 resize 或使借用的 storage 失效。
 Simpler 或 native launch 扩展；`torch` 仍是 PyPTO 的常规依赖。真正描述 NPU 调用时
 才按需加载 `torch_npu`，缺失时给出针对性的错误信息。
 
-本基础能力覆盖 metadata 校验和 Python 调用 frame 所有权，不表示 kernel launch、
-taskQueue 顺序、allocator 安全、eager 数值执行或 ACLGraph 已可用。公开入口切换
-必须等待 native adapter 和 runtime 集成完成。
+内部 launch 路径需要可选 native adapter。公开 JIT 入口切换与 torch.ops 注册仍是后续工作。
+eager 提交拒绝 graph capture，尚未提供 ACLGraph 生命周期契约。
 
 ## 进程 kernel Worker 与注册
 
@@ -70,7 +69,7 @@ kernel Worker。所有算子共享此管理器；算子、Scalar 值或 caller s
 Worker。`KernelConfig` 固定 platform、runtime、device 和 AICPU 线程数，其他常驻资源
 暂用 simpler 默认值。配置不兼容时报错，不额外创建 Worker。
 
-集成 SDK 固定为 `29a1cd405645ab65e8f26c1b1f18c8622e5bf8b9`。实际 Python 接口为
+集成 SDK 固定为 `bd7a7c41026914e0e129063ee4867de876aae69c`。实际 Python 接口为
 `simpler.task_interface.ChipWorker.kernel_init`、`kernel_prepare_callable` 和
 `finalize`，目标 L2 `Worker(execution_mode="kernel")` 尚未提供。PyPTO 内部 adapter
 使用这些已有方法；init/prepare 不接收 caller stream，native context generation 和
@@ -98,8 +97,8 @@ close 后仍保留；切换模式须使用独立进程。simpler 提供 native �
 重复 kernel context 拒绝。直接使用第三方 simpler 对象会绕过 PyPTO 的进程检查，不能
 据此在同一进程混用 program/kernel 执行。
 
-内部管理器 `close()` 为终止操作，须在初始化线程执行，且调用方已排空 launch 和图使用。
-它停止新增注册、等待在途 prepare，然后 finalize Worker。close 失败保留 owner 与
+内部管理器 `close()` 为终止操作，须在初始化线程执行。它停止新增注册及提交，
+等待在途 prepare/admission，排空已接纳 eager ticket，然后 finalize Worker。close 失败保留 owner 与
 注册记录供初始化线程重试，但 handle 已不可用；成功后清空注册、使 handle 失效，不能
 重新初始化。关闭未初始化的管理器不做 native 工作。不增加析构或裸 `atexit` close，
 框架退出时序另行接入；这些是内部基础原语，不要求普通算子用户手动管理生命周期。
@@ -120,3 +119,60 @@ offset view 和非连续输入拒绝行为。没有真实 NPU 或所选平台为
 对两个 DSL callable 执行 init/prepare/close，并验证 native 重复 kernel context 拒绝
 和 HBG 能力拒绝。测试要求固定版本 runtime 二进制及已预留的 NPU，不执行 PyPTO
 kernel，也不验证 capture。
+
+## 内部 torch 队列提交（04B）
+
+`pypto.torch.launch.enqueue(registration, args)` 接受进程管理器准备好的注册项及逻辑签名顺序的完整参数。
+每次校验注册项并生成独立 frame，通过可选 native torch_npu 扩展提交，返回既有输出别名；返回只表示
+Host 接纳，不表示设备执行完成。本入口不编译、不 prepare、不创建 Worker、不分配业务输出。
+公开 JIT 入口与 torch.ops 注册仍由后续 PR 接线。当前 eager 提交明确拒绝 graph capture。
+
+扩展使用固定 SDK 的 `ChipStorageTaskArgs` 头文件构造两个独立参数池。混合签名 `(x, scale, out)`
+对应两个 Tensor 和一个 Scalar；组装及二进制恢复的 ChipCallable 签名包含 `IN, OUT, SCALAR`，
+program 代码生成的 Tensor direction 元数据保持原语义。Scalar 按实际类型的对象字节零扩展为 u64，
+保留浮点位模式及有符号整数宽度。Tensor 使用含 storage offset 的逻辑地址；native launch 当前要求
+rank 1..5、正 u32 extent/stride 和基础格式。空 view 可描述 metadata，但暂不可提交执行。
+
+`OpCommand::RunOpApiV2` 将 native callback 纳入当前 framework stream 的 Host 队列；关闭 taskQueue
+时同一 callback 同步执行。callback 只调用正式 C++ `ChipWorker::kernel_launch`，不执行 Python、
+JIT 或 prepare。Tensor、Storage、参数 POD、callable ID 和 stream 都在提交前捕获。不会缓存首个
+调用的 stream，也不读取会排空队列的 Python `npu_stream` 属性；capture 查询使用不排空队列的 stream。
+
+进程管理器在 enqueue **之前**持有 ticket，并串行处理 Host 接纳。native Tensor/Storage owner 覆盖
+延迟 callback；提交前按唯一 Storage 执行 allocator `recordStream`，包括别名参数。Simpler 建立
+caller-stream join 后记录逐次 completion event，覆盖设备使用。后续调用查询 event 回收已完成 ticket，
+不排空 Host 队列；内部 `state.drain()` 或初始化线程上的 `close()` 等待在途提交，最后一个 ticket 可保留到
+该边界。close 拒绝新增工作，等待 prepare/admission，排空 ticket 后才 finalize Worker。
+
+同步提交错误及异步 callback 错误通过 framework 和 ticket wait 传播。失败或部分 enqueue 的 ticket
+继续持有 Worker、参数及 Storage：caller stream 等待失败不能证明内部 stream 已静止。内部初始化线程上的 close 排空 Host callback，并仅在错误路径执行全设备同步，证明内部 stream
+已静止后再 finalize、释放 owner，同时重新抛出原提交错误。quiescence 或 teardown 失败时继续保留
+全部 owner 以便重试 close。不会隐式重新初始化；自动框架退出串接仍留给后续工作。
+
+### 可选扩展构建
+
+默认 `PYPTO_BUILD_TORCH_NPU=OFF`，普通构建不发现或链接 torch_npu。导入 `pypto.torch.launch` 无需
+扩展；实际 enqueue 缺扩展时给出明确构建提示。
+
+```bash
+source .claude/skills/testing/load-env.sh
+# Source the installed CANN set_env.sh to set ASCEND_HOME_PATH.
+cmake -S . -B build -DPYPTO_BUILD_TORCH_NPU=ON
+cmake --build build --parallel "$PYPTO_BUILD_JOBS"
+```
+
+使用当前环境匹配的 torch/torch_npu headers、libraries，以及 `ASCEND_HOME_PATH` 下的 CANN；要求
+C++11 libstdc++ ABI 和兼容的 nanobind 构建。扩展嵌入并校验精确 Simpler revision。
+Simpler Python 模块隐藏 C++ symbols，因此本扩展直接编译固定 SDK 的 Worker 实现，并通过 nanobind
+已注册的 `ChipWorker` 类型接入；不复制 ABI 定义、不提取私有 context 地址、不创建额外 Worker。
+切换 SDK、framework 或编译器 ABI 后须同时重建两个模块。
+
+确定性 Host 队列阻塞测试使用独立、不安装的辅助模块。仅测试时开启
+`-DPYPTO_BUILD_TORCH_NPU_TESTS=ON`，并把 `build/torch_npu_tests` 加入 `PYTHONPATH`。
+生产扩展不包含阻塞队列或故障注入接口。
+
+`tests/ut/torch/test_launch.py` 覆盖分发、Scalar 编码、别名、缺失/不兼容扩展；管理器 UT 覆盖保活、
+回收、失败接纳及关闭顺序。`tests/st/runtime/kernel/test_torch_launch.py` 用真实 DSL callable 验证
+A → PyPTO → B、非默认 stream、taskQueue 开关、offset view、逐次 Scalar、GC/分配压力、close、
+阻塞 callback 快照及 native 错误注入。需预留 A2/A3 NPU 并从本 worktree 构建两个扩展；不声明 A5 或
+ACLGraph 已验收。

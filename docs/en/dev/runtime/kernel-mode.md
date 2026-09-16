@@ -1,7 +1,7 @@
 # Kernel-mode integration foundations
 
-The internal torch adapter describes borrowed NPU arguments for a future kernel
-executor. It does not add a public kernel execution entry point. Existing JIT,
+The internal torch adapter validates borrowed NPU arguments and submits prepared
+kernel registrations through an optional native torch_npu extension. It does not add a public kernel execution entry point. Existing JIT,
 compiled-program and Worker calls keep their current behavior.
 
 ## Call metadata and ownership
@@ -23,7 +23,7 @@ Each call produces a new immutable `CallFrame`:
 | `return_tensors` | The exact caller objects selected by validated return aliases. |
 
 Tensor and scalar ordering does not define a native ABI layout. Native argument
-encoding will consume these values together with a validated kernel descriptor.
+encoding consumes these values together with a validated kernel descriptor.
 Addresses, scalar values and streams are per-call state, not compilation keys or
 persistent metadata.
 
@@ -31,7 +31,7 @@ The frame retains each tensor and its storage object. `alias_result()` returns
 `None`, one existing tensor, or a tuple of existing tensors. It never allocates
 business outputs. Python ownership alone does not protect asynchronous device
 use after the frame is released; native queue ownership and allocator stream
-recording are separate launch-layer work. Callers must not resize or invalidate
+recording are supplied by the launch adapter described below. Callers must not resize or invalidate
 borrowed storage while a frame is in use.
 
 ## Validation
@@ -72,10 +72,9 @@ module does not request torch_npu, Simpler or a native launch extension.
 `torch` remains a normal PyPTO dependency. A real call description loads
 `torch_npu` on demand and reports a targeted error if it is unavailable.
 
-This foundation covers metadata validation and Python call-frame ownership.
-It does not claim kernel launch, taskQueue ordering, allocator safety, eager
-numerical execution or ACLGraph support. Those need the native adapter and
-runtime integration before a public entry-point switch.
+The internal launch path requires the optional native adapter. Public JIT entry
+selection and torch.ops registration remain separate work. Eager submission
+rejects graph capture; it does not provide an ACLGraph lifetime contract.
 
 ## Process kernel Worker and registration
 
@@ -87,7 +86,7 @@ context resources currently use Simpler defaults. An incompatible configuration
 is rejected instead of opening another Worker.
 
 The integration SDK is pinned to
-`29a1cd405645ab65e8f26c1b1f18c8622e5bf8b9`. Its supported Python surface is
+`bd7a7c41026914e0e129063ee4867de876aae69c`. Its supported Python surface is
 `simpler.task_interface.ChipWorker.kernel_init`, `kernel_prepare_callable` and
 `finalize`; the proposed L2 `Worker(execution_mode="kernel")` API is not present.
 PyPTO's private adapter uses these existing methods. Init and prepare take no
@@ -125,14 +124,87 @@ third-party Simpler objects bypasses PyPTO's process gate; it is not a supported
 way to combine program and kernel execution in one process.
 
 `close()` on the internal manager is terminal and must run on the thread that
-initialized it, after the caller has drained launches and graph use. It stops
-new registration, waits for in-flight prepare, then finalizes the Worker. A
+initialized it. It stops new registration and submission, waits for in-flight
+prepare/admission, drains accepted eager tickets, then finalizes the Worker. A
 failed close retains ownership and registration records for an owner-thread
 retry; it does not leave handles usable. Successful close clears registrations,
 invalidates handles and cannot reinitialize. Closing an unused manager performs
 no native work. No destructor or bare `atexit` hook closes the Worker; framework
 exit ordering remains a separate integration step. These methods are internal
 foundations, not a manual lifecycle required of ordinary operator users.
+
+## Internal torch queue submission
+
+`pypto.torch.launch.enqueue(registration, args)` takes a registration from the
+process manager and complete arguments in logical signature order. It validates
+the registration and describes a fresh frame, then returns the declared output
+aliases after host admission. Return does not mean device completion. It never
+compiles, prepares a callable, creates a Worker or allocates business outputs.
+
+The optional `pypto._torch_npu` module constructs `ChipStorageTaskArgs` using the
+pinned SDK headers. Tensor and scalar pools are independent: a mixed signature
+`(x, scale, out)` produces two tensor entries and one scalar slot. The assembled
+kernel ChipCallable includes `IN, OUT, SCALAR`, including in restored binary
+manifests. Generated program tensor-direction metadata remains unchanged.
+Scalars copy zero-extended object bytes, preserving float bits and signed integer
+width. Tensor addresses point at the logical view, including storage offsets.
+The current native launch requires rank 1..5, positive u32 extents/strides and
+base-format tensors; empty views remain valid metadata but cannot launch yet.
+
+`OpCommand::RunOpApiV2` places the native callback in the framework's current
+stream queue. The callback invokes the public C++ `ChipWorker::kernel_launch`;
+it executes no Python, JIT or prepare. The same callback runs inline when the
+framework disables taskQueue. The adapter captures native Tensor and Storage
+owners, a copied argument POD, callable ID and current stream. It does not cache
+the first call's stream or read a queue-draining Python `npu_stream` property.
+Capture-state inspection uses the borrowed stream without draining the queue.
+
+The process manager retains every native ticket **before** enqueue, serializes
+host admission and refuses stale registrations. Native storage owners cover
+the delayed host callback. Allocator `recordStream` is applied once per unique
+storage before submission, including aliased inputs/outputs. A completion event
+recorded after Simpler's caller-stream join covers device use. Later calls reap
+completed tickets without draining the host queue; internal `state.drain()` or
+owner-thread `close()` waits for outstanding work. A retained last ticket is
+released at that drain/close boundary.
+
+Submission and asynchronous callback errors propagate through the framework and
+ticket wait. Failed or partially enqueued tickets retain their Worker, argument
+and storage owners: a failed stream wait does not establish that Simpler's
+internal streams are quiescent. Internal owner-thread close drains the host callback and, only on failure,
+requires a full device synchronization to establish internal-stream quiescence.
+It then finalizes and releases owners, while re-raising the original submission
+error. Failed quiescence or teardown retains all owners for a later close attempt.
+There is no implicit reinitialization. Automatic framework shutdown remains
+follow-up work; the internal manager supplies the drain/cleanup boundary.
+
+### Building the optional adapter
+
+The ordinary build defaults `PYPTO_BUILD_TORCH_NPU=OFF` and does not discover or
+link torch_npu. Importing `pypto.torch.launch` remains safe without the extension;
+a real enqueue reports how to enable it when absent.
+
+```bash
+# Use the same Python environment/compiler ABI for PyPTO and Simpler.
+source .claude/skills/testing/load-env.sh
+# Source the installed CANN set_env.sh to set ASCEND_HOME_PATH.
+cmake -S . -B build -DPYPTO_BUILD_TORCH_NPU=ON
+cmake --build build --parallel "$PYPTO_BUILD_JOBS"
+```
+
+The adapter is compiled against the installed torch/torch_npu headers and
+libraries and CANN from `ASCEND_HOME_PATH`. The supported build requires the
+C++11 libstdc++ ABI and compatible nanobind builds. The adapter embeds and checks
+the exact Simpler revision. Simpler's Python module hides its C++ symbols, so
+the adapter compiles the pinned SDK Worker implementation directly and uses
+nanobind's registered `ChipWorker` type. It neither redefines the runtime ABI
+nor extracts private context pointers; it creates no additional Worker. Rebuild
+both modules together after changing the SDK, framework or compiler ABI.
+
+The hardware test's deterministic host-queue gate is a separate, non-installed
+module, enabled only with `-DPYPTO_BUILD_TORCH_NPU_TESTS=ON`. Add
+`build/torch_npu_tests` to `PYTHONPATH` when running that test. No fault-injection
+or queue-blocking entry is shipped in the production adapter.
 
 ## Verification
 
@@ -153,3 +225,12 @@ handles, ownership, owner-thread shutdown and retry. The isolated cases in
 init/prepare/close with two DSL callables, duplicate native kernel-context
 rejection and HBG capability refusal. They require the pinned runtime binaries
 and a reserved NPU. They do not launch a PyPTO kernel or validate capture.
+
+`tests/ut/torch/test_launch.py` checks dispatch, scalar encoding, aliases and
+missing/incompatible extension errors. Manager tests cover retention, reaping,
+failed admission and close ordering. `tests/st/runtime/kernel/test_torch_launch.py`
+uses a generated scalar-bearing DSL callable with taskQueue enabled/disabled,
+non-default streams, framework A → PyPTO → B ordering, offset views, changing
+scalars, GC/allocation pressure, owner-thread close, a deliberately blocked host
+callback and native error injection. These require a reserved A2/A3 NPU and
+both locally built adapters. They do not claim A5 or ACLGraph acceptance.

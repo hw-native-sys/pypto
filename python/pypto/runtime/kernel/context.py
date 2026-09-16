@@ -12,6 +12,7 @@
 import itertools
 import os
 import threading
+from collections.abc import Callable
 from concurrent.futures import Future
 from enum import Enum
 from types import SimpleNamespace
@@ -48,6 +49,8 @@ class _ProcessKernelState:
         self._registrations: dict[bytes, KernelRegistration] = {}
         self._preparing: dict[bytes, Future[KernelRegistration]] = {}
         self._prepare_threads: dict[bytes, threading.Thread] = {}
+        self._submissions: list[Any] = []
+        self._submission_lock = threading.Lock()
 
     def _check_pid(self) -> None:
         if self.pid != os.getpid():
@@ -143,8 +146,32 @@ class _ProcessKernelState:
             ):
                 raise RuntimeError("Kernel registration does not belong to this live Worker generation")
 
+    def submit(self, registration: KernelRegistration, prepare: Callable[[Any], Any]) -> None:
+        """Serialize admission and retain native tickets before any enqueue can fail."""
+        self._check_pid()
+        with self._submission_lock:
+            self.require_registration(registration)
+            self._submissions = [ticket for ticket in self._submissions if not ticket.done()]
+            ticket = prepare(self._worker)
+            self._submissions.append(ticket)
+            try:
+                ticket.enqueue()
+            except BaseException as exc:
+                with self._condition:
+                    self._failure = exc
+                    self.state = KernelState.FAILED
+                raise
+
+    def drain(self) -> None:
+        """Wait for admitted eager work; failed tickets remain owned for diagnosis."""
+        self._check_pid()
+        with self._submission_lock:
+            for ticket in self._submissions:
+                ticket.wait()
+            self._submissions.clear()
+
     def close(self) -> None:
-        """Internal terminal close; callers must already have drained launch/graph work."""
+        """Internal owner-thread close, draining admitted eager submissions first."""
         self._check_pid()
         with self._condition:
             if self.state is KernelState.CLOSED:
@@ -159,9 +186,20 @@ class _ProcessKernelState:
             self._condition.notify_all()
             while self._preparing:
                 self._condition.wait()
+        submission_error: BaseException | None = None
         try:
-            if self._worker is not None:
-                self._worker.close()
+            with self._submission_lock:
+                for ticket in self._submissions:
+                    try:
+                        ticket.wait()
+                    except BaseException as exc:
+                        submission_error = submission_error or exc
+                        # A missing caller join requires full device quiescence.
+                        # Failure here keeps every owner and prevents finalize.
+                        ticket.quiesce()
+                if self._worker is not None:
+                    self._worker.close()
+                self._submissions.clear()
         except BaseException as exc:
             with self._condition:
                 self._failure = exc
@@ -170,7 +208,10 @@ class _ProcessKernelState:
         with self._condition:
             self._registrations.clear()
             self._worker = None
+            self._failure = None
             self.state = KernelState.CLOSED
+        if submission_error is not None:
+            raise submission_error
 
 
 _process = SimpleNamespace(state=_ProcessKernelState())

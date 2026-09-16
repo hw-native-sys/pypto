@@ -1341,5 +1341,38 @@ def test_internal_kernel_jit_cache_is_distinct_and_scalar_values_reuse(
     assert program.execution_capabilities != first.execution_capabilities
 
 
+def test_kernel_binary_signature_includes_scalar_pool_and_rejects_old_manifest():
+    from pypto._kernel_abi import KernelABI, KernelParameter  # noqa: PLC0415
+    from pypto.runtime._kernel_artifact import (  # noqa: PLC0415
+        kernel_callable_signature,
+        validate_kernel_record,
+    )
+
+    abi = KernelABI(
+        "a2a3",
+        "tensormap_and_ringbuffer",
+        (
+            KernelParameter("x", "fp32", "In", (8,)),
+            KernelParameter("scale", "fp32", "In", None),
+            KernelParameter("out", "fp32", "Out", (8,)),
+            KernelParameter("count", "int32", "In", None),
+        ),
+    )
+    record = {
+        "platform": abi.platform,
+        "runtime_name": abi.runtime,
+        "orchestration": {
+            "signature": ["IN", "OUT"],
+            "function_name": "aicpu_orchestration_entry",
+            "binary": abi.binary_tag(),
+        },
+    }
+    with pytest.raises(ValueError, match="does not match"):
+        validate_kernel_record(record, abi)
+    assert kernel_callable_signature(abi) == ["IN", "OUT", "SCALAR", "SCALAR"]
+    record["orchestration"]["signature"] = kernel_callable_signature(abi)
+    validate_kernel_record(record, abi)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

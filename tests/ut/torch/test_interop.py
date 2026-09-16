@@ -363,6 +363,7 @@ builtins.__import__ = guarded
 import pypto
 import pypto.torch
 import pypto.torch.interop
+import pypto.torch.launch
 assert pypto.torch.__all__ == []
 """
     result = subprocess.run(

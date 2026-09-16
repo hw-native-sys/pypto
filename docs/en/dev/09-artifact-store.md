@@ -88,7 +88,7 @@ this helper does not change their behavior or introduce a kernel calling API.
 ## Kernel ABI descriptors (integration branch)
 
 The integration branch pins simpler to
-`29a1cd405645ab65e8f26c1b1f18c8622e5bf8b9`. `pypto._kernel_abi.KernelABI`
+`bd7a7c41026914e0e129063ee4867de876aae69c`. `pypto._kernel_abi.KernelABI`
 describes that revision's `ChipStorageTaskArgs` argument protocol. Its schema 1
 is a **PyPTO descriptor version**, not a version exported by simpler. Updating
 the runtime pin requires a fresh ABI audit and conformance test; an unknown

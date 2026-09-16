@@ -56,5 +56,10 @@ class _NativeWorker:
     def prepare(self, callable_: Any) -> Any:
         return self.worker.kernel_prepare_callable(callable_)
 
+    @property
+    def native_launch_target(self) -> Any:
+        """Borrow the pinned SDK's registered C++ instance for a native type cast."""
+        return self.worker._impl
+
     def close(self) -> None:
         self.worker.finalize()
