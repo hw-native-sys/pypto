@@ -62,7 +62,7 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 | Rule Name | IRProperty | Purpose |
 | --------- | ---------- | ------- |
 | **SSAVerify** | SSAForm | No multiple assignment, no name shadowing, no missing yield, scope violations, cardinality checks |
-| **TypeCheck** | TypeChecked | Type kind/dtype/shape/size consistency |
+| **TypeCheck** | TypeChecked | Type kind/dtype/shape/size consistency; call-boundary layout agreement |
 | **NoNestedCall** | NoNestedCalls | No nested call expressions in args, conditions, ranges |
 | **BreakContinueCheck** | BreakContinueValid | Break/continue only in sequential/while loops |
 | **UseAfterDefCheck** | UseAfterDef | Every Var use dominated by a definition (param, AssignStmt, loop var, iter_arg, return_var) |
@@ -354,6 +354,7 @@ buffer lifetime verifiers remain separate obligations.
 | 110 | `DISTRIBUTED_WINDOW_IDENTITY_MISMATCH` | Distributed tensors refer to different window buffers |
 | 111 | `TILE_VIEW_MISMATCH` | Effective TileView metadata mismatch |
 | 112 | `BUFFER_DESCRIPTOR_MISMATCH` | Buffer descriptor or multi-buffer slot count mismatch |
+| 113 | `TENSOR_LAYOUT_MISMATCH` | Call/Submit argument layout differs from the callee parameter's |
 
 ### NoNestedCall
 

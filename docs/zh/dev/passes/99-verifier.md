@@ -62,7 +62,7 @@
 | 规则名称 | IRProperty | 用途 |
 | -------- | ---------- | ---- |
 | **SSAVerify** | SSAForm | 无多重赋值、无名称遮蔽、无缺失 yield、作用域违规、基数检查 |
-| **TypeCheck** | TypeChecked | 类型种类/数据类型/形状/大小一致性 |
+| **TypeCheck** | TypeChecked | 类型种类/数据类型/形状/大小一致性；调用边界 layout 一致性 |
 | **NoNestedCall** | NoNestedCalls | 参数、条件、范围中无嵌套调用表达式 |
 | **BreakContinueCheck** | BreakContinueValid | break/continue 仅在顺序/while 循环中 |
 | **UseAfterDefCheck** | UseAfterDef | 每个 Var 使用均由定义支配（参数、AssignStmt、循环变量、iter_arg、return_var） |
@@ -308,6 +308,7 @@ Buffer IR 选项。
 | 110 | `DISTRIBUTED_WINDOW_IDENTITY_MISMATCH` | DistributedTensor 引用了不同的窗口缓冲区 |
 | 111 | `TILE_VIEW_MISMATCH` | 有效 TileView 元数据不匹配 |
 | 112 | `BUFFER_DESCRIPTOR_MISMATCH` | Buffer 描述符或多缓冲槽位数量不匹配 |
+| 113 | `TENSOR_LAYOUT_MISMATCH` | Call/Submit 实参的 layout 与被调用函数形参不一致 |
 
 ### NoNestedCall
 

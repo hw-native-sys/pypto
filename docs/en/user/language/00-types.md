@@ -171,7 +171,15 @@ b: pl.Tensor[[N, K], pl.FP32]              # ✅ source shape, no marker
 The layout-only shorthand `pl.Tensor[..., pl.DN]` is not supported: it raises
 `ParserTypeError`. For a transposed matmul operand, pass `a_trans=True` / `b_trans=True` to
 `pl.matmul`, or derive the transposed view at the use site with `pl.transpose(x, -2, -1)`.
-A slice or reshape of a DN-producing operation inherits DN automatically.
+A slice or reshape of a DN-producing operation inherits DN automatically. A slice keeps the
+source layout whenever its trailing two axes survive intact, so a leading-axis shard
+(`w[r]` of a `[N_RANKS, R, C]` weight) stays on the parent's layout.
+
+**A layout annotation must agree on both sides of a call.** It is a claim about byte order in
+memory, not a conversion request, so passing an ND-typed argument to a parameter declared
+`pl.NZ` (or `pl.DN`) is rejected by the type checker before the first pass runs:
+`Layout mismatch at argument 1 of call to 'nz_helper': parameter 'b' is declared NZ but the
+argument is ND.` Annotate both ends, or neither.
 
 `pl.ND` is the default row-major layout and never needs writing. `pl.NZ` asserts that the
 tensor's bytes in global memory are *already* stored in PTO-native NZ fractal order, so a

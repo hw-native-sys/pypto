@@ -2510,6 +2510,80 @@ def test_tensor_slice_drop_dims_drops_valid_shape_axes():
     assert [d.value for d in result_type.tensor_view.valid_shape if isinstance(d, ir.ConstInt)] == [4, 64]
 
 
+def _layout_of(call: ir.Call) -> ir.TensorLayout:
+    """The layout a call's result type claims; an absent view means the ND default."""
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    if result_type.tensor_view is None:
+        return ir.TensorLayout.ND
+    return result_type.tensor_view.layout
+
+
+def _result_dims(call: ir.Call) -> list[int]:
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    return [d.value for d in result_type.shape if isinstance(d, ir.ConstInt)]
+
+
+def _view_var(shape, layout, name="t"):
+    span = ir.Span.unknown()
+    view = ir.TensorView([], layout)
+    return ir.Var(name, ir.TensorType(shape, DataType.FP32, None, view), span)
+
+
+def test_tensor_slice_keeps_dn_layout():
+    """A slice is a view into the source bytes, so it cannot become row-major ND."""
+    call = ir.op.tensor.slice(_view_var([32, 32], ir.TensorLayout.DN), [16, 32], [0, 0])
+
+    assert _layout_of(call) == ir.TensorLayout.DN
+
+
+def test_tensor_slice_keeps_nz_layout():
+    """The same rule for NZ: the fractal order of the selected bytes is unchanged."""
+    call = ir.op.tensor.slice(_view_var([512, 256], ir.TensorLayout.NZ), [256, 128], [0, 0])
+
+    assert _layout_of(call) == ir.TensorLayout.NZ
+
+
+def test_tensor_slice_keeps_layout_when_only_leading_axes_are_dropped():
+    """Dropping a batch axis leaves the trailing plane -- and so the layout -- intact."""
+    call = ir.op.tensor.slice(
+        _view_var([4, 512, 256], ir.TensorLayout.NZ), [1, 512, 256], [2, 0, 0], drop_dims=[0]
+    )
+
+    assert _result_dims(call) == [512, 256]
+    assert _layout_of(call) == ir.TensorLayout.NZ
+
+
+def test_tensor_slice_drops_layout_when_a_trailing_axis_is_dropped():
+    """DN and NZ are claims about the trailing pair; erasing one of those axes ends them."""
+    call = ir.op.tensor.slice(
+        _view_var([512, 256, 1], ir.TensorLayout.DN), [512, 256, 1], [0, 0, 0], drop_dims=[2]
+    )
+
+    assert _result_dims(call) == [512, 256]
+    assert _layout_of(call) == ir.TensorLayout.ND
+
+
+def test_tensor_slice_drops_layout_for_a_lower_rank_window():
+    """A lower-rank window re-associates the source axes, so its layout is not inherited."""
+    call = ir.op.tensor.slice(_view_var([4, 512, 256], ir.TensorLayout.NZ), [512, 256], [0, 0])
+
+    assert _layout_of(call) == ir.TensorLayout.ND
+
+
+def test_tensor_slice_of_nd_source_still_carries_no_view():
+    """The ND path is unchanged: a fully valid ND slice keeps its canonical empty view."""
+    span = ir.Span.unknown()
+    tensor_var = ir.Var("t", ir.TensorType([32, 32], DataType.FP32), span)
+
+    call = ir.op.tensor.slice(tensor_var, [16, 32], [0, 0])
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.tensor_view is None
+
+
 def test_tensor_slice_drop_dims_rejects_non_unit_dim():
     """drop_dims may only erase statically size-1 dimensions."""
     span = ir.Span.unknown()

@@ -11,8 +11,10 @@
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/error.h"
@@ -64,6 +66,8 @@ std::string ErrorTypeToString(ErrorType type) {
       return "TILE_VIEW_MISMATCH";
     case ErrorType::BUFFER_DESCRIPTOR_MISMATCH:
       return "BUFFER_DESCRIPTOR_MISMATCH";
+    case ErrorType::TENSOR_LAYOUT_MISMATCH:
+      return "TENSOR_LAYOUT_MISMATCH";
     default:
       return "UNKNOWN";
   }
@@ -78,10 +82,13 @@ namespace {
  */
 class TypeChecker : public IRVisitor {
  public:
-  explicit TypeChecker(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
+  explicit TypeChecker(std::vector<Diagnostic>& diagnostics, ProgramPtr program = nullptr)
+      : diagnostics_(diagnostics), program_(std::move(program)) {}
 
   void VisitFunction(const FunctionPtr& func) override;
   void VisitExpr(const ExprPtr& expr) override;
+  void VisitExpr_(const CallPtr& op) override;
+  void VisitExpr_(const SubmitPtr& op) override;
   void VisitStmt_(const ForStmtPtr& op) override;
   void VisitStmt_(const WhileStmtPtr& op) override;
   void VisitStmt_(const IfStmtPtr& op) override;
@@ -90,6 +97,13 @@ class TypeChecker : public IRVisitor {
 
  private:
   std::vector<Diagnostic>& diagnostics_;
+  /// Owning program, when available: lets a call resolve its callee's signature.
+  ProgramPtr program_;
+
+  /**
+   * @brief Check that each argument's tensor layout matches the callee parameter's
+   */
+  void CheckCallArgLayouts(const OpPtr& callee_op, const std::vector<ExprPtr>& args, const Span& span);
 
   /**
    * @brief Record an error
@@ -163,6 +177,69 @@ void TypeChecker::VisitExpr(const ExprPtr& expr) {
   }
   ValidateTypeValidShape(expr->GetType(), context, expr->span_);
   IRVisitor::VisitExpr(expr);
+}
+
+namespace {
+
+/// The layout a tensor-like type carries. An absent ``tensor_view_`` means ND —
+/// the ``TensorType`` constructor drops a view that adds nothing to the default,
+/// so "no view" and "an ND view" are the same layout claim.
+std::optional<TensorLayout> TensorLayoutOf(const TypePtr& type) {
+  auto tensor_type = AsTensorTypeLike(type);
+  if (!tensor_type) return std::nullopt;
+  if (!tensor_type->tensor_view_) return TensorLayout::ND;
+  return tensor_type->tensor_view_->layout;
+}
+
+}  // namespace
+
+void TypeChecker::CheckCallArgLayouts(const OpPtr& callee_op, const std::vector<ExprPtr>& args,
+                                      const Span& span) {
+  // Only a call to another function in this program has a signature to check
+  // against; a registered operator validates its own operands via f_deduce_type.
+  if (!program_ || !As<GlobalVar>(callee_op)) return;
+  auto callee = program_->GetFunction(callee_op->name_);
+  if (!callee) return;  // Opaque / external — no signature to compare.
+
+  // ``Call`` maps args to params by identity with full coverage; ``Submit``
+  // coverage is only bounded (``args_.size() <= params_.size()``), because a
+  // ``pl.submit`` may omit trailing runtime-allocated ``Out`` params. Identity
+  // still holds over the *leading* args, but once a gap and a trailing
+  // ``CommCtxType`` suffix coexist (after ``MaterializeDistTensorCtx``) the
+  // suffix args bind ``params_[i + gap]``. Rather than re-derive that mapping,
+  // stop before the suffix: those args carry no layout to compare anyway.
+  // See ``Submit::args_`` in include/pypto/ir/expr.h for the canonical rule.
+  size_t n = args.size() < callee->params_.size() ? args.size() : callee->params_.size();
+  if (args.size() != callee->params_.size()) {
+    while (n > 0 && callee->params_[n - 1] && As<CommCtxType>(callee->params_[n - 1]->GetType())) {
+      --n;
+    }
+  }
+  for (size_t i = 0; i < n; ++i) {
+    const auto& param = callee->params_[i];
+    if (!param || !args[i]) continue;
+    auto want = TensorLayoutOf(param->GetType());
+    auto got = TensorLayoutOf(args[i]->GetType());
+    if (!want || !got || *want == *got) continue;
+    std::ostringstream msg;
+    msg << "Layout mismatch at argument " << i << " of call to '" << callee->name_ << "': parameter '"
+        << param->name_hint_ << "' is declared " << TensorLayoutToString(*want) << " but the argument is "
+        << TensorLayoutToString(*got)
+        << ". A layout annotation is a claim about byte order in memory, so the two ends must agree"
+        << " -- annotate the argument " << TensorLayoutToString(*want) << " as well, or drop "
+        << TensorLayoutToString(*want) << " from the parameter.";
+    RecordError(typecheck::ErrorType::TENSOR_LAYOUT_MISMATCH, msg.str(), span);
+  }
+}
+
+void TypeChecker::VisitExpr_(const CallPtr& op) {
+  if (op) CheckCallArgLayouts(op->op_, op->args_, op->span_);
+  IRVisitor::VisitExpr_(op);
+}
+
+void TypeChecker::VisitExpr_(const SubmitPtr& op) {
+  if (op) CheckCallArgLayouts(op->op_, op->args_, op->span_);
+  IRVisitor::VisitExpr_(op);
 }
 
 void TypeChecker::ValidateTypeValidShape(const TypePtr& type, const std::string& context, const Span& span) {
@@ -598,7 +675,7 @@ class TypeCheckPropertyVerifierImpl : public PropertyVerifier {
       }
 
       // Create type checker and run checking
-      TypeChecker checker(diagnostics);
+      TypeChecker checker(diagnostics, program);
       checker.VisitFunction(func);
     }
   }
