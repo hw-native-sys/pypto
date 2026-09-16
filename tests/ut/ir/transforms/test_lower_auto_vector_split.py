@@ -3744,12 +3744,16 @@ def test_sibling_regions_get_distinct_subblock_idx_names():
     assert len(set(injected)) == 2, f"sibling regions must get distinct names, got {injected}"
 
 
-def test_mixed_explicit_implicit_region_rejected():
+def test_mixed_explicit_implicit_region_splices_through():
     """A region that MIXES an explicit ``tile.aiv_shard`` with a plain full-width
     vector op (a Vec ``tile.load`` the implicit path would otherwise halve) is
-    rejected with an actionable user error: the explicit boundary keeps the region
-    in half-width form, so the un-localized full-width op would corrupt both AIV
-    lanes. NEGATIVE test: a rejected transform produces no ``After`` IR."""
+    spliced through UNCHANGED.
+
+    Both lanes really do run that load at full width, so the kernel is very likely
+    wrong — but writing the boundary op by hand is the author's statement that the
+    sharding is theirs, and this pass no longer second-guesses it. The former hard
+    rejection is gone; only the compiler-halved paths keep the scan, as an
+    INTERNAL_CHECK on their own postcondition."""
     span = ir.Span.unknown()
     a_left = ir.Var("a_left", _tile([128, 128], mem=MS.Left), span)
     b_right = ir.Var("b_right", _tile([128, 128], mem=MS.Right), span)
@@ -3782,13 +3786,26 @@ def test_mixed_explicit_implicit_region_rejected():
         ),
         span=span,
     )
+    params = [(a_left, _IN), (b_right, _IN), (data, _IN), (out_0, _OUT)]
     program = _explicit_region_program(
         [ir.AssignStmt(qk, matmul, span), region, ir.ReturnStmt([out_store], span)],
-        [(a_left, _IN), (b_right, _IN), (data, _IN), (out_0, _OUT)],
+        params,
         [out_0.type],
     )
-    with pytest.raises(ValueError, match="full-width vector op"):
-        _lower(program)
+    expected = _expected_region_program(
+        [
+            ir.AssignStmt(qk, matmul, span),
+            ir.AssignStmt(aiv_id, aiv_id_call, span),
+            ir.AssignStmt(qk_h, shard, span),
+            ir.AssignStmt(full_t, full_load, span),
+            ir.AssignStmt(out_store, store, span),
+            ir.ReturnStmt([out_store], span),
+        ],
+        params,
+        [out_0.type],
+    )
+    # The full-width load survives verbatim: nothing was halved, nothing localized.
+    ir.assert_structural_equal(_lower(program), expected)
 
 
 def test_auto_path_unchanged():
@@ -3952,11 +3969,11 @@ def test_while_inside_region_halves_vector_op():
     ir.assert_structural_equal(_lower(program), expected)
 
 
-def test_mixed_explicit_implicit_region_in_while_rejected():
-    """The mixed-explicit validator recurses into a WhileStmt inside the region, so
-    a plain full-width vector op buried in a while (not derived from the explicit
-    tile.aiv_shard) is still rejected. NEGATIVE test: a rejected transform has no
-    ``After`` IR."""
+def test_mixed_explicit_implicit_region_in_while_splices_through():
+    """The same full-width op buried in a WhileStmt inside the region is likewise
+    spliced through. The scan that used to recurse here ran only to reject; with
+    the manual path unvalidated, control flow inside the region is simply carried
+    along with the rest of the body."""
     span = ir.Span.unknown()
     a_left = ir.Var("a_left", _tile([128, 128], mem=MS.Left), span)
     b_right = ir.Var("b_right", _tile([128, 128], mem=MS.Right), span)
@@ -3988,13 +4005,24 @@ def test_mixed_explicit_implicit_region_in_while_rejected():
         ),
         span=span,
     )
+    params = [(a_left, _IN), (b_right, _IN), (data, _IN), (out_0, _OUT)]
     program = _explicit_region_program(
         [ir.AssignStmt(qk, matmul, span), region, ir.ReturnStmt([out_store], span)],
-        [(a_left, _IN), (b_right, _IN), (data, _IN), (out_0, _OUT)],
+        params,
         [out_0.type],
     )
-    with pytest.raises(ValueError, match="full-width vector op"):
-        _lower(program)
+    expected = _expected_region_program(
+        [
+            ir.AssignStmt(qk, matmul, span),
+            ir.AssignStmt(aiv_id, aiv_id_call, span),
+            ir.AssignStmt(qk_h, shard, span),
+            inner_while,
+            ir.ReturnStmt([out_store], span),
+        ],
+        params,
+        [out_0.type],
+    )
+    ir.assert_structural_equal(_lower(program), expected)
 
 
 # ---------------------------------------------------------------------------
@@ -4276,11 +4304,18 @@ def _broadcast_expanded_to_full_width_body(span, stmts, aiv_id, qk_h, data):
     return y
 
 
-def test_broadcast_load_does_not_prove_a_full_width_consumer_is_sharded():
-    """The broadcast producer is accepted, but the full-width consumer is not."""
+def test_broadcast_expanded_to_full_width_splices_through():
+    """A replicated row expanded back to full width is the author's call.
+
+    Both lanes compute the same full ``tile.col_expand``, which is almost
+    certainly not what the author meant — but the manual path states no opinion.
+    The AUTO paths still reject the equivalent shape, as an INTERNAL_CHECK: see
+    ``test_auto_path_*`` and the operand gate in ``FindFullWidthOperand``."""
     span = ir.Span.unknown()
-    with pytest.raises(ValueError, match=r"vector op\(s\) \[tile.col_expand\]"):
-        _lower(_admission_program(span, _broadcast_expanded_to_full_width_body, wrap=True))
+    ir.assert_structural_equal(
+        _lower(_admission_program(span, _broadcast_expanded_to_full_width_body, wrap=True)),
+        _admission_program(span, _broadcast_expanded_to_full_width_body, wrap=False),
+    )
 
 
 def test_region_admits_half_width_generator():
@@ -4361,44 +4396,49 @@ def test_region_admits_lane_localized_gather_row_nested_in_loop():
     )
 
 
-def test_region_rejects_gather_row_localized_only_on_dst():
-    """A gather is per-lane only when its READ offset is lane-derived. With the
-    lane reference in ``dst_offset`` and a lane-invariant ``src_offset``, both
-    lanes fetch the SAME GM row — full-width work replicated — so it must still be
-    reported. This is what pins ``AddressArgs`` to src_offset alone. NEGATIVE
-    test: no ``After`` IR."""
-    with pytest.raises(ValueError, match=r"full-width vector op.*tile\.gather_row"):
-        _lower(_admission_program(ir.Span.unknown(), _gather_row_dst_only_localized_body, wrap=True))
+def test_region_splices_through_gather_row_localized_only_on_dst():
+    """A gather is per-lane only when its READ offset is lane-derived; here the
+    lane reference sits in ``dst_offset`` over a lane-invariant ``src_offset``, so
+    both lanes fetch the SAME GM row into different slots. Real hazard, but on the
+    manual path it is spliced through — the author owns it."""
+    span = ir.Span.unknown()
+    ir.assert_structural_equal(
+        _lower(_admission_program(span, _gather_row_dst_only_localized_body, wrap=True)),
+        _admission_program(span, _gather_row_dst_only_localized_body, wrap=False),
+    )
 
 
-def test_region_rejects_lane_reference_outside_address_args():
-    """A lane reference only localizes when it lands in an op's ADDRESS args. A
-    tile.load at offset [0, 0] that mentions aiv_id only in its valid_shape has
-    BOTH lanes reading the same base rows, so it must still be reported —
-    otherwise its consumers would be trusted as half-width. NEGATIVE test."""
-    with pytest.raises(ValueError, match=r"full-width vector op.*tile\.load"):
-        _lower(_admission_program(ir.Span.unknown(), _lane_ref_in_non_address_arg_body, wrap=True))
+def test_region_splices_through_lane_reference_outside_address_args():
+    """A ``tile.load`` at offset [0, 0] that mentions aiv_id only in its
+    valid_shape has BOTH lanes reading the same base rows. The manual path emits
+    it unchanged rather than reporting it."""
+    span = ir.Span.unknown()
+    ir.assert_structural_equal(
+        _lower(_admission_program(span, _lane_ref_in_non_address_arg_body, wrap=True)),
+        _admission_program(span, _lane_ref_in_non_address_arg_body, wrap=False),
+    )
 
 
-def test_region_rejects_consumer_of_full_width_generator():
-    """A generator is admitted for ITSELF only — it does not join the half-width
-    dataflow. So a consumer reachable from a full-width generator and from no
-    shard is still reported. Without this, ``z = tile.full([128,128]);
-    y = tile.add(z, z)`` would be silently accepted and BOTH AIV lanes would
-    compute (and store) the full tile. NEGATIVE test: no ``After`` IR."""
-    with pytest.raises(ValueError, match=r"full-width vector op.*tile\.add"):
-        _lower(_admission_program(ir.Span.unknown(), _full_width_generator_body, wrap=True))
+def test_region_splices_through_consumer_of_full_width_generator():
+    """``z = tile.full([128,128]); y = tile.add(z, z)`` inside a manual region:
+    both AIV lanes compute and store the full tile. Spliced through — the
+    equivalent AUTO body is still caught by the halving postcondition."""
+    span = ir.Span.unknown()
+    ir.assert_structural_equal(
+        _lower(_admission_program(span, _full_width_generator_body, wrap=True)),
+        _admission_program(span, _full_width_generator_body, wrap=False),
+    )
 
 
-def test_region_rejects_lane_reference_on_non_addressing_op():
-    """A lane reference is trusted only on an ADDRESS-carrying op. A lane-derived
-    scalar reaching a non-addressing op says nothing about the result's width, so
-    ``tile.set_validshape(full_width_tile, 1, aiv_id * 64)`` must not launder a
-    full-width tile into the half-width dataflow. NEGATIVE test: no ``After``
-    IR. (A full-width load with NO lane reference is covered by
-    test_mixed_explicit_implicit_region_rejected above.)"""
-    with pytest.raises(ValueError, match=r"full-width vector op.*tile\.set_validshape"):
-        _lower(_admission_program(ir.Span.unknown(), _laundering_body, wrap=True))
+def test_region_splices_through_lane_reference_on_non_addressing_op():
+    """``tile.set_validshape(full_width_tile, 1, aiv_id * 64)`` used to be the
+    laundering case the admission scan had to refuse. With no scan on the manual
+    path there is nothing to launder: the statement is emitted as written."""
+    span = ir.Span.unknown()
+    ir.assert_structural_equal(
+        _lower(_admission_program(span, _laundering_body, wrap=True)),
+        _admission_program(span, _laundering_body, wrap=False),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -5266,21 +5306,31 @@ def test_manual_tuple_merge_preserves_shard_facts():
     )
 
 
-def test_manual_tuple_merge_requires_both_branches_to_shard_the_element():
+def test_manual_tuple_merge_splices_through_a_half_merged_element():
+    """Element 1 is sharded on one branch and neutral on the other, so the merge
+    carries no shard fact. On the manual path that is emitted as written."""
     span = ir.Span.unknown()
 
     def body(span, stmts, aiv_id, qk_h, data):
         return _tuple_merge_body(span, stmts, aiv_id, qk_h, data, element=1)
 
-    with pytest.raises(ValueError, match="full-width"):
-        _lower(_admission_program(span, body, wrap=True))
+    ir.assert_structural_equal(
+        _lower(_admission_program(span, body, wrap=True)),
+        _admission_program(span, body, wrap=False),
+    )
 
 
 @pytest.mark.parametrize("loop_kind", ["for", "while"])
 @pytest.mark.parametrize("initial_half,consume_exit", [(True, False), (False, True), (False, False)])
 @pytest.mark.parametrize("tuple_carry", [False, True])
-def test_manual_loop_checks_shard_carry_uses(loop_kind, initial_half, consume_exit, tuple_carry):
-    """A backedge may gain a shard fact, but cannot prove a zero-iteration exit."""
+def test_manual_loop_carry_shapes_splice_through(loop_kind, initial_half, consume_exit, tuple_carry):
+    """Every manual loop-carry shape is emitted as written.
+
+    A backedge may gain a shard fact and a zero-iteration exit cannot be
+    classified from its yield alone; both used to be hard rejections on this
+    path. They are now the author's contract, so the pass carries each shape
+    through unchanged. The AUTO paths keep the same analysis as an
+    INTERNAL_CHECK postcondition."""
     span = ir.Span.unknown()
 
     def body(span, stmts, aiv_id, qk_h, data):
@@ -5325,26 +5375,15 @@ def test_manual_loop_checks_shard_carry_uses(loop_kind, initial_half, consume_ex
         stmts.append(ir.AssignStmt(result, result_call, span))
         return result
 
-    if initial_half or consume_exit:
-        with pytest.raises(ValueError, match="full-width|loop-carried") as exc:
-            _lower(_admission_program(span, body, wrap=True))
-        message = str(exc.value)
-        if initial_half:
-            assert "loop-carried value(s) [carry]" in message
-            assert "backedge" in message
-            assert "corresponding yield lane-local" in message
-            assert "full-width vector op(s)" not in message
-            assert "read address" not in message
-        else:
-            assert "full-width vector op(s) [tile.add]" in message
-            assert "read address" in message
-            assert "loop-carried" not in message
-            assert "mixes explicit" not in message
-    else:
-        ir.assert_structural_equal(
-            _lower(_admission_program(span, body, wrap=True)),
-            _admission_program(span, body, wrap=False),
-        )
+    # Every combination now splices through: a lost carry shard fact and a
+    # zero-iteration exit that cannot be classified are both authoring concerns,
+    # and the manual path does not adjudicate them. The shard-fact machinery is
+    # still exercised here — it must not CRASH on any of these shapes — it just
+    # no longer decides whether the body compiles.
+    ir.assert_structural_equal(
+        _lower(_admission_program(span, body, wrap=True)),
+        _admission_program(span, body, wrap=False),
+    )
 
 
 def test_auto_region_keeps_notify_on_aiv_and_wait_on_both_lanes():
@@ -5443,6 +5482,232 @@ def test_transformed_body_admission_failure_is_internal(in_region):
     )
     with passes.PassContext([]), pytest.raises(InternalError, match="Internal error: LowerAutoVectorSplit"):
         passes.lower_auto_vector_split()(ir.Program([func], "broken_lowering", span))
+
+
+# ---------------------------------------------------------------------------
+# The whole-function transpose-split hazard.
+#
+# A tile.transpose that SWAPS the split axis migrates the per-lane data to the
+# other dimension while the split still halves the original axis, so the result
+# is mis-shaped and miscomputes. The split is a perf decision the user owns, so
+# the pass fails loud rather than silently compiling it un-split.
+#
+# These tests lived in test_expand_mixed_kernel_a2a3.py while ExpandMixedKernel
+# owned the check. It moved here because this is the earliest pass that sees
+# every function carrying a function-level split mode -- including the
+# pure-vector ones this pass declines to lower, which is the only reason the
+# check ever had to run at pass 24. The per-REGION analogue is the AivSplitValid
+# verifier's check (l), backstopped by ValidateTransposeSplitHazard in this pass
+# (see test_transpose_hazard_per_region above).
+#
+# These use the full @pl.program Before form rather than this file's hand-built
+# region fixtures: the subject is a function-level pl.split attr, which the DSL
+# expresses directly.
+# ---------------------------------------------------------------------------
+
+
+def _run_to_expand_with_flatten(program: ir.Program) -> ir.Program:
+    """The prefix above, carried on through ExpandMixedKernel.
+
+    Only the singleton carve-out needs this: accepting the transpose is pass 23's
+    answer, but "the split SURVIVES" is a fact about the expanded AIV function.
+    """
+    p = passes.convert_to_ssa()(program)
+    p = passes.lower_composite_ops()(p)
+    p = passes.flatten_tile_nd_to_2d()(p)
+    p = passes.infer_tile_memory_space()(p)
+    return passes.expand_mixed_kernel()(p)
+
+
+def _run_to_lower_split_with_flatten(program: ir.Program) -> ir.Program:
+    """The tile-pipeline prefix a tile.transpose needs to reach this pass.
+
+    FlattenTileNdTo2D adds the transpose scratch arg that the TileOps2D verifier
+    requires; InferTileMemorySpace resolves the spaces the affinity gate reads.
+    """
+    p = passes.convert_to_ssa()(program)
+    p = passes.lower_composite_ops()(p)
+    p = passes.flatten_tile_nd_to_2d()(p)
+    p = passes.infer_tile_memory_space()(p)
+    return passes.lower_auto_vector_split()(p)
+
+
+def _assert_actionable_split_error(excinfo, mode_name: str) -> None:
+    """The error must name the split mode and surface both fix directions so the
+    user can act without reading the source: drop the split, or remove the
+    transpose."""
+    msg = str(excinfo.value)
+    assert "swaps the split axis" in msg, msg
+    assert mode_name in msg, msg
+    assert "pl.SplitMode.NONE" in msg, msg  # direction 1: drop the split
+    assert "column slice" in msg, msg  # direction 2: remove the transpose
+
+
+def test_unsplittable_transpose_raises_actionable_error():
+    """A requested UP_DOWN split is rejected with a ValueError when the kernel
+    contains a tile.transpose that swaps the split axis.
+
+    tile.transpose swaps axes, so the per-lane split data migrates to the other
+    dim while SplitVectorKernel still halves the original split axis — it cannot
+    type such a transpose correctly. The split is a perf decision the user owns,
+    so the pass fails loud instead of silently compiling it un-split. Here the
+    [16, 8] matmul result is transposed under UP_DOWN (split dim 0, non-singleton).
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def t_hazard(
+            self,
+            x: pl.Tensor[[16, 128], pl.BF16],
+            y: pl.Tensor[[128, 8], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
+        ) -> pl.Tensor[[8, 16], pl.FP32]:
+            x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+            x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+            y_mat = pl.load(y, [0, 0], [128, 8], target_memory=pl.MemorySpace.Mat)
+            y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+            z = pl.matmul(x_left, y_right)  # [16, 8] (cube result)
+            z_vec = pl.move(z, target_memory=pl.MemorySpace.Vec)
+            zt = pl.transpose(z_vec, axis1=0, axis2=1)  # source dim0=16 non-singleton -> error
+            out_0 = pl.store(zt, [0, 0], out_0)
+            return out_0
+
+    with pytest.raises(ValueError) as excinfo:
+        _run_to_lower_split_with_flatten(Before)
+    _assert_actionable_split_error(excinfo, "UP_DOWN")
+
+
+def test_left_right_transpose_also_raises():
+    """The error is mode-independent: a LEFT_RIGHT split whose transpose source is
+    non-singleton on the split axis (dim 1) is also rejected, because the
+    transpose migrates the column split axis just as UP_DOWN migrates rows."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.LEFT_RIGHT})
+        def t_lr(
+            self,
+            x: pl.Tensor[[16, 128], pl.BF16],
+            y: pl.Tensor[[128, 16], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+            x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+            y_mat = pl.load(y, [0, 0], [128, 16], target_memory=pl.MemorySpace.Mat)
+            y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+            z = pl.matmul(x_left, y_right)  # [16, 16] (cube result)
+            z_vec = pl.move(z, target_memory=pl.MemorySpace.Vec)
+            zt = pl.transpose(z_vec, axis1=0, axis2=1)  # source dim1=16 non-singleton -> error
+            out_0 = pl.store(zt, [0, 0], out_0)
+            return out_0
+
+    with pytest.raises(ValueError) as excinfo:
+        _run_to_lower_split_with_flatten(Before)
+    _assert_actionable_split_error(excinfo, "LEFT_RIGHT")
+
+
+def test_singleton_split_axis_transpose_keeps_split():
+    """A transpose whose source is singleton on the split axis carries no split
+    data (the no-op broadcast case), so the split is preserved. Here a [1, 16]
+    source is transposed under UP_DOWN (split dim 0 == 1), so it is NOT rejected
+    and the AIV keeps its split attr with no dual-AIV dispatch."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def t_singleton(
+            self,
+            x: pl.Tensor[[1, 128], pl.BF16],
+            y: pl.Tensor[[128, 16], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+        ) -> pl.Tensor[[16, 1], pl.FP32]:
+            x_mat = pl.load(x, [0, 0], [1, 128], target_memory=pl.MemorySpace.Mat)
+            x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+            y_mat = pl.load(y, [0, 0], [128, 16], target_memory=pl.MemorySpace.Mat)
+            y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+            z = pl.matmul(x_left, y_right)  # [1, 16] (cube result)
+            z_vec = pl.move(z, target_memory=pl.MemorySpace.Vec)
+            zt = pl.transpose(z_vec, axis1=0, axis2=1)  # source dim0=1 singleton -> kept split
+            out_0 = pl.store(zt, [0, 0], out_0)
+            return out_0
+
+    After = _run_to_expand_with_flatten(Before)
+    aiv = next(f for f in After.functions.values() if f.func_type == ir.FunctionType.AIV)
+    assert aiv.attrs.get("dual_aiv_dispatch") is not True, (
+        f"a singleton-split-axis transpose must not be rejected, got attrs={dict(aiv.attrs)}"
+    )
+    assert "split" in aiv.attrs, (
+        f"the requested split must be preserved when the transpose is a no-op on the split axis, "
+        f"got attrs={dict(aiv.attrs)}"
+    )
+
+
+def test_unsplittable_int8_transpose_raises_actionable_error():
+    """The error is dtype-independent: an int8 transpose that swaps a
+    non-singleton split axis is rejected just like the fp/bf16 cases.
+
+    A bf16 matmul (cube) keeps the kernel mixed; separately, an int8 [16, 32]
+    tensor is loaded into Vec and transposed under UP_DOWN (source dim0=16
+    non-singleton), so ExpandMixedKernel rejects the split.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def t_hazard_i8(
+            self,
+            x: pl.Tensor[[16, 128], pl.BF16],
+            y: pl.Tensor[[128, 8], pl.BF16],
+            q: pl.Tensor[[16, 32], pl.INT8],
+            out_0: pl.Out[pl.Tensor[[16, 8], pl.FP32]],
+            out_1: pl.Out[pl.Tensor[[32, 16], pl.INT8]],
+        ) -> pl.Tensor[[16, 8], pl.FP32]:
+            x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+            x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+            y_mat = pl.load(y, [0, 0], [128, 8], target_memory=pl.MemorySpace.Mat)
+            y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+            z = pl.matmul(x_left, y_right)  # [16, 8] (cube result, keeps the kernel mixed)
+            z_vec = pl.move(z, target_memory=pl.MemorySpace.Vec)
+            out_0 = pl.store(z_vec, [0, 0], out_0)
+            q_vec = pl.load(q, [0, 0], [16, 32], target_memory=pl.MemorySpace.Vec)
+            qt = pl.transpose(q_vec, axis1=0, axis2=1)  # int8 source dim0=16 non-singleton -> error
+            out_1 = pl.store(qt, [0, 0], out_1)
+            return out_0
+
+    with pytest.raises(ValueError) as excinfo:
+        _run_to_lower_split_with_flatten(Before)
+    _assert_actionable_split_error(excinfo, "UP_DOWN")
+
+
+def test_pure_vector_split_transpose_also_raises():
+    """A PURE-VECTOR pl.split kernel is checked too — the coverage the move adds.
+
+    LowerAutoVectorSplit lowers only genuinely mixed (cube<->vector) functions; a
+    pure-vector pl.split has no boundary to converge, so the pass passes it
+    through untouched. That is exactly why this check used to sit at
+    ExpandMixedKernel, which sees every function. Running it over the
+    pass-through branch keeps that coverage at pass 23 — without it, this kernel
+    would reach SplitVectorKernel with a transpose it cannot type and miscompile
+    silently.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def t_pure_vec(
+            self,
+            q: pl.Tensor[[16, 32], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+        ) -> pl.Tensor[[32, 16], pl.FP32]:
+            q_vec = pl.load(q, [0, 0], [16, 32], target_memory=pl.MemorySpace.Vec)
+            qt = pl.transpose(q_vec, axis1=0, axis2=1)  # source dim0=16 non-singleton -> error
+            out_0 = pl.store(qt, [0, 0], out_0)
+            return out_0
+
+    with pytest.raises(ValueError) as excinfo:
+        _run_to_lower_split_with_flatten(Before)
+    _assert_actionable_split_error(excinfo, "UP_DOWN")
 
 
 if __name__ == "__main__":

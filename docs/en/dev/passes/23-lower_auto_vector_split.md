@@ -70,6 +70,19 @@ A function is rewritten iff **all** of:
   the same `ClassifyCallAffinity` / `CombineAffinity` decision `ExpandMixedKernel`
   uses for `is_mixed`.
 
+### The whole-function transpose-split hazard
+
+Before any of that, every `InCore` function carrying a function-level split mode
+is checked for a `tile.transpose` that **swaps the split axis** — including the
+functions this pass then passes through unlowered. The check used to live in
+`ExpandMixedKernel` purely because that pass sees every function; running it over
+the pass-through branch here is what let it move, and without that coverage a
+**pure-vector** `pl.split` kernel would reach `SplitVectorKernel` with a transpose
+it cannot type and miscompile silently. It runs before the lowering branch so its
+specific diagnostic precedes the generic full-width-operand rejection the halving
+would otherwise raise on the same statement. The per-**region** analogue is
+[`AivSplitValid`](99-verifier.md) check (l), backstopped by this pass.
+
 Everything else is passed through unchanged. The last condition matters: a
 **pure-vector** `pl.split` function (an elementwise op split across the two AIV
 lanes, with no cube and no C↔V boundary) has nothing to converge, so it is left
@@ -105,17 +118,19 @@ hazard against its own mode.
 
 ### Shared body admission and AUTO regions
 
-`AnalyzeSplitBody` checks both transformed AUTO bodies and explicit manual bodies.
-AUTO supplies the tile facts established by its shape transformation before
-substitution/cloning; manual bodies reconstruct shard and lane-address lineage,
-including aliases, tuple projections and loop results. Broadcast reads and
+`AnalyzeSplitBody` checks bodies **this pass halved** — the AUTO whole function
+and the boundary-free region — using the tile facts its shape transformation
+established before substitution/cloning. It reconstructs shard and lane-address
+lineage through aliases, tuple projections and loop results. Broadcast reads and
 read-only singleton arithmetic remain neutral, so accepting them cannot certify
 an unrelated full-width consumer. Rank-1 loads and full reshape/reinterpret views
 may stage a subsequent lane-local slice; they do not become half-width facts.
+A region whose boundary the **author** wrote is not scanned at all — see
+[What may appear inside an explicit-boundary region](#what-may-appear-inside-an-explicit-boundary-region).
 
 At control-flow merges, shard facts are intersected per tuple element across both branches. A loop backedge must preserve any shard fact inherited from its initial value. A neutral initial value may become lane-local in the body, but the carry and exit remain neutral; a zero-iteration exit cannot be classified using only its yield.
 
-Admission diagnostics distinguish full-width operator names (`full_width_vec_ops`) from loop-carry names (`carry_mismatches`). A carry mismatch reports the lost entry shard fact and asks for a lane-local yield; an unlocalized operator reports its name and asks for lane-local operands or a localized read address. Explicit-boundary admission failures use user-facing `CHECK_SPAN` diagnostics. Failures after implicit or AUTO halving are compiler postcondition violations and use `INTERNAL_CHECK_SPAN` without authoring advice. Carry mismatches are reported first if both categories are present.
+Diagnostics distinguish full-width operator names (`full_width_vec_ops`) from loop-carry names (`carry_mismatches`), and carry mismatches are reported first when both are present. Every failure here is a compiler postcondition violation — the pass halved the body and left something un-localized — so both use `INTERNAL_CHECK_SPAN` without authoring advice.
 
 After lowering, AUTO wraps a single straight-line vector phase when the same
 structural verifier accepts its region boundaries. It preserves compute order and the lane variable identity. The lane binding moves
@@ -205,7 +220,7 @@ Three region body shapes are handled, selected by the region's `split_` mode:
   `subblock_idx`; the author's `aiv_id = get_subblock_idx()` already carries the
   lane). `tile.aiv_shard` / `tile.aic_gather` are **accepted** here: with no split
   axis they cross the boundary without splitting, and `split=0` preserves the
-  shape. `ValidateMixedExplicitRegion` is skipped — everything is full width. The
+  shape. Nothing is validated here either — everything is full width. The
   function is still stamped `split_aiv`, so `SplitVectorKernel` dispatches it to
   **both** AIV lanes (`dual_aiv_dispatch`) rather than the lane-0-only replay;
   both therefore push on a V→C crossing, into one shared slot with no
@@ -215,45 +230,35 @@ Three region body shapes are handled, selected by the region's `split_` mode:
 
 ### What may appear inside an explicit-boundary region
 
-Because that body is spliced through **unchanged**, every vector op in it must
-already be per-lane — an op left at full width would run identically on both AIV
-lanes. `ValidateMixedExplicitRegion` enforces this and rejects the region with an
-actionable error naming the offending ops. A tile-producing op is accepted when
-any of the following holds:
+**Whatever the author writes.** The body is spliced through **unchanged**, so
+every vector op in it must already be per-lane — one left at full width runs
+identically on both AIV lanes — but establishing that is the **author's
+contract**. Writing `tile.aiv_shard` / `tile.aic_gather` by hand *is* the
+statement "I sharded this myself", and the pass takes it at its word. A body
+mixing the boundary op with a full-width vector op compiles; a later `assemble`
+/ `store` at a lane offset then double-counts. That is the cost of the mode.
 
-| Accepted | Why |
-| -------- | --- |
-| Consumes a `tile.aiv_shard` result defined in **this** region (transitively) | It is in the half-width dataflow by construction. |
-| A pure generator — `tile.full` / `tile.ci` / `tile.random` (and `tile.create`, which classifies `SHARED` and so was never reportable anyway) | Its result is a function of its attributes only: it reads no tile and no memory, so per-lane replication is correct at whatever extent the author wrote. |
-| An address-carrying op — `tile.load` / `tile.slice` / `tile.extract` / `tile.gather_row` — whose **read address** references the region's `aiv_id` | The author localized it explicitly, e.g. `data[base + aiv_id * HALF : ...]`. Only the read-offset args count (`tile.load` arg 1, `tile.slice` arg 2, `tile.extract` args 1–2, `tile.gather_row` arg 3 = `src_offset`) — a lane reference in a `shape`, a `valid_shape`, or a *destination* slot does not move the window, so it does not admit. |
+An earlier revision ran `ValidateSplitBody` here as a hard `ValueError`, but the
+scan proves *intent*, not *extent* — it already trusted the author on
+`tile.store` offsets and on whether a lane-strided read really partitions. As a
+gate it rejected correct kernels (a lane-invariant broadcast operand; a shard
+arriving through a construct the forward scan cannot follow) while still
+admitting incorrect ones, so it did not deliver the safety that justified
+blocking authoring. The compiler-halved paths keep the same scan, where a
+full-width leftover means the pass's own postcondition failed:
 
-The scan is seeded **per region** and makes one forward pass in program order, so
-it recognises only a boundary result defined in the region it is scanning. A
-`tile.aiv_shard` result reaching the region from elsewhere — produced in a sibling
-region, or arriving through a loop `iter_arg` on the back edge — is invisible to
-it, and the consumer would be reported as full width even though the value really
-is per-lane. Both shapes are rejected 12 passes earlier by the `AivSplitValid`
-verifier (checks (i) and (j), see [99-verifier.md](99-verifier.md)), which is what
-keeps that false positive off the author's screen; this scan therefore only ever
-meets a same-region dataflow, which is the domain it was written for.
+| Path | Who halved the body | Check |
+| ---- | ------------------- | ----- |
+| AUTO whole function | the pass | `INTERNAL_CHECK_SPAN` |
+| Region, `UpDown`/`LeftRight`, no boundary op | the pass | `INTERNAL_CHECK_SPAN` |
+| Region, `UpDown`/`LeftRight`, author wrote the boundary | the author | **none** |
+| Region, `None` (task-parallel) | nobody — all full width | **none** |
 
-`tile.gather_row` is the DMA case: being DPS it carries **two** offsets, and only
-`src_offset` decides whether the lanes do different work — a lane-derived
-`src_offset` means each lane pulls its own scattered GM rows (admitted), while a
-lane-derived `dst_offset` over a lane-invariant `src_offset` means both lanes fetch
-the *same* rows into different slots of a full-width accumulator (still reported).
-
-Anything else that classifies `VECTOR` is reported. A generator is accepted for
-**itself only** — `z = pl.full([FULL, N]); y = pl.add(z, z)` still rejects on `y`,
-because a full-width generator must not vouch for its consumers. And the lane
-reference is trusted **only** on an addressing op, so
-`pl.set_validshape(full_width_tile, 1, aiv_id * HALF)` cannot launder a full tile
-into the region.
-
-The guard proves *intent*, not *extent*: a load at a lane-strided offset but a
-full-width extent is accepted, and the two lanes then read overlapping windows —
-the same trust already extended to `tile.store`, whose lane-dependent offset the
-pass never checks.
+Independent checks still reject a manual region: the per-region **transpose
+hazard** (a `tile.transpose` swapping the split axis cannot be *typed* at any
+lane — a representability limit, not a claim about intent),
+[`AivSplitValid`](99-verifier.md)'s checks (a)–(k) twelve passes earlier, and
+the `AivSplitLoweredValid` handoff to `ExpandMixedKernel`.
 
 Because the region is built via the generic `BeginScope`/`EndScope` and is
 non-outlined, it can be **nested** inside a `pl.range` / `pl.pipeline` loop or an

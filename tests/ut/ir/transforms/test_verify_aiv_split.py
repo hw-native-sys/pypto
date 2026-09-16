@@ -1778,5 +1778,131 @@ def test_lowered_boundary_checks_locally_defined_operands(in_region, binding):
     assert any("operand is in Vec" in d.message for d in diagnostics)
 
 
+# ---------------------------------------------------------------------------
+# (l) A transpose that swaps the region's split axis.
+#
+# Moved here from ExpandMixedKernel (pass 25), which could only report it from
+# inside the walk that ERASES the region wrapper — so its message could not name
+# the region's mode, the offending result, or a fix. LowerAutoVectorSplit (pass
+# 23) keeps the identical check as a backstop, the same arrangement check (h)
+# documents.
+# ---------------------------------------------------------------------------
+
+
+def _transpose_in_region(span, mode, axis_a, axis_b):
+    """A region whose body transposes ``axis_a`` <-> ``axis_b``."""
+    shard_stmt, sharded = _shard_of_acc(span, [128, 128])
+    tr = T.transpose(sharded, axis_a, axis_b, span=span)
+    stmts: list[ir.Stmt] = [shard_stmt, ir.AssignStmt(ir.Var("pre_t", tr.type, span), tr, span)]
+    return _region(mode, stmts)
+
+
+def test_region_transpose_swapping_the_split_axis_fails():
+    """(l) UP_DOWN splits dim 0, and this transpose moves that data to dim 1."""
+    span = ir.Span.unknown()
+    errors = _errors(_program(_transpose_in_region(span, ir.SplitMode.UP_DOWN, 0, 1)))
+    hits = [d for d in errors if "swaps the split axis" in d.message]
+    assert len(hits) == 1, [d.message for d in errors]
+    assert "pl.split_aiv(UP_DOWN)" in hits[0].message
+    assert "(result 'pre_t')" in hits[0].message
+    # The diagnostic the author acts on, which pass 25 could not produce.
+    assert "move the transpose outside the pl.split_aiv region" in hits[0].message
+
+
+def test_none_region_has_no_split_axis_to_swap():
+    """(l) A task-parallel region has no split axis, so no transpose can swap it."""
+    span = ir.Span.unknown()
+    errors = _errors(_program(_transpose_in_region(span, ir.SplitMode.NONE, 0, 1)))
+    assert not any("swaps the split axis" in d.message for d in errors), [d.message for d in errors]
+
+
+# ---------------------------------------------------------------------------
+# (m) A named crossing must actually BE a crossing.
+#
+# The converse of (f)/(g): those require an implicit crossing to be written
+# down; this requires a written-down crossing to have something to cross. Moved
+# here from ExpandMixedKernel, where it fired 14 passes later on IR the compiler
+# had already rewritten.
+# ---------------------------------------------------------------------------
+
+
+def _shard_of_vector_value(span, *, inline=False):
+    """``pl.aiv_shard`` of a tile.full result — vector-produced, never on AIC."""
+    full = T.full([16, 128], FP32, 0.0, span=span)
+    if inline:
+        call = T.aiv_shard(full, split=1, span=span)
+        return _region(ir.SplitMode.UP_DOWN, [ir.AssignStmt(ir.Var("bad", call.type, span), call, span)])
+    z = ir.Var("z", full.type, span)
+    call = T.aiv_shard(z, split=1, span=span)
+    return _region(
+        ir.SplitMode.UP_DOWN,
+        [ir.AssignStmt(z, full, span), ir.AssignStmt(ir.Var("bad", call.type, span), call, span)],
+    )
+
+
+def test_shard_of_a_vector_produced_value_fails():
+    """(m) tile.full lives on AIV already; the CUBE lane never defines it."""
+    errors = _errors(_program(_shard_of_vector_value(ir.Span.unknown())))
+    hits = [d for d in errors if "pushes from the CUBE lane" in d.message]
+    assert len(hits) == 1, [d.message for d in errors]
+    assert "operand 'z' is produced on the VECTOR lane by 'tile.full'" in hits[0].message
+    assert "drop the pl.aiv_shard" in hits[0].message
+
+
+def test_shard_of_an_inline_vector_call_fails():
+    """(m) The inline spelling is the shortest way to write the mistake, so a
+    Var-only lookup would wave it through."""
+    errors = _errors(_program(_shard_of_vector_value(ir.Span.unknown(), inline=True)))
+    hits = [d for d in errors if "pushes from the CUBE lane" in d.message]
+    assert len(hits) == 1, [d.message for d in errors]
+    assert "operand (inline) is produced on the VECTOR lane by 'tile.full'" in hits[0].message
+
+
+def test_gather_of_a_cube_produced_value_fails():
+    """(m) The V->C mirror: a matmul result is CUBE-affine and stays on AIC."""
+    span = ir.Span.unknown()
+    mm = _cube_matmul(span)
+    acc = ir.Var("acc", mm.type, span)
+    gather = T.aic_gather(acc, split=1, span=span)
+    region = _region(
+        ir.SplitMode.UP_DOWN,
+        [ir.AssignStmt(acc, mm, span), ir.AssignStmt(ir.Var("full", gather.type, span), gather, span)],
+    )
+    errors = _errors(_program(region))
+    hits = [d for d in errors if "pushes from the VECTOR lane" in d.message]
+    assert len(hits) == 1, [d.message for d in errors]
+    assert "operand 'acc' is produced on the CUBE lane by 'tile.matmul'" in hits[0].message
+    assert "Gather the value only after it has been computed by vector ops" in hits[0].message
+
+
+def test_chained_same_direction_shard_fails():
+    """(m) A boundary result is bound on its CONSUMING lane, so it cannot cross
+    a second time in the same direction — the first crossing already delivered
+    it there."""
+    span = ir.Span.unknown()
+    shard_stmt, sharded = _shard_of_acc(span)
+    again = T.aiv_shard(sharded, split=1, span=span)
+    region = _region(
+        ir.SplitMode.UP_DOWN,
+        [shard_stmt, ir.AssignStmt(ir.Var("twice", again.type, span), again, span)],
+    )
+    errors = _errors(_program(region))
+    hits = [d for d in errors if "pushes from the CUBE lane" in d.message]
+    assert len(hits) == 1, [d.message for d in errors]
+    assert "Its producer is itself a cross-core boundary" in hits[0].message
+
+
+def test_shard_of_a_parameter_is_accepted():
+    """(m) keys on where a value is PRODUCED. A parameter has no producing
+    statement, so both lanes hold it and nothing is refuted. Regression guard
+    against tightening this into a memory-space equality."""
+    span = ir.Span.unknown()
+    param = ir.Var("acc_param", _tile([16, 128], mem=MS.Acc), span)
+    call = T.aiv_shard(param, split=1, span=span)
+    region = _region(ir.SplitMode.UP_DOWN, [ir.AssignStmt(ir.Var("h", call.type, span), call, span)])
+    errors = _errors(_program(region))
+    assert not any("never defines it" in d.message for d in errors), [d.message for d in errors]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

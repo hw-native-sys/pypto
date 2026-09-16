@@ -102,9 +102,8 @@ void CheckNoCubeTileHalved(const std::vector<StmtPtr>& stmts,
                            const std::unordered_map<const Var*, TileInfo>& halved, bool& cube_halved);
 void ValidateTransposeSplitHazard(const std::vector<StmtPtr>& stmts, int split_dim, const Span& region_span);
 void ValidateSplitBody(const std::vector<StmtPtr>& stmts, int split_dim, const Span& span,
-                       bool explicit_boundary,
-                       const std::unordered_map<const Var*, TileInfo>& known_tiles = {},
-                       const std::unordered_map<const Var*, VarPtr>& replacements = {});
+                       const std::unordered_map<const Var*, TileInfo>& known_tiles,
+                       const std::unordered_map<const Var*, VarPtr>& replacements);
 std::vector<StmtPtr> LowerExplicitRegions(const std::vector<StmtPtr>& stmts,
                                           std::unordered_set<std::string>& used_names);
 
@@ -219,10 +218,10 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
       // pair an implicit crossing produces. The AivSplitValid verifier is what
       // makes writing them mandatory (checks (f)/(g)) rather than optional.
       //
-      // ValidateSplitBody is deliberately NOT run for this mode: it
-      // rejects a body that mixes half-width boundary ops with full-width vector
-      // ops, and in a task-parallel region EVERYTHING is full width, so the mix it
-      // describes does not exist.
+      // Like every author-written region, this one is unvalidated: the pass
+      // halves nothing here, so there is no postcondition of its own to check.
+      // Dispatching the two lanes onto disjoint work via aiv_id is the author's
+      // job — see the explicit-boundary arm below.
       if (rmode == SplitMode::None) {
         // Preserve the full body and authored lane binding; lower child regions
         // independently using their own modes.
@@ -236,12 +235,26 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
       // EXPLICIT boundary form (user wrote tile.aiv_shard / tile.aic_gather
       // inside the region): the body is already half-width and carries its own
       // lane index. Retain the scope wrapper and preserve the body — no
-      // re-halving, no duplicate subblock_idx. Still run the per-region transpose
-      // hazard check so a transpose that swaps the split axis is rejected with a
-      // region-scoped diagnostic. ExpandMixedKernel folds the explicit boundary
-      // into tpush/tpop just as for a hand-authored split_aiv kernel.
+      // re-halving, no duplicate subblock_idx. ExpandMixedKernel folds the
+      // explicit boundary into tpush/tpop just as for a hand-authored split_aiv
+      // kernel.
+      //
+      // Per-lane correctness of this body is the AUTHOR's contract, not the
+      // compiler's: writing the boundary op by hand is the statement "I sharded
+      // this myself". The pass therefore does NOT run ValidateSplitBody here.
+      // Its half-width scan proves INTENT, not EXTENT — it already trusts the
+      // author on tile.store offsets, on whether a lane-strided read really
+      // partitions, and on the extent behind it — so as a hard gate it rejected
+      // correct kernels (a lane-invariant broadcast operand, a shard arriving
+      // through a construct the scan cannot follow) while still admitting
+      // incorrect ones. The AUTO paths below keep it: there the compiler did the
+      // halving, so a full-width leftover is the compiler's own postcondition
+      // failure, not an authoring choice.
+      //
+      // The transpose hazard check DOES still run: a transpose that swaps the
+      // split axis cannot be TYPED correctly at any lane, so it is a
+      // representability limit rather than a claim about the author's intent.
       if (RegionBodyHasExplicitBoundary(reg->body_)) {
-        ValidateSplitBody(region_stmts, rdim, reg->span_, /*explicit_boundary=*/true);
         ValidateTransposeSplitHazard(region_stmts, rdim, reg->span_);
         // The body is already half-width, but the boundary op's split-axis valid
         // extent is still the deducer's lane-agnostic ceil-div guess. This region
@@ -283,7 +296,7 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
           << "Internal error: LowerAutoVectorSplit halved a CUBE-affinity op inside a pl.split_aiv "
              "region — the vector-sub-region affinity gate leaked into a cube operand.";
 
-      ValidateSplitBody(lowered, rdim, reg->span_, /*explicit_boundary=*/false, r_tile_vars, r_var_repl);
+      ValidateSplitBody(lowered, rdim, reg->span_, r_tile_vars, r_var_repl);
       StmtPtr region_body =
           (lowered.size() == 1) ? lowered[0] : std::make_shared<SeqStmts>(lowered, reg->span_);
       if (!r_var_repl.empty()) {
@@ -637,36 +650,50 @@ std::string JoinDiagnosticNames(const std::vector<std::string>& names) {
 // Check both explicit-boundary and implicitly lowered bodies. Report a lost
 // loop-entry fact separately from an unlocalized vector op: the former needs a
 // consistent yield, while the latter needs per-lane operand/address dataflow.
+// Postcondition on a body THIS PASS halved (the AUTO whole-function path and the
+// boundary-free region path). A full-width vector op or a lost loop-carry shard
+// fact left behind after the pass's own halving is a compiler bug, so both are
+// INTERNAL_CHECKs with no authoring advice.
+//
+// A region whose boundary the AUTHOR wrote does NOT come here — that body is
+// spliced through unchanged and its per-lane correctness is the author's
+// contract. See the explicit-boundary arm of LowerStmts.
 void ValidateSplitBody(const std::vector<StmtPtr>& stmts, int split_dim, const Span& region_span,
-                       bool explicit_boundary, const std::unordered_map<const Var*, TileInfo>& known_tiles,
+                       const std::unordered_map<const Var*, TileInfo>& known_tiles,
                        const std::unordered_map<const Var*, VarPtr>& replacements) {
   auto scan = split_axis::AnalyzeSplitBody(stmts, split_dim, known_tiles, replacements);
-  if (!explicit_boundary) {
-    INTERNAL_CHECK_SPAN(scan.carry_mismatches.empty(), region_span)
-        << "Internal error: LowerAutoVectorSplit produced inconsistent loop-carried value(s) ["
-        << JoinDiagnosticNames(scan.carry_mismatches) << "]: a lowered backedge lost an entry shard fact";
-    INTERNAL_CHECK_SPAN(scan.full_width_vec_ops.empty(), region_span)
-        << "Internal error: LowerAutoVectorSplit left unlocalized full-width vector op(s) ["
-        << JoinDiagnosticNames(scan.full_width_vec_ops) << "] in a transformed AIV split body";
-    return;
-  }
-  CHECK_SPAN(scan.carry_mismatches.empty(), region_span)
-      << "LowerAutoVectorSplit: inconsistent loop-carried value(s) ["
-      << JoinDiagnosticNames(scan.carry_mismatches)
-      << "]. The loop's initial value is lane-local, but a yielded backedge value (or tuple element) "
-         "is not. The next iteration would lose a shard fact required by the loop body. Keep each "
-         "corresponding yield lane-local, including each carried tuple element that is lane-local "
-         "at entry.";
-  if (scan.full_width_vec_ops.empty()) return;
+  INTERNAL_CHECK_SPAN(scan.carry_mismatches.empty(), region_span)
+      << "Internal error: LowerAutoVectorSplit produced inconsistent loop-carried value(s) ["
+      << JoinDiagnosticNames(scan.carry_mismatches) << "]: a lowered backedge lost an entry shard fact";
+  INTERNAL_CHECK_SPAN(scan.full_width_vec_ops.empty(), region_span)
+      << "Internal error: LowerAutoVectorSplit left unlocalized full-width vector op(s) ["
+      << JoinDiagnosticNames(scan.full_width_vec_ops) << "] in a transformed AIV split body";
+}
 
-  CHECK_SPAN(false, region_span)
-      << "LowerAutoVectorSplit: an AIV split body contains full-width vector op(s) ["
-      << JoinDiagnosticNames(scan.full_width_vec_ops)
-      << "] outside the per-lane half-width dataflow. Leaving these ops un-localized would make both "
-         "AIV lanes compute the full tile. Derive the op from a lane-local tile (for example, a "
-         "tile.aiv_shard result), or localize its read address with the lane index, e.g. load at "
-         "'base + aiv_id * HALF' at the half extent. The lane reference must select the window read, "
-         "not just appear in a shape, a valid_shape, or a destination slot.";
+// Whole-function transpose-split hazard check (user-facing limitation), for the
+// AUTO function-level ``pl.split`` mode. The region form above is reported by the
+// AivSplitValid verifier's check (l) and backstopped by this pass; a
+// function-level split has no region to hang that on, so this pass is the
+// earliest place the check can run at all.
+//
+// It runs over EVERY function carrying the mode, including the pure-vector ones
+// this pass declines to lower — ExpandMixedKernel used to hold the check purely
+// because it saw those, and moving it here without covering them would let a
+// pure-vector split_aiv kernel miscompile silently.
+void ValidateFunctionTransposeSplitHazard(const FunctionPtr& func, SplitMode mode) {
+  const int split_dim = SplitDimension(mode);
+  auto hazard = split_axis::FindTransposeSplitHazard(func->body_, split_dim);
+  if (!hazard.call) return;
+  const char* mode_name = (split_dim == 0) ? "UP_DOWN" : "LEFT_RIGHT";
+  std::string where = hazard.result_name.empty() ? std::string() : " (result '" + hazard.result_name + "')";
+  CHECK_SPAN(false, hazard.call->span_)
+      << "LowerAutoVectorSplit: kernel '" << func->name_ << "' requests pl.split(" << mode_name
+      << ") but contains a tile.transpose" << where << " that swaps the split axis (dim " << split_dim
+      << "). The split halves that axis while the transpose moves the data to the other dimension, so "
+         "the split cannot be applied correctly. Fix it one of two ways: (1) drop the split — remove "
+         "the pl.split optimization (or set attrs={\"split\": pl.SplitMode.NONE}); or (2) eliminate "
+         "this transpose, e.g. replace a transpose-then-row-index with a direct column slice such as "
+         "pre[:, h:h+1].";
 }
 
 // Top-level walk for the explicit ``SplitAivScopeStmt`` path. Statements OUTSIDE
@@ -958,8 +985,7 @@ FunctionPtr LowerFunction(const FunctionPtr& func, SplitMode mode) {
       << "Internal error: LowerAutoVectorSplit halved a CUBE-affinity op in '" << func->name_
       << "' — the vector-sub-region affinity gate leaked into a cube operand.";
 
-  ValidateSplitBody(new_stmts, split_dim, func->span_, /*explicit_boundary=*/false, tile_vars,
-                    var_replacements);
+  ValidateSplitBody(new_stmts, split_dim, func->span_, tile_vars, var_replacements);
   StmtPtr new_body =
       (new_stmts.size() == 1) ? new_stmts[0] : std::make_shared<SeqStmts>(new_stmts, func->span_);
   if (!var_replacements.empty()) {
@@ -1054,6 +1080,15 @@ Pass LowerAutoVectorSplit() {
         new_functions.push_back(LowerExplicitRegionFunction(func));
         changed = true;
         continue;
+      }
+      // No regions: the function-level mode is the whole story, so the
+      // whole-function hazard applies. Checked BEFORE the lowering branch so it
+      // covers the functions passed through unlowered (pure-vector splits, and a
+      // hand-written flat split_aiv), and so its specific diagnostic precedes the
+      // generic full-width-operand rejection the halving would otherwise raise on
+      // the same statement.
+      if (is_incore && mode.has_value() && mode.value() != SplitMode::None) {
+        ValidateFunctionTransposeSplitHazard(func, mode.value());
       }
       // AUTO whole-function path: lower genuinely mixed (cube<->vector)
       // functions. Pure-vector pl.split functions have no boundary to converge;

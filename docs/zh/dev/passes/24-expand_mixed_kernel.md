@@ -42,20 +42,30 @@ Pass 会拒绝该 Group，并要求两个声明使用相同签名。
 已经一致的两个成员签名末尾。该过程不需要 `sync_start`：AIC 与 AIV 是同一个 mixed
 task 的 subslot，而 `sync_start` 控制的是多 block SPMD 启动准入。
 
-## 不可切分的转置：报错而非降级
+## 不可切分的转置：已前移，不在本 pass
 
-当内核含有一个**交换了切分轴**的 `tile.transpose` 时,**请求的向量切分会被以 `ValueError` 拒绝**。`tile.transpose` 交换两个轴,于是每个 lane 的切分数据迁移到了*另一个*维度,而 `SplitVectorKernel` 仍按*原*切分轴减半 —— 它无法正确定型这种转置,结果形状错误并会算错。这与切分模式(UP_DOWN dim 0 / LEFT_RIGHT dim 1)和 dtype 都无关。
+**交换了切分轴**的 `tile.transpose` 无法被正确切分：每个 lane 的切分数据迁移到了*另一个*
+维度，而切分仍按*原*轴减半，结果形状错误并会算错。本 pass 不再上报它——该检查已移到仍然
+持有所需上下文的位置：
 
-切分是用户掌控的性能决策,因此 pass 不会悄悄把它丢掉(那会编译出比用户要求更慢的内核),而是 fail-loud、指出出错的那个 transpose,并给出两条修改方向:
+| 形态 | 上报者 |
+| ---- | ------ |
+| `pl.split_aiv` 区域 | [`AivSplitValid`](99-verifier.md) 检查 (l)，以 [`LowerAutoVectorSplit`](23-lower_auto_vector_split.md) 兜底 |
+| 函数级 `pl.split`（无区域） | `LowerAutoVectorSplit` |
 
-1. **删掉切分** —— 设 `attrs={"split": pl.SplitMode.NONE}`(或移除 `pl.split(...)` 优化)。这与用户本可直接请求的不拆内核完全一致。
-2. **消除该 transpose** —— 例如把「转置后按行取」改成直接列切片 `pre[:, h:h+1]`。这样切分得以保留,内核仍拿到请求的加速,同时也避开了 pto-isa FP 转置在设备上的 tail-path 算错。
+在此上报只会得到更差的诊断：会触发区域情形的那趟遍历是 `AppendConsumed`，而它正是**擦除**
+了它本该指名的那个包装，因此既说不出区域的模式，也说不出出错的结果名，更给不出修法。至于
+函数级情形，它之所以曾留在这里，只是因为本 pass 能看到**每一个**函数，包括
+`LowerAutoVectorSplit` 不予下降的纯向量 `pl.split` 内核；那个 pass 现在会校验它的透传分支，
+从而在不依赖迟到诊断的前提下补上这一缺口。
 
-`split_axis::FindTransposeSplitHazard` 在 `ExpandMixedFunction` 开头检测:标记**第一个**在切分轴上非 singleton 的 `tile.transpose` 源(若源在切分轴上是 singleton,则不携带切分数据 —— 即广播 no-op 情形 —— 保持切分;动态的非 `ConstInt` extent 视为非 singleton,保守标记)。
+`split_axis::FindTransposeSplitHazard` 仍是共用的检测器：标记**第一个**在切分轴上非 singleton
+的 `tile.transpose` 源（若源在切分轴上是 singleton，则不携带切分数据——即广播 no-op 情形——
+保持切分；动态的非 `ConstInt` extent 视为非 singleton，保守标记）。
 
-`SplitRegionConsumer` 按保留或合成区域自身的切分轴检查转置风险，擦除包装，并在同一份
+`SplitRegionConsumer` 擦除包装，并在同一份
 消费后的 body 上记录临时放置信息，供 mixed 判定和展开共用。纯 AIV 函数也在此消费区域。
-没有区域的函数保留原有的整函数转置检查，并跳过区域消费及 body 重建。擦除区域的注释移到首条生成语句之前，不修改输入元数据；边界展开为传输操作时也保留注释。
+没有区域的函数跳过区域消费及 body 重建。擦除区域的注释移到首条生成语句之前，不修改输入元数据；边界展开为传输操作时也保留注释。
 
 本 pass 要求 `AivSplitLoweredValid`。源阶段严格检查边界操作数内存，lowered 阶段仍对本地定义的值执行此检查。展开时，内联调用与已绑定变量均计入词法放置信息，根据
 生产 lane 是否拥有操作数进行检查，因此两侧共享的参数不受其内存注解限制。边界结果

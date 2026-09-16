@@ -66,6 +66,16 @@ result = passes.lower_auto_vector_split()(program)
 - 确为**混合（cube↔vector）**：其汇总亲和性为 `MIXED`，与 `ExpandMixedKernel`
   判定 `is_mixed` 所用的 `ClassifyCallAffinity` / `CombineAffinity` 完全一致。
 
+### 整函数的 transpose 切分冒险
+
+在上述判定之前，每个带函数级拆分模式的 `InCore` 函数都会先检查是否存在**交换了切分轴**的
+`tile.transpose`——**包括**随后被本 pass 原样透传的那些函数。该检查原本位于
+`ExpandMixedKernel`，纯粹是因为那个 pass 能看到每一个函数；正是「在透传分支上也执行它」
+使它得以前移。没有这份覆盖，**纯向量** `pl.split` 内核会带着一个无法定型的 transpose 抵达
+`SplitVectorKernel` 并静默算错。它在下降分支之前运行，以便其针对性诊断先于折半在同一条语句上
+可能抛出的通用「全宽操作数」拒绝。按**区域**的对应检查是
+[`AivSplitValid`](99-verifier.md) 的检查 (l)，并由本 pass 兜底。
+
 其余一律原样透传。最后一条很关键：**纯向量** `pl.split` 函数（例如把一个逐元素算子
 拆到两个 AIV lane，既无 cube 也无 C↔V 边界）没有可收敛的边界，故保持不动——
 `ExpandMixedKernel` 会照旧把它转成普通 AIV 函数并剥掉其 `split` 属性，保留其原先
@@ -92,15 +102,16 @@ pass 能区分「被 scope 包裹的混合函数」与「纯向量函数」，�
 
 ### 共享函数体检查与 AUTO 区域
 
-`AnalyzeSplitBody` 同时检查变换后的 AUTO body 和显式 manual body。AUTO 在替换与克隆
-之前提供形状变换已建立的 tile 事实；manual 从 shard、lane 地址、别名、tuple projection
-和循环结果重建数据流。广播读取与只读 singleton 计算保持中立，不会替无关的全宽消费者
-证明已分片。rank-1 load 与全宽 reshape/reinterpret view 可作为后续 lane-local slice
-的中间值，但不会因此成为半宽事实。
+`AnalyzeSplitBody` 只检查**由本 pass 折半**的 body——AUTO 整函数与无边界算子的区域——
+使用其形状变换在替换与克隆之前建立的 tile 事实，并从 shard、lane 地址、别名、
+tuple projection 和循环结果重建数据流。广播读取与只读 singleton 计算保持中立，不会替
+无关的全宽消费者证明已分片。rank-1 load 与全宽 reshape/reinterpret view 可作为后续
+lane-local slice 的中间值，但不会因此成为半宽事实。由**作者**手写边界算子的区域完全不做
+该扫描——见[显式边界区域内允许出现哪些算子](#显式边界区域内允许出现哪些算子)。
 
 控制流合并会逐 tuple 元素取两个分支的 shard 事实交集。循环回边必须保留从初值继承的 shard 事实。中性初值可以在循环体中变为按 lane 的值，但循环携带值与出口仍保持中性，避免仅根据 yield 将零次迭代的出口误判为按 lane 切分。
 
-检查诊断分别记录全宽算子名（`full_width_vec_ops`）与循环携带变量名（`carry_mismatches`）。携带值不一致时，说明入口的 shard 事实在回边丢失，并提示保留按 lane 的 yield；算子未本地化时，报告算子名，并提示使用按 lane 的操作数或本地化读取地址。显式边界区域的检查失败使用面向用户的 `CHECK_SPAN` 文案；隐式或 AUTO 折半后的失败属于编译器后置条件违例，使用 `INTERNAL_CHECK_SPAN`，不附带作者修改建议。两类问题同时存在时，优先报告携带值不一致。
+检查诊断分别记录全宽算子名（`full_width_vec_ops`）与循环携带变量名（`carry_mismatches`），两类问题同时存在时优先报告携带值不一致。此处的失败一律属于编译器后置条件违例——pass 折半了 body 却留下未本地化的算子——因此两者都使用 `INTERNAL_CHECK_SPAN`，不附带作者修改建议。
 
 AUTO 完成下降后，只在同一结构验证器认可时包装单个直线向量阶段，保留计算顺序和 lane 变量身份，仅在区域外没有使用者时把 lane 绑定移入区域。
 向量阶段之后、下一个计算阶段或 return 之前的 SHARED 调用归入该向量阶段。交错的 cube/vector 阶段、控制流、带 `lane_stride` 的重平衡边界、迁移后的边界轴
@@ -178,9 +189,8 @@ lane 规则同理（见[作用域与放置](../../user/language/04-scopes.md)）
   **原样透传区域体**（不折半、不本地化偏移、不注入 `subblock_idx`；作者的
   `aiv_id = get_subblock_idx()` 绑定已携带 lane 信息）。此处的 `tile.aiv_shard` /
   `tile.aic_gather` 是**被接受**的，并与其余语句一同透传：没有拆分轴时它只跨越 AIC/AIV 边界
-  而不切分，其 `split=0` 类型推导原样保留形状，因此没有可折半或可拼合的东西。本模式下会跳过
-  `ValidateMixedExplicitRegion`——它拒绝的是「半宽边界算子与全宽向量算子混写」，而这里一切
-  都是全宽。该函数仍会被标记 `split_aiv`，因此下游 [`ExpandMixedKernel`](24-expand_mixed_kernel.md) /
+  而不切分，其 `split=0` 类型推导原样保留形状，因此没有可折半或可拼合的东西。本模式下同样不做任何
+  校验——这里一切都是全宽。该函数仍会被标记 `split_aiv`，因此下游 [`ExpandMixedKernel`](24-expand_mixed_kernel.md) /
   `SplitVectorKernel` 会把它派发到**两个** AIV lane（经由 `dual_aiv_dispatch`），而**非**
   lane-0-only 的非拆分 replay——故从这类区域向外的 V→C 跨越上两个 lane 都会 push，写入同一个
   共享槽位且没有任何仲裁，因此除非作者保证该值 lane-uniform，cube 收到的是二者之一且不确定
@@ -188,35 +198,29 @@ lane 规则同理（见[作用域与放置](../../user/language/04-scopes.md)）
 
 ### 显式边界区域内允许出现哪些算子
 
-由于该区域体是**原样**拼接的，其中每个 vector 算子都必须已经是 per-lane 的——保持全宽的
-算子会在两个 AIV lane 上运行出完全相同的结果。`ValidateMixedExplicitRegion` 负责校验这一
-点，并以可操作的错误信息列出违规算子。满足以下任一条件的 tile 生成算子会被接受：
+**作者写什么就是什么。** 该区域体是**原样**拼接的，因此其中每个 vector 算子都必须已经是
+per-lane 的——保持全宽的算子会在两个 AIV lane 上算出完全相同的结果——但保证这一点是
+**作者的契约**，本 pass 不再校验。亲手写下 `tile.aiv_shard` / `tile.aic_gather` 本身就是
+「切分由我负责」的声明，pass 予以采信。混写了边界算子与全宽向量算子的区域体可以编译通过；
+其后按 lane 偏移的 `assemble` / `store` 会因此重复累加。这是本模式的代价。
 
-| 接受条件 | 原因 |
-| -------- | ---- |
-| （传递地）消费了 `tile.aiv_shard` 的结果 | 依构造即处于 half-width 数据流中。 |
-| 纯生成算子——`tile.full` / `tile.ci` / `tile.random`（以及 `tile.create`，它归类为 `SHARED`，本就不会被报告） | 其结果仅是自身属性的函数：不读取任何 tile、不读取内存，因此无论作者写的是什么 extent，per-lane 复制都是正确的。 |
-| 携带**地址**的算子——`tile.load` / `tile.slice` / `tile.extract` / `tile.gather_row`——且其**读地址**引用了区域的 `aiv_id` | 作者已显式做了 per-lane 定位，例如 `data[base + aiv_id * HALF : ...]`。仅读偏移参数计入（`tile.load` 第 1 个、`tile.slice` 第 2 个、`tile.extract` 第 1–2 个、`tile.gather_row` 第 3 个即 `src_offset`）——出现在 `shape`、`valid_shape` 或**目的**槽位中的 lane 引用并不会移动窗口，因此不予接受。 |
+早先的版本会在这里以硬性 `ValueError` 运行 `ValidateSplitBody`，但该扫描证明的是**意图**
+而非**范围**——它本就信任作者给出的 `tile.store` 偏移，也信任按 lane 跨步的读取确实做了切分。
+作为一道门禁，它既拒绝了正确的核（lane 无关的广播操作数；经由前向扫描无法跟踪的构造到达的
+shard 结果），又仍然放行了错误的核；它带来的安全性并不足以支撑「阻塞作者」这一代价。由 pass
+自己折半的路径保留同一套扫描——在那里，残留的全宽算子意味着 pass 自身的后置条件失败：
 
-该扫描按**区域**播种，并按程序顺序做一次前向遍历，因此它只能识别在当前扫描区域内定义的边界结果。从别处到达该区域的 `tile.aiv_shard` 结果——在兄弟区域中产生，或经由回边上的循环 `iter_arg` 传入——对它是不可见的，于是消费者会被报成全宽，尽管该值确实是按 lane 的。这两种写法都会被 `AivSplitValid` 验证器提前 12 个 pass 拒绝（检查 (i) 与 (j)，见 [99-verifier.md](99-verifier.md)），这正是让上述误报不会出现在作者面前的原因；因此本扫描实际只会遇到同区域内的数据流，也正是它被设计来处理的范围。
+| 路径 | 由谁折半 | 检查 |
+| ---- | -------- | ---- |
+| AUTO 整函数 | pass | `INTERNAL_CHECK_SPAN` |
+| 区域，`UpDown`/`LeftRight`，无边界算子 | pass | `INTERNAL_CHECK_SPAN` |
+| 区域，`UpDown`/`LeftRight`，作者手写边界算子 | 作者 | **无** |
+| 区域，`None`（任务并行） | 无人——全部全宽 | **无** |
 
-`tile.gather_row` 是其中的 DMA 情形：它是 DPS，因此带有**两个**偏移，而只有 `src_offset`
-决定两个 lane 是否在做不同的工作——`src_offset` 由 lane 派生意味着每个 lane 各自拉取属于
-自己的散列 GM 行（接受）；若只有 `dst_offset` 由 lane 派生，则两个 lane 会把**相同**的行取到
-同一个全宽累加器的不同槽位（仍会被报告）。
-
-其余归类为 `VECTOR` 的算子都会被报告。有两点需要注意：
-
-- 生成算子**仅对其自身**被接受，它不会加入 half-width 数据流。
-  `z = pl.full([FULL, N]); y = pl.add(z, z)` 仍会在 `y` 处被拒绝——全宽生成算子不得为其
-  消费者背书。
-- lane 引用**仅**在携带地址的算子上被信任。在其他算子上，lane 派生的标量只是一个普通操作数，
-  并不能说明结果的宽度——因此 `pl.set_validshape(full_width_tile, 1, aiv_id * HALF)`
-  无法把一个全宽 tile 洗白进区域。
-
-该校验证明的是**意图**而非**范围**：偏移按 lane 跨步、但 extent 仍为全宽的 load 会被接受，
-此时两个 lane 会读到重叠的窗口——这与本 pass 从不检查 `tile.store` 的 lane 相关偏移是同一种
-信任。
+仍会拒绝手写区域的是另外几项独立检查：按区域执行的 **transpose 冒险检查**（交换了拆分轴的
+`tile.transpose` 在任何 lane 上都无法正确**定型**，这是可表示性的限制，而非对作者意图的判断）、
+提前 12 个 pass 的 [`AivSplitValid`](99-verifier.md) 检查 (a)–(k)，以及交给
+`ExpandMixedKernel` 的 `AivSplitLoweredValid` 交接。
 
 由于区域经由通用的 `BeginScope`/`EndScope` 构建且不被提取，它可**嵌套**在 `pl.range` /
 `pl.pipeline` 循环或 `if` 之内；区域路径会递归进入复合语句以下降每个区域，同时保留外围控制流。
