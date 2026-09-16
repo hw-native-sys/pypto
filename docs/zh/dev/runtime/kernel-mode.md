@@ -76,7 +76,10 @@ Scalar 保持符号形式。直接返回输入保留 stride、storage offset 与
 并注册 fake kernel；调用方负责保留 library 对象及其注册生命周期。重复定义，包括
 同名不同签名，均抛出 PyTorch 的重复定义错误，不替换已有定义。导入或重新加载模块
 不注册算子。`pypto.torch` 不新增公开注册 API，本阶段也不安装真实设备 kernel。
-如果当前 PyTorch 缺少 `torch.library.register_fake`，则在安装 schema 前明确报错。
+如果当前 PyTorch 缺少 `torch.library.register_fake`，则回退到
+`torch.library.impl_abstract`（PyTorch 2.2–2.3 提供），并保留调用方 Library 的
+生命周期管理。两种 API 均不可用时，在安装 schema 前明确报错。该可选辅助要求
+至少存在其中一种 API；此回退不新增 PyTorch 2.0–2.1 支持，也不调整整个包的最低依赖版本。
 
 测试使用临时 namespace 和 CPU 实现夹具。在 PyTorch 2.6 上，无 dispatcher 返回值
 的纯修改 schema 通过全部
@@ -85,6 +88,8 @@ Scalar 保持符号形式。直接返回输入保留 stride、storage offset 与
 测试 wrapper 在调用算子后返回调用方传入的输出 Tensor。通过注册后的 `torch.ops`
 验证有具体值提示（backed）和无具体值提示（unbacked）的整数符号原样到达 fake kernel，
 且不添加等值 guard；另以 shape 派生的 Scalar 验证不同输入尺寸复用同一编译图。
+API 选择测试在 PyTorch 2.6 上模拟旧注册入口，验证 Fake/Meta dispatch、重复定义拒绝
+及 Library 清理；不据此宣称旧版 PyTorch 已通过端到端编译器兼容性验证。
 带返回别名的 schema 分别
 验证 schema 正确性与 Fake/Meta 行为，不把这些检查视为该类算子已支持函数化
 （functionalization）或编译执行。正式 kernel 注册、设备执行、autograd 与最终编译器

@@ -177,7 +177,11 @@ class RegistrationSignature:
         """
         register_fake = getattr(torch.library, "register_fake", None)
         if register_fake is None:
-            raise RuntimeError("Metadata registration requires torch.library.register_fake support")
+            register_fake = getattr(torch.library, "impl_abstract", None)
+        if register_fake is None:
+            raise RuntimeError(
+                "Metadata registration requires torch.library.register_fake or impl_abstract support"
+            )
         schema = self.schema(name)
         library.define(schema)
         register_fake(f"{library.ns}::{name}", self.fake, lib=library)

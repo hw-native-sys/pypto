@@ -97,8 +97,12 @@ signature with the same name, raise PyTorch's duplicate-definition error;
 existing definitions are not replaced. Importing or reloading this module does
 not register an operator. `pypto.torch` exports no new public registration API,
 and PyPTO installs no real device kernel in this foundation. If the installed
-PyTorch lacks `torch.library.register_fake`, definition fails before installing
-a schema.
+PyTorch lacks `torch.library.register_fake`, the helper falls back to
+`torch.library.impl_abstract` (available in PyTorch 2.2–2.3), preserving the
+caller-owned library lifetime. If neither API is available, definition fails
+before installing a schema. This optional helper requires one of these APIs;
+the fallback does not add support for PyTorch 2.0–2.1 or change the package-wide
+minimum dependency version.
 
 The tests use temporary namespaces and CPU fixture implementations. On PyTorch
 2.6, mutation-only schemas with no dispatcher return pass all
@@ -108,6 +112,9 @@ the test wrapper returns the caller's output tensor after the operator call.
 Registered `torch.ops` tests verify that backed and unbacked integer symbols
 reach the fake kernel unchanged without equality guards. A shape-derived scalar
 test also verifies that different input sizes reuse one compiled graph.
+API-selection tests emulate the older registration entry point on PyTorch 2.6
+and verify Fake/Meta dispatch, duplicate rejection and library cleanup; they
+do not establish end-to-end compiler compatibility on older PyTorch releases.
 Schemas with aliased returns are checked for schema correctness and Fake/Meta
 behavior separately. These checks do not establish functionalization or compiled
 execution of aliased-return operators. Actual kernel registration, device

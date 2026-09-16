@@ -245,9 +245,52 @@ def test_missing_registration_api_fails_before_definition(library, monkeypatch):
     signature = registration.RegistrationSignature([_param()])
     with monkeypatch.context() as patch:
         patch.delattr(torch.library, "register_fake")
-        with pytest.raises(RuntimeError, match="requires torch.library.register_fake"):
+        patch.delattr(torch.library, "impl_abstract", raising=False)
+        with pytest.raises(RuntimeError, match="register_fake or impl_abstract"):
             signature.define(library, "unavailable")
     signature.define(library, "unavailable")
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_registration_api_selection_and_library_lifetime(monkeypatch, legacy):
+    """Both API names register working kernels owned by the caller's library."""
+    register_fake = torch.library.register_fake
+    calls = []
+
+    def impl_abstract(qualname, func=None, *, lib=None):
+        # Emulate the older API signature while using real dispatcher registration.
+        assert legacy, "register_fake must take precedence when available"
+        calls.append((qualname, lib))
+        return register_fake(qualname, func, lib=lib)
+
+    monkeypatch.setattr(torch.library, "impl_abstract", impl_abstract, raising=False)
+    if legacy:
+        monkeypatch.delattr(torch.library, "register_fake")
+    signature = registration.RegistrationSignature(
+        [_param(direction=ParamDirection.InOut)], return_aliases=(0,)
+    )
+    lib = torch.library.Library(f"pypto_schema_test_{uuid.uuid4().hex}", "DEF")
+    qualname = f"{lib.ns}::identity"
+    try:
+        signature.define(lib, "identity")
+        assert calls == ([(qualname, lib)] if legacy else [])
+        op = getattr(getattr(torch.ops, lib.ns), "identity")
+        value = torch.empty((2, 3), device="meta")
+        assert op(value) is value
+        with FakeTensorMode():
+            value = torch.empty((2, 3))
+            assert op(value) is value
+        with pytest.raises(RuntimeError, match="same name and overload name"):
+            signature.define(lib, "identity")
+    finally:
+        lib._destroy()
+    assert qualname not in torch._C._dispatch_get_all_op_names()
+    # Reusing the name also proves that the fake registration handle was removed.
+    replacement = torch.library.Library(lib.ns, "DEF")
+    try:
+        signature.define(replacement, "identity")
+    finally:
+        replacement._destroy()
 
 
 def test_mixed_abstract_devices_are_rejected():
