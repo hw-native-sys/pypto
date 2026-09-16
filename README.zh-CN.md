@@ -32,9 +32,35 @@ PyPTO（发音：pai p-t-o）是一个面向 AI 加速器的高性能编程框�
 - **nanobind**：2.0.0 或更高版本（构建时自动安装）
 - **scikit-build-core**：0.10.0 或更高版本（构建时自动安装）
 
+以上是从源码安装的要求。下面的开发容器已经带齐这些，宿主机一个都不需要。
+
 ### 安装
 
-#### 从源码安装
+#### 方式一：开发容器（昇腾 A2/A3）
+
+有昇腾卡的机器上最快的路径。CANN、PyPTO、`simpler` 和 ptoas 都已构建进镜像，不需要自己拼工具链。
+
+宿主机需要先备齐三样：昇腾 NPU 驱动（26.0.rc1）、Docker Engine，以及 Ascend Docker
+Runtime —— 下面的 `--runtime=ascend` 正是靠这个插件才生效。这三样的安装与核验步骤见
+[开发容器](docs/zh/user/04-dev-container.md)，选卡、跨容器保留源码和设备侧故障排查也都在同一篇。
+
+备齐之后，拉取镜像并用 0 号卡起一个容器。镜像仓库允许匿名拉取，不需要登录：
+
+```bash
+export PYPTO_IMAGE=swr.cn-east-3.myhuaweicloud.com/cloud-pypto/pypto-dev:a3-dist
+docker pull "$PYPTO_IMAGE"
+
+docker run --rm -it \
+  --runtime=ascend \
+  -e ASCEND_VISIBLE_DEVICES=0 \
+  --shm-size=16g \
+  "$PYPTO_IMAGE"
+```
+
+进入容器后，用 `pypto-doctor` 自检环境，用 `python $PYPTO_SRC/examples/beginner/01_hello_world.py`
+在卡上跑一个内核。
+
+#### 方式二：从源码安装
 
 1. **克隆仓库**：
 

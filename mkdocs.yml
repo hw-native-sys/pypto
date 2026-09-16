@@ -168,6 +168,7 @@ nav:
   - User Manual:
       - en/user/index.md
       - en/user/01-installation.md
+      - en/user/04-dev-container.md
       - en/user/02-quickstart.md
       - en/user/03-programming-model.md
       - Language Guide:
