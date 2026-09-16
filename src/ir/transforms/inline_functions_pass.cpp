@@ -652,7 +652,20 @@ class NestedInlineCallHoister : public IRMutator {
     auto call = As<Call>(visited);
     if (!call) return visited;
     auto gvar = As<GlobalVar>(call->op_);
-    if (!gvar || inline_fns_.count(gvar->name_) == 0) return visited;
+    if (!gvar) return visited;
+    auto it = inline_fns_.find(gvar->name_);
+    if (it == inline_fns_.end()) return visited;
+
+    // A tuple-returning callee must not be hoisted. `SpliceInlineCallAsTupleSub`
+    // deliberately emits no `tmp = ...` binding — it records the cloned return
+    // values against the LHS Var and rewrites downstream
+    // `TupleGetItemExpr(tmp, i)` uses instead. A nested consumer holds `tmp`
+    // itself rather than a TupleGetItemExpr, so hoisting would leave the temp
+    // undefined (`return self.pair(x), y` printed `t__inline_arg_v0__FREE_VAR`).
+    // Leaving the Call in place preserves the pre-hoist behaviour: the
+    // InlineFunctionsEliminated verifier reports it at its own source line
+    // right after this pass.
+    if (InlineReturnsTuple(it->second)) return visited;
 
     VarPtr tmp = std::make_shared<Var>(HoistTempName(), call->GetType(), call->span_);
     pending_->push_back(std::make_shared<const AssignStmt>(tmp, call, call->span_));

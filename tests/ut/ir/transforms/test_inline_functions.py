@@ -17,6 +17,7 @@ Tests use the Before/Expected pattern with ``ir.assert_structural_equal``,
 which compares programs under alpha-equivalence (Var name mismatches are OK
 as long as the LHS↔RHS Var mapping is consistent throughout)."""
 
+import pypto
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
@@ -924,6 +925,76 @@ class TestInlineFunctionsNestedCallSites:
 
         After = passes.inline_functions()(Before)
         ir.assert_structural_equal(After, Expected)
+
+    def test_tuple_returning_callee_is_not_hoisted(self):
+        """A tuple-returning callee must stay put — hoisting it leaves an undefined temp.
+
+        `SpliceInlineCallAsTupleSub` deliberately emits no `tmp = ...` binding: it
+        records the cloned return values against the LHS `Var` and rewrites
+        downstream `TupleGetItemExpr(tmp, i)` uses instead. A nested consumer holds
+        `tmp` itself, not a `TupleGetItemExpr`, so a hoist would print
+        `t__inline_arg_v0__FREE_VAR`. Leaving the Call in place keeps the pre-hoist
+        behaviour, and `InlineFunctionsEliminated` reports it.
+
+        Written as source text because the IR shape — a multi-value `ReturnStmt`
+        whose first value is a tuple — has no Python-typeable annotation: the DSL
+        rejects a nested `tuple[...]` return, and a flat one contradicts what the
+        callee returns.
+        """
+        source = """
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.Inline)
+    def pair(self, x: pl.Tensor[[1], pl.INT32]) -> tuple[pl.Tensor[[1], pl.INT32], pl.Tensor[[1], pl.INT32]]:
+        a: pl.Tensor[[1], pl.INT32] = pl.tensor.mul(x, x)
+        b: pl.Tensor[[1], pl.INT32] = pl.tensor.add(x, x)
+        return a, b
+
+    @pl.function
+    def main(self, x: pl.Tensor[[1], pl.INT32]) -> tuple[
+            pl.Tensor[[1], pl.INT32], pl.Tensor[[1], pl.INT32], pl.Tensor[[1], pl.INT32]]:
+        y: pl.Tensor[[1], pl.INT32] = pl.tensor.mul(x, x)
+        return self.pair(x), y
+"""
+        Before = pl.parse_program(source)
+
+        # InlineFunctionsEliminated is in GetVerifiedProperties(), so the
+        # un-spliced Call is reported by the pass's own post-verification — at
+        # the `return self.pair(x), y` line, not 40 passes later in codegen.
+        with pytest.raises(pypto.Error, match=r"Dangling Call to function 'pair'"):
+            passes.inline_functions()(Before)
+
+        # The IR itself is intact: the Call stays where it was, and no temp is
+        # left dangling (`t__inline_arg_vN__FREE_VAR`).
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            After = passes.inline_functions()(Before)
+        printed = ir.python_print(After)
+        assert "FREE_VAR" not in printed, printed
+        assert "self.pair(x)" in printed, printed
+
+    def test_tuple_unpack_call_site_still_splices(self):
+        """The ordinary `a, b = self.pair(x)` form is unaffected by the hoist skip."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def pair(
+                self, x: pl.Tensor[[1], pl.INT32]
+            ) -> tuple[pl.Tensor[[1], pl.INT32], pl.Tensor[[1], pl.INT32]]:
+                a: pl.Tensor[[1], pl.INT32] = pl.mul(x, x)
+                b: pl.Tensor[[1], pl.INT32] = pl.add(x, x)
+                return a, b
+
+            @pl.function
+            def main(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+                p, q = self.pair(x)
+                z: pl.Tensor[[1], pl.INT32] = pl.add(p, q)
+                return z
+
+        After = passes.inline_functions()(Before)
+        printed = ir.python_print(After)
+        assert "pair" not in printed, printed
+        assert "FREE_VAR" not in printed, printed
 
     def test_verifier_silent_after_nested_call_site(self):
         """The nested form leaves nothing for InlineFunctionsEliminated to report."""
