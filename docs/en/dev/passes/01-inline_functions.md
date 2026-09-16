@@ -121,8 +121,39 @@ The scope is preserved verbatim and gets outlined by `OutlineIncoreScopes` later
 | Inline calls Inline (transitive) | Iteratively expanded to fixpoint. |
 | Recursive Inline (self or mutual) | `pypto::ValueError` raised before any splicing, with the cycle named (`a -> b -> a`). |
 | Multi-return inline | No `LHS = MakeTuple([rets...])` is emitted — orchestration codegen cannot lower `MakeTuple`. The cloned return values are recorded against the LHS `Var` and downstream `TupleGetItemExpr(LHS, i)` uses are rewritten to value `i`, leaving the LHS binding unreferenced (see `SpliceInlineCallAsTupleSub`). |
-| Nested call to Inline (e.g. `pl.add(inline_fn(x), y)`) | Not handled in v1 — left as-is. The `InlineFunctionsEliminated` verifier flags any surviving Call. |
+| Nested call to Inline (e.g. `pl.add(inline_fn(x), y)`, or the `array.update_element(arr, i, inline_fn(x))` the parser desugars `arr[i] = inline_fn(x)` into) | Hoisted onto an `AssignStmt` of its own, then spliced in the same iteration — see [Nested call sites](#nested-call-sites). |
+| Nested call to a **tuple-returning** Inline, a `WhileStmt` condition, an `IterArg` init value, or a bare (non-`SeqStmts`) `ForStmt` / `IfStmt` body | Not hoisted. The `InlineFunctionsEliminated` verifier reports the surviving Call at its own source line right after this pass. |
 | `EvalStmt(inline_call(...))` — return value ignored | The value is discarded, its **evaluation** is not. See [Discarding a return value](#discarding-a-return-value) below. |
+
+## Nested call sites
+
+`HandleTopLevelInlineCall` recognises a call site only when the `Call` **is** the whole statement value — `LHS = f(...)`, `EvalStmt(f(...))`, `return f(...)`. A `Call` anywhere else would be skipped while step 5 dropped the callee anyway, leaving a reference to a deleted function that only failed at `GenerateOrchestration preconditions` with `references undefined function`.
+
+Such calls come from ordinary DSL, sometimes without the user writing a nested call at all. `arr[i] = f(x)` has no IR statement of its own; the parser desugars it to a functional update:
+
+```python
+arr[i] = f(x)                              # what the user writes
+arr = pl.array.update_element(arr, i, f(x))  # what the parser stores — f is now an argument
+```
+
+`NestedInlineCallHoister` therefore runs over each statement's own expressions before the call-site match, pulling every nested inline `Call` onto a fresh `t__inline_arg_vN` binding placed before that statement:
+
+```python
+# before                                   # after the hoist, before the splice
+k = self.half(n) + 1                       t__inline_arg_v0 = self.half(n)
+                                           k = t__inline_arg_v0 + 1
+```
+
+`SpliceHoisted` then splices each hoisted binding immediately, so a hoist and the splice it enables land in the same fixpoint iteration and the `inline_fns.size() + 1` iteration bound still holds.
+
+Three properties worth keeping in mind when editing this:
+
+- **A call already in top-level position is left alone** (`HoistInArgs` rewrites only its arguments). Hoisting it would add a redundant copy to every existing call site and churn every before/after test.
+- **Bodies are not touched.** The hoister rewrites only the statement's own expressions; `InlineCallsMutator` still recurses into loop and branch bodies, so a hoist inside a body lands inside that body.
+- **Every hoisted position is evaluated exactly once**, at the point the hoisted statement lands — a call argument, a binary operand, a loop bound, an `if` condition, a `yield` value. A `WhileStmt` condition is not, which is why it is excluded: hoisting it would evaluate the spliced body once instead of per iteration.
+- **A tuple-returning callee is never hoisted.** `SpliceInlineCallAsTupleSub` deliberately emits no `tmp = ...` binding — it records the cloned return values against the LHS `Var` and rewrites downstream `TupleGetItemExpr(tmp, i)` uses instead. A nested consumer holds `tmp` itself rather than a `TupleGetItemExpr`, so hoisting would leave the temp undefined: `return self.pair(x), y` printed `t__inline_arg_v0__FREE_VAR`. Leaving the `Call` in place keeps the pre-hoist behaviour, and the verifier names it.
+
+This is deliberately narrower than `FlattenCallExpr` (pass 06), which performs the same hoist for *all* calls. That pass declares `.required = {SSAForm, NormalizedStmtStructure}`, both established after this one, so it cannot simply run first.
 
 ## Discarding a return value
 
