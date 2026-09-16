@@ -7812,5 +7812,74 @@ class TestCapacityGatedReuse:
             passes.allocate_memory_addr()(after)
 
 
+class TestChainedInPlaceIfPhis:
+    """An in-place producer must never be anchored onto an unsettled `if` phi.
+
+    An `scf.if` return_var is not a tracked def in the reuse analysis, so it still
+    carries its pre-reuse buffer when the pre-YieldFixup identity-copy
+    normalization runs. Re-anchoring an in-place producer onto that stale buffer
+    pins it to storage YieldFixup is about to abandon, which then reconciles the
+    sibling arm with a same-space `tile.move` no target can lower, and leaves the
+    phi buffer unwritten on the taken arm.
+    """
+
+    def test_chained_conditional_gather_row_shares_one_l1_buffer(self, ascend_backend):
+        """Two chained `if`s over one in-place `gather_row` keep a single L1 buffer.
+
+        A dynamic `pl.pipeline` trip count makes LowerPipelineLoops peel a remainder
+        epilogue onto its own buffer, which is what gives MemoryReuse a retarget to
+        make; `pl.unroll(2)` around the `if` is what chains two phis over the same
+        tile. Both are required to reach the bug.
+        """
+
+        @pl.program
+        class ChainedGather:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                pool: pl.Tensor[[4096, 128], pl.INT8],
+                q: pl.Tensor[[32, 128], pl.INT8],
+                limits: pl.Tensor[[2], pl.INT32],
+                out: pl.Out[pl.Tensor[[4, 64, 32], pl.INT32]],
+            ) -> pl.Tensor[[4, 64, 32], pl.INT32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    pages = pl.cast(pl.read(limits, [0]), pl.INDEX)
+                    groups = pl.cast(pl.read(limits, [1]), pl.INDEX)
+                    for group in pl.pipeline(0, groups, stage=2):
+                        kv = pl.create_l1([64, 128], pl.INT8)
+                        for slot in pl.unroll(2):
+                            page = group * 2 + slot
+                            if page < pages:
+                                row = pl.cast(page * 32, pl.INDEX)
+                                kv = pl.gather_row(kv, pool, [slot * 32, 0], [row, 0], [32, 128])
+                        score = pl.matmul(kv, q, out_dtype=pl.INT32, b_trans=True)
+                        out = pl.assemble(out, score, [group, 0, 0])
+                return out
+
+        lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(ChainedGather)
+        aic_functions = [
+            function for function in lowered.functions.values() if function.func_type == ir.FunctionType.AIC
+        ]
+        assert len(aic_functions) == 1
+
+        body = aic_functions[0].as_python()
+        # A Mat -> Mat tile.move has no legal `pto.tmov` address-space pair; the phi
+        # must resolve in place instead.
+        assert not any(
+            "pl.tile.move(" in line and "target_memory=pl.Mem.Mat" in line for line in body.splitlines()
+        ), f"MemoryReuse emitted an unlowerable Mat->Mat tile.move:\n{body}"
+
+        # Every gather in one epilogue/steady-state copy, and the phi feeding the
+        # matmul, must name one L1 allocation — otherwise the taken arm writes a
+        # buffer the matmul never reads.
+        pto = codegen.PTOCodegen().generate(
+            ir.Program([aic_functions[0]], aic_functions[0].name, lowered.span),
+            emit_tile_addr=True,
+        )
+        assert not re.search(r"pto\.tmov ins\([^)]*loc=mat[^)]*\) outs\([^)]*loc=mat[^)]*\)", pto), (
+            f"codegen emitted a same-space Mat->Mat pto.tmov:\n{pto}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

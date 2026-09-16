@@ -4553,6 +4553,13 @@ class StripPipelineMembershipMutator : public IRMutator {
 /// copy has a buffer mismatch (the common case).
 class NormalizeIdentityCopyBuffersMutator : public IRMutator {
  public:
+  NormalizeIdentityCopyBuffersMutator() = default;
+
+  /// `unsettled` names IfStmt return_vars whose buffer YieldFixup has not chosen
+  /// yet; see `ReanchorInplaceOutput` for why anchoring onto one is wrong.
+  explicit NormalizeIdentityCopyBuffersMutator(std::set<const Var*> unsettled)
+      : unsettled_(std::move(unsettled)) {}
+
   ExprPtr VisitExpr_(const VarPtr& op) override {
     auto it = subst_.find(op);
     return it != subst_.end() ? it->second : op;
@@ -4587,6 +4594,17 @@ class NormalizeIdentityCopyBuffersMutator : public IRMutator {
   /// This also repairs a producer/output mismatch introduced by control-flow or
   /// pipeline lowering even when the input itself was not substituted in this
   /// traversal. Returns nullptr when the allocation already agrees.
+  ///
+  /// Skips a reused input listed in `unsettled_` — an IfStmt return_var on the
+  /// pre-YieldFixup run.  A phi is not a tracked def in the reuse analysis (see
+  /// LifetimeAnalyzer's IfStmt handler), so it still carries its pre-reuse buffer
+  /// here and YieldFixup chooses the real one in Step 4.  Anchoring onto the
+  /// stale buffer pins this producer to storage that is about to be abandoned:
+  /// YieldFixup then reads it as the canonical target for the *next* phi in the
+  /// chain and reconciles the other arm with a same-space `tile.move` no target
+  /// can lower, while the post-fixup run silently re-anchors the producer back —
+  /// leaving the phi buffer unwritten on the taken arm.  Two conditionals over
+  /// one in-place tile (what `pl.unroll(2)` around an `if` produces) are enough.
   StmtPtr ReanchorInplaceOutput(const AssignStmtPtr& op) {
     auto call = As<Call>(op->value_);
     if (!call || !call->op_) return nullptr;
@@ -4596,6 +4614,7 @@ class NormalizeIdentityCopyBuffersMutator : public IRMutator {
     if (!in_var) return nullptr;
     auto new_in = AsVarLike(VisitExpr(in_var));  // follow prior subst_ renames
     if (!new_in) return nullptr;
+    if (unsettled_.count(in_var.get()) != 0 || unsettled_.count(new_in.get()) != 0) return nullptr;
     auto lhs_tile = GetTileTypeWithMemRef(op->var_->GetType());
     auto in_new_tile = GetTileTypeWithMemRef(new_in->GetType());
     if (!lhs_tile || !in_new_tile ||
@@ -4612,7 +4631,29 @@ class NormalizeIdentityCopyBuffersMutator : public IRMutator {
   }
 
   std::map<VarPtr, ExprPtr> subst_;
+  std::set<const Var*> unsettled_;
 };
+
+/// Every IfStmt return_var (phi) reachable in a body.  These are the vars whose
+/// buffer YieldFixup, not the reuse analysis, decides.
+class IfPhiReturnVarCollector : public IRVisitor {
+ public:
+  std::set<const Var*> phis;
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    for (const auto& rv : op->return_vars_) phis.insert(rv.get());
+    IRVisitor::VisitStmt_(op);
+  }
+};
+
+/// The pre-YieldFixup half of the identity-copy normalization bracket: identical
+/// to the plain run except that an in-place producer is never anchored onto a phi
+/// whose buffer YieldFixup has yet to choose (`ReanchorInplaceOutput`).
+StmtPtr NormalizeIdentityCopyBuffersBeforeYieldFixup(const StmtPtr& body) {
+  IfPhiReturnVarCollector collector;
+  collector.VisitStmt(body);
+  return NormalizeIdentityCopyBuffersMutator(std::move(collector.phis)).VisitStmt(body);
+}
 
 /**
  * @brief Transform a function by identifying and applying memory reuse
@@ -4708,7 +4749,7 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
   } else if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::DsaRP) {
     // Identity-copy normalization brackets YieldFixup on both sides; see the
     // matching step in TransformMemoryReuse for why each side is needed.
-    new_body = NormalizeIdentityCopyBuffersMutator().VisitStmt(new_body);
+    new_body = NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
 
     YieldFixupMutator yield_fixup(/*fixup_if_stmts=*/true);
     new_body = yield_fixup.VisitStmt(new_body);
@@ -4834,7 +4875,7 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   //
   // The mutator is idempotent, so the second run is a no-op whenever the first
   // already settled everything.
-  new_body = NormalizeIdentityCopyBuffersMutator().VisitStmt(new_body);
+  new_body = NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
 
   // Step 4: Fix ForStmt/IfStmt yield/return_var MemRef mismatches
   const auto* ctx = PassContext::Current();
