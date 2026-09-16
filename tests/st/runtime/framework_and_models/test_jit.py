@@ -197,6 +197,8 @@ class TestJITExecution:
         The pair on one kernel is the point: ``TILE`` picks which artifact runs,
         ``value`` is read at dispatch, and only ``TILE`` recompiles (issue #2759).
         """
+        if test_config.codegen_only:
+            pytest.skip("Constexpr artifact selection is only observable on device")
 
         @pl.jit
         def tiled_add(
@@ -207,17 +209,33 @@ class TestJITExecution:
         ):
             with pl.at(level=pl.Level.CORE_GROUP):
                 tile = pl.load(x, [0, 0], [TILE, TILE])
-                pl.store(pl.add(tile, value), [0, 0], out)
+                # TILE is folded into the stored value as well as the extent,
+                # so the written block itself says which binary produced it.
+                # Asserting the extent alone cannot: a TILE=8 request served
+                # the TILE=16 artifact leaves the first 8x8 correct either way,
+                # and the region outside the tile is not a usable witness
+                # because a pure `pl.Out` buffer is not zero-filled per run.
+                # The constant is added to the tile, not to ``value`` -- a
+                # scalar float add there emits an ``arith.addf`` that ptoas
+                # refuses to legalize.
+                pl.store(pl.add(pl.add(tile, value), TILE * 1.0), [0, 0], out)
             return out
 
         x = torch.full((16, 16), 2.0)
-        for tile_size in (8, 16):
+        # 8 then 16 only ever asks for a wider tile than anything cached, so it
+        # cannot catch a wide artifact being handed to a narrow request. The
+        # trailing 8 runs with the 16 artifact already cached, which is the
+        # direction this test exists for.
+        for tile_size in (8, 16, 8):
             for value in (3.0, -1.5):
                 out = torch.zeros_like(x)
                 tiled_add(x, out, value, tile_size, config=test_config)
-                # Only the leading tile_size x tile_size block is written.
+                # Only the leading tile_size x tile_size block is written, and
+                # its value carries TILE, so a wrong artifact fails here in
+                # either direction.
                 written = out[:tile_size, :tile_size]
-                torch.testing.assert_close(written, torch.full_like(written, 2.0 + value))
+                expected = torch.full_like(written, 2.0 + value + tile_size)
+                torch.testing.assert_close(written, expected)
 
     def test_inplace_add(self, test_config):
         """@pl.jit: first call compiles and executes correctly on device."""
