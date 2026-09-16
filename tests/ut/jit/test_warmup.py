@@ -129,6 +129,14 @@ def test_warmup_prepares_one_binary_per_constexpr_value(assembly):
     assert large is not small
     assert len(assembly) == 2
 
+    # "takes only the runtime arguments" was asserted by this docstring and by
+    # nothing else. The prepared program's parameters are the dispatch ABI, so
+    # check TILE is absent from them while the scalar survives.
+    entry = large.program.get_function("scale")
+    params = {param.name_hint for param in entry.params}
+    assert "TILE" not in params
+    assert {"x", "out", "factor"} <= params
+
 
 def test_warmup_preserves_dynamic_extents(assembly):
     rows = pl.dynamic("rows")

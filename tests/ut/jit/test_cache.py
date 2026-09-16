@@ -1150,6 +1150,46 @@ class TestConstexprParameters:
         assert "scale: pl.Scalar[pl.FP32]" in source
         assert "BLOCK" not in source
 
+    def test_nothing_is_dispatched_for_a_constexpr_parameter(self, samples, monkeypatch):
+        """The runtime ABI, not just the generated source, drops the parameter.
+
+        Asserts the argument list ``_resolve_compiled`` actually returns — the
+        one ``__call__`` dispatches — rather than rebuilding it here from
+        ``param_names`` and ``arguments``. Rebuilding it would restate the
+        production rule and pass even if the dispatch path regressed to
+        forwarding the raw call arguments. Compilation is stubbed because only
+        the argument list is under test.
+        """
+        x, out = samples
+        kernel = pl.jit(_constexpr_kernel)
+        monkeypatch.setattr(kernel, "_compile", lambda *a, **k: object())
+
+        specialization, _ = kernel._resolve_specialization((x, out, 1.0, 16), {})
+        assert "BLOCK" in specialization.param_names, "it is still a declared parameter"
+        assert specialization.constexpr_values["BLOCK"] == "16"
+
+        _compiled, ordered_args, _config = kernel._resolve_compiled((x, out, 1.0, 16), {})
+        assert ordered_args == [x, out, 1.0], "the constexpr value must not reach dispatch"
+
+    def test_lower_folds_the_constant_and_requires_a_value(self, samples):
+        """``lower()`` honours the same binding rules as ``compile()``.
+
+        It reaches specialization by the same path, but nothing covered it, so
+        a regression that reached only this entry point would have shipped.
+        """
+        x, out = samples
+        kernel = pl.jit(_constexpr_kernel)
+        source = kernel.lower(x, out, 1.0, 16).as_python()
+
+        # Post-pipeline, so assert on the tile the constant sized rather than
+        # the pre-SSA call text.
+        assert "pl.Tile[[16, 16], pl.FP32" in source
+        assert "BLOCK" not in source
+        assert "pl.Scalar[pl.FP32]" in source, "the runtime scalar still survives as a parameter"
+
+        with pytest.raises(TypeError, match=r"constexpr parameter 'BLOCK'.*no source form"):
+            kernel.lower(x, out, 1.0, object())
+
     def test_a_value_with_no_source_form_is_rejected(self, samples):
         x, out = samples
         kernel = pl.jit(_constexpr_kernel)
