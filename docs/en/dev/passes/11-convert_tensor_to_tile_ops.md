@@ -270,6 +270,42 @@ non-Vec requirement reaches its producer the same way.
 
 The demand is propagated **through** zero-copy metadata ops that declare `set_output_memory_inherit_input()` — `tensor.slice`, `tensor.view`, `tensor.reshape`, `tensor.reinterpret_view`, `tensor.set_validshape`. So an operand written as `pl.matmul(pl.set_validshape(a[:, :K], rows, K), b)` still loads straight to Mat. An op that aliases its input's storage but omits that declaration breaks the chain: the operand materializes in Vec and needs a `tile.move` to Mat, which is a vector→cube boundary that flips an otherwise pure-CUBE InCore scope to `MIXED` and makes [`ExpandMixedKernel`](24-expand_mixed_kernel.md) split it into an AIC/AIV pair.
 
+### A transposed operand may not be a Mat sub-window
+
+`tile.transpose_view` is a zero-copy *relabel of a whole buffer*: the result's
+`pto.alloc_tile` carries the transposed layout at the source's address, and the
+two declarations at one address are the entire mechanism.
+
+A `tile.slice` of a Mat-resident parent is not a whole buffer. It reaches
+codegen as `pto.subview`, carrying a runtime offset and the **parent's** row
+pitch, and neither survives into an `alloc_tile`: a dynamic offset cannot fold
+into the constant `addr` (see [`AllocateMemoryAddr`](37-allocate_memory_addr.md))
+and the pitch is not in the type. ptoas has no transposing read of such a window
+either — it refuses a mat-source `pto.tmov` on a view ("expects mat-source tmov
+to use matching src/dst shapes") and refuses `pto.treshape` on one at every
+destination size ("expects src and dst to have the same total byte size"). A Mat
+window is readable only by `pto.textract`, which has no transposing form.
+
+Codegen therefore **rejects** the combination rather than emitting an alias that
+silently reads the parent's first bytes:
+
+```python
+parent = pl.slice(query, [512, 128], [0, 0])      # loaded to Mat once
+for q in pl.range(8):
+    window = pl.slice(parent, [64, 128], [q * 64, 0])
+    dot = pl.matmul(key, window, b_trans=True)    # ValueError at codegen
+```
+
+Slice the GM tensor and load each window on its own instead — the transpose is
+still zero-copy there — or pre-transpose the data in GM and drop the flag.
+
+A window covering its parent's **full extent at a constant `[0, 0]` offset** is
+exempt: it names exactly the source's bytes with the source's own pitch, so
+codegen folds it back to the parent and proceeds.
+[`FlattenTileNdTo2D`](14-flatten_tile_nd_to_2d.md) emits one such slice per page
+for a leading-dim-1 batch, so this is ordinary input rather than a degenerate
+case.
+
 ## Cube Operand M-Axis Boxing
 
 A cube operand has two independent extents, and only one of them is constrained.

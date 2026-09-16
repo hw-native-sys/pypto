@@ -973,17 +973,9 @@ static std::string GetViewSourceType(codegen::PTOCodegen& codegen, const ir::Exp
 // result var's TileType buf-type (empty if none); when present a fresh temp
 // buffer is bound so the view gets its own SSA name and `: src -> dst` annotation
 // (the MemRef-less source's type comes from the TileType, not a MemRef).
-static void EmitTreshapeView(codegen::PTOCodegen& codegen, const ir::ExprPtr& src_arg,
-                             std::string result_target, const std::string& result_type,
-                             const std::string& temp_prefix) {
-  std::string src = codegen.GetExprAsCode(src_arg);
-  // Annotate the operand with the type its SSA value was DEFINED with, which
-  // GetExprTypeAnnotation resolves through the SSA → tile_buf-type map. Deriving
-  // it from the IR TileType instead breaks whenever the def carries static valid
-  // dims that `ExtractTileTypeInfo` renders as `v_row=?, v_col=?`: a `pto.subview`
-  // def infers its valid from the slice `sizes`, so a reshape of a slice would
-  // print `valid=?x?` at the use and MLIR rejects the def/use type mismatch.
-  std::string src_type = GetViewSourceType(codegen, src_arg);
+static void EmitTreshapeViewFromSsa(codegen::PTOCodegen& codegen, const std::string& src,
+                                    const std::string& src_type, std::string result_target,
+                                    const std::string& result_type, const std::string& temp_prefix) {
   if (!result_type.empty()) {
     result_target = codegen.NewNamedTemp(temp_prefix);
     codegen.SetCurrentResultBuf(result_target);
@@ -996,6 +988,20 @@ static void EmitTreshapeView(codegen::PTOCodegen& codegen, const ir::ExprPtr& sr
     oss << " : " << src_type << " -> " << result_type;
   }
   codegen.Emit(oss.str());
+}
+
+// Same, resolving the source SSA and its type from the IR operand.
+static void EmitTreshapeView(codegen::PTOCodegen& codegen, const ir::ExprPtr& src_arg,
+                             std::string result_target, const std::string& result_type,
+                             const std::string& temp_prefix) {
+  // Annotate the operand with the type its SSA value was DEFINED with, which
+  // GetExprTypeAnnotation resolves through the SSA → tile_buf-type map. Deriving
+  // it from the IR TileType instead breaks whenever the def carries static valid
+  // dims that `ExtractTileTypeInfo` renders as `v_row=?, v_col=?`: a `pto.subview`
+  // def infers its valid from the slice `sizes`, so a reshape of a slice would
+  // print `valid=?x?` at the use and MLIR rejects the def/use type mismatch.
+  EmitTreshapeViewFromSsa(codegen, codegen.GetExprAsCode(src_arg), GetViewSourceType(codegen, src_arg),
+                          std::move(result_target), result_type, temp_prefix);
 }
 
 struct StaticValidTileView {
@@ -1286,8 +1292,11 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     // ("unknown") if the source rank or column count is not statically known,
     // which makes the shape half of the guard stand down rather than reject a
     // shape it cannot reason about.
+    auto source_rows_const =
+        source_tile_type->shape_.size() == 2 ? ir::As<ir::ConstInt>(source_tile_type->shape_[0]) : nullptr;
     auto source_cols_const =
         source_tile_type->shape_.size() == 2 ? ir::As<ir::ConstInt>(source_tile_type->shape_[1]) : nullptr;
+    mat_info.source_rows = source_rows_const ? source_rows_const->value_ : 0;
     mat_info.source_cols = source_cols_const ? source_cols_const->value_ : 0;
     mat_info.view_rows = rows_const->value_;
     mat_info.view_cols = cols_const->value_;
@@ -1505,11 +1514,12 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
         result_has_memref = result_tile->memref_.has_value();
       }
     }
-    // A `pto.subview` source has no transposed form on A2/A3, so neither path
-    // below can express it. A Mat window is readable only by `pto.textract`:
-    // `pto.tmov` refuses a mat-source view ("expects mat-source tmov to use
-    // matching src/dst shapes") and `pto.treshape` refuses it at every
-    // destination size ("expects src and dst to have the same total byte size").
+    // A `pto.subview` source is a *strided window*, and a strided window has no
+    // transposed form on A2/A3 -- so neither path below can express it. A Mat
+    // window is readable only by `pto.textract`: `pto.tmov` refuses a mat-source
+    // view ("expects mat-source tmov to use matching src/dst shapes") and
+    // `pto.treshape` refuses it at every destination size ("expects src and dst
+    // to have the same total byte size").
     //
     // The no-op branch is the dangerous one. A dynamic slice offset cannot fold
     // into a constant `pto.alloc_tile addr` (see AllocateMemoryAddr), and the
@@ -1522,14 +1532,40 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     //
     // Provenance, not the rendered type, is the question: only `tile.slice`
     // registers a subview materialization, so a transpose of a whole Mat load
-    // (the zero-copy #1776 case this op exists for) is unaffected.
-    CHECK_SPAN(codegen.GetSubviewMaterialization(codegen.GetExprAsCode(op->args_[0])) == nullptr, op->span_)
-        << "a transposed matmul operand (a_trans / b_trans) cannot be taken from a slice of an "
-           "on-chip Mat tile: the transpose is a zero-copy relabel of a whole buffer, and a slice "
-           "is a strided window, so the parent's row stride and the slice offset have nowhere to "
-           "go. Slice the GM tensor instead and load each window on its own -- pl.matmul(..., "
-           "b_trans=True) on a tile loaded directly from GM is still lowered zero-copy -- or "
-           "pre-transpose the data in GM and drop the flag";
+    // (the zero-copy #1776 case this op exists for) never reaches here.
+    std::string src_ssa = codegen.GetExprAsCode(op->args_[0]);
+    std::string src_type = GetViewSourceType(codegen, op->args_[0]);
+    if (const auto* window = codegen.GetSubviewMaterialization(src_ssa)) {
+      // An *identity* window -- full extent at a zero constant offset -- is the
+      // one subview that loses nothing: it names exactly its source's bytes, with
+      // the source's own pitch. `FlattenTileNdTo2D` emits one per page for a
+      // leading-dim-1 batch, so this is ordinary input, not a degenerate case.
+      // Fold it back to the parent and carry on; the guard below then only sees
+      // windows that really do drop an offset or a stride.
+      //
+      // Folding (rather than merely exempting) also fixes the PTOAS planner,
+      // where no address is baked and the fallback would otherwise emit
+      // `pto.treshape` against the subview SSA -- rejected however identity the
+      // window is. Reading the parent makes it a dense source, which is accepted.
+      // A 0 extent means "not statically known" and fails the test, as it must.
+      auto is_zero = [](const ir::ExprPtr& e) {
+        auto c = ir::As<ir::ConstInt>(e);
+        return c != nullptr && c->value_ == 0;
+      };
+      const bool identity_window = window->const_offset && is_zero(window->row_offset) &&
+                                   is_zero(window->col_offset) && window->source_rows > 0 &&
+                                   window->source_cols > 0 && window->view_rows == window->source_rows &&
+                                   window->view_cols == window->source_cols;
+      CHECK_SPAN(identity_window, op->span_)
+          << "a transposed matmul operand (a_trans / b_trans) cannot be taken from a slice of an "
+             "on-chip Mat tile: the transpose is a zero-copy relabel of a whole buffer, and a slice "
+             "is a strided window, so the parent's row stride and the slice offset have nowhere to "
+             "go. Slice the GM tensor instead and load each window on its own -- pl.matmul(..., "
+             "b_trans=True) on a tile loaded directly from GM is still lowered zero-copy -- or "
+             "pre-transpose the data in GM and drop the flag";
+      src_ssa = window->source_ssa;
+      src_type = window->source_type;
+    }
 
     // The result's own alloc_tile already declares the transposed type: it IS
     // the view, so emit nothing. Mirrors tile.reshape's no-op check.
@@ -1540,7 +1576,7 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
 
     // No declaration carries the transposed type — reinterpret the source in
     // place via pto.treshape reading its SSA, exactly like tile.reshape.
-    EmitTreshapeView(codegen, op->args_[0], result_target, view_type, "transpose_view_buf");
+    EmitTreshapeViewFromSsa(codegen, src_ssa, src_type, result_target, view_type, "transpose_view_buf");
     return std::string("");
   });
 

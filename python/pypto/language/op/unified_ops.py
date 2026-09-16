@@ -1079,6 +1079,22 @@ def matmul(
     and then unrolled to per-batch ``tile.matmul`` by ``FlattenTileNdTo2D``.
     Use this entry point (rather than ``pl.batch_matmul``) for tensor-level ND
     matmul.
+
+    **A transposed operand may not be a sub-window of an on-chip Mat tile.** The
+    flag is realised by a zero-copy ``tile.transpose_view``, which relabels a
+    whole buffer's layout; a strided window has no transposed form on A2/A3, so
+    codegen raises instead of aliasing the wrong bytes. In practice this means a
+    resident parent cannot be sliced per iteration and fed to ``b_trans``::
+
+        parent = pl.slice(query, [512, 128], [0, 0])      # loaded to Mat once
+        for q in pl.range(8):
+            window = pl.slice(parent, [64, 128], [q * 64, 0])
+            dot = pl.matmul(key, window, b_trans=True)    # raises at codegen
+
+    Slice the GM tensor and load each window on its own instead -- the transpose
+    is still zero-copy there -- or pre-transpose the data in GM and drop the
+    flag. A slice covering its parent's full extent at offset ``[0, 0]`` is
+    exempt: it names the same bytes, so it folds back to the parent.
     """
     if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
         return _tensor.matmul(lhs, rhs, out_dtype, a_trans, b_trans, c_matrix_nz)

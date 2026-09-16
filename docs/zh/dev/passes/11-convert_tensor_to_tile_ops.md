@@ -235,6 +235,36 @@ load 会把同一个操作数放进同一块 buffer。
 
 该需求会**穿过**声明了 `set_output_memory_inherit_input()` 的零拷贝元数据 op 继续向上传播 —— `tensor.slice`、`tensor.view`、`tensor.reshape`、`tensor.reinterpret_view`、`tensor.set_validshape`。因此 `pl.matmul(pl.set_validshape(a[:, :K], rows, K), b)` 这样的操作数仍然直接加载到 Mat。若某个别名输入存储的 op 漏掉该声明，传播链就会断开：操作数被物化到 Vec，再通过 `tile.move` 桥接到 Mat，而这是一个 vector→cube 边界，会把本应是纯 CUBE 的 InCore scope 判定为 `MIXED`，导致 [`ExpandMixedKernel`](24-expand_mixed_kernel.md) 将其拆分为 AIC/AIV 两个函数。
 
+### 转置操作数不能取自 Mat 子窗口
+
+`tile.transpose_view` 是对**整块 buffer** 的零拷贝重新标注：结果的 `pto.alloc_tile`
+在源地址上携带转置后的 layout，同一地址上的这两条声明就是全部机制。
+
+Mat 驻留 parent 的 `tile.slice` 并不是整块 buffer。它以 `pto.subview` 到达 codegen，
+携带运行期 offset 与 **parent 的**行间距，而两者都无法进入 `alloc_tile`：动态 offset
+无法折叠进常量 `addr`（见 [`AllocateMemoryAddr`](37-allocate_memory_addr.md)），行间距
+也不在类型里。ptoas 同样没有针对该窗口的转置读取 —— 它拒绝以 view 作为 mat 源的
+`pto.tmov`（"expects mat-source tmov to use matching src/dst shapes"），也在任意目标
+尺寸下拒绝对其做 `pto.treshape`（"expects src and dst to have the same total byte
+size"）。Mat 窗口只能被 `pto.textract` 读取，而它没有转置形式。
+
+因此 codegen 会**拒绝**该组合，而不是发射一个静默读到 parent 起始字节的别名：
+
+```python
+parent = pl.slice(query, [512, 128], [0, 0])      # 只加载一次到 Mat
+for q in pl.range(8):
+    window = pl.slice(parent, [64, 128], [q * 64, 0])
+    dot = pl.matmul(key, window, b_trans=True)    # codegen 处抛 ValueError
+```
+
+改为切分 GM tensor 并单独加载每个窗口 —— 那里的转置仍是零拷贝 —— 或在 GM 中预先转置
+数据并去掉该 flag。
+
+覆盖 parent **全部 extent 且 offset 为常量 `[0, 0]`** 的窗口属于例外：它以源自身的行间距
+命名了完全相同的字节，因此 codegen 会将其折回 parent 后继续。
+[`FlattenTileNdTo2D`](14-flatten_tile_nd_to_2d.md) 对 leading-dim 为 1 的 batch 会逐页
+发射这样的 slice，所以这是正常输入而非退化情况。
+
 ## Cube 操作数的 M 轴分形对齐（M-Axis Boxing）
 
 一个 cube 操作数有两个彼此独立的尺寸概念，而只有其中一个受到约束。
