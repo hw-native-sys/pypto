@@ -896,6 +896,15 @@ class CoreType(enum.IntEnum):
     VECTOR = ...
     CUBE = ...
 
+class FunctionIRStage(enum.Enum):
+    """Function body representation, independent of its execution context."""
+
+    Functional = ...
+    """Tensor/Tile value semantics (default)."""
+
+    Buffer = ...
+    """Explicit storage handles and destination writes."""
+
 class FunctionType(enum.Enum):
     """Function type classification.
 
@@ -2759,6 +2768,9 @@ class Function(IRNode):
     attrs: Final[dict[str, Any]]
     """Function-level attributes (key-value metadata)."""
 
+    ir_stage: Final[FunctionIRStage]
+    """Function body representation; defaults to Functional."""
+
     requires_runtime_binding: Final[bool]
     """True for an abstract SubWorker (``...`` body) bound at runtime via callbacks."""
 
@@ -2789,6 +2801,7 @@ class Function(IRNode):
         role: Role | None = None,
         attrs: dict[str, Any] | None = None,
         requires_runtime_binding: bool = False,
+        ir_stage: FunctionIRStage = FunctionIRStage.Functional,
     ) -> None:
         """Create a function definition.
 
@@ -2804,6 +2817,7 @@ class Function(IRNode):
             attrs: Function-level attributes dict (default: None)
             requires_runtime_binding: True for an abstract SubWorker (``...``
                 body) whose implementation is bound at runtime (default: False)
+            ir_stage: Function body representation (default: Functional)
         """
 
     def __str__(self) -> str:
@@ -3590,6 +3604,7 @@ class IRBuilder:
         role: Role | None = None,
         attrs: dict[str, Any] | None = None,
         requires_runtime_binding: bool = False,
+        ir_stage: FunctionIRStage = FunctionIRStage.Functional,
     ) -> None:
         """Begin building a function.
 
@@ -3601,6 +3616,7 @@ class IRBuilder:
             role: Function role (default: None)
             attrs: Function-level attributes dict (default: None)
             requires_runtime_binding: True for abstract SubWorkers bound at runtime (default: False)
+            ir_stage: Function body representation (default: Functional)
         """
 
     def func_arg(

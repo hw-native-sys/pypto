@@ -63,9 +63,10 @@ ProgramPtr Run(const ProgramPtr& program) {
     changed = true;
     for (const auto& clone_name : rewritten.used_clone_names) used_clone_names.insert(clone_name);
     rewritten_orch_funcs.emplace(
-        func.get(), std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
-                                               func->return_types_, rewritten.body, func->span_,
-                                               func->func_type_, func->level_, func->role_, func->attrs_));
+        func.get(),
+        std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
+                                   rewritten.body, func->span_, func->func_type_, func->level_, func->role_,
+                                   func->attrs_, func->requires_runtime_binding_, func->ir_stage_));
   }
 
   if (!changed) return program;

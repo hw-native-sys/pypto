@@ -1960,6 +1960,10 @@ void BindIR(nb::module_& m) {
                         nb::arg("language"), nb::arg("span"), "Create an inline statement");
   BindFields<InlineStmt>(inline_stmt_class);
 
+  nb::enum_<FunctionIRStage>(ir, "FunctionIRStage", "Function body representation")
+      .value("Functional", FunctionIRStage::Functional, "Tensor/Tile value semantics (default)")
+      .value("Buffer", FunctionIRStage::Buffer, "Explicit storage handles and destination writes");
+
   // FunctionType enum
   nb::enum_<FunctionType>(ir, "FunctionType", "Function type classification")
       .value("Opaque", FunctionType::Opaque, "Unspecified function type (default)")
@@ -2045,7 +2049,7 @@ void BindIR(nb::module_& m) {
       [](Function* self, const std::string& name, const nb::list& params,
          const std::vector<TypePtr>& return_types, const StmtPtr& body, const Span& span, FunctionType type,
          std::optional<Level> level, std::optional<Role> role, const nb::object& attrs_or_none,
-         bool requires_runtime_binding) {
+         bool requires_runtime_binding, FunctionIRStage ir_stage) {
         std::vector<VarPtr> param_vars;
         std::vector<ParamDirection> param_dirs;
         param_vars.reserve(nb::len(params));
@@ -2066,12 +2070,12 @@ void BindIR(nb::module_& m) {
         }
         auto attrs = ConvertAttrsFromPython(attrs_or_none);
         new (self) Function(name, std::move(param_vars), std::move(param_dirs), return_types, body, span,
-                            type, level, role, std::move(attrs), requires_runtime_binding);
+                            type, level, role, std::move(attrs), requires_runtime_binding, ir_stage);
       },
       nb::arg("name"), nb::arg("params"), nb::arg("return_types"), nb::arg("body"), nb::arg("span"),
       nb::arg("type") = FunctionType::Opaque, nb::arg("level") = nb::none(), nb::arg("role") = nb::none(),
       nb::arg("attrs") = nb::none(), nb::arg("requires_runtime_binding") = false,
-      "Create a function definition");
+      nb::arg("ir_stage") = FunctionIRStage::Functional, "Create a function definition");
   BindFields<Function>(function_class);
   // Use the shared attr converter so Function readback covers every value type
   // accepted by ConvertKwargsDict, including enum, list, Var, and Expr attrs.
