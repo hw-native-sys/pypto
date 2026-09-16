@@ -10,11 +10,8 @@
  */
 
 /**
- * @file testing.cpp
- * @brief Implementation of Python bindings for testing utilities
- *
- * This module provides internal testing utilities that should not be used
- * in production code. It is exposed as pypto.testing in Python.
+ * @file torch_npu_adapter.cpp
+ * @brief Native queue submission and lifetime management for prepared kernels.
  */
 
 #include <acl/acl.h>
@@ -23,6 +20,7 @@
 #include <nanobind/stl/vector.h>
 #include <torch/csrc/autograd/python_variable.h>
 #include <torch_npu/csrc/core/npu/NPUCachingAllocator.h>
+#include <torch_npu/csrc/core/npu/NPUGuard.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
 
@@ -118,6 +116,7 @@ class LaunchTicket {
   }
 
   bool Done() {
+    c10_npu::NPUGuard device_guard(state_->stream.device_index());
     state_->CheckError();
     if (state_->completion == nullptr) return true;
     if (!state_->callback_finished.load(std::memory_order_acquire)) return false;
@@ -131,6 +130,7 @@ class LaunchTicket {
   }
 
   void Quiesce() {
+    c10_npu::NPUGuard device_guard(state_->stream.device_index());
     // Error-only cleanup: a caller-stream fence can be missing after partial
     // enqueue. Drain the host queue first, then prove *all* device streams idle.
     try {
@@ -146,6 +146,7 @@ class LaunchTicket {
   }
 
   void Wait() {
+    c10_npu::NPUGuard device_guard(state_->stream.device_index());
     // Framework synchronization drains its host queue as well as device work.
     // If either fails, the manager retains this ticket and all its owners.
     state_->stream.synchronize();

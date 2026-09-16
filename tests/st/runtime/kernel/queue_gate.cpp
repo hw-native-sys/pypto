@@ -10,11 +10,8 @@
  */
 
 /**
- * @file testing.cpp
- * @brief Implementation of Python bindings for testing utilities
- *
- * This module provides internal testing utilities that should not be used
- * in production code. It is exposed as pypto.testing in Python.
+ * @file queue_gate.cpp
+ * @brief Test-only native gate for delaying the torch_npu host queue.
  */
 
 #include <nanobind/nanobind.h>
