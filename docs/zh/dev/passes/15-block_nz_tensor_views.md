@@ -227,6 +227,56 @@ GlobalTensor<int8_t, pto::Shape<1, 16, 16, 16, 32>,
 | 显式 stride 或部分 `valid_shape` | 拒绝 |
 | 分布式张量 | 拒绝——`remote_load` 没有 NZ 分块 |
 | 对 NZ 做 `tensor.view` / `tensor.reinterpret_view` | 在算子构造期拒绝 |
+| 多列块 load 的 GM 行间隔超过 65535 个 block | 拒绝——**临时**，见 [GM 行间隔：一道临时防护](#gm-行间隔一道临时防护) |
+
+### GM 行间隔：一道临时防护
+
+**这一行不是设计上的限制。** 它防护的是一个上游缺陷
+（[hw-native-sys/pto-isa#317]），该缺陷修复后即删除——连同 pass 里的
+`CheckNzGmGapFitsBurstStride` 及其三个单测一并删除。
+
+`TLoadGm2L1Nz2nz` 以 `uint32_t` 计算相邻列块之间的 GM 间隔，再不加范围检查地传给
+`TLoadInstrGm2L1` 的 `uint16_t gmGap`。一旦超过 65535 个 32 字节 block 就会回绕，
+load 读到错误的 fractal——而且是静默的：PTOAS 能汇编该 view，CCE 编译器接受该
+kernel，matmul 在运行期返回错误数值且不报任何错。本 pass 是最后一个还知道是哪个
+`pl.NZ` 标注导致问题的层，因此诊断放在这里。
+
+对分块后的 view，该间隔可化简为 load 跳过的行数：
+
+```text
+gmGap = (gStride1 - gShape2*gShape3*gShape4) * sizeof(T) / 32
+      = (R/16 - TR/16) * 16 * c0 * sizeof(T) / 32
+      = R - TR                                       （32 字节 block）
+```
+
+因为任何 NZ view 按构造都满足 `c0 * sizeof(T) == 32`——所以该上界与 dtype 无关，
+而且降低间隔靠的是**更宽**的行 tile，不是更窄的：
+
+| `R` | 行 tile | 间隔 | 结果 |
+| --- | ------- | ---- | ---- |
+| 65536 | 16 | 65520 | 接受 |
+| 65552 | 16 | **65536** | 拒绝 |
+| 65552 | 32 | 65520 | 接受——同一张量，更宽的 tile |
+
+另一种绕过方式是把按层堆叠的权重标注为 rank-3、以堆叠轴作为 batch
+（`[LAYERS, K, N]`），其范围随即由 `gStride0` 和一个真正的 `for` 循环承载，而不再
+经过 burst 间隔。
+
+这里度量的窗口是 codegen 最终生成 `pto.partition_view` 所用的那个——load 带
+`valid_shape` 时取 `valid_shape`，否则取 `shapes`
+（`src/backend/common/pto_ops_memory.cpp`）。该 view 就是 pto-isa 的 `gShape`，
+因此收窄的 `valid_shape` 载入的行 fractal **更少**，留下的间隔反而**更大**，比只看
+`shapes` 得到的值更大。一个 `[65552, 64]` 的 INT8 权重若以 `shapes=[32, 64]`、
+`valid_shape=[16, 64]` 读取，生成的是 `partition_tensor_view<1x2x1x16x32>`，
+间隔为 65536，而不是 `shapes` 暗示的 65520。
+
+**单列块 load 不受此限制。** `TLoadGm2L1Nz2nz` 把 load 自身的列块数作为 `nBurst`
+传入，而 DMA 只在从一个 burst 跨到下一个时才使用 `gmGap`，因此只有一个 burst 时那个
+被截断的字段根本不会被读取。已在设备上于 pto-isa 自带的 `tload_gm2mat` ST 中确认：
+`gShape1 = 1`、间隔为 65536 的 NZ `int16` load 返回逐位正确的数据，而同一个 load 在
+`gShape1 = 2` 时会损坏 1837/4096 个元素。
+
+[hw-native-sys/pto-isa#317]: https://github.com/hw-native-sys/pto-isa/issues/317
 
 ### 为什么拒绝逻辑 rank 4+
 

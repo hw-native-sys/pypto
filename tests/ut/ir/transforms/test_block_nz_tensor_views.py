@@ -863,5 +863,151 @@ def test_rejects_tensor_view_of_nz():
                 return out
 
 
+# -- Temporary guard for hw-native-sys/pto-isa#317 ----------------------------
+# Delete this block together with ``CheckNzGmGapFitsBurstStride`` once the
+# upstream truncation is fixed.
+
+
+def _gap_program(rows: int, tile_rows: int):
+    """A 16-column-block NZ load of *tile_rows* out of a *rows*-row weight.
+
+    The GM gap ``TLoadGm2L1Nz2nz`` computes for it is exactly ``rows -
+    tile_rows`` 32-byte blocks, for every dtype.
+    """
+
+    @pl.program
+    class GmGap:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            x: pl.Tensor[[64, 512], pl.INT8],
+            w: pl.Tensor[[rows, 512], pl.INT8, pl.NZ],
+            out: pl.Tensor[[64, tile_rows], pl.INT32],
+        ):
+            xt = pl.load(x, [0, 0], [64, 512], target_memory=pl.Mem.Mat)
+            wt = pl.load(w, [0, 0], [tile_rows, 512], target_memory=pl.Mem.Mat)
+            acc = pl.matmul(xt, pl.tile.transpose_view(wt), out_dtype=pl.INT32)
+            pl.store(acc, [0, 0], out)
+            return out
+
+    return GmGap
+
+
+def _single_column_block_program(rows: int, tile_rows: int):
+    """The same load narrowed to one C0 column block (32 INT8 columns).
+
+    ``TLoadGm2L1Nz2nz`` passes the column-block extent as ``nBurst``, so this
+    load issues a single burst and never consumes ``gmGap``.
+    """
+
+    @pl.program
+    class OneBlock:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            x: pl.Tensor[[64, 32], pl.INT8],
+            w: pl.Tensor[[rows, 32], pl.INT8, pl.NZ],
+            out: pl.Tensor[[64, tile_rows], pl.INT32],
+        ):
+            xt = pl.load(x, [0, 0], [64, 32], target_memory=pl.Mem.Mat)
+            wt = pl.load(w, [0, 0], [tile_rows, 32], target_memory=pl.Mem.Mat)
+            acc = pl.matmul(xt, pl.tile.transpose_view(wt), out_dtype=pl.INT32)
+            pl.store(acc, [0, 0], out)
+            return out
+
+    return OneBlock
+
+
+def test_accepts_the_largest_encodable_gm_gap():
+    """65520 blocks is the largest gap a fractal-aligned load can produce."""
+    assert 65536 - 16 == 65520
+    _run(_gap_program(rows=65536, tile_rows=16))
+
+
+def test_rejects_a_gm_gap_above_the_burst_stride_field():
+    """Above 65535 blocks pto-isa truncates the gap and reads wrong fractals.
+
+    The message must say this is a temporary guard, not an NZ limitation — a
+    user who reads it as "NZ tops out here" would design around a cap that is
+    about to disappear.
+    """
+    assert 65552 - 16 == 65536
+    with pytest.raises(ValueError) as excinfo:
+        _run(_gap_program(rows=65552, tile_rows=16))
+    message = str(excinfo.value)
+    assert "65536 32-byte blocks" in message
+    assert "NOT an expected pl.NZ limitation" in message
+    assert "pto-isa#317" in message
+
+
+def test_a_taller_row_tile_rescues_the_same_tensor():
+    """The gap, not the row extent, is the limit.
+
+    Same 65552-row weight the test above refuses, read in a 32-row tile instead
+    of a 16-row one: the gap drops to 65520 and it compiles. This is why the
+    diagnostic offers a *wider* tile as the workaround.
+    """
+    assert 65552 - 32 == 65520
+    _run(_gap_program(rows=65552, tile_rows=32))
+
+
+def test_a_single_column_block_load_is_exempt_from_the_gap_limit():
+    """``gmGap`` is the stride *between* bursts, so one burst never reads it.
+
+    Verified on device in pto-isa's own tload_gm2mat ST suite: an NZ int16 load
+    with ``gShape1 = 1`` and a 65536-block gap returns bit-exact data, while the
+    identical load at ``gShape1 = 2`` corrupts 1837/4096 elements. Rejecting the
+    single-block case would refuse a load that is actually correct.
+    """
+    assert 65552 - 16 == 65536
+    _run(_single_column_block_program(rows=65552, tile_rows=16))
+
+
+def _valid_shape_program(rows: int, tile_rows: int, valid_rows: int):
+    """An NZ load whose ``valid_shape`` narrows the row window below ``shapes``.
+
+    Codegen builds the ``pto.partition_view`` from ``valid_shape`` when the load
+    carries one, so this window — not ``shapes`` — is pto-isa's ``gShape``.
+    """
+
+    @pl.program
+    class NarrowedValidShape:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            x: pl.Tensor[[64, 64], pl.INT8],
+            w: pl.Tensor[[rows, 64], pl.INT8, pl.NZ],
+            out: pl.Tensor[[64, tile_rows], pl.INT32],
+        ):
+            xt = pl.load(x, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
+            wt = pl.load(w, [0, 0], [tile_rows, 64], valid_shape=[valid_rows, 64], target_memory=pl.Mem.Mat)
+            acc = pl.matmul(xt, pl.tile.transpose_view(wt), out_dtype=pl.INT32)
+            pl.store(acc, [0, 0], out)
+            return out
+
+    return NarrowedValidShape
+
+
+def test_a_narrowed_valid_shape_drives_the_gap_check():
+    """The gap follows ``valid_shape``, not ``shapes``.
+
+    ``shapes`` alone puts this load at 65520 blocks — under the bound — while
+    the partition codegen actually emits (``1x2x1x16x32``, from ``valid_shape``)
+    puts it at 65536. Measuring ``shapes`` would wave through a load that
+    truncates on device, which is the whole failure this guard exists to stop.
+    """
+    assert 65552 - 32 == 65520  # what `shapes` alone would report
+    assert 65552 - 16 == 65536  # what pto-isa actually computes
+    with pytest.raises(ValueError) as excinfo:
+        _run(_valid_shape_program(rows=65552, tile_rows=32, valid_rows=16))
+    assert "65536 32-byte blocks" in str(excinfo.value)
+
+
+def test_a_valid_shape_load_within_the_bound_is_accepted():
+    """A narrowed valid_shape is not rejected per se — only an oversized gap."""
+    assert 65536 - 16 == 65520
+    _run(_valid_shape_program(rows=65536, tile_rows=32, valid_rows=16))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
