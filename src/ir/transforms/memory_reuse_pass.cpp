@@ -4555,8 +4555,9 @@ class NormalizeIdentityCopyBuffersMutator : public IRMutator {
  public:
   NormalizeIdentityCopyBuffersMutator() = default;
 
-  /// `unsettled` names IfStmt return_vars whose buffer YieldFixup has not chosen
-  /// yet; see `ReanchorInplaceOutput` for why anchoring onto one is wrong.
+  /// `unsettled` seeds the IfStmt return_vars whose buffer YieldFixup has not
+  /// chosen yet; the traversal grows it with their bare-Var renames.  See
+  /// `ReanchorInplaceOutput` for why anchoring onto one is wrong.
   explicit NormalizeIdentityCopyBuffersMutator(std::set<const Var*> unsettled)
       : unsettled_(std::move(unsettled)) {}
 
@@ -4570,11 +4571,19 @@ class NormalizeIdentityCopyBuffersMutator : public IRMutator {
     auto src_var = AsVarLike(op->value_);
     if (src_var) {
       auto new_src = AsVarLike(VisitExpr(op->value_));  // follow prior substitutions
+      // A rename of an unsettled value denotes that same storage, so it is just as
+      // unsettled: `tmp = phi` then `t = <in-place>(tmp, ...)` would otherwise walk
+      // straight past the guard in ReanchorInplaceOutput and anchor onto the phi's
+      // stale buffer through the alias.
+      if (IsUnsettled(src_var) || IsUnsettled(new_src)) {
+        unsettled_.insert(op->var_.get());
+      }
       auto lhs_tile = new_src ? GetTileTypeWithMemRef(op->var_->GetType()) : nullptr;
       auto rhs_tile = new_src ? GetTileTypeWithMemRef(new_src->GetType()) : nullptr;
       if (lhs_tile && rhs_tile &&
           !SamePhysicalWindow(GetDefinedMemRef(lhs_tile), GetDefinedMemRef(rhs_tile))) {
         auto new_lhs = std::make_shared<Var>(op->var_->name_hint_, new_src->GetType(), op->var_->span_);
+        if (IsUnsettled(op->var_)) unsettled_.insert(new_lhs.get());
         subst_[op->var_] = new_lhs;
         return std::make_shared<AssignStmt>(new_lhs, new_src, op->span_);
       }
@@ -4595,8 +4604,15 @@ class NormalizeIdentityCopyBuffersMutator : public IRMutator {
   /// pipeline lowering even when the input itself was not substituted in this
   /// traversal. Returns nullptr when the allocation already agrees.
   ///
-  /// Skips a reused input listed in `unsettled_` — an IfStmt return_var on the
-  /// pre-YieldFixup run.  A phi is not a tracked def in the reuse analysis (see
+  /// True when `var` denotes storage whose buffer YieldFixup has not chosen yet —
+  /// an IfStmt return_var seeded into `unsettled_`, or a bare-Var rename of one.
+  [[nodiscard]] bool IsUnsettled(const VarPtr& var) const {
+    return var != nullptr && unsettled_.count(var.get()) != 0;
+  }
+
+  /// Skips a reused input listed in `unsettled_` — an IfStmt return_var, or a
+  /// rename of one, on the pre-YieldFixup run.  A phi is not a tracked def in the
+  /// reuse analysis (see
   /// LifetimeAnalyzer's IfStmt handler), so it still carries its pre-reuse buffer
   /// here and YieldFixup chooses the real one in Step 4.  Anchoring onto the
   /// stale buffer pins this producer to storage that is about to be abandoned:
@@ -4614,7 +4630,7 @@ class NormalizeIdentityCopyBuffersMutator : public IRMutator {
     if (!in_var) return nullptr;
     auto new_in = AsVarLike(VisitExpr(in_var));  // follow prior subst_ renames
     if (!new_in) return nullptr;
-    if (unsettled_.count(in_var.get()) != 0 || unsettled_.count(new_in.get()) != 0) return nullptr;
+    if (IsUnsettled(in_var) || IsUnsettled(new_in)) return nullptr;
     auto lhs_tile = GetTileTypeWithMemRef(op->var_->GetType());
     auto in_new_tile = GetTileTypeWithMemRef(new_in->GetType());
     if (!lhs_tile || !in_new_tile ||
