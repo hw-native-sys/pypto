@@ -29,7 +29,7 @@ def setup(monkeypatch):
     calls = SimpleNamespace(workers=[], inits=[], prepares=[], closes=[])
 
     class FakeWorker:
-        def __init__(self, config):
+        def __init__(self, config, state):
             calls.workers.append(self)
 
         def init(self, config):
@@ -155,16 +155,14 @@ def test_concurrent_failed_prepare_shares_failure(setup, monkeypatch):
     state.close()
 
 
-def test_close_requires_init_thread_and_invalidates_handles(setup):
+def test_close_from_another_thread_invalidates_handles(setup):
     state, config, calls, _ = setup
     registration = state.ensure_callable(artifact(), config)
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        with pytest.raises(RuntimeError, match="init-owner thread"):
-            pool.submit(state.close).result(timeout=5)
     registration.require_live()
     with pytest.raises(RuntimeError, match="generation"):
         state.require_registration(replace(registration, generation=registration.generation + 1))
-    state.close()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(state.close).result(timeout=5)
     state.close()
     assert len(calls.closes) == 1
     with pytest.raises(RuntimeError, match="closed"):

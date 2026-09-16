@@ -22,8 +22,9 @@ op(x, 2.0, out)
 省略 `config` 时选择该目标及 torch 当前 NPU device；显式 `RunConfig` 须匹配目标和当前设备。
 拒绝 program 专用诊断、ring 覆盖、分布式配置、CPU/Meta/Fake Tensor 及 Worker 自有 handle，
 不会据此切换执行路径。native launch 要求 rank 1–5 和正 uint32 extent/stride。
-A5、HBG 执行、ACLGraph、自动框架退出及公开 torch.ops 注册仍属后续工作。
-内部 Worker close 协议已经存在，但尚未接入正常退出的自动清理；此功能仍限于集成分支。
+A5、HBG 执行、ACLGraph 和公开 torch.ops 注册仍属后续工作。自动 eager 清理目前按下文
+torch_npu 2.6.0.post2 的退出契约接入；其他框架版本在完成退出协议验证前拒绝 native kernel
+初始化。此功能仍限于集成分支。
 
 Host/模拟器和分布式执行使用显式 program 编译：
 
@@ -173,11 +174,40 @@ close 后仍保留；切换模式须使用独立进程。simpler 提供 native �
 重复 kernel context 拒绝。直接使用第三方 simpler 对象会绕过 PyPTO 的进程检查，不能
 据此在同一进程混用 program/kernel 执行。
 
-内部管理器 `close()` 为终止操作，须在初始化线程执行。它停止新增注册及提交，
-等待在途 prepare/admission，排空已接纳 eager ticket，然后 finalize Worker。close 失败保留 owner 与
-注册记录供初始化线程重试，但 handle 已不可用；成功后清空注册、使 handle 失效，不能
-重新初始化。关闭未初始化的管理器不做 native 工作。不增加析构或裸 `atexit` close，
-框架退出时序另行接入；这些是内部基础原语，不要求普通算子用户手动管理生命周期。
+## 自动 eager 退出
+
+PyPTO 在 native Worker 初始化前接入 torch_npu 既有退出边界。torch_npu 2.6.0.post2 的
+[`_npu_shutdown`](https://github.com/Ascend/pytorch/blob/eef1d5ae62b9118ae78bf2d7084e6fba1b13058f/torch_npu/__init__.py)
+依次调用 `_C._npu_shutdown_synchronize()`、销毁 process group、调用 `_C._npu_shutdown(success)`。
+PyPTO 包装这两个 native 属性，在首次同步前完成一次清理；teardown 包装也覆盖跳过同步步骤的
+显式拆除。保留原函数及参数，不额外注册 `atexit(worker.close)`；普通导入和 program 编译不安装钩子。
+
+框架 native [teardown](https://github.com/Ascend/pytorch/blob/eef1d5ae62b9118ae78bf2d7084e6fba1b13058f/torch_npu/csrc/InitNpuBindings.cpp)
+清理 allocator 后调用 `NpuSysCtrl::Finalize`，后者销毁 event、stream 和 device。
+kernel 清理须在这些操作之前完成。native `GetInitFlag()` 检查已拆除的框架且不初始化设备。
+私有退出接口和顺序依赖版本，因此当前仅允许 torch_npu 2.6.0.post2 初始化 native kernel。
+
+每个 native kernel Worker 持有一个持续运行的 daemon 生命周期线程。该线程借用调用方的 ACL
+context，执行 Worker 构造/init、callable prepare 和 finalize，不创建或 reset 设备。
+因此即使首次调用来自已结束的应用线程，也满足 simpler 的 init-owner-thread 规则。
+热路径仍走已有 native torch 队列。close 成功后停止并 join 此线程；失败时保留线程以便重试。
+采用 daemon 是因为 Python 会在框架退出钩子之前 join 非 daemon 线程；正常清理由钩子显式 join，
+发生在框架拆除之前。
+
+内部 `close()` 可由其他线程请求：先禁止新增工作，等待初始化、在途 prepare/admission，排空
+已接受的 eager ticket，再在 native owner 线程 finalize。并发 close 共享完成结果；重复框架
+通知不重试或重复 finalize。初始化/prepare 内的重入 close 被拒绝。成功后清空注册、使 handle
+失效且不能重新初始化；未初始化的管理器不创建 Worker、不执行 native close。算子 GC 不触发关闭。
+
+drain/finalize 失败保留 Worker、注册项及必要引用。自动清理不能完成或框架已拆除时，发出诊断，
+停止接纳，并使用故意不释放的 native Python 引用保活管理器，防止后续解释器/module 清理在
+ACL context 已销毁后执行 Worker/event 析构。框架退出仍继续；此为失败回退，不代表安全释放
+已经完成。已证明清理成功但需报告较早提交错误的情况单独报告。fork 子进程不关闭继承的 Worker；
+`os._exit`、signal、解释器崩溃等异常终止不保证清理。
+
+此契约仅覆盖 eager。当前拒绝 graph capture，因此不存在通过 PyPTO 捕获、在该边界后继续 replay
+的 callable。PR-08 在启用 capture 前须验证 graph 停止/释放顺序，单次设备同步不足以阻止随后
+外部 replay。不新增要求用户手动配对的 close/shutdown 接口。
 
 ## 验证
 
@@ -217,13 +247,13 @@ JIT 或 prepare。Tensor、Storage、参数 POD、callable ID 和 stream 都在�
 进程管理器在 enqueue **之前**持有 ticket，并串行处理 Host 接纳。native Tensor/Storage owner 覆盖
 延迟 callback；提交前按唯一 Storage 执行 allocator `recordStream`，包括别名参数。Simpler 建立
 caller-stream join 后记录逐次 completion event，覆盖设备使用。后续调用查询 event 回收已完成 ticket，
-不排空 Host 队列；内部 `state.drain()` 或初始化线程上的 `close()` 等待在途提交，最后一个 ticket 可保留到
+不排空 Host 队列；内部 `state.drain()` 或内部 `close()` 等待在途提交，最后一个 ticket 可保留到
 该边界。close 拒绝新增工作，等待 prepare/admission，排空 ticket 后才 finalize Worker。
 
 同步提交错误及异步 callback 错误通过 framework 和 ticket wait 传播。失败或部分 enqueue 的 ticket
-继续持有 Worker、参数及 Storage：caller stream 等待失败不能证明内部 stream 已静止。内部初始化线程上的 close 排空 Host callback，并仅在错误路径执行全设备同步，证明内部 stream
+继续持有 Worker、参数及 Storage：caller stream 等待失败不能证明内部 stream 已静止。内部 close 排空 Host callback，并仅在错误路径执行全设备同步，证明内部 stream
 已静止后再 finalize、释放 owner，同时重新抛出原提交错误。quiescence 或 teardown 失败时继续保留
-全部 owner 以便重试 close。不会隐式重新初始化；自动框架退出串接仍留给后续工作。
+全部 owner 以便重试 close。不会隐式重新初始化；自动框架退出通过上述集成完成。
 
 ### 可选扩展构建
 
@@ -258,3 +288,8 @@ ACLGraph 已验收。
 dispatcher/compiler 集成。
 
 `tests/ut/jit/test_kernel_eager.py` 覆盖公开入口、提前拒绝、Scalar 快照和缓存隔离。`tests/st/runtime/kernel/test_jit_eager.py` 验证真实 InOut 多次更新、constexpr 变体、共享 Worker 和隔离进程中的显式 program 执行。
+
+`tests/ut/runtime/test_kernel_shutdown.py` 覆盖线程归属、初始化竞态、幂等 close、框架顺序、失败保活、
+版本拒绝和 fork。`tests/st/runtime/kernel/test_kernel_shutdown.py` 使用普通 Python 子进程正常退出，
+避免 multiprocessing 的 `os._exit` 绕过退出钩子，业务路径不手动 close/drain。覆盖 taskQueue 开关、
+已结束的首调线程、两个算子、延迟 callback、部分初始化、重复通知及 finalize 失败后跨框架 teardown 保活。

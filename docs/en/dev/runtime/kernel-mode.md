@@ -29,9 +29,10 @@ the target and current device. Program-only diagnostics, ring overrides,
 distributed configuration, CPU/Meta/Fake tensors and Worker-owned handles are
 rejected; they do not select another execution path. Native launch requires
 rank 1–5 and positive uint32 extents/strides. A5, HBG execution, ACLGraph,
-automatic framework shutdown and public torch.ops registration remain later work.
-The internal Worker close protocol exists, but ordinary automatic exit cleanup
-is not yet wired; this remains integration-branch functionality.
+and public torch.ops registration remain later work. Automatic eager cleanup is
+verified with torch_npu 2.6.0.post2 as described below; other framework versions
+are rejected before native kernel initialization until their teardown contract
+is validated. This remains integration-branch functionality.
 
 Host/simulator and distributed execution use explicit program compilation:
 
@@ -191,7 +192,8 @@ The integration SDK is pinned to
 `finalize`; the proposed L2 `Worker(execution_mode="kernel")` API is not present.
 PyPTO's private adapter uses these existing methods. Init and prepare take no
 caller stream; Simpler mints the native context generation and callable IDs.
-The calling thread must already hold the framework's current device. Init uses
+The calling thread must already hold the framework's current device. The native
+lifecycle thread borrows that ACL context without creating or resetting a device. Init uses
 installed runtime binaries and checks capability; it does not compile an
 operator or allocate business outputs. HBG kernel initialization is unsupported
 at this pin even though HBG binary compilation works.
@@ -223,15 +225,58 @@ per-context mode checks and duplicate kernel-context rejection. Direct use of
 third-party Simpler objects bypasses PyPTO's process gate; it is not a supported
 way to combine program and kernel execution in one process.
 
-`close()` on the internal manager is terminal and must run on the thread that
-initialized it. It stops new registration and submission, waits for in-flight
-prepare/admission, drains accepted eager tickets, then finalizes the Worker. A
-failed close retains ownership and registration records for an owner-thread
-retry; it does not leave handles usable. Successful close clears registrations,
-invalidates handles and cannot reinitialize. Closing an unused manager performs
-no native work. No destructor or bare `atexit` hook closes the Worker; framework
-exit ordering remains a separate integration step. These methods are internal
-foundations, not a manual lifecycle required of ordinary operator users.
+## Automatic eager shutdown
+
+PyPTO installs a versioned integration at torch_npu's existing shutdown boundary
+before native Worker initialization. In torch_npu 2.6.0.post2,
+[`_npu_shutdown`](https://github.com/Ascend/pytorch/blob/eef1d5ae62b9118ae78bf2d7084e6fba1b13058f/torch_npu/__init__.py)
+calls `_C._npu_shutdown_synchronize()`, destroys process groups, and then calls
+`_C._npu_shutdown(success)`. PyPTO wraps both native entry attributes: its one-shot
+cleanup runs before the first synchronization, and the teardown wrapper also
+covers an explicit teardown that bypasses that step. The original functions and
+arguments are preserved. No additional `atexit(worker.close)` registration is
+used, and importing PyPTO or compiling a program installs no hook.
+
+The native framework
+[teardown](https://github.com/Ascend/pytorch/blob/eef1d5ae62b9118ae78bf2d7084e6fba1b13058f/torch_npu/csrc/InitNpuBindings.cpp)
+clears allocators and calls `NpuSysCtrl::Finalize`, which destroys events, streams
+and devices. Kernel cleanup must finish before those operations. A native
+`GetInitFlag()` check detects an already-finalized framework without initializing
+it. Private shutdown entry points and this ordering are version-sensitive;
+PyPTO currently admits only torch_npu 2.6.0.post2 for native kernel initialization.
+
+Each native kernel Worker owns one persistent daemon lifecycle thread. Its
+constructor/init, callable preparation and finalize execute on that thread with
+the borrowed framework context, satisfying Simpler's init-owner-thread rule even
+when the application's first caller was a short-lived background thread. Hot
+launches stay on the existing native torch queue path. Successful close stops
+and joins the lifecycle thread; a failed close keeps it alive for cleanup retry.
+The thread is daemon because Python joins non-daemon threads before framework
+exit hooks run; ordinary shutdown explicitly joins it before framework teardown.
+
+The internal manager's `close()` can be requested from another thread. It first
+stops admission, waits for initialization and in-flight preparation/admission,
+drains accepted eager tickets, and finalizes on the native owner thread. Concurrent
+close requests share the completed close, and repeated framework notifications
+do not retry or double-finalize. Reentrant close from initialization/preparation
+is rejected. Success clears registrations, invalidates handles and cannot
+reinitialize. An unused manager creates no Worker and performs no native close.
+Operator garbage collection does not close the process Worker.
+
+Failed drain/finalize keeps ownership and registration records. If cleanup cannot
+complete, or the framework is already torn down, automatic cleanup reports a
+warning, stops admission, and anchors the manager with a deliberately unreleased
+native Python reference. This prevents later interpreter/module clearing from
+running Worker/event destructors against a destroyed ACL context. Framework
+shutdown still proceeds; this is a failure fallback, not proof of safe resource
+release. A proven successful cleanup that reports an earlier submission error
+is reported separately. Forked children never close an inherited Worker. Abrupt
+termination (`os._exit`, signals, interpreter crashes) provides no cleanup promise.
+
+This contract covers eager work only. Graph capture remains rejected, so no
+PyPTO graph can replay a callable after this boundary. PR-08 must establish graph
+stop/release ordering before enabling capture; device synchronization alone
+cannot prevent later external replay. There is no public close/shutdown ritual.
 
 ## Internal torch queue submission
 
@@ -265,13 +310,13 @@ the delayed host callback. Allocator `recordStream` is applied once per unique
 storage before submission, including aliased inputs/outputs. A completion event
 recorded after Simpler's caller-stream join covers device use. Later calls reap
 completed tickets without draining the host queue; internal `state.drain()` or
-owner-thread `close()` waits for outstanding work. A retained last ticket is
+`close()` waits for outstanding work. A retained last ticket is
 released at that drain/close boundary.
 
 Submission and asynchronous callback errors propagate through the framework and
 ticket wait. Failed or partially enqueued tickets retain their Worker, argument
 and storage owners: a failed stream wait does not establish that Simpler's
-internal streams are quiescent. Internal owner-thread close drains the host callback and, only on failure,
+internal streams are quiescent. Internal close drains the host callback and, only on failure,
 requires a full device synchronization to establish internal-stream quiescence.
 It then finalizes and releases owners, while re-raising the original submission
 error. Failed quiescence or teardown retains all owners for a later close attempt.
@@ -340,3 +385,11 @@ Fake/Meta and symbolic inputs, isolated imports, duplicate definitions, and
 test-only dispatcher/compiler integration without a real kernel executor.
 
 `tests/ut/jit/test_kernel_eager.py` checks public entry routing, preflight rejection, scalar snapshots and cache separation. `tests/st/runtime/kernel/test_jit_eager.py` verifies real repeated InOut updates, constexpr variants, one shared Worker and isolated explicit program execution.
+
+`tests/ut/runtime/test_kernel_shutdown.py` checks lifecycle affinity, initialization
+races, idempotent close, framework ordering, failure retention, version refusal and
+fork handling. `tests/st/runtime/kernel/test_kernel_shutdown.py` uses ordinary
+Python subprocess exit (not multiprocessing's `os._exit`) with no user close or
+drain. It covers taskQueue on/off, a departed first-caller thread, two operators,
+delayed host callbacks, partial initialization, repeated notifications and a
+failed finalize retained through framework teardown.

@@ -43,7 +43,9 @@ class _ProcessKernelState:
         self.state = KernelState.UNINITIALIZED
         self.config: KernelConfig | None = None
         self._condition = threading.Condition()
-        self._owner_thread: threading.Thread | None = None
+        self._initializing_thread: threading.Thread | None = None
+        self._closing_thread: threading.Thread | None = None
+        self._stop_requested = False
         self._worker: Any = None
         self._failure: BaseException | None = None
         self._registrations: dict[bytes, KernelRegistration] = {}
@@ -57,31 +59,37 @@ class _ProcessKernelState:
             raise RuntimeError("Kernel state belongs to another PID; use a fresh spawned process")
 
     def _require_ready(self) -> None:
-        if self.state is not KernelState.READY:
-            raise RuntimeError(f"Kernel Worker is {self.state.value}, expected ready") from self._failure
+        if self.state is not KernelState.READY or self._stop_requested:
+            status = (
+                "stopping" if self._stop_requested and self.state is KernelState.READY else self.state.value
+            )
+            raise RuntimeError(f"Kernel Worker is {status}, expected ready") from self._failure
 
     def ensure_worker(self, config: KernelConfig) -> Any:
         """Share the first init result; incompatible requests never create another Worker."""
         self._check_pid()
         with self._condition:
+            if self._stop_requested:
+                raise RuntimeError("Kernel Worker is closing or closed; new initialization is disabled")
             if self.config is not None and self.config != config:
                 raise ValueError(
                     f"Kernel Worker configuration conflict: bound {self.config}, requested {config}"
                 )
             while self.state is KernelState.INITIALIZING:
-                if self._owner_thread is threading.current_thread():
+                if self._initializing_thread is threading.current_thread():
                     raise RuntimeError("Reentrant kernel Worker initialization is not supported")
                 self._condition.wait()
             if self.state is KernelState.READY:
+                self._require_ready()
                 return self._worker
             if self.state is not KernelState.UNINITIALIZED:
                 self._require_ready()
             claim_kernel_mode()
             self.config = config
-            self._owner_thread = threading.current_thread()
+            self._initializing_thread = threading.current_thread()
             self.state = KernelState.INITIALIZING
         try:
-            self._worker = _NativeWorker(config)
+            self._worker = _NativeWorker(config, self)
             self._worker.init(config)
         except BaseException as exc:
             with self._condition:
@@ -90,8 +98,11 @@ class _ProcessKernelState:
                 self._condition.notify_all()
             raise
         with self._condition:
-            self.state = KernelState.READY
+            if self.state is KernelState.INITIALIZING:
+                self.state = KernelState.READY
             self._condition.notify_all()
+            if self.state is not KernelState.READY:
+                self._require_ready()
             return self._worker
 
     def ensure_callable(self, artifact: Any, config: KernelConfig) -> KernelRegistration:
@@ -159,7 +170,8 @@ class _ProcessKernelState:
             except BaseException as exc:
                 with self._condition:
                     self._failure = exc
-                    self.state = KernelState.FAILED
+                    if self.state is not KernelState.CLOSING:
+                        self.state = KernelState.FAILED
                 raise
 
     def drain(self) -> None:
@@ -171,17 +183,23 @@ class _ProcessKernelState:
             self._submissions.clear()
 
     def close(self) -> None:
-        """Internal owner-thread close, draining admitted eager submissions first."""
+        """Stop admission, join in-flight operations and finalize on the native owner."""
         self._check_pid()
         with self._condition:
+            current = threading.current_thread()
+            if (self.state is KernelState.INITIALIZING and self._initializing_thread is current) or (
+                self.state is KernelState.CLOSING and self._closing_thread is current
+            ):
+                raise RuntimeError(f"Cannot close kernel Worker while {self.state.value} on this thread")
+            if current in self._prepare_threads.values():
+                raise RuntimeError("Cannot close kernel Worker from within prepare")
+            self._stop_requested = True
+            self._condition.notify_all()
+            while self.state in (KernelState.INITIALIZING, KernelState.CLOSING):
+                self._condition.wait()
             if self.state is KernelState.CLOSED:
                 return
-            if self._owner_thread is not None and self._owner_thread is not threading.current_thread():
-                raise RuntimeError("Kernel Worker close must run on its init-owner thread")
-            if self.state in (KernelState.INITIALIZING, KernelState.CLOSING):
-                raise RuntimeError(f"Cannot close kernel Worker while {self.state.value}")
-            if threading.current_thread() in self._prepare_threads.values():
-                raise RuntimeError("Cannot close kernel Worker from within prepare")
+            self._closing_thread = current
             self.state = KernelState.CLOSING
             self._condition.notify_all()
             while self._preparing:
@@ -204,14 +222,28 @@ class _ProcessKernelState:
             with self._condition:
                 self._failure = exc
                 self.state = KernelState.FAILED
+                self._closing_thread = None
+                self._condition.notify_all()
             raise
         with self._condition:
             self._registrations.clear()
             self._worker = None
             self._failure = None
             self.state = KernelState.CLOSED
+            self._closing_thread = None
+            self._condition.notify_all()
         if submission_error is not None:
             raise submission_error
+
+    def retain_shutdown_failure(self, error: BaseException) -> None:
+        """Stop admission without touching device resources after unsafe teardown."""
+        self._check_pid()
+        with self._condition:
+            self._stop_requested = True
+            if self.state is not KernelState.CLOSED:
+                self._failure = error
+                self.state = KernelState.FAILED
+            self._condition.notify_all()
 
 
 _process = SimpleNamespace(state=_ProcessKernelState())

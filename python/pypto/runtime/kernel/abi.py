@@ -35,12 +35,22 @@ class KernelConfig:
 
 
 class _NativeWorker:
-    def __init__(self, config: KernelConfig):
+    def __init__(self, config: KernelConfig, state: Any):
         require_kernel_native(KernelABI(config.platform, config.runtime, ()))
-        interface = importlib.import_module("simpler.task_interface")
-        self.worker = interface.ChipWorker()
+        from pypto.torch.shutdown import install_shutdown  # noqa: PLC0415
+
+        from .owner import _OwnerThread  # noqa: PLC0415
+
+        self._native = install_shutdown(state)
+        self._context = self._native.borrow_context(config.device_id)
+        self.worker: Any = None
+        self._owner = _OwnerThread()
 
     def init(self, config: KernelConfig) -> None:
+        self._owner.call(lambda: self._init(config))
+
+    def _init(self, config: KernelConfig) -> None:
+        self._native.bind_context(self._context)
         interface = importlib.import_module("simpler.task_interface")
         runtime_builder = importlib.import_module("simpler_setup.runtime_builder")
         cfg = interface.CallConfig()
@@ -49,12 +59,13 @@ class _NativeWorker:
         bins = runtime_builder.RuntimeBuilder(platform=config.platform).get_binaries(
             config.runtime, build=False
         )
+        self.worker = interface.ChipWorker()
         self.worker.kernel_init(config.device_id, bins, cfg)
         if not self.worker.kernel_mode_supported:
             raise RuntimeError(f"Simpler does not support kernel mode for {config.platform}/{config.runtime}")
 
     def prepare(self, callable_: Any) -> Any:
-        return self.worker.kernel_prepare_callable(callable_)
+        return self._owner.call(lambda: self.worker.kernel_prepare_callable(callable_))
 
     @property
     def native_launch_target(self) -> Any:
@@ -62,4 +73,10 @@ class _NativeWorker:
         return self.worker._impl
 
     def close(self) -> None:
-        self.worker.finalize()
+        def finalize() -> None:
+            self._native.bind_context(self._context)
+            if self.worker is not None:
+                self.worker.finalize()
+
+        self._owner.call(finalize)
+        self._owner.stop()

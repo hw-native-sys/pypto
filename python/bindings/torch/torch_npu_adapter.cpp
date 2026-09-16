@@ -22,6 +22,7 @@
 #include <torch_npu/csrc/core/npu/NPUCachingAllocator.h>
 #include <torch_npu/csrc/core/npu/NPUGuard.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
+#include <torch_npu/csrc/core/npu/sys_ctrl/npu_sys_ctrl.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
 
 #include <atomic>
@@ -160,6 +161,25 @@ class LaunchTicket {
   std::shared_ptr<LaunchState> state_;
 };
 
+bool FrameworkAlive() { return c10_npu::NpuSysCtrl::GetInstance().GetInitFlag(); }
+
+uintptr_t BorrowContext(int32_t device_id) {
+  Require(FrameworkAlive(), "Cannot borrow a context after torch_npu teardown");
+  int32_t current = -1;
+  aclrtContext context = nullptr;
+  Require(aclrtGetDevice(&current) == ACL_SUCCESS && current == device_id,
+          "Kernel lifecycle must borrow the current torch NPU device");
+  Require(aclrtGetCurrentContext(&context) == ACL_SUCCESS && context != nullptr,
+          "Cannot borrow the current torch NPU context");
+  return reinterpret_cast<uintptr_t>(context);
+}
+
+void BindContext(uintptr_t context) {
+  Require(FrameworkAlive() && context != 0, "Kernel lifecycle cannot use a torn-down framework context");
+  Require(aclrtSetCurrentContext(reinterpret_cast<aclrtContext>(context)) == ACL_SUCCESS,
+          "Cannot bind the borrowed framework context to the kernel lifecycle thread");
+}
+
 c10_npu::NPUStream EagerStream(int64_t stream_id, int32_t device_id) {
   auto stream = c10_npu::getCurrentNPUStream(device_id);
   Require(stream.id() == stream_id, "Kernel frame is not on the current NPU stream");
@@ -222,6 +242,12 @@ NB_MODULE(_torch_npu, m) {
       .def("done", &LaunchTicket::Done, nb::call_guard<nb::gil_scoped_release>())
       .def("wait", &LaunchTicket::Wait, nb::call_guard<nb::gil_scoped_release>())
       .def("quiesce", &LaunchTicket::Quiesce, nb::call_guard<nb::gil_scoped_release>());
+  m.def("framework_alive", &FrameworkAlive);
+  m.def("borrow_context", &BorrowContext);
+  m.def("bind_context", &BindContext);
+  // Deliberately never decref: unsafe shutdown must not run native destructors
+  // during later Python module clearing, after the framework has destroyed ACL.
+  m.def("retain_until_exit", [](nb::object owner) { Py_INCREF(owner.ptr()); });
   m.def("check_eager", [](int64_t stream_id, int32_t device_id) { EagerStream(stream_id, device_id); });
   m.def("prepare", &Prepare, nb::keep_alive<0, 1>());
 }
