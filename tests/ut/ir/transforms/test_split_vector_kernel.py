@@ -1209,6 +1209,80 @@ class TestSplitVectorKernelManualTpopDeferredValid:
         with pytest.raises(ValueError, match="fills the padding of a hand-written"):
             _run_split_vector_kernel(Before)
 
+    @pytest.mark.parametrize("pop_first", [True, False], ids=["pop_lhs", "pop_rhs"])
+    def test_deferred_pop_feeding_a_two_tile_consumer_keeps_the_lane_extent(self, pop_first):
+        """Widening the pop must not disturb a consumer that reads a SECOND tile.
+
+        The deferred pop is fully valid while an independently halved operand
+        keeps its lane-local extent, so the two disagree. That is fine on both
+        counts: ``HalvedCallStaysTypeConsistent`` compares only ``shape_``, never
+        ``valid_shape``, so the author's declared (localized) result view is what
+        survives; and elementwise deduction does not require the operands to
+        agree anyway. Pinned in both operand orders, since elementwise deduction
+        takes its view from the LHS.
+        """
+
+        def build(lhs_is_pop):
+            @pl.program
+            class Before:
+                @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+                def main_aiv(
+                    self,
+                    data: pl.Tensor[[16, 128], pl.FP32],
+                    out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+                    vr: pl.Scalar[pl.INDEX],
+                ) -> pl.Tensor[[16, 128], pl.FP32]:
+                    slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                    pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
+                    z_vec: pl.Tile[
+                        [16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[vr, 128])
+                    ] = pl.tpop_from_aic(split=1)
+                    other: pl.Tile[
+                        [16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[vr, 128])
+                    ] = pl.load(
+                        data, [0, 0], [16, 128], valid_shape=[vr, 128], target_memory=pl.MemorySpace.Vec
+                    )
+                    summed: pl.Tile[
+                        [16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[vr, 128])
+                    ] = pl.tile.add(z_vec, other)
+                    pl.tfree_to_aic(z_vec)
+                    out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(summed, [0, 0], out_0)
+                    return out_0_store
+
+            @pl.program
+            class BeforeReversed:
+                @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+                def main_aiv(
+                    self,
+                    data: pl.Tensor[[16, 128], pl.FP32],
+                    out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+                    vr: pl.Scalar[pl.INDEX],
+                ) -> pl.Tensor[[16, 128], pl.FP32]:
+                    slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                    pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
+                    z_vec: pl.Tile[
+                        [16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[vr, 128])
+                    ] = pl.tpop_from_aic(split=1)
+                    other: pl.Tile[
+                        [16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[vr, 128])
+                    ] = pl.load(
+                        data, [0, 0], [16, 128], valid_shape=[vr, 128], target_memory=pl.MemorySpace.Vec
+                    )
+                    summed: pl.Tile[
+                        [16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[vr, 128])
+                    ] = pl.tile.add(other, z_vec)
+                    pl.tfree_to_aic(z_vec)
+                    out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(summed, [0, 0], out_0)
+                    return out_0_store
+
+            return Before if lhs_is_pop else BeforeReversed
+
+        printed = ir.python_print(_run_split_vector_kernel(build(pop_first)))
+        # The pop took the box; only the SECOND operand and the sum keep a lane extent.
+        assert "pl.Tile[[8, 128], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=1)" in printed, printed
+        assert printed.count("pl.min(pl.max(vr__ssa_v0") == 3, printed  # load arg + load type + sum type
+        assert "pl.tile.store(summed__ssa_v0, [0 + subblock_idx * 8, 0]" in printed, printed
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
