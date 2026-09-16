@@ -692,7 +692,7 @@ class InlineCallsMutator : public IRMutator {
       // then treats each as an ordinary call site, so a hoist and the splice it
       // enables land in the same fixpoint iteration.
       if (auto hoisted = HoistNestedInlineCalls(stmt)) {
-        new_stmts.push_back(SpliceHoisted(std::move(*hoisted), stmt->span_));
+        new_stmts.push_back(SpliceHoisted(*hoisted, stmt->span_));
         any_changed = true;
         continue;
       }
@@ -717,7 +717,7 @@ class InlineCallsMutator : public IRMutator {
   // the splice in a SeqStmts so the parent body remains a single Stmt;
   // SeqStmts::Flatten collapses any redundant nesting later.
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
-    if (auto hoisted = HoistNestedInlineCalls(op)) return SpliceHoisted(std::move(*hoisted), op->span_);
+    if (auto hoisted = HoistNestedInlineCalls(op)) return SpliceHoisted(*hoisted, op->span_);
     auto handled = HandleTopLevelInlineCall(op);
     if (!handled.has_value()) return IRMutator::VisitStmt_(op);
     changed_ = true;
@@ -725,7 +725,7 @@ class InlineCallsMutator : public IRMutator {
   }
 
   StmtPtr VisitStmt_(const EvalStmtPtr& op) override {
-    if (auto hoisted = HoistNestedInlineCalls(op)) return SpliceHoisted(std::move(*hoisted), op->span_);
+    if (auto hoisted = HoistNestedInlineCalls(op)) return SpliceHoisted(*hoisted, op->span_);
     auto handled = HandleTopLevelInlineCall(op);
     if (!handled.has_value()) return IRMutator::VisitStmt_(op);
     changed_ = true;
@@ -736,7 +736,7 @@ class InlineCallsMutator : public IRMutator {
   // EvalStmt: a function body that is a bare ReturnStmt (no enclosing
   // SeqStmts) reaches this override directly.
   StmtPtr VisitStmt_(const ReturnStmtPtr& op) override {
-    if (auto hoisted = HoistNestedInlineCalls(op)) return SpliceHoisted(std::move(*hoisted), op->span_);
+    if (auto hoisted = HoistNestedInlineCalls(op)) return SpliceHoisted(*hoisted, op->span_);
     auto handled = HandleTopLevelInlineCall(op);
     if (!handled.has_value()) return IRMutator::VisitStmt_(op);
     changed_ = true;
@@ -873,7 +873,7 @@ class InlineCallsMutator : public IRMutator {
   // Splice each statement of a hoisted sequence as an ordinary call site. Doing
   // it here rather than deferring to the next fixpoint iteration keeps the
   // pass within its `inline_fns.size() + 1` iteration bound.
-  StmtPtr SpliceHoisted(std::vector<StmtPtr> work, const Span& span) {
+  StmtPtr SpliceHoisted(const std::vector<StmtPtr>& work, const Span& span) {
     changed_ = true;
     std::vector<StmtPtr> out;
     out.reserve(work.size());
