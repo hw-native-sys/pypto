@@ -995,6 +995,13 @@ class l0_tile_chooser:
         AStationary = 1
         BStationary = 2
 
+    class DbcEmissionRoute(Enum):
+        """Concrete output-grid schedule used to realize L0C double buffering."""
+
+        Unsupported = 0
+        PipelinedInner = 1
+        UnrolledGrid = 2
+
     class L0TileConfig:
         """Inputs to choose_l0_tile: problem dims + hardware + realizable-mask gates.
 
@@ -1029,6 +1036,8 @@ class l0_tile_chooser:
         allow_a_stationary: bool
         allow_b_stationary: bool
         allow_double_buffer_c: bool
+        full_k_dbc_route: l0_tile_chooser.DbcEmissionRoute
+        split_k_dbc_route: l0_tile_chooser.DbcEmissionRoute
         c_read: bool
         bw_a: float
         bw_b: float
@@ -1056,6 +1065,7 @@ class l0_tile_chooser:
         stationarity: l0_tile_chooser.Stationarity
         os_holds_a: bool
         double_buffer_c: bool
+        dbc_emission_route: l0_tile_chooser.DbcEmissionRoute
         perf_hint: str
 
     @staticmethod

@@ -86,7 +86,16 @@ The pass is a `ProgramPass` and walks each function with an `IRMutator`; functio
 `ChooseL0Tile` picks the L0 GEMM tile by an **exhaustive roofline search**, not a closed form. For every legal aligned `(m, n, k)` — each a multiple of `GetL0FractalAlignment()`, with `AlignUp(m, l0c_align_m) × n` used for the L0C budget — it estimates wall-clock in core cycles and returns the minimum:
 
 - `wall ≈ max(C_load, C_mad) + C_drain` when the FIXPIPE L0C→L1 drain is exposed (single L0C), or
-- `wall ≈ max(C_load, C_mad, C_drain) + min(compute, C_drain) / T` when the drain is hidden behind compute (double-buffered L0C, `T` output tiles). The `+ min(…)/T` term is the pipeline **fill/drain bubble** — the first tile's compute (or the last tile's drain) has no partner to overlap, so the ideal all-hidden `T·max` roofline undercounts by one tile's non-dominant pipe (50% of the smaller pipe for two output tiles and ≈25% at a 2×2 grid). This keeps dbC=2 from being over-picked on small grids.
+- a route-specific complete schedule when L0C is double-buffered. Let
+  `C=max(C_load,C_mad)`, `D=C_drain`, `T` be the output-tile count, and use
+  `c=C/T`, `d=D/T`. An unrolled grid is one pipeline and costs
+  `T·max(c,d)+min(c,d)`. A nested full-K grid pays the fill/drain bubble once
+  per stationary-outer iteration and cannot overlap its peeled boundary tiles:
+  `I·max(c,d)+R·min(c,d)+E·(c+d)`, where `I` is the full interior-tile count,
+  `R` the number of inner-pipeline restarts, and `E=T-I` the exposed boundary
+  count. This prevents a nested grid from being priced as one flattened
+  pipeline. A dbC plan is selected only when this complete emitted cost is
+  strictly lower than the best single-C plan; an equal wall keeps one C buffer.
 
 `C_load` is the L1→L0A/L0B operand traffic under the chosen loop order, scaled by the per-buffer bandwidths from `GetL0CostModel()` (on-device MTE1 sweep: `bw_l0a≈130`, `bw_l0b≈85` B/cyc, ~1.52:1); `C_mad` is the cube MAD cost (per-`TMATMUL` issue overhead × K-fractal count). `C_drain` is the FIXPIPE L0C writeback, charged **per output tile** as a **per-M-row** cost: `⌈M/m⌉·⌈N/n⌉ · (drain_fixed + m·(max(drain_row, bytes_c·n/bw_drain) + drain_penalty·(odd(⌈n/N0⌉)−1)))`. A direct fit of an on-device FIXPIPE sweep: FIXPIPE addresses one M-row of the `N1 M1 M0 N0` FRACTAL_NZ accumulator at a time (so cost ∝ `m`), each row a grouped `nburst`/`loop` over the `N1 = ⌈n/N0⌉` N-fractals (`N0 = 32/bytes_c = 8` for the fp32 L0C). The per-row cost is `max(floor, throughput)` — a fixed burst-issue **floor** `drain_row` (row addressing/setup, N-independent) that dominates narrow N, or the fractal **throughput** `bytes_c·n/bw_drain` that dominates wide N (crossover ~n=131) — plus the **misalignment** residual: a non-power-of-two fractal count serializes the odd part `odd(N1)−1` into extra passes at `drain_penalty` per M-row (the predicate is a **non-power-of-two `N1`**, not literally `N%32`: `n=80 → odd(10)=5` is penalized, and so is `n=96 → odd(12)=3` even though `96%32=0`; aligned power-of-two `N1` such as `n=128 → 16` pays nothing). Because the drain count is `⌈M/m⌉·⌈N/n⌉`, **splitting the output (M/N) adds drains but splitting K does not** (partial sums accumulate in one L0C, drained once per `(m,n)` block). The per-M-row form makes the chooser prefer **wide-N / small-M** tiles (fewer FIXPIPE rows per drain) and correctly prices a misaligned-N tile so it is not over-selected — e.g. `320×320` lands an aligned `(160,128,64)` instead of the drain-bound `160×80`. Device-validated (drain 0.93–1.09×, loads R²=0.993). The search is exhaustive over **all** legal `k` per `(m, n)` (not the largest legal k — `⌈K/k⌉·⌈k/kt⌉` is non-monotone in `k` when `kt ≠ align_k`). Wall ties break lexicographically on `(padded_compute, ⌈K/k⌉, C_load, …)`; the `C_load` key picks the lower-hidden-load aspect among MAD-bound `(m,n)`↔`(n,m)` ties (L0B's slower bandwidth favours fewer m-blocks).
 
@@ -127,19 +136,46 @@ capacity gate (#1475) keeps the buffers distinct to the affordable depth.
 `DSA_RP` also skips `MemoryReuse`; it represents pipeline-stage separations as
 hard constraints, runs its bounded strict search first, and relaxes only
 pipeline-intent separations to soft penalties if that search finds no
-capacity-fitting placement. dbC=2 requires full-K and at least two **full**
-tiles on the moving inner axis; the stationary outer axis may have one tile.
-The emitted loop orientation follows the chooser's stationarity/hoist decision,
-and a peeled partial boundary does not count as a ping-pong stage. Thus rows
-outer admits a 1×2 grid, while columns outer admits a 2×1 grid. The Mat-scratch
-(`Acc→Mat`, `tile.assemble`) drain is floated the same way. A
+capacity-fitting placement. dbC=2 needs two **independent output tiles** —
+consecutive K blocks accumulate into the same L0C tile and are serially
+dependent, so only an M/N split supplies the second ping/pong stage. Both
+emitters supply it. What differs is the emitted **shape**, so there are two
+counting rules across three emitters:
+
+- **Pipelined loop** (`BuildFullKPipelined`): the dbC marker rides the moving
+  **inner** loop, so that loop alone must hold at least two **full** tiles; the
+  stationary outer axis may have one. The emitted loop orientation follows the
+  chooser's stationarity/hoist decision, so rows outer admits a 1×2 grid and
+  columns outer a 2×1 grid. A peeled partial boundary does **not** count: it is
+  emitted straight-line outside the pipelined loops, where
+  `CanonicalizeIOOrder` never reaches it.
+- **Unrolled grid** (`BuildSplitKGrid`, `TryFoldCanonicalSplitKAcc`): the
+  `ceil(M/m) × ceil(N/n)` grid is emitted unrolled, one K-loop plus drain per
+  tile, so there is no loop for `LowerPipelineLoops` to replicate. The emitter
+  instead assigns the grid a unique group from AutoTile's reserved range and
+  stamps `pipeline_membership` `(group, tile index % 2)` on each tile's
+  accumulator. Every tile is stamped, a partial boundary tile included — it is
+  an ordinary member of the unrolled sequence, not a peeled tail — so any two
+  output tiles ping-pong. PyPTO and DSA-RP consume that relation. PTOAS does not,
+  so the same route additionally binds the accumulator seed—or the first cube
+  result when a biased reduction has no seed—to one explicit pinned
+  `MemRef(slots=2)` and selects slot `tile index % 2`.
+
+The caller passes the actual emission route explicitly. Ordinary chooser-driven
+tiling supplies pipelined-inner for `k == K` and unrolled-grid for `k < K`.
+`TryFoldCanonicalSplitKAcc`, which retiles a user-written
+`create`/K-loop/`store` reduction, passes unrolled-grid for every candidate,
+independent of `k`. The chooser uses that route both for realizability and cost;
+it never has to infer the canonical fold's lowering from `k`.
+
+The Mat-scratch (`Acc→Mat`, `tile.assemble`) drain is floated the same way. A
 `PassManager` built under one planner and run under another fails loudly
 because its pass list and chooser gates must agree. The cost-model formulas
 are gate-independent. See
 [`31-canonicalize_io_order.md`](32-canonicalize_io_order.md) for the co-live
 float and runtime validation of the distinct `{0, L0C/2}` offsets.
 
-The full-K and moving-inner restrictions above apply only to chooser-emitted M/N
+The moving-inner restriction above applies only to chooser-emitted **full-K** M/N
 tiling. The separate existing-pipeline recognizer does not alter the chooser's
 design space: for the legacy PyPTO planner, it applies the same two-Acc mechanism
 to the canonical stationary-panel pattern after the conservative
