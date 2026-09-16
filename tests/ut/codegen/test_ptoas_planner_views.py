@@ -446,6 +446,54 @@ def test_transposed_matmul_operand_is_a_re_view_under_pypto_planner():
     assert "blayout=row_major, slayout=col_major" in decl, decl
 
 
+# ── a transposed operand may not come from a Mat *window* ────────────────────
+
+PARENT_ROWS, WINDOW_ROWS = 512, 64
+
+
+@pl.program
+class MatmulBTransOverSliceProgram:
+    """`b_trans=True` on a `tile.slice` of a Mat-resident parent.
+
+    The window is selected per iteration, so its offset is a runtime value and the
+    slice reaches codegen as a `pto.subview`.
+    """
+
+    @pl.function
+    def kernel(
+        self,
+        query: pl.Tensor[[PARENT_ROWS, QK], pl.INT8],
+        key: pl.Tensor[[QM, QK], pl.INT8],
+        out: pl.Out[pl.Tensor[[QM, WINDOW_ROWS], pl.INT32]],
+    ) -> pl.Tensor[[QM, WINDOW_ROWS], pl.INT32]:
+        with pl.at(level=pl.Level.CORE_GROUP, name_hint="qk_window"):
+            query_all = pl.slice(query, [PARENT_ROWS, QK], [0, 0])
+            for q in pl.range(PARENT_ROWS // WINDOW_ROWS):
+                window = pl.slice(query_all, [WINDOW_ROWS, QK], [q * WINDOW_ROWS, 0])
+                out[:, :] = pl.matmul(key[:, :], window, out_dtype=pl.INT32, b_trans=True)
+        return out
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_transposed_matmul_operand_over_a_mat_slice_is_rejected(planner):
+    """A transposed view of a Mat window has no lowering, and must not be aliased.
+
+    `tile.transpose_view` is a zero-copy relabel of a whole buffer. Its source
+    here is a `pto.subview`, which carries a runtime offset and the *parent's* row
+    pitch — and neither of the op's two lowerings can express that. ptoas refuses
+    a mat-source `pto.tmov` on a view ("matching src/dst shapes") and refuses a
+    `pto.treshape` on one at every destination size ("same total byte size").
+
+    Left alone, the PyPTO planner took the no-op branch and the result's own
+    `pto.alloc_tile` landed at the *parent's base* with the *window's* extent: a
+    dynamic slice offset cannot fold into a constant `addr`, and the parent pitch
+    is absent from the alloc's type. The matmul then read the same wrong bytes on
+    every iteration, silently. Reject at codegen instead, under both planners.
+    """
+    with pytest.raises(ValueError, match="cannot be taken from a slice of an on-chip Mat tile"):
+        _emit_incore_pto(MatmulBTransOverSliceProgram, planner)
+
+
 # ── pto.treshape results must carry STATIC valid dims ────────────────────────
 
 COLVEC_ROWS = 16

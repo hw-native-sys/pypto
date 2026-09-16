@@ -1505,6 +1505,32 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
         result_has_memref = result_tile->memref_.has_value();
       }
     }
+    // A `pto.subview` source has no transposed form on A2/A3, so neither path
+    // below can express it. A Mat window is readable only by `pto.textract`:
+    // `pto.tmov` refuses a mat-source view ("expects mat-source tmov to use
+    // matching src/dst shapes") and `pto.treshape` refuses it at every
+    // destination size ("expects src and dst to have the same total byte size").
+    //
+    // The no-op branch is the dangerous one. A dynamic slice offset cannot fold
+    // into a constant `pto.alloc_tile addr` (see AllocateMemoryAddr), and the
+    // parent's row pitch is absent from the alloc's type as well, so the result's
+    // own alloc_tile sits at the *parent's base with the window's extent*.
+    // Emitting nothing therefore aliases the wrong bytes silently -- on every
+    // iteration, not only the ones with a non-zero offset. Reject here instead;
+    // a diagnostic is all PyPTO can offer until ptoas grows a transposing
+    // Mat-window read.
+    //
+    // Provenance, not the rendered type, is the question: only `tile.slice`
+    // registers a subview materialization, so a transpose of a whole Mat load
+    // (the zero-copy #1776 case this op exists for) is unaffected.
+    CHECK_SPAN(codegen.GetSubviewMaterialization(codegen.GetExprAsCode(op->args_[0])) == nullptr, op->span_)
+        << "a transposed matmul operand (a_trans / b_trans) cannot be taken from a slice of an "
+           "on-chip Mat tile: the transpose is a zero-copy relabel of a whole buffer, and a slice "
+           "is a strided window, so the parent's row stride and the slice offset have nowhere to "
+           "go. Slice the GM tensor instead and load each window on its own -- pl.matmul(..., "
+           "b_trans=True) on a tile loaded directly from GM is still lowered zero-copy -- or "
+           "pre-transpose the data in GM and drop the flag";
+
     // The result's own alloc_tile already declares the transposed type: it IS
     // the view, so emit nothing. Mirrors tile.reshape's no-op check.
     auto existing_type = codegen.GetSSATileBufType(result_target);
