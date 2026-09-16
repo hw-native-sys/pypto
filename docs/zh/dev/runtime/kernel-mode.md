@@ -22,7 +22,7 @@ op(x, 2.0, out)
 省略 `config` 时选择该目标及 torch 当前 NPU device；显式 `RunConfig` 须匹配目标和当前设备。
 拒绝 program 专用诊断、ring 覆盖、分布式配置、CPU/Meta/Fake Tensor 及 Worker 自有 handle，
 不会据此切换执行路径。native launch 要求 rank 1–5 和正 uint32 extent/stride。
-A5、HBG 执行、ACLGraph 和公开 torch.ops 注册仍属后续工作。自动 eager 清理目前按下文
+A5、HBG 执行和 ACLGraph 仍属后续工作。自动 eager 清理目前按下文
 torch_npu 2.6.0.post2 的退出契约接入；其他框架版本在完成退出协议验证前拒绝 native kernel
 初始化。此功能仍限于集成分支。
 
@@ -110,7 +110,7 @@ Scalar 保持符号形式。直接返回输入保留 stride、storage offset 与
 `define(library, name)` 仅在调用方持有的 `torch.library.Library` 中定义 schema
 并注册 fake kernel；调用方负责保留 library 对象及其注册生命周期。重复定义，包括
 同名不同签名，均抛出 PyTorch 的重复定义错误，不替换已有定义。导入或重新加载模块
-不注册算子。`pypto.torch` 不新增公开注册 API，本阶段也不安装真实设备 kernel。
+不注册算子。下文的公开 `register` 辅助负责持有 Library 并接入实际设备实现。
 如果当前 PyTorch 缺少 `torch.library.register_fake`，则回退到
 `torch.library.impl_abstract`（PyTorch 2.2–2.3 提供），并保留调用方 Library 的
 生命周期管理。两种 API 均不可用时，在安装 schema 前明确报错。该可选辅助要求
@@ -125,18 +125,57 @@ Scalar 保持符号形式。直接返回输入保留 stride、storage offset 与
 且不添加等值 guard；另以 shape 派生的 Scalar 验证不同输入尺寸复用同一编译图。
 API 选择测试在 PyTorch 2.6 上模拟旧注册入口，验证 Fake/Meta dispatch、重复定义拒绝
 及 Library 清理；不据此宣称旧版 PyTorch 已通过端到端编译器兼容性验证。
-带返回别名的 schema 分别
-验证 schema 正确性与 Fake/Meta 行为，不把这些检查视为该类算子已支持函数化
-（functionalization）或编译执行。正式 kernel 注册、设备执行、autograd 与最终编译器
-接线仍属于后续工作。
+不透明的带返回别名 schema 仍分别验证 schema 正确性与 Fake/Meta 行为。
+公开注册通过下述分解（decomposition）支持函数化（functionalization）；仅定义带别名的
+不透明 schema 不足以支持编译执行。当前不提供 autograd。
+
+## 将 JIT kernel 注册到 torch.ops
+
+```python
+from pypto.torch import register
+
+# op has fully shaped @pl.jit annotations, including Out/InOut directions.
+registered = register(op, "my_kernels::op")
+registered(x, 2.0, out)
+torch.ops.my_kernels.op(x, 3.0, out)
+```
+
+`register(kernel, name, *, constexpr=None, config=None)` 从 `kernel.specialize()` 和
+已有 kernel ABI/返回别名分析派生 schema。注册不构建 binary、不分配 Tensor、不查询 NPU
+上下文、不初始化 Worker。首次真实 NPU 调用进入与 `kernel(...)` 相同的隐式编译、注册、
+当前 stream 提交及共享 Worker 路径。返回 Tensor 就是返回原始 Out/InOut 对象，支持重复
+别名。全部运行时参数都必须提供，即使 Python 函数有默认值；不推导输出分配。不注册 CPU 执行。
+
+Tensor 注解必须给出 shape/dtype；声明的动态维度保持动态。`constexpr={"block": 16}`
+为一个算子名固定编译期参数，省略时使用签名默认值；运行时 Scalar 仍保留在 dispatcher
+schema 中。其他 constexpr 变体使用其他名称。可选 `config` 在注册时复制，随后用于 JIT
+调用；省略时沿用当前设备默认值。constexpr 和 config 都不是运行时 `torch.ops` 参数。
+
+PyPTO 在进程生命周期内持有注册 Library。同名、同一个 JIT 对象、相同 constexpr 和配置的
+重复请求返回已有 overload；并发请求共享一个定义。不同 JIT 对象/绑定、外部已有定义和
+内部名称冲突均报错，不替换已有算子。普通重复 import 命中模块缓存，不重复注册；重新加载
+应用模块产生新的 JIT 对象时应使用新名称。重新加载注册辅助本身保留已有 Library。
+`_pypto_` 前缀的算子名供内部 dispatcher 使用；注册中途失败会撤销本次定义。
+
+公开算子保留准确 mutation/alias schema，其 `CompositeImplicitAutograd` 实现调用内部
+纯修改算子，再返回原始参数。内部算子的 PrivateUse1 实现调用既有 JIT 入口，并配有 Fake/Meta
+校验。这样 PyTorch 可对修改执行函数化，而无需处理不透明的返回别名；wrapper 不创建业务输出，
+框架编译变换可以管理自己的中间缓冲区。真实和抽象执行都校验注册时的 shape/dtype 契约；
+Fake/Meta 不编译、不 prepare、不 launch。尽管 dispatch key 名称包含 Autograd，此入口仅供推理：
+开启梯度且 Tensor requires_grad 时明确拒绝；`torch.no_grad()` / `torch.inference_mode()`
+下可使用这类 Tensor，但不提供 backward。
+
+已验证的编译路径是 PyTorch 2.6 `torch.compile(backend="aot_eager", fullgraph=True)`，
+CPU 夹具覆盖输出修改与重复别名；真实 NPU 测试覆盖直接/注册调用复用产物和 handle、taskQueue
+开关，以及编译图中 kernel 前后的框架算子。不据此宣称所有 compiler backend 或 ACLGraph 已通过。
 
 ## 可选依赖与范围
 
-`import pypto.torch` 不导出执行 API。导入该包、`interop` 或 `registration` 模块不请求 torch_npu、
+`import pypto.torch` 导出 `register`。导入该包、`interop` 或 `registration` 模块不请求 torch_npu、
 Simpler 或 native launch 扩展；`torch` 仍是 PyPTO 的常规依赖。真正描述 NPU 调用时
 才按需加载 `torch_npu`，缺失时给出针对性的错误信息。
 
-内部 launch 路径需要可选 native adapter。公开 torch.ops 注册仍是后续工作。
+直接调用与注册后的 launch 路径均需要可选 native adapter。
 eager 提交拒绝 graph capture，尚未提供 ACLGraph 生命周期契约。
 
 ## 进程 kernel Worker 与注册
@@ -285,7 +324,9 @@ ACLGraph 已验收。
 
 `tests/ut/torch/test_registration.py` 覆盖 schema mutation/alias 契约、Fake/Meta
 与符号输入、隔离导入、重复定义，以及不依赖真实 kernel executor 的测试内
-dispatcher/compiler 集成。
+dispatcher/compiler 集成，以及注册生命周期/冲突、回滚、推理限制和 JIT 入口路由。
+`tests/st/runtime/kernel/test_torch_ops.py` 验证公开注册的真实 NPU eager/aot_eager、taskQueue
+开关及共享 Worker/产物/callable；使用正常进程退出，不要求用户 close。
 
 `tests/ut/jit/test_kernel_eager.py` 覆盖公开入口、提前拒绝、Scalar 快照和缓存隔离。`tests/st/runtime/kernel/test_jit_eager.py` 验证真实 InOut 多次更新、constexpr 变体、共享 Worker 和隔离进程中的显式 program 执行。
 

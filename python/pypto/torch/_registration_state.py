@@ -7,12 +7,10 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Optional registration of JIT kernels with the torch dispatcher.
+"""Process-owned dispatcher libraries, kept stable across registration-module reloads."""
 
-Importing this package does not import torch_npu, create a Worker or load a
-native launch adapter. Framework-specific dependencies are resolved on demand.
-"""
+import threading
+from typing import Any
 
-from .registration import register
-
-__all__ = ["register"]
+lock = threading.RLock()
+registrations: dict[str, Any] = {}

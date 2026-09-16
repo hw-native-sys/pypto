@@ -269,6 +269,19 @@ Host 和模拟器执行使用显式编译，再调用 program 对象。直接 `a
 Tensor 并隐式编译后执行 kernel，当前范围见 [kernel mode](../dev/runtime/kernel-mode.md)。
 两个入口均要求调用方传入全部 Out/InOut Tensor。
 
+如需可选的 `torch.ops` 集成，注册同一个具有完整注解的 JIT 函数：
+
+```python
+from pypto.torch import register
+
+registered_add = register(add, "my_kernels::add")
+```
+
+注册不需要设备或显式编译。在独立的 kernel mode 进程中，
+`torch.ops.my_kernels.add(a_npu, b_npu, out_npu)` 与直接 `add(...)` 共用执行路径并返回
+`out_npu`。constexpr 绑定、Fake/Meta 行为和仅推理的编译器支持见
+[注册与编译器支持](../dev/runtime/kernel-mode.md#将-jit-kernel-注册到-torchops)。
+
 ## 边界情况
 
 > **致命陷阱：** `@pl.jit` 是**解析**函数体，不是执行它。函数体里的 `print()` 或 `assert`

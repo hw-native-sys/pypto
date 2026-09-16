@@ -288,6 +288,20 @@ Direct `add(...)` calls instead borrow real NPU tensors and compile implicitly f
 kernel execution; see [kernel mode](../dev/runtime/kernel-mode.md) for the current
 integration scope. Both entry points require caller-supplied Out/InOut tensors.
 
+For optional `torch.ops` integration, register the same fully annotated JIT function:
+
+```python
+from pypto.torch import register
+
+registered_add = register(add, "my_kernels::add")
+```
+
+Registration needs no device or explicit compilation. In a separate kernel-mode
+process, `torch.ops.my_kernels.add(a_npu, b_npu, out_npu)` uses the same execution
+path as direct `add(...)` and returns `out_npu`. See
+[registration and compiler support](../dev/runtime/kernel-mode.md#registering-a-jit-kernel-with-torchops)
+for constexpr bindings, Fake/Meta behavior and inference-only compiler support.
+
 ## Edge Cases
 
 > **Fatal pitfall:** `@pl.jit` **parses** the body — it does not run it. A `print()` or

@@ -7,17 +7,15 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Internal dispatcher schema and Fake/Meta helpers; no operators register on import.
+"""Explicit JIT registration and dispatcher metadata; no operators register on import."""
 
-Definitions belong to a caller-owned torch.library.Library. Device kernels and
-public kernel-mode registration are deliberately supplied by later integration.
-"""
-
+import copy
 import ctypes
+import inspect
 import keyword
 import re
 from collections.abc import Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
@@ -26,6 +24,10 @@ from pypto.ir.param_info import _DATATYPE_TO_CTYPE, ParamInfo, _to_torch_dtype, 
 from pypto.pypto_core.ir import ParamDirection
 
 from .interop import _scalar_value
+
+if TYPE_CHECKING:
+    from pypto.jit.decorator import JITFunction
+    from pypto.runtime import RunConfig
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
@@ -136,13 +138,20 @@ class RegistrationSignature:
         device/stream state. Symbolic dimensions stay symbolic. Physical layout
         and storage overlap remain real-call validation responsibilities.
         """
-        bound = bind_complete_args(args, self._params, caller_name="Fake/Meta call")
+        bound = self._validate(args, abstract=True)
+        result = tuple(bound[index] for index in self._return_aliases)
+        return result[0] if len(result) == 1 else result or None
+
+    def _validate(self, args: Sequence[Any], *, abstract: bool) -> list[Any]:
+        bound = bind_complete_args(args, self._params, caller_name="Registered kernel call")
         device = None
         for arg, info in zip(bound, self._params, strict=True):
             if info.shape is None:
                 _check_scalar(arg, info)
                 continue
-            if not isinstance(arg, torch.Tensor) or not (isinstance(arg, FakeTensor) or arg.is_meta):
+            if not isinstance(arg, torch.Tensor) or (
+                abstract and not (isinstance(arg, FakeTensor) or arg.is_meta)
+            ):
                 raise TypeError(f"Parameter {info.name!r} requires a FakeTensor or Meta tensor")
             if device is not None and arg.device != device:
                 raise ValueError(f"Parameter {info.name!r} has device {arg.device}, expected {device}")
@@ -165,8 +174,7 @@ class RegistrationSignature:
                     torch._check(
                         actual == expected, lambda: f"Parameter {info.name!r} has incompatible shape"
                     )
-        result = tuple(bound[index] for index in self._return_aliases)
-        return result[0] if len(result) == 1 else result or None
+        return bound
 
     def define(self, library: torch.library.Library, name: str) -> None:
         """Define metadata in a caller-owned library, failing on duplicate names.
@@ -185,3 +193,126 @@ class RegistrationSignature:
         schema = self.schema(name)
         library.define(schema)
         register_fake(f"{library.ns}::{name}", self.fake, lib=library)
+
+
+def register(
+    kernel: "JITFunction",
+    name: str,
+    *,
+    constexpr: dict[str, Any] | None = None,
+    config: "RunConfig | None" = None,
+) -> torch._ops.OpOverload:
+    """Register a fully annotated JIT function as an inference-only torch operator.
+
+    Registration specializes only frontend IR to derive mutation/return aliases;
+    it never builds binaries or initializes a Worker. Real NPU calls use the same
+    JIT cache, process Worker and current stream as direct calls. Fake/Meta calls
+    validate metadata without device work. All runtime arguments, including every
+    Out/InOut tensor, are required by the dispatcher.
+
+    Args:
+        kernel: A JIT function with shaped tensor annotations.
+        name: Explicit ``namespace::operator`` name owned by the application.
+        constexpr: Fixed constexpr bindings; omitted values use signature defaults.
+        config: Optional fixed RunConfig, copied at registration. Omit it to use
+            the direct-call defaults and the current NPU device.
+
+    Returns:
+        The registered ``torch.ops.namespace.operator.default`` overload. PyPTO
+        retains its library for the process lifetime; callers need no owner token.
+
+    Raises:
+        ValueError: The name is invalid, already owned by another definition, or
+            a binding is not a constexpr parameter.
+        TypeError: The JIT signature cannot describe a supported kernel schema.
+    """
+    from pypto.ir._kernel_compile import _entry, kernel_abi_for_program  # noqa: PLC0415
+    from pypto.ir.compiled_program import _extract_func_param_infos  # noqa: PLC0415
+    from pypto.jit.decorator import JITFunction, _constexpr_params, _resolve_constexpr_value  # noqa: PLC0415
+    from pypto.runtime import RunConfig  # noqa: PLC0415
+
+    from . import _registration_state  # noqa: PLC0415
+
+    if not isinstance(kernel, JITFunction):
+        raise TypeError("torch registration requires a @pl.jit function")
+    if not isinstance(name, str) or name.count("::") != 1:
+        raise ValueError(f"Expected namespace::operator, got {name!r}")
+    namespace, operator = name.split("::")
+    _check_name(namespace)
+    _check_name(operator)
+    if operator.startswith("_pypto_"):
+        raise ValueError("Operator names starting with '_pypto_' are reserved for PyPTO")
+    if config is not None and not isinstance(config, RunConfig):
+        raise TypeError("torch registration config must be a RunConfig")
+    configuration = copy.deepcopy(config)
+    constants = copy.deepcopy(dict(constexpr or {}))
+    constant_names = _constexpr_params(kernel._func)
+    unknown = set(constants) - set(constant_names)
+    if unknown:
+        raise ValueError(f"Registration bindings must name constexpr parameters, got {sorted(unknown)}")
+    parameters = inspect.signature(kernel._func).parameters
+    for key in constant_names:
+        if key not in constants:
+            if parameters[key].default is inspect.Parameter.empty:
+                raise TypeError(f"Registration requires a value for constexpr parameter {key!r}")
+            constants[key] = copy.deepcopy(parameters[key].default)
+    constant_identity = tuple(
+        (key, _resolve_constexpr_value(kernel.__name__, key, constants[key])) for key in constant_names
+    )
+
+    with _registration_state.lock:
+        existing = _registration_state.registrations.get(name)
+        if existing is not None:
+            owner, bindings, options, _, registered = existing
+            if owner is kernel and bindings == constant_identity and options == configuration:
+                return registered
+            raise ValueError(f"Torch operator {name!r} is already registered with a different definition")
+        mutation_name = f"_pypto_{operator}_mutate"
+        occupied = set(torch._C._dispatch_get_all_op_names())
+        if name in occupied or f"{namespace}::{mutation_name}" in occupied:
+            raise ValueError(f"Torch operator {name!r} or its internal mutation name is already defined")
+
+        program = kernel.specialize(**constants)
+        abi = kernel_abi_for_program(program, platform="a2a3", runtime="tensormap_and_ringbuffer")
+        params, _, _ = _extract_func_param_infos(_entry(program))
+        signature = RegistrationSignature(params, return_aliases=abi.return_aliases)
+        mutation_signature = RegistrationSignature(params)
+        library = torch.library.Library(namespace, "FRAGMENT")
+        try:
+            mutation_signature.define(library, mutation_name)
+
+            def execute(*args: Any) -> None:
+                mutation_signature._validate(args, abstract=False)
+                bound = dict(zip((p.name for p in params), args, strict=True))
+                kernel(**bound, **constants, config=configuration)
+
+            library.impl(mutation_name, execute, "PrivateUse1")
+            mutation = getattr(getattr(torch.ops, namespace), mutation_name).default
+
+            def call(*args: Any) -> Any:
+                if torch.is_grad_enabled() and any(
+                    isinstance(arg, torch.Tensor) and arg.requires_grad for arg in args
+                ):
+                    raise ValueError("PyPTO torch operators are inference-only; no autograd is registered")
+                mutation(*args)
+                aliases = tuple(args[index] for index in abi.return_aliases)
+                return aliases[0] if len(aliases) == 1 else aliases or None
+
+            # Decompose the alias-returning shell into a mutation-only operator
+            # plus original arguments. PyTorch can functionalize that inner op;
+            # an opaque custom op with aliased returns cannot be functionalized
+            # by the supported PyTorch 2.6 dispatcher.
+            library.define(signature.schema(operator))
+            library.impl(operator, call, "CompositeImplicitAutograd")
+            registered = getattr(getattr(torch.ops, namespace), operator).default
+        except BaseException:
+            library._destroy()
+            raise
+        _registration_state.registrations[name] = (
+            kernel,
+            constant_identity,
+            configuration,
+            library,
+            registered,
+        )
+        return registered

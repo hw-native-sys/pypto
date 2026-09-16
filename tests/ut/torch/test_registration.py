@@ -10,18 +10,25 @@
 """Exercise internal schema helpers with temporary, test-only dispatcher operators."""
 
 import ctypes
+import gc
 import importlib
 import os
 import subprocess
 import sys
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
+import pypto.language as pl
 import pytest
 import torch
+from pypto import CacheConfig
 from pypto.ir.param_info import ParamInfo
+from pypto.jit.decorator import JITFunction
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import ParamDirection
-from pypto.torch import registration
+from pypto.runtime import RunConfig
+from pypto.runtime.kernel.context import _ProcessKernelState
+from pypto.torch import _registration_state, register, registration
 from torch._dynamo.testing import CompileCounterWithBackend
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
@@ -455,6 +462,198 @@ def test_mutation_only_schema_opcheck_and_compile(library):
         x, out = torch.ones(rows, 3), torch.empty(rows, 3)
         assert compiled(x, step, out) is out
         torch.testing.assert_close(out, x + step)
+
+
+@pl.jit
+def _registered_update(
+    x: pl.Tensor[[16, 16], pl.FP32],
+    scale: pl.Scalar[pl.FP32],
+    out: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+):
+    a = pl.load(x, [0, 0], [16, 16])
+    b = pl.load(out, [0, 0], [16, 16])
+    out = pl.store(pl.add(b, pl.mul(a, scale)), [0, 0], out)
+    return out, out
+
+
+@pl.jit
+def _registered_constant(
+    x: pl.Tensor[[16, 16], pl.FP32],
+    out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+    value: pl.constexpr = 4,
+):
+    a = pl.load(x, [0, 0], [16, 16])
+    out = pl.store(pl.add(a, value), [0, 0], out)
+    return out
+
+
+@pytest.fixture
+def registered_namespace():
+    namespace = f"pypto_register_test_{uuid.uuid4().hex}"
+    yield namespace
+    with _registration_state.lock:
+        for name in list(_registration_state.registrations):
+            if name.startswith(namespace + "::"):
+                entry = _registration_state.registrations.pop(name)
+                entry[3]._destroy()
+
+
+def _cpu_fixture(namespace, name, execute):
+    entry = _registration_state.registrations[f"{namespace}::{name}"]
+    entry[3].impl(f"_pypto_{name}_mutate", execute, "CPU")
+
+
+def test_public_registration_fake_meta_and_import_lifetime(registered_namespace, monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("registration or Fake/Meta touched binary compilation or a Worker")
+
+    monkeypatch.setattr(JITFunction, "_resolve_compiled", forbidden)
+    monkeypatch.setattr(_ProcessKernelState, "ensure_worker", forbidden)
+    name = f"{registered_namespace}::update"
+    op = register(_registered_update, name)
+    assert str(op._schema) == (
+        f"{name}(Tensor(a0) x, float scale, Tensor(a2!) out) -> (Tensor(a2!), Tensor(a2!))"
+    )
+    meta_x, meta_out = torch.empty(16, 16, device="meta"), torch.empty(16, 16, device="meta")
+    assert all(value is meta_out for value in op(x=meta_x, scale=2.0, out=meta_out))
+    with FakeTensorMode():
+        x, out = torch.empty(16, 16), torch.empty(16, 16)
+        assert all(value is out for value in op(x, 3.0, out))
+    gc.collect()
+    importlib.reload(registration)
+    assert registration.register(_registered_update, name) is op
+    assert all(value is meta_out for value in op(meta_x, 1.0, meta_out))
+
+
+def test_public_registration_compile_preserves_mutation_and_aliases(registered_namespace):
+    op = registration.register(_registered_update, f"{registered_namespace}::update")
+
+    def execute(x, scale, out):
+        out.add_(x * scale)
+
+    _cpu_fixture(registered_namespace, "update", execute)
+    result = torch.library.opcheck(op, (torch.ones(16, 16), 2.0, torch.zeros(16, 16)))
+    assert all(value == "SUCCESS" for value in result.values())
+
+    def call(x, out):
+        first, second = op(x, 2.0, out)
+        return first, second, second + 1
+
+    compiled = torch.compile(call, backend="aot_eager", fullgraph=True)
+    x, out = torch.ones(16, 16), torch.zeros(16, 16)
+    for value in (2.0, 4.0):
+        first, second, other = compiled(x, out)
+        assert first is out and second is out
+        torch.testing.assert_close(out, torch.full_like(out, value))
+        torch.testing.assert_close(other, torch.full_like(out, value + 1))
+
+
+def test_public_registration_constexpr_conflicts_and_copies_config(registered_namespace):
+    config = RunConfig(platform="a2a3", device_id=0, cache_config=CacheConfig(enabled=False))
+    name = f"{registered_namespace}::constant"
+    bindings = {"value": 5}
+    op = registration.register(_registered_constant, name, constexpr=bindings, config=config)
+    bindings["value"] = 6
+    assert registration.register(_registered_constant, name, constexpr={"value": 5}, config=config) is op
+    config.device_id = 1
+    with pytest.raises(ValueError, match="different definition"):
+        registration.register(_registered_constant, name, constexpr={"value": 5}, config=config)
+    with pytest.raises(ValueError, match="different definition"):
+        registration.register(_registered_constant, name, constexpr=bindings)
+    with pytest.raises(ValueError, match="different definition"):
+        registration.register(_registered_update, name)
+    with pytest.raises(ValueError, match="constexpr parameters"):
+        registration.register(_registered_update, f"{registered_namespace}::bad", constexpr={"scale": 2})
+    assert [arg.name for arg in op._schema.arguments] == ["x", "out"]
+
+
+def test_public_registration_rejects_grad_but_allows_inference(registered_namespace):
+    op = registration.register(_registered_update, f"{registered_namespace}::update")
+
+    def execute(x, scale, out):
+        out.add_(x * scale)
+
+    _cpu_fixture(registered_namespace, "update", execute)
+    x, out = torch.ones(16, 16, requires_grad=True), torch.zeros(16, 16)
+    with pytest.raises(ValueError, match="inference-only"):
+        op(x, 1.0, out)
+    with torch.no_grad():
+        assert all(value is out for value in op(x, 1.0, out))
+    torch.testing.assert_close(out, torch.ones_like(out))
+
+
+def test_public_registration_preserves_foreign_definition(library):
+    library.define("occupied(Tensor x) -> Tensor")
+    with pytest.raises(ValueError, match="already defined"):
+        registration.register(_registered_update, f"{library.ns}::occupied")
+    assert str(getattr(torch.ops, library.ns).occupied.default._schema).endswith("(Tensor x) -> Tensor")
+
+
+def test_public_registration_rolls_back_partial_definition(registered_namespace, monkeypatch):
+    original = torch.library.Library.impl
+
+    def fail(library, name, *args, **kwargs):
+        if name == "update":
+            raise RuntimeError("injected registration failure")
+        return original(library, name, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(torch.library.Library, "impl", fail)
+        with pytest.raises(RuntimeError, match="injected registration failure"):
+            registration.register(_registered_update, f"{registered_namespace}::update")
+    assert not any(
+        name.startswith(registered_namespace + "::") for name in torch._C._dispatch_get_all_op_names()
+    )
+    op = registration.register(_registered_update, f"{registered_namespace}::update")
+    assert op._schema.name == f"{registered_namespace}::update"
+
+
+def test_public_registration_device_binding_uses_jit_kwargs(registered_namespace, monkeypatch):
+    op = registration.register(
+        _registered_constant, f"{registered_namespace}::constant", constexpr={"value": 7}
+    )
+    calls = []
+
+    def execute(kernel, **kwargs):
+        assert kernel is _registered_constant
+        calls.append(kwargs)
+        kwargs["out"].copy_(kwargs["x"] + kwargs["value"])
+        return kwargs["out"]
+
+    monkeypatch.setattr(JITFunction, "__call__", execute)
+    mutation = getattr(torch.ops, registered_namespace)._pypto_constant_mutate.default
+    keys = torch._C.DispatchKeySet(torch._C.DispatchKey.PrivateUse1)
+    x, out = torch.ones(16, 16), torch.empty(16, 16)
+    # Force only the dispatcher entry key; use CPU storage and a fixture JIT body.
+    assert mutation.redispatch(keys, x, out) is None
+    assert calls == [{"x": x, "out": out, "value": 7, "config": None}]
+    torch.testing.assert_close(out, torch.full_like(out, 8))
+    with pytest.raises(RuntimeError, match="incompatible shape"):
+        mutation.redispatch(keys, torch.ones(32, 16), out)
+    assert len(calls) == 1
+    with pytest.raises(RuntimeError, match="missing value"):
+        op(x)
+
+
+def test_public_registration_concurrent_requests_share_one_definition(registered_namespace):
+    name = f"{registered_namespace}::update"
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        operators = list(pool.map(lambda _: registration.register(_registered_update, name), range(8)))
+    assert all(op is operators[0] for op in operators)
+    owned = [name for name in torch._C._dispatch_get_all_op_names() if name.startswith(registered_namespace)]
+    assert len(owned) == 2
+
+
+@pytest.mark.parametrize("name", ["unqualified", "ns::a::b", "ns::a()", "ns::_pypto_reserved"])
+def test_public_registration_rejects_invalid_names(name):
+    with pytest.raises(ValueError):
+        registration.register(_registered_update, name)
+
+
+@pytest.mark.parametrize("kernel", [lambda x: x])
+def test_public_registration_requires_jit_function(registered_namespace, kernel):
+    with pytest.raises(TypeError, match="@pl.jit"):
+        registration.register(kernel, f"{registered_namespace}::plain")
 
 
 if __name__ == "__main__":

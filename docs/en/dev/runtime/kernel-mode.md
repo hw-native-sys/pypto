@@ -28,8 +28,8 @@ that target and the current torch NPU device. An explicit `RunConfig` must match
 the target and current device. Program-only diagnostics, ring overrides,
 distributed configuration, CPU/Meta/Fake tensors and Worker-owned handles are
 rejected; they do not select another execution path. Native launch requires
-rank 1–5 and positive uint32 extents/strides. A5, HBG execution, ACLGraph,
-and public torch.ops registration remain later work. Automatic eager cleanup is
+rank 1–5 and positive uint32 extents/strides. A5, HBG execution and ACLGraph
+remain later work. Automatic eager cleanup is
 verified with torch_npu 2.6.0.post2 as described below; other framework versions
 are rejected before native kernel initialization until their teardown contract
 is validated. This remains integration-branch functionality.
@@ -141,8 +141,8 @@ caller-owned `torch.library.Library`. The caller must keep that library alive
 and owns its registration lifetime. Repeated definitions, including a different
 signature with the same name, raise PyTorch's duplicate-definition error;
 existing definitions are not replaced. Importing or reloading this module does
-not register an operator. `pypto.torch` exports no new public registration API,
-and PyPTO installs no real device kernel in this foundation. If the installed
+not register an operator. The public `register` helper below owns its libraries
+and supplies the actual device implementation. If the installed
 PyTorch lacks `torch.library.register_fake`, the helper falls back to
 `torch.library.impl_abstract` (available in PyTorch 2.2–2.3), preserving the
 caller-owned library lifetime. If neither API is available, definition fails
@@ -161,20 +161,76 @@ test also verifies that different input sizes reuse one compiled graph.
 API-selection tests emulate the older registration entry point on PyTorch 2.6
 and verify Fake/Meta dispatch, duplicate rejection and library cleanup; they
 do not establish end-to-end compiler compatibility on older PyTorch releases.
-Schemas with aliased returns are checked for schema correctness and Fake/Meta
-behavior separately. These checks do not establish functionalization or compiled
-execution of aliased-return operators. Actual kernel registration, device
-execution, autograd and the final compiler integration remain later work.
+Opaque schemas with aliased returns are checked for schema correctness and
+Fake/Meta behavior separately. The public registration below supplies a
+decomposition so those returns also work through functionalization; opaque
+aliased-return schemas alone are insufficient. Autograd is not provided.
+
+## Registering a JIT kernel with torch.ops
+
+```python
+from pypto.torch import register
+
+# op has fully shaped @pl.jit annotations, including Out/InOut directions.
+registered = register(op, "my_kernels::op")
+registered(x, 2.0, out)
+torch.ops.my_kernels.op(x, 3.0, out)
+```
+
+`register(kernel, name, *, constexpr=None, config=None)` derives the schema from
+`kernel.specialize()` and the existing kernel ABI/return-alias analysis. It does
+not build binaries, allocate tensors, query an NPU context or initialize a Worker.
+The first real NPU invocation follows the same implicit compilation, registration,
+current-stream submission and shared Worker path as `kernel(...)`. Returning a
+Tensor means returning the corresponding caller-owned Out/InOut object, including
+repeated aliases. Every runtime argument is required, even if the Python function
+has a default; output allocation is never inferred. CPU execution is not registered.
+
+A tensor annotation must provide shape and dtype; declared dynamic dimensions
+remain dynamic. `constexpr={"block": 16}` fixes compile-time parameters for one
+operator name, using signature defaults when omitted. Runtime scalars stay in the
+dispatcher schema. Use another name for another constexpr variant. Optional
+`config` is copied at registration and used by each underlying JIT call; without
+it, the current-device defaults apply. Neither constexpr nor config is a runtime
+`torch.ops` argument.
+
+PyPTO owns the registration libraries for the process lifetime. Repeating the
+same name with the same JIT object, constexpr values and configuration returns
+the existing overload; concurrent requests share one definition. Different JIT
+objects or bindings, foreign definitions and internal-name collisions fail
+without replacing anything. Reimporting a cached application module does not
+register twice; reloading a module that creates a new JIT object requires a new
+operator name. Reloading the registration helper itself preserves existing
+libraries. `_pypto_` operator names are reserved for internal dispatcher entries.
+Partial registration failure removes that attempt's definitions.
+
+The public operator has the exact mutation/alias schema and a
+`CompositeImplicitAutograd` implementation that calls an internal mutation-only
+operator and returns the original arguments. The internal operator has a
+PrivateUse1 implementation delegating to the JIT entry and a Fake/Meta validator.
+This lets PyTorch functionalize the mutation without opaque aliased returns;
+the wrapper creates no output tensors. Framework compiler transforms may manage
+their own intermediate buffers. Both real and abstract execution validate the
+registered shape/dtype contract; Fake/Meta never compile, prepare or launch.
+Despite the dispatch-key name, this is inference-only: grad-enabled calls with
+gradient-requiring tensors fail explicitly. `torch.no_grad()` and
+`torch.inference_mode()` may use such tensors without a backward contract.
+
+The tested compiler path is PyTorch 2.6 `torch.compile(backend="aot_eager",
+fullgraph=True)`, including mutated outputs and repeated aliases in CPU fixture
+tests. Real NPU tests cover direct and registered calls sharing artifacts and
+handles, taskQueue on/off and compiled framework operations around a kernel.
+This does not establish every compiler backend or ACLGraph capture/replay.
 
 ## Optional dependencies and scope
 
-`import pypto.torch` exports no execution API. Importing it or its `interop`
+`import pypto.torch` exports `register`. Importing it or its `interop`
 or `registration` module does not request torch_npu, Simpler or a native launch
 extension.
 `torch` remains a normal PyPTO dependency. A real call description loads
 `torch_npu` on demand and reports a targeted error if it is unavailable.
 
-The internal launch path requires the optional native adapter. Public torch.ops registration remains separate work. Eager submission
+The direct and registered launch paths require the optional native adapter. Eager submission
 rejects graph capture; it does not provide an ACLGraph lifetime contract.
 
 ## Process kernel Worker and registration
@@ -382,7 +438,11 @@ both locally built adapters. They do not claim A5 or ACLGraph acceptance.
 
 `tests/ut/torch/test_registration.py` covers schema mutation/alias contracts,
 Fake/Meta and symbolic inputs, isolated imports, duplicate definitions, and
-test-only dispatcher/compiler integration without a real kernel executor.
+dispatcher/compiler integration with CPU fixtures, registration lifetime/conflicts,
+rollback, inference guards and routing into the JIT entry.
+`tests/st/runtime/kernel/test_torch_ops.py` checks real NPU eager and aot_eager
+execution through the public registration with taskQueue on/off and shared
+Worker/artifact/callable reuse. It exits normally without a user close call.
 
 `tests/ut/jit/test_kernel_eager.py` checks public entry routing, preflight rejection, scalar snapshots and cache separation. `tests/st/runtime/kernel/test_jit_eager.py` verifies real repeated InOut updates, constexpr variants, one shared Worker and isolated explicit program execution.
 

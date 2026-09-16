@@ -364,7 +364,8 @@ import pypto
 import pypto.torch
 import pypto.torch.interop
 import pypto.torch.launch
-assert pypto.torch.__all__ == []
+assert pypto.torch.__all__ == ["register"]
+assert callable(pypto.torch.register)
 """
     result = subprocess.run(
         [sys.executable, "-c", source],
