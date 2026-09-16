@@ -4722,7 +4722,13 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
   // aliases too, so normalize them before any planner observes lifetimes or
   // emits handles. Planner-specific repetitions remain below because later
   // YieldFixup/reuse steps can create fresh mismatches.
-  new_body = NormalizeIdentityCopyBuffersMutator().VisitStmt(new_body);
+  //
+  // This is the earliest normalization on every path, so no IfStmt YieldFixup has
+  // run yet under any planner: use the pre-fixup form, or an in-place producer
+  // re-anchored onto a phi's not-yet-chosen buffer here survives into the planner
+  // (the guarded runs below only decline to *add* such an anchor, they do not undo
+  // one) and is read as the canonical branch target when the fixup finally runs.
+  new_body = NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
 
   // Under memory_planner=PtoAS or DsaRP the whole MemoryReuse pass is skipped.
   // DsaRP must therefore run the remaining correctness normalizations from
