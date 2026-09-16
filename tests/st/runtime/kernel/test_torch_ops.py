@@ -90,7 +90,7 @@ def _run(case, device, directory):
             assert counts == dict(compile=2, init=1, prepare=2)
             assert state._worker is worker and len(state._registrations) == 2
 
-            if case == "compile":
+            if case in ("compile", "capture"):
 
                 def call(x, acc):
                     result = update(x + 1, 2.0, acc)
@@ -104,6 +104,26 @@ def _run(case, device, directory):
                     torch.testing.assert_close(following.cpu(), torch.full((16, 16), expected + 3))
                 assert counts == dict(compile=2, init=1, prepare=2)
                 assert state._worker is worker
+                if case == "capture":
+                    from tests.st.runtime.kernel.test_capture import _replay  # noqa: PLC0415
+
+                    torch_npu.npu.synchronize()
+                    acc.zero_()
+                    graph = torch_npu.npu.NPUGraph()
+                    with torch_npu.npu.graph(graph):
+                        result, following = compiled(x, acc)
+                    assert result is acc
+                    expected = 0.0
+                    for value in (1.0, 4.0, 2.0):
+                        x.fill_(value)
+                        _replay(graph)
+                        expected += (value + 1) * 2
+                        torch.testing.assert_close(acc.cpu(), torch.full((16, 16), expected))
+                        torch.testing.assert_close(following.cpu(), torch.full((16, 16), expected + 3))
+                    assert counts == dict(compile=2, init=1, prepare=2)
+                    assert state._worker is worker
+                    # Keep the compiled graph alive through ordinary process exit.
+                    globals()["retained_compiled_graph"] = graph
         # Ordinary process exit exercises 07; no caller-owned close or drain.
 
 
@@ -128,7 +148,7 @@ def _isolated(case, device, directory, queue_enabled):
     assert "PyPTO kernel shutdown did not complete" not in result.stderr
 
 
-@pytest.mark.parametrize("case", ["eager", "compile"])
+@pytest.mark.parametrize("case", ["eager", "compile", "capture"])
 @pytest.mark.parametrize("queue_enabled", [0, 1])
 def test_torch_ops(test_config, tmp_path, case, queue_enabled):
     if test_config.codegen_only or test_config.platform != "a2a3":

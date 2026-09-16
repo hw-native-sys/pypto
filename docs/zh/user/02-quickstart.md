@@ -282,6 +282,21 @@ registered_add = register(add, "my_kernels::add")
 `out_npu`。constexpr 绑定、Fake/Meta 行为和仅推理的编译器支持见
 [注册与编译器支持](../dev/runtime/kernel-mode.md#将-jit-kernel-注册到-torchops)。
 
+执行图前须在 capture 外 warmup 每个算子特化，再在 `torch.npu.graph(graph)` 中调用
+JIT 函数或对应的 torch.ops 入口。warmup 会执行业务，因此需要初值的 InOut 应恢复状态。
+replay 保留捕获时的 Tensor 地址与 Scalar 值；新输入应原位更新 Tensor 内容。
+
+可运行的 [Torch kernel 示例](../../../examples/runtime/torch_kernel_capture.py) 展示 eager 调用、
+注册、双算子 capture 和多次 replay，并校验数值。在 kernel mode 构建环境中运行：
+
+```bash
+python examples/runtime/torch_kernel_capture.py --device 0 --entry torch_ops
+python examples/runtime/torch_kernel_capture.py --device 0 --entry jit
+```
+
+支持的框架版本、native adapter 构建要求与清理顺序见
+[图契约](../dev/runtime/kernel-mode.md#warmup-后的-jit-与-torchops-图捕获)。
+
 ## 边界情况
 
 > **致命陷阱：** `@pl.jit` 是**解析**函数体，不是执行它。函数体里的 `print()` 或 `assert`

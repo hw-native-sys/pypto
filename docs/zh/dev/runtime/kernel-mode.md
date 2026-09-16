@@ -22,7 +22,7 @@ op(x, 2.0, out)
 省略 `config` 时选择该目标及 torch 当前 NPU device；显式 `RunConfig` 须匹配目标和当前设备。
 拒绝 program 专用诊断、ring 覆盖、分布式配置、CPU/Meta/Fake Tensor 及 Worker 自有 handle，
 不会据此切换执行路径。native launch 要求 rank 1–5 和正 uint32 extent/stride。
-A5、HBG 执行仍属后续工作；直接 JIT 支持 warmup 后的 ACLGraph capture/replay，见下文。自动清理目前按下文
+A5、HBG 执行仍属后续工作；直接 JIT 和注册后的 torch.ops 均支持 warmup 后的 ACLGraph capture/replay，见下文。自动清理目前按下文
 torch_npu 2.6.0.post2 的退出契约接入；其他框架版本在完成退出协议验证前拒绝 native kernel
 初始化。此功能仍限于集成分支。
 
@@ -167,7 +167,10 @@ Fake/Meta 不编译、不 prepare、不 launch。尽管 dispatch key 名称包�
 
 已验证的编译路径是 PyTorch 2.6 `torch.compile(backend="aot_eager", fullgraph=True)`，
 CPU 夹具覆盖输出修改与重复别名；真实 NPU 测试覆盖直接/注册调用复用产物和 handle、taskQueue
-开关，以及编译图中 kernel 前后的框架算子。不据此宣称所有 compiler backend 或 ACLGraph 已通过。
+开关，以及编译图中 kernel 前后的框架算子。已 warmup 的 `aot_eager` 调用还经过 NPUGraph
+capture/replay 验证，包含注册 kernel 周围的框架算子。必须在 capture 外用相同受 guard 约束的输入
+和选项调用 compiled wrapper；仅 warmup 底层 JIT 不会编译框架 wrapper。不据此宣称所有 compiler
+backend 或自动图捕获已支持。
 
 ## 可选依赖与范围
 
@@ -176,7 +179,7 @@ Simpler 或 native launch 扩展；`torch` 仍是 PyPTO 的常规依赖。真正
 才按需加载 `torch_npu`，缺失时给出针对性的错误信息。
 
 直接调用与注册后的 launch 路径均需要可选 native adapter。
-直接 JIT capture 要求提前 warmup；torch.ops 图路径仍需单独验收。
+直接 JIT 与注册后的 torch.ops capture 均要求提前 warmup，并共用图生命周期集成。
 
 ## 进程 kernel Worker 与注册
 
@@ -247,7 +250,7 @@ ACL context 已销毁后执行 Worker/event 析构。框架退出仍继续；此
 对于含有 PyPTO 调用的 `torch_npu.npu.NPUGraph`，退出先禁止新增 replay，排空框架队列与设备工作，
 reset 存活图，再释放 graph ticket 并关闭 Worker。不新增用户必须配对的 close/shutdown 接口。
 
-## warmup 后的直接 JIT 图捕获
+## warmup 后的 JIT 与 torch.ops 图捕获
 
 capture 前必须对**每个算子及特化**执行 warmup。shape、dtype 或 constexpr 变化可能选择新特化，
 需要重新 warmup；运行时 Scalar 值变化不需要。warmup 会实际执行算子，因此若捕获计算依赖
@@ -266,6 +269,31 @@ with torch.npu.graph(graph):
     op_b(y, out)
 graph.replay()
 ```
+
+注册算子沿用同一契约。匹配的直接 JIT warmup 可供 torch.ops capture 使用，反之亦然：
+kernel 对象、constexpr 绑定及编译/Worker 配置必须一致。在一张图中混用两个入口也复用
+同一个 Worker 与既有 callable 注册。`register()` 只定义 dispatcher 元数据，不等于 warmup。
+
+```python
+from pypto.torch import register
+
+registered_a = register(op_a, "my_graph::a")
+registered_b = register(op_b, "my_graph::b")
+registered_a(x, y)
+registered_b(y, out)
+torch.npu.synchronize()
+# Restore any InOut state changed by warmup here.
+graph = torch.npu.NPUGraph()
+with torch.npu.graph(graph):
+    torch.ops.my_graph.a(x, y)
+    torch.ops.my_graph.b(y, out)
+graph.replay()
+```
+
+dispatcher Scalar 使用 Python `int`/`float`/`bool`；直接 JIT 还接受类型化 ctypes 值。
+两者最终形成相同的类型化 ABI 快照。带数值校验的完整双算子示例见
+[`examples/runtime/torch_kernel_capture.py`](../../../../examples/runtime/torch_kernel_capture.py)，
+通过 `--entry torch_ops`（默认）或 `--entry jit` 选择调用入口。
 
 capture 只查找已有产物与已完成注册，不初始化 Worker、不加载或注册新二进制。缺少 warmup 时明确报错
 `Kernel capture requires warmup outside capture for this specialization`。当前 pin 的 Simpler 注册会同步
@@ -307,7 +335,7 @@ kernel，也不验证 capture。
 `pypto.torch.launch.enqueue(registration, args)` 接受进程管理器准备好的注册项及逻辑签名顺序的完整参数。
 每次校验注册项并生成独立 frame，通过可选 native torch_npu 扩展提交，返回既有输出别名；返回只表示
 Host 接纳，不表示设备执行完成。本入口不编译、不 prepare、不创建 Worker、不分配业务输出。
-公开 JIT 和 torch.ops 设备实现均复用此路径。直接 JIT capture 要求提前 warmup；torch.ops 图路径单独验收。
+公开 JIT 和 torch.ops 设备实现均复用此路径；两个入口的 capture 均要求提前 warmup。
 
 扩展使用固定 SDK 的 `ChipStorageTaskArgs` 头文件构造两个独立参数池。混合签名 `(x, scale, out)`
 对应两个 Tensor 和一个 Scalar；组装及二进制恢复的 ChipCallable 签名包含 `IN, OUT, SCALAR`，
@@ -372,6 +400,10 @@ dispatcher/compiler 集成，以及注册生命周期/冲突、回滚、推理�
 避免 multiprocessing 的 `os._exit` 绕过退出钩子，业务路径不手动 close/drain。覆盖 taskQueue 开关、
 已结束的首调线程、两个算子、延迟 callback、部分初始化、重复通知及 finalize 失败后跨框架 teardown 保活。
 
-`tests/st/runtime/kernel/test_capture.py` 覆盖缺失 warmup 拒绝、单/多算子、多图、Scalar 快照、
-图 reset/GC/重建及在途 replay 的正常进程退出，分别验证 taskQueue 开关。
+`tests/st/runtime/kernel/test_capture.py` 对直接 JIT 和 torch.ops 执行同一矩阵，覆盖缺失 warmup
+拒绝、单/多算子、多图/跨流、持久缓存复用、Scalar 快照、storage 保活、图 reset/GC/重建及
+在途 replay 的正常进程退出，分别验证 taskQueue 开关。跨入口用例验证一种入口 warmup、另一种
+入口 capture，以及同图混用；replay 不允许重新进入 Python JIT、编译或 prepare。
+`tests/st/runtime/kernel/test_torch_ops.py` 还验证已 warmup 的 `aot_eager` 调用进入 capture，
+包含周围框架算子及输出 alias。
 `tests/ut/torch/test_capture.py` 覆盖图持有和退出接纳；管理器/JIT 测试验证 capture 不初始化、编译或注册。

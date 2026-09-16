@@ -28,8 +28,9 @@ that target and the current torch NPU device. An explicit `RunConfig` must match
 the target and current device. Program-only diagnostics, ring overrides,
 distributed configuration, CPU/Meta/Fake tensors and Worker-owned handles are
 rejected; they do not select another execution path. Native launch requires
-rank 1–5 and positive uint32 extents/strides. A5 and HBG execution remain later work. Direct JIT ACLGraph capture/replay
-is supported after warmup, as described below. Automatic eager cleanup is
+rank 1–5 and positive uint32 extents/strides. A5 and HBG execution remain later work.
+Direct JIT and registered torch.ops ACLGraph capture/replay are supported after
+warmup, as described below. Automatic eager cleanup is
 verified with torch_npu 2.6.0.post2 as described below; other framework versions
 are rejected before native kernel initialization until their teardown contract
 is validated. This remains integration-branch functionality.
@@ -221,7 +222,11 @@ The tested compiler path is PyTorch 2.6 `torch.compile(backend="aot_eager",
 fullgraph=True)`, including mutated outputs and repeated aliases in CPU fixture
 tests. Real NPU tests cover direct and registered calls sharing artifacts and
 handles, taskQueue on/off and compiled framework operations around a kernel.
-This does not establish every compiler backend or ACLGraph capture/replay.
+Warmed `aot_eager` calls are also tested inside NPUGraph capture/replay, including
+framework operations around the registered kernel. Warm up the compiled wrapper
+itself outside capture, with the same guarded inputs and options; warming only
+the underlying JIT operator does not compile a framework wrapper. This does not
+establish support for every compiler backend or automatic graph capture.
 
 ## Optional dependencies and scope
 
@@ -232,8 +237,8 @@ extension.
 `torch_npu` on demand and reports a targeted error if it is unavailable.
 
 The direct and registered launch paths require the optional native adapter.
-Direct JIT capture requires prior warmup. Registered torch.ops graph integration
-remains a separate acceptance step.
+Direct JIT and registered torch.ops capture require prior warmup and use the
+same graph lifetime integration.
 
 ## Process kernel Worker and registration
 
@@ -336,7 +341,7 @@ admission, drains framework queues/device work and resets the live graphs. It
 then releases graph tickets and finalizes the Worker. There is no public
 close/shutdown ritual; see the capture contract below.
 
-## Direct JIT graph capture after warmup
+## JIT and torch.ops graph capture after warmup
 
 Warm up **every operator and specialization** outside capture. Shape, dtype or
 constexpr changes can select another specialization and require another warmup;
@@ -357,6 +362,34 @@ with torch.npu.graph(graph):
     op_b(y, out)
 graph.replay()
 ```
+
+Registered operators use the same contract. A matching direct JIT warmup is
+sufficient for torch.ops capture and vice versa: the kernel object, constexpr
+bindings and compilation/Worker configuration must match. Mixing both entries
+in one graph shares the same Worker and existing callable registrations.
+`register()` itself only defines dispatcher metadata and is not warmup.
+
+```python
+from pypto.torch import register
+
+registered_a = register(op_a, "my_graph::a")
+registered_b = register(op_b, "my_graph::b")
+registered_a(x, y)
+registered_b(y, out)
+torch.npu.synchronize()
+# Restore any InOut state changed by warmup here.
+graph = torch.npu.NPUGraph()
+with torch.npu.graph(graph):
+    torch.ops.my_graph.a(x, y)
+    torch.ops.my_graph.b(y, out)
+graph.replay()
+```
+
+Dispatcher scalars are Python `int`/`float`/`bool` values; direct JIT additionally
+accepts typed ctypes values. Both become the same typed ABI snapshot. A complete
+two-operator example with numerical checks is available in
+[`examples/runtime/torch_kernel_capture.py`](../../../../examples/runtime/torch_kernel_capture.py):
+use `--entry torch_ops` (default) or `--entry jit`.
 
 Capture only looks up an existing artifact and completed registration; it
 neither initializes a Worker nor loads/registers new binaries. Missing warmup
@@ -509,8 +542,13 @@ drain. It covers taskQueue on/off, a departed first-caller thread, two operators
 delayed host callbacks, partial initialization, repeated notifications and a
 failed finalize retained through framework teardown.
 
-`tests/st/runtime/kernel/test_capture.py` covers warmup refusal, single/multiple
-operators, multiple graphs, scalar snapshots, graph reset/GC/recreation and
-ordinary exit with pending replay, with taskQueue enabled and disabled.
+`tests/st/runtime/kernel/test_capture.py` runs the same direct JIT and torch.ops
+matrix: warmup refusal, single/multiple operators, multiple graphs/streams,
+persistent-cache reuse, scalar snapshots, storage ownership, graph reset/GC/recreation
+and ordinary exit with pending replay, with taskQueue enabled and disabled.
+Cross-entry cases warm through either entry and capture through the other or mix
+entries in one graph. Replay must not reenter Python JIT, compile or prepare.
+`tests/st/runtime/kernel/test_torch_ops.py` also checks warmed `aot_eager` calls
+inside capture, including the surrounding framework operations and output aliases.
 `tests/ut/torch/test_capture.py` covers graph ownership and shutdown admission;
 manager/JIT tests verify that capture never initializes, compiles or registers.

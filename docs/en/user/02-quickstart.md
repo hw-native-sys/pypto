@@ -302,6 +302,24 @@ path as direct `add(...)` and returns `out_npu`. See
 [registration and compiler support](../dev/runtime/kernel-mode.md#registering-a-jit-kernel-with-torchops)
 for constexpr bindings, Fake/Meta behavior and inference-only compiler support.
 
+For graph execution, warm up every operator specialization outside capture,
+then call either the JIT function or its registered torch.ops entry inside
+`torch.npu.graph(graph)`. Warmup executes the operator, so restore any InOut
+state that needs its initial value. Replay keeps captured tensor addresses and
+scalar values; update tensor contents in place for new inputs.
+
+The runnable [Torch kernel example](../../../examples/runtime/torch_kernel_capture.py)
+demonstrates eager calls, registration, two-operator capture and repeated replay
+with numerical checks. In the kernel-mode build environment, run:
+
+```bash
+python examples/runtime/torch_kernel_capture.py --device 0 --entry torch_ops
+python examples/runtime/torch_kernel_capture.py --device 0 --entry jit
+```
+
+See the [graph contract](../dev/runtime/kernel-mode.md#jit-and-torchops-graph-capture-after-warmup)
+for supported framework versions, native adapter requirements and cleanup.
+
 ## Edge Cases
 
 > **Fatal pitfall:** `@pl.jit` **parses** the body — it does not run it. A `print()` or

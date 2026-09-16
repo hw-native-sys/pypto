@@ -210,6 +210,11 @@ def register(
     validate metadata without device work. All runtime arguments, including every
     Out/InOut tensor, are required by the dispatcher.
 
+    NPU graph capture requires prior execution of each specialization outside
+    capture. Warmup through either this operator or the matching direct JIT call
+    shares the same artifact and registration. Replay uses captured addresses
+    and scalar values; update tensor contents in place to supply new input data.
+
     Args:
         kernel: A JIT function with shaped tensor annotations.
         name: Explicit ``namespace::operator`` name owned by the application.
