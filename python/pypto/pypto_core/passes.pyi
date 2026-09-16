@@ -66,6 +66,8 @@ class IRProperty(Enum):
     NoScalarKernelReturn = ...
     AivSplitLoweredValid = ...
     BufferIR = ...
+    TileStorageLegalized = ...
+    TileStorageAllocated = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -382,6 +384,9 @@ def init_mem_ref() -> Pass:
 
 def materialize_semantic_aliases() -> Pass:
     """Create the semantic must-alias materialization pass (loop-carry / in-place)."""
+
+def verify_tile_storage(allocated: bool = False) -> Pass:
+    """Verify canonical storage; allocated=True also checks effective address overlap."""
 
 def memory_reuse() -> Pass:
     """Create a memory reuse pass."""

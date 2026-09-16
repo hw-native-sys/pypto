@@ -115,8 +115,8 @@ O(N log N) work and O(N) storage. No persistent alias table is attached to IR.
 Accumulator branches still use the existing guarded coalescing; a remaining
 divergent `Acc` branch is rejected because Acc-to-Acc copying is unsupported.
 This slice does not establish a complete storage property: live incoming loop
-values, general parallel carry transfers, While carries, and post-reuse storage
-verification require the following migration slice.
+values, general parallel carry transfers, and While carries require the following
+migration slice.
 
 ### Default pipeline
 
@@ -150,3 +150,7 @@ physical address for ptoas `PlanMemory`. See
   `tile.matmul_acc(..., init_cond=...)`. Peeled `matmul`/`matmul_acc` branches
   remain supported for existing hand-written kernels and are normalized by this
   pass.
+
+The staged pipeline runs `VerifyTileStorage` after shared and post-reuse storage
+reconciliation, before address placement. See the [storage property contracts](99-verifier.md#tile-storage-properties)
+for symbolic closure and the separate allocated-address overlap check.

@@ -119,6 +119,10 @@ std::string IRPropertyToString(IRProperty prop) {
       return "AivSplitLoweredValid";
     case IRProperty::BufferIR:
       return "BufferIR";
+    case IRProperty::TileStorageLegalized:
+      return "TileStorageLegalized";
+    case IRProperty::TileStorageAllocated:
+      return "TileStorageAllocated";
     default:
       return "Unknown";
   }
