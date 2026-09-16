@@ -1011,6 +1011,46 @@ def test_benchmark_registers_once_and_loops_warmup_plus_rounds():
     assert stats.rounds == 3
 
 
+def test_benchmark_captures_markers_drained_during_worker_teardown():
+    """Queued timing records must drain before the capture restores fd 2."""
+    pending = bytearray()
+
+    class DeferredLogWorker(_FakeWorker):
+        def __exit__(self, *_exc: object) -> bool:
+            os.write(2, pending)
+            return False
+
+    worker = DeferredLogWorker()
+    worker.handle.side_effect = lambda *args, **kwargs: pending.extend(b"delayed timing record\n")
+    sentinel = BenchmarkStats(device_wall_us=[1.0] * 5, host_wall_us=[2.0] * 5, rounds=5, warmup=2)
+    with (
+        patch("pypto.runtime.bench.ChipWorker", return_value=worker),
+        patch("pypto.runtime.bench.configure_log"),
+        patch("pypto.runtime.bench.current_level", return_value=20),
+        patch("pypto.runtime.bench._parse_stats_from_strace", return_value=sentinel) as parse,
+    ):
+        benchmark(_compiled_mock(), [MagicMock()], rounds=5, warmup=2)
+    assert parse.call_args.args[0] == "delayed timing record\n" * 7
+
+
+def test_benchmark_replays_captured_worker_setup_failure(capfd):
+    """Extending capture to setup must not hide the failure's diagnostics."""
+
+    class FailingWorker(_FakeWorker):
+        def __enter__(self):
+            os.write(2, b"worker setup failed\n")
+            raise RuntimeError("worker setup failed")
+
+    with (
+        patch("pypto.runtime.bench.ChipWorker", return_value=FailingWorker()),
+        patch("pypto.runtime.bench.configure_log"),
+        patch("pypto.runtime.bench.current_level", return_value=20),
+        pytest.raises(RuntimeError, match="worker setup failed"),
+    ):
+        benchmark(_compiled_mock(), [MagicMock()], rounds=1, warmup=0)
+    assert "worker setup failed" in capfd.readouterr().err
+
+
 def test_benchmark_sets_log_level_to_timing_and_restores():
     _stats, _worker, _ctor, cfg, _parse = _run_benchmark(rounds=1, warmup=0)
     # First call enables TIMING markers; the final call restores the saved level (20).
