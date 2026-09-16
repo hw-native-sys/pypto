@@ -11,9 +11,6 @@
 
 import ctypes
 import gc
-import os
-import subprocess
-import sys
 import weakref
 from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
@@ -350,16 +347,9 @@ def test_optional_torch_npu_dependency_error(monkeypatch):
         interop.CallSignature([_param("n", None, DataType.INT32)]).describe_call((1,))
 
 
-def test_import_does_not_require_npu_or_simpler():
+def test_import_does_not_require_npu_or_simpler(run_without_optional_runtime):
     """A fresh process can import the package with optional runtime imports forbidden."""
     source = """
-import builtins
-original = builtins.__import__
-def guarded(name, *args, **kwargs):
-    if name.split('.')[0] in {'torch_npu', 'simpler', 'simpler_setup'}:
-        raise AssertionError('unexpected optional runtime import: ' + name)
-    return original(name, *args, **kwargs)
-builtins.__import__ = guarded
 import pypto
 import pypto.torch
 import pypto.torch.interop
@@ -367,14 +357,7 @@ import pypto.torch.launch
 assert pypto.torch.__all__ == ["register"]
 assert callable(pypto.torch.register)
 """
-    result = subprocess.run(
-        [sys.executable, "-c", source],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=30,
-        env=os.environ | {"TORCH_DEVICE_BACKEND_AUTOLOAD": "0"},
-    )
+    result = run_without_optional_runtime(source)
     assert result.returncode == 0, result.stderr
 
 

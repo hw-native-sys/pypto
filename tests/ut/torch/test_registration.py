@@ -12,9 +12,6 @@
 import ctypes
 import gc
 import importlib
-import os
-import subprocess
-import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
@@ -333,15 +330,8 @@ def test_scalar_schema_and_values(dtype, value, kind):
     assert signature.fake(torch.empty((2, 3), device="meta"), value) is None
 
 
-def test_import_and_reload_do_not_register_or_load_optional_runtime():
+def test_import_and_reload_do_not_register_or_load_optional_runtime(run_without_optional_runtime):
     source = """
-import builtins
-original = builtins.__import__
-def guarded(name, *args, **kwargs):
-    if name.split('.')[0] in {'torch_npu', 'simpler', 'simpler_setup'}:
-        raise AssertionError('unexpected optional import: ' + name)
-    return original(name, *args, **kwargs)
-builtins.__import__ = guarded
 import importlib
 import torch
 before = set(torch._C._dispatch_get_all_op_names())
@@ -349,14 +339,35 @@ import pypto.torch.registration
 importlib.reload(pypto.torch.registration)
 assert set(torch._C._dispatch_get_all_op_names()) == before
 """
-    result = subprocess.run(
-        [sys.executable, "-c", source],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        env=os.environ | {"TORCH_DEVICE_BACKEND_AUTOLOAD": "0"},
-        check=False,
-    )
+    result = run_without_optional_runtime(source)
+    assert result.returncode == 0, result.stderr
+
+
+def test_registered_fake_and_meta_do_not_load_optional_runtime(run_without_optional_runtime):
+    """Abstract dispatch stays independent of device runtimes after registration."""
+    result = run_without_optional_runtime("""
+import torch
+from torch._subclasses.fake_tensor import FakeTensorMode
+from pypto.ir.param_info import ParamInfo
+from pypto.pypto_core import DataType
+from pypto.pypto_core.ir import ParamDirection
+from pypto.torch.registration import RegistrationSignature
+
+signature = RegistrationSignature(
+    [ParamInfo('out', ParamDirection.Out, [-1, 3], DataType.FP32)], return_aliases=(0,)
+)
+library = torch.library.Library('pypto_optional_runtime_test', 'DEF')
+try:
+    signature.define(library, 'identity')
+    op = torch.ops.pypto_optional_runtime_test.identity
+    value = torch.empty((4, 3), device='meta')[1:]
+    assert op(value) is value
+    with FakeTensorMode():
+        value = torch.empty((4, 3))[1:]
+        assert op(value) is value
+finally:
+    library._destroy()
+""")
     assert result.returncode == 0, result.stderr
 
 

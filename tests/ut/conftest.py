@@ -11,7 +11,9 @@
 
 import importlib
 import os
+import subprocess
 import sys
+from collections.abc import Callable
 from types import ModuleType, SimpleNamespace
 from typing import Final
 from unittest.mock import MagicMock, patch
@@ -27,6 +29,57 @@ from pypto.pypto_core import _clear_thread_log_level, passes
 # mutate it — so every unit test starts from whatever PYPTO_LOG_LEVEL / the
 # build-type default selected for this session. See `_reset_log_level`.
 _INITIAL_LOG_LEVEL: Final[LogLevel] = get_log_level()
+
+
+@pytest.fixture
+def run_without_optional_runtime() -> Callable[[str], subprocess.CompletedProcess[str]]:
+    """Run source in a fresh process that rejects optional runtime import attempts.
+
+    The import finder covers statements and importlib alike. Tracking attempts
+    also makes a caught ImportError fail the check. PyTorch backend autoload is
+    disabled to test PyPTO's imports independently of installed torch plugins.
+    """
+
+    def run(source: str) -> subprocess.CompletedProcess[str]:
+        bootstrap = f"""
+import importlib.abc
+import sys
+
+blocked = ('torch_npu', 'simpler', 'simpler_setup', 'pypto._torch_npu')
+
+def is_blocked(name):
+    return any(name == root or name.startswith(root + '.') for root in blocked)
+
+assert not any(is_blocked(name) for name in sys.modules), 'Optional runtime already loaded'
+
+class RejectOptionalRuntime(importlib.abc.MetaPathFinder):
+    def __init__(self):
+        self.attempts = []
+
+    def find_spec(self, fullname, path=None, target=None):
+        if is_blocked(fullname):
+            self.attempts.append(fullname)
+            raise ModuleNotFoundError('Blocked optional runtime import: ' + fullname, name=fullname)
+        return None
+
+guard = RejectOptionalRuntime()
+sys.meta_path.insert(0, guard)
+try:
+    exec(compile({source!r}, '<optional-runtime-check>', 'exec'))
+finally:
+    assert not guard.attempts, 'Optional runtime imports attempted: ' + repr(guard.attempts)
+    assert not any(is_blocked(name) for name in sys.modules), 'Optional runtime was loaded'
+"""
+        return subprocess.run(
+            [sys.executable, "-c", bootstrap],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+            env=os.environ | {"TORCH_DEVICE_BACKEND_AUTOLOAD": "0"},
+        )
+
+    return run
 
 
 @pytest.fixture
