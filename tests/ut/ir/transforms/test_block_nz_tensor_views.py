@@ -863,5 +863,68 @@ def test_rejects_tensor_view_of_nz():
                 return out
 
 
+# -- Temporary guard for hw-native-sys/pto-isa#317 ----------------------------
+# Delete this block together with ``CheckNzGmGapFitsBurstStride`` once the
+# upstream truncation is fixed.
+
+
+def _gap_program(rows: int, tile_rows: int):
+    """A whole-column NZ load of *tile_rows* out of a *rows*-row weight.
+
+    The GM gap ``TLoadGm2L1Nz2nz`` computes for it is exactly ``rows -
+    tile_rows`` 32-byte blocks, for every dtype.
+    """
+
+    @pl.program
+    class GmGap:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            x: pl.Tensor[[64, 512], pl.INT8],
+            w: pl.Tensor[[rows, 512], pl.INT8, pl.NZ],
+            out: pl.Tensor[[64, tile_rows], pl.INT32],
+        ):
+            xt = pl.load(x, [0, 0], [64, 512], target_memory=pl.Mem.Mat)
+            wt = pl.load(w, [0, 0], [tile_rows, 512], target_memory=pl.Mem.Mat)
+            acc = pl.matmul(xt, pl.tile.transpose_view(wt), out_dtype=pl.INT32)
+            pl.store(acc, [0, 0], out)
+            return out
+
+    return GmGap
+
+
+def test_accepts_the_largest_encodable_gm_gap():
+    """65520 blocks is the largest gap a fractal-aligned load can produce."""
+    assert 65536 - 16 == 65520
+    _run(_gap_program(rows=65536, tile_rows=16))
+
+
+def test_rejects_a_gm_gap_above_the_burst_stride_field():
+    """Above 65535 blocks pto-isa truncates the gap and reads wrong fractals.
+
+    The message must say this is a temporary guard, not an NZ limitation — a
+    user who reads it as "NZ tops out here" would design around a cap that is
+    about to disappear.
+    """
+    assert 65552 - 16 == 65536
+    with pytest.raises(ValueError) as excinfo:
+        _run(_gap_program(rows=65552, tile_rows=16))
+    message = str(excinfo.value)
+    assert "65536 32-byte blocks" in message
+    assert "NOT an expected pl.NZ limitation" in message
+    assert "pto-isa#317" in message
+
+
+def test_a_taller_row_tile_rescues_the_same_tensor():
+    """The gap, not the row extent, is the limit.
+
+    Same 65552-row weight the test above refuses, read in a 32-row tile instead
+    of a 16-row one: the gap drops to 65520 and it compiles. This is why the
+    diagnostic offers a *wider* tile as the workaround.
+    """
+    assert 65552 - 32 == 65520
+    _run(_gap_program(rows=65552, tile_rows=32))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

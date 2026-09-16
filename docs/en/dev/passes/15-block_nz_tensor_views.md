@@ -249,6 +249,45 @@ diagnostic naming the fix — an NZ tensor must never be silently mis-addressed.
 | explicit stride or partial `valid_shape` | rejected |
 | distributed tensor | rejected — `remote_load` has no NZ blocking |
 | `tensor.view` / `tensor.reinterpret_view` of NZ | rejected at op construction |
+| GM row gap above 65535 blocks | rejected — **temporary**, see [GM row gap](#gm-row-gap-a-temporary-guard) |
+
+### GM row gap: a temporary guard
+
+**This row is not a design limit.** It guards an upstream defect
+([hw-native-sys/pto-isa#317]) and is deleted when that lands — along with
+`CheckNzGmGapFitsBurstStride` in the pass and its three unit tests.
+
+`TLoadGm2L1Nz2nz` computes the GM gap between consecutive column blocks as a
+`uint32_t` and hands it to `TLoadInstrGm2L1`'s `uint16_t gmGap` with no range
+test. Above 65535 32-byte blocks it wraps, and the load reads the wrong
+fractals — silently: PTOAS assembles the view, the CCE compiler accepts the
+kernel, and the matmul returns wrong numbers with no error at run time. This
+pass is the last layer that still knows which `pl.NZ` annotation is
+responsible, so the diagnostic belongs here.
+
+For a blocked view the gap reduces to the row extent the load leaves behind:
+
+```text
+gmGap = (gStride1 - gShape2*gShape3*gShape4) * sizeof(T) / 32
+      = (R/16 - TR/16) * 16 * c0 * sizeof(T) / 32
+      = R - TR                                       (32-byte blocks)
+```
+
+because `c0 * sizeof(T) == 32` holds for every NZ view by construction — so the
+bound is dtype-independent, and a **wider** row tile is what lowers the gap, not
+a narrower one:
+
+| `R` | row tile | gap | Result |
+| --- | -------- | --- | ------ |
+| 65536 | 16 | 65520 | accepted |
+| 65552 | 16 | **65536** | rejected |
+| 65552 | 32 | 65520 | accepted — same tensor, wider tile |
+
+The other workaround is to annotate a layer-stacked weight rank-3 with the
+stacked axis as the batch (`[LAYERS, K, N]`); its extent then rides `gStride0`
+and a real `for` loop rather than the burst gap.
+
+[hw-native-sys/pto-isa#317]: https://github.com/hw-native-sys/pto-isa/issues/317
 
 ### Why logical rank 4+ is rejected
 
