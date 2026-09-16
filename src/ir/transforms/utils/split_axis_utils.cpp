@@ -713,18 +713,151 @@ void RejectDeferredValidStore(bool deferred, const CallPtr& call) {
          "  * keep the extent at or below the box half, so the second lane is empty";
 }
 
+// --- The deferred-extent contract for a hand-written tile.tpop_from_aic ------
+//
+// When the pop cannot carry the lane's own extent (BoundaryCarriesLaneExtent),
+// RebuildTpopWithHalvedShape gives it the transport's BOX and the lane extent
+// lands on the pop's consumers instead. Two consumers cannot receive it, and
+// both silently write the transport's padding as data if left alone. They are
+// the same two the region path refuses (RejectDeferredValidStore /
+// FillsPadRegion in LocalizeExplicitBoundaryValid); these helpers hold a
+// hand-written body to the identical contract, checked on the AUTHOR's IR so
+// the diagnostic quotes what they wrote.
+
+/// Whether @p call reads any of @p vars directly as an operand.
+bool ReadsAnyOf(const CallPtr& call, const std::unordered_set<const Var*>& vars) {
+  if (vars.empty()) return false;
+  for (const auto& arg : call->args_) {
+    auto arg_var = AsVarLike(arg);
+    if (arg_var && vars.count(arg_var.get()) != 0) return true;
+  }
+  return false;
+}
+
+/// Vars bound by a hand-written ``tile.tpop_from_aic`` whose split-axis extent
+/// must be deferred. Recurses: a pop inside a ``pl.range`` body defers on
+/// exactly the same terms as a top-level one.
+void CollectDeferredManualTpops(const std::vector<StmtPtr>& stmts, int split_dim, const ExprPtr& lane_stride,
+                                std::unordered_set<const Var*>* out) {
+  for (const auto& stmt : stmts) {
+    if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+      CollectDeferredManualTpops(transform_utils::FlattenToStmts(for_stmt->body_), split_dim, lane_stride,
+                                 out);
+      continue;
+    }
+    if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+      CollectDeferredManualTpops(transform_utils::FlattenToStmts(while_stmt->body_), split_dim, lane_stride,
+                                 out);
+      continue;
+    }
+    if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+      CollectDeferredManualTpops(transform_utils::FlattenToStmts(if_stmt->then_body_), split_dim, lane_stride,
+                                 out);
+      if (if_stmt->else_body_.has_value()) {
+        CollectDeferredManualTpops(transform_utils::FlattenToStmts(*if_stmt->else_body_), split_dim,
+                                   lane_stride, out);
+      }
+      continue;
+    }
+    if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
+      CollectDeferredManualTpops(seq->stmts_, split_dim, lane_stride, out);
+      continue;
+    }
+    auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt);
+    auto call = assign ? std::dynamic_pointer_cast<const Call>(assign->value_) : nullptr;
+    if (!call || !call->op_ || !IsOp(call, "tile.tpop_from_aic")) continue;
+    if (BoundaryCarriesLaneExtent(call->GetType(), split_dim, lane_stride)) continue;
+    out->insert(assign->var_.get());
+  }
+}
+
+/// Refuse the two consumers a deferred pop cannot hand its extent to.
+void RejectDeferredManualTpopConsumer(const CallPtr& call, const std::unordered_set<const Var*>& deferred) {
+  if (!call || !call->op_ || !ReadsAnyOf(call, deferred)) return;
+  CHECK_SPAN(!IsOp(call, "tile.store"), call->span_)
+      << "tile.store: this store reads a hand-written tile.tpop_from_aic directly, and that pop's "
+         "split-axis valid extent cannot ride on the transport — pto-isa would place the second AIV "
+         "lane's band at that extent, while the producer wrote it at the box half. The pop therefore "
+         "has to declare the transport's full box, and storing it would write the lane's padding as "
+         "data.\n"
+         "Author one of these instead:\n"
+         "  * narrow after the pop: run a vector op whose result carries the extent you want stored "
+         "(e.g. pl.tile.add(...), then pl.tile.set_validshape(...)), and store that\n"
+         "  * balance the two lanes — a split-axis extent that is a compile-time constant and leaves "
+         "the lanes equal, one apart, or the second empty rides on the transport itself\n"
+         "  * keep the extent at or below the box half, so the second lane is empty";
+  CHECK_SPAN(!FillsPadRegion(call), call->span_)
+      << call->op_->name_
+      << ": this fills the padding of a hand-written tile.tpop_from_aic whose split-axis valid extent "
+         "cannot ride on the transport. The pop has to declare the transport's full box (that is what "
+         "places the second lane's band where the producer wrote it), so there is no per-lane boundary "
+         "left to fill up to and the fill would define nothing.\n"
+         "Author one of these instead:\n"
+         "  * fill the padding on the CUBE side, before pl.tpush_to_aiv\n"
+         "  * put the lane's own compute first — any op that passes valid_shape through materializes "
+         "the lane extent, and a fill after it works normally\n"
+         "  * make the split-axis valid extent a compile-time constant that leaves the two lanes "
+         "placeable, so it rides the boundary itself";
+}
+
+void RejectDeferredManualTpopConsumers(const std::vector<StmtPtr>& stmts,
+                                       const std::unordered_set<const Var*>& deferred) {
+  for (const auto& stmt : stmts) {
+    if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+      RejectDeferredManualTpopConsumers(transform_utils::FlattenToStmts(for_stmt->body_), deferred);
+      continue;
+    }
+    if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+      RejectDeferredManualTpopConsumers(transform_utils::FlattenToStmts(while_stmt->body_), deferred);
+      continue;
+    }
+    if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+      RejectDeferredManualTpopConsumers(transform_utils::FlattenToStmts(if_stmt->then_body_), deferred);
+      if (if_stmt->else_body_.has_value()) {
+        RejectDeferredManualTpopConsumers(transform_utils::FlattenToStmts(*if_stmt->else_body_), deferred);
+      }
+      continue;
+    }
+    if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
+      RejectDeferredManualTpopConsumers(seq->stmts_, deferred);
+      continue;
+    }
+    if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+      RejectDeferredManualTpopConsumer(std::dynamic_pointer_cast<const Call>(assign->value_), deferred);
+      continue;
+    }
+    if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
+      RejectDeferredManualTpopConsumer(std::dynamic_pointer_cast<const Call>(eval->expr_), deferred);
+      continue;
+    }
+    // `return pl.tile.store(v, ...)` binds no var, so the store reaches neither
+    // arm above — and it is the spelling the cross-core ST kernels use.
+    if (auto ret = std::dynamic_pointer_cast<const ReturnStmt>(stmt)) {
+      for (const auto& value : ret->value_) {
+        RejectDeferredManualTpopConsumer(std::dynamic_pointer_cast<const Call>(value), deferred);
+      }
+    }
+  }
+}
+
 CallPtr RebuildTpopWithHalvedShape(const CallPtr& call, int split_code, int split_dim,
                                    const ExprPtr& subblock_idx, const ExprPtr& lane_stride) {
-  // NOT widened for a runtime extent, unlike the boundary ops in
-  // LocalizeExplicitBoundaryValid. A hand-written tpop declares its own
-  // valid_shape and its consumers inherit that declaration, so widening the pop
-  // alone leaves each consumer writing a partial destination out of a full
-  // source — measured to produce wrong data on a2a3 for every extent except the
-  // two where the widening is a no-op. See
-  // tests/st/runtime/cross_core/test_cross_core_split_parity.py, whose
-  // xfailing params record what a runtime split-axis extent still gets wrong on
-  // this path.
   auto new_result_type = HalveTileShape(call->GetType(), split_dim, subblock_idx, lane_stride);
+
+  // Where the lane's extent may LAND, exactly as on the tile.aiv_shard boundary
+  // (LocalizeExplicitBoundaryValid). pto-isa reads lane 1's band offset off this
+  // very tile, while PTO codegen always transports the producer's full box, so
+  // the halving may materialize the lane's extent here only for the lane pairs
+  // the transport has a code for. For any other pair -- a RUNTIME extent, or a
+  // ragged static one like 12 of a 16-row box (lanes 8 and 4) -- the pop must
+  // declare its BOX instead, which puts lane 1's band at the box half where the
+  // producer wrote it. The lane's own extent still reaches the store: the
+  // halving localizes every CONSUMER from its own declared pre-split type, and a
+  // consumer that cannot carry it is refused up front by
+  // ValidateManualDeferredTpopConsumers.
+  if (!BoundaryCarriesLaneExtent(call->GetType(), split_dim, lane_stride)) {
+    new_result_type = WithFullSplitAxisValid(new_result_type, split_dim);
+  }
 
   std::vector<std::pair<std::string, std::any>> new_kwargs;
   bool has_split = false;
@@ -1016,7 +1149,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
       const int push_code =
           IsOp(call, "tile.tpush_to_aic")
               ? GatherSplitCode(mode, call->args_[0]->GetType(), split_dim, op_name, call->span_)
-              : ShardSplitCode(mode, call->args_[0]->GetType(), split_dim, lane_stride, op_name, call->span_);
+              : ShardSplitCode(mode, call->args_[0]->GetType(), split_dim, lane_stride,
+                               SplitOrigin::kManualTransport, op_name, call->span_);
       auto new_call = RebuildCallWithSplit(call, push_code);
       return std::make_shared<AssignStmt>(assign->var_, new_call, assign->span_);
     }
@@ -1031,9 +1165,11 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
     }
     if (IsOp(call, "tile.tpop_from_aic")) {
       auto tt = std::dynamic_pointer_cast<const TileType>(call->GetType());
-      auto new_call = RebuildTpopWithHalvedShape(
-          call, ShardSplitCode(mode, call->GetType(), split_dim, lane_stride, op_name, call->span_),
-          split_dim, subblock_idx, lane_stride);
+      auto new_call =
+          RebuildTpopWithHalvedShape(call,
+                                     ShardSplitCode(mode, call->GetType(), split_dim, lane_stride,
+                                                    SplitOrigin::kManualTransport, op_name, call->span_),
+                                     split_dim, subblock_idx, lane_stride);
       auto new_var =
           std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
       if (tt && split_dim < static_cast<int>(tt->shape_.size())) {
@@ -1538,8 +1674,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_dim,
       const int push_code =
           IsOp(call, "tile.tpush_to_aic")
               ? GatherSplitCode(mode, call->args_[0]->GetType(), split_dim, call->op_->name_, call->span_)
-              : ShardSplitCode(mode, call->args_[0]->GetType(), split_dim, lane_stride, call->op_->name_,
-                               call->span_);
+              : ShardSplitCode(mode, call->args_[0]->GetType(), split_dim, lane_stride,
+                               SplitOrigin::kManualTransport, call->op_->name_, call->span_);
       auto new_call = RebuildCallWithSplit(call, push_code);
       return std::make_shared<EvalStmt>(new_call, eval->span_);
     }
@@ -1659,6 +1795,15 @@ std::string ReserveFreshName(std::unordered_set<std::string>& used_names, const 
 }
 
 }  // namespace
+
+void ValidateManualDeferredTpopConsumers(const std::vector<StmtPtr>& stmts, int split_dim,
+                                         const ExprPtr& lane_stride) {
+  if (split_dim < 0) return;
+  std::unordered_set<const Var*> deferred;
+  CollectDeferredManualTpops(stmts, split_dim, lane_stride, &deferred);
+  if (deferred.empty()) return;
+  RejectDeferredManualTpopConsumers(stmts, deferred);
+}
 
 // Shared loop/branch carry repair. Extracted so the AUTO affinity-gated path in
 // lower_auto_vector_split_pass.cpp gets the same treatment as ProcessStmts: it
@@ -2347,19 +2492,31 @@ bool HasStaticLaneExtents(const TypePtr& full_type, int split_dim, const ExprPtr
   return StaticLaneExtents(full_type, split_dim, lane_stride).has_value();
 }
 
+bool BoundaryCarriesLaneExtent(const TypePtr& full_type, int split_dim, const ExprPtr& lane_stride) {
+  auto extents =
+      ComputeLaneExtents(std::dynamic_pointer_cast<const TileType>(full_type), split_dim, lane_stride);
+  // A runtime box, valid extent or stride has no compile-time lane pair at all,
+  // so nothing can be verified against the transport's band geometry.
+  if (!extents.has_value()) return false;
+  // The three pairs ShardSplitCode has a code for: equal (even), off by one
+  // (odd), and an empty lane 1 whose band is never dereferenced.
+  return extents->lane0 == extents->lane1 || extents->lane0 == extents->lane1 + 1 || extents->lane1 == 0;
+}
+
 int ShardSplitCode(SplitMode mode, const TypePtr& full_type, int split_dim, const ExprPtr& lane_stride,
-                   const std::string& op_name, const Span& span) {
+                   SplitOrigin origin, const std::string& op_name, const Span& span) {
   if (mode == SplitMode::None) return kSplitNone;
   auto tt = std::dynamic_pointer_cast<const TileType>(full_type);
-  // What the FIFO can carry at all. The boundary ops are checked when their type
-  // is deduced; a HAND-WRITTEN tile.tpush_to_aiv / tile.tpop_from_aic pair never
-  // goes through that deduction, and reaches the transport here instead. Both
-  // must obey the same contract, because it is pto-isa's geometry rather than a
-  // pass's convention: the pop derives its GM row stride and its lane offset
-  // from the popped tile's own valid extents, so a narrowed COLUMN extent
-  // mis-strides the read against the producer's full-box pitch (measured on
-  // a2a3: a [16, 16] boundary read back with valid_col 12 or 8 misses the
-  // golden, while 16 matches).
+  // What the FIFO can carry at all -- a LOWERING contract, so it holds for both
+  // origins. The boundary ops are checked when their type is deduced; a
+  // HAND-WRITTEN tile.tpush_to_aiv / tile.tpop_from_aic pair never goes through
+  // that deduction, and reaches the transport here instead. Both must obey it,
+  // because it is pto-isa's geometry rather than a pass's convention: the pop
+  // derives its GM row stride and its lane offset from the popped tile's own
+  // valid extents, so a narrowed COLUMN extent mis-strides the read against the
+  // producer's full-box pitch (measured on a2a3: a [16, 16] boundary read back
+  // with valid_col 12 or 8 misses the golden, while 16 matches). No choice of
+  // partition repairs that, which is exactly why it is not gated on `origin`.
   if (tt) {
     CheckSplitBoundaryCarriesValid(op_name, tt->shape_,
                                    tile_view_semantics::GetEffectiveTileView(*tt).valid_shape, split_dim,
@@ -2372,18 +2529,10 @@ int ShardSplitCode(SplitMode mode, const TypePtr& full_type, int split_dim, cons
   // full box (PTO codegen widens every split tpush), so lane 1's band sits at
   // the box half and the even code points pto-isa there; which lane holds how
   // much data is carried by the tile's CONSUMERS, where no band offset depends
-  // on it. LocalizeExplicitBoundaryValid establishes that pairing for a
-  // pl.split_aiv region's boundary op (WithFullSplitAxisValid).
-  //
-  // The pairing is what makes this safe. The even code beside a PER-LANE extent
-  // silently mis-places lane 1: a 16-row box valid to 12 leaves the lanes 8 and
-  // 4, and pto-isa reads lane 1's band at row 4 while the producer wrote it at
-  // row 8. A hand-written tile.tpop_from_aic still pairs this way and is still
-  // wrong for such an extent -- widening it alone regresses the device (see
-  // RebuildTpopWithHalvedShape). It went unnoticed for as long as it did
-  // because tests/st/runtime/cross_core/test_cross_core_split_parity.py fed
-  // both operands uniform constants, which makes every row and column of the
-  // product identical and any band offset indistinguishable.
+  // on it. BoundaryCarriesLaneExtent is that same condition, and both boundary
+  // forms consult it before materializing an extent onto their own tile:
+  // LocalizeExplicitBoundaryValid for tile.aiv_shard,
+  // RebuildTpopWithHalvedShape for a hand-written tile.tpop_from_aic.
   if (!extents.has_value()) return SplitCodeFor(mode, /*odd_extent=*/false);
 
   if (extents->lane0 == extents->lane1) return SplitCodeFor(mode, /*odd_extent=*/false);
@@ -2392,6 +2541,18 @@ int ShardSplitCode(SplitMode mode, const TypePtr& full_type, int split_dim, cons
   // is exact whatever lane 0 holds. This is the empty-tail shard (a valid extent
   // that does not reach the second lane at all).
   if (extents->lane1 == 0) return SplitCodeFor(mode, /*odd_extent=*/false);
+
+  // An unplaceable lane pair. Whether that is reportable depends on whether
+  // anyone can still choose a different partition.
+  //
+  // A HAND-WRITTEN transport fixed the partition at the box half the moment the
+  // author wrote the tpush / tpop pair: there is no split scope to move a value
+  // out of and no ResolveLaneStride to re-cut the lanes, so the diagnostic below
+  // would name a decision nobody can revisit. Take the deferred pairing instead
+  // — the even code beside a boundary tile that declares its box — which places
+  // both bands for EVERY extent, ragged or not. RebuildTpopWithHalvedShape reads
+  // the same BoundaryCarriesLaneExtent predicate to withhold the extent.
+  if (origin == SplitOrigin::kManualTransport) return SplitCodeFor(mode, /*odd_extent=*/false);
 
   // Only the BOX partition can land here: the balanced stride is ceil(V / 2) by
   // construction, so its lanes never differ by more than one. ResolveLaneStride

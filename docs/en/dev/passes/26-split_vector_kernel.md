@@ -1,7 +1,8 @@
 # SplitVectorKernel Pass
 
-After the staged convergence refactor, `SplitVectorKernel` has two narrow jobs;
-it **no longer halves any function body**:
+After the staged convergence refactor, `SplitVectorKernel` has three narrow jobs.
+It **no longer halves an InCore body** — job 3 is the one remaining halving arm,
+and it exists only for functions `LowerAutoVectorSplit` never sees:
 
 1. **`split_aiv` attribute stamping** — the SOLE split path through this pass.
    A `split_aiv` kernel (hand-authored, or produced upstream by
@@ -18,6 +19,27 @@ it **no longer halves any function body**:
    function `dual_aiv_dispatch=True`. This pass wraps the body in a per-lane
    `if subblock_idx == 0 ... else` replay so AIC↔AIV cross-core handshakes stay
    balanced even though only lane 0 does real compute.
+
+3. **Standalone hand-written split kernels** (`ProcessStandaloneSplitFunction`) —
+   separate AIC/AIV functions whose cross-core split is signalled by a
+   function-level `split` attr or a `split=N` kwarg on their own
+   `tile.tpush_to_aiv` / `tile.tpop_from_aic`. These never pass through
+   `LowerAutoVectorSplit` (it is InCore-only) and arrive un-halved, so this arm
+   injects `get_subblock_idx` and routes the body through the **shared**
+   `split_axis::ProcessStmts` halving driver — the same machinery
+   `LowerAutoVectorSplit` calls, so the per-lane body is identical. Guarded by
+   NOT `split_aiv`, so an already-lowered auto-split function can never reach it.
+
+   Being hand-written changes one thing about the Cube→Vector boundary: the
+   author fixed the two lanes at the box half by writing the transport, so there
+   is no partition left for the compiler to re-cut. `ShardSplitCode` is therefore
+   called with `split_axis::SplitOrigin::kManualTransport`, which **defers** an
+   unplaceable lane pair instead of reporting it — the pop declares the
+   transport's box and the lane's extent lands on its consumers. The FIFO's own
+   valid-shape contract still applies unchanged; see
+   [Partially-valid operands across the boundary](23-lower_auto_vector_split.md#partially-valid-operands-across-the-boundary).
+   `split_axis::ValidateManualDeferredTpopConsumers` runs first, on the author's
+   own statements, to refuse the two consumers a deferred extent cannot reach.
 
 > **Historical note.** This pass used to drive per-op AIV halving
 > (`ProcessFunction` / `ResolveSplitMode` / `CrossCoreSplitCollector`). That

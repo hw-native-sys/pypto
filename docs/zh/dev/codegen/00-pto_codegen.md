@@ -243,9 +243,11 @@ tile 调用 `set_validshape`。
   shape——消费侧通过纯元数据的 `pto.treshape` 恢复（前端 tpop 结果不是 PTOAS 的本地
   绑定 tile，`pto.set_validshape` 无法就地修改它）。第一个例外是切分轴上的 extent：它必须保持
   逐 lane 的值并留在 TPOP 操作数上，因为 ISA 正是靠它定位 lane 1 的数据段起点——也正因如此，
-  编译期无法核验的逐 lane extent 绝不能到达那里。`pl.split_aiv` 区域中切分轴 extent 为运行期
-  值的边界，会让被弹出的 tile 保留完整 box（`split_axis::WithFullSplitAxisValid`），使偶数
-  code 的数据段落在 box 的一半处，而把 lane 自身的 extent 交给消费者携带。
+  编译期无法核验的逐 lane extent 绝不能到达那里。若某个边界的 lane 组合没有对应的传输 code
+  （`split_axis::BoundaryCarriesLaneExtent`），被弹出的 tile 就保留完整 box
+  （`split_axis::WithFullSplitAxisValid`），使偶数 code 的数据段落在 box 的一半处，而把 lane
+  自身的 extent 交给消费者携带。`pl.split_aiv` 边界与手写的 `tile.tpop_from_aic` 同样适用——
+  运行期的切分轴 extent 在两者上都是最常见的情形。
 - 第二个例外是**非切分** Acc-to-Vec TPUSH 的**行**维度：它必须保持 producer 写入时
   的值。TPUSH 执行的是 L0C 上的 `TStoreAccNz2nd`，其源 pitch 对 compact tile 为
   `ceil(validRow/16)*16`，否则为 `TileData::Rows`；而 `mad` 是按 L0A 操作数的**有效**

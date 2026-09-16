@@ -420,38 +420,53 @@ rebuilt by the halving walk rather than by this one.
   and `e1 == 0` (lane 1 pops nothing, so its band is never dereferenced — the
   even code stays exact). The box partition does not guarantee that for a ragged
   boundary — 13 of a 16-row box gives 8 and 5 — which is what the balanced
-  partition below is for. When it does not apply, `ShardSplitCode` reports the
-  extents instead, naming what would work.
-- **A runtime split-axis valid extent pops the FULL box.** The split code is a
+  partition below is for. When it does not apply, what happens next depends on
+  **who chose the partition** (`split_axis::SplitOrigin`): a `tile.aiv_shard`
+  cut by this pass is `kCompilerPartition`, and `ShardSplitCode` reports the
+  extents so the partition can be fixed; a hand-written transport is
+  `kManualTransport`, where the author fixed the lanes at the box half by writing
+  the `tpush`/`tpop` pair and no rebalancer exists to appeal to, so the boundary
+  defers its extent instead (next bullet). `BoundaryCarriesLaneExtent` is the
+  shared predicate both consult.
+- **An extent the transport cannot place pops the FULL box.** The split code is a
   compile-time attr, but which one the lanes need depends on their *runtime*
   extents: 12 of a 16-row axis leaves them at 8 and 4, 16 leaves them at 8 and 8.
   No code is right for both, so the boundary op does not carry a per-lane extent
-  at all — `LocalizeExplicitBoundaryValid` gives it the full box
-  (`split_axis::WithFullSplitAxisValid`) and moves the lane's extent onto the
-  first consumer. That pairs exactly with the even code: the producer transports
-  the full physical box, so lane 1's band sits at the box half and the even code
-  points there, whatever the extent turns out to be. Confirmed on a2a3 for every
-  extent 1..16 of a 16-row boundary. The [pto-isa
+  at all — it takes the full box (`split_axis::WithFullSplitAxisValid`) and the
+  lane's extent moves onto its consumers. That pairs exactly with the even code:
+  the producer transports the full physical box, so lane 1's band sits at the box
+  half and the even code points there, whatever the extent turns out to be.
+  Confirmed on a2a3 for every extent 1..16 of a 16-row boundary. The [pto-isa
   pop](https://github.com/hw-native-sys/pto-isa/issues/263) does place lane 1 at
   the popped tile's own extent, as its source reads — the earlier measurement
   that suggested otherwise came from a probe whose operands were uniform
   constants, which makes every row and column of the product identical and any
   band offset indistinguishable.
-- **The same ROW extent on a hand-written `tile.tpop_from_aic` is still
-  misplaced.** `SplitVectorKernel`'s halving localizes a declared `valid_shape`
-  onto the pop itself, where pto-isa reads it as the band offset. Widening only
-  the pop does not fix that path: its consumers inherit the author's declaration
-  and then write partial destinations out of a full source, which measures worse
-  on device. The xfailing params of
-  `tests/st/runtime/cross_core/test_cross_core_split_parity.py` record the regime
-  this affects: `half < V < box` on `UP_DOWN`.
+
+  **Both boundary forms defer this way**, on the one condition
+  `BoundaryCarriesLaneExtent`: `LocalizeExplicitBoundaryValid` for a region's
+  `tile.aiv_shard`, and `RebuildTpopWithHalvedShape` (reached from
+  [`SplitVectorKernel`](26-split_vector_kernel.md)'s standalone arm) for a
+  hand-written `tile.tpop_from_aic`. A *placeable* pair still rides the
+  transport, so a fully-valid or odd boundary keeps the per-lane extent on the
+  pop and the `_ODD` code with it.
+
+  Two consumers cannot receive a deferred extent and are refused, on both forms:
+  a `tile.store` reading the boundary directly (it carries nothing onward, so the
+  transport's padding would be stored as data) and a pad FILL, whose result is
+  fully valid by construction and so has nothing left to fill up to. On the
+  hand-written path `ValidateManualDeferredTpopConsumers` makes that check,
+  before the halving, so the diagnostic quotes the author's own op.
 - **A narrowed COLUMN extent is rejected on every path.** It has no carrier at
   all — the slot is written at the producer's physical column pitch while the pop
   rebuilds its geometry from the tile's own `validCol` — and on `LeftRight` it is
   the split axis, so it would have to be per-lane. `CheckSplitBoundaryCarriesValid`
   (`src/ir/op/tile_ops/cross_core.cpp`) owns that contract; it runs both in the
   boundary op's deduction and from `ShardSplitCode`, so a hand-written
-  `tile.tpush_to_aiv` / `tile.tpop_from_aic` pair is held to it too.
+  `tile.tpush_to_aiv` / `tile.tpop_from_aic` pair is held to it too. Unlike the
+  lane-pair rule above, this one is **not** gated on `SplitOrigin`: it is a
+  property of the transport instruction rather than of the partition, so no
+  choice of lanes — and no author — can make a narrowed column carry.
 - **An empty lane's store is guarded.** A lane the ragged extent does not reach
   has extent `0`, and a zero-row `TSTORE` is outside pto-isa's contract
   (`TSTORE_IMPL` asserts `GetValidRow() > 0`). The store gets a runtime

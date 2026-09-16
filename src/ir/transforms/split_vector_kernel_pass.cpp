@@ -516,6 +516,12 @@ FunctionPtr ProcessStandaloneSplitFunction(const FunctionPtr& func, SplitMode mo
 
   auto injected = InjectSubblockIdx(func, is_aiv);
 
+  // Before the halving, while the body is still the author's: a hand-written
+  // tile.tpop_from_aic whose split-axis extent cannot ride on the transport has
+  // that extent deferred onto its consumers, and two consumer shapes cannot
+  // receive it. Refusing them here quotes the author's own op.
+  split_axis::ValidateManualDeferredTpopConsumers(injected.body_stmts, split_dim);
+
   auto new_stmts = ProcessStmts(injected.body_stmts, mode, split_dim, tile_vars, is_aiv,
                                 injected.subblock_idx_expr, var_replacements);
   StmtPtr new_body =

@@ -991,5 +991,224 @@ class TestSplitVectorKernelStandaloneSetValidshape:
         _assert_split_matches_expected(Before, Expected)
 
 
+class TestSplitVectorKernelManualTpopDeferredValid:
+    """Where a hand-written ``tile.tpop_from_aic``'s split-axis extent may land.
+
+    pto-isa reads lane 1's band offset off the POPPED tile's own runtime valid
+    extents, while PTO codegen always transports the producer's full physical
+    box. The halving may therefore materialize the lane's extent onto the pop
+    only for the lane pairs the transport has a code for -- equal, one apart, or
+    an empty lane 1 (``split_axis::BoundaryCarriesLaneExtent``). Any other pair
+    DEFERS: the pop declares its box, which is where the producer wrote lane 1,
+    and the lane's extent lands on the pop's consumers instead.
+
+    This is the same pairing ``LocalizeExplicitBoundaryValid`` gives a
+    ``pl.split_aiv`` region's ``tile.aiv_shard``; these tests pin it for the
+    hand-written transport form, which reaches it through
+    ``RebuildTpopWithHalvedShape``.
+    """
+
+    def test_runtime_split_axis_extent_defers_onto_the_consumer(self):
+        """A RUNTIME extent has no compile-time lane pair, so the pop takes the box.
+
+        Materializing ``clamp(vr - lane * 8, 0, 8)`` on the pop would send lane 1
+        to row ``vr - 8``; the producer wrote it at row 8. The extent moves to the
+        ``tile.add`` that consumes the pop, where no band offset depends on it.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aiv(
+                self,
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+                vr: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
+                z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[vr, 128])] = (
+                    pl.tpop_from_aic(split=1)
+                )
+                inc: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[vr, 128])] = (
+                    pl.tile.add(z_vec, 1.0)
+                )
+                pl.tfree_to_aic(z_vec)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(inc, [0, 0], out_0)
+                return out_0_store
+
+        @pl.program
+        class Expected:
+            @pl.function(
+                type=pl.FunctionType.AIV,
+                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
+            )
+            def main_aiv(
+                self,
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+                vr: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
+                z_vec: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
+                inc: pl.Tile[
+                    [8, 128],
+                    pl.FP32,
+                    pl.MemorySpace.Vec,
+                    pl.TileView(
+                        valid_shape=[pl.min(pl.max(vr, subblock_idx * 8) - subblock_idx * 8, 8), 128]
+                    ),
+                ] = pl.tile.add(z_vec, 1.0)
+                pl.tfree_to_aic(z_vec)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(inc, [0 + subblock_idx * 8, 0], out_0)
+                return out_0_store
+
+        _assert_split_matches_expected(Before, Expected)
+
+    def test_ragged_static_extent_defers_instead_of_being_refused(self):
+        """12 of a 16-row box leaves the lanes 8 and 4 -- no code places that pair.
+
+        The hand-written form has no partition left to choose: the author fixed
+        the lanes at the box half by writing the transport, and there is no
+        ``ResolveLaneStride`` to re-cut them. So the pop defers rather than
+        reporting a decision nobody can revisit (``SplitOrigin::kManualTransport``).
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
+                z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[12, 128])] = (
+                    pl.tpop_from_aic(split=1)
+                )
+                inc: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[12, 128])] = (
+                    pl.tile.add(z_vec, 1.0)
+                )
+                pl.tfree_to_aic(z_vec)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(inc, [0, 0], out_0)
+                return out_0_store
+
+        result = _run_split_vector_kernel(Before)
+        printed = ir.python_print(result)
+        # The pop carries the transport's box (no valid_shape survives on it) and
+        # keeps the EVEN code -- lane 1's band is at the box half.
+        assert "pl.Tile[[8, 128], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=1)" in printed, printed
+        # The lane's own extent is still materialized, on the consumer.
+        assert "pl.tile.add" in printed or "pl.tile.adds" in printed, printed
+        assert "subblock_idx" in printed, printed
+
+    def test_placeable_odd_extent_keeps_the_lane_extent_on_the_pop(self):
+        """15 of 16 leaves the lanes 8 and 7 -- one apart, which the ODD code places.
+
+        A placeable pair must NOT defer: the odd codes exist precisely so the
+        per-lane extent can ride on the transport, and pto-isa reads it off the
+        popped tile to find lane 1 at ``(e1 + 1) * pitch``.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
+                z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[15, 128])] = (
+                    pl.tpop_from_aic(split=1)
+                )
+                inc: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[15, 128])] = (
+                    pl.tile.add(z_vec, 1.0)
+                )
+                pl.tfree_to_aic(z_vec)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(inc, [0, 0], out_0)
+                return out_0_store
+
+        printed = ir.python_print(_run_split_vector_kernel(Before))
+        assert "pl.tile.tpop_from_aic(split=3)" in printed, printed
+        # The pop itself carries the per-lane clamp, NOT the box.
+        pop_line = next(line for line in printed.splitlines() if "tpop_from_aic" in line)
+        pop_decl = printed[: printed.index(pop_line) + len(pop_line)]
+        assert "valid_shape" in pop_decl, printed
+
+    def test_narrowed_column_is_still_refused_on_the_manual_path(self):
+        """The FIFO's valid-shape contract is a LOWERING fact, so it is not deferred.
+
+        No choice of partition lets the transport carry a narrowed column extent:
+        pto-isa strides the GM slot view with the popped tile's own ``validCol``
+        against the producer's full-box pitch. Unlike the lane-pair rule, this one
+        holds for a hand-written transport exactly as for ``tile.aiv_shard``.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.LEFT_RIGHT})
+            def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
+                z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[16, 64])] = (
+                    pl.tpop_from_aic(split=2)
+                )
+                inc: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[16, 64])] = (
+                    pl.tile.add(z_vec, 1.0)
+                )
+                pl.tfree_to_aic(z_vec)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(inc, [0, 0], out_0)
+                return out_0_store
+
+        with pytest.raises(ValueError, match="LEFT_RIGHT splits the column axis"):
+            _run_split_vector_kernel(Before)
+
+    def test_deferred_pop_stored_directly_is_refused(self):
+        """A store off a deferred pop would write the transport's padding as data.
+
+        The extent has to land on a consumer, and a store carries nothing onward.
+        Same refusal ``RejectDeferredValidStore`` makes inside a region.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aiv(
+                self,
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+                vr: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
+                z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[vr, 128])] = (
+                    pl.tpop_from_aic(split=1)
+                )
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
+                pl.tfree_to_aic(z_vec)
+                return out_0_store
+
+        with pytest.raises(ValueError, match="reads a hand-written tile.tpop_from_aic directly"):
+            _run_split_vector_kernel(Before)
+
+    def test_deferred_pop_pad_fill_is_refused(self):
+        """A pad fill off a deferred pop has no per-lane boundary left to fill up to."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aiv(
+                self,
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+                vr: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
+                z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[vr, 128])] = (
+                    pl.tpop_from_aic(split=1)
+                )
+                filled: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tile.fillpad(z_vec, 0.0)
+                pl.tfree_to_aic(z_vec)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(filled, [0, 0], out_0)
+                return out_0_store
+
+        with pytest.raises(ValueError, match="fills the padding of a hand-written"):
+            _run_split_vector_kernel(Before)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

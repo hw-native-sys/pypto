@@ -343,42 +343,35 @@ class _C2VValidShapeParityCase(PTOTestCase):
 # (8), above-half (9, 12, 15) — the regimes that distinguish "subblock 1 no-op"
 # from "subblock 1 contributes a partial extent". 12 is the deep tail: it leaves
 # the lanes 8 and 4, the widest gap the box partition can produce, so a lane 1
-# read at its own extent lands four rows (or columns) off.
+# read at its own extent lands four rows off.
 #
-# The xfailing params are the ones a HAND-WRITTEN ``tile.tpop_from_aic`` still
-# gets wrong on a2a3, and they were invisible until this probe stopped feeding
-# uniform operands. Its declared per-lane extent reaches the transport, so
-# pto-isa places lane 1's band at that extent instead of at the box half where
-# the producer wrote it; on LEFT_RIGHT a narrowed split-axis (column) extent
-# additionally collapses the pop's GM row gap, which is why even the
-# empty-lane-1 columns miss. Widening only the pop is not the fix here — the
-# consumers inherit the declared extent and then write partial destinations out
-# of a full source, which measures worse. A ``pl.split_aiv`` region has no such
-# problem: LocalizeExplicitBoundaryValid keeps the boundary op full-width and
-# moves the lane extent onto the consumers.
-_UNPLACEABLE = "runtime split-axis extent on a hand-written tpop: lane 1's band is placed at its own extent"
-
+# Every extent here places both bands, because the pop only DECLARES a per-lane
+# extent when the transport has a code for the resulting lane pair
+# (``split_axis::BoundaryCarriesLaneExtent``). A runtime ``valid_rows`` never
+# does — the pair is not known at compile time — so the pop declares the
+# transport's box, which is where the producer wrote lane 1, and the localized
+# extent lands on the pop's consumers instead. That is the same deferral a
+# ``pl.split_aiv`` region applies through LocalizeExplicitBoundaryValid; here it
+# reaches a hand-written ``tile.tpop_from_aic`` via RebuildTpopWithHalvedShape.
+#
+# vr9 / vr12 / vr15 were strict xfails until that deferral existed: the declared
+# per-lane extent reached the transport and pto-isa placed lane 1's band at it
+# rather than at the box half. They were invisible for longer still, because this
+# probe used to feed uniform operands — which makes every element of the product
+# identical and any band offset indistinguishable.
 _UP_DOWN_PARITY_CASES = [
-    (1, 16, "vr1", False),
-    (7, 16, "vr7", False),
-    (8, 16, "vr8", False),
-    (9, 16, "vr9", True),
-    (12, 16, "vr12", True),
-    (15, 16, "vr15", True),
+    (1, 16, "vr1"),
+    (7, 16, "vr7"),
+    (8, 16, "vr8"),
+    (9, 16, "vr9"),
+    (12, 16, "vr12"),
+    (15, 16, "vr15"),
 ]
 
 
 def _sweep_params(cases):
-    """(vr, vc) params, with the known-unplaceable extents marked xfail."""
-    return [
-        pytest.param(
-            vr,
-            vc,
-            id=name,
-            marks=[pytest.mark.xfail(strict=True, reason=_UNPLACEABLE)] if broken else [],
-        )
-        for vr, vc, name, broken in cases
-    ]
+    """(vr, vc) params. Every extent in the sweep must now place both bands."""
+    return [pytest.param(vr, vc, id=name) for vr, vc, name in cases]
 
 
 class TestSplitParityRuntime:
