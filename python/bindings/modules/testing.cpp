@@ -205,6 +205,11 @@ void ValidateOpTypeRegistrationForTesting(ir::OpIRStage stage, bool internal_onl
   } catch (const pypto::Error& e) {
     e.RethrowWithMessage(replacement);
   }
+  // `RethrowWithMessage` is `[[noreturn]]`, but the call above is virtual and an override
+  // is not required to carry the attribute, so the compiler still treats this point as
+  // reachable. Mark it explicitly instead of letting a `[[noreturn]]` function fall off
+  // its end.
+  INTERNAL_UNREACHABLE << "Error::RethrowWithMessage returned for kind '" << kind << "'";
 }
 
 /**
