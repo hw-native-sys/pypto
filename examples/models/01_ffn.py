@@ -161,7 +161,9 @@ if __name__ == "__main__":
 
     # FFN + GELU: GELU(hidden @ gate_proj) @ down_proj, GELU = x * sigmoid(1.702 * x)
     output = torch.zeros(64, 64, dtype=torch.float32)
-    ffn_gelu(hidden_states, gate_proj_weight, down_proj_weight, output, config=cfg)
+    ffn_gelu.compile(hidden_states, gate_proj_weight, down_proj_weight, output, config=cfg)(
+        hidden_states, gate_proj_weight, down_proj_weight, output, config=cfg
+    )
     gate = hidden_states @ gate_proj_weight
     expected_gelu = (gate * torch.sigmoid(1.702 * gate)) @ down_proj_weight
     assert torch.allclose(output, expected_gelu, rtol=3e-3, atol=3e-3), (
@@ -170,7 +172,9 @@ if __name__ == "__main__":
 
     # FFN + SwiGLU: SwiGLU(gate, up) @ down_proj, SwiGLU = gate * sigmoid(gate) * up
     output = torch.zeros(64, 64, dtype=torch.float32)
-    ffn_swiglu(hidden_states, gate_proj_weight, up_proj_weight, down_proj_weight, output, config=cfg)
+    ffn_swiglu.compile(hidden_states, gate_proj_weight, up_proj_weight, down_proj_weight, output, config=cfg)(
+        hidden_states, gate_proj_weight, up_proj_weight, down_proj_weight, output, config=cfg
+    )
     gate = hidden_states @ gate_proj_weight
     up = hidden_states @ up_proj_weight
     expected_swiglu = (gate * torch.sigmoid(gate) * up) @ down_proj_weight
@@ -180,7 +184,9 @@ if __name__ == "__main__":
 
     # FFN + ReLU: ReLU(hidden @ gate_proj) @ down_proj
     output = torch.zeros(64, 64, dtype=torch.float32)
-    ffn_relu(hidden_states, gate_proj_weight, down_proj_weight, output, config=cfg)
+    ffn_relu.compile(hidden_states, gate_proj_weight, down_proj_weight, output, config=cfg)(
+        hidden_states, gate_proj_weight, down_proj_weight, output, config=cfg
+    )
     gate = hidden_states @ gate_proj_weight
     expected_relu = torch.relu(gate) @ down_proj_weight
     assert torch.allclose(output, expected_relu, rtol=3e-3, atol=3e-3), (

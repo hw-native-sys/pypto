@@ -77,8 +77,8 @@ class TestCompileReturnsCompiledProgram:
         second = add_kernel.compile(a, b, c)
         assert first is second
 
-    def test_call_then_compile_returns_cached_instance(self, monkeypatch):
-        """``__call__`` and ``compile()`` share the same cached program."""
+    def test_program_execution_then_compile_returns_cached_instance(self, monkeypatch):
+        """Executing an explicitly compiled program preserves its compilation cache."""
         torch = pytest.importorskip("torch")
 
         a = torch.zeros(96, 96, dtype=torch.float32)
@@ -87,7 +87,7 @@ class TestCompileReturnsCompiledProgram:
 
         compiled = add_kernel.compile(a, b, c)
         monkeypatch.setattr(CompiledProgram, "__call__", lambda self, *_args, **_kwargs: "called")
-        assert add_kernel(a, b, c) == "called"
+        assert compiled(a, b, c) == "called"
         assert add_kernel.compile(a, b, c) is compiled
 
     def test_compile_cache_miss_on_different_shape(self):

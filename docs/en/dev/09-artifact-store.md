@@ -60,7 +60,8 @@ Public compilers emit `supported_execution_modes: ["program"]` in
 retain it across `from_dir()` without loading binaries or starting workers.
 A program consumer rejects a kernel capability list. Kernel compiler adapters
 must supply the explicit ABI descriptor described below.
-There is no new user mode selector, and normal JIT/program calls are unchanged.
+There is no user mode selector: direct JIT calls use kernel execution, while
+explicit `.compile()` produces program objects. See [kernel mode](runtime/kernel-mode.md).
 
 `ArtifactSpec.execution_capabilities` records the same declaration in the
 schema-3 artifact manifest and participates in the spec digest. Different
@@ -81,9 +82,9 @@ legacy directories without a sidecar retain their existing program-only path.
 it requires all positional parameters, including Out/InOut, and returns the
 original objects in signature order. It never allocates, copies, coerces scalars,
 or initializes a runtime, so aliases and each call's scalar values survive.
-Executors retain responsibility for tensor/storage and ABI validation. Existing
-program return-style calls still allocate omitted Out tensors before execution;
-this helper does not change their behavior or introduce a kernel calling API.
+Executors retain responsibility for tensor/storage and ABI validation. Formal
+program calls also require every Out/InOut tensor, including restored objects
+and orchestration children. They reject omissions before allocation or execution.
 
 ## Kernel ABI descriptors (integration branch)
 
@@ -147,8 +148,8 @@ and participates in the persistent stage identity.
 
 `JITFunction._resolve_kernel_artifact` is an internal producer for subsequent JIT
 integration. It reuses specialization, the pass pipeline, PTO code generation,
-and PyPTO-owned binary compilation. Public `compile()` and direct calls retain
-their program behavior; no decorator mode or public kernel compilation API is
+and PyPTO-owned binary compilation. Public `compile()` retains
+program behavior, while direct calls use kernel execution; no decorator mode or public kernel compilation API is
 added. Compilation yields `KernelArtifact`, which exposes device-free `load()`
 and `chip_callable` for internal consumers, with no execution method.
 

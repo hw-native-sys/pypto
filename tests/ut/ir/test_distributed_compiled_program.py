@@ -81,6 +81,20 @@ def compiled(tmp_path) -> DistributedCompiledProgram:
     return prog
 
 
+@pytest.mark.parametrize("restored", [False, True])
+def test_formal_distributed_requires_output_before_allocation(compiled, tmp_path, restored):
+    program = DistributedCompiledProgram.from_dir(tmp_path) if restored else compiled
+    a, b = torch.zeros(128, 128), torch.zeros(128, 128)
+    with (
+        patch("torch.zeros") as allocate,
+        patch("pypto.runtime.distributed_runner._execute_distributed") as execute,
+        pytest.raises(TypeError, match="Out/InOut"),
+    ):
+        program(a, b)
+    allocate.assert_not_called()
+    execute.assert_not_called()
+
+
 def test_one_shot_rejects_device_tensor_with_prepare_guidance(compiled):
     a = torch.zeros(128, 128, dtype=torch.float32)
     weight = DeviceTensor(0xABCD0000, (128, 128), torch.float32)  # worker-resident

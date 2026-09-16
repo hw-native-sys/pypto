@@ -14,7 +14,6 @@ torch tensors::
 
     compiled = ir.compile(MyProgram)
     compiled(a, b, c)                    # in-place on default sim, device 0
-    c = compiled(a, b)                   # return style
     compiled(a, b, c, device=1)          # specify device at call time
 
 **Why the ``pypto.runtime`` imports are function-local.** This module is both
@@ -681,8 +680,8 @@ def _invoke_compiled(
     config: Any,
     caller_name: str,
     artifact_runtime: Any = None,
-) -> "torch.Tensor | tuple[torch.Tensor, ...] | None":
-    """Shared dispatch: coerce args, call the runtime, pack outputs.
+) -> None:
+    """Shared dispatch: require complete arguments and execute the program.
 
     Used by both :meth:`CompiledProgram.__call__` (single-orch case) and
     :meth:`_SubChipCallable.__call__` (multi-orch case). The two callers
@@ -691,13 +690,12 @@ def _invoke_compiled(
     An explicit run config selects its platform; without one, the platform
     bound to the compiled artifact is preserved.
 
-    Returns *outputs*: ``None`` for in-place calls or the packed return
-    tensors otherwise. Per-run timing is no longer returned — read it from
+    Returns ``None``; the caller supplies every Out/InOut tensor.
+    Per-run timing is no longer returned — read it from
     the runtime's ``[STRACE]`` log markers (simpler PR #1177).
     """
-    coerced, return_style = _coerce_args(
-        args, param_infos, output_indices, return_types, caller_name=caller_name
-    )
+    bind_complete_args(args, param_infos, caller_name=caller_name)
+    coerced, _ = _coerce_args(args, param_infos, output_indices, return_types, caller_name=caller_name)
 
     from pypto.runtime.runner import RunConfig, _execute_compiled  # noqa: PLC0415
 
@@ -715,12 +713,6 @@ def _invoke_compiled(
         config=config,
         **({"artifact_runtime": artifact_runtime} if artifact_runtime is not None else {}),
     )
-
-    if not return_style:
-        return None
-    outputs = [coerced[i] for i in output_indices]
-    assert all(isinstance(o, torch.Tensor) for o in outputs)
-    return outputs[0] if len(outputs) == 1 else tuple(outputs)  # type: ignore[return-value]
 
 
 def _default_platform(backend_type: BackendType) -> str:
@@ -848,21 +840,14 @@ class CompiledProgram(_RuntimeFacade):
     artifact** -- it stores the compilation output, target platform, and IR
     metadata.  The ``device`` index is provided at call time.
 
-    Two calling conventions:
-
-    **In-place** (output passed as argument)::
+    Pass all parameters, including caller-owned Out/InOut tensors::
 
         compiled = ir.compile(MyProgram)
-        compiled(a, b, c)  # c modified in-place on device
+        compiled(a, b, c)  # c modified in-place; returns None
 
-    **Return** (program has a return value)::
+    Device selection uses a per-call config::
 
-        compiled = ir.compile(MyProgram)
-        c = compiled(a, b)  # output allocated and returned
-
-    Device selection is a keyword argument on each call::
-
-        compiled(a, b, c, device=1)
+        compiled(a, b, c, config=RunConfig(device_id=1))
 
     For backward compatibility, ``CompiledProgram`` also behaves like a
     path string via ``__str__`` and ``__fspath__``, so existing code that
@@ -1404,13 +1389,12 @@ class CompiledProgram(_RuntimeFacade):
         self,
         *args: CallArg,
         config: Any = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, ...] | None:
+    ) -> None:
         """Execute the compiled program with torch tensors and/or scalars.
 
-        Args match the orchestration function's parameter order.  For
-        **in-place** style, pass all tensors (including outputs) and the
-        output tensors are modified on device.  For **return** style,
-        pass only input tensors and the outputs are allocated and returned.
+        Arguments match the orchestration signature, including every Out/InOut
+        tensor. Output tensors are supplied by the caller and modified in place;
+        missing outputs fail before allocation or execution.
 
         Scalar parameters (``pl.Scalar[...]``) accept Python ``int``,
         ``float``, ``bool``, or ``ctypes`` scalar values.
@@ -1424,8 +1408,7 @@ class CompiledProgram(_RuntimeFacade):
                 the compiled artifact's platform and other runtime defaults apply.
 
         Returns:
-            ``None`` for in-place calls, a single ``torch.Tensor`` or a
-            ``tuple`` for return-style calls. Per-run on-device timing is no
+            ``None``. Per-run on-device timing is no
             longer surfaced as an attribute — read it from the runtime's
             ``[STRACE]`` log markers (simpler PR #1177).
 
@@ -1550,7 +1533,7 @@ class _SubChipCallable(_RuntimeFacade):
         self,
         *args: CallArg,
         config: Any = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, ...] | None:
+    ) -> None:
         return _invoke_compiled(
             output_dir=self._output_dir,
             platform=self._platform,

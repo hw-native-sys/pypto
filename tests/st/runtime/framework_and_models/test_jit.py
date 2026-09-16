@@ -97,7 +97,7 @@ def _persistent_process(root, platform, device_id, consume, connection):
                 guard.setattr("pypto.backend.pto_backend._run_ptoas", forbidden)
             x = torch.full((16, 16), 2.0)
             out = torch.zeros_like(x)
-            persistent_add(x, out, config=config)
+            persistent_add.compile(x, out, config=config)(x, out, config=config)
             torch.testing.assert_close(out, torch.full_like(out, 5.0))
             compiled = persistent_add.compile(config=config)
             assert compiled._artifact_runtime is not None
@@ -214,7 +214,9 @@ class TestJITExecution:
         for tile_size in (8, 16):
             for value in (3.0, -1.5):
                 out = torch.zeros_like(x)
-                tiled_add(x, out, value, tile_size, config=test_config)
+                tiled_add.compile(x, out, value, tile_size, config=test_config)(
+                    x, out, value, config=test_config
+                )
                 # Only the leading tile_size x tile_size block is written.
                 written = out[:tile_size, :tile_size]
                 torch.testing.assert_close(written, torch.full_like(written, 2.0 + value))
@@ -227,7 +229,7 @@ class TestJITExecution:
         b = torch.full((128, 128), 3.0, dtype=torch.float32)
         c = torch.zeros((128, 128), dtype=torch.float32)
 
-        add_kernel(a, b, c, config=test_config)
+        add_kernel.compile(a, b, c, config=test_config)(a, b, c, config=test_config)
 
         expected = torch.full((128, 128), 5.0, dtype=torch.float32)
         assert torch.allclose(c, expected, rtol=1e-5, atol=1e-5), (
@@ -241,7 +243,7 @@ class TestJITExecution:
         a1 = torch.full((128, 128), 1.0, dtype=torch.float32)
         b1 = torch.full((128, 128), 2.0, dtype=torch.float32)
         c1 = torch.zeros((128, 128), dtype=torch.float32)
-        add_kernel(a1, b1, c1, config=test_config)
+        add_kernel.compile(a1, b1, c1, config=test_config)(a1, b1, c1, config=test_config)
 
         assert len(add_kernel._cache) == 1
         cached = next(iter(add_kernel._cache.values()))
@@ -251,7 +253,7 @@ class TestJITExecution:
         a2 = torch.full((128, 128), 10.0, dtype=torch.float32)
         b2 = torch.full((128, 128), 20.0, dtype=torch.float32)
         c2 = torch.zeros((128, 128), dtype=torch.float32)
-        add_kernel(a2, b2, c2, config=test_config)
+        add_kernel.compile(a2, b2, c2, config=test_config)(a2, b2, c2, config=test_config)
 
         assert len(add_kernel._cache) == 1, "Cache should still have exactly one entry"
         assert torch.allclose(c2, torch.full((128, 128), 30.0), rtol=1e-5, atol=1e-5), (
@@ -265,12 +267,12 @@ class TestJITExecution:
         a1 = torch.full((128, 128), 1.0, dtype=torch.float32)
         b1 = torch.full((128, 128), 1.0, dtype=torch.float32)
         c1 = torch.zeros((128, 128), dtype=torch.float32)
-        add_kernel(a1, b1, c1, config=test_config)
+        add_kernel.compile(a1, b1, c1, config=test_config)(a1, b1, c1, config=test_config)
 
         a2 = torch.full((64, 64), 3.0, dtype=torch.float32)
         b2 = torch.full((64, 64), 4.0, dtype=torch.float32)
         c2 = torch.zeros((64, 64), dtype=torch.float32)
-        add_kernel(a2, b2, c2, config=test_config)
+        add_kernel.compile(a2, b2, c2, config=test_config)(a2, b2, c2, config=test_config)
 
         assert len(add_kernel._cache) == 2, "Different shape should produce a second cache entry"
         expected = torch.full((64, 64), 7.0, dtype=torch.float32)
@@ -291,7 +293,7 @@ class TestJITExecution:
         a = torch.full((128, 128), 1.0, dtype=torch.float32)
         b = torch.full((128, 128), 2.0, dtype=torch.float32)
         c = torch.zeros((128, 128), dtype=torch.float32)
-        add_kernel(a, b, c, config=test_config)
+        add_kernel.compile(a, b, c, config=test_config)(a, b, c, config=test_config)
 
         (compiled,) = add_kernel._cache.values()
         run_script = compiled.output_dir / "debug" / "run.py"
@@ -321,13 +323,13 @@ class TestJITDynamicBatch:
 
         a32 = torch.randn(_BATCH_CAP, _COLS, dtype=torch.float32)
         out32 = torch.zeros(_BATCH_CAP, _COLS, dtype=torch.float32)
-        copy_dyn_batch(a32, out32, config=test_config)
+        copy_dyn_batch.compile(a32, out32, config=test_config)(a32, out32, config=test_config)
         assert torch.allclose(out32, a32, rtol=1e-5, atol=1e-5)
         assert len(copy_dyn_batch._cache) == 1
 
         a16 = torch.randn(16, _COLS, dtype=torch.float32)
         out16 = torch.zeros(16, _COLS, dtype=torch.float32)
-        copy_dyn_batch(a16, out16, config=test_config)
+        copy_dyn_batch.compile(a16, out16, config=test_config)(a16, out16, config=test_config)
         assert torch.allclose(out16, a16, rtol=1e-5, atol=1e-5)
         # Same dynamic artifact serves the smaller batch — no recompilation.
         assert len(copy_dyn_batch._cache) == 1
@@ -396,7 +398,7 @@ class TestJITSubscriptSliceForwarding:
         c = torch.zeros(_SUB_TILE_ROWS, _SUB_COLS, dtype=torch.float32)
         expected = src[0:_SUB_TILE_ROWS] + 1.0
 
-        subscript_slice_addone(src, c, config=test_config)
+        subscript_slice_addone.compile(src, c, config=test_config)(src, c, config=test_config)
         assert torch.allclose(c, expected, rtol=1e-5, atol=1e-5), (
             f"subscript-slice forwarding numerical mismatch: max diff = {(c - expected).abs().max().item()}"
         )
@@ -412,7 +414,7 @@ class TestJITSubscriptSliceForwarding:
         c = torch.zeros(_SUB_TILE_ROWS, _SUB_COLS, dtype=torch.float32)
         expected = src[_SUB_TILE_ROWS:] + 1.0
 
-        open_slice_addone(src, c, config=test_config)
+        open_slice_addone.compile(src, c, config=test_config)(src, c, config=test_config)
         assert torch.allclose(c, expected, rtol=1e-5, atol=1e-5), (
             f"open-upper-bound slice forwarding mismatch: max diff = {(c - expected).abs().max().item()}"
         )

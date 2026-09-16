@@ -1,8 +1,53 @@
 # Kernel-mode integration foundations
 
-The internal torch adapter validates borrowed NPU arguments and submits prepared
-kernel registrations through an optional native torch_npu extension. It does not add a public kernel execution entry point. Existing JIT,
-compiled-program and Worker calls keep their current behavior.
+The public JIT eager entry borrows NPU arguments and submits through the optional
+native torch_npu adapter. Explicit `.compile()` produces program objects.
+
+## Public JIT eager entry
+
+On this integration branch, `op(x, scale, out)` runs in kernel mode. The caller
+supplies real NPU tensors and every Out/InOut argument; there is no decorator
+mode argument or explicit kernel compilation step. On each call PyPTO validates
+arguments, snapshots typed scalar values and the current stream, and rejects
+graph capture before compilation or Worker initialization. The first valid call
+compiles a kernel artifact, initializes the process Worker and prepares the
+callable. Later matching calls reuse the artifact and registration. Different
+operators share that Worker. Changing runtime scalar values or streams does not
+recompile; changing a constexpr can select a different artifact.
+
+```python
+# op is a @pl.jit entry; the caller selected the current NPU device.
+x = torch.ones((16, 16), device="npu")
+out = torch.empty_like(x)
+op(x, 2.0, out)
+```
+
+This entry currently supports A2/A3 with `tensormap_and_ringbuffer`, including
+non-default streams and taskQueue enabled or disabled. Omitting `config` selects
+that target and the current torch NPU device. An explicit `RunConfig` must match
+the target and current device. Program-only diagnostics, ring overrides,
+distributed configuration, CPU/Meta/Fake tensors and Worker-owned handles are
+rejected; they do not select another execution path. Native launch requires
+rank 1–5 and positive uint32 extents/strides. A5, HBG execution, ACLGraph,
+automatic framework shutdown and public torch.ops registration remain later work.
+The internal Worker close protocol exists, but ordinary automatic exit cleanup
+is not yet wired; this remains integration-branch functionality.
+
+Host/simulator and distributed execution use explicit program compilation:
+
+```python
+program = op.compile(host_x, 2.0, host_out, config=program_config)
+program(host_x, 3.0, host_out, config=program_config)
+```
+
+Compilation alone never claims a process execution mode. Executing a program
+and executing a kernel require separate processes. Program and kernel artifacts
+have separate cache identities. Formal program calls, including restored objects
+and orchestration children, require all Out/InOut tensors and return `None`;
+they do not allocate omitted outputs. Low-level explicit Worker APIs retain
+their existing memory-management behavior. Kernel calls return `None` or exactly
+the original tensor objects selected by the IR return aliases, without allocating
+outputs or running a warmup invocation.
 
 ## Call metadata and ownership
 
@@ -128,8 +173,7 @@ extension.
 `torch` remains a normal PyPTO dependency. A real call description loads
 `torch_npu` on demand and reports a targeted error if it is unavailable.
 
-The internal launch path requires the optional native adapter. Public JIT entry
-selection and torch.ops registration remain separate work. Eager submission
+The internal launch path requires the optional native adapter. Public torch.ops registration remains separate work. Eager submission
 rejects graph capture; it does not provide an ACLGraph lifetime contract.
 
 ## Process kernel Worker and registration
@@ -294,3 +338,5 @@ both locally built adapters. They do not claim A5 or ACLGraph acceptance.
 `tests/ut/torch/test_registration.py` covers schema mutation/alias contracts,
 Fake/Meta and symbolic inputs, isolated imports, duplicate definitions, and
 test-only dispatcher/compiler integration without a real kernel executor.
+
+`tests/ut/jit/test_kernel_eager.py` checks public entry routing, preflight rejection, scalar snapshots and cache separation. `tests/st/runtime/kernel/test_jit_eager.py` verifies real repeated InOut updates, constexpr variants, one shared Worker and isolated explicit program execution.

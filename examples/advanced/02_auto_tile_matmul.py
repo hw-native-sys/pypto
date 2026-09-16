@@ -147,7 +147,7 @@ if __name__ == "__main__":
         a = torch.randn(256, K, dtype=torch.float32)
         b = torch.randn(K, 256, dtype=torch.float32)
         out = torch.zeros((256, 256), dtype=torch.float32)
-        fn(a, b, out, config=cfg)
+        fn.compile(a, b, out, config=cfg)(a, b, out, config=cfg)
         assert torch.allclose(out, a @ b, rtol=1e-3, atol=1e-3), f"{fn.__name__} mismatch"
 
     # Mat/L1 scratch: (a @ b) @ e -> [256, 64]; bf16 operands, bf16 on-chip intermediate.
@@ -158,7 +158,7 @@ if __name__ == "__main__":
         b = torch.randn(K, 256, dtype=torch.bfloat16)
         e = torch.randn(256, 64, dtype=torch.bfloat16)
         out = torch.zeros((256, 64), dtype=torch.float32)
-        fn(a, b, e, out, config=cfg)
+        fn.compile(a, b, e, out, config=cfg)(a, b, e, out, config=cfg)
         c_bf16 = (a.float() @ b.float()).to(torch.bfloat16).float()  # FIXPIPE downcast
         golden = c_bf16 @ e.float()
         assert torch.allclose(out, golden, rtol=2e-2, atol=2e-2), f"{fn.__name__} mismatch"
@@ -173,7 +173,7 @@ if __name__ == "__main__":
         b = torch.randn(K, 128, dtype=torch.bfloat16)
         e = torch.randn(128, 64, dtype=torch.bfloat16)
         out = torch.zeros((128, 64), dtype=torch.float32)
-        fn(a, b, e, out, config=cfg)
+        fn.compile(a, b, e, out, config=cfg)(a, b, e, out, config=cfg)
         c_bf16 = (a.float() @ b.float()).to(torch.bfloat16).float()  # FIXPIPE downcast
         golden = c_bf16 @ e.float()
         rel_err = ((out - golden).norm() / golden.norm()).item()

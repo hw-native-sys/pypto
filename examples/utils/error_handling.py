@@ -36,7 +36,7 @@ if __name__ == "__main__":
     x = torch.randn(64, dtype=torch.float32)
     result = torch.zeros_like(x)
     try:
-        test_ssa_violation(x, result, config=RunConfig())
+        test_ssa_violation.compile(x, result, config=RunConfig())(x, result, config=RunConfig())
         print("ERROR: expected the invalid kernel to be rejected")
         sys.exit(1)
     except PartialCodegenError as e:

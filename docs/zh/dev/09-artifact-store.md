@@ -46,7 +46,8 @@ SHA-256 源码和特化摘要。其记录保留每个环境组件摘要和两个
 `CompiledProgram`、其 orchestration 子对象和 `DistributedCompiledProgram`
 在 `from_dir()` 后保留该记录，无需加载二进制或初始化 Worker。
 program 消费者拒绝声明 kernel 的产物。kernel compiler adapter 必须提供下文的显式 ABI 描述符。
-本次不增加用户 mode 选择，普通 JIT/program 调用保持原行为。
+不增加用户 mode 选择：JIT 直调进入 kernel，显式 `.compile()` 返回 program 对象，
+参见 [kernel mode](runtime/kernel-mode.md)。
 
 `ArtifactSpec.execution_capabilities` 将同一声明写入 schema 3 的 artifact manifest，
 并纳入 spec 摘要；不同能力不会复用同一阶段 slot。generated 到 ready 晋级保留能力声明，
@@ -62,8 +63,8 @@ program 消费者拒绝声明 kernel 的产物。kernel compiler adapter 必须�
 `pypto.ir.param_info.bind_complete_args` 是内部共享绑定设施：要求全部位置参数，
 包括 Out/InOut，并按签名顺序返回原对象。它不分配、不复制、不转换 Scalar，也不初始化
 runtime，因此保留参数别名和每次调用的 Scalar 值。Tensor/storage 与 ABI 校验仍由
-各执行器负责。已有 program return-style 调用仍会在执行前分配省略的 Out Tensor；
-该 helper 不切换已有行为，也不提供 kernel 调用接口。
+各执行器负责。正式 program 调用（含恢复对象和 orchestration 子入口）也要求完整 Out/InOut，
+缺参在分配或执行前报错。
 
 ## Kernel ABI 描述符（集成分支）
 
@@ -113,7 +114,7 @@ kernel consumer 返回 metadata 前校验 manifest、sidecar 和请求的 ABI。
 
 `JITFunction._resolve_kernel_artifact` 是供后续 JIT 接线使用的内部产物入口，复用
 specialization、pass pipeline、PTO codegen 和 PyPTO 自有二进制编译。公开 `compile()`
-与直接调用保持 program 行为，不增加 decorator mode 或公开 kernel 编译接口。
+保留 program 行为，直接调用进入 kernel；不增加 decorator mode 或公开 kernel 编译接口。
 返回的 `KernelArtifact` 为内部消费者提供无设备工作的 `load()` 和 `chip_callable`，
 不提供执行方法。
 

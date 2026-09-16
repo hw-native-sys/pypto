@@ -395,9 +395,11 @@ class TestCompiledProgramCall:
         cp = CompiledProgram(prog, str(tmp_path))
         a = torch.randn(128, 128)
         # Program has 3 params (2 in + 1 out), with return.
-        # Valid: 3 args (in-place) or 2 args (return style)
-        with pytest.raises(TypeError, match="expects 3 .* or 2"):
-            cp(a)  # 1 arg is neither 3 nor 2
+        # Declared returns do not make external Out parameters optional.
+        with pytest.raises(TypeError, match="expects 3 .*Out/InOut"):
+            cp(a)
+        with pytest.raises(TypeError, match="expects 3 .*Out/InOut"):
+            cp(a, a)
 
     def test_no_orchestration_multi_func_call_raises(self, tmp_path):
         prog = _make_program_without_orchestration()
@@ -595,23 +597,19 @@ class TestCompiledProgramScalarCall:
         with pytest.raises(TypeError, match="tensor"):
             cp(5, 10, torch.zeros(128, 128))
 
-    def test_return_style_with_scalar(self, tmp_path):
-        """Return-style call with scalar: compiled(a, n) should allocate output."""
-        prog = _make_program_with_scalar()
-        cp = CompiledProgram(prog, str(tmp_path))
-
+    def test_scalar_call_requires_external_output(self, tmp_path):
+        """Neither a scalar nor an IR return permits allocating a missing Out."""
+        cp = CompiledProgram(_make_program_with_scalar(), str(tmp_path))
         a = torch.randn(128, 128)
-
-        with patch("pypto.runtime.runner._execute_compiled") as mock_exec:
-            result = cp(a, 7)
-
-        # Should have called _execute_compiled with 3 args (a, scalar, allocated c)
-        coerced_args = mock_exec.call_args.args[1]
-        assert len(coerced_args) == 3
-        assert isinstance(coerced_args[1], ctypes.c_int64)
-        assert coerced_args[1].value == 7
-        # Output should be returned
-        assert isinstance(result, torch.Tensor)
+        out = torch.empty_like(a)
+        with patch("pypto.runtime.runner._execute_compiled") as execute:
+            with pytest.raises(TypeError, match="Out/InOut"):
+                cp(a, 7)
+            execute.assert_not_called()
+            assert cp(a, 7, out) is None
+        coerced = execute.call_args.args[1]
+        assert coerced[0] is a and coerced[2] is out
+        assert isinstance(coerced[1], ctypes.c_int64) and coerced[1].value == 7
 
 
 class TestCompiledProgramDeviceTensor:
@@ -1648,6 +1646,22 @@ def test_multi_orchestration_preserves_capabilities_in_children_and_reload(tmp_p
         assert child.execution_capabilities == compiled.execution_capabilities
         assert restored.execution_capabilities == child.execution_capabilities
         assert restored.param_names == child.param_names
+
+
+@pytest.mark.parametrize("restored", [False, True])
+def test_formal_program_requires_output_before_allocation(tmp_path, restored):
+    program = CompiledProgram(_make_program_with_orchestration(has_return=True), str(tmp_path))
+    if restored:
+        program = CompiledProgram.from_dir(tmp_path)
+    a, b = torch.zeros(128, 128), torch.zeros(128, 128)
+    with (
+        patch("pypto.ir.compiled_program._build_full_args") as allocate,
+        patch("pypto.runtime.runner._execute_compiled") as execute,
+        pytest.raises(TypeError, match="Out/InOut"),
+    ):
+        program(a, b)
+    allocate.assert_not_called()
+    execute.assert_not_called()
 
 
 if __name__ == "__main__":

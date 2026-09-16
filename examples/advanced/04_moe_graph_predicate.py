@@ -178,7 +178,9 @@ def expected_bands(
 def _run_and_check(x, w_gate, w_up, w_down, counts, cfg) -> None:
     out = torch.zeros((EXPERTS * D, D), dtype=torch.float32)
     with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
-        moe_decode(x, w_gate, w_up, w_down, counts, out, config=cfg)
+        moe_decode.compile(x, w_gate, w_up, w_down, counts, out, config=cfg)(
+            x, w_gate, w_up, w_down, counts, out, config=cfg
+        )
 
     want = expected_bands(x, w_gate, w_up, w_down, counts)
     for e in range(EXPERTS):

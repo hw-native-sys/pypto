@@ -41,7 +41,6 @@ from .compiled_program import (
     _param_info_to_dict,
     _ParamInfo,
     _remove_meta,
-    _to_torch_dtype,
     _write_debug_runner,
     _write_meta_atomically,
 )
@@ -420,8 +419,11 @@ class DistributedCompiledProgram:
         self,
         *args: CallArg,
         config: "RunConfig | None" = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, ...] | None:
+    ) -> None:
         """Execute the distributed program via simpler Worker(level=3).
+
+        All arguments, including Out/InOut tensors, are required. The caller
+        owns the outputs; this method modifies them in place and returns None.
 
         ``config`` is an optional per-dispatch :class:`RunConfig`; its per-task
         ring-sizing overrides (``ring_task_window`` / ``ring_heap`` /
@@ -443,11 +445,8 @@ class DistributedCompiledProgram:
         """
         from pypto.runtime.distributed_runner import _execute_distributed  # noqa: PLC0415
 
-        param_infos, output_indices, return_types = self._get_metadata()
-        n_params = len(param_infos)
-        n_inputs = n_params - len(output_indices)
-        has_return = len(return_types) > 0
-        return_style = has_return and len(args) == n_inputs
+        param_infos, _, _ = self._get_metadata()
+        all_args = bind_complete_args(args, param_infos, caller_name="DistributedCompiledProgram")
 
         if any(isinstance(arg, (DeviceTensor, StackedDeviceTensor)) for arg in args):
             raise TypeError(
@@ -455,19 +454,6 @@ class DistributedCompiledProgram:
                 "StackedDeviceTensor: their Buffer/provenance must belong to the same prepared "
                 "DistributedWorker. Use `with compiled.prepare() as worker:`, allocate with "
                 "`worker.alloc_tensor()` / `worker.alloc_stacked_tensor()`, then call `worker.run(...)`."
-            )
-
-        if len(args) == n_params:
-            all_args = bind_complete_args(args, param_infos, caller_name="DistributedCompiledProgram")
-        elif return_style:
-            all_args = self._build_full_args(args, param_infos, output_indices)
-        else:
-            expected = f"{n_params} (in-place)"
-            if has_return:
-                expected += f" or {n_inputs} (return)"
-            raise TypeError(
-                f"DistributedCompiledProgram expects {expected} arguments, got {len(args)}. "
-                f"Parameters: {[p.name for p in param_infos]}"
             )
 
         # Validate and coerce one-shot host tensor args. Resident tensors are a
@@ -482,11 +468,6 @@ class DistributedCompiledProgram:
             coerced.append(arg)
 
         _execute_distributed(self, coerced, config)
-
-        if not return_style:
-            return None
-        outputs = [coerced[i] for i in output_indices]
-        return outputs[0] if len(outputs) == 1 else tuple(outputs)
 
     def prepare(
         self,
@@ -588,28 +569,3 @@ class DistributedCompiledProgram:
             inherited_host_tensors=inherited_host_tensors,
             startup_timeout_s=startup_timeout_s,
         )
-
-    @staticmethod
-    def _build_full_args(input_args, param_infos, output_indices):
-        output_set = set(output_indices)
-        all_tensors = []
-        input_idx = 0
-
-        for i, info in enumerate(param_infos):
-            if i in output_set:
-                if info.shape is None:
-                    raise ValueError(f"Cannot allocate output tensor {info.name!r}: no shape in IR")
-                if any(d < 0 for d in info.shape):
-                    raise ValueError(
-                        f"Cannot allocate output tensor {info.name!r}: shape {info.shape} "
-                        f"contains dynamic dimensions."
-                    )
-                torch_dtype = _to_torch_dtype(info.dtype)
-                if torch_dtype is None:
-                    raise ValueError(f"Unsupported dtype {info.dtype} for output tensor {info.name!r}")
-                all_tensors.append(torch.zeros(info.shape, dtype=torch_dtype))
-            else:
-                all_tensors.append(input_args[input_idx])
-                input_idx += 1
-
-        return all_tensors

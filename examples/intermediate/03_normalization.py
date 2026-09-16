@@ -125,7 +125,7 @@ if __name__ == "__main__":
     x = torch.randn(32, 64, dtype=torch.float32)
     gamma = torch.randn(1, 64, dtype=torch.float32)
     out = torch.zeros_like(x)
-    rms_norm(x, gamma, out, config=config)
+    rms_norm.compile(x, gamma, out, config=config)(x, gamma, out, config=config)
     mean_sq = (x**2).sum(dim=-1, keepdim=True) / hidden_size
     rms_ref = torch.sqrt(mean_sq + eps)
     expected = (x / rms_ref) * gamma
@@ -138,7 +138,7 @@ if __name__ == "__main__":
     gamma = torch.randn(1, 64, dtype=torch.float32)
     beta = torch.randn(1, 64, dtype=torch.float32)
     out = torch.zeros_like(x)
-    layer_norm(x, gamma, beta, out, config=config)
+    layer_norm.compile(x, gamma, beta, out, config=config)(x, gamma, beta, out, config=config)
     mean = x.sum(dim=-1, keepdim=True) / hidden_size
     centered = x - mean
     var = (centered**2).sum(dim=-1, keepdim=True) / hidden_size

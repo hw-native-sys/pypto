@@ -101,21 +101,21 @@ if __name__ == "__main__":
     a128 = torch.full((128, 128), 2.0, dtype=torch.float32)
     b128 = torch.full((128, 128), 3.0, dtype=torch.float32)
     c128 = torch.zeros((128, 128), dtype=torch.float32)
-    tile_add_128(a128, b128, c128, config=cfg)
+    tile_add_128.compile(a128, b128, c128, config=cfg)(a128, b128, c128, config=cfg)
     assert torch.allclose(c128, a128 + b128, rtol=1e-5, atol=1e-5)
 
     c128 = torch.zeros((128, 128), dtype=torch.float32)
-    tile_mul_128(a128, b128, c128, config=cfg)
+    tile_mul_128.compile(a128, b128, c128, config=cfg)(a128, b128, c128, config=cfg)
     assert torch.allclose(c128, a128 * b128, rtol=1e-5, atol=1e-5)
 
     a64 = torch.full((64, 64), 2.0, dtype=torch.float32)
     b64 = torch.full((64, 64), 3.0, dtype=torch.float32)
     c64 = torch.zeros((64, 64), dtype=torch.float32)
-    tile_add_64(a64, b64, c64, config=cfg)
+    tile_add_64.compile(a64, b64, c64, config=cfg)(a64, b64, c64, config=cfg)
     assert torch.allclose(c64, a64 + b64, rtol=1e-5, atol=1e-5)
 
     c64 = torch.zeros((64, 64), dtype=torch.float32)
-    tile_mul_64(a64, b64, c64, config=cfg)
+    tile_mul_64.compile(a64, b64, c64, config=cfg)(a64, b64, c64, config=cfg)
     assert torch.allclose(c64, a64 * b64, rtol=1e-5, atol=1e-5)
 
     # Larger than one tile: four 128x128 chunks.
@@ -123,7 +123,7 @@ if __name__ == "__main__":
     a_big = torch.randn((ROWS, COLS), dtype=torch.float32)
     b_big = torch.randn((ROWS, COLS), dtype=torch.float32)
     c_big = torch.zeros((ROWS, COLS), dtype=torch.float32)
-    chunked_add(a_big, b_big, c_big, config=cfg)
+    chunked_add.compile(a_big, b_big, c_big, config=cfg)(a_big, b_big, c_big, config=cfg)
     assert torch.allclose(c_big, a_big + b_big, rtol=1e-5, atol=1e-5)
 
     print("OK")

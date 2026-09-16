@@ -170,12 +170,12 @@ def main():
     b = torch.full((128, 128), 3.0, dtype=torch.float32)
     f = torch.zeros((128, 128), dtype=torch.float32)
 
-    vector_dag(
+    vector_dag.compile(
         a,
         b,
         f,
         config=RunConfig(enable_chip_swimlane=args.enable_chip_swimlane),
-    )
+    )(a, b, f, config=RunConfig(enable_chip_swimlane=args.enable_chip_swimlane))
 
     # Golden validation
     tensors = {"a": a, "b": b, "f": f.clone()}

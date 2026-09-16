@@ -1,7 +1,41 @@
 # Kernel mode 集成基础
 
-内部 torch 适配器校验借用的 NPU 参数，并通过可选 native torch_npu 扩展提交已准备好的
-kernel 注册项，不新增公开 kernel 执行入口。已有 JIT、编译 program 和 Worker 调用保持当前行为。
+公开 JIT eager 入口借用 NPU 参数，通过可选 native torch_npu adapter 提交。
+显式 `.compile()` 返回 program 对象。
+
+## 公开 JIT eager 入口
+
+本集成分支中，`op(x, scale, out)` 固定进入 kernel mode。调用方传入真实 NPU Tensor 和完整
+Out/InOut，不设置 decorator mode，也不显式编译 kernel。每次调用先校验参数、快照本次
+类型化 Scalar 与当前 stream，并在编译或初始化 Worker 前拒绝 graph capture。首次有效
+调用编译 kernel 产物、初始化进程 Worker 并 prepare callable；后续匹配调用复用产物和注册。
+不同算子共享同一个 Worker。运行时 Scalar 值与 stream 变化不重新编译，constexpr 变化可选择不同产物。
+
+```python
+# op is a @pl.jit entry; the caller selected the current NPU device.
+x = torch.ones((16, 16), device="npu")
+out = torch.empty_like(x)
+op(x, 2.0, out)
+```
+
+当前支持 A2/A3 的 `tensormap_and_ringbuffer`，包含非默认 stream 和 taskQueue 开关。
+省略 `config` 时选择该目标及 torch 当前 NPU device；显式 `RunConfig` 须匹配目标和当前设备。
+拒绝 program 专用诊断、ring 覆盖、分布式配置、CPU/Meta/Fake Tensor 及 Worker 自有 handle，
+不会据此切换执行路径。native launch 要求 rank 1–5 和正 uint32 extent/stride。
+A5、HBG 执行、ACLGraph、自动框架退出及公开 torch.ops 注册仍属后续工作。
+内部 Worker close 协议已经存在，但尚未接入正常退出的自动清理；此功能仍限于集成分支。
+
+Host/模拟器和分布式执行使用显式 program 编译：
+
+```python
+program = op.compile(host_x, 2.0, host_out, config=program_config)
+program(host_x, 3.0, host_out, config=program_config)
+```
+
+仅编译不认领进程执行模式，program 与 kernel 执行须使用独立进程。两种产物使用独立缓存身份。
+正式 program 调用（包括恢复对象和 orchestration 子入口）必须传入全部 Out/InOut，返回 `None`，
+不分配省略的输出。底层显式 Worker API 保留原有内存管理行为。kernel 调用返回 `None` 或 IR
+return alias 指定的原始 Tensor 对象，不分配输出、不额外执行 warmup。
 
 ## 调用元数据与所有权
 
@@ -101,7 +135,7 @@ API 选择测试在 PyTorch 2.6 上模拟旧注册入口，验证 Fake/Meta disp
 Simpler 或 native launch 扩展；`torch` 仍是 PyPTO 的常规依赖。真正描述 NPU 调用时
 才按需加载 `torch_npu`，缺失时给出针对性的错误信息。
 
-内部 launch 路径需要可选 native adapter。公开 JIT 入口切换与 torch.ops 注册仍是后续工作。
+内部 launch 路径需要可选 native adapter。公开 torch.ops 注册仍是后续工作。
 eager 提交拒绝 graph capture，尚未提供 ACLGraph 生命周期契约。
 
 ## 进程 kernel Worker 与注册
@@ -167,7 +201,7 @@ kernel，也不验证 capture。
 `pypto.torch.launch.enqueue(registration, args)` 接受进程管理器准备好的注册项及逻辑签名顺序的完整参数。
 每次校验注册项并生成独立 frame，通过可选 native torch_npu 扩展提交，返回既有输出别名；返回只表示
 Host 接纳，不表示设备执行完成。本入口不编译、不 prepare、不创建 Worker、不分配业务输出。
-公开 JIT 入口与 torch.ops 注册仍由后续 PR 接线。当前 eager 提交明确拒绝 graph capture。
+公开 JIT 入口复用此路径，torch.ops 注册仍由后续 PR 接线。当前 eager 提交明确拒绝 graph capture。
 
 扩展使用固定 SDK 的 `ChipStorageTaskArgs` 头文件构造两个独立参数池。混合签名 `(x, scale, out)`
 对应两个 Tensor 和一个 Scalar；组装及二进制恢复的 ChipCallable 签名包含 `IN, OUT, SCALAR`，
@@ -222,3 +256,5 @@ ACLGraph 已验收。
 `tests/ut/torch/test_registration.py` 覆盖 schema mutation/alias 契约、Fake/Meta
 与符号输入、隔离导入、重复定义，以及不依赖真实 kernel executor 的测试内
 dispatcher/compiler 集成。
+
+`tests/ut/jit/test_kernel_eager.py` 覆盖公开入口、提前拒绝、Scalar 快照和缓存隔离。`tests/st/runtime/kernel/test_jit_eager.py` 验证真实 InOut 多次更新、constexpr 变体、共享 Worker 和隔离进程中的显式 program 执行。

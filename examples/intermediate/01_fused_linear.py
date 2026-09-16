@@ -89,12 +89,12 @@ if __name__ == "__main__":
     b64 = torch.full((64, 64), 3.0, dtype=torch.float32)
     bias = torch.randn(64, 64, dtype=torch.float32)
     c64 = torch.zeros((64, 64), dtype=torch.float32)
-    fused_matmul_bias(a64, b64, bias, c64, config=cfg)
+    fused_matmul_bias.compile(a64, b64, bias, c64, config=cfg)(a64, b64, bias, c64, config=cfg)
     assert torch.allclose(c64, torch.matmul(a64, b64) + bias, rtol=1e-3, atol=1e-3)
 
     # fused_linear_relu
     y = torch.zeros((64, 64), dtype=torch.float32)
-    fused_linear_relu(a64, b64, bias, y, config=cfg)
+    fused_linear_relu.compile(a64, b64, bias, y, config=cfg)(a64, b64, bias, y, config=cfg)
     assert torch.allclose(y, torch.relu(torch.matmul(a64, b64) + bias), rtol=1e-3, atol=1e-3)
 
     print("OK")

@@ -222,7 +222,7 @@ def odd_rows_pto(tmp_path_factory) -> str:
     cfg = RunConfig(platform="a2a3", codegen_only=True, save_kernels=True, save_kernels_dir=str(dump_dir))
     error: Exception | None = None
     try:
-        odd_rows(*_args(ODD_VALID_M), config=cfg)
+        odd_rows.compile(*_args(ODD_VALID_M), config=cfg)
     except Exception as e:  # noqa: BLE001 - see docstring
         error = e
     ptos = sorted(dump_dir.rglob("*.pto"))
@@ -348,7 +348,7 @@ def runtime_tail_pto(tmp_path_factory) -> str:
     cfg = RunConfig(platform="a2a3", codegen_only=True, save_kernels=True, save_kernels_dir=str(dump_dir))
     error: Exception | None = None
     try:
-        runtime_tail_rows(
+        runtime_tail_rows.compile(
             torch.randn(ROWS, K, dtype=torch.bfloat16),
             torch.randn(COLS, K, dtype=torch.bfloat16),
             torch.tensor([12], dtype=torch.int64),
@@ -407,7 +407,7 @@ def test_runtime_extent_rejects_a_pad_fill_at_the_boundary():
     two authoring routes that do work.
     """
     with pytest.raises(ValueError) as exc:
-        runtime_tail_fillpad_first(*_runtime_tail_args(12), config=RunConfig(platform="a2a3"))
+        runtime_tail_fillpad_first.compile(*_runtime_tail_args(12), config=RunConfig(platform="a2a3"))
 
     message = str(exc.value)
     assert "fills the padding of a Cube -> Vector boundary tile" in message, message
@@ -417,7 +417,7 @@ def test_runtime_extent_rejects_a_pad_fill_at_the_boundary():
 def test_runtime_extent_rejects_a_direct_store_of_the_boundary():
     """Storing the boundary tile itself would write the transport's padding."""
     with pytest.raises(ValueError) as exc:
-        runtime_tail_store_first(*_runtime_tail_args(12), config=RunConfig(platform="a2a3"))
+        runtime_tail_store_first.compile(*_runtime_tail_args(12), config=RunConfig(platform="a2a3"))
 
     message = str(exc.value)
     assert "consumes a Cube -> Vector boundary tile directly" in message, message

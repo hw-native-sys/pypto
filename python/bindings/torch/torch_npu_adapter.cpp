@@ -160,6 +160,18 @@ class LaunchTicket {
   std::shared_ptr<LaunchState> state_;
 };
 
+c10_npu::NPUStream EagerStream(int64_t stream_id, int32_t device_id) {
+  auto stream = c10_npu::getCurrentNPUStream(device_id);
+  Require(stream.id() == stream_id, "Kernel frame is not on the current NPU stream");
+  aclmdlRICaptureStatus capture_status{};
+  aclmdlRI model = nullptr;
+  Require(aclmdlRICaptureGetInfo(stream.stream(false), &capture_status, &model) == ACL_SUCCESS,
+          "Cannot query capture state for PyPTO eager submission");
+  Require(capture_status == ACL_MODEL_RI_CAPTURE_STATUS_NONE,
+          "PyPTO eager kernel submission does not support graph capture");
+  return stream;
+}
+
 std::shared_ptr<LaunchTicket> Prepare(ChipWorker* worker, int32_t callable_id, nb::list objects,
                                       const std::vector<uint32_t>& dtypes,
                                       const std::vector<uint64_t>& scalar_bits, int64_t stream_id,
@@ -170,14 +182,7 @@ std::shared_ptr<LaunchTicket> Prepare(ChipWorker* worker, int32_t callable_id, n
   Require(objects.size() == dtypes.size() && objects.size() <= CHIP_MAX_TENSOR_ARGS &&
               scalar_bits.size() <= CHIP_MAX_SCALAR_ARGS,
           "Kernel argument pools exceed the pinned native ABI");
-  auto stream = c10_npu::getCurrentNPUStream(device_id);
-  Require(stream.id() == stream_id, "Kernel frame is not on the current NPU stream");
-  aclmdlRICaptureStatus capture_status{};
-  aclmdlRI model = nullptr;
-  Require(aclmdlRICaptureGetInfo(stream.stream(false), &capture_status, &model) == ACL_SUCCESS,
-          "Cannot query capture state for PyPTO eager submission");
-  Require(capture_status == ACL_MODEL_RI_CAPTURE_STATUS_NONE,
-          "PyPTO eager kernel submission does not support graph capture");
+  auto stream = EagerStream(stream_id, device_id);
   auto state = std::make_shared<LaunchState>(worker, callable_id, stream);
   for (size_t i = 0; i < objects.size(); ++i) {
     Require(THPVariable_Check(objects[i].ptr()), "Kernel arguments must be torch tensors");
@@ -217,5 +222,6 @@ NB_MODULE(_torch_npu, m) {
       .def("done", &LaunchTicket::Done, nb::call_guard<nb::gil_scoped_release>())
       .def("wait", &LaunchTicket::Wait, nb::call_guard<nb::gil_scoped_release>())
       .def("quiesce", &LaunchTicket::Quiesce, nb::call_guard<nb::gil_scoped_release>());
+  m.def("check_eager", [](int64_t stream_id, int32_t device_id) { EagerStream(stream_id, device_id); });
   m.def("prepare", &Prepare, nb::keep_alive<0, 1>());
 }

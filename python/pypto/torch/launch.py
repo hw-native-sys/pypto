@@ -14,13 +14,13 @@ import struct
 from collections.abc import Sequence
 from typing import Any
 
-from pypto._kernel_abi import SCALAR_FORMATS, SIMPLER_KERNEL_REVISION, TENSOR_DTYPE_TAGS
+from pypto._kernel_abi import SCALAR_FORMATS, SIMPLER_KERNEL_REVISION, TENSOR_DTYPE_TAGS, KernelABI
 from pypto.ir.param_info import ParamInfo
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import ParamDirection
 from pypto.runtime.kernel.callable import KernelRegistration
 
-from .interop import CallSignature
+from .interop import CallFrame, CallSignature
 
 
 def _load_native() -> Any:
@@ -45,6 +45,11 @@ def enqueue(registration: KernelRegistration, args: Sequence[Any]) -> Any:
     """
     registration.require_live()
     abi = registration.artifact.kernel_abi
+    frame = _describe(abi, args)
+    return _enqueue_frame(registration, frame)
+
+
+def _describe(abi: KernelABI, args: Sequence[Any]) -> CallFrame:
     params = [
         ParamInfo(
             p.name,
@@ -54,7 +59,71 @@ def enqueue(registration: KernelRegistration, args: Sequence[Any]) -> Any:
         )
         for p in abi.parameters
     ]
-    frame = CallSignature(params, return_aliases=abi.return_aliases).describe_call(args)
+    return CallSignature(params, return_aliases=abi.return_aliases).describe_call(args)
+
+
+def describe_eager_call(abi: KernelABI, args: Sequence[Any], config: Any) -> CallFrame:
+    """Validate before compilation, Worker initialization or callable registration."""
+    if (abi.platform, abi.runtime) != ("a2a3", "tensormap_and_ringbuffer"):
+        raise ValueError(
+            "JIT eager execution currently requires a2a3/tensormap_and_ringbuffer; "
+            "use explicit compile for program execution"
+        )
+    from pypto.runtime.kernel.abi import KernelConfig  # noqa: PLC0415
+
+    frame = _describe(abi, args)
+    KernelConfig(
+        abi.platform, abi.runtime, frame.device_index, 0 if config is None else config.aicpu_thread_num or 0
+    )
+    for tensor in frame.tensors:
+        meta = tensor.metadata
+        if not 1 <= len(meta.shape) <= 5 or any(
+            x <= 0 or x > 0xFFFFFFFF for x in (*meta.shape, *meta.strides)
+        ):
+            raise ValueError("JIT eager tensors require rank 1..5 and positive u32 extents/strides")
+    if config is not None:
+        if config.device_id != frame.device_index:
+            raise ValueError("Kernel config device differs from the current torch NPU device")
+        unsupported = [
+            name
+            for name in (
+                "codegen_only",
+                "enable_chip_swimlane",
+                "enable_dump_args",
+                "enable_pmu",
+                "enable_dep_gen",
+                "enable_scope_stats",
+                "ring_task_window",
+                "ring_heap",
+                "ring_dep_pool",
+                "distributed_config",
+            )
+            if getattr(config, name, None)
+        ]
+        if unsupported:
+            raise ValueError(
+                f"JIT eager execution does not support program runtime options {unsupported}; "
+                "use explicit compile"
+            )
+    _load_native().check_eager(frame.stream.stream_id, frame.device_index)
+    return frame
+
+
+def invoke(artifact: Any, frame: CallFrame, config: Any) -> Any:
+    """Register once on the process Worker and submit one prevalidated eager call."""
+    from pypto.runtime.kernel.abi import KernelConfig  # noqa: PLC0415
+    from pypto.runtime.kernel.context import get_process_kernel_state  # noqa: PLC0415
+
+    abi = artifact.kernel_abi
+    worker_config = KernelConfig(
+        abi.platform, abi.runtime, frame.device_index, 0 if config is None else config.aicpu_thread_num or 0
+    )
+    registration = get_process_kernel_state().ensure_callable(artifact, worker_config)
+    return _enqueue_frame(registration, frame)
+
+
+def _enqueue_frame(registration: KernelRegistration, frame: CallFrame) -> Any:
+    registration.require_live()
     if frame.device_index != registration.owner.config.device_id:
         raise ValueError("Kernel call device differs from its process Worker device")
     native = _load_native()

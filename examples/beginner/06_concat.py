@@ -42,7 +42,7 @@ if __name__ == "__main__":
     a = torch.randn(32, 16, dtype=torch.float32)
     b = torch.randn(32, 16, dtype=torch.float32)
     c = torch.zeros((32, 32), dtype=torch.float32)
-    tile_concat_32x32(a, b, c, config=cfg)
+    tile_concat_32x32.compile(a, b, c, config=cfg)(a, b, c, config=cfg)
     expected = torch.cat([a, b], dim=1)
     assert torch.allclose(c, expected, rtol=1e-5, atol=1e-5)
 

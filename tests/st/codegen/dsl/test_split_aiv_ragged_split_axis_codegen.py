@@ -185,7 +185,7 @@ def _ragged_rows_pto() -> str:
     cfg = RunConfig(platform="a2a3", codegen_only=True, save_kernels=True, save_kernels_dir=str(DUMP_DIR))
     error: Exception | None = None
     try:
-        ragged_rows(*_ragged_rows_args(), config=cfg)
+        ragged_rows.compile(*_ragged_rows_args(), config=cfg)
     except Exception as e:  # noqa: BLE001 - see docstring
         error = e
     ptos = sorted(DUMP_DIR.rglob("*.pto"))

@@ -51,7 +51,7 @@ def _specialize_and_get_compiled(test_config: RunConfig):
     a = torch.full((128, 128), 1.0, dtype=torch.float32)
     b = torch.full((128, 128), 1.0, dtype=torch.float32)
     c = torch.zeros((128, 128), dtype=torch.float32)
-    tile_add_128(a, b, c, config=test_config)
+    tile_add_128.compile(a, b, c, config=test_config)(a, b, c, config=test_config)
     assert len(tile_add_128._cache) == 1, "tile_add_128 should have one cache entry"
     return next(iter(tile_add_128._cache.values()))
 

@@ -115,13 +115,13 @@ if __name__ == "__main__":
     a = torch.full((128, 128), 2.0, dtype=torch.float32)
     b = torch.full((128, 128), 3.0, dtype=torch.float32)
     c = torch.zeros((128, 128), dtype=torch.float32)
-    fused_add_relu(a, b, c, config=config)
+    fused_add_relu.compile(a, b, c, config=config)(a, b, c, config=config)
     assert torch.allclose(c, torch.relu(a + b), rtol=1e-5, atol=1e-5)
 
     # SiLU
     x = torch.randn(32, 128, dtype=torch.float32)
     out = torch.zeros_like(x)
-    silu(x, out, config=config)
+    silu.compile(x, out, config=config)(x, out, config=config)
     expected = x * torch.sigmoid(x)
     assert torch.allclose(out, expected, rtol=1e-5, atol=1e-5), (
         f"silu failed: max diff = {(out - expected).abs().max().item()}"
@@ -130,7 +130,7 @@ if __name__ == "__main__":
     # GELU
     x = torch.randn(32, 128, dtype=torch.float32)
     out = torch.zeros_like(x)
-    gelu(x, out, config=config)
+    gelu.compile(x, out, config=config)(x, out, config=config)
     expected = x * torch.sigmoid(1.702 * x)
     assert torch.allclose(out, expected, rtol=1e-5, atol=1e-5), (
         f"gelu failed: max diff = {(out - expected).abs().max().item()}"
@@ -140,7 +140,7 @@ if __name__ == "__main__":
     gate = torch.randn(32, 128, dtype=torch.float32)
     up = torch.randn(32, 128, dtype=torch.float32)
     out = torch.zeros_like(gate)
-    swiglu(gate, up, out, config=config)
+    swiglu.compile(gate, up, out, config=config)(gate, up, out, config=config)
     expected = gate * torch.sigmoid(gate) * up
     assert torch.allclose(out, expected, rtol=1e-5, atol=1e-5), (
         f"swiglu failed: max diff = {(out - expected).abs().max().item()}"
@@ -150,7 +150,7 @@ if __name__ == "__main__":
     gate = torch.randn(32, 128, dtype=torch.float32)
     up = torch.randn(32, 128, dtype=torch.float32)
     out = torch.zeros_like(gate)
-    geglu(gate, up, out, config=config)
+    geglu.compile(gate, up, out, config=config)(gate, up, out, config=config)
     expected = gate * torch.sigmoid(1.702 * gate) * up
     assert torch.allclose(out, expected, rtol=1e-5, atol=1e-5), (
         f"geglu failed: max diff = {(out - expected).abs().max().item()}"

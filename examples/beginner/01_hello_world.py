@@ -39,7 +39,7 @@ if __name__ == "__main__":
     a = torch.full((128, 128), 2.0, dtype=torch.float32)
     b = torch.full((128, 128), 3.0, dtype=torch.float32)
     c = torch.zeros((128, 128), dtype=torch.float32)
-    tile_add(a, b, c, config=RunConfig())
+    tile_add.compile(a, b, c, config=RunConfig())(a, b, c, config=RunConfig())
     expected = a + b
     assert torch.allclose(c, expected, rtol=1e-5, atol=1e-5), (
         f"hello_world tile_add failed: max diff = {(c - expected).abs().max().item()}"

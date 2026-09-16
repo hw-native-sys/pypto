@@ -59,11 +59,11 @@ def add(
     return out
 
 
-compiled = add.compile()
+compiled = add.compile(config=CFG)
 print(f"Generated code in: {compiled.output_dir}")
 
 out = torch.zeros(128, 128, dtype=torch.float32)
-add(A, B, out, config=CFG)
+compiled(A, B, out, config=CFG)
 torch.testing.assert_close(out, A + B, rtol=1e-4, atol=1e-4)
 ```
 
@@ -113,7 +113,7 @@ def add_then_square(
 
 
 out = torch.zeros(128, 128, dtype=torch.float32)
-add_then_square(A, B, out, config=CFG)
+add_then_square.compile(A, B, out, config=CFG)(A, B, out, config=CFG)
 torch.testing.assert_close(out, (A + B) * (A + B), rtol=1e-4, atol=1e-4)
 ```
 
@@ -200,7 +200,7 @@ top-level kernels from silently folding into one program.
 ### Compiling
 
 ```python
-compiled = add.compile()
+compiled = add.compile(config=CFG)
 print(f"Generated code in: {compiled.output_dir}")
 ```
 
@@ -278,13 +278,15 @@ a = torch.full((128, 128), 2.0, dtype=torch.float32)
 b = torch.full((128, 128), 3.0, dtype=torch.float32)
 out = torch.zeros((128, 128), dtype=torch.float32)
 
-add(a, b, out, config=RunConfig())          # compiles, caches, dispatches
+program = add.compile(a, b, out, config=RunConfig())
+program(a, b, out, config=RunConfig())
 assert torch.allclose(out, a + b, rtol=1e-5, atol=1e-5)
 ```
 
-Calling a `@pl.jit` function directly does the whole thing: specialize on the argument
-shapes and dtypes, compile, cache, dispatch. Later calls with the same shapes reuse the
-cached compilation. `examples/beginner/01_hello_world.py` is this pattern, at tile level.
+Host and simulator execution uses explicit compilation followed by a program call.
+Direct `add(...)` calls instead borrow real NPU tensors and compile implicitly for
+kernel execution; see [kernel mode](../dev/runtime/kernel-mode.md) for the current
+integration scope. Both entry points require caller-supplied Out/InOut tensors.
 
 ## Edge Cases
 

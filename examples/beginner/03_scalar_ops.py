@@ -43,7 +43,7 @@ if __name__ == "__main__":
     a = torch.full((128, 128), 2.0, dtype=torch.float32)
     b = torch.full((128, 128), 3.0, dtype=torch.float32)
     c = torch.zeros((128, 128), dtype=torch.float32)
-    fused_add_scale(a, b, c, config=cfg)
+    fused_add_scale.compile(a, b, c, config=cfg)(a, b, c, config=cfg)
     assert torch.allclose(c, (a + b) * 2.0, rtol=1e-5, atol=1e-5)
 
     print("OK")

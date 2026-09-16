@@ -4,6 +4,10 @@
 
 > **前置**：[类型](00-types.md)。
 
+Python 直接调用 `entry(...)` 选择 NPU kernel 执行；Host/模拟器和分布式执行先
+`entry.compile(...)`，再调用返回的 program。全部 Out/InOut 必须传入，DSL 函数体内
+的调用仍是 IR 调用。支持范围见 [kernel mode](../../dev/runtime/kernel-mode.md)。
+
 ## Concept
 
 装饰器不是包装你的函数 —— 它**解析你的源码**。函数体从不作为 Python 执行。这一个事实解释了后面大部分内容：闭包变量为什么是那样的行为、`pl.yield_` 为什么只有写在被装饰函数里才有意义、以及 kernel 体里的错误为什么在解析期带行号报出来，而不是调用时给你一条 traceback。

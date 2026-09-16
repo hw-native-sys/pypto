@@ -51,8 +51,9 @@ JITFunction.__call__ flow
 4. Scan entry + dep ASTs for bind_dynamic declarations.
 5. Resolve compile options; bypass caching for diagnostics or explicit output requests.
 6. Build CacheKey including referenced constants (dynamic dims → None in shape tuple).
-7. Cache hit  → execute cached CompiledProgram on device → return result.
-8. Cache miss → specialize (entry + deps) → pl.parse() → ir.compile() → cache → execute → return.
+7. Validate complete NPU arguments and capture the current scalar values and stream.
+8. Resolve a kernel artifact, compiling on a cache miss.
+9. Initialize the shared process Worker, prepare once, enqueue and return output aliases.
 """
 
 from __future__ import annotations
@@ -2416,8 +2417,8 @@ class JITFunction:
             the caller supplies ``config=RunConfig(distributed_config=...)``:
             the config is forwarded through ``_compile`` → ``ir.compile()``
             (see ``RunConfig.compile_kwargs``), which yields a
-            ``DistributedCompiledProgram`` that ``__call__`` dispatches
-            per-rank.
+            ``DistributedCompiledProgram`` obtained via explicit ``compile()``
+            and then called to dispatch per-rank.
         _level: pl.Level or None.
         _auto_scope: Whether the compiler auto-inserts AUTO runtime scopes
             (SIMPLER_SCOPE) around the body and each for/if body. ``True`` by
@@ -2459,6 +2460,7 @@ class JITFunction:
         self._dep_graph_state: _CachedDepGraph | None = None
         self._cache: dict[CacheKey | tuple[CacheKey, KernelABI], Any] = {}
         self._artifact_objects: dict[Any, Any] = {}
+        self._kernel_contracts: dict[CacheKey, tuple[Any, KernelABI]] = {}
         self._cache_lock = threading.RLock()
 
         # Preserve function metadata
@@ -3085,6 +3087,7 @@ class JITFunction:
         allow_signature_mode: bool = False,
         *,
         _kernel: bool = False,
+        _preflight: Callable[[KernelABI, list[Any], Any], None] | None = None,
     ) -> tuple[Any, list[Any], Any | None]:
         """Look up or build a specialized program or internal kernel artifact.
 
@@ -3105,6 +3108,10 @@ class JITFunction:
         )
 
         compile_kwargs, bypass_cache = _resolve_compile_request(run_config)
+        if _preflight is not None and run_config is None:
+            # Eager calls target the first supported hardware combination.
+            # Explicit program compilation retains its simulator default.
+            compile_kwargs["platform"] = "a2a3"
         cache_config = capture_cache_config(getattr(run_config, "cache_config", None))
         record_stats(requests=1)
         if not cache_config.enabled:
@@ -3115,21 +3122,23 @@ class JITFunction:
 
         kernel_abi = None
         kernel_program = None
-        if _kernel:
+
+        def resolve_kernel_contract() -> tuple[Any, KernelABI]:
             from pypto.ir._kernel_compile import kernel_abi_for_program  # noqa: PLC0415
 
-            kernel_program = self._compile_to_program(
+            program = self._compile_to_program(
                 specialization.tensor_meta,
                 specialization.scalar_dtypes,
                 specialization.constexpr_values,
                 specialization.per_func_dyn,
                 pl,
             )
-            kernel_abi = kernel_abi_for_program(
-                kernel_program,
+            abi = kernel_abi_for_program(
+                program,
                 platform=compile_kwargs["platform"],
                 runtime=runtime_kind_to_name(_resolve_runtime()),
             )
+            return program, abi
 
         def build(**overrides: Any) -> Any:
             record_stats(generation_builds=1)
@@ -3154,6 +3163,10 @@ class JITFunction:
 
         if bypass_cache:
             record_stats(forced_rebuilds=1)
+            if _kernel:
+                kernel_program, kernel_abi = resolve_kernel_contract()
+                if _preflight is not None:
+                    _preflight(kernel_abi, ordered_args, run_config)
             return build(), ordered_args, run_config
 
         # Resolved before the key rather than during ``build()``: a dep's
@@ -3183,8 +3196,14 @@ class JITFunction:
             runtime=_resolve_runtime(),
         )
 
-        memory_key = key if kernel_abi is None else (key, kernel_abi)
         with self._cache_lock:
+            if _kernel:
+                if key not in self._kernel_contracts:
+                    self._kernel_contracts[key] = resolve_kernel_contract()
+                kernel_program, kernel_abi = self._kernel_contracts[key]
+                if _preflight is not None:
+                    _preflight(kernel_abi, ordered_args, run_config)
+            memory_key = key if kernel_abi is None else (key, kernel_abi)
             if cache_config.enabled:
                 from ._persistent import resolve_persistent  # noqa: PLC0415
 
@@ -3210,7 +3229,7 @@ class JITFunction:
     def _resolve_kernel_artifact(
         self, args: tuple[Any, ...], kwargs: dict[str, Any], *, allow_signature_mode: bool = False
     ) -> Any:
-        """Resolve an internal kernel variant; public JIT dispatch is connected separately."""
+        """Resolve a kernel artifact without initializing or submitting to a Worker."""
         artifact, _, _ = self._resolve_compiled(args, kwargs, allow_signature_mode, _kernel=True)
         return artifact
 
@@ -3255,50 +3274,41 @@ class JITFunction:
         return _persistent_dynamic_digest(state.persistent_source_hash, tuple(values))
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        """Specialize, compile (or serve from cache), and execute on device.
+        """Implicitly compile and enqueue a kernel on the current torch NPU stream.
 
-        A compatible compiled object is reused in process. When persistent
-        caching is enabled, a disk hit restores generated code or complete
-        binaries; a miss specializes into ``@pl.program`` and runs passes and
-        codegen. Execution publishes missing binaries automatically. Diagnostic
-        and explicit output requests bypass lookup and insertion on every call.
+        Supply every Out/InOut tensor. Returns only declared aliases of caller
+        tensors, without allocating outputs or waiting for device completion.
+        Python/ctypes scalars use this invocation's value; compatible artifacts,
+        registrations and the process Worker are reused. The first call executes
+        the operator exactly once.
 
-        The compiled kernel is then executed on the NPU device with the given
-        torch tensor arguments (Triton-like API).
+        ``config=RunConfig(...)`` supplies compilation options and fixed Worker
+        configuration. The initial eager target is A2/A3 with TRB; no config
+        defaults to that target and the framework's current device. Program-only
+        execution/diagnostic options and graph capture are rejected.
 
-        A ``config=RunConfig(...)`` keyword argument is consumed here rather
-        than passed to the decorated function: its compile-side fields
-        (``strategy``, ``dump_passes``, diagnostics, ...) are forwarded to
-        ``ir.compile()`` via ``RunConfig.compile_kwargs``, and its
-        runtime fields drive on-device execution.  ``strategy`` also takes
-        part in the cache key so artifacts compiled under different strategy
-        values never share a cache entry.
-
-        Args:
-            *args: Positional arguments matching the decorated function's params.
-            **kwargs: Keyword arguments.  A ``config`` keyword, if present, is
-                a ``RunConfig`` and is consumed by
-                the JIT machinery (not forwarded to the decorated function).
-
-        Returns:
-            ``None`` for in-place calls (output tensors modified on device),
-            or ``torch.Tensor`` / ``tuple[torch.Tensor, ...]`` for return-style
-            calls. Per-run on-device timing is no longer surfaced as an
-            attribute — read it from the runtime's ``[STRACE]`` log markers
-            (simpler PR #1177).
+        Use ``op.compile(...)(...)`` for program execution, including CPU tensors,
+        DeviceTensor, simulation and distributed programs.
         """
-        compiled, ordered_args, run_config = self._resolve_compiled(args, kwargs)
-        if run_config is not None:
-            return compiled(*ordered_args, config=run_config)
-        return compiled(*ordered_args)
+        from pypto.torch.launch import describe_eager_call, invoke  # noqa: PLC0415
+
+        frame = None
+
+        def preflight(abi: KernelABI, bound: list[Any], config: Any) -> None:
+            nonlocal frame
+            frame = describe_eager_call(abi, bound, config)
+
+        artifact, _, config = self._resolve_compiled(args, kwargs, _kernel=True, _preflight=preflight)
+        assert frame is not None
+        return invoke(artifact, frame, config)
 
     def compile(self, *args: Any, **kwargs: Any) -> Any:
         """Specialize + compile for the shape/dtype combination implied by *args*,
         and return the underlying ``CompiledProgram``.
 
-        Same specialization / cache pipeline as ``__call__``, minus the
-        on-device dispatch. Use this when you want to drive execution through
-        the runtime worker API directly:
+        Uses the program artifact cache, separate from the eager kernel cache
+        used by ``__call__``. Call the returned object for program execution, or
+        drive execution through the runtime worker API directly:
 
         - ``pypto.runtime.ChipWorker.run`` / ``register``
           for explicit L2 dispatch.
@@ -3307,13 +3317,12 @@ class JITFunction:
 
         ``config=RunConfig(...)`` is still consumed (and its compile-side
         knobs forwarded to ``ir.compile()``) so the returned
-        ``CompiledProgram`` honours the same options as a direct
-        ``kernel(*args, config=...)`` call. Runtime-side fields on the
+        ``CompiledProgram`` honours the selected compile options. Runtime-side fields on the
         ``RunConfig`` (``device_id``, DFX flags, ...) do not apply here —
         they affect dispatch, not the compiled artefact.
 
-        Subsequent calls (either ``__call__`` or [`compile`][pypto.language.JITFunction.compile]) with the
-        same specialization and compatible cache policy return the same
+        Subsequent ``compile()`` calls with the same specialization and
+        compatible cache policy return the same
         ``CompiledProgram`` instance. With persistence enabled, a disk-restored
         object has ``program is None``; disable persistence when IR is required.
         Dump, compile-profiling, explicit output,
