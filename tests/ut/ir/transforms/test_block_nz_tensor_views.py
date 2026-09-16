@@ -963,5 +963,51 @@ def test_a_single_column_block_load_is_exempt_from_the_gap_limit():
     _run(_single_column_block_program(rows=65552, tile_rows=16))
 
 
+def _valid_shape_program(rows: int, tile_rows: int, valid_rows: int):
+    """An NZ load whose ``valid_shape`` narrows the row window below ``shapes``.
+
+    Codegen builds the ``pto.partition_view`` from ``valid_shape`` when the load
+    carries one, so this window — not ``shapes`` — is pto-isa's ``gShape``.
+    """
+
+    @pl.program
+    class NarrowedValidShape:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            x: pl.Tensor[[64, 64], pl.INT8],
+            w: pl.Tensor[[rows, 64], pl.INT8, pl.NZ],
+            out: pl.Tensor[[64, tile_rows], pl.INT32],
+        ):
+            xt = pl.load(x, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
+            wt = pl.load(w, [0, 0], [tile_rows, 64], valid_shape=[valid_rows, 64], target_memory=pl.Mem.Mat)
+            acc = pl.matmul(xt, pl.tile.transpose_view(wt), out_dtype=pl.INT32)
+            pl.store(acc, [0, 0], out)
+            return out
+
+    return NarrowedValidShape
+
+
+def test_a_narrowed_valid_shape_drives_the_gap_check():
+    """The gap follows ``valid_shape``, not ``shapes``.
+
+    ``shapes`` alone puts this load at 65520 blocks — under the bound — while
+    the partition codegen actually emits (``1x2x1x16x32``, from ``valid_shape``)
+    puts it at 65536. Measuring ``shapes`` would wave through a load that
+    truncates on device, which is the whole failure this guard exists to stop.
+    """
+    assert 65552 - 32 == 65520  # what `shapes` alone would report
+    assert 65552 - 16 == 65536  # what pto-isa actually computes
+    with pytest.raises(ValueError) as excinfo:
+        _run(_valid_shape_program(rows=65552, tile_rows=32, valid_rows=16))
+    assert "65536 32-byte blocks" in str(excinfo.value)
+
+
+def test_a_valid_shape_load_within_the_bound_is_accepted():
+    """A narrowed valid_shape is not rejected per se — only an oversized gap."""
+    assert 65536 - 16 == 65520
+    _run(_valid_shape_program(rows=65536, tile_rows=32, valid_rows=16))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

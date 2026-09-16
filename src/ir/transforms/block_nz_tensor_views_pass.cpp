@@ -297,12 +297,19 @@ constexpr int64_t kNzMaxGmGapBlocks = 65535;
 /// The gap is the stride *between* bursts, and ``nBurst`` is the load's own
 /// column-block extent, so a single-column-block load never consumes it — it
 /// is exempt no matter how large the gap computes to.
-void CheckNzGmGapFitsBurstStride(const std::vector<ExprPtr>& blocked_shape, const ExprPtr& blocked_sizes,
+///
+/// ``blocked_partition`` must be the tuple codegen turns into the
+/// ``pto.partition_view`` — ``valid_shape`` when the load carries one, else
+/// ``shapes`` (``src/backend/common/pto_ops_memory.cpp``). That view *is*
+/// pto-isa's ``gShape``, so reading ``shapes`` unconditionally would measure a
+/// window the hardware never sees: a narrowed ``valid_shape`` loads *fewer*
+/// row fractals and therefore leaves a *larger* gap behind.
+void CheckNzGmGapFitsBurstStride(const std::vector<ExprPtr>& blocked_shape, const ExprPtr& blocked_partition,
                                  const Span& span) {
-  auto sizes = As<MakeTuple>(blocked_sizes);
+  auto sizes = As<MakeTuple>(blocked_partition);
   INTERNAL_CHECK_SPAN(sizes && sizes->elements_.size() == tensor_view_semantics::kNzBlockedRank, span)
-      << "Internal error: blocked tile.load sizes must be a rank-" << tensor_view_semantics::kNzBlockedRank
-      << " MakeTuple";
+      << "Internal error: the blocked tile.load partition must be a rank-"
+      << tensor_view_semantics::kNzBlockedRank << " MakeTuple";
   INTERNAL_CHECK_SPAN(blocked_shape.size() == tensor_view_semantics::kNzBlockedRank, span)
       << "Internal error: the NZ tensor shape must be blocked before the GM gap check";
 
@@ -478,7 +485,12 @@ class BlockNzMutator : public IRMutator {
     if (args.size() >= 4) {
       args[3] = BlockTupleArg(args[3], dtype, op->span_, /*is_offsets=*/false, facts_);
     }
-    CheckNzGmGapFitsBurstStride(tensor_type->shape_, args[2], op->span_);
+    // Codegen builds the ``pto.partition_view`` — and so pto-isa's ``gShape`` —
+    // from valid_shape when the load carries one, falling back to shapes
+    // otherwise (``src/backend/common/pto_ops_memory.cpp``). Measure the same
+    // tuple: a narrowed valid_shape loads fewer row fractals and leaves a
+    // larger gap than shapes alone would suggest.
+    CheckNzGmGapFitsBurstStride(tensor_type->shape_, args.size() >= 4 ? args[3] : args[2], op->span_);
     return args;
   }
 

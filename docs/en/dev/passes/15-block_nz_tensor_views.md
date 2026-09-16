@@ -287,6 +287,15 @@ The other workaround is to annotate a layer-stacked weight rank-3 with the
 stacked axis as the batch (`[LAYERS, K, N]`); its extent then rides `gStride0`
 and a real `for` loop rather than the burst gap.
 
+The window measured is the one codegen turns into the `pto.partition_view` —
+`valid_shape` when the load carries one, else `shapes`
+(`src/backend/common/pto_ops_memory.cpp`). That view *is* pto-isa's `gShape`, so
+a narrowed `valid_shape` loads **fewer** row fractals and leaves a **larger**
+gap than `shapes` alone would suggest. A `[65552, 64]` INT8 weight read with
+`shapes=[32, 64]` and `valid_shape=[16, 64]` emits
+`partition_tensor_view<1x2x1x16x32>` and so a gap of 65536, not the 65520
+`shapes` implies.
+
 **A single-column-block load is exempt.** `TLoadGm2L1Nz2nz` passes the load's
 column-block extent as `nBurst`, and the DMA applies `gmGap` only when stepping
 from one burst to the next, so at one burst the truncated field is never read.

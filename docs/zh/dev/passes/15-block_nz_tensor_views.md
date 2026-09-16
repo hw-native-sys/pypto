@@ -262,6 +262,14 @@ gmGap = (gStride1 - gShape2*gShape3*gShape4) * sizeof(T) / 32
 （`[LAYERS, K, N]`），其范围随即由 `gStride0` 和一个真正的 `for` 循环承载，而不再
 经过 burst 间隔。
 
+这里度量的窗口是 codegen 最终生成 `pto.partition_view` 所用的那个——load 带
+`valid_shape` 时取 `valid_shape`，否则取 `shapes`
+（`src/backend/common/pto_ops_memory.cpp`）。该 view 就是 pto-isa 的 `gShape`，
+因此收窄的 `valid_shape` 载入的行 fractal **更少**，留下的间隔反而**更大**，比只看
+`shapes` 得到的值更大。一个 `[65552, 64]` 的 INT8 权重若以 `shapes=[32, 64]`、
+`valid_shape=[16, 64]` 读取，生成的是 `partition_tensor_view<1x2x1x16x32>`，
+间隔为 65536，而不是 `shapes` 暗示的 65520。
+
 **单列块 load 不受此限制。** `TLoadGm2L1Nz2nz` 把 load 自身的列块数作为 `nBurst`
 传入，而 DMA 只在从一个 burst 跨到下一个时才使用 `gmGap`，因此只有一个 burst 时那个
 被截断的字段根本不会被读取。已在设备上于 pto-isa 自带的 `tload_gm2mat` ST 中确认：
