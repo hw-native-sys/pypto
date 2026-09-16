@@ -65,10 +65,66 @@ read `npu_stream`, synchronize, or enqueue commands. These context queries can
 initialize torch_npu's own framework context; they do not create or initialize a
 Simpler/PyPTO Worker.
 
+## Internal schema and Fake/Meta helpers
+
+`pypto.torch.registration.RegistrationSignature` copies the same `ParamInfo` carrier
+shapes and return-slot indices. Its `schema(name)` method marks Out/InOut tensor
+arguments writable and connects each tensor return to the corresponding input
+alias set. All arguments remain required; no output allocation is inferred.
+Scalar inputs map to dispatcher `SymInt`, `float` or `bool`. `SymInt` accepts
+ordinary integers and preserves symbolic integers through dispatch, including
+symbols without concrete hints. Scalar validation retains dtype range checks
+without converting symbols to Python integers. Read-only input
+identity returns, scalar outputs, scalar-only operators, invalid names and
+aliases, and UINT64 scalars are rejected:
+the dispatcher's signed integer type cannot represent the full UINT64 range.
+Return aliases must name Out/InOut tensors: the dispatcher schema checker
+rejects returning a read-only input object directly.
+
+`fake(*args)` accepts FakeTensor or Meta tensors, validates dtype, rank, static
+shape, contiguity, device consistency and inference-only use, then returns the
+exact declared input objects. Dynamic dimensions and symbolic integer scalars
+remain symbolic. Returning an input preserves its strides, storage offset and
+alias identity, including empty slices. This helper never reads storage or data
+pointers, queries NPU formats/device/stream, allocates business outputs or invokes
+a Worker. Physical NPU format and overlapping-storage checks stay in the real
+call adapter because abstract tensors do not establish those facts.
+
+`define(library, name)` installs only the schema and fake kernel into a
+caller-owned `torch.library.Library`. The caller must keep that library alive
+and owns its registration lifetime. Repeated definitions, including a different
+signature with the same name, raise PyTorch's duplicate-definition error;
+existing definitions are not replaced. Importing or reloading this module does
+not register an operator. `pypto.torch` exports no new public registration API,
+and PyPTO installs no real device kernel in this foundation. If the installed
+PyTorch lacks `torch.library.register_fake`, the helper falls back to
+`torch.library.impl_abstract` (available in PyTorch 2.2–2.3), preserving the
+caller-owned library lifetime. If neither API is available, definition fails
+before installing a schema. This optional helper requires one of these APIs;
+the fallback does not add support for PyTorch 2.0–2.1 or change the package-wide
+minimum dependency version.
+
+The tests use temporary namespaces and CPU fixture implementations. On PyTorch
+2.6, mutation-only schemas with no dispatcher return pass all
+[`torch.library.opcheck`](https://docs.pytorch.org/docs/2.6/library.html#torch.library.opcheck)
+checks and `torch.compile(backend="aot_eager", fullgraph=True, dynamic=True)`;
+the test wrapper returns the caller's output tensor after the operator call.
+Registered `torch.ops` tests verify that backed and unbacked integer symbols
+reach the fake kernel unchanged without equality guards. A shape-derived scalar
+test also verifies that different input sizes reuse one compiled graph.
+API-selection tests emulate the older registration entry point on PyTorch 2.6
+and verify Fake/Meta dispatch, duplicate rejection and library cleanup; they
+do not establish end-to-end compiler compatibility on older PyTorch releases.
+Schemas with aliased returns are checked for schema correctness and Fake/Meta
+behavior separately. These checks do not establish functionalization or compiled
+execution of aliased-return operators. Actual kernel registration, device
+execution, autograd and the final compiler integration remain later work.
+
 ## Optional dependencies and scope
 
 `import pypto.torch` exports no execution API. Importing it or its `interop`
-module does not request torch_npu, Simpler or a native launch extension.
+or `registration` module does not request torch_npu, Simpler or a native launch
+extension.
 `torch` remains a normal PyPTO dependency. A real call description loads
 `torch_npu` on demand and reports a targeted error if it is unavailable.
 
@@ -86,7 +142,7 @@ context resources currently use Simpler defaults. An incompatible configuration
 is rejected instead of opening another Worker.
 
 The integration SDK is pinned to
-`bd7a7c41026914e0e129063ee4867de876aae69c`. Its supported Python surface is
+`b5a0ea0c941576e4e9c409b7be5130a607c4f9dc`. Its supported Python surface is
 `simpler.task_interface.ChipWorker.kernel_init`, `kernel_prepare_callable` and
 `finalize`; the proposed L2 `Worker(execution_mode="kernel")` API is not present.
 PyPTO's private adapter uses these existing methods. Init and prepare take no
@@ -234,3 +290,7 @@ non-default streams, framework A → PyPTO → B ordering, offset views, changin
 scalars, GC/allocation pressure, owner-thread close, a deliberately blocked host
 callback and native error injection. These require a reserved A2/A3 NPU and
 both locally built adapters. They do not claim A5 or ACLGraph acceptance.
+
+`tests/ut/torch/test_registration.py` covers schema mutation/alias contracts,
+Fake/Meta and symbolic inputs, isolated imports, duplicate definitions, and
+test-only dispatcher/compiler integration without a real kernel executor.

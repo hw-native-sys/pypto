@@ -1244,10 +1244,25 @@ def _assignment_parts(stmt: ast.stmt) -> tuple[list[ast.expr], ast.expr | None] 
     return None
 
 
-def _stmt_calls_dep(stmt: ast.stmt, dep_name: str | None) -> bool:
-    """Check expression fields on ``stmt`` without searching nested bodies."""
-    if dep_name is None:
+def _stmt_calls_dep(stmt: ast.stmt, dep_name: str | None, stop_at_call: ast.Call | None = None) -> bool:
+    """Check expression fields on ``stmt`` without searching nested bodies.
+
+    ``stop_at_call`` narrows the match from "any call to ``dep_name``" to one
+    specific call node. A dep reached with two different ``pl.constexpr``
+    bindings is compiled once per binding, and each of those compilations must
+    read the metadata live at *its own* call site — stopping at the first call
+    to the name would hand every later binding the first site's tensors.
+    """
+    if stop_at_call is None and dep_name is None:
         return False
+
+    def matches(node: ast.AST) -> bool:
+        if stop_at_call is not None:
+            return node is stop_at_call
+        return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == dep_name
+
+    # Nested bodies are skipped here and walked by the caller one statement at a
+    # time, so the metadata a scope defines before the call is still collected.
     nested_stmt_fields = {"body", "orelse", "finalbody", "handlers"}
     for field, value in ast.iter_fields(stmt):
         if field in nested_stmt_fields:
@@ -1256,10 +1271,7 @@ def _stmt_calls_dep(stmt: ast.stmt, dep_name: str | None) -> bool:
         for item in items:
             if not isinstance(item, ast.AST):
                 continue
-            if any(
-                isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == dep_name
-                for node in ast.walk(item)
-            ):
+            if any(matches(node) for node in ast.walk(item)):
                 return True
     return False
 
@@ -1344,10 +1356,11 @@ def _walk_local_tensor_meta_stmts(
     deps: _DepScan,
     resolve_int: Callable[[ast.expr], int | None],
     pl_attr_handlers: dict[str, Callable[[ast.Call, str | None], TensorMeta | None]],
+    stop_at_call: ast.Call | None = None,
 ) -> bool:
     """Walk supported DSL scopes in source order until the selected call."""
     for stmt in stmts:
-        if _stmt_calls_dep(stmt, stop_at_dep):
+        if _stmt_calls_dep(stmt, stop_at_dep, stop_at_call):
             return True
         _update_local_tensor_meta(stmt, local, dim_aliases, deps, resolve_int, pl_attr_handlers)
         for attr in ("body", "orelse", "finalbody"):
@@ -1360,6 +1373,7 @@ def _walk_local_tensor_meta_stmts(
                 deps,
                 resolve_int,
                 pl_attr_handlers,
+                stop_at_call,
             ):
                 return True
     return False
@@ -1371,6 +1385,7 @@ def _extract_local_tensor_metas(
     caller_func_type: str = "orchestration",
     stop_at_dep: str | None = None,
     dep_seen: frozenset[int] = frozenset(),
+    stop_at_call: ast.Call | None = None,
 ) -> dict[str, TensorMeta]:
     """Infer ``TensorMeta`` for the local tensor variables in ``func``'s body.
 
@@ -1428,7 +1443,10 @@ def _extract_local_tensor_metas(
     When ``stop_at_dep`` is provided, extraction stops
     immediately before the first source-ordered call to that dependency. This
     produces the point-in-time metadata visible to that call and ignores later
-    rebindings.
+    rebindings. ``stop_at_call`` selects one specific call node instead, which
+    is what a dep reached with several ``pl.constexpr`` bindings needs: each
+    binding is a separate compilation and must see the tensors live at its own
+    call site, not at the first call to the same name.
     """
     func_def = _get_func_def(func)
     local: dict[str, TensorMeta] = dict(seed_meta or {})
@@ -1633,6 +1651,7 @@ def _extract_local_tensor_metas(
         deps,
         _resolve_int,
         _pl_attr_handlers,
+        stop_at_call,
     )
     return local
 
@@ -1776,85 +1795,233 @@ def _fold_call_site_constant(
     return constant_source(value)
 
 
-def _resolve_dep_constexpr_values(
-    dep: JITFunction,
-    callers: Sequence[tuple[Any, str]],
-    resolved_constexpr: Mapping[int, Mapping[str, str]],
+def _resolve_call_site_constexpr(
+    dep_name: str,
+    signature: tuple[list[str], list[str]],
+    call: ast.Call,
+    caller_name: str,
+    caller_binding: Mapping[str, str],
+    caller_globals: Mapping[str, Any],
+    caller_locals: frozenset[str],
 ) -> dict[str, str]:
-    """Resolve a dep's ``pl.constexpr`` parameters from every call site that reaches it.
-
-    One generated function is emitted per dep, so **every** call site of it must
-    agree on every constexpr value — across callers as well as within one body.
-    A diamond ``entry -> {left, right} -> shared`` where the two branches pass
-    different constants is the case that makes this matter: resolving from the
-    first caller alone would fold its value, drop the argument at both rewritten
-    call sites, and silently run the other branch against the wrong constant.
-    Divergence is reported instead.
+    """Resolve one call site's ``pl.constexpr`` arguments into folded source text.
 
     Args:
-        dep: The dependency whose constexpr parameters to resolve
-        callers: Every ``(caller_func, dep_call_name)`` pair that reaches it
-        resolved_constexpr: Already-resolved bindings per ``id(func)``, so a
+        dep_name: The dependency's name, for diagnostics
+        signature: ``(constexpr parameter names, all parameter names)`` for the
+            dependency. Passed in rather than re-derived because the caller
+            resolves every call site of a dep and both lists cost a full
+            ``inspect.signature`` with annotation resolution.
+        call: The call node whose arguments to bind
+        caller_name: The calling function's name, for diagnostics
+        caller_binding: The caller's own resolved constexpr values, so a
             forwarded parameter (``helper(x, BLOCK)``) carries through
+        caller_globals: The caller's global/closure namespace
+        caller_locals: The caller's parameters and assignment targets, which
+            shadow same-named globals
 
     Returns:
-        Folded source text per constexpr parameter name; empty when the dep
-        declares none
+        Folded source text per constexpr parameter name
 
     Raises:
-        TypeError: if a constexpr parameter is unbound at a call site, bound to
-            something with no compile-time value, or given differing values.
+        TypeError: if a constexpr parameter is unbound at this call site or is
+            bound to something with no compile-time value.
     """
-    constexpr_names = _constexpr_params(dep._func)
-    if not constexpr_names:
-        return {}
+    constexpr_names, dep_param_names = signature
+    bound: dict[str, ast.expr] = {}
+    for index, arg in enumerate(call.args):
+        if index < len(dep_param_names):
+            bound[dep_param_names[index]] = arg
+    for keyword in call.keywords:
+        if keyword.arg is not None:
+            bound[keyword.arg] = keyword.value
 
-    dep_param_names = dep._param_names()
     resolved: dict[str, str] = {}
-    origin: dict[str, str] = {}
-    for caller_func, dep_call_name in callers:
-        caller_constexpr = resolved_constexpr.get(id(caller_func), {})
-        caller_globals = func_name_lookup(caller_func)
-        caller_locals = frozenset(_body_local_names(caller_func))
-        caller_name = getattr(caller_func, "__name__", "<caller>")
-        for call in _dep_call_nodes(caller_func, dep_call_name):
-            bound: dict[str, ast.expr] = {}
-            for index, arg in enumerate(call.args):
-                if index < len(dep_param_names):
-                    bound[dep_param_names[index]] = arg
-            for keyword in call.keywords:
-                if keyword.arg is not None:
-                    bound[keyword.arg] = keyword.value
-
-            for name in constexpr_names:
-                arg = bound.get(name)
-                if arg is None:
-                    raise TypeError(
-                        f"@pl.jit function '{dep.__name__}': constexpr parameter '{name}' is not "
-                        f"bound at the call site in '{caller_name}'. A 'pl.constexpr' parameter is "
-                        f"resolved at compile time, so every call must pass it — a signature "
-                        f"default is not read for a dep call."
-                    )
-                folded = _fold_call_site_constant(arg, caller_constexpr, caller_globals, caller_locals)
-                if folded is None:
-                    raise TypeError(
-                        f"@pl.jit function '{dep.__name__}': constexpr parameter '{name}' is bound "
-                        f"to '{ast.unparse(arg)}' at the call site in '{caller_name}', which has "
-                        f"no compile-time value. Pass a literal, one of the caller's own "
-                        f"'pl.constexpr' parameters, or a module-level/closure constant."
-                    )
-                previous = resolved.setdefault(name, folded)
-                origin.setdefault(name, caller_name)
-                if previous != folded:
-                    raise TypeError(
-                        f"@pl.jit function '{dep.__name__}': constexpr parameter '{name}' is called "
-                        f"with two different values — {previous} in '{origin[name]}' and {folded} in "
-                        f"'{caller_name}'. One generated function is emitted per dependency, so its "
-                        f"compile-time parameters must agree across every call site that reaches it. "
-                        f"Give each configuration its own kernel, or make '{name}' a "
-                        f"'pl.Scalar[dtype]' runtime parameter if the value need not be constant."
-                    )
+    for name in constexpr_names:
+        arg = bound.get(name)
+        if arg is None:
+            raise TypeError(
+                f"@pl.jit function '{dep_name}': constexpr parameter '{name}' is not "
+                f"bound at the call site in '{caller_name}'. A 'pl.constexpr' parameter is "
+                f"resolved at compile time, so every call must pass it — a signature "
+                f"default is not read for a dep call."
+            )
+        folded = _fold_call_site_constant(arg, caller_binding, caller_globals, caller_locals)
+        if folded is None:
+            raise TypeError(
+                f"@pl.jit function '{dep_name}': constexpr parameter '{name}' is bound "
+                f"to '{ast.unparse(arg)}' at the call site in '{caller_name}', which has "
+                f"no compile-time value. Pass a literal, one of the caller's own "
+                f"'pl.constexpr' parameters, or a module-level/closure constant."
+            )
+        resolved[name] = folded
     return resolved
+
+
+# A resolved compile-time binding: sorted ``(param, folded source text)`` pairs.
+# Hashable, so it can stand in the identity of one generated function.
+_ConstexprBinding = tuple[tuple[str, str], ...]
+# One generated ``@pl.function``: a Python function plus the compile-time
+# binding it is compiled against. Everything downstream used to key on
+# ``id(func)`` alone, which is why a dep reached with two different constants
+# had to be refused -- there was one slot to put it in.
+_VariantKey = tuple[int, _ConstexprBinding]
+
+
+def _freeze_binding(values: Mapping[str, str]) -> _ConstexprBinding:
+    """Normalise a resolved binding into its hashable identity form."""
+    return tuple(sorted(values.items()))
+
+
+@dataclass
+class _VariantPlan:
+    """Every generated function for one request, and how call sites reach them.
+
+    A ``pl.constexpr`` argument is folded into the callee's body, so two call
+    sites passing different constants need two different generated functions.
+    This plan is the expansion of the (constexpr-independent, cached) dep graph
+    into those per-binding functions, computed fresh per request because the
+    entry's own binding seeds it.
+
+    Attributes:
+        order: Every variant in leaf-first order, entry last — the order the
+            generated ``@pl.program`` must define them in.
+        jit_func: The ``JITFunction`` each variant specializes.
+        binding: Folded constexpr text per parameter, per variant.
+        origin: ``(caller variant, call name, call node)`` for the first call
+            site that produced each dep variant. Metadata is resolved from that
+            site, so each binding reads the tensors live at its own call rather
+            than at the first call sharing its name.
+        call_targets: Per variant, ``(call name, ordinal) -> callee variant``.
+            The ordinal is the call's position among same-named calls in source
+            order, which is how the specializer tells two otherwise identical
+            call sites apart.
+    """
+
+    order: list[_VariantKey]
+    jit_func: dict[_VariantKey, JITFunction]
+    binding: dict[_VariantKey, dict[str, str]]
+    origin: dict[_VariantKey, tuple[_VariantKey, str, ast.Call]]
+    call_targets: dict[_VariantKey, dict[tuple[str, int], _VariantKey]]
+
+    def naming_order(self, entry_key: _VariantKey) -> list[tuple[_VariantKey, JITFunction]]:
+        """The order generated names are handed out in, entry first.
+
+        Functions keep the leaf-first order names were allocated in before
+        variants existed, so a call graph with one binding per dep gets exactly
+        the names it got then. Within one function, variants are ordered by the
+        call site that produced them, so the first site in the source keeps the
+        unsuffixed name and later ones take ``__2``, ``__3``, … — reading the
+        generated program in source order then matches reading the original.
+        """
+        groups: dict[int, list[_VariantKey]] = {}
+        func_order: list[int] = []
+        for key in self.order:
+            if key == entry_key:
+                continue
+            func_id = key[0]
+            if func_id not in groups:
+                groups[func_id] = []
+                func_order.append(func_id)
+            groups[func_id].append(key)
+        result: list[tuple[_VariantKey, JITFunction]] = [(entry_key, self.jit_func[entry_key])]
+        for func_id in func_order:
+            # ``order`` is the reverse of the discovery walk, so one function's
+            # variants sit in reverse source order; flip them back.
+            result.extend((key, self.jit_func[key]) for key in reversed(groups[func_id]))
+        return result
+
+
+def _expand_constexpr_variants(
+    entry: JITFunction,
+    deps_topo: Sequence[JITFunction],
+    callers_by_id: Mapping[int, Sequence[tuple[Any, str]]],
+    entry_constexpr: Mapping[str, str],
+) -> _VariantPlan:
+    """Expand the dep graph into one generated function per compile-time binding.
+
+    Walks caller-first (``reversed(deps_topo)``), so by the time a dep is
+    reached every caller variant that can reach it already exists and its own
+    forwarded values are resolved. Each call site is folded independently; call
+    sites that agree on every value collapse onto one variant, which is what
+    keeps the ordinary single-binding program emitting exactly one function per
+    dep.
+
+    Args:
+        entry: The entry function, whose binding seeds the walk
+        deps_topo: Every reachable dep, leaf-first
+        callers_by_id: ``id(dep func) -> [(caller func, call name), ...]``
+        entry_constexpr: The entry's own resolved binding
+
+    Returns:
+        The full :class:`_VariantPlan` for this request
+
+    Raises:
+        TypeError: if a constexpr parameter is unbound at a call site or bound
+            to something with no compile-time value.
+    """
+    entry_key: _VariantKey = (id(entry._func), _freeze_binding(entry_constexpr))
+    plan = _VariantPlan(
+        order=[entry_key],
+        jit_func={entry_key: entry},
+        binding={entry_key: dict(entry_constexpr)},
+        origin={},
+        call_targets={entry_key: {}},
+    )
+    variants_by_func: dict[int, list[_VariantKey]] = {id(entry._func): [entry_key]}
+
+    for dep in reversed(deps_topo):
+        # Both lists cost a full ``inspect.signature`` with annotation
+        # resolution, so they are derived once per dep rather than per call
+        # site. A dep declaring no constexpr parameter cannot split at all, and
+        # skips call-site folding entirely.
+        signature = (_constexpr_params(dep._func), dep._param_names())
+        splits = bool(signature[0])
+        for caller_func, call_name in callers_by_id.get(id(dep._func), ()):
+            caller_globals = func_name_lookup(caller_func)
+            caller_locals = frozenset(_body_local_names(caller_func))
+            caller_name = getattr(caller_func, "__name__", "<caller>")
+            call_nodes = _dep_call_nodes(caller_func, call_name)
+            for caller_key in variants_by_func.get(id(caller_func), ()):
+                caller_binding = plan.binding[caller_key]
+                for ordinal, call in enumerate(call_nodes):
+                    values = (
+                        _resolve_call_site_constexpr(
+                            dep.__name__,
+                            signature,
+                            call,
+                            caller_name,
+                            caller_binding,
+                            caller_globals,
+                            caller_locals,
+                        )
+                        if splits
+                        else {}
+                    )
+                    dep_key: _VariantKey = (id(dep._func), _freeze_binding(values))
+                    if dep_key not in plan.binding:
+                        plan.order.append(dep_key)
+                        plan.jit_func[dep_key] = dep
+                        plan.binding[dep_key] = values
+                        plan.call_targets[dep_key] = {}
+                        plan.origin[dep_key] = (caller_key, call_name, call)
+                        variants_by_func.setdefault(id(dep._func), []).append(dep_key)
+                    plan.call_targets[caller_key][(call_name, ordinal)] = dep_key
+        if id(dep._func) not in variants_by_func:
+            # Reached by dep discovery but with no ``name(...)`` call node to
+            # fold against. It still has to be emitted -- dropping it would
+            # leave the caller calling an undefined function -- so it gets the
+            # empty binding, exactly what it received before variants existed.
+            fallback: _VariantKey = (id(dep._func), ())
+            plan.order.append(fallback)
+            plan.jit_func[fallback] = dep
+            plan.binding[fallback] = {}
+            plan.call_targets[fallback] = {}
+            variants_by_func[id(dep._func)] = [fallback]
+
+    # Collected caller-first; the generated program must define callees first.
+    plan.order.reverse()
+    return plan
 
 
 def _call_arg_refs(node: ast.Call) -> list[tuple[str | None, str | _SlicedArg | None]]:
@@ -1903,6 +2070,7 @@ def _resolve_dep_call_metadata(
     dep_dyn_map: dict[str, dict[int, DynDim]],
     caller_func_type: str = "orchestration",
     dep_call_name: str | None = None,
+    call_node: ast.Call | None = None,
 ) -> tuple[
     dict[str, TensorMeta],
     dict[str, DataType],
@@ -1926,15 +2094,26 @@ def _resolve_dep_call_metadata(
     it differs from ``dep.__name__`` under an aliased import or any other
     rebinding. Defaults to ``dep.__name__`` for callers that resolve a dep
     reached under its own name.
+
+    ``call_node`` pins resolution to one specific call site instead of the
+    first one bearing that name. A dep called with two different
+    ``pl.constexpr`` bindings is compiled once per binding, and each of those
+    compilations reads the arguments and the point-in-time metadata of the call
+    site that produced it.
     """
     dep_param_names = dep._param_names()
     call_name = dep_call_name or dep.__name__
-    call_args = _extract_call_args_for_dep(caller_func, call_name)
+    call_args = (
+        _call_arg_refs(call_node)
+        if call_node is not None
+        else _extract_call_args_for_dep(caller_func, call_name)
+    )
     intermediate_metas = _extract_local_tensor_metas(
         caller_func,
         seed_meta=caller_tensor_meta,
         caller_func_type=caller_func_type,
-        stop_at_dep=call_name if call_args is not None else None,
+        stop_at_dep=call_name if call_args is not None and call_node is None else None,
+        stop_at_call=call_node,
     )
     # The extractor starts from caller_tensor_meta, then applies source-ordered
     # rebindings. Its result is therefore the authoritative state at the call.
@@ -2337,9 +2516,13 @@ class JITFunction:
         cached = state.layouts
         if cached is not None and all(a is b for a, b in zip(bindings, cached.bindings, strict=True)):
             return cached.layouts
-        # Same list ``_build_contexts`` allocates from, so the names agree with
-        # the ones the generated program actually uses.
-        gen_names = _allocate_generated_names(self, state.graph.deps)
+        # Keyed per function, not per ``pl.constexpr`` variant: a parameter's
+        # layout is a property of the declaration, so every variant of a dep
+        # carries the same one and only needs to be counted once. The names
+        # therefore agree with the generated program's for any single-binding
+        # call graph, and stay a stable discriminator when a dep is emitted
+        # more than once.
+        gen_names = _allocate_generated_names([(id(d._func), d) for d in [self, *state.graph.deps]])
         layouts = tuple(
             sorted(
                 (gen_names[id(dep._func)], param, str(layout))
@@ -2490,40 +2673,72 @@ class JITFunction:
                 records.append((index, func.__module__, func.__qualname__, name, folded))
         return compute_source_hash([source_hash, json.dumps(records, separators=(",", ":"))])
 
-    def _resolve_constexpr_bindings(self, entry_constexpr: Mapping[str, str]) -> dict[int, dict[str, str]]:
-        """Resolve every function's ``pl.constexpr`` bindings, entry then each dep.
+    def _resolve_constexpr_bindings(self, entry_constexpr: Mapping[str, str]) -> _VariantPlan:
+        """Expand this request's call graph into one function per constexpr binding.
 
-        Walked caller-first so a dep that forwards one of its caller's
-        compile-time parameters sees it already resolved. Run before the cache
-        key as well as during specialization: a dep's value is part of what gets
-        compiled, so it has to be part of what the key identifies.
+        Run before the cache key as well as during specialization: a dep's
+        constant is part of what gets compiled, so it has to be part of what
+        the key identifies, and the same walk backing both means the two cannot
+        disagree.
 
         Args:
             entry_constexpr: The entry's own bindings, from argument binding
 
         Returns:
-            Folded source text per constexpr param name, keyed by ``id(func)``
+            The request's :class:`_VariantPlan`
         """
         deps_topo, callers_by_id, _, _ = self._get_dep_graph()
-        resolved: dict[int, dict[str, str]] = {id(self._func): dict(entry_constexpr)}
-        for dep in reversed(deps_topo):
-            resolved[id(dep._func)] = _resolve_dep_constexpr_values(
-                dep, callers_by_id[id(dep._func)], resolved
-            )
-        return resolved
+        return _expand_constexpr_variants(self, deps_topo, callers_by_id, entry_constexpr)
 
-    def _constexpr_identity_records(self, bindings: Mapping[int, Mapping[str, str]]) -> list[tuple[Any, ...]]:
-        """Flatten resolved bindings into deterministic cache-identity records.
+    def _constexpr_identity_records(self, plan: _VariantPlan) -> list[tuple[Any, ...]]:
+        """Flatten a variant plan into deterministic cache-identity records.
 
         Indexed by position in ``[self, *deps]`` and qualified by the defining
         module, mirroring ``_get_source_hash``'s records so two functions that
-        share a parameter name stay distinguishable.
+        share a parameter name stay distinguishable. A dep emitted once per
+        binding contributes one record group per binding, so a program that
+        compiles ``helper`` at 16 and at 32 cannot collide with one that
+        compiles it twice at 16.
+
+        Once anything is split, **which** specialization each call site reaches
+        is also part of the identity, because the set of bindings does not
+        determine it. Three calls at ``16``, ``32`` and ``cfg.N`` emit the same
+        two bindings whichever value ``cfg.N`` holds; only the third call's
+        target moves, and an attribute like ``cfg.N`` is invisible to
+        ``_get_source_hash``, which can render free names only. Without the
+        wiring the key stands still while the generated program changes, and
+        the artifact built for the other target is served.
+
+        The wiring is emitted only when some function really is split. With one
+        binding apiece each call name has exactly one possible target, so the
+        call graph in the source hash plus the bindings above already pin it,
+        and staying silent keeps every existing key — and the artifacts behind
+        it — valid.
         """
+        position = {id(jit_func._func): index for index, jit_func in enumerate([self, *self._get_deps()])}
+        split = len({key[0] for key in plan.order}) != len(plan.order)
         records: list[tuple[Any, ...]] = []
-        for index, jit_func in enumerate([self, *self._get_deps()]):
-            func = jit_func._func
-            for name, text in sorted(bindings.get(id(func), {}).items()):
+        for key in plan.order:
+            func = plan.jit_func[key]._func
+            index = position.get(id(func), -1)
+            binding = _freeze_binding(plan.binding[key])
+            for name, text in binding:
                 records.append((index, func.__module__, func.__qualname__, name, text))
+            if not split:
+                continue
+            for (call_name, ordinal), target in sorted(plan.call_targets[key].items()):
+                records.append(
+                    (
+                        index,
+                        func.__module__,
+                        func.__qualname__,
+                        binding,
+                        call_name,
+                        ordinal,
+                        position.get(target[0], -1),
+                        target[1],
+                    )
+                )
         return records
 
     @cache_in_snapshot
@@ -3465,59 +3680,106 @@ class JITFunction:
         The returned list is in leaf-first order (deps before their
         callers) so the generated source defines callees before callers.
         """
-        deps_topo, callers_by_id, callees_by_id, _ = self._get_dep_graph()
+        _, callers_by_id, callees_by_id, _ = self._get_dep_graph()
         empty_dyn: dict[str, dict[int, DynDim]] = {}
 
         # Map each Python function id → its JIT ``_func_type`` so meta
         # resolution downstream can gate dep discovery on the caller's type
         # (a host orchestrator additionally admits ``orchestration`` deps).
-        func_type_by_id: dict[int, str] = {id(self._func): self._func_type}
-        for d in deps_topo:
-            func_type_by_id[id(d._func)] = d._func_type
+        # Expand the graph into one generated function per compile-time binding.
+        # A dep called with two different ``pl.constexpr`` values is two
+        # functions here, not an error. The same walk backs the cache key, so
+        # the two cannot disagree.
+        plan = self._resolve_constexpr_bindings(constexpr_values)
+        entry_key: _VariantKey = (id(self._func), _freeze_binding(constexpr_values))
 
-        # Walk caller-first to resolve each dep's metadata from its actual
-        # caller's already-resolved metadata.
+        func_type_by_id: dict[int, str] = {id(self._func): self._func_type}
+        for key in plan.order:
+            jit_func = plan.jit_func[key]
+            func_type_by_id[id(jit_func._func)] = jit_func._func_type
+
+        # One generated ``@pl.function`` name per variant, unique across the
+        # program. Two names can collide for two reasons: two distinct deps
+        # sharing a ``__name__`` (two modules each defining ``helper``), and
+        # two bindings of one dep. Either way the later claimant is suffixed,
+        # because emitting both as ``def helper`` made the parser reject the
+        # program with a bare ``Duplicate function name "helper"``.
+        # Entry first, so a clash never moves the name the user called.
+        gen_names = _allocate_generated_names(plan.naming_order(entry_key))
+
+        # Per variant, how its body's calls name the functions they reach.
+        # ``dep_call_variants`` is keyed by ``(call name, ordinal)`` because one
+        # body can now call one name at two constants and must reach a different
+        # generated function at each site. ``dep_func_names`` keeps the
+        # per-name view for the single-binding case, where every ordinal agrees.
+        dep_func_names_by_variant: dict[_VariantKey, dict[str, str]] = {}
+        dep_call_variants_by_variant: dict[_VariantKey, dict[tuple[str, int], str]] = {}
+        for caller_key, targets in plan.call_targets.items():
+            first_by_name: dict[str, str] = {}
+            reached_by_name: dict[str, set[str]] = {}
+            per_site: dict[tuple[str, int], str] = {}
+            # Sorted by ``(call name, ordinal)``, so the first hit per name is
+            # its ordinal 0 — the target ``dep_func_names`` should name.
+            for (call_name, ordinal), dep_key in sorted(targets.items(), key=lambda item: item[0]):
+                per_site[(call_name, ordinal)] = gen_names[dep_key]
+                first_by_name.setdefault(call_name, gen_names[dep_key])
+                reached_by_name.setdefault(call_name, set()).add(gen_names[dep_key])
+            dep_func_names_by_variant[caller_key] = first_by_name
+            # Left empty unless some call name really does reach more than one
+            # generated function: the per-name map already covers the rest, and
+            # an empty map is what tells the specializer it can skip numbering
+            # this body's call sites.
+            dep_call_variants_by_variant[caller_key] = (
+                per_site if any(len(reached) > 1 for reached in reached_by_name.values()) else {}
+            )
+
+        # Walk caller-first (reverse of leaf-first order) so each variant's
+        # caller metadata is already resolved when we get to it; collect
+        # contexts caller-first, then reverse to restore leaf-first emit order.
         resolved: dict[
-            int,
+            _VariantKey,
             tuple[
                 dict[str, TensorMeta],
                 dict[str, DataType],
             ],
-        ] = {id(self._func): (tensor_meta, scalar_dtypes)}
-        # Constexpr bindings resolved per function, so a dep that forwards one of
-        # its caller's compile-time parameters carries the same value through.
-        # The same walk backs the cache key, so the two cannot disagree.
-        resolved_constexpr = self._resolve_constexpr_bindings(constexpr_values)
+        ] = {entry_key: (tensor_meta, scalar_dtypes)}
 
-        # One generated ``@pl.function`` name per JIT function, unique across
-        # the program. Two distinct deps may share a ``__name__`` (two modules
-        # each defining ``helper``, or two kernels from the same factory);
-        # emitting both as ``def helper`` made the parser reject the program
-        # with a bare ``Duplicate function name "helper"``.
-        gen_names = _allocate_generated_names(self, deps_topo)
-
-        # Walk caller-first (reverse of leaf-first topo order) so each dep's
-        # caller metadata is already resolved when we get to it; collect
-        # contexts caller-first, then reverse to restore leaf-first emit
-        # order.
-        # Per caller, ``call name → generated function name``. They differ
-        # under an aliased import (the body calls ``kern(...)`` while the
-        # generated ``@pl.function`` is named after ``dep.__name__``) and
-        # under a uniquified name (``helper`` → ``helper__2``).
-        dep_func_names_by_caller: dict[int, dict[str, str]] = {}
-        for dep in deps_topo:
-            for caller_func, call_name in callers_by_id.get(id(dep._func), ()):
-                dep_func_names_by_caller.setdefault(id(caller_func), {})[call_name] = gen_names[id(dep._func)]
-
-        dep_contexts: list[SpecializeContext] = []
-        for dep in reversed(deps_topo):
-            # For metadata resolution we use the first-recorded caller. In a
-            # diamond ``entry -> {A, B} -> shared`` only one specialization
-            # of ``shared`` is emitted, so the call sites in other branches
-            # must agree on shapes/dtypes anyway.
-            caller_func, dep_call_name = callers_by_id[id(dep._func)][0]
-            c_meta, c_sd = resolved[id(caller_func)]
-            dep_constexpr = resolved_constexpr[id(dep._func)]
+        contexts: list[SpecializeContext] = []
+        for key in reversed(plan.order):
+            dep = plan.jit_func[key]
+            if key == entry_key:
+                contexts.append(
+                    build_specialize_context(
+                        func=self._func,
+                        func_name=gen_names[key],
+                        func_type=self._func_type,
+                        level=self._level,
+                        tensor_meta=tensor_meta,
+                        scalar_dtypes=scalar_dtypes,
+                        constexpr_values=constexpr_values,
+                        dep_names=callees_by_id[id(self._func)],
+                        dep_func_names=dep_func_names_by_variant.get(key, {}),
+                        dep_call_variants=dep_call_variants_by_variant.get(key, {}),
+                        auto_scope=self._auto_scope,
+                    )
+                )
+                continue
+            # Each variant reads the call site that produced it, so its
+            # metadata is the state live at *that* call rather than at the
+            # first call sharing the name. Call sites that collapse onto one
+            # variant still have to agree on shapes/dtypes, as before.
+            origin = plan.origin.get(key)
+            if origin is not None:
+                caller_key, dep_call_name, call_node = origin
+            else:
+                # No call node to pin to (see the fallback in
+                # ``_expand_constexpr_variants``); resolve as before variants
+                # existed, from the first recorded caller.
+                caller_obj, dep_call_name = callers_by_id[id(dep._func)][0]
+                caller_key = next((other for other in resolved if other[0] == id(caller_obj)), entry_key)
+                call_node = None
+            caller_func = plan.jit_func[caller_key]._func
+            c_meta, c_sd = resolved[caller_key]
             caller_ftype = func_type_by_id.get(id(caller_func), "orchestration")
             dep_meta, dep_sd = _resolve_dep_call_metadata(
                 dep,
@@ -3527,19 +3789,21 @@ class JITFunction:
                 per_func_dyn.get(id(dep._func), empty_dyn),
                 caller_func_type=caller_ftype,
                 dep_call_name=dep_call_name,
+                call_node=call_node,
             )
-            resolved[id(dep._func)] = (dep_meta, dep_sd)
-            dep_contexts.append(
+            resolved[key] = (dep_meta, dep_sd)
+            contexts.append(
                 build_specialize_context(
                     func=dep._func,
-                    func_name=gen_names[id(dep._func)],
+                    func_name=gen_names[key],
                     func_type=dep._func_type,
                     level=dep._level,
                     tensor_meta=dep_meta,
                     scalar_dtypes=dep_sd,
-                    constexpr_values=dep_constexpr,
+                    constexpr_values=plan.binding[key],
                     dep_names=callees_by_id[id(dep._func)],
-                    dep_func_names=dep_func_names_by_caller.get(id(dep._func), {}),
+                    dep_func_names=dep_func_names_by_variant.get(key, {}),
+                    dep_call_variants=dep_call_variants_by_variant.get(key, {}),
                     auto_scope=dep._auto_scope,
                     external_core_type=dep._external_core_type,
                     external_aic_source=dep._external_aic_source,
@@ -3548,21 +3812,8 @@ class JITFunction:
                     external_include_dirs=dep._external_include_dirs,
                 )
             )
-        dep_contexts.reverse()
-
-        entry_ctx = build_specialize_context(
-            func=self._func,
-            func_name=gen_names[id(self._func)],
-            func_type=self._func_type,
-            level=self._level,
-            tensor_meta=tensor_meta,
-            scalar_dtypes=scalar_dtypes,
-            constexpr_values=constexpr_values,
-            dep_names=callees_by_id[id(self._func)],
-            dep_func_names=dep_func_names_by_caller.get(id(self._func), {}),
-            auto_scope=self._auto_scope,
-        )
-        return dep_contexts + [entry_ctx]
+        contexts.reverse()
+        return contexts
 
     def __repr__(self) -> str:
         return f"JITFunction({self.__name__!r}, func_type={self._func_type!r})"
@@ -3636,27 +3887,32 @@ def _generated_names_for(jit_func: JITFunction, base: str) -> tuple[str, ...]:
     return (base,)
 
 
-def _allocate_generated_names(entry: JITFunction, deps: list[JITFunction]) -> dict[int, str]:
-    """Map ``id(jit_func._func)`` → the unique name its ``@pl.function`` gets.
+def _allocate_generated_names(items: Sequence[tuple[Any, JITFunction]]) -> dict[Any, str]:
+    """Map each caller-supplied key → the unique name its ``@pl.function`` gets.
 
-    A generated ``@pl.program`` holds one method per JIT function, so their
-    names must be distinct — but two distinct deps may legitimately share a
-    ``__name__`` (two modules each defining ``helper``, or two kernels built by
-    the same factory). A clash is resolved by suffixing the later claimant
-    ``__2``, ``__3``, … so both specializations survive instead of the parser
-    rejecting the program with ``Duplicate function name "helper"``.
+    A generated ``@pl.program`` holds one method per generated function, so
+    their names must be distinct — but two of them may legitimately want the
+    same ``__name__``. That happens for two distinct deps (two modules each
+    defining ``helper``, or two kernels built by the same factory) and for two
+    ``pl.constexpr`` variants of a single dep, which are one Python function
+    compiled against different constants. A clash is resolved by suffixing the
+    later claimant ``__2``, ``__3``, … so every specialization survives instead
+    of the parser rejecting the program with ``Duplicate function name
+    "helper"``.
 
-    The entry is named first, so a clash never moves the name the user called;
-    deps follow in ``deps`` order, which is derived from source order, so the
-    same call graph always yields the same names.
+    ``items`` pairs each key with the function to name, entry first so a clash
+    never moves the name the user called. The key is ``id(func)`` where one
+    name per function is wanted and a ``(func, binding)`` variant key where one
+    name per specialization is. Repeats of a key are ignored, and ``items``
+    order is derived from source order, so the same call graph always yields
+    the same names.
     """
     used: set[str] = set()
-    names: dict[int, str] = {}
+    names: dict[Any, str] = {}
     # Highest suffix already handed out per base name, so N functions sharing a
     # base cost O(N) probes overall rather than rescanning from 2 each time.
     next_suffix: dict[str, int] = {}
-    for jit_func in [entry, *deps]:
-        key = id(jit_func._func)
+    for key, jit_func in items:
         if key in names:
             continue
         base = jit_func.__name__
