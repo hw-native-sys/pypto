@@ -66,6 +66,31 @@ def test_concurrent_operators_share_one_worker_and_registration(setup):
     registrations[0].require_live()
 
 
+def test_capture_lookup_requires_completed_registration_without_loading(setup):
+    state, config, calls, _ = setup
+    value = artifact()
+    value._loaded = None
+    with pytest.raises(RuntimeError, match="requires warmup"):
+        state.require_callable(value, config)
+    assert not calls.workers
+    registration = state.ensure_callable(value, config)
+    with pytest.raises(RuntimeError, match="requires warmup"):
+        state.require_callable(value, config)
+    value._loaded = (b"kernel", "unused", {})
+    value.load = lambda: pytest.fail("capture must not load binaries")
+    assert state.require_callable(value, config) is registration
+    other = artifact(b"new")
+    other._loaded = (b"new", "unused", {})
+    with pytest.raises(RuntimeError, match="requires warmup"):
+        state.require_callable(other, config)
+    assert len(calls.prepares) == 1
+    with pytest.raises(ValueError, match="configuration conflict"):
+        state.require_callable(value, replace(config, device_id=1))
+    state.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        state.require_callable(value, config)
+
+
 @pytest.mark.parametrize(
     "change", [{"device_id": 1}, {"runtime": "host_build_graph"}, {"aicpu_thread_num": 2}]
 )

@@ -7,7 +7,7 @@
 
 本集成分支中，`op(x, scale, out)` 固定进入 kernel mode。调用方传入真实 NPU Tensor 和完整
 Out/InOut，不设置 decorator mode，也不显式编译 kernel。每次调用先校验参数、快照本次
-类型化 Scalar 与当前 stream，并在编译或初始化 Worker 前拒绝 graph capture。首次有效
+类型化 Scalar 与当前 stream。graph capture 要求每个算子特化提前完成 warmup。首次有效
 调用编译 kernel 产物、初始化进程 Worker 并 prepare callable；后续匹配调用复用产物和注册。
 不同算子共享同一个 Worker。运行时 Scalar 值与 stream 变化不重新编译，constexpr 变化可选择不同产物。
 
@@ -22,7 +22,7 @@ op(x, 2.0, out)
 省略 `config` 时选择该目标及 torch 当前 NPU device；显式 `RunConfig` 须匹配目标和当前设备。
 拒绝 program 专用诊断、ring 覆盖、分布式配置、CPU/Meta/Fake Tensor 及 Worker 自有 handle，
 不会据此切换执行路径。native launch 要求 rank 1–5 和正 uint32 extent/stride。
-A5、HBG 执行和 ACLGraph 仍属后续工作。自动 eager 清理目前按下文
+A5、HBG 执行仍属后续工作；直接 JIT 支持 warmup 后的 ACLGraph capture/replay，见下文。自动清理目前按下文
 torch_npu 2.6.0.post2 的退出契约接入；其他框架版本在完成退出协议验证前拒绝 native kernel
 初始化。此功能仍限于集成分支。
 
@@ -176,7 +176,7 @@ Simpler 或 native launch 扩展；`torch` 仍是 PyPTO 的常规依赖。真正
 才按需加载 `torch_npu`，缺失时给出针对性的错误信息。
 
 直接调用与注册后的 launch 路径均需要可选 native adapter。
-eager 提交拒绝 graph capture，尚未提供 ACLGraph 生命周期契约。
+直接 JIT capture 要求提前 warmup；torch.ops 图路径仍需单独验收。
 
 ## 进程 kernel Worker 与注册
 
@@ -213,7 +213,7 @@ close 后仍保留；切换模式须使用独立进程。simpler 提供 native �
 重复 kernel context 拒绝。直接使用第三方 simpler 对象会绕过 PyPTO 的进程检查，不能
 据此在同一进程混用 program/kernel 执行。
 
-## 自动 eager 退出
+## 自动框架退出
 
 PyPTO 在 native Worker 初始化前接入 torch_npu 既有退出边界。torch_npu 2.6.0.post2 的
 [`_npu_shutdown`](https://github.com/Ascend/pytorch/blob/eef1d5ae62b9118ae78bf2d7084e6fba1b13058f/torch_npu/__init__.py)
@@ -244,9 +244,46 @@ ACL context 已销毁后执行 Worker/event 析构。框架退出仍继续；此
 已经完成。已证明清理成功但需报告较早提交错误的情况单独报告。fork 子进程不关闭继承的 Worker；
 `os._exit`、signal、解释器崩溃等异常终止不保证清理。
 
-此契约仅覆盖 eager。当前拒绝 graph capture，因此不存在通过 PyPTO 捕获、在该边界后继续 replay
-的 callable。PR-08 在启用 capture 前须验证 graph 停止/释放顺序，单次设备同步不足以阻止随后
-外部 replay。不新增要求用户手动配对的 close/shutdown 接口。
+对于含有 PyPTO 调用的 `torch_npu.npu.NPUGraph`，退出先禁止新增 replay，排空框架队列与设备工作，
+reset 存活图，再释放 graph ticket 并关闭 Worker。不新增用户必须配对的 close/shutdown 接口。
+
+## warmup 后的直接 JIT 图捕获
+
+capture 前必须对**每个算子及特化**执行 warmup。shape、dtype 或 constexpr 变化可能选择新特化，
+需要重新 warmup；运行时 Scalar 值变化不需要。warmup 会实际执行算子，因此若捕获计算依赖
+InOut/输出初值，需恢复被 warmup 改写的状态。仅编译或命中磁盘缓存不代表已经在当前进程 Worker 注册。
+`force_recompile` 与 capture 不兼容。
+
+```python
+# op_a and op_b are @pl.jit entries; x, y, out are caller-owned NPU tensors.
+op_a(x, y)
+op_b(y, out)
+torch.npu.synchronize()
+# Restore any InOut state changed by warmup here.
+graph = torch.npu.NPUGraph()
+with torch.npu.graph(graph):
+    op_a(x, y)
+    op_b(y, out)
+graph.replay()
+```
+
+capture 只查找已有产物与已完成注册，不初始化 Worker、不加载或注册新二进制。缺少 warmup 时明确报错
+`Kernel capture requires warmup outside capture for this specialization`。当前 pin 的 Simpler 注册会同步
+内部 AICPU 流，该流在已有算子加入 capture 后不能被同步。冷双算子捕获见
+[Simpler #2255](https://github.com/hw-native-sys/simpler/issues/2255)，流分离修复暂缓；不自动回退到 eager。
+
+replay 直接执行已捕获的设备工作，不经过 Python JIT、编译或注册。Tensor 地址与类型化 Scalar 值是
+捕获时的快照：修改该地址处的 storage 内容会影响 replay，重绑 Python Tensor 或修改 ctypes Scalar
+不会改变图参数。不同 stream 之间的数据依赖由调用方建立。
+
+captured ticket 持有 native Tensor/Storage，直到 ACL 图的销毁回调触发且设备静默已得到确认。
+不能使用 eager 完成 event 证明以后不会 replay；销毁回调只标记 Host 状态，不调用 Python 或 ACL 清理。
+reset 和正常退出先排空工作再释放图资源；算子/图 GC 都不会关闭进程 Worker。
+
+torch_npu 2.6.0.post2 上首次有效 capture 包装 `NPUGraph.capture_end`、`replay`、`reset`，
+仅以弱引用跟踪包含 PyPTO 调用的图。退出先禁止这些图的新 replay，再同步、reset 存活图、释放 ticket、
+关闭 Worker，最后才允许框架拆除。未结束/失败的 capture 或排空失败保留资源并报告已有退出警告。
+直接使用底层 ACL 图 API、预先保存的未包装框架方法及其他框架版本不在此生命周期契约内。
 
 ## 验证
 
@@ -270,7 +307,7 @@ kernel，也不验证 capture。
 `pypto.torch.launch.enqueue(registration, args)` 接受进程管理器准备好的注册项及逻辑签名顺序的完整参数。
 每次校验注册项并生成独立 frame，通过可选 native torch_npu 扩展提交，返回既有输出别名；返回只表示
 Host 接纳，不表示设备执行完成。本入口不编译、不 prepare、不创建 Worker、不分配业务输出。
-公开 JIT 入口复用此路径，torch.ops 注册仍由后续 PR 接线。当前 eager 提交明确拒绝 graph capture。
+公开 JIT 和 torch.ops 设备实现均复用此路径。直接 JIT capture 要求提前 warmup；torch.ops 图路径单独验收。
 
 扩展使用固定 SDK 的 `ChipStorageTaskArgs` 头文件构造两个独立参数池。混合签名 `(x, scale, out)`
 对应两个 Tensor 和一个 Scalar；组装及二进制恢复的 ChipCallable 签名包含 `IN, OUT, SCALAR`，
@@ -334,3 +371,7 @@ dispatcher/compiler 集成，以及注册生命周期/冲突、回滚、推理�
 版本拒绝和 fork。`tests/st/runtime/kernel/test_kernel_shutdown.py` 使用普通 Python 子进程正常退出，
 避免 multiprocessing 的 `os._exit` 绕过退出钩子，业务路径不手动 close/drain。覆盖 taskQueue 开关、
 已结束的首调线程、两个算子、延迟 callback、部分初始化、重复通知及 finalize 失败后跨框架 teardown 保活。
+
+`tests/st/runtime/kernel/test_capture.py` 覆盖缺失 warmup 拒绝、单/多算子、多图、Scalar 快照、
+图 reset/GC/重建及在途 replay 的正常进程退出，分别验证 taskQueue 开关。
+`tests/ut/torch/test_capture.py` 覆盖图持有和退出接纳；管理器/JIT 测试验证 capture 不初始化、编译或注册。

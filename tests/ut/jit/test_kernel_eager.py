@@ -45,7 +45,7 @@ def eager(monkeypatch):
         launch,
         "_load_native",
         lambda: SimpleNamespace(
-            check_eager=lambda stream_id, device: events.captures.append((stream_id, device))
+            check_call=lambda stream_id, device: events.captures.append((stream_id, device))
         ),
     )
 
@@ -125,14 +125,31 @@ def test_eager_rejects_unsupported_runtime_options_before_build(eager, change):
     assert eager.builds == 0 and not eager.frames
 
 
-def test_eager_rejects_capture_before_build(eager, monkeypatch):
+def test_invalidated_capture_is_rejected_before_build(eager, monkeypatch):
     def captured(stream, device):
-        raise ValueError("graph capture is unsupported")
+        raise ValueError("graph capture was invalidated")
 
-    monkeypatch.setattr(launch, "_load_native", lambda: SimpleNamespace(check_eager=captured))
+    monkeypatch.setattr(launch, "_load_native", lambda: SimpleNamespace(check_call=captured))
     with pytest.raises(ValueError, match="graph capture"):
         scale_eager(_tensor((4, 4)), 2, _tensor((4, 4)), config=eager.config)
     assert eager.builds == 0 and not eager.frames
+
+
+def test_cold_capture_rejected_before_build(eager, monkeypatch):
+    monkeypatch.setattr(launch, "_load_native", lambda: SimpleNamespace(check_call=lambda *args: 42))
+    with pytest.raises(RuntimeError, match="requires warmup outside capture"):
+        scale_eager(_tensor((4, 4)), 2, _tensor((4, 4)), config=eager.config)
+    assert eager.builds == 0 and not eager.frames
+
+
+def test_capture_reuses_warm_artifact_and_snapshots_current_scalar(eager, monkeypatch):
+    x, out = _tensor((4, 4)), _tensor((4, 4))
+    scale_eager(x, 2, out, config=eager.config)
+    monkeypatch.setattr(launch, "_load_native", lambda: SimpleNamespace(check_call=lambda *args: 42))
+    assert scale_eager(x, 3, out, config=eager.config) is out
+    assert eager.builds == 1
+    assert eager.frames[-1].capture_id == 42
+    assert eager.frames[-1].scalars[0].value == 3
 
 
 def test_explicit_compile_keeps_program_path_and_separate_cache(eager, monkeypatch):

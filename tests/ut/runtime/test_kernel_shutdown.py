@@ -81,6 +81,37 @@ def test_framework_hook_drains_then_closes_once_before_teardown(setup, framework
         state.ensure_worker(config)
 
 
+def test_graphs_stop_and_reset_before_tickets_and_worker_close(setup, framework):
+    state, config, _, _ = setup
+    fw, _, events = framework
+    shutdown.install_shutdown(state)
+    state.ensure_callable(artifact(), config)
+    state._graph_lifecycle = SimpleNamespace(close=lambda: events.append("graphs-stop-drain-reset"))
+    state._submissions.append(SimpleNamespace(wait=lambda: events.append("ticket-wait")))
+    fw._C._npu_shutdown_synchronize()
+    assert events == ["graphs-stop-drain-reset", "ticket-wait", "worker-close", "framework-sync"]
+    assert state.state is KernelState.CLOSED
+
+
+def test_graph_shutdown_failure_preserves_tickets_and_worker(setup, framework):
+    state, config, calls, _ = setup
+    fw, native, events = framework
+    shutdown.install_shutdown(state)
+    state.ensure_callable(artifact(), config)
+
+    def fail():
+        raise RuntimeError("capture still active")
+
+    state._graph_lifecycle = SimpleNamespace(close=fail)
+    ticket = SimpleNamespace(wait=lambda: events.append("ticket-wait"))
+    state._submissions.append(ticket)
+    with pytest.warns(RuntimeWarning, match="capture still active"):
+        fw._C._npu_shutdown_synchronize()
+    assert state.state is KernelState.FAILED and not calls.closes
+    assert state._submissions == [ticket] and state._registrations
+    assert events == [("retain", state), "framework-sync"]
+
+
 def test_unused_shutdown_never_constructs_a_worker(setup, framework):
     state, _, calls, _ = setup
     fw, _, events = framework

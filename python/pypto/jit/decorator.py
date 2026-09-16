@@ -3087,7 +3087,7 @@ class JITFunction:
         allow_signature_mode: bool = False,
         *,
         _kernel: bool = False,
-        _preflight: Callable[[KernelABI, list[Any], Any], None] | None = None,
+        _preflight: Callable[[KernelABI, list[Any], Any], bool] | None = None,
     ) -> tuple[Any, list[Any], Any | None]:
         """Look up or build a specialized program or internal kernel artifact.
 
@@ -3122,6 +3122,7 @@ class JITFunction:
 
         kernel_abi = None
         kernel_program = None
+        capturing = False
 
         def resolve_kernel_contract() -> tuple[Any, KernelABI]:
             from pypto.ir._kernel_compile import kernel_abi_for_program  # noqa: PLC0415
@@ -3141,6 +3142,8 @@ class JITFunction:
             return program, abi
 
         def build(**overrides: Any) -> Any:
+            if capturing:
+                raise RuntimeError("Kernel capture requires warmup outside capture for this specialization")
             record_stats(generation_builds=1)
             with time_stage("build_ns"):
                 if kernel_abi is not None:
@@ -3166,7 +3169,7 @@ class JITFunction:
             if _kernel:
                 kernel_program, kernel_abi = resolve_kernel_contract()
                 if _preflight is not None:
-                    _preflight(kernel_abi, ordered_args, run_config)
+                    capturing = _preflight(kernel_abi, ordered_args, run_config)
             return build(), ordered_args, run_config
 
         # Resolved before the key rather than during ``build()``: a dep's
@@ -3202,7 +3205,7 @@ class JITFunction:
                     self._kernel_contracts[key] = resolve_kernel_contract()
                 kernel_program, kernel_abi = self._kernel_contracts[key]
                 if _preflight is not None:
-                    _preflight(kernel_abi, ordered_args, run_config)
+                    capturing = _preflight(kernel_abi, ordered_args, run_config)
             memory_key = key if kernel_abi is None else (key, kernel_abi)
             if cache_config.enabled:
                 from ._persistent import resolve_persistent  # noqa: PLC0415
@@ -3216,7 +3219,7 @@ class JITFunction:
                     platform=compile_kwargs["platform"],
                     runtime_name=runtime_kind_to_name(_resolve_runtime()),
                     distributed=self._func_type == "host",
-                    **({} if kernel_abi is None else {"kernel_abi": kernel_abi}),
+                    **({} if kernel_abi is None else {"kernel_abi": kernel_abi, "require_cached": capturing}),
                 )
             elif memory_key in self._cache:
                 record_stats(object_hits=1)
@@ -3285,7 +3288,8 @@ class JITFunction:
         ``config=RunConfig(...)`` supplies compilation options and fixed Worker
         configuration. The initial eager target is A2/A3 with TRB; no config
         defaults to that target and the framework's current device. Program-only
-        execution/diagnostic options and graph capture are rejected.
+        execution/diagnostic options are rejected. Graph capture requires warmup
+        of every operator specialization outside capture.
 
         Use ``op.compile(...)(...)`` for program execution, including CPU tensors,
         DeviceTensor, simulation and distributed programs.
@@ -3294,9 +3298,10 @@ class JITFunction:
 
         frame = None
 
-        def preflight(abi: KernelABI, bound: list[Any], config: Any) -> None:
+        def preflight(abi: KernelABI, bound: list[Any], config: Any) -> bool:
             nonlocal frame
             frame = describe_eager_call(abi, bound, config)
+            return bool(frame.capture_id)
 
         artifact, _, config = self._resolve_compiled(args, kwargs, _kernel=True, _preflight=preflight)
         assert frame is not None

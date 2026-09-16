@@ -8,8 +8,8 @@ native torch_npu adapter. Explicit `.compile()` produces program objects.
 On this integration branch, `op(x, scale, out)` runs in kernel mode. The caller
 supplies real NPU tensors and every Out/InOut argument; there is no decorator
 mode argument or explicit kernel compilation step. On each call PyPTO validates
-arguments, snapshots typed scalar values and the current stream, and rejects
-graph capture before compilation or Worker initialization. The first valid call
+arguments and snapshots typed scalar values and the current stream. Graph
+capture requires each operator specialization to be warmed up beforehand. The first valid call
 compiles a kernel artifact, initializes the process Worker and prepares the
 callable. Later matching calls reuse the artifact and registration. Different
 operators share that Worker. Changing runtime scalar values or streams does not
@@ -28,8 +28,8 @@ that target and the current torch NPU device. An explicit `RunConfig` must match
 the target and current device. Program-only diagnostics, ring overrides,
 distributed configuration, CPU/Meta/Fake tensors and Worker-owned handles are
 rejected; they do not select another execution path. Native launch requires
-rank 1–5 and positive uint32 extents/strides. A5, HBG execution and ACLGraph
-remain later work. Automatic eager cleanup is
+rank 1–5 and positive uint32 extents/strides. A5 and HBG execution remain later work. Direct JIT ACLGraph capture/replay
+is supported after warmup, as described below. Automatic eager cleanup is
 verified with torch_npu 2.6.0.post2 as described below; other framework versions
 are rejected before native kernel initialization until their teardown contract
 is validated. This remains integration-branch functionality.
@@ -66,6 +66,7 @@ Each call produces a new immutable `CallFrame`:
 | `scalars` | Current typed primitive values in signature order, with original `param_index`; mutable ctypes inputs are copied. |
 | `device_index` | The current NPU device, checked against every tensor. |
 | `stream` | This call's current torch_npu stream object, retained by the frame. |
+| `capture_id` | Active native capture identity, or zero outside capture. |
 | `return_tensors` | The exact caller objects selected by validated return aliases. |
 
 Tensor and scalar ordering does not define a native ABI layout. Native argument
@@ -230,8 +231,9 @@ extension.
 `torch` remains a normal PyPTO dependency. A real call description loads
 `torch_npu` on demand and reports a targeted error if it is unavailable.
 
-The direct and registered launch paths require the optional native adapter. Eager submission
-rejects graph capture; it does not provide an ACLGraph lifetime contract.
+The direct and registered launch paths require the optional native adapter.
+Direct JIT capture requires prior warmup. Registered torch.ops graph integration
+remains a separate acceptance step.
 
 ## Process kernel Worker and registration
 
@@ -281,7 +283,7 @@ per-context mode checks and duplicate kernel-context rejection. Direct use of
 third-party Simpler objects bypasses PyPTO's process gate; it is not a supported
 way to combine program and kernel execution in one process.
 
-## Automatic eager shutdown
+## Automatic framework shutdown
 
 PyPTO installs a versioned integration at torch_npu's existing shutdown boundary
 before native Worker initialization. In torch_npu 2.6.0.post2,
@@ -329,10 +331,63 @@ release. A proven successful cleanup that reports an earlier submission error
 is reported separately. Forked children never close an inherited Worker. Abrupt
 termination (`os._exit`, signals, interpreter crashes) provides no cleanup promise.
 
-This contract covers eager work only. Graph capture remains rejected, so no
-PyPTO graph can replay a callable after this boundary. PR-08 must establish graph
-stop/release ordering before enabling capture; device synchronization alone
-cannot prevent later external replay. There is no public close/shutdown ritual.
+For participating `torch_npu.npu.NPUGraph` objects, cleanup first stops replay
+admission, drains framework queues/device work and resets the live graphs. It
+then releases graph tickets and finalizes the Worker. There is no public
+close/shutdown ritual; see the capture contract below.
+
+## Direct JIT graph capture after warmup
+
+Warm up **every operator and specialization** outside capture. Shape, dtype or
+constexpr changes can select another specialization and require another warmup;
+changing a runtime Scalar does not. Warmup executes the operator, so restore
+InOut/output state if the captured computation expects its initial contents.
+Compilation or a disk-cache hit alone does not register a callable with this
+process's Worker. `force_recompile` is incompatible with capture.
+
+```python
+# op_a and op_b are @pl.jit entries; x, y, out are caller-owned NPU tensors.
+op_a(x, y)
+op_b(y, out)
+torch.npu.synchronize()
+# Restore any InOut state changed by warmup here.
+graph = torch.npu.NPUGraph()
+with torch.npu.graph(graph):
+    op_a(x, y)
+    op_b(y, out)
+graph.replay()
+```
+
+Capture only looks up an existing artifact and completed registration; it
+neither initializes a Worker nor loads/registers new binaries. Missing warmup
+raises `Kernel capture requires warmup outside capture for this specialization`.
+The pinned Simpler registration path synchronizes its private AICPU stream, which
+cannot be synchronized once another captured operator has joined it. Cold
+multi-operator capture is tracked in
+[Simpler #2255](https://github.com/hw-native-sys/simpler/issues/2255); the runtime
+stream-separation fix is deferred. There is no automatic eager fallback.
+
+Replay executes captured device work without entering Python JIT, compilation
+or registration. Tensor addresses and typed Scalar values are snapshots of the
+capture call. Updating storage contents at those addresses affects replay;
+reassigning a Python Tensor or changing a ctypes Scalar does not retarget the
+graph. Callers establish data dependencies when using different streams.
+
+Captured tickets retain native Tensor/Storage owners until the ACL graph's
+native destruction callback fires **and** device quiescence is established.
+They do not use an eager completion event as evidence that future replay has
+ended. The callback only marks host state; it performs no Python calls or ACL
+cleanup. Reset and ordinary process shutdown drain work before releasing graph
+resources. Operator/graph garbage collection never closes the process Worker.
+
+On torch_npu 2.6.0.post2, the first accepted capture installs wrappers around
+`NPUGraph.capture_end`, `replay` and `reset`. Only graphs containing PyPTO calls
+are tracked, with weak references. Shutdown stops their replay entry before
+synchronization, resets live participating graphs, releases retained tickets,
+then closes the Worker before framework teardown. An unfinished/failed capture
+or failed drain retains owners and reports the existing shutdown warning.
+Low-level ACL graph APIs, saved unwrapped framework methods and other framework
+versions are outside this lifecycle contract.
 
 ## Internal torch queue submission
 
@@ -376,8 +431,8 @@ internal streams are quiescent. Internal close drains the host callback and, onl
 requires a full device synchronization to establish internal-stream quiescence.
 It then finalizes and releases owners, while re-raising the original submission
 error. Failed quiescence or teardown retains all owners for a later close attempt.
-There is no implicit reinitialization. Automatic framework shutdown remains
-follow-up work; the internal manager supplies the drain/cleanup boundary.
+There is no implicit reinitialization. The framework shutdown integration above
+uses this drain/cleanup boundary.
 
 ### Building the optional adapter
 
@@ -453,3 +508,9 @@ Python subprocess exit (not multiprocessing's `os._exit`) with no user close or
 drain. It covers taskQueue on/off, a departed first-caller thread, two operators,
 delayed host callbacks, partial initialization, repeated notifications and a
 failed finalize retained through framework teardown.
+
+`tests/st/runtime/kernel/test_capture.py` covers warmup refusal, single/multiple
+operators, multiple graphs, scalar snapshots, graph reset/GC/recreation and
+ordinary exit with pending replay, with taskQueue enabled and disabled.
+`tests/ut/torch/test_capture.py` covers graph ownership and shutdown admission;
+manager/JIT tests verify that capture never initializes, compiles or registers.

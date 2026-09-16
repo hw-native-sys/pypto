@@ -29,6 +29,7 @@
 #include <exception>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -45,6 +46,49 @@ void Require(bool condition, const char* message) {
   if (!condition) throw pypto::ValueError(message);
 }
 
+// ACL owns the notification, while tickets retain tensors until graph destruction
+// and device quiescence. The callback only marks host state; it never uses Python.
+struct GraphLease {
+  std::atomic<bool> destroyed{false};
+};
+std::mutex graph_mutex;
+std::unordered_map<aclmdlRI, std::weak_ptr<GraphLease>> graph_leases;
+
+struct GraphNotification {
+  aclmdlRI model;
+  std::shared_ptr<GraphLease> lease;
+};
+
+void GraphDestroyed(void* data) {
+  std::unique_ptr<GraphNotification> notification(static_cast<GraphNotification*>(data));
+  std::lock_guard<std::mutex> lock(graph_mutex);
+  notification->lease->destroyed.store(true, std::memory_order_release);
+  graph_leases.erase(notification->model);
+}
+
+aclmdlRI CaptureModel(c10_npu::NPUStream stream) {
+  aclmdlRICaptureStatus status{};
+  aclmdlRI model = nullptr;
+  Require(aclmdlRICaptureGetInfo(stream.stream(false), &status, &model) == ACL_SUCCESS,
+          "Cannot query kernel call capture state");
+  Require(status == ACL_MODEL_RI_CAPTURE_STATUS_NONE || status == ACL_MODEL_RI_CAPTURE_STATUS_ACTIVE,
+          "Kernel call encountered an invalidated graph capture");
+  return status == ACL_MODEL_RI_CAPTURE_STATUS_ACTIVE ? model : nullptr;
+}
+
+std::shared_ptr<GraphLease> RetainGraph(aclmdlRI model) {
+  if (!model) return {};
+  std::lock_guard<std::mutex> lock(graph_mutex);
+  if (auto existing = graph_leases[model].lock()) return existing;
+  auto lease = std::make_shared<GraphLease>();
+  auto notification = std::make_unique<GraphNotification>(GraphNotification{model, lease});
+  Require(aclmdlRIDestroyRegisterCallback(model, GraphDestroyed, notification.get()) == ACL_SUCCESS,
+          "Cannot retain kernel resources until graph destruction");
+  notification.release();
+  graph_leases[model] = lease;
+  return lease;
+}
+
 // Everything captured by the taskQueue callback is native. Python owns the ticket
 // and Worker on the admission side; releasing a callback never acquires the GIL.
 struct LaunchState {
@@ -53,6 +97,7 @@ struct LaunchState {
   c10_npu::NPUStream stream;
   ChipStorageTaskArgs args{};
   aclrtEvent completion = nullptr;
+  std::shared_ptr<GraphLease> graph;
   std::vector<at::Tensor> tensors;
   std::vector<c10::Storage> storages;
   std::atomic<bool> callback_finished{false};
@@ -103,8 +148,10 @@ class LaunchTicket {
       try {
         std::lock_guard<std::mutex> launch_lock(launch_mutex);
         state->worker->kernel_launch(state->callable_id, &state->args, state->stream.stream(false));
-        Require(aclrtRecordEvent(state->completion, state->stream.stream(false)) == ACL_SUCCESS,
-                "Failed to record kernel completion; retain all owners");
+        if (!state->graph) {
+          Require(aclrtRecordEvent(state->completion, state->stream.stream(false)) == ACL_SUCCESS,
+                  "Failed to record kernel completion; retain all owners");
+        }
       } catch (...) {
         std::lock_guard<std::mutex> lock(state->mutex);
         state->error = std::current_exception();
@@ -119,6 +166,12 @@ class LaunchTicket {
   bool Done() {
     c10_npu::NPUGuard device_guard(state_->stream.device_index());
     state_->CheckError();
+    if (CaptureModel(c10_npu::getCurrentNPUStream(state_->stream.device_index()))) return false;
+    if (state_->graph) {
+      if (!state_->graph->destroyed.load(std::memory_order_acquire)) return false;
+      Quiesce();
+      return true;
+    }
     if (state_->completion == nullptr) return true;
     if (!state_->callback_finished.load(std::memory_order_acquire)) return false;
     aclrtEventRecordedStatus status{};
@@ -131,8 +184,10 @@ class LaunchTicket {
   }
 
   void Quiesce() {
+    Require(!state_->graph || state_->graph->destroyed.load(std::memory_order_acquire),
+            "Cannot release kernel resources while a captured graph can still replay");
     c10_npu::NPUGuard device_guard(state_->stream.device_index());
-    // Error-only cleanup: a caller-stream fence can be missing after partial
+    // A caller-stream fence can be missing after partial
     // enqueue. Drain the host queue first, then prove *all* device streams idle.
     try {
       state_->stream.synchronize();
@@ -147,6 +202,11 @@ class LaunchTicket {
   }
 
   void Wait() {
+    if (state_->graph) {
+      state_->CheckError();
+      Quiesce();
+      return;
+    }
     c10_npu::NPUGuard device_guard(state_->stream.device_index());
     // Framework synchronization drains its host queue as well as device work.
     // If either fails, the manager retains this ticket and all its owners.
@@ -180,15 +240,9 @@ void BindContext(uintptr_t context) {
           "Cannot bind the borrowed framework context to the kernel lifecycle thread");
 }
 
-c10_npu::NPUStream EagerStream(int64_t stream_id, int32_t device_id) {
+c10_npu::NPUStream CallStream(int64_t stream_id, int32_t device_id) {
   auto stream = c10_npu::getCurrentNPUStream(device_id);
   Require(stream.id() == stream_id, "Kernel frame is not on the current NPU stream");
-  aclmdlRICaptureStatus capture_status{};
-  aclmdlRI model = nullptr;
-  Require(aclmdlRICaptureGetInfo(stream.stream(false), &capture_status, &model) == ACL_SUCCESS,
-          "Cannot query capture state for PyPTO eager submission");
-  Require(capture_status == ACL_MODEL_RI_CAPTURE_STATUS_NONE,
-          "PyPTO eager kernel submission does not support graph capture");
   return stream;
 }
 
@@ -202,8 +256,9 @@ std::shared_ptr<LaunchTicket> Prepare(ChipWorker* worker, int32_t callable_id, n
   Require(objects.size() == dtypes.size() && objects.size() <= CHIP_MAX_TENSOR_ARGS &&
               scalar_bits.size() <= CHIP_MAX_SCALAR_ARGS,
           "Kernel argument pools exceed the pinned native ABI");
-  auto stream = EagerStream(stream_id, device_id);
+  auto stream = CallStream(stream_id, device_id);
   auto state = std::make_shared<LaunchState>(worker, callable_id, stream);
+  state->graph = RetainGraph(CaptureModel(stream));
   for (size_t i = 0; i < objects.size(); ++i) {
     Require(THPVariable_Check(objects[i].ptr()), "Kernel arguments must be torch tensors");
     at::Tensor tensor = THPVariable_Unpack(objects[i].ptr());
@@ -230,7 +285,9 @@ std::shared_ptr<LaunchTicket> Prepare(ChipWorker* worker, int32_t callable_id, n
     state->tensors.push_back(std::move(tensor));
   }
   for (auto value : scalar_bits) state->args.add_scalar(value);
-  Require(aclrtCreateEvent(&state->completion) == ACL_SUCCESS, "Cannot create kernel completion event");
+  if (!state->graph) {
+    Require(aclrtCreateEvent(&state->completion) == ACL_SUCCESS, "Cannot create kernel completion event");
+  }
   return std::make_shared<LaunchTicket>(std::move(state));
 }
 }  // namespace
@@ -248,6 +305,8 @@ NB_MODULE(_torch_npu, m) {
   // Deliberately never decref: unsafe shutdown must not run native destructors
   // during later Python module clearing, after the framework has destroyed ACL.
   m.def("retain_until_exit", [](nb::object owner) { Py_INCREF(owner.ptr()); });
-  m.def("check_eager", [](int64_t stream_id, int32_t device_id) { EagerStream(stream_id, device_id); });
+  m.def("check_call", [](int64_t stream_id, int32_t device_id) {
+    return reinterpret_cast<uintptr_t>(CaptureModel(CallStream(stream_id, device_id)));
+  });
   m.def("prepare", &Prepare, nb::keep_alive<0, 1>());
 }

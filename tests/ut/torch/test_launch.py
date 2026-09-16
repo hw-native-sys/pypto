@@ -31,7 +31,7 @@ def dispatch(monkeypatch):
     )
     monkeypatch.setattr(interop, "_load_torch_npu", lambda: npu)
     worker = SimpleNamespace(native_launch_target=object())
-    native = SimpleNamespace(prepare=lambda *args: calls.append(args) or object())
+    native = SimpleNamespace(prepare=lambda *args: calls.append(args) or object(), check_call=lambda *args: 0)
     monkeypatch.setattr(launch, "_load_native", lambda: native)
     owner = SimpleNamespace(
         config=SimpleNamespace(device_id=0),

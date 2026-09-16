@@ -161,6 +161,7 @@ def resolve_persistent(
     runtime_name: str,
     distributed: bool,
     kernel_abi: KernelABI | None = None,
+    require_cached: bool = False,
 ) -> Any:
     """Capture identity before object lookup; keep policy out of content keys."""
     from pypto.runtime._artifact_runtime import bind_artifact, restore_artifact  # noqa: PLC0415
@@ -214,6 +215,8 @@ def resolve_persistent(
         if cached is not None:
             record_stats(object_hits=1)
             return cached
+        if require_cached:
+            raise RuntimeError("Kernel capture requires warmup outside capture for this specialization")
         key = ArtifactKey(
             identity,
             digest_record((source_before, extra.digest)),

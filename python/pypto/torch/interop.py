@@ -82,6 +82,8 @@ class CallFrame:
     stream: Any = field(repr=False, compare=False)
     return_tensors: tuple[torch.Tensor, ...] = field(repr=False, compare=False)
 
+    capture_id: int = 0
+
     def alias_result(self) -> torch.Tensor | tuple[torch.Tensor, ...] | None:
         """Return the exact externally supplied objects named by return aliases."""
         if not self.return_tensors:

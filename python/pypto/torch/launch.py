@@ -7,11 +7,12 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Internal eager submission of a prepared kernel through the torch_npu queue."""
+"""Internal eager/captured submission of a prepared kernel through the torch_npu queue."""
 
 import importlib
 import struct
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Any
 
 from pypto._kernel_abi import SCALAR_FORMATS, SIMPLER_KERNEL_REVISION, TENSOR_DTYPE_TAGS, KernelABI
@@ -105,8 +106,8 @@ def describe_eager_call(abi: KernelABI, args: Sequence[Any], config: Any) -> Cal
                 f"JIT eager execution does not support program runtime options {unsupported}; "
                 "use explicit compile"
             )
-    _load_native().check_eager(frame.stream.stream_id, frame.device_index)
-    return frame
+    capture_id = _load_native().check_call(frame.stream.stream_id, frame.device_index)
+    return replace(frame, capture_id=capture_id or 0)
 
 
 def invoke(artifact: Any, frame: CallFrame, config: Any) -> Any:
@@ -118,7 +119,12 @@ def invoke(artifact: Any, frame: CallFrame, config: Any) -> Any:
     worker_config = KernelConfig(
         abi.platform, abi.runtime, frame.device_index, 0 if config is None else config.aicpu_thread_num or 0
     )
-    registration = get_process_kernel_state().ensure_callable(artifact, worker_config)
+    state = get_process_kernel_state()
+    registration = (
+        state.require_callable(artifact, worker_config)
+        if frame.capture_id
+        else state.ensure_callable(artifact, worker_config)
+    )
     return _enqueue_frame(registration, frame)
 
 
@@ -127,6 +133,11 @@ def _enqueue_frame(registration: KernelRegistration, frame: CallFrame) -> Any:
     if frame.device_index != registration.owner.config.device_id:
         raise ValueError("Kernel call device differs from its process Worker device")
     native = _load_native()
+    capture_id = native.check_call(frame.stream.stream_id, frame.device_index)
+    if capture_id:
+        from .capture import install_capture  # noqa: PLC0415
+
+        install_capture(registration.owner).notice(capture_id)
     scalar_bits = [
         int.from_bytes(struct.pack(f"<{SCALAR_FORMATS[str(s.dtype)]}", s.value), "little")
         for s in frame.scalars

@@ -53,6 +53,7 @@ class _ProcessKernelState:
         self._prepare_threads: dict[bytes, threading.Thread] = {}
         self._submissions: list[Any] = []
         self._submission_lock = threading.Lock()
+        self._graph_lifecycle: Any = None
 
     def _check_pid(self) -> None:
         if self.pid != os.getpid():
@@ -145,6 +146,25 @@ class _ProcessKernelState:
                 del self._prepare_threads[identity]
                 self._condition.notify_all()
 
+    def require_callable(self, artifact: Any, config: KernelConfig) -> KernelRegistration:
+        """Look up completed warmup without initializing, loading or registering."""
+        self._check_pid()
+        with self._condition:
+            if self.state is KernelState.UNINITIALIZED:
+                raise RuntimeError("Kernel capture requires warmup outside capture for this specialization")
+            self._require_ready()
+            if self.config != config:
+                raise ValueError(
+                    f"Kernel Worker configuration conflict: bound {self.config}, requested {config}"
+                )
+            loaded = artifact._loaded
+            if loaded is not None:
+                identity = callable_identity(loaded[0], artifact.kernel_abi)
+                registration = self._registrations.get(identity)
+                if registration is not None:
+                    return registration
+            raise RuntimeError("Kernel capture requires warmup outside capture for this specialization")
+
     def require_registration(self, registration: KernelRegistration) -> None:
         self._check_pid()
         with self._condition:
@@ -207,6 +227,8 @@ class _ProcessKernelState:
         submission_error: BaseException | None = None
         try:
             with self._submission_lock:
+                if self._graph_lifecycle is not None:
+                    self._graph_lifecycle.close()
                 for ticket in self._submissions:
                     try:
                         ticket.wait()
