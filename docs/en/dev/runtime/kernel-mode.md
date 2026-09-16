@@ -71,7 +71,10 @@ Simpler/PyPTO Worker.
 shapes and return-slot indices. Its `schema(name)` method marks Out/InOut tensor
 arguments writable and connects each tensor return to the corresponding input
 alias set. All arguments remain required; no output allocation is inferred.
-Scalar inputs map to dispatcher `int`, `float` or `bool`. Read-only input
+Scalar inputs map to dispatcher `SymInt`, `float` or `bool`. `SymInt` accepts
+ordinary integers and preserves symbolic integers through dispatch, including
+symbols without concrete hints. Scalar validation retains dtype range checks
+without converting symbols to Python integers. Read-only input
 identity returns, scalar outputs, scalar-only operators, invalid names and
 aliases, and UINT64 scalars are rejected:
 the dispatcher's signed integer type cannot represent the full UINT64 range.
@@ -102,6 +105,9 @@ The tests use temporary namespaces and CPU fixture implementations. On PyTorch
 [`torch.library.opcheck`](https://docs.pytorch.org/docs/2.6/library.html#torch.library.opcheck)
 checks and `torch.compile(backend="aot_eager", fullgraph=True, dynamic=True)`;
 the test wrapper returns the caller's output tensor after the operator call.
+Registered `torch.ops` tests verify that backed and unbacked integer symbols
+reach the fake kernel unchanged without equality guards. A shape-derived scalar
+test also verifies that different input sizes reuse one compiled graph.
 Schemas with aliased returns are checked for schema correctness and Fake/Meta
 behavior separately. These checks do not establish functionalization or compiled
 execution of aliased-return operators. Actual kernel registration, device

@@ -22,6 +22,7 @@ from pypto.ir.param_info import ParamInfo
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import ParamDirection
 from pypto.torch import registration
+from torch._dynamo.testing import CompileCounterWithBackend
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
@@ -52,6 +53,7 @@ def test_schema_marks_mutation_and_return_aliases():
         return_aliases=(2, 3, 2),
     )
     schema = torch._C.parse_schema(signature.schema("update"))
+    assert "SymInt step" in str(schema)
     assert [str(a.type) for a in schema.arguments] == ["Tensor", "int", "Tensor", "Tensor"]
     assert [a.alias_info.is_write if a.alias_info else False for a in schema.arguments] == [
         False,
@@ -264,13 +266,20 @@ def test_mixed_abstract_devices_are_rejected():
         (DataType.FP32, 2.0, "float"),
         (DataType.BF16, 1.0, "float"),
         (DataType.BOOL, True, "bool"),
-        (DataType.UINT8, 255, "int"),
-        (DataType.INDEX, 3, "int"),
+        (DataType.INT8, -128, "SymInt"),
+        (DataType.INT16, -32768, "SymInt"),
+        (DataType.INT32, -(1 << 31), "SymInt"),
+        (DataType.INT64, -(1 << 63), "SymInt"),
+        (DataType.UINT8, 255, "SymInt"),
+        (DataType.UINT16, 65535, "SymInt"),
+        (DataType.UINT32, (1 << 32) - 1, "SymInt"),
+        (DataType.INDEX, 3, "SymInt"),
     ],
 )
 def test_scalar_schema_and_values(dtype, value, kind):
     signature = registration.RegistrationSignature([_param(), _param("value", None, dtype)])
-    assert str(torch._C.parse_schema(signature.schema("op")).arguments[1].type) == kind
+    # Argument.type prints both int and SymInt as "int"; inspect the full schema.
+    assert f"{kind} value" in str(torch._C.parse_schema(signature.schema("op")))
     assert signature.fake(torch.empty((2, 3), device="meta"), value) is None
 
 
@@ -325,14 +334,59 @@ def test_aliased_schema_matches_cpu_and_fake_metadata(library, aliases):
     assert all(status == "SUCCESS" for status in result.values())
 
 
-def test_symbolic_scalar_does_not_specialize_its_value():
-    mode = FakeTensorMode(shape_env=ShapeEnv())
+@pytest.mark.parametrize("unbacked", [False, True])
+def test_registered_symbolic_scalar_does_not_specialize_its_value(library, monkeypatch, unbacked):
+    shape_env = ShapeEnv()
+    mode = FakeTensorMode(shape_env=shape_env)
     value = mode.from_tensor(torch.empty(4, 3), static_shapes=False)
+    scalar = shape_env.create_unbacked_symint() if unbacked else value.shape[0]
+    assert isinstance(scalar, torch.SymInt)
+    expression = scalar.node.expr
     signature = registration.RegistrationSignature(
         [_param(shape=(-1, -1)), _param("n", None, DataType.INT32)]
     )
-    assert isinstance(value.shape[0], torch.SymInt)
-    assert signature.fake(value, value.shape[0]) is None
+    seen = []
+    original_fake = signature.fake
+
+    def fake(x, n):
+        seen.append(n)
+        return original_fake(x, n)
+
+    monkeypatch.setattr(signature, "fake", fake)
+    signature.define(library, "symbolic")
+    op = getattr(getattr(torch.ops, library.ns), "symbolic")
+    with mode:
+        assert op(value, scalar) is None
+    assert seen
+    assert all(isinstance(n, torch.SymInt) and n.node.expr == expression for n in seen)
+    assert scalar.node.expr == expression
+    # Range validation may add inequalities, but must not specialize to the hint.
+    assert all(not guard.expr.is_Equality for guard in shape_env.guards)
+
+
+def test_shape_scalar_reuses_compiled_graph(library):
+    signature = registration.RegistrationSignature(
+        [_param(), _param("step", None, DataType.INT32), _param("out", direction=ParamDirection.Out)]
+    )
+    signature.define(library, "write_shape")
+
+    def write(x, step, out):
+        out.copy_(x + step)
+
+    library.impl("write_shape", write, "CPU")
+    op = getattr(getattr(torch.ops, library.ns), "write_shape")
+
+    def call(x, out):
+        op(x, x.shape[0], out)
+        return out
+
+    counter = CompileCounterWithBackend("aot_eager")
+    compiled = torch.compile(call, backend=counter, fullgraph=True, dynamic=True)
+    for rows in (4, 6, 8):
+        x, out = torch.ones(rows, 3), torch.empty(rows, 3)
+        assert compiled(x, out) is out
+        torch.testing.assert_close(out, x + rows)
+    assert counter.frame_count == 1
 
 
 def test_mutation_only_schema_opcheck_and_compile(library):

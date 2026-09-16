@@ -58,7 +58,9 @@ frame 使用期间，调用方不能 resize 或使借用的 storage 失效。
 `pypto.torch.registration.RegistrationSignature` 复制相同的 `ParamInfo` carrier shape
 及返回参数索引。`schema(name)` 将 Out/InOut Tensor 标记为可写，并把每个 Tensor
 返回值关联到对应输入的别名集合（alias set）。全部参数均须传入，不推导输出分配。
-Scalar 输入映射为 dispatcher 的 `int`、`float` 或 `bool`。拒绝直接返回只读输入、Scalar 输出、
+Scalar 输入映射为 dispatcher 的 `SymInt`、`float` 或 `bool`。`SymInt` 接受普通整数，
+并在 dispatch 中保留符号整数，包括没有具体值提示的符号。Scalar 校验保留 dtype
+范围检查，不将符号转换为 Python 整数。拒绝直接返回只读输入、Scalar 输出、
 纯 Scalar 算子、非法名称与返回别名，以及 UINT64 Scalar：dispatcher 的有符号整数
 类型无法表达完整 UINT64 范围。返回别名必须指向 Out/InOut Tensor，因为 dispatcher
 schema 检查器不允许直接返回只读输入对象。
@@ -80,7 +82,10 @@ Scalar 保持符号形式。直接返回输入保留 stride、storage offset 与
 的纯修改 schema 通过全部
 [`torch.library.opcheck`](https://docs.pytorch.org/docs/2.6/library.html#torch.library.opcheck)
 检查以及 `torch.compile(backend="aot_eager", fullgraph=True, dynamic=True)`；
-测试 wrapper 在调用算子后返回调用方传入的输出 Tensor。带返回别名的 schema 分别
+测试 wrapper 在调用算子后返回调用方传入的输出 Tensor。通过注册后的 `torch.ops`
+验证有具体值提示（backed）和无具体值提示（unbacked）的整数符号原样到达 fake kernel，
+且不添加等值 guard；另以 shape 派生的 Scalar 验证不同输入尺寸复用同一编译图。
+带返回别名的 schema 分别
 验证 schema 正确性与 Fake/Meta 行为，不把这些检查视为该类算子已支持函数化
 （functionalization）或编译执行。正式 kernel 注册、设备执行、autograd 与最终编译器
 接线仍属于后续工作。

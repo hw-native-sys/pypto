@@ -37,23 +37,23 @@ def _check_name(name: str) -> None:
 
 
 def _scalar_schema(info: ParamInfo) -> str:
-    """Represent supported scalar types without narrowing the dispatcher integer range."""
+    """Preserve symbolic integers through dispatch and reject unsupported scalar ranges."""
     dtype = str(info.dtype)
     if dtype == "bool":
         return "bool"
     if dtype in ("fp16", "fp32", "fp64", "bfloat16"):
         return "float"
     if dtype in _DATATYPE_TO_CTYPE and dtype != "uint64":
-        return "int"
+        return "SymInt"
     raise TypeError(f"Parameter {info.name!r} has no supported dispatcher scalar type for {info.dtype}")
 
 
 def _check_scalar(value: Any, info: ParamInfo) -> None:
     """Validate abstract scalar values without converting symbolic integers to Python."""
     kind = _scalar_schema(info)
-    symbolic_type = {"int": torch.SymInt, "float": torch.SymFloat, "bool": torch.SymBool}[kind]
+    symbolic_type = {"SymInt": torch.SymInt, "float": torch.SymFloat, "bool": torch.SymBool}[kind]
     if isinstance(value, symbolic_type):
-        if kind == "int":
+        if kind == "SymInt":
             ctype = _DATATYPE_TO_CTYPE[str(info.dtype)]
             bits = ctypes.sizeof(ctype) * 8
             signed = ctype(-1).value < 0
