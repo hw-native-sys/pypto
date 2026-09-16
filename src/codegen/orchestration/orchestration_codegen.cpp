@@ -312,6 +312,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// it makes every generated identifier ambiguous to read and to grep.
   void SetTaskVarPrefix(std::string prefix) { task_var_prefix_ = std::move(prefix); }
 
+  void SetGraphScalarParams(const std::vector<VarPtr>& params) {
+    for (const auto& param : params) {
+      if (As<ScalarType>(param->GetType())) {
+        graph_scalar_params_.insert(param.get());
+      }
+    }
+  }
+
   /// Reserve identifiers the emitted C++ function already declares outside the
   /// body this instance generates, so no body Var can be handed one of them.
   ///
@@ -516,6 +524,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
       return GetVarName(var);
     }
     return CodegenBase::TryGetVarName(expr);
+  }
+  [[nodiscard]] std::string GenerateExprString(const ExprPtr& expr) const override {
+    if (auto var = AsVarLike(expr); var && graph_scalar_params_.count(var.get())) {
+      auto scalar_type = As<ScalarType>(var->GetType());
+      INTERNAL_CHECK_SPAN(scalar_type, expr->span_) << "Internal error: Graph scalar must have ScalarType";
+      return GetVarName(var) + ".to<" + scalar_type->dtype_.ToCTypeString() + ">()";
+    }
+    return CodegenBase::GenerateExprString(expr);
   }
   [[nodiscard]] std::string GetTensorShapeDim(const std::string& name, int64_t axis) const override {
     std::string physical_dim;
@@ -782,8 +798,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
       // so the bare emit name is not a valid identifier when the init value is
       // a param. Apply the same translation as everything else that names a
       // tensor in the emitted code.
-      const std::string init_var_name =
-          init_is_var ? GetExternalTensorName(init_emit_name) : GenerateExprString(iter_arg->initValue_);
+      const std::string init_var_name = init_is_var && !As<ScalarType>(iter_arg->initValue_->GetType())
+                                            ? GetExternalTensorName(init_emit_name)
+                                            : GenerateExprString(iter_arg->initValue_);
 
       if (array_size > 0) {
         // ARRAY CARRY PATH — allocate ``TaskId <name>[N]`` and init it.
@@ -1877,8 +1894,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   // Encode a scalar variable for the orchestration API.
-  // float variables must be bit-cast via to_u64(); other types pass through as-is.
-  static std::string EncodeScalarVar(const std::string& var_name, const std::string& cpp_type) {
+  // Graph parameters keep their InheritableScalar origin when forwarded.
+  // Ordinary float variables must be bit-cast via to_u64().
+  std::string EncodeScalarVar(const ExprPtr& expr, const std::string& var_name,
+                              const std::string& cpp_type) const {
+    if (auto var = AsVarLike(expr); var && graph_scalar_params_.count(var.get())) {
+      return var_name;
+    }
     return cpp_type == "float" ? "to_u64(" + var_name + ")" : var_name;
   }
 
@@ -1971,7 +1993,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
       if (auto scalar_type = As<ScalarType>(arg->GetType())) {
         std::string cpp_type = scalar_type->dtype_.ToCTypeString();
-        return {ArgDirection::Scalar, EncodeScalarVar(var_name, cpp_type)};
+        return {ArgDirection::Scalar, EncodeScalarVar(arg, var_name, cpp_type)};
       }
       std::string ext_name = GetExternalTensorName(var_name);
       return {call_arg_directions[arg_idx], ext_name};
@@ -2456,7 +2478,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         }
         if (auto scalar_type = As<ScalarType>(outer_arg->GetType())) {
           std::string cpp_type = scalar_type->dtype_.ToCTypeString();
-          params.push_back({ArgDirection::Scalar, EncodeScalarVar(var_name, cpp_type)});
+          params.push_back({ArgDirection::Scalar, EncodeScalarVar(outer_arg, var_name, cpp_type)});
           continue;
         }
 
@@ -4454,6 +4476,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::map<std::string, std::vector<std::string>>* func_name_to_signature_;
   int* next_func_id_;
   std::unordered_map<const Var*, std::string> emit_name_map_;
+  // Only Graph boundary scalars are wrappers; body-local scalars hold values.
+  std::unordered_set<const Var*> graph_scalar_params_;
   std::set<std::string> declared_var_names_;
   std::set<std::string> param_name_set_;
   std::map<std::string, int> param_name_to_orch_index_;
@@ -4723,6 +4747,7 @@ std::string GenerateGraphFunctions(const ProgramPtr& program, const FunctionPtr&
                                           /*param_name_set=*/{}, /*param_name_to_orch_index=*/{},
                                           /*packed_fp4_axis=*/{}, /*dist_param_to_ctx_param=*/{});
     body_codegen.SetTaskVarPrefix("g" + std::to_string(graph_index) + "_");
+    body_codegen.SetGraphScalarParams(graph_func->params_);
     // The prologue below declares one C++ name per parameter. They are not in
     // ``param_name_set``, so reserve them explicitly or a body SSA rename will
     // shadow one (issue #2605; see ReserveDeclaredNames).

@@ -1585,7 +1585,7 @@ class TestOrchestrationMore:
         assert t2_alloc_line > n_line, "t2 alloc must come after n definition"
 
     def test_scalar_taskarg(self):
-        """Scalar params get ChipTaskArgs scalar slots (0-indexed) via scalar<T>()."""
+        """Scalar params read ChipTaskArgs scalar slots (0-indexed) via scalar<T>()."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 

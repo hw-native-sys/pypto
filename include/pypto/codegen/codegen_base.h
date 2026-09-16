@@ -199,7 +199,7 @@ class CodegenBase : public ir::IRVisitor {
    * @param expr Expression to convert
    * @return C++ code string
    */
-  [[nodiscard]] std::string GenerateExprString(const ir::ExprPtr& expr) const;
+  [[nodiscard]] virtual std::string GenerateExprString(const ir::ExprPtr& expr) const;
 
  protected:
   /**
