@@ -9,7 +9,6 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -26,10 +25,12 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
@@ -213,7 +214,7 @@ class TileToBufferMutator : public IRMutator {
     return std::make_shared<MakeTuple>(std::move(extents), tile->span_);
   }
 
-  StmtPtr Operation(const std::string& name, std::vector<ExprPtr> args, const Span& span) const {
+  StmtPtr Operation(const std::string& name, const std::vector<ExprPtr>& args, const Span& span) const {
     return std::make_shared<EvalStmt>(OpRegistry::GetInstance().CreateInternal(name, args, span), span);
   }
 
