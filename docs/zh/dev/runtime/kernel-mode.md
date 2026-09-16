@@ -108,6 +108,17 @@ taskQueue 顺序、allocator 安全、eager 数值执行或 ACLGraph 已可用�
 
 ## 验证
 
+共享 UT fixture `run_without_optional_runtime` 启动独立 Python 进程，通过导入查找器
+（import finder）阻止 `torch_npu`、`simpler`、`simpler_setup` 和 `pypto._torch_npu`。
+同时捕获 import 语句与 `importlib.import_module()` 动态导入，即使调用方捕获了
+`ImportError`，该次尝试仍使检查失败。子进程关闭 PyTorch backend 自动加载，以隔离
+PyPTO 自身行为与已安装的框架插件。查找器的负向测试确保 CPU runner 即使原本就未安装
+这些依赖，也不会把导入尝试误报为通过。
+
+这些检查覆盖包导入/重载、program 配置和注册后的 Fake/Meta dispatch，直接进入现有
+全量 UT CI，无需可选 runtime 依赖或新增设备 job。它们不验证 native adapter 构建或
+设备执行；这些验证仍属于集成分支。
+
 `tests/ut/torch/test_interop.py` 使用真实 CPU storage 和模拟的 NPU device 标签，
 只替换框架 format/context 查询。覆盖 view offset、alias、独立 Scalar/stream 快照、
 所有权、非法输入和禁止导入可选 runtime 依赖的隔离进程。
