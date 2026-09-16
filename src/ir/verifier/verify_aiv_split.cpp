@@ -566,6 +566,32 @@ class SplitAivStructuralVerifier : public IRVisitor {
           "region inside a 'with pl.at(level=pl.Level.CORE_GROUP):' scope in such a function, and "
           "let pass 8 outline it.");
     }
+    // (l) A tile.transpose that SWAPS the split axis migrates the per-lane data
+    // to the other dimension, so the region cannot be split correctly at any
+    // lane. This is a representability limit, not a claim about the author's
+    // intent, which is why it survives here while the half-width admission scan
+    // does not. Reported at the region, with the region's own mode in scope —
+    // the same reason check (h) lives here: LowerAutoVectorSplit (pass 23) keeps
+    // the identical check as a backstop, and ExpandMixedKernel (pass 25) cannot
+    // report it well at all, because it consumes the wrapper it would name.
+    // Skipped for a None region: no split axis, so no axis for a transpose to
+    // swap.
+    if (op->split_ != SplitMode::None) {
+      const int region_split_dim = split_axis::SplitDimension(op->split_);
+      auto hazard = split_axis::FindTransposeSplitHazard(op->body_, region_split_dim);
+      if (hazard.call) {
+        const std::string where =
+            hazard.result_name.empty() ? std::string() : " (result '" + hazard.result_name + "')";
+        Err(hazard.call->span_,
+            "a pl.split_aiv(" + std::string(region_split_dim == 0 ? "UP_DOWN" : "LEFT_RIGHT") +
+                ") region contains a tile.transpose" + where + " that swaps the split axis (dim " +
+                std::to_string(region_split_dim) +
+                "). The transpose moves the per-lane split data to the other dimension, so the region "
+                "cannot be split correctly. Fix it one of two ways: (1) remove the transpose, e.g. "
+                "replace a transpose-then-row-index with a direct column slice such as pre[:, h:h+1]; "
+                "or (2) move the transpose outside the pl.split_aiv region.");
+      }
+    }
     int prev_split_dim = cur_split_dim_;
     const SplitAivScopeStmt* prev_region = cur_region_;
     cur_region_ = op.get();
@@ -649,6 +675,9 @@ class SplitAivStructuralVerifier : public IRVisitor {
         // EVERY region: which lane produces the value and which consumes it does
         // not depend on the split mode, only the shape does.
         if (tile_boundary) CheckBoundaryMemory(op);
+        // (m) The converse of (f)/(g): those require an implicit crossing to be
+        // NAMED; this requires a named crossing to actually BE one.
+        if (boundary) CheckBoundaryOperandLane(op);
       } else {
         // Outside every region.
         if (boundary && allow_flat_ && tile_boundary) {
@@ -744,6 +773,91 @@ class SplitAivStructuralVerifier : public IRVisitor {
         reported.push_back(var.get());
       }
     }
+  }
+
+  /// (m) A named crossing must actually BE a crossing.
+  ///
+  /// Checks (f)/(g) catch a value that crosses the AIC/AIV boundary without
+  /// saying so. This is the converse: a `pl.aiv_shard` / `pl.aic_gather` whose
+  /// operand was never on the lane the boundary pushes FROM. Each op pushes from
+  /// exactly one lane:
+  ///
+  /// | boundary op       | crossing  | pushes from | so its operand must be |
+  /// | ----------------- | --------- | ----------- | ---------------------- |
+  /// | `pl.aiv_shard`    | C -> V    | CUBE        | cube-produced          |
+  /// | `pl.aic_gather`   | V -> C    | VECTOR      | vector-produced        |
+  ///
+  /// A `pl.aiv_shard(pl.full(...))` names a crossing for a value that already
+  /// lives on the AIV lane: the cube half of the kernel would push a variable it
+  /// never defines. That reaches the backend as a free variable in the AIC
+  /// function and dies there, far from the line that caused it.
+  ///
+  /// Reported here rather than at ExpandMixedKernel (pass 25), where it used to
+  /// live, for the reason check (h) gives: this is a fact about what the author
+  /// wrote, and it is fully decidable from the source shape, so it belongs as
+  /// close to the source as the fact allows.
+  ///
+  /// One def-map lookup per boundary operand, so O(N) over the body.
+  void CheckBoundaryOperandLane(const CallPtr& op) {
+    if (op->args_.empty()) return;
+    // The operand is either a bound name (resolve it through the def map) or an
+    // inline call (`pl.aiv_shard(pl.full(...))`), which IS its own producer.
+    // Handling both matters: an inline spelling is the shortest way to write the
+    // mistake, and a Var-only lookup would wave it through.
+    std::string operand_name = "(inline)";
+    CallPtr producer;
+    if (auto var = AsVarLike(op->args_[0])) {
+      operand_name = "'" + var->name_hint_ + "'";
+      auto it = facts_.defs.find(var.get());
+      if (it == facts_.defs.end()) return;
+      producer = it->second.call;
+    } else {
+      producer = As<Call>(op->args_[0]);
+    }
+    if (!producer || !producer->op_) return;
+    // A hoisted load/store is the compiler's own out-of-region output and says
+    // nothing about the author's lane intent — same carve-out as (f)/(g).
+    if (IsHoistedMemoryOp(producer)) return;
+
+    const bool gather = IsGatherOp(op);
+    const auto pushes_from = gather ? core_affinity::CoreAffinity::VECTOR : core_affinity::CoreAffinity::CUBE;
+
+    // A producer that is itself a boundary op binds its result on its CONSUMING
+    // lane, which is the opposite of the lane its own name suggests.
+    const bool producer_is_boundary = IsBoundaryOp(producer);
+    core_affinity::CoreAffinity produced_on;
+    if (producer_is_boundary) {
+      produced_on =
+          IsGatherOp(producer) ? core_affinity::CoreAffinity::CUBE : core_affinity::CoreAffinity::VECTOR;
+    } else {
+      produced_on = core_affinity::ClassifyCallAffinity(producer);
+    }
+    // SHARED / MIXED producers are lane-neutral: they carry no claim to refute.
+    if (produced_on != core_affinity::CoreAffinity::CUBE &&
+        produced_on != core_affinity::CoreAffinity::VECTOR) {
+      return;
+    }
+    if (produced_on == pushes_from) return;
+
+    const std::string dsl = BoundaryOpDslName(op);
+    const char* produced_lane = (produced_on == core_affinity::CoreAffinity::CUBE) ? "CUBE" : "VECTOR";
+    const char* pushing_lane = gather ? "VECTOR" : "CUBE";
+    const char* crossing = gather ? "VECTOR -> CUBE" : "CUBE -> VECTOR";
+    const std::string hint =
+        producer_is_boundary
+            ? " Its producer is itself a cross-core boundary, which binds a result on its consuming "
+              "lane only — the value cannot cross a second time in the same direction, because the "
+              "first crossing already delivered it there."
+        : gather ? " Gather the value only after it has been computed by vector ops on the AIV lane."
+                 : " A vector-produced value (pl.full / pl.load) already lives on the AIV lane and has "
+                   "no boundary to cross: drop the " +
+                       dsl +
+                       " and use the value directly, authoring it at the per-lane extent inside the "
+                       "region — or lane-localize the load with the region's aiv_id.";
+    Err(op->span_, "'" + dsl + "' operand " + operand_name + " is produced on the " + produced_lane +
+                       " lane by '" + producer->op_->name_ + "', but '" + dsl + "' is the " + crossing +
+                       " crossing and pushes from the " + pushing_lane + " lane, which never defines it." +
+                       hint);
   }
 
   /// (i) A pl.aiv_shard / pl.aic_gather result must not be carried across a loop

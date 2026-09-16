@@ -46,38 +46,47 @@ This normalization happens before `InjectGMPipeBuffer`, so a backend-injected
 signatures. It does not require `sync_start`: AIC and AIV are subslots of one
 mixed task, while `sync_start` controls multi-block SPMD launch admission.
 
-## Unsplittable transpose: reject with an actionable error
+## Unsplittable transpose: checked earlier, not here
 
-A requested vector split is **rejected with a `ValueError`** when the kernel
-contains a `tile.transpose` that **swaps the split axis**. `tile.transpose` swaps
-two axes, so the per-lane split data migrates to the *other* dimension while
-`SplitVectorKernel` still halves the *original* split axis — it cannot type such a
-transpose correctly, so the result would be mis-shaped and miscompute. This is
-independent of split mode (UP_DOWN dim 0 / LEFT_RIGHT dim 1) and dtype.
+A `tile.transpose` that **swaps the split axis** cannot be split correctly: the
+per-lane data migrates to the *other* dimension while the split still halves the
+*original* axis, so the result would be mis-shaped and miscompute. This pass no
+longer reports it. The check moved to where the context it needs still exists:
 
-The split is a performance decision the user owns, so the pass does not silently
-drop it (which would compile a slower kernel than asked for). It fails loud and
-points at the offending transpose with two fix directions:
+| Shape | Reported by |
+| ----- | ----------- |
+| A `pl.split_aiv` region | [`AivSplitValid`](99-verifier.md) check (l), with [`LowerAutoVectorSplit`](23-lower_auto_vector_split.md) as the backstop |
+| A function-level `pl.split` (no region) | `LowerAutoVectorSplit` |
 
-1. **Drop the split** — set `attrs={"split": pl.SplitMode.NONE}` (or remove the
-   `pl.split(...)` optimization). This is the same un-split kernel the user can
-   already request directly.
-2. **Eliminate the transpose** — e.g. replace a transpose-then-row-index with a
-   direct column slice such as `pre[:, h:h+1]`. This keeps the split, so the
-   kernel still gets the requested speedup, and also avoids the pto-isa FP
-   transpose tail-path miscompute on device.
+Reporting it here could only ever produce a worse diagnostic: the walk that
+would raise the region case is `AppendConsumed`, which *erases* the wrapper it
+would have to name, so it could state neither the region's mode nor the
+offending result nor a fix. And the function-level case sat here only because
+this pass sees **every** function, including the pure-vector `pl.split` kernels
+`LowerAutoVectorSplit` declines to lower; that pass now validates its
+pass-through branch, which closes the gap without the late diagnostic.
 
-`split_axis::FindTransposeSplitHazard` detects this at the start of
-`ExpandMixedFunction`: it flags the first `tile.transpose` whose source is
-**non-singleton on the split axis** (a source that is singleton on the split axis
-carries no split data — the no-op broadcast case — and is left split; a dynamic,
-non-`ConstInt` extent is treated as non-singleton and flagged conservatively).
+**A whole-function backstop remains here, as an `INTERNAL_CHECK_SPAN`.** This
+pass is documented below as invocable on its own after `InferTileMemorySpace`,
+and a bare pass call does **not** enforce `required` properties — only
+`PassPipeline` does. So a caller who skips `LowerAutoVectorSplit` arrives with
+`AivSplitLoweredValid` unmet, and without the guard the kernel expands silently
+and `SplitVectorKernel` mis-shapes it. It is internal rather than user-facing
+because the failure is an unmet pass prerequisite, not a fact the author can
+read off their source, so the message names the skipped step instead of giving
+authoring advice.
+
+`split_axis::FindTransposeSplitHazard` is still the shared detector: it flags the
+first `tile.transpose` whose source is **non-singleton on the split axis** (a
+singleton source carries no split data — the no-op broadcast case — and is left
+split; a dynamic, non-`ConstInt` extent is treated as non-singleton and flagged
+conservatively).
 
 `SplitRegionConsumer` validates each retained or synthesized region using its
 own split axis, erases the wrapper, and records placement on the same consumed
 body used by both mixed-function classification and expansion. Pure-AIV functions
-also consume their regions here. Functions with no regions retain the existing
-whole-function transpose check and skip region consumption without rebuilding their bodies. Erased-region comments are prepended to the first emitted statement without mutating input metadata, including when a boundary expands into transport operations.
+also consume their regions here. Functions with no regions skip region
+consumption without rebuilding their bodies. Erased-region comments are prepended to the first emitted statement without mutating input metadata, including when a boundary expands into transport operations.
 
 The pass requires `AivSplitLoweredValid`. Source boundaries use strict operand
 memory rules; lowered verification retains those checks for locally defined operands. Expansion checks operand availability, using lexical placement for inline calls as well as bound values, on the producing

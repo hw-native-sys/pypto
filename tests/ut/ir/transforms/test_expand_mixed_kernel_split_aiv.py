@@ -22,6 +22,7 @@ The Ascend950 backend (where the V->C direction needs an NZ fractal adapter) is
 configured by the directory-level ``conftest.py``.
 """
 
+import pypto
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
@@ -484,27 +485,28 @@ def _build_cube_produced_gather_program():
     return ir.Program([func], "test_cube_produced_gather", span)
 
 
-def test_shard_of_a_vector_produced_value_is_rejected():
-    """A vector-produced shard operand is an authoring error, not a lane-local halve.
+def test_shard_of_a_vector_produced_value_hits_the_backstop():
+    """A vector-produced shard operand would lower into a tpush the cube lane
+    cannot satisfy, so the pass still refuses it.
 
-    ``pl.aiv_shard`` MEANS "cross the AIC/AIV boundary"; a value the AIV lane
-    already produced has no crossing to name. Reject it with the boundary op's
-    span rather than lowering it into a tpush the cube lane cannot satisfy.
+    The AUTHORING report for this shape now comes from the AivSplitValid verifier
+    (check (m)), 14 passes earlier and in the author's own pl.* spelling. What is
+    left here is a compiler backstop: reaching it means verification was off, or
+    a pass built the bad pairing itself. So it raises an INTERNAL error with no
+    fix advice.
     """
-    # Exercise the pass guard independently of the earlier lowered verifier.
     with (
         passes.PassContext([]),
-        pytest.raises(ValueError, match=r"is produced on the VECTOR lane by 'tile\.full'"),
+        pytest.raises(pypto.InternalError, match=r"is defined on the VECTOR lane by 'tile\.full'"),
     ):
         _expand(_build_vector_produced_shard_program())
 
 
-def test_gather_of_a_cube_produced_value_is_rejected():
-    """The V->C mirror: a cube-produced gather operand is rejected the same way."""
-    # Exercise the pass guard independently of the earlier lowered verifier.
+def test_gather_of_a_cube_produced_value_hits_the_backstop():
+    """The V->C mirror, refused by the same backstop."""
     with (
         passes.PassContext([]),
-        pytest.raises(ValueError, match=r"is produced on the CUBE lane by 'tile\.matmul'"),
+        pytest.raises(pypto.InternalError, match=r"is defined on the CUBE lane by 'tile\.matmul'"),
     ):
         _expand(_build_cube_produced_gather_program())
 
@@ -602,29 +604,27 @@ def _build_inline_operand_shard_program():
     return ir.Program([func], "test_inline_operand_shard", span)
 
 
-def test_chained_same_direction_shard_is_rejected():
+def test_chained_same_direction_shard_hits_the_backstop():
     """A boundary result cannot cross again in the same direction.
 
     Before the MIXED case was resolved through the producer's direction, the cube
     half emitted ``pl.tile.tpush_to_aiv(half1__FREE_VAR, split=1)``.
     """
-    # Exercise the pass guard independently of the earlier lowered verifier.
     with (
         passes.PassContext([]),
-        pytest.raises(ValueError, match=r"is produced on the VECTOR lane by 'tile\.aiv_shard'"),
+        pytest.raises(pypto.InternalError, match=r"is defined on the VECTOR lane by 'tile\.aiv_shard'"),
     ):
         _expand(_build_chained_shard_program())
 
 
-def test_inline_vector_call_operand_is_rejected():
+def test_inline_vector_call_operand_hits_the_backstop():
     """An unbound vector Call operand is caught too, not skipped for lack of a Var.
 
     Before this, the cube half emitted the ``tile.full`` inline inside its tpush.
     """
-    # Exercise the pass guard independently of the earlier lowered verifier.
     with (
         passes.PassContext([]),
-        pytest.raises(ValueError, match=r"operand \(inline\) is produced on the VECTOR lane"),
+        pytest.raises(pypto.InternalError, match=r"operand \(inline\) is defined on the VECTOR lane"),
     ):
         _expand(_build_inline_operand_shard_program())
 

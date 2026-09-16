@@ -173,12 +173,12 @@ class SplitRegionConsumer : public IRMutator {
   void AppendConsumed(const StmtPtr& stmt, std::vector<StmtPtr>& body) {
     if (auto region = As<SplitAivScopeStmt>(stmt)) {
       had_regions = true;
-      if (region->split_ != SplitMode::None) {
-        auto hazard =
-            split_axis::FindTransposeSplitHazard(region->body_, split_axis::SplitDimension(region->split_));
-        CHECK_SPAN(!hazard.call, region->span_)
-            << "ExpandMixedKernel: a pl.split_aiv region contains a transpose that swaps its split axis";
-      }
+      // The region's transpose-split hazard is NOT checked here. It is a fact
+      // about what the author wrote, so it is reported by the AivSplitValid
+      // verifier's check (l) twelve passes earlier, with LowerAutoVectorSplit
+      // (pass 23) holding the backstop. Checking it here could only ever produce
+      // a worse diagnostic: this walk is the one that CONSUMES the wrapper, so
+      // the region it would name is about to stop existing.
       pending_comments_.insert(pending_comments_.end(), region->leading_comments_.begin(),
                                region->leading_comments_.end());
       ++region_depth_;
@@ -641,25 +641,19 @@ void CheckOpDrivenBoundaryOperands(const std::vector<StmtPtr>& stmts,
           if (auto op = As<Op>(producer_call ? producer_call->op_ : nullptr)) {
             producer_op = " by '" + op->name_ + "'";
           }
-          const bool chained_boundary = producer_call && BoundaryResultLane(producer_call).has_value();
-          const char* op_name = cube_to_vector ? "pl.aiv_shard" : "pl.aic_gather";
+          const char* op_name = cube_to_vector ? "tile.aiv_shard" : "tile.aic_gather";
           const char* producer_lane = (*lane == CoreAffinity::CUBE) ? "CUBE" : "VECTOR";
-          const char* crossing = cube_to_vector ? "CUBE -> VECTOR" : "VECTOR -> CUBE";
           const char* pushing_lane = cube_to_vector ? "CUBE" : "VECTOR";
-          const char* hint =
-              chained_boundary ? " Its producer is itself a cross-core boundary, which binds a result on its"
-                                 " consuming lane only — the value cannot cross a second time in the same"
-                                 " direction, because the first crossing already delivered it there."
-              : cube_to_vector
-                  ? " A vector-produced value (pl.full / pl.load) already lives on the AIV lane and"
-                    " has no boundary to cross: drop the pl.aiv_shard and use the value directly,"
-                    " authoring it at the per-lane extent inside the region — or lane-localize the"
-                    " load with the region's aiv_id."
-                  : " Gather the value only after it has been computed by vector ops on the AIV lane.";
-          CHECK_SPAN(false, stmt->span_)
-              << "'" << op_name << "' operand " << operand_name << " is produced on the " << producer_lane
-              << " lane" << producer_op << ", but '" << op_name << "' is the " << crossing
-              << " crossing and pushes from the " << pushing_lane << " lane, which never defines it." << hint;
+          // Backstop only. An AUTHORED boundary op on the wrong lane is reported
+          // by the AivSplitValid verifier's check (m), twelve passes earlier and
+          // with the author's own pl.* spelling. Reaching here means either that
+          // verification was disabled, or that THIS compiler produced the bad
+          // pairing when it rewrote a tile.move into a boundary op — a pass bug
+          // either way, so the message is technical and carries no fix advice.
+          INTERNAL_CHECK_SPAN(false, stmt->span_)
+              << "Internal error: '" << op_name << "' operand " << operand_name << " is defined on the "
+              << producer_lane << " lane" << producer_op << ", but that op pushes from the " << pushing_lane
+              << " lane, which never defines it";
         }
       }
     }
@@ -1974,33 +1968,34 @@ struct ExpandedKernel {
 
 ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, const AivPlacement& placement,
                                    bool had_regions) {
-  // A tile.transpose that swaps the split axis cannot be split correctly:
-  // SplitVectorKernel halves the original split axis, but the transpose moves
-  // that data to the other dimension, mis-typing the result. Reject the split
-  // request with an actionable error rather than silently miscompiling — the
-  // user controls this perf decision (drop the split, or remove the transpose).
+  // Whole-function transpose-split hazard: BACKSTOP only.
   //
-  // SplitRegionConsumer already validated each lexical region using its own
-  // mode; skip
-  // the single-func-mode check for them. A multi-mode function carries no single
-  // ``func->GetSplitMode()`` and this whole-function check would mis-check the
-  // other region's axis.
+  // The AUTHORING report moved to LowerAutoVectorSplit (pass 23), which reaches
+  // the pure-vector pl.split functions too and can name both fix directions. But
+  // this pass is documented as directly invocable after InferTileMemorySpace
+  // ("building a custom pass pipeline"), and a bare pass call does not enforce
+  // `required` properties — only PassPipeline does. So a caller who skips pass 23
+  // lands here with AivSplitLoweredValid unmet, and without this guard the kernel
+  // expands silently and SplitVectorKernel mis-shapes it.
+  //
+  // Internal rather than user-facing: the failure is an unmet pass prerequisite,
+  // not something about the kernel the author can read off their source. The
+  // message says which step was skipped instead of offering authoring advice.
+  //
+  // Regions carry their own per-mode check in the AivSplitValid verifier (l), and
+  // a multi-mode function has no single GetSplitMode() for this whole-function
+  // form to read, so regions are skipped here exactly as before.
   if (!had_regions) {
     if (auto mode = func->GetSplitMode(); mode.has_value() && *mode != SplitMode::None) {
-      int split_dim = (*mode == SplitMode::UpDown) ? 0 : 1;
+      const int split_dim = split_axis::SplitDimension(*mode);
       auto hazard = split_axis::FindTransposeSplitHazard(func->body_, split_dim);
       if (hazard.call) {
-        const char* mode_name = (*mode == SplitMode::UpDown) ? "UP_DOWN" : "LEFT_RIGHT";
-        std::string where =
-            hazard.result_name.empty() ? std::string() : " (result '" + hazard.result_name + "')";
-        CHECK_SPAN(false, hazard.call->span_)
-            << "ExpandMixedKernel: kernel '" << func->name_ << "' requests pl.split(" << mode_name
-            << ") but contains a tile.transpose" << where << " that swaps the split axis (dim " << split_dim
-            << "). SplitVectorKernel halves the split axis while the transpose moves that data to the "
-               "other dimension, so the split cannot be applied correctly. Fix it one of two ways: "
-               "(1) drop the split — set attrs={\"split\": pl.SplitMode.NONE} (or remove the pl.split "
-               "optimization); or (2) eliminate this transpose, e.g. replace a transpose-then-row-index "
-               "with a direct column slice such as pre[:, h:h+1].";
+        INTERNAL_CHECK_SPAN(false, hazard.call->span_)
+            << "Internal error: kernel '" << func->name_ << "' carries split mode "
+            << (split_dim == 0 ? "UP_DOWN" : "LEFT_RIGHT")
+            << " and a tile.transpose that swaps the split axis (dim " << split_dim
+            << "), which LowerAutoVectorSplit rejects — this IR did not pass that step, so "
+               "AivSplitLoweredValid does not hold";
       }
     }
   }
