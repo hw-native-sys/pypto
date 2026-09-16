@@ -543,6 +543,89 @@ std::vector<VarPtr> CollectVarsFromShapeExpr(const ExprPtr& expr) {
   return out;
 }
 
+namespace {
+
+std::optional<int64_t> ConstIntFromShapeExpr(const ExprPtr& expr) {
+  if (auto ci = As<ir::ConstInt>(expr)) return ci->value_;
+  return std::nullopt;
+}
+
+bool IsTargetVar(const ExprPtr& v, const VarPtr& target) {
+  auto var = As<ir::Var>(v);
+  return var && var.get() == target.get();
+}
+
+}  // namespace
+
+std::string InvertShapeDimForVar(const ExprPtr& dim_expr, const VarPtr& target_var,
+                                 const std::string& shape_access, ShapeInvertDialect dialect) {
+  if (IsTargetVar(dim_expr, target_var)) return shape_access;
+
+  if (auto add = As<ir::Add>(dim_expr)) {
+    if (IsTargetVar(add->left_, target_var)) {
+      if (auto c = ConstIntFromShapeExpr(add->right_)) {
+        return "(" + shape_access + " - " + std::to_string(*c) + ")";
+      }
+    }
+    if (IsTargetVar(add->right_, target_var)) {
+      if (auto c = ConstIntFromShapeExpr(add->left_)) {
+        return "(" + shape_access + " - " + std::to_string(*c) + ")";
+      }
+    }
+    return "";
+  }
+
+  if (auto sub = As<ir::Sub>(dim_expr)) {
+    if (IsTargetVar(sub->left_, target_var)) {
+      if (auto c = ConstIntFromShapeExpr(sub->right_)) {
+        return "(" + shape_access + " + " + std::to_string(*c) + ")";
+      }
+    }
+    if (IsTargetVar(sub->right_, target_var)) {
+      if (auto c = ConstIntFromShapeExpr(sub->left_)) {
+        return "(" + std::to_string(*c) + " - " + shape_access + ")";
+      }
+    }
+    return "";
+  }
+
+  const char* idiv = dialect == ShapeInvertDialect::kPython ? " // " : " / ";
+  if (auto mul = As<ir::Mul>(dim_expr)) {
+    if (IsTargetVar(mul->left_, target_var)) {
+      if (auto c = ConstIntFromShapeExpr(mul->right_); c && *c != 0) {
+        return "(" + shape_access + idiv + std::to_string(*c) + ")";
+      }
+    }
+    if (IsTargetVar(mul->right_, target_var)) {
+      if (auto c = ConstIntFromShapeExpr(mul->left_); c && *c != 0) {
+        return "(" + shape_access + idiv + std::to_string(*c) + ")";
+      }
+    }
+    return "";
+  }
+
+  if (auto fdiv = As<ir::FloorDiv>(dim_expr)) {
+    if (IsTargetVar(fdiv->left_, target_var)) {
+      if (auto c = ConstIntFromShapeExpr(fdiv->right_); c && *c != 0) {
+        return "(" + shape_access + " * " + std::to_string(*c) + ")";
+      }
+    }
+    return "";
+  }
+
+  return "";
+}
+
+int ShapeDimInvertRank(const ExprPtr& dim_expr, const VarPtr& target_var) {
+  // Probe invertibility with a placeholder access; only emptiness matters.
+  if (InvertShapeDimForVar(dim_expr, target_var, "S", ShapeInvertDialect::kCpp).empty()) {
+    return 0;
+  }
+  if (IsTargetVar(dim_expr, target_var)) return 3;
+  if (As<ir::FloorDiv>(dim_expr)) return 1;  // lossy: floor(K/c)*c may != K
+  return 2;                                  // +/-/* with a ConstInt
+}
+
 // Visitor to collect all MemRef objects from TileType variables. Also
 // piggy-backs synthetic-parameter detection (prefetch.make_context and the
 // SPMD identity ops) on the same body walk so callers do not need a separate
@@ -1267,6 +1350,43 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
   }
 }
 
+void PTOCodegen::ExpandPackedFp4MakeTensorViewDims(DataType dtype, ir::TensorLayout layout,
+                                                   const std::vector<ir::ExprPtr>& shape_exprs,
+                                                   std::vector<std::string>& shape_ssas,
+                                                   const std::vector<ir::ExprPtr>* stride_exprs,
+                                                   std::vector<std::string>& stride_ssas) {
+  // PackFp4 IR / tile_buf use pair (carrier) extents. pto-isa GetByteSize for
+  // float4_e*x2_t treats indices as nibbles ((n+1)>>1 → bytes), and EmitC
+  // expands Tile cols the same way. Expand last dim + leading strides so GM
+  // views share that nibble unit (multi-row TLOAD pitch matches Tile).
+  // Unit table: docs/en/dev/fp4.md#unit-convention
+  if (!dtype.IsPackedFp4() || IsMxTensorLayout(layout) || shape_ssas.empty()) return;
+  const size_t rank = shape_ssas.size();
+  auto two = GetOrEmitConstant(static_cast<int64_t>(2), DataType::INDEX);
+  auto times_two = [&](const std::string& ssa, const ir::ExprPtr& expr) -> std::string {
+    if (expr) {
+      if (auto ci = As<ir::ConstInt>(expr)) {
+        return GetOrEmitConstant(ci->value_ * 2, DataType::INDEX);
+      }
+    }
+    std::string mul = NewTemp();
+    Emit(mul + " = arith.muli " + ssa + ", " + two + " : index");
+    return mul;
+  };
+  ir::ExprPtr last_shape;
+  if (!shape_exprs.empty() && shape_exprs.size() == rank) {
+    last_shape = shape_exprs.back();
+  }
+  shape_ssas.back() = times_two(shape_ssas.back(), last_shape);
+  for (size_t j = 0; j + 1 < rank && j < stride_ssas.size(); ++j) {
+    ir::ExprPtr stride_expr;
+    if (stride_exprs && j < stride_exprs->size()) {
+      stride_expr = (*stride_exprs)[j];
+    }
+    stride_ssas[j] = times_two(stride_ssas[j], stride_expr);
+  }
+}
+
 void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
   // RFC #1300 P7 (canonical codegen).
   //
@@ -1362,14 +1482,18 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
     // but the codegen tolerates absent strides for any path that constructs
     // IR ad-hoc and skips the pipeline).
     std::vector<std::string> stride_names(rank);
-    bool has_explicit_stride =
-        tensor_type->tensor_view_.has_value() && !tensor_type->tensor_view_->stride.empty();
-    if (has_explicit_stride) {
-      const auto& strides = tensor_type->tensor_view_->stride;
-      CHECK(strides.size() == rank) << "EmitMakeTensorViews: explicit stride rank " << strides.size()
-                                    << " does not match tensor shape rank " << rank;
+    // Keep a non-optional pointer so later packed-FP4 stride scaling does not
+    // re-touch tensor_view_ (clang-tidy bugprone-unchecked-optional-access).
+    const std::vector<ir::ExprPtr>* explicit_strides = nullptr;
+    if (tensor_type->tensor_view_.has_value() && !tensor_type->tensor_view_->stride.empty()) {
+      explicit_strides = &tensor_type->tensor_view_->stride;
+    }
+    if (explicit_strides != nullptr) {
+      CHECK(explicit_strides->size() == rank)
+          << "EmitMakeTensorViews: explicit stride rank " << explicit_strides->size()
+          << " does not match tensor shape rank " << rank;
       for (size_t j = 0; j < rank; ++j) {
-        stride_names[j] = get_stride_mlir(strides[j]);
+        stride_names[j] = get_stride_mlir((*explicit_strides)[j]);
       }
     } else if (force_column_vector_dn) {
       // Forced-DN ``[..., M, 1]`` legacy stride pattern (PTOAS column-vector
@@ -1418,6 +1542,9 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
         }
       }
     }
+
+    ExpandPackedFp4MakeTensorViewDims(tensor_type->dtype_, layout, tensor_type->shape_, shape_dim_names,
+                                      explicit_strides, stride_names);
 
     // Buffer the statement so Emit() writes it as one line and can suffix the
     // parameter's source location.
@@ -1514,35 +1641,18 @@ PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
     return wide;
   };
 
-  // FP4 Vec tile_bufs use PTOAS's physical x2-carrier coordinates along the
-  // BLayout packed axis. PyPTO keeps logical nibble shapes internally; matrix
-  // spaces are excluded because TMATMUL_MX has its own logical-dimension ABI.
-  //
-  // PTOAS special requirement (FP4 Vec physical valid_shape): valid_row /
-  // valid_col operands on pto.alloc_tile must use the packed physical extent
-  // (logical / 2) on that axis. Skipping this conversion makes PTOAS reject
-  // or mis-size the tile relative to the f4E2M1x2 carrier.
-  const auto memory_space = tile_type->GetMemorySpace();
-  const auto tile_view = ir::tile_view_semantics::GetEffectiveTileView(*tile_type);
-  const bool packed_fp4_vec =
-      tile_type->dtype_ == DataType::FP4 && memory_space.has_value() && *memory_space == ir::MemorySpace::Vec;
-  const size_t packed_dim = tile_view.blayout == ir::TileLayout::col_major ? 0 : 1;
+  // After PackFp4, tile extents are already in FP4E2M1X2 carrier units that
+  // match PTOAS !pto.f4E2M1x2. Emit valid_row / valid_col as-is (no /2 here).
+  INTERNAL_CHECK(tile_type->dtype_ != DataType::FP4)
+      << "Internal error: logical DataType::FP4 reached alloc_tile codegen; PackFp4 must rewrite it "
+         "to FP4E2M1X2 first";
 
   // Lower a single valid_shape dim expression to an `index` SSA value.
-  auto lower_dim = [&](const ir::ExprPtr& expr, size_t dim) -> std::string {
+  auto lower_dim = [&](const ir::ExprPtr& expr, size_t /*dim*/) -> std::string {
     if (!expr) return "";
     if (auto ci = As<ir::ConstInt>(expr)) {
-      int64_t value = ci->value_;
-      if (packed_fp4_vec && dim == packed_dim) {
-        CHECK(value > 0 && value % 2 == 0)
-            << "FP4 Vec valid_shape packed dimension must be a positive even logical extent for PTOAS, got "
-            << value;
-        value /= 2;
-      }
-      return GetOrEmitConstant(value, DataType::INDEX);
+      return GetOrEmitConstant(ci->value_, DataType::INDEX);
     }
-    CHECK(!(packed_fp4_vec && dim == packed_dim)) << "Dynamic FP4 Vec valid_shape on the packed dimension is "
-                                                     "not supported; provide a static even extent";
     return cast_to_index(GetExprAsCode(expr), expr);
   };
 
@@ -2398,7 +2508,7 @@ std::string PTOCodegen::GetTypeString(const DataType& dtype) const {
   INTERNAL_CHECK(handler) << "PTOCodegen requires a backend handler";
   if (!handler->SupportsIncoreDataType(dtype)) {
     const std::string arch = handler->GetPtoTargetArch();
-    if (arch == "a2a3" && dtype.GetBit() == 4) {
+    if (arch == "a2a3" && (dtype.GetBit() == 4 || dtype.IsFp4Family())) {
       CHECK(false) << "The 4-bit dtype " << dtype.ToString()
                    << " is not supported for end-to-end in-core codegen on backend 'a2a3'. "
                       "A2/A3 exposes only an isolated FP16<->INT4 conversion, while direct packed "
@@ -2406,7 +2516,8 @@ std::string PTOCodegen::GetTypeString(const DataType& dtype) const {
     }
     CHECK(false) << "The 4-bit dtype " << dtype.ToString()
                  << " is not supported for end-to-end in-core codegen on backend '" << arch
-                 << "'; A5 currently supports only FP4 among 4-bit dtypes";
+                 << "'. A5 accepts packed FP4E2M1X2 (after PackFp4) and non-4-bit dtypes; "
+                    "logical FP4 / INT4 / UINT4 / HF4 are rejected (see docs/en/dev/fp4.md)";
   }
   return DataTypeToMLIR(dtype);
 }
@@ -2627,31 +2738,19 @@ std::string PTOCodegen::GetViewTileBufTypeStringFromTileType(
   // This static-valid type string is the PTOAS-facing half of
   // EmitStaticValidTileView (pto.tquant.mx / X-to-ZZ requireStaticShape): the
   // treshape result type must carry concrete v_row/v_col, not `?`.
-  //
-  // PTOAS special requirement (FP4 Vec physical valid_shape): when the tile is
-  // FP4 in Vec, also convert the BLayout packed axis from logical nibble
-  // extent to f4E2M1x2 physical extent (/2) so the static type matches the
-  // carrier coordinates PTOAS expects on that tile_buf.
+  // After PackFp4, valid extents are already carrier units — emit as-is.
+  INTERNAL_CHECK(tile_type->dtype_ != DataType::FP4)
+      << "Internal error: logical DataType::FP4 reached tile view type codegen; PackFp4 must rewrite "
+         "it to FP4E2M1X2 first";
   const auto view = ir::tile_view_semantics::GetEffectiveTileView(*tile_type);
   const auto& valid = view.valid_shape;
-  const bool packed_fp4_vec = tile_type->dtype_ == DataType::FP4 && *memory_space == ir::MemorySpace::Vec;
-  const size_t packed_dim = view.blayout == ir::TileLayout::col_major ? 0 : 1;
-  auto physical_valid = [&](int64_t value, size_t dim) {
-    if (packed_fp4_vec && dim == packed_dim) {
-      CHECK(value > 0 && value % 2 == 0) << "FP4 Vec view valid_shape packed dimension must be a positive "
-                                            "even logical extent for PTOAS, got "
-                                         << value;
-      return value / 2;
-    }
-    return value;
-  };
   if (valid.size() == 1) {
     // Match ComputeAllocTileFields / ExtractTileTypeInfo: a 1-D valid_shape
     // maps to rows=1, cols=shape[0]. Without this a 1-D reshape view keeps the
     // dynamic zero-valid extent and its consumers become silent no-ops.
     if (auto v_col = As<ir::ConstInt>(valid[0])) {
       c.v_row = 1;
-      c.v_col = physical_valid(v_col->value_, 1);
+      c.v_col = v_col->value_;
       c.v_row_dynamic = false;
       c.v_col_dynamic = false;
     }
@@ -2659,8 +2758,8 @@ std::string PTOCodegen::GetViewTileBufTypeStringFromTileType(
     auto v_row = As<ir::ConstInt>(valid[0]);
     auto v_col = As<ir::ConstInt>(valid[1]);
     if (v_row && v_col) {
-      c.v_row = physical_valid(v_row->value_, 0);
-      c.v_col = physical_valid(v_col->value_, 1);
+      c.v_row = v_row->value_;
+      c.v_col = v_col->value_;
       c.v_row_dynamic = false;
       c.v_col_dynamic = false;
     }

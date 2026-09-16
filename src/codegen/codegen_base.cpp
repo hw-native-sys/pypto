@@ -11,7 +11,6 @@
 
 #include "pypto/codegen/codegen_base.h"
 
-#include <cstddef>
 #include <string>
 
 #include "pypto/core/dtype.h"
@@ -130,20 +129,12 @@ std::string CodegenBase::GetRuntimeDataTypeString(const DataType& dtype) const {
   if (dtype == DataType::FP8E4M3FN) return "DataType::FP8E4M3FN";
   if (dtype == DataType::FP8E5M2) return "DataType::FP8E5M2";
   if (dtype == DataType::FP8E8M0) return "DataType::FP8E8M0";
-  if (dtype == DataType::FP4) return "DataType::FP4E2M1";
+  if (dtype == DataType::FP4E2M1X2) return "DataType::FP4E2M1";
   // INDEX is a semantic type in the IR; the runtime represents it as INT64
   if (dtype == DataType::INDEX) return "DataType::INT64";
   if (dtype == DataType::INT64) return "DataType::INT64";
   if (dtype == DataType::UINT64) return "DataType::UINT64";
   return "DataType::UNKNOWN";
-}
-
-std::string CodegenBase::GetRuntimeTensorShapeDim(const DataType& dtype, size_t axis, size_t ndim,
-                                                  const std::string& logical_dim_expr) const {
-  if (dtype != DataType::FP4 || axis + 1 != ndim) return logical_dim_expr;
-  return "([&]() -> uint32_t { const int64_t fp4_logical_dim = static_cast<int64_t>(" + logical_dim_expr +
-         "); always_assert(fp4_logical_dim > 0 && (fp4_logical_dim & 1u) == 0u); return "
-         "static_cast<uint32_t>(fp4_logical_dim / 2); }())";
 }
 
 }  // namespace codegen

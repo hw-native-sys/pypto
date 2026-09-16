@@ -15,6 +15,7 @@ from pypto import (
     DT_BF16,
     DT_BOOL,
     DT_FP4,
+    DT_FP4E2M1X2,
     DT_FP8E4M3FN,
     DT_FP8E5M2,
     DT_FP8E8M0,
@@ -51,6 +52,8 @@ class TestDataTypeEnum:
         assert hasattr(DataType, "INT64")
 
         # Floating point
+        assert hasattr(DataType, "FP4")
+        assert hasattr(DataType, "FP4E2M1X2")
         assert hasattr(DataType, "FP8E4M3FN")
         assert hasattr(DataType, "FP8E5M2")
         assert hasattr(DataType, "FP8E8M0")
@@ -89,6 +92,7 @@ class TestDataTypeEnum:
             DataType.UINT32,
             DataType.UINT64,
             DataType.FP4,
+            DataType.FP4E2M1X2,
             DataType.FP8E4M3FN,
             DataType.FP8E5M2,
             DataType.FP8E8M0,
@@ -124,6 +128,7 @@ class TestDataTypeEnum:
         assert DT_UINT32 == DataType.UINT32
         assert DT_UINT64 == DataType.UINT64
         assert DT_FP4 == DataType.FP4
+        assert DT_FP4E2M1X2 == DataType.FP4E2M1X2
         assert DT_FP8E4M3FN == DataType.FP8E4M3FN
         assert DT_FP8E5M2 == DataType.FP8E5M2
         assert DT_FP8E8M0 == DataType.FP8E8M0
@@ -148,6 +153,7 @@ class TestDataTypeEnum:
         assert hasattr(pypto, "DT_UINT32")
         assert hasattr(pypto, "DT_UINT64")
         assert hasattr(pypto, "DT_FP4")
+        assert hasattr(pypto, "DT_FP4E2M1X2")
         assert hasattr(pypto, "DT_FP8E4M3FN")
         assert hasattr(pypto, "DT_FP8E5M2")
         assert hasattr(pypto, "DT_FP8E8M0")
@@ -173,6 +179,7 @@ class TestDataTypeBit:
         assert pypto.DT_INT4.get_bit() == 4
         assert pypto.DT_UINT4.get_bit() == 4
         assert pypto.DT_FP4.get_bit() == 4
+        assert pypto.DT_FP4E2M1X2.get_bit() == 8
         assert pypto.DT_HF4.get_bit() == 4
 
     def test_8bit_types(self):
@@ -225,6 +232,7 @@ class TestDataTypeString:
     def test_floating_point_strings(self):
         """Test string representation of floating point types."""
         assert pypto.DT_FP4.to_string() == "fp4"
+        assert pypto.DT_FP4E2M1X2.to_string() == "fp4e2m1x2"
         assert pypto.DT_FP8E4M3FN.to_string() == "fp8e4m3fn"
         assert pypto.DT_FP8E5M2.to_string() == "fp8e5m2"
         assert pypto.DT_FP8E8M0.to_string() == "fp8e8m0"
@@ -327,6 +335,7 @@ class TestDataTypePredicates:
             DT_INT32,
             DT_INT64,
             DT_FP4,
+            DT_FP4E2M1X2,
             DT_FP8E4M3FN,
             DT_FP8E5M2,
             DT_FP8E8M0,
@@ -368,6 +377,7 @@ class TestDataTypeIntegration:
         pypto.DT_UINT32,
         pypto.DT_UINT64,
         pypto.DT_FP4,
+        pypto.DT_FP4E2M1X2,
         pypto.DT_FP8E4M3FN,
         pypto.DT_FP8E5M2,
         pypto.DT_FP16,

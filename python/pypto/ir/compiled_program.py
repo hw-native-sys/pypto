@@ -118,11 +118,11 @@ _BUILD_KIND_MARKERS = (
 
 
 def _to_runtime_shape(shape: list[int], dtype: DataType) -> list[int]:
-    """Convert logical IR shape to the runtime carrier shape.
+    """Convert compiled IR shape to the runtime carrier shape.
 
-    Only packed FP4 differs: Torch/runtime use one x2 element per byte while
-    PyPTO IR counts logical nibbles. The conversion remains at the call ABI
-    boundary, so no persistent storage_shape is needed in IR types.
+    After PackFp4, FP4E2M1X2 last dims already match ``torch.float4_e2m1fn_x2``.
+    Leftover logical ``DataType.FP4`` (pre-pack IR) still counts nibbles, so
+    the call ABI halves a static last dim at this boundary only.
     """
     runtime_shape = list(shape)
     if dtype == DataType.FP4 and runtime_shape[-1] != -1:
@@ -153,7 +153,7 @@ def _validate_fp4_carrier_shape(shape: Sequence[int], info: "_ParamInfo") -> Non
 _STR_TO_DATATYPE: dict[str, DataType] = {}
 for _dt_name in (
     "BOOL", "INT4", "INT8", "INT16", "INT32", "INT64", "UINT4", "UINT8", "UINT16",
-    "UINT32", "UINT64", "FP4", "FP8E4M3FN", "FP8E5M2", "FP8E8M0", "FP16", "FP32", "BF16",
+    "UINT32", "UINT64", "FP4", "FP4E2M1X2", "FP8E4M3FN", "FP8E5M2", "FP8E8M0", "FP16", "FP32", "BF16",
     "HF4", "HF8", "INDEX", "TASK_ID",
 ):  # fmt: skip
     _dt = getattr(DataType, _dt_name, None)

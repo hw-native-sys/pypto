@@ -960,6 +960,87 @@ inline TypePtr MakeFreshTensorType(std::vector<ExprPtr> shape, DataType dtype,
                                       std::make_optional(std::move(view)));
 }
 
+/// Packed FP4E2M1X2 ↔ a wider element type is a 2:1 last-axis conversion.
+/// Logical FP4 (pre-pack) keeps a 1:1 geometry.
+inline bool IsFp4PackedCastGeometryChange(DataType src, DataType dst) {
+  return (src.IsPackedFp4() && !dst.IsFp4Family()) || (!src.IsFp4Family() && dst.IsPackedFp4());
+}
+
+/// Scale last-axis extents for post-PackFp4 casts between packed FP4E2M1X2 and a
+/// wider element type. Logical FP4 (pre-pack) keeps a 1:1 shape.
+inline std::vector<ExprPtr> AdjustFp4E2M1x2CastLastDim(std::vector<ExprPtr> dims, DataType src, DataType dst,
+                                                       const Span& span) {
+  if (dims.empty()) return dims;
+  if (src.IsPackedFp4() && !dst.IsFp4Family()) {
+    if (auto extent = As<ConstInt>(dims.back())) {
+      dims.back() = std::make_shared<ConstInt>(extent->value_ * 2, DataType::INDEX, span);
+    } else {
+      dims.back() = MakeMul(dims.back(), std::make_shared<ConstInt>(2, DataType::INDEX, span), span);
+    }
+  } else if (!src.IsFp4Family() && dst.IsPackedFp4()) {
+    if (auto extent = As<ConstInt>(dims.back())) {
+      CHECK_SPAN(extent->value_ > 0 && extent->value_ % 2 == 0, span)
+          << "cast to FP4E2M1X2 requires a positive even last dimension, got " << extent->value_;
+      dims.back() = std::make_shared<ConstInt>(extent->value_ / 2, DataType::INDEX, span);
+    } else {
+      dims.back() = MakeFloorDiv(dims.back(), std::make_shared<ConstInt>(2, DataType::INDEX, span), span);
+    }
+  }
+  return dims;
+}
+
+inline std::vector<ExprPtr> RowMajorStridesFromShape(const std::vector<ExprPtr>& shape, const Span& span) {
+  if (shape.empty()) return {};
+  std::vector<ExprPtr> strides(shape.size());
+  strides.back() = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+  for (int i = static_cast<int>(shape.size()) - 2; i >= 0; --i) {
+    const size_t dim = static_cast<size_t>(i);
+    auto next_extent = As<ConstInt>(shape[dim + 1]);
+    auto next_stride = As<ConstInt>(strides[dim + 1]);
+    if (next_extent && next_stride) {
+      strides[dim] =
+          std::make_shared<ConstInt>(next_stride->value_ * next_extent->value_, DataType::INDEX, span);
+    } else {
+      strides[dim] = MakeMul(strides[dim + 1], shape[dim + 1], span);
+    }
+  }
+  return strides;
+}
+
+/// Scale ND leading strides with the 2:1 last-axis change. Last stride stays 1.
+/// Empty source strides become the row-major stride of @p dst_shape.
+inline std::vector<ExprPtr> AdjustFp4E2M1x2CastStrides(std::vector<ExprPtr> src_strides,
+                                                       const std::vector<ExprPtr>& dst_shape, DataType src,
+                                                       DataType dst, const Span& span) {
+  if (!IsFp4PackedCastGeometryChange(src, dst)) return src_strides;
+  if (src_strides.empty()) return RowMajorStridesFromShape(dst_shape, span);
+  CHECK_SPAN(src_strides.size() == dst_shape.size(), span)
+      << "FP4E2M1X2 cast stride rank " << src_strides.size() << " does not match shape rank "
+      << dst_shape.size();
+  auto last = As<ConstInt>(src_strides.back());
+  CHECK_SPAN(last && last->value_ == 1, span)
+      << "FP4E2M1X2 cast requires a contiguous last axis (stride[-1] == 1)";
+  const bool unpack = src.IsPackedFp4();
+  auto two = std::make_shared<ConstInt>(2, DataType::INDEX, span);
+  for (size_t i = 0; i + 1 < src_strides.size(); ++i) {
+    if (auto extent = As<ConstInt>(src_strides[i])) {
+      if (unpack) {
+        src_strides[i] = std::make_shared<ConstInt>(extent->value_ * 2, DataType::INDEX, span);
+      } else {
+        CHECK_SPAN(extent->value_ % 2 == 0, span)
+            << "cast to FP4E2M1X2 requires even leading strides, got " << extent->value_;
+        src_strides[i] = std::make_shared<ConstInt>(extent->value_ / 2, DataType::INDEX, span);
+      }
+    } else if (unpack) {
+      src_strides[i] = MakeMul(src_strides[i], two, span);
+    } else {
+      src_strides[i] = MakeFloorDiv(src_strides[i], two, span);
+    }
+  }
+  src_strides.back() = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+  return src_strides;
+}
+
 /**
  * @brief Deduce return types for a cross-function call by substituting dynamic
  *        shape variables in the callee's return types with concrete values from

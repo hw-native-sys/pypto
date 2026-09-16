@@ -104,15 +104,11 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
   CHECK(IsSupportedMxDataType(lhs_type->dtype_))
       << "The operator " << op_name << " requires lhs dtype FP8E4M3FN, but got "
       << lhs_type->dtype_.ToString()
-      << (lhs_type->dtype_ == DataType::FP4
-              ? "; native FP4 matmul is not supported, so cast the FP4 lhs to FP8E4M3FN with pl.cast first"
-              : "");
+      << (lhs_type->dtype_.IsFp4Family() ? "; native FP4 matmul is not supported" : "");
   CHECK(IsSupportedMxDataType(rhs_type->dtype_))
       << "The operator " << op_name << " requires rhs dtype FP8E4M3FN, but got "
       << rhs_type->dtype_.ToString()
-      << (rhs_type->dtype_ == DataType::FP4
-              ? "; native FP4 matmul is not supported, so cast the FP4 rhs to FP8E4M3FN with pl.cast first"
-              : "");
+      << (rhs_type->dtype_.IsFp4Family() ? "; native FP4 matmul is not supported" : "");
 
   ExprPtr m_phys = lhs_type->shape_[0];
   ExprPtr k_phys_lhs = lhs_type->shape_[1];

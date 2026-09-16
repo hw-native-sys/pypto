@@ -148,7 +148,7 @@ cmake.args = [
 [tool.pyright]
 include = ["python/pypto", "tests"]
 exclude = ["**/__pycache__", "build", "dist", "tests/st", "tests/ut/jit/test_roundtrip.py"]
-extraPaths = ["python", "."]
+extraPaths = ["python", ".", "tests/ut"]
 typeCheckingMode = "basic"
 pythonVersion = "3.10"
 reportMissingTypeStubs = false

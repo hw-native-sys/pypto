@@ -59,6 +59,7 @@ scalar_dir: ArgDirection
 
 # DataType aliases (mirrors runtime __init__.py)
 FP4: DataType
+FP4E2M1X2: DataType
 FP8E4M3FN: DataType
 FP8E5M2: DataType
 FP8E8M0: DataType

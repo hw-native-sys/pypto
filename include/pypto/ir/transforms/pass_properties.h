@@ -140,6 +140,12 @@ inline const PassProperties kFlattenCallExprProperties{
     .required = {IRProperty::SSAForm, IRProperty::NormalizedStmtStructure},
     .produced = {IRProperty::SSAForm, IRProperty::NoNestedCalls, IRProperty::NormalizedStmtStructure}};
 
+// Pack logical FP4 nibble types into packed FP4E2M1X2 after SSA + FlattenCallExpr
+// and before Outline / ConvertTensorToTileOps / MaterializeTensorStrides.
+inline const PassProperties kPackFp4Properties{
+    .required = {IRProperty::SSAForm, IRProperty::NoNestedCalls, IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::SSAForm, IRProperty::NoNestedCalls, IRProperty::NormalizedStmtStructure}};
+
 inline const PassProperties kNormalizeStmtStructureProperties{
     .produced = {IRProperty::NormalizedStmtStructure}};
 

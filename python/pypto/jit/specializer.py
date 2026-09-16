@@ -486,6 +486,7 @@ def _fold_free_name(name: str, py_globals: Mapping[str, Any], node: ast.expr) ->
 
 _DTYPE_TO_PL: dict[DataType, str] = {
     DataType.FP4: "pl.FP4",
+    DataType.FP4E2M1X2: "pl.FP4E2M1X2",
     DataType.FP8E4M3FN: "pl.FP8E4M3FN",
     DataType.FP8E5M2: "pl.FP8E5M2",
     DataType.FP8E8M0: "pl.FP8E8M0",

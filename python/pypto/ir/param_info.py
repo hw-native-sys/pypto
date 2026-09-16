@@ -62,6 +62,7 @@ for _ir_name, _torch_name in (
     ("fp8e5m2", "float8_e5m2"),
     ("fp8e8m0", "float8_e8m0fnu"),
     ("fp4", "float4_e2m1fn_x2"),
+    ("fp4e2m1x2", "float4_e2m1fn_x2"),
 ):
     _torch_dtype = getattr(torch, _torch_name, None)
     if _torch_dtype is not None:

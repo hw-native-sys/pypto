@@ -38,6 +38,8 @@ void BindCore(nb::module_& m) {
       .def_ro_static("UINT32", &DataType::UINT32, "32-bit unsigned integer")
       .def_ro_static("UINT64", &DataType::UINT64, "64-bit unsigned integer")
       .def_ro_static("FP4", &DataType::FP4, "4-bit floating point")
+      .def_ro_static("FP4E2M1X2", &DataType::FP4E2M1X2,
+                     "Packed pair of E2M1 FP4 (compiler-internal after PackFp4)")
       .def_ro_static("FP8E4M3FN", &DataType::FP8E4M3FN, "8-bit floating point (E4M3FN format)")
       .def_ro_static("FP8E5M2", &DataType::FP8E5M2, "8-bit floating point (E5M2 format)")
       .def_ro_static("FP8E8M0", &DataType::FP8E8M0, "8-bit floating point (E8M0 MX block-scale exponent)")
