@@ -236,9 +236,90 @@ class TestL0TilingEdgeCases:
         assert result.os_holds_a is rows_outer
         assert result.double_buffer_c is True
 
+    def test_dbc_admitted_on_split_k_when_the_grid_has_two_output_tiles(self):
+        """dbC=2 is not a full-K privilege: an M/N grid of K-loops ping-pongs too.
+
+        Consecutive K blocks accumulate into the SAME L0C tile and are serially
+        dependent, so splitting K alone never yields a second ping/pong stage.
+        An M/N split does, and ``BuildSplitKGrid`` emits that grid unrolled with
+        each tile's accumulator stamped for its own slot -- so ``k < K`` is
+        eligible whenever the grid holds at least two output tiles.
+        """
+        cfg = _default_config(M=128, N=384, K=512)
+        cfg.allow_double_buffer_c = True
+        r = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert r.double_buffer_c is True
+        assert r.k < cfg.K, f"this shape exercises the split-K route; got k={r.k}"
+        assert _cdiv(cfg.M, r.m) * _cdiv(cfg.N, r.n) >= 2
+        assert _capacities_ok(r.m, r.n, r.k, cfg, dbc=True)
+
+    def test_dbc_rejected_when_the_output_is_a_single_tile(self):
+        """The one principled bar on dbC=2: fewer than two independent output tiles.
+
+        128x128 fits a halved L0C whole, so the wall optimum keeps it in one tile and
+        there is nothing for that tile's drain to hide behind. Note what this pins and
+        what it does not: smaller (m, n) with two tiles ARE realizable here and the
+        chooser declines them on cost, so this is the end-to-end outcome. The gate
+        itself -- ceil(M/m)*ceil(N/n) < 2 being rejected outright -- is pinned by
+        test_dbc_rejected_when_the_grid_cannot_split below."""
+        cfg = _default_config(M=128, N=128, K=512)
+        cfg.allow_double_buffer_c = True
+        r = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert (r.m, r.n) == (128, 128), f"expected the whole output in one tile, got ({r.m}, {r.n})"
+        assert r.double_buffer_c is False
+
+    def test_dbc_rejected_when_the_grid_cannot_split(self):
+        """The realizability gate itself: with M == min_m and N == min_n there is no
+        (m, n) yielding two output tiles on either route, so dbC is unreachable
+        regardless of what the wall model would prefer."""
+        cfg = _default_config(M=16, N=16, K=512)
+        cfg.allow_double_buffer_c = True
+        r = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert _cdiv(cfg.M, r.m) * _cdiv(cfg.N, r.n) == 1
+        assert r.double_buffer_c is False
+
+    @pytest.mark.parametrize(
+        ("M", "N", "restricted_axis", "expected_tile"),
+        [(16, 192, "n", (16, 128, 16)), (192, 16, "m", (128, 16, 16))],
+    )
+    def test_dbc_does_not_count_peeled_tail_as_inner_stage(self, M, N, restricted_axis, expected_tile):
+        """On the FULL-K route a partial boundary cannot be a dbC stage.
+
+        192 with a 128-aligned axis is one full tile plus a 64-wide boundary.
+        ``BuildFullKPipelined`` marks the moving inner loop, and the boundary is
+        peeled into a straight-line tail emitted OUTSIDE that loop, where
+        ``CanonicalizeIOOrder`` never reaches it -- so ``floor(192/128) = 1`` full
+        tile is all the pipeline has, and dbC is not realizable.
+
+        ``K = align_k = 16`` pins the test to that route: ``k == K`` is then the only
+        legal k, so the split-K grid (which CAN use the boundary tile -- see
+        ``test_dbc_admitted_on_split_k_with_a_boundary_tile``) is out of the design
+        space and cannot mask the full-K exclusion.
+        """
+        cfg = _default_config(M=M, N=N, K=16)
+        cfg.min_k = cfg.align_k = 16
+        if restricted_axis == "n":
+            cfg.min_n = cfg.align_n = 128
+        else:
+            cfg.min_m = cfg.align_m = 128
+        cfg.allow_double_buffer_c = True
+
+        result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+
+        assert (result.m, result.n, result.k) == expected_tile
+        assert result.k == cfg.K, "this case must stay on the full-K route"
+        assert result.double_buffer_c is False
+
     @pytest.mark.parametrize(("M", "N", "restricted_axis"), [(16, 192, "n"), (192, 16, "m")])
-    def test_dbc_does_not_count_peeled_tail_as_inner_stage(self, M, N, restricted_axis):
-        """A partial boundary emitted outside the loop cannot be a dbC stage."""
+    def test_dbc_admitted_on_split_k_with_a_boundary_tile(self, M, N, restricted_axis):
+        """The same 1-full-tile-plus-boundary shape IS eligible once k < K is open.
+
+        ``BuildSplitKGrid`` emits the M/N grid unrolled and stamps every tile's
+        accumulator, so the 64-wide boundary is an ordinary member of the sequence
+        rather than a peeled tail -- two output tiles, two slots. This is the exact
+        counterpart of the full-K exclusion above; together they pin that the bar is
+        the EMITTER's tile count, not ``k == K``.
+        """
         cfg = _default_config(M=M, N=N, K=128)
         if restricted_axis == "n":
             cfg.min_n = cfg.align_n = 128
@@ -248,9 +329,58 @@ class TestL0TilingEdgeCases:
 
         result = passes.l0_tile_chooser.choose_l0_tile(cfg)
 
-        expected_tile = (16, 128, 128) if restricted_axis == "n" else (128, 16, 128)
-        assert (result.m, result.n, result.k) == expected_tile
-        assert result.double_buffer_c is False
+        assert result.double_buffer_c is True
+        assert result.k < cfg.K, f"the boundary tile only counts on the split-K route; got k={result.k}"
+        assert _cdiv(cfg.M, result.m) * _cdiv(cfg.N, result.n) == 2
+
+    def test_emission_route_changes_restart_cost_and_selection(self):
+        """A nested 2x2 grid pays one dbC restart per outer-loop iteration.
+
+        Force the only dbC-capable full-K tile to 128x128. The unrolled route is
+        one four-tile pipeline and wins; the nested route restarts its two-tile
+        inner pipeline twice, so its complete emitted cost loses to single-C.
+        This pins that the chooser receives and prices the route explicitly.
+        """
+        cfg = _default_config(M=256, N=256, K=64)
+        cfg.min_m = cfg.align_m = 128
+        cfg.min_n = cfg.align_n = 128
+        cfg.min_k = cfg.align_k = 64
+        cfg.allow_double_buffer_c = True
+
+        pipelined = passes.l0_tile_chooser.DbcEmissionRoute.PipelinedInner
+        unrolled_route = passes.l0_tile_chooser.DbcEmissionRoute.UnrolledGrid
+        cfg.full_k_dbc_route = pipelined
+        nested = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert nested.double_buffer_c is False
+
+        cfg.full_k_dbc_route = unrolled_route
+        unrolled = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert (unrolled.m, unrolled.n, unrolled.k) == (128, 128, 64)
+        assert unrolled.double_buffer_c is True
+        assert unrolled.dbc_emission_route == unrolled_route
+        assert unrolled.estimated_cost_cycles < nested.estimated_cost_cycles
+
+    def test_dbc_must_strictly_beat_the_best_single_c_plan(self):
+        """An equal-wall dbC candidate must not win through secondary keys.
+
+        Make FIXPIPE effectively free. Any modeled dbC overlap then has no
+        benefit; its legal tile is already present in the larger single-C search
+        space. The enabled chooser must return exactly the disabled single-C
+        optimum rather than using dbC as a tie-break preference.
+        """
+        cfg = _default_config(M=256, N=256, K=64)
+        cfg.drain_fixed_cycles = 0.0
+        cfg.drain_row_cycles = 0.0
+        cfg.drain_penalty_cycles = 0.0
+        cfg.bw_drain = 1.0e12
+
+        single = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        cfg.allow_double_buffer_c = True
+        enabled = passes.l0_tile_chooser.choose_l0_tile(cfg)
+
+        assert enabled.double_buffer_c is False
+        assert (enabled.m, enabled.n, enabled.k) == (single.m, single.n, single.k)
+        assert enabled.estimated_cost_cycles == single.estimated_cost_cycles
 
     def test_k_must_divide_K_when_no_padding(self):
         """Regression: qwen3_decode gate_proj/up_proj inner-K shape.
@@ -496,6 +626,9 @@ _STAT_ENUM = {
     _AS: passes.l0_tile_chooser.Stationarity.AStationary,
     _BS: passes.l0_tile_chooser.Stationarity.BStationary,
 }
+_DBC_UNSUPPORTED = passes.l0_tile_chooser.DbcEmissionRoute.Unsupported
+_DBC_PIPELINED = passes.l0_tile_chooser.DbcEmissionRoute.PipelinedInner
+_DBC_UNROLLED = passes.l0_tile_chooser.DbcEmissionRoute.UnrolledGrid
 
 
 def _derive_db(stat: str) -> tuple[bool, bool]:
@@ -576,11 +709,25 @@ def _wall_key(m: int, n: int, k: int, cfg, stat: str, dbc: bool) -> tuple:
     per_drain = cfg.drain_fixed_cycles + m * per_row
     drain = num_drains * per_drain
     compute = max(load, float(mad))
-    # dbC pipeline fill/drain bubble (mirrors C++ WallCycles): the first tile's compute or
-    # the last tile's drain is not overlapped, so the all-hidden T*max(C,D) roofline
-    # undercounts by one tile's non-dominant pipe -> wall = max(agg) + min(agg)/T.
+    route = cfg.full_k_dbc_route if k == cfg.K else cfg.split_k_dbc_route
     if dbc:
-        wall_f = max(compute, drain) + min(compute, drain) / num_drains
+        compute_per_tile = compute / num_drains
+        drain_per_tile = drain / num_drains
+        if route == _DBC_UNROLLED:
+            wall_f = num_drains * max(compute_per_tile, drain_per_tile) + min(
+                compute_per_tile, drain_per_tile
+            )
+        else:
+            assert route == _DBC_PIPELINED
+            full_m, full_n = M // m, N // n
+            interior_tiles = full_m * full_n
+            invocations = full_m if _row_outer(m, n, cfg, stat) else full_n
+            exposed_tiles = num_drains - interior_tiles
+            wall_f = (
+                interior_tiles * max(compute_per_tile, drain_per_tile)
+                + invocations * min(compute_per_tile, drain_per_tile)
+                + exposed_tiles * (compute_per_tile + drain_per_tile)
+            )
     else:
         wall_f = compute + drain
     wall = int(wall_f + 0.5)
@@ -612,7 +759,27 @@ def _legal_ks(m: int, n: int, cfg, a0: int, b0: int) -> list[int]:
     return ks
 
 
-def _enumerate_best(cfg, stat: str, dbc: bool, require_inner_pair: bool, require_full_k: bool):
+def _dbc_realizable(m: int, n: int, k: int, cfg, stat: str) -> bool:
+    """Mirror C++ ``DbcRealizable``: route-aware dbC=2 eligibility.
+
+    dbC needs two INDEPENDENT output tiles (K blocks accumulate into the same
+    tile and are serially dependent), and the two emitters count them
+    differently. Full-K (k == K) goes to BuildFullKPipelined, which marks only
+    the moving inner loop, so that loop alone must hold >= 2 full tiles -- the
+    peeled boundary is emitted outside the pipeline. Split-K (k < K) goes to
+    BuildSplitKGrid, which unrolls the M/N grid and stamps every tile's
+    accumulator directly, so any two output tiles ping-pong, boundary included.
+    """
+    route = cfg.full_k_dbc_route if k == cfg.K else cfg.split_k_dbc_route
+    if route == _DBC_PIPELINED:
+        inner_full_tiles = cfg.N // n if _row_outer(m, n, cfg, stat) else cfg.M // m
+        return inner_full_tiles >= 2
+    if route == _DBC_UNROLLED:
+        return _cdiv(cfg.M, m) * _cdiv(cfg.N, n) >= 2
+    return False
+
+
+def _enumerate_best(cfg, stat: str, dbc: bool, require_full_k: bool):
     """Exhaustively score the legal aligned (m, n, k) grid for one regime; best
     (key, tile). Every legal k per (m, n) is scored (not a largest-k shortcut)."""
     dba, dbb = _derive_db(stat)
@@ -630,10 +797,11 @@ def _enumerate_best(cfg, stat: str, dbc: bool, require_inner_pair: bool, require
         n = cfg.min_n
         while n <= min(cfg.N, c0 // physical_m):
             boxed_n = _cdiv(n, cfg.box_align_n) * cfg.box_align_n
-            inner_full_tiles = cfg.N // n if _row_outer(m, n, cfg, stat) else cfg.M // m
-            if physical_m * boxed_n <= c0 and (not require_inner_pair or inner_full_tiles >= 2):
+            if physical_m * boxed_n <= c0:
                 for k in _legal_ks(m, n, cfg, a0, b0):
                     if require_full_k and k != cfg.K:
+                        continue
+                    if dbc and not _dbc_realizable(m, n, k, cfg, stat):
                         continue
                     key = _wall_key(m, n, k, cfg, stat, dbc)
                     if best is None or key < best[0]:
@@ -648,9 +816,10 @@ def _brute_optimum(cfg) -> tuple:
 
     Returns (tile, stationarity, double_buffer_c, wall).
     """
-    base = _enumerate_best(cfg, _OS, False, require_inner_pair=False, require_full_k=False)
+    base = _enumerate_best(cfg, _OS, False, require_full_k=False)
     assert base is not None
     best_key, best = base[0], (base[1], _OS, False)
+    best_single_key, best_single = base[0], (base[1], _OS, False)
     # Explore the rest of the space only when the baseline already tiles.
     if base[1] != (cfg.M, cfg.N, cfg.K):
         stats = [_OS]
@@ -671,11 +840,32 @@ def _brute_optimum(cfg) -> tuple:
             min_physical_m = _cdiv(min_boxed_m, cfg.l0c_align_m) * cfg.l0c_align_m
             if c0 < min_physical_m * min_boxed_n:
                 continue
-            cand = _enumerate_best(
-                cfg, stat, dbc, require_inner_pair=dbc, require_full_k=(stat != _OS or dbc)
+            # Operand-stationary pins A or B in L0 across K, so it needs k == K.
+            # dbC does not: both emitters realize it, gated per (m, n, k) by
+            # _dbc_realizable inside _enumerate_best.
+            cand = _enumerate_best(cfg, stat, dbc, require_full_k=(stat != _OS))
+            if cand is None:
+                continue
+            if not dbc and cand[0] < best_single_key:
+                best_single_key, best_single = cand[0], (cand[1], stat, False)
+            # Mirror the C++ cross-regime rule: adopt on a strictly lower wall, plus
+            # the one narrow tie-break -- at an EXACT tie prefer a k == K plan over a
+            # dbC SPLIT-K incumbent (it keeps an operand resident instead of
+            # re-streaming both). It never displaces the baseline and never enables dbC.
+            strictly_better = cand[0][0] < best_key[0]
+            # Guarded on the load key (index 3 of _wall_key), not merely on k == K --
+            # mirrors the C++ rationale, which is about traffic, not about the route.
+            tie_prefers_resident_operand = (
+                cand[0][0] == best_key[0]
+                and best[2]
+                and best[0][2] != cfg.K
+                and cand[1][2] == cfg.K
+                and cand[0][3] < best_key[3]
             )
-            if cand is not None and cand[0][0] < best_key[0]:  # strictly lower wall
+            if strictly_better or tie_prefers_resident_operand:
                 best_key, best = cand[0], (cand[1], stat, dbc)
+    if best[2] and best_key[0] >= best_single_key[0]:
+        best_key, best = best_single_key, best_single
     tile, stat, dbc = best
     return tile, stat, dbc, best_key[0]
 
@@ -748,14 +938,15 @@ class TestL0TilingRooflineOptimum:
 
         512x512x64: the L0C drain (~M*N) dominates the shallow-K compute, so
         hiding it behind the next tile beats a single big accumulator. The chosen
-        tile must fit the halved L0C budget and provide at least two full tiles
-        on the moving inner axis.
+        tile must fit the halved L0C budget and provide at least two independent
+        output tiles on whichever concrete emission route wins.
         """
         cfg = _default_config(M=512, N=512, K=64)
         cfg.allow_double_buffer_c = True
         result = passes.l0_tile_chooser.choose_l0_tile(cfg)
         assert result.double_buffer_c is True
-        assert result.k == 64, f"dbC=2 requires a full-K tile; got k={result.k}"
+        assert result.dbc_emission_route == passes.l0_tile_chooser.DbcEmissionRoute.UnrolledGrid
+        assert _cdiv(cfg.M, result.m) * _cdiv(cfg.N, result.n) >= 2
         inner_full_tiles = 512 // result.n if _row_outer(result.m, result.n, cfg, _OS) else 512 // result.m
         assert inner_full_tiles >= 2, "dbC=2 needs at least two full moving-inner tiles"
         assert _capacities_ok(result.m, result.n, result.k, cfg, dbc=True)

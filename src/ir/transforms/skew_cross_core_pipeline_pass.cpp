@@ -289,10 +289,11 @@ class SkewCrossCoreMutator : public IRMutator {
 
  private:
   /// Monotonic pipeline-group id for the membership tags this pass stamps. Started
-  /// at a high base so it never collides with LowerPipelineLoops' own 0-based group
-  /// ids (both passes write `pipeline_membership`; a shared id would make MemoryReuse
-  /// conflate two unrelated pipelines). One fresh group per skewed loop.
-  static constexpr int32_t kSkewGroupBase = 1 << 20;
+  /// at a reserved base so it never collides with LowerPipelineLoops' own 0-based
+  /// group ids (both passes write `pipeline_membership`; a shared id would make
+  /// MemoryReuse conflate two unrelated pipelines). One fresh group per skewed
+  /// loop. The bases are declared together in attrs.h; NextSkewGroup checks this
+  /// counter against the next one so the ranges cannot silently run into each other.
   int32_t next_skew_group_ = kSkewGroupBase;
 
   /// Rebuild the loop with the recursed bounds/body, preserving kind and attrs.
@@ -612,6 +613,9 @@ class SkewCrossCoreMutator : public IRMutator {
     // keeps the per-stage Mat-L1 load buffers private instead of coalescing the D
     // copies onto one buffer (the fa_fused_aic over-reuse). See MembershipTagger.
     const int32_t group = next_skew_group_++;
+    INTERNAL_CHECK_SPAN(group < kAutoTileGroupBase, sp)
+        << "Internal error: skew pipeline group " << group << " ran past the next reserved "
+        << "pipeline_membership base (" << kAutoTileGroupBase << "); see attrs.h";
 
     // Prologue: produce(start + i*step) for i in [0, D) — primes the peer with the
     // first D tiles so it can start consuming while the steady loop runs D ahead.
