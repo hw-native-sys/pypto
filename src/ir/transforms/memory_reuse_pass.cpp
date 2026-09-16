@@ -5034,6 +5034,14 @@ class StripPipelineMembershipMutator : public IRMutator {
 /// copy has a buffer mismatch (the common case).
 class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
  public:
+  NormalizeIdentityCopyBuffersMutator() = default;
+
+  /// `unsettled` seeds the IfStmt return_vars whose buffer YieldFixup has not
+  /// chosen yet; the traversal grows it with their bare-Var renames.  See
+  /// `ReanchorInplaceOutput` for why anchoring onto one is wrong.
+  explicit NormalizeIdentityCopyBuffersMutator(std::set<const Var*> unsettled)
+      : unsettled_(std::move(unsettled)) {}
+
   ExprPtr VisitExpr_(const VarPtr& op) override {
     auto it = subst_.find(op);
     return it != subst_.end() ? it->second : op;
@@ -5044,11 +5052,19 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
     auto src_var = AsVarLike(op->value_);
     if (src_var) {
       auto new_src = AsVarLike(VisitExpr(op->value_));  // follow prior substitutions
+      // A rename of an unsettled value denotes that same storage, so it is just as
+      // unsettled: `tmp = phi` then `t = <in-place>(tmp, ...)` would otherwise walk
+      // straight past the guard in ReanchorInplaceOutput and anchor onto the phi's
+      // stale buffer through the alias.
+      if (IsUnsettled(src_var) || IsUnsettled(new_src)) {
+        unsettled_.insert(op->var_.get());
+      }
       auto lhs_tile = new_src ? GetTileTypeWithMemRef(op->var_->GetType()) : nullptr;
       auto rhs_tile = new_src ? GetTileTypeWithMemRef(new_src->GetType()) : nullptr;
       if (lhs_tile && rhs_tile &&
           !SamePhysicalWindow(GetDefinedMemRef(lhs_tile), GetDefinedMemRef(rhs_tile))) {
         auto new_lhs = std::make_shared<Var>(op->var_->name_hint_, new_src->GetType(), op->var_->span_);
+        if (IsUnsettled(op->var_)) unsettled_.insert(new_lhs.get());
         subst_[op->var_] = new_lhs;
         return std::make_shared<AssignStmt>(new_lhs, new_src, op->span_);
       }
@@ -5068,6 +5084,24 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
   /// This also repairs a producer/output mismatch introduced by control-flow or
   /// pipeline lowering even when the input itself was not substituted in this
   /// traversal. Returns nullptr when the allocation already agrees.
+  ///
+  /// True when `var` denotes storage whose buffer YieldFixup has not chosen yet —
+  /// an IfStmt return_var seeded into `unsettled_`, or a bare-Var rename of one.
+  [[nodiscard]] bool IsUnsettled(const VarPtr& var) const {
+    return var != nullptr && unsettled_.count(var.get()) != 0;
+  }
+
+  /// Skips a reused input listed in `unsettled_` — an IfStmt return_var, or a
+  /// rename of one, on the pre-YieldFixup run.  A phi is not a tracked def in the
+  /// reuse analysis (see
+  /// LifetimeAnalyzer's IfStmt handler), so it still carries its pre-reuse buffer
+  /// here and YieldFixup chooses the real one in Step 4.  Anchoring onto the
+  /// stale buffer pins this producer to storage that is about to be abandoned:
+  /// YieldFixup then reads it as the canonical target for the *next* phi in the
+  /// chain and reconciles the other arm with a same-space `tile.move` no target
+  /// can lower, while the post-fixup run silently re-anchors the producer back —
+  /// leaving the phi buffer unwritten on the taken arm.  Two conditionals over
+  /// one in-place tile (what `pl.unroll(2)` around an `if` produces) are enough.
   StmtPtr ReanchorInplaceOutput(const AssignStmtPtr& op) {
     auto call = As<Call>(op->value_);
     if (!call || !call->op_) return nullptr;
@@ -5077,6 +5111,7 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
     if (!in_var) return nullptr;
     auto new_in = AsVarLike(VisitExpr(in_var));  // follow prior subst_ renames
     if (!new_in) return nullptr;
+    if (IsUnsettled(in_var) || IsUnsettled(new_in)) return nullptr;
     auto lhs_tile = GetTileTypeWithMemRef(op->var_->GetType());
     auto in_new_tile = GetTileTypeWithMemRef(new_in->GetType());
     if (!lhs_tile || !in_new_tile ||
@@ -5093,7 +5128,29 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
   }
 
   std::map<VarPtr, ExprPtr> subst_;
+  std::set<const Var*> unsettled_;
 };
+
+/// Every IfStmt return_var (phi) reachable in a body.  These are the vars whose
+/// buffer YieldFixup, not the reuse analysis, decides.
+class IfPhiReturnVarCollector : public IRVisitor {
+ public:
+  std::set<const Var*> phis;
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    for (const auto& rv : op->return_vars_) phis.insert(rv.get());
+    IRVisitor::VisitStmt_(op);
+  }
+};
+
+/// The pre-YieldFixup half of the identity-copy normalization bracket: identical
+/// to the plain run except that an in-place producer is never anchored onto a phi
+/// whose buffer YieldFixup has yet to choose (`ReanchorInplaceOutput`).
+StmtPtr NormalizeIdentityCopyBuffersBeforeYieldFixup(const StmtPtr& body) {
+  IfPhiReturnVarCollector collector;
+  collector.VisitStmt(body);
+  return NormalizeIdentityCopyBuffersMutator(std::move(collector.phis)).VisitStmt(body);
+}
 
 /**
  * @brief Transform a function by identifying and applying memory reuse
@@ -5162,7 +5219,13 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
   // aliases too, so normalize them before any planner observes lifetimes or
   // emits handles. Planner-specific repetitions remain below because later
   // YieldFixup/reuse steps can create fresh mismatches.
-  new_body = NormalizeIdentityCopyBuffersMutator().VisitStmt(new_body);
+  //
+  // This is the earliest normalization on every path, so no IfStmt YieldFixup has
+  // run yet under any planner: use the pre-fixup form, or an in-place producer
+  // re-anchored onto a phi's not-yet-chosen buffer here survives into the planner
+  // (the guarded runs below only decline to *add* such an anchor, they do not undo
+  // one) and is read as the canonical branch target when the fixup finally runs.
+  new_body = NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
 
   // Under memory_planner=PtoAS or DsaRP the whole MemoryReuse pass is skipped.
   // DsaRP must therefore run the remaining correctness normalizations from
@@ -5205,7 +5268,7 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
   } else if (ctx != nullptr && ctx->GetMemoryPlanner() == MemoryPlanner::DsaRP) {
     // Identity-copy normalization brackets YieldFixup on both sides; see the
     // matching step in TransformMemoryReuse for why each side is needed.
-    new_body = NormalizeIdentityCopyBuffersMutator().VisitStmt(new_body);
+    new_body = NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
 
     YieldFixupMutator yield_fixup(/*fixup_if_stmts=*/true);
     new_body = yield_fixup.Run(new_body, func->params_);
@@ -5336,7 +5399,7 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   //
   // The mutator is idempotent, so the second run is a no-op whenever the first
   // already settled everything.
-  new_body = NormalizeIdentityCopyBuffersMutator().VisitStmt(new_body);
+  new_body = NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
 
   // Step 4: Fix ForStmt/IfStmt yield/return_var MemRef mismatches
   const auto* ctx = PassContext::Current();
