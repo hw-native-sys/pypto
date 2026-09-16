@@ -15,7 +15,6 @@ import multiprocessing
 import os
 import threading
 import traceback
-from types import SimpleNamespace
 
 import pypto.language as pl
 import pytest
@@ -137,19 +136,22 @@ def _failure_case(registration, state, device):
     from pypto.torch import launch  # noqa: PLC0415
 
     native = launch._load_native()
+    prepare = native.prepare
 
     def invalid_callable(worker, callable_id, *args):
-        return native.prepare(worker, 8191, *args)
+        return prepare(worker, 8191, *args)
 
     x = torch.ones((16, 16), device=f"npu:{device}")
     out = torch.empty_like(x)
+    # taskQueue may surface the framework wrapper before the ticket's SDK error.
+    error_pattern = "simpler_kernel_mode_launch failed|working operator name is PyPTOKernel"
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(launch, "_load_native", lambda: SimpleNamespace(prepare=invalid_callable))
-        with pytest.raises(RuntimeError):
+        patch.setattr(native, "prepare", invalid_callable)
+        with pytest.raises(RuntimeError, match=error_pattern):
             launch.enqueue(registration, (x, 2.0, out))
             state.drain()
     assert len(state._submissions) == 1
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match=error_pattern):
         state.close()
     assert state._worker is None and not state._submissions
 
