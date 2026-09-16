@@ -324,6 +324,7 @@ def test_scalar_schema_and_values(dtype, value, kind):
 
 
 def test_import_and_reload_do_not_register_or_load_optional_runtime(run_without_optional_runtime):
+    """Importing and reloading preserve dispatcher state without device runtimes."""
     source = """
 import importlib
 import torch

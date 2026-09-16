@@ -41,22 +41,28 @@ def run_without_optional_runtime() -> Callable[[str], subprocess.CompletedProces
     """
 
     def run(source: str) -> subprocess.CompletedProcess[str]:
+        """Execute source with import enforcement and return captured diagnostics."""
         bootstrap = f"""
 import importlib.abc
 import sys
 
-blocked = ('torch_npu', 'simpler', 'simpler_setup', 'pypto._torch_npu')
+blocked = ('torch_npu', 'simpler', 'simpler_setup', '_task_interface', 'pypto._torch_npu')
 
 def is_blocked(name):
+    'Match an optional runtime root or one of its submodules.'
     return any(name == root or name.startswith(root + '.') for root in blocked)
 
-assert not any(is_blocked(name) for name in sys.modules), 'Optional runtime already loaded'
+if any(is_blocked(name) for name in sys.modules):
+    raise AssertionError('Optional runtime already loaded')
 
 class RejectOptionalRuntime(importlib.abc.MetaPathFinder):
+    'Record and reject optional imports before any loader runs.'
     def __init__(self):
+        'Keep evidence even when the caller catches an import failure.'
         self.attempts = []
 
     def find_spec(self, fullname, path=None, target=None):
+        'Reject optional runtimes and defer all other imports.'
         if is_blocked(fullname):
             self.attempts.append(fullname)
             raise ModuleNotFoundError('Blocked optional runtime import: ' + fullname, name=fullname)
@@ -67,8 +73,10 @@ sys.meta_path.insert(0, guard)
 try:
     exec(compile({source!r}, '<optional-runtime-check>', 'exec'))
 finally:
-    assert not guard.attempts, 'Optional runtime imports attempted: ' + repr(guard.attempts)
-    assert not any(is_blocked(name) for name in sys.modules), 'Optional runtime was loaded'
+    if guard.attempts:
+        raise AssertionError('Optional runtime imports attempted: ' + repr(guard.attempts))
+    if any(is_blocked(name) for name in sys.modules):
+        raise AssertionError('Optional runtime was loaded')
 """
         return subprocess.run(
             [sys.executable, "-c", bootstrap],

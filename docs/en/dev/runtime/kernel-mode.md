@@ -137,10 +137,12 @@ runtime integration before a public entry-point switch.
 ## Verification
 
 The shared `run_without_optional_runtime` unit-test fixture runs a fresh Python
-process with `torch_npu`, `simpler`, `simpler_setup` and `pypto._torch_npu`
-blocked by an import finder. It detects both import statements and dynamic
+process with `torch_npu`, `simpler`, `simpler_setup`, `_task_interface` and
+`pypto._torch_npu` blocked by an import finder. It detects both import statements and dynamic
 `importlib.import_module()` calls, including attempts whose `ImportError` is
-caught by the caller. PyTorch backend autoload is disabled in that subprocess
+caught by the caller. Explicit enforcement checks remain active under
+`PYTHONOPTIMIZE=1` and `2`; negative controls cover both settings and normal
+execution. PyTorch backend autoload is disabled in that subprocess
 to isolate PyPTO's behavior from installed framework plugins. The guard's own
 negative tests ensure an attempted import cannot silently pass on a CPU runner
 where the dependency is already absent.
