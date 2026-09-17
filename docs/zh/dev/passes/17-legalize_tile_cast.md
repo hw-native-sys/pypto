@@ -50,9 +50,23 @@ IEEE 规定窄化溢出产生无穷，`torch` 与之一致，而
 
 IR 只记录相对适用默认值的*偏离*：想要该默认值的 cast 不携带 `saturation_mode`
 kwarg，这与 Pass 合成的 cast 形状一致。正是这一点让打印出的 cast 能重新解析成结构
-相同的 IR——若把默认值也写进去，两种语义完全相同的形式反而会不相等。Codegen 会把
-默认值读出来：整数目标的 `pto.tcvt` 即使 cast 未指定也会带显式 `satmode`，而浮点
-目标则完全不发射。
+相同的 IR——若把默认值也写进去，两种语义完全相同的形式反而会不相等。
+`include/pypto/ir/cast_saturation.h` 的 `DefaultSaturationModeFor` 与
+`python/pypto/ir/utils.py` 的 `default_saturation_mode_for` 是这条规则的两半，必须
+保持一致。
+
+**Codegen 始终发射 `satmode`**，整数目标与浮点目标一视同仁，无论 cast 是否指定过。
+`GetEmittedSaturationMode` 会把默认值读出来，并把浮点目标那个"交给目标平台"解析成
+`OFF`——这正是目标平台的 IEEE 行为。既然该属性从不省略，汇编器对"省略时"的默认值就
+无法左右语义——而它确实会变：PTOAS v0.63 把该默认值从 `OFF` 翻成了 `ON`
+（`fix(tcvt): default saturation mode to ON`）。若仍沿用"浮点目标不发射"的旧规则，
+每个 `INT32 -> FP16` 都会被悄悄变成钳制转换。v0.63 下显式 `satmode = OFF` 汇编出的
+结果与 v0.61 下省略该属性逐字节相同。
+
+这个解析刻意放在发射边界，而不是放进 IR 默认值。若把 IR 默认值也放宽成 `OFF`，浮点
+目标上显式的 `saturation_mode="off"` 就变成了非偏离，于是不再被记录——而那些询问
+"作者是否提出过要求"的 Pass（`CastFoldableToFixpipeMat`）也就看不到它了。A2/A3 上
+`INT32` `pto.trem` 之后用于还原 `rhs` 的那条编译器合成 `pto.tcvt` 遵循同一策略。
 
 两种模式仅在目标类型本就能表示的值上一致，所以对整数目标而言，这个默认值是一次行为
 选择，而非空操作：依赖目标平台自身非饱和溢出行为的 kernel 现在必须显式写 `"off"`。

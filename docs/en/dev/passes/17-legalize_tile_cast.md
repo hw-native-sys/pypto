@@ -54,9 +54,28 @@ The IR records only a *deviation* from whichever default applies: a cast that
 wants it carries no `saturation_mode` kwarg, which is the same shape a
 pass-synthesized cast has. That is what keeps a printed cast re-parsing to
 structurally equal IR — stamping the default would make two forms differ with no
-semantic difference between them. Codegen reads the default through, so an
-integer-destination `pto.tcvt` carries an explicit `satmode` even when the cast
-said nothing, while a float-destination one emits none.
+semantic difference between them. `DefaultSaturationModeFor` in
+`include/pypto/ir/cast_saturation.h` and `default_saturation_mode_for` in
+`python/pypto/ir/utils.py` are the two halves of that rule and must agree.
+
+**Codegen always stamps `satmode`**, for an integer and a float destination
+alike, whether or not the cast said anything. `GetEmittedSaturationMode` reads
+the default through and resolves a float destination's "whatever the target
+does" to `OFF` — which *is* the target's IEEE behaviour. The attribute is never
+omitted, so the assembler's own default for an omitted one cannot decide the
+semantics, and it does change: PTOAS v0.63 flipped it from `OFF` to `ON`
+(`fix(tcvt): default saturation mode to ON`), which under the previous "emit
+nothing for a float destination" rule would have silently turned every
+`INT32 -> FP16` into a clamping cast. An explicit `satmode = OFF` under v0.63
+assembles byte-for-byte identically to the omitted form under v0.61.
+
+That resolution lives at the emission boundary, not in the IR default, on
+purpose. Widening the IR default to `OFF` would make an explicit
+`saturation_mode="off"` on a float destination a non-deviation, so it would stop
+being recorded — and the passes that ask whether the author requested a mode
+(`CastFoldableToFixpipeMat`) would stop seeing it. The compiler-synthesized
+`pto.tcvt` that restores `rhs` after an A2/A3 `INT32` `pto.trem` stamps its
+`satmode` under the same policy.
 
 The two modes agree only on values the destination can already represent, so for
 integer destinations this default is a behavioural choice, not a no-op: a kernel

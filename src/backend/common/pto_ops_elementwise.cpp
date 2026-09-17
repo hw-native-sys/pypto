@@ -403,11 +403,12 @@ static std::string MakePrecisionCodegenPTO(const std::string& pto_op_name, size_
 // static-valid views the same way tprelu / tcolsum do.
 //
 // Both forms carry the same config attr-dict, so the rounding mode and the
-// destination saturation are rendered once, before the form splits. The IR
-// records only a deviation from the destination's default, so the default is
-// read through here -- an integer destination emits an explicit `satmode` even
-// when the cast said nothing, while a float destination emits none and keeps the
-// target's own IEEE overflow behavior.
+// destination saturation are rendered once, before the form splits. `satmode` is
+// always stamped: the IR records only a deviation from the destination's default,
+// and `GetEmittedSaturationMode` resolves both the default and the "whatever the
+// target does" case a float destination leaves open. Omitting the attribute
+// instead would hand the decision to the assembler, whose own default for an
+// omitted `satmode` flipped OFF -> ON in PTOAS v0.63.
 static std::string MakeTcvtCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
   INTERNAL_CHECK_SPAN(op->args_.size() == 1 || op->args_.size() == 2, op->span_)
@@ -417,12 +418,10 @@ static std::string MakeTcvtCodegenPTO(const CallPtr& op, codegen::CodegenBase& c
   INTERNAL_CHECK_SPAN(mode >= 0 && mode < static_cast<int>(round_modes.size()), op->span_)
       << "Internal error: tile.cast round mode out of range: " << mode;
   std::string config_attr = "{rmode = #pto<round_mode " + round_modes.at(mode) + ">";
-  if (const auto saturation_mode = ir::GetSaturationMode(op)) {
-    INTERNAL_CHECK_SPAN(ir::IsValidSaturationMode(*saturation_mode), op->span_)
-        << "Internal error: tile.cast saturation_mode out of range: " << *saturation_mode;
-    config_attr +=
-        ", satmode = #pto<saturation_mode " + ir::SaturationModeToPTOString(*saturation_mode) + ">";
-  }
+  const int saturation_mode = ir::GetEmittedSaturationMode(op);
+  INTERNAL_CHECK_SPAN(ir::IsValidSaturationMode(saturation_mode), op->span_)
+      << "Internal error: tile.cast saturation_mode out of range: " << saturation_mode;
+  config_attr += ", satmode = #pto<saturation_mode " + ir::SaturationModeToPTOString(saturation_mode) + ">";
   config_attr += "}";
 
   if (op->args_.size() == 2 && codegen.GetBackendHandler()->RequiresLevel3TmpScratch()) {
@@ -556,9 +555,22 @@ static std::string MakeRemainderCodegenPTO(const std::string& pto_op_name, size_
     const std::string rhs_fp32 =
         EnsureTileViewSsa(op->args_[1], rhs_fp32_type, codegen, "trem_rhs_fp32_view");
     const std::string rhs_int32 = EnsureStaticViewTileSsa(op->args_[1], codegen, "trem_rhs_int32_view");
-    EmitInsOutsWithViewTypes(codegen, "pto.tcvt",
-                             {{rhs_fp32, codegen.GetViewTileBufTypeStringFromTileType(rhs_fp32_type)}},
-                             rhs_int32, rhs_type, "{rmode = #pto<round_mode ROUND>}");
+    // `satmode` is stamped for the same reason `tile.cast` stamps it (see
+    // MakeTcvtCodegenPTO): PTOAS v0.63 flipped its default for an omitted attribute
+    // from OFF to ON, so leaving it out hands the decision to the assembler release.
+    // This arm only runs for an INT32 `tile.rem`, whose operands share a dtype, so
+    // the destination is INT32 and resolves to ON -- which is also what this restore
+    // wants: an `|rhs|` above 2^24 already lost precision on the way into FP32, and
+    // INT32_MAX rounds up to 2^31, which is out of range. Clamping puts it back at
+    // INT32_MAX; the non-saturating result there is architecture-defined.
+    INTERNAL_CHECK_SPAN(rhs_type->dtype_ == DataType::INT32, op->span_)
+        << "Internal error: A2/A3 INT32 tile.rem rhs must be INT32, got " << rhs_type->dtype_.ToString();
+    const std::string satmode =
+        ir::SaturationModeToPTOString(static_cast<int>(ir::EmittedSaturationModeFor(rhs_type->dtype_)));
+    EmitInsOutsWithViewTypes(
+        codegen, "pto.tcvt", {{rhs_fp32, codegen.GetViewTileBufTypeStringFromTileType(rhs_fp32_type)}},
+        rhs_int32, rhs_type,
+        "{rmode = #pto<round_mode ROUND>, satmode = #pto<saturation_mode " + satmode + ">}");
   }
   return result;
 }
