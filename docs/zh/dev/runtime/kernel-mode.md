@@ -410,7 +410,7 @@ CPU UT 覆盖 JIT 路由、ABI/编译器/产物契约、Worker 与 shutdown 状�
 UT 或设备矩阵，完整测试仍可手动运行。CPU 测试与 pre-commit 独立启动，设备 job
 只等待工具链解析；最终结果仍要求每个 job 全部通过。
 
-每个设备任务使用已核实的 `[self-hosted, linux, ARM64, npu-xp]` runner 池、现有
+每个设备任务只需一张 NPU 卡，使用共享的 `[self-hosted, linux, ARM64, npu]` runner 池、现有
 `setup-ci-job` bundle 环境，以及通过 runner 的 `DEVICE_ID` 分配设备的 `task-submit`。
 独立环境安装 Torch 2.6.0 和 torch_npu 2.6.0.post2，要求 C++11 ABI，
 并从当前检出的源码构建 adapter 和仅供测试的队列 gate。torch_npu 2.6.0.post2

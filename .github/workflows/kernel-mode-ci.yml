@@ -107,9 +107,9 @@ jobs:
           - suite: capture
             max-time: 2400
     needs: toolchain
-    # Verified online ARM64 pool; Torch 2.6's ARM64 wheel uses the required
-    # C++11 ABI. Record the actual chip, rather than treating this as A2 AND A3.
-    runs-on: [self-hosted, linux, ARM64, npu-xp]
+    # Each job needs one NPU. Keep ARM64 for the pinned Torch/torch_npu wheel
+    # ABI; use the shared npu pool so eager and capture can schedule separately.
+    runs-on: [self-hosted, linux, ARM64, npu]
     timeout-minutes: 120
     defaults:
       run:

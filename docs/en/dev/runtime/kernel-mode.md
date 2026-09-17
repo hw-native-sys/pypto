@@ -629,7 +629,7 @@ repository-wide unit or device matrices. Those tests remain available to run
 manually. CPU tests and pre-commit start independently; device jobs depend only
 on toolchain resolution. The final result still requires every job to pass.
 
-Each device job uses the verified `[self-hosted, linux, ARM64, npu-xp]` pool,
+Each device job requires one NPU and uses the shared `[self-hosted, linux, ARM64, npu]` pool,
 the existing `setup-ci-job` bundle environment, and `task-submit` with the
 runner's `DEVICE_ID`. It installs Torch 2.6.0 and torch_npu 2.6.0.post2 in its
 isolated environment, requires C++11 ABI, and builds both the adapter and the
