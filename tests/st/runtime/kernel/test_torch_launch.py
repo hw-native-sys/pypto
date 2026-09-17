@@ -133,6 +133,7 @@ def _delayed_case(registration, state, device):
 
 def _failure_case(registration, state, device):
     import torch  # noqa: PLC0415
+    from pypto.runtime.kernel.context import KernelState  # noqa: PLC0415
     from pypto.torch import launch  # noqa: PLC0415
 
     native = launch._load_native()
@@ -147,9 +148,14 @@ def _failure_case(registration, state, device):
     error_pattern = "simpler_kernel_mode_launch failed|working operator name is PyPTOKernel"
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(native, "prepare", invalid_callable)
-        with pytest.raises(RuntimeError, match=error_pattern):
+        with pytest.raises(RuntimeError, match=error_pattern) as caught:
             launch.enqueue(registration, (x, 2.0, out))
             state.drain()
+    assert state.state is KernelState.FAILED
+    assert len(state._submissions) == 1
+    with pytest.raises(RuntimeError, match="failed, expected ready") as rejected:
+        launch.enqueue(registration, (x, 2.0, out))
+    assert rejected.value.__cause__ is caught.value
     assert len(state._submissions) == 1
     with pytest.raises(RuntimeError, match=error_pattern):
         state.close()

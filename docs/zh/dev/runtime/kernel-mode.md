@@ -410,7 +410,11 @@ caller-stream join 后记录逐次 completion event，覆盖设备使用。后�
 不排空 Host 队列；内部 `state.drain()` 或内部 `close()` 等待在途提交，最后一个 ticket 可保留到
 该边界。close 拒绝新增工作，等待 prepare/admission，排空 ticket 后才 finalize Worker。
 
-同步提交错误及异步 callback 错误通过 framework 和 ticket wait 传播。失败或部分 enqueue 的 ticket
+同步提交错误及异步 callback 错误通过 framework 和 ticket wait 传播。回收旧 ticket 或 drain 时
+观察到错误后，Worker 与同步 enqueue 失败一样进入 `FAILED`。后续任意算子调用均报
+`Kernel Worker is failed, expected ready`，异常 cause 保留首次观察到的提交错误。
+在回收时首次发现异步错误的调用会报告较早的异步 launch 失败，不 prepare 或 enqueue 新 ticket。
+close 期间发现失败时保持 `CLOSING`，由清理过程完成收尾。失败或部分 enqueue 的 ticket
 继续持有 Worker、参数及 Storage：caller stream 等待失败不能证明内部 stream 已静止。内部 close 排空 Host callback，并仅在错误路径执行全设备同步，证明内部 stream
 已静止后再 finalize、释放 owner，同时重新抛出原提交错误。quiescence 或 teardown 失败时继续保留
 全部 owner 以便重试 close。不会隐式重新初始化；自动框架退出通过上述集成完成。

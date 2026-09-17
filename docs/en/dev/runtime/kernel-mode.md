@@ -458,7 +458,14 @@ completed tickets without draining the host queue; internal `state.drain()` or
 released at that drain/close boundary.
 
 Submission and asynchronous callback errors propagate through the framework and
-ticket wait. Failed or partially enqueued tickets retain their Worker, argument
+ticket wait. An error observed while reaping a previous ticket or draining work
+marks the Worker `FAILED`, just as a synchronous enqueue failure does. Later
+calls through any operator are rejected with `Kernel Worker is failed, expected
+ready`, chained to the first observed submission error. A call that first
+discovers the error during reaping reports an earlier asynchronous launch error
+and does not prepare or enqueue a new ticket. Failure discovered during close
+leaves the Worker `CLOSING` so cleanup can finish.
+Failed or partially enqueued tickets retain their Worker, argument
 and storage owners: a failed stream wait does not establish that Simpler's
 internal streams are quiescent. Internal close drains the host callback and, only on failure,
 requires a full device synchronization to establish internal-stream quiescence.

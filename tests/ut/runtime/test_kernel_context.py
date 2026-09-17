@@ -333,6 +333,118 @@ class _Ticket:
         self.finished = True
 
 
+class _AsyncFailedTicket(_Ticket):
+    def enqueue(self):
+        self.calls.append("enqueue")
+
+    def done(self):
+        raise self.error
+
+    def quiesce(self):
+        self.calls.append("quiesce")
+
+
+@pytest.mark.parametrize("observe", ["submit", "drain"])
+@pytest.mark.parametrize("other_operator", [False, True])
+def test_async_failure_stops_admission_and_retains_cleanup_owners(setup, observe, other_operator):
+    state, config, calls, _ = setup
+    registration = state.ensure_callable(artifact(), config)
+    later = state.ensure_callable(artifact(b"other operator"), config) if other_operator else registration
+    error = RuntimeError("async launch failed")
+    order = []
+    ticket = _AsyncFailedTicket(order, error)
+    owner = weakref.ref(ticket)
+    state.submit(registration, lambda worker, ticket=ticket: ticket)
+    del ticket
+    assert state.state is KernelState.READY
+
+    def reject_prepare(worker):
+        pytest.fail("failed admission must not prepare a new ticket")
+
+    if observe == "submit":
+        with pytest.raises(RuntimeError, match="earlier asynchronous") as caught:
+            state.submit(later, reject_prepare)
+        assert caught.value.__cause__ is error
+    else:
+        with pytest.raises(RuntimeError, match="async launch failed") as caught:
+            state.drain()
+        assert caught.value is error
+    assert state.state is KernelState.FAILED
+    assert owner() is not None and state._submissions == [owner()]
+    assert not calls.closes and state._worker is calls.workers[0]
+    for candidate in (registration, later):
+        with pytest.raises(RuntimeError, match="failed, expected ready") as caught:
+            state.submit(candidate, reject_prepare)
+        assert caught.value.__cause__ is error
+    assert order.count("enqueue") == 1
+    with pytest.raises(RuntimeError, match="async launch failed") as caught:
+        state.close()
+    assert caught.value is error
+    assert order[-2:] == ["wait", "quiesce"]
+    assert calls.closes == calls.workers
+    assert state.state is KernelState.CLOSED and not state._submissions
+
+
+def test_repeated_drain_preserves_first_admission_failure(setup):
+    state, config, _, _ = setup
+    registration = state.ensure_callable(artifact(), config)
+    first = RuntimeError("first callback error")
+    ticket = _AsyncFailedTicket([], first)
+    state.submit(registration, lambda worker: ticket)
+    with pytest.raises(RuntimeError, match="first callback error"):
+        state.drain()
+    ticket.error = RuntimeError("later framework error")
+    with pytest.raises(RuntimeError, match="later framework error"):
+        state.drain()
+    with pytest.raises(RuntimeError, match="failed, expected ready") as caught:
+        registration.require_live()
+    assert caught.value.__cause__ is first
+    ticket.error = first
+    with pytest.raises(RuntimeError, match="first callback error"):
+        state.close()
+
+
+@pytest.mark.parametrize("observe", ["submit", "drain"])
+def test_async_failure_during_close_preserves_closing_state(setup, monkeypatch, observe):
+    state, config, calls, _ = setup
+    registration = state.ensure_callable(artifact(), config)
+    error = RuntimeError("async launch failed during close")
+    ticket = _AsyncFailedTicket([], error)
+    state.submit(registration, lambda worker: ticket)
+    entered = threading.Event()
+
+    def fail_while_closing():
+        entered.set()
+        with state._condition:
+            assert state._condition.wait_for(lambda: state.state is KernelState.CLOSING, timeout=5)
+        raise error
+
+    monkeypatch.setattr(ticket, "done" if observe == "submit" else "wait", fail_while_closing)
+    fail_admission = state._fail_admission
+
+    def observe_failure(exc):
+        fail_admission(exc)
+        assert state.state is KernelState.CLOSING
+
+    monkeypatch.setattr(state, "_fail_admission", observe_failure)
+
+    def discover_error():
+        with pytest.raises(RuntimeError, match="earlier asynchronous|async launch failed"):
+            if observe == "submit":
+                state.submit(registration, lambda worker: pytest.fail("must not prepare"))
+            else:
+                state.drain()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(discover_error)
+        assert entered.wait(5)
+        with pytest.raises(RuntimeError, match="async launch failed during close"):
+            state.close()
+        future.result(timeout=5)
+    assert calls.closes == calls.workers
+    assert state.state is KernelState.CLOSED and not state._submissions
+
+
 def test_launch_ownership_reaping_and_close_order(setup, monkeypatch):
     state, config, calls, _ = setup
     registration = state.ensure_callable(artifact(), config)

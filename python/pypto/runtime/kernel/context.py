@@ -177,29 +177,42 @@ class _ProcessKernelState:
             ):
                 raise RuntimeError("Kernel registration does not belong to this live Worker generation")
 
+    def _fail_admission(self, error: BaseException) -> None:
+        """Retain the first observed submission error without interrupting close."""
+        with self._condition:
+            if self._failure is None:
+                self._failure = error
+            if self.state is not KernelState.CLOSING:
+                self.state = KernelState.FAILED
+
     def submit(self, registration: KernelRegistration, prepare: Callable[[Any], Any]) -> None:
         """Serialize admission and retain native tickets before any enqueue can fail."""
         self._check_pid()
         with self._submission_lock:
             self.require_registration(registration)
-            self._submissions = [ticket for ticket in self._submissions if not ticket.done()]
+            try:
+                self._submissions = [ticket for ticket in self._submissions if not ticket.done()]
+            except BaseException as exc:
+                self._fail_admission(exc)
+                raise RuntimeError("Kernel Worker failed after an earlier asynchronous launch error") from exc
             ticket = prepare(self._worker)
             self._submissions.append(ticket)
             try:
                 ticket.enqueue()
             except BaseException as exc:
-                with self._condition:
-                    self._failure = exc
-                    if self.state is not KernelState.CLOSING:
-                        self.state = KernelState.FAILED
+                self._fail_admission(exc)
                 raise
 
     def drain(self) -> None:
         """Wait for admitted eager work; failed tickets remain owned for diagnosis."""
         self._check_pid()
         with self._submission_lock:
-            for ticket in self._submissions:
-                ticket.wait()
+            try:
+                for ticket in self._submissions:
+                    ticket.wait()
+            except BaseException as exc:
+                self._fail_admission(exc)
+                raise
             self._submissions.clear()
 
     def close(self) -> None:
