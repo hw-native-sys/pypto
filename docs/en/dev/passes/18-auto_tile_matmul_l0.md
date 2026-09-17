@@ -165,7 +165,9 @@ counting rules across three emitters:
   zero-offset `pto.subview`; the boundary therefore remains a legal dbC stage
   instead of being removed from the chooser's design space. Each selected
   constant slot is materialized before its K-loop and the loop carry reuses that
-  handle.
+  handle. Compatible multi-buffer regions with disjoint conservative lifetimes
+  reuse one physical PTOAS region, while their pipeline-group identities remain
+  distinct.
 
 The caller passes the actual emission route explicitly. Ordinary chooser-driven
 tiling supplies pipelined-inner for `k == K` and unrolled-grid for `k < K`.
