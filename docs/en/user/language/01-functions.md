@@ -5,7 +5,8 @@ functions call each other.
 
 > **Prerequisites:** [Types](00-types.md).
 
-Direct Python `entry(...)` calls select NPU kernel execution; host/simulator and
+Direct Python `entry(...)` calls select NPU kernel execution after one
+`pypto.torch.init()` per process; host/simulator and
 distributed execution first use `entry.compile(...)` and call the returned program.
 All Out/InOut arguments are required. Calls inside DSL bodies remain IR calls.
 See [kernel mode](../../dev/runtime/kernel-mode.md) for supported targets.

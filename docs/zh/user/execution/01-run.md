@@ -4,7 +4,7 @@
 
 ## 概念
 
-`CompiledProgram` 是一个句柄：指向编译产物，外加运行时启动它们所需的元数据。`ChipWorker` 持有设备连接与那些注册；派发要么是隐式的 —— 在 `@pl.jit` 函数上直接 `kernel(*args)` —— 要么是显式的，经由 worker，适用于库代码需要把 worker 传来传去、或服务化运行时想预注册许多 kernel 的场合。
+`CompiledProgram` 是一个句柄：指向编译产物，外加运行时启动它们所需的元数据。`ChipWorker` 持有设备连接与那些注册；派发要么是隐式的 —— 在 `@pl.jit` 函数上调用 `kernel.compile(...)(*args)` —— 要么是显式的，经由 worker，适用于库代码需要把 worker 传来传去、或服务化运行时想预注册许多 kernel 的场合。直接调用 `kernel(*args)` 则是在 `pypto.torch.init()` 之后的 NPU kernel 执行，见 [kernel mode](../../dev/runtime/kernel-mode.md)。
 
 早点搞清楚的一件事是：每次 launch 有什么东西跨过了 PCIe。默认每个张量实参都会 H2D 拷进去、再 D2H 拷回来。`DeviceTensor` 让一块 buffer 同时免掉这两次拷贝 —— 常驻权重或 KV cache 能成立，靠的就是它。
 

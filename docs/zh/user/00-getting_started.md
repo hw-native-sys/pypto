@@ -145,7 +145,7 @@ compiled = prefill_fwd.compile()
   仍是真正的参数，值在 dispatch 时给出；它与动态维一样不进 cache key，一份产物
   服务所有取值。`kernel.compile()` 即可，值通过 `compiled(x, out, 128)` 或
   `worker.register(compiled)` 拿到的 handle 给出。直接调用内核也一样：
-  `kernel(x, out, 128)` 与 `kernel(x, out, 256)` 复用同一份编译结果。
+  调用 `pypto.torch.init()` 后，`kernel(x, out, 128)` 与 `kernel(x, out, 256)` 复用同一份编译结果。
   `pl.RUNTIME` 仍被接受（它正是现在每个标量的默认行为）；向 `compile()` 传字面量
   会给出告警，因为这个写法过去表示相反的含义。
 - **`pl.constexpr` 参数**位于这条轴的另一端 —— 见下文"编译期参数"一节。
@@ -174,6 +174,7 @@ def kernel(
         pl.store(pl.add(pl.load(x, [0, 0], [BLOCK, BLOCK]), scale), [0, 0], out)
     return out
 
+pypto.torch.init()  # once per process before eager kernel calls
 kernel(x, out, scale=1.0, BLOCK=16)
 kernel(x, out, scale=2.0, BLOCK=16)   # 同一份产物——只有标量变了
 kernel(x, out, scale=2.0, BLOCK=32)   # 第二份产物

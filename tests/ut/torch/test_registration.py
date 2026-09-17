@@ -14,16 +14,18 @@ import gc
 import importlib
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import pypto.language as pl
 import pytest
 import torch
-from pypto import CacheConfig
+from pypto.ir import DistributedConfig
 from pypto.ir.param_info import ParamInfo
 from pypto.jit.decorator import JITFunction
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import ParamDirection
-from pypto.runtime import RunConfig
+from pypto.runtime import CompileOptions, RunConfig
+from pypto.runtime.kernel import context as kernel_context
 from pypto.runtime.kernel.context import _ProcessKernelState
 from pypto.torch import _registration_state, register, registration
 from torch._dynamo.testing import CompileCounterWithBackend
@@ -521,6 +523,8 @@ def test_public_registration_fake_meta_and_import_lifetime(registered_namespace,
 
     monkeypatch.setattr(JITFunction, "_resolve_compiled", forbidden)
     monkeypatch.setattr(_ProcessKernelState, "ensure_worker", forbidden)
+    # Registration and abstract calls precede pypto.torch.init.
+    monkeypatch.setattr(_ProcessKernelState, "require_config", forbidden)
     name = f"{registered_namespace}::update"
     op = register(_registered_update, name)
     assert str(op._schema) == (
@@ -560,16 +564,20 @@ def test_public_registration_compile_preserves_mutation_and_aliases(registered_n
         torch.testing.assert_close(other, torch.full_like(out, value + 1))
 
 
-def test_public_registration_constexpr_conflicts_and_copies_config(registered_namespace):
-    config = RunConfig(platform="a2a3", device_id=0, cache_config=CacheConfig(enabled=False))
+def test_public_registration_constexpr_and_compile_options_identity(registered_namespace):
+    config = CompileOptions()
     name = f"{registered_namespace}::constant"
     bindings = {"value": 5}
     op = registration.register(_registered_constant, name, constexpr=bindings, config=config)
     bindings["value"] = 6
-    assert registration.register(_registered_constant, name, constexpr={"value": 5}, config=config) is op
-    config.device_id = 1
+    assert (
+        registration.register(_registered_constant, name, constexpr={"value": 5}, config=CompileOptions())
+        is op
+    )
+    assert registration.register(_registered_constant, name, constexpr={"value": 5}) is op
+    changed = CompileOptions(analyze_auto_scopes_for_deps=True)
     with pytest.raises(ValueError, match="different definition"):
-        registration.register(_registered_constant, name, constexpr={"value": 5}, config=config)
+        registration.register(_registered_constant, name, constexpr={"value": 5}, config=changed)
     with pytest.raises(ValueError, match="different definition"):
         registration.register(_registered_constant, name, constexpr=bindings)
     with pytest.raises(ValueError, match="different definition"):
@@ -577,6 +585,38 @@ def test_public_registration_constexpr_conflicts_and_copies_config(registered_na
     with pytest.raises(ValueError, match="constexpr parameters"):
         registration.register(_registered_update, f"{registered_namespace}::bad", constexpr={"scale": 2})
     assert [arg.name for arg in op._schema.arguments] == ["x", "out"]
+
+
+@pytest.mark.parametrize("config", [RunConfig(platform="a2a3", device_id=0), object()])
+def test_public_registration_rejects_execution_config(registered_namespace, config):
+    with pytest.raises(TypeError, match="CompileOptions"):
+        registration.register(_registered_update, f"{registered_namespace}::update", config=config)
+    assert not any(
+        name.startswith(registered_namespace + "::") for name in torch._C._dispatch_get_all_op_names()
+    )
+
+
+def test_public_registration_rejects_distributed_compile_options(registered_namespace):
+    config = CompileOptions(distributed_config=DistributedConfig())
+    with pytest.raises(ValueError, match="distributed_config"):
+        registration.register(_registered_update, f"{registered_namespace}::update", config=config)
+    assert not any(
+        name.startswith(registered_namespace + "::") for name in torch._C._dispatch_get_all_op_names()
+    )
+
+
+def test_public_registration_real_call_requires_init(registered_namespace, monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("a kernel call before pypto.torch.init must not bind or compile")
+
+    registration.register(_registered_update, f"{registered_namespace}::update")
+    monkeypatch.setattr(kernel_context, "_process", SimpleNamespace(state=_ProcessKernelState()))
+    monkeypatch.setattr(JITFunction, "_resolve_specialization", forbidden)
+    mutation = getattr(torch.ops, registered_namespace)._pypto_update_mutate.default
+    keys = torch._C.DispatchKeySet(torch._C.DispatchKey.PrivateUse1)
+    # Force only the device dispatcher entry on CPU storage; the real JIT entry runs.
+    with pytest.raises(RuntimeError, match=r"call pypto\.torch\.init"):
+        mutation.redispatch(keys, torch.ones(16, 16), 2.0, torch.zeros(16, 16))
 
 
 def test_public_registration_rejects_grad_but_allows_inference(registered_namespace):

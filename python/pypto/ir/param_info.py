@@ -131,21 +131,21 @@ def bind_complete_args(
     return list(args)
 
 
+def kernel_parameters_from_params(param_infos: Sequence[_ParamInfo]) -> tuple[KernelParameter, ...]:
+    """Map logical IR parameters to target-independent kernel parameter records."""
+    return tuple(
+        KernelParameter(
+            p.name, str(p.dtype), p.direction.name, tuple(p.shape) if p.shape is not None else None
+        )
+        for p in param_infos
+    )
+
+
 def kernel_abi_from_params(
     param_infos: Sequence[_ParamInfo], *, platform: str, runtime: str, return_aliases: Sequence[int]
 ) -> KernelABI:
     """Map logical IR parameters to the pinned simpler pools without device work."""
-    return KernelABI(
-        platform,
-        runtime,
-        tuple(
-            KernelParameter(
-                p.name, str(p.dtype), p.direction.name, tuple(p.shape) if p.shape is not None else None
-            )
-            for p in param_infos
-        ),
-        tuple(return_aliases),
-    )
+    return KernelABI(platform, runtime, kernel_parameters_from_params(param_infos), tuple(return_aliases))
 
 
 def bind_kernel_args(

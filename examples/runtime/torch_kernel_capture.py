@@ -17,18 +17,17 @@ Run from the repository root:
     python examples/runtime/torch_kernel_capture.py --device 0
     python examples/runtime/torch_kernel_capture.py --device 0 --entry jit
 
-Both operators borrow caller-owned tensors and share PyPTO's process Worker.
+Call pypto.torch.init once per process before the first kernel call. Both
+operators borrow caller-owned tensors and share PyPTO's process Worker.
 Both entry points use the same warmup and graph-lifetime contract.
 """
 
 import argparse
 import importlib
-from functools import partial
 
 import pypto.language as pl
 import torch
-from pypto.runtime import RunConfig
-from pypto.torch import register
+from pypto.torch import init, register
 
 
 @pl.jit
@@ -54,31 +53,26 @@ def main(device: int, entry: str) -> None:
     """Run eager and captured calls and check their numerical results."""
     torch_npu = importlib.import_module("torch_npu")
     torch_npu.npu.set_device(device)
-    config = RunConfig(platform="a2a3", device_id=device)
+    # Execution information is process state: never passed per call, captured or registered.
+    init()
     x = torch.full((16, 16), 2.0, dtype=torch.float32, device=f"npu:{device}")
     acc = torch.zeros_like(x)
     out = torch.empty_like(x)
 
     # First calls implicitly compile and register each operator. They also warm
     # up every specialization that will appear in the captured graph.
-    accumulate(x, 3.0, acc, config=config)
-    add_bias(acc, out, config=config)
+    accumulate(x, 3.0, acc)
+    add_bias(acc, out)
     torch.testing.assert_close(out.cpu(), torch.full((16, 16), 10.0))
 
     # Optional eager torch.ops entry: same JIT operator and process Worker.
-    register(accumulate, "pypto_kernel_example::accumulate", config=config)
-    register(add_bias, "pypto_kernel_example::add_bias", config=config)
+    register(accumulate, "pypto_kernel_example::accumulate")
+    register(add_bias, "pypto_kernel_example::add_bias")
     torch.ops.pypto_kernel_example.accumulate(x, 2.0, acc)
     torch.testing.assert_close(acc.cpu(), torch.full((16, 16), 10.0))
 
-    update = (
-        torch.ops.pypto_kernel_example.accumulate
-        if entry == "torch_ops"
-        else partial(accumulate, config=config)
-    )
-    write_output = (
-        torch.ops.pypto_kernel_example.add_bias if entry == "torch_ops" else partial(add_bias, config=config)
-    )
+    update = torch.ops.pypto_kernel_example.accumulate if entry == "torch_ops" else accumulate
+    write_output = torch.ops.pypto_kernel_example.add_bias if entry == "torch_ops" else add_bias
 
     torch_npu.npu.synchronize()
     # Warmup executed the computation: restore InOut state before capture.
@@ -99,7 +93,7 @@ def main(device: int, entry: str) -> None:
         torch.testing.assert_close(out.cpu(), torch.full((16, 16), expected + 4.0))
         print(f"input={value}, accumulator={expected}, output={expected + 4.0}")
 
-    # No explicit compile(), Worker creation, or close() is required.
+    # Beyond init(), no explicit compile(), Worker handle, or close() is required.
 
 
 if __name__ == "__main__":

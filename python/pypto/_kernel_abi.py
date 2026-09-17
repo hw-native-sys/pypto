@@ -15,6 +15,7 @@ symbols; the Worker/native adapter owns that boundary in later integration.
 
 import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -56,6 +57,9 @@ TENSOR_DIRECTION_TAGS = {"In": 1, "Out": 2, "InOut": 3}
 MAX_KERNEL_TENSORS = 256
 MAX_KERNEL_SCALARS = 128
 MAX_KERNEL_RANK = 5
+# (platform, runtime) pairs whose native launch is validated for framework
+# eager and graph calls. Binary descriptors may name other targets.
+EAGER_KERNEL_TARGETS = frozenset({("a2a3", "tensormap_and_ringbuffer")})
 
 
 @dataclass(frozen=True)
@@ -86,6 +90,27 @@ class KernelParameter:
             object.__setattr__(self, "shape", shape)
 
 
+def validate_kernel_signature(
+    parameters: Sequence[KernelParameter], return_aliases: Sequence[int]
+) -> tuple[tuple[KernelParameter, ...], tuple[int, ...]]:
+    """Check the target-independent pools and aliases shared by every kernel target."""
+    params = tuple(parameters)
+    if any(not isinstance(param, KernelParameter) for param in params):
+        raise ValueError("Kernel ABI requires KernelParameter entries")
+    if len({param.name for param in params}) != len(params):
+        raise ValueError("Kernel parameter names must be unique")
+    tensor_count = sum(param.shape is not None for param in params)
+    if tensor_count > MAX_KERNEL_TENSORS or len(params) - tensor_count > MAX_KERNEL_SCALARS:
+        raise ValueError("Kernel ABI exceeds simpler tensor/scalar argument capacity")
+    aliases = tuple(return_aliases)
+    for index in aliases:
+        if type(index) is not int or not 0 <= index < len(params):
+            raise ValueError(f"Invalid kernel return alias index {index!r}")
+        if params[index].shape is None:
+            raise ValueError(f"Kernel return alias {index} must name an external tensor")
+    return params, aliases
+
+
 @dataclass(frozen=True)
 class KernelABI:
     """Compile-time identity and signature for one orchestration.
@@ -108,21 +133,7 @@ class KernelABI:
             raise ValueError(f"Unsupported kernel ABI platform {self.platform!r}")
         if self.runtime not in ("host_build_graph", "tensormap_and_ringbuffer"):
             raise ValueError(f"Unsupported kernel ABI runtime {self.runtime!r}")
-        params = tuple(self.parameters)
-        if any(not isinstance(param, KernelParameter) for param in params):
-            raise ValueError("Kernel ABI requires KernelParameter entries")
-        if len({param.name for param in params}) != len(params):
-            raise ValueError("Kernel parameter names must be unique")
-        tensor_count = sum(param.shape is not None for param in params)
-        if tensor_count > MAX_KERNEL_TENSORS or len(params) - tensor_count > MAX_KERNEL_SCALARS:
-            raise ValueError("Kernel ABI exceeds simpler tensor/scalar argument capacity")
-        aliases = tuple(self.return_aliases)
-        for index in aliases:
-            if type(index) is not int or not 0 <= index < len(params):
-                raise ValueError(f"Invalid kernel return alias index {index!r}")
-            param = params[index]
-            if param.shape is None:
-                raise ValueError(f"Kernel return alias {index} must name an external tensor")
+        params, aliases = validate_kernel_signature(self.parameters, self.return_aliases)
         object.__setattr__(self, "parameters", params)
         object.__setattr__(self, "return_aliases", aliases)
 

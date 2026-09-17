@@ -353,10 +353,11 @@ class RunConfig:
             (e.g. ``build_output/<name>_<ts>/data``) to reuse existing golden
             data, or specify a new path to persist data to a fixed location.
         aicpu_thread_num: Optional per-invocation override of the AICPU
-            thread count. ``None`` (default) defers to the value baked
-            into ``kernel_config.py``'s ``RUNTIME_CONFIG`` at compile
-            time (which itself may be unset, in which case the simpler
-            runtime default applies).
+            thread count for program execution. ``None`` (default) defers to
+            the value baked into ``kernel_config.py``'s ``RUNTIME_CONFIG`` at
+            compile time (which itself may be unset, in which case the simpler
+            runtime default applies). Kernel calls never read ``RunConfig``;
+            they use the process thread count set by ``pypto.torch.init``.
         ring_task_window: Optional per-invocation override of the runtime
             ring's task-slot window (number of in-flight tasks). Forwarded to
             ``CallConfig.runtime_env.ring_task_window``. A scalar (broadcast to

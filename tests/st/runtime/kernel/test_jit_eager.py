@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pypto.language as pl
 import pytest
-from pypto import CacheConfig
+from pypto import CacheConfig, configure_cache
 from pypto.runtime import RunConfig
 
 
@@ -46,13 +46,13 @@ def _run(case, device, directory):
     from pypto.jit.decorator import JITFunction  # noqa: PLC0415
     from pypto.runtime.kernel.abi import _NativeWorker  # noqa: PLC0415
     from pypto.runtime.kernel.context import get_process_kernel_state  # noqa: PLC0415
+    from pypto.torch import init  # noqa: PLC0415
 
     os.chdir(directory)
     os.environ.pop("PYPTO_PROG_BUILD_DIR", None)
     torch_npu.npu.set_device(device)
-    config = RunConfig(
-        platform="a2a3", device_id=device, cache_config=CacheConfig(enabled=False, root=Path(directory))
-    )
+    cache = CacheConfig(enabled=False, root=Path(directory))
+    config = RunConfig(platform="a2a3", device_id=device, cache_config=cache)
     if case == "program":
         x, acc = torch.full((16, 16), 2.0), torch.zeros(16, 16)
         program = accumulate.compile(x, 1.0, acc, config=config)
@@ -76,6 +76,8 @@ def _run(case, device, directory):
     def forbidden_compile(*args, **kwargs):
         raise AssertionError("eager execution used explicit program compilation")
 
+    # Kernel calls carry no execution information; the process binds it once.
+    configure_cache(cache)
     state = get_process_kernel_state()
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(compiler, "_compile_impl", counted("compile", compiler._compile_impl))
@@ -86,19 +88,27 @@ def _run(case, device, directory):
         patch.setattr(_NativeWorker, "init", counted("init", _NativeWorker.init))
         patch.setattr(_NativeWorker, "prepare", counted("prepare", _NativeWorker.prepare))
         try:
+            probe = torch.zeros((16, 16), device=f"npu:{device}")
+            with pytest.raises(RuntimeError, match=r"call pypto\.torch\.init"):
+                accumulate(probe, 1.0, probe)
+            with pytest.raises(TypeError, match="CompileOptions"):
+                accumulate(probe, 1.0, probe, config=config)
+            assert state._worker is None and counts == dict(compile=0, frontend=0, init=0, prepare=0)
+            init()
+            assert counts == dict(compile=0, frontend=0, init=1, prepare=0)
             stream = torch_npu.npu.Stream(device=device)
             with torch_npu.npu.stream(stream):
                 x = torch.full((16, 16), 2.0, device=f"npu:{device}")
                 acc = torch.zeros_like(x)
                 expected = 0.0
                 for step in (1.0, 2.0, 3.0):
-                    assert accumulate(x, step, acc, config=config) is acc
+                    assert accumulate(x, step, acc) is acc
                     expected += 2 * step
                     torch.testing.assert_close(acc.cpu(), torch.full((16, 16), expected))
                 assert counts == dict(compile=1, frontend=1, init=1, prepare=1)
                 out = torch.empty_like(x)
                 for value in (1, 1, 2):
-                    assert add_constant(x, out, value=value, config=config) is out
+                    assert add_constant(x, out, value=value) is out
                     torch.testing.assert_close((out + 3).cpu(), torch.full((16, 16), float(5 + value)))
                 assert counts == dict(compile=3, frontend=3, init=1, prepare=3)
                 assert len(state._registrations) == 3

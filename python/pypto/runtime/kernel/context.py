@@ -34,6 +34,10 @@ class KernelState(Enum):
 
 
 _generations = itertools.count(1)
+_NOT_INITIALIZED = (
+    "Kernel execution is not initialized; call pypto.torch.init(...) once in this process "
+    "before the first kernel call, outside graph capture"
+)
 
 
 class _ProcessKernelState:
@@ -67,7 +71,7 @@ class _ProcessKernelState:
             raise RuntimeError(f"Kernel Worker is {status}, expected ready") from self._failure
 
     def ensure_worker(self, config: KernelConfig) -> Any:
-        """Share the first init result; incompatible requests never create another Worker."""
+        """Initialize for ``pypto.torch.init``; incompatible requests never create another Worker."""
         self._check_pid()
         with self._condition:
             if self._stop_requested:
@@ -106,13 +110,38 @@ class _ProcessKernelState:
                 self._require_ready()
             return self._worker
 
+    def require_config(self) -> KernelConfig:
+        """Return the configuration bound by ``pypto.torch.init``; kernel calls never initialize."""
+        self._check_pid()
+        with self._condition:
+            while (
+                self.state is KernelState.INITIALIZING
+                and self._initializing_thread is not threading.current_thread()
+            ):
+                self._condition.wait()
+            if self.state is KernelState.UNINITIALIZED and not self._stop_requested:
+                raise RuntimeError(_NOT_INITIALIZED)
+            self._require_ready()
+            if self.config is None:
+                raise RuntimeError("Internal error: a ready kernel Worker has no bound configuration")
+            return self.config
+
+    def bound_worker(self, config: KernelConfig) -> Any:
+        """Return the initialized Worker for a matching configuration without initializing one."""
+        bound = self.require_config()
+        if bound != config:
+            raise ValueError(f"Kernel Worker configuration conflict: bound {bound}, requested {config}")
+        with self._condition:
+            self._require_ready()
+            return self._worker
+
     def ensure_callable(self, artifact: Any, config: KernelConfig) -> KernelRegistration:
         """Prepare an entire artifact once; concurrent callers share success or failure."""
         self._check_pid()
         abi = artifact.kernel_abi
         if (abi.platform, abi.runtime) != (config.platform, config.runtime):
             raise ValueError("Kernel artifact platform/runtime does not match the Worker configuration")
-        worker = self.ensure_worker(config)
+        worker = self.bound_worker(config)
         callable_ = artifact.load()
         identity = callable_identity(callable_, abi)
         with self._condition:
@@ -150,8 +179,8 @@ class _ProcessKernelState:
         """Look up completed warmup without initializing, loading or registering."""
         self._check_pid()
         with self._condition:
-            if self.state is KernelState.UNINITIALIZED:
-                raise RuntimeError("Kernel capture requires warmup outside capture for this specialization")
+            if self.state is KernelState.UNINITIALIZED and not self._stop_requested:
+                raise RuntimeError(_NOT_INITIALIZED)
             self._require_ready()
             if self.config != config:
                 raise ValueError(

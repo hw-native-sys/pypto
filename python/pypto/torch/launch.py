@@ -13,7 +13,7 @@ import importlib
 import struct
 from collections.abc import Sequence
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pypto._kernel_abi import SCALAR_FORMATS, SIMPLER_KERNEL_REVISION, TENSOR_DTYPE_TAGS, KernelABI
 from pypto.ir.param_info import ParamInfo
@@ -22,6 +22,9 @@ from pypto.pypto_core.ir import ParamDirection
 from pypto.runtime.kernel.callable import KernelRegistration
 
 from .interop import CallFrame, CallSignature
+
+if TYPE_CHECKING:
+    from pypto.runtime.kernel.abi import KernelConfig
 
 
 def _load_native() -> Any:
@@ -63,67 +66,33 @@ def _describe(abi: KernelABI, args: Sequence[Any]) -> CallFrame:
     return CallSignature(params, return_aliases=abi.return_aliases).describe_call(args)
 
 
-def describe_eager_call(abi: KernelABI, args: Sequence[Any], config: Any) -> CallFrame:
-    """Validate before compilation, Worker initialization or callable registration."""
-    if (abi.platform, abi.runtime) != ("a2a3", "tensormap_and_ringbuffer"):
-        raise ValueError(
-            "JIT eager execution currently requires a2a3/tensormap_and_ringbuffer; "
-            "use explicit compile for program execution"
-        )
-    from pypto.runtime.kernel.abi import KernelConfig  # noqa: PLC0415
-
+def describe_eager_call(abi: KernelABI, args: Sequence[Any], bound: "KernelConfig") -> CallFrame:
+    """Validate against the target bound by ``pypto.torch.init`` before compilation or registration."""
     frame = _describe(abi, args)
-    KernelConfig(
-        abi.platform, abi.runtime, frame.device_index, 0 if config is None else config.aicpu_thread_num or 0
-    )
     for tensor in frame.tensors:
         meta = tensor.metadata
         if not 1 <= len(meta.shape) <= 5 or any(
             x <= 0 or x > 0xFFFFFFFF for x in (*meta.shape, *meta.strides)
         ):
             raise ValueError("JIT eager tensors require rank 1..5 and positive u32 extents/strides")
-    if config is not None:
-        if config.device_id != frame.device_index:
-            raise ValueError("Kernel config device differs from the current torch NPU device")
-        unsupported = [
-            name
-            for name in (
-                "codegen_only",
-                "enable_chip_swimlane",
-                "enable_dump_args",
-                "enable_pmu",
-                "enable_dep_gen",
-                "enable_scope_stats",
-                "ring_task_window",
-                "ring_heap",
-                "ring_dep_pool",
-                "distributed_config",
-            )
-            if getattr(config, name, None)
-        ]
-        if unsupported:
-            raise ValueError(
-                f"JIT eager execution does not support program runtime options {unsupported}; "
-                "use explicit compile"
-            )
+    if frame.device_index != bound.device_id:
+        raise ValueError(
+            f"Kernel call tensors are on NPU {frame.device_index}, but pypto.torch.init bound NPU "
+            f"{bound.device_id}; kernel mode uses one device per process"
+        )
     capture_id = _load_native().check_call(frame.stream.stream_id, frame.device_index)
     return replace(frame, capture_id=capture_id or 0)
 
 
-def invoke(artifact: Any, frame: CallFrame, config: Any) -> Any:
-    """Register once on the process Worker and submit one prevalidated eager call."""
-    from pypto.runtime.kernel.abi import KernelConfig  # noqa: PLC0415
+def invoke(artifact: Any, frame: CallFrame, bound: "KernelConfig") -> Any:
+    """Register once on the initialized process Worker and submit one prevalidated eager call."""
     from pypto.runtime.kernel.context import get_process_kernel_state  # noqa: PLC0415
 
-    abi = artifact.kernel_abi
-    worker_config = KernelConfig(
-        abi.platform, abi.runtime, frame.device_index, 0 if config is None else config.aicpu_thread_num or 0
-    )
     state = get_process_kernel_state()
     registration = (
-        state.require_callable(artifact, worker_config)
+        state.require_callable(artifact, bound)
         if frame.capture_id
-        else state.ensure_callable(artifact, worker_config)
+        else state.ensure_callable(artifact, bound)
     )
     return _enqueue_frame(registration, frame)
 

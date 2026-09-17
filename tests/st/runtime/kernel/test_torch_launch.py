@@ -47,7 +47,10 @@ def _execute_case(case, platform, device, directory):
     with passes.PassContext([], runtime=passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER):
         artifact = scaled_kernel._resolve_kernel_artifact((), {"config": config}, allow_signature_mode=True)
     state = get_process_kernel_state()
-    registration = state.ensure_callable(artifact, KernelConfig(platform, "tensormap_and_ringbuffer", device))
+    worker_config = KernelConfig(platform, "tensormap_and_ringbuffer", device)
+    # The internal counterpart of pypto.torch.init: registration never initializes.
+    state.ensure_worker(worker_config)
+    registration = state.ensure_callable(artifact, worker_config)
     stream = torch_npu.npu.Stream(device=device)
     alternate = torch_npu.npu.Stream(device=device)
     outputs = []

@@ -45,9 +45,9 @@ def _child(case, device, directory):
     atexit.register(report_exit)
     import torch  # noqa: PLC0415
     import torch_npu  # noqa: PLC0415
-    from pypto import CacheConfig  # noqa: PLC0415
-    from pypto.runtime import RunConfig  # noqa: PLC0415
+    from pypto import CacheConfig, configure_cache  # noqa: PLC0415
     from pypto.runtime.kernel.context import get_process_kernel_state  # noqa: PLC0415
+    from pypto.torch import init  # noqa: PLC0415
     from simpler.task_interface import ChipWorker  # noqa: PLC0415
 
     from tests.st.runtime.kernel.test_jit_eager import accumulate, add_constant  # noqa: PLC0415
@@ -82,21 +82,23 @@ def _child(case, device, directory):
     ChipWorker.finalize = finalize
     if case == "unused":
         return
-    config = RunConfig(platform="a2a3", device_id=device, cache_config=CacheConfig(enabled=False))
+    configure_cache(CacheConfig(enabled=False))
     outputs = []
     failures = []
 
     def execute():
         try:
             torch_npu.npu.set_device(device)
+            # For the thread case, init runs on a caller thread that exits before shutdown.
+            init()
             stream = torch_npu.npu.Stream(device=device)
             with torch_npu.npu.stream(stream):
                 x = torch.full((16, 16), 2.0, device=f"npu:{device}")
                 out = torch.zeros_like(x)
-                accumulate(x, 3.0, out, config=config)
+                accumulate(x, 3.0, out)
                 outputs.append((out, 6.0))
                 other = torch.empty_like(x)
-                add_constant(x, other, value=4, config=config)
+                add_constant(x, other, value=4)
                 outputs.append((other, 6.0))
                 if case == "delayed":
                     import _torch_npu_test  # noqa: PLC0415
@@ -111,7 +113,7 @@ def _child(case, device, directory):
                         gate.release()
 
                     threading.Thread(target=release, daemon=True).start()
-                    accumulate(x, 1.0, out, config=config)
+                    accumulate(x, 1.0, out)
                     outputs[0] = (out, 8.0)
         except RuntimeError as exc:
             if case != "partial" or "injected partial init failure" not in str(exc):

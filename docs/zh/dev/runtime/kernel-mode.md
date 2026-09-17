@@ -1,27 +1,30 @@
 # Kernel mode 集成基础
 
 公开 JIT eager 入口借用 NPU 参数，通过可选 native torch_npu adapter 提交。
-显式 `.compile()` 返回 program 对象。
+kernel 执行要求每个进程先调用一次 `pypto.torch.init(...)`。显式 `.compile()` 返回 program 对象。
 
 ## 公开 JIT eager 入口
 
-本集成分支中，`op(x, scale, out)` 固定进入 kernel mode。调用方传入真实 NPU Tensor 和完整
+本集成分支中，`op(x, scale, out)` 固定进入 kernel mode。进程须先调用一次
+`pypto.torch.init(...)`（见[kernel 执行设置](#kernel-execution-setup)）。调用方随后传入真实 NPU Tensor 和完整
 Out/InOut，不设置 decorator mode，也不显式编译 kernel。每次调用先校验参数、快照本次
 类型化 Scalar 与当前 stream。graph capture 要求每个算子特化提前完成 warmup。首次有效
-调用编译 kernel 产物、初始化进程 Worker 并 prepare callable；后续匹配调用复用产物和注册。
+调用编译 kernel 产物，并在 `init` 创建的 Worker 上 prepare callable；后续匹配调用复用产物和注册。
 不同算子共享同一个 Worker。运行时 Scalar 值与 stream 变化不重新编译，constexpr 变化可选择不同产物。
 
 ```python
+import pypto.torch
+
 # op is a @pl.jit entry; the caller selected the current NPU device.
+pypto.torch.init()
 x = torch.ones((16, 16), device="npu")
 out = torch.empty_like(x)
 op(x, 2.0, out)
 ```
 
 当前支持 A2/A3 的 `tensormap_and_ringbuffer`，包含非默认 stream 和 taskQueue 开关。
-省略 `config` 时选择该目标及 torch 当前 NPU device；显式 `RunConfig` 须匹配目标和当前设备。
-拒绝 program 专用诊断、ring 覆盖、分布式配置、CPU/Meta/Fake Tensor 及 Worker 自有 handle，
-不会据此切换执行路径。native launch 要求 rank 1–5 和正 uint32 extent/stride。
+可选的 `config=CompileOptions(...)` 提供编译选项，并计入特化 key。拒绝 `RunConfig`、
+CPU/Meta/Fake Tensor 及 Worker 自有 handle，不会据此切换执行路径。native launch 要求 rank 1–5 和正 uint32 extent/stride。
 A5、HBG 执行仍属后续工作；直接 JIT 和注册后的 torch.ops 均支持 warmup 后的 ACLGraph capture/replay，见下文。自动清理目前按下文
 torch_npu 2.6.0.post2 的退出契约接入；其他框架版本在完成退出协议验证前拒绝 native kernel
 初始化。此功能仍限于集成分支。
@@ -37,6 +40,44 @@ program(host_x, 3.0, host_out, config=program_config)
 正式 program 调用（包括恢复对象和 orchestration 子入口）必须传入全部 Out/InOut，返回 `None`，
 不分配省略的输出。底层显式 Worker API 保留原有内存管理行为。kernel 调用返回 `None` 或 IR
 return alias 指定的原始 Tensor 对象，不分配输出、不额外执行 warmup。
+
+## kernel 执行设置 {#kernel-execution-setup}
+
+执行信息属于进程状态，而不是调用参数：
+
+```python
+import pypto
+import pypto.torch
+import torch_npu
+from pypto.runtime import CompileOptions
+
+torch_npu.npu.set_device(3)
+pypto.torch.init(aicpu_thread_num=4)  # device=None uses the current torch_npu device
+pypto.configure_cache(pypto.CacheConfig(enabled=True))  # optional process cache policy
+op(x, 2.0, out)  # no execution information at the call site
+op(x, 2.0, out, config=CompileOptions(analyze_auto_scopes_for_deps=True))  # compile options only
+```
+
+`init(*, device=None, platform="a2a3", runtime="tensormap_and_ringbuffer",
+aicpu_thread_num=0)` 在每个进程中调用一次，须早于首次直接 JIT 或注册 torch.ops 的 kernel 调用，
+且在 graph capture 之外。认领 kernel mode 之前，它依次检查目标、torch_npu 当前设备、框架版本以及
+当前没有进行中的 capture；随后认领 kernel mode、安装框架退出集成，并在生命周期线程上初始化进程
+Worker。它不编译也不 prepare 任何算子，入图的每个特化仍需 warmup。
+
+| 情形 | 行为 |
+| ---- | ---- |
+| `init` 前发起 kernel 调用 | 参数绑定、依赖发现与编译之前报 `RuntimeError`；进程不认领 mode，之后仍可调用 `init` |
+| 以相同配置重复调用 `init` | 直接返回 |
+| 以不同配置调用 `init` | `ValueError`，不创建第二个 Worker |
+| `device` 与 torch_npu 当前设备不同 | `ValueError`；`init` 从不切换设备 |
+| 在 graph capture 中调用 `init` | 任何状态变化之前报 `RuntimeError` |
+| native 初始化失败 | 保留失败状态；需使用新进程 |
+| 注册、Fake/Meta 调用、编译器追踪、program 编译 | 不需要 `init` |
+
+执行信息不随调用传入，graph capture、编译器追踪和 dispatcher 注册都不会固化设备或 runtime。
+直接调用和 `register()` 拒绝 `RunConfig` 与 `CompileOptions.distributed_config`：编译选项使用 `CompileOptions`，持久缓存策略使用
+`pypto.configure_cache`。`CompileOptions.platform` 若不是默认值，必须等于绑定的平台。外层
+`PassContext` 的 runtime 必须与绑定值一致；没有外层上下文时，eager 编译使用 `init` 绑定的 runtime。
 
 ## 调用元数据与所有权
 
@@ -132,26 +173,27 @@ API 选择测试在 PyTorch 2.6 上模拟旧注册入口，验证 Fake/Meta disp
 ## 将 JIT kernel 注册到 torch.ops
 
 ```python
-from pypto.torch import register
+from pypto.torch import init, register
 
 # op has fully shaped @pl.jit annotations, including Out/InOut directions.
-registered = register(op, "my_kernels::op")
+registered = register(op, "my_kernels::op")  # needs no init
+init()
 registered(x, 2.0, out)
 torch.ops.my_kernels.op(x, 3.0, out)
 ```
 
 `register(kernel, name, *, constexpr=None, config=None)` 从 `kernel.specialize()` 和
-已有 kernel ABI/返回别名分析派生 schema。注册不构建 binary、不分配 Tensor、不查询 NPU
-上下文、不初始化 Worker。首次真实 NPU 调用进入与 `kernel(...)` 相同的隐式编译、注册、
-当前 stream 提交及共享 Worker 路径。返回 Tensor 就是返回原始 Out/InOut 对象，支持重复
+与目标无关的返回别名分析派生 schema。注册不构建 binary、不分配 Tensor、不查询 NPU
+上下文、不要求 `pypto.torch.init`，也不初始化 Worker。真实 NPU 调用须先完成 `init`，随后进入与
+`kernel(...)` 相同的隐式编译、注册、当前 stream 提交及共享 Worker 路径。返回 Tensor 就是返回原始 Out/InOut 对象，支持重复
 别名。全部运行时参数都必须提供，即使 Python 函数有默认值；不推导输出分配。不注册 CPU 执行。
 
 Tensor 注解必须给出 shape/dtype；声明的动态维度保持动态。`constexpr={"block": 16}`
 为一个算子名固定编译期参数，省略时使用签名默认值；运行时 Scalar 仍保留在 dispatcher
-schema 中。其他 constexpr 变体使用其他名称。可选 `config` 在注册时复制，随后用于 JIT
-调用；省略时沿用当前设备默认值。constexpr 和 config 都不是运行时 `torch.ops` 参数。
+schema 中。其他 constexpr 变体使用其他名称。可选 `config=CompileOptions(...)` 计入算子身份
+（省略时等同于 `CompileOptions()`），并用于每次 JIT 调用。拒绝 `RunConfig`：设备与 runtime 来自 `pypto.torch.init`，从不来自注册。constexpr 和 config 都不是运行时 `torch.ops` 参数。
 
-PyPTO 在进程生命周期内持有注册 Library。同名、同一个 JIT 对象、相同 constexpr 和配置的
+PyPTO 在进程生命周期内持有注册 Library。同名、同一个 JIT 对象、相同 constexpr 和编译选项的
 重复请求返回已有 overload；并发请求共享一个定义。不同 JIT 对象/绑定、外部已有定义和
 内部名称冲突均报错，不替换已有算子。普通重复 import 命中模块缓存，不重复注册；重新加载
 应用模块产生新的 JIT 对象时应使用新名称。重新加载注册辅助本身保留已有 Library。
@@ -183,8 +225,9 @@ Simpler 或 native launch 扩展；`torch` 仍是 PyPTO 的常规依赖。真正
 
 ## 进程 kernel Worker 与注册
 
-内部 `runtime.kernel.context.get_process_kernel_state()` 持有进程唯一的延迟初始化
-kernel Worker。所有算子共享此管理器；算子、Scalar 值或 caller stream 变化不会新建
+内部 `runtime.kernel.context.get_process_kernel_state()` 持有由 `pypto.torch.init`
+通过 `ensure_worker` 创建的进程唯一 kernel Worker。kernel 调用只读取已绑定配置（`require_config`、
+`bound_worker`），从不初始化 Worker；未调用 `init` 时报未初始化错误。所有算子共享此管理器；算子、Scalar 值或 caller stream 变化不会新建
 Worker。`KernelConfig` 固定 platform、runtime、device 和 AICPU 线程数，其他常驻资源
 暂用 simpler 默认值。配置不兼容时报错，不额外创建 Worker。
 
@@ -231,7 +274,7 @@ kernel 清理须在这些操作之前完成。native `GetInitFlag()` 检查已�
 
 每个 native kernel Worker 持有一个持续运行的 daemon 生命周期线程。该线程借用调用方的 ACL
 context，执行 Worker 构造/init、callable prepare 和 finalize，不创建或 reset 设备。
-因此即使首次调用来自已结束的应用线程，也满足 simpler 的 init-owner-thread 规则。
+因此即使 `pypto.torch.init` 在已结束的短生命周期线程上执行，也满足 simpler 的 init-owner-thread 规则。
 热路径仍走已有 native torch 队列。close 成功后停止并 join 此线程；失败时保留线程以便重试。
 采用 daemon 是因为 Python 会在框架退出钩子之前 join 非 daemon 线程；正常清理由钩子显式 join，
 发生在框架拆除之前。
@@ -252,13 +295,15 @@ reset 存活图，再释放 graph ticket 并关闭 Worker。不新增用户必�
 
 ## warmup 后的 JIT 与 torch.ops 图捕获
 
-capture 前必须对**每个算子及特化**执行 warmup。shape、dtype 或 constexpr 变化可能选择新特化，
+须在 warmup 之前调用 `pypto.torch.init`；在 capture 中调用 `init`，或未调用 `init` 就捕获 kernel 调用，
+均会被拒绝。capture 前必须对**每个算子及特化**执行 warmup。shape、dtype 或 constexpr 变化可能选择新特化，
 需要重新 warmup；运行时 Scalar 值变化不需要。warmup 会实际执行算子，因此若捕获计算依赖
 InOut/输出初值，需恢复被 warmup 改写的状态。仅编译或命中磁盘缓存不代表已经在当前进程 Worker 注册。
 `force_recompile` 与 capture 不兼容。
 
 ```python
 # op_a and op_b are @pl.jit entries; x, y, out are caller-owned NPU tensors.
+pypto.torch.init()
 op_a(x, y)
 op_b(y, out)
 torch.npu.synchronize()
@@ -279,6 +324,7 @@ from pypto.torch import register
 
 registered_a = register(op_a, "my_graph::a")
 registered_b = register(op_b, "my_graph::b")
+pypto.torch.init()
 registered_a(x, y)
 registered_b(y, out)
 torch.npu.synchronize()
@@ -295,7 +341,8 @@ dispatcher Scalar 使用 Python `int`/`float`/`bool`；直接 JIT 还接受类�
 [`examples/runtime/torch_kernel_capture.py`](../../../../examples/runtime/torch_kernel_capture.py)，
 通过 `--entry torch_ops`（默认）或 `--entry jit` 选择调用入口。
 
-capture 只查找已有产物与已完成注册，不初始化 Worker、不加载或注册新二进制。缺少 warmup 时明确报错
+capture 只查找已有产物与已完成注册，不初始化 Worker、不加载或注册新二进制；执行信息在 capture 前已由
+`init` 绑定，图中不会记录它。缺少 warmup 时明确报错
 `Kernel capture requires warmup outside capture for this specialization`。当前 pin 的 Simpler 注册会同步
 内部 AICPU 流，该流在已有算子加入 capture 后不能被同步。冷双算子捕获见
 [Simpler #2255](https://github.com/hw-native-sys/simpler/issues/2255)，流分离修复暂缓；不自动回退到 eager。
@@ -449,7 +496,9 @@ dispatcher/compiler 集成，以及注册生命周期/冲突、回滚、推理�
 `tests/st/runtime/kernel/test_torch_ops.py` 验证公开注册的真实 NPU eager/aot_eager、taskQueue
 开关及共享 Worker/产物/callable；使用正常进程退出，不要求用户 close。
 
-`tests/ut/jit/test_kernel_eager.py` 覆盖公开入口、提前拒绝、Scalar 快照和缓存隔离。`tests/st/runtime/kernel/test_jit_eager.py` 验证真实 InOut 多次更新、constexpr 变体、共享 Worker 和隔离进程中的显式 program 执行。
+`tests/ut/torch/test_init.py` 覆盖显式初始化：绑定当前设备、幂等与配置冲突，以及不支持的目标、设备不一致、未验证的框架版本和进行中的 capture 在认领 kernel mode 之前被拒绝。
+
+`tests/ut/jit/test_kernel_eager.py` 覆盖公开入口、参数绑定前的未初始化错误、`RunConfig` 拒绝、`CompileOptions` 特化、绑定目标/设备/runtime 校验、提前拒绝、Scalar 快照和缓存隔离。`tests/st/runtime/kernel/test_jit_eager.py` 验证未初始化错误、Worker 在 `init` 中初始化、真实 InOut 多次更新、constexpr 变体、共享 Worker 和隔离进程中的显式 program 执行。
 
 `tests/ut/runtime/test_kernel_shutdown.py` 覆盖线程归属、初始化竞态、幂等 close、框架顺序、失败保活、
 版本拒绝和 fork。`tests/st/runtime/kernel/test_kernel_shutdown.py` 使用普通 Python 子进程正常退出，
@@ -459,7 +508,8 @@ dispatcher/compiler 集成，以及注册生命周期/冲突、回滚、推理�
 `tests/st/runtime/kernel/test_capture.py` 对直接 JIT 和 torch.ops 执行同一矩阵，覆盖缺失 warmup
 拒绝、单/多算子、多图/跨流、持久缓存复用、Scalar 快照、storage 保活、图 reset/GC/重建及
 在途 replay 的正常进程退出，分别验证 taskQueue 开关。跨入口用例验证一种入口 warmup、另一种
-入口 capture，以及同图混用；replay 不允许重新进入 Python JIT、编译或 prepare。
+入口 capture，以及同图混用；另有用例拒绝未调用 `init` 就捕获 kernel 调用，以及在 capture 中调用 `init`。
+replay 不允许重新进入 Python JIT、编译或 prepare。
 `tests/st/runtime/kernel/test_torch_ops.py` 还验证已 warmup 的 `aot_eager` 调用进入 capture，
 包含周围框架算子及输出 alias。
 `tests/ut/torch/test_capture.py` 覆盖图持有和退出接纳；管理器/JIT 测试验证 capture 不初始化、编译或注册。

@@ -1,33 +1,39 @@
 # Kernel-mode integration foundations
 
 The public JIT eager entry borrows NPU arguments and submits through the optional
-native torch_npu adapter. Explicit `.compile()` produces program objects.
+native torch_npu adapter. Kernel execution requires one `pypto.torch.init(...)`
+per process. Explicit `.compile()` produces program objects.
 
 ## Public JIT eager entry
 
-On this integration branch, `op(x, scale, out)` runs in kernel mode. The caller
-supplies real NPU tensors and every Out/InOut argument; there is no decorator
-mode argument or explicit kernel compilation step. On each call PyPTO validates
+On this integration branch, `op(x, scale, out)` runs in kernel mode. The process
+first calls `pypto.torch.init(...)` once (see
+[kernel execution setup](#kernel-execution-setup)). The caller then supplies
+real NPU tensors and every Out/InOut argument; there is no decorator mode
+argument or explicit kernel compilation step. On each call PyPTO validates
 arguments and snapshots typed scalar values and the current stream. Graph
-capture requires each operator specialization to be warmed up beforehand. The first valid call
-compiles a kernel artifact, initializes the process Worker and prepares the
-callable. Later matching calls reuse the artifact and registration. Different
-operators share that Worker. Changing runtime scalar values or streams does not
-recompile; changing a constexpr can select a different artifact.
+capture requires each operator specialization to be warmed up beforehand. The
+first valid call compiles a kernel artifact and prepares the callable on the
+Worker created by `init`. Later matching calls reuse the artifact and
+registration. Different operators share that Worker. Changing runtime scalar
+values or streams does not recompile; changing a constexpr can select a
+different artifact.
 
 ```python
+import pypto.torch
+
 # op is a @pl.jit entry; the caller selected the current NPU device.
+pypto.torch.init()
 x = torch.ones((16, 16), device="npu")
 out = torch.empty_like(x)
 op(x, 2.0, out)
 ```
 
 This entry currently supports A2/A3 with `tensormap_and_ringbuffer`, including
-non-default streams and taskQueue enabled or disabled. Omitting `config` selects
-that target and the current torch NPU device. An explicit `RunConfig` must match
-the target and current device. Program-only diagnostics, ring overrides,
-distributed configuration, CPU/Meta/Fake tensors and Worker-owned handles are
-rejected; they do not select another execution path. Native launch requires
+non-default streams and taskQueue enabled or disabled. An optional
+`config=CompileOptions(...)` supplies compilation options, which join the
+specialization key. `RunConfig`, CPU/Meta/Fake tensors and Worker-owned handles
+are rejected; they do not select another execution path. Native launch requires
 rank 1–5 and positive uint32 extents/strides. A5 and HBG execution remain later work.
 Direct JIT and registered torch.ops ACLGraph capture/replay are supported after
 warmup, as described below. Automatic eager cleanup is
@@ -50,6 +56,51 @@ they do not allocate omitted outputs. Low-level explicit Worker APIs retain
 their existing memory-management behavior. Kernel calls return `None` or exactly
 the original tensor objects selected by the IR return aliases, without allocating
 outputs or running a warmup invocation.
+
+## Kernel execution setup
+
+Execution information is process state, not a call argument:
+
+```python
+import pypto
+import pypto.torch
+import torch_npu
+from pypto.runtime import CompileOptions
+
+torch_npu.npu.set_device(3)
+pypto.torch.init(aicpu_thread_num=4)  # device=None uses the current torch_npu device
+pypto.configure_cache(pypto.CacheConfig(enabled=True))  # optional process cache policy
+op(x, 2.0, out)  # no execution information at the call site
+op(x, 2.0, out, config=CompileOptions(analyze_auto_scopes_for_deps=True))  # compile options only
+```
+
+`init(*, device=None, platform="a2a3", runtime="tensormap_and_ringbuffer",
+aicpu_thread_num=0)` runs once per process, before the first direct JIT or
+registered torch.ops kernel call and outside graph capture. Before claiming
+kernel mode it checks the target, the current torch_npu device, the framework
+version and that no capture is active. It then claims kernel mode, installs the
+framework shutdown integration and initializes the process Worker on its
+lifecycle thread. It compiles and prepares no operator; every captured
+specialization still needs warmup.
+
+| Situation | Behavior |
+| --------- | -------- |
+| Kernel call before `init` | `RuntimeError` before argument binding, dependency discovery or compilation; the process stays unclaimed and may still call `init` |
+| Repeated `init` with the same configuration | No-op |
+| `init` with a different configuration | `ValueError`; no second Worker |
+| `device` differs from the current torch_npu device | `ValueError`; `init` never switches devices |
+| `init` inside graph capture | `RuntimeError` before any state change |
+| Native initialization failure | Failure state is retained; use a new process |
+| Registration, Fake/Meta calls, compiler tracing, program compilation | No `init` required |
+
+Keeping execution information out of calls means graph capture, compiler
+tracing and dispatcher registration never snapshot a device or runtime choice.
+Direct calls and `register()` reject `RunConfig` and
+`CompileOptions.distributed_config`: compile options use `CompileOptions`, and
+persistent-cache policy uses `pypto.configure_cache`. A
+`CompileOptions.platform` other than its default must equal the bound platform.
+An active `PassContext` must name the bound runtime; without one, eager
+compilation uses the runtime from `init`.
 
 ## Call metadata and ownership
 
@@ -171,19 +222,21 @@ aliased-return schemas alone are insufficient. Autograd is not provided.
 ## Registering a JIT kernel with torch.ops
 
 ```python
-from pypto.torch import register
+from pypto.torch import init, register
 
 # op has fully shaped @pl.jit annotations, including Out/InOut directions.
-registered = register(op, "my_kernels::op")
+registered = register(op, "my_kernels::op")  # needs no init
+init()
 registered(x, 2.0, out)
 torch.ops.my_kernels.op(x, 3.0, out)
 ```
 
 `register(kernel, name, *, constexpr=None, config=None)` derives the schema from
-`kernel.specialize()` and the existing kernel ABI/return-alias analysis. It does
-not build binaries, allocate tensors, query an NPU context or initialize a Worker.
-The first real NPU invocation follows the same implicit compilation, registration,
-current-stream submission and shared Worker path as `kernel(...)`. Returning a
+`kernel.specialize()` and the target-independent return-alias analysis. It does
+not build binaries, allocate tensors, query an NPU context, require
+`pypto.torch.init` or initialize a Worker. Real NPU invocations require `init`
+and then follow the same implicit compilation, registration, current-stream
+submission and shared Worker path as `kernel(...)`. Returning a
 Tensor means returning the corresponding caller-owned Out/InOut object, including
 repeated aliases. Every runtime argument is required, even if the Python function
 has a default; output allocation is never inferred. CPU execution is not registered.
@@ -192,12 +245,13 @@ A tensor annotation must provide shape and dtype; declared dynamic dimensions
 remain dynamic. `constexpr={"block": 16}` fixes compile-time parameters for one
 operator name, using signature defaults when omitted. Runtime scalars stay in the
 dispatcher schema. Use another name for another constexpr variant. Optional
-`config` is copied at registration and used by each underlying JIT call; without
-it, the current-device defaults apply. Neither constexpr nor config is a runtime
-`torch.ops` argument.
+`config=CompileOptions(...)` is part of the operator identity (omitting it equals
+`CompileOptions()`) and is used by each underlying JIT call. `RunConfig` is rejected: the
+device and runtime come from `pypto.torch.init`, never from registration.
+Neither constexpr nor config is a runtime `torch.ops` argument.
 
 PyPTO owns the registration libraries for the process lifetime. Repeating the
-same name with the same JIT object, constexpr values and configuration returns
+same name with the same JIT object, constexpr values and compile options returns
 the existing overload; concurrent requests share one definition. Different JIT
 objects or bindings, foreign definitions and internal-name collisions fail
 without replacing anything. Reimporting a cached application module does not
@@ -242,9 +296,12 @@ same graph lifetime integration.
 
 ## Process kernel Worker and registration
 
-The internal `runtime.kernel.context.get_process_kernel_state()` owns one lazy
-kernel Worker for the process. All operators share that manager; changing the
-operator, scalar values or caller stream does not create another Worker.
+The internal `runtime.kernel.context.get_process_kernel_state()` owns the
+process kernel Worker that `pypto.torch.init` creates through `ensure_worker`.
+Kernel calls only read the bound configuration (`require_config`,
+`bound_worker`) and never initialize a Worker; without `init` they raise the
+not-initialized error. All operators share that manager; changing the operator,
+scalar values or caller stream does not create another Worker.
 `KernelConfig` fixes platform, runtime, device and AICPU thread count. Other
 context resources currently use Simpler defaults. An incompatible configuration
 is rejected instead of opening another Worker.
@@ -269,7 +326,8 @@ cannot use an initialized manager or its registrations. Forking before any
 kernel initialization replaces only the unused Python state. Use a fresh spawned
 process after native initialization.
 
-`ensure_callable(artifact, config)` loads the artifact and hashes its full
+`ensure_callable(artifact, config)` requires the Worker bound with a matching
+configuration, then loads the artifact and hashes its full
 serialized ChipCallable, tensor signature, target/runtime and PyPTO ABI
 descriptor using Simpler's existing descriptor helper. It does not use an ELF
 display hash, file path or Python object address as registration identity.
@@ -311,7 +369,7 @@ PyPTO currently admits only torch_npu 2.6.0.post2 for native kernel initializati
 Each native kernel Worker owns one persistent daemon lifecycle thread. Its
 constructor/init, callable preparation and finalize execute on that thread with
 the borrowed framework context, satisfying Simpler's init-owner-thread rule even
-when the application's first caller was a short-lived background thread. Hot
+when `pypto.torch.init` ran on a short-lived background thread. Hot
 launches stay on the existing native torch queue path. Successful close stops
 and joins the lifecycle thread; a failed close keeps it alive for cleanup retry.
 The thread is daemon because Python joins non-daemon threads before framework
@@ -343,7 +401,9 @@ close/shutdown ritual; see the capture contract below.
 
 ## JIT and torch.ops graph capture after warmup
 
-Warm up **every operator and specialization** outside capture. Shape, dtype or
+Call `pypto.torch.init` before warmup; calling it inside capture, or capturing a
+kernel call without it, is rejected. Warm up **every operator and
+specialization** outside capture. Shape, dtype or
 constexpr changes can select another specialization and require another warmup;
 changing a runtime Scalar does not. Warmup executes the operator, so restore
 InOut/output state if the captured computation expects its initial contents.
@@ -352,6 +412,7 @@ process's Worker. `force_recompile` is incompatible with capture.
 
 ```python
 # op_a and op_b are @pl.jit entries; x, y, out are caller-owned NPU tensors.
+pypto.torch.init()
 op_a(x, y)
 op_b(y, out)
 torch.npu.synchronize()
@@ -374,6 +435,7 @@ from pypto.torch import register
 
 registered_a = register(op_a, "my_graph::a")
 registered_b = register(op_b, "my_graph::b")
+pypto.torch.init()
 registered_a(x, y)
 registered_b(y, out)
 torch.npu.synchronize()
@@ -392,7 +454,8 @@ two-operator example with numerical checks is available in
 use `--entry torch_ops` (default) or `--entry jit`.
 
 Capture only looks up an existing artifact and completed registration; it
-neither initializes a Worker nor loads/registers new binaries. Missing warmup
+neither initializes a Worker nor loads/registers new binaries. Execution
+information is bound by `init` before capture, so a graph never records it. Missing warmup
 raises `Kernel capture requires warmup outside capture for this specialization`.
 The pinned Simpler registration path synchronizes its private AICPU stream, which
 cannot be synchronized once another captured operator has joined it. Cold
@@ -604,7 +667,9 @@ rollback, inference guards and routing into the JIT entry.
 execution through the public registration with taskQueue on/off and shared
 Worker/artifact/callable reuse. It exits normally without a user close call.
 
-`tests/ut/jit/test_kernel_eager.py` checks public entry routing, preflight rejection, scalar snapshots and cache separation. `tests/st/runtime/kernel/test_jit_eager.py` verifies real repeated InOut updates, constexpr variants, one shared Worker and isolated explicit program execution.
+`tests/ut/torch/test_init.py` checks explicit initialization: current-device binding, idempotence and conflicts, and rejection before claiming kernel mode for unsupported targets, device mismatch, unverified framework versions and active capture.
+
+`tests/ut/jit/test_kernel_eager.py` checks public entry routing, the not-initialized error before argument binding, `RunConfig` rejection, `CompileOptions` specialization, bound target/device/runtime checks, preflight rejection, scalar snapshots and cache separation. `tests/st/runtime/kernel/test_jit_eager.py` verifies the not-initialized error, Worker initialization inside `init`, real repeated InOut updates, constexpr variants, one shared Worker and isolated explicit program execution.
 
 `tests/ut/runtime/test_kernel_shutdown.py` checks lifecycle affinity, initialization
 races, idempotent close, framework ordering, failure retention, version refusal and
@@ -619,7 +684,8 @@ matrix: warmup refusal, single/multiple operators, multiple graphs/streams,
 persistent-cache reuse, scalar snapshots, storage ownership, graph reset/GC/recreation
 and ordinary exit with pending replay, with taskQueue enabled and disabled.
 Cross-entry cases warm through either entry and capture through the other or mix
-entries in one graph. Replay must not reenter Python JIT, compile or prepare.
+entries in one graph. Additional cases reject a kernel call captured without
+`init` and `init` called inside capture. Replay must not reenter Python JIT, compile or prepare.
 `tests/st/runtime/kernel/test_torch_ops.py` also checks warmed `aot_eager` calls
 inside capture, including the surrounding framework operations and output aliases.
 `tests/ut/torch/test_capture.py` covers graph ownership and shutdown admission;

@@ -285,7 +285,8 @@ assert torch.allclose(out, a + b, rtol=1e-5, atol=1e-5)
 
 Host and simulator execution uses explicit compilation followed by a program call.
 Direct `add(...)` calls instead borrow real NPU tensors and compile implicitly for
-kernel execution; see [kernel mode](../dev/runtime/kernel-mode.md) for the current
+kernel execution, after the process calls `pypto.torch.init()` once to fix the device
+and runtime; see [kernel mode](../dev/runtime/kernel-mode.md) for the current
 integration scope. Both entry points require caller-supplied Out/InOut tensors.
 
 For optional `torch.ops` integration, register the same fully annotated JIT function:
@@ -296,13 +297,15 @@ from pypto.torch import register
 registered_add = register(add, "my_kernels::add")
 ```
 
-Registration needs no device or explicit compilation. In a separate kernel-mode
-process, `torch.ops.my_kernels.add(a_npu, b_npu, out_npu)` uses the same execution
-path as direct `add(...)` and returns `out_npu`. See
+Registration needs no device, `init` or explicit compilation. In a separate
+kernel-mode process that has called `pypto.torch.init()`,
+`torch.ops.my_kernels.add(a_npu, b_npu, out_npu)` uses the same execution path as
+direct `add(...)` and returns `out_npu`. See
 [registration and compiler support](../dev/runtime/kernel-mode.md#registering-a-jit-kernel-with-torchops)
 for constexpr bindings, Fake/Meta behavior and inference-only compiler support.
 
-For graph execution, warm up every operator specialization outside capture,
+For graph execution, call `pypto.torch.init()` and warm up every operator
+specialization outside capture,
 then call either the JIT function or its registered torch.ops entry inside
 `torch.npu.graph(graph)`. Warmup executes the operator, so restore any InOut
 state that needs its initial value. Replay keeps captured tensor addresses and

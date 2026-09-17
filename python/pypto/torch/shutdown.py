@@ -85,16 +85,21 @@ class _ShutdownHook:
 _install_lock = threading.Lock()
 
 
-def install_shutdown(state: Any) -> Any:
-    """Install before native initialization, while the framework is still alive."""
-    framework = _load_torch_npu()
-    native = _load_native()
+def require_supported_framework(framework: Any) -> None:
+    """Reject torch_npu releases whose teardown contract has not been validated."""
     version = framework.__version__.split("+", 1)[0]
     if version != "2.6.0.post2":
         raise RuntimeError(
             f"Automatic kernel shutdown is verified for torch_npu 2.6.0.post2, got {version}; "
             "this framework's teardown contract must be validated before kernel initialization"
         )
+
+
+def install_shutdown(state: Any) -> Any:
+    """Install before native initialization, while the framework is still alive."""
+    framework = _load_torch_npu()
+    native = _load_native()
+    require_supported_framework(framework)
     with _install_lock:
         existing = getattr(framework, "_pypto_kernel_shutdown", None)
         if existing is not None:

@@ -13,12 +13,12 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pypto._kernel_abi import KernelABI
+from pypto._kernel_abi import KernelABI, validate_kernel_signature
 from pypto.pypto_core import codegen
 from pypto.pypto_core.ir import Function, FunctionType, Program, level_to_linqu_level
 
 from .compiled_program import _extract_func_param_infos, write_kernel_metadata
-from .param_info import kernel_abi_from_params
+from .param_info import _ParamInfo, kernel_abi_from_params, kernel_parameters_from_params
 
 if TYPE_CHECKING:
     from pypto.runtime._kernel_artifact import KernelArtifact
@@ -37,8 +37,12 @@ def _entry(program: Program) -> Function:
     return entries[0]
 
 
-def kernel_abi_for_program(program: Program, *, platform: str, runtime: str) -> KernelABI:
-    """Derive logical pools and external return aliases before lowering rewrites IR."""
+def kernel_signature_for_program(program: Program) -> tuple[list[_ParamInfo], tuple[int, ...]]:
+    """Derive external parameters and return aliases without choosing an execution target.
+
+    Dispatcher schemas depend only on this signature, so registration can run
+    before ``pypto.torch.init`` binds a platform and runtime.
+    """
     entry = _entry(program)
     params, _, returns = _extract_func_param_infos(entry)
     aliases = codegen._returned_param_indices(entry, program)
@@ -46,9 +50,16 @@ def kernel_abi_for_program(program: Program, *, platform: str, runtime: str) -> 
         raise ValueError(
             "Kernel returns must alias external tensor parameters; pass every Out/InOut explicitly"
         )
-    return kernel_abi_from_params(
-        params, platform=platform, runtime=runtime, return_aliases=[i for i in aliases if i is not None]
+    _, checked = validate_kernel_signature(
+        kernel_parameters_from_params(params), [i for i in aliases if i is not None]
     )
+    return params, checked
+
+
+def kernel_abi_for_program(program: Program, *, platform: str, runtime: str) -> KernelABI:
+    """Derive logical pools and external return aliases before lowering rewrites IR."""
+    params, aliases = kernel_signature_for_program(program)
+    return kernel_abi_from_params(params, platform=platform, runtime=runtime, return_aliases=aliases)
 
 
 def finish_kernel_artifact(

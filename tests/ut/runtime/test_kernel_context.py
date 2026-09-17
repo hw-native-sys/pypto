@@ -56,8 +56,13 @@ def artifact(key=b"kernel"):
 def test_concurrent_operators_share_one_worker_and_registration(setup):
     state, config, calls, _ = setup
     assert context.get_process_kernel_state() is state
+
+    def initialize_and_prepare(_):
+        state.ensure_worker(config)
+        return state.ensure_callable(artifact(), config)
+
     with ThreadPoolExecutor(max_workers=8) as pool:
-        registrations = list(pool.map(lambda _: state.ensure_callable(artifact(), config), range(32)))
+        registrations = list(pool.map(initialize_and_prepare, range(32)))
     assert len(calls.workers) == len(calls.inits) == len(calls.prepares) == 1
     assert all(reg is registrations[0] for reg in registrations)
     second = state.ensure_callable(artifact(b"different code"), config)
@@ -66,13 +71,60 @@ def test_concurrent_operators_share_one_worker_and_registration(setup):
     registrations[0].require_live()
 
 
+def test_kernel_calls_never_initialize_the_worker(setup):
+    state, config, calls, _ = setup
+    for lookup in (
+        state.require_config,
+        lambda: state.bound_worker(config),
+        lambda: state.ensure_callable(artifact(), config),
+        lambda: state.require_callable(artifact(), config),
+    ):
+        with pytest.raises(RuntimeError, match=r"call pypto\.torch\.init"):
+            lookup()
+    assert not calls.workers and _execution_mode._gate.mode is None
+    worker = state.ensure_worker(config)
+    assert state.require_config() == config
+    assert state.bound_worker(config) is worker
+    with pytest.raises(ValueError, match="configuration conflict"):
+        state.bound_worker(replace(config, device_id=1))
+    with pytest.raises(ValueError, match="configuration conflict"):
+        state.ensure_callable(artifact(), replace(config, aicpu_thread_num=2))
+    assert len(calls.workers) == 1 and not calls.prepares
+    state.close()
+
+
+def test_kernel_lookup_waits_for_concurrent_initialization(setup, monkeypatch):
+    state, config, calls, worker_cls = setup
+    entered, release = threading.Event(), threading.Event()
+
+    def init(self, config):
+        entered.set()
+        assert release.wait(5)
+        calls.inits.append(config)
+
+    monkeypatch.setattr(worker_cls, "init", init)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        initializing = pool.submit(state.ensure_worker, config)
+        assert entered.wait(5)
+        lookup = pool.submit(state.require_config)
+        assert not lookup.done()
+        release.set()
+        assert lookup.result(timeout=5) == config
+        initializing.result(timeout=5)
+    assert len(calls.workers) == len(calls.inits) == 1
+    state.close()
+
+
 def test_capture_lookup_requires_completed_registration_without_loading(setup):
     state, config, calls, _ = setup
     value = artifact()
     value._loaded = None
-    with pytest.raises(RuntimeError, match="requires warmup"):
+    with pytest.raises(RuntimeError, match=r"pypto\.torch\.init"):
         state.require_callable(value, config)
     assert not calls.workers
+    state.ensure_worker(config)
+    with pytest.raises(RuntimeError, match="requires warmup"):
+        state.require_callable(value, config)
     registration = state.ensure_callable(value, config)
     with pytest.raises(RuntimeError, match="requires warmup"):
         state.require_callable(value, config)
@@ -136,6 +188,7 @@ def test_failed_prepare_is_not_published_and_can_retry(setup, monkeypatch):
         raise RuntimeError("prepare rejected")
 
     monkeypatch.setattr(worker_cls, "prepare", fail)
+    state.ensure_worker(config)
     with pytest.raises(RuntimeError, match="prepare rejected"):
         state.ensure_callable(artifact(), config)
     assert not state._registrations and not state._preparing
@@ -182,6 +235,7 @@ def test_concurrent_failed_prepare_shares_failure(setup, monkeypatch):
 
 def test_close_from_another_thread_invalidates_handles(setup):
     state, config, calls, _ = setup
+    state.ensure_worker(config)
     registration = state.ensure_callable(artifact(), config)
     registration.require_live()
     with pytest.raises(RuntimeError, match="generation"):
@@ -198,6 +252,7 @@ def test_close_from_another_thread_invalidates_handles(setup):
 
 def test_close_failure_retains_owner_and_registrations_for_retry(setup, monkeypatch):
     state, config, calls, worker_cls = setup
+    state.ensure_worker(config)
     registration = state.ensure_callable(artifact(), config)
     close = worker_cls.close
 
@@ -264,6 +319,7 @@ def test_close_waits_for_in_flight_prepare(setup, monkeypatch):
 
 def test_fork_rejects_state_before_touching_inherited_mutex(setup, monkeypatch):
     state, config, _, _ = setup
+    state.ensure_worker(config)
     registration = state.ensure_callable(artifact(), config)
     monkeypatch.setattr(context.os, "getpid", lambda: state.pid + 1)
     with pytest.raises(RuntimeError, match="PID"):
@@ -276,6 +332,7 @@ def test_fork_rejects_state_before_touching_inherited_mutex(setup, monkeypatch):
 
 def test_registration_retains_worker_after_operator_is_deleted(setup):
     state, config, _, _ = setup
+    state.ensure_worker(config)
     registration = state.ensure_callable(artifact(), config)
     owner = weakref.ref(state)
     del state
@@ -295,6 +352,7 @@ def test_reentrant_prepare_and_close_are_rejected(setup, monkeypatch):
         return 1
 
     monkeypatch.setattr(worker_cls, "prepare", prepare)
+    state.ensure_worker(config)
     state.ensure_callable(artifact(), config).require_live()
     state.close()
 
@@ -335,6 +393,7 @@ class _Ticket:
 
 def test_launch_ownership_reaping_and_close_order(setup, monkeypatch):
     state, config, calls, _ = setup
+    state.ensure_worker(config)
     registration = state.ensure_callable(artifact(), config)
     order = []
     ticket = _Ticket(order)
@@ -353,6 +412,7 @@ def test_launch_ownership_reaping_and_close_order(setup, monkeypatch):
 
 def test_completed_launch_is_reaped_on_next_call(setup):
     state, config, _, _ = setup
+    state.ensure_worker(config)
     registration = state.ensure_callable(artifact(), config)
     ticket = _Ticket([])
     state.submit(registration, lambda worker, ticket=ticket: ticket)
@@ -366,6 +426,7 @@ def test_completed_launch_is_reaped_on_next_call(setup):
 
 def test_partial_enqueue_failure_retains_owners_and_refuses_new_work(setup):
     state, config, calls, _ = setup
+    state.ensure_worker(config)
     registration = state.ensure_callable(artifact(), config)
     ticket = _Ticket([], RuntimeError("partial enqueue"))
     owner = weakref.ref(ticket)
@@ -382,6 +443,7 @@ def test_partial_enqueue_failure_retains_owners_and_refuses_new_work(setup):
 
 def test_close_waits_for_in_progress_admission(setup, monkeypatch):
     state, config, calls, _ = setup
+    state.ensure_worker(config)
     registration = state.ensure_callable(artifact(), config)
     entered, release = threading.Event(), threading.Event()
     order = []
@@ -406,6 +468,7 @@ def test_close_waits_for_in_progress_admission(setup, monkeypatch):
 
 def test_close_reports_submission_error_after_proven_quiescence(setup, monkeypatch):
     state, config, calls, _ = setup
+    state.ensure_worker(config)
     registration = state.ensure_callable(artifact(), config)
     ticket = _Ticket([], RuntimeError("native rejection"))
     with pytest.raises(RuntimeError, match="native rejection"):

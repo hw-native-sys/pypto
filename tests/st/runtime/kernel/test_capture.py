@@ -14,24 +14,23 @@ import importlib
 import os
 import subprocess
 import sys
-from functools import partial
 from pathlib import Path
 
 import pytest
 
 
-def _entrypoints(entry, config):
+def _entrypoints(entry):
     import torch  # noqa: PLC0415
     from pypto.torch import register  # noqa: PLC0415
 
     from tests.st.runtime.kernel.test_jit_eager import accumulate, add_constant  # noqa: PLC0415
 
-    direct = partial(accumulate, config=config), partial(add_constant, config=config)
+    direct = accumulate, add_constant
     if entry == "jit":
         return direct, direct
-    register(accumulate, "pypto_capture_st::update", config=config)
+    register(accumulate, "pypto_capture_st::update")
     for value in (4, 5):
-        register(add_constant, f"pypto_capture_st::add_{value}", constexpr={"value": value}, config=config)
+        register(add_constant, f"pypto_capture_st::add_{value}", constexpr={"value": value})
 
     def update(x, scalar, out):
         # Dispatcher schemas accept Python primitives, whereas direct JIT also
@@ -55,21 +54,20 @@ def _entrypoints(entry, config):
 def _run(device, directory, case, entry="jit"):
     import torch  # noqa: PLC0415
     import torch_npu  # noqa: PLC0415
-    from pypto import CacheConfig  # noqa: PLC0415
+    from pypto import CacheConfig, configure_cache  # noqa: PLC0415
     from pypto.runtime import RunConfig  # noqa: PLC0415
     from pypto.runtime.kernel.abi import _NativeWorker  # noqa: PLC0415
     from pypto.runtime.kernel.context import get_process_kernel_state  # noqa: PLC0415
+    from pypto.torch import init  # noqa: PLC0415
 
     from tests.st.runtime.kernel.test_jit_eager import accumulate  # noqa: PLC0415
 
     os.chdir(directory)
     os.environ.pop("PYPTO_PROG_BUILD_DIR", None)
     torch_npu.npu.set_device(device)
-    config = RunConfig(
-        platform="a2a3",
-        device_id=device,
-        cache_config=CacheConfig(enabled=case == "persistent", root=Path(directory) / "cache"),
-    )
+    configure_cache(CacheConfig(enabled=case == "persistent", root=Path(directory) / "cache"))
+    # Only the internal artifact lookup takes compile-side RunConfig; kernel calls never do.
+    build_config = RunConfig(platform="a2a3", device_id=device)
     x = torch.full((16, 16), 2.0, device=f"npu:{device}")
     out = torch.zeros_like(x)
     following = torch.empty_like(out)
@@ -88,16 +86,20 @@ def _run(device, directory, case, entry="jit"):
         patch.setattr(compiler, "_compile_impl", counted("compile", compiler._compile_impl))
         patch.setattr(_NativeWorker, "init", counted("init", _NativeWorker.init))
         patch.setattr(_NativeWorker, "prepare", counted("prepare", _NativeWorker.prepare))
-        (warm_update, warm_add), (update, add) = _entrypoints(entry, config)
+        (warm_update, warm_add), (update, add) = _entrypoints(entry)
         assert counts == dict(compile=0, init=0, prepare=0)
-        rejected = case in ("cold", "generated", "binary", "second-cold", "new-variant")
+        unbound = case in ("uninitialized", "init-in-capture")
+        rejected = unbound or case in ("cold", "generated", "binary", "second-cold", "new-variant")
+        if not unbound:
+            init()
+            assert counts == dict(compile=0, init=1, prepare=0)
         if case in ("generated", "binary"):
-            artifact = accumulate._resolve_kernel_artifact((x, 3.0, out), dict(config=config))
-            assert state._worker is None and artifact._loaded is None
+            artifact = accumulate._resolve_kernel_artifact((x, 3.0, out), dict(config=build_config))
+            assert not state._registrations and artifact._loaded is None
             if case == "binary":
                 artifact.load()
-                assert state._worker is None
-        elif case != "cold":
+                assert not state._registrations
+        elif not unbound and case != "cold":
             warm_update(x, 3.0, out)
             if case in (
                 "multi",
@@ -123,11 +125,16 @@ def _run(device, directory, case, entry="jit"):
                     # before checking that a cold second callable is refused.
                     assert update(x, scalar, out) is out
                 # Catch inside capture so the framework can finish a valid graph.
-                with pytest.raises(RuntimeError, match="requires warmup outside capture"):
-                    if case in ("second-cold", "new-variant"):
-                        add(out, following, value=5 if case == "new-variant" else 4)
-                    else:
-                        update(x, scalar, out)
+                if case == "init-in-capture":
+                    with pytest.raises(RuntimeError, match="outside graph capture"):
+                        init()
+                else:
+                    refusal = r"call pypto\.torch\.init" if unbound else "requires warmup outside capture"
+                    with pytest.raises(RuntimeError, match=refusal):
+                        if case in ("second-cold", "new-variant"):
+                            add(out, following, value=5 if case == "new-variant" else 4)
+                        else:
+                            update(x, scalar, out)
                 following.copy_(out)
             else:
                 assert update(x, scalar, out) is out
@@ -135,6 +142,7 @@ def _run(device, directory, case, entry="jit"):
                     assert add(out, following, value=4) is following
         assert counts == warmed
         if rejected:
+            assert (state._worker is None) == unbound
             graph.reset()
             return
         callables = 1 if case == "single" else 2
@@ -144,7 +152,7 @@ def _run(device, directory, case, entry="jit"):
         del x, out, following
         graphs = [graph]
         del graph
-        graph = _replay_case(case, graphs, tensors, config, torch_npu, add)
+        graph = _replay_case(case, graphs, tensors, device, torch_npu, add)
         assert counts == warmed
         globals()["retained_graph"] = graph
 
@@ -160,7 +168,7 @@ def _replay(graph):
         graph.replay()
 
 
-def _replay_case(case, graphs, tensors, config, torch_npu, add):
+def _replay_case(case, graphs, tensors, device, torch_npu, add):
     import gc  # noqa: PLC0415
     import weakref  # noqa: PLC0415
 
@@ -169,7 +177,6 @@ def _replay_case(case, graphs, tensors, config, torch_npu, add):
     graph = graphs.pop()
     x, out, following = tensors
     tensors.clear()
-    device = config.device_id
     replay_stream = torch_npu.npu.Stream(device=device)
     expected = 0.0
     with torch_npu.npu.stream(replay_stream):
@@ -258,6 +265,8 @@ def _isolated(test_config, tmp_path, case, queue_enabled, entry):
 @pytest.mark.parametrize(
     "case",
     [
+        "uninitialized",
+        "init-in-capture",
         "cold",
         "generated",
         "binary",

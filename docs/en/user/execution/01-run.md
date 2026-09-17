@@ -6,9 +6,10 @@ Dispatching a `CompiledProgram`, and keeping resident data resident.
 
 A `CompiledProgram` is a handle to compiled artifacts plus the metadata the runtime needs
 to launch them. `ChipWorker` owns the device connection and the registrations; dispatching
-is either implicit — `kernel(*args)` on a `@pl.jit` function — or explicit, through the
-worker, when library code needs to pass the worker around or a serving runtime wants to
-pre-register many kernels.
+is either implicit — `kernel.compile(...)(*args)` on a `@pl.jit` function — or explicit,
+through the worker, when library code needs to pass the worker around or a serving runtime
+wants to pre-register many kernels. A direct `kernel(*args)` call is NPU kernel execution
+instead, after `pypto.torch.init()`; see [kernel mode](../../dev/runtime/kernel-mode.md).
 
 The one thing worth understanding early is what crosses the PCIe boundary on each launch.
 By default every tensor argument is copied host to device and back. A `DeviceTensor` opts a

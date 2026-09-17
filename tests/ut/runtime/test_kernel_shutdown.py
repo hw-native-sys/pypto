@@ -62,6 +62,7 @@ def test_framework_hook_drains_then_closes_once_before_teardown(setup, framework
     hook = fw._pypto_kernel_shutdown
     shutdown.install_shutdown(state)
     assert fw._pypto_kernel_shutdown is hook
+    state.ensure_worker(config)
     state.ensure_callable(artifact(), config)
     state.ensure_callable(artifact(b"other"), config)
     state._submissions.append(SimpleNamespace(wait=lambda: events.append("ticket-wait")))
@@ -85,6 +86,7 @@ def test_graphs_stop_and_reset_before_tickets_and_worker_close(setup, framework)
     state, config, _, _ = setup
     fw, _, events = framework
     shutdown.install_shutdown(state)
+    state.ensure_worker(config)
     state.ensure_callable(artifact(), config)
     state._graph_lifecycle = SimpleNamespace(close=lambda: events.append("graphs-stop-drain-reset"))
     state._submissions.append(SimpleNamespace(wait=lambda: events.append("ticket-wait")))
@@ -97,6 +99,7 @@ def test_graph_shutdown_failure_preserves_tickets_and_worker(setup, framework):
     state, config, calls, _ = setup
     fw, native, events = framework
     shutdown.install_shutdown(state)
+    state.ensure_worker(config)
     state.ensure_callable(artifact(), config)
 
     def fail():
@@ -125,6 +128,7 @@ def test_unused_shutdown_never_constructs_a_worker(setup, framework):
 def test_shutdown_failure_retains_resources_and_stops_admission(setup, framework, monkeypatch, failure):
     state, config, _, worker_cls = setup
     fw, native, events = framework
+    state.ensure_worker(config)
     registration = state.ensure_callable(artifact(), config)
     shutdown.install_shutdown(state)
     if failure == "framework":
@@ -165,6 +169,7 @@ def test_partial_initialization_is_closed_before_framework(setup, framework, mon
 def test_warning_as_error_does_not_interrupt_framework_shutdown(setup, framework, capsys):
     state, config, _, _ = setup
     fw, native, events = framework
+    state.ensure_worker(config)
     state.ensure_callable(artifact(), config)
     shutdown.install_shutdown(state)
     native.framework_alive = lambda: False
@@ -241,6 +246,7 @@ def test_initialization_does_not_override_abandoned_shutdown(setup, framework, m
 
 def test_admission_failure_does_not_reopen_a_closing_manager(setup):
     state, config, calls, _ = setup
+    state.ensure_worker(config)
     registration = state.ensure_callable(artifact(), config)
     entered, release = threading.Event(), threading.Event()
 
@@ -365,6 +371,8 @@ def _exit_probe(path, case):
     if case != "unused":
         try:
             with ThreadPoolExecutor(max_workers=1) as pool:
+                # pypto.torch.init from a departed caller thread, then two operators.
+                pool.submit(state.ensure_worker, config).result(timeout=5)
                 pool.submit(state.ensure_callable, artifact(), config).result(timeout=5)
                 pool.submit(state.ensure_callable, artifact(b"another"), config).result(timeout=5)
         except RuntimeError:

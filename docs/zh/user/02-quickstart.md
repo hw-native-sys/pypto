@@ -266,7 +266,7 @@ assert torch.allclose(out, a + b, rtol=1e-5, atol=1e-5)
 ```
 
 Host 和模拟器执行使用显式编译，再调用 program 对象。直接 `add(...)` 则借用真实 NPU
-Tensor 并隐式编译后执行 kernel，当前范围见 [kernel mode](../dev/runtime/kernel-mode.md)。
+Tensor 并隐式编译后执行 kernel；此前进程须调用一次 `pypto.torch.init()` 固定设备与 runtime，当前范围见 [kernel mode](../dev/runtime/kernel-mode.md)。
 两个入口均要求调用方传入全部 Out/InOut Tensor。
 
 如需可选的 `torch.ops` 集成，注册同一个具有完整注解的 JIT 函数：
@@ -277,12 +277,12 @@ from pypto.torch import register
 registered_add = register(add, "my_kernels::add")
 ```
 
-注册不需要设备或显式编译。在独立的 kernel mode 进程中，
+注册不需要设备、`init` 或显式编译。在已调用 `pypto.torch.init()` 的独立 kernel mode 进程中，
 `torch.ops.my_kernels.add(a_npu, b_npu, out_npu)` 与直接 `add(...)` 共用执行路径并返回
 `out_npu`。constexpr 绑定、Fake/Meta 行为和仅推理的编译器支持见
 [注册与编译器支持](../dev/runtime/kernel-mode.md#将-jit-kernel-注册到-torchops)。
 
-执行图前须在 capture 外 warmup 每个算子特化，再在 `torch.npu.graph(graph)` 中调用
+执行图前须在 capture 外调用 `pypto.torch.init()` 并 warmup 每个算子特化，再在 `torch.npu.graph(graph)` 中调用
 JIT 函数或对应的 torch.ops 入口。warmup 会执行业务，因此需要初值的 InOut 应恢复状态。
 replay 保留捕获时的 Tensor 地址与 Scalar 值；新输入应原位更新 Tensor 内容。
 

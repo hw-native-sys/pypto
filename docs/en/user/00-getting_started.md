@@ -159,8 +159,9 @@ throwaway `torch.empty(...)` buffers. Details:
   value arrives at dispatch, and — like a dynamic dim — it drops out of the
   cache key, so one artifact serves every value. `kernel.compile()` is enough;
   the value goes to `compiled(x, out, 128)` or to a `worker.register(compiled)`
-  handle. Calling the kernel eagerly works the same way: `kernel(x, out, 128)`
-  and `kernel(x, out, 256)` reuse one compilation.
+  handle. Calling the kernel eagerly works the same way: after
+  `pypto.torch.init()`, `kernel(x, out, 128)` and `kernel(x, out, 256)` reuse one
+  compilation.
   `pl.RUNTIME` is still accepted (it is what every scalar now does) and passing
   a literal to `compile()` warns, because it used to mean the opposite.
 - **`pl.constexpr` parameters** are the opposite end of that axis — see
@@ -192,6 +193,7 @@ def kernel(
         pl.store(pl.add(pl.load(x, [0, 0], [BLOCK, BLOCK]), scale), [0, 0], out)
     return out
 
+pypto.torch.init()  # once per process before eager kernel calls
 kernel(x, out, scale=1.0, BLOCK=16)
 kernel(x, out, scale=2.0, BLOCK=16)   # same artifact — only the scalar changed
 kernel(x, out, scale=2.0, BLOCK=32)   # a second artifact

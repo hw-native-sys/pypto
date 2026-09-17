@@ -51,9 +51,10 @@ JITFunction.__call__ flow
 4. Scan entry + dep ASTs for bind_dynamic declarations.
 5. Resolve compile options; bypass caching for diagnostics or explicit output requests.
 6. Build CacheKey including referenced constants (dynamic dims → None in shape tuple).
-7. Validate complete NPU arguments and capture the current scalar values and stream.
+7. Require the target bound by pypto.torch.init; validate complete NPU arguments and
+   capture the current scalar values and stream.
 8. Resolve a kernel artifact, compiling on a cache miss.
-9. Initialize the shared process Worker, prepare once, enqueue and return output aliases.
+9. Prepare once on the initialized process Worker, enqueue and return output aliases.
 """
 
 from __future__ import annotations
@@ -71,7 +72,7 @@ import threading
 import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from pypto._cache_config import capture_cache_config, record_stats, time_stage
 from pypto._external_source import external_source_digest
@@ -102,6 +103,9 @@ from .specializer import (
     free_name_source,
     func_name_lookup,
 )
+
+if TYPE_CHECKING:
+    from pypto.runtime.kernel.abi import KernelConfig
 
 # ---------------------------------------------------------------------------
 # Error message rewriting for JIT compilation
@@ -2294,19 +2298,70 @@ def _resolve_runtime() -> _passes.RuntimeKind:
     return ctx.get_runtime() if ctx is not None else _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
 
 
+def _eager_kernel_config(run_config: Any) -> KernelConfig:
+    """Validate kernel call options and return the target bound by ``pypto.torch.init``.
+
+    Runs before argument binding, dependency discovery or compilation. Execution
+    information is process state rather than a call argument, so graph capture
+    and compiler tracing never snapshot a device or runtime choice.
+    """
+    from pypto.runtime import CompileOptions, RunConfig  # noqa: PLC0415
+    from pypto.runtime.kernel.context import get_process_kernel_state  # noqa: PLC0415
+
+    if isinstance(run_config, RunConfig):
+        raise TypeError(
+            "JIT kernel calls take config=CompileOptions(...); set the device, platform, runtime and "
+            "AICPU threads once with pypto.torch.init(...) and cache policy with pypto.configure_cache(...)"
+        )
+    if run_config is not None and not isinstance(run_config, CompileOptions):
+        raise TypeError(f"JIT kernel calls take config=CompileOptions(...), got {type(run_config).__name__}")
+    if run_config is not None and run_config.distributed_config is not None:
+        raise ValueError(
+            "JIT kernel calls do not support CompileOptions.distributed_config; "
+            "compile distributed programs explicitly with op.compile(...)"
+        )
+    return get_process_kernel_state().require_config()
+
+
+def _eager_platform(requested: str, bound: str) -> str:
+    """Compile for the bound platform; only an explicitly different platform conflicts."""
+    from pypto.runtime import CompileOptions  # noqa: PLC0415
+
+    if requested not in (CompileOptions().platform, bound):
+        raise ValueError(
+            f"CompileOptions(platform={requested!r}) conflicts with platform {bound!r} "
+            "bound by pypto.torch.init"
+        )
+    return bound
+
+
+def _eager_runtime(ambient: _passes.RuntimeKind, bound_name: str) -> _passes.RuntimeKind:
+    """Return the bound runtime; an active PassContext must already name the same runtime."""
+    bound = _passes.runtime_kind_from_name(bound_name)
+    if _passes.PassContext.current() is not None and ambient != bound:
+        raise ValueError(
+            f"Active PassContext runtime {runtime_kind_to_name(ambient)!r} conflicts with runtime "
+            f"{bound_name!r} bound by pypto.torch.init"
+        )
+    return bound
+
+
 def _resolve_compile_request(run_config: Any) -> tuple[dict[str, Any], bool]:
     """Resolve compiler arguments and whether this call requires fresh compilation.
 
-    RunConfig's compile mapping is the source for both codegen and cache keys.
+    The compile mapping of RunConfig or CompileOptions is the source for both
+    codegen and cache keys.
     Diagnostics are requests to run the compiler, so decide bypass before any
     cache lookup (including source-key construction). With persistence disabled,
     tool discovery remains on the compile path; persistent hits additionally
     require a verified installation identity.
     """
-    if run_config is None:
-        from pypto.runtime import CompileOptions  # noqa: PLC0415
+    from pypto.runtime import CompileOptions  # noqa: PLC0415
 
+    if run_config is None:
         kwargs = CompileOptions().as_compile_kwargs()
+    elif isinstance(run_config, CompileOptions):
+        kwargs = run_config.as_compile_kwargs()
     else:
         kwargs = run_config.compile_kwargs()
     kwargs["dump_passes"] = coerce_dump_level(kwargs["dump_passes"])
@@ -3087,7 +3142,8 @@ class JITFunction:
         allow_signature_mode: bool = False,
         *,
         _kernel: bool = False,
-        _preflight: Callable[[KernelABI, list[Any], Any], bool] | None = None,
+        _preflight: Callable[[KernelABI, list[Any]], bool] | None = None,
+        _kernel_config: KernelConfig | None = None,
     ) -> tuple[Any, list[Any], Any | None]:
         """Look up or build a specialized program or internal kernel artifact.
 
@@ -3108,10 +3164,15 @@ class JITFunction:
         )
 
         compile_kwargs, bypass_cache = _resolve_compile_request(run_config)
-        if _preflight is not None and run_config is None:
-            # Eager calls target the first supported hardware combination.
-            # Explicit program compilation retains its simulator default.
-            compile_kwargs["platform"] = "a2a3"
+        runtime = _resolve_runtime()
+        if _kernel_config is not None:
+            # Eager calls compile for the target bound by pypto.torch.init;
+            # explicit program compilation keeps its simulator default.
+            compile_kwargs["platform"] = _eager_platform(compile_kwargs["platform"], _kernel_config.platform)
+            runtime = _eager_runtime(runtime, _kernel_config.runtime)
+            if _passes.PassContext.current() is None:
+                # ir.compile scopes the runtime in its own PassContext.
+                compile_kwargs["runtime"] = runtime
         cache_config = capture_cache_config(getattr(run_config, "cache_config", None))
         record_stats(requests=1)
         if not cache_config.enabled:
@@ -3137,7 +3198,7 @@ class JITFunction:
             abi = kernel_abi_for_program(
                 program,
                 platform=compile_kwargs["platform"],
-                runtime=runtime_kind_to_name(_resolve_runtime()),
+                runtime=runtime_kind_to_name(runtime),
             )
             return program, abi
 
@@ -3169,7 +3230,7 @@ class JITFunction:
             if _kernel:
                 kernel_program, kernel_abi = resolve_kernel_contract()
                 if _preflight is not None:
-                    capturing = _preflight(kernel_abi, ordered_args, run_config)
+                    capturing = _preflight(kernel_abi, ordered_args)
             return build(), ordered_args, run_config
 
         # Resolved before the key rather than during ``build()``: a dep's
@@ -3196,7 +3257,7 @@ class JITFunction:
             memory_planner=compile_kwargs.get("memory_planner", _resolve_memory_planner(None)),
             enable_pypto_l0c_double_buffer=_resolve_enable_pypto_l0c_double_buffer(),
             enable_buffer_ir=_resolve_enable_buffer_ir(),
-            runtime=_resolve_runtime(),
+            runtime=runtime,
         )
 
         with self._cache_lock:
@@ -3205,7 +3266,7 @@ class JITFunction:
                     self._kernel_contracts[key] = resolve_kernel_contract()
                 kernel_program, kernel_abi = self._kernel_contracts[key]
                 if _preflight is not None:
-                    capturing = _preflight(kernel_abi, ordered_args, run_config)
+                    capturing = _preflight(kernel_abi, ordered_args)
             memory_key = key if kernel_abi is None else (key, kernel_abi)
             if cache_config.enabled:
                 from ._persistent import resolve_persistent  # noqa: PLC0415
@@ -3217,7 +3278,7 @@ class JITFunction:
                     build,
                     self._persistent_source_digest,
                     platform=compile_kwargs["platform"],
-                    runtime_name=runtime_kind_to_name(_resolve_runtime()),
+                    runtime_name=runtime_kind_to_name(runtime),
                     distributed=self._func_type == "host",
                     **({} if kernel_abi is None else {"kernel_abi": kernel_abi, "require_cached": capturing}),
                 )
@@ -3279,33 +3340,41 @@ class JITFunction:
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """Implicitly compile and enqueue a kernel on the current torch NPU stream.
 
+        Call ``pypto.torch.init(...)`` once in the process first; it fixes the
+        device, platform, runtime and AICPU threads and initializes the shared
+        Worker. Without it, the call fails before argument binding, dependency
+        discovery or compilation.
+
         Supply every Out/InOut tensor. Returns only declared aliases of caller
         tensors, without allocating outputs or waiting for device completion.
         Python/ctypes scalars use this invocation's value; compatible artifacts,
         registrations and the process Worker are reused. The first call executes
         the operator exactly once.
 
-        ``config=RunConfig(...)`` supplies compilation options and fixed Worker
-        configuration. The initial eager target is A2/A3 with TRB; no config
-        defaults to that target and the framework's current device. Program-only
-        execution/diagnostic options are rejected. Graph capture requires warmup
-        of every operator specialization outside capture.
+        ``config=CompileOptions(...)`` optionally supplies compilation options,
+        which are part of the specialization. ``RunConfig`` is rejected: execution
+        information is process state, not a call argument. Graph capture requires
+        warmup of every operator specialization outside capture.
 
         Use ``op.compile(...)(...)`` for program execution, including CPU tensors,
         DeviceTensor, simulation and distributed programs.
         """
         from pypto.torch.launch import describe_eager_call, invoke  # noqa: PLC0415
 
+        # The bound target cannot change once initialized; read it once per call.
+        target = _eager_kernel_config(kwargs.get("config"))
         frame = None
 
-        def preflight(abi: KernelABI, bound: list[Any], config: Any) -> bool:
+        def preflight(abi: KernelABI, arguments: list[Any]) -> bool:
             nonlocal frame
-            frame = describe_eager_call(abi, bound, config)
+            frame = describe_eager_call(abi, arguments, target)
             return bool(frame.capture_id)
 
-        artifact, _, config = self._resolve_compiled(args, kwargs, _kernel=True, _preflight=preflight)
+        artifact, _, _ = self._resolve_compiled(
+            args, kwargs, _kernel=True, _preflight=preflight, _kernel_config=target
+        )
         assert frame is not None
-        return invoke(artifact, frame, config)
+        return invoke(artifact, frame, target)
 
     def compile(self, *args: Any, **kwargs: Any) -> Any:
         """Specialize + compile for the shape/dtype combination implied by *args*,

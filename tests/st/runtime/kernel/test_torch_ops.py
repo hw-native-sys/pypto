@@ -21,12 +21,11 @@ def _run(case, device, directory):
 
     import torch  # noqa: PLC0415
     import torch_npu  # noqa: PLC0415
-    from pypto import CacheConfig  # noqa: PLC0415
+    from pypto import CacheConfig, configure_cache  # noqa: PLC0415
     from pypto.jit.decorator import JITFunction  # noqa: PLC0415
-    from pypto.runtime import RunConfig  # noqa: PLC0415
     from pypto.runtime.kernel.abi import _NativeWorker  # noqa: PLC0415
     from pypto.runtime.kernel.context import get_process_kernel_state  # noqa: PLC0415
-    from pypto.torch import register  # noqa: PLC0415
+    from pypto.torch import init, register  # noqa: PLC0415
     from torch._subclasses.fake_tensor import FakeTensorMode  # noqa: PLC0415
 
     from tests.st.runtime.kernel.test_jit_eager import accumulate, add_constant  # noqa: PLC0415
@@ -34,7 +33,7 @@ def _run(case, device, directory):
     os.chdir(directory)
     os.environ.pop("PYPTO_PROG_BUILD_DIR", None)
     torch_npu.npu.set_device(device)
-    config = RunConfig(platform="a2a3", device_id=device, cache_config=CacheConfig(enabled=False))
+    configure_cache(CacheConfig(enabled=False))
     state = get_process_kernel_state()
     counts = dict(compile=0, init=0, prepare=0)
     compiler = importlib.import_module("pypto.ir.compile")
@@ -54,9 +53,10 @@ def _run(case, device, directory):
         patch.setattr(JITFunction, "compile", forbidden_compile)
         patch.setattr(_NativeWorker, "init", counted("init", _NativeWorker.init))
         patch.setattr(_NativeWorker, "prepare", counted("prepare", _NativeWorker.prepare))
-        update = register(accumulate, "pypto_ops_st::update", config=config)
-        add = register(add_constant, "pypto_ops_st::add", constexpr={"value": 4}, config=config)
-        assert update is register(accumulate, "pypto_ops_st::update", config=config)
+        # Registration and abstract calls need no execution information or init.
+        update = register(accumulate, "pypto_ops_st::update")
+        add = register(add_constant, "pypto_ops_st::add", constexpr={"value": 4})
+        assert update is register(accumulate, "pypto_ops_st::update")
         assert state._worker is None
         meta_x = torch.empty(16, 16, device="meta")
         meta_out = torch.empty_like(meta_x)
@@ -77,14 +77,18 @@ def _run(case, device, directory):
             assert counts == dict(compile=0, init=0, prepare=0)
             x = torch.full((16, 16), 2.0, device=f"npu:{device}")
             acc = torch.zeros_like(x)
-            assert accumulate(x, 1.0, acc, config=config) is acc
+            with pytest.raises(RuntimeError, match=r"call pypto\.torch\.init"):
+                update(x, 1.0, acc)
+            assert counts == dict(compile=0, init=0, prepare=0) and state._worker is None
+            init()
+            assert accumulate(x, 1.0, acc) is acc
             worker = state._worker
             assert update(x=x, step=2.0, acc=acc) is acc
             assert torch.ops.pypto_ops_st.update(x, 3.0, acc) is acc
             torch.testing.assert_close(acc.cpu(), torch.full((16, 16), 12.0))
             assert counts == dict(compile=1, init=1, prepare=1)
             out = torch.empty_like(x)
-            assert add_constant(x, out, value=4, config=config) is out
+            assert add_constant(x, out, value=4) is out
             assert add(x, out) is out
             torch.testing.assert_close(out.cpu(), torch.full((16, 16), 6.0))
             assert counts == dict(compile=2, init=1, prepare=2)

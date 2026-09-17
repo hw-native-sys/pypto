@@ -4,7 +4,7 @@
 
 > **前置**：[类型](00-types.md)。
 
-Python 直接调用 `entry(...)` 选择 NPU kernel 执行；Host/模拟器和分布式执行先
+进程调用一次 `pypto.torch.init()` 后，Python 直接调用 `entry(...)` 选择 NPU kernel 执行；Host/模拟器和分布式执行先
 `entry.compile(...)`，再调用返回的 program。全部 Out/InOut 必须传入，DSL 函数体内
 的调用仍是 IR 调用。支持范围见 [kernel mode](../../dev/runtime/kernel-mode.md)。
 
