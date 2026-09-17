@@ -22,7 +22,8 @@ PTOAS 提供不带地址的分配身份。即使关闭自动验证，本 pass �
 地址规划器还会检查有效地址区间的重叠。
 
 自定义流水线满足相同的存储、SSA、返回值规范化及设备/编排分离约束后，
-可调用 `passes.lower_tile_to_buffer()`。该 pass 产生 `BufferIR` 属性，
+可调用 `passes.lower_tile_to_buffer()`。还必须满足 `NoNestedCalls`：在此边界之前执行
+`FlattenCallExpr`。该 pass 产生 `BufferIR` 属性，
 并使描述 Tile 存储的属性失效。
 
 ## 表示示例

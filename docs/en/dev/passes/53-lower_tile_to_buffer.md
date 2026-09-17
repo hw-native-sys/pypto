@@ -25,6 +25,7 @@ Addressed planners additionally check effective-range overlap.
 
 Custom pipelines can call `passes.lower_tile_to_buffer()` once the same storage,
 SSA, return normalization, and device/orchestration separation invariants hold.
+`NoNestedCalls` is also required: run `FlattenCallExpr` before this boundary.
 The pass produces `BufferIR` and invalidates properties describing Tile storage.
 
 ## Representation example

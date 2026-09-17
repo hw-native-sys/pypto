@@ -80,7 +80,11 @@ Register(DiagnosticCheck::MyCheck,
 
 ### 第一项检查：`TileInnermostDimGranularity` (PH001)
 
-检查每个 `tile.load` / `tile.store` 操作。当最内层维度的字节数（`shape[-1] * sizeof(dtype)`）低于 `GetRecommendedInnermostDimBytes()` 时发出 diagnostic，指向源代码 span。该检查适用于**所有内存空间，包括 cube 私有空间**（issue #2309）：本检查只考察 `tile.load` / `tile.store`，而它们的非 tile 一侧是 `TensorType`——始终位于片外——因此无论 tile 落在哪个空间，二者都是 GM↔片上传输，其 GM 侧总是以最内层维度的粒度穿越 L2。真正的片内搬移（`tile.move` / `tile.extract`，如 Mat→L0）才是 cube 私有的，而本检查根本不考察它们。早期版本以 L2 局部性为由跳过 `Mat`/`Left`/`Right`/`Acc` tile；由于任何片内传输都不会到达本检查，该跳过只可能压制真阳性——典型的就是 `b_trans` matmul 的 GM→Mat 权重加载，其加载窗口是调用方 `[N, K]` 切片的转置（每行 128 B，而建议值为 512 B，实测有 16–25% 的性能损失）。
+Buffer lowering 之后，同一检查也处理 `buffer.load` 与 `buffer.store`。
+物理形状、dtype 和内存空间来自 Buffer 句柄；传输量来自显式有效窗口操作数。
+窗口含符号维度时省略传输量，但仍保留物理宽度提示。
+
+检查每个 `tile.load` / `tile.store` 操作。当最内层维度的字节数（`shape[-1] * sizeof(dtype)`）低于 `GetRecommendedInnermostDimBytes()` 时发出 diagnostic，指向源代码 span。该检查适用于**所有内存空间，包括 cube 私有空间**（issue #2309）：本检查只考察 Tile load/store 及其对应的 Buffer 操作，而它们的非 tile 一侧是 `TensorType`——始终位于片外——因此无论 tile 落在哪个空间，二者都是 GM↔片上传输，其 GM 侧总是以最内层维度的粒度穿越 L2。真正的片内搬移（`tile.move` / `tile.extract`，如 Mat→L0）才是 cube 私有的，而本检查根本不考察它们。早期版本以 L2 局部性为由跳过 `Mat`/`Left`/`Right`/`Acc` tile；由于任何片内传输都不会到达本检查，该跳过只可能压制真阳性——典型的就是 `b_trans` matmul 的 GM→Mat 权重加载，其加载窗口是调用方 `[N, K]` 切片的转置（每行 128 B，而建议值为 512 B，实测有 16–25% 的性能损失）。
 
 每条 hint 还会报告**传输规模**——`moves <total>B as <rows> x <row>B rows`——其中 `rows` 是该次传输发出的短总线事务数量。规模是同一最内层尺寸下区分 hint 轻重的依据：`[1024, 64]` 权重面板与 `[16, 64]` 激活面板在 span、op、dtype、最内层尺寸和内存空间上完全一致，只在流量上相差 64 倍。有三点需要注意：
 

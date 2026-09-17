@@ -16,6 +16,7 @@ import pytest
 from pypto import backend, ir, passes
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.pypto_core import ir as _ir
 
 
 @pytest.fixture(autouse=True)
@@ -452,6 +453,67 @@ def test_dedup_collapses_repeated_site_a3():
     # Dedup invariant: every surviving hit is at a distinct (file, line, col, op)
     # site — identical transfers were collapsed, not emitted repeatedly.
     assert len(sites) == len(set(sites)), f"hits not deduplicated per site: {sites}"
+
+
+@pytest.mark.parametrize("planner", list(passes.MemoryPlanner))
+@pytest.mark.parametrize("innermost", [32, 128])
+def test_buffer_pipeline_preserves_transfer_perf_hints(planner, innermost):
+    """PH001 survives the final representation boundary under every planner."""
+    _activate_a3()
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=True):
+        program = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
+            _make_load_program(innermost, pl.FP32)
+        )
+        hints = _run_perf_hint_check(program)
+    assert all(fn.ir_stage == ir.FunctionIRStage.Buffer for fn in program.functions.values())
+    if innermost == 128:
+        assert hints == []
+        return
+    assert len(hints) == 2
+    assert {d.message.split()[0] for d in hints} == {"buffer.load", "buffer.store"}
+    assert all(d.hint_code == "PH001" for d in hints)
+    assert all("128B" in d.message and "moves 2048B as 16 x 128B rows" in d.message for d in hints)
+
+
+@pytest.mark.parametrize("operation", ["buffer.load", "buffer.store"])
+@pytest.mark.parametrize("window", ["full", "narrow", "symbolic"])
+def test_buffer_transfer_volume_uses_explicit_window(operation, window):
+    """Physical width comes from the handle; volume follows each transfer window."""
+    _activate_a5()
+    span = ir.Span("buffer_transfer.py", 10, 2)
+    tensor = ir.Var("tensor", ir.TensorType([16, 16], pl.FP32), span)
+    handle = ir.Var(
+        "handle", ir.BufferType([16, 16], pl.FP32, ir.MemorySpace.Vec, valid_shape=[-1, -1]), span
+    )
+    dynamic = ir.Var("rows", ir.ScalarType(pl.INDEX), span)
+    rows = dynamic if window == "symbolic" else ir.ConstInt(3 if window == "narrow" else 16, pl.INDEX, span)
+    cols = ir.ConstInt(5 if window == "narrow" else 16, pl.INDEX, span)
+    valid = ir.MakeTuple([rows, cols], span)
+    offsets = ir.MakeTuple([ir.ConstInt(0, pl.INDEX, span), ir.ConstInt(0, pl.INDEX, span)], span)
+    args = (
+        [tensor, offsets, valid, handle] if operation == "buffer.load" else [handle, offsets, valid, tensor]
+    )
+    call = _ir._create_internal_op_call(operation, args, {}, span)
+    function = ir.Function(
+        "kernel",
+        [tensor, handle, dynamic],
+        [],
+        ir.EvalStmt(call, span),
+        span,
+        type=ir.FunctionType.InCore,
+        ir_stage=ir.FunctionIRStage.Buffer,
+    )
+    hints = _run_perf_hint_check(ir.Program([function], "BufferTransfer", span))
+    assert len(hints) == 1
+    hint = hints[0]
+    assert hint.hint_code == "PH001"
+    assert hint.span.to_string() == span.to_string()
+    assert hint.message.startswith(f"{operation} has innermost dim = 64B")
+    if window == "symbolic":
+        assert "moves " not in hint.message
+    else:
+        volume = "moves 60B as 3 x 20B rows" if window == "narrow" else "moves 1024B as 16 x 64B rows"
+        assert volume in hint.message
 
 
 if __name__ == "__main__":

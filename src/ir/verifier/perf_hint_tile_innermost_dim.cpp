@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/memory_space.h"
@@ -68,23 +69,12 @@ struct TileTransferInfo {
   std::optional<uint64_t> transfer_bytes;
 };
 
-/// Inspect a TileType and compute the innermost-dim transfer facts. Returns
-/// nullopt if the shape is symbolic, the dtype has unknown bit width, or the
-/// type is not a tile.
-///
-/// We use the result type for tile.load (which produces a tile) and the first
-/// argument's type for tile.store (which consumes a tile) — see VisitExpr_.
-std::optional<TileTransferInfo> InspectTile(const TypePtr& type) {
-  auto tile = std::dynamic_pointer_cast<const TileType>(type);
-  if (!tile) return std::nullopt;
-  if (tile->shape_.empty()) return std::nullopt;
-
-  // Innermost dimension must be a constant integer to compute byte size.
-  auto last = std::dynamic_pointer_cast<const ConstInt>(tile->shape_.back());
-  if (!last) return std::nullopt;
-  if (last->value_ <= 0) return std::nullopt;
-
-  size_t bits = tile->dtype_.GetBit();
+/// Shared transfer facts for logical Tiles and lowered Buffer handles.
+std::optional<TileTransferInfo> InspectTransfer(int64_t innermost, const DataType& dtype,
+                                                std::optional<MemorySpace> memory,
+                                                const std::vector<ExprPtr>& extent) {
+  if (innermost <= 0) return std::nullopt;
+  const size_t bits = dtype.GetBit();
   if (bits == 0) return std::nullopt;
 
   TileTransferInfo info;
@@ -92,18 +82,16 @@ std::optional<TileTransferInfo> InspectTile(const TypePtr& type) {
   // dtypes (int4, bool, ...) per-element rounding overestimates the row size
   // and would mask hints that should fire. Innermost-dim granularity is a
   // bus / cache concern measured in bytes.
-  info.innermost_bytes = (static_cast<uint64_t>(last->value_) * static_cast<uint64_t>(bits) + 7u) / 8u;
-  info.innermost_elems = last->value_;
-  info.dtype_name = tile->dtype_.ToString();
-  info.memory = tile->GetMemorySpace();
+  info.innermost_bytes = (static_cast<uint64_t>(innermost) * static_cast<uint64_t>(bits) + 7u) / 8u;
+  info.innermost_elems = innermost;
+  info.dtype_name = dtype.ToString();
+  info.memory = memory;
 
   // Volume comes from the effective valid shape, not the physical allocation:
   // both ops size their GM partition from valid_shape, so a padded or tail tile
   // transfers only that region. A single symbolic valid extent makes the volume
   // unknowable; the innermost facts above still stand, so the hint is emitted
   // without the volume clause rather than dropped.
-  const TileView effective = tile_view_semantics::GetEffectiveTileView(*tile);
-  const std::vector<ExprPtr>& extent = effective.valid_shape;
   if (extent.empty()) return info;
 
   uint64_t rows = 1;
@@ -131,6 +119,26 @@ std::optional<TileTransferInfo> InspectTile(const TypePtr& type) {
   return info;
 }
 
+/// Tile loads expose the descriptor on their result; stores on their source.
+std::optional<TileTransferInfo> InspectTile(const TypePtr& type) {
+  auto tile = std::dynamic_pointer_cast<const TileType>(type);
+  if (!tile || tile->shape_.empty()) return std::nullopt;
+  auto last = std::dynamic_pointer_cast<const ConstInt>(tile->shape_.back());
+  if (!last) return std::nullopt;
+  const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
+  return InspectTransfer(last->value_, tile->dtype_, tile->GetMemorySpace(), view.valid_shape);
+}
+
+/// Buffer transfer windows are explicit operands and may differ from valid_shape.
+std::optional<TileTransferInfo> InspectBuffer(const TypePtr& type, const ExprPtr& window) {
+  auto buffer = std::dynamic_pointer_cast<const BufferType>(type);
+  if (!buffer || buffer->shape_.empty()) return std::nullopt;
+  auto valid = std::dynamic_pointer_cast<const MakeTuple>(window);
+  const std::vector<ExprPtr> unknown;
+  return InspectTransfer(buffer->shape_.back(), buffer->dtype_, buffer->memory_space_,
+                         valid ? valid->elements_ : unknown);
+}
+
 class TileInnermostDimVisitor : public IRVisitor {
  public:
   TileInnermostDimVisitor(std::vector<Diagnostic>& diagnostics, uint32_t recommended_bytes,
@@ -156,11 +164,16 @@ class TileInnermostDimVisitor : public IRVisitor {
     const std::string& name = op->op_->name_;
     if (IsOp(op, "tile.load")) {
       // tile.load returns a TileType — innermost dim is on the result.
-      RecordIfBelowThreshold(name, op->GetType(), op->span_);
+      RecordIfBelowThreshold(name, InspectTile(op->GetType()), op->span_);
     } else if (IsOp(op, "tile.store")) {
       // tile.store's first arg is the source tile; innermost dim lives there.
       if (op->args_.empty() || !op->args_[0]) return;
-      RecordIfBelowThreshold(name, op->args_[0]->GetType(), op->span_);
+      RecordIfBelowThreshold(name, InspectTile(op->args_[0]->GetType()), op->span_);
+    } else if (IsOp(op, "buffer.load") || IsOp(op, "buffer.store")) {
+      if (op->args_.size() != 4) return;
+      const auto& handle = op->args_[IsOp(op, "buffer.load") ? 3 : 0];
+      if (!handle) return;
+      RecordIfBelowThreshold(name, InspectBuffer(handle->GetType(), op->args_[2]), op->span_);
     }
   }
 
@@ -201,16 +214,16 @@ class TileInnermostDimVisitor : public IRVisitor {
                              std::optional<MemorySpace>, std::optional<uint64_t>, std::optional<uint64_t>,
                              std::optional<uint64_t>>;
 
-  void RecordIfBelowThreshold(const std::string& op_name, const TypePtr& tile_type, const Span& span) {
-    auto info_opt = InspectTile(tile_type);
+  void RecordIfBelowThreshold(const std::string& op_name, const std::optional<TileTransferInfo>& info_opt,
+                              const Span& span) {
     if (!info_opt.has_value()) return;
     const TileTransferInfo& info = *info_opt;
 
     // Deliberately NOT skipped by memory space (issue #2309). An earlier
     // revision returned early for cube-private spaces (Mat/Left/Right/Acc) on
     // the grounds that they never traverse L2. That reasoning is sound for
-    // chip-internal movement, but this check inspects only `tile.load` and
-    // `tile.store`, whose non-tile side is a `TensorType` — always off-chip.
+    // chip-internal movement, but this check inspects Tile and Buffer load/store
+    // operations, whose GM side is a `TensorType` — always off-chip.
     // Both are therefore GM<->chip transfers whatever space the tile lands in,
     // and the GM side always crosses L2 at the innermost-dim granularity. The
     // genuinely cube-private moves (Mat->L0 `tile.move` / `tile.extract`) are
