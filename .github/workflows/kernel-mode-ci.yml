@@ -34,7 +34,6 @@ jobs:
           extra_args: --all-files
 
   unit-tests:
-    needs: pre-commit
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -60,11 +59,12 @@ jobs:
           python -m pip install 'torch==2.6.0' --index-url https://download.pytorch.org/whl/cpu
           CMAKE_ARGS='-DPYPTO_BUILD_TORCH_NPU=OFF' python -m pip install -v '.[dev]'
           python -c "import importlib.util; assert importlib.util.find_spec('pypto._torch_npu') is None"
-      - name: Full unit suite including optional import isolation
+      - name: Kernel regression tests including optional import isolation
         run: |
           source .claude/skills/testing/load-env.sh
           mkdir -p test-results/kernel-mode
-          python -m pytest tests/ut -n "$PYPTO_TEST_JOBS" -q --junitxml=test-results/kernel-mode/unit.xml
+          source .github/scripts/kernel-mode-cases.sh unit
+          python -m pytest "${cases[@]}" -n "$PYPTO_TEST_JOBS" -q --junitxml=test-results/kernel-mode/unit.xml
       - name: Unit test report
         if: always()
         run: python .github/scripts/kernel_ci_results.py --allow-skips test-results/kernel-mode/unit.xml >> "$GITHUB_STEP_SUMMARY"
@@ -106,7 +106,7 @@ jobs:
             max-time: 1800
           - suite: capture
             max-time: 2400
-    needs: [pre-commit, unit-tests, toolchain]
+    needs: toolchain
     # Verified online ARM64 pool; Torch 2.6's ARM64 wheel uses the required
     # C++11 ABI. Record the actual chip, rather than treating this as A2 AND A3.
     runs-on: [self-hosted, linux, ARM64, npu-xp]

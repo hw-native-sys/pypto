@@ -21,7 +21,6 @@ from pathlib import Path
 
 import pytest
 
-SAMPLES = 1024
 BATCH = 16
 
 
@@ -35,13 +34,13 @@ def _summary(samples):
     }
 
 
-def _measure(call, state, native, counts):
+def _measure(call, state, native, counts, sample_count):
     """Bound pending work between timing batches; exclude warmup and drain time."""
     state.drain()
     native._test_reset_counters()
     before = counts.copy()
     samples = []
-    for index in range(SAMPLES):
+    for index in range(sample_count):
         start = time.perf_counter_ns()
         call()
         samples.append(time.perf_counter_ns() - start)
@@ -54,7 +53,7 @@ def _measure(call, state, native, counts):
     )
 
 
-def _backlog(call, background, stream, state, native):
+def _backlog(call, background, stream, state, native, sample_count):
     """Hold the host queue so another stream has exactly N initial pending tickets."""
     import _torch_npu_test  # noqa: PLC0415
     import torch_npu  # noqa: PLC0415
@@ -66,7 +65,7 @@ def _backlog(call, background, stream, state, native):
     for pending in (0, 16, 256):
         samples = []
         polls = 0
-        for _ in range(SAMPLES // BATCH):
+        for _ in range(sample_count // BATCH):
             state.drain()
             gate = _torch_npu_test.block_queue()
             try:
@@ -96,7 +95,7 @@ def _backlog(call, background, stream, state, native):
     return result
 
 
-def _threaded(call, streams, device, state):
+def _threaded(call, streams, device, state, sample_count):
     """Measure producer batches with the completion boundary Simpler requires."""
     import torch_npu  # noqa: PLC0415
 
@@ -111,7 +110,7 @@ def _threaded(call, streams, device, state):
             torch_npu.npu.set_device(device)
             with torch_npu.npu.stream(streams[index]):
                 barrier.wait(timeout=30)
-                for _ in range(SAMPLES // BATCH):
+                for _ in range(sample_count // BATCH):
                     with handoff:
                         for _ in range(BATCH):
                             call(index)
@@ -129,16 +128,16 @@ def _threaded(call, streams, device, state):
         state.drain()
         end = time.perf_counter_ns()
         result[str(workers)] = {
-            "calls": workers * SAMPLES,
+            "calls": workers * sample_count,
             "batch_size": BATCH,
             "stream_handoff": "serialized_batch_and_drain",
-            "producer_calls_per_second": workers * SAMPLES * 1e9 / (host_end - start),
-            "completed_calls_per_second": workers * SAMPLES * 1e9 / (end - start),
+            "producer_calls_per_second": workers * sample_count * 1e9 / (host_end - start),
+            "completed_calls_per_second": workers * sample_count * 1e9 / (end - start),
         }
     return result
 
 
-def _run(device, directory, queue_enabled):
+def _run(device, directory, queue_enabled, sample_count):
     """Run all measurements in one isolated process and write JSON for JUnit."""
     import importlib  # noqa: PLC0415
     import platform  # noqa: PLC0415
@@ -173,6 +172,7 @@ def _run(device, directory, queue_enabled):
             "machine": platform.machine(),
             "queue_enabled": queue_enabled,
             "adapter_test_counters": True,
+            "sample_count": sample_count,
         }
     }
 
@@ -223,18 +223,18 @@ def _run(device, directory, queue_enabled):
                                 "identity",
                                 lambda self: _kernel_artifact.callable_identity(self.load(), self.kernel_abi),
                             )
-                        measured = _measure(call, state, native, counts)
-                    assert measured["descriptor"] == (SAMPLES if variant == "uncached_control" else 0)
-                    assert measured["describe"] == measured["cache_key"] == SAMPLES
-                    assert measured["registration_validate"] == (SAMPLES if name == "torch_ops" else 0)
+                        measured = _measure(call, state, native, counts, sample_count)
+                    assert measured["descriptor"] == (sample_count if variant == "uncached_control" else 0)
+                    assert measured["describe"] == measured["cache_key"] == sample_count
+                    assert measured["registration_validate"] == (sample_count if name == "torch_ops" else 0)
                     assert measured["device_sync"] == 0
                     results[name][variant] = measured
                     Path(directory, "hot-path.json").write_text(json.dumps(results, indent=2) + "\n")
                 if queue_enabled:
                     results[name]["blocked_queue_backlog"] = _backlog(
-                        call, lambda: call(1), streams[1], state, native
+                        call, lambda: call(1), streams[1], state, native, sample_count
                     )
-                results[name]["producers"] = _threaded(call, streams, device, state)
+                results[name]["producers"] = _threaded(call, streams, device, state, sample_count)
             # Count the current per-ticket graph cleanup without changing its safety contract.
             graph = torch_npu.npu.NPUGraph()
             before = counts["descriptor"]
@@ -257,7 +257,7 @@ def _run(device, directory, queue_enabled):
 
 
 @pytest.mark.parametrize("queue_enabled", [0, 1])
-def test_kernel_hot_path(test_config, tmp_path, queue_enabled, record_property):
+def test_kernel_hot_path(test_config, tmp_path, queue_enabled, record_property, request):
     """Persist timings/counters as JUnit properties without hardware speed thresholds."""
     if test_config.codegen_only or test_config.platform != "a2a3":
         pytest.skip("Requires an A2/A3 NPU and the optional torch adapter")
@@ -267,10 +267,11 @@ def test_kernel_hot_path(test_config, tmp_path, queue_enabled, record_property):
             sys.executable,
             "-c",
             "from tests.st.runtime.kernel.test_hot_path import _run; "
-            "import sys; _run(int(sys.argv[1]), sys.argv[2], int(sys.argv[3]))",
+            "import sys; _run(int(sys.argv[1]), sys.argv[2], int(sys.argv[3]), int(sys.argv[4]))",
             str(test_config.device_id),
             str(tmp_path),
             str(queue_enabled),
+            str(request.config.getoption("kernel_perf_samples")),
         ],
         env=dict(os.environ, TASK_QUEUE_ENABLE=str(queue_enabled)),
         capture_output=True,

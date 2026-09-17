@@ -110,7 +110,7 @@ descriptor build is not cached. Capture uses `loaded_identity()`, which never
 loads or compiles an artifact. Process registrations still belong to their Worker
 generation; only immutable binary identity is cached.
 
-`tests/st/runtime/kernel/test_hot_path.py` records 1,024 host-return samples per
+`tests/st/runtime/kernel/test_hot_path.py` defaults to 64 host-return samples per
 entry/variant for direct JIT and registered `torch.ops`, with taskQueue off and
 on. It writes p50/p99 in microseconds, validation/cache-key/descriptor counts,
 and one-versus-two-producer throughput into JUnit properties. An uncached control
@@ -118,7 +118,10 @@ restores per-call descriptor hashing on the same build to isolate that cost.
 Warmup and batch drains are outside the latency samples. Producer throughput uses
 16-call batches with a serialized handoff and drain, included in elapsed time;
 it does not measure unrestricted concurrent streams. Timings are evidence, not
-CI pass thresholds.
+CI pass thresholds. The small default checks counters and correctness; its tail
+latencies are not a performance acceptance result. For the full measurement,
+pass `--kernel-perf-samples=1024` to pytest. Keeping the same 16-call batch size
+preserves the backlog counter contract while reducing repeated work in PR CI.
 
 The pinned Simpler runtime rejects changing caller streams while the previous
 caller's serial tail is incomplete (`PTO_RUNTIME_ERR_PREPARED_INCOMPATIBLE`,
@@ -616,9 +619,15 @@ or queue-blocking entry is shipped in the production adapter.
 
 Pull requests targeting `feat/kernel-mode-integration-test` run the
 `Kernel Mode CI` workflow. Its required stages are pre-commit (without
-clang-tidy), the full CPU unit suite with the native adapter disabled, pinned
+clang-tidy), focused kernel CPU regressions with the native adapter disabled, pinned
 toolchain resolution, and a native adapter build plus targeted device tests.
-The CPU suite includes the optional-import guard from PR #2785 (09A).
+The CPU suite includes JIT routing, ABI/compiler/artifact contracts, Worker and
+shutdown state, torch interop/registration/launch/capture, JUnit evidence checks,
+and the optional-import guard from PR #2785 (09A). The explicit selections live
+in `.github/scripts/kernel-mode-cases.sh`; this PR workflow does not run the
+repository-wide unit or device matrices. Those tests remain available to run
+manually. CPU tests and pre-commit start independently; device jobs depend only
+on toolchain resolution. The final result still requires every job to pass.
 
 Each device job uses the verified `[self-hosted, linux, ARM64, npu-xp]` pool,
 the existing `setup-ci-job` bundle environment, and `task-submit` with the
@@ -646,12 +655,18 @@ Each job owns its checkout, environment, build, device allocation, report check,
 and task cleanup. `fail-fast: false` lets the other job finish after one fails.
 Their artifacts are `kernel-device-eager-results` and
 `kernel-device-capture-results`; each contains only that suite's evidence.
-Both JIT and registered entries, taskQueue settings, cold-call rejection, and the
-`aot_eager` graph path are included.
-The delayed host-queue test with taskQueue disabled is explicitly deselected
-because it has no blocked callback to test; every selected device case must
-pass without skips. Pytest runs serially on the allocated card; its cases
-create isolated processes as needed.
+The PR selection contains 10 eager cases and 6 capture cases:
+
+- Eager: direct JIT in both queue modes, explicit program regression, registered
+  `aot_eager`, submission failure in both queue modes, a delayed host callback,
+  normal process shutdown, and the two small hot-path counter runs.
+- Capture: cold-call rejection, queue-off direct JIT replay, registered storage
+  ownership and shutdown, a mixed-entry multi-operator graph, and `aot_eager`
+  capture. This samples key contracts without their full Cartesian matrix.
+
+Every selected device case must pass without skips. Explicit pytest node IDs
+make missing or renamed cases fail collection. Pytest runs serially on the
+allocated card; its cases create isolated processes as needed.
 
 Artifacts retain JUnit reports, the actual chip name/device id, source and SDK
 revisions, Python/Torch/torch_npu/nanobind versions, `npu-smi` output, and CANN
@@ -680,7 +695,7 @@ negative tests ensure an attempted import cannot silently pass on a CPU runner
 where the dependency is already absent.
 
 These checks cover package import/reload, program configuration and registered
-Fake/Meta dispatch. They run in the existing full unit-test CI job without
+Fake/Meta dispatch. They run in the focused kernel unit-test CI job without
 optional runtime dependencies or a new device job. They do not validate native
 adapter builds or device execution; those require the integration branch.
 

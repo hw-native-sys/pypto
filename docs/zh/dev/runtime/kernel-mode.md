@@ -87,12 +87,14 @@ capture 使用 `loaded_identity()`，绝不加载或编译产物。进程内注�
 代次（generation）；缓存的只是不可变二进制的身份。
 
 `tests/st/runtime/kernel/test_hot_path.py` 在 taskQueue 开关两种配置下，为直接 JIT 与
-注册后的 `torch.ops` 各入口、各变体记录 1,024 次 Host 返回耗时。JUnit 属性包含
+注册后的 `torch.ops` 各入口、各变体默认记录 64 次 Host 返回耗时。JUnit 属性包含
 微秒单位的 p50/p99、参数校验/cache key/描述符计数，以及单/双生产线程吞吐。
 未缓存对照（uncached control）在同一构建中恢复逐次描述符哈希，以隔离该项成本。
 warmup 与批次 drain 不计入延迟样本。生产线程吞吐使用 16 次调用的批次，
 串行切换 stream 并 drain，包含该交接耗时；不代表无约束的多 stream 并发吞吐。
-耗时作为测量证据，不设 CI 通过阈值。
+耗时作为测量证据，不设 CI 通过阈值。小样本默认仅检查计数与正确性，尾延迟不作为性能验收结果。
+完整测量通过 pytest 参数 `--kernel-perf-samples=1024` 启用。保持每批 16 次调用，
+保留 backlog 计数契约，同时减少 PR CI 中的重复工作。
 
 当前固定版本的 Simpler 在前一 caller stream 的 serial tail 未完成时拒绝切换 stream，
 返回 `PTO_RUNTIME_ERR_PREPARED_INCOMPATIBLE`（`-1002`）。应用须在切换 caller stream 前
@@ -400,9 +402,13 @@ torch_npu 2.6.0.post2 上首次有效 capture 包装 `NPUGraph.capture_end`、`r
 ### 集成分支 CI
 
 目标为 `feat/kernel-mode-integration-test` 的 PR 会运行 `Kernel Mode CI`。
-必验阶段包括 pre-commit（不含 clang-tidy）、关闭 native adapter 的完整 CPU UT、
+必验阶段包括 pre-commit（不含 clang-tidy）、关闭 native adapter 的 kernel 定向 CPU 回归、
 固定工具链解析，以及 native adapter 构建和定向设备测试。
-CPU UT 包含 PR #2785（09A）的可选依赖导入隔离检查。
+CPU UT 覆盖 JIT 路由、ABI/编译器/产物契约、Worker 与 shutdown 状态、torch
+互操作/注册/launch/capture、JUnit 证据校验，以及 PR #2785（09A）的可选依赖导入隔离。
+显式用例清单位于 `.github/scripts/kernel-mode-cases.sh`；该 PR workflow 不运行仓库全量
+UT 或设备矩阵，完整测试仍可手动运行。CPU 测试与 pre-commit 独立启动，设备 job
+只等待工具链解析；最终结果仍要求每个 job 全部通过。
 
 每个设备任务使用已核实的 `[self-hosted, linux, ARM64, npu-xp]` runner 池、现有
 `setup-ci-job` bundle 环境，以及通过 runner 的 `DEVICE_ID` 分配设备的 `task-submit`。
@@ -423,10 +429,15 @@ eager、stream、生命周期及 program 回归，和 warmup 后的 capture/repl
 runner 和设备资源允许时可并行执行；每个 job 独立检出、配置环境、构建、分配设备、
 检查报告并清理自身任务。`fail-fast: false` 保证一组失败后另一组仍可完成。
 制品分别命名为 `kernel-device-eager-results` 和 `kernel-device-capture-results`，
-各自只保存对应测试组的证据。覆盖直接 JIT、注册入口、taskQueue 设置、冷调用拒绝及
-`aot_eager` 图执行。关闭 taskQueue 时的 delayed host-queue 用例显式取消选择，因为该组合没有
-可阻塞的回调；所有已选择的设备用例均须通过，不能跳过。Pytest 在分配的卡上串行运行，
-用例按需创建隔离进程。
+各自只保存对应测试组的证据。PR 选择 10 个 eager 用例和 6 个 capture 用例：
+
+- Eager：两种队列模式的直接 JIT、显式 program 回归、注册入口 `aot_eager`、
+  两种队列模式的提交失败、延迟 Host callback、正常进程退出，以及两个小样本热路径计数用例。
+- Capture：冷调用拒绝、关闭队列的直接 JIT replay、注册入口 storage 保活与退出、
+  混合入口多算子图，以及 `aot_eager` capture。选择关键契约，不展开完整笛卡尔积矩阵。
+
+所有已选择的设备用例均须通过，不能跳过。显式 pytest node ID 保证用例缺失或改名时
+收集失败。Pytest 在分配的卡上串行运行，用例按需创建隔离进程。
 
 制品保留 JUnit、实际芯片名称和 device id、源码及 SDK revision、
 Python/Torch/torch_npu/nanobind 版本、`npu-smi` 输出，以及安装环境提供的 CANN
@@ -450,7 +461,7 @@ PyPTO 自身行为与已安装的框架插件。查找器的负向测试确保 C
 这些依赖，也不会把导入尝试误报为通过。
 
 这些检查覆盖包导入/重载、program 配置和注册后的 Fake/Meta dispatch，直接进入现有
-全量 UT CI，无需可选 runtime 依赖或新增设备 job。它们不验证 native adapter 构建或
+kernel 定向 UT CI，无需可选 runtime 依赖或新增设备 job。它们不验证 native adapter 构建或
 设备执行；这些验证仍属于集成分支。
 
 `tests/ut/torch/test_interop.py` 使用真实 CPU storage 和模拟的 NPU device 标签，
