@@ -999,6 +999,7 @@ def test_canonical_split_k_grid_declares_the_dbc_ping_pong(M, N, K_total, K_tile
 
     with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
         after = passes.auto_tile_matmul_l0()(Before)
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
     printed = ir.python_print(after)
 
     assert printed.count("pl.tile.store(") == tiles, printed
@@ -1009,6 +1010,16 @@ def test_canonical_split_k_grid_declares_the_dbc_ping_pong(M, N, K_total, K_tile
     assert runs == slots, f"one accumulator per tile, so no two adjacent stamps merge: {slots}"
     assert all(a != b for a, b in zip(runs, runs[1:])), f"consecutive tiles must alternate: {slots}"
     assert "slots=2" in printed, f"PTOAS must receive a concrete two-slot allocation:\n{printed}"
+
+    # Printed IR used to pass while PTO codegen rejected the constant slotted
+    # accumulator carried by each cloned K-loop. Exercise the complete in-tree
+    # lowering boundary for both the canonical 6- and 9-tile grids.
+    from pypto.pypto_core import codegen  # noqa: PLC0415
+
+    func = next(func for func in optimized.functions.values() if func.name == "kernel")
+    pto = codegen.PTOCodegen().generate(ir.Program([func], func.name, optimized.span), emit_tile_addr=False)
+    assert pto.count("pto.alloc_multi_tile") >= 1, pto
+    assert pto.count("pto.multi_tile_get") >= 2, pto
 
 
 def test_canonical_split_k_grid_allocates_two_l0c_slots():

@@ -147,7 +147,11 @@ tile 上，彼此串行依赖，因此只有 M/N 切分才能提供第二个 pin
   输出 tile 都能 ping-pong。PyPTO 与 DSA-RP 直接消费该关系；PTOAS 不消费它，
   因此同一路径还把 accumulator seed（带 bias 的归约没有 seed 时则为第一个
   cube 结果）绑定到一个显式固定的 `MemRef(slots=2)`，并选择 slot
-  `tile 序号 % 2`。
+  `tile 序号 % 2`。PTOAS multi-buffer 的 slot 共用一种统一的物理类型。
+  对非均匀的边界网格，codegen 按能覆盖所有 tile 的完整 tile 定义该类型，
+  并把较小的边界使用发射为零偏移 `pto.subview`；因此边界 tile 仍是合法的
+  dbC stage，不会被从 chooser 的设计空间中删除。每个选中的常量 slot 都在其
+  K-loop 之前实例化，循环携带值复用该 handle。
 
 调用方显式传入实际发射路径。普通 chooser 驱动的切分对 `k == K` 传入
 pipelined-inner，对 `k < K` 传入 unrolled-grid。重新切分用户手写
