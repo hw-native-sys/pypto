@@ -152,9 +152,8 @@ jobs:
           curl --fail --location --retry 3 --connect-timeout 15 --max-time 120 \
             "${torch_npu_release}/${torch_npu_wheel}" -o "$wheel_dir/$torch_npu_wheel"
           printf '%s  %s\n' "$torch_npu_sha" "$wheel_dir/$torch_npu_wheel" | sha256sum --check --strict
-          # This wheel imports yaml but does not declare PyYAML in its metadata.
-          uv pip install "$wheel_dir/$torch_npu_wheel" 'PyYAML==6.0.3'
-          python -c 'import torch_npu'
+          uv pip install "$wheel_dir/$torch_npu_wheel" -r .github/requirements/kernel-mode.txt
+          python -c 'import torch_npu; import tbe'
           # setup-ci-job uses build/ for scikit-build's wheel cache. Its cached
           # SKBUILD_PROJECT_NAME would keep extensions out of the source tree.
           cmake -S . -B build/kernel-native -DCMAKE_BUILD_TYPE=RelWithDebInfo \

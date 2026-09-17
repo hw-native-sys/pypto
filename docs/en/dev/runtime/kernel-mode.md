@@ -512,8 +512,10 @@ isolated environment, requires C++11 ABI, and builds both the adapter and the
 test-only queue gate from the checked-out source. The torch_npu 2.6.0.post2
 CPython 3.10 / ARM64 wheel is installed from Ascend's official
 `v7.1.0.2-pytorch2.6.0` release with a pinned SHA256; that version is not on PyPI.
-The job explicitly installs PyYAML, an undeclared wheel dependency, and checks
-that torch_npu imports successfully before building the adapter.
+The job installs the pinned dependencies in `.github/requirements/kernel-mode.txt`:
+CANN 9 TBE's base dependencies and PyYAML, an undeclared torch_npu wheel dependency.
+It checks torch_npu and TBE imports before building the adapter; sourcing CANN's
+environment alone does not install its Python dependencies into the job venv.
 The native build uses `build/kernel-native`, separate from the shared setup's
 scikit-build wheel cache in `build/`. It verifies that the source-tree core,
 adapter, and test gate can import before allocating a device.
