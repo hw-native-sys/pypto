@@ -2761,6 +2761,64 @@ def test_pto_codegen_reshaped_row_slice_under_if_keeps_its_row_offset():
     assert page_addrs[0] != page_addrs[1], f"Both pages read the same address {page_addrs[0]}"
 
 
+def test_pto_codegen_reshaped_row_slice_in_spmd_body_gets_constant_row_address():
+    """A reshaped row slice at a constant row inside ``pl.spmd`` compiles at that row's address.
+
+    Simplify does not substitute ``r0 = page * 32`` inside the ``pl.spmd`` body, so the
+    view offset is ``r0 * 4`` when addresses are assigned. After outlining, the final
+    Simplify substitutes ``r0`` into the statements and deletes its binding. A symbolic
+    address left naming ``r0`` fails codegen ("cannot materialize symbol"), and one
+    collapsed to the base makes page 1 read page 0's rows; the address must be folded
+    to ``base + 32 * 4``.
+    """
+
+    @pl.program
+    class SpmdColumnSlice:
+        @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+        def paged(
+            self,
+            x: pl.Tensor[[128, 64], pl.FP32],
+            scale: pl.Tensor[[4, 32], pl.FP32],
+            output: pl.Out[pl.Tensor[[4, 32], pl.FP32]],
+        ) -> pl.Tensor[[4, 32], pl.FP32]:
+            for blk in pl.spmd(2, name_hint="paged_spmd"):
+                col = pl.row_sum(pl.slice(x, [64, 64], [blk * 64, 0]))
+                for page in pl.unroll(2):
+                    r0 = page * 32
+                    dst = blk * 2 + page
+                    part = pl.reshape(col[r0 : r0 + 32, :], [1, 32])
+                    output[dst : dst + 1, 0:32] = pl.mul(part, scale[dst : dst + 1, 0:32])
+            return output
+
+    lowered = _run_default_passes(SpmdColumnSlice)
+    kernels = [func for func in lowered.functions.values() if ir.is_incore_type(func.func_type)]
+    assert len(kernels) == 1, f"Expected one outlined kernel, got: {[func.name for func in kernels]}"
+    kernel = kernels[0]
+
+    reshape_addrs: list[int] = []
+    root_addr: list[int] = []
+
+    class _Collector(ir.IRVisitor):
+        def visit_assign_stmt(self, stmt):  # type: ignore[override]
+            memref = stmt.var.type.memref if isinstance(stmt.var.type, ir.TileType) else None
+            if memref is not None and isinstance(stmt.value, ir.Call):
+                address = memref.byte_offset_
+                if stmt.value.op.name == ir.get_op("tile.reshape").name:
+                    assert isinstance(address, ir.ConstInt), f"Symbolic reshape address: {address}"
+                    reshape_addrs.append(address.value)
+                elif stmt.value.op.name == ir.get_op("tile.row_sum").name:
+                    assert isinstance(address, ir.ConstInt)
+                    root_addr.append(address.value)
+            super().visit_assign_stmt(stmt)
+
+    _Collector().visit_stmt(kernel.body)
+    assert len(root_addr) == 1, f"Expected one row_sum column, got {root_addr}"
+    assert reshape_addrs == [root_addr[0], root_addr[0] + 32 * 4]
+
+    mlir_code = _generate_mlir(ir.Program([kernel], kernel.name, lowered.span))
+    assert "pto.tmul" in mlir_code
+
+
 def test_pto_codegen_if_stmt_only_returns_scalars_for_tile_phi():
     """IfStmt should materialize tile phi values via branch-local copies, not scf.if results."""
 

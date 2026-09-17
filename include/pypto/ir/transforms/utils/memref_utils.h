@@ -23,6 +23,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -225,29 +226,37 @@ inline MemRefPtr GetDefinedMemRef(const std::shared_ptr<const TileType>& tile_ty
   return *tile_type->memref_;
 }
 
+/// Each MemRef's offset relative to its buffer, as address assignment reads it.
+///
+/// Keyed by MemRef pointer. An entry is the MemRef's `byte_offset_`, with scalar
+/// constants folded in where AllocateMemoryAddr can prove them (see
+/// `FoldRelativeMemRefOffsets` there).
+using RelativeMemRefOffsets = std::unordered_map<const MemRef*, ExprPtr>;
+
 /// The absolute address of @p memref once its buffer has been placed at @p buffer_base.
 ///
-/// A MemRef's offset is relative to its buffer until address assignment, so the
-/// address is `buffer_base + byte_offset_`. A constant offset folds into one INT64
-/// `ConstInt` — the dtype the `pto.alloc_tile` addr operand takes. A symbolic offset
-/// stays an expression, which codegen lowers into the tile's runtime address
-/// assignment. Two sources produce one:
+/// The address is `buffer_base + relative`, where `relative` is @p memref's entry in
+/// @p relative_offsets. A constant folds into one INT64 `ConstInt` — the dtype the
+/// `pto.alloc_tile` addr operand takes. A still-symbolic offset stays an expression,
+/// which codegen lowers into the tile's runtime address assignment: a declared
+/// allocation's runtime slot index (`l0c[i % 2]`), or a slice at a runtime row.
 ///
-///  * a declared allocation's runtime slot index (`l0c[i % 2]`);
-///  * a view whose slice offset is a scalar Var — Simplify substitutes constants only
-///    at function-body top level, so `r0 = 32` inside an `if` or loop body stays `r0`.
-///
-/// The expression must survive for views too. A `tile.slice` re-derives its offset
-/// through `pto.subview`, but a view of that view — a `tile.reshape`, which emits no
-/// op of its own — is addressed only by its `pto.alloc_tile addr`, so dropping the
-/// offset silently aliases it onto the buffer's first bytes.
-inline ExprPtr MakeAbsoluteMemRefAddress(uint64_t buffer_base, const MemRefPtr& memref) {
+/// The offset must never be dropped. A `tile.slice` re-derives it through
+/// `pto.subview`, but a view of that view — a `tile.reshape`, which emits no op of its
+/// own — is addressed only by its `pto.alloc_tile addr`, so dropping the offset
+/// silently aliases it onto the buffer's first bytes.
+inline ExprPtr MakeAbsoluteMemRefAddress(uint64_t buffer_base, const MemRefPtr& memref,
+                                         const RelativeMemRefOffsets& relative_offsets) {
   INTERNAL_CHECK(memref != nullptr) << "Internal error: null MemRef passed to MakeAbsoluteMemRefAddress";
   INTERNAL_CHECK_SPAN(buffer_base <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
                       memref->span_)
       << "Internal error: buffer base " << buffer_base << " of MemRef '" << memref->name_hint_
       << "' exceeds PyPTO's signed INT64 address representation";
-  if (auto relative = As<ConstInt>(memref->byte_offset_)) {
+  const auto entry = relative_offsets.find(memref.get());
+  INTERNAL_CHECK_SPAN(entry != relative_offsets.end() && entry->second != nullptr, memref->span_)
+      << "Internal error: MemRef '" << memref->name_hint_ << "' reached address assignment with no offset";
+  const ExprPtr& relative_offset = entry->second;
+  if (auto relative = As<ConstInt>(relative_offset)) {
     INTERNAL_CHECK_SPAN(relative->value_ >= 0, memref->span_)
         << "Internal error: MemRef '" << memref->name_hint_ << "' has a negative relative offset "
         << relative->value_;
@@ -259,10 +268,8 @@ inline ExprPtr MakeAbsoluteMemRefAddress(uint64_t buffer_base, const MemRefPtr& 
     return std::make_shared<ConstInt>(static_cast<int64_t>(buffer_base) + relative->value_, DataType::INT64,
                                       Span::unknown());
   }
-  INTERNAL_CHECK_SPAN(memref->byte_offset_ != nullptr, memref->span_)
-      << "Internal error: MemRef '" << memref->name_hint_ << "' reached address assignment with no offset";
   auto base = std::make_shared<ConstInt>(static_cast<int64_t>(buffer_base), DataType::INDEX, Span::unknown());
-  return std::make_shared<Add>(base, memref->byte_offset_, DataType::INDEX, Span::unknown());
+  return std::make_shared<Add>(base, relative_offset, DataType::INDEX, Span::unknown());
 }
 
 /// How two MemRefs' start addresses relate.

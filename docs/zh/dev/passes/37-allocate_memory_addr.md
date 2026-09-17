@@ -125,7 +125,7 @@ Canonical greedy 尝试偏移 `0`、预留范围末尾，以及已放置硬/软�
 
 共享同一 `base_` Ptr 的 MemRef（根分配加上其 `tile.slice` 视图）会被放入同一个 slot，slot 大小取最大成员的大小，因为每个视图在物理上都是父分配的别名。每个成员保留其在 slot 内的相对偏移：`new_addr = slot_base + member.byte_offset`（即 InitMemRef 计算出的相对偏移）。根位于 `slot_base`；第 `k` 行的视图位于 `slot_base + k * row_stride`。这对于那些视图偏移不会在 codegen 阶段重新推导的链尤为重要——例如对 `tile.slice` 做 `tile.reshape` 不会发出 `pto.subview`，其 `pto.alloc_tile addr` 直接从该 MemRef 偏移读取。
 
-符号（symbolic）相对偏移会被保留而不是丢弃：地址成为表达式 `slot_base + member.byte_offset`，codegen 将其降级为 tile 的运行时地址赋值。当视图的切片偏移是一个标量 Var 时会出现这种偏移——运行时行号，或在 `if` / 循环体内绑定的常量（Simplify 不会在嵌套作用域中替换它）——声明分配的运行时 slot 索引同样如此。若将其折叠为 `slot_base`，对该切片做 reshape 就会读到父分配的前几行。两种规划器（`PYPTO` 与 `DSA_RP`）都通过 `MakeAbsoluteMemRefAddress` 构造该地址。
+符号（symbolic）相对偏移绝不会被丢弃。当视图的切片偏移是一个标量 Var 时会出现这种偏移——在 `if`、循环或 `pl.spmd` 体内绑定的常量（Simplify 不会在嵌套作用域中替换它），或真正的运行时行号——声明分配的运行时 slot 索引同样如此。若将其折叠为 `slot_base`，对该切片做 reshape 就会读到父分配的前几行。本 pass 先把所有仅被赋值一次且值为常量的标量 Var 代入偏移，使常量行号得到常量地址；这一步是必需的，因为之后的最终 Simplify 会把该常量代入语句并删除其绑定，却不会重写 MemRef 偏移。仍引用运行时值的偏移则成为表达式 `slot_base + member.byte_offset`，由 codegen 降级为 tile 的运行时地址赋值。两种规划器（`PYPTO` 与 `DSA_RP`）都通过 `MakeAbsoluteMemRefAddress` 构造该地址。
 
 后端可以通过 `Backend::CreateMemoryAllocatorPolicy()` 提供自定义 `MemoryAllocatorPolicy` 来覆盖上述默认行为。详见下方[分配策略](#分配策略)章节。
 

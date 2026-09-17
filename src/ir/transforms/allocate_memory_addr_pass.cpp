@@ -28,6 +28,7 @@
 #include "pypto/core/any_cast.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -56,6 +57,7 @@
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/reserve_buffer_utils.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 
@@ -312,6 +314,56 @@ class PinnedAllocCollector : public IRVisitor {
   }
 };
 
+/// Scalar Vars assigned exactly once, and to a constant, anywhere in a body.
+///
+/// Simplify substitutes such a constant only at function-body top level, so one bound
+/// inside an `if`, loop, or `pl.spmd` body is still a Var when InitMemRef builds a
+/// view's offset from it (`r0 * 4`).
+class ConstantScalarCollector : public IRVisitor {
+ public:
+  std::unordered_map<const Var*, ExprPtr> constants;
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    const Var* var = op->var_.get();
+    if (++assignment_counts_[var] > 1) {
+      constants.erase(var);  // not single-assignment: no one value to fold
+    } else if (As<ScalarType>(op->var_->GetType()) && As<ConstInt>(op->value_)) {
+      constants.emplace(var, op->value_);
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  std::unordered_map<const Var*, size_t> assignment_counts_;
+};
+
+/// Every MemRef's offset relative to its buffer, with the body's scalar constants folded in.
+///
+/// Folding is required, not an optimization. A symbolic address names SSA Vars, and no
+/// later pass remaps a MemRef's offset: once a `pl.spmd` body is outlined into its own
+/// kernel, the final Simplify sees `r0 = 0` at top level, substitutes it into the
+/// statements, and deletes the binding — leaving `base + r0 * 4` naming a Var nothing
+/// defines, which PTO codegen cannot materialize. A folded constant address has no such
+/// dependency. An offset that still names a runtime value (a loop variable, a scalar
+/// parameter) stays symbolic.
+RelativeMemRefOffsets FoldRelativeMemRefOffsets(const std::vector<MemRefWithSpace>& memrefs,
+                                                const StmtPtr& body) {
+  ConstantScalarCollector collector;
+  collector.VisitStmt(body);
+  arith::Analyzer analyzer;
+  RelativeMemRefOffsets relative_offsets;
+  for (const auto& [memref, memory_space] : memrefs) {
+    static_cast<void>(memory_space);
+    ExprPtr offset = memref->byte_offset_;
+    if (offset && !As<ConstInt>(offset) && !collector.constants.empty()) {
+      offset = transform_utils::Substitute(offset, collector.constants);
+      if (auto folded = As<ConstInt>(analyzer.Simplify(offset))) offset = folded;
+    }
+    relative_offsets.emplace(memref.get(), std::move(offset));
+  }
+  return relative_offsets;
+}
+
 /**
  * @brief Allocate memory addresses using the given allocation policy
  *
@@ -324,11 +376,14 @@ class PinnedAllocCollector : public IRVisitor {
  * ``pinned_alloc_sizes`` maps each author-declared allocation's base to the bytes
  * its alloc statement reserves. Those are the only bases whose buffer can be
  * larger than their largest member (a multi-slot declaration).
+ *
+ * ``relative_offsets`` holds each MemRef's offset within its buffer; see
+ * FoldRelativeMemRefOffsets.
  */
 std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
     const std::vector<MemRefWithSpace>& memrefs, const ReserveBufferResolution& reserve_resolution,
     const MemoryAllocatorPolicy& policy, const std::map<const Var*, uint64_t>& pinned_alloc_sizes,
-    const std::string& func_name) {
+    const RelativeMemRefOffsets& relative_offsets, const std::string& func_name) {
   const ReservedEndBySpace& reserved_end_by_space = reserve_resolution.reserved_end_by_space;
   // Group MemRefs by memory space
   std::unordered_map<MemorySpace, std::vector<MemRefPtr>> space_to_memrefs;
@@ -402,15 +457,15 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
       // derives the offset from the slice op's own operands off the root base.
       //
       // The offset is kept even when it is symbolic, for every base — see
-      // MakeAbsoluteMemRefAddress for the two ways one arises.
+      // MakeAbsoluteMemRefAddress.
       for (const auto& old_memref : group) {
         // NOTE: MemRef is identity-bearing — each result must get a fresh
         // unique_id_, so build it via the explicit constructor (MutableCopy is
         // static_assert-forbidden for Var/MemRef).
         auto new_memref = std::make_shared<MemRef>(
-            old_memref->name_hint_, old_memref->base_, MakeAbsoluteMemRefAddress(base_addr, old_memref),
-            old_memref->size_, old_memref->span_, old_memref->is_pinned_, old_memref->slot_count_,
-            old_memref->slot_index_);
+            old_memref->name_hint_, old_memref->base_,
+            MakeAbsoluteMemRefAddress(base_addr, old_memref, relative_offsets), old_memref->size_,
+            old_memref->span_, old_memref->is_pinned_, old_memref->slot_count_, old_memref->slot_index_);
         memref_pairs.emplace_back(old_memref.get(), new_memref);
       }
     }
@@ -461,7 +516,8 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
 
 std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithDsaRP(
     const FunctionPtr& func, const MemoryAllocatorPolicy& policy,
-    const ReservedEndBySpace& reserved_end_by_space, const std::vector<MemRefWithSpace>& memrefs) {
+    const ReservedEndBySpace& reserved_end_by_space, const std::vector<MemRefWithSpace>& memrefs,
+    const RelativeMemRefOffsets& relative_offsets) {
   const dsa_adapter::AllocationPlan allocation_plan = dsa_adapter::BuildDsaAllocationPlan(func);
   if (allocation_plan.intervals.empty()) return {};
 
@@ -519,7 +575,7 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithDsaRP(
                     "AllocateMemoryAddr");
   }
 
-  return dsa_adapter::BuildMemRefReplacements(prepared, *result.solution, memrefs, policy);
+  return dsa_adapter::BuildMemRefReplacements(prepared, *result.solution, memrefs, policy, relative_offsets);
 }
 
 /**
@@ -546,6 +602,7 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
 
   // Step 2: Collect all unique MemRef objects from TileType variables
   auto memrefs = memref_collectors::CollectMemRefsWithSpace(func->body_);
+  const RelativeMemRefOffsets relative_offsets = FoldRelativeMemRefOffsets(memrefs, func->body_);
 
   const PassContext* context = PassContext::Current();
   const MemoryPlanner planner = context == nullptr ? MemoryPlanner::PyPTO : context->GetMemoryPlanner();
@@ -553,14 +610,15 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
   // Step 3: use the selected in-tree allocator. PTOAS never reaches this pass.
   std::vector<std::pair<const MemRef*, MemRefPtr>> memref_pairs;
   if (planner == MemoryPlanner::DsaRP) {
-    memref_pairs = PlanWithDsaRP(func, *policy, reserve_resolution.reserved_end_by_space, memrefs);
+    memref_pairs =
+        PlanWithDsaRP(func, *policy, reserve_resolution.reserved_end_by_space, memrefs, relative_offsets);
   } else {
     // Declared allocations are the only ones whose buffer can exceed their
     // largest member (a multi-slot declaration).
     PinnedAllocCollector pinned_collector;
     pinned_collector.VisitStmt(func->body_);
     memref_pairs = AllocateMemoryAddresses(memrefs, reserve_resolution, *policy, pinned_collector.alloc_sizes,
-                                           func->name_);
+                                           relative_offsets, func->name_);
   }
 
   if (memref_pairs.empty() && reserve_resolution.resolved_bases.empty()) {

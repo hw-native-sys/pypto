@@ -23,6 +23,7 @@
 #include "pypto/ir/memref.h"
 #include "pypto/ir/transforms/dsa/allocation_plan.h"
 #include "pypto/ir/transforms/dsa/dsa_reuse_penalty_solver.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 
 namespace pypto {
 namespace backend {
@@ -64,10 +65,14 @@ struct PreparedProblem {
 
 /**
  * @brief Convert validated offsets to fresh MemRefs, preserving view offsets.
+ *
+ * Each MemRef's address is its buffer's placement plus its entry in
+ * ``relative_offsets``, which must cover every MemRef in ``memrefs``.
  */
 [[nodiscard]] std::vector<std::pair<const MemRef*, MemRefPtr>> BuildMemRefReplacements(
     const PreparedProblem& prepared, const dsa::DsaSolution& solution,
-    const std::vector<MemRefWithSpace>& memrefs, const MemoryAllocatorPolicy& policy);
+    const std::vector<MemRefWithSpace>& memrefs, const MemoryAllocatorPolicy& policy,
+    const RelativeMemRefOffsets& relative_offsets);
 
 }  // namespace dsa_adapter
 }  // namespace ir

@@ -191,7 +191,8 @@ dsa::DsaProblem RelaxPipelineIntent(const PreparedProblem& prepared) {
 
 std::vector<std::pair<const MemRef*, MemRefPtr>> BuildMemRefReplacements(
     const PreparedProblem& prepared, const dsa::DsaSolution& solution,
-    const std::vector<MemRefWithSpace>& memrefs, const MemoryAllocatorPolicy& policy) {
+    const std::vector<MemRefWithSpace>& memrefs, const MemoryAllocatorPolicy& policy,
+    const RelativeMemRefOffsets& relative_offsets) {
   std::vector<std::pair<const MemRef*, MemRefPtr>> replacements;
   replacements.reserve(memrefs.size());
   for (const auto& [old_memref, memory_space] : memrefs) {
@@ -207,10 +208,10 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> BuildMemRefReplacements(
 
     // A symbolic offset is kept for every base, not only declared allocations:
     // see MakeAbsoluteMemRefAddress.
-    auto new_memref = std::make_shared<MemRef>(old_memref->name_hint_, old_memref->base_,
-                                               MakeAbsoluteMemRefAddress(*offset, old_memref),
-                                               old_memref->size_, old_memref->span_, old_memref->is_pinned_,
-                                               old_memref->slot_count_, old_memref->slot_index_);
+    auto new_memref = std::make_shared<MemRef>(
+        old_memref->name_hint_, old_memref->base_,
+        MakeAbsoluteMemRefAddress(*offset, old_memref, relative_offsets), old_memref->size_,
+        old_memref->span_, old_memref->is_pinned_, old_memref->slot_count_, old_memref->slot_index_);
     replacements.emplace_back(old_memref.get(), std::move(new_memref));
   }
 
