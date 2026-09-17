@@ -102,6 +102,51 @@ persistent-cache policy uses `pypto.configure_cache`. A
 An active `PassContext` must name the bound runtime; without one, eager
 compilation uses the runtime from `init`.
 
+## Callable identity and hot-path measurements
+
+Each loaded `KernelArtifact` memoizes the digest of the complete Simpler callable
+and PyPTO ABI. Concurrent eager and capture lookups share this identity; a failed
+descriptor build is not cached. Capture uses `loaded_identity()`, which never
+loads or compiles an artifact. Process registrations still belong to their Worker
+generation; only immutable binary identity is cached.
+
+`tests/st/runtime/kernel/test_hot_path.py` records 1,024 host-return samples per
+entry/variant for direct JIT and registered `torch.ops`, with taskQueue off and
+on. It writes p50/p99 in microseconds, validation/cache-key/descriptor counts,
+and one-versus-two-producer throughput into JUnit properties. An uncached control
+restores per-call descriptor hashing on the same build to isolate that cost.
+Warmup and batch drains are outside the latency samples. Producer throughput uses
+16-call batches with a serialized handoff and drain, included in elapsed time;
+it does not measure unrestricted concurrent streams. Timings are evidence, not
+CI pass thresholds.
+
+The pinned Simpler runtime rejects changing caller streams while the previous
+caller's serial tail is incomplete (`PTO_RUNTIME_ERR_PREPARED_INCOMPATIBLE`,
+`-1002`). Applications must establish completion before switching caller streams.
+The adapter's host launch lock alone does not establish that device completion.
+This also limits the two-producer experiment; removing a host lock cannot make
+unrestricted multi-stream submission supported.
+
+With taskQueue enabled, a deliberately blocked host callback holds exactly
+0/16/256 initial tickets on another stream. Each measured batch adds 16 tickets,
+then releases the gate and drains. A queued test-only stream fence completes
+the background stream before the foreground launches reach Simpler; it executes
+after gate release, outside host latency samples. The test asserts `16 * pending + 120` calls to
+`done()` per batch, exposing the existing full-list scan. This blocked-queue
+experiment cannot run with taskQueue disabled, where the gate executes inline;
+ordinary latency and producer measurements cover both modes. Four tickets from
+a destroyed graph currently cause four device synchronizations on the next eager
+submission; a separate counter assertion records that behavior. Queue reclamation,
+graph synchronization batching and lock removal remain separate changes with
+lifetime, asynchronous-failure and Simpler concurrency requirements.
+
+Build with `PYPTO_BUILD_TORCH_NPU_TESTS=ON` for these cases. That option adds private
+`_test_counters()` and `_test_reset_counters()` hooks to the optional adapter;
+normal builds omit the hooks and counter increments. Counts cover adapter
+`Done()` calls and device-synchronization attempts, not all framework/SDK calls.
+Both control and cached measurements use the same instrumented build. The kernel
+eager device CI job runs these cases and uploads their JUnit evidence.
+
 ## Call metadata and ownership
 
 [`CallSignature`](../../../../python/pypto/torch/interop.py) copies the shared

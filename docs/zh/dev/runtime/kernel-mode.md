@@ -79,6 +79,41 @@ Worker。它不编译也不 prepare 任何算子，入图的每个特化仍需 w
 `pypto.configure_cache`。`CompileOptions.platform` 若不是默认值，必须等于绑定的平台。外层
 `PassContext` 的 runtime 必须与绑定值一致；没有外层上下文时，eager 编译使用 `init` 绑定的 runtime。
 
+## Callable 身份与热路径测量
+
+每个已加载的 `KernelArtifact` 缓存完整 Simpler callable 与 PyPTO ABI 的摘要。
+并发 eager 与 capture 查询共享这一身份，描述符构建失败不会缓存结果。
+capture 使用 `loaded_identity()`，绝不加载或编译产物。进程内注册仍属于对应 Worker
+代次（generation）；缓存的只是不可变二进制的身份。
+
+`tests/st/runtime/kernel/test_hot_path.py` 在 taskQueue 开关两种配置下，为直接 JIT 与
+注册后的 `torch.ops` 各入口、各变体记录 1,024 次 Host 返回耗时。JUnit 属性包含
+微秒单位的 p50/p99、参数校验/cache key/描述符计数，以及单/双生产线程吞吐。
+未缓存对照（uncached control）在同一构建中恢复逐次描述符哈希，以隔离该项成本。
+warmup 与批次 drain 不计入延迟样本。生产线程吞吐使用 16 次调用的批次，
+串行切换 stream 并 drain，包含该交接耗时；不代表无约束的多 stream 并发吞吐。
+耗时作为测量证据，不设 CI 通过阈值。
+
+当前固定版本的 Simpler 在前一 caller stream 的 serial tail 未完成时拒绝切换 stream，
+返回 `PTO_RUNTIME_ERR_PREPARED_INCOMPATIBLE`（`-1002`）。应用须在切换 caller stream 前
+确保前一条 stream 已完成；adapter 的 Host launch 锁本身不能保证设备完成。
+这一限制也约束双生产线程实验，移除 Host 锁不能使无约束的多 stream 提交得到支持。
+
+taskQueue 开启时，使用阻塞的 Host callback，在另一条 stream 上精确保留
+0/16/256 个初始 pending ticket。每个测量批次增加 16 个 ticket，随后释放 gate 并 drain。
+另有排入队列的测试专用 stream fence，保证 foreground launch 到达 Simpler 前
+background stream 已完成；fence 在 gate 释放后执行，不计入 Host 延迟样本。
+测试断言每批 `done()` 调用次数为 `16 * pending + 120`，显示当前全列表扫描成本。
+taskQueue 关闭时 gate 会内联执行，因此不运行该阻塞队列实验；普通延迟与生产线程测量
+覆盖开关两种配置。一个已销毁图的四个 ticket 当前会在下次 eager 提交中产生四次设备同步，
+另有计数断言记录该行为。队列回收、图同步合并及去锁仍为独立改造，须满足生命周期、
+异步失败及 Simpler 并发契约。
+
+这些用例需要以 `PYPTO_BUILD_TORCH_NPU_TESTS=ON` 构建。该选项向可选 adapter 添加
+私有 `_test_counters()` 和 `_test_reset_counters()` 接口；普通构建不包含这些接口与
+计数增量。计数只覆盖 adapter 的 `Done()` 调用及设备同步尝试，不代表框架/SDK 的全部调用。
+对照与缓存变体使用同一计数构建。kernel eager 设备 CI job 执行这些用例并上传 JUnit 证据。
+
 ## 调用元数据与所有权
 
 [`CallSignature`](../../../../python/pypto/torch/interop.py) 一次性复制共享的

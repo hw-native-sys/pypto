@@ -22,6 +22,7 @@ case "${1:-}" in
       tests/st/runtime/kernel/test_torch_interop.py
       tests/st/runtime/kernel/test_torch_launch.py
       tests/st/runtime/kernel/test_torch_ops.py
+      tests/st/runtime/kernel/test_hot_path.py
     )
     selection=(-k 'not capture'
       '--deselect=tests/st/runtime/kernel/test_torch_launch.py::test_torch_kernel_launch[delayed-0]')
@@ -88,4 +89,4 @@ fi
 # These tests create isolated child processes and own queue-mode parametrization.
 # Do not use xdist: one allocated device runs one test at a time.
 python -m pytest "${cases[@]}" "${selection[@]}" --platform=a2a3 \
-  --device="$TASK_DEVICE" -v --junitxml="test-results/kernel-mode/$1.xml" 2>&1 | tee "test-results/kernel-mode/$1-pytest.log"
+  --device="$TASK_DEVICE" -v -o junit_family=legacy --junitxml="test-results/kernel-mode/$1.xml" 2>&1 | tee "test-results/kernel-mode/$1-pytest.log"

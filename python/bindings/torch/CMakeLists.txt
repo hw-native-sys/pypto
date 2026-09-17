@@ -55,15 +55,16 @@ else()
     set_target_properties(_torch_npu PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/python/pypto")
 endif()
 
-option(PYPTO_BUILD_TORCH_NPU_TESTS "Build native test-only queue gates (not installed)" OFF)
+option(PYPTO_BUILD_TORCH_NPU_TESTS "Build test-only queue gates and adapter counters" OFF)
 if(PYPTO_BUILD_TORCH_NPU_TESTS)
+    target_compile_definitions(_torch_npu PRIVATE PYPTO_KERNEL_TEST_COUNTERS=1)
     nanobind_add_module(_torch_npu_test "${CMAKE_SOURCE_DIR}/tests/st/runtime/kernel/queue_gate.cpp"
         "${CMAKE_SOURCE_DIR}/src/core/backtrace.cpp" "${CMAKE_SOURCE_DIR}/src/core/error.cpp")
     target_include_directories(_torch_npu_test PRIVATE
         "${LIBBACKTRACE_INSTALL_DIR}/include" "${_torch_npu}/include" "${PYPTO_ACL_INCLUDE}")
     target_compile_options(_torch_npu_test PRIVATE ${_torch_flags})
     target_link_libraries(_torch_npu_test PRIVATE libbacktrace ${TORCH_LIBRARIES}
-        "${_torch_npu}/lib/libtorch_npu.so")
+        "${_torch_npu}/lib/libtorch_npu.so" "${PYPTO_ASCENDCL}")
     set_target_properties(_torch_npu_test PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/build/torch_npu_tests")
 endif()

@@ -366,7 +366,6 @@ def _exit_probe(path, case):
             self.owner.stop()
 
     context._NativeWorker = Worker
-    context.callable_identity = lambda callable_, abi: callable_
     config = KernelConfig("a2a3", "tensormap_and_ringbuffer", 0)
     if case != "unused":
         try:

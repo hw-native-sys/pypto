@@ -41,6 +41,10 @@ namespace nb = nanobind;
 
 namespace {
 std::mutex launch_mutex;
+#ifdef PYPTO_KERNEL_TEST_COUNTERS
+std::atomic<uint64_t> test_done_calls{0};
+std::atomic<uint64_t> test_device_sync_calls{0};
+#endif
 
 void Require(bool condition, const char* message) {
   if (!condition) throw pypto::ValueError(message);
@@ -164,6 +168,9 @@ class LaunchTicket {
   }
 
   bool Done() {
+#ifdef PYPTO_KERNEL_TEST_COUNTERS
+    test_done_calls.fetch_add(1, std::memory_order_relaxed);
+#endif
     c10_npu::NPUGuard device_guard(state_->stream.device_index());
     state_->CheckError();
     if (CaptureModel(c10_npu::getCurrentNPUStream(state_->stream.device_index()))) return false;
@@ -196,6 +203,9 @@ class LaunchTicket {
     }
     Require(state_->callback_finished.load(std::memory_order_acquire),
             "Cannot release a kernel ticket whose host callback has not finished");
+#ifdef PYPTO_KERNEL_TEST_COUNTERS
+    test_device_sync_calls.fetch_add(1, std::memory_order_relaxed);
+#endif
     Require(aclrtSynchronizeDevice() == ACL_SUCCESS,
             "Cannot establish device quiescence after failed kernel submission; owners retained");
     state_->ReleaseCompletedOwners();
@@ -293,6 +303,18 @@ std::shared_ptr<LaunchTicket> Prepare(ChipWorker* worker, int32_t callable_id, n
 }  // namespace
 
 NB_MODULE(_torch_npu, m) {
+#ifdef PYPTO_KERNEL_TEST_COUNTERS
+  m.def("_test_reset_counters", [] {
+    test_done_calls.store(0, std::memory_order_relaxed);
+    test_device_sync_calls.store(0, std::memory_order_relaxed);
+  });
+  m.def("_test_counters", [] {
+    nb::dict result;
+    result["done"] = test_done_calls.load(std::memory_order_relaxed);
+    result["device_sync"] = test_device_sync_calls.load(std::memory_order_relaxed);
+    return result;
+  });
+#endif
   m.attr("simpler_revision") = PYPTO_SIMPLER_REVISION;
   nb::class_<LaunchTicket>(m, "LaunchTicket")
       .def("enqueue", &LaunchTicket::Enqueue, nb::call_guard<nb::gil_scoped_release>())

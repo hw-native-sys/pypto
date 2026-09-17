@@ -21,7 +21,7 @@ from typing import Any
 from pypto.runtime._execution_mode import claim_kernel_mode
 
 from .abi import KernelConfig, _NativeWorker
-from .callable import KernelRegistration, callable_identity
+from .callable import KernelRegistration
 
 
 class KernelState(Enum):
@@ -142,8 +142,7 @@ class _ProcessKernelState:
         if (abi.platform, abi.runtime) != (config.platform, config.runtime):
             raise ValueError("Kernel artifact platform/runtime does not match the Worker configuration")
         worker = self.bound_worker(config)
-        callable_ = artifact.load()
-        identity = callable_identity(callable_, abi)
+        identity = artifact.identity()
         with self._condition:
             self._require_ready()
             if identity in self._registrations:
@@ -158,6 +157,7 @@ class _ProcessKernelState:
         if not leader:
             return future.result()
         try:
+            callable_ = artifact.load()
             handle = worker.prepare(callable_)
             registration = KernelRegistration(
                 identity, self.pid, self.generation, handle, self, callable_, artifact
@@ -178,6 +178,7 @@ class _ProcessKernelState:
     def require_callable(self, artifact: Any, config: KernelConfig) -> KernelRegistration:
         """Look up completed warmup without initializing, loading or registering."""
         self._check_pid()
+        identity = artifact.loaded_identity()
         with self._condition:
             if self.state is KernelState.UNINITIALIZED and not self._stop_requested:
                 raise RuntimeError(_NOT_INITIALIZED)
@@ -186,9 +187,7 @@ class _ProcessKernelState:
                 raise ValueError(
                     f"Kernel Worker configuration conflict: bound {self.config}, requested {config}"
                 )
-            loaded = artifact._loaded
-            if loaded is not None:
-                identity = callable_identity(loaded[0], artifact.kernel_abi)
+            if identity is not None:
                 registration = self._registrations.get(identity)
                 if registration is not None:
                     return registration

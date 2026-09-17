@@ -19,6 +19,7 @@ from pypto._artifact_contract import ArtifactExecutionMode, ExecutionCapabilitie
 from pypto._kernel_abi import KernelABI
 from pypto.ir.compiled_program import load_kernel_metadata
 from pypto.jit._artifact_manifest import BuildKind
+from pypto.runtime.kernel.callable import callable_identity
 
 
 def validate_kernel_config(config: ModuleType, abi: KernelABI) -> None:
@@ -73,6 +74,7 @@ class KernelArtifact:
         self.execution_capabilities = ExecutionCapabilities((ArtifactExecutionMode.KERNEL,))
         self._artifact_runtime: Any = None
         self._loaded: tuple[Any, str, dict[str, Any]] | None = None
+        self._identity: bytes | None = None
         self._lock = threading.Lock()
         load_kernel_metadata(directory, abi)
 
@@ -93,6 +95,23 @@ class KernelArtifact:
                         self.output_dir, self.platform, BuildKind.SINGLE_CHIP, kernel_abi=self.kernel_abi
                     )["."]
             return self._loaded[0]
+
+    def identity(self) -> bytes:
+        """Load if needed and hash the immutable callable once per artifact."""
+        callable_ = self.load()
+        with self._lock:
+            if self._identity is None:
+                self._identity = callable_identity(callable_, self.kernel_abi)
+            return self._identity
+
+    def loaded_identity(self) -> bytes | None:
+        """Identify an already loaded callable without compiling or loading it."""
+        with self._lock:
+            if self._loaded is None:
+                return None
+            if self._identity is None:
+                self._identity = callable_identity(self._loaded[0], self.kernel_abi)
+            return self._identity
 
     @property
     def chip_callable(self) -> Any:

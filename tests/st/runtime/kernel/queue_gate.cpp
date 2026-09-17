@@ -14,6 +14,7 @@
  * @brief Test-only native gate for delaying the torch_npu host queue.
  */
 
+#include <acl/acl.h>
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
@@ -62,6 +63,17 @@ NB_MODULE(_torch_npu_test, m) {
   nb::class_<QueueGate>(m, "QueueGate")
       .def("wait_entered", &QueueGate::WaitEntered, nb::call_guard<nb::gil_scoped_release>())
       .def("release", &QueueGate::Release, nb::call_guard<nb::gil_scoped_release>());
+  m.def(
+      "queue_stream_fence",
+      [](uintptr_t stream) {
+        at_npu::native::OpCommand::RunOpApiV2("PyPTOTestStreamFence", [stream] {
+          if (aclrtSynchronizeStream(reinterpret_cast<aclrtStream>(stream)) != ACL_SUCCESS) {
+            throw pypto::RuntimeError("Test stream handoff fence failed");
+          }
+          return 0;
+        });
+      },
+      nb::call_guard<nb::gil_scoped_release>());
   m.def(
       "block_queue",
       [] {

@@ -1374,5 +1374,78 @@ def test_kernel_binary_signature_includes_scalar_pool_and_rejects_old_manifest()
     validate_kernel_record(record, abi)
 
 
+@pytest.fixture
+def identity_artifact(monkeypatch, tmp_path):
+    """Use real artifact locking and hashing with device-free serialized bytes."""
+    from pypto._kernel_abi import KernelABI  # noqa: PLC0415
+    from pypto.runtime import _kernel_artifact  # noqa: PLC0415
+
+    counts = []
+    monkeypatch.setattr(_kernel_artifact, "load_kernel_metadata", lambda *args: None)
+
+    def descriptor(*, target, platform, runtime):
+        counts.append(target)
+        return target
+
+    monkeypatch.setitem(
+        sys.modules, "simpler.callable_identity", SimpleNamespace(build_chip_callable_descriptor=descriptor)
+    )
+    value = _kernel_artifact.KernelArtifact(tmp_path, KernelABI("a2a3", "tensormap_and_ringbuffer", ()))
+    value._artifact_runtime = SimpleNamespace(load=lambda: {".": (b"complete binary", "unused", {})})
+    return value, counts
+
+
+def test_kernel_identity_is_shared_by_concurrent_eager_and_loaded_lookups(identity_artifact):
+    """Concurrent warmup and capture lookups must serialize the descriptor once."""
+    value, counts = identity_artifact
+    assert value.loaded_identity() is None and not counts
+    value.load()
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda i: value.identity() if i % 2 else value.loaded_identity(), range(32)))
+    assert len(set(results)) == 1 and results[0] is not None
+    assert counts == [b"complete binary"]
+
+
+def test_unloaded_identity_never_loads(identity_artifact, monkeypatch):
+    """Capture cannot cause compilation or loading through the identity lookup."""
+    value, counts = identity_artifact
+    monkeypatch.setattr(value, "load", lambda: pytest.fail("capture must not load"))
+    assert value.loaded_identity() is None and not counts
+
+
+def test_failed_identity_is_not_cached(identity_artifact, monkeypatch):
+    """A descriptor failure can be retried without publishing an incomplete identity."""
+    from pypto.runtime import _kernel_artifact  # noqa: PLC0415
+
+    value, counts = identity_artifact
+    original = _kernel_artifact.callable_identity
+
+    def fail_identity(*args):
+        raise ValueError("hash failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(_kernel_artifact, "callable_identity", fail_identity)
+        with pytest.raises(ValueError, match="hash failed"):
+            value.identity()
+    assert value._identity is None
+    assert value.identity() == original(value.load(), value.kernel_abi)
+    assert len(counts) == 2
+
+
+def test_kernel_identity_keeps_full_binary_and_abi_in_key(identity_artifact):
+    """Memoization must preserve the existing complete-content identity contract."""
+    from dataclasses import replace  # noqa: PLC0415
+
+    from pypto._kernel_abi import KernelParameter  # noqa: PLC0415
+    from pypto.runtime.kernel.callable import callable_identity  # noqa: PLC0415
+
+    value, _ = identity_artifact
+    identity = value.identity()
+    assert identity == callable_identity(value.load(), value.kernel_abi)
+    assert identity != callable_identity(b"different binary", value.kernel_abi)
+    other = replace(value.kernel_abi, parameters=(KernelParameter("x", "fp32", "In", (1,)),))
+    assert identity != callable_identity(value.load(), other)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

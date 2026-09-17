@@ -43,14 +43,18 @@ def setup(monkeypatch):
             calls.closes.append(self)
 
     monkeypatch.setattr(context, "_NativeWorker", FakeWorker)
-    monkeypatch.setattr(context, "callable_identity", lambda callable_, abi: abi.binary_tag() + callable_)
     state = context._ProcessKernelState()
     monkeypatch.setattr(context, "_process", SimpleNamespace(state=state))
     return state, KernelConfig("a2a3", "tensormap_and_ringbuffer", 0), calls, FakeWorker
 
 
 def artifact(key=b"kernel"):
-    return SimpleNamespace(kernel_abi=KernelABI("a2a3", "tensormap_and_ringbuffer", ()), load=lambda: key)
+    value = SimpleNamespace(
+        kernel_abi=KernelABI("a2a3", "tensormap_and_ringbuffer", ()), load=lambda: key, _loaded=None
+    )
+    value.identity = lambda: value.kernel_abi.binary_tag() + key
+    value.loaded_identity = lambda: value.identity() if value._loaded is not None else None
+    return value
 
 
 def test_concurrent_operators_share_one_worker_and_registration(setup):
@@ -112,6 +116,32 @@ def test_kernel_lookup_waits_for_concurrent_initialization(setup, monkeypatch):
         assert lookup.result(timeout=5) == config
         initializing.result(timeout=5)
     assert len(calls.workers) == len(calls.inits) == 1
+    state.close()
+
+
+
+def test_repeated_registration_hashes_artifact_only_once(setup, monkeypatch, tmp_path):
+    import sys  # noqa: PLC0415
+
+    from pypto.runtime import _kernel_artifact  # noqa: PLC0415
+
+    state, config, calls, _ = setup
+    descriptors = []
+
+    def descriptor(**kwargs):
+        descriptors.append(kwargs["target"])
+        return kwargs["target"]
+
+    sdk = SimpleNamespace(build_chip_callable_descriptor=descriptor)
+    monkeypatch.setitem(sys.modules, "simpler.callable_identity", sdk)
+    monkeypatch.setattr(_kernel_artifact, "load_kernel_metadata", lambda *args: None)
+    value = _kernel_artifact.KernelArtifact(tmp_path, artifact().kernel_abi)
+    value._artifact_runtime = SimpleNamespace(load=lambda: {".": (b"kernel", "unused", {})})
+    state.ensure_worker(config)
+    registrations = [state.ensure_callable(value, config) for _ in range(3)]
+    assert all(registration is registrations[0] for registration in registrations)
+    assert state.require_callable(value, config) is registrations[0]
+    assert descriptors == calls.prepares == [b"kernel"]
     state.close()
 
 
@@ -592,6 +622,23 @@ def test_close_reports_submission_error_after_proven_quiescence(setup, monkeypat
     assert quiescence == ["all streams idle"]
     assert len(calls.closes) == 1 and not state._submissions
     assert state.state is KernelState.CLOSED
+    state.close()
+
+
+@pytest.mark.parametrize("pending", [0, 16, 256])
+def test_pending_ticket_polling_cost(setup, monkeypatch, pending):
+    """Record the current full scan without assuming pending work completes."""
+    state, config, _, _ = setup
+    registration = state.ensure_callable(artifact(), config)
+    polls = []
+    for index in range(pending):
+        ticket = _Ticket([])
+        monkeypatch.setattr(ticket, "done", lambda index=index: polls.append(index) or False)
+        state.submit(registration, lambda worker, ticket=ticket: ticket)
+    assert len(polls) == pending * (pending - 1) // 2
+    polls.clear()
+    state.submit(registration, lambda worker: _Ticket([]))
+    assert polls == list(range(pending))
     state.close()
 
 
