@@ -514,6 +514,9 @@ CPython 3.10 / ARM64 wheel is installed from Ascend's official
 `v7.1.0.2-pytorch2.6.0` release with a pinned SHA256; that version is not on PyPI.
 The job explicitly installs PyYAML, an undeclared wheel dependency, and checks
 that torch_npu imports successfully before building the adapter.
+The native build uses `build/kernel-native`, separate from the shared setup's
+scikit-build wheel cache in `build/`. It verifies that the source-tree core,
+adapter, and test gate can import before allocating a device.
 Simpler and pto-isa come from
 the submodule pin; ptoas comes from `toolchain/versions.env`. CANN comes from the
 runner's `CANN_ROOT` and must satisfy the adapter's documented prerequisites.

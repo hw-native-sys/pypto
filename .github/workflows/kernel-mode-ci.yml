@@ -155,9 +155,16 @@ jobs:
           # This wheel imports yaml but does not declare PyYAML in its metadata.
           uv pip install "$wheel_dir/$torch_npu_wheel" 'PyYAML==6.0.3'
           python -c 'import torch_npu'
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+          # setup-ci-job uses build/ for scikit-build's wheel cache. Its cached
+          # SKBUILD_PROJECT_NAME would keep extensions out of the source tree.
+          cmake -S . -B build/kernel-native -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DPython_EXECUTABLE="$(command -v python)" \
+            -Dnanobind_DIR="$(python -m nanobind --cmake_dir)" \
+            -DPYPTO_DEBUG_INFO_LEVEL=1 \
             -DPYPTO_BUILD_TORCH_NPU=ON -DPYPTO_BUILD_TORCH_NPU_TESTS=ON
-          cmake --build build --parallel "$PYPTO_BUILD_JOBS"
+          cmake --build build/kernel-native --parallel "$PYPTO_BUILD_JOBS"
+          PYTHONPATH="$PWD/python:$PWD/build/torch_npu_tests${PYTHONPATH:+:$PYTHONPATH}" \
+            python -c 'from pypto.pypto_core import DataType; from pypto.torch.launch import _load_native; _load_native(); import _torch_npu_test'
       - name: Eager, program regression, stream and lifecycle cases
         if: ${{ !cancelled() && steps.adapter.outcome == 'success' }}
         run: |

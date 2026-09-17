@@ -328,7 +328,9 @@ CPU UT 包含 PR #2785（09A）的可选依赖导入隔离检查。
 并从当前检出的源码构建 adapter 和仅供测试的队列 gate。torch_npu 2.6.0.post2
 的 CPython 3.10 / ARM64 wheel 来自 Ascend 官方 `v7.1.0.2-pytorch2.6.0`
 发布，使用固定 SHA256 校验；PyPI 未发布该版本。任务显式安装 wheel 未声明的
-PyYAML 依赖，并在构建 adapter 前检查 torch_npu 能否成功导入。Simpler 与 pto-isa
+PyYAML 依赖，并在构建 adapter 前检查 torch_npu 能否成功导入。native 构建使用
+`build/kernel-native`，与共享 setup 在 `build/` 中的 scikit-build wheel 缓存分开，
+并在分配设备前检查源码目录的 core、adapter 及测试 gate 能否导入。Simpler 与 pto-isa
 来自 submodule pin，ptoas 来自 `toolchain/versions.env`。CANN 使用 runner 的
 `CANN_ROOT`，须满足 adapter 已说明的环境前提。设备操作均在任务分配范围内执行。
 
