@@ -5489,10 +5489,18 @@ class TestL0CrossShapeReuse:
         assert physical["small_r0"].byte_offset_.value == 0
         assert isinstance(physical["small_r1"].byte_offset_, ir.ConstInt)
         assert physical["small_r1"].byte_offset_.value == 32768
-        # Pure tile.slice addresses deliberately collapse to the bare base here;
-        # PTO derives the runtime window from the placed source tile below.
-        assert isinstance(physical["small_r1_view"].byte_offset_, ir.ConstInt)
-        assert physical["small_r1_view"].byte_offset_.value == 0
+        # The view keeps its symbolic row offset: the placed address is its original
+        # relative offset displaced by the root's 32 KiB rebase (buffer base 0).
+        placed_displacement = Analyzer().simplify(
+            ir.Sub(
+                physical["small_r1_view"].byte_offset_,
+                before_view.byte_offset_,
+                DataType.INDEX,
+                ir.Span.unknown(),
+            )
+        )
+        assert isinstance(placed_displacement, ir.ConstInt)
+        assert placed_displacement.value == 32768
 
         mlir = codegen.PTOCodegen().generate(allocated)
         small_r1_alloc = next(

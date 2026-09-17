@@ -674,10 +674,12 @@ static std::string MakeGatherbCodegenPTO(const CallPtr& op, codegen::CodegenBase
   INTERNAL_CHECK(src_type) << "tile.gatherb src must be a TileType";
   const std::string src_ssa = codegen.GetExprAsCode(op->args_[0]);
   if (const auto* subview = codegen.GetSubviewMaterialization(src_ssa)) {
+    // Covers the whole address: the source's placed base plus the slice offset.
+    // The view's own MemRef address may be symbolic (a runtime row), so it is not
+    // re-checked below.
     CHECK_SPAN(subview->byte_offset_mod_32 == 0, op->span_)
         << "tile.gatherb source subview byte offset must be provably 32-byte aligned";
-  }
-  if (src_type->memref_.has_value()) {
+  } else if (src_type->memref_.has_value()) {
     auto byte_offset = As<ir::ConstInt>((*src_type->memref_)->byte_offset_);
     CHECK_SPAN(byte_offset, op->span_)
         << "tile.gatherb source base byte offset must be statically known and 32-byte aligned";

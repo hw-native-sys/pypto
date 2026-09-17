@@ -285,14 +285,11 @@ class MemRefUpdateMutator : public IRMutator {
 /// this pass. It keeps `slot_count_` / `slot_index_`, but those describe one slot,
 /// not the declaration: no resolved MemRef states the reserved size. So by this
 /// pass the only record of the allocation *as a whole* is its alloc statement.
-/// Two things here depend on it:
-///
-///  * a declared allocation is the one place a *dynamic* address is meaningful;
-///  * it is the one place the allocation is deliberately **larger than any single
-///    MemRef in it**. A multi-slot declaration reserves `slots x slot_size` while
-///    each slot MemRef is sized to its own slot, so sizing the buffer from the
-///    largest member — as every other base can be — would reserve one slot and let
-///    the next allocation land on top of slot 1.
+/// It is the one place the allocation is deliberately **larger than any single
+/// MemRef in it**. A multi-slot declaration reserves `slots x slot_size` while
+/// each slot MemRef is sized to its own slot, so sizing the buffer from the
+/// largest member — as every other base can be — would reserve one slot and let
+/// the next allocation land on top of slot 1.
 ///
 /// The size therefore has to come from the alloc statement, which InitMemRef
 /// already sized to the whole slot set.
@@ -326,9 +323,8 @@ class PinnedAllocCollector : public IRVisitor {
  * each consuming size_ bytes of fresh L1.
  *
  * ``pinned_alloc_sizes`` maps each author-declared allocation's base to the bytes
- * its alloc statement reserves. Those are the only bases that may receive a
- * dynamic (expression) address, and the only ones whose buffer can be larger than
- * their largest member (a multi-slot declaration).
+ * its alloc statement reserves. Those are the only bases whose buffer can be
+ * larger than their largest member (a multi-slot declaration).
  */
 std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
     const std::vector<MemRefWithSpace>& memrefs, const ReserveBufferResolution& reserve_resolution,
@@ -400,53 +396,22 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
       // the view op's byte offset, see ShareMemRefFrom).  The root MemRef has
       // offset 0, so it lands on base_addr; a ``tile.slice`` view at row k lands
       // on base_addr + k*row_stride.  Codegen reads ``pto.alloc_tile`` addr 1:1
-      // from this ConstInt, so a reshape-of-slice chain — whose result inherits
+      // from this address, so a reshape-of-slice chain — whose result inherits
       // the slice's offset but does NOT go through ``pto.subview`` — gets the
       // correct per-view address instead of collapsing onto the parent base
       // (issue #1510).  Pure ``tile.slice`` codegen is unaffected: it still
       // derives the offset from the slice op's own operands off the root base.
+      //
+      // The offset is kept even when it is symbolic, for every base — see
+      // MakeAbsoluteMemRefAddress for the two ways one arises.
       for (const auto& old_memref : group) {
-        // Fold a const relative offset into a single ConstInt: base + offset.
-        // A reshape-of-slice chain inherits the slice's offset but does NOT go
-        // through `pto.subview`, so its address must come from this MemRef
-        // (issue #1510).
-        //
-        // A *dynamic* offset cannot fold. For a declared allocation the address
-        // becomes the expression `base_addr + offset` and codegen lowers it into
-        // the tile's runtime address assignment — that is how a runtime slot index
-        // (`l0c[i % 2]`, scaled to a byte offset by InitMemRef) reaches the
-        // hardware. Dropping it would silently address slot 0 every iteration.
-        //
-        // Every OTHER dynamic offset keeps the old behaviour: fall back to the
-        // bare base. Those are `tile.slice` views, which reach codegen through
-        // `pto.subview` and re-derive their offset from the slice op's own
-        // operands, so this address is unused — and emitting the expression anyway
-        // is actively harmful: it is not renderable at the `pto.alloc_tile addr`
-        // position and PTOAS rejects the module with "expected SSA operand".
-        //
-        // INT64 dtype is required by the PTOAS dialect's `pto.alloc_tile` addr
-        // operand; PTO codegen reads this dtype from the ConstInt 1:1.
-        ExprPtr member_addr_expr;
-        auto old_offset = std::dynamic_pointer_cast<const ConstInt>(old_memref->byte_offset_);
-        if (!old_offset && pinned_alloc_sizes.count(old_memref->base_.get()) == 0) {
-          // Not a declared allocation: bare base, exactly as before slots existed.
-          old_offset = std::make_shared<ConstInt>(0, DataType::INT64, Span::unknown());
-        }
-        if (old_offset) {
-          member_addr_expr = std::make_shared<ConstInt>(static_cast<int64_t>(base_addr) + old_offset->value_,
-                                                        DataType::INT64, Span::unknown());
-        } else {
-          auto base_expr =
-              std::make_shared<ConstInt>(static_cast<int64_t>(base_addr), DataType::INDEX, Span::unknown());
-          member_addr_expr =
-              std::make_shared<Add>(base_expr, old_memref->byte_offset_, DataType::INDEX, Span::unknown());
-        }
         // NOTE: MemRef is identity-bearing — each result must get a fresh
         // unique_id_, so build it via the explicit constructor (MutableCopy is
         // static_assert-forbidden for Var/MemRef).
         auto new_memref = std::make_shared<MemRef>(
-            old_memref->name_hint_, old_memref->base_, member_addr_expr, old_memref->size_, old_memref->span_,
-            old_memref->is_pinned_, old_memref->slot_count_, old_memref->slot_index_);
+            old_memref->name_hint_, old_memref->base_, MakeAbsoluteMemRefAddress(base_addr, old_memref),
+            old_memref->size_, old_memref->span_, old_memref->is_pinned_, old_memref->slot_count_,
+            old_memref->slot_index_);
         memref_pairs.emplace_back(old_memref.get(), new_memref);
       }
     }
@@ -473,7 +438,7 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
   // with A=(name "z", offset 0), B=(name "a", offset 1) and C=(name "m", dynamic),
   // A < B by offset and B < C by name, yet A < C is false — and a non-transitive
   // comparator makes std::sort undefined behaviour. A declared allocation's
-  // runtime slot index made that case reachable.
+  // runtime slot index, or a view's symbolic slice offset, makes that case reachable.
   //
   // Ordering on one total key instead: constants first in address order, then
   // dynamic addresses by name. `name_hint_` breaks ties among equal offsets so
@@ -591,8 +556,8 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
   if (planner == MemoryPlanner::DsaRP) {
     memref_pairs = PlanWithDsaRP(func, *policy, reserve_resolution.reserved_end_by_space, memrefs);
   } else {
-    // Declared allocations are the only ones that may take a dynamic address
-    // (a runtime slot index).
+    // Declared allocations are the only ones whose buffer can exceed their
+    // largest member (a multi-slot declaration).
     PinnedAllocCollector pinned_collector;
     pinned_collector.VisitStmt(func->body_);
     memref_pairs = AllocateMemoryAddresses(memrefs, reserve_resolution, *policy, pinned_collector.alloc_sizes,
@@ -684,7 +649,8 @@ class AllocatedMemoryAddrVerifier : public IRVisitor {
     if (!seen_.insert(memref.get()).second) return;
 
     // An address may legitimately be an expression: a declared allocation's runtime
-    // slot index becomes `base_addr + index * slot_size`, which codegen lowers into
+    // slot index becomes `base_addr + index * slot_size`, and a view whose slice
+    // offset is a scalar Var becomes `base_addr + offset`; codegen lowers either into
     // the tile's address assignment. What the property requires is that an address
     // was *assigned* — a null offset, or a negative constant, means it was not.
     if (!memref->byte_offset_) {
@@ -704,8 +670,9 @@ class AllocatedMemoryAddrVerifier : public IRVisitor {
       return;
     }
     // High-water tracking needs a concrete address. A dynamic one is bounded by
-    // the whole declared allocation, which its own root MemRef already accounts
-    // for, so skipping it here cannot under-report the space's footprint.
+    // the whole allocation it points into — a declared allocation, or the parent a
+    // view slices — which its own root MemRef already accounts for, so skipping it
+    // here cannot under-report the space's footprint.
     if (!const_offset) return;
 
     uint64_t end = static_cast<uint64_t>(const_offset->value_) + memref->size_;

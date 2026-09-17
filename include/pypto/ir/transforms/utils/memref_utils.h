@@ -225,6 +225,46 @@ inline MemRefPtr GetDefinedMemRef(const std::shared_ptr<const TileType>& tile_ty
   return *tile_type->memref_;
 }
 
+/// The absolute address of @p memref once its buffer has been placed at @p buffer_base.
+///
+/// A MemRef's offset is relative to its buffer until address assignment, so the
+/// address is `buffer_base + byte_offset_`. A constant offset folds into one INT64
+/// `ConstInt` — the dtype the `pto.alloc_tile` addr operand takes. A symbolic offset
+/// stays an expression, which codegen lowers into the tile's runtime address
+/// assignment. Two sources produce one:
+///
+///  * a declared allocation's runtime slot index (`l0c[i % 2]`);
+///  * a view whose slice offset is a scalar Var — Simplify substitutes constants only
+///    at function-body top level, so `r0 = 32` inside an `if` or loop body stays `r0`.
+///
+/// The expression must survive for views too. A `tile.slice` re-derives its offset
+/// through `pto.subview`, but a view of that view — a `tile.reshape`, which emits no
+/// op of its own — is addressed only by its `pto.alloc_tile addr`, so dropping the
+/// offset silently aliases it onto the buffer's first bytes.
+inline ExprPtr MakeAbsoluteMemRefAddress(uint64_t buffer_base, const MemRefPtr& memref) {
+  INTERNAL_CHECK(memref != nullptr) << "Internal error: null MemRef passed to MakeAbsoluteMemRefAddress";
+  INTERNAL_CHECK_SPAN(buffer_base <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
+                      memref->span_)
+      << "Internal error: buffer base " << buffer_base << " of MemRef '" << memref->name_hint_
+      << "' exceeds PyPTO's signed INT64 address representation";
+  if (auto relative = As<ConstInt>(memref->byte_offset_)) {
+    INTERNAL_CHECK_SPAN(relative->value_ >= 0, memref->span_)
+        << "Internal error: MemRef '" << memref->name_hint_ << "' has a negative relative offset "
+        << relative->value_;
+    INTERNAL_CHECK_SPAN(static_cast<uint64_t>(relative->value_) <=
+                            static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) - buffer_base,
+                        memref->span_)
+        << "Internal error: address of MemRef '" << memref->name_hint_
+        << "' exceeds PyPTO's signed INT64 address representation";
+    return std::make_shared<ConstInt>(static_cast<int64_t>(buffer_base) + relative->value_, DataType::INT64,
+                                      Span::unknown());
+  }
+  INTERNAL_CHECK_SPAN(memref->byte_offset_ != nullptr, memref->span_)
+      << "Internal error: MemRef '" << memref->name_hint_ << "' reached address assignment with no offset";
+  auto base = std::make_shared<ConstInt>(static_cast<int64_t>(buffer_base), DataType::INDEX, Span::unknown());
+  return std::make_shared<Add>(base, memref->byte_offset_, DataType::INDEX, Span::unknown());
+}
+
 /// How two MemRefs' start addresses relate.
 enum class AddressRelation {
   kSame,       ///< provably the same address

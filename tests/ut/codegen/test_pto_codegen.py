@@ -2707,6 +2707,60 @@ def test_pto_codegen_keeps_loop_carried_tile_distinct_from_reshape_result():
     assert "rows=1, cols=16" in tadd_line, f"Expected row-vector operands in tadd, got: {tadd_line}"
 
 
+def test_pto_codegen_reshaped_row_slice_under_if_keeps_its_row_offset():
+    """A reshape of a row slice under an ``if`` is addressed at the slice's row, not the parent's base.
+
+    Simplify substitutes constants only at function-body top level, so inside each
+    ``if`` the page offset stays a scalar Var (``r0 = 32``) and the view MemRef offset
+    stays symbolic (``r0 * 4``). ``tile.reshape`` emits no op: the ``pto.tmul`` reads the
+    reshape's own ``alloc_tile``, so that tile's ``addr`` is the only thing placing page 1
+    at row 32. Dropping the symbolic offset aliased it onto the parent base, so page 1
+    silently read page 0's rows.
+    """
+
+    @pl.program
+    class PagedColumnSlice:
+        @pl.function(type=pl.FunctionType.InCore)
+        def paged(
+            self,
+            x: pl.Tensor[[64, 64], pl.FP32],
+            n: pl.Tensor[[1], pl.INT32],
+            scale: pl.Tensor[[2, 32], pl.FP32],
+            output: pl.Out[pl.Tensor[[2, 32], pl.FP32]],
+        ) -> pl.Tensor[[2, 32], pl.FP32]:
+            limit = pl.cast(pl.read(n, [0]), pl.INDEX)
+            col = pl.row_sum(x)
+            for page in pl.unroll(2):
+                if page < limit:
+                    r0 = page * 32
+                    part = pl.reshape(col[r0 : r0 + 32, :], [1, 32])
+                    output[page : page + 1, 0:32] = pl.mul(part, scale[page : page + 1, 0:32])
+            return output
+
+    mlir_code = _generate_default_mlir(PagedColumnSlice)
+    alloc_addr = {}
+    for line in _get_alloc_tile_lines(mlir_code):
+        match = re.match(r"(%\w+) = pto\.alloc_tile addr = (%\w+)", line)
+        assert match, f"Expected an addressed alloc_tile, got: {line}"
+        alloc_addr[match.group(1)] = match.group(2)
+
+    col_allocs = [line for line in _get_alloc_tile_lines(mlir_code) if "rows=64, cols=1," in line]
+    assert len(col_allocs) == 1, f"Expected one row_sum column alloc_tile, got: {col_allocs}"
+    col_addr = alloc_addr[col_allocs[0].split(" = ", 1)[0]]
+    tmul_lines = _find_lines(_get_mlir_lines(mlir_code), "pto.tmul ", startswith=True)
+    assert len(tmul_lines) == 2, f"Expected one pto.tmul per page, got: {tmul_lines}"
+    page_addrs = []
+    for line in tmul_lines:
+        reshaped = re.match(r"pto\.tmul ins\((%\w+),", line)
+        assert reshaped, f"Expected pto.tmul to read the reshaped slice first, got: {line}"
+        page_addrs.append(alloc_addr[reshaped.group(1)])
+
+    assert page_addrs[1] != col_addr, (
+        f"Page 1's reshaped slice is addressed at the parent base {col_addr}; it must be offset by 32 rows"
+    )
+    assert page_addrs[0] != page_addrs[1], f"Both pages read the same address {page_addrs[0]}"
+
+
 def test_pto_codegen_if_stmt_only_returns_scalars_for_tile_phi():
     """IfStmt should materialize tile phi values via branch-local copies, not scf.if results."""
 
