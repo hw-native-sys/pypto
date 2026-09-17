@@ -152,7 +152,9 @@ jobs:
           curl --fail --location --retry 3 --connect-timeout 15 --max-time 120 \
             "${torch_npu_release}/${torch_npu_wheel}" -o "$wheel_dir/$torch_npu_wheel"
           printf '%s  %s\n' "$torch_npu_sha" "$wheel_dir/$torch_npu_wheel" | sha256sum --check --strict
-          uv pip install "$wheel_dir/$torch_npu_wheel"
+          # This wheel imports yaml but does not declare PyYAML in its metadata.
+          uv pip install "$wheel_dir/$torch_npu_wheel" 'PyYAML==6.0.3'
+          python -c 'import torch_npu'
           cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DPYPTO_BUILD_TORCH_NPU=ON -DPYPTO_BUILD_TORCH_NPU_TESTS=ON
           cmake --build build --parallel "$PYPTO_BUILD_JOBS"
