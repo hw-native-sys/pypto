@@ -919,7 +919,9 @@ class PTOCodegen : public CodegenBase {
    * one distinct slot is live per loop iteration, the memory space is a local one
    * ptoas supports for multi_tile_buf (vec / mat / acc), and the count is within
    * ptoas's `[2, 16]`. Smaller statically shaped uses are emitted as zero-offset
-   * subviews of the selected covering slot.
+   * subviews of the selected covering slot. Exact-compatible regions with
+   * disjoint conservative lifetimes share one physical multi-buffer handle;
+   * distinct pipeline groups therefore do not reserve storage permanently.
    *
    * The one-slot-per-iteration condition is a ptoas synchronization limit, not a
    * typing one (hw-native-sys/PTOAS#1519 in the pinned ptoas) — see
@@ -1009,10 +1011,10 @@ class PTOCodegen : public CodegenBase {
     /// SSA names emitted as tile views (`pto.subview` / `pto.treshape`).
     std::set<std::string> tile_view_names;
 
-    /// Eligible multi-buffer regions, keyed by the allocation's base Ptr.
+    /// Eligible logical multi-buffer regions, keyed by allocation base. Entries
+    /// with disjoint lifetimes may share one physical `region_ssa`.
     std::map<const ir::Var*, MultiBufferRegion> multi_buffer_regions;
-    /// The same regions in discovery order — the map is keyed by pointer, which
-    /// is not a stable order to emit declarations in.
+    /// One owner base per physical region, in deterministic emission order.
     std::vector<const ir::Var*> multi_buffer_region_order;
 
     int temp_counter = 0;

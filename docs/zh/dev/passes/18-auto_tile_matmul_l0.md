@@ -151,7 +151,9 @@ tile 上，彼此串行依赖，因此只有 M/N 切分才能提供第二个 pin
   对非均匀的边界网格，codegen 按能覆盖所有 tile 的完整 tile 定义该类型，
   并把较小的边界使用发射为零偏移 `pto.subview`；因此边界 tile 仍是合法的
   dbC stage，不会被从 chooser 的设计空间中删除。每个选中的常量 slot 都在其
-  K-loop 之前实例化，循环携带值复用该 handle。
+  K-loop 之前实例化，循环携带值复用该 handle。对于保守生命周期不重叠且
+  类型兼容的 multi-buffer region，PTOAS 复用同一个物理 region，但各自的
+  pipeline group 标识仍保持独立。
 
 调用方显式传入实际发射路径。普通 chooser 驱动的切分对 `k == K` 传入
 pipelined-inner，对 `k < K` 传入 unrolled-grid。重新切分用户手写

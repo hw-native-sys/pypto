@@ -40,6 +40,10 @@ MIXED_VALID = pl.MemRef(slots=2)
 RUNTIME_VALID = pl.MemRef(slots=2)
 CO_LIVE = pl.MemRef(slots=2)
 SIBLING_LOOPS = pl.MemRef(slots=2)
+SEQUENTIAL_A = pl.MemRef(slots=2)
+SEQUENTIAL_B = pl.MemRef(slots=2)
+OVERLAPPING_A = pl.MemRef(slots=2)
+OVERLAPPING_B = pl.MemRef(slots=2)
 
 
 @pl.program
@@ -198,6 +202,48 @@ class SequentialSlotsInSiblingLoops:
             s1: pl.Tile[[64, 64], pl.FP32] = pl.exp(hi)
             output = pl.store(s1, [128 + j * 64, 0], output)
         return output
+
+
+@pl.program
+class SequentialCompatibleRegions:
+    """Two compatible allocations whose complete lifetimes are sequential."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        b: pl.Tensor[[64, 64], pl.FP32],
+        out_a: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        out_b: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> tuple[pl.Tensor[[64, 64], pl.FP32], pl.Tensor[[64, 64], pl.FP32]]:
+        a0: pl.Tile[[64, 64], pl.FP32, SEQUENTIAL_A[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+        a1: pl.Tile[[64, 64], pl.FP32, SEQUENTIAL_A[1], pl.Mem.Vec] = pl.exp(a0)
+        result_a = pl.store(a1, [0, 0], out_a)
+        b0: pl.Tile[[64, 64], pl.FP32, SEQUENTIAL_B[0], pl.Mem.Vec] = pl.load(b, [0, 0], [64, 64])
+        b1: pl.Tile[[64, 64], pl.FP32, SEQUENTIAL_B[1], pl.Mem.Vec] = pl.exp(b0)
+        result_b = pl.store(b1, [0, 0], out_b)
+        return result_a, result_b
+
+
+@pl.program
+class OverlappingCompatibleRegions:
+    """Same region types as above, but both allocations are live together."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        b: pl.Tensor[[64, 64], pl.FP32],
+        out_a: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        out_b: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> tuple[pl.Tensor[[64, 64], pl.FP32], pl.Tensor[[64, 64], pl.FP32]]:
+        a0: pl.Tile[[64, 64], pl.FP32, OVERLAPPING_A[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+        b0: pl.Tile[[64, 64], pl.FP32, OVERLAPPING_B[0], pl.Mem.Vec] = pl.load(b, [0, 0], [64, 64])
+        a1: pl.Tile[[64, 64], pl.FP32, OVERLAPPING_A[1], pl.Mem.Vec] = pl.exp(a0)
+        b1: pl.Tile[[64, 64], pl.FP32, OVERLAPPING_B[1], pl.Mem.Vec] = pl.exp(b0)
+        result_a = pl.store(a1, [0, 0], out_a)
+        result_b = pl.store(b1, [0, 0], out_b)
+        return result_a, result_b
 
 
 @pl.program
@@ -372,6 +418,26 @@ class TestPtoasPlannerEmitsMultiBuffer:
         mlir = _codegen(SequentialSlotsInSiblingLoops, passes.MemoryPlanner.PTOAS)
         assert len(_lines(mlir, "pto.alloc_multi_tile")) == 1, mlir
         assert len(_lines(mlir, "pto.multi_tile_get")) == 2, mlir
+
+    def test_sequential_compatible_allocations_share_one_physical_region(self):
+        """Function-head regions recover reuse proved by conservative lifetimes."""
+        mlir = _codegen(SequentialCompatibleRegions, passes.MemoryPlanner.PTOAS)
+        assert len(_lines(mlir, "pto.alloc_multi_tile")) == 1, mlir
+        regions = {
+            line.split("pto.multi_tile_get ", 1)[1].split("[", 1)[0]
+            for line in _lines(mlir, "pto.multi_tile_get")
+        }
+        assert len(regions) == 1, mlir
+
+    def test_overlapping_compatible_allocations_keep_distinct_regions(self):
+        """Type compatibility alone cannot alias simultaneously-live slots."""
+        mlir = _codegen(OverlappingCompatibleRegions, passes.MemoryPlanner.PTOAS)
+        assert len(_lines(mlir, "pto.alloc_multi_tile")) == 2, mlir
+        regions = {
+            line.split("pto.multi_tile_get ", 1)[1].split("[", 1)[0]
+            for line in _lines(mlir, "pto.multi_tile_get")
+        }
+        assert len(regions) == 2, mlir
 
     def test_slot_tiles_take_no_alloc_tile(self):
         """A slot is taken from the region, never allocated beside it."""

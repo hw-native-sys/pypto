@@ -23,9 +23,11 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <queue>
 #include <set>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -49,6 +51,7 @@
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/tile_buf_signature.h"
@@ -1641,6 +1644,20 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     colive_collector.VisitStmt(func->body_);
   }
 
+  // PTOAS treats a function-head `alloc_multi_tile` as live for the whole
+  // function, so two declarations cannot reuse storage even when the IR
+  // allocations are sequential. Recover that reuse explicitly below: map each
+  // slotted base to its conservative IR lifetime, then let compatible,
+  // non-overlapping declarations share one multi-buffer handle.
+  const auto lifetime_analysis = ir::AnalyzeAllocationLifetimes(func);
+  std::map<const ir::Var*, std::pair<int, int>> base_lifetimes;
+  for (const auto& interval : lifetime_analysis.lifetimes) {
+    const auto tile_type = As<TileType>(interval.variable->GetType());
+    if (!tile_type || !tile_type->memref_.has_value()) continue;
+    const auto memref = ir::GetDefinedMemRef(tile_type);
+    base_lifetimes[memref->base_.get()] = {interval.def_point, interval.last_use_point};
+  }
+
   /// One allocation's slots, accumulated over every tile bound to it. `blocker`
   /// is empty while the allocation can still become a region, and otherwise says
   /// what stopped it — the author has to hear that, because under this planner a
@@ -1811,6 +1828,31 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     }
   }
 
+  // Allocate one physical region per simultaneously-live compatibility class.
+  // Candidates are processed by definition point. For each exact region type,
+  // the min-heap exposes the physical region that becomes free first, giving an
+  // O(R log R) interval allocation rather than a pairwise scan over regions.
+  std::stable_sort(discovery_order.begin(), discovery_order.end(),
+                   [&](const ir::Var* lhs, const ir::Var* rhs) {
+                     auto lhs_it = base_lifetimes.find(lhs);
+                     auto rhs_it = base_lifetimes.find(rhs);
+                     if (lhs_it == base_lifetimes.end()) return false;
+                     if (rhs_it == base_lifetimes.end()) return true;
+                     return lhs_it->second.first < rhs_it->second.first;
+                   });
+
+  struct AvailableRegion {
+    int last_use = 0;
+    const ir::Var* owner = nullptr;
+  };
+  struct EarliestAvailable {
+    bool operator()(const AvailableRegion& lhs, const AvailableRegion& rhs) const {
+      return lhs.last_use > rhs.last_use;
+    }
+  };
+  using RegionHeap = std::priority_queue<AvailableRegion, std::vector<AvailableRegion>, EarliestAvailable>;
+  std::map<std::tuple<std::string, int64_t, int64_t>, RegionHeap> available_regions;
+
   for (const ir::Var* base : discovery_order) {
     Candidate& candidate = candidates.at(base);
     // Degrading to one alloc_tile per slot would silently undo the separation the
@@ -1835,10 +1877,29 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     region.count = candidate.count;
     region.slot_type_str = candidate.slot_type_str;
     region.mtb_type_str = FormatMultiTileBufTypeString(region.slot_type_str, region.count);
-    region.region_ssa = NewNamedTemp(base->name_hint_ + "_mb");
+
+    const auto compatibility = std::make_tuple(region.mtb_type_str, region.valid_row, region.valid_col);
+    auto lifetime_it = base_lifetimes.find(base);
+    bool reused = false;
+    if (lifetime_it != base_lifetimes.end()) {
+      RegionHeap& heap = available_regions[compatibility];
+      if (!heap.empty() && heap.top().last_use <= lifetime_it->second.first) {
+        const AvailableRegion available = heap.top();
+        heap.pop();
+        region.region_ssa = fs_.multi_buffer_regions.at(available.owner).region_ssa;
+        heap.push({lifetime_it->second.second, available.owner});
+        reused = true;
+      }
+    }
+    if (!reused) {
+      region.region_ssa = NewNamedTemp(base->name_hint_ + "_mb");
+      fs_.multi_buffer_region_order.push_back(base);
+      if (lifetime_it != base_lifetimes.end()) {
+        available_regions[compatibility].push({lifetime_it->second.second, base});
+      }
+    }
 
     fs_.multi_buffer_regions.emplace(base, std::move(region));
-    fs_.multi_buffer_region_order.push_back(base);
   }
 }
 
