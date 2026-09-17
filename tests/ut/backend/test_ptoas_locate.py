@@ -240,6 +240,24 @@ def test_failed_check_is_not_cached(tmp_path):
     check_ptoas_version(str(ptoas))
 
 
+def test_relative_path_cannot_reuse_another_directorys_result(tmp_path, monkeypatch):
+    """A relative PTOAS_ROOT names a different ptoas once the cwd changes."""
+    current, stale = tmp_path / "current", tmp_path / "stale"
+    _make_versioned_ptoas(current / "ptoas-bin" / "bin" / "ptoas", f"ptoas {_PINNED}")
+    _make_versioned_ptoas(stale / "ptoas-bin" / "bin" / "ptoas", f"ptoas {_OLDER}")
+    monkeypatch.setenv("PTOAS_ROOT", "ptoas-bin")
+
+    monkeypatch.chdir(current)
+    ptoas = find_ptoas_binary()
+    assert ptoas is not None
+    assert ptoas == os.path.join("ptoas-bin", "bin", "ptoas")
+    check_ptoas_version(ptoas)
+
+    monkeypatch.chdir(stale)
+    with pytest.raises(RuntimeError, match=rf"is version {_OLDER}"):
+        check_ptoas_version(ptoas)
+
+
 def test_run_ptoas_rejects_older_version_before_assembling(tmp_path, monkeypatch):
     root = tmp_path / "ptoas-bin"
     ptoas = _make_versioned_ptoas(root / "bin" / "ptoas", f"ptoas {_OLDER}")

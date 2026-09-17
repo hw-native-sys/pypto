@@ -83,7 +83,11 @@ def check_ptoas_version(ptoas_bin: str) -> None:
             :data:`PTOAS_MIN_VERSION`.
     """
     with _version_lock:
-        if ptoas_bin in _verified_binaries:
+        # Key by the file the path names now: a relative PTOAS_ROOT or a
+        # repointed symlink can make one path string name a different ptoas.
+        # The probe itself still runs the unresolved path, as callers do.
+        cache_key = os.path.realpath(ptoas_bin)
+        if cache_key in _verified_binaries:
             return
         install_hint = (
             f"Install PTOAS {PTOAS_MIN_VERSION} or newer from {PTOAS_RELEASES_URL} "
@@ -114,4 +118,4 @@ def check_ptoas_version(ptoas_bin: str) -> None:
                 f"ptoas at '{ptoas_bin}' is version {found}, but PyPTO requires PTOAS >= "
                 f"{PTOAS_MIN_VERSION}. {install_hint}"
             )
-        _verified_binaries.add(ptoas_bin)
+        _verified_binaries.add(cache_key)
