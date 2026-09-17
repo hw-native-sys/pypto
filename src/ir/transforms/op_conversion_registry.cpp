@@ -524,6 +524,77 @@ void OpConversionRegistry::RegisterElementwiseBinaryOps() {
 // ============================================================================
 
 void OpConversionRegistry::RegisterMemoryOps() {
+  RegisterCustom(
+      "tensor.copy",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        INTERNAL_CHECK_SPAN(args.size() == 2 || args.size() == 5, span)
+            << "tensor.copy conversion expects 2 or 5 arguments";
+        CHECK_SPAN(AsTensorTypeLike(args[0]->GetType()) && AsTensorTypeLike(args[1]->GetType()), span)
+            << "tensor.copy requires addressable tensors, not computed tile values";
+        auto& reg = OpRegistry::GetInstance();
+        const auto source = GetKwargOr<MemorySpace>(kwargs, "source_memory", MemorySpace::DDR);
+        const auto target = GetKwargOr<MemorySpace>(kwargs, "target_memory", MemorySpace::SRAM);
+        const auto src_type = AsTensorTypeLike(args[1]->GetType());
+        const auto shape_arg = args.size() == 5 ? args[4] : MakeShapeTuple(src_type->shape_, span);
+        const auto dst_arg = args.size() == 5 ? args[2] : MakeZeroOffsets(src_type->shape_.size(), span);
+        const auto src_arg = args.size() == 5 ? args[3] : MakeZeroOffsets(src_type->shape_.size(), span);
+        const auto& shape = As<MakeTuple>(shape_arg)->elements_;
+        const auto& dst_base = As<MakeTuple>(dst_arg)->elements_;
+        const auto& src_base = As<MakeTuple>(src_arg)->elements_;
+        auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+        auto one = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+        // Bound temporary storage independently of the tensor size. Each outer
+        // dimension selects one row; only the innermost dimension is chunked.
+        int64_t width = 256;
+        if (auto cols = As<ConstInt>(shape.back())) width = std::min(width, cols->value_);
+        auto chunk = std::make_shared<ConstInt>(width, DataType::INDEX, span);
+        std::vector<ExprPtr> positions(shape.size());
+        std::function<ConversionResult(size_t, ExprPtr)> lower;
+        lower = [&](size_t dim, ExprPtr dst) -> ConversionResult {
+          if (dim == shape.size()) {
+            std::vector<ExprPtr> src_offsets, dst_offsets;
+            for (size_t i = 0; i < shape.size(); ++i) {
+              src_offsets.push_back(MakeAdd(src_base[i], positions[i], span));
+              dst_offsets.push_back(MakeAdd(dst_base[i], positions[i], span));
+            }
+            std::vector<ExprPtr> physical(shape.size(), one);
+            physical.back() = chunk;
+            auto valid = physical;
+            valid.back() = MakeMin(chunk, MakeSub(shape.back(), positions.back(), span), span);
+            auto load = reg.Create("tile.load",
+                                   {args[1], MakeShapeTuple(src_offsets, span),
+                                    MakeShapeTuple(physical, span), MakeShapeTuple(valid, span)},
+                                   {{"source_memory", source}, {"target_memory", MemorySpace::Vec}}, span);
+            auto tile = std::make_shared<Var>("copy_chunk", load->GetType(), span);
+            std::vector<StmtPtr> prologue{std::make_shared<AssignStmt>(tile, load, span)};
+            if (shape.size() != 2) {
+              auto reshape = reg.Create("tile.reshape", {tile, MakeShapeTuple({one, chunk}, span)}, span);
+              tile = std::make_shared<Var>("copy_chunk_2d", reshape->GetType(), span);
+              prologue.push_back(std::make_shared<AssignStmt>(tile, reshape, span));
+            }
+            auto store = reg.Create("tile.store", {tile, MakeShapeTuple(dst_offsets, span), dst},
+                                    {{"source_memory", MemorySpace::Vec}, {"target_memory", target}}, span);
+            return ConversionResult{std::move(prologue), store};
+          }
+          auto index = std::make_shared<Var>("copy_i" + std::to_string(dim),
+                                             std::make_shared<ScalarType>(DataType::INDEX), span);
+          positions[dim] = index;
+          auto carried = std::make_shared<IterArg>("copy_dst", dst->GetType(), dst, span);
+          auto inner = lower(dim + 1, carried);
+          auto value = std::make_shared<Var>("copy_updated", dst->GetType(), span);
+          inner.prologue.push_back(std::make_shared<AssignStmt>(value, inner.result, span));
+          inner.prologue.push_back(std::make_shared<YieldStmt>(std::vector<ExprPtr>{value}, span));
+          auto result = std::make_shared<Var>("copy_result", dst->GetType(), span);
+          ExprPtr step = dim + 1 == shape.size() ? chunk : one;
+          auto loop = std::make_shared<ForStmt>(
+              index, zero, shape[dim], step, std::vector<IterArgPtr>{carried},
+              SeqStmts::Flatten(std::move(inner.prologue), span), std::vector<VarPtr>{result}, span);
+          return ConversionResult{{loop}, result};
+        };
+        return lower(0, args[0]);
+      });
+
   // tensor.slice → tile.load (gm_tensor) or tile.slice (local_tensor)
   RegisterCustom(
       "tensor.slice",
@@ -826,6 +897,10 @@ void OpConversionRegistry::RegisterMemoryOps() {
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
          const Span& span) -> ConversionResult {
         INTERNAL_CHECK_SPAN(args.size() == 1, span) << "tensor.create conversion expects 1 arg (shape)";
+        CHECK_SPAN(GetKwargOr<MemorySpace>(kwargs, "memory_type", MemorySpace::DDR) != MemorySpace::SRAM,
+                   span)
+            << "Create SRAM-declared tensors in orchestration and pass them into InCore functions; "
+               "SRAM is not a tile storage space";
         auto& op_reg = OpRegistry::GetInstance();
 
         // No target_memory: `tensor.create` says nothing about where the tile

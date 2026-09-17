@@ -3231,6 +3231,8 @@ std::string IRPythonPrinter::PrintExprForType(const ExprPtr& expr) {
     return GetVarName(var.get());
   }
   IRPythonPrinter temp_printer(prefix_);
+  temp_printer.var_rename_map_ = var_rename_map_;
+  temp_printer.free_body_vars_ = free_body_vars_;
   temp_printer.dyn_var_rename_map_ = dyn_var_rename_map_;
   // Composite dims must reparse to the same tree, not Python-eval to a folded
   // int. Typed const leaves (pl.const(v, pl.INDEX)) make them self-describing;

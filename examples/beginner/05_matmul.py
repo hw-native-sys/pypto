@@ -14,12 +14,15 @@ Kernel:
   matmul_64 -- full 64x64 matmul in one shot
 
 Concepts introduced:
+  - DDR tensor allocation and DDR -> DDR copy through load/store
   - Memory hierarchy: GM -> Mat (L1) -> Left/Right (L0A/L0B) -> matmul -> Acc (L0C)
   - pl.matmul for cube unit multiplication
 
 Run:  python examples/beginner/05_matmul.py
 Next: examples/beginner/06_concat.py
 """
+
+import argparse
 
 import pypto.language as pl
 import torch
@@ -28,9 +31,18 @@ from pypto.runtime import RunConfig
 
 @pl.jit
 def matmul_64(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+    a1 = pl.create_tensor(a.shape, dtype=a.dtype, memory_type=pl.Mem.DDR)
+    b1 = pl.create_tensor(b.shape, dtype=b.dtype, memory_type=pl.Mem.DDR)
+
+    # copy is destination-first. Run its load/store instructions in an InCore
+    # scope before the matmul scope consumes the separately allocated buffers.
     with pl.at(level=pl.Level.CORE_GROUP):
-        tile_a_l1 = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
-        tile_b_l1 = pl.load(b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+        a1 = pl.copy(a1, a, source_memory=pl.Mem.DDR, target_memory=pl.Mem.DDR)
+        b1 = pl.copy(b1, b, source_memory=pl.Mem.DDR, target_memory=pl.Mem.DDR)
+
+    with pl.at(level=pl.Level.CORE_GROUP):
+        tile_a_l1 = pl.load(a1, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+        tile_b_l1 = pl.load(b1, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
         tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
         tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
         tile_c_l0c = pl.matmul(tile_a_l0a, tile_b_l0b)
@@ -39,7 +51,10 @@ def matmul_64(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
 
 
 if __name__ == "__main__":
-    cfg = RunConfig()
+    parser = argparse.ArgumentParser(description="Validate DDR copy followed by 64x64 matmul")
+    parser.add_argument("--platform", default="a2a3sim", choices=["a2a3sim", "a5sim", "a2a3", "a5"])
+    args = parser.parse_args()
+    cfg = RunConfig(platform=args.platform)
     torch.manual_seed(0)
 
     a = torch.randn(64, 64, dtype=torch.float32)

@@ -112,6 +112,7 @@ void BindBackend(nb::module_& m) {
       .def(nb::init<std::map<Die, int>>(), nb::arg("die_counts"), "Create SoC from die counts map")
       .def(nb::init<const Die&, int>(), nb::arg("die"), nb::arg("count"), "Create SoC with single die type")
       .def_prop_ro("die_counts", &SoC::GetDieCounts, "Map of die configurations to counts")
+      .def_prop_ro("mems", &SoC::GetMems, "Chip-shared memory components")
       .def("total_die_count", &SoC::TotalDieCount, "Get total number of dies in SoC")
       .def("total_cluster_count", &SoC::TotalClusterCount, "Get total number of clusters in SoC")
       .def("total_core_count", &SoC::TotalCoreCount, "Get total number of cores in SoC")

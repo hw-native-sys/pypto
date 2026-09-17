@@ -38,6 +38,34 @@ from ._pad_value import normalize_pad_value
 from .tile_ops import resolve_gather_compare_cmp_mode
 
 
+def copy(
+    dst: Expr,
+    src: Expr,
+    dst_offsets: Sequence[int | Expr] | None = None,
+    src_offsets: Sequence[int | Expr] | None = None,
+    shape: Sequence[int | Expr] | None = None,
+    *,
+    source_memory: MemorySpace = MemorySpace.DDR,
+    target_memory: MemorySpace = MemorySpace.SRAM,
+    span: Span | None = None,
+) -> Call:
+    """Copy a tensor region between DDR/SRAM endpoints, including DDR to DDR.
+
+    Returns the destination tensor, aliasing its existing storage. Dynamic
+    offsets and extents must describe an in-bounds region at runtime.
+    Omit all three region arguments to copy matching whole tensors.
+    """
+    actual_span = _get_span_or_capture(span)
+    args = [dst, src]
+    if dst_offsets is not None or src_offsets is not None or shape is not None:
+        if dst_offsets is None or src_offsets is None or shape is None:
+            raise ValueError("copy requires dst_offsets, src_offsets and shape together, or none of them")
+        args.extend(_to_make_tuple(v, actual_span) for v in (dst_offsets, src_offsets, shape))
+    return _ir_core.create_op_call(
+        "tensor.copy", args, {"source_memory": source_memory, "target_memory": target_memory}, actual_span
+    )
+
+
 def create(
     shape: Sequence[int | Expr] | _ir_core.MakeTuple,
     dtype: DataType,
@@ -45,6 +73,8 @@ def create(
     manual_dep: bool = False,
     init_value: int | float | None = None,
     span: Span | None = None,
+    *,
+    memory_type: MemorySpace = MemorySpace.DDR,
 ) -> Call:
     """Create a new tensor with specified shape and dtype.
 
@@ -52,6 +82,8 @@ def create(
         shape: List of dimension sizes (int or Expr), or a MakeTuple
         dtype: Data type of tensor elements
         layout: Tensor layout (default: ND)
+        memory_type: Logical external memory, DDR (default) or SRAM. Current
+            runtimes back both with DDR; SRAM records allocation intent only.
         init_value: **Removed.** Passing anything but ``None`` raises
             ``ValueError``. The runtime dropped
             ``TensorCreateInfo::set_initial_value``, so orchestration can no
@@ -84,6 +116,11 @@ def create(
 
     args = [shape_tuple]
     kwargs: dict[str, Any] = {"dtype": dtype, "layout": layout}
+    if memory_type not in (MemorySpace.DDR, MemorySpace.SRAM):
+        raise ValueError(f"create_tensor memory_type must be DDR or SRAM, got {memory_type}")
+    # Omitted DDR is canonical, preserving existing IR and positional layout calls.
+    if memory_type != MemorySpace.DDR:
+        kwargs["memory_type"] = memory_type
     if manual_dep:
         kwargs["manual_dep"] = True
     if init_value is not None:

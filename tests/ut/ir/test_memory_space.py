@@ -121,8 +121,8 @@ def test_sram_has_independent_external_routes(backend_type):
     assert be.find_mem_path(MS.DDR, MS.Mat) == [MS.DDR, MS.Mat]
     assert be.find_mem_path(MS.SRAM, MS.Left) == [MS.SRAM, MS.Mat, MS.Left]
     assert be.find_mem_path(MS.Vec, MS.SRAM) == [MS.Vec, MS.SRAM]
-    # Topology membership does not create a per-core allocation pool.
-    assert be.get_mem_size(MS.SRAM) == 0
+    # Capacity belongs to the chip, not to a per-core allocation pool.
+    assert be.get_mem_size(MS.SRAM) == 256 * 1024 * 1024
 
 
 @pytest.mark.parametrize("backend_type", _TARGETS)

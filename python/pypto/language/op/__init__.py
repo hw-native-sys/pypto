@@ -42,7 +42,6 @@ from .system_ops import (
     tpush_to_aiv,
 )
 from .tensor_ops import ci as arange
-from .tensor_ops import create as create_tensor
 
 # Promoted tensor-only ops (accessible as pl.create_tensor, etc.). Names that
 # also exist at tile level are re-exported below from ``unified_ops`` instead so
@@ -51,6 +50,7 @@ from .tensor_ops import create as create_tensor
 # (``gather`` / ``scatter``), or that carry no operand to dispatch on at all
 # (``full``, ``random``, and the block-identity queries).
 from .tensor_ops import (
+    copy,
     create_l1,
     dim,
     expand_clone,
@@ -63,6 +63,7 @@ from .tensor_ops import (
     random,
     scatter,
 )
+from .tensor_ops import create as create_tensor
 
 # Promoted tile-only ops (accessible as pl.load, etc.). ``abs`` and the
 # bitwise family are re-exported below from ``unified_ops`` instead so the
@@ -326,6 +327,7 @@ __all__ = [
     # Promoted tensor-only
     "arange",
     "create_tensor",
+    "copy",
     "dim",
     "expand_clone",
     "full",

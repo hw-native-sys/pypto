@@ -105,6 +105,7 @@ from .op.tensor_ops import ci as arange
 # reconcile (``gather`` / ``scatter``), or that carry no operand to dispatch on
 # at all (``full``, ``random``, and the block-identity queries).
 from .op.tensor_ops import (
+    copy,
     create_l1,
     create_tensor,
     dim,
@@ -491,6 +492,7 @@ __all__ = [
     "sort32",
     # Promoted tensor-only
     "create_tensor",
+    "copy",
     "dim",
     "full",
     "ScopeMode",

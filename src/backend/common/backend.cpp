@@ -137,6 +137,9 @@ msgpack::object SerializeDie(const Die& die, msgpack::zone& zone) {
 // Serialize SoC to msgpack object
 msgpack::object SerializeSoC(const SoC& soc, msgpack::zone& zone) {
   std::map<std::string, msgpack::object> soc_map;
+  std::vector<msgpack::object> mems;
+  for (const auto& mem : soc.GetMems()) mems.push_back(SerializeMem(mem, zone));
+  soc_map["mems"] = msgpack::object(mems, zone);
 
   // Serialize die_counts map
   std::vector<msgpack::object> dies_vec;
@@ -273,7 +276,11 @@ std::shared_ptr<const SoC> DeserializeSoC(const msgpack::object& obj) {
     mem_graph[from] = neighbors;
   }
 
-  return std::make_shared<SoC>(std::move(die_counts), std::move(mem_graph));
+  std::vector<Mem> mems;
+  if (const auto it = soc_map.find("mems"); it != soc_map.end()) {
+    for (const auto& mem : it->second.as<std::vector<msgpack::object>>()) mems.push_back(DeserializeMem(mem));
+  }
+  return std::make_shared<SoC>(std::move(die_counts), std::move(mem_graph), std::move(mems));
 }
 
 }  // namespace
@@ -363,6 +370,9 @@ std::vector<ir::MemorySpace> Backend::FindMemPath(ir::MemorySpace from, ir::Memo
 }
 
 uint64_t Backend::GetMemSize(ir::MemorySpace mem_type) const {
+  for (const auto& mem : soc_->GetMems()) {
+    if (mem.GetMemType() == mem_type) return mem.GetMemSize();
+  }
   // Find the first memory of the requested type and return its size
   for (const auto& [die, die_count] : soc_->GetDieCounts()) {
     for (const auto& [cluster, cluster_count] : die.GetClusterCounts()) {
@@ -395,6 +405,9 @@ int Backend::GetCoreCount(ir::CoreType core_type) const {
 }
 
 uint64_t Backend::GetMemAlignment(ir::MemorySpace mem_type) const {
+  for (const auto& mem : soc_->GetMems()) {
+    if (mem.GetMemType() == mem_type) return mem.GetAlignment();
+  }
   for (const auto& [die, die_count] : soc_->GetDieCounts()) {
     for (const auto& [cluster, cluster_count] : die.GetClusterCounts()) {
       for (const auto& [core, core_count] : cluster.GetCoreCounts()) {
@@ -488,6 +501,9 @@ std::optional<ir::PipeType> InferTransferPipe(const Backend& backend, ir::Memory
   using Pipe = ir::PipeType;
   if (!HasDirectMemoryRoute(backend, source, destination)) return std::nullopt;
 
+  if (source == ir::MemorySpace::DDR && destination == ir::MemorySpace::SRAM) return Pipe::MTE2;
+  if (source == ir::MemorySpace::SRAM && destination == ir::MemorySpace::DDR) return Pipe::MTE3;
+
   if ((source == ir::MemorySpace::DDR || source == ir::MemorySpace::SRAM) &&
       (destination == ir::MemorySpace::Vec || destination == ir::MemorySpace::Mat)) {
     return Pipe::MTE2;
@@ -511,6 +527,18 @@ std::optional<ir::PipeType> InferTransferPipe(const Backend& backend, ir::Memory
 
 std::optional<ir::PipeType> InferCommonPtoPipe(const Backend& backend, const ir::CallPtr& call) {
   using Pipe = ir::PipeType;
+
+  if (ir::IsOp(call, "tensor.copy")) {
+    // DDR self-space transfers use the same load/store lowering as DDR/SRAM.
+    // There is no topology self-edge or single physical transfer pipe: MTE2
+    // denotes the logical read leg; lowered stores are inferred as MTE3.
+    if (call->GetKwarg<ir::MemorySpace>("source_memory") == ir::MemorySpace::DDR &&
+        call->GetKwarg<ir::MemorySpace>("target_memory") == ir::MemorySpace::DDR) {
+      return Pipe::MTE2;
+    }
+    return InferTransferPipe(backend, call->GetKwarg<ir::MemorySpace>("source_memory"),
+                             call->GetKwarg<ir::MemorySpace>("target_memory"));
+  }
 
   std::vector<ir::MemorySpace> result_spaces;
   CollectPipeMemorySpaces(call->GetType(), &result_spaces);

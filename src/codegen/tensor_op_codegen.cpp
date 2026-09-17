@@ -88,6 +88,10 @@ REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
   size_t ndim = result_type->shape_.size();
 
   std::ostringstream oss;
+  if (op->GetKwarg<MemorySpace>("memory_type", MemorySpace::DDR) == MemorySpace::SRAM) {
+    // Keep the logical request visible without pretending the runtime has an SRAM allocator.
+    oss << "// memory_type=SRAM: emulated with DDR backing by the current runtime.\n";
+  }
   oss << "uint32_t " << result_var << "_ci_shapes[" << ndim << "] = {";
   for (size_t i = 0; i < ndim; ++i) {
     if (i > 0) oss << ", ";

@@ -1360,7 +1360,8 @@ class TestOrchestration:
         # The after-scope consumer reads the hoisted phi directly (in scope).
         assert f"add_input({phi_name})" in code, code
 
-    def test_tensor_create(self):
+    @pytest.mark.parametrize("memory_type", [pl.Mem.DDR, pl.Mem.SRAM])
+    def test_tensor_create(self, memory_type):
         """Test tensor.create generates TensorCreateInfo with shape/dtype."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
@@ -1383,7 +1384,9 @@ class TestOrchestration:
                 a: pl.Tensor[[32, 32], pl.FP16],
                 result: pl.Out[pl.Tensor[[32, 32], pl.FP16]],
             ) -> pl.Tensor[[32, 32], pl.FP16]:
-                buf: pl.Tensor[[32, 32], pl.FP16] = pl.create_tensor([32, 32], dtype=pl.FP16)
+                buf: pl.Tensor[[32, 32], pl.FP16] = pl.create_tensor(
+                    [32, 32], dtype=pl.FP16, memory_type=memory_type
+                )
                 result = self.kernel_fill(buf, result)
                 return result
 
@@ -1395,6 +1398,7 @@ class TestOrchestration:
         assert "TensorCreateInfo buf_ci(buf_ci_shapes, 2, DataType::FLOAT16)" in code
         assert "const Tensor& buf = " in code
         assert "make_tensor_external(nullptr, buf_ci_shapes, 2, DataType::FLOAT16)" not in code
+        assert ("memory_type=SRAM: emulated with DDR backing" in code) == (memory_type == pl.Mem.SRAM)
 
     def test_tensor_create_with_manual_dep(self):
         """``pl.create_tensor(..., manual_dep=True)`` opts a tensor out of OverlapMap

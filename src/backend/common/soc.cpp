@@ -91,11 +91,13 @@ bool Die::operator==(const Die& other) const { return cluster_counts_ == other.c
 
 // ========== SoC Implementation ==========
 
-SoC::SoC(std::map<Die, int> die_counts, std::map<ir::MemorySpace, std::vector<ir::MemorySpace>> mem_graph)
-    : die_counts_(std::move(die_counts)), mem_graph_(std::move(mem_graph)) {}
+SoC::SoC(std::map<Die, int> die_counts, std::map<ir::MemorySpace, std::vector<ir::MemorySpace>> mem_graph,
+         std::vector<Mem> mems)
+    : die_counts_(std::move(die_counts)), mems_(std::move(mems)), mem_graph_(std::move(mem_graph)) {}
 
-SoC::SoC(const Die& die, int count, std::map<ir::MemorySpace, std::vector<ir::MemorySpace>> mem_graph)
-    : die_counts_({{die, count}}), mem_graph_(std::move(mem_graph)) {}
+SoC::SoC(const Die& die, int count, std::map<ir::MemorySpace, std::vector<ir::MemorySpace>> mem_graph,
+         std::vector<Mem> mems)
+    : die_counts_({{die, count}}), mems_(std::move(mems)), mem_graph_(std::move(mem_graph)) {}
 
 int SoC::TotalDieCount() const {
   return std::accumulate(die_counts_.begin(), die_counts_.end(), 0,
@@ -154,7 +156,7 @@ const SoC& Create910BSoC() {
     mem_graph[ir::MemorySpace::Mat] = {ir::MemorySpace::Left, ir::MemorySpace::Right, ir::MemorySpace::Bias};
     mem_graph[ir::MemorySpace::Acc] = {ir::MemorySpace::Mat, ir::MemorySpace::DDR, ir::MemorySpace::SRAM};
 
-    return SoC(die, 1, std::move(mem_graph));
+    return SoC(die, 1, std::move(mem_graph), {Mem(ir::MemorySpace::SRAM, 256ULL * 1024 * 1024, 32)});
   }();
   return soc;
 }
@@ -202,7 +204,7 @@ const SoC& Create950SoC() {
     mem_graph[ir::MemorySpace::Acc] = {ir::MemorySpace::Vec, ir::MemorySpace::Mat, ir::MemorySpace::DDR,
                                     ir::MemorySpace::SRAM};
 
-    return SoC(die, 2, std::move(mem_graph));
+    return SoC(die, 2, std::move(mem_graph), {Mem(ir::MemorySpace::SRAM, 256ULL * 1024 * 1024, 32)});
   }();
   return soc;
 }

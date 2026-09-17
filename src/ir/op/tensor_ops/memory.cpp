@@ -36,9 +36,59 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
+#include "src/ir/op/distributed/comm_op_utils.h"
 
 namespace pypto {
 namespace ir {
+
+TypePtr DeduceTensorCopyType(const std::vector<ExprPtr>& args,
+                             const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  CHECK(args.size() == 2 || args.size() == 5)
+      << "tensor.copy expects dst, src, optionally followed by dst_offsets, src_offsets, shape";
+  for (const auto& arg : args) CHECK(arg) << "tensor.copy arguments must not be null";
+  auto dst = AsTensorTypeLike(args[0]->GetType());
+  auto src = AsTensorTypeLike(args[1]->GetType());
+  CHECK_SPAN(dst && src, args[0]->span_) << "tensor.copy requires tensor endpoints";
+  CHECK_SPAN(dst->dtype_ == src->dtype_, args[0]->span_) << "tensor.copy requires matching dtypes";
+  CHECK_SPAN(!dst->shape_.empty() && dst->shape_.size() == src->shape_.size(), args[0]->span_)
+      << "tensor.copy requires matching nonzero ranks";
+  auto source = GetRequiredKwarg<MemorySpace>(kwargs, "source_memory", "tensor.copy");
+  auto target = GetRequiredKwarg<MemorySpace>(kwargs, "target_memory", "tensor.copy");
+  CHECK_SPAN((source == MemorySpace::DDR && (target == MemorySpace::DDR || target == MemorySpace::SRAM)) ||
+                 (source == MemorySpace::SRAM && target == MemorySpace::DDR),
+             args[0]->span_)
+      << "tensor.copy requires DDR -> DDR, DDR -> SRAM or SRAM -> DDR endpoints";
+  if (args.size() == 2) {
+    comm_op::ValidateTransferShapeContract(dst->shape_, src->shape_, "tensor.copy", true);
+  } else {
+    comm_op::ValidateRegionArgs(args, 2, dst->shape_, src->shape_, "tensor.copy");
+  }
+  for (size_t i = 2; i < args.size(); ++i) {
+    for (const auto& element : As<MakeTuple>(args[i])->elements_) {
+      auto scalar = As<ScalarType>(element->GetType());
+      CHECK_SPAN(scalar && scalar->dtype_.IsInt(), element->span_)
+          << "tensor.copy offsets and shape must contain integers";
+    }
+  }
+  return args[0]->GetType();
+}
+
+REGISTER_OP("tensor.copy")
+    .set_op_category("TensorOp")
+    .set_description("Copy whole tensors or regions between DDR/SRAM endpoints, including DDR to DDR")
+    .add_argument("dst", "Destination tensor")
+    .add_argument("src", "Source tensor with matching dtype and rank")
+    .add_argument("dst_offsets", "Optional destination offsets; supply all three region arguments together")
+    .add_argument("src_offsets", "Optional source offsets")
+    .add_argument("shape", "Optional transfer extents")
+    .set_attr<MemorySpace>("source_memory")
+    .set_attr<MemorySpace>("target_memory")
+    .set_output_reuses_input(0)
+    .set_arg_effect(0, ArgEffect::Write)
+    .set_write_channel(WriteChannel::Dma)
+    .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
+    .no_memory_spec()
+    .f_deduce_type(DeduceTensorCopyType);
 
 TypePtr DeduceTensorReadType(const std::vector<ExprPtr>& args,
                              const std::vector<std::pair<std::string, std::any>>& kwargs) {
@@ -88,6 +138,9 @@ TypePtr DeduceTensorCreateType(const std::vector<ExprPtr>& args,
   // dtype comes from kwargs
   CHECK(args.size() == 1) << "tensor.create requires exactly 1 argument (shape tuple), but got "
                           << args.size();
+  const auto memory_type = GetKwargOr<MemorySpace>(kwargs, "memory_type", MemorySpace::DDR);
+  CHECK_SPAN(memory_type == MemorySpace::DDR || memory_type == MemorySpace::SRAM, args[0]->span_)
+      << "tensor.create memory_type must be DDR or SRAM";
 
   // Extract dtype from kwargs
   bool found_dtype = false;
@@ -540,6 +593,7 @@ REGISTER_OP("tensor.create")
     .add_argument("shape", "Shape dimensions (TupleType of ScalarType(INT64))")
     .set_attr<DataType>("dtype")
     .set_attr<TensorLayout>("layout")
+    .set_attr<MemorySpace>("memory_type")
     .set_attr<bool>("manual_dep")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

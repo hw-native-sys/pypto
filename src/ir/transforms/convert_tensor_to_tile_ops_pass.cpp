@@ -431,7 +431,7 @@ class TensorArgsInConvertedOpsCollector : public IRVisitor {
           "tensor.slice",        "tensor.assemble",     "tensor.read",
           "tensor.write",        "tensor.expand_clone", "tensor.gather",
           "tensor.paged_gather", "tensor.create_l1",    "tensor.gather_row"};
-      if (kSelfLoadingOps.count(call->op_->name_)) {
+      if (kSelfLoadingOps.count(call->op_->name_) || IsOp(call, "tensor.copy")) {
         IRVisitor::VisitStmt_(op);
         return;
       }

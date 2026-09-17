@@ -206,7 +206,8 @@ class SoC {
    * @param mem_graph Memory hierarchy adjacency list (optional)
    */
   explicit SoC(std::map<Die, int> die_counts,
-               std::map<ir::MemorySpace, std::vector<ir::MemorySpace>> mem_graph = {});
+               std::map<ir::MemorySpace, std::vector<ir::MemorySpace>> mem_graph = {},
+               std::vector<Mem> mems = {});
 
   /**
    * @brief Convenience constructor for single die type
@@ -215,7 +216,8 @@ class SoC {
    * @param count Number of dies with this configuration
    * @param mem_graph Memory hierarchy adjacency list (optional)
    */
-  SoC(const Die& die, int count, std::map<ir::MemorySpace, std::vector<ir::MemorySpace>> mem_graph = {});
+  SoC(const Die& die, int count, std::map<ir::MemorySpace, std::vector<ir::MemorySpace>> mem_graph = {},
+      std::vector<Mem> mems = {});
 
   // Disable copy and move to enforce immutability
   SoC(const SoC&) = delete;
@@ -224,6 +226,8 @@ class SoC {
   SoC& operator=(SoC&&) = delete;
 
   [[nodiscard]] const std::map<Die, int>& GetDieCounts() const { return die_counts_; }
+  /// Chip-shared memory, counted once rather than once per core.
+  [[nodiscard]] const std::vector<Mem>& GetMems() const { return mems_; }
   [[nodiscard]] const std::map<ir::MemorySpace, std::vector<ir::MemorySpace>>& GetMemoryGraph() const {
     return mem_graph_;
   }
@@ -233,6 +237,7 @@ class SoC {
 
  private:
   std::map<Die, int> die_counts_;
+  std::vector<Mem> mems_;
   std::map<ir::MemorySpace, std::vector<ir::MemorySpace>> mem_graph_;
 };
 

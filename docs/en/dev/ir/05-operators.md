@@ -14,6 +14,58 @@ Type-safe operator definitions with automatic type deduction, organized into mod
 
 **Key Features**: Fluent API, automatic type deduction, kwargs for metadata, NumPy-style broadcasting, type promotion, dynamic dimensions (`kDynamicDim`)
 
+## DDR/SRAM tensor creation and copy
+
+`pl.create_tensor(shape, dtype=..., memory_type=pl.Mem.DDR)` accepts a keyword-only
+`memory_type` of `DDR` or `SRAM`, defaulting to DDR without changing existing
+positional layout arguments. SRAM declarations are stored on `tensor.create`;
+TensorType retains DDR global addressing. There is no SRAM hardware in the
+current environment, so the runtime uses DDR backing for both declarations.
+Generated orchestration code comments identify this SRAM emulation. Create
+SRAM-declared tensors in orchestration and pass them into InCore; SRAM is not
+an InCore tile storage space.
+
+Current numerical validation uses DDR → DDR. `memory_type` does not infer copy
+endpoints; specify them explicitly:
+
+```python
+dst = pl.create_tensor(src.shape, dtype=src.dtype, memory_type=pl.Mem.DDR)
+with pl.at(level=pl.Level.CORE_GROUP):
+    dst = pl.copy(dst, src, source_memory=pl.Mem.DDR, target_memory=pl.Mem.DDR)
+```
+
+Omit all region arguments to copy equal-shaped whole tensors, or supply all of
+`dst_offsets`, `src_offsets`, and `shape`. The destination always comes first.
+See `examples/beginner/05_matmul.py`: copy A/B, then consume the copies in a
+separate InCore scope for matrix multiplication.
+
+`pl.copy(dst, src, dst_offsets, src_offsets, shape, *, source_memory=pl.Mem.DDR,
+target_memory=pl.Mem.SRAM)` copies between tensor regions and returns an alias of
+`dst`. Supported routes are DDR → DDR, DDR → SRAM, and SRAM → DDR; the default
+remains DDR → SRAM. Dtypes and ranks must match;
+static out-of-bounds regions are rejected. Dynamic regions must be in bounds at
+runtime. Source and destination regions must not overlap.
+
+The endpoint keywords follow `pl.load` / `pl.store`: tensors retain global DDR
+addressing, while the keywords declare the physical medium. The simulation SoC
+records one 256 MiB SRAM component at chip level, not per core. Destination
+storage is supplied by the caller/runtime and can survive multiple InCore calls;
+there is no explicit SRAM alloc/free API or new cross-core synchronization.
+
+The current toolchain has no direct external-to-external instruction. InCore
+lowering uses a bounded Vec tile (at most 256 elements per chunk), MTE2 loads and
+MTE3 stores, preserving the endpoint markers and handling the final partial
+chunk. It does not allocate the entire transfer in Vec. Existing pipeline
+synchronization remains responsible for ordering these instructions. This is a
+simulation-compatible transfer path, not a new hardware SRAM allocator.
+
+```python
+@pl.jit.incore
+def stage(src: pl.Tensor[[4, 600], pl.FP32],
+          dst: pl.Out[pl.Tensor[[4, 600], pl.FP32]]) -> pl.Tensor[[4, 600], pl.FP32]:
+    return pl.copy(dst, src, [0, 0], [0, 0], [4, 600])
+```
+
 ## Type System
 
 ```cpp

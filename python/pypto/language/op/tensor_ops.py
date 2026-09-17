@@ -18,6 +18,7 @@ from collections.abc import Sequence
 from typing import Any, TypeVar, overload
 
 __all__ = [
+    "copy",
     "create_tensor",
     "create",
     "no_dep",
@@ -168,6 +169,8 @@ def create(
     layout: TensorLayout = TensorLayout.ND,
     manual_dep: bool = False,
     init_value: int | float | None = None,
+    *,
+    memory_type: MemorySpace = MemorySpace.DDR,
 ) -> Tensor:
     """Create a new tensor with specified shape and dtype.
 
@@ -175,6 +178,10 @@ def create(
         shape: List of dimension sizes (int or Expr)
         dtype: Data type of tensor elements
         layout: Tensor layout (default: ND)
+        memory_type: Logical external memory, DDR (default) or SRAM. Current
+            runtimes use DDR backing for both. Create SRAM-declared buffers in
+            orchestration and pass them to InCore functions; this does not
+            select tile storage or infer copy endpoint keywords.
         init_value: **Removed.** Passing anything but ``None`` raises
             ``ValueError``. The runtime dropped its create-info fill, so a
             runtime-allocated buffer can no longer be pre-filled from
@@ -210,12 +217,50 @@ def create(
         Tensor wrapping the create operation
     """
     call_expr = _ir_ops.create(
-        _normalize_intlike(shape), dtype, layout, manual_dep=manual_dep, init_value=init_value
+        _normalize_intlike(shape),
+        dtype,
+        layout,
+        manual_dep=manual_dep,
+        init_value=init_value,
+        memory_type=memory_type,
     )
     return Tensor(expr=call_expr)
 
 
 create_tensor = create
+
+
+def copy(
+    dst: _TensorT,
+    src: Tensor,
+    dst_offsets: Sequence[IntLike] | None = None,
+    src_offsets: Sequence[IntLike] | None = None,
+    shape: Sequence[IntLike] | None = None,
+    *,
+    source_memory: MemorySpace = MemorySpace.DDR,
+    target_memory: MemorySpace = MemorySpace.SRAM,
+) -> _TensorT:
+    """Copy a DDR/SRAM tensor region, including DDR to DDR, returning ``dst``.
+
+    Both endpoints use global tensor addressing. Defaults to DDR -> SRAM;
+    reverse both memory keywords for SRAM -> DDR. The destination must already
+    have backing storage, which may be reused across InCore calls. No explicit
+    SRAM alloc/free or cross-core synchronization is introduced. Dynamic
+    offsets and extents must be in bounds at runtime.
+    Omit all region arguments for a whole-tensor copy with matching shapes.
+    Set both endpoints to DDR to validate data movement on current hardware.
+    """
+    return dst.__class__(
+        expr=_ir_ops.copy(
+            dst.unwrap(),
+            src.unwrap(),
+            None if dst_offsets is None else _normalize_intlike(dst_offsets),
+            None if src_offsets is None else _normalize_intlike(src_offsets),
+            None if shape is None else _normalize_intlike(shape),
+            source_memory=source_memory,
+            target_memory=target_memory,
+        )
+    )
 
 
 def no_dep(tensor: Tensor) -> Tensor:

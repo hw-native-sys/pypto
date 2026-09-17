@@ -1,5 +1,48 @@
 # 算子系统
 
+## DDR/SRAM 张量创建与拷贝
+
+`pl.create_tensor(shape, dtype=..., memory_type=pl.Mem.DDR)` 新增仅限关键字的
+`memory_type` 参数，支持 `DDR` 和 `SRAM`，默认 DDR，已有 layout 位置参数不变。
+SRAM 声明保存在 `tensor.create` 属性中，TensorType 仍使用 DDR 全局地址空间。
+当前硬件没有 SRAM，运行时暂时以 DDR 分配支持这两种声明；生成的 orchestration
+代码会为 SRAM 声明标注这一模拟行为。请在 orchestration 中创建 SRAM 声明的张量，
+再传入 InCore；它不是 InCore tile 存储空间。
+
+当前数值验证使用 DDR → DDR。`memory_type` 不会自动推导 copy 端点，需显式指定：
+
+```python
+dst = pl.create_tensor(src.shape, dtype=src.dtype, memory_type=pl.Mem.DDR)
+with pl.at(level=pl.Level.CORE_GROUP):
+    dst = pl.copy(dst, src, source_memory=pl.Mem.DDR, target_memory=pl.Mem.DDR)
+```
+
+省略全部区域参数时复制整个同形状张量；指定区域时，`dst_offsets`、`src_offsets`
+和 `shape` 必须同时提供。参数顺序始终为目的在前、源在后。完整验证示例见
+`examples/beginner/05_matmul.py`：先复制 A/B，再在另一 InCore scope 中执行矩阵乘法。
+
+`pl.copy(dst, src, dst_offsets, src_offsets, shape, *, source_memory=pl.Mem.DDR,
+target_memory=pl.Mem.SRAM)` 在张量区域之间搬运数据，返回 `dst` 的别名。
+支持 DDR → DDR、DDR → SRAM 和 SRAM → DDR；默认端点仍为 DDR → SRAM。
+两端 dtype、rank 必须一致；静态越界在编译时
+报错，动态区域由调用者保证运行时不越界。源和目的区域不得重叠。
+
+端点参数沿用 `pl.load` / `pl.store`：张量仍使用 DDR 全局地址，参数声明物理介质。
+模拟 SoC 在 chip 层记录一块 256 MiB SRAM，不按 core 重复计数。目的存储由调用者或
+运行时提供，可跨多个 InCore 调用复用；不新增显式 SRAM alloc/free API 或跨核同步。
+
+当前工具链没有外部内存之间的直接搬运指令。InCore lowering 使用有界 Vec 临时块
+（每块最多 256 个元素），通过 MTE2 load 和 MTE3 store 搬运，保留端点标记并处理尾块，
+不会将整个搬运区域分配到 Vec。指令顺序仍由已有流水线同步机制处理。这是兼容模拟器
+的搬运路径，不是新的硬件 SRAM 分配器。
+
+```python
+@pl.jit.incore
+def stage(src: pl.Tensor[[4, 600], pl.FP32],
+          dst: pl.Out[pl.Tensor[[4, 600], pl.FP32]]) -> pl.Tensor[[4, 600], pl.FP32]:
+    return pl.copy(dst, src, [0, 0], [0, 0], [4, 600])
+```
+
 类型 (Type) 安全的算子定义，支持自动类型推导，按模块化分类组织（TensorOp、TileOp、SyncOp、CrossCoreOp）。
 
 ## 算子分类
