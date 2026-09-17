@@ -159,7 +159,13 @@ counting rules across three emitters:
   output tiles ping-pong. PyPTO and DSA-RP consume that relation. PTOAS does not,
   so the same route additionally binds the accumulator seed—or the first cube
   result when a biased reduction has no seed—to one explicit pinned
-  `MemRef(slots=2)` and selects slot `tile index % 2`.
+  `MemRef(slots=2)` and selects slot `tile index % 2`. PTOAS multi-buffer slots
+  have one uniform physical type. For a non-uniform boundary grid, codegen sizes
+  that type to the covering full tile and emits the smaller boundary use as a
+  zero-offset `pto.subview`; the boundary therefore remains a legal dbC stage
+  instead of being removed from the chooser's design space. Each selected
+  constant slot is materialized before its K-loop and the loop carry reuses that
+  handle.
 
 The caller passes the actual emission route explicitly. Ordinary chooser-driven
 tiling supplies pipelined-inner for `k == K` and unrolled-grid for `k < K`.
