@@ -410,10 +410,11 @@ CPU UT 覆盖 JIT 路由、ABI/编译器/产物契约、Worker 与 shutdown 状�
 UT 或设备矩阵，完整测试仍可手动运行。CPU 测试与 pre-commit 独立启动，设备 job
 只等待工具链解析；最终结果仍要求每个 job 全部通过。
 
-每个设备任务只需一张 NPU 卡，使用共享的 `[self-hosted, linux, npu]` runner 池、现有
+每个设备任务只需一张 NPU 卡，使用共享的 `[self-hosted, linux, ARM64, npu]` runner 池、现有
 `setup-ci-job` bundle 环境，以及通过 runner 的 `DEVICE_ID` 分配设备的 `task-submit`。
 独立环境安装 Torch 2.6.0 和 torch_npu 2.6.0.post2，要求 C++11 ABI，
-并从当前检出的源码构建 adapter 和仅供测试的队列 gate。框架包按 runner 架构选择：ARM64 使用
+并从当前检出的源码构建 adapter 和仅供测试的队列 gate。设备 CI 当前限制在已验证的 ARM64 池；
+安装脚本保留其他主机架构的包选择逻辑。ARM64 使用
 Torch CPU 索引及固定 SHA256 的 torch_npu CPython 3.10 wheel；x86_64 使用 Torch
 `cpu-cxx11-abi` 索引及 Ascend C++11 ABI zip 中的 CPython 3.10 wheel。
 两种 torch_npu 包均来自官方 `v7.1.0.2-pytorch2.6.0` 发布，PyPI 未发布该版本。
