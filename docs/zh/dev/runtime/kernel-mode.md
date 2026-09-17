@@ -417,7 +417,9 @@ UT 或设备矩阵，完整测试仍可手动运行。CPU 测试与 pre-commit �
 Torch CPU 索引及固定 SHA256 的 torch_npu CPython 3.10 wheel；x86_64 使用 Torch
 `cpu-cxx11-abi` 索引及 Ascend C++11 ABI zip 中的 CPython 3.10 wheel。
 两种 torch_npu 包均来自官方 `v7.1.0.2-pytorch2.6.0` 发布，PyPI 未发布该版本。
-任务在构建前检查 Torch ABI，并从
+设备预检复用 runtime 的框架版本检查，接受 C++11 ABI 构建后缀，仍要求版本为
+2.6.0.post2。即使预检在生成 JUnit 之前失败，完整任务日志也会上传；缺失或失败的
+JUnit 报告仍使 job 失败。任务在构建前检查 Torch ABI，并从
 `.github/requirements/kernel-mode.txt` 安装固定版本的 CANN 9 TBE 基础依赖及
 torch_npu wheel 未声明的 PyYAML，并在构建 adapter 前检查 torch_npu 和 TBE 导入。
 仅加载 CANN 环境变量不会向任务虚拟环境安装这些 Python 依赖。native 构建使用

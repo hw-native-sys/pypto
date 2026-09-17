@@ -33,9 +33,11 @@ from simpler.task_interface import ChipWorker
 
 from pypto._kernel_abi import SIMPLER_KERNEL_REVISION
 from pypto.torch.launch import _load_native
+from pypto.torch.shutdown import require_supported_framework
 
-if torch.__version__.split("+")[0] != "2.6.0" or torch_npu.__version__ != "2.6.0.post2":
-    raise RuntimeError(f"Expected Torch 2.6.0 / torch_npu 2.6.0.post2, got {torch.__version__}/{torch_npu.__version__}")
+require_supported_framework(torch_npu)
+if torch.__version__.split("+", 1)[0] != "2.6.0":
+    raise RuntimeError(f"Expected Torch 2.6.0, got {torch.__version__}")
 if not torch._C._GLIBCXX_USE_CXX11_ABI:
     raise RuntimeError("Kernel adapter requires the C++11 ABI")
 if not hasattr(ChipWorker, "kernel_init") or not hasattr(ChipWorker, "kernel_prepare_callable"):

@@ -638,6 +638,10 @@ and the SHA256-pinned torch_npu CPython 3.10 wheel. x86_64 uses the Torch
 `cpu-cxx11-abi` index and the CPython 3.10 wheel from Ascend's C++11 ABI zip.
 Both torch_npu packages come from the official `v7.1.0.2-pytorch2.6.0` release;
 that version is not on PyPI. The job checks the Torch ABI before building.
+Device preflight reuses the runtime framework-version check, accepting the
+C++11 ABI build suffix while still requiring release 2.6.0.post2. The full
+task log is uploaded even if preflight fails before producing JUnit evidence;
+a missing or failed JUnit report still fails the job.
 The job installs the pinned dependencies in `.github/requirements/kernel-mode.txt`:
 CANN 9 TBE's base dependencies and PyYAML, an undeclared torch_npu wheel dependency.
 It checks torch_npu and TBE imports before building the adapter; sourcing CANN's

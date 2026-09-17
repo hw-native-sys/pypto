@@ -55,9 +55,11 @@ def framework(setup, monkeypatch):
     return framework, native, events
 
 
-def test_framework_hook_drains_then_closes_once_before_teardown(setup, framework):
+@pytest.mark.parametrize("version", ["2.6.0.post2", "2.6.0.post2+cxx11-abi", "2.6.0.post2+cxx11.abi"])
+def test_framework_hook_drains_then_closes_once_before_teardown(setup, framework, version):
     state, config, calls, _ = setup
     fw, native, events = framework
+    fw.__version__ = version
     shutdown.install_shutdown(state)
     hook = fw._pypto_kernel_shutdown
     shutdown.install_shutdown(state)
@@ -294,7 +296,7 @@ def test_owner_thread_survives_initial_caller_and_preserves_affinity():
     assert not owner.thread.is_alive()
 
 
-@pytest.mark.parametrize("version", ["2.5.1", "2.7.1"])
+@pytest.mark.parametrize("version", ["2.5.1", "2.7.1", "2.6.0.post1+cxx11-abi"])
 def test_unverified_framework_fails_before_install(setup, framework, version):
     state, _, _, _ = setup
     fw, _, _ = framework

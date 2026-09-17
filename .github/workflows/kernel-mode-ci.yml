@@ -211,7 +211,9 @@ jobs:
           source activate.sh
           test -n "$DEVICE_ID"
           printf -v command 'cd %q && source activate.sh && bash .github/scripts/kernel-mode-device.sh %q' "$PWD" "$KERNEL_SUITE"
-          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time "$KERNEL_MAX_TIME" --run "$command"
+          mkdir -p test-results/kernel-mode
+          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time "$KERNEL_MAX_TIME" --run "$command" 2>&1 | \
+            tee "test-results/kernel-mode/$KERNEL_SUITE-task.log"
       - name: Require complete device results
         if: ${{ always() && steps.adapter.outcome == 'success' }}
         run: |
