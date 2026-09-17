@@ -214,6 +214,27 @@ class BackendHandler {
   [[nodiscard]] virtual bool RequiresSplitLoadTpopWorkaround() const = 0;
 
   /**
+   * @brief Whether `tile.cmp` / `tile.cmps` evaluate an ORDERING comparison
+   *        (`lt` / `le` / `gt` / `ge`) correctly for `src_dtype` on this target.
+   *
+   * A2/A3 has exactly one int32 comparator, `vcmpvs_eq`; the ISA capability
+   * table reports no int32 form of the ordering compares. pto-isa's
+   * `GenCmpCall` (a2a3/TCmps.hpp, and a2a3/TCmp.hpp for the tile-vs-tile form)
+   * short-circuits `int32_t` onto that one instruction and drops the requested
+   * mode, so an ordering compare silently yields an EQUALITY mask instead of
+   * failing -- see pto-isa issue #321. Equality and inequality stay correct
+   * (`ne` is `eq` plus the `vnot` fix-up), so only the ordering modes are
+   * gated.
+   *
+   * This is a denylist of the one combination confirmed wrong on device, not
+   * an allowlist of what is proven right. The 16-bit path bit-casts source and
+   * scalar to `half` and borrows the fp16 comparator, which matches integer
+   * ordering only for non-negative values; that is analysis, not a measured
+   * failure, so it is reported in issue #321 rather than rejected here.
+   */
+  [[nodiscard]] virtual bool SupportsOrderingCompareDataType(const DataType& src_dtype) const = 0;
+
+  /**
    * @brief Whether PyPTO/DSA-RP must materialize PTOAS level-3 explicit tmp
    *        scratch and emit static-valid codegen views.
    *

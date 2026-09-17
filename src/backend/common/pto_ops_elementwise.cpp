@@ -378,6 +378,37 @@ static std::string MakeModalCodegenPTO(const std::string& pto_op_name, size_t ar
   return "";
 }
 
+// Shared gate for tile.cmp / tile.cmps. Both lower onto pto-isa's `GenCmpCall`,
+// which on A2/A3 short-circuits an int32 source onto `vcmpvs_eq` / `vcmpv_eq`
+// and DISCARDS the requested mode -- an ordering compare then returns an
+// equality mask with no diagnostic anywhere (pto-isa issue #321). Reject the
+// pairing here so the user gets an error instead of wrong data.
+static std::string MakeCmpCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
+                                     codegen::CodegenBase& codegen_base) {
+  auto& codegen = AsPto(codegen_base);
+  CheckArity(op, pto_op_name, 2);
+  // cmp_modes is {eq, ne, lt, le, gt, ge}; indices 2..5 are the ordering forms.
+  // eq is the instruction actually issued and ne is eq plus TCmps' vnot
+  // fix-up, so both stay correct for every dtype the ISA admits.
+  constexpr int kFirstOrderingMode = 2;
+  const int mode = op->GetKwarg<int>("cmp_type");
+  if (mode >= kFirstOrderingMode) {
+    auto src_type = As<ir::TileType>(op->args_[0]->GetType());
+    INTERNAL_CHECK_SPAN(src_type, op->span_)
+        << "Internal error: " << pto_op_name << " requires a TileType first operand";
+    const auto* handler = codegen.GetBackendHandler();
+    CHECK_SPAN(handler->SupportsOrderingCompareDataType(src_type->dtype_), op->span_)
+        << pto_op_name << " cannot evaluate an ordering comparison (cmp_type " << kFirstOrderingMode
+        << "-5: lt/le/gt/ge) on " << src_type->dtype_.ToString() << " values for target arch '"
+        << handler->GetPtoTargetArch()
+        << "', which has no ordering compare for that element type and would silently produce an "
+           "EQUALITY mask instead. Use cmp_type=0 (eq) or cmp_type=1 (ne), or cast the source to "
+           "FP32 with tile.cast first (exact for |value| < 2^24)";
+  }
+  return MakeModalCodegenPTO(pto_op_name, 2, "cmp_type", cmp_modes, "Tile cmp", "cmpMode", "cmp", op,
+                             codegen_base);
+}
+
 // Emit the default PTO form without an explicit precision attribute, or append
 // the exact PTOAS enum attribute after outs(...) for high-precision mode.
 // Unlike cmp/cvt attributes, precision-op assembly formats place their
@@ -1190,8 +1221,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   if (exclude_ops.count("tile.cmp") == 0) {
     backend.RegisterOp("tile.cmp")
         .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-          return MakeModalCodegenPTO("pto.tcmp", 2, "cmp_type", cmp_modes, "Tile cmp", "cmpMode", "cmp", op,
-                                     codegen);
+          return MakeCmpCodegenPTO("pto.tcmp", op, codegen);
         })
         .set_input_layout(0, ir::TileLayout::row_major)
         .set_input_layout(1, ir::TileLayout::row_major)
@@ -1272,8 +1302,7 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
   if (exclude_ops.count("tile.cmps") == 0) {
     backend.RegisterOp("tile.cmps")
         .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-          return MakeModalCodegenPTO("pto.tcmps", 2, "cmp_type", cmp_modes, "Tile cmp", "cmpMode", "cmp", op,
-                                     codegen);
+          return MakeCmpCodegenPTO("pto.tcmps", op, codegen);
         })
         .set_input_layout(0, ir::TileLayout::row_major)
         .set_output_layout(ir::TileLayout::row_major);

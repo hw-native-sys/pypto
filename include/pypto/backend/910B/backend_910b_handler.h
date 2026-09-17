@@ -42,6 +42,12 @@ class Ascend910BHandler : public BackendHandler {
 
   [[nodiscard]] bool RequiresGMPipeBuffer() const override { return true; }
   [[nodiscard]] bool RequiresSplitLoadTpopWorkaround() const override { return true; }
+
+  // A2/A3 has no int32 ordering compare; pto-isa substitutes an equality
+  // mask instead of failing (pto-isa issue #321).
+  [[nodiscard]] bool SupportsOrderingCompareDataType(const DataType& src_dtype) const override {
+    return src_dtype != DataType::INT32;
+  }
   [[nodiscard]] bool RequiresLevel3TmpScratch() const override { return true; }
 
   // A2/A3 TSEL takes a level-3 explicit scratch of UINT32 [1, 16].

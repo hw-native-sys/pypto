@@ -325,20 +325,13 @@ def test_element_widths(case_run):
     case_run.assert_passed()
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "A2/A3: a tcmps mask built from an INT32 source drives tsels inverted -- every "
-        "lane selects the branch the comparison did not choose (1136/2048 elements, "
-        "`v > 0` keeping the scalar where it should keep v and vice versa). INT16 and "
-        "FP32 pass through the identical code path with identical literals, so this is "
-        "specific to 32-bit integers rather than to element width or to the composite. "
-        "No existing ST covers it: tests/st/runtime/ops/test_sels.py builds its mask with "
-        "tile.cmps only for FP16/FP32, and reaches INT32 solely through an explicitly "
-        "loaded mask carrier, which bypasses tcmps entirely."
-    ),
-)
-@st.cases(_scalar_case("false", 4, pl.INT32, torch.int32, name="select_dtype_int32"))
+# A2/A3 has exactly one int32 comparator and it is an equality one: the ISA
+# capability table reports no int32 form of lt/le/gt/ge, and pto-isa answers an
+# ordering request with an equality mask instead of failing (pto-isa issue
+# #321). PyPTO now rejects that pairing in codegen -- covered by
+# tests/ut/codegen/test_pto_codegen_ops.py -- so the device coverage here uses
+# `ne`, which A2/A3 evaluates correctly as `eq` plus TCmps' vnot fix-up.
+@st.cases(_scalar_case("false", 1, pl.INT32, torch.int32, name="select_dtype_int32_ne"))
 def test_int32_compare_feeding_a_select(case_run):
     """An INT32 source compared with tile.cmps and then selected on."""
     case_run.assert_passed()
@@ -397,21 +390,6 @@ def test_multiple_physical_vector_parts(case_run):
     case_run.assert_passed()
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "A2/A3 only: the second TSELS's scratch is reused onto the buffer the preceding "
-        "tcmps reads. TSELS opens with a one-element scalar-pipe store at offset 0 "
-        "(pto-isa a2a3/TSels.hpp writes the scalar into tmp for set_cmpmask), which races "
-        "the vector-pipe read still in flight, so element 0 of the compare source is "
-        "corrupted and the mask's first bit comes out wrong -- observed as exactly "
-        "1/2048 elements differing. Memory reuse is right that the source is dead by IR "
-        "liveness; the gap is the cross-pipe WAR sync, which is not specific to "
-        "tile.select and reproduces for a hand-written tile.sels given the same "
-        "allocation. Expected to pass on A5, where the scalar goes to a vector register "
-        "via vdup and never lands in UB."
-    ),
-)
 @st.cases(
     st.case(
         _clamp,

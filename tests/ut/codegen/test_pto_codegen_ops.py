@@ -997,7 +997,10 @@ class TestB02SelectionAndPreluCodegen:
                 out: pl.Tensor[[16, 16], pl.INT32],
             ) -> pl.Tensor[[16, 16], pl.INT32]:
                 src_tile: pl.Tile[[16, 16], pl.INT32] = pl.load(src, [0, 0], [16, 16])
-                mask: pl.Tile[[16, 32], pl.UINT8] = pl.tile.cmps(src_tile, 0, cmp_type=4)
+                # eq, not an ordering mode: A2/A3 has no int32 ordering compare
+                # and codegen now rejects that pairing. This test is about how
+                # pto.tsels spells its operands, so any valid mask will do.
+                mask: pl.Tile[[16, 32], pl.UINT8] = pl.tile.cmps(src_tile, 0, cmp_type=0)
                 tmp: pl.Tile[[1, 32], pl.UINT8] = pl.tile.create([1, 32], dtype=pl.UINT8)
                 result: pl.Tile[[16, 16], pl.INT32] = pl.tile.sels(mask, src_tile, tmp, -3)
                 return pl.store(result, [0, 0], out)
@@ -1063,6 +1066,41 @@ class TestB02SelectionAndPreluCodegen:
 
         with pytest.raises(ValueError, match="only supported on the 'a5' backend"):
             self._generate_mlir(Prog)
+
+    def test_cmps_rejects_an_int32_ordering_compare_on_a2a3(self):
+        """A2/A3 has exactly one int32 comparator, and it is an equality one.
+
+        pto-isa's `GenCmpCall` short-circuits an int32 source onto `vcmpvs_eq`
+        and drops the requested mode, so `lt` / `le` / `gt` / `ge` silently
+        yield an equality mask (pto-isa issue #321). Reject the pairing in
+        codegen rather than emit it. `eq` / `ne` stay correct -- `ne` is `eq`
+        plus TCmps' `vnot` fix-up -- and A5 dispatches every mode generically.
+        """
+
+        def build(cmp_type: int):
+            @pl.program
+            class Prog:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    src: pl.Tensor[[16, 16], pl.INT32],
+                    out: pl.Tensor[[16, 16], pl.INT32],
+                ) -> pl.Tensor[[16, 16], pl.INT32]:
+                    src_tile: pl.Tile[[16, 16], pl.INT32] = pl.load(src, [0, 0], [16, 16])
+                    mask: pl.Tile[[16, 32], pl.UINT8] = pl.tile.cmps(src_tile, 0, cmp_type=cmp_type)
+                    tmp: pl.Tile[[1, 16], pl.INT32] = pl.tile.create([1, 16], dtype=pl.INT32)
+                    result: pl.Tile[[16, 16], pl.INT32] = pl.tile.sels(mask, src_tile, tmp, -3)
+                    return pl.store(result, [0, 0], out)
+
+            return Prog
+
+        for ordering in (2, 3, 4, 5):  # lt, le, gt, ge
+            with pytest.raises(ValueError, match="ordering comparison"):
+                self._generate_mlir(build(ordering), BackendType.Ascend910B)
+
+        for equality in (0, 1):  # eq, ne
+            assert "pto.tcmps" in self._generate_mlir(build(equality), BackendType.Ascend910B)
+        assert "pto.tcmps" in self._generate_mlir(build(4), BackendType.Ascend950)
 
     def test_tsels_tmp_may_alias_src_only_on_a5(self):
         @pl.program

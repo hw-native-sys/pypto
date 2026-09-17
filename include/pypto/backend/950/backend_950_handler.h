@@ -46,6 +46,11 @@ class Ascend950Handler : public BackendHandler {
 
   [[nodiscard]] bool RequiresGMPipeBuffer() const override { return false; }
   [[nodiscard]] bool RequiresSplitLoadTpopWorkaround() const override { return false; }
+
+  // A5 dispatches all six compare modes generically over the element type.
+  [[nodiscard]] bool SupportsOrderingCompareDataType(const DataType& /*src_dtype*/) const override {
+    return true;
+  }
   [[nodiscard]] bool RequiresLevel3TmpScratch() const override { return false; }
 
   // A5 sizes both select scratches as one 32-byte block, source-independent.
