@@ -24,6 +24,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
@@ -242,7 +243,8 @@ struct SplicedInlineBody {
 // SpliceInlineCall* helper.
 //
 //   1. Build the substitution seed: params → actual args, locally-defined
-//      Vars → fresh `_inlineN` Vars.
+//      Vars → fresh `_inlineN` Vars. An actual arg that cannot be substituted
+//      verbatim is first bound to a fresh Var at the call site.
 //   2. DeepClone the callee body with that seed. The clone uses the same
 //      substitution at use-sites and def-sites, so a rebinding of a param
 //      (`out = pl.assemble(out, ...)`) collapses to `actual = pl.assemble(
@@ -255,26 +257,55 @@ SplicedInlineBody CloneInlineBody(const FunctionPtr& callee, const std::vector<E
       << " argument(s) but callee expects " << callee->params_.size()
       << " (parser/type-checker should have caught arity mismatch before InlineFunctions)";
 
+  DefVarCollector def_collector;
+  def_collector.VisitStmt(callee->body_);
+
   // 1. Build the seed substitution map for DeepClone:
   //    - Each param Var → its actual-arg Expr. The same substitution is
   //      consulted at both use-sites and def-sites of the param, so a
   //      rebinding `out = pl.assemble(out, ...)` where `out` is a param
   //      becomes `q_out = pl.assemble(q_out, ...)` when the actual arg is
   //      the Var `q_out` (the natural pre-SSA in-place semantics for
-  //      pl.Out parameters). If the actual arg is not a Var and the param
-  //      is rebound, IRMutator::VisitStmt_(AssignStmtPtr)'s Var-cast check
-  //      fires with a clear span-tagged error.
+  //      pl.Out parameters).
+  //    - Some actual args are instead bound to a fresh Var ahead of the body,
+  //      and that Var is substituted — exactly the IR the parser emits when
+  //      the caller names the argument itself (`cr = c[r]; f(x, cr)`):
+  //        * A rebound param whose arg is not an assignable Var (a slice
+  //          `c[r]`, an IterArg, a computed scalar). Substituting it would put
+  //          that Expr on the LHS of the rebinding.
+  //        * A computed tensor / tile arg (a `Call`, e.g. `a[r]`). Python
+  //          evaluates it once at the call; substituting it would re-evaluate
+  //          it at every use, inside the callee's `pl.spmd` / `pl.pipeline` /
+  //          `pl.at` bodies, moving the view from the call site into the
+  //          outlined kernel.
+  //      Scalar and constant args stay substituted, so shape expressions that
+  //      read a param keep folding to the caller's value.
   //    - Each locally-defined Var → a fresh Var with a `_inlineN` name so
   //      multi-call-site expansions of the same callee remain
   //      distinguishable in IR dumps. DeepClone uses the seeded fresh Var
   //      verbatim; only Vars NOT in the seed receive an auto-cloned copy
   //      with their original name_hint as a safety fallback.
   std::unordered_map<const Var*, ExprPtr> seed;
+  std::vector<StmtPtr> arg_bindings;
   for (size_t i = 0; i < callee->params_.size(); ++i) {
-    seed[callee->params_[i].get()] = args[i];
+    const VarPtr& param = callee->params_[i];
+    ExprPtr actual = args[i];
+    const TypePtr actual_type = actual->GetType();
+    // The same assignment targets IRMutator::VisitStmt_(AssignStmtPtr) accepts.
+    const bool assignable = As<Var>(actual) || As<MemRef>(actual);
+    const bool rebound = def_collector.defs.count(param.get()) > 0;
+    const bool computed_shaped =
+        As<Call>(actual) && actual_type && (AsTensorTypeLike(actual_type) || As<TileType>(actual_type));
+    if ((rebound && !assignable) || computed_shaped) {
+      INTERNAL_CHECK_SPAN(actual_type, actual->span_)
+          << "Internal error: argument bound at the call site for inline parameter '" << param->name_hint_
+          << "' of '" << callee->name_ << "' has no type";
+      auto bound = std::make_shared<Var>(FreshName(param->name_hint_), actual_type, actual->span_);
+      arg_bindings.push_back(std::make_shared<const AssignStmt>(bound, actual, actual->span_));
+      actual = bound;
+    }
+    seed[param.get()] = actual;
   }
-  DefVarCollector def_collector;
-  def_collector.VisitStmt(callee->body_);
   for (const Var* v : def_collector.defs) {
     if (seed.count(v) > 0) continue;  // param — already seeded with actual arg
     auto fresh = std::make_shared<Var>(FreshName(v->name_hint_), v->GetType(), v->span_);
@@ -290,7 +321,7 @@ SplicedInlineBody CloneInlineBody(const FunctionPtr& callee, const std::vector<E
   auto [renamed_body, _unused] = DeepClone(callee->body_, seed, /*clone_def_vars=*/true);
 
   // 3. Walk renamed_body and separate trailing ReturnStmt from the rest.
-  std::vector<StmtPtr> spliced;
+  std::vector<StmtPtr> spliced = std::move(arg_bindings);  // must precede the body
   std::vector<ExprPtr> return_values;
   bool has_return = false;
 

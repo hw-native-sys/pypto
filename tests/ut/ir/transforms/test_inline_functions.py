@@ -23,6 +23,7 @@ import pytest
 from pypto import ir, passes
 from pypto.ir import OptimizationStrategy, PassManager
 from pypto.pypto_core import passes as core_passes
+from pypto.runtime import RunConfig
 
 
 class TestInlineFunctionsBasic:
@@ -1178,6 +1179,197 @@ class TestInlineFunctionsParamRebinding:
                 return q, k, v
 
         ir.assert_structural_equal(After, Expected)
+
+    def test_rebound_param_with_slice_arg_binds_temporary(self):
+        """A rebound param whose actual arg is a slice is bound to a temporary.
+
+        Substituting ``ext[r]`` for ``out`` at the rebinding's def-site would put
+        a ``tensor.slice`` Call on the LHS of an AssignStmt, which used to fail
+        with ``InternalError: AssignStmt var is not a Var after mutation``. The
+        splice instead binds the slice to a fresh Var first, which is the IR the
+        parser already produces when the caller names the slice itself.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def write0(self, x: pl.Tensor[[4], pl.FP32], out: pl.Tensor[[4], pl.FP32]):
+                out = pl.tensor.assemble(out, x, [0])
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                ext: pl.Out[pl.Tensor[[2, 4], pl.FP32]],
+            ) -> pl.Tensor[[2, 4], pl.FP32]:
+                for r in pl.range(2):
+                    self.write0(a, ext[r])
+                return ext
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                ext: pl.Out[pl.Tensor[[2, 4], pl.FP32]],
+            ) -> pl.Tensor[[2, 4], pl.FP32]:
+                for r in pl.range(2):
+                    out: pl.Tensor[[4], pl.FP32] = ext[r]
+                    out = pl.tensor.assemble(out, a, [0])
+                return ext
+
+        After = passes.inline_functions()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_rebound_param_with_iter_arg_binds_temporary(self):
+        """An IterArg actual arg is not an assignable Var either, so a rebound
+        param bound to one gets the same temporary instead of crashing."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def write0(self, x: pl.Tensor[[4], pl.FP32], out: pl.Tensor[[4], pl.FP32]):
+                out = pl.tensor.assemble(out, x, [0])
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                ext: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                for i, (acc,) in pl.range(2, init_values=(ext,)):
+                    self.write0(a, acc)
+                    acc = pl.yield_(acc)
+                return ext
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                ext: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                for i, (acc,) in pl.range(2, init_values=(ext,)):
+                    out: pl.Tensor[[4], pl.FP32] = acc
+                    out = pl.tensor.assemble(out, a, [0])
+                    acc = pl.yield_(acc)
+                return ext
+
+        After = passes.inline_functions()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_read_only_param_with_slice_arg_binds_temporary(self):
+        """A computed tensor arg is evaluated once at the call site even when
+        the callee only reads it.
+
+        Substituting ``a[r]`` verbatim would re-evaluate the slice at every use
+        inside the callee body, moving it into whatever ``pl.spmd`` /
+        ``pl.pipeline`` / ``pl.at`` scope holds that use and therefore into the
+        outlined kernel.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def write0(self, x: pl.Tensor[[4], pl.FP32], out: pl.Tensor[[4], pl.FP32]):
+                out = pl.tensor.assemble(out, x, [0])
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[2, 4], pl.FP32],
+                ext: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                for r in pl.range(2):
+                    self.write0(a[r], ext)
+                return ext
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[2, 4], pl.FP32],
+                ext: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                for r in pl.range(2):
+                    x: pl.Tensor[[4], pl.FP32] = a[r]
+                    ext = pl.tensor.assemble(ext, x, [0])
+                return ext
+
+        After = passes.inline_functions()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_scalar_expression_arg_is_substituted_in_place(self):
+        """A read-only scalar arg is not bound: only computed tensor / tile args
+        are, so scalar expressions keep folding into the callee body."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def dbl(self, n: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                m: pl.Scalar[pl.INDEX] = n * 2
+                return m
+
+            @pl.function
+            def main(self, k: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                y: pl.Scalar[pl.INDEX] = self.dbl(k + 1)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, k: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                m: pl.Scalar[pl.INDEX] = (k + 1) * 2
+                y: pl.Scalar[pl.INDEX] = m
+                return y
+
+        After = passes.inline_functions()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_jit_subscript_write_through_sliced_arg_lowers(self):
+        """End-to-end repro: a ``@pl.jit.inline`` helper writing ``c[...] = v``
+        into a tensor param, called with ``c[r]``, lowers through the default
+        pipeline and still writes into the caller's ``c``."""
+
+        @pl.jit.inline
+        def add_into(x: pl.Tensor[[64, 128], pl.FP32], c: pl.Tensor[[64, 128], pl.FP32]):
+            for i in pl.spmd(2):
+                c0 = i * 64
+                c[0:64, c0 : c0 + 64] = pl.add(x[0:64, c0 : c0 + 64], x[0:64, c0 : c0 + 64])
+
+        @pl.jit
+        def drv(a: pl.Tensor[[2, 64, 128], pl.FP32], c: pl.Out[pl.Tensor[[2, 64, 128], pl.FP32]]):
+            for r in pl.range(2):
+                add_into(a[r], c[r])
+            return c
+
+        # tests/ut/ir/transforms/conftest.py pins the Ascend950 backend.
+        lowered = drv.lower(config=RunConfig(platform="a5"))
+        assert ir.FunctionType.Inline not in {f.func_type for f in lowered.functions.values()}
+
+        class DispatchCollector(ir.IRVisitor):
+            def __init__(self):
+                super().__init__()
+                self.calls: list[ir.Call] = []
+
+            def visit_call(self, op):
+                if isinstance(op.op, ir.GlobalVar):
+                    self.calls.append(op)
+                super().visit_call(op)
+
+        orch = next(f for f in lowered.functions.values() if f.func_type == ir.FunctionType.Orchestration)
+        collector = DispatchCollector()
+        collector.visit_function(orch)
+        assert len(collector.calls) == 1
+        # The kernel's written operand is the bound slice: a view into c's buffer.
+        written_type = collector.calls[0].args[-1].type
+        c_type = orch.params[1].type
+        assert isinstance(written_type, ir.TensorType) and isinstance(c_type, ir.TensorType)
+        assert written_type.memref is not None and c_type.memref is not None
+        assert written_type.memref.base_.unique_id == c_type.memref.base_.unique_id
 
 
 class TestInlineReturnAndMultiReturn:
