@@ -97,6 +97,15 @@ jobs:
           echo "PTO_ISA_COMMIT=$commit" >> "$GITHUB_OUTPUT"
 
   device-tests:
+    name: device-tests (${{ matrix.suite }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: eager
+            max-time: 1800
+          - suite: capture
+            max-time: 2400
     needs: [pre-commit, unit-tests, toolchain]
     # Verified online ARM64 pool; Torch 2.6's ARM64 wheel uses the required
     # C++11 ABI. Record the actual chip, rather than treating this as A2 AND A3.
@@ -104,9 +113,9 @@ jobs:
     timeout-minutes: 120
     defaults:
       run:
-        working-directory: kernel-mode-checkout
+        working-directory: kernel-mode-${{ matrix.suite }}
     env:
-      PTOAS_ROOT: ${{ github.workspace }}/kernel-mode-checkout/ptoas-bin
+      PTOAS_ROOT: ${{ github.workspace }}/kernel-mode-${{ matrix.suite }}/ptoas-bin
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
       PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
       PTOAS_SHA256_X86_64: ${{ needs.toolchain.outputs.ptoas_sha256_x86_64 }}
@@ -118,6 +127,8 @@ jobs:
       CCACHE_MAXSIZE: 30G
       CCACHE_UMASK: '000'
       TORCH_DEVICE_BACKEND_AUTOLOAD: '0'
+      KERNEL_SUITE: ${{ matrix.suite }}
+      KERNEL_MAX_TIME: ${{ matrix.max-time }}
     steps:
       - name: Fetch composite action definitions
         uses: actions/checkout@v4
@@ -128,7 +139,7 @@ jobs:
       - name: Setup pinned SDK and toolchain
         uses: ./.github/actions/setup-ci-job
         with:
-          checkout-path: kernel-mode-checkout
+          checkout-path: kernel-mode-${{ matrix.suite }}
           needs-device: 'true'
           toolchain: bundle
           pip-cache-name: pip-kernel-mode
@@ -164,41 +175,35 @@ jobs:
           cmake --build build/kernel-native --parallel "$PYPTO_BUILD_JOBS"
           PYTHONPATH="$PWD/python:$PWD/build/torch_npu_tests${PYTHONPATH:+:$PYTHONPATH}" \
             python -c 'from pypto.pypto_core import DataType; from pypto.torch.launch import _load_native; _load_native(); import _torch_npu_test'
-      - name: Eager, program regression, stream and lifecycle cases
+      - name: Run ${{ matrix.suite }} device cases
         if: ${{ !cancelled() && steps.adapter.outcome == 'success' }}
         run: |
           source activate.sh
           test -n "$DEVICE_ID"
-          printf -v command 'cd %q && source activate.sh && bash .github/scripts/kernel-mode-device.sh eager' "$PWD"
-          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 1800 --run "$command"
-      - name: Warmed capture and replay through both entries
-        if: ${{ !cancelled() && steps.adapter.outcome == 'success' }}
-        run: |
-          source activate.sh
-          test -n "$DEVICE_ID"
-          printf -v command 'cd %q && source activate.sh && bash .github/scripts/kernel-mode-device.sh capture' "$PWD"
-          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 2400 --run "$command"
+          printf -v command 'cd %q && source activate.sh && bash .github/scripts/kernel-mode-device.sh %q' "$PWD" "$KERNEL_SUITE"
+          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time "$KERNEL_MAX_TIME" --run "$command"
       - name: Require complete device results
         if: ${{ always() && steps.adapter.outcome == 'success' }}
         run: |
           source activate.sh
-          python .github/scripts/kernel_ci_results.py test-results/kernel-mode/eager.xml test-results/kernel-mode/capture.xml >> "$GITHUB_STEP_SUMMARY"
+          python .github/scripts/kernel_ci_results.py "test-results/kernel-mode/$KERNEL_SUITE.xml" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload device evidence
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: kernel-device-results
-          path: kernel-mode-checkout/test-results/kernel-mode/
+          name: kernel-device-${{ matrix.suite }}-results
+          path: kernel-mode-${{ matrix.suite }}/test-results/kernel-mode/
           if-no-files-found: error
       - name: Kill orphaned device tasks
         if: always()
         uses: ./.github/actions/kill-orphaned-tasks
         with:
-          checkout-path: kernel-mode-checkout
+          checkout-path: kernel-mode-${{ matrix.suite }}
 
   summary:
     name: Kernel Mode required results
     if: always()
+    # The matrix result succeeds only when both eager and capture jobs succeed.
     needs: [pre-commit, unit-tests, toolchain, device-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 5

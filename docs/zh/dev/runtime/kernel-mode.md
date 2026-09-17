@@ -322,7 +322,7 @@ torch_npu 2.6.0.post2 上首次有效 capture 包装 `NPUGraph.capture_end`、`r
 固定工具链解析，以及 native adapter 构建和定向设备测试。
 CPU UT 包含 PR #2785（09A）的可选依赖导入隔离检查。
 
-设备任务使用已核实的 `[self-hosted, linux, ARM64, npu-xp]` runner 池、现有
+每个设备任务使用已核实的 `[self-hosted, linux, ARM64, npu-xp]` runner 池、现有
 `setup-ci-job` bundle 环境，以及通过 runner 的 `DEVICE_ID` 分配设备的 `task-submit`。
 独立环境安装 Torch 2.6.0 和 torch_npu 2.6.0.post2，要求 C++11 ABI，
 并从当前检出的源码构建 adapter 和仅供测试的队列 gate。torch_npu 2.6.0.post2
@@ -336,16 +336,21 @@ torch_npu wheel 未声明的 PyYAML，并在构建 adapter 前检查 torch_npu �
 来自 submodule pin，ptoas 来自 `toolchain/versions.env`。CANN 使用 runner 的
 `CANN_ROOT`，须满足 adapter 已说明的环境前提。设备操作均在任务分配范围内执行。
 
-两次串行设备分配分别运行 eager、stream、生命周期及 program 回归，和 warmup 后的
-capture/replay。覆盖直接 JIT、注册入口、taskQueue 设置、冷调用拒绝及 `aot_eager`
-图执行。关闭 taskQueue 时的 delayed host-queue 用例显式取消选择，因为该组合没有
+两个矩阵 job `device-tests (eager)` 和 `device-tests (capture)` 分别独立运行
+eager、stream、生命周期及 program 回归，和 warmup 后的 capture/replay。
+runner 和设备资源允许时可并行执行；每个 job 独立检出、配置环境、构建、分配设备、
+检查报告并清理自身任务。`fail-fast: false` 保证一组失败后另一组仍可完成。
+制品分别命名为 `kernel-device-eager-results` 和 `kernel-device-capture-results`，
+各自只保存对应测试组的证据。覆盖直接 JIT、注册入口、taskQueue 设置、冷调用拒绝及
+`aot_eager` 图执行。关闭 taskQueue 时的 delayed host-queue 用例显式取消选择，因为该组合没有
 可阻塞的回调；所有已选择的设备用例均须通过，不能跳过。Pytest 在分配的卡上串行运行，
 用例按需创建隔离进程。
 
 制品保留 JUnit、实际芯片名称和 device id、源码及 SDK revision、
 Python/Torch/torch_npu/nanobind 版本、`npu-smi` 输出，以及安装环境提供的 CANN
 版本文件。设备报告缺失、为空、格式错误、失败或存在跳过都会使报告检查失败。
-最终 `Kernel Mode required results` 即使上游失败仍会运行，并要求全部阶段成功；
+最终 `Kernel Mode required results` 即使上游失败仍会运行，并要求包括两个设备矩阵
+job 在内的全部阶段成功；
 跳过或取消的 job 不能满足该检查。若需由 GitHub 强制限制合入，应将其配置到
 集成分支的合入规则；仅定义 workflow 不会修改仓库规则。
 
