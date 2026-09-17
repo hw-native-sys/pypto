@@ -307,6 +307,30 @@ def test_nested_entries_record_their_true_resolved_paths(tmp_path):
     assert recorded["linked.py"] == str((actual / "nested/kernel.py").resolve())
 
 
+def test_child_replaced_by_symlink_after_hashing_is_unavailable(tmp_path, monkeypatch):
+    # Whether _file_digest's own metadata comparison notices this swap depends
+    # on the filesystem: replacing the name changes st_nlink, but not every
+    # filesystem reports that as a ctime change. Swap after the read returns so
+    # the entry's post-read check is the only thing that can reject it.
+    source = tmp_path / "compiler.bin"
+    source.write_bytes(b"original")
+    target = tmp_path / "target.bin"
+    target.write_bytes(b"original")
+    original_file_digest = _identity._file_digest
+
+    def replace_after_reading(path):
+        result = original_file_digest(path)
+        if path == source and not source.is_symlink():
+            source.unlink()
+            source.symlink_to(target)
+        return result
+
+    monkeypatch.setattr(_identity, "_file_digest", replace_after_reading)
+    identity = fingerprint_content((ContentRoot(tmp_path),))
+    assert identity.digest is None
+    assert identity.failure is not None and "symlink changed while being read" in identity.failure
+
+
 def test_special_files_are_rejected_without_opening_them(tmp_path):
     fifo = tmp_path / "pipe"
     os.mkfifo(fifo)

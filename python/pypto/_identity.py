@@ -155,9 +155,12 @@ def _content_entries(
     python_only: bool,
     ancestors: frozenset[Path],
     resolved: Path | None = None,
+    via_symlink: bool = True,
 ) -> list[tuple[Any, ...]]:
     # An entry that is not itself a symlink inherits its parent's resolution,
     # so only a symlinked entry needs a full readlink walk of every component.
+    # ``via_symlink`` records which case produced ``resolved``, selecting the
+    # cheapest post-read check that still detects replacement of this entry.
     if resolved is None:
         resolved = path.resolve(strict=True)
     mode = resolved.stat().st_mode
@@ -192,7 +195,14 @@ def _content_entries(
             ):
                 continue
             entries.extend(
-                _content_entries(child, child_relative, python_only, ancestors | {resolved}, child_resolved)
+                _content_entries(
+                    child,
+                    child_relative,
+                    python_only,
+                    ancestors | {resolved},
+                    child_resolved,
+                    entry.is_symlink(),
+                )
             )
         with os.scandir(path) as scan:
             after = sorted(entry.name for entry in scan)
@@ -202,7 +212,15 @@ def _content_entries(
     if not stat.S_ISREG(mode):
         raise ValueError(f"Identity input is not a regular file or directory: {path}")
     size, digest = _file_digest(path)
-    if resolved != path.resolve(strict=True):
+    # An inherited resolution only has to prove that this entry did not become
+    # a symlink while its bytes were read: replacement of an ancestor component
+    # is caught by that directory's own post-read check. _file_digest already
+    # rejects a same-path regular file swapped in during the read.
+    if via_symlink:
+        replaced = resolved != path.resolve(strict=True)
+    else:
+        replaced = stat.S_ISLNK(os.lstat(path).st_mode)
+    if replaced:
         raise ValueError(f"Identity symlink changed while being read: {path}")
     return [("file", relative, str(resolved), size, digest)]
 
