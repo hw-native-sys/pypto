@@ -107,8 +107,8 @@ jobs:
           - suite: capture
             max-time: 2400
     needs: toolchain
-    # Each job needs one NPU; use the verified ARM64 pool for device execution.
-    runs-on: [self-hosted, linux, ARM64, npu]
+    # Each job needs one NPU; select framework packages for the runner architecture.
+    runs-on: [self-hosted, linux, npu]
     timeout-minutes: 120
     defaults:
       run:
