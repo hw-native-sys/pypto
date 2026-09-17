@@ -19,6 +19,7 @@ case "${1:-}" in
       tests/ut/runtime/test_kernel_context.py
       tests/ut/runtime/test_kernel_shutdown.py
       tests/ut/runtime/test_prebuilt_artifact.py
+      tests/ut/torch/test_init.py
       tests/ut/torch/test_interop.py
       tests/ut/torch/test_launch.py
       tests/ut/torch/test_registration.py

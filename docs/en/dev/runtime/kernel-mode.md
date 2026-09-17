@@ -629,13 +629,15 @@ repository-wide unit or device matrices. Those tests remain available to run
 manually. CPU tests and pre-commit start independently; device jobs depend only
 on toolchain resolution. The final result still requires every job to pass.
 
-Each device job requires one NPU and uses the shared `[self-hosted, linux, ARM64, npu]` pool,
+Each device job requires one NPU and uses the shared `[self-hosted, linux, npu]` pool,
 the existing `setup-ci-job` bundle environment, and `task-submit` with the
 runner's `DEVICE_ID`. It installs Torch 2.6.0 and torch_npu 2.6.0.post2 in its
 isolated environment, requires C++11 ABI, and builds both the adapter and the
-test-only queue gate from the checked-out source. The torch_npu 2.6.0.post2
-CPython 3.10 / ARM64 wheel is installed from Ascend's official
-`v7.1.0.2-pytorch2.6.0` release with a pinned SHA256; that version is not on PyPI.
+test-only queue gate from the checked-out source. Framework packages follow the runner architecture. ARM64 uses the Torch CPU index
+and the SHA256-pinned torch_npu CPython 3.10 wheel. x86_64 uses the Torch
+`cpu-cxx11-abi` index and the CPython 3.10 wheel from Ascend's C++11 ABI zip.
+Both torch_npu packages come from the official `v7.1.0.2-pytorch2.6.0` release;
+that version is not on PyPI. The job checks the Torch ABI before building.
 The job installs the pinned dependencies in `.github/requirements/kernel-mode.txt`:
 CANN 9 TBE's base dependencies and PyYAML, an undeclared torch_npu wheel dependency.
 It checks torch_npu and TBE imports before building the adapter; sourcing CANN's

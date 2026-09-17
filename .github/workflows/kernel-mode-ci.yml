@@ -107,9 +107,8 @@ jobs:
           - suite: capture
             max-time: 2400
     needs: toolchain
-    # Each job needs one NPU. Keep ARM64 for the pinned Torch/torch_npu wheel
-    # ABI; use the shared npu pool so eager and capture can schedule separately.
-    runs-on: [self-hosted, linux, ARM64, npu]
+    # Each job needs one NPU; select framework packages for the runner architecture.
+    runs-on: [self-hosted, linux, npu]
     timeout-minutes: 120
     defaults:
       run:
@@ -151,19 +150,50 @@ jobs:
           source .claude/skills/testing/load-env.sh
           # The shared setup uses the program CI's Torch version. Replace it
           # only in this job's isolated venv; leave shared wheels unchanged.
-          uv pip install 'torch==2.6.0' --index-url https://download.pytorch.org/whl/cpu
-          # post2 is an Ascend release asset, not a PyPI release. Pin the same
-          # CPython 3.10 / ARM64 wheel used for kernel-mode device validation.
           torch_npu_release=https://gitee.com/ascend/pytorch/releases/download/v7.1.0.2-pytorch2.6.0
-          torch_npu_wheel=torch_npu-2.6.0.post2-cp310-cp310-manylinux_2_28_aarch64.whl
-          torch_npu_sha=8302dfc710a6cdd717f6f7e29c879858dde328bf4a788c4e455147264e329aec
           wheel_dir=$(mktemp -d)
           trap 'rm -rf "$wheel_dir"' EXIT
-          # Gitee rejects uv's download request; fetch and verify before install.
+          case "$(uname -m)" in
+            aarch64)
+              torch_index=https://download.pytorch.org/whl/cpu
+              torch_npu_asset=torch_npu-2.6.0.post2-cp310-cp310-manylinux_2_28_aarch64.whl
+              ;;
+            x86_64)
+              # Both packages must use the adapter's C++11 ABI on x86.
+              torch_index=https://download.pytorch.org/whl/cpu-cxx11-abi
+              torch_npu_asset=torch_npu-2.6.0.post2_cxx11.abi_x86_64.zip
+              ;;
+            *) echo "Unsupported runner architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          uv pip install 'torch==2.6.0' --index-url "$torch_index"
+          # post2 is an Ascend release asset, not a PyPI release. Fetch before
+          # installing because Gitee rejects uv's download request.
           curl --fail --location --retry 3 --connect-timeout 15 --max-time 120 \
-            "${torch_npu_release}/${torch_npu_wheel}" -o "$wheel_dir/$torch_npu_wheel"
-          printf '%s  %s\n' "$torch_npu_sha" "$wheel_dir/$torch_npu_wheel" | sha256sum --check --strict
-          uv pip install "$wheel_dir/$torch_npu_wheel" -r .github/requirements/kernel-mode.txt
+            "${torch_npu_release}/${torch_npu_asset}" -o "$wheel_dir/$torch_npu_asset"
+          if [[ "$torch_npu_asset" == *.zip ]]; then
+            python - "$wheel_dir/$torch_npu_asset" <<'PYTHON'
+          import pathlib
+          import shutil
+          import sys
+          import zipfile
+
+          archive = pathlib.Path(sys.argv[1])
+          with zipfile.ZipFile(archive) as bundle:
+              wheels = [name for name in bundle.namelist()
+                        if pathlib.PurePosixPath(name).name.startswith("torch_npu-")
+                        and "-cp310-cp310-" in name and name.endswith("x86_64.whl")]
+              if len(wheels) != 1:
+                  raise RuntimeError(f"Expected one CPython 3.10 x86 wheel, found {wheels}")
+              target = archive.parent / pathlib.PurePosixPath(wheels[0]).name
+              with bundle.open(wheels[0]) as source, target.open("wb") as output:
+                  shutil.copyfileobj(source, output)
+          PYTHON
+          else
+            torch_npu_sha=8302dfc710a6cdd717f6f7e29c879858dde328bf4a788c4e455147264e329aec
+            printf '%s  %s\n' "$torch_npu_sha" "$wheel_dir/$torch_npu_asset" | sha256sum --check --strict
+          fi
+          uv pip install "$wheel_dir"/*.whl -r .github/requirements/kernel-mode.txt
+          python -c 'import torch; assert torch._C._GLIBCXX_USE_CXX11_ABI, "Kernel adapter requires C++11 ABI"'
           python -c 'import torch_npu; import tbe'
           # setup-ci-job uses build/ for scikit-build's wheel cache. Its cached
           # SKBUILD_PROJECT_NAME would keep extensions out of the source tree.

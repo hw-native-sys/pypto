@@ -119,7 +119,6 @@ def test_kernel_lookup_waits_for_concurrent_initialization(setup, monkeypatch):
     state.close()
 
 
-
 def test_repeated_registration_hashes_artifact_only_once(setup, monkeypatch, tmp_path):
     import sys  # noqa: PLC0415
 
@@ -436,6 +435,7 @@ class _AsyncFailedTicket(_Ticket):
 @pytest.mark.parametrize("other_operator", [False, True])
 def test_async_failure_stops_admission_and_retains_cleanup_owners(setup, observe, other_operator):
     state, config, calls, _ = setup
+    state.ensure_worker(config)
     registration = state.ensure_callable(artifact(), config)
     later = state.ensure_callable(artifact(b"other operator"), config) if other_operator else registration
     error = RuntimeError("async launch failed")
@@ -475,6 +475,7 @@ def test_async_failure_stops_admission_and_retains_cleanup_owners(setup, observe
 
 def test_repeated_drain_preserves_first_admission_failure(setup):
     state, config, _, _ = setup
+    state.ensure_worker(config)
     registration = state.ensure_callable(artifact(), config)
     first = RuntimeError("first callback error")
     ticket = _AsyncFailedTicket([], first)
@@ -495,6 +496,7 @@ def test_repeated_drain_preserves_first_admission_failure(setup):
 @pytest.mark.parametrize("observe", ["submit", "drain"])
 def test_async_failure_during_close_preserves_closing_state(setup, monkeypatch, observe):
     state, config, calls, _ = setup
+    state.ensure_worker(config)
     registration = state.ensure_callable(artifact(), config)
     error = RuntimeError("async launch failed during close")
     ticket = _AsyncFailedTicket([], error)
@@ -629,6 +631,7 @@ def test_close_reports_submission_error_after_proven_quiescence(setup, monkeypat
 def test_pending_ticket_polling_cost(setup, monkeypatch, pending):
     """Record the current full scan without assuming pending work completes."""
     state, config, _, _ = setup
+    state.ensure_worker(config)
     registration = state.ensure_callable(artifact(), config)
     polls = []
     for index in range(pending):

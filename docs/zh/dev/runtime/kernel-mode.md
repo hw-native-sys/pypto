@@ -410,12 +410,14 @@ CPU UT 覆盖 JIT 路由、ABI/编译器/产物契约、Worker 与 shutdown 状�
 UT 或设备矩阵，完整测试仍可手动运行。CPU 测试与 pre-commit 独立启动，设备 job
 只等待工具链解析；最终结果仍要求每个 job 全部通过。
 
-每个设备任务只需一张 NPU 卡，使用共享的 `[self-hosted, linux, ARM64, npu]` runner 池、现有
+每个设备任务只需一张 NPU 卡，使用共享的 `[self-hosted, linux, npu]` runner 池、现有
 `setup-ci-job` bundle 环境，以及通过 runner 的 `DEVICE_ID` 分配设备的 `task-submit`。
 独立环境安装 Torch 2.6.0 和 torch_npu 2.6.0.post2，要求 C++11 ABI，
-并从当前检出的源码构建 adapter 和仅供测试的队列 gate。torch_npu 2.6.0.post2
-的 CPython 3.10 / ARM64 wheel 来自 Ascend 官方 `v7.1.0.2-pytorch2.6.0`
-发布，使用固定 SHA256 校验；PyPI 未发布该版本。任务从
+并从当前检出的源码构建 adapter 和仅供测试的队列 gate。框架包按 runner 架构选择：ARM64 使用
+Torch CPU 索引及固定 SHA256 的 torch_npu CPython 3.10 wheel；x86_64 使用 Torch
+`cpu-cxx11-abi` 索引及 Ascend C++11 ABI zip 中的 CPython 3.10 wheel。
+两种 torch_npu 包均来自官方 `v7.1.0.2-pytorch2.6.0` 发布，PyPI 未发布该版本。
+任务在构建前检查 Torch ABI，并从
 `.github/requirements/kernel-mode.txt` 安装固定版本的 CANN 9 TBE 基础依赖及
 torch_npu wheel 未声明的 PyYAML，并在构建 adapter 前检查 torch_npu 和 TBE 导入。
 仅加载 CANN 环境变量不会向任务虚拟环境安装这些 Python 依赖。native 构建使用
