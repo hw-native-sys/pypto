@@ -127,11 +127,12 @@ PreparedProblem BuildProblem(const FunctionPtr& func, const AllocationPlan& allo
     INTERNAL_CHECK(separation.first < buffer_by_interval.size() &&
                    separation.second < buffer_by_interval.size())
         << "DSA-RP separation references an out-of-range interval";
-    if (!buffer_by_interval[separation.first] || !buffer_by_interval[separation.second]) {
+    const std::optional<dsa::BufferId> first_buffer = buffer_by_interval[separation.first];
+    const std::optional<dsa::BufferId> second_buffer = buffer_by_interval[separation.second];
+    if (!first_buffer.has_value() || !second_buffer.has_value()) {
       continue;
     }
-    const BufferPair pair =
-        CanonicalPair(*buffer_by_interval[separation.first], *buffer_by_interval[separation.second]);
+    const BufferPair pair = CanonicalPair(*first_buffer, *second_buffer);
     // Physical memory spaces are independent DSA problems. A relation between
     // two spaces cannot constrain reuse because those addresses never alias.
     if (prepared.strict_problem.buffers[pair.first].pool !=
@@ -163,11 +164,12 @@ PreparedProblem BuildProblem(const FunctionPtr& func, const AllocationPlan& allo
     INTERNAL_CHECK(penalty.first_interval < buffer_by_interval.size() &&
                    penalty.second_interval < buffer_by_interval.size())
         << "DSA-RP recognizer returned an out-of-range interval";
-    if (!buffer_by_interval[penalty.first_interval] || !buffer_by_interval[penalty.second_interval]) {
+    const std::optional<dsa::BufferId> first_buffer = buffer_by_interval[penalty.first_interval];
+    const std::optional<dsa::BufferId> second_buffer = buffer_by_interval[penalty.second_interval];
+    if (!first_buffer.has_value() || !second_buffer.has_value()) {
       continue;
     }
-    const BufferPair pair = CanonicalPair(*buffer_by_interval[penalty.first_interval],
-                                          *buffer_by_interval[penalty.second_interval]);
+    const BufferPair pair = CanonicalPair(*first_buffer, *second_buffer);
     if (prepared.strict_problem.buffers[pair.first].pool !=
         prepared.strict_problem.buffers[pair.second].pool) {
       continue;
