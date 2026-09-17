@@ -1463,6 +1463,8 @@ class TestAutoTileMatmulL0MNTiling:
                 return out
 
         from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+        from pypto.pypto_core import codegen as _codegen_core  # noqa: PLC0415
+        from pypto.pypto_core import ir as _ir_core  # noqa: PLC0415
 
         with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
             tiled = passes.auto_tile_matmul_l0()(Before)
@@ -1474,6 +1476,14 @@ class TestAutoTileMatmulL0MNTiling:
         assert "tile.create" not in printed, "the bias head itself should remain the accumulator seed"
         assert "slots=2" in ir.python_print(optimized), "InitMemRef must preserve the PTOAS slot region"
         _assert_ssa_valid(tiled, "test_ptoas_unrolled_dbc_bias_seed")
+
+        func = next(func for func in optimized.functions.values() if func.name == "kernel")
+        mlir = _codegen_core.PTOCodegen().generate(
+            _ir_core.Program([func], func.name, optimized.span), emit_tile_addr=False
+        )
+        subviews = [line for line in mlir.splitlines() if "pto.subview" in line]
+        assert len(subviews) == 2, mlir
+        assert all("sizes [80, 32]" in line for line in subviews), subviews
 
     def test_matmul_bias_n_tiling_with_partial_valid_load_is_deferred(self):
         """A narrowed bias snapshot cannot be widened by reconstructed N-window loads."""
@@ -3154,6 +3164,10 @@ class TestAutoTileMatmulL0MNTiling:
         the split-K reload counts, which are idealized -- so this case is a
         calibration target, not a settled result.
         """
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+        from pypto.pypto_core import codegen as _codegen_core  # noqa: PLC0415
+        from pypto.pypto_core import ir as _ir_core  # noqa: PLC0415
+
         M, K, N = 64, 384, 288
 
         @pl.program
@@ -3179,6 +3193,7 @@ class TestAutoTileMatmulL0MNTiling:
         _backend.set_backend_type(BackendType.Ascend910B)
         with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
             After = passes.auto_tile_matmul_l0()(Before)
+            optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
         printed = ir.python_print(After)
 
         # Unrolled 2-tile N-grid, one K-loop each -- not the held-A nest.
@@ -3189,6 +3204,16 @@ class TestAutoTileMatmulL0MNTiling:
         assert '"pipeline_membership": "2097152:0"' in printed
         assert '"pipeline_membership": "2097152:1"' in printed
         _assert_ssa_valid(After, "test_split_k_dbc_beats_held_a")
+
+        func = next(func for func in optimized.functions.values() if func.name == "kernel")
+        mlir = _codegen_core.PTOCodegen().generate(
+            _ir_core.Program([func], func.name, optimized.span), emit_tile_addr=False
+        )
+        subviews = [line for line in mlir.splitlines() if "pto.subview" in line]
+        assert len(subviews) == 1, mlir
+        assert "sizes [64, 32]" in subviews[0], subviews[0]
+        assert "rows=64, cols=256" in subviews[0], subviews[0]
+        assert "rows=64, cols=32" in subviews[0], subviews[0]
 
     def test_split_k_grid_dbc_rotates_two_l0c_slots(self):
         """dbC=2 on the SPLIT-K route (k < K): the unrolled M/N grid ping-pongs.
@@ -3240,6 +3265,7 @@ class TestAutoTileMatmulL0MNTiling:
         _backend.set_backend_type(BackendType.Ascend910B)
         with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
             tiled = passes.auto_tile_matmul_l0()(Before)
+            ptoas_optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
         printed = ir.python_print(tiled)
 
         # Split-K route: one K-loop per output tile, no loop over the tiles.
@@ -3262,6 +3288,19 @@ class TestAutoTileMatmulL0MNTiling:
         # Tiles 0, 1, 2 -> slots 0, 1, 0. Each tile's K-loop holds several MADs,
         # all writing that tile's one accumulator, so per-tile runs share a slot.
         assert [slot for slot, _ in itertools.groupby(slots)] == [0, 1, 0], slots
+
+        # This is the codegen boundary the printed-IR-only regression missed:
+        # each tile carries its constant slot through its own K-loop. PTO
+        # codegen must lower that carry to the pre-loop multi_tile_get handle.
+        from pypto.pypto_core import codegen as _codegen_core  # noqa: PLC0415
+        from pypto.pypto_core import ir as _ir_core  # noqa: PLC0415
+
+        ptoas_func = next(func for func in ptoas_optimized.functions.values() if func.name == "kernel")
+        mlir = _codegen_core.PTOCodegen().generate(
+            _ir_core.Program([ptoas_func], ptoas_func.name, ptoas_optimized.span), emit_tile_addr=False
+        )
+        assert mlir.count("pto.alloc_multi_tile") >= 1, mlir
+        assert mlir.count("pto.multi_tile_get") >= 2, mlir
 
         # The rotation shows up in both in-tree planners: PyPTO materializes two
         # reuse classes; DSA-RP may retain more logical roots, but places them on
@@ -3307,6 +3346,8 @@ class TestAutoTileMatmulL0MNTiling:
         can be reused. Each grid therefore receives a fresh group while its own
         tiles continue to alternate stages 0/1.
         """
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
         M, K, N = 128, 512, 384
 
         @pl.program
@@ -3334,6 +3375,7 @@ class TestAutoTileMatmulL0MNTiling:
         _backend.set_backend_type(BackendType.Ascend910B)
         with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
             tiled = passes.auto_tile_matmul_l0()(Before)
+            optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
         printed = ir.python_print(tiled)
 
         memberships = re.findall(r'"pipeline_membership": "(\d+):([01])"', printed)
@@ -3345,6 +3387,16 @@ class TestAutoTileMatmulL0MNTiling:
             "each emitted output tile must select one of its grid's two slots"
         )
         _assert_ssa_valid(tiled, "test_unrolled_dbc_unique_groups")
+
+        from pypto.pypto_core import codegen as _codegen_core  # noqa: PLC0415
+        from pypto.pypto_core import ir as _ir_core  # noqa: PLC0415
+
+        func = next(func for func in optimized.functions.values() if func.name == "kernel")
+        mlir = _codegen_core.PTOCodegen().generate(
+            _ir_core.Program([func], func.name, optimized.span), emit_tile_addr=False
+        )
+        assert mlir.count("pto.alloc_multi_tile") == 2, mlir
+        assert mlir.count("pto.multi_tile_get") == 4, mlir
 
     @pytest.mark.parametrize(
         ("M", "N"),

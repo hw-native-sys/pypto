@@ -346,6 +346,23 @@ class TestPtoasPlannerEmitsMultiBuffer:
         slots = {get.split("[")[1].split("]")[0] for get in gets}
         assert len(slots) == 2, f"the two slots must be distinct:\n{mlir}"
 
+    def test_nested_slot_shapes_use_one_covering_region_and_a_boundary_view(self):
+        """Smaller slot uses are zero-offset views of one uniform region type.
+
+        PTOAS requires uniform physical slots, but an unrolled output grid may
+        end in a smaller boundary tile. The region therefore uses the largest
+        bound tile and the smaller use becomes a subview; it must not be rejected
+        or lowered to an unrelated allocation that loses slot separation.
+        """
+        mlir = _codegen(MixedSlotShapes, passes.MemoryPlanner.PTOAS)
+        assert len(_lines(mlir, "pto.alloc_multi_tile")) == 1, mlir
+        assert len(_lines(mlir, "pto.multi_tile_get")) == 2, mlir
+        subviews = _lines(mlir, "pto.subview")
+        assert len(subviews) == 1, mlir
+        assert "sizes [32, 32]" in subviews[0], subviews[0]
+        assert "rows=64, cols=64" in subviews[0], subviews[0]
+        assert "rows=32, cols=32" in subviews[0], subviews[0]
+
     def test_sibling_loops_each_taking_one_slot_still_form_a_region(self):
         """The co-live blocker is per loop body, not per function.
 
@@ -408,7 +425,6 @@ class TestUnsupportedShapesAreLoud:
         ("program", "reason"),
         [
             (TooManySlots, "17"),
-            (MixedSlotShapes, "differently shaped tiles"),
             (MixedSlotValidShapes, "different valid shapes"),
             (RuntimeValidShapeSlots, "runtime valid shape"),
             (CoLiveSlotsInLoop, "two of its slots are live at once inside a loop"),
@@ -416,7 +432,6 @@ class TestUnsupportedShapesAreLoud:
         ],
         ids=[
             "slot-count-out-of-range",
-            "non-uniform-slot-type",
             "non-uniform-valid-shape",
             "runtime-valid-shape",
             "co-live-slots-in-loop",
