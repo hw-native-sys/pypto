@@ -98,6 +98,8 @@ buffer.store(destination, (selected_offset, 0), (16, 32), Out)
 A branch result that aliases GM is removed when both arms resolve to the same
 existing parameter. The result's later uses then name that parameter directly.
 Different GM aliases require a separate dynamic-GM recipe and are diagnosed.
+Distributed-tensor branch results are explicitly rejected at this boundary, even
+when both arms alias the same parameter; they need a separate conversion recipe.
 Nested branches use scoped yield contexts; conversion adds no allocation or
 copy to repair a region. Branch and yield source comments are preserved.
 

@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -178,6 +179,11 @@ class TileToBufferMutator : public IRMutator {
   }
 
   StmtPtr VisitStmt_(const IfStmtPtr& branch) override {
+    // Distributed GM windows need a separate region-result and device ABI recipe.
+    for (const auto& result : branch->return_vars_) {
+      CHECK_SPAN(!As<DistributedTensorType>(result->GetType()), result->span_)
+          << "LowerTileToBuffer: distributed tensor branch results require a separate conversion recipe";
+    }
     auto condition = VisitExpr(branch->condition_);
     YieldContext then_context(branch->return_vars_);
     auto then_body = LowerRegion(branch->then_body_, then_context);

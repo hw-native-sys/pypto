@@ -294,5 +294,37 @@ def test_distinct_gm_branch_aliases_require_a_separate_recipe(planner):
     assert ir.serialize(SelectGM) == before
 
 
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("same_alias", [True, False], ids=["same-gm", "different-gm"])
+def test_distributed_branch_results_fail_at_lowering_boundary(planner, same_alias):
+    """Distributed GM results must not survive as unsupported native region results."""
+    span = ir.Span.unknown()
+    dtype = ir.DistributedTensorType([16, 32], pl.FP32)
+    a, b = ir.Var("a", dtype, span), ir.Var("b", dtype, span)
+    flag = ir.Var("flag", ir.ScalarType(pl.BOOL), span)
+    result = ir.Var("result", dtype, span)
+    branch = ir.IfStmt(
+        flag,
+        ir.YieldStmt([a], span),
+        ir.YieldStmt([a if same_alias else b], span),
+        [result],
+        span,
+    )
+    function = ir.Function(
+        "kernel",
+        [a, b, flag],
+        [],
+        ir.SeqStmts([branch, ir.ReturnStmt([], span)], span),
+        span,
+        type=ir.FunctionType.InCore,
+    )
+    program = ir.Program([function], "DistributedBranch", span)
+    before = ir.serialize(program)
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=True):
+        with pytest.raises(ValueError, match="distributed tensor branch results require a separate"):
+            passes.lower_tile_to_buffer()(program)
+    assert ir.serialize(program) == before
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
