@@ -288,6 +288,25 @@ def test_extra_source_filter_cannot_hide_unreadable_subtrees(tmp_path, monkeypat
     assert identity.failure is not None and "Cannot inspect plugins" in identity.failure
 
 
+def test_nested_entries_record_their_true_resolved_paths(tmp_path):
+    # Entries inherit their parent's resolution instead of resolving every
+    # component again; the recorded path must still be the real path.
+    actual = tmp_path / "actual"
+    (actual / "nested").mkdir(parents=True)
+    (actual / "nested/kernel.py").write_text("rows = 32\n")
+    (actual / "plain.py").write_text("rows = 16\n")
+    (actual / "linked.py").symlink_to(actual / "nested/kernel.py")
+    root = tmp_path / "link"
+    root.symlink_to(actual, target_is_directory=True)
+
+    entries = _identity._content_entries(root, "", False, frozenset())
+    recorded = {entry[1]: entry[2] for entry in entries}
+    assert recorded
+    for relative, resolved in recorded.items():
+        assert resolved == os.path.realpath(root / relative if relative else root)
+    assert recorded["linked.py"] == str((actual / "nested/kernel.py").resolve())
+
+
 def test_special_files_are_rejected_without_opening_them(tmp_path):
     fifo = tmp_path / "pipe"
     os.mkfifo(fifo)

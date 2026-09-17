@@ -154,8 +154,12 @@ def _content_entries(
     relative: str,
     python_only: bool,
     ancestors: frozenset[Path],
+    resolved: Path | None = None,
 ) -> list[tuple[Any, ...]]:
-    resolved = path.resolve(strict=True)
+    # An entry that is not itself a symlink inherits its parent's resolution,
+    # so only a symlinked entry needs a full readlink walk of every component.
+    if resolved is None:
+        resolved = path.resolve(strict=True)
     mode = resolved.stat().st_mode
     if stat.S_ISDIR(mode):
         if resolved in ancestors:
@@ -163,23 +167,33 @@ def _content_entries(
         # scandir propagates unreadable-directory errors; glob may silently
         # omit them and give a smaller, apparently valid dependency set.
         with os.scandir(path) as scan:
-            names = sorted(entry.name for entry in scan)
+            children = sorted(scan, key=lambda entry: entry.name)
+        names = [entry.name for entry in children]
         entries: list[tuple[Any, ...]] = [] if python_only else [("directory", relative, str(resolved))]
-        for name in names:
+        for entry in children:
+            name = entry.name
             if name in _IGNORED_DIRECTORIES:
                 continue
             child = path / name
             child_relative = f"{relative}/{name}" if relative else name
             # is_dir() returns False for dangling links, which must not turn
             # an unavailable source subtree into an excluded non-Python file.
-            child_mode = child.resolve(strict=True).stat().st_mode
+            # resolve(strict=True) still raises for a dangling symlink here.
+            if entry.is_symlink():
+                child_resolved = child.resolve(strict=True)
+                child_mode = child_resolved.stat().st_mode
+            else:
+                child_resolved = resolved / name
+                child_mode = entry.stat(follow_symlinks=False).st_mode
             if not (stat.S_ISDIR(child_mode) or stat.S_ISREG(child_mode)):
                 raise ValueError(f"Identity input is not a regular file or directory: {child}")
             if stat.S_ISREG(child_mode) and (
                 child.suffix in _IGNORED_SUFFIXES or (python_only and child.suffix != ".py")
             ):
                 continue
-            entries.extend(_content_entries(child, child_relative, python_only, ancestors | {resolved}))
+            entries.extend(
+                _content_entries(child, child_relative, python_only, ancestors | {resolved}, child_resolved)
+            )
         with os.scandir(path) as scan:
             after = sorted(entry.name for entry in scan)
         if names != after or resolved != path.resolve(strict=True):
