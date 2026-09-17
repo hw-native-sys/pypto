@@ -30,11 +30,11 @@ from __future__ import annotations
 import os
 import shlex
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pypto.backend import pto_backend
 from pypto.backend._ptoas_locate import PTOAS_MIN_VERSION, check_ptoas_version, find_ptoas_binary
-from pypto.compile_profiling import StageRecord
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _major, _minor = (int(part) for part in PTOAS_MIN_VERSION.removeprefix("v").split(".")[:2])
@@ -269,21 +269,23 @@ def test_run_ptoas_rejects_older_version_before_assembling(tmp_path, monkeypatch
     assert _calls(ptoas) == ["--version"]
 
 
-def test_ptoas_phase_reports_older_version_once(tmp_path, monkeypatch):
-    """A stale assembler is one toolchain error, not one error-report row per kernel."""
+def test_older_version_still_leaves_the_generated_pto(tmp_path, monkeypatch):
+    """The check fails the assembly step, not codegen: the ``.pto`` is written first.
+
+    Codegen-only runs and debugging read that artifact, and a failing assembler
+    always left it behind.
+    """
     root = tmp_path / "ptoas-bin"
     ptoas = _make_versioned_ptoas(root / "bin" / "ptoas", f"ptoas {_OLDER}")
     monkeypatch.setenv("PTOAS_ROOT", str(root))
-    units = [
-        pto_backend._CodegenUnit(name, "module {}", [], False, StageRecord(name=name, start=0.0))
-        for name in ("kernel_a", "kernel_b")
-    ]
-    errors: list[tuple[str, Exception]] = []
+    handler = SimpleNamespace(get_extra_ptoas_flags=lambda: [])
+    monkeypatch.setattr(pto_backend._backend_core, "get_handler", lambda: handler)
+    out = tmp_path / "out"
 
     with pytest.raises(RuntimeError, match=rf"requires PTOAS >= {PTOAS_MIN_VERSION}"):
-        pto_backend._run_ptoas_phase(units, str(tmp_path / "out"), False, None, {}, errors)
+        pto_backend._compile_pto_module("module {}", "kernel_a", str(out))
 
-    assert errors == []
+    assert (out / "ptoas" / "kernel_a.pto").read_text() == "module {}"
     assert _calls(ptoas) == ["--version"]
 
 

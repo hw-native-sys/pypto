@@ -1657,19 +1657,7 @@ def _run_ptoas_phase(
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
     dump_ptoas_passes: bool = False,
 ) -> None:
-    """Phase 2: run ptoas for all codegen units, sequentially or in parallel.
-
-    Raises:
-        RuntimeError: If the selected ptoas is older than the pinned minimum.
-    """
-    if not skip_ptoas and units:
-        # A stale assembler fails every unit the same way; raise it once, up
-        # front, instead of as one error-report row per kernel. A missing binary
-        # still surfaces per unit from _run_ptoas.
-        ptoas_bin = _find_ptoas_binary()
-        if ptoas_bin is not None:
-            _check_ptoas_version(ptoas_bin)
-
+    """Phase 2: run ptoas for all codegen units, sequentially or in parallel."""
     max_workers = _get_max_workers()
 
     if max_workers == 1 or len(units) <= 1:
