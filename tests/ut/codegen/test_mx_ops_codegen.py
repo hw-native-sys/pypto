@@ -145,6 +145,25 @@ class TestMxMatmulCodegen:
             "{layout = #pto.layout<mx_a_zz>, cache_policy = #pto.load_cache_policy<l2_bypass>}" in tloads[0]
         ), tloads[0]
 
+    def test_mx_scale_load_accepts_clamped_and_modulo_offsets(self):
+        """Clamp and positive-divisor modulo expressions prove non-negative."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a_s: pl.Tensor[[128, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+                offset: pl.Scalar[pl.INDEX],
+            ):
+                row_off = pl.min(pl.max(offset, 0), 7) * 16
+                col_off = (offset % 4) * 2
+                _ = pl.load(a_s, [row_off, col_off], [16, 2], target_memory=pl.Mem.Mat)
+
+        mlir = _emit_incore_mlir(Program)
+        assert "cf.assert" not in mlir
+        assert "pto.tload" in mlir
+
     def test_mx_scale_load_rejects_unprovable_dynamic_offset(self):
         """Unaligned / unprovable dynamic MX offsets fail at BlockMxScaleTensorViews."""
 
@@ -274,6 +293,92 @@ class TestMxMatmulCodegen:
         lines = mlir.splitlines()
         first_tget = next(i for i, line in enumerate(lines) if "pto.tget_scale_addr" in line)
         assert any("pto.tmov" in line and "scaling" in line for i, line in enumerate(lines) if i < first_tget)
+
+    def test_autotiles_64k_right_panel_with_data_and_scale_pipeline(self):
+        """A 64 KiB MX Right panel is split into two prefetched L0B stages."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[16, 256], pl.FP8E4M3FN],
+                a_s: pl.Tensor[[16, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[256, 256], pl.FP8E4M3FN],
+                b_s: pl.Tensor[[8, 256], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Tensor[[16, 256], pl.FP32],
+            ):
+                # Match model code: direct cube input leaves its source space
+                # unset until InferTileMemorySpace, which runs after AutoTile.
+                ta = pl.load(a, [0, 0], [16, 256])
+                tas = pl.load(a_s, [0, 0], [16, 8], target_memory=pl.Mem.Mat)
+                tb = pl.load(b, [0, 0], [256, 256], target_memory=pl.Mem.Mat)
+                tbs = pl.load(b_s, [0, 0], [8, 256], target_memory=pl.Mem.Mat)
+                c = pl.matmul_mx(ta, tas, tb, tbs)
+                pl.store(c, [0, 0], out)
+
+        mlir = _emit_incore_mlir(Program)
+        assert "pto.tmatmul.mx" in mlir
+        right_allocs = [
+            line for line in mlir.splitlines() if "pto.alloc_tile" in line and "loc=right" in line
+        ]
+        assert len(right_allocs) == 2
+        assert all("rows=128, cols=256" in line for line in right_allocs)
+        assert all("rows=256, cols=256" not in line for line in right_allocs)
+        right_addresses = {line.split("addr = ", 1)[1].split()[0] for line in right_allocs}
+        assert len(right_addresses) == 2, "the two K stages must use distinct L0B ping-pong buffers"
+        # Scales reload as logical GM→Mat windows, then Mat→scaling via tmov —
+        # A5 rejects FP8E8M0 textract, mat→mat textract, and boxed non-aligned subviews.
+        scale_textract = [line for line in mlir.splitlines() if "pto.textract" in line and "f8E8" in line]
+        assert scale_textract == []
+        assert "pto.subview" not in mlir or all(
+            "f8E8" not in line for line in mlir.splitlines() if "pto.subview" in line
+        )
+        scale_tmovs = [
+            line
+            for line in mlir.splitlines()
+            if "pto.tmov" in line and "outs(" in line and "loc=scaling" in line
+        ]
+        assert len(scale_tmovs) == 4
+        assert mlir.count("pto.tget_scale_addr") == 4
+        first_matmul = next(i for i, line in enumerate(mlir.splitlines()) if "pto.tmatmul.mx" in line)
+        prefix = mlir.splitlines()[:first_matmul]
+        # Prefetch emits both K-stage data extracts and both stages' scale
+        # load+tmov bundles before the first matmul.
+        assert sum("pto.textract" in line for line in prefix) == 4
+        assert sum("pto.tmov" in line and "loc=scaling" in line for line in prefix) == 4
+        assert sum("pto.tget_scale_addr" in line for line in prefix) == 4
+
+    def test_autotiles_oversized_acc_with_scale_windows(self):
+        """An Acc that overflows A5 L0C is M/N-tiled; each window still binds scales."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[256, 256], pl.FP8E4M3FN],
+                a_s: pl.Tensor[[256, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[256, 512], pl.FP8E4M3FN],
+                b_s: pl.Tensor[[8, 512], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[256, 512], pl.FP32]],
+            ) -> pl.Tensor[[256, 512], pl.FP32]:
+                ta = pl.tile.load(a, [0, 0], [256, 256], target_memory=pl.Mem.Mat)
+                tas = pl.tile.load(a_s, [0, 0], [256, 8], target_memory=pl.Mem.Mat)
+                tb = pl.tile.load(b, [0, 0], [256, 512], target_memory=pl.Mem.Mat)
+                tbs = pl.tile.load(b_s, [0, 0], [8, 512], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul_mx(ta, tas, tb, tbs)
+                out = pl.tile.store(c, [0, 0], out)
+                return out
+
+        mlir = _emit_incore_mlir(Program)
+        assert "pto.tmatmul.mx" in mlir
+        right_allocs = [
+            line for line in mlir.splitlines() if "pto.alloc_tile" in line and "loc=right" in line
+        ]
+        assert len(right_allocs) >= 2, f"M/N-tiled Right panels must ping-pong, got: {right_allocs}"
+        assert mlir.count("pto.tget_scale_addr") >= 4
+        assert mlir.count("pto.tmatmul.mx") >= 2
 
     def test_nd_backing_alias_only_emits_physical_rank5_mx_views(self):
         @pl.program
@@ -406,6 +511,76 @@ class TestMxMatmulCodegen:
         ins_acc = acc_line.split("ins(", 1)[1].split(",", 1)[0].strip()
         outs_acc = acc_line.split("outs(", 1)[1].split(":", 1)[0].strip()
         assert ins_acc == outs_acc
+
+    @pytest.mark.parametrize(
+        ("init_cond", "expected_op"),
+        [(True, "pto.tmatmul.mx "), (False, "pto.tmatmul.mx.acc")],
+    )
+    def test_matmul_mx_acc_literal_init_cond_selects_form(self, init_cond, expected_op):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.FP8E4M3FN],
+                a_s: pl.Tensor[[16, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[64, 32], pl.FP8E4M3FN],
+                b_s: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Tensor[[16, 32], pl.FP32],
+            ):
+                lhs = pl.load(a, [0, 0], [16, 64])
+                lhs_scale = pl.load(a_s, [0, 0], [16, 2])
+                rhs = pl.load(b, [0, 0], [64, 32])
+                rhs_scale = pl.load(b_s, [0, 0], [2, 32])
+                acc = pl.tile.create([16, 32], pl.FP32, target_memory=pl.Mem.Acc)
+                result = pl.matmul_mx_acc(
+                    acc,
+                    lhs,
+                    lhs_scale,
+                    rhs,
+                    rhs_scale,
+                    init_cond=init_cond,
+                )
+                pl.store(result, [0, 0], out)
+
+        mlir = _emit_incore_mlir(Program)
+        assert expected_op in mlir
+        assert mlir.count("pto.tmatmul.mx") == 1
+        assert "scf.if" not in mlir
+
+    def test_matmul_mx_acc_runtime_init_cond_branches(self):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.FP8E4M3FN],
+                a_s: pl.Tensor[[16, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[64, 32], pl.FP8E4M3FN],
+                b_s: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
+                pred: pl.Tensor[[1, 1], pl.BOOL],
+                out: pl.Tensor[[16, 32], pl.FP32],
+            ):
+                lhs = pl.load(a, [0, 0], [16, 64])
+                lhs_scale = pl.load(a_s, [0, 0], [16, 2])
+                rhs = pl.load(b, [0, 0], [64, 32])
+                rhs_scale = pl.load(b_s, [0, 0], [2, 32])
+                acc = pl.tile.create([16, 32], pl.FP32, target_memory=pl.Mem.Acc)
+                result = pl.matmul_mx_acc(
+                    acc,
+                    lhs,
+                    lhs_scale,
+                    rhs,
+                    rhs_scale,
+                    init_cond=pl.read(pred, [0, 0]),
+                )
+                pl.store(result, [0, 0], out)
+
+        mlir = _emit_incore_mlir(Program)
+        assert "scf.if" in mlir
+        assert "pto.tmatmul.mx " in mlir
+        assert "pto.tmatmul.mx.acc" in mlir
+        assert "= scf.if" not in mlir
 
     def test_mx_rank5_view_maps_aligned_logical_offsets(self):
         @pl.program

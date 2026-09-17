@@ -186,6 +186,176 @@ class TestAutoTileMatmulL0ExplicitL0Diagnostics:
 class TestAutoTileMatmulL0KOnly:
     """K-tiling rewrites for Mat-resident tile.matmul."""
 
+    def test_mx_skinny_gemm_pipelines_data_and_scale_bundle(self):
+        """MX uses K=128 so two 32 KiB Right panels fit in A5 L0B."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 256], pl.FP8E4M3FN],
+                lhs_scale: pl.Tensor[[16, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+                rhs: pl.Tensor[[256, 256], pl.FP8E4M3FN],
+                rhs_scale: pl.Tensor[[8, 256], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+            ) -> pl.Tensor[[16, 256], pl.FP32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [16, 256], target_memory=pl.Mem.Mat)
+                lhs_scale_mat = pl.tile.load(lhs_scale, [0, 0], [16, 8], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [256, 256], target_memory=pl.Mem.Mat)
+                rhs_scale_mat = pl.tile.load(rhs_scale, [0, 0], [8, 256], target_memory=pl.Mem.Mat)
+                result = pl.tile.matmul_mx(lhs_mat, lhs_scale_mat, rhs_mat, rhs_scale_mat)
+                out = pl.tile.store(result, [0, 0], out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 256], pl.FP8E4M3FN],
+                lhs_scale: pl.Tensor[[16, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+                rhs: pl.Tensor[[256, 256], pl.FP8E4M3FN],
+                rhs_scale: pl.Tensor[[8, 256], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+            ) -> pl.Tensor[[16, 256], pl.FP32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [16, 256], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [256, 256], target_memory=pl.Mem.Mat)
+                result_init = pl.tile.create([16, 256], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+                for ko, (result_iter,) in pl.pipeline(0, 256, 128, init_values=(result_init,), stage=2):
+                    lhs_l0 = pl.tile.extract(lhs_mat, 0, ko, shape=[16, 128], target_memory=pl.Mem.Left)
+                    lhs_scale_mat_win = pl.tile.load(
+                        lhs_scale, [0, ko // 32], [16, 4], target_memory=pl.Mem.Mat
+                    )
+                    lhs_scale_l0 = pl.tile.move(lhs_scale_mat_win, target_memory=pl.Mem.LeftScale)
+                    rhs_l0 = pl.tile.extract(rhs_mat, ko, 0, shape=[128, 256], target_memory=pl.Mem.Right)
+                    rhs_scale_mat_win = pl.tile.load(
+                        rhs_scale, [ko // 32, 0], [4, 256], target_memory=pl.Mem.Mat
+                    )
+                    rhs_scale_l0 = pl.tile.move(rhs_scale_mat_win, target_memory=pl.Mem.RightScale)
+                    result_acc = pl.tile.matmul_mx_acc(
+                        result_iter,
+                        lhs_l0,
+                        lhs_scale_l0,
+                        rhs_l0,
+                        rhs_scale_l0,
+                        ko == 0,
+                    )
+                    result = pl.yield_(result_acc)
+                out = pl.tile.store(result, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_mx_unset_data_loads_are_rebuilt_in_mat(self):
+        """Unset-space MX data loads (no ``target_memory``) rebuild in Mat like
+        ``mxfp8_autotile_kernel``; the original rhs load is dropped after K-only."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 256], pl.FP8E4M3FN],
+                lhs_scale: pl.Tensor[[16, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+                rhs: pl.Tensor[[256, 256], pl.FP8E4M3FN],
+                rhs_scale: pl.Tensor[[8, 256], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+            ) -> pl.Tensor[[16, 256], pl.FP32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [16, 256])
+                lhs_scale_mat = pl.tile.load(lhs_scale, [0, 0], [16, 8], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [256, 256])
+                rhs_scale_mat = pl.tile.load(rhs_scale, [0, 0], [8, 256], target_memory=pl.Mem.Mat)
+                result = pl.tile.matmul_mx(lhs_mat, lhs_scale_mat, rhs_mat, rhs_scale_mat)
+                out = pl.tile.store(result, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        printed = ir.python_print(After)
+        with pytest.raises(ValueError, match="Structural equality"):
+            ir.assert_structural_equal(After, Before)
+        assert "pl.pipeline(" in printed
+        assert "pl.tile.matmul_mx_acc(" in printed
+        assert "pl.Mem.Left" in printed
+        assert "pl.Mem.Right" in printed
+        assert "pl.Mem.LeftScale" in printed
+        assert "pl.Mem.RightScale" in printed
+        assert "result_l0_rmat" in printed
+        assert "target_memory=pl.Mem.Mat" in printed
+        assert "pl.tile.move(" in printed
+        _assert_ssa_valid(After, "test_mx_unset_data_loads_are_rebuilt_in_mat")
+
+    def test_mx_unset_mn_tiling_rebuilds_data_loads(self):
+        """Unset-space data loads on an oversized Acc M/N path rebuild in Mat
+        once (CodeRabbit); originals are dropped after the direct-store fold."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[256, 256], pl.FP8E4M3FN],
+                lhs_scale: pl.Tensor[[256, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+                rhs: pl.Tensor[[256, 512], pl.FP8E4M3FN],
+                rhs_scale: pl.Tensor[[8, 512], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[256, 512], pl.FP32]],
+            ) -> pl.Tensor[[256, 512], pl.FP32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [256, 256])
+                lhs_scale_mat = pl.tile.load(lhs_scale, [0, 0], [256, 8], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [256, 512])
+                rhs_scale_mat = pl.tile.load(rhs_scale, [0, 0], [8, 512], target_memory=pl.Mem.Mat)
+                result = pl.tile.matmul_mx(lhs_mat, lhs_scale_mat, rhs_mat, rhs_scale_mat)
+                out = pl.tile.store(result, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        printed = ir.python_print(After)
+        with pytest.raises(ValueError, match="Structural equality"):
+            ir.assert_structural_equal(After, Before)
+        assert "result_l0_lmat" in printed or "result_l0_rmat" in printed
+        assert printed.count("pl.tile.load(lhs,") == 1
+        assert printed.count("pl.tile.load(rhs,") == 1
+        assert "target_memory=pl.Mem.Mat" in printed
+        assert "pl.Mem.LeftScale" in printed
+        assert "pl.tile.move(" in printed
+        _assert_ssa_valid(After, "test_mx_unset_mn_tiling_rebuilds_data_loads")
+
+    def test_mx_bias_k_split_applies_bias_once(self):
+        """MX bias reuses the plain head-peel: one ``matmul_mx_bias`` then K-acc."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 256], pl.FP8E4M3FN],
+                lhs_scale: pl.Tensor[[16, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+                rhs: pl.Tensor[[256, 256], pl.FP8E4M3FN],
+                rhs_scale: pl.Tensor[[8, 256], pl.FP8E8M0, pl.MX_B_NN],
+                bias: pl.Tensor[[1, 256], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+            ) -> pl.Tensor[[16, 256], pl.FP32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [16, 256], target_memory=pl.Mem.Mat)
+                lhs_scale_mat = pl.tile.load(lhs_scale, [0, 0], [16, 8], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [256, 256], target_memory=pl.Mem.Mat)
+                rhs_scale_mat = pl.tile.load(rhs_scale, [0, 0], [8, 256], target_memory=pl.Mem.Mat)
+                bias_mat = pl.tile.load(bias, [0, 0], [1, 256], target_memory=pl.Mem.Mat)
+                result = pl.tile.matmul_mx_bias(lhs_mat, lhs_scale_mat, rhs_mat, rhs_scale_mat, bias_mat)
+                out = pl.tile.store(result, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        printed = ir.python_print(After)
+        assert printed.count("pl.tile.matmul_mx_bias(") == 1
+        assert "pl.tile.matmul_mx_acc(" in printed
+        assert "if " not in printed, printed
+        assert printed.index("pl.tile.matmul_mx_bias(") < printed.index("pl.tile.matmul_mx_acc("), printed
+        assert printed.count("target_memory=pl.Mem.Bias") == 1
+        assert "pl.Mem.LeftScale" in printed
+        assert "pl.Mem.RightScale" in printed
+        _assert_ssa_valid(After, "test_mx_bias_k_split_applies_bias_once")
+
     def test_skinny_gemm_pipelined(self):
         """16×64 @ 2048 BF16 → ChooseL0Tile picks (m=16, n=64, k=256).
 
@@ -1946,6 +2116,138 @@ class TestAutoTileMatmulL0MNTiling:
         ok, max_diff = _torch_codegen_matches_matmul(After, 512, 512, 512)
         assert ok, f"512×512 M/N-tiled output mismatch: max abs diff {max_diff:.3e}"
 
+    def test_mx_mn_tiling_emits_matched_scale_windows(self):
+        """Oversized MX Acc (256×512 FP32 = 512 KiB > A5 L0C) uses the same
+        direct-store M/N grid as plain matmul; each sub-tile extracts Left/Right
+        *and* LeftScale/RightScale windows from the full Mat scale tiles."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[256, 128], pl.FP8E4M3FN],
+                lhs_scale: pl.Tensor[[256, 4], pl.FP8E8M0, pl.MX_A_ZZ],
+                rhs: pl.Tensor[[128, 512], pl.FP8E4M3FN],
+                rhs_scale: pl.Tensor[[4, 512], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[256, 512], pl.FP32]],
+            ) -> pl.Tensor[[256, 512], pl.FP32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [256, 128], target_memory=pl.Mem.Mat)
+                lhs_scale_mat = pl.tile.load(lhs_scale, [0, 0], [256, 4], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [128, 512], target_memory=pl.Mem.Mat)
+                rhs_scale_mat = pl.tile.load(rhs_scale, [0, 0], [4, 512], target_memory=pl.Mem.Mat)
+                result = pl.tile.matmul_mx(lhs_mat, lhs_scale_mat, rhs_mat, rhs_scale_mat)
+                out = pl.tile.store(result, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        printed = ir.python_print(After)
+        assert "pl.tile.matmul_mx(lhs_mat, lhs_scale_mat, rhs_mat, rhs_scale_mat)" not in printed
+        assert "pl.pipeline(" in printed
+        assert "target_memory=pl.Mem.Left)" in printed
+        assert "target_memory=pl.Mem.Right)" in printed
+        assert "target_memory=pl.Mem.LeftScale" in printed
+        assert "target_memory=pl.Mem.RightScale" in printed
+        assert "pl.tile.matmul_mx(" in printed or "pl.tile.matmul_mx_acc(" in printed
+        _assert_ssa_valid(After, "test_mx_mn_tiling_emits_matched_scale_windows")
+
+    def test_mx_canonical_split_k_predicated_retiles_outside_k_loop(self):
+        """Predicated MX create/pipeline/store is M/N-tiled outside the K loop."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[256, 256], pl.FP8E4M3FN],
+                lhs_scale: pl.Tensor[[256, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+                rhs: pl.Tensor[[256, 320], pl.FP8E4M3FN],
+                rhs_scale: pl.Tensor[[8, 320], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[256, 320], pl.FP32]],
+            ) -> pl.Tensor[[256, 320], pl.FP32]:
+                acc_init = pl.tile.create([256, 320], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+                for k0, (acc_iter,) in pl.pipeline(0, 256, 128, init_values=(acc_init,), stage=2):
+                    lhs_mat = pl.tile.load(lhs, [0, k0], [256, 128], target_memory=pl.Mem.Mat)
+                    lhs_scale_mat = pl.tile.load(lhs_scale, [0, k0 // 32], [256, 4], target_memory=pl.Mem.Mat)
+                    rhs_mat = pl.tile.load(rhs, [k0, 0], [128, 320], target_memory=pl.Mem.Mat)
+                    rhs_scale_mat = pl.tile.load(rhs_scale, [k0 // 32, 0], [4, 320], target_memory=pl.Mem.Mat)
+                    acc = pl.tile.matmul_mx_acc(
+                        acc_iter,
+                        lhs_mat,
+                        lhs_scale_mat,
+                        rhs_mat,
+                        rhs_scale_mat,
+                        init_cond=(k0 == 0),
+                    )
+                    acc = pl.yield_(acc)
+                out = pl.tile.store(acc, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        printed = ir.python_print(After)
+        with pytest.raises(ValueError, match="Structural equality"):
+            ir.assert_structural_equal(After, Before)
+        assert printed.count("pl.tile.store(") >= 2, "canonical MX split-K must store an M/N output grid"
+        assert printed.count("pl.tile.matmul_mx_acc(") >= 2
+        assert printed.count("pl.tile.create(") >= 2
+        assert re.search(r"pl\.tile\.load\(\s*lhs_scale,", printed)
+        assert re.search(r"pl\.tile\.load\(\s*rhs_scale,", printed)
+        assert not re.search(r"pl\.tile\.load\(\s*lhs,\s*\[[^]]+\],\s*\[256, 128\]", printed), (
+            "each cloned K loop must narrow the full-M lhs load to an output window"
+        )
+        _assert_ssa_valid(After, "test_mx_canonical_split_k_predicated_retiles_outside_k_loop")
+
+    def test_mx_canonical_split_k_peeled_retiles_outside_k_loop(self):
+        """Peeled MX ``if k0==0: matmul_mx else matmul_mx_acc`` is M/N-tiled like
+        the predicated form."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[256, 256], pl.FP8E4M3FN],
+                lhs_scale: pl.Tensor[[256, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+                rhs: pl.Tensor[[256, 320], pl.FP8E4M3FN],
+                rhs_scale: pl.Tensor[[8, 320], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[256, 320], pl.FP32]],
+            ) -> pl.Tensor[[256, 320], pl.FP32]:
+                acc_init = pl.tile.create([256, 320], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+                for k0, (acc_iter,) in pl.pipeline(0, 256, 128, init_values=(acc_init,), stage=2):
+                    lhs_mat = pl.tile.load(lhs, [0, k0], [256, 128], target_memory=pl.Mem.Mat)
+                    lhs_scale_mat = pl.tile.load(lhs_scale, [0, k0 // 32], [256, 4], target_memory=pl.Mem.Mat)
+                    rhs_mat = pl.tile.load(rhs, [k0, 0], [128, 320], target_memory=pl.Mem.Mat)
+                    rhs_scale_mat = pl.tile.load(rhs_scale, [k0 // 32, 0], [4, 320], target_memory=pl.Mem.Mat)
+                    if k0 == 0:
+                        acc_first = pl.tile.matmul_mx(lhs_mat, lhs_scale_mat, rhs_mat, rhs_scale_mat)
+                        acc_phi = pl.yield_(acc_first)
+                    else:
+                        acc_rest = pl.tile.matmul_mx_acc(
+                            acc_iter,
+                            lhs_mat,
+                            lhs_scale_mat,
+                            rhs_mat,
+                            rhs_scale_mat,
+                        )
+                        acc_phi = pl.yield_(acc_rest)
+                    acc = pl.yield_(acc_phi)
+                out = pl.tile.store(acc, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        printed = ir.python_print(After)
+        with pytest.raises(ValueError, match="Structural equality"):
+            ir.assert_structural_equal(After, Before)
+        assert printed.count("pl.tile.store(") >= 2, "peeled MX split-K must store an M/N output grid"
+        assert printed.count("pl.tile.matmul_mx(") >= 1
+        assert printed.count("pl.tile.matmul_mx_acc(") >= 1
+        assert re.search(r"pl\.tile\.load\(\s*lhs_scale,", printed)
+        assert re.search(r"pl\.tile\.load\(\s*rhs_scale,", printed)
+        assert not re.search(r"pl\.tile\.load\(\s*lhs,\s*\[[^]]+\],\s*\[256, 128\]", printed), (
+            "each cloned K loop must narrow the full-M lhs load to an output window"
+        )
+        _assert_ssa_valid(After, "test_mx_canonical_split_k_peeled_retiles_outside_k_loop")
+
     def test_mn_tiling_partial_tiles_numerically_correct(self):
         """384×384 @ 512 FP32 on Ascend950: ChooseL0Tile still picks m = n = 256,
         so the output tiles into a 2×2 grid with **partial boundary sub-tiles**
@@ -3280,6 +3582,47 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
         acc_bases = alloc_bases("Acc")
         assert len(acc_bases) == 2, f"expected two L0C ping-pong buffers, got: {acc_bases}"
 
+    def test_marks_mx_pipeline_with_moving_scale_extract(self):
+        """A manual L0 ``tile.matmul_mx`` with stationary Left/LeftScale and
+        moving Right/RightScale gets the same dbC marker as plain matmul."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend950)
+        tile_m, tile_n, k, trips = 16, 128, 128, 4
+        width = trips * tile_n
+        k_groups = k // 32
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                q: pl.Tensor[[tile_m, k], pl.FP8E4M3FN],
+                q_scale: pl.Tensor[[tile_m, k_groups], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[k, width], pl.FP8E4M3FN],
+                b_scale: pl.Tensor[[k_groups, width], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[tile_m, width], pl.FP32]],
+            ) -> pl.Tensor[[tile_m, width], pl.FP32]:
+                q_mat = pl.tile.load(q, [0, 0], [tile_m, k], target_memory=pl.Mem.Mat)
+                q_l0 = pl.tile.move(q_mat, target_memory=pl.Mem.Left)
+                q_scale_mat = pl.tile.load(q_scale, [0, 0], [tile_m, k_groups], target_memory=pl.Mem.Mat)
+                q_scale_l0 = pl.tile.move(q_scale_mat, target_memory=pl.Mem.LeftScale)
+                b_mat = pl.tile.load(b, [0, 0], [k, width], target_memory=pl.Mem.Mat)
+                b_scale_mat = pl.tile.load(b_scale, [0, 0], [k_groups, width], target_memory=pl.Mem.Mat)
+                for ni, (out_i,) in pl.pipeline(0, width, tile_n, stage=2, init_values=(out,)):
+                    b_l0 = pl.tile.extract(b_mat, 0, ni, [k, tile_n], target_memory=pl.Mem.Right)
+                    b_scale_l0 = pl.tile.extract(
+                        b_scale_mat, 0, ni, [k_groups, tile_n], target_memory=pl.Mem.RightScale
+                    )
+                    c_l0 = pl.tile.matmul_mx(q_l0, q_scale_l0, b_l0, b_scale_l0)
+                    out_s = pl.tile.store(c_l0, [0, ni], out_i)
+                    out_r = pl.yield_(out_s)
+                return out_r
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        printed = ir.python_print(After)
+        assert "pipeline_double_buffer_c" in printed
+        _assert_ssa_valid(After, "test_existing_pipeline_dbc_mx")
+
     @pytest.mark.parametrize(
         ("inner_stage", "width", "expected"),
         [(3, 384, "MMSSMS"), (4, 512, "MMSSMMSS")],
@@ -4186,6 +4529,65 @@ class TestAutoTileMatmulL0Skips:
         with pytest.raises(ValueError, match="Structural equality"):
             ir.assert_structural_equal(incore_after, InCoreProg)
 
+    def test_mx_shared_scale_load_is_left_untouched(self):
+        """MX AutoTile requires each scale to be a single-use direct ``tile.load``."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 256], pl.FP8E4M3FN],
+                lhs2: pl.Tensor[[16, 256], pl.FP8E4M3FN],
+                lhs_scale: pl.Tensor[[16, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+                rhs: pl.Tensor[[256, 256], pl.FP8E4M3FN],
+                rhs2: pl.Tensor[[256, 256], pl.FP8E4M3FN],
+                rhs_scale: pl.Tensor[[8, 256], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+                out2: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16, 256], pl.FP32], pl.Tensor[[16, 256], pl.FP32]]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [16, 256], target_memory=pl.Mem.Mat)
+                lhs2_mat = pl.tile.load(lhs2, [0, 0], [16, 256], target_memory=pl.Mem.Mat)
+                lhs_scale_mat = pl.tile.load(lhs_scale, [0, 0], [16, 8], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [256, 256], target_memory=pl.Mem.Mat)
+                rhs2_mat = pl.tile.load(rhs2, [0, 0], [256, 256], target_memory=pl.Mem.Mat)
+                rhs_scale_mat = pl.tile.load(rhs_scale, [0, 0], [8, 256], target_memory=pl.Mem.Mat)
+                c0 = pl.tile.matmul_mx(lhs_mat, lhs_scale_mat, rhs_mat, rhs_scale_mat)
+                c1 = pl.tile.matmul_mx(lhs2_mat, lhs_scale_mat, rhs2_mat, rhs_scale_mat)
+                out = pl.tile.store(c0, [0, 0], out)
+                out2 = pl.tile.store(c1, [0, 0], out2)
+                return out, out2
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Before)
+
+    def test_mx_vec_left_mn_is_deferred(self, capfd):
+        """Vec-left M/N stays on ``PH-AT-006`` for MX the same way as plain matmul."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[256, 128], pl.FP8E4M3FN],
+                lhs_scale: pl.Tensor[[256, 4], pl.FP8E8M0, pl.MX_A_ZZ],
+                rhs: pl.Tensor[[128, 512], pl.FP8E4M3FN],
+                rhs_scale: pl.Tensor[[4, 512], pl.FP8E8M0, pl.MX_B_NN],
+                out: pl.Out[pl.Tensor[[256, 512], pl.FP32]],
+            ) -> pl.Tensor[[256, 512], pl.FP32]:
+                lhs_vec = pl.tile.load(lhs, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+                lhs_scale_mat = pl.tile.load(lhs_scale, [0, 0], [256, 4], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [128, 512], target_memory=pl.Mem.Mat)
+                rhs_scale_mat = pl.tile.load(rhs_scale, [0, 0], [4, 512], target_memory=pl.Mem.Mat)
+                result = pl.tile.matmul_mx(lhs_vec, lhs_scale_mat, rhs_mat, rhs_scale_mat)
+                out = pl.tile.store(result, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Before)
+        diagnostics = capfd.readouterr().err
+        assert "PH-AT-006" in diagnostics
+
 
 class TestAutoTileMatmulL0MatScratch:
     """M/N output tiling to an L1/Mat scratch (on-chip matmul consumer), not DDR.
@@ -4609,6 +5011,43 @@ class TestAutoTileMatmulL0MatScratch:
         expected = c_bf16 @ e.float()
         rel_err = ((out - expected).norm() / expected.norm()).item()
         assert rel_err < 5e-2, f"full-K Mat-scratch chained bf16 rel_err {rel_err:.3e} exceeds 5e-2"
+
+    def test_mx_producer_uses_mat_scratch(self):
+        """An oversized MX producer consumed only as a later matmul lhs stays on-chip.
+
+        ``tile.matmul_mx`` yields FP32 Acc, so the chained consumer is a plain
+        ``tile.matmul`` lhs/rhs use — the same GetMatmulSignature operand check
+        that admits an MX→MX data chain.
+        """
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend950)
+        M, K, N, out_n = 256, 128, 320, 64
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[M, K], pl.FP8E4M3FN],
+                a_s: pl.Tensor[[M, K // 32], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[K, N], pl.FP8E4M3FN],
+                b_s: pl.Tensor[[K // 32, N], pl.FP8E8M0, pl.MX_B_NN],
+                e: pl.Tensor[[N, out_n], pl.FP32],
+                out: pl.Out[pl.Tensor[[M, out_n], pl.FP32]],
+            ) -> pl.Tensor[[M, out_n], pl.FP32]:
+                c = pl.matmul_mx(a, a_s, b, b_s)
+                d = pl.matmul(c, e, out_dtype=pl.FP32)
+                out = pl.assemble(out, d, [0, 0])
+                return out
+
+        After = passes.auto_tile_matmul_l0()(_lower_to_tile_ops(Before))
+        printed = ir.python_print(After)
+        assert "tile.create" in printed and "Mem.Mat" in printed
+        assert printed.count("pl.tile.assemble(") >= 2
+        assert "pl.tile.matmul_mx(" in printed or "pl.tile.matmul_mx_acc(" in printed
+        assert "target_memory=pl.Mem.LeftScale" in printed
+        assert "target_memory=pl.Mem.RightScale" in printed
+        _assert_ssa_valid(After, "test_mx_producer_uses_mat_scratch")
 
 
 class TestAutoTileMatmulL0FitsL0cCastFold:

@@ -2102,12 +2102,15 @@ def matmul_mx_acc(
     rhs: Expr,
     rhs_scale: Expr,
     span: Span | None = None,
+    *,
+    init_cond: Expr | None = None,
 ) -> Call:
-    """MX block-scale matmul with accumulation: acc += matmul_mx(...)."""
+    """MX block-scale matmul with optional conditional initialization."""
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call(
-        "tile.matmul_mx_acc", [acc, lhs, lhs_scale, rhs, rhs_scale], {}, actual_span
-    )
+    args = [acc, lhs, lhs_scale, rhs, rhs_scale]
+    if init_cond is not None:
+        args.append(init_cond)
+    return _ir_core.create_op_call("tile.matmul_mx_acc", args, {}, actual_span)
 
 
 def matmul_mx_bias(

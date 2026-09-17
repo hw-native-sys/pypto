@@ -33,11 +33,14 @@ pass.
 
 ```text
 ... -> FlattenTileNdTo2D -> BlockNzTensorViews
-    -> BlockMxScaleTensorViews -> LegalizeTileCast -> ...
+    -> LegalizeTileCast -> AutoTileMatmulL0
+    -> CanonicalizeTileSlice -> BlockMxScaleTensorViews -> ...
 ```
 
-The pass runs after `FlattenTileNdTo2D`, when `tile.load` results are logical
-2-D tiles, and before all consumers that require a physical MX tensor shape.
+The pass runs after `AutoTileMatmulL0`, which may rebuild an MX matmul's direct
+scale loads as smaller logical K windows, and after `CanonicalizeTileSlice`.
+At this point `tile.load` results are still logical 2-D tiles, and the pass
+still precedes all consumers that require a physical MX tensor shape.
 `MaterializeTensorStrides` later fills the rank-5 row-major strides.
 
 ## Rewrites
