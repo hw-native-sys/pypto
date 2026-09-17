@@ -3395,7 +3395,10 @@ class TestAutoTileMatmulL0MNTiling:
         mlir = _codegen_core.PTOCodegen().generate(
             _ir_core.Program([func], func.name, optimized.span), emit_tile_addr=False
         )
-        assert mlir.count("pto.alloc_multi_tile") == 2, mlir
+        assert mlir.count("pto.alloc_multi_tile") == 1, (
+            "the grids keep distinct logical groups but reuse one physical region after the first dies:\n"
+            f"{mlir}"
+        )
         assert mlir.count("pto.multi_tile_get") == 4, mlir
 
     @pytest.mark.parametrize(
