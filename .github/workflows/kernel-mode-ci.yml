@@ -146,7 +146,13 @@ jobs:
           torch_npu_release=https://gitee.com/ascend/pytorch/releases/download/v7.1.0.2-pytorch2.6.0
           torch_npu_wheel=torch_npu-2.6.0.post2-cp310-cp310-manylinux_2_28_aarch64.whl
           torch_npu_sha=8302dfc710a6cdd717f6f7e29c879858dde328bf4a788c4e455147264e329aec
-          uv pip install "${torch_npu_release}/${torch_npu_wheel}#sha256=${torch_npu_sha}"
+          wheel_dir=$(mktemp -d)
+          trap 'rm -rf "$wheel_dir"' EXIT
+          # Gitee rejects uv's download request; fetch and verify before install.
+          curl --fail --location --retry 3 --connect-timeout 15 --max-time 120 \
+            "${torch_npu_release}/${torch_npu_wheel}" -o "$wheel_dir/$torch_npu_wheel"
+          printf '%s  %s\n' "$torch_npu_sha" "$wheel_dir/$torch_npu_wheel" | sha256sum --check --strict
+          uv pip install "$wheel_dir/$torch_npu_wheel"
           cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DPYPTO_BUILD_TORCH_NPU=ON -DPYPTO_BUILD_TORCH_NPU_TESTS=ON
           cmake --build build --parallel "$PYPTO_BUILD_JOBS"
