@@ -40,6 +40,11 @@ on.
 That is a crash in the ptoas binary rather than a rejection of your IR. Point `PTOAS_ROOT`
 at a working version.
 
+**`ptoas at '...' is version X, but PyPTO requires PTOAS >= vY`.**
+Codegen checks `ptoas --version` before assembling, and your PyPTO emits instruction forms
+newer than that assembler. Install the version the error names (`PTOAS_VERSION` in
+`toolchain/versions.env`) and point `PTOAS_ROOT` at it.
+
 ## Running
 
 **Why is `run()`'s time so much larger than the kernel?**

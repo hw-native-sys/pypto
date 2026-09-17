@@ -45,6 +45,8 @@ from pypto._function_attrs import (
     EXTERNAL_SOURCE_ATTR,
 )
 from pypto.backend._ptoas_locate import PTOAS_RELATIVE_PATHS as _PTOAS_RELATIVE_PATHS
+from pypto.backend._ptoas_locate import PTOAS_RELEASES_URL as _PTOAS_RELEASES_URL
+from pypto.backend._ptoas_locate import check_ptoas_version as _check_ptoas_version
 from pypto.backend._ptoas_locate import find_ptoas_binary as _find_ptoas_binary
 from pypto.backend._ptoas_preprocess import preprocess_ptoas_output as _preprocess_ptoas_output
 from pypto.compile_profiling import CompileProfiler, StageRecord
@@ -55,8 +57,6 @@ from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core import passes as _passes
 
 logger = logging.getLogger(__name__)
-
-_PTOAS_RELEASE_URL = "https://github.com/zhangstevenunity/PTOAS/releases"
 
 _EMIT_SOURCE_LOC_ENV = "PYPTO_EMIT_PTO_LOC"
 _FALSY_ENV_VALUES = frozenset({"0", "false", "no", "off"})
@@ -208,7 +208,7 @@ def _run_ptoas(
 
     Raises:
         FileNotFoundError: If the ptoas binary cannot be found
-        RuntimeError: If ptoas compilation fails
+        RuntimeError: If ptoas is older than the pinned minimum, or compilation fails
     """
     ptoas_bin = _find_ptoas_binary()
     if ptoas_bin is None:
@@ -221,8 +221,9 @@ def _run_ptoas(
             )
         raise FileNotFoundError(
             "ptoas binary not found. Set PTOAS_ROOT to the extracted release directory, "
-            f"or add ptoas to your PATH.\nDownload from: {_PTOAS_RELEASE_URL}"
+            f"or add ptoas to your PATH.\nDownload from: {_PTOAS_RELEASES_URL}"
         )
+    _check_ptoas_version(ptoas_bin)
 
     cmd = [ptoas_bin, pto_path, "-o", output_path]
     if ptoas_flags:
@@ -1656,7 +1657,19 @@ def _run_ptoas_phase(
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
     dump_ptoas_passes: bool = False,
 ) -> None:
-    """Phase 2: run ptoas for all codegen units, sequentially or in parallel."""
+    """Phase 2: run ptoas for all codegen units, sequentially or in parallel.
+
+    Raises:
+        RuntimeError: If the selected ptoas is older than the pinned minimum.
+    """
+    if not skip_ptoas and units:
+        # A stale assembler fails every unit the same way; raise it once, up
+        # front, instead of as one error-report row per kernel. A missing binary
+        # still surfaces per unit from _run_ptoas.
+        ptoas_bin = _find_ptoas_binary()
+        if ptoas_bin is not None:
+            _check_ptoas_version(ptoas_bin)
+
     max_workers = _get_max_workers()
 
     if max_workers == 1 or len(units) <= 1:

@@ -32,6 +32,7 @@ import re
 import subprocess
 from pathlib import Path
 
+from pypto.backend._ptoas_locate import check_ptoas_version as _check_ptoas_version
 from pypto.backend._ptoas_locate import find_ptoas_binary as _ptoas_binary
 from pypto.backend._ptoas_preprocess import preprocess_ptoas_output as _preprocess_ptoas_body
 
@@ -88,6 +89,7 @@ def _ptoas_flags(pto_content: str) -> list[str]:
 
 def _run_ptoas(ptoas_bin: str, pto_path: Path, out_cpp: Path) -> None:
     """Invoke the ``ptoas`` binary on *pto_path*, writing to *out_cpp*."""
+    _check_ptoas_version(ptoas_bin)
     pto_content = pto_path.read_text(encoding="utf-8")
     cmd = [ptoas_bin, str(pto_path), "-o", str(out_cpp), *_ptoas_flags(pto_content)]
     result = subprocess.run(  # noqa: S603 — args are constructed locally, no shell

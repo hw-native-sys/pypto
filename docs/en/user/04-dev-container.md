@@ -458,7 +458,7 @@ renumbers cards, and exposes only the ones you named.
 | `npu-smi` reports `-9005`, or `DrvMngGetConsoleLogLevel failed (ret=4)` | `npu-smi` tries to enumerate the whole machine while only some cards are exposed | Harmless. Trust `pypto-doctor`'s `device access: aclrtSetDevice(0) ok` instead |
 | `/workspace/pypto` does not exist | Bind mount one level too high | Mount the directory containing `pypto/`: `-v "$PWD/workspace:/workspace"`, not `-v "$PWD:/workspace"` |
 | `pypto-doctor` says the simpler binding does not match its source | The mounted source differs from what the image built | `pypto-build && pypto-doctor` |
-| ptoas rejects an instruction form in generated code | The assembler has fallen behind `toolchain/versions.env` after a hand-run source update | `/workspace/pypto/.github/docker/pypto-update.sh` — it is the only step that reinstalls ptoas. The image as published is aligned (0.61) |
+| Codegen fails with `ptoas at '...' is version X, but PyPTO requires PTOAS >= vY` | The assembler has fallen behind `toolchain/versions.env` after a hand-run source update | `/workspace/pypto/.github/docker/pypto-update.sh` — it is the only step that reinstalls ptoas. The image as published is aligned (0.61) |
 | `pto-isa` tries to clone over the network | The mounted source bumped `runtime/pto_isa.pin`, or the managed checkout was modified | Expected after a pin bump. If GitHub HTTP/2 is unstable, `git config --global http.version HTTP/1.1` — the resolver retries GitHub and then falls back to the GitCode mirror |
 
 ### Triaging `507018`

@@ -27,6 +27,11 @@ DSL 需要知道一个循环究竟是编译期展开、设备侧循环，还是�
 **`ptoas compilation failed:` 后面是空的。**
 那是 ptoas 二进制崩了，而不是它拒绝了你的 IR。把 `PTOAS_ROOT` 指向一个能用的版本。
 
+**`ptoas at '...' is version X, but PyPTO requires PTOAS >= vY`。**
+codegen 在汇编之前会检查 `ptoas --version`，而你的 PyPTO 生成的指令形式比这个汇编器新。
+安装报错中给出的版本（即 `toolchain/versions.env` 中的 `PTOAS_VERSION`），并把 `PTOAS_ROOT`
+指向它。
+
 ## 运行
 
 **为什么 `run()` 的时间比 kernel 大那么多？**

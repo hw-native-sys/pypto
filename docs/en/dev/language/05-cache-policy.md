@@ -224,11 +224,11 @@ Three properties of the emit are worth stating, because each one is asserted in
 
 ### Older assemblers
 
-The emit is unconditional: there is no version gate, and no mechanism in the
-tree reads the pinned assembler version at compile time. A build pointed at an
-assembler older than the `PTOAS_VERSION` this repo pins is therefore out of
-contract — `cache_policy` is a v0.61 addition, so expect it to fail the
-`pto.tload` verifier there.
+The emit itself is unconditional — `cache_policy` is a v0.61 addition, and an
+older assembler would fail it at the `pto.tload` verifier. That never happens
+in practice: before the first `.pto` is assembled, codegen runs `ptoas --version`
+and rejects any assembler older than the `PTOAS_VERSION` this repo pins, with
+an error that names both versions.
 
 ### Limits
 
