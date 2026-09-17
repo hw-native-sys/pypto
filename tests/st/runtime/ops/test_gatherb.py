@@ -54,30 +54,18 @@ _ELEMENT_BYTES = {
 }
 
 
-# PTOAS v0.61 narrowed `pto.tgatherb`'s A2/A3 destination width from {1, 2, 4}
-# bytes to {2, 4} in the shared op verifier (PTOAS#971), to match a new VPTO
-# lowering path whose `llvm.hivm.VGATHERB` intrinsics only come in `.b16` and
-# `.b32`. The EmitC path these tests take lowers a 1-byte destination through
-# the ISA's dedicated `GatherBInstrB8`, and every case below passed on real
-# A2/A3 hardware under v0.60 — so this is an assembler regression, not a pypto
-# limitation, and nothing in pypto can make them compile again.
+# The 1-byte destinations below were skipped for hw-native-sys/PTOAS#1495: v0.61
+# narrowed `pto.tgatherb`'s A2/A3 destination width from {1, 2, 4} bytes to {2, 4}
+# in the shared op verifier (PTOAS#971), to match a new VPTO lowering path whose
+# `llvm.hivm.VGATHERB` intrinsics only come in `.b16` and `.b32`, so these stopped
+# compiling with `'pto.tgatherb' op expects A2/A3 dst element size to be 2 or 4
+# bytes`. The EmitC path they take lowers a 1-byte destination through the ISA's
+# dedicated `GatherBInstrB8`, which is why they passed under v0.60.
 #
-# Tracked as hw-native-sys/PTOAS#1495. Drop these marks (do not "fix" the
-# tests) once the verifier accepts 1-byte destinations again.
-_PTOAS_1495 = (
-    "PTOAS >= v0.61 rejects a 1-byte pto.tgatherb destination on A2/A3, which the "
-    "ISA implements via GatherBInstrB8 and hardware computes correctly "
-    "(hw-native-sys/PTOAS#1495)"
-)
-
-
-def _skip_one_byte_dst(dtype: DataType) -> list[pytest.MarkDecorator]:
-    """Collection-time skip marks for a destination PTOAS >= v0.61 refuses.
-
-    A collection-time mark rather than a ``pytest.skip`` in the body, so the
-    case is not pre-compiled either — compilation is where it fails.
-    """
-    return [pytest.mark.skip(reason=_PTOAS_1495)] if _ELEMENT_BYTES[dtype] == 1 else []
+# PTOAS v0.63 (`fix: accept byte-sized A2/A3 tgatherb destinations`) restores the
+# 1-byte width, and #1495 is closed as completed. The marks are therefore dropped
+# along with the v0.61 -> v0.63 bump in `toolchain/versions.env`; they must come
+# back if the pin ever moves to a release between v0.61 and v0.63.
 
 
 def _byte_offsets(pattern: str, rows: int, offsets_per_row: int) -> torch.Tensor:
@@ -198,20 +186,13 @@ class TestGatherb:
     """TGATHERB dtype, block permutation, and valid-shape branches."""
 
     @pytest.mark.parametrize("platform", ONBOARD_PLATFORMS)
-    @pytest.mark.parametrize(
-        "dtype",
-        [pytest.param(dt, marks=_skip_one_byte_dst(dt), id=str(dt)) for dt in _PL_DTYPE],
-    )
+    @pytest.mark.parametrize("dtype", _PL_DTYPE, ids=str)
     def test_dtypes(self, test_runner, platform, dtype):
         result = test_runner.run(GatherbTestCase(dtype=dtype, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    # Both patterns gather into UINT8, so both are refused by PTOAS >= v0.61.
     @pytest.mark.parametrize("platform", ONBOARD_PLATFORMS)
-    @pytest.mark.parametrize(
-        "pattern",
-        [pytest.param(p, marks=_skip_one_byte_dst(DataType.UINT8), id=p) for p in ("reverse", "roll3")],
-    )
+    @pytest.mark.parametrize("pattern", ("reverse", "roll3"))
     def test_byte_offset_patterns(self, test_runner, platform, pattern):
         result = test_runner.run(GatherbTestCase(dtype=DataType.UINT8, pattern=pattern, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
@@ -220,7 +201,7 @@ class TestGatherb:
     @pytest.mark.parametrize(
         ("dtype", "output_dtype"),
         [
-            pytest.param(src, dst, marks=_skip_one_byte_dst(dst), id=f"{src}-{dst}")
+            pytest.param(src, dst, id=f"{src}-{dst}")
             for src, dst in (
                 (DataType.INT16, DataType.INT32),
                 (DataType.UINT8, DataType.UINT16),
