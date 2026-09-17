@@ -509,7 +509,10 @@ The device job uses the verified `[self-hosted, linux, ARM64, npu-xp]` pool,
 the existing `setup-ci-job` bundle environment, and `task-submit` with the
 runner's `DEVICE_ID`. It installs Torch 2.6.0 and torch_npu 2.6.0.post2 in its
 isolated environment, requires C++11 ABI, and builds both the adapter and the
-test-only queue gate from the checked-out source. Simpler and pto-isa come from
+test-only queue gate from the checked-out source. The torch_npu 2.6.0.post2
+CPython 3.10 / ARM64 wheel is installed from Ascend's official
+`v7.1.0.2-pytorch2.6.0` release with a pinned SHA256; that version is not on PyPI.
+Simpler and pto-isa come from
 the submodule pin; ptoas comes from `toolchain/versions.env`. CANN comes from the
 runner's `CANN_ROOT` and must satisfy the adapter's documented prerequisites.
 No device work runs outside a task allocation.

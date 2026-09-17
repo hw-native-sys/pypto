@@ -141,7 +141,12 @@ jobs:
           # The shared setup uses the program CI's Torch version. Replace it
           # only in this job's isolated venv; leave shared wheels unchanged.
           uv pip install 'torch==2.6.0' --index-url https://download.pytorch.org/whl/cpu
-          uv pip install 'torch-npu==2.6.0.post2'
+          # post2 is an Ascend release asset, not a PyPI release. Pin the same
+          # CPython 3.10 / ARM64 wheel used for kernel-mode device validation.
+          torch_npu_release=https://gitee.com/ascend/pytorch/releases/download/v7.1.0.2-pytorch2.6.0
+          torch_npu_wheel=torch_npu-2.6.0.post2-cp310-cp310-manylinux_2_28_aarch64.whl
+          torch_npu_sha=8302dfc710a6cdd717f6f7e29c879858dde328bf4a788c4e455147264e329aec
+          uv pip install "${torch_npu_release}/${torch_npu_wheel}#sha256=${torch_npu_sha}"
           cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DPYPTO_BUILD_TORCH_NPU=ON -DPYPTO_BUILD_TORCH_NPU_TESTS=ON
           cmake --build build --parallel "$PYPTO_BUILD_JOBS"
