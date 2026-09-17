@@ -44,6 +44,10 @@ Coverage:
   operands in ``AssignStmt`` and ``EvalStmt``, plus plain aliases and loop
   carries; provably aligned static, constant-SSA, dynamic-row, and dynamic
   known-multiple slices stay zero-copy;
+* Vec extract placement — the extract replaces the slice definition (staying in
+  the author's ``pl.split_aiv`` region, one copy for several consumers, chained
+  slices rebased onto it) unless the source is written in place, which keeps
+  the consumer-site extract;
 * no-op cases — no Mat slice, and safe Vec-resident slices left untouched;
 * Acc accumulator contiguity — the strided-window rejection and the two shapes
   it accepts, both where the operand *is* the slice result and where it only
@@ -1011,7 +1015,10 @@ class TestUnalignedVecSlice:
         ir.assert_structural_equal(_run_pass(Before), Expected)
 
     def test_unaligned_slice_through_plain_alias_materialized(self):
-        """A plain SSA alias must not hide an unaligned slice from the pass."""
+        """A plain SSA alias must not hide an unaligned slice from the pass.
+
+        The extract replaces the slice's definition, so the alias forwards the
+        aligned copy to its consumer."""
 
         @pl.program
         class Before:
@@ -1041,9 +1048,10 @@ class TestUnalignedVecSlice:
                 local: pl.Tile[[16, 8], pl.FP32, pl.Mem.Vec] = pl.tile.load(
                     x, [0, 0], [16, 8], target_memory=pl.Mem.Vec
                 )
-                head_alias: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.extract(
+                head_ext: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.extract(
                     local, 0, 1, shape=[16, 1], target_memory=pl.Mem.Vec
                 )
+                head_alias: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = head_ext
                 scaled: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.muls(head_alias, 0.5)
                 out = pl.store(scaled, [0, 0], out)
                 return out
@@ -1391,6 +1399,228 @@ class TestSliceIntoColExpand:
                 return out
 
         ir.assert_structural_equal(_run_pass(Before), Before)
+
+
+class TestVecExtractPlacement:
+    """A Vec slice is materialized by replacing its DEFINITION when nothing in the
+    function writes its storage, so the extract stays where the author wrote the
+    slice. A slice whose storage may be written keeps the consumer-site extract,
+    which is the only placement that reads what the view would have read."""
+
+    def test_extract_stays_in_the_split_aiv_region_that_defines_the_slice(self):
+        """A slice written in a ``NONE`` region and consumed in the next
+        ``UP_DOWN`` region is extracted inside ``NONE``. A consumer-site extract
+        would move the read into ``UP_DOWN``, where LowerAutoVectorSplit sees a
+        full-width vector op the author never wrote there."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                scores: pl.Tensor[[16, 256], pl.FP32],
+                meta: pl.Tensor[[4, 256], pl.FP32],
+                row_off: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+            ) -> pl.Tensor[[16, 256], pl.FP32]:
+                local: pl.Tile[[16, 256], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    scores, [0, 0], [16, 256], target_memory=pl.Mem.Vec
+                )
+                meta_t: pl.Tile[[4, 256], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    meta, [0, 0], [4, 256], target_memory=pl.Mem.Vec
+                )
+                for _lane in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+                    coeff: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.slice(
+                        meta_t, [1, 256], [row_off, 0]
+                    )
+                for _aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                    scaled: pl.Tile[[16, 256], pl.FP32, pl.Mem.Vec] = pl.tile.col_expand_mul(local, coeff)
+                    out = pl.store(scaled, [0, 0], out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                scores: pl.Tensor[[16, 256], pl.FP32],
+                meta: pl.Tensor[[4, 256], pl.FP32],
+                row_off: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+            ) -> pl.Tensor[[16, 256], pl.FP32]:
+                local: pl.Tile[[16, 256], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    scores, [0, 0], [16, 256], target_memory=pl.Mem.Vec
+                )
+                meta_t: pl.Tile[[4, 256], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    meta, [0, 0], [4, 256], target_memory=pl.Mem.Vec
+                )
+                for _lane in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+                    coeff_ext: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.extract(
+                        meta_t, row_off, 0, shape=[1, 256], target_memory=pl.Mem.Vec
+                    )
+                for _aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                    scaled: pl.Tile[[16, 256], pl.FP32, pl.Mem.Vec] = pl.tile.col_expand_mul(local, coeff_ext)
+                    out = pl.store(scaled, [0, 0], out)
+                return out
+
+        ir.assert_structural_equal(_run_pass(Before), Expected)
+
+    def test_slice_with_multiple_consumers_extracted_once(self):
+        """Every consumer reads the one definition-site extract instead of each
+        receiving its own copy."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                scores: pl.Tensor[[16, 256], pl.FP32],
+                gamma: pl.Tensor[[1, 256], pl.FP32],
+                row_off: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[1, 256], pl.FP32]],
+            ) -> pl.Tensor[[1, 256], pl.FP32]:
+                local: pl.Tile[[16, 256], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    scores, [0, 0], [16, 256], target_memory=pl.Mem.Vec
+                )
+                gamma_t: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    gamma, [0, 0], [1, 256], target_memory=pl.Mem.Vec
+                )
+                row: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.slice(local, [1, 256], [row_off, 0])
+                scaled: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.col_expand_mul(row, gamma_t)
+                shifted: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.col_expand_add(row, gamma_t)
+                stored = pl.store(scaled, [0, 0], out)
+                out = pl.store(shifted, [0, 0], stored)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                scores: pl.Tensor[[16, 256], pl.FP32],
+                gamma: pl.Tensor[[1, 256], pl.FP32],
+                row_off: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[1, 256], pl.FP32]],
+            ) -> pl.Tensor[[1, 256], pl.FP32]:
+                local: pl.Tile[[16, 256], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    scores, [0, 0], [16, 256], target_memory=pl.Mem.Vec
+                )
+                gamma_t: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    gamma, [0, 0], [1, 256], target_memory=pl.Mem.Vec
+                )
+                row_ext: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.extract(
+                    local, row_off, 0, shape=[1, 256], target_memory=pl.Mem.Vec
+                )
+                scaled: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.col_expand_mul(row_ext, gamma_t)
+                shifted: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.col_expand_add(row_ext, gamma_t)
+                stored = pl.store(scaled, [0, 0], out)
+                out = pl.store(shifted, [0, 0], stored)
+                return out
+
+        ir.assert_structural_equal(_run_pass(Before), Expected)
+
+    def test_written_source_keeps_consumer_site_extract(self):
+        """An in-place write to the source between the slice and its consumer
+        makes a definition-site copy read stale rows, so the extract is placed
+        immediately before the consumer, after the write."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                scores: pl.Tensor[[16, 256], pl.FP32],
+                gamma: pl.Tensor[[1, 256], pl.FP32],
+                row_off: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[1, 256], pl.FP32]],
+            ) -> pl.Tensor[[1, 256], pl.FP32]:
+                local: pl.Tile[[16, 256], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    scores, [0, 0], [16, 256], target_memory=pl.Mem.Vec
+                )
+                gamma_t: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    gamma, [0, 0], [1, 256], target_memory=pl.Mem.Vec
+                )
+                row: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.slice(local, [1, 256], [row_off, 0])
+                _padded: pl.Tile[[16, 256], pl.FP32, pl.Mem.Vec] = pl.tile.fillpad_inplace(local, pad_value=0)
+                scaled: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.col_expand_mul(row, gamma_t)
+                out = pl.store(scaled, [0, 0], out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                scores: pl.Tensor[[16, 256], pl.FP32],
+                gamma: pl.Tensor[[1, 256], pl.FP32],
+                row_off: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[1, 256], pl.FP32]],
+            ) -> pl.Tensor[[1, 256], pl.FP32]:
+                local: pl.Tile[[16, 256], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    scores, [0, 0], [16, 256], target_memory=pl.Mem.Vec
+                )
+                gamma_t: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    gamma, [0, 0], [1, 256], target_memory=pl.Mem.Vec
+                )
+                _padded: pl.Tile[[16, 256], pl.FP32, pl.Mem.Vec] = pl.tile.fillpad_inplace(local, pad_value=0)
+                row_ext: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.extract(
+                    local, row_off, 0, shape=[1, 256], target_memory=pl.Mem.Vec
+                )
+                scaled: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.col_expand_mul(row_ext, gamma_t)
+                out = pl.store(scaled, [0, 0], out)
+                return out
+
+        ir.assert_structural_equal(_run_pass(Before), Expected)
+
+    def test_chained_slice_rebased_onto_definition_site_extract(self):
+        """A slice of a materialized slice is rebased onto the extract. Relative
+        to the original source, column 1 + 7 = 8 is 32-byte aligned; relative to
+        the extract's fresh buffer the chained column 7 is not, so the chained
+        slice must be materialized from the extract too."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 8], pl.FP32]],
+            ) -> pl.Tensor[[16, 8], pl.FP32]:
+                local: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    x, [0, 0], [16, 16], target_memory=pl.Mem.Vec
+                )
+                wide: pl.Tile[[16, 8], pl.FP32, pl.Mem.Vec] = pl.tile.slice(local, [16, 8], [0, 1])
+                wide_scaled: pl.Tile[[16, 8], pl.FP32, pl.Mem.Vec] = pl.tile.muls(wide, 0.5)
+                col: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.slice(wide, [16, 1], [0, 7])
+                col_scaled: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.muls(col, 0.5)
+                stored = pl.store(wide_scaled, [0, 0], out)
+                out = pl.store(col_scaled, [0, 0], stored)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 8], pl.FP32]],
+            ) -> pl.Tensor[[16, 8], pl.FP32]:
+                local: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    x, [0, 0], [16, 16], target_memory=pl.Mem.Vec
+                )
+                wide_ext: pl.Tile[[16, 8], pl.FP32, pl.Mem.Vec] = pl.tile.extract(
+                    local, 0, 1, shape=[16, 8], target_memory=pl.Mem.Vec
+                )
+                wide_scaled: pl.Tile[[16, 8], pl.FP32, pl.Mem.Vec] = pl.tile.muls(wide_ext, 0.5)
+                col_ext: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.extract(
+                    wide_ext, 0, 7, shape=[16, 1], target_memory=pl.Mem.Vec
+                )
+                col_scaled: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.muls(col_ext, 0.5)
+                stored = pl.store(wide_scaled, [0, 0], out)
+                out = pl.store(col_scaled, [0, 0], stored)
+                return out
+
+        ir.assert_structural_equal(_run_pass(Before), Expected)
 
 
 class TestNoOp:

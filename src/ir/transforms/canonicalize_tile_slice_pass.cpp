@@ -78,6 +78,19 @@
 /// a dynamic row is safe when its known multiple times the base row stride is
 /// aligned, and a dynamic column is safe when its known multiple times the
 /// element storage width is aligned.
+///
+/// **Where a Vec extract goes.**  Both Vec materializations above replace the
+/// slice's *definition* with the ``tile.extract`` whenever that is provably
+/// equivalent, so the copy stays where the author wrote the slice — in
+/// particular inside the same ``pl.split_aiv`` region, rather than being moved
+/// into a consumer's region — and a slice with several consumers is copied
+/// once.  A slice is a view, so an extract at the definition reads the source
+/// earlier than the consumer would; the two agree only when nothing writes that
+/// storage in between.  When any write in the function may reach it (an in-place
+/// or accumulate op, hardware scratch, or an opaque call on a Var sharing its
+/// storage), the extract is instead placed immediately before each consumer.
+/// A chained slice of a definition-site extract is rebased onto the extract.
+///
 /// Last, the pass **rejects** the col-major (``Acc`` / L0C) dual of the #2010
 /// contiguity condition when the slice is a matmul *accumulator*.  Here there is
 /// no repair to apply — an ``Acc`` window cannot be copied out and back, because
@@ -131,7 +144,8 @@
 /// as the backstop for any future pass that re-introduces a strided accumulator
 /// destination.
 ///
-/// After all consumers are rewritten the now-dead ``tile.slice`` is dropped.
+/// After all consumers are rewritten the now-dead ``tile.slice`` is dropped
+/// (a slice materialized at its definition has no ``tile.slice`` left to drop).
 /// Chained slices (a slice of a slice) are peeled, accumulating the offset.
 ///
 /// Pipeline position: right after ``AutoTileMatmulL0`` (so the per-iter
@@ -209,8 +223,11 @@ struct SliceInfo {
   ExprPtr off_row;  ///< Row offset to fold into the consumer index.
   ExprPtr off_col;  ///< Column offset to fold into the consumer index.
   std::optional<MemorySpace>
-      memory_space;  ///< Result tile's space (nullopt until InferTileMemorySpace runs).
-  bool is_mat;       ///< memory_space == Mem.Mat (drives the matmul/extract rewrite).
+      memory_space;        ///< Result tile's space (nullopt until InferTileMemorySpace runs).
+  bool is_mat;             ///< memory_space == Mem.Mat (drives the matmul/extract rewrite).
+  VarPtr source;           ///< The slice's own operand, before peeling (== base unless chained).
+  ExprPtr source_off_row;  ///< Row offset relative to `source`, before peeling.
+  ExprPtr source_off_col;  ///< Column offset relative to `source`, before peeling.
 };
 
 /// Resolve a scalar Var that is known to be a direct ConstInt SSA definition.
@@ -284,8 +301,10 @@ std::optional<SliceInfo> ParseSliceWindow(const AssignStmtPtr& assign,
   auto slice_tile = As<TileType>(assign->var_->GetType());
   std::optional<MemorySpace> memory_space = slice_tile ? slice_tile->GetMemorySpace() : std::nullopt;
   bool is_mat = IsMatTile(assign->var_->GetType());
-  ExprPtr off_row = ResolveKnownConstInt(offset->elements_[0], known_consts);
-  ExprPtr off_col = ResolveKnownConstInt(offset->elements_[1], known_consts);
+  const ExprPtr source_off_row = ResolveKnownConstInt(offset->elements_[0], known_consts);
+  const ExprPtr source_off_col = ResolveKnownConstInt(offset->elements_[1], known_consts);
+  ExprPtr off_row = source_off_row;
+  ExprPtr off_col = source_off_col;
   VarPtr base = src;
   // Peel a chained slice: src itself may be a slice we already recorded.
   auto it = known.find(src.get());
@@ -294,7 +313,7 @@ std::optional<SliceInfo> ParseSliceWindow(const AssignStmtPtr& assign,
     off_row = MakeCanonicalIndexAdd(it->second.off_row, off_row, assign->span_);
     off_col = MakeCanonicalIndexAdd(it->second.off_col, off_col, assign->span_);
   }
-  return SliceInfo{base, off_row, off_col, memory_space, is_mat};
+  return SliceInfo{base, off_row, off_col, memory_space, is_mat, src, source_off_row, source_off_col};
 }
 
 /// Rewrite-eligible slices only — the input to every canonicalization below.
@@ -506,6 +525,8 @@ class SliceCollector : public IRVisitor {
   /// the MAD with exactly the same broken stride — and then extended along
   /// identity-preserving edges by `BindWindowAlias`.
   std::unordered_map<const Var*, SliceInfo> windows;
+  /// The keys of `slices`, in program order: a chained slice follows its source.
+  std::vector<VarPtr> slice_order;
 
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
@@ -525,6 +546,7 @@ class SliceCollector : public IRVisitor {
     }
     if (auto info = ParseCanonicalSlice(op, slices, known_consts_)) {
       slices.emplace(op->var_.get(), *info);
+      slice_order.push_back(op->var_);
       return;
     }
     RecordCarriedAccumulatorUse(op->value_);
@@ -755,6 +777,199 @@ class SliceCollector : public IRVisitor {
   std::unordered_map<const Var*, CallPtr> carried_acc_uses_;
 };
 
+/// True for the col-expand ops whose `pto.*` lowering materializes a subview
+/// operand via the lazy `pto.textract` path (pto_ops_common.cpp).  Must mirror
+/// the materializing set in `MakeNaryCodegenPTO` exactly (#1640).
+bool IsColExpandMaterializingOp(const OpPtr& op) {
+  return IsOp(op, "tile.col_expand_mul") || IsOp(op, "tile.col_expand_add") ||
+         IsOp(op, "tile.col_expand_div") || IsOp(op, "tile.col_expand_sub") ||
+         IsOp(op, "tile.col_expand_max") || IsOp(op, "tile.col_expand_min") ||
+         IsOp(op, "tile.col_expand_expdif");
+}
+
+/// Phase 1b — the facts that decide whether a Vec slice can be materialized
+/// where it is *defined* rather than where it is consumed: which consumers
+/// would materialize it, and whether the storage it names can change between
+/// the two sites.
+///
+/// A `tile.slice` is a view, so a consumer reads the source as it is at the
+/// consumer.  A `tile.extract` placed at the definition reads it at the
+/// definition instead.  The two agree unless something writes that storage in
+/// between, so a slice qualifies only when *nothing in the function* writes
+/// any Var sharing its storage.  Storage sharing is an equivalence relation
+/// built with union-find over the edges that bind a Var to existing storage —
+/// a plain alias, an output that inherits its source buffer (views, in-place
+/// ops), and loop / if merges.  A write is a declared writeback operand, a
+/// declared hardware scratch or absolute-indexed destination, or any tile
+/// operand of a call the registry cannot describe.  Whole-function rather than
+/// between-site analysis keeps the sweep O(N α(N)); it can only decline a
+/// placement, never admit a wrong one.
+class SliceStorageAnalysis : public IRVisitor {
+ public:
+  /// How a Var is consumed, restricted to what CanonicalizeMutator materializes.
+  struct Uses {
+    bool col_expand = false;   ///< Operand of a lazily materializing `tile.col_expand_*`.
+    bool vec_operand = false;  ///< Call operand, yield value, loop initializer, or plain-alias source.
+  };
+
+  const Uses* FindUses(const Var* var) const {
+    auto it = uses_.find(var);
+    return it == uses_.end() ? nullptr : &it->second;
+  }
+
+  /// True when some write in the function may land in `var`'s storage.
+  bool MayBeWritten(const Var* var) {
+    if (!written_roots_resolved_) {
+      for (const auto* written : written_) written_roots_.insert(Find(written));
+      written_roots_resolved_ = true;
+    }
+    return written_roots_.count(Find(var)) != 0;
+  }
+
+ protected:
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (!op || !op->var_) return;
+    if (auto call = As<Call>(op->value_)) {
+      RecordCall(call, op->var_);
+    } else if (auto source = AsVarLike(op->value_)) {
+      uses_[source.get()].vec_operand = true;
+      Union(op->var_, source);
+    } else if (auto tuple = As<MakeTuple>(op->value_)) {
+      for (const auto& element : tuple->elements_) Union(op->var_, element);
+    } else if (auto item = As<TupleGetItemExpr>(op->value_)) {
+      Union(op->var_, item->tuple_);
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const EvalStmtPtr& op) override {
+    if (!op) return;
+    if (auto call = As<Call>(op->expr_)) RecordCall(call, nullptr);
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const YieldStmtPtr& op) override {
+    if (!op) return;
+    for (const auto& value : op->value_) {
+      if (auto var = AsVarLike(value)) uses_[var.get()].vec_operand = true;
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    if (!op) return;
+    RecordLoopEdges(op->iter_args_, op->body_, op->return_vars_);
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    if (!op) return;
+    RecordLoopEdges(op->iter_args_, op->body_, op->return_vars_);
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    if (!op) return;
+    RecordMergeEdges(op->then_body_, op->return_vars_);
+    if (op->else_body_.has_value()) RecordMergeEdges(*op->else_body_, op->return_vars_);
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  void RecordCall(const CallPtr& call, const VarPtr& result) {
+    if (!call || !call->op_) return;
+    // Mirror CanonicalizeMutator's consumer rewrites: a tile.slice operand is
+    // peeled and a tile.extract operand is folded, so neither materializes.
+    if (!IsOp(call, "tile.slice") && !IsOp(call, "tile.extract")) {
+      const bool col_expand = IsColExpandMaterializingOp(call->op_) && call->args_.size() == 2;
+      for (const auto& arg : call->args_) {
+        auto var = AsVarLike(arg);
+        if (!var) continue;
+        auto& uses = uses_[var.get()];
+        uses.vec_operand = true;
+        uses.col_expand |= col_expand;
+      }
+    }
+
+    auto& registry = OpRegistry::GetInstance();
+    if (!registry.IsRegistered(call->op_->name_)) {
+      // A user function or an unregistered op: nothing says which operands it
+      // writes, so assume all of them.
+      for (const auto& arg : call->args_) MarkWritten(arg);
+      return;
+    }
+    const auto writeback = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
+    if (writeback.has_value()) MarkWritten(call->args_[*writeback]);
+    const auto& entry = registry.GetEntry(call->op_->name_);
+    for (size_t i = 0; i < call->args_.size(); ++i) {
+      auto kind = entry.GetLaneInvariantArgKind(i);
+      if (kind.has_value() && *kind != LaneInvariantArg::IndexAddressedSource) MarkWritten(call->args_[i]);
+    }
+    if (result && !call->args_.empty() && op_predicates::OutputInheritsSourceBuffer(call->op_->name_)) {
+      const size_t source_index = writeback.value_or(0);
+      if (source_index < call->args_.size()) Union(result, call->args_[source_index]);
+    }
+  }
+
+  /// A loop IterArg names its initializer's storage on entry and its yielded
+  /// value's on every later trip; the loop result names the final yield.
+  void RecordLoopEdges(const std::vector<IterArgPtr>& iter_args, const StmtPtr& body,
+                       const std::vector<VarPtr>& return_vars) {
+    for (const auto& iter_arg : iter_args) {
+      if (!iter_arg) continue;
+      if (auto init = AsVarLike(iter_arg->initValue_)) uses_[init.get()].vec_operand = true;
+      Union(iter_arg, iter_arg->initValue_);
+    }
+    auto yield = transform_utils::GetLastYieldStmt(body);
+    if (!yield) return;
+    for (size_t i = 0; i < yield->value_.size(); ++i) {
+      if (i < iter_args.size() && iter_args[i]) Union(iter_args[i], yield->value_[i]);
+      if (i < return_vars.size()) Union(return_vars[i], yield->value_[i]);
+    }
+  }
+
+  void RecordMergeEdges(const StmtPtr& body, const std::vector<VarPtr>& return_vars) {
+    auto yield = transform_utils::GetLastYieldStmt(body);
+    if (!yield) return;
+    for (size_t i = 0; i < yield->value_.size() && i < return_vars.size(); ++i) {
+      Union(return_vars[i], yield->value_[i]);
+    }
+  }
+
+  void MarkWritten(const ExprPtr& expr) {
+    if (auto var = AsVarLike(expr)) written_.push_back(var.get());
+  }
+
+  const Var* Find(const Var* var) {
+    const Var* root = var;
+    for (auto it = parent_.find(root); it != parent_.end() && it->second != root; it = parent_.find(root)) {
+      root = it->second;
+    }
+    while (var != root) {  // path compression
+      auto it = parent_.find(var);
+      const Var* next = it->second;
+      it->second = root;
+      var = next;
+    }
+    return root;
+  }
+
+  void Union(const ExprPtr& lhs, const ExprPtr& rhs) {
+    auto lhs_var = AsVarLike(lhs);
+    auto rhs_var = AsVarLike(rhs);
+    if (!lhs_var || !rhs_var) return;
+    const Var* lhs_root = Find(lhs_var.get());
+    const Var* rhs_root = Find(rhs_var.get());
+    if (lhs_root != rhs_root) parent_[lhs_root] = rhs_root;
+  }
+
+  std::unordered_map<const Var*, Uses> uses_;
+  std::unordered_map<const Var*, const Var*> parent_;
+  std::vector<const Var*> written_;
+  std::unordered_set<const Var*> written_roots_;
+  bool written_roots_resolved_ = false;
+};
+
 /// Phase 2 — rewrite canonicalizable `tile.slice` consumers: Mat slices are
 /// folded into `tile.extract` / matmul, hazardous col-expand operands get fresh
 /// storage, and unaligned Vec operands are materialized before ordinary ops.
@@ -764,8 +979,48 @@ class CanonicalizeMutator : public IRMutator {
                       const std::unordered_map<const Var*, ExprPtr>& scalar_defs)
       : slices_(slices), scalar_defs_(scalar_defs) {}
 
+  /// Phase 2a — choose the Vec slices to materialize at their DEFINITION.
+  ///
+  /// A consumer-site `tile.extract` lands wherever the consumer is, which is not
+  /// necessarily where the author put the slice: a slice written inside one
+  /// `pl.split_aiv` region and consumed inside the next moves into the
+  /// consumer's region, changing which region owns the read.  Replacing the
+  /// definition instead keeps the extract in the author's region, and a slice
+  /// with several consumers is copied once rather than once per consumer.
+  ///
+  /// A slice qualifies when some consumer would materialize it (the same
+  /// predicates the consumer-site rewrites apply) and nothing in the function
+  /// writes its storage (see `SliceStorageAnalysis`).  A slice whose storage
+  /// may be written keeps the consumer-site placement — only there does the
+  /// copy read what the view would have read.
+  ///
+  /// `slice_order` is program order, so a chained slice is planned after its
+  /// source and is rebased onto the source's extract when that was planned.
+  void PlanDefinitionSiteExtracts(const std::vector<VarPtr>& slice_order, SliceStorageAnalysis& storage) {
+    for (const auto& slice_var : slice_order) {
+      auto& info = slices_.at(slice_var.get());
+      RebaseOnPlannedSource(info, slice_var->span_);
+      const auto* uses = storage.FindUses(slice_var.get());
+      if (!uses || !IsVecOrUnassigned(info)) continue;
+      const bool materializes = (uses->col_expand && MaterializationCorruptsSource(slice_var, info)) ||
+                                (uses->vec_operand && NeedsAlignedVecMaterialization(info));
+      if (!materializes || storage.MayBeWritten(slice_var.get())) continue;
+      definition_site_extracts_.emplace(
+          slice_var.get(), BuildOperandExtract(slice_var, info, MemorySpace::Vec, slice_var->span_));
+    }
+  }
+
  protected:
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    if (op && op->var_) {
+      auto planned = definition_site_extracts_.find(op->var_.get());
+      if (planned != definition_site_extracts_.end()) {
+        // Every later reference to the slice now reads the extract. SSA puts
+        // the definition before its uses, so the remap is in place in time.
+        var_remap_[op->var_.get()] = planned->second->var_;
+        return planned->second;
+      }
+    }
     auto base = IRMutator::VisitStmt_(op);
     auto assign = As<AssignStmt>(base);
     if (!assign) return base;
@@ -915,16 +1170,6 @@ class CanonicalizeMutator : public IRMutator {
     std::vector<StmtPtr> out = std::move(extracts);
     out.push_back(new_assign);
     return out;
-  }
-
-  /// True for the col-expand ops whose `pto.*` lowering materializes a subview
-  /// operand via the lazy `pto.textract` path (pto_ops_common.cpp).  Must mirror
-  /// the materializing set in `MakeNaryCodegenPTO` exactly (#1640).
-  static bool IsColExpandMaterializingOp(const OpPtr& op) {
-    return IsOp(op, "tile.col_expand_mul") || IsOp(op, "tile.col_expand_add") ||
-           IsOp(op, "tile.col_expand_div") || IsOp(op, "tile.col_expand_sub") ||
-           IsOp(op, "tile.col_expand_max") || IsOp(op, "tile.col_expand_min") ||
-           IsOp(op, "tile.col_expand_expdif");
   }
 
   /// True when a slice offset is dynamic (either component is not a `ConstInt`).
@@ -1185,8 +1430,30 @@ class CanonicalizeMutator : public IRMutator {
     return SeqStmts::Flatten(std::move(extracts), op->span_);
   }
 
-  const std::unordered_map<const Var*, SliceInfo>& slices_;
+  /// Re-derive a chained slice's peeled window when its source's own window
+  /// changed: planned sources become the new base (the extract is a fresh,
+  /// dense buffer, so the chained offset restarts from it), and a source that
+  /// was itself rebased propagates its new base and offsets.
+  void RebaseOnPlannedSource(SliceInfo& info, const Span& span) {
+    auto planned = definition_site_extracts_.find(info.source.get());
+    if (planned != definition_site_extracts_.end()) {
+      info.base = planned->second->var_;
+      info.off_row = info.source_off_row;
+      info.off_col = info.source_off_col;
+      return;
+    }
+    auto source = slices_.find(info.source.get());
+    if (source == slices_.end() || source->second.base.get() == info.base.get()) return;
+    info.base = source->second.base;
+    info.off_row = MakeCanonicalIndexAdd(source->second.off_row, info.source_off_row, span);
+    info.off_col = MakeCanonicalIndexAdd(source->second.off_col, info.source_off_col, span);
+  }
+
+  /// Own copy: planning rebases chained windows in place.
+  std::unordered_map<const Var*, SliceInfo> slices_;
   const std::unordered_map<const Var*, ExprPtr>& scalar_defs_;
+  /// Slice Var -> the `tile.extract` assignment that replaces its definition.
+  std::unordered_map<const Var*, AssignStmtPtr> definition_site_extracts_;
 };
 
 /// Phase 3a — collect every Var *used* (referenced on a statement's RHS).  An
@@ -1243,8 +1510,12 @@ Pass CanonicalizeTileSlice() {
     collector.VisitStmt(func->body_);
     if (collector.slices.empty()) return func;
 
-    // Phase 2 — fold or materialize canonical slice consumers.
+    // Phase 2 — materialize Vec slices at their definition where that is
+    // provably equivalent, then fold or materialize the remaining consumers.
+    SliceStorageAnalysis storage;
+    storage.VisitStmt(func->body_);
     CanonicalizeMutator mutator(collector.slices, collector.scalar_defs);
+    mutator.PlanDefinitionSiteExtracts(collector.slice_order, storage);
     auto new_body = mutator.VisitStmt(func->body_);
 
     // Phase 3 — drop the slice defs that no longer have any use.  A chained
