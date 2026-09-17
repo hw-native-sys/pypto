@@ -28,6 +28,28 @@ namespace ir {
 struct AllocationHazardInputs {
   std::unordered_set<const Var*> load_derived;
   std::unordered_set<const Var*> reads_tpop;
+  /// Vars passed to an operand the operator declares as a written workspace
+  /// (`set_workspace_arg` + a writing `set_arg_effect`). The intrinsic writes
+  /// that buffer itself, on a pipe PyPTO cannot see, so it must not inherit a
+  /// buffer an earlier value occupies.
+  std::unordered_set<const Var*> written_workspaces;
+  /// MemRef allocation bases of those same operands. A lifetime interval is
+  /// keyed on ONE representative of its sharing group, and an `IterArg` never
+  /// gets an interval of its own at all (its carry chain -- init value,
+  /// IterArg, yield value -- was fused onto a single MemRef base by
+  /// MaterializeSemanticAliases). Matching on Var identity alone therefore
+  /// misses a loop-carried workspace, and any workspace that is not its
+  /// group's representative. The base is the identity that survives both.
+  std::unordered_set<const Var*> written_workspace_bases;
+  /// The subset of those enclosed in a loop, with their bases. Across a back
+  /// edge "earlier" and "later" stop meaning anything: iteration i+1 re-writes
+  /// the workspace from the scalar pipe while iteration i's vector reads of a
+  /// value sharing that buffer can still be in flight. A looping workspace
+  /// therefore needs an exclusive buffer, not just protection from inheriting
+  /// one. Only `ForStmt` and `WhileStmt` repeat a body by the time MemoryReuse
+  /// runs -- `pl.pipeline` is lowered to a loop by pass 30/31.
+  std::unordered_set<const Var*> looping_written_workspaces;
+  std::unordered_set<const Var*> looping_written_workspace_bases;
 };
 
 using AllocationForbidAliasMap = std::map<const Var*, std::vector<VarPtr>>;

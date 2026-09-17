@@ -168,6 +168,24 @@ carry 同时也打破了程序序，因此收集器会对函数体遍历**两次
 
 该 guard 由 `BackendHandler::RequiresSplitLoadTpopWorkaround()`（仅 Ascend910B 为 true）以及函数为 split-AIV 这两个条件门控；在其他任何 backend / 函数类型下输入集合为空，复用行为不变。writer 仍可自由复用任何**非** load buffer —— 只有 load + tpop 的原地组合会被拒绝。（该 guard 此前由独立的 `LegalizePTOBufferReuse` pass 在事后拆分 buffer 来实现，现已并入 MemoryReuse。）
 
+## 被写工作区危害 {#written-workspace-hazard}
+
+`set_workspace_arg(i)` 声明某操作数为*编译器提供的 scratch：硬件会写它，但它不携带调用者读取的结果*；配套的 `set_arg_effect(i, ...)` 说明这个写确实发生。`tile.gather`、`tile.quant_mx` 与 `tile.sels` 都声明了这样的操作数。
+
+这类缓冲区由指令**自身**写入，用的是其实现选择的任意流水。A2/A3 的 TSELS 以 `*scalarPtr = scalar` 开场——向 `tmp` 偏移 0 处写一个元素，发射在**标量**流水上——而其余 tile 操作数都在向量流水上读。pto-isa 只保证本算子内部的 RAW（`set_cmpmask` 之前的 `PtoSetWaitFlag<PIPE_S, PIPE_V>`），没有任何东西先让该缓冲区上尚未退休的*向量*读者退休。这个写也不会以"写"的身份出现在生成的 `.pto` 中——发射器按位置传操作数——因此下游任何同步插入都看不到这个 WAR。
+
+只能由 MemoryReuse 从分配上阻止：
+
+- 传给被写工作区操作数的变量，不得加入某个缓冲区，若该缓冲区另一成员的生命期**结束于工作区定义点之前或同点**。
+
+在直线代码中该守卫是**有方向的**，因而保留了合法的反方向：更晚的值——通常是 TSELS 的 `dst`——仍可加入工作区自己的缓冲区，因为那时它早已退休。`dst` 与 `mask` 之间的约束仍由 `forbid_output_alias(0)` 独立负责。
+
+进入循环后这个方向性就失效了。回边会在第 *i+1* 次迭代用标量流水重写工作区，而第 *i* 次迭代对同缓冲区上任何值的向量读——`dst` 以及消费它的算子——可能仍在飞，单次迭代内的生命期先后证明不了下一次迭代的安全性。因此被 `ForStmt` 或 `WhileStmt` 包裹的工作区取**独占**缓冲区，两个方向都拦。在 MemoryReuse 运行时，只有这两种语句会重复执行 body：`pl.pipeline` 已被 [`LowerPipelineToSlots`](30-lower_pipeline_to_slots.md) / [`LowerPipelineLoops`](31-lower_pipeline_loops.md) 降为循环。
+
+它以 registry 为依据，而非算子名或后端开关，且**不按后端门控**：PyPTO 无从得知某条指令用哪条流水写工作区，因此所有声明过的工作区一律隔离。A5 的 TSELS 恰好不碰 `tmp`（它用 `vdup` 把标量送进向量寄存器），在那里多付一小块缓冲区，是不把逐指令的流水知识编码进 pass 所付的代价。同一事实也被 DSA-RP 作为 `TargetHazard` 分离约束消费，两个规划器结论一致。
+
+若无该守卫，由 `pl.tile.select` 构建的 clamp 会恰好损坏比较源的第 0 个元素：复合算子合成的工作区在一条语句内生死，因而是前一条 `tile.cmps` 仍在读的那块缓冲区最优先的复用候选。
+
 ## 示例
 
 ### MemRef 共享与 Alloc 清理

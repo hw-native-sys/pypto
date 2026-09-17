@@ -153,6 +153,60 @@ AllocationPlan BuildDsaAllocationPlan(const FunctionPtr& func) {
     }
   }
 
+  // An operand declared a written workspace is written by the intrinsic itself,
+  // on a pipe PyPTO cannot see, with nothing ordering that write against a read
+  // of the same buffer still in flight. It must not inherit storage from a value
+  // that dies before it is defined. Directional, like the legacy-reuse guard: a
+  // LATER value joining the workspace's buffer stays legal, since it has long
+  // retired.
+  if (!constraints.target_hazard_inputs.written_workspaces.empty()) {
+    std::vector<size_t> workspace_indices;
+    std::vector<size_t> looping_indices;
+    for (size_t index = 0; index < intervals.size(); ++index) {
+      const VarPtr& var = intervals[index].variable;
+      bool is_workspace = constraints.target_hazard_inputs.written_workspaces.count(var.get()) != 0;
+      if (!is_workspace) {
+        // A lifetime interval is keyed on one representative of its sharing
+        // group, and an IterArg gets no interval of its own, so Var identity
+        // alone misses a loop-carried workspace. Fall back to the allocation
+        // base, which the carry chain shares.
+        const auto memref = GetTypeMemRef(var->GetType());
+        if (memref.has_value() && memref.value() && memref.value()->base_) {
+          is_workspace = constraints.target_hazard_inputs.written_workspace_bases.count(
+                             memref.value()->base_.get()) != 0;
+        }
+      }
+      if (is_workspace) workspace_indices.push_back(index);
+      bool is_looping = constraints.target_hazard_inputs.looping_written_workspaces.count(var.get()) != 0;
+      if (!is_looping) {
+        const auto memref = GetTypeMemRef(var->GetType());
+        if (memref.has_value() && memref.value() && memref.value()->base_) {
+          is_looping = constraints.target_hazard_inputs.looping_written_workspace_bases.count(
+                           memref.value()->base_.get()) != 0;
+        }
+      }
+      if (is_looping) looping_indices.push_back(index);
+    }
+    for (const size_t workspace : workspace_indices) {
+      for (size_t other = 0; other < intervals.size(); ++other) {
+        if (other == workspace) continue;
+        if (intervals[other].last_use_point <= intervals[workspace].def_point) {
+          add_separation(workspace, other, AllocationSeparationReason::TargetHazard);
+        }
+      }
+    }
+    // A workspace inside a loop needs an exclusive buffer: the back edge
+    // re-writes it from the scalar pipe while iteration i's vector reads of a
+    // co-resident value can still be in flight, so lifetime order within one
+    // iteration proves nothing.
+    for (const size_t workspace : looping_indices) {
+      for (size_t other = 0; other < intervals.size(); ++other) {
+        if (other == workspace) continue;
+        add_separation(workspace, other, AllocationSeparationReason::TargetHazard);
+      }
+    }
+  }
+
   // Op-semantic no-alias constraints resolve operands through allocation-base identity.
   for (size_t index = 0; index < intervals.size(); ++index) {
     const auto forbidden = constraints.forbid_alias.find(intervals[index].variable.get());

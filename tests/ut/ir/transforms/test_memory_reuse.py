@@ -6343,13 +6343,18 @@ class TestForbidOutputAlias:
                 out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 t0: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(a, [0, 0], [16, 16])
-                dead: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(t0, t0)
                 src: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(b, [0, 0], [16, 16])
-                mask: pl.Tile[[16, 32], pl.UINT8, pl.MemorySpace.Vec] = pl.cmps(dead, 0.0, cmp_type=4)
+                mask: pl.Tile[[16, 32], pl.UINT8, pl.MemorySpace.Vec] = pl.cmps(t0, 0.0, cmp_type=4)
                 tmp: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(tmp_in, [0, 0], [16, 16])
                 dst: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.sels(mask, src, tmp, -1.0)
+                # Keep t0 and src live past the sels: this test is about which
+                # buffer `dst` may JOIN, so no earlier buffer may fall dead and
+                # offer itself first. A dead one here would also hand `tmp` a
+                # buffer a preceding op still reads, which the A2/A3 TSELS
+                # scratch guard forbids (see test_sels_scratch_* below).
                 keep_src_live: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(src, dst)
-                res: pl.Tensor[[16, 16], pl.FP32] = pl.store(keep_src_live, [0, 0], out)
+                keep_t0_live: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(t0, keep_src_live)
+                res: pl.Tensor[[16, 16], pl.FP32] = pl.store(keep_t0_live, [0, 0], out)
                 return res
 
         backend.reset_for_testing()
@@ -6365,6 +6370,163 @@ class TestForbidOutputAlias:
         assert bases["dst"] == bases["tmp"]
         assert bases["dst"] != bases["src"]
         assert bases["dst"] != bases["mask"]
+
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+    def test_written_workspace_does_not_inherit_a_buffer_a_preceding_op_reads(self, backend_type):
+        """A workspace the intrinsic writes itself may not recycle a buffer.
+
+        `tile.sels` declares its `tmp` a written workspace: A2/A3's TSELS opens
+        with ``*scalarPtr = scalar`` into it -- a one-element store issued on
+        the SCALAR pipe and ordered forward only by
+        ``PtoSetWaitFlag<PIPE_S, PIPE_V>``. Nothing retires an earlier VECTOR
+        reader of that buffer first, so letting the workspace inherit `dead`'s
+        storage lets the store land before ``pl.cmps`` has read element 0,
+        silently corrupting it.
+
+        The guard is registry-driven, not backend-gated: PyPTO cannot know
+        which pipe a given intrinsic writes a workspace from, so every declared
+        one is isolated. A5's TSELS happens to leave `tmp` untouched (it dups
+        the scalar into a vector register), and paying a 512-byte buffer there
+        is the price of not encoding per-intrinsic pipe knowledge in the pass.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                tmp_in: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                dead: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(a, [0, 0], [16, 16])
+                src: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(b, [0, 0], [16, 16])
+                # `dead` dies here, one statement before the scratch is created.
+                mask: pl.Tile[[16, 32], pl.UINT8, pl.MemorySpace.Vec] = pl.cmps(dead, 0.0, cmp_type=4)
+                tmp: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(tmp_in, [0, 0], [16, 16])
+                dst: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.sels(mask, src, tmp, -1.0)
+                res: pl.Tensor[[16, 16], pl.FP32] = pl.store(dst, [0, 0], out)
+                return res
+
+        backend.reset_for_testing()
+        backend.set_backend_type(backend_type)
+        try:
+            After = _run_pipeline(Before)
+        finally:
+            backend.reset_for_testing()
+
+        bases = _collect_tile_memref_bases(After)
+        for name in ("dead", "tmp"):
+            assert name in bases, f"Expected {name} in After IR; got bases: {bases}"
+        assert bases["tmp"] != bases["dead"], (
+            "a written workspace must not inherit the buffer of a value the preceding cmps "
+            f"still reads, but both landed on {bases['tmp']} (backend {backend_type})"
+        )
+
+    def test_loop_carried_written_workspace_is_still_isolated(self):
+        """Var identity alone misses this; the guard keys on the MemRef base.
+
+        A lifetime interval is keyed on ONE representative of its sharing group,
+        and an `IterArg` never gets an interval of its own -- its carry chain
+        (init value, IterArg, yield value) is fused onto a single MemRef base by
+        MaterializeSemanticAliases. The `tile.sels` here sees the carry's
+        `IterArg`, so a Var-pointer lookup matches no interval and the guard
+        would silently not fire, letting the carry's storage stay on `dead`'s
+        buffer -- which the `cmps` right before it still reads.
+
+        The dead value and the carry's init must both sit BEFORE the loop: the
+        carry's storage is established at its init value, so a value dying
+        inside the body can never be inherited by it.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                tmp_in: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                dead: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(a, [0, 0], [16, 16])
+                src: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(b, [0, 0], [16, 16])
+                # `dead` dies here, one statement before the carry's init value.
+                mask: pl.Tile[[16, 32], pl.UINT8, pl.MemorySpace.Vec] = pl.cmps(dead, 0.0, cmp_type=4)
+                tmp0: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(tmp_in, [0, 0], [16, 16])
+                for _, (carry_tmp,) in pl.range(2, init_values=(tmp0,)):
+                    got: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.sels(mask, src, carry_tmp, -1.0)
+                    next_tmp = pl.yield_(got)
+                res: pl.Tensor[[16, 16], pl.FP32] = pl.store(next_tmp, [0, 0], out)
+                return res
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        try:
+            After = _run_pipeline(Before)
+        finally:
+            backend.reset_for_testing()
+
+        bases = _collect_tile_memref_bases(After)
+        for name in ("dead", "tmp0"):
+            assert name in bases, f"Expected {name} in After IR; got bases: {bases}"
+        assert bases["tmp0"] != bases["dead"], (
+            "a loop-carried written workspace must not inherit the buffer of a value the "
+            f"preceding cmps still reads, but both landed on {bases['tmp0']}"
+        )
+
+    def test_written_workspace_in_a_loop_takes_an_exclusive_buffer(self):
+        """Across a back edge the directional argument collapses.
+
+        The straight-line rule lets a LATER value join a workspace's buffer,
+        because by then the workspace has retired. Inside a loop that stops
+        holding: iteration i+1 re-writes the workspace from the SCALAR pipe
+        while iteration i's vector reads of a co-resident value -- here the
+        TSELS `dst` and the `add` that consumes it -- can still be in flight.
+        Lifetime order within one iteration proves nothing about the next, so a
+        looping workspace takes an exclusive buffer in both directions.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                src: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(b, [0, 0], [16, 16])
+                acc0: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(a, [0, 0], [16, 16])
+                for _i, (acc,) in pl.range(4, init_values=(acc0,)):
+                    tmp: pl.Tile[[1, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.create(
+                        [1, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                    )
+                    mask: pl.Tile[[16, 32], pl.UINT8, pl.MemorySpace.Vec] = pl.cmps(acc, 0.0, cmp_type=4)
+                    dst: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.sels(mask, src, tmp, -1.0)
+                    # Reads dst on the vector pipe, so it can still be in flight
+                    # when the next iteration's TSELS stages its scalar.
+                    used: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(dst, dst)
+                    nxt = pl.yield_(used)
+                res: pl.Tensor[[16, 16], pl.FP32] = pl.store(nxt, [0, 0], out)
+                return res
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        try:
+            After = _run_pipeline(Before)
+        finally:
+            backend.reset_for_testing()
+
+        bases = _collect_tile_memref_bases(After)
+        for name in ("tmp", "dst", "used", "src", "mask"):
+            assert name in bases, f"Expected {name} in After IR; got bases: {bases}"
+        for other in ("dst", "used", "src", "mask"):
+            assert bases["tmp"] != bases[other], (
+                "a workspace written inside a loop must not share its buffer with anything, but "
+                f"tmp and {other} both landed on {bases['tmp']}"
+            )
 
     def test_prelu_output_does_not_alias_any_input(self):
         """A2/A3 TPRELU reads src, slope, and tmp while writing dst."""

@@ -1481,6 +1481,12 @@ REGISTER_OP("tile.sels")
     .add_argument("src", "Source tile, selected where mask is true (TileType)")
     .add_argument("tmp", "Scratch tile required by TSELS (TileType)")
     .add_argument("scalar", "Scalar value, selected where mask is false (ScalarType)")
+    // A2/A3's TSELS stages its scalar into tmp -- `*scalarPtr = scalar` at offset 0, latched by
+    // set_cmpmask -- so the hardware writes this operand even though it carries no result the
+    // caller reads. A5 dups the scalar into a vector register and leaves tmp untouched; declare
+    // the write unconditionally, as tile.gather already does for its own backend-conditional tmp.
+    .set_arg_effect(2, ArgEffect::Write)
+    .set_workspace_arg(2)
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_input_memory(2, MemorySpace::Vec)

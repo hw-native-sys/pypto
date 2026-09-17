@@ -2964,6 +2964,88 @@ class ForbidAliasCollector : public IRVisitor {
   std::map<const Var*, const Var*> member_to_rep_;  ///< sharing-group member -> representative
 };
 
+/// Collect every tile operand an operator declares as a WRITTEN WORKSPACE.
+///
+/// `set_workspace_arg(i)` means "compiler-supplied scratch: the hardware writes
+/// it, but it carries no result the caller reads", and `set_arg_effect(i, ...)`
+/// says whether that write happens. Such a buffer is written by the intrinsic
+/// itself, on whatever pipe its implementation chooses -- A2/A3's TSELS stages
+/// its scalar into `tmp` from the SCALAR pipe while every tile operand is read
+/// on the vector pipe. Program order does not order a write against a read
+/// still in flight on another pipe, and the write never reaches the generated
+/// `.pto` as a write (operands are emitted positionally), so no downstream sync
+/// insertion can see the WAR. The buffer therefore must not be inherited from a
+/// value that dies before the workspace is defined.
+///
+/// Keyed on the registry rather than on operator names or a backend flag: any
+/// operator declaring a written workspace is exposed to the same hazard, and
+/// PyPTO has no way to know which pipe a given intrinsic writes from.
+class WrittenWorkspaceCollector : public IRVisitor {
+ public:
+  void VisitExpr_(const CallPtr& op) override {
+    Record(op->op_, op->args_);
+    IRVisitor::VisitExpr_(op);
+  }
+
+  // The registry keys both call-like kinds the same way; classifying only Call
+  // would silently skip an operator launched through pl.submit.
+  void VisitExpr_(const SubmitPtr& op) override {
+    Record(op->op_, op->args_);
+    IRVisitor::VisitExpr_(op);
+  }
+
+  // Only these two repeat a body once MemoryReuse runs: `pl.pipeline` is
+  // lowered to a loop by LowerPipelineToSlots / LowerPipelineLoops (passes
+  // 30-31), well before this pass.
+  void VisitStmt_(const ForStmtPtr& op) override {
+    ++loop_depth_;
+    IRVisitor::VisitStmt_(op);
+    --loop_depth_;
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    ++loop_depth_;
+    IRVisitor::VisitStmt_(op);
+    --loop_depth_;
+  }
+
+  std::unordered_set<const Var*> TakeVars() { return std::move(workspaces_); }
+  std::unordered_set<const Var*> TakeBases() { return std::move(bases_); }
+  std::unordered_set<const Var*> TakeLoopingVars() { return std::move(looping_workspaces_); }
+  std::unordered_set<const Var*> TakeLoopingBases() { return std::move(looping_bases_); }
+
+ private:
+  void Record(const OpPtr& op, const std::vector<ExprPtr>& args) {
+    // LookupOpEntry, not a name lookup: a Submit's callee is a GlobalVar naming
+    // a *function*, and resolving that against the operator registry would hand
+    // a user function whose name collides with an operator that operator's
+    // workspace contract.
+    const auto* entry = LookupOpEntry(op);
+    if (entry == nullptr) return;
+    for (const size_t index : entry->GetWorkspaceArgs()) {
+      if (index >= args.size() || !entry->MayWriteArg(index)) continue;
+      // AsVarLike, not As<Var>: a workspace can reach the op as a loop IterArg
+      // when the call sits inside a loop body.
+      auto workspace = AsVarLike(args[index]);
+      if (!workspace) continue;
+      workspaces_.insert(workspace.get());
+      // Record the allocation base as well -- see `written_workspace_bases`.
+      const Var* base = TileMemRefBase(workspace);
+      if (base != nullptr) bases_.insert(base);
+      if (loop_depth_ > 0) {
+        looping_workspaces_.insert(workspace.get());
+        if (base != nullptr) looping_bases_.insert(base);
+      }
+    }
+  }
+
+  int loop_depth_ = 0;
+  std::unordered_set<const Var*> workspaces_;
+  std::unordered_set<const Var*> bases_;
+  std::unordered_set<const Var*> looping_workspaces_;
+  std::unordered_set<const Var*> looping_bases_;
+};
+
 /// True only for Ascend910B AIV split-mode functions, which need the load +
 /// tpop_from_aic in-place hazard guard.  All other backends / function kinds
 /// reuse buffers freely.  Defensive against unit-test contexts that run
@@ -3324,6 +3406,38 @@ ReuseMap IdentifyReuseOpportunities(
            hazard.load_derived.count(input.variable.get()) != 0;
   };
 
+  // Written-workspace hazard (directional): the intrinsic writes this operand
+  // itself, on a pipe PyPTO cannot see, and nothing orders that write against a
+  // read of the same buffer still in flight.  Block only the direction that
+  // lets the workspace INHERIT storage from a value that dies before it is
+  // defined -- a later value joining the workspace's buffer is safe (it has
+  // long retired), which keeps the legal `dst` reuse that
+  // `test_sels_output_may_reuse_dead_tmp` pins.
+  auto in_workspace_set = [](const LifetimeInterval& interval, const std::unordered_set<const Var*>& vars,
+                             const std::unordered_set<const Var*>& bases) {
+    if (vars.count(interval.variable.get()) != 0) return true;
+    const Var* base = TileMemRefBase(interval.variable);
+    return base != nullptr && bases.count(base) != 0;
+  };
+  auto is_written_workspace = [&hazard, &in_workspace_set](const LifetimeInterval& interval) {
+    return in_workspace_set(interval, hazard.written_workspaces, hazard.written_workspace_bases);
+  };
+  auto is_looping_written_workspace = [&hazard, &in_workspace_set](const LifetimeInterval& interval) {
+    return in_workspace_set(interval, hazard.looping_written_workspaces,
+                            hazard.looping_written_workspace_bases);
+  };
+  auto workspace_blocks = [&is_written_workspace, &is_looping_written_workspace](
+                              const LifetimeInterval& workspace, const LifetimeInterval& other) {
+    // Inside a loop the directional argument collapses: the back edge re-writes
+    // the workspace from the scalar pipe on iteration i+1 while iteration i's
+    // vector reads of anything sharing that buffer -- the TSELS `dst`, say, and
+    // whatever consumes it -- can still be in flight. Lifetime order within one
+    // iteration proves nothing about the next, so a looping workspace takes an
+    // exclusive buffer.
+    if (is_looping_written_workspace(workspace)) return true;
+    return is_written_workspace(workspace) && other.last_use_point <= workspace.def_point;
+  };
+
   // No-alias guard (directional): `writer`'s defining op forbids its output from
   // sharing a buffer with one or more input operands — either because the op is
   // not_inplace_safe (forbids ALL inputs, e.g. tile.recip) or because it marks a
@@ -3489,6 +3603,7 @@ ReuseMap IdentifyReuseOpportunities(
     // branch-local alias of an outside-live buffer) is still caught.
     if (LifetimesOverlap(cand, member) && overlap_blocks_sharing(cand, member)) return false;
     if (hazard_blocks(cand, member) || hazard_blocks(member, cand)) return false;
+    if (workspace_blocks(cand, member) || workspace_blocks(member, cand)) return false;
     if (forbid_blocks(cand, member) || forbid_blocks(member, cand)) return false;
     if (pipeline_blocks(cand, member)) return false;  // symmetric — one call suffices
     return true;
@@ -5449,6 +5564,13 @@ AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& fun
     collector.Run(func->body_);
     result.target_hazard_inputs = collector.Take();
   }
+
+  WrittenWorkspaceCollector workspace_collector;
+  workspace_collector.VisitStmt(func->body_);
+  result.target_hazard_inputs.written_workspaces = workspace_collector.TakeVars();
+  result.target_hazard_inputs.written_workspace_bases = workspace_collector.TakeBases();
+  result.target_hazard_inputs.looping_written_workspaces = workspace_collector.TakeLoopingVars();
+  result.target_hazard_inputs.looping_written_workspace_bases = workspace_collector.TakeLoopingBases();
 
   ForbidAliasCollector forbid_collector(lifetimes.var_sharing_groups);
   forbid_collector.VisitStmt(func->body_);

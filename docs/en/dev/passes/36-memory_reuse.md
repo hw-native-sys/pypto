@@ -182,6 +182,24 @@ A carry also breaks program order, so the collector walks the body **twice**. Th
 
 The guard is gated by `BackendHandler::RequiresSplitLoadTpopWorkaround()` (true only for Ascend910B) and the function being split-AIV; on every other backend / function kind the inputs are empty and reuse behaviour is unchanged. The writer is still free to reuse any **non**-load buffer — only the load + tpop in-place combination is rejected. (This guard previously lived in a dedicated `LegalizePTOBufferReuse` pass that split the buffer after the fact; it now folds into MemoryReuse.)
 
+## Written-workspace hazard
+
+`set_workspace_arg(i)` declares an operand to be *compiler-supplied scratch: the hardware writes it, but it carries no result the caller reads*; a writing `set_arg_effect(i, ...)` says the write happens. `tile.gather`, `tile.quant_mx` and `tile.sels` all declare one.
+
+Such a buffer is written by the intrinsic **itself**, on whatever pipe its implementation chooses. A2/A3's TSELS opens with `*scalarPtr = scalar` — a one-element store into `tmp` at offset 0 issued on the **scalar** pipe — while every tile operand is read on the vector pipe. pto-isa orders only the op's own RAW (`PtoSetWaitFlag<PIPE_S, PIPE_V>` before `set_cmpmask`); nothing retires an earlier *vector* reader of that buffer first. The write never reaches the generated `.pto` as a write either — the emitter passes operands positionally — so no sync insertion downstream can see the WAR.
+
+MemoryReuse therefore has to prevent the placement:
+
+- a var passed to a written workspace operand must not join a buffer whose other member's lifetime **ends at or before** the workspace's def point.
+
+In straight-line code the guard is **directional**, which keeps the legal opposite case: a later value — typically the TSELS `dst` — may still join the workspace's own buffer, because by then it has retired. `forbid_output_alias(0)` continues to cover `dst` vs `mask` independently.
+
+Inside a loop that direction collapses. The back edge re-writes the workspace from the scalar pipe on iteration *i+1* while iteration *i*'s vector reads of anything sharing that buffer — the `dst`, and whatever consumes it — can still be in flight, so lifetime order within one iteration proves nothing about the next. A workspace enclosed in a `ForStmt` or `WhileStmt` therefore takes an **exclusive** buffer, blocked in both directions. Those two are the only statements that repeat a body by the time MemoryReuse runs: `pl.pipeline` is lowered to a loop by [`LowerPipelineToSlots`](30-lower_pipeline_to_slots.md) / [`LowerPipelineLoops`](31-lower_pipeline_loops.md).
+
+It is keyed on the registry rather than on operator names or a backend flag, and is **not** backend-gated: PyPTO cannot know which pipe a given intrinsic writes a workspace from, so every declared one is isolated. A5's TSELS happens to leave `tmp` untouched (it dups the scalar into a vector register via `vdup`), and paying a small buffer there is the price of not encoding per-intrinsic pipe knowledge in the pass. The same fact is consumed by DSA-RP as a `TargetHazard` separation, so both planners agree.
+
+Without the guard, `pl.tile.select`-built clamps corrupt exactly element 0 of the compare source: the composite's synthesized workspace is born and dies inside one statement, which makes it the prime reuse candidate for the buffer the preceding `tile.cmps` is still reading.
+
 ## Example
 
 ### MemRef Sharing with Alloc Cleanup
