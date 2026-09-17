@@ -43,8 +43,13 @@ enum class SaturationMode : int {
 };
 
 /// What a cast means when it carries no `saturation_mode` kwarg, given where it
-/// is converting *to*. `nullopt` means "whatever the target does" -- no `satmode`
-/// is emitted and the lowering is exactly what it was before this kwarg existed.
+/// is converting *to*. `nullopt` means "whatever the target does" -- the cast made
+/// no claim, which is the same shape a pass-synthesized cast has.
+///
+/// This is the **IR** default: the value a kwarg is recorded as a deviation from,
+/// so it must keep mirroring `default_saturation_mode_for` in
+/// `python/pypto/ir/utils.py`. It is deliberately *not* what codegen stamps --
+/// see `EmittedSaturationModeFor`.
 ///
 /// The default is only ON for an **integer** destination. That is where the two
 /// modes are a genuine choice: no standard fixes what a float-to-int or a
@@ -65,7 +70,9 @@ inline std::optional<SaturationMode> DefaultSaturationModeFor(DataType dst) {
 }
 
 /// The effective mode of a cast, reading the destination's default through for an
-/// absent kwarg. `nullopt` means no `satmode` should be emitted.
+/// absent kwarg. `nullopt` means the cast made no claim about saturation.
+///
+/// Passes ask this. Codegen asks `GetEmittedSaturationMode` instead.
 inline std::optional<int> GetSaturationMode(const CallPtr& call) {
   constexpr int kAbsent = -1;
   const int explicit_mode = call->GetKwarg<int>("saturation_mode", kAbsent);
@@ -73,6 +80,30 @@ inline std::optional<int> GetSaturationMode(const CallPtr& call) {
   const auto fallback = DefaultSaturationModeFor(call->GetKwarg<DataType>("target_type"));
   if (!fallback.has_value()) return std::nullopt;
   return static_cast<int>(*fallback);
+}
+
+/// The concrete mode codegen stamps on `pto.tcvt`, resolving "whatever the target
+/// does" to OFF.
+///
+/// `satmode` is always emitted, so the assembler's own default for an omitted
+/// attribute can never decide the semantics -- and it does change: PTOAS v0.63
+/// flipped it from OFF to ON (`fix(tcvt): default saturation mode to ON`), which
+/// under an "emit nothing for a float destination" rule would have silently turned
+/// every `INT32 -> FP16` into a clamping cast. OFF is the right resolution because
+/// it *is* the target's IEEE behavior, and because it reproduces what v0.61
+/// assembled for the same omitted attribute, byte for byte.
+///
+/// This resolution lives at the emission boundary on purpose: widening the IR
+/// default to OFF instead would make an explicit `saturation_mode="off"` on a float
+/// destination a non-deviation, so it would stop being recorded and the passes that
+/// ask whether the author requested a mode would stop seeing it.
+inline SaturationMode EmittedSaturationModeFor(DataType dst) {
+  return DefaultSaturationModeFor(dst).value_or(SaturationMode::kOff);
+}
+
+inline int GetEmittedSaturationMode(const CallPtr& call) {
+  if (const auto mode = GetSaturationMode(call)) return *mode;
+  return static_cast<int>(EmittedSaturationModeFor(call->GetKwarg<DataType>("target_type")));
 }
 
 inline bool IsValidSaturationMode(int value) {
@@ -98,7 +129,7 @@ inline std::string SaturationModeToPTOString(int value) {
 /// Reject an out-of-contract `saturation_mode` at construction time, so a bad
 /// value is reported against the cast the caller wrote rather than surfacing as
 /// an unrenderable PTOAS attribute in codegen. A missing kwarg is valid — it
-/// means "leave the backend default alone" — so this only checks what is there.
+/// means "take the destination's default" — so this only checks what is there.
 inline void ValidateCastSaturationModeKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs,
                                             const std::string& op_name) {
   for (const auto& [key, value] : kwargs) {
