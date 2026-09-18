@@ -76,6 +76,36 @@ result has `usable=False` and `digest=None` if any component is incomplete or
 unreadable. There is no shared `UNKNOWN` key. An extra application fingerprint
 cannot turn this result into a usable toolchain identity.
 
+### Externally verified revisions
+
+`ComponentInputs.verified_revision` is the one exception to reading contents. An
+adapter may set it only when some other mechanism has already proven, in the
+same resolution, that the component's bytes *are* that revision. A version an
+installation reports about itself is not such a proof, and neither is a path
+that contains a version number.
+
+PTO-ISA is the only component that currently qualifies. `ensure_pto_isa_root()`
+returns a checkout only after proving it is clean and at the pinned commit, and
+re-clones it from the pin otherwise; git objects are content-addressed, so a
+clean tree at `HEAD == pin` is byte-for-byte the pinned tree. Hashing that tree
+again re-proves what the resolution established.
+
+That resolution decides cleanliness with `git status --porcelain`, which omits
+paths the checkout ignores, so a build writing generated files into the ISA tree
+would not disturb it. The adapter therefore re-asks with `--ignored`, which
+covers the tracked state again at the same time: anything at all that git does
+not account for — ignored, untracked or modified — sends the component back to
+its contents. That check costs about 18ms against the 0.71s the content read
+costs.
+
+An adapter that cannot read the revision, or cannot get a usable answer about
+the tree, falls back the same way, and `unavailable_reason` still outranks a
+revision, so an incomplete component stays unavailable.
+
+A verified revision is recorded together with its component name, so one
+component's revision can never produce the same digest as another's, nor as any
+content digest.
+
 Successful component reads are memoized by their complete resolved inventory,
 with synchronization for concurrent threads. Changed selection must produce a
 new inventory. Failed reads are retried rather than cached indefinitely.
