@@ -1558,11 +1558,22 @@ def matmul_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
     return Tile(expr=call_expr)
 
 
-def matmul_mx_acc(acc: Tile, lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
+def matmul_mx_acc(
+    acc: Tile,
+    lhs: Tile,
+    lhs_scale: Tile,
+    rhs: Tile,
+    rhs_scale: Tile,
+    init_cond: BoolLike | None = None,
+) -> Tile:
     """MX block-scale matmul with accumulation.
 
     Data operands follow [`matmul_mx`][pypto.language.tile.matmul_mx]: an FP4 lhs must first be cast to
     FP8E4M3FN, and the operation itself receives two FP8E4M3FN tiles.
+
+    ``init_cond`` follows [`matmul_acc`][pypto.language.tile.matmul_acc]: where
+    it holds, the accumulator is overwritten with the current MX product rather
+    than accumulated into. This removes the peeled first K iteration.
 
     Args:
         acc: Accumulator tile
@@ -1570,12 +1581,18 @@ def matmul_mx_acc(acc: Tile, lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: T
         lhs_scale: Left-hand side scale tile (FP8E8M0)
         rhs: Right-hand side data tile (FP8E4M3FN)
         rhs_scale: Right-hand side scale tile (FP8E8M0)
+        init_cond: Optional predicate selecting overwrite over accumulate
 
     Returns:
         Tile wrapping the matmul_mx_acc operation
     """
     call_expr = _ir_ops.matmul_mx_acc(
-        acc.unwrap(), lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap()
+        acc.unwrap(),
+        lhs.unwrap(),
+        lhs_scale.unwrap(),
+        rhs.unwrap(),
+        rhs_scale.unwrap(),
+        init_cond=predicate_to_expr(init_cond),
     )
     return Tile(expr=call_expr)
 

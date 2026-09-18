@@ -28,6 +28,7 @@ if not all(hasattr(torch, name) for name in _REQUIRED_TORCH_DTYPES):
     pytest.skip("torch MXFP4/MXFP8/E8M0 dtypes required", allow_module_level=True)
 
 M, K, N = 64, 128, 128
+AUTOTILE_M, AUTOTILE_K, AUTOTILE_N = 16, 256, 256
 MX_GROUP_SIZE = 32
 SCALE_BLOCK_SIZE = 16
 SCALE_C0_SIZE = 2
@@ -123,7 +124,7 @@ def _matmul_mx_golden(
     b_scale_codes: torch.Tensor,
 ) -> torch.Tensor:
     """Compute MX matmul from decoded values and logical per-group E8M0 scales."""
-    k_group = torch.arange(K) // MX_GROUP_SIZE
+    k_group = torch.arange(a.shape[1]) // MX_GROUP_SIZE
     a_scale = torch.pow(2.0, a_scale_codes.to(torch.float64) - 127)
     b_scale = torch.pow(2.0, b_scale_codes.to(torch.float64) - 127)
     a_scaled = a.to(torch.float64) * a_scale[:, k_group]
@@ -161,6 +162,33 @@ def mxfp8_matmul(
     out_acc: pl.Out[pl.Tensor[[M, N], pl.FP32]],
 ) -> tuple[pl.Tensor[[M, N], pl.FP32], pl.Tensor[[M, N], pl.FP32]]:
     return mxfp8_matmul_kernel(a, a_scale, b, b_scale, out, out_acc)
+
+
+@pl.jit.incore
+def mxfp8_autotile_kernel(
+    a: pl.Tensor[[AUTOTILE_M, AUTOTILE_K], pl.FP8E4M3FN],
+    a_scale: pl.Tensor[[AUTOTILE_M, AUTOTILE_K // 32], pl.FP8E8M0, pl.MX_A_ZZ],
+    b: pl.Tensor[[AUTOTILE_K, AUTOTILE_N], pl.FP8E4M3FN],
+    b_scale: pl.Tensor[[AUTOTILE_K // 32, AUTOTILE_N], pl.FP8E8M0, pl.MX_B_NN],
+    out: pl.Out[pl.Tensor[[AUTOTILE_M, AUTOTILE_N], pl.FP32]],
+) -> pl.Tensor[[AUTOTILE_M, AUTOTILE_N], pl.FP32]:
+    lhs = pl.load(a, [0, 0], [AUTOTILE_M, AUTOTILE_K])
+    lhs_scale = pl.load(a_scale, [0, 0], [AUTOTILE_M, AUTOTILE_K // 32])
+    rhs = pl.load(b, [0, 0], [AUTOTILE_K, AUTOTILE_N])
+    rhs_scale = pl.load(b_scale, [0, 0], [AUTOTILE_K // 32, AUTOTILE_N])
+    result = pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale)
+    return pl.store(result, [0, 0], out)
+
+
+@pl.jit
+def mxfp8_autotile(
+    a: pl.Tensor[[AUTOTILE_M, AUTOTILE_K], pl.FP8E4M3FN],
+    a_scale: pl.Tensor[[AUTOTILE_M, AUTOTILE_K // 32], pl.FP8E8M0, pl.MX_A_ZZ],
+    b: pl.Tensor[[AUTOTILE_K, AUTOTILE_N], pl.FP8E4M3FN],
+    b_scale: pl.Tensor[[AUTOTILE_K // 32, AUTOTILE_N], pl.FP8E8M0, pl.MX_B_NN],
+    out: pl.Out[pl.Tensor[[AUTOTILE_M, AUTOTILE_N], pl.FP32]],
+) -> pl.Tensor[[AUTOTILE_M, AUTOTILE_N], pl.FP32]:
+    return mxfp8_autotile_kernel(a, a_scale, b, b_scale, out)
 
 
 @pl.jit.incore
@@ -273,6 +301,57 @@ class MatmulMxTestCase(PTOTestCase):
         tensors["out_acc"][:] = 2 * base
 
 
+class MatmulMxAutotileTestCase(PTOTestCase):
+    """One MX matmul whose original right panel fills all of A5 L0B."""
+
+    __test__ = False
+
+    def __init__(self):
+        super().__init__(RunConfig(rtol=0.0, atol=0.0), platform="a5")
+
+    def get_name(self) -> str:
+        return "matmul_mx_autotile_64k_right_panel"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        generator = torch.Generator().manual_seed(41)
+        a = MatmulMxTestCase._make_fp8_data((AUTOTILE_M, AUTOTILE_K), generator)
+        b = MatmulMxTestCase._make_fp8_data((AUTOTILE_K, AUTOTILE_N), generator)
+        a_scale_codes = torch.randint(
+            126,
+            130,
+            (AUTOTILE_M, AUTOTILE_K // MX_GROUP_SIZE),
+            generator=generator,
+        ).to(torch.uint8)
+        b_scale_codes = torch.randint(
+            126,
+            130,
+            (AUTOTILE_K // MX_GROUP_SIZE, AUTOTILE_N),
+            generator=generator,
+        ).to(torch.uint8)
+        a_scale = _pack_a_scale(a_scale_codes).view(torch.float8_e8m0fnu)
+        b_scale = _pack_b_scale(b_scale_codes).view(torch.float8_e8m0fnu)
+        return [
+            TensorSpec("a", list(a.shape), DataType.FP8E4M3FN, init_value=a),
+            TensorSpec("a_scale", list(a_scale.shape), DataType.FP8E8M0, init_value=a_scale),
+            TensorSpec("b", list(b.shape), DataType.FP8E4M3FN, init_value=b),
+            TensorSpec("b_scale", list(b_scale.shape), DataType.FP8E8M0, init_value=b_scale),
+            TensorSpec("out", [AUTOTILE_M, AUTOTILE_N], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return mxfp8_autotile.specialize()
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        a_scale_codes = _unpack_a_scale(tensors["a_scale"].view(torch.uint8))
+        b_scale_codes = _unpack_b_scale(tensors["b_scale"].view(torch.uint8))
+        tensors["out"][:] = _matmul_mx_golden(
+            tensors["a"].to(torch.float64),
+            a_scale_codes,
+            tensors["b"].to(torch.float64),
+            b_scale_codes,
+        )
+
+
 @pytest.mark.platforms("a5")
 class TestMatmulMx:
     """Numerical execution coverage for the supported A5 MX dtype pairs."""
@@ -286,6 +365,11 @@ class TestMatmulMx:
     )
     def test_matmul_mx_base_and_acc(self, test_runner, lhs_dtype, rhs_dtype):
         case = MatmulMxTestCase(lhs_dtype, rhs_dtype)
+        result = test_runner.run(case)
+        assert result.passed, f"Test failed: {result.error}"
+
+    def test_matmul_mx_autotile_64k_right_panel(self, test_runner):
+        case = MatmulMxAutotileTestCase()
         result = test_runner.run(case)
         assert result.passed, f"Test failed: {result.error}"
 

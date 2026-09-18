@@ -185,16 +185,17 @@ class PassManager:
             # its ND2NZ window collapse for NZ sources so the logical window is
             # still intact here.
             passes.block_nz_tensor_views,
-            # Physicalize logical MX_A_ZZ / MX_B_NN scale tensors and their
-            # tile.load windows into A5's packed rank-5 SFractal form. This is
-            # independent from NZ blocking and owns its own offset proofs.
-            passes.block_mx_scale_tensor_views,
             # Expand non-native tile.cast (src,dst) pairs into shortest native
             # cast chains (e.g. A5 INT32→FP16 → INT32→FP32→FP16) before
             # AutoTileMatmulL0 may FIXPIPE-fold already-native f32→bf16/f16.
             passes.legalize_tile_cast,
             passes.auto_tile_matmul_l0,
             passes.canonicalize_tile_slice,
+            # Physicalize logical MX_A_ZZ / MX_B_NN scale tensors and every
+            # scale window load introduced by AutoTile into A5's packed rank-5
+            # SFractal form. Keeping this after AutoTile lets that pass rebuild
+            # legal logical tile.load windows instead of boxed Mat subviews.
+            passes.block_mx_scale_tensor_views,
             passes.infer_tile_memory_space,
             passes.insert_mx_scale_addr,
             passes.resolve_backend_op_layouts,

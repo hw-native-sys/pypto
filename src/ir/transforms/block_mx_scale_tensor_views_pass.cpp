@@ -121,10 +121,22 @@ bool IsMxProvableNonNegative(const ExprPtr& expr, const MxOffsetFacts& facts, in
     return IsMxProvableNonNegative(add->left_, facts, budget) &&
            IsMxProvableNonNegative(add->right_, facts, budget);
   }
+  if (auto max = As<Max>(expr)) {
+    return IsMxProvableNonNegative(max->left_, facts, budget) ||
+           IsMxProvableNonNegative(max->right_, facts, budget);
+  }
+  if (auto min = As<Min>(expr)) {
+    return IsMxProvableNonNegative(min->left_, facts, budget) &&
+           IsMxProvableNonNegative(min->right_, facts, budget);
+  }
   if (auto floordiv = As<FloorDiv>(expr)) {
     auto denominator = As<ConstInt>(floordiv->right_);
     if (!denominator || denominator->value_ <= 0) return false;
     return IsMxProvableNonNegative(floordiv->left_, facts, budget);
+  }
+  if (auto floormod = As<FloorMod>(expr)) {
+    auto denominator = As<ConstInt>(floormod->right_);
+    return denominator && denominator->value_ > 0;
   }
   if (auto var = As<Var>(expr)) {
     if (facts.is_non_negative && facts.is_non_negative(var, budget)) return true;

@@ -246,9 +246,11 @@ TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
 TypePtr DeduceTileMatMulMxAccType(const std::vector<ExprPtr>& args,
                                   const std::vector<std::pair<std::string, std::any>>& kwargs,
                                   const std::string& op_name) {
-  CHECK(args.size() == 5) << "The operator " << op_name
-                          << " requires exactly 5 arguments (acc, lhs, lhs_scale, rhs, rhs_scale), but got "
-                          << args.size();
+  CHECK(args.size() == 5 || args.size() == 6)
+      << "The operator " << op_name
+      << " requires 5 arguments (acc, lhs, lhs_scale, rhs, rhs_scale) or 6 with the optional "
+      << "init_cond predicate, but got " << args.size();
+  CheckMatmulInitCond(args, 5, op_name);
   auto acc_type = As<TileType>(args[0]->GetType());
   CHECK(acc_type) << "The operator " << op_name << " requires acc to be a TileType, but got "
                   << args[0]->GetType()->TypeName();
@@ -345,6 +347,9 @@ REGISTER_OP("tile.matmul_mx_acc")
     .add_argument("lhs_scale", "Left scale tile (TileType, 2D, FP8E8M0)")
     .add_argument("rhs", "Right-hand side tile (TileType, 2D, MXFP8 E4M3)")
     .add_argument("rhs_scale", "Right scale tile (TileType, 2D, FP8E8M0)")
+    .add_argument("init_cond",
+                  "Optional BOOL scalar; where it holds the accumulator is overwritten with "
+                  "the MX product instead of accumulated into")
     .set_input_memory(0, MemorySpace::Acc)
     .set_input_memory(1, MemorySpace::Left)
     .set_input_memory(2, MemorySpace::LeftScale)

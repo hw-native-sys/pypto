@@ -801,6 +801,17 @@ TypePtr DeduceTileExtractType(const std::vector<ExprPtr>& args,
   } else if (target == MemorySpace::Right) {
     tile_view.blayout = TileLayout::row_major;
     tile_view.slayout = TileLayout::col_major;
+  } else if (target == MemorySpace::Mat && src_type->tile_view_ &&
+             src_type->tile_view_->fractal == tile_view_semantics::kMXScaleFractal &&
+             (src_type->dtype_ == DataType::FP8E8M0 || src_type->dtype_ == DataType::UINT8)) {
+    // Mat→Mat windows of an MX scale tile (FP8E8M0 or its UINT8 byte alias) must
+    // keep the source's hardware box (row/row/32 or col/col/32). Mat's implicit
+    // layout is col/row/512 and would make a follow-up Mat→LeftScale/RightScale
+    // `tile.move` illegal. A5 also rejects FP8E8M0 `pto.textract` entirely, so
+    // AutoTile windows the UINT8 alias then tmovs into scale memory.
+    tile_view.blayout = src_type->tile_view_->blayout;
+    tile_view.slayout = src_type->tile_view_->slayout;
+    tile_view.fractal = src_type->tile_view_->fractal;
   }
 
   // A partial Mat->L0A/L0B extract is a compact boundary transfer, not a

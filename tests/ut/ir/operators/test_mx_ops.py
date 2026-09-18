@@ -211,6 +211,17 @@ class TestMatmulMxTypes:
         acc = ir.Var("acc", ir.TileType([16, 32], DataType.FP32), span)
         acc_call = ir.op.tile.matmul_mx_acc(acc, lhs, lhs_scale, rhs, rhs_scale, span)
         assert acc_call.op.name == ir.get_op("tile.matmul_mx_acc").name
+        init_cond = ir.Var("init_cond", ir.ScalarType(DataType.BOOL), span)
+        init_call = ir.op.tile.matmul_mx_acc(
+            acc,
+            lhs,
+            lhs_scale,
+            rhs,
+            rhs_scale,
+            span,
+            init_cond=init_cond,
+        )
+        assert len(init_call.args) == 6
 
         bias = ir.Var("bias", ir.TileType([1, 32], DataType.FP32), span)
         bias_call = ir.op.tile.matmul_mx_bias(lhs, lhs_scale, rhs, rhs_scale, bias, span)

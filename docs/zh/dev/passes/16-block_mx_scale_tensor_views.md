@@ -30,11 +30,14 @@ stride 就得到物理 GlobalTensor stride，因此本 pass 之后
 
 ```text
 ... -> FlattenTileNdTo2D -> BlockNzTensorViews
-    -> BlockMxScaleTensorViews -> LegalizeTileCast -> ...
+    -> LegalizeTileCast -> AutoTileMatmulL0
+    -> CanonicalizeTileSlice -> BlockMxScaleTensorViews -> ...
 ```
 
-本 pass 在 `FlattenTileNdTo2D` 之后运行，此时 `tile.load` 的结果已经是逻辑
-2-D tile；它位于所有要求物理 MX tensor shape 的消费者之前。
+本 pass 在 `AutoTileMatmulL0` 之后运行；后者可能把 MX matmul 的直接
+scale load 重建为更小的逻辑 K 窗口。它同时位于 `CanonicalizeTileSlice`
+之后。此时 `tile.load` 结果仍是逻辑 2-D tile，而本 pass 仍位于所有
+要求物理 MX tensor shape 的消费者之前。
 `MaterializeTensorStrides` 随后填入 rank-5 行主序 stride。
 
 ## 改写内容

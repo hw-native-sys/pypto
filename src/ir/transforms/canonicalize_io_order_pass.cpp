@@ -98,18 +98,22 @@ enum class IOCategory : int {
 /// of name strings avoids string comparisons in the hot path and makes the set
 /// of recognized ops explicit at pass construction.
 struct IOCategoryOps {
-  OpPtr tile_load;      ///< Read: tensor → tile data movement
-  OpPtr tile_read;      ///< Read: extract scalar from a tile
-  OpPtr tile_store;     ///< Write: tile → tensor data movement
-  OpPtr tile_write;     ///< Write: put scalar into a tile
-  OpPtr tile_extract;   ///< Sub-tile extract — load-like only when L1→L0 (see IsL1ToL0ExtractCall)
-  OpPtr tile_assemble;  ///< Acc→Mat sub-tile drain (Mat-scratch path) — drain-like only under dbC
+  OpPtr tile_load;             ///< Read: tensor → tile data movement
+  OpPtr tile_read;             ///< Read: extract scalar from a tile
+  OpPtr tile_store;            ///< Write: tile → tensor data movement
+  OpPtr tile_write;            ///< Write: put scalar into a tile
+  OpPtr tile_extract;          ///< Sub-tile extract — load-like only when L1→L0 (see IsL1ToL0ExtractCall)
+  OpPtr tile_assemble;         ///< Acc→Mat sub-tile drain (Mat-scratch path) — drain-like only under dbC
+  OpPtr tile_move;             ///< Mat→MX-scale L0 transfer
+  OpPtr tile_tget_scale_addr;  ///< Bind an MX scale tile to its paired L0 data tile
 
   static IOCategoryOps Build() {
     const auto& registry = OpRegistry::GetInstance();
     return {
-        registry.GetOp("tile.load"),  registry.GetOp("tile.read"),    registry.GetOp("tile.store"),
-        registry.GetOp("tile.write"), registry.GetOp("tile.extract"), registry.GetOp("tile.assemble"),
+        registry.GetOp("tile.load"),    registry.GetOp("tile.read"),
+        registry.GetOp("tile.store"),   registry.GetOp("tile.write"),
+        registry.GetOp("tile.extract"), registry.GetOp("tile.assemble"),
+        registry.GetOp("tile.move"),    registry.GetOp("tile.tget_scale_addr"),
     };
   }
 
@@ -141,6 +145,22 @@ struct IOCategoryOps {
       return target == MemorySpace::Left || target == MemorySpace::Right;
     }
     return false;
+  }
+
+  /// MX scale preparation is part of the same prefetch bundle as the paired
+  /// Mat→Left/Right data extract. Lift both the Mat→ScaleLeft/ScaleRight move
+  /// and its address binding ahead of cube compute so the next stage is fully
+  /// ready, rather than only double-buffering the data panel.
+  [[nodiscard]] bool IsMxScalePrepCall(const Call& call) const {
+    if (IsOp(call.op_, "tile.tget_scale_addr")) return true;
+    if (!IsOp(call.op_, "tile.move") || call.args_.empty()) return false;
+    auto src_tile = As<TileType>(call.args_[0]->GetType());
+    auto dst_tile = As<TileType>(call.GetType());
+    if (!src_tile || !dst_tile) return false;
+    auto src_ms = src_tile->GetMemorySpace();
+    auto dst_ms = dst_tile->GetMemorySpace();
+    return src_ms.has_value() && *src_ms == MemorySpace::Mat && dst_ms.has_value() &&
+           (*dst_ms == MemorySpace::LeftScale || *dst_ms == MemorySpace::RightScale);
   }
 };
 
@@ -174,6 +194,7 @@ IOCategory CategorizeStmt(const StmtPtr& stmt, const IOCategoryOps& ops, bool ov
       // (Mat source, Left/Right target). Other extract shapes stay in
       // TileCompute — see IsL1ToL0ExtractCall doc for rationale.
       if (ops.IsL1ToL0ExtractCall(*call)) return IOCategory::Load;
+      if (ops.IsMxScalePrepCall(*call)) return IOCategory::Load;
     }
     INTERNAL_CHECK_SPAN(assign->var_, assign->span_) << "Internal error: AssignStmt has null var_";
     // Scalar-producing compute lifts to the top so it unblocks downstream
