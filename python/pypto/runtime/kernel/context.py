@@ -274,7 +274,7 @@ class _ProcessKernelState:
             # framework's host taskQueue. Drain through torch_npu first.
             stream.synchronize()
             if begin:
-                self._worker.begin_dfx()
+                self._worker.begin_dfx(stream.npu_stream)
                 self._dfx_stream = stream
             else:
                 self._worker.end_dfx(stream.npu_stream)

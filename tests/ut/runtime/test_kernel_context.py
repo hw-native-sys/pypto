@@ -693,7 +693,7 @@ def test_native_worker_forwards_dfx_config_and_uses_owner_thread(monkeypatch, tm
     worker = SimpleNamespace(
         kernel_init=lambda device, bins, config: events.append((device, bins, config)),
         kernel_mode_supported=True,
-        kernel_begin_dfx=lambda: events.append(("begin", threading.current_thread())),
+        kernel_begin_dfx=lambda stream: events.append(("begin", stream, threading.current_thread())),
         kernel_end_dfx=lambda stream: events.append(("end", stream, threading.current_thread())),
         finalize=lambda: None,
     )
@@ -713,7 +713,7 @@ def test_native_worker_forwards_dfx_config_and_uses_owner_thread(monkeypatch, tm
     adapter._owner = _OwnerThread()
     try:
         adapter.init(KernelConfig("a2a3", "tensormap_and_ringbuffer", 0, 4, True, True, tmp_path))
-        adapter.begin_dfx()
+        adapter.begin_dfx(123)
         adapter.end_dfx(123)
         assert cfg.aicpu_thread_num == 4
         assert cfg.enable_chip_swimlane == 4 and cfg.enable_dep_gen is True
@@ -721,7 +721,7 @@ def test_native_worker_forwards_dfx_config_and_uses_owner_thread(monkeypatch, tm
         assert events == [
             "validate",
             (0, "bins", cfg),
-            ("begin", adapter._owner.thread),
+            ("begin", 123, adapter._owner.thread),
             ("end", 123, adapter._owner.thread),
         ]
     finally:

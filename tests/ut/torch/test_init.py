@@ -171,7 +171,9 @@ def test_dfx_windows_drain_queue_and_enforce_boundaries(setup, framework, monkey
     events = []
     stream = SimpleNamespace(stream_id=12, npu_stream=123, synchronize=lambda: events.append("drain"))
     monkeypatch.setattr(framework.npu, "current_stream", lambda device: stream)
-    monkeypatch.setattr(worker_cls, "begin_dfx", lambda self: events.append("begin"), raising=False)
+    monkeypatch.setattr(
+        worker_cls, "begin_dfx", lambda self, ptr: events.append(("begin", ptr)), raising=False
+    )
     monkeypatch.setattr(worker_cls, "end_dfx", lambda self, ptr: events.append(("end", ptr)), raising=False)
     with pytest.raises(RuntimeError, match="not initialized"):
         begin_dfx()
@@ -197,7 +199,7 @@ def test_dfx_windows_drain_queue_and_enforce_boundaries(setup, framework, monkey
     end_dfx()
     begin_dfx()
     end_dfx()
-    assert events == ["drain", "begin", "drain", ("end", 123)] * 2
+    assert events == ["drain", ("begin", 123), "drain", ("end", 123)] * 2
     state.close()
 
 

@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Kernel DFX windows through the public torch API, including queued graph replay."""
+"""Kernel DFX windows, including mixed torch/PyPTO execution and queued graph replay."""
 
 import json
 import os
@@ -33,31 +33,57 @@ def _run(device: int, directory: str, mode: str, diagnostics: str) -> None:
     swimlane, deps = diagnostics != "deps", diagnostics != "swimlane"
     init(enable_chip_swimlane=4 if swimlane else 0, enable_dep_gen=deps, output_dir=output)
     stream = torch_npu.npu.Stream(device=device)
+    mixed = mode.startswith("mixed_")
+    launches = 2 if mixed else 1
     graph = None
     with torch_npu.npu.stream(stream):
         x = torch.full((16, 16), 2.0, device=f"npu:{device}")
         out = torch.empty_like(x)
-        add_constant(x, out, value=4)
+        intermediate = torch.empty_like(x)
+        staged = torch.empty_like(x)
+
+        def run_ops() -> None:
+            if mixed:
+                # Each op consumes the preceding op's output, with no host waits.
+                torch.add(x, 3, out=staged)
+                add_constant(staged, intermediate, value=4)
+                torch.mul(intermediate, 2, out=staged)
+                add_constant(staged, out, value=4)
+                torch.sub(out, 1, out=out)
+            else:
+                add_constant(x, out, value=4)
+
+        run_ops()
         stream.synchronize()
-        if mode == "replay":
+        if mode in ("replay", "mixed_replay"):
             graph = torch_npu.npu.NPUGraph()
             with torch_npu.npu.graph(graph, stream=stream):
                 with pytest.raises(RuntimeError, match="outside graph capture"):
                     begin_dfx()
-                add_constant(x, out, value=4)
+                run_ops()
         with pytest.raises(RuntimeError, match="No kernel DFX"):
             end_dfx()
         for index in range(2):
+            if index:
+                # Work between windows must also stay out of the next capture.
+                if graph is None:
+                    run_ops()
+                else:
+                    graph.replay()
+            if mixed:
+                # A changed input rules out reusing the warmup/capture result.
+                x.fill_(2 + index)
             begin_dfx()
             with pytest.raises(RuntimeError, match="already open"):
                 begin_dfx()
             if graph is None:
-                add_constant(x, out, value=4)
+                run_ops()
             else:
                 graph.replay()
             # No caller synchronization: end_dfx must drain the host queue too.
             end_dfx()
-            torch.testing.assert_close(out.cpu(), torch.full((16, 16), 6.0))
+            expected = float(21 + 2 * index) if mixed else 6.0
+            torch.testing.assert_close(out.cpu(), torch.full((16, 16), expected))
             window = output if index == 0 else output / f"window_{index}"
             records, topology = window / "chip_swimlane_records.json", window / "deps.json"
             assert records.is_file() == swimlane
@@ -65,13 +91,14 @@ def _run(device: int, directory: str, mode: str, diagnostics: str) -> None:
             if swimlane:
                 captured = json.loads(records.read_text())
                 assert captured["chip_swimlane_level"] == 4
-                assert len(captured["metadata"]["run_boundaries"]) == 1
+                assert len(captured["metadata"]["run_boundaries"]) == launches
                 assert captured["metadata"]["dropped_run_boundaries"] == 0
-                assert captured["aicore_tasks"]
+                # Runtime DFX records PyPTO tasks, not the intervening torch ops.
+                assert len(captured["aicore_tasks"]) == launches
                 assert all(0 < row[3] <= row[4] for row in captured["aicore_tasks"])
-                assert captured["scheduler_tasks"]["records"]
+                assert len(captured["scheduler_tasks"]["records"]) == launches
             if deps:
-                assert json.loads(topology.read_text())["tasks"]
+                assert len(json.loads(topology.read_text())["tasks"]) == launches
             if swimlane and deps:
                 merged = window / "merged_swimlane.json"
                 subprocess.run(
@@ -93,7 +120,15 @@ def _run(device: int, directory: str, mode: str, diagnostics: str) -> None:
 
 @pytest.mark.parametrize("queue_enabled", [0, 1])
 @pytest.mark.parametrize(
-    "mode,diagnostics", [("eager", "both"), ("replay", "both"), ("eager", "swimlane"), ("eager", "deps")]
+    "mode,diagnostics",
+    [
+        ("eager", "both"),
+        ("replay", "both"),
+        ("eager", "swimlane"),
+        ("eager", "deps"),
+        ("mixed_eager", "both"),
+        ("mixed_replay", "both"),
+    ],
 )
 def test_kernel_dfx(test_config, tmp_path, queue_enabled, mode, diagnostics):
     if test_config.codegen_only or test_config.platform != "a2a3":

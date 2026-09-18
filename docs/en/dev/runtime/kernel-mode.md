@@ -109,6 +109,9 @@ calls run outside ACLGraph capture and synchronize the current torch_npu stream,
 including its host task queue. Use one stream for the entire window and serialize
 collection with other kernel activity in this process.
 
+Device-side recording is enabled only between begin and end. Warmup and other
+launches outside the window execute without recording diagnostics.
+
 ```python
 pypto.torch.init(enable_chip_swimlane=4, enable_dep_gen=True, output_dir="dfx")
 op(x, 2.0, out)  # warm up before measuring
@@ -137,9 +140,10 @@ Open the merged file in Perfetto. Dependency collection adds overhead; for timin
 measurements, collect the same operator's graph separately with `enable_dep_gen`
 and pass its file to the converter using `--deps-json`. Use separate processes
 when changing init settings. A window can include multiple launches, but the
-converter currently renders them together; use one launch per window for separate
-operator traces. This integration supports A2/A3 TMR, including warmed graph
-replay; begin/end themselves cannot run inside capture.
+converter requires unique `(core_id, reg_task_id)` pairs across the window and
+can reject IDs reused across launches. Use one PyPTO launch per window for trace
+conversion. This integration supports A2/A3 TMR, including warmed graph replay;
+begin/end themselves cannot run inside capture.
 
 ## Callable identity and hot-path measurements
 
@@ -394,7 +398,7 @@ context resources currently use Simpler defaults. An incompatible configuration
 is rejected instead of opening another Worker.
 
 The integration SDK is pinned to
-`cbafd5247109c8b5998fb7dd7a141db357d15461`. Its supported Python surface is
+`46b92250f2f5fa6e7166085f91e3fc7b7e74ca46`. Its supported Python surface is
 `simpler.task_interface.ChipWorker.kernel_init`, `kernel_prepare_callable`,
 `kernel_begin_dfx`, `kernel_end_dfx` and `finalize`.
 PyPTO's private adapter uses these existing methods. Init and prepare take no

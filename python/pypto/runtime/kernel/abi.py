@@ -89,8 +89,8 @@ class _NativeWorker:
     def prepare(self, callable_: Any) -> Any:
         return self._owner.call(lambda: self.worker.kernel_prepare_callable(callable_))
 
-    def begin_dfx(self) -> None:
-        self._owner.call(self.worker.kernel_begin_dfx)
+    def begin_dfx(self, caller_stream: int) -> None:
+        self._owner.call(lambda: self.worker.kernel_begin_dfx(caller_stream))
 
     def end_dfx(self, caller_stream: int) -> None:
         self._owner.call(lambda: self.worker.kernel_end_dfx(caller_stream))

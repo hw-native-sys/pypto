@@ -86,6 +86,9 @@ Worker。它不编译也不 prepare 任何算子，入图的每个特化仍需 w
 （包括 host taskQueue）。一个窗口中的调用、replay 和结束操作必须使用同一 stream，
 并与本进程其他 kernel 活动串行执行。
 
+设备端只在 begin/end 窗口内开启诊断记录；预热和其他窗口外调用正常执行，
+不会产生诊断记录。
+
 ```python
 pypto.torch.init(enable_chip_swimlane=4, enable_dep_gen=True, output_dir="dfx")
 op(x, 2.0, out)  # warm up before measuring
@@ -108,8 +111,9 @@ python -m simpler_setup.tools.swimlane_converter \
 
 合并文件可用 Perfetto 打开。依赖采集会增加开销；精确测时可在独立进程中
 单独采集同一算子的依赖图，并通过转换器 `--deps-json` 指定文件。
-改变 init 配置需要新进程。一个窗口可以包含多次调用，但转换器暂时不按调用
-拆分；需要独立算子泳道图时，每个窗口只测一次调用。
+改变 init 配置需要新进程。一个窗口可以包含多次调用，但转换器要求窗口内
+`(core_id, reg_task_id)` 组合唯一，可能因不同调用复用 ID 而拒绝转换。
+需要转换泳道图时，每个窗口只测一次 PyPTO 调用。
 当前支持 A2/A3 TMR，包括预热后的 graph replay；begin/end 本身不支持 capture。
 
 ## Callable 身份与热路径测量
@@ -301,7 +305,7 @@ Simpler 或 native launch 扩展；`torch` 仍是 PyPTO 的常规依赖。真正
 Worker。`KernelConfig` 固定 platform、runtime、device、AICPU 线程数和 DFX 配置，其他常驻资源
 暂用 simpler 默认值。配置不兼容时报错，不额外创建 Worker。
 
-集成 SDK 固定为 `cbafd5247109c8b5998fb7dd7a141db357d15461`。实际 Python 接口为
+集成 SDK 固定为 `46b92250f2f5fa6e7166085f91e3fc7b7e74ca46`。实际 Python 接口为
 `simpler.task_interface.ChipWorker.kernel_init`、`kernel_prepare_callable`、
 `kernel_begin_dfx`、`kernel_end_dfx` 和 `finalize`。PyPTO 内部 adapter
 使用这些已有方法；init/prepare 不接收 caller stream，native context generation 和
