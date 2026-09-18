@@ -426,6 +426,17 @@ class BlockNzMutator : public IRMutator {
       CHECK_SPAN(!IsOp(op, "tile.store"), op->span_)
           << "NZ layout is read-only: an NZ tensor cannot be a store destination. "
           << "Annotate the output tensor as pl.ND.";
+      // A tensor.slice still standing here is outside a kernel (in-kernel ones
+      // were lowered to tile ops by ConvertTensorToTileOps). There the runtime
+      // tensor descriptor carries the host's logical shape, not the blocked
+      // one, so the slice cannot be retargeted the way a tile.load is. Name the
+      // in-kernel form that does work: a load's batch offset maps straight onto
+      // the blocked batch slot.
+      CHECK_SPAN(!IsOp(op, "tensor.slice"), op->span_)
+          << "tensor.slice of a pl.NZ tensor is not supported yet, so an NZ weight cannot be sliced "
+          << "before it is passed to a kernel. To give a kernel one plane of a stacked [B, R, C] NZ "
+          << "weight, pass the whole tensor and select the plane inside the kernel: "
+          << "pl.reshape(pl.load(w, [b, 0, 0], [1, R, C], target_memory=pl.Mem.Mat), [R, C]).";
       CHECK_SPAN(IsOp(op, "tile.load") && nz_args.size() == 1 && nz_args[0] == 0, op->span_)
           << "NZ layout currently supports only 'tile.load' reading the tensor as its source, but it is "
           << "used by '" << op->op_->name_ << "' at argument " << nz_args[0]

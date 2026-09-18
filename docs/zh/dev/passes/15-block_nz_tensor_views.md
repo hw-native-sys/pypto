@@ -224,6 +224,7 @@ GlobalTensor<int8_t, pto::Shape<1, 16, 16, 16, 32>,
 | 逻辑 rank > 3 | 拒绝——一个 batch 槽位装不下两个前导轴（见下） |
 | `target_memory != Mat`（或缺省） | 拒绝——NZ→NZ 是 cube 操作数路径 |
 | `tile.load` 之外的消费者 | 拒绝——此处 NZ 是只读的 |
+| 对 NZ 做 `tensor.slice`（例如在编排函数中写 `w[b]`） | 拒绝——应传入完整的 `[B, R, C]` 张量，在 kernel 内用 `pl.reshape(pl.load(w, [b, 0, 0], [1, R, C], target_memory=pl.Mem.Mat), [R, C])` 选取第 `b` 个平面——load 的 `[1, R, C]` 窗口在 reshape 之前是 rank 3 的 tile |
 | 显式 stride 或部分 `valid_shape` | 拒绝 |
 | 分布式张量 | 拒绝——`remote_load` 没有 NZ 分块 |
 | 对 NZ 做 `tensor.view` / `tensor.reinterpret_view` | 在算子构造期拒绝 |

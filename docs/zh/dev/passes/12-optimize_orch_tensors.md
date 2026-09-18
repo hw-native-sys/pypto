@@ -72,6 +72,8 @@ for i in pl.range(N, init_values=[init_buf]):
 
 **方案**：分析编排函数中的 `tensor.slice(parent, size, offset)` 模式。当切片结果作为 `In` 参数传递给 InCore 调用时，将父张量形状推导出的步长通过 `TensorView` 附加到 InCore 函数的 `In` 参数类型上，使 `tile.load` 能使用正确的内存布局。
 
+声明为 `pl.NZ` 的 `In` 参数会被跳过：其字节按分形分块排列，行主序的父张量步长无法描述它。`BlockNzTensorViews` 会从分块形状推导其步长，并拒绝显式步长。
+
 ### 模式 5：静态窗口外提
 
 模式 5 **仅**对显式标注了 `windowize=True` 的 InCore-type function（`InCore`、`AIC` 或 `AIV`）生效。未标注的 kernel 无论访问模式如何都不会被 windowize。

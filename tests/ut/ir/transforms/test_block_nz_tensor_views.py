@@ -863,6 +863,115 @@ def test_rejects_tensor_view_of_nz():
                 return out
 
 
+# -- Slicing a stacked NZ weight outside a kernel -----------------------------
+#
+# A driver holding a stacked [B, R, C] NZ weight wants to hand each kernel one
+# plane, ``w[b]``. That slice is rejected, and the rejection has to be the same
+# actionable message no matter which function the pass visits first: functions
+# are visited in name order, and OptimizeOrchTensors used to stamp the parent's
+# row-major strides onto the kernel's NZ param, so a kernel that sorted first
+# failed on a stride the user never wrote.
+
+_SLICE_WORKAROUND = (
+    r"tensor\.slice of a pl\.NZ tensor is not supported yet.*select the plane inside the kernel"
+)
+
+
+@pl.program
+class SlicedNzDriverOrchFirst:
+    """The orchestrator (``main``) sorts before the kernel (``shard_mm``)."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def shard_mm(
+        self,
+        x: pl.Tensor[[64, 512], pl.INT8],
+        w: pl.Tensor[[256, 512], pl.INT8, pl.NZ],
+        out: pl.Out[pl.Tensor[[64, 256], pl.INT32]],
+    ) -> pl.Tensor[[64, 256], pl.INT32]:
+        xt = pl.load(x, [0, 0], [64, 512], target_memory=pl.Mem.Mat)
+        wt = pl.load(w, [0, 0], [256, 512], target_memory=pl.Mem.Mat)
+        acc = pl.matmul(xt, pl.tile.transpose_view(wt), out_dtype=pl.INT32)
+        return pl.store(acc, [0, 0], out)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        x: pl.Tensor[[64, 512], pl.INT8],
+        w: pl.Tensor[[2, 256, 512], pl.INT8, pl.NZ],
+        out: pl.Out[pl.Tensor[[64, 256], pl.INT32]],
+    ) -> pl.Tensor[[64, 256], pl.INT32]:
+        shard = w[1]
+        return self.shard_mm(x, shard, out)
+
+
+@pl.program
+class SlicedNzDriverKernelFirst:
+    """The same program with the kernel renamed so it sorts first (``a_kernel``)."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def a_kernel(
+        self,
+        x: pl.Tensor[[64, 512], pl.INT8],
+        w: pl.Tensor[[256, 512], pl.INT8, pl.NZ],
+        out: pl.Out[pl.Tensor[[64, 256], pl.INT32]],
+    ) -> pl.Tensor[[64, 256], pl.INT32]:
+        xt = pl.load(x, [0, 0], [64, 512], target_memory=pl.Mem.Mat)
+        wt = pl.load(w, [0, 0], [256, 512], target_memory=pl.Mem.Mat)
+        acc = pl.matmul(xt, pl.tile.transpose_view(wt), out_dtype=pl.INT32)
+        return pl.store(acc, [0, 0], out)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        x: pl.Tensor[[64, 512], pl.INT8],
+        w: pl.Tensor[[2, 256, 512], pl.INT8, pl.NZ],
+        out: pl.Out[pl.Tensor[[64, 256], pl.INT32]],
+    ) -> pl.Tensor[[64, 256], pl.INT32]:
+        shard = w[1]
+        return self.a_kernel(x, shard, out)
+
+
+def test_rejects_a_slice_outside_a_kernel_and_names_the_workaround():
+    """``w[b]`` in an orchestration body is refused with the in-kernel form to use instead."""
+    with pytest.raises(ValueError, match=_SLICE_WORKAROUND):
+        _run(SlicedNzDriverOrchFirst)
+
+
+def test_slice_rejection_does_not_depend_on_function_order():
+    """A kernel that sorts first must not fail on a stride the user never wrote."""
+    with pytest.raises(ValueError, match=_SLICE_WORKAROUND) as excinfo:
+        _run(SlicedNzDriverKernelFirst)
+    assert "explicit stride" not in str(excinfo.value)
+
+
+def test_a_batch_offset_on_the_load_selects_one_plane():
+    """The workaround the slice rejection names: select the plane in the kernel's own load.
+
+    The logical batch offset ``1`` lands on the blocked batch slot unchanged,
+    and the destination tile is the logical 2-D plane once reshaped.
+    """
+
+    @pl.program
+    class StackedLoad:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            x: pl.Tensor[[64, 512], pl.INT8],
+            w: pl.Tensor[[2, 256, 512], pl.INT8, pl.NZ],
+            out: pl.Tensor[[64, 256], pl.INT32],
+        ):
+            xt = pl.load(x, [0, 0], [64, 512], target_memory=pl.Mem.Mat)
+            plane = pl.load(w, [1, 0, 0], [1, 256, 512], target_memory=pl.Mem.Mat)
+            wt = pl.reshape(plane, [256, 512])
+            acc = pl.matmul(xt, pl.tile.transpose_view(wt), out_dtype=pl.INT32)
+            pl.store(acc, [0, 0], out)
+            return out
+
+    call = _nz_load(_run(StackedLoad))
+    assert _values(_elements(call.args[1])) == [1, 0, 0, 0, 0]  # offsets
+    assert _values(_elements(call.args[2])) == [1, 16, 16, 16, 32]  # shapes
+
+
 # -- Temporary guard for hw-native-sys/pto-isa#317 ----------------------------
 # Delete this block together with ``CheckNzGmGapFitsBurstStride`` once the
 # upstream truncation is fixed.

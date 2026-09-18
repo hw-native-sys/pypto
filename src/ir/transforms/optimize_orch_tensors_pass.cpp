@@ -1564,6 +1564,13 @@ class SliceInputStridesOptimizer {
         // Skip params that already have explicit strides
         if (tensor_type->tensor_view_.has_value() && !tensor_type->tensor_view_->stride.empty()) continue;
 
+        // NZ bytes are fractal-blocked, so the parent's logical row-major strides
+        // do not describe them. BlockNzTensorViews derives the real strides from
+        // the blocked shape and refuses an explicit one; stamping them here made
+        // it blame the user for a stride they never wrote.
+        const auto& param_view = tensor_type->tensor_view_;
+        if (param_view.has_value() && param_view->layout == TensorLayout::NZ) continue;
+
         size_t in_rank = tensor_type->shape_.size();
         if (in_rank > full_strides.size()) continue;
         std::vector<ExprPtr> strides(full_strides.end() - static_cast<std::ptrdiff_t>(in_rank),

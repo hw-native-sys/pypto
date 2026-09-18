@@ -246,6 +246,7 @@ diagnostic naming the fix — an NZ tensor must never be silently mis-addressed.
 | logical rank > 3 | rejected — one batch slot cannot hold two leading axes (see below) |
 | `target_memory != Mat` (or absent) | rejected — NZ→NZ is the cube operand path |
 | consumer other than `tile.load` | rejected — NZ is read-only here |
+| `tensor.slice` of NZ (e.g. `w[b]` in an orchestration body) | rejected — pass the whole `[B, R, C]` tensor and select plane `b` in the kernel with `pl.reshape(pl.load(w, [b, 0, 0], [1, R, C], target_memory=pl.Mem.Mat), [R, C])` — the load's `[1, R, C]` window is a rank-3 tile until reshaped |
 | explicit stride or partial `valid_shape` | rejected |
 | distributed tensor | rejected — `remote_load` has no NZ blocking |
 | `tensor.view` / `tensor.reinterpret_view` of NZ | rejected at op construction |
