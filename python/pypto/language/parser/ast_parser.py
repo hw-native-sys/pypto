@@ -4332,16 +4332,12 @@ class ASTParser:
                     span=self.span_tracker.get_span(stmt),
                     hint=f"Use 'with pl.{func_attr}():'",
                 )
+            dump_vars: list[ir.Var] = []
             for kw in context_expr.keywords:
                 if kw.arg == "name_hint":
                     name_hint = self._parse_scope_name_hint(kw.value, f"pl.{func_attr}()")
                 elif kw.arg == "dumps":
-                    if dumps_kw is not None:
-                        raise ParserSyntaxError(
-                            "pl.cluster() got duplicate keyword argument 'dumps'",
-                            span=self.span_tracker.get_span(stmt),
-                        )
-                    dumps_kw = kw
+                    dump_vars = self._parse_scope_dumps_kwarg(kw, f"pl.{func_attr}")
                 else:
                     raise ParserSyntaxError(
                         f"pl.{func_attr}() got unexpected keyword argument '{kw.arg}'",
@@ -4350,9 +4346,16 @@ class ASTParser:
                     )
             scope_kind = scope_kind_map[func_attr]
             span = self.span_tracker.get_span(stmt)
-            dump_vars = self._parse_at_dumps_kwarg(dumps_kw, construct="pl.cluster") if dumps_kw else []
-            attrs = [("dump_vars", dump_vars)] if dump_vars else None
-            self._parse_scope_body(stmt, scope_kind, span, name_hint=name_hint, attrs=attrs)
+            # ``dumps=`` marks tensors for selective dump on the Group dispatch the
+            # cluster outlines to — the same ``dump_vars`` carrier a forward-sticky
+            # ``pl.dump_tag`` merges in, and the surface the printer emits it back as.
+            self._parse_scope_body(
+                stmt,
+                scope_kind,
+                span,
+                name_hint=name_hint,
+                attrs=[("dump_vars", dump_vars)] if dump_vars else None,
+            )
             return
         self._parse_spmd_scope(stmt, context_expr, scope_kind_map, optional_vars=optional_vars)
 
@@ -4470,6 +4473,7 @@ class ASTParser:
             "name_hint",
             "optimizations",
             "deps",
+            "dumps",
             "allow_early_resolve",
             "predicate",
         }
@@ -4510,17 +4514,26 @@ class ASTParser:
         *,
         usage_hint: str,
     ) -> tuple[
-        "ir.Expr", bool, str, "ir.SplitMode | None", "int | None", "list[ir.Var]", bool, "ir.Expr | None"
+        "ir.Expr",
+        bool,
+        str,
+        "ir.SplitMode | None",
+        "int | None",
+        "list[ir.Var]",
+        bool,
+        "ir.Expr | None",
+        "list[ir.Var]",
     ]:
         """Parse the ``pl.spmd(core_num, *, sync_start=, name_hint=, optimizations=, deps=, ...)`` arguments.
 
         Also accepts ``allow_early_resolve=`` (the speculative early-dispatch
-        hint) and ``predicate=`` (the dispatch predicate). The first positional
-        argument is ``core_num`` (range-like). Returns
-        ``(core_num, sync_start, name_hint, split_mode, split_slot_num, dep_vars,
-        allow_early_resolve, predicate)`` with ``sync_start`` /
-        ``allow_early_resolve`` defaulting to ``False``, ``split_mode`` /
-        ``split_slot_num`` / ``predicate`` to ``None``, and ``dep_vars`` to ``[]``.
+        hint), ``predicate=`` (the dispatch predicate) and ``dumps=`` (selective
+        tensor dump). The first positional argument is ``core_num`` (range-like).
+        Returns ``(core_num, sync_start, name_hint, split_mode, split_slot_num,
+        dep_vars, allow_early_resolve, predicate, dump_vars)`` with
+        ``sync_start`` / ``allow_early_resolve`` defaulting to ``False``,
+        ``split_mode`` / ``split_slot_num`` / ``predicate`` to ``None``, and
+        ``dep_vars`` / ``dump_vars`` to ``[]``.
 
         ``optimizations=[...]`` accepts only ``pl.split(MODE)`` — see
         :meth:`_parse_spmd_optimizations_list`.
@@ -4547,6 +4560,15 @@ class ASTParser:
         outliner synthesises a TaskId Var when the scope has none) and is
         rejected by the same cluster-nesting guard. The producer-in-``deps=``
         contract is checked below, once ``dep_vars`` is resolved.
+
+        ``dumps=[t, ...]`` marks tensors for selective dump on the grid dispatch,
+        resolved via :meth:`_parse_scope_dumps_kwarg` exactly as on ``pl.at``. It
+        rides on the ``SpmdScopeStmt`` (never on an auto-synthesised InCore
+        carrier) — which is also where the printer reads it back — and the Spmd
+        outliner moves it onto the synthesised dispatch. Unlike the Submit-only
+        kwargs it is legal on a ``pl.cluster()``-nested scope:
+        ``OutlineClusterScopes`` lifts it onto the Group dispatch together with
+        the launch spec.
         """
         if len(call.args) > 1:
             raise ParserSyntaxError(
@@ -4562,6 +4584,7 @@ class ASTParser:
         split_mode: ir.SplitMode | None = None
         split_slot_num: int | None = None
         deps_kw: ast.keyword | None = None
+        dump_vars: list[ir.Var] = []
         allow_early_resolve: bool = False
         predicate: ir.Expr | None = None
         for kw in call.keywords:
@@ -4582,6 +4605,8 @@ class ASTParser:
                 split_mode, split_slot_num = self._parse_spmd_optimizations_list(kw.value)
             elif kw.arg == "deps":
                 deps_kw = kw
+            elif kw.arg == "dumps":
+                dump_vars = self._parse_scope_dumps_kwarg(kw, "pl.spmd")
             elif kw.arg == "allow_early_resolve":
                 allow_early_resolve = self._parse_spmd_bool_literal_kwarg(kw, usage_hint)
             elif kw.arg == "predicate":
@@ -4616,6 +4641,7 @@ class ASTParser:
             dep_vars,
             allow_early_resolve,
             predicate,
+            dump_vars,
         )
 
     def _reject_spmd_submit_only_kwargs_in_cluster(
@@ -4662,20 +4688,18 @@ class ASTParser:
         allow_early_resolve: bool,
         predicate: "ir.Expr | None",
         task_id_var: "ir.Var | None" = None,
+        dump_vars: "list[ir.Var] | None" = None,
     ) -> "list[tuple[str, Any]]":
         """Build a ``SpmdScopeStmt``'s attr list in canonical order.
 
         The single source of the ordering shared by all three ``pl.spmd`` forms:
-        ``manual_dep_edges``, ``task_id_var`` (``as tid`` only), then
-        ``allow_early_resolve``, then ``predicate`` — mirroring
-        :meth:`_parse_at_meta` for ``pl.at`` scopes.
-
-        **The order is load-bearing.** ``structural_equal`` compares scope attrs
-        positionally, so a print -> reparse cycle only round-trips while this
-        matches the printer's emission order (``PrintScopeDepsAttr`` ->
-        ``PrintScopeTaskIdVarSuffix`` -> ``PrintScopeAllowEarlyResolveAttr`` ->
-        ``PrintScopePredicateAttr`` in ``python_printer.cpp``). Keeping it in one
-        place is what makes adding a kwarg a two-file change instead of a
+        ``manual_dep_edges``, ``dump_vars``, ``task_id_var`` (``as tid`` only),
+        then ``allow_early_resolve``, then ``predicate`` — mirroring
+        :meth:`_parse_at_meta` for ``pl.at`` scopes and the printer's emission
+        order in ``python_printer.cpp``. ``structural_equal`` matches attrs by
+        key, so the order is not needed for a print -> reparse round-trip; one
+        canonical order keeps freshly parsed IR deterministic, and building it in
+        one place is what makes adding a kwarg a two-file change instead of a
         four-site one.
 
         Each entry is omitted when unset, so a plain ``with pl.spmd(n):`` yields
@@ -4684,6 +4708,8 @@ class ASTParser:
         attrs: list[tuple[str, Any]] = []
         if dep_vars:
             attrs.append(("manual_dep_edges", dep_vars))
+        if dump_vars:
+            attrs.append(("dump_vars", dump_vars))
         if task_id_var is not None:
             attrs.append(("task_id_var", task_id_var))
         if allow_early_resolve:
@@ -5034,6 +5060,7 @@ class ASTParser:
             dep_vars,
             allow_early_resolve,
             predicate,
+            dump_vars,
         ) = self._parse_spmd_kwargs(stmt, context_expr, usage_hint=with_hint)
         scope_kind = scope_kind_map["spmd"]
         span = self.span_tracker.get_span(stmt)
@@ -5051,6 +5078,7 @@ class ASTParser:
                 dep_vars,
                 allow_early_resolve,
                 predicate,
+                dump_vars,
                 optional_vars,
             )
             return
@@ -5065,7 +5093,9 @@ class ASTParser:
         self._reject_spmd_submit_only_kwargs_in_cluster(dep_vars, allow_early_resolve, predicate, span)
         # No task_id_var — this form captures none; the rest of the canonical
         # order is shared with the other two forms.
-        spmd_attrs = self._build_spmd_scope_attrs(dep_vars, allow_early_resolve, predicate)
+        spmd_attrs = self._build_spmd_scope_attrs(
+            dep_vars, allow_early_resolve, predicate, dump_vars=dump_vars
+        )
 
         # No ``as tid``: the plain with-form. Any ``deps=`` rides on the scope as
         # ``manual_dep_edges`` and the Spmd outliner synthesises the TaskId Var it
@@ -5097,6 +5127,7 @@ class ASTParser:
         dep_vars: "list[ir.Var]",
         allow_early_resolve: bool,
         predicate: "ir.Expr | None",
+        dump_vars: "list[ir.Var]",
         optional_vars: "ast.expr",
     ) -> None:
         """Parse ``with pl.spmd(n, deps=[...]) as tid:`` capturing the dispatch TaskId.
@@ -5142,7 +5173,9 @@ class ASTParser:
         # its indices), which ConvertToSSA versions via SubstScopeAttrs.
         tid_var = self.builder.var(optional_vars.id, ir.ScalarType(DataType.TASK_ID), span=span)
         self.scope_manager.define_var(optional_vars.id, tid_var, span=span)
-        scope_attrs = self._build_spmd_scope_attrs(dep_vars, allow_early_resolve, predicate, tid_var)
+        scope_attrs = self._build_spmd_scope_attrs(
+            dep_vars, allow_early_resolve, predicate, tid_var, dump_vars=dump_vars
+        )
 
         # Emit the transient ``AssignStmt(tid, system.task_invalid())`` placeholder
         # one stmt BEFORE the scope so ConvertToSSA has a def for the tid Var; the
@@ -5259,6 +5292,7 @@ class ASTParser:
             dep_vars,
             allow_early_resolve,
             predicate,
+            dump_vars,
         ) = self._parse_spmd_kwargs(stmt, iter_call, usage_hint=spmd_hint)
         spmd_name_hint, incore_name_hint = _split_spmd_for_loop_name_hints(name_hint)
 
@@ -5269,7 +5303,9 @@ class ASTParser:
         # a Submit, so reject them there (mirrors the with-form / as-tid guards).
         self._reject_spmd_submit_only_kwargs_in_cluster(dep_vars, allow_early_resolve, predicate, span)
         # No task_id_var — the for-form captures none (see the with-form).
-        spmd_attrs = self._build_spmd_scope_attrs(dep_vars, allow_early_resolve, predicate)
+        spmd_attrs = self._build_spmd_scope_attrs(
+            dep_vars, allow_early_resolve, predicate, dump_vars=dump_vars
+        )
         # Merge forward-sticky pl.dump_tag tensors onto the auto-outlined InCore
         # scope — the kernel the loop body lowers to. The with-form (pl.at /
         # pl.spmd / pl.cluster) routes through _parse_scope_body for this; the
@@ -5499,8 +5535,9 @@ class ASTParser:
         """Merge forward-sticky ``pl.dump_tag`` tensors into a scope's dump_vars attr.
 
         The single injection point for the scope-level selective-dump carrier on
-        first parse — the explicit / round-trip ``dumps=`` surface is handled
-        separately by :meth:`_parse_at_meta`. Both the ``pl.at`` and the
+        first parse — the explicit / round-trip ``dumps=`` surface (on ``pl.at`` /
+        ``pl.spmd`` / ``pl.cluster`` / ``pl.graph``) is handled separately by
+        :meth:`_parse_scope_dumps_kwarg`, and merged here with the tags. Both the ``pl.at`` and the
         ``pl.cluster`` paths route through
         :meth:`_parse_scope_body`, so attaching here covers every scope kind that
         becomes a kernel dispatch. Runtime scopes (``pl.manual_scope`` /
@@ -5663,13 +5700,21 @@ class ASTParser:
                 span=span,
                 hint="Use 'with pl.graph(\"decoder_layer\"):'",
             )
-        if context_expr.keywords:
-            unexpected = context_expr.keywords[0].arg or "**kwargs"
-            raise ParserSyntaxError(
-                f"pl.graph() got unexpected keyword argument '{unexpected}'",
-                span=span,
-                hint="pl.graph() takes only the region name: 'with pl.graph(\"decoder_layer\"):'",
-            )
+        # ``dumps=`` marks tensors for selective dump on the Graph task the region
+        # outlines to (codegen emits it on the graph dispatch itself, distinct from
+        # the kernel dispatches recorded inside) — the same ``dump_vars`` carrier a
+        # forward-sticky ``pl.dump_tag`` merges in, and the surface the printer
+        # emits it back as.
+        dump_vars: list[ir.Var] = []
+        for kw in context_expr.keywords:
+            if kw.arg != "dumps":
+                raise ParserSyntaxError(
+                    f"pl.graph() got unexpected keyword argument '{kw.arg or '**kwargs'}'",
+                    span=span,
+                    hint="pl.graph() takes the region name and an optional `dumps=[...]`: "
+                    "'with pl.graph(\"decoder_layer\"):'",
+                )
+            dump_vars = self._parse_scope_dumps_kwarg(kw, "pl.graph")
 
         name = self._parse_scope_name_hint(context_expr.args[0], "pl.graph()")
         if not name:
@@ -5679,7 +5724,13 @@ class ASTParser:
                 hint="The name becomes the recorded graph's symbol: 'with pl.graph(\"decoder_layer\"):'",
             )
 
-        self._parse_scope_body(stmt, ir.ScopeKind.Graph, span, name_hint=name)
+        self._parse_scope_body(
+            stmt,
+            ir.ScopeKind.Graph,
+            span,
+            name_hint=name,
+            attrs=[("dump_vars", dump_vars)] if dump_vars else None,
+        )
 
     def _parse_at_scope(
         self, stmt: ast.With, context_expr: ast.Call, optional_vars: "ast.expr | None" = None
@@ -5952,7 +6003,7 @@ class ASTParser:
         # :meth:`_parse_scope_body` (the single injection point shared by the
         # ``pl.at`` and ``pl.cluster`` paths), so it is
         # not consulted here.
-        dump_vars: list[ir.Var] = self._parse_at_dumps_kwarg(dumps_kw) if dumps_kw else []
+        dump_vars: list[ir.Var] = self._parse_scope_dumps_kwarg(dumps_kw, "pl.at") if dumps_kw else []
 
         if (
             deps_kw is None
@@ -6071,8 +6122,13 @@ class ASTParser:
             resolved.append(var)
         return resolved
 
-    def _parse_at_dumps_kwarg(self, kw: "ast.keyword", construct: str = "pl.at") -> list[ir.Var]:
-        """Resolve ``pl.at(dumps=[t1, t2])`` entries to outer-scope tensor Vars.
+    def _parse_scope_dumps_kwarg(self, kw: "ast.keyword", api: str) -> list[ir.Var]:
+        """Resolve a scope's ``dumps=[t1, t2]`` entries to outer-scope tensor Vars.
+
+        Shared by every scope construct with a ``dumps=`` kwarg — ``pl.at``,
+        ``pl.spmd``, ``pl.cluster`` and ``pl.graph`` — each of which may carry
+        ``kAttrDumpVars``; ``api`` (e.g. ``"pl.at"``) names the construct in
+        error messages.
 
         Mirrors :meth:`_parse_at_no_dep_args_kwarg`: each entry must be a bare
         Name resolving to a Tensor-typed Var. ``dumps=`` is the explicit
@@ -6089,7 +6145,7 @@ class ASTParser:
         """
         if not isinstance(kw.value, (ast.List, ast.Tuple)):
             raise ParserTypeError(
-                f"{construct}(dumps=...) must be a list literal of tensor names",
+                f"{api}(dumps=...) must be a list literal of tensor names",
                 span=self.span_tracker.get_span(kw),
                 hint="Use `dumps=[t1, t2]` with bare tensor names visible to the enclosing function.",
             )
@@ -6099,7 +6155,7 @@ class ASTParser:
         for elt in kw.value.elts:
             if not isinstance(elt, ast.Name):
                 raise ParserTypeError(
-                    f"{construct}(dumps=[...]) entries must be bare tensor names",
+                    f"{api}(dumps=[...]) entries must be bare tensor names",
                     span=self.span_tracker.get_span(elt),
                     hint="Use `dumps=[t]` where `t` is a tensor variable visible "
                     "to the enclosing function scope.",
@@ -6107,19 +6163,19 @@ class ASTParser:
             var = self.scope_manager.lookup_var(elt.id)
             if var is None:
                 raise ParserTypeError(
-                    f"{construct}(dumps=[...]) references unknown name '{elt.id}'",
+                    f"{api}(dumps=[...]) references unknown name '{elt.id}'",
                     span=self.span_tracker.get_span(elt),
                     hint="Each entry must resolve to a tensor visible in the enclosing function scope.",
                 )
             if not isinstance(var.type, ir.TensorType):
                 raise ParserTypeError(
-                    f"{construct}(dumps=[...]) entry '{elt.id}' is not a tensor (got type {var.type})",
+                    f"{api}(dumps=[...]) entry '{elt.id}' is not a tensor (got type {var.type})",
                     span=self.span_tracker.get_span(elt),
                     hint="Only tensors can be selectively dumped.",
                 )
             if id(var) in seen:
                 raise ParserTypeError(
-                    f"{construct}(dumps=[...]) lists '{elt.id}' more than once",
+                    f"{api}(dumps=[...]) lists '{elt.id}' more than once",
                     span=self.span_tracker.get_span(elt),
                     hint="Each tensor may appear at most once in `dumps=`.",
                 )
@@ -8586,7 +8642,7 @@ class ASTParser:
                         f"call to '{method_name}'",
                         span=elt_span,
                     )
-                if id(val) not in seen:  # dedup by identity, matching _parse_at_dumps_kwarg
+                if id(val) not in seen:  # dedup by identity, matching _parse_scope_dumps_kwarg
                     seen.add(id(val))
                     result.append(val)
             return result

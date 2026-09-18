@@ -296,12 +296,15 @@ void IRVisitor::VisitStmt_(const InCoreScopeStmtPtr& op) {
 
 void IRVisitor::VisitStmt_(const ClusterScopeStmtPtr& op) {
   INTERNAL_CHECK_SPAN(op->body_, op->span_) << "ClusterScopeStmt has null body";
+  // A ``pl.dump_tag`` / ``dumps=`` puts ``kAttrDumpVars`` on this scope too.
   VisitScopeAttrs(op);
   VisitStmt(op->body_);
 }
 
 void IRVisitor::VisitStmt_(const GraphScopeStmtPtr& op) {
   INTERNAL_CHECK_SPAN(op->body_, op->span_) << "GraphScopeStmt has null body";
+  // A ``pl.dump_tag`` / ``dumps=`` puts ``kAttrDumpVars`` on this scope too.
+  VisitScopeAttrs(op);
   VisitStmt(op->body_);
 }
 

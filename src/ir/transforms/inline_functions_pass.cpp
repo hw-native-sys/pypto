@@ -559,9 +559,11 @@ class VarUseCollector : public IRVisitor {
 // inside the callee now appears verbatim in the spliced body. Two carriers are
 // stamped (both round-trip and are tracked by Var identity downstream):
 //
-//   * ``with pl.at(...)`` scopes whose body uses a tagged arg get it merged into
-//     their ``kAttrDumpVars`` — the same scope-level carrier ``pl.dump_tag``
-//     seeds at parse. The outliner later maps it onto the synthesised dispatch.
+//   * Dispatch scopes (``pl.at`` / ``pl.spmd`` / ``pl.cluster`` / ``pl.graph``)
+//     whose body uses a tagged arg get it merged into their ``kAttrDumpVars`` —
+//     the same scope-level carrier ``pl.dump_tag`` seeds at parse, printed back
+//     as each construct's ``dumps=``. The outliner later maps it onto the
+//     synthesised dispatch.
 //   * Nested cross-function (``GlobalVar``) Calls that take a tagged arg get it
 //     merged into the Call's ``kAttrDumpVars``. This is what makes a tag survive
 //     *multi-level* inlining: when the callee itself just forwards the arg into
@@ -583,8 +585,11 @@ class InlineDumpVarTransfer : public IRMutator {
   StmtPtr VisitStmt_(const HierarchyScopeStmtPtr& op) override { return Attach<HierarchyScopeStmt>(op); }
   StmtPtr VisitStmt_(const ClusterScopeStmtPtr& op) override { return Attach<ClusterScopeStmt>(op); }
   StmtPtr VisitStmt_(const SpmdScopeStmtPtr& op) override { return Attach<SpmdScopeStmt>(op); }
-  StmtPtr VisitStmt_(const SplitAivScopeStmtPtr& op) override { return Attach<SplitAivScopeStmt>(op); }
   StmtPtr VisitStmt_(const GraphScopeStmtPtr& op) override { return Attach<GraphScopeStmt>(op); }
+  // ``SplitAivScopeStmt`` is deliberately not stamped: a ``pl.split_aiv`` region
+  // lives inside a kernel and is never outlined into a dispatch, so no pass reads
+  // a dump mark off it (and ``pl.split_aiv`` has no ``dumps=`` to print one as).
+  // The enclosing InCore scope carries the mark instead.
 
   ExprPtr VisitExpr_(const CallPtr& op) override {
     // Recurse first so nested args (this pass runs pre-flatten, so a call arg

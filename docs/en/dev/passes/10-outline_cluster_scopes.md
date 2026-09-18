@@ -34,7 +34,7 @@ program_outlined = outline_pass(program)
 2. **Outline Cluster Scopes**: Extract each Cluster body into `Function(func_type=Group)`
 3. **Scan for Standalone Spmd Scopes**: On the transformed body, find `SpmdScopeStmt` nodes that are not nested inside a Cluster
 4. **Outline Standalone Spmd Scopes**: Extract each standalone Spmd body into `Function(func_type=Spmd)` and attach `core_num` / `sync_start` to the synthesised **dispatch** (Call attrs, or the `Submit` fields for an `as tid` scope) — never to the outlined function
-5. **Unwrap Nested Spmd in Group**: For `pl.cluster(): with pl.spmd(...): ...`, keep a single Group function, move `core_num` / `sync_start` onto its **dispatch** (translated back through the dispatch's args, since the spec is lifted from inside the callee), and stamp the self-contained `spmd_unwrapped` marker on the Group
+5. **Unwrap Nested Spmd in Group**: For `pl.cluster(): with pl.spmd(...): ...`, keep a single Group function, move `core_num` / `sync_start` — and the Spmd scope's selective-dump marks (`dumps=` / `dump_vars`), merged after the Cluster scope's own — onto its **dispatch** (translated back through the dispatch's args, since the spec is lifted from inside the callee), and stamp the self-contained `spmd_unwrapped` marker on the Group
 6. **Replace Scope**: Replace each outlined scope with a Call to the outlined function + output assignments
 7. **Add to Program**: Prepend outlined functions to the program's function list
 

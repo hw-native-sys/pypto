@@ -34,7 +34,7 @@ program_outlined = outline_pass(program)
 2. **提取 Cluster 作用域**：将每个 Cluster 作用域体提取为 `Function(func_type=Group)`
 3. **扫描 standalone Spmd 作用域**：在变换后的函数体中查找所有未嵌套在 Cluster 内部的 `SpmdScopeStmt` 节点
 4. **提取 standalone Spmd 作用域**：将每个 standalone Spmd 作用域体提取为 `Function(func_type=Spmd)`，并把 `core_num` / `sync_start` 挂到合成出的**调度点**（Call attrs；`as tid` 作用域则用 `Submit` 字段）——绝不挂在被提取的函数上
-5. **展开 Group 内嵌 Spmd**：对于 `pl.cluster(): with pl.spmd(...): ...`，保留单一 Group 函数，把 `core_num` / `sync_start` 挂到其**调度点**（由于该规格是从被调用方内部提取的，需经调度点实参回译），并在 Group 上打上自包含的 `spmd_unwrapped` 标记
+5. **展开 Group 内嵌 Spmd**：对于 `pl.cluster(): with pl.spmd(...): ...`，保留单一 Group 函数，把 `core_num` / `sync_start` —— 以及 Spmd scope 上的选择性 dump 标记（`dumps=` / `dump_vars`，合并在 Cluster scope 自身标记之后）—— 挂到其**调度点**（由于该规格是从被调用方内部提取的，需经调度点实参回译），并在 Group 上打上自包含的 `spmd_unwrapped` 标记
 6. **替换作用域**：将作用域语句替换为对提取函数的调用 + 输出赋值
 7. **添加到程序**：将提取的函数前置到程序的函数列表中
 

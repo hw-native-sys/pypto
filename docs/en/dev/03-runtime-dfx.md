@@ -202,10 +202,11 @@ def orch(self, q: pl.Tensor[...], k_cache: pl.Tensor[...], out: pl.Out[...]):
     out = self.qk_pv(q, k_cache, out)   # q and out dumped; k_cache filtered out
 ```
 
-**Explicit kwarg (`dumps=[...]`)** — `pl.submit(...)` and `pl.at(...)` accept a
-`dumps=[...]` kwarg (symmetric with `deps=[...]`) listing the tensors to dump
-at that one task launch. Each entry must be a tensor argument of that submit /
-a tensor captured by that scope:
+**Explicit kwarg (`dumps=[...]`)** — `pl.submit(...)` and every dispatch scope
+(`pl.at(...)`, `pl.spmd(...)` in all three forms, `pl.cluster(...)`,
+`pl.graph(...)`) accept a `dumps=[...]` kwarg (symmetric with `deps=[...]`)
+listing the tensors to dump at that one task launch. Each entry must be a
+tensor argument of that submit / a tensor captured by that scope:
 
 ```python
 with pl.manual_scope():
@@ -234,7 +235,7 @@ styles:
 - **`@pl.jit` / tensor-op style (`with pl.at(level=...)`, `c = a + 1.0`)** —
   here the kernel dispatch is *synthesised by the outline passes*, not written
   at parse time. The tag instead seeds the enclosing scope's `dump_vars` (which
-  round-trips as `pl.at(..., dumps=[...])`); a tag applied at the inline
+  round-trips as that construct's `dumps=[...]`); a tag applied at the inline
   call site rides the call's `dump_vars` and is transferred by
   `InlineFunctions` onto the scopes it splices in. The outliner then
   translates each captured scope dump Var into the synthesised dispatch's
@@ -252,6 +253,7 @@ the pass's fixpoint.
 | `pl.dump_tag(t)` as a standalone statement in an Orchestration or Inline body | Supported (declarative marker; affects every subsequent consuming dispatch). |
 | `dumps=[arg]` on `pl.submit(...)` | Supported — explicit submit-side surface (symmetric with `deps=`); each entry must be a positional arg of the submit. |
 | `dumps=[t]` on `pl.at(...)` | Supported — explicit scope-side surface (symmetric with `deps=`); each entry must be a tensor captured by the scope body. |
+| `dumps=[t]` on `pl.spmd(...)` / `pl.cluster(...)` / `pl.graph(...)` | Supported — marks the dispatch that construct lowers to: the SPMD grid launch, the Group launch, or the graph task itself (not the kernels recorded inside it). A cluster-nested `pl.spmd` is unwrapped into its Group, so its marks move onto the Group launch. |
 | `dumps=` on a plain `self.kernel(...)` call | Not supported — raises `ParserTypeError`. A plain call is fire-and-forget; declare the target with `pl.dump_tag(t)` or submit it with `pl.submit(..., dumps=[...])`. |
 | Tag consumed by an outline-synthesised dispatch (`@pl.jit` / `with pl.at(level=...)` / tensor-op style) | Supported — the tag rides a scope-level `dump_vars` carrier (`dumps=`) and the outliner maps it onto the synthesised dispatch arg. |
 | `pl.dump_tag(t)` inside a `@pl.function(type=pl.FunctionType.InCore/AIC/AIV/Group)` body | Not supported — raises `ParserSyntaxError` at parse time. Dump filtering is applied by orchestration codegen at the kernel-call site; kernel-body functions have no corresponding call-site arg to attach the marker to. Place `pl.dump_tag` in the enclosing `Orchestration` (or `Inline`) function instead. |

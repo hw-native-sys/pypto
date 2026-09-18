@@ -121,13 +121,13 @@ for (x,) in pl.while_(init_values=(x_init,)):
 `pl.spmd(N)` 把一个 kernel 派发到 `N` 个 block。形式：
 
 - `with pl.spmd(N): ...` —— body **既可以**是调用已声明 InCore kernel 的*派发型* body（`SpmdScopeStmt(body=<stmts>)`，无内层 InCore 包裹），**也可以**是一段*内联*块，自动外包成一段隐式 InCore 区域（与 for-form 相同，只是不自动绑定索引）。区分依据是语义而非语句数量：body 若读取 `pl.tile.get_block_idx()`，即为内联 body 并被包裹；否则即为派发型 body，无论包含多少条语句都不加包裹。若 body 既不读取索引、也不派发 `self.<kernel>(...)` 调用，则会被拒绝。不捕获 producer TaskId。
-  - 当 body 唯一的语句是显式的 `with pl.at(<CORE_GROUP level>, ...):` 时，该嵌套 scope 本身*就是* InCore 载体：它会被当作普通嵌套 scope 解析，而不会被二次包裹（`level` 可用位置或关键字形式，也可带 `as tid` / `name_hint=`）。printer 正是以这种形式输出 `Spmd(InCore(...))`，因此这也是该 IR 能够 round-trip 的原因。当 body 已提供载体时，`optimizations=` 必须写在该 `pl.at(...)` 上；写在 `pl.spmd(...)` 行会被拒绝，无论载体自身是否也带有该项。
+  - 当 body 唯一的语句是显式的 `with pl.at(<CORE_GROUP level>, ...):` 时，该嵌套 scope 本身*就是* InCore 载体：它会被当作普通嵌套 scope 解析，而不会被二次包裹（`level` 可用位置或关键字形式，也可带 `as tid` / `name_hint=`）。printer 正是以这种形式输出 `Spmd(InCore(...))`，因此这也是该 IR 能够 round-trip 的原因。对于 inline body，若其载体带有只能由载体自身 header 表达的 kwarg（最常见的是 `dumps=`，由前置的 `pl.dump_tag` 合并到载体上），printer 同样输出这种形式，因为 for 形式和 inline `as tid` 形式都会省略该 header。当 body 已提供载体时，`optimizations=` 必须写在该 `pl.at(...)` 上；写在 `pl.spmd(...)` 行会被拒绝，无论载体自身是否也带有该项。
   - 派发型 body 只能启动**一个** kernel。它经由 `FindFirstInnerCall` 下降，而后者在第一个调用处即停止，因此第二个派发不会被启动而是被静默丢弃；parser 会直接拒绝这种写法。提升出的临时变量与 tuple 投影不算派发，不计入数量。
 - `for i in pl.spmd(N): ...` —— 循环变量绑定到每个 block 的索引（`pl.tile.get_block_idx()`）；body 自动外包成一段隐式 InCore 区域。
 - `with pl.spmd(N, deps=[...]) as tid: ...` —— **捕获形式**：与 `with pl.at(...) as tid:` 对称。body 形态与上面的普通形式相同，并额外在 `tid` 中捕获该分发的 grid 级 producer `pl.Scalar[pl.TASK_ID]`（可用作 `deps=` 边、存入 `pl.array.create(N, pl.TASK_ID)`、或跨入 `pl.manual_scope`）。TaskId 捕获与内联 body 正交——这是该形式相比普通形式唯一多出来的能力。lower 成一个 `ir.Submit`，其尾部 tuple 元素即 grid TaskId；`core_num` / `sync_start` 记录在该 `Submit` 自身的字段上（launch spec 属于启动点，而非外包出的被调函数）。参见下文“手动依赖原语”小节。
 - `out, tid = pl.spmd_submit(kernel, *args, core_num=N)` —— **submit 形式**：将 kernel 在 `N` 个 block 上分发，同时捕获该分发的 producer `pl.Scalar[pl.TASK_ID]`（针对已声明 kernel 的 `pl.submit` 版本）。参见下文“手动依赖原语”小节。
 
-以上三种形式也都接受 `allow_early_resolve=True`（布尔字面量；与 `pl.submit` / `pl.at` 相同的 early-dispatch 选项）。即使不写 `as tid` 也会强制走 `ir.Submit` 形态，并 lower 为 `Arg::set_allow_early_resolve(true)`。在嵌套于 `pl.cluster()` 内的 `pl.spmd` 上会被拒绝（此类 scope 会被 unwrap 进 Group 函数、永远不会产生 Submit，提示会丢失）。
+以上三种形式也都接受 `allow_early_resolve=True`（布尔字面量；与 `pl.submit` / `pl.at` 相同的 early-dispatch 选项）。即使不写 `as tid` 也会强制走 `ir.Submit` 形态，并 lower 为 `Arg::set_allow_early_resolve(true)`。在嵌套于 `pl.cluster()` 内的 `pl.spmd` 上会被拒绝（此类 scope 会被 unwrap 进 Group 函数、永远不会产生 Submit，提示会丢失）。它们也都接受 `dumps=[t, ...]` —— 在 grid 派发上做选择性张量 dump，记录在 Spmd scope 本身而非自动合成的载体上。它不会强制走 `ir.Submit`，并且可用于嵌套在 `pl.cluster()` 内的 `pl.spmd`，其标记会转移到 Group 派发上。
 
 可选 `optimizations=[...]`。各条目彼此正交，可在同一列表中组合
 （例如 `[pl.split(MODE), pl.cross_core_slot(slot_num=4)]`）：
@@ -185,11 +185,10 @@ def func(x: pl.Tensor[[128, 64], pl.FP16]) -> pl.Tensor[[128, 64], pl.FP16]:
 - `static_print` 接受变量、常量、字符串标签（原样打印）和 f-string 的简单 `{expr}` 占位符（格式化为 IR）。不支持转换标志（`!r`、`!s`、`!a`）和格式说明符（`:...`）。
 - `static_assert` 支持闭包变量表达式（如 `N > 32`）和 IR 常量
 - `static_assert` 的消息参数必须是字符串字面量
-- `dump_tag` 接受单个绑定在外层 Orchestration（或 Inline）作用域内的张量变量名，在解析期被消耗，并自始至终以 Var 身份（而非名字）跟踪到 codegen。在显式 `self.kernel(...)` 调用点，它把该张量记录到每个后续消费它的 Call 的 `dump_vars` 上；在 `@pl.jit` / `with pl.at(level=...)` 风格（派发由 outline pass 合成）下，它改为写入所在 scope 的 `dump_vars`，再由 outliner 映射到合成派发的实参上（见 [运行期 DFX](../03-runtime-dfx.md#选择性张量-dump)）。若需要在单次 task 启动处显式列出 dump 目标，请用 `pl.submit(...)` / `pl.at(...)` 上的 `dumps=[...]` kwarg（与 `deps=` 对称）
+- `dump_tag` 接受单个绑定在外层 Orchestration（或 Inline）作用域内的张量变量名，在解析期被消耗，并自始至终以 Var 身份（而非名字）跟踪到 codegen。在显式 `self.kernel(...)` 调用点，它把该张量记录到每个后续消费它的 Call 的 `dump_vars` 上；在 `@pl.jit` / `with pl.at(level=...)` 风格（派发由 outline pass 合成）下，它改为写入所在 scope 的 `dump_vars`，再由 outliner 映射到合成派发的实参上（见 [运行期 DFX](../03-runtime-dfx.md#选择性张量-dump)）。若需要在单次 task 启动处显式列出 dump 目标，请用 `pl.submit(...)` 或派发 scope —— `pl.at(...)` / `pl.spmd(...)` / `pl.cluster(...)` / `pl.graph(...)` —— 上的 `dumps=[...]` kwarg（与 `deps=` 对称）
+- 即使后续解析失败，输出仍会显示——适用于调试解析错误
 
 `pl.cluster(dumps=[a])` 将 dump 标记限定于该 cluster 派发，不会标记后续作用域。打印的 IR 使用此显式形式保留 cluster 的 dump 属性。带有作用域 dump 属性的 SPMD 代码保留显式内层 `pl.at(..., dumps=[a])`，使打印后重新解析仍将属性保留在正确的作用域上。
-
-- 即使后续解析失败，输出仍会显示——适用于调试解析错误
 
 ### 语句序列
 

@@ -30,9 +30,11 @@ The companion device/manifest checks
 live in ``tests/st/runtime/framework_and_models/test_dump_tag.py``.
 """
 
+import contextlib
+
 import pypto.language as pl
 import pytest
-from pypto import codegen, ir
+from pypto import codegen, ir, passes
 
 
 @pl.jit.inline
@@ -268,6 +270,113 @@ def test_dump_tag_survives_cluster_group_mixed_split():
     dumps = _dispatch_dump_vars(program)
     tagged = sorted({_base(n) for dv in dumps.values() for n in dv})
     assert "a" in tagged, f"expected some AIC/AIV dispatch to dump 'a', got {dumps}"
+
+
+@pl.jit.inline
+def _spmd_dumps_writeback(a: pl.Tensor[[128, 128], pl.FP32], c: pl.Tensor[[128, 128], pl.FP32]):
+    c_view = pl.reshape(c, [128, 128])
+    for ob in pl.spmd(2, dumps=[a]):
+        t0 = ob * 64
+        c_view[t0 : t0 + 64, 0:128] = pl.add(a[t0 : t0 + 64, 0:128], 1.0)
+    c = pl.reshape(c_view, [128, 128])
+    return c
+
+
+@pl.jit
+def _spmd_with_dumps(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+    c = _spmd_dumps_writeback(a, c)
+    return c
+
+
+@pl.jit.inline
+def _cluster_dumps_mixed(
+    a: pl.Tensor[[64, 64], pl.FP32],
+    b: pl.Tensor[[64, 64], pl.FP32],
+    bias: pl.Tensor[[64, 64], pl.FP32],
+    c: pl.Tensor[[64, 64], pl.FP32],
+):
+    with pl.cluster(dumps=[a]):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            mm = pl.matmul(a, b, out_dtype=pl.FP32)
+            c = pl.add(mm, bias)
+    return c
+
+
+@pl.jit
+def _cluster_with_dumps(a: pl.Tensor, b: pl.Tensor, bias: pl.Tensor, c: pl.Out[pl.Tensor]):
+    c = _cluster_dumps_mixed(a, b, bias, c)
+    return c
+
+
+@pl.jit.inline
+def _cluster_nested_spmd_dumps_mixed(
+    a: pl.Tensor[[64, 64], pl.FP32],
+    b: pl.Tensor[[64, 64], pl.FP32],
+    bias: pl.Tensor[[64, 64], pl.FP32],
+    c: pl.Tensor[[64, 64], pl.FP32],
+):
+    with pl.cluster():
+        with pl.spmd(1, dumps=[a]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                mm = pl.matmul(a, b, out_dtype=pl.FP32)
+                c = pl.add(mm, bias)
+    return c
+
+
+@pl.jit
+def _cluster_nested_spmd_with_dumps(a: pl.Tensor, b: pl.Tensor, bias: pl.Tensor, c: pl.Out[pl.Tensor]):
+    c = _cluster_nested_spmd_dumps_mixed(a, b, bias, c)
+    return c
+
+
+@pl.jit
+def _graph_with_dumps(a: pl.Tensor, acc: pl.InOut[pl.Tensor]):
+    with pl.graph("g", dumps=[a]):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            t = pl.load(a, [0, 0], [64, 64])
+            cur = pl.load(acc, [0, 0], [64, 64])
+            pl.store(pl.add(cur, t), [0, 0], acc)
+    return acc
+
+
+def _emitted_dumps(program: ir.Program) -> list[str]:
+    """Every ``.dump(...)`` line orchestration codegen emits for *program*."""
+    lines: list[str] = []
+    for fn in program.functions.values():
+        if fn.func_type == ir.FunctionType.Orchestration:
+            code = codegen.generate_orchestration(program, fn).code
+            lines += [ln.strip() for ln in code.splitlines() if ".dump(" in ln]
+    return lines
+
+
+@pytest.mark.parametrize(
+    ("entry", "shapes", "runtime"),
+    [
+        (_spmd_with_dumps, [(128, 128), (128, 128)], None),
+        (_cluster_with_dumps, [(64, 64)] * 4, None),
+        (_cluster_nested_spmd_with_dumps, [(64, 64)] * 4, None),
+        (_graph_with_dumps, [(64, 64)] * 2, passes.RuntimeKind.HOST_BUILD_GRAPH),
+    ],
+    ids=["spmd", "cluster", "cluster_nested_spmd", "graph"],
+)
+def test_container_scope_dumps_reach_codegen(entry, shapes, runtime):
+    """An explicit ``dumps=[a]`` on ``pl.spmd`` / ``pl.cluster`` / a
+    cluster-nested ``pl.spmd`` / ``pl.graph`` reaches the dispatch that
+    construct lowers to, so orchestration codegen emits ``.dump(a)``.
+
+    Two regressions ride on this: ``IRMutator`` did not rewrite Cluster/Graph
+    scope attrs, so inlining left their mark naming the helper's param and the
+    outliner dropped it; and unwrapping a cluster-nested Spmd scope deleted its
+    mark along with the scope."""
+    torch = pytest.importorskip("torch")
+
+    args = [torch.randn(*shape, dtype=torch.float32) for shape in shapes]
+    ctx = passes.PassContext([], runtime=runtime) if runtime is not None else contextlib.nullcontext()
+    with ctx:
+        program = entry.lower(*args)
+        dump_lines = _emitted_dumps(program)
+    assert len(dump_lines) == 1, f"expected one emitted .dump(), got {dump_lines}"
+    assert ".dump(ext_a" in dump_lines[0], dump_lines[0]
 
 
 def test_no_dump_tag_yields_no_dispatch_dump_vars():
