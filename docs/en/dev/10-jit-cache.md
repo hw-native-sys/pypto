@@ -1,11 +1,12 @@
 # Persistent JIT Cache
 
-Persistent caching is enabled by default. It reuses generated code and complete binaries
-across processes, while each JIT function also retains live compiled objects.
+Persistent caching is opt-in (`PYPTO_CACHE=1` or `CacheConfig(enabled=True)`).
+It reuses generated code and complete binaries across processes. By default,
+JIT reuses live compiled objects without capturing the installation identity.
 Cached artifacts contain executable code: use a cache with trusted writers.
 
 `PYPTO_PROG_BUILD_DIR` selects an output parent without forcing compilation.
-With environment/default policy, the cache lives in its `.pypto-cache`
+When persistence is enabled through environment policy, the cache lives in its `.pypto-cache`
 subdirectory, or in `~/.cache/pypto/jit` when that variable is empty or unset.
 `PYPTO_CACHE_DIR` overrides this cache location. Explicit per-call/process
 `CacheConfig` objects still replace the entire environment policy.
@@ -127,7 +128,7 @@ settings. Fields are never partially merged across those levels.
 
 | Field | Default | Meaning |
 | ----- | ------- | ------- |
-| `enabled` | `True` | Enable persistent lookup and publication. |
+| `enabled` | `False` | Enable persistent lookup and publication. |
 | `root` | `None` | Use `~/.cache/pypto/jit`; explicit relative paths resolve when the request is captured. |
 | `readonly` | `False` | Prohibit writes, locks and bytecode under the cache root. Private builds and runtime output remain outside it. |
 | `extra_source_paths` | `()` | Content-hash files, or recursively hash Python sources in directories, on every request. Missing inputs bypass reuse. |
@@ -194,7 +195,12 @@ participate in identity, so moving an installation may cause a miss.
 Cold inventory reads are deliberately conservative and can be expensive. One
 local CANN/PTOAS installation took approximately 12 seconds for its first content
 inventory; that measurement is not a general performance claim. Each new
-independent process currently pays this cost. A disk memo based only on path,
+independent process currently pays this cost, even on a READY hit. This can cost
+more than compilation itself; persistence remains opt-in until
+[installation identity amortization](https://github.com/hw-native-sys/pypto/issues/2732)
+is resolved. Measure first-call wall time and `lookup_ns` separately from
+`build_ns` and hit counts; zero builds do not establish a latency improvement.
+A disk memo based only on path,
 size, mtime and inode cannot prove unchanged contents and is not used. Statistics
 include identity and validation time. Deployment without a verifiable local
 toolchain is a separate protocol and is not enabled by this API.

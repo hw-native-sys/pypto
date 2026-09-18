@@ -27,7 +27,7 @@ class CacheConfig:
     writers. Read-only stores permit private builds outside the cache root.
     """
 
-    enabled: bool = True
+    enabled: bool = False
     root: Path | None = None
     readonly: bool = False
     extra_source_paths: tuple[Path, ...] = ()
@@ -130,7 +130,7 @@ def capture_cache_config(per_call: CacheConfig | None) -> CacheConfig:
         enabled = os.environ.get("PYPTO_CACHE")
         readonly = os.environ.get("PYPTO_CACHE_READONLY")
         config = CacheConfig(
-            enabled=_boolean("PYPTO_CACHE", "1" if enabled is None else enabled),
+            enabled=_boolean("PYPTO_CACHE", "0" if enabled is None else enabled),
             root=Path(root) if root else Path(build_root) / ".pypto-cache" if build_root else None,
             readonly=_boolean("PYPTO_CACHE_READONLY", "0" if readonly is None else readonly),
         )

@@ -79,9 +79,9 @@ an entry in the artifact cache:
   or verification/diagnostic settings different from the pipeline defaults.
 
 `PYPTO_PROG_BUILD_DIR` only selects output storage; it does not force a rebuild.
-Persistent caching is enabled by default and uses `.pypto-cache` under that
-parent unless the cache policy selects another root. See
-[cache configuration](../10-jit-cache.md#configuration) for precedence and opt-out.
+In-process reuse works by default. Opt-in persistent caching uses `.pypto-cache`
+under that parent unless the cache policy selects another root. See
+[cache configuration](../10-jit-cache.md#configuration) for precedence and opt-in.
 
 This ensures a warm kernel still emits requested dumps and reports. Repeating
 a request regenerates the output; a failed diagnostic compile leaves ordinary
@@ -150,7 +150,7 @@ again. Diagnostic/output requests still compile afresh as described above.
 
 With [persistent caching](../10-jit-cache.md) enabled, warmup automatically
 publishes or reuses READY artifacts through the [runtime protocol](../09-artifact-store.md).
-Persistence is enabled by default. Read-only misses, unsupported inputs and
+Persistence is disabled by default. Read-only misses, unsupported inputs and
 storage failures can prepare private results. A restored result has
 `.program is None`; disable persistence or use `specialize()`/`lower()` to require IR.
 The public cache policy, statistics and metadata-only warmup CLI are documented

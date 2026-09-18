@@ -901,13 +901,14 @@ def test_automatic_jit_refreshes_sources_before_object_hit(tmp_path, automatic_j
 
 
 @pytest.mark.parametrize("damage", ["none", "missing", "corrupt"])
-def test_default_cache_reuses_build_directory_and_recovers_damage(
+def test_enabled_cache_reuses_build_directory_and_recovers_damage(
     tmp_path, automatic_jit_case, fake_runtime, monkeypatch, damage
 ):
     kernel, builds = automatic_jit_case
     for name in ("PYPTO_CACHE", "PYPTO_CACHE_DIR", "PYPTO_CACHE_READONLY"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr("pypto._cache_config._policy.override", None)
+    monkeypatch.setenv("PYPTO_CACHE", "1")
     root = tmp_path / "output"
     monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(root))
     with passes.PassContext([]):
@@ -1108,7 +1109,7 @@ def test_unavailable_identity_keeps_build_directory_outside_readonly_cache(
     monkeypatch.setattr(
         "pypto.jit._persistent.capture_toolchain", lambda *args: replace(_key().environment, ptoas=None)
     )
-    config = RunConfig(cache_config=CacheConfig(root=root, readonly=True))
+    config = RunConfig(cache_config=CacheConfig(enabled=True, root=root, readonly=True))
     with passes.PassContext([]):
         private = kernel.compile(config=config)
     assert len(builds) == 1 and not root.exists()

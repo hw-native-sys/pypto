@@ -30,8 +30,8 @@ def clean_policy(monkeypatch):
 
 def test_default_and_complete_precedence(tmp_path, monkeypatch):
     default = capture_cache_config(None)
-    assert default.enabled and default.root == (Path.home() / ".cache/pypto/jit").resolve()
-    assert pypto.CacheConfig().enabled
+    assert not default.enabled and default.root is None
+    assert not pypto.CacheConfig().enabled
     monkeypatch.setenv("PYPTO_CACHE", "1")
     monkeypatch.setenv("PYPTO_CACHE_DIR", str(tmp_path / "environment"))
     assert capture_cache_config(None).enabled
@@ -86,24 +86,27 @@ def test_invalid_explicit_config(values):
         pypto.CacheConfig(**values)
 
 
-def test_disabled_policy_does_not_probe_filesystem(monkeypatch):
+@pytest.mark.parametrize("enabled", [None, "0"])
+def test_disabled_policy_does_not_probe_filesystem(monkeypatch, enabled):
     def forbidden(*args, **kwargs):
         pytest.fail("disabled dispatch probed the filesystem")
 
     monkeypatch.setattr(Path, "resolve", forbidden)
-    monkeypatch.setenv("PYPTO_CACHE", "0")
+    if enabled is not None:
+        monkeypatch.setenv("PYPTO_CACHE", enabled)
     assert not capture_cache_config(None).enabled
     assert not capture_cache_config(pypto.CacheConfig(enabled=False, root=Path("unused"))).enabled
 
 
 def test_build_directory_selects_default_cache_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("PYPTO_CACHE", "1")
     monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", "output")
     config = capture_cache_config(None)
     assert config.enabled and config.root == tmp_path / "output/.pypto-cache"
     monkeypatch.setenv("PYPTO_CACHE_DIR", "shared")
     assert capture_cache_config(None).root == tmp_path / "shared"
     # Explicit policy is complete: it does not partially inherit environment roots.
-    explicit = pypto.CacheConfig(root=tmp_path / "explicit")
+    explicit = pypto.CacheConfig(enabled=True, root=tmp_path / "explicit")
     assert capture_cache_config(explicit) == explicit
     monkeypatch.setenv("PYPTO_CACHE", "0")
     assert not capture_cache_config(None).enabled

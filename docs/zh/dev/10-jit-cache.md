@@ -1,8 +1,9 @@
 # JIT 持久缓存
 
-持久缓存（persistent cache）默认开启，可跨进程复用生成代码和完整二进制。
+持久缓存（persistent cache）默认关闭，通过 `PYPTO_CACHE=1` 或 `CacheConfig(enabled=True)`
+显式启用后可跨进程复用生成代码和完整二进制。默认只复用进程内编译对象，不计算安装标识。
 
-`PYPTO_PROG_BUILD_DIR` 只指定输出父目录，不再强制重新编译。使用环境/默认策略时，
+`PYPTO_PROG_BUILD_DIR` 只指定输出父目录，不再强制重新编译。通过环境策略开启持久化时，
 缓存位于其 `.pypto-cache` 子目录；变量为空或未设置时使用 `~/.cache/pypto/jit`。
 `PYPTO_CACHE_DIR` 优先指定缓存位置；显式的每次调用/进程 `CacheConfig` 仍整体覆盖环境策略。
 私有构建及可写运行输出使用指定的输出父目录，发布产物使用选定的缓存根目录。
@@ -96,7 +97,7 @@ HBG orchestration 使用 Host 编译器；TRB 在模拟器上使用 Host 编译�
 
 | 字段 | 默认值 | 含义 |
 | ---- | ------ | ---- |
-| `enabled` | `True` | 启用持久查找和发布。 |
+| `enabled` | `False` | 启用持久查找和发布。 |
 | `root` | `None` | 使用 `~/.cache/pypto/jit`；显式相对路径在捕获请求时解析。 |
 | `readonly` | `False` | 缓存根目录内禁止写入、锁和字节码；私有构建及运行输出位于根目录外。 |
 | `extra_source_paths` | `()` | 每次请求按内容哈希文件，或递归哈希目录中的 Python 源码。缺失输入旁路复用。 |
@@ -153,6 +154,10 @@ PTOAS 扩展、不支持的编译器布局、sanitizer 构建，以及 `CPATH`�
 大小、mtime 和 inode 的磁盘记忆不能证明内容未变，因此不采用。统计包含标识计算和
 校验时间。没有可验证本地工具链的
 部署需要另一套协议，本 API 尚不支持。
+
+即使 READY 命中，每个独立进程仍需计算安装标识，成本可能高于编译本身。
+在[安装标识跨进程摊销](https://github.com/hw-native-sys/pypto/issues/2732)解决前，持久化保持显式启用。
+性能验收应分别记录首调总耗时、`lookup_ns` 和 `build_ns`；零构建次数不代表延迟下降。
 
 ## 统计与 CLI
 

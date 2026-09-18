@@ -797,8 +797,15 @@ def test_environment_request_bypasses_warm_cache(kernel, compile_calls, monkeypa
 
 
 def test_build_directory_reuses_private_compilation_and_separates_roots(kernel, monkeypatch, tmp_path):
-    # Persistence is explicitly disabled by the frontend fixture. Output roots
-    # must still participate in object selection so a new root receives files.
+    # Exercise the actual default, including the first compilation. A READY
+    # hit alone would not catch expensive per-process installation traversal.
+    monkeypatch.delenv("PYPTO_CACHE", raising=False)
+    monkeypatch.setattr("pypto._cache_config._policy.override", None)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("default compilation must not inventory the toolchain")
+
+    monkeypatch.setattr("pypto.jit._persistent.capture_toolchain", forbidden)
     ordinary = kernel.compile()
     root = tmp_path / "requested"
     monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(root))

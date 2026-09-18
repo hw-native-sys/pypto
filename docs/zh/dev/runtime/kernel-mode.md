@@ -352,10 +352,10 @@ capture 独立于 JIT 编译缓存查询该记录，因此设置 `PYPTO_PROG_BUI
 `CompileOptions(output_dir=...)`，或在 warmup 后清空编译缓存，都不会丢失已准备的 callable。
 capture 不会编译、加载二进制或再次 prepare。prepare 失败不会发布记录，Worker 关闭后其注册记录均失效。
 capture 外的诊断 eager/program 调用仍按原有策略重新编译。
-单独设置 `PYPTO_PROG_BUILD_DIR` 不再视为诊断请求：持久缓存默认开启，使用其 `.pypto-cache`
-子目录，除非缓存策略指定其他位置。重复 eager 调用可复用编译结果与注册记录；后续进程
-可复用校验后的产物，但仍需在各自 Worker 中 prepare。
-设置 `PYPTO_CACHE=0` 或 `CacheConfig(enabled=False)` 可关闭持久化。
+单独设置 `PYPTO_PROG_BUILD_DIR` 不再视为诊断请求。持久缓存默认关闭，重复 eager 调用
+仍可复用编译结果与注册记录。通过 `PYPTO_CACHE=1` 或 `CacheConfig(enabled=True)`
+开启跨进程复用；环境策略使用构建目录的 `.pypto-cache` 子目录，除非另有指定。
+后续进程仍需在各自 Worker 中 prepare，目前即使 READY 命中也需支付安装目录遍历成本。
 
 ```python
 # op_a and op_b are @pl.jit entries; x, y, out are caller-owned NPU tensors.

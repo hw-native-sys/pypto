@@ -58,12 +58,13 @@ def _configure_capture_cache(directory, case):
         os.environ["PYPTO_PROG_BUILD_DIR"] = str(Path(directory) / "generated")
         for name in ("PYPTO_CACHE", "PYPTO_CACHE_DIR", "PYPTO_CACHE_READONLY"):
             os.environ.pop(name, None)
+        os.environ["PYPTO_CACHE"] = "1"
         configure_cache(None)
     else:
         configure_cache(CacheConfig(enabled=case == "persistent", root=Path(directory) / "cache"))
 
 
-def _check_default_cache_reuse(counts, update, add, x, out, following, directory, restored):
+def _check_persistent_cache_reuse(counts, update, add, x, out, following, directory, restored):
     from pypto import cache_stats  # noqa: PLC0415
     from pypto.jit._artifact_manifest import MANIFEST_NAME  # noqa: PLC0415
 
@@ -75,7 +76,7 @@ def _check_default_cache_reuse(counts, update, add, x, out, following, directory
     assert stats.ready_hits == (2 if restored else 0)
     update(x, 3.0, out)
     add(out, following, value=4)
-    assert counts == before_repeat, "default-cache hits must not compile or prepare again"
+    assert counts == before_repeat, "persistent-cache hits must not compile or prepare again"
     assert list((Path(directory) / "generated/.pypto-cache").rglob(MANIFEST_NAME))
 
 
@@ -141,7 +142,7 @@ def _run(device, directory, case, entry="jit", restored=False):
             ):
                 warm_add(out, following, value=4)
             if case == "build-dir":
-                _check_default_cache_reuse(
+                _check_persistent_cache_reuse(
                     counts, warm_update, warm_add, x, out, following, directory, restored
                 )
             torch_npu.npu.synchronize()
