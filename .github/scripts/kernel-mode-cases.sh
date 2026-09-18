@@ -12,6 +12,7 @@ case "${1:-}" in
   unit)
     cases=(
       tests/ut/test_optional_runtime_imports.py
+      tests/ut/test_kernel_ci_download.py
       tests/ut/test_kernel_ci_results.py
       tests/ut/jit/test_kernel_eager.py
       tests/ut/runtime/test_kernel_abi.py

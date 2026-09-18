@@ -641,6 +641,9 @@ Both torch_npu packages come from the official `v7.1.0.2-pytorch2.6.0` release;
 that version is not on PyPI. Release downloads allow up to ten minutes per
 transfer, with a 15-second connection timeout and a one-minute low-speed cutoff
 below 1 KiB/s, so slow downloads can finish without letting stalled transfers hang.
+Up to four attempts resume interrupted transfers from the bytes already received;
+if the server rejects resuming, the next attempt starts from zero. Only a completed
+download is passed to the installer.
 The job checks the Torch ABI before building.
 Device preflight reuses the runtime framework-version check, accepting the
 C++11 ABI build suffix while still requiring release 2.6.0.post2. The full
