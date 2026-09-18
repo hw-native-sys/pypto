@@ -33,8 +33,9 @@ one byte-identical kernel source is a compile-only property, asserted in
 
 The exchange uses five window-bound resources, all allocated in one comm-domain
 scope: ``stage`` (TPUT source only), ``data`` (the result window), ``signal``
-(barrier), ``counts`` (this rank's send counts) and ``recv`` (per-source valid
-row counts published during the push).
+(barrier), ``counts`` (this rank's send counts, pulled by its peers after the
+barrier — so it must own >= 64 B) and ``recv`` (per-source valid row counts,
+written by the collective).
 
 **Why ``@pl.program`` and not ``@pl.jit``** (issue #2638): ``@pl.jit``
 propagates local tensor metadata statement by statement, but its walker
@@ -121,6 +122,8 @@ def _build_l2_all_to_all_v_program(n_ranks: int, max_recv: int):
         def consume_step(
             self,
             data: pl.InOut[pld.DistributedTensor[[total, SIZE], pl.FP32]],
+            # Written by the collective (pulled from each source's send_counts
+            # window); recv_counts[src, 0] is the count the consumer reads.
             recv_counts: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
             out: pl.Out[pl.Tensor[[total, SIZE], pl.FP32]],
             recv_out: pl.Out[pl.Tensor[[nr, 1], pl.INT32]],
@@ -186,7 +189,10 @@ def _build_l2_all_to_all_v_program(n_ranks: int, max_recv: int):
             stage_buf = pld.alloc_window_buffer(total * SIZE * pl.FP32.get_byte())
             data_buf = pld.alloc_window_buffer(total * SIZE * pl.FP32.get_byte())
             signal_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
-            counts_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
+            # Peers pull this rank's counts from this window, so the buffer must
+            # own one 64-byte TLOAD unit set (16 x INT32); the [NR, 1] view is
+            # all the op needs.
+            counts_buf = pld.alloc_window_buffer(16 * pl.INT32.get_byte())
             recv_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
 
             for r in pl.range(pld.world_size()):

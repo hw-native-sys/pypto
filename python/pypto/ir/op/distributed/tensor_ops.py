@@ -474,8 +474,11 @@ def all_to_all_v(
     (staging window / result), INT32 barrier signal [NR, 1], INT32
     ``send_counts`` [NR] / [NR, 1] holding the number of rows to send to each
     destination, and window-bound INT32 ``recv_counts`` [NR, 1] that receives
-    per-source valid-row counts after the barrier (published via
-    ``pld.system.notify`` as ``clamp(send_counts[dest], 0, MAX_RECV)``). Powered
+    per-source valid-row counts after the barrier. The hand-written builtin
+    kernel pulls each peer's own ``send_counts`` window (so a rank's
+    ``send_counts`` buffer must own >= 64 B — one 64-byte TLOAD unit set) and
+    clamps the value reader-side; the InCore composite rail publishes the
+    clamped count via ``pld.system.notify``. Powered
     by LowerCompositeOps into a 2-phase push-based decomposition (push →
     barrier), returning the target window. Each push transfers exactly
     ``clamp(send_counts[dest], 0, MAX_RECV)`` rows — the transfer extent is the

@@ -1038,13 +1038,18 @@ def all_to_all_v(
        masks by ``recv_counts`` afterwards will propagate NaN into
        otherwise-valid rows.  Mask first, then compute.
 
-    During the same push, each rank also publishes
-    ``clamp(send_counts[dest], 0, MAX_RECV)`` into peer ``dest``'s
-    ``recv_counts[my_rank, 0]`` via ``pld.system.notify`` (Set). After the
-    barrier, ``recv_counts[src, 0]`` tells this rank how many rows ``src``
-    sent — which is now also exactly how many were transferred — so use that
-    count to know where to stop reading. This is the MPI_Alltoallv recvcounts
-    side.
+    The recvcounts side is a peer-to-peer pull on the builtin rails: each rank
+    stages its own ``send_counts`` vector into its window, and after the barrier
+    the kernel reads every peer's vector straight from that peer's window
+    (``recv_counts[src, 0] = clamp(send_counts_of[src][my_rank], 0, MAX_RECV)``),
+    so a rank's ``send_counts`` buffer must own one 64-byte TLOAD unit set
+    (16 x INT32) with its ``[NR]`` vector at the start. The InCore composite rail
+    instead publishes ``clamp(send_counts[dest], 0, MAX_RECV)`` into peer
+    ``dest``'s ``recv_counts[my_rank, 0]`` via ``pld.system.notify`` (Set).
+    Either way, after the barrier ``recv_counts[src, 0]`` tells this rank how
+    many rows ``src`` sent — which is also exactly how many were transferred —
+    so use that count to know where to stop reading. This is the MPI_Alltoallv
+    recvcounts side.
 
     The barrier ``signal`` is self-clearing (restored to zero after each call)
     and safe to reuse inside a ``for``/``while`` loop.
@@ -1059,7 +1064,8 @@ def all_to_all_v(
         send_counts: INT32 [NR] or [NR, 1] rows-per-destination counts (Input).
             A plain :class:`pl.Tensor` or a window-bound
             :class:`pld.DistributedTensor` (e.g. counts published by a
-            preceding exchange).
+            preceding exchange). On the builtin rails the window must own at
+            least 64 B (16 x INT32): peers read it with one 64-byte TLOAD.
         recv_counts: :class:`pld.DistributedTensor` INT32 [NR, 1] — after the
             call, ``recv_counts[src, 0]`` holds how many rows ``src`` actually
             sent here, and how many were transferred — the count is clamped

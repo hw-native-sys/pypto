@@ -30,7 +30,7 @@ There are **fifteen ops** and **four ABI enums**:
 | `pld.tensor.reduce_scatter` | reduce and scatter chunks across ranks | `DistributedTensorType` (same as src) | builtin collective |
 | `pld.tensor.allgather` | gather data from all ranks via window | `DistributedTensorType` (same as src) | builtin collective |
 | `pld.tensor.all_to_all` | push-based symmetric personalized exchange — every rank pushes its per-destination chunks to every peer's window via `pld.tensor.put` (TPUT), returns window as result | `DistributedTensorType` (same as src) | composite / HOST builtin |
-| `pld.tensor.all_to_all_v` | variable-size all-to-all (MPI_Alltoallv) — pushes `clamp(send_counts[dest], 0, MAX_RECV)` rows per destination into a flat 2D staging window (transfer size is the runtime row count, so padding never crosses the wire), and publishes that same clamped count into peer `recv_counts[my_rank, 0]` via `pld.system.notify` (Set) so the receiver knows which rows are valid; returns window as result (same window-as-result pattern as symmetric `all_to_all`) | `DistributedTensorType` (same as target) | composite / HOST builtin / CHIP builtin |
+| `pld.tensor.all_to_all_v` | variable-size all-to-all (MPI_Alltoallv) — pushes `clamp(send_counts[dest], 0, MAX_RECV)` rows per destination into a flat 2D staging window (transfer size is the runtime row count, so padding never crosses the wire), and fills `recv_counts[src, 0]` so the receiver knows which rows are valid — the builtin kernel pulls each peer's own `send_counts` window (which must own >= 64 B) and clamps reader-side, the composite rail publishes via `pld.system.notify` (Set); returns window as result (same window-as-result pattern as symmetric `all_to_all`) | `DistributedTensorType` (same as target) | composite / HOST builtin / CHIP builtin |
 | `pld.system.notify` | signal a peer's slot | `Unknown` (side effect) | TNOTIFY |
 | `pld.system.wait` | block on own slot | `Unknown` (side effect) | TWAIT |
 | `pld.system.defer_wait` | defer this task's logical completion on a local counter | `Unknown` (side effect) | Simpler completion runtime (no PTOAS wait op) |
@@ -425,14 +425,21 @@ InCore and CHIP rails the operands arrive as function parameters with no such
 provenance, so distinctness is the caller's obligation.
 
 `MAX_RECV = target.shape[0] // NR`. Lowering reads `send_counts[dest]` at
-runtime, clamps it to `[0, MAX_RECV]`, and publishes the **clamped** count into
-peer `recv_counts[my_rank, 0]` via `pld.system.notify` (Set). The push transfers
-exactly that many rows — the transfer shape is the runtime `[rows, SIZE]`, not
-the compile-time capacity — so padding rows never cross the wire. After the
-barrier the receiver uses `recv_counts[src, 0]` to identify the valid rows; the
-remainder of its capacity slot is never written at all. Window memory is not
-*guaranteed* zeroed and can carry over within a process, so those untouched
-bytes are undefined.
+runtime, clamps it to `[0, MAX_RECV]`, and fills the receive-side count vector
+`recv_counts[src, 0]`. The builtin kernel (HOST and managed CHIP/L2 rails) does
+this by **pulling**: each rank stages its own send vector into its `send_counts`
+window — which must therefore own at least 64 B (16 x INT32, one 64-byte TLOAD
+unit set) with the `[NR]` vector at the start — and after the barrier every rank
+reads each peer's vector from that peer's window and clamps the raw value
+reader-side (`recv_counts[src, 0] = clamp(send_counts_of[src][my_rank], 0,
+MAX_RECV)`). The InCore composite rail instead publishes the already-clamped
+count into peer `dest`'s `recv_counts[my_rank, 0]` via `pld.system.notify`
+(Set). The push transfers exactly that many rows — the transfer shape is the
+runtime `[rows, SIZE]`, not the compile-time capacity — so padding rows never
+cross the wire. After the barrier the receiver uses `recv_counts[src, 0]` to
+identify the valid rows; the remainder of its capacity slot is never written at
+all. Window memory is not *guaranteed* zeroed and can carry over within a
+process, so those untouched bytes are undefined.
 
 > [!WARNING]
 > **Trim to `recv_counts` before doing arithmetic over the capacity block.**

@@ -52,8 +52,9 @@ and `data`/`target` (result) must be two distinct windows. For `allgather` the
 per destination and is `[NR*MAX_RECV, SIZE]`. In both `all_to_all` /
 `all_to_all_v` cases `data`/`target` is the peers'-push-in result window.
 `all_to_all_v` additionally requires `send_counts` (window-bound at this
-layer, LOCAL-only) and `recv_counts` (window-bound, published cross-rank via
-`pld.system.notify`) — all five window args must resolve into the same
+layer; every rank's window must own >= 64 B, because peers pull this rank's
+send vector from it) and `recv_counts` (window-bound, filled by the kernel) —
+all five window args must resolve into the same
 `CommDomainScopeStmt` and must be pairwise-distinct window allocations
 (aliasing any pair is a cross-process race, whether data-vs-data,
 data-vs-control, or control-vs-control).

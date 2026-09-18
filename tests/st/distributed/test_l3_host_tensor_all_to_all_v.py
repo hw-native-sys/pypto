@@ -33,10 +33,12 @@ push-based TPUT pattern with FIVE window-bound resources:
   3. **All-to-all-v** (``builtin.tensor.all_to_all_v``): the kernel pushes only
      ``rows = clamp(send_counts[dest], 0, MAX_RECV)`` rows per destination into
      ``data_buf`` — the padding up to ``MAX_RECV`` never crosses the wire —
-     publishes that same clamped count into peer ``recv_counts[my_rank, 0]``
-     via TNOTIFY, and synchronises with one barrier. The clamp is two-sided and
-     identical to ``LowerTensorAllToAllVRule``'s, keeping the HOST and InCore
-     rails bit-for-bit identical on the wire for every input.
+     pulls each peer's own ``send_counts`` window after the barrier and clamps
+     the raw value reader-side into ``recv_counts[src, 0]`` (so every rank's
+     ``send_counts`` window must own >= 64 B), and synchronises with one
+     barrier. The clamp is two-sided and identical to
+     ``LowerTensorAllToAllVRule``'s, keeping the HOST and InCore rails
+     bit-for-bit identical on the wire for every input.
   4. **Consume** (``consume_step``): each rank reads ``recv_counts`` to learn
      how many rows each source actually sent, then reads back only those valid
      rows from ``data_buf``.
@@ -122,6 +124,8 @@ def _build_host_all_to_all_v_program(n_ranks: int, max_recv: int):
         def consume_step(
             self,
             data: pld.DistributedTensor[[total, SIZE], pl.FP32],
+            # Written by the collective (pulled from each source's send_counts
+            # window); recv_counts[src, 0] is the count the consumer reads.
             recv_counts: pld.DistributedTensor[[nr, 1], pl.INT32],
             out: pl.Out[pl.Tensor[[total, SIZE], pl.FP32]],
             recv_out: pl.Out[pl.Tensor[[nr, 1], pl.INT32]],
@@ -171,7 +175,10 @@ def _build_host_all_to_all_v_program(n_ranks: int, max_recv: int):
             input_buf = pld.alloc_window_buffer(total * SIZE * pl.FP32.get_byte())
             data_buf = pld.alloc_window_buffer(total * SIZE * pl.FP32.get_byte())
             signal_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
-            counts_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
+            # Peers pull this rank's counts from this window, so the buffer must
+            # own one 64-byte TLOAD unit set (16 x INT32); the [NR, 1] view is
+            # all the op needs.
+            counts_buf = pld.alloc_window_buffer(16 * pl.INT32.get_byte())
             recv_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
 
             for r in pl.range(pld.world_size()):

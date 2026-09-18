@@ -31,6 +31,16 @@ namespace {
 
 static constexpr int64_t kTileCount = 256;
 static constexpr int kMaxSupportedRanks = 16;
+// The counts side is a peer PULL, not a publish: every rank stages its own
+// per-destination send vector into its OWN send_counts window (the public op
+// already requires a window-bound DistributedTensor there), and after the
+// barrier each rank reads its peers' vectors straight from those windows:
+//   recv_counts[src] = clamp(peer src's send_counts[my_rank], 0, max_recv)
+// The pull reads kSendVecInts int32 (16 x int32 = 64 B = two 32-byte TLOAD
+// units), enough columns to cover every supported rank (kMaxSupportedRanks), so
+// a rank's send_counts buffer must own at least 64 B with its [NR] send vector
+// at the start.
+static constexpr int64_t kSendVecInts = 16;
 
 template <typename T>
 AICORE inline __gm__ T *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T *local_ptr, int pe) {
@@ -110,10 +120,13 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   using ShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
   using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
   using Global = pto::GlobalTensor<{{dtype_cpp}}, ShapeDyn, StrideDyn, pto::Layout::ND>;
+  // The counts exchange is INT32 whatever the payload dtype is.
+  using GlobalI32 = pto::GlobalTensor<int32_t, ShapeDyn, StrideDyn, pto::Layout::ND>;
   using TileData = pto::Tile<pto::TileType::Vec, {{dtype_cpp}}, 1, kTileCount, pto::BLayout::RowMajor, -1, -1>;
 
-  int tile_cols = static_cast<int>(row_numel < kTileCount ? row_numel : kTileCount);
-  TileData send_tile(1, tile_cols);
+  // Staging tile width is kTileCount; TPUT_IMPL chunks larger payloads against
+  // GetValidCol(), so one TPUT per destination is enough (RFC #2521 K1).
+  TileData send_tile(1, kTileCount);
   TASSIGN(send_tile, 0x0);
 
   // ==================================================================
@@ -126,7 +139,8 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   //          MakeMax(MakeMin(cast(count, INDEX), max_recv), 0) exactly, so
   //          HOST and InCore agree bit-for-bit on every input, including a
   //          negative send_counts.
-  //   TNOTIFY(recv_counts[dest]'s window, slot my_rank) = rows  (Set)
+  //   (no count publish here - peers read THIS rank's send_counts window in
+  //    Phase 3)
   //   TPUT input[dest*max_recv : dest*max_recv + rows, :]
   //        -> target[my_rank*max_recv : my_rank*max_recv + rows, :]
   //
@@ -162,31 +176,22 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     if (rows64 < 0) rows64 = 0;
     int32_t rows = static_cast<int32_t>(rows64);
 
-    __gm__ int32_t *remote_recv_slot = CommRemotePtr(comm_ctx, recv_counts_base + my_rank, dest);
-    pto::comm::Signal count_sig(remote_recv_slot);
-    pto::comm::TNOTIFY(count_sig, rows, pto::comm::NotifyOp::Set);
-
     int64_t src_row_offset = static_cast<int64_t>(dest) * max_recv * row_numel;
     int64_t dst_row_offset = static_cast<int64_t>(my_rank) * max_recv * row_numel;
     __gm__ {{dtype_cpp}} *remote_block = CommRemotePtr(comm_ctx, target + dst_row_offset, dest);
 
-    // The pushed block [rows, SIZE] is contiguous in the dense row-major
-    // [NR*max_recv, SIZE] layout, so it is flattened into one 1D-chunked TPUT
-    // loop (same tiling shape as symmetric all_to_all's single-row loop,
-    // generalized to rows*row_numel elements). rows == 0 makes block_numel 0
-    // and the loop below simply does not execute, so no TPUT is issued for a
-    // destination getting nothing — matching the InCore rail's rows > 0 guard.
+    // K1: ONE TPUT per destination. TPUT_IMPL re-chunks the flat [rows * SIZE]
+    // block internally against the staging tile, so there is no caller-managed
+    // per-chunk loop and no pipe_barrier pair per chunk. rows == 0 issues no
+    // TPUT at all, matching the InCore rail's rows > 0 guard.
     int64_t block_numel = rows64 * row_numel;
-    for (int64_t base = 0; base < block_numel; base += tile_cols) {
-      int64_t chunk64 = block_numel - base;
-      if (chunk64 > tile_cols) chunk64 = tile_cols;
-      int chunk = static_cast<int>(chunk64);
-      send_tile.ColMaskInternal = chunk;
+    if (block_numel > 0) {
+      send_tile.ColMaskInternal = static_cast<int>(block_numel <= kTileCount ? block_numel : kTileCount);
 
-      ShapeDyn shape(1, 1, 1, 1, chunk);
-      StrideDyn stride(chunk, chunk, chunk, chunk, 1);
-      Global src_g(input_local + src_row_offset + base, shape, stride);
-      Global dst_g(remote_block + base, shape, stride);
+      ShapeDyn shape(1, 1, 1, 1, block_numel);
+      StrideDyn stride(block_numel, block_numel, block_numel, block_numel, 1);
+      Global src_g(input_local + src_row_offset, shape, stride);
+      Global dst_g(remote_block, shape, stride);
 
       pipe_barrier(PIPE_ALL);
       pto::comm::TPUT(dst_g, src_g, send_tile);
@@ -195,7 +200,9 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   }
 
   // ==================================================================
-  // Phase 2: barrier — notify peers and wait for all (NotifyOp::AtomicAdd).
+  // Phase 2: barrier - notify peers and wait for all (NotifyOp::AtomicAdd).
+  // Nothing of ours needs publishing here: the counts this kernel reads were
+  // staged by the caller's own fill step before the collective was dispatched.
   // ==================================================================
   pipe_barrier(PIPE_ALL);
   dsb(DSB_DDR);
@@ -219,6 +226,56 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     if (peer == my_rank) continue;
     pto::comm::Signal self_sig(signal_base + peer);
     pto::comm::TNOTIFY(self_sig, static_cast<int32_t>(-1), pto::comm::NotifyOp::AtomicAdd);
+  }
+
+  // ==================================================================
+  // Phase 3: pull. The barrier above guarantees every rank has staged its send
+  // vector into its own send_counts window before arriving. Each rank now reads
+  // its peers' vectors (bulk TLOAD of the peer's send_counts buffer), keeps the
+  // destination that belongs to it, clamps the RAW value two-sided - the same
+  // clamp the sender applies to its transfer - and stores it at
+  // recv_counts[src], the entry consumers read. No rank writes into another
+  // rank's array, and no NotifyOp::Set is involved anywhere.
+  // ==================================================================
+  {
+    using PullTile = pto::Tile<pto::TileType::Vec, int32_t, 1, kSendVecInts, pto::BLayout::RowMajor, -1, -1>;
+    PullTile pull_tile(1, static_cast<int>(kSendVecInts));
+    TASSIGN(pull_tile, 0x10000);
+
+    // Self: my own send vector is local. The window holds the RAW count, so the
+    // reader applies the same two-sided clamp the sender applies to its transfer.
+    {
+      int32_t self_rows = send_counts_base[my_rank];
+      if (self_rows > max_recv) self_rows = static_cast<int32_t>(max_recv);
+      if (self_rows < 0) self_rows = 0;
+      recv_counts_base[my_rank] = self_rows;
+    }
+
+    for (int src = 0; src < nranks; ++src) {
+      if (src == my_rank) continue;
+      __gm__ int32_t *remote_vec = CommRemotePtr(comm_ctx, send_counts_base, src);
+      ShapeDyn rshape(1, 1, 1, 1, kSendVecInts);
+      StrideDyn rstride(kSendVecInts, kSendVecInts, kSendVecInts, kSendVecInts, 1);
+      GlobalI32 remote_g(remote_vec, rshape, rstride);
+      TLOAD(pull_tile, remote_g);
+      pipe_barrier(PIPE_ALL);
+      int32_t pulled = pull_tile.GetValue(static_cast<uint32_t>(my_rank));
+      if (pulled > max_recv) pulled = static_cast<int32_t>(max_recv);
+      if (pulled < 0) pulled = 0;
+      recv_counts_base[src] = pulled;
+    }
+
+    // The delivered counts above are plain scalar stores. Flush them to GM: a
+    // consumer on another AIV invalidates and re-reads the window, so a value
+    // left sitting in this core's cache would read back as stale zero. (The old
+    // push design flushed implicitly - TNOTIFY ends in dcci + dsb.)
+    for (int src = 0; src < nranks; ++src) {
+      __asm__ __volatile__("");
+      dcci(static_cast<__gm__ void *>(recv_counts_base + src), cache_line_t::SINGLE_CACHE_LINE);
+      __asm__ __volatile__("");
+    }
+    dsb(DSB_DDR);
+    pipe_barrier(PIPE_ALL);
   }
   pipe_barrier(PIPE_ALL);
 }

@@ -738,12 +738,15 @@ TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
       << "pld.tensor.all_to_all_v send_counts dim 0 (" << counts_dim0->value_
       << ") must equal signal dim 0 (NR = " << signal_dim0->value_ << ")";
 
-  // recv_counts: window where each peer publishes how many rows it sent to me
-  // (MPI_Alltoallv recvcounts).  Same 2D [NR, 1] INT32 layout as ``signal`` —
-  // published via ``pld.system.notify`` (Set) as ``min(send_counts[dest],
-  // MAX_RECV)`` into ``recv_counts[my_rank, 0]``.  After the barrier the
-  // receiver reads ``recv_counts[src, 0]`` to skip the unwritten holes at the
-  // tail of each source's MAX_RECV slot.
+  // recv_counts: window where this rank stores how many rows each source sent
+  // to it (MPI_Alltoallv recvcounts).  Same 2D [NR, 1] INT32 layout as
+  // ``signal``.  After the barrier ``recv_counts[src, 0]`` lets the receiver
+  // skip the unwritten holes at the tail of each source's MAX_RECV slot.  The
+  // hand-written builtin kernel fills it by PULLING each peer's own
+  // ``send_counts`` window and clamping the value reader-side; the InCore
+  // composite rail keeps publishing it with ``pld.system.notify`` (Set) as
+  // ``min(send_counts[dest], MAX_RECV)`` into ``recv_counts[my_rank, 0]``.
+  // Either way no rank writes into another rank's recv_counts array.
   auto recv_type = As<DistributedTensorType>(args[4]->GetType());
   CHECK(recv_type) << "pld.tensor.all_to_all_v recv_counts must be a DistributedTensor (window-bound), got "
                    << args[4]->GetType()->TypeName();
@@ -789,11 +792,13 @@ REGISTER_OP("pld.tensor.all_to_all_v")
         "the sender's surplus.  Those bytes are UNINITIALISED and may decode as "
         "NaN/Inf, unlike the finite FP32 surplus the old full-capacity push left "
         "there: trim to ``recv_counts`` BEFORE computing over the capacity "
-        "block, or NaN propagates into otherwise-valid rows.  During the same push phase "
-        "each rank publishes that same clamped count into peer ``dest``'s "
-        "``recv_counts[my_rank, 0]`` via ``pld.system.notify`` (Set) — the "
-        "receive-side count vector (MPI_Alltoallv recvcounts) identifying how "
-        "many rows are logically valid, so the receiver skips the rest.  "
+        "block, or NaN propagates into otherwise-valid rows.  The receive-side count "
+        "vector (MPI_Alltoallv recvcounts) lands in ``recv_counts[src, 0]``, "
+        "identifying how many rows are logically valid, so the receiver skips the "
+        "rest: the hand-written builtin kernel PULLS every peer's own "
+        "``send_counts`` window after the barrier and clamps the value reader-side, "
+        "while the InCore composite rail publishes the clamped count into peer "
+        "``dest``'s ``recv_counts[my_rank, 0]`` via ``pld.system.notify`` (Set).  "
         "Returns the target window so the caller can read back via "
         "``tile.load`` — same pattern as the symmetric "
         "``pld.tensor.all_to_all`` intrinsic.")

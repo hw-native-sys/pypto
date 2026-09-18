@@ -27,7 +27,7 @@ TPUT/TGET 在该侧只需要一段可读/可写的*本地* GM 区域。窗口绑
 | `pld.tensor.reduce_scatter` | 跨 rank 规约并分散 | `DistributedTensorType`（同 src） | builtin collective |
 | `pld.tensor.allgather` | 从所有 rank 收集数据到窗口 | `DistributedTensorType`（同 src） | builtin collective |
 | `pld.tensor.all_to_all` | 基于推送的对称个性化交换——每个 rank 通过 `pld.tensor.put`（TPUT）将自己的各目标 block 推送到每个对等方的窗口中，返回窗口作为结果 | `DistributedTensorType`（同 src） | composite / HOST builtin |
-| `pld.tensor.all_to_all_v` | 变长 all-to-all（MPI_Alltoallv）——按每个目标推送 `clamp(send_counts[dest], 0, MAX_RECV)` 行，写入平面 2D 暂存窗口（传输大小是运行时行数，因此填充不会经过链路），同时通过 `pld.system.notify`（Set）把同一钳制后的计数发布到对端 `recv_counts[my_rank, 0]`，使接收方知道哪些行有效；返回窗口作为结果（与对称 `all_to_all` 相同的窗口即结果模式） | `DistributedTensorType`（与 target 相同） | composite / HOST builtin / CHIP builtin |
+| `pld.tensor.all_to_all_v` | 变长 all-to-all（MPI_Alltoallv）——按每个目标推送 `clamp(send_counts[dest], 0, MAX_RECV)` 行，写入平面 2D 暂存窗口（传输大小是运行时行数，因此填充不会经过链路），并填充 `recv_counts[src, 0]` 使接收方知道哪些行有效——builtin 内核拉取每个对端自己的 `send_counts` 窗口（该窗口须至少拥有 64 B）并在读取方做钳制，composite 通路则用 `pld.system.notify`（Set）发布；返回窗口作为结果（与对称 `all_to_all` 相同的窗口即结果模式） | `DistributedTensorType`（与 target 相同） | composite / HOST builtin / CHIP builtin |
 | `pld.system.notify` | 给 peer 的槽位发信号 | `Unknown`（副作用） | TNOTIFY |
 | `pld.system.wait` | 在自身槽位上阻塞 | `Unknown`（副作用） | TWAIT |
 | `pld.system.defer_wait` | 让本任务的逻辑完成等待本地 counter | `Unknown`（副作用） | Simpler completion runtime（无 PTOAS wait op） |
@@ -374,9 +374,15 @@ CHIP 通路上，操作数是以函数参数的形式到达的，没有这样的
 调用方的义务。
 
 `MAX_RECV = target.shape[0] // NR`。降级在运行时读取 `send_counts[dest]`、钳制到
-`[0, MAX_RECV]`，并把**钳制后**的计数通过 `pld.system.notify`（Set）写入对端
-`recv_counts[my_rank, 0]`。推送只传输这么多行——传输形状是运行时的
-`[rows, SIZE]`，而非编译期容量——因此填充行不会经过链路。屏障之后接收方用
+`[0, MAX_RECV]`，并填充接收侧计数向量 `recv_counts[src, 0]`。builtin 内核
+（HOST 与托管 CHIP/L2 通路）以**拉取**方式完成：每个 rank 先把自身的发送向量
+暂存到自己的 `send_counts` 窗口——因此该窗口须至少拥有 64 B（16 × INT32，即一组
+64 字节 TLOAD 单元），且 `[NR]` 向量位于起始处——屏障之后每个 rank 从各对端的
+窗口读取其向量，并在**读取方**做钳制
+（`recv_counts[src, 0] = clamp(send_counts_of[src][my_rank], 0, MAX_RECV)`）。
+InCore composite 通路则把已经钳制过的计数通过 `pld.system.notify`（Set）写入
+对端 `dest` 的 `recv_counts[my_rank, 0]`。推送只传输这么多行——传输形状是运行时
+的 `[rows, SIZE]`，而非编译期容量——因此填充行不会经过链路。屏障之后接收方用
 `recv_counts[src, 0]` 识别有效行；其容量槽的其余部分根本不会被写入。窗口内存
 不*保证*清零，且可能在同一进程内残留，因此这些未触及的字节是未定义的。
 
