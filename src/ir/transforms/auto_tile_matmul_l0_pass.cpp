@@ -137,8 +137,9 @@
 ///     retiled output keeps whichever spelling the source used; only the two
 ///     statements at the tail of the K-loop body differ between them.
 ///     Arbitrary standalone ``tile.matmul_acc`` (which would need slices of a
-///     caller-owned accumulator), a Vec left operand, or a mixed/non-matmul
-///     on-chip consumer is deferred with a ``PerfHint``.
+///     caller-owned accumulator) and mixed/non-matmul on-chip consumers are
+///     deferred with a ``PerfHint``. A Vec left operand is staged into Mat once
+///     for the complete output grid when its mandatory Mat peak fits.
 ///   * A compatible f32-to-bf16/f16 ``tile.cast(mode="rint")`` feeding only
 ///     matmul operands is folded into the Acc-to-Mat FIXPIPE writeback.
 ///   * Any 16-aligned K.  When the chosen ``k`` does not divide ``K``
@@ -194,6 +195,8 @@
 #include "pypto/ir/transforms/utils/acc_init_builder.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/core_affinity.h"
+#include "pypto/ir/transforms/utils/cross_core_pipe.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/l0_tile_chooser.h"
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
@@ -211,6 +214,11 @@ namespace {
 using transform_utils::PreserveCallAttrs;
 
 constexpr const char* kPassName = "AutoTileMatmulL0";
+
+enum class DbcSemanticEligibility {
+  kDisabled,
+  kEnabled,
+};
 
 ExprPtr MakeIndex(int64_t v, const Span& span) {
   return std::make_shared<ConstInt>(v, DataType::INDEX, span);
@@ -887,6 +895,7 @@ KLoopRewrite MakeKLoop(const MatmulTiling& t, ExprPtr mi, ExprPtr ni, int64_t m_
 /// dispatches K-only vs M/N tiling on ``MatmulTiling::needs_mn_tiling()``.
 std::optional<MatmulTiling> AnalyzeMatmul(
     const AssignStmtPtr& assign, std::vector<Diagnostic>& hints, AutoTileDbcGroupAllocator& dbc_groups,
+    DbcSemanticEligibility dbc_eligibility,
     utils::DbcEmissionRoute full_k_dbc_route = utils::DbcEmissionRoute::kPipelinedInner,
     bool force_output_stationary = false,
     std::optional<tile_view_semantics::BoxedTileAlignment> output_box_alignment = std::nullopt,
@@ -1192,7 +1201,13 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   const MemoryPlanner memory_planner = ctx ? ctx->GetMemoryPlanner() : MemoryPlanner::PyPTO;
   const bool pypto_dbc =
       memory_planner == MemoryPlanner::PyPTO && ctx && ctx->GetEnablePyptoL0cDoubleBuffer();
-  cfg.allow_double_buffer_c = memory_planner != MemoryPlanner::PyPTO || pypto_dbc;
+  // ``allow_double_buffer_c`` is the caller's semantic placement gate. The
+  // local call-level rewrite sets it only when a dbC M/N grid can be placed by
+  // DirectGmPlacer or MatScratchPlacer; the canonical split-K path controls its
+  // complete accumulator lifecycle and keeps the default true. Intersect that
+  // contract with the planner/opt-in policy before dbC enters the design space.
+  cfg.allow_double_buffer_c = dbc_eligibility == DbcSemanticEligibility::kEnabled &&
+                              (memory_planner != MemoryPlanner::PyPTO || pypto_dbc);
   cfg.full_k_dbc_route = full_k_dbc_route;
   cfg.split_k_dbc_route = utils::DbcEmissionRoute::kUnrolledGrid;
   // tile.matmul_acc threads the caller's accumulator into the K-loop's
@@ -1435,6 +1450,41 @@ struct MNFold {
   VarPtr return_var;                  ///< final output tensor value (replaces the store's result downstream)
   VarPtr store_result_var;            ///< the consumer store's LHS (remapped to return_var)
   const AssignStmt* store = nullptr;  ///< consumer store to drop from the SeqStmts
+};
+
+enum class LocalMNFoldPlacement {
+  kNone,
+  kDirectStore,
+  kMatScratch,
+};
+
+/// One semantic decision shared by chooser admission and the M/N emitters.
+/// Keeping the selected placement, remap targets, scratch dtype, and diagnostic
+/// together prevents a pre-chooser approximation from drifting away from the
+/// route that is actually emitted.
+struct LocalMNFoldPlan {
+  LocalMNFoldPlacement placement = LocalMNFoldPlacement::kNone;
+  bool allow_dbc = false;
+  const AssignStmt* store_stmt = nullptr;
+  DataType scratch_dtype = DataType::FP32;
+  const Var* remap_target = nullptr;
+  const Var* extra_remap = nullptr;
+  std::string diagnostic_code = "PH-AT-006";
+  std::string diagnostic_message =
+      "tile.matmul output exceeds L0c but has no supported direct-store or Mat-scratch placement; left "
+      "untouched";
+};
+
+/// Conservative whole-function facts needed before admitting a Vec-left M/N
+/// grid.  ExpandMixedKernel replaces every cube/vector boundary with one shared
+/// ring whose slot size is the largest boundary tile and whose depth comes from
+/// the function's optional ``slot_num`` attribute.  AutoTile must budget that
+/// exact policy rather than assuming the default two-slot ring locally.
+struct VecMNFoldCapacityContext {
+  bool valid = false;
+  uint64_t existing_mat_upper_bound = 0;
+  uint64_t largest_cross_core_slot_bytes = 0;
+  uint64_t slot_count = 0;
 };
 
 /// Where each computed ``[m_eff, n_eff]`` Acc sub-tile is placed.  The M/N grid
@@ -2154,7 +2204,8 @@ std::optional<CanonicalSplitKFold> TryFoldCanonicalSplitKAcc(const CanonicalSpli
   // every physical output window, so chooser capacity cannot admit a logical
   // tile that becomes oversized after padding. The recursively visited
   // narrowed calls independently choose their legal inner K blocking.
-  auto tiling = AnalyzeMatmul(match.shape_source(), hints, dbc_groups, utils::DbcEmissionRoute::kUnrolledGrid,
+  auto tiling = AnalyzeMatmul(match.shape_source(), hints, dbc_groups, DbcSemanticEligibility::kEnabled,
+                              utils::DbcEmissionRoute::kUnrolledGrid,
                               /*force_output_stationary=*/true, output_box_alignment);
   if (!tiling || !tiling->needs_mn_tiling()) return std::nullopt;
 
@@ -2381,6 +2432,18 @@ std::pair<std::vector<StmtPtr>, VarPtr> BuildFullKPipelined(const MatmulTiling& 
   const int64_t full_n = (t.N / t.n) * t.n;
 
   std::vector<StmtPtr> stmts;
+  MatmulTiling emitted = t;
+  if (t.stage_lhs_to_mat) {
+    // The Vec->Mat crossing is common to every legal tile candidate. Hoist it
+    // once for the complete output grid instead of letting each sub-tile's
+    // K-loop repeat the transfer. Consequently its traffic/cost is an equal
+    // additive term for dbC and single-C and cancels in the chooser's strict
+    // comparison; the candidate-dependent L1->L0 traffic remains fully scored.
+    auto lhs_mat = BuildMove(t.lhs, MemorySpace::Mat, base + "_l0_lmat", sp);
+    stmts.push_back(lhs_mat);
+    emitted.lhs = lhs_mat->var_;
+    emitted.stage_lhs_to_mat = false;
+  }
   VarPtr chain = placer.Init(stmts);
 
   // --- Interior: nested pipelined loops over [0, full_m) x [0, full_n) ---
@@ -2399,7 +2462,7 @@ std::pair<std::vector<StmtPtr>, VarPtr> BuildFullKPipelined(const MatmulTiling& 
     // inner iter-arg is initialised from the outer iter-arg.
     auto out_outer = std::make_shared<IterArg>(base + "_oc", out_type, chain, sp);
     auto out_inner = std::make_shared<IterArg>(base + "_ic", out_type, out_outer, sp);
-    auto sa = BuildExtract(t.lhs, {t.m, t.K}, mi, MakeIndex(0, sp), MemorySpace::Left, base + "_a", sp);
+    auto sa = BuildExtract(emitted.lhs, {t.m, t.K}, mi, MakeIndex(0, sp), MemorySpace::Left, base + "_a", sp);
     auto sb = BuildExtract(t.rhs, {t.K, t.n}, MakeIndex(0, sp), ni, MemorySpace::Right, base + "_b", sp);
     const AssignStmtPtr& outer_extract = row_outer ? sa : sb;  // stationary panel
     const AssignStmtPtr& inner_extract = row_outer ? sb : sa;  // moving panel
@@ -2470,11 +2533,11 @@ std::pair<std::vector<StmtPtr>, VarPtr> BuildFullKPipelined(const MatmulTiling& 
   // step 0 is used by the interior placement; the tail continues from step 1.
   int tail_step = 1;
   for (int64_t ni = 0; full_m < t.M && ni < t.N; ni += t.n) {
-    chain = EmitFullKTile(stmts, t, placer, chain, full_m, ni, t.M - full_m, std::min<int64_t>(t.n, t.N - ni),
-                          base, tail_step++);
+    chain = EmitFullKTile(stmts, emitted, placer, chain, full_m, ni, t.M - full_m,
+                          std::min<int64_t>(t.n, t.N - ni), base, tail_step++);
   }
   for (int64_t mi = 0; full_n < t.N && mi < full_m; mi += t.m) {
-    chain = EmitFullKTile(stmts, t, placer, chain, mi, full_n, t.m, t.N - full_n, base, tail_step++);
+    chain = EmitFullKTile(stmts, emitted, placer, chain, mi, full_n, t.m, t.N - full_n, base, tail_step++);
   }
   return {std::move(stmts), chain};
 }
@@ -2492,6 +2555,16 @@ std::pair<std::vector<StmtPtr>, VarPtr> BuildSplitKGrid(const MatmulTiling& t, S
   const int64_t num_n = (t.N + t.n - 1) / t.n;
 
   std::vector<StmtPtr> stmts;
+  MatmulTiling emitted = t;
+  if (t.stage_lhs_to_mat) {
+    // See BuildFullKPipelined: one grid-wide boundary transfer is both the
+    // emitted schedule and the costed schedule. BuildKLoopRewrite therefore
+    // receives the staged Mat value and must not synthesize a transfer per tile.
+    auto lhs_mat = BuildMove(t.lhs, MemorySpace::Mat, base + "_l0_lmat", sp);
+    stmts.push_back(lhs_mat);
+    emitted.lhs = lhs_mat->var_;
+    emitted.stage_lhs_to_mat = false;
+  }
   VarPtr chain = placer.Init(stmts);
   int step = 0;
   for (int64_t nj = 0; nj < num_n; ++nj) {
@@ -2502,7 +2575,8 @@ std::pair<std::vector<StmtPtr>, VarPtr> BuildSplitKGrid(const MatmulTiling& t, S
       const int64_t m_eff = std::min<int64_t>(t.m, t.M - mi);
       const std::string tbase = base + "_t" + std::to_string(step);
 
-      auto inner = BuildKLoopRewrite(MakeKLoop(t, MakeIndex(mi, sp), MakeIndex(ni, sp), m_eff, n_eff, tbase));
+      auto inner =
+          BuildKLoopRewrite(MakeKLoop(emitted, MakeIndex(mi, sp), MakeIndex(ni, sp), m_eff, n_eff, tbase));
       // dbC=2: consecutive output tiles must occupy different L0C buffers, declared
       // per tile because this grid has no loop for LowerPipelineLoops to replicate.
       if (t.double_buffer_c) {
@@ -2531,28 +2605,23 @@ std::pair<std::vector<StmtPtr>, VarPtr> BuildSplitKGrid(const MatmulTiling& t, S
 /// The Mat-scratch alternative is handled earlier by ``TryFoldMatScratch``.
 /// ``result_uses`` / ``store_stmt`` come from the precomputed SiblingIndex.
 /// Returns nullopt (with a PerfHint) when neither placement applies — an
-/// arbitrary ``matmul_acc`` with a caller-supplied [M, N] accumulator, a Vec
-/// left operand, and mixed/non-matmul on-chip consumers are deferred. The
+/// arbitrary ``matmul_acc`` with a caller-supplied [M, N] accumulator and
+/// mixed/non-matmul on-chip consumers are deferred. A Vec-resident left
+/// operand is staged into Mat once outside the emitted output grid. The
 /// canonical frontend split-K create/pipeline/store form is handled earlier at
 /// the enclosing-loop level.
-std::optional<MNFold> TryFoldMNTiling(const MatmulTiling& t, int result_uses, const AssignStmt* store_stmt,
+std::optional<MNFold> TryFoldMNTiling(const MatmulTiling& t, const LocalMNFoldPlan& plan,
                                       std::vector<Diagnostic>& hints) {
   const Span sp = t.assign->span_;
-  auto skip = [&](const std::string& msg) -> std::optional<MNFold> {
-    hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-006", msg, sp);
+  auto skip = [&]() -> std::optional<MNFold> {
+    hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, plan.diagnostic_code,
+                       plan.diagnostic_message, sp);
     return std::nullopt;
   };
 
-  if (t.is_acc()) {
-    return skip(
-        "oversized tile.matmul_acc does not match the canonical create -> split-K pipeline -> store "
-        "form handled by loop-level M/N tiling; slicing this caller-owned [M, N] accumulator is "
-        "unsupported, so the call is left untouched");
-  }
-  if (t.stage_lhs_to_mat) {
-    return skip(
-        "tile.matmul with a Vec left operand needs M/N tiling — the PV path is deferred; left untouched");
-  }
+  if (plan.placement != LocalMNFoldPlacement::kDirectStore) return skip();
+  INTERNAL_CHECK_SPAN(plan.store_stmt, sp)
+      << "Internal error: direct-store M/N placement has no consumer store";
   // K spans >= 2 L0 blocks → pipelined K-loop per sub-tile (BuildSplitKGrid);
   // k == K (full K fits L0a/L0b) → pipelined interior + straight-line partial
   // tail (BuildFullKPipelined).  Either grid drives the chosen SubtilePlacer;
@@ -2568,29 +2637,17 @@ std::optional<MNFold> TryFoldMNTiling(const MatmulTiling& t, int result_uses, co
   // — so a prior fold that redefined this output is rewritten correctly (a
   // stale-output SSA guard); resolving it here would miss folds emitted before
   // this one.
-  if (store_stmt && result_uses == 1) {
-    auto store_call = As<Call>(store_stmt->value_);
-    INTERNAL_CHECK_SPAN(store_call, store_stmt->span_)
-        << "Internal error: SiblingIndex store_of mapped a non-Call AssignStmt";
-    auto offs = As<MakeTuple>(store_call->args_[1]);
-    if (!offs || offs->elements_.size() != 2) {
-      return skip("tile.store offsets are not a 2D tuple — M/N fold not applicable; left untouched");
-    }
-    auto out_in = AsVarLike(store_call->args_[2]);
-    if (!out_in) {
-      return skip(
-          "tile.store target is not a simple tensor variable — M/N fold not applicable; left untouched");
-    }
-    DirectGmPlacer placer(offs->elements_[0], offs->elements_[1], out_in, store_call->kwargs_,
-                          store_call->attrs_, sp);
-    auto [stmts, last_out] = full_k ? BuildFullKPipelined(t, placer) : BuildSplitKGrid(t, placer);
-    return MNFold{std::move(stmts), last_out, store_stmt->var_, store_stmt};
-  }
-
-  return skip(
-      "tile.matmul output exceeds L0c but its result is not consumed by a single 2D tile.store "
-      "(direct-store) — a result consumed on-chip (chained matmul / elementwise), stored-and-reused, "
-      "or fed to a non-store consumer is deferred; left untouched");
+  auto store_call = As<Call>(plan.store_stmt->value_);
+  INTERNAL_CHECK_SPAN(store_call && store_call->args_.size() >= 3, plan.store_stmt->span_)
+      << "Internal error: direct-store M/N placement lost its tile.store call";
+  auto offs = As<MakeTuple>(store_call->args_[1]);
+  auto out_in = AsVarLike(store_call->args_[2]);
+  INTERNAL_CHECK_SPAN(offs && offs->elements_.size() == 2 && out_in, plan.store_stmt->span_)
+      << "Internal error: direct-store M/N placement no longer has 2D offsets and a tensor target";
+  DirectGmPlacer placer(offs->elements_[0], offs->elements_[1], out_in, store_call->kwargs_,
+                        store_call->attrs_, sp);
+  auto [stmts, last_out] = full_k ? BuildFullKPipelined(t, placer) : BuildSplitKGrid(t, placer);
+  return MNFold{std::move(stmts), last_out, plan.store_stmt->var_, plan.store_stmt};
 }
 
 /// True when a ``tile.cast`` may be folded into a cube FIXPIPE Acc->Mat writeback
@@ -2636,59 +2693,18 @@ bool CastFoldableToFixpipeMat(const CallPtr& cast, const TileTypePtr& src_ty, Da
 /// Both K-split (unrolled, constant offsets) and full-K (pipelined, loop-variable
 /// offsets) are supported: ``tile.assemble`` only needs a literal ``MakeTuple``
 /// offset whose *elements* may be loop variables (`ValidateIndexTupleElements`
-/// requires index-typed elements, not constants). Arbitrary ``matmul_acc`` and
-/// Vec-left stay deferred; the canonical split-K form is handled before this
-/// local call-level fold.
+/// requires index-typed elements, not constants). Arbitrary ``matmul_acc``
+/// stays deferred; the canonical split-K form is handled before this local
+/// call-level fold. Vec-left inputs are supported: the grid builders hoist one
+/// Vec->Mat stage before the complete output grid.
 std::optional<std::pair<std::vector<StmtPtr>, VarPtr>> TryFoldMatScratch(const MatmulTiling& t,
-                                                                         int result_uses, int operand_uses,
-                                                                         DataType scratch_dtype,
-                                                                         std::vector<Diagnostic>& hints) {
+                                                                         const LocalMNFoldPlan& plan) {
   const Span sp = t.assign->span_;
-  // Arbitrary matmul_acc / Vec-left are deferred (the direct-store path already
-  // hinted these). Canonical split-K is rewritten at the enclosing-loop level.
-  if (t.is_acc() || t.stage_lhs_to_mat) return std::nullopt;
-  // Every use must be a matmul operand: a non-operand use (store, elementwise,
-  // matmul_acc accumulator) means substituting an upstream Mat scratch is illegal.
-  if (result_uses < 1 || operand_uses != result_uses) return std::nullopt;
-  // On backends whose only offset Acc->Mat path is the FIXPIPE writeback
-  // (`pto.tinsert`), that path downcasts f32 -> bf16/f16 and cannot keep f32 — a
-  // same-dtype f32 Acc->Mat assemble lowers to subview+tmov, which the assembler
-  // rejects for a partial window. So an oversized chained-matmul scratch must be
-  // bf16/f16 there (the dtype comes from a `tile.cast(result, bf16/f16)` fused
-  // into the assemble, the cube's native operand precision); without it, defer
-  // (left whole) rather than emit an unassemblable f32 Mat scratch. A5's tinsert
-  // accepts dst=f32, so its handler returns false and an f32 scratch is kept.
-  const auto* ctx = PassContext::Current();
-  const auto* handler = ctx ? ctx->GetBackendHandler() : pypto::backend::GetBackend()->GetHandler();
-  const bool requires_low_precision = handler && handler->RequiresLowPrecisionMatScratch();
-  if (requires_low_precision && scratch_dtype != DataType::BF16 && scratch_dtype != DataType::FP16) {
-    hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-009",
-                       "chained-matmul [" + std::to_string(t.M) + ", " + std::to_string(t.N) +
-                           "] intermediate is " + scratch_dtype.ToString() +
-                           "; this backend's oversized on-chip Mat scratch needs a bf16/f16 "
-                           "intermediate (cast the matmul result to bf16 before the consumer "
-                           "matmul, the cube's native operand precision) — left on the deferred path",
-                       sp);
-    return std::nullopt;
-  }
-  auto result_ty = As<TileType>(t.assign->var_->GetType());
-  INTERNAL_CHECK_SPAN(result_ty, sp) << "Internal error: matmul result is not a TileType";
-  // Necessary capacity gate: the Mat scratch alone must fit. The allocator still
-  // performs the full live-range/packing check later.
-  const uint64_t mat_capacity = handler ? handler->GetMatCapacityBytes() : 0;
-  const uint64_t scratch_bytes =
-      static_cast<uint64_t>(t.M) * static_cast<uint64_t>(t.N) * DTypeBytes(scratch_dtype);
-  if (mat_capacity > 0 && scratch_bytes > mat_capacity) {
-    hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-006",
-                       "chained-matmul [" + std::to_string(t.M) + ", " + std::to_string(t.N) +
-                           "] Mat scratch (" + std::to_string(scratch_bytes) +
-                           " bytes) exceeds Mat capacity (" + std::to_string(mat_capacity) +
-                           " bytes); left on the deferred path",
-                       sp);
-    return std::nullopt;
-  }
+  if (plan.placement != LocalMNFoldPlacement::kMatScratch) return std::nullopt;
+  INTERNAL_CHECK_SPAN(plan.remap_target, sp)
+      << "Internal error: Mat-scratch M/N placement has no remap target";
   const std::string base = t.assign->var_->name_hint_ + "_mat";
-  MatScratchPlacer placer(t.M, t.N, scratch_dtype, base, sp);
+  MatScratchPlacer placer(t.M, t.N, plan.scratch_dtype, base, sp);
   // K-split (K spans >= 2 L0 blocks) → unrolled per-sub-tile K-loop grid; full-K →
   // the pipelined interior + straight-line tail.  Both drive MatScratchPlacer,
   // which assembles each sub-tile into the L1/Mat scratch (tile.assemble accepts
@@ -2709,6 +2725,194 @@ std::optional<std::pair<std::vector<StmtPtr>, VarPtr>> TryFoldMatScratch(const M
   return std::make_pair(std::move(stmts), scratch);
 }
 
+/// Classify the one semantic M/N placement this local matmul may use. The same
+/// result gates dbC before ChooseL0Tile and is consumed by the emitter, so route
+/// legality cannot drift between two independently maintained predicates.
+///
+/// Canonical split-K is handled by its earlier loop-level rewrite and does not
+/// call this classifier. An arbitrary tile.matmul_acc has no local placement:
+/// its full caller-owned accumulator contains the initial value of every output
+/// tile, so two reusable slots cannot overwrite those values before use.
+LocalMNFoldPlan AnalyzeLocalMNFoldPlan(const AssignStmtPtr& assign, const SiblingIndex& sibling_index,
+                                       const Stmt* next_effect, const DirectDefMap& direct_defs,
+                                       const VecMNFoldCapacityContext& vec_capacity,
+                                       uint64_t enclosing_pipeline_depth) {
+  LocalMNFoldPlan plan;
+  auto call = assign ? As<Call>(assign->value_) : nullptr;
+  if (!call || !call->op_) return plan;
+  const bool is_fresh = IsOp(call, "tile.matmul");
+  const bool is_bias = IsOp(call, "tile.matmul_bias");
+  if (!is_fresh && !is_bias) {
+    if (IsOp(call, "tile.matmul_acc")) {
+      plan.diagnostic_message =
+          "oversized tile.matmul_acc does not match the canonical create -> split-K pipeline -> store "
+          "form handled by loop-level M/N tiling; slicing this caller-owned [M, N] accumulator is "
+          "unsupported, so the call is left untouched";
+    }
+    return plan;
+  }
+
+  const Var* result = assign->var_.get();
+  plan.remap_target = result;
+  const auto use_it = sibling_index.use_counts.find(result);
+  int result_uses = use_it == sibling_index.use_counts.end() ? 0 : use_it->second;
+  const auto operand_it = sibling_index.matmul_operand_uses.find(result);
+  int operand_uses = operand_it == sibling_index.matmul_operand_uses.end() ? 0 : operand_it->second;
+
+  const auto store_it = sibling_index.store_of.find(result);
+  const AssignStmt* store_stmt = store_it == sibling_index.store_of.end() ? nullptr : store_it->second;
+  if (store_stmt && result_uses == 1) {
+    auto store_call = As<Call>(store_stmt->value_);
+    auto offsets =
+        store_call && store_call->args_.size() >= 3 ? As<MakeTuple>(store_call->args_[1]) : nullptr;
+    auto output = store_call && store_call->args_.size() >= 3 ? AsVarLike(store_call->args_[2]) : nullptr;
+    if (offsets && offsets->elements_.size() == 2 && output && (!is_bias || store_stmt == next_effect)) {
+      plan.placement = LocalMNFoldPlacement::kDirectStore;
+      plan.store_stmt = store_stmt;
+    } else if (is_bias && store_stmt != next_effect) {
+      plan.diagnostic_code = "PH-AT-011";
+      plan.diagnostic_message =
+          "tile.matmul_bias N-window loads would move to its folded consumer store across an "
+          "intervening effect; left untouched to preserve the original bias snapshot";
+    }
+  }
+
+  auto result_type = As<TileType>(assign->var_->GetType());
+  if (!result_type || result_type->shape_.size() != 2) {
+    plan.allow_dbc = plan.placement != LocalMNFoldPlacement::kNone;
+    return plan;
+  }
+  DataType scratch_dtype = result_type->dtype_;
+  const Var* remap_target = result;
+  const Var* extra_remap = nullptr;
+  if (auto cast_it = sibling_index.cast_of.find(result); cast_it != sibling_index.cast_of.end()) {
+    const Var* cast_result = cast_it->second->var_.get();
+    auto cast_type = As<TileType>(cast_result->GetType());
+    auto cast_call = As<Call>(cast_it->second->value_);
+    if (cast_type && CastFoldableToFixpipeMat(cast_call, result_type, cast_type->dtype_)) {
+      const auto cast_uses_it = sibling_index.use_counts.find(cast_result);
+      const auto cast_operands_it = sibling_index.matmul_operand_uses.find(cast_result);
+      const int cast_uses = cast_uses_it == sibling_index.use_counts.end() ? 0 : cast_uses_it->second;
+      const int cast_operand_uses =
+          cast_operands_it == sibling_index.matmul_operand_uses.end() ? 0 : cast_operands_it->second;
+      if (result_uses == 1 && cast_uses >= 1 && cast_uses == cast_operand_uses) {
+        scratch_dtype = cast_type->dtype_;
+        remap_target = cast_result;
+        extra_remap = result;
+        result_uses = cast_uses;
+        operand_uses = cast_operand_uses;
+      }
+    }
+  }
+
+  const auto* ctx = PassContext::Current();
+  const auto* handler = pypto::backend::BackendConfig::IsConfigured()
+                            ? (ctx ? ctx->GetBackendHandler() : pypto::backend::GetBackend()->GetHandler())
+                            : nullptr;
+  uint64_t scratch_bytes = 0;
+  if (plan.placement == LocalMNFoldPlacement::kNone && result_uses >= 1 && operand_uses == result_uses) {
+    if (handler && handler->RequiresLowPrecisionMatScratch() && scratch_dtype != DataType::BF16 &&
+        scratch_dtype != DataType::FP16) {
+      plan.diagnostic_code = "PH-AT-009";
+      plan.diagnostic_message =
+          "chained-matmul intermediate is " + scratch_dtype.ToString() +
+          "; this backend's oversized on-chip Mat scratch needs a bf16/f16 intermediate "
+          "(cast the matmul result to bf16 before the consumer matmul, the cube's native operand "
+          "precision) — left on the deferred path";
+      return plan;
+    }
+    auto m = As<ConstInt>(result_type->shape_[0]);
+    auto n = As<ConstInt>(result_type->shape_[1]);
+    const uint32_t bytes = DTypeBytes(scratch_dtype);
+    if (!m || !n || bytes == 0) return plan;
+    const uint64_t m_extent = static_cast<uint64_t>(m->value_);
+    const uint64_t n_extent = static_cast<uint64_t>(n->value_);
+    if (m_extent > std::numeric_limits<uint64_t>::max() / n_extent ||
+        m_extent * n_extent > std::numeric_limits<uint64_t>::max() / bytes) {
+      return plan;
+    }
+    scratch_bytes = m_extent * n_extent * bytes;
+    const uint64_t mat_capacity = handler ? handler->GetMatCapacityBytes() : 0;
+    if (mat_capacity > 0 && scratch_bytes > mat_capacity) {
+      plan.diagnostic_message = "chained-matmul Mat scratch (" + std::to_string(scratch_bytes) +
+                                " bytes) exceeds Mat capacity (" + std::to_string(mat_capacity) +
+                                " bytes); left on the deferred path";
+      return plan;
+    }
+    plan.placement = LocalMNFoldPlacement::kMatScratch;
+    plan.scratch_dtype = scratch_dtype;
+    plan.remap_target = remap_target;
+    plan.extra_remap = extra_remap;
+  }
+
+  if (plan.placement == LocalMNFoldPlacement::kNone) return plan;
+  plan.allow_dbc = true;
+
+  // A dbC chooser may split N. Bias-resident inputs and Mat inputs without a
+  // reconstructible defining load can only support full-N placement, so keep
+  // their single-C path but remove dbC from the design space up front.
+  if (is_bias && call->args_.size() >= 3) {
+    auto bias = AsVarLike(call->args_[2]);
+    auto bias_type = bias ? As<TileType>(bias->GetType()) : nullptr;
+    if (!bias_type || bias_type->GetMemorySpace() == MemorySpace::Bias ||
+        direct_defs.count(bias.get()) == 0) {
+      plan.allow_dbc = false;
+    }
+  }
+
+  // Vec-left emission uses one grid-wide cross-core stage. ExpandMixedKernel
+  // reserves one shared ring for all cube/vector boundaries, using the largest
+  // observed slot and the effective function-level slot count. Add that exact
+  // ring to a conservative whole-function Mat upper bound, plus the future Mat
+  // scratch when this fold creates one. This is candidate-independent, but it
+  // is a hard feasibility cost and must fit before M/N emission is admitted.
+  auto lhs = call->args_.empty() ? nullptr : AsVarLike(call->args_[0]);
+  auto lhs_type = lhs ? As<TileType>(lhs->GetType()) : nullptr;
+  if (lhs_type && lhs_type->GetMemorySpace() == MemorySpace::Vec) {
+    auto lhs_bytes = utils::StaticPhysicalAllocationBytes(lhs_type, MemorySpace::Mat, handler);
+    bool overflow = !handler || !lhs_bytes || !vec_capacity.valid || vec_capacity.slot_count == 0 ||
+                    enclosing_pipeline_depth == 0;
+    const uint64_t slot_bytes =
+        lhs_bytes ? std::max(*lhs_bytes, vec_capacity.largest_cross_core_slot_bytes) : 0;
+    if (!overflow && slot_bytes > std::numeric_limits<uint64_t>::max() / vec_capacity.slot_count) {
+      overflow = true;
+    }
+    const uint64_t ring_bytes = overflow ? 0 : slot_bytes * vec_capacity.slot_count;
+    uint64_t candidate_bytes = ring_bytes;
+    auto add = [&](uint64_t bytes) {
+      if (candidate_bytes > std::numeric_limits<uint64_t>::max() - bytes) {
+        overflow = true;
+      } else {
+        candidate_bytes += bytes;
+      }
+    };
+    if (!overflow && plan.placement == LocalMNFoldPlacement::kMatScratch) add(scratch_bytes);
+    if (!overflow && candidate_bytes > std::numeric_limits<uint64_t>::max() / enclosing_pipeline_depth) {
+      overflow = true;
+    }
+    uint64_t mandatory_peak = vec_capacity.existing_mat_upper_bound;
+    if (!overflow) {
+      candidate_bytes *= enclosing_pipeline_depth;
+      if (mandatory_peak > std::numeric_limits<uint64_t>::max() - candidate_bytes) {
+        overflow = true;
+      } else {
+        mandatory_peak += candidate_bytes;
+      }
+    }
+    const uint64_t mat_capacity = handler ? handler->GetMatCapacityBytes() : 0;
+    if (overflow || mat_capacity == 0 || mandatory_peak > mat_capacity) {
+      plan.placement = LocalMNFoldPlacement::kNone;
+      plan.allow_dbc = false;
+      plan.diagnostic_message =
+          "Vec-left M/N tiling needs the effective cross-core Mat ring plus the conservative "
+          "whole-function Mat footprint" +
+          std::string(scratch_bytes == 0 ? "" : " and Mat scratch") +
+          ", whose capacity cannot be proven to fit; left untouched";
+    }
+  }
+  return plan;
+}
+
 /// Static physical footprint of a tile, rounded exactly as the active memory
 /// allocator rounds one buffer in @p space.  Unknown/dynamic shapes and
 /// arithmetic overflow return nullopt: an automatic capacity decision must
@@ -2722,6 +2926,115 @@ std::optional<uint64_t> StaticAlignedTileBytes(const TileTypePtr& tile, MemorySp
   const uint64_t aligned = policy.AlignAddress(*bytes, space);
   if (aligned < *bytes) return std::nullopt;  // alignment arithmetic overflow
   return aligned;
+}
+
+/// Conservative Mat inventory and cross-core ring facts for Vec-left M/N
+/// admission. Every distinct Mat SSA value is charged at the greatest source
+/// pipeline depth at which it is observed. This intentionally over-approximates
+/// lifetime overlap and in-place chains; unlike a local lhs+rhs estimate it
+/// cannot admit a grid that a pre-existing co-live Mat allocation makes
+/// impossible. The ordinary allocator remains the final exact placement check.
+class MatFootprintCollector : public IRVisitor {
+ public:
+  MatFootprintCollector(const MemoryAllocatorPolicy& policy, const backend::BackendHandler* handler)
+      : policy_(policy), handler_(handler) {}
+
+  bool valid = true;
+  uint64_t total_bytes = 0;
+  uint64_t largest_cross_core_slot_bytes = 0;
+
+ protected:
+  void VisitVarLike_(const VarPtr& op) override { RecordMat(op, pipeline_depth_); }
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    RecordMat(op->var_, pipeline_depth_);
+    auto call = As<Call>(op->value_);
+    if (call && (core_affinity::ClassifyMoveDirection(call) != core_affinity::CVDirection::NONE ||
+                 IsOp(call, "tile.aiv_shard") || IsOp(call, "tile.aic_gather"))) {
+      auto slot_bytes = cross_core_pipe::TryGetTileSlotSizeBytes(op->var_->GetType());
+      if (!slot_bytes || *slot_bytes < 0) {
+        valid = false;
+      } else {
+        largest_cross_core_slot_bytes =
+            std::max(largest_cross_core_slot_bytes, static_cast<uint64_t>(*slot_bytes));
+      }
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    const uint64_t saved_pipeline_depth = pipeline_depth_;
+    if (op && op->kind_ == ForKind::Pipeline) {
+      const int stages = op->GetAttr<int>(kPipelineStagesAttr, 0);
+      if (stages <= 0 ||
+          pipeline_depth_ > std::numeric_limits<uint64_t>::max() / static_cast<uint64_t>(stages)) {
+        valid = false;
+      } else {
+        pipeline_depth_ *= static_cast<uint64_t>(stages);
+      }
+    }
+    IRVisitor::VisitStmt_(op);
+    pipeline_depth_ = saved_pipeline_depth;
+  }
+
+ private:
+  struct Entry {
+    uint64_t bytes = 0;
+    uint64_t copies = 0;
+  };
+
+  void RecordMat(const VarPtr& var, uint64_t copies) {
+    if (!valid || !var || copies == 0) return;
+    auto tile = As<TileType>(var->GetType());
+    if (!tile || tile->GetMemorySpace() != MemorySpace::Mat) return;
+    auto bytes = StaticAlignedTileBytes(tile, MemorySpace::Mat, policy_, handler_);
+    if (!bytes || copies > std::numeric_limits<uint64_t>::max() / *bytes) {
+      valid = false;
+      return;
+    }
+    auto [it, inserted] = entries_.try_emplace(var.get(), Entry{*bytes, 0});
+    if (!inserted && it->second.bytes != *bytes) {
+      valid = false;
+      return;
+    }
+    if (copies <= it->second.copies) return;
+    const uint64_t added_copies = copies - it->second.copies;
+    const uint64_t added_bytes = added_copies * *bytes;
+    if (total_bytes > std::numeric_limits<uint64_t>::max() - added_bytes) {
+      valid = false;
+      return;
+    }
+    it->second.copies = copies;
+    total_bytes += added_bytes;
+  }
+
+  const MemoryAllocatorPolicy& policy_;
+  const backend::BackendHandler* handler_ = nullptr;
+  uint64_t pipeline_depth_ = 1;
+  std::unordered_map<const Var*, Entry> entries_;
+};
+
+VecMNFoldCapacityContext BuildVecMNFoldCapacityContext(const FunctionPtr& func) {
+  VecMNFoldCapacityContext result;
+  if (!func || !pypto::backend::BackendConfig::IsConfigured()) return result;
+  const auto* ctx = PassContext::Current();
+  const auto* handler = ctx ? ctx->GetBackendHandler() : pypto::backend::GetBackend()->GetHandler();
+  if (!handler || handler->GetMatCapacityBytes() == 0) return result;
+  auto policy = pypto::backend::GetBackend()->CreateMemoryAllocatorPolicy();
+  if (!policy) return result;
+
+  const int slot_count = func->HasAttr("slot_num") ? func->GetAttr<int>("slot_num", 0)
+                                                   : cross_core_pipe::kDefaultAutoPipeSlotNum;
+  if (slot_count <= 0) return result;
+
+  MatFootprintCollector footprint(*policy, handler);
+  footprint.VisitFunction(func);
+  if (!footprint.valid) return result;
+  result.valid = true;
+  result.existing_mat_upper_bound = footprint.total_bytes;
+  result.largest_cross_core_slot_bytes = footprint.largest_cross_core_slot_bytes;
+  result.slot_count = static_cast<uint64_t>(slot_count);
+  return result;
 }
 
 /// Whole-function conservative L0C inventory after accounting for pipeline
@@ -3163,17 +3476,31 @@ std::unordered_set<const ForStmt*> BuildPipelineDbCPlan(const FunctionPtr& func)
 
 class AutoTileMutator : public IRMutator {
  public:
-  AutoTileMutator(std::unordered_set<const ForStmt*> pipeline_dbc_plan, AutoTileDbcGroupAllocator& dbc_groups)
-      : pipeline_dbc_plan_(std::move(pipeline_dbc_plan)), dbc_groups_(dbc_groups) {}
+  AutoTileMutator(std::unordered_set<const ForStmt*> pipeline_dbc_plan, AutoTileDbcGroupAllocator& dbc_groups,
+                  VecMNFoldCapacityContext vec_capacity)
+      : pipeline_dbc_plan_(std::move(pipeline_dbc_plan)),
+        dbc_groups_(dbc_groups),
+        vec_capacity_(std::move(vec_capacity)) {}
 
   std::vector<Diagnostic> hints;
 
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
     const bool should_double_buffer_c = pipeline_dbc_plan_.count(op.get()) != 0;
+    const uint64_t saved_pipeline_depth = source_pipeline_depth_;
+    if (op && op->kind_ == ForKind::Pipeline) {
+      const int stages = op->GetAttr<int>(kPipelineStagesAttr, 0);
+      if (stages <= 0 || source_pipeline_depth_ == 0 ||
+          source_pipeline_depth_ > std::numeric_limits<uint64_t>::max() / static_cast<uint64_t>(stages)) {
+        source_pipeline_depth_ = 0;
+      } else {
+        source_pipeline_depth_ *= static_cast<uint64_t>(stages);
+      }
+    }
     // Recurse first: nested pipelines make their own local dbC decision. An
     // enclosing pipeline does not inherit the marker and therefore does not
     // multiply the accumulator buffering depth.
     auto visited = IRMutator::VisitStmt_(op);
+    source_pipeline_depth_ = saved_pipeline_depth;
     auto loop = As<ForStmt>(visited);
     if (!should_double_buffer_c || !loop) return visited;
 
@@ -3379,7 +3706,14 @@ class AutoTileMutator : public IRMutator {
       // visitation happens after rewrite-rejection so nested matmuls inside
       // ForStmt bodies still get rewritten by the recursive visit.
       if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(current)) {
-        if (auto tiling = AnalyzeMatmul(assign, hints, dbc_groups_, utils::DbcEmissionRoute::kPipelinedInner,
+        const Stmt* next_effect =
+            next_non_load[i] < op->stmts_.size() ? op->stmts_[next_non_load[i]].get() : nullptr;
+        const LocalMNFoldPlan mn_plan = AnalyzeLocalMNFoldPlan(
+            assign, sibling_index, next_effect, direct_defs, vec_capacity_, source_pipeline_depth_);
+        const DbcSemanticEligibility dbc_eligibility =
+            mn_plan.allow_dbc ? DbcSemanticEligibility::kEnabled : DbcSemanticEligibility::kDisabled;
+        if (auto tiling = AnalyzeMatmul(assign, hints, dbc_groups_, dbc_eligibility,
+                                        utils::DbcEmissionRoute::kPipelinedInner,
                                         /*force_output_stationary=*/false,
                                         /*output_box_alignment=*/std::nullopt, &direct_defs)) {
           if (!tiling->needs_mn_tiling()) {
@@ -3397,50 +3731,9 @@ class AutoTileMutator : public IRMutator {
             changed = true;
             continue;
           }
-          // Output exceeds L0c — tile M/N by folding the consumer store, found
-          // via the raw (un-substituted) SiblingIndex: the matmul's result is
-          // freshly defined here, so its use count / store site are never
-          // affected by the running remap.
-          const Var* result = assign->var_.get();
-          auto uc_it = sibling_index.use_counts.find(result);
-          int result_uses = uc_it == sibling_index.use_counts.end() ? 0 : uc_it->second;
-          auto mo_it = sibling_index.matmul_operand_uses.find(result);
-          int operand_uses = mo_it == sibling_index.matmul_operand_uses.end() ? 0 : mo_it->second;
-          // Mat-scratch dtype + remap target. Default: the matmul result itself at
-          // its own dtype. Chained-matmul-with-downcast — `c -> tile.cast(c,
-          // bf16/f16) -> matmul` — fuses the cast (the cube FIXPIPE writeback,
-          // pto.tinsert) into the scratch: the scratch holds the bf16/f16
-          // intermediate, the per-sub-tile assemble downcasts Acc f32 -> Mat bf16,
-          // and the cast result is remapped to the scratch so the consumer matmul
-          // reads it on-chip (the cast op then goes dead).
-          auto result_tile_ty = As<TileType>(result->GetType());
-          DataType scratch_dtype = result_tile_ty->dtype_;
-          const Var* remap_target = result;
-          const Var* extra_remap = nullptr;
-          if (auto cast_it = sibling_index.cast_of.find(result); cast_it != sibling_index.cast_of.end()) {
-            const Var* cb = cast_it->second->var_.get();
-            auto cb_ty = As<TileType>(cb->GetType());
-            auto cast_call = As<Call>(cast_it->second->value_);
-            // Fold the downcast into the FIXPIPE Acc->Mat writeback only when FIXPIPE
-            // can reproduce it: f32 (the matmul Acc) -> bf16/f16, round-to-nearest.
-            // Otherwise keep the standalone Vector cast (e.g. an int accumulator, or a
-            // directional/truncating round mode FIXPIPE has no `rmode` for).
-            if (cb_ty && CastFoldableToFixpipeMat(cast_call, result_tile_ty, cb_ty->dtype_)) {
-              auto cb_uc = sibling_index.use_counts.find(cb);
-              auto cb_mo = sibling_index.matmul_operand_uses.find(cb);
-              const int cb_uses = cb_uc == sibling_index.use_counts.end() ? 0 : cb_uc->second;
-              const int cb_mm = cb_mo == sibling_index.matmul_operand_uses.end() ? 0 : cb_mo->second;
-              // `c`'s sole use is the cast, whose result is consumed entirely as
-              // matmul operands — fold the matmul+cast into a low-precision scratch.
-              if (result_uses == 1 && cb_uses >= 1 && cb_uses == cb_mm) {
-                scratch_dtype = cb_ty->dtype_;
-                remap_target = cb;     // consumer matmul reads the scratch
-                extra_remap = result;  // c -> scratch too; the cast op goes dead
-                result_uses = cb_uses;
-                operand_uses = cb_mm;
-              }
-            }
-          }
+          INTERNAL_CHECK_SPAN(!tiling->double_buffer_c || mn_plan.allow_dbc, tiling->assign->span_)
+              << "Internal error: chooser selected dbC for a local matmul whose M/N result has no "
+                 "supported semantic placement";
           // Mat-scratch: result consumed entirely on-chip at matmul-operand
           // positions — assemble the sub-tiles into an L1/Mat scratch and remap the
           // matmul result (or its downcast) to it.  Emitted at the matmul site
@@ -3458,15 +3751,16 @@ class AutoTileMutator : public IRMutator {
           std::optional<MatmulTiling> os_tiling;
           const auto* ctx = PassContext::Current();
           const MemoryPlanner planner = ctx ? ctx->GetMemoryPlanner() : MemoryPlanner::PyPTO;
-          if (planner == MemoryPlanner::PyPTO &&
+          if (mn_plan.placement == LocalMNFoldPlacement::kMatScratch && planner == MemoryPlanner::PyPTO &&
               tiling->stationarity != utils::Stationarity::kOutputStationary) {
             std::vector<Diagnostic> discard;  // the first AnalyzeMatmul already emitted the hints
-            os_tiling = AnalyzeMatmul(assign, discard, dbc_groups_, utils::DbcEmissionRoute::kPipelinedInner,
+            os_tiling = AnalyzeMatmul(assign, discard, dbc_groups_, dbc_eligibility,
+                                      utils::DbcEmissionRoute::kPipelinedInner,
                                       /*force_output_stationary=*/true,
                                       /*output_box_alignment=*/std::nullopt, &direct_defs);
             if (os_tiling) fold_tiling = &*os_tiling;
           }
-          if (auto ms = TryFoldMatScratch(*fold_tiling, result_uses, operand_uses, scratch_dtype, hints)) {
+          if (auto ms = TryFoldMatScratch(*fold_tiling, mn_plan)) {
             // Mat-scratch may re-choose output stationarity for #1908. Base
             // source-load removal on the schedule we actually emit: the first
             // choice may N-tile while the forced OS choice keeps full N (or
@@ -3475,17 +3769,15 @@ class AutoTileMutator : public IRMutator {
               retroactively_dropped.insert(fold_tiling->bias_load_def->var_.get());
             }
             for (auto& s : ms->first) out.push_back(std::move(s));
-            remap[remap_target] = ms->second;
-            if (extra_remap) {
-              remap[extra_remap] = ms->second;  // c -> scratch (cast reads the scratch)
-              dropped.insert(remap_target);     // ... and drop the now-dead cast def
+            remap[mn_plan.remap_target] = ms->second;
+            if (mn_plan.extra_remap) {
+              remap[mn_plan.extra_remap] = ms->second;  // c -> scratch (cast reads the scratch)
+              dropped.insert(mn_plan.remap_target);     // ... and drop the now-dead cast def
             }
             changed = true;
             continue;
           }
-          auto store_it = sibling_index.store_of.find(result);
-          const AssignStmt* store_stmt =
-              store_it == sibling_index.store_of.end() ? nullptr : store_it->second;
+          const AssignStmt* store_stmt = mn_plan.store_stmt;
           const bool reconstructs_bias = tiling->bias_load_def && tiling->n != tiling->N;
           const bool bias_snapshot_reaches_store =
               !reconstructs_bias || !store_stmt ||
@@ -3499,7 +3791,7 @@ class AutoTileMutator : public IRMutator {
                 tiling->assign->span_);
           }
           if (bias_snapshot_reaches_store) {
-            if (auto fold = TryFoldMNTiling(*tiling, result_uses, store_stmt, hints)) {
+            if (auto fold = TryFoldMNTiling(*tiling, mn_plan, hints)) {
               if (tiling->bias_load_def && tiling->n != tiling->N) {
                 retroactively_dropped.insert(tiling->bias_load_def->var_.get());
               }
@@ -3509,6 +3801,10 @@ class AutoTileMutator : public IRMutator {
               continue;  // drop the matmul; sub-tile stmts emit at the store site
             }
           }
+          INTERNAL_CHECK_SPAN(!tiling->double_buffer_c && !fold_tiling->double_buffer_c,
+                              fold_tiling->assign->span_)
+              << "Internal error: dbC semantic eligibility drifted from the M/N emitter; chooser selected "
+                 "a route that neither direct-store nor Mat-scratch placement could emit";
           // M/N tiling not applicable — fall through and leave it untouched.
         }
       }
@@ -3533,6 +3829,8 @@ class AutoTileMutator : public IRMutator {
  private:
   std::unordered_set<const ForStmt*> pipeline_dbc_plan_;
   AutoTileDbcGroupAllocator& dbc_groups_;
+  VecMNFoldCapacityContext vec_capacity_;
+  uint64_t source_pipeline_depth_ = 1;
 };
 
 FunctionPtr TransformFunction(const FunctionPtr& func, std::vector<Diagnostic>& hints) {
@@ -3543,7 +3841,8 @@ FunctionPtr TransformFunction(const FunctionPtr& func, std::vector<Diagnostic>& 
   // plan is computed from the exact IR the ordinary AutoTile phase will visit.
   AutoTileDbcGroupAllocator dbc_groups;
   auto canonical = RewriteCanonicalSplitKAcc(func, hints, dbc_groups);
-  AutoTileMutator mutator(BuildPipelineDbCPlan(canonical), dbc_groups);
+  AutoTileMutator mutator(BuildPipelineDbCPlan(canonical), dbc_groups,
+                          BuildVecMNFoldCapacityContext(canonical));
   auto new_body = mutator.VisitStmt(canonical->body_);
   for (auto& d : mutator.hints) hints.push_back(std::move(d));
   if (new_body == canonical->body_) return canonical;
