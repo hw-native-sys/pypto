@@ -460,5 +460,38 @@ def test_gm_loop_alias_changes_are_diagnosed(planner):
     assert ir.serialize(ChangedGM) == before
 
 
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("kind", ["for", "while"])
+@pytest.mark.parametrize("same_alias", [True, False], ids=["same-gm", "different-gm"])
+def test_distributed_loop_carries_fail_at_lowering_boundary(planner, kind, same_alias):
+    span = ir.Span.unknown()
+    dtype = ir.DistributedTensorType([16, 32], pl.FP32)
+    a, b = ir.Var("a", dtype, span), ir.Var("b", dtype, span)
+    flag = ir.Var("flag", ir.ScalarType(pl.BOOL), span)
+    carried = ir.IterArg("carried", dtype, a, span)
+    result = ir.Var("result", dtype, span)
+    body = ir.YieldStmt([carried if same_alias else b], span)
+    if kind == "while":
+        loop = ir.WhileStmt(flag, [carried], body, [result], span)
+    else:
+        index = ir.Var("i", ir.ScalarType(pl.INDEX), span)
+        zero, one = ir.ConstInt(0, pl.INDEX, span), ir.ConstInt(1, pl.INDEX, span)
+        loop = ir.ForStmt(index, zero, one, one, [carried], body, [result], span)
+    function = ir.Function(
+        "kernel",
+        [a, b, flag],
+        [],
+        ir.SeqStmts([loop, ir.ReturnStmt([], span)], span),
+        span,
+        type=ir.FunctionType.InCore,
+    )
+    program = ir.Program([function], "DistributedLoop", span)
+    before = ir.serialize(program)
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=True):
+        with pytest.raises(ValueError, match="distributed tensor loop carries require a separate"):
+            passes.lower_tile_to_buffer()(program)
+    assert ir.serialize(program) == before
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

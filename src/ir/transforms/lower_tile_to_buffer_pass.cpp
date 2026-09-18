@@ -282,6 +282,11 @@ class TileToBufferMutator : public IRMutator {
     for (size_t i = 0; i < loop->iter_args_.size(); ++i) {
       const auto& argument = loop->iter_args_[i];
       const auto& result = loop->return_vars_[i];
+      // Distributed GM windows need a separate region-result and device ABI recipe.
+      CHECK_SPAN(
+          !As<DistributedTensorType>(argument->GetType()) && !As<DistributedTensorType>(result->GetType()),
+          loop->span_)
+          << "LowerTileToBuffer: distributed tensor loop carries require a separate conversion recipe";
       auto initial = VisitExpr(argument->initValue_);
       initial_values[i] = initial;
       if (As<TileType>(argument->GetType())) {

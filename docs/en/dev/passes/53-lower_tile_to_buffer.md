@@ -117,6 +117,8 @@ when their initial value and backedge resolve to the same parameter; a changing
 GM selection requires a separate recipe and is diagnosed. Nested loops and
 branches use distinct yield contexts, and each initializer is traversed only
 at its binding to avoid repeated walks through enclosing carry chains.
+Distributed Tensor loop carries are rejected explicitly at this boundary, as
+with branch results, until their region-result and device ABI recipe is supported.
 Binary round trips restore While carry definitions before decoding their
 condition, preserving shared references from both the condition and body.
 
