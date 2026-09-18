@@ -355,7 +355,7 @@ context resources currently use Simpler defaults. An incompatible configuration
 is rejected instead of opening another Worker.
 
 The integration SDK is pinned to
-`b5a0ea0c941576e4e9c409b7be5130a607c4f9dc`. Its supported Python surface is
+`4f162da09791eba7d1a380c9113e79d0bf0ecd0b`. Its supported Python surface is
 `simpler.task_interface.ChipWorker.kernel_init`, `kernel_prepare_callable` and
 `finalize`; the proposed L2 `Worker(execution_mode="kernel")` API is not present.
 PyPTO's private adapter uses these existing methods. Init and prepare take no
@@ -365,6 +365,20 @@ lifecycle thread borrows that ACL context without creating or resetting a device
 installed runtime binaries and checks capability; it does not compile an
 operator or allocate business outputs. HBG kernel initialization is unsupported
 at this pin even though HBG binary compilation works.
+
+This pin adds two requirements PyPTO depends on. An onboard
+`tensormap_and_ringbuffer` build must stage the separate kernel-mode AICore ELF
+(`aicore_kernel_mode.o`): `RuntimeBuilder.get_binaries` then reports
+`kernel_aicore_required` with a `kernel_aicore_path`, and `kernel_init` rejects
+the configuration when that artifact is absent instead of falling back to the
+program-mode binary. Registration also no longer synchronizes — success means the
+callable image is uploaded and its residency recorded, not that the device
+loaded the orchestration. That load belongs to the callable's first launch, so a
+device-side refusal surfaces when the caller drains that launch rather than from
+prepare. Simpler now also permits registration inside ACLGraph capture (init
+still must complete outside it) and exposes a pre-init
+`ChipWorker.probe_kernel_mode_supported(bins)`; PyPTO uses neither yet and keeps
+requiring warmup outside capture.
 
 The manager transitions through UNINITIALIZED, INITIALIZING, READY, FAILED,
 CLOSING and CLOSED. Concurrent initialization shares one result. An init failure

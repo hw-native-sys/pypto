@@ -268,13 +268,24 @@ Simpler 或 native launch 扩展；`torch` 仍是 PyPTO 的常规依赖。真正
 Worker。`KernelConfig` 固定 platform、runtime、device 和 AICPU 线程数，其他常驻资源
 暂用 simpler 默认值。配置不兼容时报错，不额外创建 Worker。
 
-集成 SDK 固定为 `b5a0ea0c941576e4e9c409b7be5130a607c4f9dc`。实际 Python 接口为
+集成 SDK 固定为 `4f162da09791eba7d1a380c9113e79d0bf0ecd0b`。实际 Python 接口为
 `simpler.task_interface.ChipWorker.kernel_init`、`kernel_prepare_callable` 和
 `finalize`，目标 L2 `Worker(execution_mode="kernel")` 尚未提供。PyPTO 内部 adapter
 使用这些已有方法；init/prepare 不接收 caller stream，native context generation 和
 callable ID 均由 simpler 分配。调用线程须已绑定框架当前设备。初始化使用已安装的
 runtime 二进制并检查能力，不编译业务算子、不分配业务输出。该 pin 的 HBG kernel
 初始化不受支持，HBG 二进制编译成功不代表可执行。
+
+该 pin 新增两项 PyPTO 依赖的要求。onboard 的 `tensormap_and_ringbuffer` 构建必须产出
+独立的 kernel-mode AICore ELF（`aicore_kernel_mode.o`）：此时
+`RuntimeBuilder.get_binaries` 会报告 `kernel_aicore_required` 及对应的
+`kernel_aicore_path`，缺少该产物时 `kernel_init` 直接报错，不回退到 program 模式的
+二进制。注册也不再同步——成功只表示 callable 镜像已上传且驻留已记录，并不表示设备已
+加载 orchestration；该加载属于此 callable 的首次 launch，因此设备侧拒绝会在调用方排空
+那次 launch 时浮现，而不是从 prepare 抛出。simpler 现在还允许在 ACLGraph capture 内注册
+（init 仍须在 capture 外完成），并提供 init 前的
+`ChipWorker.probe_kernel_mode_supported(bins)`；PyPTO 两者都尚未使用，仍要求在 capture
+外完成 warmup。
 
 管理器状态包括 UNINITIALIZED、INITIALIZING、READY、FAILED、CLOSING、CLOSED。
 并发初始化共享结果；初始化失败保留错误及部分 Worker 供清理，不自动重建。PID 检查在
