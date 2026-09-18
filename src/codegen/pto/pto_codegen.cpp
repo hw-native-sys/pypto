@@ -2235,8 +2235,10 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
         RegisterCommCtxFor(op->var_, comm_ctx);
         return;
       }
-    } else if (!emit_tile_addr_ && As<TileType>(op->var_->GetType())) {
-      // Bare tile SSA alias (`lhs = rhs`) under memory_planner=PTOAS. `lhs` and
+    } else if (auto lhs_tile = As<TileType>(op->var_->GetType());
+               lhs_tile && (!emit_tile_addr_ || !lhs_tile->memref_.has_value())) {
+      // Bare tile SSA alias (`lhs = rhs`) under memory_planner=PTOAS, or with a
+      // MemRef-less `lhs` under either planner (see below). `lhs` and
       // `rhs` denote the identical tile value, so `lhs` must resolve to `rhs`'s
       // CURRENT SSA binding. This matters when `rhs` is a view (tile.reshape /
       // tile.transpose_view) that re-pointed itself at a typed view SSA of a
@@ -2249,7 +2251,10 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
       // `[N, 1]` view SSA so the write-back has matching src/dst shapes — the
       // same shape the `s = pl.mul(...)`-style yield (no bare alias) already
       // gets. Under PyPTO (emit_tile_addr_) the baked address already aliases
-      // the two allocs, so this is a no-op there and is left untouched.
+      // the two allocs, so this is a no-op there and is left untouched -- except
+      // for a MemRef-less `lhs` (a tpop result, or a view / alias chained off
+      // one, e.g. an identity reshape FoldNoOpReshape folded), which owns no
+      // alloc under either planner and so must follow `rhs` here too.
       const std::string rhs_ssa = LookupVarName(rhs_var);
       if (!rhs_ssa.empty()) {
         BindVarToMlir(op->var_, rhs_ssa);
