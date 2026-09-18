@@ -381,6 +381,71 @@ def test_failed_component_reads_can_be_retried(inventories):
     assert cache.capture(missing).usable
 
 
+def test_a_verified_revision_identifies_a_component_without_reading_it(inventories):
+    # The adapter supplying the revision owns the proof that the contents are
+    # that revision; the cache must then not read the component at all.
+    verified = replace(inventories.pto_isa, roots=(), verified_revision="a" * 40)
+    identity = InstallationIdentityCache().capture(replace(inventories, pto_isa=verified))
+    assert identity.usable
+    assert identity.pto_isa is not None
+    # An empty root tuple is otherwise unavailable, so this cannot be the
+    # content path returning a digest by accident.
+    assert fingerprint_content(()).digest is None
+
+
+def test_a_verified_revision_tracks_the_revision(inventories):
+    def capture(revision):
+        verified = replace(inventories.pto_isa, roots=(), verified_revision=revision)
+        return InstallationIdentityCache().capture(replace(inventories, pto_isa=verified)).pto_isa
+
+    assert capture("a" * 40) != capture("b" * 40)
+
+
+def test_a_verified_revision_cannot_collide_across_schemes(inventories):
+    revision = "c" * 40
+    as_pto_isa = replace(inventories.pto_isa, roots=(), verified_revision=revision)
+    as_runtime = replace(inventories.runtime, roots=(), verified_revision=revision)
+    identity = InstallationIdentityCache().capture(
+        replace(inventories, pto_isa=as_pto_isa, runtime=as_runtime)
+    )
+    # The same revision under two components must not produce one digest, and
+    # neither may equal a content digest of the component's own inputs.
+    assert identity.pto_isa != identity.runtime
+    assert identity.pto_isa != fingerprint_content(inventories.pto_isa.roots).digest
+
+
+def test_a_reported_version_is_not_a_verified_revision(inventories):
+    # The same string under the two fields records different evidence, so the
+    # digests must differ; otherwise a weaker claim could impersonate a proof.
+    claim = "0.61"
+    reported = replace(inventories.ptoas, roots=(), reported_version=claim)
+    verified = replace(inventories.ptoas, roots=(), verified_revision=claim)
+    cache = InstallationIdentityCache()
+    as_reported = cache.capture(replace(inventories, ptoas=reported)).ptoas
+    as_verified = cache.capture(replace(inventories, ptoas=verified)).ptoas
+    assert as_reported is not None and as_verified is not None
+    assert as_reported != as_verified
+
+
+def test_a_reported_version_tracks_the_whole_string(inventories):
+    def capture(reported):
+        component = replace(inventories.ptoas, roots=(), reported_version=reported)
+        return InstallationIdentityCache().capture(replace(inventories, ptoas=component)).ptoas
+
+    # A dev build and the release it came from share a parsed number; the
+    # identity must still separate them.
+    assert capture("ptoas 0.61") != capture("ptoas 0.61.dev3")
+
+
+def test_an_unavailable_component_outranks_a_verified_revision(inventories):
+    blocked = replace(
+        inventories.pto_isa, roots=(), verified_revision="d" * 40, unavailable_reason="probe failed"
+    )
+    identity = InstallationIdentityCache().capture(replace(inventories, pto_isa=blocked))
+    assert not identity.usable
+    assert [failure.reason for failure in identity.failures] == ["probe failed"]
+
+
 def test_installation_cache_is_keyed_by_resolved_inputs(inventories, tmp_path):
     cache = InstallationIdentityCache()
     first = cache.capture(inventories)

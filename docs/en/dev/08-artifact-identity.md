@@ -76,6 +76,61 @@ result has `usable=False` and `digest=None` if any component is incomplete or
 unreadable. There is no shared `UNKNOWN` key. An extra application fingerprint
 cannot turn this result into a usable toolchain identity.
 
+### Externally verified revisions
+
+`ComponentInputs.verified_revision` is the one exception to reading contents. An
+adapter may set it only when some other mechanism has already proven, in the
+same resolution, that the component's bytes *are* that revision. A version an
+installation reports about itself is not such a proof, and neither is a path
+that contains a version number.
+
+PTO-ISA is the only component that currently qualifies. `ensure_pto_isa_root()`
+returns a checkout only after proving it is clean and at the pinned commit, and
+re-clones it from the pin otherwise; git objects are content-addressed, so a
+clean tree at `HEAD == pin` is byte-for-byte the pinned tree. Hashing that tree
+again re-proves what the resolution established.
+
+That resolution decides cleanliness with `git status --porcelain`, which omits
+paths the checkout ignores, so a build writing generated files into the ISA tree
+would not disturb it. The adapter therefore re-asks with `--ignored`, which
+covers the tracked state again at the same time: anything at all that git does
+not account for — ignored, untracked or modified — sends the component back to
+its contents. That check costs about 18ms against the 0.71s the content read
+costs.
+
+An adapter that cannot read the revision, or cannot get a usable answer about
+the tree, falls back the same way, and `unavailable_reason` still outranks a
+revision, so an incomplete component stays unavailable.
+
+A verified revision is recorded together with its component name, so one
+component's revision can never produce the same digest as another's, nor as any
+content digest.
+
+### Self-reported versions
+
+`ComponentInputs.reported_version` is deliberately weaker and is named for what
+it is: a version the installation states about *itself*, with nothing verifying
+it. It separates installations that say they differ; it cannot see bytes that
+changed while the version stayed put, so a rebuild or a patch applied in place
+is invisible to it.
+
+ptoas uses it. Nothing proves that installation's bytes: it is an external tree
+selected by `PTOAS_ROOT`, its releases carry no manifest the installer checks,
+and the sha256 in `toolchain/versions.env` names the downloaded wheel rather
+than anything reachable from the unpacked tree. The identity therefore rests on
+a deployment property — that ptoas arrives as an unmodified published build —
+not on evidence PyPTO can check.
+
+The complete `--version` text is the identity, not the number parsed from it.
+The accepted-version check keeps only the numeric part, so a dev build's suffix
+— the one marker separating it from the release it was built from — would
+otherwise be discarded, and the two would share an identity.
+
+`reported_version` and `verified_revision` are recorded under different tags, so
+the same string under each yields different digests: a self-reported claim can
+never impersonate a proof. A failed probe falls back to the content inventory,
+and `unavailable_reason` still outranks both.
+
 Successful component reads are memoized by their complete resolved inventory,
 with synchronization for concurrent threads. Changed selection must produce a
 new inventory. Failed reads are retried rather than cached indefinitely.
