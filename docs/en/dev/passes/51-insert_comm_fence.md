@@ -65,6 +65,28 @@ rules** — the *notify* itself needs no marker. A single structural traversal
   flushes);
 - **notify** — nothing.
 
+### Phase B — InCore entry invalidate for DistributedTensor scalar reads
+
+Phase A runs only on **InCore** bodies. Cross-task consumers that perform a
+**cached scalar load** (`tensor.read` / `pl.read`) on a value with
+**`DistributedTensorType`** need a whole-GM invalidate at function entry —
+peers may have written that window from a separate AIV task (e.g. collective
+`recv_counts`), and orchestration codegen cannot host InCore
+`system.cacheinvalid`.
+
+Phase B is a **purely local per-InCore rule** (no orchestration scan):
+
+| Step | Action |
+| ---- | ------ |
+| Scan body | True iff any `tensor.read` first argument has exact-kind `DistributedTensorType` (control flow nested; SSA rebinds after store keep the type). |
+| Apply | Prepend no-arg `system.cacheinvalid()` at function entry. **Invalidate-only** — no entry `system.fence` (fence belongs on the publish path). |
+
+Synthesized collective AIV kernels (`builtin_template_dir`) are skipped. Marking
+is **function-granular** and idempotent (entry that already starts with whole-GM
+`cacheinvalid` is left alone). `pl.load` / tile loads alone do **not** trigger
+Phase B — only scalar `tensor.read` on a DistTensor-typed value matches the
+stale-line failure mode this phase targets.
+
 A region `system.cacheinvalid(target)` addresses `target`'s **local** base, which
 is correct for a local-window store. The **remote** writes `remote_store` / `put`
 write to a **peer-offset** GM address (`local_ptr + delems(peer)`) that the local
@@ -171,9 +193,9 @@ A `remote_load` (result is a tile, no GM write) and a `tile.store` / `tensor.wri
 / `get` whose destination is a plain `Tensor` rather than a window-bound
 `DistributedTensor` are **not** publishing writes — no marker at all.
 
-## Algorithm — one structural traversal, with consume-side batching
+## Algorithm — phase A: one structural traversal, with consume-side batching
 
-The pass carries one piece of control-flow state — a flag that suppresses the
+Phase A (`InsertCommMarkers`) carries one piece of control-flow state — a flag that suppresses the
 per-wait invalidate while visiting the body of a **pure wait-loop** (a `for`/`while`
 whose body contains only `pld.system.wait` through seq/if nesting — **at least
 one** — with memory-inert control expressions; a wait-free loop is not a pure
@@ -208,6 +230,14 @@ for: { notify; store(win) }           -> for: { notify; store(win); cacheinvalid
 An existing region `cacheinvalid` **immediately followed by a fence** after a
 write, and an existing whole-GM cacheinvalid immediately after a wait, are
 recognized and **not duplicated**, so the pass is idempotent.
+
+## Algorithm — phase B: local DistributedTensor scalar-read rule
+
+1. For each InCore function (skipping `builtin_template_dir` AIV stubs): collect
+   `DistributedTensorType` params; walk the body for `tensor.read` on those params.
+2. If matched, prepend no-arg `system.cacheinvalid()` at entry (idempotent).
+
+No orchestration statement is rewritten — Phase B never leaves the InCore function.
 
 ## Codegen interaction
 

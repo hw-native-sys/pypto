@@ -68,11 +68,32 @@
  * wait already followed by a whole-GM cacheinvalid, are left alone. Runs last in
  * the Default pipeline (after all statement-reordering passes) so the inserted ops
  * stay adjacent through codegen.
+ *
+ * ## Phase B — InCore entry invalidate for DistributedTensor scalar reads
+ *
+ * Phase A (`InsertCommMarkers`) is InCore-only: orchestration codegen rejects
+ * `system.cacheinvalid` / `system.fence`. Cross-task consumers that read a
+ * peer-written window via a cached scalar load (`tensor.read` on a
+ * `DistributedTensor` parameter) need a whole-GM invalidate at function entry
+ * — otherwise stale GM cache lines produce silent races (e.g. `recv_counts=0`
+ * after a collective publishes counts in a separate AIV task).
+ *
+ * Phase B is a purely local per-InCore rule (no orchestration scan):
+ *
+ *   At an InCore function's entry, prepend a no-arg `system.cacheinvalid`
+ *   iff the body performs a `tensor.read` whose first argument has
+ *   `DistributedTensorType` (matched by type, so SSA rebinds after
+ *   `tile.store` / similar are covered).
+ *
+ * This replaces an earlier sticky `seen_publish` orchestration walk that was
+ * both too wide (any `Submit`) and too narrow (`Group`/`Spmd`, loop-carried
+ * deps). Consume-side contract is invalidate-only (no entry `system.fence`).
  */
 
 #include <cstddef>
 #include <memory>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -263,6 +284,111 @@ StmtPtr MakeNoArgOp(const char* op_name, const Span& span) {
 
 // Whole-GM cacheinvalid: the no-argument form of `system.cacheinvalid`.
 StmtPtr MakeCacheInvalidAll(const Span& span) { return MakeNoArgOp("system.cacheinvalid", span); }
+
+bool HasConsumePrologue(const StmtPtr& body) {
+  // Invalidate-only (consume-side contract): fence belongs on the publish path.
+  if (auto seq = As<SeqStmts>(body)) {
+    return !seq->stmts_.empty() && IsCacheInvalidAll(seq->stmts_[0]);
+  }
+  return IsCacheInvalidAll(body);
+}
+
+FunctionPtr PrependConsumePrologue(const FunctionPtr& func) {
+  if (!func || !func->body_ || HasConsumePrologue(func->body_)) return func;
+  std::vector<StmtPtr> stmts;
+  stmts.push_back(MakeCacheInvalidAll(func->span_));
+  stmts.push_back(func->body_);
+  auto new_body = SeqStmts::Flatten(std::move(stmts), func->span_);
+  return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
+                                    new_body, func->span_, func->func_type_, func->level_, func->role_,
+                                    func->attrs_, func->requires_runtime_binding_, func->ir_stage_);
+}
+
+// ---- Phase B: local DistributedTensor scalar-read detection ----
+
+bool ExprReadsDistTensor(const ExprPtr& expr) {
+  if (!expr) return false;
+  if (auto call = As<Call>(expr)) {
+    if (IsOp(call, "tensor.read") && !call->args_.empty() &&
+        As<DistributedTensorType>(call->args_[0]->GetType())) {
+      return true;
+    }
+    for (const auto& arg : call->args_) {
+      if (ExprReadsDistTensor(arg)) return true;
+    }
+    return false;
+  }
+  if (auto bin = As<BinaryExpr>(expr)) {
+    if (ExprReadsDistTensor(bin->left_)) return true;
+    return ExprReadsDistTensor(bin->right_);
+  }
+  if (auto un = As<UnaryExpr>(expr)) {
+    return ExprReadsDistTensor(un->operand_);
+  }
+  if (auto tuple = As<MakeTuple>(expr)) {
+    for (const auto& el : tuple->elements_) {
+      if (ExprReadsDistTensor(el)) return true;
+    }
+    return false;
+  }
+  if (auto get = As<TupleGetItemExpr>(expr)) {
+    return ExprReadsDistTensor(get->tuple_);
+  }
+  return false;
+}
+
+bool BodyReadsDistTensor(const StmtPtr& stmt) {
+  if (!stmt) return false;
+  if (auto seq = As<SeqStmts>(stmt)) {
+    for (const auto& child : seq->stmts_) {
+      if (BodyReadsDistTensor(child)) return true;
+    }
+    return false;
+  }
+  if (auto iff = As<IfStmt>(stmt)) {
+    if (ExprReadsDistTensor(iff->condition_)) return true;
+    if (BodyReadsDistTensor(iff->then_body_)) return true;
+    if (iff->else_body_.has_value() && BodyReadsDistTensor(iff->else_body_.value())) {
+      return true;
+    }
+    return false;
+  }
+  if (auto for_ = As<ForStmt>(stmt)) {
+    if (ExprReadsDistTensor(for_->start_) || ExprReadsDistTensor(for_->stop_) ||
+        ExprReadsDistTensor(for_->step_)) {
+      return true;
+    }
+    return BodyReadsDistTensor(for_->body_);
+  }
+  if (auto while_ = As<WhileStmt>(stmt)) {
+    if (ExprReadsDistTensor(while_->condition_)) return true;
+    return BodyReadsDistTensor(while_->body_);
+  }
+  if (auto scope = As<ScopeStmt>(stmt)) {
+    return BodyReadsDistTensor(scope->body_);
+  }
+  if (auto assign = As<AssignStmt>(stmt)) {
+    return ExprReadsDistTensor(assign->value_);
+  }
+  if (auto eval = As<EvalStmt>(stmt)) {
+    return ExprReadsDistTensor(eval->expr_);
+  }
+  if (auto ret = As<ReturnStmt>(stmt)) {
+    for (const auto& value : ret->value_) {
+      if (ExprReadsDistTensor(value)) return true;
+    }
+    return false;
+  }
+  return false;
+}
+
+bool NeedsConsumePrologue(const FunctionPtr& func) {
+  if (!func || !func->body_ || !IsInCoreType(func->func_type_)) return false;
+  // Synthesized collective AIV kernels are opaque publishers (template body is
+  // not a PyPTO IR graph with tensor.read); skip them.
+  if (func->HasAttr(kAttrBuiltinTemplateDir)) return false;
+  return BodyReadsDistTensor(func->body_);
+}
 
 // Structural traversal: emit `cacheinvalid; fence` after every publishing write
 // and `cacheinvalid()` after every wait. No control-flow state is needed — both
@@ -499,20 +625,21 @@ class InsertCommMarkers : public IRMutator {
 
 Pass InsertCommFence() {
   auto pass_func = [](const FunctionPtr& func) -> FunctionPtr {
-    if (!func || !func->body_) return func;
-    // The data-before-signal contract is an InCore-only concern: the publishing
-    // writes, waits, and the system.cacheinvalid / system.fence markers are
-    // InCore GM builtins. Orchestration / HOST functions only dispatch tasks —
-    // their cross-function calls are not GM publishing writes, and inserting an
-    // InCore builtin there is rejected by orchestration codegen.
-    if (!IsInCoreType(func->func_type_)) return func;
+    if (!func || !func->body_ || !IsInCoreType(func->func_type_)) return func;
+
     InsertCommMarkers mutator;
     auto new_body = mutator.MarkTopLevel(func->body_);
-    if (new_body.get() == func->body_.get()) return func;
-    return std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
-                                      func->return_types_, new_body, func->span_, func->func_type_,
-                                      func->level_, func->role_, func->attrs_,
-                                      func->requires_runtime_binding_, func->ir_stage_);
+    FunctionPtr result = func;
+    if (new_body.get() != func->body_.get()) {
+      result =
+          std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
+                                     new_body, func->span_, func->func_type_, func->level_, func->role_,
+                                     func->attrs_, func->requires_runtime_binding_, func->ir_stage_);
+    }
+    if (NeedsConsumePrologue(result)) {
+      result = PrependConsumePrologue(result);
+    }
+    return result;
   };
   return CreateFunctionPass(pass_func, "InsertCommFence", kInsertCommFenceProperties);
 }

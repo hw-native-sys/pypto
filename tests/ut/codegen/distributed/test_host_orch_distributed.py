@@ -1517,7 +1517,7 @@ def test_backend_materializes_all_to_all_v_next_level_files(tmp_path):
         def host_orch(self):
             input_buf = pld.alloc_window_buffer(8 * SIZE * pl.FP32.get_byte())
             data_buf = pld.alloc_window_buffer(8 * SIZE * pl.FP32.get_byte())
-            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * 2 * pl.INT32.get_byte())
             counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             inp = pld.window(input_buf, [8, SIZE], dtype=pl.FP32)
@@ -1574,7 +1574,7 @@ def test_host_all_to_all_v_builtin_variant_shared_across_max_recv():
         def host_orch(self):
             input_buf = pld.alloc_window_buffer(8 * SIZE * pl.FP32.get_byte())
             data_buf = pld.alloc_window_buffer(8 * SIZE * pl.FP32.get_byte())
-            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * 2 * pl.INT32.get_byte())
             counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             inp = pld.window(input_buf, [8, SIZE], dtype=pl.FP32)
@@ -1588,7 +1588,7 @@ def test_host_all_to_all_v_builtin_variant_shared_across_max_recv():
 
             input_buf2 = pld.alloc_window_buffer(8 * SIZE * pl.FP32.get_byte())
             data_buf2 = pld.alloc_window_buffer(8 * SIZE * pl.FP32.get_byte())
-            signal_buf2 = pld.alloc_window_buffer(2 * pl.INT32.get_byte())
+            signal_buf2 = pld.alloc_window_buffer(2 * 2 * pl.INT32.get_byte())
             counts_buf2 = pld.alloc_window_buffer(2 * pl.INT32.get_byte())
             recv_buf2 = pld.alloc_window_buffer(2 * pl.INT32.get_byte())
             inp2 = pld.window(input_buf2, [8, SIZE], dtype=pl.FP32)

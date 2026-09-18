@@ -23,6 +23,10 @@ The pass enforces the ptoas data-before-signal contract with purely-local rules
   unregistered user function: a whole-GM ``pl.system.cacheinvalid()`` followed by
   ``pl.system.fence()``.
 * **After every wait**: a whole-GM ``pl.system.cacheinvalid()`` (no args).
+* **Phase B (InCore entry)**: prepend whole-GM ``pl.system.cacheinvalid()`` at
+  an InCore function's entry iff its body performs a ``tensor.read``
+  (``pl.read``) on a ``DistributedTensorType`` value (type match, including SSA
+  rebinds). Invalidate-only — no entry ``system.fence``. No orchestration scan.
 
 The **remote** writes land at a peer-offset address that a local-target
 cacheinvalid cannot address, so the pass inserts only their release fence — the
@@ -555,6 +559,8 @@ def test_wait_then_read_inserts_whole_gm_cacheinvalid():
             out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
             signal: pld.DistributedTensor[[1, 1], pl.INT32],
         ):
+            # Phase B entry invalidate (dist tensor.read) + Phase A post-wait invalidate.
+            pl.system.cacheinvalid()
             pld.system.wait(signal=signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
             pl.system.cacheinvalid()
             val: pl.Scalar[pl.INT32] = pl.read(signal, [0, 0])
@@ -589,6 +595,7 @@ def test_notify_wait_read_handshake():
             signal: pld.DistributedTensor[[1, 1], pl.INT32],
             peer: pl.Scalar[pl.INT32],
         ):
+            pl.system.cacheinvalid()
             pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.Set)
             pld.system.wait(signal=signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
             pl.system.cacheinvalid()
@@ -629,6 +636,7 @@ def test_pure_wait_loop_gets_single_whole_gm_cacheinvalid():
             me: pl.Scalar[pl.INT32],
             out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
         ):
+            pl.system.cacheinvalid()
             for src in pl.range(nranks):
                 if src != me:
                     pld.system.wait(signal=signal, offsets=[0, src], expected=1, cmp=pld.WaitCmp.Ge)
@@ -647,7 +655,7 @@ def test_consecutive_waits_share_one_whole_gm_cacheinvalid():
         @pl.function(type=pl.FunctionType.InCore)
         def f(
             self,
-            signal: pld.DistributedTensor[[1, 2], pl.INT32],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
             out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
         ):
             pld.system.wait(signal=signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
@@ -660,9 +668,10 @@ def test_consecutive_waits_share_one_whole_gm_cacheinvalid():
         @pl.function(type=pl.FunctionType.InCore)
         def f(
             self,
-            signal: pld.DistributedTensor[[1, 2], pl.INT32],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
             out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
         ):
+            pl.system.cacheinvalid()
             pld.system.wait(signal=signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
             pld.system.wait(signal=signal, offsets=[0, 1], expected=1, cmp=pld.WaitCmp.Ge)
             pl.system.cacheinvalid()
@@ -736,6 +745,7 @@ def test_control_expression_read_prevents_batching():
             nranks: pl.Scalar[pl.INT32],
             out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
         ):
+            pl.system.cacheinvalid()
             for src in pl.range(nranks):
                 if pl.read(signal, [0, src]) != 0:
                     pld.system.wait(signal=signal, offsets=[0, src], expected=1, cmp=pld.WaitCmp.Ge)
@@ -840,6 +850,7 @@ def test_if_with_wait_and_empty_else_is_still_pure():
             me: pl.Scalar[pl.INT32],
             out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
         ):
+            pl.system.cacheinvalid()
             for src in pl.range(nranks):
                 if src != me:
                     pld.system.wait(signal=signal, offsets=[0, src], expected=1, cmp=pld.WaitCmp.Ge)
@@ -864,6 +875,226 @@ def test_bare_barrier_notify_no_marker():
         ):
             pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
             pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
+
+    ir.assert_structural_equal(_apply(Before), Before)
+
+
+def test_incore_dist_scalar_read_gets_prologue():
+    # Phase B: InCore body that scalar-reads a DistributedTensor param gets an
+    # entry whole-GM cacheinvalid (invalidate-only; no fence).
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
+            pl.write(out, [0, 0], val)
+            return out
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            pl.system.cacheinvalid()
+            val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
+            pl.write(out, [0, 0], val)
+            return out
+
+    ir.assert_structural_equal(_apply(Before), Expected)
+
+
+def test_incore_dist_scalar_read_after_store_rebind_gets_prologue():
+    # Phase B matches DistributedTensorType on the read target, so an SSA rebind
+    # after tile.store still triggers the entry invalidate.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            chunk: pl.Tile[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            recv_counts = pl.store(chunk, [0, 0], recv_counts)
+            val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
+            pl.write(out, [0, 0], val)
+            return out
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            chunk: pl.Tile[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            pl.system.cacheinvalid()
+            recv_counts = pl.store(chunk, [0, 0], recv_counts)
+            pl.system.cacheinvalid(recv_counts, [1, 1], [0, 0])
+            pl.system.fence()
+            val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
+            pl.write(out, [0, 0], val)
+            return out
+
+    ir.assert_structural_equal(_apply(Before), Expected)
+
+
+def test_incore_no_prologue_without_dist_scalar_read():
+    # pl.load on a DistributedTensor is not a scalar read — no Phase B prologue.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def load_only(
+            self,
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, N], pl.FP32]],
+        ) -> pl.Tensor[[1, N], pl.FP32]:
+            tile = pl.load(data, [0, 0], [1, N])
+            pl.store(tile, [0, 0], out)
+            return out
+
+    ir.assert_structural_equal(_apply(Before), Before)
+
+
+def test_incore_no_prologue_scalar_read_plain_tensor():
+    # pl.read on a plain Tensor param must not trigger Phase B.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def read_plain(
+            self,
+            counts: pl.Tensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            val: pl.Scalar[pl.INT32] = pl.read(counts, [0, 0])
+            pl.write(out, [0, 0], val)
+            return out
+
+    ir.assert_structural_equal(_apply(Before), Before)
+
+
+def test_incore_stage_plain_vs_consume_dist_read():
+    # stage_step (plain Tensor / load-only) unmarked; consume_step (dist read) marked.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def stage_step(
+            self,
+            x: pl.Tensor[[1, N], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, N], pl.FP32]],
+        ) -> pl.Tensor[[1, N], pl.FP32]:
+            local = pl.load(x, [0, 0], [1, N])
+            pl.store(local, [0, 0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
+            pl.write(out, [0, 0], val)
+            return out
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def stage_step(
+            self,
+            x: pl.Tensor[[1, N], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, N], pl.FP32]],
+        ) -> pl.Tensor[[1, N], pl.FP32]:
+            local = pl.load(x, [0, 0], [1, N])
+            pl.store(local, [0, 0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            pl.system.cacheinvalid()
+            val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
+            pl.write(out, [0, 0], val)
+            return out
+
+    ir.assert_structural_equal(_apply(Before), Expected)
+
+
+def test_incore_dist_scalar_read_inside_if():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            run: pl.Scalar[pl.BOOL],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            if run:
+                val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
+                pl.write(out, [0, 0], val)
+            return out
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            run: pl.Scalar[pl.BOOL],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            pl.system.cacheinvalid()
+            if run:
+                val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
+                pl.write(out, [0, 0], val)
+            return out
+
+    ir.assert_structural_equal(_apply(Before), Expected)
+
+
+def test_incore_dist_scalar_read_prologue_idempotent():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
+            pl.write(out, [0, 0], val)
+            return out
+
+    once = _apply(Before)
+    twice = _apply(once)
+    ir.assert_structural_equal(twice, once)
+
+
+def test_builtin_template_aiv_skipped():
+    # Synthesized collective AIV kernels carry builtin_template_dir and must not
+    # get a Phase B prologue (their IR body is a ReturnStmt stub).
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def collective_kernel(
+            self,
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+            recv: pld.DistributedTensor[[1, 1], pl.INT32],
+        ) -> pld.DistributedTensor[[1, N], pl.FP32]:
+            pl.func_attr({"builtin_template_dir": ":pypto.runtime.builtins.collectives.all_to_all_v"})
+            return data
 
     ir.assert_structural_equal(_apply(Before), Before)
 

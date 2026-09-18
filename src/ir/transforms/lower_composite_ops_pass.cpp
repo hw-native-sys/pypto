@@ -2567,17 +2567,23 @@ ExprPtr LowerTensorAllToAllVRule(const CallPtr& call, const std::vector<ExprPtr>
   auto one_idx = std::make_shared<ConstInt>(1, DataType::INDEX, span);
 
   // MAX_RECV = target[0] / NR.  NR is extracted from signal[0]
-  // (deducer-enforced compile-time constant).  Signal is required to be 2D
-  // [NR, 1] so MakeSignalOffsets(rank) → [rank, 0] matches notify/wait.
-  // These three validate the caller's declared window/signal shapes, so a
-  // violation is a user error, not a compiler invariant — report it as such.
+  // (deducer-enforced compile-time constant).  Signal is 2D [NR, 1] so
+  // MakeSignalOffsets(rank) → [rank, 0] matches notify/wait. These validate
+  // the caller's declared shapes — user errors.
   auto total_rows_c = As<ConstInt>(target_type->shape_[0]);
   CHECK_SPAN(total_rows_c, span)
       << "pld.tensor.all_to_all_v target dim 0 must be a compile-time constant (it is split as "
          "NR * MAX_RECV to give every sender a fixed-capacity slot)";
   auto signal_type = As<DistributedTensorType>(signal->GetType());
   INTERNAL_CHECK_SPAN(signal_type, span) << "signal must be DistributedTensorType";
-  ValidateMeshSignalShape(signal_type, "pld.tensor.all_to_all_v", span);
+  // InCore composite uses signal column 0 only (MakeSignalOffsets → [rank, 0]).
+  CHECK_SPAN(signal_type, span) << "pld.tensor.all_to_all_v signal must be a DistributedTensor";
+  CHECK_SPAN(signal_type->shape_.size() == 2, span)
+      << "pld.tensor.all_to_all_v signal must be 2D [NR, 1], got rank " << signal_type->shape_.size();
+  if (auto col_dim = As<ConstInt>(signal_type->shape_[1])) {
+    CHECK_SPAN(col_dim->value_ == 1, span)
+        << "pld.tensor.all_to_all_v signal shape[1] must be 1, got " << col_dim->value_;
+  }
   auto nr_c = As<ConstInt>(signal_type->shape_[0]);
   CHECK_SPAN(nr_c, span) << "pld.tensor.all_to_all_v signal dim 0 (NR) must be a compile-time constant";
   int64_t max_recv_value = total_rows_c->value_ / nr_c->value_;
