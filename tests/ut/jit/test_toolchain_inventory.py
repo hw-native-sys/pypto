@@ -111,6 +111,37 @@ def test_pto_isa_falls_back_to_contents_when_the_revision_is_unknown(tmp_path, m
     assert fingerprint_content(component.roots).digest != before.digest
 
 
+def test_ptoas_is_identified_by_the_version_it_reports(tmp_path, monkeypatch):
+    monkeypatch.setattr("pypto.backend._ptoas_locate.check_ptoas_version", lambda binary: "ptoas 0.61.dev3\n")
+    component = _toolchain._ptoas_component(str(tmp_path / "ptoas"))
+    assert component.reported_version == "ptoas 0.61.dev3"
+    assert component.verified_revision is None
+    assert component.roots == ()
+    assert component.unavailable_reason is None
+
+
+def test_ptoas_falls_back_to_contents_when_the_probe_fails(tmp_path, monkeypatch):
+    def refuse(binary):
+        raise RuntimeError("ptoas is version 0.55, but PyPTO requires PTOAS >= v0.61")
+
+    monkeypatch.setattr("pypto.backend._ptoas_locate.check_ptoas_version", refuse)
+    captured = {}
+
+    def fake_inputs(launcher):
+        captured["launcher"] = launcher
+        return {tmp_path / "tree"}
+
+    (tmp_path / "tree").mkdir()
+    (tmp_path / "tree/ptoas.so").write_bytes(b"\x7fELF")
+    monkeypatch.setattr(_toolchain, "_ptoas_inputs", fake_inputs)
+
+    component = _toolchain._ptoas_component(str(tmp_path / "ptoas"))
+
+    assert component.reported_version is None
+    assert [root.path for root in component.roots] == [tmp_path / "tree"]
+    assert captured["launcher"] == tmp_path / "ptoas"
+
+
 def test_unknown_shell_launcher_is_not_an_executable_identity(tmp_path):
     script = tmp_path / "ptoas"
     script.write_text("#!/bin/sh\neval some_dynamic_command\n")

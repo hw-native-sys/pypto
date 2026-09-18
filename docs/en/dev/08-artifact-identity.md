@@ -106,6 +106,31 @@ A verified revision is recorded together with its component name, so one
 component's revision can never produce the same digest as another's, nor as any
 content digest.
 
+### Self-reported versions
+
+`ComponentInputs.reported_version` is deliberately weaker and is named for what
+it is: a version the installation states about *itself*, with nothing verifying
+it. It separates installations that say they differ; it cannot see bytes that
+changed while the version stayed put, so a rebuild or a patch applied in place
+is invisible to it.
+
+ptoas uses it. Nothing proves that installation's bytes: it is an external tree
+selected by `PTOAS_ROOT`, its releases carry no manifest the installer checks,
+and the sha256 in `toolchain/versions.env` names the downloaded wheel rather
+than anything reachable from the unpacked tree. The identity therefore rests on
+a deployment property — that ptoas arrives as an unmodified published build —
+not on evidence PyPTO can check.
+
+The complete `--version` text is the identity, not the number parsed from it.
+The accepted-version check keeps only the numeric part, so a dev build's suffix
+— the one marker separating it from the release it was built from — would
+otherwise be discarded, and the two would share an identity.
+
+`reported_version` and `verified_revision` are recorded under different tags, so
+the same string under each yields different digests: a self-reported claim can
+never impersonate a proof. A failed probe falls back to the content inventory,
+and `unavailable_reason` still outranks both.
+
 Successful component reads are memoized by their complete resolved inventory,
 with synchronization for concurrent threads. Changed selection must produce a
 new inventory. Failed reads are retried rather than cached indefinitely.
