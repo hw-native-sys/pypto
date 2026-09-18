@@ -25,6 +25,8 @@ import subprocess
 import sys
 import sysconfig
 import threading
+from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -40,6 +42,8 @@ from pypto.backend._ptoas_locate import find_ptoas_binary
 
 _identity_cache = InstallationIdentityCache()
 _discovery_lock = threading.Lock()
+# ldd is subprocess-bound, not CPU-bound; this only caps how many run at once.
+_LDD_WORKERS = 32
 _identities: dict[tuple[Any, ...], ToolchainIdentity] = {}
 
 
@@ -84,15 +88,50 @@ def _elf_inputs(path: Path, library_path: str | None = None) -> set[Path]:
     }
 
 
+def _elf_inputs_many(natives: Iterable[Path], library_path: str | None = None) -> set[Path]:
+    """Resolve several ELF dependency closures at once.
+
+    Each ``ldd`` is an independent subprocess whose wait releases the GIL, so a
+    bounded thread pool turns discovery's dominant serial cost into roughly one
+    round trip. Failure behaves as the serial loop did: ``map`` re-raises the
+    first worker error, and a partial inventory is never returned.
+    """
+    ordered = list(natives)
+    if not ordered:
+        return set()
+
+    # Reproduce each caller's own call shape: a site with no library path called
+    # _elf_inputs with one argument, and a stub standing in for it may accept
+    # only that one.
+    def resolve(native: Path) -> set[Path]:
+        return _elf_inputs(native) if library_path is None else _elf_inputs(native, library_path)
+
+    if len(ordered) == 1:
+        return resolve(ordered[0])
+    paths: set[Path] = set()
+    with ThreadPoolExecutor(min(_LDD_WORKERS, len(ordered))) as pool:
+        for closure in pool.map(resolve, ordered):
+            paths.update(closure)
+    return paths
+
+
 def _component(paths: set[Path]) -> ComponentInputs:
     # Parents already enumerate child contents. Retain logical paths in the
     # inventory; resolving every root would lose compiler selection aliases.
+    # Ancestors sort first, so a containing root has already been accepted by the
+    # time a descendant is tested: walking the candidate's own parents replaces
+    # rescanning every accepted root. resolve(strict=True) discarded its result,
+    # so it only asserted that the path exists; os.stat raises for the same
+    # missing, dangling and symlink-loop cases without the per-component
+    # readlink walk.
     ordered = sorted(paths, key=lambda p: (len(p.parts), str(p)))
     roots: list[Path] = []
+    accepted: set[Path] = set()
     for path in ordered:
-        path.resolve(strict=True)
-        if not any(parent in path.parents for parent in roots):
+        os.stat(path)
+        if accepted.isdisjoint(path.parents):
             roots.append(path)
+            accepted.add(path)
     return ComponentInputs(tuple(ContentRoot(p) for p in roots), unavailable_reason=None)
 
 
@@ -110,8 +149,7 @@ def _package(name: str) -> set[Path]:
                 selected = Path(origin).resolve(strict=True)
                 if root not in selected.parents:
                     raise ValueError(f"Compiler package uses an external import redirect: {imported_name}")
-    for native in root.rglob("*.so"):
-        paths.update(_elf_inputs(native))
+    paths.update(_elf_inputs_many(root.rglob("*.so")))
     return paths
 
 
@@ -375,13 +413,15 @@ def _wheel_inputs(launcher: Path) -> set[Path]:
     paths.update(_elf_inputs(interpreter.resolve(strict=True)))
     # Reduce nested roots before visiting native extensions and bundled ELF
     # libraries, including wheel-specific directories such as numpy.libs.
+    natives = []
     for root in _component(paths).roots:
         candidates = root.path.rglob("*") if root.path.is_dir() else (root.path,)
         for native in candidates:
             if native.is_file() and ".so" in native.name:
                 with native.open("rb") as stream:
                     if stream.read(4) == b"\x7fELF":
-                        paths.update(_elf_inputs(native.resolve(strict=True)))
+                        natives.append(native.resolve(strict=True))
+    paths.update(_elf_inputs_many(natives))
     return paths
 
 
@@ -464,11 +504,13 @@ def _ptoas_inputs(launcher: Path, ancestors: frozenset[Path] = frozenset()) -> s
         raise ValueError("PTOAS requires its compatible self-contained CPython installation")
     paths = {launcher, root, prefix, *_elf_inputs(_executable("bash"))}
     paths.update(_elf_inputs(interpreter, library_path))
+    natives = []
     for directory in (root, Path(stdlib) / "lib-dynload"):
         for native in directory.rglob("*.so"):
             with native.open("rb") as stream:
                 if stream.read(4) == b"\x7fELF":
-                    paths.update(_elf_inputs(native, library_path))
+                    natives.append(native)
+    paths.update(_elf_inputs_many(natives, library_path))
     return paths
 
 
@@ -485,8 +527,7 @@ def _discover(compiler: Any, ptoas: str, runtime_name: str) -> ToolchainInputs:
     pypto.update(
         p for p in stdlib.iterdir() if p.name not in ("site-packages", "dist-packages", "__pycache__")
     )
-    for native in (stdlib / "lib-dynload").glob("*.so"):
-        pypto.update(_elf_inputs(native))
+    pypto.update(_elf_inputs_many((stdlib / "lib-dynload").glob("*.so")))
     runtime = _package("simpler") | _package("simpler_setup")
     runtime.update({compiler.project_root / "src", compiler.project_root / "build/lib"})
     native_interface = importlib.import_module("_task_interface")

@@ -30,6 +30,60 @@ def test_component_preserves_content_changes_without_metadata_change(tmp_path):
     assert len(component.roots) == 1
 
 
+def test_component_drops_every_enclosed_path_regardless_of_order(tmp_path):
+    # Roots are accepted by walking a candidate's own parents rather than
+    # rescanning the accepted roots, so an ancestor several levels up must still
+    # absorb its descendants, and unrelated siblings must survive.
+    deep = tmp_path / "sdk/lib/backend/plugin.so"
+    deep.parent.mkdir(parents=True)
+    deep.write_bytes(b"\x7fELF")
+    sibling = tmp_path / "other/header.h"
+    sibling.parent.mkdir()
+    sibling.write_text("aaa")
+    supplied = {tmp_path / "sdk", deep, deep.parent, deep.parent.parent, sibling, sibling.parent}
+
+    component = _toolchain._component(supplied)
+
+    assert [root.path for root in component.roots] == [sibling.parent, tmp_path / "sdk"]
+
+
+def test_component_rejects_an_input_that_does_not_exist(tmp_path):
+    present = tmp_path / "present.h"
+    present.write_text("aaa")
+    with pytest.raises(OSError):
+        _toolchain._component({present, tmp_path / "missing.h"})
+
+
+def test_component_rejects_a_dangling_symlink(tmp_path):
+    link = tmp_path / "libmissing.so"
+    link.symlink_to(tmp_path / "absent.so")
+    with pytest.raises(OSError):
+        _toolchain._component({link})
+
+
+def test_elf_inputs_many_merges_every_closure(monkeypatch, tmp_path):
+    first, second = tmp_path / "a.so", tmp_path / "b.so"
+    shared = tmp_path / "libc.so"
+    monkeypatch.setattr(_toolchain, "_elf_inputs", lambda p, *rest: {p, shared})
+    assert _toolchain._elf_inputs_many([first, second]) == {first, second, shared}
+    assert _toolchain._elf_inputs_many([]) == set()
+
+
+def test_elf_inputs_many_propagates_a_worker_failure(monkeypatch, tmp_path):
+    # A partial inventory is never returned: one unresolvable library fails the
+    # whole component exactly as the serial loop did.
+    natives = [tmp_path / f"lib{index}.so" for index in range(8)]
+
+    def explode(path, *rest):
+        if path == natives[5]:
+            raise ValueError(f"Unresolved native dependencies for {path}")
+        return {path}
+
+    monkeypatch.setattr(_toolchain, "_elf_inputs", explode)
+    with pytest.raises(ValueError, match="Unresolved native dependencies"):
+        _toolchain._elf_inputs_many(natives)
+
+
 def test_unknown_shell_launcher_is_not_an_executable_identity(tmp_path):
     script = tmp_path / "ptoas"
     script.write_text("#!/bin/sh\neval some_dynamic_command\n")
