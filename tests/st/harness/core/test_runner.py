@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pypto import ir
+from pypto import ir, passes
 from pypto.backend import (
     BackendType,
     get_backend_type,
@@ -163,7 +163,7 @@ def _cache_key(
     resolved_platform: str | None = None,
     session_memory_planner: MemoryPlanner | None = None,
 ) -> str:
-    """Return a unique cache key combining test name, platform, and planner.
+    """Key the test name, platform, planner and optional Buffer representation.
 
     The cache key is anchored to the *resolved* platform so that the
     pre-compilation cache, the binary cache and the executor all agree on
@@ -187,7 +187,57 @@ def _cache_key(
         raise ValueError(f"cannot key an artifact for {tc.get_name()}: no platform resolved or bound")
     planner = _resolve_case_memory_planner(tc, session_memory_planner)
     planner_tag = planner.name.lower() if planner is not None else "default"
-    return f"{tc.get_name()}@{resolved_platform}@{planner_tag}"
+    representation = "@buffer_ir" if _case_uses_buffer_ir(tc) else ""
+    return f"{tc.get_name()}@{resolved_platform}@{planner_tag}{representation}"
+
+
+def _case_uses_buffer_ir(test_case: PTOTestCase) -> bool:
+    """Keep older duck-typed cases on their existing compile path."""
+    getter = getattr(test_case, "get_enable_buffer_ir", None)
+    return getter is not None and getter() is True
+
+
+def _compile_case_program(test_case: PTOTestCase, program: ir.Program, **kwargs: Any) -> Any:
+    """Apply the case's representation in the thread that actually compiles it.
+
+    A parent-thread PassContext cannot configure the precompile pool. Capture
+    the actual final pass output so numerical success cannot hide a legacy run.
+    """
+    if not _case_uses_buffer_ir(test_case):
+        return ir.compile(program, **kwargs)
+
+    final_program: ir.Program | None = None
+
+    def capture_final(_pass: passes.Pass, transformed: ir.Program) -> None:
+        nonlocal final_program
+        final_program = transformed
+
+    outer = passes.PassContext.current()
+    instruments = list(outer.get_instruments()) if outer is not None else []
+    instruments.append(passes.CallbackInstrument(after_pass=capture_final, name="BufferAcceptance"))
+    planner = kwargs.pop("memory_planner", None)
+    if planner is None:
+        planner = outer.get_memory_planner() if outer is not None else MemoryPlanner.PYPTO
+    inherited: dict[str, Any] = {}
+    if outer is not None:
+        inherited = {
+            "verification_level": outer.get_verification_level(),
+            "diagnostic_phase": outer.get_diagnostic_phase(),
+            "disabled_diagnostics": outer.get_disabled_diagnostics(),
+            "enable_pypto_l0c_double_buffer": outer.get_enable_pypto_l0c_double_buffer(),
+            "runtime": outer.get_runtime(),
+        }
+    with passes.PassContext(instruments, memory_planner=planner, enable_buffer_ir=True, **inherited):
+        compiled = ir.compile(program, **kwargs)
+
+    if final_program is None:
+        raise ValueError(f"Buffer case {test_case.get_name()} produced no final pass output")
+    devices = [f for f in final_program.functions.values() if ir.is_incore_type(f.func_type)]
+    if not devices or any(f.ir_stage != ir.FunctionIRStage.Buffer for f in devices):
+        raise ValueError(f"Buffer case {test_case.get_name()} did not convert every device function")
+    receipt = Path(kwargs["output_dir"]) / "buffer_ir.msgpack"
+    receipt.write_bytes(ir.serialize(final_program))
+    return compiled
 
 
 # The platform of the item pytest is currently setting up or running, published
@@ -423,7 +473,8 @@ def _compile_for_cache(
             f"Test case {test_case.get_name()} must implement get_program() "
             "to return a @pl.program class or ir.Program"
         )
-    ir.compile(
+    _compile_case_program(
+        test_case,
         program,
         output_dir=str(work_dir),
         strategy=test_case.get_strategy(),
@@ -1632,7 +1683,8 @@ class TestRunner:
                 )
 
             strategy = test_case.get_strategy()
-            ir.compile(
+            _compile_case_program(
+                test_case,
                 program,
                 output_dir=str(work_dir),
                 strategy=strategy,
