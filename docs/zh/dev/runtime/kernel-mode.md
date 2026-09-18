@@ -111,9 +111,11 @@ python -m simpler_setup.tools.swimlane_converter \
 
 合并文件可用 Perfetto 打开。依赖采集会增加开销；精确测时可在独立进程中
 单独采集同一算子的依赖图，并通过转换器 `--deps-json` 指定文件。
-改变 init 配置需要新进程。一个窗口可以包含多次调用，但转换器要求窗口内
-`(core_id, reg_task_id)` 组合唯一，可能因不同调用复用 ID 而拒绝转换。
-需要转换泳道图时，每个窗口只测一次 PyPTO 调用。
+改变 init 配置需要新进程。一个窗口可以包含多次调用：转换器通过运行边界区分
+重复的任务 ID，保留调用间隔，并增加 `Kernel Launches` 泳道，事件详情包含
+`launch_epoch`。调用条的终点是最后一条观测记录，不是测量得到的完成时间。
+传入的依赖拓扑和名称映射会应用于每次调用；映射不同的工作负载应分别采集。
+独立的调度开销分析和依赖查看器的时间信息仍要求单次调用的采集结果。
 当前支持 A2/A3 TMR，包括预热后的 graph replay；begin/end 本身不支持 capture。
 
 ## Callable 身份与热路径测量
@@ -305,7 +307,7 @@ Simpler 或 native launch 扩展；`torch` 仍是 PyPTO 的常规依赖。真正
 Worker。`KernelConfig` 固定 platform、runtime、device、AICPU 线程数和 DFX 配置，其他常驻资源
 暂用 simpler 默认值。配置不兼容时报错，不额外创建 Worker。
 
-集成 SDK 固定为 `46b92250f2f5fa6e7166085f91e3fc7b7e74ca46`。实际 Python 接口为
+集成 SDK 固定为 `6cde59295057d99b846319366141a27f101afc56`。实际 Python 接口为
 `simpler.task_interface.ChipWorker.kernel_init`、`kernel_prepare_callable`、
 `kernel_begin_dfx`、`kernel_end_dfx` 和 `finalize`。PyPTO 内部 adapter
 使用这些已有方法；init/prepare 不接收 caller stream，native context generation 和

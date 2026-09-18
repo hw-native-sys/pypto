@@ -139,11 +139,15 @@ python -m simpler_setup.tools.swimlane_converter \
 Open the merged file in Perfetto. Dependency collection adds overhead; for timing
 measurements, collect the same operator's graph separately with `enable_dep_gen`
 and pass its file to the converter using `--deps-json`. Use separate processes
-when changing init settings. A window can include multiple launches, but the
-converter requires unique `(core_id, reg_task_id)` pairs across the window and
-can reject IDs reused across launches. Use one PyPTO launch per window for trace
-conversion. This integration supports A2/A3 TMR, including warmed graph replay;
-begin/end themselves cannot run inside capture.
+when changing init settings. A window can include multiple launches: the converter
+uses run boundaries to separate repeated task IDs, preserves launch spacing, and
+adds a `Kernel Launches` track with `launch_epoch` in event details. A launch bar
+ends at its last observed record, not a measured completion timestamp. The supplied
+dependency topology and name mapping apply to every launch; use separate windows
+for workloads with different mappings. Standalone scheduler overhead analysis and
+the dependency viewer's timing sidecar still require single-launch captures.
+This integration supports A2/A3 TMR, including warmed graph replay; begin/end
+themselves cannot run inside capture.
 
 ## Callable identity and hot-path measurements
 
@@ -398,7 +402,7 @@ context resources currently use Simpler defaults. An incompatible configuration
 is rejected instead of opening another Worker.
 
 The integration SDK is pinned to
-`46b92250f2f5fa6e7166085f91e3fc7b7e74ca46`. Its supported Python surface is
+`6cde59295057d99b846319366141a27f101afc56`. Its supported Python surface is
 `simpler.task_interface.ChipWorker.kernel_init`, `kernel_prepare_callable`,
 `kernel_begin_dfx`, `kernel_end_dfx` and `finalize`.
 PyPTO's private adapter uses these existing methods. Init and prepare take no

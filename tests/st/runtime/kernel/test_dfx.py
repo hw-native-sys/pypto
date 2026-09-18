@@ -113,7 +113,24 @@ def _run(device: int, directory: str, mode: str, diagnostics: str) -> None:
                     check=True,
                     timeout=60,
                 )
-                assert json.loads(merged.read_text())["traceEvents"]
+                trace = json.loads(merged.read_text())
+                launch_events = [
+                    event for event in trace["traceEvents"] if event.get("cat") == "kernel_launch"
+                ]
+                assert [event["args"]["launch_epoch"] for event in launch_events] == list(range(launches))
+                assert all(event["dur"] > 0 for event in launch_events)
+                assert all(
+                    earlier["ts"] < later["ts"] for earlier, later in zip(launch_events, launch_events[1:])
+                )
+                worker_tasks = [
+                    event
+                    for event in trace["traceEvents"]
+                    if event.get("pid") == 4 and event.get("ph") == "X" and "taskId" in event.get("args", {})
+                ]
+                assert sorted(event["args"]["launch_epoch"] for event in worker_tasks) == list(
+                    range(launches)
+                )
+                assert len({event["id"] for event in worker_tasks}) == launches
     if graph is not None:
         graph.reset()
 
