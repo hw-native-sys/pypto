@@ -120,10 +120,13 @@ such a variable is not in scope.
 | `PTOAS` | One `alloc_multi_tile` region + a `multi_tile_get` per use | **Rejected at codegen** |
 
 The PTOAS refusal is deliberate and worth understanding before you design around it: ptoas
-guards only the first `multi_tile_get` of an iteration, so a second co-live slot is read
-while the next iteration overwrites it. That was measured wrong on device before codegen
-started refusing it. **One slot live per iteration** is the shape the region form exists
-for, and it is the shape to write if you may switch planners.
+has mis-synchronized two co-live slots in a loop. Older releases left the second slot's load
+unguarded against the next iteration's write, measured wrong on device. The pinned release
+still gets one form of the shape wrong, a slot filled an iteration ahead of its read, which
+produces wrong data or a device hang
+([PTOAS#1519](https://github.com/hw-native-sys/PTOAS/issues/1519), fixed in ptoas 0.63).
+**One slot live per iteration** is the shape the region form exists for, and it is the
+shape to write if you may switch planners.
 
 ## Seeing the on-chip budget
 

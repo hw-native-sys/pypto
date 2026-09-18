@@ -904,11 +904,11 @@ class PTOCodegen : public CodegenBase {
    * expression. Emitting N unrelated `alloc_tile`s instead throws that away.
    *
    * Runs only under the PTOAS memory planner (`emit_tile_addr_ == false`). Under
-   * the PyPTO planner, ptoas runs at `--pto-level=level3`, where the fan-out of an
-   * explicit base address is not constant-folded, so its slot narrowing degrades
-   * to conservative aliasing — the multi-buffer form is measurably *worse* there
-   * than the baked-address `alloc_tile` path (an extra false WAR pair between two
-   * constant slots). See hw-native-sys/PTOAS#1106.
+   * the PyPTO planner, ptoas runs at `--pto-level=level3`, where a region needs an
+   * explicit `addr` base that codegen does not emit, so the baked-address
+   * `alloc_tile` path stays. ptoas itself handles such a region: given a constant
+   * `addr`, it has derived the same per-slot sync at level3 as at level2 since 0.55
+   * (hw-native-sys/PTOAS#1106, closed).
    *
    * A region is eligible when every tile bound to that allocation selects a slot,
    * the slots share one tile_buf type and one static valid extent, at most one of
@@ -916,7 +916,8 @@ class PTOCodegen : public CodegenBase {
    * for multi_tile_buf (vec / mat / acc), and the count is within ptoas's `[2, 16]`.
    *
    * The one-slot-per-iteration condition is a ptoas synchronization limit, not a
-   * typing one — see CoLiveSlotCollector.
+   * typing one (hw-native-sys/PTOAS#1519 in the pinned ptoas) — see
+   * CoLiveSlotCollector.
    *
    * Anything else is a `ValueError` naming the shape, *not* a fallback: under this
    * planner per-slot `alloc_tile`s would leave ptoas free to plan the slots on top

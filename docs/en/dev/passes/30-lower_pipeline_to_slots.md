@@ -123,7 +123,7 @@ configured) is left ungated, mirroring `MemoryReuse`. This bounds only what *thi
 pins: tiles it does not slot are still planned by ptoas with lifetime reuse, which the pass
 cannot model.
 
-**Why a declined enclosing loop disqualifies everything below it.** That loop will be replicated, and its `F` clones would each select one slot of the same allocation inside one loop body. ptoas derives the per-slot WAR guard only for the *first* `multi_tile_get` of an iteration, so codegen rejects that shape ([PTOAS#1118](https://github.com/hw-native-sys/PTOAS/issues/1118)).
+**Why a declined enclosing loop disqualifies everything below it.** That loop will be replicated, and its `F` clones would each select one slot of the same allocation inside one loop body — a shape PTO codegen rejects under this planner (see [one slot per iteration](../codegen/00-pto_codegen.md#multi-slot-declarations-become-one-ptoas-region-ptoas-mode)).
 
 ## Generated PTO IR
 

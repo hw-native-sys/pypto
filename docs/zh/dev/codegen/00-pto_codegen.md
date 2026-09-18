@@ -410,16 +410,23 @@ ptoas 的 `[2, 16]` 内）会报 `ValueError` 并指明具体形态，因为回�
 `alloc_tile` 会让 ptoas 有机会把这些槽位规划到同一块内存上。
 
 **每轮迭代只用一个槽位。** 共活槽位被拒绝，不是因为 ptoas 无法为它*定型*，而是无法为它
-*同步*：ptoas 0.54 只为一轮迭代中的**第一个** `multi_tile_get` 推导逐槽位 WAR 保护；有两个时，
-第二个 load 前面不会发出任何 `wait_flag`，于是下一轮迭代会在本轮还在读该槽位时覆盖它。真机上
-实测算错，因此代码生成直接拒绝该形态并指向 PyPTO planner——那里由固化地址和 PyPTO 自己发射的
-同步来处理。直线代码不受影响：没有循环就没有跨迭代复用需要保护。已报
-[PTOAS#1118](https://github.com/hw-native-sys/PTOAS/issues/1118)；修好后放宽只需改
-`PlanMultiBufferRegions` 里一个条件。
+*同步*。这类形态中有两种出过错：
 
-`PYPTO` 模式下则完全不发射区域：在 `--pto-level=level3` 下 ptoas 不会折叠逐槽位的地址展开，
-区域形式反而会丢掉它赖以存在的槽位分析
-（[PTOAS#1106](https://github.com/hw-native-sys/PTOAS/issues/1106)）。
+| 形态 | ptoas 行为 | 上游 |
+| ---- | ---------- | ---- |
+| 同一轮迭代内填充并读取两个槽位 | ≤ 0.55 只保护**第一个** `multi_tile_get`，第二个 load 与下一轮迭代的写入竞争（0.54 真机实测算错）。0.56 起用整个区域的一个静态 event 保护循环体——正确，但没有区域形式赖以存在的逐槽位重叠 | [PTOAS#1118](https://github.com/hw-native-sys/PTOAS/issues/1118)，0.56 修复 |
+| 预取：循环前填充槽位 0，之后每轮迭代填充槽位 `(i+1) % 2`、同时读取槽位 `i % 2` | ≤ 0.62 像一槽位轮转那样为两个槽位的 event 都做 prime 和 drain，在这里差一：迭代次数为偶数时算错，为奇数时设备挂死 | [PTOAS#1519](https://github.com/hw-native-sys/PTOAS/issues/1519)，0.63 修复 |
+
+`CoLiveSlotCollector` 只按循环体统计槽位选取次数，分不清这两种形态，而当前固定的 ptoas（0.61）
+仍有第二个缺陷。因此代码生成对两者都拒绝，并指向 PyPTO planner——它的固化地址 `alloc_tile`
+路径在真机上能正确运行同轮迭代那种形态。直线代码不受影响：没有循环就没有跨迭代复用需要
+保护。放宽限制只需改 `PlanMultiBufferRegions` 里一个条件，但前提是把 ptoas 固定版本升到 0.63
+或更高，并在真机上跑通这两种形态。
+
+`PYPTO` 模式下则完全不发射区域：`--pto-level=level3` 下的区域需要显式的基地址 `addr`，而
+codegen 目前还不发射它。限制不在 ptoas——给定常量 `addr`，ptoas 自 0.55 起在 level3 下推导出的
+逐槽位同步与 level2 相同（[PTOAS#1106](https://github.com/hw-native-sys/PTOAS/issues/1106)，
+已关闭）。
 
 ### 加载操作转换
 

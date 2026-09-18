@@ -198,19 +198,28 @@ class TilePhiBaseCollector : public ir::IRVisitor {
 
 // Allocations with two or more slots selected inside one loop body.
 //
-// ptoas derives the per-slot WAR guard from the slot expression, but only for the
-// FIRST `multi_tile_get` of a region in an iteration: given two co-live slots it
-// emits the dynamic `wait_flag`/`set_flag` pair for one and leaves the other load
-// unguarded, so the next iteration's write into that slot races the current
-// iteration's read of it. Measured on ptoas 0.54 (`--enable-insert-sync`,
-// `--pto-level=level2`, a3) — the kernel is silently wrong on device, not slow.
-// Filed as hw-native-sys/PTOAS#1118.
+// ptoas synchronizes such a body from the slot expressions, and has gotten two
+// forms of it wrong:
 //
-// The ping-pong the region form exists for takes ONE slot per iteration, and that
-// shape is guarded correctly. So the co-live shape is rejected rather than
-// miscompiled, and the author is pointed at the PyPTO planner, whose baked
-// addresses and PyPTO-emitted sync handle it. Straight-line code is untouched:
-// with no loop there is no cross-iteration reuse to guard.
+// - Two slots filled and read in the same iteration. ptoas <= 0.55 guarded only
+//   the FIRST `multi_tile_get` of an iteration, leaving the other load unguarded
+//   against the next iteration's write — measured silently wrong on device with
+//   ptoas 0.54 (hw-native-sys/PTOAS#1118). Fixed in 0.56, which guards the body
+//   with one static event for the whole region: correct, but with none of the
+//   per-slot overlap the region form exists for.
+// - The prefetch: slot 0 filled before the loop, then each iteration fills slot
+//   (i+1)%2 while reading slot i%2. ptoas <= 0.62 primes and drains both slots'
+//   events as for a one-slot rotation, which is off by one here — wrong data for
+//   an even trip count, a device hang for an odd one (hw-native-sys/PTOAS#1519,
+//   fixed in 0.63).
+//
+// This collector only counts slot selections per loop body, so it cannot tell the
+// two apart, and the pinned ptoas still has the second bug. Both are rejected
+// rather than miscompiled, and the author is pointed at the PyPTO planner, whose
+// baked-address alloc_tile path runs the same-iteration form correctly on device.
+// The ping-pong the region form exists for takes ONE slot per iteration and is
+// guarded correctly. Straight-line code is untouched: with no loop there is no
+// cross-iteration reuse to guard.
 class CoLiveSlotCollector : public ir::IRVisitor {
  public:
   std::set<const ir::Var*> bases;  ///< Allocations with >= 2 slots live in one loop body
@@ -1588,10 +1597,11 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
   fs_.multi_buffer_regions.clear();
   fs_.multi_buffer_region_order.clear();
 
-  // PyPTO planner (ptoas --pto-level=level3): ptoas fans an explicit base address
-  // out into the per-slot addresses without folding them, so its multi-buffer slot
-  // narrowing falls back to conservative aliasing — measurably worse there than the
-  // baked-address alloc_tile path. See hw-native-sys/PTOAS#1106.
+  // PyPTO planner (ptoas --pto-level=level3): a level3 region needs an explicit
+  // `addr` base, and the region emitted below carries none, so that planner keeps
+  // the baked-address alloc_tile path. The gap is PyPTO's, not ptoas's: given a
+  // constant `addr`, ptoas has derived the same per-slot sync at level3 as at level2
+  // since 0.55 (hw-native-sys/PTOAS#1106, closed).
   if (emit_tile_addr_) return;
 
   TilePhiBaseCollector phi_collector;
@@ -1709,10 +1719,10 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
       candidate.blocker = "one of its slots is carried out of an if or a loop as a phi";
     } else if (colive_collector.bases.count(memref->base_.get()) != 0) {
       candidate.blocker =
-          "two of its slots are live at once inside a loop, and ptoas guards only the first slot "
-          "selected in an iteration — the second would be read while the next iteration overwrites "
-          "it (ptoas 0.54). Take one slot per iteration, which is the shape the region form "
-          "accelerates";
+          "two of its slots are live at once inside a loop, and ptoas before 0.63 mis-synchronizes "
+          "one form of that — a slot filled an iteration ahead of its read — into wrong data or a "
+          "device hang (hw-native-sys/PTOAS#1519). Take one slot per iteration, which is the shape "
+          "the region form accelerates";
     }
   }
 

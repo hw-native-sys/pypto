@@ -114,7 +114,7 @@ shape、phi、view / 原地算子）只对**真正想要 slot** 的 load 生效�
 不设闸门，与 `MemoryReuse` 的做法一致。本闸门只约束**本 pass 钉住**的部分：未被开槽的 tile 仍由
 ptoas 带生命周期复用地规划，那部分本 pass 无法建模。
 
-**为什么被拒绝的外层循环会使其下方全部失去资格。** 那个循环会被复制，其 `F` 个副本会在同一个循环体内各自选取同一分配的一个 slot。ptoas 只为一次迭代中**第一个** `multi_tile_get` 推导 per-slot WAR 保护，因此 codegen 拒绝这种形状（[PTOAS#1118](https://github.com/hw-native-sys/PTOAS/issues/1118)）。
+**为什么被拒绝的外层循环会使其下方全部失去资格。** 那个循环会被复制，其 `F` 个副本会在同一个循环体内各自选取同一分配的一个 slot——这是 PTO codegen 在该 planner 下拒绝的形状（见[每轮迭代只用一个槽位](../codegen/00-pto_codegen.md#多槽位声明映射为一块-ptoas-区域ptoas-模式)）。
 
 ## 生成的 PTO IR
 

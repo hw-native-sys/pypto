@@ -193,10 +193,10 @@ than Vec / Mat / Acc, a runtime valid shape, or a slot carried out of an `if` or
 phi. Those are errors naming the shape, not silent fallbacks, because a fallback would
 undo the separation you declared.
 
-The default PyPTO planner is unaffected: it bakes addresses, and at
-`--pto-level=level3` ptoas does not fold its per-slot address fan-out, so the region form
-would there lose the very slot analysis it exists for
-([PTOAS#1106](https://github.com/hw-native-sys/PTOAS/issues/1106)).
+The default PyPTO planner is unaffected: it bakes addresses and keeps the `alloc_tile`
+form. A region at `--pto-level=level3` needs an explicit base `addr`, which codegen does
+not emit yet; ptoas itself has supported that form since 0.55
+([PTOAS#1106](https://github.com/hw-native-sys/PTOAS/issues/1106), closed).
 
 A declared name lives in its own namespace — it never resolves to a Python variable that
 happens to share it. The memory space **is** required (a `TileType` always pairs a

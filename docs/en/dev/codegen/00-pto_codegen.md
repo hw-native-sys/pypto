@@ -437,19 +437,26 @@ because falling back to per-slot `alloc_tile` would let ptoas plan the slots on
 top of each other.
 
 **One slot per iteration.** The co-live rejection is not a shape ptoas fails to
-*type* — it is one it fails to *synchronize*. ptoas 0.54 derives the per-slot WAR
-guard only for the first `multi_tile_get` of an iteration; given two, the second
-load is emitted with no `wait_flag`, so the next iteration overwrites that slot
-while the current one still reads it. Measured wrong on device, so codegen refuses
-the shape and points at the PyPTO planner, whose baked addresses and PyPTO-emitted
-sync handle it. Straight-line code is unaffected — with no loop there is no
-cross-iteration reuse to guard. Filed as
-[PTOAS#1118](https://github.com/hw-native-sys/PTOAS/issues/1118); lifting the
-restriction is one condition in `PlanMultiBufferRegions`.
+*type* — it is one it fails to *synchronize*. Two forms of it have gone wrong:
 
-Under `PYPTO` no region is emitted at all: at `--pto-level=level3` ptoas does not
-fold its per-slot address fan-out, so the region form would lose the slot analysis
-it exists for ([PTOAS#1106](https://github.com/hw-native-sys/PTOAS/issues/1106)).
+| Form | ptoas behaviour | Upstream |
+| ---- | --------------- | -------- |
+| Two slots filled and read in the same iteration | ≤ 0.55 guards only the first `multi_tile_get`; the second load races the next iteration's write (measured wrong on device with 0.54). 0.56+ guards the body with one static event for the whole region — correct, but none of the per-slot overlap the region form exists for | [PTOAS#1118](https://github.com/hw-native-sys/PTOAS/issues/1118), fixed in 0.56 |
+| Prefetch: slot 0 filled before the loop, then each iteration fills slot `(i+1) % 2` while reading slot `i % 2` | ≤ 0.62 primes and drains both slots' events as for a one-slot rotation, off by one here: wrong data for an even trip count, a device hang for an odd one | [PTOAS#1519](https://github.com/hw-native-sys/PTOAS/issues/1519), fixed in 0.63 |
+
+`CoLiveSlotCollector` counts slot selections per loop body, so it cannot tell the
+two forms apart, and the pinned ptoas (0.61) still has the second bug. Codegen
+therefore refuses both and points at the PyPTO planner, whose baked-address
+`alloc_tile` path runs the same-iteration form correctly on device.
+Straight-line code is unaffected — with no loop there is no cross-iteration reuse
+to guard. Lifting the restriction is one condition in `PlanMultiBufferRegions`;
+it needs the ptoas pin at 0.63 or later and a device run of both forms.
+
+Under `PYPTO` no region is emitted at all: a region at `--pto-level=level3` needs
+an explicit base `addr`, which codegen does not emit yet. ptoas is not the limit —
+given a constant `addr` it has derived the same per-slot sync at level3 as at
+level2 since 0.55 ([PTOAS#1106](https://github.com/hw-native-sys/PTOAS/issues/1106),
+closed).
 
 ### Load Operation Transformation
 

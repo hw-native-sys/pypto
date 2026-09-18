@@ -31,11 +31,11 @@ both planners against one golden is what shows the region form is equivalent.
 
 The double-buffer case is the shape the region form exists for — one slot live per
 iteration — and its golden checks the WAR edge ptoas derives from the slot index.
-Two slots live at once inside a loop is **rejected** under PTOAS: ptoas 0.54 guards
-only the first ``multi_tile_get`` of an iteration, so the second is read while the
-next iteration overwrites it. That was measured wrong on device before codegen
-started refusing it, and ``MultiBufferCoLiveProgram`` is the case that pins the
-refusal.
+Two slots live at once inside a loop is **rejected** under PTOAS. ptoas 0.54 guarded
+only the first ``multi_tile_get`` of an iteration, which was measured wrong on device
+(hw-native-sys/PTOAS#1118, fixed in 0.56); the pinned ptoas still mis-syncs the
+prefetch form of the shape (hw-native-sys/PTOAS#1519, fixed in 0.63), which codegen
+cannot tell apart. ``MultiBufferCoLiveProgram`` is the case that pins the refusal.
 """
 
 from typing import Any
@@ -210,12 +210,13 @@ MULTI_BUF_CONST = pl.MemRef(slots=2)
 class MultiBufferCoLiveProgram:
     """Two UB slots co-live per iteration — rejected under PTOAS, correct under PYPTO.
 
-    ptoas derives the per-slot WAR guard only for the first ``multi_tile_get`` of a
-    region in an iteration; with two co-live slots the second load is unguarded and
-    the next iteration overwrites the slot while this one is still reading it.
-    Measured wrong on device (ptoas 0.54): ``out`` came back as ``a[block i+1] +
-    a[block i]`` instead of ``a + b``. Codegen therefore refuses the shape, and this
-    kernel is the ST that pins that refusal — under PYPTO the same source is fine.
+    ptoas 0.54 derived the per-slot WAR guard only for the first ``multi_tile_get`` of
+    a region in an iteration, so the second load raced the next iteration's write.
+    Measured wrong on device: ``out`` came back as ``a[block i+1] + a[block i]``
+    instead of ``a + b`` (hw-native-sys/PTOAS#1118, fixed in 0.56). The pinned ptoas
+    still mis-syncs the prefetch form of this shape (hw-native-sys/PTOAS#1519, fixed in
+    0.63), and codegen cannot tell the forms apart, so it refuses both; this kernel is
+    the ST that pins that refusal — under PYPTO the same source is fine.
     """
 
     @pl.function(type=pl.FunctionType.InCore)
@@ -619,9 +620,9 @@ class TestMemoryPlannerPtoas:
         assert result.passed, f"multi-buffer co-live ({_planner_tag(planner)}) failed: {result.error}"
 
     def test_multi_buffer_colive_slots_rejected_under_ptoas(self):
-        # ptoas 0.54 emits the per-slot WAR pair only for the first multi_tile_get
-        # of an iteration, so the second slot is read while the next iteration
-        # overwrites it — measured wrong on device. Refuse rather than miscompile.
+        # Two co-live slots include a prefetch form the pinned ptoas mis-syncs
+        # (hw-native-sys/PTOAS#1519, fixed in 0.63; 0.54 also got this
+        # same-iteration form wrong on device, #1118). Refuse rather than miscompile.
         #
         # Asserted here through the real `ir.compile` entry point, which surfaces a
         # kernel's ValueError as PartialCodegenError; the exact reason string is
