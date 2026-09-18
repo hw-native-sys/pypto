@@ -229,6 +229,32 @@ def test_probe_runs_once_per_binary(tmp_path):
     assert _calls(ptoas) == ["--version"]
 
 
+def test_check_returns_the_complete_version_text(tmp_path):
+    ptoas = _make_versioned_ptoas(tmp_path / "bin" / "ptoas", f"ptoas {_PINNED}.dev3+g1234abc")
+
+    assert check_ptoas_version(str(ptoas)) == f"ptoas {_PINNED}.dev3+g1234abc"
+
+
+def test_a_dev_build_is_distinguishable_from_the_release_it_came_from(tmp_path):
+    # The accepted-version parser keeps only the numeric part, so both of these
+    # pass the same gate with the same number. Anything identifying the
+    # assembler has to use the complete text instead.
+    release = _make_versioned_ptoas(tmp_path / "release" / "ptoas", f"ptoas {_PINNED}")
+    dev = _make_versioned_ptoas(tmp_path / "dev" / "ptoas", f"ptoas {_PINNED}.dev3")
+
+    assert check_ptoas_version(str(release)) != check_ptoas_version(str(dev))
+
+
+def test_a_memoized_check_still_returns_the_text(tmp_path):
+    ptoas = _make_versioned_ptoas(tmp_path / "bin" / "ptoas", f"ptoas {_PINNED}")
+
+    first = check_ptoas_version(str(ptoas))
+    second = check_ptoas_version(str(ptoas))
+
+    assert first == second == f"ptoas {_PINNED}"
+    assert _calls(ptoas) == ["--version"]
+
+
 def test_failed_check_is_not_cached(tmp_path):
     """Replacing a stale install in place must take effect without a restart."""
     ptoas = tmp_path / "bin" / "ptoas"

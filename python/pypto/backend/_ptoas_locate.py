@@ -25,7 +25,7 @@ PTOAS_RELEASES_URL = "https://github.com/hw-native-sys/PTOAS/releases"
 # `ptoas --version` prints e.g. "ptoas 0.61"; a dev build may append a suffix.
 _VERSION_RE = re.compile(r"\bptoas(?:\s+version)?\s+v?(\d+(?:\.\d+)+)")
 _version_lock = threading.Lock()
-_verified_binaries: set[str] = set()
+_verified_binaries: dict[str, str] = {}
 
 # Probed in order under $PTOAS_ROOT — launcher first, the three entries are NOT
 # interchangeable:
@@ -65,7 +65,7 @@ def _parse_version(text: str) -> tuple[int, ...]:
     return tuple(int(part) for part in text.removeprefix("v").split("."))
 
 
-def check_ptoas_version(ptoas_bin: str) -> None:
+def check_ptoas_version(ptoas_bin: str) -> str:
     """Reject a ``ptoas`` older than :data:`PTOAS_MIN_VERSION`.
 
     An older assembler rejects instruction forms the current codegen emits, and
@@ -78,6 +78,13 @@ def check_ptoas_version(ptoas_bin: str) -> None:
         ptoas_bin: Path to the ``ptoas`` executable, e.g. from
             :func:`find_ptoas_binary`.
 
+    Returns:
+        The probe's complete ``--version`` text. Callers identifying the
+        assembler must use this rather than the parsed number: the pattern
+        below captures only the numeric part, so a dev build's suffix -- the
+        very thing that distinguishes it from the release it was built from --
+        is absent from the comparison value.
+
     Raises:
         RuntimeError: If the version cannot be determined, or is older than
             :data:`PTOAS_MIN_VERSION`.
@@ -88,7 +95,7 @@ def check_ptoas_version(ptoas_bin: str) -> None:
         # The probe itself still runs the unresolved path, as callers do.
         cache_key = os.path.realpath(ptoas_bin)
         if cache_key in _verified_binaries:
-            return
+            return _verified_binaries[cache_key]
         install_hint = (
             f"Install PTOAS {PTOAS_MIN_VERSION} or newer from {PTOAS_RELEASES_URL} "
             "and point PTOAS_ROOT at it."
@@ -118,4 +125,5 @@ def check_ptoas_version(ptoas_bin: str) -> None:
                 f"ptoas at '{ptoas_bin}' is version {found}, but PyPTO requires PTOAS >= "
                 f"{PTOAS_MIN_VERSION}. {install_hint}"
             )
-        _verified_binaries.add(cache_key)
+        _verified_binaries[cache_key] = output
+        return output

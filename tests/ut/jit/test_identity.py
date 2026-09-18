@@ -414,6 +414,29 @@ def test_a_verified_revision_cannot_collide_across_schemes(inventories):
     assert identity.pto_isa != fingerprint_content(inventories.pto_isa.roots).digest
 
 
+def test_a_reported_version_is_not_a_verified_revision(inventories):
+    # The same string under the two fields records different evidence, so the
+    # digests must differ; otherwise a weaker claim could impersonate a proof.
+    claim = "0.61"
+    reported = replace(inventories.ptoas, roots=(), reported_version=claim)
+    verified = replace(inventories.ptoas, roots=(), verified_revision=claim)
+    cache = InstallationIdentityCache()
+    as_reported = cache.capture(replace(inventories, ptoas=reported)).ptoas
+    as_verified = cache.capture(replace(inventories, ptoas=verified)).ptoas
+    assert as_reported is not None and as_verified is not None
+    assert as_reported != as_verified
+
+
+def test_a_reported_version_tracks_the_whole_string(inventories):
+    def capture(reported):
+        component = replace(inventories.ptoas, roots=(), reported_version=reported)
+        return InstallationIdentityCache().capture(replace(inventories, ptoas=component)).ptoas
+
+    # A dev build and the release it came from share a parsed number; the
+    # identity must still separate them.
+    assert capture("ptoas 0.61") != capture("ptoas 0.61.dev3")
+
+
 def test_an_unavailable_component_outranks_a_verified_revision(inventories):
     blocked = replace(
         inventories.pto_isa, roots=(), verified_revision="d" * 40, unavailable_reason="probe failed"

@@ -568,11 +568,43 @@ def _pto_isa_component(isa_root: Path) -> ComponentInputs:
     return ComponentInputs(unavailable_reason=None, verified_revision=revision)
 
 
+def _ptoas_component(ptoas_bin: str) -> ComponentInputs:
+    """Identify the assembler by the version it reports about itself.
+
+    Unlike PTO-ISA, nothing proves this installation's bytes: ptoas is an
+    external tree selected by ``PTOAS_ROOT``, its releases carry no manifest
+    the installer checks, and the sha256 in ``toolchain/versions.env`` names
+    the downloaded wheel rather than anything reachable from the unpacked
+    tree. This identity therefore rests on a deployment property -- that ptoas
+    arrives as an unmodified published build -- and not on evidence PyPTO can
+    check. A rebuild or a patch applied in place under an unchanged version is
+    invisible here, where the full inventory would have caught it.
+
+    The probe's complete output is the identity, not the number parsed out of
+    it: the parser keeps only the numeric part, so a dev build's suffix -- the
+    one marker that separates it from the release it came from -- would
+    otherwise be discarded. check_ptoas_version already runs this probe once
+    per executable, so no extra process is started, and an assembler it
+    rejects never reaches this point.
+
+    Falls back to the content inventory whenever the probe fails.
+    """
+    from pypto.backend._ptoas_locate import check_ptoas_version  # noqa: PLC0415
+
+    try:
+        reported = check_ptoas_version(ptoas_bin).strip()
+    except RuntimeError:
+        reported = ""
+    if not reported:
+        return _component(_ptoas_inputs(Path(ptoas_bin)))
+    return ComponentInputs(unavailable_reason=None, reported_version=reported)
+
+
 def _discover(compiler: Any, ptoas: str, runtime_name: str) -> ToolchainInputs:
     """Collect the compiler, linker, SDK and PTO assembler inputs for cache identity."""
     if sys.platform != "linux":
         raise ValueError(f"Unsupported dependency discovery platform: {sys.platform}")
-    ptoas_paths = _ptoas_inputs(Path(ptoas))
+    ptoas_component = _ptoas_component(ptoas)
     pypto = _package("pypto")
     pypto.update(_elf_inputs(Path(sys.executable).resolve()))
     stdlib = Path(sysconfig.get_path("stdlib"))
@@ -626,7 +658,7 @@ def _discover(compiler: Any, ptoas: str, runtime_name: str) -> ToolchainInputs:
         _component(pypto),
         _component(runtime),
         _pto_isa_component(isa),
-        _component(ptoas_paths),
+        ptoas_component,
         _component(device),
     )
 
