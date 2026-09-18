@@ -61,9 +61,13 @@ JIT 调用和 `kernel.compile()` 在查找进程内产物之前解析编译选�
   以及 `dump_ptoas_passes=True`。
 - `compile_profiling=True`、活跃的 `CompileProfiler`，或通过
   `PYPTO_COMPILE_PROFILING` 启用的编译性能分析。
-- 显式指定 `save_kernels_dir`，或非空的 `PYPTO_PROG_BUILD_DIR`。
+- 显式指定 `save_kernels_dir` 或 `CompileOptions(output_dir=...)`。
 - 显式诊断设置，或包含 instrument、验证/诊断设置不同于流水线默认值的活跃
   `PassContext`。
+
+`PYPTO_PROG_BUILD_DIR` 只选择输出位置，不强制重编。持久缓存默认开启，在该父目录的
+`.pypto-cache` 下保存产物，除非缓存策略指定其他根目录。
+优先级及关闭方式见[缓存配置](../10-jit-cache.md#配置)。
 
 因此已有缓存的 kernel 仍会输出请求的 dump 和报告；重复请求会重新生成输出。
 诊断编译失败不会改变普通缓存条目。JIT 为每次编译自动分配唯一输出目录，
@@ -122,7 +126,7 @@ constexpr 参数不在该列表中，产物已经把它解析掉了。
 二进制构建失败后，可以再次调用 warmup 重试。诊断和显式输出请求仍按上文规则重新编译。
 
 启用[持久缓存](../10-jit-cache.md) 后，warmup 通过[运行时协议](../09-artifact-store.md)
-自动发布或复用 READY 产物。持久缓存默认关闭；只读未命中、不支持的输入和存储故障
+自动发布或复用 READY 产物。持久缓存默认开启；只读未命中、不支持的输入和存储故障
 可以生成私有结果。从缓存恢复的结果 `.program is None`；需要 IR 时关闭持久缓存，
 或使用 `specialize()`/`lower()`。公共缓存策略、统计和仅用元数据预热的 CLI 参见
 [JIT 持久缓存](../10-jit-cache.md)。

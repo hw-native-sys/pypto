@@ -44,6 +44,7 @@ def pass_verification_context():
 
 @pytest.fixture(autouse=True)
 def _redirect_prog_build_dir(tmp_path, monkeypatch):
-    """Isolate artifacts without an explicit output request that bypasses JIT caching."""
+    """Keep frontend tests independent of the installed persistent-cache toolchain."""
     monkeypatch.delenv("PYPTO_PROG_BUILD_DIR", raising=False)
+    monkeypatch.setenv("PYPTO_CACHE", "0")
     monkeypatch.chdir(tmp_path)

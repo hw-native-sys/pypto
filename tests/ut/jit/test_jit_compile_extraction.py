@@ -785,7 +785,7 @@ def test_diagnostic_requests_neither_lookup_nor_insert(kernel, compile_calls, mo
         assert kernel.compile() is cached
 
 
-@pytest.mark.parametrize("env_name", ["PYPTO_PROG_BUILD_DIR", "PYPTO_COMPILE_PROFILING"])
+@pytest.mark.parametrize("env_name", ["PYPTO_COMPILE_PROFILING"])
 def test_environment_request_bypasses_warm_cache(kernel, compile_calls, monkeypatch, tmp_path, env_name):
     kernel.compile()
     before = dict(kernel._cache)
@@ -794,6 +794,25 @@ def test_environment_request_bypasses_warm_cache(kernel, compile_calls, monkeypa
     assert kernel.compile() is not first
     assert len(compile_calls) == 3
     assert kernel._cache == before
+
+
+def test_build_directory_reuses_private_compilation_and_separates_roots(kernel, monkeypatch, tmp_path):
+    # Persistence is explicitly disabled by the frontend fixture. Output roots
+    # must still participate in object selection so a new root receives files.
+    ordinary = kernel.compile()
+    root = tmp_path / "requested"
+    monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(root))
+    first = kernel.compile()
+    assert first is not ordinary and first.output_dir.parent == root
+    assert kernel.compile() is first
+    assert (first.output_dir / "compiled_meta.json").is_file()
+    monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(tmp_path / "other"))
+    second = kernel.compile()
+    assert second is not first and second.output_dir.parent == tmp_path / "other"
+    monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(root))
+    assert kernel.compile() is first
+    monkeypatch.delenv("PYPTO_PROG_BUILD_DIR")
+    assert kernel.compile() is ordinary
 
 
 def test_active_profiler_bypasses_warm_cache(kernel, compile_calls):

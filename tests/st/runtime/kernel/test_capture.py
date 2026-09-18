@@ -51,10 +51,37 @@ def _entrypoints(entry):
     return registered, registered
 
 
-def _run(device, directory, case, entry="jit"):
+def _configure_capture_cache(directory, case):
+    from pypto import CacheConfig, configure_cache  # noqa: PLC0415
+
+    if case == "build-dir":
+        os.environ["PYPTO_PROG_BUILD_DIR"] = str(Path(directory) / "generated")
+        for name in ("PYPTO_CACHE", "PYPTO_CACHE_DIR", "PYPTO_CACHE_READONLY"):
+            os.environ.pop(name, None)
+        configure_cache(None)
+    else:
+        configure_cache(CacheConfig(enabled=case == "persistent", root=Path(directory) / "cache"))
+
+
+def _check_default_cache_reuse(counts, update, add, x, out, following, directory, restored):
+    from pypto import cache_stats  # noqa: PLC0415
+    from pypto.jit._artifact_manifest import MANIFEST_NAME  # noqa: PLC0415
+
+    before_repeat = counts.copy()
+    assert counts["compile"] == (0 if restored else 2)
+    assert counts["prepare"] == 2, "each process must prepare its own callable"
+    stats = cache_stats()
+    assert stats.binary_builds == (0 if restored else 2)
+    assert stats.ready_hits == (2 if restored else 0)
+    update(x, 3.0, out)
+    add(out, following, value=4)
+    assert counts == before_repeat, "default-cache hits must not compile or prepare again"
+    assert list((Path(directory) / "generated/.pypto-cache").rglob(MANIFEST_NAME))
+
+
+def _run(device, directory, case, entry="jit", restored=False):
     import torch  # noqa: PLC0415
     import torch_npu  # noqa: PLC0415
-    from pypto import CacheConfig, configure_cache  # noqa: PLC0415
     from pypto.runtime import RunConfig  # noqa: PLC0415
     from pypto.runtime.kernel.abi import _NativeWorker  # noqa: PLC0415
     from pypto.runtime.kernel.context import get_process_kernel_state  # noqa: PLC0415
@@ -63,10 +90,8 @@ def _run(device, directory, case, entry="jit"):
     from tests.st.runtime.kernel.test_jit_eager import accumulate  # noqa: PLC0415
 
     os.chdir(directory)
-    if case == "build-dir":
-        os.environ["PYPTO_PROG_BUILD_DIR"] = str(Path(directory) / "generated")
     torch_npu.npu.set_device(device)
-    configure_cache(CacheConfig(enabled=case == "persistent", root=Path(directory) / "cache"))
+    _configure_capture_cache(directory, case)
     # Only the internal artifact lookup takes compile-side RunConfig; kernel calls never do.
     build_config = RunConfig(platform="a2a3", device_id=device)
     x = torch.full((16, 16), 2.0, device=f"npu:{device}")
@@ -115,6 +140,10 @@ def _run(device, directory, case, entry="jit"):
                 "build-dir",
             ):
                 warm_add(out, following, value=4)
+            if case == "build-dir":
+                _check_default_cache_reuse(
+                    counts, warm_update, warm_add, x, out, following, directory, restored
+                )
             torch_npu.npu.synchronize()
             out.zero_()
         warmed = counts.copy()
@@ -149,7 +178,7 @@ def _run(device, directory, case, entry="jit"):
             graph.reset()
             return
         callables = 1 if case == "single" else 2
-        assert warmed == dict(compile=callables, init=1, prepare=callables)
+        assert warmed == dict(compile=0 if restored else callables, init=1, prepare=callables)
         scalar.value = 99.0
         tensors = [x, out, following]
         del x, out, following
@@ -249,7 +278,7 @@ def _replay_case(case, graphs, tensors, device, torch_npu, add):
     return graph
 
 
-def _isolated(test_config, tmp_path, case, queue_enabled, entry):
+def _isolated(test_config, tmp_path, case, queue_enabled, entry, restored=False):
     if test_config.codegen_only or test_config.platform != "a2a3":
         pytest.skip("Requires an A2/A3 NPU")
     pytest.importorskip("torch_npu")
@@ -258,11 +287,12 @@ def _isolated(test_config, tmp_path, case, queue_enabled, entry):
             sys.executable,
             "-c",
             "from tests.st.runtime.kernel.test_capture import _run; "
-            "import sys; _run(int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4])",
+            "import sys; _run(int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5] == '1')",
             str(test_config.device_id),
             str(tmp_path),
             case,
             entry,
+            str(int(restored)),
         ],
         env=dict(os.environ, TASK_QUEUE_ENABLE=str(queue_enabled)),
         capture_output=True,
@@ -272,6 +302,8 @@ def _isolated(test_config, tmp_path, case, queue_enabled, entry):
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PyPTO kernel shutdown did not complete" not in result.stderr
+    if case == "build-dir" and not restored:
+        _isolated(test_config, tmp_path, case, queue_enabled, entry, restored=True)
 
 
 @pytest.mark.parametrize("entry", ["jit", "torch_ops"])

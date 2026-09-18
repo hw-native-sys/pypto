@@ -73,6 +73,7 @@ import threading
 import warnings
 from collections.abc import Callable, Hashable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from pypto._cache_config import capture_cache_config, record_stats, time_stage
@@ -2381,7 +2382,6 @@ def _resolve_compile_request(run_config: Any) -> tuple[dict[str, Any], bool]:
         or kwargs["profiling"]
         or get_active_profiler() is not None
         or kwargs.get("output_dir") is not None
-        or bool(os.environ.get("PYPTO_PROG_BUILD_DIR"))
         or os.environ.get("PYPTO_EMIT_DEBUG_RUNNER") is not None
         or os.environ.get("PYPTO_REBUILD_FROM_PTO") is not None
         or kwargs.get("verification_level") is not None
@@ -2515,7 +2515,7 @@ class JITFunction:
         self._external_dual_aiv_dispatch = external_dual_aiv_dispatch
         self._external_include_dirs = external_include_dirs
         self._dep_graph_state: _CachedDepGraph | None = None
-        self._cache: dict[CacheKey | tuple[CacheKey, KernelABI], Any] = {}
+        self._cache: dict[Hashable, Any] = {}
         self._artifact_objects: dict[Any, Any] = {}
         self._kernel_contracts: dict[CacheKey, tuple[Any, KernelABI]] = {}
         self._cache_lock = threading.RLock()
@@ -3166,6 +3166,8 @@ class JITFunction:
         )
 
         compile_kwargs, bypass_cache = _resolve_compile_request(run_config)
+        build_root = os.environ.get("PYPTO_PROG_BUILD_DIR")
+        output_root = Path(build_root).resolve() if build_root else None
         runtime = _resolve_runtime()
         if _kernel_config is not None:
             # Eager calls compile for the target bound by pypto.torch.init;
@@ -3209,6 +3211,19 @@ class JITFunction:
                 raise RuntimeError("Kernel capture requires warmup outside capture for this specialization")
             record_stats(generation_builds=1)
             with time_stage("build_ns"):
+                if (
+                    output_root is not None
+                    and compile_kwargs.get("output_dir") is None
+                    and "output_dir" not in overrides
+                ):
+                    private_root = output_root
+                    if cache_config.enabled and cache_config.root in (output_root, *output_root.parents):
+                        from ._persistent import _fallback_private_root  # noqa: PLC0415
+
+                        assert cache_config.root is not None
+                        private_root = _fallback_private_root(cache_config.root, os.getpid())
+                    private_root.mkdir(parents=True, exist_ok=True)
+                    overrides["output_dir"] = tempfile.mkdtemp(prefix=f"{self.__name__}_", dir=private_root)
                 if kernel_abi is not None:
                     assert kernel_program is not None
                     from pypto.ir.compile import _compile_impl  # noqa: PLC0415
@@ -3286,7 +3301,7 @@ class JITFunction:
                 kernel_program, kernel_abi = self._kernel_contracts[key]
                 if _preflight is not None and not preflight_done:
                     capturing = _preflight(kernel_abi, ordered_args, kernel_key)
-            memory_key = key if kernel_abi is None else (key, kernel_abi)
+            memory_key = (key, kernel_abi, output_root)
             if cache_config.enabled:
                 from ._persistent import resolve_persistent  # noqa: PLC0415
 
@@ -3298,7 +3313,7 @@ class JITFunction:
                     self._persistent_source_digest,
                     platform=compile_kwargs["platform"],
                     runtime_name=runtime_kind_to_name(runtime),
-                    distributed=self._func_type == "host",
+                    output_root=output_root,
                     **({} if kernel_abi is None else {"kernel_abi": kernel_abi, "require_cached": capturing}),
                 )
             elif memory_key in self._cache:

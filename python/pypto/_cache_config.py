@@ -27,7 +27,7 @@ class CacheConfig:
     writers. Read-only stores permit private builds outside the cache root.
     """
 
-    enabled: bool = False
+    enabled: bool = True
     root: Path | None = None
     readonly: bool = False
     extra_source_paths: tuple[Path, ...] = ()
@@ -44,9 +44,6 @@ class CacheConfig:
             raise TypeError("CacheConfig.extra_source_paths must be a tuple of Path objects")
         if self.extra_fingerprint is not None and type(self.extra_fingerprint) is not str:
             raise TypeError("CacheConfig.extra_fingerprint must be str or None")
-
-
-_DEFAULT_CONFIG = CacheConfig()
 
 
 @dataclass(frozen=True)
@@ -129,13 +126,12 @@ def capture_cache_config(per_call: CacheConfig | None) -> CacheConfig:
         config = per_call if per_call is not None else _policy.override
     if config is None:
         root = os.environ.get("PYPTO_CACHE_DIR")
+        build_root = os.environ.get("PYPTO_PROG_BUILD_DIR")
         enabled = os.environ.get("PYPTO_CACHE")
         readonly = os.environ.get("PYPTO_CACHE_READONLY")
-        if root is None and enabled is None and readonly is None:
-            return _DEFAULT_CONFIG
         config = CacheConfig(
-            enabled=_boolean("PYPTO_CACHE", "0" if enabled is None else enabled),
-            root=Path(root) if root else None,
+            enabled=_boolean("PYPTO_CACHE", "1" if enabled is None else enabled),
+            root=Path(root) if root else Path(build_root) / ".pypto-cache" if build_root else None,
             readonly=_boolean("PYPTO_CACHE_READONLY", "0" if readonly is None else readonly),
         )
     if not isinstance(config, CacheConfig):

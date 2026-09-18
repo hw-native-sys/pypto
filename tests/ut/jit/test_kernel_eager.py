@@ -103,7 +103,9 @@ def eager(monkeypatch):
     monkeypatch.setattr(JITFunction, "_resolve_specialization", counted_specialization)
     events.real_invoke = launch.invoke
     monkeypatch.setattr(launch, "invoke", invoke)
-    monkeypatch.setattr(importlib.import_module("pypto._cache_config")._policy, "override", CacheConfig())
+    monkeypatch.setattr(
+        importlib.import_module("pypto._cache_config")._policy, "override", CacheConfig(enabled=False)
+    )
     events.state = _bind(monkeypatch, KernelConfig("a2a3", "tensormap_and_ringbuffer", 0))
     return events
 
@@ -314,7 +316,7 @@ def test_capture_finds_prepared_callable_without_compilation_caches(prepared, mo
 
 
 def test_bypassed_eager_rebuild_publishes_latest_prepared_callable(prepared, monkeypatch, tmp_path):
-    monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(tmp_path))
+    monkeypatch.setenv("PYPTO_COMPILE_PROFILING", "1")
     x, out = _tensor((4, 4)), _tensor((4, 4))
     scale_eager(x, 2, out)
     scale_eager(x, 3, out)
@@ -325,6 +327,16 @@ def test_bypassed_eager_rebuild_publishes_latest_prepared_callable(prepared, mon
     scale_eager(x, 4, out)
     assert prepared.registrations[-1] is latest
     assert prepared.builds == len(prepared.prepares) == 2
+
+
+def test_build_directory_reuses_eager_preparation(prepared, monkeypatch, tmp_path):
+    monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(tmp_path))
+    x, out = _tensor((4, 4)), _tensor((4, 4))
+    scale_eager(x, 2, out)
+    scale_eager(x, 3, out)
+    assert prepared.builds == len(prepared.prepares) == 1
+    assert prepared.registrations[0] is prepared.registrations[1]
+    assert [frame.scalars[0].value for frame in prepared.frames] == [2, 3]
 
 
 def test_capture_selects_each_prepared_specialization(prepared, monkeypatch):
@@ -395,7 +407,7 @@ def test_new_worker_generation_requires_new_warmup(prepared, monkeypatch):
 
 
 def test_program_diagnostics_still_rebuild_without_key_lookup(eager, monkeypatch, tmp_path):
-    monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(tmp_path))
+    monkeypatch.setenv("PYPTO_COMPILE_PROFILING", "1")
     compiled = []
     monkeypatch.setattr(scale_eager, "_compile", lambda *args, **kwargs: compiled.append(object()))
     monkeypatch.setattr(

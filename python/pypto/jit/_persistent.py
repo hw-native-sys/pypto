@@ -159,9 +159,9 @@ def resolve_persistent(
     *,
     platform: str,
     runtime_name: str,
-    distributed: bool,
     kernel_abi: KernelABI | None = None,
     require_cached: bool = False,
+    output_root: Path | None = None,
 ) -> Any:
     """Capture identity before object lookup; keep policy out of content keys."""
     from pypto.runtime._artifact_runtime import bind_artifact, restore_artifact  # noqa: PLC0415
@@ -169,6 +169,7 @@ def resolve_persistent(
     from pypto.runtime._extern_includes import UnsupportedArtifactInput  # noqa: PLC0415
     from pypto.runtime._prebuilt import ready_spec  # noqa: PLC0415
 
+    distributed = owner._func_type == "host"
     if kernel_abi is not None and distributed:
         raise ValueError("Distributed kernel artifacts are not supported")
 
@@ -210,6 +211,7 @@ def resolve_persistent(
             config.root,
             config.readonly,
             kernel_abi,
+            output_root,
         )
         cached = owner._artifact_objects.get(compatible)
         if cached is not None:
@@ -226,7 +228,7 @@ def resolve_persistent(
         # Avoid tempfile's write probes under a readonly TMPDIR. The usual
         # build_output parent is created lazily; the exceptional temporary
         # parent is allocated securely before any runtime output can use it.
-        private_root = Path.cwd() / "build_output"
+        private_root = output_root or Path.cwd() / "build_output"
         if private_root == config.root or config.root in private_root.parents:
             private_root = _fallback_private_root(config.root, os.getpid())
         store = JITArtifactStore(config.root, readonly=config.readonly, private_root=private_root)

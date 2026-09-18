@@ -480,6 +480,11 @@ compiler-cache entries after warmup does not lose the prepared callable.
 Capture performs no compilation, binary loading or preparation. Failed preparation
 publishes no entry, and closing the Worker invalidates all of its registrations.
 Diagnostic eager/program calls still request fresh compilation outside capture.
+`PYPTO_PROG_BUILD_DIR` alone is no longer a diagnostic request: persistent caching
+is enabled by default and uses its `.pypto-cache` subdirectory unless overridden
+by cache policy. Repeated eager calls can reuse the compilation and registration;
+later processes reuse validated artifacts but still prepare their own Worker.
+Set `PYPTO_CACHE=0` or `CacheConfig(enabled=False)` to disable persistence.
 
 ```python
 # op_a and op_b are @pl.jit entries; x, y, out are caller-owned NPU tensors.

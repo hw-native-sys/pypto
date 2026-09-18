@@ -900,6 +900,46 @@ def test_automatic_jit_refreshes_sources_before_object_hit(tmp_path, automatic_j
         assert len(builds) == 3
 
 
+@pytest.mark.parametrize("damage", ["none", "missing", "corrupt"])
+def test_default_cache_reuses_build_directory_and_recovers_damage(
+    tmp_path, automatic_jit_case, fake_runtime, monkeypatch, damage
+):
+    kernel, builds = automatic_jit_case
+    for name in ("PYPTO_CACHE", "PYPTO_CACHE_DIR", "PYPTO_CACHE_READONLY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr("pypto._cache_config._policy.override", None)
+    root = tmp_path / "output"
+    monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(root))
+    with passes.PassContext([]):
+        first = kernel.warmup()
+        assert first.output_dir.is_relative_to(root / ".pypto-cache")
+        assert kernel.warmup() is first
+        assert len(builds) == 1
+        handle = first._artifact_runtime.handle
+        if damage == "missing":
+            shutil.rmtree(root / ".pypto-cache")
+        elif damage == "corrupt":
+            # Damage both stages; a valid GENERATED stage could otherwise
+            # repair the binary without running code generation again.
+            (first.output_dir / "compiled_meta.json").write_text("corrupt")
+            (handle.directory / "compiled_meta.json").write_text("corrupt")
+        kernel._artifact_objects.clear()
+        kernel._cache.clear()
+        restored = kernel.compile()
+        assert restored is not first
+        assert len(builds) == (1 if damage == "none" else 2)
+        assert (
+            json.loads((restored.output_dir / "compiled_meta.json").read_text())["schema"]
+            == _COMPILED_META_SCHEMA
+        )
+        if damage != "corrupt":
+            restored.load()
+            assert fake_runtime.runner._compile_and_assemble.call_count == (1 if damage == "none" else 2)
+        else:
+            assert restored._artifact_runtime is None
+        assert kernel.compile() is restored
+
+
 @pytest.mark.parametrize("fallback", ["readonly", "invalid", "storage_error"])
 def test_automatic_jit_private_fallback_reuses_concurrent_object(tmp_path, automatic_jit_case, fallback):
     kernel, builds = automatic_jit_case
@@ -1055,6 +1095,25 @@ def test_private_fallback_parent_is_secure_for_builds_and_restored_runtime(
     assert not (cache_root / "build_output").exists()
     # Runtime output is also rooted in the protected parent.
     assert parent in restored._artifact_runtime.run_directory.parents
+
+
+def test_unavailable_identity_keeps_build_directory_outside_readonly_cache(
+    tmp_path, automatic_jit_case, monkeypatch
+):
+    from dataclasses import replace  # noqa: PLC0415
+
+    kernel, builds = automatic_jit_case
+    root = tmp_path / "readonly"
+    monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(root / "nested"))
+    monkeypatch.setattr(
+        "pypto.jit._persistent.capture_toolchain", lambda *args: replace(_key().environment, ptoas=None)
+    )
+    config = RunConfig(cache_config=CacheConfig(root=root, readonly=True))
+    with passes.PassContext([]):
+        private = kernel.compile(config=config)
+    assert len(builds) == 1 and not root.exists()
+    assert not private.output_dir.is_relative_to(root)
+    assert private._artifact_runtime is None
 
 
 @pytest.mark.parametrize("binary", [False, True])

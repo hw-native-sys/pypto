@@ -147,8 +147,8 @@
       "reason": "Logging threshold; does not select compiler transformations."
     },
     "PYPTO_PROG_BUILD_DIR": {
-      "category": "fresh_request",
-      "reason": "An explicit nonempty output root requests fresh JIT artifacts."
+      "category": "nonsemantic",
+      "reason": "Selects private output storage and the default persistent cache parent; does not force compilation."
     },
     "PYPTO_REBUILD_FROM_PTO": {
       "category": "fresh_request",

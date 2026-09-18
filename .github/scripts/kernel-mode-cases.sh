@@ -15,6 +15,8 @@ case "${1:-}" in
       tests/ut/test_kernel_ci_download.py
       tests/ut/test_kernel_ci_results.py
       tests/ut/jit/test_kernel_eager.py
+      tests/ut/jit/test_cache_config.py
+      tests/ut/jit/test_jit_compile_extraction.py
       tests/ut/runtime/test_kernel_abi.py
       tests/ut/runtime/test_kernel_compiler.py
       tests/ut/runtime/test_kernel_context.py

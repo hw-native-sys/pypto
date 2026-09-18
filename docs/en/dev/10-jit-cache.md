@@ -1,8 +1,29 @@
 # Persistent JIT Cache
 
-Persistent caching is opt-in. It reuses generated code and complete binaries
+Persistent caching is enabled by default. It reuses generated code and complete binaries
 across processes, while each JIT function also retains live compiled objects.
 Cached artifacts contain executable code: use a cache with trusted writers.
+
+`PYPTO_PROG_BUILD_DIR` selects an output parent without forcing compilation.
+With environment/default policy, the cache lives in its `.pypto-cache`
+subdirectory, or in `~/.cache/pypto/jit` when that variable is empty or unset.
+`PYPTO_CACHE_DIR` overrides this cache location. Explicit per-call/process
+`CacheConfig` objects still replace the entire environment policy.
+Private builds and writable runtime output use the requested output parent;
+published artifacts use the selected cache root. Read `compiled.output_dir`
+for the actual artifact directory; cached entries use content-addressed paths.
+
+Matching calls reuse live objects, and later processes validate stored artifacts
+before reuse. Changed source, specialization or toolchain identity selects a new
+entry. Missing or invalid disk entries rebuild; invalid entries may produce a
+private result rather than overwrite immutable storage. Files backing live
+objects must not be edited or removed while they are in use. Graph capture
+continues to use its Worker-owned prepared registration without disk lookup.
+
+Set `PYPTO_CACHE=0` or `CacheConfig(enabled=False)` to disable persistence;
+compatible objects can still be reused within the process. Changing the output
+parent then selects a separate private object. Explicit fixed `output_dir=` /
+`save_kernels_dir=` requests and compile diagnostics still compile afresh.
 
 ```python
 from pathlib import Path
@@ -106,7 +127,7 @@ settings. Fields are never partially merged across those levels.
 
 | Field | Default | Meaning |
 | ----- | ------- | ------- |
-| `enabled` | `False` | Enable persistent lookup and publication. |
+| `enabled` | `True` | Enable persistent lookup and publication. |
 | `root` | `None` | Use `~/.cache/pypto/jit`; explicit relative paths resolve when the request is captured. |
 | `readonly` | `False` | Prohibit writes, locks and bytecode under the cache root. Private builds and runtime output remain outside it. |
 | `extra_source_paths` | `()` | Content-hash files, or recursively hash Python sources in directories, on every request. Missing inputs bypass reuse. |

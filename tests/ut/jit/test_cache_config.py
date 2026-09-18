@@ -22,21 +22,23 @@ from pypto.runtime import RunConfig
 @pytest.fixture(autouse=True)
 def clean_policy(monkeypatch):
     pypto.configure_cache(None)
-    for name in ("PYPTO_CACHE", "PYPTO_CACHE_DIR", "PYPTO_CACHE_READONLY"):
+    for name in ("PYPTO_CACHE", "PYPTO_CACHE_DIR", "PYPTO_CACHE_READONLY", "PYPTO_PROG_BUILD_DIR"):
         monkeypatch.delenv(name, raising=False)
     yield
     pypto.configure_cache(None)
 
 
 def test_default_and_complete_precedence(tmp_path, monkeypatch):
-    assert not capture_cache_config(None).enabled
+    default = capture_cache_config(None)
+    assert default.enabled and default.root == (Path.home() / ".cache/pypto/jit").resolve()
+    assert pypto.CacheConfig().enabled
     monkeypatch.setenv("PYPTO_CACHE", "1")
     monkeypatch.setenv("PYPTO_CACHE_DIR", str(tmp_path / "environment"))
     assert capture_cache_config(None).enabled
     process = pypto.CacheConfig(enabled=True, root=tmp_path / "process", readonly=True)
     pypto.configure_cache(process)
     assert capture_cache_config(None) == process
-    local = capture_cache_config(pypto.CacheConfig())
+    local = capture_cache_config(pypto.CacheConfig(enabled=False))
     assert not local.enabled and not local.readonly
     assert local.root != process.root
     pypto.configure_cache(None)
@@ -50,7 +52,7 @@ def test_environment_booleans_are_strict(monkeypatch, name, value):
     with pytest.raises(ValueError, match=name):
         capture_cache_config(None)
     # Explicit policy replaces malformed lower-precedence environment too.
-    assert not capture_cache_config(pypto.CacheConfig()).enabled
+    assert not capture_cache_config(pypto.CacheConfig(enabled=False)).enabled
 
 
 def test_config_capture_is_immutable(tmp_path, monkeypatch):
@@ -89,8 +91,23 @@ def test_disabled_policy_does_not_probe_filesystem(monkeypatch):
         pytest.fail("disabled dispatch probed the filesystem")
 
     monkeypatch.setattr(Path, "resolve", forbidden)
+    monkeypatch.setenv("PYPTO_CACHE", "0")
     assert not capture_cache_config(None).enabled
-    assert not capture_cache_config(pypto.CacheConfig(root=Path("unused"))).enabled
+    assert not capture_cache_config(pypto.CacheConfig(enabled=False, root=Path("unused"))).enabled
+
+
+def test_build_directory_selects_default_cache_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", "output")
+    config = capture_cache_config(None)
+    assert config.enabled and config.root == tmp_path / "output/.pypto-cache"
+    monkeypatch.setenv("PYPTO_CACHE_DIR", "shared")
+    assert capture_cache_config(None).root == tmp_path / "shared"
+    # Explicit policy is complete: it does not partially inherit environment roots.
+    explicit = pypto.CacheConfig(root=tmp_path / "explicit")
+    assert capture_cache_config(explicit) == explicit
+    monkeypatch.setenv("PYPTO_CACHE", "0")
+    assert not capture_cache_config(None).enabled
+    assert capture_cache_config(explicit).enabled
 
 
 def test_cache_policy_does_not_change_compiler_or_launcher_options():
