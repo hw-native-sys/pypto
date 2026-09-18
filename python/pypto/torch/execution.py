@@ -9,6 +9,8 @@
 
 """Explicit process-level execution information for kernel calls."""
 
+from pathlib import Path
+
 from pypto._kernel_abi import EAGER_KERNEL_TARGETS, KernelABI
 
 
@@ -18,6 +20,9 @@ def init(
     platform: str = "a2a3",
     runtime: str = "tensormap_and_ringbuffer",
     aicpu_thread_num: int = 0,
+    enable_chip_swimlane: int | bool = 0,
+    enable_dep_gen: bool = False,
+    output_dir: str | Path | None = None,
 ) -> None:
     """Fix this process's kernel execution target and initialize its Worker.
 
@@ -37,6 +42,10 @@ def init(
         platform: Kernel target platform family.
         runtime: Simpler runtime bound by the process Worker.
         aicpu_thread_num: 0 selects the runtime default; otherwise 2..5.
+        enable_chip_swimlane: Collection level 0..4; True selects full (4).
+            Use begin_dfx/end_dfx outside capture to select measured launches.
+        enable_dep_gen: Collect the task graph independently of timing.
+        output_dir: Artifact directory, required when either diagnostic is enabled.
 
     Raises:
         TypeError: ``device`` is neither None nor an int.
@@ -77,7 +86,9 @@ def init(
             f"pypto.torch.init(device={device}) must match the current torch_npu device {current}; "
             f"call torch.npu.set_device({device}) first"
         )
-    config = KernelConfig(platform, runtime, current, aicpu_thread_num)
+    config = KernelConfig(
+        platform, runtime, current, aicpu_thread_num, enable_chip_swimlane, enable_dep_gen, output_dir
+    )
     # Every check below runs before ensure_worker claims kernel mode.
     shutdown.require_supported_framework(framework)
     _kernel_artifact.require_kernel_native(KernelABI(platform, runtime, ()))
@@ -85,3 +96,40 @@ def init(
     if launch._load_native().check_call(stream.stream_id, current):
         raise RuntimeError("pypto.torch.init must be called outside graph capture")
     state.ensure_worker(config)
+
+
+def _dfx_window(*, begin: bool) -> None:
+    from pypto.runtime.kernel.context import get_process_kernel_state  # noqa: PLC0415
+
+    from . import interop, launch  # noqa: PLC0415
+
+    state = get_process_kernel_state()
+    config = state.require_config()
+    framework = interop._load_torch_npu()
+    if framework.npu.current_device() != config.device_id:
+        raise ValueError(f"Kernel DFX requires the initialized device {config.device_id} to be current")
+    stream = framework.npu.current_stream(config.device_id)
+    if launch._load_native().check_call(stream.stream_id, config.device_id):
+        raise RuntimeError("Kernel DFX begin/end must be called outside graph capture")
+    state.collect_dfx(stream, begin=begin)
+
+
+def begin_dfx() -> None:
+    """Open a swimlane window on the current stream, outside graph capture.
+
+    Requires init with swimlane or dep_gen enabled and output_dir. Warm up operators
+    first. This drains earlier stream work before opening the window. Serialize
+    collection with other kernel work and keep all measured launches/replays on
+    this stream. Nested windows are rejected.
+    """
+    _dfx_window(begin=True)
+
+
+def end_dfx() -> None:
+    """Drain the window's current stream and write its swimlane artifact.
+
+    Must run outside capture, on the same stream as begin_dfx. Drains torch_npu's
+    host task queue before the runtime collects device records. The first window
+    writes into init's output_dir; later windows use window_1, window_2, etc.
+    """
+    _dfx_window(begin=False)

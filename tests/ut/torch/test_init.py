@@ -17,7 +17,7 @@ import pytest
 from pypto.runtime import _execution_mode, _kernel_artifact
 from pypto.runtime.kernel.abi import KernelConfig
 from pypto.runtime.kernel.context import KernelState
-from pypto.torch import init, interop, launch
+from pypto.torch import begin_dfx, end_dfx, init, interop, launch
 
 from tests.ut.runtime import test_kernel_context
 
@@ -132,6 +132,81 @@ def test_init_respects_process_mode_and_shutdown(setup, framework):
     state.close()
     with pytest.raises(RuntimeError, match="closing or closed"):
         init()
+
+
+@pytest.mark.parametrize("level", [True, 1, 2, 3, 4])
+def test_init_dfx_configuration_is_normalized_and_immutable(setup, framework, tmp_path, level):
+    state, _, calls, _ = setup
+    init(enable_chip_swimlane=level, enable_dep_gen=True, output_dir=tmp_path)
+    config = state.require_config()
+    assert config.enable_chip_swimlane == (4 if level is True else level)
+    assert config.enable_dep_gen and config.output_dir == tmp_path
+    init(enable_chip_swimlane=config.enable_chip_swimlane, enable_dep_gen=True, output_dir=str(tmp_path))
+    assert len(calls.inits) == 1
+    with pytest.raises(ValueError, match="configuration conflict"):
+        init(enable_chip_swimlane=level, output_dir=tmp_path)
+    state.close()
+
+
+@pytest.mark.parametrize(
+    "options,error,match",
+    [
+        ({"enable_chip_swimlane": 5}, ValueError, "enable_chip_swimlane"),
+        ({"enable_chip_swimlane": -1}, ValueError, "enable_chip_swimlane"),
+        ({"enable_chip_swimlane": 1.5}, TypeError, "enable_chip_swimlane"),
+        ({"enable_chip_swimlane": True}, ValueError, "output_dir"),
+        ({"enable_dep_gen": True}, ValueError, "output_dir"),
+        ({"enable_dep_gen": 1}, TypeError, "enable_dep_gen"),
+    ],
+)
+def test_invalid_dfx_configuration_does_not_claim_process(setup, framework, options, error, match):
+    _, _, calls, _ = setup
+    with pytest.raises(error, match=match):
+        init(**options)
+    assert not calls.workers and _execution_mode._gate.mode is None
+
+
+def test_dfx_windows_drain_queue_and_enforce_boundaries(setup, framework, monkeypatch, tmp_path):
+    state, _, _, worker_cls = setup
+    events = []
+    stream = SimpleNamespace(stream_id=12, npu_stream=123, synchronize=lambda: events.append("drain"))
+    monkeypatch.setattr(framework.npu, "current_stream", lambda device: stream)
+    monkeypatch.setattr(worker_cls, "begin_dfx", lambda self: events.append("begin"), raising=False)
+    monkeypatch.setattr(worker_cls, "end_dfx", lambda self, ptr: events.append(("end", ptr)), raising=False)
+    with pytest.raises(RuntimeError, match="not initialized"):
+        begin_dfx()
+    init(enable_chip_swimlane=True, output_dir=tmp_path)
+    with pytest.raises(RuntimeError, match="No kernel DFX"):
+        end_dfx()
+    begin_dfx()
+    with pytest.raises(RuntimeError, match="already open"):
+        begin_dfx()
+    framework.capture = 42
+    with pytest.raises(RuntimeError, match="outside graph capture"):
+        end_dfx()
+    framework.capture = 0
+    other = SimpleNamespace(stream_id=13)
+    monkeypatch.setattr(framework.npu, "current_stream", lambda device: other)
+    with pytest.raises(ValueError, match="same stream"):
+        end_dfx()
+    monkeypatch.setattr(framework.npu, "current_stream", lambda device: stream)
+    framework.device = 1
+    with pytest.raises(ValueError, match="initialized device"):
+        end_dfx()
+    framework.device = 0
+    end_dfx()
+    begin_dfx()
+    end_dfx()
+    assert events == ["drain", "begin", "drain", ("end", 123)] * 2
+    state.close()
+
+
+def test_dfx_windows_require_diagnostics(setup, framework, tmp_path):
+    state, _, _, _ = setup
+    init(output_dir=tmp_path)
+    with pytest.raises(RuntimeError, match="require init"):
+        begin_dfx()
+    state.close()
 
 
 if __name__ == "__main__":

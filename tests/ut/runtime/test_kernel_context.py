@@ -682,5 +682,51 @@ def test_specialization_cannot_publish_or_resolve_foreign_registration(setup):
     state.close()
 
 
+def test_native_worker_forwards_dfx_config_and_uses_owner_thread(monkeypatch, tmp_path):
+    import sys  # noqa: PLC0415
+
+    from pypto.runtime.kernel import abi  # noqa: PLC0415
+    from pypto.runtime.kernel.owner import _OwnerThread  # noqa: PLC0415
+
+    events = []
+    cfg = SimpleNamespace(validate=lambda: events.append("validate"))
+    worker = SimpleNamespace(
+        kernel_init=lambda device, bins, config: events.append((device, bins, config)),
+        kernel_mode_supported=True,
+        kernel_begin_dfx=lambda: events.append(("begin", threading.current_thread())),
+        kernel_end_dfx=lambda stream: events.append(("end", stream, threading.current_thread())),
+        finalize=lambda: None,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "simpler.task_interface",
+        SimpleNamespace(CallConfig=lambda: cfg, ChipWorker=lambda: worker),
+    )
+    builder = SimpleNamespace(get_binaries=lambda runtime, build: "bins")
+    monkeypatch.setitem(
+        sys.modules, "simpler_setup.runtime_builder", SimpleNamespace(RuntimeBuilder=lambda platform: builder)
+    )
+    adapter = object.__new__(abi._NativeWorker)
+    adapter._native = SimpleNamespace(bind_context=lambda context: None)
+    adapter._context = object()
+    adapter.worker = None
+    adapter._owner = _OwnerThread()
+    try:
+        adapter.init(KernelConfig("a2a3", "tensormap_and_ringbuffer", 0, 4, True, True, tmp_path))
+        adapter.begin_dfx()
+        adapter.end_dfx(123)
+        assert cfg.aicpu_thread_num == 4
+        assert cfg.enable_chip_swimlane == 4 and cfg.enable_dep_gen is True
+        assert cfg.output_prefix == str(tmp_path)
+        assert events == [
+            "validate",
+            (0, "bins", cfg),
+            ("begin", adapter._owner.thread),
+            ("end", 123, adapter._owner.thread),
+        ]
+    finally:
+        adapter.close()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

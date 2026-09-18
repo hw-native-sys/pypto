@@ -75,7 +75,7 @@ op(x, 2.0, out, config=CompileOptions(analyze_auto_scopes_for_deps=True))  # com
 ```
 
 `init(*, device=None, platform="a2a3", runtime="tensormap_and_ringbuffer",
-aicpu_thread_num=0)` runs once per process, before the first direct JIT or
+aicpu_thread_num=0, enable_chip_swimlane=0, enable_dep_gen=False, output_dir=None)` runs once per process, before the first direct JIT or
 registered torch.ops kernel call and outside graph capture. Before claiming
 kernel mode it checks the target, the current torch_npu device, the framework
 version and that no capture is active. It then claims kernel mode, installs the
@@ -101,6 +101,45 @@ persistent-cache policy uses `pypto.configure_cache`. A
 `CompileOptions.platform` other than its default must equal the bound platform.
 An active `PassContext` must name the bound runtime; without one, eager
 compilation uses the runtime from `init`.
+
+## Kernel swimlane collection
+
+Initialize diagnostics once, then bracket the launches to measure. Both boundary
+calls run outside ACLGraph capture and synchronize the current torch_npu stream,
+including its host task queue. Use one stream for the entire window and serialize
+collection with other kernel activity in this process.
+
+```python
+pypto.torch.init(enable_chip_swimlane=4, enable_dep_gen=True, output_dir="dfx")
+op(x, 2.0, out)  # warm up before measuring
+pypto.torch.begin_dfx()
+op(x, 2.0, out)  # alternatively: replay an already captured graph
+pypto.torch.end_dfx()
+```
+
+`enable_chip_swimlane` accepts levels 0..4 (`True` means 4); `enable_dep_gen`
+is independent. Either diagnostic requires `output_dir`. These settings are part
+of the immutable process configuration, so repeat `init` with identical settings.
+The first window writes `chip_swimlane_records.json` and/or `deps.json` directly
+into `output_dir`; subsequent windows use `window_1/`, `window_2/`, etc. A missing
+output directory is created. Nested windows, ending without a window, and ending
+on another stream are rejected. Pair each successful begin with an end before
+shutdown to obtain its artifacts.
+
+To view timing and dependency edges together:
+
+```bash
+python -m simpler_setup.tools.swimlane_converter \
+    dfx/chip_swimlane_records.json -o dfx/merged_swimlane.json
+```
+
+Open the merged file in Perfetto. Dependency collection adds overhead; for timing
+measurements, collect the same operator's graph separately with `enable_dep_gen`
+and pass its file to the converter using `--deps-json`. Use separate processes
+when changing init settings. A window can include multiple launches, but the
+converter currently renders them together; use one launch per window for separate
+operator traces. This integration supports A2/A3 TMR, including warmed graph
+replay; begin/end themselves cannot run inside capture.
 
 ## Callable identity and hot-path measurements
 
@@ -350,14 +389,14 @@ Kernel calls only read the bound configuration (`require_config`,
 `bound_worker`) and never initialize a Worker; without `init` they raise the
 not-initialized error. All operators share that manager; changing the operator,
 scalar values or caller stream does not create another Worker.
-`KernelConfig` fixes platform, runtime, device and AICPU thread count. Other
+`KernelConfig` fixes platform, runtime, device, AICPU thread count and DFX settings. Other
 context resources currently use Simpler defaults. An incompatible configuration
 is rejected instead of opening another Worker.
 
 The integration SDK is pinned to
-`4f162da09791eba7d1a380c9113e79d0bf0ecd0b`. Its supported Python surface is
-`simpler.task_interface.ChipWorker.kernel_init`, `kernel_prepare_callable` and
-`finalize`; the proposed L2 `Worker(execution_mode="kernel")` API is not present.
+`cbafd5247109c8b5998fb7dd7a141db357d15461`. Its supported Python surface is
+`simpler.task_interface.ChipWorker.kernel_init`, `kernel_prepare_callable`,
+`kernel_begin_dfx`, `kernel_end_dfx` and `finalize`.
 PyPTO's private adapter uses these existing methods. Init and prepare take no
 caller stream; Simpler mints the native context generation and callable IDs.
 The calling thread must already hold the framework's current device. The native

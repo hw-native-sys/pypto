@@ -41,6 +41,7 @@ case "${1:-}" in
       'tests/st/runtime/kernel/test_kernel_shutdown.py::test_kernel_shutdown[normal-1]'
       'tests/st/runtime/kernel/test_hot_path.py::test_kernel_hot_path[0]'
       'tests/st/runtime/kernel/test_hot_path.py::test_kernel_hot_path[1]'
+      'tests/st/runtime/kernel/test_dfx.py'
     )
     ;;
   capture)

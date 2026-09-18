@@ -59,6 +59,7 @@ class _ProcessKernelState:
         self._submissions: list[Any] = []
         self._submission_lock = threading.Lock()
         self._graph_lifecycle: Any = None
+        self._dfx_stream: Any = None
 
     def _check_pid(self) -> None:
         if self.pid != os.getpid():
@@ -253,6 +254,32 @@ class _ProcessKernelState:
                 self._fail_admission(exc)
                 raise
 
+    def collect_dfx(self, stream: Any, *, begin: bool) -> None:
+        """Serialize a collection boundary with submission and native teardown."""
+        self._check_pid()
+        with self._submission_lock:
+            config = self.require_config()
+            if not (config.enable_chip_swimlane or config.enable_dep_gen):
+                raise RuntimeError(
+                    "Kernel DFX windows require init with swimlane or dep_gen enabled and output_dir"
+                )
+            if begin and self._dfx_stream is not None:
+                raise RuntimeError("A kernel DFX window is already open")
+            if not begin:
+                if self._dfx_stream is None:
+                    raise RuntimeError("No kernel DFX window is open")
+                if stream.stream_id != self._dfx_stream.stream_id:
+                    raise ValueError("End kernel DFX on the same stream as begin_dfx")
+            # ACL stream synchronization alone cannot see work still in the
+            # framework's host taskQueue. Drain through torch_npu first.
+            stream.synchronize()
+            if begin:
+                self._worker.begin_dfx()
+                self._dfx_stream = stream
+            else:
+                self._worker.end_dfx(stream.npu_stream)
+                self._dfx_stream = None
+
     def drain(self) -> None:
         """Wait for admitted eager work; failed tickets remain owned for diagnosis."""
         self._check_pid()
@@ -314,6 +341,7 @@ class _ProcessKernelState:
             self._specializations.clear()
             self._registrations.clear()
             self._worker = None
+            self._dfx_stream = None
             self._failure = None
             self.state = KernelState.CLOSED
             self._closing_thread = None

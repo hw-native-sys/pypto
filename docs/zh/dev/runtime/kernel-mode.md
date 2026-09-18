@@ -59,7 +59,7 @@ op(x, 2.0, out, config=CompileOptions(analyze_auto_scopes_for_deps=True))  # com
 ```
 
 `init(*, device=None, platform="a2a3", runtime="tensormap_and_ringbuffer",
-aicpu_thread_num=0)` 在每个进程中调用一次，须早于首次直接 JIT 或注册 torch.ops 的 kernel 调用，
+aicpu_thread_num=0, enable_chip_swimlane=0, enable_dep_gen=False, output_dir=None)` 在每个进程中调用一次，须早于首次直接 JIT 或注册 torch.ops 的 kernel 调用，
 且在 graph capture 之外。认领 kernel mode 之前，它依次检查目标、torch_npu 当前设备、框架版本以及
 当前没有进行中的 capture；随后认领 kernel mode、安装框架退出集成，并在生命周期线程上初始化进程
 Worker。它不编译也不 prepare 任何算子，入图的每个特化仍需 warmup。
@@ -78,6 +78,39 @@ Worker。它不编译也不 prepare 任何算子，入图的每个特化仍需 w
 直接调用和 `register()` 拒绝 `RunConfig` 与 `CompileOptions.distributed_config`：编译选项使用 `CompileOptions`，持久缓存策略使用
 `pypto.configure_cache`。`CompileOptions.platform` 若不是默认值，必须等于绑定的平台。外层
 `PassContext` 的 runtime 必须与绑定值一致；没有外层上下文时，eager 编译使用 `init` 绑定的 runtime。
+
+## Kernel 泳道图采集 {#kernel-swimlane-collection}
+
+在初始化时配置诊断，使用 `begin_dfx()` / `end_dfx()` 包围需要测量的调用。
+两个边界接口必须在 ACLGraph capture 外调用，且会同步当前 torch_npu stream
+（包括 host taskQueue）。一个窗口中的调用、replay 和结束操作必须使用同一 stream，
+并与本进程其他 kernel 活动串行执行。
+
+```python
+pypto.torch.init(enable_chip_swimlane=4, enable_dep_gen=True, output_dir="dfx")
+op(x, 2.0, out)  # warm up before measuring
+pypto.torch.begin_dfx()
+op(x, 2.0, out)  # alternatively: replay an already captured graph
+pypto.torch.end_dfx()
+```
+
+`enable_chip_swimlane` 接受 0..4（`True` 表示 4）；`enable_dep_gen` 可独立开启。
+任一诊断开启时必须提供 `output_dir`。这些选项属于进程固定配置，重复 `init`
+必须使用相同配置。目录不存在时会创建。第一个窗口直接输出
+`chip_swimlane_records.json` 和/或 `deps.json`，后续窗口输出到
+`window_1/`、`window_2/` 等子目录。嵌套窗口、没有 begin 就 end、换 stream
+结束均会报错；关闭进程前应结束每个已开启的窗口。
+
+```bash
+python -m simpler_setup.tools.swimlane_converter \
+    dfx/chip_swimlane_records.json -o dfx/merged_swimlane.json
+```
+
+合并文件可用 Perfetto 打开。依赖采集会增加开销；精确测时可在独立进程中
+单独采集同一算子的依赖图，并通过转换器 `--deps-json` 指定文件。
+改变 init 配置需要新进程。一个窗口可以包含多次调用，但转换器暂时不按调用
+拆分；需要独立算子泳道图时，每个窗口只测一次调用。
+当前支持 A2/A3 TMR，包括预热后的 graph replay；begin/end 本身不支持 capture。
 
 ## Callable 身份与热路径测量
 
@@ -265,12 +298,12 @@ Simpler 或 native launch 扩展；`torch` 仍是 PyPTO 的常规依赖。真正
 内部 `runtime.kernel.context.get_process_kernel_state()` 持有由 `pypto.torch.init`
 通过 `ensure_worker` 创建的进程唯一 kernel Worker。kernel 调用只读取已绑定配置（`require_config`、
 `bound_worker`），从不初始化 Worker；未调用 `init` 时报未初始化错误。所有算子共享此管理器；算子、Scalar 值或 caller stream 变化不会新建
-Worker。`KernelConfig` 固定 platform、runtime、device 和 AICPU 线程数，其他常驻资源
+Worker。`KernelConfig` 固定 platform、runtime、device、AICPU 线程数和 DFX 配置，其他常驻资源
 暂用 simpler 默认值。配置不兼容时报错，不额外创建 Worker。
 
-集成 SDK 固定为 `4f162da09791eba7d1a380c9113e79d0bf0ecd0b`。实际 Python 接口为
-`simpler.task_interface.ChipWorker.kernel_init`、`kernel_prepare_callable` 和
-`finalize`，目标 L2 `Worker(execution_mode="kernel")` 尚未提供。PyPTO 内部 adapter
+集成 SDK 固定为 `cbafd5247109c8b5998fb7dd7a141db357d15461`。实际 Python 接口为
+`simpler.task_interface.ChipWorker.kernel_init`、`kernel_prepare_callable`、
+`kernel_begin_dfx`、`kernel_end_dfx` 和 `finalize`。PyPTO 内部 adapter
 使用这些已有方法；init/prepare 不接收 caller stream，native context generation 和
 callable ID 均由 simpler 分配。调用线程须已绑定框架当前设备。初始化使用已安装的
 runtime 二进制并检查能力，不编译业务算子、不分配业务输出。该 pin 的 HBG kernel

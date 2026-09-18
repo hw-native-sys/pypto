@@ -13,7 +13,7 @@ Importing this package does not import torch_npu, create a Worker or load a
 native launch adapter. Framework-specific dependencies are resolved on demand.
 """
 
-from .execution import init
+from .execution import begin_dfx, end_dfx, init
 from .registration import register
 
-__all__ = ["init", "register"]
+__all__ = ["begin_dfx", "end_dfx", "init", "register"]

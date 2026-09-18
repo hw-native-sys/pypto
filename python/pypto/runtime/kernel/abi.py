@@ -11,6 +11,7 @@
 
 import importlib
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from pypto._kernel_abi import KernelABI
@@ -25,9 +26,25 @@ class KernelConfig:
     runtime: str
     device_id: int
     aicpu_thread_num: int = 0
+    enable_chip_swimlane: int | bool = 0
+    enable_dep_gen: bool = False
+    output_dir: str | Path | None = None
 
     def __post_init__(self) -> None:
+        from pypto.runtime.runner import _normalize_swimlane_level  # noqa: PLC0415
+
         KernelABI(self.platform, self.runtime, ())
+        object.__setattr__(
+            self,
+            "enable_chip_swimlane",
+            _normalize_swimlane_level(self.enable_chip_swimlane, "enable_chip_swimlane"),
+        )
+        if type(self.enable_dep_gen) is not bool:
+            raise TypeError(f"enable_dep_gen must be bool, got {self.enable_dep_gen!r}")
+        if self.output_dir is not None:
+            object.__setattr__(self, "output_dir", Path(self.output_dir).expanduser().resolve())
+        if (self.enable_chip_swimlane or self.enable_dep_gen) and self.output_dir is None:
+            raise ValueError("Kernel DFX requires output_dir when swimlane or dep_gen is enabled")
         if type(self.device_id) is not int or self.device_id < 0:
             raise ValueError(f"Expected a nonnegative kernel device id, got {self.device_id!r}")
         if type(self.aicpu_thread_num) is not int or self.aicpu_thread_num not in (0, 2, 3, 4, 5):
@@ -55,6 +72,11 @@ class _NativeWorker:
         runtime_builder = importlib.import_module("simpler_setup.runtime_builder")
         cfg = interface.CallConfig()
         cfg.aicpu_thread_num = config.aicpu_thread_num
+        cfg.enable_chip_swimlane = config.enable_chip_swimlane
+        cfg.enable_dep_gen = config.enable_dep_gen
+        if config.output_dir is not None:
+            Path(config.output_dir).mkdir(parents=True, exist_ok=True)
+            cfg.output_prefix = str(config.output_dir)
         cfg.validate()
         bins = runtime_builder.RuntimeBuilder(platform=config.platform).get_binaries(
             config.runtime, build=False
@@ -66,6 +88,12 @@ class _NativeWorker:
 
     def prepare(self, callable_: Any) -> Any:
         return self._owner.call(lambda: self.worker.kernel_prepare_callable(callable_))
+
+    def begin_dfx(self) -> None:
+        self._owner.call(self.worker.kernel_begin_dfx)
+
+    def end_dfx(self, caller_stream: int) -> None:
+        self._owner.call(lambda: self.worker.kernel_end_dfx(caller_stream))
 
     @property
     def native_launch_target(self) -> Any:

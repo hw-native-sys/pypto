@@ -354,7 +354,8 @@ import pypto
 import pypto.torch
 import pypto.torch.interop
 import pypto.torch.launch
-assert pypto.torch.__all__ == ["init", "register"]
+assert pypto.torch.__all__ == ["begin_dfx", "end_dfx", "init", "register"]
+assert callable(pypto.torch.begin_dfx) and callable(pypto.torch.end_dfx)
 assert callable(pypto.torch.init) and callable(pypto.torch.register)
 """
     result = run_without_optional_runtime(source)

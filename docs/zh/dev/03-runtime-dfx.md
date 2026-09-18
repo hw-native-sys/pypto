@@ -1,5 +1,10 @@
 # 运行时 DFX（Design For X）开关
 
+kernel-mode JIT 调用通过 `pypto.torch.init` 配置 DFX，使用
+`pypto.torch.begin_dfx()` / `end_dfx()` 包围待测调用，详见
+[kernel 泳道图采集](runtime/kernel-mode.md#kernel-swimlane-collection)。
+下文的 `RunConfig` 选项适用于 program 执行。
+
 PyPTO 将 Simpler 的五项运行时诊断子功能以独立开关的形式暴露在
 [`RunConfig`](../../../python/pypto/runtime/runner.py) 上。每个开关都映射到
 Simpler 的 `CallConfig` 字段，以及 `tests/st/conftest.py` 中对应的 pytest

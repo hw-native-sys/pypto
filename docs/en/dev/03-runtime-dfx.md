@@ -1,5 +1,10 @@
 # Runtime DFX (Design For X) Flags
 
+For kernel-mode JIT calls, configure DFX through `pypto.torch.init` and bracket
+launches with `pypto.torch.begin_dfx()` / `end_dfx()`. See
+[kernel swimlane collection](runtime/kernel-mode.md#kernel-swimlane-collection).
+The `RunConfig` controls below apply to program execution.
+
 PyPTO exposes Simpler's five runtime diagnostic sub-features as independent
 toggles on [`RunConfig`](../../../python/pypto/runtime/runner.py). Each
 toggle maps to a field on Simpler's `CallConfig` and to the matching pytest
