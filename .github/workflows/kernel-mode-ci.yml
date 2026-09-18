@@ -168,7 +168,9 @@ jobs:
           uv pip install 'torch==2.6.0' --index-url "$torch_index"
           # post2 is an Ascend release asset, not a PyPI release. Fetch before
           # installing because Gitee rejects uv's download request.
-          curl --fail --location --retry 3 --connect-timeout 15 --max-time 120 \
+          # The x86 archive can take several minutes on the runner connection.
+          curl --fail --location --retry 3 --retry-max-time 1200 \
+            --connect-timeout 15 --max-time 600 --speed-limit 1024 --speed-time 60 \
             "${torch_npu_release}/${torch_npu_asset}" -o "$wheel_dir/$torch_npu_asset"
           if [[ "$torch_npu_asset" == *.zip ]]; then
             python - "$wheel_dir/$torch_npu_asset" <<'PYTHON'

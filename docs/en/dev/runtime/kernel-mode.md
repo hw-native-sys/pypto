@@ -638,7 +638,10 @@ for the runner architecture. ARM64 uses the Torch CPU index and the
 SHA256-pinned torch_npu CPython 3.10 wheel. x86_64 uses the Torch
 `cpu-cxx11-abi` index and the CPython 3.10 wheel from Ascend's C++11 ABI zip.
 Both torch_npu packages come from the official `v7.1.0.2-pytorch2.6.0` release;
-that version is not on PyPI. The job checks the Torch ABI before building.
+that version is not on PyPI. Release downloads allow up to ten minutes per
+transfer, with a 15-second connection timeout and a one-minute low-speed cutoff
+below 1 KiB/s, so slow downloads can finish without letting stalled transfers hang.
+The job checks the Torch ABI before building.
 Device preflight reuses the runtime framework-version check, accepting the
 C++11 ABI build suffix while still requiring release 2.6.0.post2. The full
 task log is uploaded even if preflight fails before producing JUnit evidence;

@@ -417,6 +417,8 @@ UT 或设备矩阵，完整测试仍可手动运行。CPU 测试与 pre-commit �
 ARM64 使用 Torch CPU 索引及固定 SHA256 的 torch_npu CPython 3.10 wheel；x86_64 使用 Torch
 `cpu-cxx11-abi` 索引及 Ascend C++11 ABI zip 中的 CPython 3.10 wheel。
 两种 torch_npu 包均来自官方 `v7.1.0.2-pytorch2.6.0` 发布，PyPI 未发布该版本。
+发布包每次下载最多允许十分钟，连接超时为 15 秒，连续一分钟低于 1 KiB/s 则中止，
+使持续传输的慢下载能够完成，同时避免停滞的连接一直等待。
 设备预检复用 runtime 的框架版本检查，接受 C++11 ABI 构建后缀，仍要求版本为
 2.6.0.post2。即使预检在生成 JUnit 之前失败，完整任务日志也会上传；缺失或失败的
 JUnit 报告仍使 job 失败。任务在构建前检查 Torch ABI，并从
