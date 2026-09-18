@@ -10,6 +10,8 @@
 """Dependency inventories fail closed and hash compiler resource contents."""
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,6 +30,85 @@ def test_component_preserves_content_changes_without_metadata_change(tmp_path):
     header.write_text("bbb")
     assert fingerprint_content(component.roots).digest != before.digest
     assert len(component.roots) == 1
+
+
+def test_pto_isa_uses_the_revision_its_resolution_verified(tmp_path, monkeypatch):
+    checkout = _git_checkout(tmp_path / "pto-isa")
+    monkeypatch.setitem(
+        sys.modules, "simpler_setup.pto_isa", SimpleNamespace(get_pto_isa_head=lambda root: "f" * 40)
+    )
+    component = _toolchain._pto_isa_component(checkout)
+    assert component.verified_revision == "f" * 40
+    assert component.roots == ()
+    assert component.unavailable_reason is None
+
+
+def _git_checkout(root: Path) -> Path:
+    """A real committed checkout, so the git invocation itself is under test."""
+    root.mkdir(parents=True, exist_ok=True)
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+    }
+    (root / ".gitignore").write_text("build/\n")
+    (root / "isa.h").write_text("int isa;\n")
+    for args in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "isa"]):
+        subprocess.run(["git", *args], cwd=root, env=env, check=True, capture_output=True)
+    return root
+
+
+def test_ignored_files_are_not_invisible_to_the_checkout_check(tmp_path):
+    # The resolver decides cleanliness with `git status --porcelain`, which
+    # omits ignored paths; a generated file left in the tree would otherwise
+    # leave both the revision and that check unchanged.
+    checkout = _git_checkout(tmp_path / "pto-isa")
+    assert _toolchain._unaccounted_checkout_state(checkout) == ""
+
+    (checkout / "build").mkdir()
+    (checkout / "build/generated.h").write_text("int generated;\n")
+
+    assert "build/" in _toolchain._unaccounted_checkout_state(checkout)
+
+
+def test_an_unusable_git_answer_is_not_treated_as_clean(tmp_path):
+    not_a_checkout = tmp_path / "loose"
+    not_a_checkout.mkdir()
+    assert _toolchain._unaccounted_checkout_state(not_a_checkout) != ""
+
+
+def test_pto_isa_falls_back_to_contents_for_an_unaccounted_tree(tmp_path, monkeypatch):
+    checkout = tmp_path / "pto-isa"
+    checkout.mkdir()
+    (checkout / "isa.h").write_text("aaa")
+    monkeypatch.setitem(
+        sys.modules, "simpler_setup.pto_isa", SimpleNamespace(get_pto_isa_head=lambda root: "f" * 40)
+    )
+    monkeypatch.setattr(_toolchain, "_unaccounted_checkout_state", lambda root: "!! build/x.h")
+
+    component = _toolchain._pto_isa_component(checkout)
+
+    assert component.verified_revision is None
+    assert [root.path for root in component.roots] == [checkout]
+
+
+def test_pto_isa_falls_back_to_contents_when_the_revision_is_unknown(tmp_path, monkeypatch):
+    # get_pto_isa_head reports failure as an empty string, which must never be
+    # accepted as an identity.
+    checkout = tmp_path / "pto-isa"
+    checkout.mkdir()
+    (checkout / "isa.h").write_text("aaa")
+    monkeypatch.setitem(
+        sys.modules, "simpler_setup.pto_isa", SimpleNamespace(get_pto_isa_head=lambda root: "")
+    )
+    component = _toolchain._pto_isa_component(checkout)
+    assert component.verified_revision is None
+    assert [root.path for root in component.roots] == [checkout]
+    before = fingerprint_content(component.roots)
+    (checkout / "isa.h").write_text("bbb")
+    assert fingerprint_content(component.roots).digest != before.digest
 
 
 def test_unknown_shell_launcher_is_not_an_executable_identity(tmp_path):

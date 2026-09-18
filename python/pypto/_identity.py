@@ -276,10 +276,19 @@ class ComponentInputs:
     An adapter must leave ``unavailable_reason`` set until it has accounted
     for all resources and dynamic dependencies, even if it knows some files.
     A caller-supplied application fingerprint cannot complete this inventory.
+
+    ``verified_revision`` is the narrow exception to reading contents: an
+    adapter may supply a revision when some *other* mechanism has already
+    proven, in the same resolution, that the component's bytes are exactly that
+    revision -- not merely that it claims to be. A version an installation
+    reports about itself is not such a proof. The adapter owns that proof and
+    must document what it does not cover; without one, leave this unset so the
+    contents are read.
     """
 
     roots: tuple[ContentRoot, ...] = ()
     unavailable_reason: str | None = "Dependency inventory has not been established"
+    verified_revision: str | None = None
 
 
 @dataclass(frozen=True)
@@ -341,6 +350,12 @@ class InstallationIdentityCache:
                 component: ComponentInputs = getattr(inputs, name)
                 if component.unavailable_reason is not None:
                     result = ContentIdentity(None, component.unavailable_reason)
+                elif component.verified_revision is not None:
+                    # Keyed by component so one component's revision can never
+                    # collide with another's, nor with any content digest.
+                    result = ContentIdentity(
+                        digest_record(("verified_revision", name, component.verified_revision))
+                    )
                 elif component in self._components:
                     result = ContentIdentity(self._components[component])
                 else:
