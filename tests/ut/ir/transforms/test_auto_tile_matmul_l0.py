@@ -3448,6 +3448,274 @@ class TestAutoTileMatmulL0MNTiling:
                 generated = True
         assert generated, "direct-store full-K must generate valid PTO MLIR"
 
+    @pytest.mark.parametrize(
+        "planner",
+        [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS],
+    )
+    def test_arbitrary_matmul_acc_excludes_dbc_before_choice(self, planner, capfd):
+        """A caller-owned full accumulator cannot be recycled as a two-slot grid.
+
+        The production PV shape would choose a 1x4 dbC grid if admitted. Semantic
+        eligibility removes that regime before the chooser runs, so every planner
+        emits the same legal K-only plan as PyPTO with dbC disabled and no
+        speculative PH-AT-006 diagnostic.
+        """
+        M, N, K = 32, 512, 128
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, N], pl.BF16],
+                acc: pl.Tile[[M, N], pl.FP32, pl.Mem.Acc],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                result = pl.tile.matmul_acc(acc, lhs_mat, rhs_mat)
+                out = pl.tile.store(result, [0, 0], out)
+                return out
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
+            single_c = passes.auto_tile_matmul_l0()(Before)
+        capfd.readouterr()
+        with passes.PassContext([], memory_planner=planner, enable_pypto_l0c_double_buffer=True):
+            selected = passes.auto_tile_matmul_l0()(Before)
+
+        ir.assert_structural_equal(selected, single_c)
+        printed = ir.python_print(selected)
+        assert "pipeline_double_buffer_c" not in printed
+        assert "PH-AT-006" not in capfd.readouterr().err
+
+    def test_result_without_grid_placement_excludes_dbc_before_choice(self, capfd):
+        """An arbitrary on-chip consumer cannot receive an M/N output grid."""
+        M, N, K = 16, 1024, 64
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, N], pl.BF16],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                result = pl.tile.matmul(lhs_mat, rhs_mat)
+                result_vec = pl.tile.move(result, target_memory=pl.Mem.Vec)
+                out = pl.tile.store(result_vec, [0, 0], out)
+                return out
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
+            single_c = passes.auto_tile_matmul_l0()(Before)
+        capfd.readouterr()
+        with passes.PassContext(
+            [], memory_planner=passes.MemoryPlanner.PYPTO, enable_pypto_l0c_double_buffer=True
+        ):
+            selected = passes.auto_tile_matmul_l0()(Before)
+
+        ir.assert_structural_equal(selected, single_c)
+        assert "pipeline_double_buffer_c" not in ir.python_print(selected)
+        assert "PH-AT-006" not in capfd.readouterr().err
+
+    @pytest.mark.parametrize(
+        ("M", "N", "K", "route_marker"),
+        [
+            (128, 384, 64, "pipeline_double_buffer_c"),  # full-K nested grid; output > L0C
+            (128, 384, 256, '"pipeline_membership": "2097152:'),  # split-K; output > L0C
+        ],
+    )
+    def test_vec_left_mn_dbc_stages_once_for_complete_grid(self, M, N, K, route_marker):
+        """Both PV grid routes pay one grid-wide Vec->Mat crossing."""
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, N], pl.BF16],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                lhs_vec = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Vec)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                result = pl.tile.matmul(lhs_vec, rhs_mat)
+                out = pl.tile.store(result, [0, 0], out)
+                return out
+
+        with passes.PassContext(
+            [], memory_planner=passes.MemoryPlanner.PYPTO, enable_pypto_l0c_double_buffer=True
+        ):
+            selected = passes.auto_tile_matmul_l0()(Before)
+
+        printed = ir.python_print(selected)
+        assert route_marker in printed, printed
+        vec_to_mat = [
+            line
+            for line in printed.splitlines()
+            if "pl.tile.move(" in line and "target_memory=pl.Mem.Mat" in line
+        ]
+        assert len(vec_to_mat) == 1, (
+            "Vec staging is one candidate-independent grid prelude, not one transfer per output tile:\n"
+            f"{printed}"
+        )
+        _assert_ssa_valid(selected, "test_vec_left_mn_dbc_stages_once_for_complete_grid")
+
+        # The staging move is also the cross-core handoff contract consumed by
+        # ExpandMixedKernel. Exercise the complete default pipeline so this
+        # regression cannot stop at merely well-formed AutoTile IR.
+        with passes.PassContext(
+            [], memory_planner=passes.MemoryPlanner.PYPTO, enable_pypto_l0c_double_buffer=True
+        ):
+            lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+        _assert_ssa_valid(lowered, "test_vec_left_mn_dbc_stages_once_for_complete_grid_full_pipeline")
+
+    def test_vec_left_mn_rejects_mandatory_mat_peak_before_emission(self, capfd):
+        """The grid-wide stage cannot overcommit its two-slot Mat ring.
+
+        The full Vec-left value needs 2 * 128 * 512 * 2 bytes of cross-core
+        ring space, while the resident RHS needs another 512 * 384 * 2 bytes.
+        Their 640 KiB mandatory peak exceeds the 512 KiB Mat capacity before
+        any optional scratch or unrelated live value is counted.
+        """
+        M, N, K = 128, 384, 512
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, N], pl.BF16],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                lhs_vec = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Vec)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                result = pl.tile.matmul(lhs_vec, rhs_mat)
+                out = pl.tile.store(result, [0, 0], out)
+                return out
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            selected = passes.auto_tile_matmul_l0()(Before)
+
+        ir.assert_structural_equal(selected, Before)
+        diagnostics = capfd.readouterr().err
+        assert "PH-AT-006" in diagnostics
+        assert "effective cross-core Mat ring" in diagnostics
+
+    def test_vec_left_mn_honors_cross_core_slot_override(self, capfd):
+        """An explicit cross-core ring depth participates in admission.
+
+        With the default two slots this shape's conservative Mat bound fits.
+        Four 128-KiB slots plus the resident Mat inventory exceed 512 KiB, so
+        the M/N grid must be rejected before chooser selection.
+        """
+        M, N, K = 256, 160, 256
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, N], pl.BF16],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                pl.func_attr({"slot_num": 4})
+                lhs_vec = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Vec)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                result = pl.tile.matmul(lhs_vec, rhs_mat)
+                out = pl.tile.store(result, [0, 0], out)
+                return out
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            selected = passes.auto_tile_matmul_l0()(Before)
+
+        ir.assert_structural_equal(selected, Before)
+        diagnostics = capfd.readouterr().err
+        assert "PH-AT-006" in diagnostics
+        assert "effective cross-core Mat ring" in diagnostics
+
+    def test_vec_left_mn_uses_largest_shared_cross_core_slot(self, capfd):
+        """A larger boundary in either direction sets the shared ring size."""
+        M, N, K = 128, 384, 64
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, N], pl.BF16],
+                other: pl.Tensor[[256, 320], pl.BF16],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                # This independent 160-KiB cube->vector boundary determines the
+                # common slot size used by both pipe directions.
+                other_mat = pl.tile.load(other, [0, 0], [256, 320], target_memory=pl.Mem.Mat)
+                _other_vec = pl.tile.move(other_mat, target_memory=pl.Mem.Vec)
+                lhs_vec = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Vec)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                result = pl.tile.matmul(lhs_vec, rhs_mat)
+                out = pl.tile.store(result, [0, 0], out)
+                return out
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            selected = passes.auto_tile_matmul_l0()(Before)
+
+        ir.assert_structural_equal(selected, Before)
+        diagnostics = capfd.readouterr().err
+        assert "PH-AT-006" in diagnostics
+        assert "effective cross-core Mat ring" in diagnostics
+
+    def test_vec_left_mn_multiplies_candidate_by_outer_pipeline_depth(self, capfd):
+        """Future ring storage is charged at the enclosing source depth."""
+        M, N, K = 128, 384, 64
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, N], pl.BF16],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                for _, (out_i,) in pl.pipeline(0, 8, 1, init_values=(out,), stage=8):
+                    lhs_vec = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Vec)
+                    rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                    result = pl.tile.matmul(lhs_vec, rhs_mat)
+                    out_next = pl.tile.store(result, [0, 0], out_i)
+                    out_y = pl.yield_(out_next)
+                return out_y
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            selected = passes.auto_tile_matmul_l0()(Before)
+
+        ir.assert_structural_equal(selected, Before)
+        diagnostics = capfd.readouterr().err
+        assert "PH-AT-006" in diagnostics
+        assert "effective cross-core Mat ring" in diagnostics
+
 
 class TestAutoTileMatmulL0ExistingPipelineDbC:
     """Automatic L0C ping-pong for a user-authored pipeline of L0 matmuls."""
@@ -4687,6 +4955,46 @@ class TestAutoTileMatmulL0MatScratch:
         expected = intermediate @ e.float()
         rel_err = ((out - expected).norm() / expected.norm()).item()
         assert rel_err < 5e-2, f"matmul_bias Mat-scratch rel_err {rel_err:.3e} exceeds 5e-2"
+
+    def test_vec_left_mat_scratch_dbc_uses_one_grid_stage(self):
+        """Vec-left dbC also supports the on-chip Mat-scratch placement."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        M, K, N, out_n = 128, 64, 384, 16
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[M, K], pl.BF16],
+                b: pl.Tensor[[K, N], pl.BF16],
+                e: pl.Tensor[[N, out_n], pl.BF16],
+                out: pl.Out[pl.Tensor[[M, out_n], pl.FP32]],
+            ) -> pl.Tensor[[M, out_n], pl.FP32]:
+                a_vec = pl.tile.load(a, [0, 0], [M, K], target_memory=pl.Mem.Vec)
+                b_mat = pl.tile.load(b, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                e_mat = pl.tile.load(e, [0, 0], [N, out_n], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul(a_vec, b_mat)
+                cb = pl.cast(c, pl.BF16, mode="rint")
+                d = pl.tile.matmul(cb, e_mat)
+                out = pl.tile.store(d, [0, 0], out)
+                return out
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA_RP):
+            selected = passes.auto_tile_matmul_l0()(Before)
+
+        printed = ir.python_print(selected)
+        assert "pipeline_double_buffer_c" in printed
+        assert "pl.tile.assemble(" in printed
+        assert "pl.tile.cast(" not in printed
+        vec_to_mat = [
+            line
+            for line in printed.splitlines()
+            if "pl.tile.move(" in line and "target_memory=pl.Mem.Mat" in line
+        ]
+        assert len(vec_to_mat) == 1
+        _assert_ssa_valid(selected, "test_vec_left_mat_scratch_dbc_uses_one_grid_stage")
 
     def test_matmul_bias_mat_scratch_load_removal_uses_forced_os_tile(self):
         """#1908 re-selection keeps the full bias load when forced OS only K-tiles.
