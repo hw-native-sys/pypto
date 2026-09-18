@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <any>
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -19,6 +20,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/any_cast.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -49,6 +51,10 @@ namespace {
 struct SpmdLaunchSpec {
   ExprPtr core_num;
   bool sync_start = false;
+  /// The nested scope's ``kAttrDumpVars`` (``pl.spmd(..., dumps=[...])`` or a
+  /// merged ``pl.dump_tag``), in callee scope. Selective dump is dispatch
+  /// metadata like the launch spec, so it moves onto the Group's dispatch too.
+  std::vector<VarPtr> dump_vars;
   FunctionPtr group;
   /// Every Var the Group binds (params + body definitions). ``core_num`` must
   /// reference none of them once translated into caller scope — see
@@ -62,12 +68,15 @@ struct SpmdLaunchSpec {
 ///
 /// The spec must not stay on the Group (see ``kAttrCoreNum``); what does stay is
 /// the self-contained ``kAttrSpmdUnwrapped`` marker. core_num is propagated as
-/// an ExprPtr — codegen is responsible for evaluating it.
+/// an ExprPtr — codegen is responsible for evaluating it. The scope's
+/// ``kAttrDumpVars`` travels with the spec: unwrapping deletes the scope, and
+/// with it the only carrier of an explicit ``pl.spmd(..., dumps=[...])``.
 FunctionPtr UnwrapNestedSpmd(const FunctionPtr& group_func, SpmdLaunchSpec* spec_out) {
   class SpmdUnwrapper : public IRMutator {
    public:
     ExprPtr core_num;
     std::optional<bool> sync_start;
+    std::vector<VarPtr> dump_vars;
 
    protected:
     StmtPtr VisitStmt_(const SpmdScopeStmtPtr& op) override {
@@ -95,6 +104,7 @@ FunctionPtr UnwrapNestedSpmd(const FunctionPtr& group_func, SpmdLaunchSpec* spec
              "at parse time.";
       core_num = op->core_num_;
       sync_start = op->sync_start_;
+      dump_vars = op->GetAttr<std::vector<VarPtr>>(kAttrDumpVars);
       return VisitStmt(op->body_);
     }
   };
@@ -113,6 +123,7 @@ FunctionPtr UnwrapNestedSpmd(const FunctionPtr& group_func, SpmdLaunchSpec* spec
   mutable_func->attrs_.emplace_back(kAttrSpmdUnwrapped, true);
   spec_out->core_num = unwrapper.core_num;
   spec_out->sync_start = unwrapper.sync_start.value_or(false);
+  spec_out->dump_vars = std::move(unwrapper.dump_vars);
   return mutable_func;
 }
 
@@ -138,7 +149,7 @@ class LaunchSpecStamper : public IRMutator {
     auto call = As<Call>(visited);
     auto resolved = Resolve(call, call ? call->args_ : std::vector<ExprPtr>{});
     if (!resolved) return visited;
-    auto attrs = call->attrs_;
+    auto attrs = WithLiftedDumpVars(call->attrs_, call->op_->name_, call->args_);
     attrs.emplace_back(kAttrCoreNum, resolved->first);
     if (resolved->second) attrs.emplace_back(kAttrSyncStart, true);
     return std::make_shared<const Call>(call->op_, call->args_, call->kwargs_, std::move(attrs),
@@ -150,8 +161,9 @@ class LaunchSpecStamper : public IRMutator {
     auto submit = As<Submit>(visited);
     auto resolved = Resolve(submit, submit ? submit->args_ : std::vector<ExprPtr>{});
     if (!resolved) return visited;
+    auto attrs = WithLiftedDumpVars(submit->attrs_, submit->op_->name_, submit->args_);
     return std::make_shared<const Submit>(submit->op_, submit->args_, submit->deps_, submit->kwargs_,
-                                          submit->attrs_, submit->GetType(), submit->span_,
+                                          std::move(attrs), submit->GetType(), submit->span_,
                                           std::optional<ExprPtr>(resolved->first), resolved->second,
                                           submit->allow_early_resolve_, submit->predicate_);
   }
@@ -166,6 +178,44 @@ class LaunchSpecStamper : public IRMutator {
     auto it = specs_.find(node->op_->name_);
     if (it == specs_.end()) return std::nullopt;
     return std::make_pair(ToCallerScope(it->second, args), it->second.sync_start);
+  }
+
+  /// Merge the unwrapped scope's dump Vars into ``attrs``' ``kAttrDumpVars``,
+  /// translated into the caller's Var space through the dispatch's positional
+  /// args (``params_[i] <-> args_[i]``, bounded by the arg count as below). An
+  /// entry the Group does not take as a param was bound inside the cluster and
+  /// has no dispatch arg to mark, so it is skipped — the same rule the scope
+  /// outliner applies to a dump Var the scope never captured.
+  [[nodiscard]] std::vector<std::pair<std::string, std::any>> WithLiftedDumpVars(
+      std::vector<std::pair<std::string, std::any>> attrs, const std::string& callee,
+      const std::vector<ExprPtr>& args) const {
+    const auto& spec = specs_.at(callee);
+    if (spec.dump_vars.empty()) return attrs;
+    INTERNAL_CHECK(spec.group) << "Internal error: launch spec for an unwrapped Group has no Group "
+                                  "attached; its dump Vars cannot be translated into caller scope";
+    std::unordered_map<const Var*, size_t> param_index;
+    const auto& params = spec.group->params_;
+    for (size_t i = 0; i < std::min(params.size(), args.size()); ++i) {
+      if (params[i]) param_index.emplace(params[i].get(), i);
+    }
+    std::vector<VarPtr> merged;
+    for (const auto& [k, v] : attrs) {
+      if (k == kAttrDumpVars) merged = AnyCast<std::vector<VarPtr>>(v, "dispatch attr key: dump_vars");
+    }
+    std::unordered_set<const Var*> seen;
+    for (const auto& var : merged) {
+      if (var) seen.insert(var.get());
+    }
+    const size_t before = merged.size();
+    for (const auto& dump_var : spec.dump_vars) {
+      if (!dump_var) continue;
+      auto it = param_index.find(dump_var.get());
+      if (it == param_index.end()) continue;
+      auto arg_var = AsVarLike(args[it->second]);
+      if (arg_var && seen.insert(arg_var.get()).second) merged.push_back(arg_var);
+    }
+    if (merged.size() == before) return attrs;
+    return WithDumpVarsAttr(std::move(attrs), std::move(merged));
   }
 
   /// Rewrite the callee-scoped ``core_num`` into the caller's Var space via the

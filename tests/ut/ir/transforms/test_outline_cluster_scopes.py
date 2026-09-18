@@ -685,6 +685,76 @@ class TestOutlineClusterScopes:
         After = passes.outline_cluster_scopes()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_nested_spmd_in_cluster_lifts_dumps_onto_dispatch(self):
+        """A cluster-nested ``pl.spmd(..., dumps=[...])`` moves its dump marks
+        onto the Group's DISPATCH alongside ``core_num``.
+
+        Unwrapping deletes the Spmd scope, which is the only carrier of an
+        explicit ``dumps=`` there, so LaunchSpecStamper translates the marks back
+        through the dispatch's args like the launch spec. They merge after the
+        Cluster scope's own marks: ``x`` (on both) appears once, ``out`` (only
+        on the Spmd scope) is appended.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                out: pl.Tensor[[64], pl.FP32] = pl.store(x_tile, [0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.cluster(dumps=[x]):
+                    with pl.spmd(8, dumps=[x, out]):
+                        out = self.kernel(x, out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                out: pl.Tensor[[64], pl.FP32] = pl.store(x_tile, [0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Group)
+            def main_cluster_0(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                pl.func_attr({"spmd_unwrapped": True})
+                out_call = self.kernel(x, out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                out = self.main_cluster_0(x, out, attrs={"dump_vars": [x, out], "core_num": 8})
+                return out
+
+        Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
+        After = passes.outline_cluster_scopes()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_cluster_callee_out_slot_does_not_demote_inout(self):
         """Step 3 merges an inner callee's direction; it never overwrites.
 

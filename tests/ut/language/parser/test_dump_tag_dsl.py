@@ -172,6 +172,201 @@ def test_dump_tag_absent_when_unused() -> None:
     assert "dump_vars" not in calls[0].attrs
 
 
+def _tagged_spmd_as_tid() -> ir.Program:
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            a: pl.Tensor[[512, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        ) -> pl.Tensor[[512, 128], pl.FP32]:
+            pl.dump_tag(a)
+            with pl.spmd(4) as tid:  # noqa: F841 — the capture selects the `as tid` form
+                i = pl.tile.get_block_idx()
+                t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [i * 128, 0], [128, 128])
+                out = pl.store(t, [i * 128, 0], out)
+            return out
+
+    return P
+
+
+def _tagged_spmd_as_tid_split() -> ir.Program:
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            a: pl.Tensor[[512, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        ) -> pl.Tensor[[512, 128], pl.FP32]:
+            pl.dump_tag(a)
+            with pl.spmd(4, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]) as tid:  # noqa: F841
+                i = pl.tile.get_block_idx()
+                t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [i * 128, 0], [128, 128])
+                out = pl.store(t, [i * 128, 0], out)
+            return out
+
+    return P
+
+
+def _tagged_spmd_for() -> ir.Program:
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            a: pl.Tensor[[512, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        ) -> pl.Tensor[[512, 128], pl.FP32]:
+            pl.dump_tag(a)
+            for i in pl.spmd(4, name_hint="stage1"):
+                t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [i * 128, 0], [128, 128])
+                out = pl.store(t, [i * 128, 0], out)
+            return out
+
+    return P
+
+
+def _tagged_spmd_with() -> ir.Program:
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            a: pl.Tensor[[512, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        ) -> pl.Tensor[[512, 128], pl.FP32]:
+            pl.dump_tag(a)
+            with pl.spmd(4):
+                i = pl.tile.get_block_idx()
+                t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [i * 128, 0], [128, 128])
+                out = pl.store(t, [i * 128, 0], out)
+            return out
+
+    return P
+
+
+@pytest.mark.parametrize(
+    "build",
+    [_tagged_spmd_as_tid, _tagged_spmd_as_tid_split, _tagged_spmd_for, _tagged_spmd_with],
+    ids=["as_tid", "as_tid_split", "for", "with"],
+)
+def test_dump_tag_before_inline_spmd_survives_print_reparse(build) -> None:
+    """A tag before an inline-body ``pl.spmd`` lands on the auto-synthesised
+    InCore carrier. Every such form normally prints that carrier's header away
+    (``for i in pl.spmd(...)`` / the inline ``as tid`` body), and ``pl.dump_tag``
+    leaves no statement to re-print — so the printer must spell the carrier out
+    as ``pl.at(level=pl.Level.CORE_GROUP, dumps=[a])`` for the mark to survive."""
+    program = build()
+    printed = program.as_python()
+    assert "dumps=[a]" in printed, printed
+    ir.assert_structural_equal(program, pl.parse_program(printed))
+
+
+def _tagged_spmd_dispatch() -> ir.Program:
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[512, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        ) -> pl.Tensor[[512, 128], pl.FP32]:
+            i = pl.tile.get_block_idx()
+            t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [i * 128, 0], [128, 128])
+            out = pl.store(t, [i * 128, 0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            a: pl.Tensor[[512, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        ) -> pl.Tensor[[512, 128], pl.FP32]:
+            pl.dump_tag(a)
+            with pl.spmd(4):
+                out = self.kernel(a, out)
+            return out
+
+    return P
+
+
+def _tagged_spmd_explicit_carrier() -> ir.Program:
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            a: pl.Tensor[[512, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        ) -> pl.Tensor[[512, 128], pl.FP32]:
+            pl.dump_tag(a)
+            with pl.spmd(4):
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    i = pl.tile.get_block_idx()
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [i * 128, 0], [128, 128])
+                    out = pl.store(t, [i * 128, 0], out)
+            return out
+
+    return P
+
+
+def _tagged_cluster() -> ir.Program:
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            a: pl.Tensor[[64, 64], pl.FP32],
+            b: pl.Tensor[[64, 64], pl.FP32],
+            c: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            pl.dump_tag(a)
+            with pl.cluster():
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    mm = pl.matmul(a, b, out_dtype=pl.FP32)
+                    c = pl.add(mm, b)
+            return c
+
+    return P
+
+
+def _tagged_graph() -> ir.Program:
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            a: pl.Tensor[[64, 64], pl.FP32],
+            c: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            pl.dump_tag(a)
+            with pl.graph("g"):
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    c = pl.add(a, a)
+            return c
+
+    return P
+
+
+@pytest.mark.parametrize(
+    "build",
+    [_tagged_spmd_dispatch, _tagged_spmd_explicit_carrier, _tagged_cluster, _tagged_graph],
+    ids=["spmd_dispatch", "spmd_explicit_carrier", "cluster", "graph"],
+)
+def test_dump_tag_before_container_scope_survives_print_reparse(build) -> None:
+    """A tag before a ``pl.spmd`` whose body is a kernel dispatch or an explicit
+    carrier, a ``pl.cluster``, or a ``pl.graph`` lands on that outer scope itself
+    (each outlines to a dispatch of its own). The outer scope prints it back as
+    its own ``dumps=[a]`` kwarg, so the mark survives print -> reparse."""
+    program = build()
+    outer = program.get_function("main").body.stmts[0]
+    assert [v.name_hint for v in outer.attrs["dump_vars"]] == ["a"]
+    printed = program.as_python()
+    ir.assert_structural_equal(program, pl.parse_program(printed))
+
+
 def test_dump_tag_rejects_non_name_argument() -> None:
     """``pl.dump_tag(<attr/subscript/call>)`` is rejected with a clear error.
     Only bare variable names are valid — the codegen matches against IR Var

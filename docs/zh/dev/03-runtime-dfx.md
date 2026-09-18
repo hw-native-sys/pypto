@@ -176,8 +176,9 @@ def orch(self, q: pl.Tensor[...], k_cache: pl.Tensor[...], out: pl.Out[...]):
     out = self.qk_pv(q, k_cache, out)   # q、out 被 dump；k_cache 被过滤掉
 ```
 
-**显式 kwarg（`dumps=[...]`）** —— `pl.submit(...)` 和 `pl.at(...)` 接受
-`dumps=[...]` kwarg（与 `deps=[...]` 对称），列出该次 task 启动要 dump 的张量。
+**显式 kwarg（`dumps=[...]`）** —— `pl.submit(...)` 以及所有派发 scope
+（`pl.at(...)`、三种形式的 `pl.spmd(...)`、`pl.cluster(...)`、`pl.graph(...)`）
+接受 `dumps=[...]` kwarg（与 `deps=[...]` 对称），列出该次 task 启动要 dump 的张量。
 每个条目必须是该 submit 的某个张量实参 / 该 scope 捕获的某个张量：
 
 ```python
@@ -203,7 +204,7 @@ with pl.manual_scope():
   `pl.create_tensor(...)` 结果上的标记会在内联点生效。
 - **`@pl.jit` / 张量算子风格（`with pl.at(level=...)`、`c = a + 1.0`）** ——
   此时 kernel 派发由 outline pass *合成*，而非在 parse 阶段写出。标记改为
-  写入所在 scope 的 `dump_vars`（round-trip 成 `pl.at(..., dumps=[...])`）；
+  写入所在 scope 的 `dump_vars`（round-trip 成该构造自身的 `dumps=[...]`）；
   写在内联调用点的标记先落在该 call 的 `dump_vars` 上，再由
   `InlineFunctions` 转移到它 splice 进来的 scope 上。outliner 随后按 Var
   身份把每个被 scope 捕获的 dump Var 翻译成合成派发的 `dump_vars` ——
@@ -219,6 +220,7 @@ with pl.manual_scope():
 | `pl.dump_tag(t)` 写在 Orchestration 或 Inline 函数体内的独立语句 | 支持（声明式标记；影响每个后续消费的派发）。 |
 | `dumps=[arg]` 写在 `pl.submit(...)` 上 | 支持 —— submit 侧的显式入口（与 `deps=` 对称）；每个条目必须是该 submit 的位置实参。 |
 | `dumps=[t]` 写在 `pl.at(...)` 上 | 支持 —— scope 侧的显式入口（与 `deps=` 对称）；每个条目必须是该 scope 体捕获的张量。 |
+| `dumps=[t]` 写在 `pl.spmd(...)` / `pl.cluster(...)` / `pl.graph(...)` 上 | 支持 —— 标记该构造降级得到的派发：SPMD 网格启动、Group 启动，或 graph task 本身（而非其内部记录的 kernel）。嵌套在 `pl.cluster` 内的 `pl.spmd` 会被展开进它的 Group，因此其标记会转移到 Group 启动上。 |
 | `dumps=` 写在普通 `self.kernel(...)` 调用上 | 不支持 —— 抛出 `ParserTypeError`。普通调用是 fire-and-forget；请用 `pl.dump_tag(t)` 声明目标，或用 `pl.submit(..., dumps=[...])` 提交。 |
 | 标记被 outline 合成的派发消费（`@pl.jit` / `with pl.at(level=...)` / 张量算子风格） | 支持 —— 标记随 scope 级 `dump_vars` 载体（`dumps=`）传递，outliner 再把它映射到合成派发的实参上。 |
 | `pl.dump_tag(t)` 写在 `@pl.function(type=pl.FunctionType.InCore/AIC/AIV/Group)` 函数体内 | 不支持 —— parse 阶段抛出 `ParserSyntaxError`。dump 过滤由编排层 codegen 在 kernel 调用点完成；kernel 函数体内没有对应的调用点实参可挂载标记。请将 `pl.dump_tag` 放在外层 `Orchestration`（或 `Inline`）函数里。 |

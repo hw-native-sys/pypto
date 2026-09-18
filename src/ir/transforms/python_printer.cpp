@@ -110,6 +110,32 @@ bool SpmdInlineBodyRebuildsCarrier(const InCoreScopeStmtPtr& incore) {
   return detector.found();
 }
 
+/// True when the ``std::vector<VarPtr>`` attr ``key`` holds a non-null entry —
+/// the condition under which ``PrintScopeVarListKwarg`` prints it.
+bool HasNonNullVarListAttr(const ScopeStmtPtr& scope, const char* key) {
+  const auto vars = scope->GetAttr<std::vector<VarPtr>>(key);
+  return std::any_of(vars.begin(), vars.end(), [](const VarPtr& var) { return var != nullptr; });
+}
+
+/// True when ``incore`` carries a kwarg only its own
+/// ``pl.at(level=pl.Level.CORE_GROUP, ...)`` header can spell.
+///
+/// The Spmd sugar forms (``for i in pl.spmd(...):`` and the inline
+/// ``with pl.spmd(...) as tid:`` body) drop that header and let the parser
+/// re-synthesise the carrier, which then holds only what the sugar re-prints:
+/// ``optimizations=`` on the ``pl.spmd(...)`` line and ``pl.set_cache_policy``
+/// markers as body statements. Any other kwarg the InCore printer emits would be
+/// silently lost — notably ``dumps=``: a forward-sticky ``pl.dump_tag`` merges its
+/// tensors onto this carrier and emits no statement of its own to re-print. Such
+/// a carrier must be spelled out as a nested scope instead.
+bool IncoreCarrierHasHeaderOnlyKwargs(const InCoreScopeStmtPtr& incore) {
+  if (!incore) return false;
+  return HasNonNullVarListAttr(incore, kAttrDumpVars) || HasNonNullVarListAttr(incore, kAttrManualDepEdges) ||
+         HasNonNullVarListAttr(incore, kAttrArgDirOverrideVars) || incore->GetAttr<VarPtr>(kAttrTaskIdVar) ||
+         incore->GetAttr<ExprPtr>(kAttrPredicate) || incore->GetAttr<bool>("allow_early_resolve", false) ||
+         incore->GetAttr<bool>("windowize", false);
+}
+
 /// Convert cast round mode integer to its string name for printing.
 /// Inverse of the CAST_MODE_NAMES mapping in python/pypto/ir/utils.py.
 std::string CastModeToString(int mode) {
@@ -450,8 +476,10 @@ class IRPythonPrinter : public IRVisitor {
   // list-of-VarPtr attr keyed by ``attr_key`` on ``op``. Skips null entries so
   // the rendered Python stays syntactically valid. Returns false when the attr
   // is absent or every entry is null. Shared by the two scope-attr printers
-  // below so the null-filter rule lives in one place.
-  bool PrintScopeVarListKwarg(const ScopeStmtPtr& op, const char* attr_key, const char* kwarg_name);
+  // below so the null-filter rule lives in one place. ``leading_comma=false``
+  // is for a call whose first kwarg this may be (``pl.cluster(...)``).
+  bool PrintScopeVarListKwarg(const ScopeStmtPtr& op, const char* attr_key, const char* kwarg_name,
+                              bool leading_comma = true);
 
   // Emit ``no_dep_args=[t1, t2]`` if the scope carries ``kAttrArgDirOverrideVars``;
   // returns true when something was printed. Common to InCore/Hierarchy scope
@@ -2097,7 +2125,7 @@ void IRPythonPrinter::VisitStmt_(const WhileStmtPtr& op) {
 // — some transforms intentionally leave null slots in dep-edge lists.
 // Returns false (no output) when the attr is missing or every entry is null.
 bool IRPythonPrinter::PrintScopeVarListKwarg(const ScopeStmtPtr& op, const char* attr_key,
-                                             const char* kwarg_name) {
+                                             const char* kwarg_name, bool leading_comma) {
   for (const auto& [k, v] : op->attrs_) {
     if (k != attr_key) continue;
     const auto* vars = std::any_cast<std::vector<VarPtr>>(&v);
@@ -2108,7 +2136,7 @@ bool IRPythonPrinter::PrintScopeVarListKwarg(const ScopeStmtPtr& op, const char*
       if (var) non_null.push_back(var.get());
     }
     if (non_null.empty()) continue;
-    stream_ << ", " << kwarg_name << "=[";
+    stream_ << (leading_comma ? ", " : "") << kwarg_name << "=[";
     for (size_t i = 0; i < non_null.size(); ++i) {
       if (i > 0) stream_ << ", ";
       stream_ << GetVarName(non_null[i]);
@@ -2287,9 +2315,13 @@ void IRPythonPrinter::VisitStmt_(const InCoreScopeStmtPtr& op) {
 
 void IRPythonPrinter::VisitStmt_(const ClusterScopeStmtPtr& op) {
   stream_ << "with " << prefix_ << ".cluster(";
-  if (!op->name_hint_.empty()) {
+  const bool has_name_hint = !op->name_hint_.empty();
+  if (has_name_hint) {
     stream_ << "name_hint=\"" << op->name_hint_ << "\"";
   }
+  // ``dumps=`` may be the first kwarg here, so it leads with a comma only after
+  // ``name_hint``.
+  PrintScopeVarListKwarg(op, kAttrDumpVars, "dumps", /*leading_comma=*/has_name_hint);
   stream_ << "):\n";
   IncreaseIndent();
   PrintStmtBlock(op->body_);
@@ -2299,7 +2331,9 @@ void IRPythonPrinter::VisitStmt_(const ClusterScopeStmtPtr& op) {
 void IRPythonPrinter::VisitStmt_(const GraphScopeStmtPtr& op) {
   // ``name_hint_`` is the region name the user wrote; the parser requires it,
   // so it is printed positionally rather than as an optional keyword.
-  stream_ << "with " << prefix_ << ".graph(\"" << op->name_hint_ << "\"):\n";
+  stream_ << "with " << prefix_ << ".graph(\"" << op->name_hint_ << "\"";
+  PrintScopeDumpAttr(op);
+  stream_ << "):\n";
   IncreaseIndent();
   PrintStmtBlock(op->body_);
   DecreaseIndent();
@@ -2321,6 +2355,10 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
   // inner InCore (auto-outlined kernel); print its statements directly (no
   // synthesised loop-var to skip), reconstructing optimizations / deps / `as tid`.
   if (op->GetAttr<VarPtr>(kAttrTaskIdVar)) {
+    // Inline the InCore's statements only when the parser rebuilds an identical
+    // carrier from them; otherwise it is spelled out as a nested scope below.
+    const bool inlines_incore_body =
+        SpmdInlineBodyRebuildsCarrier(incore) && !IncoreCarrierHasHeaderOnlyKwargs(incore);
     stream_ << "with " << prefix_ << ".spmd(";
     VisitExpr(op->core_num_);
     if (op->sync_start_) {
@@ -2329,10 +2367,13 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
     if (!op->name_hint_.empty()) {
       stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
     }
-    if (incore) {
+    // A spelled-out carrier prints its own ``optimizations=``; the parser rejects
+    // the entry on both lines.
+    if (inlines_incore_body) {
       PrintScopeOptimizations(incore->split_, incore);
     }
     PrintScopeDepsAttr(op);
+    PrintScopeDumpAttr(op);
     PrintScopeAllowEarlyResolveAttr(op);
     PrintScopePredicateAttr(op);
     stream_ << ")";
@@ -2345,18 +2386,18 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
     // here, from ``incore``, or they are lost. When the carrier is spelled out
     // instead, the nested InCore prints its own markers and re-printing them
     // here would duplicate them.
-    const bool inlines_incore_body = SpmdInlineBodyRebuildsCarrier(incore);
     PrintScopeCachePolicyStmts(op);
     if (inlines_incore_body) {
       PrintScopeCachePolicyStmts(incore);
     }
     if (!inlines_incore_body) {
-      // Print the body as-is. Either inlining would drop the carrier — the parser
+      // Print the body as-is. Either inlining would lose the carrier — the parser
       // re-synthesises an InCore only for a body that carries a split or reads the
-      // per-block index, so the carrier must be spelled out as a nested
-      // ``pl.at(level=pl.Level.CORE_GROUP)``, the same shape the plain with-form
-      // prints — or (defensively) there is no InCore wrapper at all, which an
-      // `as tid` Spmd scope should never be missing.
+      // per-block index, and even then cannot recover a header-only kwarg such as
+      // ``dumps=`` — so the carrier must be spelled out as a nested
+      // ``pl.at(level=pl.Level.CORE_GROUP, ...)``, the same shape the plain
+      // with-form prints; or (defensively) there is no InCore wrapper at all,
+      // which an `as tid` Spmd scope should never be missing.
       PrintStmtBlock(op->body_);
     } else if (incore_seq && !incore_seq->stmts_.empty()) {
       for (size_t i = 0; i < incore_seq->stmts_.size(); ++i) {
@@ -2377,7 +2418,10 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
                           : (incore ? As<AssignStmt>(incore->body_) : nullptr);
   auto first_call = first_assign ? As<Call>(first_assign->value_) : nullptr;
   auto first_op = first_call ? As<Op>(first_call->op_) : nullptr;
-  if (first_op && IsOp(first_op, "tile.get_block_idx")) {
+  // The for-form drops the carrier's header just like the inline ``as tid`` body,
+  // so a carrier with a header-only kwarg falls through to the plain with-form,
+  // which spells it out.
+  if (first_op && IsOp(first_op, "tile.get_block_idx") && !IncoreCarrierHasHeaderOnlyKwargs(incore)) {
     stream_ << "for " << GetVarName(first_assign->var_.get()) << " in " << prefix_ << ".spmd(";
     VisitExpr(op->core_num_);
     if (op->sync_start_) {
@@ -2393,6 +2437,7 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
     // it needs to emit a Submit, so the for-form carries edges too and must print
     // them or the round-trip drops the dependency.
     PrintScopeDepsAttr(op);
+    PrintScopeDumpAttr(op);
     PrintScopeAllowEarlyResolveAttr(op);
     PrintScopePredicateAttr(op);
     stream_ << "):\n";
@@ -2433,6 +2478,7 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
   // Same as the for-form above: a plain ``with pl.spmd(...):`` may carry
   // ``manual_dep_edges`` without a captured TaskId.
   PrintScopeDepsAttr(op);
+  PrintScopeDumpAttr(op);
   PrintScopeAllowEarlyResolveAttr(op);
   PrintScopePredicateAttr(op);
   stream_ << "):\n";

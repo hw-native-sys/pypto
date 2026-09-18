@@ -107,6 +107,9 @@ with pl.manual_scope():
     out, tid = pl.submit(self.qk_pv, q, k_cache, out, deps=[prev], dumps=[q, out])
 ```
 
+同一个 `dumps=[...]` kwarg 也可以写在派发 scope 上 —— `pl.at(...)`、`pl.spmd(...)`、
+`pl.cluster(...)` 或 `pl.graph(...)` —— 标记该 scope 启动的 task。
+
 标记按 **Var 身份追踪，绝不按名字**，所以它能穿过 SSA、内联和 codegen —— 也因此，被重新绑定或变换过的值**不**被覆盖：
 
 | 你写的 | 覆盖吗？ |

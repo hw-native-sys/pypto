@@ -136,6 +136,9 @@ with pl.manual_scope():
     out, tid = pl.submit(self.qk_pv, q, k_cache, out, deps=[prev], dumps=[q, out])
 ```
 
+The same `dumps=[...]` kwarg also works on a dispatch scope — `pl.at(...)`, `pl.spmd(...)`,
+`pl.cluster(...)` or `pl.graph(...)` — and marks the task that scope launches.
+
 Marks are tracked by **Var identity, never by name**, so they ride SSA, inlining, and
 codegen — and so a rebound or transformed value is *not* covered:
 

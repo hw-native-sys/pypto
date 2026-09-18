@@ -736,6 +736,117 @@ class TestInlineFunctionsBodyShapes:
         ir.assert_structural_equal(After, Expected)
 
 
+class TestInlineFunctionsDumpMarks:
+    """Selective-dump marks (``dump_vars``) on the scopes an Inline body splices in."""
+
+    def test_helper_tag_on_cluster_follows_param_substitution(self):
+        """A helper-local ``pl.dump_tag(x)`` lands on its ``pl.cluster`` scope as
+        well as on the inner ``pl.at`` carrier; splicing must rename ``x`` to the
+        caller's arg on both, or the Cluster's mark names a Var the caller never
+        binds and the outliner silently drops it."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def helper(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                pl.dump_tag(x)
+                with pl.cluster():
+                    with pl.at(level=pl.Level.CORE_GROUP):
+                        y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+            @pl.function
+            def main(self, a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                r: pl.Tensor[[64], pl.FP32] = self.helper(a)
+                return r
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.cluster(dumps=[a]):
+                    with pl.at(level=pl.Level.CORE_GROUP, dumps=[a]):
+                        y_inline: pl.Tensor[[64], pl.FP32] = pl.add(a, a)
+                r: pl.Tensor[[64], pl.FP32] = y_inline
+                return r
+
+        After = passes.inline_functions()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_helper_tag_on_graph_follows_param_substitution(self):
+        """Same as the Cluster case for a ``pl.graph`` region, whose mark marks
+        the graph task itself."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def helper(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                pl.dump_tag(x)
+                with pl.graph("g"):
+                    with pl.at(level=pl.Level.CORE_GROUP):
+                        y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+            @pl.function
+            def main(self, a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                r: pl.Tensor[[64], pl.FP32] = self.helper(a)
+                return r
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.graph("g", dumps=[a]):
+                    with pl.at(level=pl.Level.CORE_GROUP, dumps=[a]):
+                        y_inline: pl.Tensor[[64], pl.FP32] = pl.add(a, a)
+                r: pl.Tensor[[64], pl.FP32] = y_inline
+                return r
+
+        After = passes.inline_functions()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_call_site_tag_skips_split_aiv_region(self):
+        """A call-site tag is transferred onto the spliced ``pl.at`` carrier but
+        not onto the ``pl.split_aiv`` region inside it: that region is never
+        outlined into a dispatch, and ``pl.split_aiv`` has no ``dumps=`` to print
+        a mark as."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def helper(
+                self, x: pl.Tensor[[128, 128], pl.FP32], out: pl.Tensor[[128, 128], pl.FP32]
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    for aiv in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                        t: pl.Tile[[64, 128], pl.FP32] = pl.load(x, [aiv * 64, 0], [64, 128])
+                        out = pl.store(t, [aiv * 64, 0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self, a: pl.Tensor[[128, 128], pl.FP32], out: pl.Out[pl.Tensor[[128, 128], pl.FP32]]
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                pl.dump_tag(a)
+                out = self.helper(a, out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self, a: pl.Tensor[[128, 128], pl.FP32], out: pl.Out[pl.Tensor[[128, 128], pl.FP32]]
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, dumps=[a]):
+                    for aiv in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                        t: pl.Tile[[64, 128], pl.FP32] = pl.load(a, [aiv * 64, 0], [64, 128])
+                        out = pl.store(t, [aiv * 64, 0], out)
+                return out
+
+        After = passes.inline_functions()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+
 class TestInlineFunctionsDeadCode:
     """Inline functions with no callers."""
 

@@ -659,8 +659,9 @@ class ClusterContext:
     The parser recognizes this pattern and creates a ScopeStmt(Cluster).
     """
 
-    def __init__(self, *, name_hint: str = "") -> None:
+    def __init__(self, *, name_hint: str = "", dumps: list[Any] | None = None) -> None:
         self.name_hint = name_hint
+        self.dumps = dumps
 
     def __enter__(self) -> None:
         """Enter the Cluster scope context."""
@@ -671,7 +672,7 @@ class ClusterContext:
         pass
 
 
-def cluster(*, name_hint: str = "") -> ClusterContext:
+def cluster(*, name_hint: str = "", dumps: list[Any] | None = None) -> ClusterContext:
     """Mark a region of code as belonging to a Cluster execution context.
 
     A cluster groups co-scheduled AIC (Cube) and AIV (Vector) kernels that
@@ -680,6 +681,11 @@ def cluster(*, name_hint: str = "") -> ClusterContext:
 
     Args:
         name_hint: Optional name hint for the outlined function.
+        dumps: Optional list literal of outer-scope tensor names to mark for
+            selective tensor dump on the Group dispatch the cluster outlines to
+            — the same surface as ``pl.at(..., dumps=[...])``. Equivalent to
+            declaring the tensors with ``pl.dump_tag(t)`` before the scope, and
+            the form the printer emits for a scope carrying such marks.
 
     Returns:
         Context manager for Cluster scope
@@ -689,7 +695,7 @@ def cluster(*, name_hint: str = "") -> ClusterContext:
         ...     with pl.at(level=pl.Level.CORE_GROUP):
         ...         y = pl.add(x, x)
     """
-    return ClusterContext(name_hint=name_hint)
+    return ClusterContext(name_hint=name_hint, dumps=dumps)
 
 
 class GraphContext:
@@ -699,8 +705,9 @@ class GraphContext:
     a ``GraphScopeStmt``.
     """
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, *, dumps: list[Any] | None = None) -> None:
         self.name = name
+        self.dumps = dumps
 
     def __enter__(self) -> None:
         """Enter the Graph scope context."""
@@ -711,7 +718,7 @@ class GraphContext:
         pass
 
 
-def graph(name: str) -> GraphContext:
+def graph(name: str, *, dumps: list[Any] | None = None) -> GraphContext:
     """Mark a repeated region of orchestration as one recordable graph.
 
     Under ``runtime="host_build_graph"`` the runtime records the region's task
@@ -736,6 +743,12 @@ def graph(name: str) -> GraphContext:
         name: Region name. Must be a valid Python identifier; it becomes the
             outlined function's name and hence the runtime's graph key, so keep
             it stable across edits.
+        dumps: Optional list literal of outer-scope tensor names to mark for
+            selective tensor dump on the Graph task itself (distinct from the
+            kernel dispatches recorded inside it) — the same surface as
+            ``pl.at(..., dumps=[...])``. Equivalent to declaring the tensors
+            with ``pl.dump_tag(t)`` before the scope, and the form the printer
+            emits for a scope carrying such marks.
 
     Returns:
         Context manager for the Graph scope.
@@ -751,7 +764,7 @@ def graph(name: str) -> GraphContext:
         ...         h = attention(x, wq, h)
         ...         x = mlp(h, w1, x)
     """
-    return GraphContext(name)
+    return GraphContext(name, dumps=dumps)
 
 
 class SpmdContext:
@@ -774,12 +787,14 @@ class SpmdContext:
         deps: list[Any] | None = None,
         allow_early_resolve: bool = False,
         predicate: Any = None,
+        dumps: list[Any] | None = None,
     ) -> None:
         self.core_num = core_num
         self.sync_start = sync_start
         self.name_hint = name_hint
         self.optimizations = optimizations
         self.deps = deps
+        self.dumps = dumps
         self.allow_early_resolve = allow_early_resolve
         self.predicate = predicate
 
@@ -819,6 +834,7 @@ def spmd(
     deps: list[Any] | None = None,
     allow_early_resolve: bool = False,
     predicate: Any = None,
+    dumps: list[Any] | None = None,
 ) -> SpmdContext:
     """Dispatch a kernel with SPMD (Single Program Multiple Data) multi-block execution.
 
@@ -929,6 +945,14 @@ def spmd(
             ``deps=`` — otherwise the predicate may read a stale value. The parser
             makes a best-effort check (see ``pl.spmd_submit``); getting ``deps=``
             right remains the author's responsibility.
+        dumps: Optional list literal of outer-scope tensor names to mark for
+            selective tensor dump on the grid dispatch — the same surface as
+            ``pl.at(..., dumps=[...])``, accepted on all three forms. It rides
+            on the Spmd scope; a forward-sticky ``pl.dump_tag(t)`` before an
+            inline body lands on the auto-outlined kernel instead, and either
+            way the tensor is dumped on the one launch. Unlike ``deps=`` it is
+            legal on a ``pl.cluster()``-nested ``pl.spmd``, whose marks move
+            onto the Group dispatch.
 
     Returns:
         Context manager / loop iterator for the SPMD scope.
@@ -993,6 +1017,7 @@ def spmd(
         deps=deps,
         allow_early_resolve=allow_early_resolve,
         predicate=predicate,
+        dumps=dumps,
     )
 
 
