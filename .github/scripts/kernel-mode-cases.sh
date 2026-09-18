@@ -47,7 +47,7 @@ case "${1:-}" in
       'tests/st/runtime/kernel/test_capture.py::test_capture[0-single-jit]'
       'tests/st/runtime/kernel/test_capture.py::test_capture[1-owners-torch_ops]'
       'tests/st/runtime/kernel/test_capture.py::test_capture[1-shutdown-torch_ops]'
-      'tests/st/runtime/kernel/test_capture.py::test_capture_entry_interop[1-multi-mixed]'
+      'tests/st/runtime/kernel/test_capture.py::test_capture_entry_interop[1-build-dir-mixed]'
       'tests/st/runtime/kernel/test_torch_ops.py::test_torch_ops[1-capture]'
     )
     ;;

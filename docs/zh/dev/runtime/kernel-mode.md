@@ -347,7 +347,11 @@ reset 存活图，再释放 graph ticket 并关闭 Worker。不新增用户必�
 均会被拒绝。capture 前必须对**每个算子及特化**执行 warmup。shape、dtype 或 constexpr 变化可能选择新特化，
 需要重新 warmup；运行时 Scalar 值变化不需要。warmup 会实际执行算子，因此若捕获计算依赖
 InOut/输出初值，需恢复被 warmup 改写的状态。仅编译或命中磁盘缓存不代表已经在当前进程 Worker 注册。
-`force_recompile` 与 capture 不兼容。
+Device 准备成功后，进程 Worker 按算子、特化及标量 ABI 类型持有注册记录（owning registration）。
+capture 独立于 JIT 编译缓存查询该记录，因此设置 `PYPTO_PROG_BUILD_DIR`、传入
+`CompileOptions(output_dir=...)`，或在 warmup 后清空编译缓存，都不会丢失已准备的 callable。
+capture 不会编译、加载二进制或再次 prepare。prepare 失败不会发布记录，Worker 关闭后其注册记录均失效。
+capture 外的诊断 eager/program 调用仍按原有策略重新编译。
 
 ```python
 # op_a and op_b are @pl.jit entries; x, y, out are caller-owned NPU tensors.

@@ -645,5 +645,42 @@ def test_pending_ticket_polling_cost(setup, monkeypatch, pending):
     state.close()
 
 
+def test_prepared_specializations_retain_registration_until_close(setup):
+    state, config, calls, _ = setup
+    state.ensure_worker(config)
+    key = (object(), "specialization")
+    value = artifact()
+    registration = state.ensure_callable(value, config)
+    assert state.find_specialization(key, config) is None
+    state.publish_specialization(key, registration)
+    assert state.find_specialization(key, config) is registration
+    assert registration.artifact is value
+    assert state.find_specialization((object(), "specialization"), config) is None
+    with pytest.raises(ValueError, match="configuration conflict"):
+        state.find_specialization(key, replace(config, device_id=1))
+    state.close()
+    assert not state._specializations
+    with pytest.raises(RuntimeError, match="closed"):
+        state.publish_specialization(key, registration)
+    with pytest.raises(RuntimeError, match="closed"):
+        state.find_specialization(key, config)
+    assert len(calls.prepares) == 1
+
+
+def test_specialization_cannot_publish_or_resolve_foreign_registration(setup):
+    state, config, _, _ = setup
+    state.ensure_worker(config)
+    registration = state.ensure_callable(artifact(), config)
+    stale = replace(registration, generation=registration.generation + 1)
+    with pytest.raises(RuntimeError, match="live Worker generation"):
+        state.publish_specialization("key", stale)
+    assert not state._specializations
+    # Defense in depth: a corrupted/stale index entry must not bypass ownership.
+    state._specializations["key"] = stale
+    with pytest.raises(RuntimeError, match="live Worker generation"):
+        state.find_specialization("key", config)
+    state.close()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

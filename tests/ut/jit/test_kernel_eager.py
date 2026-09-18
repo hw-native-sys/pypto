@@ -74,7 +74,13 @@ def eager(monkeypatch):
         events.build_kwargs = kwargs
         if events.mutate is not None:
             events.mutate.value = 99
-        return SimpleNamespace(kernel_abi=kwargs["_kernel_abi"])
+        image = f"image-{events.builds}".encode()
+        return SimpleNamespace(
+            kernel_abi=kwargs["_kernel_abi"],
+            identity=lambda: image,
+            loaded_identity=lambda: image,
+            load=lambda: image,
+        )
 
     frontend = JITFunction._compile_to_program
     specialize = JITFunction._resolve_specialization
@@ -87,7 +93,7 @@ def eager(monkeypatch):
         events.bindings += 1
         return specialize(self, *args, **kwargs)
 
-    def invoke(artifact, frame, bound):
+    def invoke(artifact, frame, bound, *, specialization=None):
         assert bound is events.state.config
         events.frames.append(frame)
         return frame.alias_result()
@@ -95,6 +101,7 @@ def eager(monkeypatch):
     monkeypatch.setattr(importlib.import_module("pypto.ir.compile"), "_compile_impl", build)
     monkeypatch.setattr(JITFunction, "_compile_to_program", counted_frontend)
     monkeypatch.setattr(JITFunction, "_resolve_specialization", counted_specialization)
+    events.real_invoke = launch.invoke
     monkeypatch.setattr(launch, "invoke", invoke)
     monkeypatch.setattr(importlib.import_module("pypto._cache_config")._policy, "override", CacheConfig())
     events.state = _bind(monkeypatch, KernelConfig("a2a3", "tensormap_and_ringbuffer", 0))
@@ -258,6 +265,146 @@ def test_explicit_compile_keeps_program_path_and_separate_cache(eager, monkeypat
     assert calls == [(x, 3, out)]
     assert scale_eager(x, 4, out) is out
     assert eager.builds == 1 and len(scale_eager._cache) == 2
+
+
+@pytest.fixture
+def prepared(eager, monkeypatch):
+    """Keep real preparation/publication and stub only the native submission boundary."""
+    eager.prepares = []
+    eager.registrations = []
+    eager.fail_prepare = False
+
+    def prepare(image):
+        eager.prepares.append(image)
+        if eager.fail_prepare:
+            raise RuntimeError("prepare failed")
+        return object()
+
+    def enqueue(registration, frame):
+        registration.require_live()
+        eager.registrations.append(registration)
+        eager.frames.append(frame)
+        return frame.alias_result()
+
+    eager.state._worker = SimpleNamespace(prepare=prepare, close=lambda: None)
+    monkeypatch.setattr(launch, "invoke", eager.real_invoke)
+    monkeypatch.setattr(launch, "_enqueue_frame", enqueue)
+    return eager
+
+
+@pytest.mark.parametrize("bypass", ["none", "environment", "options"])
+def test_capture_finds_prepared_callable_without_compilation_caches(prepared, monkeypatch, tmp_path, bypass):
+    kwargs = {}
+    if bypass == "environment":
+        monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(tmp_path))
+    elif bypass == "options":
+        kwargs["config"] = CompileOptions(output_dir=str(tmp_path))
+    x, out = _tensor((4, 4)), _tensor((4, 4))
+    scale_eager(x, 2, out, **kwargs)
+    registration = prepared.registrations[-1]
+    scale_eager._cache.clear()
+    scale_eager._kernel_contracts.clear()
+    warmed = prepared.builds, prepared.frontends, len(prepared.prepares)
+    monkeypatch.setattr(launch, "_load_native", lambda: SimpleNamespace(check_call=lambda *args: 42))
+    assert scale_eager(x, 3, out, **kwargs) is out
+    assert prepared.registrations[-1] is registration
+    assert prepared.frames[-1].scalars[0].value == 3
+    assert (prepared.builds, prepared.frontends, len(prepared.prepares)) == warmed
+    assert not scale_eager._cache and not scale_eager._kernel_contracts
+
+
+def test_bypassed_eager_rebuild_publishes_latest_prepared_callable(prepared, monkeypatch, tmp_path):
+    monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(tmp_path))
+    x, out = _tensor((4, 4)), _tensor((4, 4))
+    scale_eager(x, 2, out)
+    scale_eager(x, 3, out)
+    first, latest = prepared.registrations
+    assert first is not latest and prepared.builds == len(prepared.prepares) == 2
+    assert not scale_eager._cache and not scale_eager._kernel_contracts
+    monkeypatch.setattr(launch, "_load_native", lambda: SimpleNamespace(check_call=lambda *args: 42))
+    scale_eager(x, 4, out)
+    assert prepared.registrations[-1] is latest
+    assert prepared.builds == len(prepared.prepares) == 2
+
+
+def test_capture_selects_each_prepared_specialization(prepared, monkeypatch):
+    shapes = [(4, 4), (8, 8)]
+    tensors = [(_tensor(shape), _tensor(shape)) for shape in shapes]
+    for x, out in tensors:
+        scale_eager(x, 2, out)
+    expected = list(prepared.registrations)
+    scale_eager._cache.clear()
+    scale_eager._kernel_contracts.clear()
+    monkeypatch.setattr(launch, "_load_native", lambda: SimpleNamespace(check_call=lambda *args: 42))
+    for (x, out), registration in zip(tensors, expected):
+        scale_eager(x, 3, out)
+        assert prepared.registrations[-1] is registration
+    with pytest.raises(RuntimeError, match="requires warmup"):
+        scale_eager(_tensor((16, 16)), 2, _tensor((16, 16)))
+    assert prepared.builds == len(prepared.prepares) == 2
+
+
+def test_capture_rejects_unwarmed_compile_configuration(prepared, monkeypatch):
+    x, out = _tensor((4, 4)), _tensor((4, 4))
+    scale_eager(x, 2, out)
+    monkeypatch.setattr(launch, "_load_native", lambda: SimpleNamespace(check_call=lambda *args: 42))
+    with pytest.raises(RuntimeError, match="requires warmup"):
+        scale_eager(x, 3, out, config=CompileOptions(analyze_auto_scopes_for_deps=True))
+    assert prepared.builds == len(prepared.prepares) == 1
+
+
+def test_failed_prepare_does_not_publish_capture_warmup(prepared, monkeypatch, tmp_path):
+    monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(tmp_path))
+    prepared.fail_prepare = True
+    x, out = _tensor((4, 4)), _tensor((4, 4))
+    with pytest.raises(RuntimeError, match="prepare failed"):
+        scale_eager(x, 2, out)
+    assert not prepared.state._specializations
+    with monkeypatch.context() as capture:
+        capture.setattr(launch, "_load_native", lambda: SimpleNamespace(check_call=lambda *args: 42))
+        with pytest.raises(RuntimeError, match="requires warmup"):
+            scale_eager(x, 3, out)
+    assert prepared.builds == len(prepared.prepares) == 1
+    prepared.fail_prepare = False
+    scale_eager(x, 2, out)
+    assert len(prepared.state._specializations) == 1
+
+
+def test_new_worker_generation_requires_new_warmup(prepared, monkeypatch):
+    x, out = _tensor((4, 4)), _tensor((4, 4))
+    scale_eager(x, 2, out)
+    old_registration = prepared.registrations[-1]
+    worker = prepared.state._worker
+    prepared.state.close()
+    assert not prepared.state._specializations
+    state = _bind(monkeypatch, prepared.state.config)
+    state._worker = worker
+    with monkeypatch.context() as capture:
+        capture.setattr(launch, "_load_native", lambda: SimpleNamespace(check_call=lambda *args: 42))
+        with pytest.raises(RuntimeError, match="requires warmup"):
+            scale_eager(x, 3, out)
+    scale_eager(x, 2, out)
+    new_registration = prepared.registrations[-1]
+    assert new_registration.generation != old_registration.generation
+    with pytest.raises(RuntimeError, match="closed"):
+        old_registration.require_live()
+    monkeypatch.setattr(launch, "_load_native", lambda: SimpleNamespace(check_call=lambda *args: 42))
+    scale_eager(x, 3, out)
+    assert prepared.registrations[-1] is new_registration
+    assert prepared.builds == 1 and len(prepared.prepares) == 2
+
+
+def test_program_diagnostics_still_rebuild_without_key_lookup(eager, monkeypatch, tmp_path):
+    monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(tmp_path))
+    compiled = []
+    monkeypatch.setattr(scale_eager, "_compile", lambda *args, **kwargs: compiled.append(object()))
+    monkeypatch.setattr(
+        scale_eager, "_get_source_hash", lambda: pytest.fail("program bypass must stay fresh")
+    )
+    x, out = _tensor((4, 4)), _tensor((4, 4))
+    scale_eager.compile(x, 2, out)
+    scale_eager.compile(x, 2, out)
+    assert len(compiled) == 2
 
 
 if __name__ == "__main__":

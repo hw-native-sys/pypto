@@ -470,7 +470,16 @@ constexpr changes can select another specialization and require another warmup;
 changing a runtime Scalar does not. Warmup executes the operator, so restore
 InOut/output state if the captured computation expects its initial contents.
 Compilation or a disk-cache hit alone does not register a callable with this
-process's Worker. `force_recompile` is incompatible with capture.
+process's Worker.
+
+After successful Device preparation, the process Worker retains an owning
+registration indexed by operator, specialization and scalar ABI types. Capture
+uses this index independently of the JIT compilation caches, so setting
+`PYPTO_PROG_BUILD_DIR`, supplying `CompileOptions(output_dir=...)`, or clearing
+compiler-cache entries after warmup does not lose the prepared callable.
+Capture performs no compilation, binary loading or preparation. Failed preparation
+publishes no entry, and closing the Worker invalidates all of its registrations.
+Diagnostic eager/program calls still request fresh compilation outside capture.
 
 ```python
 # op_a and op_b are @pl.jit entries; x, y, out are caller-owned NPU tensors.

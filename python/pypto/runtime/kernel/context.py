@@ -12,7 +12,7 @@
 import itertools
 import os
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from concurrent.futures import Future
 from enum import Enum
 from types import SimpleNamespace
@@ -53,6 +53,7 @@ class _ProcessKernelState:
         self._worker: Any = None
         self._failure: BaseException | None = None
         self._registrations: dict[bytes, KernelRegistration] = {}
+        self._specializations: dict[Hashable, KernelRegistration] = {}
         self._preparing: dict[bytes, Future[KernelRegistration]] = {}
         self._prepare_threads: dict[bytes, threading.Thread] = {}
         self._submissions: list[Any] = []
@@ -193,6 +194,27 @@ class _ProcessKernelState:
                     return registration
             raise RuntimeError("Kernel capture requires warmup outside capture for this specialization")
 
+    def publish_specialization(self, key: Hashable, registration: KernelRegistration) -> None:
+        """Retain completed preparation independently of the JIT compilation cache."""
+        self._check_pid()
+        with self._condition:
+            self.require_registration(registration)
+            self._specializations[key] = registration
+
+    def find_specialization(self, key: Hashable, config: KernelConfig) -> KernelRegistration | None:
+        """Find a prepared specialization only in this live Worker generation."""
+        self._check_pid()
+        with self._condition:
+            self._require_ready()
+            if self.config != config:
+                raise ValueError(
+                    f"Kernel Worker configuration conflict: bound {self.config}, requested {config}"
+                )
+            registration = self._specializations.get(key)
+            if registration is not None:
+                self.require_registration(registration)
+            return registration
+
     def require_registration(self, registration: KernelRegistration) -> None:
         self._check_pid()
         with self._condition:
@@ -289,6 +311,7 @@ class _ProcessKernelState:
                 self._condition.notify_all()
             raise
         with self._condition:
+            self._specializations.clear()
             self._registrations.clear()
             self._worker = None
             self._failure = None

@@ -11,7 +11,7 @@
 
 import importlib
 import struct
-from collections.abc import Sequence
+from collections.abc import Hashable, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -84,7 +84,9 @@ def describe_eager_call(abi: KernelABI, args: Sequence[Any], bound: "KernelConfi
     return replace(frame, capture_id=capture_id or 0)
 
 
-def invoke(artifact: Any, frame: CallFrame, bound: "KernelConfig") -> Any:
+def invoke(
+    artifact: Any, frame: CallFrame, bound: "KernelConfig", *, specialization: Hashable | None = None
+) -> Any:
     """Register once on the initialized process Worker and submit one prevalidated eager call."""
     from pypto.runtime.kernel.context import get_process_kernel_state  # noqa: PLC0415
 
@@ -94,6 +96,8 @@ def invoke(artifact: Any, frame: CallFrame, bound: "KernelConfig") -> Any:
         if frame.capture_id
         else state.ensure_callable(artifact, bound)
     )
+    if specialization is not None and not frame.capture_id:
+        state.publish_specialization(specialization, registration)
     return _enqueue_frame(registration, frame)
 
 

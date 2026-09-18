@@ -63,7 +63,8 @@ def _run(device, directory, case, entry="jit"):
     from tests.st.runtime.kernel.test_jit_eager import accumulate  # noqa: PLC0415
 
     os.chdir(directory)
-    os.environ.pop("PYPTO_PROG_BUILD_DIR", None)
+    if case == "build-dir":
+        os.environ["PYPTO_PROG_BUILD_DIR"] = str(Path(directory) / "generated")
     torch_npu.npu.set_device(device)
     configure_cache(CacheConfig(enabled=case == "persistent", root=Path(directory) / "cache"))
     # Only the internal artifact lookup takes compile-side RunConfig; kernel calls never do.
@@ -111,11 +112,13 @@ def _run(device, directory, case, entry="jit"):
                 "shutdown",
                 "new-variant",
                 "persistent",
+                "build-dir",
             ):
                 warm_add(out, following, value=4)
             torch_npu.npu.synchronize()
             out.zero_()
         warmed = counts.copy()
+        _clear_compilation_caches()
         graph = torch_npu.npu.NPUGraph()
         scalar = ctypes.c_float(3.0)
         with torch_npu.npu.graph(graph):
@@ -155,6 +158,16 @@ def _run(device, directory, case, entry="jit"):
         graph = _replay_case(case, graphs, tensors, device, torch_npu, add)
         assert counts == warmed
         globals()["retained_graph"] = graph
+
+
+def _clear_compilation_caches():
+    """Prepared registrations must outlive every compiler-side cache."""
+    from tests.st.runtime.kernel.test_jit_eager import accumulate, add_constant  # noqa: PLC0415
+
+    for kernel in (accumulate, add_constant):
+        kernel._cache.clear()
+        kernel._kernel_contracts.clear()
+        kernel._artifact_objects.clear()
 
 
 def _replay(graph):
@@ -277,6 +290,7 @@ def _isolated(test_config, tmp_path, case, queue_enabled, entry):
         "graphs",
         "streams",
         "persistent",
+        "build-dir",
         "owners",
         "recreate",
         "gc",
@@ -289,7 +303,7 @@ def test_capture(test_config, tmp_path, case, queue_enabled, entry):
 
 
 @pytest.mark.parametrize("entry", ["jit_to_ops", "ops_to_jit", "mixed"])
-@pytest.mark.parametrize("case", ["multi", "persistent"])
+@pytest.mark.parametrize("case", ["multi", "persistent", "build-dir"])
 @pytest.mark.parametrize("queue_enabled", [0, 1])
 def test_capture_entry_interop(test_config, tmp_path, entry, case, queue_enabled):
     _isolated(test_config, tmp_path, case, queue_enabled, entry)
