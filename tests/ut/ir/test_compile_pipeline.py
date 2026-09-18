@@ -10,6 +10,7 @@
 """Tests for the shared IR pass pipeline."""
 
 import json
+import re
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -192,6 +193,21 @@ def test_default_output_dirs_are_unique_per_compile(tmp_path, monkeypatch):
     assert len({str(d) for d in dirs}) == 3, f"compiles shared an output directory: {dirs}"
     for d in dirs:
         assert Path(d).is_dir()
+
+
+def test_default_output_dir_name_leads_with_timestamp(tmp_path, monkeypatch):
+    """The default directory reads ``<name>_<YYYYmmdd_HHMMSS>_<random>``.
+
+    The timestamp keeps ``build_output/`` human-readable and chronologically
+    sortable; the random tail (not the timestamp) is what keeps it unique.
+    """
+    monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(tmp_path))
+    program = _scalar_program()
+
+    output_dir = Path(ir.compile(program, dump_passes=False, skip_ptoas=True).output_dir)
+
+    assert output_dir.parent == tmp_path
+    assert re.fullmatch(rf"{re.escape(program.name)}_\d{{8}}_\d{{6}}_\w+", output_dir.name), output_dir.name
 
 
 if __name__ == "__main__":

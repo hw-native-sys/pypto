@@ -21,7 +21,7 @@ print(compiled.output_dir)
 ```
 
 ```bash
-OUT=build_output/<program>_<unique>          # what the line above printed
+OUT=build_output/<program>_<timestamp>_<random>  # what the line above printed
 pypto-ir-trace "$OUT/passes_dump" -o ir_trace.html
 ```
 

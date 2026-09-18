@@ -50,7 +50,7 @@ DFX 是可观测面：编译器注意到了什么、决定了什么，以及硬�
 编译写在输出目录下，运行时写在其中的 `dfx_outputs/` 里。除 `report/` 外，这里没有一样是不问自来的。
 
 ```text
-build_output/<program>_<unique>/
+build_output/<program>_<timestamp>_<random>/
 ├── passes_dump/            # dump_passes=          -> memory map, IR trace
 ├── ptoas/                  # the .pto per InCore function, and ptoas's .cpp
 ├── ptoas_passes/           # dump_ptoas_passes=

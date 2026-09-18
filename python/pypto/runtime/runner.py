@@ -261,8 +261,10 @@ class RunConfig:
         save_kernels: If ``True``, retain generated artefacts after execution.
             When ``False`` (default), a temporary directory is used and cleaned up.
         save_kernels_dir: Directory to save generated artefacts when *save_kernels*
-            is ``True``.  If ``None``, a fresh directory is created per call
-            under ``build_output/<program_name>_<unique>``.
+            is ``True``.  If ``None``, a fresh directory
+            ``<base>/<program_name>_<YYYYmmdd_HHMMSS>_<random>`` is created per
+            call, where ``<base>`` is ``PYPTO_PROG_BUILD_DIR`` if set (and
+            non-empty), else ``build_output``.
         codegen_only: If ``True``, stop after code generation without executing
             on device.  Useful for validating compilation output.
         enable_chip_swimlane: Chip swimlane collection **level** — per-task
@@ -350,7 +352,7 @@ class RunConfig:
             If the directory already contains all required ``.pt`` files they
             are reused; otherwise the directory is created and data is generated
             there.  Use a path from a previous run
-            (e.g. ``build_output/<name>_<ts>/data``) to reuse existing golden
+            (e.g. ``build_output/<name>_<ts>_<random>/data``) to reuse existing golden
             data, or specify a new path to persist data to a fixed location.
         aicpu_thread_num: Optional per-invocation override of the AICPU
             thread count. ``None`` (default) defers to the value baked

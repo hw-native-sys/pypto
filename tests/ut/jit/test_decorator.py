@@ -3245,9 +3245,10 @@ class TestCompileKwargForwarding:
         # compile to a DistributedCompiledProgram and dispatch per-rank.
         assert captured["distributed_config"] is dc
 
-    def test_compile_without_output_dir_allocates_one(self, monkeypatch):
+    def test_compile_without_output_dir_allocates_one(self, monkeypatch, tmp_path):
         """Each JIT compilation owns an automatic directory when none is supplied."""
         ir_compile_mod = importlib.import_module("pypto.ir.compile")
+        monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(tmp_path))
 
         @jit
         def plain_kernel(x: pl.Tensor, out: pl.Out[pl.Tensor]):
@@ -3275,7 +3276,11 @@ class TestCompileKwargForwarding:
             pl=pl,
         )
         assert set(captured) == {"skip_ptoas", "output_dir"}
-        assert Path(captured["output_dir"]).is_dir()
+        output_dir = Path(captured["output_dir"])
+        assert output_dir.is_dir()
+        # Same helper as ir.compile(): <base>/<program name>_<YYYYmmdd_HHMMSS>_<random>.
+        assert output_dir.parent == tmp_path
+        assert re.fullmatch(r"_jit_plain_kernel_\d{8}_\d{6}_\w+", output_dir.name), output_dir.name
 
 
 # ---------------------------------------------------------------------------

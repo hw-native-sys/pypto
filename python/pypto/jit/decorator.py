@@ -64,7 +64,6 @@ import inspect
 import json
 import os
 import re
-import tempfile
 import textwrap
 import threading
 import warnings
@@ -78,7 +77,7 @@ from pypto._identity import digest_record
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import emit_source_loc_default
 from pypto.compile_profiling import get_active_profiler
-from pypto.ir.compile import _validate_pass_context_conflicts
+from pypto.ir.compile import _validate_pass_context_conflicts, make_default_output_dir
 from pypto.ir.pass_manager import PassDumpLevel, coerce_dump_level
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
@@ -3562,9 +3561,7 @@ class JITFunction:
             parsed = pl.parse(source, filename=self._diagnostic_filename, source_map=specializer.source_map)
             skip_ptoas = not _ptoas_available()
             if ir_compile_kwargs.get("output_dir") is None:
-                output_root = os.environ.get("PYPTO_PROG_BUILD_DIR") or "build_output"
-                os.makedirs(output_root, exist_ok=True)
-                ir_compile_kwargs["output_dir"] = tempfile.mkdtemp(prefix=f"{parsed.name}_", dir=output_root)
+                ir_compile_kwargs["output_dir"] = make_default_output_dir(parsed.name)
             return ir_compile(parsed, skip_ptoas=skip_ptoas, **ir_compile_kwargs)
         except Exception as exc:
             rewritten = _rewrite_jit_error(exc, rename_map)

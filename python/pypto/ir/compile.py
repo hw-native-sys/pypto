@@ -13,6 +13,7 @@ import logging
 import os
 import tempfile
 from contextlib import AbstractContextManager, nullcontext
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from pypto.backend import BackendType
@@ -254,6 +255,32 @@ def _run_pass_pipeline(  # noqa: PLR0913
     return _PassPipelineResult(transformed_program, mplan, effective_backend_type, rt)
 
 
+def make_default_output_dir(name: str) -> str:
+    """Create a fresh ``<base>/<name>_<YYYYmmdd_HHMMSS>_<random>`` directory.
+
+    ``<base>`` is ``PYPTO_PROG_BUILD_DIR`` when set and non-empty, else
+    ``build_output``.
+
+    Args:
+        name: Program name used as the directory prefix
+
+    Returns:
+        Path of the newly created, empty directory
+    """
+    # ``or`` (not get's default arg) so an empty-but-set env var
+    # (``export PYPTO_PROG_BUILD_DIR=``) still falls back to build_output
+    # rather than writing artifacts into the current working directory.
+    base = os.environ.get("PYPTO_PROG_BUILD_DIR") or "build_output"
+    os.makedirs(base, exist_ok=True)
+    # The timestamp is for humans (readable, sorts chronologically); mkdtemp's
+    # random suffix is what guarantees uniqueness. A bare one-second timestamp
+    # created with ``exist_ok=True`` let two same-named compiles within one
+    # second share a directory, the second silently overwriting the first's
+    # kernels -- a batch compiled up front then dispatched the wrong kernel.
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return tempfile.mkdtemp(prefix=f"{name}_{timestamp}_", dir=base)
+
+
 def compile(  # noqa: PLR0913
     program: _ir_core.Program,
     *,
@@ -292,7 +319,7 @@ def compile(  # noqa: PLR0913
     Args:
         program: Input Program to compile
         output_dir: Output directory. When None, a fresh directory
-            ``<base>/<program_name>_<unique>`` is created per call, where
+            ``<base>/<program_name>_<YYYYmmdd_HHMMSS>_<random>`` is created per call, where
             ``<base>`` is the ``PYPTO_PROG_BUILD_DIR`` environment variable if
             set (and non-empty), else ``build_output``. The suffix is opaque --
             do not derive one; read ``compiled.output_dir`` instead.
@@ -383,20 +410,7 @@ def compile(  # noqa: PLR0913
     _select_backend(backend_type=backend_type, platform=platform)
 
     if output_dir is None:
-        # ``or`` (not get's default arg) so an empty-but-set env var
-        # (``export PYPTO_PROG_BUILD_DIR=``) still falls back to build_output
-        # rather than writing artifacts into the current working directory.
-        base = os.environ.get("PYPTO_PROG_BUILD_DIR") or "build_output"
-        os.makedirs(base, exist_ok=True)
-        # mkdtemp, not ``<name>_<timestamp>``: the timestamp had one-second
-        # resolution and the directory was created with ``exist_ok=True``, so two
-        # compiles of same-named programs within one second shared a directory
-        # and the second silently overwrote the first's kernels. A caller that
-        # compiles one program and runs it before compiling the next never saw
-        # it; one that compiles a batch up front and dispatches afterwards gets
-        # the wrong kernel with no error -- only a numeric assertion catches it.
-        # `@pl.jit` already resolves its own output directory this way.
-        output_dir = tempfile.mkdtemp(prefix=f"{program.name}_", dir=base)
+        output_dir = make_default_output_dir(program.name)
     else:
         os.makedirs(output_dir, exist_ok=True)
 

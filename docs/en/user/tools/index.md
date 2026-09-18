@@ -59,7 +59,7 @@ Compilation writes under the output directory; the runtime writes under `dfx_out
 inside it. Nothing here is produced unless you ask for it, except `report/`.
 
 ```text
-build_output/<program>_<unique>/
+build_output/<program>_<timestamp>_<random>/
 ├── passes_dump/            # dump_passes=          -> memory map, IR trace
 ├── ptoas/                  # the .pto per InCore function, and ptoas's .cpp
 ├── ptoas_passes/           # dump_ptoas_passes=
