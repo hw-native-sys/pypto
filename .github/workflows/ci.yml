@@ -64,7 +64,7 @@ jobs:
     outputs:
       docs_only: ${{ steps.classify.outputs.docs_only }}
       docs_changed: ${{ steps.classify.outputs.docs_changed }}
-      toolchain_changed: ${{ steps.classify.outputs.toolchain_changed }}
+      ptoas_version_changed: ${{ steps.classify.outputs.ptoas_version_changed }}
     steps:
       - name: Classify changed paths
         id: classify
@@ -72,6 +72,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -81,15 +83,15 @@ jobs:
           if [ "$EVENT_NAME" != 'pull_request' ]; then
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
             echo "docs_changed=true" >> "$GITHUB_OUTPUT"
-            # `toolchain_changed` gates the serving guard, which is opt-in on
-            # cost rather than conservative on correctness: the pin only ever
-            # moves through a pull request, so a push to main re-running it
-            # would buy no signal. workflow_dispatch stays true so the guard can
-            # be forced by hand.
+            # `ptoas_version_changed` gates the serving guard, which is opt-in
+            # on cost rather than conservative on correctness: the pin only
+            # ever moves through a pull request, so a push to main re-running
+            # it would buy no signal. workflow_dispatch stays true so the guard
+            # can be forced by hand.
             if [ "$EVENT_NAME" = 'workflow_dispatch' ]; then
-              echo "toolchain_changed=true" >> "$GITHUB_OUTPUT"
+              echo "ptoas_version_changed=true" >> "$GITHUB_OUTPUT"
             else
-              echo "toolchain_changed=false" >> "$GITHUB_OUTPUT"
+              echo "ptoas_version_changed=false" >> "$GITHUB_OUTPUT"
             fi
             echo "event '$EVENT_NAME' is not a pull request -> full pipeline"
             exit 0
@@ -106,7 +108,7 @@ jobs:
             # Also open for the serving guard: an unreadable file list cannot
             # prove the pin did not move, and a toolchain bump reaching serving
             # unguarded is worth more than the cards a spurious run costs.
-            echo "toolchain_changed=true" >> "$GITHUB_OUTPUT"
+            echo "ptoas_version_changed=true" >> "$GITHUB_OUTPUT"
             echo "$1 -> full pipeline"
             exit 0
           }
@@ -165,15 +167,15 @@ jobs:
           # One full pass, no early exit: `docs_only` and `docs_changed` are
           # independent questions, and short-circuiting on the first
           # non-documentation path would answer the second by file order alone.
-          # `toolchain_changed` is a third, independent question: did this PR
-          # move the pinned external toolchain? `toolchain/versions.env` holds
-          # nothing else (PTOAS_VERSION + the two wheel sha256s; pto-isa is
-          # derived from the runtime submodule), so the path IS the question.
-          # It gates `serving-guard`, which is skipped by default because it
-          # borrows cards for a downstream repo's model tests.
+          # `ptoas_version_changed` is a third, independent question: did this
+          # PR change the pinned PTOAS_VERSION value? The version-file path is
+          # only a cheap first filter: below, the assignment is compared at the
+          # PR base and head so comments and wheel-sha updates do not consume
+          # cards for `serving-guard`.
           docs_only=true
           docs_changed=false
-          toolchain_changed=false
+          ptoas_version_changed=false
+          versions_env_changed=false
           while IFS="$(printf '\t')" read -r new_path old_path; do
             for f in "$new_path" "$old_path"; do
               [ -n "$f" ] || continue
@@ -182,8 +184,7 @@ jobs:
               esac
               case "$f" in
                 toolchain/versions.env)
-                  toolchain_changed=true
-                  echo "pinned toolchain moved: $f -> serving guard enabled"
+                  versions_env_changed=true
                   ;;
               esac
               case "$f" in
@@ -198,9 +199,35 @@ jobs:
             done
           done <<< "$files"
 
+          if [ "$versions_env_changed" = 'true' ]; then
+            read_ptoas_version() {
+              gh api -H 'Accept: application/vnd.github.raw+json' \
+                "repos/$REPO/contents/toolchain/versions.env?ref=$1" |
+                sed -nE 's/^PTOAS_VERSION=([^[:space:]]+)$/\1/p'
+            }
+
+            is_single_version() {
+              [ -n "$1" ] && [ "$(printf '%s\n' "$1" | wc -l)" -eq 1 ]
+            }
+
+            if ! base_ptoas_version="$(read_ptoas_version "$PR_BASE_SHA")" ||
+              ! head_ptoas_version="$(read_ptoas_version "$PR_HEAD_SHA")" ||
+              ! is_single_version "$base_ptoas_version" ||
+              ! is_single_version "$head_ptoas_version"; then
+              fail_open 'PTOAS_VERSION could not be read exactly once at both PR revisions'
+            fi
+
+            if [ "$base_ptoas_version" != "$head_ptoas_version" ]; then
+              ptoas_version_changed=true
+              echo "PTOAS_VERSION changed: $base_ptoas_version -> $head_ptoas_version; serving guard enabled"
+            else
+              echo "PTOAS_VERSION unchanged ($head_ptoas_version); serving guard disabled"
+            fi
+          fi
+
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
           echo "docs_changed=$docs_changed" >> "$GITHUB_OUTPUT"
-          echo "toolchain_changed=$toolchain_changed" >> "$GITHUB_OUTPUT"
+          echo "ptoas_version_changed=$ptoas_version_changed" >> "$GITHUB_OUTPUT"
           if [ "$docs_only" = 'true' ]; then
             echo "all $expected changed paths are documentation:"
             printf '%s\n' "$files" | cut -f1 | sed 's/^/  /'
@@ -1789,17 +1816,17 @@ jobs:
     # THIS pull request's pypto and points serving at it, which is the same
     # inversion `pypto-lib-model` already does for pypto-lib.
     #
-    # SKIPPED BY DEFAULT. Gated on `toolchain/versions.env`, the single file
-    # that carries the pinned assembler. It borrows cards to run a downstream
-    # repo's model tests, which is far too expensive for every pull request,
-    # and the risk it covers only exists when the pin moves. `workflow_dispatch`
-    # forces it (see the `changes` job).
+    # SKIPPED BY DEFAULT. Gated on a changed `PTOAS_VERSION` assignment in
+    # toolchain/versions.env, the pin that selects the assembler release. It
+    # borrows cards to run a downstream repo's model tests, which is far too
+    # expensive for every pull request, and the risk it covers only exists when
+    # the pin moves. `workflow_dispatch` forces it (see the `changes` job).
     #
     # Lint gate + docs-only gate, as every other device job here.
     needs: [changes, toolchain, pre-commit, clang-tidy]
     if: >-
       needs.changes.outputs.docs_only != 'true' &&
-      needs.changes.outputs.toolchain_changed == 'true'
+      needs.changes.outputs.ptoas_version_changed == 'true'
     # Checkout + clone pypto-serving + test only.
     permissions:
       contents: read
