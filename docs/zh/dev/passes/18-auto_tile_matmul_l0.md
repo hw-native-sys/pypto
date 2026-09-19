@@ -161,11 +161,11 @@ pipelined-inner，对 `k < K` 传入 unrolled-grid。重新切分用户手写
 unrolled-grid，与 `k` 无关。chooser 使用该路径同时判断可实现性和计算代价，
 无需再从 `k` 推断 canonical fold 的 lowering。
 
-Mat-scratch（`Acc→Mat`，`tile.assemble`）的
-drain 也以相同方式浮动。若 `PassManager` 在一个 planner
-下构造却在另一个下运行，会显式报错，因为 pass 列表与 chooser gate 必须一致。
-代价模型公式本身与 gate 无关。共存浮动与 `{0, L0C/2}` 不同 offset 的运行时验证
-见 [`31-canonicalize_io_order.md`](32-canonicalize_io_order.md)。
+Mat-scratch（`Acc→Mat`，`tile.assemble`）的 drain 使用相同的双 slot 轮换和常规
+stage-major `matmul, drain, matmul, drain` 顺序；drain 不会被浮动到下一个 matmul 之后。
+若 `PassManager` 在一个 planner 下构造却在另一个下运行，会显式报错，因为 pass 列表与
+chooser gate 必须一致。代价模型公式本身与 gate 无关。顺序契约与 `{0, L0C/2}` 不同
+offset 的运行时验证见 [`32-canonicalize_io_order.md`](32-canonicalize_io_order.md)。
 
 上段的移动内层限制只适用于 chooser 发射的 **full-K** M/N 切分。独立的已有流水线识别器不改变 chooser 的设计空间：它仅在 PyPTO 下，对上文的规范 stationary-panel 模式执行函数级 Acc 保守容量检查后复用相同的双 Acc 机制。
 

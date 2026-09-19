@@ -176,12 +176,13 @@ tiling supplies pipelined-inner for `k == K` and unrolled-grid for `k < K`.
 independent of `k`. The chooser uses that route both for realizability and cost;
 it never has to infer the canonical fold's lowering from `k`.
 
-The Mat-scratch (`Acc→Mat`, `tile.assemble`) drain is floated the same way. A
-`PassManager` built under one planner and run under another fails loudly
-because its pass list and chooser gates must agree. The cost-model formulas
-are gate-independent. See
-[`31-canonicalize_io_order.md`](32-canonicalize_io_order.md) for the co-live
-float and runtime validation of the distinct `{0, L0C/2}` offsets.
+The Mat-scratch (`Acc→Mat`, `tile.assemble`) drain uses the same two-slot
+rotation and ordinary stage-major `matmul, drain, matmul, drain` order; no drain
+is floated past the next matmul. A `PassManager` built under one planner and run
+under another fails loudly because its pass list and chooser gates must agree.
+The cost-model formulas are gate-independent. See
+[`32-canonicalize_io_order.md`](32-canonicalize_io_order.md) for the ordering
+contract and runtime validation of the distinct `{0, L0C/2}` offsets.
 
 The moving-inner restriction above applies only to chooser-emitted **full-K** M/N
 tiling. The separate existing-pipeline recognizer does not alter the chooser's
