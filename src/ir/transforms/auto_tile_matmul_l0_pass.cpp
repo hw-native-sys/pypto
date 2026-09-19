@@ -2143,7 +2143,7 @@ class DbcSlotStamper : public IRMutator {
     auto tile = As<TileType>(assign->var_->GetType());
     if (!tile || tile->GetMemorySpace() != MemorySpace::Acc) return visited;
     const bool is_cube_accumulator = call->op_->name_.rfind("tile.matmul", 0) == 0;
-    const bool is_acc_storage = call->op_->name_ == "tile.create";
+    const bool is_acc_storage = IsOp(call, "tile.create");
     if (!is_cube_accumulator && !is_acc_storage) return visited;
 
     auto attrs = call->attrs_;
