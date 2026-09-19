@@ -283,6 +283,8 @@ TypePtr DeduceTileReshapeType(const std::vector<ExprPtr>& args,
   auto tile_type = As<TileType>(args[0]->GetType());
   CHECK(tile_type) << "tile.reshape requires first argument to be a TileType, but got "
                    << args[0]->GetType()->TypeName();
+  CHECK_SPAN(!tile_type->dtype_.IsFp4Family(), args[0]->span_)
+      << "tile.reshape is not supported for FP4/FP4E2M1X2 (see docs/en/dev/fp4.md)";
 
   // Second argument must be TupleType (shape)
   auto shape_tuple_type = As<TupleType>(args[1]->GetType());
@@ -456,6 +458,8 @@ TypePtr DeduceTileTransposeType(const std::vector<ExprPtr>& args,
 
   CHECK(axis1 != axis2) << "tile.transpose: axis1 and axis2 must be different, but got axis1=" << axis1
                         << ", axis2=" << axis2;
+  CHECK_SPAN(!input_type->dtype_.IsFp4Family(), args[0]->span_)
+      << "tile.transpose does not support FP4/FP4E2M1X2; PTOAS ttrans has no f4E2M1x2 lowering";
 
   std::vector<ExprPtr> new_shape = input_shape;
   std::swap(new_shape[axis1], new_shape[axis2]);
@@ -1066,7 +1070,7 @@ TypePtr DeduceTileSetValidShapeType(const std::vector<ExprPtr>& args,
   // a fully-written accumulator here must therefore leave its non-compact
   // reading pitch alone.
   TileView tile_view = tile_view_semantics::GetEffectiveTileView(*tile_type);
-  if (tile_type->dtype_ == DataType::FP4 && tile_type->memory_space_ == MemorySpace::Vec) {
+  if (tile_type->dtype_.IsLogicalFp4() && tile_type->memory_space_ == MemorySpace::Vec) {
     const size_t packed_dim = tile_view.blayout == TileLayout::col_major ? 0 : 1;
     const ExprPtr& packed_valid = args[packed_dim + 1];
     auto packed_const = As<ConstInt>(packed_valid);

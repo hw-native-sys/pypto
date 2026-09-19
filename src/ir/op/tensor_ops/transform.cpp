@@ -150,6 +150,8 @@ TypePtr DeduceTensorReshapeType(const std::vector<ExprPtr>& args,
   CHECK_SPAN(!tensor_type->tensor_view_ || !IsMxTensorLayout(tensor_type->tensor_view_->layout),
              args[0]->span_)
       << "tensor.reshape does not support MX-layout tensors";
+  CHECK_SPAN(!tensor_type->dtype_.IsFp4Family(), args[0]->span_)
+      << "tensor.reshape is not supported for FP4/FP4E2M1X2 (see docs/en/dev/fp4.md)";
 
   // Second argument must be TupleType (shape)
   auto shape_tuple_type = As<TupleType>(args[1]->GetType());
@@ -348,6 +350,8 @@ TypePtr DeduceTensorTransposeType(const std::vector<ExprPtr>& args,
 
   CHECK(axis1 != axis2) << "tensor.transpose: axis1 and axis2 must be different, but got axis1=" << axis1
                         << ", axis2=" << axis2;
+  CHECK_SPAN(!tensor_type->dtype_.IsFp4Family(), args[0]->span_)
+      << "tensor.transpose is not supported for FP4/FP4E2M1X2 (see docs/en/dev/fp4.md)";
 
   // Create new shape by swapping the specified dimensions
   std::vector<ExprPtr> new_shape = input_shape;

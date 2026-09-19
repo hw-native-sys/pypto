@@ -84,7 +84,7 @@ REGISTER_OP("system.set_ffts")
 被调函数的槽位被累积为两个独立标志——`In`/`InOut` 记为读、`Out`/`InOut` 记为写
 ——最后一次性推导出方向。
 
-参见 [Outline InCore Scopes](../passes/09-outline_incore_scopes.md)。
+参见 [Outline InCore Scopes](../passes/10-outline_incore_scopes.md)。
 
 ### 2. 调用方传播（pass 11）
 
@@ -121,7 +121,7 @@ for _ in pl.range(4):
 `OutputExisting`、`InOut`、`NoDep`、`Scalar`——这才是依赖分析与 codegen 实际消费的
 东西。
 
-参见 [Derive Call Directions](../passes/41-derive_call_directions.md)。
+参见 [Derive Call Directions](../passes/42-derive_call_directions.md)。
 
 ### 4. 一致性警告（PostPipeline）
 
@@ -179,7 +179,7 @@ t = buf2                                  # ……但映射说 t -> buf2
 ## 参见
 
 - [算子系统](05-operators.md) —— 完整的声明面。
-- [Outline InCore Scopes](../passes/09-outline_incore_scopes.md) —— 阶段 1。
-- [Convert Tensor to Tile Ops](../passes/11-convert_tensor_to_tile_ops.md) —— 阶段 2。
-- [Derive Call Directions](../passes/41-derive_call_directions.md) —— 阶段 3。
+- [Outline InCore Scopes](../passes/10-outline_incore_scopes.md) —— 阶段 1。
+- [Convert Tensor to Tile Ops](../passes/12-convert_tensor_to_tile_ops.md) —— 阶段 2。
+- [Derive Call Directions](../passes/42-derive_call_directions.md) —— 阶段 3。
 - [IR 验证器](../passes/99-verifier.md) —— 阶段 4。

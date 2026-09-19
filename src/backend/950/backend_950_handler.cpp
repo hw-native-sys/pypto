@@ -68,7 +68,8 @@ const TcvtAdjacency& Ascend950Handler::GetTcvtAdjacency() const {
     add(DataType::FP32, {DataType::FP8E4M3FN, DataType::FP8E5M2, DataType::HF8});
     add(DataType::FP16, {DataType::FP32, DataType::INT32, DataType::INT16, DataType::INT8, DataType::UINT8});
     add(DataType::FP16, {DataType::HF8});
-    add(DataType::BF16, {DataType::FP32, DataType::INT32, DataType::FP16, DataType::FP4});
+    add(DataType::BF16,
+        {DataType::FP32, DataType::INT32, DataType::FP16, DataType::FP4, DataType::FP4E2M1X2});
     add(DataType::INT16, {DataType::FP16, DataType::FP32, DataType::UINT8, DataType::UINT32});
     add(DataType::INT16, {DataType::INT32});
     add(DataType::INT32, {DataType::FP32, DataType::INT16, DataType::INT64, DataType::UINT16});
@@ -81,6 +82,7 @@ const TcvtAdjacency& Ascend950Handler::GetTcvtAdjacency() const {
     add(DataType::FP8E5M2, {DataType::FP32});
     add(DataType::HF8, {DataType::FP32});
     add(DataType::FP4, {DataType::BF16});
+    add(DataType::FP4E2M1X2, {DataType::BF16});
     return t;
   }();
   return kTable;

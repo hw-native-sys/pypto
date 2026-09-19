@@ -72,6 +72,33 @@ namespace codegen {
  */
 std::vector<ir::VarPtr> CollectVarsFromShapeExpr(const ir::ExprPtr& expr);
 
+/// Dialect for integer division when recovering a dynamic dim from a Mul form.
+/// Host Python orch uses ``//``; C++ orchestration / device wrappers use ``/``.
+enum class ShapeInvertDialect { kCpp, kPython };
+
+/**
+ * Recover ``target_var`` from a runtime shape access when ``dim_expr`` is an
+ * invertible single-var form (bare var, ``var+/-c``, ``c-var``, ``var*c`` /
+ * ``c*var``, ``var//c``). Returns empty if non-invertible.
+ *
+ * Used by distributed host orch. Entry/Graph orchestration does not call these
+ * helpers: ``GenerateDynamicDimDefs`` only emits bare-Var extents, and PackFp4
+ * hard-rejects dynamic logical FP4 last-axis geometry in this release.
+ * A user-written ``FloorDiv(K, 2)`` inverts to ``shape * 2``.
+ */
+std::string InvertShapeDimForVar(const ir::ExprPtr& dim_expr, const ir::VarPtr& target_var,
+                                 const std::string& shape_access,
+                                 ShapeInvertDialect dialect = ShapeInvertDialect::kCpp);
+
+/**
+ * Rank how faithfully ``dim_expr`` recovers ``target_var`` from a runtime shape.
+ * Higher is better: bare symbol (3) > affine +, -, * (2) > FloorDiv invert (1) >
+ * non-invertible (0). Prefer lossless sources when multiple tensor dims mention
+ * the same symbol (e.g. ``y[K]`` over ``x[K // 2]``). Used with
+ * ``InvertShapeDimForVar`` by distributed host orch.
+ */
+int ShapeDimInvertRank(const ir::ExprPtr& dim_expr, const ir::VarPtr& target_var);
+
 /**
  * @brief PTO MLIR code generator
  *
@@ -215,6 +242,23 @@ class PTOCodegen : public CodegenBase {
    * @return SSA variable name for the constant
    */
   std::string GetOrEmitConstant(int64_t value, DataType dt);
+
+  /**
+   * PackFp4 IR / tile_buf use carrier extents. Expand last shape dim and leading
+   * strides to pto-isa nibble units for ``make_tensor_view`` (param GM views and
+   * InCore ``tensor.view``). No-op for non-packed FP4 or MX layouts.
+   * Unit table: docs/en/dev/fp4.md#unit-convention
+   *
+   * @param shape_exprs optional IR exprs aligned with ``shape_ssas`` (ConstInt
+   *        folds to a doubled constant); empty entries skip folding.
+   * @param stride_exprs optional IR exprs for leading strides (same length as
+   *        ``stride_ssas``); null means no folding for strides.
+   */
+  void ExpandPackedFp4MakeTensorViewDims(DataType dtype, ir::TensorLayout layout,
+                                         const std::vector<ir::ExprPtr>& shape_exprs,
+                                         std::vector<std::string>& shape_ssas,
+                                         const std::vector<ir::ExprPtr>* stride_exprs,
+                                         std::vector<std::string>& stride_ssas);
 
   /**
    * @brief Get or emit a floating-point constant of any float dtype.

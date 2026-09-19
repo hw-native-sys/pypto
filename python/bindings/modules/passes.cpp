@@ -639,6 +639,8 @@ void BindPass(nb::module_& m) {
              "allreduce is skipped for LowerHostTensorCollectives. FP32-only for trig. Idempotent.");
   passes.def("flatten_call_expr", &pass::FlattenCallExpr,
              "Create a pass that flattens nested call expressions");
+  passes.def("pack_fp4", &pass::PackFp4,
+             "Pack frontend logical FP4 nibble types into packed FP4E2M1X2 after SSA flattening");
   passes.def("inline_functions", &pass::InlineFunctions,
              "Create a pass that eliminates FunctionType::Inline functions by splicing\n"
              "their bodies at every call site. Runs as the first pipeline pass.\n"

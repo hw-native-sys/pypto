@@ -296,9 +296,9 @@ def _extract_tensor_meta(
                 "Packed torch.float4_e2m1fn_x2 tensors require a positive runtime x2 carrier last "
                 f"dimension; got shape {tuple(extents)}"
             )
-        # Torch exposes one x2 carrier per byte. PyPTO IR and PTO-ISA count
-        # logical FP4 nibbles, so expand only at this API boundary and keep the
-        # storage shape out of TensorType/TileType.
+        # Torch exposes one x2 carrier per byte. Frontend IR still counts
+        # logical FP4 nibbles, so expand only at this API boundary. PackFp4
+        # then rewrites the IR to packed FP4E2M1X2.
         extents[-1] *= 2
     return _build_tensor_meta(extents, dtype, dyn_dims, layout)
 

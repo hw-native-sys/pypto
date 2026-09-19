@@ -41,7 +41,9 @@ class Ascend950Handler : public BackendHandler {
   [[nodiscard]] std::string GetDefaultSimPlatform() const override { return "a5sim"; }
   [[nodiscard]] std::vector<std::string> GetExtraPtoasFlags() const override { return {"--pto-arch", "a5"}; }
   [[nodiscard]] bool SupportsIncoreDataType(const DataType& dtype) const override {
-    return dtype.GetBit() != 4 || dtype == DataType::FP4;
+    // PackFp4 rewrites logical FP4 to FP4E2M1X2 before in-core; only the packed
+    // carrier remains legal here (GetBit()==8, so the bit-width gate alone is not enough).
+    return dtype.GetBit() != 4 || dtype.IsPackedFp4();
   }
 
   [[nodiscard]] bool RequiresGMPipeBuffer() const override { return false; }

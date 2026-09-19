@@ -1541,9 +1541,8 @@ def matmul_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
     """MX block-scale matrix multiplication.
 
     Scales use logical ``[M, K/32]`` / ``[K/32, N]`` shapes. Both data tiles
-    passed to this operation must be FP8E4M3FN. For the supported FP4 x FP8
-    input form, explicitly cast the FP4 lhs to FP8E4M3FN before calling this
-    operation; native FP4 x FP4 is not supported.
+    passed to this operation must be FP8E4M3FN. Native FP4 data is not supported
+    (see docs/en/dev/fp4.md).
 
     Args:
         lhs: Left-hand side data tile (FP8E4M3FN)
@@ -1561,8 +1560,8 @@ def matmul_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
 def matmul_mx_acc(acc: Tile, lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
     """MX block-scale matmul with accumulation.
 
-    Data operands follow [`matmul_mx`][pypto.language.tile.matmul_mx]: an FP4 lhs must first be cast to
-    FP8E4M3FN, and the operation itself receives two FP8E4M3FN tiles.
+    Data operands follow [`matmul_mx`][pypto.language.tile.matmul_mx]: both data
+    tiles must be FP8E4M3FN; native FP4 is not supported.
 
     Args:
         acc: Accumulator tile
@@ -1583,8 +1582,8 @@ def matmul_mx_acc(acc: Tile, lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: T
 def matmul_mx_bias(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile, bias: Tile) -> Tile:
     """MX block-scale matmul with bias.
 
-    Data operands follow [`matmul_mx`][pypto.language.tile.matmul_mx]: an FP4 lhs must first be cast to
-    FP8E4M3FN, and the operation itself receives two FP8E4M3FN tiles.
+    Data operands follow [`matmul_mx`][pypto.language.tile.matmul_mx]: both data
+    tiles must be FP8E4M3FN; native FP4 is not supported.
 
     Args:
         lhs: Left-hand side data tile (FP8E4M3FN)

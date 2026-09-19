@@ -34,6 +34,7 @@
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
+#include "pypto/core/dtype.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
@@ -67,6 +68,16 @@ std::vector<std::string> GetIndexOffsetCodes(const std::vector<ir::ExprPtr>& exp
                                              codegen::PTOCodegen& codegen);
 std::vector<std::string> GetDimStrings(const std::vector<ir::ExprPtr>& exprs);
 std::vector<std::string> GetSizeCodes(const std::vector<ir::ExprPtr>& exprs, codegen::PTOCodegen& codegen);
+/// PackFp4 rewrites GM last-axis offsets/sizes into FP4E2M1X2 carrier units.
+/// Expand them to pto-isa nibble units so partition windows match EmitC-doubled
+/// tiles and GetByteSize multi-row pitch (see EmitMakeTensorViews).
+/// Unit table: docs/en/dev/fp4.md#unit-convention
+/// When ``last_size`` / ``last_offset`` are ConstInt, fold ``*2`` into a constant
+/// SSA (same as ExpandPackedFp4MakeTensorViewDims) instead of emitting arith.muli.
+void ExpandPackedFp4GmLastAxis(DataType dtype, std::vector<std::string>& offset_codes,
+                               std::vector<std::string>& size_codes, std::vector<std::string>& dim_strings,
+                               codegen::PTOCodegen& codegen, const ir::ExprPtr& last_size = nullptr,
+                               const ir::ExprPtr& last_offset = nullptr);
 bool ExprsEquivalentForSubview(const ir::ExprPtr& lhs, const ir::ExprPtr& rhs);
 codegen::TileTypeComponents InferSubviewTileTypeComponents(const ir::TileType& source_tile_type,
                                                            const ir::MakeTuple& shape_tuple,

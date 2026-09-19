@@ -2093,8 +2093,9 @@ jobs:
     # --- mx-tests-a5 ---
     # Scope — tests/st/runtime/ops/test_matmul_mx.py (host-prequant MXFP8/FP4×FP8
     # matmul_mx / matmul_mx_acc), test_quant_mx.py (on-board quant_mx for
-    # MX_A_ZZ / MX_B_NN), and test_quantized_matmul_mx.py (GM-staged
-    # quant-to-matmul). All are `@pytest.mark.platforms("a5")`.
+    # MX_A_ZZ / MX_B_NN), test_quantized_matmul_mx.py (GM-staged
+    # quant-to-matmul), and test_fp4.py (packed FP4 multi-row GM stride +
+    # multi-row FP4→FP8 cast numerics). All are `@pytest.mark.platforms("a5")`.
     #
     # Setup is the standard device-job shape (same composite action / env as
     # `system-tests`), on the npu-a5 runner pool. That runner must satisfy the
@@ -2186,6 +2187,7 @@ jobs:
               tests/st/runtime/ops/test_matmul_mx.py \
               tests/st/runtime/ops/test_quant_mx.py \
               tests/st/runtime/ops/test_quantized_matmul_mx.py \
+              tests/st/runtime/ops/test_fp4.py \
               -v --forked --platform=a5 --device=\$TASK_DEVICE"
 
       - name: Kill orphaned task-submit tasks
