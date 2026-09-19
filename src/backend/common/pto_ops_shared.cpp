@@ -631,6 +631,12 @@ std::string EmitIndexOperand(codegen::PTOCodegen& codegen, const ExprPtr& expr, 
   return ssa;
 }
 
+void EmitWaitAsyncEventPTO(codegen::PTOCodegen& codegen, const std::string& result_ssa,
+                           const std::string& event_ssa, const std::string& session_ssa) {
+  codegen.Emit(result_ssa + " = pto.comm.wait_async_event(" + event_ssa + ", " + session_ssa +
+               " : !pto.async_event, !pto.async_session) -> i1");
+}
+
 }  // namespace pto_ops_detail
 
 }  // namespace backend

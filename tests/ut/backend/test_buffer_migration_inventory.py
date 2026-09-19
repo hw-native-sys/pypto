@@ -85,7 +85,7 @@ def test_every_backend_entry_has_one_current_migration_classification(registry_s
 
     # These are audited baseline sizes, not a count of implemented recipes.
     assert len(MIGRATION_FAMILIES) == 22
-    assert sum(len(family.operations) for family in MIGRATION_FAMILIES) == 168
+    assert sum(len(family.operations) for family in MIGRATION_FAMILIES) == 171
     assert len(HISTORICAL_CALLBACKS) == 8
 
 
