@@ -311,6 +311,13 @@ if __name__ == '__main__':
         sys.argv[0] = sys.argv[0][:-4]
     sys.exit(main())
 """,
+    # pip 26 onwards. Same shim, expressed with str.removesuffix.
+    """import sys
+from ptoas._cli import main
+if __name__ == '__main__':
+    sys.argv[0] = sys.argv[0].removesuffix('.exe')
+    sys.exit(main())
+""",
 )
 _CONSOLE_TREES = frozenset(ast.dump(ast.parse(body)) for body in _CONSOLE_BODIES)
 

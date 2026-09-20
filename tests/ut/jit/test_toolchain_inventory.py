@@ -460,8 +460,12 @@ def test_gcc_link_plan_selects_actual_inputs_only(tmp_path, monkeypatch):
         "    elif sys.argv[0].endswith('.exe'):\n"
         "        sys.argv[0] = sys.argv[0][:-4]\n"
         "    sys.exit(main())\n",
+        "import sys\nfrom ptoas._cli import main\n"
+        "if __name__ == '__main__':\n"
+        "    sys.argv[0] = sys.argv[0].removesuffix('.exe')\n"
+        "    sys.exit(main())\n",
     ],
-    ids=["pip", "uv"],
+    ids=["pip", "uv", "pip26"],
 )
 def test_wheel_console_script_preserves_virtualenv_interpreter(tmp_path, body):
     interpreter = tmp_path / "bin/python"
