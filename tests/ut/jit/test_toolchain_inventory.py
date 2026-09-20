@@ -196,6 +196,65 @@ def test_ptoas_falls_back_to_contents_when_the_probe_fails(tmp_path, monkeypatch
     assert captured["launcher"] == tmp_path / "ptoas"
 
 
+def _cann_install(root: Path, arch: str = "aarch64-linux", **fields: str) -> Path:
+    stated = {"package_name": "Ascend-cann-toolkit", "version": "9.0.0", **fields}
+    (root / arch).mkdir(parents=True, exist_ok=True)
+    (root / arch / "ascend_toolkit_install.info").write_text("".join(f"{k}={v}\n" for k, v in stated.items()))
+    return root
+
+
+def test_cann_version_prefers_the_build_over_the_release(tmp_path):
+    # Two builds of one release share `version`; only `innerversion` separates
+    # them, which is the whole point of covering the tree by what it states.
+    root = _cann_install(tmp_path / "cann", innerversion="V100R001C10SPC001B250")
+    assert _toolchain._cann_install_version(root) == "V100R001C10SPC001B250"
+
+
+def test_cann_version_falls_back_to_the_release(tmp_path):
+    root = _cann_install(tmp_path / "cann")
+    assert _toolchain._cann_install_version(root) == "9.0.0"
+
+
+def test_cann_version_counts_one_installation_reached_by_two_paths(tmp_path):
+    # CANN ships `arm64-linux` as a symlink to `aarch64-linux`, so the glob
+    # returns two paths naming one file. Counting paths would reject a normal
+    # installation and silently fall back to reading every byte.
+    root = _cann_install(tmp_path / "cann", innerversion="V100R001C10SPC001B250")
+    (root / "arm64-linux").symlink_to(root / "aarch64-linux", target_is_directory=True)
+
+    assert _toolchain._cann_install_version(root) == "V100R001C10SPC001B250"
+
+
+def test_cann_version_rejects_two_installations(tmp_path):
+    root = _cann_install(tmp_path / "cann", innerversion="B1")
+    _cann_install(root, arch="x86_64-linux", innerversion="B2")
+    assert _toolchain._cann_install_version(root) == ""
+
+
+def test_cann_version_rejects_an_empty_statement(tmp_path):
+    root = _cann_install(tmp_path / "cann", version="", innerversion="")
+    assert _toolchain._cann_install_version(root) == ""
+
+
+def test_cann_version_skips_an_empty_build_for_the_release(tmp_path):
+    root = _cann_install(tmp_path / "cann", innerversion="")
+    assert _toolchain._cann_install_version(root) == "9.0.0"
+
+
+def test_cann_version_is_empty_without_an_installation(tmp_path):
+    (tmp_path / "cann").mkdir()
+    assert _toolchain._cann_install_version(tmp_path / "cann") == ""
+
+
+def test_outside_keeps_only_what_the_installation_does_not_own(tmp_path):
+    install = tmp_path / "cann"
+    owned_root = install / "tools/bisheng_compiler"
+    outside = tmp_path / "usr/include"
+    paths = {install, owned_root, outside, tmp_path / "usr/lib64/libc.so.6"}
+
+    assert _toolchain._outside(paths, install) == {outside, tmp_path / "usr/lib64/libc.so.6"}
+
+
 def test_unknown_shell_launcher_is_not_an_executable_identity(tmp_path):
     script = tmp_path / "ptoas"
     script.write_text("#!/bin/sh\neval some_dynamic_command\n")

@@ -27,6 +27,7 @@ import sysconfig
 import threading
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -600,6 +601,43 @@ def _ptoas_component(ptoas_bin: str) -> ComponentInputs:
     return ComponentInputs(unavailable_reason=None, reported_version=reported)
 
 
+_CANN_INSTALL_INFO = "ascend_toolkit_install.info"
+
+
+def _cann_install_version(cann_root: Path) -> str:
+    """Return the build the CANN installation states about itself, or "".
+
+    ``innerversion`` is preferred over ``version``: it carries the vendor's
+    build number, so two builds of one release are distinguishable, while the
+    release number alone is not. Exactly one install-info *file* must be
+    present -- several would mean this is not a single installation -- but an
+    installation reaches its own through more than one path, so candidates are
+    counted by the file they name: CANN ships `arm64-linux` as a symlink to
+    `aarch64-linux`, and both spell the same inode. The value must be
+    non-empty, or the caller reads the contents instead.
+    """
+    try:
+        found = {path.resolve(strict=True) for path in cann_root.glob(f"*/{_CANN_INSTALL_INFO}")}
+    except OSError:
+        return ""
+    if len(found) != 1:
+        return ""
+    fields: dict[str, str] = {}
+    try:
+        for line in found.pop().read_text().splitlines():
+            key, separator, value = line.partition("=")
+            if separator:
+                fields[key.strip()] = value.strip()
+    except OSError:
+        return ""
+    return fields.get("innerversion") or fields.get("version") or ""
+
+
+def _outside(paths: set[Path], install_root: Path) -> set[Path]:
+    """Return the paths an installation does not own."""
+    return {p for p in paths if p != install_root and install_root not in p.parents}
+
+
 def _discover(compiler: Any, ptoas: str, runtime_name: str) -> ToolchainInputs:
     """Collect the compiler, linker, SDK and PTO assembler inputs for cache identity."""
     if sys.platform != "linux":
@@ -637,6 +675,7 @@ def _discover(compiler: Any, ptoas: str, runtime_name: str) -> ToolchainInputs:
     )
     orchestration = compiler._orchestration_toolchain(runtime_name)
     device = _gcc_inputs(_executable(orchestration.cxx_path))
+    cann_root: Path | None = None
     if compiler.platform.endswith("sim"):
         device.update(_gcc_inputs(_executable(compiler.sdk.gxx15.cxx_path)))
     else:
@@ -648,18 +687,33 @@ def _discover(compiler: Any, ptoas: str, runtime_name: str) -> ToolchainInputs:
         if ccec.parent.name != "bin" or ccec.parent.parent.name != "bisheng_compiler":
             raise ValueError(f"Unsupported CCEC installation layout: {ccec}")
         device.add(ccec.parent.parent)
+        # <cann>/tools/bisheng_compiler/bin/ccec -- the layout checked above
+        # fixes the first two levels, so require the third before trusting it
+        # to name the installation whose stated build covers these files.
+        if ccec.parent.parent.parent.name == "tools":
+            cann_root = ccec.parents[3]
         for core_type in ("aiv", "aic"):
             flags = [
                 flag for flag in compiler.sdk.ccec.get_compile_flags(core_type=core_type) if flag != "-c"
             ]
             output = _run([str(ccec), *flags, "-E", "-v", os.devnull])
             device.update(_include_roots(output, ccec))
+    # The device compiler runs on the host, so its inputs come from two
+    # sources: the CANN installation, which states its own build, and files the
+    # host OS provides, which state nothing. Cover each with the evidence it
+    # actually has rather than letting one version speak for both. Without a
+    # usable CANN version every input is read, as before.
+    cann_version = _cann_install_version(cann_root) if cann_root is not None else ""
+    if cann_root is not None and cann_version:
+        device_component = replace(_component(_outside(device, cann_root)), reported_version=cann_version)
+    else:
+        device_component = _component(device)
     return ToolchainInputs(
         _component(pypto),
         _component(runtime),
         _pto_isa_component(isa),
         ptoas_component,
-        _component(device),
+        device_component,
     )
 
 

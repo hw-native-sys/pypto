@@ -131,6 +131,22 @@ the same string under each yields different digests: a self-reported claim can
 never impersonate a proof. A failed probe falls back to the content inventory,
 and `unavailable_reason` still outranks both.
 
+A component may carry a version *and* contents. The device toolchain does: its
+compiler runs on the host, so its inputs come from the CANN installation, which
+states its own build, and from files the host OS provides, which state nothing.
+Each part is covered by the evidence it actually has. Declared roots are always
+read, so a version never stands in for files the component lists — if that
+inventory cannot be read, the component is unavailable however good the version
+is.
+
+CANN is identified by `innerversion` from `ascend_toolkit_install.info`, in
+preference to `version`: two builds of one release share the release number and
+differ only in the build. An installation reaches its own info file by more than
+one path — `arm64-linux` is a symlink to `aarch64-linux` — so candidates are
+counted by the file they name, not by path. Anything unexpected (no info file,
+two distinct ones, an empty value, an unrecognised install layout) reads every
+input as before.
+
 Successful component reads are memoized by their complete resolved inventory,
 with synchronization for concurrent threads. Changed selection must produce a
 new inventory. Failed reads are retried rather than cached indefinitely.

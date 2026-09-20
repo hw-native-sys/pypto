@@ -437,6 +437,45 @@ def test_a_reported_version_tracks_the_whole_string(inventories):
     assert capture("ptoas 0.61") != capture("ptoas 0.61.dev3")
 
 
+def test_one_component_can_carry_a_version_and_contents(inventories):
+    # A component whose files come from a vendor package and from the host OS
+    # covers each part with the evidence that part has; the identity must move
+    # when either moves.
+    def capture(reported, payload):
+        (inventories.device_toolchain.roots[0].path / "input.bin").write_text(payload)
+        component = replace(inventories.device_toolchain, reported_version=reported)
+        return (
+            InstallationIdentityCache()
+            .capture(replace(inventories, device_toolchain=component))
+            .device_toolchain
+        )
+
+    base = capture("B250", "aaa")
+    assert base is not None
+    assert capture("B251", "aaa") != base
+    assert capture("B250", "bbb") != base
+
+
+def test_a_version_never_stands_in_for_declared_contents(inventories):
+    # With roots present, an unreadable inventory must fail the component even
+    # though a version is available.
+    missing = replace(
+        inventories.device_toolchain,
+        roots=(ContentRoot(inventories.device_toolchain.roots[0].path.parent / "absent"),),
+        reported_version="B250",
+    )
+    identity = InstallationIdentityCache().capture(replace(inventories, device_toolchain=missing))
+    assert not identity.usable
+    assert identity.device_toolchain is None
+
+
+def test_a_component_supplying_nothing_stays_unavailable(inventories):
+    empty = replace(inventories.device_toolchain, roots=())
+    identity = InstallationIdentityCache().capture(replace(inventories, device_toolchain=empty))
+    assert not identity.usable
+    assert identity.device_toolchain is None
+
+
 def test_an_unavailable_component_outranks_a_verified_revision(inventories):
     blocked = replace(
         inventories.pto_isa, roots=(), verified_revision="d" * 40, unavailable_reason="probe failed"
