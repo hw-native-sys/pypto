@@ -14,6 +14,11 @@
       "function": "_ptoas_inputs",
       "path": "python/pypto/jit/_toolchain.py",
       "reason": "Copies the compiler subprocess environment; explicit dependency overrides are rejected and effective semantic/tool selections are captured by the adapter."
+    },
+    {
+      "function": "_run",
+      "path": "python/pypto/jit/_toolchain.py",
+      "reason": "Copies the compiler subprocess environment so a probe sees the tool selection the build does, with the C locale pinned over it; explicit dependency overrides are rejected and effective semantic/tool selections are captured by the adapter."
     }
   ],
   "schema": 1,

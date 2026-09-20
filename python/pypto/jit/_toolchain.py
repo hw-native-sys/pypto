@@ -48,8 +48,23 @@ _LDD_WORKERS = 32
 _identities: dict[tuple[Any, ...], ToolchainIdentity] = {}
 
 
+# Every probe below reads its answer out of a tool's diagnostic output, and
+# those strings are translated: on a non-English host gcc prints its own
+# rendering of "#include <...> search starts here:", which no marker here
+# matches. Pin the C locale for the probes rather than teach every parser
+# every translation.
+_C_LOCALE = {"LC_ALL": "C", "LANG": "C", "LANGUAGE": ""}
+
+
 def _run(command: list[str]) -> str:
-    result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=True)
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+        env={**os.environ, **_C_LOCALE},
+    )
     return result.stdout + result.stderr
 
 
@@ -95,7 +110,7 @@ def _elf_inputs(path: Path, library_path: str | None = None) -> set[Path]:
     with path.open("rb") as stream:
         if stream.read(4) != b"\x7fELF":
             raise ValueError(f"Expected an ELF installation input: {path}")
-    environment = dict(os.environ)
+    environment = {**os.environ, **_C_LOCALE}
     if library_path is not None:
         environment["LD_LIBRARY_PATH"] = library_path
     result = subprocess.run(
@@ -538,7 +553,7 @@ def _ptoas_inputs(launcher: Path, ancestors: frozenset[Path] = frozenset()) -> s
     library_path = str(root / "lib") + os.pathsep + os.environ.get("LD_LIBRARY_PATH", "")
     # Query interpreter resources without loading PTOAS or running a compiler.
     # Match the launcher's PYTHONHOME removal and library search environment.
-    environment = dict(os.environ)
+    environment = {**os.environ, **_C_LOCALE}
     environment.pop("PYTHONHOME", None)
     environment["LD_LIBRARY_PATH"] = library_path
     probe = subprocess.run(

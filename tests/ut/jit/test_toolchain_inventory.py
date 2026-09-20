@@ -354,6 +354,30 @@ def test_invocable_still_refuses_a_non_elf_launcher(tmp_path, monkeypatch):
         _toolchain._invocable("g++")
 
 
+def test_probes_do_not_read_translated_output(tmp_path, monkeypatch):
+    # gcc translates its diagnostics: on a non-English host it renders
+    # "#include <...> search starts here:" in that language, and no marker
+    # here matches the result.
+    compiler = tmp_path / "g++"
+    compiler.write_text(
+        "#!/bin/sh\n"
+        'if [ "$LC_ALL" = C ]; then\n'
+        '  echo "#include <...> search starts here:"\n'
+        '  echo " /usr/include"\n'
+        '  echo "End of search list."\n'
+        "else\n"
+        '  echo "#include <...> translated marker"\n'
+        "fi\n"
+    )
+    compiler.chmod(0o755)
+    monkeypatch.setenv("LC_ALL", "zh_CN.UTF-8")
+    monkeypatch.setenv("LANG", "zh_CN.UTF-8")
+
+    roots = _toolchain._include_roots(_toolchain._run([str(compiler)]), compiler)
+
+    assert roots == {Path("/usr/include")}
+
+
 def test_unknown_shell_launcher_is_not_an_executable_identity(tmp_path):
     script = tmp_path / "ptoas"
     script.write_text("#!/bin/sh\neval some_dynamic_command\n")
