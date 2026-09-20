@@ -293,9 +293,8 @@ def _extract_tensor_meta(
     torch_dtype = _torch_dtype_to_pypto(tensor.dtype)
     extents = list(tensor.shape)
 
-    if torch_dtype == DataType.FP4E2M1X2 or expected_dtype in (
-        DataType.FP4,
-        DataType.FP4E2M1X2,
+    if torch_dtype == DataType.FP4E2M1X2 or (
+        expected_dtype is not None and expected_dtype in (DataType.FP4, DataType.FP4E2M1X2)
     ):
         if not extents:
             raise TypeError("Packed torch.float4_e2m1fn_x2 tensors must have rank >= 1")

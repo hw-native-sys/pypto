@@ -155,8 +155,10 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
       valid_shape_tuple->elements_.empty() ? nullptr : valid_shape_tuple->elements_.back();
   const ir::ExprPtr last_offset =
       offsets_tuple->elements_.empty() ? nullptr : offsets_tuple->elements_.back();
+  const ir::TensorLayout gm_layout =
+      tensor_type->tensor_view_.has_value() ? tensor_type->tensor_view_->layout : ir::TensorLayout::ND;
   ExpandPackedFp4GmLastAxis(tensor_type->dtype_, offset_codes, size_codes, partition_dims, codegen, last_size,
-                            last_offset);
+                            last_offset, gm_layout);
   std::string tensor_view = codegen.GetOrCreateTensorView(tensor);
   std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
 
@@ -251,8 +253,10 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     auto size_codes = GetSizeCodes(shape_elems, codegen);
     const ir::ExprPtr last_size = shape_elems.empty() ? nullptr : shape_elems.back();
     const ir::ExprPtr last_offset = offset_elems.empty() ? nullptr : offset_elems.back();
+    const ir::TensorLayout gm_layout =
+        tensor_type->tensor_view_.has_value() ? tensor_type->tensor_view_->layout : ir::TensorLayout::ND;
     ExpandPackedFp4GmLastAxis(tensor_type->dtype_, offset_codes, size_codes, partition_dims, codegen,
-                              last_size, last_offset);
+                              last_size, last_offset, gm_layout);
     partition_type = MakePartitionTensorViewType(partition_dims, dtype_str);
     partition_view = EmitPartitionViewPTO(output_tensor->name_hint_, tensor_view, tensor_view_type,
                                           partition_type, offset_codes, size_codes, codegen);
@@ -289,8 +293,10 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     const ir::ExprPtr last_size = valid_shape.size() > 1 ? valid_shape[1] : nullptr;
     const ir::ExprPtr last_offset =
         offsets_tuple->elements_.empty() ? nullptr : offsets_tuple->elements_.back();
+    const ir::TensorLayout gm_layout =
+        tensor_type->tensor_view_.has_value() ? tensor_type->tensor_view_->layout : ir::TensorLayout::ND;
     ExpandPackedFp4GmLastAxis(tensor_type->dtype_, offset_codes, size_codes, partition_dims, codegen,
-                              last_size, last_offset);
+                              last_size, last_offset, gm_layout);
     partition_type = MakePartitionTensorViewType(partition_dims, dtype_str);
     partition_view = EmitPartitionViewPTO(output_tensor->name_hint_, tensor_view, tensor_view_type,
                                           partition_type, offset_codes, size_codes, codegen);

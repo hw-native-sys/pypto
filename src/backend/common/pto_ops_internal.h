@@ -34,6 +34,7 @@
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
+#include "pypto/core/dtype.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
@@ -76,7 +77,8 @@ std::vector<std::string> GetSizeCodes(const std::vector<ir::ExprPtr>& exprs, cod
 void ExpandPackedFp4GmLastAxis(DataType dtype, std::vector<std::string>& offset_codes,
                                std::vector<std::string>& size_codes, std::vector<std::string>& dim_strings,
                                codegen::PTOCodegen& codegen, const ir::ExprPtr& last_size = nullptr,
-                               const ir::ExprPtr& last_offset = nullptr);
+                               const ir::ExprPtr& last_offset = nullptr,
+                               ir::TensorLayout layout = ir::TensorLayout::ND);
 bool ExprsEquivalentForSubview(const ir::ExprPtr& lhs, const ir::ExprPtr& rhs);
 codegen::TileTypeComponents InferSubviewTileTypeComponents(const ir::TileType& source_tile_type,
                                                            const ir::MakeTuple& shape_tuple,

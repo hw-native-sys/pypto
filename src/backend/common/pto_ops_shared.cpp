@@ -182,8 +182,10 @@ std::string EmitIndexTimesTwo(const std::string& ssa, codegen::PTOCodegen& codeg
 void ExpandPackedFp4GmLastAxis(DataType dtype, std::vector<std::string>& offset_codes,
                                std::vector<std::string>& size_codes, std::vector<std::string>& dim_strings,
                                codegen::PTOCodegen& codegen, const ir::ExprPtr& last_size,
-                               const ir::ExprPtr& last_offset) {
-  if (!dtype.IsPackedFp4() || size_codes.empty()) return;
+                               const ir::ExprPtr& last_offset, ir::TensorLayout layout) {
+  // Match ExpandPackedFp4MakeTensorViewDims: MX layouts keep carrier/physical
+  // SFractal coordinates and must not nibble-expand the last axis.
+  if (!dtype.IsPackedFp4() || ir::IsMxTensorLayout(layout) || size_codes.empty()) return;
   size_codes.back() = EmitIndexTimesTwo(size_codes.back(), codegen, last_size);
   if (!offset_codes.empty()) {
     offset_codes.back() = EmitIndexTimesTwo(offset_codes.back(), codegen, last_offset);

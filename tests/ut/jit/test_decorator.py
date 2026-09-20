@@ -66,6 +66,14 @@ class TestJitDecoration:
 
         assert my_kernel.__name__ == "my_kernel"
 
+    def test_torch_fp32_without_expected_dtype_does_not_crash(self):
+        """Unannotated FP32 must not hit DataType.__eq__(None) via ``in``."""
+        torch = pytest.importorskip("torch")
+        t = torch.empty((4, 8), dtype=torch.float32)
+        meta = _extract_tensor_meta(t)
+        assert meta.dtype == DataType.FP32
+        assert meta.static_shape() == (4, 8)
+
     def test_torch_fp4_x2_default_keeps_carrier_shape(self):
         """Bare / packed annotation: torch float4 stays FP4E2M1X2 carrier extents."""
         torch = pytest.importorskip("torch")
