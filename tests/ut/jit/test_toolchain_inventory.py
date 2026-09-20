@@ -255,6 +255,75 @@ def test_outside_keeps_only_what_the_installation_does_not_own(tmp_path):
     assert _toolchain._outside(paths, install) == {outside, tmp_path / "usr/lib64/libc.so.6"}
 
 
+def _split_package(tmp_path, name="splitpkg", stray=None):
+    """An editable install: sources in a checkout, built extension elsewhere."""
+    checkout = tmp_path / "checkout" / name
+    installed = tmp_path / "site-packages" / name
+    checkout.mkdir(parents=True)
+    installed.mkdir(parents=True)
+    (checkout / "__init__.py").write_text("sources = 1\n")
+    (installed / "built.py").write_text("extension = 1\n")
+    modules = {name: checkout / "__init__.py", f"{name}.built": installed / "built.py"}
+    if stray is not None:
+        stray.write_text("elsewhere = 1\n")
+        modules[f"{name}.stray"] = stray
+    return checkout, installed, modules
+
+
+def _install_modules(monkeypatch, modules):
+    for module_name, origin in modules.items():
+        monkeypatch.setitem(sys.modules, module_name, SimpleNamespace(__file__=str(origin)))
+    monkeypatch.setattr(_toolchain.importlib, "import_module", lambda n: sys.modules[n], raising=False)
+
+
+def test_package_inventories_both_trees_of_an_editable_install(tmp_path, monkeypatch):
+    # scikit-build-core maps sources to the checkout and leaves the built
+    # extension under site-packages; refusing that split made the whole
+    # toolchain unavailable and silently disabled the persistent cache.
+    checkout, installed, modules = _split_package(tmp_path)
+    _install_modules(monkeypatch, modules)
+
+    paths = _toolchain._package("splitpkg")
+
+    assert paths == {checkout, installed}
+
+
+def test_the_second_tree_is_covered_not_merely_listed(tmp_path, monkeypatch):
+    checkout, installed, modules = _split_package(tmp_path)
+    _install_modules(monkeypatch, modules)
+    component = _toolchain._component(_toolchain._package("splitpkg"))
+
+    before = fingerprint_content(component.roots)
+    (installed / "built.py").write_text("extension = 2\n")
+
+    assert fingerprint_content(component.roots).digest != before.digest
+
+
+def test_the_second_trees_native_dependencies_are_resolved(tmp_path, monkeypatch):
+    # In an editable install the checkout holds no extension at all -- the
+    # built .so lives in the second tree, so that is where its shared-library
+    # closure has to be discovered.
+    checkout, installed, modules = _split_package(tmp_path)
+    native = installed / "built.so"
+    native.write_bytes(b"\x7fELF")
+    dependency = tmp_path / "libbuilt.so.1"
+    dependency.write_bytes(b"\x7fELF")
+    _install_modules(monkeypatch, modules)
+    monkeypatch.setattr(_toolchain, "_elf_inputs", lambda p, *rest: {p, dependency} if p == native else {p})
+
+    assert dependency in _toolchain._package("splitpkg")
+
+
+def test_a_redirect_outside_the_package_is_still_refused(tmp_path, monkeypatch):
+    # Nothing bounds what an arbitrary redirect would drag in, so only a tree
+    # named for the package is accepted.
+    _, _, modules = _split_package(tmp_path, stray=tmp_path / "elsewhere.py")
+    _install_modules(monkeypatch, modules)
+
+    with pytest.raises(ValueError, match="external import redirect: splitpkg.stray"):
+        _toolchain._package("splitpkg")
+
+
 def test_unknown_shell_launcher_is_not_an_executable_identity(tmp_path):
     script = tmp_path / "ptoas"
     script.write_text("#!/bin/sh\neval some_dynamic_command\n")

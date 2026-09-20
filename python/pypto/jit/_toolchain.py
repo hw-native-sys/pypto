@@ -137,20 +137,42 @@ def _component(paths: set[Path]) -> ComponentInputs:
 
 
 def _package(name: str) -> set[Path]:
+    """Inventory every tree a package actually loads from.
+
+    An editable install splits one package across two: scikit-build-core maps
+    the Python sources to the checkout and leaves the built extensions as real
+    files under ``site-packages/<name>``, which is the layout the documented
+    ``pip install -e`` workflow produces. Refusing that split does not make the
+    identity safer -- it makes the whole toolchain unavailable, and with it the
+    persistent cache -- so a submodule loading from outside the first tree adds
+    *its* tree instead.
+
+    A redirect is only accepted when it still lands inside a directory named
+    for the package: that is the build system placing the package's own files,
+    and every later import from it is covered because the whole directory is
+    inventoried. A redirect anywhere else is still refused, because nothing
+    bounds what it would drag in.
+    """
     module = importlib.import_module(name)
     filename = getattr(module, "__file__", None)
     if filename is None:
         raise ValueError(f"Compiler module has no inspectable installation: {name}")
-    root = Path(filename).resolve().parent
-    paths = {root}
+    roots = {Path(filename).resolve().parent}
     for imported_name, imported in tuple(sys.modules.items()):
         if imported_name == name or imported_name.startswith(f"{name}."):
             origin = getattr(imported, "__file__", None)
-            if origin is not None:
-                selected = Path(origin).resolve(strict=True)
-                if root not in selected.parents:
-                    raise ValueError(f"Compiler package uses an external import redirect: {imported_name}")
-    paths.update(_elf_inputs_many(root.rglob("*.so")))
+            if origin is None:
+                continue
+            selected = Path(origin).resolve(strict=True)
+            if any(root == selected.parent or root in selected.parents for root in roots):
+                continue
+            anchor = next((parent for parent in selected.parents if parent.name == name), None)
+            if anchor is None:
+                raise ValueError(f"Compiler package uses an external import redirect: {imported_name}")
+            roots.add(anchor)
+    paths = set(roots)
+    for root in roots:
+        paths.update(_elf_inputs_many(root.rglob("*.so")))
     return paths
 
 
