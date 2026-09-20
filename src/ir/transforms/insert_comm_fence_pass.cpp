@@ -207,7 +207,7 @@ bool IsCacheInvalidAll(const StmtPtr& stmt) {
 // Control expressions (if conditions, loop bounds/conditions) that read GM
 // disqualify a wait-loop from being "pure": the consume-side whole-GM
 // cacheinvalid cannot be deferred past a read that could observe stale peer
-// data (an InCore `tensor.read` lowers to a cached `pto.load_scalar`).
+// data (an InCore `tensor.read` lowers to a cached `pto.load`).
 bool ExprMayRead(const ExprPtr& expr) {
   if (!expr) return false;
   if (auto call = As<Call>(expr)) {

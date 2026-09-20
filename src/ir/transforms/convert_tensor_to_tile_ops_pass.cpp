@@ -3426,7 +3426,7 @@ class IncoreTileOpsVerifier : public IRVisitor {
       // tensor.read/tensor.write on a gm_tensor (TensorType input) intentionally stays unconverted.
       // ``AsTensorTypeLike`` also whitelists ``DistributedTensorType``, which the
       // conversion registry above keeps as ``tensor.read`` / ``tensor.write`` so the
-      // PTO codegen can lower it as a local-rank ``pto.load_scalar`` / ``pto.store_scalar``.
+      // PTO codegen can lower it as a local-rank ``pto.load`` / ``pto.store``.
       if ((IsOp(call, "tensor.read") || IsOp(call, "tensor.write")) && !call->args_.empty() &&
           AsTensorTypeLike(call->args_[0]->GetType())) {
         return;

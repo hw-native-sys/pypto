@@ -2140,7 +2140,7 @@ void OpConversionRegistry::RegisterGatherOps() {
 // load loop on the Cube core.
 //
 // For each gathered row i (i in [0, rows), rows = runtime indices count):
-//   idx   = indices[i]                         (scalar GM read -> pto.load_scalar)
+//   idx   = indices[i]                         (scalar GM read -> pto.load)
 //   phys  = block_table[idx / block_size] * block_size + idx % block_size  (scalar)
 //   row   = tile.load(src, [phys, col_off], [1, size], target_memory=space)  (GM->L1/UB)
 //   acc'  = tile.assemble(acc, row, [i, 0])     (write row i into the on-chip tile)

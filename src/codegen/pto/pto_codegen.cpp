@@ -816,7 +816,7 @@ std::string PTOCodegen::EmitCommRemoteOffsetInline(const std::string& ctx_ssa, c
   const int64_t elem_size_bytes = static_cast<int64_t>(elem_bits / 8);
 
   namespace cl = codegen::distributed::comm_layout;
-  // CommContext field indices, expressed in u64 slots (one ``pto.load_scalar``
+  // CommContext field indices, expressed in u64 slots (one ``pto.load``
   // step = one slot). Pinned via static_assert in
   // include/pypto/codegen/distributed/comm_layout.h so a runtime ABI shift
   // fails PyPTO compilation rather than silently emitting wrong addresses.
@@ -832,7 +832,7 @@ std::string PTOCodegen::EmitCommRemoteOffsetInline(const std::string& ctx_ssa, c
   // Read rankId (the low 32 bits of the (rankId, rankNum) 8-byte slot at
   // u64 index k_rank_idx).
   const std::string rk_pair = NewTemp();
-  Emit(rk_pair + " = pto.load_scalar " + ctx_ssa + "[" + c_r + "] : !pto.ptr<i64> -> i64");
+  Emit(rk_pair + " = pto.load " + ctx_ssa + "[" + c_r + "] : !pto.ptr<i64> -> i64");
   const std::string rk_i32 = NewTemp();
   Emit(rk_i32 + " = arith.trunci " + rk_pair + " : i64 to i32");
   const std::string rk_idx = NewTemp();
@@ -842,13 +842,13 @@ std::string PTOCodegen::EmitCommRemoteOffsetInline(const std::string& ctx_ssa, c
   const std::string lb_off = NewTemp();
   Emit(lb_off + " = arith.addi " + c_w + ", " + rk_idx + " : index");
   const std::string lbase = NewTemp();
-  Emit(lbase + " = pto.load_scalar " + ctx_ssa + "[" + lb_off + "] : !pto.ptr<i64> -> i64");
+  Emit(lbase + " = pto.load " + ctx_ssa + "[" + lb_off + "] : !pto.ptr<i64> -> i64");
 
   // peer_base = windowsIn[peer]
   const std::string pb_off = NewTemp();
   Emit(pb_off + " = arith.addi " + c_w + ", " + peer_ssa + " : index");
   const std::string pbase = NewTemp();
-  Emit(pbase + " = pto.load_scalar " + ctx_ssa + "[" + pb_off + "] : !pto.ptr<i64> -> i64");
+  Emit(pbase + " = pto.load " + ctx_ssa + "[" + pb_off + "] : !pto.ptr<i64> -> i64");
 
   // delta_bytes = peer_base - local_base; converted to an element offset
   // because pto.addptr takes element counts, not bytes.
@@ -1104,7 +1104,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   // Pair each DistributedTensor param with its explicit CommCtxType param (in
   // IR-param order). The runtime CommContext is passed as a GM ``uint64_t*``
   // (see ``runtime/src/common/platform_comm/comm_context.h``); codegen indexes
-  // its fields via ``pto.load_scalar`` and the ``comm_layout::k*`` constants.
+  // its fields via ``pto.load`` and the ``comm_layout::k*`` constants.
   INTERNAL_CHECK_SPAN(dist_tensor_params.size() == comm_ctx_params.size(), func->span_)
       << "PTOCodegen: function '" << func->name_ << "' has " << dist_tensor_params.size()
       << " DistributedTensor params but " << comm_ctx_params.size()
@@ -1147,7 +1147,6 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   // Python wrapper mirrors this exact order.
   if (uses_l2_cache_offset) {
     if (!first_param) stream_ << ", ";
-    first_param = false;
     fs_.l2_cache_offset_arg = "%__pypto_l2_cache_offset";
     stream_ << fs_.l2_cache_offset_arg << ": i64";
   }
@@ -2259,7 +2258,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   // tile.store into the alias can resolve its view instead of
   // GetOrCreateTensorView tripping its INTERNAL_CHECK on the synthetic var.
   // We additionally propagate the base-ptr mapping so element-wise alias
-  // consumers (pl.read / pl.write / store_scalar) resolve to the backing
+  // consumers (pl.read / pl.write / pto.store) resolve to the backing
   // pointer rather than the view SSA — as the IfStmt in-place-return path
   // (VisitStmt_(IfStmtPtr)) does for merged tensors.
   // Non-fatal: if the RHS has no registered view, fall through to the generic

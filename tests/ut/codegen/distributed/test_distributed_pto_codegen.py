@@ -27,7 +27,7 @@ Covers the InCore PTO codegen for ``pld.tile.remote_load``,
 - ``pto.addptr`` and ``pto.make_tensor_view`` MUST live at the call site
   regardless: PTOAS verifies per-function that ``addptr`` directly feeds
   ``make_tensor_view`` / ``initialize_l2g2l_pipe(gm_addr)`` /
-  ``load|store_scalar``, AND ``make_tensor_view`` lowers to a strided
+  ``pto.load / pto.store``, AND ``make_tensor_view`` lowers to a strided
   memref whose layout cannot be encoded in a ``!pto.tensor_view<…>``
   return type — so the view could not be returned across a func boundary
   either.
@@ -727,8 +727,8 @@ def test_remote_load_emits_inline_offset_arithmetic_with_addptr_at_call_site():
     # make_tensor_view locally so PTOAS sees the addptr→make_tensor_view
     # chain within a single func.func.
     kernel = funcs["kernel"]
-    # Inline body: load_scalar reads (rankId + 2 window slots) + divsi.
-    assert kernel.count("pto.load_scalar") >= 3, kernel
+    # Inline body: pto.load reads (rankId + 2 window slots) + divsi.
+    assert kernel.count("pto.load") >= 3, kernel
     assert "arith.divsi" in kernel, kernel
     assert "pto.addptr" in kernel, "addptr must live at the call site"
     # The addptr's direct downstream is a make_tensor_view in the same func —
@@ -768,7 +768,7 @@ def test_remote_store_emits_tstore_with_partition_view_pattern():
     assert "_peer_pview" in kernel, kernel
     # Address translation lives at the call site (same constraints as remote_load).
     assert "CommRemoteOffset" not in mlir, mlir
-    assert kernel.count("pto.load_scalar") >= 3, kernel
+    assert kernel.count("pto.load") >= 3, kernel
     assert "pto.addptr" in kernel, kernel
     assert "pto.make_tensor_view" in kernel, kernel
 
@@ -1002,9 +1002,7 @@ def test_remote_load_uses_comm_layout_constants():
     # bare `arith.constant 2 : index` may equally be an unrelated shape or
     # stride. Matching the *uses* keeps the comm_layout pin load-bearing.
     rank_slot_reads = [
-        line
-        for line in kernel.splitlines()
-        if "pto.load_scalar" in line and f"[%c{rank_idx_unit}_index]" in line
+        line for line in kernel.splitlines() if "pto.load" in line and f"[%c{rank_idx_unit}_index]" in line
     ]
     assert rank_slot_reads, kernel
     assert f"arith.addi %c{win_idx_unit}_index," in kernel, kernel
@@ -1468,11 +1466,11 @@ def test_if_merged_distributed_metadata_rejects_conflicting_contexts():
         _generate_mlir(P)
 
 
-def test_rank_emits_pto_load_scalar_at_slot_2_plus_trunci():
+def test_rank_emits_pto_load_at_slot_2_plus_trunci():
     """``pld.system.rank(ctx)`` reads slot 2 (= kRankIdOffset /
     kWindowSlotStride = 16/8) then truncates to signless ``i32`` for PTOAS.
 
-    Asserts that the emitted MLIR contains ``pto.load_scalar %argN[%cK] :
+    Asserts that the emitted MLIR contains ``pto.load %argN[%cK] :
     !pto.ptr<i64> -> i64`` and ``arith.trunci`` — no ``arith.shrui`` (that
     is the nranks path).
     """
@@ -1488,14 +1486,14 @@ def test_rank_emits_pto_load_scalar_at_slot_2_plus_trunci():
     mlir = _generate_mlir(P)
     body = mlir.split("func.func @kernel", 1)[1]
     # rank lowering line.
-    assert "pto.load_scalar" in body and "!pto.ptr<i64> -> i64" in body, body
+    assert "pto.load" in body and "!pto.ptr<i64> -> i64" in body, body
     assert "arith.trunci" in body and "to i32" in body, body
     assert "to ui32" not in body, body
     # rank does not shrui — only nranks does.
     assert "arith.shrui" not in body, body
 
 
-def test_nranks_emits_pto_load_scalar_plus_shrui_32_plus_trunci():
+def test_nranks_emits_pto_load_plus_shrui_32_plus_trunci():
     """``pld.system.nranks(ctx)`` reads the SAME slot 2 then
     ``arith.shrui ..., 32`` (high 32 bits = rankNum) then ``arith.trunci``.
 
@@ -1514,8 +1512,8 @@ def test_nranks_emits_pto_load_scalar_plus_shrui_32_plus_trunci():
 
     mlir = _generate_mlir(P)
     body = mlir.split("func.func @kernel", 1)[1]
-    # nranks lowering: pto.load_scalar + arith.shrui + arith.trunci.
-    assert "pto.load_scalar" in body and "!pto.ptr<i64> -> i64" in body, body
+    # nranks lowering: pto.load + arith.shrui + arith.trunci.
+    assert "pto.load" in body and "!pto.ptr<i64> -> i64" in body, body
     assert "arith.shrui" in body, body
     assert "arith.trunci" in body and "to i32" in body, body
     assert "to ui32" not in body, body
@@ -1594,7 +1592,7 @@ def test_put_emits_comm_tput_with_attr_and_staging_tile():
     # addptr needed for its own view).
     assert "CommRemoteOffset" not in mlir, mlir
     # Pin the element-size divisor, not just "some scalar read happened":
-    # pto.load_scalar alone is emitted by unrelated lowerings (pld.system.rank,
+    # pto.load alone is emitted by unrelated lowerings (pld.system.rank,
     # tensor.read), so it would not catch a wrong dtype reaching the inline
     # peer-offset arithmetic. FP16 => 2 bytes.
     assert "arith.constant 2 : i64" in mlir, mlir

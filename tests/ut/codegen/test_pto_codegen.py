@@ -172,7 +172,7 @@ def test_gm_scalar_write_between_converted_ops_keeps_store_and_reload():
 
     mlir = _generate_default_mlir(Before)
     lines = _get_mlir_lines(mlir)
-    scalar_store = _single_line(lines, "pto.store_scalar")
+    scalar_store = _single_line(lines, "pto.store")
     assert ", %arg0[" in scalar_store, "the scalar store must target the original x pointer"
     assert "pto.tsetval" not in mlir, "a GM write must not be redirected into a UB tile"
     loads = [line for line in lines if "pto.tload " in line]
@@ -976,9 +976,9 @@ def test_pto_codegen_lowered_mixed_store_keeps_ptr():
     """Low-level mixed stores keep distinct tensor-view and pointer SSA values.
 
     Regression for #1493: slice-assign lowers to `pto.make_tensor_view`/`tstore`
-    (a `!pto.tensor_view`) while pl.write lowers to `store_scalar` (a `!pto.ptr`).
+    (a `!pto.tensor_view`) while pl.write lowers to `pto.store` (a `!pto.ptr`).
     Both must not bind to the same SSA name, or ptoas rejects one value typed two
-    ways. The base pointer must flow through to store_scalar, not the view SSA.
+    ways. The base pointer must flow through to pto.store, not the view SSA.
 
     ConvertTensorToTileOps rejects this source-level combination for memory
     coherence (#2005), so this codegen-only invariant is tested on already
@@ -1006,9 +1006,9 @@ def test_pto_codegen_lowered_mixed_store_keeps_ptr():
     partition_view = _single_line(lines, f"{tstore_view_match.group(1)} = pto.partition_view")
     assert "!pto.tensor_view" in partition_view
     assert "!pto.partition_tensor_view" in partition_view
-    store_scalar = _single_line(lines, "pto.store_scalar")
-    assert "_view[" not in store_scalar, f"store_scalar must use ptr, not view: {store_scalar}"
-    assert "!pto.ptr<f32>" in store_scalar
+    store_line = _single_line(lines, "pto.store")
+    assert "_view[" not in store_line, f"pto.store must use ptr, not view: {store_line}"
+    assert "!pto.ptr<f32>" in store_line
 
 
 def test_pto_codegen_tile_mul():

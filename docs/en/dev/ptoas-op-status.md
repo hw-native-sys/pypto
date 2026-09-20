@@ -69,8 +69,8 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.make_prefetch_async_context | pto::PrefetchAsyncContext | internal | ✅ | — | — | — | — | validated as part of async-prefetch integration |
 | pto.get_prefetch_async_session | .session | internal | ✅ | — | — | — | — | validated as part of async-prefetch integration |
 | pto.tstore | TSTORE | tile | ✅ | ✅ | ❌ | ✅ | — |  |
-| pto.load_scalar | direct pointer load | tensor | ✅ | ❌ | ✅ | ✅ | — | emitted by `tensor.read` |
-| pto.store_scalar | direct pointer store | tensor | ✅ | ❌ | ✅ | ✅ | — | emitted by `tensor.write` |
+| pto.load | direct pointer load | tensor | ✅ | ❌ | ✅ | ✅ | — | emitted by `tensor.read` |
+| pto.store | direct pointer store | tensor | ✅ | ❌ | ✅ | ✅ | — | emitted by `tensor.write` |
 | pto.tmov | TMOV / TMOV_FP | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.ttrans | TTRANS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | **Matrix Computation (12)** |  |  |  |  |  |  |  |  |

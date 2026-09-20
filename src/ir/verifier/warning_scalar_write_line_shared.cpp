@@ -13,7 +13,7 @@
  * @file warning_scalar_write_line_shared.cpp
  * @brief Warn when concurrent task instances may `pl.write` into one 64-byte line.
  *
- * `tensor.write` lowers to `pto.store_scalar`, which PTOAS emits as a plain
+ * `tensor.write` lowers to `pto.store`, which PTOAS emits as a plain
  * cacheable store through a `__gm__` pointer plus ONE whole-cache
  * `dcci(0, ENTIRE_DATA_CACHE)` at the function tail. The store lands in the
  * issuing core's data cache and reaches GM only at kernel exit, written back a

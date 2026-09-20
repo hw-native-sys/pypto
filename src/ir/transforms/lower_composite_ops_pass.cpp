@@ -2621,7 +2621,7 @@ ExprPtr LowerTensorAllToAllVRule(const CallPtr& call, const std::vector<ExprPtr>
         auto my_base = MakeMul(comm.my_rank, max_recv_expr, span);
 
         // Per-destination row count, read from device data at runtime
-        // (``tensor.read`` → ``pto.load_scalar``) and clamped to the
+        // (``tensor.read`` → ``pto.load``) and clamped to the
         // compile-time capacity: a count above MAX_RECV would otherwise push
         // into the next destination's slice of the peer window.
         std::vector<ExprPtr> count_indices{dest_var};

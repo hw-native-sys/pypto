@@ -69,7 +69,7 @@ def kernel(
 ```
 
 归约接收 `tile.load(x, ...)` 的结果。最后的写入保留为
-`tensor.write(x, ...)`，生成 GM `pto.store_scalar`；它不会变成针对归约输入
+`tensor.write(x, ...)`，生成 GM `pto.store`；它不会变成针对归约输入
 tile 的 `tile.write`。同样的规则适用于 `pld.DistributedTensor` 参数、标量读取
 以及返回的 GM 别名。
 
@@ -489,7 +489,7 @@ SSA 遍历中收集。已注册的 functional tile 算子若生成独立存储�
 rows = tensor.dim(indices, last_axis)                  # 运行期聚合行数
 acc  = tile.create([max_indices, size], target_memory=space)   # 静态片上 buffer
 for i in [0, rows):                                    # ForStmt，iter_arg = acc
-    idx   = tensor.read(indices, [i])                  # 标量读 GM（pto.load_scalar）
+    idx   = tensor.read(indices, [i])                  # 标量读 GM（pto.load）
     phys  = block_table[idx // block_size] * block_size + idx % block_size   # 标量
     acc   = tile.gather_row(acc, src, [i, 0], [phys, col_off], [1, size])    # GM->片上
     yield acc
