@@ -1655,6 +1655,8 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     const auto tile_type = As<TileType>(interval.variable->GetType());
     if (!tile_type || !tile_type->memref_.has_value()) continue;
     const auto memref = ir::GetDefinedMemRef(tile_type);
+    // AnalyzeAllocationLifetimes already merges every variable sharing this
+    // MemRef base into one [min(def), max(last use)] interval.
     base_lifetimes[memref->base_.get()] = {interval.def_point, interval.last_use_point};
   }
 
