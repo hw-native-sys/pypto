@@ -64,6 +64,32 @@ def _executable(name: str) -> Path:
     return path
 
 
+def _invocable(name: str) -> Path:
+    """Return the compiler as the build invokes it, without resolving it.
+
+    A compiler on PATH may be a wrapper that dispatches on argv[0]: ccache
+    installs a directory of symlinks, one per compiler name, every one of them
+    pointing at the single ccache binary, and decides which compiler to run
+    from the name it was called by. Resolving that symlink first discards the
+    name, and the wrapper then answers ``-print-prog-name`` about *itself* --
+    ccache rejects the option outright -- so discovery fails on a host whose
+    PATH puts those shims first, which is the ordinary state of a build
+    machine. Invoking the path the build invokes keeps the dispatch intact and
+    reaches the real compiler underneath.
+
+    The file behind the name still has to be an ELF image; a wrapper written
+    as a shell script needs its own dependency adapter, exactly as before.
+    """
+    selected = shutil.which(name)
+    if selected is None:
+        raise ValueError(f"Compiler executable is unavailable: {name}")
+    path = Path(selected)
+    with path.open("rb") as stream:
+        if stream.read(4) != b"\x7fELF":
+            raise ValueError(f"Unsupported compiler launcher (requires dependency adapter): {selected}")
+    return path
+
+
 def _elf_inputs(path: Path, library_path: str | None = None) -> set[Path]:
     """ldd reports the loader's transitive resolution, including the interpreter."""
     with path.open("rb") as stream:
@@ -703,10 +729,10 @@ def _discover(compiler: Any, ptoas: str, runtime_name: str) -> ToolchainInputs:
         if Path(p).exists()
     )
     orchestration = compiler._orchestration_toolchain(runtime_name)
-    device = _gcc_inputs(_executable(orchestration.cxx_path))
+    device = _gcc_inputs(_invocable(orchestration.cxx_path))
     cann_root: Path | None = None
     if compiler.platform.endswith("sim"):
-        device.update(_gcc_inputs(_executable(compiler.sdk.gxx15.cxx_path)))
+        device.update(_gcc_inputs(_invocable(compiler.sdk.gxx15.cxx_path)))
     else:
         ccec = _executable(compiler.sdk.ccec.cxx_path)
         device.update(_elf_inputs(ccec))

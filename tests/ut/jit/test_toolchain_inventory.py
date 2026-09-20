@@ -324,6 +324,36 @@ def test_a_redirect_outside_the_package_is_still_refused(tmp_path, monkeypatch):
         _toolchain._package("splitpkg")
 
 
+def test_invocable_keeps_the_name_a_wrapper_dispatches_on(tmp_path, monkeypatch):
+    # ccache installs one symlink per compiler name, all pointing at the single
+    # ccache binary, and picks the compiler from the name it was invoked by.
+    # Resolving the symlink first discards that name.
+    real = tmp_path / "bin" / "ccache"
+    real.parent.mkdir()
+    real.write_bytes(b"\x7fELF" + b"\x00" * 16)
+    real.chmod(0o755)
+    shims = tmp_path / "shims"
+    shims.mkdir()
+    shim = shims / "g++"
+    shim.symlink_to(real)
+    monkeypatch.setenv("PATH", str(shims))
+
+    assert _toolchain._invocable("g++") == shim
+    # The contrast is deliberate: the inventory still wants the real file.
+    assert _toolchain._executable("g++") == real.resolve()
+
+
+def test_invocable_still_refuses_a_non_elf_launcher(tmp_path, monkeypatch):
+    shims = tmp_path / "shims"
+    shims.mkdir()
+    (shims / "g++").write_text('#!/bin/sh\nexec something "$@"\n')
+    (shims / "g++").chmod(0o755)
+    monkeypatch.setenv("PATH", str(shims))
+
+    with pytest.raises(ValueError, match="Unsupported compiler launcher"):
+        _toolchain._invocable("g++")
+
+
 def test_unknown_shell_launcher_is_not_an_executable_identity(tmp_path):
     script = tmp_path / "ptoas"
     script.write_text("#!/bin/sh\neval some_dynamic_command\n")
