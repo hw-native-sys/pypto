@@ -9,6 +9,7 @@
 
 """Dependency inventories fail closed and hash compiler resource contents."""
 
+import inspect
 import json
 import os
 import subprocess
@@ -17,7 +18,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from pypto._identity import fingerprint_content
+from pypto._identity import (
+    ComponentInputs,
+    InstallationIdentityCache,
+    ToolchainInputs,
+    fingerprint_content,
+)
 from pypto.jit import _toolchain
 
 
@@ -359,28 +365,29 @@ def test_the_driver_a_wrapper_executes_is_inventoried(tmp_path, monkeypatch):
     # decide the compilation -- the driver it execs does. Inventorying only the
     # path invoked would let the real compiler be replaced without moving the
     # fingerprint.
-    driver = tmp_path / "real-g++"
-    driver.write_bytes(b"\x7fELF")
-    shim = tmp_path / "wrapper-g++"
-    shim.write_bytes(b"\x7fELF")
+    driver = _elf(tmp_path / "real-g++")
+    wrapper = _elf(tmp_path / "bin" / "ccache")
+    shim = tmp_path / "shims" / "g++"
+    shim.parent.mkdir()
+    shim.symlink_to(wrapper)
     output = f"COLLECT_GCC={driver}\nsome other line\n"
 
     assert _toolchain._driver_executed(output, shim) == driver.resolve()
 
 
 def test_an_unidentifiable_driver_refuses_rather_than_guesses(tmp_path):
-    shim = tmp_path / "wrapper-g++"
-    shim.write_bytes(b"\x7fELF")
+    shim = _elf(tmp_path / "wrapper-g++")
 
     with pytest.raises(ValueError, match="compiler driver actually executed"):
         _toolchain._driver_executed("no marker here\n", shim)
 
 
 def test_gcc_inputs_covers_both_the_wrapper_and_its_driver(tmp_path, monkeypatch):
-    shim = tmp_path / "wrapper-g++"
-    shim.write_bytes(b"\x7fELF")
-    driver = tmp_path / "real-g++"
-    driver.write_bytes(b"\x7fELF")
+    wrapper = _elf(tmp_path / "bin" / "ccache")
+    shim = tmp_path / "shims" / "g++"
+    shim.parent.mkdir()
+    shim.symlink_to(wrapper)
+    driver = _elf(tmp_path / "real-g++")
     subprogram = tmp_path / "cc1plus"
     subprogram.write_bytes(b"\x7fELF")
     subprogram.chmod(0o755)
@@ -404,6 +411,81 @@ def test_gcc_inputs_covers_both_the_wrapper_and_its_driver(tmp_path, monkeypatch
     paths = _toolchain._gcc_inputs(shim)
 
     assert {shim, driver} <= paths
+
+
+def _elf(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\x7fELF")
+    path.chmod(0o755)
+    return path
+
+
+def test_a_tracked_wrapper_is_accepted(tmp_path):
+    driver = _elf(tmp_path / "real-g++")
+    wrapper = _elf(tmp_path / "bin" / "ccache")
+    shim = tmp_path / "shims" / "g++"
+    shim.parent.mkdir()
+    shim.symlink_to(wrapper)
+
+    assert _toolchain._driver_executed(f"COLLECT_GCC={driver}\n", shim) == driver.resolve()
+
+
+def test_an_untracked_wrapper_refuses_rather_than_trusting_it(tmp_path):
+    # Its selection inputs are not enumerated anywhere here, so an identity
+    # taken through it would not move when the compiler it picks does.
+    driver = _elf(tmp_path / "real-g++")
+    wrapper = _elf(tmp_path / "bin" / "somecache")
+    shim = tmp_path / "shims" / "g++"
+    shim.parent.mkdir()
+    shim.symlink_to(wrapper)
+
+    with pytest.raises(ValueError, match="untracked selection inputs: somecache"):
+        _toolchain._driver_executed(f"COLLECT_GCC={driver}\n", shim)
+
+
+def test_a_compiler_invoked_directly_is_not_treated_as_a_wrapper(tmp_path):
+    compiler = _elf(tmp_path / "g++")
+
+    assert _toolchain._driver_executed(f"COLLECT_GCC={compiler}\n", compiler) == compiler.resolve()
+
+
+@pytest.mark.parametrize("variable", ["CCACHE_COMPILER", "CCACHE_PREFIX", "CCACHE_CONFIGPATH"])
+def test_changing_a_wrapper_selection_rediscovers_in_the_same_process(monkeypatch, variable):
+    # The wrapper picks the compiler from these, exactly as PATH does, so the
+    # identity of the compiler chosen before must not be reused after a change.
+    seen = []
+
+    def discover(compiler, ptoas, runtime_name):
+        chosen = os.environ.get(variable, "default")
+        seen.append(chosen)
+        component = ComponentInputs(unavailable_reason=None, reported_version=chosen)
+        return ToolchainInputs(component, component, component, component, component)
+
+    monkeypatch.setattr(_toolchain, "_discover", discover)
+    monkeypatch.setattr(_toolchain, "_identities", {})
+    monkeypatch.setattr(_toolchain, "_identity_cache", InstallationIdentityCache())
+    monkeypatch.setattr(
+        _toolchain, "_compiler", lambda *a, **k: SimpleNamespace(project_root="/x", _sanitizers="")
+    )
+    monkeypatch.setattr(_toolchain, "find_ptoas_binary", lambda: "/usr/bin/true")
+
+    monkeypatch.setenv(variable, "/compiler/A")
+    first = _toolchain.capture_toolchain("a2a3", "tensormap_and_ringbuffer")
+    monkeypatch.setenv(variable, "/compiler/B")
+    second = _toolchain.capture_toolchain("a2a3", "tensormap_and_ringbuffer")
+
+    assert seen == ["/compiler/A", "/compiler/B"]
+    assert first.usable and second.usable
+    assert first.digest != second.digest
+
+
+def test_every_tracked_wrapper_variable_reaches_the_discovery_key():
+    # The key reads these by name so each is a classified environment input;
+    # that means adding a wrapper to the table is not enough on its own.
+    source = inspect.getsource(_toolchain.capture_toolchain)
+    missing = [name for name in _toolchain._WRAPPER_VARIABLES if f'"{name}"' not in source]
+
+    assert not missing, f"tracked but never re-read: {missing}"
 
 
 def test_probes_do_not_read_translated_output(tmp_path, monkeypatch):

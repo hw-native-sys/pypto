@@ -31,6 +31,34 @@
       "category": "tool_resolution",
       "reason": "Runtime build-tool selection; direct kernel compilation uses its selected toolchain object."
     },
+    "CCACHE_CC": {
+      "category": "tool_resolution",
+      "reason": "Deprecated alias of CCACHE_COMPILER; selects the compiler a ccache wrapper runs."
+    },
+    "CCACHE_COMPILER": {
+      "category": "tool_resolution",
+      "reason": "Forces the compiler a ccache wrapper runs, overriding the name it was invoked by."
+    },
+    "CCACHE_CONFIGPATH": {
+      "category": "tool_resolution",
+      "reason": "Selects the ccache configuration file, which may set the compiler to run."
+    },
+    "CCACHE_DISABLE": {
+      "category": "tool_resolution",
+      "reason": "Takes ccache out of the compilation chain."
+    },
+    "CCACHE_NODISABLE": {
+      "category": "tool_resolution",
+      "reason": "Counterpart of CCACHE_DISABLE; keeps ccache in the compilation chain."
+    },
+    "CCACHE_PREFIX": {
+      "category": "tool_resolution",
+      "reason": "Inserts another program before the compiler, e.g. distcc."
+    },
+    "CCACHE_PREFIX_CPP": {
+      "category": "tool_resolution",
+      "reason": "Inserts another program before the preprocessor."
+    },
     "COMPILER_PATH": {
       "category": "tool_resolution",
       "reason": "Can redirect compiler subprograms; resolve their contents."

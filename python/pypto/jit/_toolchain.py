@@ -225,6 +225,30 @@ def _include_roots(output: str, executable: Path) -> set[Path]:
     return {Path(line.strip()).resolve(strict=True) for line in includes.splitlines() if line.strip()}
 
 
+# ccache is the wrapper this project actually meets. Its manual names the
+# settings that decide which compiler runs, and each has an environment
+# override; those overrides therefore select a tool exactly as PATH does, and
+# belong in the discovery key beside it. A wrapper absent from this table has
+# selection inputs nobody has enumerated here, so an identity taken through it
+# would not move when the compiler it picks does -- discovery refuses instead.
+# Settings that only govern the wrapper's own cache validity, such as
+# CCACHE_COMPILERCHECK, do not change which compiler runs and are not listed.
+_WRAPPER_SELECTION: dict[str, tuple[str, ...]] = {
+    "ccache": (
+        "CCACHE_CC",  # deprecated alias of CCACHE_COMPILER
+        "CCACHE_COMPILER",  # forces the compiler outright
+        "CCACHE_CONFIGPATH",  # selects the config file that may set it
+        "CCACHE_DISABLE",  # takes ccache out of the chain
+        "CCACHE_NODISABLE",
+        "CCACHE_PREFIX",  # inserts another program, e.g. distcc
+        "CCACHE_PREFIX_CPP",
+    ),
+}
+# The discovery key reads these by name; a test fails if the table ever grows
+# a variable that key does not read.
+_WRAPPER_VARIABLES = tuple(sorted({name for names in _WRAPPER_SELECTION.values() for name in names}))
+
+
 def _driver_executed(output: str, executable: Path) -> Path:
     """Return the compiler driver the invocation actually ran.
 
@@ -242,10 +266,17 @@ def _driver_executed(output: str, executable: Path) -> Path:
     be identified at all, so refuse rather than guess: an unusable identity
     leaves the cache off, which is the safe direction.
     """
+    driver = None
     for line in output.splitlines():
         if line.startswith("COLLECT_GCC="):
-            return Path(line.partition("=")[2].strip()).resolve(strict=True)
-    raise ValueError(f"Cannot identify the compiler driver actually executed: {executable}")
+            driver = Path(line.partition("=")[2].strip()).resolve(strict=True)
+            break
+    if driver is None:
+        raise ValueError(f"Cannot identify the compiler driver actually executed: {executable}")
+    invoked = executable.resolve(strict=True)
+    if driver != invoked and invoked.name not in _WRAPPER_SELECTION:
+        raise ValueError(f"Compiler wrapper with untracked selection inputs: {invoked.name} at {executable}")
+    return driver
 
 
 def _gcc_inputs(executable: Path) -> set[Path]:
@@ -863,6 +894,18 @@ def capture_toolchain(platform: str, runtime_name: str) -> ToolchainIdentity:
             os.environ.get("PYTHONNOUSERSITE"),
             os.environ.get("PYTHONSAFEPATH"),
             os.environ.get("PYTHONOPTIMIZE"),
+            # A wrapper's selection overrides pick a compiler exactly as PATH
+            # does, so a change to one has to re-run discovery rather than
+            # reuse the identity of the compiler previously chosen. Read by
+            # name rather than by iterating the table, so each one is a
+            # classified environment input and not an opaque dynamic read.
+            os.environ.get("CCACHE_CC"),
+            os.environ.get("CCACHE_COMPILER"),
+            os.environ.get("CCACHE_CONFIGPATH"),
+            os.environ.get("CCACHE_DISABLE"),
+            os.environ.get("CCACHE_NODISABLE"),
+            os.environ.get("CCACHE_PREFIX"),
+            os.environ.get("CCACHE_PREFIX_CPP"),
         )
         with _discovery_lock:
             identity = _identities.get(selected)
