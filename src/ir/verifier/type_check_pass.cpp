@@ -103,7 +103,8 @@ class TypeChecker : public IRVisitor {
   /**
    * @brief Check that each argument's tensor layout matches the callee parameter's
    */
-  void CheckCallArgLayouts(const OpPtr& callee_op, const std::vector<ExprPtr>& args, const Span& span);
+  void CheckCallArgLayouts(const OpPtr& callee_op, const std::vector<ExprPtr>& args, const Span& span,
+                           bool is_device_dispatch);
 
   /**
    * @brief Record an error
@@ -194,7 +195,7 @@ std::optional<TensorLayout> TensorLayoutOf(const TypePtr& type) {
 }  // namespace
 
 void TypeChecker::CheckCallArgLayouts(const OpPtr& callee_op, const std::vector<ExprPtr>& args,
-                                      const Span& span) {
+                                      const Span& span, bool is_device_dispatch) {
   // Only a call to another function in this program has a signature to check
   // against; a registered operator validates its own operands via f_deduce_type.
   if (!program_ || !As<GlobalVar>(callee_op)) return;
@@ -230,6 +231,15 @@ void TypeChecker::CheckCallArgLayouts(const OpPtr& callee_op, const std::vector<
     // ``OptimizeOrchTensors`` also rewrites such a parameter's view with
     // explicit strides, which is what makes the pattern lower correctly.
     if (*want == TensorLayout::DN || *got == TensorLayout::DN) continue;
+    // A ``device=`` dispatch crosses from a host driver into a device program,
+    // and what crosses it is a buffer: the driver never reads these bytes, it
+    // only says which card they are on. The callee's parameter is therefore the
+    // only claim about their order, and an ND argument is the absence of a
+    // competing one -- the shape a host allocates a weight in, whatever the
+    // kernel makes of it. The reverse stays an error: an NZ argument bound to an
+    // ND parameter means the callee reads fractals as row-major, which nothing
+    // downstream would notice.
+    if (is_device_dispatch && *got == TensorLayout::ND) continue;
     std::ostringstream msg;
     msg << "Layout mismatch at argument " << i << " of call to '" << callee->name_ << "': parameter '"
         << param->name_hint_ << "' is declared " << TensorLayoutToString(*want) << " but the argument is "
@@ -242,12 +252,12 @@ void TypeChecker::CheckCallArgLayouts(const OpPtr& callee_op, const std::vector<
 }
 
 void TypeChecker::VisitExpr_(const CallPtr& op) {
-  if (op) CheckCallArgLayouts(op->op_, op->args_, op->span_);
+  if (op) CheckCallArgLayouts(op->op_, op->args_, op->span_, op->HasAttr(kAttrDevice));
   IRVisitor::VisitExpr_(op);
 }
 
 void TypeChecker::VisitExpr_(const SubmitPtr& op) {
-  if (op) CheckCallArgLayouts(op->op_, op->args_, op->span_);
+  if (op) CheckCallArgLayouts(op->op_, op->args_, op->span_, op->HasAttr(kAttrDevice));
   IRVisitor::VisitExpr_(op);
 }
 
