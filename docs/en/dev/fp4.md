@@ -91,14 +91,14 @@ Legend: ✅ supported · ⚠️ partial / Warning · ❌ unsupported · ⏳ not 
 
 | Feature | PyPTO | Notes |
 | ------- | ----- | ----- |
-| Hand-written `pl.FP4E2M1X2` | ✅ | Preferred frontend for packed paths |
+| Hand-written `pl.FP4E2M1X2` | ✅ | Preferred frontend for packed paths; **ND only** |
 | Logical `pl.FP4` without PackFp4 | ⚠️ | Prefer warning; A5 in-core still supports legacy logical FP4 alongside FP4E2M1X2 |
-| GM ExpandPackedFp4\* (carrier→nibble) | ✅ | `make_tensor_view` / partition last axis |
-| `FP4E2M1X2` ↔ BF16 cast | ✅ | Silent native hop |
+| GM ExpandPackedFp4\* (carrier→nibble) | ✅ | `make_tensor_view` / partition last axis (ND) |
+| `FP4E2M1X2` ↔ BF16 cast | ✅ | Silent native hop; result strides rebuilt contiguous |
 | `FP4E2M1X2` → FP8\* cast | ⚠️ | Warning; prefer LUT / host |
 | `FP4` ↔ `FP4E2M1X2` cast | ❌ | Rejected |
 | Automatic PackFp4 | ⏳ | Follow-up |
-| `reshape` / `transpose` / cube / DN / NZ / distributed FP4 | ❌ / ⏳ | Use ND row-major + Vec; hard rejects for reshape/transpose now |
+| `reshape` / `transpose` / DN / NZ / column-vector `[M,1]` / layout `tensor.view` for `FP4E2M1X2` | ❌ | ND row-major only; implicit DN and explicit layout conversion hard-rejected |
 | `matmul_mx` native FP4 data | ⏳ | Cast lhs to FP8 first when needed |
 
 ## Recommended paths

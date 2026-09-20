@@ -86,6 +86,44 @@ def test_fp4e2m1x2_make_tensor_view_expands_to_nibble_units():
     assert all("%c1_index]" in line for line in views3), mlir3
 
 
+def test_fp4e2m1x2_rejects_column_vector_last_carrier_dim_one():
+    """Carrier last-dim 1 would force DN; packed FP4E2M1X2 bans that path."""
+
+    @pl.program
+    class ColVecPacked:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            src: pl.Tensor[[32, 1], pl.FP4E2M1X2],
+            out: pl.Out[pl.Tensor[[32, 1], pl.FP4E2M1X2]],
+        ) -> pl.Tensor[[32, 1], pl.FP4E2M1X2]:
+            return pl.store(pl.load(src, [0, 0], [32, 1]), [0, 0], out)
+
+    with pytest.raises(ValueError, match=r"last carrier dimension 1|column-vector"):
+        _emit_incore_mlir(ColVecPacked)
+
+
+def test_fp4e2m1x2_rejects_explicit_dn_param_annotation():
+    """Non-ND annotations on packed FP4E2M1X2 are rejected at make_tensor_view."""
+
+    @pl.program
+    class DnAnnotated:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            src: pl.Tensor[
+                [16, 32],
+                pl.FP4E2M1X2,
+                pl.TensorView(stride=[1, 16], layout=pl.TensorLayout.DN),
+            ],
+            out: pl.Out[pl.Tensor[[16, 32], pl.FP4E2M1X2]],
+        ) -> pl.Tensor[[16, 32], pl.FP4E2M1X2]:
+            return pl.store(pl.load(src, [0, 0], [16, 32]), [0, 0], out)
+
+    with pytest.raises(ValueError, match=r"FP4E2M1X2 supports ND layout only"):
+        _emit_incore_mlir(DnAnnotated)
+
+
 def test_fp4e2m1x2_slice_cast_and_vec_move():
     """Even last-axis slice + cast emits f4x2; move stays on Vec."""
 

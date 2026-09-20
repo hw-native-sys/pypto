@@ -87,14 +87,14 @@ def fp4x2_to_fp8(
 
 | 特性 | PyPTO | 说明 |
 | ---- | ----- | ---- |
-| 手写 `pl.FP4E2M1X2` | ✅ | packed 路径的首选前端 |
+| 手写 `pl.FP4E2M1X2` | ✅ | packed 路径的首选前端；**仅 ND** |
 | 无 PackFp4 的逻辑 `pl.FP4` | ⚠️ | Prefer Warning；A5 in-core 仍支持逻辑 FP4，并与 FP4E2M1X2 并存 |
-| GM ExpandPackedFp4\*（carrier→nibble） | ✅ | `make_tensor_view` / partition 末轴 |
-| `FP4E2M1X2` ↔ BF16 cast | ✅ | 静默原生 hop |
+| GM ExpandPackedFp4\*（carrier→nibble） | ✅ | `make_tensor_view` / partition 末轴（ND） |
+| `FP4E2M1X2` ↔ BF16 cast | ✅ | 静默原生 hop；结果 stride 重建为连续 |
 | `FP4E2M1X2` → FP8\* cast | ⚠️ | Warning；更推荐 LUT / 主机 |
 | `FP4` ↔ `FP4E2M1X2` cast | ❌ | 拒绝 |
 | 自动 PackFp4 | ⏳ | 后续 |
-| `reshape` / `transpose` / cube / DN / NZ / distributed FP4 | ❌ / ⏳ | 请用 ND row-major + Vec；reshape/transpose 现已硬拒 |
+| `FP4E2M1X2` 的 `reshape` / `transpose` / DN / NZ / 列向量 `[M,1]` / layout `tensor.view` | ❌ | 仅 ND row-major；隐式 DN 与显式 layout 转化硬拒 |
 | `matmul_mx` 原生 FP4 数据 | ⏳ | 需要时先 cast lhs 到 FP8 |
 
 ## 推荐路径

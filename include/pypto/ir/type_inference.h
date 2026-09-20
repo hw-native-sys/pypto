@@ -1017,39 +1017,15 @@ inline std::vector<ExprPtr> RowMajorStridesFromShape(const std::vector<ExprPtr>&
   return strides;
 }
 
-/// Scale ND leading strides with the 2:1 last-axis change. Last stride stays 1.
-/// Empty source strides become the row-major stride of @p dst_shape.
+/// Packed FP4E2M1X2 ↔ wider-type casts allocate a fresh dense result. Rebuild
+/// contiguous row-major strides from @p dst_shape; never scale source strides
+/// (a non-contiguous source would otherwise produce a wrong pitch, e.g. [64,1]
+/// unpacking to [128,1] instead of [64,1]).
 inline std::vector<ExprPtr> AdjustFp4E2M1x2CastStrides(std::vector<ExprPtr> src_strides,
                                                        const std::vector<ExprPtr>& dst_shape, DataType src,
                                                        DataType dst, const Span& span) {
   if (!IsFp4PackedCastGeometryChange(src, dst)) return src_strides;
-  if (src_strides.empty()) return RowMajorStridesFromShape(dst_shape, span);
-  CHECK_SPAN(src_strides.size() == dst_shape.size(), span)
-      << "FP4E2M1X2 cast stride rank " << src_strides.size() << " does not match shape rank "
-      << dst_shape.size();
-  auto last = As<ConstInt>(src_strides.back());
-  CHECK_SPAN(last && last->value_ == 1, span)
-      << "FP4E2M1X2 cast requires a contiguous last axis (stride[-1] == 1)";
-  const bool unpack = src.IsPackedFp4();
-  auto two = std::make_shared<ConstInt>(2, DataType::INDEX, span);
-  for (size_t i = 0; i + 1 < src_strides.size(); ++i) {
-    if (auto extent = As<ConstInt>(src_strides[i])) {
-      if (unpack) {
-        src_strides[i] = std::make_shared<ConstInt>(extent->value_ * 2, DataType::INDEX, span);
-      } else {
-        CHECK_SPAN(extent->value_ % 2 == 0, span)
-            << "cast to FP4E2M1X2 requires even leading strides, got " << extent->value_;
-        src_strides[i] = std::make_shared<ConstInt>(extent->value_ / 2, DataType::INDEX, span);
-      }
-    } else if (unpack) {
-      src_strides[i] = MakeMul(src_strides[i], two, span);
-    } else {
-      CHECK_SPAN(false, span) << "cast to FP4E2M1X2 requires static even leading strides "
-                                 "(dynamic strides are not supported; see docs/en/dev/fp4.md)";
-    }
-  }
-  src_strides.back() = std::make_shared<ConstInt>(1, DataType::INDEX, span);
-  return src_strides;
+  return RowMajorStridesFromShape(dst_shape, span);
 }
 
 /**

@@ -251,9 +251,9 @@ TypePtr DeduceTensorCastType(const std::vector<ExprPtr>& args,
   if (!IsFp4PackedCastGeometryChange(tensor_type->dtype_, target_dtype)) {
     return MakeFreshTensorType(std::move(shape), target_dtype, std::move(valid_shape));
   }
-  // Packed FP4E2M1X2 ↔ a wider type: last dim and leading strides follow together
-  // so the result is a dense tensor of the destination dtype, not a packed
-  // carrier viewed at the wrong pitch.
+  // Packed FP4E2M1X2 ↔ a wider type: last dim expands/contracts 2:1 and the
+  // result is a fresh dense tensor whose strides are rebuilt from the destination
+  // shape (not scaled from a possibly non-contiguous source pitch).
   TensorView view;
   view.valid_shape = std::move(valid_shape);
   std::vector<ExprPtr> src_stride;

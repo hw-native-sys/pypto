@@ -1289,6 +1289,30 @@ def test_tensor_cast():
     assert len(result_type.shape) == 2
 
 
+def test_tensor_cast_fp4e2m1x2_rebuilds_contiguous_strides():
+    """Unpack cast must not scale a non-contiguous source stride (e.g. 64→128)."""
+    span = ir.Span.unknown()
+    shape = [ir.ConstInt(16, DataType.INDEX, span), ir.ConstInt(32, DataType.INDEX, span)]
+    # Non-contiguous row pitch 64 (contiguous would be 32).
+    view = ir.TensorView(
+        [ir.ConstInt(64, DataType.INDEX, span), ir.ConstInt(1, DataType.INDEX, span)],
+        ir.TensorLayout.ND,
+    )
+    tensor_var = ir.Var("packed", ir.TensorType(shape, DataType.FP4E2M1X2, None, view), span)
+
+    call = ir.op.tensor.cast(tensor_var, DataType.BF16)
+    result = call.type
+    assert isinstance(result, ir.TensorType)
+    assert result.dtype == DataType.BF16
+    assert _const_shape(call) == [16, 64]
+    assert result.tensor_view is not None
+    assert [d.value for d in result.tensor_view.stride if isinstance(d, ir.ConstInt)] == [64, 1]
+
+    # Fresh contiguous BF16 must accept a dense reshape/view collapse.
+    flat = ir.op.tensor.view(call, [1, 1024])
+    assert _const_shape(flat) == [1, 1024]
+
+
 def test_tensor_cast_rejects_same_dtype():
     """tensor.cast must reject same-dtype invocation at construction time.
 

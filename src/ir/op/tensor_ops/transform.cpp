@@ -489,6 +489,11 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
   TensorLayout src_layout =
       src_type->tensor_view_.has_value() ? src_type->tensor_view_->layout : TensorLayout::ND;
   TensorLayout new_layout = requested_layout.value_or(src_layout);
+  CHECK_SPAN(
+      !src_type->dtype_.IsPackedFp4() || (src_layout == TensorLayout::ND && new_layout == TensorLayout::ND),
+      args[0]->span_)
+      << "tensor.view: FP4E2M1X2 supports ND layout only; layout conversion is not supported "
+         "(see docs/en/dev/fp4.md)";
   const bool has_shape = args.size() >= 2;
   // FP8E8M0 scale buffers may alias between packed ND storage and the Cube
   // consumer layouts. MX_A_ZZ covers LeftScale boxes; MX_B_NN covers RightScale.
