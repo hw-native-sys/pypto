@@ -13,6 +13,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -367,6 +368,26 @@ TileTypeComponents ExtractTileTypeInfo(const ir::TileType& tile_type, const std:
   c.pad = view.pad;
   c.compact = view.compact;
   return c;
+}
+
+int64_t EncodeFixpipePreQuant(double scale, const DataType& dst) {
+  // pto-isa `SET_QUANT_SCALAR_IMPL`: the register word is the FP32 scale's bit
+  // pattern, zero-extended. The scale is narrowed to float first -- that is the
+  // precision the hardware multiplies in, so rounding it here rather than at the
+  // device keeps the emitted constant and the executed scale the same value.
+  const auto narrowed = static_cast<float>(scale);
+  uint32_t bits = 0;
+  static_assert(sizeof(bits) == sizeof(narrowed), "FP32 scale must be 4 bytes to bit-cast");
+  std::memcpy(&bits, &narrowed, sizeof(bits));
+  auto word = static_cast<uint64_t>(bits);
+  // Byte-sized destinations carry their signedness in bit 46; wider ones have no
+  // such field and must leave it clear. pto-isa sets the bit for `int8_t` only,
+  // so `uint8_t` and the byte-sized float formats (hf8, fp8e4m3) leave it clear.
+  if (dst.GetBit() == 8) {
+    constexpr uint64_t kSignBit = uint64_t{1} << 46;
+    word = (word & ~kSignBit) | (dst == DataType::INT8 ? kSignBit : uint64_t{0});
+  }
+  return static_cast<int64_t>(word);
 }
 
 }  // namespace codegen

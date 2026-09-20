@@ -390,6 +390,42 @@ class BackendHandler {
   [[nodiscard]] virtual bool SupportsAccToGmDtype(const DataType& dtype) const = 0;
 
   /**
+   * @brief Which FIXPIPE writeback a scale-bearing (`pre_quant`) conversion targets.
+   *
+   * The legal (source, destination) dtype pairs differ between the two, so the
+   * destination has to be part of the query rather than implied by the dtypes.
+   */
+  enum class FixpipeDest {
+    kMat,  ///< Acc -> Mat (L1), `pto.tinsert` / `mte_l0c_l1`
+    kGm,   ///< Acc -> GM,        `pto.tstore`  / `mte_l0c_gm`
+  };
+
+  /**
+   * @brief Whether this backend's FIXPIPE can drain an `src` accumulator into a
+   *        `dst` destination while applying a scalar pre-quantization scale.
+   *
+   * This is the *scale-bearing* half of the writeback, the one
+   * `ir::CubeWritebackSupportsDataType` deliberately excludes: `INT32 -> FP16`
+   * is a dequantization (`DEQF16`), `FP32 -> INT8` a quantization
+   * (`QF322B8_PRE`), `INT32 -> INT8` a requantization (`REQ8`). The scale
+   * travels as the `pre_quant` operand — see `codegen::EncodeFixpipePreQuant`.
+   *
+   * The authority for these sets is **pto-isa's `GetScalarPreQuantMode<Src,
+   * Dst>()`**, not the assembler: ptoas verifies the pair only on a2a3
+   * (`"expects A2/A3 acc fp/preQuantScalar tinsert element types to be ..."`)
+   * and accepts anything on a5, while pto-isa's a5 table silently returns
+   * `QuantMode_t::NoQuant` for an unsupported pair — which drops the scale
+   * instead of failing. So this table, not the assembler, is what keeps a
+   * mis-typed fold from becoming a wrong answer on device.
+   *
+   * `INT16` is excluded on every backend even where pto-isa lists it: its
+   * `SHIFTS322S16` payload is a shift count, not an FP32 scale, so it cannot
+   * carry the multiplier this interface promises.
+   */
+  [[nodiscard]] virtual bool SupportsFixpipePreQuant(const DataType& src, const DataType& dst,
+                                                     FixpipeDest dest) const = 0;
+
+  /**
    * @brief Compute the destination tile view for a cross-core transfer.
    *
    * Encapsulates the per-backend rule for how to lay out the bridge tile

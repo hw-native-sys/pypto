@@ -194,6 +194,23 @@ enum class ArgEffect : uint8_t {
   return fallback;
 }
 
+/// Real-valued counterpart of GetIntKwarg, reporting *presence* rather than a
+/// fallback. The FIXPIPE `pre_quant` scale needs this: `1.0` is a legal identity
+/// multiplier that still selects the quantizing instruction form, so "absent"
+/// and "given as 1.0" are different requests and cannot share a sentinel.
+///
+/// The value is always a `double` by the time a reader sees it: `ValidateKwargs`
+/// requires an exact type match against the operator's declared attr type, so an
+/// `int` in a `double` slot is rejected at construction rather than reaching
+/// here. Callers that accept an int literal normalize it on the way in.
+[[nodiscard]] inline std::optional<double> GetOptionalDoubleKwarg(
+    const std::vector<std::pair<std::string, std::any>>& kwargs, const std::string& key) {
+  for (const auto& [k, v] : kwargs) {
+    if (k == key) return AnyCast<double>(v, key);
+  }
+  return std::nullopt;
+}
+
 /// String-valued counterpart of GetIntKwarg, for the kwargs that select an
 /// operator mode by name (`system.syncall`'s hard/soft form).
 [[nodiscard]] inline std::string GetStringKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs,

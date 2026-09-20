@@ -66,6 +66,8 @@ for i in pl.range(N, init_values=[init_buf]):
 
 **Solution**: Rewrite the loop body to use `tile.store` directly (writing into the `Out` param), initializing the iter-arg from the `Out` param instead of a `tile.create`.
 
+**Declined when the pattern carries a FIXPIPE epilogue.** If the in-loop `tile.assemble` or the post-loop `tile.store` carries `pre_quant` / `pre_relu`, the whole pattern is left alone. The rewrite moves the write to a different destination *class* (an on-chip tile becomes a GM tensor, and the legal scale-bearing dtype pairs are keyed on exactly that) and a different destination *dtype* (which is what the packed scale word encodes against), so the kwargs cannot be carried across unchanged — and re-deriving legality would duplicate the backend tables inside an optimization. Declining costs this fusion and nothing else; dropping the kwargs would cost a ReLU or a dequantization scale silently, with `FixpipeEpilogueValid` unable to catch it afterwards because by then there would be no epilogue left to reject. The two copies of the match — the mutator and the dead-set scanner — share one predicate so they cannot decline on different conditions and leave a deleted store behind an unrewritten loop.
+
 ### Pattern 4: Slice Input Strides (SliceInputStridesOptimizer)
 
 **Problem**: When orchestration passes a sliced tensor (`tensor.slice`) as an `In` argument to an InCore function, the InCore function's parameter has contiguous strides (computed from its own shape), not the parent tensor's strides. This causes incorrect memory access when the slice is a non-contiguous view of the parent.

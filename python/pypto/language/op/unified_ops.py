@@ -104,7 +104,13 @@ __all__ = [
     "mrgsort",
 ]
 
-from pypto.ir.utils import _elem_dtype, _get_span_or_capture, resolve_cast_mode, resolve_saturation_mode
+from pypto.ir.utils import (
+    _elem_dtype,
+    _get_span_or_capture,
+    resolve_cast_mode,
+    resolve_fixpipe_epilogue,
+    resolve_saturation_mode,
+)
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import AtomicType, PadValue
@@ -232,15 +238,21 @@ def _tmp_scratch_requirement(op_name: str) -> str:
     return f"an explicit scratch tile — call pl.{op_name}(lhs, rhs, tmp) or pl.tile.{op_name}(lhs, rhs, tmp)"
 
 
-def _reject_tile_unsupported(op_name: str, /, **flags: tuple[bool, str]) -> None:
-    """Guard the Tile path against Tensor-only flags it cannot honour.
+def _reject_unsupported(op_name: str, kind: str, /, **flags: tuple[bool, str]) -> None:
+    """Guard one dispatch path against flags only the other path can honour.
 
-    Each entry maps a kwarg name to ``(is_non_default, remedy)``. ``op_name`` is
-    positional-only so it cannot collide with a guarded kwarg of the same name.
+    Each entry maps a kwarg name to ``(is_non_default, remedy)``. ``op_name`` and
+    ``kind`` are positional-only so neither can collide with a guarded kwarg of
+    the same name.
+
+    The rejection runs both ways. Tensor-only flags describe something a tile has
+    no place for (an atomic combine needs a global-memory destination); Tile-only
+    flags describe on-chip residency (memory spaces, the cube writeback) that a
+    Tensor does not name, because its lowering chooses those itself.
     """
     for name, (given, remedy) in flags.items():
         if given:
-            raise TypeError(f"pl.{op_name}: '{name}' is not supported for Tile operands. {remedy}")
+            raise TypeError(f"pl.{op_name}: '{name}' is not supported for {kind} operands. {remedy}")
 
 
 def _check_tile_matmul_out_dtype(result: Tile, out_dtype: int | DataType | None) -> None:
@@ -657,7 +669,7 @@ def rsqrt(input, high_precision: bool = False):
     if isinstance(input, Tensor):
         return _tensor.rsqrt(input, high_precision=high_precision)
     if isinstance(input, Tile):
-        _reject_tile_unsupported("rsqrt", high_precision=(high_precision, _TILE_RSQRT_PRECISION_REMEDY))
+        _reject_unsupported("rsqrt", "Tile", high_precision=(high_precision, _TILE_RSQRT_PRECISION_REMEDY))
         return _tile.rsqrt(input)
     raise TypeError(f"pl.rsqrt: expected Tensor or Tile, got {type(input).__name__}")
 
@@ -1099,8 +1111,9 @@ def matmul(
     if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
         return _tensor.matmul(lhs, rhs, out_dtype, a_trans, b_trans, c_matrix_nz)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
-        _reject_tile_unsupported(
+        _reject_unsupported(
             "matmul",
+            "Tile",
             a_trans=(a_trans, _TILE_TRANSPOSE_REMEDY),
             b_trans=(b_trans, _TILE_TRANSPOSE_REMEDY),
             c_matrix_nz=(c_matrix_nz, _TILE_C_MATRIX_NZ_REMEDY),
@@ -1177,8 +1190,9 @@ def matmul_acc(
     if isinstance(acc, Tensor) and isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
         return _tensor.matmul_acc(acc, lhs, rhs, a_trans, b_trans, init_cond)
     if isinstance(acc, Tile) and isinstance(lhs, Tile) and isinstance(rhs, Tile):
-        _reject_tile_unsupported(
+        _reject_unsupported(
             "matmul_acc",
+            "Tile",
             a_trans=(a_trans, _TILE_TRANSPOSE_REMEDY),
             b_trans=(b_trans, _TILE_TRANSPOSE_REMEDY),
         )
@@ -1769,27 +1783,78 @@ _TILE_ATOMIC_REMEDY = (
 )
 
 
+_TENSOR_FIXPIPE_REMEDY = (
+    "The FIXPIPE pre-ops describe how one cube accumulator is drained, so they need an "
+    "Acc-resident tile source and an on-chip Mat target — a Tensor-level assemble names "
+    "neither. Write the tile-level form instead: pl.tile.assemble(mat_scratch, acc_tile, "
+    "offset, pre_quant=..., pre_relu=...)."
+)
+
+
 @overload
 def assemble(
-    target: Tensor, source: Tensor, offset: Sequence[IntLike], *, atomic: AtomicType = ...
+    target: Tensor,
+    source: Tensor,
+    offset: Sequence[IntLike],
+    *,
+    atomic: AtomicType = ...,
+    # Narrowed to the defaults rather than omitted: leaving them off this overload
+    # would make a Tensor call that passes either one select the *Tile* overload
+    # and fail as an operand-type error, so the runtime rejection below — and its
+    # remedy naming the tile-level form — could never be reached from
+    # type-checked code. Spelling the defaults keeps `pl.assemble(t1, t2, off,
+    # pre_relu=False)` a legal no-op on both paths, which is what the two
+    # dispatch paths agreeing actually means.
+    pre_quant: None = ...,
+    pre_relu: Literal[False] = ...,
 ) -> Tensor: ...
 @overload
 def assemble(
-    target: Tile, source: Tile, offset: Sequence[IntLike], *, atomic: Literal[AtomicType.None_] = ...
+    target: Tile,
+    source: Tile,
+    offset: Sequence[IntLike],
+    *,
+    atomic: Literal[AtomicType.None_] = ...,
+    pre_quant: float | None = ...,
+    pre_relu: bool = ...,
 ) -> Tile: ...
-def assemble(target, source, offset, *, atomic: AtomicType = AtomicType.None_):
+def assemble(
+    target,
+    source,
+    offset,
+    *,
+    atomic: AtomicType = AtomicType.None_,
+    pre_quant: float | None = None,
+    pre_relu: bool = False,
+):
     """Write ``source`` into ``target`` at ``offset``, dispatched by target type.
 
     ``atomic`` is Tensor-only: the combine lowers to an atomic-add store into
     global memory, which a tile-to-tile assemble has no destination for. Passing
     the documented default keeps working on both paths; any other value with a
     Tile target raises.
+
+    ``pre_quant`` / ``pre_relu`` are the mirror image — Tile-only. They configure
+    the cube's FIXPIPE writeback that drains an ``Acc`` source into a ``Mat``
+    target, so they are meaningless without memory spaces to name. See
+    [`pypto.language.tile.assemble`][pypto.language.tile.assemble].
     """
+    # Resolve before dispatching: inside a ``@pl.program`` body the parser has
+    # folded these literals into IR nodes, and a folded ``pre_relu=False`` is
+    # truthy as an object -- the Tensor guard below would then reject an explicit
+    # default. The Tile path re-resolves in the op builder, which is idempotent.
+    scale, relu = resolve_fixpipe_epilogue("assemble", pre_quant, pre_relu)
     if isinstance(target, Tensor) and isinstance(source, Tensor):
+        _reject_unsupported(
+            "assemble",
+            "Tensor",
+            pre_quant=(scale is not None, _TENSOR_FIXPIPE_REMEDY),
+            pre_relu=(relu, _TENSOR_FIXPIPE_REMEDY),
+        )
         return _tensor.assemble(target, source, offset, atomic=atomic)
     if isinstance(target, Tile) and isinstance(source, Tile):
-        _reject_tile_unsupported("assemble", atomic=(atomic != AtomicType.None_, _TILE_ATOMIC_REMEDY))
-        return _tile.assemble(target, source, offset)
+        _reject_unsupported("assemble", "Tile", atomic=(atomic != AtomicType.None_, _TILE_ATOMIC_REMEDY))
+        return _tile.assemble(target, source, offset, pre_quant=scale, pre_relu=relu)
     _raise_type_dispatch_error("assemble", target, source)
 
 

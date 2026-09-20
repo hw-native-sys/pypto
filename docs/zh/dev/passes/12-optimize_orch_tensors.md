@@ -66,6 +66,8 @@ for i in pl.range(N, init_values=[init_buf]):
 
 **方案**：将循环体重写为直接使用 `tile.store`（写入 `Out` 参数），用 `Out` 参数初始化 iter-arg 代替 `tile.create`。
 
+**当模式携带 FIXPIPE epilogue 时放弃改写。** 若循环内的 `tile.assemble` 或循环后的 `tile.store` 带有 `pre_quant` / `pre_relu`，整个模式原样保留。这次改写把写入目标换成了另一个**类别**（片上 tile 变成 GM tensor，而带 scale 的合法 dtype 组合正是按这个类别区分的），同时也换成了另一个**目标 dtype**（打包后的 scale 字正是按它编码的），因此这些 kwarg 无法原样迁移；而在一个优化里重新推导合法性等于把后端表复制一份。放弃改写只损失这次融合，别的什么也不损失；而悄悄丢掉这些 kwarg 损失的是一个 ReLU 或一个反量化 scale，且 `FixpipeEpilogueValid` 事后也抓不到——那时已经没有 epilogue 可拒绝了。匹配逻辑有两份（改写器与死集扫描器），它们共用同一个判据，因此不会出现「一方放弃、另一方已把 store 标记为死代码」而留下未改写循环的情况。
+
 ### 模式 4：切片输入步长（SliceInputStridesOptimizer）
 
 **问题**：当编排函数将切片张量（`tensor.slice`）作为 `In` 参数传递给 InCore 函数时，InCore 函数的参数使用连续步长（从自身形状计算），而非父张量的步长。当切片是父张量的非连续视图时，这会导致错误的内存访问。

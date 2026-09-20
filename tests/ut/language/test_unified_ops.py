@@ -1772,6 +1772,52 @@ class TestUnifiedOpsCrossPathKwargs:
         # The binary-tree form is distinguishable from the sequential one.
         assert not ir.structural_equal(unified.unwrap(), pl.tile.col_sum(t).unwrap())
 
+    @pytest.mark.parametrize("kwarg", ["pre_quant", "pre_relu"])
+    def test_assemble_tensor_rejects_fixpipe_epilogue(self, kwarg):
+        """The FIXPIPE epilogue is the mirror image of ``atomic``: it configures
+        the cube writeback that drains one Acc tile into a Mat one, so a
+        Tensor-level assemble — which names no memory space at all — cannot
+        honour it and must say so rather than drop it."""
+        target, source = _tensor("target", [128, 128]), _tensor("source", [128, 128])
+        value = 0.5 if kwarg == "pre_quant" else True
+
+        with pytest.raises(TypeError) as exc_info:
+            unified_ops.assemble(target, source, [0, 0], **{kwarg: value})  # type: ignore[call-overload]
+
+        msg = str(exc_info.value)
+        assert f"'{kwarg}'" in msg
+        assert "not supported for Tensor operands" in msg
+        assert "pl.tile.assemble" in msg, "the remedy must name the form that does carry it"
+
+    def test_assemble_tensor_accepts_explicit_default_fixpipe_flags(self):
+        """Spelling out the defaults must stay a no-op on the Tensor path.
+
+        Inside a ``@pl.program`` body the parser folds a literal ``False`` into an
+        IR node, which is truthy *as an object* — so a guard reading the argument
+        raw would reject an explicit default. Both paths resolve the pair before
+        testing it, and this pins that they agree.
+        """
+        target, source = _tensor("target", [128, 128]), _tensor("source", [128, 128])
+
+        unified = unified_ops.assemble(target, source, [0, 0], pre_quant=None, pre_relu=False)
+        explicit = pl.tensor.assemble(target, source, [0, 0])
+
+        ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
+
+    def test_assemble_tile_forwards_the_fixpipe_epilogue(self):
+        """On the Tile path the unified entry is plain forwarding, so it must
+        build the same IR as calling ``pl.tile.assemble`` directly."""
+        target = _tile("target", [128, 128], DataType.FP16)
+        source = _tile("source", [128, 128], DataType.INT32)
+
+        unified = unified_ops.assemble(target, source, [0, 0], pre_quant=0.5, pre_relu=True)
+        explicit = pl.tile.assemble(target, source, [0, 0], pre_quant=0.5, pre_relu=True)
+
+        ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
+        call = unified.unwrap()
+        assert isinstance(call, ir.Call)
+        assert dict(call.kwargs)["pre_quant"] == 0.5
+
 
 # Run in a subprocess with the ``pypto`` package reached through a symlink.
 # ``argv[1]`` is the symlinked sys.path entry the import is expected to use.

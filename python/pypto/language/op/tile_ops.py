@@ -476,6 +476,8 @@ def store(
     *,
     atomic: AtomicType = AtomicType.None_,
     st_phase: STPhase = STPhase.Unspecified,
+    pre_quant: float | None = None,
+    pre_relu: bool = False,
 ) -> _TensorT:
     """Copy data from tile back to tensor.
 
@@ -500,6 +502,22 @@ def store(
         st_phase: Consumer-side unit-flag phase. A producer that finishes with
             ``acc_phase=pl.AccPhase.Final`` must be consumed by a store with
             ``st_phase=pl.STPhase.Final`` so the unit flag is cleared.
+        pre_quant: Scale applied by the cube's FIXPIPE while it drains an ``Acc``
+            tile to global memory — the write becomes ``out = tile * pre_quant``
+            in one instruction, with no vector work. This is what makes a
+            *scale-bearing* conversion reachable from a cube accumulator: an
+            INT32 accumulator into an FP16 tensor (dequantization) or into an
+            INT8 one (requantization), neither of which the unscaled writeback
+            can do. Legal source/destination dtype pairs are backend-specific
+            and rejected here rather than in the assembler. ``None`` (default)
+            emits no scale; ``1.0`` is a real identity scale and still selects
+            the quantizing form.
+        pre_relu: Apply ReLU in the same writeback. It runs on the *accumulator*,
+            **before** ``pre_quant`` — pto-isa spells it ``ReluPreMode`` — with
+            the destination clamp last, so the pair reproduces
+            ``maximum(tile, 0) * pre_quant`` and not
+            ``maximum(tile * pre_quant, 0)``. The two agree for every positive
+            scale and differ at every element for a negative one.
 
     Returns:
         Tensor wrapping the store operation
@@ -513,6 +531,8 @@ def store(
         >>> result = store(partial, [0, 0], out, atomic=pl.AtomicType.Add)
         >>> # clear the unit flag after a final phased accumulation
         >>> result = store(acc, [0, 0], out, st_phase=pl.STPhase.Final)
+        >>> # INT32 accumulator dequantized and ReLU'd straight into FP16 GM
+        >>> result = store(acc_i32, [0, 0], out_f16, pre_quant=1.0 / 1024, pre_relu=True)
     """
     normalized_offsets = _normalize_intlike(offsets)
     normalized_shapes = _normalize_intlike(shapes) if shapes is not None else None
@@ -523,22 +543,64 @@ def store(
         normalized_shapes,
         atomic=int(atomic),
         st_phase=st_phase,
+        pre_quant=pre_quant,
+        pre_relu=pre_relu,
     )
     return output_tensor.__class__(expr=call_expr)
 
 
-def assemble(target: Tile, source: Tile, offset: Sequence[IntLike]) -> Tile:
+def assemble(
+    target: Tile,
+    source: Tile,
+    offset: Sequence[IntLike],
+    *,
+    pre_quant: float | None = None,
+    pre_relu: bool = False,
+) -> Tile:
     """Write source tile data into target tile at specified offset.
 
     Args:
         target: Target tile to update
         source: Source tile to write
         offset: Offset dimensions for where to write
+        pre_quant: Scale applied by the cube's FIXPIPE while it drains an ``Acc``
+            source into a ``Mat`` target — the write becomes
+            ``target[offset] = source * pre_quant`` in one instruction, with no
+            vector work. This is what makes a *scale-bearing* conversion
+            reachable from a cube accumulator: an INT32 accumulator into an FP16
+            Mat tile (dequantization), which the next matmul can then read
+            on-chip. ``None`` (default) emits no scale; ``1.0`` is a real
+            identity scale and still selects the quantizing form.
+
+            **Currently rejected on every backend** (PTOAS#1570). ptoas assembles the scale
+            onto ``pto.tinsert`` but emits a pto-isa call that binds it to the
+            row index instead, silently dropping it, so PyPTO refuses the whole
+            destination rather than emit a kernel that computes the wrong thing.
+            Use the Acc -> GM form — ``tile.store(acc, ..., pre_quant=s)``, which
+            is device-verified — or scale in the vector unit. ``pre_relu`` alone
+            is unaffected here.
+        pre_relu: Apply ReLU in the same writeback. It runs on the *accumulator*,
+            **before** ``pre_quant`` — pto-isa spells it ``ReluPreMode`` — with
+            the destination clamp last, so the pair reproduces
+            ``maximum(source, 0) * pre_quant`` and not
+            ``maximum(source * pre_quant, 0)``. The two agree for every positive
+            scale and differ at every element for a negative one.
 
     Returns:
         Tile wrapping the assemble operation
+
+    Example:
+        >>> # INT32 accumulator dequantized and ReLU'd into an FP16 Mat scratch
+        >>> s = create([128, 128], pl.FP16, target_memory=pl.Mem.Mat)
+        >>> s = assemble(s, acc_i32, [0, 0], pre_quant=1.0 / 1024, pre_relu=True)
     """
-    call_expr = _ir_ops.assemble(target.unwrap(), source.unwrap(), _normalize_intlike(offset))
+    call_expr = _ir_ops.assemble(
+        target.unwrap(),
+        source.unwrap(),
+        _normalize_intlike(offset),
+        pre_quant=pre_quant,
+        pre_relu=pre_relu,
+    )
     return Tile(expr=call_expr)
 
 

@@ -185,6 +185,31 @@ print(pto_code)
 `pto.tmov src → dst_view` 才是真正写入由 `pto.subview` 切出的子窗口的数据
 搬运。
 
+**Acc 写回上的 FIXPIPE epilogue。** **发生类型转换的** `Acc → Mat` assemble，
+以及**任何** `Acc → GM` store，都是 cube 的 fix-pipe 在排空 L0C——它可以在写出的
+同时乘一个 FP32 scale 并施加 ReLU；两个 op 都用 `pre_quant` / `pre_relu` 承载这
+件事。顺序是 **先 ReLU、再乘、最后按目标类型 clamp**——激活属于*量化前*阶段
+（pto-isa 的 `ReluPreMode`），看到的是未缩放的累加器，因此这一对算出的是
+`maximum(tile, 0) * scale` 而非 `maximum(tile * scale, 0)`。二者对所有
+`scale > 0` 完全相同，所以只有负 scale 能把它们区分开；
+`tests/st/runtime/ops/test_fixpipe_epilogue.py` 中的 `acc_to_gm_negative_scale`
+在 a2a3 真机上测得了这个顺序。
+
+scale 还**决定**走哪条下沉路径，而不只是搭个便车——`INT32` 累加器之所以能
+抵达 `FP16` 的 Mat tile，正是因为它带了 scale（`DEQF16`）——因此由同一个判据
+`ir::CubeMatWritebackUsesFixpipe` 同时供 emitter 与 `FixpipeEpilogueValid` 使用；
+同 dtype 的 assemble 不发生转换，仍是普通的 `pto.tmov`，**带不了任何 epilogue**。
+`pto.tinsert` 与 `pto.tstore` 对打包后的 scale 操作数拼写不同，两种形式都无法从
+对方推出——二者连同其出处都逐字钉在各自的发射点上。寄存器编码见
+`codegen::EncodeFixpipePreQuant`，各后端的 dtype 表见 `99-verifier.md`。
+
+`pto.tinsert` 那一半**能发射但当前走不到**：两个 handler 都对
+`FixpipeDest::kMat` 关闭了 `pre_quant`，因为 ptoas 为它发出的调用有歧义（scale
+被绑到了 `indexRow`，见 [PTOAS#1570](https://github.com/hw-native-sys/PTOAS/issues/1570)，
+机制详见 `99-verifier.md`），所以下面这段 emitter 代码只在关闭
+校验的情况下被覆盖。`Acc → Mat` 上单独的 `pre_relu`，以及整条 `Acc → GM` 路径，
+都不受影响。
+
 **`tile.set_validshape` 下沉细节。** `pto.set_validshape` 修改的是操作数的
 `valid_row` / `valid_col` 操作数，因此操作数必须是拥有它们的 handle：alloc、
 `scf.if` 结果、跨核 pop slot。而**视图**——`tile.slice` 下沉出的 `pto.subview`，

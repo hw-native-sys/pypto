@@ -337,6 +337,28 @@ DataType MatmulAccumulatorDataType(DataType lhs, DataType rhs);
 bool CubeWritebackSupportsDataType(DataType accumulator, DataType out);
 
 /**
+ * @brief Does an Acc -> Mat writeback of this shape go through the fix-pipe?
+ *
+ * Unlike the Acc -> GM store, which is always the fix-pipe because nothing else
+ * reads L0C, an Acc -> Mat ``tile.assemble`` has two lowerings. A *converting*
+ * one is ``pto.tinsert``, the fix-pipe drain; a same-dtype one is
+ * ``pto.subview`` + an MTE1 ``pto.tmov``, which never touches the fix-pipe and
+ * so cannot carry a ``pre_quant`` scale or a ``pre_relu`` activation.
+ *
+ * Both the emitter and ``FixpipeEpilogueValid`` ask this one question rather
+ * than each re-deriving the condition: when they disagreed, an epilogue on a
+ * same-dtype assemble passed verification and then tripped the emitter's own
+ * internal check — a user-reachable internal error.
+ *
+ * @param accumulator Source (Acc) element type
+ * @param target Destination (Mat) element type
+ * @param has_pre_quant Whether the writeback carries a scale, which selects the
+ *                      quantizing form of the instruction on its own
+ * @return true when the writeback lowers to the fix-pipe ``pto.tinsert``
+ */
+bool CubeMatWritebackUsesFixpipe(DataType accumulator, DataType target, bool has_pre_quant);
+
+/**
  * @brief Name the scaled conversion a rejected Acc writeback pair would need
  *
  * The pairs `CubeWritebackSupportsDataType` rejects are not all the same kind of

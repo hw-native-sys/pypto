@@ -294,6 +294,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_aiv_split.cpp
     src/ir/verifier/verify_acc_compact.cpp
     src/ir/verifier/verify_acc_to_gm_store.cpp
+    src/ir/verifier/verify_fixpipe_epilogue.cpp
     src/ir/verifier/verify_atomic_add_dtype.cpp
     src/ir/verifier/verify_acc_store_phase.cpp
     src/ir/verifier/verify_no_scalar_kernel_return.cpp

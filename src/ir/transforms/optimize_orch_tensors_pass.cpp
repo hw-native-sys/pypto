@@ -1039,6 +1039,28 @@ class AssembleParentStridesOptimizer {
 // from the Out param.
 // ============================================================================
 
+/// True when a `tile.assemble` / `tile.store` carries a FIXPIPE epilogue.
+///
+/// This rewrite turns an in-loop assemble into a store, which changes both the
+/// destination *class* (an on-chip tile becomes a GM tensor, and the legal
+/// scale-bearing dtype pairs are keyed on exactly that -- see
+/// `BackendHandler::FixpipeDest`) and the destination *dtype* (the accumulator
+/// tile's, versus the output tensor's, which is what
+/// `codegen::EncodeFixpipePreQuant` reads for the signedness field). Carrying
+/// the kwargs across unchanged would therefore re-target an epilogue validated
+/// for one writeback onto a different one, and re-deriving legality here would
+/// duplicate the backend tables inside an optimization.
+///
+/// So the pattern is declined instead. This costs a loop-fusion opportunity and
+/// nothing else; dropping the kwargs silently costs a ReLU or a dequantization
+/// scale, and `FixpipeEpilogueValid` cannot catch that afterwards because by
+/// then there is no epilogue left to reject.
+[[nodiscard]] inline bool HasFixpipeEpilogue(const CallPtr& call) {
+  if (!call) return false;
+  return GetOptionalDoubleKwarg(call->kwargs_, "pre_quant").has_value() ||
+         call->GetKwarg<bool>("pre_relu", false);
+}
+
 class AssembleLoopRewriter {
  public:
   ProgramPtr Run(const ProgramPtr& program, const std::unordered_set<std::string>& incore_names) {
@@ -1146,6 +1168,8 @@ class AssembleLoopRewriter {
         if (!assign) continue;
         auto call = As<Call>(assign->value_);
         if (!call || !IsOp(call, "tile.assemble")) continue;
+        // Declined rather than rewritten -- see HasFixpipeEpilogue.
+        if (HasFixpipeEpilogue(call)) continue;
         if (call->args_.size() < 3) continue;
         const Var* arg0_raw = nullptr;
         if (auto v = As<Var>(call->args_[0])) arg0_raw = v.get();
@@ -1284,6 +1308,8 @@ class AssembleLoopRewriter {
       if (def_it == var_def.end()) continue;
       auto call = As<Call>(def_it->second->value_);
       if (!call || !IsOp(call, "tile.store")) continue;
+      // The rewrite deletes this store; an epilogue on it would go with it.
+      if (HasFixpipeEpilogue(call)) continue;
       if (call->args_.size() < 3) continue;
       auto out_tensor = As<Var>(call->args_[2]);
       if (!out_tensor || !out_var_to_param_idx.count(out_tensor.get())) continue;
@@ -1347,6 +1373,9 @@ class AssembleLoopRewriter {
           if (!assign) continue;
           auto call = As<Call>(assign->value_);
           if (!call || !IsOp(call, "tile.assemble")) continue;
+          // Must decline on exactly the same condition as the mutator above, or
+          // the store below would be marked dead for a loop that is never rewritten.
+          if (HasFixpipeEpilogue(call)) continue;
           if (call->args_.size() < 3) continue;
           const Var* arg0_raw = nullptr;
           if (auto v = As<Var>(call->args_[0])) arg0_raw = v.get();

@@ -96,6 +96,39 @@ class Ascend910BHandler : public BackendHandler {
            dtype == DataType::BF16;
   }
 
+  // A2/A3 scale-bearing fix-pipe writeback. Measured against ptoas v0.61, which
+  // verifies these pairs explicitly:
+  //   tinsert: "(src=f32,dst=i8) or (src=i32,dst=i8/f16/i16)"
+  //   tstore : "i8/ui8"  from an f32 accumulator, "i8/ui8/f16" from an i32 one
+  // pto-isa a2a3 `GetScalarPreQuantMode` agrees (QF322B8_PRE / REQ8 / DEQF16).
+  // INT16 (SHIFTS322S16) is excluded per the base-class contract: its payload
+  // is a shift count, not a scale. Notably there is NO scaled f32 -> f16/bf16
+  // here -- that narrowing exists only in the *unscaled* writeback.
+  //
+  // Acc->Mat is withheld regardless of dtype (PTOAS#1570): ptoas 0.63 assembles
+  // the scale onto `pto.tinsert` (it round-trips through `--emit-pto-ir`) but
+  // emits a C++ call that pto-isa resolves to the *unscaled* overload, because
+  // every scalar operand it emits is `int64_t` and the two wrappers differ only
+  // in their parameter types:
+  //     TINSERT(Dst&, Src&,           uint16_t row, uint16_t col, WaitEvents&...)
+  //     TINSERT(Dst&, Src&, uint64_t, uint16_t row, uint16_t col, WaitEvents&...)
+  // For `TINSERT<Mat, Acc, relu>(dst, src, scale_i64, row_i64, col_i64)` the
+  // first is the better match -- `col` binds to the event pack by identity
+  // while the second needs a conversion there -- so the scale lands in `row`
+  // (truncated to 0) and the column index is waited on as an event id. The
+  // resulting cast-path `static_assert` in a2a3/common.hpp is the symptom; the
+  // silent misbinding is the defect, and no `.pto` spelling avoids it. Acc->GM
+  // is unaffected: `TSTORE` has no index operands for the scale to slide into,
+  // and it is device-verified in tests/st/runtime/ops/test_fixpipe_epilogue.py.
+  [[nodiscard]] bool SupportsFixpipePreQuant(const DataType& src, const DataType& dst,
+                                             FixpipeDest dest) const override {
+    if (dest == FixpipeDest::kMat) return false;
+    const bool dst_is_byte = dst == DataType::INT8 || dst == DataType::UINT8;
+    if (src == DataType::INT32) return dst_is_byte || dst == DataType::FP16;
+    if (src == DataType::FP32) return dst_is_byte;
+    return false;
+  }
+
   [[nodiscard]] ir::TileView BuildCrossCoreTransferView(ir::MemorySpace dest_ms,
                                                         const ir::TileView& original_view) const override;
 

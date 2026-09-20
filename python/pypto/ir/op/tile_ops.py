@@ -43,9 +43,31 @@ from ..utils import (
     _to_int32_scalar,
     _to_make_tuple,
     resolve_cast_mode,
+    resolve_fixpipe_epilogue,
     resolve_saturation_deviation,
 )
 from ._pad_value import normalize_pad_value
+
+
+def _fixpipe_epilogue_kwargs(
+    op_name: str, pre_quant: float | Expr | None, pre_relu: bool | Expr
+) -> dict[str, Any]:
+    """Build the FIXPIPE ``pre_quant`` / ``pre_relu`` op kwargs, or none at all.
+
+    Resolution lives in :func:`resolve_fixpipe_epilogue` so the DSL entry points
+    can apply the same rules before dispatching. This adds only the op-kwarg
+    shape: an epilogue-free call must produce no kwargs, so ordinary tile IR
+    prints and compares exactly as it did before the feature existed, and a
+    ``float`` is always stored (the op declares ``set_attr<double>``, which an
+    ``int`` would fail to cast).
+    """
+    scale, relu = resolve_fixpipe_epilogue(op_name, pre_quant, pre_relu)
+    kwargs: dict[str, Any] = {}
+    if scale is not None:
+        kwargs["pre_quant"] = scale
+    if relu:
+        kwargs["pre_relu"] = True
+    return kwargs
 
 
 def _validate_offsets_shapes(offsets_tuple: _ir_core.MakeTuple, shapes_tuple: _ir_core.MakeTuple) -> None:
@@ -296,6 +318,8 @@ def store(
     *,
     atomic: int = 0,
     st_phase: STPhase = STPhase.Unspecified,
+    pre_quant: float | Expr | None = None,
+    pre_relu: bool | Expr = False,
 ) -> Call:
     """Copy data from unified buffer (tile) to tensor.
 
@@ -314,6 +338,14 @@ def store(
             preserves ordinary stores; ``STPhase.Final`` checks and clears the
             flag published by a final phased accumulator producer. The kwarg is
             omitted entirely for the default so existing stores remain unchanged.
+        pre_quant: FIXPIPE pre-quantization scale for an ``Acc`` source. The
+            accumulator is multiplied by it in FP32 on the way out, before the
+            destination clamp, which is what lets an INT32 accumulator reach an
+            FP16 or INT8 tensor without a vector round-trip. ``None`` (default)
+            emits no scale at all — distinct from ``1.0``, which still selects
+            the quantizing instruction form.
+        pre_relu: Apply ReLU inside the same writeback, *after* ``pre_quant`` and
+            the clamp — it reproduces ``maximum(tile * pre_quant, 0)``.
 
     Returns:
         Call expression that returns the output tensor
@@ -328,6 +360,7 @@ def store(
     kwargs: dict[str, Any] = {"atomic": atomic} if atomic else {}
     if st_phase != STPhase.Unspecified:
         kwargs["st_phase"] = int(st_phase)
+    kwargs.update(_fixpipe_epilogue_kwargs("tile.store", pre_quant, pre_relu))
     return _ir_core.create_op_call("tile.store", args, kwargs, actual_span)
 
 
@@ -336,6 +369,9 @@ def assemble(
     source: Expr,
     offset: Sequence[int | Expr] | _ir_core.MakeTuple,
     span: Span | None = None,
+    *,
+    pre_quant: float | Expr | None = None,
+    pre_relu: bool | Expr = False,
 ) -> Call:
     """Write source tile data into target tile at specified offset.
 
@@ -344,6 +380,14 @@ def assemble(
         source: Source tile to write (TileType)
         offset: Offset dimensions for where to write, or a MakeTuple
         span: Optional source span for debugging (auto-captured if not provided)
+        pre_quant: FIXPIPE pre-quantization scale for an ``Acc``-to-``Mat``
+            writeback. The accumulator is multiplied by it in FP32 on the way
+            out, before the destination clamp, which is what lets an INT32
+            accumulator land in an FP16 Mat tile the next matmul can read.
+            ``None`` (default) emits no scale at all — distinct from ``1.0``,
+            which still selects the quantizing instruction form.
+        pre_relu: Apply ReLU inside the same writeback, *after* ``pre_quant`` and
+            the clamp — it reproduces ``maximum(tile * pre_quant, 0)``.
 
     Returns:
         Call expression that returns a TileType with the same shape/dtype as target
@@ -351,7 +395,8 @@ def assemble(
     actual_span = _get_span_or_capture(span)
     offset_tuple = _to_make_tuple(offset, actual_span)
 
-    return _ir_core.create_op_call("tile.assemble", [target, source, offset_tuple], {}, actual_span)
+    kwargs = _fixpipe_epilogue_kwargs("tile.assemble", pre_quant, pre_relu)
+    return _ir_core.create_op_call("tile.assemble", [target, source, offset_tuple], kwargs, actual_span)
 
 
 def gather_row(  # noqa: PLR0913

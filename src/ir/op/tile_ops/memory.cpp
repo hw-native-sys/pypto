@@ -1330,6 +1330,12 @@ REGISTER_OP("tile.store")
                   "Injected by FlattenTileNdTo2D for ND tensors.")
     .set_attr<int>("atomic")
     .set_attr<int>("st_phase")
+    // FIXPIPE pre-ops on an Acc->GM writeback (`pto.tstore`): `pre_quant` is an
+    // FP32 scale the accumulator is multiplied by on the way out, `pre_relu` an
+    // activation applied after that multiply and the destination clamp. Both are
+    // meaningless for a Vec source and rejected there by `AccToGmStoreValid`.
+    .set_attr<double>("pre_quant")
+    .set_attr<bool>("pre_relu")
     .set_input_memory(0, {MemorySpace::Vec, MemorySpace::Acc})
     .set_output_reuses_input(2)
     // A plain store overwrites the region it lands on: the untouched remainder

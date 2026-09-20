@@ -536,6 +536,17 @@ bool CubeWritebackSupportsDataType(DataType accumulator, DataType out) {
   return accumulator == DataType::FP32 && (out == DataType::FP16 || out == DataType::BF16);
 }
 
+bool CubeMatWritebackUsesFixpipe(DataType accumulator, DataType target, bool has_pre_quant) {
+  // A scale has no other instruction to ride: it selects the quantizing form of
+  // `pto.tinsert` whatever the dtypes are.
+  if (has_pre_quant) return true;
+  // Otherwise only a *conversion* engages the fix-pipe. A same-dtype Acc->Mat
+  // move is a plain MTE1 copy, so it is excluded even though the unscaled
+  // conversion table (which also serves the Acc->GM store, where an unconverted
+  // write is still a fix-pipe drain) reports the identity pair as supported.
+  return target != accumulator && CubeWritebackSupportsDataType(accumulator, target);
+}
+
 const char* DescribeCubeWritebackScaledConversion(DataType accumulator, DataType out) {
   if (accumulator.IsFloat()) return "a quantization";
   return out.IsFloat() ? "a dequantization" : "a requantization";

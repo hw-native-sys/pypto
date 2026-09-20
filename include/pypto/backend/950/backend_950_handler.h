@@ -98,6 +98,37 @@ class Ascend950Handler : public BackendHandler {
            dtype == DataType::BF16;
   }
 
+  // A5 scale-bearing fix-pipe writeback, transcribed from pto-isa
+  // `include/pto/npu/a5/common.hpp` `GetScalarPreQuantMode`:
+  //   f32 -> i8/u8 (QF322B8_PRE), hf8 (QF322HIF8_PRE), f16 (QF322F16_PRE),
+  //          bf16 (QF322BF16_PRE), fp8e4m3 (QF322FP8_PRE)
+  //   i32 -> i8/u8 (REQ8), f16 (DEQF16), bf16 (QS322BF16_PRE)
+  // The assembler is NOT the authority here: ptoas v0.61 verifies no dtype pair
+  // for an a5 quantized tinsert (a measured `f32 -> f32` assembles cleanly) and
+  // its tstore message even lists f32, yet pto-isa's table has no `f32 -> f32`
+  // entry and returns `QuantMode_t::NoQuant` for it -- silently dropping the
+  // scale on device. Keep this in step with pto-isa, not with ptoas.
+  //
+  // Acc->Mat is withheld for the same reason as on a2a3 (PTOAS#1570): the two `TINSERT`
+  // wrappers that ptoas' all-`int64_t` operands choose between live in the
+  // arch-independent `pto/common/pto_instr.hpp`, so a5 inherits the misbinding
+  // that drops the scale into `indexRow`. See `Ascend910BHandler` for the
+  // mechanism. a5 has no device evidence either way; the a2a3 `static_assert`
+  // that surfaces it there is arch-specific, so here it would likely be silent.
+  [[nodiscard]] bool SupportsFixpipePreQuant(const DataType& src, const DataType& dst,
+                                             FixpipeDest dest) const override {
+    if (dest == FixpipeDest::kMat) return false;
+    const bool dst_is_byte = dst == DataType::INT8 || dst == DataType::UINT8;
+    if (src == DataType::FP32) {
+      return dst_is_byte || dst == DataType::HF8 || dst == DataType::FP16 || dst == DataType::BF16 ||
+             dst == DataType::FP8E4M3FN;
+    }
+    if (src == DataType::INT32) {
+      return dst_is_byte || dst == DataType::FP16 || dst == DataType::BF16;
+    }
+    return false;
+  }
+
   [[nodiscard]] ir::TileView BuildCrossCoreTransferView(ir::MemorySpace dest_ms,
                                                         const ir::TileView& original_view) const override;
 

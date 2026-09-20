@@ -35,6 +35,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/phase.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
@@ -307,9 +308,31 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
   if (!tile_buf_type.empty()) {
     tstore_line << " : " << tile_buf_type;
   }
+  // FIXPIPE scalar pre-quantization: the accumulator is multiplied by this FP32
+  // scale on the way out, which is what lets an INT32 accumulator reach an FP16
+  // tensor (DEQF16) or an INT8 one (REQ8) without a vector round-trip. PTOAS
+  // takes the packed word as a second `ins(...)` operand here — unlike
+  // `pto.tinsert`, which spells it as a trailing `pre_quant <ssa> : i64` clause
+  // (both verified against ptoas v0.61).
+  const auto pre_quant = ir::GetOptionalDoubleKwarg(op->kwargs_, "pre_quant");
+  if (pre_quant.has_value()) {
+    const int64_t word = codegen::EncodeFixpipePreQuant(*pre_quant, tensor_type->dtype_);
+    tstore_line << ", " << codegen.GetOrEmitConstant(word, DataType::INT64) << " : i64";
+  }
   tstore_line << ") outs(" << partition_view << " : " << partition_type << ")";
 
   std::vector<std::string> attrs;
+
+  // FIXPIPE activation. It runs on the *accumulator*, ahead of the pre-quant
+  // multiply -- hence `reluPreMode` -- so the pair reproduces
+  // `maximum(tile, 0) * s` and NOT `maximum(tile * s, 0)`. The two agree for
+  // every s > 0, which is why only a negative scale separates them; measured
+  // that way on a2a3 by `acc_to_gm_negative_scale` in
+  // tests/st/runtime/ops/test_fixpipe_epilogue.py. The destination clamp is
+  // last, after the multiply.
+  if (op->GetKwarg<bool>("pre_relu", false)) {
+    attrs.emplace_back("reluPreMode = #pto<relu_pre_mode normal_relu>");
+  }
 
   const int st_phase = op->GetKwarg<int>("st_phase", static_cast<int>(ir::STPhase::kUnspecified));
   INTERNAL_CHECK_SPAN(ir::IsValidSTPhase(st_phase), op->span_)

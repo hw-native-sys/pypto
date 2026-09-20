@@ -6406,6 +6406,65 @@ class TestTileAssembleOp:
         with pytest.raises(ValueError, match="same dtype"):
             tile.assemble(target_var, source_var, [0, 0])
 
+    def test_pre_quant_admits_a_scale_bearing_dtype_pair(self):
+        """A ``pre_quant`` scale turns the writeback into a *scale-bearing*
+        conversion, so it reaches destinations the unscaled narrowing cannot —
+        here the INT32 -> FP16 dequant (DEQF16).
+
+        Which pairs a backend actually has is decided later, by the
+        ``FixpipeEpilogueValid`` verifier: memory spaces are still unresolved at
+        deduction time, so this deducer cannot even tell an Acc->Mat writeback
+        from a Vec->Vec insert, let alone which arch it will run on.
+        """
+        span = ir.Span.unknown()
+        dim = ir.ConstInt(128, DataType.INT32, span)
+        target_var = ir.Var("target", ir.TileType([dim, dim], DataType.FP16), span)
+        source_var = ir.Var("source", ir.TileType([dim, dim], DataType.INT32), span)
+
+        call = tile.assemble(target_var, source_var, [0, 0], pre_quant=1.0 / 1024, pre_relu=True)
+
+        assert _tile_result_dtype(call) == DataType.FP16, "the result keeps the target's dtype"
+        kwargs = dict(call.kwargs)
+        assert kwargs["pre_quant"] == 1.0 / 1024
+        assert kwargs["pre_relu"] is True
+
+    def test_identity_scale_is_still_a_request(self):
+        """``pre_quant=1.0`` is not a no-op: it selects the quantizing instruction
+        form, which is the only way an INT32 accumulator reaches an FP16 target at
+        all. So presence, not value, is what the deducer keys on — a sentinel
+        would make this spelling unreachable."""
+        span = ir.Span.unknown()
+        dim = ir.ConstInt(128, DataType.INT32, span)
+        target_var = ir.Var("target", ir.TileType([dim, dim], DataType.FP16), span)
+        source_var = ir.Var("source", ir.TileType([dim, dim], DataType.INT32), span)
+
+        call = tile.assemble(target_var, source_var, [0, 0], pre_quant=1.0)
+        assert dict(call.kwargs)["pre_quant"] == 1.0
+
+    def test_pre_relu_alone_does_not_admit_a_dtype_mismatch(self):
+        """``pre_relu`` rides the *unscaled* writeback, so it changes nothing
+        about which conversions exist — only ``pre_quant`` widens the dtype rule."""
+        span = ir.Span.unknown()
+        dim = ir.ConstInt(128, DataType.INT32, span)
+        target_var = ir.Var("target", ir.TileType([dim, dim], DataType.FP16), span)
+        source_var = ir.Var("source", ir.TileType([dim, dim], DataType.INT32), span)
+
+        with pytest.raises(ValueError, match="same dtype"):
+            tile.assemble(target_var, source_var, [0, 0], pre_relu=True)
+
+    def test_runtime_scale_is_rejected_with_a_reason(self):
+        """The fix-pipe reads its scale from a configuration register written at
+        assembly time, so a runtime scalar genuinely cannot be encoded. Saying so
+        here beats letting it reach codegen as an un-castable kwarg."""
+        span = ir.Span.unknown()
+        dim = ir.ConstInt(128, DataType.INT32, span)
+        target_var = ir.Var("target", ir.TileType([dim, dim], DataType.FP16), span)
+        source_var = ir.Var("source", ir.TileType([dim, dim], DataType.INT32), span)
+        runtime_scale = ir.Var("scale", ir.ScalarType(DataType.FP32), span)
+
+        with pytest.raises(TypeError, match="compile-time constant scale"):
+            tile.assemble(target_var, source_var, [0, 0], pre_quant=runtime_scale)
+
 
 class TestTileExtractOp:
     """Tests for tile.extract operator (ISA TEXTRACT Variant 1)."""

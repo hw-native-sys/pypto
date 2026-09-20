@@ -16,6 +16,8 @@
 #include <string>
 #include <vector>
 
+#include "pypto/backend/common/backend_handler.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/ir/program.h"
 
@@ -96,6 +98,33 @@ PropertyVerifierPtr CreateNoNestedCallPropertyVerifier();
  * @return Shared pointer to AccToGmStoreValid PropertyVerifier
  */
 PropertyVerifierPtr CreateAccToGmStoreValidPropertyVerifier();
+
+/**
+ * @brief Factory for the Acc->Mat FIXPIPE-epilogue property verifier
+ *
+ * Checks that every ``tile.assemble`` carrying ``pre_quant`` / ``pre_relu`` is
+ * an Acc-to-Mat writeback whose dtype pair the backend's fix-pipe supports. The
+ * Acc->GM half of the same contract is ``AccToGmStoreValid``.
+ *
+ * @return Shared pointer to FixpipeEpilogueValid PropertyVerifier
+ */
+PropertyVerifierPtr CreateFixpipeEpilogueValidPropertyVerifier();
+
+/**
+ * @brief List the fix-pipe pre-quant destinations reachable from @p src_dtype
+ *
+ * Both halves of the epilogue contract reject a dtype pair, and a diagnostic
+ * that only refuses leaves the author guessing which dtype would work. Shared
+ * so the Acc->Mat and Acc->GM messages cannot drift apart while describing the
+ * same backend table.
+ *
+ * @param handler Backend whose table is consulted
+ * @param src_dtype Accumulator element type
+ * @param dest Which writeback is being described
+ * @return Slash-separated dtype names, or "none" when the source reaches nothing
+ */
+std::string DescribeFixpipePreQuantTargets(const backend::BackendHandler& handler, DataType src_dtype,
+                                           backend::BackendHandler::FixpipeDest dest);
 
 /**
  * @brief Factory for the Acc compact-mode property verifier

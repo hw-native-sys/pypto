@@ -3213,6 +3213,192 @@ class TestTileAssembleCodegen:
         )
 
 
+class TestFixpipeEpilogueCodegen:
+    """FIXPIPE pre-quant / pre-ReLU on the Acc->Mat and Acc->GM writebacks.
+
+    The emitted spelling is not symmetric and neither half is guessable from the
+    other: ``pto.tinsert`` takes the packed scale as a ``pre_quant <ssa> : i64``
+    clause *inside* ``ins(...)`` after the type list, while ``pto.tstore`` takes
+    it as a second ``ins(...)`` operand. Both forms below were round-tripped
+    through ptoas v0.61 (``--emit-pto-ir``) and assemble to device C++ carrying
+    ``ReluPreMode::NormalRelu``, so these assertions pin a verified contract
+    rather than a plausible one.
+    """
+
+    # float(1.0 / 1024) == 0x3A800000. The same constant appears in CANN's
+    # `SetFixpipePreQuantFlag(0x3a800000)` for this kernel family, which makes it
+    # an independent check on `EncodeFixpipePreQuant`'s bit layout.
+    SCALE_WORD = 0x3A800000
+
+    def _generate_mlir_all_incore(self, program_cls, *, verify=True) -> str:
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        level = ir.VerificationLevel.BASIC if verify else ir.VerificationLevel.NONE
+        with ir.PassContext([], level):
+            optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program_cls)
+        return "\n".join(
+            codegen.PTOCodegen().generate(ir.Program([func], func.name, optimized.span))
+            for func in optimized.functions.values()
+            if ir.is_incore_type(func.func_type)
+        )
+
+    def test_acc_to_mat_assemble_emits_pre_quant_clause_and_relu_attr(self):
+        """An INT32 accumulator dequantized into an FP16 Mat scratch, then read by
+        a second matmul — the whole chain stays on the cube.
+
+        ``FixpipeEpilogueValid`` rejects this program today: ptoas mis-emits the
+        scale on ``pto.tinsert`` (PTOAS#1570; see
+        ``Ascend910BHandler::SupportsFixpipePreQuant``), so both handlers withhold
+        the Mat destination. The *emitter* contract is independent of that gate
+        and stays correct, so this runs with verification off. When ptoas is
+        fixed the handlers flip one line and this is what proves the emission
+        survived the wait — deleting it would leave nothing pinning the ``.pto``
+        spelling, which is the half no other test covers.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                k: pl.Tensor[[128, 64], pl.INT8],
+                q: pl.Tensor[[128, 64], pl.INT8],
+                w: pl.Tensor[[128, 32], pl.FP16],
+                out: pl.Out[pl.Tensor[[128, 32], pl.FP32]],
+            ) -> pl.Tensor[[128, 32], pl.FP32]:
+                k_mat = pl.tile.load(k, [0, 0], [128, 64], target_memory=pl.Mem.Mat)
+                q_mat = pl.tile.load(q, [0, 0], [128, 64], target_memory=pl.Mem.Mat)
+                acc = pl.tile.matmul(
+                    pl.tile.move(k_mat, target_memory=pl.Mem.Left),
+                    pl.tile.move(pl.tile.transpose_view(q_mat), target_memory=pl.Mem.Right),
+                )
+                s_mat = pl.tile.create([128, 128], pl.FP16, target_memory=pl.Mem.Mat)
+                s_mat = pl.tile.assemble(s_mat, acc, [0, 0], pre_quant=1.0 / 1024, pre_relu=True)
+                w_mat = pl.tile.load(w, [0, 0], [128, 32], target_memory=pl.Mem.Mat)
+                y = pl.tile.matmul(
+                    pl.tile.move(s_mat, target_memory=pl.Mem.Left),
+                    pl.tile.move(w_mat, target_memory=pl.Mem.Right),
+                )
+                return pl.tile.store(y, [0, 0], out)
+
+        mlir = self._generate_mlir_all_incore(Prog, verify=False)
+        tinserts = [line for line in mlir.splitlines() if "pto.tinsert" in line]
+        assert len(tinserts) == 1, f"one Acc->Mat writeback expected, got {len(tinserts)}:\n{mlir}"
+        line = tinserts[0]
+        assert f"arith.constant {self.SCALE_WORD} : i64" in mlir, (
+            f"pre_quant=1/1024 must encode as the FP32 bit pattern {self.SCALE_WORD:#x}:\n{mlir}"
+        )
+        assert "index, index pre_quant %" in line and " : i64)" in line, (
+            f"pre_quant belongs inside ins(...) after the type list:\n{line}"
+        )
+        # The debug `loc(...)` suffix follows the op, so match the dict itself
+        # rather than the end of the line.
+        assert ") {reluPreMode = #pto<relu_pre_mode normal_relu>}" in line, (
+            f"pre_relu must ride as an attribute dict after outs(...):\n{line}"
+        )
+        assert "loc=acc, dtype=i32" in line and "loc=mat, dtype=f16" in line, (
+            f"this writeback is the i32 -> f16 dequant (DEQF16):\n{line}"
+        )
+
+    def test_acc_to_gm_store_emits_pre_quant_operand_and_relu_attr(self):
+        """The same epilogue on the direct-to-GM path, where the packed scale is a
+        second ``ins(...)`` operand rather than a trailing clause."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                k: pl.Tensor[[128, 64], pl.INT8],
+                q: pl.Tensor[[128, 64], pl.INT8],
+                out: pl.Out[pl.Tensor[[128, 128], pl.FP16]],
+            ) -> pl.Tensor[[128, 128], pl.FP16]:
+                k_mat = pl.tile.load(k, [0, 0], [128, 64], target_memory=pl.Mem.Mat)
+                q_mat = pl.tile.load(q, [0, 0], [128, 64], target_memory=pl.Mem.Mat)
+                acc = pl.tile.matmul(
+                    pl.tile.move(k_mat, target_memory=pl.Mem.Left),
+                    pl.tile.move(pl.tile.transpose_view(q_mat), target_memory=pl.Mem.Right),
+                )
+                return pl.tile.store(acc, [0, 0], out, pre_quant=1.0 / 1024, pre_relu=True)
+
+        mlir = self._generate_mlir_all_incore(Prog)
+        stores = [line for line in mlir.splitlines() if "pto.tstore " in line]
+        assert len(stores) == 1, f"one Acc->GM writeback expected, got {len(stores)}:\n{mlir}"
+        line = stores[0]
+        assert f"arith.constant {self.SCALE_WORD} : i64" in mlir, (
+            f"pre_quant=1/1024 must encode as the FP32 bit pattern {self.SCALE_WORD:#x}:\n{mlir}"
+        )
+        ins_clause = line.split("ins(", 1)[1].split(") outs(", 1)[0]
+        assert ins_clause.endswith(" : i64"), (
+            f"pto.tstore takes the packed scale as a second ins(...) operand:\n{line}"
+        )
+        assert "reluPreMode = #pto<relu_pre_mode normal_relu>" in line, (
+            f"pre_relu must ride in the attribute dict:\n{line}"
+        )
+
+    def test_pre_relu_alone_rides_the_unscaled_writeback(self):
+        """``pre_relu`` without a scale is not a degenerate quantized store — it
+        attaches to the ordinary ``f32 -> bf16`` narrowing, which needs no
+        ``pre_quant`` operand at all. Emitting one would change the instruction
+        (and on A2/A3 there is no scaled ``f32 -> bf16`` mode to change it to)."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[128, 64], pl.BF16],
+                b: pl.Tensor[[64, 128], pl.BF16],
+                w: pl.Tensor[[128, 32], pl.BF16],
+                out: pl.Out[pl.Tensor[[128, 32], pl.FP32]],
+            ) -> pl.Tensor[[128, 32], pl.FP32]:
+                a_mat = pl.tile.load(a, [0, 0], [128, 64], target_memory=pl.Mem.Mat)
+                b_mat = pl.tile.load(b, [0, 0], [64, 128], target_memory=pl.Mem.Mat)
+                acc = pl.tile.matmul(
+                    pl.tile.move(a_mat, target_memory=pl.Mem.Left),
+                    pl.tile.move(b_mat, target_memory=pl.Mem.Right),
+                )
+                s_mat = pl.tile.create([128, 128], pl.BF16, target_memory=pl.Mem.Mat)
+                s_mat = pl.tile.assemble(s_mat, acc, [0, 0], pre_relu=True)
+                w_mat = pl.tile.load(w, [0, 0], [128, 32], target_memory=pl.Mem.Mat)
+                y = pl.tile.matmul(
+                    pl.tile.move(s_mat, target_memory=pl.Mem.Left),
+                    pl.tile.move(w_mat, target_memory=pl.Mem.Right),
+                )
+                return pl.tile.store(y, [0, 0], out)
+
+        mlir = self._generate_mlir_all_incore(Prog)
+        tinserts = [line for line in mlir.splitlines() if "pto.tinsert" in line]
+        assert len(tinserts) == 1, f"one Acc->Mat writeback expected, got {len(tinserts)}:\n{mlir}"
+        assert "pre_quant" not in mlir, f"relu alone must emit no scale operand:\n{mlir}"
+        assert "reluPreMode = #pto<relu_pre_mode normal_relu>" in tinserts[0], tinserts[0]
+
+    def test_plain_assemble_and_store_keep_their_byte_identical_form(self):
+        """No epilogue kwargs must mean no extra operand and no extra attribute —
+        an ordinary kernel's ``.pto`` is unchanged by this feature."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[128, 64], pl.FP16],
+                b: pl.Tensor[[64, 128], pl.FP16],
+                out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                a_mat = pl.tile.load(a, [0, 0], [128, 64], target_memory=pl.Mem.Mat)
+                b_mat = pl.tile.load(b, [0, 0], [64, 128], target_memory=pl.Mem.Mat)
+                acc = pl.tile.matmul(
+                    pl.tile.move(a_mat, target_memory=pl.Mem.Left),
+                    pl.tile.move(b_mat, target_memory=pl.Mem.Right),
+                )
+                return pl.tile.store(acc, [0, 0], out)
+
+        mlir = self._generate_mlir_all_incore(Prog)
+        assert "pre_quant" not in mlir, f"an epilogue-free kernel must emit no pre_quant:\n{mlir}"
+        assert "relu_pre_mode" not in mlir, f"an epilogue-free kernel must emit no relu:\n{mlir}"
+
+
 class TestSetValidShapeCodegen:
     """Tests for tile.set_validshape PTO code generation."""
 
