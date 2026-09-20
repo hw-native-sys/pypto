@@ -880,7 +880,8 @@ class PTOCodegen : public CodegenBase {
    * there is no baked `addr` to alias through. Returns "" when addresses are
    * baked, when `memref` is null, or when no handle is bound yet.
    */
-  [[nodiscard]] std::string TryGetSharedTileBufHandle(const ir::MemRefPtr& memref) const;
+  [[nodiscard]] std::string TryGetSharedTileBufHandle(
+      const ir::MemRefPtr& memref, const std::shared_ptr<const ir::TileType>& tile_type) const;
 
   /**
    * @brief Declare `ssa_name`'s `pto.alloc_tile` in the function head.

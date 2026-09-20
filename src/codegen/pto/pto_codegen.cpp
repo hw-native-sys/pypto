@@ -161,6 +161,15 @@ std::string MemRefIdentityKey(const ir::MemRefPtr& memref) {
   return key.str();
 }
 
+std::string TileBufHandleIdentityKey(const ir::MemRefPtr& memref, const std::string& type_str) {
+  std::string ident = MemRefIdentityKey(memref);
+  // A multi-buffer slot can have a narrower view than its covering region. Keep
+  // differently typed views on separate SSA handles even when their byte window
+  // is identical; one MLIR SSA cannot carry two tile_buf types.
+  if (memref->slot_count_ > 1) ident += "|slot-type=" + type_str;
+  return ident;
+}
+
 // Base Ptrs of tile phis that cannot be represented by PTO codegen.
 //
 // A while-loop phi may select a handle at runtime, so a function-head allocation
@@ -1000,8 +1009,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
       // the region's covering tile. One MLIR SSA cannot carry both tile_buf
       // types, so share handles only among vars with the same slot geometry.
       // Ordinary (non-slotted) aliases keep the historical byte-identity key.
-      std::string ident = MemRefIdentityKey(memref);
-      if (memref->slot_count_ > 1) ident += "|slot-type=" + type_str;
+      std::string ident = TileBufHandleIdentityKey(memref, type_str);
       auto it = fs_.memref_identity_to_mlir.find(ident);
       if (it != fs_.memref_identity_to_mlir.end()) {
         ssa_name = it->second;  // reuse the shared handle (in-place aliasing)
@@ -2151,11 +2159,12 @@ std::string PTOCodegen::AllocNewTileBuf(const std::string& tile_buf_type_string,
   return name;
 }
 
-std::string PTOCodegen::TryGetSharedTileBufHandle(const ir::MemRefPtr& memref) const {
-  if (emit_tile_addr_ || !memref) {
+std::string PTOCodegen::TryGetSharedTileBufHandle(
+    const ir::MemRefPtr& memref, const std::shared_ptr<const ir::TileType>& tile_type) const {
+  if (emit_tile_addr_ || !memref || !tile_type) {
     return "";
   }
-  const std::string ident = MemRefIdentityKey(memref);
+  const std::string ident = TileBufHandleIdentityKey(memref, GetTileBufTypeStringFromTileType(tile_type));
   // A mixed-type identity's handle already carries another var's type; re-typing
   // it would make one SSA value have two types and ptoas would reject the module.
   if (fs_.memref_identity_mixed_types.count(ident) != 0) {
