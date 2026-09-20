@@ -103,11 +103,44 @@ class _ParamInfo:
     direction: ParamDirection
     shape: list[int] | None  # None for scalar params
     dtype: DataType
+    # ``TensorLayout`` name ("ND", "NZ", ...) for a tensor param, None for a
+    # scalar. An NZ param's ``shape`` is the *blocked* rank-5 one the backend
+    # addresses, not the logical shape its caller allocates, so a consumer
+    # comparing shapes has to block the caller's shape first (``block_nz_shape``).
+    layout: str | None = None
 
 
 # Public spelling for code outside ``pypto.ir`` (the replay-script writer, and
 # harnesses that bind arguments themselves).
 ParamInfo = _ParamInfo
+
+# pto-isa's NZ blocking: c0 elements per 32-byte C0 line, 16 rows per fractal.
+_NZ_C0_BYTES = 32
+_NZ_FRACTAL_ROWS = 16
+
+
+def block_nz_shape(shape: Sequence[int], dtype: torch.dtype) -> list[int]:
+    """The blocked rank-5 shape an NZ parameter of logical *shape* is compiled to.
+
+    ``[..., R, C]`` becomes ``[prod(lead), C/c0, R/16, 16, c0]``: every leading
+    axis folds into the single batch slot pto-isa declares, and the trailing
+    matrix expands into the fractal plane. This mirrors ``BlockNzShape`` in
+    ``tensor_view_semantics.h`` — a caller allocates the logical shape, the
+    compiled parameter names the blocked one, and the two describe the same bytes.
+    """
+    if len(shape) < 2:
+        raise ValueError(f"an NZ shape needs a trailing [R, C] pair, got {tuple(shape)}")
+    rows, cols = shape[-2], shape[-1]
+    c0 = _NZ_C0_BYTES // torch.empty((), dtype=dtype).element_size()
+    if rows % _NZ_FRACTAL_ROWS or cols % c0:
+        raise ValueError(
+            f"an NZ shape needs {_NZ_FRACTAL_ROWS}-row fractals and whole C0 lines of {c0} "
+            f"elements, got {tuple(shape)}"
+        )
+    batch = 1
+    for dim in shape[:-2]:
+        batch *= dim
+    return [batch, cols // c0, rows // _NZ_FRACTAL_ROWS, _NZ_FRACTAL_ROWS, c0]
 
 
 _Arg = TypeVar("_Arg")

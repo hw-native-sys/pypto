@@ -66,6 +66,7 @@ from .param_info import (  # noqa: F401  -- re-export
     _ParamInfo,
     _to_torch_dtype,
     bind_complete_args,
+    block_nz_shape,
 )
 
 # Type alias for arguments accepted by CompiledProgram.__call__().
@@ -177,6 +178,7 @@ def _param_info_to_dict(info: _ParamInfo) -> dict[str, Any]:
         "direction": info.direction.name,
         "shape": info.shape,
         "dtype": str(info.dtype),
+        "layout": info.layout,
     }
 
 
@@ -219,11 +221,18 @@ def _param_info_from_dict(d: dict[str, Any]) -> _ParamInfo:
     if not isinstance(raw_dtype, str):
         raise ValueError(f"'dtype' must be a string, got {raw_dtype!r}")
 
+    # A sidecar written before parameters carried a layout says nothing about
+    # one, which is exactly what ND means.
+    raw_layout = d.get("layout")
+    if raw_layout is not None and not isinstance(raw_layout, str):
+        raise ValueError(f"'layout' must be null or a string, got {raw_layout!r}")
+
     return _ParamInfo(
         name=name,
         direction=direction,
         shape=shape,
         dtype=_datatype_from_string(raw_dtype),
+        layout=raw_layout,
     )
 
 
@@ -403,10 +412,14 @@ def _extract_func_param_infos(func: Function) -> tuple[list[_ParamInfo], list[in
         param_type = param.type
         shape: list[int] | None = None
 
+        layout: str | None = None
+
         if isinstance(param_type, ShapedType):
             dtype = param_type.dtype
             logical_shape = [dim.value if isinstance(dim, ConstInt) else -1 for dim in param_type.shape]
             shape = _to_runtime_shape(logical_shape, dtype)
+            view = getattr(param_type, "tensor_view", None)
+            layout = view.layout.name if view is not None else "ND"
         elif isinstance(param_type, ScalarType):
             dtype = param_type.dtype
         else:
@@ -415,7 +428,9 @@ def _extract_func_param_infos(func: Function) -> tuple[list[_ParamInfo], list[in
                 f"Expected ShapedType or ScalarType."
             )
 
-        param_infos.append(_ParamInfo(name=param.name_hint, direction=direction, shape=shape, dtype=dtype))
+        param_infos.append(
+            _ParamInfo(name=param.name_hint, direction=direction, shape=shape, dtype=dtype, layout=layout)
+        )
 
         # Only pure Out params can be auto-allocated in return-style calls.
         # InOut params require an initial value from the caller, so they must
@@ -457,6 +472,27 @@ def _extract_param_infos(program: Program) -> tuple[list[_ParamInfo], list[int],
     return _extract_func_param_infos(orch_func)
 
 
+def _arg_shape_as_declared(arg_shape: Sequence[int], info: _ParamInfo) -> list[int]:
+    """*arg_shape* in the parameter's own terms, ready to compare with ``info.shape``.
+
+    An NZ parameter is compiled to the blocked rank-5 shape the backend
+    addresses, while its caller allocates and passes the logical one — the same
+    bytes under two spellings. Comparing them means blocking the caller's shape
+    with the rule the compiler used. Every other parameter is already in its
+    caller's terms, and a shape that does not block at all (an odd row count,
+    say) is left alone so it is reported as the mismatch it is.
+    """
+    if info.layout != "NZ":
+        return list(arg_shape)
+    expected_dtype = _to_torch_dtype(info.dtype)
+    if expected_dtype is None:
+        return list(arg_shape)
+    try:
+        return block_nz_shape(arg_shape, expected_dtype)
+    except ValueError:
+        return list(arg_shape)
+
+
 def _validate_device_tensor(arg: DeviceTensor, info: _ParamInfo) -> None:
     """Check a ``DeviceTensor`` arg against IR parameter metadata.
 
@@ -470,12 +506,13 @@ def _validate_device_tensor(arg: DeviceTensor, info: _ParamInfo) -> None:
     runtime can't map to torch are also skipped.
     """
     if info.shape is not None:
-        if len(info.shape) != len(arg.shape):
+        blocked_arg_shape = _arg_shape_as_declared(arg.shape, info)
+        if len(info.shape) != len(blocked_arg_shape):
             raise TypeError(
                 f"Parameter {info.name!r} expects rank {len(info.shape)} "
                 f"(shape {tuple(info.shape)}); got DeviceTensor shape {arg.shape}"
             )
-        for expected_dim, actual_dim in zip(info.shape, arg.shape, strict=True):
+        for expected_dim, actual_dim in zip(info.shape, blocked_arg_shape, strict=True):
             if expected_dim >= 0 and expected_dim != actual_dim:
                 raise TypeError(
                     f"Parameter {info.name!r} expects shape {tuple(info.shape)}; "
@@ -502,12 +539,13 @@ def _validate_stacked_tensor(arg: StackedDeviceTensor, info: _ParamInfo) -> None
         TypeError: when ``full_shape`` rank/dims or dtype disagree with ``info``.
     """
     if info.shape is not None:
-        if len(info.shape) != len(arg.full_shape):
+        blocked_full_shape = _arg_shape_as_declared(arg.full_shape, info)
+        if len(info.shape) != len(blocked_full_shape):
             raise TypeError(
                 f"Parameter {info.name!r} expects rank {len(info.shape)} "
                 f"(shape {tuple(info.shape)}); got StackedDeviceTensor full_shape {arg.full_shape}"
             )
-        for expected_dim, actual_dim in zip(info.shape, arg.full_shape, strict=True):
+        for expected_dim, actual_dim in zip(info.shape, blocked_full_shape, strict=True):
             if expected_dim >= 0 and expected_dim != actual_dim:
                 raise TypeError(
                     f"Parameter {info.name!r} expects shape {tuple(info.shape)}; "
