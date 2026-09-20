@@ -441,9 +441,11 @@ def load(
             the full contract). An explicit value here always wins over a
             scope-level ``pl.set_cache_policy`` declaration for the same tensor,
             in both directions: ``cache=CachePolicy.DEFAULT`` opts this one read
-            back into the cache inside a bypassing scope. Requires PTOAS >= v0.61,
-            where a BYPASS read compiles to an L2 hint on the emitted load;
-            DEFAULT emits nothing.
+            back into the cache inside a bypassing scope. Requires PTOAS >= v0.64,
+            where a BYPASS read compiles to a load issued against the page's
+            uncached alias on A2/A3 — the only architecture that maps GM twice,
+            and the only one where the declaration has an effect today; DEFAULT
+            emits nothing.
 
     Returns:
         Tile wrapping the load operation

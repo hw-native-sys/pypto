@@ -8,10 +8,12 @@ The policy is a *contract the author states*, never a hint the compiler infers.
 It is therefore written explicitly, at one of two granularities, and is carried
 unchanged from the DSL to codegen.
 
-> **Requires PTOAS >= v0.61** (`PTOAS_VERSION` in `toolchain/versions.env`). A
-> `BYPASS` declaration becomes a `cache_policy` attribute on `pto.tload`, which
-> the assembler lowers to pto-isa's own L2 hint. See
-> [What codegen emits](#what-codegen-emits).
+> **Requires PTOAS >= v0.64** (`PTOAS_VERSION` in `toolchain/versions.env`), and
+> **has an effect on a2a3 only**. A `BYPASS` declaration becomes a
+> `cache_policy` attribute on `pto.tload` plus an `offset` operand carrying that
+> device's no-cache alias distance, which the assembler adds to that one load's
+> source address. See [What codegen emits](#what-codegen-emits) and
+> [Architectures](#architectures).
 
 ## Two surfaces
 
@@ -196,37 +198,101 @@ with pl.at(level=pl.Level.CORE_GROUP, name_hint="mm"):
 
 ## What codegen emits
 
-A `BYPASS` read becomes one attribute on the emitted load — there is no extra
-operation, no second tensor view, and no architecture-specific address alias:
+A `BYPASS` read becomes one attribute on the emitted load and one operand — the
+distance from the tensor's address to the uncached alias of the same bytes:
 
 ```mlir
-pto.tload ins(%b__ssa_v0_pview : !pto.partition_tensor_view<256x256xf32>)
-          outs(%b__ssa_v0_mat  : !pto.tile_buf<loc=mat, ...>)
-          {cache_policy = #pto.load_cache_policy<l2_bypass>}
+func.func @main(%arg0: !pto.ptr<f32>, %arg1: !pto.ptr<f32>,
+                %__pypto_l2_cache_offset: i64) {
+  ...
+  pto.tload ins(%b__ssa_v0_pview : !pto.partition_tensor_view<256x256xf32>)
+            outs(%b__ssa_v0_mat  : !pto.tile_buf<loc=mat, ...>)
+            {cache_policy = #pto.load_cache_policy<l2_bypass>}
+            offset = %__pypto_l2_cache_offset : i64
 ```
 
-PTOAS >= v0.61 lowers that to pto-isa's own L2 hint, which is the whole
-difference in the generated CCE:
+The attribute alone declares the policy and moves no address: PTOAS applies the
+offset only to a load that also declared `l2_bypass`, and a declaration without
+one compiles to an ordinary cached load. Both together are what bypasses L2 —
+which is why the offset, not the attribute, is what makes the feature real, and
+why [only a2a3 has one](#architectures).
+
+### Where the offset comes from
+
+A2/A3 maps every GM page twice — once cached, once not — and a load issued
+against the uncached alias does not allocate in L2. The distance between the two
+mappings is a per-device value only the driver knows (`rtGetL2CacheOffset`), so
+it cannot be a constant in the compiler: one box answers `0x80000000000` where a
+pto-isa comment names `0x100000000000`.
+
+simpler queries it once per Worker and carries it to every core's
+`GlobalContext`, where an incore kernel reads it with
+`get_l2_cache_offset(args)` (simpler PR #2323). The generated kernel wrapper
+reads it **once at entry** — the value cannot change during a dispatch, so a
+per-load read would go back through GM for a constant — and forwards it through
+the synthetic `%__pypto_l2_cache_offset` parameter:
+
+```cpp
+extern "C" __aicore__ void kernel_entry(__gm__ int64_t* args) {
+    // ... tensor unpacking ...
+    uint64_t __pypto_l2_cache_offset = get_l2_cache_offset(args);
+    main(a__ssa_v0, b__ssa_v0, out__ssa_v0, __pypto_l2_cache_offset);
+}
+```
+
+PTOAS >= v0.64 turns the pair into address arithmetic on a *copy* of the source
+descriptor, so other loads of the same tensor keep the cached address, and then
+issues an ordinary `TLOAD`:
 
 ```diff
 -  TLOAD(v45, v50);
-+  TLOAD<pto::TLoadL2Hint::NotAllocKeep>(v45, v50);
++  __gm__ uint8_t* v51 = reinterpret_cast<__gm__ uint8_t*>(PTOAS__GLOBAL_TENSOR_DATA(v50));
++  __gm__ float* v52 = (__gm__ float*) (v51 + v5);
++  GlobalTensor<float, ...> v53(nullptr);
++  v53 = v50;
++  TASSIGN(v53, v52);
++  TLOAD(v45, v53);
 ```
 
-Three properties of the emit are worth stating, because each one is asserted in
-`tests/ut/codegen/test_cache_policy_codegen.py`:
+Zero is a valid answer, not a failure: an a2a3 device that exposes no alias
+reports zero, `addr + 0` is the ordinary address, and the declaration costs
+bandwidth rather than correctness. The simulator is that case by construction.
+That is a *device* answering zero — distinct from an architecture that has no
+alias at all, which never gets an offset operand to begin with.
+
+Five properties of the emit are worth stating, because each one is asserted in
+`tests/ut/codegen/test_cache_policy_codegen.py` (the argument order, in
+`tests/ut/codegen/test_prefetch_codegen.py`):
 
 | Property | Why |
 | -------- | --- |
-| `CachePolicy.DEFAULT` emits **nothing** | A kernel that states no policy keeps the PTO form it had before this existed, so the attribute is the only difference between two otherwise identical kernels |
+| `CachePolicy.DEFAULT` emits **nothing** | A kernel that states no policy keeps the PTO form it had before this existed, so the attribute, the operand and the parameter are the only difference between two otherwise identical kernels |
 | The attribute is emitted **per load**, not per tensor | It is a property of the instruction; a hint on only the first of two loads would leave the second one allocating in L2 (the superseded `[CacheBypassUnsupported]` diagnostic was deliberately once-per-tensor — the opposite granularity) |
-| It joins the MX `layout` in **one** attribute dict, after it | PTOAS takes all present attributes in a single dict; keeping `layout` first leaves an MX load that declares no policy byte-identical |
+| The offset parameter is appended **once per kernel** | One runtime value serves every bypassing load, read once at entry |
+| It joins the MX `layout` in **one** attribute dict, after it, and the operand follows the dict | PTOAS takes all present attributes in a single dict; keeping `layout` first leaves an MX load that declares no policy byte-identical |
+| a5 emits the attribute and **no** offset | There is no second mapping to address (see [Architectures](#architectures)), and no accessor to read a distance from |
+
+### Architectures
+
+The double mapping is an a2a3 property, and so is everything built on it:
+
+| Target | What a `BYPASS` declaration does today |
+| ------ | -------------------------------------- |
+| a2a3 device | The load is issued against the uncached alias, `addr + get_l2_cache_offset(args)`. This is the case the feature exists for |
+| a2a3 device with no alias | The driver reports `0`, `addr + 0` is the ordinary address, and the read is cached — correct, one optimisation short. The simulator is this case by construction |
+| a5 | Codegen emits the attribute and no offset, and PTOAS v0.64 lowers a bare attribute to an ordinary `TLOAD`. The declaration is accepted and **does nothing** |
+
+A5 is not a missing offset waiting to be supplied: it has no second mapping to
+address. pto-isa carries an L2 hint on A5's `TLOAD` as an instruction operand
+instead, which is where a future A5 path would go — it is not wired to
+`cache_policy` in v0.64, so nothing in the emitted CCE distinguishes a declared
+load from an undeclared one there.
 
 ### Older assemblers
 
-The emit itself is unconditional — `cache_policy` is a v0.61 addition, and an
-older assembler would fail it at the `pto.tload` verifier. That never happens
-in practice: before the first `.pto` is assembled, codegen runs `ptoas --version`
+The emit itself is unconditional — `offset` is a v0.64 addition, and an older
+assembler would fail it at the `pto.tload` verifier. That never happens in
+practice: before the first `.pto` is assembled, codegen runs `ptoas --version`
 and rejects any assembler older than the `PTOAS_VERSION` this repo pins, with
 an error that names both versions.
 
@@ -251,6 +317,9 @@ an error that names both versions.
 | Lowering | `src/ir/transforms/convert_tensor_to_tile_ops_pass.cpp` |
 | Printer | `src/ir/transforms/python_printer.cpp` (`PrintScopeCachePolicyStmts`) |
 | Codegen | `src/backend/common/pto_ops_memory.cpp` (`MakeTileLoadCodegenPTO`) |
+| Synthetic param | `src/codegen/pto/pto_codegen.cpp` (`MemRefCollectorVisitor::UsesL2BypassLoad`, signature emission) |
+| Kernel wrapper | `python/pypto/backend/pto_backend.py` (`_uses_l2_cache_offset`, `_generate_kernel_wrapper`) |
+| Runtime accessor | `runtime/src/a2a3/runtime/*/common/intrinsic.h` (`get_l2_cache_offset`), `runtime/docs/l2-cache-bypass.md` |
 
 ## See Also
 

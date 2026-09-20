@@ -679,6 +679,7 @@ _AIV_FIFO_ENDPOINT_OPS = frozenset(
 )
 _SDMA_WORKSPACE_OPS = frozenset({_ir_core.get_op("prefetch.make_context").name})
 _DEFERRED_COMPLETION_OPS = frozenset({_ir_core.get_op("pld.system.defer_wait").name})
+_TILE_LOAD_OP = _ir_core.get_op("tile.load").name
 
 
 def _function_uses_ops(func: _ir_core.Function, op_names: frozenset[str]) -> bool:
@@ -727,6 +728,40 @@ def _uses_sdma_workspace(func: _ir_core.Function) -> bool:
 def _uses_deferred_completion(func: _ir_core.Function) -> bool:
     """Return whether the wrapper must expose the scheduler AsyncCtx."""
     return _function_uses_ops(func, _DEFERRED_COMPLETION_OPS)
+
+
+def _uses_l2_cache_offset(func: _ir_core.Function) -> bool:
+    """Return whether the wrapper must forward the device L2 no-cache alias offset.
+
+    True when the function contains a ``tile.load`` that declared
+    ``CachePolicy.BYPASS`` and the target reaches the uncached mapping through
+    an address alias — a2a3 only. Mirrors the C++ condition in
+    ``PTOCodegen``'s signature emission (``MemRefCollectorVisitor::
+    UsesL2BypassLoad`` gated on ``GetPtoTargetArch()``), because the wrapper's
+    forwarded call args must match the callee signature exactly.
+    """
+
+    if _backend_core.get_handler().get_pto_target_arch() != "a2a3":
+        return False
+
+    class _BypassLoadFinder(_ir_core.IRVisitor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.found = False
+
+        def visit_call(self, op: _ir_core.Call) -> None:
+            if self.found:
+                return
+            ir_op = getattr(op, "op", None)
+            if isinstance(ir_op, _ir_core.Op) and ir_op.name == _TILE_LOAD_OP:
+                if int(op.kwargs.get("cache", 0)) == int(_ir_core.CachePolicy.BYPASS):
+                    self.found = True
+                    return
+            super().visit_call(op)
+
+    finder = _BypassLoadFinder()
+    finder.visit_stmt(func.body)
+    return finder.found
 
 
 def _requires_dual_aiv_dispatch(func: _ir_core.Function) -> bool:
@@ -945,6 +980,7 @@ def _generate_kernel_header(
     uses_spmd: bool | None = None,
     uses_subblock: bool | None = None,
     uses_sdma: bool | None = None,
+    uses_l2_cache_offset: bool | None = None,
     uses_deferred_completion: bool | None = None,
 ) -> str:
     """Generate the wrapper header, including split lane overrides when needed."""
@@ -972,9 +1008,11 @@ def _generate_kernel_header(
         uses_subblock = _uses_dynamic_subblock_id(func)
     if uses_sdma is None:
         uses_sdma = _uses_sdma_workspace(func)
+    if uses_l2_cache_offset is None:
+        uses_l2_cache_offset = _uses_l2_cache_offset(func)
     if uses_deferred_completion is None:
         uses_deferred_completion = _uses_deferred_completion(func)
-    needs_intrinsic = uses_spmd or uses_subblock or uses_sdma
+    needs_intrinsic = uses_spmd or uses_subblock or uses_sdma or uses_l2_cache_offset
     spmd_override = '#include "intrinsic.h"\n' if needs_intrinsic else ""
     deferred_completion_include = _DEFERRED_COMPLETION_INCLUDE if uses_deferred_completion else ""
 
@@ -1003,6 +1041,7 @@ def _generate_kernel_wrapper(
     uses_spmd = group_uses_spmd or func_uses_spmd
     func_uses_subblock = _uses_dynamic_subblock_id(func)
     func_uses_sdma = _uses_sdma_workspace(func)
+    func_uses_l2_cache_offset = _uses_l2_cache_offset(func)
     func_uses_deferred_completion = _uses_deferred_completion(func)
     ptoas_body = _preprocess_ptoas_output(ptoas_code)
     ptoas_body, fifo_uses_subblock = _forward_runtime_lane_to_split_fifo_calls(func, ptoas_body)
@@ -1012,6 +1051,7 @@ def _generate_kernel_wrapper(
         uses_spmd=uses_spmd,
         uses_subblock=wrapper_uses_subblock,
         uses_sdma=func_uses_sdma,
+        uses_l2_cache_offset=func_uses_l2_cache_offset,
         uses_deferred_completion=func_uses_deferred_completion,
     )
     unpacking_code, var_names = _generate_arg_unpacking(func, uses_spmd=uses_spmd)
@@ -1064,15 +1104,30 @@ def _generate_kernel_wrapper(
             "get_dma_workspace(args, DMA_WORKSPACE_SDMA));\n\n"
         )
 
+    # The A2/A3 driver maps every GM page twice, and a load against the uncached
+    # alias does not allocate in L2. The distance between the two mappings is a
+    # per-device value the runtime carries in the dispatch payload, so read it
+    # once here rather than per load: it cannot change during the dispatch, and
+    # a per-load read would go back through GM for a constant. Zero means the
+    # device exposes no alias, which leaves every bypassing load ordinary.
+    l2_cache_offset_setup = ""
+    if func_uses_l2_cache_offset:
+        l2_cache_offset_setup = (
+            "    // Read the device L2 no-cache alias offset from runtime dispatch payload\n"
+            "    uint64_t __pypto_l2_cache_offset = get_l2_cache_offset(args);\n\n"
+        )
+
     # PTOCodegen appends raw dispatch args for deferred completion after
-    # user-derived arguments, then the SDMA workspace and synthetic i32
-    # identity params in canonical order (block_idx, block_num, subblock_idx).
-    # Mirror that exact order here.
+    # user-derived arguments, then the SDMA workspace, the device L2 no-cache
+    # alias offset, and the synthetic i32 identity params in canonical order
+    # (block_idx, block_num, subblock_idx). Mirror that exact order here.
     call_args_list = list(var_names)
     if func_uses_deferred_completion:
         call_args_list.append("args")
     if func_uses_sdma:
         call_args_list.append("__pypto_sdma_workspace")
+    if func_uses_l2_cache_offset:
+        call_args_list.append("__pypto_l2_cache_offset")
     if func_uses_spmd:
         call_args_list = call_args_list + ["__pypto_spmd_block_idx", "__pypto_spmd_block_num"]
     if wrapper_uses_subblock:
@@ -1092,6 +1147,7 @@ def _generate_kernel_wrapper(
         f"{subblock_arg_setup}"
         f"{unpacking_code}\n"
         f"{sdma_setup}"
+        f"{l2_cache_offset_setup}"
         f"    // Forward to ptoas-generated function\n"
         f"    {func.name}({call_args});\n"
         "}\n"

@@ -9,13 +9,15 @@
 
 """Codegen behaviour of the declared GM cache-access policy (pypto #2534, #2680).
 
-PTOAS >= v0.61 carries a streaming GM read as a ``cache_policy`` attribute on
-``pto.tload``, which the assembler lowers to pto-isa's own L2 hint
-(``TLOAD<pto::TLoadL2Hint::NotAllocKeep>``). ``CachePolicy.BYPASS`` therefore
-stopped being a no-op: codegen now emits that attribute, and the
-``[CacheBypassUnsupported]`` warning that stood in for it is gone.
+PTOAS >= v0.64 carries a streaming GM read as a ``cache_policy`` attribute on
+``pto.tload`` plus an optional byte ``offset`` it adds to that one load's source
+address. On a2a3 the uncached mapping of a page is reached by address alias, so
+the attribute alone declares the policy and moves nothing: the offset is what
+makes the load bypass. That distance is a per-device value only the driver
+knows, so it is threaded in as the synthetic ``%__pypto_l2_cache_offset``
+parameter the kernel wrapper fills from ``get_l2_cache_offset(args)``.
 
-The contract asserted here has three sides:
+The contract asserted here has four sides:
 
 1. **A declared read carries the attribute** — once per emitted load, since the
    hint belongs to the instruction rather than to the tensor (an unrolled loop
@@ -29,6 +31,11 @@ The contract asserted here has three sides:
    read, which is observable in the emitted MLIR for the first time — while
    BYPASS was a no-op, the documented precedence could only be checked on the IR
    (``tests/ut/ir/transforms/test_convert_tensor_to_tile_ops.py``).
+4. **The device offset reaches every declared load, from one parameter.** The
+   value cannot change during a dispatch, so it is read once at kernel entry and
+   passed down; a kernel with no declared read gains no parameter. An
+   architecture that does not map GM twice — a5 — emits the attribute and no
+   offset, and the declaration has no effect there.
 
 The assembler's own acceptance of the attribute is not asserted here: every UT
 runs with ``skip_ptoas=True``, so these tests stop at the emitted MLIR text (the
@@ -41,8 +48,12 @@ from pypto import LogLevel, backend, codegen, ir, set_log_level
 from pypto.backend import BackendType
 from pypto.ir import OptimizationStrategy, PassManager
 
-# The exact attribute PTOAS >= v0.61 consumes on `pto.tload`.
+# The exact attribute PTOAS >= v0.64 consumes on `pto.tload`.
 BYPASS_ATTR = "cache_policy = #pto.load_cache_policy<l2_bypass>"
+# The operand that carries the device's no-cache alias distance to that load,
+# and the synthetic parameter it is bound to.
+OFFSET_PARAM = "%__pypto_l2_cache_offset"
+OFFSET_OPERAND = f"offset = {OFFSET_PARAM} : i64"
 # The diagnostic that stood in for the attribute while PTOAS had no bypass path.
 # It must never be emitted again — the request is now honoured, not reported.
 BYPASS_WARNING_TAG = "[CacheBypassUnsupported]"
@@ -243,20 +254,21 @@ def test_declared_tensor_load_carries_the_bypass_attribute():
     assert plain == {"a"}, f"the undeclared tensor must stay cached, got {plain}"
 
 
-def test_the_attribute_is_the_only_difference_from_the_undeclared_kernel():
-    """`pl.set_cache_policy(b, BYPASS)` adds an attribute and nothing else.
+def test_the_declaration_adds_only_the_attribute_offset_and_parameter():
+    """`pl.set_cache_policy(b, BYPASS)` adds an annotated load and nothing else.
 
-    No extra operation, no extra view, no reordering: stripping the attribute
-    from the declared kernel's MLIR must reproduce the undeclared kernel's,
-    line for line. That is what keeps the declaration a property of the load
-    rather than a codegen mode.
+    No extra operation, no extra view, no reordering: stripping the attribute,
+    the offset operand and the parameter that feeds it from the declared
+    kernel's MLIR must reproduce the undeclared kernel's, line for line. That is
+    what keeps the declaration a property of the load rather than a codegen mode.
     """
     with_decl = _incore_mlir(DeclaredBypass)
     without_decl = _incore_mlir(PlainMatmul)
 
     assert BYPASS_ATTR in with_decl, f"declared kernel emitted no bypass hint:\n{with_decl}"
     assert BYPASS_ATTR not in without_decl, f"undeclared kernel must carry no hint:\n{without_decl}"
-    stripped = with_decl.replace(" {" + BYPASS_ATTR + "}", "")
+    stripped = with_decl.replace(" {" + BYPASS_ATTR + "}" + " " + OFFSET_OPERAND, "")
+    stripped = stripped.replace(f", {OFFSET_PARAM}: i64", "")
     assert stripped == without_decl
 
 
@@ -283,7 +295,64 @@ def test_every_emitted_load_of_a_declared_tensor_is_hinted():
 
 
 # ---------------------------------------------------------------------------
-# (b) An undeclared read — and an explicitly re-cached one — carry nothing
+# (b) The device offset reaches every declared load through one parameter
+# ---------------------------------------------------------------------------
+
+
+def _signature_line(mlir: str) -> str:
+    """The emitted ``func.func`` signature — where synthetic params are appended."""
+    return next(line.strip() for line in mlir.splitlines() if line.strip().startswith("func.func @"))
+
+
+def test_declared_load_takes_the_device_offset_as_its_tload_operand():
+    """The attribute declares the policy; the offset is what moves the address.
+
+    PTOAS applies the offset only to a load that also declared ``l2_bypass``, so
+    the two travel together on the same ``pto.tload`` — an attribute without an
+    offset compiles to an ordinary cached load, which would make the declaration
+    silently inert.
+    """
+    mlir = _incore_mlir(DeclaredBypass)
+    hinted = _hinted_tloads(mlir)
+
+    assert len(hinted) == 1, f"expected exactly one hinted load:\n{mlir}"
+    assert OFFSET_OPERAND in hinted[0], f"hinted load carries no device offset:\n{hinted[0]}"
+    assert f"{OFFSET_PARAM}: i64" in _signature_line(mlir), _signature_line(mlir)
+
+
+def test_one_parameter_serves_every_declared_load():
+    """Two hinted loads, one parameter: the value cannot change within a dispatch.
+
+    The wrapper reads ``get_l2_cache_offset(args)`` once at kernel entry, so a
+    second parameter would mean a second GM read of a constant.
+    """
+    mlir = _incore_mlir(TwoBypassingLoadsOfOneTensor)
+    hinted = _hinted_tloads(mlir)
+
+    assert len(hinted) == 2, f"expected two hinted loads:\n{mlir}"
+    assert all(OFFSET_OPERAND in line for line in hinted), f"every hinted load takes it:\n{mlir}"
+    assert _signature_line(mlir).count(f"{OFFSET_PARAM}: i64") == 1, _signature_line(mlir)
+
+
+def test_a5_declares_the_policy_without_an_address_offset():
+    """A5 does not map GM twice, so there is no alias for an offset to reach.
+
+    Its runtime exposes no ``get_l2_cache_offset`` either, so emitting the
+    parameter would produce a kernel wrapper that cannot compile. PTOAS v0.64
+    lowers the bare attribute to an ordinary load, so the declaration is
+    accepted there and does nothing — which is a property of the target, not a
+    missing operand.
+    """
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend950)
+    mlir = _incore_mlir(TwoBypassingLoadsOfOneTensor)
+
+    assert _hinted_tloads(mlir), f"a5 must still carry the declaration:\n{mlir}"
+    assert OFFSET_PARAM not in mlir, f"a5 must take no address offset:\n{mlir}"
+
+
+# ---------------------------------------------------------------------------
+# (c) An undeclared read — and an explicitly re-cached one — carry nothing
 # ---------------------------------------------------------------------------
 
 
@@ -309,7 +378,7 @@ def test_explicit_default_load_beats_the_declaration_and_emits_no_attribute():
 
 
 # ---------------------------------------------------------------------------
-# (c) The stand-in diagnostic is gone
+# (d) The stand-in diagnostic is gone
 # ---------------------------------------------------------------------------
 
 

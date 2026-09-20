@@ -588,6 +588,14 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
   /// the ccec get_subblockid() register.
   [[nodiscard]] bool UsesSubblockOp() const { return uses_subblock_op_; }
 
+  /// Returns true when the visited body contains a tile.load that declared
+  /// CachePolicy.BYPASS. Drives PTOCodegen's decision to append the synthetic
+  /// i64 device L2 no-cache alias offset param to the emitted func.func
+  /// signature; the kernel wrapper resolves it from
+  /// intrinsic.h::get_l2_cache_offset(args) at dispatch time, and each
+  /// bypassing pto.tload passes it as its `offset`.
+  [[nodiscard]] bool UsesL2BypassLoad() const { return uses_l2_bypass_load_; }
+
   [[nodiscard]] const std::set<const ir::Var*>& GetFFTSWorkspaceVars() const { return ffts_workspace_vars_; }
 
   void VisitExpr_(const VarPtr& op) override {
@@ -617,6 +625,10 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
       if (!uses_subblock_op_ && ir::IsOp(op, "tile.get_subblock_idx")) {
         uses_subblock_op_ = true;
       }
+      if (!uses_l2_bypass_load_ && ir::IsOp(op, "tile.load") &&
+          static_cast<ir::CachePolicy>(op->GetKwarg<int>("cache", 0)) == ir::CachePolicy::kBypass) {
+        uses_l2_bypass_load_ = true;
+      }
       if (ir::IsOp(op, "system.set_ffts") && op->args_.size() == 1) {
         if (auto workspace = As<ir::Var>(op->args_[0])) {
           ffts_workspace_vars_.insert(workspace.get());
@@ -635,6 +647,7 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
   bool uses_deferred_completion_ = false;
   bool uses_spmd_block_ops_ = false;
   bool uses_subblock_op_ = false;
+  bool uses_l2_bypass_load_ = false;
   std::set<const ir::Var*> ffts_workspace_vars_;
 
   void AddMemRefIfUnique(const MemRefPtr& memref, const std::shared_ptr<const TileType>& tile_type) {
@@ -937,12 +950,22 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   const bool uses_deferred_completion = collector.UsesDeferredCompletion();
   const bool uses_spmd_params = collector.UsesSpmdBlockOps();
   const bool uses_subblock_param = collector.UsesSubblockOp();
+  // A2/A3 reaches the uncached mapping of a page by adding a driver-owned
+  // offset to the address, so a bypassing load needs that value threaded in.
+  // No other architecture maps GM twice -- a5 expresses the policy on the
+  // instruction instead -- and no other runtime exposes an accessor to read a
+  // distance, so the parameter would be unfillable there.
+  const bool uses_l2_cache_offset =
+      collector.UsesL2BypassLoad() && backend_->GetHandler()->GetPtoTargetArch() == "a2a3";
   fs_.ffts_workspace_vars = collector.GetFFTSWorkspaceVars();
   if (uses_sdma_workspace) {
     fs_.used_ssa_names.insert("arg" + std::to_string(func->params_.size() + dyn_vars.size()));
   }
   if (uses_deferred_completion) {
     fs_.used_ssa_names.insert("__pypto_deferred_raw_args");
+  }
+  if (uses_l2_cache_offset) {
+    fs_.used_ssa_names.insert("__pypto_l2_cache_offset");
   }
   if (uses_spmd_params) {
     fs_.used_ssa_names.insert("__pypto_spmd_block_idx");
@@ -1113,8 +1136,20 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   // before SPMD identity params. The Python wrapper mirrors this exact order.
   if (uses_sdma_workspace) {
     if (!first_param) stream_ << ", ";
+    first_param = false;
     fs_.sdma_workspace_arg_ssa = "%arg" + std::to_string(next_arg_idx++);
     stream_ << fs_.sdma_workspace_arg_ssa << ": !pto.ptr<i8>";
+  }
+
+  // Append the device L2 no-cache alias offset after the SDMA workspace and
+  // before the SPMD identity params. Both are runtime-owned values the kernel
+  // wrapper reads out of the dispatch payload, so they stay adjacent; the
+  // Python wrapper mirrors this exact order.
+  if (uses_l2_cache_offset) {
+    if (!first_param) stream_ << ", ";
+    first_param = false;
+    fs_.l2_cache_offset_arg = "%__pypto_l2_cache_offset";
+    stream_ << fs_.l2_cache_offset_arg << ": i64";
   }
 
   // Append SPMD identity params after the dynamic-dim and SDMA workspace args,
