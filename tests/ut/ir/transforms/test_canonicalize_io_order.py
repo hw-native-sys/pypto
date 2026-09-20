@@ -114,6 +114,35 @@ class TestCanonicalizeIOOrder:
             _loop_op_order(After)
         )
 
+    def test_lowered_pipeline_orders_multi_digit_stages_numerically(self):
+        """Stage 10 follows stage 9 rather than sorting between stages 1 and 2."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(
+                self,
+                x: pl.Tensor[[1408], pl.FP32],
+                out: pl.Out[pl.Tensor[[1408], pl.FP32]],
+            ) -> pl.Tensor[[1408], pl.FP32]:
+                for i in pl.pipeline(0, 22, 1, stage=11):
+                    t: pl.Tile[[128], pl.FP32, pl.MemorySpace.Vec] = pl.tile.load(
+                        x, [i * 128], [128], [128], target_memory=pl.MemorySpace.Vec
+                    )
+                    u: pl.Tile[[128], pl.FP32, pl.MemorySpace.Vec] = pl.tile.add(t, t)
+                    _r: pl.Tensor[[1408], pl.FP32] = pl.tile.store(u, [i * 128], out)
+                return x
+
+        After = passes.canonicalize_io_order()(passes.lower_pipeline_loops()(Before))
+        stages = [
+            int(match.group(1))
+            for line in ir.python_print(After).splitlines()
+            if "pl.tile.add(" in line
+            for match in [re.search(r'"pipeline_membership": "0:(\d+)"', line)]
+            if match is not None
+        ]
+        assert stages == list(range(11)), stages
+
     def test_scalar_offset_lifts_above_independent_load(self):
         """Scalar compute lifts above loads (cat 0 < cat 1) while still preceding
         any load that depends on it. ``off`` floats to the top; ``ta2`` stays

@@ -2150,7 +2150,7 @@ class DbcSlotStamper : public IRMutator {
     if (is_cube_accumulator) {
       auto packed = call->GetAttr<std::string>(kPipelineMembershipAttr, std::string());
       packed = AppendPipelineMembership(packed, group_, slot_);
-      attrs = StripAttr(std::move(attrs), kPipelineMembershipAttr);
+      attrs = StripAttr(attrs, kPipelineMembershipAttr);
       attrs.emplace_back(kPipelineMembershipAttr, std::move(packed));
       auto stamped = std::make_shared<Call>(call->op_, call->args_, call->kwargs_, std::move(attrs),
                                             call->GetType(), call->span_);
@@ -3480,7 +3480,7 @@ class AutoTileMutator : public IRMutator {
                   VecMNFoldCapacityContext vec_capacity)
       : pipeline_dbc_plan_(std::move(pipeline_dbc_plan)),
         dbc_groups_(dbc_groups),
-        vec_capacity_(std::move(vec_capacity)) {}
+        vec_capacity_(vec_capacity) {}
 
   std::vector<Diagnostic> hints;
 

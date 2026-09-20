@@ -417,19 +417,20 @@ class CanonicalizeIOOrderMutator : public IRMutator {
     // overlap. Two co-live slots come from the rotated ``pipeline_membership``
     // below, not from clustering the drains.) L0A/L0B keep the requested depth F
     // while L0C rotates over two slots.
-    using HeapKey = std::tuple<int, std::string, int, size_t>;
+    using PipelineStageKey = std::vector<std::pair<int32_t, int32_t>>;
+    using HeapKey = std::tuple<int, PipelineStageKey, int, size_t>;
     std::priority_queue<HeapKey, std::vector<HeapKey>, std::greater<>> ready;
     std::vector<int> tier(sort_count);
     std::vector<int> sub(sort_count);
-    std::vector<std::string> packed_stage(sort_count);
+    std::vector<PipelineStageKey> stage(sort_count);
     for (size_t i = 0; i < sort_count; ++i) {
       tier[i] = (cats[i] == IOCategory::ScalarCompute) ? 0 : (cats[i] == IOCategory::Load) ? 1 : 2;
       sub[i] = (cats[i] == IOCategory::Store) ? 1 : 0;
       if (tier[i] == 2) {
-        packed_stage[i] = stage_key(stmts[i]);
+        stage[i] = ParsePipelineMembership(stage_key(stmts[i]));
       }
     }
-    auto key_for = [&](size_t i) -> HeapKey { return {tier[i], packed_stage[i], sub[i], i}; };
+    auto key_for = [&](size_t i) -> HeapKey { return {tier[i], stage[i], sub[i], i}; };
     for (size_t i = 0; i < sort_count; ++i) {
       if (remaining[i] == 0) ready.push(key_for(i));
     }
