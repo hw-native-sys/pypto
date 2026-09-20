@@ -148,9 +148,11 @@ tile 上，彼此串行依赖，因此只有 M/N 切分才能提供第二个 pin
   因此同一路径还把 accumulator seed（带 bias 的归约没有 seed 时则为第一个
   cube 结果）绑定到一个显式固定的 `MemRef(slots=2)`，并选择 slot
   `tile 序号 % 2`。PTOAS multi-buffer 的 slot 共用一种统一的物理类型。
-  对非均匀的边界网格，codegen 按能覆盖所有 tile 的完整 tile 定义该类型，
-  并把较小的边界使用发射为零偏移 `pto.subview`；因此边界 tile 仍是合法的
-  dbC stage，不会被从 chooser 的设计空间中删除。每个选中的常量 slot 都在其
+  仅有列边界时，累加器的物理行数不变，因此 codegen 可以按完整 tile 定义
+  region，并把较窄的使用发射为零偏移 `pto.subview`。行边界会改变 L0C 的
+  fractal stride；PTOAS 因而在选择前排除这类 dbC 候选，而不是发射无效别名。
+  PyPTO 和 DSA-RP 为每个 tile 保留原生几何形状，可支持两个方向的边界。
+  每个选中的常量 slot 都在其
   K-loop 之前实例化，循环携带值复用该 handle。对于保守生命周期不重叠且
   类型兼容的 multi-buffer region，PTOAS 复用同一个物理 region，但各自的
   pipeline group 标识仍保持独立。

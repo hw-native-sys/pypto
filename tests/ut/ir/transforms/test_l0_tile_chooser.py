@@ -360,6 +360,21 @@ class TestL0TilingEdgeCases:
         assert unrolled.dbc_emission_route == unrolled_route
         assert unrolled.estimated_cost_cycles < nested.estimated_cost_cycles
 
+    def test_unrolled_dbc_can_exclude_row_boundary_slots(self):
+        """A route with uniform Acc slots must reject candidates whose M tail changes stride."""
+        cfg = _default_config(M=272, N=416, K=32)
+        cfg.allow_double_buffer_c = True
+
+        unrestricted = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert unrestricted.double_buffer_c
+        assert cfg.M % unrestricted.m != 0
+
+        cfg.allow_unrolled_dbc_m_boundary = False
+
+        restricted = passes.l0_tile_chooser.choose_l0_tile(cfg)
+
+        assert not restricted.double_buffer_c or cfg.M % restricted.m == 0
+
     def test_dbc_must_strictly_beat_the_best_single_c_plan(self):
         """An equal-wall dbC candidate must not win through secondary keys.
 
@@ -775,7 +790,9 @@ def _dbc_realizable(m: int, n: int, k: int, cfg, stat: str) -> bool:
         inner_full_tiles = cfg.N // n if _row_outer(m, n, cfg, stat) else cfg.M // m
         return inner_full_tiles >= 2
     if route == _DBC_UNROLLED:
-        return _cdiv(cfg.M, m) * _cdiv(cfg.N, n) >= 2
+        return (cfg.allow_unrolled_dbc_m_boundary or cfg.M % m == 0) and (
+            _cdiv(cfg.M, m) * _cdiv(cfg.N, n) >= 2
+        )
     return False
 
 

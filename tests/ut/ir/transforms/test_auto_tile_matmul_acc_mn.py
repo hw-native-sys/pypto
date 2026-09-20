@@ -1072,8 +1072,9 @@ def test_canonical_split_k_peeled_spelling_shares_one_slot_per_tile():
     would resolve them by iteration order -- silently, with no assert and nothing to
     fail. The per-tile slot is what keeps that assumption true.
 
-    Declaration only, same as ``test_canonical_split_k_grid_declares_the_dbc_ping_pong``
-    -- see that test's note on what PTOAS does and does not prove here.
+    The full lowering is also exercised: both branches write one constant slot,
+    so the if-phi carries a preselected handle rather than choosing a slot at
+    runtime and is representable by PTOAS multi-buffer codegen.
     """
     M, N, K_total, K_tile = 256, 384, 256, 128
 
@@ -1110,6 +1111,7 @@ def test_canonical_split_k_peeled_spelling_shares_one_slot_per_tile():
     _backend.set_backend_type(BackendType.Ascend910B)
     with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
         after = passes.auto_tile_matmul_l0()(Before)
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
     printed = ir.python_print(after)
 
     tiles = printed.count("pl.tile.store(")
@@ -1122,6 +1124,13 @@ def test_canonical_split_k_peeled_spelling_shares_one_slot_per_tile():
     assert all(len(list(g)) == 2 for _, g in itertools.groupby(slots)), (
         f"each tile's two MADs must share its slot: {slots}"
     )
+
+    from pypto.pypto_core import codegen  # noqa: PLC0415
+
+    func = next(func for func in optimized.functions.values() if func.name == "kernel")
+    pto = codegen.PTOCodegen().generate(ir.Program([func], func.name, optimized.span), emit_tile_addr=False)
+    assert pto.count("pto.alloc_multi_tile") >= 1, pto
+    assert pto.count("pto.multi_tile_get") >= 2, pto
 
 
 if __name__ == "__main__":

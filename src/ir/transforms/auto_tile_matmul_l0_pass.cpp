@@ -1210,6 +1210,12 @@ std::optional<MatmulTiling> AnalyzeMatmul(
                               (memory_planner != MemoryPlanner::PyPTO || pypto_dbc);
   cfg.full_k_dbc_route = full_k_dbc_route;
   cfg.split_k_dbc_route = utils::DbcEmissionRoute::kUnrolledGrid;
+  // PTOAS lowers an unrolled grid to one uniform multi-buffer region. A
+  // column-only boundary is a valid zero-offset view because the L0C row pitch
+  // is unchanged, but a shorter physical M changes that pitch and cannot alias
+  // the covering slot. Exclude those candidates before selection; the other
+  // planners keep native per-tile allocations and support both boundaries.
+  cfg.allow_unrolled_dbc_m_boundary = memory_planner != MemoryPlanner::PtoAS;
   // tile.matmul_acc threads the caller's accumulator into the K-loop's
   // iter-arg, so each invocation reads C from L1 at start and writes back at
   // end (gamma_c = 2 in the chooser's traffic model).  Plain tile.matmul

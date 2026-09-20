@@ -35,6 +35,7 @@ CONST_SLOTS = pl.MemRef(slots=2)
 SINGLE = pl.MemRef()
 TOO_MANY = pl.MemRef(slots=17)
 MIXED_SHAPES = pl.MemRef(slots=2)
+MIXED_ACC_STRIDES = pl.MemRef(slots=2)
 MIXED_BINDING = pl.MemRef(slots=2)
 MIXED_VALID = pl.MemRef(slots=2)
 RUNTIME_VALID = pl.MemRef(slots=2)
@@ -119,6 +120,28 @@ class MixedSlotShapes:
         r_big: pl.Tensor[[64, 64], pl.FP32] = pl.store(big, [0, 0], big_out)
         small: pl.Tile[[32, 32], pl.FP32, MIXED_SHAPES[1], pl.Mem.Vec] = pl.load(a, [0, 0], [32, 32])
         r_small: pl.Tensor[[32, 32], pl.FP32] = pl.store(small, [0, 0], small_out)
+        return r_big, r_small
+
+
+@pl.program
+class MixedAccRowStrides:
+    """Acc slot views with different physical rows have different NZ strides."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        big_out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        small_out: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
+    ) -> tuple[pl.Tensor[[64, 64], pl.FP32], pl.Tensor[[32, 64], pl.FP32]]:
+        big: pl.Tile[[64, 64], pl.FP32, MIXED_ACC_STRIDES[0], pl.Mem.Acc] = pl.tile.create(
+            [64, 64], dtype=pl.FP32, target_memory=pl.Mem.Acc
+        )
+        r_big: pl.Tensor[[64, 64], pl.FP32] = pl.store(big, [0, 0], big_out)
+        small: pl.Tile[[32, 64], pl.FP32, MIXED_ACC_STRIDES[1], pl.Mem.Acc] = pl.tile.create(
+            [32, 64], dtype=pl.FP32, target_memory=pl.Mem.Acc
+        )
+        r_small: pl.Tensor[[32, 64], pl.FP32] = pl.store(small, [0, 0], small_out)
         return r_big, r_small
 
 
@@ -525,6 +548,7 @@ class TestUnsupportedShapesAreLoud:
         [
             (TooManySlots, "17"),
             (MixedSlotValidShapes, "different valid shapes"),
+            (MixedAccRowStrides, "different physical row counts"),
             (RuntimeValidShapeSlots, "runtime valid shape"),
             (CoLiveSlotsInLoop, "two of its slots are live at once inside a loop"),
             (UnsubscriptedBinding, "without selecting a slot"),
@@ -532,6 +556,7 @@ class TestUnsupportedShapesAreLoud:
         ids=[
             "slot-count-out-of-range",
             "non-uniform-valid-shape",
+            "non-uniform-acc-stride",
             "runtime-valid-shape",
             "co-live-slots-in-loop",
             "unsubscripted-binding",

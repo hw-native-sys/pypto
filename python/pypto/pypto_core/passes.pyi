@@ -1027,6 +1027,7 @@ class l0_tile_chooser:
         allow_double_buffer_c: bool
         full_k_dbc_route: l0_tile_chooser.DbcEmissionRoute
         split_k_dbc_route: l0_tile_chooser.DbcEmissionRoute
+        allow_unrolled_dbc_m_boundary: bool
         c_read: bool
         bw_a: float
         bw_b: float

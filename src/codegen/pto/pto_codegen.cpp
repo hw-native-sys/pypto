@@ -163,20 +163,19 @@ std::string MemRefIdentityKey(const ir::MemRefPtr& memref) {
 
 // Base Ptrs of tile phis that cannot be represented by PTO codegen.
 //
-// Branch and while-loop phis may select a handle at runtime, so a function-head
-// allocation cannot replace them with one `pto.multi_tile_get`. A `ForStmt` tile
-// carry is different: PTO codegen maps non-scalar iter_args and return vars
-// directly to their init handle (see pto_control_flow_codegen.cpp). When that
-// handle selects a CONSTANT slot before the loop, carrying it through the loop
-// requires no runtime slot index and is representable. AutoTile's unrolled dbC
-// route has exactly this shape: one K-loop per output tile, with a constant slot
-// selected before each loop.
+// A while-loop phi may select a handle at runtime, so a function-head allocation
+// cannot replace it with one `pto.multi_tile_get`. For/if tile phis are different:
+// PTO codegen maps them to the predeclared canonical handle. When that handle
+// selects a CONSTANT slot before the control-flow region, carrying it through the
+// region requires no runtime slot index and is representable. AutoTile's unrolled
+// dbC route has exactly this shape: one K-loop per output tile, sometimes with an
+// if-shaped first-block spelling, and one constant slot for the whole tile.
 class UnsupportedTilePhiBaseCollector : public ir::IRVisitor {
  public:
   std::set<const ir::Var*> bases;
 
   void VisitStmt_(const ir::IfStmtPtr& op) override {
-    Record(op->return_vars_);
+    RecordNonConstantSlots(op->return_vars_);
     ir::IRVisitor::VisitStmt_(op);
   }
 
@@ -1669,6 +1668,7 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     std::string slot_type_str;
     TileTypeComponents slot_components;
     bool mixed_geometry = false;
+    bool incompatible_acc_stride = false;
     /// The valid extent every slot must share, taken from the reference tile.
     /// Held as plain values plus a flag rather than an optional: `blocker` is what
     /// decides whether they are usable, and an optional here reads as if a null
@@ -1740,6 +1740,9 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
         candidate.blocker = "its slots use incompatible tile layouts or element types";
         break;
       }
+      if (first_type->GetMemorySpace() == ir::MemorySpace::Acc && components.rows != baseline.rows) {
+        candidate.incompatible_acc_stride = true;
+      }
       max_rows = std::max(max_rows, components.rows);
       max_cols = std::max(max_cols, components.cols);
       candidate.mixed_geometry |= components.rows != baseline.rows || components.cols != baseline.cols;
@@ -1756,6 +1759,11 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     if (!candidate.reference_tile) {
       candidate.blocker =
           "its slots have crossed tile shapes with no single bound tile that covers every use";
+      continue;
+    }
+    if (candidate.incompatible_acc_stride) {
+      candidate.blocker =
+          "its Acc slots have different physical row counts, which imply different L0C fractal strides";
       continue;
     }
     if (candidate.mixed_geometry && candidate.slot_components.pad != ir::PadValue::null) {
