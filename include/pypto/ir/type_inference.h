@@ -966,10 +966,19 @@ inline bool IsFp4PackedCastGeometryChange(DataType src, DataType dst) {
   return (src.IsPackedFp4() && !dst.IsFp4Family()) || (!src.IsFp4Family() && dst.IsPackedFp4());
 }
 
+/// Reject FP4 ↔ FP4E2M1X2 family-internal casts (geometry would disagree with Assign).
+inline void RejectFp4FamilyInternalCast(DataType src, DataType dst, const Span& span) {
+  CHECK_SPAN(!(src.IsFp4Family() && dst.IsFp4Family()), span)
+      << "cast between FP4 and FP4E2M1X2 is not supported; cast via a wider type (e.g. BF16) "
+         "or rewrite shapes to the target packing explicitly (see docs/en/dev/fp4.md)";
+}
+
 /// Scale last-axis extents for post-PackFp4 casts between packed FP4E2M1X2 and a
 /// wider element type. Logical FP4 (pre-pack) keeps a 1:1 shape.
+/// Wider → packed requires a static positive even last dim (dynamic rejected).
 inline std::vector<ExprPtr> AdjustFp4E2M1x2CastLastDim(std::vector<ExprPtr> dims, DataType src, DataType dst,
                                                        const Span& span) {
+  RejectFp4FamilyInternalCast(src, dst, span);
   if (dims.empty()) return dims;
   if (src.IsPackedFp4() && !dst.IsFp4Family()) {
     if (auto extent = As<ConstInt>(dims.back())) {
@@ -983,7 +992,8 @@ inline std::vector<ExprPtr> AdjustFp4E2M1x2CastLastDim(std::vector<ExprPtr> dims
           << "cast to FP4E2M1X2 requires a positive even last dimension, got " << extent->value_;
       dims.back() = std::make_shared<ConstInt>(extent->value_ / 2, DataType::INDEX, span);
     } else {
-      dims.back() = MakeFloorDiv(dims.back(), std::make_shared<ConstInt>(2, DataType::INDEX, span), span);
+      CHECK_SPAN(false, span) << "cast to FP4E2M1X2 requires a static positive even last dimension "
+                                 "(dynamic last axes are not supported; see docs/en/dev/fp4.md)";
     }
   }
   return dims;
@@ -1034,7 +1044,8 @@ inline std::vector<ExprPtr> AdjustFp4E2M1x2CastStrides(std::vector<ExprPtr> src_
     } else if (unpack) {
       src_strides[i] = MakeMul(src_strides[i], two, span);
     } else {
-      src_strides[i] = MakeFloorDiv(src_strides[i], two, span);
+      CHECK_SPAN(false, span) << "cast to FP4E2M1X2 requires static even leading strides "
+                                 "(dynamic strides are not supported; see docs/en/dev/fp4.md)";
     }
   }
   src_strides.back() = std::make_shared<ConstInt>(1, DataType::INDEX, span);

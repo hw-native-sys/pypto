@@ -23,6 +23,7 @@ from pypto.backend import BackendType
 from pypto.ir.builder import IRBuilder
 from pypto.ir.op import tensor as tensor_ops
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.language.parser.diagnostics import InvalidOperationError
 from pypto.pypto_core import DataType, ir
 
 
@@ -121,58 +122,32 @@ class TestOrchestrationMore:
         with pytest.raises(ValueError, match="packed FP4 last-axis offset must be byte-aligned"):
             _generate_orch_code(Fp4OddSliceProgram)
 
-    def test_fp4_reshape_and_view_use_x2_carrier_last_dimension(self):
-        """Both shape-reinterpret paths preserve physical carrier element counts."""
+    def test_fp4_reshape_and_transpose_are_rejected(self):
+        """FP4-family reshape/transpose are unsupported without PackFp4."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend950)
 
-        @pl.program
-        class Fp4ShapeViewProgram:
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                data: pl.Tensor[[8, 16], pl.FP4],
-            ) -> pl.Tensor[[2, 64], pl.FP4]:
-                reshaped: pl.Tensor[[4, 32], pl.FP4] = pl.reshape(data, [4, 32])
-                viewed: pl.Tensor[[2, 64], pl.FP4] = pl.tensor.view(reshaped, [2, 64])
-                return viewed
+        with pytest.raises(InvalidOperationError, match="tensor.reshape is not supported for FP4"):
 
-        code = _generate_orch_code(Fp4ShapeViewProgram)
-        assert "uint32_t reshaped_shapes[2] = {4, 16};" in code
-        assert "Tensor reshaped = ext_data.reshape(reshaped_shapes, 2);" in code
-        assert "uint32_t viewed_shapes[2] = {2, 32};" in code
-        assert "Tensor viewed = reshaped.reshape(viewed_shapes, 2);" in code
+            @pl.program
+            class Fp4ReshapeProgram:
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(
+                    self,
+                    data: pl.Tensor[[8, 16], pl.FP4],
+                ) -> pl.Tensor[[4, 32], pl.FP4]:
+                    return pl.reshape(data, [4, 32])
 
-    def test_fp4_transpose_keeps_packed_axis_fixed(self):
-        """Swapping non-packed axes is representable; moving the packed axis is not."""
-        backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend950)
+        with pytest.raises(InvalidOperationError, match="tensor.transpose is not supported for FP4"):
 
-        @pl.program
-        class Fp4NonPackedTransposeProgram:
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                data: pl.Tensor[[2, 4, 16], pl.FP4],
-            ) -> pl.Tensor[[4, 2, 16], pl.FP4]:
-                transposed: pl.Tensor[[4, 2, 16], pl.FP4] = pl.transpose(data, axis1=0, axis2=1)
-                return transposed
-
-        code = _generate_orch_code(Fp4NonPackedTransposeProgram)
-        assert "Tensor transposed = ext_data.transpose(0, 1);" in code
-
-        @pl.program
-        class Fp4PackedTransposeProgram:
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                data: pl.Tensor[[2, 4, 16], pl.FP4],
-            ) -> pl.Tensor[[2, 16, 4], pl.FP4]:
-                transposed: pl.Tensor[[2, 16, 4], pl.FP4] = pl.transpose(data, axis1=1, axis2=2)
-                return transposed
-
-        with pytest.raises(ValueError, match="cannot move the packed FP4 last axis"):
-            _generate_orch_code(Fp4PackedTransposeProgram)
+            @pl.program
+            class Fp4TransposeProgram:
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(
+                    self,
+                    data: pl.Tensor[[2, 4, 16], pl.FP4],
+                ) -> pl.Tensor[[4, 2, 16], pl.FP4]:
+                    return pl.transpose(data, axis1=0, axis2=1)
 
     def test_fp4_view_rejects_layout_flip_across_packed_axis(self):
         """ND/DN layout flips swap the trailing pair and cannot preserve FP4 packing."""

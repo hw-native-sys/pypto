@@ -226,6 +226,17 @@ class PTOCodegen : public CodegenBase {
   std::string GetOrEmitConstant(double value, DataType dt);
 
   /**
+   * @brief Expand packed FP4E2M1X2 make_tensor_view last-axis shape/strides
+   *        from IR carrier units to pto-isa nibble units (see docs/en/dev/fp4.md).
+   *        MX layouts are skipped. Mutates shape_ssas / stride_ssas in place.
+   */
+  void ExpandPackedFp4MakeTensorViewDims(DataType dtype, ir::TensorLayout layout,
+                                         const std::vector<ir::ExprPtr>& shape_exprs,
+                                         std::vector<std::string>& shape_ssas,
+                                         const std::vector<ir::ExprPtr>* stride_exprs,
+                                         std::vector<std::string>& stride_ssas);
+
+  /**
    * @brief Emit arith.index_cast if var is not already index type
    *
    * Valid_shape vars may be INT64/INT32 (from pl.min(...)), but pto.alloc_tile

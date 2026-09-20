@@ -51,12 +51,13 @@ class TestMxMatmulCodegen:
         class Program:
             @pl.function(type=pl.FunctionType.InCore)
             def main(self):
-                created = pl.tile.create([16, 64], dtype=pl.FP4, target_memory=pl.Mem.Vec)
-                pl.set_validshape(created, 8, 64)
+                created = pl.tile.create([16, 32], dtype=pl.FP4E2M1X2, target_memory=pl.Mem.Vec)
+                pl.set_validshape(created, 8, 32)
 
         mlir = _emit_incore_mlir(Program)
         alloc = next(line for line in mlir.splitlines() if "pto.alloc_tile" in line and "f4E2M1x2" in line)
         set_valid = next(line for line in mlir.splitlines() if "pto.set_validshape" in line)
+        # Carrier extents are emitted as-is (no /2); logical FP4 would still /2 on Vec.
         assert "valid_row = %c16_index valid_col = %c32_index" in alloc
         assert "v_row=?, v_col=?" in alloc
         assert ", %c8_index, %c32_index :" in set_valid
@@ -320,13 +321,13 @@ class TestMxMatmulCodegen:
             @pl.function(type=pl.FunctionType.InCore)
             def main(
                 self,
-                a: pl.Tensor[[128, 64], pl.FP4],
+                a: pl.Tensor[[128, 32], pl.FP4E2M1X2],
                 a_s: pl.Tensor[[128, 2], pl.FP8E8M0, pl.MX_A_ZZ],
                 b: pl.Tensor[[64, 64], pl.FP8E4M3FN],
                 b_s: pl.Tensor[[2, 64], pl.FP8E8M0, pl.MX_B_NN],
                 out: pl.Tensor[[128, 64], pl.FP32],
             ):
-                ta = pl.cast(pl.load(a, [0, 0], [128, 64]), pl.FP8E4M3FN)
+                ta = pl.cast(pl.load(a, [0, 0], [128, 32]), pl.FP8E4M3FN)
                 tas = pl.load(a_s, [0, 0], [128, 2])
                 tb = pl.load(b, [0, 0], [64, 64])
                 tbs = pl.load(b_s, [0, 0], [2, 64])
@@ -350,7 +351,7 @@ class TestMxMatmulCodegen:
             ):
                 pl.store(pl.load(src, [0, 0], [16, 64]), [0, 0], out)
 
-        with pytest.raises(ValueError, match=r"4-bit dtype.*not supported.*a2a3.*load/store.*ABI"):
+        with pytest.raises(ValueError, match=r"4-bit dtype.*not supported.*a2a3"):
             _emit_incore_mlir(Program, BackendType.Ascend910B)
 
     @pytest.mark.parametrize("dtype", [pl.INT4, pl.UINT4, pl.HF4])
@@ -365,7 +366,7 @@ class TestMxMatmulCodegen:
             ):
                 pl.store(pl.load(src, [0, 0], [16, 64]), [0, 0], out)
 
-        with pytest.raises(ValueError, match=r"4-bit dtype.*not supported.*a5.*only FP4"):
+        with pytest.raises(ValueError, match=r"4-bit dtype.*not supported.*a5.*FP4E2M1X2"):
             _emit_incore_mlir(Program)
 
     def test_matmul_mx_acc_ins_equals_outs(self):

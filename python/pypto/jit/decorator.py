@@ -281,15 +281,22 @@ def _extract_tensor_meta(
     tensor: Any,
     dyn_dims: dict[int, DynDim] | None = None,
     layout: _ir.TensorLayout | None = None,
+    expected_dtype: DataType | None = None,
 ) -> TensorMeta:
     """Extract TensorMeta from a torch.Tensor (shape/dtype only — no data read).
 
-    ``layout`` comes from the parameter's annotation, not the tensor: torch has
-    no notion of a PyPTO layout, so the annotation is the only source.
+    ``layout`` and ``expected_dtype`` come from the parameter's annotation, not
+    the tensor: torch has no notion of a PyPTO layout, and ``float4_e2m1fn_x2``
+    alone cannot distinguish logical ``pl.FP4`` (nibble IR, expand last dim) from
+    packed ``pl.FP4E2M1X2`` (carrier IR, no expand).
     """
-    dtype = _torch_dtype_to_pypto(tensor.dtype)
+    torch_dtype = _torch_dtype_to_pypto(tensor.dtype)
     extents = list(tensor.shape)
-    if dtype == DataType.FP4E2M1X2:
+
+    if torch_dtype == DataType.FP4E2M1X2 or expected_dtype in (
+        DataType.FP4,
+        DataType.FP4E2M1X2,
+    ):
         if not extents:
             raise TypeError("Packed torch.float4_e2m1fn_x2 tensors must have rank >= 1")
         if extents[-1] <= 0:
@@ -297,17 +304,34 @@ def _extract_tensor_meta(
                 "Packed torch.float4_e2m1fn_x2 tensors require a positive runtime x2 carrier last "
                 f"dimension; got shape {tuple(extents)}"
             )
-        # Torch and IR both count packed x2 carriers for FP4E2M1X2; do not expand.
-    elif dtype == DataType.FP4:
-        if not extents:
-            raise TypeError("Packed torch.float4_e2m1fn_x2 tensors must have rank >= 1")
-        if extents[-1] <= 0:
+
+    if expected_dtype is not None and expected_dtype == DataType.FP4:
+        if torch_dtype not in (DataType.FP4, DataType.FP4E2M1X2):
             raise TypeError(
-                "Packed torch.float4_e2m1fn_x2 tensors require a positive runtime x2 carrier last "
-                f"dimension; got shape {tuple(extents)}"
+                f"Parameter annotated pl.FP4 but got torch dtype mapped to {torch_dtype}; "
+                "pass torch.float4_e2m1fn_x2 or change the annotation"
             )
         # Legacy logical FP4 path: expand carrier → nibble extents at the API boundary.
         extents[-1] *= 2
+        dtype = DataType.FP4
+    elif expected_dtype is not None and expected_dtype == DataType.FP4E2M1X2:
+        if torch_dtype not in (DataType.FP4, DataType.FP4E2M1X2):
+            raise TypeError(
+                f"Parameter annotated pl.FP4E2M1X2 but got torch dtype mapped to {torch_dtype}; "
+                "pass torch.float4_e2m1fn_x2 or change the annotation"
+            )
+        # Torch and IR both count packed x2 carriers for FP4E2M1X2; do not expand.
+        dtype = DataType.FP4E2M1X2
+    elif expected_dtype is not None and expected_dtype != torch_dtype:
+        raise TypeError(
+            f"Parameter annotated {expected_dtype} but torch tensor maps to {torch_dtype}; "
+            "change the annotation or pass a matching tensor"
+        )
+    else:
+        # No FP4-family annotation (or bare pl.Tensor): keep the torch→IR default
+        # (packed FP4E2M1X2 for float4_e2m1fn_x2, no expand).
+        dtype = torch_dtype
+
     return _build_tensor_meta(extents, dtype, dyn_dims, layout)
 
 
@@ -408,6 +432,29 @@ def _param_layouts(func: Any, func_name: str) -> dict[str, _ir.TensorLayout]:
         if layout is not None:
             layouts[name] = layout
     return layouts
+
+
+def _param_dtypes(func: Any) -> dict[str, DataType]:
+    """Map parameter name → annotated element dtype, for shaped tensor params.
+
+    Used by the torch-argument path so ``pl.FP4`` vs ``pl.FP4E2M1X2`` can select
+    the expand / no-expand ABI for ``torch.float4_e2m1fn_x2``.
+    """
+    try:
+        sig = inspect.signature(func)
+    except (TypeError, ValueError):
+        return {}
+    ann_ns = _annotation_namespace(func, sig)
+
+    dtypes: dict[str, DataType] = {}
+    for name, param in sig.parameters.items():
+        if name == "self":
+            continue
+        annotation = _resolve_annotation(param.annotation, ann_ns)
+        dtype = getattr(annotation, "dtype", None)
+        if isinstance(dtype, DataType):
+            dtypes[name] = dtype
+    return dtypes
 
 
 def _constexpr_params(func: Any) -> list[str]:
@@ -2840,8 +2887,9 @@ class JITFunction:
         )
         entry_dyn_map = per_func_dyn_maps[id(self._func)]
         # A layout has no runtime counterpart on a torch tensor, so it comes
-        # from the annotation even on this path.
+        # from the annotation even on this path. FP4 vs FP4E2M1X2 likewise.
         param_layouts = _param_layouts(self._func, self.__name__)
+        param_dtypes = _param_dtypes(self._func)
         tensor_meta: dict[str, TensorMeta] = {}
         scalar_dtypes: dict[str, DataType] = {}
         constexpr_names = _constexpr_params(self._func)
@@ -2868,7 +2916,10 @@ class JITFunction:
                 )
             if _is_tensor(value):
                 tensor_meta[name] = _extract_tensor_meta(
-                    value, entry_dyn_map.get(name), param_layouts.get(name)
+                    value,
+                    entry_dyn_map.get(name),
+                    param_layouts.get(name),
+                    param_dtypes.get(name),
                 )
 
         # Drop constexpr bindings out of ``arguments``: they are resolved during

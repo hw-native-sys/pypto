@@ -134,7 +134,7 @@ End-to-end 4-bit execution is backend-gated. Ascend950 in-core accepts packed
 in-core codegen. Ascend910B/A2A3 rejects every FP4-family in-core dtype because
 its isolated FP16↔INT4 conversion has no matching packed load/store carrier ABI.
 See [FP4](../../dev/fp4.md) for cast samples (`FP4E2M1X2`→BF16 / FP8), units, and
-#2754-class stride guidance.
+`#2754`-class stride guidance.
 
 ### Container types
 

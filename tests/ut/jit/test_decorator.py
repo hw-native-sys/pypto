@@ -66,13 +66,29 @@ class TestJitDecoration:
 
         assert my_kernel.__name__ == "my_kernel"
 
-    def test_torch_fp4_x2_shape_becomes_logical_ir_shape(self):
+    def test_torch_fp4_x2_default_keeps_carrier_shape(self):
+        """Bare / packed annotation: torch float4 stays FP4E2M1X2 carrier extents."""
         torch = pytest.importorskip("torch")
         fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
         if fp4_dtype is None:
             pytest.skip("torch.float4_e2m1fn_x2 required")
         packed = torch.empty((128, 32), dtype=fp4_dtype)
         meta = _extract_tensor_meta(packed)
+        assert meta.dtype == DataType.FP4E2M1X2
+        assert meta.static_shape() == (128, 32)
+
+        meta_x2 = _extract_tensor_meta(packed, expected_dtype=DataType.FP4E2M1X2)
+        assert meta_x2.dtype == DataType.FP4E2M1X2
+        assert meta_x2.static_shape() == (128, 32)
+
+    def test_torch_fp4_x2_with_logical_fp4_annotation_expands(self):
+        """pl.FP4 annotation restores legacy carrier→nibble expand at the API boundary."""
+        torch = pytest.importorskip("torch")
+        fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
+        if fp4_dtype is None:
+            pytest.skip("torch.float4_e2m1fn_x2 required")
+        packed = torch.empty((128, 32), dtype=fp4_dtype)
+        meta = _extract_tensor_meta(packed, expected_dtype=DataType.FP4)
         assert meta.dtype == DataType.FP4
         assert meta.static_shape() == (128, 64)
 

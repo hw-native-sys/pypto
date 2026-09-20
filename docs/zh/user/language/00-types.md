@@ -116,7 +116,7 @@ metadata 仍会在该 dtype 存在时按二收缩/展开。
 `pl.FP4E2M1X2`；逻辑 `pl.FP4` / `INT4` / `UINT4` / `HF4` 会被 in-core codegen
 拒绝。Ascend910B/A2A3 会拒绝整族 FP4 in-core dtype，因为它只有孤立的
 FP16↔INT4 转换，没有配套的 packed load/store carrier ABI。cast 样例
-（`FP4E2M1X2`→BF16 / FP8）、单位约定与 #2754 类 stride 指引见
+（`FP4E2M1X2`→BF16 / FP8）、单位约定与 `#2754` 类 stride 指引见
 [FP4](../../dev/fp4.md)。
 
 ### 容器类型

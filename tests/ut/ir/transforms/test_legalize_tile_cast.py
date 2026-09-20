@@ -13,6 +13,7 @@ import pypto.language as pl
 import pytest
 from pypto import backend, ir, passes
 from pypto.backend import BackendType
+from pypto.language.parser.diagnostics import InvalidOperationError
 
 _TILE_CAST = ir.get_op("tile.cast").name
 
@@ -271,28 +272,21 @@ def test_a5_fp4e2m1x2_to_fp8_cast_emits_warning(capfd):
 
 
 def test_a5_packed_fp4e2m1x2_cast_expands_last_dim_valid_shape():
-    """After PackFp4, FP4E2M1X2→FP8 legalization expands the last axis 2:1."""
-    from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+    """Hand-written FP4E2M1X2→FP8 legalization expands the last axis 2:1."""
 
     @pl.program
     class Before:
         @pl.function(type=pl.FunctionType.InCore)
         def kernel(
             self,
-            x: pl.Tensor[[16, 64], pl.FP4],
+            x: pl.Tensor[[16, 32], pl.FP4E2M1X2],
             out: pl.Out[pl.Tensor[[16, 64], pl.FP8E4M3FN]],
         ) -> pl.Tensor[[16, 64], pl.FP8E4M3FN]:
-            t = pl.load(x, [0, 0], [16, 64], valid_shape=[8, 48])
+            t = pl.load(x, [0, 0], [16, 32], valid_shape=[8, 24])
             c = pl.cast(t, pl.FP8E4M3FN)
             return pl.store(c, [0, 0], out)
 
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend950)
-    try:
-        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
-            after = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
-    finally:
-        backend.reset_for_testing()
+    after = _run(Before, BackendType.Ascend950)
 
     pairs = _cast_pairs(after)
     assert pairs[0][0] == "fp4e2m1x2"
@@ -345,6 +339,42 @@ def test_a5_packed_fp4e2m1x2_cast_expands_last_dim_valid_shape():
     # valid_shape [8, 24] → [8, 48] is the sub-rectangle, not the row pitch.
     assert strides.strides[0] == [64, 1]
     assert all(stride == [64, 1] for stride in strides.strides)
+
+
+def test_fp4_family_internal_cast_is_rejected():
+    """FP4 ↔ FP4E2M1X2 must fail at type deduction (geometry disagree)."""
+    with pytest.raises(InvalidOperationError, match="cast between FP4 and FP4E2M1X2"):
+
+        @pl.program
+        class Bad:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 64], pl.FP4],
+                out: pl.Out[pl.Tensor[[16, 32], pl.FP4E2M1X2]],
+            ) -> pl.Tensor[[16, 32], pl.FP4E2M1X2]:
+                t = pl.load(x, [0, 0], [16, 64])
+                c = pl.cast(t, pl.FP4E2M1X2)
+                return pl.store(c, [0, 0], out)
+
+
+def test_cast_to_packed_fp4_rejects_dynamic_last_dim():
+    """Wider → FP4E2M1X2 requires a static positive even last dim."""
+    n = pl.dynamic("N")
+
+    with pytest.raises(InvalidOperationError, match="static positive even last dimension"):
+
+        @pl.program
+        class Bad:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, n], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, n // 2], pl.FP4E2M1X2]],
+            ) -> pl.Tensor[[16, n // 2], pl.FP4E2M1X2]:
+                t = pl.load(x, [0, 0], [16, n])
+                c = pl.cast(t, pl.FP4E2M1X2)
+                return pl.store(c, [0, 0], out)
 
 
 def test_a2a3_int32_to_fp16_stays_native():
