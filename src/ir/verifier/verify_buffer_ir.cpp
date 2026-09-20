@@ -10,6 +10,7 @@
  */
 
 #include <any>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -285,8 +286,9 @@ class BufferIRVisitor : public IRVisitor {
     byte_sizes_[type.get()] = std::nullopt;
     if ((type->shape_.size() != 1 && type->shape_.size() != 2) || type->blayout_ != TileLayout::row_major ||
         type->slayout_ != TileLayout::none_box || type->fractal_ != 512 || type->pad_ != PadValue::null ||
-        type->compact_ != CompactMode::null || type->dtype_.GetBit() % 8 != 0)
+        type->compact_ != CompactMode::null || type->dtype_.GetBit() % 8 != 0) {
       return std::nullopt;
+    }
     uint64_t bytes = type->dtype_.GetBit() / 8;
     for (const auto extent : type->shape_) {
       if (static_cast<uint64_t>(extent) > std::numeric_limits<uint64_t>::max() / bytes) return std::nullopt;

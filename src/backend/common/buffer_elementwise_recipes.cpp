@@ -12,6 +12,7 @@
 #include "pypto/backend/common/buffer_elementwise_recipes.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
