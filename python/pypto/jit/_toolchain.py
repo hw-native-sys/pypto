@@ -225,6 +225,29 @@ def _include_roots(output: str, executable: Path) -> set[Path]:
     return {Path(line.strip()).resolve(strict=True) for line in includes.splitlines() if line.strip()}
 
 
+def _driver_executed(output: str, executable: Path) -> Path:
+    """Return the compiler driver the invocation actually ran.
+
+    Invoking through a wrapper reaches a different binary: ccache's shim execs
+    /usr/bin/g++, and it is that driver's specs, subprograms and built-ins that
+    decide the compilation -- the wrapper contributes none of them. Inventorying
+    only the path invoked would leave the real compiler out, so replacing it
+    between two runs would not move the fingerprint and a stale artifact could
+    be reused.
+
+    GCC reports the driver it ran as COLLECT_GCC in its verbose output, which is
+    the outcome of whatever selection the wrapper performed -- stronger evidence
+    than the wrapper's configuration, because a configuration change that picks
+    a different compiler changes this value. Without it the real compiler cannot
+    be identified at all, so refuse rather than guess: an unusable identity
+    leaves the cache off, which is the safe direction.
+    """
+    for line in output.splitlines():
+        if line.startswith("COLLECT_GCC="):
+            return Path(line.partition("=")[2].strip()).resolve(strict=True)
+    raise ValueError(f"Cannot identify the compiler driver actually executed: {executable}")
+
+
 def _gcc_inputs(executable: Path) -> set[Path]:
     if "clang" in _run([str(executable), "--version"]).lower():
         raise ValueError(f"Unsupported host compiler resource layout: {executable}")
@@ -236,6 +259,7 @@ def _gcc_inputs(executable: Path) -> set[Path]:
     paths.add(libgcc.parent)  # GCC specs, plugins, startup objects, resources.
     output = _run([str(executable), "-E", "-x", "c++", "-v", os.devnull])
     paths.update(_include_roots(output, executable))
+    paths.update(_elf_inputs(_driver_executed(output, executable)))
     paths.update(_gcc_link_inputs(executable))
     return paths
 

@@ -354,6 +354,58 @@ def test_invocable_still_refuses_a_non_elf_launcher(tmp_path, monkeypatch):
         _toolchain._invocable("g++")
 
 
+def test_the_driver_a_wrapper_executes_is_inventoried(tmp_path, monkeypatch):
+    # A wrapper contributes none of the specs, subprograms or built-ins that
+    # decide the compilation -- the driver it execs does. Inventorying only the
+    # path invoked would let the real compiler be replaced without moving the
+    # fingerprint.
+    driver = tmp_path / "real-g++"
+    driver.write_bytes(b"\x7fELF")
+    shim = tmp_path / "wrapper-g++"
+    shim.write_bytes(b"\x7fELF")
+    output = f"COLLECT_GCC={driver}\nsome other line\n"
+
+    assert _toolchain._driver_executed(output, shim) == driver.resolve()
+
+
+def test_an_unidentifiable_driver_refuses_rather_than_guesses(tmp_path):
+    shim = tmp_path / "wrapper-g++"
+    shim.write_bytes(b"\x7fELF")
+
+    with pytest.raises(ValueError, match="compiler driver actually executed"):
+        _toolchain._driver_executed("no marker here\n", shim)
+
+
+def test_gcc_inputs_covers_both_the_wrapper_and_its_driver(tmp_path, monkeypatch):
+    shim = tmp_path / "wrapper-g++"
+    shim.write_bytes(b"\x7fELF")
+    driver = tmp_path / "real-g++"
+    driver.write_bytes(b"\x7fELF")
+    subprogram = tmp_path / "cc1plus"
+    subprogram.write_bytes(b"\x7fELF")
+    subprogram.chmod(0o755)
+    libgcc = tmp_path / "lib" / "libgcc.a"
+    libgcc.parent.mkdir()
+    libgcc.write_bytes(b"!<arch>\n")
+
+    def run(command):
+        if "--version" in command:
+            return "g++ (GCC) 13\n"
+        if any(arg.startswith("-print-prog-name") for arg in command):
+            return f"{subprogram}\n"
+        if "-print-libgcc-file-name" in command:
+            return f"{libgcc}\n"
+        return f"COLLECT_GCC={driver}\n#include <...> search starts here:\n {tmp_path}\nEnd of search list.\n"
+
+    monkeypatch.setattr(_toolchain, "_run", run)
+    monkeypatch.setattr(_toolchain, "_gcc_link_inputs", lambda executable: set())
+    monkeypatch.setattr(_toolchain, "_elf_inputs", lambda p, *rest: {p})
+
+    paths = _toolchain._gcc_inputs(shim)
+
+    assert {shim, driver} <= paths
+
+
 def test_probes_do_not_read_translated_output(tmp_path, monkeypatch):
     # gcc translates its diagnostics: on a non-English host it renders
     # "#include <...> search starts here:" in that language, and no marker
