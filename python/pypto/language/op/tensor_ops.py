@@ -231,7 +231,7 @@ create_tensor = create
 
 
 def copy(
-    dst: _TensorT,
+    dst: Tensor,
     src: Tensor,
     dst_offsets: Sequence[IntLike] | None = None,
     src_offsets: Sequence[IntLike] | None = None,
@@ -239,8 +239,12 @@ def copy(
     *,
     source_memory: MemorySpace = MemorySpace.DDR,
     target_memory: MemorySpace = MemorySpace.SRAM,
-) -> _TensorT:
-    """Copy a DDR/SRAM tensor region, including DDR to DDR, returning ``dst``.
+) -> _ir_core.Call:
+    """Copy a DDR/SRAM tensor region in place, without a tensor result.
+
+    Use ``pl.copy(dst, src, ...)`` as a standalone DSL statement, then use
+    ``dst`` directly. The Python builder returns a void-typed IR Call for the
+    parser, following the side-effect-only operator convention.
 
     Both endpoints use global tensor addressing. Defaults to DDR -> SRAM;
     reverse both memory keywords for SRAM -> DDR. The destination must already
@@ -250,16 +254,14 @@ def copy(
     Omit all region arguments for a whole-tensor copy with matching shapes.
     Set both endpoints to DDR to validate data movement on current hardware.
     """
-    return dst.__class__(
-        expr=_ir_ops.copy(
-            dst.unwrap(),
-            src.unwrap(),
-            None if dst_offsets is None else _normalize_intlike(dst_offsets),
-            None if src_offsets is None else _normalize_intlike(src_offsets),
-            None if shape is None else _normalize_intlike(shape),
-            source_memory=source_memory,
-            target_memory=target_memory,
-        )
+    return _ir_ops.copy(
+        dst.unwrap(),
+        src.unwrap(),
+        None if dst_offsets is None else _normalize_intlike(dst_offsets),
+        None if src_offsets is None else _normalize_intlike(src_offsets),
+        None if shape is None else _normalize_intlike(shape),
+        source_memory=source_memory,
+        target_memory=target_memory,
     )
 
 

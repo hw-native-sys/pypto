@@ -31,7 +31,7 @@ endpoints; specify them explicitly:
 ```python
 dst = pl.create_tensor(src.shape, dtype=src.dtype, memory_type=pl.Mem.DDR)
 with pl.at(level=pl.Level.CORE_GROUP):
-    dst = pl.copy(dst, src, source_memory=pl.Mem.DDR, target_memory=pl.Mem.DDR)
+    pl.copy(dst, src, source_memory=pl.Mem.DDR, target_memory=pl.Mem.DDR)
 ```
 
 Omit all region arguments to copy equal-shaped whole tensors, or supply all of
@@ -40,8 +40,11 @@ See `examples/beginner/05_matmul.py`: copy A/B, then consume the copies in a
 separate InCore scope for matrix multiplication.
 
 `pl.copy(dst, src, dst_offsets, src_offsets, shape, *, source_memory=pl.Mem.DDR,
-target_memory=pl.Mem.SRAM)` copies between tensor regions and returns an alias of
-`dst`. Supported routes are DDR → DDR, DDR → SRAM, and SRAM → DDR; the default
+target_memory=pl.Mem.SRAM)` writes `dst` in place without a tensor result. Use it
+as a standalone statement, then use `dst` directly; migrate `dst = pl.copy(...)`
+to `pl.copy(...)` and `return pl.copy(...)` to `pl.copy(...); return dst`.
+The Python builder returns an UnknownType IR Call for the parser, not a Tensor.
+Supported routes are DDR → DDR, DDR → SRAM, and SRAM → DDR; the default
 remains DDR → SRAM. Dtypes and ranks must match;
 static out-of-bounds regions are rejected. Dynamic regions must be in bounds at
 runtime. Source and destination regions must not overlap.
@@ -63,7 +66,8 @@ simulation-compatible transfer path, not a new hardware SRAM allocator.
 @pl.jit.incore
 def stage(src: pl.Tensor[[4, 600], pl.FP32],
           dst: pl.Out[pl.Tensor[[4, 600], pl.FP32]]) -> pl.Tensor[[4, 600], pl.FP32]:
-    return pl.copy(dst, src, [0, 0], [0, 0], [4, 600])
+    pl.copy(dst, src, [0, 0], [0, 0], [4, 600])
+    return dst
 ```
 
 ## Type System

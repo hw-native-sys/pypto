@@ -19,14 +19,15 @@ import torch
 def stage(
     src: pl.Tensor[[4, 600], pl.FP32], dst: pl.Out[pl.Tensor[[4, 600], pl.FP32]]
 ) -> pl.Tensor[[4, 600], pl.FP32]:
-    return pl.copy(dst, src, [0, 0], [0, 0], [4, 600])
+    pl.copy(dst, src, [0, 0], [0, 0], [4, 600])
+    return dst
 
 
 @pl.jit.incore
 def restore(
     src: pl.Tensor[[4, 600], pl.FP32], dst: pl.Out[pl.Tensor[[4, 600], pl.FP32]]
 ) -> pl.Tensor[[4, 600], pl.FP32]:
-    return pl.copy(
+    pl.copy(
         dst,
         src,
         [0, 0],
@@ -35,6 +36,7 @@ def restore(
         source_memory=pl.Mem.SRAM,
         target_memory=pl.Mem.DDR,
     )
+    return dst
 
 
 @pl.jit
@@ -50,7 +52,8 @@ def roundtrip(
 def copy_region(
     src: pl.Tensor[[4, 600], pl.FP32], dst: pl.InOut[pl.Tensor[[4, 600], pl.FP32]]
 ) -> pl.Tensor[[4, 600], pl.FP32]:
-    return pl.copy(dst, src, [1, 8], [0, 16], [2, 577])
+    pl.copy(dst, src, [1, 8], [0, 16], [2, 577])
+    return dst
 
 
 @pl.jit

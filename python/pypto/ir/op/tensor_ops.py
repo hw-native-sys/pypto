@@ -51,7 +51,7 @@ def copy(
 ) -> Call:
     """Copy a tensor region between DDR/SRAM endpoints, including DDR to DDR.
 
-    Returns the destination tensor, aliasing its existing storage. Dynamic
+    Writes the destination in place and returns a void-typed IR Call. Dynamic
     offsets and extents must describe an in-bounds region at runtime.
     Omit all three region arguments to copy matching whole tensors.
     """

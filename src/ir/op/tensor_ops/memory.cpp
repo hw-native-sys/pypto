@@ -70,7 +70,7 @@ TypePtr DeduceTensorCopyType(const std::vector<ExprPtr>& args,
           << "tensor.copy offsets and shape must contain integers";
     }
   }
-  return args[0]->GetType();
+  return GetUnknownType();
 }
 
 REGISTER_OP("tensor.copy")
@@ -83,7 +83,6 @@ REGISTER_OP("tensor.copy")
     .add_argument("shape", "Optional transfer extents")
     .set_attr<MemorySpace>("source_memory")
     .set_attr<MemorySpace>("target_memory")
-    .set_output_reuses_input(0)
     .set_arg_effect(0, ArgEffect::Write)
     .set_write_channel(WriteChannel::Dma)
     .set_core_affinity(core_affinity::CoreAffinity::VECTOR)

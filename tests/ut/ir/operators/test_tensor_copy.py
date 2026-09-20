@@ -28,12 +28,12 @@ def var(name, shape=(4, 600), dtype=DataType.FP32):
 
 
 @pytest.mark.parametrize("reverse", [False, True])
-def test_copy_alias_and_pipe(reverse):
+def test_copy_void_and_pipe(reverse):
     backend.set_backend_type(backend.BackendType.Ascend910B)
     dst, src = var("dst"), var("src")
     source, target = (ir.Mem.SRAM, ir.Mem.DDR) if reverse else (ir.Mem.DDR, ir.Mem.SRAM)
     call = tensor.copy(dst, src, [1, 4], [0, 8], [2, 500], source_memory=source, target_memory=target)
-    ir.assert_structural_equal(call.type, dst.type)
+    assert isinstance(call.type, ir.UnknownType)
     assert testing.try_infer_pipe(call) == int(ir.PipeType.MTE3 if reverse else ir.PipeType.MTE2)
 
 
@@ -49,7 +49,7 @@ def test_ddr_whole_tensor_copy():
     backend.set_backend_type(backend.BackendType.Ascend910B)
     dst, src = var("dst"), var("src")
     call = tensor.copy(dst, src, target_memory=ir.Mem.DDR)
-    ir.assert_structural_equal(call.type, dst.type)
+    assert isinstance(call.type, ir.UnknownType)
     assert len(call.args) == 2
     assert testing.try_infer_pipe(call) == int(ir.PipeType.MTE2)
     with pytest.raises(ValueError, match="same static shape"):
@@ -131,7 +131,7 @@ def test_full_pipeline(target, endpoints, shape, repeat):
     source, destination = endpoints
     offsets = [0] * len(shape)
     first_copy = (
-        f"dst = pl.copy(dst, src, {offsets}, {offsets}, {shape}, "
+        f"pl.copy(dst, src, {offsets}, {offsets}, {shape}, "
         f"source_memory=pl.Mem.{source}, target_memory=pl.Mem.{destination})"
         if repeat
         else ""
@@ -144,8 +144,9 @@ class Copy:
     def main(self, src: pl.Tensor[{shape}, pl.FP32],
              dst: pl.Out[pl.Tensor[{shape}, pl.FP32]]) -> pl.Tensor[{shape}, pl.FP32]:
         {first_copy}
-        return pl.copy(dst, src, {offsets}, {offsets}, {shape},
+        pl.copy(dst, src, {offsets}, {offsets}, {shape},
                        source_memory=pl.Mem.{source}, target_memory=pl.Mem.{destination})
+        return dst
 """)
     ir.assert_structural_equal(program, pl.parse(ir.python_print(program)))
     lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)

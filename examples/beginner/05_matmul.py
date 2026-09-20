@@ -37,8 +37,8 @@ def matmul_64(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
     # copy is destination-first. Run its load/store instructions in an InCore
     # scope before the matmul scope consumes the separately allocated buffers.
     with pl.at(level=pl.Level.CORE_GROUP):
-        a1 = pl.copy(a1, a, source_memory=pl.Mem.DDR, target_memory=pl.Mem.DDR)
-        b1 = pl.copy(b1, b, source_memory=pl.Mem.DDR, target_memory=pl.Mem.DDR)
+        pl.copy(a1, a, source_memory=pl.Mem.DDR, target_memory=pl.Mem.DDR)
+        pl.copy(b1, b, source_memory=pl.Mem.DDR, target_memory=pl.Mem.DDR)
 
     with pl.at(level=pl.Level.CORE_GROUP):
         tile_a_l1 = pl.load(a1, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
