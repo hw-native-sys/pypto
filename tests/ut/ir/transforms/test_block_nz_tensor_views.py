@@ -128,6 +128,23 @@ def _walk(stmt):
     yield stmt
 
 
+def _nz_slices(program: ir.Program) -> list[ir.Call]:
+    """Every tensor.slice whose source tensor carries the NZ layout, in body order."""
+    slice_name = ir.get_op("tensor.slice").name
+    found = []
+    for func in program.functions.values():
+        for stmt in _walk(func.body):
+            if not isinstance(stmt, ir.AssignStmt):
+                continue
+            call = stmt.value
+            if not isinstance(call, ir.Call) or call.op.name != slice_name:
+                continue
+            view = getattr(call.args[0].type, "tensor_view", None)
+            if view is not None and view.layout == ir.TensorLayout.NZ:
+                found.append(call)
+    return found
+
+
 def _nz_loads(program: ir.Program) -> list[ir.Call]:
     """Every tile.load whose source tensor carries the NZ layout, in body order."""
     load_name = ir.get_op("tile.load").name
@@ -553,14 +570,12 @@ def test_codegen_tile_keeps_logical_2d_nz_layout():
 # ============================================================================
 
 
-def test_rejects_logical_rank_above_three():
-    """Rank 4+ has no canonical blocked form — reject it here, not in PTOAS.
+def test_folds_leading_axes_into_the_batch_slot():
+    """A logical ``[G, E, N, K]`` weight blocks with ``B = G*E``.
 
-    pto-isa's NZ ``GlobalTensor`` has exactly one batch slot, so a logical
-    ``[G, E, N, K]`` weight would need its two leading axes folded into it. The
-    fold is sound on the shape and unsound on the offsets (it would have to
-    re-associate ``[g, e, ...]`` into ``g*E + e``), so the front end names the
-    restriction instead of emitting a view the assembler refuses.
+    pto-isa's NZ ``GlobalTensor`` has exactly one batch slot, and dense
+    row-major leading axes collapse into it exactly — the fold removes only the
+    strides it multiplies back in.
     """
 
     @pl.jit
@@ -571,14 +586,108 @@ def test_rejects_logical_rank_above_three():
     ):
         for _ in pl.spmd(1, name_hint="rank4_nz"):
             xt = pl.slice(x, [64, 512], [0, 0])
-            wt = w[0:1, 0:1, 0:256, 0:512]
+            wt = w[1:2, 3:4, 0:256, 0:512]
             acc = pl.matmul(xt, wt, b_trans=True, out_dtype=pl.INT32)
             out[0:64, 0:256] = pl.reshape(acc, [64, 256])
         return out
 
     _, _, tm, sd, cx, dyn = _rank4_nz._bind_args_from_signature({})
-    with pytest.raises(ValueError, match="logical rank of at most 3"):
-        _run(_rank4_nz._compile_to_program(tm, sd, cx, dyn, pl))
+    after = _run(_rank4_nz._compile_to_program(tm, sd, cx, dyn, pl))
+    assert _values(_nz_param(after).shape) == [8, 16, 16, 16, 32]
+    call = _nz_load(after)
+    # [1, 3, 0, 0] into [2, 4, ...] addresses batch 1*4 + 3 = 7.
+    assert _values(_elements(call.args[1])) == [7, 0, 0, 0, 0]
+    assert _values(_elements(call.args[2])) == [1, 16, 16, 16, 32]
+
+
+def test_blocks_a_leading_axis_slice():
+    """``pl.slice`` along the batch axis keeps the NZ view addressable.
+
+    A layer-stacked weight reaches its kernel as one layer's window, so the
+    slice has to block like the load that follows it: whole trailing matrix,
+    batch offset carried through.
+    """
+
+    @pl.jit(auto_scope=False)
+    def _sliced_nz(
+        x: pl.Tensor[[64, 512], pl.INT8],
+        w: pl.Tensor[[4, 256, 512], pl.INT8, pl.NZ],
+        out: pl.Out[pl.Tensor[[64, 256], pl.INT32]],
+    ):
+        w_layer: pl.Tensor[[2, 256, 512], pl.INT8, pl.NZ] = pl.slice(w, [2, 256, 512], [2, 0, 0])
+        with pl.scope():
+            for _ in pl.spmd(1, name_hint="sliced_nz"):
+                xt = pl.slice(x, [64, 512], [0, 0])
+                acc = pl.matmul(xt, w_layer[1:2, 0:256, 0:512], b_trans=True, out_dtype=pl.INT32)
+                out[0:64, 0:256] = pl.reshape(acc, [64, 256])
+        return out
+
+    _, _, tm, sd, cx, dyn = _sliced_nz._bind_args_from_signature({})
+    after = _run(_sliced_nz._compile_to_program(tm, sd, cx, dyn, pl))
+    slices = _nz_slices(after)
+    assert len(slices) == 1
+    assert _values(_elements(slices[0].args[1])) == [2, 16, 16, 16, 32]  # shapes
+    assert _values(_elements(slices[0].args[2])) == [2, 0, 0, 0, 0]  # offsets
+    slice_type = slices[0].type
+    assert isinstance(slice_type, ir.TensorType)
+    assert _values(slice_type.shape) == [2, 16, 16, 16, 32]
+
+
+def test_rejects_a_leading_window_under_a_spanning_axis():
+    """Two narrowed leading axes do not fold into one contiguous batch run.
+
+    ``[2, 4, R, C]`` sliced to ``[2, 2, R, C]`` at ``[0, 1, 0, 0]`` names
+    batches ``{1, 2, 5, 6}``, but the fold multiplies extents and flattens
+    offsets row-major, so it would emit extent 4 at offset 1 — the run
+    ``{1, 2, 3, 4}``, a different four layers read as if they were the right
+    ones.
+    """
+
+    @pl.jit(auto_scope=False)
+    def _two_windows(
+        x: pl.Tensor[[64, 512], pl.INT8],
+        w: pl.Tensor[[2, 4, 256, 512], pl.INT8, pl.NZ],
+        out: pl.Out[pl.Tensor[[64, 256], pl.INT32]],
+    ):
+        w_win: pl.Tensor[[2, 2, 256, 512], pl.INT8, pl.NZ] = pl.slice(w, [2, 2, 256, 512], [0, 1, 0, 0])
+        with pl.scope():
+            for _ in pl.spmd(1, name_hint="two_windows"):
+                xt = pl.slice(x, [64, 512], [0, 0])
+                acc = pl.matmul(xt, w_win[0:1, 0:1, 0:256, 0:512], b_trans=True, out_dtype=pl.INT32)
+                out[0:64, 0:256] = pl.reshape(acc, [64, 256])
+        return out
+
+    _, _, tm, sd, cx, dyn = _two_windows._bind_args_from_signature({})
+    program = _two_windows._compile_to_program(tm, sd, cx, dyn, pl)
+    with pytest.raises(ValueError, match="a window on one leading axis only"):
+        _run(program)
+
+
+def test_rejects_a_slice_inside_the_fractal_plane():
+    """A row window of an NZ tensor has no contiguous stride, so it is refused.
+
+    One layer's rows sit inside every fractal column block, so ``[layer*R, 0]``
+    selects ``C/c0`` disjoint runs — exactly what the blocked view's derived
+    row-major stride cannot describe.
+    """
+
+    @pl.jit(auto_scope=False)
+    def _row_sliced_nz(
+        x: pl.Tensor[[64, 512], pl.INT8],
+        w: pl.Tensor[[512, 512], pl.INT8, pl.NZ],
+        out: pl.Out[pl.Tensor[[64, 256], pl.INT32]],
+    ):
+        w_layer: pl.Tensor[[256, 512], pl.INT8, pl.NZ] = pl.slice(w, [256, 512], [256, 0])
+        with pl.scope():
+            for _ in pl.spmd(1, name_hint="row_sliced_nz"):
+                xt = pl.slice(x, [64, 512], [0, 0])
+                acc = pl.matmul(xt, w_layer[0:256, 0:512], b_trans=True, out_dtype=pl.INT32)
+                out[0:64, 0:256] = pl.reshape(acc, [64, 256])
+        return out
+
+    _, _, tm, sd, cx, dyn = _row_sliced_nz._bind_args_from_signature({})
+    with pytest.raises(ValueError, match="slicing the leading axes only"):
+        _run(_row_sliced_nz._compile_to_program(tm, sd, cx, dyn, pl))
 
 
 def test_rejects_unaligned_rows():

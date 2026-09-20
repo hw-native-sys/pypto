@@ -242,10 +242,13 @@ diagnostic naming the fix — an NZ tensor must never be silently mis-addressed.
 | symbolic trailing slice offset, sign not provable | rejected — a negative offset is clamped, not caught, at the partition view |
 | logical rank 2 | blocked to `[1, C/c0, R/16, 16, c0]` — batch materialised |
 | logical rank 3 | blocked to `[B, C/c0, R/16, 16, c0]` — leading axis is the batch |
+| logical rank > 3 | blocked with every leading axis folded into the batch (see below) |
 | logical rank < 2 | rejected — the trailing pair is the fractal plane |
-| logical rank > 3 | rejected — one batch slot cannot hold two leading axes (see below) |
+| dynamic leading extent, rank > 3 | rejected — the fold needs static extents to multiply |
 | `target_memory != Mat` (or absent) | rejected — NZ→NZ is the cube operand path |
-| consumer other than `tile.load` | rejected — NZ is read-only here |
+| `tensor.slice` narrowing the leading axes only | blocked like the load that follows it (see below) |
+| `tensor.slice` windowing the trailing `[R, C]` pair | rejected — the window is not contiguous |
+| consumer other than `tile.load` / `tensor.slice` | rejected — NZ is read-only here |
 | explicit stride or partial `valid_shape` | rejected |
 | distributed tensor | rejected — `remote_load` has no NZ blocking |
 | `tensor.view` / `tensor.reinterpret_view` of NZ | rejected at op construction |
@@ -305,20 +308,41 @@ load at `gShape1 = 2` corrupts 1837/4096 elements.
 
 [hw-native-sys/pto-isa#317]: https://github.com/hw-native-sys/pto-isa/issues/317
 
-### Why logical rank 4+ is rejected
+### Leading axes fold into the one batch slot
 
 pto-isa's NZ `GlobalTensor` has exactly **one** batch slot, so a logical
-`[G, E, N, K]` weight would have to fold its two leading axes into it. That fold
-is sound on the *shape* — a dense row-major tensor's leading strides collapse
-exactly, `G*E` with stride `C*R` — but not on the *offsets*: a slice `w[g, e, ...]`
-would need the coordinate re-associated into `g*E + e`, which is precisely the
-arithmetic `BlockNzOffsets` refuses to invent (see [Symbolic trailing
-offsets](#symbolic-trailing-offsets) for why re-association is unsound in
-general). Rejecting names the restriction at the annotation; the alternative is a
-view PTOAS refuses while naming SSA the user never wrote.
+`[G, E, N, K]` weight folds its two leading axes into it: the blocked batch is
+`G*E`, with stride `C*R`. The fold is exact because those axes are dense and
+row-major — it removes only the strides it multiplies back in — and an offset
+folds the same way, `[g, e, 0, 0]` addressing batch `g*E + e`
+(`FoldNzLeadingOffsets`).
 
-Reshape to `[B, R, C]` before the NZ annotation, or annotate the tensor as
-`pl.ND`.
+That is *not* the re-association [the trailing offsets
+refuse](#why-the-offset-is-divided-not-re-associated): nothing is divided and
+nothing is assumed about alignment, so the fold is exact for every coordinate,
+not only aligned ones. It is the same arithmetic the ND path performs at address
+computation, written once into the coordinate instead.
+
+The extents being folded must be static — a dynamic one cannot be multiplied
+into the batch — which the diagnostic names.
+
+A rank-4 parameter is what a multi-card entry declares (`[RANKS, E, R, C]`,
+sliced per rank before dispatch), so the fold is what lets a distributed program
+carry NZ weights at all.
+
+### Slicing an NZ tensor
+
+A layer- or rank-stacked weight reaches its kernel through `tensor.slice`, so
+the slice blocks like the `tile.load` that follows it: the shapes and offsets
+become rank-5, and a rank-reducing scalar index (`w[r]`) needs no `drop_dims`
+afterwards because the fold already collapsed every leading axis.
+
+Only the **leading** axes may be narrowed. A window inside the trailing `[R, C]`
+pair is rejected: in NZ order one layer's rows sit inside *every* fractal column
+block, so `[layer*R, 0]` selects `C/c0` disjoint runs, and the blocked view has
+no stride of its own to describe them — `MaterializeTensorStrides` derives a
+row-major one from the blocked shape. Annotate the stacked axis as a leading
+axis (`[LAYERS, R, C]`) instead of stacking rows.
 
 Sub-byte dtypes (INT4 / UINT4 / FP4 / HF4 / BOOL) are rejected as a **PyPTO
 milestone-1 scope limit, not a hardware one** — pto-isa's NZ machinery does
