@@ -88,7 +88,7 @@ def fp4x2_to_fp8(
 | 特性 | PyPTO | 说明 |
 | ---- | ----- | ---- |
 | 手写 `pl.FP4E2M1X2` | ✅ | packed 路径的首选前端 |
-| 无 PackFp4 的逻辑 `pl.FP4` | ⚠️ | Warning；A5 in-core 拒逻辑 FP4 |
+| 无 PackFp4 的逻辑 `pl.FP4` | ⚠️ | Prefer Warning；A5 in-core 仍支持逻辑 FP4，并与 FP4E2M1X2 并存 |
 | GM ExpandPackedFp4\*（carrier→nibble） | ✅ | `make_tensor_view` / partition 末轴 |
 | `FP4E2M1X2` ↔ BF16 cast | ✅ | 静默原生 hop |
 | `FP4E2M1X2` → FP8\* cast | ⚠️ | Warning；更推荐 LUT / 主机 |

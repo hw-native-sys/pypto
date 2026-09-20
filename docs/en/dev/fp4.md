@@ -92,7 +92,7 @@ Legend: ✅ supported · ⚠️ partial / Warning · ❌ unsupported · ⏳ not 
 | Feature | PyPTO | Notes |
 | ------- | ----- | ----- |
 | Hand-written `pl.FP4E2M1X2` | ✅ | Preferred frontend for packed paths |
-| Logical `pl.FP4` without PackFp4 | ⚠️ | Warning; in-core rejects logical FP4 on A5 |
+| Logical `pl.FP4` without PackFp4 | ⚠️ | Prefer warning; A5 in-core still supports legacy logical FP4 alongside FP4E2M1X2 |
 | GM ExpandPackedFp4\* (carrier→nibble) | ✅ | `make_tensor_view` / partition last axis |
 | `FP4E2M1X2` ↔ BF16 cast | ✅ | Silent native hop |
 | `FP4E2M1X2` → FP8\* cast | ⚠️ | Warning; prefer LUT / host |

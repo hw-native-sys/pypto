@@ -2451,8 +2451,8 @@ std::string PTOCodegen::GetTypeString(const DataType& dtype) const {
     }
     CHECK(false) << dtype_kind << dtype.ToString()
                  << " is not supported for end-to-end in-core codegen on backend '" << arch
-                 << "'. A5 accepts packed FP4E2M1X2 and non-4-bit dtypes; "
-                    "logical FP4 / INT4 / UINT4 / HF4 are rejected (see docs/en/dev/fp4.md)";
+                 << "'. A5 supports FP4 and packed FP4E2M1X2 among FP4-family / 4-bit paths; "
+                    "INT4 / UINT4 / HF4 are rejected (see docs/en/dev/fp4.md)";
   }
   return DataTypeToMLIR(dtype);
 }
