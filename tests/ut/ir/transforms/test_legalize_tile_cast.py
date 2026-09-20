@@ -189,6 +189,55 @@ def test_a5_fp4_to_bf16_cast_is_silent(capfd):
     assert "FP4→BF16→FP32→FP8" not in err
 
 
+def test_a5_fp4e2m1x2_to_bf16_cast_is_silent_and_expands_last_dim(capfd):
+    """Hand-written FP4E2M1X2→BF16 is a native hop; last axis expands 2:1."""
+    from pypto import LogLevel, get_log_level, set_log_level  # noqa: PLC0415
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 32], pl.FP4E2M1X2],
+            out: pl.Out[pl.Tensor[[16, 64], pl.BF16]],
+        ) -> pl.Tensor[[16, 64], pl.BF16]:
+            t = pl.load(x, [0, 0], [16, 32])
+            c = pl.cast(t, pl.BF16)
+            return pl.store(c, [0, 0], out)
+
+    prev = get_log_level()
+    set_log_level(LogLevel.WARN)
+    try:
+        capfd.readouterr()
+        after = _run(Before, BackendType.Ascend950)
+    finally:
+        set_log_level(prev)
+    assert _cast_pairs(after) == [("fp4e2m1x2", "bfloat16")]
+    err = capfd.readouterr().err
+    assert "LegalizeTileCast" not in err
+    assert "FP4→BF16→FP32→FP8" not in err
+
+    class _ShapeCollector(ir.IRVisitor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cast_out_shape: tuple[int, int] | None = None
+
+        def visit_call(self, op: ir.Call) -> None:
+            if op.op.name == _TILE_CAST:
+                ty = op.type
+                assert isinstance(ty, ir.TileType)
+                rows = ty.shape[0]
+                cols = ty.shape[1]
+                assert isinstance(rows, ir.ConstInt)
+                assert isinstance(cols, ir.ConstInt)
+                self.cast_out_shape = (rows.value, cols.value)
+            super().visit_call(op)
+
+    shapes = _ShapeCollector()
+    shapes.visit_program(after)
+    assert shapes.cast_out_shape == (16, 64)
+
+
 def test_a5_fp4e2m1x2_to_fp8_cast_emits_warning(capfd):
     """Hand-written FP4E2M1X2→FP8* is allowed with the same Warning as logical FP4."""
     from pypto import LogLevel, get_log_level, set_log_level  # noqa: PLC0415

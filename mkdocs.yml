@@ -289,6 +289,7 @@ nav:
       - en/dev/runtime/kernel-mode.md
       - en/dev/distributed_ops.md
       - en/dev/ptoas-op-status.md
+      - en/dev/fp4.md
       - IR:
           - en/dev/ir/index.md
           - en/dev/ir/00-overview.md
