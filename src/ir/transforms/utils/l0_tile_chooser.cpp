@@ -277,7 +277,9 @@ int64_t PipelinedInnerFullTiles(int m, int n, const L0TileConfig& cfg, Stationar
 //   split-K (k < K) -> BuildSplitKGrid. The M/N grid is emitted UNROLLED and
 //     each output tile's accumulator is stamped with its own slot, so any two
 //     output tiles ping-pong -- a boundary tile included, since it is an
-//     ordinary member of the unrolled sequence, not a peeled tail.
+//     ordinary member of the unrolled sequence, not a peeled tail. A caller
+//     whose uniform slot representation cannot preserve a row-boundary L0C
+//     stride sets allow_unrolled_dbc_m_boundary=false.
 DbcEmissionRoute DbcRouteForK(int k, const L0TileConfig& cfg) {
   return k == cfg.K ? cfg.full_k_dbc_route : cfg.split_k_dbc_route;
 }
@@ -287,7 +289,8 @@ bool DbcRealizableTile(int m, int n, const L0TileConfig& cfg, Stationarity stat,
     case DbcEmissionRoute::kPipelinedInner:
       return PipelinedInnerFullTiles(m, n, cfg, stat) >= 2;
     case DbcEmissionRoute::kUnrolledGrid:
-      return CeilDiv(cfg.M, m) * CeilDiv(cfg.N, n) >= 2;
+      return (cfg.allow_unrolled_dbc_m_boundary || cfg.M % m == 0) &&
+             CeilDiv(cfg.M, m) * CeilDiv(cfg.N, n) >= 2;
     case DbcEmissionRoute::kUnsupported:
       return false;
   }
