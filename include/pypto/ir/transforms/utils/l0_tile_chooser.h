@@ -143,6 +143,13 @@ struct L0TileConfig {
   DbcEmissionRoute full_k_dbc_route = DbcEmissionRoute::kPipelinedInner;
   DbcEmissionRoute split_k_dbc_route = DbcEmissionRoute::kUnrolledGrid;
 
+  // Whether an unrolled dbC grid may include a partial M boundary. PTOAS
+  // represents the two slots with one uniform tile type; narrowing that type's
+  // physical row count through a subview changes the L0C fractal stride and is
+  // not a valid accumulator alias. PyPTO and DSA-RP allocate each boundary
+  // accumulator at its native geometry and therefore keep this enabled.
+  bool allow_unrolled_dbc_m_boundary = true;
+
   // Whether the matmul reads its accumulator (C = beta * C + A @ B). When
   // true, C traffic doubles in the cost estimate.
   bool c_read = false;
@@ -260,7 +267,8 @@ struct L0TileResult {
   //   UNROLLED GRID (BuildSplitKGrid, TryFoldCanonicalSplitKAcc): every output
   //     tile's accumulator is stamped with its own slot, so >= 2 output tiles
   //     suffice -- a partial boundary tile included, since it is an ordinary
-  //     member of the unrolled sequence, not a peeled tail. Hence ceil product.
+  //     member of the unrolled sequence, not a peeled tail. Hence ceil product,
+  //     subject to allow_unrolled_dbc_m_boundary for uniform-slot emitters.
   //
   // NOTE: the caller must REALIZE this with a genuine two-accumulator schedule
   // (two co-live L0C buffers). A full-K emitter that threads the output as a
