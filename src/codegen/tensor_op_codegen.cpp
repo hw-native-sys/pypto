@@ -560,7 +560,7 @@ REGISTER_ORCHESTRATION_OP(tensor_view, ("tensor.view")) {
     INTERNAL_CHECK_SPAN(ndim >= 2, op->span_)
         << "Internal error: tensor.view cross-layout flip reached codegen with rank=" << ndim
         << "; DeduceTensorViewType is supposed to reject cross-layout flips below rank 2";
-    CHECK_SPAN(input_type->dtype_ != DataType::FP4, op->span_)
+    CHECK_SPAN(!input_type->dtype_.IsFp4Family(), op->span_)
         << "tensor.view cannot move the packed FP4 last axis during an Orchestration layout change because "
            "the runtime Tensor carries physical x2 elements; lower the view through PTO in-core codegen";
     oss << "Tensor " << result_var << " = " << ext_input_name << ".transpose(" << (ndim - 2) << ", "

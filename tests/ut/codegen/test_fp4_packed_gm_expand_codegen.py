@@ -73,13 +73,17 @@ def test_fp4e2m1x2_make_tensor_view_expands_to_nibble_units():
 
     mlir3 = _emit_incore_mlir(Rank3)
     assert "!pto.f4E2M1x2" in mlir3
-    ok = (
-        any("64" in line for line in mlir3.splitlines() if "make_tensor_view" in line)
-        or "arith.muli %c32_index, %c2_index" in mlir3
-        or "arith.muli %c512_index, %c2_index" in mlir3
-        or "arith.muli %c1024_index, %c2_index" in mlir3
-    )
-    assert ok, mlir3
+    views3 = [line for line in mlir3.splitlines() if "pto.make_tensor_view" in line and "f4E2M1x2" in line]
+    assert views3, mlir3
+    # Carrier [2,16,32] → nibble shape last-axis 32*2=64 (ConstInt fold).
+    assert all("shape = [%c2_index, %c16_index, %c64_index]" in line for line in views3), mlir3
+    # Leading strides expand via *2: row pitch 32*16 then *2 → 1024; mid stride 32*2 → 64.
+    assert "arith.muli %c32_index, %c16_index : index" in mlir3, mlir3
+    assert "arith.muli %c32_index, %c2_index : index" in mlir3, mlir3
+    assert any(
+        "arith.muli" in line and "_s0," in line and "%c2_index" in line for line in mlir3.splitlines()
+    ), mlir3
+    assert all("%c1_index]" in line for line in views3), mlir3
 
 
 def test_fp4e2m1x2_slice_cast_and_vec_move():

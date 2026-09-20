@@ -351,7 +351,7 @@ class TestMxMatmulCodegen:
             ):
                 pl.store(pl.load(src, [0, 0], [16, 64]), [0, 0], out)
 
-        with pytest.raises(ValueError, match=r"4-bit dtype.*not supported.*a2a3"):
+        with pytest.raises(ValueError, match=r"(?:4-bit )?dtype .*not supported.*a2a3"):
             _emit_incore_mlir(Program, BackendType.Ascend910B)
 
     @pytest.mark.parametrize("dtype", [pl.INT4, pl.UINT4, pl.HF4])

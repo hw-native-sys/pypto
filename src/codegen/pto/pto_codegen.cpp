@@ -2442,13 +2442,14 @@ std::string PTOCodegen::GetTypeString(const DataType& dtype) const {
   INTERNAL_CHECK(handler) << "PTOCodegen requires a backend handler";
   if (!handler->SupportsIncoreDataType(dtype)) {
     const std::string arch = handler->GetPtoTargetArch();
+    const char* dtype_kind = (dtype.GetBit() == 4) ? "The 4-bit dtype " : "The dtype ";
     if (arch == "a2a3" && (dtype.GetBit() == 4 || dtype.IsFp4Family())) {
-      CHECK(false) << "The 4-bit dtype " << dtype.ToString()
+      CHECK(false) << dtype_kind << dtype.ToString()
                    << " is not supported for end-to-end in-core codegen on backend 'a2a3'. "
                       "A2/A3 exposes only an isolated FP16<->INT4 conversion, while direct packed "
                       "4-bit load/store and carrier ABI are unavailable";
     }
-    CHECK(false) << "The 4-bit dtype " << dtype.ToString()
+    CHECK(false) << dtype_kind << dtype.ToString()
                  << " is not supported for end-to-end in-core codegen on backend '" << arch
                  << "'. A5 accepts packed FP4E2M1X2 and non-4-bit dtypes; "
                     "logical FP4 / INT4 / UINT4 / HF4 are rejected (see docs/en/dev/fp4.md)";

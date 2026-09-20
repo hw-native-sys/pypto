@@ -149,14 +149,15 @@ class TestOrchestrationMore:
                 ) -> pl.Tensor[[4, 2, 16], pl.FP4]:
                     return pl.transpose(data, axis1=0, axis2=1)
 
-    def test_fp4_view_rejects_layout_flip_across_packed_axis(self):
+    @pytest.mark.parametrize("dtype", [DataType.FP4, DataType.FP4E2M1X2])
+    def test_fp4_view_rejects_layout_flip_across_packed_axis(self, dtype):
         """ND/DN layout flips swap the trailing pair and cannot preserve FP4 packing."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend950)
 
         ib = IRBuilder()
         with ib.function("orch_fp4_view", type=ir.FunctionType.Orchestration) as f:
-            data = f.param("data", ir.TensorType([8, 16], DataType.FP4))
+            data = f.param("data", ir.TensorType([8, 16], dtype))
             data_dn = ib.let("data_dn", tensor_ops.view(data, layout=ir.TensorLayout.DN))
             f.return_type(data_dn.type)
             ib.return_stmt(data_dn)
