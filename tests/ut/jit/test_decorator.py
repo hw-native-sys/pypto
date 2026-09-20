@@ -33,6 +33,7 @@ from pypto.jit.decorator import (
     _extract_call_args_for_dep,
     _extract_local_tensor_metas,
     _extract_tensor_meta,
+    _param_dtypes,
     _resolve_dep_call_metadata,
     _rewrite_jit_error,
     _scan_dep_io,
@@ -73,6 +74,31 @@ class TestJitDecoration:
         meta = _extract_tensor_meta(t)
         assert meta.dtype == DataType.FP32
         assert meta.static_shape() == (4, 8)
+
+    def test_torch_index_annotation_accepts_int64_abi(self):
+        """pl.INDEX is semantic; torch carries it as int64 — do not strict-mismatch."""
+        torch = pytest.importorskip("torch")
+        t = torch.empty((4,), dtype=torch.int64)
+        # Even if a caller passes INDEX as expected_dtype, keep torch→INT64 ABI.
+        meta = _extract_tensor_meta(t, expected_dtype=DataType.INDEX)
+        assert meta.dtype == DataType.INT64
+        assert meta.static_shape() == (4,)
+
+    def test_param_dtypes_only_records_fp4_family(self):
+        """_param_dtypes is FP4 dual-path only; INDEX/FP32 annotations are omitted."""
+
+        def kernel(
+            idx: pl.Tensor[[4], pl.INDEX],
+            x: pl.Tensor[[8, 16], pl.FP32],
+            packed: pl.Tensor[[8, 16], pl.FP4E2M1X2],
+            logical: pl.Tensor[[8, 32], pl.FP4],
+        ):
+            return idx, x, packed, logical
+
+        assert _param_dtypes(kernel) == {
+            "packed": DataType.FP4E2M1X2,
+            "logical": DataType.FP4,
+        }
 
     def test_torch_fp4_x2_default_keeps_carrier_shape(self):
         """Bare / packed annotation: torch float4 stays FP4E2M1X2 carrier extents."""

@@ -288,7 +288,8 @@ def _extract_tensor_meta(
     ``layout`` and ``expected_dtype`` come from the parameter's annotation, not
     the tensor: torch has no notion of a PyPTO layout, and ``float4_e2m1fn_x2``
     alone cannot distinguish logical ``pl.FP4`` (nibble IR, expand last dim) from
-    packed ``pl.FP4E2M1X2`` (carrier IR, no expand).
+    packed ``pl.FP4E2M1X2`` (carrier IR, no expand). ``expected_dtype`` is only
+    consulted for that FP4-family dual path; other annotations are ignored here.
     """
     torch_dtype = _torch_dtype_to_pypto(tensor.dtype)
     extents = list(tensor.shape)
@@ -304,6 +305,9 @@ def _extract_tensor_meta(
                 f"dimension; got shape {tuple(extents)}"
             )
 
+    # expected_dtype is FP4-family only (see ``_param_dtypes``). Other annotations
+    # such as ``pl.INDEX`` are semantic IR types whose torch ABI is INT64; do not
+    # introduce a general annotation↔torch strict check here.
     if expected_dtype is not None and expected_dtype == DataType.FP4:
         if torch_dtype not in (DataType.FP4, DataType.FP4E2M1X2):
             raise TypeError(
@@ -321,11 +325,6 @@ def _extract_tensor_meta(
             )
         # Torch and IR both count packed x2 carriers for FP4E2M1X2; do not expand.
         dtype = DataType.FP4E2M1X2
-    elif expected_dtype is not None and expected_dtype != torch_dtype:
-        raise TypeError(
-            f"Parameter annotated {expected_dtype} but torch tensor maps to {torch_dtype}; "
-            "change the annotation or pass a matching tensor"
-        )
     else:
         # No FP4-family annotation (or bare pl.Tensor): keep the torch→IR default
         # (packed FP4E2M1X2 for float4_e2m1fn_x2, no expand).
@@ -434,10 +433,12 @@ def _param_layouts(func: Any, func_name: str) -> dict[str, _ir.TensorLayout]:
 
 
 def _param_dtypes(func: Any) -> dict[str, DataType]:
-    """Map parameter name → annotated element dtype, for shaped tensor params.
+    """Map parameter name → annotated FP4-family dtype, for shaped tensor params.
 
     Used by the torch-argument path so ``pl.FP4`` vs ``pl.FP4E2M1X2`` can select
-    the expand / no-expand ABI for ``torch.float4_e2m1fn_x2``.
+    the expand / no-expand ABI for ``torch.float4_e2m1fn_x2``. Non-FP4 annotations
+    (e.g. ``pl.INDEX``) are omitted: they are not needed for that dual-path and
+    must not drive a general torch↔annotation dtype check.
     """
     try:
         sig = inspect.signature(func)
@@ -451,7 +452,7 @@ def _param_dtypes(func: Any) -> dict[str, DataType]:
             continue
         annotation = _resolve_annotation(param.annotation, ann_ns)
         dtype = getattr(annotation, "dtype", None)
-        if isinstance(dtype, DataType):
+        if isinstance(dtype, DataType) and dtype in (DataType.FP4, DataType.FP4E2M1X2):
             dtypes[name] = dtype
     return dtypes
 
