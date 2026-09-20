@@ -39,6 +39,7 @@ Numerics are the point: dbC=2 reuses buffers, so a sync error corrupts the resul
 a2a3sim (the 128 KB-L0C chooser regime that selects these dbC tiles).
 """
 
+import re
 from typing import Any
 
 import pypto.language as pl
@@ -383,14 +384,14 @@ class TestDbc2DoubleBuffer:
         ],
     )
     def test_non_divisible_tail_dbc(self, test_runner, platform, planner):
-        """Non-divisible M/N (320x320): the peeled L-shaped tail is emitted straight-line
-        (its drains are not floated), so this exercises dbC interior + exposed tail."""
+        """Non-divisible M/N (320x320): the split-K grid includes a column boundary."""
         choice = _choose_a2a3_fp32_dbc(320, 320)
         assert (choice.m, choice.n, choice.k) == (80, 128, 32)
         assert choice.double_buffer_c
         case = _DbcDirectStore(320, 320, planner=planner, platform=platform)
         printed = _printed_after_auto_tile(case, planner)
-        assert printed.count('"pipeline_double_buffer_c": True') == 1
+        stages = re.findall(r'"pipeline_membership": "\d+:(\d+)"', printed)
+        assert stages == ["0", "1"] * 6
         result = test_runner.run(case)
         assert result.passed, f"Test failed: {result.error}"
 

@@ -1020,6 +1020,8 @@ def test_canonical_split_k_grid_declares_the_dbc_ping_pong(M, N, K_total, K_tile
     pto = codegen.PTOCodegen().generate(ir.Program([func], func.name, optimized.span), emit_tile_addr=False)
     assert pto.count("pto.alloc_multi_tile") >= 1, pto
     assert pto.count("pto.multi_tile_get") >= 2, pto
+    acc_copies = [line for line in pto.splitlines() if "pto.tmov" in line and line.count("loc=acc") >= 2]
+    assert not acc_copies, acc_copies
 
 
 def test_canonical_split_k_grid_allocates_two_l0c_slots():
@@ -1131,6 +1133,8 @@ def test_canonical_split_k_peeled_spelling_shares_one_slot_per_tile():
     pto = codegen.PTOCodegen().generate(ir.Program([func], func.name, optimized.span), emit_tile_addr=False)
     assert pto.count("pto.alloc_multi_tile") >= 1, pto
     assert pto.count("pto.multi_tile_get") >= 2, pto
+    acc_copies = [line for line in pto.splitlines() if "pto.tmov" in line and line.count("loc=acc") >= 2]
+    assert not acc_copies, acc_copies
 
 
 if __name__ == "__main__":
