@@ -365,7 +365,7 @@ class TestMxMatmulCodegen:
             ):
                 pl.store(pl.load(src, [0, 0], [16, 64]), [0, 0], out)
 
-        with pytest.raises(ValueError, match=r"4-bit dtype.*not supported.*a5.*only FP4"):
+        with pytest.raises(ValueError, match=r"4-bit dtype.*not supported.*a5.*FP4E2M1X2.*PackFp4"):
             _emit_incore_mlir(Program)
 
     def test_matmul_mx_acc_ins_equals_outs(self):
