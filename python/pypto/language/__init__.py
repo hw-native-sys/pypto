@@ -284,6 +284,7 @@ MX_B_NN = TensorLayout.MX_B_NN
 
 # Re-export DataType constants for convenience
 FP4 = DataType.FP4
+FP4E2M1X2 = DataType.FP4E2M1X2  # packed carrier (PTOAS / Torch)
 FP8E4M3FN = DataType.FP8E4M3FN
 FP8E5M2 = DataType.FP8E5M2
 FP8E8M0 = DataType.FP8E8M0
@@ -546,6 +547,7 @@ __all__ = [
     "MX_A_ZZ",
     "MX_B_NN",
     "FP4",
+    "FP4E2M1X2",
     "FP8E4M3FN",
     "FP8E5M2",
     "FP8E8M0",

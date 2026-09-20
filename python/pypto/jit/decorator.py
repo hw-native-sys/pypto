@@ -171,7 +171,7 @@ def _get_torch() -> Any:
                 ("float8_e4m3fn", DataType.FP8E4M3FN),
                 ("float8_e5m2", DataType.FP8E5M2),
                 ("float8_e8m0fnu", DataType.FP8E8M0),
-                ("float4_e2m1fn_x2", DataType.FP4),
+                ("float4_e2m1fn_x2", DataType.FP4E2M1X2),
             ):
                 _td = getattr(torch, _torch_name, None)
                 if _td is not None:
@@ -289,7 +289,7 @@ def _extract_tensor_meta(
     """
     dtype = _torch_dtype_to_pypto(tensor.dtype)
     extents = list(tensor.shape)
-    if dtype == DataType.FP4:
+    if dtype == DataType.FP4E2M1X2:
         if not extents:
             raise TypeError("Packed torch.float4_e2m1fn_x2 tensors must have rank >= 1")
         if extents[-1] <= 0:
@@ -297,9 +297,16 @@ def _extract_tensor_meta(
                 "Packed torch.float4_e2m1fn_x2 tensors require a positive runtime x2 carrier last "
                 f"dimension; got shape {tuple(extents)}"
             )
-        # Torch exposes one x2 carrier per byte. PyPTO IR and PTO-ISA count
-        # logical FP4 nibbles, so expand only at this API boundary and keep the
-        # storage shape out of TensorType/TileType.
+        # Torch and IR both count packed x2 carriers for FP4E2M1X2; do not expand.
+    elif dtype == DataType.FP4:
+        if not extents:
+            raise TypeError("Packed torch.float4_e2m1fn_x2 tensors must have rank >= 1")
+        if extents[-1] <= 0:
+            raise TypeError(
+                "Packed torch.float4_e2m1fn_x2 tensors require a positive runtime x2 carrier last "
+                f"dimension; got shape {tuple(extents)}"
+            )
+        # Legacy logical FP4 path: expand carrier → nibble extents at the API boundary.
         extents[-1] *= 2
     return _build_tensor_meta(extents, dtype, dyn_dims, layout)
 

@@ -42,6 +42,7 @@
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -241,10 +242,23 @@ ExprPtr MakeCast(const ExprPtr& x, DataType to, int mode, const Span& span) {
   return OpRegistry::GetInstance().Create("tile.cast", {x}, kw, span);
 }
 
+bool IsFp8DataCastTarget(DataType dst) { return dst == DataType::FP8E4M3FN || dst == DataType::FP8E5M2; }
+
+/// FP4 / FP4E2M1X2 → FP8* is allowed but discouraged (prefer LUT gather or host precast).
+void MaybeWarnFp4FamilyToFp8(DataType src, DataType dst, const Span& span, std::vector<Diagnostic>* diags) {
+  if (!diags || !src.IsFp4Family() || !IsFp8DataCastTarget(dst)) return;
+  diags->emplace_back(DiagnosticSeverity::Warning, "LegalizeTileCast", 0,
+                      "cast from " + src.ToString() + " to " + dst.ToString() +
+                          " expands to FP4→BF16→FP32→FP8, which is slow and memory-heavy; prefer a LUT "
+                          "gather for better performance and lower memory use",
+                      span);
+}
+
 class LegalizeTileCastMutator : public IRMutator {
  public:
-  LegalizeTileCastMutator(const backend::TcvtAdjacency& table, std::string arch_name)
-      : arch_name_(std::move(arch_name)), adj_(BuildAdj(table)) {}
+  LegalizeTileCastMutator(const backend::TcvtAdjacency& table, std::string arch_name,
+                          std::vector<Diagnostic>* diags)
+      : arch_name_(std::move(arch_name)), adj_(BuildAdj(table)), diags_(diags) {}
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto call = As<Call>(op->value_);
@@ -260,6 +274,8 @@ class LegalizeTileCastMutator : public IRMutator {
     DataType src = src_tile->dtype_;
     DataType dst = call->GetKwarg<DataType>("target_type");
     const int mode = call->GetKwarg<int>("mode", kCastModeRound);
+
+    MaybeWarnFp4FamilyToFp8(src, dst, op->span_, diags_);
 
     if (IsNativeCast(adj_, src, dst)) {
       return IRMutator::VisitStmt_(op);
@@ -321,6 +337,7 @@ class LegalizeTileCastMutator : public IRMutator {
   std::string arch_name_;
   AdjList adj_;
   std::size_t temp_counter_ = 0;
+  std::vector<Diagnostic>* diags_;
 };
 
 FunctionPtr TransformLegalizeTileCast(const FunctionPtr& func) {
@@ -342,8 +359,11 @@ FunctionPtr TransformLegalizeTileCast(const FunctionPtr& func) {
   if (handler == nullptr) {
     return func;
   }
-  LegalizeTileCastMutator mutator(handler->GetTcvtAdjacency(), handler->GetPtoTargetArch());
-  return mutator.VisitFunction(func);
+  std::vector<Diagnostic> diags;
+  LegalizeTileCastMutator mutator(handler->GetTcvtAdjacency(), handler->GetPtoTargetArch(), &diags);
+  auto result = mutator.VisitFunction(func);
+  EmitDiagnostics(diags, "LegalizeTileCast");
+  return result;
 }
 
 }  // namespace

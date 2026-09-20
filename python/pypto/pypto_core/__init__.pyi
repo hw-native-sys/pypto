@@ -52,7 +52,8 @@ class DataType:
     UINT16: DataType  # 16-bit unsigned integer
     UINT32: DataType  # 32-bit unsigned integer
     UINT64: DataType  # 64-bit unsigned integer
-    FP4: DataType  # 4-bit floating point
+    FP4: DataType  # 4-bit floating point (logical nibble)
+    FP4E2M1X2: DataType  # Packed pair of E2M1 FP4 (PTOAS / Torch carrier)
     FP8E4M3FN: DataType  # 8-bit floating point (IEEE 754 e4m3fn format)
     FP8E5M2: DataType  # 8-bit floating point (IEEE 754 e5m2 format)
     FP8E8M0: DataType  # 8-bit floating point (E8M0 MX block-scale exponent)

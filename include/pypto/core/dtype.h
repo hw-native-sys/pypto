@@ -75,10 +75,11 @@ class DataType {
   static constexpr uint8_t kFp8e5m2Code = 0x32;
   static constexpr uint8_t kFp16Code = 0x33;
   static constexpr uint8_t kFp32Code = 0x34;
-  static constexpr uint8_t kFp64Code = 0x35;     // Reserved for future FP64 support
-  static constexpr uint8_t kFp8e8m0Code = 0x36;  // MX block-scale exponent (E8M0)
+  static constexpr uint8_t kFp64Code = 0x35;       // Reserved for future FP64 support
+  static constexpr uint8_t kFp8e8m0Code = 0x36;    // MX block-scale exponent (E8M0)
+  static constexpr uint8_t kFp4e2m1x2Code = 0x37;  // Packed pair of E2M1 FP4 (1 byte)
   static constexpr uint8_t kIeeeFloatRangeEnd = 0x3F;
-  // 0x37-0x3F reserved for future IEEE float types
+  // 0x38-0x3F reserved for future IEEE float types
 
   // Brain/Hisilicon float types: 0x40-0x4F (16 slots reserved)
   static constexpr uint8_t kBrainFloatRangeStart = 0x40;
@@ -108,7 +109,8 @@ class DataType {
   static const DataType UINT16;     // 16-bit unsigned integer
   static const DataType UINT32;     // 32-bit unsigned integer
   static const DataType UINT64;     // 64-bit unsigned integer
-  static const DataType FP4;        // 4-bit floating point
+  static const DataType FP4;        // 4-bit floating point (logical nibble; frontend only)
+  static const DataType FP4E2M1X2;  // Packed pair of E2M1 FP4 (1 byte); PTOAS / Torch carrier
   static const DataType FP8E4M3FN;  // 8-bit floating point (IEEE 754 e4m3fn format)
   static const DataType FP8E5M2;    // 8-bit floating point (IEEE 754 e5m2 format)
   static const DataType FP8E8M0;    // 8-bit floating point (E8M0 MX block-scale exponent)
@@ -163,6 +165,7 @@ class DataType {
       case kFp8e4m3fnCode:
       case kFp8e5m2Code:
       case kFp8e8m0Code:
+      case kFp4e2m1x2Code:
       case kUInt8Code:
       case kInt8Code:
         return 8;
@@ -226,6 +229,8 @@ class DataType {
         return "uint64";
       case kFp4Code:
         return "fp4";
+      case kFp4e2m1x2Code:
+        return "fp4e2m1x2";
       case kFp8e4m3fnCode:
         return "fp8e4m3fn";
       case kFp8e5m2Code:
@@ -297,6 +302,7 @@ class DataType {
         // Align with PTOAS EmitC for !pto.f8E8M0 → float8_e8m0_t.
         return "float8_e8m0_t";
       case kFp4Code:
+      case kFp4e2m1x2Code:
         return "float4_e2m1x2_t";
       default:
         return "unknown";
@@ -371,6 +377,12 @@ class DataType {
    */
   [[nodiscard]] constexpr uint8_t Code() const { return code_; }
 
+  /// Frontend logical nibble FP4.
+  [[nodiscard]] constexpr bool IsLogicalFp4() const { return code_ == kFp4Code; }
+  /// Packed E2M1x2 carrier.
+  [[nodiscard]] constexpr bool IsPackedFp4() const { return code_ == kFp4e2m1x2Code; }
+  [[nodiscard]] constexpr bool IsFp4Family() const { return IsLogicalFp4() || IsPackedFp4(); }
+
  private:
   uint8_t code_;  // Internal type code
 };
@@ -388,6 +400,7 @@ inline constexpr DataType DataType::UINT16 = DataType(kUInt16Code);
 inline constexpr DataType DataType::UINT32 = DataType(kUInt32Code);
 inline constexpr DataType DataType::UINT64 = DataType(kUInt64Code);
 inline constexpr DataType DataType::FP4 = DataType(kFp4Code);
+inline constexpr DataType DataType::FP4E2M1X2 = DataType(kFp4e2m1x2Code);
 inline constexpr DataType DataType::FP8E4M3FN = DataType(kFp8e4m3fnCode);
 inline constexpr DataType DataType::FP8E5M2 = DataType(kFp8e5m2Code);
 inline constexpr DataType DataType::FP8E8M0 = DataType(kFp8e8m0Code);
@@ -428,6 +441,7 @@ inline std::string DataTypeToString(const DataType& dtype) {
   if (dtype == DataType::UINT32) return "UINT32";
   if (dtype == DataType::UINT64) return "UINT64";
   if (dtype == DataType::FP4) return "FP4";
+  if (dtype == DataType::FP4E2M1X2) return "FP4E2M1X2";
   if (dtype == DataType::FP8E4M3FN) return "FP8E4M3FN";
   if (dtype == DataType::FP8E5M2) return "FP8E5M2";
   if (dtype == DataType::FP8E8M0) return "FP8E8M0";

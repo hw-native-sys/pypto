@@ -81,6 +81,10 @@ class Ascend910BHandler : public BackendHandler {
   [[nodiscard]] bool RequiresNoSplitDualAivDispatch() const override { return true; }
   // A2/A3 offset Acc->Mat tinsert requires f32->bf16/f16 (cannot keep f32).
   [[nodiscard]] bool RequiresLowPrecisionMatScratch() const override { return true; }
+  // A2/A3 has no packed fp4 load/store ABI; reject the whole FP4 family.
+  [[nodiscard]] bool SupportsIncoreDataType(const DataType& dtype) const override {
+    return dtype.GetBit() != 4 && !dtype.IsFp4Family();
+  }
 
   // A2/A3 store pipe supports bf16 atomic-add (pto-isa set_atomic_bf16).
   [[nodiscard]] bool SupportsBf16AtomicAdd() const override { return true; }

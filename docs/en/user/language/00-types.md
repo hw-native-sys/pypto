@@ -104,7 +104,8 @@ torch.testing.assert_close(acc, acc_before + scaled, rtol=1e-2, atol=1e-2)  # In
 | `pl.FP16` | 16 | IEEE half |
 | `pl.BF16` | 16 | Brain float |
 | `pl.FP32` | 32 | IEEE single |
-| `pl.FP4` | 4 | Packed MXFP4 E2M1×2 |
+| `pl.FP4` | 4 | Frontend logical MXFP4 E2M1 nibble (incomplete without automatic pack; prefer `FP4E2M1X2`) |
+| `pl.FP4E2M1X2` | 8 | Packed carrier (two nibbles); physical last dim matches `torch.float4_e2m1fn_x2` / `!pto.f4E2M1x2` |
 | `pl.FP8E4M3FN` / `pl.FP8E5M2` | 8 | MXFP8 data formats |
 | `pl.FP8E8M0` | 8 | MX block-scale exponent |
 | `pl.HF4` / `pl.HF8` | 4 / 8 | Hisilicon float formats |
@@ -121,19 +122,17 @@ packs every semantic 4-bit dtype two logical elements per byte, so the physical 
 nbytes = 256 * pl.FP32.get_byte()          # 1024, not 256
 ```
 
-FP4 shapes inside PyPTO IR are logical nibble shapes, and `valid_shape` uses the same
-logical units. At the Torch/runtime boundary, `torch.float4_e2m1fn_x2` uses a physical x2
-carrier shape: its last dimension contains one byte per two logical FP4 values. JIT expands
-that last dimension on entry, while compiled-call metadata and orchestration allocations
-contract it by two; no separate `storage_shape` is stored in `TensorType` or `TileType`. Packed
-FP4 requires a positive even logical last dimension, including static allocation and view
-shapes; dynamic widths are checked before conversion. A 4-bit slice origin must land on a byte
-boundary, so an odd linear nibble offset is rejected.
+Frontend `pl.FP4` is a logical nibble type (`GetBit()==4`, even last dim). Prefer
+hand-written `pl.FP4E2M1X2` for the packed carrier (`GetBit()==8`, last dim already
+in x2 units). Resolving the short `FP4` name emits a `UserWarning` until automatic
+pack lands. At the Torch/runtime boundary, `torch.float4_e2m1fn_x2` maps to
+`FP4E2M1X2` without expanding the last dim; logical `FP4` call metadata still
+contracts/expands by two where that dtype remains.
 
-End-to-end 4-bit execution is backend-gated. Ascend950 supports `pl.FP4`; `INT4`, `UINT4`,
-and `HF4` remain storage-accounted but are rejected by in-core codegen. Ascend910B/A2A3
-rejects every 4-bit in-core dtype because its isolated FP16↔INT4 conversion has no matching
-packed load/store carrier ABI.
+End-to-end 4-bit execution is backend-gated. Ascend950 in-core accepts packed
+`pl.FP4E2M1X2`; logical `pl.FP4` / `INT4` / `UINT4` / `HF4` are rejected by
+in-core codegen. Ascend910B/A2A3 rejects every FP4-family in-core dtype because
+its isolated FP16↔INT4 conversion has no matching packed load/store carrier ABI.
 
 ### Container types
 

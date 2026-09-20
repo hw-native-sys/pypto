@@ -56,11 +56,13 @@ std::string DataTypeToMLIR(DataType dtype) {
     return "!pto.f8E8M0";
   } else if (dtype == DataType::HF8) {
     return "!pto.hif8";
-  } else if (dtype == DataType::FP4) {
+  } else if (dtype == DataType::FP4 || dtype == DataType::FP4E2M1X2) {
     // MXFP4 E2M1 packed form used by pto-isa / PTOAS for MX matmul. Bare
     // `f4E2M1x2` does not parse in PTOAS (the bare-keyword parser lacks it);
     // the dialect type `!pto.f4E2M1x2` (TableGen mnemonic) is accepted in all
     // emit contexts (ptr<>, tile_buf dtype=, tensor_view element).
+    // Logical FP4 still maps here until PackFp4 lands; FP4E2M1X2 is the
+    // explicit packed carrier.
     return "!pto.f4E2M1x2";
   } else if (dtype == DataType::INT32) {
     return "i32";

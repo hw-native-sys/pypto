@@ -92,7 +92,8 @@ torch.testing.assert_close(acc, acc_before + scaled, rtol=1e-2, atol=1e-2)  # In
 | `pl.FP16` | 16 | IEEE 半精度 |
 | `pl.BF16` | 16 | Brain float |
 | `pl.FP32` | 32 | IEEE 单精度 |
-| `pl.FP4` | 4 | 打包的 MXFP4 E2M1×2 |
+| `pl.FP4` | 4 | 前端逻辑 MXFP4 E2M1 nibble（尚无自动打包时不完善；推荐 `FP4E2M1X2`） |
+| `pl.FP4E2M1X2` | 8 | 打包 carrier（双 nibble）；物理末维对齐 `torch.float4_e2m1fn_x2` / `!pto.f4E2M1x2` |
 | `pl.FP8E4M3FN` / `pl.FP8E5M2` | 8 | MXFP8 数据格式 |
 | `pl.FP8E8M0` | 8 | MX 块缩放指数 |
 | `pl.HF4` / `pl.HF8` | 4 / 8 | 海思浮点格式 |
@@ -105,9 +106,16 @@ torch.testing.assert_close(acc, acc_before + scaled, rtol=1e-2, atol=1e-2)  # In
 nbytes = 256 * pl.FP32.get_byte()          # 1024, not 256
 ```
 
-PyPTO IR 中的 FP4 shape 是以 nibble 计数的逻辑 shape，`valid_shape` 也使用相同单位。Torch/runtime 边界上的 `torch.float4_e2m1fn_x2` 使用物理 x2 carrier shape：末维的每个元素是一字节、承载两个逻辑 FP4。JIT 在入口展开末维，compiled-call metadata 与 orchestration allocation 将末维除以二；`TensorType` 和 `TileType` 不保存单独的 `storage_shape`。Packed FP4 的逻辑末维必须是正偶数，静态 allocation/view shape 同样受此约束，动态宽度会在换算前检查。4-bit slice 起点必须落在字节边界；线性 nibble offset 为奇数时会直接报错。
+前端 `pl.FP4` 是逻辑 nibble 类型（`GetBit()==4`，末维偶数）。推荐手写
+`pl.FP4E2M1X2` 作为打包 carrier（`GetBit()==8`，末维已是 x2 单位）。解析短名
+`FP4` 时会发出 `UserWarning`，直到自动打包落地。Torch/runtime 边界上
+`torch.float4_e2m1fn_x2` 映射到 `FP4E2M1X2` 且不展开末维；逻辑 `FP4` 的 call
+metadata 仍会在该 dtype 存在时按二收缩/展开。
 
-4-bit 端到端执行按后端做能力检查。Ascend950 支持 `pl.FP4`；`INT4`、`UINT4`、`HF4` 虽使用统一存储计数，但 in-core codegen 会拒绝。Ascend910B/A2A3 会拒绝所有 4-bit in-core dtype，因为它只有孤立的 FP16↔INT4 转换，没有配套的 packed load/store carrier ABI。
+4-bit 端到端执行按后端做能力检查。Ascend950 in-core 接受打包的
+`pl.FP4E2M1X2`；逻辑 `pl.FP4` / `INT4` / `UINT4` / `HF4` 会被 in-core codegen
+拒绝。Ascend910B/A2A3 会拒绝整族 FP4 in-core dtype，因为它只有孤立的
+FP16↔INT4 转换，没有配套的 packed load/store carrier ABI。
 
 ### 容器类型
 

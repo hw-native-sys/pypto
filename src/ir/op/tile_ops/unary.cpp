@@ -34,6 +34,8 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/span.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -171,11 +173,19 @@ TypePtr DeduceTileCastType(const std::vector<ExprPtr>& args,
       << " equals input dtype; same-dtype cast is not a valid operation. "
       << "Remove the cast or use a different target_type.";
 
-  // Cast preserves shape and the source tile's valid_shape; only dtype changes.
+  // Logical FP4 keeps a 1:1 geometry until PackFp4. Packed FP4E2M1X2 ↔ a wider
+  // type is a 2:1 last-axis conversion (bf16[M,K] ↔ f4x2[M,K/2]): shape,
+  // valid_shape, and ND stride all follow that change.
+  const Span& span = args[0]->span_;
+  auto shape = AdjustFp4E2M1x2CastLastDim(tile_type->shape_, tile_type->dtype_, target_dtype, span);
+  const auto src_view = tile_view_semantics::GetEffectiveTileView(*tile_type);
   TileView tile_view;
-  tile_view.valid_shape = GetValidShape(tile_type);
+  tile_view.valid_shape =
+      AdjustFp4E2M1x2CastLastDim(GetValidShape(tile_type), tile_type->dtype_, target_dtype, span);
+  tile_view.stride =
+      AdjustFp4E2M1x2CastStrides(src_view.stride, shape, tile_type->dtype_, target_dtype, span);
   InheritTileViewLayout(tile_view, tile_type);
-  return std::make_shared<TileType>(tile_type->shape_, target_dtype, std::nullopt, tile_view);
+  return std::make_shared<TileType>(std::move(shape), target_dtype, std::nullopt, tile_view);
 }
 
 // ============================================================================

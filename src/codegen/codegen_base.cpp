@@ -130,7 +130,7 @@ std::string CodegenBase::GetRuntimeDataTypeString(const DataType& dtype) const {
   if (dtype == DataType::FP8E4M3FN) return "DataType::FP8E4M3FN";
   if (dtype == DataType::FP8E5M2) return "DataType::FP8E5M2";
   if (dtype == DataType::FP8E8M0) return "DataType::FP8E8M0";
-  if (dtype == DataType::FP4) return "DataType::FP4E2M1";
+  if (dtype == DataType::FP4 || dtype == DataType::FP4E2M1X2) return "DataType::FP4E2M1";
   // INDEX is a semantic type in the IR; the runtime represents it as INT64
   if (dtype == DataType::INDEX) return "DataType::INT64";
   if (dtype == DataType::INT64) return "DataType::INT64";
