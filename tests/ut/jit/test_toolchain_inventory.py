@@ -366,7 +366,7 @@ def test_the_driver_a_wrapper_executes_is_inventoried(tmp_path, monkeypatch):
     # path invoked would let the real compiler be replaced without moving the
     # fingerprint.
     driver = _elf(tmp_path / "real-g++")
-    wrapper = _elf(tmp_path / "bin" / "ccache")
+    wrapper = _fake_ccache(tmp_path / "bin" / "ccache")
     shim = tmp_path / "shims" / "g++"
     shim.parent.mkdir()
     shim.symlink_to(wrapper)
@@ -383,7 +383,7 @@ def test_an_unidentifiable_driver_refuses_rather_than_guesses(tmp_path):
 
 
 def test_gcc_inputs_covers_both_the_wrapper_and_its_driver(tmp_path, monkeypatch):
-    wrapper = _elf(tmp_path / "bin" / "ccache")
+    wrapper = _fake_ccache(tmp_path / "bin" / "ccache")
     shim = tmp_path / "shims" / "g++"
     shim.parent.mkdir()
     shim.symlink_to(wrapper)
@@ -422,7 +422,7 @@ def _elf(path: Path) -> Path:
 
 def test_a_tracked_wrapper_is_accepted(tmp_path):
     driver = _elf(tmp_path / "real-g++")
-    wrapper = _elf(tmp_path / "bin" / "ccache")
+    wrapper = _fake_ccache(tmp_path / "bin" / "ccache")
     shim = tmp_path / "shims" / "g++"
     shim.parent.mkdir()
     shim.symlink_to(wrapper)
@@ -434,7 +434,7 @@ def test_an_untracked_wrapper_refuses_rather_than_trusting_it(tmp_path):
     # Its selection inputs are not enumerated anywhere here, so an identity
     # taken through it would not move when the compiler it picks does.
     driver = _elf(tmp_path / "real-g++")
-    wrapper = _elf(tmp_path / "bin" / "somecache")
+    wrapper = _fake_ccache(tmp_path / "bin" / "somecache")
     shim = tmp_path / "shims" / "g++"
     shim.parent.mkdir()
     shim.symlink_to(wrapper)
@@ -449,6 +449,7 @@ def test_a_compiler_invoked_directly_is_not_treated_as_a_wrapper(tmp_path):
     assert _toolchain._driver_executed(f"COLLECT_GCC={compiler}\n", compiler) == compiler.resolve()
 
 
+@pytest.mark.usefixtures("compiler_metadata")
 @pytest.mark.parametrize("variable", ["CCACHE_COMPILER", "CCACHE_PREFIX", "CCACHE_CONFIGPATH"])
 def test_changing_a_wrapper_selection_rediscovers_in_the_same_process(monkeypatch, variable):
     # The wrapper picks the compiler from these, exactly as PATH does, so the
@@ -474,9 +475,69 @@ def test_changing_a_wrapper_selection_rediscovers_in_the_same_process(monkeypatc
     monkeypatch.setenv(variable, "/compiler/B")
     second = _toolchain.capture_toolchain("a2a3", "tensormap_and_ringbuffer")
 
+    # Report why capture gave up before discovery rather than leaving an
+    # empty list to explain itself: the reason is host-dependent and this
+    # test cannot reproduce every host.
+    assert first.usable, [failure.reason for failure in first.failures]
+    assert second.usable, [failure.reason for failure in second.failures]
     assert seen == ["/compiler/A", "/compiler/B"]
-    assert first.usable and second.usable
     assert first.digest != second.digest
+
+
+def _fake_ccache(wrapper: Path, **settings: str) -> Path:
+    """A ccache that answers --show-config the way the real one does."""
+    lines = {
+        "compiler": "",
+        "compiler_check": "mtime",
+        "path": "",
+        "prefix_command": "",
+        "prefix_command_cpp": "",
+        **settings,
+    }
+    body = "".join(f'echo "({"environment" if lines[k] else "default"}) {k} = {lines[k]}"\n' for k in lines)
+    wrapper.parent.mkdir(parents=True, exist_ok=True)
+    wrapper.write_text(f"#!/bin/sh\n{body}")
+    wrapper.chmod(0o755)
+    return wrapper
+
+
+def test_a_wrapper_at_its_defaults_redirects_nothing(tmp_path):
+    assert _toolchain._wrapper_redirects(_fake_ccache(tmp_path / "ccache")) == []
+
+
+@pytest.mark.parametrize("setting", ["compiler", "path", "prefix_command", "prefix_command_cpp"])
+def test_a_configured_redirect_is_reported_with_its_origin(tmp_path, setting):
+    wrapper = _fake_ccache(tmp_path / "ccache", **{setting: "/somewhere/else"})
+
+    reported = _toolchain._wrapper_redirects(wrapper)
+
+    assert reported == [f"{setting}=/somewhere/else from (environment)"]
+
+
+def test_a_setting_that_does_not_redirect_is_ignored(tmp_path):
+    # compiler_check governs the wrapper's own cache validity, not which
+    # compiler runs, and it is non-empty by default.
+    assert _toolchain._wrapper_redirects(_fake_ccache(tmp_path / "ccache")) == []
+
+
+def test_an_unreadable_wrapper_configuration_is_reported(tmp_path):
+    missing = tmp_path / "not-installed"
+
+    assert _toolchain._wrapper_redirects(missing) != []
+
+
+def test_a_redirecting_wrapper_is_refused(tmp_path):
+    # prefix_command splices another program into the compile step only, so
+    # the -E probe never sees it and the driver it reports is unchanged --
+    # two hosts differing only in it would otherwise share an identity.
+    driver = _elf(tmp_path / "real-g++")
+    wrapper = _fake_ccache(tmp_path / "bin" / "ccache", prefix_command="distcc")
+    shim = tmp_path / "shims" / "g++"
+    shim.parent.mkdir()
+    shim.symlink_to(wrapper)
+
+    with pytest.raises(ValueError, match="redirects compilation beyond this inventory"):
+        _toolchain._driver_executed(f"COLLECT_GCC={driver}\n", shim)
 
 
 def test_every_tracked_wrapper_variable_reaches_the_discovery_key():
@@ -776,9 +837,29 @@ def test_python_optimization_splits_persistent_identity(monkeypatch):
     assert _semantic_environment() != ordinary
 
 
+# capture_toolchain refuses before discovery when any of these is set, and a
+# CI runner may well set one.
+_IMPLICIT_DEPENDENCY_OVERRIDES = (
+    "CPATH",
+    "CPLUS_INCLUDE_PATH",
+    "C_INCLUDE_PATH",
+    "COMPILER_PATH",
+    "GCC_EXEC_PREFIX",
+    "LIBRARY_PATH",
+    "LD_PRELOAD",
+    "LD_AUDIT",
+)
+
+
 @pytest.fixture
 def compiler_metadata(monkeypatch):
-    """Keep discovery tests independent of optional runtime installations."""
+    """Keep discovery tests independent of the host, not just of its runtime.
+
+    capture_toolchain gives up before discovery for two host-dependent reasons
+    -- an optional runtime that is not installed, and an implicit dependency
+    override that is set -- and either one silently turns a test of the memo
+    into a test of that refusal.
+    """
     monkeypatch.setitem(sys.modules, "simpler_setup", None)
     monkeypatch.setitem(sys.modules, "simpler", None)
     monkeypatch.setitem(
@@ -786,6 +867,8 @@ def compiler_metadata(monkeypatch):
         "pypto.runtime.kernel_compiler",
         SimpleNamespace(KernelCompiler=SimpleNamespace(_sanitizers=None)),
     )
+    for override in _IMPLICIT_DEPENDENCY_OVERRIDES:
+        monkeypatch.delenv(override, raising=False)
 
 
 @pytest.mark.usefixtures("compiler_metadata")

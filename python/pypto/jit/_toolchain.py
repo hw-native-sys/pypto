@@ -249,6 +249,35 @@ _WRAPPER_SELECTION: dict[str, tuple[str, ...]] = {
 _WRAPPER_VARIABLES = tuple(sorted({name for names in _WRAPPER_SELECTION.values() for name in names}))
 
 
+# Settings that send compilation somewhere this inventory does not follow: a
+# different compiler, a different place to look for it, or another program
+# spliced into the chain. Read from the wrapper itself rather than from the
+# environment, so a value set in a config file counts the same as one exported.
+_WRAPPER_REDIRECTS = ("compiler", "path", "prefix_command", "prefix_command_cpp")
+
+
+def _wrapper_redirects(wrapper: Path) -> list[str]:
+    """Report every configured redirect of a wrapper, with where it came from.
+
+    A prefix is the case the rest of this module cannot see: it applies to
+    compilation, not preprocessing, so the -E probe never runs it and the
+    driver that probe reports is unchanged. Two hosts differing only in
+    prefix_command would otherwise agree on an identity and share each other's
+    artifacts.
+    """
+    try:
+        output = _run([str(wrapper), "--show-config"])
+    except (OSError, subprocess.SubprocessError) as exc:
+        return [f"its configuration could not be read ({exc})"]
+    redirects = []
+    for line in output.splitlines():
+        origin, marker, setting = line.partition(") ")
+        key, separator, value = setting.partition(" = ")
+        if marker and separator and key.strip() in _WRAPPER_REDIRECTS and value.strip():
+            redirects.append(f"{key.strip()}={value.strip()} from {origin.strip()})")
+    return redirects
+
+
 def _driver_executed(output: str, executable: Path) -> Path:
     """Return the compiler driver the invocation actually ran.
 
@@ -274,8 +303,19 @@ def _driver_executed(output: str, executable: Path) -> Path:
     if driver is None:
         raise ValueError(f"Cannot identify the compiler driver actually executed: {executable}")
     invoked = executable.resolve(strict=True)
-    if driver != invoked and invoked.name not in _WRAPPER_SELECTION:
-        raise ValueError(f"Compiler wrapper with untracked selection inputs: {invoked.name} at {executable}")
+    if driver != invoked:
+        # COLLECT_GCC naming a different file is the signal that something
+        # mediated the choice of compiler.
+        if invoked.name not in _WRAPPER_SELECTION:
+            raise ValueError(
+                f"Compiler wrapper with untracked selection inputs: {invoked.name} at {executable}"
+            )
+        redirects = _wrapper_redirects(invoked)
+        if redirects:
+            raise ValueError(
+                f"Compiler wrapper redirects compilation beyond this inventory: "
+                f"{invoked.name} has {', '.join(redirects)}"
+            )
     return driver
 
 
