@@ -9,14 +9,17 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <cstddef>
 #include <exception>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "pypto/core/error.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -27,6 +30,26 @@ namespace pypto {
 namespace ir {
 
 namespace {
+
+/// Counts, per Var, how many AssignStmts in a function body define it. Before
+/// ConvertToSSA a source-level rebind reuses ONE Var node across several
+/// assignments (``t = pl.load(...)`` then ``t = pl.add(t, t)``), so that Var
+/// cannot carry every RHS type at once -- the asymmetry is inherent to
+/// pre-SSA IR, not a defect. Only a singly-defined Var has a single defining
+/// value to agree with.
+class AssignCountVisitor : public IRVisitor {
+ public:
+  [[nodiscard]] const std::unordered_map<const Var*, size_t>& counts() const { return counts_; }
+
+ protected:
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (op && op->var_) ++counts_[op->var_.get()];
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  std::unordered_map<const Var*, size_t> counts_;
+};
 
 /// Walks every AssignStmt reachable from a function body and asserts that the
 /// left-hand-side Var's type is structurally equal to the right-hand-side
@@ -44,14 +67,21 @@ namespace {
 /// by ``HasMemRefs`` / ``AllocatedMemoryAddr`` — so MemRef asymmetry,
 /// legitimate after ``InitMemRef``, is out of scope here. Note ``memory_space``
 /// exists only on TileType, not TensorType.
+///
+/// Only a Var that ``AssignCountVisitor`` saw defined exactly once is checked
+/// (see its comment): a rebound Var has no single defining value to agree with.
 class AssignTypeSymmetryVisitor : public IRVisitor {
  public:
-  AssignTypeSymmetryVisitor(std::vector<Diagnostic>& diagnostics, std::string func_name)
-      : diagnostics_(diagnostics), func_name_(std::move(func_name)) {}
+  AssignTypeSymmetryVisitor(std::vector<Diagnostic>& diagnostics, std::string func_name,
+                            const std::unordered_map<const Var*, size_t>& assign_counts)
+      : diagnostics_(diagnostics), func_name_(std::move(func_name)), assign_counts_(assign_counts) {}
 
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
-    if (op && op->var_ && op->value_) CheckAssign(op);
+    if (op && op->var_ && op->value_) {
+      auto it = assign_counts_.find(op->var_.get());
+      if (it == assign_counts_.end() || it->second == 1) CheckAssign(op);
+    }
     IRVisitor::VisitStmt_(op);
   }
 
@@ -81,6 +111,7 @@ class AssignTypeSymmetryVisitor : public IRVisitor {
 
   std::vector<Diagnostic>& diagnostics_;
   std::string func_name_;
+  const std::unordered_map<const Var*, size_t>& assign_counts_;
 };
 
 }  // namespace
@@ -93,7 +124,9 @@ class AssignTypeSymmetryPropertyVerifierImpl : public PropertyVerifier {
     if (!program) return;
     for (const auto& [global_var, func] : program->functions_) {
       if (!func || !func->body_) continue;
-      AssignTypeSymmetryVisitor visitor(diagnostics, func->name_);
+      AssignCountVisitor counter;
+      counter.VisitStmt(func->body_);
+      AssignTypeSymmetryVisitor visitor(diagnostics, func->name_, counter.counts());
       visitor.VisitStmt(func->body_);
     }
   }

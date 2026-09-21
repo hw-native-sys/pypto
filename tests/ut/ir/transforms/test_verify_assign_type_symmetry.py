@@ -48,6 +48,22 @@ def _one_assign_program(var_type: ir.Type, value_type: ir.Type) -> ir.Program:
     return ir.Program([func], "AssignSymTest", _SPAN)
 
 
+def _walk_assigns(stmt: ir.Stmt) -> list:
+    """Every AssignStmt reachable from ``stmt``, in source order."""
+    found: list = []
+    if isinstance(stmt, ir.AssignStmt):
+        found.append(stmt)
+    for child in (
+        stmt.stmts
+        if isinstance(stmt, ir.SeqStmts)
+        else [stmt.body]
+        if isinstance(stmt, (ir.ScopeStmt, ir.ForStmt, ir.WhileStmt))
+        else []
+    ):
+        found.extend(_walk_assigns(child))
+    return found
+
+
 def _tile(shape, dtype=None, memref=None, tile_view=None, memory_space=None) -> ir.TileType:
     return ir.TileType(shape, dtype or DataType.FP32, memref, tile_view, memory_space or ir.MemorySpace.Vec)
 
@@ -195,6 +211,64 @@ def test_tuple_type_assignment():
     diags = _verify(_one_assign_program(ir.TupleType([a, b]), tup_bad_rhs))
     assert len(diags) == 1
     assert diags[0].rule_name == "AssignTypeSymmetry"
+
+
+# --------------------------------------------------------------------------- #
+# Scope — only a Var with a single defining assignment is checked.
+# --------------------------------------------------------------------------- #
+
+
+def test_rebound_var_is_not_a_violation():
+    """A Var defined by two AssignStmts has no single defining value.
+
+    Before ``ConvertToSSA`` a source-level rebind reuses ONE ``Var`` node across
+    several assignments, so that Var cannot equal every RHS type at once. The
+    asymmetry is inherent to pre-SSA IR, not a defect, so the verifier checks
+    only singly-defined Vars — which post-SSA is every Var.
+    """
+    vec = _tile([16, 64], memory_space=ir.MemorySpace.Vec)
+    acc = _tile([16, 64], memory_space=ir.MemorySpace.Acc)
+    src_vec = ir.Var("src_vec", vec, _SPAN)
+    src_acc = ir.Var("src_acc", acc, _SPAN)
+    dst = ir.Var("dst", vec, _SPAN)
+    body = ir.SeqStmts([ir.AssignStmt(dst, src_vec, _SPAN), ir.AssignStmt(dst, src_acc, _SPAN)], _SPAN)
+    func = ir.Function("main_incore_0", [src_vec, src_acc], [vec], body, _SPAN, ir.FunctionType.InCore)
+    # The second assignment IS asymmetric in isolation ...
+    assert not ir.structural_equal(dst.type, src_acc.type)
+    # ... yet the program verifies clean, because `dst` is rebound.
+    assert len(_verify(ir.Program([func], "RebindTest", _SPAN))) == 0
+
+
+def test_dsl_rebind_tolerated_before_ssa_and_clean_after():
+    """The same shape in real DSL: ``t`` is loaded, then rebound by ``pl.add``.
+
+    ``pl.add`` deduces ``Mem.Vec`` while the Var minted at the first assignment
+    carries no memory space, so the pre-SSA IR is asymmetric by construction.
+    ``ConvertToSSA`` gives each definition its own Var and the asymmetry is
+    gone — the invariant the verifier enforces is the post-SSA one.
+    """
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.AIV)
+        def kern(
+            self,
+            x: pl.Tensor[[16, 64], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ) -> pl.Tensor[[16, 64], pl.FP32]:
+            t = pl.load(x, [0, 0], [16, 64])
+            t = pl.add(t, t)
+            return pl.store(t, [0, 0], out)
+
+    rebinds = [
+        stmt
+        for stmt in _walk_assigns(next(f for f in Program.functions.values() if f.name == "kern").body)
+        if not ir.structural_equal(stmt.var.type, stmt.value.type)
+    ]
+    assert len(rebinds) == 1  # pin the asymmetry this test is about
+
+    assert len(_verify(Program)) == 0
+    assert len(_verify(passes.convert_to_ssa()(Program))) == 0
 
 
 if __name__ == "__main__":

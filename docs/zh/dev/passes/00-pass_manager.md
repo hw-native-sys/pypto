@@ -61,7 +61,7 @@
 | `CommDomainScopesMaterialized` | host_orch 函数体已被 CommDomainScopeStmt 包裹，且 `pld.tensor.window` 结果类型带有 `DistributedTensorType::window_buffer_` 反向引用 |
 | `DistTensorCtxMaterialized` | host orchestration 之外不再残留 `pld.system.get_comm_ctx`；每个 chip-orchestration / device 通信上下文都是可追溯到参数的显式 CommCtxType SSA 值 |
 | `RuntimeScopesMaterialized` | Orchestration 函数带有显式的 RuntimeScopeStmt 节点，codegen 不再隐式生成 `SIMPLER_SCOPE()` 包裹 |
-| `AssignTypeSymmetry` | 每个 AssignStmt 满足 `structural_equal(var->GetType(), value->GetType())`（memref 作为分配细节被排除） |
+| `AssignTypeSymmetry` | 每个只被定义一次的 Var，在其定义所在的 AssignStmt 上满足 `structural_equal(var->GetType(), value->GetType())`（memref 作为分配细节被排除；pre-SSA 的重绑定没有唯一定义值） |
 | `ManualDepsOnSubmitOnly` | 普通跨函数 Call 不携带 `attrs["manual_dep_edges"]`——手写依赖边只存在于 `Submit::deps_` |
 | `ReturnParamsExplicit` | InCore/Group/Spmd/Graph 的 tensor 返回值按指针恒等引用函数参数（#1702、#2601） |
 | `UnrollResolved` | 不再残留 `ForKind::Unroll`；由 UnrollLoops 产生 |

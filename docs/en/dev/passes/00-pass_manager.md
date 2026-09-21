@@ -61,7 +61,7 @@ Framework for organizing and executing IR transformation passes on Programs with
 | `CommDomainScopesMaterialized` | Host_orch bodies wrapped in CommDomainScopeStmts, and `pld.tensor.window` result types carry `DistributedTensorType::window_buffer_` back-references |
 | `DistTensorCtxMaterialized` | No `pld.system.get_comm_ctx` survives outside host orchestration; every chip-orchestration / device communication context is an explicit CommCtxType SSA value traceable to a parameter |
 | `RuntimeScopesMaterialized` | Orchestration functions carry explicit RuntimeScopeStmt nodes, so codegen emits no implicit `SIMPLER_SCOPE()` wrappers |
-| `AssignTypeSymmetry` | Every AssignStmt has `structural_equal(var->GetType(), value->GetType())` (memref excluded as an allocation detail) |
+| `AssignTypeSymmetry` | Every singly-defined Var has `structural_equal(var->GetType(), value->GetType())` on its defining AssignStmt (memref excluded as an allocation detail; a pre-SSA rebind has no single defining value) |
 | `ManualDepsOnSubmitOnly` | No plain cross-function Call carries `attrs["manual_dep_edges"]` — manual edges live in `Submit::deps_` |
 | `ReturnParamsExplicit` | InCore/Group/Spmd/Graph tensor returns reference function params by pointer identity (#1702, #2601) |
 | `UnrollResolved` | No `ForKind::Unroll` survives; produced by UnrollLoops |
