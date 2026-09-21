@@ -202,11 +202,57 @@ std::string CoreTypeToSubmitPrefix(CoreType core_type) {
   return func + "(";
 }
 
+// Whether this parameter was rewritten into the blocked NZ form.
+//
+// ``BlockNzTensorViews`` rewrites an NZ parameter to the blocked rank-5 shape
+// the backend addresses, while the caller keeps allocating and passing the
+// logical one — the same bytes under two spellings (see
+// ``_arg_shape_as_declared`` on the Python side). The runtime ``Tensor`` that
+// arrives therefore carries the logical rank.
+bool IsBlockedNzParam(const TensorTypePtr& tensor_type) {
+  return tensor_type && tensor_type->tensor_view_.has_value() &&
+         tensor_type->tensor_view_->layout == TensorLayout::NZ;
+}
+
 std::string GenerateMakeTensorExternal(const std::string& var_name, int orch_index,
-                                       [[maybe_unused]] const TensorTypePtr& tensor_type,
+                                       const TensorTypePtr& tensor_type,
                                        [[maybe_unused]] const CodegenBase& codegen) {
   std::ostringstream oss;
-  oss << "    const Tensor& ext_" << var_name << " = orch_args.tensor(" << orch_index << ").ref();\n";
+  if (!IsBlockedNzParam(tensor_type)) {
+    oss << "    const Tensor& ext_" << var_name << " = orch_args.tensor(" << orch_index << ").ref();\n";
+    return oss.str();
+  }
+
+  // Restate an NZ argument in blocked terms once, at the boundary: the blocked
+  // form holds the same elements in the same order, so this is a metadata-only
+  // reshape. Every later ``Tensor::view`` clamps its blocked extents against
+  // this parent, and clamping them against the logical rank would read past the
+  // incoming rank and silently yield an empty view.
+  const std::string logical_var = "ext_" + var_name + "_logical";
+  const std::string shape_var = "ext_" + var_name + "_nz_shapes";
+  const std::vector<ExprPtr>& blocked_shape = tensor_type->shape_;
+  oss << "    const Tensor& " << logical_var << " = orch_args.tensor(" << orch_index << ").ref();\n";
+  oss << "    uint32_t " << shape_var << "[" << blocked_shape.size() << "] = {";
+  for (size_t i = 0; i < blocked_shape.size(); ++i) {
+    if (i > 0) oss << ", ";
+    if (auto extent = As<ConstInt>(blocked_shape[i])) {
+      oss << extent->value_;
+      continue;
+    }
+    // The blocked form is rank 5, and its four trailing extents come from the
+    // fractal plane, which `BlockNzShape` requires static. Leading axes above
+    // rank 3 are folded into the batch, which `FoldNzLeadingExtents` requires
+    // static too. A dynamic extent is therefore the batch of a rank-3 tensor —
+    // its own leading extent, which the incoming logical tensor carries at
+    // index 0 and passes through unchanged.
+    INTERNAL_CHECK(i == 0 && blocked_shape.size() == 5)
+        << "Internal error: NZ parameter '" << var_name << "' has a dynamic blocked extent at axis " << i
+        << ", which only the batch of a rank-3 NZ tensor may be";
+    oss << logical_var << ".shapes[0]";
+  }
+  oss << "};\n";
+  oss << "    Tensor ext_" << var_name << " = " << logical_var << ".reshape(" << shape_var << ", "
+      << blocked_shape.size() << ");\n";
   return oss.str();
 }
 
