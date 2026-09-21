@@ -11,9 +11,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -22,6 +24,7 @@
 
 #include "pypto/backend/common/buffer_elementwise_recipes.h"
 #include "pypto/backend/common/buffer_type_support.h"
+#include "pypto/backend/common/buffer_view_semantics.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -80,10 +83,18 @@ BufferTypePtr DenseDescriptor(const TileTypePtr& tile, const Span& span) {
   return std::make_shared<BufferType>(shape, tile->dtype_, MemorySpace::Vec, valid);
 }
 
-/// One indexed allocation identity. No conversion table is attached to the IR.
-struct BufferStorage {
+/// Planned members retain their descriptors; storage is represented once.
+struct StorageMember {
+  TileTypePtr tile;
   MemRefPtr memory;
+  BufferTypePtr descriptor;
+  Span span;
+};
+
+struct BufferStorage {
   VarPtr handle;
+  std::vector<StorageMember> members;
+  std::vector<StmtPtr> definitions;
 };
 
 class StorageIndex : public IRVisitor {
@@ -103,27 +114,32 @@ class StorageIndex : public IRVisitor {
                  expr->span_)
           << "LowerTileToBuffer: tile storage must be planned; multi-slot storage needs its own recipe";
       auto offset = As<ConstInt>(memory->byte_offset_);
-      CHECK_SPAN(offset && offset->value_ >= 0 && (addressed_ || offset->value_ == 0), expr->span_)
-          << "LowerTileToBuffer: expected a final nonnegative address or an addressless root window";
-      auto descriptor = DenseDescriptor(tile, expr->span_);
-      auto found = roots.find(memory->base_.get());
-      if (found == roots.end()) {
-        auto handle = std::make_shared<Var>(memory->base_->name_hint_ + "_buffer", descriptor, expr->span_);
-        roots.emplace(memory->base_.get(), BufferStorage{memory, handle});
-      } else {
-        CHECK_SPAN(structural_equal(descriptor, found->second.handle->GetType()) &&
-                       structural_equal(memory->byte_offset_, found->second.memory->byte_offset_),
-                   expr->span_)
-            << "LowerTileToBuffer: one allocation has differing descriptors or windows; "
-               "an explicit Buffer view or dynamic-metadata recipe is required";
-      }
+      CHECK_SPAN(offset && offset->value_ >= 0, expr->span_)
+          << "LowerTileToBuffer: expected a static nonnegative storage window address";
+      roots[memory->base_.get()].members.push_back(
+          {tile, memory, DenseDescriptor(tile, expr->span_), expr->span_});
     }
     IRVisitor::VisitExpr(expr);
   }
 
+  // Each member participates in a fixed number of indexed scans, O(N log N).
+  // The resulting aliases are ordinary SSA definitions, not an IR side table.
+  void Finalize() {
+    for (auto& [base, storage] : roots) FinalizeRoot(base, storage);
+  }
+
   std::unordered_map<const Var*, BufferStorage> roots;
+  std::unordered_map<const TileType*, VarPtr> handles;
 
  protected:
+  void VisitStmt_(const AssignStmtPtr& assign) override {
+    if (auto call = As<Call>(assign->value_); call && IsOp(call, "tile.alloc")) {
+      INTERNAL_CHECK_SPAN(declarations_.emplace(assign->var_.get(), call).second, assign->span_)
+          << "Internal error: duplicate planned allocation definition";
+    }
+    IRVisitor::VisitStmt_(assign);
+  }
+
   // Initializers are visited once at their lexical binding. Body references
   // must not expand the initializer chains of enclosing loops.
   void VisitExpr_(const IterArgPtr& argument) override { VisitVarLike_(argument); }
@@ -137,14 +153,116 @@ class StorageIndex : public IRVisitor {
   }
 
  private:
+  using ViewKey = std::tuple<uint64_t, std::string, std::vector<int64_t>, std::vector<int64_t>>;
+
+  static VarPtr Define(BufferStorage& storage, const std::string& suffix, const std::string& op,
+                       const std::vector<ExprPtr>& args, const BufferTypePtr& descriptor, const Span& span) {
+    auto handle = std::make_shared<Var>(storage.handle->name_hint_ + suffix, descriptor, span);
+    auto call = OpRegistry::GetInstance().CreateInternal(op, args, {}, descriptor, span);
+    storage.definitions.push_back(std::make_shared<AssignStmt>(handle, call, span));
+    return handle;
+  }
+
+  void FinalizeRoot(const Var* base, BufferStorage& storage) {
+    auto declaration = declarations_.find(base);
+    CHECK_SPAN(declaration != declarations_.end(), base->span_)
+        << "LowerTileToBuffer: storage root requires a planned tile.alloc capacity";
+    const auto& call = declaration->second;
+    const auto& span =
+        call->span_.is_valid() && !call->span_.filename_.empty() ? call->span_ : storage.members.front().span;
+    INTERNAL_CHECK_SPAN(call->args_.size() == 2, span) << "Internal error: malformed planned tile.alloc";
+    auto size = As<ConstInt>(call->args_[1]);
+    auto space = As<ConstInt>(call->args_[0]);
+    CHECK_SPAN(size && size->value_ > 0 && space && space->value_ == static_cast<int64_t>(MemorySpace::Vec),
+               span)
+        << "LowerTileToBuffer: storage root requires a static positive Vec allocation capacity";
+    const auto capacity = static_cast<uint64_t>(size->value_);
+    // Address placement rebases each member. Only a full-capacity member can
+    // establish the origin; guessing the minimum interior address loses bytes.
+    std::optional<int64_t> origin = addressed_ ? std::nullopt : std::optional<int64_t>(0);
+    for (const auto& member : storage.members) {
+      if (member.memory->size_ != capacity) continue;
+      const auto address = As<ConstInt>(member.memory->byte_offset_)->value_;
+      CHECK_SPAN(!origin || *origin == address, span)
+          << "LowerTileToBuffer: full-capacity storage members disagree on the allocation origin";
+      origin = address;
+    }
+    CHECK_SPAN(origin, span) << "LowerTileToBuffer: addressed storage needs a full-capacity MemRef anchor; "
+                                "interior windows alone do not determine the planned allocation origin";
+
+    std::map<ViewKey, BufferTypePtr> descriptors;
+    std::vector<ViewKey> member_keys;
+    for (const auto& member : storage.members) {
+      const auto address = As<ConstInt>(member.memory->byte_offset_)->value_;
+      const auto bytes = backend::DenseBufferBytes(member.descriptor);
+      CHECK_SPAN(address >= *origin && bytes, span)
+          << "LowerTileToBuffer: dense storage window must begin within its allocation";
+      const auto offset = static_cast<uint64_t>(address - *origin);
+      CHECK_SPAN(offset <= capacity && *bytes <= capacity - offset, span)
+          << "LowerTileToBuffer: descriptor window exceeds the planned allocation capacity";
+      ViewKey key{offset, member.descriptor->dtype_.ToString(), member.descriptor->shape_,
+                  member.descriptor->valid_shape_};
+      descriptors.emplace(key, member.descriptor);
+      member_keys.push_back(std::move(key));
+    }
+    const auto& first = *descriptors.begin();
+    const bool direct = descriptors.size() == 1 && std::get<0>(first.first) == 0 &&
+                        backend::DenseBufferBytes(first.second) == capacity;
+    CHECK_SPAN(direct || capacity % 32 == 0, span)
+        << "LowerTileToBuffer: byte storage views require allocation capacity aligned to 32 bytes";
+    auto root_type =
+        direct ? first.second
+               : std::make_shared<BufferType>(std::vector<int64_t>{static_cast<int64_t>(capacity / 32), 32},
+                                              DataType::UINT8, MemorySpace::Vec);
+    storage.handle = std::make_shared<Var>(base->name_hint_ + "_buffer", root_type, span);
+    std::vector<ExprPtr> args{std::make_shared<MakeTuple>(std::vector<ExprPtr>{}, span)};
+    if (addressed_) args.push_back(std::make_shared<ConstInt>(*origin, DataType::INDEX, span));
+    auto allocation = OpRegistry::GetInstance().CreateInternal("buffer.alloc", args, {}, root_type, span);
+    storage.definitions.push_back(std::make_shared<AssignStmt>(storage.handle, allocation, span));
+
+    std::map<ViewKey, VarPtr> views;
+    std::map<std::pair<uint64_t, uint64_t>, VarPtr> byte_windows;
+    for (const auto& [key, descriptor] : descriptors) {
+      if (direct) {
+        views.emplace(key, storage.handle);
+        continue;
+      }
+      const auto offset = std::get<0>(key);
+      const auto dense_bytes = backend::DenseBufferBytes(descriptor);
+      INTERNAL_CHECK_SPAN(dense_bytes.has_value(), span)
+          << "Internal error: storage view descriptor must have a dense byte extent";
+      const auto bytes = *dense_bytes;
+      CHECK_SPAN(offset % 32 == 0 && bytes % 32 == 0, span)
+          << "LowerTileToBuffer: static byte views require offsets and windows aligned to 32 bytes";
+      auto window = storage.handle;
+      if (offset != 0 || bytes != capacity) {
+        auto [entry, inserted] = byte_windows.emplace(std::make_pair(offset, bytes), nullptr);
+        if (inserted) {
+          auto type = std::make_shared<BufferType>(std::vector<int64_t>{static_cast<int64_t>(bytes / 32), 32},
+                                                   DataType::UINT8, MemorySpace::Vec);
+          std::vector<ExprPtr> indices{
+              std::make_shared<ConstInt>(static_cast<int64_t>(offset / 32), DataType::INDEX, span),
+              std::make_shared<ConstInt>(0, DataType::INDEX, span)};
+          entry->second = Define(storage, "_bytes", "buffer.subview",
+                                 {window, std::make_shared<MakeTuple>(indices, span)}, type, span);
+        }
+        window = entry->second;
+      }
+      views.emplace(key, Define(storage, "_view", "buffer.reshape", {window}, descriptor, span));
+    }
+    for (size_t i = 0; i < storage.members.size(); ++i) {
+      handles.emplace(storage.members[i].tile.get(), views.at(member_keys[i]));
+    }
+  }
+
   bool addressed_;
   std::unordered_set<const TileType*> types_;
+  std::unordered_map<const Var*, CallPtr> declarations_;
 };
 
 class TileToBufferMutator : public IRMutator {
  public:
-  TileToBufferMutator(const StorageIndex& storage, bool addressed)
-      : storage_(storage), addressed_(addressed) {}
+  explicit TileToBufferMutator(const StorageIndex& storage) : storage_(storage) {}
 
  protected:
   ExprPtr VisitExpr_(const VarPtr& var) override {
@@ -330,11 +448,10 @@ class TileToBufferMutator : public IRMutator {
   VarPtr Handle(const ExprPtr& value) const {
     auto tile = As<TileType>(value->GetType());
     INTERNAL_CHECK_SPAN(tile, value->span_) << "Internal error: Buffer conversion expected a Tile operand";
-    const auto memory = GetDefinedMemRef(tile);
-    auto found = storage_.roots.find(memory->base_.get());
-    INTERNAL_CHECK_SPAN(found != storage_.roots.end(), value->span_)
-        << "Internal error: missing indexed allocation for a Tile operand";
-    return found->second.handle;
+    auto found = storage_.handles.find(tile.get());
+    INTERNAL_CHECK_SPAN(found != storage_.handles.end(), value->span_)
+        << "Internal error: missing indexed storage view for a Tile operand";
+    return found->second;
   }
 
   MakeTuplePtr Valid(const ExprPtr& tile) const {
@@ -367,20 +484,33 @@ class TileToBufferMutator : public IRMutator {
       INTERNAL_CHECK_SPAN(result, call->span_) << "Internal error: allocation has no pointer definition";
       auto found = storage_.roots.find(result.get());
       if (found == storage_.roots.end()) return Empty(call->span_);
-      std::vector<ExprPtr> args{std::make_shared<MakeTuple>(std::vector<ExprPtr>{}, call->span_)};
-      if (addressed_) args.push_back(found->second.memory->byte_offset_);
-      const auto& handle = found->second.handle;
-      // Synthetic Tile allocations have no source location. The indexed handle
-      // retains the source of the Tile whose storage this allocation provides.
-      const auto& span =
-          call->span_.is_valid() && !call->span_.filename_.empty() ? call->span_ : handle->span_;
-      auto allocation =
-          OpRegistry::GetInstance().CreateInternal("buffer.alloc", args, {}, handle->GetType(), span);
-      return std::make_shared<AssignStmt>(handle, allocation, span);
+      return std::make_shared<SeqStmts>(found->second.definitions, call->span_);
     }
     if (IsOp(call, "tile.create")) {
       INTERNAL_CHECK_SPAN(result, call->span_) << "Internal error: tile.create has no result";
       (void)Handle(result);
+      return Empty(call->span_);
+    }
+    if (IsOp(call, "tile.reshape")) {
+      INTERNAL_CHECK_SPAN(result, call->span_) << "Internal error: tile.reshape has no result";
+      const auto& entry = OpRegistry::GetInstance().GetEntry(call->op_->name_);
+      ValidateKwargs(call->kwargs_, entry.GetOp()->GetAttrs(), call->op_->name_);
+      const auto expected = As<TileType>(entry.GetDeduceType()(call->args_, call->kwargs_));
+      const auto source = As<TileType>(call->args_[0]->GetType());
+      const auto destination = As<TileType>(result->GetType());
+      const auto source_memory = GetDefinedMemRef(source);
+      const auto destination_memory = GetDefinedMemRef(destination);
+      const auto descriptor = As<BufferType>(Handle(result)->GetType());
+      INTERNAL_CHECK_SPAN(expected && expected->dtype_ == descriptor->dtype_ &&
+                              StaticExtents(expected->shape_, call->span_) == descriptor->shape_ &&
+                              StaticExtents(tile_view_semantics::GetEffectiveTileView(*expected).valid_shape,
+                                            call->span_) == descriptor->valid_shape_ &&
+                              source_memory->base_ == destination_memory->base_ &&
+                              structural_equal(source_memory->byte_offset_, destination_memory->byte_offset_),
+                          call->span_)
+          << "Internal error: planned tile.reshape must preserve its validated storage window";
+      // StorageIndex already materialized this typed alias at the allocation.
+      // Logical reshape has no data transfer and needs no second alias handle.
       return Empty(call->span_);
     }
     if (IsOp(call, "tile.load")) {
@@ -458,7 +588,6 @@ class TileToBufferMutator : public IRMutator {
   }
 
   const StorageIndex& storage_;
-  bool addressed_;
   YieldContext* yield_context_ = nullptr;
   // Input SSA uses distinct identities for branch-local definitions. Retaining
   // their mappings is linear and avoids copying the outer map at each region.
@@ -484,7 +613,8 @@ ProgramPtr TransformProgram(const ProgramPtr& program) {
     }
     StorageIndex storage(addressed);
     storage.VisitStmt(function->body_);
-    TileToBufferMutator mutator(storage, addressed);
+    storage.Finalize();
+    TileToBufferMutator mutator(storage);
     auto lowered = std::make_shared<Function>(*function);
     lowered->body_ = mutator.VisitStmt(function->body_);
     lowered->ir_stage_ = FunctionIRStage::Buffer;

@@ -65,6 +65,11 @@ for descriptor, direction, dynamic-window, and ABI limits. Native compilation
 tests establish syntax and operand dataflow; numerical execution is a separate
 integration requirement.
 
+Static storage aliases arrive as explicit `buffer.subview` and `buffer.reshape`
+operations. Codegen maps them to `pto.subview` and `pto.treshape`, preserving the
+source handle and result descriptor without allocating, copying, or inferring
+storage windows. Descriptor bounds and alias legality are verified before emission.
+
 ### Class Structure
 
 **Header**: `include/pypto/codegen/pto/pto_codegen.h`

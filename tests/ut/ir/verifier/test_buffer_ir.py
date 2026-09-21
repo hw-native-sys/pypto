@@ -667,5 +667,102 @@ def test_unknown_address_and_distinct_borrowed_operands_need_a_future_provenance
     _assert_error(program, "requires proven allocation provenance")
 
 
+def _view_chain(root, suffix, row=0):
+    byte_type = ir.BufferType([64, 32], DataType.UINT8, ir.MemorySpace.Vec)
+    window = _var(f"window_{suffix}", byte_type)
+    value = _var(f"value_{suffix}")
+    offsets = ir.MakeTuple([_int(row), _int(0)], SPAN)
+    return value, [
+        ir.AssignStmt(window, _call("buffer.subview", [root, offsets], byte_type), SPAN),
+        ir.AssignStmt(value, _call("buffer.reshape", [window], value.type), SPAN),
+    ]
+
+
+def _byte_root(name, address=None):
+    root = _var(name, ir.BufferType([128, 32], DataType.UINT8, ir.MemorySpace.Vec))
+    args = [ir.MakeTuple([], SPAN)]
+    if address is not None:
+        args.append(address)
+    return root, ir.AssignStmt(root, _call("buffer.alloc", args, root.type), SPAN)
+
+
+@pytest.mark.parametrize("name", ["buffer.add", "buffer.copy", "buffer.recip"])
+@pytest.mark.parametrize("row", [0, 1, 64], ids=["exact", "overlap", "disjoint"])
+def test_view_windows_are_proven_against_their_shared_storage_root(name, row):
+    root, allocation = _byte_root("root")
+    source, source_views = _view_chain(root, "source")
+    destination, destination_views = _view_chain(root, "destination", row)
+    args = [source, source, destination] if name == "buffer.add" else [source, destination]
+    program = _program(
+        ir.SeqStmts(
+            [allocation, *source_views, *destination_views, ir.EvalStmt(_call(name, args), SPAN)], SPAN
+        )
+    )
+    if row == 1 or (row == 0 and name == "buffer.recip"):
+        _assert_error(program, "overlapping" if name != "buffer.recip" else "disjoint")
+    else:
+        assert _verify(program) == []
+
+
+def test_distinct_placed_roots_do_not_prove_disjoint_view_ranges():
+    left, left_alloc = _byte_root("left", _int(0))
+    right, right_alloc = _byte_root("right", _int(32))
+    source, source_views = _view_chain(left, "source")
+    destination, destination_views = _view_chain(right, "destination")
+    program = _program(
+        ir.SeqStmts(
+            [
+                left_alloc,
+                right_alloc,
+                *source_views,
+                *destination_views,
+                ir.EvalStmt(_call("buffer.copy", [source, destination]), SPAN),
+            ],
+            SPAN,
+        )
+    )
+    _assert_error(program, "partially overlapping")
+
+
+def test_same_root_disjoint_views_do_not_need_a_constant_placed_address():
+    address = _var("address", ir.ScalarType(DataType.INDEX))
+    root, allocation = _byte_root("root", address)
+    source, source_views = _view_chain(root, "source")
+    destination, destination_views = _view_chain(root, "destination", 64)
+    program = _program(
+        ir.SeqStmts(
+            [
+                allocation,
+                *source_views,
+                *destination_views,
+                ir.EvalStmt(_call("buffer.recip", [source, destination]), SPAN),
+            ],
+            SPAN,
+        ),
+        [address],
+    )
+    assert _verify(program) == []
+
+
+def test_view_valid_metadata_cannot_be_mutated():
+    root, allocation = _byte_root("root")
+    value, views = _view_chain(root, "view")
+    update = _call("buffer.set_validshape", [value, ir.MakeTuple([_int(16), _int(32)], SPAN)])
+    _assert_error(
+        _program(ir.SeqStmts([allocation, *views, ir.EvalStmt(update, SPAN)], SPAN)),
+        "cannot mutate static view metadata",
+    )
+
+
+def test_original_view_result_descriptor_is_validated():
+    root, allocation = _byte_root("root")
+    malformed = _var("malformed")
+    call = _call("buffer.reshape", [root], malformed.type)
+    _assert_error(
+        _program(ir.SeqStmts([allocation, ir.AssignStmt(malformed, call, SPAN)], SPAN)),
+        "equal physical byte sizes",
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

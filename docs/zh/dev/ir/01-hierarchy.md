@@ -417,6 +417,9 @@ for_stmt = ir.ForStmt(i, start, stop, step, [], body, [], span, ir.ForKind.Paral
 | `slot_count_` | uint64_t | 该声明包含的等长 slot 数 (`pl.MemRef("name", slots=N)`)；省略 `slots` 时为 1 |
 | `slot_index_` | ExprPtr \| None | 该 MemRef 指向哪个 slot (`l0c[k]`)；未选定 slot 前为 None，且可以是运行期值 |
 
+Python 构造函数省略 `slot` 参数或传入 `slot=None` 时，槽索引均为空，
+与 C++ 构造函数的默认值一致。
+
 ```python
 # base allocation name, byte offset within it, size in bytes
 memref = ir.MemRef("mem_left_0", 0, 1024)

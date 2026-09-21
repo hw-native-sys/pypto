@@ -12,7 +12,6 @@
 #include <any>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -22,6 +21,7 @@
 #include <vector>
 
 #include "pypto/backend/common/buffer_elementwise_recipes.h"
+#include "pypto/backend/common/buffer_view_semantics.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/ir/arith/const_fold.h"
@@ -66,6 +66,7 @@ class BufferIRVisitor : public IRVisitor {
     // identity, including parameters containing handles inside tuples.
     for (const auto& param : function->params_) {
       if (param && ContainsBuffer(param->GetType())) buffer_parameters_.insert(param.get());
+      if (param && As<BufferType>(param->GetType())) RegisterWindow(param, param.get(), 0);
     }
     VisitValues(function->params_);
     CheckAttrs(function->attrs_, "Function attribute");
@@ -124,6 +125,22 @@ class BufferIRVisitor : public IRVisitor {
     if (auto call = As<Call>(op->value_); IsOp(call, "buffer.alloc") && valid_calls_.count(call.get())) {
       allocations_[op->var_.get()] = Allocation{
           call->args_.size() == 1, call->args_.size() == 2 ? ConstantAddress(call->args_[1]) : nullptr};
+      RegisterWindow(op->var_, op->var_.get(), 0);
+    } else if (call && valid_calls_.count(call.get()) &&
+               (IsOp(call, "buffer.subview") || IsOp(call, "buffer.reshape"))) {
+      const auto source = AsVarLike(call->args_[0]);
+      const auto window = windows_.find(source.get());
+      view_handles_.insert(op->var_.get());
+      if (window == windows_.end()) {
+        Error("Buffer view requires proven source-window provenance", call->span_);
+      } else {
+        uint64_t offset = window->second.offset;
+        if (IsOp(call, "buffer.subview")) {
+          const auto offsets = As<MakeTuple>(call->args_[1]);
+          offset += static_cast<uint64_t>(As<ConstInt>(offsets->elements_[0])->value_) * 32;
+        }
+        RegisterWindow(op->var_, window->second.root, offset);
+      }
     }
     if (As<ScalarType>(op->var_->GetType())) constants_[op->var_.get()] = ConstantAddress(op->value_);
   }
@@ -163,6 +180,13 @@ class BufferIRVisitor : public IRVisitor {
         registry.ValidateBufferCall(op);
         valid_calls_.insert(op.get());
         if (const auto* recipe = backend::FindBufferElementwiseRecipe(name)) CheckRecipeWindows(op, *recipe);
+        if (IsOp(op, "buffer.copy") && (view_handles_.count(AsVarLike(op->args_[0]).get()) ||
+                                        view_handles_.count(AsVarLike(op->args_[1]).get()))) {
+          CheckWindowPair(op, op->args_[0], op->args_[1], true);
+        }
+        if (IsOp(op, "buffer.set_validshape") && view_handles_.count(AsVarLike(op->args_[0]).get())) {
+          Error("buffer.set_validshape cannot mutate static view metadata", op->span_);
+        }
       } catch (const pypto::Error& error) {
         Error("Invalid buffer call '" + name + "': " + error.what(), op->span_);
       }
@@ -269,7 +293,7 @@ class BufferIRVisitor : public IRVisitor {
     }
     if (result) {
       const auto bits = dtype.GetBit();
-      if ((dtype.IsUnsignedInt() && result->value_ < 0) ||
+      if (bits == 0 || (dtype.IsUnsignedInt() && result->value_ < 0) ||
           (bits < 64 && (result->value_ < (dtype.IsUnsignedInt() ? 0 : -(int64_t{1} << (bits - 1))) ||
                          result->value_ > ((int64_t{1} << (bits - (dtype.IsUnsignedInt() ? 0 : 1))) - 1)))) {
         result = nullptr;
@@ -279,67 +303,78 @@ class BufferIRVisitor : public IRVisitor {
     return result;
   }
 
+  struct Window {
+    const Var* root;
+    uint64_t offset;
+    uint64_t bytes;
+  };
+
   std::optional<uint64_t> DenseBytes(const BufferTypePtr& type) {
-    if (auto cached = byte_sizes_.find(type.get()); cached != byte_sizes_.end()) {
-      return cached->second;
+    const auto [entry, inserted] = byte_sizes_.try_emplace(type.get(), std::nullopt);
+    if (inserted) entry->second = backend::DenseBufferBytes(type);
+    return entry->second;
+  }
+
+  void RegisterWindow(const VarPtr& variable, const Var* root, uint64_t offset) {
+    if (const auto bytes = DenseBytes(As<BufferType>(variable->GetType()))) {
+      windows_[variable.get()] = Window{root, offset, *bytes};
     }
-    byte_sizes_[type.get()] = std::nullopt;
-    if ((type->shape_.size() != 1 && type->shape_.size() != 2) || type->blayout_ != TileLayout::row_major ||
-        type->slayout_ != TileLayout::none_box || type->fractal_ != 512 || type->pad_ != PadValue::null ||
-        type->compact_ != CompactMode::null || type->dtype_.GetBit() % 8 != 0) {
-      return std::nullopt;
+  }
+
+  // This pairwise proof accepts different extents. Same-root views use relative
+  // windows; separately placed roots require effective addresses, not distinct
+  // SSA pointers. Later instruction recipes can reuse this storage proof.
+  void CheckWindowPair(const CallPtr& call, const ExprPtr& source_expr, const ExprPtr& destination_expr,
+                       bool exact_allowed) {
+    const auto source = AsVarLike(source_expr);
+    const auto destination = AsVarLike(destination_expr);
+    if (source && source == destination && exact_allowed) return;
+    const auto src = windows_.find(source.get());
+    const auto dst = windows_.find(destination.get());
+    const std::string name = call->op_->name_;
+    if (src == windows_.end() || dst == windows_.end()) {
+      Error(name + " requires proven allocation provenance for distinct operands", call->span_);
+      return;
     }
-    uint64_t bytes = type->dtype_.GetBit() / 8;
-    for (const auto extent : type->shape_) {
-      if (static_cast<uint64_t>(extent) > std::numeric_limits<uint64_t>::max() / bytes) return std::nullopt;
-      bytes *= static_cast<uint64_t>(extent);
+    __int128 source_start = src->second.offset;
+    __int128 destination_start = dst->second.offset;
+    if (src->second.root != dst->second.root) {
+      const auto src_root = allocations_.find(src->second.root);
+      const auto dst_root = allocations_.find(dst->second.root);
+      if (src_root == allocations_.end() || dst_root == allocations_.end()) {
+        Error(name + " requires proven allocation provenance for distinct operands", call->span_);
+        return;
+      }
+      if (src_root->second.symbolic && dst_root->second.symbolic) return;
+      const auto& src_address = src_root->second.address;
+      const auto& dst_address = dst_root->second.address;
+      if (!src_address || !dst_address) {
+        Error(name + " requires provably disjoint constant addresses or addressless allocations",
+              call->span_);
+        return;
+      }
+      if (src_address->value_ < 0 || dst_address->value_ < 0) {
+        Error(name + " requires nonnegative placed addresses", call->span_);
+        return;
+      }
+      source_start += src_address->value_;
+      destination_start += dst_address->value_;
     }
-    byte_sizes_[type.get()] = bytes;
-    return bytes;
+    if (source_start == destination_start && src->second.bytes == dst->second.bytes && exact_allowed) return;
+    if (source_start + src->second.bytes > destination_start &&
+        destination_start + dst->second.bytes > source_start) {
+      Error(name + (exact_allowed ? " rejects partially overlapping placed source and destination ranges"
+                                  : " requires disjoint placed source and destination ranges"),
+            call->span_);
+    }
   }
 
   void CheckRecipeWindows(const CallPtr& call, const backend::BufferElementwiseRecipe& recipe) {
-    const auto destination = AsVarLike(call->args_.back());
-    const auto dst = allocations_.find(destination.get());
     const bool exact_allowed =
         recipe.destination_alias == backend::BufferDestinationAliasPolicy::ExactOrDisjoint;
     for (size_t i = 0; i < recipe.inputs.size(); ++i) {
-      if (recipe.inputs[i].kind != backend::BufferElementwiseOperandKind::Buffer) continue;
-      const auto source = AsVarLike(call->args_[i]);
-      if (source && source == destination && exact_allowed) continue;
-      const auto src = allocations_.find(source.get());
-      if (src == allocations_.end() || dst == allocations_.end()) {
-        Error(std::string(recipe.buffer_op) + " requires proven allocation provenance for distinct operands",
-              call->span_);
-        continue;
-      }
-      if (src->second.symbolic && dst->second.symbolic && source != destination) continue;
-      const auto& src_address = src->second.address;
-      const auto& dst_address = dst->second.address;
-      if (!src_address || !dst_address) {
-        Error(std::string(recipe.buffer_op) +
-                  " requires provably disjoint constant addresses or addressless allocations",
-              call->span_);
-        continue;
-      }
-      if (src_address->value_ < 0 || dst_address->value_ < 0) {
-        Error(std::string(recipe.buffer_op) + " requires nonnegative placed addresses", call->span_);
-        continue;
-      }
-      if (src_address->value_ == dst_address->value_ && exact_allowed) continue;
-      const auto bytes = DenseBytes(As<BufferType>(destination->GetType()));
-      if (!bytes) {
-        Error(std::string(recipe.buffer_op) + " requires a supported dense byte-window contract",
-              call->span_);
-        continue;
-      }
-      const auto source_end = static_cast<__int128>(src_address->value_) + *bytes;
-      const auto destination_end = static_cast<__int128>(dst_address->value_) + *bytes;
-      if (source_end > dst_address->value_ && destination_end > src_address->value_) {
-        Error(std::string(recipe.buffer_op) +
-                  (exact_allowed ? " rejects partially overlapping placed source and destination ranges"
-                                 : " requires disjoint placed source and destination ranges"),
-              call->span_);
+      if (recipe.inputs[i].kind == backend::BufferElementwiseOperandKind::Buffer) {
+        CheckWindowPair(call, call->args_[i], call->args_.back(), exact_allowed);
       }
     }
   }
@@ -471,6 +506,8 @@ class BufferIRVisitor : public IRVisitor {
   std::unordered_set<const WindowBuffer*> checked_window_buffers_;
   std::unordered_set<const Var*> buffer_parameters_;
   std::unordered_map<const Var*, Allocation> allocations_;
+  std::unordered_map<const Var*, Window> windows_;
+  std::unordered_set<const Var*> view_handles_;
   std::unordered_map<const Expr*, ConstIntPtr> constants_;
   std::unordered_map<const BufferType*, std::optional<uint64_t>> byte_sizes_;
   std::unordered_set<const Call*> valid_calls_;

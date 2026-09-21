@@ -122,6 +122,7 @@ set(PYPTO_SOURCES
     # IR - Operators
     src/ir/op/buffer_ops/elementwise.cpp
     src/ir/op/buffer_ops/memory.cpp
+    src/ir/op/buffer_ops/view.cpp
     src/ir/op/tile_ops/batch_matmul.cpp
     src/ir/op/tile_ops/broadcast.cpp
     src/ir/op/tile_ops/elementwise.cpp
@@ -367,6 +368,7 @@ set(PYPTO_SOURCES
     src/backend/common/backend_config.cpp
     src/backend/common/backend_registry.cpp
     src/backend/common/buffer_elementwise_recipes.cpp
+    src/backend/common/buffer_view_semantics.cpp
     src/backend/common/pto_ops_common.cpp
     src/backend/common/pto_ops_shared.cpp
     src/backend/common/pto_ops_elementwise.cpp

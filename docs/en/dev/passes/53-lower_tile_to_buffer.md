@@ -77,6 +77,37 @@ program unchanged. No functional Tile pass should run after this boundary.
 
 Synthetic allocations inherit the source location of their indexed Tile handle when the original allocation has no location. This keeps native allocation diagnostics tied to the user source.
 
+## Planned storage views
+
+The `tile.alloc` byte capacity remains authoritative. When a root serves
+multiple static descriptors or smaller windows, lowering declares one full-valid
+`UINT8[capacity / 32, 32]` Buffer and creates explicit `buffer.subview` and
+`buffer.reshape` aliases. Equal descriptor/window pairs share one SSA handle,
+including separate Tile variables that name the same view. A single descriptor
+covering the full allocation keeps the direct typed-allocation form.
+
+```text
+# Planned allocation: capacity 4096, effective base address 8192.
+# A dense FP32[16,32] member starts at effective address 8256.
+root = buffer.alloc((), 8192) : Buffer[[128,32], UINT8, Vec]
+window = buffer.subview(root, (2,0)) : Buffer[[64,32], UINT8, Vec]
+value = buffer.reshape(window) : Buffer[[16,32], FP32, Vec]
+```
+
+Each alias definition occurs beside the original allocation. It reads descriptor
+metadata without reading or copying data. The emitter serializes those exact
+native forms and does not recover allocation sizes, choose view instructions,
+or add storage. Logical `tile.reshape` disappears after its type and preserved
+storage window have been checked; the indexed typed alias supplies its result.
+
+For addressed planners, a member whose MemRef size equals the allocation capacity
+must establish the final base address. Interior members alone are rejected:
+their minimum address cannot prove where the allocation begins. A later
+allocation-fact representation can remove this restriction. PTOAS uses symbolic
+origin zero. Every view must fit within the original capacity, with static
+32-byte-aligned byte offsets, byte counts and physical rows. Strided or boxed
+views and mutable view metadata remain unsupported.
+
 ## Branches
 
 Storage legalization has already selected one destination window for each Tile
@@ -144,8 +175,7 @@ assignments; `FlattenCallExpr` handles nested source expressions beforehand.
 ## Initial supported recipes
 
 The current recipes support straight-line kernels, branches and loops with static
-rank-2 dense Vec FP16/BF16/FP32/INT32 tiles with one
-descriptor per allocation, static valid extents, ordinary packed ND GM tensors,
+rank-2 dense Vec FP16/BF16/FP32/INT32 tiles with explicit static storage views, static valid extents, ordinary packed ND GM tensors,
 and default load/store policies. It converts allocation, create, load, store,
 move, already legalized aliases, and the [typed elementwise recipes](../ir/05-operators.md#typed-buffer-elementwise-recipes).
 GM load/store preserve matching element types without casts. `add`/`mul` support
@@ -167,6 +197,10 @@ The current Python diagnostic printer is not a Buffer DSL parser round trip.
 frontend through the full pipeline for all three planners, checks explicit
 allocations and destination writes, verifies immutable/idempotent conversion
 and binary persistence, and compiles the resulting PTO with native PTOAS.
+
+`tests/ut/ir/transforms/test_lower_buffer_views.py` checks authoritative capacity,
+nonzero window offsets, repeated view identity, fail-closed placement diagnostics,
+binary persistence and native compilation on both targets with all three planners.
 
 For numerical system tests, declare `st.case(..., enable_buffer_ir=True,
 memory_planner=...)` on the public `@pl.jit` entry. The harness applies the option

@@ -55,7 +55,7 @@ Void call 应放在 `EvalStmt` 中，不能绑定变量、用作操作数、放�
 物理形状静态、列数大于一的稠密 ND 二维 FP16/BF16/FP32/INT32 Tensor。
 算术配方分别施加更窄的 dtype 契约。规范化后的 Tensor
 返回值是这些参数的别名，原生内核仍返回 void。Buffer 参数 ABI、原生函数
-结果、view、slot、helper 和其他物理布局尚未支持，会明确报错。
+结果、动态或非连续 view、slot、helper 和其他物理布局尚未支持，会明确报错。
 Buffer 类型 dump 使用原生 `pypto.ir.BufferType(...)` 构造表达式，
 二进制序列化保留完整描述符。目前尚不支持通过 DSL parser 重新解析
 完整的 buffer 程序 dump。
@@ -127,6 +127,29 @@ destination 并返回 `VoidType`，目前要求所有参数的 Vec buffer 描述
 动态操作数保留在其词法作用域内，不重建逻辑 `TileType` 或 `MemRef`，
 也不运行隐式 tile 分配逻辑。设置 `enable_buffer_ir=True` 后，流水线在发射前通过
 [LowerTileToBuffer](../passes/53-lower_tile_to_buffer.md) 转换 Tile IR。
+
+静态存储视图 (static storage view) 在同一 Buffer 阶段使用普通 SSA 别名边：
+
+```text
+%root = buffer.alloc(()) : Buffer<[128, 32], UINT8, Vec>
+%bytes = buffer.subview(%root, (2, 0)) : Buffer<[64, 32], UINT8, Vec>
+%tile = buffer.reshape(%bytes) : Buffer<[16, 32], FP32, Vec>
+```
+
+`buffer.subview` 当前要求源和结果为 valid 区域完整的 `UINT8[N,32]`，
+偏移量为静态 `INDEX` 元组 `(row, 0)`，窗口必须处于源容量内。
+`buffer.reshape` 保持物理字节数完全相同，支持静态、紧密行主序的二维
+Vec FP16、BF16、FP32、INT16、INT32 和 UINT8 描述符，每个物理行的字节数必须为 32 的倍数。
+两者均声明 `Alias(0)`、无数据访问和源元数据读效应，不分配存储，
+也不初始化数据。每个中间结果的形状、dtype 和 valid extent 均由结果
+类型显式表达。`buffer.set_validshape` 不能修改这些静态视图句柄。
+
+`BufferIR` 缓存视图的根身份、相对偏移和字节范围。逐元素指令及涉及视图的
+拷贝会检查源和目标窗口：同根使用相对偏移，不同已分配根使用有效地址。
+不同的无地址分配互不重叠；未经证明的不同输入根不能作为不重叠证明。
+同根窗口即使使用运行时基地址，仍可证明相对范围不重叠。此检查不建立
+初始化或生命周期安全证明。输入非视图 buffer 之间的旧拷贝契约仍保留
+原有重叠前提。
 
 GM 传输将完整窗口表示为普通操作数：
 

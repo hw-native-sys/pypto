@@ -49,6 +49,24 @@ class TestMemorySpace:
 class TestMemRef:
     """Tests for MemRef struct."""
 
+    @pytest.mark.parametrize("expression_offset", [False, True])
+    @pytest.mark.parametrize("explicit_none", [False, True])
+    def test_omitted_slot_is_structurally_unslotted(self, expression_offset, explicit_none):
+        """Python None has the same absent-slot representation as the C++ default."""
+        span = ir.Span.unknown()
+        base = ir.Var("storage", ir.PtrType(), span)
+        offset = ir.ConstInt(0, DataType.INT64, span) if expression_offset else 0
+        if explicit_none:
+            actual = ir.MemRef(base, offset, 1024, span, slot=None)
+        else:
+            actual = ir.MemRef(base, offset, 1024, span)
+        # The string-base overload uses the C++ constructor's nullopt default.
+        expected = ir.MemRef("storage", 0, 1024, span)
+        assert not actual.is_pinned_ and actual.slot_count_ == 1 and actual.slot_index_ is None
+        ir.assert_structural_equal(expected, actual, enable_auto_mapping=True)
+        restored = ir.deserialize(ir.serialize(actual))
+        ir.assert_structural_equal(actual, restored, enable_auto_mapping=True)
+
     def test_memref_creation_with_params(self):
         """Test creating a MemRef with all parameters."""
         span = ir.Span.unknown()

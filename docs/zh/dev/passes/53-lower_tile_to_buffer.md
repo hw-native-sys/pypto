@@ -69,6 +69,31 @@ pass 验证输出并保持幂等；转换失败不会修改输入程序。此边
 
 合成分配的原始位置未知时，继承已索引 Tile 句柄的源码位置，使原生分配诊断能够定位用户源码。
 
+## 已规划的存储视图
+
+`tile.alloc` 的字节容量始终是分配大小的依据。当同一个根服务多个静态描述符或较小窗口时，
+转换声明一个有效范围完整的 `UINT8[capacity / 32, 32]` Buffer，再创建显式
+`buffer.subview` 和 `buffer.reshape` 别名。相同的描述符与窗口组合共享一个 SSA 句柄，
+即使输入是不同的 Tile 变量。唯一描述符覆盖整个分配时，仍直接使用带类型的分配形式。
+
+```text
+# Planned allocation: capacity 4096, effective base address 8192.
+# A dense FP32[16,32] member starts at effective address 8256.
+root = buffer.alloc((), 8192) : Buffer[[128,32], UINT8, Vec]
+window = buffer.subview(root, (2,0)) : Buffer[[64,32], UINT8, Vec]
+value = buffer.reshape(window) : Buffer[[16,32], FP32, Vec]
+```
+
+每个别名定义放在原始分配旁边，只读取描述符元数据，不读取或复制数据。
+发射器按这些已确定的原生形式逐条输出，不恢复分配大小、不选择视图指令，也不增加存储。
+逻辑 `tile.reshape` 在检查类型和存储窗口保持不变后消失，其结果由索引中的带类型别名提供。
+
+对于分配地址的规划器，必须有一个 MemRef 大小等于分配容量的成员确定最终基地址。
+只有内部窗口时拒绝转换，因为它们的最小地址不能证明分配从哪里开始；
+后续显式分配事实表示可解除这个限制。PTOAS 使用符号原点零。
+所有视图必须位于原始容量内，字节偏移、字节大小和物理行均须静态且按 32 字节对齐。
+带步长或分形布局的视图、可变视图元数据仍不支持。
+
 ## 分支
 
 存储合法化已经为每个 Tile 分支结果选择规范目标窗口，并在各分支体内放置必要的传输。
@@ -129,7 +154,7 @@ buffer.store(left_buf, (row_result, column_result), (16, 32), Out)
 
 ## 首批支持的转换
 
-当前转换支持直线程序、分支和循环、静态二维稠密 Vec FP16/BF16/FP32/INT32 Tile、每个分配一个描述符、静态有效范围、
+当前转换支持直线程序、分支和循环、静态二维稠密 Vec FP16/BF16/FP32/INT32 Tile、显式静态存储视图、静态有效范围、
 普通紧密排列的 ND GM Tensor 以及默认加载/存储策略。
 它转换分配、create、load、store、move、已经合法化的别名及[带类型的逐元素配方](../ir/05-operators.md#typed-buffer-elementwise-recipes)。
 标量输入在 lowering 中显式转换为目标 dtype；发射器直接消费这些类型。
@@ -146,6 +171,9 @@ BF16 传输支持不代表算术支持。
 
 `tests/ut/ir/transforms/test_lower_tile_to_buffer.py` 通过公开前端运行三种规划器的完整流水线，
 检查显式分配和目标写入、转换的不可变性与幂等性、二进制持久化，并使用原生 PTOAS 编译输出。
+
+`tests/ut/ir/transforms/test_lower_buffer_views.py` 检查分配容量、非零窗口偏移、
+重复视图身份、无法证明地址时的诊断、二进制持久化，以及两个目标和三个规划器的原生编译。
 
 数值系统测试应在公开 `@pl.jit` 入口对应的 case 上声明
 `st.case(..., enable_buffer_ir=True, memory_planner=...)`。

@@ -1104,7 +1104,7 @@ void BindIR(nb::module_& m) {
       .def(
           "__init__",
           [](MemRef* self, const VarPtr& base, int64_t byte_offset, uint64_t size, const Span& span,
-             bool is_pinned, uint64_t slots, const ExprPtr& slot) {
+             bool is_pinned, uint64_t slots, const std::optional<ExprPtr>& slot) {
             CheckSlotCount(slots);
             new (self) MemRef(base, byte_offset, size, span, is_pinned, slots, slot);
           },
@@ -1116,7 +1116,7 @@ void BindIR(nb::module_& m) {
       .def(
           "__init__",
           [](MemRef* self, const VarPtr& base, const ExprPtr& byte_offset, uint64_t size, const Span& span,
-             uint64_t slots, const ExprPtr& slot) {
+             uint64_t slots, const std::optional<ExprPtr>& slot) {
             CheckSlotCount(slots);
             new (self) MemRef(base, byte_offset, size, span, /*is_pinned=*/false, slots, slot);
           },

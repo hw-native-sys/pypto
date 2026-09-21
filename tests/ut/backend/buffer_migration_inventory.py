@@ -236,6 +236,7 @@ MIGRATION_FAMILIES = (
             "tile.slice",
             "tile.set_validshape",
         ),
+        restricted=frozenset({"tile.reshape"}),
     ),
     MigrationFamily(
         "G14: Matrix and GEMV",

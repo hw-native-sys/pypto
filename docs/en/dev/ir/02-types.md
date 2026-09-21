@@ -61,7 +61,7 @@ parameters support dense ND rank-2 FP16/BF16/FP32/INT32 tensors with static
 physical shapes and more than one column. Arithmetic recipes impose their own
 narrower dtype contracts. Normalized Tensor returns alias those parameters;
 the native kernel still returns void. Buffer parameter ABI, native function
-results, views, slots, helpers, and other physical layouts are not yet supported
+results, dynamic or strided views, slots, helpers, and other physical layouts are not yet supported
 and produce explicit errors. Buffer type dumps use native
 `pypto.ir.BufferType(...)` constructors; binary serialization preserves their
 complete descriptors. Reparsing complete buffer-program dumps through the
@@ -147,6 +147,32 @@ operands remain in their lexical scope. No logical `TileType` or `MemRef` is
 reconstructed, and no implicit tile allocation pass runs on this path. The
 pipeline with `enable_buffer_ir=True` converts Tile IR before emission through
 [LowerTileToBuffer](../passes/53-lower_tile_to_buffer.md).
+
+Static storage views use ordinary SSA alias edges in the same Buffer stage:
+
+```text
+%root = buffer.alloc(()) : Buffer<[128, 32], UINT8, Vec>
+%bytes = buffer.subview(%root, (2, 0)) : Buffer<[64, 32], UINT8, Vec>
+%tile = buffer.reshape(%bytes) : Buffer<[16, 32], FP32, Vec>
+```
+
+`buffer.subview` currently accepts full-valid `UINT8[N,32]` source/result
+buffers and static `INDEX` offsets `(row, 0)`. Its window must fit within the
+source. `buffer.reshape` preserves the exact physical byte count and accepts
+static dense row-major rank-2 Vec FP16, BF16, FP32, INT16, INT32 and UINT8 descriptors, with physical
+rows aligned to 32 bytes. Both operations declare `Alias(0)`, no data access, and
+source-metadata read. They neither allocate storage nor initialize data.
+Every intermediate shape, dtype and valid extent is explicit in its result type.
+`buffer.set_validshape` cannot mutate these static view handles.
+
+`BufferIR` memoizes root identity, relative offset and byte extent for these
+views. Elementwise recipes, and copies involving views, check source/destination
+windows using relative offsets within one root or effective addresses across
+placed roots. Distinct addressless allocations are disjoint; distinct unproven
+incoming roots are not a disjointness proof. Same-root disjoint windows remain
+provable even with a runtime base address. This does not establish initialization
+or lifetime safety. Legacy copies between incoming non-view buffers retain their
+existing overlap precondition.
 
 GM transfers expose their complete window as ordinary operands:
 

@@ -52,17 +52,19 @@ namespace {
 using ir::As;
 
 // BufferType is already a physical descriptor. This initial emitter supports
-// dense Vec FP16/BF16/FP32/INT32 only; no logical shape, layout, or packing is inferred.
+// dense Vec descriptors only; no logical shape, layout, or packing is inferred.
 std::string BufferTypeString(const ir::BufferTypePtr& type, const ir::Span& span) {
   CHECK_SPAN(type->shape_.size() == 1 || type->shape_.size() == 2, span)
       << "Direct Buffer IR codegen supports only rank-1 or rank-2 buffers";
   CHECK_SPAN(type->memory_space_ == ir::MemorySpace::Vec &&
-                 backend::IsDenseBufferTransferDtype(type->dtype_) &&
+                 (backend::IsDenseBufferTransferDtype(type->dtype_) || type->dtype_ == DataType::UINT8 ||
+                  type->dtype_ == DataType::INT16) &&
                  type->blayout_ == ir::TileLayout::row_major && type->slayout_ == ir::TileLayout::none_box &&
                  type->fractal_ == 512 && type->pad_ == ir::PadValue::null &&
                  type->compact_ == ir::CompactMode::null,
              span)
-      << "Direct Buffer IR codegen currently requires dense row-major Vec FP16/BF16/FP32/INT32 buffers "
+      << "Direct Buffer IR codegen currently requires dense row-major Vec FP16/BF16/FP32/INT32/INT16/UINT8 "
+         "buffers "
          "with fractal=512, no padding, and no compact mode";
   const bool vector = type->shape_.size() == 1;
   const int64_t rows = vector ? 1 : type->shape_[0];
@@ -341,6 +343,7 @@ class BufferEmissionPreflight : public ir::IRVisitor {
     uses_spmd_subblock |= ir::IsOp(call, "buffer.get_subblock_idx");
     const auto* recipe = backend::FindBufferElementwiseRecipe(call->op_->name_);
     CHECK_SPAN(recipe || ir::IsOp(call, "buffer.alloc") || ir::IsOp(call, "buffer.copy") ||
+                   ir::IsOp(call, "buffer.subview") || ir::IsOp(call, "buffer.reshape") ||
                    ir::IsOp(call, "buffer.load") || ir::IsOp(call, "buffer.store") ||
                    ir::IsOp(call, "buffer.set_validshape") || ir::IsOp(call, "buffer.get_block_idx") ||
                    ir::IsOp(call, "buffer.get_block_num") || ir::IsOp(call, "buffer.get_subblock_idx"),
@@ -564,6 +567,24 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
     Emit(name + " = pto.alloc_tile" + (address.empty() ? "" : " addr = " + address) +
          (dimensions[0].empty() ? "" : " valid_row = " + dimensions[0]) +
          (dimensions[1].empty() ? "" : " valid_col = " + dimensions[1]) + " : " + descriptor);
+    BindVarToMlir(result, name);
+    RegisterTileBufType(name, descriptor);
+  } else if (ir::IsOp(call, "buffer.subview") || ir::IsOp(call, "buffer.reshape")) {
+    const auto type = As<ir::BufferType>(call->GetType());
+    const std::string descriptor = BufferTypeString(type, call->span_);
+    const std::string name = NewNamedTemp(result->name_hint_);
+    const std::string source = GetExprAsCode(call->args_[0]);
+    const std::string source_type = GetExprTypeAnnotation(call->args_[0]);
+    if (ir::IsOp(call, "buffer.subview")) {
+      const auto offsets = As<ir::MakeTuple>(call->args_[1]);
+      const auto row = GetExprAsCode(offsets->elements_[0]);
+      const auto col = GetExprAsCode(offsets->elements_[1]);
+      Emit(name + " = pto.subview " + source + "[" + row + ", " + col + "] sizes [" +
+           std::to_string(type->shape_[0]) + ", " + std::to_string(type->shape_[1]) + "] : " + source_type +
+           " -> " + descriptor);
+    } else {
+      Emit(name + " = pto.treshape " + source + " : " + source_type + " -> " + descriptor);
+    }
     BindVarToMlir(result, name);
     RegisterTileBufType(name, descriptor);
   } else if (ir::IsOp(call, "buffer.set_validshape")) {

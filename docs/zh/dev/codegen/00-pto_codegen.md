@@ -60,6 +60,10 @@ valid 状态更新，也不重建逻辑 Tile。
 描述符、方向、动态窗口和 ABI 限制见 [Buffer 契约](../ir/02-types.md#buffer-算子契约)。
 原生编译测试验证语法和操作数数据流；数值执行是单独的集成验收要求。
 
+静态存储别名以显式 `buffer.subview` 和 `buffer.reshape` 操作进入代码生成，
+分别发射为 `pto.subview` 和 `pto.treshape`，直接保留源句柄和结果描述符，
+不分配、不复制，也不推导存储窗口。描述符边界和别名合法性在发射前完成验证。
+
 ### 类结构
 
 **头文件**: `include/pypto/codegen/pto/pto_codegen.h`

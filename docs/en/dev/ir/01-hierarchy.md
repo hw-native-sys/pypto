@@ -464,6 +464,9 @@ aliasing is answered by `MemRef.same_allocation(a, b)` and `MemRef.may_alias(a, 
 | `slot_count_` | uint64_t | Equally-sized slots the declaration holds (`pl.MemRef("name", slots=N)`); 1 when `slots` is omitted |
 | `slot_index_` | ExprPtr \| None | Which slot this MemRef denotes (`l0c[k]`); None until a slot is selected, and may be a runtime value |
 
+Omitting the Python constructor's `slot` argument or passing `slot=None`
+produces the same absent slot index as the C++ constructor's default.
+
 ```python
 # base allocation name, byte offset within it, size in bytes
 memref = ir.MemRef("mem_left_0", 0, 1024)
