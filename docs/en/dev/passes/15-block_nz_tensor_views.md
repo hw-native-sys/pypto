@@ -128,6 +128,7 @@ the enclosing function in one read-only sweep:
 | `AssignStmt` (`n0 = nb * 256`) | one factor of the product is a multiple | both factors are non-negative |
 | `ForStmt` (`for k0 in pl.pipeline(512, 4096, 512)`) | `start` and `step` are both multiples | `start` and `step` are both non-negative |
 | `tile.get_block_idx` / `tile.get_block_num` | — | a lane number is never negative |
+| `FloorMod` / `FloorDiv` by a positive constant (`(blk % 2) * 512`) | the other factor carries it | a remainder carries its divisor's sign; a quotient keeps the dividend's |
 | `ConstInt` | the value is a multiple | the value is `>= 0` |
 
 Sums and products compose from those; a difference proves divisibility but never
@@ -248,7 +249,9 @@ diagnostic naming the fix — an NZ tensor must never be silently mis-addressed.
 | `target_memory != Mat` (or absent) | rejected — NZ→NZ is the cube operand path |
 | `tensor.slice` narrowing the leading axes only | blocked like the load that follows it (see below) |
 | `tensor.slice` windowing the trailing `[R, C]` pair | rejected — the window is not contiguous |
-| consumer other than `tile.load` / `tensor.slice` | rejected — NZ is read-only here |
+| `tensor.reshape` flattening the whole tensor to `[N]` | kept as written — see [Flattening an NZ tensor](#flattening-an-nz-tensor) |
+| `tensor.reshape` to any other shape | rejected — it reinterprets coordinates the blocked form does not carry |
+| consumer other than `tile.load` / `tensor.slice` / a whole-tensor flatten | rejected — NZ is read-only here |
 | explicit stride or partial `valid_shape` | rejected |
 | distributed tensor | rejected — `remote_load` has no NZ blocking |
 | `tensor.view` / `tensor.reinterpret_view` of NZ | rejected at op construction |
@@ -343,6 +346,26 @@ block, so `[layer*R, 0]` selects `C/c0` disjoint runs, and the blocked view has
 no stride of its own to describe them — `MaterializeTensorStrides` derives a
 row-major one from the blocked shape. Annotate the stacked axis as a leading
 axis (`[LAYERS, R, C]`) instead of stacking rows.
+
+### Flattening an NZ tensor
+
+A rank-1 view of *every* element is layout-invariant: the blocked form permutes
+the index space, not the memory, so both spellings walk the same contiguous GM
+range in the same order. Such a `tensor.reshape` is therefore kept exactly as
+written — no coordinate rewrite, and the result is ND, which is what
+`prefetch.async_prefetch` wants of its source. Without it, annotating a weight
+`pl.NZ` would silently cost it its SDMA L2 warm.
+
+Any other target shape does reinterpret coordinates — `[256, 512] -> [128,
+1024]` pairs rows in logical row-major order, and in the blocked form those
+elements are scattered across fractal blocks — so it is rejected rather than
+addressed as if it were ND.
+
+An NZ argument also arrives at the orchestration entry in its *logical* shape:
+the caller allocates the weight that way, and only the compiled parameter is
+blocked. The entry restates it in blocked terms once (a metadata-only reshape,
+same elements in the same order), so every `Tensor::view` derived from it clamps
+against the rank it is written in.
 
 Sub-byte dtypes (INT4 / UINT4 / FP4 / HF4 / BOOL) are rejected as a **PyPTO
 milestone-1 scope limit, not a hardware one** — pto-isa's NZ machinery does

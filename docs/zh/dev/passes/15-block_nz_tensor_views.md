@@ -118,6 +118,7 @@ wt: pl.Tile[[256, 512], pl.INT8, pl.Mem.Mat] =
 | `AssignStmt`（`n0 = nb * 256`） | 乘积中的某个因子是倍数 | 两个因子都非负 |
 | `ForStmt`（`for k0 in pl.pipeline(512, 4096, 512)`） | `start` 与 `step` 同时是倍数 | `start` 与 `step` 同时非负 |
 | `tile.get_block_idx` / `tile.get_block_num` | —— | lane 编号不可能为负 |
+| 对正常量取模 / 整除（`(blk % 2) * 512`） | 由另一个因子承担 | 余数带着除数的符号，商保持被除数的符号 |
 | `ConstInt` | 该值本身是倍数 | 该值 `>= 0` |
 
 在此基础上，和与乘积可以组合；差能证明整除性但无法证明符号，因此被拒绝。**两列必须
@@ -226,7 +227,9 @@ GlobalTensor<int8_t, pto::Shape<1, 16, 16, 16, 32>,
 | `target_memory != Mat`（或缺省） | 拒绝——NZ→NZ 是 cube 操作数路径 |
 | `tensor.slice` 只收窄前导轴 | 与其后的 load 一样分块（见下） |
 | `tensor.slice` 在末尾 `[R, C]` 平面上开窗 | 拒绝——该窗口不连续 |
-| `tile.load` / `tensor.slice` 之外的消费者 | 拒绝——此处 NZ 是只读的 |
+| `tensor.reshape` 把整块张量展平成 `[N]` | 原样保留——见[展平 NZ 张量](#展平-nz-张量) |
+| `tensor.reshape` 成其它形状 | 拒绝——它重新解释了分块形式无法承载的坐标 |
+| `tile.load` / `tensor.slice` / 整块展平之外的消费者 | 拒绝——此处 NZ 是只读的 |
 | 显式 stride 或部分 `valid_shape` | 拒绝 |
 | 分布式张量 | 拒绝——`remote_load` 没有 NZ 分块 |
 | 对 NZ 做 `tensor.view` / `tensor.reinterpret_view` | 在算子构造期拒绝 |
@@ -307,6 +310,22 @@ pto-isa 的 NZ `GlobalTensor` 只有**一个** batch 槽位，因此逻辑 `[G, 
 的行分布在*每一个*分形列块内部，因此 `[layer*R, 0]` 选出的是 `C/c0` 段不连续的数据，
 而分块 view 自身没有 stride 来描述它们——`MaterializeTensorStrides` 是从分块 shape
 推导行主序 stride 的。请把堆叠轴放成前导轴（`[LAYERS, R, C]`），而不是按行堆叠。
+
+### 展平 NZ 张量
+
+覆盖*全部*元素的 rank-1 view 与 layout 无关：分块形式重排的是索引空间而不是内存，
+两种写法走的是同一段连续 GM、顺序也相同。因此这样的 `tensor.reshape` 被原样保留
+——不改写坐标，结果是 ND，正好是 `prefetch.async_prefetch` 对源张量的要求。没有
+这条规则，给权重标注 `pl.NZ` 就会悄悄让它失去 SDMA L2 预热。
+
+其它目标形状确实重新解释了坐标——`[256, 512] -> [128, 1024]` 是按逻辑行主序把行
+两两合并，而在分块形式下这些元素散落在不同的分形块里——所以会被拒绝，而不是当作
+ND 去寻址。
+
+NZ 实参到达 orchestration 入口时同样带着*逻辑* shape：调用方就是按逻辑 shape 分配
+权重的，只有编译后的形参是分块的。入口处会把它一次性改写成分块形式（纯元数据的
+reshape，元素与顺序都不变），这样由它派生的每个 `Tensor::view` 都是按同一个 rank
+去做 clamp 的。
 
 sub-byte dtype（INT4 / UINT4 / FP4 / HF4 / BOOL）被拒绝，这是 **PyPTO 里程碑 1 的
 范围限制，不是硬件限制**——pto-isa 的 NZ 机制确实处理 FP4（`tload_common.hpp` 中有
