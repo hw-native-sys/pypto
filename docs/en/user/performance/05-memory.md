@@ -265,9 +265,10 @@ coherency bug, which is why this is never a default and never inferred. The
 compiler rejects the case it can see — declaring `BYPASS` on a tensor the scope
 writes is an error — but it cannot prove the general case.
 
-**Requires PTOAS >= v0.61.** A `BYPASS` read compiles to
-a real L2 hint on the load instruction (`TLOAD<pto::TLoadL2Hint::NotAllocKeep>`);
-a read that declares nothing is unaffected, byte for byte.
+**Requires PTOAS >= v0.64.** The declaration is preserved on the load, but
+codegen does not yet supply the runtime offset required by this assembler.
+`BYPASS` therefore currently executes as an ordinary cached read; it provides
+no cache or performance benefit until the offset is wired through.
 
 ## See also
 

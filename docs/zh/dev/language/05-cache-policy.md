@@ -7,9 +7,10 @@
 该策略是*作者声明的契约（contract）*，绝不是编译器推断出来的提示（hint）。因此它必须
 显式书写，粒度二选一，并且从 DSL 一路原样传递到代码生成（codegen）。
 
-> **要求 PTOAS >= v0.61**（`toolchain/versions.env` 中的 `PTOAS_VERSION`）。`BYPASS`
-> 声明会变成 `pto.tload` 上的一个 `cache_policy` 属性，由汇编器降级为 pto-isa 自带的
-> L2 hint。参见[codegen 发射什么](#codegen-发射什么)。
+> **要求 PTOAS >= v0.64**（`toolchain/versions.env` 中的 `PTOAS_VERSION`）。`BYPASS`
+> 声明由 `pto.tload` 的 `cache_policy` 属性携带。未提供运行时偏移（offset）时，
+> PTOAS v0.64 生成普通缓存读取。本版本保留声明，但尚不实际绕过 L2。
+> 参见[codegen 发射什么](#codegen-发射什么)。
 
 ## 两个书写面
 
@@ -189,12 +190,14 @@ pto.tload ins(%b__ssa_v0_pview : !pto.partition_tensor_view<256x256xf32>)
           {cache_policy = #pto.load_cache_policy<l2_bypass>}
 ```
 
-PTOAS >= v0.61 会把它降级为 pto-isa 自带的 L2 hint，这也是生成的 CCE 中唯一的差异：
+PTOAS v0.64 使用可选字节偏移替代原来的 `TLoadL2Hint::NotAllocKeep` 下降方式。
+codegen 尚未提供该操作数，所以 `BYPASS` 和默认读取生成相同的普通缓存读取：
 
-```diff
--  TLOAD(v45, v50);
-+  TLOAD<pto::TLoadL2Hint::NotAllocKeep>(v45, v50);
+```cpp
+TLOAD(v45, v50);
 ```
+
+后续实现需通过 kernel wrapper 和函数签名传递设备的非缓存地址偏移，声明才会改变实际设备访问。
 
 这次发射有三条性质值得写明，因为每一条都在
 `tests/ut/codegen/test_cache_policy_codegen.py` 中有对应断言：
@@ -202,7 +205,7 @@ PTOAS >= v0.61 会把它降级为 pto-isa 自带的 L2 hint，这也是生成的
 | 性质 | 原因 |
 | ---- | ---- |
 | `CachePolicy.DEFAULT` **什么都不发射** | 未声明策略的 kernel 保持本特性出现之前的 PTO 形态，因此该属性就是两个在其余方面完全相同的 kernel 之间唯一的差异 |
-| 该属性按 **load** 发射，而不是按张量 | 它是指令的性质；若两条 load 只有第一条带 hint，第二条仍会在 L2 中分配（被取代的 `[CacheBypassUnsupported]` 诊断刻意是"每张量一次"—— 粒度正好相反） |
+| 该属性按 **load** 发射，而不是按张量 | 声明属于每条指令；在尚未提供 offset 时，两次访问仍使用缓存 |
 | 它与 MX 的 `layout` 合并进**同一个**属性字典，且排在其后 | PTOAS 要求所有存在的属性在同一个字典里；把 `layout` 留在前面可使未声明策略的 MX load 保持逐字节一致 |
 
 ### 更旧的汇编器

@@ -397,10 +397,10 @@ def set_cache_policy(tensor: Tensor, policy: CachePolicy) -> None:
       ``cache=pl.CachePolicy.DEFAULT`` opts a single read back into the cache
       inside a bypassing scope.
 
-    Requires PTOAS >= v0.61: a declared read compiles to
-    a ``cache_policy`` attribute on ``pto.tload``, which the assembler lowers to
-    pto-isa's own L2 hint. ``CachePolicy.DEFAULT`` emits nothing, so a read that
-    declares no policy generates exactly the code it did before.
+    Requires PTOAS >= v0.64. The declaration becomes a ``cache_policy``
+    attribute on ``pto.tload``. Codegen does not yet supply the runtime offset
+    required for bypass, so declared reads currently remain cached.
+    ``CachePolicy.DEFAULT`` emits no attribute.
 
     Args:
         tensor: The tensor whose reads the policy applies to. Must be a

@@ -111,11 +111,10 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   INTERNAL_CHECK_SPAN(!shapes_tuple->elements_.empty(), op->span_)
       << "tile.load shapes tuple must have at least one element";
 
-  // The declared GM cache-access policy (pypto #2680). PTOAS >= v0.61 carries a
-  // streaming read as a `cache_policy` attribute on `pto.tload`, which lowers to
-  // pto-isa's own L2 hint (`TLOAD<pto::TLoadL2Hint::NotAllocKeep>`), so there is
-  // no architecture-specific address alias to build here. It is attached below,
-  // alongside the MX layout attribute when both apply.
+  // The declared GM cache-access policy (pypto #2680) remains an attribute on
+  // `pto.tload`. PTOAS v0.64 requires an explicit byte offset to bypass L2;
+  // without that operand the declaration lowers to an ordinary cached load.
+  // The attribute is attached below alongside the MX layout when both apply.
   const auto policy = static_cast<ir::CachePolicy>(op->GetKwarg<int>("cache", 0));
 
   std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);
@@ -740,7 +739,7 @@ static std::string MakeTensorReadCodegenPTO(const CallPtr& op, codegen::CodegenB
   INTERNAL_CHECK_SPAN(scalar_type_ptr, op->span_) << "tensor.read result must be ScalarType";
   std::string scalar_type = codegen.GetTypeString(scalar_type_ptr->dtype_);
 
-  // store_scalar/load_scalar need the base !pto.ptr; resolve via the tensor var
+  // pto.store / pto.load need the base !pto.ptr; resolve via the tensor var
   // even after a slice-assign rebound it to a tensor_view (issue #1493).
   std::string src = codegen.GetTensorBasePtr(AsVarLike(op->args_[0]));
   std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
@@ -753,7 +752,7 @@ static std::string MakeTensorReadCodegenPTO(const CallPtr& op, codegen::CodegenB
   std::string off = GetFlatOffsetSSA(indices_tuple, tensor_type_ptr->shape_, codegen);
 
   std::ostringstream oss;
-  oss << result << " = pto.load_scalar " << src << "[" << off << "]";
+  oss << result << " = pto.load " << src << "[" << off << "]";
   if (!src_type.empty()) {
     oss << " : " << src_type;
   }
@@ -773,7 +772,7 @@ static std::string MakeTensorWriteCodegenPTO(const CallPtr& op, codegen::Codegen
   auto indices_tuple = As<ir::MakeTuple>(op->args_[1]);
   INTERNAL_CHECK_SPAN(indices_tuple, op->span_) << "tensor.write second argument must be MakeTuple (indices)";
 
-  // store_scalar needs the base !pto.ptr; resolve via the tensor var even after
+  // pto.store needs the base !pto.ptr; resolve via the tensor var even after
   // a prior slice-assign rebound it to a tensor_view (issue #1493).
   std::string tensor = codegen.GetTensorBasePtr(AsVarLike(op->args_[0]));
   std::string tensor_type_str = codegen.GetExprTypeAnnotation(op->args_[0]);
@@ -787,7 +786,7 @@ static std::string MakeTensorWriteCodegenPTO(const CallPtr& op, codegen::Codegen
   std::string off = GetFlatOffsetSSA(indices_tuple, tensor_type_ptr->shape_, codegen);
 
   std::ostringstream oss;
-  oss << "pto.store_scalar " << value << ", " << tensor << "[" << off << "]";
+  oss << "pto.store " << value << ", " << tensor << "[" << off << "]";
   if (!tensor_type_str.empty() || !value_type.empty()) {
     oss << " : ";
     if (!tensor_type_str.empty()) oss << tensor_type_str;

@@ -76,7 +76,7 @@ def kernel(
 ```
 
 The reduction receives a `tile.load(x, ...)` result. The final write remains
-`tensor.write(x, ...)`, emitted as a GM `pto.store_scalar`; it does not become a
+`tensor.write(x, ...)`, emitted as a GM `pto.store`; it does not become a
 `tile.write` into the reduction's input tile. The same rule applies to
 `pld.DistributedTensor` parameters, scalar reads, and returned GM aliases.
 
@@ -561,7 +561,7 @@ The pass materializes the loop directly:
 rows = tensor.dim(indices, last_axis)                  # runtime gathered-row count
 acc  = tile.create([max_indices, size], target_memory=space)   # static on-chip buffer
 for i in [0, rows):                                    # ForStmt, iter_arg = acc
-    idx   = tensor.read(indices, [i])                  # scalar GM read (pto.load_scalar)
+    idx   = tensor.read(indices, [i])                  # scalar GM read (pto.load)
     phys  = block_table[idx // block_size] * block_size + idx % block_size   # scalar
     acc   = tile.gather_row(acc, src, [i, 0], [phys, col_off], [1, size])    # GM->on-chip
     yield acc

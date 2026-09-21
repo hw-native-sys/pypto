@@ -8,9 +8,10 @@ The policy is a *contract the author states*, never a hint the compiler infers.
 It is therefore written explicitly, at one of two granularities, and is carried
 unchanged from the DSL to codegen.
 
-> **Requires PTOAS >= v0.61** (`PTOAS_VERSION` in `toolchain/versions.env`). A
-> `BYPASS` declaration becomes a `cache_policy` attribute on `pto.tload`, which
-> the assembler lowers to pto-isa's own L2 hint. See
+> **Requires PTOAS >= v0.64** (`PTOAS_VERSION` in `toolchain/versions.env`).
+> `BYPASS` is carried as a `cache_policy` attribute on `pto.tload`. Without a
+> runtime-provided offset, PTOAS v0.64 emits an ordinary cached load. This
+> version preserves the declaration but does not yet bypass L2. See
 > [What codegen emits](#what-codegen-emits).
 
 ## Two surfaces
@@ -205,13 +206,16 @@ pto.tload ins(%b__ssa_v0_pview : !pto.partition_tensor_view<256x256xf32>)
           {cache_policy = #pto.load_cache_policy<l2_bypass>}
 ```
 
-PTOAS >= v0.61 lowers that to pto-isa's own L2 hint, which is the whole
-difference in the generated CCE:
+PTOAS v0.64 replaces the former `TLoadL2Hint::NotAllocKeep` lowering with an
+optional byte offset. Codegen does not yet supply that operand, so both a
+`BYPASS` read and a default read emit the same ordinary cached load:
 
-```diff
--  TLOAD(v45, v50);
-+  TLOAD<pto::TLoadL2Hint::NotAllocKeep>(v45, v50);
+```cpp
+TLOAD(v45, v50);
 ```
+
+A follow-up must thread the device's uncached-address offset through the kernel
+wrapper and signature before the declaration changes device accesses.
 
 Three properties of the emit are worth stating, because each one is asserted in
 `tests/ut/codegen/test_cache_policy_codegen.py`:
@@ -219,7 +223,7 @@ Three properties of the emit are worth stating, because each one is asserted in
 | Property | Why |
 | -------- | --- |
 | `CachePolicy.DEFAULT` emits **nothing** | A kernel that states no policy keeps the PTO form it had before this existed, so the attribute is the only difference between two otherwise identical kernels |
-| The attribute is emitted **per load**, not per tensor | It is a property of the instruction; a hint on only the first of two loads would leave the second one allocating in L2 (the superseded `[CacheBypassUnsupported]` diagnostic was deliberately once-per-tensor — the opposite granularity) |
+| The attribute is emitted **per load**, not per tensor | The declaration belongs to each instruction, even while the offset is not supplied and both accesses remain cached |
 | It joins the MX `layout` in **one** attribute dict, after it | PTOAS takes all present attributes in a single dict; keeping `layout` first leaves an MX load that declares no policy byte-identical |
 
 ### Older assemblers

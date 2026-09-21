@@ -55,8 +55,8 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 | pto.make_prefetch_async_context | pto::PrefetchAsyncContext | internal | ✅ | — | — | — | — | 随 async prefetch 集成验证 |
 | pto.get_prefetch_async_session | .session | internal | ✅ | — | — | — | — | 随 async prefetch 集成验证 |
 | pto.tstore | TSTORE | tile | ✅ | ✅ | ❌ | ✅ | — |  |
-| pto.load_scalar | direct pointer load | tensor | ✅ | ❌ | ✅ | ✅ | — | 由 `tensor.read` 发射 |
-| pto.store_scalar | direct pointer store | tensor | ✅ | ❌ | ✅ | ✅ | — | 由 `tensor.write` 发射 |
+| pto.load | direct pointer load | tensor | ✅ | ❌ | ✅ | ✅ | — | 由 `tensor.read` 发射 |
+| pto.store | direct pointer store | tensor | ✅ | ❌ | ✅ | ✅ | — | 由 `tensor.write` 发射 |
 | pto.tmov | TMOV / TMOV_FP | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.ttrans | TTRANS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | **矩阵计算（12）** |  |  |  |  |  |  |  |  |

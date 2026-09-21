@@ -108,7 +108,7 @@ DistTensorBinding ResolveDistTensorBinding(const ExprPtr& arg, codegen::PTOCodeg
 // because of two intertwined PTOAS constraints:
 //
 // * ``pto.addptr`` must feed ``pto.make_tensor_view`` /
-//   ``initialize_l2g2l_pipe(gm_addr)`` / ``load|store_scalar`` *within
+//   ``initialize_l2g2l_pipe(gm_addr)`` / ``pto.load / pto.store`` *within
 //   the same func.func*. A helper that ended with ``addptr → return``
 //   would only feed ``func.return``, which PTOAS rejects.
 // * ``pto.make_tensor_view`` always lowers to ``memref<…, strided<[?,
@@ -128,7 +128,7 @@ DistTensorBinding ResolveDistTensorBinding(const ExprPtr& arg, codegen::PTOCodeg
 // Generated MLIR (2-D example, ``DistributedTensor[[1, 64], FP32]``):
 //
 //   %peer_idx = arith.index_cast %peer : i32 to index
-//   %rk_pair = pto.load_scalar %ctx[%c2_index] : !pto.ptr<i64> -> i64
+//   %rk_pair = pto.load %ctx[%c2_index] : !pto.ptr<i64> -> i64
 //   ...                                (see EmitCommRemoteOffsetInline)
 //   %delems = arith.index_cast %delems_i : i64 to index
 //   %peer_ptr = pto.addptr %local_ptr, %delems
@@ -1092,7 +1092,7 @@ static std::string MakeGetCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
   return "";
 }
 
-// Emit ``%rk_pair = pto.load_scalar %ctx[%slot] : !pto.ptr<i64> -> i64`` for
+// Emit ``%rk_pair = pto.load %ctx[%slot] : !pto.ptr<i64> -> i64`` for
 // the (rankId, rankNum) u64 slot. Shared by ``pld.system.rank`` (low 32 bits)
 // and ``pld.system.nranks`` (high 32 bits) — see comm_layout.h for the static
 // asserts that anchor rankNum at rankId + 4 in the same i64 slot.
@@ -1101,7 +1101,7 @@ static std::string EmitLoadRankPair(codegen::PTOCodegen& cg, const std::string& 
   constexpr int64_t kRankSlotIdx = static_cast<int64_t>(cl::kRankIdOffset / cl::kWindowSlotStride);
   std::string slot_c = cg.GetOrEmitConstant(kRankSlotIdx, DataType::INDEX);
   std::string rk_pair = cg.NewTemp();
-  cg.Emit(rk_pair + " = pto.load_scalar " + ctx_ssa + "[" + slot_c + "] : !pto.ptr<i64> -> i64");
+  cg.Emit(rk_pair + " = pto.load " + ctx_ssa + "[" + slot_c + "] : !pto.ptr<i64> -> i64");
   return rk_pair;
 }
 
@@ -1166,7 +1166,7 @@ void RegisterDistributedOps(Backend& backend, const std::unordered_set<std::stri
 
   // ``pld.system.rank(ctx)``: IR ``ScalarType(INT32)``; MLIR type is ``i32``.
   // ``i32`` (PTOAS rejects ``arith.trunci`` to ``ui32``). Low 32 bits of the
-  // (rankId, rankNum) u64 slot via ``pto.load_scalar`` + ``arith.trunci``.
+  // (rankId, rankNum) u64 slot via ``pto.load`` + ``arith.trunci``.
   reg("pld.system.rank", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) -> std::string {
     auto& cg = AsPto(codegen_base);
     INTERNAL_CHECK_SPAN(op->args_.size() == 1, op->span_)
@@ -1182,7 +1182,7 @@ void RegisterDistributedOps(Backend& backend, const std::unordered_set<std::stri
   // ``pld.system.nranks(ctx)``: same INT32 IR / i32 MLIR convention.
   // High 32 bits of the same slot —
   // ``kRankNumOffset == kRankIdOffset + 4`` lets us shift the already-loaded
-  // i64 right by 32 instead of issuing a second pto.load_scalar.
+  // i64 right by 32 instead of issuing a second pto.load.
   reg("pld.system.nranks", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) -> std::string {
     auto& cg = AsPto(codegen_base);
     INTERNAL_CHECK_SPAN(op->args_.size() == 1, op->span_)

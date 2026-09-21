@@ -667,7 +667,7 @@ class PTOCodegen : public CodegenBase {
    * ``pto.make_tensor_view`` — keeping ``addptr`` and ``make_tensor_view``
    * co-located in the user kernel's ``func.func``, which is what PTOAS's
    * per-func lowering check (``addptr must feed make_tensor_view /
-   * initialize_l2g2l_pipe(gm_addr) / load|store_scalar``) requires.
+   * initialize_l2g2l_pipe(gm_addr) / pto.load / pto.store``) requires.
    *
    * The arithmetic is emitted inline rather than shared through a
    * module-level ``func.func`` helper. A mixed cube+vector kernel group is

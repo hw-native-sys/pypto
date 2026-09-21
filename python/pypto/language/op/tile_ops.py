@@ -441,9 +441,9 @@ def load(
             the full contract). An explicit value here always wins over a
             scope-level ``pl.set_cache_policy`` declaration for the same tensor,
             in both directions: ``cache=CachePolicy.DEFAULT`` opts this one read
-            back into the cache inside a bypassing scope. Requires PTOAS >= v0.61,
-            where a BYPASS read compiles to an L2 hint on the emitted load;
-            DEFAULT emits nothing.
+            back into the cache inside a bypassing scope. Requires PTOAS >= v0.64.
+            The BYPASS attribute currently has no runtime offset, so the load
+            remains cached. DEFAULT emits no attribute.
 
     Returns:
         Tile wrapping the load operation
