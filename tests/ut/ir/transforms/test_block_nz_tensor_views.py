@@ -817,6 +817,43 @@ def test_rejects_a_slice_offset_whose_sign_cannot_be_proven():
         _run(program)
 
 
+def test_maps_a_split_k_offset_built_from_a_remainder():
+    """``(block % OK) * K_SLICE`` is the split-K half of a K loop.
+
+    A remainder carries its divisor's sign, so a positive constant divisor makes
+    the offset non-negative whatever the block index is, and the constant factor
+    carries the alignment. Without the remainder rule the whole split-K idiom —
+    which the attention projections use — is refused.
+    """
+
+    @pl.jit
+    def _split_k(
+        x: pl.Tensor[[64, 1024], pl.INT8],
+        w: pl.Tensor[[256, 1024], pl.INT8, pl.NZ],
+        out: pl.Out[pl.Tensor[[64, 256], pl.INT32]],
+    ):
+        for blk in pl.spmd(4, name_hint="split_k_mm"):
+            k_base = (blk % 2) * 512
+            n0 = (blk // 2) * 128
+            acc = pl.create_tensor([64, 128], dtype=pl.INT32)
+            for kb in pl.pipeline(0, 512, 512, stage=2):
+                k0 = k_base + kb
+                acc = pl.matmul_acc(
+                    acc,
+                    x[0:64, k0 : k0 + 512],
+                    w[n0 : n0 + 128, k0 : k0 + 512],
+                    b_trans=True,
+                    init_cond=(kb == 0),
+                )
+            out[:, n0 : n0 + 128] = acc
+        return out
+
+    _, _, tm, sd, cx, dyn = _split_k._bind_args_from_signature({})
+    call = _nz_load(_run(_split_k._compile_to_program(tm, sd, cx, dyn, pl)))
+    # Both trailing offsets are divided; neither is refused for an unprovable sign.
+    assert len(_elements(call.args[1])) == 5
+
+
 def test_rejects_a_loop_variable_whose_step_breaks_alignment():
     """A loop variable is only divisible when *both* its start and step are.
 

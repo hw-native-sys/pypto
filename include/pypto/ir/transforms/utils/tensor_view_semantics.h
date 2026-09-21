@@ -432,6 +432,21 @@ inline bool IsProvableNonNegative(const ExprPtr& expr, const NzOffsetFacts& fact
            IsProvableNonNegative(add->right_, facts, budget);
   }
 
+  // A remainder carries the divisor's sign, so a positive constant divisor makes
+  // the result non-negative whatever the dividend is. This is what a split-K
+  // block index reaches for -- ``(block % OK) * K_SLICE`` names the K half.
+  if (auto mod = As<FloorMod>(expr)) {
+    auto divisor = As<ConstInt>(mod->right_);
+    return divisor && divisor->value_ > 0;
+  }
+
+  // A quotient keeps the sign of the dividend when the divisor is positive, so
+  // the companion ``block // OK`` of that same split is non-negative too.
+  if (auto div = As<FloorDiv>(expr)) {
+    auto divisor = As<ConstInt>(div->right_);
+    return divisor && divisor->value_ > 0 && IsProvableNonNegative(div->left_, facts, budget);
+  }
+
   if (auto var = As<Var>(expr)) {
     if (facts.is_non_negative && facts.is_non_negative(var)) return true;
     if (facts.definition) {
