@@ -50,6 +50,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/allocation_constraint_analysis.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -161,12 +162,23 @@ std::string MemRefIdentityKey(const ir::MemRefPtr& memref) {
   return key.str();
 }
 
-std::string TileBufHandleIdentityKey(const ir::MemRefPtr& memref, const std::string& type_str) {
+std::optional<std::pair<int64_t, int64_t>> StaticValidExtents(
+    const std::shared_ptr<const ir::TileType>& tile_type);
+
+std::string TileBufHandleIdentityKey(const ir::MemRefPtr& memref, const std::string& type_str,
+                                     const std::shared_ptr<const ir::TileType>& tile_type) {
   std::string ident = MemRefIdentityKey(memref);
   // A multi-buffer slot can have a narrower view than its covering region. Keep
   // differently typed views on separate SSA handles even when their byte window
   // is identical; one MLIR SSA cannot carry two tile_buf types.
-  if (memref->slot_count_ > 1) ident += "|slot-type=" + type_str;
+  if (memref->slot_count_ > 1) {
+    ident += "|slot-type=" + type_str;
+    // The printed tile_buf type uses unknown valid extents, but a boundary
+    // subview's static valid extents are part of its SSA handle identity.
+    if (const auto extents = StaticValidExtents(tile_type)) {
+      ident += "|valid=" + std::to_string(extents->first) + "x" + std::to_string(extents->second);
+    }
+  }
   return ident;
 }
 
@@ -1009,7 +1021,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
       // the region's covering tile. One MLIR SSA cannot carry both tile_buf
       // types, so share handles only among vars with the same slot geometry.
       // Ordinary (non-slotted) aliases keep the historical byte-identity key.
-      std::string ident = TileBufHandleIdentityKey(memref, type_str);
+      std::string ident = TileBufHandleIdentityKey(memref, type_str, tile_type);
       auto it = fs_.memref_identity_to_mlir.find(ident);
       if (it != fs_.memref_identity_to_mlir.end()) {
         ssa_name = it->second;  // reuse the shared handle (in-place aliasing)
@@ -1731,6 +1743,35 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
   }
   if (candidates.empty()) return;
 
+  const auto constraints = ir::AnalyzeAllocationConstraints(func, lifetime_analysis, "PTOCodegen");
+  auto base_of = [](const ir::Var* var) -> const ir::Var* {
+    const auto tile_type = var ? As<TileType>(var->GetType()) : nullptr;
+    return tile_type && tile_type->memref_.has_value() ? tile_type->memref_.value()->base_.get() : nullptr;
+  };
+  // The allocator's no-alias facts refer to logical tile Vars. Resolve their
+  // MemRef bases once, then check every occupant of a reused physical region.
+  // A region's first owner alone is insufficient after a second allocation has
+  // reused it. Hard-edge checks total O(E log R), for R bases and E edges.
+  std::map<const ir::Var*, std::set<const ir::Var*>> forbidden_bases;
+  for (const auto& [writer, inputs] : constraints.forbid_alias) {
+    const ir::Var* writer_base = base_of(writer);
+    if (!writer_base) continue;
+    for (const auto& input : inputs) {
+      const ir::Var* input_base = base_of(input.get());
+      if (!input_base || input_base == writer_base) continue;
+      forbidden_bases[writer_base].insert(input_base);
+      forbidden_bases[input_base].insert(writer_base);
+    }
+  }
+  std::set<const ir::Var*> load_derived_bases;
+  std::set<const ir::Var*> reads_tpop_bases;
+  for (const ir::Var* var : constraints.target_hazard_inputs.load_derived) {
+    if (const ir::Var* base = base_of(var)) load_derived_bases.insert(base);
+  }
+  for (const ir::Var* var : constraints.target_hazard_inputs.reads_tpop) {
+    if (const ir::Var* base = base_of(var)) reads_tpop_bases.insert(base);
+  }
+
   // Pick a bound tile that component-wise covers every use. Do this after the
   // scan so the result is independent of statement/discovery order. A crossed
   // pair such as 64x32 and 32x64 has no such bound tile; synthesizing 64x64
@@ -1850,14 +1891,16 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
   // Candidates are processed by definition point. For each exact region type,
   // the min-heap exposes the physical region that becomes free first, giving an
   // O(R log R) interval allocation rather than a pairwise scan over regions.
-  std::stable_sort(discovery_order.begin(), discovery_order.end(),
-                   [&](const ir::Var* lhs, const ir::Var* rhs) {
-                     auto lhs_it = base_lifetimes.find(lhs);
-                     auto rhs_it = base_lifetimes.find(rhs);
-                     if (lhs_it == base_lifetimes.end()) return false;
-                     if (rhs_it == base_lifetimes.end()) return true;
-                     return lhs_it->second.first < rhs_it->second.first;
-                   });
+  std::vector<std::pair<int, const ir::Var*>> allocation_order;
+  allocation_order.reserve(discovery_order.size());
+  for (const ir::Var* base : discovery_order) {
+    const auto lifetime_it = base_lifetimes.find(base);
+    const int def =
+        lifetime_it == base_lifetimes.end() ? std::numeric_limits<int>::max() : lifetime_it->second.first;
+    allocation_order.emplace_back(def, base);
+  }
+  std::stable_sort(allocation_order.begin(), allocation_order.end(),
+                   [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
 
   struct AvailableRegion {
     int last_use = 0;
@@ -1870,8 +1913,12 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
   };
   using RegionHeap = std::priority_queue<AvailableRegion, std::vector<AvailableRegion>, EarliestAvailable>;
   std::map<std::tuple<std::string, int64_t, int64_t>, RegionHeap> available_regions;
+  std::map<const ir::Var*, std::set<const ir::Var*>> region_occupants;
+  std::set<const ir::Var*> regions_with_load_derived;
+  std::set<const ir::Var*> regions_with_looping_workspace;
 
-  for (const ir::Var* base : discovery_order) {
+  for (const auto& ordered : allocation_order) {
+    const ir::Var* base = ordered.second;
     Candidate& candidate = candidates.at(base);
     // Degrading to one alloc_tile per slot would silently undo the separation the
     // author declared — ptoas would be free to plan the slots on top of each
@@ -1903,15 +1950,44 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
       RegionHeap& heap = available_regions[compatibility];
       if (!heap.empty() && heap.top().last_use <= lifetime_it->second.first) {
         const AvailableRegion available = heap.top();
-        heap.pop();
-        region.region_ssa = fs_.multi_buffer_regions.at(available.owner).region_ssa;
-        heap.push({lifetime_it->second.second, available.owner});
-        reused = true;
+        const auto& occupants = region_occupants.at(available.owner);
+        const auto forbidden_it = forbidden_bases.find(base);
+        bool hard_conflict = false;
+        if (forbidden_it != forbidden_bases.end()) {
+          for (const ir::Var* peer : forbidden_it->second) {
+            if (occupants.count(peer) != 0) {
+              hard_conflict = true;
+              break;
+            }
+          }
+        }
+        const auto& hazard = constraints.target_hazard_inputs;
+        // A looping scalar-written workspace must never inherit a region or
+        // lend one across iterations. A non-looping workspace must not inherit
+        // earlier storage. The split-AIV load+tpop hazard is directional too.
+        const bool workspace_conflict = hazard.written_workspace_bases.count(base) != 0 ||
+                                        hazard.looping_written_workspace_bases.count(base) != 0 ||
+                                        regions_with_looping_workspace.count(available.owner) != 0;
+        const bool tpop_conflict =
+            reads_tpop_bases.count(base) != 0 && regions_with_load_derived.count(available.owner) != 0;
+        if (!hard_conflict && !workspace_conflict && !tpop_conflict) {
+          heap.pop();
+          region.region_ssa = fs_.multi_buffer_regions.at(available.owner).region_ssa;
+          heap.push({lifetime_it->second.second, available.owner});
+          region_occupants.at(available.owner).insert(base);
+          if (load_derived_bases.count(base) != 0) regions_with_load_derived.insert(available.owner);
+          reused = true;
+        }
       }
     }
     if (!reused) {
       region.region_ssa = NewNamedTemp(base->name_hint_ + "_mb");
       fs_.multi_buffer_region_order.push_back(base);
+      region_occupants[base].insert(base);
+      if (load_derived_bases.count(base) != 0) regions_with_load_derived.insert(base);
+      if (constraints.target_hazard_inputs.looping_written_workspace_bases.count(base) != 0) {
+        regions_with_looping_workspace.insert(base);
+      }
       if (lifetime_it != base_lifetimes.end()) {
         available_regions[compatibility].push({lifetime_it->second.second, base});
       }
@@ -2164,7 +2240,8 @@ std::string PTOCodegen::TryGetSharedTileBufHandle(
   if (emit_tile_addr_ || !memref || !tile_type) {
     return "";
   }
-  const std::string ident = TileBufHandleIdentityKey(memref, GetTileBufTypeStringFromTileType(tile_type));
+  const std::string ident =
+      TileBufHandleIdentityKey(memref, GetTileBufTypeStringFromTileType(tile_type), tile_type);
   // A mixed-type identity's handle already carries another var's type; re-typing
   // it would make one SSA value have two types and ptoas would reject the module.
   if (fs_.memref_identity_mixed_types.count(ident) != 0) {

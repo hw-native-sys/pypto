@@ -47,6 +47,10 @@ OVERLAPPING_A = pl.MemRef(slots=2)
 OVERLAPPING_B = pl.MemRef(slots=2)
 INTERLEAVED_A = pl.MemRef(slots=2)
 INTERLEAVED_B = pl.MemRef(slots=2)
+TOUCHING_A = pl.MemRef(slots=2)
+TOUCHING_B = pl.MemRef(slots=2)
+TOUCHING_C = pl.MemRef(slots=2)
+MIXED_VALID_VIEWS = pl.MemRef(slots=2)
 
 
 @pl.program
@@ -293,6 +297,65 @@ class InterleavedCompatibleRegions:
 
 
 @pl.program
+class TouchingNonInplaceRegions:
+    """A non-in-place-safe result cannot inherit its input's final-use region."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[32, 32], pl.FP32],
+        out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+    ) -> pl.Tensor[[32, 32], pl.FP32]:
+        a0: pl.Tile[[32, 32], pl.FP32, TOUCHING_A[0], pl.Mem.Vec] = pl.load(a, [0, 0], [32, 32])
+        a1: pl.Tile[[32, 32], pl.FP32, TOUCHING_A[1], pl.Mem.Vec] = pl.exp(a0)
+        b0: pl.Tile[[32, 32], pl.FP32, TOUCHING_B[0], pl.Mem.Vec] = pl.recip(a1)
+        b1: pl.Tile[[32, 32], pl.FP32, TOUCHING_B[1], pl.Mem.Vec] = pl.exp(b0)
+        return pl.store(b1, [0, 0], out)
+
+
+@pl.program
+class ReusedRegionThenNonInplace:
+    """The no-alias check must include occupants after the region's first owner."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[32, 32], pl.FP32],
+        out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+    ) -> pl.Tensor[[32, 32], pl.FP32]:
+        a0: pl.Tile[[32, 32], pl.FP32, TOUCHING_A[0], pl.Mem.Vec] = pl.load(a, [0, 0], [32, 32])
+        a1: pl.Tile[[32, 32], pl.FP32, TOUCHING_A[1], pl.Mem.Vec] = pl.exp(a0)
+        out = pl.store(a1, [0, 0], out)
+        b0: pl.Tile[[32, 32], pl.FP32, TOUCHING_B[0], pl.Mem.Vec] = pl.load(a, [0, 0], [32, 32])
+        b1: pl.Tile[[32, 32], pl.FP32, TOUCHING_B[1], pl.Mem.Vec] = pl.exp(b0)
+        c0: pl.Tile[[32, 32], pl.FP32, TOUCHING_C[0], pl.Mem.Vec] = pl.recip(b1)
+        c1: pl.Tile[[32, 32], pl.FP32, TOUCHING_C[1], pl.Mem.Vec] = pl.exp(c0)
+        return pl.store(c1, [0, 0], out)
+
+
+@pl.program
+class MixedGeometryValidViews:
+    """The same slot may need distinct valid views of one physical geometry."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        cover: pl.Tile[[64, 64], pl.FP32, MIXED_VALID_VIEWS[1], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+        out = pl.store(cover, [0, 0], out)
+        small_half: pl.Tile[
+            [32, 32], pl.FP32, MIXED_VALID_VIEWS[0], pl.Mem.Vec, pl.TileView(valid_shape=[16, 32])
+        ] = pl.load(a, [0, 0], [32, 32], valid_shape=[16, 32])
+        out = pl.store(small_half, [0, 0], out)
+        small_full: pl.Tile[[32, 32], pl.FP32, MIXED_VALID_VIEWS[0], pl.Mem.Vec] = pl.load(
+            a, [0, 0], [32, 32]
+        )
+        return pl.store(small_full, [0, 0], out)
+
+
+@pl.program
 class RuntimeValidShapeSlots:
     """Slots whose valid extent is only known at runtime.
 
@@ -484,6 +547,36 @@ class TestPtoasPlannerEmitsMultiBuffer:
             for line in _lines(mlir, "pto.multi_tile_get")
         }
         assert len(regions) == 2, mlir
+
+    def test_touching_non_inplace_allocations_keep_distinct_regions(self):
+        """A final input read and output definition at one op forbid aliasing."""
+        mlir = _codegen(TouchingNonInplaceRegions, passes.MemoryPlanner.PTOAS)
+        assert len(_lines(mlir, "pto.alloc_multi_tile")) == 2, mlir
+
+    def test_non_inplace_check_includes_region_reuse_occupants(self):
+        """A can share with B, but B's final read cannot alias C's definition."""
+        mlir = _codegen(ReusedRegionThenNonInplace, passes.MemoryPlanner.PTOAS)
+        assert len(_lines(mlir, "pto.alloc_multi_tile")) == 2, mlir
+        gets = _lines(mlir, "pto.multi_tile_get")
+
+        def region_of(name):
+            line = next(line for line in gets if line.startswith(f"%{name}__"))
+            return line.split("pto.multi_tile_get ", 1)[1].split("[", 1)[0]
+
+        a_region = region_of("a0")
+        b_region = region_of("b0")
+        c_region = region_of("c0")
+        assert a_region == b_region != c_region, mlir
+
+    def test_mixed_geometry_slot_keeps_distinct_valid_views(self):
+        """A reused slot must not inherit an earlier subview's valid extent."""
+        mlir = _codegen(MixedGeometryValidViews, passes.MemoryPlanner.PTOAS)
+        assert len(_lines(mlir, "pto.alloc_multi_tile")) == 1, mlir
+        subviews = _lines(mlir, "pto.subview")
+        assert len(subviews) == 2, mlir
+        assert all("sizes [32, 32]" in view for view in subviews), mlir
+        assert any("v_row=16, v_col=32" in view for view in subviews), mlir
+        assert any("v_row=32, v_col=32" in view for view in subviews), mlir
 
     def test_interleaved_slot_lifetimes_keep_distinct_regions(self):
         """The complete lifetime of every variable sharing a base is considered."""
