@@ -34,6 +34,26 @@ PyPTO 的构成：IR、pass 流水线、代码生成，以及围绕它们的基�
 | [PTOAS 算子状态矩阵](ptoas-op-status.md) | 编译器当前会发射哪些 PTOAS 公开与兼容算子 |
 | [FP4](fp4.md) | 逻辑 vs packed FP4、cast 策略，以及手写 `FP4E2M1X2` 指引 |
 
+## 自动 PR 审查
+
+`PR Agent` GitHub Actions 工作流会在非草稿 PR 创建、重新打开、更新或标记为
+ready 时进行审查，也支持来自 fork 的 PR。仓库所有者、组织成员和协作者可以在
+打开的 PR 下发布内容完全为 `/review` 的评论来触发审查。审查结果会更新到同一条 PR 评论中。
+
+管理员在 **Settings → Secrets and variables → Actions** 中启用工作流：
+
+1. 将 DeepSeek API Key 保存为仓库密钥（Secret）`OPENAI_KEY`。
+2. 按需设置仓库变量 `PR_AGENT_API_BASE`（默认 `https://api.deepseek.com`）和
+   `PR_AGENT_MODEL`（默认 `deepseek-flash`）。模型 ID 不需要 `openai/` 前缀；
+   工作流会添加此前缀，以使用 OpenAI 兼容接口。审查的上下文预算为 32,000 token。
+3. 工作流合并到默认分支后，将仓库变量 `PR_AGENT_ENABLED` 设置为 `true`。
+   删除该变量或将其设为 `false` 可关闭审查。
+
+PR 内容会发送到所配置的模型服务，并消耗 API 额度。工作流通过 GitHub API 读取
+PR 数据，不检出 PR 代码。它使用工作流中定义的配置，仅启用 review，不会自动
+改写 PR 描述、应用代码修改或批准合并。机器人触发的事件会被跳过；维护者可以在
+机器人创建的 PR 下通过 `/review` 请求审查。
+
 ## 另请参阅
 
 - [PTO ISA 参考](../reference/index.md) —— 后端所面向的硬件模型。
