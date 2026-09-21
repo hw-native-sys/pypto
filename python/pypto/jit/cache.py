@@ -20,7 +20,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 from pypto.pypto_core import DataType
-from pypto.pypto_core.passes import MemoryPlanner, RuntimeKind, runtime_kind_to_name
+from pypto.pypto_core.passes import (
+    DEFAULT_ENABLE_BUFFER_IR,
+    MemoryPlanner,
+    RuntimeKind,
+    runtime_kind_to_name,
+)
 
 if TYPE_CHECKING:
     from pypto.ir.pass_manager import OptimizationStrategy
@@ -137,7 +142,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
     tensor_layouts: dict[str, "TensorLayout | None"] | None = None,
     dep_layouts: tuple[tuple[str, str, str], ...] = (),
     runtime: RuntimeKind = RuntimeKind.TENSORMAP_AND_RINGBUFFER,
-    enable_buffer_ir: bool = False,
+    enable_buffer_ir: bool = DEFAULT_ENABLE_BUFFER_IR,
 ) -> CacheKey:
     """Build a cache key for a JIT call site.
 
@@ -201,7 +206,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
             artifact's ``kernel_config.py`` and decides which worker can bind
             the program; without it a ``host_build_graph`` call would silently
             reuse a ``tensormap_and_ringbuffer`` artifact.
-        enable_buffer_ir: Staged Buffer IR development opt-in from the active
+        enable_buffer_ir: Buffer IR representation selection from the active
             ``PassContext``. It changes storage legalization and separates
             artifacts from the default pipeline under every memory planner.
 

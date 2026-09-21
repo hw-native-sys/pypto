@@ -11,9 +11,11 @@
 from collections.abc import Callable
 from enum import Enum
 from types import TracebackType
-from typing import overload
+from typing import Final, overload
 
 from pypto.pypto_core.ir import Function, Program, Span, Stmt
+
+DEFAULT_ENABLE_BUFFER_IR: Final[bool] = True
 
 class IRProperty(Enum):
     """Verifiable IR properties."""
@@ -297,7 +299,7 @@ class PassContext:
         memory_planner: MemoryPlanner = MemoryPlanner.PYPTO,
         enable_pypto_l0c_double_buffer: bool = False,
         runtime: RuntimeKind = RuntimeKind.TENSORMAP_AND_RINGBUFFER,
-        enable_buffer_ir: bool = False,
+        enable_buffer_ir: bool = DEFAULT_ENABLE_BUFFER_IR,
     ) -> None:
         """Create a PassContext with instruments and pass configuration (incl. memory planner).
 
@@ -311,7 +313,7 @@ class PassContext:
         ``kernel_config.py``. Passes that legalize runtime-specific IR read it
         from the context.
 
-        ``enable_buffer_ir`` enables the staged Buffer IR development pipeline.
+        ``enable_buffer_ir`` selects the Buffer IR pipeline (enabled by default).
         It defaults to false while the migration is incomplete.
         """
         ...
@@ -1064,6 +1066,7 @@ __all__ = [
     "DiagnosticCheckRegistry",
     "DiagnosticInstrument",
     "get_verified_properties",
+    "DEFAULT_ENABLE_BUFFER_IR",
     "get_default_verification_level",
     "get_default_diagnostic_phase",
     "get_default_verify_properties",

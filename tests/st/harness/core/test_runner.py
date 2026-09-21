@@ -192,9 +192,9 @@ def _cache_key(
 
 
 def _case_uses_buffer_ir(test_case: PTOTestCase) -> bool:
-    """Keep older duck-typed cases on their existing compile path."""
+    """Resolve case selection, including older cases without the new option."""
     getter = getattr(test_case, "get_enable_buffer_ir", None)
-    return getter is not None and getter() is True
+    return getter() is True if getter is not None else passes.DEFAULT_ENABLE_BUFFER_IR
 
 
 def _compile_case_program(test_case: PTOTestCase, program: ir.Program, **kwargs: Any) -> Any:
@@ -203,8 +203,7 @@ def _compile_case_program(test_case: PTOTestCase, program: ir.Program, **kwargs:
     A parent-thread PassContext cannot configure the precompile pool. Capture
     the actual final pass output so numerical success cannot hide a legacy run.
     """
-    if not _case_uses_buffer_ir(test_case):
-        return ir.compile(program, **kwargs)
+    buffer_ir = _case_uses_buffer_ir(test_case)
 
     final_program: ir.Program | None = None
 
@@ -214,7 +213,8 @@ def _compile_case_program(test_case: PTOTestCase, program: ir.Program, **kwargs:
 
     outer = passes.PassContext.current()
     instruments = list(outer.get_instruments()) if outer is not None else []
-    instruments.append(passes.CallbackInstrument(after_pass=capture_final, name="BufferAcceptance"))
+    if buffer_ir:
+        instruments.append(passes.CallbackInstrument(after_pass=capture_final, name="BufferAcceptance"))
     planner = kwargs.pop("memory_planner", None)
     if planner is None:
         planner = outer.get_memory_planner() if outer is not None else MemoryPlanner.PYPTO
@@ -227,8 +227,11 @@ def _compile_case_program(test_case: PTOTestCase, program: ir.Program, **kwargs:
             "enable_pypto_l0c_double_buffer": outer.get_enable_pypto_l0c_double_buffer(),
             "runtime": outer.get_runtime(),
         }
-    with passes.PassContext(instruments, memory_planner=planner, enable_buffer_ir=True, **inherited):
+    with passes.PassContext(instruments, memory_planner=planner, enable_buffer_ir=buffer_ir, **inherited):
         compiled = ir.compile(program, **kwargs)
+
+    if not buffer_ir:
+        return compiled
 
     if final_program is None:
         raise ValueError(f"Buffer case {test_case.get_name()} produced no final pass output")

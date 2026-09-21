@@ -10,6 +10,7 @@
 """The public Tile pipeline ends in explicit storage, before native emission."""
 
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 
 import pypto.language as pl
 import pytest
@@ -136,7 +137,7 @@ def test_lowered_public_program_compiles_natively_without_codegen_storage_recove
 
 
 @pytest.mark.parametrize("planner", _PLANNERS)
-def test_default_pipeline_stays_functional_until_the_coordinated_switch(planner):
+def test_explicit_opt_out_retains_functional_pipeline_for_comparison(planner):
     result, names = _lower(planner, enabled=False)
     assert "LowerTileToBuffer" not in names
     assert "VerifyTileStorage" not in names
@@ -145,8 +146,31 @@ def test_default_pipeline_stays_functional_until_the_coordinated_switch(planner)
 
 
 @pytest.mark.parametrize("planner", _PLANNERS)
-def test_enabled_pipeline_roundtrip_preserves_buffer_representation(planner):
-    with passes.PassContext([make_roundtrip_instrument()], memory_planner=planner, enable_buffer_ir=True):
+def test_default_pipeline_lowers_device_functions_without_opt_in(planner):
+    with passes.PassContext([], memory_planner=planner):
+        manager = PassManager.get_strategy(OptimizationStrategy.Default)
+        result = manager.run_passes(StraightLine)
+    assert manager.pass_names[-1] == "LowerTileToBuffer"
+    kernel = result.get_function("kernel")
+    assert kernel is not None and kernel.ir_stage == ir.FunctionIRStage.Buffer
+
+
+def test_context_free_pipeline_uses_buffer_default():
+    def compile_in_worker():
+        assert passes.PassContext.current() is None
+        manager = PassManager.get_strategy(OptimizationStrategy.Default)
+        assert manager.pass_names[-1] == "LowerTileToBuffer"
+        result = manager.run_passes(StraightLine)
+        kernel = result.get_function("kernel")
+        assert kernel is not None and kernel.ir_stage == ir.FunctionIRStage.Buffer
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(compile_in_worker).result()
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+def test_default_pipeline_roundtrip_preserves_buffer_representation(planner):
+    with passes.PassContext([make_roundtrip_instrument()], memory_planner=planner):
         result = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(StraightLine)
     kernel = result.get_function("kernel")
     assert kernel is not None and kernel.ir_stage == ir.FunctionIRStage.Buffer
@@ -551,7 +575,7 @@ class TypedTransfers:
             planned.append(candidate)
 
     instrument = passes.CallbackInstrument(before_pass=before, name="CaptureTypedStorage")
-    with passes.PassContext([instrument], memory_planner=planner, enable_buffer_ir=True):
+    with passes.PassContext([instrument], memory_planner=planner):
         lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
     assert len(planned) == 1
     dtype = getattr(DataType, dtype_name)

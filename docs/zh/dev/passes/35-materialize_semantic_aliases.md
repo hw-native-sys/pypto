@@ -68,7 +68,7 @@ program = passes.materialize_semantic_aliases()(program)
 ### 分阶段启用的 Buffer IR 流水线
 
 `PassContext(enable_buffer_ir=True)` 启用 Buffer IR 迁移中的存储合法化部分。
-这个临时开发选项默认为 false；单独启用它不表示所有 Tile 算子和控制流形式都已
+当前开发集成默认将该选项设为 true；单独启用它不表示所有 Tile 算子和控制流形式都已
 支持降低到 Buffer IR。C++ 访问器为 `GetEnableBufferIR()`，Python 访问器为
 `get_enable_buffer_ir()`。编译、IR dump 和 profiling 保留当前选项，所有内存
 规划器的 JIT 缓存键都会区分该选项的值。

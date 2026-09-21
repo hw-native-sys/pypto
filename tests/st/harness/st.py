@@ -41,7 +41,7 @@ import pytest
 from pypto.ir.pass_manager import OptimizationStrategy
 from pypto.jit import JITFunction
 from pypto.pypto_core import ir as _ir
-from pypto.pypto_core.passes import MemoryPlanner
+from pypto.pypto_core.passes import DEFAULT_ENABLE_BUFFER_IR, MemoryPlanner
 from pypto.runtime.runner import RunResult
 from pypto.runtime.tensor_spec import ScalarSpec
 
@@ -65,7 +65,7 @@ def case(  # noqa: PLR0913 — every knob mirrors one Case field; grouping them 
     rtol: float = 1e-5,
     atol: float = 1e-5,
     compare: Any | None = None,
-    enable_buffer_ir: bool = False,
+    enable_buffer_ir: bool = DEFAULT_ENABLE_BUFFER_IR,
 ) -> Case:
     """Build one :class:`~harness.core.case.Case`.
 

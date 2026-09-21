@@ -56,7 +56,9 @@ TENSOR_OPTIMIZATION_PASSES = [
     "InitMemRef",
     "MaterializeSemanticAliases",
     "MemoryReuse",
+    "VerifyTileStorage",
     "AllocateMemoryAddr",
+    "VerifyTileStorageAllocated",
     "FoldNoOpReshape",
     "FuseCreateAssembleToSlice",
     "LowerL2TensorCollectives",
@@ -73,6 +75,7 @@ TENSOR_OPTIMIZATION_PASSES = [
     "ClassifyIterArgCarry",
     "InsertCommFence",
     "MaterializeValidShapeSymbols",
+    "LowerTileToBuffer",
 ]
 
 

@@ -197,9 +197,18 @@ def test_pypto_reuse_preserves_legalized_branch_transfers():
     }
 
 
-def test_ptoas_legacy_branch_path_remains_the_default():
+def test_ptoas_default_legalizes_branch_destinations():
     before = _program(f"chosen: {_TILE} = pl.yield_(a)", f"chosen: {_TILE} = pl.yield_(b)")
     with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+        after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(before))
+    storage = _Storage(after)
+    _assert_canonical_arms(storage)
+    assert len(storage.calls(_MOVE)) == 2
+
+
+def test_ptoas_legacy_branch_path_requires_explicit_opt_out():
+    before = _program(f"chosen: {_TILE} = pl.yield_(a)", f"chosen: {_TILE} = pl.yield_(b)")
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=False):
         after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(before))
     storage = _Storage(after)
     assert not storage.calls(_MOVE)

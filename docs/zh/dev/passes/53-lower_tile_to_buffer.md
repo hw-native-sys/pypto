@@ -11,7 +11,7 @@ PTO codegen 直接接收分配句柄和目标操作数。
 from pypto import passes
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
-with passes.PassContext([], enable_buffer_ir=True):
+with passes.PassContext([]):
     manager = PassManager(OptimizationStrategy.Default)
     lowered = manager.run_passes(program)
 ```
@@ -242,7 +242,10 @@ GM load/store 保留匹配的元素类型，不插入转换。`add`/`mul` 支持
 BF16 传输支持不代表算术支持。
 
 辅助函数调用、其他布局、多槽位和其他操作转换由后续迁移切片补齐。
-暂不支持的形式会显式报错。在完整转换与运行时验收矩阵通过前，迁移选项默认关闭。
+暂不支持的形式会显式报错。当前开发集成默认开启 Buffer IR，通过现有 CI 矩阵暴露缺失能力；
+修复这些失败前不应合入。`passes.DEFAULT_ENABLE_BUFFER_IR` 将 C++ 默认值同步给 Python
+编译入口、pass manager、JIT 缓存键和系统测试 worker。显式设置
+`PassContext([], enable_buffer_ir=False)` 仍可用于旧路径对比，不存在自动回退。
 
 二进制序列化保留显式表示和函数阶段。当前 Python 诊断打印器不支持 Buffer DSL 解析往返。
 
@@ -261,7 +264,7 @@ valid extent，包括带地址规划器下运行时窗口部分重叠时的失�
 两个目标上原生编译生成的 PTO。
 
 数值系统测试应在公开 `@pl.jit` 入口对应的 case 上声明
-`st.case(..., enable_buffer_ir=True, memory_planner=...)`。
+`st.case(..., memory_planner=...)`。
 测试框架 (Harness) 会在内联及预编译工作线程内部应用该选项；仅在测试线程外层设置
 `PassContext` 不会配置工作线程。启用的 case 使用独立缓存键。框架检查编译产生的最终
 设备函数阶段，并将转换后程序保存为原生构件旁的 `buffer_ir.msgpack`。

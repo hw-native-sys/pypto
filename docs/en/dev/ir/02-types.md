@@ -147,7 +147,7 @@ Address emission depends only on the allocation operand; the legacy
 `emit_tile_addr` flag cannot remove or invent a buffer address. Dynamic
 operands remain in their lexical scope. No logical `TileType` or `MemRef` is
 reconstructed, and no implicit tile allocation pass runs on this path. The
-pipeline with `enable_buffer_ir=True` converts Tile IR before emission through
+default pipeline converts Tile IR before emission through
 [LowerTileToBuffer](../passes/53-lower_tile_to_buffer.md).
 
 Static storage views use ordinary SSA alias edges in the same Buffer stage:

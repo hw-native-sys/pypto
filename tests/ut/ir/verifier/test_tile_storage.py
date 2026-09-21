@@ -212,7 +212,7 @@ def test_named_storage_check_precedes_address_placement_for_every_planner(planne
         assert names.index("VerifyTileStorage") == placement - 1
         assert names.index("VerifyTileStorageAllocated") == placement + 1
     else:
-        assert "VerifyTileStorageAllocated" not in names
+        assert ("VerifyTileStorageAllocated" in names) == (planner != passes.MemoryPlanner.PTOAS)
 
 
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
@@ -235,15 +235,15 @@ def test_pipeline_allocated_check_rejects_unsafe_placement_without_automatic_ver
 
 
 @pytest.mark.parametrize("planner", PLANNERS)
-def test_default_pipeline_keeps_storage_verification_opt_in(planner):
+def test_default_pipeline_enables_storage_verification(planner):
     with passes.PassContext([], memory_planner=planner):
         names = PassManager(OptimizationStrategy.Default).get_pass_names()
-    assert "VerifyTileStorage" not in names
-    assert "VerifyTileStorageAllocated" not in names
+    assert "VerifyTileStorage" in names
+    assert ("VerifyTileStorageAllocated" in names) == (planner != passes.MemoryPlanner.PTOAS)
 
 
 def test_pipeline_rejects_changing_buffer_mode_after_construction():
-    with passes.PassContext([], enable_buffer_ir=True):
+    with passes.PassContext([], enable_buffer_ir=False):
         manager = PassManager(OptimizationStrategy.Default)
     with pytest.raises(RuntimeError, match="enable_buffer_ir changed"):
         manager.run_passes(_program(ir.ReturnStmt(SPAN)))

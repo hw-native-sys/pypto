@@ -12,7 +12,7 @@ During migration, construct and run the default pipeline in the same context:
 from pypto import passes
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
-with passes.PassContext([], enable_buffer_ir=True):
+with passes.PassContext([]):
     manager = PassManager(OptimizationStrategy.Default)
     lowered = manager.run_passes(program)
 ```
@@ -289,8 +289,12 @@ Buffer calls are constructed; fill shape/dtype select the destination descriptor
 
 Helper calls, alternate layouts, slots, and
 other operation recipes are added in subsequent migration slices. Unsupported
-forms fail explicitly. The migration option defaults to false until the
-complete recipe and runtime acceptance matrix is ready.
+forms fail explicitly. This development integration enables Buffer IR by default
+to expose missing support in the existing CI matrix. It is not ready to merge
+until those failures are fixed. `passes.DEFAULT_ENABLE_BUFFER_IR` shares the C++
+default with Python compilation, pass-manager construction, JIT cache keys and
+system-test workers. `PassContext([], enable_buffer_ir=False)` remains available
+for explicit legacy comparisons; there is no automatic fallback.
 
 Binary serialization preserves the explicit representation and function stage.
 The current Python diagnostic printer is not a Buffer DSL parser round trip.
@@ -314,8 +318,7 @@ auto-tiled cube kernels for FP16, BF16, FP32 and INT8 operands, the three
 `init_cond` forms and a transposed operand for all planners, then compiles the
 PTO natively on both targets.
 
-For numerical system tests, declare `st.case(..., enable_buffer_ir=True,
-memory_planner=...)` on the public `@pl.jit` entry. The harness applies the option
+For numerical system tests, declare `st.case(..., memory_planner=...)` on the public `@pl.jit` entry. The harness applies the option
 inside both inline and precompile-worker compilations; an outer test-thread
 `PassContext` alone does not configure worker threads. Enabled cases have distinct
 cache keys. The harness checks the actual final device function stages and saves
