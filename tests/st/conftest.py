@@ -174,12 +174,15 @@ def pytest_addoption(parser):
     parser.addoption(
         "--memory-planner",
         action="store",
-        default="default",
+        default="ptoas",
         choices=["default", "pypto", "dsa-rp", "ptoas"],
         help=(
             "Session-wide memory planner for test cases that do not select one explicitly: "
             "default (defer to PyPTO), pypto, dsa-rp, or ptoas. An explicit planner on a "
-            "PTOTestCase takes precedence (default: default)."
+            "PTOTestCase takes precedence. The suite default is ptoas, so the system tests "
+            "exercise ptoas PlanMemory rather than PyPTO's MemoryReuse + AllocateMemoryAddr; "
+            "pass --memory-planner=default to fall back to whatever ir.compile() picks "
+            "(default: ptoas)."
         ),
     )
     parser.addoption(
