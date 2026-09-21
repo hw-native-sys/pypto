@@ -769,6 +769,9 @@ ExprPtr CanonicalSimplifier::Impl::VisitExpr_(const BitNotPtr& op) {
 
 ExprPtr CanonicalSimplifier::Impl::VisitExpr_(const CastPtr& op) {
   ExprPtr a = VisitExpr(op->operand_);
+  // Fold before the identity check: ``cast(<literal>, dtype)`` folds even when
+  // the operand itself did not simplify.
+  if (auto folded = TryConstFoldCast(a, GetScalarDtype(op))) return folded;
   if (a.get() == op->operand_.get()) return op;
   return MakeCast(a, GetScalarDtype(op));
 }

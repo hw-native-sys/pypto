@@ -495,5 +495,59 @@ class TestOverflowAndEdgeCases:
         assert result.value == 3**20
 
 
+class TestCast:
+    """``cast(<integer constant>, dtype)`` folds to a constant of that dtype.
+
+    Keeps an annotated scalar whose RHS folds to a constant from carrying the
+    parser's dtype cast into codegen (``cast(0, INT64)`` vs ``const(0, INT64)``
+    — see #2779).
+    """
+
+    def test_index_to_int64_folds(self):
+        result = fold_const(ir.Cast(ir.ConstInt(7, DataType.INDEX, S), DataType.INT64, S))
+        assert isinstance(result, ir.ConstInt)
+        assert result.value == 7
+        assert result.dtype == DataType.INT64
+
+    def test_widening_and_narrowing_in_range_fold(self):
+        for value, dtype in ((-128, DataType.INT8), (127, DataType.INT8), (255, DataType.UINT8)):
+            result = fold_const(ir.Cast(ci(value), dtype, S))
+            assert isinstance(result, ir.ConstInt), (value, dtype)
+            assert result.value == value
+            assert result.dtype == dtype
+
+    def test_out_of_range_narrowing_keeps_the_cast(self):
+        """Truncation is the target's runtime behaviour — do not bake it into the IR."""
+        for value, dtype in ((128, DataType.INT8), (-1, DataType.UINT8), (70000, DataType.INT16)):
+            assert fold_const(ir.Cast(ci(value), dtype, S)) is None, (value, dtype)
+
+    def test_operand_out_of_range_for_its_own_dtype_keeps_the_cast(self):
+        """``ConstInt`` does not validate its value against its dtype, and an
+        annotated literal can mint an out-of-range one (``small: pl.Scalar[
+        pl.INT8] = 255``). Folding by copying the value would change the program:
+        codegen lowers that constant as ``arith.constant 255 : i8`` followed by
+        ``arith.extsi ... : i8 to i32``, and sign-extending ``0xff`` yields -1,
+        not 255.
+        """
+        assert fold_const(ir.Cast(ir.ConstInt(255, DataType.INT8, S), DataType.INT32, S)) is None
+        assert fold_const(ir.Cast(ir.ConstInt(-1, DataType.UINT8, S), DataType.INT32, S)) is None
+        assert fold_const(ir.Cast(ir.ConstInt(70000, DataType.INT16, S), DataType.INT64, S)) is None
+
+    def test_in_range_operand_widens(self):
+        """The same widening folds once the source value is representable."""
+        result = fold_const(ir.Cast(ir.ConstInt(-1, DataType.INT8, S), DataType.INT32, S))
+        assert isinstance(result, ir.ConstInt)
+        assert result.value == -1
+        assert result.dtype == DataType.INT32
+
+    def test_float_destination_is_left_alone(self):
+        """Rounding / saturation semantics this fold does not model."""
+        assert fold_const(ir.Cast(ci(3), DataType.FP32, S)) is None
+
+    def test_non_constant_operand_is_left_alone(self):
+        var = ir.Var("i", ir.ScalarType(DataType.INDEX), S)
+        assert fold_const(ir.Cast(var, DataType.INT32, S)) is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -422,6 +423,60 @@ inline ExprPtr TryConstFoldUnary(ObjectKind kind, const ExprPtr& operand) {
 }
 
 // ---------------------------------------------------------------------------
+// TryConstFoldCast — fold a cast of a constant into a typed constant
+// ---------------------------------------------------------------------------
+
+namespace detail {
+
+/// Whether ``value`` is exactly representable in ``dtype``.
+inline bool ConstIntFitsDtype(int64_t value, const DataType& dtype) {
+  if (dtype == DataType::INDEX) return true;  // index is the 64-bit signed domain
+  const size_t bits = dtype.GetBit();
+  if (bits == 0 || bits > 64) return false;
+  if (dtype.IsUnsignedInt()) {
+    if (value < 0) return false;
+    if (bits >= 64) return true;
+    return static_cast<uint64_t>(value) <= ((1ULL << bits) - 1ULL);
+  }
+  if (bits >= 64) return true;
+  const int64_t limit = static_cast<int64_t>(1ULL << (bits - 1));
+  return value >= -limit && value <= limit - 1;
+}
+
+}  // namespace detail
+
+/// Try to fold ``cast(<integer constant>, dtype)`` into a constant of ``dtype``.
+///
+/// Only an integer constant going to an integer (or INDEX) destination folds,
+/// and only when the value is exactly representable **on both sides**:
+///
+/// - in ``dtype``, so a narrowing cast whose value does not fit keeps its Cast
+///   node — the truncation is the target's runtime behaviour, and baking a
+///   wrapped value into the IR would hide it;
+/// - in the operand's OWN dtype, because ``ConstInt`` does not validate its
+///   value against its dtype and an annotated literal can mint an out-of-range
+///   one (``small: pl.Scalar[pl.INT8] = 255``). Copying ``value_`` across would
+///   then change the program: codegen lowers such a constant as
+///   ``arith.constant 255 : i8`` + ``arith.extsi ... : i8 to i32``, and
+///   sign-extending the ``0xff`` bit pattern yields **-1**, not 255.
+///
+/// Float conversions are left alone: they carry rounding and saturation
+/// semantics this fold does not model.
+///
+/// Without this fold, an annotated scalar whose RHS folds to a constant
+/// (``y: pl.Scalar[pl.INT64] = i // 8`` with ``i`` in ``[0, 8)``) keeps the
+/// parser's dtype cast around a literal — ``cast(0, INT64)`` instead of
+/// ``const(0, INT64)`` — all the way into codegen.
+inline ExprPtr TryConstFoldCast(const ExprPtr& operand, const DataType& dtype) {
+  auto pi = As<ConstInt>(operand);
+  if (!pi) return nullptr;
+  if (!dtype.IsInt() && dtype != DataType::INDEX) return nullptr;
+  if (!detail::ConstIntFitsDtype(pi->value_, pi->dtype())) return nullptr;
+  if (!detail::ConstIntFitsDtype(pi->value_, dtype)) return nullptr;
+  return MakeConstInt(pi->value_, dtype);
+}
+
+// ---------------------------------------------------------------------------
 // TryConstFold — unified entry point: inspect expression, dispatch to above
 // ---------------------------------------------------------------------------
 
@@ -430,6 +485,11 @@ inline ExprPtr TryConstFoldUnary(ObjectKind kind, const ExprPtr& operand) {
 inline ExprPtr TryConstFold(const ExprPtr& expr) {
   if (auto bin = As<BinaryExpr>(expr)) {
     return TryConstFoldBinary(expr->GetKind(), bin->left_, bin->right_);
+  }
+  // Cast before the generic unary arm: folding it needs the destination dtype,
+  // which only the Cast node carries.
+  if (auto cast = As<Cast>(expr)) {
+    return TryConstFoldCast(cast->operand_, GetScalarDtype(cast));
   }
   if (auto un = As<UnaryExpr>(expr)) {
     return TryConstFoldUnary(expr->GetKind(), un->operand_);
