@@ -935,6 +935,32 @@ def test_rejects_a_reshape_that_is_not_a_whole_tensor_flatten():
         _run(program)
 
 
+def test_rejects_a_remainder_of_an_unproven_dividend():
+    """A remainder is only non-negative when its dividend is.
+
+    ``FloorMod`` lowers to ``arith.remsi``, which truncates toward zero, so
+    ``(blk - 1) % 2`` is -1 on the first block. A difference proves no sign, so
+    the whole offset stays unproven rather than being trusted for its divisor.
+    """
+
+    @pl.jit
+    def _unproven_dividend(
+        x: pl.Tensor[[64, 1024], pl.INT8],
+        w: pl.Tensor[[128, 1024], pl.INT8, pl.NZ],
+        out: pl.Out[pl.Tensor[[64, 128], pl.INT32]],
+    ):
+        for blk in pl.spmd(4, name_hint="unproven_mod"):
+            k0 = ((blk - 1) % 2) * 512
+            acc = pl.matmul(x[0:64, k0 : k0 + 512], w[0:128, k0 : k0 + 512], b_trans=True, out_dtype=pl.INT32)
+            out[0:64, 0:128] = pl.reshape(acc, [64, 128])
+        return out
+
+    _, _, tm, sd, cx, dyn = _unproven_dividend._bind_args_from_signature({})
+    program = _unproven_dividend._compile_to_program(tm, sd, cx, dyn, pl)
+    with pytest.raises(ValueError, match=r"offset on shape\[-1\] to be non-negative"):
+        _run(program)
+
+
 def test_rejects_a_loop_variable_whose_step_breaks_alignment():
     """A loop variable is only divisible when *both* its start and step are.
 

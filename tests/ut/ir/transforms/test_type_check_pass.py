@@ -535,7 +535,9 @@ def test_equal_buffer_descriptors_from_distinct_objects_are_compatible(kind, con
     assert _typecheck_diagnostics(_buffer_boundary(kind, types)) == []
 
 
-def _layout_call_program(*, device_dispatch: bool) -> ir.Program:
+def _layout_call_program(
+    *, device_dispatch: bool, callee_layout: ir.TensorLayout = ir.TensorLayout.NZ
+) -> ir.Program:
     """A caller passing an ND weight to a callee that declares it ``pl.NZ``.
 
     ``device=`` marks a dispatch into a device program: the caller only says
@@ -544,9 +546,9 @@ def _layout_call_program(*, device_dispatch: bool) -> ir.Program:
     """
     shape = [_idx(256), _idx(512)]
     nd_type = ir.TensorType(shape, DataType.INT8, None, ir.TensorView(layout=ir.TensorLayout.ND))
-    nz_type = ir.TensorType(shape, DataType.INT8, None, ir.TensorView(layout=ir.TensorLayout.NZ))
+    callee_type = ir.TensorType(shape, DataType.INT8, None, ir.TensorView(layout=callee_layout))
 
-    callee_param = ir.Var("w", nz_type, _SPAN)
+    callee_param = ir.Var("w", callee_type, _SPAN)
     callee = ir.Function("device_program", [callee_param], [], ir.ReturnStmt([], _SPAN), _SPAN)
 
     caller_param = ir.Var("w_host", nd_type, _SPAN)
@@ -574,6 +576,19 @@ def test_type_check_accepts_an_nd_buffer_dispatched_to_an_nz_parameter():
     """A ``device=`` dispatch hands over a buffer, not a layout claim."""
     diagnostics = _layout_diagnostics(_layout_call_program(device_dispatch=True))
     assert not any("Layout mismatch" in d.message for d in diagnostics)
+
+
+def test_type_check_rejects_an_nd_buffer_dispatched_to_an_mx_parameter():
+    """Only NZ has a logical-to-blocked restatement at the orchestration entry.
+
+    An MX parameter is blocked the same way, but nothing restates the incoming
+    ND tensor into that form, so the exemption would hand a kernel ordinary
+    bytes to read as packed MX data.
+    """
+    diagnostics = _layout_diagnostics(
+        _layout_call_program(device_dispatch=True, callee_layout=ir.TensorLayout.MX_A_ZZ)
+    )
+    assert any("Layout mismatch" in d.message for d in diagnostics)
 
 
 if __name__ == "__main__":

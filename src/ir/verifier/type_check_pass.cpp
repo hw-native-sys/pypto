@@ -239,7 +239,12 @@ void TypeChecker::CheckCallArgLayouts(const OpPtr& callee_op, const std::vector<
     // kernel makes of it. The reverse stays an error: an NZ argument bound to an
     // ND parameter means the callee reads fractals as row-major, which nothing
     // downstream would notice.
-    if (is_device_dispatch && *got == TensorLayout::ND) continue;
+    //
+    // NZ only: it is the one layout whose logical-to-blocked boundary the
+    // orchestration entry restates. An MX parameter is blocked the same way but
+    // has no such restatement, so an ND buffer bound to one would reach the
+    // kernel as ordinary bytes read as packed MX data.
+    if (is_device_dispatch && *want == TensorLayout::NZ && *got == TensorLayout::ND) continue;
     std::ostringstream msg;
     msg << "Layout mismatch at argument " << i << " of call to '" << callee->name_ << "': parameter '"
         << param->name_hint_ << "' is declared " << TensorLayoutToString(*want) << " but the argument is "

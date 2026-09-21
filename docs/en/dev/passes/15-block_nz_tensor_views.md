@@ -128,11 +128,14 @@ the enclosing function in one read-only sweep:
 | `AssignStmt` (`n0 = nb * 256`) | one factor of the product is a multiple | both factors are non-negative |
 | `ForStmt` (`for k0 in pl.pipeline(512, 4096, 512)`) | `start` and `step` are both multiples | `start` and `step` are both non-negative |
 | `tile.get_block_idx` / `tile.get_block_num` | — | a lane number is never negative |
-| `FloorMod` / `FloorDiv` by a positive constant (`(blk % 2) * 512`) | the other factor carries it | a remainder carries its divisor's sign; a quotient keeps the dividend's |
+| `FloorMod` / `FloorDiv` by a positive constant (`(blk % 2) * 512`) | the other factor carries it | both recurse: the dividend must be non-negative too |
 | `ConstInt` | the value is a multiple | the value is `>= 0` |
 
 Sums and products compose from those; a difference proves divisibility but never
-its sign, so it is refused. **Both** columns must hold — see [Why the sign is
+its sign, so it is refused. Division by a positive constant is proven from its
+dividend rather than from the operation's name: `FloorMod` lowers to
+`arith.remsi` and `FloorDiv` to `arith.divsi`, which truncate toward zero, so
+a negative dividend yields a negative remainder. **Both** columns must hold — see [Why the sign is
 proven too](#why-the-sign-is-proven-too). The grouped-matmul weight path that
 motivated the feature therefore compiles:
 
