@@ -82,7 +82,9 @@ recipe. Both Ascend910B and Ascend950 use these contracts.
 The public `tile.full` wrapper accepts both numeric literals and parsed scalar
 constants, so positional and keyword fill values agree. Integer placeholders
 use `ConstFloat` for a floating destination; explicitly typed constants keep
-their declared dtype until lowering. Runtime fill values remain invalid.
+their declared dtype until lowering. The Python printer emits `tile.full` fill
+constants as `pl.const(value, dtype)` so print-to-parse roundtrips preserve the
+fill dtype independently of the tile dtype. Runtime fill values remain invalid.
 
 At the Buffer-call boundary, scalar operands must match the destination element
 dtype and have no memory effects. Before constructing that call, lowering converts

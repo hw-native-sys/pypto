@@ -11,7 +11,7 @@
 
 import pypto.language as pl
 import pytest
-from pypto import DataType, ir
+from pypto import DataType, ir, passes
 from pypto.ir.op import tile_ops
 
 _SPAN = ir.Span.unknown()
@@ -50,6 +50,41 @@ def test_full_preserves_an_explicitly_typed_constant():
     call = tile_ops.full([16, 32], DataType.FP32, scalar, _SPAN)
     assert isinstance(call.args[1], ir.ConstFloat)
     assert call.args[1].dtype == DataType.FP16 and call.args[1].value == 0.5
+
+
+@pytest.mark.parametrize("keyword", [False, True])
+@pytest.mark.parametrize(
+    ("tile_dtype", "fill_dtype", "value"),
+    [
+        ("FP32", "FP16", "0.5"),
+        ("FP32", "BF16", "-0.5"),
+        ("FP32", "INT32", "2"),
+        ("FP16", "FP32", "0.5"),
+        ("INT32", "FP32", "0.5"),
+        ("FP16", "FP16", "0.5"),
+        ("FP32", "FP32", "0.5"),
+        ("INT32", "INT32", "2"),
+    ],
+)
+def test_full_typed_fill_roundtrip(tile_dtype, fill_dtype, value, keyword):
+    """Printing preserves fill dtype independently of the destination dtype."""
+    fill = f"pl.const({value}, pl.{fill_dtype})"
+    arguments = f"dtype=pl.{tile_dtype}, value={fill}" if keyword else f"pl.{tile_dtype}, {fill}"
+    before = pl.parse_program(f"""
+@pl.program
+class Fill:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self) -> pl.Tile[[16, 32], pl.{tile_dtype}]:
+        result = pl.tile.full([16, 32], {arguments})
+        return result
+""")
+    printed = before.as_python()
+    after = pl.parse_program(printed)
+    ir.assert_structural_equal(before, after)
+    assert f"value={fill}" in printed
+
+    with passes.PassContext([ir.make_roundtrip_instrument()]):
+        passes.convert_to_ssa()(before)
 
 
 def test_full_rejects_runtime_scalar_values():

@@ -1264,16 +1264,23 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
       }
     }
     stream_ << ", value=";
-    // Print value as a bare numeric literal (dtype is already captured in dtype=...).
-    // Using VisitExpr would emit pl.const(v, pl.BF16) which the Python API cannot accept
-    // as the `value: int | float` parameter.
+    // tile.full preserves the fill's own dtype, which may differ from the tile dtype.
+    // Even FP32 needs explicit typing here: a bare keyword literal is retyped by full.
+    // tensor.full still requires a bare numeric value at its Python API boundary.
     const auto& val_expr = op->args_[1];
-    if (auto cf = As<ConstFloat>(val_expr)) {
+    const auto cf = As<ConstFloat>(val_expr);
+    const auto ci = As<ConstInt>(val_expr);
+    const bool typed_fill = IsOp(op, "tile.full") && (cf || ci);
+    if (typed_fill) stream_ << prefix_ << ".const(";
+    if (cf) {
       stream_ << FormatFloatLiteral(cf->value_);
-    } else if (auto ci = As<ConstInt>(val_expr)) {
+    } else if (ci) {
       stream_ << ci->value_;
     } else {
       VisitExpr(val_expr);
+    }
+    if (typed_fill) {
+      stream_ << ", " << prefix_ << "." << DataTypeToString(cf ? cf->dtype() : ci->dtype()) << ")";
     }
     print_serialized_attrs(/*need_comma=*/true);
     stream_ << ")";
