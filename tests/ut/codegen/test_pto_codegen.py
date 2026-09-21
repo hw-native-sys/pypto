@@ -3753,5 +3753,39 @@ def test_gm_slot_buffer_regions_do_not_overlap_across_pipes():
         assert "%c4096_index" in line, f"Pipe 1 must start past pipe 0's full two-ring footprint, got: {line}"
 
 
+def test_annotated_scalar_index_expression_stores_an_i32_value():
+    """An INT32-annotated scalar over an INDEX expression emits type-consistent MLIR.
+
+    Before #2779 was fixed the parser bound ``Var[INT32]`` to an INDEX-typed RHS,
+    and this emitter — dispatching on the Var's IR dtype — concluded no cast was
+    needed and fed the ``index`` SSA value straight into the ``i32`` operand of
+    ``pto.store_scalar``. PTOAS then rejected the module with ``use of value '%2'
+    expects different type than prior uses: 'i32' vs 'index'``, naming neither the
+    variable nor the user's line. Assert the def/use types agree instead.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def k(self, out: pl.Out[pl.Tensor[[1, 1], pl.INT32]]) -> pl.Tensor[[1, 1], pl.INT32]:
+            for i in pl.range(4):
+                v: pl.Scalar[pl.INT32] = pl.cast(i, pl.INT32) + 1
+                pl.write(out, [0, 0], v)
+            return out
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+    lines = _get_mlir_lines(_generate_default_mlir(Prog))
+
+    store = _single_line(lines, "pto.store_scalar")
+    operand = store.split()[1].rstrip(",")
+    defs = {line.split(" = ", 1)[0].strip(): line for line in lines if " = " in line}
+    assert operand in defs, f"stored value {operand} has no definition: {store}"
+    definition = defs[operand].split(" loc(")[0]
+    assert definition.endswith(": index to i32"), (
+        f"value stored into an i32 pointer must be defined as i32, got: {definition}"
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

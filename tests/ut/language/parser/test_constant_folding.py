@@ -213,6 +213,14 @@ class TestMixedExpressionFallback:
         by_name = {s.var.name_hint: s for s in assigns}
 
         shifted = by_name["shifted"].value
+        # ``shifted: pl.Scalar[pl.INT32] = idx + OFFSET`` binds an INT32 Var, while
+        # scalar arithmetic normalizes its operands to INDEX -- so the parser wraps
+        # the INDEX-typed Add in the cast the annotation asks for (#2779), keeping
+        # the assignment's two sides in agreement. Look through that result cast for
+        # the same reason the operand cast is looked through below: it is dtype
+        # bookkeeping, not the folding behaviour under test.
+        if isinstance(shifted, ir.Cast):
+            shifted = shifted.operand
         assert isinstance(shifted, ir.Add), f"dsl_var + closure_const folded to {type(shifted).__name__}"
         # ...and its operands are the DSL read on the left, the closure const on
         # the right. The parser may wrap the read in a dtype-promoting Cast --

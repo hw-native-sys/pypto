@@ -1861,6 +1861,30 @@ class ASTParser:
         # under a float annotation (float literals never carry INDEX).
         if isinstance(override_type, ir.ScalarType) and isinstance(value_expr, ir.ConstInt):
             value_expr = ir.ConstInt(value_expr.value, override_type.dtype, value_expr.span)
+        elif (
+            isinstance(override_type, ir.ScalarType)
+            and isinstance(value_expr.type, ir.ScalarType)
+            and value_expr.type.dtype == DataType.INDEX
+            and override_type.dtype != DataType.INDEX
+            # A Call is handled by the re-stamp below, which rebuilds it with the
+            # annotation's type. Wrapping it here instead would hide the Call
+            # inside an expression, where orchestration codegen cannot emit it.
+            and not isinstance(value_expr, ir.Call)
+        ):
+            # Same asymmetry, one step harder: a *non-constant* INDEX RHS cannot
+            # be re-stamped, because its dtype is a result of its operands
+            # (``pl.cast(i, pl.INT32) + 1`` re-normalizes back to INDEX through
+            # ``_normalize_scalar_operand``). Wrap it in the cast the annotation
+            # is asking for, so ``v: pl.Scalar[pl.INT32] = <INDEX expr>`` binds an
+            # INT32 Var to an INT32 value.
+            #
+            # Left asymmetric, this survives every pass and dies inside PTOAS:
+            # the scalar emitter dispatches on the Var's IR dtype, decides no
+            # cast is needed, and emits the ``index`` SSA value into an ``i32``
+            # operand -- MLIR that names neither the variable nor the user's
+            # line (``use of value '%2' expects different type than prior uses:
+            # 'i32' vs 'index'``). See #2779.
+            value_expr = ir.cast(value_expr, override_type.dtype, value_expr.span)
         # If annotation syntax determines the result type more precisely than the
         # raw call inference, rebuild the Call with that type so structural
         # equality sees the same IR after print→parse.

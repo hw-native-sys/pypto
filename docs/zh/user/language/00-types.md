@@ -119,6 +119,23 @@ FP16↔INT4 转换，没有配套的 packed load/store carrier ABI。cast 样例
 （`FP4E2M1X2`→BF16 / FP8）、单位约定与 `#2754` 类 stride 指引见
 [FP4](../../dev/fp4.md)。
 
+### 标量绑定的类型注解
+
+标量算术会把操作数统一归一到 `pl.INDEX`，所以即使输入不是 `INDEX`，结果也是：
+
+```python
+v = pl.cast(i, pl.INT32) + 1                        # pl.Scalar[pl.INDEX]
+```
+
+注解决定这个名字绑定时的 dtype，值会被转换过去与之匹配——赋值两侧始终一致：
+
+```python
+v: pl.Scalar[pl.INT32] = pl.cast(i, pl.INT32) + 1   # 绑定 INT32；cast 由解析器补上
+v: pl.Scalar[pl.INDEX] = pl.cast(i, pl.INT32) + 1   # 绑定 INDEX；无需转换
+```
+
+注解要写成你希望这个值被*存储*的 dtype：更窄的注解做的是转换，不是重解释。
+
 ### 容器类型
 
 | 类型 | 住在 | 写法 |

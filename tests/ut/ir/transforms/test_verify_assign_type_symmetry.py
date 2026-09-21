@@ -132,6 +132,60 @@ def test_annotated_scalar_literal_matches_annotation_dtype():
     assert seed_type.dtype == DataType.INT64
 
 
+def test_annotated_scalar_index_expression_is_cast_to_the_annotation_dtype():
+    """``v: pl.Scalar[pl.INT32] = <INDEX expr>`` binds an INT32 value, not an INDEX one.
+
+    The literal case above is re-stamped; a non-constant RHS cannot be, because
+    its dtype comes from its operands — scalar arithmetic normalizes them to
+    INDEX, so even ``pl.cast(i, pl.INT32) + 1`` is INDEX-typed. The parser wraps
+    it in the cast the annotation asks for.
+
+    Left asymmetric this reaches PTOAS as invalid MLIR (the scalar emitter reads
+    the Var's INT32, emits no cast, and feeds the ``index`` SSA value into an
+    ``i32`` operand), reported at an SSA number that names neither the variable
+    nor the user's line. See #2779.
+    """
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def k(self, out: pl.Out[pl.Tensor[[1, 1], pl.INT32]]) -> pl.Tensor[[1, 1], pl.INT32]:
+            for i in pl.range(4):
+                v: pl.Scalar[pl.INT32] = pl.cast(i, pl.INT32) + 1
+                pl.write(out, [0, 0], v)
+            return out
+
+    assert len(_verify(Program)) == 0
+
+    k = next(f for f in Program.functions.values() if f.name == "k")
+    assign = next(stmt for stmt in _walk_assigns(k.body) if stmt.var.name_hint.startswith("v"))
+    assert isinstance(assign.value, ir.Cast)
+    assert isinstance(assign.value.type, ir.ScalarType)
+    assert assign.value.type.dtype == DataType.INT32
+    # The wrapped expression keeps its own INDEX type — only the binding is cast.
+    operand_type = assign.value.operand.type
+    assert isinstance(operand_type, ir.ScalarType)
+    assert operand_type.dtype == DataType.INDEX
+
+
+def test_annotated_scalar_index_annotation_needs_no_cast():
+    """An INDEX annotation over an INDEX RHS is already symmetric — no cast added."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def k(self, out: pl.Out[pl.Tensor[[1, 1], pl.INT32]]) -> pl.Tensor[[1, 1], pl.INT32]:
+            for i in pl.range(4):
+                v: pl.Scalar[pl.INDEX] = i + 1
+                pl.write(out, [0, 0], pl.cast(v, pl.INT32))
+            return out
+
+    assert len(_verify(Program)) == 0
+    k = next(f for f in Program.functions.values() if f.name == "k")
+    assign = next(stmt for stmt in _walk_assigns(k.body) if stmt.var.name_hint.startswith("v"))
+    assert isinstance(assign.value, ir.Add)
+
+
 # --------------------------------------------------------------------------- #
 # Negative cases — each field divergence is detected.
 # --------------------------------------------------------------------------- #

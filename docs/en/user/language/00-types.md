@@ -136,6 +136,26 @@ its isolated FP16↔INT4 conversion has no matching packed load/store carrier AB
 See [FP4](../../dev/fp4.md) for cast samples (`FP4E2M1X2`→BF16 / FP8), units, and
 `#2754`-class stride guidance.
 
+### Annotating a scalar binding
+
+Scalar arithmetic normalizes its operands to `pl.INDEX`, so the result is
+`INDEX`-typed even when the inputs were not:
+
+```python
+v = pl.cast(i, pl.INT32) + 1                        # pl.Scalar[pl.INDEX]
+```
+
+An annotation decides the dtype the name is bound at, and the value is converted
+to match it — so the two sides of the assignment always agree:
+
+```python
+v: pl.Scalar[pl.INT32] = pl.cast(i, pl.INT32) + 1   # binds INT32; the cast is inserted for you
+v: pl.Scalar[pl.INDEX] = pl.cast(i, pl.INT32) + 1   # binds INDEX; nothing to convert
+```
+
+Annotate the dtype you want the value *stored* at: a narrower annotation converts
+the value, it does not reinterpret it.
+
 ### Container types
 
 | Type | Lives in | Written as |
