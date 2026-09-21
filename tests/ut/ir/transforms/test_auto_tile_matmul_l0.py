@@ -1857,6 +1857,69 @@ class TestAutoTileMatmulL0MNTiling:
         assert printed.count("pl.tile.matmul_bias(") == 2
         _assert_ssa_valid(After, "test_matmul_bias_m_only_tiling_reuses_bias_resident_source")
 
+    def test_matmul_bias_m_only_tiling_survives_intervening_effect(self):
+        """A full-N Bias-resident fold never reloads bias at its deferred store."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        M, K, N = 528, 64, 256
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, N], pl.BF16],
+                bias: pl.Tensor[[1, N], pl.FP32],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                bias_mat = pl.tile.load(bias, [0, 0], [1, N], target_memory=pl.Mem.Mat)
+                bias_l0 = pl.tile.move(bias_mat, target_memory=pl.Mem.Bias)
+                c = pl.tile.matmul_bias(lhs_mat, rhs_mat, bias_l0)
+                snapshot = pl.store(bias_mat, [0, 0], out)
+                final = pl.store(c, [0, 0], snapshot)
+                return final
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        printed = ir.python_print(After)
+        assert "pl.pipeline(" in printed
+        assert printed.count("pl.tile.matmul_bias(") == 2
+        assert printed.count("pl.tile.move(bias_mat, target_memory=pl.Mem.Bias)") == 1
+        _assert_ssa_valid(After, "test_matmul_bias_m_only_tiling_survives_intervening_effect")
+
+    def test_matmul_bias_mat_snapshot_intervening_effect_keeps_full_n(self):
+        """A later store may fold M while reusing, not reloading, a Mat bias."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        M, K, N = 528, 64, 256
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, N], pl.BF16],
+                bias: pl.Tensor[[1, N], pl.FP32],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                bias_mat = pl.tile.load(bias, [0, 0], [1, N], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul_bias(lhs_mat, rhs_mat, bias_mat)
+                snapshot_mat = pl.tile.load(bias, [0, 0], [1, N], target_memory=pl.Mem.Mat)
+                snapshot = pl.store(snapshot_mat, [0, 0], out)
+                final = pl.store(c, [0, 0], snapshot)
+                return final
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        printed = ir.python_print(After)
+        assert "pl.pipeline(" in printed
+        assert printed.count("pl.tile.matmul_bias(") == 2
+        _assert_ssa_valid(After, "test_matmul_bias_mat_snapshot_intervening_effect_keeps_full_n")
+
     def test_mn_tiling_rewrites_to_subtile_grid(self):
         """512×512 @ 512 FP32 on Ascend950 (L0c = 256 KB): the [512, 512] FP32
         output is 1 MB > L0c, so ChooseL0Tile picks m = n = 256, k = 32.  The

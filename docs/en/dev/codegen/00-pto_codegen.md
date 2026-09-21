@@ -480,7 +480,9 @@ different valid shapes, two slots live at once inside a loop, a space other than
 Vec / Mat / Acc, a runtime valid shape, a slot carried out of an `if` or loop as
 a phi, a count outside ptoas's `[2, 16]`) is a `ValueError` naming the shape,
 because falling back to per-slot `alloc_tile` would let ptoas plan the slots on
-top of each other.
+top of each other. Compatible sequential regions share storage only if shared
+allocation constraints permit it: `forbid_alias` and target hazards are checked against every prior occupant, not just the first owner.
+Static valid extents also key a slotted handle, so same-slot boundary views of identical physical shape cannot share an incompatible `pto.subview`.
 
 **One slot per iteration.** The co-live rejection is not a shape ptoas fails to
 *type* — it is one it fails to *synchronize*. Two forms of it have gone wrong:
