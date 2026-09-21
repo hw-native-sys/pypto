@@ -397,10 +397,16 @@ def set_cache_policy(tensor: Tensor, policy: CachePolicy) -> None:
       ``cache=pl.CachePolicy.DEFAULT`` opts a single read back into the cache
       inside a bypassing scope.
 
-    Requires PTOAS >= v0.61: a declared read compiles to
-    a ``cache_policy`` attribute on ``pto.tload``, which the assembler lowers to
-    pto-isa's own L2 hint. ``CachePolicy.DEFAULT`` emits nothing, so a read that
-    declares no policy generates exactly the code it did before.
+    Requires PTOAS >= v0.64. **On A2/A3** a declared read compiles to a
+    ``cache_policy`` attribute on ``pto.tload`` plus the device's no-cache alias
+    offset, which the assembler adds to that one load's source address; the
+    offset comes from the driver through the dispatch payload, and a device that
+    reports no alias reports zero, leaving the read ordinary and correct. Other
+    architectures do not map GM twice — A5 expresses the policy on the load
+    instruction instead — and PTOAS lowers the bare attribute to an ordinary
+    load, so a declaration there is accepted and currently does nothing.
+    ``CachePolicy.DEFAULT`` emits nothing, so a read that declares no policy
+    generates exactly the code it did before.
 
     Args:
         tensor: The tensor whose reads the policy applies to. Must be a

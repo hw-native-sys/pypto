@@ -61,7 +61,7 @@ class ZeroParamPrefetchProgram:
 
 @pl.program
 class OrderedSyntheticArgsProgram:
-    """Combine dynamic shape, SDMA workspace, and SPMD synthetic arguments."""
+    """Combine every synthetic argument: dynamic shape, SDMA workspace, L2 offset, SPMD."""
 
     @pl.function(type=pl.FunctionType.InCore)
     def ordered(
@@ -75,7 +75,8 @@ class OrderedSyntheticArgsProgram:
         session = pl.prefetch.session(ctx)
         pl.prefetch.wait(evt, session)
         row = pl.tile.get_block_idx()
-        return pl.store(pl.load(x, [row, 0], [1, 128]), [row, 0], out)
+        tile = pl.load(x, [row, 0], [1, 128], cache=pl.CachePolicy.BYPASS)
+        return pl.store(tile, [row, 0], out)
 
 
 class TestPrefetchPTOCodegen:
@@ -96,7 +97,11 @@ class TestPrefetchPTOCodegen:
         assert "func.func @main(%arg0: !pto.ptr<i8>)" in mlir, mlir
 
     def test_synthetic_argument_order_matches_wrapper(self):
-        """Dynamic dims precede SDMA, which precedes SPMD in both call layers."""
+        """Dynamic dims, then SDMA, then the L2 offset, then SPMD — in both call layers.
+
+        The wrapper forwards positionally, so any disagreement between the two
+        layers silently passes one runtime value as another.
+        """
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
         optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
@@ -110,7 +115,7 @@ class TestPrefetchPTOCodegen:
         assert re.search(
             r"func\.func @ordered\("
             r"%arg0: !pto\.ptr<f32>, %arg1: !pto\.ptr<f32>, %arg2: !pto\.ptr<f32>, "
-            r"%arg3: index, %arg4: !pto\.ptr<i8>, "
+            r"%arg3: index, %arg4: !pto\.ptr<i8>, %__pypto_l2_cache_offset: i64, "
             r"%__pypto_spmd_block_idx: i32, %__pypto_spmd_block_num: i32\)",
             signature_line,
         ), signature_line
@@ -121,7 +126,8 @@ class TestPrefetchPTOCodegen:
         call_line = next(line.strip() for line in wrapper.splitlines() if line.strip().startswith("ordered("))
         assert re.search(
             r"ordered\(prefetch_src\w*, x\w*, out\w*, ROWS, "
-            r"__pypto_sdma_workspace, __pypto_spmd_block_idx, __pypto_spmd_block_num\);",
+            r"__pypto_sdma_workspace, __pypto_l2_cache_offset, "
+            r"__pypto_spmd_block_idx, __pypto_spmd_block_num\);",
             call_line,
         ), call_line
 

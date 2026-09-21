@@ -111,11 +111,13 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   INTERNAL_CHECK_SPAN(!shapes_tuple->elements_.empty(), op->span_)
       << "tile.load shapes tuple must have at least one element";
 
-  // The declared GM cache-access policy (pypto #2680). PTOAS >= v0.61 carries a
-  // streaming read as a `cache_policy` attribute on `pto.tload`, which lowers to
-  // pto-isa's own L2 hint (`TLOAD<pto::TLoadL2Hint::NotAllocKeep>`), so there is
-  // no architecture-specific address alias to build here. It is attached below,
-  // alongside the MX layout attribute when both apply.
+  // The declared GM cache-access policy (pypto #2680). PTOAS >= v0.64 carries a
+  // streaming read as a `cache_policy` attribute on `pto.tload` plus an optional
+  // byte `offset` it adds to that one load's source address. On a2a3 the offset
+  // is the driver-owned distance to the page's uncached alias, threaded in as a
+  // synthetic kernel parameter (see PTOCodegen::GetL2CacheOffsetArgSSA); the
+  // attribute alone declares the policy but moves no address. Both are attached
+  // below, alongside the MX layout attribute when it applies.
   const auto policy = static_cast<ir::CachePolicy>(op->GetKwarg<int>("cache", 0));
 
   std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);
@@ -189,6 +191,18 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
       tload_line << attrs[i];
     }
     tload_line << "}";
+  }
+
+  // The offset operand follows the attribute dict, and PTOAS applies it only to
+  // a load that also declared l2_bypass. It is empty on an architecture with no
+  // address alias to reach, which leaves the declaration carried by the
+  // attribute alone -- and PTOAS v0.64 lowers a bare attribute to an ordinary
+  // TLOAD, so that declaration costs nothing and does nothing.
+  if (policy == ir::CachePolicy::kBypass) {
+    const std::string l2_cache_offset = codegen.GetL2CacheOffsetArgSSA();
+    if (!l2_cache_offset.empty()) {
+      tload_line << " offset = " << l2_cache_offset << " : i64";
+    }
   }
   codegen.Emit(tload_line.str());
 

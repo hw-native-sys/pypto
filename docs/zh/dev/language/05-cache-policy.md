@@ -7,9 +7,10 @@
 该策略是*作者声明的契约（contract）*，绝不是编译器推断出来的提示（hint）。因此它必须
 显式书写，粒度二选一，并且从 DSL 一路原样传递到代码生成（codegen）。
 
-> **要求 PTOAS >= v0.61**（`toolchain/versions.env` 中的 `PTOAS_VERSION`）。`BYPASS`
-> 声明会变成 `pto.tload` 上的一个 `cache_policy` 属性，由汇编器降级为 pto-isa 自带的
-> L2 hint。参见[codegen 发射什么](#codegen-发射什么)。
+> **要求 PTOAS >= v0.64**（`toolchain/versions.env` 中的 `PTOAS_VERSION`），并且
+> **只在 a2a3 上真正生效**。`BYPASS` 声明会变成 `pto.tload` 上的一个 `cache_policy`
+> 属性，外加一个携带该设备 uncached 别名距离的 `offset` 操作数，由汇编器加到该条
+> load 的源地址上。参见[codegen 发射什么](#codegen-发射什么)与[架构差异](#架构差异)。
 
 ## 两个书写面
 
@@ -180,34 +181,89 @@ with pl.at(level=pl.Level.CORE_GROUP, name_hint="mm"):
 
 ## codegen 发射什么
 
-一次 `BYPASS` 读取只会变成发射出的那条 load 上的一个属性 —— 没有额外的操作、没有第二个
-tensor view，也没有与架构绑定的地址别名：
+一次 `BYPASS` 读取会变成发射出的那条 load 上的一个属性，外加一个操作数 —— 从张量地址
+到同一批字节的 uncached 别名之间的距离：
 
 ```mlir
-pto.tload ins(%b__ssa_v0_pview : !pto.partition_tensor_view<256x256xf32>)
-          outs(%b__ssa_v0_mat  : !pto.tile_buf<loc=mat, ...>)
-          {cache_policy = #pto.load_cache_policy<l2_bypass>}
+func.func @main(%arg0: !pto.ptr<f32>, %arg1: !pto.ptr<f32>,
+                %__pypto_l2_cache_offset: i64) {
+  ...
+  pto.tload ins(%b__ssa_v0_pview : !pto.partition_tensor_view<256x256xf32>)
+            outs(%b__ssa_v0_mat  : !pto.tile_buf<loc=mat, ...>)
+            {cache_policy = #pto.load_cache_policy<l2_bypass>}
+            offset = %__pypto_l2_cache_offset : i64
 ```
 
-PTOAS >= v0.61 会把它降级为 pto-isa 自带的 L2 hint，这也是生成的 CCE 中唯一的差异：
+只有属性本身并不移动地址：PTOAS 只对同时声明了 `l2_bypass` 的 load 施加该 offset，
+而没有 offset 的声明会编译成普通的带缓存 load。二者合在一起才构成绕过 L2 —— 也正因
+如此，真正让这个特性落地的是 offset 而不是属性，而[只有 a2a3 才有这个 offset](#架构差异)。
+
+### offset 从哪里来
+
+A2/A3 把每个 GM 页映射两次 —— 一次带缓存，一次不带 —— 对 uncached 别名发起的 load
+不会在 L2 中分配。两个映射之间的距离是只有驱动才知道的逐设备取值
+（`rtGetL2CacheOffset`），因此它不能在编译器里写成常量：本机报告 `0x80000000000`，
+而 pto-isa 注释中写的是 `0x100000000000`。
+
+simpler 每个 Worker 查询一次，并把它带到每个核的 `GlobalContext`，incore kernel 通过
+`get_l2_cache_offset(args)` 读取（simpler PR #2323）。生成的 kernel wrapper 在入口处
+**只读一次** —— 该值在一次 dispatch 内不会变化，逐 load 读取等于为一个常量反复走 GM
+—— 然后通过合成参数 `%__pypto_l2_cache_offset` 向下传递：
+
+```cpp
+extern "C" __aicore__ void kernel_entry(__gm__ int64_t* args) {
+    // ... tensor unpacking ...
+    uint64_t __pypto_l2_cache_offset = get_l2_cache_offset(args);
+    main(a__ssa_v0, b__ssa_v0, out__ssa_v0, __pypto_l2_cache_offset);
+}
+```
+
+PTOAS >= v0.64 会把这一对变成对源描述符**副本**的地址运算 —— 因此同一张量的其它 load
+仍使用带缓存的地址 —— 随后发出一条普通 `TLOAD`：
 
 ```diff
 -  TLOAD(v45, v50);
-+  TLOAD<pto::TLoadL2Hint::NotAllocKeep>(v45, v50);
++  __gm__ uint8_t* v51 = reinterpret_cast<__gm__ uint8_t*>(PTOAS__GLOBAL_TENSOR_DATA(v50));
++  __gm__ float* v52 = (__gm__ float*) (v51 + v5);
++  GlobalTensor<float, ...> v53(nullptr);
++  v53 = v50;
++  TASSIGN(v53, v52);
++  TLOAD(v45, v53);
 ```
 
-这次发射有三条性质值得写明，因为每一条都在
-`tests/ut/codegen/test_cache_policy_codegen.py` 中有对应断言：
+0 是合法取值而非失败：不提供别名的 a2a3 设备返回 0，`addr + 0` 就是原地址，此时该声明
+损失的是带宽而不是正确性。模拟器天然属于这种情况。注意这是**设备**返回 0，与"该架构
+根本没有别名"不同 —— 后者压根不会拿到 offset 操作数。
+
+这次发射有五条性质值得写明，因为每一条都在
+`tests/ut/codegen/test_cache_policy_codegen.py` 中有对应断言（参数顺序在
+`tests/ut/codegen/test_prefetch_codegen.py`）：
 
 | 性质 | 原因 |
 | ---- | ---- |
-| `CachePolicy.DEFAULT` **什么都不发射** | 未声明策略的 kernel 保持本特性出现之前的 PTO 形态，因此该属性就是两个在其余方面完全相同的 kernel 之间唯一的差异 |
+| `CachePolicy.DEFAULT` **什么都不发射** | 未声明策略的 kernel 保持本特性出现之前的 PTO 形态，因此属性、操作数与参数就是两个在其余方面完全相同的 kernel 之间唯一的差异 |
 | 该属性按 **load** 发射，而不是按张量 | 它是指令的性质；若两条 load 只有第一条带 hint，第二条仍会在 L2 中分配（被取代的 `[CacheBypassUnsupported]` 诊断刻意是"每张量一次"—— 粒度正好相反） |
-| 它与 MX 的 `layout` 合并进**同一个**属性字典，且排在其后 | PTOAS 要求所有存在的属性在同一个字典里；把 `layout` 留在前面可使未声明策略的 MX load 保持逐字节一致 |
+| offset 参数**每个 kernel 只追加一次** | 一个运行时取值服务于全部绕过缓存的 load，入口处读一次即可 |
+| 它与 MX 的 `layout` 合并进**同一个**属性字典且排在其后，操作数则跟在字典之后 | PTOAS 要求所有存在的属性在同一个字典里；把 `layout` 留在前面可使未声明策略的 MX load 保持逐字节一致 |
+| a5 只发射属性，**不**发射 offset | 那里没有第二份映射可寻址（见[架构差异](#架构差异)），也没有可供读取距离的入口 |
+
+### 架构差异
+
+双重映射是 a2a3 的属性，建立在它之上的一切也都是：
+
+| 目标 | 当前一条 `BYPASS` 声明的实际效果 |
+| ---- | -------------------------------- |
+| a2a3 设备 | load 对 uncached 别名发起，即 `addr + get_l2_cache_offset(args)`。这正是该特性存在的场景 |
+| 无别名的 a2a3 设备 | 驱动返回 `0`，`addr + 0` 即原地址，读取照常带缓存 —— 结果正确，只是少了一项优化。模拟器天然如此 |
+| a5 | codegen 只发射属性、不发射 offset，而 PTOAS v0.64 把裸属性降级为普通 `TLOAD`。该声明被接受，但**不产生任何效果** |
+
+a5 并不是"缺一个 offset 等着填"：它根本没有第二份映射可寻址。pto-isa 在 a5 的
+`TLOAD` 上以指令操作数的形式携带 L2 hint，未来的 a5 路径应当落在那里 —— v0.64 并未把
+它接到 `cache_policy` 上，因此在 a5 上，生成的 CCE 里声明过的 load 与未声明的毫无区别。
 
 ### 更旧的汇编器
 
-发射本身是无条件的 —— `cache_policy` 是 v0.61 新增的，更旧的汇编器会在 `pto.tload`
+发射本身是无条件的 —— `offset` 是 v0.64 新增的，更旧的汇编器会在 `pto.tload`
 的校验处拒绝它。实际上走不到那一步：在汇编第一个 `.pto` 之前，codegen 会运行
 `ptoas --version`，拒绝任何比本仓库所固定 `PTOAS_VERSION` 更旧的汇编器，报错中同时给出两个版本。
 
@@ -231,6 +287,9 @@ PTOAS >= v0.61 会把它降级为 pto-isa 自带的 L2 hint，这也是生成的
 | 下沉 | `src/ir/transforms/convert_tensor_to_tile_ops_pass.cpp` |
 | Printer | `src/ir/transforms/python_printer.cpp`（`PrintScopeCachePolicyStmts`） |
 | Codegen | `src/backend/common/pto_ops_memory.cpp`（`MakeTileLoadCodegenPTO`） |
+| 合成参数 | `src/codegen/pto/pto_codegen.cpp`（`MemRefCollectorVisitor::UsesL2BypassLoad`、签名发射） |
+| Kernel wrapper | `python/pypto/backend/pto_backend.py`（`_uses_l2_cache_offset`、`_generate_kernel_wrapper`） |
+| 运行时读取入口 | `runtime/src/a2a3/runtime/*/common/intrinsic.h`（`get_l2_cache_offset`）、`runtime/docs/l2-cache-bypass.md` |
 
 ## 另请参阅
 

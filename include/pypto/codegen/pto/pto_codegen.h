@@ -557,6 +557,23 @@ class PTOCodegen : public CodegenBase {
   [[nodiscard]] std::string GetSdmaWorkspaceArgSSA() const { return fs_.sdma_workspace_arg_ssa; }
 
   /**
+   * @brief SSA name of the synthetic device L2 no-cache alias offset parameter.
+   *
+   * A2/A3 maps every GM page twice, and a load issued against the uncached
+   * alias does not allocate in L2. The distance between the two mappings is a
+   * per-device value only the driver knows, so it travels with the dispatch:
+   * the kernel wrapper reads ``intrinsic.h::get_l2_cache_offset(args)`` once at
+   * entry and forwards it through this hidden ``i64`` parameter, appended after
+   * the SDMA workspace pointer and before the SPMD identity parameters. Each
+   * ``tile.load`` that declared ``CachePolicy.BYPASS`` passes it as
+   * ``pto.tload``'s ``offset``, which PTOAS >= v0.64 adds to that one load's
+   * source address. Returns empty when the function has no bypassing load, and
+   * on every architecture but a2a3: the double mapping is an a2a3 property, and
+   * only its runtime exposes an accessor for the distance.
+   */
+  [[nodiscard]] std::string GetL2CacheOffsetArgSSA() const { return fs_.l2_cache_offset_arg; }
+
+  /**
    * @brief SSA name of the synthetic raw dispatch-args pointer parameter.
    *
    * Functions containing ``pld.system.defer_wait`` receive one hidden
@@ -1057,6 +1074,11 @@ class PTOCodegen : public CodegenBase {
     /// Empty when the current function does not use prefetch.make_context.
     std::string sdma_workspace_arg_ssa;
 
+    /// SSA name of the synthetic device L2 no-cache alias offset param. Empty
+    /// when no tile.load in the current function declared CachePolicy.BYPASS,
+    /// and on every architecture but a2a3.
+    std::string l2_cache_offset_arg;
+
     /// Raw runtime dispatch-args pointer used by deferred completion adapters.
     std::string deferred_completion_raw_args_ssa;
 
@@ -1135,6 +1157,7 @@ class PTOCodegen : public CodegenBase {
       ffts_workspace_vars.clear();
 
       sdma_workspace_arg_ssa.clear();
+      l2_cache_offset_arg.clear();
       deferred_completion_raw_args_ssa.clear();
       spmd_block_idx_arg.clear();
       spmd_block_num_arg.clear();
