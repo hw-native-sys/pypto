@@ -30,13 +30,17 @@ from pypto.ir.compiled_program import (
     CompiledProgram,
     _build_full_args,
     _extract_param_infos,
+    _param_info_from_dict,
+    _param_info_to_dict,
+    _validate_device_tensor,
+    _validate_stacked_tensor,
 )
 from pypto.ir.distributed_compiled_program import (
     _DISTRIBUTED_META_FILENAME,
     DistributedCompiledProgram,
 )
-from pypto.ir.param_info import bind_complete_args
-from pypto.runtime import DeviceTensor, RunConfig
+from pypto.ir.param_info import _ParamInfo, bind_complete_args
+from pypto.runtime import DeviceTensor, RunConfig, StackedDeviceTensor
 
 
 @contextlib.contextmanager
@@ -1648,6 +1652,62 @@ def test_multi_orchestration_preserves_capabilities_in_children_and_reload(tmp_p
         assert child.execution_capabilities == compiled.execution_capabilities
         assert restored.execution_capabilities == child.execution_capabilities
         assert restored.param_names == child.param_names
+
+
+@pytest.mark.parametrize(
+    "dtype,torch_dtype,c0", [(DataType.INT8, torch.int8, 32), (DataType.FP16, torch.float16, 16)]
+)
+def test_nz_device_tensor_shape_and_sidecar_round_trip(dtype, torch_dtype, c0):
+    """Logical resident shapes remain valid after serializing blocked metadata."""
+    info = _ParamInfo("w", ir.ParamDirection.In, [8, 512 // c0, 16, 16, c0], dtype, "NZ")
+    restored = _param_info_from_dict(json.loads(json.dumps(_param_info_to_dict(info))))
+    assert restored == info
+    arg = DeviceTensor(0x1000, (2, 4, 256, 512), torch_dtype)
+    assert _validate_device_tensor(arg, restored) is None
+    shards = [DeviceTensor(0x1000 + i * 0x100000, (4, 256, 512), torch_dtype) for i in range(2)]
+    stacked = StackedDeviceTensor(shards, (2, 4, 256, 512), [0, 1])
+    assert _validate_stacked_tensor(stacked, restored) is None
+    wrong_shape = DeviceTensor(0x1000, (2, 3, 256, 512), torch_dtype)
+    with pytest.raises(TypeError, match="expects shape"):
+        _validate_device_tensor(wrong_shape, restored)
+    unaligned = DeviceTensor(0x1000, (2, 4, 255, 512), torch_dtype)
+    with pytest.raises(TypeError, match="expects rank"):
+        _validate_device_tensor(unaligned, restored)
+
+
+def test_nz_param_layout_is_extracted_from_compiled_ir(tmp_path):
+    """Live and reloaded artifacts retain the NZ layout needed by argument binding."""
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType(
+        [8, 16, 16, 16, 32], DataType.INT8, None, ir.TensorView(layout=ir.TensorLayout.NZ)
+    )
+    param = ir.Var("w", tensor_type, span)
+    func = ir.Function("main", [param], [], ir.ReturnStmt([], span), span, ir.FunctionType.Orchestration)
+    live = CompiledProgram(ir.Program([func], "Nz", span), str(tmp_path), platform="a2a3sim")
+    restored = CompiledProgram.from_dir(tmp_path)
+    for cp in (live, restored):
+        infos, _, _ = cp._get_metadata()
+        assert infos[0].layout == "NZ"
+        assert _validate_device_tensor(DeviceTensor(0x1000, (2, 4, 256, 512), torch.int8), infos[0]) is None
+
+
+def test_legacy_parameter_metadata_keeps_nd_shape_validation():
+    info = _ParamInfo("w", ir.ParamDirection.In, [256, 512], DataType.INT8)
+    payload = _param_info_to_dict(info)
+    del payload["layout"]
+    restored = _param_info_from_dict(payload)
+    assert restored.layout is None
+    assert _validate_device_tensor(DeviceTensor(0x1000, (256, 512), torch.int8), restored) is None
+    with pytest.raises(TypeError, match="expects rank"):
+        _validate_device_tensor(DeviceTensor(0x1000, (1, 16, 16, 16, 32), torch.int8), restored)
+
+
+@pytest.mark.parametrize("layout", [0, [], {}])
+def test_parameter_metadata_rejects_non_string_layout(layout):
+    payload = _param_info_to_dict(_ParamInfo("w", ir.ParamDirection.In, [256, 512], DataType.INT8))
+    payload["layout"] = layout
+    with pytest.raises(ValueError, match="layout"):
+        _param_info_from_dict(payload)
 
 
 if __name__ == "__main__":

@@ -128,6 +128,40 @@ def _walk(stmt):
     yield stmt
 
 
+def _nz_slices(program: ir.Program) -> list[ir.Call]:
+    """Every tensor.slice whose source tensor carries the NZ layout, in body order."""
+    slice_name = ir.get_op("tensor.slice").name
+    found = []
+    for func in program.functions.values():
+        for stmt in _walk(func.body):
+            if not isinstance(stmt, ir.AssignStmt):
+                continue
+            call = stmt.value
+            if not isinstance(call, ir.Call) or call.op.name != slice_name:
+                continue
+            view = getattr(call.args[0].type, "tensor_view", None)
+            if view is not None and view.layout == ir.TensorLayout.NZ:
+                found.append(call)
+    return found
+
+
+def _nz_reshapes(program: ir.Program) -> list[ir.Call]:
+    """Every tensor.reshape whose source tensor carries the NZ layout, in body order."""
+    reshape_name = ir.get_op("tensor.reshape").name
+    found = []
+    for func in program.functions.values():
+        for stmt in _walk(func.body):
+            if not isinstance(stmt, ir.AssignStmt):
+                continue
+            call = stmt.value
+            if not isinstance(call, ir.Call) or call.op.name != reshape_name:
+                continue
+            view = getattr(call.args[0].type, "tensor_view", None)
+            if view is not None and view.layout == ir.TensorLayout.NZ:
+                found.append(call)
+    return found
+
+
 def _nz_loads(program: ir.Program) -> list[ir.Call]:
     """Every tile.load whose source tensor carries the NZ layout, in body order."""
     load_name = ir.get_op("tile.load").name
@@ -553,14 +587,12 @@ def test_codegen_tile_keeps_logical_2d_nz_layout():
 # ============================================================================
 
 
-def test_rejects_logical_rank_above_three():
-    """Rank 4+ has no canonical blocked form — reject it here, not in PTOAS.
+def test_folds_leading_axes_into_the_batch_slot():
+    """A logical ``[G, E, N, K]`` weight blocks with ``B = G*E``.
 
-    pto-isa's NZ ``GlobalTensor`` has exactly one batch slot, so a logical
-    ``[G, E, N, K]`` weight would need its two leading axes folded into it. The
-    fold is sound on the shape and unsound on the offsets (it would have to
-    re-associate ``[g, e, ...]`` into ``g*E + e``), so the front end names the
-    restriction instead of emitting a view the assembler refuses.
+    pto-isa's NZ ``GlobalTensor`` has exactly one batch slot, and dense
+    row-major leading axes collapse into it exactly — the fold removes only the
+    strides it multiplies back in.
     """
 
     @pl.jit
@@ -571,14 +603,108 @@ def test_rejects_logical_rank_above_three():
     ):
         for _ in pl.spmd(1, name_hint="rank4_nz"):
             xt = pl.slice(x, [64, 512], [0, 0])
-            wt = w[0:1, 0:1, 0:256, 0:512]
+            wt = w[1:2, 3:4, 0:256, 0:512]
             acc = pl.matmul(xt, wt, b_trans=True, out_dtype=pl.INT32)
             out[0:64, 0:256] = pl.reshape(acc, [64, 256])
         return out
 
     _, _, tm, sd, cx, dyn = _rank4_nz._bind_args_from_signature({})
-    with pytest.raises(ValueError, match="logical rank of at most 3"):
-        _run(_rank4_nz._compile_to_program(tm, sd, cx, dyn, pl))
+    after = _run(_rank4_nz._compile_to_program(tm, sd, cx, dyn, pl))
+    assert _values(_nz_param(after).shape) == [8, 16, 16, 16, 32]
+    call = _nz_load(after)
+    # [1, 3, 0, 0] into [2, 4, ...] addresses batch 1*4 + 3 = 7.
+    assert _values(_elements(call.args[1])) == [7, 0, 0, 0, 0]
+    assert _values(_elements(call.args[2])) == [1, 16, 16, 16, 32]
+
+
+def test_blocks_a_leading_axis_slice():
+    """``pl.slice`` along the batch axis keeps the NZ view addressable.
+
+    A layer-stacked weight reaches its kernel as one layer's window, so the
+    slice has to block like the load that follows it: whole trailing matrix,
+    batch offset carried through.
+    """
+
+    @pl.jit(auto_scope=False)
+    def _sliced_nz(
+        x: pl.Tensor[[64, 512], pl.INT8],
+        w: pl.Tensor[[4, 256, 512], pl.INT8, pl.NZ],
+        out: pl.Out[pl.Tensor[[64, 256], pl.INT32]],
+    ):
+        w_layer: pl.Tensor[[2, 256, 512], pl.INT8, pl.NZ] = pl.slice(w, [2, 256, 512], [2, 0, 0])
+        with pl.scope():
+            for _ in pl.spmd(1, name_hint="sliced_nz"):
+                xt = pl.slice(x, [64, 512], [0, 0])
+                acc = pl.matmul(xt, w_layer[1:2, 0:256, 0:512], b_trans=True, out_dtype=pl.INT32)
+                out[0:64, 0:256] = pl.reshape(acc, [64, 256])
+        return out
+
+    _, _, tm, sd, cx, dyn = _sliced_nz._bind_args_from_signature({})
+    after = _run(_sliced_nz._compile_to_program(tm, sd, cx, dyn, pl))
+    slices = _nz_slices(after)
+    assert len(slices) == 1
+    assert _values(_elements(slices[0].args[1])) == [2, 16, 16, 16, 32]  # shapes
+    assert _values(_elements(slices[0].args[2])) == [2, 0, 0, 0, 0]  # offsets
+    slice_type = slices[0].type
+    assert isinstance(slice_type, ir.TensorType)
+    assert _values(slice_type.shape) == [2, 16, 16, 16, 32]
+
+
+def test_rejects_a_leading_window_under_a_spanning_axis():
+    """Two narrowed leading axes do not fold into one contiguous batch run.
+
+    ``[2, 4, R, C]`` sliced to ``[2, 2, R, C]`` at ``[0, 1, 0, 0]`` names
+    batches ``{1, 2, 5, 6}``, but the fold multiplies extents and flattens
+    offsets row-major, so it would emit extent 4 at offset 1 — the run
+    ``{1, 2, 3, 4}``, a different four layers read as if they were the right
+    ones.
+    """
+
+    @pl.jit(auto_scope=False)
+    def _two_windows(
+        x: pl.Tensor[[64, 512], pl.INT8],
+        w: pl.Tensor[[2, 4, 256, 512], pl.INT8, pl.NZ],
+        out: pl.Out[pl.Tensor[[64, 256], pl.INT32]],
+    ):
+        w_win: pl.Tensor[[2, 2, 256, 512], pl.INT8, pl.NZ] = pl.slice(w, [2, 2, 256, 512], [0, 1, 0, 0])
+        with pl.scope():
+            for _ in pl.spmd(1, name_hint="two_windows"):
+                xt = pl.slice(x, [64, 512], [0, 0])
+                acc = pl.matmul(xt, w_win[0:1, 0:1, 0:256, 0:512], b_trans=True, out_dtype=pl.INT32)
+                out[0:64, 0:256] = pl.reshape(acc, [64, 256])
+        return out
+
+    _, _, tm, sd, cx, dyn = _two_windows._bind_args_from_signature({})
+    program = _two_windows._compile_to_program(tm, sd, cx, dyn, pl)
+    with pytest.raises(ValueError, match="a window on one leading axis only"):
+        _run(program)
+
+
+def test_rejects_a_slice_inside_the_fractal_plane():
+    """A row window of an NZ tensor has no contiguous stride, so it is refused.
+
+    One layer's rows sit inside every fractal column block, so ``[layer*R, 0]``
+    selects ``C/c0`` disjoint runs — exactly what the blocked view's derived
+    row-major stride cannot describe.
+    """
+
+    @pl.jit(auto_scope=False)
+    def _row_sliced_nz(
+        x: pl.Tensor[[64, 512], pl.INT8],
+        w: pl.Tensor[[512, 512], pl.INT8, pl.NZ],
+        out: pl.Out[pl.Tensor[[64, 256], pl.INT32]],
+    ):
+        w_layer: pl.Tensor[[256, 512], pl.INT8, pl.NZ] = pl.slice(w, [256, 512], [256, 0])
+        with pl.scope():
+            for _ in pl.spmd(1, name_hint="row_sliced_nz"):
+                xt = pl.slice(x, [64, 512], [0, 0])
+                acc = pl.matmul(xt, w_layer[0:256, 0:512], b_trans=True, out_dtype=pl.INT32)
+                out[0:64, 0:256] = pl.reshape(acc, [64, 256])
+        return out
+
+    _, _, tm, sd, cx, dyn = _row_sliced_nz._bind_args_from_signature({})
+    with pytest.raises(ValueError, match="slicing the leading axes only"):
+        _run(_row_sliced_nz._compile_to_program(tm, sd, cx, dyn, pl))
 
 
 def test_rejects_unaligned_rows():
@@ -705,6 +831,133 @@ def test_rejects_a_slice_offset_whose_sign_cannot_be_proven():
     _, _, tm, sd, cx, dyn = _maybe_negative._bind_args_from_signature({})
     program = _maybe_negative._compile_to_program(tm, sd, cx, dyn, pl)
     with pytest.raises(ValueError, match=r"offset on shape\[-2\] to be non-negative"):
+        _run(program)
+
+
+def test_maps_a_split_k_offset_built_from_a_remainder():
+    """``(block % OK) * K_SLICE`` is the split-K half of a K loop.
+
+    A non-negative block index and a positive constant divisor make the
+    remainder non-negative, and the constant factor carries the alignment.
+    Without the remainder rule the split-K idiom used by attention projections
+    is refused.
+    """
+
+    @pl.jit
+    def _split_k(
+        x: pl.Tensor[[64, 1024], pl.INT8],
+        w: pl.Tensor[[256, 1024], pl.INT8, pl.NZ],
+        out: pl.Out[pl.Tensor[[64, 256], pl.INT32]],
+    ):
+        for blk in pl.spmd(4, name_hint="split_k_mm"):
+            k_base = (blk % 2) * 512
+            n0 = (blk // 2) * 128
+            acc = pl.create_tensor([64, 128], dtype=pl.INT32)
+            for kb in pl.pipeline(0, 512, 512, stage=2):
+                k0 = k_base + kb
+                acc = pl.matmul_acc(
+                    acc,
+                    x[0:64, k0 : k0 + 512],
+                    w[n0 : n0 + 128, k0 : k0 + 512],
+                    b_trans=True,
+                    init_cond=(kb == 0),
+                )
+            out[:, n0 : n0 + 128] = acc
+        return out
+
+    _, _, tm, sd, cx, dyn = _split_k._bind_args_from_signature({})
+    call = _nz_load(_run(_split_k._compile_to_program(tm, sd, cx, dyn, pl)))
+    # Both trailing offsets are divided; neither is refused for an unprovable sign.
+    assert len(_elements(call.args[1])) == 5
+
+
+def test_flattens_a_whole_nz_tensor():
+    """A rank-1 view of *every* element is layout-invariant, so it is kept as written.
+
+    The blocked form permutes the index space, not the memory: both spellings
+    walk the same contiguous GM range. An SDMA L2 warm
+    (``prefetch.async_prefetch``) wants a flat logical-1D source, so refusing
+    this would mean an NZ weight can never be prefetched — which is what the
+    DeepSeek V4 o-projection weights do while they stream.
+    """
+
+    @pl.jit
+    def _flatten(
+        x: pl.Tensor[[64, 512], pl.INT8],
+        w: pl.Tensor[[256, 512], pl.INT8, pl.NZ],
+        out: pl.Out[pl.Tensor[[64, 256], pl.INT32]],
+        head: pl.Out[pl.Tensor[[512], pl.INT8]],
+    ):
+        w_flat = pl.reshape(w, [256 * 512])
+        for nb in pl.spmd(2, name_hint="nz_flat_mm"):
+            n0 = nb * 128
+            acc = pl.matmul(x[0:64, 0:512], w[n0 : n0 + 128, 0:512], b_trans=True, out_dtype=pl.INT32)
+            out[0:64, n0 : n0 + 128] = pl.reshape(acc, [64, 128])
+        for _flat_blk in pl.spmd(1, name_hint="nz_flat_head"):
+            pl.store(pl.load(w_flat, [0], [512], target_memory=pl.Mem.Vec), [0], head)
+        return out, head
+
+    _, _, tm, sd, cx, dyn = _flatten._bind_args_from_signature({})
+    program = _run(_flatten._compile_to_program(tm, sd, cx, dyn, pl))
+    flatten = _nz_reshapes(program)
+    assert len(flatten) == 1
+    # The target shape is untouched, and the source now carries the blocked type.
+    assert _values(_elements(flatten[0].args[1])) == [256 * 512]
+    source_type = flatten[0].args[0].type
+    assert isinstance(source_type, ir.TensorType)
+    assert len(source_type.shape) == 5
+    # The matmul operand is still blocked, so the flatten did not disable the pass.
+    assert len(_elements(_nz_loads(program)[0].args[1])) == 5
+
+
+def test_rejects_a_reshape_that_is_not_a_whole_tensor_flatten():
+    """A partial reshape reinterprets coordinates, which the blocked form breaks.
+
+    ``[256, 512] -> [128, 1024]`` pairs rows in logical row-major order; in the
+    blocked form those elements are scattered across fractal blocks. There is no
+    coordinate rewrite that makes it mean the same thing, so it is refused
+    rather than silently addressed as ND.
+    """
+
+    @pl.jit
+    def _partial(
+        w: pl.Tensor[[256, 512], pl.INT8, pl.NZ],
+        head: pl.Out[pl.Tensor[[512], pl.INT8]],
+    ):
+        w_half = pl.reshape(w, [128, 1024])
+        for _half_blk in pl.spmd(1, name_hint="nz_partial_head"):
+            pl.store(pl.load(w_half, [0, 0], [1, 512], target_memory=pl.Mem.Vec), [0], head)
+        return head
+
+    _, _, tm, sd, cx, dyn = _partial._bind_args_from_signature({})
+    program = _partial._compile_to_program(tm, sd, cx, dyn, pl)
+    with pytest.raises(ValueError, match="whole-tensor 'tensor.reshape' flatten"):
+        _run(program)
+
+
+def test_rejects_a_remainder_of_an_unproven_dividend():
+    """A remainder is only non-negative when its dividend is.
+
+    ``FloorMod`` lowers to ``arith.remsi``, which truncates toward zero, so
+    ``(blk - 1) % 2`` is -1 on the first block. A difference proves no sign, so
+    the whole offset stays unproven rather than being trusted for its divisor.
+    """
+
+    @pl.jit
+    def _unproven_dividend(
+        x: pl.Tensor[[64, 1024], pl.INT8],
+        w: pl.Tensor[[128, 1024], pl.INT8, pl.NZ],
+        out: pl.Out[pl.Tensor[[64, 128], pl.INT32]],
+    ):
+        for blk in pl.spmd(4, name_hint="unproven_mod"):
+            k0 = ((blk - 1) % 2) * 512
+            acc = pl.matmul(x[0:64, k0 : k0 + 512], w[0:128, k0 : k0 + 512], b_trans=True, out_dtype=pl.INT32)
+            out[0:64, 0:128] = pl.reshape(acc, [64, 128])
+        return out
+
+    _, _, tm, sd, cx, dyn = _unproven_dividend._bind_args_from_signature({})
+    program = _unproven_dividend._compile_to_program(tm, sd, cx, dyn, pl)
+    with pytest.raises(ValueError, match=r"offset on shape\[-1\] to be non-negative"):
         _run(program)
 
 
@@ -1007,6 +1260,22 @@ def test_a_valid_shape_load_within_the_bound_is_accepted():
     """A narrowed valid_shape is not rejected per se — only an oversized gap."""
     assert 65536 - 16 == 65520
     _run(_valid_shape_program(rows=65536, tile_rows=32, valid_rows=16))
+
+
+@pytest.mark.parametrize("dynamic_axis", [0, 1])
+def test_rejects_a_dynamic_leading_extent_when_folding(dynamic_axis):
+    """A rank-4 fold must reject either dynamic leading axis before codegen."""
+    batch = pl.dynamic("NZ_BATCH")
+    shape = [batch, 4, 256, 512] if dynamic_axis == 0 else [2, batch, 256, 512]
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, w: pl.Tensor[shape, pl.INT8, pl.NZ]):
+            return
+
+    with pytest.raises(ValueError, match=f"axis {dynamic_axis} is dynamic"):
+        passes.block_nz_tensor_views()(Before)
 
 
 if __name__ == "__main__":

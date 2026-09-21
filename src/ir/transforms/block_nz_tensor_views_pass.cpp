@@ -174,6 +174,32 @@ TypePtr BlockNzType(const TypePtr& type, const Span& span) {
   return type;
 }
 
+/// Whether ``op`` is a ``tensor.reshape`` that flattens the whole NZ tensor into
+/// a single rank-1 view of every element.
+///
+/// The blocked form is a reordering of the logical index space, not of memory:
+/// both spellings cover the same contiguous GM range in the same order. A view
+/// of *all* of it therefore needs no coordinate rewrite, which is what lets an
+/// NZ weight still be handed to ``prefetch.async_prefetch`` (it wants a flat
+/// logical-1D source). Any other reshape does reinterpret coordinates and is
+/// refused by the caller.
+bool IsWholeTensorFlatten(const CallPtr& op) {
+  if (!IsOp(op, "tensor.reshape")) return false;
+  auto source_type = AsTensorTypeLike(op->args_[0]->GetType());
+  if (!source_type) return false;
+  auto shape_tuple = As<MakeTuple>(op->args_[1]);
+  if (!shape_tuple || shape_tuple->elements_.size() != 1) return false;
+  auto flat_extent = As<ConstInt>(shape_tuple->elements_[0]);
+  if (!flat_extent) return false;
+  int64_t logical_elements = 1;
+  for (const auto& dim : source_type->shape_) {
+    auto extent = As<ConstInt>(dim);
+    if (!extent) return false;
+    logical_elements *= extent->value_;
+  }
+  return logical_elements == flat_extent->value_;
+}
+
 /// Index bindings a symbolic slice offset has to be proven against.
 ///
 /// A slice offset arrives at the ``tile.load`` as the SSA name it was bound to,
@@ -353,12 +379,13 @@ void CheckNzGmGapFitsBurstStride(const std::vector<ExprPtr>& blocked_shape, cons
 /// Rewrite the elements of a ``MakeTuple`` coordinate argument into blocked NZ
 /// form. ``facts`` is read only on the offsets path — a shape is a static
 /// extent, never a symbolic expression.
-ExprPtr BlockTupleArg(const ExprPtr& arg, DataType dtype, const Span& span, bool is_offsets,
-                      const tensor_view_semantics::NzOffsetFacts& facts) {
+ExprPtr BlockTupleArg(const ExprPtr& arg, const std::vector<ExprPtr>& parent_shape, DataType dtype,
+                      const Span& span, bool is_offsets, const tensor_view_semantics::NzOffsetFacts& facts) {
   auto tuple = As<MakeTuple>(arg);
-  INTERNAL_CHECK_SPAN(tuple, span) << "Internal error: tile.load coordinate argument must be a MakeTuple";
-  auto blocked = is_offsets ? tensor_view_semantics::BlockNzOffsets(tuple->elements_, dtype, span, facts)
-                            : tensor_view_semantics::BlockNzShape(tuple->elements_, dtype, span);
+  INTERNAL_CHECK_SPAN(tuple, span) << "Internal error: an NZ coordinate argument must be a MakeTuple";
+  auto blocked =
+      is_offsets ? tensor_view_semantics::BlockNzOffsets(tuple->elements_, parent_shape, dtype, span, facts)
+                 : tensor_view_semantics::BlockNzShape(tuple->elements_, dtype, span);
   return std::make_shared<MakeTuple>(std::move(blocked), tuple->span_);
 }
 
@@ -426,12 +453,25 @@ class BlockNzMutator : public IRMutator {
       CHECK_SPAN(!IsOp(op, "tile.store"), op->span_)
           << "NZ layout is read-only: an NZ tensor cannot be a store destination. "
           << "Annotate the output tensor as pl.ND.";
-      CHECK_SPAN(IsOp(op, "tile.load") && nz_args.size() == 1 && nz_args[0] == 0, op->span_)
-          << "NZ layout currently supports only 'tile.load' reading the tensor as its source, but it is "
-          << "used by '" << op->op_->name_ << "' at argument " << nz_args[0]
+      const bool is_load = IsOp(op, "tile.load");
+      const bool is_slice = IsOp(op, "tensor.slice");
+      const bool is_flatten = IsWholeTensorFlatten(op);
+      CHECK_SPAN((is_load || is_slice || is_flatten) && nz_args.size() == 1 && nz_args[0] == 0, op->span_)
+          << "NZ layout currently supports only 'tile.load' and 'tensor.slice' reading the tensor as "
+          << "their source, plus a whole-tensor 'tensor.reshape' flatten, but it is used by '"
+          << op->op_->name_ << "' at argument " << nz_args[0]
           << ". NZ tensors are read-only matmul operands in this release.";
-      args_changed = true;
-      new_args = BlockTileLoadArgs(op, std::move(new_args));
+      auto logical_type = AsTensorTypeLike(op->args_[0]->GetType());
+      INTERNAL_CHECK_SPAN(logical_type, op->span_)
+          << "Internal error: the NZ source of '" << op->op_->name_ << "' must be a tensor";
+      const std::vector<ExprPtr>& logical_shape = logical_type->shape_;
+      // The flatten keeps its arguments: the element count is layout-invariant
+      // and the result is already ND.
+      if (!is_flatten) {
+        args_changed = true;
+        new_args = is_load ? BlockTileLoadArgs(op, std::move(new_args), logical_shape)
+                           : BlockTensorSliceArgs(op, std::move(new_args), logical_shape);
+      }
     }
 
     auto new_return_type = BlockNzType(op->GetType(), op->span_);
@@ -455,9 +495,139 @@ class BlockNzMutator : public IRMutator {
   }
 
  private:
+  /// Rewrite ``tensor.slice``'s (shapes, offsets) into blocked coordinates.
+  ///
+  /// Only a window that narrows the *leading* axes is representable. A blocked
+  /// NZ view carries no stride of its own — ``MaterializeTensorStrides`` derives
+  /// a row-major one from the blocked shape — so the selected bytes have to be
+  /// contiguous. A leading-axis window is: those axes fold into the batch slot,
+  /// one whole ``R x C`` matrix per step. A row window is not: in NZ order one
+  /// layer's rows sit inside *every* column block of the parent, so
+  /// ``[layer*R, 0]`` selects ``C/c0`` disjoint runs that no contiguous stride
+  /// describes.
+  ///
+  /// A rank-reducing scalar index (``w[r]``) needs no ``drop_dims`` afterwards:
+  /// the axes it drops are leading ones, and the fold has already collapsed
+  /// every leading axis into the single batch slot.
+  std::vector<ExprPtr> BlockTensorSliceArgs(const CallPtr& op, std::vector<ExprPtr> args,
+                                            const std::vector<ExprPtr>& logical_shape) {
+    INTERNAL_CHECK_SPAN(args.size() >= 3, op->span_)
+        << "Internal error: tensor.slice expects at least (tensor, shapes, offsets), got " << args.size();
+
+    auto tensor = AsVarLike(args[0]);
+    INTERNAL_CHECK_SPAN(tensor, op->span_) << "Internal error: the NZ tensor.slice source must be a variable";
+    auto tensor_type = AsTensorTypeLike(tensor->GetType());
+    INTERNAL_CHECK_SPAN(tensor_type, op->span_)
+        << "Internal error: the NZ tensor.slice source must be a tensor";
+    const DataType dtype = tensor_type->dtype_;
+
+    auto shapes = As<MakeTuple>(args[1]);
+    auto offsets = As<MakeTuple>(args[2]);
+    INTERNAL_CHECK_SPAN(shapes && offsets, op->span_)
+        << "Internal error: tensor.slice coordinate arguments must be MakeTuples";
+    const size_t rank = shapes->elements_.size();
+    INTERNAL_CHECK_SPAN(rank == logical_shape.size() && offsets->elements_.size() == rank, op->span_)
+        << "Internal error: a tensor.slice window must have the source's own rank";
+
+    // Milestone 1 reads whole fractals only, so a *narrowed* valid_shape has no
+    // blocked form — the same rule ``BlockNzType`` applies to the tensor. The
+    // frontend writes a full one for an ordinary index, which says nothing and
+    // blocks like any other extent tuple.
+    // An omitted valid_shape reaches the op as an empty tuple, which says the
+    // same thing as no valid_shape at all: the window is valid throughout.
+    auto valid_shape = args.size() >= 4 ? As<MakeTuple>(args[3]) : nullptr;
+    if (valid_shape && valid_shape->elements_.empty()) valid_shape = nullptr;
+    if (valid_shape) {
+      CHECK_SPAN(valid_shape->elements_.size() == rank, op->span_)
+          << "NZ layout needs a full-rank valid_shape on a tensor.slice to block it, but this one is rank "
+          << valid_shape->elements_.size() << " against a rank-" << rank
+          << " window. Drop the valid_shape, or annotate the tensor as pl.ND.";
+      for (size_t axis = 0; axis < rank; ++axis) {
+        auto valid = As<ConstInt>(valid_shape->elements_[axis]);
+        auto size = As<ConstInt>(shapes->elements_[axis]);
+        CHECK_SPAN((valid && size && valid->value_ == size->value_) ||
+                       valid_shape->elements_[axis].get() == shapes->elements_[axis].get(),
+                   op->span_)
+            << "NZ layout does not support a tensor.slice whose valid_shape narrows the window: axis " << axis
+            << " is valid over less than it spans, and a partial fractal has no blocked form. "
+            << "Drop the valid_shape, or annotate the tensor as pl.ND.";
+      }
+    }
+
+    // A rank-reducing index drops leading axes only — the trailing pair is the
+    // fractal plane and was already required whole above.
+    if (args.size() >= 5) {
+      auto drop_dims = As<MakeTuple>(args[4]);
+      INTERNAL_CHECK_SPAN(drop_dims, op->span_)
+          << "Internal error: tensor.slice drop_dims must be a MakeTuple";
+      for (const auto& dim_expr : drop_dims->elements_) {
+        auto dim = As<ConstInt>(dim_expr);
+        INTERNAL_CHECK_SPAN(dim, op->span_)
+            << "Internal error: tensor.slice drop_dims entries must be ConstInt";
+        CHECK_SPAN(dim->value_ >= 0 && static_cast<size_t>(dim->value_) + 2 < rank, op->span_)
+            << "NZ layout supports dropping a leading axis only, but this tensor.slice drops axis "
+            << dim->value_ << " of the trailing fractal plane. Index a leading axis, or annotate the "
+            << "tensor as pl.ND.";
+      }
+    }
+
+    // The trailing matrix must be taken whole, which is what makes the selected
+    // bytes contiguous and the derived row-major stride correct.
+    auto whole_axis = [&](size_t axis, const char* name) {
+      auto extent = As<ConstInt>(logical_shape[axis]);
+      auto size = As<ConstInt>(shapes->elements_[axis]);
+      auto offset = As<ConstInt>(offsets->elements_[axis]);
+      CHECK_SPAN(extent && size && offset && size->value_ == extent->value_ && offset->value_ == 0, op->span_)
+          << "NZ layout supports slicing the leading axes only: shape[" << axis << "] (" << name
+          << ") must take the whole axis at offset 0. A window inside the trailing matrix selects one run "
+          << "per fractal column block, which no contiguous stride describes. Slice a leading axis, or "
+          << "annotate the tensor as pl.ND.";
+    };
+    whole_axis(rank - 2, "rows");
+    whole_axis(rank - 1, "cols");
+
+    // The leading axes fold row-major into the one batch slot -- extents
+    // multiply, offsets flatten against the parent's extents -- and a product
+    // of windows is a contiguous flat run only when every axis less significant
+    // than a narrowed one is taken whole. Slicing a [2, 4, R, C] tensor to
+    // [2, 2, R, C] at [0, 1, 0, 0] names batches {1, 2, 5, 6}, while the fold
+    // yields extent 4 at offset 1 -- the run {1, 2, 3, 4}. Refuse it rather
+    // than load the wrong weights.
+    bool rest_must_be_whole = false;
+    for (size_t axis = 0; axis + 2 < rank; ++axis) {
+      auto extent = As<ConstInt>(logical_shape[axis]);
+      auto size = As<ConstInt>(shapes->elements_[axis]);
+      auto offset = As<ConstInt>(offsets->elements_[axis]);
+      const bool whole = extent && size && offset && size->value_ == extent->value_ && offset->value_ == 0;
+      CHECK_SPAN(!rest_must_be_whole || whole, op->span_)
+          << "NZ layout supports a window on one leading axis only: shape[" << axis
+          << "] must take the whole axis at offset 0, because an axis before it already spans more "
+          << "than one element. The leading axes fold into one batch, and a narrowed axis under a "
+          << "spanning one selects a set no contiguous run describes. Slice a single leading axis, "
+          << "or annotate the tensor as pl.ND.";
+      // A symbolic extent could be anything, so it counts as spanning.
+      if (!size || size->value_ > 1) rest_must_be_whole = true;
+    }
+
+    // The blocked window carries no unit axis to drop: the fold already
+    // collapsed every leading axis into the batch slot, so the rank-reducing
+    // tail arguments go away with it.
+    std::vector<ExprPtr> blocked_args = {args[0],
+                                         BlockTupleArg(args[1], logical_shape, dtype, op->span_,
+                                                       /*is_offsets=*/false, facts_),
+                                         BlockTupleArg(args[2], logical_shape, dtype, op->span_,
+                                                       /*is_offsets=*/true, facts_)};
+    if (valid_shape) {
+      blocked_args.push_back(
+          BlockTupleArg(args[3], logical_shape, dtype, op->span_, /*is_offsets=*/false, facts_));
+    }
+    return blocked_args;
+  }
+
   /// Rewrite ``tile.load``'s (offsets, shapes, [valid_shape]) into blocked
   /// coordinates and enforce the milestone-1 scope guards.
-  std::vector<ExprPtr> BlockTileLoadArgs(const CallPtr& op, std::vector<ExprPtr> args) {
+  std::vector<ExprPtr> BlockTileLoadArgs(const CallPtr& op, std::vector<ExprPtr> args,
+                                         const std::vector<ExprPtr>& logical_shape) {
     INTERNAL_CHECK_SPAN(args.size() >= 3, op->span_)
         << "Internal error: tile.load expects at least (tensor, offsets, shapes), got " << args.size();
     auto tensor = AsVarLike(args[0]);
@@ -480,10 +650,10 @@ class BlockNzMutator : public IRMutator {
         << (target.has_value() ? MemorySpaceToString(*target) : std::string("no target_memory"))
         << ". An NZ tensor is a cube weight: load it into Mat, or annotate the tensor as pl.ND.";
 
-    args[1] = BlockTupleArg(args[1], dtype, op->span_, /*is_offsets=*/true, facts_);
-    args[2] = BlockTupleArg(args[2], dtype, op->span_, /*is_offsets=*/false, facts_);
+    args[1] = BlockTupleArg(args[1], logical_shape, dtype, op->span_, /*is_offsets=*/true, facts_);
+    args[2] = BlockTupleArg(args[2], logical_shape, dtype, op->span_, /*is_offsets=*/false, facts_);
     if (args.size() >= 4) {
-      args[3] = BlockTupleArg(args[3], dtype, op->span_, /*is_offsets=*/false, facts_);
+      args[3] = BlockTupleArg(args[3], logical_shape, dtype, op->span_, /*is_offsets=*/false, facts_);
     }
     // Codegen builds the ``pto.partition_view`` — and so pto-isa's ``gShape`` —
     // from valid_shape when the load carries one, falling back to shapes
