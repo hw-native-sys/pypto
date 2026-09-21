@@ -899,7 +899,7 @@ std::optional<MatmulTiling> AnalyzeMatmul(
     utils::DbcEmissionRoute full_k_dbc_route = utils::DbcEmissionRoute::kPipelinedInner,
     bool force_output_stationary = false,
     std::optional<tile_view_semantics::BoxedTileAlignment> output_box_alignment = std::nullopt,
-    const DirectDefMap* direct_defs = nullptr) {
+    const DirectDefMap* direct_defs = nullptr, bool require_full_n_for_bias = false) {
   auto call = As<Call>(assign->value_);
   if (!call || !call->op_) return std::nullopt;
 
@@ -1147,7 +1147,7 @@ std::optional<MatmulTiling> AnalyzeMatmul(
     // The architectural Bias memory has no Bias-to-Bias sub-window operation.
     // Restrict an already-resident source to full N during selection so an
     // unsupported narrower-N optimum cannot hide a legal M/K-tiled candidate.
-    if (bias_tile->GetMemorySpace() == MemorySpace::Bias) {
+    if (bias_tile->GetMemorySpace() == MemorySpace::Bias || require_full_n_for_bias) {
       cfg.min_n = static_cast<int>(N);
     }
   }
@@ -1471,6 +1471,7 @@ enum class LocalMNFoldPlacement {
 struct LocalMNFoldPlan {
   LocalMNFoldPlacement placement = LocalMNFoldPlacement::kNone;
   bool allow_dbc = false;
+  bool require_full_n_for_bias = false;
   const AssignStmt* store_stmt = nullptr;
   DataType scratch_dtype = DataType::FP32;
   const Var* remap_target = nullptr;
@@ -2772,14 +2773,13 @@ LocalMNFoldPlan AnalyzeLocalMNFoldPlan(const AssignStmtPtr& assign, const Siblin
     auto offsets =
         store_call && store_call->args_.size() >= 3 ? As<MakeTuple>(store_call->args_[1]) : nullptr;
     auto output = store_call && store_call->args_.size() >= 3 ? AsVarLike(store_call->args_[2]) : nullptr;
-    if (offsets && offsets->elements_.size() == 2 && output && (!is_bias || store_stmt == next_effect)) {
+    if (offsets && offsets->elements_.size() == 2 && output) {
       plan.placement = LocalMNFoldPlacement::kDirectStore;
       plan.store_stmt = store_stmt;
-    } else if (is_bias && store_stmt != next_effect) {
-      plan.diagnostic_code = "PH-AT-011";
-      plan.diagnostic_message =
-          "tile.matmul_bias N-window loads would move to its folded consumer store across an "
-          "intervening effect; left untouched to preserve the original bias snapshot";
+      // An intervening effect can change a tensor bias before a deferred
+      // N-window reload. Keep full N in the chooser's design space: it uses
+      // the already-loaded bias value and is safe even when the store is later.
+      plan.require_full_n_for_bias = is_bias && store_stmt != next_effect;
     }
   }
 
@@ -3718,10 +3718,10 @@ class AutoTileMutator : public IRMutator {
             assign, sibling_index, next_effect, direct_defs, vec_capacity_, source_pipeline_depth_);
         const DbcSemanticEligibility dbc_eligibility =
             mn_plan.allow_dbc ? DbcSemanticEligibility::kEnabled : DbcSemanticEligibility::kDisabled;
-        if (auto tiling = AnalyzeMatmul(assign, hints, dbc_groups_, dbc_eligibility,
-                                        utils::DbcEmissionRoute::kPipelinedInner,
-                                        /*force_output_stationary=*/false,
-                                        /*output_box_alignment=*/std::nullopt, &direct_defs)) {
+        if (auto tiling = AnalyzeMatmul(
+                assign, hints, dbc_groups_, dbc_eligibility, utils::DbcEmissionRoute::kPipelinedInner,
+                /*force_output_stationary=*/false,
+                /*output_box_alignment=*/std::nullopt, &direct_defs, mn_plan.require_full_n_for_bias)) {
           if (!tiling->needs_mn_tiling()) {
             // Whole output fits L0c — tile K only.  k < K here (k == K with
             // m == M, n == N needs no matmul tiling and was skipped by
@@ -3760,10 +3760,10 @@ class AutoTileMutator : public IRMutator {
           if (mn_plan.placement == LocalMNFoldPlacement::kMatScratch && planner == MemoryPlanner::PyPTO &&
               tiling->stationarity != utils::Stationarity::kOutputStationary) {
             std::vector<Diagnostic> discard;  // the first AnalyzeMatmul already emitted the hints
-            os_tiling = AnalyzeMatmul(assign, discard, dbc_groups_, dbc_eligibility,
-                                      utils::DbcEmissionRoute::kPipelinedInner,
-                                      /*force_output_stationary=*/true,
-                                      /*output_box_alignment=*/std::nullopt, &direct_defs);
+            os_tiling = AnalyzeMatmul(
+                assign, discard, dbc_groups_, dbc_eligibility, utils::DbcEmissionRoute::kPipelinedInner,
+                /*force_output_stationary=*/true,
+                /*output_box_alignment=*/std::nullopt, &direct_defs, mn_plan.require_full_n_for_bias);
             if (os_tiling) fold_tiling = &*os_tiling;
           }
           if (auto ms = TryFoldMatScratch(*fold_tiling, mn_plan)) {
