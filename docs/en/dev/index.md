@@ -49,7 +49,7 @@ Administrators enable the workflow in **Settings → Secrets and variables → A
 2. Optionally set `PR_AGENT_API_BASE` (default `https://api.deepseek.com`) and
    `PR_AGENT_MODEL` (default `deepseek-flash`) as repository variables. Use the
    provider's model ID without an `openai/` prefix; the workflow adds it for
-   OpenAI-compatible routing. Reviews use a 32,000-token context budget.
+   OpenAI-compatible routing. Reviews use a 64,000-token context budget.
 3. Set the repository variable `PR_AGENT_ENABLED` to `true` after the workflow
    is merged into the default branch. Unset it or set it to `false` to disable reviews.
 
