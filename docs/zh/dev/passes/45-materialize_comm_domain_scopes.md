@@ -71,7 +71,12 @@ alloc / view / dispatch 点在此时仍然可见。放在较晚阶段还能让�
 6. **改写 view 类型**（仅 host_orch）。对每个 view 绑定，mint 一个同
    `name_hint_` 的新 `Var`，类型为
    `DistributedTensorType(shape, dtype, memref, tensor_view, wb)`；用
-   `Substitute` 把所有对旧 view Var 的引用替换为新 Var。同一 alloc 被 N 次
+   `Substitute` 把所有对旧 view Var 的引用替换为新 Var。`Substitute` 只改写
+   *引用*，因此随后还要把定义每个新 Var 的 Call 按同一个带 `window_buffer_`
+   的类型重新 mint——否则该赋值语句结束时左值带回指、右值不带，违反
+   [`AssignTypeSymmetry`](99-verifier.md#built-in-rules)。重新 mint 只会*补上*
+   回指：仅当重建出的类型与 Var 的类型结构相等时才采用，真正的 shape / dtype /
+   view 分歧留给验证器报错。同一 alloc 被 N 次
    `pld.tensor.window` 物化的多个 view 共享同一 `shared_ptr<const WindowBuffer>`。
    chip-orch / InCore 形参类型不动。
 
@@ -99,7 +104,8 @@ pass 运行之后：
 
 - `CommDomainScopeStmt wrappers in each host_orch body` 已填（程序不分配 window buffer 时为空）。
 - 每个 `pld.tensor.window` 结果 Var 的类型是 `DistributedTensorType`，
-  `window_buffer_` 字段指向对应的 `WindowBuffer`。
+  `window_buffer_` 字段指向对应的 `WindowBuffer`；定义它的 Call 带同一个类型——
+  赋值两侧一致。
 - comm-domain 分析和 `LowerHostTensorCollectives` 看到的每个 host-level
   `pld.tensor.allreduce` 都已经有两个位置参数（在
   [`SynthesizeAllReduceSignals`](44-synthesize_allreduce_signals.md) 运行之后）。

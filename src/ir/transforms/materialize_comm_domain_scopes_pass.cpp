@@ -33,9 +33,11 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
@@ -554,6 +556,52 @@ class DispatchAnalyzer : public IRVisitor {
   return std::make_shared<IterArg>(iter_arg->name_hint_, new_type, iter_arg->initValue_, iter_arg->span_);
 }
 
+/// Re-mint the Call that *defines* a re-typed view Var so its own result type
+/// carries the same ``window_buffer_`` back-reference.
+///
+/// ``transform_utils::Substitute`` rewrites Var *references* — including an
+/// AssignStmt's LHS — but never the result type of the expression on the RHS.
+/// Without this rewrite, every ``data = pld.tensor.window(...)`` ends the pass
+/// with ``var.type.window_buffer_`` set and ``value.type.window_buffer_`` still
+/// ``nullopt``, which violates the ``AssignTypeSymmetry`` contract (#1285) that
+/// an AssignStmt's two sides carry structurally equal types.
+///
+/// The rewrite only ever *adds* the back-reference: it rebuilds the Call type
+/// from the Call's own fields plus the Var's window buffer and keeps it only
+/// when that reconstruction is structurally equal to the Var's type, so a
+/// genuine shape / dtype / view disagreement is left alone to be reported
+/// rather than papered over.
+///
+/// Call-only is exhaustive here, not an oversight of ``Submit`` (see
+/// `pass-submit-awareness.md`): a Var enters ``view_subst`` only as a
+/// ``pld.tensor.window`` result, a collective result, or a loop carry over one
+/// of those, and the collector records all three from a ``Call`` RHS. A Submit
+/// returns a TASK_ID-augmented TupleType, which is not a window view type.
+class DefiningCallRetyper : public IRMutator {
+ protected:
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    auto base = IRMutator::VisitStmt_(op);
+    auto assign = As<AssignStmt>(base);
+    if (!assign || !assign->var_ || !assign->value_) return base;
+
+    auto var_dt = As<DistributedTensorType>(assign->var_->GetType());
+    if (!var_dt || !var_dt->window_buffer_.has_value()) return base;
+
+    auto call = As<Call>(assign->value_);
+    if (!call) return base;
+    auto call_dt = As<DistributedTensorType>(call->GetType());
+    if (!call_dt || structural_equal(call_dt, var_dt)) return base;
+
+    auto retyped = std::make_shared<const DistributedTensorType>(
+        call_dt->shape_, call_dt->dtype_, call_dt->memref_, call_dt->tensor_view_, var_dt->window_buffer_);
+    if (!structural_equal(retyped, var_dt)) return base;
+
+    auto new_call =
+        std::make_shared<Call>(call->op_, call->args_, call->kwargs_, call->attrs_, retyped, call->span_);
+    return std::make_shared<AssignStmt>(assign->var_, new_call, assign->span_);
+  }
+};
+
 /// Follow a Var's def chain (through window / allreduce / all_to_all / allgather /
 /// all_to_all_v aliases and loop-carry init values) to the alloc-window-buffer it
 /// views, returning that alloc's ``WindowBuffer`` (the SAME object the scope slot
@@ -755,8 +803,14 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
   // Phase 7: rewrite host_orch body so every reference to a pld.tensor.window result
   // Var picks up the type-updated copy. The base IRMutator handles all uses;
   // Substitute is the wrapper that does exactly this transformation.
-  StmtPtr new_body = view_subst.empty() ? materialization_body
-                                        : transform_utils::Substitute(materialization_body, view_subst);
+  StmtPtr new_body = materialization_body;
+  if (!view_subst.empty()) {
+    new_body = transform_utils::Substitute(new_body, view_subst);
+    // Substitute rewrites references only; bring each re-typed Var's defining
+    // Call along so both sides of the assignment agree (#1285).
+    DefiningCallRetyper retyper;
+    new_body = retyper.VisitStmt(new_body);
+  }
 
   // Phase 8: wrap new_body in nested CommDomainScopeStmts. Outer = first
   // declared domain, inner = last. ``name_hint_`` is ``"comm_d<n>"`` so

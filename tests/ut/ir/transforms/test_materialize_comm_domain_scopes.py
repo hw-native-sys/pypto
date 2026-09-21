@@ -267,6 +267,51 @@ def test_single_alloc_all_devices_world_size_loop():
     assert view_types[0].window_buffer is wb
 
 
+def test_defining_call_type_carries_the_window_buffer_back_reference():
+    """The re-typed view Var and the Call that defines it must agree (#1285).
+
+    Phase 7 substitutes Var *references*, so without an explicit re-mint the
+    ``pld.tensor.window`` Call keeps the deducer's ``window_buffer``-less
+    ``DistributedTensorType`` while its LHS Var carries the back-reference —
+    an asymmetric AssignStmt that ``AssignTypeSymmetry`` rejects. The same
+    holds for a collective result Var that inherits the window's lineage.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            data = pld.window(data_buf, [256], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [4], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, device=r)
+            pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
+            return 0
+
+    result = _apply(P)
+    host = _get_func(result, "host_orch")
+
+    # Both sides of every window assignment point at the SAME WindowBuffer
+    # object the scope slot holds — structural equality alone cannot state this.
+    window_assigns = _find_window_calls(host)
+    assert len(window_assigns) == 2
+    for stmt in window_assigns:
+        assert isinstance(stmt.var.type, ir.DistributedTensorType)
+        assert isinstance(stmt.value.type, ir.DistributedTensorType)
+        assert stmt.value.type.window_buffer is stmt.var.type.window_buffer
+        assert stmt.value.type.window_buffer is not None
+
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.AssignTypeSymmetry)
+    assert passes.PropertyVerifierRegistry.verify(props, result) == []
+
+
 def test_allreduce_signal_inherits_data_comm_domain():
     """Signal buffers used only by pld.tensor.allreduce still become scope slots."""
 
