@@ -46,6 +46,7 @@ classifiers = [
 
 [project.scripts]
 pypto-ir-trace = "pypto.tools.ir_trace.cli:main"
+pypto-runtime-pin = "pypto.runtime.runtime_pin:main"
 
 [project.optional-dependencies]
 dev = [
@@ -89,6 +90,12 @@ ignore = [
 fixable = ["ALL"]
 
 [tool.ruff.lint.per-file-ignores]
+# `check_runtime_pin()` must run before the simpler imports it guards, so the
+# imports in these two modules are deliberately not at the top of the file.
+"python/pypto/runtime/task_interface.py" = ["E402"]
+"python/pypto/runtime/kernel_compiler.py" = ["E402"]
+# The unit suite must set PYPTO_SKIP_RUNTIME_PIN_CHECK before its first `pypto` import.
+"tests/ut/conftest.py" = ["E402"]
 # DSL type annotations (pl.Tile[..., pl.TileView(...)]) exceed line-length;
 # F841 suppressed where DSL assignments intentionally create IR nodes whose
 # Python binding is unused but structurally required by the pass output.

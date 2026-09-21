@@ -79,6 +79,13 @@ from .runner import (
     execute_compiled,
 )
 from .runtime_base import Worker
+from .runtime_pin import (
+    RuntimePinMismatch,
+    RuntimePinStatus,
+    RuntimePinWarning,
+    check_runtime_pin,
+    runtime_pin_status,
+)
 from .tensor_spec import ScalarSpec, TensorSpec
 from .worker import ChipWorker, RegistrationHandle
 
@@ -93,6 +100,11 @@ __all__ = [
     "log_level",
     "ensure_pto_isa_root",
     "pto_isa_include_dir",
+    "check_runtime_pin",
+    "runtime_pin_status",
+    "RuntimePinMismatch",
+    "RuntimePinStatus",
+    "RuntimePinWarning",
     "BenchmarkStats",
     "TraceInvocation",
     "TraceSpan",

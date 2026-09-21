@@ -163,6 +163,46 @@ ISA 头文件；但它永远不会被*读取* —— 环境里的值不等于 pi
 
 **与 pypto 的接口：** pypto 生成的 orchestration C++ 代码使用 simpler runtime API（`rt_submit_task`、`make_tensor_external` 等），simpler 实现该 API。运行时 API 是 pypto orchestration codegen 和 simpler 之间的契约。
 
+#### runtime pin {#the-runtime-pin}
+
+`runtime/` 本身就是 simpler 的 submodule，所以 PyPTO 对它的 pin 就是 gitlink ——
+`git rev-parse HEAD:runtime`。不存在第二份会漂移的 pin 文件，理由与
+`toolchain/versions.env` 不重复声明 pto-isa revision 相同。
+
+已安装的一侧没有任何能跟踪它的版本号：simpler 的 `pyproject.toml` 写着 `0.1.0`，而且永远
+如此。它唯一的 revision 身份是 `_task_interface.__build_commit__`，由
+`runtime/python/bindings/CMakeLists.txt` 在构建时用 `git rev-parse HEAD` 烧入。
+
+`pypto.runtime.runtime_pin.check_runtime_pin()` 比较两者。它在唯二于模块作用域导入 simpler
+的两个 PyPTO 模块（`pypto.runtime.task_interface` 与 `pypto.runtime.kernel_compiler`）导入时
+运行；不一致时抛出 `RuntimePinMismatch`（一个 `ImportError`），消息中给出两侧 revision 和重装
+命令。
+
+simpler 自带一道等价的守卫（`simpler.task_interface._assert_bindings_match_source_tree`），
+但它比较的是扩展与**它自己的**源码树，并且在旁边没有 `.git` 时直接返回。因此 wheel 安装，或
+把文件拷进 `site-packages` 的 `pip install ./runtime`，从来不会被检查 —— 而恰恰是这类安装最
+难发现陈旧：struct layout 变了之后，字段会静默读成 0，不报任何错。
+
+两组比较，两种严重级别：
+
+| 比较 | 含义 | 结果 |
+| ---- | ---- | ---- |
+| `__build_commit__` vs `git -C runtime rev-parse HEAD` | 已安装的 simpler 不是从这份源码构建的 | 报错 |
+| `git -C runtime rev-parse HEAD` vs `git rev-parse HEAD:runtime` | 你的 runtime 检出偏离了 PyPTO 的 pin | 警告（`RuntimePinWarning`） |
+
+第二项只是警告：在 runtime 分支上开发是正当的。
+
+其余情况一律**跳过**，绝不失败 —— wheel 安装的 PyPTO 没有 `runtime/`、`runtime/` 子模块未初始化（空目录，没有自己的
+revision）、环境里没有 git、或
+simpler 构建时无 git（空 stamp）。因为问题无法回答就拒绝运行，会弄坏每一个正当的安装。但
+「`_task_interface` 可导入却**没有** `__build_commit__` 属性」不算跳过：该属性只会在 stamp
+出现之前编译的扩展上缺失，那按定义就是另一个 revision。
+
+手动检查用 `pypto-runtime-pin`，它打印两侧并在不一致时返回非零；`pypto-runtime-pin --fix`
+重装 `runtime/` 并在全新解释器中复验。`PYPTO_SKIP_RUNTIME_PIN_CHECK=1` 可绕过检查。单元测试
+套件在 `tests/ut/conftest.py` 中设置了它，因为它把 simpler 整个 stub 掉了，不应被已安装的
+revision 绑架；系统测试跑真实 kernel，刻意不豁免。
+
 ## 接口总结
 
 每个仓库边界都有明确定义的接口：

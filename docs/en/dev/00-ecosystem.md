@@ -166,6 +166,51 @@ Executes compiled programs on Ascend hardware. Manages the three-program executi
 
 **Interface with pypto:** The orchestration C++ code that pypto generates uses the simpler runtime API (`rt_submit_task`, `make_tensor_external`, etc.), which simpler implements. The runtime API is the contract between pypto's orchestration codegen and simpler.
 
+#### The runtime pin
+
+`runtime/` *is* the simpler submodule, so PyPTO's pin on it is the gitlink —
+`git rev-parse HEAD:runtime`. There is no second pin file to drift, for the same reason
+`toolchain/versions.env` declines to restate the pto-isa revision.
+
+The installed side carries no version that tracks it: simpler's `pyproject.toml` says
+`0.1.0` and always will. Its only revision identity is `_task_interface.__build_commit__`,
+stamped by `runtime/python/bindings/CMakeLists.txt` at build time from `git rev-parse HEAD`.
+
+`pypto.runtime.runtime_pin.check_runtime_pin()` compares the two. It runs at import of the
+two PyPTO modules that import simpler at module scope — `pypto.runtime.task_interface` and
+`pypto.runtime.kernel_compiler` — and a mismatch raises `RuntimePinMismatch` (an
+`ImportError`) naming both revisions and the reinstall command.
+
+Simpler carries its own equivalent guard
+(`simpler.task_interface._assert_bindings_match_source_tree`), but that one compares the
+extension against *its own* source tree and returns early when there is no `.git` beside
+it. A wheel, or a `pip install ./runtime` that copies into `site-packages`, is therefore
+never checked — and that install is where staleness is hardest to see, because a changed
+struct layout makes fields read as 0 with no error.
+
+Two comparisons, two severities:
+
+| Comparison | Meaning | Result |
+| ---------- | ------- | ------ |
+| `__build_commit__` vs `git -C runtime rev-parse HEAD` | the installed simpler was not built from this tree | error |
+| `git -C runtime rev-parse HEAD` vs `git rev-parse HEAD:runtime` | your runtime checkout is off PyPTO's pin | warning (`RuntimePinWarning`) |
+
+The second is only a warning: working on a runtime branch is legitimate.
+
+Everything else is a **skip**, never a failure — a wheel-installed PyPTO with no
+`runtime/`, an uninitialized `runtime/` submodule (empty, so it has no revision of its
+own), no git available, or a simpler built without git (empty stamp). Refusing to
+run because the question is unanswerable would break every legitimate install. An
+importable `_task_interface` with *no* `__build_commit__` attribute is not a skip: the
+attribute only disappears on an extension compiled before the stamp existed, which is by
+definition a different revision.
+
+Check it by hand with `pypto-runtime-pin`, which prints both sides and exits non-zero on a
+mismatch; `pypto-runtime-pin --fix` reinstalls `runtime/` and re-verifies in a fresh
+interpreter. `PYPTO_SKIP_RUNTIME_PIN_CHECK=1` bypasses the check. The unit suite sets it in
+`tests/ut/conftest.py` because it stubs simpler and must not be gated on the installed
+revision; system tests run real kernels and are deliberately not exempted.
+
 ## Interface Summary
 
 Each repo boundary has a well-defined interface:

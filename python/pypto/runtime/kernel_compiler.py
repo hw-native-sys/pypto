@@ -24,6 +24,14 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+# `check_runtime_pin()` has to run before the simpler imports it guards, so the imports
+# below are deliberately not at the top of the file (E402 is ignored in pyproject.toml).
+from .runtime_pin import check_runtime_pin
+
+# The same guard `task_interface` applies, for the same reason: simpler_setup's compile
+# paths and toolchain tables move with the revision too. Cached, so this second call is free.
+check_runtime_pin()
+
 # Simpler is an optional build dependency, absent from compiler-only type-check environments.
 from simpler_setup import KernelCompiler as _SimplerCompilerSDK  # pyright: ignore[reportMissingImports]
 from simpler_setup.compile_paths import compiler_visible_path  # pyright: ignore[reportMissingImports]

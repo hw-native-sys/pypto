@@ -18,6 +18,16 @@ from types import ModuleType, SimpleNamespace
 from typing import Final
 from unittest.mock import MagicMock, patch
 
+# The unit suite stubs simpler wherever it needs it — `simpler_setup` and
+# `pypto.runtime.task_interface` are monkeypatched in sys.modules — so it never runs
+# against the installed runtime, and must not be gated on that runtime matching
+# `runtime/`. Set before the first `pypto` import below, so no import path can reach a
+# guarded module ahead of it; a developer can re-enable the guard for a run with
+# PYPTO_SKIP_RUNTIME_PIN_CHECK=0. The guard's own logic is covered directly in
+# tests/ut/runtime/test_runtime_pin.py, and system tests (tests/st) run real kernels
+# and are deliberately not exempted.
+os.environ.setdefault("PYPTO_SKIP_RUNTIME_PIN_CHECK", "1")
+
 import pytest
 from pypto import LogLevel, get_log_level, set_log_level
 from pypto import backend as _backend

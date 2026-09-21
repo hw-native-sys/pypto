@@ -195,6 +195,10 @@
       "category": "nonsemantic",
       "reason": "Synchronizes runtime and compiler logging thresholds only."
     },
+    "PYPTO_SKIP_RUNTIME_PIN_CHECK": {
+      "category": "nonsemantic",
+      "reason": "Suppresses the runtime-pin diagnostic only; the installed runtime revision it reports is separately part of the binary cache identity."
+    },
     "PYPTO_VERIFY_LEVEL": {
       "category": "fresh_request",
       "reason": "C++ captures its default once; use the effective verification policy."
