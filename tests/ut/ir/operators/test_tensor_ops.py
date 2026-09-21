@@ -410,6 +410,19 @@ def test_tensor_row_sum():
     assert isinstance(result_type, ir.TensorType)
 
 
+@pytest.mark.parametrize("is_binary", [False, True])
+def test_tensor_col_sum_strategy_roundtrip(is_binary):
+    @pl.program
+    class Program:
+        @pl.function
+        def main(self, x: pl.Tensor[[63, 192], pl.FP32]) -> pl.Tensor[[1, 192], pl.FP32]:
+            result = pl.col_sum(x, is_binary=is_binary)
+            return result
+
+    reparsed = pl.parse(ir.python_print(Program))
+    ir.assert_structural_equal(reparsed, Program)
+
+
 def test_tensor_col_sum():
     """tensor.col_sum reduces axis=-2 (the M dim of [..., M, N]) with keepdim=True."""
     span = ir.Span.unknown()

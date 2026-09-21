@@ -97,6 +97,8 @@ results differ within tolerance rather than being wrong. Reductions over a parti
 tile depend on the pad value; see
 [Memory § valid shape](../language/03-memory.md#valid-shape-and-padding).
 
+Tensor `pl.col_sum(x, is_binary=True)` selects binary-tree reduction with compiler-managed scratch of shape `[ceil(M/2), N]` for static 2D inputs (full input shape otherwise). The default `False` preserves sequential reduction. This changes floating-point summation order and can increase UB usage. Tile callers continue to select the tree by passing `tmp_tile`.
+
 ## Broadcast and expand
 
 | Operator | Reach | What it does |

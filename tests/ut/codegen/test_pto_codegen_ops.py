@@ -4035,6 +4035,24 @@ class TestColReductionCodegen:
         assert "pto.tcolsum" in mlir, f"Expected pto.tcolsum in codegen output:\n{mlir}"
         assert "isBinary" not in mlir, f"Expected no isBinary attribute in codegen output:\n{mlir}"
 
+    @pytest.mark.parametrize("is_binary", [False, True])
+    def test_tensor_col_sum_strategy_codegen(self, is_binary):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                input: pl.Tensor[[63, 32], pl.FP32],
+                output: pl.Out[pl.Tensor[[1, 32], pl.FP32]],
+            ) -> pl.Tensor[[1, 32], pl.FP32]:
+                result = pl.col_sum(input, is_binary=is_binary)
+                output[0:1, 0:32] = result
+                return output
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tcolsum" in mlir
+        assert ("isBinary = true" in mlir) == is_binary
+
     def test_col_sum_codegen_binary(self):
         """tile.col_sum with tmp_tile emits isBinary = true."""
 

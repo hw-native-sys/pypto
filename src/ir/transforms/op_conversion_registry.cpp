@@ -1418,10 +1418,10 @@ void OpConversionRegistry::RegisterReductionOps() {
   // Unlike the row_sum-style scratch above, the last dim must NOT be padded to
   // 128 — a wider tmp makes the column argmax iterate past the valid columns and
   // return the last-row index for every column.
-  auto MakeArgReductionConv = [](const std::string& tile_op) -> ConversionFunc {
-    return [tile_op](const std::vector<ExprPtr>& args,
-                     const std::vector<std::pair<std::string, std::any>>& kwargs,
-                     const Span& span) -> ConversionResult {
+  auto MakeScratchReductionConv = [](const std::string& tile_op, bool half_rows = false) -> ConversionFunc {
+    return [tile_op, half_rows](const std::vector<ExprPtr>& args,
+                                const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                const Span& span) -> ConversionResult {
       INTERNAL_CHECK_SPAN(args.size() == 1, span) << tile_op << " conversion expects 1 arg (input tile)";
       auto& op_reg = OpRegistry::GetInstance();
 
@@ -1430,7 +1430,15 @@ void OpConversionRegistry::RegisterReductionOps() {
       INTERNAL_CHECK_SPAN(tile_type, span)
           << tile_op << " conversion: input must be TileType, got " << input->GetType()->TypeName();
 
-      auto shape_tuple = std::make_shared<MakeTuple>(tile_type->shape_, span);
+      auto tmp_shape = tile_type->shape_;
+      // TCOLSUM's binary path stores only the first pairwise stage in UB.
+      // Keep a full-size fallback for non-static or higher-rank tile shapes.
+      if (half_rows && tmp_shape.size() == 2) {
+        if (auto rows = As<ConstInt>(tmp_shape[0]); rows && rows->value_ > 0) {
+          tmp_shape[0] = std::make_shared<ConstInt>((rows->value_ + 1) / 2, DataType::INDEX, span);
+        }
+      }
+      auto shape_tuple = std::make_shared<MakeTuple>(tmp_shape, span);
       std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", tile_type->dtype_},
                                                                      {"target_memory", MemorySpace::Vec}};
       auto create_call = op_reg.Create("tile.create", {shape_tuple}, create_kwargs, span);
@@ -1449,20 +1457,27 @@ void OpConversionRegistry::RegisterReductionOps() {
   RegisterCustom("tensor.row_min", MakeReductionConv("tile.row_min"));
   RegisterCustom("tensor.row_prod", MakeReductionConv("tile.row_prod"));
 
-  // tile.col_sum's 1-arg form is the sequential reduction path — no tmp_tile workspace
-  // needed, so a plain 1:1 name rewrite is enough. tile.col_max / tile.col_min are
-  // likewise 1-arg, so the same simple rewrite applies.
-  RegisterSimple("tensor.col_sum", "tile.col_sum");
+  // Binary col_sum uses ceil(M/2) scratch rows for a static 2D input.
+  RegisterCustom(
+      "tensor.col_sum",
+      [binary_conv = MakeScratchReductionConv("tile.col_sum", true)](
+          const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+          const Span& span) -> ConversionResult {
+        if (GetKwargOr<bool>(kwargs, "is_binary", false)) {
+          return binary_conv(args, {}, span);
+        }
+        return ConversionResult{OpRegistry::GetInstance().Create("tile.col_sum", args, span)};
+      });
   RegisterSimple("tensor.col_max", "tile.col_max");
   RegisterSimple("tensor.col_min", "tile.col_min");
   RegisterSimple("tensor.col_prod", "tile.col_prod");
 
   // Argmax/argmin all require a tmp scratch tile (including the column variants,
   // unlike col_max/col_min), sized exactly like the source (no 128 padding).
-  RegisterCustom("tensor.row_argmax", MakeArgReductionConv("tile.row_argmax"));
-  RegisterCustom("tensor.row_argmin", MakeArgReductionConv("tile.row_argmin"));
-  RegisterCustom("tensor.col_argmax", MakeArgReductionConv("tile.col_argmax"));
-  RegisterCustom("tensor.col_argmin", MakeArgReductionConv("tile.col_argmin"));
+  RegisterCustom("tensor.row_argmax", MakeScratchReductionConv("tile.row_argmax"));
+  RegisterCustom("tensor.row_argmin", MakeScratchReductionConv("tile.row_argmin"));
+  RegisterCustom("tensor.col_argmax", MakeScratchReductionConv("tile.col_argmax"));
+  RegisterCustom("tensor.col_argmin", MakeScratchReductionConv("tile.col_argmin"));
 }
 
 // ============================================================================

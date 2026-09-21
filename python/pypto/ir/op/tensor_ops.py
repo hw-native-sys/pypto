@@ -1169,7 +1169,7 @@ def row_prod(input: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tensor.row_prod", [input], {}, actual_span)
 
 
-def col_sum(input: Expr, span: Span | None = None) -> Call:
+def col_sum(input: Expr, span: Span | None = None, *, is_binary: bool = False) -> Call:
     """Column-wise sum reduction (reduces along axis=-2, keeps dim).
 
     Output shape is ``[..., 1, N]`` for an input of shape ``[..., M, N]``.
@@ -1177,12 +1177,16 @@ def col_sum(input: Expr, span: Span | None = None) -> Call:
     Args:
         input: Input tensor
         span: Optional source span for debugging (auto-captured if not provided)
+        is_binary: Select binary-tree reduction with compiler-managed scratch.
 
     Returns:
         Call expression for column-wise sum reduction
     """
+    if not isinstance(is_binary, bool):
+        raise TypeError(f"col_sum is_binary must be bool, got {type(is_binary).__name__}")
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tensor.col_sum", [input], {}, actual_span)
+    kwargs = {"is_binary": True} if is_binary else {}
+    return _ir_core.create_op_call("tensor.col_sum", [input], kwargs, actual_span)
 
 
 def col_max(input: Expr, span: Span | None = None) -> Call:

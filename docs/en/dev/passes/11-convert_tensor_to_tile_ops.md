@@ -16,6 +16,12 @@ The pass also updates call sites in orchestration/opaque functions: for each new
 
 **When to use**: Run after `OutlineClusterScopes` and before `OptimizeOrchTensors`.
 
+`tensor.col_sum` uses the single-operand sequential tile form by default.
+With `is_binary=True`, the converter creates Vec scratch of shape `[ceil(M/2), N]` for static 2D inputs
+(full input shape otherwise), preserving the input dtype and emits `tile.col_sum(input, scratch)`. The Tensor-only
+strategy attribute is consumed here; codegen selects `isBinary=true` from
+the extra Tile operand.
+
 ## API
 
 | C++ | Python | Level |

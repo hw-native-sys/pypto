@@ -8297,5 +8297,38 @@ class TestTensorCastConversion:
         assert "saturation_mode" not in cast_calls[0].kwargs
 
 
+@pytest.mark.parametrize("rows", [1, 3, 63, 64, 65])
+def test_col_sum_binary_uses_half_row_scratch(rows):
+    scratch_rows = (rows + 1) // 2
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[rows, 32], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, 32], pl.FP32]],
+        ) -> pl.Tensor[[1, 32], pl.FP32]:
+            r = pl.col_sum(x, is_binary=True)
+            out[0:1, 0:32] = r
+            return out
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[rows, 32], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, 32], pl.FP32]],
+        ) -> pl.Tensor[[1, 32], pl.FP32]:
+            xt = pl.load(x, [0, 0], [rows, 32])
+            tmp = pl.tile.create([scratch_rows, 32], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+            r = pl.tile.col_sum(xt, tmp)
+            stored = pl.store(r, [0, 0], out)
+            return stored
+
+    _assert_convert_equal(Before, Expected)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

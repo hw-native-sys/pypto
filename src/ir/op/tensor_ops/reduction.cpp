@@ -237,6 +237,7 @@ REGISTER_OP("tensor.col_sum")
     .set_op_category("TensorOp")
     .set_description("Column-wise sum reduction (reduces along axis=-2 by default)")
     .add_argument("input", "Input tensor (TensorType)")
+    .set_attr<bool>("is_binary")
     .set_attr<int>("axis")
     .set_attr<bool>("keep_dim")
     .f_deduce_type([](const std::vector<ExprPtr>& args,

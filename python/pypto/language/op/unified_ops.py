@@ -1271,22 +1271,22 @@ def row_prod(input, tmp_tile: Tile | None = None):
 
 
 @overload
-def col_sum(input: Tensor, tmp_tile: None = ...) -> Tensor: ...
+def col_sum(input: Tensor, tmp_tile: None = ..., *, is_binary: bool = False) -> Tensor: ...
 @overload
 def col_sum(input: Tile, tmp_tile: Tile | None = ...) -> Tile: ...
-def col_sum(input, tmp_tile: Tile | None = None):
+def col_sum(input, tmp_tile: Tile | None = None, *, is_binary: bool = False):
     """Column-wise sum reduction, dispatched by input type.
 
-    For Tile inputs, passing ``tmp_tile`` activates the binary-tree reduction
-    path; omitting it uses the sequential path. Tensor inputs must omit it: the
-    tensor-to-tile conversion always lowers to the sequential path and allocates
-    its own scratch, so a ``tmp_tile`` there could not select the requested
-    strategy and raises instead.
+    Tensor inputs accept ``is_binary=True`` to request compiler-managed scratch
+    and binary-tree reduction; the default is sequential. Tile inputs select
+    the tree by passing ``tmp_tile``. The tree changes floating-point sum order.
     """
     if isinstance(input, Tensor):
         _reject_tmp_for_tensor("col_sum", tmp_tile, "tmp_tile")
-        return _tensor.col_sum(input)
+        return _tensor.col_sum(input, is_binary=is_binary)
     if isinstance(input, Tile):
+        if is_binary:
+            raise TypeError("pl.col_sum is_binary is Tensor-only; pass tmp_tile for Tile inputs")
         return _tile.col_sum(input, tmp_tile)
     _raise_type_dispatch_error("col_sum", input)
 

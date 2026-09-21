@@ -1372,19 +1372,21 @@ def row_prod(input: Tensor) -> Tensor:
     return Tensor(expr=call_expr)
 
 
-def col_sum(input: Tensor) -> Tensor:
+def col_sum(input: Tensor, *, is_binary: bool = False) -> Tensor:
     """Column-wise sum reduction (reduces along axis=-2, keeps dim).
 
     Output shape is ``[..., 1, N]`` for an input of shape ``[..., M, N]``.
 
     Args:
         input: Input tensor
+        is_binary: Use binary-tree reduction with compiler-managed scratch.
+            Defaults to sequential reduction; True changes floating-point sum order.
 
     Returns:
         Tensor wrapping the col_sum operation
     """
     input_expr = input.unwrap()
-    call_expr = _ir_ops.col_sum(input_expr)
+    call_expr = _ir_ops.col_sum(input_expr, is_binary=is_binary)
     return Tensor(expr=call_expr)
 
 

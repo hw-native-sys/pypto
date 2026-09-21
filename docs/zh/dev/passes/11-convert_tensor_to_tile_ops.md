@@ -16,6 +16,11 @@
 
 **使用时机**：在 `OutlineClusterScopes` 之后、`OptimizeOrchTensors` 之前运行。
 
+`tensor.col_sum` 默认转换为单输入的顺序归约 Tile 形式。设置
+`is_binary=True` 时，转换器创建与输入类型相同的 Vec 临时缓冲区；静态二维输入使用 `[ceil(M/2), N]`，其他形状保守使用输入大小，
+并生成 `tile.col_sum(input, scratch)`。Tensor 层的策略属性在这里消费，
+codegen 根据额外的 Tile 参数选择 `isBinary=true`。
+
 ## API
 
 | C++ | Python | 级别 |

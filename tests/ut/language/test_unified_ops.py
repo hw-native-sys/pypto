@@ -1746,6 +1746,20 @@ class TestUnifiedOpsCrossPathKwargs:
 
         ir.assert_structural_equal(unified.unwrap(), explicit.unwrap())
 
+    def test_col_sum_tensor_binary_strategy(self):
+        x = _tensor("x", [63, 64])
+        actual = unified_ops.col_sum(x, is_binary=True)
+        expected = pl.tensor.col_sum(x, is_binary=True)
+        ir.assert_structural_equal(actual.unwrap(), expected.unwrap())
+        assert not ir.structural_equal(actual.unwrap(), unified_ops.col_sum(x).unwrap())
+        ir.assert_structural_equal(
+            unified_ops.col_sum(x, is_binary=False).unwrap(), unified_ops.col_sum(x).unwrap()
+        )
+
+    def test_col_sum_binary_requires_bool(self):
+        with pytest.raises(TypeError, match="is_binary must be bool"):
+            unified_ops.col_sum(_tensor("x", [8, 64]), is_binary="true")  # type: ignore[arg-type]
+
     def test_col_sum_tile_path_still_selects_binary_tree(self):
         """tmp_tile is honoured on the Tile path — it selects binary-tree reduction."""
         t = _tile("t", [64, 64], DataType.FP32)

@@ -43,7 +43,7 @@
 | ---- | ---- | ---- |
 | split-K / 原子加 | 末位，逐次运行不同 | 跨核的累加顺序不固定 |
 | FP16 / BF16 累加 | 随规约长度增长 | 能宽着累加就用 FP32 |
-| 规约形状 | 二叉树 vs 顺序 | `col_sum` 传不传 `tmp_tile` 会改变顺序 |
+| 规约形状 | 二叉树 vs 顺序 | Tensor 的 `col_sum(x, is_binary=True)` 或 Tile 的 `tmp_tile` 会改变顺序 |
 | backend 差异 | 指令级 | 同一个 op 在不同 backend 上不必逐位相同 |
 | 多跳 cast | **通常没有** —— 见下 | `LegalizeTileCast` 展开 ISA 一步做不到的转换 |
 
