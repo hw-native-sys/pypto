@@ -13,10 +13,12 @@
 #include <any>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/buffer_type_support.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -110,9 +112,9 @@ TypePtr DeduceBufferTransfer(const std::vector<ExprPtr>& args, bool load) {
   CHECK(tensor && buffer) << name << " requires an ordinary GM TensorType and a BufferType";
   CHECK(tensor->shape_.size() == 2 && buffer->shape_.size() == 2)
       << name << " requires rank-2 tensor and buffer operands";
-  CHECK(tensor->dtype_ == DataType::FP32 && buffer->dtype_ == DataType::FP32 &&
+  CHECK(tensor->dtype_ == buffer->dtype_ && backend::IsDenseBufferTransferDtype(buffer->dtype_) &&
         buffer->memory_space_ == MemorySpace::Vec)
-      << name << " currently requires FP32 GM tensors and Vec buffers";
+      << name << " requires matching FP16/BF16/FP32/INT32 GM tensors and Vec buffers";
   auto offsets = As<MakeTuple>(args[1]);
   auto valid = As<MakeTuple>(args[2]);
   CHECK(offsets && offsets->elements_.size() == 2 && valid && valid->elements_.size() == 2)
@@ -227,6 +229,29 @@ REGISTER_OP("buffer.store")
                       const std::vector<std::pair<std::string, std::any>>&) {
       return DeduceBufferTransfer(args, false);
     });
+
+// Runtime identity reads are scalar values, not storage handles. They use the
+// same wrapper ABI as their logical Tile counterparts and have no memory effects.
+[[maybe_unused]] const bool kBufferSpmdQueriesRegistered = [] {
+  for (const auto* name : {"buffer.get_block_idx", "buffer.get_block_num", "buffer.get_subblock_idx"}) {
+    OpRegistry::GetInstance()
+        .Register(name)
+        .set_description("Read a scalar SPMD identity from the kernel runtime ABI")
+        .no_argument()
+        .set_op_category("BufferOp")
+        .set_ir_stage(OpIRStage::Buffer)
+        .set_internal_only()
+        .no_execution_memory_access()
+        .set_output_arity(1)
+        .set_buffer_result_behavior(BufferResultBehavior::Value)
+        .f_deduce_type([name](const std::vector<ExprPtr>& args,
+                              const std::vector<std::pair<std::string, std::any>>&) -> TypePtr {
+          CHECK(args.empty()) << name << " requires no arguments";
+          return std::make_shared<ScalarType>(DataType::INDEX);
+        });
+  }
+  return true;
+}();
 
 }  // namespace ir
 }  // namespace pypto

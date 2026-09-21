@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "pypto/backend/common/buffer_elementwise_recipes.h"
+#include "pypto/backend/common/buffer_type_support.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -60,12 +61,12 @@ std::vector<int64_t> StaticExtents(const std::vector<ExprPtr>& extents, const Sp
 
 BufferTypePtr DenseDescriptor(const TileTypePtr& tile, const Span& span) {
   const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
-  CHECK_SPAN(tile->shape_.size() == 2 && tile->dtype_ == DataType::FP32 &&
+  CHECK_SPAN(tile->shape_.size() == 2 && backend::IsDenseBufferTransferDtype(tile->dtype_) &&
                  tile->GetMemorySpace() == MemorySpace::Vec && view.blayout == TileLayout::row_major &&
                  view.slayout == TileLayout::none_box && view.fractal == 512 && view.pad == PadValue::null &&
                  view.compact == CompactMode::null,
              span)
-      << "LowerTileToBuffer: this recipe requires dense rank-2 Vec FP32 tiles";
+      << "LowerTileToBuffer: this recipe requires dense rank-2 Vec FP16/BF16/FP32/INT32 tiles";
   const auto view_offset = As<ConstInt>(view.start_offset);
   CHECK_SPAN(!view.start_offset || (view_offset && view_offset->value_ == 0), span)
       << "LowerTileToBuffer: nonzero tile view offsets require an explicit Buffer view recipe";
@@ -353,6 +354,15 @@ class TileToBufferMutator : public IRMutator {
     INTERNAL_CHECK_SPAN(call->op_, call->span_) << "Internal error: device call has no operator";
     CHECK_SPAN(call->attrs_.empty(), call->span_)
         << "LowerTileToBuffer: device-call attributes require an explicit conversion contract";
+    for (const auto& [logical, physical] : {std::pair{"tile.get_block_idx", "buffer.get_block_idx"},
+                                            std::pair{"tile.get_block_num", "buffer.get_block_num"},
+                                            std::pair{"tile.get_subblock_idx", "buffer.get_subblock_idx"}}) {
+      if (!IsOp(call, logical)) continue;
+      CHECK_SPAN(result && call->args_.empty() && call->kwargs_.empty(), call->span_)
+          << "LowerTileToBuffer: SPMD queries require an SSA result and no operands or kwargs";
+      auto query = OpRegistry::GetInstance().CreateInternal(physical, {}, {}, call->span_);
+      return std::make_shared<AssignStmt>(result, query, call->span_);
+    }
     if (IsOp(call, "tile.alloc")) {
       INTERNAL_CHECK_SPAN(result, call->span_) << "Internal error: allocation has no pointer definition";
       auto found = storage_.roots.find(result.get());
@@ -360,9 +370,13 @@ class TileToBufferMutator : public IRMutator {
       std::vector<ExprPtr> args{std::make_shared<MakeTuple>(std::vector<ExprPtr>{}, call->span_)};
       if (addressed_) args.push_back(found->second.memory->byte_offset_);
       const auto& handle = found->second.handle;
+      // Synthetic Tile allocations have no source location. The indexed handle
+      // retains the source of the Tile whose storage this allocation provides.
+      const auto& span =
+          call->span_.is_valid() && !call->span_.filename_.empty() ? call->span_ : handle->span_;
       auto allocation =
-          OpRegistry::GetInstance().CreateInternal("buffer.alloc", args, {}, handle->GetType(), call->span_);
-      return std::make_shared<AssignStmt>(handle, allocation, call->span_);
+          OpRegistry::GetInstance().CreateInternal("buffer.alloc", args, {}, handle->GetType(), span);
+      return std::make_shared<AssignStmt>(handle, allocation, span);
     }
     if (IsOp(call, "tile.create")) {
       INTERNAL_CHECK_SPAN(result, call->span_) << "Internal error: tile.create has no result";
@@ -394,13 +408,41 @@ class TileToBufferMutator : public IRMutator {
     if (const auto* recipe = As<GlobalVar>(call->op_)
                                  ? nullptr
                                  : backend::FindLogicalBufferElementwiseRecipe(call->op_->name_)) {
-      INTERNAL_CHECK_SPAN(result && call->args_.size() == recipe->input_count, call->span_)
-          << "Internal error: malformed Tile elementwise recipe operands or result";
+      INTERNAL_CHECK_SPAN(result, call->span_) << "Internal error: Tile elementwise recipe has no result";
+      const auto& entry = OpRegistry::GetInstance().GetEntry(call->op_->name_);
+      INTERNAL_CHECK_SPAN(call->args_.size() == entry.GetArgumentCount(), call->span_)
+          << "Internal error: malformed Tile elementwise recipe operand count";
+      ValidateKwargs(call->kwargs_, entry.GetOp()->GetAttrs(), call->op_->name_);
+      const auto destination = Handle(result);
+      const auto dtype = As<BufferType>(destination->GetType())->dtype_;
       std::vector<ExprPtr> args;
-      for (const auto& input : call->args_) args.push_back(Handle(input));
-      args.push_back(Handle(result));
-      auto lowered =
-          OpRegistry::GetInstance().CreateInternal(recipe->buffer_op, args, call->kwargs_, call->span_);
+      for (const auto& input : recipe->inputs) {
+        INTERNAL_CHECK_SPAN(input.logical_index < call->args_.size(), call->span_)
+            << "Internal error: malformed Tile elementwise recipe operands";
+        const auto& source = call->args_[input.logical_index];
+        if (input.kind == backend::BufferElementwiseOperandKind::Buffer) {
+          args.push_back(Handle(source));
+        } else {
+          // Scalar representation belongs to the lowering contract. The emitter
+          // consumes the resulting type and never repairs element operands.
+          auto value = VisitExpr(source);
+          const auto source_dtype = GetScalarDtype(value);
+          CHECK_SPAN(source_dtype.IsSignedInt() || source_dtype == DataType::INDEX ||
+                         source_dtype == DataType::FP16 || source_dtype == DataType::BF16 ||
+                         source_dtype == DataType::FP32,
+                     source->span_)
+              << "LowerTileToBuffer: element scalar conversion requires a signed integer, INDEX, "
+                 "FP16, BF16 or FP32 value";
+          if (source_dtype == DataType::INDEX) value = MakeCast(value, DataType::INT64, source->span_);
+          args.push_back(GetScalarDtype(value) == dtype ? value : MakeCast(value, dtype, source->span_));
+        }
+      }
+      args.push_back(destination);
+      // Shape and dtype of tile.full have already selected the physical
+      // destination; they are not instruction attributes. Other registered
+      // kwargs retain their typed schema and are checked during construction.
+      const auto kwargs = IsOp(call, "tile.full") ? decltype(call->kwargs_){} : call->kwargs_;
+      auto lowered = OpRegistry::GetInstance().CreateInternal(recipe->buffer_op, args, kwargs, call->span_);
       return std::make_shared<EvalStmt>(lowered, call->span_);
     }
     if (IsOp(call, "tile.move")) {

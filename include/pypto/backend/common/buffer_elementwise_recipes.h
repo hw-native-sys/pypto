@@ -25,15 +25,22 @@ namespace backend {
 enum class BufferPrecisionKind { None, Div, Log, Recip };
 enum class BufferElementwiseTypePolicy { MatchingVec, StaticDenseFP32 };
 enum class BufferDestinationAliasPolicy { ExactOrDisjoint, Disjoint };
+enum class BufferElementwiseOperandKind { Buffer, ElementScalar };
+
+/// Select a logical operand and state its already-resolved Buffer-stage type.
+struct BufferElementwiseInput {
+  size_t logical_index;
+  BufferElementwiseOperandKind kind = BufferElementwiseOperandKind::Buffer;
+};
 
 /// One source of truth for conversion, explicit operands, and native emission.
-/// All inputs read data/metadata; operand input_count writes data and reads
-/// metadata. Writes cover the active region, not necessarily the allocation.
+/// Buffer inputs read data/metadata; scalar inputs have no memory effects.
+/// The final operand writes active data and reads destination metadata.
 struct BufferElementwiseRecipe {
   const char* logical_op;
   const char* buffer_op;
   const char* native_op;
-  size_t input_count;
+  std::vector<BufferElementwiseInput> inputs;
   BufferPrecisionKind precision = BufferPrecisionKind::None;
   BufferElementwiseTypePolicy types = BufferElementwiseTypePolicy::StaticDenseFP32;
   BufferDestinationAliasPolicy destination_alias = BufferDestinationAliasPolicy::ExactOrDisjoint;

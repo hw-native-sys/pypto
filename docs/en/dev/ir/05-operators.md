@@ -26,6 +26,12 @@ The internal Buffer-stage GM and addition operations have no public DSL wrappers
 These use separate data/metadata effects. See [Buffer contracts](02-types.md#buffer-operator-contracts)
 for shape, dtype, valid-state, and alias requirements.
 
+Internal `buffer.get_block_idx`, `buffer.get_block_num`, and
+`buffer.get_subblock_idx` are zero-argument Buffer-stage queries. They return
+an INDEX scalar (`BufferResultBehavior.Value`) with no execution memory access,
+using the existing runtime-supplied SPMD kernel parameters. They are not public
+DSL operations; lowering creates them from the corresponding Tile queries.
+
 ### Typed Buffer elementwise recipes
 
 `backend/common/buffer_elementwise_recipes` is the shared production table for
@@ -35,8 +41,8 @@ PTO emission reads that same recipe; it does not reconstruct Tile IR, invoke
 legacy callbacks, or choose storage. The table is deliberately separate from
 legacy backend callback registration.
 
-| Logical operation | Buffer operation | Native instruction | Source buffers |
-| ----------------- | ---------------- | ------------------ | -------------- |
+| Logical operation | Buffer operation | Native instruction | Inputs |
+| ----------------- | ---------------- | ------------------ | ------ |
 | `tile.add` | `buffer.add` | `pto.tadd` | 2 |
 | `tile.mul` | `buffer.mul` | `pto.tmul` | 2 |
 | `tile.sub` | `buffer.sub` | `pto.tsub` | 2 |
@@ -50,19 +56,48 @@ legacy backend callback registration.
 | `tile.relu` | `buffer.relu` | `pto.trelu` | 1 |
 | `tile.log` | `buffer.log` | `pto.tlog` | 1 |
 | `tile.recip` | `buffer.recip` | `pto.trecip` | 1 |
+| `tile.adds` | `buffer.adds` | `pto.tadds` | buffer, scalar |
+| `tile.subs` | `buffer.subs` | `pto.tsubs` | buffer, scalar |
+| `tile.muls` | `buffer.muls` | `pto.tmuls` | buffer, scalar |
+| `tile.divs` | `buffer.divs` | `pto.tdivs` | buffer, scalar |
+| `tile.maximums` | `buffer.maximums` | `pto.tmaxs` | buffer, scalar |
+| `tile.minimums` | `buffer.minimums` | `pto.tmins` | buffer, scalar |
+| `tile.lrelu` | `buffer.lrelu` | `pto.tlrelu` | buffer, scalar |
+| `tile.full` | `buffer.full` | `pto.texpands` | scalar |
 
 Every call has its destination as the final operand and returns `Void`. Sources
 read data and metadata; destinations write active data and read metadata. This
-is not a whole-allocation initialization guarantee. All operands need identical
+is not a whole-allocation initialization guarantee. All buffer operands need identical
 physical descriptors; broadcasting and partial-combine semantics are separate
 recipes. These operators are compiler-internal, not new public DSL functions.
 
-The eleven additions beyond `add` and `mul` require FP32, rank 1 or 2, static
+Recipes other than `add` and `mul` require FP32, rank 1 or 2, static
 valid extents, dense row-major Vec storage, `none_box`, fractal 512, and no padding
 or compact mode. Their dtype contract does not inherit FP16 support from the
-native descriptor formatter. Existing `add`/`mul` descriptor validation and
-FP16/FP32 native emission remain available; automatic conversion currently uses
-static rank-2 FP32 descriptors. Both Ascend910B and Ascend950 use these recipes.
+native descriptor formatter. `add`/`mul` require FP16/FP32/INT32 operands.
+Automatic conversion and ordinary GM transfers support static rank-2
+FP16/BF16/FP32/INT32 descriptors; BF16 arithmetic requires a separate native
+recipe. Both Ascend910B and Ascend950 use these contracts.
+
+The public `tile.full` wrapper accepts both numeric literals and parsed scalar
+constants, so positional and keyword fill values agree. Integer placeholders
+use `ConstFloat` for a floating destination; explicitly typed constants keep
+their declared dtype until lowering. Runtime fill values remain invalid.
+
+At the Buffer-call boundary, scalar operands must match the destination element
+dtype and have no memory effects. Before constructing that call, lowering converts
+supported source scalar expressions using explicit `Cast` expressions for signed integers,
+INDEX, FP16, BF16 and FP32; INDEX uses an intermediate INT64 cast. Other
+scalar source types remain unsupported. `tile.full(shape, dtype=..., value=...)`
+consumes shape/dtype when selecting its destination, then emits
+`buffer.full(value_f32, destination)`. Codegen performs no scalar type repair:
+
+```python
+# Logical input: result = tile.adds(value, count_i32)
+scalar_f32 = ir.Cast(count_i32, DataType.FP32, span)
+# Buffer IR diagnostic notation; the internal op has no public DSL wrapper.
+buffer.adds(value_buffer, scalar_f32, result_buffer)  # -> Void
+```
 
 `div`, `log`, and `recip` preserve the optional boolean `high_precision` kwarg.
 The recipe selects the corresponding native precision attribute; false uses
@@ -76,7 +111,7 @@ requires a later recipe. Constant scalar address definitions are evaluated with
 memoization and integer-width checks. Direct emission consumes this verified
 contract without performing allocation or alias analysis.
 
-Scalar operands, integer/bitwise operations, `rsqrt` and its optional workspace,
+Integer/bitwise operations, `rsqrt` and its optional workspace,
 partial combines, broadcasts, reductions, random generators, other layouts and
 dynamic valid-state recipes remain separate migration work. The public
 `backend.get_buffer_elementwise_recipe_names()` API returns a sorted independent

@@ -86,12 +86,17 @@ REGISTER_OP("buffer.copy")
         .set_internal_only()
         .set_output_arity(0)
         .set_buffer_result_behavior(BufferResultBehavior::None);
-    for (size_t i = 0; i < recipe.input_count; ++i) {
-      entry.add_argument("src" + std::to_string(i), "Source buffer")
-          .set_buffer_arg_effect(i, BufferAccess::Read, BufferAccess::Read);
+    for (size_t i = 0; i < recipe.inputs.size(); ++i) {
+      const bool buffer = recipe.inputs[i].kind == backend::BufferElementwiseOperandKind::Buffer;
+      entry.add_argument("src" + std::to_string(i), buffer ? "Source buffer" : "Resolved element scalar");
+      if (buffer) {
+        entry.set_buffer_arg_effect(i, BufferAccess::Read, BufferAccess::Read);
+      } else {
+        entry.set_buffer_non_memory_arg(i);
+      }
     }
     entry.add_argument("dst", "Destination buffer")
-        .set_buffer_arg_effect(recipe.input_count, BufferAccess::Write, BufferAccess::Read);
+        .set_buffer_arg_effect(recipe.inputs.size(), BufferAccess::Write, BufferAccess::Read);
     if (recipe.precision != backend::BufferPrecisionKind::None) entry.set_attr<bool>("high_precision");
     entry.f_deduce_type(
         [recipe](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>&) {

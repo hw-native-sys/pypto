@@ -55,10 +55,11 @@ rule at construction, including when attributes are attached with
 These are initial buffer IR building blocks. Automatic tile-to-buffer lowering
 is not yet enabled; the public Tile DSL and default pipeline still use
 `TileType`. Direct PTO emission accepts explicitly constructed buffer programs
-with dense row-major Vec FP16/FP32 descriptors of rank one or two, scalar
-parameters and control flow, and the buffer operations below. Ordinary GM
-parameters additionally support dense ND rank-2 FP32 tensors with static physical
-shapes and more than one column. Normalized Tensor returns alias those parameters;
+with dense row-major Vec FP16/BF16/FP32/INT32 descriptors of rank one or two,
+scalar parameters and control flow, and the buffer operations below. Ordinary GM
+parameters support dense ND rank-2 FP16/BF16/FP32/INT32 tensors with static
+physical shapes and more than one column. Arithmetic recipes impose their own
+narrower dtype contracts. Normalized Tensor returns alias those parameters;
 the native kernel still returns void. Buffer parameter ABI, native function
 results, views, slots, helpers, and other physical layouts are not yet supported
 and produce explicit errors. Buffer type dumps use native
@@ -144,7 +145,8 @@ Address emission depends only on the allocation operand; the legacy
 `emit_tile_addr` flag cannot remove or invent a buffer address. Dynamic
 operands remain in their lexical scope. No logical `TileType` or `MemRef` is
 reconstructed, and no implicit tile allocation pass runs on this path. The
-default Tile pipeline has not switched to buffer IR.
+pipeline with `enable_buffer_ir=True` converts Tile IR before emission through
+[LowerTileToBuffer](../passes/53-lower_tile_to_buffer.md).
 
 GM transfers expose their complete window as ordinary operands:
 
@@ -153,8 +155,8 @@ buffer.load(tensor, offsets_tuple, valid_extents_tuple, dst_buffer) : Void
 buffer.store(src_buffer, offsets_tuple, valid_extents_tuple, tensor) : Void
 ```
 
-These initial transfer schemas require ordinary rank-2 FP32 Tensor/Vec Buffer
-operands. Offsets are nonnegative element indices. The tuples contain two
+These transfer schemas require ordinary rank-2 Tensor/Vec Buffer operands
+with matching FP16, BF16, FP32 or INT32 element types. Offsets are nonnegative element indices. The tuples contain two
 integer or `INDEX` scalars. Each transfer extent must equal the buffer's current
 valid extent; a static descriptor axis requires that exact constant. Constant
 extents and windows are checked against buffer capacity, GM physical shape,

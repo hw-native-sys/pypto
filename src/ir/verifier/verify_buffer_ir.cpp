@@ -303,7 +303,8 @@ class BufferIRVisitor : public IRVisitor {
     const auto dst = allocations_.find(destination.get());
     const bool exact_allowed =
         recipe.destination_alias == backend::BufferDestinationAliasPolicy::ExactOrDisjoint;
-    for (size_t i = 0; i < recipe.input_count; ++i) {
+    for (size_t i = 0; i < recipe.inputs.size(); ++i) {
+      if (recipe.inputs[i].kind != backend::BufferElementwiseOperandKind::Buffer) continue;
       const auto source = AsVarLike(call->args_[i]);
       if (source && source == destination && exact_allowed) continue;
       const auto src = allocations_.find(source.get());

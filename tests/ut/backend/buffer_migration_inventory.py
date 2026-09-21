@@ -95,6 +95,17 @@ MIGRATION_FAMILIES = (
             "tile.minimums",
             "tile.lrelu",
         ),
+        restricted=frozenset(
+            {
+                "tile.adds",
+                "tile.subs",
+                "tile.muls",
+                "tile.divs",
+                "tile.maximums",
+                "tile.minimums",
+                "tile.lrelu",
+            }
+        ),
     ),
     MigrationFamily(
         "G05: Unary and precision arithmetic",
@@ -156,6 +167,7 @@ MIGRATION_FAMILIES = (
             "tile.tri",
             "tile.random",
         ),
+        restricted=frozenset({"tile.full"}),
     ),
     MigrationFamily(
         "G09: Reductions and indices",

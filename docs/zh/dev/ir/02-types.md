@@ -50,9 +50,10 @@ Void call 应放在 `EvalStmt` 中，不能绑定变量、用作操作数、放�
 
 这些类型是 Buffer IR 的初始基础设施，自动 tile-to-buffer lowering 尚未
 启用，公开 Tile DSL 和默认流水线仍使用 `TileType`。直接 PTO 代码生成支持
-显式构造的 buffer 程序：一维或二维、稠密 row-major Vec FP16/FP32
-描述符，标量参数与控制流，以及下文的 buffer 算子。普通 GM 参数另外支持
-物理形状静态、列数大于一的稠密 ND 二维 FP32 Tensor。规范化后的 Tensor
+显式构造的 buffer 程序：一维或二维、稠密 row-major Vec FP16/BF16/FP32/INT32
+描述符，标量参数与控制流，以及下文的 buffer 算子。普通 GM 参数支持
+物理形状静态、列数大于一的稠密 ND 二维 FP16/BF16/FP32/INT32 Tensor。
+算术配方分别施加更窄的 dtype 契约。规范化后的 Tensor
 返回值是这些参数的别名，原生内核仍返回 void。Buffer 参数 ABI、原生函数
 结果、view、slot、helper 和其他物理布局尚未支持，会明确报错。
 Buffer 类型 dump 使用原生 `pypto.ir.BufferType(...)` 构造表达式，
@@ -124,7 +125,8 @@ destination 并返回 `VoidType`，目前要求所有参数的 Vec buffer 描述
 `BufferType` 发射分配、destination 写入与 valid 状态更新。地址发射只取决于
 分配操作数；旧 `emit_tile_addr` 标志不能删除或补充 buffer 地址。
 动态操作数保留在其词法作用域内，不重建逻辑 `TileType` 或 `MemRef`，
-也不运行隐式 tile 分配逻辑。默认 Tile 流水线尚未切换到 Buffer IR。
+也不运行隐式 tile 分配逻辑。设置 `enable_buffer_ir=True` 后，流水线在发射前通过
+[LowerTileToBuffer](../passes/53-lower_tile_to_buffer.md) 转换 Tile IR。
 
 GM 传输将完整窗口表示为普通操作数：
 
@@ -133,7 +135,8 @@ buffer.load(tensor, offsets_tuple, valid_extents_tuple, dst_buffer) : Void
 buffer.store(src_buffer, offsets_tuple, valid_extents_tuple, tensor) : Void
 ```
 
-首批传输契约要求普通二维 FP32 Tensor/Vec Buffer 操作数。偏移量是非负的
+传输契约要求普通二维 Tensor/Vec Buffer 操作数，元素类型匹配且为
+FP16、BF16、FP32 或 INT32。偏移量是非负的
 元素索引，两个 tuple 均包含两个整数或 `INDEX` 标量。传输长度必须等于
 buffer 当前的 valid extent；静态描述符维度必须使用完全相同的常量。
 常量长度和窗口会对照 buffer 容量、GM 物理形状及 Tensor 的有效区域检查；

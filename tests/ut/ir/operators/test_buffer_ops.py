@@ -110,7 +110,9 @@ def test_non_vector_buffer_is_rejected(op_name, arg_count):
 @pytest.mark.parametrize("op_name,arg_count", [("buffer.copy", 2), ("buffer.mul", 3), ("buffer.add", 3)])
 def test_argument_arity_is_exact(op_name, arg_count):
     for count in (arg_count - 1, arg_count + 1):
-        with pytest.raises(ValueError, match="buffer operands"):
+        with pytest.raises(
+            ValueError, match=rf"requires {arg_count} (?:buffer|explicit) operands, got {count}"
+        ):
             internal_call(op_name, [buffer_var(f"arg_{i}") for i in range(count)])
 
 
@@ -186,9 +188,9 @@ def test_gm_transfer_contract_exposes_window_and_memory_effects(name):
     "field,value,message",
     [
         ("tensor", ir.TensorType([32], DataType.FP32), "rank-2"),
-        ("tensor", ir.TensorType([32, 64], DataType.FP16), "FP32"),
+        ("tensor", ir.TensorType([32, 64], DataType.FP16), "matching"),
         ("buffer", ir.BufferType([32], DataType.FP32, ir.Mem.Vec), "rank-2"),
-        ("buffer", ir.BufferType([16, 32], DataType.FP16, ir.Mem.Vec), "FP32"),
+        ("buffer", ir.BufferType([16, 32], DataType.FP16, ir.Mem.Vec), "matching"),
         ("buffer", ir.BufferType([16, 32], DataType.FP32, ir.Mem.Mat), "Vec"),
         ("offsets", valid_extents(0), "rank-2 MakeTuple"),
         ("offsets", valid_extents(-1, 0), "nonnegative"),
@@ -342,6 +344,22 @@ def test_set_validshape_runtime_operand_survives_rewriting_and_serialization():
     assert rewritten.args[1].elements[0].same_as(new_rows)
     restored = ir.deserialize(ir.serialize(rewritten))
     ir.assert_structural_equal(restored, rewritten, enable_auto_mapping=True)
+
+
+@pytest.mark.parametrize("suffix", ["get_block_idx", "get_block_num", "get_subblock_idx"])
+def test_buffer_spmd_queries_have_scalar_results_and_validate_schema(suffix):
+    name = f"buffer.{suffix}"
+    span = ir.Span.unknown()
+    call = _ir._create_internal_op_call(name, [], {}, span)
+    assert isinstance(call.type, ir.ScalarType) and call.type.dtype == DataType.INDEX
+    assert ir.get_op_output_arity(name) == 1
+    assert ir.get_op_ir_stage(name) == ir.OpIRStage.Buffer
+    with pytest.raises(ValueError, match="internal-only"):
+        ir.create_op_call(name, [], {}, span)
+    with pytest.raises(ValueError, match="requires no arguments"):
+        _ir._create_internal_op_call(name, [ir.ConstInt(0, DataType.INDEX, span)], {}, span)
+    with pytest.raises(ValueError, match="Unknown kwarg"):
+        _ir._create_internal_op_call(name, [], {"unknown": True}, span)
 
 
 if __name__ == "__main__":

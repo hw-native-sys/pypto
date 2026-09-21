@@ -263,7 +263,7 @@ def test_gm_transfers_reject_incompatible_parameter_directions(name, direction):
 @pytest.mark.parametrize(
     "tensor_type,message",
     [
-        (ir.TensorType([16, 32], DataType.FP16), "rank-2 FP32"),
+        (ir.TensorType([16, 32], DataType.INT8), "rank-2 FP16/BF16/FP32/INT32"),
         (ir.TensorType([16, 1], DataType.FP32), "columns > 1"),
         (
             ir.TensorType([16, 32], DataType.FP32, None, ir.TensorView([1, 16], ir.TensorLayout.DN)),

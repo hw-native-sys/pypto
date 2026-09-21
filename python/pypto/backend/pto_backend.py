@@ -660,17 +660,24 @@ def _get_fixed_subblock_id(func: _ir_core.Function) -> int | None:
 
 
 # Op-name sets for SPMD identity detection. Detection must stay in lockstep
-# with the C++ MemRefCollectorVisitor (src/codegen/pto/pto_codegen.cpp), which
-# decides which synthetic params to append to the func.func signature — a
+# with the functional collector and Buffer preflight in PTOCodegen, which
+# decide which synthetic params to append to the func.func signature — a
 # mismatch would desync the wrapper's forwarded call args from the callee
 # signature.
 # Routing each literal through get_op validates it at import (a typo raises), then
 # we keep the canonical names: ops are matched by name, not identity, because IR
 # reaching codegen may carry Op instances built outside the registry.
 _SPMD_BLOCK_OPS = frozenset(
-    {_ir_core.get_op("tile.get_block_idx").name, _ir_core.get_op("tile.get_block_num").name}
+    {
+        _ir_core.get_op("tile.get_block_idx").name,
+        _ir_core.get_op("tile.get_block_num").name,
+        _ir_core.get_op("buffer.get_block_idx").name,
+        _ir_core.get_op("buffer.get_block_num").name,
+    }
 )
-_SUBBLOCK_OPS = frozenset({_ir_core.get_op("tile.get_subblock_idx").name})
+_SUBBLOCK_OPS = frozenset(
+    {_ir_core.get_op("tile.get_subblock_idx").name, _ir_core.get_op("buffer.get_subblock_idx").name}
+)
 _AIV_FIFO_ENDPOINT_OPS = frozenset(
     {
         _ir_core.get_op("tile.tpop_from_aic").name,

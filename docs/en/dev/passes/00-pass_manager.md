@@ -301,6 +301,11 @@ Print→parse roundtrip verification instrument. After every pass, it:
 2. Parses the text back to an IR `Program` via `parse()`
 3. Asserts `structural_equal(original, reparsed)` — a failure means the printer or parser cannot faithfully represent the IR produced by that pass
 
+Buffer-stage programs use binary serialization roundtrip because their Python
+output is diagnostic text rather than executable DSL. Structural equality still
+checks the complete program, including device stages, descriptors and aliases;
+serialization failures are errors, not skipped verification.
+
 ```python
 from pypto.pypto_core import passes
 from pypto.ir.instruments import make_roundtrip_instrument

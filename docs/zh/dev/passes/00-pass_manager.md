@@ -299,6 +299,10 @@ with passes.PassContext([instrument]):
 2. 通过 `parse()` 将文本解析回 IR `Program`
 3. 断言 `structural_equal(original, reparsed)` —— 失败则说明 printer 或 parser 无法忠实表示该 Pass 输出的 IR
 
+Buffer 阶段程序使用二进制序列化往返检查，因为其 Python 输出是诊断文本，
+不属于可执行 DSL。结构相等检查仍覆盖整个程序的设备阶段、描述符和别名；
+序列化失败会报错，不跳过验证。
+
 ```python
 from pypto.pypto_core import passes
 from pypto.ir.instruments import make_roundtrip_instrument

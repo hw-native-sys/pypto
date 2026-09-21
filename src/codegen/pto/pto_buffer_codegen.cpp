@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "pypto/backend/common/buffer_elementwise_recipes.h"
+#include "pypto/backend/common/buffer_type_support.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
 #include "pypto/core/error.h"
@@ -51,17 +52,17 @@ namespace {
 using ir::As;
 
 // BufferType is already a physical descriptor. This initial emitter supports
-// dense Vec fp16/fp32 only; no logical shape, layout, or packing is inferred.
+// dense Vec FP16/BF16/FP32/INT32 only; no logical shape, layout, or packing is inferred.
 std::string BufferTypeString(const ir::BufferTypePtr& type, const ir::Span& span) {
   CHECK_SPAN(type->shape_.size() == 1 || type->shape_.size() == 2, span)
       << "Direct Buffer IR codegen supports only rank-1 or rank-2 buffers";
   CHECK_SPAN(type->memory_space_ == ir::MemorySpace::Vec &&
-                 (type->dtype_ == DataType::FP16 || type->dtype_ == DataType::FP32) &&
+                 backend::IsDenseBufferTransferDtype(type->dtype_) &&
                  type->blayout_ == ir::TileLayout::row_major && type->slayout_ == ir::TileLayout::none_box &&
                  type->fractal_ == 512 && type->pad_ == ir::PadValue::null &&
                  type->compact_ == ir::CompactMode::null,
              span)
-      << "Direct Buffer IR codegen currently requires dense row-major Vec FP16/FP32 buffers "
+      << "Direct Buffer IR codegen currently requires dense row-major Vec FP16/BF16/FP32/INT32 buffers "
          "with fractal=512, no padding, and no compact mode";
   const bool vector = type->shape_.size() == 1;
   const int64_t rows = vector ? 1 : type->shape_[0];
@@ -74,8 +75,8 @@ std::string BufferTypeString(const ir::BufferTypePtr& type, const ir::Span& span
 }
 
 void CheckBufferTensorParameter(const ir::TensorTypePtr& tensor, const ir::Span& span) {
-  CHECK_SPAN(tensor->shape_.size() == 2 && tensor->dtype_ == DataType::FP32, span)
-      << "Direct Buffer IR GM parameters currently require rank-2 FP32 tensors";
+  CHECK_SPAN(tensor->shape_.size() == 2 && backend::IsDenseBufferTransferDtype(tensor->dtype_), span)
+      << "Direct Buffer IR GM parameters currently require rank-2 FP16/BF16/FP32/INT32 tensors";
   auto rows = As<ir::ConstInt>(tensor->shape_[0]);
   auto cols = As<ir::ConstInt>(tensor->shape_[1]);
   CHECK_SPAN(rows && cols && rows->value_ > 0 && cols->value_ > 1, span)
@@ -180,6 +181,8 @@ class BufferFunctionDetector : public ir::IRVisitor {
 // representation verifier separately owns SSA, dominance, and op contracts.
 class BufferEmissionPreflight : public ir::IRVisitor {
  public:
+  bool uses_spmd_blocks = false;
+  bool uses_spmd_subblock = false;
   explicit BufferEmissionPreflight(ir::FunctionPtr function) : function_(std::move(function)) {
     for (size_t i = 0; i < function_->params_.size(); ++i) {
       if (auto tensor = As<ir::TensorType>(function_->params_[i]->GetType())) {
@@ -334,10 +337,13 @@ class BufferEmissionPreflight : public ir::IRVisitor {
   }
 
   void VisitExpr_(const ir::CallPtr& call) override {
+    uses_spmd_blocks |= ir::IsOp(call, "buffer.get_block_idx") || ir::IsOp(call, "buffer.get_block_num");
+    uses_spmd_subblock |= ir::IsOp(call, "buffer.get_subblock_idx");
     const auto* recipe = backend::FindBufferElementwiseRecipe(call->op_->name_);
     CHECK_SPAN(recipe || ir::IsOp(call, "buffer.alloc") || ir::IsOp(call, "buffer.copy") ||
                    ir::IsOp(call, "buffer.load") || ir::IsOp(call, "buffer.store") ||
-                   ir::IsOp(call, "buffer.set_validshape"),
+                   ir::IsOp(call, "buffer.set_validshape") || ir::IsOp(call, "buffer.get_block_idx") ||
+                   ir::IsOp(call, "buffer.get_block_num") || ir::IsOp(call, "buffer.get_subblock_idx"),
                call->span_)
         << "Operation '" << call->op_->name_ << "' is not supported by direct Buffer IR codegen";
     if (ir::IsOp(call, "buffer.load") || ir::IsOp(call, "buffer.store")) {
@@ -439,6 +445,23 @@ void PTOCodegen::GenerateBufferFunction(const ir::FunctionPtr& func) {
       stream_ << GetTypeString(As<ir::ScalarType>(parameters[i]->GetType())->dtype_);
     }
   }
+  // The wrapper supplies SPMD identities after all user parameters. Detect
+  // these scalar queries during preflight, without legacy storage discovery.
+  bool has_parameters = !parameters.empty();
+  const auto append_identity = [&](std::string& binding, const char* name) {
+    binding = std::string("%") + name;
+    fs_.used_ssa_names.insert(name);
+    if (has_parameters) stream_ << ", ";
+    stream_ << binding << ": i32";
+    has_parameters = true;
+  };
+  if (preflight.uses_spmd_blocks) {
+    append_identity(fs_.spmd_block_idx_arg, "__pypto_spmd_block_idx");
+    append_identity(fs_.spmd_block_num_arg, "__pypto_spmd_block_num");
+  }
+  if (preflight.uses_spmd_subblock) {
+    append_identity(fs_.spmd_subblock_idx_arg, "__pypto_spmd_subblock_idx");
+  }
   // Reserve every ABI name before assigning view names.
   for (const auto& param : parameters) {
     if (As<ir::TensorType>(param->GetType())) {
@@ -506,7 +529,18 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
     return false;
   }
   SpanScope call_loc(this, &call->span_);
-  if (ir::IsOp(call, "buffer.alloc")) {
+  if (ir::IsOp(call, "buffer.get_block_idx") || ir::IsOp(call, "buffer.get_block_num") ||
+      ir::IsOp(call, "buffer.get_subblock_idx")) {
+    INTERNAL_CHECK_SPAN(result, call->span_) << "Internal error: Buffer SPMD query needs an SSA result";
+    const std::string argument = ir::IsOp(call, "buffer.get_block_idx")   ? GetSpmdBlockIdxArgSSA()
+                                 : ir::IsOp(call, "buffer.get_block_num") ? GetSpmdBlockNumArgSSA()
+                                                                          : GetSpmdSubblockIdxArgSSA();
+    INTERNAL_CHECK_SPAN(!argument.empty(), call->span_)
+        << "Internal error: Buffer SPMD query requires a kernel ABI parameter";
+    const auto name = NewNamedTemp(result->name_hint_);
+    Emit(name + " = arith.index_cast " + argument + " : i32 to index");
+    BindVarToMlir(result, name);
+  } else if (ir::IsOp(call, "buffer.alloc")) {
     INTERNAL_CHECK_SPAN(result, call->span_) << "Internal error: buffer.alloc needs its explicit SSA result";
     const auto type = As<ir::BufferType>(result->GetType());
     INTERNAL_CHECK_SPAN(type, call->span_) << "Internal error: buffer.alloc result must be BufferType";
@@ -569,7 +603,7 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
     const auto* recipe = backend::FindBufferElementwiseRecipe(call->op_->name_);
     INTERNAL_CHECK_SPAN(recipe || ir::IsOp(call, "buffer.copy"), call->span_)
         << "Internal error: missing preflighted buffer emitter for " << call->op_->name_;
-    const size_t input_count = recipe ? recipe->input_count : 1;
+    const size_t input_count = recipe ? recipe->inputs.size() : 1;
     std::ostringstream line;
     line << (recipe ? recipe->native_op : "pto.tmov") << " ins(";
     for (size_t i = 0; i < input_count; ++i) {

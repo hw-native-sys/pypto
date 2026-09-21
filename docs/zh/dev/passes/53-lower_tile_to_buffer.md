@@ -67,6 +67,8 @@ PTOAS 省略 `buffer.alloc` 的第二个操作数。地址规划器只传入一�
 转换后的 `InCore`、`AIC`、`AIV` 函数标记为 `FunctionIRStage.Buffer`，编排函数保持原样。
 pass 验证输出并保持幂等；转换失败不会修改输入程序。此边界之后不应运行功能式 Tile pass。
 
+合成分配的原始位置未知时，继承已索引 Tile 句柄的源码位置，使原生分配诊断能够定位用户源码。
+
 ## 分支
 
 存储合法化已经为每个 Tile 分支结果选择规范目标窗口，并在各分支体内放置必要的传输。
@@ -120,11 +122,20 @@ While 条件引用重写后的标量绑定。若 GM 初始值和回边都解析�
 buffer.store(left_buf, (row_result, column_result), (16, 32), Out)
 ```
 
+标量 SPMD 查询 `tile.get_block_idx`、`tile.get_block_num` 和
+`tile.get_subblock_idx` 转换为对应的内部 `buffer.*` 查询，返回 INDEX 值且没有内存效果。
+原生发射读取既有运行时传入的 kernel ABI 参数。查询保持为直接 SSA 赋值；
+源程序的嵌套调用由此前的 `FlattenCallExpr` 展开。
+
 ## 首批支持的转换
 
-当前转换支持直线程序、分支和循环、静态二维稠密 Vec FP32 Tile、每个分配一个描述符、静态有效范围、
+当前转换支持直线程序、分支和循环、静态二维稠密 Vec FP16/BF16/FP32/INT32 Tile、每个分配一个描述符、静态有效范围、
 普通紧密排列的 ND GM Tensor 以及默认加载/存储策略。
-它转换分配、create、load、store、加法、乘法、move 及已经合法化的别名。
+它转换分配、create、load、store、move、已经合法化的别名及[带类型的逐元素配方](../ir/05-operators.md#typed-buffer-elementwise-recipes)。
+标量输入在 lowering 中显式转换为目标 dtype；发射器直接消费这些类型。
+`tile.full` 的形状和 dtype 由目标描述符表示，不会重复作为指令属性发射。
+GM load/store 保留匹配的元素类型，不插入转换。`add`/`mul` 支持 FP16/FP32/INT32；
+BF16 传输支持不代表算术支持。
 
 辅助函数调用、其他布局、动态元数据、多槽位和其他操作转换由后续迁移切片补齐。
 暂不支持的形式会显式报错。在完整转换与运行时验收矩阵通过前，迁移选项默认关闭。

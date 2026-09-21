@@ -16,7 +16,7 @@ from pypto.pypto_core import passes as _passes
 
 
 def make_roundtrip_instrument() -> _passes.CallbackInstrument:
-    """Create a CallbackInstrument that verifies print→parse roundtrip after each pass.
+    """Create a CallbackInstrument that verifies IR roundtrip after each pass.
 
     After every pass, the instrument:
     1. Prints the resulting IR to Python DSL text (``python_print``).
@@ -25,6 +25,10 @@ def make_roundtrip_instrument() -> _passes.CallbackInstrument:
 
     A failure means the printer or parser cannot faithfully represent the IR
     produced by that pass, which is a bug in the printer/parser layer.
+
+    Buffer-stage programs use binary serialization instead: their Python output
+    is diagnostic text, not executable DSL. The complete program, including
+    orchestration and device stage markers, must still be structurally equal.
 
     Known non-failures (instrument emits a warning instead):
 
@@ -42,6 +46,16 @@ def make_roundtrip_instrument() -> _passes.CallbackInstrument:
         from pypto.language.parser.text_parser import parse  # noqa: PLC0415
 
         pass_name = pass_obj.get_name()
+
+        if any(func.ir_stage == _ir.FunctionIRStage.Buffer for func in program.functions.values()):
+            try:
+                restored = _ir.deserialize(_ir.serialize(program))
+                _ir.assert_structural_equal(program, restored)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"[RoundtripInstrument] Binary roundtrip failed after pass '{pass_name}'.\n{exc}"
+                ) from exc
+            return
 
         # --- Step 1: print ---
         try:

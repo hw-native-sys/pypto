@@ -22,7 +22,6 @@ from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import (
     AccPhase,
     Call,
-    ConstFloat,
     ConstInt,
     Expr,
     MemorySpace,
@@ -683,7 +682,7 @@ def get_block_num(span: Span | None = None) -> Call:
 def full(
     shape: Sequence[int | Expr] | _ir_core.MakeTuple,
     dtype: DataType,
-    value: int | float,
+    value: int | float | Expr,
     span: Span | None = None,
 ) -> Call:
     """Create a tile from a shape and fill with value in UB.
@@ -691,7 +690,7 @@ def full(
     Args:
         shape: Shape of the tile, or a MakeTuple
         dtype: Data type of the tile
-        value: filling scalar
+        value: Numeric fill value or parsed scalar constant (runtime values are not supported)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -699,10 +698,7 @@ def full(
     """
     actual_span = _get_span_or_capture(span)
     shape_tuple = _to_make_tuple(shape, actual_span)
-    if isinstance(value, int):
-        value_expr = ConstInt(value, dtype, actual_span)
-    else:
-        value_expr = ConstFloat(value, dtype, actual_span)
+    value_expr = _normalize_const_to_dtype(value, dtype, actual_span)
     kwargs: dict[str, Any] = {"dtype": dtype}
     return _ir_core.create_op_call("tile.full", [shape_tuple, value_expr], kwargs, actual_span)
 

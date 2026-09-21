@@ -26,6 +26,10 @@
 这些算子分别声明数据/元数据效应。形状、dtype、valid 状态和别名要求见
 [Buffer 契约](02-types.md#buffer-算子契约)。
 
+内部 `buffer.get_block_idx`、`buffer.get_block_num` 和 `buffer.get_subblock_idx`
+是无参数的 Buffer 阶段查询，返回 INDEX 标量（`BufferResultBehavior.Value`），没有执行期内存访问。
+它们读取既有运行时传入的 SPMD kernel 参数，由对应 Tile 查询转换产生，不提供公开 DSL 接口。
+
 ### 类型化 Buffer 逐元素配方
 
 `backend/common/buffer_elementwise_recipes` 是逻辑到 Buffer 转换、显式操作数约束及
@@ -33,8 +37,8 @@
 实际的 Buffer 调用。直接 PTO 发射读取同一张表，不重建 Tile IR、不调用旧回调，
 也不选择存储位置。此表独立于旧后端回调注册。
 
-| 逻辑算子 | Buffer 算子 | 原生指令 | 源 buffer 数量 |
-| -------- | ----------- | -------- | -------------- |
+| 逻辑算子 | Buffer 算子 | 原生指令 | 输入 |
+| -------- | ----------- | -------- | ---- |
 | `tile.add` | `buffer.add` | `pto.tadd` | 2 |
 | `tile.mul` | `buffer.mul` | `pto.tmul` | 2 |
 | `tile.sub` | `buffer.sub` | `pto.tsub` | 2 |
@@ -48,17 +52,43 @@
 | `tile.relu` | `buffer.relu` | `pto.trelu` | 1 |
 | `tile.log` | `buffer.log` | `pto.tlog` | 1 |
 | `tile.recip` | `buffer.recip` | `pto.trecip` | 1 |
+| `tile.adds` | `buffer.adds` | `pto.tadds` | buffer, scalar |
+| `tile.subs` | `buffer.subs` | `pto.tsubs` | buffer, scalar |
+| `tile.muls` | `buffer.muls` | `pto.tmuls` | buffer, scalar |
+| `tile.divs` | `buffer.divs` | `pto.tdivs` | buffer, scalar |
+| `tile.maximums` | `buffer.maximums` | `pto.tmaxs` | buffer, scalar |
+| `tile.minimums` | `buffer.minimums` | `pto.tmins` | buffer, scalar |
+| `tile.lrelu` | `buffer.lrelu` | `pto.tlrelu` | buffer, scalar |
+| `tile.full` | `buffer.full` | `pto.texpands` | scalar |
 
 每个调用以最终操作数表示目标，并返回 `Void`。源读取数据和元数据；目标写入
-有效数据区域并读取元数据。这不保证整个分配已初始化。所有操作数必须具有
+有效数据区域并读取元数据。这不保证整个分配已初始化。所有 buffer 操作数必须具有
 相同的物理描述符；广播和部分合并语义由独立配方处理。这些算子仅供编译器内部
 使用，不新增公开 DSL 函数。
 
-除 `add`、`mul` 外的十一项新增配方要求 FP32、1 或 2 维、静态 valid 范围、
+除 `add`、`mul` 外的配方要求 FP32、1 或 2 维、静态 valid 范围、
 稠密行主序 Vec 存储、`none_box`、fractal 512，并且没有 padding 或 compact 模式。
-其 dtype 约束不会继承原生描述符格式化器的 FP16 支持。现有 `add`/`mul` 的
-描述符验证及 FP16/FP32 原生发射保持可用；自动转换目前使用静态二维 FP32
-描述符。Ascend910B 与 Ascend950 都使用这些配方。
+其 dtype 约束不会继承原生描述符格式化器的 FP16 支持。`add`/`mul` 要求
+FP16/FP32/INT32 操作数。自动转换及普通 GM 传输支持静态二维
+FP16/BF16/FP32/INT32 描述符；BF16 算术需要独立的原生配方。
+Ascend910B 与 Ascend950 都使用这些契约。
+
+公开 `tile.full` 包装器同时接受数值字面量和已解析的标量常量，位置参数与关键字参数
+得到一致结果。浮点目标的整数占位常量使用 `ConstFloat`；显式指定类型的常量保留
+原始 dtype，直到降低阶段转换。运行时填充值仍不支持。
+
+在 Buffer call 边界，标量操作数必须匹配目标元素 dtype，且不具有内存效果。
+降低阶段在构造该 call 之前转换受支持的源标量表达式，为有符号整数、
+INDEX、FP16、BF16 和 FP32 插入显式 `Cast`；INDEX 先转换为 INT64。
+其他标量源类型仍不支持。`tile.full(shape, dtype=..., value=...)` 的 shape/dtype
+用于选择目标，随后生成 `buffer.full(value_f32, destination)`。代码生成不修复标量类型：
+
+```python
+# Logical input: result = tile.adds(value, count_i32)
+scalar_f32 = ir.Cast(count_i32, DataType.FP32, span)
+# Buffer IR diagnostic notation; the internal op has no public DSL wrapper.
+buffer.adds(value_buffer, scalar_f32, result_buffer)  # -> Void
+```
 
 `div`、`log`、`recip` 保留可选布尔 kwarg `high_precision`。配方选择相应的原生
 精度属性，false 使用原生默认值，不隐式引入 workspace、复制或分配。`recip`
@@ -68,7 +98,7 @@
 后续配方。常量标量地址定义通过记忆化及整数位宽检查求值。直接发射消费此已
 验证约束，不执行分配或别名分析。
 
-标量操作数、整数/位运算、`rsqrt` 及其可选 workspace、部分合并、广播、归约、
+整数/位运算、`rsqrt` 及其可选 workspace、部分合并、广播、归约、
 随机生成、其他布局和动态 valid 状态仍属于独立迁移工作。公开 API
 `backend.get_buffer_elementwise_recipe_names()` 从实际生产表返回排序的独立快照。
 列出的名称仅代表上述受限配方，不代表逻辑算子的全部形式。测试覆盖公开流水线

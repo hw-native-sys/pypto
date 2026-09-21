@@ -16,6 +16,7 @@ from pypto import DataType, backend, ir, passes
 from pypto.pypto_core import ir as _ir
 
 _SPAN = ir.Span.unknown()
+_SCALAR_RECIPES = ["adds", "subs", "muls", "divs", "maximums", "minimums", "lrelu", "full"]
 _RECIPES = [
     ("add", 2),
     ("mul", 2),
@@ -44,7 +45,9 @@ def _call(suffix, args, **kwargs):
 
 
 def test_reported_recipes_are_the_actual_sorted_independent_snapshot():
-    expected = sorted(ir.get_op(f"tile.{suffix}").name for suffix, _ in _RECIPES)
+    expected = sorted(
+        ir.get_op(f"tile.{suffix}").name for suffix in [*[s for s, _ in _RECIPES], *_SCALAR_RECIPES]
+    )
     names = backend.get_buffer_elementwise_recipe_names()
     assert names == expected
     names.clear()
@@ -66,9 +69,9 @@ def test_recipe_operand_contract_and_effects(suffix, input_count):
         assert effect.data == (ir.BufferAccess.Write if i == input_count else ir.BufferAccess.Read)
         assert effect.metadata == ir.BufferAccess.Read
         assert not effect.non_memory and not ir.op_arg_is_workspace(call.op.name, i)
-    with pytest.raises(ValueError, match="buffer operands"):
+    with pytest.raises(ValueError, match="explicit operands"):
         _call(suffix, args[:-1])
-    with pytest.raises(ValueError, match="buffer operands"):
+    with pytest.raises(ValueError, match="explicit operands"):
         _call(suffix, [*args, args[-1]])
     with pytest.raises(ValueError, match="internal-only"):
         ir.create_op_call(call.op.name, args, _SPAN)
@@ -169,6 +172,36 @@ def test_precision_survives_verification_and_serialization(suffix, input_count, 
 def test_unmodeled_precision_kwarg_is_rejected():
     with pytest.raises(ValueError, match="Unknown kwarg 'high_precision'"):
         _call("exp", [_buffer("src"), _buffer("dst")], high_precision=True)
+
+
+@pytest.mark.parametrize("suffix", _SCALAR_RECIPES)
+def test_scalar_recipes_have_typed_non_memory_operands(suffix):
+    source, destination = _buffer("source"), _buffer("destination")
+    scalar = ir.Var("factor", ir.ScalarType(DataType.FP32), _SPAN)
+    inputs = [scalar] if suffix == "full" else [source, scalar]
+    call = _call(suffix, [*inputs, destination])
+    assert isinstance(call.type, ir.VoidType)
+    scalar_index = len(inputs) - 1
+    effect = ir.get_op_buffer_arg_effect(call.op.name, scalar_index)
+    assert effect.non_memory
+    assert effect.data == effect.metadata == ir.BufferAccess.None_
+    destination_effect = ir.get_op_buffer_arg_effect(call.op.name, len(inputs))
+    assert destination_effect.data == ir.BufferAccess.Write
+    assert destination_effect.metadata == ir.BufferAccess.Read
+    restored = ir.deserialize(ir.serialize(ir.EvalStmt(call, _SPAN)))
+    ir.assert_structural_equal(ir.EvalStmt(call, _SPAN), restored, enable_auto_mapping=True)
+    for invalid in [source, ir.ConstInt(3, DataType.INT32, _SPAN)]:
+        with pytest.raises(ValueError, match="scalar matching the destination dtype"):
+            _call(suffix, [*inputs[:-1], invalid, destination])
+    with pytest.raises(ValueError, match="Unknown kwarg 'dtype'"):
+        _call(suffix, [*inputs, destination], dtype=DataType.FP32)
+
+
+@pytest.mark.parametrize("suffix", ["add", "mul"])
+@pytest.mark.parametrize("dtype", [DataType.BF16, DataType.INT8])
+def test_transfer_types_do_not_implicitly_enable_arithmetic(suffix, dtype):
+    with pytest.raises(ValueError, match="FP16/FP32/INT32 arithmetic"):
+        _call(suffix, [_buffer(f"arg_{i}", dtype=dtype) for i in range(3)])
 
 
 if __name__ == "__main__":

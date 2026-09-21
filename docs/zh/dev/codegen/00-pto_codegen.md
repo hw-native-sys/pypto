@@ -44,7 +44,7 @@ stride 表达式里的常量 (例如复合参数维度 `M * 2` 中的 `2`) 也�
 ### 显式 Buffer 输入
 
 `GenerateBufferFunction` 在发射前验证显式构造的 Buffer IR。GM 路径支持
-物理形状静态、紧密 ND 布局的二维 FP32 Tensor 参数，以及规范化的 Tensor
+物理形状静态、紧密 ND 布局的二维 FP16/BF16/FP32/INT32 Tensor 参数，以及规范化的 Tensor
 参数返回值。它复用现有 GM 张量视图前缀和原生“Tensor 在前、标量在后”的
 ABI。Tensor 返回值保留在 IR 中供编排处理别名，不产生原生返回值。
 
@@ -55,7 +55,8 @@ ABI。Tensor 返回值保留在 IR 中供编排处理别名，不产生原生返
 存在时才发射地址，不受旧发射标志影响。GM 传输不创建 buffer、不推导
 valid 状态更新，也不重建逻辑 Tile。
 
-此直接路径不启用自动 Tile-to-Buffer 转换，也不修改默认流水线。
+设置 `enable_buffer_ir=True` 时，流水线在进入此直接路径前执行 `LowerTileToBuffer`。
+迁移期间默认流水线仍保持 Functional 阶段。
 描述符、方向、动态窗口和 ABI 限制见 [Buffer 契约](../ir/02-types.md#buffer-算子契约)。
 原生编译测试验证语法和操作数数据流；数值执行是单独的集成验收要求。
 

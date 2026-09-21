@@ -46,7 +46,7 @@ declared in the constants block before its use.
 ### Explicit Buffer input
 
 `GenerateBufferFunction` validates explicitly constructed Buffer IR before
-emission. Its GM path supports static, packed ND rank-2 FP32 Tensor parameters
+emission. Its GM path supports static, packed ND rank-2 FP16/BF16/FP32/INT32 Tensor parameters
 and normalized Tensor parameter returns. It shares the existing GM tensor-view
 prologue and native tensors-first/scalars-last ABI. Tensor returns remain in IR
 for orchestration aliasing; they do not create native return values.
@@ -59,8 +59,8 @@ from a `buffer.alloc` in the same scope; an address is emitted exactly when its
 operand is present, independently of the legacy emission flag. GM transfers
 never create a buffer, infer valid-state updates, or reconstruct a logical Tile.
 
-This direct path does not enable automatic Tile-to-Buffer conversion or change
-the default pipeline. See [Buffer contracts](../ir/02-types.md#buffer-operator-contracts)
+With `enable_buffer_ir=True`, the pipeline runs `LowerTileToBuffer` before
+entering this direct path. The default pipeline remains Functional during migration. See [Buffer contracts](../ir/02-types.md#buffer-operator-contracts)
 for descriptor, direction, dynamic-window, and ABI limits. Native compilation
 tests establish syntax and operand dataflow; numerical execution is a separate
 integration requirement.

@@ -13,9 +13,11 @@ from collections import Counter
 
 import pypto.language as pl
 import pytest
-from pypto import ir, passes
+from pypto import DataType, ir, passes
+from pypto.backend import BackendType
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import _run_ptoas
+from pypto.ir.instruments import make_roundtrip_instrument
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import codegen
 
@@ -92,6 +94,10 @@ def test_all_planners_end_in_buffer_ir_with_explicit_allocation_operands(planner
     assert calls.allocations
     for allocation in calls.allocations:
         assert isinstance(allocation.value, ir.Call)
+        assert allocation.span.filename == allocation.var.span.filename
+        assert allocation.span.begin_line == allocation.var.span.begin_line
+        assert allocation.value.span.begin_line == allocation.span.begin_line
+        assert allocation.span.is_valid()
         assert len(allocation.value.args) == (1 if planner == passes.MemoryPlanner.PTOAS else 2)
         assert isinstance(allocation.value.args[0], ir.MakeTuple)
         assert not allocation.value.args[0].elements
@@ -136,6 +142,23 @@ def test_default_pipeline_stays_functional_until_the_coordinated_switch(planner)
     assert "VerifyTileStorage" not in names
     kernel = result.get_function("kernel")
     assert kernel is not None and kernel.ir_stage == ir.FunctionIRStage.Functional
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+def test_enabled_pipeline_roundtrip_preserves_buffer_representation(planner):
+    with passes.PassContext([make_roundtrip_instrument()], memory_planner=planner, enable_buffer_ir=True):
+        result = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(StraightLine)
+    kernel = result.get_function("kernel")
+    assert kernel is not None and kernel.ir_stage == ir.FunctionIRStage.Buffer
+    assert _BufferCalls(result).allocations
+
+
+def test_buffer_roundtrip_rejects_lost_stage_and_operands(monkeypatch):
+    result, _ = _lower(passes.MemoryPlanner.PYPTO)
+    monkeypatch.setattr("pypto.pypto_core.ir.deserialize", lambda _data: StraightLine)
+    with passes.PassContext([make_roundtrip_instrument()]):
+        with pytest.raises(RuntimeError, match="Binary roundtrip failed"):
+            passes.lower_tile_to_buffer()(result)
 
 
 @pytest.mark.parametrize("planner", _PLANNERS)
@@ -491,6 +514,84 @@ def test_distributed_loop_carries_fail_at_lowering_boundary(planner, kind, same_
         with pytest.raises(ValueError, match="distributed tensor loop carries require a separate"):
             passes.lower_tile_to_buffer()(program)
     assert ir.serialize(program) == before
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize(
+    "dtype_name,mlir_type,operation",
+    [
+        (dtype, mlir, operation)
+        for dtype, mlir in [("FP16", "f16"), ("FP32", "f32"), ("INT32", "i32")]
+        for operation in ["transfer", "add", "mul"]
+    ]
+    + [("BF16", "bf16", "transfer")],
+)
+def test_typed_transfers_and_arithmetic_keep_physical_storage(
+    tmp_path, ascend_backend, planner, dtype_name, mlir_type, operation
+):
+    valid = [13, 24] if operation == "transfer" else [16, 32]
+    computation = "result = lhs" if operation == "transfer" else f"result = pl.{operation}(lhs, lhs)"
+    program = pl.parse_program(f"""
+@pl.program
+class TypedTransfers:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, source: pl.Tensor[[32, 64], pl.{dtype_name}],
+               output: pl.Out[pl.Tensor[[32, 64], pl.{dtype_name}]]
+               ) -> pl.Tensor[[32, 64], pl.{dtype_name}]:
+        lhs = pl.load(source, [3, 8], [16, 32], valid_shape={valid})
+        {computation}
+        output = pl.store(result, [4, 32], output)
+        return output
+""")
+    planned = []
+
+    def before(pass_obj, candidate):
+        if pass_obj.get_name() == "LowerTileToBuffer":
+            planned.append(candidate)
+
+    instrument = passes.CallbackInstrument(before_pass=before, name="CaptureTypedStorage")
+    with passes.PassContext([instrument], memory_planner=planner, enable_buffer_ir=True):
+        lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+    assert len(planned) == 1
+    dtype = getattr(DataType, dtype_name)
+    tile_types = [
+        statement.var.type
+        for statement in statements(planned[0])
+        if isinstance(statement, ir.AssignStmt) and isinstance(statement.var.type, ir.TileType)
+    ]
+    assert tile_types
+    for tile_type in tile_types:
+        assert tile_type.dtype == dtype and tile_type.memref is not None
+        assert tile_type.memref.size_ == 16 * 32 * dtype.get_byte()
+    restored = ir.deserialize(ir.serialize(lowered))
+    assert isinstance(restored, ir.Program)
+    ir.assert_structural_equal(lowered, restored, enable_auto_mapping=True)
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.BufferIR)
+    assert passes.PropertyVerifierRegistry.verify(properties, restored) == []
+    calls = _BufferCalls(restored)
+    assert calls.allocations
+    for allocation in calls.allocations:
+        assert isinstance(allocation.var.type, ir.BufferType)
+        assert allocation.var.type.dtype == dtype
+        assert allocation.var.type.shape == [16, 32]
+        assert allocation.var.type.valid_shape == valid
+    text = codegen.PTOCodegen().generate(restored, emit_source_loc=False)
+    assert text.count(f"!pto.ptr<{mlir_type}>") >= 2
+    assert text.count("pto.tload ins(") == text.count("pto.tstore ins(") == 1
+    assert "pto.tcast" not in text and "pto.tmov" not in text
+    if operation != "transfer":
+        assert text.count(f"pto.t{operation} ins(") == 1
+    assert (" addr = " in text) == (planner != passes.MemoryPlanner.PTOAS)
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    source, output = tmp_path / "typed.pto", tmp_path / "typed.cpp"
+    source.write_text(text)
+    arch = "a2" if ascend_backend == BackendType.Ascend910B else "a5"
+    level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+    _run_ptoas(str(source), str(output), [f"--pto-arch={arch}", f"--pto-level={level}"])
+    assert output.is_file()
 
 
 if __name__ == "__main__":

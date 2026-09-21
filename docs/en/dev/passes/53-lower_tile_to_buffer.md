@@ -75,6 +75,8 @@ Converted `InCore`, `AIC`, and `AIV` functions receive
 verifies its output and is idempotent. Failed conversion leaves the input
 program unchanged. No functional Tile pass should run after this boundary.
 
+Synthetic allocations inherit the source location of their indexed Tile handle when the original allocation has no location. This keeps native allocation diagnostics tied to the user source.
+
 ## Branches
 
 Storage legalization has already selected one destination window for each Tile
@@ -133,13 +135,23 @@ condition, preserving shared references from both the condition and body.
 buffer.store(left_buf, (row_result, column_result), (16, 32), Out)
 ```
 
+The scalar SPMD queries `tile.get_block_idx`, `tile.get_block_num`, and
+`tile.get_subblock_idx` become corresponding internal `buffer.*` queries with
+an INDEX value result and no memory effects. Native emission reads the existing
+runtime-supplied kernel ABI parameters. These queries remain direct SSA
+assignments; `FlattenCallExpr` handles nested source expressions beforehand.
+
 ## Initial supported recipes
 
 The current recipes support straight-line kernels, branches and loops with static
-rank-2 dense Vec FP32 tiles with one
+rank-2 dense Vec FP16/BF16/FP32/INT32 tiles with one
 descriptor per allocation, static valid extents, ordinary packed ND GM tensors,
 and default load/store policies. It converts allocation, create, load, store,
-add, multiply, move, and already legalized aliases.
+move, already legalized aliases, and the [typed elementwise recipes](../ir/05-operators.md#typed-buffer-elementwise-recipes).
+GM load/store preserve matching element types without casts. `add`/`mul` support
+FP16/FP32/INT32; BF16 transfer support does not imply arithmetic support.
+Scalar recipe inputs are converted explicitly to the destination dtype before
+Buffer calls are constructed; fill shape/dtype select the destination descriptor.
 
 Helper calls, alternate layouts, dynamic metadata, slots, and
 other operation recipes are added in subsequent migration slices. Unsupported
