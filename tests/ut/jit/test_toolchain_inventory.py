@@ -851,6 +851,109 @@ _IMPLICIT_DEPENDENCY_OVERRIDES = (
 )
 
 
+def _tree(root: Path, *relatives: str) -> Path:
+    for relative in relatives:
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(relative)
+    return root
+
+
+def test_a_subtree_identified_elsewhere_is_left_out(tmp_path):
+    package = _tree(tmp_path / "pkg", "a.py", "_assets/build/pto-isa/isa.h")
+
+    kept = _toolchain._without_subtree({package}, package / "_assets/build/pto-isa")
+
+    walked = {q for root in kept for q in ([root] if root.is_file() else root.rglob("*")) if q.is_file()}
+    assert walked == {package / "a.py"}
+
+
+def test_splitting_a_root_keeps_every_sibling_on_the_way_down(tmp_path):
+    # Each level of the descent must contribute its other entries, or excluding
+    # one leaf would silently drop everything beside it.
+    package = _tree(
+        tmp_path / "pkg",
+        "top.py",
+        "_assets/meta.txt",
+        "_assets/build/cmake/rules.cmake",
+        "_assets/build/pto-isa/isa.h",
+    )
+
+    kept = _toolchain._without_subtree({package}, package / "_assets/build/pto-isa")
+
+    walked = {q for root in kept for q in ([root] if root.is_file() else root.rglob("*")) if q.is_file()}
+    assert walked == {
+        package / "top.py",
+        package / "_assets/meta.txt",
+        package / "_assets/build/cmake/rules.cmake",
+    }
+
+
+def test_a_root_that_does_not_contain_the_subtree_keeps_its_logical_path(tmp_path):
+    # The roots a component reports are part of its identity, so an unrelated
+    # root must come back as given rather than resolved or rebuilt.
+    link = tmp_path / "link"
+    link.symlink_to(_tree(tmp_path / "real", "x.py"), target_is_directory=True)
+
+    assert _toolchain._without_subtree({link}, tmp_path / "elsewhere") == {link}
+
+
+def test_a_path_inside_the_excluded_subtree_is_dropped(tmp_path):
+    package = _tree(tmp_path / "pkg", "isa/isa.h")
+    isa = package / "isa"
+
+    assert _toolchain._without_subtree({isa, isa / "isa.h"}, isa) == set()
+
+
+def test_a_subtree_outside_every_root_excludes_nothing(tmp_path):
+    # PTO_ISA_ROOT pointing away from the package is the ordinary case: there
+    # is no duplicate to remove, and the roots must be untouched.
+    package = _tree(tmp_path / "pkg", "a.py")
+    elsewhere = _tree(tmp_path / "isa", "isa.h")
+
+    assert _toolchain._without_subtree({package}, elsewhere) == {package}
+
+
+@pytest.mark.parametrize("unaccounted", ["", "!! build/x.h"])
+def test_what_the_runtime_stops_inventorying_the_isa_component_still_covers(
+    tmp_path, monkeypatch, unaccounted
+):
+    """The deduplication is only sound while these two agree on the same tree.
+
+    _discover drops the ISA checkout from the runtime inventory because
+    _pto_isa_component identifies it. That holds on both of its branches -- a
+    verified revision, or the contents when the revision cannot be trusted --
+    and a change making either stop covering the tree would open a hole no
+    other component fills.
+    """
+    package = _tree(tmp_path / "simpler_setup", "a.py", "_assets/build/pto-isa/isa.h")
+    checkout = package / "_assets/build/pto-isa"
+    monkeypatch.setitem(
+        sys.modules, "simpler_setup.pto_isa", SimpleNamespace(get_pto_isa_head=lambda root: "f" * 40)
+    )
+    monkeypatch.setattr(_toolchain, "_unaccounted_checkout_state", lambda root: unaccounted)
+
+    runtime = _toolchain._without_subtree({package}, checkout)
+    component = _toolchain._pto_isa_component(checkout)
+
+    inventoried = {q for root in runtime for q in root.rglob("*") if q.is_file()}
+    assert checkout / "isa.h" not in inventoried
+    covered_by_revision = component.verified_revision is not None
+    covered_by_contents = [root.path for root in component.roots] == [checkout]
+    assert covered_by_revision or covered_by_contents
+
+
+def test_a_root_reached_through_a_symlink_still_finds_the_subtree(tmp_path):
+    package = _tree(tmp_path / "real", "a.py", "isa/isa.h")
+    link = tmp_path / "link"
+    link.symlink_to(package, target_is_directory=True)
+
+    kept = _toolchain._without_subtree({link}, package / "isa")
+
+    walked = {q for root in kept for q in ([root] if root.is_file() else root.rglob("*")) if q.is_file()}
+    assert walked == {link / "a.py"}
+
+
 @pytest.fixture
 def compiler_metadata(monkeypatch):
     """Keep discovery tests independent of the host, not just of its runtime.

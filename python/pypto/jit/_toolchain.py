@@ -803,6 +803,36 @@ def _outside(paths: set[Path], install_root: Path) -> set[Path]:
     return {p for p in paths if p != install_root and install_root not in p.parents}
 
 
+def _without_subtree(paths: set[Path], excluded: Path) -> set[Path]:
+    """Cover everything in ``paths`` except ``excluded``, which is identified elsewhere.
+
+    A root that *contains* ``excluded`` cannot simply be dropped -- that would
+    lose the rest of its tree -- so it is replaced by the siblings along the way
+    down to ``excluded``. Every other file under that root is still inventoried,
+    and the logical path of each sibling is preserved, because the roots a
+    component reports are part of its identity.
+
+    Paths are compared resolved, so a root reached through a symlink still
+    recognises the subtree beneath it. Nothing is excluded when no root contains
+    ``excluded`` -- the checkout living outside the package is the ordinary
+    ``PTO_ISA_ROOT`` case, and then there is nothing to deduplicate.
+    """
+    target = excluded.resolve()
+    kept: set[Path] = set()
+    for path in paths:
+        resolved = path.resolve()
+        if resolved == target or target in resolved.parents:
+            continue
+        if resolved not in target.parents:
+            kept.add(path)
+            continue
+        current = path
+        for name in target.relative_to(resolved).parts:
+            kept.update(child for child in current.iterdir() if child.name != name)
+            current = current / name
+    return kept
+
+
 def _discover(compiler: Any, ptoas: str, runtime_name: str) -> ToolchainInputs:
     """Collect the compiler, linker, SDK and PTO assembler inputs for cache identity."""
     if sys.platform != "linux":
@@ -873,9 +903,13 @@ def _discover(compiler: Any, ptoas: str, runtime_name: str) -> ToolchainInputs:
         device_component = replace(_component(_outside(device, cann_root)), reported_version=cann_version)
     else:
         device_component = _component(device)
+    # The ISA checkout lives inside the installed runtime package, and
+    # _pto_isa_component already identifies it -- by its verified revision, or
+    # by reading it when that cannot be trusted. Inventorying it here as well
+    # reads ~5.8k files a second time to prove what that component establishes.
     return ToolchainInputs(
         _component(pypto),
-        _component(runtime),
+        _component(_without_subtree(runtime, isa)),
         _pto_isa_component(isa),
         ptoas_component,
         device_component,
