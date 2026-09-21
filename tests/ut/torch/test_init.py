@@ -50,16 +50,20 @@ def framework(setup, monkeypatch):
     return fake
 
 
-def test_init_binds_current_device_and_initializes_once(setup, framework):
+@pytest.mark.parametrize("runtime", ["tensormap_and_ringbuffer", "host_build_graph"])
+def test_init_binds_current_device_and_initializes_once(setup, framework, runtime):
     state, _, calls, _ = setup
     framework.device = 3
-    init(aicpu_thread_num=4)
-    assert state.require_config() == KernelConfig("a2a3", "tensormap_and_ringbuffer", 3, 4)
+    init(runtime=runtime, aicpu_thread_num=4)
+    assert state.require_config() == KernelConfig("a2a3", runtime, 3, 4)
     assert len(calls.workers) == len(calls.inits) == 1 and framework.streams == [3]
-    init(device=3, aicpu_thread_num=4)
+    init(device=3, runtime=runtime, aicpu_thread_num=4)
     assert len(calls.workers) == 1
     with pytest.raises(ValueError, match="configuration conflict"):
-        init(device=3)
+        init(device=3, runtime=runtime)
+    other = "host_build_graph" if runtime == "tensormap_and_ringbuffer" else "tensormap_and_ringbuffer"
+    with pytest.raises(ValueError, match="configuration conflict"):
+        init(device=3, runtime=other, aicpu_thread_num=4)
     assert len(calls.workers) == len(calls.inits) == 1
     state.close()
 
@@ -80,7 +84,7 @@ def test_invalid_init_leaves_process_unclaimed_and_retryable(setup, framework, c
     state, _, calls, _ = setup
     kwargs = {
         "platform": {"platform": "a5"},
-        "runtime": {"runtime": "host_build_graph"},
+        "runtime": {"runtime": "unsupported_runtime"},
         "device": {"device": 1},
         "threads": {"aicpu_thread_num": 1},
     }.get(case, {})

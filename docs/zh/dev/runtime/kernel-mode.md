@@ -29,6 +29,15 @@ A5、HBG 执行仍属后续工作；直接 JIT 和注册后的 torch.ops 均支�
 torch_npu 2.6.0.post2 的退出契约接入；其他框架版本在完成退出协议验证前拒绝 native kernel
 初始化。此功能仍限于集成分支。
 
+HBG 接入已准备为 `pypto.torch.init(runtime="host_build_graph")`，复用同一个进程 Worker，
+并让 JIT 按 HBG 编译；注册 `torch.ops` 不会在 init 前绑定 runtime。再次 init 选择不同
+runtime 会报配置冲突。**当前 Simpler pin 仍无法运行此路径**：需要先合入
+[Simpler #2289](https://github.com/hw-native-sys/simpler/pull/2289)，更新 pin 与 ABI revision，
+再将 HBG 加入 CI 并确认设备支持。`tests/st/runtime/kernel/test_torch_ops.py` 的
+`test_host_build_graph` 用例覆盖 eager、注册调用、`torch.compile`、Worker 复用以及
+warmup 后的 capture/replay，并分别开启/关闭 taskQueue；上板验证仍待完成。
+PyPTO API 仍要求 capture 前 warmup。
+
 Host/模拟器和分布式执行使用显式 program 编译：
 
 ```python

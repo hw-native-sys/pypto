@@ -57,9 +57,10 @@ TENSOR_DIRECTION_TAGS = {"In": 1, "Out": 2, "InOut": 3}
 MAX_KERNEL_TENSORS = 256
 MAX_KERNEL_SCALARS = 128
 MAX_KERNEL_RANK = 5
-# (platform, runtime) pairs whose native launch is validated for framework
-# eager and graph calls. Binary descriptors may name other targets.
-EAGER_KERNEL_TARGETS = frozenset({("a2a3", "tensormap_and_ringbuffer")})
+# Targets accepted by the framework frontend. Runtime initialization still
+# checks native capability; HBG requires its Simpler integration.
+# Binary descriptors may name other targets.
+EAGER_KERNEL_TARGETS = frozenset({("a2a3", "tensormap_and_ringbuffer"), ("a2a3", "host_build_graph")})
 
 
 @dataclass(frozen=True)

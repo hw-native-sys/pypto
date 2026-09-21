@@ -41,6 +41,17 @@ verified with torch_npu 2.6.0.post2 as described below; other framework versions
 are rejected before native kernel initialization until their teardown contract
 is validated. This remains integration-branch functionality.
 
+HBG integration is prepared through `pypto.torch.init(runtime="host_build_graph")`.
+It uses the same process Worker and selects HBG for JIT compilation; registering
+`torch.ops` does not fix a runtime before init. Repeating init with another
+runtime is a configuration conflict. This path is **not runnable with the current
+Simpler pin**: it depends on [Simpler #2289](https://github.com/hw-native-sys/simpler/pull/2289).
+Merge that dependency and update the pin/ABI revision before enabling HBG in CI
+or claiming device support. The focused `test_host_build_graph` cases in
+`tests/st/runtime/kernel/test_torch_ops.py` cover eager calls, registered calls,
+`torch.compile`, Worker reuse and warmed capture/replay with taskQueue off/on;
+their device validation is pending. Warmup remains required by the PyPTO API.
+
 Host/simulator and distributed execution use explicit program compilation:
 
 ```python

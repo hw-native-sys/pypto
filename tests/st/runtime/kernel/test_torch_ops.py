@@ -16,7 +16,7 @@ import sys
 import pytest
 
 
-def _run(case, device, directory):
+def _run(case, device, directory, runtime="tensormap_and_ringbuffer"):
     import importlib  # noqa: PLC0415
 
     import torch  # noqa: PLC0415
@@ -80,7 +80,7 @@ def _run(case, device, directory):
             with pytest.raises(RuntimeError, match=r"call pypto\.torch\.init"):
                 update(x, 1.0, acc)
             assert counts == dict(compile=0, init=0, prepare=0) and state._worker is None
-            init()
+            init(runtime=runtime)
             assert accumulate(x, 1.0, acc) is acc
             worker = state._worker
             assert update(x=x, step=2.0, acc=acc) is acc
@@ -131,16 +131,17 @@ def _run(case, device, directory):
         # Ordinary process exit exercises 07; no caller-owned close or drain.
 
 
-def _isolated(case, device, directory, queue_enabled):
+def _isolated(case, device, directory, queue_enabled, runtime="tensormap_and_ringbuffer"):
     result = subprocess.run(
         [
             sys.executable,
             "-c",
             "from tests.st.runtime.kernel.test_torch_ops import _run; "
-            "import sys; _run(sys.argv[1], int(sys.argv[2]), sys.argv[3])",
+            "import sys; _run(sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4])",
             case,
             str(device),
             str(directory),
+            runtime,
         ],
         env=dict(os.environ, TASK_QUEUE_ENABLE=str(queue_enabled)),
         capture_output=True,
@@ -159,6 +160,14 @@ def test_torch_ops(test_config, tmp_path, case, queue_enabled):
         pytest.skip("Requires an A2/A3 NPU and the optional torch adapter")
     pytest.importorskip("torch_npu")
     _isolated(case, test_config.device_id, tmp_path, queue_enabled)
+
+
+@pytest.mark.parametrize("queue_enabled", [0, 1])
+def test_host_build_graph(test_config, tmp_path, queue_enabled):
+    if test_config.codegen_only or test_config.platform != "a2a3":
+        pytest.skip("Requires an A2/A3 NPU and the optional torch adapter")
+    pytest.importorskip("torch_npu")
+    _isolated("capture", test_config.device_id, tmp_path, queue_enabled, runtime="host_build_graph")
 
 
 if __name__ == "__main__":

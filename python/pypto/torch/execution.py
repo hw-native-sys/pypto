@@ -40,7 +40,8 @@ def init(
         device: NPU index. None uses torch_npu's current device; an explicit
             value must equal it because init never switches the framework device.
         platform: Kernel target platform family.
-        runtime: Simpler runtime bound by the process Worker.
+        runtime: Simpler runtime bound by the process Worker, either
+            ``tensormap_and_ringbuffer`` (default) or ``host_build_graph``.
         aicpu_thread_num: 0 selects the runtime default; otherwise 2..5.
         enable_chip_swimlane: Collection level 0..4; True selects full (4).
             Use begin_dfx/end_dfx outside capture to select measured launches.

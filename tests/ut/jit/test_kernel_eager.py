@@ -124,13 +124,15 @@ def test_eager_reuses_artifact_and_snapshots_each_scalar_and_stream(eager):
     assert eager.captures == [(12, 0), (13, 0)]
 
 
-def test_eager_compiles_for_the_init_bound_target(eager):
+@pytest.mark.parametrize("runtime", ["tensormap_and_ringbuffer", "host_build_graph"])
+def test_eager_compiles_for_the_init_bound_target(eager, monkeypatch, runtime):
+    eager.state = _bind(monkeypatch, KernelConfig("a2a3", runtime, 0))
     x, out = _tensor((4, 4)), _tensor((4, 4))
     assert scale_eager(x, 2, out) is out
     abi = eager.build_kwargs["_kernel_abi"]
-    assert (abi.platform, abi.runtime) == ("a2a3", "tensormap_and_ringbuffer")
+    assert (abi.platform, abi.runtime) == ("a2a3", runtime)
     assert eager.build_kwargs["platform"] == "a2a3"
-    assert eager.build_kwargs["runtime"] == passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
+    assert eager.build_kwargs["runtime"] == passes.runtime_kind_from_name(runtime)
     assert eager.frames[0].device_index == 0
 
 
