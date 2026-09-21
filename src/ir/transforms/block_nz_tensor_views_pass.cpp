@@ -227,23 +227,14 @@ class NzOffsetFactStore {
       auto it = definitions_.find(var);
       return it == definitions_.end() ? nullptr : it->second;
     };
-    facts.is_multiple_of = [this](const VarPtr& var, int64_t divisor) {
+    facts.loop_range = [this](const VarPtr& var) -> std::pair<ExprPtr, ExprPtr> {
       auto it = loop_bindings_.find(var);
-      if (it == loop_bindings_.end()) return false;
-      // Every value the loop variable takes is ``start + i * step``, so it is a
-      // multiple of ``divisor`` exactly when both endpoints of that form are.
-      const auto& [start, step] = it->second;
-      return start % divisor == 0 && step % divisor == 0;
+      if (it == loop_bindings_.end()) return {nullptr, nullptr};
+      return it->second;
     };
     facts.is_non_negative = [this](const VarPtr& var) {
       // The SPMD block index is a lane number, so it is never negative.
-      if (non_negative_vars_.count(var) != 0) return true;
-      auto it = loop_bindings_.find(var);
-      if (it == loop_bindings_.end()) return false;
-      // ``start + i * step`` only stays at or above ``start`` while the step
-      // does not walk downwards, so both have to be non-negative.
-      const auto& [start, step] = it->second;
-      return start >= 0 && step >= 0;
+      return non_negative_vars_.count(var) != 0;
     };
     return facts;
   }
@@ -272,10 +263,11 @@ class NzOffsetFactStore {
     }
 
     void VisitStmt_(const ForStmtPtr& op) override {
-      auto start = As<ConstInt>(op->start_);
-      auto step = As<ConstInt>(op->step_);
-      if (op->loop_var_ && start && step) {
-        store_->loop_bindings_.emplace(op->loop_var_, std::make_pair(start->value_, step->value_));
+      // Symbolic bounds are recorded too: the proofs recurse into them, so a
+      // strided loop that starts at the block index is as provable as one that
+      // starts at a literal.
+      if (op->loop_var_ && op->start_ && op->step_) {
+        store_->loop_bindings_.emplace(op->loop_var_, std::make_pair(op->start_, op->step_));
       }
       IRVisitor::VisitStmt_(op);
     }
@@ -285,7 +277,7 @@ class NzOffsetFactStore {
   };
 
   std::unordered_map<VarPtr, ExprPtr> definitions_;
-  std::unordered_map<VarPtr, std::pair<int64_t, int64_t>> loop_bindings_;
+  std::unordered_map<VarPtr, std::pair<ExprPtr, ExprPtr>> loop_bindings_;
   std::unordered_set<VarPtr> non_negative_vars_;
 };
 
@@ -339,13 +331,15 @@ void CheckNzGmGapFitsBurstStride(const std::vector<ExprPtr>& blocked_shape, cons
   INTERNAL_CHECK_SPAN(blocked_shape.size() == tensor_view_semantics::kNzBlockedRank, span)
       << "Internal error: the NZ tensor shape must be blocked before the GM gap check";
 
-  // ``BlockNzShape`` rejects a dynamic ``shape[-2]`` on both the tensor and the
-  // load window, so both row-fractal extents are constants by the time we
-  // arrive — they were built by ``make_index`` a few frames up.
+  // ``BlockNzShape`` rejects a dynamic ``shape[-2]`` on the tensor, so its
+  // row-fractal extent is a constant. The loaded extent is dynamic when a
+  // valid_shape narrows a ragged last tile; the gap only grows as fewer rows
+  // load, so the proof takes the worst case -- nothing loaded -- and a load that
+  // fits then fits for every run-time width.
   auto whole = As<ConstInt>(blocked_shape[kNzRowFractalDim]);
+  INTERNAL_CHECK_SPAN(whole, span)
+      << "Internal error: the blocked NZ tensor row-fractal extent must be static";
   auto loaded = As<ConstInt>(sizes->elements_[kNzRowFractalDim]);
-  INTERNAL_CHECK_SPAN(whole && loaded, span)
-      << "Internal error: blocked NZ row-fractal extents must be static";
 
   // ``TLoadGm2L1Nz2nz`` passes the load's column-block extent as ``nBurst``,
   // and the DMA applies ``gmGap`` only when stepping from one burst to the
@@ -360,7 +354,7 @@ void CheckNzGmGapFitsBurstStride(const std::vector<ExprPtr>& blocked_shape, cons
   if (column_blocks->value_ <= 1) return;
 
   const int64_t whole_rows = whole->value_ * tensor_view_semantics::kNzFractalRow;
-  const int64_t loaded_rows = loaded->value_ * tensor_view_semantics::kNzFractalRow;
+  const int64_t loaded_rows = loaded ? loaded->value_ * tensor_view_semantics::kNzFractalRow : 0;
   const int64_t gap = whole_rows - loaded_rows;
   CHECK_SPAN(gap <= kNzMaxGmGapBlocks, span)
       << "NZ layout: this tile.load is refused because it would silently return wrong data. Its GM row "
@@ -653,7 +647,13 @@ class BlockNzMutator : public IRMutator {
     args[1] = BlockTupleArg(args[1], logical_shape, dtype, op->span_, /*is_offsets=*/true, facts_);
     args[2] = BlockTupleArg(args[2], logical_shape, dtype, op->span_, /*is_offsets=*/false, facts_);
     if (args.size() >= 4) {
-      args[3] = BlockTupleArg(args[3], logical_shape, dtype, op->span_, /*is_offsets=*/false, facts_);
+      // A valid_shape may narrow the rows at run time -- a ragged last tile --
+      // so it blocks through the path that proves a dynamic row extent rather
+      // than the static-shape one.
+      auto valid = As<MakeTuple>(args[3]);
+      INTERNAL_CHECK_SPAN(valid, op->span_) << "Internal error: tile.load valid_shape must be a MakeTuple";
+      args[3] = std::make_shared<MakeTuple>(
+          tensor_view_semantics::BlockNzValidShape(valid->elements_, dtype, op->span_, facts_), valid->span_);
     }
     // Codegen builds the ``pto.partition_view`` — and so pto-isa's ``gShape`` —
     // from valid_shape when the load carries one, falling back to shapes

@@ -117,6 +117,8 @@ wt: pl.Tile[[256, 512], pl.INT8, pl.Mem.Mat] =
 | -------- | -------------- | ---- |
 | `AssignStmt`（`n0 = nb * 256`） | 乘积中的某个因子是倍数 | 两个因子都非负 |
 | `ForStmt`（`for k0 in pl.pipeline(512, 4096, 512)`） | `start` 与 `step` 同时是倍数 | `start` 与 `step` 同时非负 |
+| 符号 start 的 `ForStmt`（`for ob in pl.range(core, TILES, CORES)`） | 向 `start` 与 `step` 递归 | 向 `start` 与 `step` 递归 |
+| `Min` / `Max`（`min(800 - o0, 256)`） | 两个操作数都是倍数 | `Min`：两个操作数都非负；`Max`：任一即可 |
 | `tile.get_block_idx` / `tile.get_block_num` | —— | lane 编号不可能为负 |
 | 对正常量取模 / 整除（`(blk % 2) * 512`） | 由另一个因子承担 | 两者都向下递归：被除数也必须非负 |
 | `ConstInt` | 该值本身是倍数 | 该值 `>= 0` |
@@ -231,6 +233,8 @@ GlobalTensor<int8_t, pto::Shape<1, 16, 16, 16, 32>,
 | `tensor.reshape` 成其它形状 | 拒绝——它重新解释了分块形式无法承载的坐标 |
 | `tile.load` / `tensor.slice` / 整块展平之外的消费者 | 拒绝——此处 NZ 是只读的 |
 | 显式 stride 或部分 `valid_shape` | 拒绝 |
+| 动态 `valid_shape[-2]` 可证明是 16 的倍数（不规则的最后一个 tile） | 分块——行 fractal 数变为 `FloorDiv(rows, 16)` |
+| 动态 `valid_shape[-2]` 可能止于 fractal 内部 | 拒绝——不完整的 fractal 没有分块形式 |
 | 分布式张量 | 拒绝——`remote_load` 没有 NZ 分块 |
 | 对 NZ 做 `tensor.view` / `tensor.reinterpret_view` | 在算子构造期拒绝 |
 | 多列块 load 的 GM 行间隔超过 65535 个 block | 拒绝——**临时**，见 [GM 行间隔：一道临时防护](#gm-行间隔一道临时防护) |
@@ -274,7 +278,8 @@ gmGap = (gStride1 - gShape2*gShape3*gShape4) * sizeof(T) / 32
 因此收窄的 `valid_shape` 载入的行 fractal **更少**，留下的间隔反而**更大**，比只看
 `shapes` 得到的值更大。一个 `[65552, 64]` 的 INT8 权重若以 `shapes=[32, 64]`、
 `valid_shape=[16, 64]` 读取，生成的是 `partition_tensor_view<1x2x1x16x32>`，
-间隔为 65536，而不是 `shapes` 暗示的 65520。
+间隔为 65536，而不是 `shapes` 暗示的 65520。载入的行范围为动态时（不规则的最后一个
+tile），检查按最坏情况——一行都不载入——计算，因此通过检查的 load 对任意运行期宽度都成立。
 
 **单列块 load 不受此限制。** `TLoadGm2L1Nz2nz` 把 load 自身的列块数作为 `nBurst`
 传入，而 DMA 只在从一个 burst 跨到下一个时才使用 `gmGap`，因此只有一个 burst 时那个

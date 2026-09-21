@@ -317,16 +317,17 @@ inline std::vector<ExprPtr> BlockNzShape(const std::vector<ExprPtr>& shape, Data
 struct NzOffsetFacts {
   /// The expression an SSA ``Var`` was assigned, or nullptr when unknown.
   std::function<ExprPtr(const VarPtr&)> definition;
-  /// Whether a ``Var`` holds a multiple of ``divisor`` by construction — a loop
-  /// variable whose start and step are both multiples. Such a variable has no
-  /// exact structural quotient (nothing in the IR names its trip count), so the
-  /// property is the only thing that licenses dividing it.
-  std::function<bool(const VarPtr&, int64_t)> is_multiple_of;
-  /// Whether a ``Var`` is non-negative by construction. Two sources qualify: a
-  /// loop variable whose start and step are both non-negative, and a variable
-  /// bound to an operator whose result cannot be negative (the SPMD block
-  /// index). The second is an *operator* fact, which is why the owning pass
-  /// supplies it rather than this header deciding it structurally.
+  /// The ``(start, step)`` of the loop that binds a ``Var`` as its loop
+  /// variable, or ``{nullptr, nullptr}`` when it is not one. Every value the
+  /// variable takes is ``start + i * step``, so the proofs below recurse into
+  /// both — which is what lets a symbolic start, such as a strided loop that
+  /// begins at the block index, carry its facts into the loop. A loop variable
+  /// has no exact structural quotient (nothing in the IR names its trip
+  /// count), so these properties are the only thing that licenses dividing it.
+  std::function<std::pair<ExprPtr, ExprPtr>(const VarPtr&)> loop_range;
+  /// Whether a ``Var`` is bound to an operator whose result cannot be negative
+  /// (the SPMD block index). That is an *operator* fact, which is why the owning
+  /// pass supplies it rather than this header deciding it structurally.
   std::function<bool(const VarPtr&)> is_non_negative;
 };
 
@@ -385,11 +386,28 @@ inline bool IsProvableMultipleOf(const ExprPtr& expr, int64_t divisor, const NzO
            IsProvableMultipleOf(sub->right_, divisor, facts, budget);
   }
 
+  // Either operand is the result, so both have to qualify. This is how a
+  // ragged last tile names its width -- ``min(extent - o0, TILE)``.
+  if (auto min_expr = As<Min>(expr)) {
+    return IsProvableMultipleOf(min_expr->left_, divisor, facts, budget) &&
+           IsProvableMultipleOf(min_expr->right_, divisor, facts, budget);
+  }
+  if (auto max_expr = As<Max>(expr)) {
+    return IsProvableMultipleOf(max_expr->left_, divisor, facts, budget) &&
+           IsProvableMultipleOf(max_expr->right_, divisor, facts, budget);
+  }
+
   // ``As<Var>`` deliberately excludes ``IterArg`` (see ir-kind-traits): an
   // IterArg's value changes every iteration, so neither its initial value nor
   // any binding recorded for it proves anything about the value this use sees.
   if (auto var = As<Var>(expr)) {
-    if (facts.is_multiple_of && facts.is_multiple_of(var, divisor)) return true;
+    if (facts.loop_range) {
+      auto [start, step] = facts.loop_range(var);
+      if (start && step && IsProvableMultipleOf(start, divisor, facts, budget) &&
+          IsProvableMultipleOf(step, divisor, facts, budget)) {
+        return true;
+      }
+    }
     if (facts.definition) {
       if (auto def = facts.definition(var)) {
         return IsProvableMultipleOf(def, divisor, facts, budget);
@@ -453,8 +471,28 @@ inline bool IsProvableNonNegative(const ExprPtr& expr, const NzOffsetFacts& fact
     return divisor && divisor->value_ > 0 && IsProvableNonNegative(div->left_, facts, budget);
   }
 
+  // A minimum is at least as small as either operand, so both must be
+  // non-negative; a maximum is at least as large, so one is enough.
+  if (auto min_expr = As<Min>(expr)) {
+    return IsProvableNonNegative(min_expr->left_, facts, budget) &&
+           IsProvableNonNegative(min_expr->right_, facts, budget);
+  }
+  if (auto max_expr = As<Max>(expr)) {
+    return IsProvableNonNegative(max_expr->left_, facts, budget) ||
+           IsProvableNonNegative(max_expr->right_, facts, budget);
+  }
+
   if (auto var = As<Var>(expr)) {
     if (facts.is_non_negative && facts.is_non_negative(var)) return true;
+    // ``start + i * step`` only stays at or above ``start`` while the step does
+    // not walk downwards, so both have to be non-negative.
+    if (facts.loop_range) {
+      auto [start, step] = facts.loop_range(var);
+      if (start && step && IsProvableNonNegative(start, facts, budget) &&
+          IsProvableNonNegative(step, facts, budget)) {
+        return true;
+      }
+    }
     if (facts.definition) {
       if (auto def = facts.definition(var)) {
         return IsProvableNonNegative(def, facts, budget);
@@ -463,6 +501,49 @@ inline bool IsProvableNonNegative(const ExprPtr& expr, const NzOffsetFacts& fact
   }
 
   return false;
+}
+
+/// Block a ``tile.load``'s ``valid_shape`` into NZ coordinates.
+///
+/// Unlike ``BlockNzShape`` the row extent may be dynamic: a ragged last tile
+/// names its width at run time (``min(extent - o0, TILE)``), and a valid region
+/// that covers whole fractals has a blocked form -- fewer row fractals. The row
+/// extent must therefore be *proven* a non-negative multiple of 16, and it is
+/// divided as a whole (``FloorDiv(rows, 16)``), for the same wraparound reason
+/// ``BlockNzOffsets`` divides an offset whole rather than re-associating it. The
+/// column extent is the contiguous C0 line and stays static.
+inline std::vector<ExprPtr> BlockNzValidShape(const std::vector<ExprPtr>& valid, DataType dtype,
+                                              const Span& span, const NzOffsetFacts& facts) {
+  CheckNzLogicalRank(valid.size(), "valid_shape", span);
+  const ExprPtr& rows = valid[valid.size() - 2];
+  if (As<ConstInt>(rows)) return BlockNzShape(valid, dtype, span);
+
+  const int64_t c0 = NzC0Elems(dtype);
+  auto cols = As<ConstInt>(valid.back());
+  CHECK_SPAN(cols && cols->value_ > 0 && cols->value_ % c0 == 0, span)
+      << "NZ layout requires a static valid_shape[-1] that is a positive multiple of c0 = " << c0
+      << "; a partial C0 line has no blocked form.";
+  int budget = kNzDivideStepBudget;
+  CHECK_SPAN(IsProvableMultipleOf(rows, kNzFractalRow, facts, &budget), span)
+      << "NZ layout requires a dynamic valid_shape[-2] to be a provable multiple of " << kNzFractalRow
+      << ": a valid region that ends inside a fractal has no blocked form. Provable forms are a "
+      << "constant, a loop variable whose start and step are multiples, and any sum, difference, "
+      << "product, min or max built from those.";
+  // The sign is deliberately not proven. It matters for an *offset* because
+  // a negative one is clamped to 0 at the partition view and reads the wrong
+  // fractal; a negative valid extent instead yields an empty partition, exactly
+  // as it does for an ND load, so it carries no NZ-specific hazard. Divisibility
+  // is the NZ-specific part -- a partial fractal has no blocked form.
+
+  std::vector<ExprPtr> blocked;
+  blocked.reserve(kNzBlockedRank);
+  auto make_index = [&span](int64_t v) { return std::make_shared<ConstInt>(v, DataType::INDEX, span); };
+  blocked.push_back(FoldNzLeadingExtents(valid, span));
+  blocked.push_back(make_index(cols->value_ / c0));
+  blocked.push_back(MakeFloorDiv(rows, make_index(kNzFractalRow), span));
+  blocked.push_back(make_index(kNzFractalRow));
+  blocked.push_back(make_index(c0));
+  return blocked;
 }
 
 /// Map logical offsets ``[b, r0, c0off]`` (or ``[r0, c0off]``) into the blocked
