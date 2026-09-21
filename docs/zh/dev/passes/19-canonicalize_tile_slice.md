@@ -15,7 +15,7 @@ PTO ISA 支持 Mat 上的 `pto.subview` 作为零拷贝别名（无数据搬运�
 | 目标**地址**正确 | `AllocateMemoryAddr` 会把 `ConstInt` 偏移折叠成 `base + off`；但**动态**偏移无法编码为 `ConstInt` 地址，会退化到裸源基址——抽出的窗口于是落到源 tile 的第 0 行（#1640）。 |
 | 目标**布局**一致 | slice 缓冲区是稠密的（行间距 = slice 列数），而源窗口是跨步的（行间距 = 源列数）。二者只有在窗口**连续**时才相同：单行，或覆盖全部列。多行 tile 的列切片（`t[:, a:b]`）会在自己仍然存活的源上做 跨步 → 稠密 的重排并将其摧毁——只有第 0 行幸存，因为它的稠密目标地址恰好等于其源地址（#2010）。 |
 
-只要任一条件不成立，该操作数就会被替换为新的 `tile.extract(..., target_memory=Vec)`，其结果获得独立、非继承的分配。`tile.extract` 注册为 `not_inplace_safe()`，因此 [`MemoryReuse`](36-memory_reuse.md) 也不会把这块新缓冲区重新放回源 tile 上。若实例化本身就是恒等拷贝，则该 slice 保持原样——它继续共享源缓冲区，而不必付出一份重复分配的代价。
+只要任一条件不成立，该操作数就会被替换为新的 `tile.extract(..., target_memory=Vec)`，其结果获得独立、非继承的分配。`tile.extract` 注册为 `not_inplace_safe()`，因此 [`MemoryReuse`](37-memory_reuse.md) 也不会把这块新缓冲区重新放回源 tile 上。若实例化本身就是恒等拷贝，则该 slice 保持原样——它继续共享源缓冲区，而不必付出一份重复分配的代价。
 
 此外，PTO 向量指令要求 tile 操作数的基址按 32 字节对齐。零拷贝 Vec slice 的起始地址为
 
@@ -27,7 +27,7 @@ base + (off_row * base_cols + off_col) * storage_bits
 
 两种 Vec 实例化只要可证明等价，就把 `tile.extract` 放在 **slice 的定义处**，使拷贝留在作者书写 slice 的位置——尤其是同一个 `pl.split_aiv` 区域内——且有多个消费者的 slice 只拷贝一次。slice 是在被消费时才读取源的视图，因此在定义处拷贝只有在两处之间没有任何写入该存储时才等价；若可能有写入到达，则改为在每个消费者之前放置 extract（见[Vec extract 的放置位置](#vec-extract-的放置位置)）。
 
-**Pipeline 位置**：紧跟在 [`AutoTileMatmulL0`](18-auto_tile_matmul_l0.md) 之后（此时读取 batch-page slice 的逐迭代 `tile.extract` 已经存在），先于 [`InferTileMemorySpace`](20-infer_tile_memory_space.md)。
+**Pipeline 位置**：紧跟在 [`AutoTileMatmulL0`](18-auto_tile_matmul_l0.md) 之后（此时读取 batch-page slice 的逐迭代 `tile.extract` 已经存在），先于 [`InferTileMemorySpace`](21-infer_tile_memory_space.md)。
 
 **前置属性 (Required)**：`SSAForm`、`SplitIncoreOrch`、`IncoreTileOps`、`TileOps2D`、`NormalizedStmtStructure`。
 
@@ -201,7 +201,7 @@ for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
     scaled: pl.Tile[[16, 256], pl.FP32, pl.Mem.Vec] = pl.tile.col_expand_mul(local, coeff_textract)
 ```
 
-若把 extract 放在消费者处，读取就会被移进 `UP_DOWN` 区域，[`LowerAutoVectorSplit`](23-lower_auto_vector_split.md) 会在那里看到一个作者从未写在该处的全宽向量算子。
+若把 extract 放在消费者处，读取就会被移进 `UP_DOWN` 区域，[`LowerAutoVectorSplit`](24-lower_auto_vector_split.md) 会在那里看到一个作者从未写在该处的全宽向量算子。
 
 若两处之间可能有写入源 tile 的操作，则以视图语义为准，extract 放在消费者处——位于写入之后：
 

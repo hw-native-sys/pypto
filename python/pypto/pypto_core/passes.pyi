@@ -624,6 +624,27 @@ def canonicalize_tile_slice() -> Pass:
     on ``tile.extract`` / ``pto.textract``.
     """
 
+def fold_fixpipe_acc_epilogue() -> Pass:
+    """Fold a vector dequant/ReLU epilogue into the cube's Acc writeback.
+
+    A matmul whose accumulator is scaled and/or activated before being stored
+    costs more than the vector instructions suggest: the vector work splits a
+    pure-cube kernel into AIC+AIV functions with a C2V/V2C round-trip and a GM
+    slot buffer. The cube's fix-pipe performs both operations while draining
+    L0C, so the chain collapses into ``pre_quant`` / ``pre_relu`` kwargs on the
+    ``tile.store`` and the vector statements are deleted.
+
+    The hardware order is ``clamp(ReLU(acc) * s)`` — the activation reads the
+    raw accumulator and the multiply follows — so ``maximum(tile * s, 0)`` is
+    equivalent only for a non-negative ``s``; a negative one is declined with a
+    PerfHint rather than silently folded. Non-constant scales, non-RNE cast
+    modes, explicit saturation, multiply-used intermediates, and dtype pairs the
+    backend's fix-pipe cannot perform are all declined too.
+
+    Only the Acc→GM (``pto.tstore``) writeback is folded; Acc→Mat is withheld
+    by both backend handlers pending PTOAS#1570.
+    """
+
 def infer_tile_memory_space() -> Pass:
     """Infer TileType memory spaces and safe stationary matmul residency.
 
@@ -1101,6 +1122,7 @@ __all__ = [
     "legalize_tile_cast",
     "auto_tile_matmul_l0",
     "canonicalize_tile_slice",
+    "fold_fixpipe_acc_epilogue",
     "infer_tile_memory_space",
     "insert_mx_scale_addr",
     "materialize_tensor_strides",

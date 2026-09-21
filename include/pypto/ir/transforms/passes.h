@@ -729,6 +729,42 @@ Pass AutoTileMatmulL0();
 Pass CanonicalizeTileSlice();
 
 /**
+ * @brief Fold a vector dequant/ReLU epilogue into the cube's Acc writeback
+ *
+ * A matmul whose accumulator is scaled and/or activated and then stored costs
+ * far more than the vector instructions suggest: the vector work splits a
+ * pure-cube kernel into AIC+AIV functions with a C2V/V2C round-trip and a GM
+ * slot buffer. The cube's fix-pipe performs both operations while draining
+ * L0C, so the whole chain collapses into kwargs on the store.
+ *
+ * Recognised (every link must be the sole consumer of the previous one):
+ * @code
+ *   acc = tile.matmul(...)              // Acc by construction
+ *   [ t = tile.maximums(acc, 0.0) ]     // -> pre_relu=True   (form A)
+ *   [ t = tile.cast(t, FP32) ]          // absorbed: FIXPIPE multiplies in FP32
+ *   [ t = tile.muls(t, <const s>) ]     // -> pre_quant=s
+ *   [ t = tile.maximums(t, 0.0) ]       // -> pre_relu=True   (form B, s >= 0)
+ *   [ t = tile.cast(t, DST) ]           // the writeback's own conversion
+ *   tile.store(t, offs, out)            // rewritten to read `acc` directly
+ * @endcode
+ *
+ * The hardware order is `clamp(ReLU(acc) * s)` -- the activation precedes the
+ * multiply -- so form B is only equivalent for a non-negative scale and is
+ * declined with a PerfHint otherwise.
+ *
+ * Only the Acc->GM (``pto.tstore``) writeback is folded. The Acc->Mat
+ * (``pto.tinsert``) form is withheld by both backend handlers pending
+ * PTOAS#1570, and emitting it would produce IR ``FixpipeEpilogueValid``
+ * rejects.
+ *
+ * Requirements:
+ * - Runs between ``CanonicalizeTileSlice`` and ``InferTileMemorySpace``: the
+ *   latter is what assigns the vector chain to ``Mem.Vec`` and spawns the
+ *   cross-core transfer, so folding must happen before it.
+ */
+Pass FoldFixpipeAccEpilogue();
+
+/**
  * @brief Infer target memory space for TileType variables in InCore functions
  *
  * Sets TileType::memory_space_ based on the producing tile operation:

@@ -195,6 +195,7 @@ class PassManager:
             passes.legalize_tile_cast,
             passes.auto_tile_matmul_l0,
             passes.canonicalize_tile_slice,
+            passes.fold_fixpipe_acc_epilogue,
             passes.infer_tile_memory_space,
             passes.insert_mx_scale_addr,
             passes.resolve_backend_op_layouts,

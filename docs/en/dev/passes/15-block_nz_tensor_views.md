@@ -426,5 +426,5 @@ fails a `static_assert` instead of computing wrong results.
 ## Related
 
 - [14-flatten_tile_nd_to_2d.md](14-flatten_tile_nd_to_2d.md) — skips its ND2NZ window collapse for NZ sources
-- [32-materialize_tensor_strides.md](33-materialize_tensor_strides.md) — fills the blocked NZ stride
+- [32-materialize_tensor_strides.md](34-materialize_tensor_strides.md) — fills the blocked NZ stride
 - [../ir/02-types.md](../ir/02-types.md) — `TensorLayout` and `TensorView`

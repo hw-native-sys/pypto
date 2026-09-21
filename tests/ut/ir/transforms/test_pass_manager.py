@@ -39,6 +39,7 @@ TENSOR_OPTIMIZATION_PASSES = [
     "LegalizeTileCast",
     "AutoTileMatmulL0",
     "CanonicalizeTileSlice",
+    "FoldFixpipeAccEpilogue",
     "InferTileMemorySpace",
     "InsertMxScaleAddr",
     "ResolveBackendOpLayouts",

@@ -126,7 +126,7 @@ destination 并返回 `VoidType`，目前要求所有参数的 Vec buffer 描述
 分配操作数；旧 `emit_tile_addr` 标志不能删除或补充 buffer 地址。
 动态操作数保留在其词法作用域内，不重建逻辑 `TileType` 或 `MemRef`，
 也不运行隐式 tile 分配逻辑。设置 `enable_buffer_ir=True` 后，流水线在发射前通过
-[LowerTileToBuffer](../passes/53-lower_tile_to_buffer.md) 转换 Tile IR。
+[LowerTileToBuffer](../passes/54-lower_tile_to_buffer.md) 转换 Tile IR。
 
 GM 传输将完整窗口表示为普通操作数：
 
@@ -312,7 +312,7 @@ Packed canonical 公式（`BuildLogicalStridesFromLayout`，见
   stride 为空，消费者按对应 layout 的 packed canonical 解释。
 - **显式** —— 每个维度的 stride 都已写出。
 
-[`MaterializeTensorStrides`](../passes/33-materialize_tensor_strides.md) Pass
+[`MaterializeTensorStrides`](../passes/34-materialize_tensor_strides.md) Pass
 将所有隐式形态展开为显式 packed canonical，让 codegen 看到单一契约。
 `TensorViewCanonical` IRProperty + verifier 强制此不变量：
 

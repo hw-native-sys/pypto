@@ -108,5 +108,5 @@ state from a shape that might coincidentally look blocked.
 ## See also
 
 - [BlockNzTensorViews](15-block_nz_tensor_views.md)
-- [MaterializeTensorStrides](33-materialize_tensor_strides.md)
-- [InsertMxScaleAddr](21-insert_mx_scale_addr.md)
+- [MaterializeTensorStrides](34-materialize_tensor_strides.md)
+- [InsertMxScaleAddr](22-insert_mx_scale_addr.md)

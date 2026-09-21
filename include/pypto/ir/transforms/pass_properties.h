@@ -283,6 +283,17 @@ inline const PassProperties kCanonicalizeTileSliceProperties{
     .produced = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
                  IRProperty::TileOps2D, IRProperty::NormalizedStmtStructure}};
 
+// -- FIXPIPE Acc-epilogue folding pass ----------------------------------------
+
+// Property-preserving peephole: it deletes vector statements and moves their
+// effect onto an existing store's kwargs, changing neither the structural form
+// nor the tile-op stage.
+inline const PassProperties kFoldFixpipeAccEpilogueProperties{
+    .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
+                 IRProperty::TileOps2D, IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
+                 IRProperty::TileOps2D, IRProperty::NormalizedStmtStructure}};
+
 // -- Tile memory space inference pass -----------------------------------------
 
 // Also re-verifies AivSplitValid (same rationale as ConvertTensorToTileOps): this

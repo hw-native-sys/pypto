@@ -594,6 +594,16 @@ void BindPass(nb::module_& m) {
              "reduction, and bias-capacity-bounded N-window reloads followed by Mat-to-Bias moves. Other\n"
              "already-L0-sized and unsupported regimes are left untouched;\n"
              "useful deferred cases emit PerfHint diagnostics.");
+  passes.def("fold_fixpipe_acc_epilogue", &pass::FoldFixpipeAccEpilogue,
+             "Create a pass that folds a vector dequant/ReLU epilogue into the cube writeback\n\n"
+             "A matmul whose accumulator is scaled and/or activated before being stored costs\n"
+             "more than the vector instructions suggest: the vector work splits a pure-cube\n"
+             "kernel into AIC+AIV functions with a C2V/V2C round-trip and a GM slot buffer.\n"
+             "The fix-pipe performs both while draining L0C, so the chain collapses into\n"
+             "pre_quant / pre_relu kwargs on the tile.store and the vector statements go away.\n"
+             "The hardware applies ReLU to the accumulator *before* the scale, so\n"
+             "maximum(tile * s, 0) folds only for a non-negative s; other shapes are declined\n"
+             "with a PerfHint. Acc->Mat is not folded (withheld by the handlers, PTOAS#1570).");
   passes.def("canonicalize_tile_slice", &pass::CanonicalizeTileSlice,
              "Create a pass that lowers Mat-resident tile.slice into tile.extract\n\n"
              "A tile.slice whose result tile is Mem.Mat (e.g. a batch-page slice emitted by\n"

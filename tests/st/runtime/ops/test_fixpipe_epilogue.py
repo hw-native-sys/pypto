@@ -43,11 +43,17 @@ scale is silently dropped (PTOAS#1570). See
 alone on Acc->Mat is unaffected and is covered by ``acc_to_mat_relu_only``; add
 the scaled Mat cases back with the ptoas fix.
 
-Golden: torch. **A2/A3 only.** The A5 table in ``Ascend950Handler`` is
-transcribed from pto-isa's ``GetScalarPreQuantMode`` but has no device evidence
-yet, and an unsupported pair there is answered by *dropping the scale* rather
-than failing -- so an a5 case would be asserting exactly the thing nobody has
-measured. Enable it alongside a real a5 run, not before.
+Golden: torch. **A2/A3 hardware only** -- deliberately *not* ``a2a3sim``: pto-isa's
+CPU reference model (``quantize_element``) applies the ReLU on the *other* side of the
+multiply from silicon, so ``acc_to_gm_negative_scale`` would disagree with the
+simulator. No CI job had ever run this file on a2a3sim, so the marker was asserting a
+platform claim nothing had checked.
+
+Not a5 either: the table in ``Ascend950Handler`` is transcribed from pto-isa's
+``GetScalarPreQuantMode`` but has no device evidence yet, and an unsupported pair
+there is answered by *dropping the scale* rather than failing -- so an a5 case
+would be asserting exactly the thing nobody has measured. Enable it alongside a
+real a5 run, not before.
 """
 
 import pypto.language as pl
@@ -178,6 +184,37 @@ def matmul_relu_to_mat(a: pl.Tensor, b: pl.Tensor, e: pl.Tensor, out: pl.Out[pl.
 
 
 # ---------------------------------------------------------------------------
+# Kernel -- the *folded* form: the vector chain FoldFixpipeAccEpilogue collapses
+# ---------------------------------------------------------------------------
+
+
+@pl.jit
+def score_dequant_relu_written_as_vector_ops(k: pl.Tensor, q: pl.Tensor, out: pl.Out[pl.Tensor]):
+    """``relu(acc * SCALE)`` written the long way, for the pass to fold.
+
+    Same kernel as ``score_dequant_relu_to_gm`` but expressed as the vector chain
+    a user would actually write. ``FoldFixpipeAccEpilogue`` collapses it onto the
+    writeback, so both cases share the golden below: this asserts on hardware
+    that the fold is value-preserving, not merely structure-preserving.
+
+    The casts say ``mode="rint"`` because the fix-pipe rounds half-to-even while
+    the frontend default rounds half away from zero -- the pass declines the
+    default rather than change results at ties.
+    """
+    with pl.at(level=pl.Level.CORE_GROUP):
+        k_mat = pl.tile.load(k, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+        q_mat = pl.tile.load(q, [0, 0], [N, K], target_memory=pl.Mem.Mat)
+        acc = pl.tile.matmul(
+            pl.tile.move(k_mat, target_memory=pl.Mem.Left),
+            pl.tile.move(pl.tile.transpose_view(q_mat), target_memory=pl.Mem.Right),
+        )
+        scaled = pl.tile.muls(pl.tile.cast(acc, pl.FP32, mode="rint"), SCALE)
+        activated = pl.tile.maximums(scaled, 0.0)
+        pl.tile.store(pl.tile.cast(activated, pl.FP16, mode="rint"), [0, 0], out)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Goldens
 # ---------------------------------------------------------------------------
 
@@ -239,9 +276,19 @@ def _relu_only_case(kernel, name, **kwargs):
 _STORE_TOL = {"rtol": 1e-3, "atol": 1e-3}
 
 
-@pytest.mark.platforms("a2a3", "a2a3sim")
+@pytest.mark.platforms("a2a3")
 @st.cases(
     _gm_case(score_dequant_relu_to_gm, "acc_to_gm_dequant_relu", SCALE, relu=True, **_STORE_TOL),
+    # The same computation written as vector ops, which FoldFixpipeAccEpilogue
+    # collapses onto the writeback. Sharing the golden with the case above is the
+    # point: it pins that the fold does not change the numbers.
+    _gm_case(
+        score_dequant_relu_written_as_vector_ops,
+        "acc_to_gm_dequant_relu_folded",
+        SCALE,
+        relu=True,
+        **_STORE_TOL,
+    ),
     # A scale with a full mantissa, and no ReLU, so the multiply is on its own.
     _gm_case(
         score_inexact_scale_no_relu_to_gm,
@@ -277,7 +324,7 @@ def test_acc_to_gm_epilogue(case_run):
     case_run.assert_passed()
 
 
-@pytest.mark.platforms("a2a3", "a2a3sim")
+@pytest.mark.platforms("a2a3")
 @st.cases(_relu_only_case(matmul_relu_to_mat, "acc_to_mat_relu_only", rtol=2e-2, atol=2e-2))
 def test_acc_to_mat_relu_without_scale(case_run):
     """``pre_relu`` alone rides the unscaled FP32 -> BF16 narrowing."""

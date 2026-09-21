@@ -15,7 +15,7 @@ The pass also canonicalizes a **Vec** `tile.slice` consumed by the `tile.col_exp
 | The destination **address** is right | `AllocateMemoryAddr` folds a `ConstInt` offset into `base + off`, but a **dynamic** offset cannot be encoded as a `ConstInt` address and falls back to the bare source base — the extracted window lands on the source's row 0 (#1640). |
 | The destination **layout** matches | The slice's buffer is dense (row pitch = slice cols) while the source window is strided (row pitch = source cols). These coincide only for a **contiguous** window: a single row, or one spanning every column. A column slice of a multi-row tile (`t[:, a:b]`) repacks strided → dense on top of its own source and destroys it — only row 0 survives, because its dense destination happens to equal its source address (#2010). |
 
-When either condition fails, the operand is replaced by a fresh `tile.extract(..., target_memory=Vec)`, whose result gets its own non-inherited allocation. `tile.extract` is registered `not_inplace_safe()`, so [`MemoryReuse`](36-memory_reuse.md) cannot place that fresh buffer back onto the source either. A slice whose materialization *is* an identity copy is left untouched, so it keeps sharing the source buffer rather than paying for a duplicate allocation.
+When either condition fails, the operand is replaced by a fresh `tile.extract(..., target_memory=Vec)`, whose result gets its own non-inherited allocation. `tile.extract` is registered `not_inplace_safe()`, so [`MemoryReuse`](37-memory_reuse.md) cannot place that fresh buffer back onto the source either. A slice whose materialization *is* an identity copy is left untouched, so it keeps sharing the source buffer rather than paying for a duplicate allocation.
 
 Independently, PTO vector instructions require tile operand base addresses to be 32-byte aligned. A zero-copy Vec slice starts at
 
@@ -27,7 +27,7 @@ so an FP32 column slice at `[:, 1:2]` starts only 4 bytes past an aligned alloca
 
 Both Vec materializations place the `tile.extract` **at the slice's definition** whenever that is provably equivalent, so the copy stays where the author wrote the slice — in particular inside the same `pl.split_aiv` region — and a slice with several consumers is copied once. A slice is a view that reads its source when consumed, so a copy taken at the definition is equivalent only when nothing writes that storage in between; when a write may reach it, the extract is placed before each consumer instead (see [Where a Vec extract goes](#where-a-vec-extract-goes)).
 
-**Pipeline position**: After [`AutoTileMatmulL0`](18-auto_tile_matmul_l0.md) (so the per-iter `tile.extract`s that read the batch-page slices already exist), before [`InferTileMemorySpace`](20-infer_tile_memory_space.md).
+**Pipeline position**: After [`AutoTileMatmulL0`](18-auto_tile_matmul_l0.md) (so the per-iter `tile.extract`s that read the batch-page slices already exist), before [`InferTileMemorySpace`](21-infer_tile_memory_space.md).
 
 **Requirements**: `SSAForm`, `SplitIncoreOrch`, `IncoreTileOps`, `TileOps2D`, `NormalizedStmtStructure`.
 
@@ -201,7 +201,7 @@ for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
     scaled: pl.Tile[[16, 256], pl.FP32, pl.Mem.Vec] = pl.tile.col_expand_mul(local, coeff_textract)
 ```
 
-Placing the extract at the consumer instead would move the read into the `UP_DOWN` region, where [`LowerAutoVectorSplit`](23-lower_auto_vector_split.md) sees a full-width vector op the author never wrote there.
+Placing the extract at the consumer instead would move the read into the `UP_DOWN` region, where [`LowerAutoVectorSplit`](24-lower_auto_vector_split.md) sees a full-width vector op the author never wrote there.
 
 If anything may write the source between the two sites, the view semantics win and the extract is placed at the consumer — after the write:
 

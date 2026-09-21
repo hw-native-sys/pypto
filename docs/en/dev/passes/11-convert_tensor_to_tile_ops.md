@@ -208,7 +208,7 @@ Each entry names the operand rather than the space:
 `BridgeSpaceOf` reads that argument's `set_input_memory` constraint out of
 `OpRegistry` and stages it through `StagingSpaceForLoad`. `OpRegistry` is
 therefore the single place an operand's memory space is stated, for this pass and
-for [`InferTileMemorySpace`](20-infer_tile_memory_space.md) alike.
+for [`InferTileMemorySpace`](21-infer_tile_memory_space.md) alike.
 
 **A registration cannot write a space of its own.** `InputSpaceReq::demanded_space`
 is an `OperandSpace`, a type with no public constructor and no conversion from
@@ -274,7 +274,7 @@ RHS) gets a zero-copy `tile.transpose_view` at the matmul site. Nothing here
 matches on the operator being a matmul — an operand of any op declaring a
 non-Vec requirement reaches its producer the same way.
 
-The demand is propagated **through** zero-copy metadata ops that declare `set_output_memory_inherit_input()` — `tensor.slice`, `tensor.view`, `tensor.reshape`, `tensor.reinterpret_view`, `tensor.set_validshape`. So an operand written as `pl.matmul(pl.set_validshape(a[:, :K], rows, K), b)` still loads straight to Mat. An op that aliases its input's storage but omits that declaration breaks the chain: the operand materializes in Vec and needs a `tile.move` to Mat, which is a vector→cube boundary that flips an otherwise pure-CUBE InCore scope to `MIXED` and makes [`ExpandMixedKernel`](24-expand_mixed_kernel.md) split it into an AIC/AIV pair.
+The demand is propagated **through** zero-copy metadata ops that declare `set_output_memory_inherit_input()` — `tensor.slice`, `tensor.view`, `tensor.reshape`, `tensor.reinterpret_view`, `tensor.set_validshape`. So an operand written as `pl.matmul(pl.set_validshape(a[:, :K], rows, K), b)` still loads straight to Mat. An op that aliases its input's storage but omits that declaration breaks the chain: the operand materializes in Vec and needs a `tile.move` to Mat, which is a vector→cube boundary that flips an otherwise pure-CUBE InCore scope to `MIXED` and makes [`ExpandMixedKernel`](25-expand_mixed_kernel.md) split it into an AIC/AIV pair.
 
 ### A transposed operand may not be a Mat sub-window
 
@@ -285,7 +285,7 @@ two declarations at one address are the entire mechanism.
 A `tile.slice` of a Mat-resident parent is not a whole buffer. It reaches
 codegen as `pto.subview`, carrying a runtime offset and the **parent's** row
 pitch, and neither survives into an `alloc_tile`: a dynamic offset cannot fold
-into the constant `addr` (see [`AllocateMemoryAddr`](37-allocate_memory_addr.md))
+into the constant `addr` (see [`AllocateMemoryAddr`](38-allocate_memory_addr.md))
 and the pitch is not in the type. ptoas has no transposing read of such a window
 either — it refuses a mat-source `pto.tmov` on a view ("expects mat-source tmov
 to use matching src/dst shapes") and refuses `pto.treshape` on one at every
@@ -413,7 +413,7 @@ c_tile = pl.tile.matmul_acc(acc_tile, a_mat, b_mat)
 
 Two details this path settles that the operand path does not:
 
-- **The space is stated, not left to [`InferTileMemorySpace`](20-infer_tile_memory_space.md).**
+- **The space is stated, not left to [`InferTileMemorySpace`](21-infer_tile_memory_space.md).**
   The plain `tensor.create` conversion deliberately leaves `target_memory` unset,
   having no consumer context to derive it from; here there is one, and it is the
   same demand that asked for the boxing. Stating it also matters for correctness:
@@ -440,7 +440,7 @@ accumulator (see `ResolveCubeMAlignment`). `N`'s has to reconcile *memory
 spaces* instead, which `M`'s does not:
 
 - the right operand is loaded into `Mat` and then promoted on to `Right` by
-  [`InferTileMemorySpace`](20-infer_tile_memory_space.md), and `Right` boxes the
+  [`InferTileMemorySpace`](21-infer_tile_memory_space.md), and `Right` boxes the
   same 512-byte fractal under the opposite `slayout`, which swaps the row and
   column granularities:
 
@@ -622,7 +622,7 @@ for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
 oi = pl.matmul(full, v, out_dtype=pl.FP32)               # Tensor, OUTSIDE the region
 ```
 
-This pass lowers each **1:1** to its tile op (`tensor.aiv_shard` → `tile.aiv_shard`, `tensor.aic_gather` → `tile.aic_gather`), so from here on the IR is byte-identical to what the AUTO `pl.split` path produces via [`LowerAutoVectorSplit`](23-lower_auto_vector_split.md) (pass 23). `ExpandMixedKernel` (pass 24) then folds both into the cross-core `tpush`/`tpop` machinery.
+This pass lowers each **1:1** to its tile op (`tensor.aiv_shard` → `tile.aiv_shard`, `tensor.aic_gather` → `tile.aic_gather`), so from here on the IR is byte-identical to what the AUTO `pl.split` path produces via [`LowerAutoVectorSplit`](24-lower_auto_vector_split.md) (pass 23). `ExpandMixedKernel` (pass 24) then folds both into the cross-core `tpush`/`tpop` machinery.
 
 **Constraints** (enforced by the tensor-level deducer and the DSL parser, not this pass):
 

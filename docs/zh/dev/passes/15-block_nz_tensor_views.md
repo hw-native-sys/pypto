@@ -376,5 +376,5 @@ packer 负责生成 fractal 字节；此外还有切片用例分别钉住两个�
 ## 相关文档
 
 - [14-flatten_tile_nd_to_2d.md](14-flatten_tile_nd_to_2d.md) —— 对 NZ 源跳过 ND2NZ 窗口塌缩
-- [32-materialize_tensor_strides.md](33-materialize_tensor_strides.md) —— 填充分块 NZ stride
+- [32-materialize_tensor_strides.md](34-materialize_tensor_strides.md) —— 填充分块 NZ stride
 - [../ir/02-types.md](../ir/02-types.md) —— `TensorLayout` 与 `TensorView`
