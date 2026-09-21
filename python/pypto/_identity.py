@@ -25,7 +25,7 @@ import threading
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 IDENTITY_SCHEMA = 1
 _COMPONENTS = ("pypto", "runtime", "pto_isa", "ptoas", "device_toolchain")
@@ -121,14 +121,112 @@ class ContentIdentity:
     failure: str | None = None
 
 
-def _file_digest(path: Path) -> tuple[int, str]:
+# Sections a debugger reads and an execution never does. .dynsym and .dynstr
+# drive dynamic linking and are deliberately absent: they decide what a library
+# resolves at load time, so they are part of what it does.
+_DEBUGGER_SECTIONS = (".debug", ".zdebug", ".symtab", ".strtab", ".comment", ".gnu_debuglink")
+_ELF_MAGIC = b"\x7fELF"
+_SHT_NOBITS = 8
+
+
+def _elf_sections(stream: BinaryIO) -> list[tuple[str, int, int]] | None:
+    """Return (name, offset, size) for every ELF64 section holding file bytes.
+
+    None whenever the header cannot be read the way this expects -- a different
+    class, a truncated table, an unreadable string section. The caller then
+    reads the whole file, so a file this does not understand is covered exactly
+    as it was before.
+    """
+    stream.seek(0)
+    header = stream.read(64)
+    if len(header) < 64 or header[:4] != _ELF_MAGIC or header[4] != 2:
+        return None
+    endian = "<" if header[5] == 1 else ">"
+    (offset,) = struct.unpack_from(endian + "Q", header, 40)
+    entry_size, count, names_index = struct.unpack_from(endian + "HHH", header, 58)
+    if count == 0 or offset == 0 or entry_size < 64 or names_index >= count:
+        return None
+    stream.seek(offset)
+    table = stream.read(entry_size * count)
+    if len(table) != entry_size * count:
+        return None
+
+    def field(index: int, at: int, code: str) -> int:
+        return struct.unpack_from(endian + code, table, index * entry_size + at)[0]
+
+    stream.seek(field(names_index, 24, "Q"))
+    names = stream.read(field(names_index, 32, "Q"))
+    sections = []
+    for index in range(count):
+        start = field(index, 0, "I")
+        end = names.find(b"\0", start)
+        if start >= len(names) or end < 0:
+            return None
+        if field(index, 4, "I") == _SHT_NOBITS:
+            continue
+        sections.append(
+            (names[start:end].decode("ascii", "replace"), field(index, 24, "Q"), field(index, 32, "Q"))
+        )
+    return sections
+
+
+def _executable_digest(stream: BinaryIO) -> str | None:
+    """Digest what an ELF file does, skipping what only a debugger reads.
+
+    Debug information cannot change the artifact a compiler produces from this
+    installation, but it dominates an unstripped build: on the development tree
+    measured here it is 69% of every byte the inventory reads, and 367 MB of a
+    single 376 MB extension module. Reading it makes a rebuild that changed
+    only source paths or -g level invalidate every cached artifact.
+
+    The section name and size enter the digest beside the bytes, so removing a
+    section, renaming it, or moving its bytes into another cannot leave the
+    result unchanged. None whenever the sections cannot be read.
+    """
+    found = _elf_sections(stream)
+    if found is None:
+        return None
+    digest = hashlib.sha256()
+    for name, offset, size in sorted(found):
+        if name.startswith(_DEBUGGER_SECTIONS):
+            continue
+        digest.update(f"{name}\0{size}\0".encode())
+        stream.seek(offset)
+        remaining = size
+        while remaining:
+            chunk = stream.read(min(remaining, 1024 * 1024))
+            if not chunk:
+                raise ValueError("Identity input ended inside a declared ELF section")
+            digest.update(chunk)
+            remaining -= len(chunk)
+    # Tagged, so a section digest can never be read as the whole-file digest of
+    # some other file that happens to hash to the same value.
+    return f"elf64-sections:{digest.hexdigest()}"
+
+
+def _file_digest(path: Path, *, sections: bool = False) -> tuple[int, str]:
+    """Digest a file's bytes, and detect a change or replacement during the read.
+
+    ``sections`` selects the identity reading, which skips the parts of an ELF
+    file only a debugger reads; the artifact manifest leaves it off, because it
+    is verifying that stored bytes are intact rather than asking what an
+    installation would compile with, and its record is a plain SHA-256 that
+    other code recomputes over the whole file.
+    """
     with path.open("rb") as stream:
         before = os.fstat(stream.fileno())
         if not stat.S_ISREG(before.st_mode):
             raise ValueError(f"Identity input is not a regular file: {path}")
-        digest = hashlib.sha256()
-        while chunk := stream.read(1024 * 1024):
-            digest.update(chunk)
+        if sections:
+            recorded = _executable_digest(stream)
+        else:
+            recorded = None
+        if recorded is None:
+            digest = hashlib.sha256()
+            stream.seek(0)
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+            recorded = digest.hexdigest()
         after = os.fstat(stream.fileno())
     # Metadata is a race detector, not an identity or a memoization key.
     if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
@@ -146,7 +244,7 @@ def _file_digest(path: Path) -> tuple[int, str]:
         current.st_ctime_ns,
     ):
         raise ValueError(f"Identity input was replaced while being read: {path}")
-    return after.st_size, digest.hexdigest()
+    return after.st_size, recorded
 
 
 def _content_entries(
@@ -211,7 +309,7 @@ def _content_entries(
         return entries
     if not stat.S_ISREG(mode):
         raise ValueError(f"Identity input is not a regular file or directory: {path}")
-    size, digest = _file_digest(path)
+    size, digest = _file_digest(path, sections=True)
     # An inherited resolution only has to prove that this entry did not become
     # a symlink while its bytes were read: replacement of an ancestor component
     # is caught by that directory's own post-read check. _file_digest already
