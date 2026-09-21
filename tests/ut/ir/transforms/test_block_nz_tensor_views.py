@@ -145,6 +145,23 @@ def _nz_slices(program: ir.Program) -> list[ir.Call]:
     return found
 
 
+def _nz_reshapes(program: ir.Program) -> list[ir.Call]:
+    """Every tensor.reshape whose source tensor carries the NZ layout, in body order."""
+    reshape_name = ir.get_op("tensor.reshape").name
+    found = []
+    for func in program.functions.values():
+        for stmt in _walk(func.body):
+            if not isinstance(stmt, ir.AssignStmt):
+                continue
+            call = stmt.value
+            if not isinstance(call, ir.Call) or call.op.name != reshape_name:
+                continue
+            view = getattr(call.args[0].type, "tensor_view", None)
+            if view is not None and view.layout == ir.TensorLayout.NZ:
+                found.append(call)
+    return found
+
+
 def _nz_loads(program: ir.Program) -> list[ir.Call]:
     """Every tile.load whose source tensor carries the NZ layout, in body order."""
     load_name = ir.get_op("tile.load").name
@@ -852,6 +869,70 @@ def test_maps_a_split_k_offset_built_from_a_remainder():
     call = _nz_load(_run(_split_k._compile_to_program(tm, sd, cx, dyn, pl)))
     # Both trailing offsets are divided; neither is refused for an unprovable sign.
     assert len(_elements(call.args[1])) == 5
+
+
+def test_flattens_a_whole_nz_tensor():
+    """A rank-1 view of *every* element is layout-invariant, so it is kept as written.
+
+    The blocked form permutes the index space, not the memory: both spellings
+    walk the same contiguous GM range. An SDMA L2 warm
+    (``prefetch.async_prefetch``) wants a flat logical-1D source, so refusing
+    this would mean an NZ weight can never be prefetched — which is what the
+    DeepSeek V4 o-projection weights do while they stream.
+    """
+
+    @pl.jit
+    def _flatten(
+        x: pl.Tensor[[64, 512], pl.INT8],
+        w: pl.Tensor[[256, 512], pl.INT8, pl.NZ],
+        out: pl.Out[pl.Tensor[[64, 256], pl.INT32]],
+        head: pl.Out[pl.Tensor[[512], pl.INT8]],
+    ):
+        w_flat = pl.reshape(w, [256 * 512])
+        for nb in pl.spmd(2, name_hint="nz_flat_mm"):
+            n0 = nb * 128
+            acc = pl.matmul(x[0:64, 0:512], w[n0 : n0 + 128, 0:512], b_trans=True, out_dtype=pl.INT32)
+            out[0:64, n0 : n0 + 128] = pl.reshape(acc, [64, 128])
+        for _flat_blk in pl.spmd(1, name_hint="nz_flat_head"):
+            pl.store(pl.load(w_flat, [0], [512], target_memory=pl.Mem.Vec), [0], head)
+        return out, head
+
+    _, _, tm, sd, cx, dyn = _flatten._bind_args_from_signature({})
+    program = _run(_flatten._compile_to_program(tm, sd, cx, dyn, pl))
+    flatten = _nz_reshapes(program)
+    assert len(flatten) == 1
+    # The target shape is untouched, and the source now carries the blocked type.
+    assert _values(_elements(flatten[0].args[1])) == [256 * 512]
+    source_type = flatten[0].args[0].type
+    assert isinstance(source_type, ir.TensorType)
+    assert len(source_type.shape) == 5
+    # The matmul operand is still blocked, so the flatten did not disable the pass.
+    assert len(_elements(_nz_loads(program)[0].args[1])) == 5
+
+
+def test_rejects_a_reshape_that_is_not_a_whole_tensor_flatten():
+    """A partial reshape reinterprets coordinates, which the blocked form breaks.
+
+    ``[256, 512] -> [128, 1024]`` pairs rows in logical row-major order; in the
+    blocked form those elements are scattered across fractal blocks. There is no
+    coordinate rewrite that makes it mean the same thing, so it is refused
+    rather than silently addressed as ND.
+    """
+
+    @pl.jit
+    def _partial(
+        w: pl.Tensor[[256, 512], pl.INT8, pl.NZ],
+        head: pl.Out[pl.Tensor[[512], pl.INT8]],
+    ):
+        w_half = pl.reshape(w, [128, 1024])
+        for _half_blk in pl.spmd(1, name_hint="nz_partial_head"):
+            pl.store(pl.load(w_half, [0, 0], [1, 512], target_memory=pl.Mem.Vec), [0], head)
+        return head
+
+    _, _, tm, sd, cx, dyn = _partial._bind_args_from_signature({})
+    program = _partial._compile_to_program(tm, sd, cx, dyn, pl)
+    with pytest.raises(ValueError, match="whole-tensor 'tensor.reshape' flatten"):
+        _run(program)
 
 
 def test_rejects_a_loop_variable_whose_step_breaks_alignment():

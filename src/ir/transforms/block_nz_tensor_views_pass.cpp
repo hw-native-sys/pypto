@@ -174,6 +174,32 @@ TypePtr BlockNzType(const TypePtr& type, const Span& span) {
   return type;
 }
 
+/// Whether ``op`` is a ``tensor.reshape`` that flattens the whole NZ tensor into
+/// a single rank-1 view of every element.
+///
+/// The blocked form is a reordering of the logical index space, not of memory:
+/// both spellings cover the same contiguous GM range in the same order. A view
+/// of *all* of it therefore needs no coordinate rewrite, which is what lets an
+/// NZ weight still be handed to ``prefetch.async_prefetch`` (it wants a flat
+/// logical-1D source). Any other reshape does reinterpret coordinates and is
+/// refused by the caller.
+bool IsWholeTensorFlatten(const CallPtr& op) {
+  if (!IsOp(op, "tensor.reshape")) return false;
+  auto source_type = AsTensorTypeLike(op->args_[0]->GetType());
+  if (!source_type) return false;
+  auto shape_tuple = As<MakeTuple>(op->args_[1]);
+  if (!shape_tuple || shape_tuple->elements_.size() != 1) return false;
+  auto flat_extent = As<ConstInt>(shape_tuple->elements_[0]);
+  if (!flat_extent) return false;
+  int64_t logical_elements = 1;
+  for (const auto& dim : source_type->shape_) {
+    auto extent = As<ConstInt>(dim);
+    if (!extent) return false;
+    logical_elements *= extent->value_;
+  }
+  return logical_elements == flat_extent->value_;
+}
+
 /// Index bindings a symbolic slice offset has to be proven against.
 ///
 /// A slice offset arrives at the ``tile.load`` as the SSA name it was bound to,
@@ -429,17 +455,23 @@ class BlockNzMutator : public IRMutator {
           << "Annotate the output tensor as pl.ND.";
       const bool is_load = IsOp(op, "tile.load");
       const bool is_slice = IsOp(op, "tensor.slice");
-      CHECK_SPAN((is_load || is_slice) && nz_args.size() == 1 && nz_args[0] == 0, op->span_)
+      const bool is_flatten = IsWholeTensorFlatten(op);
+      CHECK_SPAN((is_load || is_slice || is_flatten) && nz_args.size() == 1 && nz_args[0] == 0, op->span_)
           << "NZ layout currently supports only 'tile.load' and 'tensor.slice' reading the tensor as "
-          << "their source, but it is used by '" << op->op_->name_ << "' at argument " << nz_args[0]
+          << "their source, plus a whole-tensor 'tensor.reshape' flatten, but it is used by '"
+          << op->op_->name_ << "' at argument " << nz_args[0]
           << ". NZ tensors are read-only matmul operands in this release.";
       auto logical_type = AsTensorTypeLike(op->args_[0]->GetType());
       INTERNAL_CHECK_SPAN(logical_type, op->span_)
           << "Internal error: the NZ source of '" << op->op_->name_ << "' must be a tensor";
       const std::vector<ExprPtr>& logical_shape = logical_type->shape_;
-      args_changed = true;
-      new_args = is_load ? BlockTileLoadArgs(op, std::move(new_args), logical_shape)
-                         : BlockTensorSliceArgs(op, std::move(new_args), logical_shape);
+      // The flatten keeps its arguments: the element count is layout-invariant
+      // and the result is already ND.
+      if (!is_flatten) {
+        args_changed = true;
+        new_args = is_load ? BlockTileLoadArgs(op, std::move(new_args), logical_shape)
+                           : BlockTensorSliceArgs(op, std::move(new_args), logical_shape);
+      }
     }
 
     auto new_return_type = BlockNzType(op->GetType(), op->span_);
