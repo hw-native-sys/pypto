@@ -45,7 +45,7 @@ ready 时进行审查，也支持来自 fork 的 PR。仓库所有者、组织�
 1. 将 DeepSeek API Key 保存为仓库密钥（Secret）`OPENAI_KEY`。
 2. 按需设置仓库变量 `PR_AGENT_API_BASE`（默认 `https://api.deepseek.com`）和
    `PR_AGENT_MODEL`（默认 `deepseek-flash`）。模型 ID 不需要 `openai/` 前缀；
-   工作流会添加此前缀，以使用 OpenAI 兼容接口。审查的上下文预算为 64,000 token。
+   工作流会添加此前缀，以使用 OpenAI 兼容接口。审查的上下文预算为 128,000 token。
 3. 工作流合并到默认分支后，将仓库变量 `PR_AGENT_ENABLED` 设置为 `true`。
    删除该变量或将其设为 `false` 可关闭审查。
 

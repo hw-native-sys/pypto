@@ -46,8 +46,8 @@ jobs:
           OPENAI.API_BASE: ${{ vars.PR_AGENT_API_BASE || 'https://api.deepseek.com' }}
           CONFIG.MODEL: openai/${{ vars.PR_AGENT_MODEL || 'deepseek-flash' }}
           CONFIG.FALLBACK_MODELS: '[]'
-          CONFIG.CUSTOM_MODEL_MAX_TOKENS: '64000'
-          CONFIG.MAX_MODEL_TOKENS: '64000'
+          CONFIG.CUSTOM_MODEL_MAX_TOKENS: '128000'
+          CONFIG.MAX_MODEL_TOKENS: '128000'
           CONFIG.USE_REPO_SETTINGS_FILE: 'false'
           GITHUB_ACTION_CONFIG.AUTO_REVIEW: 'true'
           GITHUB_ACTION_CONFIG.AUTO_DESCRIBE: 'false'
