@@ -3787,5 +3787,25 @@ def test_annotated_scalar_index_expression_stores_an_i32_value():
     )
 
 
+@pytest.mark.parametrize("namespace", ["tile", "tensor"])
+@pytest.mark.parametrize("op", ["get_block_idx", "get_block_num", "get_subblock_idx"])
+def test_annotated_index_call_stores_an_i32_value(namespace, op):
+    """Identity calls must convert their INDEX result before an INT32 store."""
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def k(self, out: pl.Out[pl.Tensor[[1, 1], pl.INT32]]) -> pl.Tensor[[1, 1], pl.INT32]:
+        v: pl.Scalar[pl.INT32] = pl.{namespace}.{op}()
+        pl.write(out, [0, 0], v)
+        return out
+""")
+    lines = _get_mlir_lines(_generate_default_mlir(program))
+    store = _single_line(lines, "pto.store_scalar")
+    operand = store.split()[1].rstrip(",")
+    definitions = {line.split(" = ", 1)[0]: line for line in lines if " = " in line}
+    assert definitions[operand].split(" loc(")[0].endswith(": index to i32")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

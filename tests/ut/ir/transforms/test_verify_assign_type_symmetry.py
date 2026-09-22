@@ -22,6 +22,7 @@ where ``InferTileMemorySpace`` wrote ``Mem.Acc`` onto a Var whose producing
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
+from pypto.language.parser.diagnostics import ParserTypeError
 
 DataType = ir.DataType
 _SPAN = ir.Span.unknown()
@@ -166,6 +167,55 @@ def test_annotated_scalar_index_expression_is_cast_to_the_annotation_dtype():
     operand_type = assign.value.operand.type
     assert isinstance(operand_type, ir.ScalarType)
     assert operand_type.dtype == DataType.INDEX
+
+
+@pytest.mark.parametrize("dtype", ["INT32", "INT64", "INDEX"])
+@pytest.mark.parametrize("op", ["tile.get_block_idx", "tensor.get_block_idx"])
+def test_annotated_index_call_preserves_inferred_type_and_roundtrips(dtype, op):
+    """A call keeps its actual return type; the binding converts its result."""
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def k(self, out: pl.Out[pl.Tensor[[1, 1], pl.INT32]]) -> pl.Tensor[[1, 1], pl.INT32]:
+        v_index: pl.Scalar[pl.INT32] = 7
+        v: pl.Scalar[pl.{dtype}] = pl.{op}()
+        pl.write(out, [0, 0], v_index + v)
+        return out
+""")
+    func = program.get_function("k")
+    assert func is not None
+    assigns = _walk_assigns(func.body)
+    call_assign = next(
+        stmt
+        for stmt in assigns
+        if isinstance(stmt.value, ir.Call) and stmt.value.op.name == ir.get_op(op).name
+    )
+    assert isinstance(call_assign.value.type, ir.ScalarType)
+    assert call_assign.value.type.dtype == DataType.INDEX
+    binding = next(stmt for stmt in assigns if stmt.var.name_hint == "v")
+    if dtype == "INDEX":
+        assert isinstance(binding.value, ir.Call)
+    else:
+        assert isinstance(binding.value, ir.Cast)
+        assert isinstance(binding.value.operand, ir.Var)
+        assert binding.value.operand.same_as(call_assign.var)
+    assert len(_verify(program)) == 0
+    ir.assert_structural_equal(program, pl.parse_program(program.as_python()))
+
+
+@pytest.mark.parametrize("rhs", ["pl.cast(i, pl.INT32) + 1", "pl.tile.get_block_idx()"])
+def test_index_expression_rejects_float_annotation(rhs):
+    """An annotation cannot implicitly convert INDEX arithmetic or calls to FP32."""
+    with pytest.raises(ParserTypeError, match="dtype fp32 but expression has dtype index"):
+        pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def k(self, i: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.FP32]:
+        v: pl.Scalar[pl.FP32] = {rhs}
+        return v
+""")
 
 
 def test_annotated_scalar_index_annotation_needs_no_cast():

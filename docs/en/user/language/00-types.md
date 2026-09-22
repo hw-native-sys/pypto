@@ -156,6 +156,15 @@ v: pl.Scalar[pl.INDEX] = pl.cast(i, pl.INT32) + 1   # binds INDEX; nothing to co
 Annotate the dtype you want the value *stored* at: a narrower annotation converts
 the value, it does not reinterpret it.
 
+INDEX-returning calls follow the same rule, including `pl.tile.get_block_idx()`:
+
+```python
+v: pl.Scalar[pl.INT32] = pl.tile.get_block_idx()    # converts the INDEX result to INT32
+```
+
+This compatibility applies only to integer/INDEX pairs. An FP32 annotation on an
+INDEX expression is rejected; use an explicit `pl.cast` for a float conversion.
+
 ### Container types
 
 | Type | Lives in | Written as |

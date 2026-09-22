@@ -1866,10 +1866,6 @@ class ASTParser:
             and isinstance(value_expr.type, ir.ScalarType)
             and value_expr.type.dtype == DataType.INDEX
             and override_type.dtype != DataType.INDEX
-            # A Call is handled by the re-stamp below, which rebuilds it with the
-            # annotation's type. Wrapping it here instead would hide the Call
-            # inside an expression, where orchestration codegen cannot emit it.
-            and not isinstance(value_expr, ir.Call)
         ):
             # Same asymmetry, one step harder: a *non-constant* INDEX RHS cannot
             # be re-stamped, because its dtype is a result of its operands
@@ -1884,6 +1880,11 @@ class ASTParser:
             # operand -- MLIR that names neither the variable nor the user's
             # line (``use of value '%2' expects different type than prior uses:
             # 'i32' vs 'index'``). See #2779.
+            if isinstance(value_expr, ir.Call):
+                # Keep the call's inferred dtype: re-stamping it does not change
+                # the type its emitter produces. Materialize it before casting
+                # so orchestration codegen still sees a statement-level call.
+                value_expr = self.builder.let(f"{var_name}_index", value_expr, span=value_expr.span)
             value_expr = ir.cast(value_expr, override_type.dtype, value_expr.span)
         # If annotation syntax determines the result type more precisely than the
         # raw call inference, rebuild the Call with that type so structural

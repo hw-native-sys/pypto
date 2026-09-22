@@ -136,6 +136,15 @@ v: pl.Scalar[pl.INDEX] = pl.cast(i, pl.INT32) + 1   # 绑定 INDEX；无需转�
 
 注解要写成你希望这个值被*存储*的 dtype：更窄的注解做的是转换，不是重解释。
 
+返回 INDEX 的调用也遵循相同规则，包括 `pl.tile.get_block_idx()`：
+
+```python
+v: pl.Scalar[pl.INT32] = pl.tile.get_block_idx()    # converts the INDEX result to INT32
+```
+
+这种兼容性仅适用于整数/INDEX 类型对。对 INDEX 表达式使用 FP32 注解会被拒绝；
+浮点转换需要显式使用 `pl.cast`。
+
 ### 容器类型
 
 | 类型 | 住在 | 写法 |
