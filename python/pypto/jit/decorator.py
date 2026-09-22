@@ -171,7 +171,7 @@ def _get_torch() -> Any:
                 ("float8_e4m3fn", DataType.FP8E4M3FN),
                 ("float8_e5m2", DataType.FP8E5M2),
                 ("float8_e8m0fnu", DataType.FP8E8M0),
-                ("float4_e2m1fn_x2", DataType.FP4E2M1X2),
+                ("float4_e2m1fn_x2", DataType.FP4),
             ):
                 _td = getattr(torch, _torch_name, None)
                 if _td is not None:
@@ -293,8 +293,7 @@ def _extract_tensor_meta(
     """
     torch_dtype = _torch_dtype_to_pypto(tensor.dtype)
     extents = list(tensor.shape)
-
-    if torch_dtype == DataType.FP4E2M1X2 or (
+    if torch_dtype in (DataType.FP4, DataType.FP4E2M1X2) or (
         expected_dtype is not None and expected_dtype in (DataType.FP4, DataType.FP4E2M1X2)
     ):
         if not extents:
@@ -314,9 +313,7 @@ def _extract_tensor_meta(
                 f"Parameter annotated pl.FP4 but got torch dtype mapped to {torch_dtype}; "
                 "pass torch.float4_e2m1fn_x2 or change the annotation"
             )
-        # Legacy logical FP4 path: expand carrier → nibble extents at the API boundary.
-        extents[-1] *= 2
-        dtype = DataType.FP4
+        expand_logical_fp4 = True
     elif expected_dtype is not None and expected_dtype == DataType.FP4E2M1X2:
         if torch_dtype not in (DataType.FP4, DataType.FP4E2M1X2):
             raise TypeError(
@@ -324,11 +321,19 @@ def _extract_tensor_meta(
                 "pass torch.float4_e2m1fn_x2 or change the annotation"
             )
         # Torch and IR both count packed x2 carriers for FP4E2M1X2; do not expand.
+        expand_logical_fp4 = False
         dtype = DataType.FP4E2M1X2
+    elif torch_dtype == DataType.FP4:
+        # Unannotated float4_e2m1fn_x2 uses the same logical-FP4 expand.
+        expand_logical_fp4 = True
     else:
-        # No FP4-family annotation (or bare pl.Tensor): keep the torch→IR default
-        # (packed FP4E2M1X2 for float4_e2m1fn_x2, no expand).
+        expand_logical_fp4 = False
         dtype = torch_dtype
+
+    if expand_logical_fp4:
+        # Torch x2 carrier → logical FP4 nibbles; PackFp4 rewrites IR to FP4E2M1X2.
+        extents[-1] *= 2
+        dtype = DataType.FP4
 
     return _build_tensor_meta(extents, dtype, dyn_dims, layout)
 

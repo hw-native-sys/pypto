@@ -245,4 +245,4 @@ def kernel(self, a, out: pl.Out[...]):
 
 - `python/pypto/jit/decorator.py` — `@pl.jit.inline` 是用户层入口(`_SubFunctionDecorator("inline", ...)`)。
 - [02-unroll_loops](02-unroll_loops.md) — 紧随其后运行。
-- [09-outline_incore_scopes](09-outline_incore_scopes.md) — 处理展开后剩余的 `pl.at` scope。
+- [09-outline_incore_scopes](10-outline_incore_scopes.md) — 处理展开后剩余的 `pl.at` scope。

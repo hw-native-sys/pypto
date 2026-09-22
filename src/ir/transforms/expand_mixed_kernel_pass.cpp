@@ -176,7 +176,7 @@ class SplitRegionConsumer : public IRMutator {
       // The region's transpose-split hazard is NOT checked here. It is a fact
       // about what the author wrote, so it is reported by the AivSplitValid
       // verifier's check (l) twelve passes earlier, with LowerAutoVectorSplit
-      // (pass 23) holding the backstop. Checking it here could only ever produce
+      // (pass 24) holding the backstop. Checking it here could only ever produce
       // a worse diagnostic: this walk is the one that CONSUMES the wrapper, so
       // the region it would name is about to stop existing.
       pending_comments_.insert(pending_comments_.end(), region->leading_comments_.begin(),
@@ -1970,11 +1970,11 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
                                    bool had_regions) {
   // Whole-function transpose-split hazard: BACKSTOP only.
   //
-  // The AUTHORING report moved to LowerAutoVectorSplit (pass 23), which reaches
+  // The AUTHORING report moved to LowerAutoVectorSplit (pass 24), which reaches
   // the pure-vector pl.split functions too and can name both fix directions. But
   // this pass is documented as directly invocable after InferTileMemorySpace
   // ("building a custom pass pipeline"), and a bare pass call does not enforce
-  // `required` properties — only PassPipeline does. So a caller who skips pass 23
+  // `required` properties — only PassPipeline does. So a caller who skips pass 24
   // lands here with AivSplitLoweredValid unmet, and without this guard the kernel
   // expands silently and SplitVectorKernel mis-shapes it.
   //

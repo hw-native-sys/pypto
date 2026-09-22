@@ -2574,7 +2574,7 @@ class SplitAivScopeStmt(ScopeStmt):
     Dispatches a region across the 2 AIV subblocks. ``mode=SplitMode.NONE`` is
     task-parallel (no halving; both lanes run the full body, dispatched via
     ``aiv_id``); ``UP_DOWN`` / ``LEFT_RIGHT`` are data-parallel (vector compute
-    halved on the split axis). Erased by LowerAutoVectorSplit (pass 23); never
+    halved on the split axis). Erased by LowerAutoVectorSplit (pass 24); never
     reaches codegen.
     """
 
