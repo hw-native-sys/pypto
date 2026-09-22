@@ -124,6 +124,12 @@ PTOAS 扩展、不支持的编译器布局、sanitizer 构建，以及 `CPATH`�
 依赖覆盖会旁路持久缓存。最新原因可通过 `cache_stats().last_bypass_reason` 获取，
 无需开启 INFO 日志。每次旁路也由 `pypto.jit._persistent` 以 INFO 级别记录。
 
+ELF64 身份仅忽略经验证不分配内存且位于所有程序段之外的调试数据。
+所有 ELF 头、程序头和节头均保留，包括 `.bss` 大小、标志、对齐信息、符号表
+及节之外的字节。布局不变的调试数据修改不影响身份；改变布局的调试重编译
+可能保守地使缓存失效。不支持或格式错误的 ELF 布局回退为整文件 SHA-256。
+产物清单始终对完整文件进行哈希。
+
 隐式链接脚本支持绝对路径的 `INPUT`/`GROUP` 依赖、嵌套 `AS_NEEDED` 以及
 `OUTPUT_FORMAT`/`OUTPUT_ARCH` 声明，按选定的 sysroot 递归追踪依赖。
 相对路径、`-l` 名称、`SEARCH_DIR`、`INCLUDE` 和未知语法需要完整的链接器搜索上下文，

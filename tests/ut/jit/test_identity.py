@@ -10,7 +10,9 @@
 """Protocol and content identity tests; no toolchain or device is required."""
 
 import hashlib
+import io
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -308,7 +310,9 @@ def test_nested_entries_record_their_true_resolved_paths(tmp_path):
     assert recorded["linked.py"] == str((actual / "nested/kernel.py").resolve())
 
 
-def _elf64(path: Path, sections: dict[str, bytes]) -> Path:
+def _elf64(
+    path: Path, sections: dict[str, bytes], *, endian: str = "<", program_headers: bytes = b""
+) -> Path:
     """Write a minimal ELF64 whose named sections carry the given bytes."""
     names = bytearray(b"\0")
     name_offset = {}
@@ -316,7 +320,7 @@ def _elf64(path: Path, sections: dict[str, bytes]) -> Path:
         name_offset[name] = len(names)
         names += name.encode() + b"\0"
 
-    body = bytearray()
+    body = bytearray(program_headers)
     placed = []
     for name, payload in sections.items():
         placed.append((name, 64 + len(body), len(payload)))
@@ -327,22 +331,28 @@ def _elf64(path: Path, sections: dict[str, bytes]) -> Path:
 
     header = bytearray(64)
     header[0:7] = b"\x7fELF\x02\x01\x01"
-    struct.pack_into("<Q", header, 40, table_offset)
-    struct.pack_into("<HHH", header, 58, 64, len(placed) + 2, len(placed) + 1)
+    header[5] = 1 if endian == "<" else 2
+    struct.pack_into(endian + "HHI", header, 16, 3, 62, 1)  # ET_DYN, EM_X86_64, EV_CURRENT
+    struct.pack_into(endian + "H", header, 52, 64)
+    if program_headers:
+        struct.pack_into(endian + "Q", header, 32, 64)
+        struct.pack_into(endian + "HH", header, 54, 56, len(program_headers) // 56)
+    struct.pack_into(endian + "Q", header, 40, table_offset)
+    struct.pack_into(endian + "HHH", header, 58, 64, len(placed) + 2, len(placed) + 1)
 
     entries = bytearray(64)  # index 0 is SHT_NULL
     for name, offset, size in placed:
         entry = bytearray(64)
-        struct.pack_into("<I", entry, 0, name_offset[name])
-        struct.pack_into("<I", entry, 4, 1)  # SHT_PROGBITS
-        struct.pack_into("<Q", entry, 24, offset)
-        struct.pack_into("<Q", entry, 32, size)
+        struct.pack_into(endian + "I", entry, 0, name_offset[name])
+        struct.pack_into(endian + "I", entry, 4, 1)  # SHT_PROGBITS
+        struct.pack_into(endian + "Q", entry, 24, offset)
+        struct.pack_into(endian + "Q", entry, 32, size)
         entries += entry
     entry = bytearray(64)
-    struct.pack_into("<I", entry, 0, name_offset[".shstrtab"])
-    struct.pack_into("<I", entry, 4, 3)  # SHT_STRTAB
-    struct.pack_into("<Q", entry, 24, shstrtab_offset)
-    struct.pack_into("<Q", entry, 32, len(names))
+    struct.pack_into(endian + "I", entry, 0, name_offset[".shstrtab"])
+    struct.pack_into(endian + "I", entry, 4, 3)  # SHT_STRTAB
+    struct.pack_into(endian + "Q", entry, 24, shstrtab_offset)
+    struct.pack_into(endian + "Q", entry, 32, len(names))
     entries += entry
 
     path.write_bytes(bytes(header) + bytes(body) + bytes(entries))
@@ -421,32 +431,25 @@ def test_a_relocatable_object_keeps_the_symbol_table_a_linker_reads(tmp_path):
     assert _identity._file_digest(first, sections=True)[1] != _identity._file_digest(second, sections=True)[1]
 
 
-def test_a_shared_object_still_spares_its_symbol_table(tmp_path):
-    # The counterpart: a finished ET_DYN resolves through .dynsym, so .symtab
-    # there is debugger-only and stays out.
+def test_a_shared_object_preserves_non_debug_symbol_tables(tmp_path):
+    # Keep non-debug tables conservatively, even in a finished ET_DYN.
     first = _elf64(tmp_path / "a.so", {".text": b"code", ".symtab": b"symA"})
     second = _elf64(tmp_path / "b.so", {".text": b"code", ".symtab": b"symB"})
 
-    assert _identity._file_digest(first, sections=True)[1] == _identity._file_digest(second, sections=True)[1]
+    assert _identity._file_digest(first, sections=True)[1] != _identity._file_digest(second, sections=True)[1]
 
 
-def test_the_recorded_size_describes_what_was_digested(tmp_path):
-    """Skipping debug bytes is undone if the record still states the file size.
-
-    The size sits in the content entry beside the digest, so reporting the
-    whole file would carry every debug byte back into the identity and a
-    debug-only rebuild would invalidate the cache exactly as before.
-    """
-    root = tmp_path / "tree"
-    root.mkdir()
-    _elf64(root / "x.so", {".text": b"code", ".debug_info": b"a"})
-    before = fingerprint_content((ContentRoot(root),)).digest
-
-    _elf64(root / "x.so", {".text": b"code", ".debug_info": b"a" * 64})
-
-    assert fingerprint_content((ContentRoot(root),)).digest == before
-    _elf64(root / "x.so", {".text": b"CODE", ".debug_info": b"a" * 64})
-    assert fingerprint_content((ContentRoot(root),)).digest != before
+def test_debug_layout_changes_conservatively_invalidate_identity(tmp_path):
+    """Debug payloads are omitted, but layout metadata remains authoritative."""
+    path = _elf64(tmp_path / "x.so", {".text": b"code", ".debug_info": b"a"})
+    size, digest = _identity._file_digest(path, sections=True)
+    assert size == path.stat().st_size - 1
+    before = fingerprint_content((ContentRoot(path),))
+    _elf64(path, {".text": b"code", ".debug_info": b"a" * 64})
+    after_size, after_digest = _identity._file_digest(path, sections=True)
+    assert after_size == size
+    assert after_digest != digest
+    assert fingerprint_content((ContentRoot(path),)) != before
 
 
 def _corrupt(path: Path, offset: int, value: int, code: str = "<Q") -> Path:
@@ -471,8 +474,6 @@ def test_a_declared_size_the_file_cannot_hold_falls_back(tmp_path, field):
     reported as truncated content rather than as a file this cannot parse.
     """
     path = _elf64(tmp_path / "x.so", {".text": b"code", ".rodata": b"data"})
-    with path.open("rb") as stream:
-        kind, sections = _identity._elf_sections(stream)
     table_offset = struct.unpack_from("<Q", path.read_bytes(), 40)[0]
     entry_size, count, names_index = struct.unpack_from("<HHH", path.read_bytes(), 58)
     names_entry = table_offset + names_index * entry_size
@@ -496,8 +497,193 @@ def test_a_section_digest_is_tagged_apart_from_a_whole_file_digest(tmp_path):
     plain = tmp_path / "b.bin"
     plain.write_bytes(b"code")
 
-    assert _identity._file_digest(elf, sections=True)[1].startswith("elf64-sections:")
-    assert not _identity._file_digest(plain, sections=True)[1].startswith("elf64-sections:")
+    assert _identity._file_digest(elf, sections=True)[1].startswith("elf64-debug-filtered-v2:")
+    assert not _identity._file_digest(plain, sections=True)[1].startswith("elf64-debug-filtered-v2:")
+
+
+@pytest.mark.parametrize("endian", ["<", ">"])
+@pytest.mark.parametrize(
+    "field,code,value",
+    [
+        (4, "I", 8),
+        (8, "Q", 4),
+        (16, "Q", 4096),
+        (32, "Q", 2),
+        (40, "I", 2),
+        (44, "I", 1),
+        (48, "Q", 32),
+        (56, "Q", 8),
+    ],
+)
+def test_section_metadata_changes_identity(tmp_path, endian, field, code, value):
+    """Every section attribute, including NOBITS, is an identity input."""
+    path = _elf64(tmp_path / "x.o", {".text": b"code"}, endian=endian)
+    before = _identity._file_digest(path, sections=True)
+    table = struct.unpack_from(endian + "Q", path.read_bytes(), 40)[0]
+    _corrupt(path, table + 64 + field, value, endian + code)
+    assert _identity._file_digest(path, sections=True) != before
+
+
+@pytest.mark.parametrize("field,code,value", [(16, "H", 1), (18, "H", 183), (24, "Q", 4096), (48, "I", 1)])
+def test_elf_header_changes_identity(tmp_path, field, code, value):
+    path = _elf64(tmp_path / "x.so", {".text": b"code"})
+    before = _identity._file_digest(path, sections=True)
+    _corrupt(path, field, value, "<" + code)
+    assert _identity._file_digest(path, sections=True) != before
+
+
+@pytest.mark.parametrize(
+    "field,code,value",
+    [
+        (0, "I", 0x6474E551),
+        (4, "I", 7),
+        (16, "Q", 8192),
+        (24, "Q", 8192),
+        (32, "Q", 3),
+        (40, "Q", 32),
+        (48, "Q", 8192),
+    ],
+)
+def test_program_header_changes_identity(tmp_path, field, code, value):
+    program = struct.pack("<IIQQQQQQ", 1, 5, 120, 4096, 4096, 4, 4, 4096)
+    path = _elf64(tmp_path / "x.so", {".text": b"code"}, program_headers=program)
+    before = _identity._file_digest(path, sections=True)
+    _corrupt(path, 64 + field, value, "<" + code)
+    assert _identity._file_digest(path, sections=True) != before
+
+
+@pytest.mark.parametrize("name", [".debug_info", ".debugger", ".comment.extra", ".symtab.extra"])
+def test_only_unallocated_debug_payloads_are_omitted(tmp_path, name):
+    path = _elf64(tmp_path / "x.so", {name: b"aaaa"})
+    table = struct.unpack_from("<Q", path.read_bytes(), 40)[0]
+    _corrupt(path, table + 64 + 8, 2)  # SHF_ALLOC
+    before = _identity._file_digest(path, sections=True)
+    _corrupt(path, 64, 0x62626262, "<I")
+    assert _identity._file_digest(path, sections=True) != before
+
+
+@pytest.mark.parametrize("name", [".debugger", ".comment.extra", ".symtab.extra"])
+def test_debug_name_prefix_does_not_hide_other_sections(tmp_path, name):
+    first = _elf64(tmp_path / "a.so", {name: b"aaaa"})
+    second = _elf64(tmp_path / "b.so", {name: b"bbbb"})
+    assert _identity._file_digest(first, sections=True) != _identity._file_digest(second, sections=True)
+
+
+def test_segment_backed_debug_payload_falls_back(tmp_path):
+    program = struct.pack("<IIQQQQQQ", 1, 5, 120, 4096, 4096, 4, 4, 4096)
+    path = _elf64(tmp_path / "x.so", {".debug_info": b"aaaa"}, program_headers=program)
+    assert _identity._file_digest(path, sections=True) == _identity._file_digest(path)
+
+
+def test_bytes_outside_sections_are_preserved(tmp_path):
+    path = _elf64(tmp_path / "x.so", {".text": b"code"})
+    with path.open("ab") as stream:
+        stream.write(b"extra segment data")
+    before = _identity._file_digest(path, sections=True)
+    _corrupt(path, path.stat().st_size - 1, ord("X"), "B")
+    assert _identity._file_digest(path, sections=True) != before
+
+
+@pytest.mark.parametrize(
+    "offset,code,value",
+    [
+        (5, "B", 0),
+        (5, "B", 3),
+        (6, "B", 0),
+        (16, "H", 4),
+        (20, "I", 2),
+        (40, "Q", 1 << 60),
+        (52, "H", 65),
+        (58, "H", 65535),
+        (60, "H", 65535),
+        (60, "H", 0),
+        (62, "H", 65535),
+        (54, "H", 65535),
+        (56, "H", 65535),
+    ],
+)
+def test_unsupported_elf_headers_fall_back(tmp_path, offset, code, value):
+    path = _elf64(tmp_path / "x.so", {".debug_info": b"aaaa"})
+    # A nonzero program count makes its entry size meaningful.
+    if offset == 54:
+        _corrupt(path, 56, 1, "<H")
+    _corrupt(path, offset, value, "<" + code)
+    assert _identity._file_digest(path, sections=True) == _identity._file_digest(path)
+
+
+def test_overlapping_debug_section_falls_back(tmp_path):
+    path = _elf64(tmp_path / "x.so", {".text": b"code", ".debug_info": b"aaaa"})
+    table = struct.unpack_from("<Q", path.read_bytes(), 40)[0]
+    _corrupt(path, table + 128 + 24, 64)
+    assert _identity._file_digest(path, sections=True) == _identity._file_digest(path)
+
+
+def test_sparse_string_table_does_not_cause_large_reads(tmp_path):
+    path = _elf64(tmp_path / "x.so", {".debug_info": b"aaaa"})
+    raw = path.read_bytes()
+    table = struct.unpack_from("<Q", raw, 40)[0]
+    names_offset = struct.unpack_from("<Q", raw, table + 128 + 24)[0]
+    _corrupt(path, table + 128 + 32, 1 << 32)
+    with path.open("r+b") as stream:
+        stream.truncate(names_offset + (1 << 32))
+
+    class BoundedReader(io.BufferedReader):
+        def read(self, size=-1):
+            assert 0 <= size <= 1024 * 1024
+            return super().read(size)
+
+    with path.open("rb", buffering=0) as stream, BoundedReader(stream) as bounded:
+        assert _identity._elf_debug_ranges(bounded) is None
+
+
+@pytest.fixture(scope="module")
+def clang_elf_object(tmp_path_factory):
+    """Exercise genuine Clang sections rather than only synthetic ELF layouts."""
+    clang = shutil.which("clang")
+    if clang is None:
+        pytest.skip("Clang is required for the real ELF regression")
+    directory = tmp_path_factory.mktemp("clang-identity")
+    source = directory / "input.c"
+    source.write_text("char buffer[16]; int read_buffer(void) { return buffer[0]; }\n")
+    path = directory / "input.o"
+    subprocess.run([clang, "-g", "-c", str(source), "-o", str(path)], check=True, capture_output=True)
+    return path.read_bytes()
+
+
+def _section_header(raw: bytes, name: bytes) -> int:
+    """Locate a section in the real little-endian ELF64 test object."""
+    table = struct.unpack_from("<Q", raw, 40)[0]
+    entry_size, count, names_index = struct.unpack_from("<HHH", raw, 58)
+    names = struct.unpack_from("<Q", raw, table + names_index * entry_size + 24)[0]
+    for index in range(count):
+        entry = table + index * entry_size
+        start = names + struct.unpack_from("<I", raw, entry)[0]
+        if raw[start : raw.index(b"\0", start)] == name:
+            return entry
+    raise AssertionError(f"Missing ELF section {name!r}")
+
+
+@pytest.mark.parametrize("name,field,value", [(b".bss", 32, 32), (b".bss", 48, 32), (b".text", 8, 2)])
+def test_real_clang_elf_metadata_invalidates_identity(tmp_path, clang_elf_object, name, field, value):
+    path = tmp_path / "input.o"
+    path.write_bytes(clang_elf_object)
+    before = _identity._file_digest(path, sections=True)
+    entry = _section_header(clang_elf_object, name)
+    if name == b".bss" and field == 32:
+        assert struct.unpack_from("<Q", clang_elf_object, entry + field)[0] == 16
+    _corrupt(path, entry + field, value)
+    assert _identity._file_digest(path, sections=True) != before
+
+
+def test_real_clang_debug_payload_is_skipped(tmp_path, clang_elf_object):
+    path = tmp_path / "input.o"
+    path.write_bytes(clang_elf_object)
+    before = _identity._file_digest(path, sections=True)
+    entry = _section_header(clang_elf_object, b".debug_info")
+    offset = struct.unpack_from("<Q", clang_elf_object, entry + 24)[0]
+    _corrupt(path, offset, clang_elf_object[offset] ^ 1, "B")
+    assert _identity._file_digest(path, sections=True) == before
+    assert before[0] < len(clang_elf_object)
 
 
 def test_a_file_that_is_not_elf64_is_read_whole(tmp_path):

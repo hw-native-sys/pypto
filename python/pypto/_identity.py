@@ -88,8 +88,9 @@ def digest_record(value: Any) -> str:
 class ContentRoot:
     """One ordered content input, with its path captured at construction.
 
-    A file contributes its exact bytes. A directory contributes every regular
-    file recursively, except Git metadata and generated Python bytecode.
+    A file contributes its bytes except verified ELF debug payloads.
+    A directory contributes every regular file recursively, except Git metadata
+    and generated Python bytecode.
     ``python_only`` filters directory entries to ``.py`` files for additional
     application source roots; it never filters a directly supplied file.
     Paths participate in identity because source locations and includes are
@@ -121,114 +122,137 @@ class ContentIdentity:
     failure: str | None = None
 
 
-# Sections a debugger reads and an execution never does. .dynsym and .dynstr
-# drive dynamic linking and are deliberately absent: they decide what a library
-# resolves at load time, so they are part of what it does.
-_DEBUG_SECTIONS = (".debug", ".zdebug", ".comment", ".gnu_debuglink")
-_DEBUGGER_SECTIONS = (*_DEBUG_SECTIONS, ".symtab", ".strtab")
-_ET_REL = 1
+# Only non-allocated debug payloads may be omitted. All ELF metadata, symbol
+# tables, segment contents, and bytes outside sections remain identity inputs.
 _ELF_MAGIC = b"\x7fELF"
 _SHT_NOBITS = 8
 
 
-def _elf_sections(stream: BinaryIO) -> tuple[int, list[tuple[str, int, int]]] | None:
-    """Return the ELF64 type and every section holding file bytes.
+def _elf_debug_ranges(stream: BinaryIO) -> list[tuple[int, int]] | None:
+    """Find safely skippable ELF64 debug payloads, or request whole-file hashing.
 
-    None whenever the header cannot be read the way this expects -- a different
-    class, a truncated table, an unreadable string section, or a declared size
-    the file cannot hold. The caller then reads the whole file, so a file this
-    does not understand is covered exactly as it was before.
-
-    Sizes come from the file's own header, so every read is clamped to the
-    file's real length first: a corrupt or truncated header can declare a
-    section table of gigabytes, and attempting that allocation would raise out
-    of here instead of falling back the way this promises.
+    Support ordinary ELF64 relocatables, executables, and shared objects in
+    either byte order. Extended numbering, unknown layouts, overlapping
+    sections, and debug payloads referenced by program headers fall back.
+    Reads are bounded independently of the file's declared or sparse size.
     """
     length = os.fstat(stream.fileno()).st_size
     stream.seek(0)
     header = stream.read(64)
-    if len(header) < 64 or header[:4] != _ELF_MAGIC or header[4] != 2:
+    if (
+        len(header) != 64
+        or header[:4] != _ELF_MAGIC
+        or header[4] != 2
+        or header[5] not in (1, 2)
+        or header[6] != 1
+    ):
         return None
     endian = "<" if header[5] == 1 else ">"
-    (kind,) = struct.unpack_from(endian + "H", header, 16)
-    (offset,) = struct.unpack_from(endian + "Q", header, 40)
-    entry_size, count, names_index = struct.unpack_from(endian + "HHH", header, 58)
-    if count == 0 or offset == 0 or entry_size < 64 or names_index >= count:
-        return None
-    stream.seek(offset)
-    # entry_size * count cannot exceed ~4 GiB, which read absorbs by returning
-    # short; the 64-bit sizes below cannot, and are bounded before they are used.
-    table = stream.read(entry_size * count)
-    if len(table) != entry_size * count:
+    kind, _, version, _, phoff, shoff, _, ehsize, phsize, phnum, shsize, shnum, names_index = (
+        struct.unpack_from(endian + "HHIQQQIHHHHHH", header, 16)
+    )
+    if (
+        kind not in (1, 2, 3)
+        or version != 1
+        or ehsize != 64
+        or shsize != 64
+        or not 0 < names_index < shnum < 0xFF00
+        or shoff < 64
+        or phnum == 0xFFFF
+        or (phnum and (phsize != 56 or phoff < 64))
+        or (not phnum and phoff != 0)
+    ):
         return None
 
-    def field(index: int, at: int, code: str) -> int:
-        return struct.unpack_from(endian + code, table, index * entry_size + at)[0]
+    def in_file(offset: int, size: int) -> bool:
+        return offset <= length and size <= length - offset
 
-    names_offset, names_size = field(names_index, 24, "Q"), field(names_index, 32, "Q")
-    if names_offset > length or names_size > length - names_offset:
+    if not in_file(shoff, shsize * shnum) or not in_file(phoff, phsize * phnum):
         return None
-    stream.seek(names_offset)
-    names = stream.read(names_size)
-    sections = []
-    for index in range(count):
-        start = field(index, 0, "I")
-        end = names.find(b"\0", start)
-        if start >= len(names) or end < 0:
+    stream.seek(shoff)
+    table = stream.read(shsize * shnum)  # At most 0xFEFF fixed-size entries.
+    if len(table) != shsize * shnum or table[:64] != bytes(64):
+        return None
+    sections = list(struct.iter_unpack(endian + "IIQQQQIIQQ", table))
+    _, names_type, _, _, names_offset, names_size, _, _, _, _ = sections[names_index]
+    if names_type != 3 or not names_size or not in_file(names_offset, names_size):
+        return None
+
+    occupied = [(0, 64), (shoff, shoff + len(table))]
+    if phnum:
+        occupied.append((phoff, phoff + phsize * phnum))
+    skipped = []
+    for index, (name, section_type, flags, _, offset, size, _, _, _, _) in enumerate(sections[1:], 1):
+        if name >= names_size:
             return None
-        if field(index, 4, "I") == _SHT_NOBITS:
-            continue
-        section_offset, section_size = field(index, 24, "Q"), field(index, 32, "Q")
-        if section_offset > length or section_size > length - section_offset:
+        stream.seek(names_offset + name)
+        # ELF imposes no short name limit. Unusually long names are supported
+        # by whole-file hashing instead of allocating an unbounded string table.
+        raw_name = stream.read(min(256, names_size - name))
+        end = raw_name.find(b"\0")
+        if end < 0:
             return None
-        sections.append((names[start:end].decode("ascii", "replace"), section_offset, section_size))
-    return kind, sections
+        section_name = raw_name[:end]
+        if section_type in (0, _SHT_NOBITS):
+            continue  # Their full headers are still hashed, including BSS size.
+        if not in_file(offset, size):
+            return None
+        if size:
+            occupied.append((offset, offset + size))
+        debug = section_name in (b".debug", b".zdebug", b".comment", b".gnu_debuglink") or (
+            section_name.startswith((b".debug_", b".zdebug_"))
+        )
+        # SHF_COMPRESSED is safe; any other flag or non-PROGBITS type may carry
+        # semantics beyond debug information. Never omit the section-name table.
+        if debug and section_type == 1 and flags & ~0x800 == 0 and index != names_index and size:
+            skipped.append((offset, offset + size))
+    occupied.sort()
+    if any(left[1] > right[0] for left, right in zip(occupied, occupied[1:])):
+        return None
+
+    for index in range(phnum):
+        stream.seek(phoff + index * phsize)
+        entry = stream.read(phsize)
+        if len(entry) != phsize:
+            return None
+        _, _, offset, _, _, size, _, _ = struct.unpack(endian + "IIQQQQQQ", entry)
+        if not in_file(offset, size):
+            return None
+        if any(start < offset + size and offset < end for start, end in skipped):
+            return None
+    return sorted(skipped)
 
 
 def _executable_digest(stream: BinaryIO) -> tuple[int, str] | None:
-    """Digest what an ELF file does, skipping what only a debugger reads.
+    """Hash all ELF bytes except verified debug payloads, retaining all headers.
 
-    Debug information cannot change the artifact a compiler produces from this
-    installation, but it dominates an unstripped build: on the development tree
-    measured here it is 69% of every byte the inventory reads, and 367 MB of a
-    single 376 MB extension module. Reading it makes a rebuild that changed
-    only source paths or -g level invalidate every cached artifact.
-
-    The section name and size enter the digest beside the bytes, so removing a
-    section, renaming it, or moving its bytes into another cannot leave the
-    result unchanged. None whenever the sections cannot be read.
+    In particular, section attributes and SHT_NOBITS sizes, program headers,
+    and segment bytes outside sections must affect identity. Keeping offsets
+    is conservative: debug rebuilds that change layout can invalidate the
+    cache, while same-layout debug edits still avoid hashing their payloads.
     """
-    parsed = _elf_sections(stream)
-    if parsed is None:
+    skipped = _elf_debug_ranges(stream)
+    if skipped is None:
         return None
-    kind, found = parsed
-    # In a relocatable object the symbol table is what a linker resolves against,
-    # not something only a debugger reads: two objects with identical code and
-    # relocations but a rebuilt .symtab link differently. Only a finished
-    # executable or shared object can spare it.
-    skipped = _DEBUGGER_SECTIONS if kind != _ET_REL else _DEBUG_SECTIONS
+    length = os.fstat(stream.fileno()).st_size
     digest = hashlib.sha256()
     covered = 0
-    for name, offset, size in sorted(found):
-        if name.startswith(skipped):
-            continue
+    offset = 0
+    for start, end in [*skipped, (length, length)]:
+        size = start - offset
+        digest.update(struct.pack(">QQ", offset, size))
         covered += size
-        digest.update(f"{name}\0{size}\0".encode())
         stream.seek(offset)
         remaining = size
         while remaining:
             chunk = stream.read(min(remaining, 1024 * 1024))
             if not chunk:
-                raise ValueError("Identity input ended inside a declared ELF section")
+                raise ValueError("Identity input ended inside a declared ELF range")
             digest.update(chunk)
             remaining -= len(chunk)
-    # The size recorded beside the digest has to be the size of what was
-    # digested. Reporting the whole file would put the debug sections back into
-    # the identity through the record, undoing what skipping them achieved.
-    #
-    # Tagged, so a section digest can never be read as the whole-file digest of
-    # some other file that happens to hash to the same value.
-    return covered, f"elf64-sections:{digest.hexdigest()}"
+        offset = end
+    # Version the tag: the old section-only digest omitted semantic metadata.
+    return covered, f"elf64-debug-filtered-v2:{digest.hexdigest()}"
 
 
 def _file_digest(path: Path, *, sections: bool = False) -> tuple[int, str]:

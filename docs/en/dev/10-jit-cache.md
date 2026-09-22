@@ -156,6 +156,13 @@ persistence. The latest bypass reason is available in
 `cache_stats().last_bypass_reason`, even when INFO logging is disabled. Every
 bypass is also logged by `pypto.jit._persistent` at INFO.
 
+ELF64 identity omits only verified non-allocated debug payloads outside all
+program segments. It retains every ELF, program, and section header, including
+`.bss` size, flags, alignment, symbol tables, and bytes outside sections.
+Same-layout debug-content edits do not invalidate identity; debug rebuilds that
+change layout may conservatively invalidate it. Unsupported or malformed ELF
+layouts use whole-file SHA-256. Artifact manifests always hash complete files.
+
 Implicit linker scripts support absolute `INPUT`/`GROUP` dependencies, nested
 `AS_NEEDED`, and `OUTPUT_FORMAT`/`OUTPUT_ARCH` declarations. Dependencies are
 followed recursively with the selected sysroot. Relative inputs, `-l` names,
