@@ -113,6 +113,16 @@ namespace {
 /// makes re-entry a no-op without relying on that ambiguity.
 constexpr const char* kNzBlockedAttr = "nz_tensor_views_blocked";
 
+// ``BlockNzTensorViews`` rewrites the coordinates of an NZ slice to the
+// physical rank-5 form used by chip codegen.  HOST distributed codegen still
+// indexes the original Python tensor, so it needs to retain the logical
+// rank-reduction caused by ``w[r]``.  Keep the original logical index as
+// compiler metadata rather than putting ``drop_dims`` back into the blocked
+// slice: the latter would make the chip-side view rank-reduce the physical NZ
+// tensor.  The original index matters for rank-4+ NZ tensors because blocking
+// folds leading axes into a physical batch offset (e.g. ``r * groups``).
+constexpr const char* kNzHostDropOffsetsAttr = "nz_host_drop_offsets";
+
 /// True when a tensor-like type carries an NZ TensorView.
 bool IsNzTensorType(const TypePtr& type) {
   auto tensor_type = AsTensorTypeLike(type);
@@ -441,6 +451,8 @@ class BlockNzMutator : public IRMutator {
     // A call to another function just forwards the tensor; the callee's own
     // params are blocked when that function is transformed.
     const bool is_function_call = static_cast<bool>(As<GlobalVar>(op->op_));
+    const bool is_slice = IsOp(op, "tensor.slice");
+    std::vector<ExprPtr> host_drop_offsets;
     if (!nz_args.empty() && !is_function_call) {
       // Name the store case directly: annotating an Out/InOut tensor pl.NZ is
       // the likely authoring mistake, and "read-only" is the actionable fact.
@@ -448,7 +460,6 @@ class BlockNzMutator : public IRMutator {
           << "NZ layout is read-only: an NZ tensor cannot be a store destination. "
           << "Annotate the output tensor as pl.ND.";
       const bool is_load = IsOp(op, "tile.load");
-      const bool is_slice = IsOp(op, "tensor.slice");
       const bool is_flatten = IsWholeTensorFlatten(op);
       CHECK_SPAN((is_load || is_slice || is_flatten) && nz_args.size() == 1 && nz_args[0] == 0, op->span_)
           << "NZ layout currently supports only 'tile.load' and 'tensor.slice' reading the tensor as "
@@ -462,6 +473,20 @@ class BlockNzMutator : public IRMutator {
       // The flatten keeps its arguments: the element count is layout-invariant
       // and the result is already ND.
       if (!is_flatten) {
+        if (is_slice && op->args_.size() >= 5) {
+          auto drop_dims = As<MakeTuple>(op->args_[4]);
+          auto logical_offsets = As<MakeTuple>(new_args[2]);
+          INTERNAL_CHECK_SPAN(drop_dims && logical_offsets, op->span_)
+              << "Internal error: NZ tensor.slice coordinates must be MakeTuples";
+          for (const auto& dim_expr : drop_dims->elements_) {
+            auto dim = As<ConstInt>(dim_expr);
+            INTERNAL_CHECK_SPAN(dim, op->span_)
+                << "Internal error: tensor.slice drop_dims entries must be ConstInt";
+            CHECK_SPAN(dim->value_ == 0, op->span_)
+                << "NZ host tensor.slice currently supports only a scalar leading-axis index";
+            host_drop_offsets.push_back(logical_offsets->elements_[static_cast<size_t>(dim->value_)]);
+          }
+        }
         args_changed = true;
         new_args = is_load ? BlockTileLoadArgs(op, std::move(new_args), logical_shape)
                            : BlockTensorSliceArgs(op, std::move(new_args), logical_shape);
@@ -475,7 +500,11 @@ class BlockNzMutator : public IRMutator {
     // Direct ctor, not OpRegistry::Create: re-deducing ``tile.load``'s type
     // from the now rank-5 shapes argument would turn the destination tile into
     // a rank-5 TileType. The GM partition is blocked; the tile is not.
-    return std::make_shared<Call>(op->op_, std::move(new_args), op->kwargs_, op->attrs_,
+    std::vector<std::pair<std::string, std::any>> new_attrs = op->attrs_;
+    if (!host_drop_offsets.empty() && !op->HasAttr(kNzHostDropOffsetsAttr)) {
+      new_attrs.emplace_back(kNzHostDropOffsetsAttr, std::move(host_drop_offsets));
+    }
+    return std::make_shared<Call>(op->op_, std::move(new_args), op->kwargs_, std::move(new_attrs),
                                   std::move(new_return_type), op->span_);
   }
 

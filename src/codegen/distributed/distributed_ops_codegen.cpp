@@ -471,6 +471,23 @@ REGISTER_DISTRIBUTED_OP(tensor_slice, "tensor.slice") {
     }
   }
 
+  // NZ blocking changes the IR coordinates to rank-5 physical extents, but
+  // the HOST orchestrator indexes the original logical torch tensor (or a
+  // StackedDeviceTensor).  A scalar leading index is the one case where the
+  // logical form is recoverable without carrying every logical dimension: the
+  // trailing axes are the whole shard and must not be emitted at all.
+  const auto host_drop_offsets = op->GetAttr<std::vector<ExprPtr>>("nz_host_drop_offsets");
+  if (!host_drop_offsets.empty()) {
+    INTERNAL_CHECK_SPAN(host_drop_offsets.size() == 1, op->span_)
+        << "Internal error: NZ host tensor.slice metadata must contain exactly one scalar leading-axis index";
+    const std::string offset_i = codegen.GetExprAsCode(host_drop_offsets.front());
+    std::ostringstream line;
+    line << "tensors[\"" << lhs << "\"] = tensors[\"" << input_name << "\"][" << offset_i << "]";
+    codegen.Emit(line.str());
+    dist_codegen.MarkDeclared(lhs);
+    return "";
+  }
+
   std::ostringstream indices;
   for (size_t i = 0; i < shape_tuple->elements_.size(); ++i) {
     if (i > 0) indices << ", ";
