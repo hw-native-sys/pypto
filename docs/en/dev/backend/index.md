@@ -31,7 +31,7 @@ The list also includes legacy backend entries whose IR operators no longer exist
 use `ir.is_op_registered(name)` to distinguish those when auditing current IR.
 
 The audit ledger lives in `tests/ut/backend/buffer_migration_inventory.py`:
-`MIGRATION_FAMILIES` classifies 168 live names in 22 families, and
+`MIGRATION_FAMILIES` classifies 171 live names in 22 families, and
 `HISTORICAL_CALLBACKS` records eight historical callbacks. Update this module
 whenever the registered surface changes. Its validator,
 `tests/ut/backend/test_buffer_migration_inventory.py`, compares the ledger with
