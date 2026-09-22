@@ -97,7 +97,7 @@ dependency (issue #2415). The callee slots are accumulated as two independent
 flags — `In`/`InOut` marks a read, `Out`/`InOut` marks a write — and the
 direction is derived once at the end.
 
-See [Outline InCore Scopes](../passes/09-outline_incore_scopes.md).
+See [Outline InCore Scopes](../passes/10-outline_incore_scopes.md).
 
 ### 2. Caller propagation (pass 11)
 
@@ -137,7 +137,7 @@ consumer one source of truth: `callee->param_directions_`.
 `Output`, `OutputExisting`, `InOut`, `NoDep`, `Scalar` — which is what
 dependency analysis and codegen actually consume.
 
-See [Derive Call Directions](../passes/41-derive_call_directions.md).
+See [Derive Call Directions](../passes/42-derive_call_directions.md).
 
 ### 4. Consistency warning (PostPipeline)
 
@@ -204,7 +204,7 @@ pinned as a passing test.
 ## See Also
 
 - [Operator System](05-operators.md) — the declaration surface, in full.
-- [Outline InCore Scopes](../passes/09-outline_incore_scopes.md) — stage 1.
-- [Convert Tensor to Tile Ops](../passes/11-convert_tensor_to_tile_ops.md) — stage 2.
-- [Derive Call Directions](../passes/41-derive_call_directions.md) — stage 3.
+- [Outline InCore Scopes](../passes/10-outline_incore_scopes.md) — stage 1.
+- [Convert Tensor to Tile Ops](../passes/12-convert_tensor_to_tile_ops.md) — stage 2.
+- [Derive Call Directions](../passes/42-derive_call_directions.md) — stage 3.
 - [IR Verifier](../passes/99-verifier.md) — stage 4.

@@ -104,8 +104,8 @@ torch.testing.assert_close(acc, acc_before + scaled, rtol=1e-2, atol=1e-2)  # In
 | `pl.FP16` | 16 | IEEE half |
 | `pl.BF16` | 16 | Brain float |
 | `pl.FP32` | 32 | IEEE single |
-| `pl.FP4` | 4 | Frontend logical MXFP4 E2M1 nibble (incomplete without automatic pack; prefer `FP4E2M1X2`) |
-| `pl.FP4E2M1X2` | 8 | Packed carrier (two nibbles); physical last dim matches `torch.float4_e2m1fn_x2` / `!pto.f4E2M1x2` |
+| `pl.FP4` | 4 | Frontend logical MXFP4 E2M1 nibble; `PackFp4` rewrites IR to `FP4E2M1X2` |
+| `pl.FP4E2M1X2` | 8 | Packed carrier (two nibbles); physical last dim. Even extents are author-owned; PackFp4 still rejects DN / NZ / col_major / cube |
 | `pl.FP8E4M3FN` / `pl.FP8E5M2` | 8 | MXFP8 data formats |
 | `pl.FP8E8M0` | 8 | MX block-scale exponent |
 | `pl.HF4` / `pl.HF8` | 4 / 8 | Hisilicon float formats |
@@ -122,18 +122,17 @@ packs every semantic 4-bit dtype two logical elements per byte, so the physical 
 nbytes = 256 * pl.FP32.get_byte()          # 1024, not 256
 ```
 
-Frontend `pl.FP4` is a logical nibble type (`GetBit()==4`, even last dim). Prefer
-hand-written `pl.FP4E2M1X2` for the packed carrier (`GetBit()==8`, last dim already
-in x2 units). Resolving the short `FP4` name emits a `UserWarning` until automatic
-pack lands. At the Torch/runtime boundary, `torch.float4_e2m1fn_x2` maps to
-`FP4E2M1X2` without expanding the last dim; logical `FP4` call metadata still
-contracts/expands by two where that dtype remains.
+Frontend `pl.FP4` is a logical nibble type. Static even last dims pack via
+`PackFp4` into `FP4E2M1X2`. Dynamic last-axis geometry, transpose / reshape /
+read-write, distributed FP4, and native `matmul_mx` FP4 are out of scope —
+see [FP4](../../dev/fp4.md) for limits, cast policy, and unit convention.
 
 End-to-end 4-bit execution is backend-gated. Ascend950 in-core accepts packed
-`pl.FP4E2M1X2`; logical `pl.FP4` / `INT4` / `UINT4` / `HF4` are rejected by
-in-core codegen. Ascend910B/A2A3 rejects every FP4-family in-core dtype because
-its isolated FP16↔INT4 conversion has no matching packed load/store carrier ABI.
-See [FP4](../../dev/fp4.md) for cast samples (`FP4E2M1X2`→BF16 / FP8), units, and
+`pl.FP4E2M1X2` (after PackFp4); logical `pl.FP4` / `INT4` / `UINT4` / `HF4` are
+rejected by in-core codegen. Ascend910B/A2A3 rejects every FP4-family in-core
+dtype because its isolated FP16↔INT4 conversion has no matching packed
+load/store carrier ABI.
+See [FP4](../../dev/fp4.md) for PackFp4, cast samples, units, and
 `#2754`-class stride guidance.
 
 ### Annotating a scalar binding
@@ -261,7 +260,8 @@ physically). The matmul itself is `pl.matmul_mx` and its `_acc` /
 the op must be `FP8E4M3FN`. The supported FP4-input form is a left FP4 operand multiplied by a
 right FP8 operand: write `pl.cast(fp4_tile, pl.FP8E4M3FN)` before `matmul_mx`. On A5 the cast
 legalization pass expands that request to FP4→BF16→FP32→FP8E4M3FN. Native FP4×FP4 and the
-reverse FP8×FP4 form are not supported. Standalone `pl.quant_mx` (MXFP8-only in this release, with
+reverse FP8×FP4 form are not supported. Physical K, valid K, and scale groups use the post-cast
+FP8 tile, not the packed x2 carrier. See [FP4](../../dev/fp4.md). Standalone `pl.quant_mx` (MXFP8-only in this release, with
 `group_axis` matching PTOAS `grpAxis`) is available. On Ascend950 it can share one InCore mixed
 task with `matmul_mx`; the generated data and scale cross directly over V2C, with a generated
 Vec-to-Mat-to-scale-memory path for the scale.
@@ -343,7 +343,7 @@ it — which is a race, not a diagnostic.
 | **`ParserTypeError` about the DN layout-only shorthand** | `pl.Tensor[..., pl.DN]` — removed, it forced two coordinate systems onto one annotation | Write the source shape with no marker; derive DN at the use site with `pl.transpose(x, -2, -1)`; or inherit it through a slice/reshape of a DN-producing op |
 | **Results wrong only when two tasks overlap** | A read-write buffer declared `In` or `Out` instead of `InOut` | Declare the direction the kernel actually performs |
 | **Reading an `Out` parameter returns garbage** | `Out` promises write-before-read | Use `pl.InOut[...]` if the prior contents matter |
-| **`pl.cast` where you expected implicit promotion** | There is no implicit promotion | Insert the cast; check [LegalizeTileCast](../../dev/passes/17-legalize_tile_cast.md) for multi-hop pairs |
+| **`pl.cast` where you expected implicit promotion** | There is no implicit promotion | Insert the cast; check [LegalizeTileCast](../../dev/passes/18-legalize_tile_cast.md) for multi-hop pairs |
 | **Two dimensions that should match are treated as independent** | Two separate `pl.dynamic("M")` calls | Create the `DynVar` once and reuse the object |
 
 Not every `pl.cast` is one instruction. Whether a `(src, dst)` pair maps to a single
@@ -352,7 +352,7 @@ instruction on Ascend910B and lowers to `INT32 -> FP32 -> FP16` on Ascend950. Ea
 costs a `tcvt`, and where an intermediate is narrower than the source the result can
 differ from a directly rounded conversion by one ULP of the destination. This is expected
 behaviour, not a defect — see
-[LegalizeTileCast](../../dev/passes/17-legalize_tile_cast.md) for the per-architecture
+[LegalizeTileCast](../../dev/passes/18-legalize_tile_cast.md) for the per-architecture
 tables.
 
 `pl.cast` also takes a keyword-only `saturation_mode` (`"on"` / `"off"`, or `1` / `0`) for
@@ -372,4 +372,4 @@ you named.
 - [Memory and Data Movement](03-memory.md) — moving data between the spaces these types name.
 - [Operations](../ops/index.md) — which operators accept `Tensor` versus `Tile`.
 - [IR Types](../../dev/ir/02-types.md) — the IR-level type system these annotations build.
-- [LegalizeTileCast](../../dev/passes/17-legalize_tile_cast.md) — per-architecture cast expansion and its precision consequences.
+- [LegalizeTileCast](../../dev/passes/18-legalize_tile_cast.md) — per-architecture cast expansion and its precision consequences.

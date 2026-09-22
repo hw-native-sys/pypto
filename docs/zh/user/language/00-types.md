@@ -92,8 +92,8 @@ torch.testing.assert_close(acc, acc_before + scaled, rtol=1e-2, atol=1e-2)  # In
 | `pl.FP16` | 16 | IEEE 半精度 |
 | `pl.BF16` | 16 | Brain float |
 | `pl.FP32` | 32 | IEEE 单精度 |
-| `pl.FP4` | 4 | 前端逻辑 MXFP4 E2M1 nibble（尚无自动打包时不完善；推荐 `FP4E2M1X2`） |
-| `pl.FP4E2M1X2` | 8 | 打包 carrier（双 nibble）；物理末维对齐 `torch.float4_e2m1fn_x2` / `!pto.f4E2M1x2` |
+| `pl.FP4` | 4（前端逻辑 nibble） | 前端逻辑 E2M1 nibble；`PackFp4` 之后 IR 变为 `FP4E2M1X2`（8 bit，末维 /2） |
+| `pl.FP4E2M1X2` | 8 | 打包 carrier（双 nibble）；物理末维。偶数长度由作者保证；PackFp4 仍拒绝 DN / NZ / col_major / cube |
 | `pl.FP8E4M3FN` / `pl.FP8E5M2` | 8 | MXFP8 数据格式 |
 | `pl.FP8E8M0` | 8 | MX 块缩放指数 |
 | `pl.HF4` / `pl.HF8` | 4 / 8 | 海思浮点格式 |
@@ -106,18 +106,15 @@ torch.testing.assert_close(acc, acc_before + scaled, rtol=1e-2, atol=1e-2)  # In
 nbytes = 256 * pl.FP32.get_byte()          # 1024, not 256
 ```
 
-前端 `pl.FP4` 是逻辑 nibble 类型（`GetBit()==4`，末维偶数）。推荐手写
-`pl.FP4E2M1X2` 作为打包 carrier（`GetBit()==8`，末维已是 x2 单位）。解析短名
-`FP4` 时会发出 `UserWarning`，直到自动打包落地。Torch/runtime 边界上
-`torch.float4_e2m1fn_x2` 映射到 `FP4E2M1X2` 且不展开末维；逻辑 `FP4` 的 call
-metadata 仍会在该 dtype 存在时按二收缩/展开。
+`pl.FP4` 是逻辑 nibble 类型：静态偶末维经 `PackFp4` 打成 `FP4E2M1X2`。动态末维、
+transpose / reshape / read-write、分布式 FP4、原生 `matmul_mx` FP4 均不在本版本
+范围内 — 限制、cast 与单位约定见 [FP4](../../dev/fp4.md)。
 
-4-bit 端到端执行按后端做能力检查。Ascend950 in-core 接受打包的
-`pl.FP4E2M1X2`；逻辑 `pl.FP4` / `INT4` / `UINT4` / `HF4` 会被 in-core codegen
-拒绝。Ascend910B/A2A3 会拒绝整族 FP4 in-core dtype，因为它只有孤立的
-FP16↔INT4 转换，没有配套的 packed load/store carrier ABI。cast 样例
-（`FP4E2M1X2`→BF16 / FP8）、单位约定与 `#2754` 类 stride 指引见
-[FP4](../../dev/fp4.md)。
+4-bit 端到端执行按后端做能力检查。Ascend950 in-core 接受打包后的
+`pl.FP4E2M1X2`（经 PackFp4）；逻辑 `pl.FP4` / `INT4` / `UINT4` / `HF4` 会被
+in-core codegen 拒绝。Ascend910B/A2A3 会拒绝整族 FP4 in-core dtype，因为它只有
+孤立的 FP16↔INT4 转换，没有配套的 packed load/store carrier ABI。PackFp4、cast
+样例、单位约定与 `#2754` 类 stride 指引见 [FP4](../../dev/fp4.md)。
 
 ### 标量绑定的类型注解
 
@@ -189,7 +186,7 @@ view = pl.TensorView(stride=[1024, 1], layout=pl.TensorLayout.ND, valid_shape=[1
 
 只要给了 `stride`、`valid_shape`、`pad` 三者之一，`layout=` 就是必填的。`pl.TensorLayout` 是这些布局常量所属的枚举 —— `pl.ND` 就是 `pl.TensorLayout.ND`。
 
-剩下两个布局常量是 `pl.MX_A_ZZ` 与 `pl.MX_B_NN`。它们标注 Ascend950 上 MX（microscaling）操作数的 **GM scale 张量** —— `MX_A_ZZ` 对应左/A 侧 scale pack，`MX_B_NN` 对应右/B 侧 —— 使 Mat 到 scale 的 `pl.move` 能校验源布局，而不是把不兼容的数据按字节拷进 `LeftScale` / `RightScale`。这是唯一一处**要求**在 `pl.Tensor` 注解上写布局标记、而非不建议写的场景。MX 的 `pl.load` 可省略 `target_memory`；Python API 会选择 `pl.Mem.Mat`，`matmul_mx` 操作数放置会插入所需 move。常规 MX 子视图（`slice`、`reshape`、`transpose`、`reinterpret_view`）与 MX `remote_load` 会被拒绝。例外：FP8E8M0 的 `pl.tensor.view` 可在 packed ND backing 与 `MX_A_ZZ` / `MX_B_NN` 之间建立逻辑 rank-2 alias（`layout=mx_*`；PTOAS v0.60 负责物理打包）。矩阵乘本身是 `pl.matmul_mx` 及其 `_acc` / `_bias` 变体，每个操作数各接一块数据 tile 和一块 scale tile。进入算子的两块 data tile 必须都是 `FP8E4M3FN`。支持的 FP4 输入形式仅为左侧 FP4×右侧 FP8，并且必须在 `matmul_mx` 前显式写 `pl.cast(fp4_tile, pl.FP8E4M3FN)`；A5 的 cast legalization pass 会将其展开为 FP4→BF16→FP32→FP8E4M3FN。原生 FP4×FP4 与反向 FP8×FP4 均不支持。独立 `pl.quant_mx`（本版本仅 MXFP8，以 `group_axis` 对齐 PTOAS `grpAxis`）已开放；在 Ascend950 上可与 `pl.matmul_mx` 共用一个 InCore mixed task，生成的 data 与 scale 直接经 V2C 传递，scale 会生成 Vec→Mat→scale memory 路径。
+剩下两个布局常量是 `pl.MX_A_ZZ` 与 `pl.MX_B_NN`。它们标注 Ascend950 上 MX（microscaling）操作数的 **GM scale 张量** —— `MX_A_ZZ` 对应左/A 侧 scale pack，`MX_B_NN` 对应右/B 侧 —— 使 Mat 到 scale 的 `pl.move` 能校验源布局，而不是把不兼容的数据按字节拷进 `LeftScale` / `RightScale`。这是唯一一处**要求**在 `pl.Tensor` 注解上写布局标记、而非不建议写的场景。MX 的 `pl.load` 可省略 `target_memory`；Python API 会选择 `pl.Mem.Mat`，`matmul_mx` 操作数放置会插入所需 move。常规 MX 子视图（`slice`、`reshape`、`transpose`、`reinterpret_view`）与 MX `remote_load` 会被拒绝。例外：FP8E8M0 的 `pl.tensor.view` 可在 packed ND backing 与 `MX_A_ZZ` / `MX_B_NN` 之间建立逻辑 rank-2 alias（`layout=mx_*`；PTOAS v0.60 负责物理打包）。矩阵乘本身是 `pl.matmul_mx` 及其 `_acc` / `_bias` 变体，每个操作数各接一块数据 tile 和一块 scale tile。进入算子的两块 data tile 必须都是 `FP8E4M3FN`。支持的 FP4 输入是左 FP4 × 右 FP8：在 `matmul_mx` 之前写 `pl.cast(fp4_tile, pl.FP8E4M3FN)`。A5 上 cast 合法化会展开为 FP4→BF16→FP32→FP8E4M3FN。原生 FP4×FP4 与反向 FP8×FP4 不支持。Physical K、valid K 与 scale group 按 cast 之后的 FP8 tile 计，不按 packed x2 carrier。见 [FP4](../../dev/fp4.md)。独立 `pl.quant_mx`（本版本仅 MXFP8，以 `group_axis` 对齐 PTOAS `grpAxis`）已开放；在 Ascend950 上可与 `pl.matmul_mx` 共用一个 InCore mixed task，生成的 data 与 scale 直接经 V2C 传递，scale 会生成 Vec→Mat→scale memory 路径。
 
 `pl.quant_mx(tensor, group_axis=1)` 返回 GM A data `[M,K]` 和
 `MX_A_ZZ[M,K/32]` scale tensor。`group_axis=0` 接受 `[N,K]`，返回 Cube 定向的
@@ -252,10 +249,10 @@ for extent in (TILE, 3 * TILE):
 | **报 DN layout-only shorthand 的 `ParserTypeError`** | `pl.Tensor[..., pl.DN]` —— 已移除，它把两套坐标系压进了一条注解 | 写源 shape、不带标记；在使用处用 `pl.transpose(x, -2, -1)` 导出 DN；或让它从产生 DN 的算子经切片/reshape 继承 |
 | **只有两个任务重叠时结果才出错** | 读写缓冲区声明成了 `In` 或 `Out` 而非 `InOut` | 按 kernel 实际行为声明方向 |
 | **读 `Out` 参数读到垃圾** | `Out` 承诺的是先写后读 | 若此前内容有意义，改用 `pl.InOut[...]` |
-| **本以为会隐式提升，却要求 `pl.cast`** | 没有隐式提升 | 补上 cast；多跳类型对见 [LegalizeTileCast](../../dev/passes/17-legalize_tile_cast.md) |
+| **本以为会隐式提升，却要求 `pl.cast`** | 没有隐式提升 | 补上 cast；多跳类型对见 [LegalizeTileCast](../../dev/passes/18-legalize_tile_cast.md) |
 | **两个本应相同的维度被当成互相独立** | 调了两次 `pl.dynamic("M")` | 只创建一次 `DynVar` 并复用该对象 |
 
-并非每个 `pl.cast` 都是一条指令。一对 `(src, dst)` 是映射到单条硬件 `pto.tcvt` 还是展开成一条链，取决于目标架构：`INT32 -> FP16` 在 Ascend910B 上是一条指令，在 Ascend950 上会降为 `INT32 -> FP32 -> FP16`。每一跳花费一次 `tcvt`；当中间类型比源类型更窄时，结果可能与直接舍入的转换相差目标类型的 1 ULP。**这是预期行为，不是缺陷** —— 各架构的对照表见 [LegalizeTileCast](../../dev/passes/17-legalize_tile_cast.md)。
+并非每个 `pl.cast` 都是一条指令。一对 `(src, dst)` 是映射到单条硬件 `pto.tcvt` 还是展开成一条链，取决于目标架构：`INT32 -> FP16` 在 Ascend910B 上是一条指令，在 Ascend950 上会降为 `INT32 -> FP32 -> FP16`。每一跳花费一次 `tcvt`；当中间类型比源类型更窄时，结果可能与直接舍入的转换相差目标类型的 1 ULP。**这是预期行为，不是缺陷** —— 各架构的对照表见 [LegalizeTileCast](../../dev/passes/18-legalize_tile_cast.md)。
 
 对 `Tensor` 和 `Tile` 输入，`pl.cast` 还接受仅关键字参数 `saturation_mode`（`"on"` / `"off"`，或 `1` / `0`）。`"on"` 把超出目标值域的结果钳制到该值域；`"off"` 保留目标平台的非饱和转换，其溢出行为由架构定义。**当目标类型是整数时，默认值是 `"on"`** —— 没有任何标准规定"转换到整数时溢出"应当产生什么，在两者之间"意外得到钳制"更安全，而且在 A2/A3 上它正是硬件原生支持的转换。**浮点**目标类型则保持原样：IEEE 规定窄化溢出产生无穷，除非你显式要求 `"on"`，PyPTO 与之保持一致。多跳 cast 只把该模式作用于最后一跳，即真正到达你所指定 dtype 的那一跳。
 
@@ -265,4 +262,4 @@ for extent in (TILE, 3 * TILE):
 - [内存与数据搬运](03-memory.md) —— 在这些类型所命名的空间之间搬运数据。
 - [算子](../ops/index.md) —— 哪些算子接受 `Tensor`、哪些接受 `Tile`。
 - [IR 类型](../../dev/ir/02-types.md) —— 这些注解所构建的 IR 层类型系统。
-- [LegalizeTileCast](../../dev/passes/17-legalize_tile_cast.md) —— 分架构的 cast 展开及其精度后果。
+- [LegalizeTileCast](../../dev/passes/18-legalize_tile_cast.md) —— 分架构的 cast 展开及其精度后果。

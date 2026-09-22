@@ -740,6 +740,9 @@ def expand_manual_phase_fence() -> Pass:
 def flatten_call_expr() -> Pass:
     """Create a pass that flattens nested call expressions."""
 
+def pack_fp4() -> Pass:
+    """Pack frontend logical FP4 nibble types into packed FP4E2M1X2 after SSA flattening."""
+
 def inline_functions() -> Pass:
     """Create a pass that eliminates ``FunctionType.Inline`` functions.
 
@@ -1117,6 +1120,7 @@ __all__ = [
     "materialize_valid_shape_symbols",
     "lower_tile_to_buffer",
     "flatten_call_expr",
+    "pack_fp4",
     "inline_functions",
     "normalize_stmt_structure",
     "derive_call_directions",

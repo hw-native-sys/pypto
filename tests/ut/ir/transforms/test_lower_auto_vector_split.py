@@ -4772,7 +4772,7 @@ def test_scope_inside_region_body_is_rejected():
 
 
 def test_outlined_region_still_lowers_and_stamps():
-    """The canonical Opaque form is unaffected: pass 7 outlines, pass 23 lowers.
+    """The canonical Opaque form is unaffected: pass 8 outlines, pass 24 lowers.
 
     Guards the boundary of the rejection above — the scope must be gone by the
     time this pass runs, and when it is, the region lowers and the function is
@@ -5709,7 +5709,7 @@ def test_transformed_body_admission_failure_is_internal(in_region):
 def _run_to_expand_with_flatten(program: ir.Program) -> ir.Program:
     """The prefix above, carried on through ExpandMixedKernel.
 
-    Only the singleton carve-out needs this: accepting the transpose is pass 23's
+    Only the singleton carve-out needs this: accepting the transpose is pass 24's
     answer, but "the split SURVIVES" is a fact about the expanded AIV function.
     """
     p = passes.convert_to_ssa()(program)
@@ -5887,7 +5887,7 @@ def test_pure_vector_split_transpose_also_raises():
     pure-vector pl.split has no boundary to converge, so the pass passes it
     through untouched. That is exactly why this check used to sit at
     ExpandMixedKernel, which sees every function. Running it over the
-    pass-through branch keeps that coverage at pass 23 — without it, this kernel
+    pass-through branch keeps that coverage at pass 24 — without it, this kernel
     would reach SplitVectorKernel with a transpose it cannot type and miscompile
     silently.
     """

@@ -24,7 +24,7 @@ acc[t0 : t0 + R, :] = pl.matmul_acc(
 
 第一个 K 步只覆盖该窗口，后续步骤在该窗口内累加，其他窗口保留原值。
 编译器可将局部累加器中大小一致的行窗口打包为连续的 L0C 窗口；参见
-[累加器逻辑行窗口](../passes/14-flatten_tile_nd_to_2d.md#累加器逻辑行窗口)。
+[累加器逻辑行窗口](../passes/15-flatten_tile_nd_to_2d.md#累加器逻辑行窗口)。
 
 ### If 语句 (SSA 风格)
 
@@ -109,12 +109,12 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.cross_core_slot(slot_num=N)])` | `InCore` | InCore + 跨核 pipe 槽位数 |
 | `pl.at(level=pl.Level.HOST)`（或任意非 `CORE_GROUP` 级别） | `Hierarchy` | 分布式层级作用域 |
 | `pl.cluster()` | `Cluster` | AIC+AIV 协同调度组 |
-| `pl.graph("name")` | `Graph` | 可录制的编排区域；名字必填，并成为提取函数的名字 —— 见 [OutlineGraphScopes](../passes/08-outline_graph_scopes.md) |
+| `pl.graph("name")` | `Graph` | 可录制的编排区域；名字必填，并成为提取函数的名字 —— 见 [OutlineGraphScopes](../passes/09-outline_graph_scopes.md) |
 | `with pl.spmd(N)` / `for i in pl.spmd(N)` | `Spmd`（for-form 内嵌 `InCore`） | SPMD 多 block 派发——见 [pl.spmd](#plspmd-多-block-派发) |
 | `pl.spmd(N, optimizations=[pl.split(MODE)])` | `Spmd(InCore(split=MODE))` | split 提示作用于内层 InCore（两种形式均适用） |
 | `pl.spmd(N, optimizations=[pl.cross_core_slot(slot_num=N)])` | `Spmd(InCore(slot_num=N))` | 槽位数作用于内层 InCore（两种形式均适用），可与 `pl.split(MODE)` 组合 |
 | `pl.scope(mode=pl.ScopeMode.MANUAL)` / `pl.manual_scope()` | `Runtime(manual=true)` | orchestrator 的 MANUAL scope——由用户管理任务排序。两种 `auto_scope` 模式下都可用（它是依赖语义选择）。见[手工依赖原语](02-manual_dependencies.md#手工依赖原语) |
-| `pl.scope()` | `Runtime(manual=false)` | orchestrator 的 AUTO scope（`SIMPLER_SCOPE()`）。手写它需要 `@pl.function(auto_scope=False)`（默认 `auto_scope=True` 下由编译器决定 AUTO 放置）。见 [MaterializeRuntimeScopes](../passes/49-materialize_runtime_scopes.md) |
+| `pl.scope()` | `Runtime(manual=false)` | orchestrator 的 AUTO scope（`SIMPLER_SCOPE()`）。手写它需要 `@pl.function(auto_scope=False)`（默认 `auto_scope=True` 下由编译器决定 AUTO 放置）。见 [MaterializeRuntimeScopes](../passes/50-materialize_runtime_scopes.md) |
 
 #### `pl.spmd` 多 block 派发
 
@@ -138,7 +138,7 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | `pl.cross_core_slot(slot_num=N)` | 两种均适用 | 给内层 InCore 设置 `slot_num` 属性——自动跨核 pipe 的槽位数（环深），由 `ExpandMixedKernel` 消费。它只决定数据通道大小，**不**划分计算，因此可与 `pl.split_aiv` 区域共存（而 `pl.split(...)` 不能）。省略时沿用默认深度：每个活跃方向 2 个槽位。 |
 
 > `pl.split(MODE, slot_num=N)` 是该槽位数的已废弃别名，会发出警告——参见
-> [ExpandMixedKernel](../passes/24-expand_mixed_kernel.md#覆盖槽位数slot_num)。
+> [ExpandMixedKernel](../passes/25-expand_mixed_kernel.md#覆盖槽位数slot_num)。
 
 示例参见 [作用域与放置](../../user/language/04-scopes.md)。
 

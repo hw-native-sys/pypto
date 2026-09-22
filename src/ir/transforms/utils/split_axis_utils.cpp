@@ -3131,7 +3131,7 @@ namespace {
 
 // Mirrors the (formerly file-local) hazard finder in ExpandMixedKernel: records
 // the first tile.transpose whose source carries the split axis and whose
-// transpose actually swaps it. Shared so the explicit per-region check in pass 23
+// transpose actually swaps it. Shared so the explicit per-region check in pass 24
 // and the AUTO whole-function check in pass 24 use one detector.
 class TransposeSplitHazardFinder : public IRVisitor {
  public:

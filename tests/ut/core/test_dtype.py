@@ -9,10 +9,7 @@
 
 """Tests for the DataType enum and related utility functions."""
 
-import warnings
-
 import pypto
-import pypto.language as pl
 import pytest
 from pypto import (
     DT_BF16,
@@ -460,38 +457,6 @@ class TestDataTypeHashEqConsistency:
         ]:
             assert a != b
             assert a not in {b}
-
-
-class TestFp4EntryWarning:
-    """Logical FP4 name warns; packed FP4E2M1X2 does not."""
-
-    def test_fp4_annotation_warns(self):
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-
-            @pl.function
-            def _fp4_kernel(x: pl.Tensor[[16, 32], pl.FP4]) -> pl.Tensor[[16, 32], pl.FP4]:
-                return x
-
-            _ = _fp4_kernel
-
-        messages = [str(w.message) for w in caught if issubclass(w.category, UserWarning)]
-        assert any("Prefer FP4E2M1X2" in msg for msg in messages)
-
-    def test_fp4e2m1x2_annotation_does_not_warn(self):
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-
-            @pl.function
-            def _packed_kernel(
-                x: pl.Tensor[[16, 16], pl.FP4E2M1X2],
-            ) -> pl.Tensor[[16, 16], pl.FP4E2M1X2]:
-                return x
-
-            _ = _packed_kernel
-
-        messages = [str(w.message) for w in caught if issubclass(w.category, UserWarning)]
-        assert not any("Prefer FP4E2M1X2" in msg for msg in messages)
 
 
 if __name__ == "__main__":

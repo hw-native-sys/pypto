@@ -104,7 +104,7 @@ def test_fp4e2m1x2_rejects_column_vector_last_carrier_dim_one():
 
 
 def test_fp4e2m1x2_rejects_explicit_dn_param_annotation():
-    """Non-ND annotations on packed FP4E2M1X2 are rejected at make_tensor_view."""
+    """Non-ND annotations on packed FP4E2M1X2 are rejected by PackFp4."""
 
     @pl.program
     class DnAnnotated:
@@ -120,7 +120,7 @@ def test_fp4e2m1x2_rejects_explicit_dn_param_annotation():
         ) -> pl.Tensor[[16, 32], pl.FP4E2M1X2]:
             return pl.store(pl.load(src, [0, 0], [16, 32]), [0, 0], out)
 
-    with pytest.raises(ValueError, match=r"FP4E2M1X2 supports ND layout only"):
+    with pytest.raises(ValueError, match=r"FP4 DN layout is unsupported"):
         _emit_incore_mlir(DnAnnotated)
 
 
@@ -154,3 +154,7 @@ def test_fp4e2m1x2_slice_cast_and_vec_move():
     mlir_m = _emit_incore_mlir(MoveProg)
     assert "!pto.f4E2M1x2" in mlir_m
     assert "pto.tmov" in mlir_m or "pto.tload" in mlir_m
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

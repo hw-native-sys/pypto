@@ -37,7 +37,7 @@ values = pl.gather(src, index=indices)  # Physical [1, 16], valid [1, 8].
 浮点使用 `tile.extract`，INT16/INT32 使用保持数值不变的整数 `tile.adds(..., 0)`。
 已证明紧凑的计算结果直接复用，不再复制；存储情况未知时仍进行紧凑物化。
 指定 `dim` 时仍按维索引（二维/三维、任意轴），mask/compare
-形式保持不变。详见 [gather 下沉](../passes/11-convert_tensor_to_tile_ops.md#扁平-gather-下沉)。
+形式保持不变。详见 [gather 下沉](../passes/12-convert_tensor_to_tile_ops.md#扁平-gather-下沉)。
 
 对于普通 `TensorType` 操作数，已支持的 Tensor-scalar 算术算子（`adds`、
 `subs`、`muls`、`divs`、`fmods` 以及 scalar `maximum` 或 `minimum`）和
@@ -91,7 +91,7 @@ with ib.function("tensor_example") as f:
 | **逐元素** | `tile.add/sub/mul/div` | Tile-Tile 操作 |
 | - | `tile.adds/subs/muls/divs` | Tile-Scalar 操作。**常量**标量操作数会采用 tile 的元素 dtype（裸整数字面量否则会被解析为 `index`，而任何 `pto.t*s` 算子都不接受它）——但整数 tile 上的浮点字面量仍保持 FP32，以保留类型提升语义。显式的 `pl.const(v, dtype)` 属于用户的有意标注，与任何非常量表达式一样保持不变；非常量的 `index` 标量（循环变量、`pl.dim`）会被拒绝——需用 `pl.cast` 转换。`tensor.*s` 同理。 |
 | **一元** | `tile.sqrt` | 逐元素平方根 |
-| **量化** | `tile.tquant_mx` / `pl.quant_mx` | 仅 Ascend950 支持的 **MXFP8** block-32 动态量化，返回 `{FP8E4M3FN quant, FP8E8M0 scale}`；`dtype` 必须为 `FP8E4M3FN`。`group_axis` 对齐 PTOAS `grpAxis`（`1` = A 侧 `[M,K]`，`0` = B 侧 `[N,K]` 并转置）。公开 scale shape 为 `[M,K/32]` / `[K/32,N]`；要求完整有效区域和 `K % 64 == 0`（axis1 还要求 `M % 16 == 0`，axis0 还要求 `N % 32 == 0`）。[Pass 13](../passes/13-lower_composite_ops.md) 生成分组 TQUANT 和 X-to-ZZ TMOV。在 mixed task 内，结果可直接经 V2C 供 `matmul_mx` 使用。MXFP4 quant 暂缓。 |
+| **量化** | `tile.tquant_mx` / `pl.quant_mx` | 仅 Ascend950 支持的 **MXFP8** block-32 动态量化，返回 `{FP8E4M3FN quant, FP8E8M0 scale}`；`dtype` 必须为 `FP8E4M3FN`。`group_axis` 对齐 PTOAS `grpAxis`（`1` = A 侧 `[M,K]`，`0` = B 侧 `[N,K]` 并转置）。公开 scale shape 为 `[M,K/32]` / `[K/32,N]`；要求完整有效区域和 `K % 64 == 0`（axis1 还要求 `M % 16 == 0`，axis0 还要求 `N % 32 == 0`）。[Pass 14](../passes/14-lower_composite_ops.md) 生成分组 TQUANT 和 X-to-ZZ TMOV。在 mixed task 内，结果可直接经 V2C 供 `matmul_mx` 使用。MXFP4 quant 暂缓。 |
 | **变换** | `tile.slice` | 提取子 tile，静态 shape，可选动态 valid_shape |
 | - | `tile.extract` | 从 `src` 在 `(index_row, index_col)` 处提取子 tile —— ISA TEXTRACT Variant 1（Mat→Left/Right，Acc→Mat）。结果 layout 取自 `target_memory` 的隐式 view；`Left`/`Right` 例外，使用 TEXTRACT 侧的 L0 格式（与 `tile.move` 的 TMOV 侧不同） |
 | - | `tile.reshape` | 重塑 tile 维度（元素总数须一致）。会把源的 `valid_shape` 带到结果上，且绝不扩大 —— 见[reshape 与有效区域（valid region）](#reshape-与有效区域valid-region) |
@@ -130,7 +130,7 @@ layout 来自目标，因为它描述的是目标缓冲区如何分块，由
 `tile.move` 自己把目标 `memory_space` 打到推导出的类型上（参见
 [类型](02-types.md#tiletype) 中的 `TileType` 契约），因此当结果 view 与目标 space 的
 implicit view 一致时会折叠为 `nullopt` —— 这与
-[`InferTileMemorySpace`](../passes/20-infer_tile_memory_space.md) 为重新定型的 tile
+[`InferTileMemorySpace`](../passes/21-infer_tile_memory_space.md) 为重新定型的 tile
 刷新的 per-space implicit view 是同一套。
 
 `tile.move` 不支持原地执行：在同一 memory space 内，源和结果必须解析到不同地址。

@@ -165,6 +165,7 @@ class PassManager:
             passes.simplify,
             passes.normalize_stmt_structure,
             passes.flatten_call_expr,
+            passes.pack_fp4,
         )
         tensor_only_passes: tuple[PassFactory, ...] = (
             passes.outline_hierarchy_scopes,

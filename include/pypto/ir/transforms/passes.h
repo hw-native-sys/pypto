@@ -904,6 +904,15 @@ Pass LowerCompositeOps();
 Pass FlattenCallExpr();
 
 /**
+ * @brief Pack frontend logical FP4 nibble types into packed FP4E2M1X2.
+ *
+ * Rewrites Tensor/Tile/Buffer dtypes and last-axis coordinates so later
+ * passes and codegen address packed !pto.f4E2M1x2 elements. Inserted after
+ * FlattenCallExpr and before Outline / ConvertTensorToTileOps.
+ */
+Pass PackFp4();
+
+/**
  * @brief Create a pass that normalizes statement structure
  */
 Pass NormalizeStmtStructure();

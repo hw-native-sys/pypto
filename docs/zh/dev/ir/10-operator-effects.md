@@ -107,7 +107,7 @@ AIC 上的那份副本可能在 AIV 通路的 TPUT 尚未把该信号所释放�
 请把该标记读作「不得在第二个核上运行」，而不是「不幂等」。
 
 读取该维度的查询是 `IsNoDuplicate()`。它唯一的消费者是 `LowerAutoVectorSplit`
-（pass 23）的 `pl.split_aiv` 区域放置标记：该 pass 恰好把区域内的 no-duplicate 调用
+（pass 24）的 `pl.split_aiv` 区域放置标记：该 pass 恰好把区域内的 no-duplicate 调用
 钉在 AIV 通路上。没有任何 verifier 在这个维度上做拒绝。
 
 被 `set_core_affinity(...)` 固定在单条通路上的算子本来就不会被复制，因此无需该标记。

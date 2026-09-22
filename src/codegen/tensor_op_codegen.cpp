@@ -67,14 +67,8 @@ static std::string EmitAsUint32(const ExprPtr& expr, CodegenBase& codegen) {
   return "static_cast<uint32_t>(" + str + ")";
 }
 
-static std::string EmitRuntimeTensorShapeDim(const ExprPtr& expr, const DataType& dtype, size_t axis,
-                                             size_t ndim, CodegenBase& codegen) {
-  if (dtype == DataType::FP4 && axis + 1 == ndim) {
-    if (auto extent = As<ConstInt>(expr)) return std::to_string(extent->value_ / 2);
-  }
-  std::string logical_dim = codegen.GenerateExprString(expr);
-  if (dtype != DataType::FP4 || axis + 1 != ndim) logical_dim = EmitAsUint32(expr, codegen);
-  return codegen.GetRuntimeTensorShapeDim(dtype, axis, ndim, logical_dim);
+static std::string EmitRuntimeTensorShapeDim(const ExprPtr& expr, CodegenBase& codegen) {
+  return EmitAsUint32(expr, codegen);
 }
 
 REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
@@ -83,6 +77,9 @@ REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
   // EmitBatchedAllocTensors at scope entry (SeqStmts).
   auto result_type = As<TensorType>(op->GetType());
   CHECK(result_type) << "tensor.create must return TensorType";
+  INTERNAL_CHECK(!result_type->dtype_.IsLogicalFp4())
+      << "Internal error: logical DataType::FP4 reached tensor.create codegen; PackFp4 must rewrite "
+         "it to FP4E2M1X2 first";
 
   std::string result_var = codegen.GetCurrentResultTarget();
   size_t ndim = result_type->shape_.size();
@@ -91,21 +88,12 @@ REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
   oss << "uint32_t " << result_var << "_ci_shapes[" << ndim << "] = {";
   for (size_t i = 0; i < ndim; ++i) {
     if (i > 0) oss << ", ";
-    const std::string ir_dim_expr = codegen.GenerateExprString(result_type->shape_[i]);
-    std::string dim_expr = ir_dim_expr;
-    if ((result_type->dtype_ != DataType::FP4 || i + 1 != ndim) && !As<ConstInt>(result_type->shape_[i])) {
-      dim_expr = "static_cast<uint32_t>(" + dim_expr + ")";
-    }
+    std::string dim_expr = EmitRuntimeTensorShapeDim(result_type->shape_[i], codegen);
     // Backends may override tensor.create shape without mutating IR.
     if (ndim == 1 && i == 0) {
       dim_expr = codegen.GetTensorCreateSizeExpr(result_var, dim_expr);
     }
-    auto const_extent = As<ConstInt>(result_type->shape_[i]);
-    if (result_type->dtype_ == DataType::FP4 && i + 1 == ndim && const_extent && dim_expr == ir_dim_expr) {
-      oss << const_extent->value_ / 2;
-    } else {
-      oss << codegen.GetRuntimeTensorShapeDim(result_type->dtype_, i, ndim, dim_expr);
-    }
+    oss << dim_expr;
   }
   oss << "};\n";
 
@@ -263,31 +251,11 @@ REGISTER_ORCHESTRATION_OP(tensor_slice, ("tensor.slice")) {
 
   std::vector<std::string> runtime_offsets;
   runtime_offsets.reserve(ndim);
+  INTERNAL_CHECK_SPAN(!input_type->dtype_.IsLogicalFp4(), op->span_)
+      << "Internal error: logical DataType::FP4 reached tensor.slice codegen; PackFp4 must rewrite "
+         "it to FP4E2M1X2 first";
   for (size_t i = 0; i < ndim; ++i) {
-    const auto& offset = offset_tuple->elements_[i];
-    if (input_type->dtype_ != DataType::FP4 || i + 1 != ndim) {
-      runtime_offsets.push_back(EmitAsUint32(offset, codegen));
-      continue;
-    }
-
-    if (auto const_offset = As<ConstInt>(offset)) {
-      CHECK_SPAN(const_offset->value_ >= 0, op->span_)
-          << "tensor.slice packed FP4 last-axis offset must be non-negative, but got "
-          << const_offset->value_;
-      CHECK_SPAN(const_offset->value_ % 2 == 0, op->span_)
-          << "tensor.slice packed FP4 last-axis offset must be byte-aligned (even), but got "
-          << const_offset->value_;
-      runtime_offsets.push_back(std::to_string(const_offset->value_ / 2));
-      continue;
-    }
-
-    // Dynamic FP4 offsets remain legal, but must select the first nibble of a
-    // carrier byte. Evaluate once, assert alignment at runtime, then convert
-    // from logical nibble units to physical x2 carrier units.
-    const std::string logical_offset_var = result_var + "_logical_fp4_offset";
-    oss << "uint32_t " << logical_offset_var << " = " << EmitAsUint32(offset, codegen) << ";\n";
-    oss << "always_assert((" << logical_offset_var << " & 1u) == 0u);\n";
-    runtime_offsets.push_back("(" + logical_offset_var + " / 2)");
+    runtime_offsets.push_back(EmitAsUint32(offset_tuple->elements_[i], codegen));
   }
 
   std::vector<bool> drop_dims(ndim, false);
@@ -327,9 +295,8 @@ REGISTER_ORCHESTRATION_OP(tensor_slice, ("tensor.slice")) {
     // unsigned, so an offset past the source extent would underflow and let std::min return
     // the original (over-extent) size — defeating the clamp. The ternary keeps it at 0.
     oss << "(" << result_var << "_offsets[" << i << "] >= " << ext_input_name << ".shapes[" << i
-        << "] ? 0u : std::min<uint32_t>("
-        << EmitRuntimeTensorShapeDim(shape_tuple->elements_[i], input_type->dtype_, i, ndim, codegen) << ", "
-        << ext_input_name << ".shapes[" << i << "] - " << result_var << "_offsets[" << i << "]))";
+        << "] ? 0u : std::min<uint32_t>(" << EmitRuntimeTensorShapeDim(shape_tuple->elements_[i], codegen)
+        << ", " << ext_input_name << ".shapes[" << i << "] - " << result_var << "_offsets[" << i << "]))";
   }
   oss << "};\n";
 
@@ -394,6 +361,9 @@ REGISTER_ORCHESTRATION_OP(tensor_reshape, ("tensor.reshape")) {
 
   auto input_type = AsTensorTypeLike(op->args_[0]->GetType());
   CHECK(input_type) << "tensor.reshape input must be TensorType or DistributedTensorType";
+  INTERNAL_CHECK_SPAN(!input_type->dtype_.IsLogicalFp4(), op->span_)
+      << "Internal error: logical DataType::FP4 reached tensor.reshape codegen; PackFp4 must rewrite "
+         "it to FP4E2M1X2 first";
 
   // Extract shape elements from MakeTuple
   auto shape_tuple = As<MakeTuple>(op->args_[1]);
@@ -406,7 +376,7 @@ REGISTER_ORCHESTRATION_OP(tensor_reshape, ("tensor.reshape")) {
   oss << "uint32_t " << result_var << "_shapes[" << ndim << "] = {";
   for (size_t i = 0; i < ndim; ++i) {
     if (i > 0) oss << ", ";
-    oss << EmitRuntimeTensorShapeDim(shape_tuple->elements_[i], input_type->dtype_, i, ndim, codegen);
+    oss << EmitRuntimeTensorShapeDim(shape_tuple->elements_[i], codegen);
   }
   oss << "};\n";
 
@@ -464,10 +434,8 @@ REGISTER_ORCHESTRATION_OP(tensor_transpose, ("tensor.transpose")) {
   CHECK(axis2 >= 0 && axis2 < ndim) << "tensor.transpose axis2 out of range: " << axis2_const->value_
                                     << " for " << ndim << "D tensor";
   CHECK(axis1 != axis2) << "tensor.transpose axis1 and axis2 must be different, got " << axis1;
-  CHECK_SPAN(input_type->dtype_ != DataType::FP4 || (axis1 != ndim - 1 && axis2 != ndim - 1), op->span_)
-      << "tensor.transpose cannot move the packed FP4 last axis in Orchestration functions because the "
-         "runtime Tensor carries physical x2 elements; keep the last axis fixed or transpose inside an "
-         "InCore function";
+  CHECK_SPAN(!input_type->dtype_.IsFp4Family(), op->span_)
+      << "tensor.transpose is not supported for FP4/FP4E2M1X2 (see docs/en/dev/fp4.md)";
 
   // If the optional valid_shape operand is present, validate its structure even though it is
   // intentionally not emitted at the orchestration layer (mirrors tensor.reshape / tensor.slice).
@@ -502,6 +470,9 @@ REGISTER_ORCHESTRATION_OP(tensor_view, ("tensor.view")) {
   auto input_type = AsTensorTypeLike(op->args_[0]->GetType());
   INTERNAL_CHECK_SPAN(input_type, op->span_)
       << "tensor.view input must be TensorType or DistributedTensorType";
+  INTERNAL_CHECK_SPAN(!input_type->dtype_.IsLogicalFp4(), op->span_)
+      << "Internal error: logical DataType::FP4 reached tensor.view codegen; PackFp4 must rewrite "
+         "it to FP4E2M1X2 first";
 
   TensorLayout src_layout =
       input_type->tensor_view_.has_value() ? input_type->tensor_view_->layout : TensorLayout::ND;
@@ -545,7 +516,7 @@ REGISTER_ORCHESTRATION_OP(tensor_view, ("tensor.view")) {
       ExprPtr shape_dim =
           shape_tuple ? shape_tuple->elements_[i]
                       : std::make_shared<TupleGetItemExpr>(op->args_[1], static_cast<int>(i), op->span_);
-      oss << EmitRuntimeTensorShapeDim(shape_dim, input_type->dtype_, i, ndim, codegen);
+      oss << EmitRuntimeTensorShapeDim(shape_dim, codegen);
     }
     oss << "};\n";
     oss << "Tensor " << result_var << " = " << ext_input_name << ".reshape(" << result_var << "_shapes, "
