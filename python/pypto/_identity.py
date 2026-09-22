@@ -22,6 +22,7 @@ import os
 import stat
 import struct
 import threading
+from bisect import bisect_right
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -210,17 +211,36 @@ def _elf_debug_ranges(stream: BinaryIO) -> list[tuple[int, int]] | None:
     if any(left[1] > right[0] for left, right in zip(occupied, occupied[1:])):
         return None
 
+    skipped.sort()
+    if not _elf_segments_avoid_ranges(stream, endian, (phoff, phnum), skipped, length):
+        return None
+    return skipped
+
+
+def _elf_segments_avoid_ranges(
+    stream: BinaryIO,
+    endian: str,
+    headers: tuple[int, int],
+    ranges: list[tuple[int, int]],
+    length: int,
+) -> bool:
+    """Check segment bounds and reject references to sorted debug ranges."""
+    phoff, phnum = headers
+    ends = [end for _, end in ranges]
     for index in range(phnum):
-        stream.seek(phoff + index * phsize)
-        entry = stream.read(phsize)
-        if len(entry) != phsize:
-            return None
+        stream.seek(phoff + index * 56)
+        entry = stream.read(56)
+        if len(entry) != 56:
+            return False
         _, _, offset, _, _, size, _, _ = struct.unpack(endian + "IIQQQQQQ", entry)
-        if not in_file(offset, size):
-            return None
-        if any(start < offset + size and offset < end for start, end in skipped):
-            return None
-    return sorted(skipped)
+        if offset > length or size > length - offset:
+            return False
+        # The first debug range ending after this segment starts is the only
+        # candidate needed. Avoid a quadratic scan of two file-declared tables.
+        candidate = bisect_right(ends, offset)
+        if size and candidate < len(ranges) and ranges[candidate][0] < offset + size:
+            return False
+    return True
 
 
 def _executable_digest(stream: BinaryIO) -> tuple[int, str] | None:
