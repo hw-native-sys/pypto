@@ -289,6 +289,21 @@ def test_exact_alias_and_disjoint_views_are_accepted(npu):
     assert {t.metadata.storage_ptr for t in frame.tensors} == {base.data_ptr()}
 
 
+def test_exact_byte_alias_with_different_dtype_is_accepted(npu):
+    """One physical page may have different writable FP32 and BF16 views."""
+    state = _tensor((16, 2048))
+    compressed_kv = state.view(torch.bfloat16).view(128, 1, 512)
+    signature = interop.CallSignature(
+        [
+            _param("state", (16, 2048), DataType.FP32, ParamDirection.InOut),
+            _param("compressed_kv", (128, 1, 512), DataType.BF16, ParamDirection.InOut),
+        ]
+    )
+    frame = signature.describe_call((state, compressed_kv))
+    assert frame.tensors[0].metadata.data_ptr == frame.tensors[1].metadata.data_ptr
+    assert frame.tensors[0].metadata.nbytes == frame.tensors[1].metadata.nbytes
+
+
 @pytest.mark.parametrize(
     ("dtype", "value", "expected"),
     [
