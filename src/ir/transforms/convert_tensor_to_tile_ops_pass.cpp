@@ -2412,30 +2412,42 @@ YieldAliasInfo AnalyzeStmtAliases(const StmtPtr& stmt, AliasOriginMap& origin_ma
   return {};
 }
 
+struct ParamAccessInfo {
+  explicit ParamAccessInfo(size_t count)
+      : has_read(count, false), has_write(count, false), dma_store_spans(count), scalar_store_spans(count) {}
+
+  [[nodiscard]] bool HasMixedStores() const {
+    for (size_t i = 0; i < dma_store_spans.size(); ++i) {
+      if (dma_store_spans[i].has_value() && scalar_store_spans[i].has_value()) return true;
+    }
+    return false;
+  }
+
+  std::vector<bool> has_read;
+  std::vector<bool> has_write;
+  std::vector<std::optional<Span>> dma_store_spans;
+  std::vector<std::optional<Span>> scalar_store_spans;
+};
+
+ParamAccessInfo AnalyzeParamAccess(const std::vector<StmtPtr>& stmts, const std::vector<VarPtr>& params) {
+  ParamAccessInfo access(params.size());
+  AliasOriginMap origin_map;
+  for (size_t i = 0; i < params.size(); ++i) {
+    // Include distributed windows, which also name GM storage.
+    if (AsTensorTypeLike(params[i]->GetType())) origin_map[params[i].get()] = ParamOrigins{i};
+  }
+  AnalyzeStmtSequenceAliases(stmts, origin_map, access.has_read, access.has_write, access.dma_store_spans,
+                             access.scalar_store_spans);
+  return access;
+}
+
 /// Upgrade In params to Out/InOut based on tile.store/tensor.write usage analysis.
 void UpgradeWrittenTensorParamDirections(const std::vector<StmtPtr>& stmts, const std::vector<VarPtr>& params,
                                          std::vector<ParamDirection>& param_directions) {
-  std::vector<bool> has_read(params.size(), false);
-  std::vector<bool> has_write(params.size(), false);
-  std::vector<std::optional<Span>> dma_store_spans(params.size());
-  std::vector<std::optional<Span>> scalar_store_spans(params.size());
-  AliasOriginMap origin_map;
-
+  const auto access = AnalyzeParamAccess(stmts, params);
   for (size_t i = 0; i < params.size() && i < param_directions.size(); ++i) {
-    // AsTensorTypeLike also seeds DistributedTensorType window params, so a
-    // pld.tile.remote_store into such a param is attributed as a write below.
-    if (!AsTensorTypeLike(params[i]->GetType())) {
-      continue;
-    }
-    origin_map[params[i].get()] = ParamOrigins{i};
-  }
-
-  auto analysis_map = origin_map;
-  AnalyzeStmtSequenceAliases(stmts, analysis_map, has_read, has_write, dma_store_spans, scalar_store_spans);
-
-  for (size_t i = 0; i < params.size() && i < param_directions.size(); ++i) {
-    if (dma_store_spans[i].has_value() && scalar_store_spans[i].has_value()) {
-      CHECK_SPAN(false, scalar_store_spans[i].value_or(Span::unknown()))
+    if (access.dma_store_spans[i].has_value() && access.scalar_store_spans[i].has_value()) {
+      CHECK_SPAN(false, access.scalar_store_spans[i].value_or(Span::unknown()))
           << "GM tensor '" << params[i]->name_hint_
           << "' mixes MTE3 and scalar stores in one InCore function. tile.store/tensor.assemble "
              "uses the MTE3 path while tensor.write uses the scalar D-cache path; PyPTO cannot "
@@ -2443,10 +2455,10 @@ void UpgradeWrittenTensorParamDirections(const std::vector<StmtPtr>& stmts, cons
              "one UB tile (use tile.write, then one tile.store), or use tensor.write for every GM "
              "element written to this tensor.";
     }
-    if (param_directions[i] != ParamDirection::In || !has_write[i]) {
+    if (param_directions[i] != ParamDirection::In || !access.has_write[i]) {
       continue;
     }
-    param_directions[i] = has_read[i] ? ParamDirection::InOut : ParamDirection::Out;
+    param_directions[i] = access.has_read[i] ? ParamDirection::InOut : ParamDirection::Out;
   }
 }
 
@@ -2612,6 +2624,14 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   auto staged_body = CanonicalizeFullTensorScalarUpdates(func->body_, func->params_);
   ConstantScalarFillLoopCanonicalizer scalar_fill_canonicalizer;
   auto canonical_body = scalar_fill_canonicalizer.VisitStmt(staged_body);
+  // A bulk fill must not introduce a second GM store channel beside scalar
+  // updates that cannot be promoted. Reuse the alias-aware access analysis and
+  // retain the original scalar loops when the tentative rewrite would mix
+  // channels. Existing explicit mixed stores still fail the check below.
+  if (canonical_body != staged_body &&
+      AnalyzeParamAccess(FlattenToStmts(canonical_body), func->params_).HasMixedStores()) {
+    canonical_body = staged_body;
+  }
 
   // Pre-scan: collect consumer memory space requirements (e.g. tensor.slice → tensor.matmul
   // needs Mat-space loads).  Driven by InputSpaceReq metadata in OpConversionRegistry.

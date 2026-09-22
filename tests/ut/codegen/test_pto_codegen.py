@@ -3777,7 +3777,7 @@ def test_annotated_scalar_index_expression_stores_an_i32_value():
     backend.set_backend_type(BackendType.Ascend910B)
     lines = _get_mlir_lines(_generate_default_mlir(Prog))
 
-    store = _single_line(lines, "pto.store_scalar")
+    store = _single_line(lines, "pto.store ", startswith=True)
     operand = store.split()[1].rstrip(",")
     defs = {line.split(" = ", 1)[0].strip(): line for line in lines if " = " in line}
     assert operand in defs, f"stored value {operand} has no definition: {store}"
@@ -3801,7 +3801,7 @@ class Program:
         return out
 """)
     lines = _get_mlir_lines(_generate_default_mlir(program))
-    store = _single_line(lines, "pto.store_scalar")
+    store = _single_line(lines, "pto.store ", startswith=True)
     operand = store.split()[1].rstrip(",")
     definitions = {line.split(" = ", 1)[0]: line for line in lines if " = " in line}
     assert definitions[operand].split(" loc(")[0].endswith(": index to i32")

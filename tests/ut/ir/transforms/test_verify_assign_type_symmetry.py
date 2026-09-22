@@ -180,7 +180,7 @@ class Program:
     def k(self, out: pl.Out[pl.Tensor[[1, 1], pl.INT32]]) -> pl.Tensor[[1, 1], pl.INT32]:
         v_index: pl.Scalar[pl.INT32] = 7
         v: pl.Scalar[pl.{dtype}] = pl.{op}()
-        pl.write(out, [0, 0], v_index + v)
+        pl.write(out, [0, 0], pl.cast(v_index + v, pl.INT32))
         return out
 """)
     func = program.get_function("k")

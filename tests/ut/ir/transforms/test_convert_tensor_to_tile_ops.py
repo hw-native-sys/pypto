@@ -4348,6 +4348,52 @@ class TestGmLocalTensorConversion:
         assert len(_find_calls_to(kernel, "tile.reshape")) == 2
         assert _find_first_call_to(kernel, "tensor.write") is None
 
+    @pytest.mark.parametrize("target", ["dst", "viewed"])
+    def test_constant_fill_with_dynamic_scalar_overrides_keeps_scalar_stores(self, target):
+        """Folding a cast must not turn two scalar-write loops into mixed stores."""
+        before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def main_incore_0(
+        self, dst: pl.Tensor[[32], pl.INT32], count: pl.Scalar[pl.INDEX]
+    ) -> pl.Tensor[[32], pl.INT32]:
+        viewed = pl.tensor.view(dst, [32])
+        for i in pl.range(32):
+            pl.tensor.write(dst, [i], pl.cast(0, pl.INT32))
+        for j in pl.range(count):
+            pl.tensor.write({target}, [j], pl.cast(j + 1, pl.INT32))
+        return dst
+""")
+        simplified = passes.simplify()(passes.convert_to_ssa()(before))
+        after = passes.convert_tensor_to_tile_ops()(simplified)
+        kernel = _require_function(after, "main_incore_0")
+        assert len(_find_calls_to(kernel, "tensor.write")) == 2
+        assert _find_first_call_to(kernel, "tile.store") is None
+        assert kernel.param_directions[0] == ir.ParamDirection.InOut
+
+    def test_constant_fill_and_scalar_update_to_distinct_tensors_keeps_bulk_fill(self):
+        """Scalar updates to a different GM root do not prevent fill promotion."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                dst: pl.Tensor[[32], pl.INT32],
+                other: pl.Tensor[[32], pl.INT32],
+                value: pl.Scalar[pl.INT32],
+            ) -> pl.Tensor[[32], pl.INT32]:
+                for i in pl.range(32):
+                    pl.tensor.write(dst, [i], pl.const(0, pl.INT32))
+                pl.tensor.write(other, [0], value)
+                return dst
+
+        after = passes.convert_tensor_to_tile_ops()(Before)
+        kernel = _require_function(after, "main_incore_0")
+        assert len(_find_calls_to(kernel, "tile.store")) == 1
+        assert len(_find_calls_to(kernel, "tensor.write")) == 1
+
     def test_unaligned_constant_scalar_fill_loop_still_rejected(self):
         """A constant fill smaller than one MTE3 row stays on the scalar path."""
 

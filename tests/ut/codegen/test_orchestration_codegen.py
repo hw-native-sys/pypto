@@ -1578,8 +1578,9 @@ class TestOrchestration:
 
         code = _generate_orch_code(TensorDimProgram)
 
-        # tensor.dim generates int64_t assignment
-        assert "int64_t d0 = 64" in code
+        # Preserve the INDEX-returning call, then convert its result for the binding.
+        assert "int64_t d0_index = 64" in code
+        assert "int64_t d0 = static_cast<int64_t>(d0_index)" in code
 
 
 class TestOrchestrationOutputDeclaration:

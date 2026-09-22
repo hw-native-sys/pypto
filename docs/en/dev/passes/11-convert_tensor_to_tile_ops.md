@@ -104,6 +104,10 @@ constant value, and the flattened region must satisfy MTE3's 32-byte row
 alignment. This keeps full-block fallback fills on the MTE3 path instead of
 rejecting them as mixed stores. Dynamic values, non-canonicalizable partial
 updates, unaligned regions, and strided scalar loops remain on the D-cache path.
+If tentative fill promotion would mix channels on a GM parameter, including
+through an alias, the pass retains the function's original scalar-fill loops.
+A constant initialization followed by dynamic scalar overrides therefore stays
+on the D-cache path. The final coherence check still rejects explicit mixed stores.
 
 The pass also stages a full-tensor `tensor.full` initialization followed only by
 scalar updates to that tensor. The scalar updates are redirected to the local
