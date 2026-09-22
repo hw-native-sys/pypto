@@ -124,29 +124,40 @@ class ContentIdentity:
 # Sections a debugger reads and an execution never does. .dynsym and .dynstr
 # drive dynamic linking and are deliberately absent: they decide what a library
 # resolves at load time, so they are part of what it does.
-_DEBUGGER_SECTIONS = (".debug", ".zdebug", ".symtab", ".strtab", ".comment", ".gnu_debuglink")
+_DEBUG_SECTIONS = (".debug", ".zdebug", ".comment", ".gnu_debuglink")
+_DEBUGGER_SECTIONS = (*_DEBUG_SECTIONS, ".symtab", ".strtab")
+_ET_REL = 1
 _ELF_MAGIC = b"\x7fELF"
 _SHT_NOBITS = 8
 
 
-def _elf_sections(stream: BinaryIO) -> list[tuple[str, int, int]] | None:
-    """Return (name, offset, size) for every ELF64 section holding file bytes.
+def _elf_sections(stream: BinaryIO) -> tuple[int, list[tuple[str, int, int]]] | None:
+    """Return the ELF64 type and every section holding file bytes.
 
     None whenever the header cannot be read the way this expects -- a different
-    class, a truncated table, an unreadable string section. The caller then
-    reads the whole file, so a file this does not understand is covered exactly
-    as it was before.
+    class, a truncated table, an unreadable string section, or a declared size
+    the file cannot hold. The caller then reads the whole file, so a file this
+    does not understand is covered exactly as it was before.
+
+    Sizes come from the file's own header, so every read is clamped to the
+    file's real length first: a corrupt or truncated header can declare a
+    section table of gigabytes, and attempting that allocation would raise out
+    of here instead of falling back the way this promises.
     """
+    length = os.fstat(stream.fileno()).st_size
     stream.seek(0)
     header = stream.read(64)
     if len(header) < 64 or header[:4] != _ELF_MAGIC or header[4] != 2:
         return None
     endian = "<" if header[5] == 1 else ">"
+    (kind,) = struct.unpack_from(endian + "H", header, 16)
     (offset,) = struct.unpack_from(endian + "Q", header, 40)
     entry_size, count, names_index = struct.unpack_from(endian + "HHH", header, 58)
     if count == 0 or offset == 0 or entry_size < 64 or names_index >= count:
         return None
     stream.seek(offset)
+    # entry_size * count cannot exceed ~4 GiB, which read absorbs by returning
+    # short; the 64-bit sizes below cannot, and are bounded before they are used.
     table = stream.read(entry_size * count)
     if len(table) != entry_size * count:
         return None
@@ -154,8 +165,11 @@ def _elf_sections(stream: BinaryIO) -> list[tuple[str, int, int]] | None:
     def field(index: int, at: int, code: str) -> int:
         return struct.unpack_from(endian + code, table, index * entry_size + at)[0]
 
-    stream.seek(field(names_index, 24, "Q"))
-    names = stream.read(field(names_index, 32, "Q"))
+    names_offset, names_size = field(names_index, 24, "Q"), field(names_index, 32, "Q")
+    if names_offset > length or names_size > length - names_offset:
+        return None
+    stream.seek(names_offset)
+    names = stream.read(names_size)
     sections = []
     for index in range(count):
         start = field(index, 0, "I")
@@ -164,13 +178,14 @@ def _elf_sections(stream: BinaryIO) -> list[tuple[str, int, int]] | None:
             return None
         if field(index, 4, "I") == _SHT_NOBITS:
             continue
-        sections.append(
-            (names[start:end].decode("ascii", "replace"), field(index, 24, "Q"), field(index, 32, "Q"))
-        )
-    return sections
+        section_offset, section_size = field(index, 24, "Q"), field(index, 32, "Q")
+        if section_offset > length or section_size > length - section_offset:
+            return None
+        sections.append((names[start:end].decode("ascii", "replace"), section_offset, section_size))
+    return kind, sections
 
 
-def _executable_digest(stream: BinaryIO) -> str | None:
+def _executable_digest(stream: BinaryIO) -> tuple[int, str] | None:
     """Digest what an ELF file does, skipping what only a debugger reads.
 
     Debug information cannot change the artifact a compiler produces from this
@@ -183,13 +198,21 @@ def _executable_digest(stream: BinaryIO) -> str | None:
     section, renaming it, or moving its bytes into another cannot leave the
     result unchanged. None whenever the sections cannot be read.
     """
-    found = _elf_sections(stream)
-    if found is None:
+    parsed = _elf_sections(stream)
+    if parsed is None:
         return None
+    kind, found = parsed
+    # In a relocatable object the symbol table is what a linker resolves against,
+    # not something only a debugger reads: two objects with identical code and
+    # relocations but a rebuilt .symtab link differently. Only a finished
+    # executable or shared object can spare it.
+    skipped = _DEBUGGER_SECTIONS if kind != _ET_REL else _DEBUG_SECTIONS
     digest = hashlib.sha256()
+    covered = 0
     for name, offset, size in sorted(found):
-        if name.startswith(_DEBUGGER_SECTIONS):
+        if name.startswith(skipped):
             continue
+        covered += size
         digest.update(f"{name}\0{size}\0".encode())
         stream.seek(offset)
         remaining = size
@@ -199,9 +222,13 @@ def _executable_digest(stream: BinaryIO) -> str | None:
                 raise ValueError("Identity input ended inside a declared ELF section")
             digest.update(chunk)
             remaining -= len(chunk)
+    # The size recorded beside the digest has to be the size of what was
+    # digested. Reporting the whole file would put the debug sections back into
+    # the identity through the record, undoing what skipping them achieved.
+    #
     # Tagged, so a section digest can never be read as the whole-file digest of
     # some other file that happens to hash to the same value.
-    return f"elf64-sections:{digest.hexdigest()}"
+    return covered, f"elf64-sections:{digest.hexdigest()}"
 
 
 def _file_digest(path: Path, *, sections: bool = False) -> tuple[int, str]:
@@ -217,10 +244,8 @@ def _file_digest(path: Path, *, sections: bool = False) -> tuple[int, str]:
         before = os.fstat(stream.fileno())
         if not stat.S_ISREG(before.st_mode):
             raise ValueError(f"Identity input is not a regular file: {path}")
-        if sections:
-            recorded = _executable_digest(stream)
-        else:
-            recorded = None
+        executable = _executable_digest(stream) if sections else None
+        recorded = None if executable is None else executable[1]
         if recorded is None:
             digest = hashlib.sha256()
             stream.seek(0)
@@ -244,7 +269,7 @@ def _file_digest(path: Path, *, sections: bool = False) -> tuple[int, str]:
         current.st_ctime_ns,
     ):
         raise ValueError(f"Identity input was replaced while being read: {path}")
-    return after.st_size, recorded
+    return (after.st_size if executable is None else executable[0]), recorded
 
 
 def _content_entries(

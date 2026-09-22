@@ -400,6 +400,95 @@ def test_section_boundaries_are_part_of_the_identity(tmp_path, before, after):
     assert first != second
 
 
+def _as_relocatable(path: Path) -> Path:
+    raw = bytearray(path.read_bytes())
+    struct.pack_into("<H", raw, 16, 1)  # ET_REL
+    path.write_bytes(bytes(raw))
+    return path
+
+
+def test_a_relocatable_object_keeps_the_symbol_table_a_linker_reads(tmp_path):
+    """In a .o the symbol table is a linker input, not debugger-only.
+
+    Two objects with identical code and relocations but a rebuilt .symtab --
+    a renamed symbol, a changed binding or visibility -- link differently, so
+    the skip that is safe for a finished shared object is not safe here. GCC's
+    startup objects reach the inventory through the compiler's own resources.
+    """
+    first = _as_relocatable(_elf64(tmp_path / "a.o", {".text": b"code", ".symtab": b"symA"}))
+    second = _as_relocatable(_elf64(tmp_path / "b.o", {".text": b"code", ".symtab": b"symB"}))
+
+    assert _identity._file_digest(first, sections=True)[1] != _identity._file_digest(second, sections=True)[1]
+
+
+def test_a_shared_object_still_spares_its_symbol_table(tmp_path):
+    # The counterpart: a finished ET_DYN resolves through .dynsym, so .symtab
+    # there is debugger-only and stays out.
+    first = _elf64(tmp_path / "a.so", {".text": b"code", ".symtab": b"symA"})
+    second = _elf64(tmp_path / "b.so", {".text": b"code", ".symtab": b"symB"})
+
+    assert _identity._file_digest(first, sections=True)[1] == _identity._file_digest(second, sections=True)[1]
+
+
+def test_the_recorded_size_describes_what_was_digested(tmp_path):
+    """Skipping debug bytes is undone if the record still states the file size.
+
+    The size sits in the content entry beside the digest, so reporting the
+    whole file would carry every debug byte back into the identity and a
+    debug-only rebuild would invalidate the cache exactly as before.
+    """
+    root = tmp_path / "tree"
+    root.mkdir()
+    _elf64(root / "x.so", {".text": b"code", ".debug_info": b"a"})
+    before = fingerprint_content((ContentRoot(root),)).digest
+
+    _elf64(root / "x.so", {".text": b"code", ".debug_info": b"a" * 64})
+
+    assert fingerprint_content((ContentRoot(root),)).digest == before
+    _elf64(root / "x.so", {".text": b"CODE", ".debug_info": b"a" * 64})
+    assert fingerprint_content((ContentRoot(root),)).digest != before
+
+
+def _corrupt(path: Path, offset: int, value: int, code: str = "<Q") -> Path:
+    raw = bytearray(path.read_bytes())
+    struct.pack_into(code, raw, offset, value)
+    path.write_bytes(bytes(raw))
+    return path
+
+
+@pytest.mark.parametrize("field", ["names_size", "names_offset", "section_size"])
+def test_a_declared_size_the_file_cannot_hold_falls_back(tmp_path, field):
+    """A corrupt header must degrade to a whole-file read, never raise.
+
+    Every size here is read out of the file itself, so a truncated download or
+    a fuzzed artifact can declare a section of exabytes. ``read`` of a 64-bit
+    size raises MemoryError rather than returning short, so without a bound
+    against the file's real length that propagates out of the digest and the
+    whole identity fails instead of covering the file the slow way.
+
+    A declared size the read *can* absorb is caught differently -- the short
+    read is noticed -- but a section whose bytes run past the end would then be
+    reported as truncated content rather than as a file this cannot parse.
+    """
+    path = _elf64(tmp_path / "x.so", {".text": b"code", ".rodata": b"data"})
+    with path.open("rb") as stream:
+        kind, sections = _identity._elf_sections(stream)
+    table_offset = struct.unpack_from("<Q", path.read_bytes(), 40)[0]
+    entry_size, count, names_index = struct.unpack_from("<HHH", path.read_bytes(), 58)
+    names_entry = table_offset + names_index * entry_size
+    if field == "names_size":
+        _corrupt(path, names_entry + 32, 1 << 60)
+    elif field == "names_offset":
+        _corrupt(path, names_entry + 24, 1 << 60)
+    else:
+        _corrupt(path, table_offset + entry_size + 32, 1 << 60)
+
+    size, digest = _identity._file_digest(path, sections=True)
+
+    assert digest == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert size == path.stat().st_size
+
+
 def test_a_section_digest_is_tagged_apart_from_a_whole_file_digest(tmp_path):
     # The two coexist in one record, so a reader must never take one for the
     # other -- an unparsable file falls back to hashing all of its bytes.
