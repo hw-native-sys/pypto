@@ -2700,8 +2700,14 @@ std::string PTOCodegen::GetViewTileBufTypeStringFromTileType(
   // FP4 in Vec, also convert the BLayout packed axis from logical nibble
   // extent to f4E2M1x2 physical extent (/2) so the static type matches the
   // carrier coordinates PTOAS expects on that tile_buf.
+  //
+  // The one valid_shape that must stay dynamic is the all-zero lane-1 replay
+  // sentinel: a static `v_row=0, v_col=0` has no pto-isa GetValidRow overload
+  // (see IsZeroValidShapeSentinel). Rendering it dynamic is what the sibling
+  // subview inference already does.
   const auto view = ir::tile_view_semantics::GetEffectiveTileView(*tile_type);
   const auto& valid = view.valid_shape;
+  const bool zero_sentinel = ir::tile_view_semantics::IsZeroValidShapeSentinel(valid);
   const bool packed_fp4_vec = tile_type->dtype_ == DataType::FP4 && *memory_space == ir::MemorySpace::Vec;
   const size_t packed_dim = view.blayout == ir::TileLayout::col_major ? 0 : 1;
   auto physical_valid = [&](int64_t value, size_t dim) {
@@ -2713,24 +2719,26 @@ std::string PTOCodegen::GetViewTileBufTypeStringFromTileType(
     }
     return value;
   };
-  if (valid.size() == 1) {
-    // Match ComputeAllocTileFields / ExtractTileTypeInfo: a 1-D valid_shape
-    // maps to rows=1, cols=shape[0]. Without this a 1-D reshape view keeps the
-    // dynamic zero-valid extent and its consumers become silent no-ops.
-    if (auto v_col = As<ir::ConstInt>(valid[0])) {
-      c.v_row = 1;
-      c.v_col = physical_valid(v_col->value_, 1);
-      c.v_row_dynamic = false;
-      c.v_col_dynamic = false;
-    }
-  } else if (valid.size() >= 2) {
-    auto v_row = As<ir::ConstInt>(valid[0]);
-    auto v_col = As<ir::ConstInt>(valid[1]);
-    if (v_row && v_col) {
-      c.v_row = physical_valid(v_row->value_, 0);
-      c.v_col = physical_valid(v_col->value_, 1);
-      c.v_row_dynamic = false;
-      c.v_col_dynamic = false;
+  if (!zero_sentinel) {
+    if (valid.size() == 1) {
+      // Match ComputeAllocTileFields / ExtractTileTypeInfo: a 1-D valid_shape
+      // maps to rows=1, cols=shape[0]. Without this a 1-D reshape view keeps the
+      // dynamic zero-valid extent and its consumers become silent no-ops.
+      if (auto v_col = As<ir::ConstInt>(valid[0])) {
+        c.v_row = 1;
+        c.v_col = physical_valid(v_col->value_, 1);
+        c.v_row_dynamic = false;
+        c.v_col_dynamic = false;
+      }
+    } else if (valid.size() >= 2) {
+      auto v_row = As<ir::ConstInt>(valid[0]);
+      auto v_col = As<ir::ConstInt>(valid[1]);
+      if (v_row && v_col) {
+        c.v_row = physical_valid(v_row->value_, 0);
+        c.v_col = physical_valid(v_col->value_, 1);
+        c.v_row_dynamic = false;
+        c.v_col_dynamic = false;
+      }
     }
   }
   return FormatTileBufTypeString(MemorySpaceToMLIR(*memory_space), c.dtype_str, c.rows, c.cols, c.blayout,

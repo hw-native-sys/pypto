@@ -628,5 +628,58 @@ def test_colvec_reshape_folds_away_under_pypto_planner():
     assert "= pto.alloc_tile addr = " in mlir, mlir
 
 
+# ── lane-1 replay sentinel: a static zero valid has no pto-isa overload ──────
+
+SENTINEL_ROWS, SENTINEL_COLS = 16, 8
+
+
+@pl.program
+class ZeroValidSentinelReinterpretProgram:
+    """A view over SplitVectorKernel's lane-1 sentinel, whose valid dims are both 0.
+
+    `WithZeroValidShape` stamps that `[0, 0]` onto every cloned lane-1 op, so any
+    view taken in the replay lane reaches codegen with an all-zero valid_shape.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        out: pl.Out[pl.Tensor[[SENTINEL_ROWS, SENTINEL_COLS], pl.INT32]],
+    ) -> pl.Tensor[[SENTINEL_ROWS, SENTINEL_COLS], pl.INT32]:
+        sentinel: pl.Tile[
+            [SENTINEL_ROWS, SENTINEL_COLS], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
+        ] = pl.tile.create([SENTINEL_ROWS, SENTINEL_COLS], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+        view: pl.Tile[[SENTINEL_ROWS, SENTINEL_COLS], pl.INT32] = pl.tile.reinterpret_view(sentinel, pl.INT32)
+        return pl.store(view, [0, 0], out)
+
+
+def test_zero_valid_sentinel_treshape_keeps_a_dynamic_valid():
+    """Regression for #2870: a `pto.treshape` view must not bake the lane-1 zero.
+
+    ptoas accepts a static `v_row=0, v_col=0` and default-constructs the tile from
+    the result type, which lands in the generated C++ as `pto::Tile<..., 0, 0, ...>`.
+    pto-isa declares `GetValidRow` / `GetValidCol` only for a static mask `> 0` and
+    for `DYNAMIC`, so that instantiation matches no overload and ccec cannot compile
+    it. Rendering the valid dynamic gives a runtime-zero extent that compiles, and
+    the replay lane discards the result either way.
+
+    The physical `rows` / `cols` must stay static — only the valid extent defers.
+    """
+    mlir = _emit_pto(ZeroValidSentinelReinterpretProgram, passes.MemoryPlanner.PTOAS)
+    treshape = _sole_line(mlir, "pto.treshape")
+    result = _result_type(treshape)
+
+    assert "v_row=0" not in result and "v_col=0" not in result, (
+        "the lane-1 [0, 0] sentinel must not become a static zero valid on the "
+        f"treshape result (pto-isa has no GetValidRow overload for it); got:\n{treshape}"
+    )
+    assert "v_row=?" in result and "v_col=?" in result, (
+        f"expected a dynamic valid on the sentinel view; got:\n{treshape}"
+    )
+    assert f"rows={SENTINEL_ROWS}, cols={SENTINEL_COLS}" in result, (
+        f"the physical shape must stay static; got:\n{treshape}"
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

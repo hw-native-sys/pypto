@@ -12,6 +12,7 @@
 #ifndef PYPTO_IR_TILE_VIEW_SEMANTICS_H_
 #define PYPTO_IR_TILE_VIEW_SEMANTICS_H_
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -182,6 +183,43 @@ inline bool ShapeExprListsEquivalent(const std::vector<ExprPtr>& lhs, const std:
     }
   }
   return true;
+}
+
+/// Return whether @p valid_shape is SplitVectorKernel's all-zero lane-1 sentinel.
+///
+/// `WithZeroValidShape` stamps every dimension of a cloned lane-1 op with a
+/// ConstInt 0 so the replay lane computes nothing. That zero is a marker, not an
+/// extent, and it must never reach a PTO type string as a static `v_row=0,
+/// v_col=0`: pto-isa declares `Tile::GetValidRow` / `GetValidCol` only for a
+/// static mask `> 0` and for `DYNAMIC`, so a static zero matches no overload and
+/// ccec cannot compile the tile. A caller that would otherwise render a static
+/// valid must leave it dynamic, which lowers to a runtime-zero extent and
+/// compiles — the replay lane discards the result either way.
+///
+/// The hazard reached three separate sites before this predicate existed
+/// (gh#1507 subview inference, gh#1649 `tile.slice` replay, gh#2870 the
+/// `pto.treshape` view type), so every new site that turns a valid_shape into a
+/// static type string must consult this rather than re-deriving the check.
+///
+/// Only the all-zero form is matched, and that is a scope limit rather than a
+/// safety claim. A single zero beside a real extent is equally unrepresentable:
+/// `GetValidRow` / `GetValidCol` each key on their own dimension, so
+/// `Tile<..., 8, 0, ...>` matches no `GetValidCol` overload either, and a
+/// valid_shape of `[8, 0]` still renders a static `v_col=0` today. That is left
+/// in place deliberately — `pto.treshape` default-constructs its destination and
+/// never assigns `ColMaskInternal`, so making a lone zero dimension dynamic
+/// would trade a compile error for a silent read of an uninitialized extent.
+/// Safe for this sentinel, whose result the replay lane discards; not safe for a
+/// zero of unknown origin. Establish where such a zero comes from before
+/// relaxing this (gh#2879).
+inline bool IsZeroValidShapeSentinel(const std::vector<ExprPtr>& valid_shape) {
+  if (valid_shape.empty()) {
+    return false;
+  }
+  return std::all_of(valid_shape.begin(), valid_shape.end(), [](const ExprPtr& dim) {
+    auto value = As<ConstInt>(dim);
+    return value != nullptr && value->value_ == 0;
+  });
 }
 
 /// Infer the implicit block layout used when Python syntax omits TileView.
