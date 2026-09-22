@@ -172,7 +172,7 @@ def test_gm_scalar_write_between_converted_ops_keeps_store_and_reload():
 
     mlir = _generate_default_mlir(Before)
     lines = _get_mlir_lines(mlir)
-    scalar_store = _single_line(lines, "pto.store")
+    scalar_store = _single_line(lines, "pto.store ", startswith=True)
     assert ", %arg0[" in scalar_store, "the scalar store must target the original x pointer"
     assert "pto.tsetval" not in mlir, "a GM write must not be redirected into a UB tile"
     loads = [line for line in lines if "pto.tload " in line]
@@ -1006,7 +1006,7 @@ def test_pto_codegen_lowered_mixed_store_keeps_ptr():
     partition_view = _single_line(lines, f"{tstore_view_match.group(1)} = pto.partition_view")
     assert "!pto.tensor_view" in partition_view
     assert "!pto.partition_tensor_view" in partition_view
-    store_line = _single_line(lines, "pto.store")
+    store_line = _single_line(lines, "pto.store ", startswith=True)
     assert "_view[" not in store_line, f"pto.store must use ptr, not view: {store_line}"
     assert "!pto.ptr<f32>" in store_line
 

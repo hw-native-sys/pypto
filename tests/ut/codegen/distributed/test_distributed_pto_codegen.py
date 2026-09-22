@@ -728,7 +728,7 @@ def test_remote_load_emits_inline_offset_arithmetic_with_addptr_at_call_site():
     # chain within a single func.func.
     kernel = funcs["kernel"]
     # Inline body: pto.load reads (rankId + 2 window slots) + divsi.
-    assert kernel.count("pto.load") >= 3, kernel
+    assert len(re.findall(r"\bpto\.load\s", kernel)) >= 3, kernel
     assert "arith.divsi" in kernel, kernel
     assert "pto.addptr" in kernel, "addptr must live at the call site"
     # The addptr's direct downstream is a make_tensor_view in the same func —
@@ -768,7 +768,7 @@ def test_remote_store_emits_tstore_with_partition_view_pattern():
     assert "_peer_pview" in kernel, kernel
     # Address translation lives at the call site (same constraints as remote_load).
     assert "CommRemoteOffset" not in mlir, mlir
-    assert kernel.count("pto.load") >= 3, kernel
+    assert len(re.findall(r"\bpto\.load\s", kernel)) >= 3, kernel
     assert "pto.addptr" in kernel, kernel
     assert "pto.make_tensor_view" in kernel, kernel
 
@@ -1002,7 +1002,9 @@ def test_remote_load_uses_comm_layout_constants():
     # bare `arith.constant 2 : index` may equally be an unrelated shape or
     # stride. Matching the *uses* keeps the comm_layout pin load-bearing.
     rank_slot_reads = [
-        line for line in kernel.splitlines() if "pto.load" in line and f"[%c{rank_idx_unit}_index]" in line
+        line
+        for line in kernel.splitlines()
+        if re.search(r"\bpto\.load\s", line) and f"[%c{rank_idx_unit}_index]" in line
     ]
     assert rank_slot_reads, kernel
     assert f"arith.addi %c{win_idx_unit}_index," in kernel, kernel
@@ -1486,7 +1488,7 @@ def test_rank_emits_pto_load_at_slot_2_plus_trunci():
     mlir = _generate_mlir(P)
     body = mlir.split("func.func @kernel", 1)[1]
     # rank lowering line.
-    assert "pto.load" in body and "!pto.ptr<i64> -> i64" in body, body
+    assert re.search(r"\bpto\.load\s", body) and "!pto.ptr<i64> -> i64" in body, body
     assert "arith.trunci" in body and "to i32" in body, body
     assert "to ui32" not in body, body
     # rank does not shrui — only nranks does.
@@ -1513,7 +1515,7 @@ def test_nranks_emits_pto_load_plus_shrui_32_plus_trunci():
     mlir = _generate_mlir(P)
     body = mlir.split("func.func @kernel", 1)[1]
     # nranks lowering: pto.load + arith.shrui + arith.trunci.
-    assert "pto.load" in body and "!pto.ptr<i64> -> i64" in body, body
+    assert re.search(r"\bpto\.load\s", body) and "!pto.ptr<i64> -> i64" in body, body
     assert "arith.shrui" in body, body
     assert "arith.trunci" in body and "to i32" in body, body
     assert "to ui32" not in body, body
