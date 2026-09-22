@@ -39,8 +39,8 @@ jobs:
     # `onboard-tests-a5` and the `qwen3-perf` job below — on the npu-a5
     # runner pool. That runner must satisfy the setup-ci-job contract for a
     # bundle job: CI_CACHE_ROOT / CANN_ROOT + DEVICE_ID in its .env, the
-    # pypto-toolchain bundle installed, and task-submit / npu-smi / ccache /
-    # git / curl on PATH. No conda: CONDA_ROOT is read only on the conda path.
+    # pypto-toolchain bundle installed, and task-submit / ccache / git / curl
+    # on PATH. No conda: CONDA_ROOT is read only on the conda path.
     #
     # The card comes from the runner's DEVICE_ID rather than the old hardcoded
     # `--device 6`, so the job schedules on any card in the pool.

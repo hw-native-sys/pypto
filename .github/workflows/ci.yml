@@ -2127,8 +2127,8 @@ jobs:
     # `system-tests`), on the npu-a5 runner pool. That runner must satisfy the
     # setup-ci-job contract for a bundle job: CI_CACHE_ROOT / CANN_ROOT +
     # DEVICE_ID in its .env, the pypto-toolchain bundle installed, and
-    # task-submit / npu-smi / ccache / git / curl on PATH. No conda: CONDA_ROOT
-    # is read only on the conda path.
+    # task-submit / ccache / git / curl on PATH. No conda: CONDA_ROOT is read
+    # only on the conda path.
     # Checkout / install land under ./a5-checkout so they never collide with the
     # other jobs' trees on a shared self-hosted host.
     #

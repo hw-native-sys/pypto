@@ -10,9 +10,9 @@ description: >-
   `localhost:5000/ci-py310` as root, which forced a root/ci-runner umask split on
   the shared ccache — running them on the host as ci-runner retires that.
 
-  The device jobs differ from the CPU ones in two inputs: `needs-device` (gate the
-  npu-smi check + CANN set_env.sh) and `install-toolchain` (gate the ptoas
-  download + the simpler build — the `--codegen-only` job needs neither).
+  The device jobs differ from the CPU ones in two inputs: `needs-device` (gate
+  CANN set_env.sh) and `install-toolchain` (gate the ptoas download + the
+  simpler build — the `--codegen-only` job needs neither).
 
   Each host describes its own layout in the runner's `.env` (the file in the
   runner application's root dir, which the runner service loads into every job it
@@ -32,8 +32,8 @@ description: >-
   this action follows it there by asking the tool rather than by naming a path.
 
   Beyond those, the host is expected to provide (by name, not by path):
-  task-submit / npu-smi / ccache / git / curl on PATH, and — on the conda path
-  only — a conda env `py310` under CONDA_ROOT. The `.env` makes the *locations*
+  task-submit / ccache / git / curl on PATH, and — on the conda path only — a
+  conda env `py310` under CONDA_ROOT. The `.env` makes the *locations*
   portable; these names are the provisioning contract a runner has to satisfy to
   be usable at all.
 
@@ -76,10 +76,10 @@ inputs:
     required: true
   needs-device:
     description: >-
-      When 'true' the job talks to an NPU: verify a card is visible (npu-smi) and
-      have activate.sh source CANN's set_env.sh, which wires up the Ascend/HCCL
-      host environment. When 'false' (the codegen-only job) both are skipped and
-      CANN_ROOT is not required in the runner config.
+      When 'true' the job talks to an NPU: activate.sh sources CANN's
+      set_env.sh, which wires up the Ascend/HCCL host environment. When 'false'
+      (the codegen-only job) it is skipped and CANN_ROOT is not required in the
+      runner config.
     required: false
     default: 'false'
   install-toolchain:
@@ -277,17 +277,6 @@ runs:
         path: ${{ inputs.checkout-path }}
         persist-credentials: false
 
-    - name: Check NPU
-      if: ${{ inputs.needs-device == 'true' }}
-      shell: bash
-      # Through task-submit, but WITHOUT --device: the npu-a5 pool cannot init
-      # dcmi outside a task-submit context (a bare `npu-smi info` fails with
-      # "dcmi module initialize failed. ret is -8005"), while asking for a card
-      # would make this probe queue behind whatever on-board suite currently
-      # holds one and time out. Reading the device inventory needs neither.
-      run: |
-        task-submit --run "cd $GITHUB_WORKSPACE/${{ inputs.checkout-path }} && npu-smi info"
-
     - name: Scope ccache to pto-isa version
       # Namespace ccache by the pinned pto-isa commit so an ISA bump forces a real
       # recompile instead of serving stale objects (see issue #1139). The
@@ -309,8 +298,8 @@ runs:
       env:
         NEEDS_DEVICE: ${{ inputs.needs-device }}
         UNSET_RING: ${{ inputs.unset-ring }}
-        # Part of the runner's provisioning contract, like having task-submit /
-        # npu-smi on PATH: the host provides a conda env under this name.
+        # Part of the runner's provisioning contract, like having task-submit
+        # on PATH: the host provides a conda env under this name.
         CONDA_ENV: py310
       run: |
         source "$CONDA_ROOT/etc/profile.d/conda.sh"
