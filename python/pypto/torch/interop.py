@@ -192,13 +192,15 @@ def _describe_tensor(tensor: torch.Tensor, info: ParamInfo, index: int, npu: Any
 
 
 def _validate_aliases(tensors: Sequence[TensorArgument]) -> None:
-    """Allow exact views and read-only overlaps, but reject partial writable overlap."""
+    """Allow exact byte-span aliases and read-only overlaps; reject partial writes."""
     views: dict[tuple[Any, ...], tuple[TensorMetadata, bool]] = {}
     for tensor in tensors:
         m = tensor.metadata
         if not m.nbytes:
             continue
-        key = (m.data_ptr, m.nbytes, m.shape, m.strides, str(m.dtype))
+        # A page pool may be viewed as FP32 state and BF16 KV with different
+        # shapes. Equal pointer and byte span are still an exact alias.
+        key = (m.data_ptr, m.nbytes)
         writable = m.direction != ParamDirection.In
         previous = views.get(key)
         views[key] = (m, writable or (previous is not None and previous[1]))
