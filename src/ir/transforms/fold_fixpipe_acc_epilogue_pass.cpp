@@ -80,8 +80,24 @@ class UseCounter : public IRVisitor {
   std::unordered_map<const Var*, int> counts;
 
  protected:
-  void VisitExpr_(const VarPtr& op) override { counts[op.get()] += 1; }
-  void VisitExpr_(const IterArgPtr& op) override { counts[op.get()] += 1; }
+  void VisitVarLike_(const VarPtr& op) override { counts[op.get()] += 1; }
+
+  // An IterArg reference reads the carried value, not its loop initializer.
+  void VisitExpr_(const IterArgPtr& op) override { VisitVarLike_(op); }
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    VisitExpr(op->start_);
+    VisitExpr(op->stop_);
+    VisitExpr(op->step_);
+    for (const auto& arg : op->iter_args_) VisitExpr(arg->initValue_);
+    VisitStmt(op->body_);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    for (const auto& arg : op->iter_args_) VisitExpr(arg->initValue_);
+    VisitExpr(op->condition_);
+    VisitStmt(op->body_);
+  }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
     // The LHS is a definition, not a use -- visit only the value.
@@ -97,36 +113,47 @@ bool IsCubeMatmul(const CallPtr& call) {
   return IsOp(call, "tile.matmul") || IsOp(call, "tile.matmul_acc") || IsOp(call, "tile.matmul_bias");
 }
 
-/// A cast the fix-pipe can absorb, on the same terms as the existing unscaled
-/// fold (`CastFoldableToFixpipeMat`, auto_tile_matmul_l0_pass.cpp) -- the two
-/// must agree, since they compete for the same IR.
+/// The rounding half of the cast contract, shared by both cast positions.
 ///
 /// FIXPIPE's narrowing is round-half-to-**even**, i.e. `RINT`. The frontend
 /// default is `ROUND` (round-half-*away*, pto-isa `CAST_ROUND`), which breaks
 /// ties the other way, so a default-written cast is deliberately NOT foldable:
-/// only `pto.tcvt` honors the requested mode. `pto.tstore` likewise carries no
-/// `satmode`, so a cast that asked for a specific destination saturation cannot
-/// be reproduced -- an *absent* mode is the "did not ask" case and stays
-/// foldable.
-bool IsFoldableCast(const CallPtr& call) {
+/// only `pto.tcvt` honors the requested mode. This matches the existing unscaled
+/// fold (`CastFoldableToFixpipeMat`, auto_tile_matmul_l0_pass.cpp) -- the two
+/// compete for the same IR and must agree.
+bool CastRoundingIsFoldable(const CallPtr& call) {
   constexpr int kModeNone = 0;
   constexpr int kModeRint = 1;
   constexpr int kModeRound = 2;
   const int mode = GetIntKwarg(call->kwargs_, "mode", kModeRound);
   if (mode != kModeNone && mode != kModeRint) return false;
-  if (GetSaturationMode(call).has_value()) return false;
   // A second operand is the A2/A3 narrowing scratch, i.e. a multi-instruction
   // lowering rather than the one conversion the writeback performs.
   return call->args_.size() == 1;
 }
 
+/// The *widening* `INT32|FP32 -> FP32` cast ahead of the multiply. It cannot
+/// overflow, so saturation does not enter into it; an explicit request is still
+/// a deviation the writeback has nowhere to record.
+bool IsFoldableWideningCast(const CallPtr& call) {
+  return CastRoundingIsFoldable(call) && !GetSaturationMode(call).has_value();
+}
+
+/// DEQF16 clamps to +/-65504, whereas an FP16 cast with saturation OFF
+/// overflows to infinity. Require matching emitted saturation; an omitted
+/// float saturation mode emits OFF and therefore cannot be folded.
+bool IsFoldableDestinationCast(const CallPtr& call) {
+  if (!CastRoundingIsFoldable(call)) return false;
+  return GetEmittedSaturationMode(call) == static_cast<int>(SaturationMode::kOn);
+}
+
 /// `true` when a cast is foldable in every respect *except* its rounding mode.
 /// That is the one rejection a caller can act on, so it earns a PerfHint.
 bool IsCastBlockedOnlyByRoundMode(const CallPtr& call) {
-  constexpr int kModeRint = 1;
-  constexpr int kModeRound = 2;
-  if (GetIntKwarg(call->kwargs_, "mode", kModeRound) == kModeRint) return false;
-  return !GetSaturationMode(call).has_value() && call->args_.size() == 1;
+  if (CastRoundingIsFoldable(call)) return false;  // rounding is fine; something else blocks it
+  // Everything *except* the rounding must already line up, otherwise the hint
+  // would promise that `mode="rint"` alone unlocks the fold when it would not.
+  return call->args_.size() == 1 && GetEmittedSaturationMode(call) == static_cast<int>(SaturationMode::kOn);
 }
 
 /// The constant behind `tile.muls(x, <const>)` / `tile.maximums(x, <const>)`.
@@ -188,7 +215,7 @@ class EpilogueMatcher {
     if (auto cast = MatchOp(cursor, "tile.cast")) {
       auto call = As<Call>(cast->value_);
       auto produced = AssignedTileDtype(cast);
-      if (produced.has_value() && *produced == DataType::FP32 && IsFoldableCast(call)) {
+      if (produced.has_value() && *produced == DataType::FP32 && IsFoldableWideningCast(call)) {
         result.chain.push_back(cast);
         cursor = cast->var_.get();
       }
@@ -197,6 +224,16 @@ class EpilogueMatcher {
     if (auto muls = MatchOp(cursor, "tile.muls")) {
       auto call = As<Call>(muls->value_);
       if (call->args_.size() != 2) return std::nullopt;
+      // Integer multiplication can overflow before conversion. FIXPIPE instead
+      // converts the accumulator and scales in FP32, so both types must agree.
+      auto input_type = As<TileType>(call->args_[0]->GetType());
+      auto output_dtype = AssignedTileDtype(muls);
+      if (!input_type || input_type->dtype_ != DataType::FP32 || output_dtype != DataType::FP32) {
+        Hint("PH-FE-005", muls->span_,
+             "fix-pipe epilogue not folded: the multiply must execute in FP32 to match the writeback. "
+             "Integer multiplication has different overflow semantics.");
+        return std::nullopt;
+      }
       auto scale = ConstScalarOperand(call->args_[1]);
       if (!scale.has_value()) {
         Hint("PH-FE-001", muls->span_,
@@ -224,10 +261,20 @@ class EpilogueMatcher {
     }
 
     // The narrowing cast to the destination dtype -- the fix-pipe's own
-    // conversion.
+    // conversion, and the one whose saturation must match (see
+    // `IsFoldableDestinationCast`).
     if (auto cast = MatchOp(cursor, "tile.cast")) {
       auto call = As<Call>(cast->value_);
-      if (!IsFoldableCast(call)) {
+      if (!IsFoldableDestinationCast(call)) {
+        if (CastRoundingIsFoldable(call) &&
+            GetEmittedSaturationMode(call) != static_cast<int>(SaturationMode::kOn)) {
+          Hint("PH-FE-006", cast->span_,
+               "fix-pipe epilogue not folded: the writeback clamps a value that leaves the "
+               "destination range, but this cast lets it overflow (saturation is off, which is "
+               "the default for a float destination). Pass saturation_mode=\"on\" if clamping is "
+               "what you want, and the whole epilogue can ride the writeback.");
+          return std::nullopt;
+        }
         if (IsCastBlockedOnlyByRoundMode(call)) {
           Hint("PH-FE-004", cast->span_,
                "fix-pipe epilogue not folded: the cube's writeback rounds half-to-even, but this "

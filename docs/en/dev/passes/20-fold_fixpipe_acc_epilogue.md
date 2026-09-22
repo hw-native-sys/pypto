@@ -86,14 +86,17 @@ must be a no-op, never a partial rewrite. Actionable declines emit a PerfHint.
 | Form B with `s < 0` | `PH-FE-002` | Not the hardware's order (above) |
 | Backend has no scale-bearing `(acc, dst)` mode | `PH-FE-003` | `SupportsFixpipePreQuant`; folding would produce IR `AccToGmStoreValid` rejects |
 | Cast uses the frontend default `mode="round"` | `PH-FE-004` | FIXPIPE rounds half-to-**even** (`RINT`); `ROUND` breaks ties away from zero, so folding would change results at ties. Pass `mode="rint"` to opt in |
-| Cast requests an explicit `saturation_mode` | — | `pto.tstore` carries no `satmode` |
-| Any intermediate read more than once | — | Folding deletes the chain |
+| Multiply does not execute in FP32 | `PH-FE-005` | FIXPIPE scales in FP32; an INT32 multiply can overflow before conversion |
+| Destination cast emits saturation OFF | `PH-FE-006` | DEQF16 clamps to ±65504; the default FP16 cast emits OFF and overflows to infinity. Explicit `saturation_mode="on"` is required |
+| Any intermediate read more than once, including a loop initial value | — | Folding deletes the chain; `for` and `while` initial values are counted once at loop entry |
 | The store already carries an epilogue | — | The two would have to be composed |
 | Target is `Mat` | — | Withheld by both handlers pending PTOAS#1570 |
 
-The cast rules deliberately match `CastFoldableToFixpipeMat`
-(`auto_tile_matmul_l0_pass.cpp`), the existing unscaled fold — the two compete
-for the same IR and must agree about which casts the fix-pipe can reproduce.
+The widening cast is required for an INT32 accumulator before a multiply.
+Its rounding must match FIXPIPE, and it must not request saturation. A destination
+cast must also match the emitted saturation: `16 * 4096` becomes `inf` with
+saturation OFF but `65504` with DEQF16. The pass does not prove a range bound,
+so an omitted FP16 saturation mode is conservatively declined.
 
 ## Scope
 

@@ -69,7 +69,7 @@ class TestFolds:
                 f = pl.tile.cast(acc, pl.FP32, mode="rint")
                 s = pl.tile.muls(f, SCALE)
                 r = pl.tile.maximums(s, 0.0)
-                h = pl.tile.cast(r, pl.FP16, mode="rint")
+                h = pl.tile.cast(r, pl.FP16, mode="rint", saturation_mode="on")
                 t = pl.tile.store(h, [0, 0], out)
                 return t
 
@@ -115,7 +115,7 @@ class TestFolds:
                 r = pl.tile.maximums(acc, 0.0)
                 f = pl.tile.cast(r, pl.FP32, mode="rint")
                 s = pl.tile.muls(f, -SCALE)
-                h = pl.tile.cast(s, pl.FP16, mode="rint")
+                h = pl.tile.cast(s, pl.FP16, mode="rint", saturation_mode="on")
                 t = pl.tile.store(h, [0, 0], out)
                 return t
 
@@ -139,7 +139,8 @@ class TestFolds:
 
         ir.assert_structural_equal(_run(Before), Expected)
 
-    def test_scale_without_activation_folds(self):
+    @pytest.mark.parametrize("scale", [SCALE, 4096.0, -4096.0])
+    def test_scale_without_activation_folds(self, scale):
         """A plain dequantization: `pre_quant` alone, no `pre_relu`."""
 
         @pl.program
@@ -158,8 +159,8 @@ class TestFolds:
                     pl.tile.move(pl.tile.transpose_view(q_mat), target_memory=pl.Mem.Right),
                 )
                 f = pl.tile.cast(acc, pl.FP32, mode="rint")
-                s = pl.tile.muls(f, SCALE)
-                h = pl.tile.cast(s, pl.FP16, mode="rint")
+                s = pl.tile.muls(f, scale)
+                h = pl.tile.cast(s, pl.FP16, mode="rint", saturation_mode="on")
                 t = pl.tile.store(h, [0, 0], out)
                 return t
 
@@ -178,7 +179,7 @@ class TestFolds:
                     pl.tile.move(k_mat, target_memory=pl.Mem.Left),
                     pl.tile.move(pl.tile.transpose_view(q_mat), target_memory=pl.Mem.Right),
                 )
-                t = pl.tile.store(acc, [0, 0], out, pre_quant=SCALE)
+                t = pl.tile.store(acc, [0, 0], out, pre_quant=scale)
                 return t
 
         ir.assert_structural_equal(_run(Before), Expected)
@@ -186,6 +187,118 @@ class TestFolds:
 
 class TestDeclines:
     """Shapes the fix-pipe cannot reproduce. Each must leave the IR untouched."""
+
+    @pytest.mark.parametrize("saturation", [None, "off"])
+    @pytest.mark.parametrize("scale", [4096.0, -4096.0])
+    def test_non_saturating_fp16_overflow_is_declined(self, saturation, scale):
+        """For acc=16, +/-65536 must overflow to infinity, not clamp to +/-65504."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                k: pl.Tensor[[M, K], pl.INT8],
+                q: pl.Tensor[[N, K], pl.INT8],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP16]],
+            ) -> pl.Tensor[[M, N], pl.FP16]:
+                k_mat = pl.tile.load(k, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                q_mat = pl.tile.load(q, [0, 0], [N, K], target_memory=pl.Mem.Mat)
+                acc = pl.tile.matmul(
+                    pl.tile.move(k_mat, target_memory=pl.Mem.Left),
+                    pl.tile.move(pl.tile.transpose_view(q_mat), target_memory=pl.Mem.Right),
+                )
+                f = pl.tile.cast(acc, pl.FP32, mode="rint")
+                s = pl.tile.muls(f, scale)
+                h = pl.tile.cast(s, pl.FP16, mode="rint", saturation_mode=saturation)
+                t = pl.tile.store(h, [0, 0], out)
+                return t
+
+        ir.assert_structural_equal(_run(Before), Before)
+
+    def test_int32_multiply_overflow_is_declined(self):
+        """For acc=2, multiplying by INT32_MAX wraps before the FP16 cast."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                k: pl.Tensor[[M, K], pl.INT8],
+                q: pl.Tensor[[N, K], pl.INT8],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP16]],
+            ) -> pl.Tensor[[M, N], pl.FP16]:
+                k_mat = pl.tile.load(k, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                q_mat = pl.tile.load(q, [0, 0], [N, K], target_memory=pl.Mem.Mat)
+                acc = pl.tile.matmul(
+                    pl.tile.move(k_mat, target_memory=pl.Mem.Left),
+                    pl.tile.move(pl.tile.transpose_view(q_mat), target_memory=pl.Mem.Right),
+                )
+                s = pl.tile.muls(acc, 2147483647)
+                h = pl.tile.cast(s, pl.FP16, mode="rint", saturation_mode="on")
+                t = pl.tile.store(h, [0, 0], out)
+                return t
+
+        ir.assert_structural_equal(_run(Before), Before)
+
+    def test_for_initializer_keeps_intermediate_live(self):
+        """The loop initializer is a second reader even if its body ignores it."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                k: pl.Tensor[[M, K], pl.INT8],
+                q: pl.Tensor[[N, K], pl.INT8],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP16]],
+            ) -> pl.Tensor[[M, N], pl.FP16]:
+                k_mat = pl.tile.load(k, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                q_mat = pl.tile.load(q, [0, 0], [N, K], target_memory=pl.Mem.Mat)
+                acc = pl.tile.matmul(
+                    pl.tile.move(k_mat, target_memory=pl.Mem.Left),
+                    pl.tile.move(pl.tile.transpose_view(q_mat), target_memory=pl.Mem.Right),
+                )
+                f = pl.tile.cast(acc, pl.FP32, mode="rint")
+                s = pl.tile.muls(f, SCALE)
+                h = pl.tile.cast(s, pl.FP16, mode="rint", saturation_mode="on")
+                t = pl.tile.store(h, [0, 0], out)
+                for _, (_carried,) in pl.range(0, 2, init_values=(s,)):
+                    replacement = pl.tile.create([M, N], pl.FP32)
+                    _final = pl.yield_(replacement)
+                return t
+
+        ir.assert_structural_equal(_run(Before), Before)
+
+    def test_while_initializer_keeps_intermediate_live(self):
+        """The loop initializer is a second reader even if its body ignores it."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                k: pl.Tensor[[M, K], pl.INT8],
+                q: pl.Tensor[[N, K], pl.INT8],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP16]],
+            ) -> pl.Tensor[[M, N], pl.FP16]:
+                k_mat = pl.tile.load(k, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                q_mat = pl.tile.load(q, [0, 0], [N, K], target_memory=pl.Mem.Mat)
+                acc = pl.tile.matmul(
+                    pl.tile.move(k_mat, target_memory=pl.Mem.Left),
+                    pl.tile.move(pl.tile.transpose_view(q_mat), target_memory=pl.Mem.Right),
+                )
+                f = pl.tile.cast(acc, pl.FP32, mode="rint")
+                s = pl.tile.muls(f, SCALE)
+                h = pl.tile.cast(s, pl.FP16, mode="rint", saturation_mode="on")
+                t = pl.tile.store(h, [0, 0], out)
+                for (_carried,) in pl.while_(init_values=(s,)):
+                    pl.cond(False)
+                    replacement = pl.tile.create([M, N], pl.FP32)
+                    _final = pl.yield_(replacement)
+                return t
+
+        ir.assert_structural_equal(_run(Before), Before)
 
     def test_negative_scale_after_the_relu_is_declined(self):
         """The discriminating case.
@@ -215,7 +328,7 @@ class TestDeclines:
                 f = pl.tile.cast(acc, pl.FP32, mode="rint")
                 s = pl.tile.muls(f, -SCALE)
                 r = pl.tile.maximums(s, 0.0)
-                h = pl.tile.cast(r, pl.FP16, mode="rint")
+                h = pl.tile.cast(r, pl.FP16, mode="rint", saturation_mode="on")
                 t = pl.tile.store(h, [0, 0], out)
                 return t
 
@@ -243,7 +356,7 @@ class TestDeclines:
                 )
                 f = pl.tile.cast(acc, pl.FP32, mode="rint")
                 s = pl.tile.muls(f, SCALE)
-                h = pl.tile.cast(s, pl.FP16)  # frontend default: "round"
+                h = pl.tile.cast(s, pl.FP16, saturation_mode="on")  # frontend default: "round"
                 t = pl.tile.store(h, [0, 0], out)
                 return t
 
@@ -271,7 +384,7 @@ class TestDeclines:
                 )
                 f = pl.tile.cast(acc, pl.FP32, mode="rint")
                 s = pl.tile.muls(f, SCALE)
-                h = pl.tile.cast(s, pl.FP16, mode="rint")
+                h = pl.tile.cast(s, pl.FP16, mode="rint", saturation_mode="on")
                 # `s` is read a second time, so it cannot be folded away.
                 pl.tile.store(s, [0, 0], aux)
                 t = pl.tile.store(h, [0, 0], out)
@@ -299,7 +412,7 @@ class TestDeclines:
                     pl.tile.move(b_mat, target_memory=pl.Mem.Right),
                 )
                 s = pl.tile.muls(acc, SCALE)
-                h = pl.tile.cast(s, pl.FP16, mode="rint")
+                h = pl.tile.cast(s, pl.FP16, mode="rint", saturation_mode="on")
                 t = pl.tile.store(h, [0, 0], out)
                 return t
 
@@ -325,7 +438,7 @@ class TestDeclines:
                     pl.tile.move(pl.tile.transpose_view(q_mat), target_memory=pl.Mem.Right),
                 )
                 r = pl.tile.maximums(acc, 0.0)
-                h = pl.tile.cast(r, pl.FP16, mode="rint")
+                h = pl.tile.cast(r, pl.FP16, mode="rint", saturation_mode="on")
                 t = pl.tile.store(h, [0, 0], out, pre_quant=SCALE)
                 return t
 

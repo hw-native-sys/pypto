@@ -80,14 +80,16 @@ acc = tile.matmul(...)                    # 天然在 Acc
 | 形态 B 且 `s < 0` | `PH-FE-002` | 与硬件顺序不符（见上） |
 | 后端没有该 `(acc, dst)` 的带 scale 模式 | `PH-FE-003` | `SupportsFixpipePreQuant`；硬折会产出 `AccToGmStoreValid` 拒绝的 IR |
 | cast 用了前端默认的 `mode="round"` | `PH-FE-004` | FIXPIPE 是**四舍六入五成双**（`RINT`），而 `ROUND` 是逢五远离零，折叠会改变平局处的结果。写 `mode="rint"` 即可启用 |
-| cast 显式要求了 `saturation_mode` | — | `pto.tstore` 没有 `satmode` 可承载 |
-| 链上任何中间值被读多于一次 | — | 折叠会删掉整条链 |
+| 乘法未在 FP32 中执行 | `PH-FE-005` | FIXPIPE 在 FP32 中缩放；INT32 乘法可能在转换前溢出 |
+| 目标 cast 发射 saturation OFF | `PH-FE-006` | DEQF16 钳位到 ±65504；默认 FP16 cast 发射 OFF，溢出为无穷大，必须显式指定 `saturation_mode="on"` |
+| 链上任何中间值被读多于一次，包括用作循环初始值 | — | 折叠会删掉整条链；`for` 和 `while` 的初始值在循环入口计数一次 |
 | store 上已经带了 epilogue | — | 两者需要复合，不是本 pass 的职责 |
 | 目标是 `Mat` | — | 两个 handler 都已关闭，等 PTOAS#1570 |
 
-cast 的规则刻意与既有的无 scale 折叠 `CastFoldableToFixpipeMat`
-（`auto_tile_matmul_l0_pass.cpp`）保持一致 —— 两者争夺同一段 IR，对「哪些 cast 能由
-fix-pipe 复现」必须给出同一个答案。
+INT32 累加器必须在乘法前扩展到 FP32；该 cast 的舍入模式须与 FIXPIPE 一致，
+且不能显式要求饱和。目标 cast 还必须匹配实际发射的饱和模式：`16 * 4096`
+在 saturation OFF 时得到 `inf`，而 DEQF16 得到 `65504`。本 pass 不证明数值范围，
+因此保守拒绝未指定 FP16 饱和模式的情况。
 
 ## 适用范围 {#scope}
 

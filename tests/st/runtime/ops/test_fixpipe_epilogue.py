@@ -210,7 +210,7 @@ def score_dequant_relu_written_as_vector_ops(k: pl.Tensor, q: pl.Tensor, out: pl
         )
         scaled = pl.tile.muls(pl.tile.cast(acc, pl.FP32, mode="rint"), SCALE)
         activated = pl.tile.maximums(scaled, 0.0)
-        pl.tile.store(pl.tile.cast(activated, pl.FP16, mode="rint"), [0, 0], out)
+        pl.tile.store(pl.tile.cast(activated, pl.FP16, mode="rint", saturation_mode="on"), [0, 0], out)
     return out
 
 
