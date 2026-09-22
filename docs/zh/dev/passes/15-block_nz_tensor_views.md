@@ -302,6 +302,10 @@ pto-isa 的 NZ `GlobalTensor` 只有**一个** batch 槽位，因此逻辑 `[G, 
 
 被折叠的 extent 必须是静态的——动态 extent 无法乘进 batch——诊断会点名这一点。
 
+逻辑 rank-3 的 `[B, R, C]` 参数支持动态 batch。对应的 `DeviceTensor.shape` 或
+`StackedDeviceTensor.full_shape` 也必须是 rank 3：入口从第一个逻辑维度读取 `B`。
+即使分块形状能够匹配，rank-2 或 rank-4+ 的实参也会在 dispatch 前被拒绝。
+
 多卡入口声明的正是 rank-4 参数（`[RANKS, E, R, C]`，dispatch 前按 rank 切片），
 因此这个折叠是分布式程序能携带 NZ 权重的前提。
 

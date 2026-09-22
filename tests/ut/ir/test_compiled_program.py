@@ -1675,6 +1675,30 @@ def test_nz_device_tensor_shape_and_sidecar_round_trip(dtype, torch_dtype, c0):
         _validate_device_tensor(unaligned, restored)
 
 
+@pytest.mark.parametrize("stacked", [False, True])
+@pytest.mark.parametrize("reload_metadata", [False, True])
+def test_dynamic_batch_nz_validation_requires_logical_rank_three(stacked, reload_metadata):
+    """Entry code reads B from shapes[0], so blocking must not erase a rank mismatch."""
+    info = _ParamInfo("w", ir.ParamDirection.In, [-1, 16, 16, 16, 32], DataType.INT8, "NZ")
+    if reload_metadata:
+        info = _param_info_from_dict(json.loads(json.dumps(_param_info_to_dict(info))))
+
+    def validate(shape):
+        if stacked:
+            shards = [DeviceTensor(0x1000 + i * 0x100000, shape[1:], torch.int8) for i in range(shape[0])]
+            arg = StackedDeviceTensor(shards, shape, list(range(shape[0])))
+            return _validate_stacked_tensor(arg, info)
+        return _validate_device_tensor(DeviceTensor(0x1000, shape, torch.int8), info)
+
+    for shape in [(1, 256, 512), (8, 256, 512)]:
+        assert validate(shape) is None
+    for shape in [(256, 512), (2, 4, 256, 512)]:
+        with pytest.raises(TypeError, match="logical rank 3"):
+            validate(shape)
+    with pytest.raises(TypeError, match="expects shape"):
+        validate((8, 512, 512))
+
+
 def test_nz_param_layout_is_extracted_from_compiled_ir(tmp_path):
     """Live and reloaded artifacts retain the NZ layout needed by argument binding."""
     span = ir.Span.unknown()

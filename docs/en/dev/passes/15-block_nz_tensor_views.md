@@ -338,6 +338,11 @@ computation, written once into the coordinate instead.
 The extents being folded must be static — a dynamic one cannot be multiplied
 into the batch — which the diagnostic names.
 
+A dynamic batch is supported for logical rank-3 `[B, R, C]` parameters. Their
+`DeviceTensor.shape` or `StackedDeviceTensor.full_shape` must also have rank 3:
+the entry reads `B` from the first logical extent. Rank-2 or rank-4+ arguments
+are rejected before dispatch, even when their blocked shape would otherwise match.
+
 A rank-4 parameter is what a multi-card entry declares (`[RANKS, E, R, C]`,
 sliced per rank before dispatch), so the fold is what lets a distributed program
 carry NZ weights at all.

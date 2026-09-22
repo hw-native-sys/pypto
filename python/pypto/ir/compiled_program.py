@@ -484,6 +484,15 @@ def _arg_shape_as_declared(arg_shape: Sequence[int], info: _ParamInfo) -> list[i
     """
     if info.layout != "NZ":
         return list(arg_shape)
+    # A dynamic blocked batch can only come from logical [B, R, C]: the NZ
+    # pass rejects dynamic leading extents at rank > 3. Entry code reads B
+    # directly from the incoming shapes[0], so accepting another logical rank
+    # here would disagree with that lookup even if blocking hides the mismatch.
+    if info.shape and info.shape[0] < 0 and len(arg_shape) != 3:
+        raise TypeError(
+            f"Parameter {info.name!r} with a dynamic NZ batch expects logical rank 3 "
+            f"(shape [B, R, C]); got shape {tuple(arg_shape)}"
+        )
     expected_dtype = _to_torch_dtype(info.dtype)
     if expected_dtype is None:
         return list(arg_shape)

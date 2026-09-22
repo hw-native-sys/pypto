@@ -215,8 +215,8 @@ bool IsBlockedNzParam(const TensorTypePtr& tensor_type) {
 }
 
 std::string GenerateMakeTensorExternal(const std::string& var_name, int orch_index,
-                                       const TensorTypePtr& tensor_type,
-                                       [[maybe_unused]] const CodegenBase& codegen) {
+                                       const TensorTypePtr& tensor_type, const std::string& logical_var,
+                                       const std::string& shape_var) {
   std::ostringstream oss;
   if (!IsBlockedNzParam(tensor_type)) {
     oss << "    const Tensor& ext_" << var_name << " = orch_args.tensor(" << orch_index << ").ref();\n";
@@ -228,8 +228,6 @@ std::string GenerateMakeTensorExternal(const std::string& var_name, int orch_ind
   // reshape. Every later ``Tensor::view`` clamps its blocked extents against
   // this parent, and clamping them against the logical rank would read past the
   // incoming rank and silently yield an empty view.
-  const std::string logical_var = "ext_" + var_name + "_logical";
-  const std::string shape_var = "ext_" + var_name + "_nz_shapes";
   const std::vector<ExprPtr>& blocked_shape = tensor_type->shape_;
   oss << "    const Tensor& " << logical_var << " = orch_args.tensor(" << orch_index << ").ref();\n";
   oss << "    uint32_t " << shape_var << "[" << blocked_shape.size() << "] = {";
@@ -384,6 +382,18 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// (issue #2605).
   void ReserveDeclaredNames(const std::set<std::string>& names) {
     declared_var_names_.insert(names.begin(), names.end());
+  }
+
+  std::string ReserveSyntheticEmitName(const std::string& base_name) {
+    std::string emit_name = auto_name::ReserveUniqueName(base_name, declared_var_names_);
+    // A name first reserved inside an active manual scope is scope-local; record
+    // it so IsEnclosingScopeValid never treats it as hoistable (issue #1697).
+    // Mirrors ReserveVarEmitName so the gating does not depend on every
+    // synthetic-named tensor happening to be mutable / non-tensor.
+    if (manual_local_names_ != nullptr) {
+      manual_local_names_->insert(emit_name);
+    }
+    return emit_name;
   }
 
   void SetEffectiveUses(std::unordered_set<const Var*> uses) { effective_uses_ = std::move(uses); }
@@ -4428,18 +4438,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return emit_name;
   }
 
-  std::string ReserveSyntheticEmitName(const std::string& base_name) {
-    std::string emit_name = auto_name::ReserveUniqueName(base_name, declared_var_names_);
-    // A name first reserved inside an active manual scope is scope-local; record
-    // it so IsEnclosingScopeValid never treats it as hoistable (issue #1697).
-    // Mirrors ReserveVarEmitName so the gating does not depend on every
-    // synthetic-named tensor happening to be mutable / non-tensor.
-    if (manual_local_names_ != nullptr) {
-      manual_local_names_->insert(emit_name);
-    }
-    return emit_name;
-  }
-
   /// Keep the array carries a just-closed scope minted over storage that
   /// outlives it, when restoring the entry snapshot.
   ///
@@ -4867,6 +4865,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
 
   std::unordered_map<const Var*, std::string> emit_name_map;
   std::set<std::string> param_name_set;
+  std::set<std::string> external_tensor_names;
   std::map<std::string, int> param_name_to_orch_index;
   std::map<std::string, int64_t> packed_fp4_axis;
   int tensor_param_count = 0;
@@ -4890,6 +4889,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
     emit_name_map[var.get()] = emit_name;
     param_name_set.insert(emit_name);
     if (auto tensor_type = AsTensorTypeLike(var->GetType())) {
+      external_tensor_names.insert("ext_" + auto_name::GetCompatibleBaseName(var->name_hint_));
       param_name_to_orch_index[emit_name] = tensor_param_count;
       if (tensor_type->dtype_ == DataType::FP4) {
         packed_fp4_axis[emit_name] = static_cast<int64_t>(tensor_type->shape_.size() - 1);
@@ -4932,6 +4932,25 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
                                         &func_name_to_signature, &next_func_id, std::move(emit_name_map),
                                         std::move(param_name_set), std::move(param_name_to_orch_index),
                                         std::move(packed_fp4_axis), std::move(dist_param_to_ctx_param));
+  // Reserve every external reference before allocating NZ temporaries, even
+  // those for parameters later in the signature. Reserve the temporaries before
+  // visiting the body too, so body variables share the same naming discipline.
+  stmt_codegen.ReserveDeclaredNames(external_tensor_names);
+  std::ostringstream external_tensors;
+  int orch_idx = 0;
+  for (const auto& var : func->params_) {
+    if (auto tensor_type = AsTensorTypeLike(var->GetType())) {
+      const std::string name = auto_name::GetCompatibleBaseName(var->name_hint_);
+      std::string logical_var;
+      std::string shape_var;
+      if (IsBlockedNzParam(tensor_type)) {
+        logical_var = stmt_codegen.ReserveSyntheticEmitName("ext_" + name + "_logical");
+        shape_var = stmt_codegen.ReserveSyntheticEmitName("ext_" + name + "_nz_shapes");
+      }
+      external_tensors << GenerateMakeTensorExternal(name, orch_idx, tensor_type, logical_var, shape_var);
+      ++orch_idx;
+    }
+  }
   stmt_codegen.SetCallTupleElements(info_collector.call_tuple_elements);
   stmt_codegen.SetTupleVarToKey(info_collector.tuple_var_to_key);
   stmt_codegen.SetEffectiveUses(std::move(use_collector.var_uses));
@@ -4966,15 +4985,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   // tensors is enabled by ``enable_dump_args == 1``.
 
   oss << "    // External tensors\n";
-  int orch_idx = 0;
-  for (const auto& var : func->params_) {
-    auto tensor_type = AsTensorTypeLike(var->GetType());
-    if (tensor_type) {
-      std::string name = auto_name::GetCompatibleBaseName(var->name_hint_);
-      oss << GenerateMakeTensorExternal(name, orch_idx, tensor_type, stmt_codegen);
-      orch_idx++;
-    }
-  }
+  oss << external_tensors.str();
 
   if (!scalar_params.empty()) {
     oss << "\n    // Scalar params\n";
