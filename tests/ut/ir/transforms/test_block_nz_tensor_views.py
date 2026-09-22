@@ -961,6 +961,98 @@ def test_rejects_a_remainder_of_an_unproven_dividend():
         _run(program)
 
 
+def test_maps_an_offset_from_a_strided_loop_that_starts_at_the_block_index():
+    """A loop variable's facts come from its start and step, symbolic or not.
+
+    ``for ob in pl.range(core, TILES, CORES)`` hands each core every CORES-th
+    tile starting at its own block index -- the vocab split an LM head uses. The
+    start is a block index, so it is non-negative, and the step is a positive
+    constant, so ``ob * 256`` is a non-negative multiple of 16. Before the start
+    could be symbolic this offset was refused for its sign.
+    """
+
+    @pl.jit
+    def _strided(
+        x: pl.Tensor[[64, 512], pl.INT8],
+        w: pl.Tensor[[1024, 512], pl.INT8, pl.NZ],
+        out: pl.Out[pl.Tensor[[64, 1024], pl.INT32]],
+    ):
+        with pl.spmd(2, name_hint="nz_strided"):
+            core = pl.tile.get_block_idx()
+            for ob in pl.range(core, 4, 2):
+                o0 = ob * 256
+                acc = pl.matmul(x[0:64, 0:512], w[o0 : o0 + 256, 0:512], b_trans=True, out_dtype=pl.INT32)
+                out[0:64, o0 : o0 + 256] = pl.reshape(acc, [64, 256])
+        return out
+
+    _, _, tm, sd, cx, dyn = _strided._bind_args_from_signature({})
+    program = _run(_strided._compile_to_program(tm, sd, cx, dyn, pl))
+    assert len(_elements(_nz_loads(program)[0].args[1])) == 5
+
+
+def test_blocks_a_ragged_tail_whose_valid_rows_are_a_min():
+    """A valid region that covers whole fractals blocks to fewer row fractals.
+
+    The last of four 256-row tiles over an 800-row weight holds 32 rows, named at
+    run time as ``min(800 - o0, 256)``. Both operands are multiples of 16, so the
+    region ends on a fractal boundary and blocks to ``valid // 16`` row
+    fractals -- the one axis left dynamic in the blocked valid shape.
+    """
+
+    @pl.jit
+    def _ragged(
+        x: pl.Tensor[[64, 512], pl.INT8],
+        w: pl.Tensor[[800, 512], pl.INT8, pl.NZ],
+        out: pl.Out[pl.Tensor[[64, 1024], pl.INT32]],
+    ):
+        with pl.at(level=pl.Level.CORE_GROUP, name_hint="nz_ragged"):
+            for ob in pl.range(0, 4):
+                o0 = ob * 256
+                valid = pl.min(800 - o0, 256)
+                wt = pl.slice(w, [256, 512], [o0, 0], valid_shape=[valid, 512])
+                acc = pl.matmul(x[0:64, 0:512], wt, b_trans=True, out_dtype=pl.INT32)
+                out[0:64, o0 : o0 + 256] = pl.reshape(acc, [64, 256])
+        return out
+
+    _, _, tm, sd, cx, dyn = _ragged._bind_args_from_signature({})
+    program = _run(_ragged._compile_to_program(tm, sd, cx, dyn, pl))
+    load = _nz_loads(program)[0]
+    valid = _elements(load.args[3])
+    assert len(valid) == 5
+    # Column blocks, fractal rows and the C0 line stay static; the row-fractal
+    # count is the run-time quotient.
+    assert _values([valid[1], valid[3], valid[4]]) == [16, 16, 32]
+    assert not isinstance(valid[2], ir.ConstInt)
+
+
+def test_rejects_a_ragged_tail_that_ends_inside_a_fractal():
+    """A dynamic valid row count must be a provable multiple of 16.
+
+    ``min(800 - o0, 250)`` can end mid-fractal, and a partial fractal has no
+    blocked form, so the load is refused rather than rounded.
+    """
+
+    @pl.jit
+    def _mid_fractal(
+        x: pl.Tensor[[64, 512], pl.INT8],
+        w: pl.Tensor[[800, 512], pl.INT8, pl.NZ],
+        out: pl.Out[pl.Tensor[[64, 1024], pl.INT32]],
+    ):
+        with pl.at(level=pl.Level.CORE_GROUP, name_hint="nz_mid_fractal"):
+            for ob in pl.range(0, 4):
+                o0 = ob * 256
+                valid = pl.min(800 - o0, 250)
+                wt = pl.slice(w, [256, 512], [o0, 0], valid_shape=[valid, 512])
+                acc = pl.matmul(x[0:64, 0:512], wt, b_trans=True, out_dtype=pl.INT32)
+                out[0:64, o0 : o0 + 256] = pl.reshape(acc, [64, 256])
+        return out
+
+    _, _, tm, sd, cx, dyn = _mid_fractal._bind_args_from_signature({})
+    program = _mid_fractal._compile_to_program(tm, sd, cx, dyn, pl)
+    with pytest.raises(ValueError, match=r"dynamic valid_shape\[-2\] to be a provable multiple of 16"):
+        _run(program)
+
+
 def test_rejects_a_loop_variable_whose_step_breaks_alignment():
     """A loop variable is only divisible when *both* its start and step are.
 

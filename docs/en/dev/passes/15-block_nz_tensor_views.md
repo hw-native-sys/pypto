@@ -127,6 +127,8 @@ the enclosing function in one read-only sweep:
 | ------- | --------------------------- | ------------ |
 | `AssignStmt` (`n0 = nb * 256`) | one factor of the product is a multiple | both factors are non-negative |
 | `ForStmt` (`for k0 in pl.pipeline(512, 4096, 512)`) | `start` and `step` are both multiples | `start` and `step` are both non-negative |
+| `ForStmt` with a symbolic start (`for ob in pl.range(core, TILES, CORES)`) | both recurse into `start` and `step` | both recurse into `start` and `step` |
+| `Min` / `Max` (`min(800 - o0, 256)`) | both operands are multiples | `Min`: both operands; `Max`: either one |
 | `tile.get_block_idx` / `tile.get_block_num` | — | a lane number is never negative |
 | `FloorMod` / `FloorDiv` by a positive constant (`(blk % 2) * 512`) | the other factor carries it | both recurse: the dividend must be non-negative too |
 | `ConstInt` | the value is a multiple | the value is `>= 0` |
@@ -256,6 +258,8 @@ diagnostic naming the fix — an NZ tensor must never be silently mis-addressed.
 | `tensor.reshape` to any other shape | rejected — it reinterprets coordinates the blocked form does not carry |
 | consumer other than `tile.load` / `tensor.slice` / a whole-tensor flatten | rejected — NZ is read-only here |
 | explicit stride or partial `valid_shape` | rejected |
+| dynamic `valid_shape[-2]` provably a multiple of 16 (a ragged last tile) | blocked — the row-fractal count becomes `FloorDiv(rows, 16)` |
+| dynamic `valid_shape[-2]` that may end inside a fractal | rejected — a partial fractal has no blocked form |
 | distributed tensor | rejected — `remote_load` has no NZ blocking |
 | `tensor.view` / `tensor.reinterpret_view` of NZ | rejected at op construction |
 | GM row gap above 65535 blocks, on a multi-column-block load | rejected — **temporary**, see [GM row gap](#gm-row-gap-a-temporary-guard) |
@@ -303,7 +307,9 @@ a narrowed `valid_shape` loads **fewer** row fractals and leaves a **larger**
 gap than `shapes` alone would suggest. A `[65552, 64]` INT8 weight read with
 `shapes=[32, 64]` and `valid_shape=[16, 64]` emits
 `partition_tensor_view<1x2x1x16x32>` and so a gap of 65536, not the 65520
-`shapes` implies.
+`shapes` implies. When the loaded row extent is dynamic (a ragged last tile),
+the check takes the worst case, nothing loaded, so a load that passes fits
+for every run-time width.
 
 **A single-column-block load is exempt.** `TLoadGm2L1Nz2nz` passes the load's
 column-block extent as `nBurst`, and the DMA applies `gmGap` only when stepping
