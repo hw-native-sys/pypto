@@ -470,22 +470,33 @@ class BlockNzMutator : public IRMutator {
         // the capture and its validation to HOST functions so a CHIP-level NZ
         // slice — which never reads `nz_host_leading_index` — is never rejected
         // by a constraint that exists purely for the HOST index it never emits.
-        if (is_host_ && is_slice && op->args_.size() >= 5) {
-          auto drop_dims = As<MakeTuple>(op->args_[4]);
+        if (is_host_ && is_slice) {
           auto logical_offsets = As<MakeTuple>(new_args[2]);
           auto logical_window = As<MakeTuple>(new_args[1]);
-          INTERNAL_CHECK_SPAN(drop_dims && logical_offsets && logical_window, op->span_)
+          INTERNAL_CHECK_SPAN(logical_offsets && logical_window, op->span_)
               << "Internal error: NZ tensor.slice coordinates must be MakeTuples";
           std::vector<bool> is_dropped(logical_shape.size(), false);
-          for (const auto& dim_expr : drop_dims->elements_) {
-            auto dim = As<ConstInt>(dim_expr);
-            INTERNAL_CHECK_SPAN(dim, op->span_)
-                << "Internal error: tensor.slice drop_dims entries must be ConstInt";
-            CHECK_SPAN(dim->value_ == 0, op->span_)
-                << "NZ host tensor.slice currently supports only a scalar leading-axis index";
-            is_dropped[0] = true;
-            host_leading_index = logical_offsets->elements_[0];
+          if (op->args_.size() >= 5) {
+            auto drop_dims = As<MakeTuple>(op->args_[4]);
+            INTERNAL_CHECK_SPAN(drop_dims, op->span_)
+                << "Internal error: tensor.slice drop_dims must be a MakeTuple";
+            for (const auto& dim_expr : drop_dims->elements_) {
+              auto dim = As<ConstInt>(dim_expr);
+              INTERNAL_CHECK_SPAN(dim, op->span_)
+                  << "Internal error: tensor.slice drop_dims entries must be ConstInt";
+              CHECK_SPAN(dim->value_ == 0, op->span_)
+                  << "NZ host tensor.slice currently supports only a scalar leading-axis index";
+              is_dropped[0] = true;
+              host_leading_index = logical_offsets->elements_[0];
+            }
           }
+          // Without a scalar leading index there is no logical lookup to emit,
+          // and the blocked rank-5 coordinates would reach the caller's logical
+          // tensor instead.
+          CHECK_SPAN(host_leading_index, op->span_)
+              << "NZ host tensor.slice must select one shard with a scalar leading-axis index (w[r]); "
+              << "a range-only slice cannot be expressed on the host. Pass the whole tensor or index "
+              << "one shard, and narrow it inside the per-rank function.";
           // HOST codegen only ever emits the leading scalar index, so
           // a real sub-range on some other axis (`w[rank, 2:4]`) would vanish
           // from the generated index instead of narrowing it. Every axis this

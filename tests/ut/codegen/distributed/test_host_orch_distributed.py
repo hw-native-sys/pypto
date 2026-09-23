@@ -204,6 +204,29 @@ def test_host_orch_nz_scalar_index_rejects_a_partial_range_on_another_axis():
         passes.block_nz_tensor_views()(passes.convert_to_ssa()(Prog))
 
 
+def test_host_orch_nz_range_only_slice_is_rejected():
+    """A HOST NZ slice with no scalar index has no logical lookup to emit.
+
+    Without one, the blocked rank-5 coordinates would reach the caller's
+    logical tensor at dispatch, which neither a ``torch.Tensor`` nor a
+    ``StackedDeviceTensor`` can index.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+        def worker(self, weights: pl.Tensor[[1, 8, 256, 512], pl.INT8, pl.NZ]):
+            pass
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self, weights: pl.Tensor[[2, 8, 256, 512], pl.INT8, pl.NZ]):
+            selected = weights[0:1]
+            self.worker(selected)
+
+    with pytest.raises(ValueError, match="must select one shard with a scalar leading-axis index"):
+        passes.block_nz_tensor_views()(passes.convert_to_ssa()(Prog))
+
+
 def test_host_orch_tensor_assemble_right_aligns_lower_rank_source():
     @pl.program
     class Prog:

@@ -255,6 +255,7 @@ diagnostic naming the fix — an NZ tensor must never be silently mis-addressed.
 | `tensor.slice` narrowing the leading axes only | blocked like the load that follows it (see below) |
 | HOST `tensor.slice` with a scalar leading index plus a narrowed other leading axis (`w[r, 2:4]`) | rejected — see [In a HOST function](#in-a-host-function) |
 | HOST `tensor.slice` with a scalar index on a non-leading axis | rejected — same section |
+| HOST `tensor.slice` with no scalar index (`w[0:1]`) | rejected — same section |
 | `tensor.slice` windowing the trailing `[R, C]` pair | rejected — the window is not contiguous |
 | `tensor.reshape` flattening the whole tensor to `[N]` | kept as written — see [Flattening an NZ tensor](#flattening-an-nz-tensor) |
 | `tensor.reshape` to any other shape | rejected — it reinterprets coordinates the blocked form does not carry |
@@ -374,7 +375,8 @@ directly.
 
 That lookup can express only the one scalar index, so a HOST slice is limited
 to it: `w[r]` with every other axis whole is accepted, while `w[r, 2:4]`, which
-would lose the `2:4` window, and a scalar index on any axis but the first are
+would lose the `2:4` window, a scalar index on any axis but the first, and a
+range-only slice such as `w[0:1]`, which has no index to emit at all, are
 rejected. Narrow the other axes inside the per-rank function instead, after
 passing it the whole shard. The limit applies to HOST functions only; a CHIP
 or kernel function slices as described above.
