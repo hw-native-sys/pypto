@@ -14,7 +14,11 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CODEX_REVIEW_IMAGE: localhost:5000/pypto-codex-review@sha256:41afd240e0b61baec52651a1e3ff60bdba7c1e6a0cc540583ccf732b2c5c4513
+  CODEX_REVIEW_IMAGE: localhost:5000/pypto-codex-review@sha256:e0e10770366b1794f8e71edf93dc05b6b5908d388976097469ec419bcab0a554
+  CODEX_PROXY_IMAGE: localhost:5000/pypto-codex-proxy@sha256:632f77b3544d5c663cb08ac48b2150a7bfa6cb9bac0852fbcf620b1d4e284a6b
+  CODEX_EGRESS_NETWORK: pypto-codex-egress
+  CODEX_RELAY_CONTAINER: pypto-codex-proxy-relay
+  CODEX_RELAY_PORT: "17895"
 
 jobs:
   review:
@@ -46,23 +50,15 @@ jobs:
           auth_file=/home/ci-runner/.codex-ci/auth.json
           output="$RUNNER_TEMP/codex-review.txt"
           log="$RUNNER_TEMP/codex-review.log"
-          work_dir=$(mktemp -d "$RUNNER_TEMP/codex-review.XXXXXX")
           suffix="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${RANDOM}"
           review_network="codex-review-${suffix}"
-          egress_network="codex-egress-${suffix}"
           proxy_container="codex-proxy-${suffix}"
           review_container="codex-agent-${suffix}"
-          relay_pid=""
 
           cleanup() {
             docker rm -f "$review_container" "$proxy_container" \
               >/dev/null 2>&1 || true
-            if [ -n "$relay_pid" ]; then
-              kill "$relay_pid" >/dev/null 2>&1 || true
-              wait "$relay_pid" >/dev/null 2>&1 || true
-            fi
-            docker network rm "$review_network" "$egress_network" \
-              >/dev/null 2>&1 || true
+            docker network rm "$review_network" >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
           trap 'exit 130' INT
@@ -74,68 +70,35 @@ jobs:
           fi
 
           docker pull "$CODEX_REVIEW_IMAGE"
+          docker pull "$CODEX_PROXY_IMAGE"
           docker network create \
             --internal \
             --opt com.docker.network.bridge.inhibit_ipv4=true \
             --label "org.pypto.codex-review.run=$GITHUB_RUN_ID" \
             "$review_network" >/dev/null
-          docker network create \
-            --internal \
-            --label "org.pypto.codex-review.run=$GITHUB_RUN_ID" \
-            "$egress_network" >/dev/null
 
-          egress_gateway=$(docker network inspect "$egress_network" \
-            --format '{{(index .IPAM.Config 0).Gateway}}')
-          egress_subnet=$(docker network inspect "$egress_network" \
-            --format '{{(index .IPAM.Config 0).Subnet}}')
-
-          # Load the relay from the pinned image, never from the PR workspace.
-          docker run --rm \
-            --network none \
-            --read-only \
-            --cap-drop ALL \
-            --security-opt no-new-privileges \
-            --user 1002:1003 \
-            --entrypoint cat \
-            "$CODEX_REVIEW_IMAGE" \
-            /usr/local/share/codex-review/proxy_relay.py \
-            >"$work_dir/proxy_relay.py"
-          python3 -I "$work_dir/proxy_relay.py" \
-            --listen-host "$egress_gateway" \
-            --allow-cidr "$egress_subnet" \
-            --target-host 127.0.0.1 \
-            --target-port 7895 \
-            --ready-file "$work_dir/relay.ready" \
-            >"$work_dir/relay.log" 2>&1 &
-          relay_pid=$!
-
-          for _ in $(seq 1 50); do
-            if [ -s "$work_dir/relay.ready" ]; then
-              break
-            fi
-            if ! kill -0 "$relay_pid" 2>/dev/null; then
-              echo "Trusted proxy relay exited before becoming ready" >&2
-              exit 1
-            fi
-            sleep 0.1
-          done
-          if [ ! -s "$work_dir/relay.ready" ]; then
-            echo "Timed out waiting for the trusted proxy relay" >&2
+          # The dedicated runner provides this internal network and the
+          # fixed-function relay as persistent, host-managed infrastructure.
+          if ! egress_gateway=$(docker network inspect "$CODEX_EGRESS_NETWORK" \
+            --format '{{(index .IPAM.Config 0).Gateway}}'); then
+            echo "Codex egress network is unavailable" >&2
             exit 1
           fi
-          relay_port=$(tr -d '\n' <"$work_dir/relay.ready")
-          case "$relay_port" in
-            '' | *[!0-9]*)
-              echo "Trusted proxy relay returned an invalid port" >&2
-              exit 1
-              ;;
-          esac
+          if ! relay_state=$(docker container inspect "$CODEX_RELAY_CONTAINER" \
+            --format '{{.State.Status}}/{{.State.Health.Status}}'); then
+            echo "Codex proxy relay is unavailable" >&2
+            exit 1
+          fi
+          if [ "$relay_state" != "running/healthy" ]; then
+            echo "Codex proxy relay is not healthy: ${relay_state}" >&2
+            exit 1
+          fi
 
           # Only this fixed-function sidecar can reach the host relay. The
           # review network has no host gateway and no route to other networks.
           docker run --detach \
             --name "$proxy_container" \
-            --network "$egress_network" \
+            --network "$CODEX_EGRESS_NETWORK" \
             --read-only \
             --cap-drop ALL \
             --security-opt no-new-privileges \
@@ -144,10 +107,10 @@ jobs:
             --cpus 0.5 \
             --user 1002:1003 \
             --env "RELAY_TARGET_HOST=$egress_gateway" \
-            --env "RELAY_TARGET_PORT=$relay_port" \
+            --env "RELAY_TARGET_PORT=$CODEX_RELAY_PORT" \
             --entrypoint node \
-            "$CODEX_REVIEW_IMAGE" \
-            /usr/local/share/codex-review/proxy-sidecar.mjs >/dev/null
+            "$CODEX_PROXY_IMAGE" \
+            /usr/local/libexec/pypto-codex-sidecar.mjs >/dev/null
           docker network connect --alias proxy \
             "$review_network" "$proxy_container"
 

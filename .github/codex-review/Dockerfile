@@ -25,13 +25,9 @@ RUN apt-get update \
 
 COPY codex-config.toml /usr/local/share/codex-review/config.toml
 COPY entrypoint.sh /usr/local/bin/codex-review-entrypoint
-COPY proxy-sidecar.mjs /usr/local/share/codex-review/proxy-sidecar.mjs
-COPY proxy_relay.py /usr/local/share/codex-review/proxy_relay.py
 
 RUN chmod 0555 /usr/local/bin/codex-review-entrypoint \
-    /usr/local/share/codex-review/proxy-sidecar.mjs \
-    && chmod 0444 /usr/local/share/codex-review/config.toml \
-    /usr/local/share/codex-review/proxy_relay.py
+    && chmod 0444 /usr/local/share/codex-review/config.toml
 
 USER 1002:1003
 WORKDIR /workspace
