@@ -646,8 +646,15 @@ def clang_elf_object(tmp_path_factory):
     source = directory / "input.c"
     source.write_text("char buffer[16]; int read_buffer(void) { return buffer[0]; }\n")
     path = directory / "input.o"
-    subprocess.run([clang, "-g", "-c", str(source), "-o", str(path)], check=True, capture_output=True)
-    return path.read_bytes()
+    # The parser below requires little-endian ELF64, including on macOS hosts.
+    subprocess.run(
+        [clang, "--target=x86_64-linux-gnu", "-g", "-c", str(source), "-o", str(path)],
+        check=True,
+        capture_output=True,
+    )
+    raw = path.read_bytes()
+    assert raw[:6] == b"\x7fELF\x02\x01", "Expected a little-endian ELF64 object from Clang"
+    return raw
 
 
 def _section_header(raw: bytes, name: bytes) -> int:
