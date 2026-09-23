@@ -48,12 +48,24 @@ jobs:
           # the node v20 directory explicitly, otherwise codex's `#!/usr/bin/env
           # node` shebang resolves to the system node v12.
           export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
-          codex review --base "${{ github.event.pull_request.base.sha }}" \
-            1> review.txt 2> review.log || {
-              echo "codex review 失败：" >&2
+
+          # The JMS relay endpoint is intermittently unstable (WebSocket long
+          # connections can drop), so retry automatically on failure.
+          attempt=0
+          max_attempts=3
+          until codex review --base "${{ github.event.pull_request.base.sha }}" \
+                1> review.txt 2> review.log; do
+            attempt=$((attempt + 1))
+            echo "codex review attempt ${attempt} failed (flaky endpoint, retrying)" >&2
+            tail -5 review.log >&2
+            if [ "$attempt" -ge "$max_attempts" ]; then
+              echo "codex review still failing after ${max_attempts} attempts:" >&2
               tail -40 review.log >&2
               exit 1
-            }
+            fi
+            sleep 10
+          done
+
           if [ -s review.txt ]; then
             gh pr comment "${{ github.event.pull_request.number }}" \
               --repo "${{ github.repository }}" \
