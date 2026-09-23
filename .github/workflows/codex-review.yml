@@ -1,73 +1,86 @@
 name: Codex Review
 
-# Runs `codex review` against the PR base and posts the result as a PR comment.
-#
-# NOTE on `pull_request` vs `pull_request_target`:
-# This workflow triggers on `pull_request`, which means the job only has access
-# to repository secrets (PROXY_TOKEN) and only the `github.token` can post
-# comments when the PR originates from this repository. For fork PRs GitHub
-# forces the token to read-only and hides secrets, so the review will fail
-# rather than post. If fork coverage is required, switch to the
-# `pull_request_target` pattern used by pr-agent.yml — but then the PR code is
-# checked out with secret access, so add the same bot/draft guards and treat the
-# checkout as untrusted.
-
+# This file must already exist on the default branch of the base repository.
+# pull_request_target uses the trusted workflow from the default branch while
+# checking out and reviewing untrusted code from the PR.
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
   pull-requests: write
 
-# One in-flight review per PR; superseded runs are cancelled to avoid duplicate
-# comments on rapid pushes (matches pr-agent.yml).
 concurrency:
   group: codex-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   codex-review:
+    if: github.event.pull_request.draft == false
     runs-on: [self-hosted, Linux, ARM64, cpu-codex]
     timeout-minutes: 20
+
     steps:
-      - name: Checkout
+      - name: Checkout PR head
         uses: actions/checkout@v4
         with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/head
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Codex review & comment
+      - name: Ensure base commit is available
+        run: |
+          git fetch --no-tags --depth=1 \
+            origin "${{ github.event.pull_request.base.sha }}"
+
+      - name: Codex review
         env:
           CODEX_HOME: /home/ci-runner/.codex-ci
-          HTTPS_PROXY: http://ci-runner:${{ secrets.PROXY_TOKEN }}@127.0.0.1:20809
-          HTTP_PROXY:  http://ci-runner:${{ secrets.PROXY_TOKEN }}@127.0.0.1:20809
-          NO_PROXY: localhost,127.0.0.1,.actions.githubusercontent.com
-          GH_TOKEN: ${{ github.token }}
+
+          # Only Codex uses the local mixed-port proxy.
+          HTTP_PROXY: http://127.0.0.1:7895
+          HTTPS_PROXY: http://127.0.0.1:7895
+          ALL_PROXY: http://127.0.0.1:7895
+          NO_PROXY: localhost,127.0.0.1,::1
         run: |
-          # The job runs as a non-login shell, so .bashrc is not sourced. Prepend
-          # the node v20 directory explicitly, otherwise codex's `#!/usr/bin/env
-          # node` shebang resolves to the system node v12.
+          set -Eeuo pipefail
           export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
 
-          # The JMS relay endpoint is intermittently unstable (WebSocket long
-          # connections can drop), so retry automatically on failure.
-          attempt=0
+          output="$RUNNER_TEMP/codex-review.txt"
+          log="$RUNNER_TEMP/codex-review.log"
+
+          attempt=1
           max_attempts=3
-          until codex review --base "${{ github.event.pull_request.base.sha }}" \
-                1> review.txt 2> review.log; do
-            attempt=$((attempt + 1))
-            echo "codex review attempt ${attempt} failed (flaky endpoint, retrying)" >&2
-            tail -5 review.log >&2
+
+          while ! codex review \
+            --base "${{ github.event.pull_request.base.sha }}" \
+            >"$output" 2>"$log"
+          do
+            echo "codex review attempt ${attempt} failed" >&2
+            tail -20 "$log" >&2
+
             if [ "$attempt" -ge "$max_attempts" ]; then
-              echo "codex review still failing after ${max_attempts} attempts:" >&2
-              tail -40 review.log >&2
+              echo "codex review failed after ${max_attempts} attempts" >&2
               exit 1
             fi
+
+            attempt=$((attempt + 1))
             sleep 10
           done
 
-          if [ -s review.txt ]; then
+      - name: Post review comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+
+          output="$RUNNER_TEMP/codex-review.txt"
+
+          if [ -s "$output" ]; then
             gh pr comment "${{ github.event.pull_request.number }}" \
               --repo "${{ github.repository }}" \
-              --body-file review.txt
+              --body-file "$output"
+          else
+            echo "Review produced no output; skipping comment" >&2
           fi
