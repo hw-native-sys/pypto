@@ -138,25 +138,6 @@ class FixpipeEpilogueVisitor : public IRVisitor {
     constexpr auto kMat = backend::BackendHandler::FixpipeDest::kMat;
     if (handler_->SupportsFixpipePreQuant(src_dtype, dst_dtype, kMat)) return;
 
-    // A handler that names no target at all for *any* accumulator withholds the
-    // whole destination rather than this one dtype pair -- today every backend
-    // does, because ptoas mis-emits the scale on `pto.tinsert` (PTOAS#1570; see
-    // the comment on `Ascend910BHandler::SupportsFixpipePreQuant`). Saying "supported
-    // targets: none" there would blame the dtypes for a toolchain defect.
-    if (DescribeFixpipePreQuantTargets(*handler_, DataType::INT32, kMat) == "none" &&
-        DescribeFixpipePreQuantTargets(*handler_, DataType::FP32, kMat) == "none") {
-      diagnostics_.emplace_back(
-          DiagnosticSeverity::Error, "FixpipeEpilogueValid", /*error_code=*/1,
-          "tile.assemble carries a pre_quant scale on the Acc -> Mat writeback (function '" + func_name_ +
-              "'), which the '" + handler_->GetPtoTargetArch() +
-              "' backend withholds: ptoas assembles the scale but emits a pto-isa call that silently "
-              "drops it (PTOAS#1570). The Acc -> GM form is unaffected -- "
-              "pl.tile.store(acc, ..., pre_quant=s) -- "
-              "and pre_relu alone is still available here on a converting assemble. Otherwise scale in "
-              "the vector unit: pl.mul(pl.cast(result, ...), scale).",
-          call->span_);
-      return;
-    }
     diagnostics_.emplace_back(
         DiagnosticSeverity::Error, "FixpipeEpilogueValid", /*error_code=*/1,
         "a '" + src_dtype.ToString() + "' cube accumulator cannot be assembled into a '" +

@@ -34,20 +34,14 @@ way:
    overflowing to infinity, which is where it parts company with an ordinary
    ``pl.cast`` to FP16. The clamp is last, after the multiply.
 
-Coverage is **Acc->GM (``pto.tstore``) only** for the scale. The Acc->Mat
-(``pto.tinsert``) spelling -- the lightning-indexer shape from issue #2765 -- is
-rejected by ``FixpipeEpilogueValid`` today: ptoas assembles the scale onto
-``pto.tinsert`` but emits a pto-isa call that binds it to ``indexRow``, so the
-scale is silently dropped (PTOAS#1570). See
-``Ascend910BHandler::SupportsFixpipePreQuant`` for the mechanism. ``pre_relu``
-alone on Acc->Mat is unaffected and is covered by ``acc_to_mat_relu_only``; add
-the scaled Mat cases back with the ptoas fix.
+Coverage includes the scaled Acc->Mat (``pto.tinsert``) score-reduction chain
+enabled by PTOAS 0.65, where an INT32 accumulator becomes an FP16 L1 tile and
+feeds a second Cube matmul. This is the form previously blocked by PTOAS#1570.
 
-Golden: torch. **A2/A3 only.** The A5 table in ``Ascend950Handler`` is
-transcribed from pto-isa's ``GetScalarPreQuantMode`` but has no device evidence
-yet, and an unsupported pair there is answered by *dropping the scale* rather
-than failing -- so an a5 case would be asserting exactly the thing nobody has
-measured. Enable it alongside a real a5 run, not before.
+Golden: torch. The Acc-to-GM cases remain **A2/A3 only** because the wider A5
+table has no device evidence. The new Acc-to-Mat case is deliberately narrower:
+it covers only the PTOAS 0.65-validated ``INT32 -> FP16`` pair and runs on both
+A2/A3 and A5.
 """
 
 import pypto.language as pl
@@ -148,8 +142,29 @@ def score_dequant_saturates_to_gm(k: pl.Tensor, q: pl.Tensor, out: pl.Out[pl.Ten
 
 
 # ---------------------------------------------------------------------------
-# Kernel -- pre_relu alone, riding the *unscaled* FP32 -> BF16 narrowing
+# Kernels -- Acc -> Mat
 # ---------------------------------------------------------------------------
+
+
+@pl.jit
+def score_dequant_relu_to_mat(k: pl.Tensor, q: pl.Tensor, w: pl.Tensor, out: pl.Out[pl.Tensor]):
+    """Scaled/ReLU INT32 L0C -> FP16 L1, followed by an FP16 matmul."""
+    with pl.at(level=pl.Level.CORE_GROUP):
+        k_mat = pl.tile.load(k, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+        q_mat = pl.tile.load(q, [0, 0], [N, K], target_memory=pl.Mem.Mat)
+        acc = pl.tile.matmul(
+            pl.tile.move(k_mat, target_memory=pl.Mem.Left),
+            pl.tile.move(pl.tile.transpose_view(q_mat), target_memory=pl.Mem.Right),
+        )
+        score_mat = pl.tile.create([M, N], pl.FP16, target_memory=pl.Mem.Mat)
+        score_mat = pl.tile.assemble(score_mat, acc, [0, 0], pre_quant=SCALE, pre_relu=True)
+        w_mat = pl.tile.load(w, [0, 0], [N, H], target_memory=pl.Mem.Mat)
+        y = pl.tile.matmul(
+            pl.tile.move(score_mat, target_memory=pl.Mem.Left),
+            pl.tile.move(w_mat, target_memory=pl.Mem.Right),
+        )
+        pl.tile.store(y, [0, 0], out)
+    return out
 
 
 @pl.jit
@@ -235,6 +250,21 @@ def _relu_only_case(kernel, name, **kwargs):
     return st.case(kernel, a, b, e, out, name=name, golden=golden, **kwargs)
 
 
+def _scaled_mat_case(kernel, name, **kwargs):
+    """``dequant_relu(k @ q.T) @ w`` with an FP16 on-chip intermediate."""
+    torch.manual_seed(0)
+    k = torch.randint(-4, 5, (M, K), dtype=torch.int8)
+    q = torch.randint(-4, 5, (N, K), dtype=torch.int8)
+    w = torch.randn(N, H, dtype=torch.float16)
+    out = torch.zeros((M, H), dtype=torch.float32)
+
+    def golden(_):
+        score = _fixpipe_dequant(_int_score(k, q), SCALE, relu=True)
+        return score.float() @ w.float()
+
+    return st.case(kernel, k, q, w, out, name=name, golden=golden, **kwargs)
+
+
 # A direct FP16 store rounds once and stops, so it is tight.
 _STORE_TOL = {"rtol": 1e-3, "atol": 1e-3}
 
@@ -281,6 +311,24 @@ def test_acc_to_gm_epilogue(case_run):
 @st.cases(_relu_only_case(matmul_relu_to_mat, "acc_to_mat_relu_only", rtol=2e-2, atol=2e-2))
 def test_acc_to_mat_relu_without_scale(case_run):
     """``pre_relu`` alone rides the unscaled FP32 -> BF16 narrowing."""
+    case_run.assert_passed()
+
+
+@pytest.mark.platforms(
+    "a2a3",
+    "a5",
+    reason="Scaled INT32 Acc-to-FP16 Mat TINSERT is enabled on PTOAS 0.65 for both architectures.",
+)
+@st.cases(
+    _scaled_mat_case(
+        score_dequant_relu_to_mat,
+        "acc_to_mat_dequant_relu_then_matmul",
+        rtol=2e-2,
+        atol=2e-2,
+    )
+)
+def test_acc_to_mat_scaled_relu(case_run):
+    """PTOAS 0.65 preserves the scale on the A2/A3 and A5 TINSERT paths."""
     case_run.assert_passed()
 
 

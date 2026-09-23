@@ -105,24 +105,13 @@ class Ascend910BHandler : public BackendHandler {
   // is a shift count, not a scale. Notably there is NO scaled f32 -> f16/bf16
   // here -- that narrowing exists only in the *unscaled* writeback.
   //
-  // Acc->Mat is withheld regardless of dtype (PTOAS#1570): ptoas 0.63 assembles
-  // the scale onto `pto.tinsert` (it round-trips through `--emit-pto-ir`) but
-  // emits a C++ call that pto-isa resolves to the *unscaled* overload, because
-  // every scalar operand it emits is `int64_t` and the two wrappers differ only
-  // in their parameter types:
-  //     TINSERT(Dst&, Src&,           uint16_t row, uint16_t col, WaitEvents&...)
-  //     TINSERT(Dst&, Src&, uint64_t, uint16_t row, uint16_t col, WaitEvents&...)
-  // For `TINSERT<Mat, Acc, relu>(dst, src, scale_i64, row_i64, col_i64)` the
-  // first is the better match -- `col` binds to the event pack by identity
-  // while the second needs a conversion there -- so the scale lands in `row`
-  // (truncated to 0) and the column index is waited on as an event id. The
-  // resulting cast-path `static_assert` in a2a3/common.hpp is the symptom; the
-  // silent misbinding is the defect, and no `.pto` spelling avoids it. Acc->GM
-  // is unaffected: `TSTORE` has no index operands for the scale to slide into,
-  // and it is device-verified in tests/st/runtime/ops/test_fixpipe_epilogue.py.
+  // PTOAS 0.65 emits typed scale and index operands for `pto.tinsert`, fixing
+  // the overload ambiguity tracked by PTOAS#1570. Enable the device-supported
+  // DEQF16 path used by the Cube score-reduction chain; keep the Mat contract
+  // narrow until the other dtype pairs have matching compiler/device coverage.
   [[nodiscard]] bool SupportsFixpipePreQuant(const DataType& src, const DataType& dst,
                                              FixpipeDest dest) const override {
-    if (dest == FixpipeDest::kMat) return false;
+    if (dest == FixpipeDest::kMat) return src == DataType::INT32 && dst == DataType::FP16;
     const bool dst_is_byte = dst == DataType::INT8 || dst == DataType::UINT8;
     if (src == DataType::INT32) return dst_is_byte || dst == DataType::FP16;
     if (src == DataType::FP32) return dst_is_byte;

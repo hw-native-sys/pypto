@@ -109,15 +109,13 @@ class Ascend950Handler : public BackendHandler {
   // entry and returns `QuantMode_t::NoQuant` for it -- silently dropping the
   // scale on device. Keep this in step with pto-isa, not with ptoas.
   //
-  // Acc->Mat is withheld for the same reason as on a2a3 (PTOAS#1570): the two `TINSERT`
-  // wrappers that ptoas' all-`int64_t` operands choose between live in the
-  // arch-independent `pto/common/pto_instr.hpp`, so a5 inherits the misbinding
-  // that drops the scale into `indexRow`. See `Ascend910BHandler` for the
-  // mechanism. a5 has no device evidence either way; the a2a3 `static_assert`
-  // that surfaces it there is arch-specific, so here it would likely be silent.
+  // PTOAS 0.65 also emits the typed scaled `TINSERT` call on A5, fixing the
+  // arch-independent overload ambiguity tracked by PTOAS#1570. Enable only the
+  // INT32 -> FP16 Mat path validated for this feature; the wider A5 table below
+  // remains available to Acc->GM without claiming untested Mat combinations.
   [[nodiscard]] bool SupportsFixpipePreQuant(const DataType& src, const DataType& dst,
                                              FixpipeDest dest) const override {
-    if (dest == FixpipeDest::kMat) return false;
+    if (dest == FixpipeDest::kMat) return src == DataType::INT32 && dst == DataType::FP16;
     const bool dst_is_byte = dst == DataType::INT8 || dst == DataType::UINT8;
     if (src == DataType::FP32) {
       return dst_is_byte || dst == DataType::HF8 || dst == DataType::FP16 || dst == DataType::BF16 ||

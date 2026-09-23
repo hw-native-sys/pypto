@@ -204,12 +204,12 @@ scale 还**决定**走哪条下沉路径，而不只是搭个便车——`INT32`
 对方推出——二者连同其出处都逐字钉在各自的发射点上。寄存器编码见
 `codegen::EncodeFixpipePreQuant`，各后端的 dtype 表见 `99-verifier.md`。
 
-`pto.tinsert` 那一半**能发射但当前走不到**：两个 handler 都对
-`FixpipeDest::kMat` 关闭了 `pre_quant`，因为 ptoas 为它发出的调用有歧义（scale
-被绑到了 `indexRow`，见 [PTOAS#1570](https://github.com/hw-native-sys/PTOAS/issues/1570)，
-机制详见 `99-verifier.md`），所以下面这段 emitter 代码只在关闭
-校验的情况下被覆盖。`Acc → Mat` 上单独的 `pre_relu`，以及整条 `Acc → GM` 路径，
-都不受影响。
+PTOAS 0.65 通过为 scale 发出 `uint64_t`、为行列索引发出 `uint16_t`，解决了
+[PTOAS#1570](https://github.com/hw-native-sys/PTOAS/issues/1570) 跟踪的 scaled
+`pto.tinsert` 重载歧义。因此 A2/A3 与 A5 均开放已验证的
+`INT32 Acc → FP16 Mat`（`DEQF16`）形式。其他带 scale 的 Acc-to-Mat dtype 组合
+仍由 `FixpipeEpilogueValid` 拒绝；范围更广的各后端能力表继续独立管辖 Acc-to-GM
+store。
 
 **`tile.set_validshape` 下沉细节。** `pto.set_validshape` 修改的是操作数的
 `valid_row` / `valid_col` 操作数，因此操作数必须是拥有它们的 handle：alloc、

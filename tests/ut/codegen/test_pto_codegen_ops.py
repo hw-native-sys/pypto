@@ -3230,11 +3230,10 @@ class TestFixpipeEpilogueCodegen:
     # an independent check on `EncodeFixpipePreQuant`'s bit layout.
     SCALE_WORD = 0x3A800000
 
-    def _generate_mlir_all_incore(self, program_cls, *, verify=True) -> str:
+    def _generate_mlir_all_incore(self, program_cls, *, backend_type=BackendType.Ascend910B) -> str:
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
-        level = ir.VerificationLevel.BASIC if verify else ir.VerificationLevel.NONE
-        with ir.PassContext([], level):
+        backend.set_backend_type(backend_type)
+        with ir.PassContext([], ir.VerificationLevel.BASIC):
             optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program_cls)
         return "\n".join(
             codegen.PTOCodegen().generate(ir.Program([func], func.name, optimized.span))
@@ -3242,18 +3241,14 @@ class TestFixpipeEpilogueCodegen:
             if ir.is_incore_type(func.func_type)
         )
 
-    def test_acc_to_mat_assemble_emits_pre_quant_clause_and_relu_attr(self):
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+    def test_acc_to_mat_assemble_emits_pre_quant_clause_and_relu_attr(self, backend_type):
         """An INT32 accumulator dequantized into an FP16 Mat scratch, then read by
         a second matmul — the whole chain stays on the cube.
 
-        ``FixpipeEpilogueValid`` rejects this program today: ptoas mis-emits the
-        scale on ``pto.tinsert`` (PTOAS#1570; see
-        ``Ascend910BHandler::SupportsFixpipePreQuant``), so both handlers withhold
-        the Mat destination. The *emitter* contract is independent of that gate
-        and stays correct, so this runs with verification off. When ptoas is
-        fixed the handlers flip one line and this is what proves the emission
-        survived the wait — deleting it would leave nothing pinning the ``.pto``
-        spelling, which is the half no other test covers.
+        PTOAS 0.65 fixes the scaled ``TINSERT`` overload ambiguity, so this runs
+        with verification enabled on both A2/A3 and A5. The assertions also pin
+        the ``.pto`` spelling consumed by that corrected toolchain.
         """
 
         @pl.program
@@ -3281,7 +3276,7 @@ class TestFixpipeEpilogueCodegen:
                 )
                 return pl.tile.store(y, [0, 0], out)
 
-        mlir = self._generate_mlir_all_incore(Prog, verify=False)
+        mlir = self._generate_mlir_all_incore(Prog, backend_type=backend_type)
         tinserts = [line for line in mlir.splitlines() if "pto.tinsert" in line]
         assert len(tinserts) == 1, f"one Acc->Mat writeback expected, got {len(tinserts)}:\n{mlir}"
         line = tinserts[0]
