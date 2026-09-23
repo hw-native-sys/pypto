@@ -41,10 +41,13 @@ jobs:
           CODEX_HOME: /home/ci-runner/.codex-ci
           HTTPS_PROXY: http://ci-runner:${{ secrets.PROXY_TOKEN }}@127.0.0.1:20809
           HTTP_PROXY:  http://ci-runner:${{ secrets.PROXY_TOKEN }}@127.0.0.1:20809
-          NO_PROXY: localhost,127.0.0.1,.actions.githubusercontent.com,.github.com
+          NO_PROXY: localhost,127.0.0.1,.actions.githubusercontent.com
           GH_TOKEN: ${{ github.token }}
         run: |
-          export PATH="$HOME/.npm-global/bin:$PATH"
+          # The job runs as a non-login shell, so .bashrc is not sourced. Prepend
+          # the node v20 directory explicitly, otherwise codex's `#!/usr/bin/env
+          # node` shebang resolves to the system node v12.
+          export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
           codex review --base "${{ github.event.pull_request.base.sha }}" \
             1> review.txt 2> review.log || {
               echo "codex review 失败：" >&2
