@@ -161,7 +161,7 @@ def test_aiv_shard_folds_into_cube_to_vector_boundary():
 
 
 def _build_aic_gather_program():
-    """half2[64,128]Vec --aic_gather(split=1)--> full[128,128], move->Left, matmul."""
+    """half2[64,128]Vec --aic_gather(split=1)--> full[128,128]Mat, move->Left, matmul."""
     span = ir.Span.unknown()
     a = ir.Var("a", _tile([64, 128], mem=MS.Vec), span)
     b = ir.Var("b", _tile([128, 128], mem=MS.Right), span)
@@ -172,7 +172,7 @@ def _build_aic_gather_program():
     half2 = ir.Var("half2", _tile(add.type.shape, add.type.tile_view, MS.Vec), span)
     gather = T.aic_gather(half2, split=1, span=span)
     assert isinstance(gather.type, ir.TileType)
-    full = ir.Var("full", _tile(gather.type.shape, gather.type.tile_view, MS.Vec), span)
+    full = ir.Var("full", _tile(gather.type.shape, gather.type.tile_view, MS.Mat), span)
     move_left = T.move(full, MS.Left, span=span)
     assert isinstance(move_left.type, ir.TileType)
     full_left = ir.Var("full_left", _tile(move_left.type.shape, move_left.type.tile_view, MS.Left), span)
