@@ -101,6 +101,16 @@ class PTOCodegen : public CodegenBase {
   [[nodiscard]] const backend::BackendHandler* GetBackendHandler() const;
 
   /**
+   * @brief Gate a per-compilation advisory so it is reported only once per site.
+   *
+   * Returns true the first time `key` is seen in this Generate() run and false
+   * afterwards. Op-emit callbacks that warn about a request the target backend
+   * drops use it to collapse the copies an unrolled loop body produces, which
+   * all share one source span, into a single diagnostic.
+   */
+  [[nodiscard]] bool ShouldReportOnce(const std::string& key);
+
+  /**
    * @brief Generate PTO-ISA MLIR format code from IR Program
    *
    * @param program Input PyPTO IR Program
@@ -1179,6 +1189,10 @@ class PTOCodegen : public CodegenBase {
 
   /// True when the module needs the wrapper-defined counter-completion adapter.
   bool needs_deferred_completion_adapter_ = false;
+
+  /// Keys already reported through ShouldReportOnce, cleared by Generate so a
+  /// second compilation in the same process warns again.
+  std::set<std::string> reported_once_keys_;
 
   const backend::Backend* backend_;  ///< Backend instance for querying op info
 

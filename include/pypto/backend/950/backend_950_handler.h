@@ -44,6 +44,7 @@ class Ascend950Handler : public BackendHandler {
   [[nodiscard]] bool SupportsIncoreDataType(const DataType& dtype) const override {
     return dtype.GetBit() != 4 || dtype == DataType::FP4 || dtype.IsPackedFp4();
   }
+  [[nodiscard]] bool HonorsHighPrecisionAlgorithm() const override { return true; }
 
   [[nodiscard]] bool RequiresGMPipeBuffer() const override { return false; }
   [[nodiscard]] bool RequiresSplitLoadTpopWorkaround() const override { return false; }

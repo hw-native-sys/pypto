@@ -694,6 +694,8 @@ PTOCodegen::PTOCodegen(const backend::Backend* backend) : backend_(backend) {
 
 const backend::BackendHandler* PTOCodegen::GetBackendHandler() const { return backend_->GetHandler(); }
 
+bool PTOCodegen::ShouldReportOnce(const std::string& key) { return reported_once_keys_.insert(key).second; }
+
 // ========================================================================
 // Generate entry and GenerateFunction
 // ========================================================================
@@ -710,6 +712,7 @@ std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr,
   fs_.body_section.clear();
   gm_slot_buffer_offsets_.clear();
   needs_deferred_completion_adapter_ = false;
+  reported_once_keys_.clear();
   PrepareGMSlotBufferLayout(program);
 
   const std::string target_arch = backend_->GetHandler()->GetPtoTargetArch();

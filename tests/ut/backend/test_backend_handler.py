@@ -30,6 +30,7 @@ class TestBackendHandlerValues:
         assert handler.get_default_sim_platform() == "a2a3sim"
         assert handler.get_extra_ptoas_flags() == ["--pto-arch", "a3"]
 
+        assert handler.honors_high_precision_algorithm() is False
         assert handler.requires_gm_pipe_buffer() is True
         assert handler.requires_split_load_tpop_workaround() is True
         assert handler.requires_level3_tmp_scratch() is True
@@ -45,6 +46,7 @@ class TestBackendHandlerValues:
         assert handler.get_default_sim_platform() == "a5sim"
         assert handler.get_extra_ptoas_flags() == ["--pto-arch", "a5"]
 
+        assert handler.honors_high_precision_algorithm() is True
         assert handler.requires_gm_pipe_buffer() is False
         assert handler.requires_split_load_tpop_workaround() is False
         assert handler.requires_level3_tmp_scratch() is False

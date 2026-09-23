@@ -416,7 +416,8 @@ def div(lhs, rhs, high_precision: bool = False):
         high_precision: Select PTOAS's high-precision divide. Available for
             Tensor/Tensor and Tile/Tile only -- a scalar divisor has no
             high-precision form, so passing it there raises rather than silently
-            falling back.
+            falling back. Honoured only on A5: A2/A3 PTO-ISA ignores it and
+            returns the default result, which compilation warns about.
     """
     if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar, _ir_core.Expr)):
         return _tensor.div(lhs, rhs, high_precision=high_precision)
@@ -504,7 +505,9 @@ def fmod(lhs, rhs, high_precision: bool = False):
     """Element-wise truncating remainder, dispatched by input type.
 
     Matches ``torch.fmod`` (the remainder takes the sign of the dividend).
-    ``high_precision`` is available only for the tile-tile form.
+    ``high_precision`` is available only for the tile-tile form, and is honoured
+    only on A5: A2/A3 PTO-ISA ignores it and returns the default result, which
+    compilation warns about.
     """
     if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar, _ir_core.Expr)):
         if high_precision:
@@ -584,7 +587,9 @@ def log(input: T, high_precision: bool = False) -> T:
 
     Args:
         input: Input tensor or tile.
-        high_precision: Select PTOAS's high-precision logarithm mode.
+        high_precision: Select PTOAS's high-precision logarithm mode. Honoured
+            only on A5: A2/A3 PTO-ISA ignores it and returns the default result,
+            which compilation warns about.
     """
     if isinstance(input, Tensor):
         return _tensor.log(input, high_precision=high_precision)
@@ -634,7 +639,9 @@ def recip(input: T, high_precision: bool = False) -> T:
 
     Args:
         input: Input tensor or tile
-        high_precision: Whether to select PTOAS's high-precision reciprocal mode (FP16/FP32 only)
+        high_precision: Whether to select PTOAS's high-precision reciprocal mode
+            (FP16/FP32 only). Honoured only on A5: A2/A3 PTO-ISA ignores it and
+            returns the default result, which compilation warns about.
     """
     if isinstance(input, Tensor):
         return _tensor.recip(input, high_precision=high_precision)

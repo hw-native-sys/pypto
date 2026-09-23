@@ -39,9 +39,9 @@ See [Memory and Data Movement](../language/03-memory.md) for which moves are leg
 
 | Operator | Reach | What it does |
 | -------- | ----- | ------------ |
-| [`add`][pypto.language.add] [`sub`][pypto.language.sub] [`mul`][pypto.language.mul] [`div`][pypto.language.div] | `pl.` | Binary arithmetic; a Python number on the right selects the scalar-operand form |
-| [`neg`][pypto.language.neg] [`abs`][pypto.language.abs] [`recip`][pypto.language.recip] | `pl.` | Unary negate, absolute value, reciprocal. For FP16/FP32 reciprocal, `high_precision=True` selects the slower, higher-precision PTO path on A5 |
-| [`rem`][pypto.language.tile.rem] [`rems`][pypto.language.tile.rems] [`fmod`][pypto.language.fmod] [`fmods`][pypto.language.fmods] | `pl.` | Floor (`rem*`) and truncating (`fmod*`) remainder. Tensor operands must match shape and dtype; tile-tile operands must match physical and valid shapes. A2/A3 supports FP32/INT32 for `rem*` and FP32 for `fmod*`; every A2/A3 INT32 `rem*` source/scalar value must be in the inclusive PTO-ISA domain `[-2^24, 2^24]`. A2/A3 scalar forms require provably positive valid extents. Tile `rem` / `rems` scratch must have provably sufficient physical and valid capacity (two / one rows and all source columns) and must not overlap a live source on A2/A3. A5 accepts the wider frontend dtype union. `high_precision=True` is FP32 tile-tile only (defined on A5, accepted but ignored on A2/A3) |
+| [`add`][pypto.language.add] [`sub`][pypto.language.sub] [`mul`][pypto.language.mul] [`div`][pypto.language.div] | `pl.` | Binary arithmetic; a Python number on the right selects the scalar-operand form. For Tensor/Tensor and Tile/Tile `div`, `high_precision=True` selects the slower, higher-precision PTO path on A5; on A2/A3 PTO-ISA ignores it and returns the default result, which compilation warns about |
+| [`neg`][pypto.language.neg] [`abs`][pypto.language.abs] [`recip`][pypto.language.recip] | `pl.` | Unary negate, absolute value, reciprocal. For FP16/FP32 reciprocal, `high_precision=True` selects the slower, higher-precision PTO path on A5; on A2/A3 PTO-ISA ignores it and returns the default result, which compilation warns about |
+| [`rem`][pypto.language.tile.rem] [`rems`][pypto.language.tile.rems] [`fmod`][pypto.language.fmod] [`fmods`][pypto.language.fmods] | `pl.` | Floor (`rem*`) and truncating (`fmod*`) remainder. Tensor operands must match shape and dtype; tile-tile operands must match physical and valid shapes. A2/A3 supports FP32/INT32 for `rem*` and FP32 for `fmod*`; every A2/A3 INT32 `rem*` source/scalar value must be in the inclusive PTO-ISA domain `[-2^24, 2^24]`. A2/A3 scalar forms require provably positive valid extents. Tile `rem` / `rems` scratch must have provably sufficient physical and valid capacity (two / one rows and all source columns) and must not overlap a live source on A2/A3. A5 accepts the wider frontend dtype union. `high_precision=True` is FP32 tile-tile only (defined on A5; accepted but ignored on A2/A3, where compilation warns) |
 | [`addc`][pypto.language.tile.addc] [`subc`][pypto.language.tile.subc] [`addsc`][pypto.language.tile.addsc] [`subsc`][pypto.language.tile.subsc] | `pl.` (t) | Three-input add / subtract with carry operand |
 | [`part_add`][pypto.language.part_add] [`part_mul`][pypto.language.part_mul] [`part_max`][pypto.language.part_max] [`part_min`][pypto.language.part_min] | `pl.` | Partial (segmented) arithmetic |
 
@@ -49,7 +49,7 @@ See [Memory and Data Movement](../language/03-memory.md) for which moves are leg
 
 | Operator | Reach | What it does |
 | -------- | ----- | ------------ |
-| [`exp`][pypto.language.exp] [`log`][pypto.language.log] | `pl.` | Exponential, natural logarithm |
+| [`exp`][pypto.language.exp] [`log`][pypto.language.log] | `pl.` | Exponential, natural logarithm. For `log`, `high_precision=True` selects the slower, higher-precision PTO path on A5; on A2/A3 PTO-ISA ignores it and returns the default result, which compilation warns about |
 | [`sqrt`][pypto.language.sqrt] [`rsqrt`][pypto.language.rsqrt] | `pl.` | Square root; reciprocal square root. `high_precision=` is tensor-only and **raises** on a Tile — at tile level precision is selected by passing the scratch tile to `pl.tile.rsqrt(src, tmp)` |
 | [`sin`][pypto.language.tensor.sin] [`cos`][pypto.language.tensor.cos] | `pl.` | Trigonometric |
 

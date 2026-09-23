@@ -1150,6 +1150,8 @@ def div(
         lhs: Left-hand side tile
         rhs: Right-hand side tile or scalar
         high_precision: Whether to select PTOAS's high-precision division mode.
+            Honoured only on A5: A2/A3 PTO-ISA ignores it and returns the default
+            result, which compilation warns about.
             Only available when ``rhs`` is a Tile.
 
     Returns:
@@ -1307,7 +1309,9 @@ def recip(tile: Tile, high_precision: bool = False) -> Tile:
 
     Args:
         tile: Input tile
-        high_precision: Whether to select PTOAS's high-precision reciprocal mode (FP16/FP32 only)
+        high_precision: Whether to select PTOAS's high-precision reciprocal mode
+            (FP16/FP32 only). Honoured only on A5: A2/A3 PTO-ISA ignores it and
+            returns the default result, which compilation warns about.
 
     Returns:
         Tile wrapping the recip operation
@@ -1321,7 +1325,9 @@ def log(tile: Tile, high_precision: bool = False) -> Tile:
 
     Args:
         tile: Input tile
-        high_precision: Whether to select PTOAS's high-precision logarithm mode
+        high_precision: Whether to select PTOAS's high-precision logarithm mode.
+            Honoured only on A5: A2/A3 PTO-ISA ignores it and returns the default
+            result, which compilation warns about.
 
     Returns:
         Tile wrapping the log operation
@@ -2548,6 +2554,8 @@ def rem(lhs: Tile, rhs: Tile, tmp: Tile, high_precision: bool = False) -> Tile:
             provably provides two rows and covers the dividend columns on
             A2/A3. It must not overlap either source there.
         high_precision: Whether to select PTOAS's high-precision TREM mode.
+            Honoured only on A5: A2/A3 PTO-ISA ignores it and returns the default
+            result, which compilation warns about.
             This mode is defined only for FP32 and is ignored by A2/A3 hardware.
 
     Returns:
@@ -2657,6 +2665,8 @@ def fmod(lhs: Tile, rhs: Tile, high_precision: bool = False) -> Tile:
         lhs: Left-hand side tile
         rhs: Right-hand side tile
         high_precision: Whether to select PTOAS's high-precision TFMOD mode.
+            Honoured only on A5: A2/A3 PTO-ISA ignores it and returns the default
+            result, which compilation warns about.
             This mode is defined only for FP32.
 
     Returns:

@@ -52,6 +52,7 @@ if (backend::GetBackendType() != backend::BackendType::Ascend910B) { ... }
 | `GetLaunchSpecCoreCountMethod()` | `launch_spec` 上设置核数的运行时 API 名 | `"set_block_num"` | `"set_core_num"` |
 | `GetDefaultSimPlatform()` | 默认仿真平台名 | `"a2a3sim"` | `"a5sim"` |
 | `GetExtraPtoasFlags()` | ptoas 额外参数 | `[]` | `["--pto-arch", "a5"]` |
+| `HonorsHighPrecisionAlgorithm()` | PTO-ISA 是否会根据 `high_precision=True` 生成的 `precisionType` 属性选择不同算法；为 false 时 codegen 会告警该请求被丢弃 | `false` | `true` |
 | `RequiresGMPipeBuffer()` | `ExpandMixedKernel` 是否注入 GM 槽位缓冲 | `true` | `false` |
 | `RequiresSplitLoadTpopWorkaround()` | MemoryReuse 是否做 load + tpop_from_aic 原地复用危害规避 | `true` | `false` |
 | `RequiresLevel3TmpScratch()` | InitMemRef 是否物化 level-3 显式 tmp；codegen static-view 桥接 | `true` | `false` |

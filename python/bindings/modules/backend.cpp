@@ -142,6 +142,9 @@ void BindBackend(nb::module_& m) {
            "Default simulator platform name (e.g. 'a2a3sim', 'a5sim')")
       .def("get_extra_ptoas_flags", &BackendHandler::GetExtraPtoasFlags,
            "Extra flags appended to ptoas invocation for this backend")
+      .def("honors_high_precision_algorithm", &BackendHandler::HonorsHighPrecisionAlgorithm,
+           "Whether PTO-ISA selects a distinct algorithm from the precisionType attribute that "
+           "high_precision=True emits (ignored on Ascend910B)")
       .def("requires_gm_pipe_buffer", &BackendHandler::RequiresGMPipeBuffer,
            "Whether ExpandMixedKernel must inject the GM-backed pipe slot buffer")
       .def("requires_split_load_tpop_workaround", &BackendHandler::RequiresSplitLoadTpopWorkaround,

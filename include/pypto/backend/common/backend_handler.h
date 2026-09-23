@@ -194,6 +194,23 @@ class BackendHandler {
     return dtype.GetBit() != 4;
   }
 
+  /**
+   * @brief Whether this backend's PTO-ISA honours the `precisionType` attribute
+   *        that `high_precision=True` emits.
+   *
+   * The attribute survives every layer — PyPTO writes it into the PTO IR and
+   * PTOAS keeps it as a `HIGH_PRECISION` template argument — but only some
+   * PTO-ISA backends select a different algorithm from it. Ascend910B's
+   * `TDIV_IMPL` / `TLOG_IMPL` / `TREM_IMPL` / `TFMOD_IMPL` accept the template
+   * parameter and never read it, so the request is silently dropped and the
+   * result is bit-identical to the default algorithm.
+   *
+   * `tile.rsqrt` is not covered by this hook: it opts into high precision by
+   * taking a scratch tile rather than by carrying `precisionType`, and that
+   * form is implemented on every backend.
+   */
+  [[nodiscard]] virtual bool HonorsHighPrecisionAlgorithm() const = 0;
+
   // ---------------------------------------------------------------------------
   // Pass behavioural hooks
   // ---------------------------------------------------------------------------

@@ -31,6 +31,7 @@
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/cast_saturation.h"
 #include "pypto/ir/expr.h"
@@ -39,6 +40,7 @@
 #include "pypto/ir/memref.h"
 #include "pypto/ir/phase.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 #include "src/backend/common/pto_ops_internal.h"
@@ -409,6 +411,40 @@ static std::string MakeCmpCodegenPTO(const std::string& pto_op_name, const CallP
                              codegen_base);
 }
 
+// Warn that a requested high-precision algorithm will not run on this target.
+//
+// The `precisionType` attribute survives every layer below PyPTO -- PTOAS keeps
+// it as a `HIGH_PRECISION` template argument -- so nothing downstream reports
+// the drop. Only PTO-ISA decides whether to read it, and on a backend that does
+// not, the op computes the default result and the request is invisible. Warning
+// here, where the attribute is written, keeps the op list in step with the
+// registrations that route through this emitter: every op that can carry the
+// attribute passes through, and no op that cannot is reached.
+//
+// Deduplicated per (op, source location): after UnrollLoops one written op can
+// reach codegen many times carrying the same span.
+static void WarnIfHighPrecisionIgnored(const std::string& pto_op_name, const CallPtr& op,
+                                       codegen::PTOCodegen& codegen) {
+  const auto* handler = codegen.GetBackendHandler();
+  if (handler->HonorsHighPrecisionAlgorithm()) return;
+
+  const std::string& op_name = op->op_->name_;
+  if (!codegen.ShouldReportOnce(op_name + "@" + op->span_.to_string())) return;
+
+  const std::string arch = handler->GetPtoTargetArch();
+  ir::EmitDiagnostics({Diagnostic(DiagnosticSeverity::Warning, "HighPrecisionIgnored", 0,
+                                  op_name + "(high_precision=True) is dropped on the '" + arch +
+                                      "' backend: PTO-ISA selects the high-precision algorithm only on "
+                                      "a5, so " +
+                                      pto_op_name +
+                                      " runs the default algorithm and the result is bit-identical to "
+                                      "high_precision=False. Request it only when compiling for a5; on "
+                                      "this backend, compute the value with scalar arithmetic where the "
+                                      "extra accuracy is required.",
+                                  op->span_)},
+                      "pto_codegen");
+}
+
 // Emit the default PTO form without an explicit precision attribute, or append
 // the exact PTOAS enum attribute after outs(...) for high-precision mode.
 // Unlike cmp/cvt attributes, precision-op assembly formats place their
@@ -424,6 +460,7 @@ static std::string MakePrecisionCodegenPTO(const std::string& pto_op_name, size_
     code += " {precisionType = #pto<";
     code += attr_kind;
     code += " high_precision>}";
+    WarnIfHighPrecisionIgnored(pto_op_name, op, codegen);
   }
   codegen.Emit(code);
   return "";

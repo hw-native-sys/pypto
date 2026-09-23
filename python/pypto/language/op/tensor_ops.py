@@ -969,6 +969,8 @@ def div(
         lhs: Left-hand side tensor
         rhs: Right-hand side tensor or scalar (int/float/Tensor/Scalar)
         high_precision: Whether to select PTOAS's high-precision division mode.
+            Honoured only on A5: A2/A3 PTO-ISA ignores it and returns the default
+            result, which compilation warns about.
             Only available when ``rhs`` is a Tensor.
 
     Returns:
@@ -1851,7 +1853,9 @@ def log(input: Tensor, high_precision: bool = False) -> Tensor:
 
     Args:
         input: Input tensor
-        high_precision: Whether to select PTOAS's high-precision logarithm mode
+        high_precision: Whether to select PTOAS's high-precision logarithm mode.
+            Honoured only on A5: A2/A3 PTO-ISA ignores it and returns the default
+            result, which compilation warns about.
 
     Returns:
         Tensor wrapping the log operation
@@ -1922,7 +1926,9 @@ def recip(input: Tensor, high_precision: bool = False) -> Tensor:
 
     Args:
         input: Input tensor
-        high_precision: Whether to select PTOAS's high-precision reciprocal mode (FP16/FP32 only)
+        high_precision: Whether to select PTOAS's high-precision reciprocal mode
+            (FP16/FP32 only). Honoured only on A5: A2/A3 PTO-ISA ignores it and
+            returns the default result, which compilation warns about.
 
     Returns:
         Tensor wrapping the recip operation

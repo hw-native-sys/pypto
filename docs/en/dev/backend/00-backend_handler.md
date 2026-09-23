@@ -55,6 +55,7 @@ to global state.
 | `GetLaunchSpecCoreCountMethod()` | runtime API name on `launch_spec` | `"set_block_num"` | `"set_core_num"` |
 | `GetDefaultSimPlatform()` | default simulator platform | `"a2a3sim"` | `"a5sim"` |
 | `GetExtraPtoasFlags()` | extra ptoas flags | `[]` | `["--pto-arch", "a5"]` |
+| `HonorsHighPrecisionAlgorithm()` | PTO-ISA selects a distinct algorithm from the `precisionType` attribute that `high_precision=True` emits; when false, codegen warns that the request is dropped | `false` | `true` |
 | `RequiresGMPipeBuffer()` | inject GM-backed pipe slot in `ExpandMixedKernel` | `true` | `false` |
 | `RequiresSplitLoadTpopWorkaround()` | MemoryReuse load + tpop_from_aic in-place hazard guard | `true` | `false` |
 | `RequiresLevel3TmpScratch()` | InitMemRef materialize level-3 explicit tmp; codegen static-view bridges | `true` | `false` |

@@ -34,9 +34,9 @@
 
 | 算子 | 可达 | 作用 |
 | ---- | ---- | ---- |
-| [`add`][pypto.language.add] [`sub`][pypto.language.sub] [`mul`][pypto.language.mul] [`div`][pypto.language.div] | `pl.` | 二元算术；右侧给 Python 数字会选中标量操作数形式 |
-| [`neg`][pypto.language.neg] [`abs`][pypto.language.abs] [`recip`][pypto.language.recip] | `pl.` | 取负、绝对值、倒数；FP16/FP32 倒数设置 `high_precision=True` 时会在 A5 上选择速度较慢、精度较高的 PTO 路径 |
-| [`rem`][pypto.language.tile.rem] [`rems`][pypto.language.tile.rems] [`fmod`][pypto.language.fmod] [`fmods`][pypto.language.fmods] | `pl.` | floor 取余（`rem*`）与截断取余（`fmod*`）。Tensor 操作数的 shape 和 dtype 必须一致；tile-tile 操作数的物理 shape 与 valid shape 必须一致。A2/A3 的 `rem*` 支持 FP32/INT32，`fmod*` 仅支持 FP32；A2/A3 INT32 `rem*` 的每个 source/scalar 值必须位于 PTO-ISA 闭区间 `[-2^24, 2^24]`。A2/A3 scalar 形式的 valid extent 必须可证明为正。Tile `rem` / `rems` 的 scratch 物理容量和有效容量都必须可证明足够（分别为两行 / 一行并覆盖全部 source 列），且在 A2/A3 上不得与仍存活的 source 重叠。A5 接受更宽的前端 dtype 集合。`high_precision=True` 仅适用于 FP32 tile-tile（A5 定义，A2/A3 接受但忽略） |
+| [`add`][pypto.language.add] [`sub`][pypto.language.sub] [`mul`][pypto.language.mul] [`div`][pypto.language.div] | `pl.` | 二元算术；右侧给 Python 数字会选中标量操作数形式。Tensor/Tensor 与 Tile/Tile 形式的 `div` 设置 `high_precision=True` 时会在 A5 上选择速度较慢、精度较高的 PTO 路径；A2/A3 接受该参数但 PTO-ISA 会忽略它并返回默认结果，编译时会给出告警 |
+| [`neg`][pypto.language.neg] [`abs`][pypto.language.abs] [`recip`][pypto.language.recip] | `pl.` | 取负、绝对值、倒数；FP16/FP32 倒数设置 `high_precision=True` 时会在 A5 上选择速度较慢、精度较高的 PTO 路径；A2/A3 接受该参数但 PTO-ISA 会忽略它并返回默认结果，编译时会给出告警 |
+| [`rem`][pypto.language.tile.rem] [`rems`][pypto.language.tile.rems] [`fmod`][pypto.language.fmod] [`fmods`][pypto.language.fmods] | `pl.` | floor 取余（`rem*`）与截断取余（`fmod*`）。Tensor 操作数的 shape 和 dtype 必须一致；tile-tile 操作数的物理 shape 与 valid shape 必须一致。A2/A3 的 `rem*` 支持 FP32/INT32，`fmod*` 仅支持 FP32；A2/A3 INT32 `rem*` 的每个 source/scalar 值必须位于 PTO-ISA 闭区间 `[-2^24, 2^24]`。A2/A3 scalar 形式的 valid extent 必须可证明为正。Tile `rem` / `rems` 的 scratch 物理容量和有效容量都必须可证明足够（分别为两行 / 一行并覆盖全部 source 列），且在 A2/A3 上不得与仍存活的 source 重叠。A5 接受更宽的前端 dtype 集合。`high_precision=True` 仅适用于 FP32 tile-tile（A5 定义；A2/A3 接受但忽略，编译时会给出告警） |
 | [`addc`][pypto.language.tile.addc] [`subc`][pypto.language.tile.subc] [`addsc`][pypto.language.tile.addsc] [`subsc`][pypto.language.tile.subsc] | `pl.` (t) | 带进位操作数的三输入加 / 减 |
 | [`part_add`][pypto.language.part_add] [`part_mul`][pypto.language.part_mul] [`part_max`][pypto.language.part_max] [`part_min`][pypto.language.part_min] | `pl.` | 分段算术 |
 
@@ -44,7 +44,7 @@
 
 | 算子 | 可达 | 作用 |
 | ---- | ---- | ---- |
-| [`exp`][pypto.language.exp] [`log`][pypto.language.log] | `pl.` | 指数、自然对数 |
+| [`exp`][pypto.language.exp] [`log`][pypto.language.log] | `pl.` | 指数、自然对数。`log` 的 `high_precision=True` 在 A5 上选择更慢、更高精度的 PTO 路径；A2/A3 接受该参数但 PTO-ISA 会忽略它并返回默认结果，编译时会给出告警 |
 | [`sqrt`][pypto.language.sqrt] [`rsqrt`][pypto.language.rsqrt] | `pl.` | 平方根；倒数平方根。`high_precision=` 只作用于张量路径，传给 Tile 会**抛异常** —— tile 级的精度由是否传入 scratch tile 决定：`pl.tile.rsqrt(src, tmp)` |
 | [`sin`][pypto.language.tensor.sin] [`cos`][pypto.language.tensor.cos] | `pl.` | 三角函数 |
 
