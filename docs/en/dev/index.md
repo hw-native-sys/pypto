@@ -36,29 +36,6 @@ PyPTO programs, start with the [User Manual](../user/index.md).
 | [PTOAS Op Status Matrix](ptoas-op-status.md) | Which public and compatibility PTOAS ops the compiler currently emits |
 | [FP4](fp4.md) | Logical vs packed FP4, cast policy, and hand-written `FP4E2M1X2` guidance |
 
-## Automated PR Review
-
-The `PR Agent` GitHub Actions workflow reviews non-draft PRs when they are
-opened, reopened, updated, or marked ready, including PRs from forks. Repository
-owners, organization members, and collaborators can also post exactly `/review`
-on an open PR to request a review. Findings update a persistent PR comment.
-
-Administrators enable the workflow in **Settings → Secrets and variables → Actions**:
-
-1. Add the DeepSeek API key as the repository secret `OPENAI_KEY`.
-2. Optionally set `PR_AGENT_API_BASE` (default `https://api.deepseek.com`) and
-   `PR_AGENT_MODEL` (default `deepseek-flash`) as repository variables. Use the
-   provider's model ID without an `openai/` prefix; the workflow adds it for
-   OpenAI-compatible routing. Reviews use a 128,000-token context budget.
-3. Set the repository variable `PR_AGENT_ENABLED` to `true` after the workflow
-   is merged into the default branch. Unset it or set it to `false` to disable reviews.
-
-PR content is sent to the configured model service and consumes API credits.
-The workflow reads PR data through GitHub's API without checking out PR code.
-It enables review only, uses workflow-owned settings, and does not automatically
-rewrite PR descriptions, apply code changes, or approve merges. Bot-triggered
-events are skipped; a maintainer can request `/review` on a bot-authored PR.
-
 ## See Also
 
 - [PTO ISA reference](../reference/index.md) — the hardware model the backend targets.
