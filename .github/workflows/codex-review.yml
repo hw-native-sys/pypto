@@ -18,7 +18,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CODEX_REVIEW_IMAGE: localhost:5000/pypto-codex-review@sha256:cc50233d2db2e676f9ed224bd29cd73d53b3004ba3812ca6968870f0cf9f5a57
+  CODEX_REVIEW_IMAGE: localhost:5000/pypto-codex-review@sha256:41afd240e0b61baec52651a1e3ff60bdba7c1e6a0cc540583ccf732b2c5c4513
 
 jobs:
   review:
@@ -93,8 +93,16 @@ jobs:
           egress_subnet=$(docker network inspect "$egress_network" \
             --format '{{(index .IPAM.Config 0).Subnet}}')
 
-          # Load the relay from the trusted base commit, never from the PR head.
-          git show "$BASE_SHA:.github/codex-review/proxy_relay.py" \
+          # Load the relay from the pinned image, never from the PR workspace.
+          docker run --rm \
+            --network none \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --user 1002:1003 \
+            --entrypoint cat \
+            "$CODEX_REVIEW_IMAGE" \
+            /usr/local/share/codex-review/proxy_relay.py \
             >"$work_dir/proxy_relay.py"
           python3 -I "$work_dir/proxy_relay.py" \
             --listen-host "$egress_gateway" \
