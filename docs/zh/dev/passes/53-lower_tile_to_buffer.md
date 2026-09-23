@@ -123,7 +123,10 @@ buffer.store(acc, (0,0), (64,64), Out)
 `tile.matmul` 转为 `buffer.matmul`。`tile.matmul_acc` 必须已经是原地累加（累加器与结果
 共享存储），转为 `buffer.matmul_acc`。其可选的 `init_cond` 决定写入形式：字面量直接选择
 一个调用，运行时条件则变成显式 `if`，两个分支分别是 `buffer.matmul` 和
-`buffer.matmul_acc`。`tile.transpose_view` 不需要调用：存储索引阶段已经声明了重新标注的
+`buffer.matmul_acc`。累加器的 valid 矩形比乘积更宽时，通过同一存储上与乘积同形的视图写入
+（带地址时是另一个 alloc，PTOAS 下是 `buffer.reshape`），因为 PTOAS 要求原生 matmul 目标与乘积一致。
+这与旧发射器的原生写入相同：乘积之外的完整分形块保持原数据，被部分覆盖的块其余部分不保留。
+`tile.transpose_view` 不需要调用：存储索引阶段已经声明了重新标注的
 窗口。Acc store 只使用 fix-pipe 不带 scale 的转换；`pre_quant`/`pre_relu`、原子与分阶段
 store 以及 cache 策略 load 在对应传输配方完成前仍显式报错。
 

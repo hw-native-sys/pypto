@@ -254,5 +254,82 @@ def test_public_buffer_tensor_matmul_extracts_and_relabels_operands(case_run, re
         assert ("pto.textract ins(" in text) or ("blayout=row_major, slayout=col_major" in text)
 
 
+def _wider_accumulator_kernel(overwrite: bool):
+    # Accumulator valid [16, 32] from a full seed product; the second product
+    # is [16, 16], one whole 16-column Acc fractal box. The cube writes whole
+    # boxes, so columns 16..31 must keep the seed product.
+    def kernel(lhs: pl.Tensor, seed: pl.Tensor, partial: pl.Tensor, out: pl.Out[pl.Tensor]):
+        lhs_mat = pl.load(lhs, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
+        seed_mat = pl.load(seed, [0, 0], [16, 32], target_memory=pl.MemorySpace.Mat)
+        partial_mat = pl.load(
+            partial, [0, 0], [16, 32], valid_shape=[16, 16], target_memory=pl.MemorySpace.Mat
+        )
+        lhs_left = pl.move(lhs_mat, target_memory=pl.MemorySpace.Left)
+        seed_right = pl.move(seed_mat, target_memory=pl.MemorySpace.Right)
+        partial_right = pl.move(partial_mat, target_memory=pl.MemorySpace.Right)
+        acc = pl.matmul(lhs_left, seed_right)
+        total = pl.matmul_acc(acc, lhs_left, partial_right, init_cond=overwrite)
+        return pl.store(total, [0, 0], out)
+
+    return kernel
+
+
+_wider_accumulate = pl.jit.incore(_wider_accumulator_kernel(False))
+_wider_overwrite = pl.jit.incore(_wider_accumulator_kernel(True))
+
+
+@pl.jit
+def _wider_accumulate_entry(lhs: pl.Tensor, seed: pl.Tensor, partial: pl.Tensor, out: pl.Out[pl.Tensor]):
+    out = _wider_accumulate(lhs, seed, partial, out)
+    return out
+
+
+@pl.jit
+def _wider_overwrite_entry(lhs: pl.Tensor, seed: pl.Tensor, partial: pl.Tensor, out: pl.Out[pl.Tensor]):
+    out = _wider_overwrite(lhs, seed, partial, out)
+    return out
+
+
+def _wider_golden(tensors, overwrite: bool) -> torch.Tensor:
+    seeded = _product(tensors["lhs"], tensors["seed"], torch.float32)
+    partial = _product(tensors["lhs"], tensors["partial"][:, :16], torch.float32)
+    result = seeded.clone()
+    result[:, :16] = partial if overwrite else seeded[:, :16] + partial
+    return result
+
+
+@st.cases(
+    *[
+        st.case(
+            entry,
+            _operand(16, 16, torch.float16),
+            _operand(16, 32, torch.float16, modulus=5),
+            _operand(16, 32, torch.float16, modulus=3),
+            torch.full((16, 32), -777.0),
+            name=f"buffer_cube_wider_{label}_{planner.name.lower()}",
+            golden=lambda tensors, overwrite=overwrite: _wider_golden(tensors, overwrite),
+            memory_planner=planner,
+            enable_buffer_ir=True,
+            rtol=0,
+            atol=0,
+        )
+        for entry, label, overwrite in (
+            (_wider_accumulate_entry, "accumulate", False),
+            (_wider_overwrite_entry, "overwrite", True),
+        )
+        for planner in _PLANNERS
+    ]
+)
+def test_public_buffer_product_view_leaves_the_wider_accumulator_intact(case_run, request):
+    text = _executed_native(case_run, request)
+    if text is not None:
+        written = [
+            line
+            for line in text.splitlines()
+            if "pto.tmatmul" in line and "v_col=16" in line.split("outs(")[1]
+        ]
+        assert len(written) == 1, text
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

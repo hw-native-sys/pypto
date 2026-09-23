@@ -47,10 +47,13 @@ BufferTypePtr MatrixOperand(const std::vector<ExprPtr>& args, size_t index, Memo
 // A static valid extent is compared; a dynamic (-1) one is a runtime precondition.
 bool StaticLessEqual(int64_t lhs, int64_t rhs) { return lhs < 0 || rhs < 0 || lhs <= rhs; }
 
-// The cube reads lhs[M, K] from Left and rhs[K, N] from Right and writes the
-// Acc window [M, N]. Physical K must agree because L0 boxes are indexed
-// directly; rhs valid K must cover lhs valid K. An accumulating write may
-// target a wider valid rectangle than the new product, which it contains.
+// The cube reads lhs[M, K] from Left and rhs[K, N] from Right. Physical K must
+// agree because L0 boxes are indexed directly; rhs valid K must cover lhs valid
+// K. Both forms write exactly the product rectangle (lhs valid rows x rhs valid
+// columns), and PTOAS requires a static destination's valid extents to equal
+// it. A wider accumulator is written through a product-shaped view of the same
+// storage. The cube writes whole fractal boxes: boxes outside the product keep
+// their data, while the rest of a partially covered box does not.
 TypePtr DeduceBufferMatmul(const std::vector<ExprPtr>& args, bool accumulate) {
   const std::string op_name = accumulate ? "buffer.matmul_acc" : "buffer.matmul";
   CHECK(args.size() == 3) << op_name << " requires lhs, rhs and destination buffers, got " << args.size()
@@ -74,9 +77,10 @@ TypePtr DeduceBufferMatmul(const std::vector<ExprPtr>& args, bool accumulate) {
   for (size_t axis = 0; axis < 2; ++axis) {
     const auto product = axis == 0 ? lhs->valid_shape_[0] : rhs->valid_shape_[1];
     const auto written = destination->valid_shape_[axis];
-    CHECK(accumulate ? StaticLessEqual(product, written) : (product < 0 || written < 0 || product == written))
+    CHECK(product < 0 || written < 0 || product == written)
         << op_name << " destination valid dimension " << axis << " (" << written
-        << (accumulate ? ") must contain" : ") must equal") << " the product valid extent " << product;
+        << ") must equal the product valid extent " << product
+        << "; write a wider accumulator through a product-shaped view";
   }
   return GetVoidType();
 }
@@ -120,8 +124,8 @@ TypePtr DeduceBufferExtract(const std::vector<ExprPtr>& args) {
 
 }  // namespace
 
-// Matrix products write the whole Acc window named by their destination. The
-// initializing form never reads the destination; the accumulating form adds
+// Matrix products write the product rectangle of their Acc destination. The
+// initializing form overwrites it without reading; the accumulating form adds
 // the product to its current data (native `ins(acc, ...) outs(acc)`).
 REGISTER_OP("buffer.matmul")
     .set_description("Write lhs @ rhs from Left/Right operands into an explicit Acc destination")

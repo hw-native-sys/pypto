@@ -436,19 +436,22 @@ def test_matmul_rejects_wrong_spaces_types_and_shapes(index, replacement, messag
         internal_call("buffer.matmul", args)
 
 
-def test_only_the_accumulating_form_may_write_a_wider_valid_rectangle():
-    wider = matmul_args()
-    wider[1] = matrix_var("rhs", ir.MemorySpace.Right, [64, 32], DataType.FP16, valid_shape=[64, 24])
-    assert isinstance(internal_call("buffer.matmul_acc", wider).type, ir.VoidType)
-    with pytest.raises(ValueError, match="must equal the product valid extent 24"):
-        internal_call("buffer.matmul", wider)
-    narrower = matmul_args(valid_shape=[16, 24])
-    with pytest.raises(ValueError, match="must contain the product valid extent 32"):
-        internal_call("buffer.matmul_acc", narrower)
+@pytest.mark.parametrize("name", ["buffer.matmul", "buffer.matmul_acc"])
+def test_both_forms_write_exactly_the_destination_valid_rectangle(name):
+    # PTOAS requires a static tmatmul[.acc] destination to match the product;
+    # lowering writes a wider accumulator through a product-shaped view.
+    for valid in ([16, 24], [8, 32]):
+        with pytest.raises(ValueError, match="must equal the product valid extent"):
+            internal_call(name, matmul_args(valid_shape=valid))
+    narrower_product = matmul_args(valid_shape=[16, 24])
+    narrower_product[1] = matrix_var(
+        "rhs", ir.MemorySpace.Right, [64, 32], DataType.FP16, valid_shape=[64, 24]
+    )
+    assert isinstance(internal_call(name, narrower_product).type, ir.VoidType)
     uncovered_k = matmul_args()
     uncovered_k[1] = matrix_var("rhs", ir.MemorySpace.Right, [64, 32], DataType.FP16, valid_shape=[48, 32])
     with pytest.raises(ValueError, match="rhs valid K to cover lhs valid K"):
-        internal_call("buffer.matmul", uncovered_k)
+        internal_call(name, uncovered_k)
 
 
 def extract_args(

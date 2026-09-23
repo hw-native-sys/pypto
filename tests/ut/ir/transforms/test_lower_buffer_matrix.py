@@ -9,6 +9,7 @@
 
 """Cube tiles cross the Buffer boundary as explicit Mat/Left/Right/Acc storage and writes."""
 
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -158,6 +159,66 @@ def test_init_cond_selects_explicit_initializing_and_accumulating_writes(
         assert branch.else_body is not None and not branch.return_vars
     text = _compile_native(tmp_path, lowered, BackendType.Ascend910B, planner != passes.MemoryPlanner.PTOAS)
     assert text.count("scf.if") == branches
+
+
+def _wider_accumulator(init_cond: str) -> ir.Program:
+    return pl.parse_program(f"""
+@pl.program
+class WiderAccumulator:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, lhs: pl.Tensor[[16, 16], pl.FP16], seed: pl.Tensor[[16, 32], pl.FP16],
+               partial: pl.Tensor[[16, 32], pl.FP16], flag: pl.Scalar[pl.INDEX],
+               output: pl.Out[pl.Tensor[[16, 32], pl.FP32]]) -> pl.Tensor[[16, 32], pl.FP32]:
+        lhs_mat: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Mat] = pl.load(
+            lhs, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
+        seed_mat: pl.Tile[[16, 32], pl.FP16, pl.MemorySpace.Mat] = pl.load(
+            seed, [0, 0], [16, 32], target_memory=pl.MemorySpace.Mat)
+        partial_mat: pl.Tile[
+            [16, 32], pl.FP16, pl.MemorySpace.Mat, pl.TileView(valid_shape=[16, 24])
+        ] = pl.load(partial, [0, 0], [16, 32], valid_shape=[16, 24], target_memory=pl.MemorySpace.Mat)
+        lhs_left = pl.move(lhs_mat, target_memory=pl.MemorySpace.Left)
+        seed_right = pl.move(seed_mat, target_memory=pl.MemorySpace.Right)
+        partial_right = pl.move(partial_mat, target_memory=pl.MemorySpace.Right)
+        acc = pl.matmul(lhs_left, seed_right)
+        result = pl.matmul_acc(acc, lhs_left, partial_right{init_cond})
+        return pl.store(result, [0, 0], output)
+""")
+
+
+@pytest.mark.parametrize("ascend_backend", _BACKENDS, indirect=True)
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize(
+    "init_cond,initializing,accumulating",
+    [("", 1, 1), (", init_cond=True", 2, 0), (", init_cond=False", 1, 1), (", init_cond=(flag == 0)", 2, 1)],
+)
+def test_wider_accumulator_is_written_through_a_product_shaped_view(
+    tmp_path: Path,
+    ascend_backend: BackendType,
+    planner: passes.MemoryPlanner,
+    init_cond: str,
+    initializing: int,
+    accumulating: int,
+) -> None:
+    # Accumulator valid [16, 32], product [16, 24]: legal for tile.matmul_acc in
+    # every form. PTOAS requires tmatmul[.acc] destinations to match the
+    # product, so the write goes through a same-storage [16, 24] view.
+    lowered = _lower(_wider_accumulator(init_cond), planner)
+    names = _call_names(lowered)
+    assert (names["buffer.matmul"], names["buffer.matmul_acc"]) == (initializing, accumulating)
+    addressed = planner != passes.MemoryPlanner.PTOAS
+    accumulators = [(d, call) for d, call in _allocations(lowered) if d.memory_space == ir.MemorySpace.Acc]
+    assert sorted(list(d.valid_shape) for d, _ in accumulators) == (
+        [[16, 24], [16, 32]] if addressed else [[16, 32]]
+    )
+    if addressed:
+        assert len({str(call.args[1]) for _, call in accumulators}) == 1
+    assert names["buffer.reshape"] == (0 if addressed else 1)
+    text = _compile_native(tmp_path, lowered, ascend_backend, addressed)
+    for line in text.splitlines():
+        if "pto.tmatmul" in line:
+            inputs, output = line.split("outs(", 1)
+            # Every native destination matches its product: rhs is the last input.
+            assert re.findall(r"v_col=(\d+)", inputs)[-1] == re.findall(r"v_col=(\d+)", output)[0], line
 
 
 @pl.program

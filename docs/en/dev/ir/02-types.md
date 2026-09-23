@@ -189,10 +189,15 @@ buffer.extract(src, row, col, dst) : Void             # static-shape window copy
 
 Operands are rank-2 `[M, K] x [K, N] -> [M, N]` physical descriptors with
 identical FP16, BF16, FP32 or INT8 operand types and the matching FP32/INT32
-accumulator. Static rhs valid K must cover lhs valid K. `buffer.matmul` writes
-exactly the product's valid rectangle; `buffer.matmul_acc` reads and writes its
-destination, whose valid rectangle may contain a narrower product. It has no
-separate accumulator input: accumulation is in place. `buffer.extract` copies a
+accumulator. Static rhs valid K must cover lhs valid K. Both forms write exactly
+the product rectangle (lhs valid rows by rhs valid columns), and a static
+destination's valid extents must equal it, as PTOAS requires. `buffer.matmul`
+overwrites that rectangle; `buffer.matmul_acc` adds to it in place and has no
+separate accumulator input. A wider accumulator is written through a
+product-shaped view of the same storage. The cube writes whole fractal boxes
+(16x16 in Acc): boxes outside the product keep their data, but the rest of a
+partially covered box is not preserved (zeros were measured on a2a3, as on the
+legacy path). `buffer.extract` copies a
 destination-shaped window at integer or `INDEX` offsets from Mat into Left/Right,
 or within Vec; constant offsets are bounds-checked and the offsets are
 non-memory operands.

@@ -112,10 +112,11 @@ BufferTypePtr StorageDescriptor(const TileTypePtr& tile, const Span& span) {
 
 /// Planned members retain their descriptors; storage is represented once.
 struct StorageMember {
-  TileTypePtr tile;
+  TileTypePtr tile;  // Null for a write view that no Tile variable names.
   MemRefPtr memory;
   BufferTypePtr descriptor;
   Span span;
+  const Call* write_view = nullptr;  // The call writing through that view.
 };
 
 struct BufferStorage {
@@ -157,6 +158,7 @@ class StorageIndex : public IRVisitor {
 
   std::unordered_map<const Var*, BufferStorage> roots;
   std::unordered_map<const TileType*, VarPtr> handles;
+  std::unordered_map<const Call*, VarPtr> write_views;
 
  protected:
   void VisitStmt_(const AssignStmtPtr& assign) override {
@@ -164,7 +166,34 @@ class StorageIndex : public IRVisitor {
       INTERNAL_CHECK_SPAN(declarations_.emplace(assign->var_.get(), call).second, assign->span_)
           << "Internal error: duplicate planned allocation definition";
     }
+    if (auto call = As<Call>(assign->value_); call && IsOp(call, "tile.matmul_acc")) {
+      IndexProductView(call, assign->var_);
+    }
     IRVisitor::VisitStmt_(assign);
+  }
+
+  // tile.matmul_acc may accumulate into a wider valid rectangle than its
+  // product. Both native forms write only the product rectangle, and PTOAS
+  // requires a static pto.tmatmul[.acc] destination to equal it, so such an
+  // accumulator gets a same-storage view with the product's valid extents,
+  // matching the legacy emitter's native write.
+  void IndexProductView(const CallPtr& call, const VarPtr& result) {
+    const auto accumulator = As<TileType>(result->GetType());
+    const auto lhs = As<TileType>(call->args_[1]->GetType());
+    const auto rhs = As<TileType>(call->args_[2]->GetType());
+    INTERNAL_CHECK_SPAN(accumulator && lhs && rhs, call->span_)
+        << "Internal error: tile.matmul_acc requires Tile accumulator and operands";
+    const auto descriptor = StorageDescriptor(accumulator, call->span_);
+    const std::vector<int64_t> product{StorageDescriptor(lhs, call->span_)->valid_shape_[0],
+                                       StorageDescriptor(rhs, call->span_)->valid_shape_[1]};
+    if (product == descriptor->valid_shape_) return;
+    auto view = std::make_shared<BufferType>(
+        descriptor->shape_, descriptor->dtype_, descriptor->memory_space_, product, descriptor->blayout_,
+        descriptor->slayout_, descriptor->fractal_, descriptor->pad_, descriptor->compact_);
+    auto memory = GetDefinedMemRef(accumulator);
+    INTERNAL_CHECK_SPAN(memory && memory->base_, call->span_)
+        << "Internal error: tile.matmul_acc accumulator storage must be planned";
+    roots[memory->base_.get()].members.push_back({nullptr, memory, view, call->span_, call.get()});
   }
 
   // Initializers are visited once at their lexical binding. Body references
@@ -291,6 +320,8 @@ class StorageIndex : public IRVisitor {
       views.emplace(key, Define(storage, "_view", "buffer.reshape", {window}, descriptor, span));
     }
     for (size_t i = 0; i < storage.members.size(); ++i) {
+      INTERNAL_CHECK_SPAN(storage.members[i].tile, storage.members[i].span)
+          << "Internal error: only matrix storage carries untyped write views";
       handles.emplace(storage.members[i].tile.get(), views.at(member_keys[i]));
     }
   }
@@ -365,7 +396,11 @@ class StorageIndex : public IRVisitor {
           entry->second = Define(storage, "_view", "buffer.reshape", {root}, descriptor, span);
         }
       }
-      handles.emplace(storage.members[i].tile.get(), entry->second);
+      if (storage.members[i].tile) {
+        handles.emplace(storage.members[i].tile.get(), entry->second);
+      } else {
+        write_views.emplace(storage.members[i].write_view, entry->second);
+      }
     }
   }
 
@@ -737,7 +772,10 @@ class TileToBufferMutator : public IRMutator {
       INTERNAL_CHECK_SPAN(Handle(call->args_[0]) == destination, call->span_)
           << "Internal error: tile.matmul_acc must accumulate in place; its accumulator and result need the "
              "same planned storage";
-      const std::vector<ExprPtr> operands{Handle(call->args_[1]), Handle(call->args_[2]), destination};
+      // A wider accumulator is written through its product-shaped view.
+      const auto view = storage_.write_views.find(call.get());
+      const std::vector<ExprPtr> operands{Handle(call->args_[1]), Handle(call->args_[2]),
+                                          view == storage_.write_views.end() ? destination : view->second};
       if (call->args_.size() == 3) return Operation("buffer.matmul_acc", operands, call->span_);
       // init_cond overwrites instead of accumulating. A literal selects one
       // form; a runtime predicate selects between both explicit writes.

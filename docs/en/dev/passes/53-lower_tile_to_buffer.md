@@ -141,7 +141,13 @@ buffer.store(acc, (0,0), (64,64), Out)
 must already accumulate in place (its accumulator and result share storage) and
 becomes `buffer.matmul_acc`. Its optional `init_cond` selects the write form: a
 literal chooses one call, and a runtime predicate becomes an explicit `if`
-whose arms are `buffer.matmul` and `buffer.matmul_acc`. `tile.transpose_view`
+whose arms are `buffer.matmul` and `buffer.matmul_acc`. An accumulator whose
+valid rectangle is wider than the product is written through a product-shaped
+view of the same storage (another addressed allocation, or a PTOAS
+`buffer.reshape`), because PTOAS requires a native matmul destination to match
+the product. This is the same native write as the legacy emitter; whole
+fractal boxes outside the product keep their data, the rest of a partially
+covered box does not. `tile.transpose_view`
 needs no call: storage indexing has already declared the relabelled window.
 Acc stores drain through the fix-pipe with its unscaled conversions only;
 `pre_quant`/`pre_relu`, atomic and phased stores, and cache-policy loads still

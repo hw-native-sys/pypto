@@ -164,9 +164,11 @@ buffer.extract(src, row, col, dst) : Void             # 静态形状窗口拷贝
 
 操作数为二维物理描述符 `[M, K] x [K, N] -> [M, N]`，两个输入元素类型相同，
 为 FP16、BF16、FP32 或 INT8，累加器对应 FP32/INT32。静态的 rhs valid K
-必须覆盖 lhs valid K。`buffer.matmul` 恰好写入乘积的 valid 矩形；
-`buffer.matmul_acc` 读写其目标，目标的 valid 矩形可以包含更窄的乘积。它没有
-单独的累加器输入：累加总是原地进行。`buffer.extract` 在整数或 `INDEX` 偏移处
+必须覆盖 lhs valid K。两种形式都恰好写入乘积矩形（lhs valid 行数 × rhs valid 列数），
+按 PTOAS 的要求，静态目标的 valid extent 必须与之相等。`buffer.matmul` 覆盖写入该矩形；
+`buffer.matmul_acc` 原地累加，没有单独的累加器输入。更宽的累加器通过同一存储上
+与乘积同形的视图写入。Cube 按完整分形块（Acc 中为 16x16）写入：乘积之外的完整块保持原数据，
+但被部分覆盖的块中其余部分不保留（在 a2a3 上实测为 0，与旧路径一致）。`buffer.extract` 在整数或 `INDEX` 偏移处
 复制与目标形状相同的窗口，方向为 Mat 到 Left/Right 或 Vec 内部；常量偏移会做
 边界检查，偏移是非内存操作数。
 
