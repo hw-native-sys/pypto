@@ -4,6 +4,10 @@ name: Codex Review
 # pull_request_target uses the trusted workflow from the default branch while
 # checking out and reviewing untrusted code from the PR.
 on:
+  # Bootstrap this workflow on PR #2882 before it exists on the default branch.
+  # Remove this trigger and the bootstrap summary step before merging.
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
 
@@ -69,7 +73,25 @@ jobs:
             sleep 10
           done
 
+      - name: Publish bootstrap review summary
+        if: github.event_name == 'pull_request'
+        run: |
+          set -Eeuo pipefail
+
+          output="$RUNNER_TEMP/codex-review.txt"
+
+          if [ -s "$output" ]; then
+            {
+              echo "## Codex Review"
+              echo
+              cat "$output"
+            } >>"$GITHUB_STEP_SUMMARY"
+          else
+            echo "Review produced no output; skipping summary" >&2
+          fi
+
       - name: Post review comment
+        if: github.event_name == 'pull_request_target'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
