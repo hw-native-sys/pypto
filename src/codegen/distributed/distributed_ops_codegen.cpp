@@ -32,6 +32,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -476,7 +477,7 @@ REGISTER_DISTRIBUTED_OP(tensor_slice, "tensor.slice") {
   // StackedDeviceTensor).  A scalar leading index is the one case where the
   // logical form is recoverable without carrying every logical dimension: the
   // trailing axes are the whole shard and must not be emitted at all.
-  const auto host_drop_offsets = op->GetAttr<std::vector<ExprPtr>>("nz_host_drop_offsets");
+  const auto host_drop_offsets = op->GetAttr<std::vector<ExprPtr>>(ir::kNzHostDropOffsetsAttr);
   if (!host_drop_offsets.empty()) {
     INTERNAL_CHECK_SPAN(host_drop_offsets.size() == 1, op->span_)
         << "Internal error: NZ host tensor.slice metadata must contain exactly one scalar leading-axis index";

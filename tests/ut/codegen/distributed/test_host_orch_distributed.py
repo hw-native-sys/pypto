@@ -142,6 +142,36 @@ def test_host_orch_nz_scalar_index_keeps_logical_stacked_shard_shape():
     compile(code, "<host_orch>", "exec")
 
 
+def test_host_orch_nz_scalar_index_rejects_a_partial_range_on_another_axis():
+    """A blocked NZ ``w[r, 2:4]`` must not narrow only the dropped axis.
+
+    HOST codegen only ever emits the dropped axes' scalar offsets (see the
+    previous test), so a real sub-range on some other axis would otherwise
+    vanish from the generated index silently instead of narrowing it -- the
+    worker would read every expert instead of the requested window. Until
+    that combined form is supported, the pass must refuse it loudly rather
+    than emit a lookup that quietly drops the range.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+        def worker(self, weights: pl.Tensor[[2, 256, 512], pl.INT8, pl.NZ]):
+            pass
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(
+            self,
+            weights: pl.Tensor[[2, 8, 256, 512], pl.INT8, pl.NZ],
+            rank: pl.Scalar[pl.INT32],
+        ):
+            selected = weights[rank, 2:4]
+            self.worker(selected)
+
+    with pytest.raises(ValueError, match="does not yet support combining a scalar leading-axis"):
+        passes.block_nz_tensor_views()(passes.convert_to_ssa()(Prog))
+
+
 def test_host_orch_tensor_assemble_right_aligns_lower_rank_source():
     @pl.program
     class Prog:
