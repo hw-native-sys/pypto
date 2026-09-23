@@ -31,6 +31,9 @@ away from this path.
 # DSL function bodies are parsed as AST, not executed — suppress pyright errors.
 # pyright: reportUndefinedVariable=false
 
+import re
+from pathlib import Path
+
 import pypto.language as pl
 import pytest
 from pypto import LogLevel, backend, codegen, ir, set_log_level
@@ -144,6 +147,40 @@ class HighPrecisionUnrolledDiv:
         return out
 
 
+@pl.program
+class TwoWrittenTileDivSites:
+    """Two `pl.div` statements on adjacent lines, already at tile level."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[N, N], pl.FP32],
+        b: pl.Tensor[[N, N], pl.FP32],
+        output: pl.Out[pl.Tensor[[N, N], pl.FP32]],
+    ) -> pl.Tensor[[N, N], pl.FP32]:
+        ta: pl.Tile[[N, N], pl.FP32] = pl.load(a, [0, 0], [N, N], target_memory=pl.MemorySpace.Vec)
+        tb: pl.Tile[[N, N], pl.FP32] = pl.load(b, [0, 0], [N, N], target_memory=pl.MemorySpace.Vec)
+        first: pl.Tile[[N, N], pl.FP32] = pl.div(ta, tb, high_precision=True)
+        second: pl.Tile[[N, N], pl.FP32] = pl.div(first, tb, high_precision=True)
+        return pl.store(second, [0, 0], output)
+
+
+@pl.program
+class TwoWrittenTensorDivSites:
+    """The same pair written on tensors, so `ConvertTensorToTileOps` rebuilds
+    both calls before codegen ever sees them."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[N, N], pl.FP32],
+        b: pl.Tensor[[N, N], pl.FP32],
+    ) -> pl.Tensor[[N, N], pl.FP32]:
+        first: pl.Tensor[[N, N], pl.FP32] = pl.div(a, b, high_precision=True)
+        second: pl.Tensor[[N, N], pl.FP32] = pl.div(first, b, high_precision=True)
+        return second
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -170,6 +207,13 @@ def _warnings(capfd) -> list[str]:
     """
     err = capfd.readouterr().err
     return [line for line in err.splitlines() if WARNING_TAG in line]
+
+
+def _source_location(warning_line: str) -> str:
+    """The `file:line:col` a warning points at, with the directory stripped."""
+    match = re.search(r"at (\S+):(\d+):(\d+)\s*$", warning_line)
+    assert match, f"warning carries no source location: {warning_line}"
+    return f"{Path(match.group(1)).name}:{match.group(2)}:{match.group(3)}"
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +261,29 @@ def test_unrolled_loop_warns_once_for_its_single_written_site(capfd):
 
     assert len(emitted) == CHUNKS, f"expected the loop body to be replicated:\n{mlir}"
     assert len(_warnings(capfd)) == 1, "one written `pl.div` must produce one warning"
+
+
+@pytest.mark.parametrize("program_cls", [TwoWrittenTileDivSites, TwoWrittenTensorDivSites])
+def test_two_written_sites_keep_their_own_locations(program_cls, capfd):
+    """Deduplication must key on the written statement, not on the operator.
+
+    Both the dedup key and the reported location come from the call's own
+    `span_`. `ConvertTensorToTileOps` rebuilds a tensor-level `pl.div` into a
+    `tile.div`, and it attributes each synthesized op to the source that
+    motivated it rather than to the enclosing `def` (only structural nodes take
+    the function span). If that ever regressed to a function-level span, both
+    sites here would collapse onto one key and report the `def` line, so this
+    pins the two apart on both the tile and the rebuilt-tensor path.
+    """
+    _incore_mlir(program_cls, BackendType.Ascend910B)
+    warnings = _warnings(capfd)
+
+    assert len(warnings) == 2, f"expected one warning per written site, got {warnings}"
+    locations = {_source_location(line) for line in warnings}
+    assert len(locations) == 2, f"both sites reported the same location: {locations}"
+    assert all(location.startswith(f"{Path(__file__).name}:") for location in locations), (
+        f"warnings must name this source file, got {locations}"
+    )
 
 
 # ---------------------------------------------------------------------------
