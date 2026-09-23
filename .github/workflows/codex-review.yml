@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CODEX_REVIEW_IMAGE: localhost:5000/pypto-codex-review@sha256:e0e10770366b1794f8e71edf93dc05b6b5908d388976097469ec419bcab0a554
+  CODEX_REVIEW_IMAGE: localhost:5000/pypto-codex-review@sha256:832c7701a365b3a9a32e2d65c1986c3b79997603dd22f170e040dfef008af552
   CODEX_PROXY_IMAGE: localhost:5000/pypto-codex-proxy@sha256:632f77b3544d5c663cb08ac48b2150a7bfa6cb9bac0852fbcf620b1d4e284a6b
   CODEX_EGRESS_NETWORK: pypto-codex-egress
   CODEX_RELAY_CONTAINER: pypto-codex-proxy-relay
@@ -145,6 +145,8 @@ jobs:
             --env GIT_CONFIG_KEY_0=safe.directory \
             --env GIT_CONFIG_VALUE_0=/workspace \
             "$CODEX_REVIEW_IMAGE" \
+            --sandbox read-only \
+            --ask-for-approval never \
             review --base "$BASE_SHA" \
             <"$auth_file" >"$output" 2>"$log"
           do
