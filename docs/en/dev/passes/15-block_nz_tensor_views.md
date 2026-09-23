@@ -253,6 +253,8 @@ diagnostic naming the fix — an NZ tensor must never be silently mis-addressed.
 | dynamic leading extent, rank > 3 | rejected — the fold needs static extents to multiply |
 | `target_memory != Mat` (or absent) | rejected — NZ→NZ is the cube operand path |
 | `tensor.slice` narrowing the leading axes only | blocked like the load that follows it (see below) |
+| HOST `tensor.slice` with a scalar leading index plus a narrowed other leading axis (`w[r, 2:4]`) | rejected — see [In a HOST function](#in-a-host-function) |
+| HOST `tensor.slice` with a scalar index on a non-leading axis | rejected — same section |
 | `tensor.slice` windowing the trailing `[R, C]` pair | rejected — the window is not contiguous |
 | `tensor.reshape` flattening the whole tensor to `[N]` | kept as written — see [Flattening an NZ tensor](#flattening-an-nz-tensor) |
 | `tensor.reshape` to any other shape | rejected — it reinterprets coordinates the blocked form does not carry |
@@ -360,6 +362,22 @@ block, so `[layer*R, 0]` selects `C/c0` disjoint runs, and the blocked view has
 no stride of its own to describe them — `MaterializeTensorStrides` derives a
 row-major one from the blocked shape. Annotate the stacked axis as a leading
 axis (`[LAYERS, R, C]`) instead of stacking rows.
+
+#### In a HOST function
+
+A HOST orchestrator does not address the blocked view: its generated Python
+indexes the logical tensor the caller passed (a `StackedDeviceTensor` per rank),
+which cannot take the folded batch range the blocked slice carries. For a
+scalar index on the leading axis the pass therefore records the pre-blocking
+index as the `nz_host_leading_index` attr, and HOST codegen emits `w[r]`
+directly.
+
+That lookup can express only the one scalar index, so a HOST slice is limited
+to it: `w[r]` with every other axis whole is accepted, while `w[r, 2:4]`, which
+would lose the `2:4` window, and a scalar index on any axis but the first are
+rejected. Narrow the other axes inside the per-rank function instead, after
+passing it the whole shard. The limit applies to HOST functions only; a CHIP
+or kernel function slices as described above.
 
 ### Flattening an NZ tensor
 

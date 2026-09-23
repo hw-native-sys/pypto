@@ -228,6 +228,8 @@ GlobalTensor<int8_t, pto::Shape<1, 16, 16, 16, 32>,
 | rank > 3 且前导维为动态 | 拒绝——折叠需要静态 extent 相乘 |
 | `target_memory != Mat`（或缺省） | 拒绝——NZ→NZ 是 cube 操作数路径 |
 | `tensor.slice` 只收窄前导轴 | 与其后的 load 一样分块（见下） |
+| HOST 中带前导标量索引、同时收窄另一前导轴的 `tensor.slice`（`w[r, 2:4]`） | 拒绝——见[在 HOST 函数中](#在-host-函数中) |
+| HOST 中在非首轴上做标量索引的 `tensor.slice` | 拒绝——同上 |
 | `tensor.slice` 在末尾 `[R, C]` 平面上开窗 | 拒绝——该窗口不连续 |
 | `tensor.reshape` 把整块张量展平成 `[N]` | 原样保留——见[展平 NZ 张量](#展平-nz-张量) |
 | `tensor.reshape` 成其它形状 | 拒绝——它重新解释了分块形式无法承载的坐标 |
@@ -319,6 +321,18 @@ pto-isa 的 NZ `GlobalTensor` 只有**一个** batch 槽位，因此逻辑 `[G, 
 的行分布在*每一个*分形列块内部，因此 `[layer*R, 0]` 选出的是 `C/c0` 段不连续的数据，
 而分块 view 自身没有 stride 来描述它们——`MaterializeTensorStrides` 是从分块 shape
 推导行主序 stride 的。请把堆叠轴放成前导轴（`[LAYERS, R, C]`），而不是按行堆叠。
+
+#### 在 HOST 函数中
+
+HOST orchestrator 不按分块 view 寻址：它生成的 Python 索引的是调用方传入的逻辑张量
+（每个 rank 一个 `StackedDeviceTensor`），无法接受分块切片携带的折叠后 batch 区间。因此
+对前导轴上的标量索引，pass 把分块前的索引记录为 `nz_host_leading_index` attr，HOST
+codegen 直接生成 `w[r]`。
+
+这种查找只能表达这一个标量索引，所以 HOST 切片也仅限于此：其余轴保持完整的 `w[r]`
+可以接受；`w[r, 2:4]` 会丢掉 `2:4` 窗口，在首轴以外的轴上做标量索引也一样，二者都会被
+拒绝。请先把整个分片传给 per-rank 函数，再在其中收窄其余轴。该限制只作用于 HOST 函数；
+CHIP 或 kernel 函数按上文方式切片。
 
 ### 展平 NZ 张量
 
