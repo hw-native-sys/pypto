@@ -159,6 +159,9 @@ bypass is also logged by `pypto.jit._persistent` at INFO.
 ELF64 identity omits only verified non-allocated debug payloads outside all
 program segments. It retains every ELF, program, and section header, including
 `.bss` size, flags, alignment, symbol tables, and bytes outside sections.
+Omitted sections must be `SHT_PROGBITS` with no flags or only `SHF_COMPRESSED`;
+for example, `.comment` sections carrying `SHF_MERGE | SHF_STRINGS` stay hashed.
+An input changed during inventory is reported as an unavailable identity.
 Same-layout debug-content edits do not invalidate identity; debug rebuilds that
 change layout may conservatively invalidate it. Unsupported or malformed ELF
 layouts use whole-file SHA-256. Artifact manifests always hash complete files.

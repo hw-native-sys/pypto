@@ -166,6 +166,7 @@ def _elf_debug_ranges(stream: BinaryIO) -> list[tuple[int, int]] | None:
         return None
 
     def in_file(offset: int, size: int) -> bool:
+        """Check a declared byte range without reading or allocating its contents."""
         return offset <= length and size <= length - offset
 
     if not in_file(shoff, shsize * shnum) or not in_file(phoff, phsize * phnum):
@@ -260,6 +261,10 @@ def _executable_digest(stream: BinaryIO) -> tuple[int, str] | None:
     offset = 0
     for start, end in [*skipped, (length, length)]:
         size = start - offset
+        if size < 0:
+            raise ValueError(
+                f"Identity input changed while being read: ELF range end {start} precedes offset {offset}"
+            )
         digest.update(struct.pack(">QQ", offset, size))
         covered += size
         stream.seek(offset)
@@ -324,6 +329,7 @@ def _content_entries(
     resolved: Path | None = None,
     via_symlink: bool = True,
 ) -> list[tuple[Any, ...]]:
+    """Inventory one input recursively, retaining path semantics and detecting replacement."""
     # An entry that is not itself a symlink inherits its parent's resolution,
     # so only a symlinked entry needs a full readlink walk of every component.
     # ``via_symlink`` records which case produced ``resolved``, selecting the
