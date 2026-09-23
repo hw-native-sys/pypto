@@ -444,7 +444,7 @@ class BlockNzMutator : public IRMutator {
     // params are blocked when that function is transformed.
     const bool is_function_call = static_cast<bool>(As<GlobalVar>(op->op_));
     const bool is_slice = IsOp(op, "tensor.slice");
-    std::vector<ExprPtr> host_drop_offsets;
+    ExprPtr host_leading_index;
     if (!nz_args.empty() && !is_function_call) {
       // Name the store case directly: annotating an Out/InOut tensor pl.NZ is
       // the likely authoring mistake, and "read-only" is the actionable fact.
@@ -468,7 +468,7 @@ class BlockNzMutator : public IRMutator {
         // This metadata is consumed only by HOST distributed codegen
         // (`distributed_ops_codegen.cpp`'s `tensor.slice` handler); scope both
         // the capture and its validation to HOST functions so a CHIP-level NZ
-        // slice — which never reads `nz_host_drop_offsets` — is never rejected
+        // slice — which never reads `nz_host_leading_index` — is never rejected
         // by a constraint that exists purely for the HOST index it never emits.
         if (is_host_ && is_slice && op->args_.size() >= 5) {
           auto drop_dims = As<MakeTuple>(op->args_[4]);
@@ -483,10 +483,10 @@ class BlockNzMutator : public IRMutator {
                 << "Internal error: tensor.slice drop_dims entries must be ConstInt";
             CHECK_SPAN(dim->value_ == 0, op->span_)
                 << "NZ host tensor.slice currently supports only a scalar leading-axis index";
-            is_dropped[static_cast<size_t>(dim->value_)] = true;
-            host_drop_offsets.push_back(logical_offsets->elements_[static_cast<size_t>(dim->value_)]);
+            is_dropped[0] = true;
+            host_leading_index = logical_offsets->elements_[0];
           }
-          // HOST codegen only ever emits the dropped axes' scalar offsets, so
+          // HOST codegen only ever emits the leading scalar index, so
           // a real sub-range on some other axis (`w[rank, 2:4]`) would vanish
           // from the generated index instead of narrowing it. Every axis this
           // pass does not drop must therefore still span its full logical
@@ -517,8 +517,8 @@ class BlockNzMutator : public IRMutator {
     // from the now rank-5 shapes argument would turn the destination tile into
     // a rank-5 TileType. The GM partition is blocked; the tile is not.
     std::vector<std::pair<std::string, std::any>> new_attrs = op->attrs_;
-    if (!host_drop_offsets.empty() && !op->HasAttr(kNzHostDropOffsetsAttr)) {
-      new_attrs.emplace_back(kNzHostDropOffsetsAttr, std::move(host_drop_offsets));
+    if (host_leading_index && !op->HasAttr(kNzHostLeadingIndexAttr)) {
+      new_attrs.emplace_back(kNzHostLeadingIndexAttr, std::move(host_leading_index));
     }
     return std::make_shared<Call>(op->op_, std::move(new_args), op->kwargs_, std::move(new_attrs),
                                   std::move(new_return_type), op->span_);

@@ -38,9 +38,10 @@ from importlib import resources
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
-from pypto import codegen
+from pypto import codegen, ir
 from pypto.backend import BackendType, pto_backend
 from pypto.language.parser.diagnostics import ParserTypeError
+from pypto.pypto_core import ir as pypto_ir
 from pypto.pypto_core import passes  # match the import path used by ut/conftest.py
 
 SIZE = 64
@@ -140,6 +141,37 @@ def test_host_orch_nz_scalar_index_keeps_logical_stacked_shard_shape():
     selected_line = next(line for line in code.splitlines() if 'tensors["selected__ssa_v0"]' in line)
     assert selected_line.endswith('tensors["weights__ssa_v0"][rank__ssa_v0]')
     compile(code, "<host_orch>", "exec")
+
+
+def test_host_orch_nz_scalar_index_metadata_survives_print_and_serialize():
+    """The leading index the pass records must round-trip through IR dumps.
+
+    This module turns off the conftest round-trip check for the whole file, so
+    exercise the printer and the serializer on the blocked program directly:
+    ``dump_passes`` prints it after ``BlockNzTensorViews``, and ``serialize``
+    is how a compiled program is cached.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+        def worker(self, weights: pl.Tensor[[8, 256, 512], pl.INT8, pl.NZ]):
+            pass
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(
+            self,
+            weights: pl.Tensor[[2, 8, 256, 512], pl.INT8, pl.NZ],
+            rank: pl.Scalar[pl.INT32],
+        ):
+            selected = weights[rank]
+            self.worker(selected)
+
+    program = passes.block_nz_tensor_views()(passes.convert_to_ssa()(Prog))
+
+    assert '"nz_host_leading_index": rank__ssa_v0' in ir.python_print(program)
+    restored = pypto_ir.deserialize(pypto_ir.serialize(program))
+    ir.assert_structural_equal(restored, program)
 
 
 def test_host_orch_nz_scalar_index_rejects_a_partial_range_on_another_axis():

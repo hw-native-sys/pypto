@@ -477,11 +477,9 @@ REGISTER_DISTRIBUTED_OP(tensor_slice, "tensor.slice") {
   // StackedDeviceTensor).  A scalar leading index is the one case where the
   // logical form is recoverable without carrying every logical dimension: the
   // trailing axes are the whole shard and must not be emitted at all.
-  const auto host_drop_offsets = op->GetAttr<std::vector<ExprPtr>>(ir::kNzHostDropOffsetsAttr);
-  if (!host_drop_offsets.empty()) {
-    INTERNAL_CHECK_SPAN(host_drop_offsets.size() == 1, op->span_)
-        << "Internal error: NZ host tensor.slice metadata must contain exactly one scalar leading-axis index";
-    const std::string offset_i = codegen.GetExprAsCode(host_drop_offsets.front());
+  const auto host_leading_index = op->GetAttr<ExprPtr>(ir::kNzHostLeadingIndexAttr, nullptr);
+  if (host_leading_index) {
+    const std::string offset_i = codegen.GetExprAsCode(host_leading_index);
     std::ostringstream line;
     line << "tensors[\"" << lhs << "\"] = tensors[\"" << input_name << "\"][" << offset_i << "]";
     codegen.Emit(line.str());

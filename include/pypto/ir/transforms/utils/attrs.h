@@ -195,20 +195,21 @@ inline std::vector<std::pair<std::string, std::any>> StripAttr(
   return out;
 }
 
-/// ``Call`` attr (``std::vector<ExprPtr>``) set by ``BlockNzTensorViews`` on an
-/// NZ ``tensor.slice`` in a HOST function whose ``drop_dims`` is a scalar
-/// leading-axis index (e.g. ``w[rank]``). Blocking rewrites the slice's
-/// coordinates to the physical rank-5 form chip codegen needs, folding leading
-/// axes into one physical batch offset (e.g. ``r * groups``); HOST distributed
-/// codegen still needs to index the original logical tensor (or a
+/// ``Call`` attr (``ExprPtr``) set by ``BlockNzTensorViews`` on an NZ
+/// ``tensor.slice`` in a HOST function that drops its leading axis with a
+/// scalar index (e.g. ``w[rank]``). Blocking rewrites the slice's coordinates
+/// to the physical rank-5 form chip codegen needs, folding leading axes into
+/// one physical batch offset (e.g. ``r * groups``); HOST distributed codegen
+/// still needs to index the original logical tensor (or a
 /// ``StackedDeviceTensor``), so this attr carries the pre-blocking logical
-/// offset for each dropped axis rather than putting ``drop_dims`` back into
-/// the blocked slice, which would make the chip-side view rank-reduce the
-/// physical NZ tensor. Consumed by ``distributed_ops_codegen.cpp``'s
-/// ``tensor.slice`` handler, which emits a plain scalar index when present
-/// instead of a range slice over
+/// index rather than putting ``drop_dims`` back into the blocked slice, which
+/// would make the chip-side view rank-reduce the physical NZ tensor. A single
+/// ``ExprPtr`` is the attr type the printer, serializer and expression walkers
+/// all carry, so the index round-trips and follows variable substitutions.
+/// Consumed by ``distributed_ops_codegen.cpp``'s ``tensor.slice`` handler,
+/// which emits a plain scalar index when present instead of a range slice over
 /// the folded physical axis.
-inline constexpr const char* kNzHostDropOffsetsAttr = "nz_host_drop_offsets";
+inline constexpr const char* kNzHostLeadingIndexAttr = "nz_host_leading_index";
 
 /// ``bool`` attr on a MANUAL ``RuntimeScopeStmt`` marking it as a scope that the
 /// compiler synthesised (``AutoDeriveTaskDependencies`` / ``MaterializeRuntimeScopes``)
