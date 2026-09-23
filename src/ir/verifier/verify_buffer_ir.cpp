@@ -184,6 +184,7 @@ class BufferIRVisitor : public IRVisitor {
                                         view_handles_.count(AsVarLike(op->args_[1]).get()))) {
           CheckWindowPair(op, op->args_[0], op->args_[1], true);
         }
+        if (IsOp(op, "buffer.extract")) CheckWindowPair(op, op->args_[0], op->args_[3], false);
         if (IsOp(op, "buffer.set_validshape") && view_handles_.count(AsVarLike(op->args_[0]).get())) {
           Error("buffer.set_validshape cannot mutate static view metadata", op->span_);
         }
@@ -309,14 +310,14 @@ class BufferIRVisitor : public IRVisitor {
     uint64_t bytes;
   };
 
-  std::optional<uint64_t> DenseBytes(const BufferTypePtr& type) {
+  std::optional<uint64_t> PhysicalBytes(const BufferTypePtr& type) {
     const auto [entry, inserted] = byte_sizes_.try_emplace(type.get(), std::nullopt);
-    if (inserted) entry->second = backend::DenseBufferBytes(type);
+    if (inserted) entry->second = backend::PhysicalBufferBytes(type);
     return entry->second;
   }
 
   void RegisterWindow(const VarPtr& variable, const Var* root, uint64_t offset) {
-    if (const auto bytes = DenseBytes(As<BufferType>(variable->GetType()))) {
+    if (const auto bytes = PhysicalBytes(As<BufferType>(variable->GetType()))) {
       windows_[variable.get()] = Window{root, offset, *bytes};
     }
   }
@@ -329,6 +330,12 @@ class BufferIRVisitor : public IRVisitor {
     const auto source = AsVarLike(source_expr);
     const auto destination = AsVarLike(destination_expr);
     if (source && source == destination && exact_allowed) return;
+    // Placed addresses are per memory space: distinct spaces never overlap.
+    const auto source_type = source ? As<BufferType>(source->GetType()) : nullptr;
+    const auto destination_type = destination ? As<BufferType>(destination->GetType()) : nullptr;
+    if (source_type && destination_type && source_type->memory_space_ != destination_type->memory_space_) {
+      return;
+    }
     const auto src = windows_.find(source.get());
     const auto dst = windows_.find(destination.get());
     const std::string name = call->op_->name_;

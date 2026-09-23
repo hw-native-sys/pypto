@@ -22,6 +22,10 @@ The internal Buffer-stage GM and addition operations have no public DSL wrappers
 | `buffer.load` | GM tensor, offsets tuple, valid extents tuple, destination buffer | Void |
 | `buffer.store` | source buffer, offsets tuple, valid extents tuple, GM tensor | Void |
 | `buffer.add` | lhs buffer, rhs buffer, destination buffer | Void |
+| `buffer.copy` | source buffer, destination buffer (Vec -> Vec, or Mat -> Left/Right) | Void |
+| `buffer.extract` | source buffer, row offset, column offset, destination buffer | Void |
+| `buffer.matmul` | Left buffer, Right buffer, Acc destination | Void |
+| `buffer.matmul_acc` | Left buffer, Right buffer, Acc buffer read and written | Void |
 
 These use separate data/metadata effects. See [Buffer contracts](02-types.md#buffer-operator-contracts)
 for shape, dtype, valid-state, and alias requirements.

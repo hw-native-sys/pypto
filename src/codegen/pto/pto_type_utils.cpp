@@ -199,9 +199,6 @@ void CheckBoxedTileExtents(const ir::TileType& tile_type, const TileTypeComponen
   // about it. (PTOAS checks a byte-size alignment there instead.)
   if (components.slayout == ir::TileLayout::none_box) return;
 
-  const DataType& dtype = tile_type.dtype_;
-  const auto space = tile_type.GetMemorySpace();
-
   // `ExtractTileTypeInfo` falls back to its struct default for a dimension that
   // is not a `ConstInt`, so a dynamic physical extent would be checked -- and
   // emitted -- as that placeholder instead of as itself. `InitMemRef` (pass 34)
@@ -213,7 +210,12 @@ void CheckBoxedTileExtents(const ir::TileType& tile_type, const TileTypeComponen
         << ir::PythonPrint(dim)
         << "); InitMemRef requires a static TileType::shape_, with any runtime extent in TileView";
   }
+  CheckBoxedTileExtents(tile_type.dtype_, tile_type.GetMemorySpace(), components, span);
+}
 
+void CheckBoxedTileExtents(const DataType& dtype, std::optional<ir::MemorySpace> space,
+                           const TileTypeComponents& components, const ir::Span* span) {
+  if (components.slayout == ir::TileLayout::none_box) return;
   const int64_t bits = static_cast<int64_t>(ir::storage_size::GetStorageBitWidth(dtype));
   if (bits <= 0 || bits % 8 != 0) return;  // sub-byte carrier: not this rule
   auto box = BoxGranularity(components.fractal, components.slayout, bits / 8);

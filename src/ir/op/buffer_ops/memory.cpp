@@ -23,6 +23,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
@@ -103,6 +104,29 @@ TypePtr DeduceSetValidShape(const std::vector<ExprPtr>& args) {
   return GetVoidType();
 }
 
+// Vec transfers copy elements unchanged. A Mat load is MTE2's ND-to-fractal
+// conversion of a cube operand. An Acc store is the fix-pipe drain, whose only
+// unscaled conversions are the accumulator's own type and FP32 -> FP16/BF16.
+void CheckTransferEndpoints(const TensorType& tensor, const BufferType& buffer, bool load,
+                            const std::string& name) {
+  const auto space = buffer.memory_space_;
+  if (space == MemorySpace::Vec) {
+    CHECK(tensor.dtype_ == buffer.dtype_ && backend::IsDenseBufferTransferDtype(buffer.dtype_))
+        << name << " requires matching FP16/BF16/FP32/INT32 GM tensors and Vec buffers";
+  } else if (load && space == MemorySpace::Mat) {
+    CHECK(tensor.dtype_ == buffer.dtype_ && backend::IsCubeOperandDtype(buffer.dtype_))
+        << name << " into Mat requires matching FP16/BF16/FP32/INT8 GM tensors and buffers";
+  } else if (!load && space == MemorySpace::Acc) {
+    CHECK(backend::IsMatrixBufferDtype(space, buffer.dtype_) &&
+          CubeWritebackSupportsDataType(buffer.dtype_, tensor.dtype_))
+        << name << " from Acc cannot convert " << buffer.dtype_.ToString() << " to "
+        << tensor.dtype_.ToString() << " without a scale";
+  } else {
+    CHECK(false) << name << " does not support " << MemorySpaceToString(space)
+                 << " buffers; loads target Vec or Mat and stores read Vec or Acc";
+  }
+}
+
 TypePtr DeduceBufferTransfer(const std::vector<ExprPtr>& args, bool load) {
   const std::string name = load ? "buffer.load" : "buffer.store";
   CHECK(args.size() == 4) << name << " requires tensor/buffer, offsets, valid extents, and destination";
@@ -112,9 +136,7 @@ TypePtr DeduceBufferTransfer(const std::vector<ExprPtr>& args, bool load) {
   CHECK(tensor && buffer) << name << " requires an ordinary GM TensorType and a BufferType";
   CHECK(tensor->shape_.size() == 2 && buffer->shape_.size() == 2)
       << name << " requires rank-2 tensor and buffer operands";
-  CHECK(tensor->dtype_ == buffer->dtype_ && backend::IsDenseBufferTransferDtype(buffer->dtype_) &&
-        buffer->memory_space_ == MemorySpace::Vec)
-      << name << " requires matching FP16/BF16/FP32/INT32 GM tensors and Vec buffers";
+  CheckTransferEndpoints(*tensor, *buffer, load, name);
   auto offsets = As<MakeTuple>(args[1]);
   auto valid = As<MakeTuple>(args[2]);
   CHECK(offsets && offsets->elements_.size() == 2 && valid && valid->elements_.size() == 2)

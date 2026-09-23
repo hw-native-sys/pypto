@@ -121,6 +121,7 @@ set(PYPTO_SOURCES
 
     # IR - Operators
     src/ir/op/buffer_ops/elementwise.cpp
+    src/ir/op/buffer_ops/matrix.cpp
     src/ir/op/buffer_ops/memory.cpp
     src/ir/op/buffer_ops/view.cpp
     src/ir/op/tile_ops/batch_matmul.cpp

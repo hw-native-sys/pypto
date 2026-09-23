@@ -29,10 +29,16 @@
 namespace pypto::backend {
 
 std::optional<uint64_t> DenseBufferBytes(const ir::BufferTypePtr& type) {
-  if (!type || (type->shape_.size() != 1 && type->shape_.size() != 2) ||
-      type->blayout_ != ir::TileLayout::row_major || type->slayout_ != ir::TileLayout::none_box ||
-      type->fractal_ != 512 || type->pad_ != ir::PadValue::null || type->compact_ != ir::CompactMode::null ||
-      type->dtype_.GetBit() == 0 || type->dtype_.GetBit() % 8 != 0) {
+  if (!type || type->blayout_ != ir::TileLayout::row_major || type->slayout_ != ir::TileLayout::none_box ||
+      type->fractal_ != 512 || type->pad_ != ir::PadValue::null || type->compact_ != ir::CompactMode::null) {
+    return std::nullopt;
+  }
+  return PhysicalBufferBytes(type);
+}
+
+std::optional<uint64_t> PhysicalBufferBytes(const ir::BufferTypePtr& type) {
+  if (!type || (type->shape_.size() != 1 && type->shape_.size() != 2) || type->dtype_.GetBit() == 0 ||
+      type->dtype_.GetBit() % 8 != 0) {
     return std::nullopt;
   }
   uint64_t bytes = type->dtype_.GetBit() / 8;
@@ -63,6 +69,25 @@ ir::BufferTypePtr StaticViewDescriptor(const ir::TypePtr& type, const std::strin
   return buffer;
 }
 
+// A fractal window is never sliced or re-pitched; the only static alias is a
+// relabel of the whole window in the same space (for example NZ <-> ZN).
+void ValidateMatrixReshape(const ir::BufferTypePtr& source, const ir::BufferTypePtr& destination) {
+  CHECK(destination && destination->memory_space_ == source->memory_space_)
+      << "buffer.reshape of a " << ir::MemorySpaceToString(source->memory_space_)
+      << " buffer must stay in the same memory space";
+  CHECK(source->shape_.size() == 2 && destination->shape_.size() == 2 &&
+        destination->dtype_ == source->dtype_)
+      << "buffer.reshape of a matrix-space buffer requires rank-2 descriptors with the same element type";
+  const auto bytes = PhysicalBufferBytes(source);
+  CHECK(bytes && bytes == PhysicalBufferBytes(destination))
+      << "buffer.reshape requires equal physical byte sizes";
+  for (const auto& type : {source, destination}) {
+    for (const auto extent : type->valid_shape_) {
+      CHECK(extent >= 0) << "buffer.reshape of a matrix-space buffer requires static valid extents";
+    }
+  }
+}
+
 }  // namespace
 
 void ValidateBufferSubview(const std::vector<ir::ExprPtr>& args, const ir::TypePtr& result) {
@@ -87,6 +112,11 @@ void ValidateBufferSubview(const std::vector<ir::ExprPtr>& args, const ir::TypeP
 
 void ValidateBufferReshape(const std::vector<ir::ExprPtr>& args, const ir::TypePtr& result) {
   INTERNAL_CHECK(args.size() == 1 && args[0]) << "Internal error: buffer.reshape requires exactly one source";
+  auto matrix_source = ir::As<ir::BufferType>(args[0]->GetType());
+  if (matrix_source && IsMatrixBufferSpace(matrix_source->memory_space_)) {
+    ValidateMatrixReshape(matrix_source, ir::As<ir::BufferType>(result));
+    return;
+  }
   auto source = StaticViewDescriptor(args[0]->GetType(), "buffer.reshape");
   auto destination = StaticViewDescriptor(result, "buffer.reshape");
   CHECK(DenseBufferBytes(source) == DenseBufferBytes(destination))

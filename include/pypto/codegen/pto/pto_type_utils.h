@@ -13,6 +13,7 @@
 #define PYPTO_CODEGEN_PTO_PTO_TYPE_UTILS_H_
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
 #include "pypto/core/dtype.h"
@@ -122,6 +123,11 @@ struct TileTypeComponents {
 ///                   emitter has no statement in scope.
 void CheckBoxedTileExtents(const ir::TileType& tile_type, const TileTypeComponents& components,
                            const ir::Span* span);
+
+/// Same box rule for an already-physical descriptor, such as a Buffer IR
+/// ``BufferType``, whose element type and memory space are given directly.
+void CheckBoxedTileExtents(const DataType& dtype, std::optional<ir::MemorySpace> space,
+                           const TileTypeComponents& components, const ir::Span* span);
 
 /// Reject an unboxed (``none_box``) tile whose contiguous axis is not a whole
 /// number of 32-byte units, which PTO cannot address.

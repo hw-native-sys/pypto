@@ -263,7 +263,7 @@ def test_gm_transfers_reject_incompatible_parameter_directions(name, direction):
 @pytest.mark.parametrize(
     "tensor_type,message",
     [
-        (ir.TensorType([16, 32], DataType.INT8), "rank-2 FP16/BF16/FP32/INT32"),
+        (ir.TensorType([16, 32], DataType.INT16), "rank-2 FP16/BF16/FP32/INT32"),
         (ir.TensorType([16, 1], DataType.FP32), "columns > 1"),
         (
             ir.TensorType([16, 32], DataType.FP32, None, ir.TensorView([1, 16], ir.TensorLayout.DN)),
@@ -800,3 +800,52 @@ def test_explicit_buffer_stage_rejects_logical_tile_calls_without_any_buffer_ope
     program = _program([ir.AssignStmt(index, call, SPAN)], ir_stage=ir.FunctionIRStage.Buffer)
     with pytest.raises(ValueError, match="Logical tile operation 'tile.get_block_idx' remains in buffer IR"):
         _emit(program)
+
+
+def _matrix_type(space, shape, dtype=DataType.FP16):
+    fractal = 1024 if space == ir.MemorySpace.Acc else 512
+    return ir.BufferType(
+        list(shape), dtype, space, list(shape), ir.TileLayout.col_major, ir.TileLayout.row_major, fractal
+    )
+
+
+@pytest.mark.parametrize(
+    "space,shape,axis,inner,padded",
+    [
+        (ir.MemorySpace.Mat, (100, 128), "row", 16, 112),
+        (ir.MemorySpace.Left, (128, 24), "column", 16, 32),
+    ],
+)
+def test_partial_fractal_matrix_descriptor_names_the_extent_to_allocate(space, shape, axis, inner, padded):
+    _, allocation = _alloc("operand", _matrix_type(space, shape))
+    with pytest.raises(ValueError) as excinfo:
+        _emit(_program([allocation], ir_stage=ir.FunctionIRStage.Buffer))
+    message = str(excinfo.value)
+    assert f"its {axis} extent" in message and f"not a multiple of {inner}" in message, message
+    assert f"allocate {padded} on that axis" in message and "valid_shape" in message, message
+
+
+@pytest.mark.parametrize(
+    "space,dtype,loc,fractal",
+    [
+        (ir.MemorySpace.Mat, DataType.INT8, "mat", 512),
+        (ir.MemorySpace.Left, DataType.BF16, "left", 512),
+        (ir.MemorySpace.Right, DataType.FP16, "right", 512),
+        (ir.MemorySpace.Acc, DataType.INT32, "acc", 1024),
+    ],
+)
+def test_matrix_descriptor_renders_its_space_and_fractal_layout(space, dtype, loc, fractal):
+    _, allocation = _alloc("operand", _matrix_type(space, (32, 64), dtype), address=_int(0, DataType.INT64))
+    ((_, declaration),) = _allocations(_emit(_program([allocation], ir_stage=ir.FunctionIRStage.Buffer)))
+    assert f"loc={loc}" in declaration and f"fractal={fractal}" in declaration
+    assert "blayout=col_major, slayout=row_major" in declaration and "v_row=32, v_col=64" in declaration
+
+
+def test_matrix_descriptor_rejects_types_the_cube_cannot_hold():
+    _, allocation = _alloc("operand", _matrix_type(ir.MemorySpace.Acc, (32, 64), DataType.FP16))
+    with pytest.raises(ValueError, match="cube operands or FP32/INT32 accumulators in Acc"):
+        _emit(_program([allocation], ir_stage=ir.FunctionIRStage.Buffer))
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

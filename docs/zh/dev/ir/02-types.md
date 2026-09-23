@@ -117,7 +117,8 @@ valid 维度均为动态的描述符（`valid_shape=[-1, -1]`）。固定的初�
 
 `buffer.copy(src, dst)`、`buffer.mul(lhs, rhs, dst)` 和 `buffer.add(lhs, rhs, dst)` 写入显式
 destination 并返回 `VoidType`，目前要求所有参数的 Vec buffer 描述符
-相同。写效应并不表示所有字节都已初始化。允许输入和 destination 是同一
+相同；例外是 `buffer.copy` 还可以把 Mat 中的 cube 操作数搬入 Left 或 Right：
+元素类型与物理/valid extent 保持不变，目标描述符给出自己的分形布局。写效应并不表示所有字节都已初始化。允许输入和 destination 是同一
 句柄；构造调用前需要保证运行时 valid extent 一致，并完成部分重叠 view
 的合法化。现有 Functional 阶段的
 `ArgEffect` 查询会显式拒绝 buffer 算子，buffer 消费方必须使用
@@ -140,6 +141,8 @@ destination 并返回 `VoidType`，目前要求所有参数的 Vec buffer 描述
 偏移量为静态 `INDEX` 元组 `(row, 0)`，窗口必须处于源容量内。
 `buffer.reshape` 保持物理字节数完全相同，支持静态、紧密行主序的二维
 Vec FP16、BF16、FP32、INT16、INT32 和 UINT8 描述符，每个物理行的字节数必须为 32 的倍数。
+在 Mat、Left、Right 和 Acc 中，它只在同一空间内重新标注一个完整分形窗口
+（例如 NZ 到 ZN），要求元素类型、字节数相同且 valid extent 为静态值。
 两者均声明 `Alias(0)`、无数据访问和源元数据读效应，不分配存储，
 也不初始化数据。每个中间结果的形状、dtype 和 valid extent 均由结果
 类型显式表达。`buffer.set_validshape` 不能修改这些静态视图句柄。
@@ -149,7 +152,23 @@ Vec FP16、BF16、FP32、INT16、INT32 和 UINT8 描述符，每个物理行的�
 不同的无地址分配互不重叠；未经证明的不同输入根不能作为不重叠证明。
 同根窗口即使使用运行时基地址，仍可证明相对范围不重叠。此检查不建立
 初始化或生命周期安全证明。输入非视图 buffer 之间的旧拷贝契约仍保留
-原有重叠前提。
+原有重叠前提。已放置地址只在同一内存空间内比较；不同空间的窗口不会重叠。
+
+Cube 操作从 Left/Right 操作数写入显式的 Acc 目标：
+
+```text
+buffer.matmul(lhs_left, rhs_right, acc) : Void        # acc = lhs @ rhs
+buffer.matmul_acc(lhs_left, rhs_right, acc) : Void    # acc = acc + lhs @ rhs
+buffer.extract(src, row, col, dst) : Void             # 静态形状窗口拷贝
+```
+
+操作数为二维物理描述符 `[M, K] x [K, N] -> [M, N]`，两个输入元素类型相同，
+为 FP16、BF16、FP32 或 INT8，累加器对应 FP32/INT32。静态的 rhs valid K
+必须覆盖 lhs valid K。`buffer.matmul` 恰好写入乘积的 valid 矩形；
+`buffer.matmul_acc` 读写其目标，目标的 valid 矩形可以包含更窄的乘积。它没有
+单独的累加器输入：累加总是原地进行。`buffer.extract` 在整数或 `INDEX` 偏移处
+复制与目标形状相同的窗口，方向为 Mat 到 Left/Right 或 Vec 内部；常量偏移会做
+边界检查，偏移是非内存操作数。
 
 GM 传输将完整窗口表示为普通操作数：
 
@@ -159,7 +178,10 @@ buffer.store(src_buffer, offsets_tuple, valid_extents_tuple, tensor) : Void
 ```
 
 传输契约要求普通二维 Tensor/Vec Buffer 操作数，元素类型匹配且为
-FP16、BF16、FP32 或 INT32。偏移量是非负的
+FP16、BF16、FP32 或 INT32。`buffer.load` 还可以填充 Mat 中的 cube 操作数
+（FP16、BF16、FP32 或 INT8，传输把 ND 转成分形布局）。`buffer.store` 还可以
+通过 fix-pipe 导出 Acc 累加器；不带 scale 的转换只有保持累加器类型，以及
+FP32 转 FP16/BF16。偏移量是非负的
 元素索引，两个 tuple 均包含两个整数或 `INDEX` 标量。传输长度必须等于
 buffer 当前的 valid extent；静态描述符维度必须使用完全相同的常量。
 常量长度和窗口会对照 buffer 容量、GM 物理形状及 Tensor 的有效区域检查；

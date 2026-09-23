@@ -94,6 +94,42 @@ value = buffer.reshape(window) : Buffer[[16,32], FP32, Vec]
 所有视图必须位于原始容量内，字节偏移、字节大小和物理行均须静态且按 32 字节对齐。
 带步长或分形布局的视图、可变视图元数据仍不支持。
 
+## 矩阵存储与 cube 转换 {#matrix-storage-and-cube-recipes}
+
+Mat、Left、Right 和 Acc Tile 在 `BufferType` 中保留已确定的分形布局（`blayout`、
+`slayout`、`fractal`、`compact`）。它们的物理范围已经是完整的分形块，而分形窗口没有
+行主序的字节视图，因此这些空间不使用 `UINT8[N,32]` 根。带地址的规划器已经确定了每个
+窗口，所以每个不同窗口都成为位于其最终有效地址的独立 `buffer.alloc`；同一地址上的两个
+描述符正是按规划器的放置互为别名。PTOAS 分配没有地址，因此每个分配只承载一个窗口；
+对该窗口的等大小重新标注成为 `buffer.reshape` 别名。
+
+```text
+# x = a @ b; y = x + a @ b; store y  (FP16 操作数，FP32 累加器)
+a_mat = buffer.alloc((), 0)      : Buffer[[64,64], FP16, Mat, NZ]
+b_mat = buffer.alloc((), 8192)   : Buffer[[64,64], FP16, Mat, NZ]
+a_l0  = buffer.alloc((), 0)      : Buffer[[64,64], FP16, Left]
+b_l0  = buffer.alloc((), 0)      : Buffer[[64,64], FP16, Right, ZN]
+acc   = buffer.alloc((), 0)      : Buffer[[64,64], FP32, Acc, fractal=1024]
+buffer.load(A, (0,0), (64,64), a_mat)
+buffer.load(B, (0,0), (64,64), b_mat)
+buffer.copy(a_mat, a_l0)
+buffer.copy(b_mat, b_l0)
+buffer.matmul(a_l0, b_l0, acc)
+buffer.matmul_acc(a_l0, b_l0, acc)
+buffer.store(acc, (0,0), (64,64), Out)
+```
+
+从 Mat 出发的 `tile.move` 转为 `buffer.copy`，`tile.extract` 转为 `buffer.extract`，
+`tile.matmul` 转为 `buffer.matmul`。`tile.matmul_acc` 必须已经是原地累加（累加器与结果
+共享存储），转为 `buffer.matmul_acc`。其可选的 `init_cond` 决定写入形式：字面量直接选择
+一个调用，运行时条件则变成显式 `if`，两个分支分别是 `buffer.matmul` 和
+`buffer.matmul_acc`。`tile.transpose_view` 不需要调用：存储索引阶段已经声明了重新标注的
+窗口。Acc store 只使用 fix-pipe 不带 scale 的转换；`pre_quant`/`pre_relu`、原子与分阶段
+store 以及 cache 策略 load 在对应传输配方完成前仍显式报错。
+
+流水线阶段归属属性只约束存储规划，而规划结果已经记录在 MemRef 中。本 pass 会丢弃该属性
+（地址规划更早地去掉它；PTOAS 下它会保留到这里）。其他调用属性仍需显式的转换契约。
+
 ## 分支
 
 存储合法化已经为每个 Tile 分支结果选择规范目标窗口，并在各分支体内放置必要的传输。
@@ -155,7 +191,8 @@ buffer.store(left_buf, (row_result, column_result), (16, 32), Out)
 ## 首批支持的转换
 
 当前转换支持直线程序、分支和循环、静态二维稠密 Vec FP16/BF16/FP32/INT32 Tile、显式静态存储视图、静态有效范围、
-普通紧密排列的 ND GM Tensor 以及默认加载/存储策略。
+普通紧密排列的 ND GM Tensor 以及默认加载/存储策略，另外还有上文的 cube 路径：Mat load、
+Mat 到 Left/Right 的拷贝与 extract、matmul/matmul_acc 以及 Acc store。
 它转换分配、create、load、store、move、已经合法化的别名及[带类型的逐元素配方](../ir/05-operators.md#typed-buffer-elementwise-recipes)。
 标量输入在 lowering 中显式转换为目标 dtype；发射器直接消费这些类型。
 `tile.full` 的形状和 dtype 由目标描述符表示，不会重复作为指令属性发射。
@@ -175,6 +212,10 @@ BF16 传输支持不代表算术支持。
 `tests/ut/ir/transforms/test_lower_buffer_views.py` 检查分配容量、非零窗口偏移、
 重复视图身份、无法证明地址时的诊断、二进制持久化，以及两个目标和三个规划器的原生编译。
 
+`tests/ut/ir/transforms/test_lower_buffer_matrix.py` 针对 FP16、BF16、FP32 和 INT8 操作数
+转换显式及自动分块的 cube 内核，覆盖三种 `init_cond` 形式和转置操作数，并在三种规划器、
+两个目标上原生编译生成的 PTO。
+
 数值系统测试应在公开 `@pl.jit` 入口对应的 case 上声明
 `st.case(..., enable_buffer_ir=True, memory_planner=...)`。
 测试框架 (Harness) 会在内联及预编译工作线程内部应用该选项；仅在测试线程外层设置
@@ -182,7 +223,8 @@ BF16 传输支持不代表算术支持。
 设备函数阶段，并将转换后程序保存为原生构件旁的 `buffer_ir.msgpack`。
 
 `tests/st/runtime/ops/test_buffer_ir.py` 为三种规划器提供带编排的
-load/add/mul/store 数值测试。只运行这个目标文件：
+load/add/mul/store 数值测试，以及精确比较的 cube 用例：FP16/BF16/INT8 的 matmul 加
+matmul_acc、带运行时 `init_cond` 的 K 循环、自动分块的 BF16 matmul 以及 `b_trans` matmul。只运行这个目标文件：
 
 ```bash
 source .claude/skills/testing/load-env.sh

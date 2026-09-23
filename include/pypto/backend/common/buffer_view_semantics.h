@@ -24,8 +24,13 @@ namespace pypto::backend {
 /// Dense physical window size. Unsupported layouts and overflow are unproven.
 std::optional<uint64_t> DenseBufferBytes(const ir::BufferTypePtr& type);
 
+/// Physical window size of any byte-addressable rank-1/2 descriptor, including
+/// fractal matrix layouts, whose physical extents are already whole boxes.
+std::optional<uint64_t> PhysicalBufferBytes(const ir::BufferTypePtr& type);
+
 /// Static native view forms, with every intermediate descriptor already in IR.
 /// Subview slices full-width UINT8[N,32] rows; reshape preserves physical bytes.
+/// A matrix-space reshape relabels one fractal window within its memory space.
 void ValidateBufferSubview(const std::vector<ir::ExprPtr>& args, const ir::TypePtr& result);
 void ValidateBufferReshape(const std::vector<ir::ExprPtr>& args, const ir::TypePtr& result);
 

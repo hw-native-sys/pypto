@@ -134,7 +134,9 @@ proofs belong to subsequent verification.
 
 The `buffer.copy(src, dst)`, `buffer.mul(lhs, rhs, dst)`, and `buffer.add(lhs, rhs, dst)` operations
 write their explicit destination and return `VoidType`. They currently require
-matching Vec buffer descriptors. A write effect does not imply that all bytes
+matching Vec buffer descriptors, except that `buffer.copy` also moves a Mat cube
+operand into Left or Right: the element type and physical/valid extents stay
+the same while the destination descriptor supplies its own fractal layout. A write effect does not imply that all bytes
 are initialized. Exact input/destination aliases are allowed; equality of
 runtime valid extents and legalization of partially overlapping views are
 preconditions for constructing these calls. Existing Functional-stage `ArgEffect` queries deliberately
@@ -160,7 +162,9 @@ Static storage views use ordinary SSA alias edges in the same Buffer stage:
 buffers and static `INDEX` offsets `(row, 0)`. Its window must fit within the
 source. `buffer.reshape` preserves the exact physical byte count and accepts
 static dense row-major rank-2 Vec FP16, BF16, FP32, INT16, INT32 and UINT8 descriptors, with physical
-rows aligned to 32 bytes. Both operations declare `Alias(0)`, no data access, and
+rows aligned to 32 bytes. In Mat, Left, Right and Acc it only relabels one
+whole fractal window in the same space (for example NZ to ZN) with the same
+element type, byte count and static valid extents. Both operations declare `Alias(0)`, no data access, and
 source-metadata read. They neither allocate storage nor initialize data.
 Every intermediate shape, dtype and valid extent is explicit in its result type.
 `buffer.set_validshape` cannot mutate these static view handles.
@@ -172,7 +176,26 @@ placed roots. Distinct addressless allocations are disjoint; distinct unproven
 incoming roots are not a disjointness proof. Same-root disjoint windows remain
 provable even with a runtime base address. This does not establish initialization
 or lifetime safety. Legacy copies between incoming non-view buffers retain their
-existing overlap precondition.
+existing overlap precondition. Placed addresses are compared only within one
+memory space; windows in different spaces never overlap.
+
+Cube operations write an explicit Acc destination from Left/Right operands:
+
+```text
+buffer.matmul(lhs_left, rhs_right, acc) : Void        # acc = lhs @ rhs
+buffer.matmul_acc(lhs_left, rhs_right, acc) : Void    # acc = acc + lhs @ rhs
+buffer.extract(src, row, col, dst) : Void             # static-shape window copy
+```
+
+Operands are rank-2 `[M, K] x [K, N] -> [M, N]` physical descriptors with
+identical FP16, BF16, FP32 or INT8 operand types and the matching FP32/INT32
+accumulator. Static rhs valid K must cover lhs valid K. `buffer.matmul` writes
+exactly the product's valid rectangle; `buffer.matmul_acc` reads and writes its
+destination, whose valid rectangle may contain a narrower product. It has no
+separate accumulator input: accumulation is in place. `buffer.extract` copies a
+destination-shaped window at integer or `INDEX` offsets from Mat into Left/Right,
+or within Vec; constant offsets are bounds-checked and the offsets are
+non-memory operands.
 
 GM transfers expose their complete window as ordinary operands:
 
@@ -182,7 +205,11 @@ buffer.store(src_buffer, offsets_tuple, valid_extents_tuple, tensor) : Void
 ```
 
 These transfer schemas require ordinary rank-2 Tensor/Vec Buffer operands
-with matching FP16, BF16, FP32 or INT32 element types. Offsets are nonnegative element indices. The tuples contain two
+with matching FP16, BF16, FP32 or INT32 element types. `buffer.load` may also
+fill a Mat cube operand (FP16, BF16, FP32 or INT8; the transfer converts ND to
+the fractal layout). `buffer.store` may also drain an Acc accumulator through
+the fix-pipe, whose only unscaled conversions keep the accumulator type or turn
+FP32 into FP16/BF16. Offsets are nonnegative element indices. The tuples contain two
 integer or `INDEX` scalars. Each transfer extent must equal the buffer's current
 valid extent; a static descriptor axis requires that exact constant. Constant
 extents and windows are checked against buffer capacity, GM physical shape,

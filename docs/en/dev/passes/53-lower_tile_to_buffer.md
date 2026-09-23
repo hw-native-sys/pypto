@@ -108,6 +108,50 @@ origin zero. Every view must fit within the original capacity, with static
 32-byte-aligned byte offsets, byte counts and physical rows. Strided or boxed
 views and mutable view metadata remain unsupported.
 
+## Matrix storage and cube recipes
+
+Mat, Left, Right and Acc tiles keep their resolved fractal layout in the
+`BufferType` (`blayout`, `slayout`, `fractal`, `compact`). Their physical
+extents are already whole fractal boxes, and a fractal window has no row-major
+byte view, so these spaces never use the `UINT8[N,32]` root. Addressed planners
+have already fixed every window, so each distinct window becomes its own
+`buffer.alloc` at its final effective address; two descriptors at one address
+alias exactly as the planner placed them. PTOAS allocations are addressless and
+therefore carry one window each; a same-size relabel of that window becomes a
+`buffer.reshape` alias.
+
+```text
+# x = a @ b; y = x + a @ b; store y  (FP16 operands, FP32 accumulator)
+a_mat = buffer.alloc((), 0)      : Buffer[[64,64], FP16, Mat, NZ]
+b_mat = buffer.alloc((), 8192)   : Buffer[[64,64], FP16, Mat, NZ]
+a_l0  = buffer.alloc((), 0)      : Buffer[[64,64], FP16, Left]
+b_l0  = buffer.alloc((), 0)      : Buffer[[64,64], FP16, Right, ZN]
+acc   = buffer.alloc((), 0)      : Buffer[[64,64], FP32, Acc, fractal=1024]
+buffer.load(A, (0,0), (64,64), a_mat)
+buffer.load(B, (0,0), (64,64), b_mat)
+buffer.copy(a_mat, a_l0)
+buffer.copy(b_mat, b_l0)
+buffer.matmul(a_l0, b_l0, acc)
+buffer.matmul_acc(a_l0, b_l0, acc)
+buffer.store(acc, (0,0), (64,64), Out)
+```
+
+`tile.move` from Mat becomes `buffer.copy`, `tile.extract` becomes
+`buffer.extract`, and `tile.matmul` becomes `buffer.matmul`. `tile.matmul_acc`
+must already accumulate in place (its accumulator and result share storage) and
+becomes `buffer.matmul_acc`. Its optional `init_cond` selects the write form: a
+literal chooses one call, and a runtime predicate becomes an explicit `if`
+whose arms are `buffer.matmul` and `buffer.matmul_acc`. `tile.transpose_view`
+needs no call: storage indexing has already declared the relabelled window.
+Acc stores drain through the fix-pipe with its unscaled conversions only;
+`pre_quant`/`pre_relu`, atomic and phased stores, and cache-policy loads still
+fail explicitly until their transfer recipes exist.
+
+Pipeline-stage membership attributes only constrain storage planning, which the
+MemRefs already record. The pass drops that attribute (address planning strips
+it earlier; PTOAS keeps it until here). Any other call attribute still needs an
+explicit conversion contract.
+
 ## Branches
 
 Storage legalization has already selected one destination window for each Tile
@@ -176,7 +220,8 @@ assignments; `FlattenCallExpr` handles nested source expressions beforehand.
 
 The current recipes support straight-line kernels, branches and loops with static
 rank-2 dense Vec FP16/BF16/FP32/INT32 tiles with explicit static storage views, static valid extents, ordinary packed ND GM tensors,
-and default load/store policies. It converts allocation, create, load, store,
+and default load/store policies, plus the cube path above: Mat loads, Mat to
+Left/Right copies and extracts, matmul/matmul_acc and Acc stores. It converts allocation, create, load, store,
 move, already legalized aliases, and the [typed elementwise recipes](../ir/05-operators.md#typed-buffer-elementwise-recipes).
 GM load/store preserve matching element types without casts. `add`/`mul` support
 FP16/FP32/INT32; BF16 transfer support does not imply arithmetic support.
@@ -202,6 +247,11 @@ and binary persistence, and compiles the resulting PTO with native PTOAS.
 nonzero window offsets, repeated view identity, fail-closed placement diagnostics,
 binary persistence and native compilation on both targets with all three planners.
 
+`tests/ut/ir/transforms/test_lower_buffer_matrix.py` lowers explicit and
+auto-tiled cube kernels for FP16, BF16, FP32 and INT8 operands, the three
+`init_cond` forms and a transposed operand for all planners, then compiles the
+PTO natively on both targets.
+
 For numerical system tests, declare `st.case(..., enable_buffer_ir=True,
 memory_planner=...)` on the public `@pl.jit` entry. The harness applies the option
 inside both inline and precompile-worker compilations; an outer test-thread
@@ -210,7 +260,9 @@ cache keys. The harness checks the actual final device function stages and saves
 the transformed program as `buffer_ir.msgpack` beside the native artifacts.
 
 `tests/st/runtime/ops/test_buffer_ir.py` provides load/add/mul/store numerical
-cases with orchestration for all three planners. Run only this targeted file:
+cases with orchestration for all three planners, and exact cube cases:
+matmul followed by matmul_acc for FP16/BF16/INT8, a K loop with a runtime
+`init_cond`, an auto-tiled BF16 matmul and a `b_trans` matmul. Run only this targeted file:
 
 ```bash
 source .claude/skills/testing/load-env.sh

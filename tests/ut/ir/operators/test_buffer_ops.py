@@ -191,7 +191,7 @@ def test_gm_transfer_contract_exposes_window_and_memory_effects(name):
         ("tensor", ir.TensorType([32, 64], DataType.FP16), "matching"),
         ("buffer", ir.BufferType([32], DataType.FP32, ir.Mem.Vec), "rank-2"),
         ("buffer", ir.BufferType([16, 32], DataType.FP16, ir.Mem.Vec), "matching"),
-        ("buffer", ir.BufferType([16, 32], DataType.FP32, ir.Mem.Mat), "Vec"),
+        ("buffer", ir.BufferType([16, 32], DataType.FP32, ir.Mem.Left), "Vec"),
         ("offsets", valid_extents(0), "rank-2 MakeTuple"),
         ("offsets", valid_extents(-1, 0), "nonnegative"),
         ("offsets", valid_extents(17, 0), "exceeds GM"),
@@ -360,6 +360,205 @@ def test_buffer_spmd_queries_have_scalar_results_and_validate_schema(suffix):
         _ir._create_internal_op_call(name, [ir.ConstInt(0, DataType.INDEX, span)], {}, span)
     with pytest.raises(ValueError, match="Unknown kwarg"):
         _ir._create_internal_op_call(name, [], {"unknown": True}, span)
+
+
+_NZ = (ir.TileLayout.col_major, ir.TileLayout.row_major)
+_ZN = (ir.TileLayout.row_major, ir.TileLayout.col_major)
+
+
+def matrix_var(name: str, space: ir.MemorySpace, shape: list[int], dtype: DataType, **fields: Any) -> ir.Var:
+    blayout, slayout = _ZN if space == ir.MemorySpace.Right else _NZ
+    layout: dict[str, Any] = dict(
+        blayout=blayout, slayout=slayout, fractal=1024 if space == ir.MemorySpace.Acc else 512
+    )
+    layout.update(fields)
+    return buffer_var(name, shape=shape, dtype=dtype, memory_space=space, **layout)
+
+
+def matmul_args(
+    lhs_dtype: DataType = DataType.FP16, acc_dtype: DataType = DataType.FP32, **acc: Any
+) -> list[ir.Expr]:
+    return [
+        matrix_var("lhs", ir.MemorySpace.Left, [16, 64], lhs_dtype),
+        matrix_var("rhs", ir.MemorySpace.Right, [64, 32], lhs_dtype),
+        matrix_var("acc", ir.MemorySpace.Acc, acc.pop("shape", [16, 32]), acc_dtype, **acc),
+    ]
+
+
+@pytest.mark.parametrize(
+    "name,destination_access",
+    [("buffer.matmul", ir.BufferAccess.Write), ("buffer.matmul_acc", ir.BufferAccess.ReadWrite)],
+)
+def test_matmul_writes_an_explicit_acc_destination(name, destination_access):
+    call = internal_call(name, matmul_args())
+    assert isinstance(call.type, ir.VoidType)
+    assert ir.get_op_ir_stage(name) == ir.OpIRStage.Buffer
+    assert ir.get_op_output_arity(name) == 0
+    for index, access in [(0, ir.BufferAccess.Read), (1, ir.BufferAccess.Read), (2, destination_access)]:
+        effect = ir.get_op_buffer_arg_effect(name, index)
+        assert (effect.data, effect.metadata, effect.non_memory) == (access, ir.BufferAccess.Read, False)
+    with pytest.raises(ValueError, match="internal-only"):
+        ir.create_op_call(name, matmul_args(), ir.Span.unknown())
+    ir.assert_structural_equal(call, ir.deserialize(ir.serialize(call)), enable_auto_mapping=True)
+
+
+@pytest.mark.parametrize(
+    "lhs_dtype,acc_dtype",
+    [
+        (DataType.FP16, DataType.FP32),
+        (DataType.BF16, DataType.FP32),
+        (DataType.FP32, DataType.FP32),
+        (DataType.INT8, DataType.INT32),
+    ],
+)
+def test_matmul_accepts_each_cube_accumulator_pairing(lhs_dtype, acc_dtype):
+    for name in ("buffer.matmul", "buffer.matmul_acc"):
+        assert isinstance(internal_call(name, matmul_args(lhs_dtype, acc_dtype)).type, ir.VoidType)
+
+
+@pytest.mark.parametrize(
+    "index,replacement,message",
+    [
+        (0, ("lhs", ir.MemorySpace.Mat, [16, 64], DataType.FP16), "rank-2 Left buffer"),
+        (1, ("rhs", ir.MemorySpace.Left, [64, 32], DataType.FP16), "rank-2 Right buffer"),
+        (2, ("acc", ir.MemorySpace.Vec, [16, 32], DataType.FP32), "rank-2 Acc buffer"),
+        (1, ("rhs", ir.MemorySpace.Right, [64, 32], DataType.BF16), "identical lhs and rhs"),
+        (2, ("acc", ir.MemorySpace.Acc, [16, 32], DataType.INT32), "fp32 accumulator"),
+        (1, ("rhs", ir.MemorySpace.Right, [48, 32], DataType.FP16), r"\[M, K\] x \[K, N\]"),
+        (2, ("acc", ir.MemorySpace.Acc, [32, 32], DataType.FP32), r"\[M, K\] x \[K, N\]"),
+        (0, ("lhs", ir.MemorySpace.Left, [16, 64], DataType.INT32), "does not support int32 Left"),
+    ],
+)
+def test_matmul_rejects_wrong_spaces_types_and_shapes(index, replacement, message):
+    args = matmul_args()
+    args[index] = matrix_var(*replacement)
+    with pytest.raises(ValueError, match=message):
+        internal_call("buffer.matmul", args)
+
+
+def test_only_the_accumulating_form_may_write_a_wider_valid_rectangle():
+    wider = matmul_args()
+    wider[1] = matrix_var("rhs", ir.MemorySpace.Right, [64, 32], DataType.FP16, valid_shape=[64, 24])
+    assert isinstance(internal_call("buffer.matmul_acc", wider).type, ir.VoidType)
+    with pytest.raises(ValueError, match="must equal the product valid extent 24"):
+        internal_call("buffer.matmul", wider)
+    narrower = matmul_args(valid_shape=[16, 24])
+    with pytest.raises(ValueError, match="must contain the product valid extent 32"):
+        internal_call("buffer.matmul_acc", narrower)
+    uncovered_k = matmul_args()
+    uncovered_k[1] = matrix_var("rhs", ir.MemorySpace.Right, [64, 32], DataType.FP16, valid_shape=[48, 32])
+    with pytest.raises(ValueError, match="rhs valid K to cover lhs valid K"):
+        internal_call("buffer.matmul", uncovered_k)
+
+
+def extract_args(
+    row: int | ir.Expr = 16,
+    col: int | ir.Expr = 0,
+    space: ir.MemorySpace = ir.MemorySpace.Left,
+    dtype: DataType = DataType.FP16,
+    **destination: Any,
+) -> list[ir.Expr]:
+    span = ir.Span.unknown()
+    source = matrix_var("mat", ir.MemorySpace.Mat, [64, 64], DataType.FP16)
+    target = matrix_var("l0", space, [16, 64], dtype, **destination)
+    offsets = [
+        value if isinstance(value, ir.Expr) else ir.ConstInt(value, DataType.INDEX, span)
+        for value in (row, col)
+    ]
+    return [source, *offsets, target]
+
+
+def test_extract_exposes_runtime_offsets_as_non_memory_operands():
+    row = ir.Var("row", ir.ScalarType(DataType.INDEX), ir.Span.unknown())
+    call = internal_call("buffer.extract", extract_args(row=row))
+    assert isinstance(call.type, ir.VoidType)
+    effects = [ir.get_op_buffer_arg_effect("buffer.extract", index) for index in range(4)]
+    assert [effect.non_memory for effect in effects] == [False, True, True, False]
+    assert (effects[0].data, effects[3].data) == (ir.BufferAccess.Read, ir.BufferAccess.Write)
+    ir.assert_structural_equal(call, ir.deserialize(ir.serialize(call)), enable_auto_mapping=True)
+    vec = [buffer_var("src", shape=[32, 32]), *extract_args()[1:3], buffer_var("dst", shape=[16, 32])]
+    assert isinstance(internal_call("buffer.extract", vec).type, ir.VoidType)
+
+
+@pytest.mark.parametrize(
+    "options,message",
+    [
+        (dict(row=49), r"row window \[49, 65\) exceeds the source extent 64"),
+        (dict(col=16), r"column window \[16, 80\) exceeds the source extent 64"),
+        (
+            dict(space=ir.MemorySpace.Acc, dtype=DataType.FP32, fractal=1024),
+            "Mat -> Left/Right and Vec -> Vec",
+        ),
+        (dict(dtype=DataType.BF16), "matching element types"),
+        (dict(row=ir.ConstFloat(1.0, DataType.FP32, ir.Span.unknown())), "integer or INDEX"),
+    ],
+)
+def test_extract_rejects_out_of_range_windows_and_unsupported_pairs(options, message):
+    with pytest.raises(ValueError, match=message):
+        internal_call("buffer.extract", extract_args(**options))
+
+
+@pytest.mark.parametrize("space", [ir.MemorySpace.Left, ir.MemorySpace.Right])
+def test_copy_moves_a_mat_operand_into_l0_with_its_own_layout(space):
+    source = matrix_var("mat", ir.MemorySpace.Mat, [16, 64], DataType.FP16)
+    assert isinstance(
+        internal_call("buffer.copy", [source, matrix_var("l0", space, [16, 64], DataType.FP16)]).type,
+        ir.VoidType,
+    )
+    for changed in (dict(shape=[16, 32]), dict(valid_shape=[16, 48])):
+        options = dict(shape=[16, 64])
+        options.update(changed)
+        target = matrix_var("l0", space, options.pop("shape"), DataType.FP16, **options)
+        with pytest.raises(ValueError, match="keep the element type and the physical and valid extents"):
+            internal_call("buffer.copy", [source, target])
+
+
+def test_copy_rejects_other_cross_space_moves():
+    acc = matrix_var("acc", ir.MemorySpace.Acc, [16, 64], DataType.FP32)
+    mat = matrix_var("mat", ir.MemorySpace.Mat, [16, 64], DataType.FP32)
+    with pytest.raises(ValueError, match="got Acc -> Mat"):
+        internal_call("buffer.copy", [acc, mat])
+
+
+def test_mat_load_and_acc_store_are_the_only_matrix_transfers():
+    span = ir.Span.unknown()
+    window = [valid_extents(0, 0), valid_extents(16, 32)]
+    fp16 = ir.Var("gm16", ir.TensorType([32, 64], DataType.FP16), span)
+    assert isinstance(
+        internal_call(
+            "buffer.load", [fp16, *window, matrix_var("mat", ir.MemorySpace.Mat, [16, 32], DataType.FP16)]
+        ).type,
+        ir.VoidType,
+    )
+    accumulator = matrix_var("acc", ir.MemorySpace.Acc, [16, 32], DataType.FP32)
+    assert isinstance(internal_call("buffer.store", [accumulator, *window, fp16]).type, ir.VoidType)
+    integer = matrix_var("acc", ir.MemorySpace.Acc, [16, 32], DataType.INT32)
+    with pytest.raises(ValueError, match="cannot convert int32 to fp16 without a scale"):
+        internal_call("buffer.store", [integer, *window, fp16])
+    mat = matrix_var("mat", ir.MemorySpace.Mat, [16, 32], DataType.FP16)
+    with pytest.raises(ValueError, match="does not support Mat buffers"):
+        internal_call("buffer.store", [mat, *window, fp16])
+    with pytest.raises(ValueError, match="does not support Acc buffers"):
+        internal_call(
+            "buffer.load", [ir.Var("gm", ir.TensorType([32, 64], DataType.FP32), span), *window, accumulator]
+        )
+
+
+def test_matrix_reshape_relabels_one_window_in_its_space():
+    source = matrix_var("nz", ir.MemorySpace.Mat, [64, 32], DataType.FP16)
+    transposed = ir.BufferType([32, 64], DataType.FP16, ir.MemorySpace.Mat, [32, 64], *_ZN)
+    call = _ir._create_internal_op_call("buffer.reshape", [source], {}, transposed, ir.Span.unknown())
+    ir.assert_structural_equal(call.type, transposed)
+    for result, message in [
+        (ir.BufferType([32, 64], DataType.FP16, ir.MemorySpace.Left, [32, 64], *_NZ), "same memory space"),
+        (
+            ir.BufferType([32, 32], DataType.FP16, ir.MemorySpace.Mat, [32, 32], *_ZN),
+            "equal physical byte sizes",
+        ),
+        (ir.BufferType([32, 32], DataType.FP32, ir.MemorySpace.Mat, [32, 32], *_ZN), "same element type"),
+    ]:
+        with pytest.raises(ValueError, match=message):
+            _ir._create_internal_op_call("buffer.reshape", [source], {}, result, ir.Span.unknown())
 
 
 if __name__ == "__main__":

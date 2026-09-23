@@ -46,7 +46,7 @@ declared in the constants block before its use.
 ### Explicit Buffer input
 
 `GenerateBufferFunction` validates explicitly constructed Buffer IR before
-emission. Its GM path supports static, packed ND rank-2 FP16/BF16/FP32/INT32 Tensor parameters
+emission. Its GM path supports static, packed ND rank-2 FP16/BF16/FP32/INT32/INT8 Tensor parameters
 and normalized Tensor parameter returns. It shares the existing GM tensor-view
 prologue and native tensors-first/scalars-last ABI. Tensor returns remain in IR
 for orchestration aliasing; they do not create native return values.
@@ -69,6 +69,15 @@ Static storage aliases arrive as explicit `buffer.subview` and `buffer.reshape`
 operations. Codegen maps them to `pto.subview` and `pto.treshape`, preserving the
 source handle and result descriptor without allocating, copying, or inferring
 storage windows. Descriptor bounds and alias legality are verified before emission.
+
+Mat, Left, Right and Acc descriptors render as `loc=mat|left|right|acc` with
+their fractal `blayout`/`slayout`/`fractal` fields, and must be whole fractal
+boxes: a partial box is rejected with the same extent-to-allocate diagnostic as
+the legacy path. `buffer.matmul` and `buffer.matmul_acc` render as
+`pto.tmatmul` and `pto.tmatmul.acc`; the accumulating form passes its
+destination as the first input, as PTOAS requires. `buffer.extract` renders as
+`pto.textract` with `index` offsets, and a Mat to Left/Right `buffer.copy` as
+`pto.tmov`.
 
 ### Class Structure
 

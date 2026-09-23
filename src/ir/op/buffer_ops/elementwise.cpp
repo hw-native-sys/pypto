@@ -29,38 +29,50 @@ namespace ir {
 
 namespace {
 
-TypePtr DeduceVecBufferWrite(const std::vector<ExprPtr>& args, size_t argument_count,
-                             const std::string& op_name) {
-  CHECK(args.size() == argument_count)
-      << op_name << " requires " << argument_count << " buffer operands, got " << args.size();
-  BufferTypePtr descriptor;
+// A Vec copy duplicates one descriptor. A Mat -> Left/Right copy is MTE1's
+// relayout into a cube operand buffer: the element type and the physical and
+// valid extents are kept, while the destination descriptor supplies the target
+// fractal layout. Other cross-space moves need their own recipes.
+TypePtr DeduceBufferCopy(const std::vector<ExprPtr>& args) {
+  CHECK(args.size() == 2) << "buffer.copy requires 2 buffer operands, got " << args.size();
+  std::vector<BufferTypePtr> buffers;
   for (size_t i = 0; i < args.size(); ++i) {
-    CHECK(args[i]) << op_name << " argument " << i << " must not be null";
+    CHECK(args[i]) << "buffer.copy argument " << i << " must not be null";
     auto buffer = As<BufferType>(args[i]->GetType());
-    CHECK(buffer) << op_name << " argument " << i << " must have BufferType";
-    CHECK(buffer->memory_space_ == MemorySpace::Vec)
-        << op_name << " argument " << i << " must be in Vec memory";
-    if (!descriptor) {
-      descriptor = buffer;
-    } else {
-      CHECK(structural_equal(descriptor, buffer))
-          << op_name << " requires identical physical descriptors, including valid shape, layout and padding";
-    }
+    CHECK(buffer) << "buffer.copy argument " << i << " must have BufferType";
+    buffers.push_back(buffer);
   }
+  const auto& source = buffers[0];
+  const auto& destination = buffers[1];
+  if (source->memory_space_ == MemorySpace::Vec && destination->memory_space_ == MemorySpace::Vec) {
+    CHECK(structural_equal(source, destination))
+        << "buffer.copy requires identical physical descriptors, including valid shape, layout and padding";
+    return GetVoidType();
+  }
+  CHECK(source->memory_space_ == MemorySpace::Mat &&
+        (destination->memory_space_ == MemorySpace::Left || destination->memory_space_ == MemorySpace::Right))
+      << "buffer.copy operands must be in Vec memory, except for a Mat -> Left/Right cube operand copy; got "
+      << MemorySpaceToString(source->memory_space_) << " -> "
+      << MemorySpaceToString(destination->memory_space_);
+  CHECK(source->dtype_ == destination->dtype_ && source->shape_ == destination->shape_ &&
+        source->valid_shape_ == destination->valid_shape_)
+      << "buffer.copy from Mat requires the destination to keep the element type and the physical and "
+         "valid extents";
   return GetVoidType();
 }
 
 }  // namespace
 
-// These initial internal operators require equal physical descriptors. An
-// exact input/destination alias is legal; partially overlapping views must be
+// These internal operators require equal physical descriptors, except for the
+// Mat -> Left/Right copy above. An exact input/destination alias is legal
+// within one space; partially overlapping views must be
 // legalized before these calls are constructed. Write concerns the active data
 // region, not whole-allocation initialization. Runtime valid extents are read
 // from each handle's metadata, and must agree when the descriptor is dynamic.
 // ExecutionMemoryAccessEvidence remains Unknown: its Functional classification
 // describes Tile SSA results and cannot represent destination-passing writes.
 REGISTER_OP("buffer.copy")
-    .set_description("Copy active buffer data into an explicit destination with the same descriptor")
+    .set_description("Copy active buffer data into an explicit Vec or cube-operand destination")
     .set_op_category("BufferOp")
     .set_ir_stage(OpIRStage::Buffer)
     .set_internal_only()
@@ -72,7 +84,7 @@ REGISTER_OP("buffer.copy")
     .set_buffer_result_behavior(BufferResultBehavior::None)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>&) {
-      return DeduceVecBufferWrite(args, 2, "buffer.copy");
+      return DeduceBufferCopy(args);
     });
 
 // The actual conversion and emitter table also defines explicit operand arity,

@@ -44,7 +44,7 @@ stride 表达式里的常量 (例如复合参数维度 `M * 2` 中的 `2`) 也�
 ### 显式 Buffer 输入
 
 `GenerateBufferFunction` 在发射前验证显式构造的 Buffer IR。GM 路径支持
-物理形状静态、紧密 ND 布局的二维 FP16/BF16/FP32/INT32 Tensor 参数，以及规范化的 Tensor
+物理形状静态、紧密 ND 布局的二维 FP16/BF16/FP32/INT32/INT8 Tensor 参数，以及规范化的 Tensor
 参数返回值。它复用现有 GM 张量视图前缀和原生“Tensor 在前、标量在后”的
 ABI。Tensor 返回值保留在 IR 中供编排处理别名，不产生原生返回值。
 
@@ -63,6 +63,13 @@ valid 状态更新，也不重建逻辑 Tile。
 静态存储别名以显式 `buffer.subview` 和 `buffer.reshape` 操作进入代码生成，
 分别发射为 `pto.subview` 和 `pto.treshape`，直接保留源句柄和结果描述符，
 不分配、不复制，也不推导存储窗口。描述符边界和别名合法性在发射前完成验证。
+
+Mat、Left、Right 和 Acc 描述符发射为 `loc=mat|left|right|acc`，并带上分形的
+`blayout`/`slayout`/`fractal` 字段；它们必须由完整分形块组成，不完整的块会以与
+旧路径相同的“应分配多少”诊断拒绝。`buffer.matmul` 和 `buffer.matmul_acc`
+分别发射为 `pto.tmatmul` 和 `pto.tmatmul.acc`，累加形式按 PTOAS 要求把目标作为
+第一个输入。`buffer.extract` 发射为带 `index` 偏移的 `pto.textract`，
+Mat 到 Left/Right 的 `buffer.copy` 发射为 `pto.tmov`。
 
 ### 类结构
 
