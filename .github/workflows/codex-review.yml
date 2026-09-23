@@ -4,10 +4,6 @@ name: Codex Review
 # pull_request_target uses the trusted workflow from the base branch while the
 # isolated container checks out and reviews untrusted code from the PR.
 on:
-  # Bootstrap this workflow on PR #2882 before it exists on the default branch.
-  # Remove this trigger after the isolated review has been validated.
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
 
@@ -178,7 +174,6 @@ jobs:
 
   comment:
     needs: review
-    if: github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
