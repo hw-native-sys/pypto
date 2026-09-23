@@ -1,33 +1,32 @@
 name: Codex Review
 
 # This file must already exist on the default branch of the base repository.
-# pull_request_target uses the trusted workflow from the default branch while
-# checking out and reviewing untrusted code from the PR.
+# pull_request_target uses the trusted workflow from the base branch while the
+# isolated container checks out and reviews untrusted code from the PR.
 on:
-  # Bootstrap this workflow on PR #2882 before it exists on the default branch.
-  # Remove this trigger and the bootstrap summary step before merging.
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
 
-permissions:
-  contents: read
-  pull-requests: write
+permissions: {}
 
 concurrency:
   group: codex-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+env:
+  CODEX_REVIEW_IMAGE: localhost:5000/pypto-codex-review@sha256:cc50233d2db2e676f9ed224bd29cd73d53b3004ba3812ca6968870f0cf9f5a57
+
 jobs:
-  codex-review:
+  review:
     if: github.event.pull_request.draft == false
     runs-on: [self-hosted, Linux, ARM64, cpu-codex]
     timeout-minutes: 20
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout PR head
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/pull/${{ github.event.pull_request.number }}/head
           fetch-depth: 0
@@ -38,34 +37,153 @@ jobs:
           git fetch --no-tags --depth=1 \
             origin "${{ github.event.pull_request.base.sha }}"
 
-      - name: Codex review
+      - name: Review in an isolated container
         env:
-          CODEX_HOME: /home/ci-runner/.codex-ci
-
-          # Only Codex uses the local mixed-port proxy.
-          HTTP_PROXY: http://127.0.0.1:7895
-          HTTPS_PROXY: http://127.0.0.1:7895
-          ALL_PROXY: http://127.0.0.1:7895
-          NO_PROXY: localhost,127.0.0.1,::1
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -Eeuo pipefail
-          export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
 
+          auth_file=/home/ci-runner/.codex-ci/auth.json
           output="$RUNNER_TEMP/codex-review.txt"
           log="$RUNNER_TEMP/codex-review.log"
+          work_dir=$(mktemp -d "$RUNNER_TEMP/codex-review.XXXXXX")
+          suffix="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${RANDOM}"
+          review_network="codex-review-${suffix}"
+          egress_network="codex-egress-${suffix}"
+          proxy_container="codex-proxy-${suffix}"
+          review_container="codex-agent-${suffix}"
+          relay_pid=""
+
+          cleanup() {
+            docker rm -f "$review_container" "$proxy_container" \
+              >/dev/null 2>&1 || true
+            if [ -n "$relay_pid" ]; then
+              kill "$relay_pid" >/dev/null 2>&1 || true
+              wait "$relay_pid" >/dev/null 2>&1 || true
+            fi
+            docker network rm "$review_network" "$egress_network" \
+              >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+
+          if [ ! -f "$auth_file" ] || [ -L "$auth_file" ]; then
+            echo "Codex auth file is missing or is not a regular file" >&2
+            exit 1
+          fi
+
+          docker pull "$CODEX_REVIEW_IMAGE"
+          docker network create \
+            --internal \
+            --opt com.docker.network.bridge.inhibit_ipv4=true \
+            --label "org.pypto.codex-review.run=$GITHUB_RUN_ID" \
+            "$review_network" >/dev/null
+          docker network create \
+            --internal \
+            --label "org.pypto.codex-review.run=$GITHUB_RUN_ID" \
+            "$egress_network" >/dev/null
+
+          egress_gateway=$(docker network inspect "$egress_network" \
+            --format '{{(index .IPAM.Config 0).Gateway}}')
+          egress_subnet=$(docker network inspect "$egress_network" \
+            --format '{{(index .IPAM.Config 0).Subnet}}')
+
+          # Load the relay from the trusted base commit, never from the PR head.
+          git show "$BASE_SHA:.github/codex-review/proxy_relay.py" \
+            >"$work_dir/proxy_relay.py"
+          python3 -I "$work_dir/proxy_relay.py" \
+            --listen-host "$egress_gateway" \
+            --allow-cidr "$egress_subnet" \
+            --target-host 127.0.0.1 \
+            --target-port 7895 \
+            --ready-file "$work_dir/relay.ready" \
+            >"$work_dir/relay.log" 2>&1 &
+          relay_pid=$!
+
+          for _ in $(seq 1 50); do
+            if [ -s "$work_dir/relay.ready" ]; then
+              break
+            fi
+            if ! kill -0 "$relay_pid" 2>/dev/null; then
+              echo "Trusted proxy relay exited before becoming ready" >&2
+              exit 1
+            fi
+            sleep 0.1
+          done
+          if [ ! -s "$work_dir/relay.ready" ]; then
+            echo "Timed out waiting for the trusted proxy relay" >&2
+            exit 1
+          fi
+          relay_port=$(tr -d '\n' <"$work_dir/relay.ready")
+          case "$relay_port" in
+            '' | *[!0-9]*)
+              echo "Trusted proxy relay returned an invalid port" >&2
+              exit 1
+              ;;
+          esac
+
+          # Only this fixed-function sidecar can reach the host relay. The
+          # review network has no host gateway and no route to other networks.
+          docker run --detach \
+            --name "$proxy_container" \
+            --network "$egress_network" \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --pids-limit 64 \
+            --memory 128m \
+            --cpus 0.5 \
+            --user 1002:1003 \
+            --env "RELAY_TARGET_HOST=$egress_gateway" \
+            --env "RELAY_TARGET_PORT=$relay_port" \
+            --entrypoint node \
+            "$CODEX_REVIEW_IMAGE" \
+            /usr/local/share/codex-review/proxy-sidecar.mjs >/dev/null
+          docker network connect --alias proxy \
+            "$review_network" "$proxy_container"
 
           attempt=1
           max_attempts=3
-
-          while ! codex review \
-            --base "${{ github.event.pull_request.base.sha }}" \
-            >"$output" 2>"$log"
+          # Codex uses bubblewrap for its inner read-only, no-network sandbox.
+          # Docker's default seccomp profile blocks the required user namespace.
+          while ! docker run --rm \
+            --interactive \
+            --name "$review_container" \
+            --hostname codex-review \
+            --network "$review_network" \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --security-opt seccomp=unconfined \
+            --pids-limit 256 \
+            --memory 2g \
+            --cpus 4 \
+            --user 1002:1003 \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=256m,mode=1777 \
+            --tmpfs /codex-home:rw,nosuid,nodev,size=64m,uid=1002,gid=1003,mode=0700 \
+            --tmpfs /home/codex-review:rw,nosuid,nodev,size=64m,uid=1002,gid=1003,mode=0700 \
+            --env CODEX_HOME=/codex-home \
+            --env HOME=/home/codex-review \
+            --env HTTP_PROXY=http://proxy:7895 \
+            --env HTTPS_PROXY=http://proxy:7895 \
+            --env ALL_PROXY=http://proxy:7895 \
+            --env NO_PROXY=localhost,127.0.0.1,::1,proxy \
+            --env GIT_CONFIG_COUNT=1 \
+            --env GIT_CONFIG_KEY_0=safe.directory \
+            --env GIT_CONFIG_VALUE_0=/workspace \
+            "$CODEX_REVIEW_IMAGE" \
+            review --base "$BASE_SHA" \
+            <"$auth_file" >"$output" 2>"$log"
           do
-            echo "codex review attempt ${attempt} failed" >&2
-            tail -20 "$log" >&2
-
+            echo "Codex review attempt ${attempt} failed" >&2
             if [ "$attempt" -ge "$max_attempts" ]; then
-              echo "codex review failed after ${max_attempts} attempts" >&2
+              command_stop="codex-review-$(tr -d '-' </proc/sys/kernel/random/uuid)"
+              echo "::stop-commands::${command_stop}"
+              tail -20 "$log" >&2
+              echo "::${command_stop}::"
+              echo "Codex review failed after ${max_attempts} attempts" >&2
               exit 1
             fi
 
@@ -73,38 +191,48 @@ jobs:
             sleep 10
           done
 
-      - name: Publish bootstrap review output
-        if: github.event_name == 'pull_request'
-        run: |
-          set -Eeuo pipefail
+      - name: Upload review result
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codex-review-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/codex-review.txt
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 9
+          include-hidden-files: false
 
-          output="$RUNNER_TEMP/codex-review.txt"
+  comment:
+    needs: review
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      pull-requests: write
 
-          if [ -s "$output" ]; then
-            command_stop="codex-review-output-${RANDOM}-${RANDOM}"
-            echo "::group::Codex Review"
-            echo "::stop-commands::${command_stop}"
-            cat "$output"
-            echo "::${command_stop}::"
-            echo "::endgroup::"
-
-            {
-              echo "## Codex Review"
-              echo
-              cat "$output"
-            } >>"$GITHUB_STEP_SUMMARY"
-          else
-            echo "Review produced no output; skipping summary" >&2
-          fi
+    steps:
+      - name: Download review result
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: codex-review-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/codex-review-artifact
 
       - name: Post review comment
-        if: github.event_name == 'pull_request_target'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -Eeuo pipefail
 
-          output="$RUNNER_TEMP/codex-review.txt"
+          output="$RUNNER_TEMP/codex-review-artifact/codex-review.txt"
+          if [ ! -f "$output" ] || [ -L "$output" ]; then
+            echo "Review artifact is missing or is not a regular file" >&2
+            exit 1
+          fi
+
+          size=$(wc -c <"$output")
+          if [ "$size" -gt 60000 ]; then
+            echo "Review output is too large to post safely: ${size} bytes" >&2
+            exit 1
+          fi
 
           if [ -s "$output" ]; then
             gh pr comment "${{ github.event.pull_request.number }}" \
