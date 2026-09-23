@@ -36,23 +36,31 @@ PyPTO 的构成：IR、pass 流水线、代码生成，以及围绕它们的基�
 
 ## 自动 PR 审查
 
-`PR Agent` GitHub Actions 工作流会在非草稿 PR 创建、重新打开、更新或标记为
-ready 时进行审查，也支持来自 fork 的 PR。仓库所有者、组织成员和协作者可以在
-打开的 PR 下发布内容完全为 `/review` 的评论来触发审查。审查结果会更新到同一条 PR 评论中。
+`Codex Review` GitHub Actions 工作流会在非草稿 PR 创建、重新打开、更新或标记为
+可审查（ready for review）时进行审查。工作流定义取自主分支的受信任版本，将 PR
+head 作为不可信输入检出，并由独立的 GitHub 托管任务（GitHub-hosted job）发布结果。
 
-管理员在 **Settings → Secrets and variables → Actions** 中启用工作流：
+管理员通过仓库 Actions 变量 `CODEX_REVIEW_ENABLED` 启用或禁用审查。将其设为
+`true` 即可启用；删除该变量或设为其他值可以立即禁用。
 
-1. 将 DeepSeek API Key 保存为仓库密钥（Secret）`OPENAI_KEY`。
-2. 按需设置仓库变量 `PR_AGENT_API_BASE`（默认 `https://api.deepseek.com`）和
-   `PR_AGENT_MODEL`（默认 `deepseek-flash`）。模型 ID 不需要 `openai/` 前缀；
-   工作流会添加此前缀，以使用 OpenAI 兼容接口。审查的上下文预算为 128,000 token。
-3. 工作流合并到默认分支后，将仓库变量 `PR_AGENT_ENABLED` 设置为 `true`。
-   删除该变量或将其设为 `false` 可关闭审查。
+审查任务（review job）需要标签为 `Linux`、`ARM64` 和 `cpu-codex` 的专用自托管
+运行器（self-hosted runner）。以下资源由宿主机管理，不取自 PR：
 
-PR 内容会发送到所配置的模型服务，并消耗 API 额度。工作流通过 GitHub API 读取
-PR 数据，不检出 PR 代码。它使用工作流中定义的配置，仅启用 review，不会自动
-改写 PR 描述、应用代码修改或批准合并。机器人触发的事件会被跳过；维护者可以在
-机器人创建的 PR 下通过 `/review` 请求审查。
+- `/home/ci-runner/.codex-ci/auth.json`，仅 runner 账号可读
+- 本地镜像仓库中按 digest 固定的 review 和 proxy 镜像
+- `pypto-codex-egress` Docker 网络
+- 监听 relay 端口 `17895` 且健康的 `pypto-codex-proxy-relay` 容器
+- 仅监听 loopback 的 mixed proxy `127.0.0.1:7895`
+
+Codex 在只读容器中以 UID/GID `1002:1003` 运行；仓库以只读方式挂载，同时移除
+能力（capability）、实施资源限制并使用内部 Docker 网络。拥有 PR 写权限的 GitHub
+令牌（token）仅提供给独立的评论任务（comment job）。如果审查输出包含 Codex
+凭据中的任何完整长字符串值，工作流会拒绝发布；正常评论也会明确标记为由不可信
+PR 内容生成的自动化结果。
+
+由 ChatGPT 管理（ChatGPT-managed）的 Codex 凭据通过可信的每周或手动维护任务
+刷新。该任务不检出仓库，只在空的临时目录中运行，通过宿主机锁与审查任务串行，
+并原地更新持久凭据。PR 审查容器只接收临时快照，绝不会挂载或写入持久凭据。
 
 ## 另请参阅
 

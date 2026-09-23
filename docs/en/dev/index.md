@@ -38,26 +38,37 @@ PyPTO programs, start with the [User Manual](../user/index.md).
 
 ## Automated PR Review
 
-The `PR Agent` GitHub Actions workflow reviews non-draft PRs when they are
-opened, reopened, updated, or marked ready, including PRs from forks. Repository
-owners, organization members, and collaborators can also post exactly `/review`
-on an open PR to request a review. Findings update a persistent PR comment.
+The `Codex Review` GitHub Actions workflow reviews non-draft pull requests when
+they are opened, reopened, updated, or marked ready for review. It uses the
+trusted workflow from the default branch, checks out the pull request head as
+untrusted input, and posts the result from a separate GitHub-hosted job.
 
-Administrators enable the workflow in **Settings → Secrets and variables → Actions**:
+Administrators enable or disable reviews with the repository Actions variable
+`CODEX_REVIEW_ENABLED`. Set it to `true` to enable reviews; unset it or use any
+other value to disable them immediately.
 
-1. Add the DeepSeek API key as the repository secret `OPENAI_KEY`.
-2. Optionally set `PR_AGENT_API_BASE` (default `https://api.deepseek.com`) and
-   `PR_AGENT_MODEL` (default `deepseek-flash`) as repository variables. Use the
-   provider's model ID without an `openai/` prefix; the workflow adds it for
-   OpenAI-compatible routing. Reviews use a 128,000-token context budget.
-3. Set the repository variable `PR_AGENT_ENABLED` to `true` after the workflow
-   is merged into the default branch. Unset it or set it to `false` to disable reviews.
+The review job requires a dedicated self-hosted runner labelled `Linux`,
+`ARM64`, and `cpu-codex`. The runner provides the following host-managed
+resources, none of which come from the pull request:
 
-PR content is sent to the configured model service and consumes API credits.
-The workflow reads PR data through GitHub's API without checking out PR code.
-It enables review only, uses workflow-owned settings, and does not automatically
-rewrite PR descriptions, apply code changes, or approve merges. Bot-triggered
-events are skipped; a maintainer can request `/review` on a bot-authored PR.
+- `/home/ci-runner/.codex-ci/auth.json`, readable only by the runner account
+- the digest-pinned review and proxy images in the local registry
+- the `pypto-codex-egress` Docker network
+- a healthy `pypto-codex-proxy-relay` container on relay port `17895`
+- a loopback-only mixed proxy on `127.0.0.1:7895`
+
+Codex runs as UID/GID `1002:1003` in a read-only container with a read-only
+repository mount, dropped capabilities, resource limits, and an internal Docker
+network. The GitHub token with pull-request write access is available only to
+the separate comment job. Review output is rejected if it contains an exact
+long-form value from the Codex credential and is labelled as automated,
+untrusted content when posted.
+
+ChatGPT-managed Codex authentication is refreshed by a trusted weekly or manual
+maintenance run that has no checkout and uses an empty temporary directory.
+The refresh is serialized with reviews by a host lock and updates the persistent
+credential in place. Pull-request review containers receive only an ephemeral
+snapshot; they never mount or write the persistent credential.
 
 ## See Also
 

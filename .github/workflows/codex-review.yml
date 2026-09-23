@@ -1,0 +1,346 @@
+name: Codex Review
+
+# This file must already exist on the default branch of the base repository.
+# pull_request_target uses the trusted workflow from the base branch while the
+# isolated container checks out and reviews untrusted code from the PR.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  # Refresh the persistent ChatGPT-managed Codex session outside any PR
+  # workspace. The interval stays below Codex's normal stale-session window.
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: codex-review-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CODEX_REVIEW_IMAGE: localhost:5000/pypto-codex-review@sha256:832c7701a365b3a9a32e2d65c1986c3b79997603dd22f170e040dfef008af552
+  CODEX_PROXY_IMAGE: localhost:5000/pypto-codex-proxy@sha256:632f77b3544d5c663cb08ac48b2150a7bfa6cb9bac0852fbcf620b1d4e284a6b
+  CODEX_EGRESS_NETWORK: pypto-codex-egress
+  CODEX_RELAY_CONTAINER: pypto-codex-proxy-relay
+  CODEX_RELAY_PORT: "17895"
+
+jobs:
+  review:
+    if: >-
+      vars.CODEX_REVIEW_ENABLED == 'true' &&
+      github.event_name == 'pull_request_target' &&
+      github.event.pull_request.draft == false &&
+      github.event.sender.type != 'Bot'
+    runs-on: [self-hosted, Linux, ARM64, cpu-codex]
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/head
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Ensure base commit is available
+        run: |
+          git fetch --no-tags --depth=1 \
+            origin "${{ github.event.pull_request.base.sha }}"
+
+      - name: Review in an isolated container
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+
+          auth_file=/home/ci-runner/.codex-ci/auth.json
+          auth_lock=/home/ci-runner/.codex-ci/auth.lock
+          output="$RUNNER_TEMP/codex-review.txt"
+          log="$RUNNER_TEMP/codex-review.log"
+          auth_snapshot=$(mktemp "$RUNNER_TEMP/codex-auth.XXXXXX")
+          secret_patterns=$(mktemp "$RUNNER_TEMP/codex-secret-patterns.XXXXXX")
+          suffix="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${RANDOM}"
+          review_network="codex-review-${suffix}"
+          proxy_container="codex-proxy-${suffix}"
+          review_container="codex-agent-${suffix}"
+
+          cleanup() {
+            docker rm -f "$review_container" "$proxy_container" \
+              >/dev/null 2>&1 || true
+            docker network rm "$review_network" >/dev/null 2>&1 || true
+            rm -f "$auth_snapshot" "$secret_patterns"
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+
+          if [ ! -f "$auth_file" ] || [ -L "$auth_file" ]; then
+            echo "Codex auth file is missing or is not a regular file" >&2
+            exit 1
+          fi
+          if [ -L "$auth_lock" ]; then
+            echo "Codex auth lock must not be a symbolic link" >&2
+            exit 1
+          fi
+
+          # Serialize every consumer of this managed session. Take an
+          # ephemeral snapshot so the untrusted review container never mounts
+          # or writes the persistent host credential.
+          exec 9>"$auth_lock"
+          flock --exclusive 9
+          jq --exit-status \
+            '.auth_mode == "chatgpt" and
+             (.tokens.refresh_token // "") != ""' \
+            "$auth_file" >/dev/null
+          cat "$auth_file" >"$auth_snapshot"
+          jq --raw-output \
+            '[.. | strings | select(length >= 16)] | unique[]' \
+            "$auth_snapshot" >"$secret_patterns"
+
+          contains_auth_material() {
+            [ -s "$secret_patterns" ] && \
+              grep --fixed-strings --quiet --file="$secret_patterns" "$@"
+          }
+
+          docker pull "$CODEX_REVIEW_IMAGE"
+          docker pull "$CODEX_PROXY_IMAGE"
+          docker network create \
+            --internal \
+            --opt com.docker.network.bridge.inhibit_ipv4=true \
+            --label "org.pypto.codex-review.run=$GITHUB_RUN_ID" \
+            "$review_network" >/dev/null
+
+          # The dedicated runner provides this internal network and the
+          # fixed-function relay as persistent, host-managed infrastructure.
+          if ! egress_gateway=$(docker network inspect "$CODEX_EGRESS_NETWORK" \
+            --format '{{(index .IPAM.Config 0).Gateway}}'); then
+            echo "Codex egress network is unavailable" >&2
+            exit 1
+          fi
+          if ! relay_state=$(docker container inspect "$CODEX_RELAY_CONTAINER" \
+            --format '{{.State.Status}}/{{.State.Health.Status}}'); then
+            echo "Codex proxy relay is unavailable" >&2
+            exit 1
+          fi
+          if [ "$relay_state" != "running/healthy" ]; then
+            echo "Codex proxy relay is not healthy: ${relay_state}" >&2
+            exit 1
+          fi
+
+          # Only this fixed-function sidecar can reach the host relay. The
+          # review network has no host gateway and no route to other networks.
+          docker run --detach \
+            --name "$proxy_container" \
+            --network "$CODEX_EGRESS_NETWORK" \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --pids-limit 64 \
+            --memory 128m \
+            --cpus 0.5 \
+            --user 1002:1003 \
+            --env "RELAY_TARGET_HOST=$egress_gateway" \
+            --env "RELAY_TARGET_PORT=$CODEX_RELAY_PORT" \
+            --entrypoint node \
+            "$CODEX_PROXY_IMAGE" \
+            /usr/local/libexec/pypto-codex-sidecar.mjs >/dev/null
+          docker network connect --alias proxy \
+            "$review_network" "$proxy_container"
+
+          attempt=1
+          max_attempts=3
+          # Codex uses bubblewrap for its inner read-only, no-network sandbox.
+          # Docker's default seccomp profile blocks the required user namespace.
+          while ! docker run --rm \
+            --interactive \
+            --name "$review_container" \
+            --hostname codex-review \
+            --network "$review_network" \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --security-opt seccomp=unconfined \
+            --pids-limit 256 \
+            --memory 2g \
+            --cpus 4 \
+            --user 1002:1003 \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=256m,mode=1777 \
+            --tmpfs /codex-home:rw,nosuid,nodev,size=64m,uid=1002,gid=1003,mode=0700 \
+            --tmpfs /home/codex-review:rw,nosuid,nodev,size=64m,uid=1002,gid=1003,mode=0700 \
+            --env CODEX_HOME=/codex-home \
+            --env HOME=/home/codex-review \
+            --env HTTP_PROXY=http://proxy:7895 \
+            --env HTTPS_PROXY=http://proxy:7895 \
+            --env ALL_PROXY=http://proxy:7895 \
+            --env NO_PROXY=localhost,127.0.0.1,::1,proxy \
+            --env GIT_CONFIG_COUNT=1 \
+            --env GIT_CONFIG_KEY_0=safe.directory \
+            --env GIT_CONFIG_VALUE_0=/workspace \
+            "$CODEX_REVIEW_IMAGE" \
+            --model gpt-6-sol \
+            --config 'model_reasoning_effort="high"' \
+            --sandbox read-only \
+            --ask-for-approval never \
+            review --base "$BASE_SHA" \
+            <"$auth_snapshot" >"$output" 2>"$log"
+          do
+            echo "Codex review attempt ${attempt} failed" >&2
+            if [ "$attempt" -ge "$max_attempts" ]; then
+              if contains_auth_material "$log"; then
+                echo "Codex failure log contained credential material; log withheld" >&2
+              else
+                command_stop="codex-review-$(tr -d '-' </proc/sys/kernel/random/uuid)"
+                echo "::stop-commands::${command_stop}"
+                tail -20 "$log" >&2
+                echo "::${command_stop}::"
+              fi
+              echo "Codex review failed after ${max_attempts} attempts" >&2
+              exit 1
+            fi
+
+            attempt=$((attempt + 1))
+            sleep 10
+          done
+
+          if contains_auth_material "$output" "$log"; then
+            : >"$output"
+            : >"$log"
+            echo "Codex output contained credential material; refusing to publish" >&2
+            exit 1
+          fi
+
+      - name: Upload review result
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codex-review-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/codex-review.txt
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 9
+          include-hidden-files: false
+
+  auth-maintenance:
+    if: >-
+      vars.CODEX_REVIEW_ENABLED == 'true' &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: [self-hosted, Linux, ARM64, cpu-codex]
+    timeout-minutes: 10
+    permissions: {}
+
+    steps:
+      - name: Refresh persistent Codex auth
+        run: |
+          set -Eeuo pipefail
+          umask 077
+
+          codex_home=/home/ci-runner/.codex-ci
+          auth_file="$codex_home/auth.json"
+          auth_lock="$codex_home/auth.lock"
+          workdir=$(mktemp -d "$RUNNER_TEMP/codex-auth-refresh.XXXXXX")
+          log="$workdir/codex-auth-refresh.log"
+
+          cleanup() {
+            find "$workdir" -mindepth 1 -delete >/dev/null 2>&1 || true
+            rmdir "$workdir" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+
+          if [ ! -f "$auth_file" ] || [ -L "$auth_file" ]; then
+            echo "Codex auth file is missing or is not a regular file" >&2
+            exit 1
+          fi
+          if [ -L "$auth_lock" ]; then
+            echo "Codex auth lock must not be a symbolic link" >&2
+            exit 1
+          fi
+
+          exec 9>"$auth_lock"
+          flock --exclusive 9
+          cd "$workdir"
+
+          # This fixed, trusted prompt runs without a repository or inherited
+          # Actions credentials. Codex refreshes auth.json in place if needed.
+          if ! env -i \
+            HOME=/home/ci-runner \
+            PATH=/home/ci-runner/.local/bin:/home/ci-runner/.npm-global/bin:/usr/local/bin:/usr/bin:/bin \
+            CODEX_HOME="$codex_home" \
+            HTTP_PROXY=http://127.0.0.1:7895 \
+            HTTPS_PROXY=http://127.0.0.1:7895 \
+            ALL_PROXY=http://127.0.0.1:7895 \
+            NO_PROXY=localhost,127.0.0.1,::1 \
+            codex \
+              --model gpt-6-sol \
+              --config 'model_reasoning_effort="none"' \
+              --sandbox read-only \
+              --ask-for-approval never \
+              exec --skip-git-repo-check \
+              'Reply with the single word OK. Do not use tools.' \
+              >/dev/null 2>"$log"
+          then
+            echo "Codex auth maintenance failed; details withheld because the log may contain credentials" >&2
+            exit 1
+          fi
+
+          jq --exit-status \
+            '.auth_mode == "chatgpt" and
+             (.tokens.access_token // "") != "" and
+             (.tokens.refresh_token // "") != "" and
+             (.last_refresh // "") != ""' \
+            "$auth_file" >/dev/null
+
+  comment:
+    needs: review
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      pull-requests: write
+
+    steps:
+      - name: Download review result
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: codex-review-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/codex-review-artifact
+
+      - name: Post review comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+
+          output="$RUNNER_TEMP/codex-review-artifact/codex-review.txt"
+          comment_body="$RUNNER_TEMP/codex-review-comment.md"
+          if [ ! -f "$output" ] || [ -L "$output" ]; then
+            echo "Review artifact is missing or is not a regular file" >&2
+            exit 1
+          fi
+
+          {
+            echo "## Codex Review"
+            echo
+            echo "> Automated review generated from untrusted pull request content. Verify findings before acting on them."
+            echo
+            cat "$output"
+          } >"$comment_body"
+
+          size=$(wc -c <"$comment_body")
+          if [ "$size" -gt 60000 ]; then
+            echo "Review output is too large to post safely: ${size} bytes" >&2
+            exit 1
+          fi
+
+          if [ -s "$output" ]; then
+            gh pr comment "${{ github.event.pull_request.number }}" \
+              --repo "${{ github.repository }}" \
+              --body-file "$comment_body"
+          else
+            echo "Review produced no output; skipping comment" >&2
+          fi
