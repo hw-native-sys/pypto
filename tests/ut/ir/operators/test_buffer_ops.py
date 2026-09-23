@@ -501,6 +501,39 @@ def test_extract_rejects_out_of_range_windows_and_unsupported_pairs(options, mes
         internal_call("buffer.extract", extract_args(**options))
 
 
+def test_extract_destination_cannot_claim_more_valid_data_than_the_source_holds():
+    # Source physical [64, 64] with valid [32, 32]; at offset (24, 24) only an
+    # [8, 8] region is valid source data.
+    source = matrix_var("mat", ir.MemorySpace.Mat, [64, 64], DataType.FP16, valid_shape=[32, 32])
+    span = ir.Span.unknown()
+
+    def extract(row, col, valid):
+        target = matrix_var("l0", ir.MemorySpace.Left, [16, 16], DataType.FP16, valid_shape=valid)
+        offsets = [
+            value if isinstance(value, ir.Expr) else ir.ConstInt(value, DataType.INDEX, span)
+            for value in (row, col)
+        ]
+        return internal_call("buffer.extract", [source, *offsets, target])
+
+    with pytest.raises(ValueError, match="row valid extent 16 exceeds the 8 valid source element"):
+        extract(24, 24, [16, 16])
+    with pytest.raises(ValueError, match="column valid extent 16 exceeds the 0 valid source element"):
+        extract(0, 40, [16, 16])
+    assert isinstance(extract(24, 24, [8, 8]).type, ir.VoidType)
+    assert isinstance(extract(0, 0, [16, 16]).type, ir.VoidType)
+    # A runtime offset leaves the bound as a runtime precondition.
+    row = ir.Var("row", ir.ScalarType(DataType.INDEX), span)
+    assert isinstance(extract(row, 0, [16, 16]).type, ir.VoidType)
+
+
+def test_extract_rejects_a_window_larger_than_its_source_at_a_runtime_offset():
+    row = ir.Var("row", ir.ScalarType(DataType.INDEX), ir.Span.unknown())
+    args = extract_args(row=row)
+    args[3] = matrix_var("l0", ir.MemorySpace.Left, [128, 64], DataType.FP16)
+    with pytest.raises(ValueError, match="row window of 128 exceeds the source extent 64"):
+        internal_call("buffer.extract", args)
+
+
 @pytest.mark.parametrize("space", [ir.MemorySpace.Left, ir.MemorySpace.Right])
 def test_copy_moves_a_mat_operand_into_l0_with_its_own_layout(space):
     source = matrix_var("mat", ir.MemorySpace.Mat, [16, 64], DataType.FP16)

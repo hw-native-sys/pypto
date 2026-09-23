@@ -367,6 +367,7 @@ class StorageIndex : public IRVisitor {
                                member.descriptor);
     }
     VarPtr root;
+    uint64_t root_offset = 0;
     for (size_t i = 0; i < storage.members.size(); ++i) {
       const auto& [key, descriptor] = member_keys[i];
       auto [entry, inserted] = handles_by_window.emplace(key, nullptr);
@@ -384,13 +385,14 @@ class StorageIndex : public IRVisitor {
           entry->second = handle;
           if (!root) {
             root = handle;
+            root_offset = std::get<0>(key);
             storage.handle = root;
           }
         } else {
-          CHECK_SPAN(
-              std::get<0>(key) == 0 && backend::PhysicalBufferBytes(descriptor) ==
-                                           backend::PhysicalBufferBytes(As<BufferType>(root->GetType())),
-              storage.members[i].span)
+          CHECK_SPAN(std::get<0>(key) == root_offset &&
+                         backend::PhysicalBufferBytes(descriptor) ==
+                             backend::PhysicalBufferBytes(As<BufferType>(root->GetType())),
+                     storage.members[i].span)
               << "LowerTileToBuffer: an addressless " << MemorySpaceToString(descriptor->memory_space_)
               << " allocation can hold only one window; distinct windows require separate allocations";
           entry->second = Define(storage, "_view", "buffer.reshape", {root}, descriptor, span);
@@ -757,6 +759,11 @@ class TileToBufferMutator : public IRMutator {
           "buffer.extract",
           {Handle(call->args_[0]), VisitExpr(call->args_[1]), VisitExpr(call->args_[2]), Handle(result)},
           call->span_);
+    }
+    if (IsOp(call, "tile.matmul") || IsOp(call, "tile.matmul_acc")) {
+      // Neither operator declares attributes; reject any kwarg instead of dropping it.
+      ValidateKwargs(call->kwargs_, OpRegistry::GetInstance().GetEntry(call->op_->name_).GetOp()->GetAttrs(),
+                     call->op_->name_);
     }
     if (IsOp(call, "tile.matmul")) {
       INTERNAL_CHECK_SPAN(result && call->args_.size() == 2, call->span_)

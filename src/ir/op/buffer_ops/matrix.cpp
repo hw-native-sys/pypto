@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <any>
 #include <cstddef>
 #include <cstdint>
@@ -90,12 +91,28 @@ void CheckExtractOffset(const ExprPtr& offset, int64_t source, int64_t window, c
   auto scalar = As<ScalarType>(offset->GetType());
   CHECK_SPAN(scalar && (scalar->dtype_.IsInt() || scalar->dtype_ == DataType::INDEX), offset->span_)
       << "buffer.extract " << axis << " offset must be an integer or INDEX scalar";
+  // The window size is static, so it is checked whatever the offset is.
+  CHECK_SPAN(window <= source, offset->span_)
+      << "buffer.extract " << axis << " window of " << window << " exceeds the source extent " << source;
   if (auto constant = As<ConstInt>(offset)) {
-    CHECK_SPAN(constant->value_ >= 0 && window <= source && constant->value_ <= source - window,
-               offset->span_)
+    CHECK_SPAN(constant->value_ >= 0 && constant->value_ <= source - window, offset->span_)
         << "buffer.extract " << axis << " window [" << constant->value_ << ", " << constant->value_ + window
         << ") exceeds the source extent " << source;
   }
+}
+
+// The destination may not claim more valid data than the source holds from
+// the offset onward. With a runtime offset or a dynamic extent this remains a
+// runtime precondition, as for GM transfers.
+void CheckExtractValid(const ExprPtr& offset, int64_t source_valid, int64_t destination_valid,
+                       const std::string& axis) {
+  auto constant = As<ConstInt>(offset);
+  if (!constant || source_valid < 0 || destination_valid < 0) return;
+  const int64_t available = std::max<int64_t>(0, source_valid - constant->value_);
+  CHECK_SPAN(destination_valid <= available, offset->span_)
+      << "buffer.extract " << axis << " valid extent " << destination_valid << " exceeds the " << available
+      << " valid source element(s) from offset " << constant->value_ << " (source valid extent "
+      << source_valid << ")";
 }
 
 // Extraction copies a static-shape window at runtime offsets. From Mat it is
@@ -119,6 +136,8 @@ TypePtr DeduceBufferExtract(const std::vector<ExprPtr>& args) {
       << destination->dtype_.ToString();
   CheckExtractOffset(args[1], source->shape_[0], destination->shape_[0], "row");
   CheckExtractOffset(args[2], source->shape_[1], destination->shape_[1], "column");
+  CheckExtractValid(args[1], source->valid_shape_[0], destination->valid_shape_[0], "row");
+  CheckExtractValid(args[2], source->valid_shape_[1], destination->valid_shape_[1], "column");
   return GetVoidType();
 }
 

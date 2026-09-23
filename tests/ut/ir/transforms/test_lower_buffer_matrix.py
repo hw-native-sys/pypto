@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pypto.language as pl
 import pytest
-from pypto import ir, passes
+from pypto import DataType, ir, passes
 from pypto.backend import BackendType
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import _run_ptoas
@@ -299,6 +299,113 @@ class QuantizedStore:
 """)
     with pytest.raises(ValueError, match="pre_quant/pre_relu stores require a Buffer transfer recipe"):
         _lower(program, passes.MemoryPlanner.PYPTO)
+
+
+_SPAN = ir.Span.unknown()
+
+
+def _index(value: int) -> ir.ConstInt:
+    return ir.ConstInt(value, DataType.INDEX, _SPAN)
+
+
+class _PlannedMatrixKernel:
+    """Hand-placed post-planning IR, for layouts the DSL pipeline never produces."""
+
+    def __init__(self) -> None:
+        self.output = ir.Var("output", ir.TensorType([16, 32], DataType.FP32), _SPAN)
+        self.body: list[ir.Stmt] = []
+
+    def allocation(self, name: str, space: ir.MemorySpace, capacity: int) -> ir.Var:
+        base = ir.Var(name, ir.PtrType(), _SPAN)
+        call = ir.Call(ir.get_op("tile.alloc"), [_index(space.value), _index(capacity)], base.type, _SPAN)
+        self.body.append(ir.AssignStmt(base, call, _SPAN))
+        return base
+
+    def tile(
+        self,
+        name: str,
+        base: ir.Var,
+        offset: int,
+        shape: tuple[int, int],
+        dtype: DataType,
+        space: ir.MemorySpace,
+    ) -> ir.Var:
+        size = shape[0] * shape[1] * dtype.get_bit() // 8
+        memory = ir.MemRef(base, offset, size, _SPAN, is_pinned=False)
+        var = ir.Var(name, ir.TileType([_index(d) for d in shape], dtype, memory, None, space), _SPAN)
+        created = ir.Call(
+            ir.get_op("tile.create"),
+            [ir.MakeTuple([_index(d) for d in shape], _SPAN)],
+            {"dtype": dtype, "target_memory": space},
+            var.type,
+            _SPAN,
+        )
+        self.body.append(ir.AssignStmt(var, created, _SPAN))
+        return var
+
+    def program(self) -> ir.Program:
+        body = [*self.body, ir.ReturnStmt([self.output], _SPAN)]
+        function = ir.Function(
+            "kernel",
+            [(self.output, ir.ParamDirection.Out)],
+            [self.output.type],
+            ir.SeqStmts(body, _SPAN),
+            _SPAN,
+            type=ir.FunctionType.InCore,
+        )
+        return ir.Program([function], "PlannedMatrix", _SPAN)
+
+
+def _lower_planned(program: ir.Program, planner: passes.MemoryPlanner) -> ir.Program:
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=True):
+        return passes.lower_tile_to_buffer()(program)
+
+
+def test_addressless_matrix_root_rejects_a_second_window_at_another_offset():
+    # The first member visited sits at offset 4096; an equal-size member at 0
+    # is a different window and must not become a reshape of the first.
+    kernel = _PlannedMatrixKernel()
+    base = kernel.allocation("mat", ir.MemorySpace.Mat, 8192)
+    kernel.tile("upper", base, 4096, (32, 64), DataType.FP16, ir.MemorySpace.Mat)
+    kernel.tile("lower", base, 0, (32, 64), DataType.FP16, ir.MemorySpace.Mat)
+    with pytest.raises(ValueError, match="can hold only one window"):
+        _lower_planned(kernel.program(), passes.MemoryPlanner.PTOAS)
+
+
+def test_matmul_kwargs_are_rejected_rather_than_dropped():
+    kernel = _PlannedMatrixKernel()
+    lhs = kernel.tile(
+        "lhs",
+        kernel.allocation("left", ir.MemorySpace.Left, 2048),
+        0,
+        (16, 64),
+        DataType.FP16,
+        ir.MemorySpace.Left,
+    )
+    rhs = kernel.tile(
+        "rhs",
+        kernel.allocation("right", ir.MemorySpace.Right, 4096),
+        0,
+        (64, 32),
+        DataType.FP16,
+        ir.MemorySpace.Right,
+    )
+    acc_base = kernel.allocation("acc", ir.MemorySpace.Acc, 2048)
+    product = ir.Var(
+        "product",
+        ir.TileType(
+            [_index(16), _index(32)],
+            DataType.FP32,
+            ir.MemRef(acc_base, 0, 2048, _SPAN, is_pinned=False),
+            None,
+            ir.MemorySpace.Acc,
+        ),
+        _SPAN,
+    )
+    call = ir.Call(ir.get_op("tile.matmul"), [lhs, rhs], {"unmodelled": 1}, product.type, _SPAN)
+    kernel.body.append(ir.AssignStmt(product, call, _SPAN))
+    with pytest.raises(ValueError, match="unmodelled"):
+        _lower_planned(kernel.program(), passes.MemoryPlanner.PTOAS)
 
 
 if __name__ == "__main__":
