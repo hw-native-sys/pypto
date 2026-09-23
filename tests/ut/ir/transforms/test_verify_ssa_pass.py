@@ -96,7 +96,7 @@ def test_verify_ssa_missing_yield():
 
     loop_var = ir.Var("i", ir.ScalarType(DataType.INDEX), span)
     iter_arg = ir.IterArg("sum", ir.ScalarType(DataType.INT64), a, span)
-    body = ir.AssignStmt(ir.Var("dummy", ir.ScalarType(DataType.INT64), span), loop_var, span)  # No yield!
+    body = ir.AssignStmt(ir.Var("dummy", ir.ScalarType(DataType.INDEX), span), loop_var, span)  # No yield!
     result_var = ir.Var("result", ir.ScalarType(DataType.INT64), span)
 
     for_stmt = ir.ForStmt(
@@ -263,7 +263,7 @@ class TestScopeViolation:
 
         loop_var = ir.Var("i", ir.ScalarType(DataType.INDEX), span)
         inner_var = ir.Var("inner", ir.ScalarType(DataType.INT64), span)
-        body = ir.AssignStmt(inner_var, loop_var, span)
+        body = ir.AssignStmt(inner_var, a, span)
 
         for_stmt = ir.ForStmt(
             loop_var,
@@ -514,7 +514,7 @@ class TestCardinalityChecks:
         loop_var = ir.Var("i", ir.ScalarType(DataType.INDEX), span)
         iter_arg = ir.IterArg("sum", ir.ScalarType(DataType.INT64), a, span)
         mid_yield = ir.YieldStmt([iter_arg], span)
-        trailing_assign = ir.AssignStmt(ir.Var("dummy", ir.ScalarType(DataType.INT64), span), loop_var, span)
+        trailing_assign = ir.AssignStmt(ir.Var("dummy", ir.ScalarType(DataType.INDEX), span), loop_var, span)
         final_yield = ir.YieldStmt([iter_arg], span)
         body = ir.SeqStmts([mid_yield, trailing_assign, final_yield], span)
 

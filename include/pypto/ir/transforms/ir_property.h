@@ -299,11 +299,12 @@ const IRPropertySet& GetVerifiedProperties();
 /**
  * @brief Structural invariants that must hold at all pipeline stages
  *
- * These are verified automatically at pipeline start and never declared
- * in per-pass PassProperties. Returns {TypeChecked, BreakContinueValid,
- * NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore,
+ * Never declared in per-pass PassProperties. VerificationInstrument checks
+ * them before and after every pass; at pipeline start PassPipeline checks only
+ * the intersection with GetVerifiedProperties(). Returns {TypeChecked,
+ * BreakContinueValid, NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore,
  * InOutUseValid, PipelineLoopValid, ArrayNotEscaped, ManualDepsOnSubmitOnly,
- * AtomicAddDtypeValid, NoScalarKernelReturn}.
+ * AtomicAddDtypeValid, NoScalarKernelReturn, AssignTypeSymmetry}.
  */
 const IRPropertySet& GetStructuralProperties();
 

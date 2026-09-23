@@ -39,6 +39,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/dead_code_elimination.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
@@ -341,7 +342,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto new_value = SimplifyExpr(op->value_);
-    auto new_var = MaybeRebuildVar(op->var_);
+    auto new_var = AdoptRewrittenValueType(op, new_value, MaybeRebuildVar(op->var_));
     auto new_type = new_var->GetType();
 
     // Register scalar assignments with the analyzer so downstream expressions
@@ -425,8 +426,10 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
         std::vector<StmtPtr> out;
         out.reserve(op->return_vars_.size());
         for (size_t i = 0; i < op->return_vars_.size(); ++i) {
-          auto rv = MaybeRebuildVar(op->return_vars_[i]);
-          out.push_back(std::make_shared<AssignStmt>(rv, new_iter_args[i]->initValue_, sp));
+          const auto& init = new_iter_args[i]->initValue_;
+          auto rv = AdoptValueType(op->return_vars_[i], op->iter_args_[i]->initValue_->GetType(), init,
+                                   MaybeRebuildVar(op->return_vars_[i]));
+          out.push_back(std::make_shared<AssignStmt>(rv, init, sp));
         }
         return loop_repair::MakeBody(out, sp);
       }
@@ -956,6 +959,39 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     return new_body;
   }
 
+  /// Keep ``var.type == value.type`` when simplification changed either side's
+  /// type. An identity ``tensor.view`` fold (SimplifyTensorView) replaces a view
+  /// with its source, whose type may spell the same layout differently — a bare
+  /// ``Tensor[[8, 4]]`` versus the view's explicit
+  /// ``TensorView(stride=[4, 1], ND)`` — whether the view is the whole RHS or
+  /// nested inside it (e.g. a tuple element). The type change then reaches
+  /// every later assignment that reads the retyped Var. Conversely,
+  /// MaybeRebuildVar can fold the Var's own type (``[N + 0, 4]`` to ``[N, 4]``)
+  /// while an alias RHS such as a function parameter keeps its unfolded type.
+  /// Either way the Var takes the value's type; later uses follow through
+  /// ``var_remap_``. Only an asymmetry this pass introduced is repaired — one
+  /// already present in the input is left for the verifier to report. A
+  /// multiply-assigned (pre-SSA) Var keeps its type: the other assignments
+  /// still bind it.
+  VarPtr AdoptRewrittenValueType(const AssignStmtPtr& op, const ExprPtr& new_value, const VarPtr& new_var) {
+    if (multi_assigned_.count(op->var_.get()) > 0) return new_var;
+    return AdoptValueType(op->var_, op->value_->GetType(), new_value, new_var);
+  }
+
+  /// Shared by AdoptRewrittenValueType and the assignments Simplify synthesizes
+  /// itself (a folded loop's return vars): @p new_var, the rebuilt
+  /// @p original_var, takes @p new_value's type when the two were equal before
+  /// simplification (@p original_value_type) but are not any more.
+  VarPtr AdoptValueType(const VarPtr& original_var, const TypePtr& original_value_type,
+                        const ExprPtr& new_value, const VarPtr& new_var) {
+    const auto& value_type = new_value->GetType();
+    if (structural_equal(new_var->GetType(), value_type)) return new_var;
+    if (!structural_equal(original_var->GetType(), original_value_type)) return new_var;
+    auto retyped = std::make_shared<Var>(new_var->name_hint_, value_type, new_var->span_);
+    var_remap_[original_var.get()] = retyped;
+    return retyped;
+  }
+
   /// Rebuild a Var with a simplified type, recording the remap so downstream
   /// VarExpr references pick up the new identity. If the Var was already
   /// rebuilt earlier (e.g., at its defining AssignStmt during the body
@@ -1016,8 +1052,8 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     for (size_t i = 0; i < return_vars.size(); ++i) {
       const auto& value = stripped.yielded_values[i];
       if (escapes_->Escapes(folded, return_vars[i].get())) {
-        materialized.push_back(
-            std::make_shared<AssignStmt>(MaybeRebuildVar(return_vars[i]), value, value->span_));
+        auto rv = AdoptValueType(return_vars[i], value->GetType(), value, MaybeRebuildVar(return_vars[i]));
+        materialized.push_back(std::make_shared<AssignStmt>(rv, value, value->span_));
         continue;
       }
       var_remap_[return_vars[i].get()] = value;
