@@ -73,7 +73,7 @@ jobs:
             sleep 10
           done
 
-      - name: Publish bootstrap review summary
+      - name: Publish bootstrap review output
         if: github.event_name == 'pull_request'
         run: |
           set -Eeuo pipefail
@@ -81,6 +81,13 @@ jobs:
           output="$RUNNER_TEMP/codex-review.txt"
 
           if [ -s "$output" ]; then
+            command_stop="codex-review-output-${RANDOM}-${RANDOM}"
+            echo "::group::Codex Review"
+            echo "::stop-commands::${command_stop}"
+            cat "$output"
+            echo "::${command_stop}::"
+            echo "::endgroup::"
+
             {
               echo "## Codex Review"
               echo
