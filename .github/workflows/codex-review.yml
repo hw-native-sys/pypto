@@ -1,0 +1,58 @@
+name: Codex Review
+
+# Runs `codex review` against the PR base and posts the result as a PR comment.
+#
+# NOTE on `pull_request` vs `pull_request_target`:
+# This workflow triggers on `pull_request`, which means the job only has access
+# to repository secrets (PROXY_TOKEN) and only the `github.token` can post
+# comments when the PR originates from this repository. For fork PRs GitHub
+# forces the token to read-only and hides secrets, so the review will fail
+# rather than post. If fork coverage is required, switch to the
+# `pull_request_target` pattern used by pr-agent.yml — but then the PR code is
+# checked out with secret access, so add the same bot/draft guards and treat the
+# checkout as untrusted.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# One in-flight review per PR; superseded runs are cancelled to avoid duplicate
+# comments on rapid pushes (matches pr-agent.yml).
+concurrency:
+  group: codex-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  codex-review:
+    runs-on: [self-hosted, Linux, ARM64, cpu-codex]
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Codex review & comment
+        env:
+          CODEX_HOME: /home/ci-runner/.codex-ci
+          HTTPS_PROXY: http://ci-runner:${{ secrets.PROXY_TOKEN }}@127.0.0.1:20809
+          HTTP_PROXY:  http://ci-runner:${{ secrets.PROXY_TOKEN }}@127.0.0.1:20809
+          NO_PROXY: localhost,127.0.0.1,.actions.githubusercontent.com,.github.com
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          export PATH="$HOME/.npm-global/bin:$PATH"
+          codex review --base "${{ github.event.pull_request.base.sha }}" \
+            1> review.txt 2> review.log || {
+              echo "codex review 失败：" >&2
+              tail -40 review.log >&2
+              exit 1
+            }
+          if [ -s review.txt ]; then
+            gh pr comment "${{ github.event.pull_request.number }}" \
+              --repo "${{ github.repository }}" \
+              --body-file review.txt
+          fi
