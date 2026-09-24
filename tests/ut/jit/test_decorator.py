@@ -2432,12 +2432,17 @@ class TestWindowLocalMetadata:
 
 
 class TestPldTensorRebindPreservesMetadata:
-    """A ``pld.tensor.*`` collective rebind must not drop the target's tensor
-    metadata (#2638). It's a two-level attribute call (``fn.value`` is itself
-    an ``ast.Attribute``, not a ``Name``), so it never reaches the
-    single-level ``pl.<op>(...)`` branch in ``_update_local_tensor_meta`` —
-    without the dedicated check it fell through to ``local.pop()`` instead of
-    the ``preserve_existing`` fallback other unmodelled same-shaped calls get."""
+    """A same-shape ``pld.tensor.*`` collective rebind must not drop the
+    target's tensor metadata (#2638). It's a two-level attribute call
+    (``fn.value`` is itself an ``ast.Attribute``, not a ``Name``), so it never
+    reaches the single-level ``pl.<op>(...)`` branch in
+    ``_update_local_tensor_meta`` — without the dedicated check it fell
+    through to ``local.pop()`` instead of the ``preserve_existing`` fallback
+    other unmodelled same-shaped calls get. The check is scoped to the
+    specific ops documented as same-shape rebinds (``_PLD_TENSOR_REBIND_OPS``)
+    rather than every ``pld.tensor.*`` name — ``window``/``alloc_window_buffer``
+    compute a *new* shape or return a ``Ptr``, so they must keep falling
+    through to ``local.pop()``, not silently reuse stale metadata."""
 
     def test_all_to_all_v_rebind_keeps_metadata(self):
         # Mirrors the real usage in
@@ -2497,6 +2502,28 @@ class TestPldTensorRebindPreservesMetadata:
         }
         metas = _extract_local_tensor_metas(body, seed_meta=seed)
         assert "result" not in metas
+
+    def test_window_three_segment_form_does_not_preserve_stale_metadata(self):
+        """``pld.tensor.window`` computes a *new* shape from an explicit
+        shape argument -- it is not a same-shape rebind like the collectives
+        above, so it must not hit the new branch. Without the op-name
+        allow-list, rebinding a name via this 3-segment spelling would have
+        silently kept an unrelated, stale shape instead of dropping it (the
+        safe pre-#2638-fix behavior this test locks back in)."""
+
+        def body(buf):
+            win = pld.tensor.window(buf, [128, 128], dtype=pl.FP32)
+            return win
+
+        seed = {
+            "buf": TensorMeta(shape=(1,), dtype=DataType.INT64),
+            # A stale (64, 64) FP16 entry for the same name the call rebinds:
+            # if window() were wrongly treated as a same-shape rebind, this
+            # would leak through untouched instead of being dropped.
+            "win": TensorMeta(shape=(64, 64), dtype=DataType.FP16),
+        }
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert "win" not in metas
 
     def test_pl_tensor_dim_is_not_mistaken_for_a_pld_rebind(self):
         """Guards the review trap: a two-level ``pl.*`` call (root ``pl``, not

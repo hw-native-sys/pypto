@@ -1335,10 +1335,29 @@ def _extract_dim_alias(value: ast.expr | None) -> tuple[str, int] | None:
     return None
 
 
-def _is_pld_tensor_call(fn: ast.expr) -> bool:
-    """True for ``pld.tensor.<attr>(...)`` — e.g. a collective rebind (issue #2638)."""
+# The pld.tensor.* ops whose result is documented as "the rebound target
+# operand, same shape and dtype" (each returns -> DistributedTensor and its
+# docstring shows `x = pld.tensor.<op>(x, ...)`). Deliberately excludes
+# pld.tensor.window/alloc_window_buffer (compute a *new* shape from an
+# explicit shape argument, or return a Ptr) and pld.tensor.get/put/
+# remote_store (not same-shape rebinds either) — those must keep falling
+# through to local.pop() rather than silently reusing stale metadata.
+_PLD_TENSOR_REBIND_OPS = frozenset({
+    "all_to_all_v",
+    "all_to_all",
+    "allreduce",
+    "reduce_scatter",
+    "broadcast",
+    "allgather",
+    "barrier",
+})
+
+
+def _is_pld_tensor_rebind_call(fn: ast.expr) -> bool:
+    """True for ``pld.tensor.<op>(...)`` where ``<op>`` is a same-shape collective rebind (#2638)."""
     return (
         isinstance(fn, ast.Attribute)
+        and fn.attr in _PLD_TENSOR_REBIND_OPS
         and isinstance(fn.value, ast.Attribute)
         and fn.value.attr == "tensor"
         and isinstance(fn.value.value, ast.Name)
@@ -1436,11 +1455,12 @@ def _update_local_tensor_meta(
                 # result metadata this extractor does not model (for example,
                 # same-shaped pl.assemble rebindings).
                 preserve_existing = True
-        elif _is_pld_tensor_call(fn) and has_named_target:
-            # A pld.tensor.* collective is a two-level attribute call, so it
-            # never reaches the single-level branch above; without this it
-            # falls through to local.pop() further below and silently drops
-            # the target's metadata instead of keeping it (#2638).
+        elif _is_pld_tensor_rebind_call(fn) and has_named_target:
+            # A same-shape pld.tensor.* collective is a two-level attribute
+            # call, so it never reaches the single-level branch above;
+            # without this it falls through to local.pop() further below and
+            # silently drops the target's metadata instead of keeping it
+            # (#2638).
             preserve_existing = True
         elif isinstance(fn, ast.Name) and fn.id in deps.io:
             # The in-place ``Out``-param convention first; a callee that
