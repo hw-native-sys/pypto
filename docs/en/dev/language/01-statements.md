@@ -189,6 +189,7 @@ def func(x: pl.Tensor[[128, 64], pl.FP16]) -> pl.Tensor[[128, 64], pl.FP16]:
 - `dump_tag` takes one bare tensor variable name bound in the enclosing Orchestration (or Inline) scope; it is consumed at parse time and tracked by Var identity (not name) all the way to codegen. At an explicit `self.kernel(...)` site it records the tensor in the consuming Call's `dump_vars` on every subsequent consuming call; in the `@pl.jit` / `with pl.at(level=...)` style (where the dispatch is synthesised by the outline passes) it instead seeds the enclosing scope's `dump_vars` and the outliner maps it onto the synthesised dispatch arg (see [Runtime DFX](../03-runtime-dfx.md#selective-tensor-dump)). To list dump targets explicitly at a single task launch, use the `dumps=[...]` kwarg on `pl.submit(...)` / `pl.at(...)` (symmetric with `deps=`)
 
 `pl.cluster(dumps=[a])` limits the dump marker to that cluster dispatch; it does not mark later scopes. Printed IR uses this explicit form to preserve cluster dump attributes. SPMD bodies with scoped dump attributes retain an explicit inner `pl.at(..., dumps=[a])` so print/reparse preserves the attribute on the correct scope.
+
 - Output appears even if parsing fails later — useful for debugging parse errors
 
 ### Statement Sequences
