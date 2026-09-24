@@ -92,7 +92,46 @@ value = buffer.reshape(window) : Buffer[[16,32], FP32, Vec]
 只有内部窗口时拒绝转换，因为它们的最小地址不能证明分配从哪里开始；
 后续显式分配事实表示可解除这个限制。PTOAS 使用符号原点零。
 所有视图必须位于原始容量内，字节偏移、字节大小和物理行均须静态且按 32 字节对齐。
-带步长或分形布局的视图、可变视图元数据仍不支持。
+分配处仍不支持分形布局的视图和可变视图元数据；带步长的窗口在使用处定义（见下文）。
+
+## 窗口：slice 与 assemble {#windows-slice-and-assemble}
+
+`tile.slice` 是源在（可能为运行时的）偏移处的窗口，保持源的行距。它的偏移只在 slice 所在位置
+可用，因此窗口在那里定义，而不是在分配处；对窗口的重新标注是在同一位置对它的 `buffer.reshape`。
+`tile.assemble` 原地写入：把源拷贝进结果存储上的一个窗口；如果规划器给目标和结果分配了不同存储，
+先把目标拷贝到结果。
+
+```text
+# window = tile.slice(whole, [16, 32], [row, 32]); placed = tile.assemble(canvas, doubled, [16, 0])
+window = buffer.subview(whole_buffer, (row, 32), (16, 32)) : Buffer[[16,32], FP32, Vec]
+buffer.add(window, window, doubled_buffer)
+placed_window = buffer.subview(canvas_buffer, (16, 0), (16, 32)) : Buffer[[16,32], FP32, Vec]
+buffer.copy(doubled_buffer, placed_window)
+```
+
+每个 lowering 生成的窗口都带 valid 元组，PTOAS 据此确定原生每一维的类型。PTOAS 无法合法化
+对字节根重新标注结果的 subview，因此在带地址的存储中，被切窗口的 tile 在其规划地址上有自己的分配。
+源本身就是 assemble 目标窗口时，数据已原地写好，不需要拷贝。跨内存空间的 assemble（fix-pipe 的
+Acc 到 Mat 形式）和降秩 slice 在对应配方完成前会被拒绝。
+
+`BufferIR` 证明每个窗口在被读取期间与写入的目标不重叠。运行时偏移的窗口只能按整个源窗口定位；
+带地址的规划器把这类目标放在该范围的一部分上时，lowering 会失败，而不是假定运行时偏移能避开它。
+
+## 运行时 valid extent {#runtime-valid-extents}
+
+非常量的 valid extent（或 lane-1 的 `[0, 0]` 哨兵）会让描述符的两个维度都变为动态，
+因为原生元数据更新总是同时写两维。分配以物理大小作为初始值，定义此类 tile 的每个操作先用
+`buffer.set_validshape` 声明自己产生的 extent；`tile.set_validshape` 直接更新共享的句柄。
+指向同一存储窗口、仅 valid extent 不同的 tile 共用一个动态句柄。窗口则在其 subview 中逐维保持
+静态或动态，因为视图从不接受元数据更新。动态 tile 必须拥有自己的分配，不能共享字节视图根。
+
+```text
+# loaded = tile.load(x, [0, 0], [16, 64], [16, cols]); doubled = tile.add(loaded, loaded)
+buffer.set_validshape(loaded_buffer, (16, cols))
+buffer.load(x, (0, 0), (16, cols), loaded_buffer)
+buffer.set_validshape(doubled_buffer, (16, cols))
+buffer.add(loaded_buffer, loaded_buffer, doubled_buffer)
+```
 
 ## 矩阵存储与 cube 转换 {#matrix-storage-and-cube-recipes}
 
@@ -193,7 +232,7 @@ buffer.store(left_buf, (row_result, column_result), (16, 32), Out)
 
 ## 首批支持的转换
 
-当前转换支持直线程序、分支和循环、静态二维稠密 Vec FP16/BF16/FP32/INT32 Tile、显式静态存储视图、静态有效范围、
+当前转换支持直线程序、分支和循环、二维稠密 Vec FP16/BF16/FP32/INT32 Tile、显式存储视图、使用处窗口、静态或运行时有效范围、
 普通紧密排列的 ND GM Tensor 以及默认加载/存储策略，另外还有上文的 cube 路径：Mat load、
 Mat 到 Left/Right 的拷贝与 extract、matmul/matmul_acc 以及 Acc store。
 它转换分配、create、load、store、move、已经合法化的别名及[带类型的逐元素配方](../ir/05-operators.md#typed-buffer-elementwise-recipes)。
@@ -202,7 +241,7 @@ Mat 到 Left/Right 的拷贝与 extract、matmul/matmul_acc 以及 Acc store。
 GM load/store 保留匹配的元素类型，不插入转换。`add`/`mul` 支持 FP16/FP32/INT32；
 BF16 传输支持不代表算术支持。
 
-辅助函数调用、其他布局、动态元数据、多槽位和其他操作转换由后续迁移切片补齐。
+辅助函数调用、其他布局、多槽位和其他操作转换由后续迁移切片补齐。
 暂不支持的形式会显式报错。在完整转换与运行时验收矩阵通过前，迁移选项默认关闭。
 
 二进制序列化保留显式表示和函数阶段。当前 Python 诊断打印器不支持 Buffer DSL 解析往返。
@@ -214,6 +253,8 @@ BF16 传输支持不代表算术支持。
 
 `tests/ut/ir/transforms/test_lower_buffer_views.py` 检查分配容量、非零窗口偏移、
 重复视图身份、无法证明地址时的诊断、二进制持久化，以及两个目标和三个规划器的原生编译。
+它还转换静态和运行时 slice、assemble，以及来自 `tile.load` 与 `tile.set_validshape` 的运行时
+valid extent，包括带地址规划器下运行时窗口部分重叠时的失败关闭。
 
 `tests/ut/ir/transforms/test_lower_buffer_matrix.py` 针对 FP16、BF16、FP32 和 INT8 操作数
 转换显式及自动分块的 cube 内核，覆盖三种 `init_cond` 形式和转置操作数，并在三种规划器、
@@ -227,7 +268,9 @@ BF16 传输支持不代表算术支持。
 
 `tests/st/runtime/ops/test_buffer_ir.py` 为三种规划器提供带编排的
 load/add/mul/store 数值测试，以及精确比较的 cube 用例：FP16/BF16/INT8 的 matmul 加
-matmul_acc、带运行时 `init_cond` 的 K 循环、自动分块的 BF16 matmul 以及 `b_trans` matmul。只运行这个目标文件：
+matmul_acc、带运行时 `init_cond` 的 K 循环、自动分块的 BF16 matmul 以及 `b_trans` matmul。
+窗口和 valid extent 用例覆盖切列后 assemble 到新 tile、运行时行 slice，以及来自 `tile.load` 和
+`tile.set_validshape` 的运行时 valid 列，每个构件运行四组运行时值。只运行这个目标文件：
 
 ```bash
 source .claude/skills/testing/load-env.sh
