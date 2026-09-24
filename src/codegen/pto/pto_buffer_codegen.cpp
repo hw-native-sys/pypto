@@ -614,11 +614,19 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
     const std::string source_type = GetExprTypeAnnotation(call->args_[0]);
     if (ir::IsOp(call, "buffer.subview")) {
       const auto offsets = As<ir::MakeTuple>(call->args_[1]);
-      const auto row = GetExprAsCode(offsets->elements_[0]);
-      const auto col = GetExprAsCode(offsets->elements_[1]);
+      const auto row = EmitBufferIntegerOperand(offsets->elements_[0], DataType::INDEX);
+      const auto col = EmitBufferIntegerOperand(offsets->elements_[1], DataType::INDEX);
+      // PTOAS types each result valid dimension from the explicit clause:
+      // a constant operand for a static dimension, an SSA value for `?`.
+      std::string valid;
+      if (call->args_.size() == 3) {
+        const auto extents = As<ir::MakeTuple>(call->args_[2]);
+        valid = " valid [" + EmitBufferIntegerOperand(extents->elements_[0], DataType::INDEX) + ", " +
+                EmitBufferIntegerOperand(extents->elements_[1], DataType::INDEX) + "]";
+      }
       Emit(name + " = pto.subview " + source + "[" + row + ", " + col + "] sizes [" +
-           std::to_string(type->shape_[0]) + ", " + std::to_string(type->shape_[1]) + "] : " + source_type +
-           " -> " + descriptor);
+           std::to_string(type->shape_[0]) + ", " + std::to_string(type->shape_[1]) + "]" + valid + " : " +
+           source_type + " -> " + descriptor);
     } else {
       Emit(name + " = pto.treshape " + source + " : " + source_type + " -> " + descriptor);
     }

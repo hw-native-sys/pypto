@@ -13,7 +13,6 @@
 
 #include <algorithm>
 #include <cstddef>
-#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -58,7 +57,7 @@ const std::vector<BufferElementwiseRecipe>& GetBufferElementwiseRecipes() {
        "pto.trecip",
        {{0}},
        BufferPrecisionKind::Recip,
-       BufferElementwiseTypePolicy::StaticDenseFP32,
+       BufferElementwiseTypePolicy::DenseFP32,
        BufferDestinationAliasPolicy::Disjoint},
       {"tile.adds", "buffer.adds", "pto.tadds", {{0}, {1, Kind::ElementScalar}}},
       {"tile.subs", "buffer.subs", "pto.tsubs", {{0}, {1, Kind::ElementScalar}}},
@@ -130,15 +129,14 @@ void ValidateBufferElementwiseOperands(const BufferElementwiseRecipe& recipe,
           descriptor->dtype_ == DataType::INT32)
         << recipe.buffer_op << " currently requires FP16/FP32/INT32 arithmetic operands";
   }
-  if (recipe.types == BufferElementwiseTypePolicy::StaticDenseFP32) {
+  if (recipe.types == BufferElementwiseTypePolicy::DenseFP32) {
     CHECK(descriptor->dtype_ == DataType::FP32) << recipe.buffer_op << " currently requires FP32 operands";
     CHECK((descriptor->shape_.size() == 1 || descriptor->shape_.size() == 2) &&
           descriptor->blayout_ == ir::TileLayout::row_major &&
           descriptor->slayout_ == ir::TileLayout::none_box && descriptor->fractal_ == 512 &&
-          descriptor->pad_ == ir::PadValue::null && descriptor->compact_ == ir::CompactMode::null &&
-          std::all_of(descriptor->valid_shape_.begin(), descriptor->valid_shape_.end(),
-                      [](int64_t extent) { return extent >= 0; }))
-        << recipe.buffer_op << " currently requires a static dense rank-1/rank-2 descriptor";
+          descriptor->pad_ == ir::PadValue::null && descriptor->compact_ == ir::CompactMode::null)
+        << recipe.buffer_op
+        << " currently requires a static dense rank-1/rank-2 row-major layout; valid extents may be runtime";
   }
   if (recipe.destination_alias == BufferDestinationAliasPolicy::Disjoint) {
     for (size_t i = 0; i < recipe.inputs.size(); ++i) {
