@@ -65,6 +65,13 @@ def main() -> int:
         return 2
 
     config = yaml.load(MKDOCS_YML.read_text(encoding="utf-8"), Loader=_LenientLoader)
+    if not isinstance(config, dict):
+        print(
+            f"Error: {MKDOCS_YML} must have a mapping root, got {type(config).__name__}",
+            file=sys.stderr,
+        )
+        return 2
+
     nav_paths: list[str] = []
     collect_nav_paths(config.get("nav", []), nav_paths)
 
