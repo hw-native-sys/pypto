@@ -44,6 +44,8 @@ jobs:
           ref: refs/pull/${{ github.event.pull_request.number }}/head
           fetch-depth: 0
           persist-credentials: false
+          # Fork contents are reviewed only inside the credential-isolated container.
+          allow-unsafe-pr-checkout: true
 
       - name: Ensure base commit is available
         run: |
