@@ -184,6 +184,11 @@ TypePtr DeduceTileCastType(const std::vector<ExprPtr>& args,
       AdjustFp4E2M1x2CastLastDim(GetValidShape(tile_type), tile_type->dtype_, target_dtype, span);
   tile_view.stride =
       AdjustFp4E2M1x2CastStrides(src_view.stride, shape, tile_type->dtype_, target_dtype, span);
+  // Logical FP4 cast results are fresh storage: do not inherit non-contiguous
+  // source strides (PackFp4 would only halve leading strides and leave a gap).
+  if (target_dtype.IsLogicalFp4()) {
+    tile_view.stride = RowMajorStridesFromShape(shape, span);
+  }
   InheritTileViewLayout(tile_view, tile_type);
   return std::make_shared<TileType>(std::move(shape), target_dtype, std::nullopt, tile_view);
 }

@@ -2788,7 +2788,7 @@ class TestOutlineNoDepArgs:
         LEFT_RIGHT) in one CORE_GROUP scope: the outlined function gets
         split_aiv=True but NO function-level ``split`` mode — there is no single
         representative mode. The authoritative per-region mode rides each
-        SplitAivScopeStmt (consumed at LowerAutoVectorSplit, pass 23); downstream
+        SplitAivScopeStmt (consumed at LowerAutoVectorSplit, pass 24); downstream
         readers key on the split_aiv marker / per-op split, not a func mode.
         """
 
@@ -2865,7 +2865,7 @@ class TestOutlineNoDepArgs:
     def test_split_aiv_preserved_in_outlined_func(self):
         """OutlineIncoreScopes outlines the enclosing InCore scope but preserves
         the nested ``SplitAivScopeStmt`` region inside the outlined function body
-        (SplitAiv is never an outline target — it is lowered in place at pass 23).
+        (SplitAiv is never an outline target — it is lowered in place at pass 24).
 
         The Expected pins the outlined two-function form: the region lives in the
         InCore ``main_incore_0`` body and the Orchestration ``main`` only carries

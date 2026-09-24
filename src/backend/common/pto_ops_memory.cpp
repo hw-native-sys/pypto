@@ -1164,14 +1164,24 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
     // v0.52), so the all-ones case needs no special handling: a raw `!pto.ptr`
     // operand is rejected outright, at parse without a type annotation and by
     // the lowering pass with one.
+    // PackFp4 rewrites shapes/offsets to carrier units; Expand so partition
+    // windows match the nibble-expanded parent make_tensor_view (same as tile.load).
+    std::vector<std::string> partition_dims = GetDimStrings(shapes_tuple->elements_);
+    std::vector<std::string> offset_codes = GetIndexOffsetCodes(offsets_tuple->elements_, codegen);
+    std::vector<std::string> size_codes = GetSizeCodes(shapes_tuple->elements_, codegen);
+    const ir::ExprPtr last_size = shapes_tuple->elements_.empty() ? nullptr : shapes_tuple->elements_.back();
+    const ir::ExprPtr last_offset =
+        offsets_tuple->elements_.empty() ? nullptr : offsets_tuple->elements_.back();
+    const ir::TensorLayout gm_layout =
+        tensor_type->tensor_view_.has_value() ? tensor_type->tensor_view_->layout : ir::TensorLayout::ND;
+    ExpandPackedFp4GmLastAxis(tensor_type->dtype_, offset_codes, size_codes, partition_dims, codegen,
+                              last_size, last_offset, gm_layout);
     const std::string tensor_view = codegen.GetOrCreateTensorView(tensor_var);
     const std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
-    const std::string partition_type =
-        MakePartitionTensorViewType(GetDimStrings(shapes_tuple->elements_), dtype_str);
+    const std::string partition_type = MakePartitionTensorViewType(partition_dims, dtype_str);
     const std::string payload_view =
         EmitPartitionViewPTO(tensor_var->name_hint_, tensor_view, tensor_view_type, partition_type,
-                             GetIndexOffsetCodes(offsets_tuple->elements_, codegen),
-                             GetSizeCodes(shapes_tuple->elements_, codegen), codegen);
+                             offset_codes, size_codes, codegen);
     codegen.Emit("pto.cmo.cacheinvalid " + payload_view + " single_cache_line : " + partition_type);
     return std::string("");
   });

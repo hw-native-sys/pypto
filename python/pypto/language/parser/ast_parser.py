@@ -5322,7 +5322,7 @@ class ASTParser:
         ``if`` — and carries the requested ``SplitMode`` on
         ``SplitAivScopeStmt::split_``. The loop variable is bound to
         ``pl.tile.get_subblock_idx()`` (the AIV lane / sub-core index) as the
-        first statement of the region body. ``LowerAutoVectorSplit`` (pass 23)
+        first statement of the region body. ``LowerAutoVectorSplit`` (pass 24)
         consumes and erases the node; it never reaches codegen.
         """
         split_aiv_hint = (
@@ -5418,7 +5418,7 @@ class ASTParser:
 
         # Build a first-class SplitAivScopeStmt region. The region body begins
         # with ``aiv_id = pl.tile.get_subblock_idx()`` and carries the requested
-        # SplitMode on the node; LowerAutoVectorSplit (pass 23) consumes it.
+        # SplitMode on the node; LowerAutoVectorSplit (pass 24) consumes it.
         #
         # FLATTEN: when the region is ALREADY in a core context, emit it in place.
         # The wrapper below exists only to give OutlineIncoreScopes something to

@@ -138,21 +138,21 @@ pl.set_cache_policy(b, BYPASS)                 statement, consumed at parse
 
 | 跳 | 载体 | 负载类型 | 写入方 | 消费方 |
 | -- | ---- | -------- | ------ | ------ |
-| 1 | `ScopeStmt.attrs_[kAttrCachePolicyVars]` | `vector<pair<VarPtr, int>>` | DSL parser | [`OutlineIncoreScopes`](../passes/09-outline_incore_scopes.md)（pass 9） |
-| 2 | `Function.attrs_[kAttrCachePolicyParams]` | `vector<pair<int32_t, int>>`，按索引排序 | pass 9 | [`ConvertTensorToTileOps`](../passes/11-convert_tensor_to_tile_ops.md)（pass 11） |
+| 1 | `ScopeStmt.attrs_[kAttrCachePolicyVars]` | `vector<pair<VarPtr, int>>` | DSL parser | [`OutlineIncoreScopes`](../passes/10-outline_incore_scopes.md)（pass 9） |
+| 2 | `Function.attrs_[kAttrCachePolicyParams]` | `vector<pair<int32_t, int>>`，按索引排序 | pass 9 | [`ConvertTensorToTileOps`](../passes/12-convert_tensor_to_tile_ops.md)（pass 11） |
 | 3 | `tile.load` 的 `cache` kwarg | `int`（`ir::CachePolicy`） | pass 11 | PTO codegen |
 
 保证这条链路不出错的几点设计考量：
 
 - **不放在 `TensorView` 的字段上。** 普通 kernel 参数根本没有 `tensor_view_`，在那里
   打策略会强行造出一个 TensorView —— 从而牵入严格的 `TensorViewCanonical` verifier；
-  而且 [`MaterializeTensorStrides`](../passes/33-materialize_tensor_strides.md) 会通过
+  而且 [`MaterializeTensorStrides`](../passes/34-materialize_tensor_strides.md) 会通过
   一个位置参数构造函数重建该 view，会静默丢掉这个字段。
 - **参数索引只在 pass 9..11 之间有效。** 二者之间只夹着 `OutlineClusterScopes`，它不会
   改动已外提 InCore 函数的参数列表。而下游的 pass *会*改：
-  [`InjectGMPipeBuffer`](../passes/25-inject_gm_pipe_buffer.md) 与
-  [`MaterializeDistTensorCtx`](../passes/47-materialize_dist_tensor_ctx.md) 追加参数，
-  [`MaterializeValidShapeSymbols`](../passes/52-materialize_valid_shape_symbols.md)
+  [`InjectGMPipeBuffer`](../passes/26-inject_gm_pipe_buffer.md) 与
+  [`MaterializeDistTensorCtx`](../passes/48-materialize_dist_tensor_ctx.md) 追加参数，
+  [`MaterializeValidShapeSymbols`](../passes/53-materialize_valid_shape_symbols.md)
   则在*前面插入*。这正是 pass 11 转换完成后必须擦除该 attr 的原因。
 - **kwarg 是 `int` 而不是枚举。** 它沿用 `tile.store` 的 `atomic` kwarg 做法，因此
   序列化器、反序列化器、`structural_hash` 与 `structural_equal` 都无需新增枚举分支。
@@ -295,5 +295,5 @@ a5 并不是"缺一个 offset 等着填"：它根本没有第二份映射可寻�
 
 - [语句与控制流](01-statements.md) —— 作用域形态，以及其它解析期标记
   （`pl.dump_tag`、`pl.static_assert`）。
-- [OutlineIncoreScopes](../passes/09-outline_incore_scopes.md) —— 第 1 跳 → 第 2 跳。
-- [ConvertTensorToTileOps](../passes/11-convert_tensor_to_tile_ops.md) —— 第 2 跳 → 第 3 跳。
+- [OutlineIncoreScopes](../passes/10-outline_incore_scopes.md) —— 第 1 跳 → 第 2 跳。
+- [ConvertTensorToTileOps](../passes/12-convert_tensor_to_tile_ops.md) —— 第 2 跳 → 第 3 跳。

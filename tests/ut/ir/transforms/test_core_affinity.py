@@ -106,7 +106,7 @@ def test_remote_load_classifies_shared_even_once_its_memory_space_is_resolved():
     ``InferTileMemorySpace`` resolves the destination tile to ``Mem.Vec``, so
     the information needed to place this op precisely *is* available by pass 20.
     It is still not used: classifying from the result tile would also change
-    what ``LowerAutoVectorSplit`` (pass 23) does, where a VECTOR-affine leaf is
+    what ``LowerAutoVectorSplit`` (pass 24) does, where a VECTOR-affine leaf is
     routed into the split-halving machinery. That machinery shrinks the result
     type but has no rewrite for this op's ``offsets`` / ``shape`` tuples, so the
     request would stay full-width while the destination halved.

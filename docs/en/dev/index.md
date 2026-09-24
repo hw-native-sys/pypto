@@ -34,7 +34,7 @@ PyPTO programs, start with the [User Manual](../user/index.md).
 | [Compile and Execution Entry Points](08-entry-points.md) | Every compile and execution entry point, the layer it belongs to, and when to reach for it |
 | [Distributed Operators](distributed_ops.md) | The N6 distributed op family — typed DSL access to collectives and primitives |
 | [PTOAS Op Status Matrix](ptoas-op-status.md) | Which public and compatibility PTOAS ops the compiler currently emits |
-| [FP4](fp4.md) | Logical vs packed FP4, cast policy, and hand-written `FP4E2M1X2` guidance |
+| [FP4](fp4.md) | Logical vs packed FP4, PackFp4 limits, cast policy, and TODOs |
 
 ## Automated PR Review
 

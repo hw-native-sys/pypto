@@ -294,9 +294,11 @@ class BufferIRVisitor : public IRVisitor {
     }
     if (result) {
       const auto bits = dtype.GetBit();
-      if (bits == 0 || (dtype.IsUnsignedInt() && result->value_ < 0) ||
-          (bits < 64 && (result->value_ < (dtype.IsUnsignedInt() ? 0 : -(int64_t{1} << (bits - 1))) ||
-                         result->value_ > ((int64_t{1} << (bits - (dtype.IsUnsignedInt() ? 0 : 1))) - 1)))) {
+      // bits == 0 makes (bits - 1) wrap; clang-analyzer treats that shift as UB.
+      if ((dtype.IsUnsignedInt() && result->value_ < 0) ||
+          (bits > 0 && bits < 64 &&
+           (result->value_ < (dtype.IsUnsignedInt() ? 0 : -(int64_t{1} << (bits - 1))) ||
+            result->value_ > ((int64_t{1} << (bits - (dtype.IsUnsignedInt() ? 0 : 1))) - 1)))) {
         result = nullptr;
       }
     }

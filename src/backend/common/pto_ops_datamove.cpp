@@ -1622,16 +1622,11 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     auto tile_type = ir::As<ir::TileType>(op->args_[0]->GetType());
     INTERNAL_CHECK_SPAN(tile_type, op->span_)
         << "Internal error: tile.set_validshape input must be a TileType";
-    const auto tile_view = ir::tile_view_semantics::GetEffectiveTileView(*tile_type);
-    // PTOAS special requirement (FP4 Vec physical valid_shape):
-    //   FP4 Vec tile_bufs use the f4E2M1x2 carrier, so PTOAS valid_row/valid_col
-    //   are counted in packed physical elements along the BLayout axis (logical
-    //   nibble extent / 2). PyPTO IR keeps logical nibble shapes; convert here
-    //   so pto.set_validshape matches the alloc_tile / treshape physical ABI.
-    //   Matrix spaces are excluded — TMATMUL_MX has its own logical-dim ABI.
-    const bool packed_fp4_vec =
-        tile_type->dtype_ == DataType::FP4 && tile_type->memory_space_ == ir::MemorySpace::Vec;
-    const size_t packed_dim = tile_view.blayout == ir::TileLayout::col_major ? 0 : 1;
+    // After PackFp4, valid extents are already FP4E2M1X2 carrier units. Emit
+    // pto.set_validshape operands as-is (no /2). Logical FP4 must not remain.
+    INTERNAL_CHECK_SPAN(tile_type->dtype_ != DataType::FP4, op->span_)
+        << "Internal error: logical DataType::FP4 reached set_validshape codegen; PackFp4 must "
+           "rewrite it to FP4E2M1X2 first";
 
     std::string tile_buf = codegen.GetExprAsCode(op->args_[0]);
     std::string tile_buf_type = codegen.GetExprTypeAnnotation(op->args_[0]);
@@ -1669,18 +1664,14 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
            "slice itself -- pl.tile.slice(tile, shape, offset, valid_shape=[...]), which also accepts "
            "runtime extents -- or call pl.set_validshape on the source tile before taking the view";
 
-    auto emit_index_arg = [&](const ir::ExprPtr& arg, bool pack_fp4) -> std::string {
+    auto emit_index_arg = [&](const ir::ExprPtr& arg) -> std::string {
       if (auto var = ir::AsVarLike(arg)) {
-        INTERNAL_CHECK_SPAN(!pack_fp4, op->span_)
-            << "Internal error: packed FP4 valid dimension must be static before PTO codegen";
         std::string mlir_name = codegen.GetVarName(var);
         return codegen.EmitCastToIndex(var, mlir_name);
       }
       if (auto c = ir::As<ir::ConstInt>(arg)) {
-        return codegen.GetOrEmitConstant(pack_fp4 ? c->value_ / 2 : c->value_, DataType::INDEX);
+        return codegen.GetOrEmitConstant(c->value_, DataType::INDEX);
       }
-      INTERNAL_CHECK_SPAN(!pack_fp4, op->span_)
-          << "Internal error: packed FP4 valid dimension must be static before PTO codegen";
       std::string ssa = codegen.GetExprAsCode(arg);
       if (auto st = ir::As<ir::ScalarType>(arg->GetType())) {
         if (st->dtype_ != DataType::INDEX) {
@@ -1693,8 +1684,8 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
       return ssa;
     };
 
-    std::string vr = emit_index_arg(op->args_[1], packed_fp4_vec && packed_dim == 0);
-    std::string vc = emit_index_arg(op->args_[2], packed_fp4_vec && packed_dim == 1);
+    std::string vr = emit_index_arg(op->args_[1]);
+    std::string vc = emit_index_arg(op->args_[2]);
 
     codegen.RegisterTileBufType(tile_buf, tile_buf_type);
     codegen.SetCurrentResultBuf(tile_buf);
