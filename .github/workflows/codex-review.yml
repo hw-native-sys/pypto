@@ -184,8 +184,8 @@ jobs:
             --env GIT_CONFIG_KEY_0=safe.directory \
             --env GIT_CONFIG_VALUE_0=/workspace \
             "$CODEX_REVIEW_IMAGE" \
-            --model gpt-6-sol \
-            --config 'model_reasoning_effort="high"' \
+            --model gpt-6-astra \
+            --config 'model_reasoning_effort="medium"' \
             --sandbox read-only \
             --ask-for-approval never \
             review --base "$BASE_SHA" \
