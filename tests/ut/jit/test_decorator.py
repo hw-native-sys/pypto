@@ -2459,6 +2459,45 @@ class TestPldTensorRebindPreservesMetadata:
         metas = _extract_local_tensor_metas(body, seed_meta=seed)
         assert metas["data"] == seed["data"]
 
+    def test_broadcast_rebind_keeps_metadata(self):
+        # A second pld.tensor.* op, not just all_to_all_v — the fix is a
+        # generic two-level-attribute check, not an all_to_all_v special
+        # case. Real DSL signature: broadcast(target, signal, *, root).
+        def body(target, signal):
+            target = pld.tensor.broadcast(target, signal, root=0)
+            return target
+
+        seed = {
+            "target": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
+            "signal": TensorMeta(shape=(4, 1), dtype=DataType.INT32),
+        }
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert metas["target"] == seed["target"]
+
+    def test_fresh_name_rebind_still_untracked(self):
+        """Known remaining gap, pinned rather than fixed: preserve_existing
+        only keeps metadata already held by the *same* name. Binding a
+        pld.tensor.* result to a fresh name — ``result = f(..., data, ...)``
+        instead of ``data = f(..., data, ...)`` — still has no metadata for
+        ``result``. Issue #2638's own suggested fix #2 ("give the managed
+        collectives a handler that returns the meta of their target
+        argument") would close this; this test marks the boundary so that
+        follow-up has a failing test to turn green."""
+
+        def body(stage, data, signal, send_counts, recv_counts):
+            result = pld.tensor.all_to_all_v(stage, data, signal, send_counts, recv_counts, core_num=1)
+            return result
+
+        seed = {
+            "stage": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
+            "data": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
+            "signal": TensorMeta(shape=(4, 1), dtype=DataType.INT32),
+            "send_counts": TensorMeta(shape=(4,), dtype=DataType.INT32),
+            "recv_counts": TensorMeta(shape=(4, 1), dtype=DataType.INT32),
+        }
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert "result" not in metas
+
     def test_pl_tensor_dim_is_not_mistaken_for_a_pld_rebind(self):
         """Guards the review trap: a two-level ``pl.*`` call (root ``pl``, not
         ``pld``) must not hit the new branch — ``pl.tensor.dim`` is a scalar
