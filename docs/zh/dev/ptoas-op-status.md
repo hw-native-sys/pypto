@@ -156,14 +156,14 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 | pto.tand | TAND | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 真机通过有/无符号 8/16 位 pattern 的完整、行尾、列尾及行列组合尾部场景；A5 真机待验证 |
 | pto.tor | TOR | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 真机通过有/无符号 8/16 位 pattern 的完整、行尾、列尾及行列组合尾部场景；A5 真机待验证 |
 | pto.txor | TXOR | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 真机通过有/无符号 8/16 位 pattern、显式 tmp 及四类 shape；IR UT 覆盖 alias 拒绝场景；A5 真机待验证 |
-| pto.tshl | TSHL | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
-| pto.tshr | TSHR | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
+| pto.tshl | TSHL | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | A2/A3 真机证据已覆盖有/无符号 16 位 count；现有用例覆盖 A2/A3 与 A5 的全部有/无符号 8/16/32 位类型、count 边界及 full/row/column/combined valid shape，扩展真机执行待完成 |
+| pto.tshr | TSHR | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | A2/A3 真机证据已覆盖有符号算术右移和无符号逻辑右移的 16 位类型；现有用例覆盖 A2/A3 与 A5 的全部有/无符号 8/16/32 位类型、count 边界及 full/row/column/combined valid shape，扩展真机执行待完成 |
 | pto.tnot | TNOT | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | 已由既有同名 `tile.not` ST 覆盖 |
 | pto.tands | TANDS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 真机通过有/无符号 8/16 位 tile、immediate/SSA scalar 及四类 shape；A5 真机待验证 |
 | pto.tors | TORS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 真机通过有/无符号 8/16 位 tile、immediate/SSA scalar 及四类 shape；A5 真机待验证 |
 | pto.txors | TXORS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 真机通过有/无符号 8/16 位 tile、immediate/SSA scalar、显式 tmp 及四类 shape；IR UT 覆盖 alias 拒绝场景；A5 真机待验证 |
-| pto.tshls | TSHLS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
-| pto.tshrs | TSHRS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | 已有链路；历史 ISA/语义问题，需按当前 pin 复验 |
+| pto.tshls | TSHLS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | A5 用例覆盖有/无符号 8/16/32 位 tile、scalar 边界和全部 valid-shape 模式；A2/A3 支持 16/32 位 tile，但固定版本 pto-isa 的 `TShiftCheck` 错将 dst valid rows 与 src valid columns 比较，上游修复前仅正方形 valid region 可执行 |
+| pto.tshrs | TSHRS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | A5 用例覆盖有/无符号 8/16/32 位 tile、scalar 边界和全部 valid-shape 模式；A2/A3 支持 16/32 位 tile，但固定版本 pto-isa 的 `TShiftCheck` 错将 dst valid rows 与 src valid columns 比较，上游修复前仅正方形 valid region 可执行 |
 | **数据重排（15）** |  |  |  |  |  |  |  |  |
 | pto.tconcat | TCONCAT | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tconcatidx | TCONCAT (indexed) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
@@ -260,6 +260,6 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 | pto.tassign | TASSIGN | internal | ✅ | — | — | — | — | 失活 backend hook，不独立建 ST |
 
 **统计**：共 204 个 PTOAS 公共/兼容 op；pypto tile 前端 113 个，tensor 前端 75 个
-（另有 `pl.prefetch.*` 一族 4 个非 tile/tensor op）；同名 ST 覆盖 121 个
-（普通 ST 117，distributed ST 4）；无同名 ST 51 个（普通 41，distributed 10）；
+（另有 `pl.prefetch.*` 一族 4 个非 tile/tensor op）；同名 ST 覆盖 136 个
+（普通 ST 132，distributed ST 4）；无同名 ST 36 个（普通 26，distributed 10）；
 其余 32 个 op 不适合独立 ST。

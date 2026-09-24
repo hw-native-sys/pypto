@@ -1143,12 +1143,13 @@ class TestConvertTensorToTileOps:
     )
     def test_bitwise_scalar_reaches_tile_scalar_op(self, op_name, tensor_op, tile_op):
         """A scalar rhs lands on tile.<op>s, whether spelled `*s` or auto-dispatched."""
+        scalar = 7 if op_name in {"shl", "shls", "shr", "shrs"} else 0xFF
         before, expected = _make_pair(
             in_specs=[("x", [64], DataType.INT32)],
             out_shape=[64],
             out_dtype=DataType.INT32,
-            tensor_op=lambda ins, op=tensor_op: op(ins[0], 0xFF),
-            tile_op=lambda ts, op=tile_op: op(ts[0], 0xFF),
+            tensor_op=lambda ins, op=tensor_op: op(ins[0], scalar),
+            tile_op=lambda ts, op=tile_op: op(ts[0], scalar),
         )
         _assert_convert_equal(before, expected)
 

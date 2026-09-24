@@ -5410,7 +5410,8 @@ def test_tensor_bitwise_auto_dispatches_scalar_rhs(builder_name, expected_op):
     """A scalar rhs routes the tensor-tensor entry point to its `*s` variant."""
     lhs = _bitwise_tensor_var([64], name="lhs")
 
-    call = getattr(ir.op.tensor, builder_name)(lhs, 0xFF)
+    # A shared dispatch count must also be valid for 32-bit shifts (0..31).
+    call = getattr(ir.op.tensor, builder_name)(lhs, 7)
 
     assert call.op.name == expected_op
 
@@ -5472,7 +5473,7 @@ def test_tensor_bitwise_rejects_float_rhs(builder_name, op_name):
         getattr(ir.op.tensor, builder_name)(_bitwise_tensor_var([64]), float_var)
 
 
-@pytest.mark.parametrize("builder_name", ["and_", "or_", "xor"])
+@pytest.mark.parametrize("builder_name", ["and_", "or_", "xor", "shl", "shr"])
 @pytest.mark.parametrize("dtype", [DataType.INT64, DataType.UINT64])
 def test_tensor_bitwise_binary_rejects_unsupported_64bit_dtype(builder_name, dtype):
     """Tensor bitwise dtypes must be implementable by the strict tile lowering."""
@@ -5482,7 +5483,7 @@ def test_tensor_bitwise_binary_rejects_unsupported_64bit_dtype(builder_name, dty
         getattr(ir.op.tensor, builder_name)(value, value)
 
 
-@pytest.mark.parametrize("builder_name", ["ands", "ors", "xors"])
+@pytest.mark.parametrize("builder_name", ["ands", "ors", "xors", "shls", "shrs"])
 @pytest.mark.parametrize("dtype", [DataType.INT64, DataType.UINT64])
 def test_tensor_bitwise_scalar_rejects_unsupported_64bit_dtype(builder_name, dtype):
     """Tensor-scalar bitwise calls reject widths unavailable in tile PTOAS."""
@@ -5511,11 +5512,83 @@ def test_tensor_bitwise_rejects_rank_mismatch(builder_name, op_name):
         )
 
 
-@pytest.mark.parametrize(("builder_name", "op_name"), [("shls", "tensor.shls"), ("shrs", "tensor.shrs")])
-def test_tensor_shift_rejects_negative_constant(builder_name, op_name):
-    """Nothing downstream range-checks the shift count, so catch a constant here."""
-    with pytest.raises(ValueError, match=rf"{op_name} requires a non-negative shift count"):
-        getattr(ir.op.tensor, builder_name)(_bitwise_tensor_var([64]), -1)
+_SHIFT_DTYPES = [
+    (DataType.INT8, DataType.INT8, 8),
+    (DataType.UINT8, DataType.INT8, 8),
+    (DataType.INT16, DataType.INT16, 16),
+    (DataType.UINT16, DataType.INT16, 16),
+    (DataType.INT32, DataType.INT32, 32),
+    (DataType.UINT32, DataType.INT32, 32),
+]
+
+
+@pytest.mark.parametrize("builder_name", ["shl", "shls", "shr", "shrs"])
+@pytest.mark.parametrize(("tensor_dtype", "scalar_dtype", "bits"), _SHIFT_DTYPES)
+def test_tensor_shift_scalar_preserves_same_width_signed_encoding(
+    builder_name, tensor_dtype, scalar_dtype, bits
+):
+    """Literals and parser placeholders match the scalar dtype emitted for PTOAS."""
+    span = ir.Span.unknown()
+    lhs = _bitwise_tensor_var([64], dtype=tensor_dtype)
+    scalar_var = ir.Var("count", ir.ScalarType(scalar_dtype), span)
+    for count in (
+        0,
+        bits - 1,
+        ir.ConstInt(bits - 1, DataType.INDEX, span),
+        ir.ConstInt(bits - 1, scalar_dtype, span),
+        scalar_var,
+    ):
+        call = getattr(ir.op.tensor, builder_name)(lhs, count)
+        assert call.args[1].type.dtype == scalar_dtype
+        assert call.type.dtype == tensor_dtype
+        if isinstance(call.args[1], ir.ConstInt):
+            expected = count.value if isinstance(count, ir.ConstInt) else count
+            assert call.args[1].value == expected
+
+
+@pytest.mark.parametrize("builder_name", ["shl", "shls", "shr", "shrs"])
+@pytest.mark.parametrize(("tensor_dtype", "bits"), [(dtype, bits) for dtype, _, bits in _SHIFT_DTYPES])
+@pytest.mark.parametrize("placeholder", [False, True])
+def test_tensor_shift_rejects_out_of_range_constant(builder_name, tensor_dtype, bits, placeholder):
+    """Reject width bounds and wraparound values before tensor-to-tile lowering."""
+    span = ir.Span.unknown()
+    lhs = _bitwise_tensor_var([64], dtype=tensor_dtype)
+    for value in (-1, bits, bits + 1, 1 << bits, -(1 << bits)):
+        count = ir.ConstInt(value, DataType.INDEX, span) if placeholder else value
+        with pytest.raises(ValueError, match=rf"requires a scalar shift count in \[0, {bits - 1}\]"):
+            getattr(ir.op.tensor, builder_name)(lhs, count)
+
+
+@pytest.mark.parametrize("builder_name", ["shl", "shls", "shr", "shrs"])
+@pytest.mark.parametrize(
+    ("tensor_dtype", "scalar_dtype"),
+    [
+        (DataType.UINT8, DataType.UINT8),
+        (DataType.UINT16, DataType.UINT16),
+        (DataType.INT16, DataType.INT32),
+        (DataType.INT32, DataType.INT64),
+    ],
+)
+@pytest.mark.parametrize("constant", [False, True])
+def test_tensor_shift_rejects_incompatible_typed_scalar(builder_name, tensor_dtype, scalar_dtype, constant):
+    """An explicit scalar type is preserved and must match the PTOAS operand encoding."""
+    span = ir.Span.unknown()
+    lhs = _bitwise_tensor_var([64], dtype=tensor_dtype)
+    count = (
+        ir.ConstInt(1, scalar_dtype, span) if constant else ir.Var("count", ir.ScalarType(scalar_dtype), span)
+    )
+    with pytest.raises(ValueError, match="same-width signless scalar"):
+        getattr(ir.op.tensor, builder_name)(lhs, count)
+
+
+@pytest.mark.parametrize("op_name", ["tensor.shls", "tensor.shrs"])
+def test_tensor_shift_registry_rejects_out_of_range_constant(op_name):
+    """Direct registry users receive the same range guard as the Python wrapper."""
+    span = ir.Span.unknown()
+    lhs = _bitwise_tensor_var([64], dtype=DataType.UINT16)
+    for value in (-1, 16, 65536):
+        with pytest.raises(ValueError, match=r"requires a scalar shift count in \[0, 15\]"):
+            ir.create_op_call(op_name, [lhs, ir.ConstInt(value, DataType.INT16, span)], {}, span)
 
 
 @pytest.mark.parametrize("builder_name", ["ands", "ors", "xors"])
@@ -5545,9 +5618,9 @@ def test_tensor_bitwise_scalar_rejects_float_tensor(builder_name, op_name):
         getattr(ir.op.tensor, builder_name)(float_var, 4)
 
 
-@pytest.mark.parametrize("op_name", ["and_", "or_", "xor"])
+@pytest.mark.parametrize("op_name", ["and_", "or_", "xor", "shl", "shr"])
 def test_tensor_bitwise_rejects_mixed_integer_widths(op_name):
-    """Tensor AND/OR/XOR require the exact dtype equality enforced by tile lowering."""
+    """Binary bitwise and shift operands require exact dtype equality in PTOAS."""
     lhs = _bitwise_tensor_var([64], dtype=DataType.INT16, name="lhs")
     rhs = _bitwise_tensor_var([64], dtype=DataType.INT32, name="rhs")
 
@@ -5556,14 +5629,28 @@ def test_tensor_bitwise_rejects_mixed_integer_widths(op_name):
 
 
 @pytest.mark.parametrize("op_name", ["shl", "shr"])
-def test_tensor_shift_keeps_lhs_dtype(op_name):
-    """The shift count never widens the result — mirrors DeduceTileOpShiftBinaryType."""
-    lhs = _bitwise_tensor_var([64], dtype=DataType.INT16, name="lhs")
-    shift = _bitwise_tensor_var([64], dtype=DataType.INT32, name="shift")
+@pytest.mark.parametrize("tensor_dtype", [dtype for dtype, _, _ in _SHIFT_DTYPES])
+def test_tensor_shift_keeps_matching_dtype(op_name, tensor_dtype):
+    """PTOAS binary shifts require the count tensor to have the data tensor's dtype."""
+    lhs = _bitwise_tensor_var([64], dtype=tensor_dtype, name="lhs")
+    shift = _bitwise_tensor_var([64], dtype=tensor_dtype, name="shift")
 
     result_type = getattr(ir.op.tensor, op_name)(lhs, shift).type
     assert isinstance(result_type, ir.TensorType)
-    assert result_type.dtype == DataType.INT16
+    assert result_type.dtype == tensor_dtype
+
+
+@pytest.mark.parametrize("op_name", ["shl", "shr"])
+@pytest.mark.parametrize(
+    ("lhs_dtype", "rhs_dtype"),
+    [(DataType.INT8, DataType.UINT8), (DataType.INT16, DataType.UINT16), (DataType.INT32, DataType.UINT32)],
+)
+def test_tensor_shift_rejects_mixed_signedness(op_name, lhs_dtype, rhs_dtype):
+    """Equal width alone is insufficient for the binary shift's matching tile types."""
+    lhs = _bitwise_tensor_var([64], dtype=lhs_dtype, name="lhs")
+    rhs = _bitwise_tensor_var([64], dtype=rhs_dtype, name="rhs")
+    with pytest.raises(ValueError, match="same dtype"):
+        getattr(ir.op.tensor, op_name)(lhs, rhs)
 
 
 def test_tensor_bitwise_dsl_surface_is_complete():

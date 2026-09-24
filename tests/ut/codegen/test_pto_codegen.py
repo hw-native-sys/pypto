@@ -1110,43 +1110,85 @@ def test_pto_codegen_tile_int_literal_scalar_is_not_index():
 
 
 @pytest.mark.parametrize(
-    ("op_name", "pto_op_name"),
+    "tile_dtype,scalar_type",
     [
-        ("tile.shls", "pto.tshls"),
-        ("tile.shrs", "pto.tshrs"),
+        (pl.UINT8, "i8"),
+        (pl.UINT16, "i16"),
+        (pl.UINT32, "i32"),
     ],
 )
-def test_pto_codegen_tile_shift_scalar_index_operand_is_cast_to_i32(op_name, pto_op_name):
-    """Tile-scalar shift codegen must never pass an index operand to PTOAS.
+@pytest.mark.parametrize("op_name", ["shls", "shrs"])
+def test_pto_codegen_unsigned_tile_shift_uses_signless_same_width_scalar(tile_dtype, scalar_type, op_name):
+    """Unsigned tile shifts encode a signed same-width PTOAS scalar operand."""
 
-    Shift amounts have an i32 PTOAS contract independent of the tile dtype, so
-    deserialized or directly constructed INDEX operands are widened here. The
-    bitwise scalar family instead requires a same-width signless scalar and is
-    covered separately.
-    """
+    if op_name == "shls":
+
+        @pl.program
+        class ShlsProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def shift_test(
+                self,
+                src: pl.Tensor[[32, 32], tile_dtype],
+                out: pl.Tensor[[32, 32], tile_dtype],
+            ):
+                src_tile = pl.load(src, offsets=[0, 0], shapes=[32, 32])
+                result = pl.tile.shls(src_tile, 1)
+                pl.store(result, offsets=[0, 0], output_tensor=out)
+
+        program = ShlsProgram
+
+    else:
+
+        @pl.program
+        class ShrsProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def shift_test(
+                self,
+                src: pl.Tensor[[32, 32], tile_dtype],
+                out: pl.Tensor[[32, 32], tile_dtype],
+            ):
+                src_tile = pl.load(src, offsets=[0, 0], shapes=[32, 32])
+                result = pl.tile.shrs(src_tile, 1)
+                pl.store(result, offsets=[0, 0], output_tensor=out)
+
+        program = ShrsProgram
+
+    lines = _get_mlir_lines(_generate_default_mlir(program))
+    shift = _single_line(lines, f"pto.t{op_name}")
+    assert "index" not in shift, f"scalar operand is still index: {shift}"
+    assert f", {scalar_type})" in shift, f"scalar operand is not {scalar_type}: {shift}"
+
+
+@pytest.mark.parametrize(
+    "dtype,scalar_dtype,scalar_type",
+    [
+        (DataType.UINT8, DataType.INT8, "i8"),
+        (DataType.UINT16, DataType.INT16, "i16"),
+        (DataType.UINT32, DataType.INT32, "i32"),
+    ],
+)
+@pytest.mark.parametrize("op_name", ["shls", "shrs"])
+@pytest.mark.parametrize("ssa_count", [False, True], ids=["literal", "ssa"])
+def test_pto_codegen_unsigned_tensor_shift_preserves_scalar_width(
+    dtype, scalar_dtype, scalar_type, op_name, ssa_count
+):
+    """Tensor shifts keep the signless count type through tensor-to-tile lowering."""
     span = ir.Span.unknown()
-    tensor_type = ir.TensorType([32, 32], DataType.INT32)
+    tensor_type = ir.TensorType([32, 32], dtype)
     ib = IRBuilder()
-    with ib.function(f"{op_name.removeprefix('tile.')}_index_operand", type=ir.FunctionType.InCore) as f:
-        input_tensor = f.param("input", tensor_type)
-        output_tensor = f.param("output", tensor_type)
-        input_tile = ib.let("input_tile", tile.load(input_tensor, [0, 0], [32, 32]))
-        scalar = ir.ConstInt(5, DataType.INDEX, span)
-        args = [input_tile, scalar]
-        result_tile = ib.let("result_tile", ir.create_op_call(op_name, args, {}, span))
-        result = ib.let("result", tile.store(result_tile, [0, 0], output_tensor))
+    with ib.function("tensor_shift", type=ir.FunctionType.InCore) as f:
+        src = f.param("src", tensor_type)
+        count = f.param("count", ir.ScalarType(scalar_dtype)) if ssa_count else 1
+        result = ib.let("result", getattr(tensor_ops, op_name)(src, count))
         f.return_type(tensor_type)
         ib.return_stmt(result)
 
-    program = ir.Program([f.get_result()], f"{op_name.removeprefix('tile.')}_index_operand", span)
-    # The round-trip instrument reparses the literal through the Python wrapper,
-    # which normalizes it before the backend can observe the direct-IR input.
-    with ir.PassContext([], ir.VerificationLevel.NONE):
-        lines = _get_mlir_lines(_generate_default_mlir(program))
-    bitwise_line = _single_line(lines, pto_op_name)
-    assert "index" not in bitwise_line, f"scalar operand is still index: {bitwise_line}"
-    assert ", i32" in bitwise_line, f"scalar operand is not i32: {bitwise_line}"
-    assert any("arith.index_cast" in line and "index to i32" in line for line in lines)
+    program = ir.Program([f.get_result()], "tensor_shift", span)
+    lines = _get_mlir_lines(_generate_default_mlir(program))
+    shift = _single_line(lines, f"pto.t{op_name}")
+    assert f", {scalar_type})" in shift
+    assert "index" not in shift
+    assert not any("arith.index_cast" in line for line in lines)
 
 
 def test_pto_codegen_tile_bitwise_unsigned_scalar_is_normalized_without_bridge():
