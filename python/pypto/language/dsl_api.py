@@ -683,9 +683,10 @@ def cluster(*, name_hint: str = "", dumps: list[Any] | None = None) -> ClusterCo
         name_hint: Optional name hint for the outlined function.
         dumps: Optional list literal of outer-scope tensor names to mark for
             selective tensor dump on the Group dispatch the cluster outlines to
-            — the same surface as ``pl.at(..., dumps=[...])``. Equivalent to
-            declaring the tensors with ``pl.dump_tag(t)`` before the scope, and
-            the form the printer emits for a scope carrying such marks.
+            — the same surface as ``pl.at(..., dumps=[...])``. This marks only
+            this Group launch. A preceding ``pl.dump_tag(t)`` also marks later
+            consuming dispatches and may mark nested ones. The printer emits
+            ``dumps=`` for a scope carrying dump marks.
 
     Returns:
         Context manager for Cluster scope
@@ -746,9 +747,10 @@ def graph(name: str, *, dumps: list[Any] | None = None) -> GraphContext:
         dumps: Optional list literal of outer-scope tensor names to mark for
             selective tensor dump on the Graph task itself (distinct from the
             kernel dispatches recorded inside it) — the same surface as
-            ``pl.at(..., dumps=[...])``. Equivalent to declaring the tensors
-            with ``pl.dump_tag(t)`` before the scope, and the form the printer
-            emits for a scope carrying such marks.
+            ``pl.at(..., dumps=[...])``. This marks only this Graph launch.
+            A preceding ``pl.dump_tag(t)`` may also mark recorded kernel
+            dispatches and later consumers. The printer emits ``dumps=`` for
+            a scope carrying dump marks.
 
     Returns:
         Context manager for the Graph scope.

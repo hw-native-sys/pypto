@@ -20,10 +20,13 @@ same way it surfaces a Submit's. The forward-sticky ``pl.dump_tag`` statement
 itself is covered in ``test_dump_tag_dsl.py``.
 """
 
+import ast
+
 import pypto.language as pl
 import pytest
 from pypto import ir
-from pypto.language.parser.diagnostics import ParserTypeError
+from pypto.language.parser.ast_parser import ASTParser
+from pypto.language.parser.diagnostics import ParserSyntaxError, ParserTypeError
 
 
 def _kernel_calls(program: ir.Program, callee_name: str = "kernel") -> list[ir.Call]:
@@ -374,6 +377,39 @@ class P:
 """
     with pytest.raises(ParserTypeError, match=rf"{api}\(dumps=\[\.\.\.\]\) entry 'n' is not a tensor"):
         pl.parse_program(source)
+
+
+@pytest.mark.parametrize(
+    ("api", "call"),
+    [
+        ("pl.spmd", "pl.spmd(4, dumps={first}, dumps={second})"),
+        ("pl.cluster", "pl.cluster(dumps={first}, dumps={second})"),
+        ("pl.graph", 'pl.graph("g", dumps={first}, dumps={second})'),
+    ],
+)
+@pytest.mark.parametrize(("first", "second"), [("[]", "[a]"), ("[a]", "[n]")])
+def test_container_scope_rejects_duplicate_dumps(api: str, call: str, first: str, second: str) -> None:
+    """Direct AST parsing rejects duplicates, including after an empty first list."""
+    scope = call.format(first=first, second=second)
+    source = f"""
+def orch(
+    a: pl.Tensor[[16, 16], pl.FP32],
+    n: pl.Scalar[pl.INT32],
+    d: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+) -> pl.Tensor[[16, 16], pl.FP32]:
+    with {scope}:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            d = pl.add(a, a)
+    return d
+"""
+    # ast.parse retains duplicate keywords. pl.parse_program compiles first,
+    # where Python rejects them before ASTParser sees the function.
+    func_def = ast.parse(source).body[0]
+    assert isinstance(func_def, ast.FunctionDef)
+    parser = ASTParser("<duplicate_dumps>", source.splitlines(), 0, 0)
+    with pytest.raises(ParserSyntaxError, match="got multiple values for argument 'dumps'") as exc:
+        parser.parse_function(func_def, func_type=ir.FunctionType.Orchestration)
+    assert f"{api}()" in str(exc.value)
 
 
 def test_at_dumps_rejects_non_tensor() -> None:

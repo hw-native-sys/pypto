@@ -4333,11 +4333,13 @@ class ASTParser:
                     hint=f"Use 'with pl.{func_attr}():'",
                 )
             dump_vars: list[ir.Var] = []
+            seen_dumps = False
             for kw in context_expr.keywords:
                 if kw.arg == "name_hint":
                     name_hint = self._parse_scope_name_hint(kw.value, f"pl.{func_attr}()")
                 elif kw.arg == "dumps":
-                    dump_vars = self._parse_scope_dumps_kwarg(kw, f"pl.{func_attr}")
+                    dump_vars = self._parse_scope_dumps_once(kw, "pl.cluster", seen_dumps)
+                    seen_dumps = True
                 else:
                     raise ParserSyntaxError(
                         f"pl.{func_attr}() got unexpected keyword argument '{kw.arg}'",
@@ -4585,6 +4587,7 @@ class ASTParser:
         split_slot_num: int | None = None
         deps_kw: ast.keyword | None = None
         dump_vars: list[ir.Var] = []
+        seen_dumps = False
         allow_early_resolve: bool = False
         predicate: ir.Expr | None = None
         for kw in call.keywords:
@@ -4606,7 +4609,8 @@ class ASTParser:
             elif kw.arg == "deps":
                 deps_kw = kw
             elif kw.arg == "dumps":
-                dump_vars = self._parse_scope_dumps_kwarg(kw, "pl.spmd")
+                dump_vars = self._parse_scope_dumps_once(kw, "pl.spmd", seen_dumps)
+                seen_dumps = True
             elif kw.arg == "allow_early_resolve":
                 allow_early_resolve = self._parse_spmd_bool_literal_kwarg(kw, usage_hint)
             elif kw.arg == "predicate":
@@ -5706,6 +5710,7 @@ class ASTParser:
         # forward-sticky ``pl.dump_tag`` merges in, and the surface the printer
         # emits it back as.
         dump_vars: list[ir.Var] = []
+        seen_dumps = False
         for kw in context_expr.keywords:
             if kw.arg != "dumps":
                 raise ParserSyntaxError(
@@ -5714,7 +5719,8 @@ class ASTParser:
                     hint="pl.graph() takes the region name and an optional `dumps=[...]`: "
                     "'with pl.graph(\"decoder_layer\"):'",
                 )
-            dump_vars = self._parse_scope_dumps_kwarg(kw, "pl.graph")
+            dump_vars = self._parse_scope_dumps_once(kw, "pl.graph", seen_dumps)
+            seen_dumps = True
 
         name = self._parse_scope_name_hint(context_expr.args[0], "pl.graph()")
         if not name:
@@ -6121,6 +6127,15 @@ class ASTParser:
             seen.add(id(var))
             resolved.append(var)
         return resolved
+
+    def _parse_scope_dumps_once(self, kw: "ast.keyword", api: str, seen: bool) -> list[ir.Var]:
+        """Reject a duplicate scope ``dumps=`` before resolving its entries."""
+        if seen:
+            raise ParserSyntaxError(
+                f"{api}() got multiple values for argument 'dumps'",
+                span=self.span_tracker.get_span(kw),
+            )
+        return self._parse_scope_dumps_kwarg(kw, api)
 
     def _parse_scope_dumps_kwarg(self, kw: "ast.keyword", api: str) -> list[ir.Var]:
         """Resolve a scope's ``dumps=[t1, t2]`` entries to outer-scope tensor Vars.
