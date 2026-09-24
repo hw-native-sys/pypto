@@ -96,6 +96,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
@@ -385,7 +386,8 @@ ExprPtr BlockTupleArg(const ExprPtr& arg, const std::vector<ExprPtr>& parent_sha
 
 class BlockNzMutator : public IRMutator {
  public:
-  explicit BlockNzMutator(tensor_view_semantics::NzOffsetFacts facts) : facts_(std::move(facts)) {}
+  BlockNzMutator(tensor_view_semantics::NzOffsetFacts facts, bool is_host)
+      : facts_(std::move(facts)), is_host_(is_host) {}
 
   void AddSubstitution(const VarPtr& old_var, const VarPtr& new_var) { var_cache_[old_var] = new_var; }
 
@@ -441,6 +443,8 @@ class BlockNzMutator : public IRMutator {
     // A call to another function just forwards the tensor; the callee's own
     // params are blocked when that function is transformed.
     const bool is_function_call = static_cast<bool>(As<GlobalVar>(op->op_));
+    const bool is_slice = IsOp(op, "tensor.slice");
+    ExprPtr host_leading_index;
     if (!nz_args.empty() && !is_function_call) {
       // Name the store case directly: annotating an Out/InOut tensor pl.NZ is
       // the likely authoring mistake, and "read-only" is the actionable fact.
@@ -448,7 +452,6 @@ class BlockNzMutator : public IRMutator {
           << "NZ layout is read-only: an NZ tensor cannot be a store destination. "
           << "Annotate the output tensor as pl.ND.";
       const bool is_load = IsOp(op, "tile.load");
-      const bool is_slice = IsOp(op, "tensor.slice");
       const bool is_flatten = IsWholeTensorFlatten(op);
       CHECK_SPAN((is_load || is_slice || is_flatten) && nz_args.size() == 1 && nz_args[0] == 0, op->span_)
           << "NZ layout currently supports only 'tile.load' and 'tensor.slice' reading the tensor as "
@@ -462,6 +465,55 @@ class BlockNzMutator : public IRMutator {
       // The flatten keeps its arguments: the element count is layout-invariant
       // and the result is already ND.
       if (!is_flatten) {
+        // This metadata is consumed only by HOST distributed codegen
+        // (`distributed_ops_codegen.cpp`'s `tensor.slice` handler); scope both
+        // the capture and its validation to HOST functions so a CHIP-level NZ
+        // slice — which never reads `nz_host_leading_index` — is never rejected
+        // by a constraint that exists purely for the HOST index it never emits.
+        if (is_host_ && is_slice) {
+          auto logical_offsets = As<MakeTuple>(new_args[2]);
+          auto logical_window = As<MakeTuple>(new_args[1]);
+          INTERNAL_CHECK_SPAN(logical_offsets && logical_window, op->span_)
+              << "Internal error: NZ tensor.slice coordinates must be MakeTuples";
+          std::vector<bool> is_dropped(logical_shape.size(), false);
+          if (op->args_.size() >= 5) {
+            auto drop_dims = As<MakeTuple>(op->args_[4]);
+            INTERNAL_CHECK_SPAN(drop_dims, op->span_)
+                << "Internal error: tensor.slice drop_dims must be a MakeTuple";
+            for (const auto& dim_expr : drop_dims->elements_) {
+              auto dim = As<ConstInt>(dim_expr);
+              INTERNAL_CHECK_SPAN(dim, op->span_)
+                  << "Internal error: tensor.slice drop_dims entries must be ConstInt";
+              CHECK_SPAN(dim->value_ == 0, op->span_)
+                  << "NZ host tensor.slice currently supports only a scalar leading-axis index";
+              is_dropped[0] = true;
+              host_leading_index = logical_offsets->elements_[0];
+            }
+          }
+          // Without a scalar leading index there is no logical lookup to emit,
+          // and the blocked rank-5 coordinates would reach the caller's logical
+          // tensor instead.
+          CHECK_SPAN(host_leading_index, op->span_)
+              << "NZ host tensor.slice must select one shard with a scalar leading-axis index (w[r]); "
+              << "a range-only slice cannot be expressed on the host. Pass the whole tensor or index "
+              << "one shard, and narrow it inside the per-rank function.";
+          // HOST codegen only ever emits the leading scalar index, so
+          // a real sub-range on some other axis (`w[rank, 2:4]`) would vanish
+          // from the generated index instead of narrowing it. Every axis this
+          // pass does not drop must therefore still span its full logical
+          // extent -- proven, not assumed, since these are static shapes.
+          for (size_t axis = 0; axis < is_dropped.size(); ++axis) {
+            if (is_dropped[axis]) continue;
+            auto window = As<ConstInt>(logical_window->elements_[axis]);
+            auto full = As<ConstInt>(logical_shape[axis]);
+            CHECK_SPAN(window && full && window->value_ == full->value_, op->span_)
+                << "NZ host tensor.slice does not yet support combining a scalar leading-axis "
+                << "index with a partial range on another axis (axis " << axis << " is narrowed to "
+                << (window ? std::to_string(window->value_) : std::string("?")) << " of "
+                << (full ? std::to_string(full->value_) : std::string("?"))
+                << "); index the full axis instead.";
+          }
+        }
         args_changed = true;
         new_args = is_load ? BlockTileLoadArgs(op, std::move(new_args), logical_shape)
                            : BlockTensorSliceArgs(op, std::move(new_args), logical_shape);
@@ -475,7 +527,11 @@ class BlockNzMutator : public IRMutator {
     // Direct ctor, not OpRegistry::Create: re-deducing ``tile.load``'s type
     // from the now rank-5 shapes argument would turn the destination tile into
     // a rank-5 TileType. The GM partition is blocked; the tile is not.
-    return std::make_shared<Call>(op->op_, std::move(new_args), op->kwargs_, op->attrs_,
+    std::vector<std::pair<std::string, std::any>> new_attrs = op->attrs_;
+    if (host_leading_index && !op->HasAttr(kNzHostLeadingIndexAttr)) {
+      new_attrs.emplace_back(kNzHostLeadingIndexAttr, std::move(host_leading_index));
+    }
+    return std::make_shared<Call>(op->op_, std::move(new_args), op->kwargs_, std::move(new_attrs),
                                   std::move(new_return_type), op->span_);
   }
 
@@ -666,6 +722,7 @@ class BlockNzMutator : public IRMutator {
 
   tensor_view_semantics::NzOffsetFacts facts_;
   std::unordered_map<VarPtr, VarPtr> var_cache_;
+  bool is_host_;
 };
 
 /// Block one function: params, return types, body. Returns the input unchanged
@@ -700,7 +757,8 @@ FunctionPtr TransformFunction(const FunctionPtr& func) {
 
   // The store owns the maps the facts read, so it must outlive the mutator.
   NzOffsetFactStore fact_store(func->body_);
-  BlockNzMutator mutator(fact_store.Facts());
+  const bool is_host = func->level_.has_value() && *func->level_ == Level::HOST;
+  BlockNzMutator mutator(fact_store.Facts(), is_host);
   for (const auto& [old_var, new_var] : param_substitutions) {
     mutator.AddSubstitution(old_var, new_var);
   }
