@@ -39,6 +39,7 @@ PyPTO 的构成：IR、pass 流水线、代码生成，以及围绕它们的基�
 `Codex Review` GitHub Actions 工作流会在非草稿 PR 创建、重新打开、更新或标记为
 可审查（ready for review）时进行审查。工作流定义取自主分支的受信任版本，将 PR
 head 作为不可信输入检出，并由独立的 GitHub 托管任务（GitHub-hosted job）发布结果。
+自动生成的审查结果仅供参考；工作流不会批准或合并 PR。
 
 管理员通过仓库 Actions 变量 `CODEX_REVIEW_ENABLED` 启用或禁用审查。将其设为
 `true` 即可启用；删除该变量或设为其他值可以立即禁用。

@@ -42,6 +42,7 @@ The `Codex Review` GitHub Actions workflow reviews non-draft pull requests when
 they are opened, reopened, updated, or marked ready for review. It uses the
 trusted workflow from the default branch, checks out the pull request head as
 untrusted input, and posts the result from a separate GitHub-hosted job.
+The generated review is advisory; it never approves or merges the pull request.
 
 Administrators enable or disable reviews with the repository Actions variable
 `CODEX_REVIEW_ENABLED`. Set it to `true` to enable reviews; unset it or use any
