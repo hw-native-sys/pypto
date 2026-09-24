@@ -5,7 +5,7 @@ name: Codex Review
 # isolated container checks out and reviews untrusted code from the PR.
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, edited]
   # Refresh the persistent ChatGPT-managed Codex session outside any PR
   # workspace. The interval stays below Codex's normal stale-session window.
   schedule:
@@ -13,10 +13,6 @@ on:
   workflow_dispatch:
 
 permissions: {}
-
-concurrency:
-  group: codex-review-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: true
 
 env:
   CODEX_REVIEW_IMAGE: localhost:5000/pypto-codex-review@sha256:832c7701a365b3a9a32e2d65c1986c3b79997603dd22f170e040dfef008af552
@@ -26,16 +22,53 @@ env:
   CODEX_RELAY_PORT: "17895"
 
 jobs:
-  review:
+  invalidate:
     if: >-
+      github.event_name == 'pull_request_target' &&
+      github.event.action == 'edited' && github.event.changes.base
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: codex-invalidate-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout trusted approval invalidator
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - name: Revoke approvals before reviewing a retargeted PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python .github/scripts/publish_codex_review.py --revoke
+
+  review:
+    needs: invalidate
+    if: >-
+      !cancelled() &&
+      (needs.invalidate.result == 'success' || needs.invalidate.result == 'skipped') &&
       vars.CODEX_REVIEW_ENABLED == 'true' &&
       github.event_name == 'pull_request_target' &&
       github.event.pull_request.draft == false &&
-      github.event.sender.type != 'Bot'
+      (github.event.action != 'edited' || github.event.changes.base) &&
+      (github.event.sender.type != 'Bot' ||
+       (github.event.action == 'edited' && github.event.changes.base))
     runs-on: [self-hosted, Linux, ARM64, cpu-codex]
     timeout-minutes: 20
+    concurrency:
+      group: codex-review-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     permissions:
       contents: read
+    env:
+      TRUSTED_WORKFLOW_SHA: ${{ github.workflow_sha }}
 
     steps:
       - name: Checkout PR head
@@ -47,10 +80,11 @@ jobs:
           # Fork contents are reviewed only inside the credential-isolated container.
           allow-unsafe-pr-checkout: true
 
-      - name: Ensure base commit is available
+      - name: Ensure base and trusted workflow commits are available
         run: |
           git fetch --no-tags --depth=1 \
             origin "${{ github.event.pull_request.base.sha }}"
+          git fetch --no-tags --depth=1 origin "$TRUSTED_WORKFLOW_SHA"
 
       - name: Review in an isolated container
         env:
@@ -65,7 +99,7 @@ jobs:
           output="$RUNNER_TEMP/codex-review.json"
           schema="$RUNNER_TEMP/codex-review-schema.json"
           test "$(git rev-parse HEAD)" = "$HEAD_SHA"
-          git show "$BASE_SHA:.github/codex-review-schema.json" >"$schema"
+          git show "$TRUSTED_WORKFLOW_SHA:.github/codex-review-schema.json" >"$schema"
           chmod 644 "$schema"
           log="$RUNNER_TEMP/codex-review.log"
           auth_snapshot=$(mktemp "$RUNNER_TEMP/codex-auth.XXXXXX")
@@ -316,17 +350,20 @@ jobs:
     needs: review
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    concurrency:
+      group: codex-publish-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     permissions:
       actions: read
       contents: read
       pull-requests: write
 
     steps:
-      # Execute publisher code from the trusted base commit, never the PR head.
+      # Execute publisher code from the trusted workflow commit, never the PR head.
       - name: Checkout trusted publisher
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
           sparse-checkout: .github/scripts
 
@@ -343,5 +380,6 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           REVIEW_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          REVIEW_BASE_REF: ${{ github.event.pull_request.base.ref }}
           AUTO_APPROVE: ${{ vars.CODEX_REVIEW_AUTO_APPROVE }}
         run: python .github/scripts/publish_codex_review.py "$RUNNER_TEMP/codex-review-artifact/codex-review.json"

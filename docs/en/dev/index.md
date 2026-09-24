@@ -77,19 +77,38 @@ Set `CODEX_REVIEW_AUTO_APPROVE=true` to allow clean reviews to submit an
 must also allow GitHub Actions to create and approve pull requests. Disable
 only automatic approval by removing this variable or setting it to `false`;
 reviews continue to be posted. The repository's required CI checks still apply.
+PRs authored by `github-actions[bot]` receive comments instead of approvals,
+because GitHub does not allow authors to approve their own PRs.
 
 The workflow checks out the event's exact head SHA and requests structured
 JSON through `codex exec --output-schema`. The schema and publishing script
-come from the trusted base commit. The publisher approves only a complete
-`pass` with zero findings, after checking both the head and base are unchanged.
+come from the commit supplying the workflow file (`github.workflow_sha`),
+independently of the PR's base revision. The publisher approves only a complete
+`pass` with zero findings, after checking the head SHA, base SHA, and base branch
+name are unchanged. Retargeting to a different branch at the same SHA also
+invalidates the review, because that branch can have different protection rules.
 Invalid, empty, oversized, inconsistent, or incomplete output never approves.
-The branch must have an active rule dismissing stale approvals after new commits.
+The branch must have an active rule requiring at least one approval and
+dismissing stale approvals after new commits.
+It must also require at least one status check with the strict up-to-date policy
+enabled. When the base branch advances, this merge gate requires updating the PR
+head, which dismisses its old approval and triggers fresh CI and review. Without
+both rules, the publisher posts a comment instead of approving.
 The publisher checks revisions again after approval and dismisses its approval
 if an update raced with publication. Replacement results first dismiss this
 workflow's previous approvals; human approvals are not modified.
 
+Changing a PR's base branch also triggers approval invalidation before review.
+A separate GitHub-hosted job runs only trusted workflow-revision code and
+revokes this workflow's earlier approvals, even when reviews are disabled, the
+PR is a draft, or a bot retargets it. A fresh eligible review starts only after
+invalidation succeeds. Title/body-only edits do not start review or cancel an
+existing review. Invalidation has a separate concurrency group that does not
+cancel running jobs when another event arrives. GitHub event delivery and job scheduling are asynchronous, so
+revocation is not atomic with the base edit.
+
 Changes under `.github`, `.claude`, `.codex`, or `.agents`, and changes to
-`AGENTS.md`, `CLAUDE.md`, or `.gitmodules` require human review. Renaming those
+`AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md`, or `.gitmodules` require human review. Renaming those
 files does not bypass this restriction. If the complete changed-file list
 cannot be verified, automatic approval is withheld.
 
@@ -102,7 +121,7 @@ credential leaks. Prefer a credential-isolating API proxy for public-repository
 review infrastructure. No model process receives the GitHub approval token.
 
 The workflow must be merged into the default branch before these changes take
-effect; pull-request-target runs use the trusted base workflow. Validate the
+effect; pull-request-target runs use the default-branch workflow. Validate the
 first clean review on a controlled PR and verify the review's commit ID and
 `APPROVED` state before relying on it as a merge gate.
 

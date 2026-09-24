@@ -78,14 +78,18 @@ def sensitive_path(path: str) -> bool:
     """Require human review for automation and agent-policy changes, including renames."""
     parts = PurePosixPath(path).parts
     return any(part in {".github", ".claude", ".codex", ".agents"} for part in parts) or (
-        PurePosixPath(path).name in {"AGENTS.md", "CLAUDE.md", ".gitmodules"}
+        PurePosixPath(path).name in {"AGENTS.md", "AGENTS.override.md", "CLAUDE.md", ".gitmodules"}
     )
 
 
-def matches_revision(pr: dict, head: str, base: str) -> bool:
-    """Check the PR still represents the complete revision pair that was reviewed."""
+def matches_revision(pr: dict, head: str, base: str, base_ref: str) -> bool:
+    """Check the PR still targets the branch and revision pair that were reviewed."""
     return (
-        pr["state"] == "open" and not pr["draft"] and pr["head"]["sha"] == head and pr["base"]["sha"] == base
+        pr["state"] == "open"
+        and not pr["draft"]
+        and pr["head"]["sha"] == head
+        and pr["base"]["sha"] == base
+        and pr["base"]["ref"] == base_ref
     )
 
 
@@ -93,6 +97,8 @@ def approval_blocker(repo: str, endpoint: str, pr: dict, review: dict, enabled: 
     """Return why human review is needed, or None if all approval gates pass."""
     if not enabled:
         return "Automatic approval is disabled"
+    if pr["user"]["login"] == "github-actions[bot]":
+        return "GitHub Actions cannot approve its own pull request"
     if review["verdict"] != "pass":
         return "Review contains findings or is incomplete"
     files = github_api(f"{endpoint}/files?per_page=100", paginate=True)
@@ -107,34 +113,40 @@ def approval_blocker(repo: str, endpoint: str, pr: dict, review: dict, enabled: 
         return "Automation or agent-policy changes require human review"
     rules = github_api(f"repos/{repo}/rules/branches/{quote(pr['base']['ref'], safe='')}", paginate=True)
     if not any(
-        rule["type"] == "pull_request" and rule["parameters"].get("dismiss_stale_reviews_on_push") is True
+        rule["type"] == "pull_request"
+        and rule["parameters"].get("dismiss_stale_reviews_on_push") is True
+        and rule["parameters"].get("required_approving_review_count", 0) >= 1
         for rule in rules
     ):
-        return "Branch must dismiss stale approvals after new commits"
+        return "Branch must require at least one approval and dismiss stale approvals after new commits"
+    if not any(
+        rule["type"] == "required_status_checks"
+        and rule["parameters"].get("strict_required_status_checks_policy") is True
+        and rule["parameters"].get("required_status_checks")
+        for rule in rules
+    ):
+        return "Branch must require status checks and an up-to-date head before merging"
     return None
 
 
-def publish(path: Path, repo: str, number: str, head: str, base: str, enabled: bool) -> str:
-    """Post a review, approving only a complete clean review of the current revision."""
+def pull_request_endpoint(repo: str, number: str) -> str:
+    """Validate the target before constructing a pull-request API endpoint."""
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
         raise ValueError("Invalid repository")
     if not re.fullmatch(r"[1-9][0-9]*", number):
         raise ValueError("Invalid pull request number")
-    if any(not re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (head, base)):
-        raise ValueError("Expected full commit SHA values")
-    endpoint = f"repos/{repo}/pulls/{number}"
-    pr = github_api(endpoint)
-    if not matches_revision(pr, head, base):
-        return "Skipped obsolete or non-reviewable PR"
+    return f"repos/{repo}/pulls/{number}"
 
-    # Revoke our own prior approvals before parsing a replacement result. A bad
-    # result or API failure must not leave an earlier automated pass in force.
+
+def revoke_approvals(repo: str, number: str) -> None:
+    """Dismiss this workflow's approvals without relying on review eligibility."""
+    endpoint = pull_request_endpoint(repo, number)
     reviews = github_api(f"{endpoint}/reviews?per_page=100", paginate=True)
     for previous in reviews:
         if (
             previous["user"]["login"] == "github-actions[bot]"
             and previous["state"] == "APPROVED"
-            and previous["body"].startswith(MARKER)
+            and (previous["body"] or "").startswith(MARKER)
         ):
             command = [
                 "gh",
@@ -153,6 +165,18 @@ def publish(path: Path, repo: str, number: str, head: str, base: str, enabled: b
                 check=True,
             )
 
+
+def publish(path: Path, repo: str, number: str, head: str, base: str, base_ref: str, enabled: bool) -> str:
+    """Post a review, approving only a complete clean review of the current revision."""
+    endpoint = pull_request_endpoint(repo, number)
+    if any(not re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (head, base)):
+        raise ValueError("Expected full commit SHA values")
+    pr = github_api(endpoint)
+    if not matches_revision(pr, head, base, base_ref):
+        return "Skipped obsolete or non-reviewable PR"
+
+    # A bad replacement result must not leave our earlier approval in force.
+    revoke_approvals(repo, number)
     review = load_review(path)
     reason = approval_blocker(repo, endpoint, pr, review, enabled)
     approve = reason is None
@@ -167,7 +191,7 @@ def publish(path: Path, repo: str, number: str, head: str, base: str, enabled: b
         raise ValueError("Rendered review exceeds 60000 bytes")
     # Fetch immediately before posting, then again afterwards to close the race
     # with synchronize events. The review is always attached to the examined SHA.
-    if not matches_revision(github_api(endpoint), head, base):
+    if not matches_revision(github_api(endpoint), head, base, base_ref):
         return "Skipped PR updated during publication"
     posted = github_api(
         f"{endpoint}/reviews",
@@ -177,7 +201,7 @@ def publish(path: Path, repo: str, number: str, head: str, base: str, enabled: b
             "body": body,
         },
     )
-    if approve and not matches_revision(github_api(endpoint), head, base):
+    if approve and not matches_revision(github_api(endpoint), head, base, base_ref):
         subprocess.run(
             ["gh", "api", f"{endpoint}/reviews/{posted['id']}/dismissals", "--method", "PUT", "--input", "-"],
             input=json.dumps({"message": "PR changed while Codex approval was being published"}),
@@ -190,13 +214,17 @@ def publish(path: Path, repo: str, number: str, head: str, base: str, enabled: b
 
 
 if __name__ == "__main__":
-    print(
-        publish(
-            Path(sys.argv[1]),
-            os.environ["GH_REPO"],
-            os.environ["PR_NUMBER"],
-            os.environ["REVIEW_HEAD_SHA"],
-            os.environ["REVIEW_BASE_SHA"],
-            os.environ.get("AUTO_APPROVE") == "true",
+    if sys.argv[1] == "--revoke":
+        revoke_approvals(os.environ["GH_REPO"], os.environ["PR_NUMBER"])
+    else:
+        print(
+            publish(
+                Path(sys.argv[1]),
+                os.environ["GH_REPO"],
+                os.environ["PR_NUMBER"],
+                os.environ["REVIEW_HEAD_SHA"],
+                os.environ["REVIEW_BASE_SHA"],
+                os.environ["REVIEW_BASE_REF"],
+                os.environ.get("AUTO_APPROVE") == "true",
+            )
         )
-    )
