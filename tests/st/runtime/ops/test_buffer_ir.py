@@ -331,5 +331,147 @@ def test_public_buffer_product_view_leaves_the_wider_accumulator_intact(case_run
         assert len(written) == 1, text
 
 
+# Windows and runtime valid extents. Each artifact runs four cases from one
+# orchestration loop; every case writes its own output band, and unwritten
+# elements keep the -777 sentinel.
+_VIEW_CASES = 4
+_VIEW_GRID = torch.arange(64 * 64, dtype=torch.float32).reshape(64, 64)
+_VIEW_INPUT = (_VIEW_GRID.remainder(37) - 18) / 8
+
+
+@pl.jit.incore
+def _slice_assemble_kernel(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
+    whole = pl.load(x, [0, 0], [64, 64])
+    window = pl.tile.slice(whole, [16, 32], [16, 32])
+    doubled = pl.add(window, window)
+    # PTOAS moves into a window only when the window spans whole rows.
+    canvas = pl.tile.full([32, 32], dtype=pl.FP32, value=0.0)
+    placed = pl.tile.assemble(canvas, doubled, [16, 0])
+    return pl.store(placed, [0, 0], out)
+
+
+@pl.jit
+def _slice_assemble_entry(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
+    out = _slice_assemble_kernel(x, out)
+    return out
+
+
+def _slice_assemble_golden(tensors) -> torch.Tensor:
+    result = torch.full((64, 64), -777.0)
+    result[:32, :32] = 0.0
+    result[16:32, :32] = 2 * tensors["x"][16:32, 32:64]
+    return result
+
+
+@pl.jit.incore
+def _runtime_slice_kernel(
+    x: pl.Tensor, out: pl.InOut[pl.Tensor], row: pl.Scalar[pl.INDEX], base: pl.Scalar[pl.INDEX]
+):
+    whole = pl.load(x, [0, 0], [64, 64])
+    window = pl.tile.slice(whole, [16, 64], [row, 0])
+    doubled = pl.add(window, window)
+    return pl.store(doubled, [base, 0], out)
+
+
+@pl.jit
+def _runtime_slice_entry(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
+    for index in pl.range(_VIEW_CASES):
+        row = index * 8
+        base = index * 16
+        out = _runtime_slice_kernel(x, out, row, base)
+    return out
+
+
+def _runtime_slice_golden(tensors) -> torch.Tensor:
+    result = torch.full((64, 64), -777.0)
+    for index in range(_VIEW_CASES):
+        result[index * 16 : index * 16 + 16] = 2 * tensors["x"][index * 8 : index * 8 + 16]
+    return result
+
+
+@pl.jit.incore
+def _valid_load_kernel(
+    x: pl.Tensor, out: pl.InOut[pl.Tensor], cols: pl.Scalar[pl.INDEX], base: pl.Scalar[pl.INDEX]
+):
+    loaded: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(
+        x, [0, 0], [16, 64], [16, cols], target_memory=pl.MemorySpace.Vec
+    )
+    doubled = pl.add(loaded, loaded)
+    return pl.store(doubled, [base, 0], out)
+
+
+@pl.jit
+def _valid_load_entry(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
+    for index in pl.range(_VIEW_CASES):
+        cols = (index + 1) * 16
+        base = index * 16
+        out = _valid_load_kernel(x, out, cols, base)
+    return out
+
+
+@pl.jit.incore
+def _set_valid_kernel(
+    x: pl.Tensor, out: pl.InOut[pl.Tensor], cols: pl.Scalar[pl.INDEX], base: pl.Scalar[pl.INDEX]
+):
+    loaded = pl.load(x, [0, 0], [16, 64])
+    narrowed = pl.tile.set_validshape(loaded, 16, cols)
+    doubled = pl.add(narrowed, narrowed)
+    return pl.store(doubled, [base, 0], out)
+
+
+@pl.jit
+def _set_valid_entry(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
+    for index in pl.range(_VIEW_CASES):
+        cols = (index + 1) * 16
+        base = index * 16
+        out = _set_valid_kernel(x, out, cols, base)
+    return out
+
+
+def _valid_columns_golden(tensors) -> torch.Tensor:
+    result = torch.full((64, 64), -777.0)
+    for index in range(_VIEW_CASES):
+        cols = (index + 1) * 16
+        result[index * 16 : index * 16 + 16, :cols] = 2 * tensors["x"][:16, :cols]
+    return result
+
+
+def _view_case(entry, name, golden, planner):
+    return st.case(
+        entry,
+        _VIEW_INPUT,
+        torch.full((64, 64), -777.0),
+        name=f"buffer_{name}_{planner.name.lower()}",
+        golden=golden,
+        memory_planner=planner,
+        enable_buffer_ir=True,
+        rtol=0,
+        atol=0,
+    )
+
+
+# The addressed planners can place a result over part of a live window's
+# source (DSA_RP here; PYPTO/DSA_RP for the runtime offset). The Buffer
+# verifier cannot prove such a partial overlap safe and rejects the kernel, so
+# those planner/case pairs are not run here.
+@st.cases(
+    *[
+        _view_case(_slice_assemble_entry, "slice_assemble", _slice_assemble_golden, p)
+        for p in (passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS)
+    ],
+    _view_case(_runtime_slice_entry, "runtime_slice", _runtime_slice_golden, passes.MemoryPlanner.PTOAS),
+    *[_view_case(_valid_load_entry, "valid_load", _valid_columns_golden, p) for p in _PLANNERS],
+    *[_view_case(_set_valid_entry, "set_valid", _valid_columns_golden, p) for p in _PLANNERS],
+)
+def test_public_buffer_windows_and_runtime_valid_extents(case_run, request):
+    text = _executed_native(case_run, request)
+    if text is not None:
+        name = case_run.case.name
+        if "slice" in name:
+            assert "pto.subview" in text and "valid [" in text
+        if "valid" in name:
+            assert "pto.set_validshape" in text and "v_col=?" in text
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -25,20 +25,23 @@ namespace pypto::ir {
 // View construction establishes an ordinary SSA alias without reading data or
 // initializing the result. Native valid metadata is fixed by the result type.
 REGISTER_OP("buffer.subview")
-    .set_description("Alias a static full-width byte window with an explicit result descriptor")
+    .set_description("Alias a strided window of a buffer at static or runtime offsets")
     .set_op_category("BufferOp")
     .set_ir_stage(OpIRStage::Buffer)
     .set_internal_only()
-    .add_argument("source", "Source byte buffer")
-    .add_argument("offsets", "Static INDEX row and column offsets")
+    .add_argument("source", "Dense row-major Vec source buffer")
+    .add_argument("offsets", "Row and column offsets (static or runtime integer/INDEX scalars)")
+    .add_argument("valid_extents", "Optional tuple of result valid extents; required for dynamic dimensions")
     .set_output_arity(1)
     .set_buffer_arg_effect(0, BufferAccess::None, BufferAccess::Read)
     .set_buffer_non_memory_arg(1)
+    .set_buffer_non_memory_arg(2)
     .set_buffer_result_behavior(BufferResultBehavior::Alias, 0)
     .f_validate_explicit_type([](const std::vector<ExprPtr>& args,
                                  const std::vector<std::pair<std::string, std::any>>&,
                                  const TypePtr& result) {
-      CHECK(args.size() == 2 && args[0] && args[1]) << "buffer.subview requires a source and offsets tuple";
+      CHECK((args.size() == 2 || args.size() == 3) && args[0] && args[1])
+          << "buffer.subview requires a source, an offsets tuple and optional valid extents";
       backend::ValidateBufferSubview(args, result);
     });
 

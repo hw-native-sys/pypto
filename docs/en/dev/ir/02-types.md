@@ -158,9 +158,13 @@ Static storage views use ordinary SSA alias edges in the same Buffer stage:
 %tile = buffer.reshape(%bytes) : Buffer<[16, 32], FP32, Vec>
 ```
 
-`buffer.subview` currently accepts full-valid `UINT8[N,32]` source/result
-buffers and static `INDEX` offsets `(row, 0)`. Its window must fit within the
-source. `buffer.reshape` preserves the exact physical byte count and accepts
+`buffer.subview(source, (row, col)[, valid])` is a strided window of a dense
+row-major rank-2 Vec buffer: the result keeps the source's element type and row
+pitch, and its static shape must fit the source. Offsets are integer or `INDEX`
+scalars, constant or runtime; constant offsets are bounds-checked. The optional
+valid tuple states every result valid extent (constants for static descriptor
+dimensions) and is required when a result dimension is dynamic. Full-width
+`UINT8[N,32]` byte windows of a storage root are the static special case. `buffer.reshape` preserves the exact physical byte count and accepts
 static dense row-major rank-2 Vec FP16, BF16, FP32, INT16, INT32 and UINT8 descriptors, with physical
 rows aligned to 32 bytes. In Mat, Left, Right and Acc it only relabels one
 whole fractal window in the same space (for example NZ to ZN) with the same
@@ -168,6 +172,9 @@ element type, byte count and static valid extents. Both operations declare `Alia
 source-metadata read. They neither allocate storage nor initialize data.
 Every intermediate shape, dtype and valid extent is explicit in its result type.
 `buffer.set_validshape` cannot mutate these static view handles.
+
+A runtime-offset window is only known to lie within its source window, so
+`BufferIR` uses that whole source range when proving disjointness.
 
 `BufferIR` memoizes root identity, relative offset and byte extent for these
 views. Elementwise recipes, and copies involving views, check source/destination
