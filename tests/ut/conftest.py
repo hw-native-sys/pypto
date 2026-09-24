@@ -258,9 +258,9 @@ def _redirect_prog_build_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(tmp_path / "build_output"))
 
 
-@pytest.fixture(autouse=True)
-def pass_verification_context():
-    """Enable pass verification and optional roundtrip checking for all pass executions.
+@pytest.fixture
+def pass_verification_instruments():
+    """Create shared pass verification and roundtrip instruments.
 
     The behavior is controlled by the PYPTO_VERIFY_LEVEL environment variable:
 
@@ -281,5 +281,11 @@ def pass_verification_context():
 
         instruments.append(make_roundtrip_instrument())
 
-    with passes.PassContext(instruments):
+    return instruments
+
+
+@pytest.fixture(autouse=True)
+def pass_verification_context(pass_verification_instruments):
+    """Enable the configured checks for all pass executions."""
+    with passes.PassContext(pass_verification_instruments):
         yield

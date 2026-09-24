@@ -23,6 +23,7 @@ import pypto.language as pl
 import pytest
 from pypto import ir
 from pypto.language.parser.diagnostics import ParserSyntaxError
+from pypto.language.parser.diagnostics.exceptions import ParserTypeError
 
 
 def _kernel_calls(program: ir.Program, callee_name: str = "kernel") -> list[ir.Call]:
@@ -296,6 +297,67 @@ def test_dump_tag_rejects_non_orch_scope() -> None:
                 return d
 
         _ = P
+
+
+@pytest.mark.parametrize("capture", ["", " as tid"])
+@pytest.mark.parametrize("optimizations", ["", ", optimizations=[pl.cross_core_slot(slot_num=2)]"])
+def test_spmd_roundtrip_preserves_scoped_dump_without_tagging_next_scope(capture, optimizations):
+    """Flattening an InCore must not drop its dump list or leak it to later scopes."""
+    program = pl.parse(f"""
+import pypto.language as pl
+
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, a: pl.Tensor[[16, 16], pl.FP32]):
+        with pl.spmd(2){capture}:
+            with pl.at(level=pl.Level.CORE_GROUP, dumps=[a]{optimizations}):
+                i = pl.tile.get_block_idx()
+                tile = pl.load(a, [i * 8, 0], [8, 16])
+        with pl.spmd(2):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                j = pl.tile.get_block_idx()
+                other = pl.load(a, [j * 8, 0], [8, 16])
+""")
+    printed = ir.python_print(program)
+    assert "dumps=[a]" in printed
+    ir.assert_structural_equal(program, pl.parse(printed))
+
+
+def test_cluster_scoped_dump_roundtrip():
+    """A cluster's explicit dump list must not become a forward-sticky marker."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, a: pl.Tensor[[16, 16], pl.FP32]):
+            with pl.cluster(dumps=[a]):
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    _tile = pl.load(a, [0, 0], [16, 16])
+            with pl.cluster():
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    _other = pl.load(a, [0, 0], [16, 16])
+
+    printed = ir.python_print(P)
+    assert 'pl.cluster(name_hint="", dumps=[a])' in printed
+    ir.assert_structural_equal(P, pl.parse(printed))
+
+
+@pytest.mark.parametrize(
+    "dumps, message",
+    [("[missing]", "unknown name"), ("[a, a]", "more than once"), ("[1]", "bare tensor names")],
+)
+def test_cluster_rejects_invalid_dump_list(dumps, message):
+    with pytest.raises(ParserTypeError, match=message):
+        pl.parse(f"""
+import pypto.language as pl
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, a: pl.Tensor[[16, 16], pl.FP32]):
+        with pl.cluster(dumps={dumps}):
+            pass
+""")
 
 
 if __name__ == "__main__":

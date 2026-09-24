@@ -116,5 +116,36 @@ class TestScopeStmt:
         assert scope.scope_kind == ir.ScopeKind.Hierarchy
 
 
+def test_cluster_visits_and_remaps_attribute_only_tensor():
+    """A tensor used only in dump metadata must participate in variable substitution."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, a: pl.Tensor[[16], pl.FP32]):
+            with pl.cluster(dumps=[a]):
+                pass
+
+    fn = next(iter(P.functions.values()))
+    scope = fn.body.stmts[0] if isinstance(fn.body, ir.SeqStmts) else fn.body
+    old = scope.attrs["dump_vars"][0]
+    new = ir.Var("replacement", old.type, old.span)
+    seen = []
+
+    class Collect(ir.IRVisitor):
+        def visit_var(self, op):
+            seen.append(op)
+
+    class Replace(ir.IRMutator):
+        def visit_var(self, op):
+            return new if op is old else super().visit_var(op)
+
+    Collect().visit_stmt(scope)
+    assert seen == [old]
+    changed = Replace().visit_stmt(scope)
+    assert changed.attrs["dump_vars"][0] is new
+    assert scope.attrs["dump_vars"][0] is old
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

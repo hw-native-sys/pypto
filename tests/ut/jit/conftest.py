@@ -10,11 +10,14 @@
 """pytest configuration for JIT unit tests."""
 
 import sys
+from functools import wraps
 from pathlib import Path
 
 import pytest
 from pypto import backend
 from pypto.backend import BackendType
+from pypto.ir.pass_manager import PassManager
+from pypto.pypto_core import passes
 
 _PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
@@ -31,15 +34,31 @@ def _setup_backend():
 
 
 @pytest.fixture(autouse=True)
-def pass_verification_context():
-    """Use default pass verification for JIT tests.
+def pass_verification_context(monkeypatch, pass_verification_instruments):
+    """Check every executed pass without turning cache lookups into diagnostic requests.
 
-    JIT-generated programs use FunctionType.Orchestration for entry functions and
-    OutlineIncoreScopes outlines the inner
-    ``with pl.at(level=pl.Level.CORE_GROUP):`` scopes into per-core kernels.  This
-    means pass verification now works correctly.
+    JIT deliberately bypasses its cache when an outer context has instruments.
+    Install the shared checks at pipeline execution instead, after that decision,
+    preserving caller instruments and all pass settings.
     """
-    yield
+    run_passes = PassManager.run_passes
+
+    @wraps(run_passes)
+    def run_verified(self, *args, **kwargs):
+        outer = passes.PassContext.current() or passes.PassContext([])
+        with passes.PassContext(
+            [*outer.get_instruments(), *pass_verification_instruments],
+            outer.get_verification_level(),
+            outer.get_diagnostic_phase(),
+            outer.get_disabled_diagnostics(),
+            outer.get_memory_planner(),
+            outer.get_enable_pypto_l0c_double_buffer(),
+            outer.get_runtime(),
+            outer.get_enable_buffer_ir(),
+        ):
+            return run_passes(self, *args, **kwargs)
+
+    monkeypatch.setattr(PassManager, "run_passes", run_verified)
 
 
 @pytest.fixture(autouse=True)

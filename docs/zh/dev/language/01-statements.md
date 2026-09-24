@@ -186,6 +186,8 @@ def func(x: pl.Tensor[[128, 64], pl.FP16]) -> pl.Tensor[[128, 64], pl.FP16]:
 - `static_assert` 支持闭包变量表达式（如 `N > 32`）和 IR 常量
 - `static_assert` 的消息参数必须是字符串字面量
 - `dump_tag` 接受单个绑定在外层 Orchestration（或 Inline）作用域内的张量变量名，在解析期被消耗，并自始至终以 Var 身份（而非名字）跟踪到 codegen。在显式 `self.kernel(...)` 调用点，它把该张量记录到每个后续消费它的 Call 的 `dump_vars` 上；在 `@pl.jit` / `with pl.at(level=...)` 风格（派发由 outline pass 合成）下，它改为写入所在 scope 的 `dump_vars`，再由 outliner 映射到合成派发的实参上（见 [运行期 DFX](../03-runtime-dfx.md#选择性张量-dump)）。若需要在单次 task 启动处显式列出 dump 目标，请用 `pl.submit(...)` / `pl.at(...)` 上的 `dumps=[...]` kwarg（与 `deps=` 对称）
+
+`pl.cluster(dumps=[a])` 将 dump 标记限定于该 cluster 派发，不会标记后续作用域。打印的 IR 使用此显式形式保留 cluster 的 dump 属性。带有作用域 dump 属性的 SPMD 代码保留显式内层 `pl.at(..., dumps=[a])`，使打印后重新解析仍将属性保留在正确的作用域上。
 - 即使后续解析失败，输出仍会显示——适用于调试解析错误
 
 ### 语句序列

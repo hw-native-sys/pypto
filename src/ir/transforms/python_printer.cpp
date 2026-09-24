@@ -92,6 +92,17 @@ class BlockIdxReadDetector : public IRVisitor {
   bool found_ = false;
 };
 
+/// Whether the flattened SPMD spelling can preserve the carrier's attributes.
+bool SpmdInlineBodyPreservesAttrs(const InCoreScopeStmtPtr& incore) {
+  if (!incore) return false;
+  // Only these attributes are reconstructed by the flattened SPMD spelling.
+  // Keep the explicit InCore header for scoped metadata such as dump_vars.
+  for (const auto& [key, value] : incore->attrs_) {
+    if (key != "slot_num" && key != kAttrCachePolicyVars) return false;
+  }
+  return true;
+}
+
 /// True when re-parsing ``with pl.spmd(...):`` with ``incore``'s statements printed
 /// inline would rebuild the InCore carrier.
 ///
@@ -102,7 +113,7 @@ class BlockIdxReadDetector : public IRVisitor {
 /// nested ``pl.at(level=pl.Level.CORE_GROUP)`` instead, or the round-trip silently
 /// drops it.
 bool SpmdInlineBodyRebuildsCarrier(const InCoreScopeStmtPtr& incore) {
-  if (!incore) return false;
+  if (!SpmdInlineBodyPreservesAttrs(incore)) return false;
   const bool has_mode = incore->split_ != SplitMode::None;
   if (has_mode || incore->HasAttr("slot_num")) return true;
   BlockIdxReadDetector detector;
@@ -2303,9 +2314,10 @@ void IRPythonPrinter::VisitStmt_(const InCoreScopeStmtPtr& op) {
 
 void IRPythonPrinter::VisitStmt_(const ClusterScopeStmtPtr& op) {
   stream_ << "with " << prefix_ << ".cluster(";
-  if (!op->name_hint_.empty()) {
+  if (!op->name_hint_.empty() || op->HasAttr(kAttrDumpVars)) {
     stream_ << "name_hint=\"" << op->name_hint_ << "\"";
   }
+  PrintScopeDumpAttr(op);
   stream_ << "):\n";
   IncreaseIndent();
   PrintStmtBlock(op->body_);
@@ -2337,6 +2349,7 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
   // inner InCore (auto-outlined kernel); print its statements directly (no
   // synthesised loop-var to skip), reconstructing optimizations / deps / `as tid`.
   if (op->GetAttr<VarPtr>(kAttrTaskIdVar)) {
+    const bool inlines_incore_body = SpmdInlineBodyRebuildsCarrier(incore);
     stream_ << "with " << prefix_ << ".spmd(";
     VisitExpr(op->core_num_);
     if (op->sync_start_) {
@@ -2345,7 +2358,7 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
     if (!op->name_hint_.empty()) {
       stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
     }
-    if (incore) {
+    if (inlines_incore_body) {
       PrintScopeOptimizations(incore->split_, incore);
     }
     PrintScopeDepsAttr(op);
@@ -2361,7 +2374,6 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
     // here, from ``incore``, or they are lost. When the carrier is spelled out
     // instead, the nested InCore prints its own markers and re-printing them
     // here would duplicate them.
-    const bool inlines_incore_body = SpmdInlineBodyRebuildsCarrier(incore);
     PrintScopeCachePolicyStmts(op);
     if (inlines_incore_body) {
       PrintScopeCachePolicyStmts(incore);
@@ -2393,7 +2405,7 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
                           : (incore ? As<AssignStmt>(incore->body_) : nullptr);
   auto first_call = first_assign ? As<Call>(first_assign->value_) : nullptr;
   auto first_op = first_call ? As<Op>(first_call->op_) : nullptr;
-  if (first_op && IsOp(first_op, "tile.get_block_idx")) {
+  if (first_op && IsOp(first_op, "tile.get_block_idx") && SpmdInlineBodyPreservesAttrs(incore)) {
     stream_ << "for " << GetVarName(first_assign->var_.get()) << " in " << prefix_ << ".spmd(";
     VisitExpr(op->core_num_);
     if (op->sync_start_) {

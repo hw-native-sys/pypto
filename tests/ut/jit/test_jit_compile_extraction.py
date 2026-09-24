@@ -1386,5 +1386,23 @@ class TestConstexprThroughDeps:
             entry.specialize(x, out, 4)
 
 
+def test_jit_fixture_detects_printer_failure(monkeypatch, pass_verification_instruments):
+    """A printer regression must fail JIT lowering under the default test checks."""
+    torch = pytest.importorskip("torch")
+    printer = importlib.import_module("pypto.ir.printer")
+
+    def broken_print(*args, **kwargs):
+        raise RuntimeError("injected printer fidelity regression")
+
+    monkeypatch.setattr(printer, "python_print", broken_print)
+    x = torch.zeros(16, 16)
+    if any(i.get_name() == "RoundtripInstrument" for i in pass_verification_instruments):
+        with pytest.raises(RuntimeError, match="(?s)Printer failed after pass.*injected printer fidelity"):
+            add_kernel.lower(x, x, torch.empty_like(x))
+    else:
+        # Explicit basic/none modes do not request a print/reparse check.
+        assert isinstance(add_kernel.lower(x, x, torch.empty_like(x)), ir.Program)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

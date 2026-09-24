@@ -659,8 +659,9 @@ class ClusterContext:
     The parser recognizes this pattern and creates a ScopeStmt(Cluster).
     """
 
-    def __init__(self, *, name_hint: str = "") -> None:
+    def __init__(self, *, name_hint: str = "", dumps: list[Any] | None = None) -> None:
         self.name_hint = name_hint
+        self.dumps = dumps
 
     def __enter__(self) -> None:
         """Enter the Cluster scope context."""
@@ -671,7 +672,7 @@ class ClusterContext:
         pass
 
 
-def cluster(*, name_hint: str = "") -> ClusterContext:
+def cluster(*, name_hint: str = "", dumps: list[Any] | None = None) -> ClusterContext:
     """Mark a region of code as belonging to a Cluster execution context.
 
     A cluster groups co-scheduled AIC (Cube) and AIV (Vector) kernels that
@@ -680,6 +681,7 @@ def cluster(*, name_hint: str = "") -> ClusterContext:
 
     Args:
         name_hint: Optional name hint for the outlined function.
+        dumps: Optional tensor names to dump for this cluster dispatch only.
 
     Returns:
         Context manager for Cluster scope
@@ -689,7 +691,7 @@ def cluster(*, name_hint: str = "") -> ClusterContext:
         ...     with pl.at(level=pl.Level.CORE_GROUP):
         ...         y = pl.add(x, x)
     """
-    return ClusterContext(name_hint=name_hint)
+    return ClusterContext(name_hint=name_hint, dumps=dumps)
 
 
 class GraphContext:

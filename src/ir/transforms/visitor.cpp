@@ -296,6 +296,7 @@ void IRVisitor::VisitStmt_(const InCoreScopeStmtPtr& op) {
 
 void IRVisitor::VisitStmt_(const ClusterScopeStmtPtr& op) {
   INTERNAL_CHECK_SPAN(op->body_, op->span_) << "ClusterScopeStmt has null body";
+  VisitScopeAttrs(op);
   VisitStmt(op->body_);
 }
 

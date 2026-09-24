@@ -4325,6 +4325,7 @@ class ASTParser:
         """
         name_hint = ""
         if func_attr == "cluster":
+            dumps_kw = None
             if context_expr.args:
                 raise ParserSyntaxError(
                     f"pl.{func_attr}() does not accept positional arguments",
@@ -4334,15 +4335,24 @@ class ASTParser:
             for kw in context_expr.keywords:
                 if kw.arg == "name_hint":
                     name_hint = self._parse_scope_name_hint(kw.value, f"pl.{func_attr}()")
+                elif kw.arg == "dumps":
+                    if dumps_kw is not None:
+                        raise ParserSyntaxError(
+                            "pl.cluster() got duplicate keyword argument 'dumps'",
+                            span=self.span_tracker.get_span(stmt),
+                        )
+                    dumps_kw = kw
                 else:
                     raise ParserSyntaxError(
                         f"pl.{func_attr}() got unexpected keyword argument '{kw.arg}'",
                         span=self.span_tracker.get_span(stmt),
-                        hint="Supported keyword: 'name_hint'. For SPMD dispatch, use pl.spmd(4):",
+                        hint="Supported keywords: 'name_hint', 'dumps'. For SPMD dispatch, use pl.spmd(4):",
                     )
             scope_kind = scope_kind_map[func_attr]
             span = self.span_tracker.get_span(stmt)
-            self._parse_scope_body(stmt, scope_kind, span, name_hint=name_hint)
+            dump_vars = self._parse_at_dumps_kwarg(dumps_kw, construct="pl.cluster") if dumps_kw else []
+            attrs = [("dump_vars", dump_vars)] if dump_vars else None
+            self._parse_scope_body(stmt, scope_kind, span, name_hint=name_hint, attrs=attrs)
             return
         self._parse_spmd_scope(stmt, context_expr, scope_kind_map, optional_vars=optional_vars)
 
@@ -6061,7 +6071,7 @@ class ASTParser:
             resolved.append(var)
         return resolved
 
-    def _parse_at_dumps_kwarg(self, kw: "ast.keyword") -> list[ir.Var]:
+    def _parse_at_dumps_kwarg(self, kw: "ast.keyword", construct: str = "pl.at") -> list[ir.Var]:
         """Resolve ``pl.at(dumps=[t1, t2])`` entries to outer-scope tensor Vars.
 
         Mirrors :meth:`_parse_at_no_dep_args_kwarg`: each entry must be a bare
@@ -6079,7 +6089,7 @@ class ASTParser:
         """
         if not isinstance(kw.value, (ast.List, ast.Tuple)):
             raise ParserTypeError(
-                "pl.at(dumps=...) must be a list literal of tensor names",
+                f"{construct}(dumps=...) must be a list literal of tensor names",
                 span=self.span_tracker.get_span(kw),
                 hint="Use `dumps=[t1, t2]` with bare tensor names visible to the enclosing function.",
             )
@@ -6089,7 +6099,7 @@ class ASTParser:
         for elt in kw.value.elts:
             if not isinstance(elt, ast.Name):
                 raise ParserTypeError(
-                    "pl.at(dumps=[...]) entries must be bare tensor names",
+                    f"{construct}(dumps=[...]) entries must be bare tensor names",
                     span=self.span_tracker.get_span(elt),
                     hint="Use `dumps=[t]` where `t` is a tensor variable visible "
                     "to the enclosing function scope.",
@@ -6097,19 +6107,19 @@ class ASTParser:
             var = self.scope_manager.lookup_var(elt.id)
             if var is None:
                 raise ParserTypeError(
-                    f"pl.at(dumps=[...]) references unknown name '{elt.id}'",
+                    f"{construct}(dumps=[...]) references unknown name '{elt.id}'",
                     span=self.span_tracker.get_span(elt),
                     hint="Each entry must resolve to a tensor visible in the enclosing function scope.",
                 )
             if not isinstance(var.type, ir.TensorType):
                 raise ParserTypeError(
-                    f"pl.at(dumps=[...]) entry '{elt.id}' is not a tensor (got type {var.type})",
+                    f"{construct}(dumps=[...]) entry '{elt.id}' is not a tensor (got type {var.type})",
                     span=self.span_tracker.get_span(elt),
                     hint="Only tensors can be selectively dumped.",
                 )
             if id(var) in seen:
                 raise ParserTypeError(
-                    f"pl.at(dumps=[...]) lists '{elt.id}' more than once",
+                    f"{construct}(dumps=[...]) lists '{elt.id}' more than once",
                     span=self.span_tracker.get_span(elt),
                     hint="Each tensor may appear at most once in `dumps=`.",
                 )

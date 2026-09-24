@@ -24,8 +24,9 @@ intent therefore rides a scope-level ``kAttrDumpVars`` carrier:
     dispatch's ``dump_vars`` by Var identity.
 
 These run the full Default pass pipeline via ``lower`` (no device),
-so they also exercise the print -> reparse roundtrip after every pass (the
-``tests/ut/conftest.py`` autouse fixture). The companion device/manifest checks
+so they also exercise the print -> reparse roundtrip after every pass (the JIT
+fixture installs the shared verification instruments at pipeline execution).
+The companion device/manifest checks
 live in ``tests/st/runtime/framework_and_models/test_dump_tag.py``.
 """
 
