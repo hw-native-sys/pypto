@@ -36,7 +36,7 @@ from pathlib import Path
 
 import pypto.language as pl
 import pytest
-from pypto import LogLevel, backend, codegen, ir, set_log_level
+from pypto import LogLevel, backend, codegen, ir, passes, set_log_level
 from pypto.backend import BackendType
 from pypto.ir import OptimizationStrategy, PassManager
 
@@ -148,6 +148,30 @@ class HighPrecisionUnrolledDiv:
 
 
 @pl.program
+class BufferIrPrecisionOps:
+    """Every op that can carry `precisionType`, shaped for the Buffer IR path.
+
+    `LowerTileToBuffer` only rewrites recipes it recognises, and those are
+    static dense FP32 — hence the fixed [16, 32] shape rather than the `N`
+    used above.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[16, 32], pl.FP32],
+        b: pl.Tensor[[16, 32], pl.FP32],
+        output: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+    ) -> pl.Tensor[[16, 32], pl.FP32]:
+        lhs: pl.Tile[[16, 32], pl.FP32] = pl.load(a, [0, 0], [16, 32])
+        rhs: pl.Tile[[16, 32], pl.FP32] = pl.load(b, [0, 0], [16, 32])
+        divided: pl.Tile[[16, 32], pl.FP32] = pl.tile.div(lhs, rhs, high_precision=True)
+        logarithm: pl.Tile[[16, 32], pl.FP32] = pl.tile.log(divided, high_precision=True)
+        reciprocal: pl.Tile[[16, 32], pl.FP32] = pl.tile.recip(logarithm, high_precision=True)
+        return pl.store(reciprocal, [0, 0], output)
+
+
+@pl.program
 class TwoWrittenTileDivSites:
     """Two `pl.div` statements on adjacent lines, already at tile level."""
 
@@ -186,15 +210,24 @@ class TwoWrittenTensorDivSites:
 # ---------------------------------------------------------------------------
 
 
-def _incore_mlir(program_cls: ir.Program, backend_type: BackendType) -> str:
-    """Lower and emit the single in-core function for one backend."""
+def _incore_mlir(
+    program_cls: ir.Program, backend_type: BackendType, *, enable_buffer_ir: bool = False
+) -> str:
+    """Lower and emit the single in-core function for one backend.
+
+    ``enable_buffer_ir`` selects the second, independent emitter: the pipeline
+    lowers the same tile ops onto ``buffer.*`` calls, which
+    ``PTOCodegen::GenerateBufferFunction`` writes out instead of the Tile op
+    callbacks. Both emit the same ``pto.*`` op and the same ``precisionType``.
+    """
     backend.reset_for_testing()
     backend.set_backend_type(backend_type)
-    optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program_cls)
+    with passes.PassContext([], enable_buffer_ir=enable_buffer_ir):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program_cls)
     incore = [f for f in optimized.functions.values() if f.func_type != pl.FunctionType.Orchestration]
     assert len(incore) == 1, f"expected one in-core function, got {[f.name for f in incore]}"
     single = ir.Program([incore[0]], incore[0].name, optimized.span)
-    result = codegen.PTOCodegen().generate(single)
+    result = codegen.PTOCodegen().generate(single, emit_tile_addr=not enable_buffer_ir)
     return result if isinstance(result, str) else "".join(result.values())
 
 
@@ -287,7 +320,50 @@ def test_two_written_sites_keep_their_own_locations(program_cls, capfd):
 
 
 # ---------------------------------------------------------------------------
-# (c) The warning does not change what PTOAS is given
+# (c) Both emitters report it — the Tile callbacks and the Buffer IR emitter
+# ---------------------------------------------------------------------------
+
+
+def _warned_ops(warnings: list[str]) -> set[str]:
+    """The operator each warning names, e.g. `tile.div`."""
+    names = set()
+    for line in warnings:
+        match = re.search(r"\) (\S+?)\(high_precision=True\)", line)
+        assert match, f"warning names no operator: {line}"
+        names.add(match.group(1))
+    return names
+
+
+@pytest.mark.parametrize("enable_buffer_ir", [False, True])
+def test_both_emitters_report_the_same_dropped_request(enable_buffer_ir, capfd):
+    """`enable_buffer_ir=True` must not turn the warning back off.
+
+    Buffer IR is a second, independent emitter: `LowerTileToBuffer` rewrites
+    `tile.div` / `tile.log` / `tile.recip` into `buffer.*` calls, and
+    `GenerateBufferFunction` writes their `precisionType` itself instead of
+    going through the Tile op callbacks. Both modes emit the same attribute, so
+    both must report the same dropped request — otherwise a supported
+    compilation mode keeps the silent behaviour this warning exists to end.
+
+    The op names are asserted as the *logical* ones the user wrote: lowering
+    through Buffer IR must not surface `buffer.div` in a diagnostic.
+    """
+    mlir = _incore_mlir(BufferIrPrecisionOps, BackendType.Ascend910B, enable_buffer_ir=enable_buffer_ir)
+    warnings = _warnings(capfd)
+
+    assert mlir.count("high_precision>") == 3, f"expected three attributes:\n{mlir}"
+    assert _warned_ops(warnings) == {"tile.div", "tile.log", "tile.recip"}, warnings
+    assert len(warnings) == 3, f"expected one warning per op, got {warnings}"
+
+
+def test_buffer_ir_stays_silent_on_ascend950(capfd):
+    """The shared check is gated on the backend, not on the emitter."""
+    _incore_mlir(BufferIrPrecisionOps, BackendType.Ascend950, enable_buffer_ir=True)
+    assert _warnings(capfd) == []
+
+
+# ---------------------------------------------------------------------------
+# (d) The warning does not change what PTOAS is given
 # ---------------------------------------------------------------------------
 
 

@@ -642,6 +642,10 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
         call->GetKwarg<bool>("high_precision", false)) {
       line << " {precisionType = #pto<" << backend::BufferPrecisionAttributeName(recipe->precision)
            << " high_precision>}";
+      // Report the logical op, not `recipe->buffer_op`: the user wrote
+      // `tile.div`, and lowering it through Buffer IR must not change what the
+      // diagnostic names.
+      WarnIfHighPrecisionIgnored(recipe->logical_op, recipe->native_op, call->span_);
     }
     Emit(line.str());
   }

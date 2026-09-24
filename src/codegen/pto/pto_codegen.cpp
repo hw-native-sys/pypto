@@ -36,6 +36,7 @@
 #include "pypto/codegen/gm_pipe_layout.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
 #include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -47,6 +48,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -694,7 +696,23 @@ PTOCodegen::PTOCodegen(const backend::Backend* backend) : backend_(backend) {
 
 const backend::BackendHandler* PTOCodegen::GetBackendHandler() const { return backend_->GetHandler(); }
 
-bool PTOCodegen::ShouldReportOnce(const std::string& key) { return reported_once_keys_.insert(key).second; }
+void PTOCodegen::WarnIfHighPrecisionIgnored(const std::string& op_name, const std::string& pto_op_name,
+                                            const ir::Span& span) {
+  const auto* handler = GetBackendHandler();
+  if (handler->HonorsHighPrecisionAlgorithm()) return;
+  if (!reported_precision_sites_.insert(op_name + "@" + span.to_string()).second) return;
+
+  const std::string arch = handler->GetPtoTargetArch();
+  ir::EmitDiagnostics({Diagnostic(DiagnosticSeverity::Warning, "HighPrecisionIgnored", 0,
+                                  op_name + "(high_precision=True) is not supported on the '" + arch +
+                                      "' backend: PTO-ISA implements the high-precision algorithm only "
+                                      "on a5, so " +
+                                      pto_op_name +
+                                      " runs the default algorithm and the result is bit-identical to "
+                                      "high_precision=False.",
+                                  span)},
+                      "pto_codegen");
+}
 
 // ========================================================================
 // Generate entry and GenerateFunction
@@ -712,7 +730,7 @@ std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr,
   fs_.body_section.clear();
   gm_slot_buffer_offsets_.clear();
   needs_deferred_completion_adapter_ = false;
-  reported_once_keys_.clear();
+  reported_precision_sites_.clear();
   PrepareGMSlotBufferLayout(program);
 
   const std::string target_arch = backend_->GetHandler()->GetPtoTargetArch();
