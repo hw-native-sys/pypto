@@ -267,17 +267,30 @@ inline ReinterpretViewPlan Resolve(const std::vector<ExprPtr>& source_shape,
                         (source_dtype == DataType::FP8E4M3FN && target_dtype == DataType::INT8) ||
                         (source_dtype == DataType::UINT8 && target_dtype == DataType::FP8E8M0) ||
                         (source_dtype == DataType::FP8E8M0 && target_dtype == DataType::UINT8);
+  // Packed FP4E2M1X2 is a 1-byte carrier; allow only UINT8/INT8 byte-identical aliases so
+  // models can reshape on a UINT8 view without a packed-FP4 reshape path. Other FP4-family
+  // reinterprets (including logical FP4) stay rejected.
+  const bool involves_packed_fp4 = source_dtype.IsPackedFp4() || target_dtype.IsPackedFp4();
+  const bool packed_fp4_alias =
+      (source_dtype.IsPackedFp4() && (target_dtype == DataType::UINT8 || target_dtype == DataType::INT8)) ||
+      (target_dtype.IsPackedFp4() && (source_dtype == DataType::UINT8 || source_dtype == DataType::INT8));
+  CHECK_SPAN(!involves_packed_fp4 || packed_fp4_alias, span)
+      << op_name
+      << " FP4E2M1X2 aliases are limited to UINT8/INT8 (same-shape byte views); "
+         "logical FP4 and other dtype pairs are not supported";
   const bool uses_unsupported_fp8 =
       (!IsSupportedDType(source_dtype) && source_dtype.IsFloat() && source_dtype.GetBit() == 8) ||
       (!IsSupportedDType(target_dtype) && target_dtype.IsFloat() && target_dtype.GetBit() == 8);
-  CHECK_SPAN(mx_alias || !uses_unsupported_fp8, span)
+  CHECK_SPAN(mx_alias || packed_fp4_alias || !uses_unsupported_fp8, span)
       << op_name << " only supports FP8 reinterpretation for INT8<->FP8E4M3FN and UINT8<->FP8E8M0";
-  CHECK_SPAN(IsSupportedDType(source_dtype) || mx_alias, span)
+  CHECK_SPAN(IsSupportedDType(source_dtype) || mx_alias || packed_fp4_alias, span)
       << op_name << " does not support source dtype " << source_dtype.ToString()
-      << "; FP8 aliases are limited to INT8<->FP8E4M3FN and UINT8<->FP8E8M0";
-  CHECK_SPAN(IsSupportedDType(target_dtype) || mx_alias, span)
+      << "; FP8 aliases are limited to INT8<->FP8E4M3FN and UINT8<->FP8E8M0; FP4E2M1X2 aliases "
+         "are limited to UINT8/INT8";
+  CHECK_SPAN(IsSupportedDType(target_dtype) || mx_alias || packed_fp4_alias, span)
       << op_name << " does not support target dtype " << target_dtype.ToString()
-      << "; FP8 aliases are limited to INT8<->FP8E4M3FN and UINT8<->FP8E8M0";
+      << "; FP8 aliases are limited to INT8<->FP8E4M3FN and UINT8<->FP8E8M0; FP4E2M1X2 aliases "
+         "are limited to UINT8/INT8";
   CHECK_SPAN(source_dtype != target_dtype, span)
       << op_name << " requires source and target dtypes to differ; use reshape/view for shape-only changes";
   detail::ValidatePhysicalShape(source_shape, "source shape", op_name, span);

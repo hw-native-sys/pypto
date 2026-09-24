@@ -22,6 +22,13 @@ FP4-family paths are unsupported in this slice (hard rejects land with PackFp4).
 `tensor` / `tile` `reshape` and `transpose` reject the FP4 family (see error
 strings and the support matrix).
 
+`reinterpret_view` allows only **byte-identical** `FP4E2M1X2` ↔ `UINT8` / `INT8`
+aliases (same shape). Prefer `reinterpret_view` → `UINT8` → `reshape` when a
+leading-dimension flatten is required; do not rely on packed-FP4 `reshape`.
+Multi-row `FP4E2M1X2` TLOAD/TSTORE still has a PTOAS address-vs-DMA stride unit
+conflict — track that in the PTOAS dual-stride issue linked from the PR, not by
+loosening PyPTO reshape.
+
 ## Unit convention
 
 | Layer | Unit |
@@ -33,9 +40,11 @@ strings and the support matrix).
 
 Write multi-row ND packed tensors with **carrier** last dims and leading strides
 (for example `pl.Tensor[[2, 256], pl.FP4E2M1X2]` for 512 logical nibbles per row).
-Codegen expands GM views to nibble units so multi-row pitch matches Tile /
-pto-isa. Using logical widths on `FP4E2M1X2` (or logical `pl.FP4` multi-row ND
-without automatic pack) can mis-size GM row strides — see issue
+Codegen expands GM **transfer** widths to nibble units for pto-isa `GetByteSize`.
+Multi-row DMA pitch still needs a PTOAS dual-stride fix (address carrier vs DMA
+nibble); prefer single-row partitions or `UINT8` reshape until that lands. Using
+logical widths on `FP4E2M1X2` (or logical `pl.FP4` multi-row ND without automatic
+pack) can mis-size GM row strides — see issue
 [#2754](https://github.com/hw-native-sys/pypto/issues/2754).
 
 ## Cast policy (Ascend950)
@@ -99,14 +108,19 @@ Legend: ✅ supported · ⚠️ partial / Warning · ❌ unsupported · ⏳ not 
 | `FP4` ↔ `FP4E2M1X2` cast | ❌ | Rejected |
 | Automatic PackFp4 | ⏳ | Follow-up |
 | `reshape` / `transpose` / DN / NZ / column-vector `[M,1]` / layout `tensor.view` for `FP4E2M1X2` | ❌ | ND row-major only; implicit DN and explicit layout conversion hard-rejected |
+| `reinterpret_view` `FP4E2M1X2` ↔ `UINT8`/`INT8` | ✅ | Same-shape byte alias; use before `reshape` for leading-dim flatten |
+| `reinterpret_view` other FP4-family pairs | ❌ | Logical FP4 and non-byte aliases rejected |
+| Multi-row packed-FP4 GM DMA pitch | ⚠️ | Needs PTOAS dual-stride fix; single-row partitions are the safe path today |
 | `matmul_mx` native FP4 data | ⏳ | Cast lhs to FP8 first when needed |
 
 ## Recommended paths
 
 1. Hand-write `pl.FP4E2M1X2` with physical carrier shapes (avoids `#2754`-class stride bugs).
-2. Cast to BF16 when a native wider float is enough.
-3. Prefer **LUT / host** for FP4→FP8; device cast is Warning-only.
-4. Keep logical `pl.FP4` only if you accept the incomplete path until PackFp4 lands.
+2. For paged-cache flatten: `pl.reshape(pl.reinterpret_view(cache, pl.UINT8), …)` then
+   reinterpret back to `FP4E2M1X2` before `cast` (or stay on a UINT8 nibble ABI).
+3. Cast to BF16 when a native wider float is enough.
+4. Prefer **LUT / host** for FP4→FP8; device cast is Warning-only.
+5. Keep logical `pl.FP4` only if you accept the incomplete path until PackFp4 lands.
 
 ## See also
 

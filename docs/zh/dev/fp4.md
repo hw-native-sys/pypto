@@ -19,6 +19,12 @@ NZ / col_major / distributed 的 FP4 族路径在本切片不支持（硬拒随 
 
 `tensor` / `tile` 的 `reshape` 与 `transpose` 会拒绝 FP4 族（见报错与支持矩阵）。
 
+`reinterpret_view` 仅允许 **等字节** 的 `FP4E2M1X2` ↔ `UINT8` / `INT8` 别名（shape
+不变）。需要前导维 flatten 时，请走 `reinterpret_view` → `UINT8` → `reshape`，不要
+依赖 packed-FP4 的 `reshape`。多行 `FP4E2M1X2` TLOAD/TSTORE 仍存在 PTOAS 寻址
+stride 与 DMA stride 单位冲突——跟进 PR 关联的 PTOAS dual-stride issue，而不是放宽
+PyPTO reshape。
+
 ## 单位约定
 
 | 层 | 单位 |
@@ -29,9 +35,11 @@ NZ / col_major / distributed 的 FP4 族路径在本切片不支持（硬拒随 
 | runtime Tensor / `torch.float4_e2m1fn_x2` | carrier 元素 |
 
 多行 ND packed 张量请用 **carrier** 末维与 leading stride（例如每行 512 逻辑
-nibble 写成 `pl.Tensor[[2, 256], pl.FP4E2M1X2]`）。Codegen 会把 GM view 扩到
-nibble 单位，使多行 pitch 与 Tile / pto-isa 一致。在 `FP4E2M1X2` 上误用逻辑宽度，
-或在无自动打包时用逻辑 `pl.FP4` 多行 ND，可能导致 GM 行 stride 错位——见 issue
+nibble 写成 `pl.Tensor[[2, 256], pl.FP4E2M1X2]`）。Codegen 会把 GM **传输宽度**
+扩到 nibble 单位以适配 pto-isa `GetByteSize`。多行 DMA pitch 仍需 PTOAS
+dual-stride 修复（寻址用 carrier、DMA 用 nibble）；在此之前请优先单行 partition
+或 `UINT8` reshape。在 `FP4E2M1X2` 上误用逻辑宽度，或在无自动打包时用逻辑
+`pl.FP4` 多行 ND，可能导致 GM 行 stride 错位——见 issue
 [#2754](https://github.com/hw-native-sys/pypto/issues/2754)。
 
 ## Cast 策略（Ascend950）
@@ -95,14 +103,19 @@ def fp4x2_to_fp8(
 | `FP4` ↔ `FP4E2M1X2` cast | ❌ | 拒绝 |
 | 自动 PackFp4 | ⏳ | 后续 |
 | `FP4E2M1X2` 的 `reshape` / `transpose` / DN / NZ / 列向量 `[M,1]` / layout `tensor.view` | ❌ | 仅 ND row-major；隐式 DN 与显式 layout 转化硬拒 |
+| `reinterpret_view` `FP4E2M1X2` ↔ `UINT8`/`INT8` | ✅ | 同 shape 字节别名；前导维 flatten 前先走此路径 |
+| `reinterpret_view` 其他 FP4 族组合 | ❌ | 逻辑 FP4 与非等字节别名均拒绝 |
+| 多行 packed-FP4 GM DMA pitch | ⚠️ | 依赖 PTOAS dual-stride 修复；当前安全路径是单行 partition |
 | `matmul_mx` 原生 FP4 数据 | ⏳ | 需要时先 cast lhs 到 FP8 |
 
 ## 推荐路径
 
 1. 手写 `pl.FP4E2M1X2` 并用物理 carrier shape（避免 `#2754` 类 stride 问题）。
-2. 需要更宽浮点时 cast 到 BF16。
-3. FP4→FP8 优先 **LUT / 主机**；设备 cast 仅 Warning。
-4. 仅在接受不完整路径时保留逻辑 `pl.FP4`，直到 PackFp4 落地。
+2. paged cache flatten：`pl.reshape(pl.reinterpret_view(cache, pl.UINT8), …)`，再在
+   `cast` 前 reinterpret 回 `FP4E2M1X2`（或保持 UINT8 nibble ABI）。
+3. 需要更宽浮点时 cast 到 BF16。
+4. FP4→FP8 优先 **LUT / 主机**；设备 cast 仅 Warning。
+5. 仅在接受不完整路径时保留逻辑 `pl.FP4`，直到 PackFp4 落地。
 
 ## 另见
 
