@@ -128,6 +128,7 @@ def test_cluster_visits_and_remaps_attribute_only_tensor():
 
     fn = next(iter(P.functions.values()))
     scope = fn.body.stmts[0] if isinstance(fn.body, ir.SeqStmts) else fn.body
+    assert isinstance(scope, ir.ClusterScopeStmt)
     old = scope.attrs["dump_vars"][0]
     new = ir.Var("replacement", old.type, old.span)
     seen = []
@@ -143,6 +144,7 @@ def test_cluster_visits_and_remaps_attribute_only_tensor():
     Collect().visit_stmt(scope)
     assert seen == [old]
     changed = Replace().visit_stmt(scope)
+    assert isinstance(changed, ir.ClusterScopeStmt)
     assert changed.attrs["dump_vars"][0] is new
     assert scope.attrs["dump_vars"][0] is old
 
