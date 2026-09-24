@@ -60,7 +60,7 @@ resources, none of which come from the pull request:
 Codex runs as UID/GID `1002:1003` in a read-only container with a read-only
 repository mount, dropped capabilities, resource limits, and an internal Docker
 network. The GitHub token with pull-request write access is available only to
-the separate comment job. Review output is rejected if it contains an exact
+the separate publishing job. Review output is rejected if it contains an exact
 long-form value from the Codex credential and is labelled as automated,
 untrusted content when posted.
 
@@ -69,6 +69,42 @@ maintenance run that has no checkout and uses an empty temporary directory.
 The refresh is serialized with reviews by a host lock and updates the persistent
 credential in place. Pull-request review containers receive only an ephemeral
 snapshot; they never mount or write the persistent credential.
+
+### Automatic approval
+
+Set `CODEX_REVIEW_AUTO_APPROVE=true` to allow clean reviews to submit an
+`APPROVE` review as `github-actions[bot]`. The repository's Actions settings
+must also allow GitHub Actions to create and approve pull requests. Disable
+only automatic approval by removing this variable or setting it to `false`;
+reviews continue to be posted. The repository's required CI checks still apply.
+
+The workflow checks out the event's exact head SHA and requests structured
+JSON through `codex exec --output-schema`. The schema and publishing script
+come from the trusted base commit. The publisher approves only a complete
+`pass` with zero findings, after checking both the head and base are unchanged.
+Invalid, empty, oversized, inconsistent, or incomplete output never approves.
+The branch must have an active rule dismissing stale approvals after new commits.
+The publisher checks revisions again after approval and dismisses its approval
+if an update raced with publication. Replacement results first dismiss this
+workflow's previous approvals; human approvals are not modified.
+
+Changes under `.github`, `.claude`, `.codex`, or `.agents`, and changes to
+`AGENTS.md`, `CLAUDE.md`, or `.gitmodules` require human review. Renaming those
+files does not bypass this restriction. If the complete changed-file list
+cannot be verified, automatic approval is withheld.
+
+Automatic approval is an AI assessment, not proof of correctness. Prompt
+injection and missed defects remain possible even with structured output.
+Enabling the Actions approval setting applies repository-wide to workflows
+with pull-request write permission. The existing credential snapshot inside
+the isolated reviewer and exact-string leak filter do not eliminate encoded
+credential leaks. Prefer a credential-isolating API proxy for public-repository
+review infrastructure. No model process receives the GitHub approval token.
+
+The workflow must be merged into the default branch before these changes take
+effect; pull-request-target runs use the trusted base workflow. Validate the
+first clean review on a controlled PR and verify the review's commit ID and
+`APPROVED` state before relying on it as a merge gate.
 
 ## See Also
 

@@ -1,0 +1,41 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "pass",
+        "findings",
+        "incomplete"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "body"
+        ]
+      }
+    }
+  },
+  "required": [
+    "verdict",
+    "summary",
+    "findings"
+  ]
+}
