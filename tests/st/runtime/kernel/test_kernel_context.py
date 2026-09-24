@@ -48,9 +48,9 @@ def _native_case(case, platform, device_id, directory, queue):
         state = get_process_kernel_state()
         config = KernelConfig(platform, "tensormap_and_ringbuffer", device_id)
         try:
-            if case == "unsupported":
-                with pytest.raises(RuntimeError, match="does not support kernel mode"):
-                    state.ensure_worker(KernelConfig(platform, "host_build_graph", device_id))
+            if case == "hbg":
+                worker = state.ensure_worker(KernelConfig(platform, "host_build_graph", device_id))
+                assert worker.worker.kernel_mode_supported
             else:
                 worker = state.ensure_worker(config)
                 assert worker is state.ensure_worker(config)
@@ -122,7 +122,7 @@ def _run_isolated(case, platform, device_id, directory):
         queue.close()
 
 
-@pytest.mark.parametrize("case", ["prepare", "duplicate", "unsupported"])
+@pytest.mark.parametrize("case", ["prepare", "duplicate", "hbg"])
 def test_real_kernel_context(test_config, tmp_path, case):
     if test_config.codegen_only or test_config.platform != "a2a3":
         pytest.skip("This lifecycle smoke test requires an A2/A3 NPU and built runtime binaries")

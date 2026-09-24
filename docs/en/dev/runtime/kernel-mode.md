@@ -29,12 +29,12 @@ out = torch.empty_like(x)
 op(x, 2.0, out)
 ```
 
-This entry currently supports A2/A3 with `tensormap_and_ringbuffer`, including
+This entry supports A2/A3 with `tensormap_and_ringbuffer` or `host_build_graph`, including
 non-default streams and taskQueue enabled or disabled. An optional
 `config=CompileOptions(...)` supplies compilation options, which join the
 specialization key. `RunConfig`, CPU/Meta/Fake tensors and Worker-owned handles
 are rejected; they do not select another execution path. Native launch requires
-rank 1–5 and positive uint32 extents/strides. A5 and HBG execution remain later work.
+rank 1–5 and positive uint32 extents/strides. A5 execution remains later work.
 Direct JIT and registered torch.ops ACLGraph capture/replay are supported after
 warmup, as described below. Automatic eager cleanup is
 verified with torch_npu 2.6.0.post2 as described below; other framework versions
@@ -101,6 +101,61 @@ persistent-cache policy uses `pypto.configure_cache`. A
 `CompileOptions.platform` other than its default must equal the bound platform.
 An active `PassContext` must name the bound runtime; without one, eager
 compilation uses the runtime from `init`.
+
+## HBG kernel Tensor contract
+
+Select HBG once with `pypto.torch.init(runtime="host_build_graph")`. The process
+Worker fixes this choice; individual calls cannot override it. All boundary
+Tensor arguments refer to caller-owned Device memory. The Torch adapter checks
+that each Tensor is contiguous and on the selected NPU before encoding
+`ChipTensor.address_space = AddressSpace::DEVICE`. Descriptors may be inspected
+for shape, dtype and stride and used to construct views and dependencies.
+
+Host orchestration cannot read or write Tensor contents. PyPTO rejects
+`pl.tensor.read` and `pl.tensor.write` in the Host entry and its reachable Host
+helpers before optimization, including branches that may not execute at runtime.
+The diagnostic includes the operation, function and source location. Device
+function bodies and in-core scopes are excluded. Dispatch predicates such as
+`predicate=(control[0] > 0)` remain valid: the scheduler reads the element on
+Device; Host orchestration only constructs the predicate descriptor. Program mode
+and TMR retain their existing behavior.
+
+Pass values needed for Host graph decisions as explicit scalar arguments:
+
+```python
+@pl.jit
+def repeat_add(
+    x: pl.Tensor[[16, 16], pl.FP32],
+    count: pl.Scalar[pl.INT32],
+    out: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+):
+    for _ in pl.range(count):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            pl.store(
+                pl.add(pl.load(out, [0, 0], [16, 16]), pl.load(x, [0, 0], [16, 16])),
+                [0, 0], out,
+            )
+    return out
+```
+
+Here `count` arrives through the existing scalar ABI; it is not read from a
+control Tensor. Express Tensor writes as Device tasks. The ABI currently carries
+64-bit scalar slots, not arbitrary Host payloads. Tensor/scalar counts must match
+the callable signature exactly. Do not append Host-copy Tensor duplicates:
+`host_copy_tensor_count` remains in the 32-byte invocation header but must be zero.
+No `pypto_orchestration_requirements_v1` symbol is generated or required.
+
+Simpler independently rejects an actual Host `get_tensor_data` or
+`set_tensor_data` access before submitting Device work, even if an orchestration
+bypasses PyPTO's compiler check. The integration SDK pins the merged revision of
+[Simpler PR #2433](https://github.com/hw-native-sys/simpler/pull/2433). Update the submodule and
+`SIMPLER_KERNEL_REVISION` together and rebuild the runtime, native Torch adapter
+and kernel artifacts. Host runtime and AICPU binaries must come from the same build.
+
+`tests/st/runtime/kernel/test_hbg_contract.py` covers Device-only add,
+scalar-controlled Host graph construction, and runtime rejection with the compiler
+check deliberately bypassed. The cases run with the framework task queue both
+on and off. Unit tests cover compiler diagnostics and mode isolation.
 
 ## Kernel swimlane collection
 
@@ -402,7 +457,7 @@ context resources currently use Simpler defaults. An incompatible configuration
 is rejected instead of opening another Worker.
 
 The integration SDK is pinned to
-`32dff953d07f6bd2aacab8532860f28aca6df931`. Its supported Python surface is
+`dd32e1ccd2ab8ae47a5001ee4502ad5daa085f51`. Its supported Python surface is
 `simpler.task_interface.ChipWorker.kernel_init`, `kernel_prepare_callable`,
 `kernel_begin_dfx`, `kernel_end_dfx` and `finalize`.
 PyPTO's private adapter uses these existing methods. Init and prepare take no
@@ -410,8 +465,8 @@ caller stream; Simpler mints the native context generation and callable IDs.
 The calling thread must already hold the framework's current device. The native
 lifecycle thread borrows that ACL context without creating or resetting a device. Init uses
 installed runtime binaries and checks capability; it does not compile an
-operator or allocate business outputs. HBG kernel initialization is unsupported
-at this pin even though HBG binary compilation works.
+operator or allocate business outputs. HBG kernel initialization uses the
+Device-only Tensor contract described above.
 
 This pin adds two requirements PyPTO depends on. An onboard
 `tensormap_and_ringbuffer` build must stage the separate kernel-mode AICore ELF
@@ -803,7 +858,7 @@ registration, configuration conflicts, shared prepare failures, stale/forked
 handles, ownership, owner-thread shutdown and retry. The isolated cases in
 `tests/st/runtime/kernel/test_kernel_context.py` exercise real A2/A3 TRB
 init/prepare/close with two DSL callables, duplicate native kernel-context
-rejection and HBG capability refusal. They require the pinned runtime binaries
+rejection and HBG initialization. They require the pinned runtime binaries
 and a reserved NPU. They do not launch a PyPTO kernel or validate capture.
 
 `tests/ut/torch/test_launch.py` checks dispatch, scalar encoding, aliases and

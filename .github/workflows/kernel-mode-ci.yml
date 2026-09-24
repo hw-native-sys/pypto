@@ -255,9 +255,9 @@ jobs:
           for name in sorted(required):
               outcome = results.get(name, {}).get("result", "missing")
               lines.append(f"| {name} | {outcome} |")
-          lines += ["", "Device scope: A2/A3-family TRB on the chip recorded in the artifacts.",
+          lines += ["", "Device scope: A2/A3-family TRB and HBG on the chip recorded in the artifacts.",
                     "Capture requires warmup. A2 and A3 are not interchangeable coverage records.",
-                    "HBG, A5, and full platform acceptance remain pending (09C)."]
+                    "A5 and full platform acceptance remain pending (09C)."]
           Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text("\n".join(lines) + "\n")
           raise SystemExit(0 if all(results.get(name, {}).get("result") == "success" for name in required) else 1)
           PYTHON

@@ -17,6 +17,7 @@ case "${1:-}" in
       tests/ut/jit/test_kernel_eager.py
       tests/ut/jit/test_cache_config.py
       tests/ut/jit/test_jit_compile_extraction.py
+      tests/ut/runtime/test_hbg_kernel_contract.py
       tests/ut/runtime/test_kernel_abi.py
       tests/ut/runtime/test_kernel_compiler.py
       tests/ut/runtime/test_kernel_context.py
@@ -42,6 +43,7 @@ case "${1:-}" in
       'tests/st/runtime/kernel/test_hot_path.py::test_kernel_hot_path[0]'
       'tests/st/runtime/kernel/test_hot_path.py::test_kernel_hot_path[1]'
       'tests/st/runtime/kernel/test_dfx.py'
+      'tests/st/runtime/kernel/test_hbg_contract.py'
     )
     ;;
   capture)
@@ -52,6 +54,7 @@ case "${1:-}" in
       'tests/st/runtime/kernel/test_capture.py::test_capture[1-shutdown-torch_ops]'
       'tests/st/runtime/kernel/test_capture.py::test_capture_entry_interop[1-build-dir-mixed]'
       'tests/st/runtime/kernel/test_torch_ops.py::test_torch_ops[1-capture]'
+      'tests/st/runtime/kernel/test_torch_ops.py::test_host_build_graph'
     )
     ;;
   *) echo "Expected unit, eager or capture suite, got '${1:-}'" >&2; return 2 ;;

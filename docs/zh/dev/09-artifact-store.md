@@ -68,7 +68,7 @@ runtime，因此保留参数别名和每次调用的 Scalar 值。Tensor/storage
 
 ## Kernel ABI 描述符（集成分支）
 
-集成分支将 simpler 固定到 `32dff953d07f6bd2aacab8532860f28aca6df931`。
+集成分支将 simpler 固定到 `dd32e1ccd2ab8ae47a5001ee4502ad5daa085f51`。
 `pypto._kernel_abi.KernelABI` 描述该版本的 `ChipStorageTaskArgs` 参数协议。
 其 schema 1 是 **PyPTO 描述符版本**，并非 simpler 导出的版本号。
 升级 runtime pin 必须重新核对 ABI 并通过一致性测试；未知版本会被拒绝。

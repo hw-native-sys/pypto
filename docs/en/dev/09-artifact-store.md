@@ -89,7 +89,7 @@ and orchestration children. They reject omissions before allocation or execution
 ## Kernel ABI descriptors (integration branch)
 
 The integration branch pins simpler to
-`32dff953d07f6bd2aacab8532860f28aca6df931`. `pypto._kernel_abi.KernelABI`
+`dd32e1ccd2ab8ae47a5001ee4502ad5daa085f51`. `pypto._kernel_abi.KernelABI`
 describes that revision's `ChipStorageTaskArgs` argument protocol. Its schema 1
 is a **PyPTO descriptor version**, not a version exported by simpler. Updating
 the runtime pin requires a fresh ABI audit and conformance test; an unknown

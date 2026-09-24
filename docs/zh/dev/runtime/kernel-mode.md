@@ -22,10 +22,10 @@ out = torch.empty_like(x)
 op(x, 2.0, out)
 ```
 
-当前支持 A2/A3 的 `tensormap_and_ringbuffer`，包含非默认 stream 和 taskQueue 开关。
+当前支持 A2/A3 的 `tensormap_and_ringbuffer` 或 `host_build_graph`，包含非默认 stream 和 taskQueue 开关。
 可选的 `config=CompileOptions(...)` 提供编译选项，并计入特化 key。拒绝 `RunConfig`、
 CPU/Meta/Fake Tensor 及 Worker 自有 handle，不会据此切换执行路径。native launch 要求 rank 1–5 和正 uint32 extent/stride。
-A5、HBG 执行仍属后续工作；直接 JIT 和注册后的 torch.ops 均支持 warmup 后的 ACLGraph capture/replay，见下文。自动清理目前按下文
+A5 执行仍属后续工作；直接 JIT 和注册后的 torch.ops 均支持 warmup 后的 ACLGraph capture/replay，见下文。自动清理目前按下文
 torch_npu 2.6.0.post2 的退出契约接入；其他框架版本在完成退出协议验证前拒绝 native kernel
 初始化。此功能仍限于集成分支。
 
@@ -78,6 +78,55 @@ Worker。它不编译也不 prepare 任何算子，入图的每个特化仍需 w
 直接调用和 `register()` 拒绝 `RunConfig` 与 `CompileOptions.distributed_config`：编译选项使用 `CompileOptions`，持久缓存策略使用
 `pypto.configure_cache`。`CompileOptions.platform` 若不是默认值，必须等于绑定的平台。外层
 `PassContext` 的 runtime 必须与绑定值一致；没有外层上下文时，eager 编译使用 `init` 绑定的 runtime。
+
+## HBG kernel Tensor 契约
+
+通过 `pypto.torch.init(runtime="host_build_graph")` 为进程选择 HBG，单次调用不能覆盖
+Worker 已绑定的 runtime。所有边界 Tensor 参数都指向调用方持有的 Device 内存。
+Torch adapter 先检查 Tensor 连续且位于目标 NPU，再编码
+`ChipTensor.address_space = AddressSpace::DEVICE`。Host 可以读取 shape、dtype、stride
+等描述符信息，以及构建 view 和依赖。
+
+Host orchestration 不得读取或写入 Tensor 内容。PyPTO 在优化前检查入口及其可达的
+Host 辅助函数，拒绝 `pl.tensor.read` 和 `pl.tensor.write`，包括运行时可能不执行的分支。
+诊断包含操作、函数和源码位置。Device 函数体与 in-core scope 不受此检查影响。
+`predicate=(control[0] > 0)` 等 dispatch predicate 仍然允许：scheduler 在 Device 上读取元素，
+Host 只构造 predicate 描述符；
+program mode 和 TMR 保留原有行为。
+
+Host 构图所需的值应通过显式 scalar 参数传入：
+
+```python
+@pl.jit
+def repeat_add(
+    x: pl.Tensor[[16, 16], pl.FP32],
+    count: pl.Scalar[pl.INT32],
+    out: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+):
+    for _ in pl.range(count):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            pl.store(
+                pl.add(pl.load(out, [0, 0], [16, 16]), pl.load(x, [0, 0], [16, 16])),
+                [0, 0], out,
+            )
+    return out
+```
+
+这里的 `count` 使用现有 scalar ABI 传入，不从控制 Tensor 中读取。
+Tensor 写入应交给 Device task。当前 ABI 使用 64-bit scalar 槽位，不承载任意 Host 数据包。
+Tensor/scalar 数量必须与 callable 签名完全一致。不得追加 Host-copy Tensor；
+`host_copy_tensor_count` 保留在 32-byte invocation header 中，但必须为零。
+无需生成或依赖 `pypto_orchestration_requirements_v1` 符号。
+
+即使绕过 PyPTO 编译检查，Simpler 仍会在实际执行 Host `get_tensor_data` 或
+`set_tensor_data` 时拒绝访问，并在提交 Device 工作前终止构图。当前 SDK 固定到
+[Simpler PR #2433](https://github.com/hw-native-sys/simpler/pull/2433) 合并后的提交。
+子模块和 `SIMPLER_KERNEL_REVISION` 必须同步更新，并重编译 runtime、
+Torch native adapter 和 kernel 产物；Host runtime 与 AICPU 二进制必须来自同一次构建。
+
+`tests/st/runtime/kernel/test_hbg_contract.py` 覆盖 Device-only add、scalar 控制 Host 构图，
+以及刻意绕过编译检查后的 runtime 访问拒绝；分别测试 task queue 开启和关闭。
+单元测试覆盖编译诊断和模式隔离。
 
 ## Kernel 泳道图采集 {#kernel-swimlane-collection}
 
@@ -307,13 +356,13 @@ Simpler 或 native launch 扩展；`torch` 仍是 PyPTO 的常规依赖。真正
 Worker。`KernelConfig` 固定 platform、runtime、device、AICPU 线程数和 DFX 配置，其他常驻资源
 暂用 simpler 默认值。配置不兼容时报错，不额外创建 Worker。
 
-集成 SDK 固定为 `32dff953d07f6bd2aacab8532860f28aca6df931`。实际 Python 接口为
+集成 SDK 固定为 `dd32e1ccd2ab8ae47a5001ee4502ad5daa085f51`。实际 Python 接口为
 `simpler.task_interface.ChipWorker.kernel_init`、`kernel_prepare_callable`、
 `kernel_begin_dfx`、`kernel_end_dfx` 和 `finalize`。PyPTO 内部 adapter
 使用这些已有方法；init/prepare 不接收 caller stream，native context generation 和
 callable ID 均由 simpler 分配。调用线程须已绑定框架当前设备。初始化使用已安装的
-runtime 二进制并检查能力，不编译业务算子、不分配业务输出。该 pin 的 HBG kernel
-初始化不受支持，HBG 二进制编译成功不代表可执行。
+runtime 二进制并检查能力，不编译业务算子、不分配业务输出。HBG kernel 初始化遵循上文的
+Device-only Tensor 契约。
 
 该 pin 新增两项 PyPTO 依赖的要求。onboard 的 `tensormap_and_ringbuffer` 构建必须产出
 独立的 kernel-mode AICore ELF（`aicore_kernel_mode.o`）：此时
@@ -542,7 +591,7 @@ offset view 和非连续输入拒绝行为。没有真实 NPU 或所选平台为
 失败传播、过期/fork handle、owner 保活、初始化线程关闭与重试。
 `tests/st/runtime/kernel/test_kernel_context.py` 在隔离进程中使用真实 A2/A3 TRB
 对两个 DSL callable 执行 init/prepare/close，并验证 native 重复 kernel context 拒绝
-和 HBG 能力拒绝。测试要求固定版本 runtime 二进制及已预留的 NPU，不执行 PyPTO
+和 HBG 初始化。测试要求固定版本 runtime 二进制及已预留的 NPU，不执行 PyPTO
 kernel，也不验证 capture。
 
 ## 内部 torch 队列提交（04B）

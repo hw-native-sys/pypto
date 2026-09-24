@@ -36,6 +36,14 @@ def scale_eager(x: pl.Tensor, scale: pl.Scalar[pl.FP32], out: pl.Out[pl.Tensor])
     return out
 
 
+@pl.jit
+def host_read(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+    scale: pl.Scalar[pl.FP32] = pl.tensor.read(x, [0, 0])
+    with pl.at(level=pl.Level.CORE_GROUP):
+        pl.store(pl.mul(pl.load(x, [0, 0], [4, 4]), scale), [0, 0], out)
+    return out
+
+
 def _bind(monkeypatch, config):
     """Emulate a completed pypto.torch.init without a native Worker."""
     state = context._ProcessKernelState()
@@ -98,7 +106,9 @@ def eager(monkeypatch):
         events.frames.append(frame)
         return frame.alias_result()
 
-    monkeypatch.setattr(importlib.import_module("pypto.ir.compile"), "_compile_impl", build)
+    compiler = importlib.import_module("pypto.ir.compile")
+    events.real_compile = compiler._compile_impl
+    monkeypatch.setattr(compiler, "_compile_impl", build)
     monkeypatch.setattr(JITFunction, "_compile_to_program", counted_frontend)
     monkeypatch.setattr(JITFunction, "_resolve_specialization", counted_specialization)
     events.real_invoke = launch.invoke
@@ -134,6 +144,22 @@ def test_eager_compiles_for_the_init_bound_target(eager, monkeypatch, runtime):
     assert eager.build_kwargs["platform"] == "a2a3"
     assert eager.build_kwargs["runtime"] == passes.runtime_kind_from_name(runtime)
     assert eager.frames[0].device_index == 0
+
+
+def test_hbg_rejects_host_read_before_pipeline_or_launch(eager, monkeypatch):
+    eager.state = _bind(monkeypatch, KernelConfig("a2a3", "host_build_graph", 0))
+    host_read._cache.clear()
+    host_read._kernel_contracts.clear()
+    compiler = importlib.import_module("pypto.ir.compile")
+    monkeypatch.setattr(compiler, "_compile_impl", eager.real_compile)
+
+    def unexpected_pipeline(*args, **kwargs):
+        pytest.fail("Invalid Host access reached the optimization pipeline")
+
+    monkeypatch.setattr(compiler, "_run_pass_pipeline", unexpected_pipeline)
+    with pytest.raises(ValueError, match="HBG kernel Host orchestration.*cannot use tensor.read"):
+        host_read(_tensor((4, 4)), _tensor((4, 4)))
+    assert not eager.frames
 
 
 def test_eager_requires_init_before_binding_or_native_queries(eager, monkeypatch):

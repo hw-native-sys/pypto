@@ -10,11 +10,13 @@
 """Internal kernel artifact producer; public compile() remains a program entry."""
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pypto._kernel_abi import KernelABI, validate_kernel_signature
 from pypto.pypto_core import codegen
+from pypto.pypto_core import ir as _ir
 from pypto.pypto_core.ir import Function, FunctionType, Program, level_to_linqu_level
 
 from .compiled_program import _extract_func_param_infos, write_kernel_metadata
@@ -60,6 +62,123 @@ def kernel_abi_for_program(program: Program, *, platform: str, runtime: str) -> 
     """Derive logical pools and external return aliases before lowering rewrites IR."""
     params, aliases = kernel_signature_for_program(program)
     return kernel_abi_from_params(params, platform=platform, runtime=runtime, return_aliases=aliases)
+
+
+def validate_hbg_kernel_orchestration(program: Program) -> None:
+    """Reject Host tensor-data access, including reachable orchestration helpers.
+
+    Walk each Host function once, before optimization can erase branches. Device
+    function bodies and in-core scopes are excluded; their call arguments are
+    still evaluated by Host orchestration. This is O(nodes + call edges).
+    """
+    functions = {func.name: func for func in program.functions.values()}
+    pending = [_entry(program)]
+    visited: set[str] = set()
+    device_types = {FunctionType.InCore, FunctionType.AIC, FunctionType.AIV, FunctionType.Group}
+    read_op = _ir.get_op("tensor.read").name
+    write_op = _ir.get_op("tensor.write").name
+
+    class HostAccessVisitor(_ir.IRVisitor):
+        def __init__(self, function_name: str) -> None:
+            super().__init__()
+            self.function_name = function_name
+            self.expressions: list[_ir.Expr] = []
+            self.statements: list[_ir.Stmt] = []
+            self.predicates: list[_ir.Expr] = []
+
+        def run(self, body: _ir.Stmt) -> None:
+            # Defer recursive dispatch until the Python override returns.
+            # Nanobind suppresses re-entry into an active visitor override.
+            self.statements.append(body)
+            while self.expressions or self.statements or self.predicates:
+                if self.expressions:
+                    self.visit_expr(self.expressions.pop())
+                elif self.predicates:
+                    self.visit_predicate(self.predicates.pop())
+                else:
+                    self.visit_stmt(self.statements.pop())
+
+        def check_call(self, op: _ir.Call | _ir.Submit) -> None:
+            if isinstance(op.op, _ir.GlobalVar):
+                callee = functions.get(op.op.name)
+                if callee is not None:
+                    pending.append(callee)
+                return
+            if op.op.name not in (read_op, write_op):
+                return
+            guidance = (
+                "Pass the required Host value as an explicit scalar argument."
+                if op.op.name == read_op
+                else "Express the update as a Device task."
+            )
+            raise ValueError(
+                f"{op.span.to_string()}: HBG kernel Host orchestration "
+                f"'{self.function_name}' cannot use {op.op.name} on Tensor storage. {guidance}"
+            )
+
+        def visit_call(self, op: _ir.Call) -> None:
+            self.check_call(op)
+            self.expressions.extend(op.args)
+            self.visit_attributes(op.attrs)
+
+        def visit_submit(self, op: _ir.Submit) -> None:
+            self.check_call(op)
+            self.expressions.extend(op.args)
+            self.expressions.extend(op.deps)
+            if op.core_num is not None:
+                self.expressions.append(op.core_num)
+            if op.predicate is not None:
+                self.predicates.append(op.predicate)
+            self.visit_attributes(op.attrs)
+
+        def visit_predicate(self, predicate: _ir.Expr) -> None:
+            host = self
+
+            class DevicePredicateVisitor(_ir.IRVisitor):
+                def visit_call(self, op: _ir.Call) -> None:
+                    # EmitPredicateHint encodes this read as Device scheduler
+                    # metadata, not get_tensor_data. Its indices are Host values.
+                    if not isinstance(op.op, _ir.GlobalVar) and op.op.name == read_op:
+                        host.expressions.extend(op.args)
+                    else:
+                        host.expressions.append(op)
+
+            DevicePredicateVisitor().visit_expr(predicate)
+
+        def visit_attributes(self, attrs: Mapping[str, object]) -> None:
+            for key, value in attrs.items():
+                if key == "predicate" and isinstance(value, _ir.Expr):
+                    self.predicates.append(value)
+                else:
+                    self.visit_attribute_value(value)
+
+        def visit_attribute_value(self, value: object) -> None:
+            if isinstance(value, _ir.Expr):
+                self.expressions.append(value)
+            elif isinstance(value, (list, tuple)):
+                for element in value:
+                    self.visit_attribute_value(element)
+
+        def visit_in_core_scope_stmt(self, op: _ir.InCoreScopeStmt) -> None:
+            # Only launch inputs run on Host; the body runs on Device.
+            self.visit_attributes(op.attrs)
+
+        def visit_hierarchy_scope_stmt(self, op: _ir.HierarchyScopeStmt) -> None:
+            self.visit_attributes(op.attrs)
+            if level_to_linqu_level(op.level) > 1:
+                self.statements.append(op.body)
+
+        def visit_spmd_scope_stmt(self, op: _ir.SpmdScopeStmt) -> None:
+            self.expressions.append(op.core_num)
+            self.visit_attributes(op.attrs)
+            self.statements.append(op.body)
+
+    while pending:
+        func = pending.pop()
+        if func.name in visited or func.func_type in device_types:
+            continue
+        visited.add(func.name)
+        HostAccessVisitor(func.name).run(func.body)
 
 
 def finish_kernel_artifact(

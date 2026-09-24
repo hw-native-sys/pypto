@@ -427,6 +427,10 @@ def _compile_impl(  # noqa: PLR0913
     _kernel_abi: KernelABI | None = None,
 ) -> Any:
     """Shared pipeline; an internal kernel request selects a separate artifact producer."""
+    if _kernel_abi is not None and _kernel_abi.runtime == "host_build_graph":
+        from ._kernel_compile import validate_hbg_kernel_orchestration  # noqa: PLC0415
+
+        validate_hbg_kernel_orchestration(program)
     _select_backend(backend_type=backend_type, platform=platform)
 
     if output_dir is None:
@@ -494,6 +498,9 @@ def _compile_impl(  # noqa: PLR0913
         mplan = pipeline.memory_planner
         effective_backend_type = pipeline.backend_type
         effective_runtime = pipeline.runtime
+        if _kernel_abi is not None and _kernel_abi.runtime == "host_build_graph":
+            # Also inspect outlined Host functions and expressions introduced by lowering.
+            validate_hbg_kernel_orchestration(transformed_program)
 
         # Codegen target selection is owned by the per-backend BackendHandler;
         # any value of the ``BackendType`` enum is a valid PTO codegen target.

@@ -59,7 +59,7 @@ metadata = {
     "torch": torch.__version__,
     "torch_npu": torch_npu.__version__,
     "nanobind": importlib.metadata.version("nanobind"),
-    "runtime": "tensormap_and_ringbuffer",
+    "runtimes": ["tensormap_and_ringbuffer", "host_build_graph"],
     "warmup_required": True,
 }
 Path(f"test-results/kernel-mode/{sys.argv[1]}-environment.json").write_text(json.dumps(metadata, indent=2) + "\n")

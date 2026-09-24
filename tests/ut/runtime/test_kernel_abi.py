@@ -282,6 +282,7 @@ def test_contract_matches_pinned_simpler_headers(tmp_path):
     source = "\n".join(
         [
             '#include "task_args.h"',
+            '#include "kernel_invocation_validation.h"',
             "#include <iostream>",
             *assertions,
             *[
@@ -293,8 +294,12 @@ def test_contract_matches_pinned_simpler_headers(tmp_path):
             f"static_assert(CHIP_MAX_TENSOR_ARGS == {MAX_KERNEL_TENSORS});",
             f"static_assert(CHIP_MAX_SCALAR_ARGS == {MAX_KERNEL_SCALARS});",
             "static_assert(sizeof(ChipTensor) == 72);",
+            "static_assert(sizeof(SimplerKernelInvocationHeader) == 32);",
             "static_assert(offsetof(ChipStorageTaskArgs, scalars_) == 256 * 72);",
-            "int main() { std::cout << to_u64(float(-3.5)) << ' ' << to_u64(int32_t(-7)); }",
+            "int main() { "
+            "if (!simpler::kernel::valid_host_copy_tensor_count(2, 0) || "
+            "simpler::kernel::valid_host_copy_tensor_count(2, 1)) return 1; "
+            "std::cout << to_u64(float(-3.5)) << ' ' << to_u64(int32_t(-7)); }",
         ]
     )
     binary = tmp_path / "abi_probe"
