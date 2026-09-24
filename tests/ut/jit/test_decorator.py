@@ -2431,6 +2431,48 @@ class TestWindowLocalMetadata:
         assert "data" not in metas
 
 
+class TestPldTensorRebindPreservesMetadata:
+    """A ``pld.tensor.*`` collective rebind must not drop the target's tensor
+    metadata (#2638). It's a two-level attribute call (``fn.value`` is itself
+    an ``ast.Attribute``, not a ``Name``), so it never reaches the
+    single-level ``pl.<op>(...)`` branch in ``_update_local_tensor_meta`` —
+    without the dedicated check it fell through to ``local.pop()`` instead of
+    the ``preserve_existing`` fallback other unmodelled same-shaped calls get."""
+
+    def test_all_to_all_v_rebind_keeps_metadata(self):
+        # Mirrors the real usage in
+        # tests/st/distributed/collectives/test_l2_tensor_all_to_all_v.py:
+        # ``data`` is rebound through the same collective it's passed into as
+        # the staging window (real signature: all_to_all_v(input, target,
+        # signal, send_counts, recv_counts, *, core_num=1) — tensor_ops.py).
+        def body(stage, data, signal, send_counts, recv_counts):
+            data = pld.tensor.all_to_all_v(stage, data, signal, send_counts, recv_counts, core_num=1)
+            return data
+
+        seed = {
+            "stage": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
+            "data": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
+            "signal": TensorMeta(shape=(4, 1), dtype=DataType.INT32),
+            "send_counts": TensorMeta(shape=(4,), dtype=DataType.INT32),
+            "recv_counts": TensorMeta(shape=(4, 1), dtype=DataType.INT32),
+        }
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert metas["data"] == seed["data"]
+
+    def test_pl_tensor_dim_is_not_mistaken_for_a_pld_rebind(self):
+        """Guards the review trap: a two-level ``pl.*`` call (root ``pl``, not
+        ``pld``) must not hit the new branch — ``pl.tensor.dim`` is a scalar
+        query, not a same-shaped rebind, so it must stay untracked here."""
+
+        def body(a):
+            d = pl.tensor.dim(a, 0)
+            return d
+
+        seed = {"a": TensorMeta(shape=(64, 64), dtype=DataType.FP32)}
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert "d" not in metas
+
+
 class TestDtypeOperandResolution:
     """A ``dtype=`` operand is resolved by value, not by its ``pl.<NAME>``
     spelling, so the inferred meta matches what the specializer folds into the

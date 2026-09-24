@@ -1335,6 +1335,17 @@ def _extract_dim_alias(value: ast.expr | None) -> tuple[str, int] | None:
     return None
 
 
+def _is_pld_tensor_call(fn: ast.expr) -> bool:
+    """True for ``pld.tensor.<attr>(...)`` — e.g. a collective rebind (issue #2638)."""
+    return (
+        isinstance(fn, ast.Attribute)
+        and isinstance(fn.value, ast.Attribute)
+        and fn.value.attr == "tensor"
+        and isinstance(fn.value.value, ast.Name)
+        and fn.value.value.id == "pld"
+    )
+
+
 def _alias_dim(alias: tuple[str, int] | None, local: Mapping[str, TensorMeta]) -> ShapeDim | None:
     """Dim ``k`` of tensor ``P`` for a ``(P, k)`` dim alias, or None when ``P`` is untracked."""
     if alias is None:
@@ -1425,6 +1436,12 @@ def _update_local_tensor_meta(
                 # result metadata this extractor does not model (for example,
                 # same-shaped pl.assemble rebindings).
                 preserve_existing = True
+        elif _is_pld_tensor_call(fn) and has_named_target:
+            # A pld.tensor.* collective is a two-level attribute call, so it
+            # never reaches the single-level branch above; without this it
+            # falls through to local.pop() further below and silently drops
+            # the target's metadata instead of keeping it (#2638).
+            preserve_existing = True
         elif isinstance(fn, ast.Name) and fn.id in deps.io:
             # The in-place ``Out``-param convention first; a callee that
             # allocates its own results falls through to its return statement.
