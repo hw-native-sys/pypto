@@ -78,6 +78,10 @@ def selected_build(tmp_path, monkeypatch):
     root.mkdir()
     (root / "pto_isa.pin").write_text("a" * 40)
     cxx = _elf(tmp_path / "cxx", b"c" * 20)
+    tools = {
+        name: _elf(tmp_path / name, name.encode().ljust(20, b"x"))
+        for name in ("cc1plus", "collect2", "as", "ld")
+    }
     monkeypatch.setattr(
         identity,
         "_module_path",
@@ -96,7 +100,14 @@ def selected_build(tmp_path, monkeypatch):
         ),
     )
     monkeypatch.setattr(_toolchain, "_invocable", lambda path: Path(path))
-    monkeypatch.setattr(_toolchain, "_run", lambda args: "compiler version 1")
+    monkeypatch.setattr(_toolchain, "_executable", lambda path: Path(path))
+
+    def run(args):
+        if args[1].startswith("-print-prog-name="):
+            return str(tools[args[1].partition("=")[2]])
+        return "compiler version 1"
+
+    monkeypatch.setattr(_toolchain, "_run", run)
     monkeypatch.setattr(identity, "_ptoas_identity", lambda selected: selected)
     compiler = SimpleNamespace(
         project_root=root,
@@ -105,7 +116,7 @@ def selected_build(tmp_path, monkeypatch):
         _orchestration_toolchain=lambda name: SimpleNamespace(cxx_path=str(cxx)),
         sdk=SimpleNamespace(gxx15=SimpleNamespace(cxx_path=str(cxx))),
     )
-    return SimpleNamespace(compiler=compiler, root=root, native=native, runtime=runtime)
+    return SimpleNamespace(compiler=compiler, root=root, native=native, runtime=runtime, tools=tools)
 
 
 def _capture(build, assembler="ptoas-1"):
@@ -130,6 +141,13 @@ def test_editable_native_build_and_effective_dependencies_invalidate(selected_bu
     assert not (build.root / "build/pto-isa").exists()
     monkeypatch.setitem(sys.modules, "_task_interface", SimpleNamespace(__build_commit__="r2"))
     assert _capture(build).runtime != first.runtime
+
+
+@pytest.mark.parametrize("program", ["as", "ld"])
+def test_selected_gcc_helper_rebuild_changes_identity(selected_build, program):
+    first = _capture(selected_build)
+    _elf(selected_build.tools[program], b"z" * 20)
+    assert _capture(selected_build).device_toolchain != first.device_toolchain
 
 
 def test_policy_and_epoch_changes_do_not_reuse_process_memo(selected_build, monkeypatch):
@@ -168,7 +186,7 @@ def test_ptoas_probe_uses_script_directory_before_importing_helpers(tmp_path):
         capture_output=True,
         text=True,
     )
-    assert json.loads(result.stdout) == str(origin)
+    assert json.loads(result.stdout)["ptoas"] == str(origin)
 
 
 def test_ptoas_resolves_selected_interpreter_without_importing_compiler(tmp_path, monkeypatch):
@@ -182,20 +200,49 @@ def test_ptoas_resolves_selected_interpreter_without_importing_compiler(tmp_path
     metadata = package.parent / "ptoas-0.65.dev1.dist-info/METADATA"
     metadata.parent.mkdir()
     metadata.write_text("Name: ptoas\nVersion: 0.65.dev1\n")
+    numpy = package.parent / "numpy/__init__.py"
+    numpy.parent.mkdir()
+    numpy.write_text("raise AssertionError('must not import NumPy')")
+    numpy_metadata = package.parent / "numpy-2.2.6.dist-info"
+    numpy_metadata.mkdir()
+    for name in ("METADATA", "WHEEL", "RECORD"):
+        (numpy_metadata / name).write_text(name)
     calls = []
     monkeypatch.setattr(_toolchain, "_console_interpreter", lambda path: Path("/selected/python"))
 
     def probe(command):
         calls.append(command)
-        return json.dumps(str(package / "__init__.py"))
+        return json.dumps({"ptoas": str(package / "__init__.py"), "numpy": str(numpy)})
 
     monkeypatch.setattr(_toolchain, "_run", probe)
     first = identity._ptoas_identity(str(launcher))
     assert calls[0][0] == "/selected/python"
     _elf(core, b"b" * 20)
     assert identity._ptoas_identity(str(launcher)) != first
+    _elf(core, b"a" * 20)
     metadata.write_text("Name: ptoas\nVersion: 0.65.dev2\n")
     assert identity._ptoas_identity(str(launcher)) != first
+    metadata.write_text("Name: ptoas\nVersion: 0.65.dev1\n")
+    assert identity._ptoas_identity(str(launcher)) == first
+    (numpy_metadata / "RECORD").write_text("new NumPy wheel build")
+    assert identity._ptoas_identity(str(launcher)) != first
+    (numpy_metadata / "RECORD").unlink()
+    with pytest.raises(ValueError, match="NumPy wheel identity"):
+        identity._ptoas_identity(str(launcher))
+
+
+@pytest.mark.parametrize("recognized_layout", [True, False])
+def test_cann_without_install_version_has_no_build_identity(
+    selected_build, monkeypatch, tmp_path, recognized_layout
+):
+    ccec_root = tmp_path / "tools/bisheng_compiler/bin" if recognized_layout else tmp_path / "unknown/bin"
+    ccec = _elf(ccec_root / "ccec", b"e" * 20)
+    linker = _elf(tmp_path / "ld.lld", b"l" * 20)
+    selected_build.compiler.platform = "a2a3"
+    selected_build.compiler.sdk.ccec = SimpleNamespace(cxx_path=str(ccec), linker_path=str(linker))
+    monkeypatch.setattr(_toolchain, "_cann_install_version", lambda root: "" if recognized_layout else "v1")
+    with pytest.raises(ValueError, match="CANN installation build version is unavailable"):
+        identity.discover_builds(lambda: selected_build.compiler, "ptoas-1", "runtime")
 
 
 if __name__ == "__main__":

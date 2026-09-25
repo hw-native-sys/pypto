@@ -134,8 +134,12 @@ _PTOAS_PROBE = """
 import sys
 sys.path[0] = sys.argv[1]
 import importlib.util, json
-spec = importlib.util.find_spec('ptoas')
-print(json.dumps(spec.origin if spec is not None else None))
+ptoas = importlib.util.find_spec('ptoas')
+numpy = importlib.util.find_spec('numpy')
+print(json.dumps({
+    'ptoas': ptoas.origin if ptoas is not None else None,
+    'numpy': numpy.origin if numpy is not None else None,
+}))
 """
 
 
@@ -154,22 +158,43 @@ def _ptoas_identity(selected: str) -> Any:
         # Non-wheel release launchers retain the complete reported version,
         # including development suffixes. Unknown layouts need the slow probe.
         return (str(launcher.resolve()), check_ptoas_version(selected))
-    origin = json.loads(_run([str(interpreter), "-c", _PTOAS_PROBE, str(launcher.parent)]))
+    selected_modules = json.loads(_run([str(interpreter), "-c", _PTOAS_PROBE, str(launcher.parent)]))
+    origin = selected_modules.get("ptoas")
     if not isinstance(origin, str):
         raise ValueError(f"Cannot resolve PTOAS package from {launcher}")
     package = Path(origin).resolve(strict=True).parent
+    numpy_identity = _numpy_wheel_identity(selected_modules.get("numpy"), interpreter)
     natives = sorted(package.glob("_core*.so"))
     if not natives or (package / "_online").exists():
-        return (str(launcher.resolve()), check_ptoas_version(selected))
+        return (str(launcher.resolve()), check_ptoas_version(selected), numpy_identity)
     metadata = sorted(package.parent.glob("ptoas-*.dist-info/METADATA"))
     if len(metadata) != 1:
-        return (str(launcher.resolve()), check_ptoas_version(selected))
+        return (str(launcher.resolve()), check_ptoas_version(selected), numpy_identity)
     return (
         str(launcher),
         _file_digest(launcher)[1],
         str(interpreter),
         _file_digest(metadata[0])[1],
         [(str(p), native_build_id(p)) for p in natives],
+        numpy_identity,
+    )
+
+
+def _numpy_wheel_identity(numpy_origin: Any, interpreter: Path) -> tuple[Any, ...]:
+    """Identify the NumPy wheel selected by PTOAS without importing it."""
+    if not isinstance(numpy_origin, str):
+        raise ValueError(f"Selected PTOAS interpreter cannot identify NumPy: {interpreter}")
+    numpy_package = Path(numpy_origin).resolve(strict=True).parent
+    if numpy_package.name != "numpy":
+        raise ValueError(f"Unsupported selected NumPy package layout: {numpy_origin}")
+    numpy_metadata = sorted(numpy_package.parent.glob("numpy-*.dist-info"))
+    if len(numpy_metadata) != 1 or not all(
+        (numpy_metadata[0] / name).is_file() for name in ("METADATA", "WHEEL", "RECORD")
+    ):
+        raise ValueError(f"Selected NumPy wheel identity is unavailable: {numpy_package}")
+    return (
+        str(numpy_package),
+        [(name, _file_digest(numpy_metadata[0] / name)[1]) for name in ("METADATA", "WHEEL", "RECORD")],
     )
 
 
@@ -192,14 +217,28 @@ def discover_builds(compiler: Callable[[], Any], ptoas: str, runtime_name: str) 
 
 
 def _compiler_identity(selected: str) -> tuple[Any, ...]:
-    from ._toolchain import _driver_executed, _invocable, _run  # noqa: PLC0415
+    from ._toolchain import _driver_executed, _executable, _invocable, _run  # noqa: PLC0415
 
     invoked = _invocable(selected)
     driver = invoked.resolve(strict=True)
     if driver.name == "ccache":
         output = _run([str(invoked), "-E", "-x", "c++", "-v", os.devnull])
         driver = _driver_executed(output, invoked)
-    return (str(invoked), _run([str(invoked), "--version"]).strip(), native_build_id(driver))
+
+    # GCC selects these programs independently of its driver. Query the same
+    # invocation used for compilation so wrapper and PATH selection are honored.
+    def selected_program(name: str) -> tuple[str, str, tuple[str, str]]:
+        answer = _run([str(invoked), f"-print-prog-name={name}"]).strip()
+        if not answer or "\n" in answer:
+            raise ValueError(f"Cannot identify GCC's selected {name}: {invoked}")
+        path = _executable(answer)
+        return (name, str(path), native_build_id(path))
+
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        version = pool.submit(_run, [str(invoked), "--version"])
+        programs = list(pool.map(selected_program, ("cc1plus", "collect2", "as", "ld")))
+        reported_version = version.result().strip()
+    return (str(invoked), reported_version, native_build_id(driver), programs)
 
 
 def _local_builds(
@@ -230,7 +269,9 @@ def _local_builds(
         ccec = Path(compiler.sdk.ccec.cxx_path).resolve(strict=True)
         cann_layout = tuple(p.name for p in ccec.parents[:3]) == ("bin", "bisheng_compiler", "tools")
         cann_version = _cann_install_version(ccec.parents[3]) if cann_layout else ""
-        device.append((str(ccec), cann_version or native_build_id(ccec)))
+        if not cann_version:
+            raise ValueError(f"CANN installation build version is unavailable: {ccec}")
+        device.append((str(ccec), cann_version))
         linker = Path(compiler.sdk.ccec.linker_path).resolve(strict=True)
         device.append((str(linker), native_build_id(linker)))
     return (

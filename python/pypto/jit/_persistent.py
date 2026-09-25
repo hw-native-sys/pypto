@@ -105,7 +105,7 @@ class JITArtifactStore(ArtifactStore):
 
         try:
             spec = ready_spec(self._slot(key, generated), generated, metadata_only=True)
-        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
             return ArtifactLookup(LookupStatus.MISS)
         return self.lookup(key, spec)
 

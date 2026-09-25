@@ -29,6 +29,7 @@ from pypto.ir.compiled_program import _COMPILED_META_SCHEMA, CompiledProgram
 from pypto.ir.distributed_compiled_program import _META_SCHEMA, DistributedCompiledProgram
 from pypto.jit import _artifact_manifest
 from pypto.jit._artifact_manifest import ArtifactKey, ArtifactSpec, ArtifactState, BuildKind
+from pypto.jit._persistent import JITArtifactStore
 from pypto.jit.artifact_cache import ArtifactStore, BuildDisposition, LookupStatus
 from pypto.runtime import RunConfig, _prebuilt
 from pypto.runtime._artifact_runtime import ArtifactRuntime, bind_artifact, restore_artifact
@@ -487,6 +488,16 @@ def test_ready_spec_uses_packaged_json_without_executing_python(tmp_path, fake_r
         Mock(side_effect=AssertionError("READY must not execute kernel_config.py")),
     )
     assert _prebuilt.ready_spec(tmp_path, _spec(BuildKind.SINGLE_CHIP)) == expected
+
+
+def test_nested_ready_hint_falls_back_to_generated_lookup(tmp_path):
+    store = JITArtifactStore(tmp_path / "cache", private_root=tmp_path / "private")
+    key, generated = _key(), _spec()
+    slot = store._slot(key, generated)
+    slot.mkdir(parents=True)
+    (slot / "kernel_config.py").write_text("KERNELS = []\n")
+    (slot / "kernel_config.json").write_text("[" * 2000 + "0" + "]" * 2000)
+    assert store.lookup_ready(key, generated).status is LookupStatus.MISS
 
 
 def test_ready_spec_enumerates_all_child_binaries(tmp_path, fake_runtime):
