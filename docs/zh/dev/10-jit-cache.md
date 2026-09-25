@@ -120,15 +120,16 @@ with_ir = decode.compile(config=RunConfig(cache_config=pypto.CacheConfig(enabled
 
 | 组件 | 身份依据 |
 | ---- | -------- |
-| PyPTO | Python 包源码内容、实际导入扩展的完整 GNU ELF Build-ID、Python 版本及 ABI。 |
+| PyPTO | Python 包源码与打包的代码生成模板内容、实际导入扩展的完整 GNU ELF Build-ID、Python 版本及 ABI。 |
 | Runtime | 干净的源码 checkout 版本或安装构建版本、实际原生扩展 Build-ID、Python 源码及可用的 runtime/PTO-ISA 构建元数据；源码 checkout 有未提交更改时绕过持久缓存。 |
 | PTO-ISA | runtime 的 `pto_isa.pin` 选定的版本；仅编译未命中时获取并校验 checkout。 |
-| PTOAS | 标准 wheel 启动器使用其解释器实际选中的包元数据、NumPy wheel 记录及原生编译器 Build-ID；缺少 wheel 证据或不支持的启动器会绕过持久缓存。独立 ELF 使用 Build-ID。 |
+| PTOAS | 标准 wheel 启动器使用其解释器实际选中的包元数据、NumPy wheel 记录、原生编译器 Build-ID、启动 `.pth` 文件与非标准库启动模块；缺少启动或 wheel 证据、不支持的启动器会绕过持久缓存。独立 ELF 使用 Build-ID。 |
 | 设备及编排工具链 | 选中的编译器路径/版本、调用入口及实际执行的 GCC 驱动的 Build-ID、GCC 辅助程序 Build-ID、CANN 安装构建版本及链接器 Build-ID；无法识别编译器 wrapper 或缺少 CANN 构建版本时绕过持久缓存。 |
 
 原生文件缺少可用 Build-ID 时回退到内容哈希。Build-ID 从小型 ELF note 读取，不读取
-整个动态库。wheel PTOAS 探测不导入其编译器包。身份不可用时绕过缓存，不生成共用
-的 `UNKNOWN` key。现有 runtime ABI 及 PTOAS 最低版本检查仍在原有路径执行。
+整个动态库。wheel PTOAS 探测不导入其编译器包；选中解释器的启动搜索路径和钩子文件
+也参与 key。身份不可用时绕过缓存，不生成共用的 `UNKNOWN` key。现有 runtime ABI 及 PTOAS
+最低版本检查仍在原有路径执行。
 带有 `_online` 构建目录的 PTOAS 包会绕过持久缓存，因为本地扩展重编可能不会改变
 报告的版本。
 

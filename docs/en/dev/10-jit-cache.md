@@ -149,17 +149,19 @@ identities; it does not add an independent expected-version or pin audit.
 
 | Component | Identity evidence |
 | --------- | ----------------- |
-| PyPTO | Package Python source contents, the actually imported native extension's full GNU ELF Build-ID, and Python version/ABI. |
+| PyPTO | Package Python source and bundled codegen template contents, the actually imported native extension's full GNU ELF Build-ID, and Python version/ABI. |
 | Runtime | A clean source checkout revision or installed build revision, actual native extension Build-ID, runtime Python sources, and available runtime/PTO-ISA build metadata. A dirty source checkout bypasses persistence. |
 | PTO-ISA | The revision selected by the runtime's `pto_isa.pin`. Checkout acquisition and validation happen on compilation misses. |
-| PTOAS | For a standard wheel launcher: metadata from its selected interpreter's package, its selected NumPy wheel record, and the native compiler Build-ID. Missing wheel evidence or unsupported launchers bypass persistence. Standalone ELF builds use Build-ID. |
+| PTOAS | For a standard wheel launcher: metadata from its selected interpreter's package, its selected NumPy wheel record, native compiler Build-ID, interpreter startup `.pth` files and non-stdlib startup modules. Missing startup or wheel evidence and unsupported launchers bypass persistence. Standalone ELF builds use Build-ID. |
 | Device and orchestration tools | Selected compiler paths/versions, the invoked executable's and executed GCC driver's Build-IDs, and GCC helper Build-IDs, plus CANN installation build version and linker Build-ID. Unrecognized compiler wrappers or missing CANN build versions bypass persistence. |
 
 Native files without a usable Build-ID fall back to content hashing. Build IDs
 are read from small ELF notes, not by reading the complete shared object. Wheel
-PTOAS discovery does not import its compiler package. Missing evidence bypasses
-persistence; it never creates an `UNKNOWN` cache key. Existing runtime ABI and
-minimum PTOAS compatibility checks remain in place on their normal paths.
+PTOAS discovery does not import its compiler package. The selected interpreter's
+startup search path and hook files also participate in the key. Missing
+evidence bypasses persistence; it never creates an `UNKNOWN` cache key.
+Existing runtime ABI and minimum PTOAS compatibility checks remain in place
+on their normal paths.
 PTOAS packages with an `_online` build directory bypass persistence because a
 local extension rebuild can leave the reported version unchanged.
 

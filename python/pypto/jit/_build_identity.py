@@ -15,9 +15,9 @@ dynamic dependencies, or same-build local patches; use the content policy or a
 new cache epoch for those. No disk memo of filesystem timestamps is involved.
 """
 
+import ast
 import hashlib
 import importlib
-import json
 import os
 import struct
 import sys
@@ -72,7 +72,7 @@ def _walk_error(error: OSError) -> None:
 
 @lru_cache(maxsize=64)
 def python_sources(root: Path) -> str:
-    """Hash package Python sources, excluding generated assets and bytecode.
+    """Hash Python sources and bundled templates, excluding generated assets.
 
     Paths and bytes both participate. Installation files are immutable within
     a process, just as imported modules are; a fresh process detects edits.
@@ -85,7 +85,7 @@ def python_sources(root: Path) -> str:
             if os.path.islink(os.path.join(directory, name)):
                 raise ValueError(f"Python package has an unsupported directory symlink: {directory}/{name}")
         for filename in sorted(files):
-            if filename.endswith(".py"):
+            if filename.endswith((".py", ".in")):
                 path = os.path.join(directory, filename)
                 with open(path, "rb") as stream:
                     before = os.fstat(stream.fileno())
@@ -132,13 +132,53 @@ def _python_package(name: str) -> list[tuple[str, str]]:
 # import ptoas: its __init__ loads the compiler and costs hundreds of ms.
 _PTOAS_PROBE = """
 import sys
+startup = tuple(sys.modules.items())
 sys.path[0] = sys.argv[1]
-import importlib.util, json
+import importlib.util, os, site
+stdlib = os.path.abspath(os.path.dirname(site.__file__))
+site_roots = [os.path.abspath(root) for root in site.getsitepackages()]
+if site.ENABLE_USER_SITE:
+    site_roots.append(os.path.abspath(site.getusersitepackages()))
+hook_roots = sorted(set(site_roots + [os.path.abspath(root) for root in sys.path if root]))
+hooks = []
+for root in hook_roots:
+    if not os.path.isdir(root):
+        continue
+    with os.scandir(root) as entries:
+        hooks.extend(entry.path for entry in entries if entry.name.endswith('.pth') and entry.is_file())
+hooks = sorted(set(hooks))
+modules = []
+unresolved = []
+for name, module in startup:
+    origin = getattr(module, '__file__', None)
+    if not origin:
+        spec_origin = getattr(getattr(module, '__spec__', None), 'origin', None)
+        if spec_origin not in (None, 'built-in', 'frozen'):
+            unresolved.append(name)
+        for directory in getattr(module, '__path__', ()):
+            path = os.path.abspath(directory)
+            if not path.startswith(stdlib + os.sep) or any(
+                path.startswith(root + os.sep) for root in site_roots
+            ):
+                unresolved.append(name)
+        continue
+    path = os.path.abspath(origin)
+    if path.startswith(stdlib + os.sep) and not any(path.startswith(root + os.sep) for root in site_roots):
+        if name not in ('sitecustomize', 'usercustomize'):
+            continue
+    if os.path.isfile(path):
+        modules.append((name, path))
+    else:
+        unresolved.append(name)
 ptoas = importlib.util.find_spec('ptoas')
 numpy = importlib.util.find_spec('numpy')
-print(json.dumps({
+print(repr({
     'ptoas': ptoas.origin if ptoas is not None else None,
     'numpy': numpy.origin if numpy is not None else None,
+    'startup_hooks': hooks,
+    'startup_modules': modules,
+    'startup_path': sys.path,
+    'startup_unresolved': sorted(set(unresolved)),
 }))
 """
 
@@ -154,7 +194,7 @@ def _ptoas_identity(selected: str) -> Any:
         interpreter = _console_interpreter(launcher)
     except ValueError as exc:
         raise ValueError(f"Unsupported PTOAS launcher for build identity: {launcher}") from exc
-    selected_modules = json.loads(_run([str(interpreter), "-c", _PTOAS_PROBE, str(launcher.parent)]))
+    selected_modules = ast.literal_eval(_run([str(interpreter), "-c", _PTOAS_PROBE, str(launcher.parent)]))
     origin = selected_modules.get("ptoas")
     if not isinstance(origin, str):
         raise ValueError(f"Cannot resolve PTOAS package from {launcher}")
@@ -175,7 +215,36 @@ def _ptoas_identity(selected: str) -> Any:
         _file_digest(metadata[0])[1],
         [(str(p), native_build_id(p)) for p in natives],
         numpy_identity,
+        _startup_identity(selected_modules),
     )
+
+
+def _startup_identity(selected_modules: dict[str, Any]) -> tuple[Any, ...]:
+    """Identify files that shaped the selected interpreter before PTOAS imports."""
+    hooks = selected_modules.get("startup_hooks")
+    modules = selected_modules.get("startup_modules")
+    search_path = selected_modules.get("startup_path")
+    unresolved = selected_modules.get("startup_unresolved")
+    if (
+        not isinstance(hooks, list)
+        or not isinstance(modules, list)
+        or not isinstance(search_path, list)
+        or unresolved != []
+        or len(hooks) > 256
+        or len(modules) > 512
+        or len(search_path) > 512
+        or any(type(path) is not str for path in (*hooks, *search_path))
+    ):
+        raise ValueError("PTOAS interpreter startup evidence is unavailable")
+    loaded = []
+    for entry in modules:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 2 or any(type(v) is not str for v in entry):
+            raise ValueError(f"Invalid PTOAS startup module evidence: {entry!r}")
+        loaded.append(tuple(entry))
+    paths = {Path(path) for path in hooks}
+    paths.update(Path(path) for _, path in loaded)
+    files = [(str(path), _file_digest(path)[1]) for path in sorted(paths)]
+    return (hooks, loaded, search_path, files)
 
 
 def _numpy_wheel_identity(numpy_origin: Any, interpreter: Path) -> tuple[Any, ...]:

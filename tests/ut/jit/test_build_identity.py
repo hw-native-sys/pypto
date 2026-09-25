@@ -9,6 +9,7 @@
 
 """Build identities follow effective imports and selected dependency versions."""
 
+import ast
 import hashlib
 import json
 import os
@@ -58,6 +59,20 @@ def test_python_edit_with_preserved_size_and_mtime_changes_identity(tmp_path):
     path.write_text("value = 2\n")
     os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
     identity.python_sources.cache_clear()  # A new process starts with an empty memo.
+    assert identity.python_sources(tmp_path) != first
+
+
+@pytest.mark.parametrize("name", ["kernel.cpp.in", "kernel_config.py.in"])
+def test_bundled_template_edit_changes_identity(tmp_path, name):
+    (tmp_path / "__init__.py").write_text("pass\n")
+    template = tmp_path / "templates" / name
+    template.parent.mkdir()
+    template.write_text("template = 1\n")
+    first = identity.python_sources(tmp_path)
+    stamp = template.stat()
+    template.write_text("template = 2\n")
+    os.utime(template, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    identity.python_sources.cache_clear()
     assert identity.python_sources(tmp_path) != first
 
 
@@ -283,7 +298,37 @@ def test_ptoas_probe_uses_script_directory_before_importing_helpers(tmp_path):
         capture_output=True,
         text=True,
     )
-    assert json.loads(result.stdout)["ptoas"] == str(origin)
+    record = ast.literal_eval(result.stdout)
+    assert record["ptoas"] == str(origin)
+    assert isinstance(record["startup_hooks"], list)
+    assert isinstance(record["startup_modules"], list)
+    assert record["startup_unresolved"] == []
+
+
+def test_ptoas_probe_records_selected_sitecustomize(tmp_path):
+    hook = tmp_path / "sitecustomize.py"
+    hook.write_text("sentinel = 1\n")
+    result = subprocess.run(
+        [sys.executable, "-c", identity._PTOAS_PROBE, str(tmp_path)],
+        env={**os.environ, "PYTHONPATH": str(tmp_path)},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    record = ast.literal_eval(result.stdout)
+    assert ("sitecustomize", str(hook)) in record["startup_modules"]
+
+
+def test_unidentifiable_ptoas_startup_module_has_no_identity():
+    with pytest.raises(ValueError, match="startup evidence is unavailable"):
+        identity._startup_identity(
+            {
+                "startup_hooks": [],
+                "startup_modules": [],
+                "startup_path": [],
+                "startup_unresolved": ["dynamic_hook"],
+            }
+        )
 
 
 def test_ptoas_resolves_selected_interpreter_without_importing_compiler(tmp_path, monkeypatch):
@@ -304,12 +349,25 @@ def test_ptoas_resolves_selected_interpreter_without_importing_compiler(tmp_path
     numpy_metadata.mkdir()
     for name in ("METADATA", "WHEEL", "RECORD"):
         (numpy_metadata / name).write_text(name)
+    startup_hook = tmp_path / "selected/site-packages/startup.pth"
+    startup_hook.write_text("import sitecustomize\n")
+    startup_module = tmp_path / "selected/site-packages/sitecustomize.py"
+    startup_module.write_text("value = 1\n")
     calls = []
     monkeypatch.setattr(_toolchain, "_console_interpreter", lambda path: Path("/selected/python"))
 
     def probe(command):
         calls.append(command)
-        return json.dumps({"ptoas": str(package / "__init__.py"), "numpy": str(numpy)})
+        return repr(
+            {
+                "ptoas": str(package / "__init__.py"),
+                "numpy": str(numpy),
+                "startup_hooks": [str(startup_hook)],
+                "startup_modules": [["sitecustomize", str(startup_module)]],
+                "startup_path": [str(launcher.parent), str(package.parent)],
+                "startup_unresolved": [],
+            }
+        )
 
     monkeypatch.setattr(_toolchain, "_run", probe)
     first = identity._ptoas_identity(str(launcher))
@@ -320,6 +378,13 @@ def test_ptoas_resolves_selected_interpreter_without_importing_compiler(tmp_path
     metadata.write_text("Name: ptoas\nVersion: 0.65.dev2\n")
     assert identity._ptoas_identity(str(launcher)) != first
     metadata.write_text("Name: ptoas\nVersion: 0.65.dev1\n")
+    assert identity._ptoas_identity(str(launcher)) == first
+    startup_hook.write_text("import sitecustomize # changed\n")
+    assert identity._ptoas_identity(str(launcher)) != first
+    startup_hook.write_text("import sitecustomize\n")
+    startup_module.write_text("value = 2\n")
+    assert identity._ptoas_identity(str(launcher)) != first
+    startup_module.write_text("value = 1\n")
     assert identity._ptoas_identity(str(launcher)) == first
     core.unlink()
     with pytest.raises(ValueError, match="no native compiler module"):
