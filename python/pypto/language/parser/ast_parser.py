@@ -4325,7 +4325,6 @@ class ASTParser:
         """
         name_hint = ""
         if func_attr == "cluster":
-            dumps_kw = None
             if context_expr.args:
                 raise ParserSyntaxError(
                     f"pl.{func_attr}() does not accept positional arguments",

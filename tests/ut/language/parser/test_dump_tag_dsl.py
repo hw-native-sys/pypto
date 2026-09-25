@@ -534,7 +534,7 @@ def test_cluster_scoped_dump_roundtrip():
                     _other = pl.load(a, [0, 0], [16, 16])
 
     printed = ir.python_print(P)
-    assert 'pl.cluster(name_hint="", dumps=[a])' in printed
+    assert "pl.cluster(dumps=[a])" in printed
     ir.assert_structural_equal(P, pl.parse(printed))
 
 
