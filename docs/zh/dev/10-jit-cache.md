@@ -124,7 +124,7 @@ with_ir = decode.compile(config=RunConfig(cache_config=pypto.CacheConfig(enabled
 | Runtime | 有效源码版本、实际原生扩展 Build-ID、Python 源码及可用的 runtime/PTO-ISA 构建元数据。 |
 | PTO-ISA | runtime 的 `pto_isa.pin` 选定的版本；仅编译未命中时获取并校验 checkout。 |
 | PTOAS | 标准 wheel 启动器使用其解释器实际选中的包元数据、NumPy wheel 记录及原生编译器 Build-ID；缺少 NumPy wheel 证据时绕过持久缓存。独立 ELF 使用 Build-ID；其他启动器使用保留开发后缀的完整 `--version` 输出。 |
-| 设备及编排工具链 | 选中的编译器路径/版本、GCC 辅助程序 Build-ID、CANN 安装构建版本及链接器 Build-ID；缺少 CANN 构建版本时绕过持久缓存。 |
+| 设备及编排工具链 | 选中的编译器路径/版本、实际执行的 GCC 驱动及辅助程序 Build-ID、CANN 安装构建版本及链接器 Build-ID；无法识别编译器 wrapper 或缺少 CANN 构建版本时绕过持久缓存。 |
 
 原生文件缺少可用 Build-ID 时回退到内容哈希。Build-ID 从小型 ELF note 读取，不读取
 整个动态库。wheel PTOAS 探测不导入其编译器包。身份不可用时绕过缓存，不生成共用

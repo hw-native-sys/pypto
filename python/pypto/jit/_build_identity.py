@@ -220,10 +220,6 @@ def _compiler_identity(selected: str) -> tuple[Any, ...]:
     from ._toolchain import _driver_executed, _executable, _invocable, _run  # noqa: PLC0415
 
     invoked = _invocable(selected)
-    driver = invoked.resolve(strict=True)
-    if driver.name == "ccache":
-        output = _run([str(invoked), "-E", "-x", "c++", "-v", os.devnull])
-        driver = _driver_executed(output, invoked)
 
     # GCC selects these programs independently of its driver. Query the same
     # invocation used for compilation so wrapper and PATH selection are honored.
@@ -234,10 +230,12 @@ def _compiler_identity(selected: str) -> tuple[Any, ...]:
         path = _executable(answer)
         return (name, str(path), native_build_id(path))
 
-    with ThreadPoolExecutor(max_workers=5) as pool:
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        executed = pool.submit(_run, [str(invoked), "-E", "-x", "c++", "-v", os.devnull])
         version = pool.submit(_run, [str(invoked), "--version"])
         programs = list(pool.map(selected_program, ("cc1plus", "collect2", "as", "ld")))
         reported_version = version.result().strip()
+        driver = _driver_executed(executed.result(), invoked)
     return (str(invoked), reported_version, native_build_id(driver), programs)
 
 

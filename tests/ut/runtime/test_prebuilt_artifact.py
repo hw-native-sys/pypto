@@ -490,13 +490,14 @@ def test_ready_spec_uses_packaged_json_without_executing_python(tmp_path, fake_r
     assert _prebuilt.ready_spec(tmp_path, _spec(BuildKind.SINGLE_CHIP)) == expected
 
 
-def test_nested_ready_hint_falls_back_to_generated_lookup(tmp_path):
+@pytest.mark.parametrize("hint", [b"[" * 2000 + b"0" + b"]" * 2000, b"\xff"])
+def test_invalid_ready_hint_falls_back_to_generated_lookup(tmp_path, hint):
     store = JITArtifactStore(tmp_path / "cache", private_root=tmp_path / "private")
     key, generated = _key(), _spec()
     slot = store._slot(key, generated)
     slot.mkdir(parents=True)
     (slot / "kernel_config.py").write_text("KERNELS = []\n")
-    (slot / "kernel_config.json").write_text("[" * 2000 + "0" + "]" * 2000)
+    (slot / "kernel_config.json").write_bytes(hint)
     assert store.lookup_ready(key, generated).status is LookupStatus.MISS
 
 

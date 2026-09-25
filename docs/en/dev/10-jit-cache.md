@@ -153,7 +153,7 @@ identities; it does not add an independent expected-version or pin audit.
 | Runtime | Effective source revision, actual native extension Build-ID, runtime Python sources, and available runtime/PTO-ISA build metadata. |
 | PTO-ISA | The revision selected by the runtime's `pto_isa.pin`. Checkout acquisition and validation happen on compilation misses. |
 | PTOAS | For a standard wheel launcher: metadata from its selected interpreter's package, its selected NumPy wheel record, and the native compiler Build-ID. Missing NumPy wheel evidence bypasses persistence. Standalone ELF builds use Build-ID; other launchers use complete `--version` output, including development suffixes. |
-| Device and orchestration tools | Selected compiler paths/versions and GCC helper Build-IDs, plus CANN installation build version and linker Build-ID. Missing CANN build version bypasses persistence. |
+| Device and orchestration tools | Selected compiler paths/versions, the executed GCC driver's Build-ID, and GCC helper Build-IDs, plus CANN installation build version and linker Build-ID. Unrecognized compiler wrappers or missing CANN build versions bypass persistence. |
 
 Native files without a usable Build-ID fall back to content hashing. Build IDs
 are read from small ELF notes, not by reading the complete shared object. Wheel

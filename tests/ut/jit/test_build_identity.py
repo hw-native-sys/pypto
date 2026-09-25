@@ -12,6 +12,7 @@
 import hashlib
 import json
 import os
+import runpy
 import struct
 import subprocess
 import sys
@@ -103,6 +104,8 @@ def selected_build(tmp_path, monkeypatch):
     monkeypatch.setattr(_toolchain, "_executable", lambda path: Path(path))
 
     def run(args):
+        if args[1] == "-E":
+            return f"COLLECT_GCC={cxx}\n"
         if args[1].startswith("-print-prog-name="):
             return str(tools[args[1].partition("=")[2]])
         return "compiler version 1"
@@ -148,6 +151,53 @@ def test_selected_gcc_helper_rebuild_changes_identity(selected_build, program):
     first = _capture(selected_build)
     _elf(selected_build.tools[program], b"z" * 20)
     assert _capture(selected_build).device_toolchain != first.device_toolchain
+
+
+def test_unknown_elf_wrapper_does_not_get_a_build_identity(selected_build, monkeypatch, tmp_path):
+    wrapper = _elf(tmp_path / "untracked-wrapper", b"w" * 20)
+    real_driver = _elf(tmp_path / "real-gcc", b"g" * 20)
+
+    def run(args):
+        if args[1] == "-E":
+            return f"COLLECT_GCC={real_driver}\n"
+        if args[1].startswith("-print-prog-name="):
+            return str(selected_build.tools[args[1].partition("=")[2]])
+        return "compiler version 1"
+
+    monkeypatch.setattr(_toolchain, "_run", run)
+    with pytest.raises(ValueError, match="untracked selection inputs"):
+        identity._compiler_identity(str(wrapper))
+
+
+def test_benchmark_creates_report_directory(tmp_path, monkeypatch):
+    benchmark = runpy.run_path(str(Path(__file__).resolve().parents[2] / "benchmarks/jit_cache_latency.py"))
+    output = tmp_path / "nested/report.json"
+    sample = {
+        "identity_ms": 1,
+        "warmup_ms": 2,
+        "total_ms": 3,
+        "stats": {
+            "ready_hits": 1,
+            "misses": 0,
+            "bypasses": 0,
+            "generation_builds": 0,
+            "binary_builds": 0,
+            "invalid_entries": 0,
+            "storage_errors": 0,
+        },
+    }
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["jit_cache_latency.py", "--cache-root", str(tmp_path), "--runs", "1", "--output", str(output)],
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=json.dumps(sample), stderr=""),
+    )
+    benchmark["main"]()
+    assert json.loads(output.read_text())["summary_ms"]["total_ms"]["median"] == 3
 
 
 def test_policy_and_epoch_changes_do_not_reuse_process_memo(selected_build, monkeypatch):
