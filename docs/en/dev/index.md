@@ -94,8 +94,8 @@ The workflow checks out the event's exact head SHA and requests structured
 JSON through `codex exec --output-schema`. The schema and publishing script
 come from the commit supplying the workflow file (`github.workflow_sha`),
 independently of the PR's base revision. The publisher approves only a complete
-`pass` with zero findings, after checking the head SHA and base branch name are
-unchanged. Retargeting to a different branch at the same SHA also
+`pass` with zero findings, after checking the head SHA, base branch name, and
+reviewed merge base are unchanged. Retargeting to a different branch at the same SHA also
 invalidates the review, because the reviewed target branch has changed.
 Invalid, empty, oversized, inconsistent, or incomplete output never approves.
 The publisher does not read branch protection rules, CI results, or mergeability
@@ -103,10 +103,11 @@ to decide whether to approve. An `APPROVE` records the code-review result; it
 does not merge the PR. GitHub evaluates configured CI checks and conflicts
 separately when a merge is requested. The workflow does not require the head to
 be up to date with the base before approving.
-The review body records the examined base SHA, but the publisher does not
-invalidate approval when that branch advances during or after review. GitHub's
-configured stale-review rule may independently dismiss an approval if the
-merge base introduces new changes.
+The review body records the examined base SHA, but an ordinary advance of that
+branch does not invalidate approval when the merge base stays the same. A base
+rewrite that changes the merge base invalidates the review because it changes
+the reviewed diff. GitHub's configured stale-review rule may independently
+dismiss an approval if the merge base introduces new changes after publication.
 The publisher checks revisions again after approval and dismisses its approval
 if an update raced with publication. Replacement results first dismiss this
 workflow's previous approvals; human approvals are not modified.

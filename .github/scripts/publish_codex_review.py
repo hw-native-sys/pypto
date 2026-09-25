@@ -144,7 +144,7 @@ def summary_finding(finding: dict) -> str:
     return text
 
 
-def render_findings(repo: str, endpoint: str, head: str, base: str, findings: list) -> tuple[str, list]:
+def render_findings(repo: str, endpoint: str, head: str, merge_base: str, findings: list) -> tuple[str, list]:
     """Split findings into validated inline comments and a lossless summary fallback."""
     if not findings:
         return "", []
@@ -168,8 +168,6 @@ def render_findings(repo: str, endpoint: str, head: str, base: str, findings: li
     }
     summary = ""
     comments = []
-    merge_base = None
-    merge_base_requested = False
     for finding in findings:
         text = f"### {finding['title']}\n\n{finding['body']}"
         location = finding_location(finding)
@@ -189,25 +187,6 @@ def render_findings(repo: str, endpoint: str, head: str, base: str, findings: li
                     continue
             revision = head
             if side == "LEFT":
-                if not merge_base_requested:
-                    merge_base_requested = True
-                    try:
-                        comparison = github_api(f"repos/{repo}/compare/{base}...{head}")
-                        candidate = comparison["merge_base_commit"]["sha"]
-                        if isinstance(candidate, str) and re.fullmatch(r"[0-9a-f]{40}", candidate):
-                            merge_base = candidate
-                    except (
-                        OSError,
-                        subprocess.CalledProcessError,
-                        json.JSONDecodeError,
-                        KeyError,
-                        TypeError,
-                    ):
-                        # An optional source link must never hide the finding itself.
-                        pass
-                if merge_base is None:
-                    summary += f"\n\n{summary_finding(finding)}"
-                    continue
                 revision = merge_base
                 path = by_path.get(path, {}).get("previous_filename", path)
             url = f"https://github.com/{repo}/blob/{revision}/{quote(path, safe='/')}#L{line}"
@@ -226,13 +205,25 @@ def sensitive_path(path: str) -> bool:
     )
 
 
-def matches_revision(pr: dict, head: str, base_ref: str) -> bool:
-    """Check the PR still targets the branch and head revision that were reviewed."""
+def merge_base_sha(repo: str, base: str, head: str) -> str:
+    """Read the merge base used to construct the reviewed PR diff."""
+    if any(not re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (base, head)):
+        raise ValueError("Expected full commit SHA values")
+    comparison = github_api(f"repos/{repo}/compare/{base}...{head}")
+    candidate = comparison["merge_base_commit"]["sha"]
+    if not isinstance(candidate, str) or not re.fullmatch(r"[0-9a-f]{40}", candidate):
+        raise ValueError("GitHub compare response has an invalid merge base")
+    return candidate
+
+
+def matches_revision(pr: dict, repo: str, head: str, base_ref: str, reviewed_merge_base: str) -> bool:
+    """Check the PR still has the reviewed head, target branch, and diff base."""
     return (
         pr["state"] == "open"
         and not pr["draft"]
         and pr["head"]["sha"] == head
         and pr["base"]["ref"] == base_ref
+        and merge_base_sha(repo, pr["base"]["sha"], head) == reviewed_merge_base
     )
 
 
@@ -299,8 +290,9 @@ def publish(path: Path, repo: str, number: str, head: str, base: str, base_ref: 
     endpoint = pull_request_endpoint(repo, number)
     if any(not re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (head, base)):
         raise ValueError("Expected full commit SHA values")
+    reviewed_merge_base = merge_base_sha(repo, base, head)
     pr = github_api(endpoint)
-    if not matches_revision(pr, head, base_ref):
+    if not matches_revision(pr, repo, head, base_ref, reviewed_merge_base):
         return "Skipped obsolete or non-reviewable PR"
 
     # A bad replacement result must not leave our earlier approval in force.
@@ -312,14 +304,14 @@ def publish(path: Path, repo: str, number: str, head: str, base: str, base_ref: 
     body = f"{MARKER}\n## Codex Review\n\nReviewed `{head}` against base `{base}`.\n\n"
     body += "> Automated assessment of untrusted PR content; not a guarantee of correctness.\n\n"
     body += review["summary"]
-    findings_body, comments = render_findings(repo, endpoint, head, base, review["findings"])
+    findings_body, comments = render_findings(repo, endpoint, head, reviewed_merge_base, review["findings"])
     body += findings_body
     body += "\n\nApproval policy: passed." if approve else f"\n\nNo automatic approval: {reason}."
     if len(body.encode()) + sum(len(item["body"].encode()) for item in comments) > MAX_BYTES:
         raise ValueError("Rendered review exceeds 60000 bytes")
     # Fetch immediately before posting, then again afterwards to close the race
     # with synchronize events. The review is always attached to the examined SHA.
-    if not matches_revision(github_api(endpoint), head, base_ref):
+    if not matches_revision(github_api(endpoint), repo, head, base_ref, reviewed_merge_base):
         return "Skipped PR updated during publication"
     posted = github_api(
         f"{endpoint}/reviews",
@@ -330,7 +322,7 @@ def publish(path: Path, repo: str, number: str, head: str, base: str, base_ref: 
             **({"comments": comments} if comments else {}),
         },
     )
-    if approve and not matches_revision(github_api(endpoint), head, base_ref):
+    if approve and not matches_revision(github_api(endpoint), repo, head, base_ref, reviewed_merge_base):
         subprocess.run(
             ["gh", "api", f"{endpoint}/reviews/{posted['id']}/dismissals", "--method", "PUT", "--input", "-"],
             input=json.dumps({"message": "PR changed while Codex approval was being published"}),

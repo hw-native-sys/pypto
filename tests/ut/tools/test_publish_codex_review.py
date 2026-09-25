@@ -79,7 +79,11 @@ def api(publisher, monkeypatch):
             assert paginate
             return state["comments"]
         if "/compare/" in endpoint:
-            return {"merge_base_commit": {"sha": "e" * 40}}
+            base_sha = endpoint.split("/compare/", 1)[1].split("...", 1)[0]
+            if state.get("invalid_merge_base"):
+                return {"merge_base_commit": {"sha": "invalid"}}
+            changed = state.get("merge_base_changed") and base_sha != BASE
+            return {"merge_base_commit": {"sha": ("f" if changed else "e") * 40}}
         state["reads"] += 1
         if state.get("retarget_at") == state["reads"]:
             state["pr"]["base"]["ref"] = "release"
@@ -188,35 +192,29 @@ def test_unanchored_review_needs_no_metadata(
     assert api["posted"][0]["event"] == "COMMENT"
 
 
-@pytest.mark.parametrize("failure", ["request", "json", "missing", "invalid"])
-def test_optional_merge_base_failure_keeps_findings(
-    publisher, review_file, api, located_review, monkeypatch, failure
-):
-    """A failed optional lookup is attempted once and cannot block summary publication."""
-    finding = located_review({"path": "src/example.cpp", "line": 500, "side": "LEFT"})
-    review = json.loads(review_file.read_text())
-    review["findings"].append({**finding, "title": "Second finding"})
-    review_file.write_text(json.dumps(review))
+@pytest.mark.parametrize("failure", ["request", "json", "missing"])
+def test_merge_base_lookup_failure_blocks_publication(publisher, review_file, api, monkeypatch, failure):
+    """A failed diff-identity lookup must not publish a stale approval."""
     request = publisher.github_api
-    calls = []
 
     def fail_compare(endpoint, *args, **kwargs):
         if "/compare/" in endpoint:
-            calls.append(endpoint)
             if failure == "request":
                 raise publisher.subprocess.CalledProcessError(1, ["gh", "api"])
             if failure == "json":
                 raise json.JSONDecodeError("Invalid response", "", 0)
-            return {} if failure == "missing" else {"merge_base_commit": {"sha": "invalid"}}
+            return {}
         return request(endpoint, *args, **kwargs)
 
     monkeypatch.setattr(publisher, "github_api", fail_compare)
-    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
-    posted = api["posted"][0]
-    assert len(calls) == 1
-    assert finding["body"] in posted["body"] and "Second finding" in posted["body"]
-    assert "src/example.cpp:500 (LEFT)" in posted["body"]
-    assert "/blob/" not in posted["body"] and posted["event"] == "COMMENT"
+    expected = {
+        "request": publisher.subprocess.CalledProcessError,
+        "json": json.JSONDecodeError,
+        "missing": KeyError,
+    }[failure]
+    with pytest.raises(expected):
+        publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    assert not api["posted"]
 
 
 @pytest.mark.parametrize("endpoint_part", ["/files?", "/comments?"])
@@ -488,6 +486,28 @@ def test_base_advance_does_not_invalidate_approval(publisher, review_file, api, 
     assert api["pr"]["base"]["sha"] != BASE
     assert api["posted"][0]["event"] == "APPROVE"
     assert not api["dismissed"]
+
+
+@pytest.mark.parametrize("base_change_at", [1, 2, 3])
+def test_merge_base_change_blocks_stale_approval(publisher, review_file, api, base_change_at):
+    """Reject a base rewrite that changes the diff despite an unchanged PR head."""
+    api["base_change_at"] = base_change_at
+    api["merge_base_changed"] = True
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    if base_change_at == 3:
+        assert api["posted"][0]["event"] == "APPROVE"
+        assert len(api["dismissed"]) == 1
+        assert "/reviews/42/dismissals" in api["dismissed"][0][2]
+    else:
+        assert not api["posted"]
+
+
+def test_invalid_merge_base_fails_closed(publisher, review_file, api):
+    """Do not publish an approval from an invalid GitHub compare response."""
+    api["invalid_merge_base"] = True
+    with pytest.raises(ValueError, match="invalid merge base"):
+        publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    assert not api["posted"]
 
 
 @pytest.mark.parametrize("change_at", [2, 3])
