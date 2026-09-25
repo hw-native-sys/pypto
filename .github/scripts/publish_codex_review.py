@@ -237,7 +237,7 @@ def matches_revision(pr: dict, head: str, base: str, base_ref: str) -> bool:
     )
 
 
-def approval_blocker(repo: str, endpoint: str, pr: dict, review: dict, enabled: bool) -> str | None:
+def approval_blocker(endpoint: str, pr: dict, review: dict, enabled: bool) -> str | None:
     """Return why human review is needed, or None if all approval gates pass."""
     if not enabled:
         return "Automatic approval is disabled"
@@ -255,21 +255,6 @@ def approval_blocker(repo: str, endpoint: str, pr: dict, review: dict, enabled: 
         if key in item
     ):
         return "Automation or agent-policy changes require human review"
-    rules = github_api(f"repos/{repo}/rules/branches/{quote(pr['base']['ref'], safe='')}", paginate=True)
-    if not any(
-        rule["type"] == "pull_request"
-        and rule["parameters"].get("dismiss_stale_reviews_on_push") is True
-        and rule["parameters"].get("required_approving_review_count", 0) >= 1
-        for rule in rules
-    ):
-        return "Branch must require at least one approval and dismiss stale approvals after new commits"
-    if not any(
-        rule["type"] == "required_status_checks"
-        and rule["parameters"].get("strict_required_status_checks_policy") is True
-        and rule["parameters"].get("required_status_checks")
-        for rule in rules
-    ):
-        return "Branch must require status checks and an up-to-date head before merging"
     return None
 
 
@@ -322,7 +307,7 @@ def publish(path: Path, repo: str, number: str, head: str, base: str, base_ref: 
     # A bad replacement result must not leave our earlier approval in force.
     revoke_approvals(repo, number)
     review = load_review(path)
-    reason = approval_blocker(repo, endpoint, pr, review, enabled)
+    reason = approval_blocker(endpoint, pr, review, enabled)
     approve = reason is None
 
     body = f"{MARKER}\n## Codex Review\n\nReviewed `{head}` against base `{base}`.\n\n"

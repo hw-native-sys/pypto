@@ -53,22 +53,6 @@ def api(publisher, monkeypatch):
             "changed_files": 1,
         },
         "files": [{"filename": "src/example.cpp"}],
-        "rules": [
-            {
-                "type": "pull_request",
-                "parameters": {
-                    "dismiss_stale_reviews_on_push": True,
-                    "required_approving_review_count": 1,
-                },
-            },
-            {
-                "type": "required_status_checks",
-                "parameters": {
-                    "strict_required_status_checks_policy": True,
-                    "required_status_checks": [{"context": "unit-tests", "integration_id": 15368}],
-                },
-            },
-        ],
         "reviews": [],
         "comments": [],
         "posted": [],
@@ -79,6 +63,7 @@ def api(publisher, monkeypatch):
     def request(endpoint, payload=None, *, paginate=False):
         """Return API fixtures and inject the requested publication race."""
         if payload is not None:
+            assert endpoint.endswith("/reviews"), "Review publishing must not merge pull requests"
             state["posted"].append(payload)
             if state.get("retarget_at") == "post":
                 state["pr"]["base"]["ref"] = "release"
@@ -87,8 +72,7 @@ def api(publisher, monkeypatch):
             assert paginate
             return state["files"]
         if "/rules/" in endpoint:
-            assert paginate
-            return state["rules"]
+            raise AssertionError("Review approval must not depend on branch protection rules")
         if "/reviews?" in endpoint:
             return state["reviews"]
         if "/comments?" in endpoint:
@@ -358,8 +342,8 @@ def test_inline_size_budget(publisher, review_file, api, located_review):
     assert not api["posted"]
 
 
-def test_clean_review_approves_exact_commit(publisher, review_file, api):
-    """Bind a valid approval to exactly the reviewed head commit."""
+def test_clean_review_approves_exact_commit_without_branch_rules(publisher, review_file, api):
+    """Bind a clean review to the examined commit without reading merge rules."""
     assert publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True).startswith("Approved")
     assert api["posted"][0]["event"] == "APPROVE"
     assert api["posted"][0]["commit_id"] == HEAD
@@ -466,33 +450,12 @@ def test_policy_changes_require_human_review(publisher, review_file, api, path, 
     "gate",
     [
         "disabled",
-        "no_rules",
-        "stale_allowed",
-        "zero_approvals",
-        "missing_approval_count",
-        "no_check_rule",
-        "non_strict_checks",
-        "empty_checks",
         "truncated_files",
         "no_files",
     ],
 )
-def test_policy_gates_fail_closed(publisher, review_file, api, gate):
-    """Withhold approval when a required safety gate is absent."""
-    if gate == "no_rules":
-        api["rules"] = []
-    if gate == "stale_allowed":
-        api["rules"][0]["parameters"]["dismiss_stale_reviews_on_push"] = False
-    if gate == "zero_approvals":
-        api["rules"][0]["parameters"]["required_approving_review_count"] = 0
-    if gate == "missing_approval_count":
-        del api["rules"][0]["parameters"]["required_approving_review_count"]
-    if gate == "no_check_rule":
-        api["rules"] = api["rules"][:1]
-    if gate == "non_strict_checks":
-        api["rules"][1]["parameters"]["strict_required_status_checks_policy"] = False
-    if gate == "empty_checks":
-        api["rules"][1]["parameters"]["required_status_checks"] = []
+def test_review_gates_fail_closed(publisher, review_file, api, gate):
+    """Withhold approval when a required review input is absent."""
     if gate == "truncated_files":
         api["pr"]["changed_files"] = 2
     if gate == "no_files":
@@ -728,6 +691,13 @@ def test_invalidation_is_independent_of_review_cancellation(workflow):
     assert jobs["publish"]["concurrency"]["cancel-in-progress"] is True
     groups = [jobs[name]["concurrency"]["group"] for name in ("invalidate", "review", "publish")]
     assert len(set(groups)) == 3
+
+
+def test_review_workflow_has_no_merge_permission(workflow):
+    """Review publishing can approve but cannot write repository contents."""
+    jobs = workflow["jobs"]
+    assert jobs["publish"]["permissions"]["pull-requests"] == "write"
+    assert all(job["permissions"].get("contents") != "write" for job in jobs.values())
 
 
 if __name__ == "__main__":

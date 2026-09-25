@@ -96,14 +96,15 @@ come from the commit supplying the workflow file (`github.workflow_sha`),
 independently of the PR's base revision. The publisher approves only a complete
 `pass` with zero findings, after checking the head SHA, base SHA, and base branch
 name are unchanged. Retargeting to a different branch at the same SHA also
-invalidates the review, because that branch can have different protection rules.
+invalidates the review, because the reviewed target branch has changed.
 Invalid, empty, oversized, inconsistent, or incomplete output never approves.
-The branch must have an active rule requiring at least one approval and
-dismissing stale approvals after new commits.
-It must also require at least one status check with the strict up-to-date policy
-enabled. When the base branch advances, this merge gate requires updating the PR
-head, which dismisses its old approval and triggers fresh CI and review. Without
-both rules, the publisher posts a comment instead of approving.
+The publisher does not read branch protection rules, CI results, or mergeability
+to decide whether to approve. An `APPROVE` records the code-review result; it
+does not merge the PR. GitHub evaluates configured CI checks and conflicts
+separately when a merge is requested. The workflow does not require the head to
+be up to date with the base before approving.
+If the base advances after approval, the review remains tied to the examined
+head and base revisions; a base update alone does not trigger another review.
 The publisher checks revisions again after approval and dismisses its approval
 if an update raced with publication. Replacement results first dismiss this
 workflow's previous approvals; human approvals are not modified.
