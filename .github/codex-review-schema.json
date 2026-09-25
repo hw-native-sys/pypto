@@ -24,11 +24,44 @@
           },
           "body": {
             "type": "string"
+          },
+          "location": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "line": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "side": {
+                    "type": "string",
+                    "enum": [
+                      "LEFT",
+                      "RIGHT"
+                    ]
+                  }
+                },
+                "required": [
+                  "path",
+                  "line",
+                  "side"
+                ]
+              }
+            ]
           }
         },
         "required": [
           "title",
-          "body"
+          "body",
+          "location"
         ]
       }
     }

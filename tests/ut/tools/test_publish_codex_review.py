@@ -70,6 +70,7 @@ def api(publisher, monkeypatch):
             },
         ],
         "reviews": [],
+        "comments": [],
         "posted": [],
         "dismissed": [],
         "reads": 0,
@@ -90,6 +91,11 @@ def api(publisher, monkeypatch):
             return state["rules"]
         if "/reviews?" in endpoint:
             return state["reviews"]
+        if "/comments?" in endpoint:
+            assert paginate
+            return state["comments"]
+        if "/compare/" in endpoint:
+            return {"merge_base_commit": {"sha": "e" * 40}}
         state["reads"] += 1
         if state.get("retarget_at") == state["reads"]:
             state["pr"]["base"]["ref"] = "release"
@@ -105,6 +111,153 @@ def api(publisher, monkeypatch):
     monkeypatch.setattr(publisher, "github_api", request)
     monkeypatch.setattr(publisher.subprocess, "run", run)
     return state
+
+
+@pytest.fixture
+def located_review(review_file, api):
+    """Supply a replacement hunk with unequal old and new line numbers."""
+    api["files"] = [
+        {
+            "filename": "src/example.cpp",
+            "patch": "@@ -10,3 +20,3 @@\n context\n-old\n+new\n tail",
+        }
+    ]
+
+    def write(location, **extra):
+        finding = {"title": "[P1] Bug", "body": "This change breaks empty inputs.", "location": location}
+        finding.update(extra)
+        review_file.write_text(
+            json.dumps({"verdict": "findings", "summary": "Needs attention", "findings": [finding]})
+        )
+        return finding
+
+    return write
+
+
+@pytest.mark.parametrize("side,line", [("RIGHT", 21), ("LEFT", 11), ("RIGHT", 20)])
+def test_inline_findings(publisher, review_file, api, located_review, side, line):
+    """Anchor added, deleted and context lines to the examined commit."""
+    location = {"path": "src/example.cpp", "side": side, "line": line}
+    finding = located_review(location)
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    posted = api["posted"][0]
+    assert posted["commit_id"] == HEAD and posted["event"] == "COMMENT"
+    assert posted["comments"] == [
+        {**location, "body": f"{publisher.MARKER}\n### {finding['title']}\n\n{finding['body']}"}
+    ]
+    assert finding["body"] not in posted["body"]
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        None,
+        {},
+        "src/example.cpp:21",
+        {"path": "../secret", "line": 21, "side": "RIGHT"},
+        {"path": "/src/example.cpp", "line": 21, "side": "RIGHT"},
+        {"path": "src/example.cpp", "line": True, "side": "RIGHT"},
+        {"path": "src/example.cpp", "line": 0, "side": "RIGHT"},
+        {"path": "src/example.cpp", "line": 21, "side": "WRONG"},
+        {"path": "src/example.cpp", "line": 11, "side": "RIGHT"},
+        {"path": "src/example.cpp", "line": 500, "side": "RIGHT"},
+        {"path": "src/unchanged.cpp", "line": 21, "side": "RIGHT"},
+    ],
+)
+def test_unanchored_findings_survive(publisher, review_file, api, located_review, location):
+    """Invalid, absent and out-of-diff locations never hide actionable findings."""
+    finding = located_review(location)
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    posted = api["posted"][0]
+    assert posted["event"] == "COMMENT"
+    assert not posted.get("comments")
+    assert finding["body"] in posted["body"]
+    if isinstance(location, dict) and location.get("line") == 500:
+        assert f"/blob/{HEAD}/src/example.cpp#L500" in posted["body"]
+
+
+def test_deleted_fallback_links_merge_base_before_rename(publisher, review_file, api, located_review):
+    """LEFT coordinates refer to the merge base, not the potentially advanced base tip."""
+    located_review({"path": "src/example.cpp", "line": 500, "side": "LEFT"})
+    api["files"][0]["previous_filename"] = "src/old name.cpp"
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    assert f"/blob/{'e' * 40}/src/old%20name.cpp#L500" in api["posted"][0]["body"]
+
+
+@pytest.mark.parametrize("patch", ["", "@@ -10,3 +20,3 @@\n context\n-old", "not a patch"])
+def test_unusable_patch_falls_back(publisher, review_file, api, located_review, patch):
+    """Missing and truncated patches cannot create unverified inline comments."""
+    finding = located_review({"path": "src/example.cpp", "line": 20, "side": "RIGHT"})
+    api["files"][0]["patch"] = patch
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    assert not api["posted"][0].get("comments")
+    assert finding["body"] in api["posted"][0]["body"]
+
+
+@pytest.mark.parametrize(
+    "patch,expected",
+    [
+        ("@@ -0,0 +1,2 @@\n+a\n+b", {("RIGHT", 1), ("RIGHT", 2)}),
+        ("@@ -1 +0,0 @@\n-a\n\\ No newline at end of file", {("LEFT", 1)}),
+        (
+            "@@ -1 +1 @@\n-a\n+b\n@@ -20 +30 @@\n-c\n+d",
+            {("LEFT", 1), ("RIGHT", 1), ("LEFT", 20), ("RIGHT", 30)},
+        ),
+    ],
+)
+def test_patch_coordinates(publisher, patch, expected):
+    """Handle new/deleted files, omitted counts, multiple hunks and newline markers."""
+    assert publisher.patch_lines(patch) == expected
+
+
+@pytest.mark.parametrize(
+    "previous_head,author,duplicate",
+    [
+        (HEAD, "github-actions[bot]", True),
+        (BASE, "github-actions[bot]", False),
+        (HEAD, "human", False),
+    ],
+)
+def test_inline_rerun_deduplication(
+    publisher, review_file, api, located_review, previous_head, author, duplicate
+):
+    """Only identical workflow comments on the same commit suppress a new thread."""
+    located_review({"path": "src/example.cpp", "line": 21, "side": "RIGHT"})
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    comment = api["posted"][0]["comments"][0]
+    api["comments"] = [{**comment, "commit_id": previous_head, "user": {"login": author}}]
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    assert bool(api["posted"][1].get("comments")) is not duplicate
+
+
+def test_inline_result_skipped_after_push(publisher, review_file, api, located_review):
+    """Recheck revision after fetching anchors and comments, before publishing."""
+    located_review({"path": "src/example.cpp", "line": 21, "side": "RIGHT"})
+    api["change_at"] = 2
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    assert not api["posted"]
+
+
+def test_mixed_findings_and_batch_limit(publisher, review_file, api, located_review):
+    """A full inline batch must retain every remaining finding in the summary."""
+    finding = located_review({"path": "src/example.cpp", "line": 21, "side": "RIGHT"})
+    findings = [{**finding, "title": f"Bug {index}"} for index in range(101)]
+    findings.append({"title": "General issue", "body": "Unanchored issue", "location": None})
+    review_file.write_text(json.dumps({"verdict": "findings", "summary": "Issues", "findings": findings}))
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    posted = api["posted"][0]
+    assert len(posted["comments"]) == 100
+    assert "Bug 100" in posted["body"] and "Unanchored issue" in posted["body"]
+
+
+def test_inline_size_budget(publisher, review_file, api, located_review):
+    """Include inline comment text in the existing rendered-output byte budget."""
+    located_review({"path": "src/example.cpp", "line": 21, "side": "RIGHT"}, body="x" * 30000)
+    # The artifact is small enough to load; the rendered review exceeds this budget.
+    publisher.MAX_BYTES = review_file.stat().st_size + 1
+    with pytest.raises(ValueError, match="Rendered review"):
+        publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    assert not api["posted"]
 
 
 def test_clean_review_approves_exact_commit(publisher, review_file, api):

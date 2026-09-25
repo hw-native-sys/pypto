@@ -43,6 +43,14 @@ they are opened, reopened, updated, or marked ready for review. It uses the
 trusted workflow from the default branch, checks out the pull request head as
 untrusted input, and posts the result from a separate GitHub-hosted job.
 
+Findings with verified diff locations appear as inline review comments, which
+can be replied to and resolved independently. Findings outside the diff, without
+a location, or with an invalid location remain in the review summary. Reported
+locations outside the diff link to the reviewed head or merge-base commit.
+An identical inline comment from this workflow on the same commit is not posted
+again. Location validation does not affect the approval policy: any finding
+still prevents automatic approval.
+
 Administrators enable or disable reviews with the repository Actions variable
 `CODEX_REVIEW_ENABLED`. Set it to `true` to enable reviews; unset it or use any
 other value to disable them immediately.

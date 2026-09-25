@@ -63,15 +63,125 @@ def load_review(path: Path) -> dict:
     if not isinstance(review["findings"], list):
         raise ValueError("Review findings must be a list")
     for finding in review["findings"]:
-        if not isinstance(finding, dict) or set(finding) != {"title", "body"}:
-            raise ValueError("Each finding must contain exactly title and body")
-        if any(not isinstance(value, str) or not value.strip() for value in finding.values()):
+        # Accept older artifacts on workflow reruns; new output includes location.
+        if not isinstance(finding, dict) or set(finding) not in (
+            {"title", "body"},
+            {"title", "body", "location"},
+        ):
+            raise ValueError("Each finding must contain title, body, and optional location")
+        if any(not isinstance(finding[key], str) or not finding[key].strip() for key in ("title", "body")):
             raise ValueError("Finding title and body must be non-empty strings")
     if (review["verdict"] == "pass" and review["findings"]) or (
         review["verdict"] == "findings" and not review["findings"]
     ):
         raise ValueError("Review verdict contradicts findings")
     return review
+
+
+def finding_location(finding: dict) -> dict | None:
+    """Treat invalid model locations as unanchored findings, never discard their text."""
+    location = finding.get("location")
+    if not isinstance(location, dict) or set(location) != {"path", "line", "side"}:
+        return None
+    path = location["path"]
+    if (
+        not isinstance(path, str)
+        or not path
+        or path.startswith("/")
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+        or any(ord(char) < 32 for char in path)
+        or type(location["line"]) is not int
+        or location["line"] <= 0
+        or location["side"] not in ("LEFT", "RIGHT")
+    ):
+        return None
+    return location
+
+
+def patch_lines(patch: str) -> set[tuple[str, int]]:
+    """Extract side-specific anchors, rejecting incomplete or malformed hunks."""
+    anchors: set[tuple[str, int]] = set()
+    old = new = old_left = new_left = 0
+    active = False
+    for text in patch.splitlines():
+        header = re.fullmatch(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@.*", text)
+        if header:
+            if old_left or new_left:
+                return set()
+            old_start, old_count, new_start, new_count = header.groups()
+            old, new = int(old_start), int(new_start)
+            old_left = int(old_count) if old_count is not None else 1
+            new_left = int(new_count) if new_count is not None else 1
+            active = True
+            continue
+        if text == "\\ No newline at end of file":
+            continue
+        if not active or not text or text[0] not in " +-":
+            return set()
+        if text[0] in " -":
+            if old_left <= 0:
+                return set()
+            # GitHub uses RIGHT for context, LEFT for deleted lines.
+            if text[0] == "-":
+                anchors.add(("LEFT", old))
+            old += 1
+            old_left -= 1
+        if text[0] in " +":
+            if new_left <= 0:
+                return set()
+            anchors.add(("RIGHT", new))
+            new += 1
+            new_left -= 1
+    return set() if old_left or new_left else anchors
+
+
+def render_findings(repo: str, endpoint: str, head: str, base: str, findings: list) -> tuple[str, list]:
+    """Split findings into validated inline comments and a lossless summary fallback."""
+    if not findings:
+        return "", []
+    files = github_api(f"{endpoint}/files?per_page=100", paginate=True)
+    by_path = {item["filename"]: item for item in files}
+    anchors = {path: patch_lines(item.get("patch", "")) for path, item in by_path.items()}
+    previous = github_api(f"{endpoint}/comments?per_page=100", paginate=True)
+    seen = {
+        (item["path"], item.get("line"), item.get("side"), item["body"])
+        for item in previous
+        if item["user"]["login"] == "github-actions[bot]"
+        and item.get("commit_id") == head
+        and (item.get("body") or "").startswith(MARKER)
+    }
+    summary = ""
+    comments = []
+    merge_base = None
+    for finding in findings:
+        text = f"### {finding['title']}\n\n{finding['body']}"
+        location = finding_location(finding)
+        if location:
+            path, line, side = location["path"], location["line"], location["side"]
+            body = f"{MARKER}\n{text}"
+            key = (path, line, side, body)
+            if (side, line) in anchors.get(path, set()):
+                if key in seen:
+                    summary += f"\n\n{text}\n\nAn identical inline comment already exists for this commit."
+                    continue
+                # Keep oversized batches in the summary rather than lose findings.
+                if len(comments) < 100:
+                    comments.append({"path": path, "line": line, "side": side, "body": body})
+                    seen.add(key)
+                    continue
+            revision = head
+            if side == "LEFT":
+                if merge_base is None:
+                    comparison = github_api(f"repos/{repo}/compare/{base}...{head}")
+                    merge_base = comparison["merge_base_commit"]["sha"]
+                revision = merge_base
+                path = by_path.get(path, {}).get("previous_filename", path)
+            url = f"https://github.com/{repo}/blob/{revision}/{quote(path, safe='/')}#L{line}"
+            text += f"\n\n[Reported code location]({url}) (not published inline)."
+        summary += f"\n\n{text}"
+    if comments:
+        summary = f"\n\n{len(comments)} finding(s) posted as inline comments." + summary
+    return summary, comments
 
 
 def sensitive_path(path: str) -> bool:
@@ -184,10 +294,10 @@ def publish(path: Path, repo: str, number: str, head: str, base: str, base_ref: 
     body = f"{MARKER}\n## Codex Review\n\nReviewed `{head}` against base `{base}`.\n\n"
     body += "> Automated assessment of untrusted PR content; not a guarantee of correctness.\n\n"
     body += review["summary"]
-    for finding in review["findings"]:
-        body += f"\n\n### {finding['title']}\n\n{finding['body']}"
+    findings_body, comments = render_findings(repo, endpoint, head, base, review["findings"])
+    body += findings_body
     body += "\n\nApproval policy: passed." if approve else f"\n\nNo automatic approval: {reason}."
-    if len(body.encode()) > MAX_BYTES:
+    if len(body.encode()) + sum(len(item["body"].encode()) for item in comments) > MAX_BYTES:
         raise ValueError("Rendered review exceeds 60000 bytes")
     # Fetch immediately before posting, then again afterwards to close the race
     # with synchronize events. The review is always attached to the examined SHA.
@@ -199,6 +309,7 @@ def publish(path: Path, repo: str, number: str, head: str, base: str, base_ref: 
             "commit_id": head,
             "event": "APPROVE" if approve else "COMMENT",
             "body": body,
+            **({"comments": comments} if comments else {}),
         },
     )
     if approve and not matches_revision(github_api(endpoint), head, base, base_ref):
