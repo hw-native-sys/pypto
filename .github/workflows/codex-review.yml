@@ -348,6 +348,8 @@ jobs:
 
   publish:
     needs: review
+    # Override implicit success(): ordinary events skip the invalidate ancestor.
+    if: ${{ !cancelled() && needs.review.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     concurrency:

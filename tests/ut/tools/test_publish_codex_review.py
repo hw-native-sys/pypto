@@ -371,11 +371,11 @@ def workflow():
     return yaml.safe_load(path.read_text())
 
 
-def workflow_expression(expression, context, *, cancelled=False):
+def workflow_expression(expression, context, *, cancelled=False, success=True):
     """Evaluate the boolean subset used by this workflow against event fixtures."""
 
     def evaluate(node):
-        """Interpret only context reads, boolean comparisons, and cancellation."""
+        """Interpret context reads, boolean comparisons, and supported status checks."""
         if isinstance(node, ast.Constant):
             return node.value
         if isinstance(node, ast.Name):
@@ -385,9 +385,9 @@ def workflow_expression(expression, context, *, cancelled=False):
             assert isinstance(value, dict)
             return value.get(node.attr, {})
         if isinstance(node, ast.Call):
-            assert isinstance(node.func, ast.Name) and node.func.id == "cancelled"
+            assert isinstance(node.func, ast.Name) and node.func.id in {"cancelled", "success"}
             assert not node.args and not node.keywords
-            return cancelled
+            return cancelled if node.func.id == "cancelled" else success
         if isinstance(node, ast.BoolOp):
             values = (bool(evaluate(value)) for value in node.values)
             return all(values) if isinstance(node.op, ast.And) else any(values)
@@ -402,9 +402,13 @@ def workflow_expression(expression, context, *, cancelled=False):
             return left != right
         raise AssertionError(f"Unsupported workflow expression: {ast.dump(node)}")
 
+    expression = expression.removeprefix("${{").removesuffix("}}")
     expression = expression.replace("&&", "and").replace("||", "or").replace("== false", "== False")
     expression = re.sub(r"!(?!=)", "not ", expression)
-    return evaluate(ast.parse(expression.strip(), mode="eval").body)
+    tree = ast.parse(expression.strip(), mode="eval")
+    # Actions adds success() unless the expression contains a status function.
+    has_status_function = any(isinstance(node, ast.Call) for node in ast.walk(tree))
+    return (has_status_function or success) and evaluate(tree.body)
 
 
 @pytest.mark.parametrize(
@@ -444,6 +448,24 @@ def test_workflow_retarget_gates(
     assert workflow["jobs"]["review"]["needs"] == "invalidate"
     assert bool(workflow_expression(workflow["jobs"]["review"]["if"], context)) == reviews
     assert not workflow_expression(workflow["jobs"]["review"]["if"], context, cancelled=True)
+
+
+@pytest.mark.parametrize("invalidation", ["skipped", "success"])
+@pytest.mark.parametrize("review", ["success", "failure", "skipped", "cancelled"])
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_publish_requires_successful_review_after_invalidation(workflow, invalidation, review, cancelled):
+    """A skipped ancestor must not suppress publishing a successful review."""
+    publish = workflow["jobs"]["publish"]
+    assert publish["needs"] == "review"
+    context = {"needs": {"review": {"result": review}}}
+    assert bool(
+        workflow_expression(
+            publish.get("if", "success()"),
+            context,
+            cancelled=cancelled,
+            success=invalidation == review == "success" and not cancelled,
+        )
+    ) == (review == "success" and not cancelled)
 
 
 def test_invalidation_is_independent_of_review_cancellation(workflow):
