@@ -150,10 +150,10 @@ identities; it does not add an independent expected-version or pin audit.
 | Component | Identity evidence |
 | --------- | ----------------- |
 | PyPTO | Package Python source contents, the actually imported native extension's full GNU ELF Build-ID, and Python version/ABI. |
-| Runtime | Effective source revision, actual native extension Build-ID, runtime Python sources, and available runtime/PTO-ISA build metadata. |
+| Runtime | A clean source checkout revision or installed build revision, actual native extension Build-ID, runtime Python sources, and available runtime/PTO-ISA build metadata. A dirty source checkout bypasses persistence. |
 | PTO-ISA | The revision selected by the runtime's `pto_isa.pin`. Checkout acquisition and validation happen on compilation misses. |
 | PTOAS | For a standard wheel launcher: metadata from its selected interpreter's package, its selected NumPy wheel record, and the native compiler Build-ID. Missing NumPy wheel evidence bypasses persistence. Standalone ELF builds use Build-ID; other launchers use complete `--version` output, including development suffixes. |
-| Device and orchestration tools | Selected compiler paths/versions, the executed GCC driver's Build-ID, and GCC helper Build-IDs, plus CANN installation build version and linker Build-ID. Unrecognized compiler wrappers or missing CANN build versions bypass persistence. |
+| Device and orchestration tools | Selected compiler paths/versions, the invoked executable's and executed GCC driver's Build-IDs, and GCC helper Build-IDs, plus CANN installation build version and linker Build-ID. Unrecognized compiler wrappers or missing CANN build versions bypass persistence. |
 
 Native files without a usable Build-ID fall back to content hashing. Build IDs
 are read from small ELF notes, not by reading the complete shared object. Wheel
@@ -169,10 +169,11 @@ with an editable installation's native extension. Distribution metadata alone
 never identifies the imported PyPTO compiler.
 
 This policy trusts published native build/version identifiers. It does not scan
-system headers, CPython's standard library, transitive dynamic libraries, or
-uncommitted runtime C++ source changes. After patching those inputs without
-changing their published identity, set a new `PYPTO_CACHE_EPOCH` value or clear
-the cache. Installed files must remain immutable within a process; restart after
+system headers, CPython's standard library, or transitive dynamic libraries.
+Source runtime checkouts must have no tracked or untracked Git changes. After
+patching installed inputs without changing their published identity, set a new
+`PYPTO_CACHE_EPOCH` value or clear the cache. Installed files must remain
+immutable within a process; restart after
 replacing them. Application extra sources are still refreshed on every request.
 Effective selection inputs, including paths and environment overrides, remain
 part of the key, so moving an installation can cause a miss.

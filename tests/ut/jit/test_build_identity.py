@@ -169,6 +169,53 @@ def test_unknown_elf_wrapper_does_not_get_a_build_identity(selected_build, monke
         identity._compiler_identity(str(wrapper))
 
 
+def test_accepted_wrapper_rebuild_changes_compiler_identity(selected_build, tmp_path):
+    wrapper = _elf(tmp_path / "ccache", b"w" * 20)
+    first = identity._compiler_identity(str(wrapper))
+    _elf(wrapper, b"v" * 20)
+    assert identity._compiler_identity(str(wrapper)) != first
+
+
+def test_dirty_runtime_checkout_has_no_build_identity(selected_build, monkeypatch):
+    root = selected_build.root
+    header = root / "runtime.h"
+    header.write_text("original\n")
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "pto_isa.pin", "runtime.h"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=PyPTO",
+            "-c",
+            "user.email=pypto@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
+    compiler_run = _toolchain._run
+
+    def run(args):
+        if args[0] == "git":
+            result = subprocess.run(args, check=True, capture_output=True, text=True)
+            return result.stdout + result.stderr
+        return compiler_run(args)
+
+    monkeypatch.setattr(_toolchain, "_run", run)
+    assert _capture(selected_build).usable
+    header.write_text("edited\n")
+    with pytest.raises(ValueError, match="uncommitted changes"):
+        _capture(selected_build)
+    header.write_text("original\n")
+    (root / "new_helper.py").write_text("pass\n")
+    with pytest.raises(ValueError, match="uncommitted changes"):
+        _capture(selected_build)
+
+
 def test_benchmark_creates_report_directory(tmp_path, monkeypatch):
     benchmark = runpy.run_path(str(Path(__file__).resolve().parents[2] / "benchmarks/jit_cache_latency.py"))
     output = tmp_path / "nested/report.json"

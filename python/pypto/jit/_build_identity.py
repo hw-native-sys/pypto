@@ -238,7 +238,10 @@ def _compiler_identity(selected: str) -> tuple[Any, ...]:
         programs = list(pool.map(selected_program, ("cc1plus", "collect2", "as", "ld")))
         reported_version = version.result().strip()
         driver = _driver_executed(executed.result(), invoked)
-    return (str(invoked), reported_version, native_build_id(driver), programs)
+    invoked_native = invoked.resolve(strict=True)
+    invoked_id = native_build_id(invoked_native)
+    driver_id = invoked_id if driver == invoked_native else native_build_id(driver)
+    return (str(invoked), reported_version, invoked_id, driver_id, programs)
 
 
 def _local_builds(
@@ -258,6 +261,9 @@ def _local_builds(
     # wheels ship those sources under _assets and record their build revision.
     if (root / ".git").exists():
         revision = _run(["git", "-C", str(root), "rev-parse", "HEAD"]).strip()
+        dirty = _run(["git", "-C", str(root), "status", "--porcelain=v1", "--untracked-files=all"])
+        if dirty.strip():
+            raise ValueError(f"Runtime source checkout has uncommitted changes: {root}")
     if not revision:
         raise ValueError(f"Runtime source build revision is unavailable: {root}")
     metadata_path = root / "build/lib/pto_isa_build.json"
