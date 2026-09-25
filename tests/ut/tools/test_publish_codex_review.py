@@ -85,6 +85,8 @@ def api(publisher, monkeypatch):
             state["pr"]["base"]["ref"] = "release"
         if state.get("change_at") == state["reads"]:
             state["pr"]["head"]["sha"] = "c" * 40
+        if state.get("base_change_at") == state["reads"]:
+            state["pr"]["base"]["sha"] = "d" * 40
         return json.loads(json.dumps(state["pr"]))
 
     def run(command, **kwargs):
@@ -465,10 +467,10 @@ def test_review_gates_fail_closed(publisher, review_file, api, gate):
     assert api["posted"][0]["event"] == "COMMENT"
 
 
-@pytest.mark.parametrize("change", ["head", "base", "draft", "closed"])
+@pytest.mark.parametrize("change", ["head", "draft", "closed"])
 def test_obsolete_or_closed_pr_skipped(publisher, review_file, api, change):
     """Skip artifacts whose PR state no longer matches the review event."""
-    if change in {"head", "base"}:
+    if change == "head":
         api["pr"][change]["sha"] = "d" * 40
     elif change == "draft":
         api["pr"]["draft"] = True
@@ -476,6 +478,16 @@ def test_obsolete_or_closed_pr_skipped(publisher, review_file, api, change):
         api["pr"]["state"] = "closed"
     publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
     assert not api["posted"]
+
+
+@pytest.mark.parametrize("base_change_at", [1, 2, 3])
+def test_base_advance_does_not_invalidate_approval(publisher, review_file, api, base_change_at):
+    """A base-branch commit must not invalidate a review of the same PR head."""
+    api["base_change_at"] = base_change_at
+    assert publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True).startswith("Approved")
+    assert api["pr"]["base"]["sha"] != BASE
+    assert api["posted"][0]["event"] == "APPROVE"
+    assert not api["dismissed"]
 
 
 @pytest.mark.parametrize("change_at", [2, 3])

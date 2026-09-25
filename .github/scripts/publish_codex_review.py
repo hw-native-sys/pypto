@@ -226,13 +226,12 @@ def sensitive_path(path: str) -> bool:
     )
 
 
-def matches_revision(pr: dict, head: str, base: str, base_ref: str) -> bool:
-    """Check the PR still targets the branch and revision pair that were reviewed."""
+def matches_revision(pr: dict, head: str, base_ref: str) -> bool:
+    """Check the PR still targets the branch and head revision that were reviewed."""
     return (
         pr["state"] == "open"
         and not pr["draft"]
         and pr["head"]["sha"] == head
-        and pr["base"]["sha"] == base
         and pr["base"]["ref"] == base_ref
     )
 
@@ -301,7 +300,7 @@ def publish(path: Path, repo: str, number: str, head: str, base: str, base_ref: 
     if any(not re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (head, base)):
         raise ValueError("Expected full commit SHA values")
     pr = github_api(endpoint)
-    if not matches_revision(pr, head, base, base_ref):
+    if not matches_revision(pr, head, base_ref):
         return "Skipped obsolete or non-reviewable PR"
 
     # A bad replacement result must not leave our earlier approval in force.
@@ -320,7 +319,7 @@ def publish(path: Path, repo: str, number: str, head: str, base: str, base_ref: 
         raise ValueError("Rendered review exceeds 60000 bytes")
     # Fetch immediately before posting, then again afterwards to close the race
     # with synchronize events. The review is always attached to the examined SHA.
-    if not matches_revision(github_api(endpoint), head, base, base_ref):
+    if not matches_revision(github_api(endpoint), head, base_ref):
         return "Skipped PR updated during publication"
     posted = github_api(
         f"{endpoint}/reviews",
@@ -331,7 +330,7 @@ def publish(path: Path, repo: str, number: str, head: str, base: str, base_ref: 
             **({"comments": comments} if comments else {}),
         },
     )
-    if approve and not matches_revision(github_api(endpoint), head, base, base_ref):
+    if approve and not matches_revision(github_api(endpoint), head, base_ref):
         subprocess.run(
             ["gh", "api", f"{endpoint}/reviews/{posted['id']}/dismissals", "--method", "PUT", "--input", "-"],
             input=json.dumps({"message": "PR changed while Codex approval was being published"}),
