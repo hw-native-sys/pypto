@@ -144,8 +144,6 @@ print(json.dumps({
 
 
 def _ptoas_identity(selected: str) -> Any:
-    from pypto.backend._ptoas_locate import check_ptoas_version  # noqa: PLC0415
-
     from ._toolchain import _console_interpreter, _run  # noqa: PLC0415
 
     launcher = Path(selected).absolute()
@@ -154,10 +152,8 @@ def _ptoas_identity(selected: str) -> Any:
             return (str(launcher.resolve()), native_build_id(launcher))
     try:
         interpreter = _console_interpreter(launcher)
-    except ValueError:
-        # Non-wheel release launchers retain the complete reported version,
-        # including development suffixes. Unknown layouts need the slow probe.
-        return (str(launcher.resolve()), check_ptoas_version(selected))
+    except ValueError as exc:
+        raise ValueError(f"Unsupported PTOAS launcher for build identity: {launcher}") from exc
     selected_modules = json.loads(_run([str(interpreter), "-c", _PTOAS_PROBE, str(launcher.parent)]))
     origin = selected_modules.get("ptoas")
     if not isinstance(origin, str):
@@ -168,10 +164,10 @@ def _ptoas_identity(selected: str) -> Any:
     numpy_identity = _numpy_wheel_identity(selected_modules.get("numpy"), interpreter)
     natives = sorted(package.glob("_core*.so"))
     if not natives:
-        return (str(launcher.resolve()), check_ptoas_version(selected), numpy_identity)
+        raise ValueError(f"PTOAS wheel has no native compiler module: {package}")
     metadata = sorted(package.parent.glob("ptoas-*.dist-info/METADATA"))
     if len(metadata) != 1:
-        return (str(launcher.resolve()), check_ptoas_version(selected), numpy_identity)
+        raise ValueError(f"PTOAS wheel metadata is unavailable or ambiguous: {package}")
     return (
         str(launcher),
         _file_digest(launcher)[1],

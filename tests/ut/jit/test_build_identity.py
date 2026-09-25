@@ -321,6 +321,20 @@ def test_ptoas_resolves_selected_interpreter_without_importing_compiler(tmp_path
     assert identity._ptoas_identity(str(launcher)) != first
     metadata.write_text("Name: ptoas\nVersion: 0.65.dev1\n")
     assert identity._ptoas_identity(str(launcher)) == first
+    core.unlink()
+    with pytest.raises(ValueError, match="no native compiler module"):
+        identity._ptoas_identity(str(launcher))
+    _elf(core, b"a" * 20)
+    metadata.unlink()
+    with pytest.raises(ValueError, match="metadata is unavailable or ambiguous"):
+        identity._ptoas_identity(str(launcher))
+    metadata.write_text("Name: ptoas\nVersion: 0.65.dev1\n")
+    second_metadata = package.parent / "ptoas-0.66.dist-info/METADATA"
+    second_metadata.parent.mkdir()
+    second_metadata.write_text("Name: ptoas\nVersion: 0.66\n")
+    with pytest.raises(ValueError, match="metadata is unavailable or ambiguous"):
+        identity._ptoas_identity(str(launcher))
+    second_metadata.unlink()
     (numpy_metadata / "RECORD").write_text("new NumPy wheel build")
     assert identity._ptoas_identity(str(launcher)) != first
     (numpy_metadata / "RECORD").unlink()
@@ -328,6 +342,18 @@ def test_ptoas_resolves_selected_interpreter_without_importing_compiler(tmp_path
         identity._ptoas_identity(str(launcher))
     (package / "_online").mkdir()
     with pytest.raises(ValueError, match="online build has no stable published identity"):
+        identity._ptoas_identity(str(launcher))
+
+
+def test_unknown_ptoas_launcher_has_no_build_identity(tmp_path, monkeypatch):
+    launcher = tmp_path / "ptoas-wrapper"
+    launcher.write_text('#!/bin/sh\nexec ptoas "$@"\n')
+
+    def reject(path):
+        raise ValueError(f"Unknown launcher: {path}")
+
+    monkeypatch.setattr(_toolchain, "_console_interpreter", reject)
+    with pytest.raises(ValueError, match="Unsupported PTOAS launcher for build identity"):
         identity._ptoas_identity(str(launcher))
 
 

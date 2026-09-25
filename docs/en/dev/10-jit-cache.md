@@ -152,7 +152,7 @@ identities; it does not add an independent expected-version or pin audit.
 | PyPTO | Package Python source contents, the actually imported native extension's full GNU ELF Build-ID, and Python version/ABI. |
 | Runtime | A clean source checkout revision or installed build revision, actual native extension Build-ID, runtime Python sources, and available runtime/PTO-ISA build metadata. A dirty source checkout bypasses persistence. |
 | PTO-ISA | The revision selected by the runtime's `pto_isa.pin`. Checkout acquisition and validation happen on compilation misses. |
-| PTOAS | For a standard wheel launcher: metadata from its selected interpreter's package, its selected NumPy wheel record, and the native compiler Build-ID. Missing NumPy wheel evidence bypasses persistence. Standalone ELF builds use Build-ID; other launchers use complete `--version` output, including development suffixes. |
+| PTOAS | For a standard wheel launcher: metadata from its selected interpreter's package, its selected NumPy wheel record, and the native compiler Build-ID. Missing wheel evidence or unsupported launchers bypass persistence. Standalone ELF builds use Build-ID. |
 | Device and orchestration tools | Selected compiler paths/versions, the invoked executable's and executed GCC driver's Build-IDs, and GCC helper Build-IDs, plus CANN installation build version and linker Build-ID. Unrecognized compiler wrappers or missing CANN build versions bypass persistence. |
 
 Native files without a usable Build-ID fall back to content hashing. Build IDs
