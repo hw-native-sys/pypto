@@ -11,6 +11,7 @@
 
 from pathlib import Path
 
+import pypto
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir, passes
@@ -212,6 +213,147 @@ def test_automatic_views_compile_without_new_allocations_or_data_copies(
         str(source), str(output), [f"--pto-arch={arch}", f"--pto-level={'level3' if addressed else 'level2'}"]
     )
     assert "TRESHAPE(" in output.read_text()
+
+
+_WINDOW_PROGRAMS = """
+@pl.program
+class StaticWindow:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64, 64], pl.FP32], out: pl.Out[pl.Tensor[[32, 32], pl.FP32]]
+               ) -> pl.Tensor[[32, 32], pl.FP32]:
+        whole = pl.load(x, [0, 0], [64, 64])
+        window = pl.tile.slice(whole, [16, 32], [16, 32])
+        doubled = pl.add(window, window)
+        canvas = pl.tile.full([32, 32], dtype=pl.FP32, value=0.0)
+        placed = pl.tile.assemble(canvas, doubled, [16, 0])
+        result = pl.store(placed, [0, 0], out)
+        return result
+
+@pl.program
+class RuntimeWindow:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64, 64], pl.FP32], row: pl.Scalar[pl.INDEX],
+               out: pl.Out[pl.Tensor[[16, 64], pl.FP32]]) -> pl.Tensor[[16, 64], pl.FP32]:
+        whole = pl.load(x, [0, 0], [64, 64])
+        window = pl.tile.slice(whole, [16, 64], [row, 0])
+        doubled = pl.add(window, window)
+        result = pl.store(doubled, [0, 0], out)
+        return result
+
+@pl.program
+class RuntimeValid:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[16, 64], pl.FP32], cols: pl.Scalar[pl.INDEX],
+               out: pl.Out[pl.Tensor[[16, 64], pl.FP32]]) -> pl.Tensor[[16, 64], pl.FP32]:
+        loaded: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(
+            x, [0, 0], [16, 64], [16, cols], target_memory=pl.MemorySpace.Vec)
+        doubled = pl.add(loaded, loaded)
+        result = pl.store(doubled, [0, 0], out)
+        return result
+
+@pl.program
+class NarrowedValid:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[16, 64], pl.FP32], cols: pl.Scalar[pl.INDEX],
+               out: pl.Out[pl.Tensor[[16, 64], pl.FP32]]) -> pl.Tensor[[16, 64], pl.FP32]:
+        loaded = pl.load(x, [0, 0], [16, 64])
+        narrowed = pl.tile.set_validshape(loaded, 16, cols)
+        doubled = pl.add(narrowed, narrowed)
+        result = pl.store(doubled, [0, 0], out)
+        return result
+"""
+
+
+def _window_program(name: str) -> ir.Program:
+    source = _WINDOW_PROGRAMS.split("@pl.program")
+    (text,) = [block for block in source if f"class {name}:" in block]
+    return pl.parse_program("@pl.program" + text)
+
+
+def _buffer_type(call: ir.Call) -> ir.BufferType:
+    assert isinstance(call.type, ir.BufferType)
+    return call.type
+
+
+def _lower_default(program: ir.Program, planner: passes.MemoryPlanner) -> ir.Program:
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=True):
+        return _verify_round_trip(PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program))
+
+
+def _compile(tmp_path: Path, program: ir.Program, backend: BackendType, addressed: bool) -> str:
+    text = codegen.PTOCodegen().generate(program, emit_tile_addr=False, emit_source_loc=False)
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    source, output = tmp_path / "window.pto", tmp_path / "window.cpp"
+    source.write_text(text)
+    arch = "a2" if backend == BackendType.Ascend910B else "a5"
+    _run_ptoas(
+        str(source), str(output), [f"--pto-arch={arch}", f"--pto-level={'level3' if addressed else 'level2'}"]
+    )
+    return text
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("planner", _PLANNERS)
+def test_slice_and_assemble_become_use_site_windows(
+    tmp_path: Path, ascend_backend: BackendType, planner: passes.MemoryPlanner
+) -> None:
+    program = _window_program("StaticWindow")
+    addressed = planner != passes.MemoryPlanner.PTOAS
+    if planner == passes.MemoryPlanner.DSA_RP:
+        # DSA_RP places the sum over part of the live window's source; the
+        # verifier cannot prove that partial overlap safe and fails closed.
+        with pytest.raises(pypto.Error, match="partially overlapping"):
+            _lower_default(program, planner)
+        return
+    lowered = _lower_default(program, planner)
+    windows = _calls(lowered, "buffer.subview")
+    # Slice window and assemble window, each with an explicit valid clause.
+    typed = [call for call in windows if _buffer_type(call).dtype == DataType.FP32]
+    assert len(typed) == 2 and all(len(call.args) == 3 for call in typed)
+    assert len(_calls(lowered, "buffer.copy")) == 1
+    text = _compile(tmp_path, lowered, ascend_backend, addressed)
+    assert "valid [" in text and "pto.tmov ins(" in text
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+def test_runtime_slice_offset_stays_an_operand_of_its_window(
+    tmp_path: Path, ascend_backend: BackendType
+) -> None:
+    lowered = _lower_default(_window_program("RuntimeWindow"), passes.MemoryPlanner.PTOAS)
+    (window,) = [
+        call for call in _calls(lowered, "buffer.subview") if _buffer_type(call).dtype == DataType.FP32
+    ]
+    offsets = window.args[1]
+    assert isinstance(offsets, ir.MakeTuple) and not isinstance(offsets.elements[0], ir.ConstInt)
+    _compile(tmp_path, lowered, ascend_backend, addressed=False)
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+def test_runtime_window_overlapping_its_planned_destination_fails_closed(
+    planner: passes.MemoryPlanner,
+) -> None:
+    # The planner reuses the parent's storage for the sum; a runtime window
+    # offset cannot prove that range disjoint from the source window.
+    with pytest.raises(pypto.Error, match="partially overlapping"):
+        _lower_default(_window_program("RuntimeWindow"), planner)
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("planner", _PLANNERS)
+# NarrowedValid shares one handle: the load states its full extents, then
+# set_validshape narrows them, then the sum states its own.
+@pytest.mark.parametrize("name,updates", [("RuntimeValid", 2), ("NarrowedValid", 3)])
+def test_runtime_valid_extents_update_the_handle_metadata(
+    tmp_path: Path, ascend_backend: BackendType, planner: passes.MemoryPlanner, name: str, updates: int
+) -> None:
+    lowered = _lower_default(_window_program(name), planner)
+    assert len(_calls(lowered, "buffer.set_validshape")) == updates
+    dynamic = [call for call in _calls(lowered, "buffer.alloc") if -1 in list(_buffer_type(call).valid_shape)]
+    extents = [call.args[0] for call in dynamic]
+    assert extents and all(isinstance(value, ir.MakeTuple) and len(value.elements) == 2 for value in extents)
+    text = _compile(tmp_path, lowered, ascend_backend, planner != passes.MemoryPlanner.PTOAS)
+    assert "v_row=?, v_col=?" in text and text.count("pto.set_validshape") == updates
 
 
 if __name__ == "__main__":

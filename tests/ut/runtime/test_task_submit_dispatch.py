@@ -27,6 +27,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
+from pypto import ir, passes
 from pypto.pypto_core.passes import MemoryPlanner
 from pypto.runtime import execute_artifact
 from pypto.runtime.runner import DfxOptions, RunConfig
@@ -58,9 +59,12 @@ def _proc(returncode, stdout="", stderr=""):
 
 
 def _planner_case():
+    span = ir.Span.unknown()
+    kernel = ir.Function("kernel", [], [], ir.ReturnStmt([], span), span, ir.FunctionType.InCore)
+    program = ir.Program([kernel], "PlannerCase", span)
     return SimpleNamespace(
         get_name=lambda: "planner_case",
-        get_program=lambda: object(),
+        get_program=lambda: program,
         get_strategy=lambda: None,
         get_backend_type=lambda: test_runner.BackendType.Ascend910B,
         get_memory_planner=lambda: None,
@@ -69,7 +73,13 @@ def _planner_case():
     )
 
 
-def _write_minimal_compile_output(_program, *, output_dir, **_kwargs):
+def _write_minimal_compile_output(program, *, output_dir, **_kwargs):
+    context = passes.PassContext.current()
+    assert context is not None and context.get_memory_planner() == MemoryPlanner.DSA_RP
+    assert context.get_enable_buffer_ir()
+    # Exercise the actual final-pass callback consumed by the worker's receipt
+    # check, even though this test does not invoke a native compiler or device.
+    passes.lower_tile_to_buffer()(program)
     work_dir = Path(output_dir)
     (work_dir / "kernels").mkdir(parents=True)
     (work_dir / "kernels" / "kernel.cpp").touch()
@@ -114,8 +124,8 @@ def test_system_test_cache_key_separates_memory_planners():
         get_memory_planner=lambda: None,
         config=RunConfig(memory_planner=None),
     )
-    assert test_runner._cache_key(case, "a2a3", MemoryPlanner.PYPTO).endswith("@pypto")
-    assert test_runner._cache_key(case, "a2a3", MemoryPlanner.DSA_RP).endswith("@dsa_rp")
+    assert test_runner._cache_key(case, "a2a3", MemoryPlanner.PYPTO).endswith("@pypto@buffer_ir")
+    assert test_runner._cache_key(case, "a2a3", MemoryPlanner.DSA_RP).endswith("@dsa_rp@buffer_ir")
 
 
 def test_precompile_forwards_session_memory_planner(tmp_path):
@@ -136,7 +146,11 @@ def test_precompile_forwards_session_memory_planner(tmp_path):
             analyze_auto_scopes_for_deps=False,
             session_memory_planner=MemoryPlanner.DSA_RP,
         )
-    assert ir_compile.call_args.kwargs["memory_planner"] == MemoryPlanner.DSA_RP
+    assert ir_compile.call_count == 1
+    receipt = ir.deserialize((tmp_path / "buffer_ir.msgpack").read_bytes())
+    assert isinstance(receipt, ir.Program)
+    kernel = receipt.get_function("kernel")
+    assert kernel is not None and kernel.ir_stage == ir.FunctionIRStage.Buffer
 
 
 def test_inline_compile_forwards_session_memory_planner():
@@ -156,7 +170,7 @@ def test_inline_compile_forwards_session_memory_planner():
     ):
         result = test_runner.TestRunner(config)._run_inline(case, "a2a3sim")
     assert result.passed, result.error
-    assert ir_compile.call_args.kwargs["memory_planner"] == MemoryPlanner.DSA_RP
+    assert ir_compile.call_count == 1
 
 
 # ---------------------------------------------------------------------------

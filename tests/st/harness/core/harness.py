@@ -24,7 +24,7 @@ import pytest
 import torch
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
-from pypto.pypto_core.passes import MemoryPlanner
+from pypto.pypto_core.passes import DEFAULT_ENABLE_BUFFER_IR, MemoryPlanner
 from pypto.runtime.runner import RunConfig
 from pypto.runtime.tensor_spec import ScalarSpec
 
@@ -210,7 +210,7 @@ class PTOTestCase(ABC):
         strategy: OptimizationStrategy | None = None,
         memory_planner: MemoryPlanner | None = None,
         enable_pypto_l0c_double_buffer: bool | None = None,
-        enable_buffer_ir: bool = False,
+        enable_buffer_ir: bool = DEFAULT_ENABLE_BUFFER_IR,
     ):
         """Initialize test case.
 

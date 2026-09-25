@@ -344,6 +344,8 @@ void BindPass(nb::module_& m) {
       .def(nb::init<DiagnosticCheckSet>(), nb::arg("checks") = DiagnosticCheckRegistry::GetAllChecks(),
            "Create a diagnostic instrument running the given check set");
 
+  passes.attr("DEFAULT_ENABLE_BUFFER_IR") = kDefaultEnableBufferIR;
+
   // PassContext
   nb::class_<PassContext>(passes, "PassContext",
                           "Context that holds instruments and pass configuration.\n\n"
@@ -358,11 +360,11 @@ void BindPass(nb::module_& m) {
            nb::arg("disabled_diagnostics") = DiagnosticCheckSet{DiagnosticCheck::UnusedControlFlowResult},
            nb::arg("memory_planner") = MemoryPlanner::PyPTO,
            nb::arg("enable_pypto_l0c_double_buffer") = false, nb::arg("runtime") = kDefaultRuntimeKind,
-           nb::arg("enable_buffer_ir") = false,
+           nb::arg("enable_buffer_ir") = kDefaultEnableBufferIR,
            "Create a PassContext with instruments, verification level, diagnostic phase gate, "
            "optional disabled diagnostic checks, memory planner selection, the experimental "
            "legacy-PyPTO chooser-emitted L0C double-buffer (dbC=2) opt-in, and the target Simpler "
-           "runtime ABI, and the staged Buffer IR development opt-in")
+           "runtime ABI, and Buffer IR selection (enabled by default)")
       .def("__enter__",
            [](PassContext& self) -> PassContext& {
              self.EnterContext();

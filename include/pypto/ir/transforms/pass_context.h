@@ -31,6 +31,9 @@ class BackendHandler;
 
 namespace ir {
 
+/// Default device representation; shared with Python pipeline and cache entry points.
+inline constexpr bool kDefaultEnableBufferIR = true;
+
 // Forward declare Pass to avoid circular include (pass_context.h <-> passes.h)
 class Pass;
 
@@ -311,7 +314,7 @@ class PassContext {
                        DiagnosticCheckSet disabled_diagnostics = {DiagnosticCheck::UnusedControlFlowResult},
                        MemoryPlanner memory_planner = MemoryPlanner::PyPTO,
                        bool enable_pypto_l0c_double_buffer = false, RuntimeKind runtime = kDefaultRuntimeKind,
-                       bool enable_buffer_ir = false);
+                       bool enable_buffer_ir = kDefaultEnableBufferIR);
 
   /**
    * @brief Push this context onto the thread-local stack

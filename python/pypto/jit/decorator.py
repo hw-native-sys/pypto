@@ -2540,7 +2540,7 @@ def _resolve_memory_planner(run_config: Any) -> _passes.MemoryPlanner:
 def _resolve_enable_buffer_ir() -> bool:
     """Resolve the staged Buffer IR option inherited by ``ir.compile()``."""
     ctx = _passes.PassContext.current()
-    return ctx.get_enable_buffer_ir() if ctx is not None else False
+    return ctx.get_enable_buffer_ir() if ctx is not None else _passes.DEFAULT_ENABLE_BUFFER_IR
 
 
 def _resolve_enable_pypto_l0c_double_buffer() -> bool:

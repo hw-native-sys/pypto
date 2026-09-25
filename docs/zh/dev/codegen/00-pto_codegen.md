@@ -55,13 +55,14 @@ ABI。Tensor 返回值保留在 IR 中供编排处理别名，不产生原生返
 存在时才发射地址，不受旧发射标志影响。GM 传输不创建 buffer、不推导
 valid 状态更新，也不重建逻辑 Tile。
 
-设置 `enable_buffer_ir=True` 时，流水线在进入此直接路径前执行 `LowerTileToBuffer`。
-迁移期间默认流水线仍保持 Functional 阶段。
+默认流水线在进入此直接路径前执行 `LowerTileToBuffer`。默认开启集成尚未完成，
+以 CI 矩阵通过为验收条件；显式 `enable_buffer_ir=False` 可选择旧路径进行对比。
 描述符、方向、动态窗口和 ABI 限制见 [Buffer 契约](../ir/02-types.md#buffer-算子契约)。
 原生编译测试验证语法和操作数数据流；数值执行是单独的集成验收要求。
 
-静态存储别名以显式 `buffer.subview` 和 `buffer.reshape` 操作进入代码生成，
-分别发射为 `pto.subview` 和 `pto.treshape`，直接保留源句柄和结果描述符，
+存储别名以显式 `buffer.subview` 和 `buffer.reshape` 操作进入代码生成，
+分别发射为 `pto.subview` 和 `pto.treshape`；带 valid 元组的 subview 会发射 `valid [..]` 子句，
+由其中的常量或 SSA 操作数确定原生结果每一维的类型，直接保留源句柄和结果描述符，
 不分配、不复制，也不推导存储窗口。描述符边界和别名合法性在发射前完成验证。
 
 Mat、Left、Right 和 Acc 描述符发射为 `loc=mat|left|right|acc`，并带上分形的

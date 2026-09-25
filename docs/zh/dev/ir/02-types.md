@@ -126,7 +126,7 @@ destination 并返回 `VoidType`，目前要求所有参数的 Vec buffer 描述
 `BufferType` 发射分配、destination 写入与 valid 状态更新。地址发射只取决于
 分配操作数；旧 `emit_tile_addr` 标志不能删除或补充 buffer 地址。
 动态操作数保留在其词法作用域内，不重建逻辑 `TileType` 或 `MemRef`，
-也不运行隐式 tile 分配逻辑。设置 `enable_buffer_ir=True` 后，流水线在发射前通过
+也不运行隐式 tile 分配逻辑。默认流水线在发射前通过
 [LowerTileToBuffer](../passes/53-lower_tile_to_buffer.md) 转换 Tile IR。
 
 静态存储视图 (static storage view) 在同一 Buffer 阶段使用普通 SSA 别名边：
@@ -137,8 +137,11 @@ destination 并返回 `VoidType`，目前要求所有参数的 Vec buffer 描述
 %tile = buffer.reshape(%bytes) : Buffer<[16, 32], FP32, Vec>
 ```
 
-`buffer.subview` 当前要求源和结果为 valid 区域完整的 `UINT8[N,32]`，
-偏移量为静态 `INDEX` 元组 `(row, 0)`，窗口必须处于源容量内。
+`buffer.subview(source, (row, col)[, valid])` 是稠密行主序二维 Vec buffer 上的带步长窗口：
+结果保持源的元素类型和行距，其静态形状必须处于源之内。偏移为整数或 `INDEX` 标量，
+可以是常量或运行时值；常量偏移会做边界检查。可选的 valid 元组给出结果每一维的 valid extent
+（静态描述符维度使用常量），结果有动态维度时必须提供。存储根上整行的 `UINT8[N,32]`
+字节窗口是其中的静态特例。
 `buffer.reshape` 保持物理字节数完全相同，支持静态、紧密行主序的二维
 Vec FP16、BF16、FP32、INT16、INT32 和 UINT8 描述符，每个物理行的字节数必须为 32 的倍数。
 在 Mat、Left、Right 和 Acc 中，它只在同一空间内重新标注一个完整分形窗口
@@ -146,6 +149,8 @@ Vec FP16、BF16、FP32、INT16、INT32 和 UINT8 描述符，每个物理行的�
 两者均声明 `Alias(0)`、无数据访问和源元数据读效应，不分配存储，
 也不初始化数据。每个中间结果的形状、dtype 和 valid extent 均由结果
 类型显式表达。`buffer.set_validshape` 不能修改这些静态视图句柄。
+
+运行时偏移的窗口只知道位于源窗口之内，因此 `BufferIR` 在证明不重叠时使用整个源范围。
 
 `BufferIR` 缓存视图的根身份、相对偏移和字节范围。逐元素指令及涉及视图的
 拷贝会检查源和目标窗口：同根使用相对偏移，不同已分配根使用有效地址。

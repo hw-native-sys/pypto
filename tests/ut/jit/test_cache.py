@@ -481,13 +481,13 @@ class TestResolveMemoryPlanner:
 
 
 def test_buffer_ir_cache_option_follows_active_context():
-    assert _resolve_enable_buffer_ir() is False
-    with passes.PassContext([], enable_buffer_ir=True):
-        assert _resolve_enable_buffer_ir() is True
+    assert _resolve_enable_buffer_ir() is True
+    with passes.PassContext([], enable_buffer_ir=False):
+        assert _resolve_enable_buffer_ir() is False
         with passes.PassContext([]):
-            assert _resolve_enable_buffer_ir() is False
-        assert _resolve_enable_buffer_ir() is True
-    assert _resolve_enable_buffer_ir() is False
+            assert _resolve_enable_buffer_ir() is True
+        assert _resolve_enable_buffer_ir() is False
+    assert _resolve_enable_buffer_ir() is True
 
 
 class TestResolveEnablePyptoL0cDoubleBuffer:

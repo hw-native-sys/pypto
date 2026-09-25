@@ -59,14 +59,16 @@ from a `buffer.alloc` in the same scope; an address is emitted exactly when its
 operand is present, independently of the legacy emission flag. GM transfers
 never create a buffer, infer valid-state updates, or reconstruct a logical Tile.
 
-With `enable_buffer_ir=True`, the pipeline runs `LowerTileToBuffer` before
-entering this direct path. The default pipeline remains Functional during migration. See [Buffer contracts](../ir/02-types.md#buffer-operator-contracts)
+The default pipeline runs `LowerTileToBuffer` before entering this direct path.
+The default-on integration remains incomplete until its CI matrix passes;
+explicit `enable_buffer_ir=False` selects the legacy comparison path. See [Buffer contracts](../ir/02-types.md#buffer-operator-contracts)
 for descriptor, direction, dynamic-window, and ABI limits. Native compilation
 tests establish syntax and operand dataflow; numerical execution is a separate
 integration requirement.
 
-Static storage aliases arrive as explicit `buffer.subview` and `buffer.reshape`
-operations. Codegen maps them to `pto.subview` and `pto.treshape`, preserving the
+Storage aliases arrive as explicit `buffer.subview` and `buffer.reshape`
+operations; a subview with a valid tuple renders a `valid [..]` clause whose
+constant or SSA operands type each native result dimension. Codegen maps them to `pto.subview` and `pto.treshape`, preserving the
 source handle and result descriptor without allocating, copying, or inferring
 storage windows. Descriptor bounds and alias legality are verified before emission.
 

@@ -11,6 +11,7 @@
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -78,6 +79,31 @@ def test_buffer_ir_option_survives_nested_pipeline_contexts(tmp_path, mode, enab
         ctx = passes.PassContext.current()
         assert ctx is not None and ctx.get_enable_buffer_ir() == enabled
     assert seen and all(value == enabled for value in seen)
+
+
+@pytest.mark.parametrize("mode", ["plain", "dump", "profiling", "dump_and_profiling"])
+def test_buffer_ir_default_survives_public_pipeline_wrappers(tmp_path, mode):
+    def compile_in_worker():
+        assert passes.PassContext.current() is None
+        seen = []
+        instrument = passes.CallbackInstrument(
+            before_pass=lambda pass_obj, _program: seen.append(pass_obj.get_name()),
+            name="ObserveDefaultBufferIR",
+        )
+        profiling = CompileProfiler() if "profiling" in mode else nullcontext()
+        with profiling:
+            _run_pass_pipeline(
+                _scalar_program(),
+                operation="lower",
+                extra_instruments=(instrument,),
+                dump_passes="dump" in mode,
+                passes_dump_dir=str(tmp_path / "passes"),
+            )
+        assert seen[-1] == "LowerTileToBuffer"
+        assert passes.PassContext.current() is None
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(compile_in_worker).result()
 
 
 def test_run_pass_pipeline_names_diagnostic_conflict_for_lower():

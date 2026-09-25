@@ -35,7 +35,7 @@ def _copy_entry(a: pl.Tensor, out: pl.Out[pl.Tensor]):
     return out
 
 
-def _case(planner=passes.MemoryPlanner.PYPTO, enabled=True):
+def _case(planner=passes.MemoryPlanner.PYPTO, enabled=None):
     return st.case(
         _copy_entry,
         torch.arange(512, dtype=torch.float32).reshape(16, 32),
@@ -44,7 +44,7 @@ def _case(planner=passes.MemoryPlanner.PYPTO, enabled=True):
         golden=lambda tensors: tensors["a"],
         platform="a2a3",
         memory_planner=planner,
-        enable_buffer_ir=enabled,
+        **({"enable_buffer_ir": enabled} if enabled is not None else {}),
     )
 
 
@@ -105,6 +105,38 @@ def test_buffer_case_rejects_a_compiler_that_leaves_functional_device_ir(tmp_pat
     with pytest.raises(ValueError, match="did not convert every device function"):
         tr._compile_case_program(case, program, output_dir=str(tmp_path), memory_planner=None)
     assert not (tmp_path / "buffer_ir.msgpack").exists()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_case_mode_is_explicit_in_worker_context(tmp_path, monkeypatch, enabled):
+    case = _case(enabled=enabled)
+    seen = []
+
+    def observe(program, **_kwargs):
+        context = passes.PassContext.current()
+        assert context is not None
+        seen.append((context.get_enable_buffer_ir(), context.get_runtime()))
+        return passes.simplify()(program)
+
+    monkeypatch.setattr(tr.ir, "compile", observe)
+    with passes.PassContext([], enable_buffer_ir=not enabled):
+        if enabled:
+            with pytest.raises(ValueError, match="did not convert every device function"):
+                tr._compile_case_program(case, case.get_program(), output_dir=str(tmp_path))
+        else:
+            tr._compile_case_program(case, case.get_program(), output_dir=str(tmp_path))
+        assert passes.PassContext.current().get_enable_buffer_ir() is not enabled
+    assert seen == [(enabled, passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER)]
+
+
+def test_older_case_without_option_follows_compiler_default():
+    assert tr._case_uses_buffer_ir(object())
+
+
+def test_declarative_case_defaults_to_buffer_ir():
+    case = _case()
+    assert case.get_enable_buffer_ir()
+    assert tr._cache_key(case).endswith("@buffer_ir")
 
 
 if __name__ == "__main__":

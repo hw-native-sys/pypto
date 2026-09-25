@@ -35,7 +35,7 @@ from typing import Any
 
 import torch
 from pypto.ir.pass_manager import OptimizationStrategy
-from pypto.pypto_core.passes import MemoryPlanner
+from pypto.pypto_core.passes import DEFAULT_ENABLE_BUFFER_IR, MemoryPlanner
 from pypto.runtime.runner import RunConfig
 from pypto.runtime.tensor_spec import ScalarSpec
 
@@ -89,7 +89,7 @@ class Case:
     rtol: float = 1e-5
     atol: float = 1e-5
     compare: Any | None = None
-    enable_buffer_ir: bool = False
+    enable_buffer_ir: bool = DEFAULT_ENABLE_BUFFER_IR
 
     def __post_init__(self) -> None:
         if not isinstance(self.kernel, (JitKernel, ProgramKernel, IRKernel)):

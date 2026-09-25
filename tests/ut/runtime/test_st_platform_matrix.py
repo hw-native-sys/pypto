@@ -139,7 +139,7 @@ def test_cache_key_separates_the_platform_variants():
     key_a2a3 = test_runner._cache_key(a2a3, session_memory_planner=MemoryPlanner.PYPTO)
     key_a5 = test_runner._cache_key(a5, session_memory_planner=MemoryPlanner.PYPTO)
     assert key_a2a3 != key_a5
-    assert key_a2a3.endswith("@a2a3@pypto") and key_a5.endswith("@a5sim@pypto")
+    assert key_a2a3.endswith("@a2a3@pypto@buffer_ir") and key_a5.endswith("@a5sim@pypto@buffer_ir")
 
 
 def test_cache_key_refuses_an_artifact_with_no_platform():

@@ -445,9 +445,9 @@ def test_dedup_collapses_repeated_site_a3():
 
     # Both loads must survive as their own hit. Site uniqueness alone cannot see
     # the coarsening regression: if the two loads shared the `def` span they
-    # would dedup into ONE tile.load hit, and a set of one load site plus one
+    # would dedup into ONE buffer.load hit, and a set of one load site plus one
     # store site is still trivially unique. Pinning the count is what fails.
-    load_sites = {site for site in sites if site[3] == "tile.load"}
+    load_sites = {site for site in sites if site[3] == "buffer.load"}
     assert len(load_sites) == 2, f"expected the entry and per-iteration load as distinct sites: {sites}"
 
     # Dedup invariant: every surviving hit is at a distinct (file, line, col, op)

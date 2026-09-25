@@ -101,7 +101,6 @@ def test_new_recipes_do_not_infer_fp16_legality_from_descriptor_support(suffix, 
 @pytest.mark.parametrize(
     "changes",
     [
-        {"valid_shape": [-1, 32]},
         {"blayout": ir.TileLayout.col_major},
         {"shape": [2, 16, 32]},
     ],
@@ -109,6 +108,13 @@ def test_new_recipes_do_not_infer_fp16_legality_from_descriptor_support(suffix, 
 def test_fixed_descriptor_recipes_reject_unimplemented_physical_forms(suffix, input_count, changes):
     with pytest.raises(ValueError, match="static dense rank-1/rank-2"):
         _call(suffix, [_buffer(f"arg_{i}", **changes) for i in range(input_count + 1)])
+
+
+@pytest.mark.parametrize("suffix,input_count", [("exp", 1), ("sub", 2)])
+def test_fixed_descriptor_recipes_read_runtime_valid_extents(suffix, input_count):
+    # The native instructions size their work from each handle's valid metadata.
+    call = _call(suffix, [_buffer(f"arg_{i}", valid_shape=[-1, -1]) for i in range(input_count + 1)])
+    assert isinstance(call.type, ir.VoidType)
 
 
 @pytest.mark.parametrize("suffix,input_count", [("log", 1), ("minimum", 2)])

@@ -78,7 +78,7 @@ rewrites), and skips `Orchestration` functions (no TileType variables).
 ### Staged Buffer IR pipeline
 
 `PassContext(enable_buffer_ir=True)` enables the storage-legalization portion of
-the Buffer IR migration. The temporary development option defaults to false;
+the Buffer IR migration. The development integration defaults to true;
 it does not by itself promise that every Tile operation or control-flow form
 can be lowered to Buffer IR. The C++ accessor is `GetEnableBufferIR()` and the
 Python accessor is `get_enable_buffer_ir()`. Compilation, IR dumping and
