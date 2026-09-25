@@ -19,6 +19,7 @@ from urllib.parse import quote
 
 MARKER = "<!-- pypto-codex-review -->"
 MAX_BYTES = 60000
+DIFF_READ_ERRORS = (OSError, subprocess.CalledProcessError, KeyError, TypeError, ValueError)
 
 
 def github_api(endpoint: str, payload: dict | None = None, *, paginate: bool = False) -> Any:
@@ -144,12 +145,14 @@ def summary_finding(finding: dict) -> str:
     return text
 
 
-def render_findings(repo: str, endpoint: str, head: str, merge_base: str, findings: list) -> tuple[str, list]:
+def render_findings(
+    repo: str, endpoint: str, head: str, merge_base: str | None, findings: list
+) -> tuple[str, list]:
     """Split findings into validated inline comments and a lossless summary fallback."""
     if not findings:
         return "", []
     summary_only = "".join(f"\n\n{summary_finding(finding)}" for finding in findings)
-    if not any(finding_location(finding) for finding in findings):
+    if merge_base is None or not any(finding_location(finding) for finding in findings):
         return summary_only, []
     try:
         files = github_api(f"{endpoint}/files?per_page=100", paginate=True)
@@ -216,14 +219,21 @@ def merge_base_sha(repo: str, base: str, head: str) -> str:
     return candidate
 
 
-def matches_revision(pr: dict, repo: str, head: str, base_ref: str, reviewed_merge_base: str) -> bool:
-    """Check the PR still has the reviewed head, target branch, and diff base."""
+def optional_merge_base_sha(repo: str, base: str, head: str) -> str | None:
+    """Fail closed on an unavailable diff check without hiding review findings."""
+    try:
+        return merge_base_sha(repo, base, head)
+    except DIFF_READ_ERRORS:
+        return None
+
+
+def matches_revision(pr: dict, head: str, base_ref: str) -> bool:
+    """Check the PR still has the reviewed head and target branch."""
     return (
         pr["state"] == "open"
         and not pr["draft"]
         and pr["head"]["sha"] == head
         and pr["base"]["ref"] == base_ref
-        and merge_base_sha(repo, pr["base"]["sha"], head) == reviewed_merge_base
     )
 
 
@@ -290,29 +300,41 @@ def publish(path: Path, repo: str, number: str, head: str, base: str, base_ref: 
     endpoint = pull_request_endpoint(repo, number)
     if any(not re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (head, base)):
         raise ValueError("Expected full commit SHA values")
-    reviewed_merge_base = merge_base_sha(repo, base, head)
     pr = github_api(endpoint)
-    if not matches_revision(pr, repo, head, base_ref, reviewed_merge_base):
+    if not matches_revision(pr, head, base_ref):
         return "Skipped obsolete or non-reviewable PR"
 
     # A bad replacement result must not leave our earlier approval in force.
     revoke_approvals(repo, number)
     review = load_review(path)
+    reviewed_merge_base = optional_merge_base_sha(repo, base, head)
+    current_merge_base = optional_merge_base_sha(repo, pr["base"]["sha"], head)
+    diff_verified = reviewed_merge_base is not None and current_merge_base == reviewed_merge_base
     reason = approval_blocker(endpoint, pr, review, enabled)
+    if not diff_verified:
+        reason = "Cannot verify that the reviewed PR diff is current"
     approve = reason is None
 
     body = f"{MARKER}\n## Codex Review\n\nReviewed `{head}` against base `{base}`.\n\n"
     body += "> Automated assessment of untrusted PR content; not a guarantee of correctness.\n\n"
     body += review["summary"]
-    findings_body, comments = render_findings(repo, endpoint, head, reviewed_merge_base, review["findings"])
+    findings_body, comments = render_findings(
+        repo, endpoint, head, reviewed_merge_base if diff_verified else None, review["findings"]
+    )
+    # Fetch immediately before posting, then again afterwards to close the race
+    # with synchronize events. The review is always attached to the examined SHA.
+    latest = github_api(endpoint)
+    if not matches_revision(latest, head, base_ref):
+        return "Skipped PR updated during publication"
+    if diff_verified and optional_merge_base_sha(repo, latest["base"]["sha"], head) != reviewed_merge_base:
+        diff_verified = False
+        reason = "Cannot verify that the reviewed PR diff is current"
+        approve = False
+        findings_body, comments = render_findings(repo, endpoint, head, None, review["findings"])
     body += findings_body
     body += "\n\nApproval policy: passed." if approve else f"\n\nNo automatic approval: {reason}."
     if len(body.encode()) + sum(len(item["body"].encode()) for item in comments) > MAX_BYTES:
         raise ValueError("Rendered review exceeds 60000 bytes")
-    # Fetch immediately before posting, then again afterwards to close the race
-    # with synchronize events. The review is always attached to the examined SHA.
-    if not matches_revision(github_api(endpoint), repo, head, base_ref, reviewed_merge_base):
-        return "Skipped PR updated during publication"
     posted = github_api(
         f"{endpoint}/reviews",
         {
@@ -322,15 +344,31 @@ def publish(path: Path, repo: str, number: str, head: str, base: str, base_ref: 
             **({"comments": comments} if comments else {}),
         },
     )
-    if approve and not matches_revision(github_api(endpoint), repo, head, base_ref, reviewed_merge_base):
-        subprocess.run(
-            ["gh", "api", f"{endpoint}/reviews/{posted['id']}/dismissals", "--method", "PUT", "--input", "-"],
-            input=json.dumps({"message": "PR changed while Codex approval was being published"}),
-            text=True,
-            capture_output=True,
-            check=True,
-        )
-        return "Dismissed approval because PR changed during publication"
+    if approve:
+        try:
+            latest = github_api(endpoint)
+            still_current = matches_revision(latest, head, base_ref) and (
+                optional_merge_base_sha(repo, latest["base"]["sha"], head) == reviewed_merge_base
+            )
+        except DIFF_READ_ERRORS:
+            still_current = False
+        if not still_current:
+            subprocess.run(
+                [
+                    "gh",
+                    "api",
+                    f"{endpoint}/reviews/{posted['id']}/dismissals",
+                    "--method",
+                    "PUT",
+                    "--input",
+                    "-",
+                ],
+                input=json.dumps({"message": "PR changed or diff verification failed during publication"}),
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            return "Dismissed approval because PR changed or diff verification failed"
     return "Approved reviewed commit" if approve else f"Commented: {reason}"
 
 

@@ -95,8 +95,8 @@ JSON through `codex exec --output-schema`. The schema and publishing script
 come from the commit supplying the workflow file (`github.workflow_sha`),
 independently of the PR's base revision. The publisher approves only a complete
 `pass` with zero findings, after checking the head SHA, base branch name, and
-reviewed merge base are unchanged. Retargeting to a different branch at the same SHA also
-invalidates the review, because the reviewed target branch has changed.
+reviewed merge base are unchanged. Retargeting to a different branch at the
+same SHA also invalidates the review, because the reviewed target branch has changed.
 Invalid, empty, oversized, inconsistent, or incomplete output never approves.
 The publisher does not read branch protection rules, CI results, or mergeability
 to decide whether to approve. An `APPROVE` records the code-review result; it
@@ -108,9 +108,11 @@ branch does not invalidate approval when the merge base stays the same. A base
 rewrite that changes the merge base invalidates the review because it changes
 the reviewed diff. GitHub's configured stale-review rule may independently
 dismiss an approval if the merge base introduces new changes after publication.
+If merge-base verification fails, the publisher keeps findings visible in a
+`COMMENT` summary without unverified inline anchors, and withholds approval.
 The publisher checks revisions again after approval and dismisses its approval
-if an update raced with publication. Replacement results first dismiss this
-workflow's previous approvals; human approvals are not modified.
+if an update raced with publication or verification failed. Replacement results
+first dismiss this workflow's previous approvals; human approvals are not modified.
 
 Changing a PR's base branch also triggers approval invalidation before review.
 A separate GitHub-hosted job runs only trusted workflow-revision code and

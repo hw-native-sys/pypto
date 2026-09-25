@@ -193,8 +193,11 @@ def test_unanchored_review_needs_no_metadata(
 
 
 @pytest.mark.parametrize("failure", ["request", "json", "missing"])
-def test_merge_base_lookup_failure_blocks_publication(publisher, review_file, api, monkeypatch, failure):
-    """A failed diff-identity lookup must not publish a stale approval."""
+def test_merge_base_lookup_failure_keeps_findings(
+    publisher, review_file, api, located_review, monkeypatch, failure
+):
+    """A failed diff check keeps findings visible without approving."""
+    finding = located_review({"path": "src/example.cpp", "line": 500, "side": "LEFT"})
     request = publisher.github_api
 
     def fail_compare(endpoint, *args, **kwargs):
@@ -207,14 +210,13 @@ def test_merge_base_lookup_failure_blocks_publication(publisher, review_file, ap
         return request(endpoint, *args, **kwargs)
 
     monkeypatch.setattr(publisher, "github_api", fail_compare)
-    expected = {
-        "request": publisher.subprocess.CalledProcessError,
-        "json": json.JSONDecodeError,
-        "missing": KeyError,
-    }[failure]
-    with pytest.raises(expected):
-        publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
-    assert not api["posted"]
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    posted = api["posted"][0]
+    assert posted["event"] == "COMMENT"
+    assert finding["body"] in posted["body"]
+    assert "Cannot verify that the reviewed PR diff is current" in posted["body"]
+    assert "/blob/" not in posted["body"]
+    assert not posted.get("comments")
 
 
 @pytest.mark.parametrize("endpoint_part", ["/files?", "/comments?"])
@@ -499,15 +501,83 @@ def test_merge_base_change_blocks_stale_approval(publisher, review_file, api, ba
         assert len(api["dismissed"]) == 1
         assert "/reviews/42/dismissals" in api["dismissed"][0][2]
     else:
-        assert not api["posted"]
+        assert api["posted"][0]["event"] == "COMMENT"
+        assert "Cannot verify that the reviewed PR diff is current" in api["posted"][0]["body"]
 
 
 def test_invalid_merge_base_fails_closed(publisher, review_file, api):
     """Do not publish an approval from an invalid GitHub compare response."""
     api["invalid_merge_base"] = True
-    with pytest.raises(ValueError, match="invalid merge base"):
-        publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
-    assert not api["posted"]
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    assert api["posted"][0]["event"] == "COMMENT"
+
+
+@pytest.mark.parametrize("failure_at", [3, 4])
+def test_compare_failure_around_publication(publisher, review_file, api, monkeypatch, failure_at):
+    """Comment before posting or dismiss approval if diff verification fails later."""
+    request = publisher.github_api
+    compare_reads = 0
+
+    def fail_late_compare(endpoint, *args, **kwargs):
+        nonlocal compare_reads
+        if "/compare/" in endpoint:
+            compare_reads += 1
+            if compare_reads == failure_at:
+                raise publisher.subprocess.CalledProcessError(1, ["gh", "api"])
+        return request(endpoint, *args, **kwargs)
+
+    monkeypatch.setattr(publisher, "github_api", fail_late_compare)
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    if failure_at == 3:
+        assert api["posted"][0]["event"] == "COMMENT"
+        assert not api["dismissed"]
+    else:
+        assert api["posted"][0]["event"] == "APPROVE"
+        assert len(api["dismissed"]) == 1
+        assert "/reviews/42/dismissals" in api["dismissed"][0][2]
+
+
+def test_prepost_compare_failure_moves_findings_to_summary(
+    publisher, review_file, api, located_review, monkeypatch
+):
+    """Avoid inline anchors when the reviewed diff cannot be verified."""
+    finding = located_review({"path": "src/example.cpp", "line": 21, "side": "RIGHT"})
+    request = publisher.github_api
+    compare_reads = 0
+
+    def fail_prepost_compare(endpoint, *args, **kwargs):
+        nonlocal compare_reads
+        if "/compare/" in endpoint:
+            compare_reads += 1
+            if compare_reads == 3:
+                raise publisher.subprocess.CalledProcessError(1, ["gh", "api"])
+        return request(endpoint, *args, **kwargs)
+
+    monkeypatch.setattr(publisher, "github_api", fail_prepost_compare)
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    posted = api["posted"][0]
+    assert posted["event"] == "COMMENT"
+    assert finding["body"] in posted["body"]
+    assert not posted.get("comments")
+
+
+def test_post_publication_pr_read_failure_dismisses_approval(publisher, review_file, api, monkeypatch):
+    """Dismiss an approval if GitHub cannot confirm the PR after posting."""
+    request = publisher.github_api
+    pr_reads = 0
+
+    def fail_final_read(endpoint, *args, **kwargs):
+        nonlocal pr_reads
+        if endpoint == "repos/owner/repo/pulls/12":
+            pr_reads += 1
+            if pr_reads == 3:
+                raise publisher.subprocess.CalledProcessError(1, ["gh", "api"])
+        return request(endpoint, *args, **kwargs)
+
+    monkeypatch.setattr(publisher, "github_api", fail_final_read)
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    assert api["posted"][0]["event"] == "APPROVE"
+    assert len(api["dismissed"]) == 1
 
 
 @pytest.mark.parametrize("change_at", [2, 3])
