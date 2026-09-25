@@ -46,7 +46,9 @@ untrusted input, and posts the result from a separate GitHub-hosted job.
 Findings with verified diff locations appear as inline review comments, which
 can be replied to and resolved independently. Findings outside the diff, without
 a location, or with an invalid location remain in the review summary. Reported
-locations outside the diff link to the reviewed head or merge-base commit.
+locations outside the diff link to the reviewed head or merge-base commit when
+available. If optional location metadata requests fail, findings still appear
+in the summary without inline anchors or unavailable links.
 An identical inline comment from this workflow on the same commit is not posted
 again. Location validation does not affect the approval policy: any finding
 still prevents automatic approval.

@@ -184,6 +184,79 @@ def test_deleted_fallback_links_merge_base_before_rename(publisher, review_file,
     assert f"/blob/{'e' * 40}/src/old%20name.cpp#L500" in api["posted"][0]["body"]
 
 
+@pytest.mark.parametrize("location", [None, {}, {"path": "../invalid", "line": 1, "side": "RIGHT"}])
+def test_unanchored_review_needs_no_metadata(
+    publisher, review_file, api, located_review, monkeypatch, location
+):
+    """Summary-only reviews publish even when location metadata APIs are unavailable."""
+    finding = located_review(location)
+    request = publisher.github_api
+
+    def fail_metadata(endpoint, *args, **kwargs):
+        assert "/files?" not in endpoint and "/comments?" not in endpoint
+        return request(endpoint, *args, **kwargs)
+
+    monkeypatch.setattr(publisher, "github_api", fail_metadata)
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    assert finding["body"] in api["posted"][0]["body"]
+    assert api["posted"][0]["event"] == "COMMENT"
+
+
+@pytest.mark.parametrize("failure", ["request", "json", "missing", "invalid"])
+def test_optional_merge_base_failure_keeps_findings(
+    publisher, review_file, api, located_review, monkeypatch, failure
+):
+    """A failed optional lookup is attempted once and cannot block summary publication."""
+    finding = located_review({"path": "src/example.cpp", "line": 500, "side": "LEFT"})
+    review = json.loads(review_file.read_text())
+    review["findings"].append({**finding, "title": "Second finding"})
+    review_file.write_text(json.dumps(review))
+    request = publisher.github_api
+    calls = []
+
+    def fail_compare(endpoint, *args, **kwargs):
+        if "/compare/" in endpoint:
+            calls.append(endpoint)
+            if failure == "request":
+                raise publisher.subprocess.CalledProcessError(1, ["gh", "api"])
+            if failure == "json":
+                raise json.JSONDecodeError("Invalid response", "", 0)
+            return {} if failure == "missing" else {"merge_base_commit": {"sha": "invalid"}}
+        return request(endpoint, *args, **kwargs)
+
+    monkeypatch.setattr(publisher, "github_api", fail_compare)
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    posted = api["posted"][0]
+    assert len(calls) == 1
+    assert finding["body"] in posted["body"] and "Second finding" in posted["body"]
+    assert "src/example.cpp:500 (LEFT)" in posted["body"]
+    assert "/blob/" not in posted["body"] and posted["event"] == "COMMENT"
+
+
+@pytest.mark.parametrize("endpoint_part", ["/files?", "/comments?"])
+@pytest.mark.parametrize("failure", ["request", "json"])
+def test_location_metadata_failure_keeps_findings(
+    publisher, review_file, api, located_review, monkeypatch, endpoint_part, failure
+):
+    """Optional location and deduplication reads cannot suppress a valid review."""
+    finding = located_review({"path": "src/example.cpp", "line": 21, "side": "RIGHT"})
+    request = publisher.github_api
+
+    def fail_metadata(endpoint, *args, **kwargs):
+        if endpoint_part in endpoint:
+            if failure == "json":
+                raise json.JSONDecodeError("Invalid response", "", 0)
+            raise publisher.subprocess.CalledProcessError(1, ["gh", "api"])
+        return request(endpoint, *args, **kwargs)
+
+    monkeypatch.setattr(publisher, "github_api", fail_metadata)
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    posted = api["posted"][0]
+    assert finding["body"] in posted["body"]
+    assert "src/example.cpp:21 (RIGHT)" in posted["body"]
+    assert not posted.get("comments") and posted["event"] == "COMMENT"
+
+
 @pytest.mark.parametrize("patch", ["", "@@ -10,3 +20,3 @@\n context\n-old", "not a patch"])
 def test_unusable_patch_falls_back(publisher, review_file, api, located_review, patch):
     """Missing and truncated patches cannot create unverified inline comments."""
@@ -211,23 +284,34 @@ def test_patch_coordinates(publisher, patch, expected):
 
 
 @pytest.mark.parametrize(
-    "previous_head,author,duplicate",
+    "previous_head,original_head,author,duplicate",
     [
-        (HEAD, "github-actions[bot]", True),
-        (BASE, "github-actions[bot]", False),
-        (HEAD, "human", False),
+        (HEAD, HEAD, "github-actions[bot]", True),
+        (BASE, BASE, "github-actions[bot]", False),
+        (HEAD, HEAD, "human", False),
+        (HEAD, BASE, "github-actions[bot]", False),
+        (HEAD, None, "github-actions[bot]", False),
     ],
 )
 def test_inline_rerun_deduplication(
-    publisher, review_file, api, located_review, previous_head, author, duplicate
+    publisher, review_file, api, located_review, previous_head, original_head, author, duplicate
 ):
     """Only identical workflow comments on the same commit suppress a new thread."""
     located_review({"path": "src/example.cpp", "line": 21, "side": "RIGHT"})
     publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
     comment = api["posted"][0]["comments"][0]
-    api["comments"] = [{**comment, "commit_id": previous_head, "user": {"login": author}}]
+    api["comments"] = [
+        {
+            **comment,
+            "commit_id": previous_head,
+            "original_commit_id": original_head,
+            "user": {"login": author},
+        }
+    ]
     publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
     assert bool(api["posted"][1].get("comments")) is not duplicate
+    if duplicate:
+        assert "src/example.cpp:21 (RIGHT)" in api["posted"][1]["body"]
 
 
 def test_inline_result_skipped_after_push(publisher, review_file, api, located_review):
@@ -236,6 +320,20 @@ def test_inline_result_skipped_after_push(publisher, review_file, api, located_r
     api["change_at"] = 2
     publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
     assert not api["posted"]
+
+
+@pytest.mark.parametrize("author_metadata", [{"user": None}, {}])
+def test_authorless_prior_comment_does_not_block_publication(
+    publisher, review_file, api, located_review, author_metadata
+):
+    """Deleted or unavailable comment authors cannot break the deduplication scan."""
+    located_review({"path": "src/example.cpp", "line": 21, "side": "RIGHT"})
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    comment = api["posted"][0]["comments"][0]
+    api["comments"] = [{**comment, "original_commit_id": HEAD, **author_metadata}]
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    assert api["posted"][1]["event"] == "COMMENT"
+    assert api["posted"][1]["comments"] == [comment]
 
 
 def test_mixed_findings_and_batch_limit(publisher, review_file, api, located_review):

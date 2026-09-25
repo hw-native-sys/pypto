@@ -135,24 +135,41 @@ def patch_lines(patch: str) -> set[tuple[str, int]]:
     return set() if old_left or new_left else anchors
 
 
+def summary_finding(finding: dict) -> str:
+    """Preserve reported coordinates even when no verified anchor or link is available."""
+    text = f"### {finding['title']}\n\n{finding['body']}"
+    location = finding_location(finding)
+    if location:
+        text += f"\n\nReported location: {location['path']}:{location['line']} ({location['side']})."
+    return text
+
+
 def render_findings(repo: str, endpoint: str, head: str, base: str, findings: list) -> tuple[str, list]:
     """Split findings into validated inline comments and a lossless summary fallback."""
     if not findings:
         return "", []
-    files = github_api(f"{endpoint}/files?per_page=100", paginate=True)
+    summary_only = "".join(f"\n\n{summary_finding(finding)}" for finding in findings)
+    if not any(finding_location(finding) for finding in findings):
+        return summary_only, []
+    try:
+        files = github_api(f"{endpoint}/files?per_page=100", paginate=True)
+        previous = github_api(f"{endpoint}/comments?per_page=100", paginate=True)
+    except (OSError, subprocess.CalledProcessError, json.JSONDecodeError):
+        # Location and deduplication metadata are optional; keep findings visible.
+        return summary_only, []
     by_path = {item["filename"]: item for item in files}
     anchors = {path: patch_lines(item.get("patch", "")) for path, item in by_path.items()}
-    previous = github_api(f"{endpoint}/comments?per_page=100", paginate=True)
     seen = {
         (item["path"], item.get("line"), item.get("side"), item["body"])
         for item in previous
-        if item["user"]["login"] == "github-actions[bot]"
-        and item.get("commit_id") == head
+        if (item.get("user") or {}).get("login") == "github-actions[bot]"
+        and item.get("original_commit_id") == head
         and (item.get("body") or "").startswith(MARKER)
     }
     summary = ""
     comments = []
     merge_base = None
+    merge_base_requested = False
     for finding in findings:
         text = f"### {finding['title']}\n\n{finding['body']}"
         location = finding_location(finding)
@@ -162,7 +179,8 @@ def render_findings(repo: str, endpoint: str, head: str, base: str, findings: li
             key = (path, line, side, body)
             if (side, line) in anchors.get(path, set()):
                 if key in seen:
-                    summary += f"\n\n{text}\n\nAn identical inline comment already exists for this commit."
+                    summary += f"\n\n{summary_finding(finding)}"
+                    summary += "\n\nAn identical inline comment already exists for this commit."
                     continue
                 # Keep oversized batches in the summary rather than lose findings.
                 if len(comments) < 100:
@@ -171,9 +189,25 @@ def render_findings(repo: str, endpoint: str, head: str, base: str, findings: li
                     continue
             revision = head
             if side == "LEFT":
+                if not merge_base_requested:
+                    merge_base_requested = True
+                    try:
+                        comparison = github_api(f"repos/{repo}/compare/{base}...{head}")
+                        candidate = comparison["merge_base_commit"]["sha"]
+                        if isinstance(candidate, str) and re.fullmatch(r"[0-9a-f]{40}", candidate):
+                            merge_base = candidate
+                    except (
+                        OSError,
+                        subprocess.CalledProcessError,
+                        json.JSONDecodeError,
+                        KeyError,
+                        TypeError,
+                    ):
+                        # An optional source link must never hide the finding itself.
+                        pass
                 if merge_base is None:
-                    comparison = github_api(f"repos/{repo}/compare/{base}...{head}")
-                    merge_base = comparison["merge_base_commit"]["sha"]
+                    summary += f"\n\n{summary_finding(finding)}"
+                    continue
                 revision = merge_base
                 path = by_path.get(path, {}).get("previous_filename", path)
             url = f"https://github.com/{repo}/blob/{revision}/{quote(path, safe='/')}#L{line}"
