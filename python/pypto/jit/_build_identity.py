@@ -163,9 +163,11 @@ def _ptoas_identity(selected: str) -> Any:
     if not isinstance(origin, str):
         raise ValueError(f"Cannot resolve PTOAS package from {launcher}")
     package = Path(origin).resolve(strict=True).parent
+    if (package / "_online").exists():
+        raise ValueError(f"PTOAS online build has no stable published identity: {package}")
     numpy_identity = _numpy_wheel_identity(selected_modules.get("numpy"), interpreter)
     natives = sorted(package.glob("_core*.so"))
-    if not natives or (package / "_online").exists():
+    if not natives:
         return (str(launcher.resolve()), check_ptoas_version(selected), numpy_identity)
     metadata = sorted(package.parent.glob("ptoas-*.dist-info/METADATA"))
     if len(metadata) != 1:

@@ -129,6 +129,8 @@ with_ir = decode.compile(config=RunConfig(cache_config=pypto.CacheConfig(enabled
 原生文件缺少可用 Build-ID 时回退到内容哈希。Build-ID 从小型 ELF note 读取，不读取
 整个动态库。wheel PTOAS 探测不导入其编译器包。身份不可用时绕过缓存，不生成共用
 的 `UNKNOWN` key。现有 runtime ABI 及 PTOAS 最低版本检查仍在原有路径执行。
+带有 `_online` 构建目录的 PTOAS 包会绕过持久缓存，因为本地扩展重编可能不会改变
+报告的版本。
 
 Python 根目录和原生扩展位置来自实际导入结果，支持 `pip install`、`pip install -e`
 及 `PYTHONPATH`，包括源码 Python 配合 editable 安装扩展的布局。不单独依赖包分发
@@ -149,6 +151,9 @@ Python 根目录和原生扩展位置来自实际导入结果，支持 `pip inst
 缓存产物仍进行完整 manifest/内容校验。新打包的产物携带 `kernel_config.json`，READY
 发现无需执行 Python 配置。恢复复用 lookup 已验证的 manifest，直接构造原生 callable，
 无需导入 Worker/通信初始化模块。
+若 GENERATED 槽缺失或损坏，查找仅扫描同一 artifact key 下最多 32 个 READY 阶段目录。
+每个候选目录自身的 JSON 必须推导出与目录一致的 spec 摘要，且通过完整 manifest/产物
+校验；多个有效候选会被拒绝。
 
 用独立进程测量首次命中：
 

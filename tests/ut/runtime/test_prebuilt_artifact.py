@@ -501,6 +501,98 @@ def test_invalid_ready_hint_falls_back_to_generated_lookup(tmp_path, hint):
     assert store.lookup_ready(key, generated).status is LookupStatus.MISS
 
 
+@pytest.mark.parametrize("kind", list(BuildKind))
+@pytest.mark.parametrize("damage", ["removed", "invalid_json"])
+def test_readonly_ready_hit_survives_generated_slot_loss(tmp_path, fake_runtime, kind, damage):
+    store = ArtifactStore(tmp_path / "cache", private_root=tmp_path / "private")
+
+    def packaged(root):
+        _generated(root, kind)
+        package_generated_sources(root, kind)
+
+    published = store.get_or_build(_key(), _spec(kind), packaged)
+    assert published.handle is not None
+    generated = published.handle
+    runtime = ArtifactRuntime(store, generated, "a2a3sim", tmp_path / "run")
+    runtime.load()
+    assert runtime.handle.spec.state is ArtifactState.BINARY_READY
+    if damage == "removed":
+        shutil.rmtree(generated.directory)
+    else:
+        chip = (
+            generated.directory if kind is BuildKind.SINGLE_CHIP else generated.directory / "next_levels/left"
+        )
+        (chip / "kernel_config.json").write_bytes(b"\xff")
+
+    readonly = JITArtifactStore(store.root, readonly=True)
+    fake_runtime.runner._compile_and_assemble.side_effect = AssertionError("unexpected compilation")
+    hit = readonly.lookup_ready(generated.key, generated.spec)
+    assert hit.status is LookupStatus.HIT and hit.handle is not None and hit.manifest is not None
+    assert hit.handle.directory == runtime.handle.directory
+    restored = restore_artifact(
+        readonly, hit.handle, tmp_path / "readonly-run", _validated_manifest=hit.manifest
+    )
+    assert restored.program is None
+    assert restored._artifact_runtime.load()
+    assert not (tmp_path / "readonly-run").exists()
+
+
+def test_orphan_ready_rejects_ambiguous_valid_stages(tmp_path, fake_runtime):
+    store = ArtifactStore(tmp_path / "cache", private_root=tmp_path / "private")
+
+    def packaged(root):
+        _generated(root, BuildKind.SINGLE_CHIP)
+        package_generated_sources(root, BuildKind.SINGLE_CHIP)
+
+    published = store.get_or_build(_key(), _spec(), packaged)
+    assert published.handle is not None
+    generated = published.handle
+    runtime = ArtifactRuntime(store, generated, "a2a3sim", tmp_path / "run")
+    runtime.load()
+    first_ready = runtime.handle.directory
+    alternative = tmp_path / "alternative"
+    shutil.copytree(first_ready, alternative)
+    (alternative / "artifact_manifest.json").unlink()
+    metadata = json.loads((alternative / "kernel_config.json").read_text())
+    metadata["kernels"].append({**metadata["kernels"][0], "func_id": 8, "name": "second"})
+    (alternative / "kernel_config.json").write_text(json.dumps(metadata))
+    binary = json.loads((alternative / "binary_manifest.json").read_text())
+    second = {**binary["kernels"][0], "func_id": 8, "name": "second"}
+    second["binary"] = {**second["binary"], "path": "prebuilt/kernel_1.bin"}
+    binary["kernels"].append(second)
+    (alternative / "binary_manifest.json").write_text(json.dumps(binary))
+    shutil.copyfile(alternative / "prebuilt/kernel_0.bin", alternative / "prebuilt/kernel_1.bin")
+    second_spec = _prebuilt.ready_spec(alternative, generated.spec, metadata_only=True)
+    assert second_spec != runtime.handle.spec
+    second_ready = store.get_or_build(
+        generated.key, second_spec, lambda root: shutil.copytree(alternative, root, dirs_exist_ok=True)
+    )
+    assert second_ready.handle is not None
+    assert store.lookup(generated.key, second_spec).status is LookupStatus.HIT
+    shutil.rmtree(generated.directory)
+    result = JITArtifactStore(store.root, readonly=True).lookup_ready(generated.key, generated.spec)
+    assert result.status is LookupStatus.INVALID and result.handle is None
+    assert "Ambiguous READY stages" in result.reason
+
+
+def test_orphan_ready_rejects_malformed_candidate(tmp_path, fake_runtime):
+    store = ArtifactStore(tmp_path / "cache", private_root=tmp_path / "private")
+
+    def packaged(root):
+        _generated(root, BuildKind.SINGLE_CHIP)
+        package_generated_sources(root, BuildKind.SINGLE_CHIP)
+
+    published = store.get_or_build(_key(), _spec(), packaged)
+    assert published.handle is not None
+    generated = published.handle
+    runtime = ArtifactRuntime(store, generated, "a2a3sim", tmp_path / "run")
+    runtime.load()
+    shutil.rmtree(generated.directory)
+    (runtime.handle.directory / "kernel_config.json").write_bytes(b"\xff")
+    result = JITArtifactStore(store.root, readonly=True).lookup_ready(generated.key, generated.spec)
+    assert result.status is LookupStatus.MISS and result.handle is None
+
+
 def test_ready_spec_enumerates_all_child_binaries(tmp_path, fake_runtime):
     store, generated = _publish(tmp_path, BuildKind.DISTRIBUTED)
     runtime = ArtifactRuntime(store, generated, "a2a3sim", tmp_path / "run")
@@ -841,6 +933,28 @@ def automatic_jit_case(tmp_path, fake_runtime, monkeypatch):
 
     monkeypatch.setattr(kernel, "_compile", compile_)
     return kernel, builds
+
+
+def test_orphan_ready_warmup_is_a_readonly_hit(tmp_path, automatic_jit_case, fake_runtime):
+    kernel, builds = automatic_jit_case
+    root = tmp_path / "cache"
+    writable = RunConfig(platform="a2a3sim", cache_config=CacheConfig(enabled=True, root=root))
+    readonly = RunConfig(platform="a2a3sim", cache_config=CacheConfig(enabled=True, readonly=True, root=root))
+    with passes.PassContext([]):
+        kernel.warmup(config=writable)
+        generated = list((root / "artifacts").rglob("generated"))
+        assert len(generated) == 1
+        shutil.rmtree(generated[0])
+        kernel._artifact_objects.clear()
+        fake_runtime.runner._compile_and_assemble.side_effect = AssertionError("unexpected compilation")
+        before = cache_stats()
+        restored = kernel.warmup(config=readonly)
+        after = cache_stats()
+    assert restored.program is None
+    assert len(builds) == 1
+    assert after.ready_hits - before.ready_hits == 1
+    for field in ("misses", "bypasses", "generation_builds", "binary_builds"):
+        assert getattr(after, field) - getattr(before, field) == 0
 
 
 def test_ready_hit_validates_once_and_does_not_execute_generated_configuration(

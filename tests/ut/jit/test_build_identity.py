@@ -279,6 +279,9 @@ def test_ptoas_resolves_selected_interpreter_without_importing_compiler(tmp_path
     (numpy_metadata / "RECORD").unlink()
     with pytest.raises(ValueError, match="NumPy wheel identity"):
         identity._ptoas_identity(str(launcher))
+    (package / "_online").mkdir()
+    with pytest.raises(ValueError, match="online build has no stable published identity"):
+        identity._ptoas_identity(str(launcher))
 
 
 @pytest.mark.parametrize("recognized_layout", [True, False])

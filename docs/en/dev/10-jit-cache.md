@@ -160,6 +160,8 @@ are read from small ELF notes, not by reading the complete shared object. Wheel
 PTOAS discovery does not import its compiler package. Missing evidence bypasses
 persistence; it never creates an `UNKNOWN` cache key. Existing runtime ABI and
 minimum PTOAS compatibility checks remain in place on their normal paths.
+PTOAS packages with an `_online` build directory bypass persistence because a
+local extension rebuild can leave the reported version unchanged.
 
 Python roots and native origins are resolved from actual imports. This supports
 `pip install`, `pip install -e`, and `PYTHONPATH`, including source Python paired
@@ -188,6 +190,10 @@ Artifact payloads still undergo complete manifest/content validation. Newly
 packaged artifacts carry `kernel_config.json` so READY discovery does not execute
 Python configuration. Restoration reuses the lookup's validated manifest and
 constructs native callables without importing Worker/communication setup.
+If the GENERATED slot is missing or damaged, lookup searches at most 32 READY
+stage directories under the exact artifact key. Each candidate's own JSON must
+derive its directory's spec digest and pass full manifest/payload validation;
+multiple valid candidates are rejected.
 
 Measure first hits in independent processes with:
 
