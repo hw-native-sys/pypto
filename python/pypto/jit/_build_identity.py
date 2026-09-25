@@ -1,0 +1,261 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+"""Bounded build identities for the default JIT cache policy.
+
+Published build/version identifiers cover native installations. Python package
+sources are hashed once per process. This deliberately does not audit sysroots,
+dynamic dependencies, or same-build local patches; use the content policy or a
+new cache epoch for those. No disk memo of filesystem timestamps is involved.
+"""
+
+import hashlib
+import importlib
+import json
+import os
+import struct
+import sys
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
+
+from pypto._identity import ComponentInputs, ToolchainInputs, _file_digest, digest_record
+
+
+def native_build_id(path: Path) -> tuple[str, str]:
+    """Read a complete GNU ELF build ID; hash contents when none is available."""
+    with path.open("rb") as stream:
+        header = stream.read(64)
+        if len(header) == 64 and header[:5] == b"\x7fELF\x02" and header[5] in (1, 2):
+            endian = "<" if header[5] == 1 else ">"
+            offset = struct.unpack_from(f"{endian}Q", header, 32)[0]
+            size, count = struct.unpack_from(f"{endian}HH", header, 54)
+            length = os.fstat(stream.fileno()).st_size
+            if size >= 56 and 0 < count < 4096 and offset + size * count <= length:
+                for index in range(count):
+                    stream.seek(offset + size * index)
+                    program = stream.read(56)
+                    if struct.unpack_from(f"{endian}I", program)[0] != 4:  # PT_NOTE
+                        continue
+                    start = struct.unpack_from(f"{endian}Q", program, 8)[0]
+                    extent = struct.unpack_from(f"{endian}Q", program, 32)[0]
+                    if extent > 1024 * 1024 or start + extent > length:
+                        continue
+                    stream.seek(start)
+                    notes = stream.read(extent)
+                    position = 0
+                    while position + 12 <= len(notes):
+                        namesz, descsz, kind = struct.unpack_from(f"{endian}III", notes, position)
+                        position += 12
+                        name = notes[position : position + namesz]
+                        position += (namesz + 3) & ~3
+                        end = position + descsz
+                        if end > len(notes):
+                            break
+                        if kind == 3 and name == b"GNU\0" and descsz:
+                            return ("gnu-build-id", notes[position:end].hex())
+                        position += (descsz + 3) & ~3
+    return ("sha256", _file_digest(path)[1])
+
+
+def _walk_error(error: OSError) -> None:
+    raise error
+
+
+@lru_cache(maxsize=64)
+def python_sources(root: Path) -> str:
+    """Hash package Python sources, excluding generated assets and bytecode.
+
+    Paths and bytes both participate. Installation files are immutable within
+    a process, just as imported modules are; a fresh process detects edits.
+    """
+    records = []
+    base = os.fspath(root)
+    for directory, dirs, files in os.walk(base, onerror=_walk_error):
+        dirs[:] = sorted(d for d in dirs if d not in ("__pycache__", ".git", "_assets"))
+        for name in dirs:
+            if os.path.islink(os.path.join(directory, name)):
+                raise ValueError(f"Python package has an unsupported directory symlink: {directory}/{name}")
+        for filename in sorted(files):
+            if filename.endswith(".py"):
+                path = os.path.join(directory, filename)
+                with open(path, "rb") as stream:
+                    before = os.fstat(stream.fileno())
+                    content = hashlib.sha256(stream.read()).hexdigest()
+                    after = os.fstat(stream.fileno())
+                current = os.stat(path)
+
+                def stamp(info: os.stat_result) -> tuple[int, ...]:
+                    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+                if stamp(before) != stamp(after) or stamp(after) != stamp(current):
+                    raise ValueError(f"Python source changed while reading: {path}")
+                records.append((path[len(base) + 1 :], content))
+    if not records:
+        raise ValueError(f"Python package has no sources: {root}")
+    return digest_record((base, records))
+
+
+def _module_path(name: str) -> Path:
+    module = importlib.import_module(name)
+    origin = getattr(module, "__file__", None)
+    if origin is None:
+        raise ValueError(f"Module has no installation path: {name}")
+    return Path(origin).resolve(strict=True)
+
+
+def _python_package(name: str) -> list[tuple[str, str]]:
+    root = _module_path(name).parent
+    roots = {root}
+    for key, module in tuple(sys.modules.items()):
+        if key.startswith(f"{name}."):
+            origin = getattr(module, "__file__", None)
+            if origin and str(origin).endswith(".py"):
+                if not os.path.abspath(origin).startswith(f"{root}{os.sep}"):
+                    path = Path(origin).resolve(strict=True)
+                    anchor = next((p for p in path.parents if p.name == name), None)
+                    if anchor is None:
+                        raise ValueError(f"Unsupported external Python import redirect: {key}")
+                    roots.add(anchor)
+    return [(str(p), python_sources(p)) for p in sorted(roots)]
+
+
+# Resolve in the launcher's interpreter, with script-mode sys.path[0]. Do not
+# import ptoas: its __init__ loads the compiler and costs hundreds of ms.
+_PTOAS_PROBE = """
+import sys
+sys.path[0] = sys.argv[1]
+import importlib.util, json
+spec = importlib.util.find_spec('ptoas')
+print(json.dumps(spec.origin if spec is not None else None))
+"""
+
+
+def _ptoas_identity(selected: str) -> Any:
+    from pypto.backend._ptoas_locate import check_ptoas_version  # noqa: PLC0415
+
+    from ._toolchain import _console_interpreter, _run  # noqa: PLC0415
+
+    launcher = Path(selected).absolute()
+    with launcher.open("rb") as stream:
+        if stream.read(4) == b"\x7fELF":
+            return (str(launcher.resolve()), native_build_id(launcher))
+    try:
+        interpreter = _console_interpreter(launcher)
+    except ValueError:
+        # Non-wheel release launchers retain the complete reported version,
+        # including development suffixes. Unknown layouts need the slow probe.
+        return (str(launcher.resolve()), check_ptoas_version(selected))
+    origin = json.loads(_run([str(interpreter), "-c", _PTOAS_PROBE, str(launcher.parent)]))
+    if not isinstance(origin, str):
+        raise ValueError(f"Cannot resolve PTOAS package from {launcher}")
+    package = Path(origin).resolve(strict=True).parent
+    natives = sorted(package.glob("_core*.so"))
+    if not natives or (package / "_online").exists():
+        return (str(launcher.resolve()), check_ptoas_version(selected))
+    metadata = sorted(package.parent.glob("ptoas-*.dist-info/METADATA"))
+    if len(metadata) != 1:
+        return (str(launcher.resolve()), check_ptoas_version(selected))
+    return (
+        str(launcher),
+        _file_digest(launcher)[1],
+        str(interpreter),
+        _file_digest(metadata[0])[1],
+        [(str(p), native_build_id(p)) for p in natives],
+    )
+
+
+def _reported(value: Any) -> ComponentInputs:
+    # Tag the policy so these identities cannot alias content inventories.
+    return ComponentInputs(
+        unavailable_reason=None,
+        reported_version=digest_record(("build-identity-v1", os.environ.get("PYPTO_CACHE_EPOCH"), value)),
+    )
+
+
+def discover_builds(compiler: Callable[[], Any], ptoas: str, runtime_name: str) -> ToolchainInputs:
+    """Overlap the external interpreter probe with local package reads."""
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assembler = pool.submit(_ptoas_identity, ptoas)
+        sources = pool.submit(_python_package, "pypto")
+        selected = compiler()
+        components = _local_builds(selected, runtime_name, sources.result())
+        return ToolchainInputs(*components[:3], _reported(assembler.result()), components[3])
+
+
+def _compiler_identity(selected: str) -> tuple[Any, ...]:
+    from ._toolchain import _driver_executed, _invocable, _run  # noqa: PLC0415
+
+    invoked = _invocable(selected)
+    driver = invoked.resolve(strict=True)
+    if driver.name == "ccache":
+        output = _run([str(invoked), "-E", "-x", "c++", "-v", os.devnull])
+        driver = _driver_executed(output, invoked)
+    return (str(invoked), _run([str(invoked), "--version"]).strip(), native_build_id(driver))
+
+
+def _local_builds(
+    compiler: Any, runtime_name: str, pypto_sources: list[tuple[str, str]]
+) -> tuple[ComponentInputs, ...]:
+    """Identify the actual imports, selected tools and resolver-selected ISA."""
+    from ._toolchain import _cann_install_version, _run  # noqa: PLC0415
+
+    if sys.platform != "linux":
+        raise ValueError(f"Unsupported build identity platform: {sys.platform}")
+    native = _module_path("pypto.pypto_core")
+    runtime_native = _module_path("_task_interface")
+    runtime_module = importlib.import_module("_task_interface")
+    revision = getattr(runtime_module, "__build_commit__", "")
+    root = compiler.project_root
+    # Source builds compile orchestration helpers from the runtime checkout;
+    # wheels ship those sources under _assets and record their build revision.
+    if (root / ".git").exists():
+        revision = _run(["git", "-C", str(root), "rev-parse", "HEAD"]).strip()
+    if not revision:
+        raise ValueError(f"Runtime source build revision is unavailable: {root}")
+    metadata_path = root / "build/lib/pto_isa_build.json"
+    runtime_build = metadata_path.read_bytes() if metadata_path.is_file() else None
+    device: list[Any] = [_compiler_identity(compiler._orchestration_toolchain(runtime_name).cxx_path)]
+    if compiler.platform.endswith("sim"):
+        device.append(_compiler_identity(compiler.sdk.gxx15.cxx_path))
+    else:
+        ccec = Path(compiler.sdk.ccec.cxx_path).resolve(strict=True)
+        cann_layout = tuple(p.name for p in ccec.parents[:3]) == ("bin", "bisheng_compiler", "tools")
+        cann_version = _cann_install_version(ccec.parents[3]) if cann_layout else ""
+        device.append((str(ccec), cann_version or native_build_id(ccec)))
+        linker = Path(compiler.sdk.ccec.linker_path).resolve(strict=True)
+        device.append((str(linker), native_build_id(linker)))
+    return (
+        _reported(
+            (
+                pypto_sources,
+                str(native),
+                native_build_id(native),
+                sys.version,
+                sys.implementation.cache_tag,
+            )
+        ),
+        _reported(
+            (
+                revision,
+                str(root),
+                _python_package("simpler"),
+                _python_package("simpler_setup"),
+                str(runtime_native),
+                native_build_id(runtime_native),
+                runtime_build,
+            )
+        ),
+        # This is the effective version selected by the resolver, not an extra
+        # compatibility gate. A hit needs neither a checkout nor a git status.
+        _reported(importlib.import_module("simpler_setup.pto_isa").read_pto_isa_pin(root / "pto_isa.pin")),
+        _reported(device),
+    )

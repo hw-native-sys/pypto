@@ -140,6 +140,7 @@ def fake_runtime(monkeypatch):
     monkeypatch.setitem(sys.modules, "simpler", simpler)
     monkeypatch.setitem(sys.modules, "simpler.task_interface", task_interface)
     monkeypatch.setitem(sys.modules, "pypto.runtime.task_interface", task_interface)
+    monkeypatch.setitem(sys.modules, "_task_interface", task_interface)
     runner: Any = ModuleType("pypto.runtime.device_runner")
     runner.register_callable_identity = Mock()
     monkeypatch.setattr("pypto.runtime._callable_identity.register_callable_identity", Mock())
@@ -458,6 +459,34 @@ def test_ready_diagnostic_labels_do_not_execute_config(tmp_path, fake_runtime, m
         assert name_map is not None and name_map.parent == run
         assert json.loads(name_map.read_text())["callable_id_to_name"] == {"7": "kernel"}
     assert not list((tmp_path / "ready").rglob("*.pyc"))
+
+
+def test_prebuilt_preserves_editable_runtime_source_guard(tmp_path, fake_runtime, monkeypatch):
+    source = tmp_path / "runtime/python/simpler/__init__.py"
+    source.parent.mkdir(parents=True)
+    (tmp_path / "runtime/.git").write_text("gitdir: elsewhere")
+    monkeypatch.setattr(sys.modules["simpler"], "__file__", str(source), raising=False)
+    original = _prebuilt.importlib.import_module
+
+    def import_module(name):
+        if name == "simpler.task_interface":
+            raise ImportError("runtime source/binary revision mismatch")
+        return original(name)
+
+    monkeypatch.setattr(_prebuilt.importlib, "import_module", import_module)
+    with pytest.raises(ImportError, match="revision mismatch"):
+        _prebuilt._native_callable_interface()
+
+
+def test_ready_spec_uses_packaged_json_without_executing_python(tmp_path, fake_runtime, monkeypatch):
+    _generated(tmp_path, BuildKind.SINGLE_CHIP)
+    package_generated_sources(tmp_path, BuildKind.SINGLE_CHIP)
+    expected = _prebuilt.ready_spec(tmp_path, _spec(BuildKind.SINGLE_CHIP))
+    monkeypatch.setattr(
+        "pypto.runtime._artifact_sources.read_kernel_config",
+        Mock(side_effect=AssertionError("READY must not execute kernel_config.py")),
+    )
+    assert _prebuilt.ready_spec(tmp_path, _spec(BuildKind.SINGLE_CHIP)) == expected
 
 
 def test_ready_spec_enumerates_all_child_binaries(tmp_path, fake_runtime):
@@ -802,6 +831,33 @@ def automatic_jit_case(tmp_path, fake_runtime, monkeypatch):
     return kernel, builds
 
 
+def test_ready_hit_validates_once_and_does_not_execute_generated_configuration(
+    tmp_path, automatic_jit_case, monkeypatch
+):
+    from pypto.jit import artifact_cache  # noqa: PLC0415
+
+    kernel, builds = automatic_jit_case
+    config = RunConfig(platform="a2a3sim", cache_config=CacheConfig(enabled=True, root=tmp_path / "cache"))
+    with passes.PassContext([]):
+        compiled = kernel.warmup(config=config)
+        kernel._artifact_objects.clear()
+        reads = Mock(wraps=artifact_cache.read_manifest)
+        monkeypatch.setattr(artifact_cache, "read_manifest", reads)
+        monkeypatch.setattr(
+            "pypto.runtime._artifact_runtime.read_manifest",
+            Mock(side_effect=AssertionError("must reuse the validated lookup manifest")),
+        )
+        monkeypatch.setattr(
+            "pypto.runtime._artifact_sources.read_kernel_config",
+            Mock(side_effect=AssertionError("must not execute generated Python")),
+        )
+        restored = kernel.warmup(config=config)
+    assert len(builds) == 1
+    assert restored is not compiled
+    assert reads.call_count == 1
+    assert reads.call_args.args[2].state is ArtifactState.BINARY_READY
+
+
 def test_published_artifact_is_restored_for_a_different_scalar_value(tmp_path, fake_runtime, monkeypatch):
     """A second process reuses the published artifact when only a scalar differs.
 
@@ -1093,6 +1149,7 @@ def test_storage_statistics_use_typed_failure_despite_changed_message(
 
 @pytest.mark.parametrize("command", ["GROUP ( libdependency.a )", "INPUT ( -ldependency )"])
 def test_unresolved_linker_dependency_compiles_privately(tmp_path, automatic_jit_case, monkeypatch, command):
+    monkeypatch.setenv("PYPTO_CACHE_IDENTITY", "content")
     from types import SimpleNamespace  # noqa: PLC0415
 
     from pypto.jit import _persistent, _toolchain  # noqa: PLC0415

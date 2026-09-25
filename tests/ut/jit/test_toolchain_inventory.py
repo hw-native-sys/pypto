@@ -27,6 +27,11 @@ from pypto._identity import (
 from pypto.jit import _toolchain
 
 
+@pytest.fixture(autouse=True)
+def content_policy(monkeypatch):
+    monkeypatch.setenv("PYPTO_CACHE_IDENTITY", "content")
+
+
 def test_component_preserves_content_changes_without_metadata_change(tmp_path):
     header = tmp_path / "include/header.h"
     header.parent.mkdir()

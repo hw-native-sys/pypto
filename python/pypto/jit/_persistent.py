@@ -94,6 +94,21 @@ class JITArtifactStore(ArtifactStore):
             _event(result.status)
         return result
 
+    def lookup_ready(self, key: ArtifactKey, generated: ArtifactSpec) -> ArtifactLookup:
+        """Use JSON only to select a READY slot, then validate its complete payload.
+
+        The GENERATED tree is not consumed on a READY hit. Malformed or absent
+        hints fall back to ordinary GENERATED validation; they never authorize
+        an artifact or execute cached Python.
+        """
+        from pypto.runtime._prebuilt import ready_spec  # noqa: PLC0415
+
+        try:
+            spec = ready_spec(self._slot(key, generated), generated, metadata_only=True)
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            return ArtifactLookup(LookupStatus.MISS)
+        return self.lookup(key, spec)
+
     def get_or_build(self, key: ArtifactKey, spec: ArtifactSpec, builder: Callable[[Path], Any]) -> Any:
         binary = spec.state is ArtifactState.BINARY_READY
         builder_ns = 0
@@ -224,6 +239,18 @@ def resolve_persistent(
             if distributed
             else ("compiled_meta.json", "kernel_config.py"),
         )
+        ready = store.lookup_ready(key, spec)
+        _event(ready.status)
+        if ready.handle is not None:
+            record_stats(ready_hits=1)
+            compiled = restore_artifact(
+                store,
+                ready.handle,
+                private_root / f"run-{uuid.uuid4().hex}",
+                _validated_manifest=ready.manifest,
+            )
+            owner._artifact_objects[compatible] = compiled
+            return compiled
         initial = store.lookup(key, spec)
         _event(initial.status)
         handle = initial.handle
@@ -232,7 +259,12 @@ def resolve_persistent(
             _event(ready.status)
             record_stats(**{"ready_hits" if ready.handle is not None else "generated_hits": 1})
             handle = ready.handle or handle
-            compiled = restore_artifact(store, handle, private_root / f"run-{uuid.uuid4().hex}")
+            compiled = restore_artifact(
+                store,
+                handle,
+                private_root / f"run-{uuid.uuid4().hex}",
+                _validated_manifest=ready.manifest if ready.handle is not None else initial.manifest,
+            )
             owner._artifact_objects[compatible] = compiled
             return compiled
         record_stats(misses=1)

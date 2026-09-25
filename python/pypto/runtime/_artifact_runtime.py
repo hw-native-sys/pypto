@@ -158,9 +158,19 @@ def _attach(compiled: Any, runtime: ArtifactRuntime, persisted_platform: str) ->
     compiled._artifact_runtime = runtime
 
 
-def restore_artifact(store: ArtifactStore, handle: ArtifactHandle, run_directory: Path) -> Any:
+def restore_artifact(
+    store: ArtifactStore,
+    handle: ArtifactHandle,
+    run_directory: Path,
+    *,
+    _validated_manifest: dict[str, Any] | None = None,
+) -> Any:
     """Restore metadata without IR, and attach the explicit artifact loading policy."""
-    manifest = read_manifest(handle.directory, handle.key, handle.spec)
+    manifest = (
+        read_manifest(handle.directory, handle.key, handle.spec)
+        if _validated_manifest is None
+        else _validated_manifest
+    )
     compiled = _restore_program_metadata(handle)
     runtime = ArtifactRuntime(store, handle, compiled.platform, run_directory)
     runtime._manifest = manifest
