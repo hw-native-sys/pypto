@@ -133,13 +133,10 @@ class BufferIRVisitor : public IRVisitor {
       view_handles_.insert(op->var_.get());
       if (window == windows_.end()) {
         Error("Buffer view requires proven source-window provenance", call->span_);
+      } else if (IsOp(call, "buffer.subview")) {
+        RegisterSubviewWindow(op->var_, call, window->second);
       } else {
-        uint64_t offset = window->second.offset;
-        if (IsOp(call, "buffer.subview")) {
-          const auto offsets = As<MakeTuple>(call->args_[1]);
-          offset += static_cast<uint64_t>(As<ConstInt>(offsets->elements_[0])->value_) * 32;
-        }
-        RegisterWindow(op->var_, window->second.root, offset);
+        RegisterWindow(op->var_, window->second.root, window->second.offset);
       }
     }
     if (As<ScalarType>(op->var_->GetType())) constants_[op->var_.get()] = ConstantAddress(op->value_);
@@ -314,6 +311,28 @@ class BufferIRVisitor : public IRVisitor {
     const auto [entry, inserted] = byte_sizes_.try_emplace(type.get(), std::nullopt);
     if (inserted) entry->second = backend::PhysicalBufferBytes(type);
     return entry->second;
+  }
+
+  // A static window spans from its first element to the end of its last row
+  // at the source's pitch. A runtime offset is only known to stay within the
+  // source window, which is therefore its conservative range.
+  void RegisterSubviewWindow(const VarPtr& variable, const CallPtr& call, const Window& source_window) {
+    const auto source = As<BufferType>(call->args_[0]->GetType());
+    const auto view = As<BufferType>(variable->GetType());
+    const auto offsets = As<MakeTuple>(call->args_[1]);
+    const auto row = As<ConstInt>(offsets->elements_[0]);
+    const auto col = As<ConstInt>(offsets->elements_[1]);
+    if (!row || !col) {
+      windows_[variable.get()] = source_window;
+      return;
+    }
+    const uint64_t element = source->dtype_.GetBit() / 8;
+    const uint64_t pitch = static_cast<uint64_t>(source->shape_[1]) * element;
+    windows_[variable.get()] = Window{source_window.root,
+                                      source_window.offset + static_cast<uint64_t>(row->value_) * pitch +
+                                          static_cast<uint64_t>(col->value_) * element,
+                                      static_cast<uint64_t>(view->shape_[0] - 1) * pitch +
+                                          static_cast<uint64_t>(view->shape_[1]) * element};
   }
 
   void RegisterWindow(const VarPtr& variable, const Var* root, uint64_t offset) {

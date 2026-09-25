@@ -23,7 +23,7 @@ namespace backend {
 
 /// Native precision attributes are selected by the recipe, never by lowering text.
 enum class BufferPrecisionKind { None, Div, Log, Recip };
-enum class BufferElementwiseTypePolicy { MatchingVec, StaticDenseFP32 };
+enum class BufferElementwiseTypePolicy { MatchingVec, DenseFP32 };
 enum class BufferDestinationAliasPolicy { ExactOrDisjoint, Disjoint };
 enum class BufferElementwiseOperandKind { Buffer, ElementScalar };
 
@@ -42,7 +42,7 @@ struct BufferElementwiseRecipe {
   const char* native_op;
   std::vector<BufferElementwiseInput> inputs;
   BufferPrecisionKind precision = BufferPrecisionKind::None;
-  BufferElementwiseTypePolicy types = BufferElementwiseTypePolicy::StaticDenseFP32;
+  BufferElementwiseTypePolicy types = BufferElementwiseTypePolicy::DenseFP32;
   BufferDestinationAliasPolicy destination_alias = BufferDestinationAliasPolicy::ExactOrDisjoint;
 };
 

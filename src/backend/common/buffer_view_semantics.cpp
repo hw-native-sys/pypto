@@ -11,10 +11,12 @@
 
 #include "pypto/backend/common/buffer_view_semantics.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pypto/backend/common/buffer_type_support.h"
@@ -90,24 +92,58 @@ void ValidateMatrixReshape(const ir::BufferTypePtr& source, const ir::BufferType
 
 }  // namespace
 
+// A strided window of a dense row-major Vec buffer: the result keeps the
+// source's row pitch, so any static-shape window fits, at static or runtime
+// offsets. Static byte windows of the UINT8[N,32] storage root are the
+// full-width special case. A result valid dimension is either static in the
+// descriptor or dynamic (-1); the optional valid tuple states every dimension
+// and is required when any is dynamic.
 void ValidateBufferSubview(const std::vector<ir::ExprPtr>& args, const ir::TypePtr& result) {
-  INTERNAL_CHECK(args.size() == 2 && args[0] && args[1])
-      << "Internal error: buffer.subview requires a source and offsets tuple";
-  auto source = StaticViewDescriptor(args[0]->GetType(), "buffer.subview");
-  auto destination = StaticViewDescriptor(result, "buffer.subview");
-  CHECK(source->dtype_ == DataType::UINT8 && destination->dtype_ == DataType::UINT8 &&
-        source->shape_[1] == 32 && destination->shape_[1] == 32 && source->valid_shape_ == source->shape_ &&
-        destination->valid_shape_ == destination->shape_)
-      << "buffer.subview currently requires full-valid UINT8[N,32] source and result descriptors";
+  INTERNAL_CHECK((args.size() == 2 || args.size() == 3) && args[0] && args[1])
+      << "Internal error: buffer.subview requires a source, an offsets tuple and optional valid extents";
+  auto source = ir::As<ir::BufferType>(args[0]->GetType());
+  auto destination = ir::As<ir::BufferType>(result);
+  for (const auto& [type, role] : {std::pair{source, "source"}, std::pair{destination, "result"}}) {
+    CHECK(type && type->shape_.size() == 2 && type->memory_space_ == ir::MemorySpace::Vec &&
+          DenseBufferBytes(type).has_value())
+        << "buffer.subview " << role << " must be a dense rank-2 row-major Vec buffer";
+  }
+  CHECK(source->dtype_ == destination->dtype_)
+      << "buffer.subview must keep the element type, got " << source->dtype_.ToString() << " -> "
+      << destination->dtype_.ToString();
   auto offsets = ir::As<ir::MakeTuple>(args[1]);
   CHECK(offsets && offsets->elements_.size() == 2) << "buffer.subview offsets must be a rank-2 MakeTuple";
-  auto row = ir::As<ir::ConstInt>(offsets->elements_[0]);
-  auto col = ir::As<ir::ConstInt>(offsets->elements_[1]);
-  CHECK(row && col && row->dtype() == DataType::INDEX && col->dtype() == DataType::INDEX &&
-        row->value_ >= 0 && col->value_ == 0)
-      << "buffer.subview requires static INDEX offsets (nonnegative row, zero column)";
-  CHECK(row->value_ <= source->shape_[0] && destination->shape_[0] <= source->shape_[0] - row->value_)
-      << "buffer.subview window exceeds source capacity";
+  for (size_t axis = 0; axis < 2; ++axis) {
+    const auto& offset = offsets->elements_[axis];
+    auto scalar = offset ? ir::As<ir::ScalarType>(offset->GetType()) : nullptr;
+    CHECK(scalar && (scalar->dtype_.IsInt() || scalar->dtype_ == DataType::INDEX))
+        << "buffer.subview offset " << axis << " must be an integer or INDEX scalar";
+    const auto extent = destination->shape_[axis];
+    CHECK(extent <= source->shape_[axis]) << "buffer.subview window dimension " << axis << " (" << extent
+                                          << ") exceeds the source (" << source->shape_[axis] << ")";
+    if (auto constant = ir::As<ir::ConstInt>(offset)) {
+      CHECK(constant->value_ >= 0 && constant->value_ <= source->shape_[axis] - extent)
+          << "buffer.subview window exceeds source capacity on dimension " << axis;
+    }
+  }
+  const bool dynamic = destination->valid_shape_[0] < 0 || destination->valid_shape_[1] < 0;
+  CHECK(!dynamic || args.size() == 3)
+      << "buffer.subview requires a valid-extents tuple when its result has a dynamic valid dimension";
+  if (args.size() == 3) {
+    auto valid = ir::As<ir::MakeTuple>(args[2]);
+    CHECK(valid && valid->elements_.size() == 2) << "buffer.subview valid extents must be a rank-2 MakeTuple";
+    for (size_t axis = 0; axis < 2; ++axis) {
+      const auto& extent = valid->elements_[axis];
+      auto scalar = extent ? ir::As<ir::ScalarType>(extent->GetType()) : nullptr;
+      CHECK(scalar && (scalar->dtype_.IsInt() || scalar->dtype_ == DataType::INDEX))
+          << "buffer.subview valid extent " << axis << " must be an integer or INDEX scalar";
+      if (destination->valid_shape_[axis] >= 0) {
+        auto constant = ir::As<ir::ConstInt>(extent);
+        CHECK(constant && constant->value_ == destination->valid_shape_[axis])
+            << "buffer.subview valid extent " << axis << " must equal the static descriptor dimension";
+      }
+    }
+  }
 }
 
 void ValidateBufferReshape(const std::vector<ir::ExprPtr>& args, const ir::TypePtr& result) {
