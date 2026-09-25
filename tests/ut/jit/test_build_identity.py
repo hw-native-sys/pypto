@@ -163,6 +163,7 @@ def test_ptoas_probe_uses_script_directory_before_importing_helpers(tmp_path):
     result = subprocess.run(
         [sys.executable, "-S", "-c", identity._PTOAS_PROBE, str(launcher_dir)],
         cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": ""},
         check=True,
         capture_output=True,
         text=True,
