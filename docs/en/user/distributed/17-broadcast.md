@@ -123,7 +123,8 @@ Compile with pass dumps enabled and diff the two modes' lowered IR:
   through a staging tile) rather than your `remote_load` + `pl.store` pair;
   and the composite appends a **self-clearing epilogue** that subtracts this
   call's credits back out, which is what makes the signal reusable by a later
-  collective (step 16). Direction and barrier placement are yours.
+  collective ([21-putting_it_together](21-putting_it_together.md), step 16).
+  Direction and barrier placement are yours.
 
 **Cost card (per rank):** root writes `N` bytes; every peer reads them —
 `(P-1)·N` total bytes in one step. This is the cheapest collective per byte

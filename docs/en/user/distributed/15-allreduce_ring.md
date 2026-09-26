@@ -105,6 +105,20 @@ chunk to every rank.
   two adjacent ranks ever synchronize: O(P) signals **per rank** (O(P²)
   system-wide) — versus the O(P²) per rank a full-mesh barrier per round would
   cost.
+- **Row 0 isn't written by the RS loop itself.** The excerpt above starts at
+  `left = ...`, but round `s=0`'s wait (`signal, offsets=[0, left]`) depends
+  on a notify the RS loop never sends: a stage-in phase, right before it,
+  copies each local chunk into `scratch` and then notifies the right
+  neighbour at row 0 — the same stage-before-notify ordering every
+  hand-rolled collective in this ladder uses (only the ring notifies a
+  single neighbour instead of every peer), just easy to miss when only the
+  loop body is quoted.
+- **The last all-gather round sends no notify.** Its own loop guards the
+  final round with `if s < nranks - 2:` — the row that round's notify would
+  use, `2*(nranks-1)`, is past the signal's last valid row
+  (`2*(nranks-1) - 1`), and nothing downstream needs to wait on it anyway.
+  Look for this exact guard if you're diffing the doc against the source and
+  wondering why the last round's notify is missing.
 
 **Cost card (per rank):** `2 * (P-1) / P * N` total — the same as two-phase —
 but in `2*(P-1)` steps of `N/P` bytes each. Under weak scaling the per-step

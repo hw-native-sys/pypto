@@ -27,6 +27,12 @@ sum into two stages, each moving `N/P`-sized pieces:
 Each stage moves `(P-1) * N/P` bytes, so the total is `2 * (P-1) / P * N` —
 roughly half of mesh's traffic, at the price of a second barrier.
 
+Two-phase never becomes a `mode=` option on `pld.tensor.allreduce` — the
+builtin only ever picks `"mesh"` (default) or `"ring"` (step 11). This step
+exists to isolate one idea (chunk the traffic) from ring's other idea (also
+go neighbour-local), so each can be understood on its own before step 10
+combines them.
+
 ## Run it
 
 ```bash

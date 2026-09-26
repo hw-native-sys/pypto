@@ -51,8 +51,10 @@ any rank producing the wrong *order* (or its own slice) fails.
 
 ## Walkthrough
 
-Both modes share one `[nr, SIZE]` window: each rank stages at its own row and
-reads every row back. The hand-rolled kernel:
+Both modes share one `[nr, SIZE]` window: each rank ends up staged at its own
+row and reads every row back — in the hand-rolled kernel the caller does the
+staging explicitly; in the reveal below, the push happens inside the call
+instead. The hand-rolled kernel:
 
 ```python
 @pl.function(type=pl.FunctionType.InCore)
@@ -133,7 +135,8 @@ barrier lands on the other side of the transfer.
   path via HCCL identity mapping.
 - After the barrier the composite emits a **self-clearing epilogue** that
   subtracts this call's credits back out, which is why the same signal can be
-  reused by a later collective (see step 16).
+  reused by a later collective (see
+  [21-putting_it_together](21-putting_it_together.md), step 16).
 
 **Cost card (per rank):** each rank sends `N/P` bytes to every peer, so each
 rank receives `(P-1)/P · N` bytes — the gather half of two-phase all-reduce
@@ -145,6 +148,14 @@ rank receives `(P-1)/P · N` bytes — the gather half of two-phase all-reduce
 > not match the peer's rank (`y[peer]` written from peer `p` but offset by
 > `p+1`), every rank is internally consistent and the golden still fails —
 > order is the contract. **Fix:** offset `peer * SIZE` for peer `peer`.
+>
+> **Fatal pitfall — reusing one window for source and result.** `target` is
+> rebound as the window-as-result, but `local_data` must be a separate
+> buffer — the same constraint `all_to_all` enforces (step 15). Passing the
+> same window as both is a cross-process data race: a peer's push into
+> `target` can land while you're still reading from it as `local_data`.
+> **Fix:** keep the source distinct from the target, as the example does —
+> the builtin enforces this too.
 
 | Symptom | Likely cause | Fix |
 | ------- | ------------ | --- |
@@ -152,6 +163,7 @@ rank receives `(P-1)/P · N` bytes — the gather half of two-phase all-reduce
 | Every rank shows its own slice | Read from own window instead of peers | `remote_load` each `peer` at `[peer, 0]` |
 | `pld.tensor.allgather local_data must be a plain Tensor` | A `DistributedTensor` window passed as the source on the InCore path | The source must be a plain `pl.Tensor [1, SIZE]` distinct from `target`; the window form is accepted only on the HOST path |
 | `pld.tensor.allgather input must be a Tensor or DistributedTensor` | A tile passed as the source — rejected earlier, by the type deducer | Pass the tensor itself, not a `pl.load` of it |
+| `pld.tensor.allgather input and target must be different buffers` | Same window passed as both `local_data` and `target` | Allocate a distinct source buffer |
 | Concatenation has gaps/overlaps | Stage/gather offset mismatch | Stage row `my_rank`; read row `peer` |
 | Stale data at P=4 | Barrier missing between stage and gather | Notify/wait covers all `nr` peers before the read loop |
 
