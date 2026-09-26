@@ -1076,6 +1076,48 @@ class TestSliceInputStrides:
         After = _run_to_optimize_orch_tensors(Before)
         ir.assert_structural_equal(After, Before)
 
+    def test_nz_in_param_gets_no_parent_stride(self):
+        """An NZ In param fed by a slice keeps an empty stride.
+
+        Row-major parent strides do not describe fractal-blocked NZ bytes.
+        BlockNzTensorViews derives the real strides from the blocked shape and
+        refuses any explicit one, so a stamped ``[512, 1]`` would surface there
+        as a stride error the user never wrote.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def shard_incore_0(
+                self,
+                x: pl.Tensor[[64, 512], pl.INT8],
+                w: pl.Tensor[[256, 512], pl.INT8, pl.NZ],
+                ret0__out: pl.Out[pl.Tensor[[64, 256], pl.INT32]],
+            ) -> pl.Tensor[[64, 256], pl.INT32]:
+                x__tile: pl.Tile[[64, 512], pl.INT8, pl.Mem.Mat] = pl.load(
+                    x, [0, 0], [64, 512], target_memory=pl.Mem.Mat
+                )
+                w__tile: pl.Tile[[256, 512], pl.INT8, pl.Mem.Mat] = pl.load(
+                    w, [0, 0], [256, 512], target_memory=pl.Mem.Mat
+                )
+                acc = pl.matmul(x__tile, pl.tile.transpose_view(w__tile), out_dtype=pl.INT32)
+                ret0__store: pl.Tensor[[64, 256], pl.INT32] = pl.store(acc, [0, 0], ret0__out)
+                return ret0__store
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def shard(
+                self,
+                x: pl.Tensor[[64, 512], pl.INT8],
+                w_all: pl.Tensor[[2, 256, 512], pl.INT8, pl.NZ],
+            ) -> pl.Tensor[[64, 256], pl.INT32]:
+                w = w_all[1]
+                ret0__out: pl.Tensor[[64, 256], pl.INT32] = pl.create_tensor([64, 256], dtype=pl.INT32)
+                result: pl.Tensor[[64, 256], pl.INT32] = self.shard_incore_0(x, w, ret0__out)
+                return result
+
+        After = passes.optimize_orch_tensors()(Before)
+        ir.assert_structural_equal(After, Before)
+
 
 class TestOutWindowExternalizer:
     """Pattern 5: static out-window externalization."""

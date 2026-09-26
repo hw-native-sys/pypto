@@ -173,6 +173,17 @@ The layout-only shorthand `pl.Tensor[..., pl.DN]` is not supported: it raises
 `pl.matmul`, or derive the transposed view at the use site with `pl.transpose(x, -2, -1)`.
 A slice or reshape of a DN-producing operation inherits DN automatically.
 
+A `device=` dispatch is the other exception: the host only says which card a buffer goes to, so
+an ND host tensor holding NZ-packed bytes may bind a `pl.NZ` parameter of the device program.
+That holds only for whole matrices — the host tensor itself, or a slice that keeps its last two
+axes whole, such as the rank shard `w[r]` of a `[N_RANKS, R, C]` stack. A window inside the
+matrix (`w[r * R : (r + 1) * R]` of a once-packed `[N_RANKS * R, C]` weight) is rejected: those
+rows are contiguous, but they are runs of several fractal column blocks, not an NZ-packed
+`[R, C]`. Pack each shard separately and stack the shards instead. An argument the checker
+cannot trace back to a host parameter through such slices — a reshape, a newly created tensor —
+is rejected too. The trace stays within the dispatching function, so a window passed into a
+helper function arrives there as a parameter and is not followed back to its caller.
+
 `pl.ND` is the default row-major layout and never needs writing. `pl.NZ` asserts that the
 tensor's bytes in global memory are *already* stored in PTO-native NZ fractal order, so a
 matmul weight load can skip the online ND→NZ conversion. It is an assertion about existing

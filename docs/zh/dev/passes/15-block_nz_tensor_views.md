@@ -117,10 +117,13 @@ wt: pl.Tile[[256, 512], pl.INT8, pl.Mem.Mat] =
 | -------- | -------------- | ---- |
 | `AssignStmt`（`n0 = nb * 256`） | 乘积中的某个因子是倍数 | 两个因子都非负 |
 | `ForStmt`（`for k0 in pl.pipeline(512, 4096, 512)`） | `start` 与 `step` 同时是倍数 | `start` 与 `step` 同时非负 |
+| 符号 start 的 `ForStmt`（`for ob in pl.range(core, TILES, CORES)`） | 向 `start` 与 `step` 递归 | 向 `start` 与 `step` 递归 |
+| `Min` / `Max`（`min(800 - o0, 256)`） | 两个操作数都是倍数 | `Min`：两个操作数都非负；`Max`：任一即可 |
 | `tile.get_block_idx` / `tile.get_block_num` | —— | lane 编号不可能为负 |
+| 对正常量取模 / 整除（`(blk % 2) * 512`） | 由另一个因子承担 | 两者都向下递归：被除数也必须非负 |
 | `ConstInt` | 该值本身是倍数 | 该值 `>= 0` |
 
-在此基础上，和与乘积可以组合；差能证明整除性但无法证明符号，因此被拒绝。**两列必须
+在此基础上，和与乘积可以组合；差能证明整除性但无法证明符号，因此被拒绝。对正常量的取模与整除，符号是从被除数证明的，而不是从运算的名字：`FloorMod` 降级为 `arith.remsi`、`FloorDiv` 降级为 `arith.divsi`，两者都向零截断，因此负的被除数会得到负的余数。**两列必须
 同时成立**——见[为什么符号也要证明](#为什么符号也要证明)。因此催生该特性的
 grouped-matmul 权重路径现在可以编译：
 
@@ -220,11 +223,18 @@ GlobalTensor<int8_t, pto::Shape<1, 16, 16, 16, 32>,
 | 末尾切片偏移为符号形式但符号无法证明 | 拒绝——负 offset 在 partition view 上会被钳位而不是报错 |
 | 逻辑 rank 2 | 分块为 `[1, C/c0, R/16, 16, c0]`——batch 具化 |
 | 逻辑 rank 3 | 分块为 `[B, C/c0, R/16, 16, c0]`——前导轴即 batch |
+| 逻辑 rank > 3 | 分块时把所有前导轴折叠进 batch 槽位（见下） |
 | 逻辑 rank < 2 | 拒绝——末尾两维是分形平面 |
-| 逻辑 rank > 3 | 拒绝——一个 batch 槽位装不下两个前导轴（见下） |
+| rank > 3 且前导维为动态 | 拒绝——折叠需要静态 extent 相乘 |
 | `target_memory != Mat`（或缺省） | 拒绝——NZ→NZ 是 cube 操作数路径 |
-| `tile.load` 之外的消费者 | 拒绝——此处 NZ 是只读的 |
+| `tensor.slice` 只收窄前导轴 | 与其后的 load 一样分块（见下） |
+| `tensor.slice` 在末尾 `[R, C]` 平面上开窗 | 拒绝——该窗口不连续 |
+| `tensor.reshape` 把整块张量展平成 `[N]` | 原样保留——见[展平 NZ 张量](#展平-nz-张量) |
+| `tensor.reshape` 成其它形状 | 拒绝——它重新解释了分块形式无法承载的坐标 |
+| `tile.load` / `tensor.slice` / 整块展平之外的消费者 | 拒绝——此处 NZ 是只读的 |
 | 显式 stride 或部分 `valid_shape` | 拒绝 |
+| 动态 `valid_shape[-2]` 可证明是 16 的倍数（不规则的最后一个 tile） | 分块——行 fractal 数变为 `FloorDiv(rows, 16)` |
+| 动态 `valid_shape[-2]` 可能止于 fractal 内部 | 拒绝——不完整的 fractal 没有分块形式 |
 | 分布式张量 | 拒绝——`remote_load` 没有 NZ 分块 |
 | 对 NZ 做 `tensor.view` / `tensor.reinterpret_view` | 在算子构造期拒绝 |
 | 多列块 load 的 GM 行间隔超过 65535 个 block | 拒绝——**临时**，见 [GM 行间隔：一道临时防护](#gm-行间隔一道临时防护) |
@@ -268,7 +278,8 @@ gmGap = (gStride1 - gShape2*gShape3*gShape4) * sizeof(T) / 32
 因此收窄的 `valid_shape` 载入的行 fractal **更少**，留下的间隔反而**更大**，比只看
 `shapes` 得到的值更大。一个 `[65552, 64]` 的 INT8 权重若以 `shapes=[32, 64]`、
 `valid_shape=[16, 64]` 读取，生成的是 `partition_tensor_view<1x2x1x16x32>`，
-间隔为 65536，而不是 `shapes` 暗示的 65520。
+间隔为 65536，而不是 `shapes` 暗示的 65520。载入的行范围为动态时（不规则的最后一个
+tile），检查按最坏情况——一行都不载入——计算，因此通过检查的 load 对任意运行期宽度都成立。
 
 **单列块 load 不受此限制。** `TLoadGm2L1Nz2nz` 把 load 自身的列块数作为 `nBurst`
 传入，而 DMA 只在从一个 burst 跨到下一个时才使用 `gmGap`，因此只有一个 burst 时那个
@@ -278,17 +289,52 @@ gmGap = (gStride1 - gShape2*gShape3*gShape4) * sizeof(T) / 32
 
 [hw-native-sys/pto-isa#317]: https://github.com/hw-native-sys/pto-isa/issues/317
 
-### 为什么拒绝逻辑 rank 4+
+### 前导轴折叠进唯一的 batch 槽位
 
 pto-isa 的 NZ `GlobalTensor` 只有**一个** batch 槽位，因此逻辑 `[G, E, N, K]` 权重
-必须把两个前导轴折叠进去。这个折叠在 *shape* 上是可证的——稠密行主序张量的前导
-stride 恰好塌缩为 `G*E`、stride 为 `C*R`——但在 *offsets* 上不成立：切片
-`w[g, e, ...]` 需要把坐标重结合成 `g*E + e`，而这正是 `BlockNzOffsets` 拒绝凭空
-造出的算术（重结合为何在一般情况下不可靠，见[符号形式的末尾
-offset](#符号形式的末尾-offset)）。在标注处拒绝可以点名这条限制；否则得到的是一个
-PTOAS 拒绝、且报错指向用户从未写过的 SSA 名的 view。
+把两个前导轴折叠进去：分块后的 batch 是 `G*E`，stride 为 `C*R`。折叠是精确的——这些
+轴稠密且行主序，折叠拿掉的 stride 正是它乘回去的那些——offset 以同样方式折叠，
+`[g, e, 0, 0]` 寻址 batch `g*E + e`（`FoldNzLeadingOffsets`）。
 
-请在 NZ 标注前 reshape 成 `[B, R, C]`，或把该张量标注为 `pl.ND`。
+这与[末尾 offset 拒绝的重结合](#为什么是整体相除而不是代数重组)不同：这里没有除法，
+也不对对齐做任何假设，因此折叠对任意坐标都精确，而不只对对齐的坐标成立。它就是 ND
+路径在地址计算时做的同一套算术，只是提前写进了坐标里。
+
+被折叠的 extent 必须是静态的——动态 extent 无法乘进 batch——诊断会点名这一点。
+
+逻辑 rank-3 的 `[B, R, C]` 参数支持动态 batch。对应的 `DeviceTensor.shape` 或
+`StackedDeviceTensor.full_shape` 也必须是 rank 3：入口从第一个逻辑维度读取 `B`。
+即使分块形状能够匹配，rank-2 或 rank-4+ 的实参也会在 dispatch 前被拒绝。
+
+多卡入口声明的正是 rank-4 参数（`[RANKS, E, R, C]`，dispatch 前按 rank 切片），
+因此这个折叠是分布式程序能携带 NZ 权重的前提。
+
+### 对 NZ 张量做切片
+
+按层或按 rank 堆叠的权重是通过 `tensor.slice` 到达 kernel 的，因此切片与其后的
+`tile.load` 一样分块：shapes 与 offsets 变成 rank-5；降秩的标量索引（`w[r]`）之后
+不再需要 `drop_dims`，因为折叠已经把所有前导轴合并掉了。
+
+只有**前导**轴可以被收窄。在末尾 `[R, C]` 平面上开窗会被拒绝：按 NZ 的字节序，某一层
+的行分布在*每一个*分形列块内部，因此 `[layer*R, 0]` 选出的是 `C/c0` 段不连续的数据，
+而分块 view 自身没有 stride 来描述它们——`MaterializeTensorStrides` 是从分块 shape
+推导行主序 stride 的。请把堆叠轴放成前导轴（`[LAYERS, R, C]`），而不是按行堆叠。
+
+### 展平 NZ 张量
+
+覆盖*全部*元素的 rank-1 view 与 layout 无关：分块形式重排的是索引空间而不是内存，
+两种写法走的是同一段连续 GM、顺序也相同。因此这样的 `tensor.reshape` 被原样保留
+——不改写坐标，结果是 ND，正好是 `prefetch.async_prefetch` 对源张量的要求。没有
+这条规则，给权重标注 `pl.NZ` 就会悄悄让它失去 SDMA L2 预热。
+
+其它目标形状确实重新解释了坐标——`[256, 512] -> [128, 1024]` 是按逻辑行主序把行
+两两合并，而在分块形式下这些元素散落在不同的分形块里——所以会被拒绝，而不是当作
+ND 去寻址。
+
+NZ 实参到达 orchestration 入口时同样带着*逻辑* shape：调用方就是按逻辑 shape 分配
+权重的，只有编译后的形参是分块的。入口处会把它一次性改写成分块形式（纯元数据的
+reshape，元素与顺序都不变），这样由它派生的每个 `Tensor::view` 都是按同一个 rank
+去做 clamp 的。
 
 sub-byte dtype（INT4 / UINT4 / FP4 / HF4 / BOOL）被拒绝，这是 **PyPTO 里程碑 1 的
 范围限制，不是硬件限制**——pto-isa 的 NZ 机制确实处理 FP4（`tload_common.hpp` 中有
@@ -309,14 +355,14 @@ shape"。因此本 pass 会在每个改写过的函数上打 `nz_tensor_views_bl
 
 ## 汇编器版本
 
-本 pass 的输出能否汇编取决于 PTOAS 版本，而仓库当前钉住的版本还不是能工作的那个。
+本 pass 要求 PTOAS 0.61 或更新版本，才能汇编显式 NZ view。
 
 | PTOAS | 行为 |
 | ----- | ---- |
 | ≤ 0.60 | 通过结构推断 layout。分块 NZ 与 ND 在结构上完全相同（都是行主序），因此推断出 `nd` 并覆盖显式的 `nz` 标注，报 `layout mismatch: user-specified layout=nz but inferred=nd`。任何秩的 NZ view 都无法汇编。 |
 | ≥ 0.61 | 把显式的 `ND` / `DN` / `NZ` 标注视为权威并加以校验，因此上面的描述符可以汇编。它同时直接强制 NZ 的 arity：秩不为 5 的 view 会被 `'pto.make_tensor_view' op user-specified layout=nz requires a rank-5 view` 拒绝。 |
 
-`toolchain/versions.env` 钉的是 **v0.61**，所以在钉住的工具链上 `pl.NZ` 已经端到端可用。
+`toolchain/versions.env` 钉的是 **v0.66**，所以在钉住的工具链上 `pl.NZ` 已经端到端可用。
 `tests/st/runtime/ops/test_matmul_nz.py` 是这一点的保障：ND 激活乘 NZ 权重，配套的 host
 packer 负责生成 fractal 字节；此外还有切片用例分别钉住两个偏移轴——行 fractal
 (`n0 // 16`) 和 C0 列块 (`k0 // c0`)。整张量 load 的所有偏移都是 0，因此仅靠基线用例

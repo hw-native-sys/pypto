@@ -20,7 +20,7 @@ description the backend needs.
 What this guards is that the weight's ``TLOAD`` is NZ->NZ rather than ND->NZ,
 so no online fractal conversion runs on the weight load.
 
-Three kernels cover the two coordinate axes the pass has to map, because a
+Four kernels cover the three coordinate axes the pass has to map, because a
 whole-tensor load leaves every offset zero and so exercises none of them:
 
 | Kernel | Weight window | Offset under test |
@@ -28,6 +28,7 @@ whole-tensor load leaves every offset zero and so exercises none of them:
 | ``nz_matmul`` | all of ``[N, K]`` | none — the baseline |
 | ``nz_matmul_n_sliced`` | two ``[N/2, K]`` halves | row fractal, ``n0 // 16`` |
 | ``nz_matmul_k_sliced`` | ``[N, K/2]`` upper half | C0 column block, ``k0 // c0`` |
+| ``nz_matmul_layer_sliced`` | one layer of ``[LAYERS, N, K]`` | batch, through a ``pl.slice`` |
 
 Inputs are small integers so the FP32 accumulation is exact and the comparison
 runs at ``rtol=atol=0``: a mis-addressed fractal reads entirely different
@@ -46,6 +47,7 @@ from harness import st
 M, K, N = 64, 256, 128
 N_TILE = N // 2
 K_TILE = K // 2
+LAYERS, LAYER = 3, 2
 
 # One 32-byte C0 line and a 16-row fractal are the two constants that define
 # pto-isa's NZ blocking; `c0` is the number of *elements* in that line, so it
@@ -182,6 +184,53 @@ def nz_matmul_k_sliced(
     return _nz_matmul_k_sliced_kernel(x, w, out)
 
 
+@pl.jit.inline(auto_scope=False)
+def _nz_matmul_layer_body(
+    x: pl.Tensor[[M, K], pl.FP16],
+    w_layer: pl.Tensor[[1, N, K], pl.FP16, pl.NZ],
+    out: pl.Tensor[[M, N], pl.FP32],
+):
+    """The same product against one layer's window, written at tensor level.
+
+    A rank-3 window reaches the cube through ``pl.matmul_acc``, not
+    ``pl.load`` + ``pl.matmul``: a tile-level load of one would produce a rank-3
+    tile, which the matmul rejects at parse time. It is also how the grouped
+    expert this feature exists for reads its weight.
+    """
+    for nb in pl.spmd(N // N_TILE, name_hint="nz_layer_mm"):
+        n0 = nb * N_TILE
+        acc = pl.create_tensor([1, M, N_TILE], dtype=pl.FP32)
+        for k0 in pl.pipeline(0, K, K, stage=2):
+            acc = pl.matmul_acc(
+                acc,
+                x[0:M, k0 : k0 + K],
+                w_layer[0:1, n0 : n0 + N_TILE, k0 : k0 + K],
+                b_trans=True,
+                init_cond=(k0 == 0),
+            )
+        out[:, n0 : n0 + N_TILE] = pl.reshape(acc, [M, N_TILE])
+
+
+@pl.jit(auto_scope=False)
+def nz_matmul_layer_sliced(
+    x: pl.Tensor[[M, K], pl.FP16],
+    w: pl.Tensor[[LAYERS, N, K], pl.FP16, pl.NZ],
+    out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+) -> pl.Tensor[[M, N], pl.FP32]:
+    """A layer-stacked weight, sliced on its leading axis before the matmul.
+
+    This is how a multi-layer model reaches one layer's weight, and it is the
+    axis the blocked view can narrow: the slice keeps whole ``[N, K]`` matrices,
+    so its bytes stay contiguous. Reading ``LAYER`` rather than layer 0 is what
+    makes a dropped batch offset visible — layer 0's product would otherwise
+    match by accident.
+    """
+    w_layer: pl.Tensor[[1, N, K], pl.FP16, pl.NZ] = pl.slice(w, [1, N, K], [LAYER, 0, 0])
+    with pl.scope():
+        _nz_matmul_layer_body(x, w_layer, out)
+    return out
+
+
 # ============================================================================
 # Cases
 # ============================================================================
@@ -201,6 +250,21 @@ def _full_golden(tensors: dict[str, torch.Tensor]) -> torch.Tensor:
     return torch.matmul(x, w.T)
 
 
+def _layer_inputs() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``LAYERS`` distinct weights; only ``LAYER``'s may reach the product."""
+    generator = torch.Generator().manual_seed(23)
+    x = torch.randint(-4, 5, (M, K), generator=generator).to(torch.float16)
+    w_logical = torch.randint(-4, 5, (LAYERS, N, K), generator=generator).to(torch.float16)
+    packed = torch.stack([_pack_nz(w_logical[layer]) for layer in range(LAYERS)])
+    return x, packed, torch.zeros((M, N), dtype=torch.float32)
+
+
+def _layer_golden(tensors: dict[str, torch.Tensor]) -> torch.Tensor:
+    x = tensors["x"].to(torch.float32)
+    w = _unpack_nz(tensors["w"][LAYER]).to(torch.float32)
+    return torch.matmul(x, w.T)
+
+
 def _k_sliced_golden(tensors: dict[str, torch.Tensor]) -> torch.Tensor:
     x = tensors["x"].to(torch.float32)[:, K_TILE:]
     w = _unpack_nz(tensors["w"]).to(torch.float32)[:, K_TILE:]
@@ -208,14 +272,15 @@ def _k_sliced_golden(tensors: dict[str, torch.Tensor]) -> torch.Tensor:
 
 
 def _nz_cases():
-    for kernel, label, golden in (
-        (nz_matmul, "full", _full_golden),
-        (nz_matmul_n_sliced, "n_sliced", _full_golden),
-        (nz_matmul_k_sliced, "k_sliced", _k_sliced_golden),
+    for kernel, label, golden, inputs in (
+        (nz_matmul, "full", _full_golden, _inputs),
+        (nz_matmul_n_sliced, "n_sliced", _full_golden, _inputs),
+        (nz_matmul_k_sliced, "k_sliced", _k_sliced_golden, _inputs),
+        (nz_matmul_layer_sliced, "layer_sliced", _layer_golden, _layer_inputs),
     ):
         yield st.case(
             kernel,
-            *_inputs(),
+            *inputs(),
             name=f"matmul_nz_{label}_{M}x{K}x{N}",
             golden=golden,
             rtol=0.0,
