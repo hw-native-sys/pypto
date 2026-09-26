@@ -56,12 +56,24 @@
                 ]
               }
             ]
+          },
+          "existing_comment_id": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "minimum": 1
+              }
+            ]
           }
         },
         "required": [
           "title",
           "body",
-          "location"
+          "location",
+          "existing_comment_id"
         ]
       }
     }

@@ -68,8 +68,12 @@ def load_review(path: Path) -> dict:
         if not isinstance(finding, dict) or set(finding) not in (
             {"title", "body"},
             {"title", "body", "location"},
+            {"title", "body", "location", "existing_comment_id"},
         ):
             raise ValueError("Each finding must contain title, body, and optional location")
+        reference = finding.get("existing_comment_id")
+        if reference is not None and (type(reference) is not int or reference <= 0):
+            raise ValueError("Existing comment ID must be a positive integer or null")
         if any(not isinstance(finding[key], str) or not finding[key].strip() for key in ("title", "body")):
             raise ValueError("Finding title and body must be non-empty strings")
     if (review["verdict"] == "pass" and review["findings"]) or (
@@ -77,6 +81,36 @@ def load_review(path: Path) -> dict:
     ):
         raise ValueError("Review verdict contradicts findings")
     return review
+
+
+def extract_session(events: Path, output: Path) -> str:
+    """Validate a completed exec event stream and return its exact root session ID."""
+    session_id = None
+    final_text = None
+    completed = False
+    with events.open() as stream:
+        for line in stream:
+            event = json.loads(line)
+            if event.get("type") == "thread.started":
+                candidate = event.get("thread_id", "")
+                if session_id is not None or not re.fullmatch(
+                    r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", candidate
+                ):
+                    raise ValueError("Invalid or ambiguous Codex session ID")
+                session_id = candidate
+            elif event.get("type") == "item.completed":
+                item = event["item"]
+                if item.get("type") == "agent_message":
+                    final_text = item.get("text")
+            elif event.get("type") == "turn.completed":
+                completed = True
+            elif event.get("type") in {"turn.failed", "error"}:
+                raise ValueError("Codex session did not complete successfully")
+    if not completed or session_id is None or not isinstance(final_text, str):
+        raise ValueError("Missing completed Codex review or session ID")
+    output.write_text(final_text)
+    load_review(output)
+    return session_id
 
 
 def finding_location(finding: dict) -> dict | None:
@@ -152,7 +186,9 @@ def render_findings(
     if not findings:
         return "", []
     summary_only = "".join(f"\n\n{summary_finding(finding)}" for finding in findings)
-    if merge_base is None or not any(finding_location(finding) for finding in findings):
+    if merge_base is None or not any(
+        finding_location(finding) or finding.get("existing_comment_id") for finding in findings
+    ):
         return summary_only, []
     try:
         files = github_api(f"{endpoint}/files?per_page=100", paginate=True)
@@ -160,6 +196,14 @@ def render_findings(
     except (OSError, subprocess.CalledProcessError, json.JSONDecodeError):
         # Location and deduplication metadata are optional; keep findings visible.
         return summary_only, []
+    existing = {
+        item["id"]: item
+        for item in previous
+        if item.get("id")
+        and not item.get("in_reply_to_id")
+        and (item.get("user") or {}).get("login") == "github-actions[bot]"
+        and (item.get("body") or "").startswith(MARKER)
+    }
     by_path = {item["filename"]: item for item in files}
     anchors = {path: patch_lines(item.get("patch", "")) for path, item in by_path.items()}
     seen = {
@@ -173,6 +217,11 @@ def render_findings(
     comments = []
     for finding in findings:
         text = f"### {finding['title']}\n\n{finding['body']}"
+        reference = finding.get("existing_comment_id")
+        if reference in existing:
+            url = f"https://github.com/{repo}/pull/{endpoint.rsplit('/', 1)[-1]}#discussion_r{reference}"
+            summary += f"\n\n{text}\n\n[Existing review thread]({url}); no duplicate inline comment posted."
+            continue
         location = finding_location(finding)
         if location:
             path, line, side = location["path"], location["line"], location["side"]
@@ -373,7 +422,9 @@ def publish(path: Path, repo: str, number: str, head: str, base: str, base_ref: 
 
 
 if __name__ == "__main__":
-    if sys.argv[1] == "--revoke":
+    if sys.argv[1] == "--extract-session":
+        print(extract_session(Path(sys.argv[2]), Path(sys.argv[3])))
+    elif sys.argv[1] == "--revoke":
         revoke_approvals(os.environ["GH_REPO"], os.environ["PR_NUMBER"])
     else:
         print(

@@ -761,9 +761,9 @@ def test_workflow_retarget_gates(
         "needs": {"invalidate": {"result": invalidation}},
     }
     assert bool(workflow_expression(workflow["jobs"]["invalidate"]["if"], context)) == invalidates
-    assert workflow["jobs"]["review"]["needs"] == "invalidate"
-    assert bool(workflow_expression(workflow["jobs"]["review"]["if"], context)) == reviews
-    assert not workflow_expression(workflow["jobs"]["review"]["if"], context, cancelled=True)
+    assert workflow["jobs"]["prepare"]["needs"] == "invalidate"
+    assert bool(workflow_expression(workflow["jobs"]["prepare"]["if"], context)) == reviews
+    assert not workflow_expression(workflow["jobs"]["prepare"]["if"], context, cancelled=True)
 
 
 @pytest.mark.parametrize("invalidation", ["skipped", "success"])
@@ -800,6 +800,118 @@ def test_review_workflow_has_no_merge_permission(workflow):
     jobs = workflow["jobs"]
     assert jobs["publish"]["permissions"]["pull-requests"] == "write"
     assert all(job["permissions"].get("contents") != "write" for job in jobs.values())
+
+
+@pytest.mark.parametrize(
+    "reference_author,root,marked,links",
+    [
+        ("github-actions[bot]", True, True, True),
+        ("maintainer", True, True, False),
+        ("github-actions[bot]", False, True, False),
+        ("github-actions[bot]", True, False, False),
+    ],
+)
+def test_repeat_finding_links_existing_thread(
+    publisher, review_file, api, located_review, reference_author, root, marked, links
+):
+    """Reworded cross-commit findings reuse only verified workflow-owned root comments."""
+    located_review({"path": "src/example.cpp", "line": 21, "side": "RIGHT"}, existing_comment_id=123)
+    api["comments"] = [
+        {
+            "id": 123,
+            "user": {"login": reference_author},
+            "body": publisher.MARKER + "previous wording" if marked else "unrelated review",
+            "in_reply_to_id": None if root else 12,
+            "path": "src/example.cpp",
+            "line": 10,
+            "side": "RIGHT",
+            "original_commit_id": "c" * 40,
+        }
+    ]
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    posted = api["posted"][0]
+    assert posted["event"] == "COMMENT"
+    assert ("#discussion_r123" in posted["body"]) == links
+    assert bool(posted.get("comments")) != links
+
+
+@pytest.mark.parametrize("reference", [True, 0, -1, "123"])
+def test_invalid_thread_reference_rejected(publisher, review_file, api, located_review, reference):
+    """Model-supplied references are data, never an unchecked URL or command."""
+    located_review(None, existing_comment_id=reference)
+    with pytest.raises(ValueError, match="comment ID"):
+        publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    assert not api["posted"]
+
+
+@pytest.mark.parametrize("ready,result", [("true", "success"), ("", "success"), ("true", "failure")])
+def test_review_requires_authorized_context(workflow, ready, result):
+    context = {"needs": {"prepare": {"result": result, "outputs": {"ready": ready}}}}
+    assert bool(workflow_expression(workflow["jobs"]["review"]["if"], context)) == (
+        ready == "true" and result == "success"
+    )
+    assert not workflow_expression(workflow["jobs"]["review"]["if"], context, cancelled=True)
+
+
+def test_comment_trigger_and_session_isolation(workflow):
+    """Only trusted default-branch comment events can enter the persistent review sandbox."""
+    trigger = workflow.get("on", workflow.get(True))
+    assert trigger["issue_comment"]["types"] == ["created"]
+    assert "pull_request_review_comment" not in trigger
+    jobs = workflow["jobs"]
+    for name in ("prepare", "publish", "invalidate"):
+        checkout = next(step for step in jobs[name]["steps"] if "checkout@" in step.get("uses", ""))
+        assert checkout["with"]["ref"] == "${{ github.workflow_sha }}"
+    review = next(
+        step["run"] for step in jobs["review"]["steps"] if step["name"] == "Review in an isolated container"
+    )
+    assert "pypto-codex-sessions-${REPOSITORY_ID}-${PR_NUMBER}" in review
+    assert "dst=/codex-home/sessions" in review and "dst=/codex-state" in review
+    assert "--tmpfs /codex-home:" in review
+    assert 'resume_args=(resume "$previous_session")' in review
+    assert 'exec "${resume_args[@]}" --json --output-schema' in review
+    assert "dst=/review-discussion.json,readonly" in review
+    assert "GH_TOKEN" not in review
+    assert jobs["prepare"]["permissions"]["pull-requests"] == "read"
+
+
+@pytest.mark.parametrize(
+    "failure", [None, "missing_id", "duplicate_id", "bad_id", "missing_completion", "failed", "bad_json"]
+)
+def test_session_checkpoint_requires_valid_completed_review(publisher, tmp_path, failure):
+    """Select the root thread ID and final answer, never a tool result or failed turn."""
+    session_id = "12345678-1234-1234-1234-123456789abc"
+    result = {"verdict": "pass", "summary": "Reviewed", "findings": []}
+    events = [
+        {"type": "thread.started", "thread_id": session_id},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "Working..."}},
+        {
+            "type": "item.completed",
+            "item": {"type": "command_execution", "aggregated_output": "not review JSON"},
+        },
+        {"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps(result)}},
+        {"type": "turn.completed"},
+    ]
+    if failure == "missing_id":
+        events.pop(0)
+    elif failure == "duplicate_id":
+        events.insert(0, events[0])
+    elif failure == "bad_id":
+        events[0]["thread_id"] = "$(shell text)"
+    elif failure == "missing_completion":
+        events.pop()
+    elif failure == "failed":
+        events.append({"type": "turn.failed"})
+    elif failure == "bad_json":
+        events[-2]["item"]["text"] = "{}"
+    source, output = tmp_path / "events.jsonl", tmp_path / "review.json"
+    source.write_text("".join(json.dumps(event) + "\n" for event in events))
+    if failure:
+        with pytest.raises(ValueError):
+            publisher.extract_session(source, output)
+    else:
+        assert publisher.extract_session(source, output) == session_id
+        assert json.loads(output.read_text()) == result
 
 
 if __name__ == "__main__":

@@ -1,0 +1,220 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+"""Test trigger authorization and lossless GitHub discussion collection without network writes."""
+
+import importlib.util
+import json
+from pathlib import Path
+
+import pytest
+
+
+@pytest.fixture
+def collector(monkeypatch):
+    scripts = Path(__file__).resolve().parents[3] / ".github/scripts"
+    monkeypatch.syspath_prepend(str(scripts))
+    spec = importlib.util.spec_from_file_location("prepare_codex_review", scripts / "prepare_codex_review.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+def pr():
+    return {
+        "number": 2911,
+        "state": "open",
+        "draft": False,
+        "head": {"sha": "a" * 40},
+        "base": {"sha": "b" * 40, "ref": "main", "repo": {"full_name": "owner/repo"}},
+        "user": {"login": "author"},
+        "title": "Roundtrip",
+        "body": "Preserve declared IR types",
+    }
+
+
+@pytest.fixture
+def comment_event():
+    return {
+        "action": "created",
+        "issue": {"number": 2911, "pull_request": {"url": "url"}},
+        "comment": {"user": {"login": "author", "type": "User"}, "body": "@pypto-codex review"},
+    }
+
+
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        ("@pypto-codex review", True),
+        ("Explanation first.\n\n@pypto-codex review\n", True),
+        ("@PYPTO-CODEX review", True),
+        ("Please @pypto-codex review", False),
+        ("> @pypto-codex review", False),
+        ("```\n@pypto-codex review\n```", False),
+        ("~~~text\n@pypto-codex review\n~~~", False),
+        ("```\nexample\n```\n@pypto-codex review", True),
+        ("@pypto-codex reviewer", False),
+        ("@codex review", False),
+        ("@pypto-codex review; touch /tmp/bad", False),
+    ],
+)
+def test_explicit_command(collector, body, expected):
+    assert collector.requests_review(body) is expected
+
+
+@pytest.mark.parametrize(
+    "author,permission,expected",
+    [
+        ("author", None, True),
+        ("maintainer", "write", True),
+        ("maintainer", "maintain", True),
+        ("maintainer", "admin", True),
+        ("outsider", "read", False),
+        ("triager", "triage", False),
+        ("outsider", "none", False),
+    ],
+)
+def test_comment_authorization(collector, pr, comment_event, monkeypatch, author, permission, expected):
+    comment_event["comment"]["user"]["login"] = author
+    calls = []
+
+    def api(endpoint):
+        calls.append(endpoint)
+        return {"permission": permission} if endpoint.endswith("/permission") else pr
+
+    monkeypatch.setattr(collector, "github_api", api)
+    assert (collector.review_target("issue_comment", comment_event, "owner/repo") is not None) is expected
+    assert len(calls) == (1 if author == "author" else 2)
+
+
+@pytest.mark.parametrize("kind", ["bot", "ordinary", "edited", "issue", "inline"])
+def test_irrelevant_events_do_not_read_pr(collector, comment_event, monkeypatch, kind):
+    if kind == "bot":
+        comment_event["comment"]["user"]["type"] = "Bot"
+    elif kind == "ordinary":
+        comment_event["comment"]["body"] = "Thanks"
+    elif kind == "edited":
+        comment_event["action"] = "edited"
+    elif kind == "issue":
+        del comment_event["issue"]["pull_request"]
+    monkeypatch.setattr(collector, "github_api", lambda *args: pytest.fail("Unexpected GitHub request"))
+    name = "pull_request_review_comment" if kind == "inline" else "issue_comment"
+    assert collector.review_target(name, comment_event, "owner/repo") is None
+
+
+@pytest.mark.parametrize("kind", ["draft", "closed", "foreign_repo", "stale_head", "retargeted"])
+def test_nonreviewable_or_obsolete_pr(collector, pr, monkeypatch, kind):
+    event = {"action": "synchronize", "sender": {"type": "User"}, "pull_request": json.loads(json.dumps(pr))}
+    if kind == "draft":
+        pr["draft"] = True
+    elif kind == "closed":
+        pr["state"] = "closed"
+    elif kind == "foreign_repo":
+        pr["base"]["repo"]["full_name"] = "other/repo"
+    elif kind == "stale_head":
+        pr["head"]["sha"] = "c" * 40
+    else:
+        pr["base"]["ref"] = "release"
+    monkeypatch.setattr(collector, "github_api", lambda *args: pr)
+    assert collector.review_target("pull_request_target", event, "owner/repo") is None
+
+
+def test_thread_and_reply_pagination(collector, monkeypatch):
+    """Retain corrections after both outer thread and inner reply pagination boundaries."""
+    calls = []
+
+    def api(endpoint, payload):
+        assert endpoint == "graphql"
+        variables = payload["variables"]
+        cursor = variables["cursor"]
+        calls.append(variables)
+        if "number" in variables:
+            value = {
+                "nodes": [{"id": "thread2" if cursor else "thread1", "isResolved": bool(cursor)}],
+                "pageInfo": {"hasNextPage": cursor is None, "endCursor": "next-thread"},
+            }
+            return {"data": {"repository": {"pullRequest": {"reviewThreads": value}}}}
+        value = {
+            "nodes": [
+                {
+                    "body": "Expert correction" if cursor else "Initial finding",
+                    "databaseId": 2 if cursor else 1,
+                }
+            ],
+            "pageInfo": {"hasNextPage": cursor is None, "endCursor": "next-comment"},
+        }
+        return {"data": {"node": {"comments": value}}}
+
+    monkeypatch.setattr(collector, "github_api", api)
+    threads = collector.review_threads("owner/repo", 2911)
+    assert len(threads) == 2 and len(calls) == 6
+    assert threads[1]["isResolved"]
+    assert all(thread["comments"][-1]["body"] == "Expert correction" for thread in threads)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"errors": [{"message": "forbidden"}]},
+        {"data": {"nodes": [], "pageInfo": {"hasNextPage": True, "endCursor": None}}},
+        {"data": {"nodes": [], "pageInfo": {"hasNextPage": True, "endCursor": "unchanged"}}},
+    ],
+)
+def test_partial_discussion_fails_closed(collector, monkeypatch, response):
+    monkeypatch.setattr(collector, "github_api", lambda *args: response)
+    with pytest.raises(ValueError):
+        collector.connection("query", {}, ())
+
+
+def test_snapshot_preserves_review_and_expert_input(collector, pr, monkeypatch):
+    calls = []
+
+    def api(endpoint, *, paginate=False):
+        assert paginate
+        calls.append(endpoint)
+        return [{"id": 7, "body": "$(do not execute)\nExpert correction", "user": None, "state": "COMMENTED"}]
+
+    monkeypatch.setattr(collector, "github_api", api)
+    monkeypatch.setattr(
+        collector, "review_threads", lambda *args: [{"isResolved": True, "comments": ["reply"]}]
+    )
+    snapshot = collector.discussion_snapshot("owner/repo", pr)
+    assert snapshot["body"] == pr["body"]
+    assert snapshot["comments"][0]["body"] == "$(do not execute)\nExpert correction"
+    assert snapshot["reviews"][0]["state"] == "COMMENTED"
+    assert snapshot["threads"][0]["comments"] == ["reply"]
+    assert len(calls) == 2
+
+
+def test_prepare_writes_safe_outputs(collector, pr, comment_event, monkeypatch, tmp_path):
+    pr["base"]["ref"] = "branch-with-$(literal)"
+    monkeypatch.setattr(collector, "review_target", lambda *args: pr)
+    monkeypatch.setattr(
+        collector, "discussion_snapshot", lambda *args: {"base_ref": pr["base"]["ref"], "body": "expert"}
+    )
+    destination, outputs = tmp_path / "discussion.json", tmp_path / "outputs"
+    collector.prepare("issue_comment", comment_event, "owner/repo", destination, outputs)
+    assert json.loads(destination.read_text())["base_ref"] == pr["base"]["ref"]
+    assert outputs.read_text() == f"number=2911\nhead={'a' * 40}\nbase={'b' * 40}\nready=true\n"
+
+
+def test_oversized_context_not_silently_truncated(collector, pr, comment_event, monkeypatch, tmp_path):
+    monkeypatch.setattr(collector, "review_target", lambda *args: pr)
+    monkeypatch.setattr(collector, "discussion_snapshot", lambda *args: {"body": "x" * 100})
+    monkeypatch.setattr(collector, "MAX_CONTEXT_BYTES", 10)
+    with pytest.raises(ValueError, match="incomplete"):
+        collector.prepare(
+            "issue_comment", comment_event, "owner/repo", tmp_path / "context", tmp_path / "outputs"
+        )
+    assert not (tmp_path / "outputs").exists()
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

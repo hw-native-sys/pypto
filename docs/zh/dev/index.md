@@ -47,6 +47,36 @@ head 作为不可信输入检出，并由独立的 GitHub 托管任务（GitHub-
 已经发布的相同行级评论不会重复发布。位置校验不影响批准策略：只要存在问题，
 就不会自动批准。
 
+### 讨论上下文与重新审查
+
+每轮审查都会获取当前 PR 描述、普通对话评论、review 正文以及全部行内讨论和回复，
+包括已解决（resolved）和过期（outdated）状态。这些内容作为审查证据，不能改变审查
+策略。Codex 必须结合专家解释和当前代码重新评估有争议的问题，并解释仍然存在的
+分歧。重复但仍有效的问题可以引用已有 Codex 讨论线程，不再创建重复行内评论；
+该问题仍会阻止自动批准。讨论读取失败或超过 8 MiB 快照限制时，工作流失败，
+不会静默省略上下文。
+
+PR 作者或具有 write、maintain、admin 权限的协作者可以在没有新 push 时请求
+重新审查。在 PR 的 **Conversation 页新增一条评论**，将以下命令独立放在一行
+（前面可以附上解释）：
+
+```text
+@pypto-codex review
+```
+
+引用或代码块中的命令、编辑已有评论、机器人评论、普通 issue 评论以及其他用户
+的命令不会触发审查。行内回复会作为上下文读取，但不会触发工作流；请在
+Conversation 中发送命令。命令由 Actions 识别，不需要名为 `pypto-codex` 的
+GitHub 账号，也不会调用独立的 `@codex` Cloud 集成。
+
+对话记录（rollout）和 Codex 会话索引保存在专用 runner 的两个 Docker 卷中，
+按目标仓库 ID 和 PR 编号隔离。后续运行通过 `codex exec resume <session-id>`
+恢复准确的主会话；只有审查完整结束且结果校验通过后才更新会话检查点。凭据与配置仍是临时的。更换 runner 或删除这两个卷后，会使用
+完整的当前 GitHub 讨论开始新会话。复用会话可以保留之前的分析并可能利用提示词
+缓存，但不保证减少计费 token；长历史仍可能被压缩。每轮仍检查完整的当前 PR diff。
+PR 不再需要保留上下文时，运维人员应在无审查运行期间删除
+`pypto-codex-sessions-<repository-id>-<pr-number>` 卷及其 `-index` 配套卷。
+
 管理员通过仓库 Actions 变量 `CODEX_REVIEW_ENABLED` 启用或禁用审查。将其设为
 `true` 即可启用；删除该变量或设为其他值可以立即禁用。
 
@@ -78,7 +108,7 @@ GitHub Actions 创建和批准 PR。删除该变量或设为 `false` 可以单�
 由 `github-actions[bot]` 创建的 PR 只接收评论而不批准，因为 GitHub 不允许作者
 批准自己的 PR。
 
-工作流检出事件对应的精确 head SHA，通过 `codex exec --output-schema` 请求
+工作流检出已授权快照对应的精确 head SHA，通过 `codex exec --output-schema` 请求
 结构化 JSON。Schema 和发布脚本取自提供工作流文件的提交（`github.workflow_sha`），
 与 PR 的 base 版本独立。发布器只有在完整审查返回
 `pass`、发现列表为空、且 head SHA、base 分支名和审查时的 merge base 均未改变时才批准。
