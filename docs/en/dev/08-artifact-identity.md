@@ -4,8 +4,11 @@ The internal `pypto._identity` module provides content hashing and deterministic
 record encoding for the persistent JIT cache proposed in [RFC #2653](https://github.com/hw-native-sys/pypto/issues/2653).
 The opt-in [JIT integration](10-jit-cache.md) supplies automatic inventories for
 supported Linux toolchains. Unsupported dependency discovery remains unavailable.
-Runtime compiler-version tokens are not content identities and are never used
-as a substitute for dependency contents.
+The default build policy combines source hashes with published build/version
+identifiers as described in [JIT caching](10-jit-cache.md#toolchain-support-and-cost).
+Those identifiers are version claims, not proofs of installed contents. The
+inventory completeness rules below describe `PYPTO_CACHE_IDENTITY=content`;
+build-policy evidence uses distinct `reported_version` tags.
 
 ## Typed records
 

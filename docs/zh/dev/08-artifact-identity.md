@@ -3,7 +3,10 @@
 内部模块 `pypto._identity` 为 [RFC #2653](https://github.com/hw-native-sys/pypto/issues/2653)
 提出的持久 JIT 缓存提供内容哈希和确定性记录编码。
 显式启用的 [JIT 集成](10-jit-cache.md) 为支持的 Linux 工具链提供自动清单。
-不支持的依赖发现仍报告不可用。运行时编译器版本 token 不是内容身份，不能替代依赖内容。
+不支持的依赖发现仍报告不可用。默认 build 策略将源码哈希与发布的构建/版本标识组合，
+详见 [JIT 缓存](10-jit-cache.md#工具链支持与开销)。这些标识是版本声明，不是安装内容
+的证明。下文的清单完整性规则描述 `PYPTO_CACHE_IDENTITY=content`；build 策略使用
+不同的 `reported_version` 标签记录证据。
 
 ## 带类型的记录
 

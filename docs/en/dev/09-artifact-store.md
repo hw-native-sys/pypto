@@ -6,7 +6,7 @@ validated manifests, per-key locking, immutable publication, and private-build
 fallback. The [opt-in JIT integration](10-jit-cache.md) connects it to ordinary
 compilation, execution and warmup. The runtime adapter below owns device-stage
 promotion and read-only loading. [Artifact identities](08-artifact-identity.md)
-cover dependency contents rather than compiler version strings.
+combine source contents and effective build identities under the selected policy.
 
 ## Adapter contract
 

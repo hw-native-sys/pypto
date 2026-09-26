@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Conservative Linux inventories for the compiler paths used by JIT.
+"""Linux JIT identity policy selection and legacy content inventories.
 
 Unknown launchers and compiler layouts are unavailable, never weak identities.
 Installed files are immutable until process exit; mutable application inputs
@@ -38,6 +38,7 @@ from pypto._identity import (
     InstallationIdentityCache,
     ToolchainIdentity,
     ToolchainInputs,
+    digest_record,
 )
 from pypto.backend._ptoas_locate import find_ptoas_binary
 
@@ -924,9 +925,24 @@ def _compiler(platform: str, path: str | None, sdk: str | None, sanitizers: str)
     return KernelCompiler(platform)
 
 
+def _selected_compiler(platform: str) -> Any:
+    """Load optional SDK metadata only after a discovery miss."""
+    from pypto.runtime.kernel_compiler import KernelCompiler  # noqa: PLC0415
+
+    compiler = _compiler(
+        platform, os.environ.get("PATH"), os.environ.get("ASCEND_HOME_PATH"), KernelCompiler._sanitizers
+    )
+    if compiler._sanitizers:
+        raise ValueError("Sanitized compiler installations require a cache adapter")
+    return compiler
+
+
 def capture_toolchain(platform: str, runtime_name: str) -> ToolchainIdentity:
     """Resolve effective tools; return explicit unavailable evidence on failure."""
     try:
+        policy = os.environ.get("PYPTO_CACHE_IDENTITY", "build")
+        if policy not in ("build", "content"):
+            raise ValueError(f"PYPTO_CACHE_IDENTITY must be build or content, got {policy!r}")
         # These mechanisms can redirect arbitrary implicit inputs. Supporting
         # them requires tracing their dependencies, not hashing their strings.
         unsupported = {
@@ -942,20 +958,17 @@ def capture_toolchain(platform: str, runtime_name: str) -> ToolchainIdentity:
         for name, value in unsupported.items():
             if value:
                 raise ValueError(f"Implicit dependency override requires a cache adapter: {name}")
-        from pypto.runtime.kernel_compiler import KernelCompiler  # noqa: PLC0415
-
-        compiler = _compiler(
-            platform, os.environ.get("PATH"), os.environ.get("ASCEND_HOME_PATH"), KernelCompiler._sanitizers
-        )
-        if compiler._sanitizers:
-            raise ValueError("Sanitized compiler installations require a cache adapter")
+        compiler_module = sys.modules.get("pypto.runtime.kernel_compiler")
+        sanitizers = getattr(getattr(compiler_module, "KernelCompiler", None), "_sanitizers", "")
         # Installed paths (including launcher symlinks) are immutable for the
         # process lifetime. Re-resolve on selection changes, including cwd for
         # relative search roots; do not probe every executable on an object hit.
         selected = (
+            policy,
+            os.environ.get("PYPTO_CACHE_EPOCH"),
             platform,
             runtime_name,
-            str(compiler.project_root),
+            sanitizers,
             os.getcwd(),
             os.environ.get("PATH"),
             os.environ.get("ASCEND_HOME_PATH"),
@@ -987,9 +1000,16 @@ def capture_toolchain(platform: str, runtime_name: str) -> ToolchainIdentity:
                 ptoas = find_ptoas_binary()
                 if ptoas is None:
                     raise ValueError("PTOAS is unavailable")
-                inputs = _discover(compiler, ptoas, runtime_name)
+                if policy == "content":
+                    inputs = _discover(_selected_compiler(platform), ptoas, runtime_name)
+                else:
+                    from ._build_identity import discover_builds  # noqa: PLC0415
+
+                    inputs = discover_builds(lambda: _selected_compiler(platform), ptoas, runtime_name)
                 identity = _identity_cache.capture(inputs)
                 if identity.usable:
+                    if policy == "build" or os.environ.get("PYPTO_CACHE_EPOCH"):
+                        identity = replace(identity, pypto=digest_record((identity.pypto, selected)))
                     _identities[selected] = identity
             return identity
     except Exception as exc:
