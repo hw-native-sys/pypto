@@ -11,11 +11,13 @@
 
 The pass rewrites ``lhs = tile.reshape(rhs, shape)`` AssignStmts into plain
 ``lhs = rhs`` whenever both sides share the same MemRef root and produce
-identical TileBufSignatures. PTO codegen previously dropped emission of such
-reshapes via a peephole; folding into the IR makes codegen 1:1.
+identical TileBufSignatures, or when neither side owns a MemRef (a cross-core
+tpop result or a view off one) and the two tile types are structurally equal.
+PTO codegen previously dropped emission of such reshapes via a peephole;
+folding into the IR makes codegen 1:1.
 
-FoldNoOpReshape runs late in the pipeline (#31), after AllocateMemoryAddr
-(#30). The prerequisite passes below mirror that ordering so the IR carries
+FoldNoOpReshape runs late in the pipeline (#38), after AllocateMemoryAddr
+(#37). The prerequisite passes below mirror that ordering so the IR carries
 the memrefs / allocated addresses the pass operates on. Tests follow the
 Before/Expected pattern: ``_run_prereqs_and_fold`` runs the prereqs plus the
 fold pass on ``Before``; ``_run_prereqs_only`` runs the prereqs alone on the
@@ -151,6 +153,106 @@ class TestFoldNoOpReshape:
 
         after = passes.fold_no_op_reshape()(Before)
         ir.assert_structural_equal(after, Before)
+
+    def test_buffer_less_identity_reshape_is_folded(self):
+        """An identity reshape of a MemRef-less tpop result folds to an alias.
+
+        The popped tile owns no buffer, so there is no MemRef to compare; equal
+        tile types prove the reshape is a no-op instead. Folding is what keeps the
+        runtime valid extent: a surviving reshape lowers to a ``pto.treshape``
+        view, which has no operands to carry ``vr``.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main(
+                self,
+                vr: pl.Scalar[pl.INDEX],
+                output: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                t: pl.Tile[[16, 128], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[vr, 128])] = (
+                    pl.tile.tpop_from_aic(split=0)
+                )
+                r: pl.Tile[[16, 128], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[vr, 128])] = (
+                    pl.tile.reshape(t, [16, 128])
+                )
+                pl.system.tfree_to_aic(t, split=0)
+                result: pl.Tensor[[16, 128], pl.FP32] = pl.tile.store(r, [0, 0], output)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main(
+                self,
+                vr: pl.Scalar[pl.INDEX],
+                output: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                t: pl.Tile[[16, 128], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[vr, 128])] = (
+                    pl.tile.tpop_from_aic(split=0)
+                )
+                r: pl.Tile[[16, 128], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[vr, 128])] = t
+                pl.system.tfree_to_aic(t, split=0)
+                result: pl.Tensor[[16, 128], pl.FP32] = pl.tile.store(r, [0, 0], output)
+                return result
+
+        After = _run_prereqs_and_fold(Before)
+        ExpectedIR = _run_prereqs_only(Expected)
+        ir.assert_structural_equal(After, ExpectedIR)
+
+    def test_buffer_less_reshape_with_a_different_valid_extent_is_kept(self):
+        """Equal signatures do not prove a MemRef-less LHS has the source's extent.
+
+        ``TileBufSignature`` records any symbolic valid dim only as "dynamic", so
+        ``[vr, 128]`` and ``[vc, 128]`` compare equal there. Aliasing ``r`` to
+        ``t`` would hand every consumer ``vr`` rows where the IR says ``vc``.
+
+        The pass is applied directly: ConvertToSSA re-deduces ``r``'s type from
+        the reshape call, which would erase the hand-written ``vc``.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main(
+                self,
+                vr: pl.Scalar[pl.INDEX],
+                vc: pl.Scalar[pl.INDEX],
+                output: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                t: pl.Tile[[16, 128], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[vr, 128])] = (
+                    pl.tile.tpop_from_aic(split=0)
+                )
+                r: pl.Tile[[16, 128], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[vc, 128])] = (
+                    pl.tile.reshape(t, [16, 128])
+                )
+                pl.system.tfree_to_aic(t, split=0)
+                result: pl.Tensor[[16, 128], pl.FP32] = pl.tile.store(r, [0, 0], output)
+                return result
+
+        after = passes.fold_no_op_reshape()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    def test_buffer_less_shape_change_is_kept(self):
+        """A reshape of a MemRef-less tile that changes its shape is a real view."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main(
+                self,
+                output: pl.Out[pl.Tensor[[128, 16], pl.FP32]],
+            ) -> pl.Tensor[[128, 16], pl.FP32]:
+                t: pl.Tile[[16, 128], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0)
+                r: pl.Tile[[128, 16], pl.FP32, pl.Mem.Vec] = pl.tile.reshape(t, [128, 16])
+                pl.system.tfree_to_aic(t, split=0)
+                result: pl.Tensor[[128, 16], pl.FP32] = pl.tile.store(r, [0, 0], output)
+                return result
+
+        After = _run_prereqs_and_fold(Before)
+        ExpectedIR = _run_prereqs_only(Before)
+        ir.assert_structural_equal(After, ExpectedIR)
 
     def test_pass_runs_without_error_on_simple_kernel(self):
         """Smoke test: pass should not crash on a kernel without trivial reshapes."""
