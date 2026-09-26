@@ -34,7 +34,7 @@ def requests_review(body: str) -> bool:
             marker = match[1]
             if fence is None:
                 fence = marker
-            elif marker[0] == fence[0] and len(marker) >= len(fence):
+            elif marker[0] == fence[0] and len(marker) >= len(fence) and match.end() == len(stripped):
                 fence = None
             continue
         if fence is None and stripped.casefold() == COMMAND:

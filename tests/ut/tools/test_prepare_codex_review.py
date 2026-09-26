@@ -78,6 +78,27 @@ def test_explicit_command(collector, body, expected):
 
 
 @pytest.mark.parametrize(
+    "opener,closer,expected",
+    [
+        ("```", "```python", False),
+        ("~~~", "~~~text", False),
+        ("```", "``` trailing text", False),
+        ("```", "```~", False),
+        ("````", "```", False),
+        ("```", "~~~", False),
+        ("```python", "```", True),
+        ("~~~text", "~~~", True),
+        ("```", "````", True),
+        ("```", "``` \t", True),
+        ("~~~", "  ~~~~ \t", True),
+    ],
+)
+def test_command_requires_bare_closing_fence(collector, opener, closer, expected):
+    """Fence-like content must not expose a command that is still inside a block."""
+    assert collector.requests_review(f"{opener}\nexample\n{closer}\n@pypto-codex review") is expected
+
+
+@pytest.mark.parametrize(
     "author,permission,expected",
     [
         ("author", None, True),
