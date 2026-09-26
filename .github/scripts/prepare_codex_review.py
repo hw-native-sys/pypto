@@ -8,6 +8,9 @@
 # -----------------------------------------------------------------------------------------------------------
 """Collect GitHub discussion as untrusted review evidence, using trusted code only."""
 
+# Standalone CI helpers also run on hosts with Python 3.8.
+from __future__ import annotations
+
 import json
 import os
 import re

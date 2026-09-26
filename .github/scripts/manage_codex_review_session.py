@@ -8,6 +8,9 @@
 # -----------------------------------------------------------------------------------------------------------
 """Manage PR session volumes from trusted host code while the caller holds the auth lock."""
 
+# Standalone CI helpers also run on hosts with Python 3.8.
+from __future__ import annotations
+
 import json
 import os
 import re

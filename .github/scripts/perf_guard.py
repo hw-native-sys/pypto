@@ -25,6 +25,9 @@ Metric source (printed by runtime/simpler_setup/tools/swimlane_converter.py):
     TOTAL                   579       22672.70         33239.52             # exec / latency
 """
 
+# Standalone CI helpers also run on hosts with Python 3.8.
+from __future__ import annotations
+
 import argparse
 import json
 import os

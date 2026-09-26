@@ -123,7 +123,9 @@ from .printer import python_print
 
 - Use absolute imports for cross-package, relative for within-package
 - Alias internal bindings: `from pypto.pypto_core import ir as _ir`
-- No `from __future__ import annotations` (project uses Python 3.10+)
+- No `from __future__ import annotations` in PyPTO code (project uses Python 3.10+).
+  Exception: standalone `.github/scripts/` helpers support Python 3.8 and defer
+  annotations so imports work on older CI hosts.
 
 ## Error Messages
 

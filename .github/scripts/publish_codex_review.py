@@ -8,6 +8,9 @@
 # -----------------------------------------------------------------------------------------------------------
 """Publish untrusted review data using trusted, fail-closed approval policy."""
 
+# Standalone CI helpers also run on hosts with Python 3.8.
+from __future__ import annotations
+
 import json
 import os
 import re
