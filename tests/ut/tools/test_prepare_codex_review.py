@@ -220,6 +220,40 @@ def test_thread_and_reply_pagination(collector, monkeypatch):
     assert all(thread["comments"][-1]["body"] == "Expert correction" for thread in threads)
 
 
+@pytest.mark.parametrize("database_id", [2**31 + 1, 2**53 + 1, 2**63 - 1, None])
+@pytest.mark.parametrize("wire_type", [str, int])
+def test_comment_ids_preserve_bigint_precision(collector, monkeypatch, database_id, wire_type):
+    """Root and parent IDs remain exact JSON integers, including beyond float precision."""
+    parent_id = database_id - 1 if database_id is not None else None
+
+    def connection(query, variables, path):
+        if "number" in variables:
+            return [{"id": "thread"}]
+        assert query.count("databaseId: fullDatabaseId") == 2
+        return [
+            {
+                "databaseId": wire_type(database_id) if database_id is not None else None,
+                "replyTo": {"databaseId": wire_type(parent_id) if parent_id is not None else None},
+            }
+        ]
+
+    monkeypatch.setattr(collector, "connection", connection)
+    threads = collector.review_threads("owner/repo", 2912)
+    comment = json.loads(json.dumps(threads))[0]["comments"][0]
+    assert comment["databaseId"] == database_id
+    assert comment["replyTo"]["databaseId"] == parent_id
+    if database_id is not None:
+        assert type(comment["databaseId"]) is int
+        assert type(comment["replyTo"]["databaseId"]) is int
+
+
+@pytest.mark.parametrize("value", [True, 1.0, 0, -1, 2**63, str(2**63), "1.0", "1e3", "01", "", {}, []])
+def test_malformed_comment_ids_fail_closed(collector, value):
+    """Reject lossy, invalid, or out-of-range ID representations."""
+    with pytest.raises(ValueError, match="comment ID"):
+        collector.comment_database_id(value)
+
+
 @pytest.mark.parametrize(
     "response",
     [

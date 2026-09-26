@@ -118,6 +118,17 @@ def connection(query: str, variables: dict, path: tuple[str, ...]) -> list[dict]
         cursors.add(cursor)
 
 
+def comment_database_id(value: object) -> int | None:
+    """Normalize nullable GraphQL BigInt IDs without floating-point conversion."""
+    if value is None:
+        return None
+    if isinstance(value, str) and re.fullmatch(r"[1-9][0-9]*", value):
+        value = int(value)
+    if type(value) is not int or not 0 < value < 2**63:
+        raise ValueError(f"Expected a positive signed 64-bit comment ID or null, got {value!r}")
+    return value
+
+
 def review_threads(repo: str, number: int) -> list[dict]:
     """Fetch all threads, including every reply and resolved/outdated state."""
     owner, name = repo.split("/")
@@ -140,8 +151,8 @@ def review_threads(repo: str, number: int) -> list[dict]:
             """query($id:ID!, $cursor:String) {
               node(id:$id) { ... on PullRequestReviewThread {
                 comments(first:100, after:$cursor) {
-                  nodes { databaseId body url createdAt updatedAt author { login }
-                    replyTo { databaseId } commit { oid } }
+                  nodes { databaseId: fullDatabaseId body url createdAt updatedAt author { login }
+                    replyTo { databaseId: fullDatabaseId } commit { oid } }
                   pageInfo { hasNextPage endCursor }
                 }
               } }
@@ -149,6 +160,10 @@ def review_threads(repo: str, number: int) -> list[dict]:
             {"id": thread["id"]},
             ("node", "comments"),
         )
+        for comment in thread["comments"]:
+            comment["databaseId"] = comment_database_id(comment["databaseId"])
+            if parent := comment.get("replyTo"):
+                parent["databaseId"] = comment_database_id(parent["databaseId"])
     return threads
 
 
