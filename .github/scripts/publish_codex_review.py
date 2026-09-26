@@ -205,6 +205,11 @@ def render_findings(
         and (item.get("body") or "").startswith(MARKER)
     }
     by_path = {item["filename"]: item for item in files}
+    renames = {
+        (item["previous_filename"], item["filename"])
+        for item in files
+        if item.get("status") == "renamed" and isinstance(item.get("previous_filename"), str)
+    }
     anchors = {path: patch_lines(item.get("patch", "")) for path, item in by_path.items()}
     seen = {
         (item["path"], item.get("line"), item.get("side"), item["body"])
@@ -218,12 +223,18 @@ def render_findings(
     for finding in findings:
         text = f"### {finding['title']}\n\n{finding['body']}"
         reference = finding.get("existing_comment_id")
-        if reference in existing:
+        location = finding_location(finding)
+        previous_path = existing.get(reference, {}).get("path")
+        if (
+            reference in existing
+            and location
+            and isinstance(previous_path, str)
+            and (previous_path == location["path"] or (previous_path, location["path"]) in renames)
+        ):
             url = f"https://github.com/{repo}/pull/{endpoint.rsplit('/', 1)[-1]}#discussion_r{reference}"
             summary += f"\n\n{summary_finding(finding)}"
             summary += f"\n\n[Existing review thread]({url}); no duplicate inline comment posted."
             continue
-        location = finding_location(finding)
         if location:
             path, line, side = location["path"], location["line"], location["side"]
             body = f"{MARKER}\n{text}"

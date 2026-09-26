@@ -66,6 +66,8 @@ def has_review_permission(repo: str, author: str) -> bool:
 def review_target(event_name: str, event: dict, repo: str) -> dict | None:
     """Resolve a current PR and authorize comment commands before starting a runner."""
     if event_name == "pull_request_target":
+        if event["action"] == "closed":
+            return None
         candidate = event["pull_request"]
         if event["action"] == "edited" and not event.get("changes", {}).get("base"):
             return None

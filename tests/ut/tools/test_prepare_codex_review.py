@@ -194,6 +194,12 @@ def test_irrelevant_events_do_not_read_pr(collector, comment_event, monkeypatch,
     assert collector.review_target(name, comment_event, "owner/repo") is None
 
 
+def test_closed_event_does_not_start_review(collector, monkeypatch):
+    """A delayed close event cannot become a review after the PR has reopened."""
+    monkeypatch.setattr(collector, "github_api", lambda *args: pytest.fail("Unexpected GitHub request"))
+    assert collector.review_target("pull_request_target", {"action": "closed"}, "owner/repo") is None
+
+
 @pytest.mark.parametrize("kind", ["draft", "closed", "foreign_repo", "stale_head", "retargeted"])
 def test_nonreviewable_or_obsolete_pr(collector, pr, monkeypatch, kind):
     event = {"action": "synchronize", "sender": {"type": "User"}, "pull_request": json.loads(json.dumps(pr))}

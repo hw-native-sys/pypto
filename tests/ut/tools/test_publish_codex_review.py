@@ -769,11 +769,14 @@ def test_workflow_retarget_gates(
 @pytest.mark.parametrize("invalidation", ["skipped", "success"])
 @pytest.mark.parametrize("review", ["success", "failure", "skipped", "cancelled"])
 @pytest.mark.parametrize("cancelled", [False, True])
-def test_publish_requires_successful_review_after_invalidation(workflow, invalidation, review, cancelled):
+@pytest.mark.parametrize("completed", ["true", ""])
+def test_publish_requires_successful_review_after_invalidation(
+    workflow, invalidation, review, cancelled, completed
+):
     """A skipped ancestor must not suppress publishing a successful review."""
     publish = workflow["jobs"]["publish"]
     assert publish["needs"] == "review"
-    context = {"needs": {"review": {"result": review}}}
+    context = {"needs": {"review": {"result": review, "outputs": {"completed": completed}}}}
     assert bool(
         workflow_expression(
             publish.get("if", "success()"),
@@ -781,7 +784,7 @@ def test_publish_requires_successful_review_after_invalidation(workflow, invalid
             cancelled=cancelled,
             success=invalidation == review == "success" and not cancelled,
         )
-    ) == (review == "success" and not cancelled)
+    ) == (review == "success" and not cancelled and completed == "true")
 
 
 def test_invalidation_is_independent_of_review_cancellation(workflow):
@@ -859,6 +862,54 @@ def test_repeat_finding_keeps_current_location(publisher, review_file, api, loca
     assert not posted.get("comments")
 
 
+@pytest.mark.parametrize(
+    "previous_path,status,rename_source,location,links",
+    [
+        ("src/example.cpp", "modified", None, True, True),
+        ("src/other.cpp", "modified", None, True, False),
+        ("src/old.cpp", "renamed", "src/old.cpp", True, True),
+        ("src/old.cpp", "modified", "src/old.cpp", True, False),
+        ("src/other.cpp", "renamed", "src/old.cpp", True, False),
+        ("src/new.cpp", "added", "reused", True, False),
+        (None, "modified", None, True, False),
+        ("src/example.cpp", "modified", None, False, False),
+    ],
+)
+def test_thread_reference_requires_matching_file(
+    publisher, review_file, api, located_review, previous_path, status, rename_source, location, links
+):
+    """Only same-file or explicit current-PR rename references can suppress a new thread."""
+    located_review(
+        {"path": "src/example.cpp", "line": 21, "side": "RIGHT"} if location else None,
+        existing_comment_id=123,
+    )
+    api["files"][0].update(status=status)
+    if rename_source == "reused":
+        api["files"].append(
+            {"filename": "src/new.cpp", "status": "renamed", "previous_filename": "src/example.cpp"}
+        )
+    elif rename_source:
+        api["files"][0]["previous_filename"] = rename_source
+    api["comments"] = [
+        {
+            "id": 123,
+            "user": {"login": "github-actions[bot]"},
+            "body": publisher.MARKER + "old finding",
+            "path": previous_path,
+            "line": 9,
+            "side": "LEFT",
+            "original_commit_id": "c" * 40,
+        }
+    ]
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    posted = api["posted"][0]
+    assert posted["event"] == "COMMENT"
+    assert ("#discussion_r123" in posted["body"]) == links
+    assert bool(posted.get("comments")) == (location and not links)
+    if not location:
+        assert "## Codex Review" in posted["body"]
+
+
 @pytest.mark.parametrize("reference", [True, 0, -1, "123"])
 def test_invalid_thread_reference_rejected(publisher, review_file, api, located_review, reference):
     """Model-supplied references are data, never an unchecked URL or command."""
@@ -883,7 +934,7 @@ def test_comment_trigger_and_session_isolation(workflow):
     assert trigger["issue_comment"]["types"] == ["created"]
     assert "pull_request_review_comment" not in trigger
     jobs = workflow["jobs"]
-    for name in ("prepare", "publish", "invalidate"):
+    for name in ("prepare", "publish", "invalidate", "cleanup-sessions"):
         checkout = next(step for step in jobs[name]["steps"] if "checkout@" in step.get("uses", ""))
         assert checkout["with"]["ref"] == "${{ github.workflow_sha }}"
     review = next(
@@ -897,6 +948,40 @@ def test_comment_trigger_and_session_isolation(workflow):
     assert "dst=/review-discussion.json,readonly" in review
     assert "GH_TOKEN" not in review
     assert jobs["prepare"]["permissions"]["pull-requests"] == "read"
+    assert jobs["review"]["permissions"]["pull-requests"] == "read"
+    assert 'git show "$TRUSTED_WORKFLOW_SHA:.github/scripts/manage_codex_review_session.py"' in review
+    assert 'git show "$TRUSTED_WORKFLOW_SHA:.github/scripts/publish_codex_review.py"' in review
+    assert review.index("flock --exclusive 9") < review.index("session_status=$(python")
+    assert review.index("session_status=$(python") < review.index("docker run")
+    upload = next(step for step in jobs["review"]["steps"] if step["name"] == "Upload review result")
+    assert upload["if"] == "steps.codex.outputs.completed == 'true'"
+
+
+@pytest.mark.parametrize("enabled", ["true", "false"])
+@pytest.mark.parametrize("draft", [True, False])
+@pytest.mark.parametrize("sender", ["Bot", "User"])
+@pytest.mark.parametrize("merged", [True, False])
+def test_close_cleanup_is_independent_of_review_eligibility(workflow, enabled, draft, sender, merged):
+    """Every close reaches trusted cleanup, with no model or active-review cancellation."""
+    context = {
+        "vars": {"CODEX_REVIEW_ENABLED": enabled},
+        "github": {
+            "event_name": "pull_request_target",
+            "event": {
+                "action": "closed",
+                "sender": {"type": sender},
+                "pull_request": {"draft": draft, "merged": merged},
+            },
+        },
+        "needs": {"invalidate": {"result": "skipped"}},
+    }
+    cleanup = workflow["jobs"]["cleanup-sessions"]
+    assert workflow_expression(cleanup["if"], context)
+    assert not workflow_expression(workflow["jobs"]["prepare"]["if"], context)
+    assert "concurrency" not in cleanup
+    run = cleanup["steps"][-1]["run"]
+    assert run.index("flock --exclusive 9") < run.index("manage_codex_review_session.py cleanup")
+    assert "docker run" not in run
 
 
 @pytest.mark.parametrize(
