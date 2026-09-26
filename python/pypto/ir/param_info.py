@@ -168,7 +168,11 @@ def kernel_parameters_from_params(param_infos: Sequence[_ParamInfo]) -> tuple[Ke
     """Map logical IR parameters to target-independent kernel parameter records."""
     return tuple(
         KernelParameter(
-            p.name, str(p.dtype), p.direction.name, tuple(p.shape) if p.shape is not None else None
+            p.name,
+            str(p.dtype),
+            p.direction.name,
+            tuple(p.shape) if p.shape is not None else None,
+            p.layout if p.layout not in (None, "ND") else None,
         )
         for p in param_infos
     )
