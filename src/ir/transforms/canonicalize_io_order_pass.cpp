@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -43,19 +44,36 @@ namespace pypto {
 namespace ir {
 namespace {
 
-std::optional<int32_t> InnermostPipelineStage(const std::string& packed) {
-  auto memberships = ParsePipelineMembership(packed);
-  if (memberships.empty()) return std::nullopt;
-  // LowerPipelineLoops lowers nested pipelines inside-out.  Their membership
-  // is therefore appended first; it is the stage controlled by the nearest
-  // enclosing pipeline currently being canonicalized.
-  return memberships.front().second;
-}
-
+/// Rotate the innermost pipeline membership stage modulo @p depth.
+///
+/// LowerPipelineLoops lowers nested pipelines inside-out, so the first membership
+/// it appends is the innermost: the stage controlled by the nearest enclosing
+/// pipeline currently being canonicalized.
+///
+/// "First appended" is not the same as "first in the list", because
+/// LowerPipelineLoops is no longer the only producer that can have run by now:
+/// AutoTileMatmulL0 stamps a split-K dbC accumulator with a group in its reserved
+/// range (starting at ``kAutoTileGroupBase``) before this pass, and that pair would
+/// sit ahead of every loop-derived one. Skip that range so the loop's own stage is
+/// the one rotated. Today the two cannot
+/// co-occur -- a split-K grid is emitted straight-line, and the existing-pipeline
+/// recognizer only matches an already-L0-resident matmul that AnalyzeMatmul
+/// declines -- so this is a guard against a silent wrong rotation, not a live fix.
+///
+/// Deliberately ``< kAutoTileGroupBase`` and not ``< kSkewGroupBase``:
+/// SkewCrossCorePipeline (pass 24) also runs before LowerPipelineLoops (25) and
+/// APPENDS its pair, so a cube accumulator inside a skewed cross-core loop carries
+/// ``skew;lpl`` and ``front()`` is the skew stage. Whether the skew or the dbC
+/// stage is the right one to rotate there is a real question, but it is a separate
+/// one with no test behind it -- so keep today's behaviour and change only what
+/// this milestone introduced.
 std::string RotateInnermostPipelineStage(const std::string& packed, int32_t depth) {
   auto memberships = ParsePipelineMembership(packed);
   if (memberships.empty() || depth <= 0) return packed;
-  auto& stage = memberships.front().second;
+  auto innermost = std::find_if(memberships.begin(), memberships.end(),
+                                [](const auto& m) { return m.first < kAutoTileGroupBase; });
+  if (innermost == memberships.end()) return packed;
+  auto& stage = innermost->second;
   stage = ((stage % depth) + depth) % depth;
   std::string result;
   for (const auto& [group, member_stage] : memberships) {
@@ -98,24 +116,22 @@ enum class IOCategory : int {
 /// of name strings avoids string comparisons in the hot path and makes the set
 /// of recognized ops explicit at pass construction.
 struct IOCategoryOps {
-  OpPtr tile_load;      ///< Read: tensor → tile data movement
-  OpPtr tile_read;      ///< Read: extract scalar from a tile
-  OpPtr tile_store;     ///< Write: tile → tensor data movement
-  OpPtr tile_write;     ///< Write: put scalar into a tile
-  OpPtr tile_extract;   ///< Sub-tile extract — load-like only when L1→L0 (see IsL1ToL0ExtractCall)
-  OpPtr tile_assemble;  ///< Acc→Mat sub-tile drain (Mat-scratch path) — drain-like only under dbC
+  OpPtr tile_load;     ///< Read: tensor → tile data movement
+  OpPtr tile_read;     ///< Read: extract scalar from a tile
+  OpPtr tile_store;    ///< Write: tile → tensor data movement
+  OpPtr tile_write;    ///< Write: put scalar into a tile
+  OpPtr tile_extract;  ///< Sub-tile extract — load-like only when L1→L0 (see IsL1ToL0ExtractCall)
 
   static IOCategoryOps Build() {
     const auto& registry = OpRegistry::GetInstance();
     return {
         registry.GetOp("tile.load"),  registry.GetOp("tile.read"),    registry.GetOp("tile.store"),
-        registry.GetOp("tile.write"), registry.GetOp("tile.extract"), registry.GetOp("tile.assemble"),
+        registry.GetOp("tile.write"), registry.GetOp("tile.extract"),
     };
   }
 
   [[nodiscard]] bool IsLoadLike(const OpPtr& op) const { return op == tile_load || op == tile_read; }
   [[nodiscard]] bool IsStoreLike(const OpPtr& op) const { return op == tile_store || op == tile_write; }
-  [[nodiscard]] bool IsAssemble(const OpPtr& op) const { return op == tile_assemble; }
 
   /// True when @p call is a `tile.extract` whose source lives in L1 (Mat) and
   /// whose destination lives in L0a/L0b (Left/Right) — i.e. the ISA TEXTRACT
@@ -149,27 +165,23 @@ struct IOCategoryOps {
 ///   each store adjacent to its producing compute rather than floating it below
 ///   the next iteration's compute — the one-accumulator schedule. See
 ///   ``kPipelineOverlapStoresAttr``.
-/// @param double_buffer_c When true, store-like ops are categorized as ``Store``
-///   regardless of ``overlap_stores`` (``ReorderRegion`` then lifts them to a tier
-///   above all compute — the dbC=2 co-live schedule). See
-///   ``kPipelineDoubleBufferCAttr``.
-IOCategory CategorizeStmt(const StmtPtr& stmt, const IOCategoryOps& ops, bool overlap_stores,
-                          bool double_buffer_c) {
-  const IOCategory store_tier =
-      (overlap_stores || double_buffer_c) ? IOCategory::Store : IOCategory::TileCompute;
+IOCategory CategorizeStmt(const StmtPtr& stmt, const IOCategoryOps& ops, bool overlap_stores) {
+  const IOCategory store_tier = overlap_stores ? IOCategory::Store : IOCategory::TileCompute;
   if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
     if (auto call = std::dynamic_pointer_cast<const Call>(assign->value_)) {
       // tile.read keeps Load even though its LHS is scalar — it's I/O against
       // a tile and belongs in the load tier alongside tile.load.
       if (ops.IsLoadLike(call->op_)) return IOCategory::Load;
       if (ops.IsStoreLike(call->op_)) return store_tier;
-      // tile.assemble is the Acc→Mat drain of the Mat-scratch path. Under dbC it is
-      // drain-like (Store tier → lifted above all compute in ReorderRegion) so the
-      // two Mat-scratch accumulators stay co-live, mirroring tile.store on the
-      // direct-store path. Without dbC it stays TileCompute (its chain dependency
-      // already orders it after its producing matmul) — the one-accumulator
-      // Mat-scratch schedule is unchanged.
-      if (double_buffer_c && ops.IsAssemble(call->op_)) return IOCategory::Store;
+      // A dbC=2 drain — tile.store on the direct-store path, tile.assemble on the
+      // Mat-scratch path — deliberately does NOT lift here. Lifting every drain
+      // above all compute (the old dbC behaviour) defers each drain past the very
+      // MAD it is supposed to hide behind, which is the opposite of the intended
+      // overlap. Co-liveness of the two accumulators is an explicit
+      // ``pipeline_membership`` constraint from LowerPipelineLoops (rotated to
+      // stage % 2 below), not a side effect of clustering the drains, so the
+      // interleaved ``compute_s0 store_s0 compute_s1 store_s1`` order is both the
+      // correct ping-pong and the one that keeps the two slots distinct.
       // tile.extract is load-like only when it represents an L1→L0 transfer
       // (Mat source, Left/Right target). Other extract shapes stay in
       // TileCompute — see IsL1ToL0ExtractCall doc for rationale.
@@ -292,10 +304,11 @@ class CanonicalizeIOOrderMutator : public IRMutator {
   bool overlap_stores_ = true;
 
   /// dbC=2 policy of the nearest enclosing `ForKind::Pipeline` loop
-  /// (saved/restored across nested pipelines). True ⇒ order compute/drain in
-  /// depth-two chunks so adjacent iterations' L0C accumulators stay co-live
-  /// without multiplying L0C usage by a larger operand pipeline depth. See
-  /// `kPipelineDoubleBufferCAttr`.
+  /// (saved/restored across nested pipelines). True ⇒ rotate cube-accumulator
+  /// `pipeline_membership` to stage % 2, so a deeper operand pipeline still uses
+  /// exactly two L0C slots. It does NOT change the statement order: the ordinary
+  /// stage-major order already issues each drain directly after its own MAD,
+  /// which is the ping-pong. See `kPipelineDoubleBufferCAttr`.
   bool double_buffer_c_ = false;
 
   /// Stable, priority-aware topological sort.
@@ -329,7 +342,7 @@ class CanonicalizeIOOrderMutator : public IRMutator {
     std::unordered_map<const Stmt*, size_t> idx_of;
     idx_of.reserve(sort_count);
     for (size_t i = 0; i < sort_count; ++i) {
-      cats[i] = CategorizeStmt(stmts[i], io_ops_, overlap_stores_, double_buffer_c_);
+      cats[i] = CategorizeStmt(stmts[i], io_ops_, overlap_stores_);
       idx_of.emplace(stmts[i].get(), i);
     }
 
@@ -396,40 +409,28 @@ class CanonicalizeIOOrderMutator : public IRMutator {
     // stage, cutting on-chip pressure and the cross-iteration load↔store
     // coupling. The original index is the final tiebreaker (stable FIFO).
     //
-    // Exception — dbC=2 (double_buffer_c_): stage F is partitioned into
-    // depth-two chunks and the key becomes (tier, stage/2, compute-before-store,
-    // stage, index). Thus F=4 emits
-    // ``compute_s0 compute_s1 store_s0 store_s1 compute_s2 compute_s3
-    // store_s2 store_s3``. L0A/L0B may still use the requested depth F, while
-    // L0C rotates over two slots.
-    // Keep the pre-dbC ordering byte-for-byte for ordinary pipelines:
-    // ``(tier, full packed membership, sub, index)``. Only a dbC loop switches
-    // to the numeric ``(tier, group=stage/2, sub, stage, index)`` order. The
-    // extra tuple fields are constants in the inactive mode.
-    using HeapKey = std::tuple<int, std::string, int32_t, int, int32_t, size_t>;
+    // dbC=2 uses this SAME ordering. It is the ping-pong order: each drain is
+    // issued directly after the MAD that produced it, so it runs while the next
+    // stage's MAD executes on the other accumulator. (The earlier dbC exception
+    // partitioned the stages into depth-two chunks — ``compute_s0 compute_s1
+    // store_s0 store_s1`` — which defers every drain past the compute it should
+    // overlap. Two co-live slots come from the rotated ``pipeline_membership``
+    // below, not from clustering the drains.) L0A/L0B keep the requested depth F
+    // while L0C rotates over two slots.
+    using PipelineStageKey = std::vector<std::pair<int32_t, int32_t>>;
+    using HeapKey = std::tuple<int, PipelineStageKey, int, size_t>;
     std::priority_queue<HeapKey, std::vector<HeapKey>, std::greater<>> ready;
     std::vector<int> tier(sort_count);
     std::vector<int> sub(sort_count);
-    std::vector<std::string> packed_stage(sort_count);
-    std::vector<int32_t> group(sort_count, -1);
-    std::vector<int32_t> stage(sort_count, -1);
+    std::vector<PipelineStageKey> stage(sort_count);
     for (size_t i = 0; i < sort_count; ++i) {
       tier[i] = (cats[i] == IOCategory::ScalarCompute) ? 0 : (cats[i] == IOCategory::Load) ? 1 : 2;
       sub[i] = (cats[i] == IOCategory::Store) ? 1 : 0;
       if (tier[i] == 2) {
-        packed_stage[i] = stage_key(stmts[i]);
-        if (double_buffer_c_) {
-          if (auto value = InnermostPipelineStage(packed_stage[i])) {
-            stage[i] = *value;
-            group[i] = *value / 2;
-          }
-        }
+        stage[i] = ParsePipelineMembership(stage_key(stmts[i]));
       }
     }
-    auto key_for = [&](size_t i) -> HeapKey {
-      if (double_buffer_c_) return {tier[i], std::string(), group[i], sub[i], stage[i], i};
-      return {tier[i], packed_stage[i], 0, sub[i], 0, i};
-    };
+    auto key_for = [&](size_t i) -> HeapKey { return {tier[i], stage[i], sub[i], i}; };
     for (size_t i = 0; i < sort_count; ++i) {
       if (remaining[i] == 0) ready.push(key_for(i));
     }
@@ -437,7 +438,7 @@ class CanonicalizeIOOrderMutator : public IRMutator {
     std::vector<StmtPtr> out;
     out.reserve(N);
     while (!ready.empty()) {
-      size_t i = std::get<5>(ready.top());
+      size_t i = std::get<3>(ready.top());
       ready.pop();
       out.push_back(stmts[i]);
       for (size_t j : successors[i]) {

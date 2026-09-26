@@ -36,6 +36,17 @@ namespace utils {
  */
 enum class Stationarity { kOutputStationary, kAStationary, kBStationary };
 
+/// Concrete output-grid schedule used to realize L0C double buffering.
+///
+/// The chooser must price and validate the schedule the caller will actually
+/// emit. ``k`` alone is not a reliable route discriminator because the
+/// canonical frontend split-K fold always emits an unrolled output grid.
+enum class DbcEmissionRoute {
+  kUnsupported = 0,
+  kPipelinedInner = 1,
+  kUnrolledGrid = 2,
+};
+
 /**
  * @brief Inputs to ChooseL0Tile.
  *
@@ -120,8 +131,24 @@ struct L0TileConfig {
 
   // Allow the L0C double-buffer (dbC = 2): two accumulators ping-ponged so the
   // FIXPIPE drain overlaps the next tile's compute (half the L0C budget, drain
-  // hidden). When false only single-L0C (dbC = 1) is considered.
+  // hidden). When false only single-L0C (dbC = 1) is considered. The route
+  // fields below independently describe what the caller can emit.
   bool allow_double_buffer_c = false;
+
+  // Exact dbC schedule emitted for candidates that reduce K in one block or
+  // multiple blocks, respectively. Ordinary AutoTile uses a pipelined-inner
+  // full-K grid and an unrolled split-K grid. A canonical frontend split-K fold
+  // overrides full_k_dbc_route to kUnrolledGrid because its surrounding source
+  // reduction fixes the emitted route independently of the narrowed call's k.
+  DbcEmissionRoute full_k_dbc_route = DbcEmissionRoute::kPipelinedInner;
+  DbcEmissionRoute split_k_dbc_route = DbcEmissionRoute::kUnrolledGrid;
+
+  // Whether an unrolled dbC grid may include a partial M boundary. PTOAS
+  // represents the two slots with one uniform tile type; narrowing that type's
+  // physical row count through a subview changes the L0C fractal stride and is
+  // not a valid accumulator alias. PyPTO and DSA-RP allocate each boundary
+  // accumulator at its native geometry and therefore keep this enabled.
+  bool allow_unrolled_dbc_m_boundary = true;
 
   // Whether the matmul reads its accumulator (C = beta * C + A @ B). When
   // true, C traffic doubles in the cost estimate.
@@ -223,9 +250,25 @@ struct L0TileResult {
   // Whether the chooser chose to double-buffer L0C (two accumulators ping-ponged
   // to overlap the FIXPIPE drain). True only when allow_double_buffer_c was set,
   // the single-L0C optimum already tiles the output (a full [M, N, K] tile that
-  // fits one L0C is left untiled instead), the moving inner loop has at least two
-  // full interior tiles, K reduces in one pass (k == K), and the double-buffered
-  // wall was strictly lower. The stationary outer axis may have one tile.
+  // fits one L0C is left untiled instead), the chosen (m, n, k) is realizable as a
+  // ping-pong (DbcRealizable -- route-aware, see below), and the double-buffered
+  // wall was strictly lower.
+  //
+  // Realizability is route-aware. K splitting alone never supplies a ping/pong
+  // stage: consecutive K blocks accumulate into the SAME L0C tile and are serially
+  // dependent, so the second stage always comes from an M/N split. What differs is
+  // how each emitted SHAPE counts those tiles -- two counting rules across three
+  // emitters:
+  //   PIPELINED LOOP (BuildFullKPipelined): the dbC marker rides the moving INNER
+  //     loop, so that loop alone needs >= 2 FULL interior tiles. The stationary
+  //     outer axis may have one, and a peeled partial boundary does NOT count: it
+  //     is emitted straight-line outside the pipelined loops, where
+  //     CanonicalizeIOOrder never reaches it. Hence floor division.
+  //   UNROLLED GRID (BuildSplitKGrid, TryFoldCanonicalSplitKAcc): every output
+  //     tile's accumulator is stamped with its own slot, so >= 2 output tiles
+  //     suffice -- a partial boundary tile included, since it is an ordinary
+  //     member of the unrolled sequence, not a peeled tail. Hence ceil product,
+  //     subject to allow_unrolled_dbc_m_boundary for uniform-slot emitters.
   //
   // NOTE: the caller must REALIZE this with a genuine two-accumulator schedule
   // (two co-live L0C buffers). A full-K emitter that threads the output as a
@@ -234,6 +277,10 @@ struct L0TileResult {
   // lowering exists — otherwise the chooser only shrinks the tile (budgeting
   // L0C/2) without hiding the drain, a regression.
   bool double_buffer_c = false;
+
+  // Concrete route used to emit the selected dbC plan. kUnsupported when
+  // double_buffer_c is false.
+  DbcEmissionRoute dbc_emission_route = DbcEmissionRoute::kUnsupported;
 
   // Empty on success. Non-empty when the chooser couldn't pick an "ideal"
   // tile but landed on a legal fallback (e.g., M < min_m so we padded up).
@@ -293,9 +340,17 @@ struct L0TileResult {
  *      (padded_compute, ceil(K/k), C_load, -m*n, -k) -- the C_load key picks the
  *      lower-hidden-load aspect among MAD-bound (m,n)<->(n,m) ties.
  *   4. Pick the global minimum-wall point across all enumerated combinations.
+ *      Cross-regime adoption is deliberately asymmetric: a non-baseline regime is
+ *      taken only on a STRICTLY lower wall, so an equal-wall candidate never
+ *      displaces the already-scored output-stationary baseline. One exception, at an
+ *      exact tie only: a k == K candidate that also loads less displaces a dbC
+ *      split-K incumbent, because that plan re-streams both operands and the tie
+ *      holds only under the model's idealized reload counts. It cannot fire against
+ *      the baseline and cannot enable dbC.
  *      A-stationary / B-stationary require k == K (operand residency). dbC = 2
- *      additionally requires at least two full tiles on the moving inner axis,
- *      k == K, and that the single-L0C optimum already tiles. The (m, n) grid
+ *      does not: it requires that the single-L0C optimum already tiles and that
+ *      the (m, n, k) is realizable as a ping-pong -- >= 2 full moving-inner tiles
+ *      at k == K, >= 2 output tiles at k < K (see DbcRealizable). The (m, n) grid
  *      is bounded by
  *      AlignUp(AlignUp(m, box_align_m), l0c_align_m) *
  *      AlignUp(n, box_align_n) <= C0 and the boxed operand caps, k by K/align_k:
@@ -309,6 +364,21 @@ struct L0TileResult {
  *   legal tile).
  */
 L0TileResult ChooseL0Tile(const L0TileConfig& cfg);
+
+/// Can the emitter realize @p res as a dbC=2 two-slot ping-pong?
+///
+/// This is the chooser<->emitter contract in ONE place: ``ChooseL0Tile`` filters
+/// candidates with it, and ``AutoTileMatmulL0`` asserts it on the result before
+/// emitting. Keeping them the same predicate is the point -- a plan that is
+/// selected but not realized ships a tile already shrunk to the L0C/2 budget with
+/// a single buffer, which is strictly worse than not choosing dbC at all.
+///
+/// dbC needs two INDEPENDENT output tiles: consecutive K blocks accumulate into
+/// the same L0C tile and are serially dependent, so the second ping/pong stage
+/// always comes from an M/N split. All three emitters supply it, under two counting
+/// rules -- see the ``L0TileResult::double_buffer_c`` comment for which and why.
+///
+[[nodiscard]] bool DbcRealizable(const L0TileConfig& cfg, const L0TileResult& res);
 
 }  // namespace utils
 }  // namespace ir

@@ -1282,10 +1282,9 @@ class TestPipelineMatmulAccGateUp(PTOTestCase):
 
 _MATMUL_SHAPES = [(64, 64, 64), (128, 64, 128), (64, 128, 64)]
 _TRANSPOSE_SHAPES = [(64, 64, 64), (128, 64, 128), (64, 128, 64), (32, 64, 32)]
-# Every row is (M, K, N, chosen k). The current calibrated chooser returns
-# (M, N, chosen_k) under BOTH planners, so these are K-only splits rather than
-# already-fitting or full-K M/N grids. The assertion in test_matmul_autol0
-# locks that contract before the device golden runs.
+# Every row is (M, K, N, PyPTO chosen k). Most remain K-only under every
+# planner. The 64x384x256 row deliberately pins the complete-cost model's
+# planner-specific split-K dbC choice under DSA-RP/PTOAS as well.
 _AUTOL0_K_SPLIT_SHAPES = [
     (16, 128, 128, 64),
     (64, 192, 128, 64),
@@ -1575,13 +1574,13 @@ class TestMatmulOperations:
     @pytest.mark.parametrize("planner", _AUTOL0_PLANNERS)
     @pytest.mark.parametrize("m,k,n,l0_k", _AUTOL0_K_SPLIT_SHAPES)
     def test_matmul_autol0(self, test_runner, platform, planner, m, k, n, l0_k):
-        """910B FP32 operands — genuine K-only AutoTile split under every planner."""
+        """910B FP32 operands — calibrated K-split schedules under every planner."""
         choice = _choose_a2a3_l0(m, k, n, planner=planner, bytes_a=4, bytes_b=4)
-        assert (choice.m, choice.n, choice.k) == (m, n, l0_k), (
-            f"expected K-only tile {(m, n, l0_k)} under {planner}, got {(choice.m, choice.n, choice.k)}"
-        )
+        planner_specific_dbc = (m, k, n) == (64, 384, 256) and planner != MemoryPlanner.PYPTO
+        expected_tile = (64, 128, 64) if planner_specific_dbc else (m, n, l0_k)
+        assert (choice.m, choice.n, choice.k) == expected_tile
         assert choice.stationarity == _core_passes.l0_tile_chooser.Stationarity.OutputStationary
-        assert not choice.double_buffer_c
+        assert choice.double_buffer_c is planner_specific_dbc
         assert choice.k < k, "the system case must exercise a real K split"
         cfg = RunConfig(platform=platform, rtol=_AUTOL0_RTOL, atol=_AUTOL0_ATOL)
         result = test_runner.run(

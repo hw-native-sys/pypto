@@ -35,12 +35,23 @@ CONST_SLOTS = pl.MemRef(slots=2)
 SINGLE = pl.MemRef()
 TOO_MANY = pl.MemRef(slots=17)
 MIXED_SHAPES = pl.MemRef(slots=2)
+MIXED_ACC_STRIDES = pl.MemRef(slots=2)
 MIXED_BINDING = pl.MemRef(slots=2)
 MIXED_VALID = pl.MemRef(slots=2)
 RUNTIME_VALID = pl.MemRef(slots=2)
 CO_LIVE = pl.MemRef(slots=2)
 PREFETCH = pl.MemRef(slots=2)
 SIBLING_LOOPS = pl.MemRef(slots=2)
+SEQUENTIAL_A = pl.MemRef(slots=2)
+SEQUENTIAL_B = pl.MemRef(slots=2)
+OVERLAPPING_A = pl.MemRef(slots=2)
+OVERLAPPING_B = pl.MemRef(slots=2)
+INTERLEAVED_A = pl.MemRef(slots=2)
+INTERLEAVED_B = pl.MemRef(slots=2)
+TOUCHING_A = pl.MemRef(slots=2)
+TOUCHING_B = pl.MemRef(slots=2)
+TOUCHING_C = pl.MemRef(slots=2)
+MIXED_VALID_VIEWS = pl.MemRef(slots=2)
 
 
 @pl.program
@@ -114,6 +125,28 @@ class MixedSlotShapes:
         r_big: pl.Tensor[[64, 64], pl.FP32] = pl.store(big, [0, 0], big_out)
         small: pl.Tile[[32, 32], pl.FP32, MIXED_SHAPES[1], pl.Mem.Vec] = pl.load(a, [0, 0], [32, 32])
         r_small: pl.Tensor[[32, 32], pl.FP32] = pl.store(small, [0, 0], small_out)
+        return r_big, r_small
+
+
+@pl.program
+class MixedAccRowStrides:
+    """Acc slot views with different physical rows have different NZ strides."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        big_out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        small_out: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
+    ) -> tuple[pl.Tensor[[64, 64], pl.FP32], pl.Tensor[[32, 64], pl.FP32]]:
+        big: pl.Tile[[64, 64], pl.FP32, MIXED_ACC_STRIDES[0], pl.Mem.Acc] = pl.tile.create(
+            [64, 64], dtype=pl.FP32, target_memory=pl.Mem.Acc
+        )
+        r_big: pl.Tensor[[64, 64], pl.FP32] = pl.store(big, [0, 0], big_out)
+        small: pl.Tile[[32, 64], pl.FP32, MIXED_ACC_STRIDES[1], pl.Mem.Acc] = pl.tile.create(
+            [32, 64], dtype=pl.FP32, target_memory=pl.Mem.Acc
+        )
+        r_small: pl.Tensor[[32, 64], pl.FP32] = pl.store(small, [0, 0], small_out)
         return r_big, r_small
 
 
@@ -236,6 +269,128 @@ class SequentialSlotsInSiblingLoops:
             s1: pl.Tile[[64, 64], pl.FP32] = pl.exp(hi)
             output = pl.store(s1, [128 + j * 64, 0], output)
         return output
+
+
+@pl.program
+class SequentialCompatibleRegions:
+    """Two compatible allocations whose complete lifetimes are sequential."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        b: pl.Tensor[[64, 64], pl.FP32],
+        out_a: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        out_b: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> tuple[pl.Tensor[[64, 64], pl.FP32], pl.Tensor[[64, 64], pl.FP32]]:
+        a0: pl.Tile[[64, 64], pl.FP32, SEQUENTIAL_A[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+        a1: pl.Tile[[64, 64], pl.FP32, SEQUENTIAL_A[1], pl.Mem.Vec] = pl.exp(a0)
+        result_a = pl.store(a1, [0, 0], out_a)
+        b0: pl.Tile[[64, 64], pl.FP32, SEQUENTIAL_B[0], pl.Mem.Vec] = pl.load(b, [0, 0], [64, 64])
+        b1: pl.Tile[[64, 64], pl.FP32, SEQUENTIAL_B[1], pl.Mem.Vec] = pl.exp(b0)
+        result_b = pl.store(b1, [0, 0], out_b)
+        return result_a, result_b
+
+
+@pl.program
+class OverlappingCompatibleRegions:
+    """Same region types as above, but both allocations are live together."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        b: pl.Tensor[[64, 64], pl.FP32],
+        out_a: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        out_b: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> tuple[pl.Tensor[[64, 64], pl.FP32], pl.Tensor[[64, 64], pl.FP32]]:
+        a0: pl.Tile[[64, 64], pl.FP32, OVERLAPPING_A[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+        b0: pl.Tile[[64, 64], pl.FP32, OVERLAPPING_B[0], pl.Mem.Vec] = pl.load(b, [0, 0], [64, 64])
+        a1: pl.Tile[[64, 64], pl.FP32, OVERLAPPING_A[1], pl.Mem.Vec] = pl.exp(a0)
+        b1: pl.Tile[[64, 64], pl.FP32, OVERLAPPING_B[1], pl.Mem.Vec] = pl.exp(b0)
+        result_a = pl.store(a1, [0, 0], out_a)
+        result_b = pl.store(b1, [0, 0], out_b)
+        return result_a, result_b
+
+
+@pl.program
+class InterleavedCompatibleRegions:
+    """One allocation surrounds another across two slot-variable lifetimes."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        b: pl.Tensor[[64, 64], pl.FP32],
+        out_a: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        out_b: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> tuple[pl.Tensor[[64, 64], pl.FP32], pl.Tensor[[64, 64], pl.FP32]]:
+        a0: pl.Tile[[64, 64], pl.FP32, INTERLEAVED_A[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+        b0: pl.Tile[[64, 64], pl.FP32, INTERLEAVED_B[0], pl.Mem.Vec] = pl.load(b, [0, 0], [64, 64])
+        b1: pl.Tile[[64, 64], pl.FP32, INTERLEAVED_B[1], pl.Mem.Vec] = pl.exp(b0)
+        result_b = pl.store(b1, [0, 0], out_b)
+        a1: pl.Tile[[64, 64], pl.FP32, INTERLEAVED_A[1], pl.Mem.Vec] = pl.exp(a0)
+        result_a = pl.store(a1, [0, 0], out_a)
+        return result_a, result_b
+
+
+@pl.program
+class TouchingNonInplaceRegions:
+    """A non-in-place-safe result cannot inherit its input's final-use region."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[32, 32], pl.FP32],
+        out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+    ) -> pl.Tensor[[32, 32], pl.FP32]:
+        a0: pl.Tile[[32, 32], pl.FP32, TOUCHING_A[0], pl.Mem.Vec] = pl.load(a, [0, 0], [32, 32])
+        a1: pl.Tile[[32, 32], pl.FP32, TOUCHING_A[1], pl.Mem.Vec] = pl.exp(a0)
+        b0: pl.Tile[[32, 32], pl.FP32, TOUCHING_B[0], pl.Mem.Vec] = pl.recip(a1)
+        b1: pl.Tile[[32, 32], pl.FP32, TOUCHING_B[1], pl.Mem.Vec] = pl.exp(b0)
+        return pl.store(b1, [0, 0], out)
+
+
+@pl.program
+class ReusedRegionThenNonInplace:
+    """The no-alias check must include occupants after the region's first owner."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[32, 32], pl.FP32],
+        out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+    ) -> pl.Tensor[[32, 32], pl.FP32]:
+        a0: pl.Tile[[32, 32], pl.FP32, TOUCHING_A[0], pl.Mem.Vec] = pl.load(a, [0, 0], [32, 32])
+        a1: pl.Tile[[32, 32], pl.FP32, TOUCHING_A[1], pl.Mem.Vec] = pl.exp(a0)
+        out = pl.store(a1, [0, 0], out)
+        b0: pl.Tile[[32, 32], pl.FP32, TOUCHING_B[0], pl.Mem.Vec] = pl.load(a, [0, 0], [32, 32])
+        b1: pl.Tile[[32, 32], pl.FP32, TOUCHING_B[1], pl.Mem.Vec] = pl.exp(b0)
+        c0: pl.Tile[[32, 32], pl.FP32, TOUCHING_C[0], pl.Mem.Vec] = pl.recip(b1)
+        c1: pl.Tile[[32, 32], pl.FP32, TOUCHING_C[1], pl.Mem.Vec] = pl.exp(c0)
+        return pl.store(c1, [0, 0], out)
+
+
+@pl.program
+class MixedGeometryValidViews:
+    """The same slot may need distinct valid views of one physical geometry."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        cover: pl.Tile[[64, 64], pl.FP32, MIXED_VALID_VIEWS[1], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+        out = pl.store(cover, [0, 0], out)
+        small_half: pl.Tile[
+            [32, 32], pl.FP32, MIXED_VALID_VIEWS[0], pl.Mem.Vec, pl.TileView(valid_shape=[16, 32])
+        ] = pl.load(a, [0, 0], [32, 32], valid_shape=[16, 32])
+        out = pl.store(small_half, [0, 0], out)
+        small_full: pl.Tile[[32, 32], pl.FP32, MIXED_VALID_VIEWS[0], pl.Mem.Vec] = pl.load(
+            a, [0, 0], [32, 32]
+        )
+        return pl.store(small_full, [0, 0], out)
 
 
 @pl.program
@@ -384,6 +539,23 @@ class TestPtoasPlannerEmitsMultiBuffer:
         slots = {get.split("[")[1].split("]")[0] for get in gets}
         assert len(slots) == 2, f"the two slots must be distinct:\n{mlir}"
 
+    def test_nested_slot_shapes_use_one_covering_region_and_a_boundary_view(self):
+        """Smaller slot uses are zero-offset views of one uniform region type.
+
+        PTOAS requires uniform physical slots, but an unrolled output grid may
+        end in a smaller boundary tile. The region therefore uses the largest
+        bound tile and the smaller use becomes a subview; it must not be rejected
+        or lowered to an unrelated allocation that loses slot separation.
+        """
+        mlir = _codegen(MixedSlotShapes, passes.MemoryPlanner.PTOAS)
+        assert len(_lines(mlir, "pto.alloc_multi_tile")) == 1, mlir
+        assert len(_lines(mlir, "pto.multi_tile_get")) == 2, mlir
+        subviews = _lines(mlir, "pto.subview")
+        assert len(subviews) == 1, mlir
+        assert "sizes [32, 32]" in subviews[0], subviews[0]
+        assert "rows=64, cols=64" in subviews[0], subviews[0]
+        assert "rows=32, cols=32" in subviews[0], subviews[0]
+
     def test_sibling_loops_each_taking_one_slot_still_form_a_region(self):
         """The co-live blocker is per loop body, not per function.
 
@@ -393,6 +565,66 @@ class TestPtoasPlannerEmitsMultiBuffer:
         mlir = _codegen(SequentialSlotsInSiblingLoops, passes.MemoryPlanner.PTOAS)
         assert len(_lines(mlir, "pto.alloc_multi_tile")) == 1, mlir
         assert len(_lines(mlir, "pto.multi_tile_get")) == 2, mlir
+
+    def test_sequential_compatible_allocations_share_one_physical_region(self):
+        """Function-head regions recover reuse proved by conservative lifetimes."""
+        mlir = _codegen(SequentialCompatibleRegions, passes.MemoryPlanner.PTOAS)
+        assert len(_lines(mlir, "pto.alloc_multi_tile")) == 1, mlir
+        regions = {
+            line.split("pto.multi_tile_get ", 1)[1].split("[", 1)[0]
+            for line in _lines(mlir, "pto.multi_tile_get")
+        }
+        assert len(regions) == 1, mlir
+
+    def test_overlapping_compatible_allocations_keep_distinct_regions(self):
+        """Type compatibility alone cannot alias simultaneously-live slots."""
+        mlir = _codegen(OverlappingCompatibleRegions, passes.MemoryPlanner.PTOAS)
+        assert len(_lines(mlir, "pto.alloc_multi_tile")) == 2, mlir
+        regions = {
+            line.split("pto.multi_tile_get ", 1)[1].split("[", 1)[0]
+            for line in _lines(mlir, "pto.multi_tile_get")
+        }
+        assert len(regions) == 2, mlir
+
+    def test_touching_non_inplace_allocations_keep_distinct_regions(self):
+        """A final input read and output definition at one op forbid aliasing."""
+        mlir = _codegen(TouchingNonInplaceRegions, passes.MemoryPlanner.PTOAS)
+        assert len(_lines(mlir, "pto.alloc_multi_tile")) == 2, mlir
+
+    def test_non_inplace_check_includes_region_reuse_occupants(self):
+        """A can share with B, but B's final read cannot alias C's definition."""
+        mlir = _codegen(ReusedRegionThenNonInplace, passes.MemoryPlanner.PTOAS)
+        assert len(_lines(mlir, "pto.alloc_multi_tile")) == 2, mlir
+        gets = _lines(mlir, "pto.multi_tile_get")
+
+        def region_of(name):
+            line = next(line for line in gets if line.startswith(f"%{name}__"))
+            return line.split("pto.multi_tile_get ", 1)[1].split("[", 1)[0]
+
+        a_region = region_of("a0")
+        b_region = region_of("b0")
+        c_region = region_of("c0")
+        assert a_region == b_region != c_region, mlir
+
+    def test_mixed_geometry_slot_keeps_distinct_valid_views(self):
+        """A reused slot must not inherit an earlier subview's valid extent."""
+        mlir = _codegen(MixedGeometryValidViews, passes.MemoryPlanner.PTOAS)
+        assert len(_lines(mlir, "pto.alloc_multi_tile")) == 1, mlir
+        subviews = _lines(mlir, "pto.subview")
+        assert len(subviews) == 2, mlir
+        assert all("sizes [32, 32]" in view for view in subviews), mlir
+        assert any("v_row=16, v_col=32" in view for view in subviews), mlir
+        assert any("v_row=32, v_col=32" in view for view in subviews), mlir
+
+    def test_interleaved_slot_lifetimes_keep_distinct_regions(self):
+        """The complete lifetime of every variable sharing a base is considered."""
+        mlir = _codegen(InterleavedCompatibleRegions, passes.MemoryPlanner.PTOAS)
+        assert len(_lines(mlir, "pto.alloc_multi_tile")) == 2, mlir
+        regions = {
+            line.split("pto.multi_tile_get ", 1)[1].split("[", 1)[0]
+            for line in _lines(mlir, "pto.multi_tile_get")
+        }
+        assert len(regions) == 2, mlir
 
     def test_slot_tiles_take_no_alloc_tile(self):
         """A slot is taken from the region, never allocated beside it."""
@@ -446,8 +678,8 @@ class TestUnsupportedShapesAreLoud:
         ("program", "reason"),
         [
             (TooManySlots, "17"),
-            (MixedSlotShapes, "differently shaped tiles"),
             (MixedSlotValidShapes, "different valid shapes"),
+            (MixedAccRowStrides, "different physical row counts"),
             (RuntimeValidShapeSlots, "runtime valid shape"),
             (CoLiveSlotsInLoop, "two of its slots are live at once inside a loop"),
             (PrefetchSlotInLoop, "two of its slots are live at once inside a loop"),
@@ -455,8 +687,8 @@ class TestUnsupportedShapesAreLoud:
         ],
         ids=[
             "slot-count-out-of-range",
-            "non-uniform-slot-type",
             "non-uniform-valid-shape",
+            "non-uniform-acc-stride",
             "runtime-valid-shape",
             "co-live-slots-in-loop",
             "prefetch-slot-in-loop",

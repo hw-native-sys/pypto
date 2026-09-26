@@ -63,34 +63,56 @@ inline constexpr const char* kPipelineStagesAttr = "pipeline_stages";
 inline constexpr const char* kPipelineOverlapStoresAttr = "pipeline_overlap_stores";
 
 /// Optional ``bool`` policy attr on a ``ForKind::Pipeline`` ``ForStmt`` (absent ⇒
-/// ``false``): when ``true``, ``CanonicalizeIOOrder`` floats the Acc-draining ops
-/// into a tier *above all compute* in the loop body, so every sibling-iteration
-/// drain sorts after every matmul — ``matmul_i, matmul_{i+1}, drain_i, drain_{i+1}``
-/// instead of ``matmul_i, drain_i, matmul_{i+1}, drain_{i+1}``. For a source
-/// pipeline deeper than two, this ordering repeats in depth-two chunks
-/// (``MMSS MMSS ...``), so operand prefetch depth remains user-selected while
-/// L0C membership still rotates over two stage residues in each fully
-/// replicated group. The drain op is ``tile.store`` on the direct-store
-/// (Acc→GM) path and ``tile.assemble`` on the Mat-scratch (Acc→Mat) path.
+/// ``false``): when ``true``, the loop's cube accumulator is double-buffered —
+/// two L0C slots ping-pong so output tile i's FIXPIPE drain overlaps tile i+1's
+/// MAD. The drain op is ``tile.store`` on the direct-store (Acc→GM) path and
+/// ``tile.assemble`` on the Mat-scratch (Acc→Mat) path.
 ///
-/// This is a *stronger* float than ``pipeline_overlap_stores`` (which only orders
-/// store-after-compute *within* a stage — the compute/store tier is shared and
-/// sorted by stage, so a stage-i store still precedes the stage-{i+1} matmul).
-/// It keeps the two iterations' L0C accumulators genuinely co-live, which is the
-/// dbC=2 (double-buffered L0C) ping-pong: overlapping their live ranges forces any
-/// correct allocator to give them distinct L0C offsets, so tile i's FIXPIPE drain
-/// overlaps tile i+1's MAD. Under ``memory_planner=PTOAS``, InitMemRef keeps the
-/// co-live buffers distinct and ptoas places them. Under the PyPTO planner,
-/// ``LowerPipelineLoops`` adds a depth-2 pipeline membership and MemoryReuse
-/// preserves the pair. ``AutoTileMatmulL0`` sets the attr either when the chooser
-/// picked ``double_buffer_c`` (with the accumulator budgeted at L0C/2), or when it
+/// The attr's content is *buffer separation*, not statement order. It makes
+/// ``LowerPipelineLoops``' membership tagger stamp the cube accumulator (which it
+/// otherwise skips, because the cube serializes MADs), and makes
+/// ``CanonicalizeIOOrder`` rotate that membership to ``stage % 2`` — so a source
+/// pipeline deeper than two keeps its user-selected operand prefetch depth while
+/// L0C still uses exactly two slots. MemoryReuse / AllocateMemoryAddr consume the
+/// membership and keep the pair in distinct buffers; under
+/// ``memory_planner=PTOAS`` MemoryReuse is skipped and InitMemRef keeps them
+/// distinct anyway.
+///
+/// It deliberately does NOT reorder the body. The ordinary stage-major order
+/// already emits ``matmul_i, drain_i, matmul_{i+1}, drain_{i+1}``, which *is* the
+/// ping-pong: each drain is issued directly after the MAD that produced it and
+/// runs while the next MAD executes on the other slot. An earlier version lifted
+/// every drain above all compute (``matmul_i, matmul_{i+1}, drain_i,
+/// drain_{i+1}``, repeating in ``MMSS`` chunks) to force the live ranges to
+/// overlap; that defers each drain past the very compute it should hide behind,
+/// and an Ascend 910B2 campaign measured the reorder alone as worth ≤ 0.08 µs
+/// (nothing) once the buffers were already distinct. Separation is carried by the
+/// membership constraint above, so the reorder bought no separation either.
+///
+/// ``AutoTileMatmulL0`` sets the attr either when the chooser picked
+/// ``double_buffer_c`` (with the accumulator budgeted at L0C/2), or when it
 /// recognizes a user-authored pipeline containing one canonical directly drained
 /// L0 matmul whose path-specific trip-count/Acc-size gate is profitable and whose
 /// conservative whole-function Acc footprint still fits after adding the extra
 /// slot. Direct-to-GM ``tile.store`` and Acc-to-Mat ``tile.assemble`` have
-/// separate conservative admission thresholds. Consumed (stripped) by
-/// ``CanonicalizeIOOrder`` alongside ``pipeline_stages`` and
-/// ``pipeline_overlap_stores``.
+/// separate conservative admission thresholds.
+///
+/// REALIZABILITY: only ``BuildFullKPipelined`` attaches this attr — it is the
+/// full-K route's mechanism, not dbC's definition. That route has no accumulator
+/// to stamp at emit time: the two co-live values do not exist as two SSA values
+/// until ``LowerPipelineLoops`` replicates the marked loop, so the attr is how
+/// AutoTile asks for that replication-time stamp. ``BuildSplitKGrid`` (k < K) has
+/// the opposite problem — it emits the output grid UNROLLED, so there is no loop
+/// to replicate and nothing to mark — and therefore stamps ``pipeline_membership``
+/// ``(unique AutoTile group, tile index % 2)`` on each tile's accumulator directly.
+/// Both routes end at the same relation; neither is the general mechanism.
+///
+/// What a dbC plan must NOT do is reach an emitter that realizes neither, because
+/// the tile has by then already been shrunk to the L0C/2 budget that paid for the
+/// ping-pong: that ships a shrunk SINGLE-buffered tile. ``AnalyzeMatmul`` asserts
+/// route-aware realizability (``utils::DbcRealizable``) for exactly that reason.
+/// Consumed (stripped) by ``CanonicalizeIOOrder`` alongside ``pipeline_stages``
+/// and ``pipeline_overlap_stores``.
 inline constexpr const char* kPipelineDoubleBufferCAttr = "pipeline_double_buffer_c";
 
 /// Attribute key marking a tile-producing ``Call`` with the pipeline-stage
@@ -128,6 +150,37 @@ inline std::string AppendPipelineMembership(const std::string& packed, int32_t g
   std::string pair = std::to_string(group) + ":" + std::to_string(stage);
   return packed.empty() ? pair : packed + ";" + pair;
 }
+
+/// Reserved ``pipeline_membership`` group bases, one per producer.
+///
+/// Three passes write ``pipeline_membership``: ``LowerPipelineLoops`` (0-based
+/// group ids), ``SkewCrossCorePipeline`` (one fresh group per skewed loop from
+/// ``kSkewGroupBase``), and ``AutoTileMatmulL0`` for a dbC=2 split-K output grid.
+/// That grid is emitted UNROLLED -- there is no loop over output tiles for
+/// ``LowerPipelineLoops`` to replicate -- so the two-slot L0C separation has to be
+/// declared directly on the accumulator of each tile.
+///
+/// Consumers key on ``(space, group, stage)`` plus lifetimes and do not care which
+/// pass wrote the tag, but two PRODUCERS sharing a group id would make
+/// ``MemoryReuse`` conflate unrelated pipelines, so each non-``LowerPipelineLoops``
+/// producer takes its own base. The bases live here, together and ordered, so the
+/// ranges cannot silently overlap; ``SkewCrossCorePipeline`` checks its counter
+/// against the next base as it hands out groups.
+///
+/// ``AutoTileMatmulL0`` allocates one group per unrolled output grid from the
+/// half-open range [kAutoTileGroupBase, kAutoTileGroupLimit). Tiles inside one
+/// grid rotate over stages 0/1; unrelated grids never acquire a false shared
+/// separation constraint. Their physical storage may still be reused when their
+/// ordinary lifetimes permit it -- group identity expresses which stages must be
+/// distinct, not a permanent allocation identity.
+inline constexpr int32_t kSkewGroupBase = 1 << 20;
+inline constexpr int32_t kAutoTileGroupBase = 1 << 21;
+inline constexpr int32_t kAutoTileGroupLimit = 1 << 22;
+static_assert(kSkewGroupBase < kAutoTileGroupBase,
+              "pipeline_membership group bases must be ordered so each producer's range is bounded "
+              "by the next base");
+static_assert(kAutoTileGroupBase < kAutoTileGroupLimit,
+              "AutoTile pipeline_membership group range must be non-empty");
 
 /// Parse a ``pipeline_membership`` string into ``(group, stage)`` pairs.
 ///

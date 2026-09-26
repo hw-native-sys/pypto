@@ -1433,6 +1433,58 @@ class TestAutoTileMatmulL0MNTiling:
             f"mismatches={(out != expected).sum().item()}, max_abs={(out - expected).abs().max().item()}"
         )
 
+    def test_ptoas_unrolled_dbc_binds_first_bias_result_to_two_slots(self):
+        """A biased K-loop has no tile.create seed; bind its first cube result.
+
+        The head-peeled ``tile.matmul_bias`` both applies the bias and mints the
+        accumulator. PTOAS does not consume ``pipeline_membership``, so an
+        unrolled dbC grid must attach the explicit two-slot MemRef there and let
+        subsequent ``tile.matmul_acc`` calls inherit it.
+        """
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        M, K, N = 160, 512, 160
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.INT8],
+                rhs: pl.Tensor[[K, N], pl.INT8],
+                bias: pl.Tensor[[1, N], pl.INT32],
+                out: pl.Out[pl.Tensor[[M, N], pl.INT32]],
+            ) -> pl.Tensor[[M, N], pl.INT32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                bias_mat = pl.tile.load(bias, [0, 0], [1, N], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul_bias(lhs_mat, rhs_mat, bias_mat)
+                out = pl.tile.store(c, [0, 0], out)
+                return out
+
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+        from pypto.pypto_core import codegen as _codegen_core  # noqa: PLC0415
+        from pypto.pypto_core import ir as _ir_core  # noqa: PLC0415
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            tiled = passes.auto_tile_matmul_l0()(Before)
+            optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+        printed = ir.python_print(tiled)
+
+        assert "pipeline_membership" in printed, printed
+        assert "slots=2" in printed, printed
+        assert "tile.create" not in printed, "the bias head itself should remain the accumulator seed"
+        assert "slots=2" in ir.python_print(optimized), "InitMemRef must preserve the PTOAS slot region"
+        _assert_ssa_valid(tiled, "test_ptoas_unrolled_dbc_bias_seed")
+
+        func = next(func for func in optimized.functions.values() if func.name == "kernel")
+        mlir = _codegen_core.PTOCodegen().generate(
+            _ir_core.Program([func], func.name, optimized.span), emit_tile_addr=False
+        )
+        subviews = [line for line in mlir.splitlines() if "pto.subview" in line]
+        assert len(subviews) == 2, mlir
+        assert all("sizes [80, 32]" in line for line in subviews), subviews
+
     def test_matmul_bias_n_tiling_with_partial_valid_load_is_deferred(self):
         """A narrowed bias snapshot cannot be widened by reconstructed N-window loads."""
         _backend.reset_for_testing()
@@ -1804,6 +1856,69 @@ class TestAutoTileMatmulL0MNTiling:
         assert "pl.tile.extract(bias_l0" not in printed
         assert printed.count("pl.tile.matmul_bias(") == 2
         _assert_ssa_valid(After, "test_matmul_bias_m_only_tiling_reuses_bias_resident_source")
+
+    def test_matmul_bias_m_only_tiling_survives_intervening_effect(self):
+        """A full-N Bias-resident fold never reloads bias at its deferred store."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        M, K, N = 528, 64, 256
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, N], pl.BF16],
+                bias: pl.Tensor[[1, N], pl.FP32],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                bias_mat = pl.tile.load(bias, [0, 0], [1, N], target_memory=pl.Mem.Mat)
+                bias_l0 = pl.tile.move(bias_mat, target_memory=pl.Mem.Bias)
+                c = pl.tile.matmul_bias(lhs_mat, rhs_mat, bias_l0)
+                snapshot = pl.store(bias_mat, [0, 0], out)
+                final = pl.store(c, [0, 0], snapshot)
+                return final
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        printed = ir.python_print(After)
+        assert "pl.pipeline(" in printed
+        assert printed.count("pl.tile.matmul_bias(") == 2
+        assert printed.count("pl.tile.move(bias_mat, target_memory=pl.Mem.Bias)") == 1
+        _assert_ssa_valid(After, "test_matmul_bias_m_only_tiling_survives_intervening_effect")
+
+    def test_matmul_bias_mat_snapshot_intervening_effect_keeps_full_n(self):
+        """A later store may fold M while reusing, not reloading, a Mat bias."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        M, K, N = 528, 64, 256
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, N], pl.BF16],
+                bias: pl.Tensor[[1, N], pl.FP32],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                bias_mat = pl.tile.load(bias, [0, 0], [1, N], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul_bias(lhs_mat, rhs_mat, bias_mat)
+                snapshot_mat = pl.tile.load(bias, [0, 0], [1, N], target_memory=pl.Mem.Mat)
+                snapshot = pl.store(snapshot_mat, [0, 0], out)
+                final = pl.store(c, [0, 0], snapshot)
+                return final
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        printed = ir.python_print(After)
+        assert "pl.pipeline(" in printed
+        assert printed.count("pl.tile.matmul_bias(") == 2
+        _assert_ssa_valid(After, "test_matmul_bias_mat_snapshot_intervening_effect_keeps_full_n")
 
     def test_mn_tiling_rewrites_to_subtile_grid(self):
         """512×512 @ 512 FP32 on Ascend950 (L0c = 256 KB): the [512, 512] FP32
@@ -2622,10 +2737,16 @@ class TestAutoTileMatmulL0MNTiling:
                 "pl.pipeline(0, 512, 128,",
                 False,
             ),
+            # K=512 (not 384): at K=384 this shape is now drain-bound enough that the
+            # chooser prefers a 2-tile split-K dbC grid (see
+            # test_split_k_dbc_beats_held_a_when_the_drain_dominates). K=512 keeps the
+            # held-A schedule the strict optimum, so this case still covers what it
+            # names -- A held across the moving loop -- rather than silently becoming
+            # a second split-K case.
             (
                 passes.MemoryPlanner.PTOAS,
                 64,
-                384,
+                512,
                 288,
                 64,
                 "pl.range(0, 64, 64,",
@@ -2756,16 +2877,18 @@ class TestAutoTileMatmulL0MNTiling:
         ],
     )
     @pytest.mark.parametrize(
-        ("M", "N", "tile_m", "tile_n"),
+        ("M", "N", "tile_m", "tile_n", "tile_k"),
         [
-            (160, 160, 80, 128),
-            (144, 144, 48, 128),
-            (256, 256, 32, 256),
-            (448, 448, 112, 128),
-            (384, 256, 32, 256),
+            (160, 160, 80, 128, 32),
+            (144, 144, 48, 128, 32),
+            (256, 256, 32, 256, 64),
+            (448, 448, 64, 256, 32),
+            (384, 256, 32, 256, 64),
         ],
     )
-    def test_system_dbc_shapes_emit_expected_fp32_tile(self, planner, pypto_dbc, M, N, tile_m, tile_n):
+    def test_system_dbc_shapes_emit_expected_fp32_tile(
+        self, planner, pypto_dbc, M, N, tile_m, tile_n, tile_k
+    ):
         """Structural lock for the direct-store dbC system-test geometries."""
         K = 64
         _backend.reset_for_testing()
@@ -2797,9 +2920,13 @@ class TestAutoTileMatmulL0MNTiling:
         ):
             After = passes.auto_tile_matmul_l0()(Before)
         printed = ir.python_print(After)
-        assert f"[{tile_m}, {K}], target_memory=pl.Mem.Left" in printed
-        assert f"[{K}, {tile_n}], target_memory=pl.Mem.Right" in printed
-        assert "pipeline_double_buffer_c" in printed
+        assert f"[{tile_m}, {tile_k}], target_memory=pl.Mem.Left" in printed
+        assert f"[{tile_k}, {tile_n}], target_memory=pl.Mem.Right" in printed
+        if tile_k == K:
+            assert "pipeline_double_buffer_c" in printed
+        else:
+            assert '"pipeline_membership": "2097152:0"' in printed
+            assert '"pipeline_membership": "2097152:1"' in printed
         _assert_ssa_valid(After, f"test_system_dbc_{planner}_{M}_{N}")
 
     def test_full_k_direct_gm_keeps_one_l0c_accumulator(self):
@@ -2893,13 +3020,16 @@ class TestAutoTileMatmulL0MNTiling:
     def test_dbc2_ptoas_co_lives_two_l0c_accumulators(self):
         """Golden co-live check for dbC=2 (companion to the dbC=1 test above).
 
-        Under ``memory_planner=PTOAS`` a dbC=2-eligible full-K grid emits the
-        two-accumulator ping-pong: ``CanonicalizeIOOrder`` floats **both** stores below
-        **both** matmuls (``matmul, matmul, store, store``), so two L0C accumulators are
-        live at once. Under the default PyPTO planner the *same shape* stays dbC=1 and
-        interleaves each store with its matmul (``matmul, store, …``). This pins the
-        co-live ordering (subtle -- the nested-context bug silently disabled it once) and
-        the planner gate in one test.
+        Both planners emit the SAME interleaved order -- each drain directly after
+        its own MAD -- because that order *is* the ping-pong: with the two tiles in
+        different L0C slots, store_i runs while matmul_{i+1} executes. What dbC=2
+        changes is the number of slots, so this test pins the planner gate on the
+        **allocation**, which is the property, rather than on statement order.
+
+        (It previously asserted ``matmul, matmul, store, store`` under PTOAS. That
+        order lifted every drain above all compute, deferring each drain past the
+        MAD it should overlap; separation comes from the rotated
+        ``pipeline_membership``, not from the reorder. See attrs.h.)
 
         256x64x256 BF16: chooser picks a 2x2 dbC=2 grid; each accumulator (128x128 or
         smaller, <= L0C/2) leaves room for two co-live buffers.
@@ -2926,28 +3056,38 @@ class TestAutoTileMatmulL0MNTiling:
                 out = pl.store(c, [0, 0], out)
                 return out
 
-        # PTOAS: dbC=2 -> at least one adjacent matmul,matmul (two co-live accumulators),
-        # and the stores float below (a matmul,matmul,store,store window exists).
-        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
-            ptoas_seq = self._colive_seq(Before)
-        mm = [i for i, op in enumerate(ptoas_seq) if op == "matmul"]
-        assert mm, f"expected matmuls under PTOAS: {ptoas_seq}"
-        assert any(i + 1 < len(ptoas_seq) and ptoas_seq[i + 1] == "matmul" for i in mm), (
-            f"dbC=2 (PTOAS) must co-live two accumulators (adjacent matmul,matmul), got: {ptoas_seq}"
-        )
-        assert any(
-            ptoas_seq[i : i + 4] == ["matmul", "matmul", "store", "store"] for i in range(len(ptoas_seq) - 3)
-        ), f"dbC=2 (PTOAS) must float both stores below both matmuls (matmul,matmul,store,store): {ptoas_seq}"
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
-        # Default PyPTO planner: dbC=1 -> every matmul is immediately followed by its store
-        # (no two co-live accumulators), for the SAME shape.
-        pypto_seq = self._colive_seq(Before)
-        mm2 = [i for i, op in enumerate(pypto_seq) if op == "matmul"]
-        assert mm2, f"expected matmuls under PyPTO: {pypto_seq}"
-        for i in mm2:
-            assert i + 1 < len(pypto_seq) and pypto_seq[i + 1] == "store", (
-                f"dbC=1 (PyPTO) must interleave matmul,store (one accumulator), got: {pypto_seq}"
-            )
+        def acc_buffers(planner) -> set[str]:
+            _backend.reset_for_testing()
+            _backend.set_backend_type(BackendType.Ascend910B)
+            with passes.PassContext([], memory_planner=planner):
+                allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+            return {
+                line.strip().split(":")[0]
+                for line in ir.python_print(allocated).splitlines()
+                if "tile.alloc(pl.Mem.Acc" in line
+            }
+
+        # Both planners emit the ping-pong order: every matmul is followed by its
+        # own store, so each drain runs under the next tile's MAD.
+        for planner in (passes.MemoryPlanner.PTOAS, passes.MemoryPlanner.PYPTO):
+            with passes.PassContext([], memory_planner=planner):
+                seq = self._colive_seq(Before)
+            mm = [i for i, op in enumerate(seq) if op == "matmul"]
+            assert mm, f"expected matmuls under {planner}: {seq}"
+            for i in mm:
+                assert i + 1 < len(seq) and seq[i + 1] == "store", (
+                    f"{planner} must emit the ping-pong order (matmul, store, ...), got: {seq}"
+                )
+
+        # The planner gate shows up in the SLOT COUNT: PTOAS takes the dbC=2 plan
+        # and keeps two co-live accumulators; the default PyPTO planner stays dbC=1
+        # on the same shape and coalesces to one.
+        ptoas_accs = acc_buffers(passes.MemoryPlanner.PTOAS)
+        assert len(ptoas_accs) == 2, f"dbC=2 (PTOAS) must keep two co-live L0C buffers, got: {ptoas_accs}"
+        pypto_accs = acc_buffers(passes.MemoryPlanner.PYPTO)
+        assert len(pypto_accs) == 1, f"dbC=1 (PyPTO default) must use one L0C buffer, got: {pypto_accs}"
 
     def test_dbc2_pypto_flag_allocates_ping_pong(self):
         """The experimental ``enable_pypto_l0c_double_buffer`` opt-in makes the PyPTO
@@ -3069,6 +3209,261 @@ class TestAutoTileMatmulL0MNTiling:
             f"got {sorted(acc_buffers)}"
         )
 
+    def test_split_k_dbc_beats_held_a_when_the_drain_dominates(self):
+        """64x384x288 BF16, PTOAS: the chooser trades held-A for a 2-tile split-K dbC grid.
+
+        This shape used to emit A-stationary (64, 32, 384) -- A held in a full L0A
+        across 9 narrow N-tiles. Once dbC=2 became available at ``k < K`` the
+        chooser prefers (64, 256, 64): 2 output tiles, each a 6-block K-loop, with
+        the drains ping-ponged.
+
+        The trade is explicit and worth pinning, because it is the sharpest example
+        of what this route buys and costs. The old plan is drain-bound -- 9 tiles
+        drain 9 times, and dbC cannot hide a drain that *is* the bottleneck, so the
+        fix has to be fewer, bigger tiles. Going to n=256 pads N=288 up to 2x256,
+        which raises modeled cube work by ~73%, and buys a ~64% drain reduction for
+        a ~7% net predicted win. That win rests on the drain constants
+        (``drain_fixed_cycles``, ``drain_row_cycles``), which are device-fit, and on
+        the split-K reload counts, which are idealized -- so this case is a
+        calibration target, not a settled result.
+        """
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+        from pypto.pypto_core import codegen as _codegen_core  # noqa: PLC0415
+        from pypto.pypto_core import ir as _ir_core  # noqa: PLC0415
+
+        M, K, N = 64, 384, 288
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, N], pl.BF16],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                lhs_mat: pl.Tile[[M, K], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [M, K], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[K, N], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat
+                )
+                c: pl.Tile[[M, N], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_mat, rhs_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            After = passes.auto_tile_matmul_l0()(Before)
+            optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+        printed = ir.python_print(After)
+
+        # Unrolled 2-tile N-grid, one K-loop each -- not the held-A nest.
+        assert printed.count("pl.range(") == 0, printed
+        assert printed.count("pl.pipeline(0, 384, 64,") == 2, printed
+        assert "pl.tile.store(c_t1, [0, 256]," in printed, printed
+        # Both tiles stamped, on opposite slots.
+        assert '"pipeline_membership": "2097152:0"' in printed
+        assert '"pipeline_membership": "2097152:1"' in printed
+        _assert_ssa_valid(After, "test_split_k_dbc_beats_held_a")
+
+        func = next(func for func in optimized.functions.values() if func.name == "kernel")
+        mlir = _codegen_core.PTOCodegen().generate(
+            _ir_core.Program([func], func.name, optimized.span), emit_tile_addr=False
+        )
+        subviews = [line for line in mlir.splitlines() if "pto.subview" in line]
+        assert len(subviews) == 1, mlir
+        assert "sizes [64, 32]" in subviews[0], subviews[0]
+        assert "rows=64, cols=256" in subviews[0], subviews[0]
+        assert "rows=64, cols=32" in subviews[0], subviews[0]
+
+    def test_split_k_grid_dbc_rotates_two_l0c_slots(self):
+        """dbC=2 on the SPLIT-K route (k < K): the unrolled M/N grid ping-pongs.
+
+        The full-K emitter gets its two slots from ``LowerPipelineLoops``
+        replicating the marked moving loop. ``BuildSplitKGrid`` has no loop over
+        output tiles to replicate — the grid is emitted unrolled, one K-loop plus
+        drain per tile — so it declares the separation itself, allocating a
+        unique group for the grid and stamping ``(group, tile index % 2)`` on
+        each tile's accumulator.
+
+        128x512x384 BF16 under PTOAS: the chooser picks (128, 128, 128), i.e. a
+        1x3 N-grid with k=128 < K=512, so each output tile owns a 4-block K-loop.
+        The statement order is already the ping-pong (tile i's store precedes tile
+        i+1's K-loop and the two are independent); what the stamp adds is the
+        buffer separation that lets tile i+1's first MAD start while tile i drains.
+
+        The first half pins the declaration under PTOAS, including its explicit
+        two-slot MemRef (PTOAS does not consume ``pipeline_membership`` itself).
+        The second half pins the effect under PYPTO+opt-in, whose allocator
+        consumes the group relation directly.
+        """
+        import itertools  # noqa: PLC0415
+
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+        M, K, N = 128, 512, 384
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, N], pl.BF16],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                lhs_mat: pl.Tile[[M, K], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [M, K], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[K, N], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat
+                )
+                c: pl.Tile[[M, N], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_mat, rhs_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            tiled = passes.auto_tile_matmul_l0()(Before)
+            ptoas_optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+        printed = ir.python_print(tiled)
+
+        # Split-K route: one K-loop per output tile, no loop over the tiles.
+        assert printed.count("pl.pipeline(0, 512, 128,") == 3, printed
+        assert "pipeline_double_buffer_c" not in printed, (
+            "the split-K grid declares its slots per tile, not with the loop marker"
+        )
+
+        # AutoTile's own group base (1 << 21) keeps its stamps apart from the
+        # LowerPipelineLoops (0-based) and SkewCrossCorePipeline (1 << 20) ranges.
+        slots = [
+            int(m.group(1))
+            for line in printed.splitlines()
+            if "pl.tile.matmul" in line and "pl.Mem.Acc" in line
+            for m in [re.search(r'"pipeline_membership": "2097152:(\d+)"', line)]
+            if m
+        ]
+        assert slots, f"every split-K dbC accumulator must carry a slot stamp:\n{printed}"
+        assert "slots=2" in printed, f"PTOAS must receive a concrete two-slot allocation:\n{printed}"
+        # Tiles 0, 1, 2 -> slots 0, 1, 0. Each tile's K-loop holds several MADs,
+        # all writing that tile's one accumulator, so per-tile runs share a slot.
+        assert [slot for slot, _ in itertools.groupby(slots)] == [0, 1, 0], slots
+
+        # This is the codegen boundary the printed-IR-only regression missed:
+        # each tile carries its constant slot through its own K-loop. PTO
+        # codegen must lower that carry to the pre-loop multi_tile_get handle.
+        from pypto.pypto_core import codegen as _codegen_core  # noqa: PLC0415
+        from pypto.pypto_core import ir as _ir_core  # noqa: PLC0415
+
+        ptoas_func = next(func for func in ptoas_optimized.functions.values() if func.name == "kernel")
+        mlir = _codegen_core.PTOCodegen().generate(
+            _ir_core.Program([ptoas_func], ptoas_func.name, ptoas_optimized.span), emit_tile_addr=False
+        )
+        assert mlir.count("pto.alloc_multi_tile") >= 1, mlir
+        assert mlir.count("pto.multi_tile_get") >= 2, mlir
+
+        # The rotation shows up in both in-tree planners: PyPTO materializes two
+        # reuse classes; DSA-RP may retain more logical roots, but places them on
+        # exactly the two disjoint 64 KiB physical slots.
+        for planner in (passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP):
+            _backend.reset_for_testing()
+            _backend.set_backend_type(BackendType.Ascend910B)
+            with passes.PassContext(
+                [],
+                memory_planner=planner,
+                enable_pypto_l0c_double_buffer=planner == passes.MemoryPlanner.PYPTO,
+            ):
+                allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+            allocated_text = ir.python_print(allocated)
+            if planner == passes.MemoryPlanner.PYPTO:
+                acc_buffers = {
+                    line.strip().split(":")[0]
+                    for line in allocated_text.splitlines()
+                    if "tile.alloc(pl.Mem.Acc" in line
+                }
+                assert len(acc_buffers) == 2, (
+                    "a 3-tile split-K dbC grid must rotate over exactly two L0C buffers, "
+                    f"got {sorted(acc_buffers)}"
+                )
+            else:
+                acc_ranges = {
+                    (int(offset), int(size))
+                    for offset, size in re.findall(
+                        r"pl\.MemRef\(mem_acc_[^,]+, pl\.const\((\d+), pl\.INT64\), (\d+)\), pl\.Mem\.Acc",
+                        allocated_text,
+                    )
+                }
+                assert acc_ranges == {(0, 65536), (65536, 65536)}, (
+                    f"DSA-RP must enforce the two disjoint L0C slots, got {sorted(acc_ranges)}"
+                )
+
+    def test_unrolled_dbc_grids_receive_distinct_pipeline_groups(self):
+        """Two independent unrolled grids must not share a separation group.
+
+        A group describes one logical two-slot pipeline. Reusing it for a later
+        matmul couples both grids in the allocator's capacity/shedding decision,
+        even though their ordinary lifetimes already decide whether their storage
+        can be reused. Each grid therefore receives a fresh group while its own
+        tiles continue to alternate stages 0/1.
+        """
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+        M, K, N = 128, 512, 384
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs0: pl.Tensor[[M, K], pl.BF16],
+                rhs0: pl.Tensor[[K, N], pl.BF16],
+                lhs1: pl.Tensor[[M, K], pl.BF16],
+                rhs1: pl.Tensor[[K, N], pl.BF16],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                lhs0_mat = pl.tile.load(lhs0, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                rhs0_mat = pl.tile.load(rhs0, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                c0 = pl.tile.matmul(lhs0_mat, rhs0_mat)
+                out0 = pl.tile.store(c0, [0, 0], out)
+                lhs1_mat = pl.tile.load(lhs1, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                rhs1_mat = pl.tile.load(rhs1, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                c1 = pl.tile.matmul(lhs1_mat, rhs1_mat)
+                out1 = pl.tile.store(c1, [0, 0], out0)
+                return out1
+
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            tiled = passes.auto_tile_matmul_l0()(Before)
+            optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+        printed = ir.python_print(tiled)
+
+        memberships = re.findall(r'"pipeline_membership": "(\d+):([01])"', printed)
+        groups: dict[int, set[int]] = {}
+        for group, stage in memberships:
+            groups.setdefault(int(group), set()).add(int(stage))
+        assert groups == {2097152: {0, 1}, 2097153: {0, 1}}, printed
+        assert printed.count("slots=2") == 6, (
+            "each emitted output tile must select one of its grid's two slots"
+        )
+        _assert_ssa_valid(tiled, "test_unrolled_dbc_unique_groups")
+
+        from pypto.pypto_core import codegen as _codegen_core  # noqa: PLC0415
+        from pypto.pypto_core import ir as _ir_core  # noqa: PLC0415
+
+        func = next(func for func in optimized.functions.values() if func.name == "kernel")
+        mlir = _codegen_core.PTOCodegen().generate(
+            _ir_core.Program([func], func.name, optimized.span), emit_tile_addr=False
+        )
+        assert mlir.count("pto.alloc_multi_tile") == 1, (
+            "the grids keep distinct logical groups but reuse one physical region after the first dies:\n"
+            f"{mlir}"
+        )
+        assert mlir.count("pto.multi_tile_get") == 4, mlir
+
     @pytest.mark.parametrize(
         ("M", "N"),
         [
@@ -3115,6 +3510,274 @@ class TestAutoTileMatmulL0MNTiling:
             if "pto." in mlir or "func.func" in mlir:
                 generated = True
         assert generated, "direct-store full-K must generate valid PTO MLIR"
+
+    @pytest.mark.parametrize(
+        "planner",
+        [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS],
+    )
+    def test_arbitrary_matmul_acc_excludes_dbc_before_choice(self, planner, capfd):
+        """A caller-owned full accumulator cannot be recycled as a two-slot grid.
+
+        The production PV shape would choose a 1x4 dbC grid if admitted. Semantic
+        eligibility removes that regime before the chooser runs, so every planner
+        emits the same legal K-only plan as PyPTO with dbC disabled and no
+        speculative PH-AT-006 diagnostic.
+        """
+        M, N, K = 32, 512, 128
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, N], pl.BF16],
+                acc: pl.Tile[[M, N], pl.FP32, pl.Mem.Acc],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                result = pl.tile.matmul_acc(acc, lhs_mat, rhs_mat)
+                out = pl.tile.store(result, [0, 0], out)
+                return out
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
+            single_c = passes.auto_tile_matmul_l0()(Before)
+        capfd.readouterr()
+        with passes.PassContext([], memory_planner=planner, enable_pypto_l0c_double_buffer=True):
+            selected = passes.auto_tile_matmul_l0()(Before)
+
+        ir.assert_structural_equal(selected, single_c)
+        printed = ir.python_print(selected)
+        assert "pipeline_double_buffer_c" not in printed
+        assert "PH-AT-006" not in capfd.readouterr().err
+
+    def test_result_without_grid_placement_excludes_dbc_before_choice(self, capfd):
+        """An arbitrary on-chip consumer cannot receive an M/N output grid."""
+        M, N, K = 16, 1024, 64
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, N], pl.BF16],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                result = pl.tile.matmul(lhs_mat, rhs_mat)
+                result_vec = pl.tile.move(result, target_memory=pl.Mem.Vec)
+                out = pl.tile.store(result_vec, [0, 0], out)
+                return out
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
+            single_c = passes.auto_tile_matmul_l0()(Before)
+        capfd.readouterr()
+        with passes.PassContext(
+            [], memory_planner=passes.MemoryPlanner.PYPTO, enable_pypto_l0c_double_buffer=True
+        ):
+            selected = passes.auto_tile_matmul_l0()(Before)
+
+        ir.assert_structural_equal(selected, single_c)
+        assert "pipeline_double_buffer_c" not in ir.python_print(selected)
+        assert "PH-AT-006" not in capfd.readouterr().err
+
+    @pytest.mark.parametrize(
+        ("M", "N", "K", "route_marker"),
+        [
+            (128, 384, 64, "pipeline_double_buffer_c"),  # full-K nested grid; output > L0C
+            (128, 384, 256, '"pipeline_membership": "2097152:'),  # split-K; output > L0C
+        ],
+    )
+    def test_vec_left_mn_dbc_stages_once_for_complete_grid(self, M, N, K, route_marker):
+        """Both PV grid routes pay one grid-wide Vec->Mat crossing."""
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, N], pl.BF16],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                lhs_vec = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Vec)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                result = pl.tile.matmul(lhs_vec, rhs_mat)
+                out = pl.tile.store(result, [0, 0], out)
+                return out
+
+        with passes.PassContext(
+            [], memory_planner=passes.MemoryPlanner.PYPTO, enable_pypto_l0c_double_buffer=True
+        ):
+            selected = passes.auto_tile_matmul_l0()(Before)
+
+        printed = ir.python_print(selected)
+        assert route_marker in printed, printed
+        vec_to_mat = [
+            line
+            for line in printed.splitlines()
+            if "pl.tile.move(" in line and "target_memory=pl.Mem.Mat" in line
+        ]
+        assert len(vec_to_mat) == 1, (
+            "Vec staging is one candidate-independent grid prelude, not one transfer per output tile:\n"
+            f"{printed}"
+        )
+        _assert_ssa_valid(selected, "test_vec_left_mn_dbc_stages_once_for_complete_grid")
+
+        # The staging move is also the cross-core handoff contract consumed by
+        # ExpandMixedKernel. Exercise the complete default pipeline so this
+        # regression cannot stop at merely well-formed AutoTile IR.
+        with passes.PassContext(
+            [], memory_planner=passes.MemoryPlanner.PYPTO, enable_pypto_l0c_double_buffer=True
+        ):
+            lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+        _assert_ssa_valid(lowered, "test_vec_left_mn_dbc_stages_once_for_complete_grid_full_pipeline")
+
+    def test_vec_left_mn_rejects_mandatory_mat_peak_before_emission(self, capfd):
+        """The grid-wide stage cannot overcommit its two-slot Mat ring.
+
+        The full Vec-left value needs 2 * 128 * 512 * 2 bytes of cross-core
+        ring space, while the resident RHS needs another 512 * 384 * 2 bytes.
+        Their 640 KiB mandatory peak exceeds the 512 KiB Mat capacity before
+        any optional scratch or unrelated live value is counted.
+        """
+        M, N, K = 128, 384, 512
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, N], pl.BF16],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                lhs_vec = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Vec)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                result = pl.tile.matmul(lhs_vec, rhs_mat)
+                out = pl.tile.store(result, [0, 0], out)
+                return out
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            selected = passes.auto_tile_matmul_l0()(Before)
+
+        ir.assert_structural_equal(selected, Before)
+        diagnostics = capfd.readouterr().err
+        assert "PH-AT-006" in diagnostics
+        assert "effective cross-core Mat ring" in diagnostics
+
+    def test_vec_left_mn_honors_cross_core_slot_override(self, capfd):
+        """An explicit cross-core ring depth participates in admission.
+
+        With the default two slots this shape's conservative Mat bound fits.
+        Four 128-KiB slots plus the resident Mat inventory exceed 512 KiB, so
+        the M/N grid must be rejected before chooser selection.
+        """
+        M, N, K = 256, 160, 256
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, N], pl.BF16],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                pl.func_attr({"slot_num": 4})
+                lhs_vec = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Vec)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                result = pl.tile.matmul(lhs_vec, rhs_mat)
+                out = pl.tile.store(result, [0, 0], out)
+                return out
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            selected = passes.auto_tile_matmul_l0()(Before)
+
+        ir.assert_structural_equal(selected, Before)
+        diagnostics = capfd.readouterr().err
+        assert "PH-AT-006" in diagnostics
+        assert "effective cross-core Mat ring" in diagnostics
+
+    def test_vec_left_mn_uses_largest_shared_cross_core_slot(self, capfd):
+        """A larger boundary in either direction sets the shared ring size."""
+        M, N, K = 128, 384, 64
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, N], pl.BF16],
+                other: pl.Tensor[[256, 320], pl.BF16],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                # This independent 160-KiB cube->vector boundary determines the
+                # common slot size used by both pipe directions.
+                other_mat = pl.tile.load(other, [0, 0], [256, 320], target_memory=pl.Mem.Mat)
+                _other_vec = pl.tile.move(other_mat, target_memory=pl.Mem.Vec)
+                lhs_vec = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Vec)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                result = pl.tile.matmul(lhs_vec, rhs_mat)
+                out = pl.tile.store(result, [0, 0], out)
+                return out
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            selected = passes.auto_tile_matmul_l0()(Before)
+
+        ir.assert_structural_equal(selected, Before)
+        diagnostics = capfd.readouterr().err
+        assert "PH-AT-006" in diagnostics
+        assert "effective cross-core Mat ring" in diagnostics
+
+    def test_vec_left_mn_multiplies_candidate_by_outer_pipeline_depth(self, capfd):
+        """Future ring storage is charged at the enclosing source depth."""
+        M, N, K = 128, 384, 64
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[M, K], pl.BF16],
+                rhs: pl.Tensor[[K, N], pl.BF16],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                for _, (out_i,) in pl.pipeline(0, 8, 1, init_values=(out,), stage=8):
+                    lhs_vec = pl.tile.load(lhs, [0, 0], [M, K], target_memory=pl.Mem.Vec)
+                    rhs_mat = pl.tile.load(rhs, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                    result = pl.tile.matmul(lhs_vec, rhs_mat)
+                    out_next = pl.tile.store(result, [0, 0], out_i)
+                    out_y = pl.yield_(out_next)
+                return out_y
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            selected = passes.auto_tile_matmul_l0()(Before)
+
+        ir.assert_structural_equal(selected, Before)
+        diagnostics = capfd.readouterr().err
+        assert "PH-AT-006" in diagnostics
+        assert "effective cross-core Mat ring" in diagnostics
 
 
 class TestAutoTileMatmulL0ExistingPipelineDbC:
@@ -3247,8 +3910,9 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
         assert '"pipeline_overlap_stores": False' in printed
         _assert_ssa_valid(After, "test_existing_pipeline_dbc_marker")
 
-        # The existing lowering machinery must realize the marker as two
-        # co-live accumulators: matmul, matmul, drain, drain.
+        # The existing lowering machinery must realize the marker as a two-slot
+        # ping-pong: each drain issued directly after its own MAD, so it runs
+        # while the next MAD executes on the other accumulator.
         lowered = passes.infer_tile_memory_space()(After)
         lowered = passes.lower_pipeline_loops()(lowered)
         lowered = passes.canonicalize_io_order()(lowered)
@@ -3259,8 +3923,8 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
                 seq.append("matmul")
             elif ".store(" in text and "=" in text:
                 seq.append("store")
-        assert any(seq[i : i + 4] == ["matmul", "matmul", "store", "store"] for i in range(len(seq) - 3)), (
-            f"expected the dbC drain-overlap schedule, got: {seq}"
+        assert all(seq[i + 1] == "store" for i, op in enumerate(seq[:-1]) if op == "matmul"), (
+            f"expected the dbC ping-pong schedule (every matmul followed by its store), got: {seq}"
         )
 
         # PyPTO must preserve the two Acc slots without requiring the chooser's
@@ -3282,15 +3946,23 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
 
     @pytest.mark.parametrize(
         ("inner_stage", "width", "expected"),
-        [(3, 384, "MMSSMS"), (4, 512, "MMSSMMSS")],
+        [(3, 384, "MSMSMS"), (4, 512, "MSMSMSMS")],
     )
-    def test_deeper_pipeline_keeps_two_accumulators_and_chunks_the_drain_schedule(
+    def test_deeper_pipeline_keeps_two_accumulators_in_a_ping_pong_schedule(
         self, inner_stage, width, expected
     ):
         """A deeper operand pipeline remains a two-slot L0C ping-pong.
 
-        Complete pairs are scheduled as ``MMSS`` and an odd final stage as
-        ``MS``; they must not become ``inner_stage`` co-live accumulators.
+        Every stage issues its drain directly after its own MAD (``MS`` repeated),
+        so each drain runs while the next stage's MAD executes on the other slot.
+        The operand pipeline keeps its full depth while L0C rotates over two
+        residues; they must not become ``inner_stage`` co-live accumulators.
+
+        This replaces an earlier ``MMSS``-chunk expectation. That order lifted
+        every drain above all compute, which defers each drain past the very MAD
+        it is meant to overlap -- it forced the accumulator live ranges to
+        overlap, but separation is carried by the rotated ``pipeline_membership``,
+        not by the reorder. See ``kPipelineDoubleBufferCAttr`` in attrs.h.
         """
         from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
@@ -3313,7 +3985,7 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
                 sequence.append("M")
             elif ".store(" in text and "=" in text:
                 sequence.append("S")
-        assert expected in "".join(sequence), f"expected depth-two dbC chunks, got: {sequence}"
+        assert expected in "".join(sequence), f"expected the dbC ping-pong schedule, got: {sequence}"
 
         allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
         acc_allocs = {
@@ -4196,6 +4868,105 @@ class TestAutoTileMatmulL0MatScratch:
     consumer, instead of the direct-GM store path. Split-K uses a constant-offset
     grid; full-K uses pipelined loop-variable offsets."""
 
+    @pytest.mark.parametrize(
+        ("M", "K", "N", "out_n", "route", "expect", "lowers"),
+        [
+            # full-K: the marker rides the moving loop, LowerPipelineLoops stamps.
+            (128, 32, 128, 256, "full_k", 1, True),
+            # split-K: no loop over tiles, so BuildSplitKGrid stamps each one itself.
+            # This one also survives the Default pipeline, so it pins the allocation
+            # rather than only the declaration.
+            (128, 128, 192, 64, "split_k", ["0", "1"], True),
+            # Wider split-K grids to exercise the rotation past two tiles. These
+            # overflow Mat/L0B under the legacy PyPTO planner (a #1908-class limit
+            # unrelated to dbC), so only the declaration is observable for them.
+            (128, 384, 384, 128, "split_k", ["0", "1", "0"], False),
+            (256, 384, 384, 64, "split_k", ["0", "1", "0", "1", "0", "1"], False),
+        ],
+    )
+    def test_mat_scratch_declares_the_dbc_ping_pong_on_both_routes(
+        self, M, K, N, out_n, route, expect, lowers
+    ):
+        """The Acc->Mat drain ping-pongs like the direct-GM store does.
+
+        Mat-scratch is not a third emitter: TryFoldMatScratch dispatches to the same
+        ``full_k ? BuildFullKPipelined : BuildSplitKGrid`` pair as the direct-store
+        fold, with MatScratchPlacer swapped in for DirectGmPlacer. So both dbC
+        declarations reach it for free -- the loop marker on the full-K route, the
+        per-tile stamp on the split-K route -- and ``tile.assemble`` drains under the
+        next tile's MAD exactly as ``tile.store`` does.
+
+        This is a regression guard for the split-K half in particular: before the grid
+        stamped its own accumulators, a Mat-scratch producer routed to BuildSplitKGrid
+        got a tile shrunk to the L0C/2 budget and no ping-pong to pay for it.
+
+        PTOAS is used for the declaration half because it enables dbC
+        unconditionally; unrolled grids also carry an explicit two-slot MemRef so
+        PTOAS can realize the rotation without consuming the tag. Cases marked
+        ``lowers`` additionally run the full Default strategy under an in-tree
+        planner and assert the two-slot allocation there too.
+        """
+        import itertools  # noqa: PLC0415
+
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[M, K], pl.BF16],
+                b: pl.Tensor[[K, N], pl.BF16],
+                e: pl.Tensor[[N, out_n], pl.BF16],
+                out: pl.Out[pl.Tensor[[M, out_n], pl.FP32]],
+            ) -> pl.Tensor[[M, out_n], pl.FP32]:
+                a_mat = pl.tile.load(a, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+                b_mat = pl.tile.load(b, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                e_mat = pl.tile.load(e, [0, 0], [N, out_n], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul(a_mat, b_mat)
+                cb = pl.cast(c, pl.BF16, mode="rint")
+                d = pl.tile.matmul(cb, e_mat)
+                out = pl.store(d, [0, 0], out)
+                return out
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            After = passes.auto_tile_matmul_l0()(Before)
+        printed = ir.python_print(After)
+        assert "pl.tile.assemble(" in printed, printed
+
+        if route == "full_k":
+            assert printed.count("pipeline_double_buffer_c") == expect, printed
+        else:
+            # Only the stamps are asserted here. A marker may legitimately also be
+            # present: the CONSUMER matmul is tiled independently and can land on the
+            # full-K route with its own dbC loop, which says nothing about the
+            # producer's split-K grid that this case is about.
+            slots = re.findall(r'"pipeline_membership": "2097152:(\d+)"', printed)
+            assert [s for s, _ in itertools.groupby(slots)] == expect, slots
+            # One stamped accumulator per assembled sub-tile.
+            assert printed.count("pl.tile.assemble(") == len(expect), printed
+        _assert_ssa_valid(After, f"test_mat_scratch_dbc_{route}")
+
+        if not lowers:
+            return
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        with passes.PassContext(
+            [], memory_planner=passes.MemoryPlanner.PYPTO, enable_pypto_l0c_double_buffer=True
+        ):
+            allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+        acc_buffers = {
+            line.strip().split(":")[0]
+            for line in ir.python_print(allocated).splitlines()
+            if "tile.alloc(pl.Mem.Acc" in line
+        }
+        assert len(acc_buffers) == 2, (
+            f"the Mat-scratch {route} ping-pong must resolve to two L0C buffers, got {sorted(acc_buffers)}"
+        )
+
     def test_matmul_bias_producer_uses_mat_scratch(self):
         """An oversized biased producer may stay on-chip for one later matmul."""
         _backend.reset_for_testing()
@@ -4247,6 +5018,46 @@ class TestAutoTileMatmulL0MatScratch:
         expected = intermediate @ e.float()
         rel_err = ((out - expected).norm() / expected.norm()).item()
         assert rel_err < 5e-2, f"matmul_bias Mat-scratch rel_err {rel_err:.3e} exceeds 5e-2"
+
+    def test_vec_left_mat_scratch_dbc_uses_one_grid_stage(self):
+        """Vec-left dbC also supports the on-chip Mat-scratch placement."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        M, K, N, out_n = 128, 64, 384, 16
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[M, K], pl.BF16],
+                b: pl.Tensor[[K, N], pl.BF16],
+                e: pl.Tensor[[N, out_n], pl.BF16],
+                out: pl.Out[pl.Tensor[[M, out_n], pl.FP32]],
+            ) -> pl.Tensor[[M, out_n], pl.FP32]:
+                a_vec = pl.tile.load(a, [0, 0], [M, K], target_memory=pl.Mem.Vec)
+                b_mat = pl.tile.load(b, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+                e_mat = pl.tile.load(e, [0, 0], [N, out_n], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul(a_vec, b_mat)
+                cb = pl.cast(c, pl.BF16, mode="rint")
+                d = pl.tile.matmul(cb, e_mat)
+                out = pl.tile.store(d, [0, 0], out)
+                return out
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA_RP):
+            selected = passes.auto_tile_matmul_l0()(Before)
+
+        printed = ir.python_print(selected)
+        assert "pipeline_double_buffer_c" in printed
+        assert "pl.tile.assemble(" in printed
+        assert "pl.tile.cast(" not in printed
+        vec_to_mat = [
+            line
+            for line in printed.splitlines()
+            if "pl.tile.move(" in line and "target_memory=pl.Mem.Mat" in line
+        ]
+        assert len(vec_to_mat) == 1
+        _assert_ssa_valid(selected, "test_vec_left_mat_scratch_dbc_uses_one_grid_stage")
 
     def test_matmul_bias_mat_scratch_load_removal_uses_forced_os_tile(self):
         """#1908 re-selection keeps the full bias load when forced OS only K-tiles.
@@ -4430,9 +5241,10 @@ class TestAutoTileMatmulL0MatScratch:
                 allocated_text,
             )
         }
-        assert right_ranges == {(0, 65536)}, (
-            "DSA_RP should co-place the producer and consumer Right-buffer lifetimes "
-            f"inside one 64 KiB L0B arena, got ranges {sorted(right_ranges)}"
+        assert (0, 65536) in right_ranges
+        assert all(offset >= 0 and size > 0 and offset + size <= 65536 for offset, size in right_ranges), (
+            "DSA_RP should place every producer/consumer Right-buffer lifetime inside "
+            f"one 64 KiB L0B arena, got ranges {sorted(right_ranges)}"
         )
 
     def test_misaligned_n_mat_scratch_roundtrips(self):

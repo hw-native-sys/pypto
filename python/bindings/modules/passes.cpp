@@ -874,6 +874,12 @@ void BindPass(nb::module_& m) {
       .value("AStationary", utils::Stationarity::kAStationary)
       .value("BStationary", utils::Stationarity::kBStationary);
 
+  nb::enum_<utils::DbcEmissionRoute>(l0_tile, "DbcEmissionRoute",
+                                     "Concrete output-grid schedule used to realize L0C double buffering")
+      .value("Unsupported", utils::DbcEmissionRoute::kUnsupported)
+      .value("PipelinedInner", utils::DbcEmissionRoute::kPipelinedInner)
+      .value("UnrolledGrid", utils::DbcEmissionRoute::kUnrolledGrid);
+
   nb::class_<utils::L0TileConfig>(
       l0_tile, "L0TileConfig",
       "Inputs to ChooseL0Tile: problem dims + hardware + schedule knobs. max_n caps the logical chosen "
@@ -905,6 +911,9 @@ void BindPass(nb::module_& m) {
       .def_rw("allow_a_stationary", &utils::L0TileConfig::allow_a_stationary)
       .def_rw("allow_b_stationary", &utils::L0TileConfig::allow_b_stationary)
       .def_rw("allow_double_buffer_c", &utils::L0TileConfig::allow_double_buffer_c)
+      .def_rw("full_k_dbc_route", &utils::L0TileConfig::full_k_dbc_route)
+      .def_rw("split_k_dbc_route", &utils::L0TileConfig::split_k_dbc_route)
+      .def_rw("allow_unrolled_dbc_m_boundary", &utils::L0TileConfig::allow_unrolled_dbc_m_boundary)
       .def_rw("c_read", &utils::L0TileConfig::c_read)
       .def_rw("bw_a", &utils::L0TileConfig::bw_a)
       .def_rw("bw_b", &utils::L0TileConfig::bw_b)
@@ -930,6 +939,7 @@ void BindPass(nb::module_& m) {
       .def_ro("stationarity", &utils::L0TileResult::stationarity)
       .def_ro("os_holds_a", &utils::L0TileResult::os_holds_a)
       .def_ro("double_buffer_c", &utils::L0TileResult::double_buffer_c)
+      .def_ro("dbc_emission_route", &utils::L0TileResult::dbc_emission_route)
       .def_ro("perf_hint", &utils::L0TileResult::perf_hint);
 
   l0_tile.def("choose_l0_tile", &utils::ChooseL0Tile, nb::arg("config"),
