@@ -64,7 +64,9 @@ def session_state(repo: str, number: str) -> tuple[dict, str]:
 
 def volume_labels(name: str) -> dict | None:
     """Inspect only the requested volume; distinguish absence from Docker failures."""
-    result = subprocess.run(["docker", "volume", "inspect", name], capture_output=True, text=True)
+    result = subprocess.run(
+        ["docker", "volume", "inspect", name], check=False, capture_output=True, text=True
+    )
     if result.returncode and "no such volume" in result.stderr.lower() and name in result.stderr:
         return None
     result.check_returncode()
