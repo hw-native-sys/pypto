@@ -114,7 +114,7 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | `pl.spmd(N, optimizations=[pl.split(MODE)])` | `Spmd(InCore(split=MODE))` | split 提示作用于内层 InCore（两种形式均适用） |
 | `pl.spmd(N, optimizations=[pl.cross_core_slot(slot_num=N)])` | `Spmd(InCore(slot_num=N))` | 槽位数作用于内层 InCore（两种形式均适用），可与 `pl.split(MODE)` 组合 |
 | `pl.scope(mode=pl.ScopeMode.MANUAL)` / `pl.manual_scope()` | `Runtime(manual=true)` | orchestrator 的 MANUAL scope——由用户管理任务排序。两种 `auto_scope` 模式下都可用（它是依赖语义选择）。见[手工依赖原语](02-manual_dependencies.md#手工依赖原语) |
-| `pl.scope()` | `Runtime(manual=false)` | orchestrator 的 AUTO scope（`SIMPLER_SCOPE()`）。手写它需要 `@pl.function(auto_scope=False)`（默认 `auto_scope=True` 下由编译器决定 AUTO 放置）。见 [MaterializeRuntimeScopes](../passes/49-materialize_runtime_scopes.md) |
+| `pl.scope()` | `Runtime(manual=false)` | orchestrator 的 AUTO scope（`SIMPLER_SCOPE()`）。手写它需要 `@pl.function(auto_scope=False)`（默认 `auto_scope=True` 下由编译器决定 AUTO 放置）。见 [MaterializeRuntimeScopes](../passes/50-materialize_runtime_scopes.md) |
 
 #### `pl.spmd` 多 block 派发
 
@@ -128,6 +128,12 @@ for (x,) in pl.while_(init_values=(x_init,)):
 - `out, tid = pl.spmd_submit(kernel, *args, core_num=N)` —— **submit 形式**：将 kernel 在 `N` 个 block 上分发，同时捕获该分发的 producer `pl.Scalar[pl.TASK_ID]`（针对已声明 kernel 的 `pl.submit` 版本）。参见下文“手动依赖原语”小节。
 
 以上三种形式也都接受 `allow_early_resolve=True`（布尔字面量；与 `pl.submit` / `pl.at` 相同的 early-dispatch 选项）。即使不写 `as tid` 也会强制走 `ir.Submit` 形态，并 lower 为 `Arg::set_allow_early_resolve(true)`。在嵌套于 `pl.cluster()` 内的 `pl.spmd` 上会被拒绝（此类 scope 会被 unwrap 进 Group 函数、永远不会产生 Submit，提示会丢失）。它们也都接受 `dumps=[t, ...]` —— 在 grid 派发上做选择性张量 dump，记录在 Spmd scope 本身而非自动合成的载体上。它不会强制走 `ir.Submit`，并且可用于嵌套在 `pl.cluster()` 内的 `pl.spmd`，其标记会转移到 Group 派发上。
+
+编译器会自动保护可能非正的动态 SPMD 个数：个数 `<= 0` 时跳过计算 launch。
+除非算术分析能证明个数为正，否则每个 Out/InOut Tensor 都必须由调用方提供。
+遗漏输出会产生包含 Tensor 名称和参数位置的编译错误。空路径保留返回 Tensor
+已有的内容，不执行初始化。参见
+[LegalizeSpmdLaunches](../passes/41-legalize_spmd_launches.md)。
 
 可选 `optimizations=[...]`。各条目彼此正交，可在同一列表中组合
 （例如 `[pl.split(MODE), pl.cross_core_slot(slot_num=4)]`）：

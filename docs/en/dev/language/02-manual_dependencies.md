@@ -323,4 +323,13 @@ a `TaskId[N_BRANCHES]` array. Each task in phase `N+1` waits for all
 
 - [Statements and Control Flow](01-statements.md) — the scope context managers these build on
 - [Orchestration Codegen](../codegen/01-orchestration_codegen.md) — how these lower
-- [AutoDeriveTaskDependencies](../passes/42-auto_derive_task_dependencies.md) — the pass that consumes them
+- [AutoDeriveTaskDependencies](../passes/43-auto_derive_task_dependencies.md) — the pass that consumes them
+
+## Potentially empty SPMD launches
+
+A dynamic `pl.spmd_submit` whose count cannot be proven positive requires all
+Out/InOut buffers to be supplied, including non-returned outputs. The compiler
+merges each output with its supplied buffer and merges the TaskId with an
+empty-path `task_dummy` carrying the original explicit dependencies. Thus a
+consumer using `deps=[tid]` remains ordered when the compute launch is skipped.
+See [LegalizeSpmdLaunches](../passes/41-legalize_spmd_launches.md).

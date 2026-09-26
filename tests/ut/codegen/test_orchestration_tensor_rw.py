@@ -724,9 +724,12 @@ class TestTensorReadWriteOffsetCodegen:
                 passes.outline_cluster_scopes()(passes.convert_to_ssa()(SpmdQueryProgram))
             )
         )
+        transformed = passes.legalize_spmd_launches()(passes.normalize_return_order()(transformed))
         code = _generate_orch_code(transformed)
 
-        assert "params_t0.launch_spec.set_block_num(rt_available_cluster_count());" in code, code
+        assert "spmd_core_num = rt_available_cluster_count();" in code, code
+        assert "params_t0.launch_spec.set_block_num(spmd_core_num);" in code, code
+        assert "if (" in code, code
         assert "params_t0.launch_spec.set_require_sync_start(true);" in code, code
 
     def test_spmd_mixed_multi_out_single_return_alias_targets_actual_return(self):

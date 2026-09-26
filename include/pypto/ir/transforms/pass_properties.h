@@ -60,7 +60,7 @@ inline const PassProperties kLowerHostTensorCollectivesProperties{
     .required = {IRProperty::CommDomainScopesMaterialized},
     .produced = {IRProperty::CommDomainScopesMaterialized}};
 
-// -- LowerL2TensorCollectives pass (runs immediately before DeriveCallDirections)
+// -- LowerL2TensorCollectives pass (runs before DeriveCallDirections)
 //    Rewrites a managed collective written in a CHIP/L2 orchestration body into a
 //    call to a synthesized AIV kernel backed by the builtin template source. It
 //    must run before DeriveCallDirections / AutoDeriveTaskDependencies so the
@@ -71,6 +71,14 @@ inline const PassProperties kLowerHostTensorCollectivesProperties{
 //    the synthesized function returns its InOut `target` parameter through an
 //    explicit ReturnStmt, so no property is required, produced or invalidated.
 inline const PassProperties kLowerL2TensorCollectivesProperties{};
+
+// Rebuild control flow before direction/dependency/runtime-scope analysis.
+// ReturnParamsExplicit supplies the unambiguous return-slot -> parameter map.
+inline const PassProperties kLegalizeSpmdLaunchesProperties{
+    .required = {IRProperty::SSAForm, IRProperty::NoNestedCalls, IRProperty::ReturnParamsExplicit},
+    .produced = {IRProperty::SSAForm, IRProperty::NoNestedCalls, IRProperty::NormalizedStmtStructure},
+    .invalidated = {IRProperty::CallDirectionsResolved, IRProperty::RuntimeScopesMaterialized,
+                    IRProperty::IterArgCarryClassified}};
 
 // Resolves a returned DistributedTensor to the parameter it writes back via
 // return_lineage::ExplicitReturnedParamIndices, which is a pointer-identity read

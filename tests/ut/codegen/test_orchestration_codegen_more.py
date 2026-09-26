@@ -225,13 +225,16 @@ class TestOrchestrationMore:
         # otherwise the test would pass vacuously on a constant size.
         size_decl = re.search(r"gm_pipe_buffer_\w+_ci_shapes\[1\] = \{(.+?)\};", code)
         assert size_decl is not None, code
-        assert "/ 16" in size_decl.group(1), size_decl.group(1)
+        count_decl = re.search(r"int64_t (spmd_core_num\w*) = (.+?);", code)
+        assert count_decl is not None, code
+        assert "/ 16" in count_decl.group(2), code
+        assert count_decl.group(1) in size_decl.group(1), code
 
         # The body-local that sizes the buffer must be declared before the alloc.
         m_decl = re.search(r"int64_t (\w+) = \(int64_t\)orch_args\.tensor\(0\)\.ref\(\)\.shapes\[0\];", code)
         assert m_decl is not None, code
         m_name = m_decl.group(1)
-        assert m_name in size_decl.group(1), (m_name, size_decl.group(1))
+        assert m_name in count_decl.group(2), code
         assert code.index(f"int64_t {m_name} =") < code.index("gm_pipe_buffer"), code
 
     def test_clamped_gm_pipe_buffer_alloc_follows_its_phi(self):
@@ -287,7 +290,10 @@ class TestOrchestrationMore:
         phi_decl = re.search(r"int64_t (\w*m_clamped\w*);", code)
         assert phi_decl is not None, code
         phi_name = phi_decl.group(1)
-        assert phi_name in size_decl.group(1), (phi_name, size_decl.group(1))
+        count_decl = re.search(r"int64_t (spmd_core_num\w*) = (.+?);", code)
+        assert count_decl is not None, code
+        assert phi_name in count_decl.group(2), code
+        assert count_decl.group(1) in size_decl.group(1), code
         assert code.index(f"int64_t {phi_name};") < code.index("gm_pipe_buffer"), code
 
     def test_clamped_tensor_create_alloc_follows_its_phi(self):

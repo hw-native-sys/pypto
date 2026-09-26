@@ -9,7 +9,7 @@ ordinary task inside the caller's own pipeline.
 
 Today it handles `pld.tensor.all_to_all_v` with `core_num=1`.
 
-The HOST rail ([`LowerHostTensorCollectives`](46-lower_host_tensor_collectives.md))
+The HOST rail ([`LowerHostTensorCollectives`](47-lower_host_tensor_collectives.md))
 solves the same problem one level up, and differently: it fans the collective
 out into one `builtin.tensor.*` chip dispatch *per device*. Each such dispatch is
 a whole extra L2 orchestration task whose only job is to submit one AIV kernel,
@@ -28,19 +28,19 @@ L3 -> L2  consume task                             └── consume       (AIV 
 ## Position in the pipeline
 
 ```text
-... -> FuseCreateAssembleToSlice -> LowerL2TensorCollectives -> DeriveCallDirections -> AutoDeriveTaskDependencies -> ...
+... -> FuseCreateAssembleToSlice -> LowerL2TensorCollectives -> LegalizeSpmdLaunches -> DeriveCallDirections -> AutoDeriveTaskDependencies -> ...
 ```
 
 The position is load-bearing. The emitted call must reach
-[`DeriveCallDirections`](41-derive_call_directions.md) and
-[`AutoDeriveTaskDependencies`](42-auto_derive_task_dependencies.md) like any
+[`DeriveCallDirections`](42-derive_call_directions.md) and
+[`AutoDeriveTaskDependencies`](43-auto_derive_task_dependencies.md) like any
 other kernel call: those two passes are what turn the synthesized kernel's
 parameter directions into the TensorMap edges that order
 `compute -> collective -> consume`. Running the rewrite after them would leave
 the collective task unordered.
 
 It also runs before
-[`MaterializeDistTensorCtx`](47-materialize_dist_tensor_ctx.md), which appends
+[`MaterializeDistTensorCtx`](48-materialize_dist_tensor_ctx.md), which appends
 the `CommCtx` arguments the kernel needs (see *ABI* below).
 
 ## Behavior
@@ -170,8 +170,8 @@ passes earlier, so re-reporting them here would blame the wrong pass.
   expression* as `target`. It does **not** reject two distinct `pld.window()`
   views of one allocation — deduction runs when the Call is built, and
   `DistributedTensorType::window_buffer_` is not bound until
-  [`MaterializeCommDomainScopes`](45-materialize_comm_domain_scopes.md)
-  (pass 45). Whole-allocation distinctness is a **HOST-rail** guarantee:
+  [`MaterializeCommDomainScopes`](46-materialize_comm_domain_scopes.md)
+  (pass 46). Whole-allocation distinctness is a **HOST-rail** guarantee:
   `LowerHostTensorCollectives` resolves each operand back to its `WindowBuffer`
   within the same `host_orch` body and runs `CheckPairwiseDistinctWindows` over
   all five. This rail — like the InCore composite rail — sees the operands as
@@ -187,8 +187,8 @@ passes earlier, so re-reporting them here would blame the wrong pass.
   bound to different domains would address the wrong remote windows. The HOST
   rail enforces the equivalent through `FindScopeForBuffers`, which sees the
   window buffers directly. This rail cannot: a comm domain has no IR
-  representation until `MaterializeCommDomainScopes` (pass 45) and
-  `MaterializeDistTensorCtx` (pass 47), both of which run *after* this pass, and
+  representation until `MaterializeCommDomainScopes` (pass 46) and
+  `MaterializeDistTensorCtx` (pass 48), both of which run *after* this pass, and
   by then the collective's operands are the enclosing pipeline's parameters —
   relating them back to the host windows that bind them needs interprocedural
   tracing that does not exist today. Comparing the appended `CommCtx` arguments

@@ -1,12 +1,14 @@
 # Passes
 
-Every transformation PyPTO runs over the IR, numbered to match its position in the
-default pipeline.
+Every transformation PyPTO runs over the IR, numbered in default-pipeline execution
+order.
 
 Pass documentation is numbered so that reading it front to back walks the
-compilation pipeline in execution order. `01`–`49` are pipeline passes; `91`+ is
-reserved for passes that run at several positions and for infrastructure that is not
-a pipeline pass at all.
+compilation pipeline in execution order. `01`–`53` document the default pipeline;
+`54` is the optional LowerTileToBuffer pass enabled by `enable_buffer_ir=True`.
+Documentation numbers omit the utility NormalizeStmtStructure pass and repeated
+Simplify invocations. `91`+ is reserved for passes that run at several positions
+and for infrastructure that is not a pipeline pass at all.
 
 ## Framework
 
@@ -31,7 +33,7 @@ a pipeline pass at all.
 | 11 | [ConvertTensorToTileOps](11-convert_tensor_to_tile_ops.md) | Converts tensor ops to tile ops in InCore functions, updating orchestration call sites |
 | 12 | [OptimizeOrchTensors](12-optimize_orch_tensors.md) | Eliminates redundant orchestration allocations and improves data flow |
 | 13 | [LowerCompositeOps](13-lower_composite_ops.md) | Decomposes composite tile / distributed ops into primitives |
-| 13 | [FlattenTileNdTo2D](14-flatten_tile_nd_to_2d.md) | Flattens 3D+ tile operations to 2D by merging all but the last dimension |
+| 14 | [FlattenTileNdTo2D](14-flatten_tile_nd_to_2d.md) | Flattens 3D+ tile operations to 2D by merging all but the last dimension |
 | 15 | [BlockNzTensorViews](15-block_nz_tensor_views.md) | Rewrites logical `pl.NZ` tensors into pto-isa's blocked rank-5 form and retargets their `tile.load` coordinates |
 | 16 | [BlockMxScaleTensorViews](16-block_mx_scale_tensor_views.md) | Migrates logical MX scale views into canonical packed rank-5 physical form |
 | 17 | [LegalizeTileCast](17-legalize_tile_cast.md) | Expands `tile.cast` pairs the ISA cannot emit as one instruction into the shortest native chain |
@@ -58,19 +60,20 @@ a pipeline pass at all.
 | 38 | [FoldNoOpReshape](38-fold_no_op_reshape.md) | Folds `tile.reshape` calls that change neither physical shape nor allocation |
 | 39 | [FuseCreateAssembleToSlice](39-fuse_create_assemble_to_slice.md) | Fuses `tensor.create` + `tensor.assemble` into one `tensor.slice` view |
 | 40 | [LowerL2TensorCollectives](40-lower_l2_tensor_collectives.md) | Rewrites a managed collective written in a CHIP orchestration body into one local builtin AIV task, with no per-device fan-out and no nested L2 dispatch |
-| 41 | [DeriveCallDirections](41-derive_call_directions.md) | Materializes wrapper `ParamDirection`s, then derives a per-argument `ArgDirection` at every call |
-| 42 | [AutoDeriveTaskDependencies](42-auto_derive_task_dependencies.md) | Derives conservative task-to-task dependency edges |
-| 43 | [ExpandManualPhaseFence](43-expand_manual_phase_fence.md) | Compresses profitable full-array `TaskId` dependencies in manual scopes |
-| 44 | [SynthesizeAllReduceSignals](44-synthesize_allreduce_signals.md) | Turns a host allreduce's optional signal into explicit internal signal IR |
-| 45 | [MaterializeCommDomainScopes](45-materialize_comm_domain_scopes.md) | Assembles `WindowBuffer` and `CommDomainScopeStmt` wrappers in each host orchestration body |
-| 46 | [LowerHostTensorCollectives](46-lower_host_tensor_collectives.md) | Rewrites host-level tensor collectives into internal builtin chip dispatches |
-| 47 | [MaterializeDistTensorCtx](47-materialize_dist_tensor_ctx.md) | Materializes an explicit `CommCtx` parameter and argument per `DistributedTensor` |
-| 48 | [LegalizeGraphBoundary](48-legalize_graph_boundary.md) | Hoists the boundary scalars a `Graph` body derives out to its call sites, and rejects boundaries the `host_build_graph` runtime could not record |
-| 49 | [MaterializeRuntimeScopes](49-materialize_runtime_scopes.md) | Inserts AUTO `RuntimeScopeStmt` nodes so orchestration codegen emits `SIMPLER_SCOPE` 1:1 |
-| 50 | [ClassifyIterArgCarry](50-classify_iter_arg_carry.md) | Classifies each orchestration `ForStmt` iter_arg as a trivial alias or a materialised rebind carry |
-| 51 | [InsertCommFence](51-insert_comm_fence.md) | Marks each publishing write (region `system.cacheinvalid` + `system.fence` locally, fence only for a remote write, whole-GM for an opaque one) and each wait (whole-GM `system.cacheinvalid`); the notify itself gets no marker |
-| 52 | [MaterializeValidShapeSymbols](52-materialize_valid_shape_symbols.md) | Turns each device-kernel `valid_shape` symbol the kernel cannot bind into a leading `Scalar[INDEX]` parameter, fed the caller's actual valid extent |
-| 53 | [LowerTileToBuffer](53-lower_tile_to_buffer.md) | Opt-in final conversion from planned Tile storage to explicit Buffer operations |
+| 41 | [LegalizeSpmdLaunches](41-legalize_spmd_launches.md) | Guard potentially empty SPMD launches |
+| 42 | [DeriveCallDirections](42-derive_call_directions.md) | Materializes wrapper `ParamDirection`s, then derives a per-argument `ArgDirection` at every call |
+| 43 | [AutoDeriveTaskDependencies](43-auto_derive_task_dependencies.md) | Derives conservative task-to-task dependency edges |
+| 44 | [ExpandManualPhaseFence](44-expand_manual_phase_fence.md) | Compresses profitable full-array `TaskId` dependencies in manual scopes |
+| 45 | [SynthesizeAllReduceSignals](45-synthesize_allreduce_signals.md) | Turns a host allreduce's optional signal into explicit internal signal IR |
+| 46 | [MaterializeCommDomainScopes](46-materialize_comm_domain_scopes.md) | Assembles `WindowBuffer` and `CommDomainScopeStmt` wrappers in each host orchestration body |
+| 47 | [LowerHostTensorCollectives](47-lower_host_tensor_collectives.md) | Rewrites host-level tensor collectives into internal builtin chip dispatches |
+| 48 | [MaterializeDistTensorCtx](48-materialize_dist_tensor_ctx.md) | Materializes an explicit `CommCtx` parameter and argument per `DistributedTensor` |
+| 49 | [LegalizeGraphBoundary](49-legalize_graph_boundary.md) | Hoists the boundary scalars a `Graph` body derives out to its call sites, and rejects boundaries the `host_build_graph` runtime could not record |
+| 50 | [MaterializeRuntimeScopes](50-materialize_runtime_scopes.md) | Inserts AUTO `RuntimeScopeStmt` nodes so orchestration codegen emits `SIMPLER_SCOPE` 1:1 |
+| 51 | [ClassifyIterArgCarry](51-classify_iter_arg_carry.md) | Classifies each orchestration `ForStmt` iter_arg as a trivial alias or a materialised rebind carry |
+| 52 | [InsertCommFence](52-insert_comm_fence.md) | Marks each publishing write (region `system.cacheinvalid` + `system.fence` locally, fence only for a remote write, whole-GM for an opaque one) and each wait (whole-GM `system.cacheinvalid`); the notify itself gets no marker |
+| 53 | [MaterializeValidShapeSymbols](53-materialize_valid_shape_symbols.md) | Turns each device-kernel `valid_shape` symbol the kernel cannot bind into a leading `Scalar[INDEX]` parameter, fed the caller's actual valid extent |
+| 54 | [LowerTileToBuffer](54-lower_tile_to_buffer.md) | Opt-in final conversion from planned Tile storage to explicit Buffer operations |
 
 ## Outside the default pipeline
 

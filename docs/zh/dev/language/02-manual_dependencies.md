@@ -287,4 +287,12 @@ phase `N` 的全部 `N_BRANCHES` 个 task，而非只等最后那个。
 
 - [语句与控制流](01-statements.md) —— 这些原语所依赖的作用域上下文管理器
 - [编排代码生成](../codegen/01-orchestration_codegen.md) —— 它们如何下降
-- [AutoDeriveTaskDependencies](../passes/42-auto_derive_task_dependencies.md) —— 消费这些信息的 pass
+- [AutoDeriveTaskDependencies](../passes/43-auto_derive_task_dependencies.md) —— 消费这些信息的 pass
+
+## 可能为空的 SPMD launch
+
+动态 `pl.spmd_submit` 的个数无法证明为正时，所有 Out/InOut buffer 都必须
+传入，包括没有返回的输出。编译器将每个输出与对应实参合并，并将 TaskId 与
+空路径的 `task_dummy` 合并；dummy 保留原有显式依赖。因此计算 launch 被跳过时，
+使用 `deps=[tid]` 的 consumer 仍保持顺序。参见
+[LegalizeSpmdLaunches](../passes/41-legalize_spmd_launches.md)。

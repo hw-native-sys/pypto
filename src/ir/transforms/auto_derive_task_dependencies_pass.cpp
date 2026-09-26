@@ -925,6 +925,16 @@ class StorageRootAnalysis : public IRVisitor {
 
 class SubmitTaskIdCollector : public IRVisitor {
  public:
+  void VisitStmt_(const IfStmtPtr& op) override {
+    IRVisitor::VisitStmt_(op);
+    // TaskId results are definitions in the enclosing scope. Do not alias them
+    // to either branch's local producer: that producer does not dominate users
+    // after the IfStmt (and may never have executed).
+    for (const auto& result : op->return_vars_) {
+      if (IsTaskIdVar(result)) task_id_by_var_id_[result->UniqueId()] = result;
+    }
+  }
+
   void VisitStmt_(const AssignStmtPtr& op) override {
     if (auto tuple_get = As<TupleGetItemExpr>(op->value_)) {
       if (auto tuple_var = AsVarLike(tuple_get->tuple_)) {
@@ -1339,6 +1349,63 @@ class AutoDepMutator : public IRMutator {
   bool whole_body_manual_candidate() const { return whole_body_manual_candidate_; }
 
  protected:
+  StmtPtr VisitStmt_(const IfStmtPtr& op) override {
+    if (prior_stack_.empty()) return IRMutator::VisitStmt_(op);
+    // Both branches start from the same incoming access history. In particular,
+    // the else branch must never acquire edges to a then-local task.
+    MarkCurrentScopeLayerUnsupported();
+    auto condition = VisitExpr(op->condition_);
+    prior_stack_.emplace_back();
+    auto then_body = VisitStmt(op->then_body_);
+    auto then_accesses = std::move(prior_stack_.back());
+    prior_stack_.pop_back();
+    std::optional<StmtPtr> else_body;
+    std::vector<StorageAccess> else_accesses;
+    if (op->else_body_) {
+      prior_stack_.emplace_back();
+      else_body = VisitStmt(*op->else_body_);
+      else_accesses = std::move(prior_stack_.back());
+      prior_stack_.pop_back();
+    }
+    auto merge = [&](std::vector<StorageAccess>& accesses, const StmtPtr& body) {
+      std::unordered_map<uint64_t, VarPtr> lifted_ids;
+      if (auto yield = GetTrailingYield(body)) {
+        for (size_t i = 0; i < op->return_vars_.size() && i < yield->value_.size(); ++i) {
+          const auto& result = op->return_vars_[i];
+          if (!IsTaskIdVar(result)) continue;
+          auto source = AsVarLike(yield->value_[i]);
+          if (auto canonical = CanonicalTaskId(source)) {
+            lifted_ids[canonical->UniqueId()] = result;
+          }
+        }
+      }
+      for (auto& access : accesses) {
+        auto tid = access.task_id_var_is_direct ? access.task_id_var : CanonicalTaskId(access.task_id_var);
+        auto found = tid ? lifted_ids.find(tid->UniqueId()) : lifted_ids.end();
+        if (found != lifted_ids.end()) {
+          access.task_id_var = found->second;
+          access.task_id_var_is_direct = true;
+        } else {
+          // Preserve the hazard, but never export a closed-scope id. A later
+          // conflicting access will retain runtime TensorMap tracking instead
+          // of acquiring an invalid compiler edge / NoDep refinement.
+          access.task_id_var = nullptr;
+          access.task_id_var_is_direct = false;
+          MarkCurrentScopeFallback();
+        }
+        prior_stack_.back().push_back(std::move(access));
+      }
+    };
+    merge(then_accesses, then_body);
+    if (else_body) merge(else_accesses, *else_body);
+    // Keep all incoming accesses too: the empty branch did not overwrite its
+    // buffers, so consumers (including users of the original argument aliases)
+    // must still depend on their earlier producers and readers.
+    if (condition == op->condition_ && then_body == op->then_body_ && else_body == op->else_body_) return op;
+    return std::make_shared<IfStmt>(condition, then_body, else_body, op->return_vars_, op->span_,
+                                    op->leading_comments_);
+  }
+
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
     if (prior_stack_.empty()) return IRMutator::VisitStmt_(op);
     if (IsStaticSingleTripLoop(op)) {

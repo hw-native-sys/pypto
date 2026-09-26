@@ -8,7 +8,7 @@
 
 目前支持 `pld.tensor.all_to_all_v`，且要求 `core_num=1`。
 
-HOST 通路（[`LowerHostTensorCollectives`](46-lower_host_tensor_collectives.md)）
+HOST 通路（[`LowerHostTensorCollectives`](47-lower_host_tensor_collectives.md)）
 在上一层解决同一问题，做法不同：它把集合通信按设备扇出成**每个设备一次**
 `builtin.tensor.*` chip dispatch。每次这样的 dispatch 都是一个完整的 L2
 orchestration task，而它唯一的工作就是提交一个 AIV kernel，因此
@@ -27,16 +27,16 @@ L3 -> L2  consume task                             └── consume       (AIV 
 ## 在流水线中的位置
 
 ```text
-... -> FuseCreateAssembleToSlice -> LowerL2TensorCollectives -> DeriveCallDirections -> AutoDeriveTaskDependencies -> ...
+... -> FuseCreateAssembleToSlice -> LowerL2TensorCollectives -> LegalizeSpmdLaunches -> DeriveCallDirections -> AutoDeriveTaskDependencies -> ...
 ```
 
 这个位置是必要条件而非偏好。改写后的调用必须像任何其他 kernel 调用一样经过
-[`DeriveCallDirections`](41-derive_call_directions.md) 和
-[`AutoDeriveTaskDependencies`](42-auto_derive_task_dependencies.md)：正是这两个
+[`DeriveCallDirections`](42-derive_call_directions.md) 和
+[`AutoDeriveTaskDependencies`](43-auto_derive_task_dependencies.md)：正是这两个
 pass 把合成 kernel 的参数方向转换成排序 `compute -> collective -> consume` 的
 TensorMap 依赖边。放在它们之后改写，会让该 collective task 失去顺序约束。
 
-它同样运行在 [`MaterializeDistTensorCtx`](47-materialize_dist_tensor_ctx.md)
+它同样运行在 [`MaterializeDistTensorCtx`](48-materialize_dist_tensor_ctx.md)
 之前 —— 后者会补上 kernel 需要的 `CommCtx` 实参（见下文 *ABI*）。
 
 ## 行为
@@ -152,7 +152,7 @@ pass 之前就已运行，在这里重复报告会指向错误的 pass。
   向量、比 shape 更窄的 `valid_shape`，以及 `input` 与 `target` 是**同一个表达式**。
   它**不会**拒绝同一块 allocation 上的两个不同 `pld.window()` 视图 —— 类型推导在
   构造 Call 时就已运行，而 `DistributedTensorType::window_buffer_` 要到
-  [`MaterializeCommDomainScopes`](45-materialize_comm_domain_scopes.md)（pass 45）
+  [`MaterializeCommDomainScopes`](46-materialize_comm_domain_scopes.md)（pass 46）
   才被绑定。整块 allocation 层面的互不相同是 **HOST 通路**的保证：
   `LowerHostTensorCollectives` 能在同一个 `host_orch` 函数体内把每个操作数溯源回
   其 `WindowBuffer`，并对五个操作数运行 `CheckPairwiseDistinctWindows`。本通路
@@ -165,8 +165,8 @@ pass 之前就已运行，在这里重复报告会指向错误的 pass。
 - **「同属一个通信域」是未经检查的前置条件**。kernel 通过单个 `CommContext`
   （`args[5]`）解析所有对端地址，因此绑定到不同域的操作数会寻址到错误的远端窗口。
   HOST 通路用 `FindScopeForBuffers` 强制了等价约束——它能直接看到 window buffer；
-  本通路做不到：comm domain 在 `MaterializeCommDomainScopes`（pass 45）与
-  `MaterializeDistTensorCtx`（pass 47）之前没有 IR 表示，而这两者都在本 pass
+  本通路做不到：comm domain 在 `MaterializeCommDomainScopes`（pass 46）与
+  `MaterializeDistTensorCtx`（pass 48）之前没有 IR 表示，而这两者都在本 pass
   之后运行；到那时该集合通信的操作数已是外层 pipeline 的参数，把它们追溯回绑定它们
   的 host window 需要目前不存在的跨函数分析。改为比较追加的 `CommCtx` 实参也不成立：
   每个 `DistributedTensor` 参数各自生成一个，单域调用本就携带多个互不相同的 SSA 值。

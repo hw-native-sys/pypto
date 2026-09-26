@@ -4,9 +4,7 @@
 
 Pass documentation files in `docs/en/dev/passes/` (and `docs/zh/dev/passes/`) must be numbered to match the pass execution order in the pass manager (`python/pypto/ir/pass_manager.py`).
 
-## Why
-
-Developers read pass docs sequentially to understand the compilation pipeline. If numbering doesn't match execution order, the reading experience is confusing.
+Developers read these files sequentially, so numbering must follow execution order.
 
 ## Current Order
 
@@ -52,19 +50,20 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 37 | `37-allocate_memory_addr.md` | 37th pass (skippable under `memory_planner=PTOAS`) |
 | 38 | `38-fold_no_op_reshape.md` | 38th pass |
 | 39 | `39-fuse_create_assemble_to_slice.md` | 39th pass |
-| 40 | `40-lower_l2_tensor_collectives.md` | Rewrites a managed collective written in a CHIP orchestration body into one local builtin AIV task (no per-device fan-out, no nested L2 dispatch); runs immediately before DeriveCallDirections so the emitted call gets its argument directions and TensorMap task edges derived like any kernel call |
-| 41 | `41-derive_call_directions.md` | 41st pass (two-phase: arg directions + manual-scope lowering) |
-| 42 | `42-auto_derive_task_dependencies.md` | 42nd pass (manual-scope compiler deps; opt-in AUTO-scope analysis/emission via compile-time switch; default behavior unchanged) |
-| 43 | `43-expand_manual_phase_fence.md` | 43rd pass (manual-scope phase-fence TaskId dep compression; runs after AutoDeriveTaskDependencies) |
-| 44 | `44-synthesize_allreduce_signals.md` | 44th pass (distributed: host allreduce optional signal -> explicit internal signal IR) |
-| 45 | `45-materialize_comm_domain_scopes.md` | 45th pass (distributed: WindowBuffer + CommDomainScopeStmt wrappers in each host_orch body; runs immediately before LowerHostTensorCollectives) |
-| 46 | `46-lower_host_tensor_collectives.md` | 46th pass (host-level tensor collectives -> internal builtin chip dispatches; runs after comm-domain scopes) |
-| 47 | `47-materialize_dist_tensor_ctx.md` | 47th pass (materializes explicit CommCtx params/args for DistributedTensor params; runs before the final Simplify) |
-| 48 | `48-legalize_graph_boundary.md` | Hoists the boundary scalars a `FunctionType::Graph` body derives out to its call sites (a derived scalar has no runtime argument slot, so replay would freeze the first call's value) and rejects boundaries the host_build_graph runtime could not record; runs after the final Simplify, before MaterializeRuntimeScopes |
-| 49 | `49-materialize_runtime_scopes.md` | Runs after the final Simplify; inserts AUTO RuntimeScopeStmt so orchestration codegen emits SIMPLER_SCOPE 1:1 |
-| 50 | `50-classify_iter_arg_carry.md` | Classifies each Orchestration ForStmt iter_arg (trivial alias vs materialised rebind carry) and sizes manual-scope TaskId array carries; runs after MaterializeRuntimeScopes |
-| 51 | `51-insert_comm_fence.md` | Last pass (distributed: inserts a whole-tensor system.cacheinvalid + GM system.fence between each publishing write and the pld.system.notify that releases it; runs after all statement-reordering passes so the inserted ops stay adjacent to notify through codegen) |
-| 52 | `52-materialize_valid_shape_symbols.md` | Runs dead last; turns each device-kernel `valid_shape` symbol the kernel cannot bind (not a physical dim, not a scalar param) into a leading `Scalar[INDEX]` param fed from the call site's actual valid extent |
+| 40 | `40-lower_l2_tensor_collectives.md` | Rewrites a managed collective written in a CHIP orchestration body into one local builtin AIV task (no per-device fan-out, no nested L2 dispatch); runs before DeriveCallDirections so the emitted call gets its argument directions and TensorMap task edges derived like any kernel call |
+| 41 | `41-legalize_spmd_launches.md` | Guards potentially empty SPMD launches before direction/dependency analysis |
+| 42 | `42-derive_call_directions.md` | 42nd pass (two-phase: arg directions + manual-scope lowering) |
+| 43 | `43-auto_derive_task_dependencies.md` | 43rd pass (manual-scope compiler deps; opt-in AUTO-scope analysis/emission via compile-time switch; default behavior unchanged) |
+| 44 | `44-expand_manual_phase_fence.md` | 44th pass (manual-scope phase-fence TaskId dep compression; runs after AutoDeriveTaskDependencies) |
+| 45 | `45-synthesize_allreduce_signals.md` | 45th pass (distributed: host allreduce optional signal -> explicit internal signal IR) |
+| 46 | `46-materialize_comm_domain_scopes.md` | 46th pass (distributed: WindowBuffer + CommDomainScopeStmt wrappers in each host_orch body; runs immediately before LowerHostTensorCollectives) |
+| 47 | `47-lower_host_tensor_collectives.md` | 47th pass (host-level tensor collectives -> internal builtin chip dispatches; runs after comm-domain scopes) |
+| 48 | `48-materialize_dist_tensor_ctx.md` | 48th pass (materializes explicit CommCtx params/args for DistributedTensor params; runs before the final Simplify) |
+| 49 | `49-legalize_graph_boundary.md` | Hoists the boundary scalars a `FunctionType::Graph` body derives out to its call sites (a derived scalar has no runtime argument slot, so replay would freeze the first call's value) and rejects boundaries the host_build_graph runtime could not record; runs after the final Simplify, before MaterializeRuntimeScopes |
+| 50 | `50-materialize_runtime_scopes.md` | Runs after the final Simplify; inserts AUTO RuntimeScopeStmt so orchestration codegen emits SIMPLER_SCOPE 1:1 |
+| 51 | `51-classify_iter_arg_carry.md` | Classifies each Orchestration ForStmt iter_arg (trivial alias vs materialised rebind carry) and sizes manual-scope TaskId array carries; runs after MaterializeRuntimeScopes |
+| 52 | `52-insert_comm_fence.md` | Last pass (distributed: inserts a whole-tensor system.cacheinvalid + GM system.fence between each publishing write and the pld.system.notify that releases it; runs after all statement-reordering passes so the inserted ops stay adjacent to notify through codegen) |
+| 53 | `53-materialize_valid_shape_symbols.md` | Runs dead last; turns each device-kernel `valid_shape` symbol the kernel cannot bind (not a physical dim, not a scalar param) into a leading `Scalar[INDEX]` param fed from the call site's actual valid extent |
 | 91 | `91-utility_passes.md` | Not in Default strategy |
 | 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
 

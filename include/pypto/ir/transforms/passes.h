@@ -267,6 +267,9 @@ Pass LowerHostTensorCollectives();
  */
 Pass LowerL2TensorCollectives();
 
+/// Guard potentially empty SPMD launches and preserve caller-provided outputs.
+Pass LegalizeSpmdLaunches();
+
 /**
  * @brief Materialize one CommCtx parameter/argument per DistributedTensor parameter.
  */
