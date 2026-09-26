@@ -78,6 +78,30 @@ def test_explicit_command(collector, body, expected):
 
 
 @pytest.mark.parametrize(
+    "body,expected",
+    [
+        ("> Example:\n@pypto-codex review", False),
+        ("> Example:\ncontinued text\n@pypto-codex review", False),
+        ("> > Nested quote\n@pypto-codex review", False),
+        ("   > Example:\n@pypto-codex review", False),
+        ("> Example:\n>\n@pypto-codex review", False),
+        ("> Example:\n\n@pypto-codex review", True),
+        ("> Example:\n    \n@pypto-codex review", True),
+        ("> Example:\n\t\n@pypto-codex review", True),
+        ("Explanation:\n@pypto-codex review", True),
+        ("```\n> Literal text\n```\n@pypto-codex review", True),
+        ("    > Literal text\n@pypto-codex review", True),
+        ("\\> Escaped marker\n@pypto-codex review", True),
+        ("> First quote\n\n> Next quote\n@pypto-codex review", False),
+        ("> Example:\n\n```\n@pypto-codex review\n```", False),
+    ],
+)
+def test_commands_after_quoted_text(collector, body, expected):
+    """Only blank-line boundaries end quote suppression; literal markers stay inactive."""
+    assert collector.requests_review(body) is expected
+
+
+@pytest.mark.parametrize(
     "opener,closer,expected",
     [
         ("```", "```python", False),

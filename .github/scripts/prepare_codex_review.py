@@ -24,11 +24,19 @@ MAX_CONTEXT_BYTES = 8 * 1024 * 1024
 def requests_review(body: str) -> bool:
     """Accept an exact standalone command outside Markdown code blocks and quotes."""
     fence = None
+    quoted = False
     for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            quoted = False
         # Tabs expand to four-column stops in Markdown indented code blocks.
         if line.expandtabs(4).startswith("    "):
             continue
-        stripped = line.strip()
+        if fence is None and stripped.startswith(">"):
+            quoted = True
+        # A blank line separates active commands from lazy quoted continuations.
+        if quoted:
+            continue
         match = re.match(r"^(`{3,}|~{3,})", stripped)
         if match:
             marker = match[1]

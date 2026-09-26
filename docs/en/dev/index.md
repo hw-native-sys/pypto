@@ -73,7 +73,9 @@ containing this exact command on its own line (explanations can precede it):
 ```
 
 Quoted/fenced commands, edited comments, bots, ordinary issue comments, and
-commands from other users do not start a review. Inline replies are included
+commands from other users do not start a review. After quoted text, leave a
+blank line before the command: continuation lines remain inactive until that
+boundary, even when they omit the `>` marker. Inline replies are included
 as context but do not trigger the workflow: post the command in Conversation.
 The command is handled by Actions; it does not require a GitHub account named
 `pypto-codex` and does not invoke the separate `@codex` Cloud integration.
