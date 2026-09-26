@@ -28,15 +28,21 @@ host-orchestrator 中的 `pld.tensor.allreduce` 调用会跳过本 Pass：`Synth
 
 ## 架构 (Architecture)
 
-本 Pass 是单个翻译单元 (translation unit)，即 `src/ir/transforms/lower_composite_ops_pass.cpp`：
+本 Pass 现在跨两个翻译单元：`LoweringBuilder` 及其辅助设施已抽取到
+`src/ir/transforms/lower_composite/lower_composite_builder.{h,cpp}`（plan 70），使共享的暂存区/控制流机制不再绑定在一个巨型文件里；规则表和 mutator 仍留在
+`src/ir/transforms/lower_composite_ops_pass.cpp` 中，该文件 `#include` 新头文件：
 
 ```text
-src/ir/transforms/lower_composite_ops_pass.cpp
+src/ir/transforms/lower_composite/lower_composite_builder.h / .cpp
+  CommSetup                 — 每次集合通信调用的 comm-domain/signal 配置组合
   LoweringBuilder           — 单次调用的暂存区 (Bind + 基本 tile 算子构造器：
                               tile.muls、tile.adds、tile.add、tile.sub、tile.mul、
                               tile.maximum、tile.minimum、tile.cast
                               + 结构化控制流：EmitFor / EmitForReduce
                               / EmitIf / EmitIfExpr + NotEq 标量比较)
+  MakeNegation              — builder 规则使用的文件内标量/tile 取负辅助函数
+
+src/ir/transforms/lower_composite_ops_pass.cpp
   CompositeLoweringFn       — (call, visited_args, builder) -> 结果表达式
   Lower<Op>Rule             — 每个组合算子一个规则函数（LowerSinRule、
                               LowerCosRule、LowerTensorAllReduceRule ...）
@@ -44,7 +50,7 @@ src/ir/transforms/lower_composite_ops_pass.cpp
   LowerCompositeOpsMutator  — 遍历函数，对每个 Call 查表
 ```
 
-新增一个单结果组合算子的步骤（改动都留在 `lower_composite_ops_pass.cpp` 内）：
+新增一个单结果组合算子的步骤（规则与分发表改动留在 `lower_composite_ops_pass.cpp` 内；只有当规则需要新的 builder 基本能力时才需要改动 `lower_composite_builder.{h,cpp}`）：
 
 1. 写一个 `Lower<Op>Rule(call, args, builder)` 函数。它接收原始 `CallPtr`（按需用 `call->span_`、`call->kwargs_`、`call->op_->name_`）、已 visit 过的参数表达式（已应用 var-remap）以及一个 `LoweringBuilder`，其 `Bind` 助手会为每个中间临时变量追加一条 `AssignStmt`。需要控制流的规则可以用 `builder.EmitFor` / `builder.EmitForReduce` / `builder.EmitIf` / `builder.EmitIfExpr`——每个都接收一个 body 回调，回调里收到的嵌套 builder 与外层共享同一个 temp 计数器，因此发射的临时变量名跨任意嵌套深度都唯一。`LowerTensorAllReduceRule` 是含控制流规则的范例（mesh 使用 ready 屏障，加分块 remote_load+accumulate / 屏障 / store；`LowerTensorRingAllReduceRule` 则通过 `mode` kwarg 分发，增加分块 RS+AG ring 调度）。
 2. 在 `LookupCompositeRule` 的 `kRules` 里加一条 `{"<op>", &Lower<Op>Rule}`。
