@@ -102,9 +102,11 @@ jobs:
     timeout-minutes: 10
     concurrency:
       group: codex-prepare-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+      queue: max
       cancel-in-progress: false
     permissions:
       actions: read
+      checks: read
       contents: read
       pull-requests: read
       issues: read

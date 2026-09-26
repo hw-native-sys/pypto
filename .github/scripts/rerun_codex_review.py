@@ -13,6 +13,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import subprocess
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -22,6 +23,31 @@ from publish_codex_review import github_api
 
 WORKFLOW = ".github/workflows/codex-review.yml"
 MAX_CONTEXT_BYTES = 8 * 1024 * 1024
+CHECK_RUNS_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      headRefOid
+      commits(last: 1) {
+        nodes {
+          commit {
+            oid
+            statusCheckRollup {
+              contexts(first: 100, after: $cursor) {
+                nodes {
+                  __typename
+                  ... on CheckRun { checkSuite { workflowRun { resourcePath } } }
+                }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
 
 
 def report(message: str) -> None:
@@ -84,15 +110,82 @@ def snapshot_matches(repo: str, run: dict, pr: dict) -> bool:
     )
 
 
+def checked_run_ids(repo: str, pr: dict) -> list[int] | None:
+    """Find Actions runs attached to the current PR head; None means head drift."""
+    owner, name = repo.split("/")
+    cursor = None
+    seen_cursors = set()
+    run_ids = set()
+    while True:
+        response = github_api(
+            "graphql",
+            {
+                "query": CHECK_RUNS_QUERY,
+                "variables": {"owner": owner, "name": name, "number": pr["number"], "cursor": cursor},
+            },
+        )
+        if not isinstance(response, dict) or response.get("errors"):
+            raise ValueError("Failed to read PR check connections from GitHub GraphQL")
+        try:
+            target = response["data"]["repository"]["pullRequest"]
+            commits = target["commits"]["nodes"]
+            if len(commits) != 1:
+                raise ValueError("Expected exactly one current PR commit")
+            commit = commits[0]["commit"]
+            if target["headRefOid"] != pr["head"]["sha"] or commit["oid"] != pr["head"]["sha"]:
+                return None
+            rollup = commit["statusCheckRollup"]
+            if rollup is None:
+                if cursor is not None:
+                    raise ValueError("PR check connection disappeared during pagination")
+                return []
+            contexts = rollup["contexts"]
+            for context in contexts["nodes"]:
+                if context["__typename"] != "CheckRun":
+                    continue
+                suite = context["checkSuite"]
+                run = suite["workflowRun"] if suite is not None else None
+                if run is None:
+                    continue
+                path = run["resourcePath"]
+                match = (
+                    re.fullmatch(rf"/{re.escape(repo)}/actions/runs/([1-9][0-9]*)", path)
+                    if isinstance(path, str)
+                    else None
+                )
+                if match is None:
+                    raise ValueError("Expected an Actions run resource path in the current repository")
+                run_ids.add(int(match[1]))
+            page = contexts["pageInfo"]
+            if type(page["hasNextPage"]) is not bool:
+                raise ValueError("Invalid PR check pagination state")
+            if not page["hasNextPage"]:
+                return sorted(run_ids, reverse=True)
+            cursor = page["endCursor"]
+            if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
+                raise ValueError("Missing or repeated PR check pagination cursor")
+            seen_cursors.add(cursor)
+        except (KeyError, TypeError, AttributeError) as error:
+            raise ValueError("Incomplete PR check response from GitHub GraphQL") from error
+
+
+def target_is_current(repo: str, pr: dict) -> bool:
+    """Recheck PR state before rerunning or collecting standalone context."""
+    current = github_api(f"repos/{repo}/pulls/{pr['number']}")
+    return (
+        current["state"] == "open"
+        and not current["draft"]
+        and current["head"]["sha"] == pr["head"]["sha"]
+        and current["base"]["ref"] == pr["base"]["ref"]
+    )
+
+
 def matching_run(repo: str, run: dict, pr: dict) -> bool:
-    """Require exact workflow, repository, source branch, head, and PR identity."""
+    """Require the workflow, base repository, and artifact-backed PR identity."""
     if not (
         run["event"] == "pull_request_target"
-        and run["path"] == WORKFLOW
+        and run["path"].split("@", 1)[0] == WORKFLOW
         and run["repository"]["full_name"] == repo
-        and run["head_sha"] == pr["head"]["sha"]
-        and run["head_branch"] == pr["head"]["ref"]
-        and run["head_repository"]["id"] == pr["head"]["repo"]["id"]
     ):
         return False
     return snapshot_matches(repo, run, pr)
@@ -100,33 +193,19 @@ def matching_run(repo: str, run: dict, pr: dict) -> bool:
 
 def route_review(repo: str, pr: dict) -> bool:
     """Reuse an active run or rerun all jobs; return False for standalone review."""
-    runs = []
-    page = 1
+    run_ids = checked_run_ids(repo, pr)
+    if run_ids is None:
+        report("PR changed while routing the command; no review was started.")
+        return True
     cutoff = datetime.now(timezone.utc) - timedelta(days=30)
-    while True:
-        response = github_api(
-            f"repos/{repo}/actions/workflows/codex-review.yml/runs"
-            f"?event=pull_request_target&head_sha={pr['head']['sha']}&per_page=100&page={page}"
-        )
-        runs.extend(response["workflow_runs"])
-        if len(runs) >= response["total_count"] or not response["workflow_runs"]:
-            break
-        if len(runs) >= 1000:
-            raise ValueError("Too many matching workflow runs; refusing an incomplete routing search")
-        page += 1
-    for run in sorted(runs, key=lambda item: item["id"], reverse=True):
+    for run_id in run_ids:
+        run = github_api(f"repos/{repo}/actions/runs/{run_id}")
         if datetime.fromisoformat(run["created_at"].replace("Z", "+00:00")) <= cutoff:
             continue
         if not matching_run(repo, run, pr):
             continue
         # Re-read both resources immediately before deciding to mutate anything.
-        current = github_api(f"repos/{repo}/pulls/{pr['number']}")
-        if (
-            current["state"] != "open"
-            or current["draft"]
-            or current["head"]["sha"] != pr["head"]["sha"]
-            or current["base"]["ref"] != pr["base"]["ref"]
-        ):
+        if not target_is_current(repo, pr):
             report("PR changed while routing the command; no review was started.")
             return True
         latest = github_api(f"repos/{repo}/actions/runs/{run['id']}")
@@ -147,6 +226,9 @@ def route_review(repo: str, pr: dict) -> bool:
             check=True,
         )
         report(f"Requested all jobs again on the PR's existing review run: {url}")
+        return True
+    if not target_is_current(repo, pr):
+        report("PR changed while routing the command; no review was started.")
         return True
     report(
         "No verifiable current-head PR run within 30 days; starting a standalone review. "

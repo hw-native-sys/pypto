@@ -70,13 +70,12 @@ def api(router, pr, run, monkeypatch):
 
     def request(endpoint):
         calls.append(endpoint)
-        if "/workflows/" in endpoint:
-            return {"total_count": 1, "workflow_runs": [run]}
         if "/pulls/" in endpoint:
             return pr
         assert endpoint == "repos/owner/repo/actions/runs/123"
         return run
 
+    monkeypatch.setattr(router, "checked_run_ids", lambda *args: [run["id"]])
     monkeypatch.setattr(router, "github_api", request)
     monkeypatch.setattr(router, "snapshot_matches", lambda *args: True)
     return calls
@@ -125,16 +124,23 @@ def test_pr_change_before_rerun_aborts(router, pr, api, monkeypatch, field, valu
     [
         ("event", "issue_comment"),
         ("path", ".github/workflows/ci.yml"),
+        ("path", ".github/workflows/ci.yml@main"),
         ("repository", {"full_name": "other/repo"}),
-        ("head_sha", "c" * 40),
-        ("head_branch", "different"),
-        ("head_repository", {"id": 13}),
     ],
 )
 def test_wrong_run_never_reads_artifact(router, run, pr, monkeypatch, field, value):
     run[field] = value
     monkeypatch.setattr(router, "snapshot_matches", lambda *args: pytest.fail("Foreign run"))
     assert not router.matching_run("owner/repo", run, pr)
+
+
+@pytest.mark.parametrize("suffix", ["", "@main", "@refs/heads/main", "@" + "b" * 40])
+def test_workflow_path_accepts_optional_ref(router, run, pr, monkeypatch, suffix):
+    run["path"] += suffix
+    verified = []
+    monkeypatch.setattr(router, "snapshot_matches", lambda *args: verified.append(args) or True)
+    assert router.matching_run("owner/repo", run, pr)
+    assert verified == [("owner/repo", run, pr)]
 
 
 def test_missing_credential_is_an_error_not_silent_fallback(router, pr, api, monkeypatch):
@@ -162,22 +168,172 @@ def test_unverifiable_run_falls_back(router, pr, api, monkeypatch):
     assert not router.route_review("owner/repo", pr)
 
 
-def test_paginated_search_prefers_newest_matching_run(router, pr, run, monkeypatch):
-    calls = []
+def check_run_context(run_id):
+    return {
+        "__typename": "CheckRun",
+        "checkSuite": {"workflowRun": {"resourcePath": f"/owner/repo/actions/runs/{run_id}"}},
+    }
 
-    def request(endpoint):
-        calls.append(endpoint)
-        if endpoint.endswith("&page=1"):
-            return {"total_count": 2, "workflow_runs": [{**run, "id": 100, "head_sha": "c" * 40}]}
-        if endpoint.endswith("&page=2"):
-            return {"total_count": 2, "workflow_runs": [run]}
-        return pr if "/pulls/" in endpoint else {**run, "status": "in_progress"}
+
+def check_response(pr, contexts, *, next_cursor=None, head=None, commit=None):
+    return {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "headRefOid": head or pr["head"]["sha"],
+                    "commits": {
+                        "nodes": [
+                            {
+                                "commit": {
+                                    "oid": commit or pr["head"]["sha"],
+                                    "statusCheckRollup": {
+                                        "contexts": {
+                                            "nodes": contexts,
+                                            "pageInfo": {
+                                                "hasNextPage": next_cursor is not None,
+                                                "endCursor": next_cursor,
+                                            },
+                                        }
+                                    },
+                                }
+                            }
+                        ]
+                    },
+                }
+            }
+        }
+    }
+
+
+def test_check_rollup_paginates_deduplicates_and_skips_non_actions(router, pr, monkeypatch):
+    cursors = []
+
+    def request(endpoint, payload):
+        assert endpoint == "graphql"
+        variables = payload["variables"]
+        assert (variables["owner"], variables["name"], variables["number"]) == ("owner", "repo", 2911)
+        cursors.append(variables["cursor"])
+        if variables["cursor"] is None:
+            return check_response(
+                pr,
+                [
+                    check_run_context(100),
+                    check_run_context(100),
+                    {"__typename": "StatusContext"},
+                    {"__typename": "CheckRun", "checkSuite": None},
+                    {"__typename": "CheckRun", "checkSuite": {"workflowRun": None}},
+                ],
+                next_cursor="page2",
+            )
+        assert variables["cursor"] == "page2"
+        return check_response(pr, [check_run_context(123), check_run_context(100)])
 
     monkeypatch.setattr(router, "github_api", request)
-    monkeypatch.setattr(router, "snapshot_matches", lambda *args: True)
+    assert router.checked_run_ids("owner/repo", pr) == [123, 100]
+    assert cursors == [None, "page2"]
+
+
+@pytest.mark.parametrize("field", ["head", "commit"])
+def test_head_drift_between_check_pages_stops_without_fallback(router, pr, monkeypatch, field):
+    calls = []
+
+    def request(endpoint, payload):
+        assert endpoint == "graphql"
+        calls.append(payload)
+        if payload["variables"]["cursor"] is None:
+            return check_response(pr, [check_run_context(123)], next_cursor="page2")
+        return check_response(pr, [], **{field: "c" * 40})
+
+    monkeypatch.setattr(router, "github_api", request)
     assert router.route_review("owner/repo", pr)
-    assert len(calls) == 4
-    assert "page=2" in calls[1]
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    "response", [None, {}, {"errors": [{"message": "denied"}]}, {"data": {"repository": None}}]
+)
+def test_invalid_graphql_response_fails_closed(router, pr, monkeypatch, response):
+    monkeypatch.setattr(router, "github_api", lambda *args: response)
+    with pytest.raises(ValueError, match="GraphQL"):
+        router.route_review("owner/repo", pr)
+
+
+def test_graphql_transport_error_never_falls_back(router, pr, monkeypatch):
+    def request(*args):
+        raise subprocess.CalledProcessError(1, "gh", stderr="HTTP 403")
+
+    monkeypatch.setattr(router, "github_api", request)
+    with pytest.raises(subprocess.CalledProcessError):
+        router.route_review("owner/repo", pr)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        None,
+        True,
+        123,
+        "/owner/repo/actions/runs/0",
+        "/owner/repo/actions/runs/-1",
+        "/owner/repo/actions/runs/01",
+        "/other/repo/actions/runs/123",
+        "/owner/other/actions/runs/123",
+        "https://github.com/owner/repo/actions/runs/123",
+        "//owner/repo/actions/runs/123",
+        "/owner/repo/actions/runs/123/",
+        "/owner/repo/actions/runs/123?attempt=2",
+        "/owner/repo/actions/runs/123#fragment",
+        "/owner/repo/actions/runs/123\n",
+        "/owner/repo/actions/runs/\uff11\uff12\uff13",
+        "/owner/repo/actions/runs/1/../../123",
+    ],
+)
+def test_invalid_check_run_path_rejected(router, pr, monkeypatch, path):
+    context = {"__typename": "CheckRun", "checkSuite": {"workflowRun": {"resourcePath": path}}}
+    monkeypatch.setattr(router, "github_api", lambda *args: check_response(pr, [context]))
+    with pytest.raises(ValueError, match="resource path"):
+        router.checked_run_ids("owner/repo", pr)
+
+
+@pytest.mark.parametrize("run_id", [2**31, 36245507417, 2**63])
+def test_check_run_ids_support_wide_integers(router, pr, monkeypatch, run_id):
+    def request(endpoint, payload):
+        assert "resourcePath" in payload["query"]
+        assert "databaseId" not in payload["query"]
+        return check_response(pr, [check_run_context(run_id), check_run_context(run_id)])
+
+    monkeypatch.setattr(router, "github_api", request)
+    assert router.checked_run_ids("owner/repo", pr) == [run_id]
+
+
+def test_empty_check_rollup_has_no_candidates(router, pr, monkeypatch):
+    response = check_response(pr, [])
+    response["data"]["repository"]["pullRequest"]["commits"]["nodes"][0]["commit"]["statusCheckRollup"] = None
+    monkeypatch.setattr(router, "github_api", lambda *args: response)
+    assert router.checked_run_ids("owner/repo", pr) == []
+
+
+def test_repeated_check_cursor_fails_closed(router, pr, monkeypatch):
+    monkeypatch.setattr(router, "github_api", lambda *args: check_response(pr, [], next_cursor="same"))
+    with pytest.raises(ValueError, match="cursor"):
+        router.checked_run_ids("owner/repo", pr)
+
+
+def test_candidate_runs_fetched_lazily_newest_first(router, pr, run, api, monkeypatch):
+    monkeypatch.setattr(router, "checked_run_ids", lambda *args: [123, 100])
+    run["status"] = "in_progress"
+    assert router.route_review("owner/repo", pr)
+    assert api == [
+        "repos/owner/repo/actions/runs/123",
+        "repos/owner/repo/pulls/2911",
+        "repos/owner/repo/actions/runs/123",
+    ]
+
+
+def test_no_candidates_rechecks_head_before_standalone_fallback(router, pr, monkeypatch):
+    monkeypatch.setattr(router, "checked_run_ids", lambda *args: [])
+    monkeypatch.setattr(router, "github_api", lambda *args: {**pr, "head": {"sha": "c" * 40}})
+    assert router.route_review("owner/repo", pr)
 
 
 def install_snapshot(router, monkeypatch, pr, snapshot=None, name="discussion.json"):
@@ -212,6 +368,7 @@ def install_snapshot(router, monkeypatch, pr, snapshot=None, name="discussion.js
 def test_fork_run_without_pr_links_verified_from_snapshot(router, run, pr, monkeypatch):
     install_snapshot(router, monkeypatch, pr)
     assert run["pull_requests"] == []
+    run.update(head_sha="b" * 40, head_branch="main", head_repository={"id": 999})
     assert router.matching_run("owner/repo", run, pr)
 
 
@@ -289,7 +446,9 @@ def test_workflow_limits_token_to_trusted_step():
     jobs = workflow["jobs"]
     prepare = jobs["prepare"]
     assert prepare["permissions"]["actions"] == "read"
+    assert prepare["permissions"]["checks"] == "read"
     assert prepare["concurrency"]["cancel-in-progress"] is False
+    assert prepare["concurrency"]["queue"] == "max"
     contexts = [step for step in prepare["steps"] if step.get("id") == "context"]
     assert len(contexts) == 1
     assert "issue_comment" in contexts[0]["env"]["CODEX_REVIEW_RERUN_TOKEN"]

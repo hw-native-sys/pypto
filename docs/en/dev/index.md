@@ -94,16 +94,25 @@ or reruns **all jobs** of a completed run (including successful runs when a new
 assessment is requested). This updates the existing PR Actions checks and
 rebuilds both context and result artifacts under the same attempt number.
 The comment run itself remains a separate, short routing run; its Actions
-summary links to the selected PR run. Requests for the same PR are serialized.
+summary links to the selected PR run. Requests for the same PR are serialized,
+with up to 100 pending preparation jobs retained; further arrivals are canceled
+when that queue is full.
 
 Configure the repository secret `CODEX_REVIEW_RERUN_TOKEN` with a dedicated
 fine-grained PAT restricted to this repository with **Actions: write**. It is
 used only by the trusted preparation step for comment commands, never passed
 to the PR checkout or review container. Missing credentials or API failures
 fail visibly instead of silently leaving PR checks unchanged. Read-only lookup
-uses `GITHUB_TOKEN` with **Actions: read**.
+uses `GITHUB_TOKEN` with **Actions: read** and **Checks: read**.
 
-Routing verifies repository, source branch, head SHA, PR number, and base ref.
+Routing starts from the PR number and fully paginates the current commit's
+GraphQL `statusCheckRollup`, following Actions check runs to their workflow run
+IDs by validating each workflow run's `resourcePath` against the exact repository
+path. This avoids depending on a GraphQL integer width. Each page must still
+refer to the requested PR head. It verifies the
+workflow, event, base repository, and artifact's repository, PR number, head
+SHA, and base ref, without relying on workflow-run source metadata. A changed
+head stops routing, including standalone fallback.
 A small identity artifact is retained for 30 days; discussion content still
 expires after one day. Older runs can be verified from an unexpired discussion
 snapshot. If no verifiable run exists within GitHub's 30-day rerun window, the
