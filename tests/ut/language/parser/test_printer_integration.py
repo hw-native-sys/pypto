@@ -11,7 +11,7 @@
 
 import pypto.language as pl
 import pytest
-from pypto import DataType, ir
+from pypto import DataType, ir, passes
 from pypto.ir import op
 from pypto.language.parser.text_parser import parse
 
@@ -399,6 +399,85 @@ class TestWhileLoopRoundTrip:
         printed = func.as_python()
         assert "pl.tile.create(" in printed
         assert "pl.tile.create_tile(" not in printed
+
+
+@pytest.mark.parametrize("memory", ["", ", pl.Mem.Vec"])
+@pytest.mark.parametrize("explicit_view", [None, False, True])
+def test_tile_assignment_full_box_view_overrides_inference(memory, explicit_view):
+    """Roundtrip preserves explicit result views; ordinary calls keep inferred views."""
+    view = ", pl.TileView()" if explicit_view else ""
+    annotation = "" if explicit_view is None else f": pl.Tile[[16, 128], pl.FP32{memory}{view}]"
+    source = f"""
+import pypto.language as pl
+
+@pl.function
+def main(x: pl.Tile[[16, 128], pl.FP32{memory}, pl.TileView(valid_shape=[8, 128])]):
+    y{annotation} = pl.tile.exp(x)
+"""
+    function = parse(source)
+    assert isinstance(function, ir.Function)
+    assert isinstance(function.body, ir.AssignStmt)
+    tile_type = function.body.var.type
+    assert isinstance(tile_type, ir.TileType)
+    if explicit_view:
+        assert tile_type.tile_view is None
+    else:
+        assert tile_type.tile_view is not None
+        rows = tile_type.tile_view.valid_shape[0]
+        assert isinstance(rows, ir.ConstInt) and rows.value == 8
+    for explicit_layout in (False, True):
+        printed = ir.python_print(function, explicit_layout=explicit_layout)
+        reparsed = parse("import pypto.language as pl\n" + printed)
+        ir.assert_structural_equal(function, reparsed)
+
+
+@pytest.mark.parametrize("memory", ["", ", pl.Mem.Vec"])
+@pytest.mark.parametrize("partial", [False, True])
+@pytest.mark.parametrize("explicit_view", [False, True])
+def test_tile_alias_annotation_preserves_matching_view(memory, partial, explicit_view):
+    """Matching and omitted alias views preserve assignment type symmetry."""
+    source_view = "pl.TileView(valid_shape=[8, 128])" if partial else "pl.TileView()"
+    annotation_view = f", {source_view}" if explicit_view else ""
+    source = f"""
+import pypto.language as pl
+
+@pl.function
+def main(x: pl.Tile[[16, 128], pl.FP32{memory}, {source_view}]):
+    y: pl.Tile[[16, 128], pl.FP32{memory}{annotation_view}] = x
+"""
+    function = parse(source)
+    assert isinstance(function, ir.Function)
+    assert isinstance(function.body, ir.AssignStmt)
+    ir.assert_structural_equal(function.body.var.type, function.body.value.type)
+    ir.assert_structural_equal(function.params[0].type, function.body.value.type)
+    printed = ir.python_print(function)
+    ir.assert_structural_equal(function, parse("import pypto.language as pl\n" + printed))
+
+
+@pytest.mark.parametrize("memory", [None, ir.MemorySpace.Vec])
+def test_asymmetric_tile_alias_roundtrips_before_ir_verification(memory):
+    """Roundtrip preserves declared IR types; the IR verifier diagnoses their mismatch."""
+    span = ir.Span.unknown()
+    partial_view = ir.TileView(
+        valid_shape=[ir.ConstInt(8, DataType.INDEX, span), ir.ConstInt(128, DataType.INDEX, span)]
+    )
+    partial_type = ir.TileType([16, 128], DataType.FP32, None, partial_view, memory)
+    full_type = ir.TileType([16, 128], DataType.FP32, None, None, memory)
+    x = ir.Var("x", partial_type, span)
+    y = ir.Var("y", full_type, span)
+    function = ir.Function("main", [x], [], ir.AssignStmt(y, x, span), span, ir.FunctionType.InCore)
+    program = ir.Program([function], "AsymmetricTileAlias", span)
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.AssignTypeSymmetry)
+
+    for explicit_layout in (False, True):
+        printed = ir.python_print(program, explicit_layout=explicit_layout)
+        reparsed = parse("import pypto.language as pl\n" + printed)
+        assert isinstance(reparsed, ir.Program)
+        ir.assert_structural_equal(program, reparsed)
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, reparsed)
+        assert len(diagnostics) == 1
+        assert diagnostics[0].rule_name == "AssignTypeSymmetry"
 
 
 if __name__ == "__main__":

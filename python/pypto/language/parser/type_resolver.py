@@ -1748,6 +1748,14 @@ class TypeResolver:
                 )
         return tv
 
+    def has_explicit_tile_view(self, annotation: ast.expr) -> bool:
+        """Check syntax before TileType canonicalization can erase a full view."""
+        return (
+            isinstance(annotation, ast.Subscript)
+            and isinstance(annotation.slice, ast.Tuple)
+            and any(self._is_tileview_node(node) for node in annotation.slice.elts[2:])
+        )
+
     def _is_tileview_node(self, node: ast.expr) -> bool:
         """Check if an AST node is a pl.TileView(...) call."""
         if not isinstance(node, ast.Call):

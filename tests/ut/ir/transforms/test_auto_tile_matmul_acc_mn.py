@@ -479,7 +479,7 @@ def test_canonical_split_k_tiles_both_m_and_n_with_boundaries():
         after = passes.auto_tile_matmul_l0()(before)
 
     printed = ir.python_print(after)
-    assert "pl.Tile[[272, 144], pl.INT32, pl.Mem.Acc]" not in printed
+    assert "pl.Tile[[272, 144], pl.INT32, pl.Mem.Acc" not in printed
     assert "[272, 128], [272, 128]" not in printed
     assert "[128, 144], [128, 144]" not in printed
     source_k_loops = printed.count("in pl.pipeline(2, stage=2")
@@ -505,7 +505,7 @@ def test_predicated_canonical_split_k_tiles_both_m_and_n_with_boundaries():
         after = passes.auto_tile_matmul_l0()(before)
 
     printed = ir.python_print(after)
-    assert "pl.Tile[[272, 144], pl.INT32, pl.Mem.Acc]" not in printed
+    assert "pl.Tile[[272, 144], pl.INT32, pl.Mem.Acc" not in printed
     assert "[272, 128], [272, 128]" not in printed
     assert "[128, 144], [128, 144]" not in printed
     source_k_loops = printed.count("in pl.pipeline(2, stage=2")

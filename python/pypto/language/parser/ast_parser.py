@@ -1819,7 +1819,10 @@ class ASTParser:
                         # 2D→2D: preserve the actual C++ inferred tile_view
                         inf_tv = value_expr.type.tile_view
                     merged_ms = ann_ms if ann_ms is not None else inf_ms
-                    merged_tv = ann_tv if ann_tv is not None else inf_tv
+                    # An explicitly written full view canonicalizes to None,
+                    # but still overrides inference (e.g. a deferred C2V shard).
+                    has_ann_tv = self.type_resolver.has_explicit_tile_view(ann)
+                    merged_tv = ann_tv if has_ann_tv or ann_tv is not None else inf_tv
                     # Build the override whenever the annotation contributes anything
                     # the raw inferred type does not already carry.  The shape test
                     # compares against ``value_expr.type`` (the *raw* inferred type),
@@ -1830,6 +1833,7 @@ class ASTParser:
                     # was never None, so the override was always built.
                     if (
                         resolved.memref is not None
+                        or has_ann_tv
                         or merged_ms is not None
                         or merged_tv is not None
                         or not _shape_exprs_match(resolved.shape, value_expr.type.shape)

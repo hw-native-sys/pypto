@@ -1814,8 +1814,10 @@ class TestAutoMoveInsertion:
         printed = ir.python_print(After)
         # Each branch keeps the space its own producer resolved to; the phi is not
         # retyped onto either one.
-        assert "a: pl.Tile[[16, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(" in printed, printed
-        assert "b: pl.Tile[[16, 128], pl.FP32, pl.Mem.Vec] = pl.tile.add(" in printed, printed
+        assert "a: pl.Tile[[16, 128], pl.FP32, pl.Mem.Acc, pl.TileView()] = pl.tile.matmul(" in printed, (
+            printed
+        )
+        assert "b: pl.Tile[[16, 128], pl.FP32, pl.Mem.Vec, pl.TileView()] = pl.tile.add(" in printed, printed
         # No move is invented to reconcile the divergence.
         assert "pl.tile.move(a," not in printed, printed
         assert "pl.tile.move(b," not in printed, printed

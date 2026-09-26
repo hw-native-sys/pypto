@@ -379,8 +379,8 @@ class TestPassManagerDumpIR:
 
         ``Mem.Acc``'s implicit view is ``blayout=col_major, slayout=row_major,
         fractal=1024`` yet the canonical ``tile_view_`` is ``nullopt``, so the
-        concise dump prints no ``TileView`` at all — the exact omission issue
-        #2088 addresses. The frontend dump (written before any pass) is a stable
+        concise dump omits the layout fields — the exact omission issue #2088
+        addresses. The frontend dump (written before any pass) is a stable
         place to observe whether the resolved layout is printed.
         """
         span = ir.Span.unknown()
@@ -394,7 +394,7 @@ class TestPassManagerDumpIR:
 
     @pytest.mark.parametrize("dump_arg", [True, ir.PassDumpLevel.CONCISE])
     def test_dump_ir_concise_omits_implicit_tile_layout(self, tmp_path, dump_arg):
-        """CONCISE (and bool ``True``) keep the concise form (no TileView on Acc)."""
+        """CONCISE keeps implicit layouts but marks full-view assignments explicitly."""
         pm = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default)
         output_dir = str(tmp_path / "dump_output")
 
@@ -407,7 +407,10 @@ class TestPassManagerDumpIR:
 
         frontend = (tmp_path / "dump_output" / "00_frontend.py").read_text()
         assert "pl.Mem.Acc" in frontend
-        assert "TileView" not in frontend
+        assert "pl.TileView()" in frontend
+        assert "blayout=" not in frontend
+        assert "slayout=" not in frontend
+        assert "fractal=" not in frontend
 
     def test_dump_ir_explicit_level_resolves_tile_layout(self, tmp_path):
         """PassDumpLevel.EXPLICIT makes dumps state the resolved tile layout."""

@@ -293,7 +293,7 @@ class IRPythonPrinter : public IRVisitor {
    * @return Python-style string representation
    */
   std::string Print(const IRNodePtr& node);
-  std::string Print(const TypePtr& type);
+  std::string Print(const TypePtr& type, bool explicit_tile_view = false);
 
  protected:
   // Expression visitors
@@ -640,7 +640,7 @@ std::string IRPythonPrinter::Print(const IRNodePtr& node) {
   return stream_.str();
 }
 
-std::string IRPythonPrinter::Print(const TypePtr& type) {
+std::string IRPythonPrinter::Print(const TypePtr& type, bool explicit_tile_view) {
   // Buffer IR is internal: print native constructors without adding DSL types.
   if (As<VoidType>(type)) {
     return "pypto.ir.VoidType()";
@@ -793,6 +793,10 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     if (view.has_value()) {
       auto view_str = PrintTileView(*view, tile_type->shape_, tile_type->memory_space_);
       oss << ", " << (view_str.empty() ? prefix_ + ".TileView()" : view_str);
+    } else if (explicit_tile_view) {
+      // On assignments, omission inherits the RHS-inferred view. State the
+      // implicit full view explicitly so re-inference cannot narrow it again.
+      oss << ", " << prefix_ << ".TileView()";
     }
 
     oss << "]";
@@ -1888,7 +1892,7 @@ void IRPythonPrinter::VisitStmt_(const AssignStmtPtr& op) {
   // In concise mode, omit the type annotation: var = value
   VisitExpr(op->var_);
   if (!concise_) {
-    stream_ << ": " << Print(op->var_->GetType());
+    stream_ << ": " << Print(op->var_->GetType(), /*explicit_tile_view=*/true);
   }
   stream_ << " = ";
   VisitExpr(op->value_);
