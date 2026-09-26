@@ -586,6 +586,46 @@ grid 避免了这两个问题 —— `require_sync_start` 让所有 block 一起
 `block_idx` 在每个 rank 上给出确定且互相匹配的划分。它是单卡准入保证而非跨 rank
 的全局同时启动；跨 rank 的启动偏差由 ready barrier 吸收。
 
+### `pld.tensor.allgather`
+
+```text
+pld.tensor.allgather(local_data, target, signal) -> DistributedTensorType(target)
+```
+
+从每个 rank 收集一个 `[1, SIZE]` 本地分块到窗口绑定的 `target` 并返回它——即**窗口即结果**
+（window-as-result）形式。与 `allreduce` 不同，`target` 不是本 rank 的切片：它是完整的
+聚合矩阵，因此其首个维度是 rank 数，末维度是一个分块。
+
+```text
+local_data : Tensor[[1, SIZE]]                 -- 本 rank 的分块
+ target    : DistributedTensor[[NR, SIZE]]     -- 聚合结果
+ signal    : DistributedTensor[[NR, 1]] INT32
+```
+
+**形状约定。** 推导器按结构（而非编译期常量）比较 `target.shape[1]` 与
+`local_data.shape[1]`，因此两侧共享的符号是可接受的——运行时分块宽度亦然。轨道的
+`[TP, width * D]` 形式因此合法；`[TP * width, D]` 则不然，会在 IR 构造阶段以
+*"target SIZE must equal input SIZE"* 被拒绝。
+
+**下降（Lowering）。** 基于推送：每个对端一次 `pld.tile.put`，把本 rank 的分块写入
+该对端 `target` 的第 `my_rank` 行，随后一次屏障，再是自清除的收尾。没有任何拉取。
+中转暂存块被限制在一个 16 KiB 分块内，传输由 `pld.tile.put` 自身分块，因此 composite
+不产生自己的分块循环，运行时范围的分块方式与静态范围完全一致（分块规则见
+[`pld.tensor.allreduce`](#pldtensorallreduce)）。任何符号范围都必须由内核标量、循环
+变量或物理张量形状参数在运行时绑定；仅类型元数据的符号会在 PTO codegen 阶段被拒绝。
+
+**类型约定。** 推导器由两条执行路径共用，因此接受两者所需的形式：`local_data`
+可以是普通 `Tensor` **或** `DistributedTensor`（HOST builtin 经 `[1, SIZE]` 的
+`DistributedTensor` 暂存窗口提交；InCore 传入普通分块）；`target` 必须是窗口绑定的
+`DistributedTensor`，形状 `[NR, SIZE]`；`signal` 可以是 **`[NR]` 或 `[NR, 1]`**
+的 INT32；且 `local_data` 与 `target` 必须是不同缓冲区——让二者别名会造成跨进程
+数据竞争。
+
+InCore 下降在一点上比推导器更严格：其屏障按 rank 索引一格，因此要求 `signal`
+为二维 `[NR, 1]`（`ValidateMeshSignalShape`）。所以 `[NR, 1]` 同时满足两条路径，
+而一维 `[NR]` 仅适用于 HOST。为 ring `allreduce` 设计的信号（`[2*(NR-1), NR]`）
+在两条路径上都不能与本集合通信算子共用，应给它独立的窗口。
+
 ### `pld.system.notify`（TNOTIFY）
 
 ```text
@@ -689,6 +729,8 @@ host_orch 函数体包裹进嵌套的 `CommDomainScopeStmt` 节点（按推断�
   `test_l3_reduce_scatter.py`、`test_l3_broadcast.py`（三者同样采用动态 NR，
   P=2/P=4）、`test_l3_tensor_allreduce_intrinsic.py`、
   `test_l3_tensor_allreduce_ring_intrinsic.py`、
+  `test_l3_tensor_allgather_runtime_width.py`（运行时范围的 composite allgather：
+  一次编译在三种不同范围上执行）、
   `test_l3_allreduce_ring.py`（手写 ring RS+AG）、
   `test_l3_host_tensor_allreduce.py`、`test_l3_host_tensor_allreduce_ring.py`、
   `test_l3_ep_dispatch_combine.py`、`test_l3_notify_wait.py`、
