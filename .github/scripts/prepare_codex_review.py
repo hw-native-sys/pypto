@@ -42,6 +42,19 @@ def requests_review(body: str) -> bool:
     return False
 
 
+def has_review_permission(repo: str, author: str) -> bool:
+    """Deny non-collaborators while preserving unexpected permission API failures."""
+    try:
+        permission = github_api(f"repos/{repo}/collaborators/{author}/permission")["permission"]
+    except subprocess.CalledProcessError as error:
+        # gh emits the actual HTTP status in its diagnostic; transport errors
+        # and all other statuses must remain failures.
+        if re.search(r"^gh: .* \(HTTP 404\)$", error.stderr or "", re.MULTILINE):
+            return False
+        raise
+    return permission in {"write", "maintain", "admin"}
+
+
 def review_target(event_name: str, event: dict, repo: str) -> dict | None:
     """Resolve a current PR and authorize comment commands before starting a runner."""
     if event_name == "pull_request_target":
@@ -76,15 +89,7 @@ def review_target(event_name: str, event: dict, repo: str) -> dict | None:
         if author != pr["user"]["login"]:
             if not re.fullmatch(r"[A-Za-z0-9-]+", author):
                 raise ValueError("Invalid GitHub comment author")
-            try:
-                permission = github_api(f"repos/{repo}/collaborators/{author}/permission")["permission"]
-            except subprocess.CalledProcessError as error:
-                # gh emits the actual HTTP status in its diagnostic; transport
-                # errors and all other statuses must remain failures.
-                if re.search(r"^gh: .* \(HTTP 404\)$", error.stderr or "", re.MULTILINE):
-                    return None
-                raise
-            if permission not in {"write", "maintain", "admin"}:
+            if not has_review_permission(repo, author):
                 return None
     if any(not re.fullmatch(r"[0-9a-f]{40}", pr[side]["sha"]) for side in ("head", "base")):
         raise ValueError("Expected full PR commit SHA values")
