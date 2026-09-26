@@ -53,6 +53,7 @@ struct AllocationHazardInputs {
 };
 
 using AllocationForbidAliasMap = std::map<const Var*, std::vector<VarPtr>>;
+using AllocationSameBaseOrDisjointMap = std::map<const Var*, std::vector<VarPtr>>;
 
 /**
  * @brief Correctness facts shared by legacy reuse and DSA allocation planning.
@@ -62,6 +63,7 @@ struct AllocationConstraintAnalysis {
   std::set<const Var*> declared_allocation_bases;
   AllocationHazardInputs target_hazard_inputs;
   AllocationForbidAliasMap forbid_alias;
+  AllocationSameBaseOrDisjointMap same_base_or_disjoint_alias;
   bool needs_load_tpop_hazard_guard = false;
 };
 

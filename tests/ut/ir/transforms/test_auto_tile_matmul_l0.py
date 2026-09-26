@@ -46,6 +46,22 @@ from pypto import ir, passes
 from pypto.backend import BackendType
 
 
+def _planner_context(planner):
+    """Preserve the verification fixture while selecting a test's planner policy."""
+    current = passes.PassContext.current()
+    if current is None:
+        return passes.PassContext([], memory_planner=planner)
+    return passes.PassContext(
+        current.get_instruments(),
+        current.get_verification_level(),
+        current.get_diagnostic_phase(),
+        current.get_disabled_diagnostics(),
+        planner,
+        current.get_enable_pypto_l0c_double_buffer(),
+        current.get_runtime(),
+    )
+
+
 class TestAutoTileMatmulL0ExplicitL0Diagnostics:
     """Actionable failures for manual L0 operands that cannot fit."""
 
@@ -999,6 +1015,12 @@ class TestAutoTileMatmulL0FractalBoundary:
     with no boundary special case in the pass.
     """
 
+    @pytest.fixture(autouse=True)
+    def _legacy_planner_policy(self):
+        """Pin exact chooser-shape assertions to their original planner policy."""
+        with _planner_context(passes.MemoryPlanner.PYPTO):
+            yield
+
     @pytest.mark.parametrize("m_dim", [1, 17, 40, 100, 250])
     def test_no_sub_fractal_cube_rows_at_any_m(self, m_dim):
         k_dim, n_dim = 256, 512
@@ -1374,6 +1396,12 @@ class TestAutoTileMatmulL0MNTiling:
     direct-store / DDR-output path).  The output tensor is chained through the
     per-sub-tile stores in SSA form.
     """
+
+    @pytest.fixture(autouse=True)
+    def _legacy_planner_policy(self):
+        """Pin exact chooser-shape assertions to their original planner policy."""
+        with _planner_context(passes.MemoryPlanner.PYPTO):
+            yield
 
     def test_matmul_bias_mn_and_k_tiling_slices_bias_by_n(self):
         """Each output-column tile reloads one Bias window and applies it once."""
@@ -2896,7 +2924,7 @@ class TestAutoTileMatmulL0MNTiling:
         Under ``memory_planner=PTOAS`` a dbC=2-eligible full-K grid emits the
         two-accumulator ping-pong: ``CanonicalizeIOOrder`` floats **both** stores below
         **both** matmuls (``matmul, matmul, store, store``), so two L0C accumulators are
-        live at once. Under the default PyPTO planner the *same shape* stays dbC=1 and
+        live at once. Under the explicit legacy PyPTO planner the *same shape* stays dbC=1 and
         interleaves each store with its matmul (``matmul, store, …``). This pins the
         co-live ordering (subtle -- the nested-context bug silently disabled it once) and
         the planner gate in one test.
@@ -2939,7 +2967,7 @@ class TestAutoTileMatmulL0MNTiling:
             ptoas_seq[i : i + 4] == ["matmul", "matmul", "store", "store"] for i in range(len(ptoas_seq) - 3)
         ), f"dbC=2 (PTOAS) must float both stores below both matmuls (matmul,matmul,store,store): {ptoas_seq}"
 
-        # Default PyPTO planner: dbC=1 -> every matmul is immediately followed by its store
+        # Explicit legacy PyPTO planner: dbC=1 -> every matmul is immediately followed by its store
         # (no two co-live accumulators), for the SAME shape.
         pypto_seq = self._colive_seq(Before)
         mm2 = [i for i, op in enumerate(pypto_seq) if op == "matmul"]
@@ -2990,7 +3018,9 @@ class TestAutoTileMatmulL0MNTiling:
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910B)
         with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
-            assert acc_buffer_count() == 1, "PyPTO default must keep a single L0C accumulator (dbC=1)"
+            assert acc_buffer_count() == 1, (
+                "Legacy PYPTO without the opt-in must keep a single L0C accumulator (dbC=1)"
+            )
 
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910B)
@@ -3119,6 +3149,33 @@ class TestAutoTileMatmulL0MNTiling:
 
 class TestAutoTileMatmulL0ExistingPipelineDbC:
     """Automatic L0C ping-pong for a user-authored pipeline of L0 matmuls."""
+
+    @pytest.fixture(autouse=True)
+    def _legacy_planner_policy(self):
+        """Retain legacy-PyPTO expectations unless a test selects another planner."""
+        with _planner_context(passes.MemoryPlanner.PYPTO):
+            yield
+
+    @staticmethod
+    def _physical_ranges(program, memory_space):
+        """Return distinct physical ranges assigned to one tile memory space."""
+        ranges = set()
+
+        class _Collector(ir.IRVisitor):
+            def visit_assign_stmt(self, stmt):  # type: ignore[override]
+                tile_type = stmt.var.type
+                if (
+                    isinstance(tile_type, ir.TileType)
+                    and tile_type.memory_space == memory_space
+                    and tile_type.memref is not None
+                ):
+                    offset = tile_type.memref.byte_offset_
+                    assert isinstance(offset, ir.ConstInt)
+                    ranges.add((offset.value, tile_type.memref.size_))
+                super().visit_assign_stmt(stmt)
+
+        _Collector().visit_program(program)
+        return ranges
 
     @staticmethod
     def _single_matmul_pipeline(tile_m: int = 16, tile_n: int = 128, inner_stage: int = 2, width: int = 512):
@@ -3263,8 +3320,8 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
             f"expected the dbC drain-overlap schedule, got: {seq}"
         )
 
-        # PyPTO must preserve the two Acc slots without requiring the chooser's
-        # experimental enable_pypto_l0c_double_buffer flag.
+        # Legacy PyPTO must preserve the two Acc slots without requiring the
+        # chooser's experimental enable_pypto_l0c_double_buffer flag.
         allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
         allocated_text = ir.python_print(allocated)
 
@@ -3279,6 +3336,39 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
         assert len(alloc_bases("Right")) == 2, "the moving b operand must remain the pipeline's L0B ping-pong"
         acc_bases = alloc_bases("Acc")
         assert len(acc_bases) == 2, f"expected two L0C ping-pong buffers, got: {acc_bases}"
+
+    def test_dsa_rp_preserves_existing_pipeline_ping_pong_ranges(self):
+        """The default DSA-RP planner retains the operand ping-pong and separates accumulators.
+
+        L0A holds the loop-invariant operand in one buffer and L0B keeps the
+        moving operand's two ping-pong slots, so the pipeline shape survives
+        placement.
+
+        The four accumulator values each get their own L0C range. Two of them
+        are the same pipeline stage in consecutive iterations: the earlier
+        value's last access drains it on a transfer resource while the later
+        one's first write is a matmul, so sharing their storage would make the
+        matmul wait for that drain. The recognizer reports that cross-resource
+        handoff and the planner spends the extra L0C rather than serialize.
+        """
+        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910B)
+        Before = self._single_matmul_pipeline()
+
+        with _planner_context(passes.MemoryPlanner.DSA_RP):
+            tiled = passes.auto_tile_matmul_l0()(Before)
+            allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+
+        assert ir.python_print(tiled).count("pipeline_double_buffer_c") == 1
+        assert len(self._physical_ranges(allocated, ir.MemorySpace.Left)) == 1
+        assert len(self._physical_ranges(allocated, ir.MemorySpace.Right)) == 2
+        accumulators = self._physical_ranges(allocated, ir.MemorySpace.Acc)
+        assert len(accumulators) == 4
+        # Distinct ranges, not merely distinct buffers: the point is that no two
+        # accumulators were given the same address.
+        assert len({offset for offset, _ in accumulators}) == 4
 
     @pytest.mark.parametrize(
         ("inner_stage", "width", "expected"),
@@ -4196,6 +4286,12 @@ class TestAutoTileMatmulL0MatScratch:
     consumer, instead of the direct-GM store path. Split-K uses a constant-offset
     grid; full-K uses pipelined loop-variable offsets."""
 
+    @pytest.fixture(autouse=True)
+    def _legacy_planner_policy(self):
+        """Pin unparameterized chooser assertions to their original policy."""
+        with _planner_context(passes.MemoryPlanner.PYPTO):
+            yield
+
     def test_matmul_bias_producer_uses_mat_scratch(self):
         """An oversized biased producer may stay on-chip for one later matmul."""
         _backend.reset_for_testing()
@@ -4481,7 +4577,7 @@ class TestAutoTileMatmulL0MatScratch:
                 return out
 
         lowered = _lower_to_tile_ops(Before)
-        with passes.PassContext([ir.make_roundtrip_instrument()]):
+        with passes.PassContext([ir.make_roundtrip_instrument()], memory_planner=passes.MemoryPlanner.PYPTO):
             After = passes.auto_tile_matmul_l0()(lowered)
 
         printed = ir.python_print(After)

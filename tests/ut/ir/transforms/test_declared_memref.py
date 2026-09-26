@@ -87,6 +87,22 @@ def _alloc_lines(program: ir.Program) -> list[str]:
     return [line.strip() for line in program.as_python().splitlines() if ".alloc(pl.Mem." in line]
 
 
+def _planner_context(planner):
+    """Preserve the verification fixture while selecting a test's planner policy."""
+    current = passes.PassContext.current()
+    if current is None:
+        return passes.PassContext([], memory_planner=planner)
+    return passes.PassContext(
+        current.get_instruments(),
+        current.get_verification_level(),
+        current.get_diagnostic_phase(),
+        current.get_disabled_diagnostics(),
+        planner,
+        current.get_enable_pypto_l0c_double_buffer(),
+        current.get_runtime(),
+    )
+
+
 def _run_memory_pipeline(program: ir.Program) -> ir.Program:
     """init_mem_ref -> materialize_semantic_aliases -> memory_reuse, as in the real pipeline."""
     return passes.memory_reuse()(passes.materialize_semantic_aliases()(passes.init_mem_ref()(program)))
@@ -607,18 +623,35 @@ class TestSlots:
             "PYPTO": passes.allocate_memory_addr()(_run_memory_pipeline(Before)),
             "DSA_RP": _run_dsa_rp_pipeline(Before),
         }
+        # Two slots of one 64x64 FP32 tile. The declaration sorts first, so it
+        # owns the bottom of the space and every other allocation must start
+        # above it; a reservation sized from the largest member would cover
+        # only slot 0 and let the next allocation land on top of slot 1.
+        declared_extent = 2 * 64 * 64 * 4
         for planner, after in placements.items():
             ranges = _tile_byte_ranges(after)
             assert len(ranges) >= 4, f"{planner}: expected addressed tiles, got {ranges}"
-            # Slot 1 must sit inside its own allocation's reservation, so nothing
-            # on a different base may overlap it.
+            # Ordinary tiles may share an address with each other: an operation
+            # registered as in-place-safe can alias its input and result
+            # exactly, and DSA-RP takes that when nothing in the model forbids
+            # it. Only landing inside the declaration is a defect.
+            for name, base, start, end in ranges:
+                if base == "aaa":
+                    continue
+                assert start >= declared_extent, (
+                    f"{planner}: {name} [{start}, {end}) on '{base}' lands inside the "
+                    f"declaration's two-slot reservation [0, {declared_extent})"
+                )
+            # Two ordinary tiles may share an address, but only exactly: an
+            # operation registered as in-place-safe can alias its input and its
+            # result, while a staggered overlap would corrupt one of them.
             for name_a, base_a, start_a, end_a in ranges:
                 for name_b, base_b, start_b, end_b in ranges:
-                    if base_a >= base_b:
+                    if base_a >= base_b or not (start_a < end_b and start_b < end_a):
                         continue
-                    assert not (start_a < end_b and start_b < end_a), (
-                        f"{planner}: {name_a} [{start_a}, {end_a}) on '{base_a}' overlaps "
-                        f"{name_b} [{start_b}, {end_b}) on '{base_b}'"
+                    assert (start_a, end_a) == (start_b, end_b), (
+                        f"{planner}: {name_a} [{start_a}, {end_a}) on '{base_a}' partially "
+                        f"overlaps {name_b} [{start_b}, {end_b}) on '{base_b}'"
                     )
 
     def test_slots_round_trip(self):
@@ -1434,8 +1467,9 @@ class Collide:
                     y = pl.yield_(nxt)
                 return y
 
-        with pytest.raises(ValueError, match="live at the same time"):
-            _run_full_pipeline(Before, "MemoryReuse")
+        with _planner_context(passes.MemoryPlanner.PYPTO):
+            with pytest.raises(ValueError, match="live at the same time"):
+                _run_full_pipeline(Before, "MemoryReuse")
 
     def test_rejects_overlapping_lifetimes(self, ascend_backend):
         """Two co-live tiles on one allocation would corrupt data, not reuse it."""

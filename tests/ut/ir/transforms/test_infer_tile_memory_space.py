@@ -28,6 +28,22 @@ _OP_TILE_LOAD = ir.get_op("tile.load").name
 _OP_TILE_MATMUL = ir.get_op("tile.matmul").name
 
 
+def _planner_context(planner):
+    """Preserve the verification fixture while selecting a test's planner policy."""
+    current = passes.PassContext.current()
+    if current is None:
+        return passes.PassContext([], memory_planner=planner)
+    return passes.PassContext(
+        current.get_instruments(),
+        current.get_verification_level(),
+        current.get_diagnostic_phase(),
+        current.get_disabled_diagnostics(),
+        planner,
+        current.get_enable_pypto_l0c_double_buffer(),
+        current.get_runtime(),
+    )
+
+
 @pytest.fixture(autouse=True)
 def _reset_backend():
     """Ensure no backend is configured so TileView inference is deterministic.
@@ -3345,7 +3361,8 @@ class MarkerOnlyScalarCall:
                 result = self.kernel(fresh_lhs, rhs, out)
                 return result
 
-        printed = ir.python_print(self._run_tensor_infer(Before))
+        with _planner_context(passes.MemoryPlanner.PYPTO):
+            printed = ir.python_print(self._run_tensor_infer(Before))
         loop = self._line_index(printed, "for n")
         lhs_loads = self._line_indices(printed, "lhs__ssa_v0_mat", "tile.load")
         lhs_extracts = self._line_indices(printed, "c_n__tile_l0_a", "tile.extract")

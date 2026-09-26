@@ -116,7 +116,8 @@ such a variable is not in scope.
 
 | Planner | Slot lowering | Two slots co-live in one iteration |
 | ------- | ------------- | ---------------------------------- |
-| `PYPTO` (default) | Baked addresses (`alloc_tile`) | Supported |
+| `PYPTO` | Baked addresses (`alloc_tile`) | Supported |
+| `DSA_RP` (default) | Capacity-constrained baked addresses (`alloc_tile`) | Supported |
 | `PTOAS` | One `alloc_multi_tile` region + a `multi_tile_get` per use | **Rejected at codegen** |
 
 The PTOAS refusal is deliberate and worth understanding before you design around it: ptoas

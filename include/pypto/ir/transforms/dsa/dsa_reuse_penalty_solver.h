@@ -39,7 +39,10 @@ namespace dsa {
  * while hard-range feasibility and soft-overlap scoring are indexed. The
  * input hard/soft relation graph can itself contain O(n^2) edges. This is a
  * storage-allocation algorithm over tens to low hundreds of buffers, not a
- * nested traversal over PyPTO IR.
+ * nested traversal over PyPTO IR. If every constructive order fails, a
+ * feasibility-only exact fallback enumerates aligned offsets under a fixed
+ * node budget. The budget keeps the exceptional search bounded; exhaustion is
+ * reported separately from proven infeasibility.
  */
 
 using BufferId = uint32_t;
@@ -78,6 +81,18 @@ struct Separation {
   BufferId second = 0;
 };
 
+/**
+ * @brief Allow two buffers to use the same base address or disjoint ranges.
+ *
+ * This represents an operation-supported in-place choice. Same-base reuse can
+ * have unequal extents, as for a safe narrowing cast. Staggered overlap is
+ * forbidden because it can overwrite an unread part of an operand.
+ */
+struct SameBaseOrDisjoint {
+  BufferId first = 0;
+  BufferId second = 0;
+};
+
 struct ReusePenalty {
   BufferId first = 0;
   BufferId second = 0;
@@ -88,6 +103,7 @@ struct DsaProblem {
   std::vector<Pool> pools;
   std::vector<Buffer> buffers;
   std::vector<Separation> separations;
+  std::vector<SameBaseOrDisjoint> same_base_or_disjoint;
   std::vector<ReusePenalty> reuse_penalties;
 };
 
@@ -109,9 +125,11 @@ struct ObjectiveValue {
 
 enum class SolveStatus {
   kFeasible,
-  // The bounded constructive search found no capacity-fitting placement. This
-  // is not a mathematical infeasibility proof.
+  // Complete exact fallback proved that no capacity-fitting placement exists.
   kNoFit,
+  // The constructive search failed and the exact fallback reached its fixed
+  // work budget before proving feasibility or infeasibility.
+  kSearchExhausted,
   kInvalidProblem,
 };
 
@@ -121,6 +139,9 @@ struct SolverStatistics {
   size_t selected_order = 0;
   bool first_fit_seed_feasible = false;
   bool selected_first_fit_seed = false;
+  uint64_t exact_candidates_evaluated = 0;
+  bool exact_fallback_used = false;
+  bool exact_search_complete = false;
 };
 
 struct DsaResult {
@@ -134,6 +155,7 @@ struct DsaResult {
 struct CanonicalGreedyOptions {
   uint64_t seed = 0;
   size_t random_restarts = 4;
+  uint64_t exact_search_candidate_budget = 100000;
 };
 
 /**
@@ -148,6 +170,9 @@ struct CanonicalGreedyOptions {
  * A capacity-fitting penalty-blind first-fit result is retained as an
  * incumbent. Consequently, canonical greedy never discards a placement known
  * to fit merely because one of its locally greedy orders gets stuck.
+ * If no incumbent exists, a deterministic, feasibility-only backtracking pass
+ * explores every aligned address up to a fixed candidate budget. It either
+ * returns a witness, proves no fit, or reports search exhaustion explicitly.
  */
 class CanonicalGreedySolver {
  public:
