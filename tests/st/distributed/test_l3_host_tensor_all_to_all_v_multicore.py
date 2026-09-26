@@ -53,6 +53,10 @@ rail's submit path it records the default ``1`` regardless of the launch spec, s
 the evidence above comes from the runtime's submit-time check instead.
 
 ST coverage: P=2 and P=4 (skips when fewer devices are available).
+``p2-l6-b6-ragged-k3`` additionally pins the RFC #2521 32-byte interior boundary
+rule on device: with K=3 its one-row split would start a lane at byte 88 under an
+element-count split, i.e. mid-cache-line - only the aligned `SplitAligned` split
+keeps every non-empty lane's TPUT 32-byte aligned.
 """
 
 import os
@@ -498,6 +502,7 @@ class TestL3HostTensorAllToAllVMulticore:
         [
             pytest.param(2, 2, 2, id="p2-l2-b2-equals-p"),
             pytest.param(2, 5, 4, id="p2-l5-b4-greater-than-p"),
+            pytest.param(2, 6, 6, id="p2-l6-b6-ragged-k3"),
             pytest.param(4, 2, 2, id="p4-l2-b2-less-than-p"),
             pytest.param(4, 10, 8, id="p4-l10-b8-greater-than-p"),
             pytest.param(2, 2, 3, id="p2-l2-b2-stride-wider-than-b"),
