@@ -798,6 +798,17 @@ def test_invalidation_is_independent_of_review_cancellation(workflow):
     assert len(set(groups)) == 3
 
 
+@pytest.mark.parametrize("job_name", ["invalidate", "cleanup-sessions", "prepare", "review", "publish"])
+def test_host_helpers_select_python_before_checkout(workflow, job_name):
+    """Host helpers must not inherit an old runner Python or PR-controlled setup inputs."""
+    steps = workflow["jobs"][job_name]["steps"]
+    setup = steps[0]
+    assert re.fullmatch(r"actions/setup-python@[0-9a-f]{40}", setup["uses"])
+    assert setup["with"] == {"python-version": "3.10"}
+    assert "if" not in setup and "continue-on-error" not in setup
+    assert any("python " in step.get("run", "") for step in steps[1:])
+
+
 def test_review_workflow_has_no_merge_permission(workflow):
     """Review publishing can approve but cannot write repository contents."""
     jobs = workflow["jobs"]

@@ -102,6 +102,11 @@ head 已更新时，会跳过审查和产物发布。GitHub 状态仍可能在�
 - 监听 relay 端口 `17895` 且健康的 `pypto-codex-proxy-relay` 容器
 - 仅监听 loopback 的 mixed proxy `127.0.0.1:7895`
 
+所有执行 Python 辅助脚本的任务都会在检出前，通过固定版本的 `actions/setup-python`
+选择 Python 3.10。这包括宿主机上的会话检查、清理和结果提取；审查容器内的 Python
+版本不会控制这些辅助脚本。自托管运行器必须支持 `setup-python`，并提供可写的工具缓存
+（或缓存中预先安装的 Python 3.10）。
+
 Codex 在只读容器中以 UID/GID `1002:1003` 运行；仓库以只读方式挂载，同时移除
 能力（capability）、实施资源限制并使用内部 Docker 网络。拥有 PR 写权限的 GitHub
 令牌（token）仅提供给独立的发布任务（publishing job）。如果审查输出包含 Codex

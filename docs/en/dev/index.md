@@ -124,6 +124,13 @@ resources, none of which come from the pull request:
 - a healthy `pypto-codex-proxy-relay` container on relay port `17895`
 - a loopback-only mixed proxy on `127.0.0.1:7895`
 
+All jobs that execute Python helpers select Python 3.10 with the pinned
+`actions/setup-python` action before checkout. This includes host-side session
+checks, cleanup, and result extraction; the Python version inside the review
+container does not control those helpers. Self-hosted runners must support
+`setup-python` and provide a writable tool cache (or a preinstalled cached
+Python 3.10).
+
 Codex runs as UID/GID `1002:1003` in a read-only container with a read-only
 repository mount, dropped capabilities, resource limits, and an internal Docker
 network. The GitHub token with pull-request write access is available only to
