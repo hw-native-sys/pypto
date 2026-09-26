@@ -460,8 +460,6 @@ def test_workflow_limits_token_to_trusted_step():
     discussion = next(step for step in prepare["steps"] if step["name"] == "Upload discussion snapshot")
     assert identity["with"]["retention-days"] == 30
     assert discussion["with"]["retention-days"] == 1
-    ci = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
-    assert "test_rerun_codex_review.py" in json.dumps(ci["jobs"]["ci-helper-tests"])
 
 
 if __name__ == "__main__":

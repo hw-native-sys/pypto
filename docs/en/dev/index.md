@@ -160,9 +160,10 @@ The standalone CI helpers in `.github/scripts/` support Python 3.8 and newer.
 Their type annotations are deferred so importing them does not require Python
 3.9 built-in generics or Python 3.10 union operators. This compatibility is
 limited to these host-side scripts; PyPTO itself still requires Python 3.10+.
-The CI helper tests run on Python 3.8 and 3.10 without building PyPTO. The review
-workflow uses the host interpreter and does not install Python or depend on the
-Python version inside the review container.
+The helper tests run as part of the regular Python 3.10 unit-test job. CI has no
+dedicated Python 3.8 helper-test check. The review workflow uses the host
+interpreter and does not install Python or depend on the Python version inside
+the review container.
 
 Codex runs as UID/GID `1002:1003` in a read-only container with a read-only
 repository mount, dropped capabilities, resource limits, and an internal Docker
