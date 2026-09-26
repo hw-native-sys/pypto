@@ -10,6 +10,7 @@
 
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -57,6 +58,13 @@ def comment_event():
         ("@PYPTO-CODEX review", True),
         ("Please @pypto-codex review", False),
         ("> @pypto-codex review", False),
+        ("    @pypto-codex review", False),
+        ("\t@pypto-codex review", False),
+        ("  \t@pypto-codex review", False),
+        ("Example:\n\n    @pypto-codex review\n", False),
+        ("    Example\n\n@pypto-codex review", True),
+        ("   @pypto-codex review", True),
+        ("```\n    ```\n@pypto-codex review\n```", False),
         ("```\n@pypto-codex review\n```", False),
         ("~~~text\n@pypto-codex review\n~~~", False),
         ("```\nexample\n```\n@pypto-codex review", True),
@@ -92,6 +100,38 @@ def test_comment_authorization(collector, pr, comment_event, monkeypatch, author
     monkeypatch.setattr(collector, "github_api", api)
     assert (collector.review_target("issue_comment", comment_event, "owner/repo") is not None) is expected
     assert len(calls) == (1 if author == "author" else 2)
+
+
+@pytest.mark.parametrize(
+    "stderr,denied",
+    [
+        ("gh: Not Found (HTTP 404)\n", True),
+        ("gh: Bad credentials (HTTP 401)\n", False),
+        ("gh: Resource not accessible (HTTP 403)\n", False),
+        ("gh: API rate limit exceeded (HTTP 429)\n", False),
+        ("gh: Internal Server Error (HTTP 500)\n", False),
+        ("Get https://api.github.com: unexpected EOF", False),
+        ("404", False),
+        (None, False),
+    ],
+)
+def test_permission_lookup_errors(collector, pr, comment_event, monkeypatch, stderr, denied):
+    """Only an explicit permission endpoint 404 skips an unauthorized command."""
+    comment_event["comment"]["user"]["login"] = "outsider"
+    error = subprocess.CalledProcessError(1, ["gh", "api"], stderr=stderr)
+
+    def api(endpoint):
+        if endpoint.endswith("/permission"):
+            raise error
+        return pr
+
+    monkeypatch.setattr(collector, "github_api", api)
+    if denied:
+        assert collector.review_target("issue_comment", comment_event, "owner/repo") is None
+    else:
+        with pytest.raises(subprocess.CalledProcessError) as caught:
+            collector.review_target("issue_comment", comment_event, "owner/repo")
+        assert caught.value is error
 
 
 @pytest.mark.parametrize("kind", ["bot", "ordinary", "edited", "issue", "inline"])

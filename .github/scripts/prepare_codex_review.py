@@ -11,6 +11,7 @@
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -21,9 +22,12 @@ MAX_CONTEXT_BYTES = 8 * 1024 * 1024
 
 
 def requests_review(body: str) -> bool:
-    """Accept an exact standalone command outside Markdown fences and quotes."""
+    """Accept an exact standalone command outside Markdown code blocks and quotes."""
     fence = None
     for line in body.splitlines():
+        # Tabs expand to four-column stops in Markdown indented code blocks.
+        if line.expandtabs(4).startswith("    "):
+            continue
         stripped = line.strip()
         match = re.match(r"^(`{3,}|~{3,})", stripped)
         if match:
@@ -72,7 +76,14 @@ def review_target(event_name: str, event: dict, repo: str) -> dict | None:
         if author != pr["user"]["login"]:
             if not re.fullmatch(r"[A-Za-z0-9-]+", author):
                 raise ValueError("Invalid GitHub comment author")
-            permission = github_api(f"repos/{repo}/collaborators/{author}/permission")["permission"]
+            try:
+                permission = github_api(f"repos/{repo}/collaborators/{author}/permission")["permission"]
+            except subprocess.CalledProcessError as error:
+                # gh emits the actual HTTP status in its diagnostic; transport
+                # errors and all other statuses must remain failures.
+                if re.search(r"^gh: .* \(HTTP 404\)$", error.stderr or "", re.MULTILINE):
+                    return None
+                raise
             if permission not in {"write", "maintain", "admin"}:
                 return None
     if any(not re.fullmatch(r"[0-9a-f]{40}", pr[side]["sha"]) for side in ("head", "base")):
