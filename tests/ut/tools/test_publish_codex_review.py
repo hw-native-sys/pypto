@@ -835,6 +835,30 @@ def test_repeat_finding_links_existing_thread(
     assert bool(posted.get("comments")) != links
 
 
+@pytest.mark.parametrize("side", ["LEFT", "RIGHT"])
+def test_repeat_finding_keeps_current_location(publisher, review_file, api, located_review, side):
+    """An old thread link must not replace the current finding's reported coordinates."""
+    located_review({"path": "src/example.cpp", "line": 21, "side": side}, existing_comment_id=123)
+    api["comments"] = [
+        {
+            "id": 123,
+            "user": {"login": "github-actions[bot]"},
+            "body": publisher.MARKER + "previous finding",
+            "path": "src/example.cpp",
+            "line": None,
+            "original_line": 10,
+            "side": "RIGHT",
+            "original_commit_id": "c" * 40,
+        }
+    ]
+    publisher.publish(review_file, "owner/repo", "12", HEAD, BASE, "main", True)
+    posted = api["posted"][0]
+    assert posted["event"] == "COMMENT"
+    assert f"Reported location: src/example.cpp:21 ({side})." in posted["body"]
+    assert "#discussion_r123" in posted["body"]
+    assert not posted.get("comments")
+
+
 @pytest.mark.parametrize("reference", [True, 0, -1, "123"])
 def test_invalid_thread_reference_rejected(publisher, review_file, api, located_review, reference):
     """Model-supplied references are data, never an unchecked URL or command."""

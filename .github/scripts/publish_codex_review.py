@@ -220,7 +220,8 @@ def render_findings(
         reference = finding.get("existing_comment_id")
         if reference in existing:
             url = f"https://github.com/{repo}/pull/{endpoint.rsplit('/', 1)[-1]}#discussion_r{reference}"
-            summary += f"\n\n{text}\n\n[Existing review thread]({url}); no duplicate inline comment posted."
+            summary += f"\n\n{summary_finding(finding)}"
+            summary += f"\n\n[Existing review thread]({url}); no duplicate inline comment posted."
             continue
         location = finding_location(finding)
         if location:
