@@ -1297,6 +1297,19 @@ def _call_operand(call: ast.Call, index: int | None, name: str) -> ast.expr | No
     return next((kw.value for kw in call.keywords if kw.arg == name), None)
 
 
+def _tensor_or_input_operand(call: ast.Call) -> ast.expr | None:
+    """The first positional operand of ``pl.slice``/``pl.reshape`` or their
+    ``pl.tensor.*`` siblings — two real spellings, two real parameter names
+    for the same slot (``tensor_ops.py``'s ``tensor`` vs ``unified_ops.py``'s
+    ``input``). A positional call is unaffected either way; only an
+    explicit-keyword one needs both names checked.
+    """
+    operand = _call_operand(call, 0, "tensor")
+    if operand is None:
+        operand = _call_operand(call, 0, "input")
+    return operand
+
+
 def _shape_attr_source(node: ast.expr) -> str | None:
     """The tensor name ``node`` reads the shape of (``src.shape`` → ``"src"``), or None."""
     if isinstance(node, ast.Attribute) and node.attr == "shape" and isinstance(node.value, ast.Name):
@@ -1333,6 +1346,74 @@ def _extract_dim_alias(value: ast.expr | None) -> tuple[str, int] | None:
     if isinstance(src_arg, ast.Name) and isinstance(dim_arg, ast.Constant) and isinstance(dim_arg.value, int):
         return src_arg.id, dim_arg.value
     return None
+
+
+def _flatten_dotted_call(fn: ast.expr) -> tuple[str, ...] | None:
+    """Full dotted path of a plain attribute/name chain, e.g. ``pld.tensor.all_to_all_v``
+    -> ``("pld", "tensor", "all_to_all_v")``, or None if ``fn`` isn't a pure chain of
+    ``Attribute`` nodes rooted at a ``Name`` (so this walker cannot reason about it at all —
+    for example the callee of a higher-order call, or an attribute on a subscript)."""
+    segments: list[str] = []
+    node = fn
+    while isinstance(node, ast.Attribute):
+        segments.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    segments.append(node.id)
+    segments.reverse()
+    return tuple(segments)
+
+
+# Qualified (3+-segment) call dispatch: full dotted path -> a handler that
+# computes the result's TensorMeta, or None for an op documented as
+# returning its own rebind target's type unchanged (#2638).
+_QualifiedCallHandlers = dict[tuple[str, ...], Callable[[ast.Call, str | None], TensorMeta | None] | None]
+
+
+def _qualified_call_meta(
+    fn: ast.expr,
+    value: ast.Call,
+    named_target: str | None,
+    qualified_call_handlers: _QualifiedCallHandlers,
+) -> tuple[TensorMeta | None, bool]:
+    """Metadata effect of a qualified call: ``(meta, preserve_existing)``.
+
+    Unlisted paths return ``(None, False)`` — the caller then falls through to
+    ``local.pop()``, exactly like any other unrecognized call.
+    """
+    path = _flatten_dotted_call(fn)
+    if path is None or path not in qualified_call_handlers:
+        return None, False
+    handler = qualified_call_handlers[path]
+    if handler is not None:
+        return handler(value, named_target), False
+    return None, True
+
+
+def _same_operand_meta(
+    local: dict[str, TensorMeta], operand_index: int, operand_name: str
+) -> Callable[[ast.Call, str | None], TensorMeta | None]:
+    """Handler factory for a collective documented as returning a specific
+    argument's own type unchanged (e.g. ``broadcast``'s ``target``,
+    ``barrier``'s ``signal``). Reads that argument's tracked metadata
+    directly rather than assuming the call's LHS name is the same name as
+    the operand: ``old = pld.tensor.broadcast(window, signal, root=0)`` must
+    get ``window``'s metadata, not whatever ``old`` already held — a blind
+    ``preserve_existing`` would silently serve stale metadata when the two
+    names differ (#2638 review). When the two names *are* the same (the
+    documented self-rebind idiom), this reads ``local[operand.id]`` before
+    the assignment takes effect, which is exactly what preserving would
+    have returned anyway — so the self-rebind case is unaffected.
+    """
+
+    def handler(call: ast.Call, target: str | None = None) -> TensorMeta | None:
+        operand = _call_operand(call, operand_index, operand_name)
+        if not isinstance(operand, ast.Name) or operand.id not in local:
+            return None
+        return local[operand.id]
+
+    return handler
 
 
 def _alias_dim(alias: tuple[str, int] | None, local: Mapping[str, TensorMeta]) -> ShapeDim | None:
@@ -1392,6 +1473,7 @@ def _update_local_tensor_meta(
     deps: _DepScan,
     resolve_int: Callable[[ast.expr], int | None],
     pl_attr_handlers: dict[str, Callable[[ast.Call, str | None], TensorMeta | None]],
+    qualified_call_handlers: _QualifiedCallHandlers,
 ) -> None:
     """Apply one assignment's metadata effects to the source-ordered state."""
     parts = _assignment_parts(stmt)
@@ -1425,6 +1507,11 @@ def _update_local_tensor_meta(
                 # result metadata this extractor does not model (for example,
                 # same-shaped pl.assemble rebindings).
                 preserve_existing = True
+        elif isinstance(fn, ast.Attribute) and has_named_target:
+            # A qualified (3+-segment) spelling, e.g. pld.tensor.all_to_all_v(...)
+            # or pl.tensor.slice(...) — invisible to the one-level branch above
+            # since fn.value is itself an Attribute, not a Name (#2638).
+            meta, preserve_existing = _qualified_call_meta(fn, value, named_target, qualified_call_handlers)
         elif isinstance(fn, ast.Name) and fn.id in deps.io:
             # The in-place ``Out``-param convention first; a callee that
             # allocates its own results falls through to its return statement.
@@ -1518,13 +1605,16 @@ def _walk_local_tensor_meta_stmts(
     deps: _DepScan,
     resolve_int: Callable[[ast.expr], int | None],
     pl_attr_handlers: dict[str, Callable[[ast.Call, str | None], TensorMeta | None]],
+    qualified_call_handlers: _QualifiedCallHandlers,
     stop_at_call: ast.Call | None = None,
 ) -> bool:
     """Walk supported DSL scopes in source order until the selected call."""
     for stmt in stmts:
         if _stmt_calls_dep(stmt, stop_at_dep, stop_at_call):
             return True
-        _update_local_tensor_meta(stmt, local, dim_values, deps, resolve_int, pl_attr_handlers)
+        _update_local_tensor_meta(
+            stmt, local, dim_values, deps, resolve_int, pl_attr_handlers, qualified_call_handlers
+        )
         for attr in ("body", "orelse", "finalbody"):
             nested = getattr(stmt, attr, None)
             if isinstance(nested, list) and _walk_local_tensor_meta_stmts(
@@ -1535,6 +1625,7 @@ def _walk_local_tensor_meta_stmts(
                 deps,
                 resolve_int,
                 pl_attr_handlers,
+                qualified_call_handlers,
                 stop_at_call,
             ):
                 return True
@@ -1601,6 +1692,33 @@ class _StaticScope:
         if not isinstance(value, (list, tuple)):
             return None
         return tuple(value) if all(isinstance(d, int) and not isinstance(d, bool) for d in value) else None
+
+
+def _drop_dims_is_noop(drop_dims_node: ast.expr | None, scope: _StaticScope) -> bool:
+    """True when ``drop_dims`` is a no-op: omitted, ``None``, an empty
+    list/tuple literal, or a ``Name`` bound to one of those. ``scope.fold()``
+    resolves a ``pl.constexpr`` parameter binding first (its own, narrower
+    mechanism — a name outside ``constexpr`` passes through unchanged); what
+    remains is then resolved as a module-level or closure constant
+    (e.g. ``EMPTY = []`` or ``NONE_DIMS = None``) if it's still a ``Name`` —
+    read directly off ``scope.namespace``/``scope.shadowed`` rather than
+    through ``scope.value()``, whose bare ``None`` return is ambiguous
+    between "genuinely bound to None" and "a local parameter, unresolvable
+    here" (e.g. ``def body(src, drop_dims): ... drop_dims=drop_dims``) — the
+    latter must never be assumed empty, or a real non-empty runtime value
+    would advertise the wrong, pre-drop rank.
+    """
+    node = scope.fold(drop_dims_node)
+    if isinstance(node, ast.Name):
+        if node.id in scope.shadowed or node.id not in scope.namespace:
+            return False
+        resolved = scope.namespace[node.id]
+        return resolved is None or (isinstance(resolved, (list, tuple)) and not resolved)
+    return (
+        node is None
+        or (isinstance(node, ast.Constant) and node.value is None)
+        or (isinstance(node, (ast.List, ast.Tuple)) and len(node.elts) == 0)
+    )
 
 
 def _extract_local_tensor_metas(
@@ -1849,8 +1967,9 @@ def _extract_local_tensor_metas(
         return TensorMeta(shape=shape, dtype=dtype_val)
 
     def _reshape_meta(call: ast.Call, target: str | None = None) -> TensorMeta | None:
-        # pl.reshape(input, shape) — dtype inherited from source tensor.
-        src = _call_operand(call, 0, "input")
+        # pl.reshape(input, shape) / pl.tensor.reshape(tensor, shape) — dtype
+        # inherited from source tensor.
+        src = _tensor_or_input_operand(call)
         if not isinstance(src, ast.Name) or src.id not in local:
             return None
         src_meta = local[src.id]
@@ -1873,8 +1992,18 @@ def _extract_local_tensor_metas(
         return TensorMeta(shape=shape, dtype=src_meta.dtype)
 
     def _slice_meta(call: ast.Call, target: str | None = None) -> TensorMeta | None:
-        # pl.slice(input, shape, offset, ...) — each by position or keyword.
-        src = _call_operand(call, 0, "input")
+        # pl.slice(input, shape, offset, ...) / pl.tensor.slice(tensor, shape,
+        # offset, ...) — shape/offset/drop_dims/etc. share the same names in
+        # both real spellings; only the first param's name differs.
+        #
+        # drop_dims rank-reduces the result; this handler doesn't model that,
+        # so decline rather than advertise the pre-drop shape at the wrong
+        # rank — UNLESS drop_dims is a no-op (see _drop_dims_is_noop).
+        # Pre-existing gap for the 2-segment spelling too, not introduced by
+        # qualified dispatch — just newly reachable through it.
+        if not _drop_dims_is_noop(_call_operand(call, 4, "drop_dims"), scope):
+            return None
+        src = _tensor_or_input_operand(call)
         if not isinstance(src, ast.Name) or src.id not in local:
             return None
         src_meta = local[src.id]
@@ -1914,6 +2043,36 @@ def _extract_local_tensor_metas(
         "reshape": _reshape_meta,
     }
 
+    # 3-segment spellings this walker also understands, keyed by the FULL
+    # dotted path so a match can never collide across namespaces the way
+    # attr-name-only dispatch could. The pl.tensor.* / pld.tensor.window
+    # entries are DERIVED from _pl_attr_handlers above rather than
+    # hand-duplicated, so a new entry added there is automatically covered
+    # under its 3-segment spelling too — the two tables can't drift apart
+    # for that half. The managed collectives have no 2-segment sugar to
+    # derive from (3-segment-only), so they're listed explicitly, each with
+    # _same_operand_meta reading the real operand its own docstring names as
+    # the rebind target — not a bare `preserve_existing`, which would trust
+    # the LHS name instead of the operand when the two differ (review
+    # finding: `old = pld.tensor.broadcast(window, ...)` must get `window`'s
+    # metadata, not `old`'s stale one). None stays available in the type for
+    # a future op with no derivable operand at all; nothing currently uses
+    # it. Anything NOT listed here safely falls through to local.pop(),
+    # exactly like today's behavior for any other unrecognized call: a new
+    # op starts safe by default and must be added here deliberately, never
+    # silently assumed same-shape (#2638).
+    _qualified_call_handlers: _QualifiedCallHandlers = {
+        **{("pl", "tensor", attr): handler for attr, handler in _pl_attr_handlers.items()},
+        ("pld", "tensor", "window"): _pl_attr_handlers["window"],
+        ("pld", "tensor", "all_to_all_v"): _same_operand_meta(local, 1, "target"),
+        ("pld", "tensor", "all_to_all"): _same_operand_meta(local, 1, "target"),
+        ("pld", "tensor", "allreduce"): _same_operand_meta(local, 0, "target"),
+        ("pld", "tensor", "reduce_scatter"): _same_operand_meta(local, 0, "target"),
+        ("pld", "tensor", "broadcast"): _same_operand_meta(local, 0, "target"),
+        ("pld", "tensor", "allgather"): _same_operand_meta(local, 1, "target"),
+        ("pld", "tensor", "barrier"): _same_operand_meta(local, 0, "signal"),
+    }
+
     _walk_local_tensor_meta_stmts(
         func_def.body,
         stop_at_dep,
@@ -1922,6 +2081,7 @@ def _extract_local_tensor_metas(
         deps,
         _resolve_int,
         _pl_attr_handlers,
+        _qualified_call_handlers,
         stop_at_call,
     )
     return local
