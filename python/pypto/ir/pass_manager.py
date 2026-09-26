@@ -240,13 +240,16 @@ class PassManager:
             passes.fold_no_op_reshape,
             passes.fuse_create_assemble_to_slice,
             # Rewrite a managed collective written in a CHIP/L2 orchestration
-            # body into one local builtin AIV task. It runs here, immediately
+            # body into one local builtin AIV task. It runs here,
             # before DeriveCallDirections, because the emitted call must get its
             # argument directions and TensorMap task edges derived like any
             # other kernel call — that is what orders compute -> collective ->
             # consume inside a single per-rank pipeline. HOST orchestrators are
             # untouched; they keep the per-device fan-out rail below.
             passes.lower_l2_tensor_collectives,
+            # Guard dynamic launches before deriving directions and dependencies
+            # so both branches participate in storage/task lineage analysis.
+            passes.legalize_spmd_launches,
             passes.derive_call_directions,
             lambda: passes.auto_derive_task_dependencies(analyze_auto_scopes=analyze_auto_scopes_for_deps),
             passes.expand_manual_phase_fence,

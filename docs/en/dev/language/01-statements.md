@@ -116,7 +116,7 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | `pl.spmd(N, optimizations=[pl.split(MODE)])` | `Spmd(InCore(split=MODE))` | Split hint applies to the inner InCore (both forms) |
 | `pl.spmd(N, optimizations=[pl.cross_core_slot(slot_num=N)])` | `Spmd(InCore(slot_num=N))` | Slot count applies to the inner InCore (both forms); combinable with `pl.split(MODE)` |
 | `pl.scope(mode=pl.ScopeMode.MANUAL)` / `pl.manual_scope()` | `Runtime(manual=true)` | Orchestrator MANUAL scope — user manages task ordering. Allowed in either `auto_scope` mode (it is a dependency-semantics choice). See [Manual dependency primitives](02-manual_dependencies.md#manual-dependency-primitives) |
-| `pl.scope()` | `Runtime(manual=false)` | Orchestrator AUTO scope (`SIMPLER_SCOPE()`). Hand-placing one requires `@pl.function(auto_scope=False)` (in the default `auto_scope=True` the compiler owns AUTO placement). See [MaterializeRuntimeScopes](../passes/49-materialize_runtime_scopes.md) |
+| `pl.scope()` | `Runtime(manual=false)` | Orchestrator AUTO scope (`SIMPLER_SCOPE()`). Hand-placing one requires `@pl.function(auto_scope=False)` (in the default `auto_scope=True` the compiler owns AUTO placement). See [MaterializeRuntimeScopes](../passes/50-materialize_runtime_scopes.md) |
 
 See [Scopes and Placement](../../user/language/04-scopes.md) for examples.
 
@@ -132,6 +132,13 @@ See [Scopes and Placement](../../user/language/04-scopes.md) for examples.
 - `out, tid = pl.spmd_submit(kernel, *args, core_num=N)` — **submit form**: dispatches the kernel across `N` blocks *and* captures the dispatch's producer `pl.Scalar[pl.TASK_ID]` (the `pl.submit` sibling for a pre-defined kernel). See [Manual dependency primitives](02-manual_dependencies.md#manual-dependency-primitives).
 
 All three `pl.spmd(...)` scope forms also accept `allow_early_resolve=True` (a boolean literal; same early-dispatch opt-in as `pl.submit` / `pl.at`). It forces the dispatch to lower to an `ir.Submit` even without `as tid` and lowers to `Arg::set_allow_early_resolve(true)`. Rejected on a `pl.cluster()`-nested `pl.spmd` (such a scope is unwrapped into the Group function and never produces a Submit, so the hint would be lost). They also accept `dumps=[t, ...]` — selective tensor dump on the grid dispatch, recorded on the Spmd scope itself rather than on an auto-synthesised carrier. It forces no `ir.Submit`, and it is legal on a cluster-nested `pl.spmd`, whose marks move onto the Group dispatch.
+
+Potentially non-positive dynamic SPMD counts are guarded automatically: a count
+`<= 0` skips the compute launch. Every Out/InOut Tensor must be supplied by the
+caller unless arithmetic analysis proves the count positive. Missing outputs
+are compile-time errors naming the tensor and parameter index. On the empty
+path, returned tensors keep their existing contents; no output is initialized.
+See [LegalizeSpmdLaunches](../passes/41-legalize_spmd_launches.md).
 
 Optional `optimizations=[...]`. The entries are orthogonal and may be combined
 in one list (e.g. `[pl.split(MODE), pl.cross_core_slot(slot_num=4)]`):

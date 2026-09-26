@@ -6,7 +6,7 @@
 `pld.tensor.allreduce`、`pld.tensor.barrier`、`pld.tensor.broadcast`、
 `pld.tensor.reduce_scatter`、`pld.tensor.allgather`、
 `pld.tensor.all_to_all` 和 `pld.tensor.all_to_all_v` 调用改写为编译器内部的
-builtin chip dispatch。它在 [`MaterializeCommDomainScopes`](45-materialize_comm_domain_scopes.md) 之后运行，
+builtin chip dispatch。它在 [`MaterializeCommDomainScopes`](46-materialize_comm_domain_scopes.md) 之后运行，
 因此 window 绑定的 data tensor 和用户显式传入或编译器合成的 signal tensor 已经带有
 `WindowBuffer` 反向引用，并属于推断出的通信域。
 
@@ -99,7 +99,7 @@ dispatch 可以完成 print -> parse 往返。它是仅供机器使用（machine
 形式 `pld.tensor.*`。
 
 注意：整程序的 `assert_structural_equal` 往返仍然被上一个 pass 阻断 ——
-[`MaterializeCommDomainScopes`](45-materialize_comm_domain_scopes.md) 会合成
+[`MaterializeCommDomainScopes`](46-materialize_comm_domain_scopes.md) 会合成
 `CommDomainScopeStmt`（打印为前导注释）以及 `DistributedTensorType` 上的
 `WindowBuffer` 反向引用（完全不打印），二者都没有可解析回来的 DSL 表面。
 
@@ -167,7 +167,7 @@ signal 可复用（对自清理的 host builtin 而言）：这些 kernel 会在
 `AtomicAdd(-2)`），因此连续调用不会留下残留的“已满足” cell。
 
 `all_to_all_v` 在 `host_orch` 的 `for`/`while` 循环中调用仍会被本 pass 之前
-紧邻运行的 [`MaterializeCommDomainScopes`](45-materialize_comm_domain_scopes.md)
+紧邻运行的 [`MaterializeCommDomainScopes`](46-materialize_comm_domain_scopes.md)
 提前拒绝——这是编译器的限制（动态重复调用需要循环携带的窗口生命周期管理），
 而不是信号本身的性质，也与 `LowerCompositeOps` 在 InCore 路径上强制的限制相同。
 在显式静态 device 子集上，`all_to_all_v` 的 signal 遵循通用容量约束——

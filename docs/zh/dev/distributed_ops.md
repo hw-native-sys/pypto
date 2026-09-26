@@ -524,7 +524,7 @@ chunk，Pass 会保留该元数据，并沿用单矩形路径只归约这个矩�
 
 host-orchestrator 用户代码可以省略 `signal`，包括在 `for` / `while`
 循环内；
-[`SynthesizeAllReduceSignals`](passes/44-synthesize_allreduce_signals.md) 阶段会为该 call 插入 private INT32 signal window，
+[`SynthesizeAllReduceSignals`](passes/45-synthesize_allreduce_signals.md) 阶段会为该 call 插入 private INT32 signal window，
 语义 shape 为 `[world_size, core_num]`（仅 mesh 模式 — `mode="ring"` 必须显式传入
 signal）。该阶段会先插入 standalone `world_size = pld.world_size()` binding，
 再用该变量构造 buffer size 和 window shape。自清理协议（参见
@@ -670,10 +670,10 @@ peer 算术；而*远程*操作数
 ## 流水线集成
 
 通信域与其槽位分配由
-[`MaterializeCommDomainScopes`](passes/45-materialize_comm_domain_scopes.md) pass 完成。该 pass 将每个
+[`MaterializeCommDomainScopes`](passes/46-materialize_comm_domain_scopes.md) pass 完成。该 pass 将每个
 host_orch 函数体包裹进嵌套的 `CommDomainScopeStmt` 节点（按推断出的通信域逐层嵌套），并产生运行时据以
 绑定物理缓冲的按窗口 `WindowBuffer` 记录。
-随后 [`LowerHostTensorCollectives`](passes/46-lower_host_tensor_collectives.md) 会在最终
+随后 [`LowerHostTensorCollectives`](passes/47-lower_host_tensor_collectives.md) 会在最终
 `Simplify` 之前把 host-level tensor collectives 降为内部 builtin chip dispatch。
 
 ## 测试

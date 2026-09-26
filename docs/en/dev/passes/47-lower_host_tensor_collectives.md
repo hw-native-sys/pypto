@@ -7,7 +7,7 @@
 `pld.tensor.reduce_scatter`, `pld.tensor.allgather`,
 `pld.tensor.all_to_all`, and `pld.tensor.all_to_all_v` into compiler-internal
 builtin chip dispatches. It runs
-after [`MaterializeCommDomainScopes`](45-materialize_comm_domain_scopes.md), so
+after [`MaterializeCommDomainScopes`](46-materialize_comm_domain_scopes.md), so
 each window-bound data tensor and explicit or synthesized signal tensor already has a
 `WindowBuffer` back-reference and belongs to an inferred communication domain.
 
@@ -107,7 +107,7 @@ surfacing as a compiler-bug diagnostic during codegen. Write the composite
 `pld.tensor.*` form instead.
 
 Note that a whole-program `assert_structural_equal` round-trip is still blocked
-one pass upstream: [`MaterializeCommDomainScopes`](45-materialize_comm_domain_scopes.md)
+one pass upstream: [`MaterializeCommDomainScopes`](46-materialize_comm_domain_scopes.md)
 synthesizes `CommDomainScopeStmt` (printed as a leading comment) and the
 `WindowBuffer` back-references on `DistributedTensorType` (not printed), and
 neither has a DSL surface to parse back.
@@ -195,7 +195,7 @@ consecutive call leaves no stale satisfied cell behind.
 
 `all_to_all_v` calls inside a `for`/`while` loop in `host_orch` are still
 rejected up front by
-[`MaterializeCommDomainScopes`](45-materialize_comm_domain_scopes.md), which
+[`MaterializeCommDomainScopes`](46-materialize_comm_domain_scopes.md), which
 runs immediately before this pass — a compiler limitation (dynamic
 re-invocation would need loop-carried window lifetime management), not a
 property of the signal, and the same restriction `LowerCompositeOps` enforces

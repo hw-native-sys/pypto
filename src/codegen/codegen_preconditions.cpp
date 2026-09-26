@@ -25,6 +25,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/spmd_launch_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -121,6 +122,7 @@ void VerifyOrchestrationCodegenPreconditions(const ProgramPtr& program, const Fu
                     IRProperty::ReturnParamsExplicit},
       program, "GenerateOrchestration preconditions");
   VerifyCodegenTargetFunctionMatchesProgram(program, func);
+  VerifySpmdLaunchGuards(program, func);
 }
 
 void VerifyDistributedCodegenPreconditions(const ProgramPtr& program) {

@@ -203,6 +203,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/materialize_comm_domain_scopes_pass.cpp
     src/ir/transforms/lower_host_tensor_collectives_pass.cpp
     src/ir/transforms/lower_l2_tensor_collectives_pass.cpp
+    src/ir/transforms/legalize_spmd_launches_pass.cpp
     src/ir/transforms/materialize_dist_tensor_ctx_pass.cpp
     src/ir/transforms/legalize_graph_boundary_pass.cpp
     src/ir/transforms/materialize_valid_shape_symbols_pass.cpp

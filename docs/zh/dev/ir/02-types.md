@@ -127,7 +127,7 @@ destination 并返回 `VoidType`，目前要求所有参数的 Vec buffer 描述
 分配操作数；旧 `emit_tile_addr` 标志不能删除或补充 buffer 地址。
 动态操作数保留在其词法作用域内，不重建逻辑 `TileType` 或 `MemRef`，
 也不运行隐式 tile 分配逻辑。设置 `enable_buffer_ir=True` 后，流水线在发射前通过
-[LowerTileToBuffer](../passes/53-lower_tile_to_buffer.md) 转换 Tile IR。
+[LowerTileToBuffer](../passes/54-lower_tile_to_buffer.md) 转换 Tile IR。
 
 静态存储视图 (static storage view) 在同一 Buffer 阶段使用普通 SSA 别名边：
 

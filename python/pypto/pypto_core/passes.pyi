@@ -785,6 +785,10 @@ def materialize_comm_domain_scopes() -> Pass:
 def lower_host_tensor_collectives() -> Pass:
     """Lower host-level ``pld.tensor.allreduce`` calls to builtin collective dispatches."""
 
+def legalize_spmd_launches() -> Pass:
+    """Guard potentially empty SPMD launches, requiring preallocated outputs."""
+    ...
+
 def lower_l2_tensor_collectives() -> Pass:
     """Lower managed collectives written in a CHIP/L2 orchestration body.
 
@@ -795,7 +799,7 @@ def lower_l2_tensor_collectives() -> Pass:
     joins the caller's own task DAG, so ``compute -> collective -> consume`` is
     ordered by ordinary TensorMap dependencies.
 
-    Runs immediately before :func:`derive_call_directions` so the emitted call
+    Runs before :func:`derive_call_directions` so the emitted call
     gets its argument directions and task edges derived like any kernel call.
     Today only ``pld.tensor.all_to_all_v`` with ``core_num=1`` is supported.
     """
@@ -1099,6 +1103,7 @@ __all__ = [
     "block_mx_scale_tensor_views",
     "flatten_tile_nd_to_2d",
     "legalize_tile_cast",
+    "legalize_spmd_launches",
     "auto_tile_matmul_l0",
     "canonicalize_tile_slice",
     "infer_tile_memory_space",

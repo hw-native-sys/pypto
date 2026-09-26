@@ -115,6 +115,6 @@ operand.
 
 ## See Also
 
-- [47-materialize_dist_tensor_ctx.md](47-materialize_dist_tensor_ctx.md) — same
+- [48-materialize_dist_tensor_ctx.md](48-materialize_dist_tensor_ctx.md) — same
   signature-and-call-site shape, for `CommCtxType`
 - [00-pass_manager.md](00-pass_manager.md) — pass ordering

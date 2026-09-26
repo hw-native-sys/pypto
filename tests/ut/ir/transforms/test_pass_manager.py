@@ -60,6 +60,7 @@ TENSOR_OPTIMIZATION_PASSES = [
     "FoldNoOpReshape",
     "FuseCreateAssembleToSlice",
     "LowerL2TensorCollectives",
+    "LegalizeSpmdLaunches",
     "DeriveCallDirections",
     "AutoDeriveTaskDependencies",
     "ExpandManualPhaseFence",
