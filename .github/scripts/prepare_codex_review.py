@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 from publish_codex_review import github_api, pull_request_endpoint
+from rerun_codex_review import route_review
 
 COMMAND = "@pypto-codex review"
 MAX_CONTEXT_BYTES = 8 * 1024 * 1024
@@ -214,11 +215,25 @@ def prepare(event_name: str, event: dict, repo: str, destination: Path, outputs:
     pr = review_target(event_name, event, repo)
     if pr is None:
         return
+    if event_name == "issue_comment" and route_review(repo, pr):
+        return
     snapshot = discussion_snapshot(repo, pr)
     contents = json.dumps(snapshot, ensure_ascii=False)
     if len(contents.encode()) > MAX_CONTEXT_BYTES:
         raise ValueError("PR discussion exceeds 8 MiB; refusing an incomplete review context")
     destination.write_text(contents)
+    # Retain only routing identity for the 30-day Actions rerun window; the
+    # full discussion snapshot keeps its existing one-day retention.
+    destination.with_name("review-target.json").write_text(
+        json.dumps(
+            {
+                "repository": repo,
+                "number": pr["number"],
+                "head": pr["head"]["sha"],
+                "base_ref": pr["base"]["ref"],
+            }
+        )
+    )
     # Do not embed ref names or discussion text into workflow shell expressions.
     with outputs.open("a") as stream:
         stream.write(

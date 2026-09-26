@@ -76,6 +76,25 @@ PR 作者或具有 write、maintain、admin 权限的协作者可以在没有新
 Conversation 中发送命令。命令由 Actions 识别，不需要名为 `pypto-codex` 的
 GitHub 账号，也不会调用独立的 `@codex` Cloud 集成。
 
+评论触发的运行会先查找属于当前 PR、head 提交及目标分支的、可验证的
+`pull_request_target` Codex Review 运行。已排队或正在执行的运行会被复用；
+已完成的运行会重跑**全部任务**（包括需要重新评估时的成功运行）。这样会更新
+PR 原有的 Actions 检查，并在同一次 attempt 中重新生成上下文和结果产物。
+评论本身仍会产生一个独立的短路由运行，其 Actions summary 会链接到选中的
+PR 运行。同一个 PR 的准备任务会串行执行。
+
+仓库需要配置 `CODEX_REVIEW_RERUN_TOKEN` secret：使用仅限本仓库、具有
+**Actions: write** 权限的专用细粒度 PAT。它只用于评论命令的可信准备步骤，
+不会传入 PR checkout 或审查容器。缺少凭据或 API 请求失败会明确报错，
+避免静默保留旧的 PR 检查状态。只读查询使用具有 **Actions: read** 权限的
+`GITHUB_TOKEN`。
+
+路由会核对仓库、源分支、head SHA、PR 编号和目标分支。小型身份产物保留
+30 天，完整讨论快照仍只保留一天；旧运行可以通过未过期的讨论快照验证。
+若 GitHub 允许重跑的 30 天窗口内没有可验证的运行，则回退为独立审查，
+并明确提示它不会替换 PR 原有的 Actions 检查。重跑使用原运行的工作流版本，
+不会自动升级为新合并的工作流代码。
+
 对话记录（rollout）和 Codex 会话索引保存在专用 runner 的两个 Docker 卷中，
 按目标仓库 ID 和 PR 编号隔离。后续运行通过 `codex exec resume <session-id>`
 恢复准确的主会话；只有审查完整结束且结果校验通过后才更新会话检查点。凭据与配置仍是临时的。更换 runner 或删除这两个卷后，会使用

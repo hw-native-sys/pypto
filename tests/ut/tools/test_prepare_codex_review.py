@@ -24,6 +24,7 @@ def collector(monkeypatch):
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "route_review", lambda *args: False)
     return module
 
 
@@ -327,6 +328,12 @@ def test_prepare_writes_safe_outputs(collector, pr, comment_event, monkeypatch, 
     destination, outputs = tmp_path / "discussion.json", tmp_path / "outputs"
     collector.prepare("issue_comment", comment_event, "owner/repo", destination, outputs)
     assert json.loads(destination.read_text())["base_ref"] == pr["base"]["ref"]
+    assert json.loads((tmp_path / "review-target.json").read_text()) == {
+        "repository": "owner/repo",
+        "number": 2911,
+        "head": "a" * 40,
+        "base_ref": pr["base"]["ref"],
+    }
     assert outputs.read_text() == f"number=2911\nhead={'a' * 40}\nbase={'b' * 40}\nready=true\n"
 
 
@@ -338,6 +345,30 @@ def test_oversized_context_not_silently_truncated(collector, pr, comment_event, 
         collector.prepare(
             "issue_comment", comment_event, "owner/repo", tmp_path / "context", tmp_path / "outputs"
         )
+    assert not (tmp_path / "outputs").exists()
+
+
+def test_prepare_routed_comment_does_not_start_duplicate_review(
+    collector, pr, comment_event, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(collector, "review_target", lambda *args: pr)
+    calls = []
+    monkeypatch.setattr(collector, "route_review", lambda *args: calls.append(args) or True)
+    monkeypatch.setattr(collector, "discussion_snapshot", lambda *args: pytest.fail("Duplicate review"))
+    collector.prepare(
+        "issue_comment", comment_event, "owner/repo", tmp_path / "context", tmp_path / "outputs"
+    )
+    assert calls == [("owner/repo", pr)]
+    assert not (tmp_path / "outputs").exists()
+    assert not (tmp_path / "context").exists()
+
+
+def test_unauthorized_comment_never_routes(collector, comment_event, monkeypatch, tmp_path):
+    monkeypatch.setattr(collector, "review_target", lambda *args: None)
+    monkeypatch.setattr(collector, "route_review", lambda *args: pytest.fail("Unauthorized routing"))
+    collector.prepare(
+        "issue_comment", comment_event, "owner/repo", tmp_path / "context", tmp_path / "outputs"
+    )
     assert not (tmp_path / "outputs").exists()
 
 

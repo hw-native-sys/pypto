@@ -100,7 +100,11 @@ jobs:
         github.event.sender.type != 'Bot'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    concurrency:
+      group: codex-prepare-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+      cancel-in-progress: false
     permissions:
+      actions: read
       contents: read
       pull-requests: read
       issues: read
@@ -120,7 +124,16 @@ jobs:
         id: context
         env:
           GH_TOKEN: ${{ github.token }}
+          CODEX_REVIEW_RERUN_TOKEN: ${{ github.event_name == 'issue_comment' && secrets.CODEX_REVIEW_RERUN_TOKEN || '' }}
         run: python .github/scripts/prepare_codex_review.py "$RUNNER_TEMP/discussion.json"
+      - name: Upload review routing identity
+        if: steps.context.outputs.ready == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codex-target-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/review-target.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Upload discussion snapshot
         if: steps.context.outputs.ready == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

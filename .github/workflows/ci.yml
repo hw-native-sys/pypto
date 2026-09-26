@@ -354,6 +354,7 @@ jobs:
         python -m pytest --confcutdir=tests/ut/tools
         tests/ut/tools/test_publish_codex_review.py
         tests/ut/tools/test_prepare_codex_review.py
+        tests/ut/tools/test_rerun_codex_review.py
         tests/ut/tools/test_manage_codex_review_session.py -q
 
   clang-tidy:

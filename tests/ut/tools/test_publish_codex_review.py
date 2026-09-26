@@ -803,7 +803,13 @@ def test_invalidation_is_independent_of_review_cancellation(workflow):
 
 @pytest.mark.parametrize(
     "script_name",
-    ["publish_codex_review", "prepare_codex_review", "manage_codex_review_session", "perf_guard"],
+    [
+        "publish_codex_review",
+        "prepare_codex_review",
+        "rerun_codex_review",
+        "manage_codex_review_session",
+        "perf_guard",
+    ],
 )
 def test_ci_helpers_import_on_supported_python(monkeypatch, script_name):
     """Exercise actual imports on the CI matrix, including evaluated type annotations."""
