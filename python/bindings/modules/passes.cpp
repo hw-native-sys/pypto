@@ -136,9 +136,8 @@ void BindPass(nb::module_& m) {
       .value("FixpipeEpilogueValid", IRProperty::FixpipeEpilogueValid,
              "Every tile.assemble carrying a FIXPIPE epilogue (pre_quant / pre_relu) is an Acc->Mat "
              "writeback the fix-pipe can perform: pre_relu alone rides the unscaled narrowing, while "
-             "pre_quant is withheld on every backend today because ptoas mis-emits the scale on "
-             "pto.tinsert; the Acc->GM half of the contract, which does carry a scale, is "
-             "AccToGmStoreValid")
+             "pre_quant is accepted only for backend-supported dtype pairs; the Acc->GM half of the "
+             "contract is AccToGmStoreValid")
       .value("AtomicAddDtypeValid", IRProperty::AtomicAddDtypeValid,
              "Every atomic-add write into GM (tile.store / tensor.assemble / pld.tensor.put / "
              "pld.tile.put / pld.tensor.remote_store / pld.tile.remote_store) targets a dtype the "

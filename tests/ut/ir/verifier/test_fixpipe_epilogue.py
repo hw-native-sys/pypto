@@ -23,8 +23,9 @@ accepts pairs pto-isa has no mode for, and pto-isa answers those from
 rather than failing. A pair these verifiers let through would compile, run, and
 return unscaled numbers.
 
-The a2a3 table asserted below was measured against ptoas v0.61 by assembling each
-pair; it is not transcribed from a document.
+The A2/A3 table asserted below was measured against ptoas v0.61 by assembling
+each pair; PTOAS 0.65 adds the typed ``TINSERT`` operands that make the
+``INT32 -> FP16`` Mat form unambiguous on both A2/A3 and A5.
 """
 
 import pypto
@@ -140,43 +141,26 @@ class TestAccToMatPreQuant:
     """``tile.assemble`` — the Acc->Mat (``pto.tinsert``) writeback."""
 
     @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
-    @pytest.mark.parametrize("mat_dtype", [pl.FP16, pl.BF16, pl.INT8, pl.INT16])
-    def test_a_scale_on_the_mat_writeback_is_withheld_on_every_backend(self, mat_dtype, backend_type):
-        """DEQF16 into a Mat tile is the mode issue #2765 asks for, and it is the
-        one the toolchain cannot currently emit.
+    def test_int32_to_fp16_scale_is_supported(self, backend_type):
+        """PTOAS 0.65 emits the typed scaled ``TINSERT`` on both backends."""
+        _run(_int_matmul_to_mat(pl.FP16, pre_relu=True), backend_type)
 
-        ptoas assembles the scale onto ``pto.tinsert`` (PTOAS#1570) — it round-trips through
-        ``--emit-pto-ir`` — but every scalar operand it emits is ``int64_t``, and
-        pto-isa's two wrappers differ only in their parameter types::
-
-            TINSERT(Dst&, Src&,           uint16_t row, uint16_t col, WaitEvents&...)
-            TINSERT(Dst&, Src&, uint64_t, uint16_t row, uint16_t col, WaitEvents&...)
-
-        For ``TINSERT<Mat, Acc, relu>(dst, src, scale_i64, row_i64, col_i64)`` the
-        unscaled one wins — ``col`` binds to the event pack by identity, where the
-        scaled one needs a conversion — so the scale lands in ``row`` (truncated
-        to 0). On a2a3 the resulting cast path ``static_assert``s; a5 has no such
-        guard. Both handlers therefore withhold the destination outright rather
-        than per dtype, so the diagnostic must name the toolchain, not the dtypes.
-        """
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+    @pytest.mark.parametrize("mat_dtype", [pl.BF16, pl.INT8, pl.INT16])
+    def test_unsupported_int32_targets_are_rejected(self, mat_dtype, backend_type):
         with pytest.raises(pypto.Error, match="FixpipeEpilogueValid") as excinfo:
             _run(_int_matmul_to_mat(mat_dtype), backend_type)
         message = str(excinfo.value)
-        assert "withholds" in message, message
-        assert "emits a pto-isa call that silently drops it" in message, message
-        # The escape hatches must be named, since the Acc->GM form does work.
-        assert "pl.tile.store(acc, ..., pre_quant=s)" in message, message
+        assert "cannot be assembled" in message, message
+        assert "Supported Mat targets from a 'int32' accumulator here are fp16" in message, message
 
-    def test_the_withheld_diagnostic_does_not_blame_the_dtype_pair(self):
-        """``fp32 -> fp16`` has no scale-bearing tinsert mode on a2a3 *either*, so
-        it would be rejected on dtype grounds too. It must still report the real
-        reason — ``Supported Mat targets ... are none`` would send the reader
-        looking for a different dtype that does not exist."""
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+    def test_unsupported_fp32_source_is_rejected(self, backend_type):
         with pytest.raises(pypto.Error, match="FixpipeEpilogueValid") as excinfo:
-            _run(_float_matmul_to_mat(pl.FP16))
+            _run(_float_matmul_to_mat(pl.FP16), backend_type)
         message = str(excinfo.value)
-        assert "withholds" in message, message
-        assert "Supported Mat targets" not in message, message
+        assert "cannot be assembled" in message, message
+        assert "Supported Mat targets from a 'fp32' accumulator here are none" in message, message
 
     def test_pre_relu_alone_needs_a_converting_writeback(self):
         """Acc -> Mat has two lowerings and only one is the fix-pipe.

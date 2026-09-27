@@ -107,10 +107,8 @@ enum class IRProperty : uint64_t {
   FixpipeEpilogueValid,             ///< Every tile.assemble carrying a FIXPIPE epilogue (``pre_quant`` /
                                     ///< ``pre_relu``) is an Acc->Mat writeback the fix-pipe can perform.
                                     ///< ``pre_relu`` alone rides the unscaled narrowing and is allowed;
-                                    ///< ``pre_quant`` is withheld here on every backend today because
-                                    ///< ptoas mis-emits the scale on pto.tinsert
-                                    ///< (BackendHandler::SupportsFixpipePreQuant answers false for
-                                    ///< FixpipeDest::kMat -- see Ascend910BHandler for the mechanism).
+                                    ///< ``pre_quant`` is accepted only for backend-supported dtype
+                                    ///< pairs (currently INT32 Acc -> FP16 Mat on A2/A3 and A5).
                                     ///< The Acc->GM half of the same contract, which does carry a scale,
                                     ///< lives in AccToGmStoreValid. Verifiable only once
                                     ///< InferTileMemorySpace has resolved memory spaces, and an error

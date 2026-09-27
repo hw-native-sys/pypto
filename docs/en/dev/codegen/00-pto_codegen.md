@@ -214,13 +214,12 @@ both pinned with their provenance at the emission sites. See
 `codegen::EncodeFixpipePreQuant` for the register layout, `99-verifier.md` for
 the per-backend dtype tables.
 
-The `pto.tinsert` half is **emitted but not currently reachable**: both handlers
-withhold `pre_quant` for `FixpipeDest::kMat` because ptoas emits an ambiguous
-call for it (the scale binds to `indexRow` —
-[PTOAS#1570](https://github.com/hw-native-sys/PTOAS/issues/1570), and
-`99-verifier.md` for the mechanism), so the
-emitter code below is exercised only with verification off. `pre_relu` alone on
-`Acc → Mat`, and the whole `Acc → GM` path, are unaffected.
+PTOAS 0.65 resolves the scaled `pto.tinsert` overload ambiguity tracked by
+[PTOAS#1570](https://github.com/hw-native-sys/PTOAS/issues/1570) by emitting a
+`uint64_t` scale and `uint16_t` row/column operands. Both A2/A3 and A5 therefore
+allow the validated `INT32 Acc → FP16 Mat` (`DEQF16`) form. Other scaled
+Acc-to-Mat dtype pairs remain rejected by `FixpipeEpilogueValid`; the wider
+per-backend tables continue to govern Acc-to-GM stores independently.
 
 **`tile.set_validshape` lowering details.**  `pto.set_validshape` mutates the
 operand's `valid_row` / `valid_col` operands, so the operand must be a handle
