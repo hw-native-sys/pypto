@@ -511,7 +511,7 @@ def test_python_print_tile_type():
     result = assign.as_python()
 
     assert "t:" in result
-    assert "pl.Tile[[16, 16], pl.FP16]" in result
+    assert "pl.Tile[[16, 16], pl.FP16, pl.TileView()]" in result
 
 
 def test_python_print_tile_type_prints_explicit_tile_memory_space():

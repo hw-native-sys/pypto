@@ -231,7 +231,12 @@ tile: pl.Tile[
 - 在这种隐式形式下，`valid_shape` 默认等于 tile shape；布局 / fractal 默认值也会根据
   shape / memory-space 组合推导。
 - 显式写出的 `pl.TileView()`（或只是在重复这些隐式默认值的写法）与省略写法在语义上等价。
-  parser / printer 的往返过程中，二者可能会被规范化为同一种打印形式。
+  parser / printer 的往返过程中，二者可能会被规范化为同一种打印形式，但带类型注解的赋值除外：
+  省略 view 会继承右侧表达式推导出的 view，显式 `pl.TileView()` 则选择完整的隐式 view。
+  printer 会在完整 view 的 tile 赋值上保留 `pl.TileView()`，以维持这一区别。
+  printer / parser 往返会保留 IR 中声明的类型，包括覆盖算子推导结果的类型。
+  语义合法性由 IR 类型校验负责：声明类型与源类型不一致的别名可以原样往返，
+  然后由 `AssignTypeSymmetry` 诊断。
 - `compact=pl.CompactMode.normal` 表示部分 boxed tile 的 PTO 紧凑传输格式。PyPTO 会为
   L0A/L0B 中部分有效的 `tile.extract` 结果自动推导该值，kernel 通常不应直接设置它。
 

@@ -256,7 +256,12 @@ tile: pl.Tile[
   inferred from the shape / memory-space combination.
 - An explicit `pl.TileView()` (or one that only repeats those implicit defaults) is treated as
   semantically equivalent to the omitted form. Parser / printer roundtrips may canonicalize both
-  forms to the same printed syntax.
+  forms to the same printed syntax, except on annotated assignments: omitting the view inherits
+  the RHS-inferred view, while explicit `pl.TileView()` selects the full implicit view. The printer
+  includes `pl.TileView()` on full-view tile assignments to preserve this distinction.
+  Printer / parser roundtrips preserve declared IR types, including overrides of operation inference.
+  Semantic validity belongs to IR type verification: an alias with unequal declared and source types
+  can roundtrip unchanged, then be diagnosed by `AssignTypeSymmetry`.
 - `compact=pl.CompactMode.normal` represents PTO's packed transfer format for a partial boxed tile.
   PyPTO infers it for partial `tile.extract` results in L0A/L0B, so kernels normally should not set it
   directly.

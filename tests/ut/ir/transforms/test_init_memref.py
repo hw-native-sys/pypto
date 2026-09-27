@@ -199,7 +199,7 @@ class TestBasic:
 
         printed = ir.python_print(passes.init_mem_ref()(Before))
         assert f"pl.tile.alloc(pl.Mem.Acc, {expected_acc_bytes})" in printed
-        assert f", pl.const(0, pl.INT64), {expected_acc_bytes}), pl.Mem.Acc]" in printed
+        assert f", pl.const(0, pl.INT64), {expected_acc_bytes}), pl.Mem.Acc, pl.TileView()]" in printed
 
     def test_acc_slice_span_does_not_reapply_root_row_padding(self):
         """A lower-half view of a padded INT32 Acc ends at its root boundary.

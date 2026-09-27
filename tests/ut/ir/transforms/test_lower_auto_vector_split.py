@@ -301,13 +301,38 @@ def test_auto_c2v_boundary_defers_a_runtime_split_axis_extent():
     shard keeps the full box, the lane's extent lands on its first consumer, and
     the store, whose lane may be empty, is guarded.
 
-    Asserted on the IR rather than against a parsed ``Expected``: a view-less
-    annotation parses back to the deducer's lane-agnostic view, so no DSL text
-    spells the full-box shard, and the roundtrip instrument is off for the same
-    reason.
+    Keep roundtrip verification enabled: printing must preserve the full-box
+    shard rather than restoring the deducer's lane-agnostic runtime extent.
     """
-    with passes.PassContext([]):
-        after = passes.lower_auto_vector_split()(_runtime_extent_program(with_consumer=True))
+    after = _lower(_runtime_extent_program(with_consumer=True))
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def split_auto(
+            n: pl.Scalar[pl.INDEX],
+            qk: pl.Tile[[64, 128], pl.FP32, pl.Mem.Mat],
+            out_0: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            pl.func_attr({"split": pl.SplitMode.UP_DOWN, "split_aiv": True})
+            subblock_idx = pl.tile.get_subblock_idx()
+            qk_n = pl.tile.set_validshape(qk, n, 128)
+            popped: pl.Tile[[32, 128], pl.FP32, pl.Mem.Vec, pl.TileView()] = pl.tile.aiv_shard(qk_n, split=1)
+            scaled: pl.Tile[
+                [32, 128],
+                pl.FP32,
+                pl.Mem.Vec,
+                pl.TileView(
+                    valid_shape=[pl.min(pl.max(n, subblock_idx * 32) - subblock_idx * 32, 32), 128],
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.row_major,
+                ),
+            ] = pl.tile.exp(popped)
+            if pl.min(pl.max(n, subblock_idx * 32) - subblock_idx * 32, 32) > 0:
+                out_store = pl.tile.store(scaled, [0 + subblock_idx * 32, 0], out_0)  # noqa: F841
+            return out_0
+
+    ir.assert_structural_equal(after, Expected)
     body = list(after.functions.values())[0].body
     assert isinstance(body, ir.SeqStmts)
     by_name = {s.var.name_hint: s for s in body.stmts if isinstance(s, ir.AssignStmt)}
@@ -358,8 +383,7 @@ def test_auto_runtime_extent_leaves_a_read_store_result_unguarded():
             out_store = pl.tile.store(scaled, [0, 0], out_0)
             return out_store
 
-    with passes.PassContext([]):
-        after = passes.lower_auto_vector_split()(Before)
+    after = _lower(Before)
     body = list(after.functions.values())[0].body
     assert isinstance(body, ir.SeqStmts)
     assert not any(isinstance(s, ir.IfStmt) for s in body.stmts), "a read store result must stay unguarded"
@@ -387,8 +411,7 @@ def test_auto_runtime_extent_guards_an_unassigned_store():
             pl.tile.store(scaled, [0, 0], out_0)
             return out_0
 
-    with passes.PassContext([]):
-        after = passes.lower_auto_vector_split()(Before)
+    after = _lower(Before)
     body = list(after.functions.values())[0].body
     assert isinstance(body, ir.SeqStmts)
     guards = [s for s in body.stmts if isinstance(s, ir.IfStmt)]
@@ -404,8 +427,8 @@ def test_auto_runtime_extent_guards_an_unassigned_store():
 def test_explicit_region_guards_an_unassigned_store_of_an_empty_lane():
     """The explicit ``pl.aiv_shard`` walk guards a statement-form store like an assigned one.
 
-    5 of 16 rows never reach lane 1, and a zero-row store is outside the ISA
-    contract, so the store must run only where the lane holds data.
+    A partial extent may never reach lane 1, and a zero-row store is outside
+    the ISA contract, so the store must run only where the lane holds data.
     """
 
     @pl.program
@@ -438,11 +461,32 @@ def test_explicit_region_guards_an_unassigned_store_of_an_empty_lane():
                 self.unguarded += 1
             super().visit_eval_stmt(op)
 
-    with passes.PassContext([]):
-        after = passes.lower_auto_vector_split()(Before)
+    after = _lower(Before, keep_regions=True)
     guards = StoreGuards()
     guards.visit_program(after)
     assert (guards.guarded, guards.unguarded) == (1, 0)
+
+
+def test_explicit_region_runtime_extent_roundtrips():
+    """The explicit split_aiv path also preserves a deferred full-box shard."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def split_region(
+            n: pl.Scalar[pl.INDEX],
+            qk: pl.Tile[[64, 128], pl.FP32, pl.Mem.Mat],
+            out_0: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            qk_n = pl.tile.set_validshape(qk, n, 128)
+            for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                shard = pl.aiv_shard(qk_n)
+                scaled = pl.tile.exp(shard)
+                pl.tile.store(scaled, [aiv_id * 32, 0], out_0)
+            return out_0
+
+    after = _lower(Before, keep_regions=True)
+    assert "shard: pl.Tile[[32, 128], pl.FP32, pl.Mem.Vec, pl.TileView()]" in after.as_python()
 
 
 def test_auto_c2v_boundary_rejects_a_direct_store_of_a_runtime_extent():
@@ -2178,8 +2222,8 @@ def test_tuple_result_op_halves_each_element_on_its_own_axis():
         in printed
     )
     # Each projection is retyped to its own element ...
-    assert "dst: pl.Tile[[128, 16], pl.INT32, pl.Mem.Vec] = _tuple_tmp[0]" in printed
-    assert "cdst: pl.Tile[[1, 128], pl.INT32, pl.Mem.Vec] = _tuple_tmp[1]" in printed
+    assert "dst: pl.Tile[[128, 16], pl.INT32, pl.Mem.Vec, pl.TileView()] = _tuple_tmp[0]" in printed
+    assert "cdst: pl.Tile[[1, 128], pl.INT32, pl.Mem.Vec, pl.TileView()] = _tuple_tmp[1]" in printed
     # ... and each store offsets the axis THAT element was halved along.
     assert "pl.tile.store(dst, [0 + subblock_idx * 128, 0], out_0)" in printed
     assert "pl.tile.store(cdst, [0, 0 + subblock_idx * 128], out_1)" in printed
@@ -2219,7 +2263,10 @@ def test_arity_dependent_scratch_needs_no_declaration():
             return out_store
 
     printed = _lower(Halved).as_python()
-    assert "merged: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.tile.mrgsort_format2(s0, s1, w" in printed
+    assert (
+        "merged: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec, pl.TileView()] = pl.tile.mrgsort_format2(s0, s1, w"
+        in printed
+    )
 
     @pl.program
     class FullWidthWorkspace:
@@ -2315,7 +2362,9 @@ def test_inline_tuple_projection_feeding_a_generic_op_carries_its_split():
             return pl.tile.store(y, [0, 0], out_1)
 
     printed = _lower(Before).as_python()
-    assert "y: pl.Tile[[1, 128], pl.INT32, pl.Mem.Vec] = pl.tile.add(pair[1], pair[1])" in printed
+    assert (
+        "y: pl.Tile[[1, 128], pl.INT32, pl.Mem.Vec, pl.TileView()] = pl.tile.add(pair[1], pair[1])" in printed
+    )
     assert "pl.tile.store(y, [0, 0 + subblock_idx * 128], out_1)" in printed
 
 
@@ -2421,7 +2470,10 @@ def test_reshape_of_an_inline_projection_is_not_split_twice():
 
     printed = _lower(Before).as_python()
     # Reshaped straight to the per-lane extent — no full-width view, no extra slice.
-    assert "r: pl.Tile[[1, 128], pl.INT32, pl.Mem.Vec] = pl.tile.reshape(pair[1], [1, 128])" in printed
+    assert (
+        "r: pl.Tile[[1, 128], pl.INT32, pl.Mem.Vec, pl.TileView()] = pl.tile.reshape(pair[1], [1, 128])"
+        in printed
+    )
     assert "pl.tile.slice" not in printed
     assert "pl.tile.store(r, [0, 0 + subblock_idx * 128], out_1)" in printed
 
@@ -2526,7 +2578,7 @@ def test_inline_projection_crossing_to_cube_is_gathered():
     # The halved [128, 16] projection is reassembled to the full [256, 16] the cube wants,
     # along dim 0 (split=1 is UP_DOWN), and the cube placement move rides on that.
     assert "pl.tile.aic_gather(pair[0], split=1)" in printed
-    assert "mat_mat: pl.Tile[[256, 16], pl.INT32, pl.Mem.Mat]" in printed
+    assert "mat_mat: pl.Tile[[256, 16], pl.INT32, pl.Mem.Mat, pl.TileView()]" in printed
 
 
 def test_loop_init_from_an_inline_projection_carries_the_split():
@@ -2561,7 +2613,7 @@ def test_loop_init_from_an_inline_projection_carries_the_split():
 
     printed = _lower(Before).as_python()
     # The body op, the backedge value and the loop exit all sit at the per-lane extent...
-    assert "doubled: pl.Tile[[1, 128], pl.INT32, pl.Mem.Vec]" in printed
+    assert "doubled: pl.Tile[[1, 128], pl.INT32, pl.Mem.Vec, pl.TileView()]" in printed
     assert "result: pl.Tile[[1, 128], pl.INT32, pl.Mem.Vec]" in printed
     # ...and the store that consumes the exit offsets `cdst`'s own axis, dim 1.
     assert "pl.tile.store(result, [0, 0 + subblock_idx * 128], out_1)" in printed
