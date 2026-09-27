@@ -9,10 +9,13 @@
 
 """Integration tests for parser and printer round-trip."""
 
+import struct
+
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir
 from pypto.ir import op
+from pypto.language.parser.diagnostics import ParserSyntaxError, ParserTypeError
 from pypto.language.parser.text_parser import parse
 
 
@@ -399,6 +402,214 @@ class TestWhileLoopRoundTrip:
         printed = func.as_python()
         assert "pl.tile.create(" in printed
         assert "pl.tile.create_tile(" not in printed
+
+
+def _roundtrip_program(params=(), values=()):
+    """Check a complete signature and body, including expression node kinds."""
+    span = ir.Span.unknown()
+    program = ir.Program(
+        [ir.Function("f", list(params), [v.type for v in values], ir.ReturnStmt(list(values), span), span)],
+        "Roundtrip",
+        span,
+    )
+    printed = ir.python_print(program, format=False)
+    reparsed = pl.parse_program(printed)
+    ir.assert_structural_equal(program, reparsed)
+    assert ir.structural_hash(program) == ir.structural_hash(reparsed)
+    return reparsed
+
+
+class TestTextFormRoundtrip:
+    """Regression coverage for supported values and internal signature markers."""
+
+    @pytest.mark.parametrize("op_type,dtype", [(ir.Xor, DataType.BOOL), (ir.BitXor, DataType.INT32)])
+    def test_xor_node_kind(self, op_type, dtype):
+        span = ir.Span.unknown()
+        x, y = [ir.Var(name, ir.ScalarType(dtype), span) for name in ("x", "y")]
+        expr = op_type(x, y, dtype, span)
+        _roundtrip_program([x, y], [expr])
+
+    @pytest.mark.parametrize("dtype", [DataType.FP16, DataType.FP32, DataType.BF16])
+    @pytest.mark.parametrize(
+        "bits",
+        [
+            "7ff0000000000000",
+            "fff0000000000000",
+            "7ff8000000000000",
+            "7ff8000000000012",
+            "fff8000000000012",
+            "7ff0000000000001",
+        ],
+    )
+    def test_nonfinite_float(self, bits, dtype):
+        value = struct.unpack(">d", bytes.fromhex(bits))[0]
+        expr = ir.ConstFloat(value, dtype, ir.Span.unknown())
+        reparsed = _roundtrip_program(values=[expr])
+        func = reparsed.get_function("f")
+        assert func is not None and isinstance(func.body, ir.ReturnStmt)
+        result = func.body.value[0]
+        assert isinstance(result, ir.ConstFloat)
+        assert struct.pack(">d", result.value).hex() == bits
+
+    @pytest.mark.parametrize(
+        "left,right,equal",
+        [
+            ("7ff8000000000012", "7ff8000000000012", True),
+            ("7ff8000000000012", "7ff8000000000013", False),
+            ("7ff8000000000012", "fff8000000000012", False),
+            ("7ff0000000000000", "fff0000000000000", False),
+            ("0000000000000000", "8000000000000000", True),
+        ],
+    )
+    def test_float_structural_identity(self, left, right, equal):
+        span = ir.Span.unknown()
+        lhs, rhs = [
+            ir.ConstFloat(struct.unpack(">d", bytes.fromhex(bits))[0], DataType.FP32, span)
+            for bits in (left, right)
+        ]
+        assert ir.structural_equal(lhs, rhs) == equal
+        if equal:
+            ir.assert_structural_equal(lhs, rhs)
+            assert ir.structural_hash(lhs) == ir.structural_hash(rhs)
+        else:
+            with pytest.raises(ValueError, match="Structural equality assertion failed"):
+                ir.assert_structural_equal(lhs, rhs)
+        other_dtype = ir.ConstFloat(lhs.value, DataType.FP16, span)
+        assert not ir.structural_equal(lhs, other_dtype)
+
+    @pytest.mark.parametrize(
+        "expression,error,match",
+        [
+            ("pl._dump.logical_xor(x, x)", ParserTypeError, "BOOL scalar operands"),
+            ("pl._dump.logical_xor(True)", ParserSyntaxError, "two positional operands"),
+            ("pl._dump.logical_xor(True, False, extra=True)", ParserSyntaxError, "two positional operands"),
+            ('pl._dump.float64("nan")', ParserSyntaxError, "16 hexadecimal digits"),
+            ('pl._dump.float64("7ff8000000000000", extra=1)', ParserSyntaxError, "one hexadecimal"),
+            (
+                'pl.const(pl._dump.float64("7ff8000000000000"), pl.INT32)',
+                ParserTypeError,
+                "floating-point dtype",
+            ),
+        ],
+    )
+    def test_malformed_dump_expression(self, expression, error, match):
+        code = f"""
+@pl.program
+class Invalid:
+    @pl.function
+    def f(self, x: pl.Scalar[pl.INT32]):
+        return {expression}
+"""
+        with pytest.raises(error, match=match):
+            pl.parse_program(code)
+
+    def test_logical_xor_nesting(self):
+        span = ir.Span.unknown()
+        x, y = [ir.Var(name, ir.ScalarType(DataType.BOOL), span) for name in ("x", "y")]
+        expr = ir.Not(ir.Xor(ir.And(x, y, DataType.BOOL, span), x, DataType.BOOL, span), DataType.BOOL, span)
+        _roundtrip_program([x, y], [expr])
+
+    @pytest.mark.parametrize("namespace", ["tensor", "tile"])
+    @pytest.mark.parametrize("value", ["math.inf", "-math.inf", "math.nan"])
+    def test_nonfinite_fill_from_dsl(self, namespace, value):
+        program = pl.parse_program(f"""
+import math
+FILL = {value}
+@pl.program
+class Fill:
+    @pl.function
+    def f(self):
+        x = pl.{namespace}.full([16, 16], dtype=pl.FP32, value=FILL)
+        return
+""")
+        ir.assert_structural_equal(program, pl.parse_program(ir.python_print(program)))
+
+    @pytest.mark.parametrize("nested", [False, True])
+    def test_tuple_signature(self, nested):
+        scalar = ir.ScalarType(DataType.INT32)
+        typ = ir.TupleType([ir.TupleType([scalar]), ir.TupleType([])]) if nested else ir.TupleType([scalar])
+        x = ir.Var("x", typ, ir.Span.unknown())
+        _roundtrip_program([x], [x])
+
+    def test_parser_produced_nested_tuple(self):
+        program = pl.parse_program("""
+@pl.program
+class Nested:
+    @pl.function
+    def f(self, x: pl.Scalar[pl.INT32]) -> pl.Tuple[pl.Tuple[pl.Scalar[pl.INT32]], pl.Scalar[pl.INT32]]:
+        inner = (x,)
+        outer = (inner, x)
+        value = outer[0][0]
+        return outer
+""")
+        ir.assert_structural_equal(program, pl.parse_program(ir.python_print(program)))
+
+    def test_nested_return_list_still_rejected(self):
+        with pytest.raises(ParserTypeError, match="Nested tuple types"):
+            pl.parse_program("""
+@pl.program
+class Invalid:
+    @pl.function
+    def f(self, x: pl.Tuple[tuple[pl.Scalar[pl.INT32]]]):
+        return
+""")
+
+    def test_void_is_not_a_tuple_value(self):
+        with pytest.raises(ValueError, match="cannot use VoidType"):
+            ir.TupleType([ir.VoidType()])
+
+    @pytest.mark.parametrize(
+        "type_factory",
+        [
+            ir.PtrType,
+            ir.WindowBufferType,
+            ir.UnknownType,
+            ir.CommCtxType.get,
+            ir.PrefetchAsyncContextType.get,
+            ir.AsyncEventType.get,
+            ir.AsyncSessionType.get,
+        ],
+    )
+    def test_internal_signature(self, type_factory):
+        x = ir.Var("x", type_factory(), ir.Span.unknown())
+        _roundtrip_program([x], [x])
+
+    @pytest.mark.parametrize(
+        "op_type",
+        [
+            ir.Add,
+            ir.Sub,
+            ir.Mul,
+            ir.FloorDiv,
+            ir.FloorMod,
+            ir.Pow,
+            ir.BitAnd,
+            ir.BitOr,
+            ir.BitXor,
+            ir.BitShiftLeft,
+            ir.BitShiftRight,
+        ],
+    )
+    @pytest.mark.parametrize("dynamic", [False, True])
+    def test_composite_shape(self, op_type, dynamic):
+        span = ir.Span.unknown()
+        n = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
+        lhs = n if dynamic else ir.ConstInt(10, DataType.INDEX, span)
+        dim = op_type(lhs, ir.ConstInt(3, DataType.INDEX, span), DataType.INDEX, span)
+        x = ir.Var("x", ir.TensorType([dim], DataType.FP32), span)
+        _roundtrip_program([n, x] if dynamic else [x], [x])
+
+    @pytest.mark.parametrize(
+        "op_type", [ir.Pow, ir.BitAnd, ir.BitOr, ir.BitXor, ir.BitShiftLeft, ir.BitShiftRight]
+    )
+    @pytest.mark.parametrize("type_factory", [ir.TensorType, ir.TileType])
+    def test_nested_typed_composite_shape(self, op_type, type_factory):
+        span = ir.Span.unknown()
+        lhs, rhs = [ir.ConstInt(n, DataType.INT32, span) for n in (10, 3)]
+        inner = op_type(lhs, rhs, DataType.INT32, span)
+        dim = ir.Add(inner, rhs, DataType.INT32, span)
+        x = ir.Var("x", type_factory([dim], DataType.FP32), span)
+        _roundtrip_program([x], [x])
 
 
 if __name__ == "__main__":

@@ -13,6 +13,16 @@ structural_hash(node, enable_auto_mapping=False) -> int
 
 **Key Feature:** Both functions ignore `Span` (source location), focusing only on logical structure.
 
+### Floating-point constants
+
+`ConstFloat` comparison uses its dtype and stored binary64 value. Finite values
+use numeric equality (including `+0.0 == -0.0`); infinities compare by sign.
+NaNs compare equal only when their binary64 representations match, including
+sign and payload. This makes a preserved NaN structurally equal after a dump
+round-trip without equating different NaN encodings. Equal constants also have
+equal structural hashes. This does not change IEEE runtime comparison semantics
+or the separate comparison of floating-point keyword/attribute metadata.
+
 ## Reference vs Structural Equality
 
 ### Reference Equality (Default `==`)

@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <iomanip>
 #include <limits>
@@ -206,7 +207,7 @@ Precedence GetPrecedence(const ExprPtr& expr) {
   static const std::unordered_map<std::type_index, Precedence> kPrecedenceMap = {
       // Logical operators≥
       {std::type_index(typeid(Or)), Precedence::kOr},
-      {std::type_index(typeid(Xor)), Precedence::kXor},
+      {std::type_index(typeid(Xor)), Precedence::kAtom},
       {std::type_index(typeid(And)), Precedence::kAnd},
       {std::type_index(typeid(Not)), Precedence::kNot},
 
@@ -597,9 +598,8 @@ class IRPythonPrinter : public IRVisitor {
 // The default float format emits a bare integer (``"4"``) for integer-valued
 // doubles without an exponent, which would re-parse as ``ConstInt``; append
 // ``.0`` in that case. The append is skipped for exponent forms (``"1e+16"``
-// already parses as a Python float) and for non-finite values (``"nan"`` /
-// ``"inf"`` have no DSL syntax — emitted verbatim, matching the prior behavior;
-// no IR construction path produces them).
+// already parses as a Python float). ConstFloat's visitor handles non-finite
+// values separately using an exact binary64 dump spelling.
 std::string FormatFloatLiteral(double value) {
   std::ostringstream os;
   os.imbue(std::locale::classic());
@@ -609,6 +609,17 @@ std::string FormatFloatLiteral(double value) {
     text += ".0";
   }
   return text;
+}
+
+// ConstFloat values may also be emitted by special call printers such as full.
+std::string FormatFloatValue(double value, const std::string& prefix) {
+  if (std::isfinite(value)) return FormatFloatLiteral(value);
+  uint64_t bits = 0;
+  static_assert(sizeof(bits) == sizeof(value));
+  std::memcpy(&bits, &value, sizeof(bits));
+  std::ostringstream encoded;
+  encoded << prefix << "._dump.float64(\"" << std::hex << std::setfill('0') << std::setw(16) << bits << "\")";
+  return encoded.str();
 }
 
 // DataTypeToPythonString removed — now uses DataTypeToString from dtype.h
@@ -823,10 +834,7 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
   }
 
   if (As<WindowBufferType>(type)) {
-    // Singleton marker — no per-instance fields. Render as a bare attribute
-    // so it round-trips through the parser via the same path as ``pld.``
-    // namespace lookups.
-    return "pld.WindowBufferType";
+    return prefix_ + "._dump.WindowBuffer";
   }
 
   if (As<CommCtxType>(type)) {
@@ -852,7 +860,7 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     return prefix_ + ".AsyncSession";
   }
 
-  return prefix_ + ".UnknownType";
+  return prefix_ + "._dump.Unknown";
 }
 
 std::string IRPythonPrinter::GetIndent() const {
@@ -891,10 +899,10 @@ void IRPythonPrinter::VisitExpr_(const ConstIntPtr& op) {
 
 void IRPythonPrinter::VisitExpr_(const ConstFloatPtr& op) {
   if (op->dtype() != DataType::DEFAULT_CONST_FLOAT) {
-    stream_ << prefix_ << ".const(" << FormatFloatLiteral(op->value_) << ", " << prefix_ << "."
+    stream_ << prefix_ << ".const(" << FormatFloatValue(op->value_, prefix_) << ", " << prefix_ << "."
             << DataTypeToString(op->dtype()) << ")";
   } else {
-    stream_ << FormatFloatLiteral(op->value_);
+    stream_ << FormatFloatValue(op->value_, prefix_);
   }
 }
 
@@ -1286,7 +1294,7 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     const bool typed_fill = IsOp(op, "tile.full") && (cf || ci);
     if (typed_fill) stream_ << prefix_ << ".const(";
     if (cf) {
-      stream_ << FormatFloatLiteral(cf->value_);
+      stream_ << FormatFloatValue(cf->value_, prefix_);
     } else if (ci) {
       stream_ << ci->value_;
     } else {
@@ -1822,7 +1830,13 @@ void IRPythonPrinter::VisitExpr_(const GePtr& op) { PrintBinaryOp(op, ">="); }
 // Logical operators
 void IRPythonPrinter::VisitExpr_(const AndPtr& op) { PrintBinaryOp(op, "and"); }
 void IRPythonPrinter::VisitExpr_(const OrPtr& op) { PrintBinaryOp(op, "or"); }
-void IRPythonPrinter::VisitExpr_(const XorPtr& op) { PrintBinaryOp(op, "xor"); }
+void IRPythonPrinter::VisitExpr_(const XorPtr& op) {
+  stream_ << prefix_ << "._dump.logical_xor(";
+  VisitExpr(op->left_);
+  stream_ << ", ";
+  VisitExpr(op->right_);
+  stream_ << ")";
+}
 
 // Bitwise operators
 void IRPythonPrinter::VisitExpr_(const BitAndPtr& op) { PrintBinaryOp(op, "&"); }

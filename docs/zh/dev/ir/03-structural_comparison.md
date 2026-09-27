@@ -13,6 +13,15 @@ structural_hash(node, enable_auto_mapping=False) -> int
 
 **核心特性：** 两个函数都忽略 `Span`（源位置），仅关注逻辑结构。
 
+### 浮点常量
+
+`ConstFloat` 比较其 dtype 及存储的 binary64 值。有限值使用数值相等关系
+（包括 `+0.0 == -0.0`）；无穷按符号区分。NaN 仅在 binary64 位模式相同
+（包括符号和 payload）时结构相等。因此，保留位模式的 NaN 可以通过 dump
+round-trip 的结构比较，不同 NaN 编码仍不相等。相等常量的结构哈希也相等。
+这不会改变 IEEE 运行时比较语义，也不会改变浮点 keyword/attribute 元数据
+所使用的独立比较规则。
+
 ## 引用相等性与结构相等性
 
 ### 引用相等性（默认 `==`）

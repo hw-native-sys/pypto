@@ -22,6 +22,7 @@ from pypto._function_attrs import AUTO_SCOPE_ATTR, EXTERNAL_SOURCE_ATTR
 from pypto.ir import IRBuilder
 from pypto.ir import op as ir_op
 from pypto.ir.printer import python_print
+from pypto.language import _dump
 from pypto.language.distributed import op as _dsl_pld
 from pypto.language.dsl_api import RangeIterator as _DslRangeIterator
 from pypto.language.op import array_ops as _dsl_array
@@ -194,6 +195,18 @@ def _is_pl_call(node: object, attr_name: str) -> TypeGuard[ast.Call]:
         and func.attr == attr_name
         and isinstance(func.value, ast.Name)
         and func.value.id == "pl"
+    )
+
+
+def _is_dump_call(node: object, name: str | None = None) -> TypeGuard[ast.Call]:
+    """Match private dump calls under the printer's configurable module prefix."""
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and (name is None or node.func.attr == name)
+        and isinstance(node.func.value, ast.Attribute)
+        and node.func.value.attr == "_dump"
+        and isinstance(node.func.value.value, ast.Name)
     )
 
 
@@ -6578,6 +6591,10 @@ class ASTParser:
             ast.Div: ir.truediv,
             ast.FloorDiv: ir.floordiv,
             ast.Mod: ir.mod,
+            ast.Pow: ir.pow,
+            ast.BitAnd: ir.bit_and,
+            ast.BitOr: ir.bit_or,
+            ast.BitXor: ir.bit_xor,
             ast.LShift: ir.bit_shift_left,
             ast.RShift: ir.bit_shift_right,
         }
@@ -6587,7 +6604,7 @@ class ASTParser:
             raise UnsupportedFeatureError(
                 f"Unsupported binary operator: {op_type.__name__}",
                 span=self.span_tracker.get_span(binop),
-                hint="Use supported operators: +, -, *, /, //, %, <<, >>",
+                hint="Use supported operators: +, -, *, /, //, %, **, &, |, ^, <<, >>",
             )
 
         return op_map[op_type](left, right, span)
@@ -6719,6 +6736,9 @@ class ASTParser:
         """
         func = call.func
 
+        if _is_dump_call(call):
+            return self._parse_dump_call(call)
+
         # Handle pl.yield_() specially
         if isinstance(func, ast.Attribute) and func.attr == "yield_":
             return self.parse_yield_call(call)
@@ -6771,6 +6791,34 @@ class ASTParser:
             hint="Use pl.* operations, pl.yield_(), self.method() for cross-function calls, "
             "or call an external @pl.function / @pl.inline by name",
         )
+
+    def _parse_dump_call(self, call: ast.Call) -> ir.Expr:
+        """Read private IR spellings without conflating logical and bitwise XOR."""
+        span = self.span_tracker.get_span(call)
+        if isinstance(call.func, ast.Attribute) and call.func.attr == "logical_xor":
+            if len(call.args) != 2 or call.keywords:
+                raise ParserSyntaxError("logical_xor requires exactly two positional operands", span=span)
+            left, right = [self.parse_expression(arg) for arg in call.args]
+            if any(
+                not isinstance(expr.type, ir.ScalarType) or expr.type.dtype != DataType.BOOL
+                for expr in (left, right)
+            ):
+                raise ParserTypeError("logical_xor requires BOOL scalar operands", span=span)
+            return ir.Xor(left, right, DataType.BOOL, span)
+        if isinstance(call.func, ast.Attribute) and call.func.attr == "float64":
+            if (
+                len(call.args) != 1
+                or call.keywords
+                or not isinstance(call.args[0], ast.Constant)
+                or not isinstance(call.args[0].value, str)
+            ):
+                raise ParserSyntaxError("float64 requires one hexadecimal string literal", span=span)
+            try:
+                value = _dump.float64(call.args[0].value)
+            except ValueError as exc:
+                raise ParserSyntaxError(str(exc), span=span) from exc
+            return ir.ConstFloat(value, DataType.DEFAULT_CONST_FLOAT, span)
+        raise ParserSyntaxError(f"Unknown IR dump expression: {ast.unparse(call.func)}", span=span)
 
     def parse_yield_call(self, call: ast.Call) -> ir.Expr:
         """Parse pl.yield_() call.
@@ -8897,6 +8945,11 @@ class ASTParser:
                 kwargs[key] = self._resolve_attribute_kwarg(value)
             elif isinstance(value, ast.List):
                 kwargs[key] = self._resolve_list_kwarg(value)
+            elif _is_dump_call(value, "float64"):
+                # Same value semantics as a float literal in an op kwarg.
+                float_expr = self._parse_dump_call(value)
+                assert isinstance(float_expr, ir.ConstFloat)
+                kwargs[key] = float_expr.value
             else:
                 kwargs[key] = self.parse_expression(value)
         return kwargs
@@ -9603,7 +9656,7 @@ class ASTParser:
         """
         span = self.span_tracker.get_span(call)
 
-        if len(call.args) != 2:
+        if len(call.args) != 2 or call.keywords:
             raise ParserSyntaxError(
                 "pl.const() requires exactly 2 arguments: value and dtype",
                 span=span,
@@ -9612,6 +9665,13 @@ class ASTParser:
 
         # Extract numeric value from first argument (handles Constant and -Constant)
         value_node = call.args[0]
+        if _is_dump_call(value_node, "float64"):
+            value_expr = self._parse_dump_call(value_node)
+            assert isinstance(value_expr, ir.ConstFloat)
+            dtype = self.type_resolver.resolve_dtype(call.args[1])
+            if not dtype.is_float():
+                raise ParserTypeError("float64 constants require a floating-point dtype", span=span)
+            return ir.ConstFloat(value_expr.value, dtype, span)
         negate = False
         if isinstance(value_node, ast.UnaryOp) and isinstance(value_node.op, ast.USub):
             negate = True

@@ -9,6 +9,8 @@
 
 """Parse DSL functions from text or files without requiring decorator syntax."""
 
+import __future__
+
 import ast
 import linecache
 import sys
@@ -235,7 +237,10 @@ def parse(
 
     # Compile the code with the specified filename for proper error reporting
     try:
-        compiled_code = compile(code, filename, "exec")
+        # Annotations are IR syntax, interpreted by TypeResolver from the
+        # original source. Evaluating them in Python first can fold IR shape
+        # trees or reject operators on symbolic dimensions before parsing.
+        compiled_code = compile(code, filename, "exec", flags=__future__.annotations.compiler_flag)
     except SyntaxError as e:
         raise SyntaxError(f"Failed to compile code from {filename}: {e}") from e
 

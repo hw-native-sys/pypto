@@ -96,6 +96,40 @@ Parse DSL code from strings or files for dynamic code generation:
 - `pl.parse_program(code)` → Use `pl.parse(code)` instead
 - `pl.loads_program(path)` → Use `pl.loads(path)` instead
 
+## Internal IR Text Forms
+
+Text parsing reads annotations as AST syntax without executing them as Python
+expressions first. This preserves symbolic shape expressions even when the DSL
+runtime wrappers do not implement the corresponding Python operator. Typed
+constant leaves in printed shapes reconstruct arithmetic, power, bitwise and
+shift nodes without constant folding. Ordinary user constant expressions may
+still fold; simplification of reconstructed IR belongs to a separate pass.
+
+Nested `pl.Tuple[...]` denotes a recursive tuple value type. The built-in
+`tuple[...]` return annotation continues to denote a list of function results;
+a nested result list is not a tuple value type and remains rejected.
+
+The printer also uses private `pl._dump` spellings. These are serialization
+syntax, not new kernel authoring APIs:
+
+| Printed form | Reconstructed IR |
+| ------------ | ---------------- |
+| `pl._dump.logical_xor(x, y)` | BOOL `Xor`; `x ^ y` instead denotes integer `BitXor` |
+| `pl.const(pl._dump.float64("7ff0000000000000"), pl.FP32)` | Positive infinity with explicit dtype |
+| `pl._dump.WindowBuffer`, `pl._dump.Unknown` | Internal fieldless type markers |
+
+`pl.Ptr` continues to represent `PtrType`, including in signatures. Marker
+round-tripping does not establish that an arbitrary internal signature can be
+lowered to an executable kernel. Unknown types remain inference placeholders;
+void value types and non-BOOL logical XOR operands are not made legal.
+
+Non-finite `ConstFloat` values use 16 hexadecimal digits encoding their stored
+IEEE 754 binary64 value, irrespective of the declared dtype. NaN sign and
+payload are retained. Structural comparison treats NaNs with identical bits as
+equal and different NaN representations as unequal; this is structural identity,
+not IEEE runtime comparison. Finite values, infinity signs, dtype checks, and
+the existing equality of positive and negative zero retain their semantics.
+
 ## SSA Properties
 
 The parser enforces Static Single Assignment:

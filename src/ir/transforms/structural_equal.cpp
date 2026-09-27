@@ -10,8 +10,10 @@
  */
 
 #include <any>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <ios>
 #include <map>
 #include <memory>
@@ -280,6 +282,12 @@ class StructuralEqualImpl {
   }
 
   result_type VisitLeafField(const double& lhs, const double& rhs) {
+    // Structural equality is reflexive for NaNs with the same representation.
+    // Keep sign/payload differences observable; ordinary numeric equality
+    // (including signed zero) and std::hash<double> remain compatible.
+    if (std::isnan(lhs) && std::isnan(rhs) && std::memcmp(&lhs, &rhs, sizeof(double)) == 0) {
+      return true;
+    }
     if (lhs != rhs) {
       if constexpr (AssertMode) {
         std::ostringstream msg;

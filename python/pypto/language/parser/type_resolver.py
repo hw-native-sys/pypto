@@ -129,8 +129,9 @@ def _is_pl_yield_call(node: ast.expr) -> bool:
 # None of the raw names is exported by `pl` / `pld`, so they resolve here but
 # cannot be evaluated as attributes. Python does not evaluate local-variable
 # annotations, so a raw name still works in an `x: pl.AsyncEventType = ...`
-# binding; in a *parameter* annotation it raises AttributeError before the
-# parser ever sees it. Emit the wrapper name — that is what the printer does.
+# binding; ordinary Python execution of a parameter annotation needs a wrapper.
+# Text parsing defers annotation evaluation, but the printer still uses wrapper
+# names so existing scripts can also evaluate their signatures normally.
 _MARKER_TYPE_GETTERS: dict[str, Callable[[], ir.Type]] = {
     "PrefetchAsyncContextType": ir.PrefetchAsyncContextType.get,
     "PrefetchAsyncContext": ir.PrefetchAsyncContextType.get,
@@ -140,6 +141,7 @@ _MARKER_TYPE_GETTERS: dict[str, Callable[[], ir.Type]] = {
     "AsyncSession": ir.AsyncSessionType.get,
     "CommCtxType": ir.CommCtxType.get,
     "CommCtx": ir.CommCtxType.get,
+    "Ptr": ir.PtrType,
 }
 
 
@@ -389,6 +391,15 @@ class TypeResolver:
         any import alias (``pl.AsyncEvent``, ``pld.CommCtx``, ``lang.AsyncEvent``)
         works.
         """
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Attribute)
+            and node.value.attr == "_dump"
+            and isinstance(node.value.value, ast.Name)
+        ):
+            getters = {"WindowBuffer": ir.WindowBufferType.get, "Unknown": ir.UnknownType}
+            getter = getters.get(node.attr)
+            return getter() if getter is not None else None
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
             name = node.attr
         elif isinstance(node, ast.Name):
@@ -1059,11 +1070,11 @@ class TypeResolver:
         return ir.TupleType(self._resolve_tuple_element_types(call_node.args[0].elts))
 
     def _resolve_tuple_element_types(self, elts: Sequence[ast.expr]) -> list[ir.Type]:
-        """Resolve a sequence of AST type nodes into IR types, rejecting nested tuples."""
+        """Resolve tuple value elements; built-in tuple return lists are not value types."""
         types: list[ir.Type] = []
         for elt in elts:
             resolved = self.resolve_type(elt)
-            if isinstance(resolved, (list, ir.TupleType)):
+            if isinstance(resolved, list):
                 raise ParserTypeError(
                     "Nested tuple types are not supported",
                     span=self._get_span(elt),
@@ -1241,6 +1252,12 @@ class TypeResolver:
         ast.Mult: "mul",
         ast.FloorDiv: "floordiv",
         ast.Mod: "mod",
+        ast.Pow: "pow",
+        ast.BitAnd: "bit_and",
+        ast.BitOr: "bit_or",
+        ast.BitXor: "bit_xor",
+        ast.LShift: "bit_shift_left",
+        ast.RShift: "bit_shift_right",
     }
 
     @staticmethod
@@ -1267,7 +1284,8 @@ class TypeResolver:
         """Rebuild a composite shape dimension as an IR expression, no folding.
 
         Handles int literals, names (closure/scope), ``pl.const(value, dtype)``
-        and binary +, -, *, //, % over those. Returns None for any other form.
+        and arithmetic/bitwise integer binary operators over those.
+        Returns None for any other form.
         """
         span = self._get_span(node)
         if isinstance(node, ast.Constant) and isinstance(node.value, int):

@@ -483,15 +483,17 @@ class TestPlTupleSubscriptTypeResolver:
         assert isinstance(result, ir.TupleType)
         assert len(result.types) == 0
 
-    def test_resolve_pl_tuple_nested_error(self):
-        """Test that pl.Tuple[pl.Tuple[...], ...] raises error."""
+    def test_resolve_pl_tuple_nested(self):
+        """Nested tuple values retain their recursive type structure."""
         resolver = _make_resolver()
 
         code = "pl.Tuple[pl.Tuple[pl.Scalar[pl.INT32]], pl.Scalar[pl.FP32]]"
         node = ast.parse(code, mode="eval").body
 
-        with pytest.raises(ParserTypeError, match="Nested tuple types"):
-            resolver.resolve_type(node)
+        expected = ir.TupleType([ir.TupleType([ir.ScalarType(DataType.INT32)]), ir.ScalarType(DataType.FP32)])
+        result = resolver.resolve_type(node)
+        assert isinstance(result, ir.TupleType)
+        ir.assert_structural_equal(result, expected)
 
     def test_resolve_pl_tuple_roundtrip(self):
         """Test print → parse round-trip with pl.Tuple[...] syntax."""
