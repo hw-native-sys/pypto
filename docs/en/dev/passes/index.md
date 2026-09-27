@@ -69,8 +69,8 @@ Keep the English and Chinese documentation synchronized.
 | 33 | [MaterializeTensorStrides](33-materialize_tensor_strides.md) | Fills in the packed canonical stride for every tensor view that carries none |
 | 34 | [InitMemRef](34-init_memref.md) | Initializes MemRefs and creates alloc operations with unallocated addresses |
 | 35 | [MaterializeSemanticAliases](35-materialize_semantic_aliases.md) | Forces buffers that program semantics require to be one allocation (loop-carry, in-place) |
-| 36 | [MemoryReuse](36-memory_reuse.md) | Reuses buffers by lifetime analysis and removes redundant allocs |
-| 37 | [AllocateMemoryAddr](37-allocate_memory_addr.md) | Assigns real addresses to existing alloc operations |
+| 36 | [MemoryReuse](36-memory_reuse.md) | Reuses buffers by lifetime analysis and removes redundant allocs; skipped with `memory_planner=DSA_RP` or `PTOAS` |
+| 37 | [AllocateMemoryAddr](37-allocate_memory_addr.md) | Assigns real addresses to existing alloc operations; skipped with `memory_planner=PTOAS` |
 | 38 | [FoldNoOpReshape](38-fold_no_op_reshape.md) | Folds `tile.reshape` calls that change neither physical shape nor allocation |
 | 39 | [FuseCreateAssembleToSlice](39-fuse_create_assemble_to_slice.md) | Fuses `tensor.create` + `tensor.assemble` into one `tensor.slice` view |
 | 40 | [LowerL2TensorCollectives](40-lower_l2_tensor_collectives.md) | Rewrites a managed collective written in a CHIP orchestration body into one local builtin AIV task, with no per-device fan-out and no nested L2 dispatch |

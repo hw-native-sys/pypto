@@ -50,7 +50,7 @@ You are a specialized code review agent. Review all code changes in the current 
 - [ ] Type stubs (`.pyi`) match actual API
 - [ ] Docstrings complete and accurate
 - [ ] Referenced files still exist
-- [ ] Pass documentation numbering matches pass manager execution order (see `../../rules/pass-doc-ordering.md`)
+- [ ] Pass documentation follows the numbering convention in `docs/en/dev/passes/index.md` and preserves relative pipeline order (see `../../rules/pass-doc-ordering.md`)
 
 **See [documentation-length.md](../../rules/documentation-length.md) for length guidelines**
 
@@ -141,7 +141,7 @@ Provide your review as:
 2. **Pass Complexity**: All passes must be O(N log N) or better — no nested full scans over IR node collections, no linear scans for lookups
 3. **Python Style**: `@overload` for multiple signatures (not `Union`), modern type syntax (`list[int]` not `List[int]`), f-strings, Google-style docstrings, type hints on public APIs
 4. **Testing Standards**: pytest only (no `unittest`), `assert` for verification (no `print`), `pytest.raises()` for exceptions, tests only in `tests/`
-5. **Documentation**: Alignment with code changes, examples still work, file lengths (≤1000 for docs; ≤200 per rule file and ≤2500 across `.claude/rules/`; ≤200 for `SKILL.md` and ≤500 for skill reference files), pass doc numbering matches pass manager execution order
+5. **Documentation**: Alignment with code changes, examples still work, file lengths (≤1000 for docs; ≤200 per rule file and ≤2500 across `.claude/rules/`; ≤200 for `SKILL.md` and ≤500 for skill reference files), pass documentation follows the convention in `docs/en/dev/passes/index.md` and preserves relative pipeline order
 6. **Cross-Layer Sync**: C++ headers, Python bindings, and type stubs must all be updated together
 7. **Commit Content**: Only relevant changes, no artifacts, no sensitive data, no AI co-author lines, no hardcoded absolute paths
 8. **Multi-Language Doc Sync**: When English docs (`docs/en/dev/` or `README.md`) are modified, verify corresponding `docs/zh/` and `README.zh-CN.md` are also updated or flagged

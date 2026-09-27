@@ -64,8 +64,8 @@ PyPTO IR 变换的参考文档，按阅读顺序组织。实际执行顺序请�
 | 33 | [MaterializeTensorStrides](33-materialize_tensor_strides.md) | 为每个尚无 stride 的 tensor view 填入紧致规范 stride |
 | 34 | [InitMemRef](34-init_memref.md) | 初始化 MemRef 并创建地址未分配的 alloc 操作 |
 | 35 | [MaterializeSemanticAliases](35-materialize_semantic_aliases.md) | 强制语义要求同一分配的缓冲区真正共用一块（循环携带、原地更新） |
-| 36 | [MemoryReuse](36-memory_reuse.md) | 基于生命周期分析复用缓冲区并删除冗余 alloc |
-| 37 | [AllocateMemoryAddr](37-allocate_memory_addr.md) | 为已有 alloc 操作分配真实地址 |
+| 36 | [MemoryReuse](36-memory_reuse.md) | 基于生命周期分析复用缓冲区并删除冗余 alloc；`memory_planner=DSA_RP` 或 `PTOAS` 时跳过 |
+| 37 | [AllocateMemoryAddr](37-allocate_memory_addr.md) | 为已有 alloc 操作分配真实地址；`memory_planner=PTOAS` 时跳过 |
 | 38 | [FoldNoOpReshape](38-fold_no_op_reshape.md) | 折叠既不改变物理形状也不改变分配的 `tile.reshape` |
 | 39 | [FuseCreateAssembleToSlice](39-fuse_create_assemble_to_slice.md) | 把 `tensor.create` + `tensor.assemble` 融合为单个 `tensor.slice` 视图 |
 | 40 | [LowerL2TensorCollectives](40-lower_l2_tensor_collectives.md) | 把写在 CHIP orchestration 函数体里的托管集合通信改写成一个本地 builtin AIV task，不按设备扇出，也不产生嵌套 L2 dispatch |
