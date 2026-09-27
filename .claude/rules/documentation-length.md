@@ -37,14 +37,9 @@ the reference file has no headroom either, add a second one split by topic.
 
 **For very large files, split into focused components:**
 
-```text
-# Example: Pass documentation split into topic folders
-docs/en/dev/passes/
-├── 00-pass_manager.md      (~295 lines) - Pass system overview
-├── 02-unroll_loops.md      (~100 lines) - Loop unrolling
-├── 04-convert_to_ssa.md    (~150 lines) - SSA conversion
-└── ...                     - Individual pass docs
-```
+For example, keep the pass system overview separate from individual pass
+reference pages. Read the index in `docs/en/dev/passes/` for the current
+organization and page names.
 
 **Splitting criteria:**
 
