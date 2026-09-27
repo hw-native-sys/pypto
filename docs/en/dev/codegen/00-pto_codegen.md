@@ -194,6 +194,34 @@ that case it preserves any data outside the insertion window.  The
 trailing `pto.tmov src → dst_view` is the actual data write into the
 sub-window carved out by `pto.subview`.
 
+**FIXPIPE epilogue on the Acc writeback.**  A *converting* `Acc → Mat` assemble
+and every `Acc → GM` store are the cube's fix-pipe draining L0C, which can
+multiply by an FP32 scale and apply ReLU on the way out; both ops carry that as
+`pre_quant` / `pre_relu`. The order is **ReLU, then the multiply, then the
+destination clamp** — the activation is a *pre*-quant stage (pto-isa's
+`ReluPreMode`) that sees the raw accumulator, so the pair computes
+`maximum(tile, 0) * scale`, not `maximum(tile * scale, 0)`. Those agree for every
+`scale > 0`, which is why only a negative scale separates them; `acc_to_gm_negative_scale`
+in `tests/st/runtime/ops/test_fixpipe_epilogue.py` measures it on a2a3.
+
+The scale also *selects* the lowering — an `INT32` accumulator reaches an `FP16`
+Mat tile only because it carries one (`DEQF16`) — so one predicate,
+`ir::CubeMatWritebackUsesFixpipe`, decides it for the emitter and
+`FixpipeEpilogueValid` alike; a same-dtype assemble converts nothing, stays a
+plain `pto.tmov`, and carries no epilogue. `pto.tinsert` and `pto.tstore` spell
+the packed scale operand differently, neither form guessable from the other —
+both pinned with their provenance at the emission sites. See
+`codegen::EncodeFixpipePreQuant` for the register layout, `99-verifier.md` for
+the per-backend dtype tables.
+
+The `pto.tinsert` half is **emitted but not currently reachable**: both handlers
+withhold `pre_quant` for `FixpipeDest::kMat` because ptoas emits an ambiguous
+call for it (the scale binds to `indexRow` —
+[PTOAS#1570](https://github.com/hw-native-sys/PTOAS/issues/1570), and
+`99-verifier.md` for the mechanism), so the
+emitter code below is exercised only with verification off. `pre_relu` alone on
+`Acc → Mat`, and the whole `Acc → GM` path, are unaffected.
+
 **`tile.set_validshape` lowering details.**  `pto.set_validshape` mutates the
 operand's `valid_row` / `valid_col` operands, so the operand must be a handle
 that has them: an alloc, an `scf.if` result, a cross-core pop slot.  A **view** —

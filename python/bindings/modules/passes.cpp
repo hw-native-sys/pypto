@@ -130,7 +130,15 @@ void BindPass(nb::module_& m) {
       .value("AccToGmStoreValid", IRProperty::AccToGmStoreValid,
              "Every tile.store draining an Acc-resident tile targets a GM tensor whose dtype the "
              "backend fix-pipe can narrow into (INT32/FP32/FP16[/BF16]); INT8/INT16 must route "
-             "through a Vec tile instead")
+             "through a Vec tile instead. A store carrying a FIXPIPE epilogue (pre_quant / "
+             "pre_relu) is judged by the scale-bearing table instead, which does reach INT8, and "
+             "an epilogue on a non-Acc source is rejected")
+      .value("FixpipeEpilogueValid", IRProperty::FixpipeEpilogueValid,
+             "Every tile.assemble carrying a FIXPIPE epilogue (pre_quant / pre_relu) is an Acc->Mat "
+             "writeback the fix-pipe can perform: pre_relu alone rides the unscaled narrowing, while "
+             "pre_quant is withheld on every backend today because ptoas mis-emits the scale on "
+             "pto.tinsert; the Acc->GM half of the contract, which does carry a scale, is "
+             "AccToGmStoreValid")
       .value("AtomicAddDtypeValid", IRProperty::AtomicAddDtypeValid,
              "Every atomic-add write into GM (tile.store / tensor.assemble / pld.tensor.put / "
              "pld.tile.put / pld.tensor.remote_store / pld.tile.remote_store) targets a dtype the "

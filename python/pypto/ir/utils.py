@@ -589,6 +589,63 @@ def _normalize_const_to_dtype(
     return _const_at_dtype(value, target, span)
 
 
+def resolve_fixpipe_epilogue(
+    op_name: str, pre_quant: float | _ir.Expr | None, pre_relu: bool | _ir.Expr
+) -> tuple[float | None, bool]:
+    """Normalize the FIXPIPE ``pre_quant`` / ``pre_relu`` pair to plain Python values.
+
+    Both reach the op builders two ways. From Python they arrive as a ``float``
+    and a ``bool``; from a ``@pl.program`` body the DSL parser has already folded
+    the literal into a ``ConstFloat`` / ``ConstInt`` node. That difference is not
+    cosmetic in either direction — ``float()`` raises on a folded scale, and a
+    folded ``pre_relu=False`` is truthy *as an object*, so a naive check would
+    turn the activation on. Every caller resolves through here so the two cannot
+    disagree about what the author wrote.
+
+    A genuinely runtime value is rejected rather than reinterpreted: the fix-pipe
+    reads its scale from a configuration register written at assembly time and
+    picks its activation as an instruction mode, so neither can depend on a value
+    the kernel computes.
+
+    Args:
+        op_name: Operator name, used in the error message.
+        pre_quant: FP32 scale, ``None``, or a parser-folded constant node.
+        pre_relu: Bool, or a parser-folded constant node.
+
+    Returns:
+        ``(scale or None, relu)`` as plain Python values.
+
+    Raises:
+        TypeError: If either argument is a runtime expression.
+    """
+    scale: float | None = None
+    if pre_quant is not None:
+        if isinstance(pre_quant, (_ir.ConstFloat, _ir.ConstInt)):
+            scale = float(pre_quant.value)
+        elif isinstance(pre_quant, _ir.Expr):
+            raise TypeError(
+                f"{op_name}: pre_quant must be a compile-time constant scale, got a "
+                f"{type(pre_quant).__name__} expression. The fix-pipe reads the scale out of a "
+                "configuration register written at assembly time, so a runtime scalar cannot be "
+                "encoded into it; hoist the value to a Python float, or scale in the vector unit."
+            )
+        else:
+            scale = float(pre_quant)
+
+    if isinstance(pre_relu, (_ir.ConstFloat, _ir.ConstInt)):
+        relu = bool(pre_relu.value)
+    elif isinstance(pre_relu, _ir.Expr):
+        raise TypeError(
+            f"{op_name}: pre_relu must be a compile-time bool, got a {type(pre_relu).__name__} "
+            "expression. The activation is an instruction mode chosen at assembly time, not a "
+            "runtime predicate."
+        )
+    else:
+        relu = bool(pre_relu)
+
+    return scale, relu
+
+
 __all__ = [
     "CAST_MODE_NAMES",
     "DEFAULT_SATURATION_MODE",
@@ -603,6 +660,7 @@ __all__ = [
     "_to_make_tuple",
     "has_partial_valid_region",
     "resolve_cast_mode",
+    "resolve_fixpipe_epilogue",
     "resolve_saturation_deviation",
     "resolve_saturation_mode",
     "use_parser_span",

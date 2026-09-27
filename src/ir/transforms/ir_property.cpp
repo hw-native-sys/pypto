@@ -105,6 +105,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "IterArgCarryClassified";
     case IRProperty::AccToGmStoreValid:
       return "AccToGmStoreValid";
+    case IRProperty::FixpipeEpilogueValid:
+      return "FixpipeEpilogueValid";
     case IRProperty::AtomicAddDtypeValid:
       return "AtomicAddDtypeValid";
     case IRProperty::AccCompactValid:
@@ -185,6 +187,7 @@ const IRPropertySet& GetVerifiedProperties() {
                                    IRProperty::DistTensorCtxMaterialized,
                                    IRProperty::GraphBoundaryLegalized,
                                    IRProperty::AccToGmStoreValid,
+                                   IRProperty::FixpipeEpilogueValid,
                                    IRProperty::AccCompactValid,
                                    IRProperty::AtomicAddDtypeValid,
                                    IRProperty::AccStorePhaseValid};
