@@ -68,8 +68,12 @@ std::vector<StmtPtr> StripDeadIterArgs(const std::vector<StmtPtr>& stmts);
 
 void BuildDefMap(const std::vector<StmtPtr>& stmts, std::unordered_map<const Var*, StmtPtr>& def_map);
 
+/// Restore missing loop initializer definitions without duplicating visible
+/// producers. Parameters and pending cross-core remaps are already bound.
 std::vector<StmtPtr> FixupIterArgInitValues(const std::vector<StmtPtr>& stmts,
-                                            const std::unordered_map<const Var*, StmtPtr>& original_def_map);
+                                            const std::unordered_map<const Var*, StmtPtr>& original_def_map,
+                                            const std::vector<VarPtr>& params = {},
+                                            const std::unordered_set<const Var*>& extra_defined = {});
 
 /// Rewrite each trailing yield value that names a Var no longer visible at that
 /// point to the carry backing its slot, so a producer pruned by an earlier split

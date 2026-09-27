@@ -551,6 +551,11 @@ class After:
         return self.compute_group(x, y, out_0)  # unchanged
 ```
 
+Loop initializer repair tracks lexical visibility: enclosing definitions, parameters,
+loop variables, carries and pending cross-core remaps remain available in nested
+bodies. It restores only missing producers; compound statements export only their
+result variables. Branch-local bindings never become visible to sibling branches.
+
 ## Implementation
 
 **Header**: `include/pypto/ir/transforms/passes.h`

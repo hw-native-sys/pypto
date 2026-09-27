@@ -70,8 +70,10 @@ from pypto import passes
 result = passes.legalize_spmd_launches()(program)
 ```
 
-Requires SSAForm, NoNestedCalls and ReturnParamsExplicit; preserves SSAForm
-and NoNestedCalls and produces NormalizedStmtStructure. It invalidates call
+Requires NoNestedCalls and ReturnParamsExplicit; preserves NoNestedCalls and
+produces NormalizedStmtStructure. It verifies SSA before and after rewriting
+each Orchestration function. It does not require or reestablish whole-program
+SSAForm: InitMemRef has invalidated that property for late device IR. It invalidates call
 directions, runtime scope materialization and loop carry classification, which
 must run after the control-flow change. The pass is idempotent and needs no
 configuration flag. Traversals and cached callee/tuple lookups are linear in

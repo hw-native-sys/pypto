@@ -74,9 +74,12 @@ inline const PassProperties kLowerL2TensorCollectivesProperties{};
 
 // Rebuild control flow before direction/dependency/runtime-scope analysis.
 // ReturnParamsExplicit supplies the unambiguous return-slot -> parameter map.
+// InitMemRef has already invalidated whole-program SSAForm. This pass verifies
+// SSA locally for the Orchestration functions it rewrites, without claiming to
+// reestablish SSA for untouched device functions.
 inline const PassProperties kLegalizeSpmdLaunchesProperties{
-    .required = {IRProperty::SSAForm, IRProperty::NoNestedCalls, IRProperty::ReturnParamsExplicit},
-    .produced = {IRProperty::SSAForm, IRProperty::NoNestedCalls, IRProperty::NormalizedStmtStructure},
+    .required = {IRProperty::NoNestedCalls, IRProperty::ReturnParamsExplicit},
+    .produced = {IRProperty::NoNestedCalls, IRProperty::NormalizedStmtStructure},
     .invalidated = {IRProperty::CallDirectionsResolved, IRProperty::RuntimeScopesMaterialized,
                     IRProperty::IterArgCarryClassified}};
 

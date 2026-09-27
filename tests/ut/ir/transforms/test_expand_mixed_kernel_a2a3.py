@@ -1710,5 +1710,67 @@ def test_nested_yield_of_a_cross_core_result_is_not_rewritten():
     )
 
 
+@pytest.mark.parametrize("use_while", [False, True])
+def test_branch_loop_initializer_keeps_enclosing_producer(use_while):
+    """HCA's branch-local carry must reuse the dominating L1 allocation."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def branch_init(
+            self,
+            x: pl.Tensor[[16, 16], pl.BF16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            n: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            seed = pl.tile.create([16, 16], dtype=pl.BF16, target_memory=pl.Mem.Mat)
+            if n > 0:
+                value = pl.load(x, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+                filled = pl.assemble(seed, value, [0, 0])
+                tile = pl.yield_(filled)
+            else:
+                for i, (carry,) in pl.range(2, init_values=(seed,)):
+                    value = pl.load(x, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+                    updated = pl.assemble(carry, value, [0, 0])
+                    loop_result = pl.yield_(updated)
+                tile = pl.yield_(loop_result)
+            left = pl.move(tile, target_memory=pl.Mem.Left)
+            right = pl.move(tile, target_memory=pl.Mem.Right)
+            acc = pl.matmul(left, right)
+            vec = pl.move(acc, target_memory=pl.Mem.Vec)
+            out = pl.store(vec, [0, 0], out)
+            return out
+
+    class UseWhile(ir.IRMutator):
+        def visit_for_stmt(self, op):
+            # The loop variable is unused. Retain the carry/yield structure
+            # while exercising the shared WhileStmt initializer repair.
+            return ir.WhileStmt(
+                ir.ConstBool(True, op.span),
+                op.iter_args,
+                op.body,
+                op.return_vars,
+                op.span,
+            )
+
+    before = passes.infer_tile_memory_space()(passes.convert_to_ssa()(Before))
+    if use_while:
+        before = UseWhile().visit_program(before)
+    after = passes.expand_mixed_kernel()(before)
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.SSAForm)
+    properties.insert(passes.IRProperty.UseAfterDef)
+    passes.run_verifier(properties)(after)
+    aic = next(f for f in after.functions.values() if f.func_type == ir.FunctionType.AIC)
+    stmts = ir.flatten_to_stmts(aic.body)
+    seed = next(s for s in stmts if _op_name(s) == ir.get_op("tile.create").name)
+    assert isinstance(seed, ir.AssignStmt)
+    branch = next(s for s in stmts if isinstance(s, ir.IfStmt))
+    assert branch.else_body is not None
+    loop = next(s for s in ir.flatten_to_stmts(branch.else_body) if isinstance(s, (ir.ForStmt, ir.WhileStmt)))
+    assert loop.iter_args[0].initValue.same_as(seed.var)
+    assert all(not isinstance(s, ir.AssignStmt) for s in ir.flatten_to_stmts(branch.else_body))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

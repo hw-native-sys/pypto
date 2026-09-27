@@ -64,8 +64,10 @@ from pypto import passes
 result = passes.legalize_spmd_launches()(program)
 ```
 
-要求 SSAForm、NoNestedCalls 和 ReturnParamsExplicit；保留 SSAForm、
-NoNestedCalls，建立 NormalizedStmtStructure。控制流改写使调用方向、runtime
+要求 NoNestedCalls 和 ReturnParamsExplicit；保留 NoNestedCalls，建立
+NormalizedStmtStructure。改写每个 Orchestration 函数前后都会验证其 SSA。
+此 pass 不要求或重新建立整个 Program 的 SSAForm：InitMemRef 已使该属性
+在后期设备 IR 中失效。控制流改写使调用方向、runtime
 scope 和循环 carry 分类失效，这些分析必须随后运行。此 pass 具有幂等性，
 无需配置开关。遍历和缓存查找的复杂度与 IR 及调用参数总大小呈线性关系。
 

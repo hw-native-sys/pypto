@@ -32,6 +32,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/alloc_batching.h"
@@ -408,6 +409,14 @@ std::unordered_map<std::string, CalleeInfo> BuildCalleeInfo(const ProgramPtr& pr
   return callees;
 }
 
+void VerifyOrchestrationSSA(const FunctionPtr& function) {
+  // Arithmetic substitution requires immutable bindings. Check only the
+  // function being rewritten: late device IR need not remain in SSA form.
+  auto program =
+      std::make_shared<Program>(std::vector<FunctionPtr>{function}, function->name_, function->span_);
+  pass::VerifyProperties({IRProperty::SSAForm}, program, "LegalizeSpmdLaunches");
+}
+
 ProgramPtr TransformProgram(const ProgramPtr& program) {
   auto callees = BuildCalleeInfo(program);
   auto functions = program->functions_;
@@ -416,12 +425,14 @@ ProgramPtr TransformProgram(const ProgramPtr& program) {
     // Graph launch counts must remain constant; LegalizeGraphBoundary owns its
     // diagnostic. Never hide an invalid Graph launch behind a generated guard.
     if (func->func_type_ != FunctionType::Orchestration) continue;
+    VerifyOrchestrationSSA(func);
     auto analyzer = std::make_shared<arith::Analyzer>();
     ScratchUses scratch;
     scratch.VisitStmt(func->body_);
     LaunchLegalizer legalizer(analyzer.get(), callees, scratch);
     auto result = legalizer.VisitFunction(func);
     result = NormalizeStmtStructure(legalizer.scratch_cleanup.VisitFunction(result));
+    VerifyOrchestrationSSA(result);
     changed |= result != func;
     func = std::move(result);
   }

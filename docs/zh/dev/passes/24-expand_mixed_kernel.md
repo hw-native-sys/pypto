@@ -496,6 +496,10 @@ class After:
         return self.compute_group(x, y, out_0)  # 不变
 ```
 
+循环初值修复按词法作用域跟踪可见定义：外层定义、参数、循环变量、carry
+以及等待跨核重映射的值在嵌套体中仍然可见。只补回缺失的 producer，
+复合语句只向外导出结果变量，分支局部定义不会泄漏到兄弟分支。
+
 ## 实现
 
 **头文件**：`include/pypto/ir/transforms/passes.h`

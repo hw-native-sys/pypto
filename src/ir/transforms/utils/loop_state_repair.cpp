@@ -461,88 +461,10 @@ void BuildDefMap(const std::vector<StmtPtr>& stmts, std::unordered_map<const Var
   }
 }
 
-std::vector<StmtPtr> FixupIterArgInitValues(const std::vector<StmtPtr>& stmts,
-                                            const std::unordered_map<const Var*, StmtPtr>& original_def_map) {
-  auto recurse = [&](const std::vector<StmtPtr>& s) { return FixupIterArgInitValues(s, original_def_map); };
-
-  std::unordered_set<const Var*> defined_so_far;
-  std::vector<StmtPtr> result;
-  std::unordered_set<const Var*> pulled;
-
-  for (const auto& stmt : stmts) {
-    auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt);
-    auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt);
-
-    const std::vector<IterArgPtr>* iter_args_ptr = nullptr;
-    if (for_stmt) {
-      iter_args_ptr = &for_stmt->iter_args_;
-    } else if (while_stmt) {
-      iter_args_ptr = &while_stmt->iter_args_;
-    }
-    if (iter_args_ptr && !iter_args_ptr->empty()) {
-      std::vector<StmtPtr> missing_defs;
-      for (const auto& iter_arg : *iter_args_ptr) {
-        var_collectors::VarDefUseCollector collector;
-        collector.VisitExpr(iter_arg->initValue_);
-        for (const Var* ref : collector.var_uses) {
-          if (!defined_so_far.count(ref) && !pulled.count(ref)) {
-            PullDefinitionChain(ref, original_def_map, defined_so_far, pulled, missing_defs);
-          }
-        }
-      }
-      for (const auto& def : missing_defs) {
-        if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(def)) {
-          defined_so_far.insert(assign->var_.get());
-        }
-      }
-      result.insert(result.end(), missing_defs.begin(), missing_defs.end());
-    }
-
-    var_collectors::VarDefUseCollector stmt_defs;
-    stmt_defs.VisitStmt(stmt);
-    defined_so_far.insert(stmt_defs.var_defs.begin(), stmt_defs.var_defs.end());
-
-    if (for_stmt) {
-      auto new_body = recurse(FlattenBody(for_stmt->body_));
-      result.push_back(RebuildForStmt(for_stmt, MakeBody(new_body, for_stmt->span_)));
-    } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-      auto new_then = recurse(FlattenBody(if_stmt->then_body_));
-      auto new_else = ProcessElseBranch(if_stmt, [&](const std::vector<StmtPtr>& es) { return recurse(es); });
-      result.push_back(RebuildIfStmt(if_stmt, new_then, new_else));
-    } else if (while_stmt) {
-      auto new_body = recurse(FlattenBody(while_stmt->body_));
-      result.push_back(RebuildWhileStmt(while_stmt, MakeBody(new_body, while_stmt->span_)));
-    } else {
-      result.push_back(stmt);
-    }
-  }
-
-  return result;
-}
-
 namespace {
 
-/// `FixupDanglingYieldValues` carrying the definitions visible to the caller.
-///
-/// `defined_so_far` only ever accumulates the statements preceding a loop
-/// *within its own block*, so a recursion that restarts it empty hides every
-/// enclosing binding from the nested loop's dangling check.
-/// `ReplaceDanglingYieldValues` then reads a yield of an outer loop variable —
-/// or of anything defined before the enclosing loop — as dangling and swaps in
-/// the slot's own carry, silently turning an update into a self-carry. Threading
-/// the scope keeps the check honest at every depth.
-///
-/// A loop contributes its `loop_var_` and `iter_args_` to the scope it opens:
-/// the header binds them, so no body statement defines them and the body walk
-/// alone never sees them.
-/// Bindings a nesting level added, removed again when that level returns.
-///
-/// One mutable set is threaded through the whole traversal rather than copied
-/// per scope. Copying costs O(levels x |visible set|) — a block that defines N
-/// values and then opens N loops copies an N-element set N times — which the
-/// repository's O(N log N) pass bound does not allow. Recording what a level
-/// added and erasing exactly that on the way out costs one insert and one erase
-/// per binding instead.
+// Track lexical visibility with one shared set and undo only this scope's
+// insertions. Copying all enclosing definitions at each depth is quadratic.
 class ScopedDefs {
  public:
   explicit ScopedDefs(std::unordered_set<const Var*>* scope) : scope_(scope) {}
@@ -564,6 +486,69 @@ class ScopedDefs {
   std::unordered_set<const Var*>* scope_;
   std::vector<const Var*> added_;
 };
+
+void BindStatementResults(const StmtPtr& stmt, ScopedDefs& scope) {
+  if (auto assign = As<AssignStmt>(stmt)) {
+    scope.Add(assign->var_.get());
+  } else if (auto for_stmt = As<ForStmt>(stmt)) {
+    for (const auto& var : for_stmt->return_vars_) scope.Add(var.get());
+  } else if (auto while_stmt = As<WhileStmt>(stmt)) {
+    for (const auto& var : while_stmt->return_vars_) scope.Add(var.get());
+  } else if (auto if_stmt = As<IfStmt>(stmt)) {
+    for (const auto& var : if_stmt->return_vars_) scope.Add(var.get());
+  }
+}
+
+std::vector<StmtPtr> FixupIterArgInitValuesScoped(
+    const std::vector<StmtPtr>& stmts, const std::unordered_map<const Var*, StmtPtr>& original_def_map,
+    std::unordered_set<const Var*>* scope) {
+  ScopedDefs level(scope);
+  auto recurse = [&](const std::vector<StmtPtr>& body) {
+    return FixupIterArgInitValuesScoped(body, original_def_map, scope);
+  };
+  std::vector<StmtPtr> result;
+  for (const auto& stmt : stmts) {
+    auto for_stmt = As<ForStmt>(stmt);
+    auto while_stmt = As<WhileStmt>(stmt);
+    if (for_stmt || while_stmt) {
+      const auto& iter_args = for_stmt ? for_stmt->iter_args_ : while_stmt->iter_args_;
+      std::unordered_set<const Var*> pulled;
+      std::vector<StmtPtr> missing_defs;
+      for (const auto& iter_arg : iter_args) {
+        var_collectors::VarDefUseCollector collector;
+        collector.VisitExpr(iter_arg->initValue_);
+        for (const Var* ref : collector.var_uses) {
+          PullDefinitionChain(ref, original_def_map, *scope, pulled, missing_defs);
+        }
+      }
+      for (const auto& def : missing_defs) BindStatementResults(def, level);
+      result.insert(result.end(), missing_defs.begin(), missing_defs.end());
+
+      // Initializers see the enclosing scope; only the body sees the header's
+      // loop variable and carries. Neither may escape into a sibling block.
+      ScopedDefs header(scope);
+      if (for_stmt) header.Add(for_stmt->loop_var_.get());
+      for (const auto& iter_arg : iter_args) header.Add(iter_arg.get());
+      if (for_stmt) {
+        result.push_back(
+            RebuildForStmt(for_stmt, MakeBody(recurse(FlattenBody(for_stmt->body_)), for_stmt->span_)));
+      } else {
+        result.push_back(RebuildWhileStmt(
+            while_stmt, MakeBody(recurse(FlattenBody(while_stmt->body_)), while_stmt->span_)));
+      }
+    } else if (auto if_stmt = As<IfStmt>(stmt)) {
+      auto new_then = recurse(FlattenBody(if_stmt->then_body_));
+      auto new_else = ProcessElseBranch(if_stmt, recurse);
+      result.push_back(RebuildIfStmt(if_stmt, new_then, new_else));
+    } else {
+      result.push_back(stmt);
+    }
+    // Compound statements export only their results, never branch/body locals
+    // or definitions that follow a nested loop's initializer.
+    BindStatementResults(result.back(), level);
+  }
+  return result;
+}
 
 std::vector<StmtPtr> FixupDanglingYieldValuesScoped(const std::vector<StmtPtr>& stmts,
                                                     std::unordered_set<const Var*>* scope) {
@@ -643,6 +628,15 @@ std::vector<StmtPtr> FixupDanglingYieldValuesScoped(const std::vector<StmtPtr>& 
 }
 
 }  // namespace
+
+std::vector<StmtPtr> FixupIterArgInitValues(const std::vector<StmtPtr>& stmts,
+                                            const std::unordered_map<const Var*, StmtPtr>& original_def_map,
+                                            const std::vector<VarPtr>& params,
+                                            const std::unordered_set<const Var*>& extra_defined) {
+  std::unordered_set<const Var*> scope = extra_defined;
+  for (const auto& param : params) scope.insert(param.get());
+  return FixupIterArgInitValuesScoped(stmts, original_def_map, &scope);
+}
 
 std::vector<StmtPtr> FixupDanglingYieldValues(const std::vector<StmtPtr>& stmts,
                                               const std::vector<VarPtr>& params,
@@ -842,7 +836,7 @@ std::vector<StmtPtr> FinalizeSplitCoreBody(const std::vector<StmtPtr>& stmts,
   // those names are pending a remap, not dangling, and only one of the two
   // knowing that would leave the other free to destroy the reference.
   auto repaired = StripDeadIterArgs(stmts);
-  repaired = FixupIterArgInitValues(repaired, original_def_map);
+  repaired = FixupIterArgInitValues(repaired, original_def_map, params, extra_defined);
   repaired = FixupDanglingYieldValues(repaired, params, extra_defined);
   repaired = StripDanglingIfReturnVars(repaired, extra_defined);
   repaired = dce::EliminateDeadCode(repaired);

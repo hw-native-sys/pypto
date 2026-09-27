@@ -11,7 +11,7 @@
 
 import pypto.language as pl
 import pytest
-from pypto import DataType, ir, passes
+from pypto import DataType, Error, ir, passes
 
 
 def _program():
@@ -339,6 +339,39 @@ def test_omitted_outputs_before_required_inputs_are_rejected(count):
         passes.legalize_spmd_launches()(program)
     assert "'a__ssa_v0' (parameter 0)" in str(error.value)
     assert "'b__ssa_v0' (parameter 2)" in str(error.value)
+
+
+@pytest.mark.parametrize("function_type", [ir.FunctionType.AIV, ir.FunctionType.Orchestration])
+def test_ssa_contract_is_local_to_orchestration(function_type):
+    """Late device IR cannot establish or invalidate the launch pass's SSA checks."""
+    span = ir.Span.unknown()
+    scalar = ir.Var("value", ir.ScalarType(DataType.INT32), span)
+    function = ir.Function(
+        "reassigned",
+        [],
+        [],
+        ir.SeqStmts(
+            [
+                ir.AssignStmt(scalar, ir.ConstInt(1, DataType.INT32, span), span),
+                ir.AssignStmt(scalar, ir.ConstInt(2, DataType.INT32, span), span),
+            ],
+            span,
+        ),
+        span,
+        type=function_type,
+    )
+    program = ir.Program([*_prepare(_program()).functions.values(), function], "mixed_ssa", span)
+    if function_type == ir.FunctionType.Orchestration:
+        with pytest.raises(Error, match="assigned more than once"):
+            passes.legalize_spmd_launches()(program)
+    else:
+        pipeline = passes.PassPipeline()
+        pipeline.add_pass(passes.legalize_spmd_launches())
+        after = pipeline.run(program)
+        unchanged = after.get_function("reassigned")
+        assert unchanged is not None
+        assert unchanged.same_as(function)
+        _verify(ir.Program([f for f in after.functions.values() if f.name != "reassigned"], "ssa", span))
 
 
 if __name__ == "__main__":
