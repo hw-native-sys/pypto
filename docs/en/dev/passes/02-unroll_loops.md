@@ -42,6 +42,7 @@ for i in pl.unroll(0, 6, 2):
 | `start`, `stop`, `step` must be integer constants | Values needed at compile time |
 | `step` must be non-zero | Prevents infinite loops |
 | `init_values` cannot be used with `pl.unroll()` | No loop-carried state in unrolled loops |
+| trip count must be ≤ 1024 (`kMaxUnrollIterations`) | Caps compile-time expansion — a larger trip count raises `ValueError`; restructure the loop or use `pl.range()` |
 
 ## Example
 

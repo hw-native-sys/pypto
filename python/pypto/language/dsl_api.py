@@ -294,6 +294,10 @@ def unroll(
 
     Unrolled loops do not support init_values (loop-carried state).
 
+    The trip count is capped at 1024 iterations by the ``UnrollLoops`` pass
+    (``kMaxUnrollIterations``); a larger loop raises ``ValueError`` — use
+    ``range()`` (a device-side loop) for larger trip counts.
+
     Args:
         *args: Positional arguments (stop) or (start, stop) or (start, stop, step).
             Each argument must be an int literal (compile-time constant).

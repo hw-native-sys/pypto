@@ -42,6 +42,7 @@ for i in pl.unroll(0, 6, 2):
 | `start`、`stop`、`step` 必须为整数常量 | 编译时需要确定值 |
 | `step` 不能为零 | 防止无限循环 |
 | `init_values` 不能与 `pl.unroll()` 一起使用 | 展开的循环不支持循环携带状态 |
+| 行程数（trip count）必须 ≤ 1024（`kMaxUnrollIterations`） | 限制编译期展开规模 —— 超出会抛出 `ValueError`；请重构循环或改用 `pl.range()` |
 
 ## 示例
 

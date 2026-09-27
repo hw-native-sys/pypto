@@ -20,7 +20,7 @@ PyPTO 的 IR 是 **SSA**：每个绑定只被写一次。在直线代码里这�
 ```text
 pl.range     sequential — the default
 pl.parallel  iterations are independent and may overlap
-pl.unroll    fully unrolled at compile time; bounds must be literals
+pl.unroll    fully unrolled at compile time; bounds must be literals; ≤ 1024 iterations
 pl.pipeline  body replicated `stage` times for ping-pong buffering
 ```
 
@@ -61,7 +61,7 @@ def accumulate(
 | ---- | ---- | ------ | ---- |
 | `pl.range(...)` | `ForKind.Sequential` | 支持 | int 或 `Scalar` |
 | `pl.parallel(...)` | `ForKind.Parallel` | 支持 | int 或 `Scalar` |
-| `pl.unroll(...)` | `ForKind.Unroll` | **不支持** | 仅字面量 |
+| `pl.unroll(...)` | `ForKind.Unroll` | **不支持** | 仅字面量 · ≤ 1024 次迭代 |
 | `pl.pipeline(..., stage=N)` | Sequential + 软流水 | 支持 | int 或 `Scalar` |
 
 ```python
@@ -71,6 +71,8 @@ for i in pl.range(0, 100, 4): ...     # 0, 4, ..., 96
 for i in pl.parallel(0, nblocks): ...
 for i in pl.unroll(4): ...            # no init_values here
 ```
+
+`pl.unroll` 在编译期把循环体按迭代展开，行程数上限为 **1024**（`UnrollLoops` pass）；超出会抛出 `ValueError` —— 请重构循环或改用 `pl.range()`。
 
 `pl.parallel` 是一个断言而非请求：你在告诉编译器这些迭代彼此独立。如果它们其实不独立，结果就是竞态。
 

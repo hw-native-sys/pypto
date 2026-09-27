@@ -30,7 +30,7 @@ Four loop constructs share one syntax and differ only in what the compiler is to
 ```text
 pl.range     sequential — the default
 pl.parallel  iterations are independent and may overlap
-pl.unroll    fully unrolled at compile time; bounds must be literals
+pl.unroll    fully unrolled at compile time; bounds must be literals; ≤ 1024 iterations
 pl.pipeline  body replicated `stage` times for ping-pong buffering
 ```
 
@@ -74,7 +74,7 @@ literals or `pl.Scalar` values, except where noted.
 | ---- | ----- | -------------- | ------ |
 | `pl.range(...)` | `ForKind.Sequential` | Yes | int or `Scalar` |
 | `pl.parallel(...)` | `ForKind.Parallel` | Yes | int or `Scalar` |
-| `pl.unroll(...)` | `ForKind.Unroll` | **No** | literals only |
+| `pl.unroll(...)` | `ForKind.Unroll` | **No** | literals only · ≤ 1024 iterations |
 | `pl.pipeline(..., stage=N)` | Sequential + pipelining | Yes | int or `Scalar` |
 
 ```python
@@ -84,6 +84,10 @@ for i in pl.range(0, 100, 4): ...     # 0, 4, ..., 96
 for i in pl.parallel(0, nblocks): ...
 for i in pl.unroll(4): ...            # no init_values here
 ```
+
+`pl.unroll` expands the body once per iteration at compile time, capped at **1024**
+iterations (the `UnrollLoops` pass); a larger trip count raises `ValueError` — restructure
+the loop or use `pl.range()`.
 
 `pl.parallel` is an assertion, not a request: you are telling the compiler the iterations
 are independent. If they are not, the result is a race.
