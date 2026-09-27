@@ -301,10 +301,11 @@ Print→parse roundtrip verification instrument. After every pass, it:
 1. Prints the resulting IR to Python DSL text via `python_print()`
 2. Parses the text back to an IR `Program` via `parse()`
 3. Asserts `structural_equal(original, reparsed)` — a failure means the printer or parser cannot faithfully represent the IR produced by that pass
+4. Checks `structural_hash(original) == structural_hash(reparsed)` with the same default variable-mapping policy; a mismatch reports the pass name and both hashes
 
 Buffer-stage programs use binary serialization roundtrip because their Python
-output is diagnostic text rather than executable DSL. Structural equality still
-checks the complete program, including device stages, descriptors and aliases;
+output is diagnostic text rather than executable DSL. Structural equality and hash
+consistency checks cover the complete program, including device stages, descriptors and aliases;
 serialization failures are errors, not skipped verification.
 
 ```python

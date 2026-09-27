@@ -265,7 +265,7 @@ def pass_verification_instruments():
     The behavior is controlled by the PYPTO_VERIFY_LEVEL environment variable:
 
     - ``roundtrip`` (default) — BEFORE_AND_AFTER property verification + print→parse
-      roundtrip structural-equality check after every pass.
+      roundtrip structural-equality and structural-hash checks after every pass.
     - ``basic`` — BEFORE_AND_AFTER property verification only (faster, no roundtrip).
     - ``none`` — no pass verification at all (fastest, for debugging only).
     """

@@ -299,9 +299,10 @@ with passes.PassContext([instrument]):
 1. 通过 `python_print()` 将结果 IR 打印为 Python DSL 文本
 2. 通过 `parse()` 将文本解析回 IR `Program`
 3. 断言 `structural_equal(original, reparsed)` —— 失败则说明 printer 或 parser 无法忠实表示该 Pass 输出的 IR
+4. 使用相同的默认变量映射策略，检查 `structural_hash(original) == structural_hash(reparsed)`；不一致时报告 Pass 名称和两个哈希值
 
 Buffer 阶段程序使用二进制序列化往返检查，因为其 Python 输出是诊断文本，
-不属于可执行 DSL。结构相等检查仍覆盖整个程序的设备阶段、描述符和别名；
+不属于可执行 DSL。结构相等和哈希一致性检查仍覆盖整个程序的设备阶段、描述符和别名；
 序列化失败会报错，不跳过验证。
 
 ```python

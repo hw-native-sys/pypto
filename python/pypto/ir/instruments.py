@@ -15,6 +15,22 @@ from pypto.pypto_core import ir as _ir
 from pypto.pypto_core import passes as _passes
 
 
+def _assert_structural_hash_equal(original: _ir.IRNode, restored: _ir.IRNode, pass_name: str) -> None:
+    """Enforce the equal-IR/equal-hash contract after a roundtrip."""
+    try:
+        original_hash = _ir.structural_hash(original)
+        restored_hash = _ir.structural_hash(restored)
+    except Exception as exc:
+        raise RuntimeError(
+            f"[RoundtripInstrument] Structural hash computation failed after pass '{pass_name}'.\n{exc}"
+        ) from exc
+    if original_hash != restored_hash:
+        raise RuntimeError(
+            f"[RoundtripInstrument] Structural hash mismatch after pass '{pass_name}'.\n"
+            f"Original hash: {original_hash}\nRestored hash: {restored_hash}"
+        )
+
+
 def make_roundtrip_instrument() -> _passes.CallbackInstrument:
     """Create a CallbackInstrument that verifies IR roundtrip after each pass.
 
@@ -22,13 +38,15 @@ def make_roundtrip_instrument() -> _passes.CallbackInstrument:
     1. Prints the resulting IR to Python DSL text (``python_print``).
     2. Parses the text back to an IR Program (``parse``).
     3. Asserts structural equality between the original and re-parsed programs.
+    4. Checks that their structural hashes are equal, using the same mapping policy.
 
     A failure means the printer or parser cannot faithfully represent the IR
-    produced by that pass, which is a bug in the printer/parser layer.
+    produced by that pass, or structural hashing violates the equal-IR/equal-hash contract.
 
     Buffer-stage programs use binary serialization instead: their Python output
     is diagnostic text, not executable DSL. The complete program, including
-    orchestration and device stage markers, must still be structurally equal.
+    orchestration and device stage markers, must still be structurally equal and
+    have equal structural hashes.
 
     Known non-failures (instrument emits a warning instead):
 
@@ -55,6 +73,7 @@ def make_roundtrip_instrument() -> _passes.CallbackInstrument:
                 raise RuntimeError(
                     f"[RoundtripInstrument] Binary roundtrip failed after pass '{pass_name}'.\n{exc}"
                 ) from exc
+            _assert_structural_hash_equal(program, restored, pass_name)
             return
 
         # --- Step 1: print ---
@@ -109,6 +128,8 @@ def make_roundtrip_instrument() -> _passes.CallbackInstrument:
                 f"\n"
                 f"--- Printed IR ---\n{printed}"
             ) from exc
+
+        _assert_structural_hash_equal(program, reparsed, pass_name)
 
     return _passes.CallbackInstrument(
         after_pass=_after_pass,
