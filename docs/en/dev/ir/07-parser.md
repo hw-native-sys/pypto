@@ -51,6 +51,11 @@ for i, (sum_val,) in pl.range(10, init_values=(sum_init,)):
 
 **Syntax**: `loop_var, (iter_arg1, ...)` - number of iter_args must match init_values.
 
+The same explicit syntax is accepted for `pl.unroll()` to preserve transitional
+SSA IR in print/parse roundtrips. It retains `ForKind.Unroll`; it does not convert
+the loop to sequential or expand it. `UnrollLoops` requires non-SSA input, so
+executable kernels still use ordinary assignments and unroll before SSA conversion.
+
 ### Yielding and If Statements
 
 Use `pl.yield_()` to return values from nested scopes:

@@ -61,7 +61,7 @@ def accumulate(
 | ---- | ---- | ------ | ---- |
 | `pl.range(...)` | `ForKind.Sequential` | 支持 | int 或 `Scalar` |
 | `pl.parallel(...)` | `ForKind.Parallel` | 支持 | int 或 `Scalar` |
-| `pl.unroll(...)` | `ForKind.Unroll` | **不支持** | 仅字面量 |
+| `pl.unroll(...)` | `ForKind.Unroll` | 普通赋值；显式 SSA 仅用于 IR 往返 | 仅字面量 |
 | `pl.pipeline(..., stage=N)` | Sequential + 软流水 | 支持 | int 或 `Scalar` |
 
 ```python
@@ -146,7 +146,7 @@ result = pl.add(result, 1.0)      # fine; the parser produces two bindings
 | **`while_() requires init_values to be specified`** | `pl.while_()` 没有携带状态 | 补上 `init_values=(...)`，哪怕只是一个计数器 |
 | **`pl.cond` 报解析错误** | 它不是 `while_` 体的第一条语句 | 移到第一行 |
 | **分支汇合被拒绝** | 只有一个分支 yield，或数量不一致 | 两个分支 yield 相同数量与类型 |
-| **`unroll()` 拒绝 `init_values`** | 展开循环不携带状态 | 改用 `pl.range`，或重构成不携带值 |
+| **`Unroll loops cannot have iter_args`** | `UnrollLoops` 收到了显式 SSA 输入 | 在 `pl.unroll` 内使用普通赋值；先运行 `UnrollLoops` 再运行 `ConvertToSSA` |
 | **`unroll()` 拒绝某个边界** | 边界必须是编译期字面量 | `Scalar` 边界请用 `pl.range` |
 | **`pipeline()` 报 stage 错误** | `stage` 缺失或不是正整数 | 传 `stage=N`，N ≥ 1 |
 | **`pl.parallel` 下出现竞态** | 迭代其实并不独立 | 改用 `pl.range`，或消除跨迭代依赖 |

@@ -41,7 +41,13 @@ for i in pl.unroll(0, 6, 2):
 | ---- | ---- |
 | `start`、`stop`、`step` 必须为整数常量 | 编译时需要确定值 |
 | `step` 不能为零 | 防止无限循环 |
-| `init_values` 不能与 `pl.unroll()` 一起使用 | 展开的循环不支持循环携带状态 |
+| 输入 Unroll 循环不能带 SSA `iter_args` | 此 Pass 展开非 SSA 循环体，必须先于 `ConvertToSSA` 运行 |
+
+IR 仍可表示带 `iter_args` 的 `ForKind.Unroll`，例如直接对累加器循环运行
+`ConvertToSSA` 时会产生该过渡形式。打印器和解析器通过
+`pl.unroll(..., init_values=(...))` 保留它，往返检查会实际验证整个程序。
+可往返不代表 Pass 顺序合法：`UnrollLoops` 仍拒绝此 SSA 输入。可执行内核应在
+`pl.unroll()` 内使用普通赋值，并遵循正常流水线顺序。
 
 ## 示例
 

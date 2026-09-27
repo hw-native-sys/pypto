@@ -16,7 +16,7 @@ equality (assert_structural_equal) can be used for all comparisons.
 
 import pypto.language as pl
 import pytest
-from pypto import ir, passes
+from pypto import InternalError, ir, passes
 from pypto.ir.printer import python_print
 from pypto.language.parser.diagnostics import ParserSyntaxError
 
@@ -247,22 +247,79 @@ class TestUnrollLimits:
 class TestParserValidation:
     """Tests for parser-level validation of pl.unroll()."""
 
-    def test_unroll_with_init_values_rejected(self):
-        """pl.unroll() cannot be combined with init_values."""
-        with pytest.raises(ParserSyntaxError, match="cannot be combined with init_values"):
+    def test_unroll_with_init_values_roundtrips_but_cannot_be_unrolled(self):
+        """SSA Unroll is representable IR, but violates UnrollLoops' input contract."""
 
-            @pl.program
-            class _:
-                @pl.function
-                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                    for i, (acc,) in pl.unroll(3, init_values=(x,)):
-                        acc = pl.add(acc, 1.0)
-                        acc = pl.yield_(acc)
-                    return x
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i, (acc,) in pl.unroll(3, init_values=(x,)):
+                    updated = pl.add(acc, 1.0)
+                    result = pl.yield_(updated)
+                return result
+
+        restored = pl.parse_program(python_print(Before, format=False))
+        ir.assert_structural_equal(Before, restored)
+        assert ir.structural_hash(Before) == ir.structural_hash(restored)
+        with pytest.raises(InternalError, match="Unroll loops cannot have iter_args"):
+            passes.unroll_loops()(restored)
 
 
 class TestPrinterRoundTrip:
     """Tests for IR printing of unroll loops."""
+
+    @pytest.mark.parametrize("bounds", ["4", "6, 0, -2", "0"])
+    def test_ssa_unroll_nested_multiple_iter_args(self, bounds):
+        """Nested SSA loops preserve carried values, attrs and signed/empty ranges."""
+        before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function
+    def main(self, x: pl.Scalar[pl.INDEX], y: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+        for i in pl.unroll({bounds}, attrs={{"marker": 7}}):
+            for j in pl.unroll(2):
+                x = x + i
+                y = y + j
+        return x + y
+""")
+        after = passes.convert_to_ssa()(before)
+        printed = python_print(after, format=False)
+        assert printed.count("init_values=") == 2
+        assert 'attrs={"marker": 7}' in printed
+        restored = pl.parse_program(printed)
+        ir.assert_structural_equal(after, restored)
+        assert ir.structural_hash(after) == ir.structural_hash(restored)
+
+    @pytest.mark.parametrize(
+        ("header", "message"),
+        [
+            ("i in pl.unroll(4, init_values=(x,))", "target must be a tuple"),
+            ("i, (a, b) in pl.unroll(4, init_values=(x,))", "Mismatch"),
+            ("i, (a,) in pl.unroll(0, 4, 0, init_values=(x,))", "step cannot be zero"),
+            ("i, (a,) in pl.unroll(x, init_values=(x,))", "constant integer bounds"),
+        ],
+    )
+    def test_ssa_unroll_rejects_malformed_headers(self, header, message):
+        """Text support retains loop binding and compile-time-bound validation."""
+        with pytest.raises(ParserSyntaxError, match=message):
+            pl.parse_program(f"""
+@pl.program
+class Invalid:
+    @pl.function
+    def main(self, x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+        for {header}:
+            result = pl.yield_(x)
+        return result
+""")
+
+    def test_unroll_iterator_accepts_init_values(self):
+        """The Python helper agrees with the parsed transitional syntax."""
+        iterator = pl.unroll(2, init_values=(3, 5))
+        assert iterator.__next__() == (0, (3, 5))
+        assert iterator.__next__() == (1, (3, 5))
+        with pytest.raises(StopIteration):
+            iterator.__next__()
 
     def test_unroll_prints_as_pl_unroll(self):
         """ForKind.Unroll should print as pl.unroll() in output."""
@@ -332,7 +389,6 @@ class TestCallAttrSubstitution:
 class TestPipelineFallback:
     """Tests that unexpanded unroll loops survive non-codegen pipeline stages."""
 
-    @pytest.mark.filterwarnings("ignore:.*RoundtripInstrument.*IR not printable:UserWarning")
     def test_unexpanded_unroll_survives_pipeline(self):
         """Skipping UnrollLoops should not crash through SSA/flatten/verifier pipeline."""
 

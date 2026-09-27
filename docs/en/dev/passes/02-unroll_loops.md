@@ -41,7 +41,14 @@ for i in pl.unroll(0, 6, 2):
 | ---------- | ------ |
 | `start`, `stop`, `step` must be integer constants | Values needed at compile time |
 | `step` must be non-zero | Prevents infinite loops |
-| `init_values` cannot be used with `pl.unroll()` | No loop-carried state in unrolled loops |
+| Input Unroll loops must have no SSA `iter_args` | This pass expands non-SSA bodies; run it before `ConvertToSSA` |
+
+The IR can nevertheless represent `ForKind.Unroll` with `iter_args`, for example
+when `ConvertToSSA` is run directly on an accumulator loop. Printer and parser
+preserve this transitional form using `pl.unroll(..., init_values=(...))`.
+Roundtrip verification checks it; it does not certify pass-order legality.
+`UnrollLoops` still rejects this SSA input. Executable kernels should use ordinary
+assignments inside `pl.unroll()` and the normal pipeline order.
 
 ## Example
 

@@ -9,8 +9,6 @@
 
 """Pass instruments for IR verification beyond the built-in VerificationInstrument."""
 
-import warnings
-
 from pypto.pypto_core import ir as _ir
 from pypto.pypto_core import passes as _passes
 
@@ -48,11 +46,8 @@ def make_roundtrip_instrument() -> _passes.CallbackInstrument:
     orchestration and device stage markers, must still be structurally equal and
     have equal structural hashes.
 
-    Known non-failures (instrument emits a warning instead):
-
-    - **Printer InternalError**: Some transitional IR states (e.g. ``ForKind::Unroll``
-      with SSA ``iter_args`` after ``ConvertToSSA``) have no valid Python DSL syntax.
-      The instrument cannot roundtrip what it cannot print; it warns and skips.
+    Transitional Unroll loops with SSA ``iter_args`` use the same text roundtrip
+    as other functional IR. Printer and parser failures are always errors.
 
     Returns:
         A ``CallbackInstrument`` named ``"RoundtripInstrument"``.
@@ -81,17 +76,6 @@ def make_roundtrip_instrument() -> _passes.CallbackInstrument:
             printed = python_print(program, format=False)
         except Exception as exc:
             first_line = str(exc).splitlines()[0] if str(exc) else repr(exc)
-            # Only suppress known transitional IR states that have no valid DSL syntax.
-            # Currently: ForKind::Unroll with SSA iter_args (created when UnrollLoops is
-            # skipped and ConvertToSSA adds loop-carried values to an unroll loop).
-            # All other printer failures are propagated so regressions are visible.
-            if "does not support iter_args" in first_line:
-                warnings.warn(
-                    f"[RoundtripInstrument] IR not printable after '{pass_name}' — "
-                    f"skipping roundtrip: {first_line}",
-                    stacklevel=2,
-                )
-                return
             raise RuntimeError(
                 f"[RoundtripInstrument] Printer failed after pass '{pass_name}'.\n\nError: {first_line}"
             ) from exc

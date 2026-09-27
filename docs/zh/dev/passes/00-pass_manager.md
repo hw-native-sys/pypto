@@ -313,15 +313,10 @@ with passes.PassContext([make_roundtrip_instrument()]):
     result = passes.convert_to_ssa()(program)
 ```
 
-**已知的非致命情况**（插桩跳过检查，不报错）：
-
-| 情况 | 行为 | 原因 |
-| ---- | ---- | ---- |
-| Printer `InternalError`（如 `ForKind::Unroll` + SSA `iter_args`） | `UserWarning`，跳过 roundtrip | 该过渡状态无合法 DSL 语法 |
-| 原始 IR 中的 `UnknownType`（手动 `ir.Call(ir.Op(...))` 构造） | 静默跳过 | 解析时 C++ 推断出具体类型，属于类型改善而非 bug |
-| `tensor.add(x, scalar)` → roundtrip 后变为 `tensor.adds` | 静默跳过 | Python API 会自动将标量 RHS dispatch 到 `tensor.adds` |
-| `tile.load` 3-arg → roundtrip 后变为 4-arg | 静默跳过 | C++ 要求 4 个参数；手动构造 3-arg 由 printer 规范化 |
-| 动态 shape Var 在 return types 中的指针不匹配 | 静默跳过 | `structural_equal` 无法在函数体外追踪 Var |
+带 SSA `iter_args` 的 Unroll 循环属于过渡 IR，使用普通文本往返检查，覆盖整个 Program。
+文本采用 `pl.unroll(..., init_values=(...))`、元组绑定和 `pl.yield_`。
+这不改变 `UnrollLoops` → `ConvertToSSA` 的流水线顺序要求。打印、解析、结构相等
+或哈希检查失败都会报错，不再按错误字符串跳过检查。
 
 **单元测试中默认开启**，通过 `tests/ut/conftest.py`（见下方[测试Fixture](#测试fixture)）。可通过 `PYPTO_VERIFY_LEVEL=basic` 或 `PYPTO_VERIFY_LEVEL=none` 关闭。
 

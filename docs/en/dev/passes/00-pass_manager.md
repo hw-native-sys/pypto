@@ -316,15 +316,11 @@ with passes.PassContext([make_roundtrip_instrument()]):
     result = passes.convert_to_ssa()(program)
 ```
 
-**Known non-fatal cases** (instrument skips the check without failing):
-
-| Case | Behaviour | Reason |
-| ---- | --------- | ------ |
-| Printer `InternalError` (e.g. `ForKind::Unroll` + SSA `iter_args`) | `UserWarning`, roundtrip skipped | No valid DSL syntax for this transitional state |
-| `UnknownType` in original IR (manually built via `ir.Call(ir.Op(...))`) | Silent skip | Parsing infers a concrete type; this is a type improvement, not a bug |
-| `tensor.add(x, scalar)` → `tensor.adds` after roundtrip | Silent skip | Python API dispatches scalar RHS to `tensor.adds`; manual construction used wrong op name |
-| `tile.load` 3-arg → 4-arg after roundtrip | Silent skip | C++ requires 4 args; manually constructed IR with 3 args is normalised by the printer |
-| Variable pointer mismatch (dynamic-shape Vars in return types) | Silent skip | `structural_equal` without `enable_auto_mapping` cannot track Vars outside the function body |
+Unroll loops with SSA `iter_args` are transitional IR and use the normal text
+roundtrip, including the complete Program. Their text uses
+`pl.unroll(..., init_values=(...))`, tuple binders and `pl.yield_`. This does not
+change the required `UnrollLoops` → `ConvertToSSA` pipeline order. Printer, parser,
+structural-equality and hash failures are errors; no error-string-based skip is used.
 
 **Enabled by default in unit tests** via `tests/ut/conftest.py` (see [Test Fixture](#test-fixture) below). Disable with `PYPTO_VERIFY_LEVEL=basic` or `PYPTO_VERIFY_LEVEL=none`.
 

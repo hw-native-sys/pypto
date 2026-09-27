@@ -51,6 +51,10 @@ for i, (sum_val,) in pl.range(10, init_values=(sum_init,)):
 
 **语法**：`loop_var, (iter_arg1, ...)` - iter_args 的数量必须与 init_values 匹配。
 
+`pl.unroll()` 也接受这一显式语法，用于保留打印/解析往返中的过渡 SSA IR。
+循环仍为 `ForKind.Unroll`，不会变成顺序循环或被展开。`UnrollLoops` 要求
+非 SSA 输入，因此可执行内核仍应使用普通赋值，并先展开循环再转换 SSA。
+
 ### Yield 与 If 语句 (Statement)
 
 使用 `pl.yield_()` 从嵌套作用域返回值：

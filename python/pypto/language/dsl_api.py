@@ -284,22 +284,60 @@ def parallel(
     return _make_range_iterator(*args, init_values=init_values, func_name="parallel")
 
 
+@overload
+def unroll(*args: RangeArg, init_values: None = None) -> RangeIterator[Scalar]: ...
+
+
+@overload
+def unroll(*args: RangeArg, init_values: tuple[T1]) -> RangeIterator[tuple[Scalar, tuple[T1]]]: ...
+
+
+@overload
+def unroll(*args: RangeArg, init_values: tuple[T1, T2]) -> RangeIterator[tuple[Scalar, tuple[T1, T2]]]: ...
+
+
+@overload
 def unroll(
     *args: RangeArg,
-) -> RangeIterator[Scalar]:
+    init_values: tuple[T1, T2, T3],
+) -> RangeIterator[tuple[Scalar, tuple[T1, T2, T3]]]: ...
+
+
+@overload
+def unroll(
+    *args: RangeArg,
+    init_values: tuple[T1, T2, T3, T4],
+) -> RangeIterator[tuple[Scalar, tuple[T1, T2, T3, T4]]]: ...
+
+
+@overload
+def unroll(
+    *args: RangeArg,
+    init_values: tuple[T1, T2, T3, T4, T5],
+) -> RangeIterator[tuple[Scalar, tuple[T1, T2, T3, T4, T5]]]: ...
+
+
+def unroll(
+    *args: RangeArg,
+    init_values: tuple[Any, ...] | None = None,
+) -> RangeIterator[Scalar] | RangeIterator[tuple[Scalar, tuple[Any, ...]]]:
     """Create an unroll range iterator for compile-time loop unrolling.
 
     Behaves identically to range() at runtime. The distinction is used by the
     parser to emit ForKind.Unroll instead of ForKind.Sequential.
 
-    Unrolled loops do not support init_values (loop-carried state).
+    Explicit init_values represent transitional SSA IR for print/parse roundtrips.
+    UnrollLoops requires non-SSA input: in executable kernels use ordinary
+    assignments and run UnrollLoops before ConvertToSSA.
 
     Args:
         *args: Positional arguments (stop) or (start, stop) or (start, stop, step).
             Each argument must be an int literal (compile-time constant).
+        init_values: Initial values for iteration arguments in transitional SSA IR.
 
     Returns:
-        RangeIterator yielding loop variable (Scalar)
+        If no init_values: RangeIterator yielding loop variable (Scalar)
+        If init_values: RangeIterator yielding (loop_var, (iter_args...))
 
     Examples:
         >>> for i in pl.unroll(4):
@@ -307,10 +345,7 @@ def unroll(
         >>> for i in pl.unroll(0, 6, 2):
         ...     x = pl.add(x, i)
     """
-    return cast(
-        RangeIterator["Scalar"],
-        _make_range_iterator(*args, func_name="unroll"),
-    )
+    return _make_range_iterator(*args, init_values=init_values, func_name="unroll")
 
 
 @overload

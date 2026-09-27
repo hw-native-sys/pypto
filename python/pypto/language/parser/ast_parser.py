@@ -2796,8 +2796,9 @@ class ASTParser:
           for (vars,) in pl.while_(init_values=(...,)):
               pl.cond(condition)
 
-        Both patterns also work with pl.parallel() for parallel loops.
-        pl.unroll() is for compile-time loop unrolling (no init_values).
+        Both patterns also work with pl.parallel() and pl.unroll(). Explicit
+        init_values on pl.unroll() represent transitional SSA IR; UnrollLoops
+        still requires non-SSA input and normally runs before ConvertToSSA.
         Pattern B produces a ForStmt without iter_args/return_vars/yield.
         The C++ ConvertToSSA pass handles converting to SSA form.
         """
@@ -2835,12 +2836,6 @@ class ASTParser:
         # later generic failures in the UnrollLoops C++ pass.
         # Note: negative literals like -1 become ir.Neg(ir.ConstInt(1)).
         if iterator_type == "unroll":
-            if range_args["init_values"]:
-                raise ParserSyntaxError(
-                    "pl.unroll() cannot be combined with init_values",
-                    span=self.span_tracker.get_span(iter_call),
-                    hint="Use pl.range() to carry state across iterations.",
-                )
             for _bound_name in ("start", "stop", "step"):
                 _bound_value = range_args.get(_bound_name)
                 if _bound_value is not None and not _is_const_int(_bound_value):

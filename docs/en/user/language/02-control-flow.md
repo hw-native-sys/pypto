@@ -74,7 +74,7 @@ literals or `pl.Scalar` values, except where noted.
 | ---- | ----- | -------------- | ------ |
 | `pl.range(...)` | `ForKind.Sequential` | Yes | int or `Scalar` |
 | `pl.parallel(...)` | `ForKind.Parallel` | Yes | int or `Scalar` |
-| `pl.unroll(...)` | `ForKind.Unroll` | **No** | literals only |
+| `pl.unroll(...)` | `ForKind.Unroll` | Ordinary assignments; explicit SSA only for IR roundtrip | literals only |
 | `pl.pipeline(..., stage=N)` | Sequential + pipelining | Yes | int or `Scalar` |
 
 ```python
@@ -185,7 +185,7 @@ non-SSA source is normal input, not a compatibility mode.
 | **`while_() requires init_values to be specified`** | `pl.while_()` with no carried state | Add `init_values=(...)`, even if it is a single counter |
 | **Parser error on `pl.cond`** | Not the first statement of the `while_` body | Move it to the first line |
 | **Branch merge rejected** | Only one arm yields, or arities differ | Yield the same count and types from both arms |
-| **`unroll()` rejects `init_values`** | Unrolled loops carry no state | Use `pl.range`, or restructure so no value is carried |
+| **`Unroll loops cannot have iter_args`** | `UnrollLoops` received explicit SSA input | Use ordinary assignments in `pl.unroll`; run `UnrollLoops` before `ConvertToSSA` |
 | **`unroll()` rejects a bound** | Bounds must be compile-time literals | Use `pl.range` for a `Scalar` bound |
 | **`pipeline()` stage error** | `stage` missing or not a positive int | Pass `stage=N`, N ≥ 1 |
 | **Race under `pl.parallel`** | Iterations are not actually independent | Use `pl.range`, or remove the cross-iteration dependency |

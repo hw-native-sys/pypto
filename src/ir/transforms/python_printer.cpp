@@ -2008,12 +2008,6 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
     VisitExpr(op->step_);
   }
 
-  // Unroll loops cannot have iter_args. The DSL parser forbids init_values for
-  // pl.unroll().
-  if (op->kind_ == ForKind::Unroll && !op->iter_args_.empty()) {
-    INTERNAL_CHECK_SPAN(false, op->span_) << "ForKind::Unroll does not support iter_args/init_values";
-  }
-
   // When rendering as `.pipeline(...)`, surface `pipeline_stages` as the required
   // `stage=` kwarg. The attr itself is stripped from the printed attrs={...} dict
   // below so it never leaks as storage detail. PipelineLoopValid guarantees the

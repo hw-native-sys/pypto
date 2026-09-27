@@ -9,10 +9,13 @@
 
 """Unit tests for PassPipeline and PassContext."""
 
+from unittest import mock
+
 import pypto
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir, passes
+from pypto.language.parser.text_parser import parse
 
 
 def _make_simple_program():
@@ -435,8 +438,27 @@ class TestReportInstrument:
         assert not (tmp_path / "report").exists()
 
 
+def _make_unroll_accumulator_program():
+    """Include an SSA Unroll candidate and independent nodes in two functions."""
+
+    @pl.program
+    class Before:
+        @pl.function
+        def main(self, x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+            for i in pl.unroll(4):
+                x = x + i
+            result = x + 7
+            return result
+
+        @pl.function
+        def other(self, y: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+            return y + 11
+
+    return Before
+
+
 class TestRoundtripInstrument:
-    """Test RoundtripInstrument error formatting."""
+    """Test complete-program checks and RoundtripInstrument error reporting."""
 
     def test_parse_failure_no_ir_dump(self):
         """RoundtripInstrument error does not include full IR dump when parse fails."""
@@ -474,6 +496,91 @@ class TestRoundtripInstrument:
                     passes.convert_to_ssa()(_make_non_ssa_program())
 
         assert "ConvertToSSA" in str(exc_info.value)
+
+    def test_unroll_ssa_checks_complete_text_roundtrip(self):
+        """The former skip now parses and checks the complete converted Program."""
+        with (
+            mock.patch("pypto.language.parser.text_parser.parse", wraps=parse) as reparse,
+            mock.patch("pypto.pypto_core.ir.deserialize", side_effect=AssertionError("unexpected binary")),
+            passes.PassContext([ir.make_roundtrip_instrument()]),
+        ):
+            result = passes.convert_to_ssa()(_make_unroll_accumulator_program())
+        reparse.assert_called_once()
+        printed = reparse.call_args.args[0]
+        assert "pl.unroll(4, init_values=" in printed
+        assert "def other(" in printed
+        restored = parse(printed)
+        ir.assert_structural_equal(result, restored)
+        assert ir.structural_hash(result) == ir.structural_hash(restored)
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.SSAForm)
+        assert not passes.PropertyVerifierRegistry.verify(properties, result)
+
+    @pytest.mark.parametrize(
+        ("original", "replacement"),
+        [
+            ("pl.unroll(4,", "pl.unroll(5,"),
+            ("pl.unroll(4,", "pl.range(4,"),
+            ("init_values=(", "init_values=(1 + "),
+            (" + 7", " + 8"),
+            (" + 11", " + 12"),
+        ],
+        ids=["unroll-bound", "unroll-kind", "initial-value", "sibling-statement", "other-function"],
+    )
+    def test_unroll_ssa_rejects_corrupted_reparse(self, monkeypatch, original, replacement):
+        """An Unroll node must not shield any part of the Program from comparison."""
+
+        def corrupt_parse(text, **kwargs):
+            assert text.count(original) == 1
+            return parse(text.replace(original, replacement), **kwargs)
+
+        monkeypatch.setattr("pypto.language.parser.text_parser.parse", corrupt_parse)
+        with passes.PassContext([ir.make_roundtrip_instrument()]):
+            with pytest.raises(RuntimeError, match="Structural equality failed after pass 'ConvertToSSA'"):
+                passes.convert_to_ssa()(_make_unroll_accumulator_program())
+
+    @pytest.mark.parametrize(
+        "message", ["unexpected printer error", "does not support iter_args/init_values"]
+    )
+    def test_printer_errors_never_skip(self, monkeypatch, message):
+        """Even the former string-based exemption must fail visibly."""
+
+        def fail_print(*args, **kwargs):
+            raise pypto.InternalError(message)
+
+        monkeypatch.setattr("pypto.ir.printer.python_print", fail_print)
+        with passes.PassContext([ir.make_roundtrip_instrument()]):
+            with pytest.raises(RuntimeError, match="Printer failed after pass 'ConvertToSSA'"):
+                passes.convert_to_ssa()(_make_unroll_accumulator_program())
+
+    def test_unroll_before_ssa_uses_text_roundtrip(self):
+        """The supported pipeline order checks both passes and eliminates Unroll."""
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                x0 = x + 0
+                x1 = x0 + 1
+                x2 = x1 + 2
+                x3 = x2 + 3
+                result = x3 + 7
+                return result
+
+            @pl.function
+            def other(self, y: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                return y + 11
+
+        with (
+            mock.patch("pypto.language.parser.text_parser.parse", wraps=parse) as reparse,
+            mock.patch("pypto.pypto_core.ir.deserialize", side_effect=AssertionError("unexpected binary")),
+            passes.PassContext([ir.make_roundtrip_instrument()]),
+        ):
+            unrolled = passes.unroll_loops()(_make_unroll_accumulator_program())
+            result = passes.convert_to_ssa()(unrolled)
+        assert reparse.call_count == 2
+        assert all("pl.unroll(" not in call.args[0] for call in reparse.call_args_list)
+        ir.assert_structural_equal(result, Expected)
 
 
 if __name__ == "__main__":
