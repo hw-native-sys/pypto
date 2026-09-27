@@ -1,6 +1,6 @@
 # Passes
 
-PyPTO 在 IR 之上运行的全部变换，文档按编译顺序组织。
+PyPTO IR 变换的参考文档，按阅读顺序组织。实际执行顺序请查阅 pass manager。
 
 ## 文档编号
 

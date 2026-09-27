@@ -1,6 +1,7 @@
 # Passes
 
-Every transformation PyPTO runs over the IR, documented in compilation order.
+Reference for PyPTO IR transformations, organized for reading. Consult the pass
+manager for execution order.
 
 ## Documentation numbering
 
