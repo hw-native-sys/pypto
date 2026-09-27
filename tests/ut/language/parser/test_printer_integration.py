@@ -544,7 +544,7 @@ class Nested:
 """)
         ir.assert_structural_equal(program, pl.parse_program(ir.python_print(program)))
 
-    def test_nested_return_list_still_rejected(self):
+    def test_nested_builtin_tuple_parameter_still_rejected(self):
         with pytest.raises(ParserTypeError, match="Nested tuple types"):
             pl.parse_program("""
 @pl.program
@@ -552,6 +552,17 @@ class Invalid:
     @pl.function
     def f(self, x: pl.Tuple[tuple[pl.Scalar[pl.INT32]]]):
         return
+""")
+
+    @pytest.mark.parametrize("outer_type", ["tuple", "pl.Tuple"])
+    def test_nested_builtin_tuple_return_annotation_still_rejected(self, outer_type):
+        with pytest.raises(ParserTypeError, match="Nested tuple types are not supported"):
+            pl.parse_program(f"""
+@pl.program
+class Invalid:
+    @pl.function
+    def f(self, x: pl.Scalar[pl.INT32]) -> {outer_type}[tuple[pl.Scalar[pl.INT32]]]:
+        return x
 """)
 
     def test_void_is_not_a_tuple_value(self):

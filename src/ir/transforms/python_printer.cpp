@@ -18,6 +18,7 @@
 #include <cstring>
 #include <functional>
 #include <iomanip>
+#include <ios>
 #include <limits>
 #include <locale>
 #include <map>
