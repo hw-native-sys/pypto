@@ -528,10 +528,12 @@ VarPtr BuildBiasOperand(std::vector<StmtPtr>& stmts, const VarPtr& bias_src, int
 /// reaches the same one-buffer chain without a predicate.  No caller therefore
 /// passes a bias operand here.
 StmtPtr BuildMatmulBody(const VarPtr& ko_var, const IterArgPtr& c_iter, const AssignStmtPtr& sa,
-                        const AssignStmtPtr& sb, const std::string& base, const Span& sp) {
+                        const AssignStmtPtr& sb, const std::string& base, const Span& sp,
+                        const std::vector<std::pair<std::string, std::any>>& acc_attrs) {
   auto& reg = OpRegistry::GetInstance();
   auto init_cond = MakeEq(ko_var, MakeIndex(0, sp), sp);
-  auto c_call = reg.Create("tile.matmul_acc", {ExprPtr(c_iter), sa->var_, sb->var_, init_cond}, sp);
+  auto c_call = PreserveCallAttrs(
+      acc_attrs, reg.Create("tile.matmul_acc", {ExprPtr(c_iter), sa->var_, sb->var_, init_cond}, sp));
   auto c_var = std::make_shared<Var>(base + "_l0_c_acc", c_call->GetType(), sp);
   auto c_assign = std::make_shared<AssignStmt>(c_var, c_call, sp);
   auto body_yield = std::make_shared<YieldStmt>(std::vector<ExprPtr>{c_var}, sp);
@@ -547,7 +549,8 @@ StmtPtr BuildMatmulBody(const VarPtr& ko_var, const IterArgPtr& c_iter, const As
 /// operand and the emitted call ANDs it with the generated ``ko == 0``.
 StmtPtr BuildMatmulAccBody(const IterArgPtr& c_iter, const AssignStmtPtr& sa, const AssignStmtPtr& sb,
                            const std::string& base, const Span& sp, const ExprPtr& user_init_cond,
-                           const VarPtr& ko_var) {
+                           const VarPtr& ko_var,
+                           const std::vector<std::pair<std::string, std::any>>& acc_attrs) {
   auto& reg = OpRegistry::GetInstance();
   std::vector<ExprPtr> args{ExprPtr(c_iter), sa->var_, sb->var_};
   if (user_init_cond) {
@@ -560,7 +563,7 @@ StmtPtr BuildMatmulAccBody(const IterArgPtr& c_iter, const AssignStmtPtr& sa, co
     // introduced here.
     args.push_back(MakeAnd(user_init_cond, MakeEq(ko_var, MakeIndex(0, sp), sp), sp));
   }
-  auto c_call = reg.Create("tile.matmul_acc", args, sp);
+  auto c_call = PreserveCallAttrs(acc_attrs, reg.Create("tile.matmul_acc", args, sp));
   auto c_var = std::make_shared<Var>(base + "_l0_c_acc", c_call->GetType(), sp);
   auto c_assign = std::make_shared<AssignStmt>(c_var, c_call, sp);
   auto outer_yield = std::make_shared<YieldStmt>(std::vector<ExprPtr>{c_var}, sp);
@@ -575,6 +578,17 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
   const bool is_acc = r.kind == MatmulKind::kAccumulate;
   const bool is_bias = r.kind == MatmulKind::kBias;
   auto& reg = OpRegistry::GetInstance();
+
+  // K tiling replaces MADs, not their output accumulator's pipeline identity.
+  // In particular, the canonical M/N fold has already stamped its dbC group
+  // before this recursive rewrite. Every full block and peel must retain the
+  // complete membership string, with the SAME stage throughout the reduction.
+  // Other call attributes are not implicitly transferable to different ops.
+  const auto original_call = As<Call>(r.original->value_);
+  INTERNAL_CHECK_SPAN(original_call, sp) << "Internal error: K tiling requires a matmul call";
+  std::vector<std::pair<std::string, std::any>> acc_attrs;
+  const auto membership = original_call->GetAttr<std::string>(kPipelineMembershipAttr);
+  if (!membership.empty()) acc_attrs.emplace_back(kPipelineMembershipAttr, membership);
 
   INTERNAL_CHECK_SPAN(is_acc == (r.acc_init != nullptr), sp)
       << "Internal error: matmul kind and accumulator initializer disagree";
@@ -655,7 +669,7 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
                            base + "_l0_a" + tag, sp);
     auto sb = BuildExtract(r.rhs_src, {kb, r.n}, MakeIndex(ko, sp), ni_off, MemorySpace::Right,
                            base + "_l0_b" + tag, sp);
-    ExprPtr call;
+    CallPtr call;
     INTERNAL_CHECK_SPAN(acc_in || !init_cond, sp)
         << "Internal error: init_cond on a straight-line block with no accumulator";
     if (acc_in) {
@@ -667,6 +681,7 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
     } else {
       call = reg.Create("tile.matmul", {sa->var_, sb->var_}, sp);
     }
+    call = PreserveCallAttrs(acc_attrs, call);
     auto cvar = std::make_shared<Var>(base + "_l0_c" + tag, call->GetType(), sp);
     out.push_back(sa);
     out.push_back(sb);
@@ -690,8 +705,8 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
     // predicated it.  The bias path passes neither: its seed already holds the
     // first block's product, so every block here accumulates.
     StmtPtr body = (k_lo == 0 && r.kind == MatmulKind::kFresh)
-                       ? BuildMatmulBody(ko_var, c_iter, sa, sb, base, sp)
-                       : BuildMatmulAccBody(c_iter, sa, sb, base, sp, user_cond, ko_var);
+                       ? BuildMatmulBody(ko_var, c_iter, sa, sb, base, sp, acc_attrs)
+                       : BuildMatmulAccBody(c_iter, sa, sb, base, sp, user_cond, ko_var, acc_attrs);
     std::vector<std::pair<std::string, std::any>> attrs = {{kPipelineStagesAttr, /*pipeline_stages=*/2}};
     // Loop return var: an intermediate when a partial tail follows (named
     // distinctly so round-trip names stay unique), else the final result.
