@@ -409,6 +409,12 @@ print(stmt.as_python())          # "x: pl.Scalar[pl.INT64] = a + b"（默认 "pl
 print(stmt.as_python("ir"))      # "x: ir.Scalar[ir.INT64] = a + b"（自定义前缀）
 ```
 
+通用 Function attrs 打印为函数体前导区的 `pl.func_attr({...})` 指令。
+解析后它们仍属于 Function 元数据，HOST SubWorker 也遵循这一规则：
+捕获的 Python `InlineStmt.body` 排除这些指令，同时保留实现和 docstring。
+引用参数的 attrs 绑定到函数自身的参数。前导区必须位于可执行语句之前
+（允许开头的 docstring）；指令位置错误或键重复都会报错，SubWorker 亦然。
+
 ### 简洁模式 (Concise Mode)
 
 传入 `concise=True` 可省略中间变量的类型标注。函数签名类型（参数和返回值）始终保留：

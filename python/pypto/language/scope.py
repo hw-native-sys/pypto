@@ -57,8 +57,10 @@ class scope:
       - AUTO scope may not nest inside a MANUAL scope (runtime forbids).
     """
 
-    def __init__(self, mode: "ScopeMode" = ScopeMode.AUTO):
+    def __init__(self, mode: "ScopeMode" = ScopeMode.AUTO, *, name_hint: str = ""):
+        """Set the mode and a structural IR label (a string literal in DSL source)."""
         self.mode = mode
+        self.name_hint = name_hint
 
     def __enter__(self):
         return self
@@ -106,6 +108,10 @@ class manual_scope:
       - Must appear inside an Orchestration function (not InCore).
       - Cannot be nested inside another ``manual_scope`` (runtime forbids).
     """
+
+    def __init__(self, *, name_hint: str = ""):
+        """Set a structural IR label, preserved by printing and parsing."""
+        self.name_hint = name_hint
 
     def __enter__(self):
         return self

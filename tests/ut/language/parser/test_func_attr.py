@@ -59,6 +59,77 @@ def _param_index(func, attr_value):
     return None
 
 
+class TestSubWorkerAttrs:
+    @pytest.mark.parametrize("format_output", [False, True])
+    def test_concrete_body_and_decorator_attrs_roundtrip(self, format_output):
+        P = pl.parse_program("""
+@pl.program
+class P:
+    @pl.function(level=pl.Level.HOST, role=pl.Role.SubWorker, attrs={"audit_marker": 1})
+    def worker():
+        x = 1
+        return
+""")
+
+        original = _function(P, "worker")
+        assert isinstance(original.body, ir.InlineStmt)
+        assert original.body.body == "x = 1\nreturn"
+        restored = P
+        for _ in range(2):
+            restored = pl.parse_program(ir.python_print(restored, format=format_output))
+            ir.assert_structural_equal(P, restored)
+            assert ir.structural_hash(P) == ir.structural_hash(restored)
+            worker = _function(restored, "worker")
+            assert worker.attrs == {"audit_marker": 1}
+            assert isinstance(worker.body, ir.InlineStmt)
+            assert worker.body.body == original.body.body
+            assert not worker.requires_runtime_binding
+
+    def test_prologue_attrs_preserve_parameter_identity_and_python_body(self):
+        @pl.program
+        class P:
+            @pl.function(level=pl.Level.HOST, role=pl.Role.SubWorker, attrs={"audit_marker": 1})
+            def worker(x: pl.Tensor[[4], pl.FP32]) -> pl.Tensor[[4], pl.FP32]:
+                """Keep this callback docstring."""
+                pl.func_attr({"stationary": x})
+                pl.func_attr({"tag": "callback"})
+                if x is None:
+                    return None
+                return x
+
+        worker = _function(P, "worker")
+        assert isinstance(worker.body, ir.InlineStmt)
+        assert "Keep this callback docstring." in worker.body.body
+        assert "if x is None:" in worker.body.body
+        assert "func_attr" not in worker.body.body
+        assert _param_index(worker, worker.attrs["stationary"]) == 0
+        restored = pl.parse_program(ir.python_print(P))
+        ir.assert_structural_equal(P, restored)
+        restored_worker = _function(restored, "worker")
+        assert isinstance(restored_worker.body, ir.InlineStmt)
+        assert _param_index(restored_worker, restored_worker.attrs["stationary"]) == 0
+        assert restored_worker.body.body == worker.body.body
+
+    @pytest.mark.parametrize(
+        "body, message",
+        [
+            ('x = 1\n        pl.func_attr({"tag": 1})', "must appear before every other statement"),
+            ('pl.func_attr({"tag": 1})\n        pl.func_attr({"tag": 2})', "[Dd]uplicate"),
+            ("pl.func_attr([1])", "dict literal"),
+        ],
+    )
+    def test_invalid_subworker_prologues_are_not_silently_removed(self, body, message):
+        with pytest.raises(ParserSyntaxError, match=message):
+            pl.parse_program(f"""
+@pl.program
+class P:
+    @pl.function(level=pl.Level.HOST, role=pl.Role.SubWorker)
+    def worker():
+        {body}
+        return
+""")
+
+
 class TestReferenceValuedAttrs:
     """The capability the decorator form cannot express at all."""
 

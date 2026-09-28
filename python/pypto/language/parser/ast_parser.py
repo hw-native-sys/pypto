@@ -4215,12 +4215,15 @@ class ASTParser:
             )
         return value.value
 
-    def _parse_scope_name_hint(self, value: ast.expr, func_name: str) -> str:
+    def _parse_scope_name_hint(
+        self, value: ast.expr, func_name: str, *, require_identifier: bool = True
+    ) -> str:
         """Extract and validate a scope name hint from an AST expression.
 
         Args:
             value: AST expression node for the name_hint value
             func_name: Function name for error messages (e.g. "pl.at()")
+            require_identifier: Whether the name may become an outlined function identifier.
 
         Returns:
             Validated name hint string.
@@ -4232,7 +4235,11 @@ class ASTParser:
                 hint='Use name_hint="my_scope_name"',
             )
         name_hint = value.value
-        if name_hint and (not name_hint.isidentifier() or _keyword_mod.iskeyword(name_hint)):
+        if (
+            require_identifier
+            and name_hint
+            and (not name_hint.isidentifier() or _keyword_mod.iskeyword(name_hint))
+        ):
             raise ParserSyntaxError(
                 f"{func_name} 'name_hint' must be a valid non-keyword identifier, got {name_hint!r}",
                 span=self.span_tracker.get_span(value),
@@ -4250,33 +4257,48 @@ class ASTParser:
         """
         if context_expr.args:
             raise ParserSyntaxError(
-                "pl.scope() takes only a 'mode=' keyword, not positional arguments",
+                "pl.scope() takes only 'mode=' and 'name_hint=' keywords, not positional arguments",
                 span=self.span_tracker.get_span(stmt),
                 hint="Use 'with pl.scope():' or 'with pl.scope(mode=pl.ScopeMode.MANUAL):'.",
             )
         manual = False
+        name_hint = ""
         for kw in context_expr.keywords:
             if kw.arg == "mode":
                 manual = extract_enum_value(kw.value, SCOPE_MODE_MAP, "ScopeMode", "pl.ScopeMode")
+            elif kw.arg == "name_hint":
+                name_hint = self._parse_scope_name_hint(kw.value, "pl.scope()", require_identifier=False)
             else:
                 raise ParserSyntaxError(
                     f"pl.scope() got an unexpected keyword '{kw.arg}'",
                     span=self.span_tracker.get_span(stmt),
-                    hint="The only accepted keyword is mode=pl.ScopeMode.AUTO|MANUAL.",
+                    hint='Use mode=pl.ScopeMode.AUTO|MANUAL and/or name_hint="label".',
                 )
-        self._emit_runtime_scope(stmt, manual=manual)
+        self._emit_runtime_scope(stmt, manual=manual, name_hint=name_hint)
 
     def _parse_manual_scope(self, stmt: ast.With, context_expr: ast.Call) -> None:
         """Parse ``with pl.manual_scope():`` — an alias for ``pl.scope(mode=MANUAL)``."""
-        if context_expr.args or context_expr.keywords:
+        if context_expr.args:
             raise ParserSyntaxError(
-                "pl.manual_scope() does not accept arguments",
+                "pl.manual_scope() does not accept positional arguments",
                 span=self.span_tracker.get_span(stmt),
                 hint="Use 'with pl.manual_scope():' (or 'with pl.scope(mode=pl.ScopeMode.MANUAL):').",
             )
-        self._emit_runtime_scope(stmt, manual=True)
+        name_hint = ""
+        for kw in context_expr.keywords:
+            if kw.arg == "name_hint":
+                name_hint = self._parse_scope_name_hint(
+                    kw.value, "pl.manual_scope()", require_identifier=False
+                )
+            else:
+                raise ParserSyntaxError(
+                    f"pl.manual_scope() got an unexpected keyword '{kw.arg}'",
+                    span=self.span_tracker.get_span(stmt),
+                    hint='The only accepted keyword is name_hint="label".',
+                )
+        self._emit_runtime_scope(stmt, manual=True, name_hint=name_hint)
 
-    def _emit_runtime_scope(self, stmt: ast.With, manual: bool) -> None:
+    def _emit_runtime_scope(self, stmt: ast.With, manual: bool, name_hint: str = "") -> None:
         """Build a RuntimeScopeStmt for a ``with pl.scope(...)`` / ``pl.manual_scope()`` block.
 
         Enforces the scope-placement rules:
@@ -4296,7 +4318,7 @@ class ASTParser:
                 )
             self._manual_scope_depth += 1
             try:
-                self._parse_scope_body(stmt, ir.ScopeKind.Runtime, span, manual=True)
+                self._parse_scope_body(stmt, ir.ScopeKind.Runtime, span, manual=True, name_hint=name_hint)
             finally:
                 self._manual_scope_depth -= 1
             return
@@ -4315,7 +4337,7 @@ class ASTParser:
                 span=span,
                 hint="The runtime forbids AUTO scope nested in MANUAL scope; move it outside.",
             )
-        self._parse_scope_body(stmt, ir.ScopeKind.Runtime, span, manual=False)
+        self._parse_scope_body(stmt, ir.ScopeKind.Runtime, span, manual=False, name_hint=name_hint)
 
     def _parse_legacy_scope(
         self,

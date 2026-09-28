@@ -130,6 +130,15 @@ lowers to `rt_submit_dummy_task(...)`, returns invalid without submitting when
 all deps are invalid, and coexists with automatic `ExpandManualPhaseFence`
 barriers for profitable full-array phase fences.
 
+Runtime-allocated `Out` parameters do **not** add logical return values.
+For a callee `kernel(x, scratch: Out[Tensor]) -> Tensor` that returns `scratch`,
+`pl.submit(self.kernel, x)` has the flat IR type `Tuple[Tensor, Scalar[TASK_ID]]`.
+Supplying `scratch` explicitly changes allocation ownership, not the tuple
+arity. With multiple callee returns, their declared order is preserved and
+`TASK_ID` is the final element. A caller-allocated Out that is not returned by
+the callee contributes no result slot. Hand-built `ir.Submit` nodes must follow
+the same contract as the parser.
+
 `pl.no_dep(arg)` is an auto-scope primitive; inside `pl.manual_scope` it
 has no effect (the whole region already skips auto-tracking).
 

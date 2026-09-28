@@ -454,9 +454,27 @@ class IRPythonPrinter : public IRVisitor {
   // Emit the `with pl.scope(...):` header for a RuntimeScopeStmt. AUTO prints as
   // the bare `pl.scope()`; MANUAL as `pl.scope(mode=pl.ScopeMode.MANUAL)`.
   // Callers emit the leading indent themselves (it differs by call site).
-  void PrintRuntimeScopeHeader(bool manual) {
-    stream_ << "with " << prefix_
-            << (manual ? ".scope(mode=" + prefix_ + ".ScopeMode.MANUAL):\n" : ".scope():\n");
+  void PrintRuntimeScopeHeader(bool manual, const std::string& name_hint = "") {
+    stream_ << "with " << prefix_ << ".scope(";
+    if (manual) stream_ << "mode=" << prefix_ << ".ScopeMode.MANUAL";
+    if (!name_hint.empty()) {
+      if (manual) stream_ << ", ";
+      stream_ << "name_hint=\"";
+      // Runtime labels do not become identifiers. Preserve arbitrary strings,
+      // including control characters that std::quoted alone does not escape.
+      constexpr char kHex[] = "0123456789abcdef";
+      for (unsigned char ch : name_hint) {
+        if (ch == '"' || ch == '\\') {
+          stream_ << '\\' << ch;
+        } else if (ch < 0x20 || ch == 0x7f) {
+          stream_ << "\\x" << kHex[ch >> 4] << kHex[ch & 0xf];
+        } else {
+          stream_ << ch;
+        }
+      }
+      stream_ << '"';
+    }
+    stream_ << "):\n";
   }
 
   // Emit a comma-prefixed kwarg ``, <kwarg_name>=[v1, v2, ...]`` from the
@@ -2555,8 +2573,8 @@ void IRPythonPrinter::PrintStmtBlock(const StmtPtr& stmt) {
 
 void IRPythonPrinter::VisitStmt_(const RuntimeScopeStmtPtr& op) {
   // Both AUTO (manual=false) and MANUAL (manual=true) runtime scopes have a DSL
-  // surface and round-trip: `with pl.auto_scope():` / `with pl.manual_scope():`.
-  PrintRuntimeScopeHeader(op->manual_);
+  // surface and preserve their structural name_hint through `pl.scope(...)`.
+  PrintRuntimeScopeHeader(op->manual_, op->name_hint_);
   IncreaseIndent();
   PrintStmtBlock(op->body_);
   DecreaseIndent();
@@ -2705,12 +2723,12 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
       }
     }
   } else if (auto rscope = As<RuntimeScopeStmt>(body); rscope && !rscope->manual_) {
-    // An AUTO RuntimeScopeStmt wrapping a for/if body (inserted by
-    // MaterializeRuntimeScopes): emit the `with pl.auto_scope():` header and
-    // recurse with return_vars so a trailing return-var yield *inside* the
-    // scope still prints its `var = pl.yield_(...)` assignment LHS.
+    // An AUTO RuntimeScopeStmt wrapping a loop/if body: preserve its name in
+    // the `with pl.scope(...):` header and recurse with return_vars so a
+    // trailing return-var yield *inside* the scope still prints its
+    // `var = pl.yield_(...)` assignment LHS.
     stream_ << GetIndent();
-    PrintRuntimeScopeHeader(/*manual=*/false);
+    PrintRuntimeScopeHeader(/*manual=*/false, rscope->name_hint_);
     IncreaseIndent();
     VisitStmtBody(rscope->body_, return_vars);
     DecreaseIndent();

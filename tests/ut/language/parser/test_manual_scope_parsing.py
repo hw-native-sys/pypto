@@ -56,6 +56,58 @@ def _calls_in(stmt):
     return calls
 
 
+@pytest.mark.parametrize("caller_out_count", [0, 1, 2])
+@pytest.mark.parametrize("return_both", [False, True])
+def test_submit_return_slots_follow_callee_not_output_allocation(caller_out_count, return_both):
+    """Caller- and runtime-allocated Out params share the declared return slots."""
+    returns = "tuple[pl.Tensor[[32], pl.FP32], pl.Tensor[[64], pl.FP32]]"
+    if not return_both:
+        returns = "pl.Tensor[[64], pl.FP32]"
+    args = ", ".join(["x", "dst", "buf"][: caller_out_count + 1])
+    original = pl.parse_program(f"""
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64], pl.FP32],
+               out: pl.Out[pl.Tensor[[32], pl.FP32]],
+               scratch: pl.Out[pl.Tensor[[64], pl.FP32]]) -> {returns}:
+        return {"out, scratch" if return_both else "scratch"}
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, x: pl.Tensor[[64], pl.FP32],
+             dst: pl.Out[pl.Tensor[[32], pl.FP32]], buf: pl.Out[pl.Tensor[[64], pl.FP32]]):
+        res = pl.submit(self.kernel, {args})
+        return res
+""")
+    function = original.get_function("main")
+    assert function is not None
+    submit = _calls_in(function.body)[0]
+    expected_results = [ir.TensorType([64], pl.FP32)]
+    if return_both:
+        expected_results.insert(0, ir.TensorType([32], pl.FP32))
+    ir.assert_structural_equal(submit.type, ir.TupleType([*expected_results, ir.ScalarType(pl.TASK_ID)]))
+    assert len(submit.args) == caller_out_count + 1
+    restored = pl.parse_program(ir.python_print(original))
+    ir.assert_structural_equal(original, restored)
+    assert ir.structural_hash(original) == ir.structural_hash(restored)
+
+
+def test_submit_rejects_counting_runtime_out_as_an_extra_result():
+    with pytest.raises(ParserTypeError, match="unpacks 2 result value.*returns 1"):
+        pl.parse_program("""
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64], pl.FP32],
+               scratch: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+        return scratch
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, x: pl.Tensor[[64], pl.FP32]):
+        (scratch, duplicate), tid = pl.submit(self.kernel, x)
+""")
+
+
 class TestManualScopeParsing:
     def test_parse_manual_scope_creates_runtime_scope_with_manual_true(self):
         @pl.program

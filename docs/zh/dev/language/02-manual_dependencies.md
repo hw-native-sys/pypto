@@ -118,6 +118,13 @@ runtime 的 `Arg::set_dependencies(ptr, count)` 直接接收调用者持有的�
 在 dep 全 invalid 时返回 invalid 且跳过 dummy submit，并可与自动
 `ExpandManualPhaseFence` barrier 共存。
 
+运行时分配的 `Out` 参数**不会**增加逻辑返回值。
+若 `kernel(x, scratch: Out[Tensor]) -> Tensor` 返回 `scratch`，
+则 `pl.submit(self.kernel, x)` 的扁平 IR 类型为 `Tuple[Tensor, Scalar[TASK_ID]]`。
+显式传入 `scratch` 只改变分配归属，不改变 tuple 长度。多个返回值保持 callee 的声明顺序，
+`TASK_ID` 位于最后；callee 未返回的调用方分配 Out 不产生返回槽位。
+手工构造的 `ir.Submit` 必须遵循与 parser 相同的契约。
+
 `pl.no_dep(arg)` 是 auto scope 原语；在 `pl.manual_scope` 内不起作用
 （整个 scope 已经退出自动跟踪了）。
 

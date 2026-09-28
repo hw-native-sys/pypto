@@ -75,6 +75,114 @@ def test_scope_auto_requires_opt_out_and_round_trips():
     ir.assert_structural_equal(Prog, pl.parse(printed))
 
 
+@pytest.mark.parametrize("manual", [False, True])
+@pytest.mark.parametrize("name_hint", ["", "named", 'phase "one"\\tail\n\t\r\x00\x7f \u9636\u6bb5'])
+def test_hand_built_runtime_scope_name_roundtrip(manual, name_hint):
+    """Compare the original Program, including its name, with parsed printer output."""
+    span = ir.Span.unknown()
+    scope = ir.RuntimeScopeStmt(manual, name_hint, ir.ReturnStmt([], span), span)
+    function = ir.Function(
+        "main", [], [], scope, span, ir.FunctionType.Orchestration, attrs={"auto_scope": False}
+    )
+    original = ir.Program([function], "P", span)
+
+    restored = pl.parse_program(python_print(original, format=False))
+    ir.assert_structural_equal(original, restored)
+    assert ir.structural_hash(original) == ir.structural_hash(restored)
+    restored_function = restored.get_function("main")
+    assert restored_function is not None
+    restored_scope = _first_runtime_scope(restored_function.body)
+    assert restored_scope is not None
+    assert restored_scope.name_hint == name_hint
+    assert restored_scope.manual == manual
+
+
+def test_runtime_scope_name_is_structural():
+    span = ir.Span.unknown()
+    body = ir.ReturnStmt([], span)
+    named = ir.RuntimeScopeStmt(True, "named", body, span)
+    unnamed = ir.RuntimeScopeStmt(True, "", body, span)
+    assert not ir.structural_equal(named, unnamed)
+
+
+@pytest.mark.parametrize("header", ["if flag:", "for i in pl.range(4):", "while flag:"])
+def test_named_auto_scope_in_control_flow_body_roundtrip(header):
+    """Preserve a named AUTO scope when it is the only control-flow body statement."""
+    original = pl.parse_program(f"""
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+    def main(self, flag: pl.Scalar[pl.BOOL]):
+        {header}
+            with pl.scope(name_hint="control body"):
+                value: pl.Scalar[pl.INT32] = 1
+        return
+""")
+
+    restored = pl.parse_program(python_print(original, format=False))
+    ir.assert_structural_equal(original, restored)
+    assert ir.structural_hash(original) == ir.structural_hash(restored)
+
+
+def test_named_auto_scopes_preserve_nested_control_flow_yields():
+    """Keep scope names and result bindings through nested loop/if body printing."""
+
+    @pl.program
+    class Original:
+        @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+        def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            for i, (acc,) in pl.range(4, init_values=(x,)):
+                with pl.scope(name_hint="iteration"):
+                    if i == 0:
+                        with pl.scope(name_hint="first iteration"):
+                            value = pl.yield_(acc)
+                    else:
+                        with pl.scope(name_hint="later iteration"):
+                            value = pl.yield_(acc)
+                    acc = pl.yield_(value)
+            return acc
+
+    restored = pl.parse_program(python_print(Original, format=False))
+    ir.assert_structural_equal(Original, restored)
+    assert ir.structural_hash(Original) == ir.structural_hash(restored)
+
+
+@pytest.mark.parametrize(
+    "header, manual",
+    [("pl.scope(", False), ("pl.scope(mode=pl.ScopeMode.MANUAL, ", True), ("pl.manual_scope(", True)],
+)
+def test_runtime_scope_name_dsl_spellings(header, manual):
+    original = pl.parse_program(f"""
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+    def main(self):
+        with {header}name_hint="phase one"):
+            return
+""")
+    function = original.get_function("main")
+    assert function is not None
+    scope = _first_runtime_scope(function.body)
+    assert scope is not None
+    assert scope.name_hint == "phase one"
+    assert scope.manual == manual
+    ir.assert_structural_equal(original, pl.parse_program(python_print(original)))
+
+
+@pytest.mark.parametrize("construct", ["pl.scope", "pl.manual_scope"])
+@pytest.mark.parametrize("value", ["42", "None", '"phase" + "one"'])
+def test_runtime_scope_name_requires_a_string_literal(construct, value):
+    with pytest.raises(ParserSyntaxError, match="'name_hint' argument must be a string literal"):
+        pl.parse_program(f"""
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+    def main(self):
+        with {construct}(name_hint={value}):
+            return
+""")
+
+
 def test_scope_manual_mode_round_trips():
     @pl.program
     class Prog:

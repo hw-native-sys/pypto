@@ -445,6 +445,14 @@ print(stmt.as_python())          # "x: pl.Scalar[pl.INT64] = a + b" (default "pl
 print(stmt.as_python("ir"))      # "x: ir.Scalar[ir.INT64] = a + b" (custom prefix)
 ```
 
+Generic Function attrs print as `pl.func_attr({...})` directives in the body
+prologue. They remain Function metadata when parsed, including on HOST
+SubWorkers: the captured Python `InlineStmt.body` excludes these directives
+while preserving the implementation and its docstring. Parameter-valued attrs
+resolve to the function's own parameters. The prologue must precede executable
+statements (a leading docstring is allowed); misplaced directives and duplicate
+keys are errors, also for SubWorkers.
+
 ### Concise Mode
 
 Pass `concise=True` to omit intermediate type annotations. Function signature types (parameters and return) are always preserved:

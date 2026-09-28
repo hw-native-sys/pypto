@@ -1434,8 +1434,8 @@ class TestDeriveSubmit:
                 ir.FunctionType.InCore,
             )
 
-        # Submit return tuple: [runtime-allocated scratch, callee return, TASK_ID].
-        submit_ret = ir.TupleType([_t256(), _t256(), ir.ScalarType(DataType.TASK_ID)])
+        # scratch IS the callee's single return, not an extra return slot.
+        submit_ret = ir.TupleType([_t256(), ir.ScalarType(DataType.TASK_ID)])
 
         # --- Before: pl.submit(self.stage1, a) with prefix args [a] ---
         a = ir.Var("a", _t256(), span)
@@ -1473,17 +1473,9 @@ class TestDeriveSubmit:
         )
         Expected = ir.Program([build_stage1(), exp_main], "submit_runtime_out", span)
 
-        # A prefix-args Submit (runtime-allocated tail Out) hits a SEPARATE,
-        # pre-existing parser limitation: ``pl.submit(self.stage1, a)`` cannot
-        # reparse because the callee declares more params than the Submit passes
-        # (the tail Out is runtime-allocated, materialised as a return-tuple
-        # element). This is independent of the TASK_ID-Tuple bug fixed by
-        # preserving Submit-ness — suppress only the print->parse roundtrip and
-        # still assert the exact Submit structure via structural_equal.
-        with _core_passes.PassContext(
-            [_core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)]
-        ):
-            After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(Before, pl.parse_program(ir.python_print(Before)))
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, pl.parse_program(ir.python_print(After)))
         ir.assert_structural_equal(After, Expected)
 
     def test_submit_caller_allocated_out_plus_runtime_tail_out(self):
@@ -1521,7 +1513,9 @@ class TestDeriveSubmit:
                 ir.FunctionType.InCore,
             )
 
-        submit_ret = ir.TupleType([_t256(), _t256(), ir.ScalarType(DataType.TASK_ID)])
+        # Only scratch is returned; caller-allocated dst is an argument, not
+        # another logical return. Allocation ownership does not add results.
+        submit_ret = ir.TupleType([_t256(), ir.ScalarType(DataType.TASK_ID)])
 
         # --- Before: pl.submit(self.stage1, a, dst) — prefix args [a, dst] ---
         a = ir.Var("a", _t256(), span)
@@ -1561,14 +1555,9 @@ class TestDeriveSubmit:
         )
         Expected = ir.Program([build_stage1(), exp_main], "submit_caller_runtime_out", span)
 
-        # Prefix-args Submit (runtime-allocated tail Out) — see
-        # test_submit_runtime_allocated_tail_out for why the print->parse
-        # roundtrip is suppressed (separate parser limitation); structural_equal
-        # still verifies the Submit is preserved with the derived directions.
-        with _core_passes.PassContext(
-            [_core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)]
-        ):
-            After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(Before, pl.parse_program(ir.python_print(Before)))
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, pl.parse_program(ir.python_print(After)))
         ir.assert_structural_equal(After, Expected)
 
     def test_submit_with_deps_preserves_submit_with_arg_directions(self):

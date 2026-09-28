@@ -116,6 +116,12 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | `pl.scope(mode=pl.ScopeMode.MANUAL)` / `pl.manual_scope()` | `Runtime(manual=true)` | orchestrator 的 MANUAL scope——由用户管理任务排序。两种 `auto_scope` 模式下都可用（它是依赖语义选择）。见[手工依赖原语](02-manual_dependencies.md#手工依赖原语) |
 | `pl.scope()` | `Runtime(manual=false)` | orchestrator 的 AUTO scope（`SIMPLER_SCOPE()`）。手写它需要 `@pl.function(auto_scope=False)`（默认 `auto_scope=True` 下由编译器决定 AUTO 放置）。见 [MaterializeRuntimeScopes](../passes/50-materialize_runtime_scopes.md) |
 
+`pl.scope(..., name_hint="label")` 和 `pl.manual_scope(name_hint="label")`
+接受可选的字符串字面量，默认值为 `""`。print/parse 精确保留该标签，包括空白和转义字符。
+它不改变运行时依赖行为，也不用于命名提取的函数，但属于继承自 `ScopeStmt` 的
+IR 结构相等和哈希契约，因此不会被规范化删除。与提取作用域的名字不同，
+该标签无需是 Python 标识符。
+
 #### `pl.spmd` 多 block 派发
 
 `pl.spmd(N)` 把一个 kernel 派发到 `N` 个 block。形式：

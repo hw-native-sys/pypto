@@ -80,7 +80,8 @@ def _capture_subworker_source(func_def: ast.FunctionDef) -> str:
 
     Body statements are unparsed (no ``def`` header, no decorators) so the IR
     ``Function`` keeps the signature and the attached ``InlineStmt`` carries
-    only the body.
+    only the body. ``pl.func_attr`` directives belong to the Function attrs,
+    not the executable Python body; ``ASTParser`` validates and consumes them.
 
     Raises:
         ParserSyntaxError: if the SubWorker declares a ``self`` parameter —
@@ -92,7 +93,7 @@ def _capture_subworker_source(func_def: ast.FunctionDef) -> str:
             "declare it as a self-contained function inside @pl.program.",
             hint="Remove the 'self' parameter from the SubWorker definition.",
         )
-    return "\n".join(ast.unparse(stmt) for stmt in func_def.body)
+    return "\n".join(ast.unparse(stmt) for stmt in func_def.body if not _is_pl_func_attr_stmt(stmt))
 
 
 @dataclasses.dataclass

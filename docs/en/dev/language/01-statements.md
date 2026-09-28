@@ -118,6 +118,14 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | `pl.scope(mode=pl.ScopeMode.MANUAL)` / `pl.manual_scope()` | `Runtime(manual=true)` | Orchestrator MANUAL scope — user manages task ordering. Allowed in either `auto_scope` mode (it is a dependency-semantics choice). See [Manual dependency primitives](02-manual_dependencies.md#manual-dependency-primitives) |
 | `pl.scope()` | `Runtime(manual=false)` | Orchestrator AUTO scope (`SIMPLER_SCOPE()`). Hand-placing one requires `@pl.function(auto_scope=False)` (in the default `auto_scope=True` the compiler owns AUTO placement). See [MaterializeRuntimeScopes](../passes/50-materialize_runtime_scopes.md) |
 
+`pl.scope(..., name_hint="label")` and `pl.manual_scope(name_hint="label")`
+accept an optional string literal, defaulting to `""`. The label is preserved
+exactly by print/parse, including whitespace and escaped characters. It does
+not affect runtime dependency behavior or name an outlined function, but it is
+part of the IR structural equality/hash contract inherited from `ScopeStmt`;
+it is not normalized away. Unlike an outlined scope name, it need not be a
+Python identifier.
+
 See [Scopes and Placement](../../user/language/04-scopes.md) for examples.
 
 #### `pl.spmd` multi-block dispatch
