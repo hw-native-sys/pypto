@@ -876,9 +876,9 @@ gather 的 `split` 属性，会被拒绝。
 
 gather 结果是 `Mat` 而非 `Vec`：边界算子声明的类型指的是**消费侧** lane 的空间，
 而 AIC 会把 V→C 传输 pop 进 L1。（`Vec` 指的是*生产侧* lane，与镜像算子
-`tile.aiv_shard` 相矛盾——后者为其 cube 产出的操作数声明向量侧的 `Vec`。）随后的
-cube 放置 move 才把 tile 放到最终的操作数空间——matmul 操作数为 `Mat → Left`；
-此处的 `Mat → Mat` 是空操作，仅因本 pass 保留了作者原有的 move 而存在。
+`tile.aiv_shard` 相矛盾——后者为其 cube 产出的操作数声明向量侧的 `Vec`。）若目标为
+Mat，直接使用 gather 结果，不发射 `Mat → Mat` move。只有非 Mat 的 cube 目标才保留
+到最终操作数空间的放置 move，例如 matmul 操作数的 `Mat → Left` 或 `Mat → Right`。
 
 ## 实现
 

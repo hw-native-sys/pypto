@@ -1039,10 +1039,10 @@ cannot be expressed as a `split` attr on a 2D gather and is rejected.
 The gather result is `Mat`, not `Vec`: the declared type of a boundary op names
 the **consuming** lane's space, and AIC pops a V→C transfer into L1. (`Vec` would
 name the *producing* lane, contradicting the mirror op `tile.aiv_shard`, which
-declares the vector-side `Vec` for its cube-produced operand.) The cube placement
-move that follows is what puts the tile in its final operand space — `Mat → Left`
-for a matmul operand; the `Mat → Mat` shown here is a no-op that survives only
-because the pass preserves the author's original move.
+declares the vector-side `Vec` for its cube-produced operand.) For Mat destinations,
+the gathered value is used directly: no `Mat → Mat` move is emitted. Only non-Mat
+cube destinations retain a placement move into their final operand space, such as
+`Mat → Left` or `Mat → Right` for a matmul operand.
 
 ## Implementation
 
