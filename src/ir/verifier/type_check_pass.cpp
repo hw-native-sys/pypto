@@ -9,10 +9,15 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/error.h"
@@ -20,6 +25,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
@@ -64,6 +70,8 @@ std::string ErrorTypeToString(ErrorType type) {
       return "TILE_VIEW_MISMATCH";
     case ErrorType::BUFFER_DESCRIPTOR_MISMATCH:
       return "BUFFER_DESCRIPTOR_MISMATCH";
+    case ErrorType::TENSOR_LAYOUT_MISMATCH:
+      return "TENSOR_LAYOUT_MISMATCH";
     default:
       return "UNKNOWN";
   }
@@ -71,6 +79,15 @@ std::string ErrorTypeToString(ErrorType type) {
 }  // namespace typecheck
 
 namespace {
+
+/// What an ND argument of a ``device=`` dispatch hands an NZ parameter, from
+/// best to worst so the worst of several possible values wins.
+enum class NzDispatchArg {
+  kWholeMatrices,  ///< A host parameter, or slices of one keeping its last two axes whole
+  kUntraced,       ///< Produced by something the check does not follow
+  kWindow,         ///< A slice cutting inside the last two axes
+};
+
 /**
  * @brief Helper visitor class for type checking
  *
@@ -78,10 +95,13 @@ namespace {
  */
 class TypeChecker : public IRVisitor {
  public:
-  explicit TypeChecker(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
+  explicit TypeChecker(std::vector<Diagnostic>& diagnostics, ProgramPtr program = nullptr)
+      : diagnostics_(diagnostics), program_(std::move(program)) {}
 
   void VisitFunction(const FunctionPtr& func) override;
   void VisitExpr(const ExprPtr& expr) override;
+  void VisitExpr_(const CallPtr& op) override;
+  void VisitExpr_(const SubmitPtr& op) override;
   void VisitStmt_(const ForStmtPtr& op) override;
   void VisitStmt_(const WhileStmtPtr& op) override;
   void VisitStmt_(const IfStmtPtr& op) override;
@@ -90,6 +110,29 @@ class TypeChecker : public IRVisitor {
 
  private:
   std::vector<Diagnostic>& diagnostics_;
+  /// Owning program, when available: lets a call resolve its callee's signature.
+  ProgramPtr program_;
+  /// The function being checked; its body is where a dispatch argument is traced.
+  FunctionPtr func_;
+  /// Every value each Var can hold in ``func_``, and ``func_``'s parameters,
+  /// built on first use: only an ND-to-NZ dispatch argument needs tracing.
+  std::unordered_map<const Var*, std::vector<ExprPtr>> var_values_;
+  std::unordered_set<const Var*> func_params_;
+  bool var_values_built_ = false;
+  /// Memoized ``ClassifyNzDispatchArg`` result per Var.
+  std::unordered_map<const Var*, NzDispatchArg> nz_dispatch_args_;
+
+  /**
+   * @brief Check that each argument's tensor layout matches the callee parameter's
+   */
+  void CheckCallArgLayouts(const OpPtr& callee_op, const std::vector<ExprPtr>& args, const Span& span,
+                           bool is_device_dispatch);
+
+  /**
+   * @brief Trace an ND argument of a ``device=`` dispatch back to what it hands
+   * an NZ parameter
+   */
+  NzDispatchArg ClassifyNzDispatchArg(const ExprPtr& arg);
 
   /**
    * @brief Record an error
@@ -131,6 +174,11 @@ void TypeChecker::RecordError(typecheck::ErrorType type, const std::string& mess
 
 void TypeChecker::VisitFunction(const FunctionPtr& func) {
   if (!func) return;
+  func_ = func;
+  var_values_.clear();
+  func_params_.clear();
+  var_values_built_ = false;
+  nz_dispatch_args_.clear();
 
   for (size_t i = 0; i < func->params_.size(); ++i) {
     const auto& param = func->params_[i];
@@ -163,6 +211,253 @@ void TypeChecker::VisitExpr(const ExprPtr& expr) {
   }
   ValidateTypeValidShape(expr->GetType(), context, expr->span_);
   IRVisitor::VisitExpr(expr);
+}
+
+namespace {
+
+/// The layout a tensor-like type carries. An absent ``tensor_view_`` means ND —
+/// the ``TensorType`` constructor drops a view that adds nothing to the default,
+/// so "no view" and "an ND view" are the same layout claim.
+std::optional<TensorLayout> TensorLayoutOf(const TypePtr& type) {
+  auto tensor_type = AsTensorTypeLike(type);
+  if (!tensor_type) return std::nullopt;
+  if (!tensor_type->tensor_view_) return TensorLayout::ND;
+  return tensor_type->tensor_view_->layout;
+}
+
+/// Every value each Var can hold in a function body: what an ``AssignStmt``
+/// binds it to (several before SSA), an ``IterArg``'s initial value and each
+/// value yielded back into it, and each value a loop or ``if`` result variable
+/// receives. A Var absent from the map is bound some other way.
+class VarValueCollector : public IRVisitor {
+ public:
+  std::unordered_map<const Var*, std::vector<ExprPtr>> values;
+
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (op && op->var_) values[op->var_.get()].push_back(op->value_);
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    if (!op) return;
+    yield_targets_.push_back(RecordLoopCarried(op->iter_args_, op->return_vars_));
+    IRVisitor::VisitStmt_(op);
+    yield_targets_.pop_back();
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    if (!op) return;
+    yield_targets_.push_back(RecordLoopCarried(op->iter_args_, op->return_vars_));
+    IRVisitor::VisitStmt_(op);
+    yield_targets_.pop_back();
+  }
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    if (!op) return;
+    std::vector<const Var*> targets;
+    targets.reserve(op->return_vars_.size());
+    for (const auto& return_var : op->return_vars_) targets.push_back(return_var.get());
+    yield_targets_.push_back(std::move(targets));
+    IRVisitor::VisitStmt_(op);
+    yield_targets_.pop_back();
+  }
+
+  void VisitStmt_(const YieldStmtPtr& op) override {
+    if (op && !yield_targets_.empty()) {
+      const auto& targets = yield_targets_.back();
+      for (size_t i = 0; i < op->value_.size() && i < targets.size(); ++i) {
+        if (targets[i]) values[targets[i]].push_back(op->value_[i]);
+      }
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  /// Per enclosing For / While / If, innermost last: the Vars its yields bind.
+  std::vector<std::vector<const Var*>> yield_targets_;
+
+  /// Record a loop's carried values; return the Vars its body's yields bind.
+  std::vector<const Var*> RecordLoopCarried(const std::vector<IterArgPtr>& iter_args,
+                                            const std::vector<VarPtr>& return_vars) {
+    std::vector<const Var*> targets;
+    targets.reserve(iter_args.size());
+    for (size_t i = 0; i < iter_args.size(); ++i) {
+      const auto& iter_arg = iter_args[i];
+      targets.push_back(iter_arg.get());
+      if (!iter_arg) continue;
+      values[iter_arg.get()].push_back(iter_arg->initValue_);
+      // The result holds the carried value after the last trip (or the initial
+      // value after none), which is exactly what the IterArg can hold.
+      if (i < return_vars.size() && return_vars[i]) values[return_vars[i].get()].push_back(iter_arg);
+    }
+    return targets;
+  }
+};
+
+/// Whether a ``tensor.slice`` takes the last two axes of its source whole: full
+/// extent at offset 0, and neither one dropped. Only such a slice selects whole
+/// matrices, whose bytes are the same run under ND and NZ order.
+bool SliceKeepsMatrixWhole(const CallPtr& slice) {
+  if (slice->args_.size() < 3) return false;
+  auto source = AsTensorTypeLike(slice->args_[0]->GetType());
+  auto shapes = As<MakeTuple>(slice->args_[1]);
+  auto offsets = As<MakeTuple>(slice->args_[2]);
+  if (!source || !shapes || !offsets) return false;
+  const size_t rank = source->shape_.size();
+  if (rank < 2 || shapes->elements_.size() != rank || offsets->elements_.size() != rank) return false;
+  for (size_t axis = rank - 2; axis < rank; ++axis) {
+    if (!AreExprsEqual(shapes->elements_[axis], source->shape_[axis]) ||
+        !IsConstValue(offsets->elements_[axis], 0)) {
+      return false;
+    }
+  }
+  if (slice->args_.size() >= 5) {
+    auto drop_dims = As<MakeTuple>(slice->args_[4]);
+    if (!drop_dims) return false;
+    for (const auto& dim_expr : drop_dims->elements_) {
+      auto dim = As<ConstInt>(dim_expr);
+      if (!dim || dim->value_ < 0 || static_cast<size_t>(dim->value_) + 2 >= rank) return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
+NzDispatchArg TypeChecker::ClassifyNzDispatchArg(const ExprPtr& arg) {
+  if (auto var = AsVarLike(arg)) {
+    if (!var_values_built_) {
+      VarValueCollector collector;
+      if (func_ && func_->body_) collector.VisitStmt(func_->body_);
+      var_values_ = std::move(collector.values);
+      if (func_) {
+        for (const auto& param : func_->params_) func_params_.insert(param.get());
+      }
+      var_values_built_ = true;
+    }
+    // Only a parameter is the buffer as the host holds it. The trace stays in
+    // this function, so a window passed into a helper arrives there as a
+    // parameter and is not followed back to the caller.
+    const bool is_param = func_params_.count(var.get()) > 0;
+    auto values = var_values_.find(var.get());
+    if (values == var_values_.end()) {
+      return is_param ? NzDispatchArg::kWholeMatrices : NzDispatchArg::kUntraced;
+    }
+    // Provisionally whole, so a pre-SSA self-reassignment terminates; each
+    // value the Var can hold still has to pass on its own.
+    auto [cached, inserted] = nz_dispatch_args_.emplace(var.get(), NzDispatchArg::kWholeMatrices);
+    if (!inserted) return cached->second;
+    NzDispatchArg worst = NzDispatchArg::kWholeMatrices;
+    for (const auto& value : values->second) {
+      worst = std::max(worst, ClassifyNzDispatchArg(value));
+      if (worst == NzDispatchArg::kWindow) break;
+    }
+    nz_dispatch_args_[var.get()] = worst;
+    return worst;
+  }
+  // Any producer other than a slice (a reshape, a fresh tensor) re-associates
+  // the axes in ways this check does not follow, so it is not trusted.
+  auto call = As<Call>(arg);
+  if (!call || !IsOp(call, "tensor.slice")) return NzDispatchArg::kUntraced;
+  if (!SliceKeepsMatrixWhole(call)) return NzDispatchArg::kWindow;
+  return ClassifyNzDispatchArg(call->args_[0]);
+}
+
+void TypeChecker::CheckCallArgLayouts(const OpPtr& callee_op, const std::vector<ExprPtr>& args,
+                                      const Span& span, bool is_device_dispatch) {
+  // Only a call to another function in this program has a signature to check
+  // against; a registered operator validates its own operands via f_deduce_type.
+  if (!program_ || !As<GlobalVar>(callee_op)) return;
+  auto callee = program_->GetFunction(callee_op->name_);
+  if (!callee) return;  // Opaque / external — no signature to compare.
+
+  // ``Call`` maps args to params by identity with full coverage; ``Submit``
+  // coverage is only bounded (``args_.size() <= params_.size()``), because a
+  // ``pl.submit`` may omit trailing runtime-allocated ``Out`` params. Identity
+  // still holds over the *leading* args, but once a gap and a trailing
+  // ``CommCtxType`` suffix coexist (after ``MaterializeDistTensorCtx``) the
+  // suffix args bind ``params_[i + gap]``. Rather than re-derive that mapping,
+  // stop before the suffix: those args carry no layout to compare anyway.
+  // See ``Submit::args_`` in include/pypto/ir/expr.h for the canonical rule.
+  size_t n = args.size() < callee->params_.size() ? args.size() : callee->params_.size();
+  if (args.size() != callee->params_.size()) {
+    while (n > 0 && callee->params_[n - 1] && As<CommCtxType>(callee->params_[n - 1]->GetType())) {
+      --n;
+    }
+  }
+  for (size_t i = 0; i < n; ++i) {
+    const auto& param = callee->params_[i];
+    if (!param || !args[i]) continue;
+    auto want = TensorLayoutOf(param->GetType());
+    auto got = TensorLayoutOf(args[i]->GetType());
+    if (!want || !got || *want == *got) continue;
+    // DN is the one layout a parameter cannot declare: ``pl.Tensor[..., pl.DN]``
+    // is rejected by the parser, and a DN value is *derived* at the use site
+    // (``pl.transpose(x, -2, -1)``, or a slice of such a view) rather than
+    // annotated. An ND parameter is therefore not making a competing claim
+    // about those bytes -- it is the only thing the author is able to write --
+    // so a DN argument binding it is the documented workflow, not a mismatch.
+    // ``OptimizeOrchTensors`` also rewrites such a parameter's view with
+    // explicit strides, which is what makes the pattern lower correctly.
+    if (*want == TensorLayout::DN || *got == TensorLayout::DN) continue;
+    // A ``device=`` dispatch crosses from a host driver into a device program,
+    // and what crosses it is a buffer: the driver never reads these bytes, it
+    // only says which card they are on. The callee's parameter is therefore the
+    // only claim about their order, and an ND argument is the absence of a
+    // competing one -- the shape a host allocates a weight in, whatever the
+    // kernel makes of it. The reverse stays an error: an NZ argument bound to an
+    // ND parameter means the callee reads fractals as row-major, which nothing
+    // downstream would notice.
+    //
+    // NZ only: it is the one layout whose logical-to-blocked boundary the
+    // orchestration entry restates. An MX parameter is blocked the same way but
+    // has no such restatement, so an ND buffer bound to one would reach the
+    // kernel as ordinary bytes read as packed MX data.
+    //
+    // And only for whole matrices. A host slice *does* read the bytes -- it
+    // addresses them row-major -- and a window inside the last two axes of
+    // NZ-packed bytes selects runs from several fractal column blocks, which the
+    // device then reads as one NZ matrix. ``w[r * R : (r + 1) * R]`` of a packed
+    // ``[N * R, C]`` weight is contiguous, so nothing downstream notices.
+    if (is_device_dispatch && *want == TensorLayout::NZ && *got == TensorLayout::ND) {
+      const NzDispatchArg handed_over = ClassifyNzDispatchArg(args[i]);
+      if (handed_over == NzDispatchArg::kWholeMatrices) continue;
+      std::ostringstream msg;
+      msg << "Layout mismatch at argument " << i << " of dispatch to '" << callee->name_ << "': parameter '"
+          << param->name_hint_
+          << "' is declared NZ, so the ND argument must be a host parameter, or a slice of one that keeps "
+             "its last two axes whole, such as the leading-axis shard w[r]. ";
+      if (handed_over == NzDispatchArg::kWindow) {
+        msg << "This argument is a window inside the matrix: NZ-packed bytes cut that way are not "
+               "themselves NZ-packed, so the device would read the wrong elements. Pack each shard "
+               "separately, stack the shards as [N, R, C], and pass w[r].";
+      } else {
+        msg << "This argument is produced some other way (for example a reshape or a newly created "
+               "tensor), so nothing shows its bytes are whole NZ-packed matrices. Pass the host "
+               "parameter, or a leading-axis slice of it.";
+      }
+      RecordError(typecheck::ErrorType::TENSOR_LAYOUT_MISMATCH, msg.str(), span);
+      continue;
+    }
+    std::ostringstream msg;
+    msg << "Layout mismatch at argument " << i << " of call to '" << callee->name_ << "': parameter '"
+        << param->name_hint_ << "' is declared " << TensorLayoutToString(*want) << " but the argument is "
+        << TensorLayoutToString(*got)
+        << ". A layout annotation is a claim about byte order in memory, so the two ends must agree"
+        << " -- annotate the argument " << TensorLayoutToString(*want) << " as well, or drop "
+        << TensorLayoutToString(*want) << " from the parameter.";
+    RecordError(typecheck::ErrorType::TENSOR_LAYOUT_MISMATCH, msg.str(), span);
+  }
+}
+
+void TypeChecker::VisitExpr_(const CallPtr& op) {
+  if (op) CheckCallArgLayouts(op->op_, op->args_, op->span_, op->HasAttr(kAttrDevice));
+  IRVisitor::VisitExpr_(op);
+}
+
+void TypeChecker::VisitExpr_(const SubmitPtr& op) {
+  if (op) CheckCallArgLayouts(op->op_, op->args_, op->span_, op->HasAttr(kAttrDevice));
+  IRVisitor::VisitExpr_(op);
 }
 
 void TypeChecker::ValidateTypeValidShape(const TypePtr& type, const std::string& context, const Span& span) {
@@ -598,7 +893,7 @@ class TypeCheckPropertyVerifierImpl : public PropertyVerifier {
       }
 
       // Create type checker and run checking
-      TypeChecker checker(diagnostics);
+      TypeChecker checker(diagnostics, program);
       checker.VisitFunction(func);
     }
   }

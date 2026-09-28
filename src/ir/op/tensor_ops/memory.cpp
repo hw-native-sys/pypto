@@ -269,9 +269,36 @@ TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
   // When the source is a DistributedTensorType, the result keeps that kind and
   // carries the same window_buffer_ — a slice is still a view into the same
   // comm-group allocation.
+  //
+  // The layout carries through: a slice is a *view* into the source allocation,
+  // so it cannot change the byte order of the bytes it selects. Dropping it
+  // here silently retypes a DN or NZ window as row-major ND, which contradicts
+  // the documented "a slice or reshape of a DN-producing operation inherits DN
+  // automatically" and hides an ND/NZ disagreement from the call-boundary
+  // layout check in the TypeChecked verifier.
+  //
+  // It carries only when the trailing pair -- the transposed plane for DN, the
+  // fractal plane for NZ -- survives intact: the window must be a rectangle at
+  // the source's own rank (a lower-rank reinterpreting window re-associates the
+  // axes), and drop_dims may erase only leading axes.
+  const size_t source_rank = tensor_type->shape_.size();
+  const TensorLayout source_layout =
+      tensor_type->tensor_view_ ? tensor_type->tensor_view_->layout : TensorLayout::ND;
+  bool only_leading_axes_dropped = true;
+  for (int64_t axis : drop_dims) {
+    if (axis < 0 || static_cast<size_t>(axis) + 2 >= source_rank) {
+      only_leading_axes_dropped = false;
+      break;
+    }
+  }
+  const bool trailing_plane_intact =
+      full_shape.size() == source_rank && new_shape.size() >= 2 && only_leading_axes_dropped;
+  const TensorLayout result_layout = trailing_plane_intact ? source_layout : TensorLayout::ND;
+
   std::optional<TensorView> result_tv;
-  if (!AreExprVectorsEqual(valid_shape, new_shape) || result_pad != PadValue::null) {
-    result_tv = TensorView({}, TensorLayout::ND, valid_shape, result_pad);
+  if (result_layout != TensorLayout::ND || !AreExprVectorsEqual(valid_shape, new_shape) ||
+      result_pad != PadValue::null) {
+    result_tv = TensorView({}, result_layout, valid_shape, result_pad);
   }
   if (auto dt = As<DistributedTensorType>(args[0]->GetType())) {
     return std::make_shared<DistributedTensorType>(new_shape, tensor_type->dtype_, std::nullopt,

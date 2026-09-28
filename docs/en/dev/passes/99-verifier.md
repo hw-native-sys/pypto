@@ -354,6 +354,7 @@ buffer lifetime verifiers remain separate obligations.
 | 110 | `DISTRIBUTED_WINDOW_IDENTITY_MISMATCH` | Distributed tensors refer to different window buffers |
 | 111 | `TILE_VIEW_MISMATCH` | Effective TileView metadata mismatch |
 | 112 | `BUFFER_DESCRIPTOR_MISMATCH` | Buffer descriptor or multi-buffer slot count mismatch |
+| 113 | `TENSOR_LAYOUT_MISMATCH` | Call/Submit argument layout differs from the callee parameter's (DN exempt — a parameter cannot declare it; an ND argument of a `device=` dispatch exempt — the device program's parameter is the claim — but only when it traces, within the dispatching function, to a host parameter through `tensor.slice`s keeping the last two axes whole (following loop-carried and `if` result values); a window inside the matrix, or a value from any other producer, is rejected) |
 
 ### NoNestedCall
 
