@@ -51,7 +51,9 @@ their `tensor.create` seed. Before verification, `NarrowTensorMatmulCarries` nar
 full seed with `tensor.set_validshape` when the extents are visible outside the loop,
 then retypes the carry and its uses. Accumulating branches explicitly narrow their
 results to that same region; `tensor.matmul_acc` inference itself is unchanged.
-Only matmul-family yields and fresh full-box seeds qualify. Other carries and extents
+The product branch supplies the region regardless of then/else order; distinct
+product regions are not silently merged. Only matmul-family yields and fresh full-box
+seeds qualify. Other carries and extents
 defined inside the loop retain their existing behavior. Tensor-to-tile conversion still
 reconciles the resulting Acc layout and compact mode.
 

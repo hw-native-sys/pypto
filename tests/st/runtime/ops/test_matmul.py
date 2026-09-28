@@ -85,10 +85,10 @@ def test_explicit_valid_shape_matmul_carry(test_config):
             for k in pl.range(0, 256, 128):
                 av = pl.slice(a, [64, 128], [0, k], valid_shape=[17, 128], clamp=True)
                 bv = pl.slice(b, [128, 32], [k, 0], valid_shape=[128, 24], clamp=True)
-                if k == 0:
-                    acc = pl.matmul(av, bv, out_dtype=pl.FP32)
-                else:
+                if k != 0:
                     acc = pl.matmul_acc(acc, av, bv)
+                else:
+                    acc = pl.matmul(av, bv, out_dtype=pl.FP32)
             out = pl.assemble(out, acc, [0, 0])
         return out
 

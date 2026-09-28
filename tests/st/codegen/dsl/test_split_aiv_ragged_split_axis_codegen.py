@@ -34,6 +34,7 @@ from pathlib import Path
 
 import pypto.language as pl
 import pytest
+from pypto.language.parser.diagnostics import ParserSyntaxError
 
 torch = pytest.importorskip("torch")
 
@@ -306,9 +307,11 @@ def test_hand_authored_partial_gather_is_rejected_where_the_lanes_are_known():
 
 def test_left_right_ragged_columns_are_rejected_with_a_dsl_fix():
     """The column field is pinned by the transport, so a per-lane column has no carrier."""
-    with pytest.raises(ValueError) as exc:
+    with pytest.raises(ParserSyntaxError) as exc:
         ragged_cols_left_right.lower(config=RunConfig(platform="a2a3"))
 
+    # Valid M/N now reaches this check during parsing rather than lowering.
+    assert isinstance(exc.value.__cause__, ValueError)
     message = str(exc.value)
     assert "LEFT_RIGHT splits the column axis" in message
     assert "valid column extent (32 of 256)" in message
@@ -319,9 +322,11 @@ def test_left_right_ragged_columns_are_rejected_with_a_dsl_fix():
 
 def test_ragged_rows_with_narrowed_columns_are_rejected():
     """treshape restores the column extent statically and would clobber the per-lane row."""
-    with pytest.raises(ValueError) as exc:
+    with pytest.raises(ParserSyntaxError) as exc:
         ragged_rows_and_cols.lower(config=RunConfig(platform="a2a3"))
 
+    # Valid M/N now reaches this check during parsing rather than lowering.
+    assert isinstance(exc.value.__cause__, ValueError)
     message = str(exc.value)
     assert "per-lane row extent" in message
     assert "pl.set_validshape" in message

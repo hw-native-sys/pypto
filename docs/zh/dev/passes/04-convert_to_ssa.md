@@ -49,7 +49,8 @@ program_ssa = ssa_pass(program)
 对于新建的二维 tensor 累加器，matmul 的 yield 有效范围可能小于 `tensor.create` 种子。
 验证前，`NarrowTensorMatmulCarries` 在有效范围表达式于循环外可见时，通过
 `tensor.set_validshape` 收窄完整种子，并重新推导携带值及其使用处的类型。累加分支也显式
-收窄结果到同一范围，`tensor.matmul_acc` 本身的类型推导不变。该处理仅适用于 matmul
+收窄结果到同一范围，`tensor.matmul_acc` 本身的类型推导不变。乘积分支提供有效范围，
+不依赖 then/else 顺序，也不会静默合并不同乘积的范围。该处理仅适用于 matmul
 系列 yield 和新建的完整种子；其他携带值、循环内定义的范围保持原有行为。
 Tensor-to-tile 转换仍负责协调最终 Acc 布局和 compact 模式。
 

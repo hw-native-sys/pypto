@@ -87,5 +87,35 @@ def test_tensor_matmul_peeled_carry_compiles(tmp_path, ascend_backend, physical_
     assert "!pto.partition_tensor_view<17x24xf32>" in pto
 
 
+@pytest.mark.parametrize("physical_m", [32, 64])
+def test_tensor_matmul_else_first_carry_compiles(tmp_path, ascend_backend, physical_m):
+    """The first product in the else branch still determines the valid carry region."""
+
+    @pl.jit
+    def split_k(
+        a: pl.Tensor[[17, 256], pl.FP16],
+        b: pl.Tensor[[256, 24], pl.FP16],
+        out: pl.Out[pl.Tensor[[physical_m, 32], pl.FP32]],
+    ):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            acc = pl.create_tensor([physical_m, 32], dtype=pl.FP32)
+            for k in pl.range(0, 256, 128):
+                av = pl.slice(a, [physical_m, 128], [0, k], valid_shape=[17, 128], clamp=True)
+                bv = pl.slice(b, [128, 32], [k, 0], valid_shape=[128, 24], clamp=True)
+                if k != 0:
+                    acc = pl.matmul_acc(acc, av, bv)
+                else:
+                    acc = pl.matmul(av, bv, out_dtype=pl.FP32)
+            out = pl.assemble(out, acc, [0, 0])
+        return out
+
+    split_k.compile(config=RunConfig(codegen_only=True, save_kernels=True, save_kernels_dir=str(tmp_path)))
+    files = list(tmp_path.rglob("*.pto"))
+    assert files
+    pto = "\n".join(file.read_text() for file in files)
+    assert "pto.tmatmul.acc" in pto
+    assert "!pto.partition_tensor_view<17x24xf32>" in pto
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
