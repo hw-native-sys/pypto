@@ -271,8 +271,11 @@ class BufferEmissionPreflight : public ir::IRVisitor {
     if (auto type = As<ir::BufferType>(expr->GetType())) {
       if (descriptors_.insert(type.get()).second) BufferTypeString(type, expr->span_);
     }
-    CHECK_SPAN(!As<ir::MultiBufferType>(expr->GetType()), expr->span_)
-        << "Direct Buffer IR codegen does not yet support multi-buffer allocations";
+    if (auto multi = As<ir::MultiBufferType>(expr->GetType())) {
+      if (descriptors_.insert(multi->element_type_.get()).second) {
+        BufferTypeString(multi->element_type_, expr->span_);
+      }
+    }
     CHECK_SPAN(!As<ir::Submit>(expr) && !As<ir::TupleGetItemExpr>(expr), expr->span_)
         << "Direct Buffer IR codegen does not yet support task submissions or tuple projections";
     IRVisitor::VisitExpr(expr);
@@ -300,7 +303,9 @@ class BufferEmissionPreflight : public ir::IRVisitor {
       returned_ = true;
     }
     if (auto assign = As<ir::AssignStmt>(stmt)) {
-      CHECK_SPAN(As<ir::BufferType>(assign->var_->GetType()) || As<ir::ScalarType>(assign->var_->GetType()),
+      CHECK_SPAN(As<ir::BufferType>(assign->var_->GetType()) ||
+                     As<ir::MultiBufferType>(assign->var_->GetType()) ||
+                     As<ir::ScalarType>(assign->var_->GetType()),
                  assign->span_)
           << "Direct Buffer IR codegen supports only scalar or buffer assignments";
     }
@@ -362,7 +367,8 @@ class BufferEmissionPreflight : public ir::IRVisitor {
     uses_spmd_blocks |= ir::IsOp(call, "buffer.get_block_idx") || ir::IsOp(call, "buffer.get_block_num");
     uses_spmd_subblock |= ir::IsOp(call, "buffer.get_subblock_idx");
     const auto* recipe = backend::FindBufferElementwiseRecipe(call->op_->name_);
-    CHECK_SPAN(recipe || ir::IsOp(call, "buffer.alloc") || ir::IsOp(call, "buffer.copy") ||
+    CHECK_SPAN(recipe || ir::IsOp(call, "buffer.alloc") || ir::IsOp(call, "buffer.alloc_multi") ||
+                   ir::IsOp(call, "buffer.get_slot") || ir::IsOp(call, "buffer.copy") ||
                    ir::IsOp(call, "buffer.subview") || ir::IsOp(call, "buffer.reshape") ||
                    ir::IsOp(call, "buffer.load") || ir::IsOp(call, "buffer.store") ||
                    ir::IsOp(call, "buffer.set_validshape") || ir::IsOp(call, "buffer.get_block_idx") ||
@@ -580,6 +586,25 @@ bool PTOCodegen::TryEmitBufferCall(const ir::CallPtr& call, const ir::VarPtr& re
     const auto name = NewNamedTemp(result->name_hint_);
     Emit(name + " = arith.index_cast " + argument + " : i32 to index");
     BindVarToMlir(result, name);
+  } else if (ir::IsOp(call, "buffer.alloc_multi")) {
+    const auto multi = As<ir::MultiBufferType>(call->GetType());
+    INTERNAL_CHECK_SPAN(result && multi, call->span_) << "Internal error: malformed multi-buffer allocation";
+    const auto type =
+        FormatMultiTileBufTypeString(BufferTypeString(multi->element_type_, call->span_), multi->slot_count_);
+    const auto name = NewNamedTemp(result->name_hint_);
+    Emit(name + " = pto.alloc_multi_tile : " + type);
+    BindVarToMlir(result, name);
+  } else if (ir::IsOp(call, "buffer.get_slot")) {
+    const auto multi = As<ir::MultiBufferType>(call->args_[0]->GetType());
+    INTERNAL_CHECK_SPAN(result && multi, call->span_) << "Internal error: malformed multi-buffer slot";
+    const auto descriptor = BufferTypeString(multi->element_type_, call->span_);
+    const auto type = FormatMultiTileBufTypeString(descriptor, multi->slot_count_);
+    const auto name = NewNamedTemp(result->name_hint_);
+    const auto index = EmitBufferIntegerOperand(call->args_[1], DataType::INDEX);
+    Emit(name + " = pto.multi_tile_get " + GetExprAsCode(call->args_[0]) + "[" + index + "] : " + type +
+         " -> " + descriptor);
+    BindVarToMlir(result, name);
+    RegisterTileBufType(name, descriptor);
   } else if (ir::IsOp(call, "buffer.alloc")) {
     INTERNAL_CHECK_SPAN(result, call->span_) << "Internal error: buffer.alloc needs its explicit SSA result";
     const auto type = As<ir::BufferType>(result->GetType());

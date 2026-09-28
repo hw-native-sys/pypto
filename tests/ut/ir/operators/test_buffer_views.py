@@ -214,5 +214,15 @@ def test_subview_requires_static_descriptor_dimensions_for_literal_extents(valid
     ir.assert_structural_equal(call.type, descriptor)
 
 
+@pytest.mark.parametrize(
+    "shape,offset,valid", [([96, 64], 0, []), ([32, 64], 1, []), ([32, 64], 0, [-1, 64])]
+)
+def test_acc_subview_rejects_invalid_slot_windows(shape, offset, valid):
+    source = ir.BufferType([64, 64], DataType.FP32, ir.MemorySpace.Acc)
+    result = ir.BufferType(shape, DataType.FP32, ir.MemorySpace.Acc, valid)
+    with pytest.raises(ValueError, match="zero-offset static view"):
+        _view("buffer.subview", [_var(source), _offsets(offset)], result)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -819,5 +819,41 @@ class TestPipelineLowersToARegion:
         assert "step %c2_index" in _lines(mlir, "scf.for")[0]
 
 
+def test_declared_accumulator_placeholder_is_not_a_competing_live_value():
+    """The split-K seed declares storage; the first matmul initializes it."""
+    slots = pl.MemRef(slots=2)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[32, 32], pl.FP16],
+            b: pl.Tensor[[32, 32], pl.FP16],
+            out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+        ) -> pl.Tensor[[32, 32], pl.FP32]:
+            seed: pl.Tile[[32, 32], pl.FP32, slots[0], pl.Mem.Acc] = pl.tile.create(
+                [32, 32], dtype=pl.FP32, target_memory=pl.Mem.Acc
+            )
+            for k, (carry,) in pl.range(2, init_values=(seed,)):
+                lhs_mat = pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.load(b, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+                lhs = pl.tile.move(lhs_mat, target_memory=pl.Mem.Left)
+                rhs = pl.tile.move(rhs_mat, target_memory=pl.Mem.Right)
+                if k == 0:
+                    first: pl.Tile[[32, 32], pl.FP32, slots[0], pl.Mem.Acc] = pl.tile.matmul(lhs, rhs)
+                    value = pl.yield_(first)
+                else:
+                    next_value = pl.tile.matmul_acc(carry, lhs, rhs)
+                    value = pl.yield_(next_value)
+                result = pl.yield_(value)
+            stored = pl.store(result, [0, 0], out)
+            return stored
+
+    text = _codegen(Before, passes.MemoryPlanner.PTOAS)
+    assert len(_lines(text, "pto.alloc_multi_tile")) == 1
+    assert "pto.tmatmul" in text
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

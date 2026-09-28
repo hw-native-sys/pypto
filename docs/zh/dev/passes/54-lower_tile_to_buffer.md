@@ -310,7 +310,14 @@ Mat 到 Left/Right 的拷贝与 extract、matmul/matmul_acc 以及 Acc store。
 GM load/store 保留匹配的元素类型，不插入转换。`add`/`mul` 支持 FP16/FP32/INT32；
 BF16 传输支持不代表算术支持。
 
-辅助函数调用、其他布局、多槽位和其他操作转换由后续迁移切片补齐。
+静态无地址多槽分配保留为带 `MultiBufferType` 的 `buffer.alloc_multi`，
+并通过 `buffer.get_slot` 显式选择槽位。PTOAS 接收一个 `pto.alloc_multi_tile`
+区域，因此 dbC 的相反阶段保持物理分离，不会变成可独立复用的分配。
+所有成员必须具有一致的槽数、槽大小和静态字节偏移；完整槽描述符提供覆盖形状。
+较小的 Acc tile 使用兼容的零偏移子视图，重复的槽位/描述符共享句柄。
+Buffer 验证跟踪槽位字节窗口及边界视图的别名。
+
+辅助函数调用、其他布局、动态槽位和其他操作转换由后续迁移切片补齐。
 显式底层转换对未支持形式报错；正常流水线将未支持的完整 kernel 保留为 Tile。
 
 二进制序列化保留显式表示和函数阶段。当前 Python 诊断打印器不支持 Buffer DSL 解析往返。
