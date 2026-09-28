@@ -163,6 +163,11 @@ pipelined-inner，对 `k < K` 传入 unrolled-grid。重新切分用户手写
 unrolled-grid，与 `k` 无关。chooser 使用该路径同时判断可实现性和计算代价，
 无需再从 `k` 推断 canonical fold 的 lowering。
 
+若规范网格缩小后的 MAD 仍需内层 K 切分，每个替换 MAD 都保留原始
+`pipeline_membership`，包括 peeled K 块和 bias 首块。同一输出 tile 的所有
+归约块保持相同 stage；只有下一个输出 tile 才切换 stage。否则 chooser 的 dbC
+选择会在分配前丢失分离声明，并可能退化为 single-C 存储。
+
 Mat-scratch（`Acc→Mat`，`tile.assemble`）的 drain 使用相同的双 slot 轮换和常规
 stage-major `matmul, drain, matmul, drain` 顺序；drain 不会被浮动到下一个 matmul 之后。
 若 `PassManager` 在一个 planner 下构造却在另一个下运行，会显式报错，因为 pass 列表与

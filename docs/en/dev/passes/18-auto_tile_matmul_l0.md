@@ -178,6 +178,12 @@ tiling supplies pipelined-inner for `k == K` and unrolled-grid for `k < K`.
 independent of `k`. The chooser uses that route both for realizability and cost;
 it never has to infer the canonical fold's lowering from `k`.
 
+If a canonical grid's narrowed MAD still needs inner-K tiling, every replacement
+MAD retains the original `pipeline_membership`, including peeled K blocks and
+bias heads. All reduction blocks for one output tile keep the same stage; only
+the next output tile changes stage. Otherwise the chooser's dbC selection loses
+its separation declaration before allocation and can collapse to single-C storage.
+
 The Mat-scratch (`Acc→Mat`, `tile.assemble`) drain uses the same two-slot
 rotation and ordinary stage-major `matmul, drain, matmul, drain` order; no drain
 is floated past the next matmul. A `PassManager` built under one planner and run

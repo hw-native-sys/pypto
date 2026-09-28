@@ -5723,5 +5723,59 @@ class TestAutoTileMatmulL0FitsL0cCastFold:
         assert tcvt == 0, "no Vector pto.tcvt — the cast is folded into the cube writeback"
 
 
+@pytest.mark.parametrize("K", [272, 544])
+def test_k_retiling_preserves_accumulator_membership_on_every_mad(K):
+    """Full blocks, bias heads and K tails keep all inherited group/stage pairs."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            lhs: pl.Tensor[[64, K], pl.BF16],
+            rhs: pl.Tensor[[K, 64], pl.BF16],
+            seed: pl.Tile[[64, 64], pl.FP32, pl.Mem.Acc],
+            bias: pl.Tile[[1, 64], pl.FP32, pl.Mem.Bias],
+            out: pl.Out[pl.Tensor[[192, 64], pl.FP32]],
+        ) -> pl.Tensor[[192, 64], pl.FP32]:
+            a = pl.tile.load(lhs, [0, 0], [64, K], target_memory=pl.Mem.Mat)
+            b = pl.tile.load(rhs, [0, 0], [K, 64], target_memory=pl.Mem.Mat)
+            fresh = pl.tile.matmul(a, b, attrs={"pipeline_membership": "7:0;2097152:1"})
+            out0 = pl.tile.store(fresh, [0, 0], out)
+            accumulated = pl.tile.matmul_acc(seed, a, b, attrs={"pipeline_membership": "9:1;2097153:0"})
+            out1 = pl.tile.store(accumulated, [64, 0], out0)
+            biased = pl.tile.matmul_bias(a, b, bias, attrs={"pipeline_membership": "11:0;2097154:1"})
+            out2 = pl.tile.store(biased, [128, 0], out1)
+            return out2
+
+    after = passes.auto_tile_matmul_l0()(Before)
+    printed = ir.python_print(after)
+    expected = {"7:0;2097152:1", "9:1;2097153:0", "11:0;2097154:1"}
+
+    class MembershipCollector(ir.IRVisitor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.memberships: list[str] = []
+
+        def visit_call(self, op: ir.Call) -> None:
+            attrs = dict(op.attrs)
+            if op.op.name in {
+                ir.get_op("tile.matmul").name,
+                ir.get_op("tile.matmul_acc").name,
+                ir.get_op("tile.matmul_bias").name,
+            }:
+                assert attrs.get("pipeline_membership") in expected, printed
+                self.memberships.append(attrs["pipeline_membership"])
+            else:
+                assert "pipeline_membership" not in attrs, printed
+            super().visit_call(op)
+
+    collector = MembershipCollector()
+    collector.visit_program(after)
+    assert set(collector.memberships) == expected
+    assert all(collector.memberships.count(membership) >= 2 for membership in expected)
+    assert "_l0_bt" in printed, "the test must exercise a peeled K tail"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

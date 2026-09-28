@@ -26,6 +26,7 @@ from pypto import backend as _backend
 from pypto import ir, passes
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.pypto_core import codegen
 
 _TILE_STORE_OP = ir.get_op("tile.store").name
 _TILE_MATMUL_OP = ir.get_op("tile.matmul").name
@@ -1022,6 +1023,48 @@ def test_canonical_split_k_grid_declares_the_dbc_ping_pong(M, N, K_total, K_tile
     assert pto.count("pto.multi_tile_get") >= 2, pto
     acc_copies = [line for line in pto.splitlines() if "pto.tmov" in line and line.count("loc=acc") >= 2]
     assert not acc_copies, acc_copies
+
+
+@pytest.mark.parametrize("source_k_tile", [128, 256])
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
+def test_canonical_split_k_dbc_membership_survives_inner_k_retiling(source_k_tile, planner):
+    """The output grid's dbC identity must survive recursive K-only tiling.
+
+    These are the same output and total reduction. A 256-wide source K panel
+    needs a second rewrite into 128-wide L0 blocks; a 128-wide source panel
+    does not. Replacing a MAD must preserve its output tile's stage, not discard
+    it or assign a new stage for each reduction block.
+    """
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910B)
+    before = _predicated_canonical_split_k(128, 256, 512, source_k_tile)
+    with passes.PassContext([], memory_planner=planner, enable_pypto_l0c_double_buffer=True):
+        after = passes.auto_tile_matmul_l0()(before)
+        allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(before)
+    printed = ir.python_print(after)
+    assert printed.count("pl.tile.store(") == 2, printed
+    stages = re.findall(r'"pipeline_membership": "2097152:(\d+)"', printed)
+    assert stages == ["0", "1"], printed
+
+    # Check physical storage, not allocation-root count: DSA-RP can retain two
+    # roots yet give them the same address when the stage declaration is lost.
+    stores = _StoreCallCollector()
+    stores.visit_program(allocated)
+    assert len(stores.calls) == 2
+    memrefs = []
+    for call in stores.calls:
+        tile_type = call.args[0].type
+        assert isinstance(tile_type, ir.TileType)
+        memrefs.append(tile_type.memref)
+    assert all(memref is not None for memref in memrefs)
+    if planner == passes.MemoryPlanner.PTOAS:
+        pto = codegen.PTOCodegen().generate(allocated, emit_tile_addr=False)
+        assert pto.count("pto.alloc_multi_tile") == 1, pto
+        assert pto.count("pto.multi_tile_get") == 2, pto
+    else:
+        assert {memref.byte_offset_.value for memref in memrefs} == {0, 65536}
 
 
 def test_canonical_split_k_grid_allocates_two_l0c_slots():
