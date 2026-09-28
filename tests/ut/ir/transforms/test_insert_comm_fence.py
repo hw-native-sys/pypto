@@ -86,7 +86,7 @@ def test_window_store_then_notify():
 
 def test_scalar_write_to_window_then_notify():
     # ConvertTensorToTileOps deliberately keeps `tensor.write` unconverted when its
-    # destination is a DistributedTensor (codegen lowers it to `pto.store_scalar`),
+    # destination is a DistributedTensor (codegen lowers it to `pto.store`),
     # so the pass must recognise it as a publishing write like `tile.store`.
     @pl.program
     class Before:

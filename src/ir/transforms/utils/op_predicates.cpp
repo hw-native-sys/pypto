@@ -109,7 +109,7 @@ bool IsPublishingWrite(const CallPtr& call) {
   // A scalar write into a window-bound tensor publishes for the same reason.
   // ConvertTensorToTileOps deliberately leaves `tensor.write` unconverted when
   // its destination is a DistributedTensor (PTO codegen lowers it to
-  // `pto.store_scalar`), so it reaches this pass as a registered builtin and
+  // `pto.store`), so it reaches this pass as a registered builtin and
   // would otherwise fall through to the `IsRegistered` guard below as false.
   if (IsOp(call, "tensor.write") && !call->args_.empty() && call->args_[0] &&
       As<DistributedTensorType>(call->args_[0]->GetType())) {
