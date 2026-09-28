@@ -407,17 +407,19 @@ class FirstSlotUseInBranch:
     def kernel(
         self,
         flag: pl.Scalar[pl.BOOL],
+        value_true: pl.Scalar[pl.FP32],
+        value_false: pl.Scalar[pl.FP32],
     ) -> pl.Scalar[pl.FP32]:
         if flag:
             t: pl.Tile[[64, 64], pl.FP32, BRANCH_SLOTS[0], pl.Mem.Vec] = pl.tile.create(
                 [64, 64], dtype=pl.FP32, target_memory=pl.Mem.Vec
             )
-            pl.tile.write(t, [0, 0], 1.0)
+            pl.tile.write(t, [0, 0], value_true)
         else:
             t: pl.Tile[[64, 64], pl.FP32, BRANCH_SLOTS[0], pl.Mem.Vec] = pl.tile.create(
                 [64, 64], dtype=pl.FP32, target_memory=pl.Mem.Vec
             )
-            pl.tile.write(t, [0, 0], 2.0)
+            pl.tile.write(t, [0, 0], value_false)
         return pl.tile.read(t, [0, 0])
 
 
