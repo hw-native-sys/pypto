@@ -23,10 +23,14 @@ does not emit — so the baked-address ``pto.alloc_tile`` path stays.
 # DSL function bodies are parsed as AST, not executed — suppress pyright errors.
 # pyright: reportUndefinedVariable=false
 
+from pathlib import Path
+
 import pypto.language as pl
 import pytest
 from pypto import backend, ir
 from pypto.backend import BackendType
+from pypto.backend._ptoas_locate import find_ptoas_binary
+from pypto.backend.pto_backend import _run_ptoas
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import codegen, passes
 
@@ -52,6 +56,8 @@ TOUCHING_A = pl.MemRef(slots=2)
 TOUCHING_B = pl.MemRef(slots=2)
 TOUCHING_C = pl.MemRef(slots=2)
 MIXED_VALID_VIEWS = pl.MemRef(slots=2)
+BRANCH_SLOTS = pl.MemRef(slots=2)
+WORKSPACE_SLOTS = pl.MemRef(slots=2)
 
 
 @pl.program
@@ -394,6 +400,54 @@ class MixedGeometryValidViews:
 
 
 @pl.program
+class FirstSlotUseInBranch:
+    """Both branch producers must write the declared slot, not an extra alloc."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        flag: pl.Scalar[pl.BOOL],
+    ) -> pl.Scalar[pl.FP32]:
+        if flag:
+            t: pl.Tile[[64, 64], pl.FP32, BRANCH_SLOTS[0], pl.Mem.Vec] = pl.tile.create(
+                [64, 64], dtype=pl.FP32, target_memory=pl.Mem.Vec
+            )
+            pl.tile.write(t, [0, 0], 1.0)
+        else:
+            t: pl.Tile[[64, 64], pl.FP32, BRANCH_SLOTS[0], pl.Mem.Vec] = pl.tile.create(
+                [64, 64], dtype=pl.FP32, target_memory=pl.Mem.Vec
+            )
+            pl.tile.write(t, [0, 0], 2.0)
+        return pl.tile.read(t, [0, 0])
+
+
+@pl.program
+class ReusePastLoopingWorkspace:
+    """A non-lendable early region must not hide a later reusable region."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[32, 32], pl.FP32],
+        out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+    ) -> pl.Tensor[[32, 32], pl.FP32]:
+        workspace: pl.Tile[[32, 32], pl.FP32, WORKSPACE_SLOTS[0], pl.Mem.Vec] = pl.tile.create(
+            [32, 32], dtype=pl.FP32, target_memory=pl.Mem.Vec
+        )
+        b0: pl.Tile[[32, 32], pl.FP32, TOUCHING_B[0], pl.Mem.Vec] = pl.load(a, [0, 0], [32, 32])
+        mask = pl.tile.cmps(b0, 0.0, cmp_type=0)
+        for i, (out_i,) in pl.range(2, init_values=(out,)):
+            rem = pl.tile.sels(mask, b0, workspace, 3.0)
+            stored = pl.store(rem, [0, 0], out_i)
+            out0 = pl.yield_(stored)
+        b1: pl.Tile[[32, 32], pl.FP32, TOUCHING_B[1], pl.Mem.Vec] = pl.exp(b0)
+        out1 = pl.store(b1, [0, 0], out0)
+        c0: pl.Tile[[32, 32], pl.FP32, TOUCHING_C[0], pl.Mem.Vec] = pl.load(a, [0, 0], [32, 32])
+        c1: pl.Tile[[32, 32], pl.FP32, TOUCHING_C[1], pl.Mem.Vec] = pl.exp(c0)
+        return pl.store(c1, [0, 0], out1)
+
+
+@pl.program
 class RuntimeValidShapeSlots:
     """Slots whose valid extent is only known at runtime.
 
@@ -491,6 +545,45 @@ def _tile_memrefs(program: ir.Program) -> dict[str, ir.MemRef]:
 
 class TestPtoasPlannerEmitsMultiBuffer:
     """Under the ptoas planner a slotted declaration becomes one region."""
+
+    def test_buffer_ir_rejects_acc_slot_with_different_physical_rows(self):
+        """Buffer lowering must preserve the same L0C pitch as Tile codegen."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=True):
+            with pytest.raises(ValueError, match="equal physical row counts"):
+                PassManager.get_strategy(OptimizationStrategy.Default).run_passes(MixedAccRowStrides)
+
+    def test_first_branch_producer_selects_slot_before_if(self, tmp_path: Path):
+        """Hoisting a phi cannot sever it from the explicit region."""
+        mlir = _codegen(FirstSlotUseInBranch, passes.MemoryPlanner.PTOAS)
+        assert len(_lines(mlir, "pto.alloc_multi_tile")) == 1, mlir
+        gets = _lines(mlir, "pto.multi_tile_get")
+        assert len(gets) == 1, mlir
+        assert not _lines(mlir, "pto.alloc_tile"), mlir
+        assert mlir.index("pto.multi_tile_get") < mlir.index("scf.if"), mlir
+        phi_handle = gets[0].split(" = ", 1)[0]
+        writes = _lines(mlir, "pto.tsetval")
+        assert len(writes) == 2 and all(phi_handle in line for line in writes), mlir
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        source = tmp_path / "branch_slot.pto"
+        output = tmp_path / "branch_slot.cpp"
+        source.write_text(mlir)
+        _run_ptoas(str(source), str(output), ["--pto-arch=a2", "--pto-level=level2"])
+        assert output.is_file()
+
+    def test_reuse_search_passes_non_lendable_workspace(self):
+        """Reuse the second free region without aliasing a looping workspace."""
+        mlir = _codegen(ReusePastLoopingWorkspace, passes.MemoryPlanner.PTOAS)
+        assert len(_lines(mlir, "pto.alloc_multi_tile")) == 2, mlir
+        gets = _lines(mlir, "pto.multi_tile_get")
+
+        def region_of(name):
+            line = next(line for line in gets if line.startswith(f"%{name}__"))
+            return line.split("pto.multi_tile_get ", 1)[1].split("[", 1)[0]
+
+        assert region_of("workspace") != region_of("b0") == region_of("c0"), mlir
 
     def test_rotating_slot_becomes_one_region_read_by_slot(self):
         """N slots are one `alloc_multi_tile`; the use selects its slot."""

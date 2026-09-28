@@ -111,6 +111,10 @@ void ValidateBufferSubview(const std::vector<ir::ExprPtr>& args, const ir::TypeP
             matrix->valid_shape_[axis] == matrix->shape_[axis])
           << "buffer.subview of Acc storage requires a zero-offset static view within a full-valid slot";
     }
+    // L0C's N-fractal column pitch depends on its physical row count. A
+    // zero-offset alias can narrow columns or valid rows, but cannot repack rows.
+    CHECK(view->shape_[0] == matrix->shape_[0])
+        << "buffer.subview of Acc storage requires equal physical row counts to preserve L0C stride";
     return;
   }
   auto source = StaticViewDescriptor(args[0]->GetType(), "buffer.subview");

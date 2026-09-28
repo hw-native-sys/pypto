@@ -136,5 +136,19 @@ def test_acc_subview_rejects_invalid_slot_windows(shape, offset, valid):
         _view("buffer.subview", [_var(source), _offsets(offset)], result)
 
 
+def test_acc_subview_cannot_change_physical_row_stride():
+    source = ir.BufferType([64, 64], DataType.FP32, ir.MemorySpace.Acc)
+    result = ir.BufferType([32, 64], DataType.FP32, ir.MemorySpace.Acc)
+    with pytest.raises(ValueError, match="equal physical row counts"):
+        _view("buffer.subview", [_var(source), _offsets()], result)
+
+
+def test_acc_subview_can_narrow_columns_and_valid_rows():
+    source = ir.BufferType([64, 64], DataType.FP32, ir.MemorySpace.Acc)
+    result = ir.BufferType([64, 32], DataType.FP32, ir.MemorySpace.Acc, [32, 32])
+    view = _view("buffer.subview", [_var(source), _offsets()], result)
+    ir.assert_structural_equal(view.type, result)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

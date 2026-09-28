@@ -12,6 +12,7 @@
 #include "pypto/codegen/pto/pto_codegen.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
@@ -2001,8 +2002,10 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
 
   // Allocate one physical region per simultaneously-live compatibility class.
   // Candidates are processed by definition point. For each exact region type,
-  // the min-heap exposes the physical region that becomes free first, giving an
-  // O(R log R) interval allocation rather than a pairwise scan over regions.
+  // heaps expose the earliest-free regions, partitioned by load-derived hazard.
+  // Translate explicit no-alias peers to region owners once per candidate, then
+  // temporarily skip only those owners. This costs O((R + E) log R) for R bases
+  // and E explicit no-alias edges, not a scan of all regions per allocation.
   std::vector<std::pair<int, const ir::Var*>> allocation_order;
   allocation_order.reserve(discovery_order.size());
   for (const ir::Var* base : discovery_order) {
@@ -2024,10 +2027,9 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     }
   };
   using RegionHeap = std::priority_queue<AvailableRegion, std::vector<AvailableRegion>, EarliestAvailable>;
-  std::map<std::tuple<std::string, int64_t, int64_t>, RegionHeap> available_regions;
-  std::map<const ir::Var*, std::set<const ir::Var*>> region_occupants;
-  std::set<const ir::Var*> regions_with_load_derived;
-  std::set<const ir::Var*> regions_with_looping_workspace;
+  using RegionPools = std::array<RegionHeap, 2>;
+  std::map<std::tuple<std::string, int64_t, int64_t>, RegionPools> available_regions;
+  std::map<const ir::Var*, const ir::Var*> region_owners;
 
   for (const auto& ordered : allocation_order) {
     const ir::Var* base = ordered.second;
@@ -2058,50 +2060,56 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     const auto compatibility = std::make_tuple(region.mtb_type_str, region.valid_row, region.valid_col);
     auto lifetime_it = base_lifetimes.find(base);
     bool reused = false;
-    if (lifetime_it != base_lifetimes.end()) {
-      RegionHeap& heap = available_regions[compatibility];
-      if (!heap.empty() && heap.top().last_use <= lifetime_it->second.first) {
-        const AvailableRegion available = heap.top();
-        const auto& occupants = region_occupants.at(available.owner);
-        const auto forbidden_it = forbidden_bases.find(base);
-        bool hard_conflict = false;
-        if (forbidden_it != forbidden_bases.end()) {
-          for (const ir::Var* peer : forbidden_it->second) {
-            if (occupants.count(peer) != 0) {
-              hard_conflict = true;
-              break;
-            }
+    const auto& hazard = constraints.target_hazard_inputs;
+    const bool looping_workspace = hazard.looping_written_workspace_bases.count(base) != 0;
+    // Written workspaces cannot inherit earlier storage; looping workspaces
+    // also cannot lend it, so they never enter the reusable pools below.
+    if (lifetime_it != base_lifetimes.end() && !looping_workspace &&
+        hazard.written_workspace_bases.count(base) == 0) {
+      std::set<const ir::Var*> forbidden_owners;
+      if (const auto forbidden = forbidden_bases.find(base); forbidden != forbidden_bases.end()) {
+        for (const ir::Var* peer : forbidden->second) {
+          if (const auto owner = region_owners.find(peer); owner != region_owners.end()) {
+            forbidden_owners.insert(owner->second);
           }
         }
-        const auto& hazard = constraints.target_hazard_inputs;
-        // A looping scalar-written workspace must never inherit a region or
-        // lend one across iterations. A non-looping workspace must not inherit
-        // earlier storage. The split-AIV load+tpop hazard is directional too.
-        const bool workspace_conflict = hazard.written_workspace_bases.count(base) != 0 ||
-                                        hazard.looping_written_workspace_bases.count(base) != 0 ||
-                                        regions_with_looping_workspace.count(available.owner) != 0;
-        const bool tpop_conflict =
-            reads_tpop_bases.count(base) != 0 && regions_with_load_derived.count(available.owner) != 0;
-        if (!hard_conflict && !workspace_conflict && !tpop_conflict) {
+      }
+      auto& pools = available_regions[compatibility];
+      const size_t pool_count = reads_tpop_bases.count(base) != 0 ? 1 : pools.size();
+      std::array<std::vector<AvailableRegion>, 2> blocked;
+      std::optional<size_t> selected;
+      for (size_t pool = 0; pool < pool_count; ++pool) {
+        auto& heap = pools[pool];
+        while (!heap.empty() && heap.top().last_use <= lifetime_it->second.first &&
+               forbidden_owners.count(heap.top().owner) != 0) {
+          blocked[pool].push_back(heap.top());
           heap.pop();
-          region.region_ssa = fs_.multi_buffer_regions.at(available.owner).region_ssa;
-          heap.push({lifetime_it->second.second, available.owner});
-          region_occupants.at(available.owner).insert(base);
-          if (load_derived_bases.count(base) != 0) regions_with_load_derived.insert(available.owner);
-          reused = true;
         }
+        if (!heap.empty() && heap.top().last_use <= lifetime_it->second.first &&
+            (!selected || heap.top().last_use < pools[*selected].top().last_use)) {
+          selected = pool;
+        }
+      }
+      if (selected) {
+        const auto available = pools[*selected].top();
+        pools[*selected].pop();
+        region.region_ssa = fs_.multi_buffer_regions.at(available.owner).region_ssa;
+        region_owners.emplace(base, available.owner);
+        const size_t next_pool = *selected != 0 || load_derived_bases.count(base) != 0 ? 1 : 0;
+        pools[next_pool].push({lifetime_it->second.second, available.owner});
+        reused = true;
+      }
+      for (size_t pool = 0; pool < pool_count; ++pool) {
+        for (const auto& entry : blocked[pool]) pools[pool].push(entry);
       }
     }
     if (!reused) {
       region.region_ssa = NewNamedTemp(base->name_hint_ + "_mb");
       fs_.multi_buffer_region_order.push_back(base);
-      region_occupants[base].insert(base);
-      if (load_derived_bases.count(base) != 0) regions_with_load_derived.insert(base);
-      if (constraints.target_hazard_inputs.looping_written_workspace_bases.count(base) != 0) {
-        regions_with_looping_workspace.insert(base);
-      }
-      if (lifetime_it != base_lifetimes.end()) {
-        available_regions[compatibility].push({lifetime_it->second.second, base});
+      region_owners.emplace(base, base);
+      if (lifetime_it != base_lifetimes.end() && !looping_workspace) {
+        const size_t pool = load_derived_bases.count(base) != 0 ? 1 : 0;
+        available_regions[compatibility][pool].push({lifetime_it->second.second, base});
       }
     }
 
