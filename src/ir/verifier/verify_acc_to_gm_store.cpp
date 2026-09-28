@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -18,6 +19,7 @@
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
@@ -106,12 +108,45 @@ class AccToGmStoreVisitor : public IRVisitor {
     // verifier only runs after, but a tile with an unresolved space is not
     // something we can classify, so leave it to the downstream check.
     if (!tile_type || !tile_type->memory_space_.has_value()) return;
-    if (*tile_type->memory_space_ != MemorySpace::Acc) return;
+
+    // The FIXPIPE epilogue configures the cube's L0C drain, so it is meaningless
+    // on a Vec source -- that store is an MTE3 DMA with no fix-pipe in the path.
+    // Checked before the Acc filter below: ptoas does reject it ("reluPreMode is
+    // only valid with src loc=acc"), but only against a line in a generated
+    // `.pto`, and a `pre_quant` on a Vec source it accepts outright and then
+    // ignores.
+    const bool has_epilogue = GetOptionalDoubleKwarg(call->kwargs_, "pre_quant").has_value() ||
+                              call->GetKwarg<bool>("pre_relu", false);
+    if (*tile_type->memory_space_ != MemorySpace::Acc) {
+      if (has_epilogue) {
+        diagnostics_.emplace_back(
+            DiagnosticSeverity::Error, "AccToGmStoreValid", /*error_code=*/1,
+            "tile.store carries a FIXPIPE epilogue (pre_quant / pre_relu) but its source tile is " +
+                MemorySpaceToString(*tile_type->memory_space_) + "-resident, not Acc (function '" +
+                func_name_ +
+                "'). The epilogue is part of the cube's accumulator writeback, and a store from the "
+                "vector unit has no fix-pipe to configure; scale and activate with ordinary vector "
+                "ops instead -- pl.maximum(pl.mul(tile, scale), 0.0).",
+            call->span_);
+      }
+      return;
+    }
 
     auto tensor_type = AsTensorTypeLike(dest_tensor->GetType());
     if (!tensor_type) return;
 
     const auto& dtype = tensor_type->dtype_;
+    const auto& src_dtype = tile_type->dtype_;
+
+    // A `pre_quant` store is the scale-bearing writeback, so neither rule below
+    // applies to it: the destination whitelist excludes exactly the INT8 that a
+    // requantizing store exists to reach, and the unscaled conversion table is
+    // the set this one is the complement of. One backend query decides it.
+    if (GetOptionalDoubleKwarg(call->kwargs_, "pre_quant").has_value()) {
+      CheckPreQuantStore(call, src_dtype, dtype);
+      return;
+    }
+
     if (!handler_->SupportsAccToGmDtype(dtype)) {
       diagnostics_.emplace_back(
           DiagnosticSeverity::Error, "AccToGmStoreValid", /*error_code=*/1,
@@ -129,7 +164,6 @@ class AccToGmStoreVisitor : public IRVisitor {
     // Whitelisted destination, but not one the fix-pipe can reach from this
     // accumulator: the unscaled writeback only narrows f32 -> f16/bf16, so an
     // INT32 accumulator leaves as INT32 or not at all.
-    const auto& src_dtype = tile_type->dtype_;
     if (CubeWritebackSupportsDataType(src_dtype, dtype)) return;
 
     diagnostics_.emplace_back(
@@ -143,6 +177,28 @@ class AccToGmStoreVisitor : public IRVisitor {
             "pl.cast(result, " +
             dtype.ToString() + ") and store that -- or store into a '" + src_dtype.ToString() +
             "' tensor (for a matmul, that is out_dtype=" + src_dtype.ToString() + ").",
+        call->span_);
+  }
+
+  /// The scale-bearing Acc->GM writeback: legality is one backend table
+  /// (`SupportsFixpipePreQuant`), transcribed from pto-isa rather than from the
+  /// assembler, because a5's ptoas verifies no dtype pair here and pto-isa
+  /// answers an unsupported one by dropping the scale instead of failing. So a
+  /// pair this table rejects would otherwise reach the device and return
+  /// unscaled numbers, which is why it is an error and not a perf hint.
+  void CheckPreQuantStore(const CallPtr& call, const DataType& src_dtype, const DataType& dst_dtype) {
+    if (handler_->SupportsFixpipePreQuant(src_dtype, dst_dtype, backend::BackendHandler::FixpipeDest::kGm)) {
+      return;
+    }
+    diagnostics_.emplace_back(
+        DiagnosticSeverity::Error, "AccToGmStoreValid", /*error_code=*/1,
+        "a '" + src_dtype.ToString() + "' cube accumulator cannot be stored into a '" + dst_dtype.ToString() +
+            "' global tensor with a pre_quant scale on the '" + handler_->GetPtoTargetArch() +
+            "' backend (function '" + func_name_ + "'): the fix-pipe has no scale-bearing " +
+            src_dtype.ToString() + " -> " + dst_dtype.ToString() + " mode. Supported destinations from a '" +
+            src_dtype.ToString() + "' accumulator here are " +
+            DescribeFixpipePreQuantTargets(*handler_, src_dtype, backend::BackendHandler::FixpipeDest::kGm) +
+            ". Scale in the vector unit instead -- pl.mul(pl.cast(result, ...), scale) -- and store that.",
         call->span_);
   }
 

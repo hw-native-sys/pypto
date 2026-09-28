@@ -111,6 +111,21 @@ def _get_function(program, name: str):
     return func
 
 
+def _calls_named(program, op_name: str) -> list[ir.Call]:
+    """Every ``op_name`` call in the program, in traversal order."""
+    found: list[ir.Call] = []
+    target = ir.get_op(op_name).name
+
+    class Collect(ir.IRVisitor):
+        def visit_call(self, op):
+            if op.op.name == target:
+                found.append(op)
+            super().visit_call(op)
+
+    Collect().visit_program(program)
+    return found
+
+
 class TestIterArgReuse:
     """Pattern 1: Merge Out params into In params via iter-arg feedback."""
 
@@ -834,6 +849,94 @@ class TestAssembleLoopRewrite:
 
         After = passes.optimize_orch_tensors()(Before)
         ir.assert_structural_equal(After, Expected)
+
+    def test_assemble_carrying_a_fixpipe_epilogue_is_left_alone(self):
+        """A `pre_quant` / `pre_relu` assemble declines the rewrite rather than
+        losing its epilogue.
+
+        The rewrite replaces the assemble with a store, which moves the write to
+        a different destination *class* (tile -> GM tensor) and a different
+        destination *dtype*. Both are inputs to whether the epilogue is legal and
+        how its scale word encodes, so the kwargs cannot be carried across
+        unchanged — and dropping them is worse than declining, because
+        `FixpipeEpilogueValid` runs later and by then there would be no epilogue
+        left to reject. The ReLU would simply be gone from the kernel.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[1, 32], pl.FP32],
+                ret0__out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+            ) -> pl.Tensor[[1, 64], pl.FP32]:
+                buf__tile: pl.Tile[[1, 64], pl.FP32] = pl.tile.create(
+                    [1, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                for i, (acc,) in pl.range(2, init_values=(buf__tile,)):
+                    off: pl.Scalar[pl.INDEX] = i * 32
+                    chunk__tile: pl.Tile[[1, 32], pl.FP32] = pl.load(x, [0, 0], [1, 32])
+                    acc_next__tile: pl.Tile[[1, 64], pl.FP32] = pl.tile.assemble(
+                        acc, chunk__tile, [0, off], pre_quant=0.5, pre_relu=True
+                    )
+                    result: pl.Tile[[1, 64], pl.FP32] = pl.yield_(acc_next__tile)
+                ret0__store: pl.Tensor[[1, 64], pl.FP32] = pl.store(result, [0, 0], ret0__out)
+                return ret0__store
+
+            @pl.function
+            def main(self, x: pl.Tensor[[1, 32], pl.FP32]) -> pl.Tensor[[1, 64], pl.FP32]:
+                ret0__out: pl.Tensor[[1, 64], pl.FP32] = pl.create_tensor([1, 64], dtype=pl.FP32)
+                y: pl.Tensor[[1, 64], pl.FP32] = self.main_incore_0(x, ret0__out)
+                return y
+
+        After = passes.optimize_orch_tensors()(Before)
+
+        # The whole program is untouched: the assemble keeps its kwargs, and the
+        # post-loop store the rewrite would have deleted is still there.
+        ir.assert_structural_equal(After, Before)
+
+        assembles = _calls_named(After, "tile.assemble")
+        assert len(assembles) == 1, f"the assemble must survive, got {len(assembles)}"
+        kwargs = dict(assembles[0].kwargs)
+        assert kwargs["pre_quant"] == 0.5
+        assert kwargs["pre_relu"] is True
+        assert len(_calls_named(After, "tile.store")) == 1, "the post-loop store must survive"
+
+    def test_store_carrying_a_fixpipe_epilogue_is_left_alone(self):
+        """The same guard from the other end: the rewrite *deletes* the post-loop
+        store, so an epilogue there would go with it."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[1, 32], pl.FP32],
+                ret0__out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+            ) -> pl.Tensor[[1, 64], pl.FP32]:
+                buf__tile: pl.Tile[[1, 64], pl.FP32] = pl.tile.create(
+                    [1, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                for i, (acc,) in pl.range(2, init_values=(buf__tile,)):
+                    off: pl.Scalar[pl.INDEX] = i * 32
+                    chunk__tile: pl.Tile[[1, 32], pl.FP32] = pl.load(x, [0, 0], [1, 32])
+                    acc_next__tile: pl.Tile[[1, 64], pl.FP32] = pl.tile.assemble(acc, chunk__tile, [0, off])
+                    result: pl.Tile[[1, 64], pl.FP32] = pl.yield_(acc_next__tile)
+                ret0__store: pl.Tensor[[1, 64], pl.FP32] = pl.store(result, [0, 0], ret0__out, pre_relu=True)
+                return ret0__store
+
+            @pl.function
+            def main(self, x: pl.Tensor[[1, 32], pl.FP32]) -> pl.Tensor[[1, 64], pl.FP32]:
+                ret0__out: pl.Tensor[[1, 64], pl.FP32] = pl.create_tensor([1, 64], dtype=pl.FP32)
+                y: pl.Tensor[[1, 64], pl.FP32] = self.main_incore_0(x, ret0__out)
+                return y
+
+        After = passes.optimize_orch_tensors()(Before)
+        ir.assert_structural_equal(After, Before)
+        stores = _calls_named(After, "tile.store")
+        assert len(stores) == 1, "the store must survive rather than be folded into the loop"
+        assert dict(stores[0].kwargs)["pre_relu"] is True
 
 
 class TestSliceInputStrides:

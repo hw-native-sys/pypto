@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <unordered_set>
@@ -33,10 +34,12 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/storage_size.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 #include "src/backend/common/pto_ops_internal.h"
 
 namespace pypto {
@@ -124,6 +127,22 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
       << offset_tuple->elements_.size();
   std::string row_off = codegen.GetExprAsCode(offset_tuple->elements_[0]);
   std::string col_off = codegen.GetExprAsCode(offset_tuple->elements_[1]);
+
+  // The FIXPIPE epilogue rides `pto.tinsert` and nothing else, so read it here —
+  // ahead of every path that returns without emitting one. `FixpipeEpilogueValid`
+  // has already rejected an epilogue this writeback cannot carry, so reaching any
+  // of them with one set means that verifier was disabled or a pass attached the
+  // kwargs to the wrong move; dropping them silently would leave a kernel that
+  // runs and returns unscaled numbers.
+  const auto pre_quant = ir::GetOptionalDoubleKwarg(op->kwargs_, "pre_quant");
+  const bool pre_relu = op->GetKwarg<bool>("pre_relu", false);
+  const bool has_epilogue = pre_quant.has_value() || pre_relu;
+  const bool fixpipe_insert = cross_space_acc_to_mat &&
+                              ir::CubeMatWritebackUsesFixpipe(
+                                  source_tile_type->dtype_, result_tile_type->dtype_, pre_quant.has_value());
+  INTERNAL_CHECK_SPAN(fixpipe_insert || !has_epilogue, op->span_)
+      << "Internal error: tile.assemble carries a FIXPIPE epilogue (pre_quant / pre_relu) but does not "
+         "lower to pto.tinsert; the epilogue would be dropped";
 
   // Self-copy: the source *is* the destination window. `tile.slice` lowers to a
   // `pto.subview` and registers its (base, row, col) SSAs, so when the source
@@ -222,15 +241,29 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
   // subview's *base* [M, N], not the [m, n] window — verified against ptoas
   // v0.45), and the f32->bf16 cast has no MTE1 `tmov` form. A same-dtype (f32)
   // full-window cross-space assemble keeps the subview/tmov path below.
-  const bool fixpipe_insert = cross_space_acc_to_mat && (result_tile_type->dtype_ == DataType::BF16 ||
-                                                         result_tile_type->dtype_ == DataType::FP16);
+  //
+  // A `pre_quant` scale selects the same instruction's *quantizing* form, which
+  // reaches destinations the unscaled narrowing cannot (INT32 -> FP16 dequant,
+  // FP32 -> INT8 quant). It is therefore part of the condition, not only of the
+  // payload: an INT32 accumulator draining into an FP16 Mat scratch is a
+  // `pto.tinsert` precisely because it carries a scale. `fixpipe_insert` is
+  // computed above, before the early returns that would drop an epilogue.
   if (fixpipe_insert) {
     std::ostringstream tins;
     tins << "pto.tinsert ins(" << src << ", " << row_off << ", " << col_off;
     if (!src_type.empty()) tins << " : " << src_type << ", index, index";
+    // PTOAS spells the scalar pre-quant operand as a `pre_quant <ssa> : i64`
+    // clause *inside* `ins(...)`, after the type list (verified against ptoas
+    // v0.61 by round-tripping the op through `--emit-pto-ir`). `pto.tstore`
+    // spells the same operand differently — see MakeTileStoreCodegenPTO.
+    if (pre_quant.has_value()) {
+      const int64_t word = codegen::EncodeFixpipePreQuant(*pre_quant, result_tile_type->dtype_);
+      tins << " pre_quant " << codegen.GetOrEmitConstant(word, DataType::INT64) << " : i64";
+    }
     tins << ") outs(" << dst;
     if (!dst_type.empty()) tins << " : " << dst_type;
     tins << ")";
+    if (pre_relu) tins << " {reluPreMode = #pto<relu_pre_mode normal_relu>}";
     codegen.Emit(tins.str());
     return "";
   }
