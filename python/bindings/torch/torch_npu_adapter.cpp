@@ -20,6 +20,7 @@
 #include <nanobind/stl/vector.h>
 #include <torch/csrc/autograd/python_variable.h>
 #include <torch_npu/csrc/core/npu/NPUCachingAllocator.h>
+#include <torch_npu/csrc/core/npu/NPUFormat.h>
 #include <torch_npu/csrc/core/npu/NPUGuard.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/core/npu/sys_ctrl/npu_sys_ctrl.h>
@@ -303,6 +304,12 @@ std::shared_ptr<LaunchTicket> Prepare(ChipWorker* worker, int32_t callable_id, n
 }  // namespace
 
 NB_MODULE(_torch_npu, m) {
+  m.def("storage_shape", [](nb::handle object) {
+    Require(THPVariable_Check(object.ptr()), "Storage shape requires a torch tensor");
+    const at::Tensor& tensor = THPVariable_Unpack(object.ptr());
+    Require(tensor.device().type() == c10::DeviceType::PrivateUse1, "Storage shape requires an NPU tensor");
+    return at_npu::native::get_npu_storage_sizes(tensor);
+  });
 #ifdef PYPTO_KERNEL_TEST_COUNTERS
   m.def("_test_reset_counters", [] {
     test_done_calls.store(0, std::memory_order_relaxed);

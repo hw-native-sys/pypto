@@ -258,6 +258,49 @@ def test_supported_base_formats_are_preserved(npu, tensor_format):
     assert frame.tensors[0].metadata.format == tensor_format
 
 
+@pytest.mark.parametrize(
+    "dtype,ir_dtype,c0",
+    [
+        (torch.float16, DataType.FP16, 16),
+        (torch.bfloat16, DataType.BF16, 16),
+        (torch.int8, DataType.INT8, 32),
+    ],
+)
+@pytest.mark.parametrize("shape", [(32, 64), (2, 32, 64)])
+def test_native_nz_borrows_original_storage(npu, monkeypatch, dtype, ir_dtype, c0, shape):
+    """Declared NZ preserves Native tensor/storage owners and pointers without conversion."""
+    value = _tensor(shape, dtype)
+    npu.get_npu_format.return_value = 29
+    monkeypatch.setattr(
+        interop, "_native_storage_shape", Mock(return_value=(*shape[:-2], 64 // c0, 2, 16, c0))
+    )
+    info = ParamInfo("w", ParamDirection.In, list(shape), ir_dtype, layout="NZ")
+    frame = interop.CallSignature([info], platform="a2a3").describe_call((value,))
+    assert frame.tensors[0].tensor is value
+    assert frame.tensors[0].metadata.data_ptr == value.data_ptr()
+    assert frame.tensors[0].metadata.storage_ptr == value.untyped_storage().data_ptr()
+    assert frame.tensors[0].metadata.format == 29
+
+
+@pytest.mark.parametrize("invalid", ["physical_shape", "offset", "writable", "platform"])
+def test_native_nz_rejects_incompatible_storage_or_contract(npu, monkeypatch, invalid):
+    """Contiguity alone cannot prove an opaque NZ tensor is the declared matrix."""
+    npu.get_npu_format.return_value = 29
+    monkeypatch.setattr(interop, "_native_storage_shape", Mock(return_value=(4, 2, 16, 16)))
+    value = _tensor((32, 64), torch.bfloat16)
+    if invalid == "physical_shape":
+        value = value.view(64, 32)
+    elif invalid == "offset":
+        value = _tensor((3, 32, 64), torch.bfloat16)[1]
+    direction = ParamDirection.InOut if invalid == "writable" else ParamDirection.In
+    info = ParamInfo("w", direction, list(value.shape), DataType.BF16, layout="NZ")
+    with pytest.raises(ValueError, match="native NZ|requires base format"):
+        interop.CallSignature([info], platform="a5" if invalid == "platform" else "a2a3").describe_call(
+            (value,)
+        )
+    npu.npu.current_device.assert_not_called()
+
+
 @pytest.mark.parametrize("writable", [False, True])
 def test_partial_overlap_requires_read_only_arguments(npu, writable):
     """Read-only views may overlap; partial writes need a richer alias contract."""

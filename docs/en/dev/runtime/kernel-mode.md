@@ -290,10 +290,17 @@ borrowed storage while a frame is in use.
 - Check dtype and rank against `ParamInfo`. Static carrier dimensions must
   match; `-1` dimensions use the current extent. Packed FP4 uses the carrier
   shape already provided by `ParamInfo`, without expanding it again.
-- Require a contiguous strided view in base NCHW (0) or ND (2) format. Preserve
-  nonzero storage offsets and logical data pointers. Other formats, transposed
-  views, unresolved conjugate/negative views and invalid storage bounds fail
-  explicitly, without copying or format conversion.
+- Require a contiguous strided view in base NCHW (0) or ND (2) format, preserving
+  nonzero storage offsets and logical data pointers. On A2/A3, a read-only
+  FP16/BF16/INT8 parameter explicitly declared `pl.NZ` also accepts native
+  FRACTAL_NZ (29). Its physical storage shape must match the declared logical
+  matrix's NZ blocking, with zero offset and no padding or excess capacity.
+  The adapter borrows the original address and storage; it never unpacks,
+  repacks or converts formats. Base-format carriers containing already packed
+  NZ bytes remain accepted. The kernel ABI retains the declared layout, so an
+  ND declaration cannot accidentally accept native NZ storage.
+- Other formats, transposed or incomplete NZ views, unresolved conjugate/negative
+  views and invalid storage bounds fail explicitly without copying.
 - Empty views access no elements, so their nonnegative storage offsets may
   exceed storage capacity. The accessed-range upper bound applies only to
   nonempty views.

@@ -237,8 +237,13 @@ frame 使用期间，调用方不能 resize 或使借用的 storage 失效。
 - 对照 `ParamInfo` 校验 dtype 和 rank。静态 carrier 维度必须匹配；`-1` 维度使用
   本次大小。打包 FP4 直接使用 `ParamInfo` 已提供的 carrier shape，不再次展开。
 - 要求 base NCHW (0) 或 ND (2) 格式的连续 strided view，保留非零 storage offset
-  和逻辑地址。其他格式、转置 view、未解析的 conjugate/negative view 及无效 storage
-  边界明确报错，不进行复制或格式转换。
+  和逻辑地址。A2/A3 上显式声明 `pl.NZ` 的只读 FP16/BF16/INT8 参数还接受原生
+  FRACTAL_NZ (29)：物理 storage shape 必须匹配声明矩阵的 NZ 分块，偏移为零，
+  无 padding 和多余容量。适配器直接借用原地址与 storage，不解包、重打包或转换格式。
+  已装入 NZ 原始字节的基础格式承载 Tensor 仍可使用。kernel ABI 保留声明布局，
+  因而 ND 声明不会误接收原生 NZ 存储。
+- 其他格式、转置或不完整的 NZ view、未解析的 conjugate/negative view 及无效 storage
+  边界明确报错，不进行复制。
 - 空 view 不访问任何元素，因此非负 storage offset 可以超过 storage 容量；
   仅对非空 view 校验访问范围上界。
 - 允许完全相同的 Tensor view 别名、同一 storage 上互不相交的 view，以及重叠的
