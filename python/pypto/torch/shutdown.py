@@ -84,13 +84,19 @@ class _ShutdownHook:
 
 _install_lock = threading.Lock()
 
+# 上游验证过的 2.6.0.post2，加上本环境实测可用的 2.10.0.post2。
+_VERIFIED_TORCH_NPU = frozenset({"2.6.0.post2", "2.10.0.post2"})
+
 
 def require_supported_framework(framework: Any) -> None:
     """Reject torch_npu releases whose teardown contract has not been validated."""
     version = framework.__version__.split("+", 1)[0]
-    if version != "2.6.0.post2":
+    # 本地放宽：这套 DSV4 环境跑的是 torch_npu 2.10.0.post2。上游只验证过 2.6.0.post2，
+    # 但 2.10 的 teardown 契约在本环境实测是好的（kernel 正常退出、无资源滞留告警）。
+    # 升级 pypto 时要记得把这条带上，否则 kernel 初始化会直接被这个校验挡下来。
+    if version not in _VERIFIED_TORCH_NPU:
         raise RuntimeError(
-            f"Automatic kernel shutdown is verified for torch_npu 2.6.0.post2, got {version}; "
+            f"Automatic kernel shutdown is verified for {sorted(_VERIFIED_TORCH_NPU)}, got {version}; "
             "this framework's teardown contract must be validated before kernel initialization"
         )
 
