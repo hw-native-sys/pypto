@@ -137,10 +137,14 @@ class StorageIndex : public IRVisitor {
     if (auto tile = variable ? As<TileType>(variable->GetType()) : nullptr;
         tile && types_.insert(tile.get()).second) {
       auto memory = GetDefinedMemRef(tile);
-      CHECK_SPAN(memory && memory->base_ && !memory->is_pinned_ && memory->slot_count_ == 1 &&
-                     !memory->slot_index_.has_value(),
+      const bool static_slots = memory && !addressed_ && memory->slot_count_ > 1 && memory->slot_index_ &&
+                                As<ConstInt>(*memory->slot_index_);
+      CHECK_SPAN(memory && memory->base_ &&
+                     (static_slots ||
+                      (!memory->is_pinned_ && memory->slot_count_ == 1 && !memory->slot_index_.has_value())),
                  expr->span_)
-          << "LowerTileToBuffer: tile storage must be planned; multi-slot storage needs its own recipe";
+          << "LowerTileToBuffer: tile storage must be planned; only static addressless multi-slot storage "
+             "has a lowering recipe";
       auto offset = As<ConstInt>(memory->byte_offset_);
       CHECK_SPAN(offset && offset->value_ >= 0, expr->span_)
           << "LowerTileToBuffer: expected a static nonnegative storage window address";
@@ -242,6 +246,10 @@ class StorageIndex : public IRVisitor {
           << "Internal error: a planned tile's memory space differs from its allocation";
     }
     const auto capacity = static_cast<uint64_t>(size->value_);
+    if (storage.members.front().memory->slot_count_ > 1) {
+      FinalizeMultiRoot(base, storage, capacity, span);
+      return;
+    }
     // Address placement rebases each member. Only a full-capacity member can
     // establish the origin; guessing the minimum interior address loses bytes.
     std::optional<int64_t> origin = addressed_ ? std::nullopt : std::optional<int64_t>(0);
@@ -340,6 +348,70 @@ class StorageIndex : public IRVisitor {
             type->fractal_,
             static_cast<int>(type->pad_),
             static_cast<int>(type->compact_)};
+  }
+
+  // Keep the allocation as one explicit region: separate addressless allocs
+  // would let PTOAS reuse opposite stages and erase the dbC contract.
+  void FinalizeMultiRoot(const Var* base, BufferStorage& storage, uint64_t capacity, const Span& span) {
+    const auto& first = storage.members.front().memory;
+    const auto count = first->slot_count_;
+    const auto slot_bytes = first->size_;
+    CHECK_SPAN(slot_bytes > 0 && capacity % slot_bytes == 0 && capacity / slot_bytes == count, span)
+        << "LowerTileToBuffer: multi-slot capacity must equal slot count times slot size";
+    BufferTypePtr cover;
+    for (const auto& member : storage.members) {
+      const auto& memory = member.memory;
+      const auto index = memory->slot_index_ ? As<ConstInt>(*memory->slot_index_) : nullptr;
+      const auto offset = As<ConstInt>(memory->byte_offset_);
+      CHECK_SPAN(
+          memory->slot_count_ == count && memory->size_ == slot_bytes && index && index->value_ >= 0 &&
+              index->value_ < count && offset &&
+              static_cast<uint64_t>(offset->value_) == static_cast<uint64_t>(index->value_) * slot_bytes,
+          member.span)
+          << "LowerTileToBuffer: multi-slot members require consistent static slot windows";
+      if (backend::PhysicalBufferBytes(member.descriptor) == slot_bytes &&
+          member.descriptor->valid_shape_ == member.descriptor->shape_) {
+        cover = member.descriptor;
+      }
+    }
+    CHECK_SPAN(cover, span) << "LowerTileToBuffer: multi-slot storage needs a full-slot descriptor";
+    auto multi = std::make_shared<MultiBufferType>(cover, count);
+    storage.handle = std::make_shared<Var>(base->name_hint_ + "_buffers", multi, span);
+    auto allocation = OpRegistry::GetInstance().CreateInternal("buffer.alloc_multi", {}, {}, multi, span);
+    storage.definitions.push_back(std::make_shared<AssignStmt>(storage.handle, allocation, span));
+    std::map<int64_t, VarPtr> slots;
+    std::map<MatrixKey, VarPtr> views;
+    for (const auto& member : storage.members) {
+      const auto slot_index = As<ConstInt>(member.memory->slot_index_.value_or(nullptr));
+      INTERNAL_CHECK_SPAN(slot_index, member.span) << "Internal error: validated static slot is missing";
+      const auto index = slot_index->value_;
+      auto [slot, inserted] = slots.emplace(index, nullptr);
+      if (inserted) {
+        slot->second = std::make_shared<Var>(base->name_hint_ + "_slot", cover, span);
+        auto get = OpRegistry::GetInstance().CreateInternal(
+            "buffer.get_slot", {storage.handle, std::make_shared<ConstInt>(index, DataType::INDEX, span)}, {},
+            span);
+        storage.definitions.push_back(std::make_shared<AssignStmt>(slot->second, get, span));
+      }
+      const auto key = MakeMatrixKey(index, member.descriptor);
+      auto [view, new_view] = views.emplace(key, slot->second);
+      if (new_view && !structural_equal(cover, member.descriptor)) {
+        if (cover->shape_ == member.descriptor->shape_) {
+          view->second = Define(storage, "_view", "buffer.reshape", {slot->second}, member.descriptor, span);
+        } else {
+          std::vector<ExprPtr> zeros{std::make_shared<ConstInt>(0, DataType::INDEX, span),
+                                     std::make_shared<ConstInt>(0, DataType::INDEX, span)};
+          view->second =
+              Define(storage, "_view", "buffer.subview",
+                     {slot->second, std::make_shared<MakeTuple>(zeros, span)}, member.descriptor, span);
+        }
+      }
+      if (member.tile) {
+        handles.emplace(member.tile.get(), view->second);
+      } else {
+        write_views.emplace(member.write_view, view->second);
+      }
+    }
   }
 
   // Fractal descriptors have no byte-view form. Addressed planners already

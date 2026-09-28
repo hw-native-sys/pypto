@@ -110,6 +110,16 @@ views and mutable view metadata remain unsupported.
 
 ## Matrix storage and cube recipes
 
+Static addressless slot groups are retained as `buffer.alloc_multi` with a
+`MultiBufferType` and explicit `buffer.get_slot` selections. PTOAS receives one
+`pto.alloc_multi_tile` region, so opposite dbC stages remain physically distinct;
+they are not converted to independently reusable allocations. Every member must
+agree on slot count, slot size and its static byte offset. A full-slot descriptor
+provides the covering geometry. Smaller Acc tiles use compatible zero-offset
+subviews; repeated slot/descriptor pairs share one handle. Buffer verification
+tracks the selected slot's byte window, including aliases of boundary views.
+Dynamic slot indices remain unsupported by this conversion recipe.
+
 Mat, Left, Right and Acc tiles keep their resolved fractal layout in the
 `BufferType` (`blayout`, `slayout`, `fractal`, `compact`). Their physical
 extents are already whole fractal boxes, and a fractal window has no row-major
@@ -234,7 +244,7 @@ FP16/FP32/INT32; BF16 transfer support does not imply arithmetic support.
 Scalar recipe inputs are converted explicitly to the destination dtype before
 Buffer calls are constructed; fill shape/dtype select the destination descriptor.
 
-Helper calls, alternate layouts, dynamic metadata, slots, and
+Helper calls, alternate layouts, dynamic metadata, dynamic slots, and
 other operation recipes are added in subsequent migration slices. Unsupported
 forms fail explicitly. The migration option defaults to false until the
 complete recipe and runtime acceptance matrix is ready.

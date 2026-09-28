@@ -12,6 +12,7 @@
 #include <any>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -126,6 +127,19 @@ class BufferIRVisitor : public IRVisitor {
       allocations_[op->var_.get()] = Allocation{
           call->args_.size() == 1, call->args_.size() == 2 ? ConstantAddress(call->args_[1]) : nullptr};
       RegisterWindow(op->var_, op->var_.get(), 0);
+    } else if (IsOp(call, "buffer.alloc_multi") && valid_calls_.count(call.get())) {
+      allocations_[op->var_.get()] = Allocation{true, nullptr};
+    } else if (IsOp(call, "buffer.get_slot") && valid_calls_.count(call.get())) {
+      const auto source = AsVarLike(call->args_[0]);
+      const auto multi = As<MultiBufferType>(call->args_[0]->GetType());
+      const auto bytes = backend::PhysicalBufferBytes(multi->element_type_);
+      const auto index = As<ConstInt>(call->args_[1])->value_;
+      if (!source || !allocations_.count(source.get()) || !bytes ||
+          static_cast<uint64_t>(index) > std::numeric_limits<uint64_t>::max() / *bytes) {
+        Error("Buffer slot requires proven allocation provenance and byte extent", call->span_);
+      } else {
+        RegisterWindow(op->var_, source.get(), static_cast<uint64_t>(index) * *bytes);
+      }
     } else if (call && valid_calls_.count(call.get()) &&
                (IsOp(call, "buffer.subview") || IsOp(call, "buffer.reshape"))) {
       const auto source = AsVarLike(call->args_[0]);
