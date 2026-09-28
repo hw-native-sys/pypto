@@ -72,6 +72,33 @@ namespace codegen {
  */
 std::vector<ir::VarPtr> CollectVarsFromShapeExpr(const ir::ExprPtr& expr);
 
+/// Dialect for integer division when recovering a dynamic dim from a Mul form.
+/// Host Python orch uses ``//``; C++ orchestration / device wrappers use ``/``.
+enum class ShapeInvertDialect { kCpp, kPython };
+
+/**
+ * Recover ``target_var`` from a runtime shape access when ``dim_expr`` is an
+ * invertible single-var form (bare var, ``var+/-c``, ``c-var``, ``var*c`` /
+ * ``c*var``, ``var//c``). Returns empty if non-invertible.
+ *
+ * Used by distributed host orch. Entry/Graph orchestration does not call these
+ * helpers: ``GenerateDynamicDimDefs`` only emits bare-Var extents, and PackFp4
+ * hard-rejects dynamic logical FP4 last-axis geometry in this release.
+ * A user-written ``FloorDiv(K, 2)`` inverts to ``shape * 2``.
+ */
+std::string InvertShapeDimForVar(const ir::ExprPtr& dim_expr, const ir::VarPtr& target_var,
+                                 const std::string& shape_access,
+                                 ShapeInvertDialect dialect = ShapeInvertDialect::kCpp);
+
+/**
+ * Rank how faithfully ``dim_expr`` recovers ``target_var`` from a runtime shape.
+ * Higher is better: bare symbol (3) > affine +, -, * (2) > FloorDiv invert (1) >
+ * non-invertible (0). Prefer lossless sources when multiple tensor dims mention
+ * the same symbol (e.g. ``y[K]`` over ``x[K // 2]``). Used with
+ * ``InvertShapeDimForVar`` by distributed host orch.
+ */
+int ShapeDimInvertRank(const ir::ExprPtr& dim_expr, const ir::VarPtr& target_var);
+
 /**
  * @brief PTO MLIR code generator
  *
@@ -778,7 +805,7 @@ class PTOCodegen : public CodegenBase {
  protected:
   // Statement-entry dispatch guard: rejects any SplitAivScopeStmt that survived
   // to PTO codegen (it must be lowered and erased by LowerAutoVectorSplit,
-  // pass 23). The base visitor would otherwise silently unwrap it.
+  // pass 24). The base visitor would otherwise silently unwrap it.
   void VisitStmt(const ir::StmtPtr& stmt) override;
 
   // Override visitor methods for code generation - Statements

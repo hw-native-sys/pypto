@@ -32,7 +32,7 @@ PyPTO 的构成：IR、pass 流水线、代码生成，以及围绕它们的基�
 | [编译与执行入口](08-entry-points.md) | 全部编译与执行入口、各自所属的层，以及何时该用哪一个 |
 | [分布式算子](distributed_ops.md) | N6 分布式算子家族 —— 对集合通信与低层原语的类型化 DSL 访问 |
 | [PTOAS 算子状态矩阵](ptoas-op-status.md) | 编译器当前会发射哪些 PTOAS 公开与兼容算子 |
-| [FP4](fp4.md) | 逻辑 vs packed FP4、cast 策略，以及手写 `FP4E2M1X2` 指引 |
+| [FP4](fp4.md) | 逻辑 vs packed FP4、PackFp4 限制、cast 策略与待办 |
 
 ## 自动 PR 审查
 

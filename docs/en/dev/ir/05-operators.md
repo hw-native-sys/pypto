@@ -299,7 +299,7 @@ yields no value — no phi is materialized on the Acc tile.
 "Literal" covers **both** spellings a constant predicate arrives in: a DSL
 `init_cond=True`/`False` reaches the emitter as a BOOL-typed `ConstInt`, while a
 predicate an earlier pass folded reaches it as a `ConstBool` — which is what the
-generated `ko == 0` becomes when [`LowerPipelineLoops`](../passes/31-lower_pipeline_loops.md)
+generated `ko == 0` becomes when [`LowerPipelineLoops`](../passes/32-lower_pipeline_loops.md)
 replicates the K-loop *and* the enclosing loop is eliminated, so each replica's
 index is a literal. Both pick an arm outright, and an emitter that folded only
 one of the two would double the MADs of every K block it missed.
@@ -396,13 +396,12 @@ between packed ND backing and `MX_A_ZZ` / `MX_B_NN` (used for GM staging).
 contract is implemented. `tensor.gather_row` / `tile.gather_row` likewise reject
 MX sources.
 
-FP4 Tensor/Tile shapes and `valid_shape` are logical nibble counts; the innermost extent must be positive and even, and slice origins cannot select a byte's second nibble.
-Torch/runtime carries `float4_e2m1fn_x2` in a physical x2 shape; JIT/compiled-call conversion avoids a persistent IR `storage_shape`.
-
 An explicit left-side FP4→FP8 tile cast is legalized on A5 as
 FP4→BF16→FP32→FP8E4M3FN. Scale values are unchanged because this is a numerical
-cast of the data operand. Native packed-FP4 matmul remains unsupported; standalone MXFP4 quantization is
-out of scope for this release (`pl.quant_mx` is MXFP8-only).
+cast of the data operand. Native FP4×FP4 and FP8×FP4 are rejected. Physical K,
+valid K, and `ceil(K/32)` scale groups are measured on the post-cast FP8 tile,
+not the packed x2 carrier. Packing and other cast policy: see
+[FP4](../fp4.md). `pl.quant_mx` is MXFP8-only.
 
 #### MX / Ascend950: pto-isa constraints
 
@@ -425,7 +424,7 @@ out of scope for this release (`pl.quant_mx` is MXFP8-only).
 | Shape-matched Mat→Scale `tmov` | Flat `[1,G]` must `treshape` to `[M,K/32]` (or B-side shape) first. |
 | Order | PyPTO emits Mat→scaling `tmov` in source order; PTOAS `PTOA5NormalizeTMovPass` reorders `tget_scale_addr` before it (ISA bind-then-fill). |
 | `#pto.layout` / mx load | `mx_a_zz` / `mx_b_nn` / …; codegen emits logical rank-2 `make_tensor_view` (PTOAS v0.60 InferPTOLayout / EmitC map the pack). |
-| Coverage | `pto.tmatmul.mx` / `.acc` / `.bias` + `pto.tget_scale_addr`; `pto.tquant.mx` via [LowerCompositeOps](../passes/13-lower_composite_ops.md). |
+| Coverage | `pto.tmatmul.mx` / `.acc` / `.bias` + `pto.tget_scale_addr`; `pto.tquant.mx` via [LowerCompositeOps](../passes/14-lower_composite_ops.md). |
 
 ### Tile-only GEMV family (A2/A3)
 

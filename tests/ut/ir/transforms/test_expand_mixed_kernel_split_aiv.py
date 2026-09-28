@@ -805,7 +805,7 @@ class _UnplacedNotifyBefore:
 
 
 class _WrapNotifyBody(ir.IRMutator):
-    """Model pass 23 output using a region, preserving the existing golden body."""
+    """Model pass 24 output using a region, preserving the existing golden body."""
 
     def visit_function(self, op):
         stmts = list(op.body.stmts)
