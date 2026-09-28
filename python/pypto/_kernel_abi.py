@@ -21,7 +21,7 @@ from typing import Any
 
 # This is a PyPTO descriptor revision, not a version exported by simpler.
 KERNEL_DESCRIPTOR_SCHEMA = 1
-SIMPLER_KERNEL_REVISION = "dd32e1ccd2ab8ae47a5001ee4502ad5daa085f51"
+SIMPLER_KERNEL_REVISION = "a54c0509552b01e13fb0960e23ce409a01b5024f"
 TENSOR_DTYPE_TAGS = {
     "fp32": 0,
     "fp16": 1,
