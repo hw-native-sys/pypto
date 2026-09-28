@@ -557,9 +557,13 @@ partition the data differently from the way the region indexes it.
      VECTOR_TO_CUBE — insert
          tile.aic_gather(half_vector_tile, split=int(mode))  -> FULL
        resolving the source to its halved var so the gather doubles
-       HALF -> FULL, then keep the original cube-placement move on the
-       gathered FULL tile (named "<dest>_mat" so ExpandMixedKernel's V->C
-       boundary names its synthesized tpop after it).
+       HALF -> FULL in Mat. For a Mat destination, bind the gathered tile
+       directly: a second Mat->Mat move is unsupported and would hide the
+       consumers from FIFO lifetime tracking. For another cube memory space
+       (e.g. Left/Right), keep the original placement move on the gathered
+       FULL tile (named "<dest>_mat" so ExpandMixedKernel's V->C boundary
+       names its synthesized tpop after it). The gathered tile stays live
+       through its final consumer, including extracts inside AutoTile's K loop.
 
    Affinity gate (ClassifyCallAffinity):
      VECTOR-affine leaf — route the single statement through
@@ -991,20 +995,19 @@ The cube operand `qk` stays `[128, 128]`; the vector sub-region is halved to
 
 ## Example — vector→cube boundary stays full (UpDown)
 
-A V→C `tile.move` becomes `tile.aic_gather`; the cube placement move on the
-gathered tile keeps the FULL `[128, 128]` `Mat` shape — the cube side never
-sees a halved tile:
+A V→C `tile.move` targeting Mat becomes `tile.aic_gather` directly, with the
+FULL `[128, 128]` Mat shape. No Mat→Mat copy is emitted. Non-Mat cube targets
+retain their placement move. Explicit Mat layout/valid-shape conversions that
+the gather cannot represent are rejected rather than silently discarded:
 
 ```python
 # `v` is the per-lane HALF the affinity gate produced, e.g. [64, 128].
-gathered_mat: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.aic_gather(v, split=1)
-gathered:     pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.move(gathered_mat,
-                                                                      target_memory=pl.Mem.Mat)
+gathered: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.aic_gather(v, split=1)
 ```
 
 **The operand must be a per-lane half.** `tile.aic_gather` is declared
 HALF → FULL, so the gather doubles `[64, 128] → [128, 128]`, which is exactly the
-FULL result type the cube placement move keeps. That agreement is a
+FULL result shape the original boundary move requested. That agreement is a
 *precondition*, not a guarantee: a VECTOR value can reach the boundary un-halved
 — a `Vec` parameter used directly, or a tile whose split dim is a singleton the
 affinity gate deliberately preserves. Doubling such an operand would produce a

@@ -472,9 +472,12 @@ out_store = pl.tile.store(popped, [0 + aiv_id * 7, 0], out_0)
        旧->新 var 重绑。cube 源（matmul / Acc 结果）保持全尺寸。
      VECTOR_TO_CUBE —— 插入
          tile.aic_gather(half_vector_tile, split=int(mode))  -> 全
-       将源解析到其折半后的 var 使 gather 把 半 -> 全 翻倍，随后保留对折叠后全尺寸
-       tile 的原 cube 放置 move（命名为 "<dest>_mat"，以便 ExpandMixedKernel 的
-       V->C 边界据此命名其合成的 tpop）。
+       将源解析到其折半后的 var，使 gather 把 半 -> 全 翻倍并落在 Mat 中。
+       若目标就是 Mat，直接绑定 gather 结果：额外的 Mat->Mat move 不受支持，
+       还会掩盖 FIFO 生命周期分析所需的真实消费者。若目标是其他 cube 内存空间
+       （如 Left/Right），保留对全尺寸 tile 的放置 move（命名为 "<dest>_mat"，
+       以便 ExpandMixedKernel 的 V->C 边界据此命名其合成的 tpop）。gather 结果
+       保持存活直到最后一次消费，包括 AutoTile K 循环内部的 extract。
 
    亲和性门控（ClassifyCallAffinity）：
      VECTOR 亲和叶子 —— 将单条语句送入
@@ -835,18 +838,17 @@ subblock 本地化。
 
 ## 示例 —— vector→cube 边界保持全尺寸（UpDown）
 
-V→C `tile.move` 变为 `tile.aic_gather`；对折叠后 tile 的 cube 放置 move 保持全尺寸
-`[128, 128]` `Mat`——cube 侧绝不会看到折半 tile：
+目标为 Mat 的 V→C `tile.move` 直接变为全尺寸 `[128, 128]` Mat 的 `tile.aic_gather`，
+不产生 Mat→Mat 复制。其他 cube 目标仍保留放置 move。若显式 Mat 布局或有效形状转换
+无法由 gather 表达，则拒绝该转换，而不是静默丢弃：
 
 ```python
 # `v` 是 affinity gate 产出的每 lane 折半 tile，例如 [64, 128]。
-gathered_mat: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.aic_gather(v, split=1)
-gathered:     pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.move(gathered_mat,
-                                                                      target_memory=pl.Mem.Mat)
+gathered: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.aic_gather(v, split=1)
 ```
 
 **操作数必须是每 lane 的折半 tile。** `tile.aic_gather` 声明为 HALF → FULL，因此
-gather 把 `[64, 128]` 加倍为 `[128, 128]`，恰好等于 cube 放置 move 所保留的全尺寸
+gather 把 `[64, 128]` 加倍为 `[128, 128]`，恰好等于原边界 move 所要求的全尺寸
 结果类型。这种一致性是**前置条件**而非保证：向量值可能以未折半的形式到达边界——
 例如直接使用的 `Vec` 参数，或 split 维为 1 而被 affinity gate 特意保留的 tile。对
 这类操作数做加倍会得到 `[256, 128]` 的 gather，而其后的 move 仍是 `[128, 128]`，
