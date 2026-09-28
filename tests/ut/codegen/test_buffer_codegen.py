@@ -881,9 +881,10 @@ def test_static_multi_buffer_slots_and_boundary_view_compile(tmp_path):
         fractal=1024,
     )
     small = ir.BufferType(
-        [32, 64],
+        [64, 32],
         DataType.FP32,
         ir.MemorySpace.Acc,
+        valid_shape=[32, 32],
         blayout=ir.TileLayout.col_major,
         slayout=ir.TileLayout.row_major,
         fractal=1024,
