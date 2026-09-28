@@ -308,6 +308,47 @@ class TestTypeMismatchReassignment:
                 t = pl.create_tensor([4, 4], dtype=pl.FP32)  # different shape  # noqa: F841
                 return x
 
+    def test_reassign_inferred_matmul_valid_shape_survives_ssa(self):
+        """Rebinding preserves the inferred RHS view for SSA to version."""
+
+        @pl.program
+        class Program:
+            @pl.function
+            def main(self, a: pl.Tensor[[32, 128], pl.FP16], b: pl.Tensor[[128, 32], pl.FP16]):
+                acc = pl.create_tensor([32, 32], dtype=pl.FP32)
+                av = pl.slice(a, [32, 128], [0, 0], valid_shape=[17, 128])
+                bv = pl.slice(b, [128, 32], [0, 0], valid_shape=[128, 24])
+                acc = pl.matmul(av, bv, out_dtype=pl.FP32)
+                return acc
+
+        after = pypto.passes.convert_to_ssa()(Program)
+        printed = ir.python_print(after)
+        assert "valid_shape=[17, 24]" in printed
+        ir.assert_structural_equal(pl.parse(printed), after)
+
+    @pytest.mark.parametrize(
+        "result_type",
+        [
+            "pl.Tensor[[32, 32], pl.FP16, pl.TensorView(valid_shape=[17, 24])]",
+            "pl.Tensor[[16, 32], pl.FP32, pl.TensorView(valid_shape=[16, 24])]",
+            "pl.Tensor[[32, 32], pl.FP32, pl.TensorView(stride=[64, 1], valid_shape=[17, 24])]",
+            "pl.Tensor[[32, 32], pl.FP32, pl.TensorView(layout=pl.TensorLayout.NZ, valid_shape=[17, 24])]",
+        ],
+    )
+    def test_valid_shape_rebinding_does_not_relax_other_type_fields(self, result_type):
+        """Valid-region refinement does not permit dtype, shape, stride or layout changes."""
+        source = f"""
+@pl.program
+class Program:
+    @pl.function
+    def main(self, a: pl.Tensor[[32, 32], pl.FP32], b: {result_type}):
+        acc = a
+        acc = b
+        return acc
+"""
+        with pytest.raises(ParserTypeError, match="Cannot reassign"):
+            pl.parse(source)
+
 
 class TestBugClassErrorsAreNotWrapped:
     """Bug-class exceptions must escape the parser with type and traceback intact.

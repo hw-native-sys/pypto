@@ -1047,7 +1047,10 @@ class TypePropagatingMutator : public IRMutator {
         auto updated = std::make_shared<Var>(rv->name_hint_, new_iter_args[i]->GetType(), rv->span_);
         // Register mapping for both original and current return_var pointers
         var_remap_[orig_return_vars[i].get()] = updated;
-        if (rv.get() != orig_return_vars[i].get()) var_remap_[rv.get()] = updated;
+        if (rv.get() != orig_return_vars[i].get()) {
+          RetainVar(rv);
+          var_remap_[rv.get()] = updated;
+        }
         updated_rv.push_back(updated);
         rv_changed = true;
       } else {
@@ -3384,11 +3387,10 @@ Pass ConvertTensorToTileOps() {
       }
     }
 
-    // A `tensor.matmul` drops its operands' valid_shape, so an accumulator only
-    // becomes narrower than the seed it is carried from once this pass turns it into
-    // a `tile.matmul` -- which re-types the yields but not the carry those yields
-    // flow through. Repair it here rather than leave a carry the TypeCheck and
-    // AccCompactValid verifiers reject (issue #2470).
+    // 2D tensor.matmul already propagates valid M/N, but carries are still typed
+    // from their seeds. Conversion also introduces physical boxing and Acc
+    // layout/compact metadata. Reconcile converted yields with their carries
+    // before TypeCheck and AccCompactValid run (issue #2470).
     for (auto& func : functions_phase2b) {
       func = narrow_loop_carry::NarrowAccCarries(func);
     }

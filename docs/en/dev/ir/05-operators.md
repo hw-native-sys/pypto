@@ -231,7 +231,20 @@ REGISTER_OP("tensor.matmul")
     .f_deduce_type(DeduceMatMul);
 ```
 
-For 2D `tile.matmul`, the physical boxed K dimensions must match. PTO derives
+For two ordinary 2D tensors, `tensor.matmul` keeps physical output shape
+`[lhs M, rhs N]` and infers `valid_shape=[lhs valid M, rhs valid N]`. Both use
+the axis mapping selected by `a_trans`/`b_trans`. An omitted input valid shape
+means its full shape; fully valid results retain the canonical view-free type.
+Symbolic valid M/N expressions are preserved. The result owns fresh storage,
+so input strides, layout, and padding metadata are not copied.
+
+For example, physical `[32,128]` valid `[17,128]` times physical `[128,32]`
+valid `[128,24]` gives physical `[32,32]` valid `[17,24]`. It can be assembled
+into a `[17,24]` destination without `pl.set_validshape`. This infers metadata;
+it does not add padding, clear memory, or extend hardware support for padded K.
+Vector, batched, distributed-window, and `tensor.matmul_acc` inference remain unchanged.
+
+For this 2D tensor form and for `tile.matmul`, the physical boxed K dimensions must match. PTO derives
 the contraction extent from the lhs valid K, so that extent may be smaller than
 the rhs valid K but must be contained by it. `tile.matmul_acc` likewise keeps
 exact physical M/N/K box compatibility while allowing the accumulator's valid

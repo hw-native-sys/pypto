@@ -215,7 +215,17 @@ REGISTER_OP("tensor.matmul")
     .f_deduce_type(DeduceMatMul);
 ```
 
-对于二维 `tile.matmul`，物理装箱后的 K 维必须一致。PTO 从 lhs 的有效 K 推导收缩范围，
+对于两个普通二维 tensor，`tensor.matmul` 保留物理输出 shape `[lhs M, rhs N]`，并推导
+`valid_shape=[lhs valid M, rhs valid N]`。两者采用 `a_trans`/`b_trans` 指定的相同轴映射。
+输入省略有效形状时使用完整 shape；全有效结果仍规范化为无 view 的类型。有效 M/N 可以是
+符号表达式，推导会保留表达式。输出拥有新存储，不继承输入的 stride、布局或 padding 元数据。
+
+例如物理 `[32,128]`、有效 `[17,128]` 与物理 `[128,32]`、有效 `[128,24]` 相乘，得到
+物理 `[32,32]`、有效 `[17,24]`，可以直接 assemble 到 `[17,24]` 目标，无需
+`pl.set_validshape`。这只是元数据推导，不新增 padding、清零或 K padding 硬件支持。
+一维、batched、distributed-window 和 `tensor.matmul_acc` 的类型推导保持不变。
+
+对于上述二维 tensor 形式以及 `tile.matmul`，物理装箱后的 K 维必须一致。PTO 从 lhs 的有效 K 推导收缩范围，
 因此该范围可以小于 rhs 的有效 K，但必须被后者包含。`tile.matmul_acc` 同样要求物理
 M/N/K 装箱严格兼容，同时允许累加器的有效 M/N 矩形以及 rhs 的有效 K 包含 PTO 根据
 lhs M/K 与 rhs N 实际计算的较小矩形。

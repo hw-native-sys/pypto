@@ -46,6 +46,15 @@ program_ssa = ssa_pass(program)
 6. **Scope-Boundary Escaping Guard**: For all `ScopeStmt` subclasses *except* `RuntimeScopeStmt` (i.e. `HierarchyScopeStmt` / `InCoreScopeStmt` / `ClusterScopeStmt` / `SpmdScopeStmt`), `ConvertScope` trims the `future_needs_` set to variables already defined before the scope. This prevents nested loops inside the scope body from promoting *scope-local* variables to bogus `init_values=(foo__FREE_VAR,)` based on a downstream use that lives outside the scope. Variables first-defined inside the scope body still substitute normally outside it (later passes such as `OutlineIncoreScopes` rely on this). `RuntimeScopeStmt` (`pl.scope()`) is a thin codegen wrapper and stays fully transparent.
 7. **Preservation**: Keep existing SSA constructs unchanged
 
+For fresh 2D tensor accumulators, matmul yields can carry a narrower valid region than
+their `tensor.create` seed. Before verification, `NarrowTensorMatmulCarries` narrows the
+full seed with `tensor.set_validshape` when the extents are visible outside the loop,
+then retypes the carry and its uses. Accumulating branches explicitly narrow their
+results to that same region; `tensor.matmul_acc` inference itself is unchanged.
+Only matmul-family yields and fresh full-box seeds qualify. Other carries and extents
+defined inside the loop retain their existing behavior. Tensor-to-tile conversion still
+reconciles the resulting Acc layout and compact mode.
+
 **Key transformations**:
 
 - `x = 1; x = 2` → `x__ssa_v0 = 1; x__ssa_v1 = 2`

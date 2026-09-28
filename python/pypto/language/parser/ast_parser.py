@@ -492,6 +492,26 @@ def _types_match(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
     return lhs == rhs
 
 
+def _tensor_types_differ_only_by_valid_shape(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
+    """Allow pre-SSA rebinding to refine only an ordinary tensor's valid region.
+
+    A fresh matmul product can narrow a full-box accumulator seed. Preserve the
+    RHS type for ConvertToSSA to version, while keeping shape, dtype and storage
+    layout checks strict. This is not annotation compatibility or a rule for
+    distributed windows.
+    """
+    if type(lhs) is not ir.TensorType or type(rhs) is not ir.TensorType:
+        return False
+
+    def without_valid_shape(tensor_type: ir.TensorType) -> ir.TensorType:
+        view = tensor_type.tensor_view
+        if view is not None:
+            view = ir.TensorView(view.stride, view.layout, [], view.pad)
+        return ir.TensorType(tensor_type.shape, tensor_type.dtype, tensor_type.memref, view)
+
+    return _types_match(without_valid_shape(lhs), without_valid_shape(rhs))
+
+
 def _tile_types_differ_only_by_unset_memory_space(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
     """Return whether two TileTypes are equal once an unset space is a wildcard.
 
@@ -1979,13 +1999,14 @@ class ASTParser:
             return self.builder.let(var_name, value_expr, type=override_type, span=span)
 
         if existing_var is not None and type(existing_var) is ir.Var and not self.scope_manager.strict_ssa:
-            # Reject reassignment with a different type (#642).  Same Python
-            # variable maps to the same Var node, so the type must match.
+            # Reject changes to the storage contract (#642). Pre-SSA tensor
+            # validity may refine per definition; SSA keeps each RHS's view.
             value_type = override_type or value_expr.type
             if (
                 not isinstance(value_type, ir.UnknownType)
                 and not isinstance(existing_var.type, ir.UnknownType)
                 and not _types_match(existing_var.type, value_type)
+                and not _tensor_types_differ_only_by_valid_shape(existing_var.type, value_type)
             ):
                 if not _tile_types_differ_only_by_unset_memory_space(existing_var.type, value_type):
                     raise ParserTypeError(

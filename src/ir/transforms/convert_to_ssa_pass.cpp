@@ -35,6 +35,7 @@
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/narrow_loop_carry.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 
@@ -1216,7 +1217,7 @@ FunctionPtr TransformConvertToSSA(const FunctionPtr& func) {
     return func;
   }
   SSAConverter converter;
-  return converter.ConvertFunction(func);
+  return narrow_loop_carry::NarrowTensorMatmulCarries(converter.ConvertFunction(func));
 }
 
 }  // namespace

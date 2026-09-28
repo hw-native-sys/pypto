@@ -46,6 +46,62 @@ _FP32_MATMUL_RTOL = 1e-4
 _FP32_MATMUL_ATOL = 1e-4
 
 
+@pl.jit
+def explicit_valid_shape_matmul(
+    a: pl.Tensor[[17, 128], pl.FP16],
+    b: pl.Tensor[[128, 24], pl.FP16],
+    out: pl.Out[pl.Tensor[[17, 24], pl.FP32]],
+):
+    """Explicit physical boxes need no user-written set_validshape on the product."""
+    with pl.at(level=pl.Level.CORE_GROUP):
+        av = pl.slice(a, [32, 128], [0, 0], valid_shape=[17, 128], clamp=True)
+        bv = pl.slice(b, [128, 32], [0, 0], valid_shape=[128, 24], clamp=True)
+        c = pl.matmul(av, bv, out_dtype=pl.FP32)
+        out = pl.assemble(out, c, [0, 0])
+    return out
+
+
+def test_explicit_valid_shape_matmul(test_config):
+    """Small integer inputs give an exact FP32 golden for the partial M/N store."""
+    a = (torch.arange(17 * 128).reshape(17, 128) % 5 - 2).to(torch.float16)
+    b = (torch.arange(128 * 24).reshape(128, 24) % 7 - 3).to(torch.float16)
+    out = torch.full((17, 24), float("nan"), dtype=torch.float32)
+    explicit_valid_shape_matmul(a, b, out, config=test_config)
+    if not test_config.codegen_only:
+        torch.testing.assert_close(out, a.float() @ b.float(), rtol=0, atol=0)
+
+
+def test_explicit_valid_shape_matmul_carry(test_config):
+    """A fresh split-K carry preserves its valid rectangle and leaves padding untouched."""
+
+    @pl.jit
+    def split_k(
+        a: pl.Tensor[[17, 256], pl.FP16],
+        b: pl.Tensor[[256, 24], pl.FP16],
+        out: pl.InOut[pl.Tensor[[64, 32], pl.FP32]],
+    ):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            acc = pl.create_tensor([64, 32], dtype=pl.FP32)
+            for k in pl.range(0, 256, 128):
+                av = pl.slice(a, [64, 128], [0, k], valid_shape=[17, 128], clamp=True)
+                bv = pl.slice(b, [128, 32], [k, 0], valid_shape=[128, 24], clamp=True)
+                if k == 0:
+                    acc = pl.matmul(av, bv, out_dtype=pl.FP32)
+                else:
+                    acc = pl.matmul_acc(acc, av, bv)
+            out = pl.assemble(out, acc, [0, 0])
+        return out
+
+    a = (torch.arange(17 * 256).reshape(17, 256) % 5 - 2).to(torch.float16)
+    b = (torch.arange(256 * 24).reshape(256, 24) % 7 - 3).to(torch.float16)
+    out = torch.full((64, 32), -777.0, dtype=torch.float32)
+    expected = out.clone()
+    expected[:17, :24] = a.float() @ b.float()
+    split_k(a, b, out, config=test_config)
+    if not test_config.codegen_only:
+        torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
+
 def _planner_tag(planner: MemoryPlanner) -> str:
     return {
         MemoryPlanner.PYPTO: "pypto",

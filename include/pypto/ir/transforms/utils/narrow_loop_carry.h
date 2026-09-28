@@ -35,8 +35,8 @@ namespace narrow_loop_carry {
  *
  * Whoever narrows a matmul result inside a carry therefore has to repair the carry before
  * it returns, or it publishes IR its own ``TypeCheck`` and ``AccCompactValid`` verifiers
- * reject. Two passes do: ``ConvertTensorToTileOps`` (a 2D seed, narrowed the moment
- * ``tensor.matmul`` becomes ``tile.matmul``) and ``FlattenTileNdTo2D`` (an ND seed, narrowed
+ * reject. Two passes do: ``ConvertTensorToTileOps`` (a 2D seed whose converted Acc
+ * metadata must agree with its yields) and ``FlattenTileNdTo2D`` (an ND seed, narrowed
  * when ``tile.batch_matmul`` is unrolled into 2D matmuls). Both call this.
  *
  * The repair re-declares the *seed* -- the only place the rest of the pipeline reads a
@@ -47,8 +47,9 @@ namespace narrow_loop_carry {
  * Deliberately narrow in scope:
  *   * only **Acc** carries, where a stale extent changes the stride a reader uses. A Vec
  *     seed may hold bytes the first iteration is entitled to read at full height.
- *   * only a seed defined by ``tile.create``; anything else may carry bytes whose layout
- *     this repair must not re-interpret.
+ *   * only a seed defined by ``tile.create``, optionally narrowed by a direct
+ *     ``tile.set_validshape``; anything else may carry bytes whose layout this repair
+ *     must not re-interpret.
  *   * only a dimension whose yield extent is adoptable: either provably ``<=`` the extent
  *     the init declares, or declared against an init that still fills its physical box --
  *     every ``valid_shape`` is bounded by that box, so a dynamic yield extent is already
@@ -57,7 +58,8 @@ namespace narrow_loop_carry {
  *   * only where the two readings of the buffer would actually disagree
  *     (``AccPitchesCoincide``, shared with the ``AccCompactValid`` verifier). A
  *     single-fractal-block box packs to its physical rows whatever its valid rows, so a
- *     ``[16, N]`` accumulator keeps the exact form it has today.
+ *     ``[16, N]`` accumulator keeps the exact form it has today. An already-narrowed
+ *     seed also gets repaired when its compact metadata differs from the yield's.
  *   * only where the narrowed extents are visible *before* the loop. The re-declared seed
  *     sits there, and the common spelling puts the row count next to the slice it bounds,
  *     inside the body -- hoisting that would leave codegen with a symbol it cannot bind.
@@ -78,6 +80,11 @@ namespace narrow_loop_carry {
  * @return The repaired function, or @p func itself when nothing narrows
  */
 FunctionPtr NarrowAccCarries(const FunctionPtr& func);
+
+/// Reconcile fresh 2D tensor.create carries with matmul-family yields before
+/// SSA verification. Only loop-external valid extents can narrow a full seed;
+/// matmul_acc results are explicitly narrowed without changing its deducer.
+FunctionPtr NarrowTensorMatmulCarries(const FunctionPtr& func);
 
 }  // namespace narrow_loop_carry
 }  // namespace ir

@@ -34,6 +34,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -194,6 +195,27 @@ TypePtr DeduceTensorMatMulType(const std::vector<ExprPtr>& args,
     CheckContractionExtents(k_lhs, k_rhs, "tensor.matmul requires matching inner dimensions");
 
     output_shape = {m_dim, n_dim};
+    // Only ordinary 2D tensors have this valid-region propagation contract;
+    // distributed windows retain their existing local-GM inference behavior.
+    if (As<TensorType>(args[0]->GetType()) && As<TensorType>(args[1]->GetType())) {
+      const auto& lhs_valid = GetEffectiveTensorValidShape(*lhs_type);
+      const auto& rhs_valid = GetEffectiveTensorValidShape(*rhs_type);
+      CHECK_SPAN(lhs_valid.size() == 2 && rhs_valid.size() == 2, args[0]->span_)
+          << "tensor.matmul requires valid_shape rank to match the 2D operand shape";
+      const auto& valid_k_lhs = lhs_valid[a_trans ? 0 : 1];
+      const auto& valid_k_rhs = rhs_valid[b_trans ? 1 : 0];
+      // Match tile.matmul: PTO contracts over lhs valid K, which rhs must cover.
+      CHECK_SPAN(ProveValidExtentLessEqual(valid_k_lhs, valid_k_rhs) != ProofResult::kFalse, args[0]->span_)
+          << "tensor.matmul requires rhs valid K to cover lhs valid K, but got lhs K="
+          << PythonPrint(valid_k_lhs) << " and rhs K=" << PythonPrint(valid_k_rhs);
+
+      // The product owns fresh storage. Do not inherit either operand's view
+      // layout, strides, padding policy, or memory reference. TensorType removes
+      // a redundant full valid_shape, preserving the canonical full-box type.
+      TensorView view;
+      view.valid_shape = {lhs_valid[a_trans ? 1 : 0], rhs_valid[b_trans ? 0 : 1]};
+      return std::make_shared<TensorType>(output_shape, out_dtype, std::nullopt, std::move(view));
+    }
   } else {
     // For higher-dimensional tensors (both must have at least 2 dimensions),
     // use batched matmul semantics

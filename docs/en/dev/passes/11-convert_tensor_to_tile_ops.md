@@ -691,15 +691,29 @@ Key changes:
 
 ## Loop-Carry Valid-Shape Repair
 
-`tensor.matmul` drops its operands' `valid_shape`, so an accumulator only becomes narrower
-than the seed it is carried from once this pass produces a `tile.matmul` over a
-row-narrowed left operand:
+For two ordinary 2D tensors, `tensor.matmul` already infers valid M/N from its operands
+while retaining physical M/N. For example, `[32,128]` valid `[17,128]` multiplied by
+`[128,32]` valid `[128,24]` produces physical `[32,32]`, valid `[17,24]`, without a
+user-written `set_validshape`. Transpose flags select the same axes for both shapes.
+This pass preserves that distinction in the Acc tile and stores only the valid rectangle.
+
+`ConvertToSSA` reconciles fresh 2D tensor accumulator carries with loop-external valid
+extents before verification. It uses explicit metadata narrowing for the seed and the
+accumulating branch, without changing `tensor.matmul_acc` inference.
+
+This does not eliminate carry repair: loop carries are still typed from their seeds,
+conversion introduces boxed physical shapes and Acc layout/compact metadata, and the
+batched and `matmul_acc` tensor inference contracts are unchanged. A peeled first product
+can therefore have a narrower valid region than its seed:
 
 ```python
 acc = pl.create_tensor([M, N], dtype=pl.INT32)          # full box
 for k0 in pl.pipeline(0, K, K_TILE, stage=2):
     xk = pl.slice(x, [M, K_TILE], [m0, k0], valid_shape=[v, K_TILE])   # runtime v
-    acc = pl.matmul_acc(acc, xk, wk, b_trans=True)      # narrowed, compact result
+    if k0 == 0:
+        acc = pl.matmul(xk, wk, b_trans=True, out_dtype=pl.INT32)
+    else:
+        acc = pl.matmul_acc(acc, xk, wk, b_trans=True)
 ```
 
 The carry is typed from its **init value alone** — `ConvertToSSA` mints the `IterArg` from
@@ -710,7 +724,8 @@ height walks it at the physical row pitch, corrupting every N-fractal above the 
 (issue #2470).
 
 Before returning, this pass therefore calls `narrow_loop_carry::NarrowAccCarries` on each
-function: an Acc carry seeded by `tile.create` is re-declared at the extent its yields
+function: an Acc carry seeded by `tile.create` (also through a direct `set_validshape`)
+is re-declared at the extent its yields
 prove — `tile.create(compact=True)` plus `tile.set_validshape` — and the body's def-use
 closure is re-typed through the operators' own deducers. Repairing it in the pass that
 creates it keeps the pipeline verifiable; leaving it would publish a carry the `TypeCheck`
@@ -720,7 +735,8 @@ unrolled into 2D matmuls.
 
 A carry is left exactly as it is when the two readings of its buffer cannot disagree — a
 single-fractal-block `[16, N]` accumulator packs to its physical rows whatever its valid
-rows — or when the narrowed extent is only computed inside the loop body, where the
+rows — unless an already-narrowed seed needs its compact metadata aligned with the
+yield. Repair also leaves a carry alone when the narrowed extent is only computed inside the loop body, where the
 re-declared seed could not name it.
 
 ## Implementation

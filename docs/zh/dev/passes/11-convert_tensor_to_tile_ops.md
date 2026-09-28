@@ -619,14 +619,26 @@ class After:
 
 ## 循环携带值的 valid_shape 修复
 
-`tensor.matmul` 会丢弃操作数的 `valid_shape`，因此只有当本 pass 把它变成作用于被收窄左
-操作数的 `tile.matmul` 之后，累加器才会比它所携带的种子更窄：
+对于两个普通二维 tensor，`tensor.matmul` 已根据操作数推导有效 M/N，同时保留物理 M/N。
+例如物理 `[32,128]`、有效 `[17,128]` 与物理 `[128,32]`、有效 `[128,24]` 相乘，得到
+物理 `[32,32]`、有效 `[17,24]`，用户无需手写 `set_validshape`。转置标志对两种形状采用
+相同的轴映射。本 pass 在 Acc tile 中保留这一区别，store 只写有效矩形。
+
+`ConvertToSSA` 在验证前协调新建二维 tensor 累加器携带值与循环外可见的有效范围。
+它通过显式元数据收窄处理种子和累加分支，不改变 `tensor.matmul_acc` 的类型推导。
+
+这并未消除携带值修复的用途：循环仍按种子定型，转换还会引入装箱后的物理形状及 Acc
+布局/compact 元数据，而 batched 和 `matmul_acc` 的 tensor 推导契约保持不变。因此，
+剥离出的首次乘积仍可能比种子的有效范围更窄：
 
 ```python
 acc = pl.create_tensor([M, N], dtype=pl.INT32)          # 完整盒
 for k0 in pl.pipeline(0, K, K_TILE, stage=2):
     xk = pl.slice(x, [M, K_TILE], [m0, k0], valid_shape=[v, K_TILE])   # 运行期 v
-    acc = pl.matmul_acc(acc, xk, wk, b_trans=True)      # 收窄且 compact 的结果
+    if k0 == 0:
+        acc = pl.matmul(xk, wk, b_trans=True, out_dtype=pl.INT32)
+    else:
+        acc = pl.matmul_acc(acc, xk, wk, b_trans=True)
 ```
 
 循环携带值**只按其初值定型**——`ConvertToSSA` 用种子铸出 `IterArg`，本 pass 再用转换后的
@@ -635,14 +647,16 @@ for k0 in pl.pipeline(0, K, K_TILE, stage=2):
 第一个之后的每个 N-fractal 都会被打乱（issue #2470）。
 
 因此本 pass 在返回前会对每个函数调用 `narrow_loop_carry::NarrowAccCarries`：由
-`tile.create` 播种的 Acc 携带值会按 yield 可证明的范围重新声明——`tile.create(compact=True)`
+`tile.create` 播种（也包括紧接一个 `set_validshape`）的 Acc 携带值会按 yield 可证明的范围
+重新声明——`tile.create(compact=True)`
 加 `tile.set_validshape`——并让循环体的 def-use 闭包经由算子自身的 deducer 重新定型。在制造
 问题的 pass 里就地修复，才能保持流水线可验证；否则产出的携带值会被 `TypeCheck` 诊断与
 `AccCompactValid` 属性验证器拒绝。`FlattenTileNdTo2D` 调用同一个 helper，用于 ND 种子——
 它的收窄要等到 `tile.batch_matmul` 展开成 2D matmul 时才出现。
 
 两种情况下携带值保持原样：一是缓冲区的两种读法本来就不会分歧——单 fractal 块的 `[16, N]`
-累加器无论有效行是多少都按物理行打包；二是收窄用的表达式只在循环体内计算，重新声明的种子
+累加器无论有效行是多少都按物理行打包（但已收窄种子的 compact 元数据仍需与 yield 对齐）；
+二是收窄用的表达式只在循环体内计算，重新声明的种子
 在那之前根本命名不到它。
 
 ## 实现

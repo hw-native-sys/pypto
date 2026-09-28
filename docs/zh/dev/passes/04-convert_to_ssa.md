@@ -46,6 +46,13 @@ program_ssa = ssa_pass(program)
 6. **跨作用域的 escaping 防护**：除 `RuntimeScopeStmt` 外的 `ScopeStmt` 子类（`HierarchyScopeStmt` / `InCoreScopeStmt` / `ClusterScopeStmt` / `SpmdScopeStmt`），`ConvertScope` 在进入 body 前把 `future_needs_` 裁剪到仅包含 scope 之前已经存在的变量。这样可以阻止 scope body 内的嵌套循环把 **scope-local 新变量**根据 scope 之后的引用错误地提升成 `init_values=(foo__FREE_VAR,)`。scope body 内首次定义、然后在 scope 之外引用的变量仍然能正常替换（`OutlineIncoreScopes` 等后续 pass 依赖这一行为）。`RuntimeScopeStmt`（`pl.scope()`）只是 codegen 包装节点，保持完全透传。
 7. **保留**：保持现有 SSA 构造不变
 
+对于新建的二维 tensor 累加器，matmul 的 yield 有效范围可能小于 `tensor.create` 种子。
+验证前，`NarrowTensorMatmulCarries` 在有效范围表达式于循环外可见时，通过
+`tensor.set_validshape` 收窄完整种子，并重新推导携带值及其使用处的类型。累加分支也显式
+收窄结果到同一范围，`tensor.matmul_acc` 本身的类型推导不变。该处理仅适用于 matmul
+系列 yield 和新建的完整种子；其他携带值、循环内定义的范围保持原有行为。
+Tensor-to-tile 转换仍负责协调最终 Acc 布局和 compact 模式。
+
 **关键变换**：
 
 - `x = 1; x = 2` -> `x__ssa_v0 = 1; x__ssa_v1 = 2`

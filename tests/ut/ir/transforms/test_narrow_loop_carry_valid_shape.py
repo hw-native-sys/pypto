@@ -378,14 +378,25 @@ def test_flatten_repairs_an_nd_seeded_carry():
     assert stored.memory_space == ir.MemorySpace.Acc
 
 
+def test_ssa_reconciles_fresh_tensor_matmul_carry_valid_shape():
+    """The new tensor result view agrees across seed, branches and carry before lowering."""
+    after = _lower(create_tensor_seeded_acc_2d, stop_after="convert_to_ssa")
+    carries = [arg for loop in _loops(after) for arg in loop.iter_args if isinstance(arg.type, ir.TensorType)]
+    assert len(carries) == 1
+    view = carries[0].type.tensor_view
+    assert view is not None
+    assert not _is_const(view.valid_shape[0], M_TILE)
+    assert [dim.value for dim in carries[0].type.shape] == [M_TILE, N_TILE]
+    ir.assert_structural_equal(pl.parse(ir.python_print(after)), after)
+
+
 def test_convert_tensor_to_tile_ops_repairs_a_2d_seeded_carry():
     """A 2D seed is narrowed one pass earlier, so it is repaired one pass earlier.
 
-    ``tensor.matmul`` drops its operands' ``valid_shape``, so the carry is still
-    consistent at pipeline input; it stops being consistent the moment
-    ``ConvertTensorToTileOps`` produces a ``tile.matmul`` over a row-narrowed left
-    operand. Stopping the prefix right there pins that the repair happens in the same
-    pass rather than several passes downstream.
+    ``tensor.matmul`` already propagates valid M/N, but the carry still inherits
+    its seed type. ``ConvertTensorToTileOps`` must reconcile that seed with the
+    narrowed Acc metadata. Stopping the prefix there pins that the repair happens
+    in the same pass rather than several passes downstream.
     """
     after = _lower(create_tensor_seeded_acc_2d, stop_after="convert_tensor_to_tile_ops")
     stored = _stored_tile_type(after)

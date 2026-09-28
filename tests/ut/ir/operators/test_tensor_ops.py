@@ -148,6 +148,174 @@ def test_tensor_matmul_with_transpose():
     assert _const_shape(call) == [4, 4]
 
 
+@pytest.mark.parametrize("a_trans,b_trans", [(False, False), (True, False), (False, True), (True, True)])
+@pytest.mark.parametrize("valid_m,valid_n", [(17, 32), (32, 24), (17, 24), (32, 32)])
+def test_tensor_matmul_valid_shape(valid_m, valid_n, a_trans, b_trans):
+    """Transpose maps physical and valid axes identically without shrinking storage."""
+    lhs_shape, rhs_shape = [32, 128], [128, 32]
+    lhs_valid, rhs_valid = [valid_m, 128], [128, valid_n]
+    if a_trans:
+        lhs_shape, lhs_valid = lhs_shape[::-1], lhs_valid[::-1]
+    if b_trans:
+        rhs_shape, rhs_valid = rhs_shape[::-1], rhs_valid[::-1]
+    lhs = _partial_tensor_var(lhs_shape, lhs_valid, name="a", dtype=DataType.FP16)
+    rhs = _partial_tensor_var(rhs_shape, rhs_valid, name="b", dtype=DataType.FP16)
+    call = tensor.matmul(lhs, rhs, a_trans=a_trans, b_trans=b_trans, out_dtype=DataType.FP32)
+    assert isinstance(call.type, ir.TensorType)
+    assert _const_shape(call) == [32, 32]
+    assert _valid_of(call.type) == [valid_m, valid_n]
+    assert call.type.dtype == DataType.FP32
+    if (valid_m, valid_n) == (32, 32):
+        assert call.type.tensor_view is None
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_tensor_matmul_full_valid_shape_is_canonical(explicit):
+    """Both omitted and explicit full valid shapes retain the original bare type."""
+    make = _partial_tensor_var if explicit else lambda shape, valid: _tensor_var("t", shape)
+    call = tensor.matmul(make([32, 128], [32, 128]), make([128, 32], [128, 32]))
+    assert isinstance(call.type, ir.TensorType)
+    assert _const_shape(call) == [32, 32]
+    assert call.type.tensor_view is None
+
+
+@pytest.mark.parametrize("a_trans,b_trans", [(False, False), (True, False), (False, True), (True, True)])
+def test_tensor_matmul_symbolic_valid_shape(a_trans, b_trans):
+    """Runtime M/N expressions survive inference verbatim."""
+    span = ir.Span.unknown()
+    m = ir.Var("m", ir.ScalarType(DataType.INDEX), span)
+    n = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
+    valid_m = ir.Add(m, ir.ConstInt(1, DataType.INDEX, span), DataType.INDEX, span)
+    lhs = _partial_tensor_var(
+        [128, 32] if a_trans else [32, 128], [128, valid_m] if a_trans else [valid_m, 128]
+    )
+    rhs = _partial_tensor_var([32, 128] if b_trans else [128, 32], [n, 128] if b_trans else [128, n])
+    result = tensor.matmul(lhs, rhs, a_trans=a_trans, b_trans=b_trans)
+    assert _const_shape(result) == [32, 32]
+    assert isinstance(result.type, ir.TensorType)
+    assert result.type.tensor_view is not None
+    ir.assert_structural_equal(result.type.tensor_view.valid_shape[0], valid_m)
+    ir.assert_structural_equal(result.type.tensor_view.valid_shape[1], n)
+
+
+def test_tensor_matmul_does_not_inherit_input_storage_view():
+    """A product has fresh ND storage, independent of operand strides/layout/pad."""
+    span = ir.Span.unknown()
+    lhs = ir.Var(
+        "a",
+        ir.TensorType(
+            [32, 128],
+            DataType.FP16,
+            memref=ir.MemRef("input_storage", 64, 16384, span),
+            tensor_view=ir.TensorView([256, 1], ir.TensorLayout.NZ, [17, 128], ir.PadValue.zero),
+        ),
+        span,
+    )
+    rhs = _partial_tensor_var([128, 32], [128, 24], dtype=DataType.FP16)
+    result = tensor.matmul(lhs, rhs).type
+    assert isinstance(result, ir.TensorType)
+    assert result.tensor_view is not None
+    assert _valid_of(result) == [17, 24]
+    assert result.memref is None
+    assert result.tensor_view.stride == []
+    assert result.tensor_view.layout == ir.TensorLayout.ND
+    assert result.tensor_view.pad == ir.PadValue.null
+
+
+@pytest.mark.parametrize("a_trans,b_trans", [(False, False), (True, False), (False, True), (True, True)])
+@pytest.mark.parametrize("lhs_k,rhs_k", [(128, 128), (64, 128), (128, 64)])
+def test_tensor_matmul_valid_k_matches_tile_contract(a_trans, b_trans, lhs_k, rhs_k):
+    """RHS must cover LHS valid K; a smaller RHS is rejected instead of taking min."""
+    lhs = _partial_tensor_var([128, 32] if a_trans else [32, 128], [lhs_k, 17] if a_trans else [17, lhs_k])
+    rhs = _partial_tensor_var([32, 128] if b_trans else [128, 32], [24, rhs_k] if b_trans else [rhs_k, 24])
+    if lhs_k > rhs_k:
+        with pytest.raises(ValueError, match="rhs valid K to cover lhs valid K"):
+            tensor.matmul(lhs, rhs, a_trans=a_trans, b_trans=b_trans)
+    else:
+        result = tensor.matmul(lhs, rhs, a_trans=a_trans, b_trans=b_trans)
+        assert _const_shape(result) == [32, 32]
+        assert _valid_of(result.type) == [17, 24]
+
+
+def test_tensor_matmul_rejects_physical_k_mismatch_even_with_equal_valid_k():
+    """Valid extents cannot make incompatible physical K boxes legal."""
+    with pytest.raises(ValueError, match="matching inner dimensions"):
+        tensor.matmul(_partial_tensor_var([32, 128], [17, 64]), _partial_tensor_var([64, 32], [64, 24]))
+
+
+@pytest.mark.parametrize(
+    "lhs_shape,lhs_valid,rhs_shape,rhs_valid,expected",
+    [
+        ([128], [64], [128], [64], []),
+        ([32, 128], [17, 128], [128], [128], [32]),
+        ([128], [128], [128, 32], [128, 24], [32]),
+        ([2, 32, 128], [2, 17, 128], [2, 128, 32], [2, 128, 24], [2, 32, 32]),
+    ],
+)
+def test_tensor_matmul_other_ranks_keep_existing_inference(
+    lhs_shape, lhs_valid, rhs_shape, rhs_valid, expected
+):
+    """The 2D fix does not introduce vector or batched valid-shape semantics."""
+    result = tensor.matmul(
+        _partial_tensor_var(lhs_shape, lhs_valid), _partial_tensor_var(rhs_shape, rhs_valid)
+    )
+    assert _const_shape(result) == expected
+    assert isinstance(result.type, ir.TensorType)
+    assert result.type.tensor_view is None
+
+
+@pytest.mark.parametrize("window_side", ["lhs", "rhs", "both"])
+def test_tensor_matmul_partial_window_keeps_existing_inference(window_side):
+    """Distributed operands still produce the existing fresh full-valid local tensor."""
+    lhs_factory = _partial_distributed_tensor_var if window_side in ("lhs", "both") else _partial_tensor_var
+    rhs_factory = _partial_distributed_tensor_var if window_side in ("rhs", "both") else _partial_tensor_var
+    result = tensor.matmul(lhs_factory([32, 128], [17, 128]), rhs_factory([128, 32], [128, 24]))
+    assert _const_shape(result) == [32, 32]
+    assert isinstance(result.type, ir.TensorType)
+    assert not isinstance(result.type, ir.DistributedTensorType)
+    assert result.type.tensor_view is None
+
+
+def test_tensor_matmul_acc_partial_inputs_keep_existing_inference():
+    """Accumulator inference is independent of fresh-product valid-shape propagation."""
+    result = tensor.matmul_acc(
+        _partial_tensor_var([32, 32], [17, 24]),
+        _partial_tensor_var([32, 128], [17, 128]),
+        _partial_tensor_var([128, 32], [128, 24]),
+    )
+    assert _const_shape(result) == [32, 32]
+    assert isinstance(result.type, ir.TensorType)
+    assert result.type.tensor_view is None
+
+
+@pytest.mark.parametrize("side", ["lhs", "rhs"])
+def test_tensor_matmul_rejects_invalid_valid_shape_rank(side):
+    lhs_valid, rhs_valid = ([17], [128, 24]) if side == "lhs" else ([17, 128], [24])
+    with pytest.raises(ValueError, match="valid_shape rank"):
+        tensor.matmul(_partial_tensor_var([32, 128], lhs_valid), _partial_tensor_var([128, 32], rhs_valid))
+
+
+def test_tensor_matmul_symbolic_valid_shape_roundtrip():
+    """Inferred tensor views survive the ordinary parser and printer."""
+
+    @pl.program
+    class Program:
+        @pl.function
+        def main(
+            self,
+            a: pl.Tensor[[32, 128], pl.FP16],
+            b: pl.Tensor[[128, 32], pl.FP16],
+            m: pl.Scalar[pl.INDEX],
+            n: pl.Scalar[pl.INDEX],
+        ):
+            av = pl.slice(a, [32, 128], [0, 0], valid_shape=[m + 1, 128])
+            bv = pl.slice(b, [128, 32], [0, 0], valid_shape=[128, n])
+            c = pl.matmul(av, bv, out_dtype=pl.FP32)
+            return c
+
+    ir.assert_structural_equal(pl.parse(ir.python_print(Program)), Program)
+
+
 def test_tensor_matmul_mat_vec_honors_a_trans():
     """2D x 1D contracts over dim 0 of the lhs when a_trans is set."""
     # lhs stored [K=128, M=64] with a_trans, rhs [K=128] -> [64]
