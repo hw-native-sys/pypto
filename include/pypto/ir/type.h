@@ -637,7 +637,7 @@ using TensorTypePtr = std::shared_ptr<const TensorType>;
 /**
  * @brief Distributed tensor type — a per-rank slice of a HCCL window buffer carved by a CommDomainScopeStmt.
  *
- * Subclass of :class:`TensorType` distinguished only by ``ObjectKind`` so that
+ * Subclass of :class:`TensorType` with a distinct ``ObjectKind`` so that
  * verifiers can reject plain ``TensorType`` arguments to cross-rank ops
  * (``pld.tile.remote_load`` / ``pld.system.notify`` / ``pld.system.wait``).
  *
@@ -649,7 +649,7 @@ using TensorTypePtr = std::shared_ptr<const TensorType>;
 class DistributedTensorType : public TensorType {
  public:
   /// Optional back-reference to the :class:`WindowBuffer` whose allocation this
-  /// tensor is a view of. Populated by ``pld.tensor.window``'s type deducer;
+  /// tensor is a view of. Populated by ``MaterializeCommDomainScopes``;
   /// ``std::nullopt`` for user-declared parameter annotations like
   /// ``pld.DistributedTensor[[shape], dtype]``. Two DistributedTensorTypes with
   /// the same shape / dtype but different ``window_buffer_`` values are

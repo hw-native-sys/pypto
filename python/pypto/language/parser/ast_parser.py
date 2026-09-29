@@ -456,6 +456,10 @@ def _simplify_shape_dims(type_: ir.Type, analyzer: "_arith.Analyzer") -> ir.Type
         return type_
     assert isinstance(type_, (ir.TensorType, ir.TileType))
     simplified_shape = [analyzer.simplify(d) if isinstance(d, ir.Expr) else d for d in type_.shape]
+    if isinstance(type_, ir.DistributedTensorType):
+        return ir.DistributedTensorType(
+            simplified_shape, type_.dtype, type_.memref, type_.tensor_view, type_.window_buffer
+        )
     if isinstance(type_, ir.TensorType):
         return ir.TensorType(simplified_shape, type_.dtype, type_.memref, type_.tensor_view)
     return ir.TileType(simplified_shape, type_.dtype, type_.memref, type_.tile_view, type_.memory_space)
@@ -1096,6 +1100,9 @@ class ASTParser:
             IR Function object
         """
         func_name = func_def.name
+        # Window definitions may follow a signature that references them. Their
+        # allocation Vars are interned and adopted at the actual definition site.
+        self.type_resolver.register_window_definitions(func_def)
         self._func_name = func_name
         self._func_level = func_level
         # auto_scope rides in func_attrs; absent ⇒ default True.
@@ -1762,7 +1769,10 @@ class ASTParser:
         # The printer adds a ``pl.Ptr`` annotation for clarity; route the
         # annotated form through the same dedicated alloc parser as the
         # unannotated form.
-        if is_ptr_type_annotation and _is_pld_call(stmt.value, "alloc_window_buffer"):
+        if is_ptr_type_annotation and (
+            _is_pld_call(stmt.value, "alloc_window_buffer")
+            or _is_dump_call(stmt.value, "alloc_window_buffer")
+        ):
             self._parse_alloc_window_buffer_assignment(stmt.target, stmt.value)
             return
 
@@ -1870,6 +1880,8 @@ class ASTParser:
                         override_type = ir.TileType(
                             resolved.shape, resolved.dtype, resolved.memref, merged_tv, merged_ms
                         )
+                elif isinstance(resolved, ir.DistributedTensorType) and resolved.window_buffer is not None:
+                    override_type = resolved
                 elif isinstance(resolved, ir.ShapedType) and resolved.memref is not None:
                     override_type = resolved
                 elif isinstance(resolved, ir.TensorType) and resolved.tensor_view is not None:
@@ -2045,7 +2057,10 @@ class ASTParser:
         # Intercept ``buf = pld.[tensor.]alloc_window_buffer(...)``: the alloc
         # op derives its ``name`` kwarg from the LHS, and the LHS name must be
         # globally unique within the @pl.program.
-        if len(stmt.targets) == 1 and _is_pld_call(stmt.value, "alloc_window_buffer"):
+        if len(stmt.targets) == 1 and (
+            _is_pld_call(stmt.value, "alloc_window_buffer")
+            or _is_dump_call(stmt.value, "alloc_window_buffer")
+        ):
             self._parse_alloc_window_buffer_assignment(stmt.targets[0], stmt.value)
             return
 
@@ -2357,11 +2372,12 @@ class ASTParser:
         - User can't pass ``name=`` (it's parser-injected from the LHS).
         """
         span = self.span_tracker.get_span(value)
+        is_printed = _is_dump_call(value, "alloc_window_buffer")
 
         in_device_scope = any(
             self._is_inside_scope(kind) for kind in (ir.ScopeKind.InCore, ir.ScopeKind.Spmd)
         )
-        if self._func_level != ir.Level.HOST or in_device_scope:
+        if not is_printed and (self._func_level != ir.Level.HOST or in_device_scope):
             raise ParserSyntaxError(
                 "pld.tensor.alloc_window_buffer() can only be called in HOST orchestration "
                 "context (not inside InCore / SPMD scopes); "
@@ -2381,16 +2397,18 @@ class ASTParser:
 
         name = target.id
 
-        if name in self._alloc_window_buffer_names:
+        if not is_printed and name in self._alloc_window_buffer_names:
             raise ParserSyntaxError(
                 f"pld.tensor.alloc_window_buffer name '{name}' is already declared in this program",
                 span=span,
                 hint="Each window buffer must have a globally unique name across all functions",
             )
 
-        args = [self._parse_op_positional_arg(a) for a in value.args]
+        args = [
+            self.parse_expression(a) if is_printed else self._parse_op_positional_arg(a) for a in value.args
+        ]
         user_kwargs = self._parse_op_kwargs(value)
-        if "name" in user_kwargs:
+        if "name" in user_kwargs and not is_printed:
             raise ParserSyntaxError(
                 "pld.tensor.alloc_window_buffer 'name' kwarg cannot be passed explicitly — "
                 f"it is auto-derived from the assignment LHS ('{name}')",
@@ -2398,17 +2416,31 @@ class ASTParser:
                 hint="Drop the 'name=...' kwarg; the LHS variable name becomes the buffer name",
             )
 
-        # Route through invoke_dsl — same path as _dispatch_op. Arity, size
-        # type, unknown kwargs are validated by the DSL wrapper / IR / C++.
-        alloc_call = invoke_dsl(
-            _dsl_pld.alloc_window_buffer,
-            args,
-            {**user_kwargs, "name": name},
-            span,
-        )
+        # Printed snapshots retain their fields directly. Authoring syntax goes
+        # through invoke_dsl for the usual arity, size, and keyword validation.
+        if is_printed:
+            alloc_call = ir.Call(
+                ir.get_op("pld.tensor.alloc_window_buffer"),
+                args,
+                user_kwargs,
+                self._parse_op_attrs(value) or {},
+                ir.PtrType(),
+                span,
+            )
+        else:
+            alloc_call = invoke_dsl(
+                _dsl_pld.alloc_window_buffer,
+                args,
+                {"name": name, **user_kwargs},
+                span,
+            )
 
         self._alloc_window_buffer_names.add(name)
-        var = self._assign_or_let(name, alloc_call, span)
+        var = self.type_resolver.interned_base_ptr(name)
+        if var is None:
+            var = self._assign_or_let(name, alloc_call, span)
+        else:
+            self.builder.emit(ir.AssignStmt(var, alloc_call, span))
         self.scope_manager.define_var(name, var, span=span)
 
     def _parse_subscript_assignment(self, target: ast.Subscript, value_node: ast.expr) -> None:
@@ -6248,6 +6280,53 @@ class ASTParser:
             resolved.append(var)
         return resolved
 
+    def _parse_comm_domain_scope(self, stmt: ast.With, call: ast.Call) -> None:
+        """Restore a printed scope, binding its slots after parsing the body."""
+        span = self.span_tracker.get_span(stmt)
+        if call.args or stmt.items[0].optional_vars is not None:
+            raise ParserSyntaxError("comm_domain accepts keyword arguments and no 'as' target", span=span)
+        keywords: dict[str, ast.expr] = {}
+        for keyword in call.keywords:
+            if keyword.arg not in {"name", "devices", "slots", "attrs"} or keyword.arg in keywords:
+                raise ParserSyntaxError("Unknown or duplicate comm_domain keyword", span=span)
+            keywords[keyword.arg] = keyword.value
+        if not {"name", "devices", "slots"} <= keywords.keys():
+            raise ParserSyntaxError("comm_domain requires name, devices, and slots", span=span)
+        name_node, devices_node, slots_node = (keywords[key] for key in ("name", "devices", "slots"))
+        if not isinstance(name_node, ast.Constant) or not isinstance(name_node.value, str):
+            raise ParserSyntaxError("comm_domain name must be a string literal", span=span)
+        if not isinstance(devices_node, ast.List) or any(
+            not isinstance(device, ast.Constant) or type(device.value) is not int
+            for device in devices_node.elts
+        ):
+            raise ParserSyntaxError("comm_domain devices must be a list of integer literals", span=span)
+        if not isinstance(slots_node, ast.List):
+            raise ParserSyntaxError(
+                "comm_domain slots must be a list of window_buffer descriptors", span=span
+            )
+        for descriptor in slots_node.elts:
+            self.type_resolver.register_window_buffer(descriptor)
+        devices = [cast(int, cast(ast.Constant, device).value) for device in devices_node.elts]
+        attrs: list[tuple[str, Any]] = []
+        slots: list[ir.WindowBuffer] = []
+        with self.builder.comm_domain_scope(devices, slots, name_node.value, span, attrs):
+            with self._scope_kind_context(ir.ScopeKind.CommDomain):
+                self.scope_manager.enter_scope("scope")
+                self._parse_body_siblings(stmt.body)
+                if "attrs" in keywords:
+                    attrs_node = keywords["attrs"]
+                    if not isinstance(attrs_node, ast.Dict):
+                        raise ParserSyntaxError("comm_domain attrs must be a dictionary literal", span=span)
+                    for key, value in zip(attrs_node.keys, attrs_node.values):
+                        if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                            raise ParserSyntaxError(
+                                "comm_domain attr names must be string literals", span=span
+                            )
+                        attrs.append((key.value, self._parse_attr_value("comm_domain", key.value, value)))
+                slots.extend(self.type_resolver.resolve_window_buffer(node) for node in slots_node.elts)
+                self._discard_tail_block_comments(stmt.body, upper_line=stmt.end_lineno)
+                self.scope_manager.exit_scope(leak_vars=True)
+
     def parse_with_statement(self, stmt: ast.With) -> None:
         """Parse with statement for scope contexts.
 
@@ -6276,6 +6355,10 @@ class ASTParser:
         item = stmt.items[0]
         context_expr = item.context_expr
         optional_vars = item.optional_vars  # the ``as <target>`` clause, if any
+
+        if _is_dump_call(context_expr, "comm_domain"):
+            self._parse_comm_domain_scope(stmt, context_expr)
+            return
 
         # Map DSL function names to ScopeKind values
         _SCOPE_KIND_MAP = {
@@ -6835,9 +6918,52 @@ class ASTParser:
             "or call an external @pl.function / @pl.inline by name",
         )
 
-    def _parse_dump_call(self, call: ast.Call) -> ir.Expr:
-        """Read private IR spellings without conflating logical and bitwise XOR."""
+    def _parse_recorded_call(self, call: ast.Call) -> ir.Call:
+        """Restore a Call snapshot without repeating type inference."""
         span = self.span_tracker.get_span(call)
+        if len(call.args) != 3 or not isinstance(call.args[1], ast.List):
+            raise ParserSyntaxError(
+                "_dump.call requires an operator, an argument list, and a result type", span=span
+            )
+        op_node, args_node, type_node = call.args
+        if isinstance(op_node, ast.Constant) and isinstance(op_node.value, str):
+            op = ir.get_op(op_node.value)
+        elif (
+            isinstance(op_node, ast.Attribute)
+            and isinstance(op_node.value, ast.Name)
+            and op_node.value.id == "self"
+            and op_node.attr in self.global_vars
+        ):
+            op = self.global_vars[op_node.attr]
+        else:
+            raise ParserSyntaxError("_dump.call requires a registered op name or a program method", span=span)
+        result_type = self.type_resolver.resolve_type(type_node)
+        if isinstance(result_type, list):
+            result_type = ir.TupleType(result_type)
+        metadata: dict[str, dict[str, Any]] = {"kwargs": {}, "attrs": {}}
+        seen: set[str] = set()
+        for keyword in call.keywords:
+            if keyword.arg not in metadata or keyword.arg in seen or not isinstance(keyword.value, ast.Dict):
+                raise ParserSyntaxError("_dump.call accepts unique kwargs and attrs dictionaries", span=span)
+            seen.add(keyword.arg)
+            values = metadata[keyword.arg]
+            for key, value in zip(keyword.value.keys, keyword.value.values):
+                if not isinstance(key, ast.Constant) or not isinstance(key.value, str) or key.value in values:
+                    raise ParserSyntaxError(
+                        "_dump.call metadata keys must be unique string literals", span=span
+                    )
+                values[key.value] = self._parse_attr_value("_dump.call", key.value, value)
+        assert isinstance(args_node, ast.List)
+        args = [self.parse_expression(arg) for arg in args_node.elts]
+        return ir.Call(op, args, metadata["kwargs"], metadata["attrs"], result_type, span)
+
+    def _parse_dump_call(self, call: ast.Call) -> ir.Expr:
+        """Read private spellings that preserve the recorded IR structure."""
+        span = self.span_tracker.get_span(call)
+        if _is_dump_call(call, "call"):
+            return self._parse_recorded_call(call)
+        if _is_dump_call(call, "window_buffer") or _is_dump_call(call, "window_ref"):
+            return self.type_resolver.resolve_window_buffer(call)
         if isinstance(call.func, ast.Attribute) and call.func.attr == "logical_xor":
             if len(call.args) != 2 or call.keywords:
                 raise ParserSyntaxError("logical_xor requires exactly two positional operands", span=span)

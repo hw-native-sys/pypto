@@ -66,7 +66,10 @@ class StructuralHasher {
 
   explicit StructuralHasher(bool enable_auto_mapping) : enable_auto_mapping_(enable_auto_mapping) {}
 
-  result_type operator()(const IRNodePtr& node) { return HashNode(node); }
+  result_type operator()(const IRNodePtr& node) {
+    map_window_slots_ = IsA<Program>(node);
+    return HashNode(node);
+  }
 
   result_type operator()(const TypePtr& type) { return HashType(type); }
 
@@ -431,6 +434,7 @@ class StructuralHasher {
   }
 
   bool enable_auto_mapping_;
+  bool map_window_slots_ = false;
   std::unordered_map<IRNodePtr, result_type> hash_value_map_;
   std::unordered_map<VarPtr, result_type> var_identity_map_;
   int64_t free_var_counter_ = 0;
@@ -672,6 +676,13 @@ StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) 
   result_type hash_value = 0;
   bool dispatched = false;
 
+  if (auto scope = As<CommDomainScopeStmt>(node); map_window_slots_ && scope) {
+    bool saved_mapping = enable_auto_mapping_;
+    enable_auto_mapping_ = true;
+    for (const auto& slot : scope->slots_) HashVarIdentity(slot);
+    enable_auto_mapping_ = saved_mapping;
+  }
+
   // MemRef needs special handling: dispatch for fields, then add Var mapping
   HASH_DISPATCH(MemRef)
   // IterArg needs special handling: dispatch for fields, then add Var mapping
@@ -724,8 +735,12 @@ StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) 
   };
 
   auto kind = node->GetKind();
-  if (kind == ObjectKind::MemRef || kind == ObjectKind::IterArg || kind == ObjectKind::Var ||
-      kind == ObjectKind::WindowBuffer) {
+  if (kind == ObjectKind::WindowBuffer) {
+    // A tensor type in the scope body may already have mapped this window at a
+    // definition site. Reuse that identity when the scope's slots are visited.
+    hash_value =
+        hash_combine(hash_value, HashVarIdentity(std::static_pointer_cast<const WindowBuffer>(node)));
+  } else if (kind == ObjectKind::MemRef || kind == ObjectKind::IterArg || kind == ObjectKind::Var) {
     hash_var_identity(static_cast<const Var*>(node.get())->UniqueId());
   }
 

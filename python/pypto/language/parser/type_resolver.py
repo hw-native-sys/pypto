@@ -12,6 +12,7 @@
 import ast
 import warnings
 from collections.abc import Callable, Sequence
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 from pypto.language.typing.dynamic import DynVar
@@ -257,6 +258,129 @@ class TypeResolver:
         self.span_tracker = span_tracker
         self._dyn_var_cache: dict[str, ir.Var] = dyn_var_cache if dyn_var_cache is not None else {}
         self._parse_expression = parse_expression
+        self._window_buffers: dict[str | int, tuple[str, ir.WindowBuffer]] = {}
+        self._window_buffer_nodes: dict[str | int, ast.Call] = {}
+
+    @staticmethod
+    def is_window_buffer_annotation(node: ast.expr) -> bool:
+        """Recognize the private, lossless window descriptor spelling."""
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"window_buffer", "window_ref"}
+            and isinstance(node.func.value, ast.Attribute)
+            and node.func.value.attr == "_dump"
+            and isinstance(node.func.value.value, ast.Name)
+            and node.func.value.value.id == "pl"
+        )
+
+    def register_window_definitions(self, root: ast.AST) -> None:
+        """Collect definitions before resolving references in a function signature."""
+        for node in ast.walk(root):
+            if (
+                isinstance(node, ast.Call)
+                and self.is_window_buffer_annotation(node)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "window_buffer"
+            ):
+                self.register_window_buffer(node)
+
+    def _window_buffer_key(self, node: ast.expr) -> str | int:
+        """Read a named window reference, accepting earlier numeric IDs as well."""
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, str) and node.value:
+                return node.value
+            if type(node.value) is int and node.value >= 0:
+                return node.value
+        raise ParserTypeError(
+            "Window reference requires a non-empty string or a non-negative integer ID",
+            span=self._get_span(node),
+        )
+
+    def _window_buffer_fields(self, node: ast.expr) -> dict[str, ast.expr]:
+        """Read descriptor fields without resolving body-local expressions."""
+        if (
+            not self.is_window_buffer_annotation(node)
+            or not isinstance(node, ast.Call)
+            or not isinstance(node.func, ast.Attribute)
+            or node.func.attr != "window_buffer"
+            or len(node.args) > 3
+        ):
+            raise ParserTypeError(
+                "Expected window_buffer(key, base=..., size=...) descriptor", span=self._get_span(node)
+            )
+        fields: dict[str, ast.expr] = dict(zip(("key", "base", "size"), node.args))
+        for keyword in node.keywords:
+            if keyword.arg not in {"key", "base", "size", "load_from_host", "store_to_host"}:
+                raise ParserTypeError("Unknown window_buffer keyword", span=self._get_span(keyword))
+            if keyword.arg in fields:
+                raise ParserTypeError(
+                    f"Duplicate window_buffer field '{keyword.arg}'", span=self._get_span(keyword)
+                )
+            fields[keyword.arg] = keyword.value
+        if not {"key", "base", "size"} <= fields.keys():
+            raise ParserTypeError(
+                "window_buffer requires a key, a base name, and a size", span=self._get_span(node)
+            )
+        return fields
+
+    def register_window_buffer(self, node: ast.expr) -> None:
+        """Record a descriptor before its body-local allocation has been parsed."""
+        fields = self._window_buffer_fields(node)
+        identifier = self._window_buffer_key(fields["key"])
+        assert isinstance(node, ast.Call)
+        previous = self._window_buffer_nodes.get(identifier)
+        if previous is not None and ast.dump(previous) != ast.dump(node):
+            raise ParserTypeError(
+                f"Conflicting window_buffer descriptors for ID {identifier}", span=self._get_span(node)
+            )
+        self._window_buffer_nodes[identifier] = node
+
+    def resolve_window_buffer(self, node: ast.expr) -> ir.WindowBuffer:
+        """Intern a printed window descriptor, preserving shared object identity."""
+        span = self._get_span(node)
+        if not self.is_window_buffer_annotation(node) or not isinstance(node, ast.Call):
+            raise ParserTypeError("Expected pl._dump.window_buffer(...) descriptor", span=span)
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "window_ref":
+            if len(node.args) != 1 or node.keywords:
+                raise ParserTypeError("window_ref requires one window key", span=span)
+            identifier = self._window_buffer_key(node.args[0])
+            cached = self._window_buffers.get(identifier)
+            if cached is not None:
+                return cached[1]
+            descriptor = self._window_buffer_nodes.get(identifier)
+            if descriptor is None:
+                raise ParserTypeError(f"Undefined window_buffer ID {identifier!r}", span=span)
+            return self.resolve_window_buffer(descriptor)
+        fields = self._window_buffer_fields(node)
+        identifier = self._window_buffer_key(fields["key"])
+        base_node, size_node = fields["base"], fields["size"]
+        if not isinstance(base_node, ast.Constant) or not isinstance(base_node.value, str):
+            raise ParserTypeError("window_buffer base must be a string", span=span)
+        flags = {"load_from_host": False, "store_to_host": False}
+        for name in flags:
+            value = fields.get(name)
+            if value is not None:
+                if not isinstance(value, ast.Constant) or type(value.value) is not bool:
+                    raise ParserTypeError(f"window_buffer {name} must be a boolean", span=span)
+                flags[name] = value.value
+        signature = ast.dump(node, include_attributes=False)
+        previous = self._window_buffers.get(identifier)
+        if previous is not None:
+            if previous[0] != signature:
+                raise ParserTypeError(
+                    f"Conflicting window_buffer descriptors for ID {identifier!r}", span=span
+                )
+            return previous[1]
+        base = self._intern_base_ptr(base_node.value, span)
+        if self._parse_expression is None:
+            raise ParserTypeError("window_buffer requires an enclosing IR parser", span=span)
+        if _is_pl_yield_call(size_node):
+            raise ParserTypeError("window_buffer size cannot contain pl.yield_()", span=span)
+        size = self._parse_expression(size_node)
+        window = ir.WindowBuffer(base, size, flags["load_from_host"], flags["store_to_host"], span)
+        self._window_buffers[identifier] = (signature, window)
+        return window
 
     def resolve_param_type(self, type_node: ast.expr) -> "tuple[ir.Type, ir.ParamDirection]":
         """Resolve AST type annotation to (ir.Type, ParamDirection) for function parameters.
@@ -476,14 +600,12 @@ class TypeResolver:
         # with the constraint that MemRef requires explicit MemorySpace.
         is_distributed = type_name == "DistributedTensor"
         is_tensor_like = type_name == "Tensor" or is_distributed
-        tensor_ctor = ir.DistributedTensorType if is_distributed else ir.TensorType
+        tensor_ctor: Callable[..., ir.TensorType] = (
+            ir.DistributedTensorType if is_distributed else ir.TensorType
+        )
 
-        # PassDumpLevel.EXPLICIT appends a `"window_buffer=<name>"` debug marker as
-        # a trailing subscript element on DistributedTensor annotations (issue
-        # #2088). It is informational only — the real back-reference re-derives
-        # from pld.tensor.window — so drop it before validation/resolution to keep
-        # EXPLICIT pass dumps reparseable (validate_ir reloads every dump via
-        # pl.loads).
+        # Older EXPLICIT dumps used an informational string rather than a real
+        # reference. Keep those annotations readable; new dumps use window_ref.
         if is_distributed and isinstance(slice_value, ast.Tuple) and slice_value.elts:
             last = slice_value.elts[-1]
             if (
@@ -492,6 +614,21 @@ class TypeResolver:
                 and last.value.startswith("window_buffer=")
             ):
                 slice_value.elts = slice_value.elts[:-1]
+
+        window = None
+        if (
+            is_distributed
+            and isinstance(slice_value, ast.Tuple)
+            and slice_value.elts
+            and self.is_window_buffer_annotation(slice_value.elts[-1])
+        ):
+            window = self.resolve_window_buffer(slice_value.elts[-1])
+            tensor_ctor = cast(
+                Callable[..., ir.TensorType], partial(ir.DistributedTensorType, window_buffer=window)
+            )
+            slice_value = ast.copy_location(
+                ast.Tuple(elts=slice_value.elts[:-1], ctx=ast.Load()), slice_value
+            )
 
         valid_counts = (2, 3, 4) if is_tensor_like else (2, 3, 4, 5)
         if not isinstance(slice_value, ast.Tuple) or len(slice_value.elts) not in valid_counts:
@@ -525,6 +662,8 @@ class TypeResolver:
 
         shape = self._to_ir_shape(self._parse_shape(shape_node))
         dtype = self.resolve_dtype(dtype_node)
+        if window is not None:
+            shape = self._tile_shape_to_expr_list(shape)
 
         n_elts = len(slice_value.elts)
 

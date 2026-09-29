@@ -141,6 +141,39 @@ After the pass:
   `window_buffer_`. N7 codegen reads the back-reference at the *host_orch*
   dispatch site and threads the matching `CommContext` pointer explicitly.
 
+## Text round-trip
+
+The ordinary authoring DSL continues to infer communication domains. Printed IR
+records the materialized state using private `pl._dump` spellings:
+
+- `comm_domain(name=..., devices=..., slots=[...], attrs={...})` preserves the
+  scope boundary, device list, ordered slots, and attributes.
+- `window_buffer("buf_window", base="buf", size=16, load_from_host=..., store_to_host=...)`
+  defines a slot; `window_ref("buf_window")` refers to that same object from tensor types.
+  The label is a text-format reference, not a device ID, slot index, or IR field.
+  Labels derive from the printed base variable; suffixes distinguish different
+  windows sharing that base. Earlier numeric IDs remain readable.
+- `alloc_window_buffer(size, name=...)` preserves the allocation's logical name
+  independently of an SSA-renamed result variable.
+- `call(op, args, result_type, kwargs=..., attrs=...)` restores a Call directly,
+  accepting any result type supported by the type parser. The printer uses it
+  for distributed calls whose recorded type must be preserved, including an
+  absent back-reference; inference can differ after a pass rewrites the operands.
+
+The parser records window descriptors before parsing the body and resolves them
+when their allocation and size expressions are available. Scope slots and tensor
+back-references share one reconstructed `WindowBuffer`. These spellings are IR
+text syntax, not operations that execute in a kernel.
+The descriptor's `base` names the allocation variable defined in the body;
+`window_buffer(...)` adds no allocation statement. Its `size` and the allocation
+Call's size argument are separate recorded IR fields and are both retained.
+
+For a self-contained program, `parse(python_print(program))` must be structurally
+equal to `program`, with equal structural hashes. No lowering pass is rerun by
+the parser or required from the caller. Statement fragments with references to
+absent definitions are outside this contract. Legacy informational
+`"window_buffer=<name>"` markers remain readable but do not encode a reference.
+
 ## Pass properties
 
 | Field | Value |

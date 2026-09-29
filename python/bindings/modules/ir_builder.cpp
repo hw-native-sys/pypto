@@ -286,15 +286,23 @@ void BindIRBuilder(nb::module_& m) {
           "        ``Call``.\n\n"
           "Raises:\n"
           "    RuntimeError: If not inside a function or loop")
-      .def("end_scope", &IRBuilder::EndScope, nb::arg("end_span"),
-           "End building a scope statement.\n\n"
-           "Finalizes the scope statement and returns it.\n\n"
-           "Args:\n"
-           "    end_span: Source location for end of scope\n\n"
-           "Returns:\n"
-           "    ScopeStmt: The built scope statement\n\n"
-           "Raises:\n"
-           "    RuntimeError: If not inside a scope context")
+      .def(
+          "end_scope",
+          [](IRBuilder& self, const Span& end_span, std::vector<int64_t> devices,
+             std::vector<WindowBufferPtr> slots, const nb::object& attrs) {
+            return self.EndScope(end_span, std::move(devices), std::move(slots),
+                                 ConvertAttrsFromPython(attrs, false));
+          },
+          nb::arg("end_span"), nb::arg("devices") = std::vector<int64_t>{},
+          nb::arg("slots") = std::vector<WindowBufferPtr>{}, nb::arg("attrs") = nb::none(),
+          "End building a scope statement.\n\n"
+          "Finalizes the scope statement and returns it.\n\n"
+          "Args:\n"
+          "    end_span: Source location for end of scope\n\n"
+          "Returns:\n"
+          "    ScopeStmt: The built scope statement\n\n"
+          "Raises:\n"
+          "    RuntimeError: If not inside a scope context")
 
       // Statement recording
       .def("emit", &IRBuilder::Emit, nb::arg("stmt"),

@@ -98,10 +98,9 @@ dispatch 可以完成 print -> parse 往返。它是仅供机器使用（machine
 按用户错误拒绝，而不是在 codegen 阶段表现为编译器 bug 诊断。用户代码请改写复合
 形式 `pld.tensor.*`。
 
-注意：整程序的 `assert_structural_equal` 往返仍然被上一个 pass 阻断 ——
-[`MaterializeCommDomainScopes`](46-materialize_comm_domain_scopes.md) 会合成
-`CommDomainScopeStmt`（打印为前导注释）以及 `DistributedTensorType` 上的
-`WindowBuffer` 反向引用（完全不打印），二者都没有可解析回来的 DSL 表面。
+完整程序的 print/parse round-trip 通过
+[`MaterializeCommDomainScopes`](46-materialize_comm_domain_scopes.md) 中的私有 dump 语法
+保留通信域作用域和窗口反向引用。解析器直接恢复这些元数据，无需重跑物化 pass。
 
 ## 检查
 

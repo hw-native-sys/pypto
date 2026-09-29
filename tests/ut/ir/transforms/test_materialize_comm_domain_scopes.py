@@ -21,28 +21,12 @@ chains, and:
   wraps the host_orch body in nested :class:`ir.CommDomainScopeStmt` nodes
   (outer = first declared domain, inner = last).
 
-The tests below run the late host-distributed materialization sequence directly
-on a parsed program (via ``passes.synthesize_allreduce_signals()`` followed by
-``passes.materialize_comm_domain_scopes()``). The materialized output products have
-no full *print/parse* surface syntax — the printer emits a comment-only
-descriptor of each comm-domain scope, and the parser doesn't reconstruct the
-scope at all — so a whole-``@pl.program`` ``Expected`` parsed from Python
-source would always carry no scope-stmt wrapping and ``window_buffer``-less
-view types, mismatching the pass output.
+The tests exercise SSA conversion, signal synthesis, and communication-domain
+materialization. Complete programs round-trip through the private dump syntax;
+slot identity assertions additionally check that views share their scope's
+WindowBuffer objects. Per-slot structural expectations cover device inference
+independently of the printer and parser.
 
-The Before/Expected ``assert_structural_equal`` pattern is therefore applied at
-the granularity of the pass's structurally-comparable output products: the
-``devices`` list and ``slots`` vector of each emitted
-:class:`ir.CommDomainScopeStmt`. Slot ``WindowBuffer``s are hand-built from
-the pass's documented semantics (device-descriptor table + slot/alloc-order
-rules in ``docs/en/dev/passes/46-materialize_comm_domain_scopes.md``) and compared with
-``enable_auto_mapping=True`` so freshly-constructed Vars match the
-pass-produced ones by structural isomorphism rather than identity.
-
-``test_no_alloc_window_buffer_no_op`` is the whole-program exception: it
-produces no scope wrapping and no rewritten view types, so it uses
-``assert_structural_equal`` on the entire program. Error-branch tests assert via
-``pytest.raises`` — the malformed-input "after" is a ``pypto::ValueError``.
 """
 
 import ast
@@ -54,26 +38,12 @@ import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 from pypto.ir.op.distributed import tensor_ops as dist_tensor_ops
+from pypto.language.parser.diagnostics import ParserTypeError
 from pypto.pypto_core import DataType, ir, passes
 
 _OP_PLD_TENSOR_ALLOC_WINDOW_BUFFER = ir.get_op("pld.tensor.alloc_window_buffer").name
 _OP_PLD_TENSOR_ALLREDUCE = ir.get_op("pld.tensor.allreduce").name
 _OP_PLD_TENSOR_WINDOW = ir.get_op("pld.tensor.window").name
-
-
-@pytest.fixture(autouse=True)
-def _basic_verification_context():
-    """Override the ``ut/conftest.py`` autouse fixture to run with
-    BEFORE_AND_AFTER property verification but no print/parse roundtrip.
-
-    The pass's output materialises ``CommDomainScopeStmt`` wrappers and
-    ``DistributedTensorType.window_buffer_`` back-references on view Vars,
-    but the printer / parser pair does not roundtrip either — so the
-    roundtrip-symmetric check would fail every iteration despite the
-    in-memory IR being correct. Property verification still runs.
-    """
-    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
-        yield
 
 
 def _get_func(program: ir.Program, name: str) -> ir.Function:
@@ -752,7 +722,7 @@ def test_synthesized_allreduce_signal_round_trips_after_materialization():
     ]
     assert alloc_call_nodes
     for node in alloc_call_nodes:
-        assert "name" not in {keyword.arg for keyword in node.keywords}
+        assert "name" in {keyword.arg for keyword in node.keywords}
     assert len(allocs) == 1
     alloc_call = _as_call(allocs[0].value)
     assert alloc_call.kwargs["name"] == allocs[0].var.name_hint
@@ -1839,7 +1809,8 @@ def test_idempotent():
             return 0
 
     first = _apply(P)
-    second = _apply(first)
+    second = passes.materialize_comm_domain_scopes()(first)
+    ir.assert_structural_equal(first, second)
     first_host = _get_func(first, "host_orch")
     second_host = _get_func(second, "host_orch")
     first_scopes = _get_comm_domain_scopes(first_host)
@@ -2018,6 +1989,210 @@ def test_verifier_flags_duplicate_slot_across_scopes():
     assert len(errors) == 1
     assert "appears in multiple CommDomainScopeStmts" in errors[0].message
     assert errors[0].rule_name == "CommDomainScopesMaterialized"
+
+
+@pytest.mark.parametrize("explicit_layout", [False, True])
+def test_materialized_program_text_roundtrip(explicit_layout):
+    """Print and parse a complete program without re-running any lowering pass."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip(self, x: pld.DistributedTensor[[4], pl.FP32]):
+            return x
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host(self, n: pl.Scalar[pl.INDEX]):
+            size = n * 4
+            buf = pld.alloc_window_buffer(size)
+            other_buf = pld.alloc_window_buffer(16)
+            x = pld.window(buf, [4], dtype=pl.FP32)
+            alias = pld.window(buf, [4], dtype=pl.FP32)
+            other = pld.window(other_buf, [4], dtype=pl.FP32)
+            for r in pl.range(2):
+                self.chip(x, device=r)
+                self.chip(alias, device=r)
+            self.chip(other, device=2)
+            return 0
+
+    ir.assert_structural_equal(P, pl.parse(ir.python_print(P, format=False)))
+    original = _apply(P)
+    printed = ir.python_print(original, format=False, explicit_layout=explicit_layout)
+    restored = pl.parse_program(printed)
+    ir.assert_structural_equal(original, restored)
+    assert ir.structural_hash(original) == ir.structural_hash(restored)
+    scopes = _get_comm_domain_scopes(_get_func(restored, "host"))
+    views = _view_var_types(_get_func(restored, "host"))
+    assert [list(scope.devices) for scope in scopes] == [[0, 1], [2]]
+    assert views[0].window_buffer is views[1].window_buffer is scopes[0].slots[0]
+    assert views[2].window_buffer is scopes[1].slots[0]
+    assert views[0].window_buffer is not views[2].window_buffer
+
+
+def test_explicit_comm_domain_metadata_roundtrip():
+    """Restore explicitly recorded metadata, including values not inferred by the pass."""
+    original = pl.parse_program("""
+import pypto.language as pl
+import pypto.language.distributed as pld
+
+@pl.program
+class P:
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def host(self):
+        with pl._dump.comm_domain(
+            name="saved_domain", devices=[],
+            slots=[pl._dump.window_buffer(7, "buf", 16, load_from_host=True, store_to_host=True)],
+            attrs={"saved_metadata": True},
+        ):
+            buf: pl.Ptr = pld.alloc_window_buffer(16)
+            x: pld.DistributedTensor[
+                [4], pl.FP32, pl._dump.window_ref(7)
+            ] = pld.window(buf, [4], dtype=pl.FP32)
+            return x
+""")
+    restored = pl.parse_program(ir.python_print(original, format=False))
+    ir.assert_structural_equal(original, restored)
+    assert ir.structural_hash(original) == ir.structural_hash(restored)
+    scope = _get_comm_domain_scopes(_get_func(restored, "host"))[0]
+    assert scope.name_hint == "saved_domain"
+    assert list(scope.devices) == []
+    assert scope.attrs == {"saved_metadata": True}
+    assert scope.slots[0].load_from_host is True
+    assert scope.slots[0].store_to_host is True
+    assert _view_var_types(_get_func(restored, "host"))[0].window_buffer is scope.slots[0]
+
+
+def test_signature_window_reference_resolves_body_allocation():
+    """The complete function supplies definitions referenced by its signature."""
+    original = pl.parse_program("""
+@pl.program
+class P:
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def host(self, x: pld.DistributedTensor[
+        [4], pl.FP32, pl.TensorView(stride=[2]), pl._dump.window_ref("input_window")
+    ]):
+        with pl._dump.comm_domain(name="saved", devices=[0], slots=[
+            pl._dump.window_buffer("input_window", base="buf", size=32)
+        ]):
+            buf: pl.Ptr = pld.alloc_window_buffer(32)
+            return x
+""")
+    restored = pl.parse_program(ir.python_print(original, format=False))
+    ir.assert_structural_equal(original, restored)
+    host = _get_func(restored, "host")
+    scope = _get_comm_domain_scopes(host)[0]
+    param_type = host.params[0].type
+    assert isinstance(param_type, ir.DistributedTensorType)
+    assert param_type.window_buffer is scope.slots[0]
+    assert param_type.tensor_view is not None
+    stride = param_type.tensor_view.stride[0]
+    assert isinstance(stride, ir.ConstInt)
+    assert stride.value == 2
+    assert isinstance(scope.body, ir.SeqStmts)
+    assert isinstance(scope.body.stmts[0], ir.AssignStmt)
+    assert scope.slots[0].base is scope.body.stmts[0].var
+
+
+def test_unused_window_slot_and_body_local_scope_attr_roundtrip():
+    """Slots define window identities independently of whether a tensor uses them."""
+    original = pl.parse_program("""
+@pl.program
+class P:
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def host(self):
+        with pl._dump.comm_domain(
+            name="saved", devices=[0], slots=[pl._dump.window_buffer(0, "buf", size)],
+            attrs={"saved_size": size},
+        ):
+            size: pl.Scalar[pl.INDEX] = 16
+            buf: pl.Ptr = pld.alloc_window_buffer(size)
+            return 0
+""")
+    restored = pl.parse_program(ir.python_print(original, format=False))
+    ir.assert_structural_equal(original, restored)
+    assert ir.structural_hash(original) == ir.structural_hash(restored)
+    scope = _get_comm_domain_scopes(_get_func(restored, "host"))[0]
+    assert scope.attrs["saved_size"] is scope.slots[0].size
+
+
+def test_undefined_window_reference_is_rejected():
+    """An absent definition cannot be repaired by silently rerunning a pass."""
+    with pytest.raises(ParserTypeError, match="Undefined window_buffer ID 9"):
+        pl.parse_program("""
+@pl.program
+class P:
+    @pl.function
+    def f(self, x: pld.DistributedTensor[[4], pl.FP32, pl._dump.window_ref(9)]):
+        return x
+""")
+
+
+def test_named_windows_preserve_distinct_identity_with_shared_base():
+    """Window labels identify objects, not their base allocation or slot index."""
+    original = pl.parse_program("""
+@pl.program
+class P:
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def host(self):
+        with pl._dump.comm_domain(name="saved", devices=[0], slots=[
+            pl._dump.window_buffer("first", base="buf", size=16),
+            pl._dump.window_buffer("second", base="buf", size=16),
+        ]):
+            buf: pl.Ptr = pl._dump.alloc_window_buffer(16, name="buf")
+            x = pl._dump.call("pld.tensor.window", [buf, [4]],
+                pld.DistributedTensor[[4], pl.FP32, pl._dump.window_ref("first")],
+                kwargs={"dtype": pl.FP32})
+            y = pl._dump.call("pld.tensor.window", [buf, [4]],
+                pld.DistributedTensor[[4], pl.FP32, pl._dump.window_ref("second")],
+                kwargs={"dtype": pl.FP32})
+            return x, y
+""")
+    printed = ir.python_print(original, format=False)
+    assert 'window_buffer("buf_window", base="buf", size=16' in printed
+    assert 'window_buffer("buf_window_1", base="buf", size=16' in printed
+    restored = pl.parse_program(printed)
+    ir.assert_structural_equal(original, restored)
+    assert ir.structural_hash(original) == ir.structural_hash(restored)
+    assert ir.python_print(restored, format=False) == printed
+    host = _get_func(restored, "host")
+    first, second = _get_comm_domain_scopes(host)[0].slots
+    assert first is not second
+    assert first.base is second.base
+    x_type, y_type = _view_var_types(host)
+    assert x_type.window_buffer is first
+    assert y_type.window_buffer is second
+
+
+@pytest.mark.parametrize(
+    ("slots", "reference", "message"),
+    [
+        ('pl._dump.window_buffer("known", base="buf", size=16)', '"missing"', "Undefined window_buffer"),
+        (
+            'pl._dump.window_buffer("same", base="buf", size=16), '
+            'pl._dump.window_buffer("same", base="buf", size=32)',
+            '"same"',
+            "Conflicting window_buffer descriptors",
+        ),
+        ('pl._dump.window_buffer("", base="buf", size=16)', '""', "non-empty string"),
+        ('pl._dump.window_buffer(True, base="buf", size=16)', "True", "non-empty string"),
+        ('pl._dump.window_buffer("w", "buf", base="buf", size=16)', '"w"', "Duplicate window_buffer"),
+    ],
+)
+def test_named_window_reference_diagnostics(slots, reference, message):
+    """Missing or ambiguous identity must fail instead of binding a different window."""
+    with pytest.raises(ParserTypeError, match=message):
+        pl.parse_program(f"""
+@pl.program
+class P:
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def host(self):
+        with pl._dump.comm_domain(name="saved", devices=[0], slots=[{slots}]):
+            buf: pl.Ptr = pl._dump.alloc_window_buffer(16, name="buf")
+            x = pl._dump.call("pld.tensor.window", [buf, [4]],
+                pld.DistributedTensor[[4], pl.FP32, pl._dump.window_ref({reference})],
+                kwargs={{"dtype": pl.FP32}})
+            return x
+""")
 
 
 if __name__ == "__main__":

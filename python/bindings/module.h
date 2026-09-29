@@ -50,7 +50,8 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nanobind::
  * @param attrs_or_none Python object (dict, list, or None)
  * @return Vector of key-value pairs
  */
-std::vector<std::pair<std::string, std::any>> ConvertAttrsFromPython(const nanobind::object& attrs_or_none);
+std::vector<std::pair<std::string, std::any>> ConvertAttrsFromPython(const nanobind::object& attrs_or_none,
+                                                                     bool wrap_core_num = true);
 
 /**
  * @brief Register error exception types and exception translator

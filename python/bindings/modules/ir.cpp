@@ -296,7 +296,8 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
   return kwargs;
 }
 
-std::vector<std::pair<std::string, std::any>> ConvertAttrsFromPython(const nb::object& attrs_or_none) {
+std::vector<std::pair<std::string, std::any>> ConvertAttrsFromPython(const nb::object& attrs_or_none,
+                                                                     bool wrap_core_num) {
   std::vector<std::pair<std::string, std::any>> attrs;
   if (attrs_or_none.is_none()) {
     // no-op
@@ -319,7 +320,7 @@ std::vector<std::pair<std::string, std::any>> ConvertAttrsFromPython(const nb::o
   // Load-bearing for the dispatch Call attrs the outliner now emits, as well as
   // a legacy Function-level spec.
   for (auto& [key, value] : attrs) {
-    if (key == "core_num" && value.type() == typeid(int)) {
+    if (wrap_core_num && key == "core_num" && value.type() == typeid(int)) {
       auto n = std::any_cast<int>(value);
       value = std::static_pointer_cast<const Expr>(
           std::make_shared<const ConstInt>(n, DataType::INDEX, Span::unknown()));
@@ -592,6 +593,11 @@ void BindIR(nb::module_& m) {
       nb::arg("window_buffer"),
       "Create a distributed tensor type produced by pld.window; window_buffer is the back-"
       "reference to the source WindowBuffer allocation.");
+  dist_tensor_type_class.def(nb::init<std::vector<ExprPtr>, DataType, std::optional<MemRefPtr>,
+                                      std::optional<TensorView>, std::optional<WindowBufferPtr>>(),
+                             nb::arg("shape"), nb::arg("dtype"), nb::arg("memref"), nb::arg("tensor_view"),
+                             nb::arg("window_buffer"),
+                             "Create a distributed tensor type preserving all optional metadata.");
   BindFields<DistributedTensorType>(dist_tensor_type_class);
 
   // TileType - const shared_ptr
@@ -1285,7 +1291,9 @@ void BindIR(nb::module_& m) {
       [](Call* self, const OpPtr& op, const std::vector<ExprPtr>& args, const nb::dict& kwargs_dict,
          const nb::object& attrs_or_none, const TypePtr& type, const Span& span) {
         auto kwargs = ConvertKwargsDict(kwargs_dict);
-        auto attrs = ConvertAttrsFromPython(attrs_or_none);
+        // Builtin kernel metadata stores core_num as an integer, whereas
+        // outlined user dispatches store the SPMD launch expression.
+        auto attrs = ConvertAttrsFromPython(attrs_or_none, !op || op->name_.rfind("builtin.", 0) != 0);
         new (self) Call(op, args, std::move(kwargs), std::move(attrs), type, span);
       },
       nb::arg("op"), nb::arg("args"), nb::arg("kwargs"), nb::arg("attrs").none(), nb::arg("type"),

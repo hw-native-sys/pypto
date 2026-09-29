@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <any>
 #include <cmath>
 #include <cstddef>
@@ -77,6 +78,7 @@ class StructuralEqualImpl {
 
   // Returns bool for structural_equal, throws for assert_structural_equal
   bool operator()(const IRNodePtr& lhs, const IRNodePtr& rhs) {
+    map_window_slots_ = IsA<Program>(lhs) && IsA<Program>(rhs);
     if constexpr (AssertMode) {
       Equal(lhs, rhs);
       return true;  // Only reached if no exception thrown
@@ -929,6 +931,7 @@ class StructuralEqualImpl {
   }
 
   bool enable_auto_mapping_;
+  bool map_window_slots_ = false;
   std::unordered_map<VarPtr, VarPtr> lhs_to_rhs_var_map_;
   std::unordered_map<VarPtr, VarPtr> rhs_to_lhs_var_map_;
   std::vector<std::string> path_;  // Only used in assert mode
@@ -1035,6 +1038,21 @@ bool StructuralEqualImpl<AssertMode>::Equal(const IRNodePtr& lhs, const IRNodePt
   EQUAL_DISPATCH(SpmdScopeStmt)
   EQUAL_DISPATCH(SplitAivScopeStmt)
   EQUAL_DISPATCH(RuntimeScopeStmt)
+  if (auto lhs_scope = As<CommDomainScopeStmt>(lhs); map_window_slots_ && lhs_scope) {
+    auto rhs_scope = std::static_pointer_cast<const CommDomainScopeStmt>(rhs);
+    // A complete Program supplies the window definitions, including unused
+    // slots. Standalone fragments retain the usual free-variable identity rule.
+    bool saved_mapping = enable_auto_mapping_;
+    enable_auto_mapping_ = true;
+    for (size_t i = 0; i < std::min(lhs_scope->slots_.size(), rhs_scope->slots_.size()); ++i) {
+      bool equal = EqualVar(lhs_scope->slots_[i], rhs_scope->slots_[i]);
+      if (!equal) {
+        enable_auto_mapping_ = saved_mapping;
+        return false;
+      }
+    }
+    enable_auto_mapping_ = saved_mapping;
+  }
   EQUAL_DISPATCH(CommDomainScopeStmt)
   EQUAL_DISPATCH(GraphScopeStmt)
   EQUAL_DISPATCH_TRANSPARENT(SeqStmts)

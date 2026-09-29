@@ -47,12 +47,9 @@ from pypto.pypto_core import passes
 def _property_verification_only():
     """Property verification without the print -> parse roundtrip check.
 
-    Same reason ``test_lower_host_tensor_collectives.py`` needs it: these
-    programs run ``MaterializeCommDomainScopes``, and neither the
-    ``CommDomainScopeStmt`` it synthesizes nor the ``WindowBuffer``
-    back-references it stamps on ``DistributedTensorType`` has a DSL surface,
-    so whole-program structural equality cannot survive a re-parse. What this
-    file asserts — the rendered kernel text — is unaffected.
+    These tests assert rendered kernel artifacts. Complete distributed IR text
+    roundtrips are checked with the default instrument in the materialization
+    and host-collective transform tests.
     """
     with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
         yield

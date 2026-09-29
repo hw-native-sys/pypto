@@ -47,6 +47,47 @@ def _assert_roundtrips(program: ir.Program) -> None:
     ir.assert_structural_equal(program, pl.parse_program(ir.python_print(program)))
 
 
+@pytest.mark.parametrize(
+    "type_text",
+    [
+        "pl.Scalar[pl.INDEX]",
+        "pl.Ptr",
+        "pl.Tensor[[4], pl.FP32]",
+        "pl.Tile[[4], pl.FP32, pl.Mem.Vec]",
+        "pl.Tuple[pl.Scalar[pl.INDEX], pl.Scalar[pl.FP32]]",
+    ],
+)
+def test_recorded_call_supports_non_distributed_result_types(type_text):
+    """The private Call syntax preserves ordinary types and call metadata too."""
+    program = pl.parse_program(f"""
+@pl.program
+class P:
+    @pl.function
+    def identity(self, x: {type_text}) -> {type_text}:
+        return x
+
+    @pl.function
+    def caller(self, x: {type_text}):
+        y = pl._dump.call(self.identity, [x], {type_text}, attrs={{"saved": True}})
+        return y
+""")
+    caller_gvar = program.get_global_var("caller")
+    assert caller_gvar is not None
+    caller = program.functions[caller_gvar]
+    assert isinstance(caller.body, ir.SeqStmts)
+    assignment = caller.body.stmts[0]
+    assert isinstance(assignment, ir.AssignStmt)
+    assert isinstance(assignment.value, ir.Call)
+    callee_gvar = program.get_global_var("identity")
+    assert callee_gvar is not None
+    assert isinstance(assignment.value.op, ir.GlobalVar)
+    assert assignment.value.op.name == callee_gvar.name
+    assert assignment.value.args[0] is caller.params[0]
+    ir.assert_structural_equal(assignment.value.type, caller.params[0].type)
+    assert assignment.value.attrs == {"saved": True}
+    _assert_roundtrips(program)
+
+
 def test_annotationless_callee_reassign_existing_var_roundtrips():
     """``c = self.kernel(...)`` reassigning an existing typed var round-trips.
 

@@ -602,15 +602,8 @@ def test_python_print_tile_type_explicit_layout_roundtrips_to_canonical():
     assert python_print(reconstructed) == "pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc]"
 
 
-def test_python_print_distributed_tensor_explicit_layout_surfaces_window_buffer():
-    """explicit_layout surfaces a DistributedTensor's window-buffer back-reference.
-
-    Two same shape/dtype distributed tensors with different ``window_buffer_``
-    are structurally distinct, yet the concise form drops the field so they print
-    identically (issue #2088). The EXPLICIT dump surfaces the buffer name so a
-    dump can tell them apart. It is a debug-only marker (a quoted string), not
-    round-trip subscript syntax — the value re-derives from ``pld.tensor.window``.
-    """
+def test_python_print_distributed_tensor_preserves_window_reference():
+    """Both default and explicit dumps retain a distributed tensor's window identity."""
     span = ir.Span.unknown()
     dims = [ir.ConstInt(128, DataType.INT32, span), ir.ConstInt(128, DataType.INT32, span)]
     base = ir.Var("wbuf", ir.PtrType(), span)
@@ -618,15 +611,11 @@ def test_python_print_distributed_tensor_explicit_layout_surfaces_window_buffer(
     dt_plain = ir.DistributedTensorType(dims, DataType.FP16)
     dt_wb = ir.DistributedTensorType(dims, DataType.FP16, window_buffer)
 
-    # Concise: the window buffer is dropped, so both print identically.
-    assert python_print(dt_plain) == python_print(dt_wb)
-    assert "window_buffer" not in python_print(dt_wb)
-
-    # Explicit: the window buffer name is surfaced, distinguishing the two.
-    explicit_plain = python_print(dt_plain, explicit_layout=True)
-    explicit_wb = python_print(dt_wb, explicit_layout=True)
-    assert "window_buffer=wbuf" in explicit_wb
-    assert explicit_plain != explicit_wb
+    for explicit in (False, True):
+        plain = python_print(dt_plain, explicit_layout=explicit)
+        with_window = python_print(dt_wb, explicit_layout=explicit)
+        assert 'pl._dump.window_ref("wbuf_window")' in with_window
+        assert plain != with_window
 
 
 def test_python_print_var_subclasses_reach_the_expression_printer():
@@ -655,8 +644,8 @@ def test_python_print_var_subclasses_reach_the_expression_printer():
     for name, node in nodes.items():
         assert python_print(node, format=False) != unsupported, f"{name} did not reach the Expr printer"
 
-    # WindowBuffer prints through the name hint inherited from its base Ptr Var.
-    assert python_print(nodes["WindowBuffer"], format=False) == "wbuf"
+    # WindowBuffer uses the same identity reference as distributed tensor types.
+    assert python_print(nodes["WindowBuffer"], format=False) == 'pl._dump.window_ref("wbuf_window")'
 
 
 def test_python_print_all_scalar_types():

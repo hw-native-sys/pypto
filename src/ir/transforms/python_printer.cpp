@@ -385,6 +385,9 @@ class IRPythonPrinter : public IRVisitor {
   // concise canonical form stays the default.
   bool explicit_layout_;
   ProgramPtr current_program_ = nullptr;  // Track when printing within Program (for self.method() calls)
+  std::unordered_map<const WindowBuffer*, std::string> window_buffer_names_;
+  std::unordered_map<std::string, size_t> window_buffer_name_counts_;
+  size_t comm_domain_depth_ = 0;
 
   // Per-function rename map: Var pointer → unique printed name.
   // Built by BuildVarRenameMap() at the start of each function to handle SSA name shadowing.
@@ -588,6 +591,9 @@ class IRPythonPrinter : public IRVisitor {
 
   // MemRef and TileView printing helpers
   std::string PrintMemRef(const MemRef& memref);
+  std::string GetWindowBufferName(const WindowBufferPtr& window);
+  std::string PrintWindowBuffer(const WindowBufferPtr& window);
+  void PrintCall(const CallPtr& op);
   std::string PrintTileView(const TileView& tile_view, const std::vector<ExprPtr>& tile_shape,
                             const std::optional<MemorySpace>& memory_space = std::nullopt);
   std::string PrintTensorView(const TensorView& tensor_view, const std::vector<ExprPtr>& tensor_shape);
@@ -757,19 +763,9 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
       oss << ", " << PrintMemRef(*tensor_type->memref_.value());
     }
 
-    // Fully-resolved dump (issue #2088): a DistributedTensorType carries a
-    // WindowBuffer back-reference that the concise form drops, so two same
-    // shape/dtype distributed tensors viewing *different* window buffers print
-    // identically. Surface the buffer name so a dump distinguishes them. This is
-    // an informational marker (a quoted string): the subscript DSL has no
-    // window_buffer slot and Python forbids keyword subscripts, so it is emitted
-    // as a trailing string element. The parser strips it (type_resolver +
-    // DistributedTensorMeta) and re-derives the real reference from
-    // pld.tensor.window, so EXPLICIT dumps still reparse to identical IR — which
-    // validate_ir relies on (it reloads every dump). Emitted only under
-    // explicit_layout_.
-    if (explicit_layout_ && dt_tensor && dt_tensor->window_buffer_.has_value()) {
-      oss << ", \"window_buffer=" << dt_tensor->window_buffer_.value()->name_hint_ << "\"";
+    if (dt_tensor && dt_tensor->window_buffer_.has_value()) {
+      oss << ", " << prefix_ << "._dump.window_ref("
+          << std::quoted(GetWindowBufferName(*dt_tensor->window_buffer_)) << ")";
     }
 
     oss << "]";
@@ -901,7 +897,9 @@ void IRPythonPrinter::VisitExpr_(const IterArgPtr& op) { stream_ << GetVarName(o
 
 void IRPythonPrinter::VisitExpr_(const MemRefPtr& op) { stream_ << op->name_hint_; }
 
-void IRPythonPrinter::VisitExpr_(const WindowBufferPtr& op) { stream_ << op->name_hint_; }
+void IRPythonPrinter::VisitExpr_(const WindowBufferPtr& op) {
+  stream_ << prefix_ << "._dump.window_ref(" << std::quoted(GetWindowBufferName(op)) << ")";
+}
 
 void IRPythonPrinter::VisitExpr_(const ConstIntPtr& op) {
   // A bare integer literal in the DSL canonically denotes INDEX -- that is what
@@ -1048,7 +1046,13 @@ void IRPythonPrinter::PrintAttrValue(const std::any& value, const Span& span) {
   } else if (t == typeid(ExprPtr)) {
     const auto& expr = std::any_cast<ExprPtr>(value);
     INTERNAL_CHECK_SPAN(expr, span) << "Internal error: null Expr attr; no DSL syntax to round-trip";
-    VisitExpr(expr);
+    if (auto integer = As<ConstInt>(expr)) {
+      // A bare literal denotes a Python integer attribute, not an IR Expr.
+      stream_ << prefix_ << ".const(" << integer->value_ << ", " << prefix_ << "."
+              << DataTypeToString(integer->dtype()) << ")";
+    } else {
+      VisitExpr(expr);
+    }
   } else {
     // No silent drop: if a new attr value type reaches the printer without a
     // codec arm here (and a matching arm in ast_parser._parse_attr_value), it
@@ -1065,6 +1069,42 @@ void IRPythonPrinter::PrintAttrValue(const std::any& value, const Span& span) {
 
 void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   INTERNAL_CHECK_SPAN(op->op_, op->span_) << "Call has null op";
+  auto distributed_type = As<DistributedTensorType>(op->GetType());
+  if (!distributed_type || (comm_domain_depth_ == 0 && !distributed_type->window_buffer_.has_value())) {
+    PrintCall(op);
+    return;
+  }
+  // Preserve the recorded result type and operand layout directly. Re-running
+  // an operator's type deducer can change metadata or reject an intermediate IR
+  // that a downstream verifier is responsible for diagnosing.
+  stream_ << prefix_ << "._dump.call(";
+  if (auto callee = As<GlobalVar>(op->op_)) {
+    stream_ << "self." << callee->name_;
+  } else {
+    stream_ << std::quoted(op->op_->name_);
+  }
+  stream_ << ", [";
+  for (size_t i = 0; i < op->args_.size(); ++i) {
+    if (i > 0) stream_ << ", ";
+    VisitExpr(op->args_[i]);
+  }
+  stream_ << "], " << Print(op->GetType());
+  auto print_metadata = [&](const char* name, const auto& fields) {
+    if (fields.empty()) return;
+    stream_ << ", " << name << "={";
+    for (size_t i = 0; i < fields.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      stream_ << std::quoted(fields[i].first) << ": ";
+      PrintAttrValue(fields[i].second, op->span_);
+    }
+    stream_ << "}";
+  };
+  print_metadata("kwargs", op->kwargs_);
+  print_metadata("attrs", op->attrs_);
+  stream_ << ")";
+}
+
+void IRPythonPrinter::PrintCall(const CallPtr& op) {
   // Check if this is a GlobalVar call within a Program context
 
   if (auto gvar = As<GlobalVar>(op->op_)) {
@@ -1185,6 +1225,10 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   // Operations are stored with internal names like "tensor.adds" or "tile.matmul"
   // and are printed in parseable format like "pl.tensor.adds"
   std::string op_name = op->op_->name_;
+  if (IsOp(op, "pld.tensor.alloc_window_buffer")) {
+    // SSA renames the bound Var without changing the allocation's logical name.
+    op_name = "_dump.alloc_window_buffer";
+  }
   const bool has_physical_remote_tail =
       IsOp(op, "pld.tile.remote_load") && op->GetKwarg<bool>("allow_physical_tail_padding", false);
   if (has_physical_remote_tail) {
@@ -1489,11 +1533,6 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   }
   for (const auto& [key, value] : op->kwargs_) {
     if (has_physical_remote_tail && key == "allow_physical_tail_padding") continue;
-    // ``pld.tensor.alloc_window_buffer`` injects its ``name`` kwarg from the LHS
-    // at parse time and explicitly rejects a user-written ``name=`` kwarg. Skip
-    // it on print so the round-trip parser can re-derive the name from the
-    // assignment LHS without tripping the no-user-kwargs check.
-    if (IsOp(op, "pld.tensor.alloc_window_buffer") && key == "name") continue;
     // Inside a live SplitAivScopeStmt region the per-op ``split=`` int on
     // aiv_shard/aic_gather is redundant: the region node's mode is the
     // authoritative carrier and the parser re-stamps it from the enclosing
@@ -2580,38 +2619,56 @@ void IRPythonPrinter::VisitStmt_(const RuntimeScopeStmtPtr& op) {
   DecreaseIndent();
 }
 
+std::string IRPythonPrinter::GetWindowBufferName(const WindowBufferPtr& window) {
+  auto it = window_buffer_names_.find(window.get());
+  if (it != window_buffer_names_.end()) return it->second;
+  // The label identifies a WindowBuffer object, independently of its base Var.
+  // A suffix distinguishes different windows backed by the same allocation.
+  const auto stem = GetVarName(window->base_.get()) + "_window";
+  auto& count = window_buffer_name_counts_[stem];
+  const auto name = count == 0 ? stem : stem + "_" + std::to_string(count);
+  ++count;
+  window_buffer_names_.emplace(window.get(), name);
+  return name;
+}
+
+std::string IRPythonPrinter::PrintWindowBuffer(const WindowBufferPtr& window) {
+  std::ostringstream oss;
+  oss << prefix_ << "._dump.window_buffer(" << std::quoted(GetWindowBufferName(window))
+      << ", base=" << std::quoted(GetVarName(window->base_.get())) << ", size=" << PrintSubExpr(window->size_)
+      << ", load_from_host=" << (window->load_from_host_ ? "True" : "False")
+      << ", store_to_host=" << (window->store_to_host_ ? "True" : "False") << ")";
+  return oss.str();
+}
+
 void IRPythonPrinter::VisitStmt_(const CommDomainScopeStmtPtr& op) {
-  // CommDomainScopeStmt is synthesized by MaterializeCommDomainScopes — it
-  // has no user DSL surface, so the printer does NOT emit a `with` wrapper
-  // (a wrapper would have no matching parser path). Reparse of the printed
-  // text produces pre-pass IR; re-running the pass pipeline reconstructs
-  // the scope.
-  //
-  // To keep dumps informative (since the Python printer is the only
-  // round-trip surface for IR), we emit a single leading comment that
-  // surfaces the scope's identity — covered devices and slot names — then
-  // descend into the body at the SAME indent (no IncreaseIndent: the body
-  // is structurally at the same level the comment occupies in the parent
-  // statement stream).
-  stream_ << "# pld.comm_domain: devices=";
-  if (op->devices_.empty()) {
-    stream_ << "all";
-  } else {
-    stream_ << "[";
-    for (size_t i = 0; i < op->devices_.size(); ++i) {
-      if (i > 0) stream_ << ", ";
-      stream_ << op->devices_[i];
-    }
-    stream_ << "]";
+  ++comm_domain_depth_;
+  stream_ << "with " << prefix_ << "._dump.comm_domain(name=" << std::quoted(op->name_hint_) << ", devices=[";
+  for (size_t i = 0; i < op->devices_.size(); ++i) {
+    if (i > 0) stream_ << ", ";
+    stream_ << op->devices_[i];
   }
-  stream_ << ", slots=[";
+  stream_ << "], slots=[";
   for (size_t i = 0; i < op->slots_.size(); ++i) {
     if (i > 0) stream_ << ", ";
     INTERNAL_CHECK_SPAN(op->slots_[i], op->span_) << "CommDomainScopeStmt has null slot at index " << i;
-    stream_ << op->slots_[i]->name_hint_;
+    stream_ << PrintWindowBuffer(op->slots_[i]);
   }
-  stream_ << "]\n";
+  stream_ << "]";
+  if (!op->attrs_.empty()) {
+    stream_ << ", attrs={";
+    for (size_t i = 0; i < op->attrs_.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      stream_ << std::quoted(op->attrs_[i].first) << ": ";
+      PrintAttrValue(op->attrs_[i].second, op->span_);
+    }
+    stream_ << "}";
+  }
+  stream_ << "):\n";
+  IncreaseIndent();
   PrintStmtBlock(op->body_);
+  DecreaseIndent();
+  --comm_domain_depth_;
 }
 
 void IRPythonPrinter::VisitStmt_(const EvalStmtPtr& op) {

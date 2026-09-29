@@ -106,11 +106,10 @@ call omitting them is rejected as a user error at parse time rather than
 surfacing as a compiler-bug diagnostic during codegen. Write the composite
 `pld.tensor.*` form instead.
 
-Note that a whole-program `assert_structural_equal` round-trip is still blocked
-one pass upstream: [`MaterializeCommDomainScopes`](46-materialize_comm_domain_scopes.md)
-synthesizes `CommDomainScopeStmt` (printed as a leading comment) and the
-`WindowBuffer` back-references on `DistributedTensorType` (not printed), and
-neither has a DSL surface to parse back.
+Whole-program print/parse round-trip preserves the enclosing communication
+scopes and window back-references through the private dump syntax documented in
+[`MaterializeCommDomainScopes`](46-materialize_comm_domain_scopes.md#text-round-trip).
+The parser restores this metadata directly, without rerunning materialization.
 
 ## Checks
 

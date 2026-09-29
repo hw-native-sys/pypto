@@ -59,11 +59,8 @@ NRANKS = 2
 def pass_verification_context(ascend_backend):
     """Override ``ut/conftest.py``'s autouse roundtrip-verification fixture.
 
-    ``MaterializeCommDomainScopes`` materialises ``DistributedTensorType.window_buffer_``
-    back-references that the printer / parser pair has no surface syntax for —
-    the roundtrip check would fail despite the in-memory IR being correct.
-    Mirrors the same override in
-    [tests/ut/ir/transforms/test_materialize_comm_domain_scopes.py](../../ir/transforms/test_materialize_comm_domain_scopes.py).
+    These tests focus on generated host orchestration. The materialization and
+    host-collective transform suites separately run whole-program roundtrips.
     The fixture name MUST be ``pass_verification_context`` to shadow the
     conftest's same-named autouse fixture (pytest fixture override semantics).
     """

@@ -331,6 +331,37 @@ class IRBuilder:
             del self._begin_spans[ctx_id]
 
     @contextmanager
+    def comm_domain_scope(
+        self,
+        devices: list[int],
+        slots: list[ir.WindowBuffer],
+        name_hint: str,
+        span: ir.Span,
+        attrs: list[tuple[str, Any]] | None = None,
+    ) -> Iterator["ScopeBuilder"]:
+        """Build a communication scope, reading its slots when the body is complete.
+
+        The parser fills ``slots`` after parsing body-local allocation definitions.
+        An empty ``devices`` list represents all runtime devices.
+
+        Args:
+            devices: Ordered device indices, or an empty list for all devices.
+            slots: Window definitions, read on context exit.
+            name_hint: Communication-domain name.
+            span: Source span of the complete scope.
+            attrs: Scope metadata, read on context exit.
+
+        Yields:
+            A builder exposing the completed scope after context exit.
+        """
+        self._builder.begin_scope(ir.ScopeKind.CommDomain, span, name_hint=name_hint)
+        builder_obj = ScopeBuilder(self)
+        try:
+            yield builder_obj
+        finally:
+            builder_obj._result = self._builder.end_scope(span, devices, slots, attrs)
+
+    @contextmanager
     def program(self, name: str, span: ir.Span | None = None) -> Iterator["ProgramBuilder"]:
         """Context manager for building programs.
 

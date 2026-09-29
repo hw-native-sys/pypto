@@ -329,7 +329,9 @@ void IRBuilder::BeginScope(ScopeKind scope_kind, const Span& span, std::optional
                                                           sync_start, manual, std::move(attrs)));
 }
 
-StmtPtr IRBuilder::EndScope(const Span& end_span) {
+StmtPtr IRBuilder::EndScope(const Span& end_span, std::vector<int64_t> devices,
+                            std::vector<WindowBufferPtr> slots,
+                            std::vector<std::pair<std::string, std::any>> extra_attrs) {
   CHECK(!context_stack_.empty() && CurrentContext()->GetType() == BuildContext::Type::SCOPE)
       << "Cannot end scope: not inside a scope context at " << end_span.to_string();
 
@@ -353,6 +355,7 @@ StmtPtr IRBuilder::EndScope(const Span& end_span) {
   auto sync_start = scope_ctx->GetSyncStart();
   auto manual = scope_ctx->GetManual();
   auto attrs = scope_ctx->TakeAttrs();
+  for (auto& attr : extra_attrs) attrs.push_back(std::move(attr));
 
   // Create scope statement before popping context so that if construction throws
   // (e.g. validation CHECK fails) the builder state stays consistent.
@@ -404,12 +407,10 @@ StmtPtr IRBuilder::EndScope(const Span& end_span) {
                                                           std::vector<std::string>{}, std::move(attrs));
       break;
     case ScopeKind::CommDomain:
-      // CommDomainScopeStmt is synthesized by MaterializeCommDomainScopes (no
-      // user DSL surface) and constructed directly by the pass — the IR builder
-      // never receives this ScopeKind from the parser.
-      throw pypto::RuntimeError(
-          "ScopeKind::CommDomain has no DSL surface and cannot be built via IRBuilder::EndScope; "
-          "it is synthesized by the MaterializeCommDomainScopes pass.");
+      scope_stmt = std::make_shared<const CommDomainScopeStmt>(std::move(devices), std::move(slots),
+                                                               std::move(name_hint), body, combined_span,
+                                                               std::vector<std::string>{}, std::move(attrs));
+      break;
   }
   // Safety net: every ScopeKind value above must populate scope_stmt. The switch has
   // no default so adding a new ScopeKind without a case here will trip -Wswitch-enum;

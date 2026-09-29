@@ -10,20 +10,11 @@
 
 """Tests for ``LowerHostTensorCollectives``.
 
-The lowering emits ``builtin.tensor.*`` internal ops, which the printer renders
-as ``pl.builtin.tensor.*`` — a machine-only surface the parser reads back, so
-the lowered dispatch survives print -> parse. A whole-``@pl.program``
-``Expected`` still cannot be parsed for these tests, but for an upstream
-reason: ``MaterializeCommDomainScopes`` must run first, and neither the
-``CommDomainScopeStmt`` it synthesizes nor the ``WindowBuffer`` back-references
-it stamps on ``DistributedTensorType`` has a DSL surface.
+The lowering emits machine-only ``pl.builtin.tensor.*`` calls. The enclosing
+communication scopes and window references also have lossless dump spellings,
+so the default whole-program roundtrip instrument covers these passes.
+Per-dispatch structural expectations separately pin builtin arguments and attrs.
 
-So, as in the materialize_comm_domain_scopes module, the structural
-Before/Expected pattern is applied at the granularity of the pass's comparable
-output product — the emitted builtin dispatch — via
-:func:`_assert_builtin_dispatch`, which pins the full dispatch (world-size
-loop, every window-bound arg in order, arg directions, and the complete
-kwarg/attr dicts) both in the pass output and in its re-parse.
 """
 
 from typing import Any, cast
@@ -40,19 +31,6 @@ from pypto.pypto_core import ir, passes
 _BUILTIN_BARRIER = ir.get_op("builtin.tensor.barrier").name
 _BUILTIN_BROADCAST = ir.get_op("builtin.tensor.broadcast").name
 _BUILTIN_REDUCE_SCATTER = ir.get_op("builtin.tensor.reduce_scatter").name
-
-
-@pytest.fixture(autouse=True)
-def _basic_verification_context():
-    """Property verification only — the conftest default adds the roundtrip
-    instrument, which these programs cannot satisfy: they run
-    ``MaterializeCommDomainScopes``, whose ``CommDomainScopeStmt`` and
-    ``WindowBuffer`` back-references have no DSL surface and so fail
-    whole-program structural equality after a re-parse. The builtin dispatch
-    itself does round-trip; ``_assert_builtin_dispatch`` checks that directly.
-    """
-    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
-        yield
 
 
 def _get_func(program: ir.Program, name: str) -> ir.Function:

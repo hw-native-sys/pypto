@@ -36,13 +36,9 @@ from pypto.language.typing.tensor import Tensor, TensorMeta
 class DistributedTensorMeta(TensorMeta):
     """Metaclass enabling ``pld.DistributedTensor[...]`` syntax.
 
-    Inherits :class:`TensorMeta`'s subscript dispatch, except it drops a trailing
-    ``"window_buffer=<name>"`` debug marker before delegating. ``PassDumpLevel.
-    EXPLICIT`` dumps append that marker as an extra subscript element to surface a
-    distributed tensor's window-buffer back-reference (issue #2088); it is
-    informational only — the real reference re-derives from ``pld.tensor.window``
-    — so ignoring it on parse keeps EXPLICIT pass dumps reparseable, which
-    ``validate_ir`` relies on (it reloads every dump via ``pl.loads``).
+    Accepts the legacy ``"window_buffer=<name>"`` informational marker used by
+    older EXPLICIT dumps. New lossless dumps use ``pl._dump.window_ref`` in
+    annotations; the AST type resolver binds those references to scope slots.
     """
 
     def __getitem__(cls, item: Any) -> "DistributedTensor":

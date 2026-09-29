@@ -7,7 +7,16 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Private spellings for lossless IR text; not a kernel authoring API."""
+"""Private spellings for lossless IR text; not a kernel authoring API.
+
+The AST parser also recognizes ``comm_domain``, ``window_buffer``, ``window_ref``,
+``alloc_window_buffer``, and ``call`` inside printed programs. These are syntax
+markers rather than Python functions: function bodies are parsed, not executed.
+Window descriptors use named references, for example
+``window_buffer("buf_window", base="buf", size=16)`` and
+``window_ref("buf_window")``. Labels encode object sharing without adding IR
+fields. ``call`` accepts any result type supported by the type parser.
+"""
 
 import re
 import struct

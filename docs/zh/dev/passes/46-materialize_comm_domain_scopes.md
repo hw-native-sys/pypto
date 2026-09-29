@@ -118,6 +118,31 @@ pass 运行之后：
   N7 codegen 在 *host_orch* 的 dispatch 处读取反向引用、再为 chip-orch 显式
   下发对应的 `CommContext` 指针。
 
+## 文本 round-trip
+
+用户编写程序时仍然自动推导通信域。打印后的 IR 使用私有 `pl._dump` 语法保存物化状态：
+
+- `comm_domain(name=..., devices=..., slots=[...], attrs={...})` 保存作用域边界、
+  设备列表、slot 顺序及属性。
+- `window_buffer("buf_window", base="buf", size=16, load_from_host=..., store_to_host=...)` 定义窗口；
+  tensor 类型通过 `window_ref("buf_window")` 引用同一个对象。
+  名称是文本格式中的引用标识，不是设备 ID、slot 下标或 IR 字段。
+  名称由打印后的 base 变量名生成；共享同一 base 的不同窗口通过后缀区分。旧的数字 ID 仍可读取。
+- `alloc_window_buffer(size, name=...)` 保存分配的逻辑名称，不受 SSA 变量重命名影响。
+- `call(op, args, result_type, kwargs=..., attrs=...)` 直接恢复 Call，接受类型解析器支持的任意结果类型。
+  打印器用它保存分布式调用实际记录的类型，包括不存在反向引用的情况；
+  pass 改写操作数后，重新推导的类型可能与原类型不同。
+
+解析器先登记窗口描述，再解析 body，在分配和大小表达式可用时绑定引用。
+作用域 slot 与 tensor 反向引用共享同一个恢复后的 `WindowBuffer`。
+这些写法属于 IR 文本语法，不是在 kernel 中执行的操作。
+描述中的 `base` 引用 body 内定义的分配变量；`window_buffer(...)` 不会增加分配语句。
+它的 `size` 和分配 Call 的大小参数是 IR 分别保存的字段，因此都会保留。
+
+对于自包含的完整程序，`parse(python_print(program))` 必须与原程序结构相等且结构哈希相等。
+解析器和调用方均不需要重跑 lowering pass。引用缺失定义的单条语句片段不属于此契约。
+旧的 `"window_buffer=<name>"` 提示字符串仍可读取，但不表达真实引用。
+
 ## Pass 属性
 
 | 字段 | 取值 |
