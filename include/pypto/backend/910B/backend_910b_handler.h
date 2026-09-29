@@ -59,6 +59,28 @@ class Ascend910BHandler : public BackendHandler {
            dtype == DataType::BF16;
   }
 
+  // A2/A3 scale-bearing fix-pipe writeback. Measured against ptoas v0.61, which
+  // verifies these pairs explicitly:
+  //   tinsert: "(src=f32,dst=i8) or (src=i32,dst=i8/f16/i16)"
+  //   tstore : "i8/ui8"  from an f32 accumulator, "i8/ui8/f16" from an i32 one
+  // pto-isa a2a3 `GetScalarPreQuantMode` agrees (QF322B8_PRE / REQ8 / DEQF16).
+  // INT16 (SHIFTS322S16) is excluded per the base-class contract: its payload
+  // is a shift count, not a scale. Notably there is NO scaled f32 -> f16/bf16
+  // here -- that narrowing exists only in the *unscaled* writeback.
+  //
+  // PTOAS 0.65 emits typed scale and index operands for `pto.tinsert`, fixing
+  // the overload ambiguity tracked by PTOAS#1570. Enable the device-supported
+  // DEQF16 path used by the Cube score-reduction chain; keep the Mat contract
+  // narrow until the other dtype pairs have matching compiler/device coverage.
+  [[nodiscard]] bool SupportsFixpipePreQuant(const DataType& src, const DataType& dst,
+                                             FixpipeDest dest) const override {
+    if (dest == FixpipeDest::kMat) return src == DataType::INT32 && dst == DataType::FP16;
+    const bool dst_is_byte = dst == DataType::INT8 || dst == DataType::UINT8;
+    if (src == DataType::INT32) return dst_is_byte || dst == DataType::FP16;
+    if (src == DataType::FP32) return dst_is_byte;
+    return false;
+  }
+
   [[nodiscard]] ir::TileView BuildCrossCoreTransferView(ir::MemorySpace dest_ms,
                                                         const ir::TileView& original_view) const override;
 

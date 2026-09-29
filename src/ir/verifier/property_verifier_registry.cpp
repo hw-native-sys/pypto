@@ -74,6 +74,7 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   Register(IRProperty::TileStorageLegalized, CreateTileStorageLegalizedPropertyVerifier);
   Register(IRProperty::TileStorageAllocated, CreateTileStorageAllocatedPropertyVerifier);
   Register(IRProperty::AccToGmStoreValid, CreateAccToGmStoreValidPropertyVerifier);
+  Register(IRProperty::FixpipeEpilogueValid, CreateFixpipeEpilogueValidPropertyVerifier);
   Register(IRProperty::AccCompactValid, CreateAccCompactValidPropertyVerifier);
   // AtomicAddDtypeValid: an atomic-add into a bf16 GM destination is A2/A3-only
   // (BackendHandler::SupportsBf16AtomicAdd). Decidable on the user's own IR, so
