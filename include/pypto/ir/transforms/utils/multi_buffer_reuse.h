@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <limits>
 #include <map>
 #include <optional>
@@ -21,8 +22,13 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/transforms/utils/allocation_constraint_analysis.h"
+#include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
+#include "pypto/ir/type.h"
 
 namespace pypto::ir {
 
