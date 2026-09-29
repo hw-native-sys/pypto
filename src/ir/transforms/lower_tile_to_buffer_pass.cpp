@@ -46,6 +46,8 @@
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
+#include "pypto/ir/transforms/utils/multi_buffer_reuse.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/property_verifier_registry.h"
 
@@ -156,11 +158,44 @@ class StorageIndex : public IRVisitor {
 
   // Each member participates in a fixed number of indexed scans, O(N log N).
   // The resulting aliases are ordinary SSA definitions, not an IR side table.
-  void Finalize() {
+  void Finalize(const FunctionPtr& function) {
     for (auto& [base, storage] : roots) FinalizeRoot(base, storage);
+    // Plan against the original Tile IR, before lowering loses its allocation
+    // lifetimes and operation-level no-alias facts. Use the same planner as
+    // Tile codegen; the result is materialized as ordinary shared Buffer SSA.
+    using RegionKey = std::tuple<MatrixKey, int, uint64_t>;
+    std::map<const Var*, RegionKey> regions;
+    for (const auto& [base, storage] : roots) {
+      if (const auto multi = As<MultiBufferType>(storage.handle->GetType())) {
+        regions.emplace(
+            base, std::make_tuple(MakeMatrixKey(0, multi->element_type_),
+                                  static_cast<int>(multi->element_type_->memory_space_), multi->slot_count_));
+      }
+    }
+    for (const auto& [base, owner] : PlanMultiBufferReuse(function, regions)) {
+      auto& storage = roots.at(base);
+      INTERNAL_CHECK_SPAN(!storage.definitions.empty(), function->span_)
+          << "Internal error: multi-buffer region has no allocation";
+      if (base == owner) {
+        // Allocation declaration order need not match value lifetime order.
+        // Static region handles dominate every get_slot, including aliases
+        // declared earlier than the first live occupant of the shared region.
+        region_prologue.push_back(storage.definitions.front());
+        storage.definitions.erase(storage.definitions.begin());
+        continue;
+      }
+      const auto& shared = roots.at(owner).handle;
+      const std::unordered_map<const Var*, VarPtr> remap{{storage.handle.get(), shared}};
+      storage.definitions.erase(storage.definitions.begin());
+      for (auto& definition : storage.definitions) {
+        definition = transform_utils::Substitute(definition, remap);
+      }
+      storage.handle = shared;
+    }
   }
 
   std::unordered_map<const Var*, BufferStorage> roots;
+  std::vector<StmtPtr> region_prologue;
   std::unordered_map<const TileType*, VarPtr> handles;
   std::unordered_map<const Call*, VarPtr> write_views;
 
@@ -906,10 +941,19 @@ ProgramPtr TransformProgram(const ProgramPtr& program) {
     }
     StorageIndex storage(addressed);
     storage.VisitStmt(function->body_);
-    storage.Finalize();
+    storage.Finalize(function);
     TileToBufferMutator mutator(storage);
     auto lowered = std::make_shared<Function>(*function);
     lowered->body_ = mutator.VisitStmt(function->body_);
+    if (!storage.region_prologue.empty()) {
+      auto body = std::move(storage.region_prologue);
+      if (const auto sequence = As<SeqStmts>(lowered->body_)) {
+        body.insert(body.end(), sequence->stmts_.begin(), sequence->stmts_.end());
+      } else {
+        body.push_back(lowered->body_);
+      }
+      lowered->body_ = std::make_shared<SeqStmts>(std::move(body), function->span_);
+    }
     lowered->ir_stage_ = FunctionIRStage::Buffer;
     functions.push_back(std::move(lowered));
   }

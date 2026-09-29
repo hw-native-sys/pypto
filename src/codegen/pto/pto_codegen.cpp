@@ -12,7 +12,6 @@
 #include "pypto/codegen/pto/pto_codegen.h"
 
 #include <algorithm>
-#include <array>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
@@ -24,7 +23,6 @@
 #include <map>
 #include <memory>
 #include <optional>
-#include <queue>
 #include <set>
 #include <sstream>
 #include <string>
@@ -53,10 +51,10 @@
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/structural_comparison.h"
-#include "pypto/ir/transforms/utils/allocation_constraint_analysis.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
+#include "pypto/ir/transforms/utils/multi_buffer_reuse.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/tile_buf_signature.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -1776,22 +1774,6 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     colive_collector.VisitStmt(func->body_);
   }
 
-  // PTOAS treats a function-head `alloc_multi_tile` as live for the whole
-  // function, so two declarations cannot reuse storage even when the IR
-  // allocations are sequential. Recover that reuse explicitly below: map each
-  // slotted base to its conservative IR lifetime, then let compatible,
-  // non-overlapping declarations share one multi-buffer handle.
-  const auto lifetime_analysis = ir::AnalyzeAllocationLifetimes(func);
-  std::map<const ir::Var*, std::pair<int, int>> base_lifetimes;
-  for (const auto& interval : lifetime_analysis.lifetimes) {
-    const auto tile_type = As<TileType>(interval.variable->GetType());
-    if (!tile_type || !tile_type->memref_.has_value()) continue;
-    const auto memref = ir::GetDefinedMemRef(tile_type);
-    // AnalyzeAllocationLifetimes already merges every variable sharing this
-    // MemRef base into one [min(def), max(last use)] interval.
-    base_lifetimes[memref->base_.get()] = {interval.def_point, interval.last_use_point};
-  }
-
   /// One allocation's slots, accumulated over every tile bound to it. `blocker`
   /// is empty while the allocation can still become a region, and otherwise says
   /// what stopped it — the author has to hear that, because under this planner a
@@ -1815,7 +1797,6 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     std::string blocker;
   };
   std::map<const ir::Var*, Candidate> candidates;
-  std::vector<const ir::Var*> discovery_order;
 
   auto same_subview_config = [](const TileTypeComponents& lhs, const TileTypeComponents& rhs) {
     return lhs.dtype_str == rhs.dtype_str && lhs.blayout == rhs.blayout && lhs.slayout == rhs.slayout &&
@@ -1835,7 +1816,6 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     auto [it, fresh] = candidates.try_emplace(base);
     Candidate& candidate = it->second;
     if (fresh) {
-      discovery_order.push_back(base);
       candidate.first_tile = tile_var;
       // Count comes from any binding — they all read it off one declaration, and
       // InitMemRef has already rejected a disagreement — so the diagnostic below
@@ -1855,35 +1835,6 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     candidate.slot_tiles.emplace_back(tile_var, tile_type);
   }
   if (candidates.empty()) return;
-
-  const auto constraints = ir::AnalyzeAllocationConstraints(func, lifetime_analysis, "PTOCodegen");
-  auto base_of = [](const ir::Var* var) -> const ir::Var* {
-    const auto tile_type = var ? As<TileType>(var->GetType()) : nullptr;
-    return tile_type && tile_type->memref_.has_value() ? tile_type->memref_.value()->base_.get() : nullptr;
-  };
-  // The allocator's no-alias facts refer to logical tile Vars. Resolve their
-  // MemRef bases once, then check every occupant of a reused physical region.
-  // A region's first owner alone is insufficient after a second allocation has
-  // reused it. Hard-edge checks total O(E log R), for R bases and E edges.
-  std::map<const ir::Var*, std::set<const ir::Var*>> forbidden_bases;
-  for (const auto& [writer, inputs] : constraints.forbid_alias) {
-    const ir::Var* writer_base = base_of(writer);
-    if (!writer_base) continue;
-    for (const auto& input : inputs) {
-      const ir::Var* input_base = base_of(input.get());
-      if (!input_base || input_base == writer_base) continue;
-      forbidden_bases[writer_base].insert(input_base);
-      forbidden_bases[input_base].insert(writer_base);
-    }
-  }
-  std::set<const ir::Var*> load_derived_bases;
-  std::set<const ir::Var*> reads_tpop_bases;
-  for (const ir::Var* var : constraints.target_hazard_inputs.load_derived) {
-    if (const ir::Var* base = base_of(var)) load_derived_bases.insert(base);
-  }
-  for (const ir::Var* var : constraints.target_hazard_inputs.reads_tpop) {
-    if (const ir::Var* base = base_of(var)) reads_tpop_bases.insert(base);
-  }
 
   // Pick a bound tile that component-wise covers every use. Do this after the
   // scan so the result is independent of statement/discovery order. A crossed
@@ -2000,49 +1951,20 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     }
   }
 
-  // Allocate one physical region per simultaneously-live compatibility class.
-  // Candidates are processed by definition point. For each exact region type,
-  // heaps expose the earliest-free regions, partitioned by load-derived hazard.
-  // Translate explicit no-alias peers to region owners once per candidate, then
-  // temporarily skip only those owners. This costs O((R + E) log R) for R bases
-  // and E explicit no-alias edges, not a scan of all regions per allocation.
-  std::vector<std::pair<int, const ir::Var*>> allocation_order;
-  allocation_order.reserve(discovery_order.size());
-  for (const ir::Var* base : discovery_order) {
-    const auto lifetime_it = base_lifetimes.find(base);
-    const int def =
-        lifetime_it == base_lifetimes.end() ? std::numeric_limits<int>::max() : lifetime_it->second.first;
-    allocation_order.emplace_back(def, base);
-  }
-  std::stable_sort(allocation_order.begin(), allocation_order.end(),
-                   [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
-
-  struct AvailableRegion {
-    int last_use = 0;
-    const ir::Var* owner = nullptr;
-  };
-  struct EarliestAvailable {
-    bool operator()(const AvailableRegion& lhs, const AvailableRegion& rhs) const {
-      return lhs.last_use > rhs.last_use;
-    }
-  };
-  using RegionHeap = std::priority_queue<AvailableRegion, std::vector<AvailableRegion>, EarliestAvailable>;
-  using RegionPools = std::array<RegionHeap, 2>;
-  std::map<std::tuple<std::string, int64_t, int64_t>, RegionPools> available_regions;
-  std::map<const ir::Var*, const ir::Var*> region_owners;
-
-  for (const auto& ordered : allocation_order) {
-    const ir::Var* base = ordered.second;
-    Candidate& candidate = candidates.at(base);
-    // Degrading to one alloc_tile per slot would silently undo the separation the
-    // author declared — ptoas would be free to plan the slots on top of each
-    // other. Say what is unsupported instead.
+  using RegionKey = std::tuple<std::string, int64_t, int64_t>;
+  std::map<const ir::Var*, RegionKey> compatibilities;
+  for (const auto& [base, candidate] : candidates) {
     CHECK_SPAN(candidate.blocker.empty(), candidate.first_tile->span_)
         << "The declared allocation 'pl.MemRef(\"" << base->name_hint_ << "\", slots=" << candidate.count
         << ")' cannot be lowered to a ptoas multi-buffer region because " << candidate.blocker
         << ". Under memory_planner=PTOAS the slots have no other way to stay apart — adjust the "
            "declaration, or compile with the default PyPTO memory planner.";
-
+    compatibilities.emplace(
+        base, std::make_tuple(FormatMultiTileBufTypeString(candidate.slot_type_str, candidate.count),
+                              candidate.valid_row, candidate.valid_col));
+  }
+  for (const auto& [base, owner] : ir::PlanMultiBufferReuse(func, compatibilities)) {
+    Candidate& candidate = candidates.at(base);
     // The valid extent is stated once on the region: pass 2 established that every
     // slot agrees on it, and that it is static — the region is declared in the
     // function head, where a runtime extent's SSA value is not yet in scope.
@@ -2057,60 +1979,11 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     region.slot_type_str = candidate.slot_type_str;
     region.mtb_type_str = FormatMultiTileBufTypeString(region.slot_type_str, region.count);
 
-    const auto compatibility = std::make_tuple(region.mtb_type_str, region.valid_row, region.valid_col);
-    auto lifetime_it = base_lifetimes.find(base);
-    bool reused = false;
-    const auto& hazard = constraints.target_hazard_inputs;
-    const bool looping_workspace = hazard.looping_written_workspace_bases.count(base) != 0;
-    // Written workspaces cannot inherit earlier storage; looping workspaces
-    // also cannot lend it, so they never enter the reusable pools below.
-    if (lifetime_it != base_lifetimes.end() && !looping_workspace &&
-        hazard.written_workspace_bases.count(base) == 0) {
-      std::set<const ir::Var*> forbidden_owners;
-      if (const auto forbidden = forbidden_bases.find(base); forbidden != forbidden_bases.end()) {
-        for (const ir::Var* peer : forbidden->second) {
-          if (const auto owner = region_owners.find(peer); owner != region_owners.end()) {
-            forbidden_owners.insert(owner->second);
-          }
-        }
-      }
-      auto& pools = available_regions[compatibility];
-      const size_t pool_count = reads_tpop_bases.count(base) != 0 ? 1 : pools.size();
-      std::array<std::vector<AvailableRegion>, 2> blocked;
-      std::optional<size_t> selected;
-      for (size_t pool = 0; pool < pool_count; ++pool) {
-        auto& heap = pools[pool];
-        while (!heap.empty() && heap.top().last_use <= lifetime_it->second.first &&
-               forbidden_owners.count(heap.top().owner) != 0) {
-          blocked[pool].push_back(heap.top());
-          heap.pop();
-        }
-        if (!heap.empty() && heap.top().last_use <= lifetime_it->second.first &&
-            (!selected || heap.top().last_use < pools[*selected].top().last_use)) {
-          selected = pool;
-        }
-      }
-      if (selected) {
-        const auto available = pools[*selected].top();
-        pools[*selected].pop();
-        region.region_ssa = fs_.multi_buffer_regions.at(available.owner).region_ssa;
-        region_owners.emplace(base, available.owner);
-        const size_t next_pool = *selected != 0 || load_derived_bases.count(base) != 0 ? 1 : 0;
-        pools[next_pool].push({lifetime_it->second.second, available.owner});
-        reused = true;
-      }
-      for (size_t pool = 0; pool < pool_count; ++pool) {
-        for (const auto& entry : blocked[pool]) pools[pool].push(entry);
-      }
-    }
-    if (!reused) {
+    if (owner != base) {
+      region.region_ssa = fs_.multi_buffer_regions.at(owner).region_ssa;
+    } else {
       region.region_ssa = NewNamedTemp(base->name_hint_ + "_mb");
       fs_.multi_buffer_region_order.push_back(base);
-      region_owners.emplace(base, base);
-      if (lifetime_it != base_lifetimes.end() && !looping_workspace) {
-        const size_t pool = load_derived_bases.count(base) != 0 ? 1 : 0;
-        available_regions[compatibility][pool].push({lifetime_it->second.second, base});
-      }
     }
 
     fs_.multi_buffer_regions.emplace(base, std::move(region));

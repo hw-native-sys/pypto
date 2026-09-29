@@ -120,6 +120,16 @@ subviews; repeated slot/descriptor pairs share one handle. Buffer verification
 tracks the selected slot's byte window, including aliases of boundary views.
 Dynamic slot indices remain unsupported by this conversion recipe.
 
+Before discarding Tile allocation facts, lowering uses the same multi-buffer
+reuse planner as Tile codegen. Compatible regions with disjoint conservative
+lifetimes share one `buffer.alloc_multi` handle. Overlapping regions, operation
+no-alias constraints against every prior occupant, and target hazards prevent
+unsafe sharing. Logical pipeline groups remain distinct. Thus crossing Buffer
+IR does not multiply physical storage for sequential dbC grids.
+Static physical region allocations are emitted in a function-entry prologue so
+they dominate all slot views, even if logical declarations precede the first
+live occupant. Slot/view definitions retain their original declaration sites.
+
 Mat, Left, Right and Acc tiles keep their resolved fractal layout in the
 `BufferType` (`blayout`, `slayout`, `fractal`, `compact`). Their physical
 extents are already whole fractal boxes, and a fractal window has no row-major

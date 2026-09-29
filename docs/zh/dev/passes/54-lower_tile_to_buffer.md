@@ -96,6 +96,16 @@ value = buffer.reshape(window) : Buffer[[16,32], FP32, Vec]
 
 ## 矩阵存储与 cube 转换 {#matrix-storage-and-cube-recipes}
 
+静态、无地址的多槽位存储保留为 `buffer.alloc_multi` 与显式的
+`buffer.get_slot`；相反 dbC stage 不会变成可相互覆盖的独立分配。
+在丢弃 Tile 分配信息前，转换使用与 Tile codegen 相同的多缓冲复用规划器。
+类型兼容且保守生命周期不相交的 region 共享一个 Buffer SSA handle；
+重叠生命周期、针对全部历史使用者的操作级 no-alias 约束以及目标平台 hazard
+都会阻止不安全复用。逻辑 pipeline group 保持独立，因此连续 dbC 网格跨越
+Buffer IR 边界不会增加物理存储需求。该转换仍只支持静态槽位索引。
+静态物理 region 分配放在函数入口，支配所有 slot view，即使逻辑声明早于
+首个存活使用者；slot/view 定义仍留在原始声明位置。
+
 Mat、Left、Right 和 Acc Tile 在 `BufferType` 中保留已确定的分形布局（`blayout`、
 `slayout`、`fractal`、`compact`）。它们的物理范围已经是完整的分形块，而分形窗口没有
 行主序的字节视图，因此这些空间不使用 `UINT8[N,32]` 根。带地址的规划器已经确定了每个

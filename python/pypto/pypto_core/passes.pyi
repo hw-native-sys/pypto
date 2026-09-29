@@ -1031,6 +1031,7 @@ class l0_tile_chooser:
         allow_b_stationary: bool
         allow_double_buffer_c: bool
         full_k_dbc_route: l0_tile_chooser.DbcEmissionRoute
+        reduction_iterations: int
         split_k_dbc_route: l0_tile_chooser.DbcEmissionRoute
         allow_unrolled_dbc_m_boundary: bool
         c_read: bool

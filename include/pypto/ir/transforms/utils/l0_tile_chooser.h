@@ -61,6 +61,12 @@ struct L0TileConfig {
   int N = 0;
   int K = 0;
 
+  // Number of source reductions of width K accumulated before one output
+  // drain. Capacity and inner K blocking still use K, not K * iterations.
+  // Zero denotes an unknown source trip count: retain single-C selection but
+  // do not claim a profitable drain overlap from an unknown compute duration.
+  int reduction_iterations = 1;
+
   // L0 capacities in bytes (typically read from BackendHandler::GetL0?CapacityBytes).
   uint32_t l0a_bytes = 0;
   uint32_t l0b_bytes = 0;

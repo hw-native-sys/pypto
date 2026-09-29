@@ -531,13 +531,13 @@ def test_padded_n_boundary_retains_valid_shape_through_inner_k_rewrite():
         after = passes.auto_tile_matmul_l0()(before)
 
     printed = ir.python_print(after)
-    assert printed.count("in pl.pipeline(2, stage=2") == 4
-    assert printed.count("pl.tile.store(") == 4
+    assert printed.count("in pl.pipeline(2, stage=2") == 3
+    assert printed.count("pl.tile.store(") == 3
     assert "[384, 32], [384, 16], target_memory=pl.Mem.Mat" in printed
     assert (
-        "[192, 32], pl.INT8, pl.Mem.Right, pl.TileView(valid_shape=[192, 16], compact=pl.CompactMode.normal)"
+        "[96, 32], pl.INT8, pl.Mem.Right, pl.TileView(valid_shape=[96, 16], compact=pl.CompactMode.normal)"
     ) in printed
-    assert "pl.Tile[[144, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[144, 16])]" in printed
+    assert "pl.Tile[[272, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[272, 16])]" in printed
     assert "pl.tile.set_validshape(" in printed
     assert "pl.tile.store(acc__rv_v2_mn2, [0, 128]" in printed
 
@@ -550,13 +550,13 @@ def test_predicated_padded_n_boundary_retains_valid_shape_through_inner_k_rewrit
         after = passes.auto_tile_matmul_l0()(before)
 
     printed = ir.python_print(after)
-    assert printed.count("in pl.pipeline(2, stage=2") == 4
-    assert printed.count("pl.tile.store(") == 4
+    assert printed.count("in pl.pipeline(2, stage=2") == 3
+    assert printed.count("pl.tile.store(") == 3
     assert "[384, 32], [384, 16], target_memory=pl.Mem.Mat" in printed
     assert (
-        "[192, 32], pl.INT8, pl.Mem.Right, pl.TileView(valid_shape=[192, 16], compact=pl.CompactMode.normal)"
+        "[96, 32], pl.INT8, pl.Mem.Right, pl.TileView(valid_shape=[96, 16], compact=pl.CompactMode.normal)"
     ) in printed
-    assert "pl.Tile[[144, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[144, 16])]" in printed
+    assert "pl.Tile[[272, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[272, 16])]" in printed
     assert "pl.tile.set_validshape(" in printed
     assert "pl.tile.store(acc__rv_v2_mn2, [0, 128]" in printed
 
@@ -850,7 +850,7 @@ def test_canonical_split_k_boundary_codegen_uses_box_aligned_physical_width():
     # carries.  Pin the pair on the buffer the boundary tstore actually drains.
     tail_store = re.search(
         r"pto\.tstore ins\((?P<acc>%[\w.]+) : !pto\.tile_buf<loc=acc, dtype=i32, "
-        r"rows=(?P<rows>128|144), cols=32,[^)]*\) outs\([^)]*<(?P=rows)x16xi32>\)",
+        r"rows=(?P<rows>272), cols=32,[^)]*\) outs\([^)]*<(?P=rows)x16xi32>\)",
         pto,
     )
     assert tail_store, pto
@@ -867,7 +867,7 @@ def test_canonical_split_k_boundary_codegen_uses_box_aligned_physical_width():
         pto,
     ), pto
     assert re.search(
-        r"!pto\.tile_buf<loc=right, dtype=i8, rows=192, cols=32, "
+        r"!pto\.tile_buf<loc=right, dtype=i8, rows=96, cols=32, "
         r"v_row=\?, v_col=\?, blayout=row_major, slayout=col_major, fractal=512, pad=0, compact=1>",
         pto,
     ), pto
@@ -970,6 +970,37 @@ def _predicated_canonical_split_k(M: int, N: int, K_total: int, K_tile: int):
     return Before
 
 
+@pytest.mark.parametrize("iterations", [2, 8, 32])
+def test_canonical_grid_chooser_receives_complete_reduction(iterations):
+    """The emitted grid must agree with a chooser given the source loop count."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910B)
+    before = _predicated_canonical_split_k(256, 384, 128 * iterations, 128)
+    cfg = passes.l0_tile_chooser.L0TileConfig()
+    cfg.M, cfg.N, cfg.K = 256, 384, 128
+    cfg.l0a_bytes = cfg.l0b_bytes = 65536
+    cfg.l0c_bytes = 131072
+    cfg.allow_double_buffer_c = True
+    cfg.allow_unrolled_dbc_m_boundary = False
+    cfg.full_k_dbc_route = passes.l0_tile_chooser.DbcEmissionRoute.UnrolledGrid
+    cfg.reduction_iterations = iterations
+    expected = passes.l0_tile_chooser.choose_l0_tile(cfg)
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+        after = passes.auto_tile_matmul_l0()(before)
+    stores = _collect_store_calls(after)
+    assert len(stores) == ((256 + expected.m - 1) // expected.m) * ((384 + expected.n - 1) // expected.n)
+    output_type = stores[0].args[0].type
+    assert isinstance(output_type, ir.TileType)
+    assert len(output_type.shape) == 2
+    for extent, expected_extent in zip(output_type.shape, (expected.m, expected.n)):
+        assert isinstance(extent, ir.ConstInt)
+        assert extent.value == expected_extent
+    text = ir.python_print(after)
+    assert ("slots=2" in text) == expected.double_buffer_c
+    # Each emitted tile retains the whole original reduction, not one source block.
+    assert text.count(f"pl.pipeline(0, {128 * iterations}, 128,") == len(stores)
+
+
 @pytest.mark.parametrize(
     ("M", "N", "K_total", "K_tile", "tiles"),
     [(256, 384, 256, 128, 6), (384, 384, 256, 128, 9)],
@@ -1039,20 +1070,20 @@ def test_canonical_split_k_dbc_membership_survives_inner_k_retiling(source_k_til
     """
     _backend.reset_for_testing()
     _backend.set_backend_type(BackendType.Ascend910B)
-    before = _predicated_canonical_split_k(128, 256, 512, source_k_tile)
+    before = _predicated_canonical_split_k(256, 384, 512, source_k_tile)
     with passes.PassContext([], memory_planner=planner, enable_pypto_l0c_double_buffer=True):
         after = passes.auto_tile_matmul_l0()(before)
         allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(before)
     printed = ir.python_print(after)
-    assert printed.count("pl.tile.store(") == 2, printed
+    assert printed.count("pl.tile.store(") == 6, printed
     stages = re.findall(r'"pipeline_membership": "2097152:(\d+)"', printed)
-    assert stages == ["0", "1"], printed
+    assert stages == ["0", "1"] * 3, printed
 
     # Check physical storage, not allocation-root count: DSA-RP can retain two
     # roots yet give them the same address when the stage declaration is lost.
     stores = _StoreCallCollector()
     stores.visit_program(allocated)
-    assert len(stores.calls) == 2
+    assert len(stores.calls) == 6
     memrefs = []
     for call in stores.calls:
         tile_type = call.args[0].type
