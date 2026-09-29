@@ -218,6 +218,19 @@ def test_nonreviewable_or_obsolete_pr(collector, pr, monkeypatch, kind):
     assert collector.review_target("pull_request_target", event, "owner/repo") is None
 
 
+@pytest.mark.parametrize("base_ref", ["main", "release", "feature/main"])
+@pytest.mark.parametrize("event_name", ["pull_request_target", "issue_comment"])
+def test_reviews_only_target_main(collector, pr, comment_event, monkeypatch, base_ref, event_name):
+    pr["base"]["ref"] = base_ref
+    event = (
+        {"action": "opened", "sender": {"type": "User"}, "pull_request": pr}
+        if event_name == "pull_request_target"
+        else comment_event
+    )
+    monkeypatch.setattr(collector, "github_api", lambda *args: pr)
+    assert (collector.review_target(event_name, event, "owner/repo") is not None) is (base_ref == "main")
+
+
 def test_thread_and_reply_pagination(collector, monkeypatch):
     """Retain corrections after both outer thread and inner reply pagination boundaries."""
     calls = []

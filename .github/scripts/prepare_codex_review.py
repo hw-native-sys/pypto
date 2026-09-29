@@ -92,7 +92,12 @@ def review_target(event_name: str, event: dict, repo: str) -> dict | None:
         return None
     number = str(candidate["number"])
     pr = github_api(pull_request_endpoint(repo, number))
-    if pr["state"] != "open" or pr["draft"] or pr["base"]["repo"]["full_name"] != repo:
+    if (
+        pr["state"] != "open"
+        or pr["draft"]
+        or pr["base"]["ref"] != "main"
+        or pr["base"]["repo"]["full_name"] != repo
+    ):
         return None
     if event_name == "pull_request_target" and (
         candidate["head"]["sha"] != pr["head"]["sha"] or candidate["base"]["ref"] != pr["base"]["ref"]

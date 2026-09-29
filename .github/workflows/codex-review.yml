@@ -5,6 +5,8 @@ name: Codex Review
 # isolated container checks out and reviews untrusted code from the PR.
 on:
   pull_request_target:
+    # Keep all base branches for approval invalidation and session cleanup.
+    # Only the prepare job may start reviews, and it requires main.
     types: [opened, synchronize, reopened, ready_for_review, edited, closed]
   issue_comment:
     types: [created]
@@ -92,6 +94,7 @@ jobs:
       (needs.invalidate.result == 'success' || needs.invalidate.result == 'skipped') &&
       vars.CODEX_REVIEW_ENABLED == 'true' &&
       ((github.event_name == 'pull_request_target' &&
+        github.event.pull_request.base.ref == 'main' &&
         github.event.action != 'closed' &&
         github.event.pull_request.draft == false &&
         (github.event.action != 'edited' || github.event.changes.base) &&

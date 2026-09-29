@@ -743,8 +743,9 @@ def workflow_expression(expression, context, *, cancelled=False, success=True):
         ("edited", True, "User", False, "true", "cancelled", True, False),
     ],
 )
+@pytest.mark.parametrize("base_ref", ["main", "release"])
 def test_workflow_retarget_gates(
-    workflow, action, retarget, actor, draft, enabled, invalidation, invalidates, reviews
+    workflow, action, retarget, actor, draft, enabled, invalidation, invalidates, reviews, base_ref
 ):
     """Retargets invalidate first and unrelated edits never enqueue review jobs."""
     trigger = workflow.get("on", workflow.get(True))
@@ -757,7 +758,7 @@ def test_workflow_retarget_gates(
                 "action": action,
                 "changes": {"base": {"ref": {"from": "main"}}} if retarget else {},
                 "sender": {"type": actor},
-                "pull_request": {"draft": draft, "number": 12},
+                "pull_request": {"draft": draft, "number": 12, "base": {"ref": base_ref}},
             },
         },
         "vars": {"CODEX_REVIEW_ENABLED": enabled},
@@ -765,7 +766,9 @@ def test_workflow_retarget_gates(
     }
     assert bool(workflow_expression(workflow["jobs"]["invalidate"]["if"], context)) == invalidates
     assert workflow["jobs"]["prepare"]["needs"] == "invalidate"
-    assert bool(workflow_expression(workflow["jobs"]["prepare"]["if"], context)) == reviews
+    assert bool(workflow_expression(workflow["jobs"]["prepare"]["if"], context)) == (
+        reviews and base_ref == "main"
+    )
     assert not workflow_expression(workflow["jobs"]["prepare"]["if"], context, cancelled=True)
 
 

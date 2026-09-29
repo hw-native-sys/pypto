@@ -36,7 +36,7 @@ PyPTO 的构成：IR、pass 流水线、代码生成，以及围绕它们的基�
 
 ## 自动 PR 审查
 
-`Codex Review` GitHub Actions 工作流会在非草稿 PR 创建、重新打开、更新或标记为
+`Codex Review` GitHub Actions 工作流仅审查目标分支为 `main` 的非草稿 PR，在其创建、重新打开、更新或标记为
 可审查（ready for review）时进行审查。工作流定义取自主分支的受信任版本，将 PR
 head 作为不可信输入检出，并由独立的 GitHub 托管任务（GitHub-hosted job）发布结果。
 
@@ -63,7 +63,7 @@ head 作为不可信输入检出，并由独立的 GitHub 托管任务（GitHub-
 失效；需要结合新增纠正重新评估时，请再次触发审查。
 
 PR 作者或具有 write、maintain、admin 权限的协作者可以在没有新 push 时请求
-重新审查。在 PR 的 **Conversation 页新增一条评论**，将以下命令独立放在一行
+重新审查，仅适用于目标分支为 `main` 的 PR。在 PR 的 **Conversation 页新增一条评论**，将以下命令独立放在一行
 （前面可以附上解释）：
 
 ```text

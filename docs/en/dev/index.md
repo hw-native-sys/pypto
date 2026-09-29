@@ -38,7 +38,7 @@ PyPTO programs, start with the [User Manual](../user/index.md).
 
 ## Automated PR Review
 
-The `Codex Review` GitHub Actions workflow reviews non-draft pull requests when
+The `Codex Review` GitHub Actions workflow reviews only non-draft pull requests targeting `main` when
 they are opened, reopened, updated, or marked ready for review. It uses the
 trusted workflow from the default branch, checks out the pull request head as
 untrusted input, and posts the result from a separate GitHub-hosted job.
@@ -73,7 +73,7 @@ Later discussion changes do not invalidate an otherwise valid approval; request
 another review after posting a correction when a new assessment is needed.
 
 The PR author or a collaborator with write, maintain, or admin permission can
-request another review without pushing. Add a **new PR Conversation comment**
+request another review without pushing for PRs targeting `main`. Add a **new PR Conversation comment**
 containing this exact command on its own line (explanations can precede it):
 
 ```text
