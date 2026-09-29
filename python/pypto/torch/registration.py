@@ -79,7 +79,9 @@ class RegistrationSignature:
     def __init__(self, params: Sequence[ParamInfo], *, return_aliases: Sequence[int] = ()) -> None:
         """Copy the signature and reject contracts the helper cannot express."""
         self._params = tuple(
-            ParamInfo(p.name, p.direction, list(p.shape) if p.shape is not None else None, p.dtype)
+            ParamInfo(
+                p.name, p.direction, list(p.shape) if p.shape is not None else None, p.dtype, layout=p.layout
+            )
             for p in params
         )
         self._return_aliases = tuple(return_aliases)

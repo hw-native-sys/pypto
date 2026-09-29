@@ -59,6 +59,21 @@ def abi(params):
     )
 
 
+def test_nz_layout_survives_descriptor_and_sidecar(tmp_path):
+    """A Native NZ permission must come from the kernel signature, including after reload."""
+    params = [ParamInfo("w", ParamDirection.In, [32, 64], DataType.BF16, layout="NZ")]
+    abi = kernel_abi_from_params(
+        params, platform="a2a3", runtime="tensormap_and_ringbuffer", return_aliases=()
+    )
+    assert abi.record()["params"][0]["layout"] == "NZ"
+    assert KernelABI.from_record(abi.record()) == abi
+    write_kernel_metadata(tmp_path, params, abi)
+    assert load_kernel_metadata(tmp_path, abi)["kernel_abi"] == abi
+    nd = KernelABI("a2a3", "tensormap_and_ringbuffer", (KernelParameter("w", "bfloat16", "In", (32, 64)),))
+    with pytest.raises(ValueError, match="does not match"):
+        nd.require_compatible(abi)
+
+
 def test_interleaved_pools_preserve_values_and_aliases(params, abi):
     x, out = object(), object()
     for scale, step in ((1.25, 0), (-3.5, 9)):

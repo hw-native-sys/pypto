@@ -70,12 +70,15 @@ class KernelParameter:
     dtype: str
     direction: str
     shape: tuple[int, ...] | None
+    layout: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name:
             raise ValueError(f"Kernel parameter requires a nonempty name, got {self.name!r}")
         if self.direction not in ("In", "Out", "InOut"):
             raise ValueError(f"Invalid kernel direction for {self.name!r}: {self.direction!r}")
+        if self.layout not in (None, "DN", "NZ") or (self.shape is None and self.layout is not None):
+            raise ValueError(f"Invalid kernel layout for {self.name!r}: {self.layout!r}")
         if self.shape is None:
             if self.direction != "In" or self.dtype not in SCALAR_FORMATS:
                 raise ValueError(f"Unsupported kernel scalar {self.name!r}: {self.dtype}/{self.direction}")
@@ -157,6 +160,8 @@ class KernelABI:
                 entry.update(kind="scalar", scalar_index=scalar_index, encoding=SCALAR_FORMATS[param.dtype])
                 scalar_index += 1
             else:
+                if param.layout is not None:
+                    entry["layout"] = param.layout
                 entry.update(
                     kind="tensor",
                     tensor_index=tensor_index,
@@ -184,7 +189,8 @@ class KernelABI:
             raise ValueError("Kernel ABI must be an explicit descriptor object; recompile")
         try:
             params = tuple(
-                KernelParameter(p["name"], p["dtype"], p["direction"], p["shape"]) for p in value["params"]
+                KernelParameter(p["name"], p["dtype"], p["direction"], p["shape"], p.get("layout"))
+                for p in value["params"]
             )
             result = cls(
                 value["platform"],

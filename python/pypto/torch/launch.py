@@ -60,10 +60,11 @@ def _describe(abi: KernelABI, args: Sequence[Any]) -> CallFrame:
             getattr(ParamDirection, p.direction),
             list(p.shape) if p.shape is not None else None,
             getattr(DataType, "BF16" if p.dtype == "bfloat16" else p.dtype.upper()),
+            layout=p.layout,
         )
         for p in abi.parameters
     ]
-    return CallSignature(params, return_aliases=abi.return_aliases).describe_call(args)
+    return CallSignature(params, return_aliases=abi.return_aliases, platform=abi.platform).describe_call(args)
 
 
 def describe_eager_call(abi: KernelABI, args: Sequence[Any], bound: "KernelConfig") -> CallFrame:

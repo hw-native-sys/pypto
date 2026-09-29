@@ -9,6 +9,7 @@
 
 """Internal kernel artifact producer; public compile() remains a program entry."""
 
+import math
 import json
 from collections.abc import Mapping
 from pathlib import Path
@@ -181,6 +182,30 @@ def validate_hbg_kernel_orchestration(program: Program) -> None:
         HostAccessVisitor(func.name).run(func.body)
 
 
+def _external_pool_key(param: "KernelParameter") -> tuple:
+    """Identity of one externally supplied pool: dtype, direction, element count.
+
+    The shape itself is deliberately not part of the key. A lowering pass may
+    re-describe the same buffer with a different shape: ``BlockNzTensorViews``
+    rewrites an ``NZ`` tensor's GM view from its logical shape to the rank-5
+    blocked shape ``[C/c0, R/16, 16, c0]`` (e.g. ``(8, 1024, 4096)`` becomes
+    ``(8, 256, 64, 16, 16)``), which is the same memory, the same byte count, at
+    the same pool index. What this check exists to catch is lowering *introducing,
+    dropping or reordering* the external pools, and that is still caught: the
+    element count, dtype, direction and position all have to line up.
+
+    The caller-facing contract stays the logical shape, because ``abi`` is derived
+    from the original program and that is the shape the framework passes tensors
+    in. A dynamic extent falls back to a per-dimension comparison, since an
+    element count cannot be formed from it.
+    """
+    if param.shape is None:
+        return (param.dtype, param.direction, None)
+    if -1 in param.shape:
+        return (param.dtype, param.direction, tuple(param.shape))
+    return (param.dtype, param.direction, math.prod(param.shape))
+
+
 def finish_kernel_artifact(
     original: Program, lowered: Program, directory: Path, abi: KernelABI
 ) -> "KernelArtifact":
@@ -194,9 +219,21 @@ def finish_kernel_artifact(
     actual = kernel_abi_from_params(
         params, platform=abi.platform, runtime=abi.runtime, return_aliases=abi.return_aliases
     )
-    expected = [(p.dtype, p.direction, p.shape) for p in abi.parameters]
-    if [(p.dtype, p.direction, p.shape) for p in actual.parameters] != expected:
-        raise ValueError("Lowering changed the kernel entry parameter ABI")
+    expected = [_external_pool_key(p) for p in abi.parameters]
+    if [_external_pool_key(p) for p in actual.parameters] != expected:
+        # Name what actually moved: a bare "the ABI changed" leaves the caller to
+        # guess which parameter, and the shape-only cases (a pass re-describing the
+        # same buffer) look identical to a genuinely reordered pool.
+        detail = []
+        if len(actual.parameters) != len(abi.parameters):
+            detail.append(f"parameter count {len(abi.parameters)} -> {len(actual.parameters)}")
+        for index, (want, got) in enumerate(zip(abi.parameters, actual.parameters)):
+            if (want.dtype, want.direction, want.shape) != (got.dtype, got.direction, got.shape):
+                detail.append(
+                    f"#{index} {want.name!r}: {want.dtype}/{want.direction}/{want.shape}"
+                    f" -> {got.name!r}: {got.dtype}/{got.direction}/{got.shape}"
+                )
+        raise ValueError("Lowering changed the kernel entry parameter ABI: " + "; ".join(detail))
     config = read_kernel_config(directory / "kernel_config.py")
     validate_kernel_config(config, abi)
     source = Path(config.ORCHESTRATION["source"])
