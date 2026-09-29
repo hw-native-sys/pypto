@@ -23,6 +23,9 @@ def init(
     enable_chip_swimlane: int | bool = 0,
     enable_dep_gen: bool = False,
     output_dir: str | Path | None = None,
+    ring_task_window: int | tuple[int, ...] | None = None,
+    ring_heap: int | tuple[int, ...] | None = None,
+    ring_dep_pool: int | tuple[int, ...] | None = None,
 ) -> None:
     """Fix this process's kernel execution target and initialize its Worker.
 
@@ -47,6 +50,14 @@ def init(
             Use begin_dfx/end_dfx outside capture to select measured launches.
         enable_dep_gen: Collect the task graph independently of timing.
         output_dir: Artifact directory, required when either diagnostic is enabled.
+        ring_task_window: Per-ring task-window depth, a scalar broadcast to every
+            scope-depth ring or exactly four values. None keeps the runtime default.
+        ring_heap: Per-ring device heap in **bytes**, same scalar/4-tuple shape.
+            The kernel arena is built once here and frozen, so a process whose
+            task graph needs less than the 256 MiB-per-ring default can reclaim
+            the difference -- it is device memory the runtime holds for its life.
+            Too small a heap is a runtime fault at dispatch, not a silent slowdown.
+        ring_dep_pool: Per-ring dependency-list pool capacity, same shape.
 
     Raises:
         TypeError: ``device`` is neither None nor an int.
@@ -88,7 +99,16 @@ def init(
             f"call torch.npu.set_device({device}) first"
         )
     config = KernelConfig(
-        platform, runtime, current, aicpu_thread_num, enable_chip_swimlane, enable_dep_gen, output_dir
+        platform,
+        runtime,
+        current,
+        aicpu_thread_num,
+        enable_chip_swimlane,
+        enable_dep_gen,
+        output_dir,
+        ring_task_window,
+        ring_heap,
+        ring_dep_pool,
     )
     # Every check below runs before ensure_worker claims kernel mode.
     shutdown.require_supported_framework(framework)

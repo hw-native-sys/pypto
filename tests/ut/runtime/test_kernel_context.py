@@ -728,5 +728,108 @@ def test_native_worker_forwards_dfx_config_and_uses_owner_thread(monkeypatch, tm
         adapter.close()
 
 
+def test_kernel_config_normalizes_ring_sizing():
+    # 标量广播到全部 4 个 ring，与 RunOptions 的同名字段语义一致。
+    config = KernelConfig("a2a3", "tensormap_and_ringbuffer", 0, ring_heap=64 * 1024 * 1024)
+    assert config.ring_heap == (64 * 1024 * 1024,) * 4
+    assert config.ring_task_window is None and config.ring_dep_pool is None
+    # 逐 ring 的列表原样保留，但存成元组：KernelConfig 是 frozen dataclass，
+    # ensure_worker 用相等性判定"同一配置的重复 init 是 no-op"，必须可哈希且稳定。
+    config = KernelConfig(
+        "a2a3", "tensormap_and_ringbuffer", 0, ring_task_window=[16, 32, 128, 256]
+    )
+    assert config.ring_task_window == (16, 32, 128, 256)
+    assert hash(config) == hash(
+        KernelConfig("a2a3", "tensormap_and_ringbuffer", 0, ring_task_window=(16, 32, 128, 256))
+    )
+    # 未设置与设置过的配置不相等，否则第二次 init 会被误判成 no-op。
+    assert KernelConfig("a2a3", "tensormap_and_ringbuffer", 0) != config
+
+
+@pytest.mark.parametrize(
+    "field, value, match",
+    [
+        ("ring_heap", [1, 2, 3], "exactly 4 per-ring values"),
+        ("ring_task_window", (4, 8, 16, 32, 64), "exactly 4 per-ring values"),
+        ("ring_dep_pool", 0, "positive ints"),
+        ("ring_heap", [1024, 1024, -1, 1024], "positive ints"),
+    ],
+)
+def test_kernel_config_rejects_bad_ring_sizing(field, value, match):
+    with pytest.raises(ValueError, match=match):
+        KernelConfig("a2a3", "tensormap_and_ringbuffer", 0, **{field: value})
+
+
+def test_native_worker_forwards_ring_sizing_only_when_set(monkeypatch, tmp_path):
+    """kernel 模式下 init 是 ring 尺寸的唯一入口，所以这一步必须真的写进 CallConfig。
+
+    arena 由 init_kernel_context -> prepare_kernel_runtime_impl 在 init 期间按
+    CallConfig.runtime_env 建好并冻结，之后的 prepare_callable / launch 都不再
+    携带 CallConfig；写漏了就只能吃编译期默认的 4 x 256 MiB。
+    """
+    import sys  # noqa: PLC0415
+
+    from pypto.runtime.kernel import abi  # noqa: PLC0415
+    from pypto.runtime.kernel.owner import _OwnerThread  # noqa: PLC0415
+
+    def make_adapter(cfg, worker):
+        monkeypatch.setitem(
+            sys.modules,
+            "simpler.task_interface",
+            SimpleNamespace(CallConfig=lambda: cfg, ChipWorker=lambda: worker),
+        )
+        builder = SimpleNamespace(get_binaries=lambda runtime, build: "bins")
+        monkeypatch.setitem(
+            sys.modules,
+            "simpler_setup.runtime_builder",
+            SimpleNamespace(RuntimeBuilder=lambda platform: builder),
+        )
+        adapter = object.__new__(abi._NativeWorker)
+        adapter._native = SimpleNamespace(bind_context=lambda context: None)
+        adapter._context = object()
+        adapter.worker = None
+        adapter._owner = _OwnerThread()
+        return adapter
+
+    def fresh():
+        # 真实的 RuntimeEnv 读回来是 4 元列表，未设置即全零；这里用 0 代表"没写过"。
+        env = SimpleNamespace(ring_task_window=0, ring_heap=0, ring_dep_pool=0)
+        cfg = SimpleNamespace(validate=lambda: None, runtime_env=env)
+        worker = SimpleNamespace(
+            kernel_init=lambda device, bins, config: None,
+            kernel_mode_supported=True,
+            finalize=lambda: None,
+        )
+        return cfg, env, worker
+
+    cfg, env, worker = fresh()
+    adapter = make_adapter(cfg, worker)
+    try:
+        adapter.init(
+            KernelConfig(
+                "a2a3",
+                "tensormap_and_ringbuffer",
+                0,
+                ring_task_window=2048,
+                ring_heap=[128, 64, 256, 16],
+                ring_dep_pool=4096,
+            )
+        )
+        assert env.ring_task_window == [2048] * 4
+        assert env.ring_heap == [128, 64, 256, 16]
+        assert env.ring_dep_pool == [4096] * 4
+    finally:
+        adapter.close()
+
+    # 不给 ring 尺寸时一个字段都不能碰，否则 Simpler 落不到自己的编译期默认。
+    cfg, env, worker = fresh()
+    adapter = make_adapter(cfg, worker)
+    try:
+        adapter.init(KernelConfig("a2a3", "tensormap_and_ringbuffer", 0))
+        assert (env.ring_task_window, env.ring_heap, env.ring_dep_pool) == (0, 0, 0)
+    finally:
+        adapter.close()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
