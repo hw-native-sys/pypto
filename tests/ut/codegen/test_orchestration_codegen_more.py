@@ -2245,5 +2245,57 @@ class TestOrchestrationMore:
         assert "rt_submit_aiv_task" not in code, code
 
 
+@pytest.mark.parametrize("dynamic_batch", [False, True])
+def test_nz_entry_restates_shape_before_slice_and_flatten(dynamic_batch):
+    """Runtime views must clamp against blocked extents, including a dynamic batch."""
+    batch = pl.dynamic("NZ_ENTRY_BATCH") if dynamic_batch else 3
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, w: pl.Tensor[[batch, 256, 512], pl.INT8, pl.NZ]) -> pl.Tensor[[256 * 512], pl.INT8]:
+            layer = pl.slice(w, [1, 256, 512], [1, 0, 0])
+            flat = pl.reshape(layer, [256 * 512])
+            return flat
+
+    with passes.PassContext([]):
+        blocked = passes.block_nz_tensor_views()(Before)
+    code = _generate_orch_code(blocked)
+    batch_extent = "ext_w_logical.shapes[0]" if dynamic_batch else "3"
+    assert f"uint32_t ext_w_nz_shapes[5] = {{{batch_extent}, 16, 16, 16, 32}};" in code
+    assert "Tensor ext_w = ext_w_logical.reshape(ext_w_nz_shapes, 5);" in code
+    assert "ext_w.view(" in code
+    assert code.index("ext_w_logical.reshape(") < code.index("ext_w.view(")
+    assert ".reshape(flat_shapes, 1)" in code
+
+
+def test_nz_entry_temporary_names_do_not_collide_with_later_parameters():
+    """NZ temporaries and parameter references share the entry's C++ scope."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            w: pl.Tensor[[3, 256, 512], pl.INT8, pl.NZ],
+            w_logical: pl.Tensor[[256, 512], pl.INT8],
+            w_nz_shapes: pl.Tensor[[256, 512], pl.INT8],
+        ) -> pl.Tensor[[256 * 512], pl.INT8]:
+            layer = pl.slice(w, [1, 256, 512], [1, 0, 0])
+            return pl.reshape(layer, [256 * 512])
+
+    with passes.PassContext([]):
+        blocked = passes.block_nz_tensor_views()(Before)
+    code = _generate_orch_code(blocked)
+    declarations = re.findall(r"\b(?:const Tensor&|Tensor|uint32_t)\s+(ext_\w+)\b", code)
+    assert len(declarations) == len(set(declarations)), code
+    logical = re.search(r"const Tensor& (\w+) = orch_args.tensor\(0\).ref\(\);", code)
+    shapes = re.search(r"uint32_t (\w+)\[5\] = \{3, 16, 16, 16, 32\};", code)
+    assert logical is not None and shapes is not None, code
+    assert f"Tensor ext_w = {logical[1]}.reshape({shapes[1]}, 5);" in code
+    assert "const Tensor& ext_w_logical = orch_args.tensor(1).ref();" in code
+    assert "const Tensor& ext_w_nz_shapes = orch_args.tensor(2).ref();" in code
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

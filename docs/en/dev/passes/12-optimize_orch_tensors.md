@@ -72,6 +72,8 @@ for i in pl.range(N, init_values=[init_buf]):
 
 **Solution**: Analyze `tensor.slice(parent, size, offset)` patterns in orchestration. When a slice result is passed as an `In` argument to an InCore call, attach the parent tensor's shape-derived strides via `TensorView` on the InCore function's `In` param type, so `tile.load` uses the correct memory layout.
 
+An `In` param declared `pl.NZ` is skipped: its bytes are fractal-blocked, so row-major parent strides do not describe them. `BlockNzTensorViews` derives its strides from the blocked shape and rejects an explicit one.
+
 ### Pattern 5: Static Window Externalization
 
 Pattern 5 runs **only** on InCore-type functions (`InCore`, `AIC`, or `AIV`) explicitly annotated with `windowize=True`. Unannotated kernels are never windowed regardless of access pattern.

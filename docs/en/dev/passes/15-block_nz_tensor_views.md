@@ -127,11 +127,17 @@ the enclosing function in one read-only sweep:
 | ------- | --------------------------- | ------------ |
 | `AssignStmt` (`n0 = nb * 256`) | one factor of the product is a multiple | both factors are non-negative |
 | `ForStmt` (`for k0 in pl.pipeline(512, 4096, 512)`) | `start` and `step` are both multiples | `start` and `step` are both non-negative |
+| `ForStmt` with a symbolic start (`for ob in pl.range(core, TILES, CORES)`) | both recurse into `start` and `step` | both recurse into `start` and `step` |
+| `Min` / `Max` (`min(800 - o0, 256)`) | both operands are multiples | `Min`: both operands; `Max`: either one |
 | `tile.get_block_idx` / `tile.get_block_num` | — | a lane number is never negative |
+| `FloorMod` / `FloorDiv` by a positive constant (`(blk % 2) * 512`) | the other factor carries it | both recurse: the dividend must be non-negative too |
 | `ConstInt` | the value is a multiple | the value is `>= 0` |
 
 Sums and products compose from those; a difference proves divisibility but never
-its sign, so it is refused. **Both** columns must hold — see [Why the sign is
+its sign, so it is refused. Division by a positive constant is proven from its
+dividend rather than from the operation's name: `FloorMod` lowers to
+`arith.remsi` and `FloorDiv` to `arith.divsi`, which truncate toward zero, so
+a negative dividend yields a negative remainder. **Both** columns must hold — see [Why the sign is
 proven too](#why-the-sign-is-proven-too). The grouped-matmul weight path that
 motivated the feature therefore compiles:
 
@@ -242,11 +248,18 @@ diagnostic naming the fix — an NZ tensor must never be silently mis-addressed.
 | symbolic trailing slice offset, sign not provable | rejected — a negative offset is clamped, not caught, at the partition view |
 | logical rank 2 | blocked to `[1, C/c0, R/16, 16, c0]` — batch materialised |
 | logical rank 3 | blocked to `[B, C/c0, R/16, 16, c0]` — leading axis is the batch |
+| logical rank > 3 | blocked with every leading axis folded into the batch (see below) |
 | logical rank < 2 | rejected — the trailing pair is the fractal plane |
-| logical rank > 3 | rejected — one batch slot cannot hold two leading axes (see below) |
+| dynamic leading extent, rank > 3 | rejected — the fold needs static extents to multiply |
 | `target_memory != Mat` (or absent) | rejected — NZ→NZ is the cube operand path |
-| consumer other than `tile.load` | rejected — NZ is read-only here |
+| `tensor.slice` narrowing the leading axes only | blocked like the load that follows it (see below) |
+| `tensor.slice` windowing the trailing `[R, C]` pair | rejected — the window is not contiguous |
+| `tensor.reshape` flattening the whole tensor to `[N]` | kept as written — see [Flattening an NZ tensor](#flattening-an-nz-tensor) |
+| `tensor.reshape` to any other shape | rejected — it reinterprets coordinates the blocked form does not carry |
+| consumer other than `tile.load` / `tensor.slice` / a whole-tensor flatten | rejected — NZ is read-only here |
 | explicit stride or partial `valid_shape` | rejected |
+| dynamic `valid_shape[-2]` provably a multiple of 16 (a ragged last tile) | blocked — the row-fractal count becomes `FloorDiv(rows, 16)` |
+| dynamic `valid_shape[-2]` that may end inside a fractal | rejected — a partial fractal has no blocked form |
 | distributed tensor | rejected — `remote_load` has no NZ blocking |
 | `tensor.view` / `tensor.reinterpret_view` of NZ | rejected at op construction |
 | GM row gap above 65535 blocks, on a multi-column-block load | rejected — **temporary**, see [GM row gap](#gm-row-gap-a-temporary-guard) |
@@ -294,7 +307,9 @@ a narrowed `valid_shape` loads **fewer** row fractals and leaves a **larger**
 gap than `shapes` alone would suggest. A `[65552, 64]` INT8 weight read with
 `shapes=[32, 64]` and `valid_shape=[16, 64]` emits
 `partition_tensor_view<1x2x1x16x32>` and so a gap of 65536, not the 65520
-`shapes` implies.
+`shapes` implies. When the loaded row extent is dynamic (a ragged last tile),
+the check takes the worst case, nothing loaded, so a load that passes fits
+for every run-time width.
 
 **A single-column-block load is exempt.** `TLoadGm2L1Nz2nz` passes the load's
 column-block extent as `nBurst`, and the DMA applies `gmGap` only when stepping
@@ -305,20 +320,66 @@ load at `gShape1 = 2` corrupts 1837/4096 elements.
 
 [hw-native-sys/pto-isa#317]: https://github.com/hw-native-sys/pto-isa/issues/317
 
-### Why logical rank 4+ is rejected
+### Leading axes fold into the one batch slot
 
 pto-isa's NZ `GlobalTensor` has exactly **one** batch slot, so a logical
-`[G, E, N, K]` weight would have to fold its two leading axes into it. That fold
-is sound on the *shape* — a dense row-major tensor's leading strides collapse
-exactly, `G*E` with stride `C*R` — but not on the *offsets*: a slice `w[g, e, ...]`
-would need the coordinate re-associated into `g*E + e`, which is precisely the
-arithmetic `BlockNzOffsets` refuses to invent (see [Symbolic trailing
-offsets](#symbolic-trailing-offsets) for why re-association is unsound in
-general). Rejecting names the restriction at the annotation; the alternative is a
-view PTOAS refuses while naming SSA the user never wrote.
+`[G, E, N, K]` weight folds its two leading axes into it: the blocked batch is
+`G*E`, with stride `C*R`. The fold is exact because those axes are dense and
+row-major — it removes only the strides it multiplies back in — and an offset
+folds the same way, `[g, e, 0, 0]` addressing batch `g*E + e`
+(`FoldNzLeadingOffsets`).
 
-Reshape to `[B, R, C]` before the NZ annotation, or annotate the tensor as
-`pl.ND`.
+That is *not* the re-association [the trailing offsets
+refuse](#why-the-offset-is-divided-not-re-associated): nothing is divided and
+nothing is assumed about alignment, so the fold is exact for every coordinate,
+not only aligned ones. It is the same arithmetic the ND path performs at address
+computation, written once into the coordinate instead.
+
+The extents being folded must be static — a dynamic one cannot be multiplied
+into the batch — which the diagnostic names.
+
+A dynamic batch is supported for logical rank-3 `[B, R, C]` parameters. Their
+`DeviceTensor.shape` or `StackedDeviceTensor.full_shape` must also have rank 3:
+the entry reads `B` from the first logical extent. Rank-2 or rank-4+ arguments
+are rejected before dispatch, even when their blocked shape would otherwise match.
+
+A rank-4 parameter is what a multi-card entry declares (`[RANKS, E, R, C]`,
+sliced per rank before dispatch), so the fold is what lets a distributed program
+carry NZ weights at all.
+
+### Slicing an NZ tensor
+
+A layer- or rank-stacked weight reaches its kernel through `tensor.slice`, so
+the slice blocks like the `tile.load` that follows it: the shapes and offsets
+become rank-5, and a rank-reducing scalar index (`w[r]`) needs no `drop_dims`
+afterwards because the fold already collapsed every leading axis.
+
+Only the **leading** axes may be narrowed. A window inside the trailing `[R, C]`
+pair is rejected: in NZ order one layer's rows sit inside *every* fractal column
+block, so `[layer*R, 0]` selects `C/c0` disjoint runs, and the blocked view has
+no stride of its own to describe them — `MaterializeTensorStrides` derives a
+row-major one from the blocked shape. Annotate the stacked axis as a leading
+axis (`[LAYERS, R, C]`) instead of stacking rows.
+
+### Flattening an NZ tensor
+
+A rank-1 view of *every* element is layout-invariant: the blocked form permutes
+the index space, not the memory, so both spellings walk the same contiguous GM
+range in the same order. Such a `tensor.reshape` is therefore kept exactly as
+written — no coordinate rewrite, and the result is ND, which is what
+`prefetch.async_prefetch` wants of its source. Without it, annotating a weight
+`pl.NZ` would silently cost it its SDMA L2 warm.
+
+Any other target shape does reinterpret coordinates — `[256, 512] -> [128,
+1024]` pairs rows in logical row-major order, and in the blocked form those
+elements are scattered across fractal blocks — so it is rejected rather than
+addressed as if it were ND.
+
+An NZ argument also arrives at the orchestration entry in its *logical* shape:
+the caller allocates the weight that way, and only the compiled parameter is
+blocked. The entry restates it in blocked terms once (a metadata-only reshape,
+same elements in the same order), so every `Tensor::view` derived from it clamps
+against the rank it is written in.
 
 Sub-byte dtypes (INT4 / UINT4 / FP4 / HF4 / BOOL) are rejected as a **PyPTO
 milestone-1 scope limit, not a hardware one** — pto-isa's NZ machinery does
@@ -342,15 +403,14 @@ sees that attribute.
 
 ## Assembler version
 
-Whether this pass's output assembles at all depends on the PTOAS release, and
-the repository's pinned version is not yet the one that works.
+This pass requires PTOAS 0.61 or later to assemble explicit NZ views.
 
 | PTOAS | Behavior |
 | ----- | -------- |
 | ≤ 0.60 | Infers the layout structurally. Blocked NZ and ND are structurally identical (both row-major), so it infers `nd`, overrides the explicit `nz` annotation, and fails with `layout mismatch: user-specified layout=nz but inferred=nd`. No NZ view assembles, at any rank. |
 | ≥ 0.61 | Treats an explicit `ND` / `DN` / `NZ` annotation as authoritative and validates it, so the descriptor above assembles. It also enforces NZ's arity directly: a view of any rank but 5 is refused with `'pto.make_tensor_view' op user-specified layout=nz requires a rank-5 view`. |
 
-`toolchain/versions.env` pins **v0.61**, so `pl.NZ` works end to end on the
+`toolchain/versions.env` pins **v0.66**, so `pl.NZ` works end to end on the
 pinned toolchain. `tests/st/runtime/ops/test_matmul_nz.py` is what holds that:
 an ND activation against an NZ weight, with the host packer that produces the
 fractal bytes, plus sliced cases that pin both offset axes — the row fractal
