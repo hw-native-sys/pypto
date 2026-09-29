@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <any>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <sstream>

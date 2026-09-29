@@ -13,6 +13,7 @@
 #define PYPTO_IR_BUILDER_H_
 
 #include <any>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
