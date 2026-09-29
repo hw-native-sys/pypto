@@ -914,7 +914,8 @@ std::optional<MatmulTiling> AnalyzeMatmul(
     utils::DbcEmissionRoute full_k_dbc_route = utils::DbcEmissionRoute::kPipelinedInner,
     bool force_output_stationary = false,
     std::optional<tile_view_semantics::BoxedTileAlignment> output_box_alignment = std::nullopt,
-    const DirectDefMap* direct_defs = nullptr, bool require_full_n_for_bias = false) {
+    const DirectDefMap* direct_defs = nullptr, bool require_full_n_for_bias = false,
+    int reduction_iterations = 1) {
   auto call = As<Call>(assign->value_);
   if (!call || !call->op_) return std::nullopt;
 
@@ -1224,6 +1225,7 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   cfg.allow_double_buffer_c = dbc_eligibility == DbcSemanticEligibility::kEnabled &&
                               (memory_planner != MemoryPlanner::PyPTO || pypto_dbc);
   cfg.full_k_dbc_route = full_k_dbc_route;
+  cfg.reduction_iterations = reduction_iterations;
   cfg.split_k_dbc_route = utils::DbcEmissionRoute::kUnrolledGrid;
   // PTOAS lowers an unrolled grid to one uniform multi-buffer region. A
   // column-only boundary is a valid zero-offset view because the L0C row pitch
@@ -2226,9 +2228,22 @@ std::optional<CanonicalSplitKFold> TryFoldCanonicalSplitKAcc(const CanonicalSpli
   // every physical output window, so chooser capacity cannot admit a logical
   // tile that becomes oversized after padding. The recursively visited
   // narrowed calls independently choose their legal inner K blocking.
-  auto tiling = AnalyzeMatmul(match.shape_source(), hints, dbc_groups, DbcSemanticEligibility::kEnabled,
-                              utils::DbcEmissionRoute::kUnrolledGrid,
-                              /*force_output_stationary=*/true, output_box_alignment);
+  const auto iterations = transform_utils::EvalConstTripCount(match.loop);
+  const int reduction_iterations =
+      iterations && *iterations > 0 && *iterations <= std::numeric_limits<int>::max()
+          ? static_cast<int>(*iterations)
+          : 0;
+  if (reduction_iterations == 0) {
+    hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-006",
+                       "canonical split-K trip count is unknown or outside the cost model range; "
+                       "using single-C tiling without a dbC profitability claim",
+                       match.loop->span_);
+  }
+  auto tiling =
+      AnalyzeMatmul(match.shape_source(), hints, dbc_groups, DbcSemanticEligibility::kEnabled,
+                    utils::DbcEmissionRoute::kUnrolledGrid,
+                    /*force_output_stationary=*/true, output_box_alignment,
+                    /*direct_defs=*/nullptr, /*require_full_n_for_bias=*/false, reduction_iterations);
   if (!tiling || !tiling->needs_mn_tiling()) return std::nullopt;
 
   auto store_call = As<Call>(match.store->value_);

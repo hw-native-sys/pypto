@@ -145,6 +145,12 @@ std::vector<int> EnumerateLegalKs(int m, int n, const L0TileConfig& cfg, int64_t
 // below; forward-declared so EstimateTraffic mirrors the same min-hoist route).
 bool OSHoldsHoldA(int m, int n, const L0TileConfig& cfg);
 
+// Both single-C and dbC use this emitted operand schedule. In particular,
+// spanning one source K block does not imply reuse across a canonical grid.
+bool StreamsBothOperands(int k, const L0TileConfig& cfg) {
+  return k < cfg.K || cfg.full_k_dbc_route == DbcEmissionRoute::kUnrolledGrid;
+}
+
 // L1<->L0 operand + drain traffic in BYTES for the chosen tile under its regime.
 // Inspection-only (the chooser ranks by the roofline wall, not this value); the
 // reload counts follow the regime's stationarity, mirroring LoadCycles so the
@@ -173,10 +179,10 @@ int64_t EstimateTraffic(int m, int n, int k, const L0TileConfig& cfg, const Regi
     case Stationarity::kOutputStationary:
       // Full-K OS hoists one operand (mirror LoadCycles' min-hoist via OSHoldsHoldA so
       // this metric matches the wall the tile was scored under); split-K re-streams both.
-      if (static_cast<int64_t>(k) >= K && OSHoldsHoldA(m, n, cfg)) {
+      if (!StreamsBothOperands(k, cfg) && OSHoldsHoldA(m, n, cfg)) {
         a_traffic = static_cast<int64_t>(cfg.bytes_a) * M * K;           // A held once
         b_traffic = static_cast<int64_t>(cfg.bytes_b) * K * N * ceil_m;  // B streamed
-      } else if (static_cast<int64_t>(k) >= K) {
+      } else if (!StreamsBothOperands(k, cfg)) {
         a_traffic = static_cast<int64_t>(cfg.bytes_a) * M * K * ceil_n;  // A streamed
         b_traffic = static_cast<int64_t>(cfg.bytes_b) * K * N;           // B held once
       } else {
@@ -187,11 +193,21 @@ int64_t EstimateTraffic(int m, int n, int k, const L0TileConfig& cfg, const Regi
   }
   const int64_t gamma_c = cfg.c_read ? 2 : 1;
   const int64_t c_traffic = gamma_c * static_cast<int64_t>(cfg.bytes_c) * M * N;
-  return a_traffic + b_traffic + c_traffic;
+  const int64_t repetitions = std::max(1, cfg.reduction_iterations);
+  CHECK(a_traffic + b_traffic <= (std::numeric_limits<int64_t>::max() - c_traffic) / repetitions)
+      << "ChooseL0Tile: repeated reduction traffic exceeds int64 range";
+  return (a_traffic + b_traffic) * repetitions + c_traffic;
+}
+
+int64_t RepeatedReductionWork(int64_t work, const L0TileConfig& cfg) {
+  const int64_t count = std::max(1, cfg.reduction_iterations);
+  CHECK(work >= 0 && work <= std::numeric_limits<int64_t>::max() / count)
+      << "ChooseL0Tile: repeated reduction work exceeds int64 range";
+  return work * count;
 }
 
 int64_t PaddedComputeVolume(int m, int n, int k, const L0TileConfig& cfg) {
-  return CeilDiv(cfg.M, m) * m * CeilDiv(cfg.N, n) * n * CeilDiv(cfg.K, k) * k;
+  return RepeatedReductionWork(CeilDiv(cfg.M, m) * m * CeilDiv(cfg.N, n) * n * CeilDiv(cfg.K, k) * k, cfg);
 }
 
 // Roofline cost model (output-stationary, single L0C -- the algorithm
@@ -220,7 +236,7 @@ int64_t MadCycles(int m, int n, int k, const L0TileConfig& cfg) {
   const int64_t k_fractals = num_full * CeilDiv(k, kt) + (k_tail > 0 ? CeilDiv(k_tail, kt) : 0);
   const int64_t per_mn =
       k_blocks * cfg.mad_head + cpr * CeilDiv(m, cfg.align_m) * k_fractals * CeilDiv(n, cfg.align_n);
-  return CeilDiv(cfg.M, m) * CeilDiv(cfg.N, n) * per_mn;
+  return RepeatedReductionWork(CeilDiv(cfg.M, m) * CeilDiv(cfg.N, n) * per_mn, cfg);
 }
 
 // Bandwidth-weighted held-A vs held-B interior load cycles for a full-K OS tile
@@ -285,6 +301,7 @@ DbcEmissionRoute DbcRouteForK(int k, const L0TileConfig& cfg) {
 }
 
 bool DbcRealizableTile(int m, int n, const L0TileConfig& cfg, Stationarity stat, DbcEmissionRoute route) {
+  if (cfg.reduction_iterations == 0) return false;
   switch (route) {
     case DbcEmissionRoute::kPipelinedInner:
       return PipelinedInnerFullTiles(m, n, cfg, stat) >= 2;
@@ -312,7 +329,7 @@ bool DbcRealizableTile(int m, int n, const L0TileConfig& cfg, Stationarity stat,
 //   held B (k==K) : A streamed (M*K*ceil_n) ; B once (K*N)
 //   OS, k==K      : min(held-A, held-B) route (the emit hoists the cheaper)
 //   OS, k<K       : both re-streamed (A M*K*ceil_n, B K*N*ceil_m)
-double LoadCycles(int m, int n, int k, const L0TileConfig& cfg, const Regime& r) {
+double SingleReductionLoadCycles(int m, int n, int k, const L0TileConfig& cfg, const Regime& r) {
   const double M = cfg.M, N = cfg.N, K = cfg.K;
   const double ceil_n = static_cast<double>(CeilDiv(cfg.N, n));
   const double ceil_m = static_cast<double>(CeilDiv(cfg.M, m));
@@ -326,7 +343,7 @@ double LoadCycles(int m, int n, int k, const L0TileConfig& cfg, const Regime& r)
     case Stationarity::kBStationary:
       return held_b;  // B held (requires k == K)
     case Stationarity::kOutputStationary:
-      if (k >= static_cast<int>(K)) {
+      if (!StreamsBothOperands(k, cfg)) {
         // Route through the shared hoist decision so the scored cost matches the
         // operand BuildFullKPipelined actually hoists (recorded in os_holds_a).
         return OSHoldsHoldA(m, n, cfg) ? held_a : held_b;
@@ -335,6 +352,10 @@ double LoadCycles(int m, int n, int k, const L0TileConfig& cfg, const Regime& r)
       return (ba * M * K * ceil_n) / cfg.bw_a + (bb * K * N * ceil_m) / cfg.bw_b;
   }
   return std::min(held_a, held_b);
+}
+
+double LoadCycles(int m, int n, int k, const L0TileConfig& cfg, const Regime& r) {
+  return SingleReductionLoadCycles(m, n, k, cfg, r) * std::max(1, cfg.reduction_iterations);
 }
 
 // The odd part of x: x divided by its largest power-of-2 factor (odd(8)=1,
@@ -589,6 +610,11 @@ L0TileResult ChooseL0Tile(const L0TileConfig& cfg) {
   // 1. Validate inputs.
   CHECK(cfg.M > 0 && cfg.N > 0 && cfg.K > 0)
       << "ChooseL0Tile: M, N, K must all be positive (got " << cfg.M << ", " << cfg.N << ", " << cfg.K << ")";
+  CHECK(cfg.reduction_iterations >= 0)
+      << "ChooseL0Tile: reduction_iterations must be nonnegative (zero means unknown)";
+  CHECK(cfg.full_k_dbc_route != DbcEmissionRoute::kUnrolledGrid ||
+        (!cfg.allow_a_stationary && !cfg.allow_b_stationary))
+      << "ChooseL0Tile: unrolled full-K grids cannot retain operands across output tiles";
   CHECK(cfg.l0a_bytes > 0 && cfg.l0b_bytes > 0 && cfg.l0c_bytes > 0)
       << "ChooseL0Tile: L0 capacities must be positive";
   CHECK(cfg.bytes_a > 0 && cfg.bytes_b > 0 && cfg.bytes_c > 0)
@@ -689,7 +715,7 @@ L0TileResult ChooseL0Tile(const L0TileConfig& cfg) {
       const int64_t a0 = L0aBudget(cfg, db);
       const int64_t b0 = L0bBudget(cfg, db);
       const bool is_os = stat == Stationarity::kOutputStationary;
-      for (int dbc = 0; dbc <= (cfg.allow_double_buffer_c ? 1 : 0); ++dbc) {
+      for (int dbc = 0; dbc <= (cfg.allow_double_buffer_c && cfg.reduction_iterations > 0 ? 1 : 0); ++dbc) {
         const Regime r{stat, /*dbc=*/dbc == 1};
         if (is_os && !r.dbc) continue;  // baseline, already scored
         const int64_t c0 = L0cBudget(cfg, r);

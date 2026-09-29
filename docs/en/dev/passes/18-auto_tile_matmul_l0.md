@@ -178,6 +178,16 @@ tiling supplies pipelined-inner for `k == K` and unrolled-grid for `k < K`.
 independent of `k`. The chooser uses that route both for realizability and cost;
 it never has to infer the canonical fold's lowering from `k`.
 
+The route also determines operand reuse for **single-C** candidates. An unrolled
+canonical grid reloads both operands for every output tile, even when `k` spans
+one source K block. It cannot receive the held-operand credit of a nested grid.
+`reduction_iterations` carries the original source loop's static trip count:
+loads, MAD work and padded compute cover every iteration, while each output tile
+drains only once. Capacity checks still use the per-iteration K block. For an
+unknown or unrepresentable trip count, AutoTile reports a hint and retains
+single-C tiling using one-block ranking; it makes no dbC profitability claim.
+These are emitted-schedule corrections, not fitted hardware coefficients.
+
 If a canonical grid's narrowed MAD still needs inner-K tiling, every replacement
 MAD retains the original `pipeline_membership`, including peeled K blocks and
 bias heads. All reduction blocks for one output tile keep the same stage; only

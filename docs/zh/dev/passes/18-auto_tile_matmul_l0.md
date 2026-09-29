@@ -163,6 +163,14 @@ pipelined-inner，对 `k < K` 传入 unrolled-grid。重新切分用户手写
 unrolled-grid，与 `k` 无关。chooser 使用该路径同时判断可实现性和计算代价，
 无需再从 `k` 推断 canonical fold 的 lowering。
 
+该路径也决定**单 C（single-C）**候选的操作数复用。展开的 canonical 网格
+为每个输出 tile 重新加载两个操作数，即使 `k` 覆盖一个源 K 块，也不能获得
+嵌套网格的驻留操作数收益。`reduction_iterations` 传递源循环的静态迭代次数：
+load、MAD 和填充计算量覆盖全部迭代，每个输出 tile 仅回写一次；容量检查仍
+使用单次迭代的 K 块。若迭代次数未知或超出模型范围，AutoTile 发出提示并按
+单块代价选择 single-C tiling，不声称 dbC 有性能收益。这些是发射调度的结构
+修正，不是拟合硬件系数。
+
 若规范网格缩小后的 MAD 仍需内层 K 切分，每个替换 MAD 都保留原始
 `pipeline_membership`，包括 peeled K 块和 bias 首块。同一输出 tile 的所有
 归约块保持相同 stage；只有下一个输出 tile 才切换 stage。否则 chooser 的 dbC

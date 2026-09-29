@@ -358,7 +358,41 @@ class TestL0TilingEdgeCases:
         assert (unrolled.m, unrolled.n, unrolled.k) == (128, 128, 64)
         assert unrolled.double_buffer_c is True
         assert unrolled.dbc_emission_route == unrolled_route
-        assert unrolled.estimated_cost_cycles < nested.estimated_cost_cycles
+        # The unrolled route also reloads both operands; unlike the nested
+        # route it cannot credit a held panel. Compare its own single-C plan.
+        cfg.allow_double_buffer_c = False
+        single = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert unrolled.estimated_cost_cycles < single.estimated_cost_cycles
+
+    @pytest.mark.parametrize("iterations", [1, 2, 8, 32])
+    def test_canonical_reduction_cost_counts_all_loads_but_one_drain(self, iterations):
+        """Four independent output reductions reload BOTH operands each iteration."""
+        cfg = _default_config(256, 256, 128)
+        cfg.min_m = cfg.min_n = cfg.align_m = cfg.align_n = 128
+        cfg.min_k = cfg.align_k = 128
+        cfg.l0c_bytes = 65536  # Exactly one legal output geometry: 128x128.
+        cfg.full_k_dbc_route = passes.l0_tile_chooser.DbcEmissionRoute.UnrolledGrid
+        cfg.reduction_iterations = iterations
+        result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert (result.m, result.n, result.k) == (128, 128, 128)
+        operand_bytes = 4 * (128 * 128 * 2 + 128 * 128 * 2)
+        assert result.estimated_traffic_bytes == iterations * operand_bytes + 256 * 256 * 4
+        loads = 4 * (128 * 128 * 2 / cfg.bw_a + 128 * 128 * 2 / cfg.bw_b)
+        mad = 4 * (cfg.mad_head + 8 * 8 * 8)
+        drain = 4 * (cfg.drain_fixed_cycles + 128 * max(cfg.drain_row_cycles, 512 / cfg.bw_drain))
+        assert result.estimated_cost_cycles == int(iterations * max(loads, mad) + drain + 0.5)
+        assert result.padded_compute_volume == 256 * 256 * 128 * iterations
+
+    def test_unknown_reduction_count_does_not_claim_dbc_profitability(self):
+        cfg = _default_config(256, 384, 128)
+        cfg.full_k_dbc_route = passes.l0_tile_chooser.DbcEmissionRoute.UnrolledGrid
+        cfg.allow_double_buffer_c = True
+        cfg.reduction_iterations = 0
+        result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert not result.double_buffer_c
+        cfg.reduction_iterations = -1
+        with pytest.raises(ValueError, match="reduction_iterations"):
+            passes.l0_tile_chooser.choose_l0_tile(cfg)
 
     def test_unrolled_dbc_can_exclude_row_boundary_slots(self):
         """A route with uniform Acc slots must reject candidates whose M tail changes stride."""
@@ -685,7 +719,7 @@ def _load_cycles(m: int, n: int, k: int, cfg, stat: str) -> float:
         return held_a
     if stat == _BS:
         return held_b
-    if k >= K:  # OS, full-K: hoist the cheaper operand
+    if k >= K and cfg.full_k_dbc_route != _DBC_UNROLLED:
         return min(held_a, held_b)
     # OS, split-K: both re-streamed
     return (cfg.bytes_a * M * K * cn) / cfg.bw_a + (cfg.bytes_b * K * N * cm) / cfg.bw_b
@@ -723,7 +757,7 @@ def _wall_key(m: int, n: int, k: int, cfg, stat: str, dbc: bool) -> tuple:
     )
     per_drain = cfg.drain_fixed_cycles + m * per_row
     drain = num_drains * per_drain
-    compute = max(load, float(mad))
+    compute = max(load, float(mad)) * max(1, cfg.reduction_iterations)
     route = cfg.full_k_dbc_route if k == cfg.K else cfg.split_k_dbc_route
     if dbc:
         compute_per_tile = compute / num_drains
@@ -746,10 +780,10 @@ def _wall_key(m: int, n: int, k: int, cfg, stat: str, dbc: bool) -> tuple:
     else:
         wall_f = compute + drain
     wall = int(wall_f + 0.5)
-    pvol = _cdiv(M, m) * m * _cdiv(N, n) * n * _cdiv(K, k) * k
+    pvol = _cdiv(M, m) * m * _cdiv(N, n) * n * _cdiv(K, k) * k * max(1, cfg.reduction_iterations)
     # C_load is a wall-tie-break (after padded-compute + k-blocks, before area/k):
     # among MAD-bound ties it picks the lower-hidden-load aspect.
-    return (wall, pvol, _cdiv(K, k), load, -(m * n), -k)
+    return (wall, pvol, _cdiv(K, k), load * max(1, cfg.reduction_iterations), -(m * n), -k)
 
 
 def _legal_ks(m: int, n: int, cfg, a0: int, b0: int) -> list[int]:
@@ -785,6 +819,8 @@ def _dbc_realizable(m: int, n: int, k: int, cfg, stat: str) -> bool:
     BuildSplitKGrid, which unrolls the M/N grid and stamps every tile's
     accumulator directly, so any two output tiles ping-pong, boundary included.
     """
+    if cfg.reduction_iterations == 0:
+        return False
     route = cfg.full_k_dbc_route if k == cfg.K else cfg.split_k_dbc_route
     if route == _DBC_PIPELINED:
         inner_full_tiles = cfg.N // n if _row_outer(m, n, cfg, stat) else cfg.M // m

@@ -503,11 +503,11 @@ class SingleSlotDeclaration:
         return pl.store(t0, [0, 0], output)
 
 
-def _codegen(program: ir.Program, planner: passes.MemoryPlanner) -> str:
+def _codegen(program: ir.Program, planner: passes.MemoryPlanner, *, buffer_ir: bool = False) -> str:
     """Compile ``program``'s InCore kernel under ``planner`` and emit its PTO IR."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
-    with passes.PassContext([], memory_planner=planner):
+    backend.set_backend_type(BackendType.Ascend950 if buffer_ir else BackendType.Ascend910B)
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=buffer_ir):
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
         optimized = pm.run_passes(program)
     func = next(f for f in optimized.functions.values() if f.name == "kernel")
@@ -547,6 +547,72 @@ def _tile_memrefs(program: ir.Program) -> dict[str, ir.MemRef]:
 
 class TestPtoasPlannerEmitsMultiBuffer:
     """Under the ptoas planner a slotted declaration becomes one region."""
+
+    @pytest.mark.parametrize(
+        "program, regions",
+        [
+            (SequentialCompatibleRegions, 1),
+            (OverlappingCompatibleRegions, 2),
+            (TouchingNonInplaceRegions, 2),
+            (ReusedRegionThenNonInplace, 2),
+        ],
+    )
+    def test_buffer_ir_preserves_region_reuse_and_no_alias(self, program, regions, tmp_path):
+        """Buffer lowering must share the Tile planner's lifetime/hard-edge policy."""
+        mlir = _codegen(program, passes.MemoryPlanner.PTOAS, buffer_ir=True)
+        assert len(_lines(mlir, "pto.alloc_multi_tile")) == regions
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        source, output = tmp_path / "regions.pto", tmp_path / "regions.cpp"
+        source.write_text(mlir)
+        _run_ptoas(str(source), str(output), ["--pto-arch=a5", "--pto-level=level2"])
+        assert output.is_file()
+
+    def test_buffer_region_owner_dominates_reversed_declarations(self, tmp_path):
+        """Allocation declaration order must not constrain lifetime-based reuse."""
+
+        class ReverseAllocations(ir.IRMutator):
+            def visit_seq_stmts(self, op):
+                seq = super().visit_seq_stmts(op)
+                assert isinstance(seq, ir.SeqStmts)
+                alloc_name = ir.get_op("tile.alloc").name
+                allocs = [
+                    stmt
+                    for stmt in seq.stmts
+                    if isinstance(stmt, ir.AssignStmt)
+                    and isinstance(stmt.value, ir.Call)
+                    and stmt.value.op.name == alloc_name
+                ]
+                replacement = iter(reversed(allocs))
+                return ir.SeqStmts(
+                    [
+                        next(replacement)
+                        if isinstance(stmt, ir.AssignStmt)
+                        and isinstance(stmt.value, ir.Call)
+                        and stmt.value.op.name == alloc_name
+                        else stmt
+                        for stmt in seq.stmts
+                    ],
+                    seq.span,
+                )
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            planned = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
+                SequentialCompatibleRegions
+            )
+            reordered = ReverseAllocations().visit_program(planned)
+            lowered = passes.lower_tile_to_buffer()(reordered)
+        mlir = codegen.PTOCodegen().generate(lowered, emit_tile_addr=False)
+        assert mlir.count("pto.alloc_multi_tile") == 1
+        assert mlir.index("pto.alloc_multi_tile") < mlir.index("pto.multi_tile_get")
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        source, output = tmp_path / "reversed.pto", tmp_path / "reversed.cpp"
+        source.write_text(mlir)
+        _run_ptoas(str(source), str(output), ["--pto-arch=a5", "--pto-level=level2"])
+        assert output.is_file()
 
     def test_buffer_ir_rejects_acc_slot_with_different_physical_rows(self):
         """Buffer lowering must preserve the same L0C pitch as Tile codegen."""
