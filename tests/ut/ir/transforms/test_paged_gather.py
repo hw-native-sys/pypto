@@ -14,7 +14,7 @@ load loop on the Cube core:
 
     acc = tile.create([max_indices, size], target_memory=Mat)
     for i in range(tensor.dim(indices, 0)):
-        idx  = tensor.read(indices, [i])          # scalar GM read (pto.load_scalar)
+        idx  = tensor.read(indices, [i])          # scalar GM read (pto.load)
         phys = block_table[idx // bs] * bs + idx % bs   # scalar
         acc  = tile.gather_row(acc, src, [i, 0], [phys, 0], [1, size])  # GM->L1
 

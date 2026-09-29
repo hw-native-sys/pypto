@@ -26,6 +26,7 @@ import pypto.language.distributed as pld
 import pytest
 from pypto import DataType, backend, codegen, ir
 from pypto.backend import BackendType, pto_backend
+from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import (
     _emit_group_output,
     _format_error_report,
@@ -172,7 +173,7 @@ def test_gm_scalar_write_between_converted_ops_keeps_store_and_reload():
 
     mlir = _generate_default_mlir(Before)
     lines = _get_mlir_lines(mlir)
-    scalar_store = _single_line(lines, "pto.store_scalar")
+    scalar_store = _single_line(lines, "pto.store ")
     assert ", %arg0[" in scalar_store, "the scalar store must target the original x pointer"
     assert "pto.tsetval" not in mlir, "a GM write must not be redirected into a UB tile"
     loads = [line for line in lines if "pto.tload " in line]
@@ -976,9 +977,9 @@ def test_pto_codegen_lowered_mixed_store_keeps_ptr():
     """Low-level mixed stores keep distinct tensor-view and pointer SSA values.
 
     Regression for #1493: slice-assign lowers to `pto.make_tensor_view`/`tstore`
-    (a `!pto.tensor_view`) while pl.write lowers to `store_scalar` (a `!pto.ptr`).
+    (a `!pto.tensor_view`) while pl.write lowers to `pto.store` (a `!pto.ptr`).
     Both must not bind to the same SSA name, or ptoas rejects one value typed two
-    ways. The base pointer must flow through to store_scalar, not the view SSA.
+    ways. The base pointer must flow through to pto.store, not the view SSA.
 
     ConvertTensorToTileOps rejects this source-level combination for memory
     coherence (#2005), so this codegen-only invariant is tested on already
@@ -1006,9 +1007,38 @@ def test_pto_codegen_lowered_mixed_store_keeps_ptr():
     partition_view = _single_line(lines, f"{tstore_view_match.group(1)} = pto.partition_view")
     assert "!pto.tensor_view" in partition_view
     assert "!pto.partition_tensor_view" in partition_view
-    store_scalar = _single_line(lines, "pto.store_scalar")
-    assert "_view[" not in store_scalar, f"store_scalar must use ptr, not view: {store_scalar}"
+    store_scalar = _single_line(lines, "pto.store ")
+    assert "_view[" not in store_scalar, f"pto.store must use ptr, not view: {store_scalar}"
     assert "!pto.ptr<f32>" in store_scalar
+
+
+@pytest.mark.parametrize("dtype", [DataType.FP32, DataType.INT32, DataType.UINT32, DataType.INT64])
+def test_scalar_pointer_load_store_ptoas(tmp_path, dtype):
+    """Tensor scalar accesses use the unified PTOAS 0.64 pointer operations."""
+    tensor_type = ir.TensorType([4, 8], dtype)
+    ib = IRBuilder()
+    with ib.function("scalar_copy", type=ir.FunctionType.InCore) as f:
+        source = f.param("source", tensor_type)
+        dest = f.param("dest", tensor_type)
+        f.return_type(tensor_type)
+        value = ib.let("value", tensor_ops.read(source, [1, 2]))
+        result = ib.let("result", tensor_ops.write(dest, [2, 3], value))
+        ib.return_stmt(result)
+
+    mlir = _generate_mlir(ir.Program([f.get_result()], "ScalarCopy", ir.Span.unknown()))
+    lines = _get_mlir_lines(mlir)
+    load = _single_line(lines, " = pto.load ")
+    store = _single_line(lines, "pto.store ", startswith=True)
+    assert "%arg0[" in load
+    assert ", %arg1[" in store
+    assert load.split(" = ", 1)[0] in store
+    assert "pto.load_scalar" not in mlir
+    assert "pto.store_scalar" not in mlir
+
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    cpp = pto_backend._compile_pto_module(mlir, "scalar_copy", str(tmp_path))
+    assert "scalar_copy" in cpp
 
 
 def test_pto_codegen_tile_mul():
