@@ -535,5 +535,87 @@ def test_equal_buffer_descriptors_from_distinct_objects_are_compatible(kind, con
     assert _typecheck_diagnostics(_buffer_boundary(kind, types)) == []
 
 
+def _layout_call_program(
+    *,
+    device_dispatch: bool,
+    callee_layout: ir.TensorLayout = ir.TensorLayout.NZ,
+    caller_layout: ir.TensorLayout = ir.TensorLayout.ND,
+    submit: bool = False,
+) -> ir.Program:
+    """A caller passing an ND weight to a callee that declares it ``pl.NZ``.
+
+    ``device=`` marks a dispatch into a device program: the caller only says
+    which card the bytes are on, so the callee's parameter is the only claim
+    about their order.
+    """
+    shape = [_idx(256), _idx(512)]
+    nd_type = ir.TensorType(shape, DataType.INT8, None, ir.TensorView(layout=caller_layout))
+    callee_type = ir.TensorType(shape, DataType.INT8, None, ir.TensorView(layout=callee_layout))
+
+    callee_param = ir.Var("w", callee_type, _SPAN)
+    callee = ir.Function("device_program", [callee_param], [], ir.ReturnStmt([], _SPAN), _SPAN)
+
+    caller_param = ir.Var("w_host", nd_type, _SPAN)
+    callee_gvar = ir.GlobalVar("device_program")
+    attrs = [("device", 0)] if device_dispatch else []
+    if submit:
+        call = ir.Submit(callee_gvar, [caller_param], [], {}, attrs, ir.ScalarType(DataType.TASK_ID), _SPAN)
+    else:
+        call = ir.Call(callee_gvar, [caller_param], {}, attrs, ir.TupleType([]), _SPAN)
+    caller_body = ir.SeqStmts([ir.EvalStmt(call, _SPAN), ir.ReturnStmt([], _SPAN)], _SPAN)
+    caller = ir.Function("host_driver", [caller_param], [], caller_body, _SPAN)
+    return ir.Program([caller, callee], "test", _SPAN)
+
+
+def _layout_diagnostics(program: ir.Program) -> list[passes.Diagnostic]:
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.TypeChecked)
+    return passes.PropertyVerifierRegistry.verify(properties, program)
+
+
+def test_type_check_rejects_a_plain_call_that_changes_layout():
+    """Inside one program both ends read the bytes, so both must agree."""
+    diagnostics = _layout_diagnostics(_layout_call_program(device_dispatch=False))
+    assert any("Layout mismatch" in d.message for d in diagnostics)
+
+
+def test_type_check_accepts_an_nd_buffer_dispatched_to_an_nz_parameter():
+    """A ``device=`` dispatch hands over a buffer, not a layout claim."""
+    diagnostics = _layout_diagnostics(_layout_call_program(device_dispatch=True))
+    assert not any("Layout mismatch" in d.message for d in diagnostics)
+
+
+def test_type_check_rejects_an_nd_buffer_dispatched_to_an_mx_parameter():
+    """Only NZ has a logical-to-blocked restatement at the orchestration entry.
+
+    An MX parameter is blocked the same way, but nothing restates the incoming
+    ND tensor into that form, so the exemption would hand a kernel ordinary
+    bytes to read as packed MX data.
+    """
+    diagnostics = _layout_diagnostics(
+        _layout_call_program(device_dispatch=True, callee_layout=ir.TensorLayout.MX_A_ZZ)
+    )
+    assert any("Layout mismatch" in d.message for d in diagnostics)
+
+
+@pytest.mark.parametrize("submit", [False, True])
+@pytest.mark.parametrize(
+    "caller_layout,callee_layout,accepted",
+    [
+        (ir.TensorLayout.ND, ir.TensorLayout.NZ, True),
+        (ir.TensorLayout.NZ, ir.TensorLayout.ND, False),
+        (ir.TensorLayout.ND, ir.TensorLayout.MX_A_ZZ, False),
+    ],
+)
+def test_device_dispatch_layout_direction_for_call_and_submit(submit, caller_layout, callee_layout, accepted):
+    diagnostics = _layout_diagnostics(
+        _layout_call_program(
+            device_dispatch=True, caller_layout=caller_layout, callee_layout=callee_layout, submit=submit
+        )
+    )
+    mismatched = any("Layout mismatch" in d.message for d in diagnostics)
+    assert mismatched is not accepted
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
