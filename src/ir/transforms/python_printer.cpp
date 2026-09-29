@@ -2666,7 +2666,11 @@ void IRPythonPrinter::VisitStmt_(const CommDomainScopeStmtPtr& op) {
   }
   stream_ << "):\n";
   IncreaseIndent();
-  PrintStmtBlock(op->body_);
+  if (auto seq = As<SeqStmts>(op->body_); seq && seq->stmts_.empty()) {
+    stream_ << GetIndent() << "pass\n";
+  } else {
+    PrintStmtBlock(op->body_);
+  }
   DecreaseIndent();
   --comm_domain_depth_;
 }

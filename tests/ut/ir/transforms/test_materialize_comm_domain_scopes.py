@@ -37,6 +37,7 @@ import pypto
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
+from pypto.ir import IRBuilder
 from pypto.ir.op.distributed import tensor_ops as dist_tensor_ops
 from pypto.language.parser.diagnostics import ParserTypeError
 from pypto.pypto_core import DataType, ir, passes
@@ -2193,6 +2194,51 @@ class P:
                 kwargs={{"dtype": pl.FP32}})
             return x
 """)
+
+
+@pytest.mark.parametrize("trailing_return", [False, True])
+def test_empty_comm_domain_scope_roundtrip(trailing_return):
+    """An empty scope needs a pass statement, including before a following sibling."""
+    suffix = "\n        return 0" if trailing_return else ""
+    original = pl.parse_program(
+        """
+@pl.program
+class P:
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def host(self):
+        with pl._dump.comm_domain(name="empty", devices=[], slots=[]):
+            pass
+"""
+        + suffix
+    )
+    restored = pl.parse_program(ir.python_print(original, format=False))
+    ir.assert_structural_equal(original, restored)
+    assert ir.structural_hash(original) == ir.structural_hash(restored)
+    scope = _get_comm_domain_scopes(_get_func(restored, "host"))[0]
+    assert isinstance(scope.body, ir.SeqStmts)
+    assert not scope.body.stmts
+
+
+@pytest.mark.parametrize("value", [-1, -2.5, -0.0])
+def test_signed_scope_attribute_roundtrip(value):
+    """A negative scalar attribute remains distinct from a typed IR constant."""
+    span = ir.Span.unknown()
+    builder = IRBuilder()
+    index_expr = ir.ConstInt(-1, DataType.INDEX, span)
+    with builder.function("host", span, level=ir.Level.HOST, role=ir.Role.Orchestrator) as fn:
+        with builder.comm_domain_scope(
+            [], [], "saved", span, attrs=[("saved", value), ("index_expr", index_expr)]
+        ):
+            builder.return_stmt(0, span)
+    original = ir.Program([fn.get_result()], "P", span)
+    restored = pl.parse_program(ir.python_print(original, format=False))
+    ir.assert_structural_equal(original, restored)
+    assert ir.structural_hash(original) == ir.structural_hash(restored)
+    scope = _get_comm_domain_scopes(_get_func(restored, "host"))[0]
+    assert type(scope.attrs["saved"]) is type(value)
+    assert scope.attrs["saved"] == value
+    assert isinstance(scope.attrs["index_expr"], ir.ConstInt)
+    assert scope.attrs["index_expr"].value == -1
 
 
 if __name__ == "__main__":

@@ -138,6 +138,8 @@ pass 运行之后：
 这些写法属于 IR 文本语法，不是在 kernel 中执行的操作。
 描述中的 `base` 引用 body 内定义的分配变量；`window_buffer(...)` 不会增加分配语句。
 它的 `size` 和分配 Call 的大小参数是 IR 分别保存的字段，因此都会保留。
+空作用域打印为 `pass`。`-1` 等属性字面量保留为标量；
+`pl.const(-1, pl.INDEX)` 则表示 IR 表达式。
 
 对于自包含的完整程序，`parse(python_print(program))` 必须与原程序结构相等且结构哈希相等。
 解析器和调用方均不需要重跑 lowering pass。引用缺失定义的单条语句片段不属于此契约。

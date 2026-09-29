@@ -167,6 +167,8 @@ text syntax, not operations that execute in a kernel.
 The descriptor's `base` names the allocation variable defined in the body;
 `window_buffer(...)` adds no allocation statement. Its `size` and the allocation
 Call's size argument are separate recorded IR fields and are both retained.
+Empty scopes print `pass`. Scalar attribute literals such as `-1` remain scalars;
+`pl.const(-1, pl.INDEX)` records an IR expression instead.
 
 For a self-contained program, `parse(python_print(program))` must be structurally
 equal to `program`, with equal structural hashes. No lowering pass is rerun by

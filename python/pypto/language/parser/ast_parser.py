@@ -8599,6 +8599,16 @@ class ASTParser:
         from pypto.language.arg_direction import NAME_TO_DIRECTION  # noqa: PLC0415
 
         node_span = self.span_tracker.get_span(value_node)
+        if (
+            isinstance(value_node, ast.UnaryOp)
+            and isinstance(value_node.op, (ast.USub, ast.UAdd))
+            and isinstance(value_node.operand, ast.Constant)
+            and type(value_node.operand.value) in (int, float)
+        ):
+            # A sign is a UnaryOp in Python's AST, even for a scalar literal.
+            # Explicit pl.const(...) still takes the IR-expression path below.
+            value = cast(int | float, value_node.operand.value)
+            return -value if isinstance(value_node.op, ast.USub) else value
         if isinstance(value_node, ast.Constant):
             v = value_node.value
             # bool is a subclass of int, so this also covers True/False.
