@@ -26,15 +26,16 @@ Concepts introduced:
     the host body, so one source serves any P — picked at run time with ``-d``,
     with no rank-count factory. This mirrors
     ``tests/st/distributed/collectives/test_l3_allreduce.py`` exactly.
-  - why this step leaves the ``@pl.jit`` family of steps 01-07: ``signal`` is a
-    window whose shape is the runtime expression ``[pld.world_size(), 1]``, and
-    ``@pl.jit`` must infer a static shape/dtype for every parameter it passes
-    to a dep — it rejects this one with "missing inferred tensor metadata for
-    parameter 'signal'". The ``@pl.program`` class form has no such
-    requirement, so the switch is forced by the *dynamic* signal shape, not by
-    a compile-time one. Steps 09 and 10 go further and do need a genuine
-    compile-time rank count, because their chunk size ``SIZE // nr`` is a
-    **tile shape**; a signal row count is not.
+  - why this step uses the ``@pl.program`` class form rather than the
+    ``@pl.jit`` family of steps 01-07, even though it doesn't have to:
+    ``signal`` is a window whose shape is the runtime expression
+    ``[pld.world_size(), 1]``. ``@pl.jit`` handles this fine — an unresolved
+    dim becomes a synthesized ``DynDim``, structurally the same ``NR`` the
+    class form writes by hand. The class form is used here purely because it
+    makes that shape explicit next to the system test it mirrors, not because
+    it's required. Steps 09 and 10 switch for a reason that *is* binding:
+    their chunk size ``SIZE // nr`` is a **tile shape**, and tile shapes must
+    be known when the kernel is written, unlike a signal row count.
 
 This is the simplest of the three all-reduces (steps 08-10): one barrier, then
 every rank reads every peer. Its O(P) traffic is why the two-phase and ring

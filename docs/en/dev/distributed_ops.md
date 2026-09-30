@@ -628,9 +628,13 @@ supported like any other collective. Explicit
 `signal` remains the internal form used by InCore lowering and by tests that
 intentionally construct the internal protocol. Comm-domain materialisation then
 keeps the signal buffer in the same domain as `src`, even when it is not passed
-to a user chip kernel. Mesh, ring, and host-builtin paths support FP16 and FP32
-with `ReduceOp.Sum`, `Max`, `Min`, and `Prod` for arbitrary positive element
-counts. InCore lowering uses UB-bounded chunks; the host builtin uses
+to a user chip kernel. InCore mesh, InCore ring, and host-builtin mesh all
+support FP16 and FP32 with `ReduceOp.Sum`, `Max`, `Min`, and `Prod` for
+arbitrary positive element counts. The one exception is **host-builtin
+ring** (`mode="ring"` lowered to `builtin.tensor.allreduce_ring`), which
+currently supports only `ReduceOp.Sum` with `dtype=FP32` — `Max`/`Min`/`Prod`
+and FP16 are not yet available on that specific path. InCore lowering uses
+UB-bounded chunks; the host builtin uses
 256-element chunks. InCore mesh and ring round only the physical FP16 remote
 tail span to 32 bytes. The host builtin rounds ragged FP16 and FP32 load spans
 to 32 bytes. Both preserve the logical valid shape. The host builtin accepts

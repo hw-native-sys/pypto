@@ -532,10 +532,12 @@ signal）。该阶段会先插入 standalone `world_size = pld.world_size()` bin
 因此 `for` / `while` 循环内的调用与其他集合通信一样受支持。显式 `signal`
 仍然是 InCore lowering 和内部测试使用的形态。通信域物化会把该 signal buffer
 保留在与 `src` 相同的 comm-domain 中，即使它没有传给用户自定义
-chip kernel。mesh、ring 和
-host builtin 路径均支持 FP16、FP32，以及任意正元素数量下的
-`ReduceOp.Sum`、`Max`、`Min` 和 `Prod`。InCore lowering 使用受 UB 上限约束的
-分块，host builtin 使用 256 元素分块。InCore mesh 和 ring 只把 FP16 remote
+chip kernel。InCore mesh、InCore ring 和 host builtin mesh 路径均支持
+FP16、FP32，以及任意正元素数量下的 `ReduceOp.Sum`、`Max`、`Min` 和 `Prod`。
+唯一的例外是 **host builtin ring**（`mode="ring"` 降级为
+`builtin.tensor.allreduce_ring`），目前只支持 `ReduceOp.Sum` 配合
+`dtype=FP32` —— 该路径尚不支持 `Max`/`Min`/`Prod` 和 FP16。InCore lowering
+使用受 UB 上限约束的分块，host builtin 使用 256 元素分块。InCore mesh 和 ring 只把 FP16 remote
 尾块的物理范围向上对齐到 32 字节；host builtin 会把 FP16 和 FP32 的 ragged load
 范围都对齐到 32 字节。两者都保留逻辑 valid shape。host builtin 接受 rank-1
 `[world_size]` 或 rank-2 `[world_size, signal_stride]` signal。Ring 模式

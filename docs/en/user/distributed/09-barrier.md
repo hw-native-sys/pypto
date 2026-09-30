@@ -128,6 +128,12 @@ would let the load race the peer's store; the golden `y[r] = x[(r+1) % N]`
 holds only because the barrier ordered them. The same
 `x`/`signal`/`data` host shape as before, one call instead of a loop.
 
+Unlike the hand-rolled version above, `pld.tensor.barrier` doesn't carry the
+single-use, "reset before you reuse it" limitation — it's self-clearing, so
+the same `signal` is reusable across back-to-back calls, including inside
+`for`/`while` loops. Don't carry the hand-rolled pitfall forward: this
+version has no counterpart to it.
+
 ## Edge cases
 
 > **Fatal pitfall — `Set`/`Eq` on a *shared*-cell barrier.** A `Set` + `Eq`
