@@ -188,6 +188,17 @@ unknown or unrepresentable trip count, AutoTile reports a hint and retains
 single-C tiling using one-block ranking; it makes no dbC profitability claim.
 These are emitted-schedule corrections, not fitted hardware coefficients.
 
+The canonical rewrite preserves the selected inner `k` and output-stationary
+schedule rather than invoking the chooser again on each narrowed matmul. It
+emits the selected Left/Right extracts directly, including full-K blocks and
+K tails, and uses the same K blocking for padded M/N boundary tiles. K-only
+plans are preserved too, even when the output needs no M/N split.
+`reduction_pipeline_stages` separately describes source pipeline storage
+multiplicity: an inner two-stage K pipeline needs two operand slots per source
+stage. Full-K candidates have no inner pipeline and budget the larger of their
+ordinary regime depth and the source depth. These physical copies are checked
+against L0A/L0B before selection; they do not multiply arithmetic or drains.
+
 If a canonical grid's narrowed MAD still needs inner-K tiling, every replacement
 MAD retains the original `pipeline_membership`, including peeled K blocks and
 bias heads. All reduction blocks for one output tile keep the same stage; only
