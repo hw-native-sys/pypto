@@ -925,6 +925,29 @@ class TestScalarConstantPropagation:
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
+    def test_alias_of_unfolded_param_keeps_the_param_type(self):
+        """Folding `N + 0` in an alias Var's own type would leave it unequal to
+        the parameter it aliases, whose type Simplify does not rebuild; the Var
+        keeps the parameter's type so the assignment stays symmetric."""
+        n = pl.dynamic("N")
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[n + 0, 4], pl.FP32]) -> pl.Tensor[[n, 4], pl.FP32]:
+                y: pl.Tensor[[n + 0, 4], pl.FP32] = x
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[n + 0, 4], pl.FP32]) -> pl.Tensor[[n, 4], pl.FP32]:
+                y: pl.Tensor[[n + 0, 4], pl.FP32] = x
+                return y
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
     def test_not_propagated_when_assigned_in_branch(self):
         """A scalar assigned inside a conditional branch must NOT be bound —
         the assignment doesn't dominate uses outside the branch, so folding
@@ -1436,6 +1459,30 @@ class TestSingleTripLoopCollapse:
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
+    def test_zero_trip_return_var_keeps_the_unfolded_init_type(self):
+        """The zero-trip fold emits ``acc_next = x``. Folding ``N + 0`` in the
+        return var's type would leave it unequal to the parameter, whose type
+        Simplify does not rebuild; the return var keeps the parameter's type."""
+        n = pl.dynamic("N")
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[n + 0, 4], pl.FP32]) -> pl.Tensor[[n, 4], pl.FP32]:
+                for _i, (acc,) in pl.range(0, init_values=(x,)):
+                    acc_next = pl.yield_(acc)
+                return acc_next
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[n + 0, 4], pl.FP32]) -> pl.Tensor[[n, 4], pl.FP32]:
+                acc_next: pl.Tensor[[n + 0, 4], pl.FP32] = x
+                return acc_next
+
+        after = passes.simplify()(passes.convert_to_ssa()(Before))
+        ir.assert_structural_equal(after, passes.convert_to_ssa()(Expected))
+
     def test_keeps_multi_iteration_loop(self):
         """Trip > 1: ForStmt preserved (control test)."""
 
@@ -1683,8 +1730,32 @@ class TestTensorViewFolding:
             def main(self, x: pl.Tensor[[8, 4], pl.FP32]) -> pl.Tensor[[8, 4], pl.FP32]:
                 # 21f11ecb dropped the alias-fold: the view Call still folds
                 # to ``x``, but the ``same = x`` residual is no longer removed.
-                same: pl.Tensor[[8, 4], pl.FP32, pl.TensorView(stride=[4, 1], layout=pl.TensorLayout.ND)] = x
+                # ``same`` takes ``x``'s type so the assignment stays symmetric.
+                same: pl.Tensor[[8, 4], pl.FP32] = x
                 return same
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_identity_view_inside_tuple_retypes_the_tuple(self):
+        """A folded view nested in a tuple changes the tuple's element type;
+        the tuple Var, and the projection read from it, follow."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[8, 4], pl.FP32]) -> pl.Tensor[[8, 4], pl.FP32]:
+                pair = (pl.tensor.view(x, layout=pl.TensorLayout.ND), x)
+                first = pair[0]
+                return first
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[8, 4], pl.FP32]) -> pl.Tensor[[8, 4], pl.FP32]:
+                pair: pl.Tuple[pl.Tensor[[8, 4], pl.FP32], pl.Tensor[[8, 4], pl.FP32]] = (x, x)
+                first: pl.Tensor[[8, 4], pl.FP32] = pair[0]
+                return first
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)

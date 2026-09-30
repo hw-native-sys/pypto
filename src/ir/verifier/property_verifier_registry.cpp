@@ -111,9 +111,8 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   Register(IRProperty::CommDomainScopesMaterialized, CreateCommDomainScopesMaterializedPropertyVerifier);
   Register(IRProperty::DistTensorCtxMaterialized, CreateDistTensorCtxMaterializedPropertyVerifier);
   // AssignTypeSymmetry (#1285): every AssignStmt(var, value) must satisfy
-  // structural_equal(var->GetType(), value->GetType()). Registered so callers
-  // can run it on demand via PropertyVerifierRegistry::verify; not yet promoted
-  // to GetStructuralProperties() (Phase 2).
+  // structural_equal(var->GetType(), value->GetType()). A structural property,
+  // so VerificationInstrument checks it before and after every pass.
   Register(IRProperty::AssignTypeSymmetry, CreateAssignTypeSymmetryPropertyVerifier);
   Register(IRProperty::ReturnParamsExplicit, CreateReturnParamsExplicitPropertyVerifier);
   // HardSyncallOccupancyValid (#1935): a hard (FFTS) system.syncall requires the
