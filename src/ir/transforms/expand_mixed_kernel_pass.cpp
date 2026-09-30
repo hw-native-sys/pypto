@@ -1275,6 +1275,43 @@ TileView BuildCrossCoreTransferView(MemorySpace dest_ms, const TileView& origina
   return PassContext::Current()->GetBackendHandler()->BuildCrossCoreTransferView(dest_ms, original_view);
 }
 
+/// How a Vec tile's layout relates to the one its shape implies.
+///
+/// `kNd` accepts both row_major/none_box and whatever
+/// `GetImplicitTileLayout(shape, Vec)` says: a single-column Vec tile is
+/// implicitly col_major (`InferImplicitTileLayoutFromShape`), yet either label
+/// on it is a plain ND tile, not a transposed alias.
+enum class VecLayoutKind { kNd, kNz, kDn, kZn, kOther };
+
+VecLayoutKind ClassifyVecLayout(const TileTypePtr& tile) {
+  const TileView view = tile_view_semantics::GetEffectiveTileView(*tile);
+  const auto implicit = tile_view_semantics::GetImplicitTileLayout(tile->shape_, MemorySpace::Vec);
+  if ((view.blayout == implicit.blayout && view.slayout == implicit.slayout) ||
+      (view.blayout == TileLayout::row_major && view.slayout == TileLayout::none_box)) {
+    return VecLayoutKind::kNd;
+  }
+  if (view.blayout == TileLayout::col_major && view.slayout == TileLayout::row_major) {
+    return VecLayoutKind::kNz;
+  }
+  if (view.blayout == TileLayout::row_major && view.slayout == TileLayout::col_major) {
+    return VecLayoutKind::kZn;
+  }
+  if (view.blayout == TileLayout::col_major && view.slayout == TileLayout::none_box) {
+    return VecLayoutKind::kDn;
+  }
+  return VecLayoutKind::kOther;
+}
+
+/// Build a zero-copy `tile.transpose_view` over `source`, appending its binding
+/// to `stmts` and returning the new Var.
+VarPtr EmitTransposeViewRelabel(std::vector<StmtPtr>& stmts, const ExprPtr& source,
+                                const std::string& name_hint, const Span& span) {
+  auto call = OpRegistry::GetInstance().Create("tile.transpose_view", {source}, {}, span);
+  auto var = std::make_shared<Var>(name_hint, call->GetType(), span);
+  stmts.push_back(std::make_shared<AssignStmt>(var, call, span));
+  return var;
+}
+
 // ============================================================================
 // GM-Mediated Cross-Lane Dependency Detection (issue #1433)
 // ============================================================================
@@ -1537,7 +1574,8 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
                                    std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
                                    std::unordered_set<const Var*>& superseded_tpop_vars,
                                    const std::map<const Stmt*, GmSyncPush>& gm_sync_pushes,
-                                   const std::map<const Stmt*, std::vector<GmSyncPop>>& gm_sync_pops) {
+                                   const std::map<const Stmt*, std::vector<GmSyncPop>>& gm_sync_pops,
+                                   const std::unordered_map<const Var*, StmtPtr>& original_def_map) {
   const auto* handler = PassContext::Current()->GetBackendHandler();
   // AIC keeps CUBE, skips VECTOR; AIV keeps VECTOR, skips CUBE
   CoreAffinity keep_affinity = (side == CoreSide::AIC) ? CoreAffinity::CUBE : CoreAffinity::VECTOR;
@@ -1618,17 +1656,103 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
                   tile_view_semantics::GetEffectiveTileView(*push_dest_type));
             }
 
-            auto tmov_type = std::make_shared<TileType>(src_type->shape_, src_type->dtype_, std::nullopt,
-                                                        fractal_view, MemorySpace::Vec);
             std::string src_name = "tile";
             if (auto sv = std::dynamic_pointer_cast<const Var>(bm.source_tile)) {
               src_name = sv->name_hint_;
             }
-            bool is_nz = (fractal_view.blayout == TileLayout::col_major);
-            auto tmov_var = std::make_shared<Var>(src_name + (is_nz ? "_nz" : "_zn"), tmov_type, stmt->span_);
-            auto tmov_call = CreateMove(bm.source_tile, MemorySpace::Vec, tmov_type, stmt->span_);
-            result.push_back(std::make_shared<AssignStmt>(tmov_var, tmov_call, stmt->span_));
-            push_source = tmov_var;
+
+            // Normalize the Vec source into a layout the ISA can actually
+            // fractalize. A5's TMOV_TILE_IMPL Vec->Vec dispatch has exactly two
+            // converting branches -- TMovToVecNd2Nz and TMovNdTo2Zn -- and both
+            // are gated on `SrcTileData::isRowMajor`, i.e. an ND source. A DN
+            // source (col_major blayout over a non-fractal none_box scatter
+            // axis, which is what `tile.transpose_view` of a Vec tile produces)
+            // matches neither and falls into the unguarded `TMovToVec`
+            // fallback: a plain strided copy that performs no fractalization at
+            // all. The bytes then reach the cube labelled NZ while still laid
+            // out DN. Nothing downstream catches it -- the fallback carries no
+            // static_assert, ptoas accepts the module, and TINSERT's source
+            // check reads the (now wrong) label rather than the payload.
+            //
+            // DN is handled by relabelling rather than by a second copy:
+            // `tile.transpose_view` aliases the same bytes as the ND dual
+            // (flip_major maps col_major<->row_major and leaves none_box), so
+            // the round trip DN -> ND -(tmov)-> ZN -> NZ costs one real data
+            // movement, exactly as the ND path does. Fractalizing to ZN and
+            // relabelling the result to NZ -- rather than fractalizing straight
+            // to NZ on the transposed shape -- keeps the pushed tile's shape
+            // equal to the operand's, so the tpush split axis, the boundary
+            // tpop type and the pop-side wiring all stay untouched.
+            auto push_layout = ClassifyVecLayout(src_type);
+            CHECK_SPAN(push_layout != VecLayoutKind::kZn && push_layout != VecLayoutKind::kOther, stmt->span_)
+                << "a cross-core (Vector->Cube) operand must reach the boundary in ND or NZ layout, but '"
+                << src_name << "' carries blayout="
+                << TileLayoutToString(tile_view_semantics::GetEffectiveTileView(*src_type).blayout)
+                << ", slayout="
+                << TileLayoutToString(tile_view_semantics::GetEffectiveTileView(*src_type).slayout)
+                << ". The hardware V2C pipe inserts into the Mat FIFO as NZ and the vector unit can only "
+                   "fractalize from ND, so this layout has no lowering. Stage the operand through Mem.Mat "
+                   "and take the transposed view on the cube side instead";
+
+            ExprPtr adapt_source = bm.source_tile;
+            TileTypePtr adapt_type = src_type;
+            const bool relabel_dual = (push_layout == VecLayoutKind::kDn);
+            if (relabel_dual) {
+              // `tile.transpose_view` is a zero-copy relabel of a whole buffer,
+              // so it has no lowering over a `tile.slice` window -- the parent's
+              // row stride and the window offset have nowhere to live in the
+              // relabelled type (see the guard in pto_ops_datamove.cpp). Catch
+              // it here, where the operand's own name is still available: left
+              // to codegen, the relabel *this pass* inserts would trip a
+              // diagnostic written for a hand-written transpose and hand the
+              // author advice that does not match their source.
+              if (auto src_var = AsVarLike(bm.source_tile)) {
+                auto def_it = original_def_map.find(src_var.get());
+                auto def = def_it == original_def_map.end()
+                               ? nullptr
+                               : std::dynamic_pointer_cast<const AssignStmt>(def_it->second);
+                auto call = def ? std::dynamic_pointer_cast<const Call>(def->value_) : nullptr;
+                CHECK_SPAN(!IsOp(call, "tile.slice"), stmt->span_)
+                    << "the cross-core (Vector->Cube) operand '" << src_name
+                    << "' is a transposed view of a tile.slice window. Crossing the V2C pipe re-fractalizes "
+                       "the operand, and the vector unit can only fractalize a dense (non-strided) tile, so "
+                       "the slice's parent stride has no lowering here. Stage the operand through Mem.Mat "
+                       "and take "
+                       "the transposed view on the cube side";
+              }
+              auto nd_var = EmitTransposeViewRelabel(result, adapt_source, src_name + "_nd", stmt->span_);
+              adapt_source = nd_var;
+              adapt_type = std::dynamic_pointer_cast<const TileType>(nd_var->GetType());
+              INTERNAL_CHECK_SPAN(adapt_type, stmt->span_)
+                  << "Internal error: tile.transpose_view of a Vec tile must yield a TileType";
+              // NZ <-> ZN are transpose duals, so the fractal target for the
+              // relabelled (transposed) shape is the dual of the boundary view.
+              std::swap(fractal_view.blayout, fractal_view.slayout);
+              fractal_view.valid_shape = tile_view_semantics::GetEffectiveTileView(*adapt_type).valid_shape;
+            }
+
+            // Already the boundary layout (only reachable for an NZ source):
+            // the tmov would be a same-layout copy, so push the tile as it is.
+            const TileView adapt_view = tile_view_semantics::GetEffectiveTileView(*adapt_type);
+            if (adapt_view.blayout == fractal_view.blayout && adapt_view.slayout == fractal_view.slayout) {
+              push_source = adapt_source;
+            } else {
+              auto tmov_type = std::make_shared<TileType>(adapt_type->shape_, adapt_type->dtype_,
+                                                          std::nullopt, fractal_view, MemorySpace::Vec);
+              bool is_nz = (fractal_view.blayout == TileLayout::col_major);
+              auto tmov_var =
+                  std::make_shared<Var>(src_name + (is_nz ? "_nz" : "_zn"), tmov_type, stmt->span_);
+              auto tmov_call = CreateMove(adapt_source, MemorySpace::Vec, tmov_type, stmt->span_);
+              result.push_back(std::make_shared<AssignStmt>(tmov_var, tmov_call, stmt->span_));
+              push_source = tmov_var;
+            }
+
+            if (relabel_dual) {
+              // Back to the operand's own shape, now NZ: the dual of the ZN the
+              // tmov just produced. Zero-copy, so the pushed payload is the
+              // fractalized bytes under their original extents.
+              push_source = EmitTransposeViewRelabel(result, push_source, src_name + "_nz", stmt->span_);
+            }
           }
           result.push_back(std::make_shared<EvalStmt>(
               CreateTpush(push_op, push_source, stmt->span_, op_split, op_lane_stride), stmt->span_));
@@ -1748,20 +1872,22 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
     } else if (affinity == CoreAffinity::MIXED) {
       // Recurse into compound statements, building pruned copies
       if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-        auto new_body = BuildCoreBody(side, FlattenBody(for_stmt->body_), stmt_map, boundary_moves,
-                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+        auto new_body =
+            BuildCoreBody(side, FlattenBody(for_stmt->body_), stmt_map, boundary_moves, tpop_var_remap,
+                          superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, original_def_map);
         auto new_for = MutableCopy(for_stmt);
         new_for->body_ = MakeBody(new_body, for_stmt->span_);
         result.push_back(new_for);
       } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-        auto new_then = BuildCoreBody(side, FlattenBody(if_stmt->then_body_), stmt_map, boundary_moves,
-                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+        auto new_then =
+            BuildCoreBody(side, FlattenBody(if_stmt->then_body_), stmt_map, boundary_moves, tpop_var_remap,
+                          superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, original_def_map);
         std::optional<StmtPtr> new_else;
         const auto& else_body = if_stmt->else_body_;
         if (else_body.has_value()) {
           auto new_else_stmts =
               BuildCoreBody(side, FlattenBody(*else_body), stmt_map, boundary_moves, tpop_var_remap,
-                            superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+                            superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, original_def_map);
           new_else = MakeBody(new_else_stmts, if_stmt->span_);
         }
         auto new_if = MutableCopy(if_stmt);
@@ -1769,8 +1895,9 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
         new_if->else_body_ = new_else;
         result.push_back(new_if);
       } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-        auto new_body = BuildCoreBody(side, FlattenBody(while_stmt->body_), stmt_map, boundary_moves,
-                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+        auto new_body =
+            BuildCoreBody(side, FlattenBody(while_stmt->body_), stmt_map, boundary_moves, tpop_var_remap,
+                          superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, original_def_map);
         auto new_while = MutableCopy(while_stmt);
         new_while->body_ = MakeBody(new_body, while_stmt->span_);
         result.push_back(new_while);
@@ -2046,7 +2173,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   // Build AIC body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aic_tpop_remap;
   auto aic_stmts = BuildCoreBody(CoreSide::AIC, stmts, stmt_map, boundary_moves, aic_tpop_remap,
-                                 superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+                                 superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, original_def_map);
 
   // Remove ReturnStmt from AIC (AIC doesn't return values)
   std::vector<StmtPtr> aic_stmts_no_return;
@@ -2077,7 +2204,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
   // Build AIV body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aiv_tpop_remap;
   auto aiv_stmts = BuildCoreBody(CoreSide::AIV, stmts, stmt_map, boundary_moves, aiv_tpop_remap,
-                                 superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+                                 superseded_tpop_vars, gm_sync_pushes, gm_sync_pops, original_def_map);
   auto aiv_final = FinalizeTpopTfrees(
       FinalizeSplitCoreBody(aiv_stmts, original_def_map, remap_keys(aiv_tpop_remap), func->params_),
       CoreSide::AIV, aiv_tpop_remap);

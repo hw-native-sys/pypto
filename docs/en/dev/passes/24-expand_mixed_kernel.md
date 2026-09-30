@@ -128,6 +128,31 @@ Ascend910B (a2a3) — cross-core transfer goes through GM → Mat, and Mat only 
 
 On both backends, the ordinary-data AIV push side (V→C) inserts a `tile.move` before `tpush_to_aic` to convert the source tile into the required fractal layout. The `tile.move` helper (`CreateMove`) propagates `blayout`/`slayout` kwargs when the result type carries a TileView. Ascend950 MX scales use the dedicated row/row carrier described below.
 
+### Automatic V2C source-layout normalization
+
+For ordinary-data boundary moves requiring fractal adaptation, the AIV side checks
+its source layout before pushing to Mat, Left, or Right. ND is converted to NZ with
+one `tile.move`; NZ is pushed directly. A dense DN source (for example, a vector
+`transpose_view` result) uses the transpose-dual sequence:
+
+```text
+DN [M, K] -> transpose_view -> ND [K, M]
+          -> tile.move     -> ZN [K, M]
+          -> transpose_view -> NZ [M, K] -> tpush_to_aic
+```
+
+Only the move copies data. The two views preserve the payload, and the push keeps
+the operand's original shape and valid shape, so split axes and cube-side pop
+contracts remain unchanged. This also handles Vec-to-Mat moves inserted earlier
+by `AutoTileMatmulL0`, without tracing the source's transpose provenance.
+
+ZN and other unsupported source layouts are rejected. A DN operand defined by
+`tile.slice` is also rejected with a diagnostic: the inserted transpose relabel
+cannot represent that window's parent stride. Stage through Mat and transpose on
+the cube side for this case. This normalization applies to automatic boundary
+moves; hand-written pipes retain the separate adapter described below. MX scale
+carriers retain their dedicated handling.
+
 ### Hand-written pipes get the same adapter
 
 The rule above describes the boundary-move path, which only sees the pipes this pass

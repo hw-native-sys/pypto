@@ -112,6 +112,26 @@ Ascend910B（a2a3）——跨核传输经过 GM → Mat，Mat 仅支持 NZ 布�
 
 在两种后端上，普通数据的 AIV 推送侧（V→C）都会在 `tpush_to_aic` 前插入一个 `tile.move` 将源 tile 转换为所需的 fractal 布局。`tile.move` 辅助函数（`CreateMove`）在结果类型携带 TileView 时会传播 `blayout`/`slayout` kwargs。Ascend950 MX scale 使用下文单独说明的 row/row carrier。
 
+### 自动 V2C 源布局规范化
+
+对于需要分形适配（fractal adaptation）的普通数据边界 move，AIV 侧会在推送到 Mat、Left 或
+Right 前检查源布局。ND 通过一次 `tile.move` 转换为 NZ；NZ 直接推送。稠密 DN 源（例如向量侧
+`transpose_view` 的结果）使用转置对偶序列：
+
+```text
+DN [M, K] -> transpose_view -> ND [K, M]
+          -> tile.move     -> ZN [K, M]
+          -> transpose_view -> NZ [M, K] -> tpush_to_aic
+```
+
+只有 move 复制数据。两次视图变换保留载荷，push 保持操作数原有的 shape 和 valid shape，因此
+split 轴及 cube 侧 pop 契约不变。这也覆盖 `AutoTileMatmulL0` 提前插入的 Vec-to-Mat move，
+无需追溯源操作数的转置来源。
+
+ZN 和其他不支持的源布局会被拒绝。由 `tile.slice` 定义的 DN 操作数也会报错：插入的转置重标记
+无法表达该窗口的父缓冲区步长。此时应经 Mat 暂存，并在 cube 侧转置。此规范化适用于自动边界
+move；手写 pipe 仍使用下文的独立适配器。MX scale carrier 保留专用处理。
+
 ### 手写 pipe 同样获得该适配
 
 上述规则描述的是边界移动路径，它只能看到本 pass 在展开 InCore 函数时构建的 pipe。完全手写的
