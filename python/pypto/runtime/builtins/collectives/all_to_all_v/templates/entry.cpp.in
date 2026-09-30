@@ -107,6 +107,10 @@ void submit_all_to_all_v_kernel(const ChipTaskArgs &orch_args) {
   // LOG_TIMING sits at the default log threshold. The guard covers a rail whose
   // DFX sink is compiled out -- the ops table is not contractually required to
   // carry one.
+  // K3 (RFC #2521): per-peer lane count of the block partition (0 => the B < P
+  // multi-peer stride regime) - the deterministic complement of the kernel's
+  // block -> (peer, lane) mapping, so the assignment is observable from the log.
+  const int32_t lanes_per_peer = admitted_blocks >= nranks ? admitted_blocks / nranks : 0;
   if (current_runtime()->ops->log_timing != nullptr) {
     // Take the min in 64-bit: signal_stride is only bounded from below (by the
     // admission check above), so narrowing it first could report a wrong or
@@ -117,8 +121,9 @@ void submit_all_to_all_v_kernel(const ChipTaskArgs &orch_args) {
                                        : signal_stride;
     const int32_t active_lanes = static_cast<int32_t>(active_lanes64);
     LOG_TIMING(
-        "all_to_all_v: requested_core_num=%d launched_core_num=%d active_lanes=%d nranks=%d", core_num,
-        admitted_blocks, active_lanes, nranks
+        "all_to_all_v: requested_core_num=%d launched_core_num=%d active_lanes=%d nranks=%d "
+        "lanes_per_peer=%d",
+        core_num, admitted_blocks, active_lanes, nranks, lanes_per_peer
     );
   }
 

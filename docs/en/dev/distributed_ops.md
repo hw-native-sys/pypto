@@ -509,18 +509,31 @@ runtime argument error **before** submitting the AIV task, and launches exactly
 `B` blocks with `require_sync_start`. The block-aware signal lanes above are
 what make `B > 1` correct. The entry also reports the three quantities §13.3
 names to DFX — one `LOG_TIMING` line per call carrying `requested_core_num=L
-launched_core_num=B active_lanes=min(B, stride)` plus the rank count, at the
-default log threshold — so the launch width is observable from the device log
-alone instead of being inferred from the data path.
+launched_core_num=B active_lanes=min(B, stride) lanes_per_peer=K` (`0` in the
+`B < NR` stride regime) plus the rank count, at the default log threshold — so
+the launch width is observable from
+the device log alone instead of being inferred from the data path.
 
-`B > 1` is correct but not yet faster. K2 makes the *launch width* dynamic and
-the barrier block-aware; it does not partition the payload, so every admitted
-block runs the whole exchange — it pushes this rank's full payload to every
-peer and writes every `recv_counts` entry. The writes are idempotent, so the
-result is right, but the interconnect traffic scales with `B` and `core_num > 1`
-costs a little more than `core_num = 1` rather than less. Splitting each peer's
-payload across the admitted blocks is the separate K3 work item; until it lands,
-raise `core_num` only to exercise the launch path, not for throughput.
+The admitted blocks **partition the work** (RFC #2521 K3):
+
+- `B >= NR` — peer × length: `K = B / NR` lanes per peer, block `idx` owns
+  `(peer, lane) = (idx / K, idx % K)`. Each lane pushes one **contiguous**
+  sub-range of that peer's valid payload (split with `ceil`; interior
+  boundaries rounded up to 32 bytes per the RFC's `SplitAligned`, so every
+  lane's `TPUT` starts 32-byte aligned and only the final tail may be ragged —
+  never interleaved by chunk), so `K = 1` degenerates to the previous
+  whole-range push and the wire shape (`[rows, SIZE]` flat TPUTs) is unchanged.
+- `B < NR` — multi-peer-per-core: block `idx` owns peers `idx, idx + B,
+  idx + 2B, …`, pushing each peer's full range.
+
+Counts remain a pull with the same two-sided clamp, but the pull is owned by
+one block per rank: `recv_counts` is `NR` adjacent `int32` words — one or more
+64-byte cache lines — and a `dcci` write-back flushes the whole line, so
+partitioning the counts writes across blocks would let one block's write-back
+clobber a neighbour's fresh word in the same line. The barriers, credits and
+the kernel ABI are
+unchanged; the per-lane completion surface stays the `AtomicAdd(-2)`
+self-clearing credit lanes.
 
 The InCore composite rail rejects any `core_num` other than a compile-time `1`,
 naming the CHIP rail in the diagnostic. The CHIP/L2 rail (below) is deliberately
