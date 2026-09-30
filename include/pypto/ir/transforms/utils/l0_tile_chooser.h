@@ -67,6 +67,12 @@ struct L0TileConfig {
   // do not claim a profitable drain overlap from an unknown compute duration.
   int reduction_iterations = 1;
 
+  // Stage multiplicity of the source reduction enclosing the emitted K loop.
+  // Split-K operands need this many copies of their two inner pipeline slots;
+  // full-K operands have no inner loop and use the larger of this depth and
+  // their ordinary regime depth. This is storage, not repeated arithmetic.
+  int reduction_pipeline_stages = 1;
+
   // L0 capacities in bytes (typically read from BackendHandler::GetL0?CapacityBytes).
   uint32_t l0a_bytes = 0;
   uint32_t l0b_bytes = 0;

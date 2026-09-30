@@ -572,6 +572,20 @@ std::optional<Candidate> EnumerateBest(const L0TileConfig& cfg, const Regime& re
       if (regime.dbc && CeilDiv(cfg.M, m) * CeilDiv(cfg.N, n) < 2) continue;
       for (const int k : EnumerateLegalKs(static_cast<int>(m), static_cast<int>(n), cfg, A0, B0)) {
         if (require_full_k && k != cfg.K) continue;
+        // A canonical source pipeline remains around the emitted inner K
+        // pipeline. LowerPipelineLoops composes both memberships; budget the
+        // resulting physical copies before selection, not after allocation.
+        const auto db = DeriveOperandDB(regime.stat);
+        const int64_t depth_a = k < cfg.K ? (db.a ? 2LL : 1LL) * cfg.reduction_pipeline_stages
+                                          : std::max(db.a ? 2 : 1, cfg.reduction_pipeline_stages);
+        const int64_t depth_b = k < cfg.K ? (db.b ? 2LL : 1LL) * cfg.reduction_pipeline_stages
+                                          : std::max(db.b ? 2 : 1, cfg.reduction_pipeline_stages);
+        const auto physical_m = BoxedExtent(static_cast<int>(m), cfg.box_align_m);
+        const auto physical_n = BoxedExtent(static_cast<int>(n), cfg.box_align_n);
+        if (!physical_m || !physical_n || *physical_m > cfg.l0a_bytes / cfg.bytes_a / depth_a / k ||
+            *physical_n > cfg.l0b_bytes / cfg.bytes_b / depth_b / k) {
+          continue;
+        }
         const DbcEmissionRoute route = DbcRouteForK(k, cfg);
         if (regime.dbc &&
             !DbcRealizableTile(static_cast<int>(m), static_cast<int>(n), cfg, regime.stat, route)) {
@@ -612,6 +626,7 @@ L0TileResult ChooseL0Tile(const L0TileConfig& cfg) {
       << "ChooseL0Tile: M, N, K must all be positive (got " << cfg.M << ", " << cfg.N << ", " << cfg.K << ")";
   CHECK(cfg.reduction_iterations >= 0)
       << "ChooseL0Tile: reduction_iterations must be nonnegative (zero means unknown)";
+  CHECK(cfg.reduction_pipeline_stages > 0) << "ChooseL0Tile: reduction_pipeline_stages must be positive";
   CHECK(cfg.full_k_dbc_route != DbcEmissionRoute::kUnrolledGrid ||
         (!cfg.allow_a_stationary && !cfg.allow_b_stationary))
       << "ChooseL0Tile: unrolled full-K grids cannot retain operands across output tiles";

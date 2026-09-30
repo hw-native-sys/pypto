@@ -394,6 +394,25 @@ class TestL0TilingEdgeCases:
         with pytest.raises(ValueError, match="reduction_iterations"):
             passes.l0_tile_chooser.choose_l0_tile(cfg)
 
+    @pytest.mark.parametrize("stages", [1, 2, 3, 4])
+    def test_source_pipeline_depth_budgets_nested_operand_slots(self, stages):
+        cfg = _default_config(64, 384, 96)
+        cfg.allow_k_boundary = True
+        cfg.full_k_dbc_route = passes.l0_tile_chooser.DbcEmissionRoute.UnrolledGrid
+        cfg.reduction_iterations = 3
+        cfg.reduction_pipeline_stages = stages
+        result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        depth = 2 * stages if result.k < cfg.K else max(2, stages)
+        assert result.m * result.k * cfg.bytes_a * depth <= cfg.l0a_bytes
+        assert result.n * result.k * cfg.bytes_b * depth <= cfg.l0b_bytes
+        assert (result.m, result.n, result.k) == _brute_optimum(cfg)[0]
+
+    def test_invalid_source_pipeline_depth_is_rejected(self):
+        cfg = _default_config(64, 384, 96)
+        cfg.reduction_pipeline_stages = 0
+        with pytest.raises(ValueError, match="reduction_pipeline_stages"):
+            passes.l0_tile_chooser.choose_l0_tile(cfg)
+
     def test_unrolled_dbc_can_exclude_row_boundary_slots(self):
         """A route with uniform Acc slots must reject candidates whose M tail changes stride."""
         cfg = _default_config(M=272, N=416, K=32)
@@ -853,6 +872,19 @@ def _enumerate_best(cfg, stat: str, dbc: bool, require_full_k: bool):
             if physical_m * boxed_n <= c0:
                 for k in _legal_ks(m, n, cfg, a0, b0):
                     if require_full_k and k != cfg.K:
+                        continue
+                    depth_a = 2 if dba else 1
+                    depth_b = 2 if dbb else 1
+                    if k < cfg.K:
+                        depth_a *= cfg.reduction_pipeline_stages
+                        depth_b *= cfg.reduction_pipeline_stages
+                    else:
+                        depth_a = max(depth_a, cfg.reduction_pipeline_stages)
+                        depth_b = max(depth_b, cfg.reduction_pipeline_stages)
+                    if (
+                        boxed_m * k * cfg.bytes_a * depth_a > cfg.l0a_bytes
+                        or boxed_n * k * cfg.bytes_b * depth_b > cfg.l0b_bytes
+                    ):
                         continue
                     if dbc and not _dbc_realizable(m, n, k, cfg, stat):
                         continue

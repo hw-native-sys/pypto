@@ -917,6 +917,7 @@ void BindPass(nb::module_& m) {
       .def_rw("allow_double_buffer_c", &utils::L0TileConfig::allow_double_buffer_c)
       .def_rw("full_k_dbc_route", &utils::L0TileConfig::full_k_dbc_route)
       .def_rw("reduction_iterations", &utils::L0TileConfig::reduction_iterations)
+      .def_rw("reduction_pipeline_stages", &utils::L0TileConfig::reduction_pipeline_stages)
       .def_rw("split_k_dbc_route", &utils::L0TileConfig::split_k_dbc_route)
       .def_rw("allow_unrolled_dbc_m_boundary", &utils::L0TileConfig::allow_unrolled_dbc_m_boundary)
       .def_rw("c_read", &utils::L0TileConfig::c_read)

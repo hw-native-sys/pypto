@@ -391,16 +391,23 @@ class _PeelToPredicate(ir.IRMutator):
         if not isinstance(stmt, ir.IfStmt) or len(stmt.return_vars) != 1 or stmt.else_body is None:
             return stmt
         arms = []
+        prefixes = []
         for body in (stmt.then_body, stmt.else_body):
-            if not isinstance(body, ir.SeqStmts) or len(body.stmts) != 2:
+            if not isinstance(body, ir.SeqStmts) or len(body.stmts) < 2:
                 return stmt
-            assign = body.stmts[0]
+            assign = body.stmts[-2]
             if not isinstance(assign, ir.AssignStmt) or not isinstance(assign.value, ir.Call):
                 return stmt
             arms.append(assign.value)
+            prefixes.append(list(body.stmts[:-2]))
         seed_call, acc_call = arms
         if seed_call.op.name != _TILE_MATMUL_OP or acc_call.op.name != _TILE_MATMUL_ACC_OP:
             return stmt
+        # Full-K canonical emission now makes the two L0 extracts explicit in
+        # each arm. Hoist one copy only after proving both prefixes equivalent.
+        ir.assert_structural_equal(
+            ir.SeqStmts(prefixes[0], stmt.span), ir.SeqStmts(prefixes[1], stmt.span), True
+        )
         phi = stmt.return_vars[0]
         predicated = ir.Call(
             acc_call.op,
@@ -410,7 +417,7 @@ class _PeelToPredicate(ir.IRMutator):
             phi.type,
             acc_call.span,
         )
-        return ir.AssignStmt(phi, predicated, stmt.span)
+        return ir.SeqStmts([*prefixes[1], ir.AssignStmt(phi, predicated, stmt.span)], stmt.span)
 
 
 def test_issue_2232_canonical_input_shape():
@@ -524,7 +531,7 @@ def test_predicated_canonical_split_k_tiles_both_m_and_n_with_boundaries():
 
 def test_padded_n_boundary_retains_valid_shape_through_inner_k_rewrite():
     """A box-padded 16-column output tail remains logically 16 columns when
-    the post-fold matmul is K-tiled again. In particular, the inner loop's Acc
+    the selected inner-K schedule is emitted. In particular, the inner loop's Acc
     initializer must not widen its valid N extent back to the physical 32."""
     before = _lower_to_auto_tile_input(_jit_program(canonical_split_k_n_boundary_retiles_k))
     with passes.PassContext([ir.make_roundtrip_instrument()]):
@@ -535,7 +542,7 @@ def test_padded_n_boundary_retains_valid_shape_through_inner_k_rewrite():
     assert printed.count("pl.tile.store(") == 3
     assert "[384, 32], [384, 16], target_memory=pl.Mem.Mat" in printed
     assert (
-        "[96, 32], pl.INT8, pl.Mem.Right, pl.TileView(valid_shape=[96, 16], compact=pl.CompactMode.normal)"
+        "[32, 32], pl.INT8, pl.Mem.Right, pl.TileView(valid_shape=[32, 16], compact=pl.CompactMode.normal)"
     ) in printed
     assert "pl.Tile[[272, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[272, 16])]" in printed
     assert "pl.tile.set_validshape(" in printed
@@ -543,7 +550,7 @@ def test_padded_n_boundary_retains_valid_shape_through_inner_k_rewrite():
 
 
 def test_predicated_padded_n_boundary_retains_valid_shape_through_inner_k_rewrite():
-    """Composing the predicated fold with the ordinary inner-K rewrite keeps the
+    """Emitting the selected K schedule in the predicated fold keeps the
     16-column logical tail, exactly as the peeled spelling does."""
     before = _lower_to_auto_tile_input(_jit_program(canonical_split_k_n_boundary_retiles_k_predicated))
     with passes.PassContext([ir.make_roundtrip_instrument()]):
@@ -554,7 +561,7 @@ def test_predicated_padded_n_boundary_retains_valid_shape_through_inner_k_rewrit
     assert printed.count("pl.tile.store(") == 3
     assert "[384, 32], [384, 16], target_memory=pl.Mem.Mat" in printed
     assert (
-        "[96, 32], pl.INT8, pl.Mem.Right, pl.TileView(valid_shape=[96, 16], compact=pl.CompactMode.normal)"
+        "[32, 32], pl.INT8, pl.Mem.Right, pl.TileView(valid_shape=[32, 16], compact=pl.CompactMode.normal)"
     ) in printed
     assert "pl.Tile[[272, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[272, 16])]" in printed
     assert "pl.tile.set_validshape(" in printed
@@ -867,7 +874,7 @@ def test_canonical_split_k_boundary_codegen_uses_box_aligned_physical_width():
         pto,
     ), pto
     assert re.search(
-        r"!pto\.tile_buf<loc=right, dtype=i8, rows=96, cols=32, "
+        r"!pto\.tile_buf<loc=right, dtype=i8, rows=32, cols=32, "
         r"v_row=\?, v_col=\?, blayout=row_major, slayout=col_major, fractal=512, pad=0, compact=1>",
         pto,
     ), pto
@@ -984,6 +991,7 @@ def test_canonical_grid_chooser_receives_complete_reduction(iterations):
     cfg.allow_unrolled_dbc_m_boundary = False
     cfg.full_k_dbc_route = passes.l0_tile_chooser.DbcEmissionRoute.UnrolledGrid
     cfg.reduction_iterations = iterations
+    cfg.reduction_pipeline_stages = 2
     expected = passes.l0_tile_chooser.choose_l0_tile(cfg)
     with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
         after = passes.auto_tile_matmul_l0()(before)
@@ -999,6 +1007,76 @@ def test_canonical_grid_chooser_receives_complete_reduction(iterations):
     assert ("slots=2" in text) == expected.double_buffer_c
     # Each emitted tile retains the whole original reduction, not one source block.
     assert text.count(f"pl.pipeline(0, {128 * iterations}, 128,") == len(stores)
+
+
+@pytest.mark.parametrize(
+    ("planner", "dbc"),
+    [
+        (passes.MemoryPlanner.PYPTO, False),
+        (passes.MemoryPlanner.PYPTO, True),
+        (passes.MemoryPlanner.DSA_RP, True),
+        (passes.MemoryPlanner.PTOAS, True),
+    ],
+)
+@pytest.mark.parametrize(
+    ("m", "n", "source_k", "iterations"),
+    [(128, 256, 128, 8), (64, 384, 96, 3), (256, 384, 128, 2), (80, 288, 96, 3)],
+)
+def test_canonical_emits_selected_k_including_boundaries(planner, dbc, m, n, source_k, iterations):
+    """One outer decision must survive emission, without recursive reselection.
+
+    Includes the T2 score/code mismatch, T5 single-C L0B overflow, and padded
+    boundary grids. Check the actual MAD operands, then run allocation/codegen.
+    """
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910B)
+    cfg = passes.l0_tile_chooser.L0TileConfig()
+    cfg.M, cfg.N, cfg.K = m, n, source_k
+    cfg.l0a_bytes = cfg.l0b_bytes = 65536
+    cfg.l0c_bytes = 131072
+    cfg.box_align_m = cfg.box_align_n = 16
+    cfg.allow_k_boundary = True
+    cfg.c_read = True
+    cfg.allow_double_buffer_c = dbc
+    cfg.allow_unrolled_dbc_m_boundary = planner != passes.MemoryPlanner.PTOAS
+    cfg.full_k_dbc_route = passes.l0_tile_chooser.DbcEmissionRoute.UnrolledGrid
+    cfg.reduction_iterations = iterations
+    cfg.reduction_pipeline_stages = 2
+    expected = passes.l0_tile_chooser.choose_l0_tile(cfg)
+    before = _predicated_canonical_split_k(m, n, source_k * iterations, source_k)
+
+    class Operands(ir.IRVisitor):
+        def __init__(self):
+            super().__init__()
+            self.ks = set()
+
+        def visit_call(self, op):
+            if op.op.name in {_TILE_MATMUL_OP, _TILE_MATMUL_ACC_OP}:
+                start = int(op.op.name == _TILE_MATMUL_ACC_OP)
+                lhs, rhs = op.args[start : start + 2]
+                assert isinstance(lhs.type, ir.TileType)
+                assert isinstance(rhs.type, ir.TileType)
+                assert lhs.type.memory_space == ir.MemorySpace.Left
+                assert rhs.type.memory_space == ir.MemorySpace.Right
+                k = lhs.type.shape[1]
+                assert isinstance(k, ir.ConstInt)
+                self.ks.add(k.value)
+                rhs_k = rhs.type.shape[0]
+                assert isinstance(rhs_k, ir.ConstInt)
+                assert rhs_k.value == k.value
+            super().visit_call(op)
+
+    with passes.PassContext([], memory_planner=planner, enable_pypto_l0c_double_buffer=dbc):
+        after = passes.auto_tile_matmul_l0()(before)
+        operands = Operands()
+        operands.visit_program(after)
+        expected_ks = {expected.k}
+        if source_k % expected.k:
+            expected_ks.add(source_k % expected.k)
+        assert operands.ks == expected_ks
+        allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(before)
+    pto = codegen.PTOCodegen().generate(allocated, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+    assert "pto.tmatmul" in pto
 
 
 @pytest.mark.parametrize(
@@ -1061,12 +1139,12 @@ def test_canonical_split_k_grid_declares_the_dbc_ping_pong(M, N, K_total, K_tile
     "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
 )
 def test_canonical_split_k_dbc_membership_survives_inner_k_retiling(source_k_tile, planner):
-    """The output grid's dbC identity must survive recursive K-only tiling.
+    """The output grid's dbC identity must survive inner K-block emission.
 
     These are the same output and total reduction. A 256-wide source K panel
-    needs a second rewrite into 128-wide L0 blocks; a 128-wide source panel
-    does not. Replacing a MAD must preserve its output tile's stage, not discard
-    it or assign a new stage for each reduction block.
+    may need different inner blocking than a 128-wide source panel. Every MAD
+    must preserve its output tile's stage, not discard it or assign a new stage
+    for each reduction block.
     """
     _backend.reset_for_testing()
     _backend.set_backend_type(BackendType.Ascend910B)

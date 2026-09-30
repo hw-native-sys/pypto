@@ -171,6 +171,14 @@ load、MAD 和填充计算量覆盖全部迭代，每个输出 tile 仅回写一
 单块代价选择 single-C tiling，不声称 dbC 有性能收益。这些是发射调度的结构
 修正，不是拟合硬件系数。
 
+规范归约重写保留选定的内层 `k` 和输出驻留调度，不再对缩小后的每个 matmul
+重新调用 chooser。它直接发射选定的 Left/Right 提取，包括 full-K 块和 K 尾块；
+填充后的 M/N 边界 tile 使用同一 K 切分。即使输出无需 M/N 切分，K-only 方案
+也会保留。`reduction_pipeline_stages` 单独描述源流水线的存储倍数：内层两级
+K 流水线需要为每个源 stage 保留两个操作数 slot。full-K 候选没有内层流水线，
+按常规 regime 深度与源深度的较大值预留。在选择之前检查这些物理副本的
+L0A/L0B 容量；该倍数不会增加算术工作量或回写次数。
+
 若规范网格缩小后的 MAD 仍需内层 K 切分，每个替换 MAD 都保留原始
 `pipeline_membership`，包括 peeled K 块和 bias 首块。同一输出 tile 的所有
 归约块保持相同 stage；只有下一个输出 tile 才切换 stage。否则 chooser 的 dbC
