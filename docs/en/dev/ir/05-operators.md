@@ -26,6 +26,8 @@ The internal Buffer-stage GM and addition operations have no public DSL wrappers
 | `buffer.extract` | source buffer, row offset, column offset, destination buffer | Void |
 | `buffer.matmul` | Left buffer, Right buffer, Acc destination | Void |
 | `buffer.matmul_acc` | Left buffer, Right buffer, Acc buffer read and written | Void |
+| `buffer.alloc_multi` | None; static element descriptor and slot count in result type | MultiBufferType |
+| `buffer.get_slot` | Multi-buffer allocation, static INDEX slot | BufferType alias |
 
 These use separate data/metadata effects. See [Buffer contracts](02-types.md#buffer-operator-contracts)
 for shape, dtype, valid-state, and alias requirements.

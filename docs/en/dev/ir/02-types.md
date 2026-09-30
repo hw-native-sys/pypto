@@ -61,13 +61,19 @@ parameters support dense ND rank-2 FP16/BF16/FP32/INT32 tensors with static
 physical shapes and more than one column. Arithmetic recipes impose their own
 narrower dtype contracts. Normalized Tensor returns alias those parameters;
 the native kernel still returns void. Buffer parameter ABI, native function
-results, dynamic or strided views, slots, helpers, and other physical layouts are not yet supported
+results, dynamic or strided views, dynamic slots, helpers, and other physical layouts are not yet supported
 and produce explicit errors. Buffer type dumps use native
 `pypto.ir.BufferType(...)` constructors; binary serialization preserves their
 complete descriptors. Reparsing complete buffer-program dumps through the
 DSL parser is not yet supported.
 
 #### Buffer operator contracts
+
+Static slot groups use `buffer.alloc_multi` (a `MultiBufferType` result) and
+`buffer.get_slot` (a static INDEX selecting a `BufferType` alias). These internal
+operations preserve distinct physical slots through native PTOAS emission.
+They neither initialize nor copy data; alias verification retains the slot's
+byte window rather than treating every selection as independent storage.
 
 Registrations default to `OpIRStage::Functional`. Internal buffer operators
 explicitly select `OpIRStage::Buffer` and `set_internal_only()`. Their output

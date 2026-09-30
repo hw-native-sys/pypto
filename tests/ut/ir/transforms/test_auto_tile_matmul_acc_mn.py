@@ -17,6 +17,7 @@ peeled kernel below therefore has a predicated twin, and
 two retiled programs differ only in that reduction statement.
 """
 
+import itertools
 import re
 
 import pypto.language as pl
@@ -24,6 +25,8 @@ import pytest
 from pypto import backend as _backend
 from pypto import ir, passes
 from pypto.backend import BackendType
+from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.pypto_core import codegen
 
 _TILE_STORE_OP = ir.get_op("tile.store").name
 _TILE_MATMUL_OP = ir.get_op("tile.matmul").name
@@ -388,16 +391,23 @@ class _PeelToPredicate(ir.IRMutator):
         if not isinstance(stmt, ir.IfStmt) or len(stmt.return_vars) != 1 or stmt.else_body is None:
             return stmt
         arms = []
+        prefixes = []
         for body in (stmt.then_body, stmt.else_body):
-            if not isinstance(body, ir.SeqStmts) or len(body.stmts) != 2:
+            if not isinstance(body, ir.SeqStmts) or len(body.stmts) < 2:
                 return stmt
-            assign = body.stmts[0]
+            assign = body.stmts[-2]
             if not isinstance(assign, ir.AssignStmt) or not isinstance(assign.value, ir.Call):
                 return stmt
             arms.append(assign.value)
+            prefixes.append(list(body.stmts[:-2]))
         seed_call, acc_call = arms
         if seed_call.op.name != _TILE_MATMUL_OP or acc_call.op.name != _TILE_MATMUL_ACC_OP:
             return stmt
+        # Full-K canonical emission now makes the two L0 extracts explicit in
+        # each arm. Hoist one copy only after proving both prefixes equivalent.
+        ir.assert_structural_equal(
+            ir.SeqStmts(prefixes[0], stmt.span), ir.SeqStmts(prefixes[1], stmt.span), True
+        )
         phi = stmt.return_vars[0]
         predicated = ir.Call(
             acc_call.op,
@@ -407,7 +417,7 @@ class _PeelToPredicate(ir.IRMutator):
             phi.type,
             acc_call.span,
         )
-        return ir.AssignStmt(phi, predicated, stmt.span)
+        return ir.SeqStmts([*prefixes[1], ir.AssignStmt(phi, predicated, stmt.span)], stmt.span)
 
 
 def test_issue_2232_canonical_input_shape():
@@ -521,39 +531,39 @@ def test_predicated_canonical_split_k_tiles_both_m_and_n_with_boundaries():
 
 def test_padded_n_boundary_retains_valid_shape_through_inner_k_rewrite():
     """A box-padded 16-column output tail remains logically 16 columns when
-    the post-fold matmul is K-tiled again. In particular, the inner loop's Acc
+    the selected inner-K schedule is emitted. In particular, the inner loop's Acc
     initializer must not widen its valid N extent back to the physical 32."""
     before = _lower_to_auto_tile_input(_jit_program(canonical_split_k_n_boundary_retiles_k))
     with passes.PassContext([ir.make_roundtrip_instrument()]):
         after = passes.auto_tile_matmul_l0()(before)
 
     printed = ir.python_print(after)
-    assert printed.count("in pl.pipeline(2, stage=2") == 4
-    assert printed.count("pl.tile.store(") == 4
+    assert printed.count("in pl.pipeline(2, stage=2") == 3
+    assert printed.count("pl.tile.store(") == 3
     assert "[384, 32], [384, 16], target_memory=pl.Mem.Mat" in printed
     assert (
-        "[192, 32], pl.INT8, pl.Mem.Right, pl.TileView(valid_shape=[192, 16], compact=pl.CompactMode.normal)"
+        "[32, 32], pl.INT8, pl.Mem.Right, pl.TileView(valid_shape=[32, 16], compact=pl.CompactMode.normal)"
     ) in printed
-    assert "pl.Tile[[144, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[144, 16])]" in printed
+    assert "pl.Tile[[272, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[272, 16])]" in printed
     assert "pl.tile.set_validshape(" in printed
     assert "pl.tile.store(acc__rv_v2_mn2, [0, 128]" in printed
 
 
 def test_predicated_padded_n_boundary_retains_valid_shape_through_inner_k_rewrite():
-    """Composing the predicated fold with the ordinary inner-K rewrite keeps the
+    """Emitting the selected K schedule in the predicated fold keeps the
     16-column logical tail, exactly as the peeled spelling does."""
     before = _lower_to_auto_tile_input(_jit_program(canonical_split_k_n_boundary_retiles_k_predicated))
     with passes.PassContext([ir.make_roundtrip_instrument()]):
         after = passes.auto_tile_matmul_l0()(before)
 
     printed = ir.python_print(after)
-    assert printed.count("in pl.pipeline(2, stage=2") == 4
-    assert printed.count("pl.tile.store(") == 4
+    assert printed.count("in pl.pipeline(2, stage=2") == 3
+    assert printed.count("pl.tile.store(") == 3
     assert "[384, 32], [384, 16], target_memory=pl.Mem.Mat" in printed
     assert (
-        "[192, 32], pl.INT8, pl.Mem.Right, pl.TileView(valid_shape=[192, 16], compact=pl.CompactMode.normal)"
+        "[32, 32], pl.INT8, pl.Mem.Right, pl.TileView(valid_shape=[32, 16], compact=pl.CompactMode.normal)"
     ) in printed
-    assert "pl.Tile[[144, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[144, 16])]" in printed
+    assert "pl.Tile[[272, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[272, 16])]" in printed
     assert "pl.tile.set_validshape(" in printed
     assert "pl.tile.store(acc__rv_v2_mn2, [0, 128]" in printed
 
@@ -847,7 +857,7 @@ def test_canonical_split_k_boundary_codegen_uses_box_aligned_physical_width():
     # carries.  Pin the pair on the buffer the boundary tstore actually drains.
     tail_store = re.search(
         r"pto\.tstore ins\((?P<acc>%[\w.]+) : !pto\.tile_buf<loc=acc, dtype=i32, "
-        r"rows=(?P<rows>128|144), cols=32,[^)]*\) outs\([^)]*<(?P=rows)x16xi32>\)",
+        r"rows=(?P<rows>272), cols=32,[^)]*\) outs\([^)]*<(?P=rows)x16xi32>\)",
         pto,
     )
     assert tail_store, pto
@@ -864,7 +874,7 @@ def test_canonical_split_k_boundary_codegen_uses_box_aligned_physical_width():
         pto,
     ), pto
     assert re.search(
-        r"!pto\.tile_buf<loc=right, dtype=i8, rows=192, cols=32, "
+        r"!pto\.tile_buf<loc=right, dtype=i8, rows=32, cols=32, "
         r"v_row=\?, v_col=\?, blayout=row_major, slayout=col_major, fractal=512, pad=0, compact=1>",
         pto,
     ), pto
@@ -929,6 +939,354 @@ def test_row_narrowed_matmul_declares_a_compact_accumulator_seed():
         assert "compact=pl.CompactMode.normal" in view, (
             f"every row-narrowed Acc tile in the K chain must stay compact, got {view!r}:\n{printed}"
         )
+
+
+def _predicated_canonical_split_k(M: int, N: int, K_total: int, K_tile: int):
+    """A canonical ``create -> pl.pipeline K-loop -> store`` reduction, predicated form.
+
+    This is the shape ``TryFoldCanonicalSplitKAcc`` retiles: one accumulator created up
+    front, accumulated across K blocks in a user-written pipeline loop, stored once.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[M, K_total], pl.BF16],
+            b: pl.Tensor[[K_total, N], pl.BF16],
+            c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        ) -> pl.Tensor[[M, N], pl.FP32]:
+            acc_init: pl.Tile[[M, N], pl.FP32, pl.Mem.Acc] = pl.tile.create(
+                [M, N], dtype=pl.FP32, target_memory=pl.Mem.Acc
+            )
+            for k0, (acc_iter,) in pl.pipeline(0, K_total, K_tile, init_values=(acc_init,), stage=2):
+                at: pl.Tile[[M, K_tile], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    a, [0, k0], [M, K_tile], target_memory=pl.Mem.Mat
+                )
+                bt: pl.Tile[[K_tile, N], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    b, [k0, 0], [K_tile, N], target_memory=pl.Mem.Mat
+                )
+                acc_next: pl.Tile[[M, N], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                    acc_iter, at, bt, init_cond=(k0 == 0)
+                )
+                acc: pl.Tile[[M, N], pl.FP32, pl.Mem.Acc] = pl.yield_(acc_next)
+            c = pl.tile.store(acc, [0, 0], c)
+            return c
+
+    return Before
+
+
+@pytest.mark.parametrize("iterations", [2, 8, 32])
+def test_canonical_grid_chooser_receives_complete_reduction(iterations):
+    """The emitted grid must agree with a chooser given the source loop count."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910B)
+    before = _predicated_canonical_split_k(256, 384, 128 * iterations, 128)
+    cfg = passes.l0_tile_chooser.L0TileConfig()
+    cfg.M, cfg.N, cfg.K = 256, 384, 128
+    cfg.l0a_bytes = cfg.l0b_bytes = 65536
+    cfg.l0c_bytes = 131072
+    cfg.allow_double_buffer_c = True
+    cfg.allow_unrolled_dbc_m_boundary = False
+    cfg.full_k_dbc_route = passes.l0_tile_chooser.DbcEmissionRoute.UnrolledGrid
+    cfg.reduction_iterations = iterations
+    cfg.reduction_pipeline_stages = 2
+    expected = passes.l0_tile_chooser.choose_l0_tile(cfg)
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+        after = passes.auto_tile_matmul_l0()(before)
+    stores = _collect_store_calls(after)
+    assert len(stores) == ((256 + expected.m - 1) // expected.m) * ((384 + expected.n - 1) // expected.n)
+    output_type = stores[0].args[0].type
+    assert isinstance(output_type, ir.TileType)
+    assert len(output_type.shape) == 2
+    for extent, expected_extent in zip(output_type.shape, (expected.m, expected.n)):
+        assert isinstance(extent, ir.ConstInt)
+        assert extent.value == expected_extent
+    text = ir.python_print(after)
+    assert ("slots=2" in text) == expected.double_buffer_c
+    # Each emitted tile retains the whole original reduction, not one source block.
+    assert text.count(f"pl.pipeline(0, {128 * iterations}, 128,") == len(stores)
+
+
+@pytest.mark.parametrize(
+    ("planner", "dbc"),
+    [
+        (passes.MemoryPlanner.PYPTO, False),
+        (passes.MemoryPlanner.PYPTO, True),
+        (passes.MemoryPlanner.DSA_RP, True),
+        (passes.MemoryPlanner.PTOAS, True),
+    ],
+)
+@pytest.mark.parametrize(
+    ("m", "n", "source_k", "iterations"),
+    [(128, 256, 128, 8), (64, 384, 96, 3), (256, 384, 128, 2), (80, 288, 96, 3)],
+)
+def test_canonical_emits_selected_k_including_boundaries(planner, dbc, m, n, source_k, iterations):
+    """One outer decision must survive emission, without recursive reselection.
+
+    Includes the T2 score/code mismatch, T5 single-C L0B overflow, and padded
+    boundary grids. Check the actual MAD operands, then run allocation/codegen.
+    """
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910B)
+    cfg = passes.l0_tile_chooser.L0TileConfig()
+    cfg.M, cfg.N, cfg.K = m, n, source_k
+    cfg.l0a_bytes = cfg.l0b_bytes = 65536
+    cfg.l0c_bytes = 131072
+    cfg.box_align_m = cfg.box_align_n = 16
+    cfg.allow_k_boundary = True
+    cfg.c_read = True
+    cfg.allow_double_buffer_c = dbc
+    cfg.allow_unrolled_dbc_m_boundary = planner != passes.MemoryPlanner.PTOAS
+    cfg.full_k_dbc_route = passes.l0_tile_chooser.DbcEmissionRoute.UnrolledGrid
+    cfg.reduction_iterations = iterations
+    cfg.reduction_pipeline_stages = 2
+    expected = passes.l0_tile_chooser.choose_l0_tile(cfg)
+    before = _predicated_canonical_split_k(m, n, source_k * iterations, source_k)
+
+    class Operands(ir.IRVisitor):
+        def __init__(self):
+            super().__init__()
+            self.ks = set()
+
+        def visit_call(self, op):
+            if op.op.name in {_TILE_MATMUL_OP, _TILE_MATMUL_ACC_OP}:
+                start = int(op.op.name == _TILE_MATMUL_ACC_OP)
+                lhs, rhs = op.args[start : start + 2]
+                assert isinstance(lhs.type, ir.TileType)
+                assert isinstance(rhs.type, ir.TileType)
+                assert lhs.type.memory_space == ir.MemorySpace.Left
+                assert rhs.type.memory_space == ir.MemorySpace.Right
+                k = lhs.type.shape[1]
+                assert isinstance(k, ir.ConstInt)
+                self.ks.add(k.value)
+                rhs_k = rhs.type.shape[0]
+                assert isinstance(rhs_k, ir.ConstInt)
+                assert rhs_k.value == k.value
+            super().visit_call(op)
+
+    with passes.PassContext([], memory_planner=planner, enable_pypto_l0c_double_buffer=dbc):
+        after = passes.auto_tile_matmul_l0()(before)
+        operands = Operands()
+        operands.visit_program(after)
+        expected_ks = {expected.k}
+        if source_k % expected.k:
+            expected_ks.add(source_k % expected.k)
+        assert operands.ks == expected_ks
+        allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(before)
+    pto = codegen.PTOCodegen().generate(allocated, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+    assert "pto.tmatmul" in pto
+
+
+@pytest.mark.parametrize(
+    ("M", "N", "K_total", "K_tile", "tiles"),
+    [(256, 384, 256, 128, 6), (384, 384, 256, 128, 9)],
+)
+def test_canonical_split_k_grid_declares_the_dbc_ping_pong(M, N, K_total, K_tile, tiles):
+    """Retiling a user-written reduction must declare its dbC=2 slots, like the
+    chooser-emitted grid does.
+
+    ``TryFoldCanonicalSplitKAcc`` clones the source create/K-loop/store triplet once per
+    output tile, so the result is an UNROLLED grid with no loop over the tiles --
+    structurally the same situation as ``BuildSplitKGrid``, and with the same
+    consequence: ``LowerPipelineLoops`` has nothing to replicate, so nothing tags the
+    accumulators. Until the fold stamped them, a dbC plan here shrank the accumulator to
+    the L0C/2 budget and bought no overlap for it, which is strictly worse than not
+    choosing dbC at all.
+
+    This pins the DECLARATION only, which is all that is observable this early in the
+    pipeline. Its effect -- the declaration actually resolving to two buffers -- is
+    pinned by ``test_canonical_split_k_grid_allocates_two_l0c_slots``, which runs the
+    full Default strategy under the planner that consumes ``pipeline_membership``.
+    PTOAS is used here because it enables dbC unconditionally. On this unrolled
+    route the emitter backs the declaration with an explicit two-slot MemRef,
+    because PTOAS does not consume ``pipeline_membership`` itself.
+    """
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910B)
+    Before = _predicated_canonical_split_k(M, N, K_total, K_tile)
+
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+        after = passes.auto_tile_matmul_l0()(Before)
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+    printed = ir.python_print(after)
+
+    assert printed.count("pl.tile.store(") == tiles, printed
+    # AutoTile's reserved group base (1 << 21), one stamp per output tile.
+    slots = re.findall(r'"pipeline_membership": "2097152:(\d+)"', printed)
+    assert len(slots) == tiles, f"every output tile must declare a slot: {slots}\n{printed}"
+    runs = [slot for slot, _ in itertools.groupby(slots)]
+    assert runs == slots, f"one accumulator per tile, so no two adjacent stamps merge: {slots}"
+    assert all(a != b for a, b in zip(runs, runs[1:])), f"consecutive tiles must alternate: {slots}"
+    assert "slots=2" in printed, f"PTOAS must receive a concrete two-slot allocation:\n{printed}"
+
+    # Printed IR used to pass while PTO codegen rejected the constant slotted
+    # accumulator carried by each cloned K-loop. Exercise the complete in-tree
+    # lowering boundary for both the canonical 6- and 9-tile grids.
+    from pypto.pypto_core import codegen  # noqa: PLC0415
+
+    func = next(func for func in optimized.functions.values() if func.name == "kernel")
+    pto = codegen.PTOCodegen().generate(ir.Program([func], func.name, optimized.span), emit_tile_addr=False)
+    assert pto.count("pto.alloc_multi_tile") >= 1, pto
+    assert pto.count("pto.multi_tile_get") >= 2, pto
+    acc_copies = [line for line in pto.splitlines() if "pto.tmov" in line and line.count("loc=acc") >= 2]
+    assert not acc_copies, acc_copies
+
+
+@pytest.mark.parametrize("source_k_tile", [128, 256])
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+)
+def test_canonical_split_k_dbc_membership_survives_inner_k_retiling(source_k_tile, planner):
+    """The output grid's dbC identity must survive inner K-block emission.
+
+    These are the same output and total reduction. A 256-wide source K panel
+    may need different inner blocking than a 128-wide source panel. Every MAD
+    must preserve its output tile's stage, not discard it or assign a new stage
+    for each reduction block.
+    """
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910B)
+    before = _predicated_canonical_split_k(256, 384, 512, source_k_tile)
+    with passes.PassContext([], memory_planner=planner, enable_pypto_l0c_double_buffer=True):
+        after = passes.auto_tile_matmul_l0()(before)
+        allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(before)
+    printed = ir.python_print(after)
+    assert printed.count("pl.tile.store(") == 6, printed
+    stages = re.findall(r'"pipeline_membership": "2097152:(\d+)"', printed)
+    assert stages == ["0", "1"] * 3, printed
+
+    # Check physical storage, not allocation-root count: DSA-RP can retain two
+    # roots yet give them the same address when the stage declaration is lost.
+    stores = _StoreCallCollector()
+    stores.visit_program(allocated)
+    assert len(stores.calls) == 6
+    memrefs = []
+    for call in stores.calls:
+        tile_type = call.args[0].type
+        assert isinstance(tile_type, ir.TileType)
+        memrefs.append(tile_type.memref)
+    assert all(memref is not None for memref in memrefs)
+    if planner == passes.MemoryPlanner.PTOAS:
+        pto = codegen.PTOCodegen().generate(allocated, emit_tile_addr=False)
+        assert pto.count("pto.alloc_multi_tile") == 1, pto
+        assert pto.count("pto.multi_tile_get") == 2, pto
+    else:
+        assert {memref.byte_offset_.value for memref in memrefs} == {0, 65536}
+
+
+def test_canonical_split_k_grid_allocates_two_l0c_slots():
+    """The stamped rotation resolves to exactly two L0C buffers under the planner that
+    consumes ``pipeline_membership``.
+
+    Six output tiles, two slots: tiles 0/2/4 share one buffer and 1/3/5 the other,
+    because a tile's accumulator dies at its own drain long before the same-stage tile
+    two steps later is written. Without the stamp MemoryReuse coalesces all six onto one
+    accumulator and every MAD waits on the previous drain.
+
+    Running the full Default strategy is what makes this the companion to the
+    declaration test above: it is the only one of the two that exercises the claim that
+    ``LowerPipelineLoops`` leaves the cube accumulator alone (the user's loop carries no
+    dbC attr), so the per-tile stamp survives as the only membership on that value.
+    """
+    M, N, K_total, K_tile = 256, 384, 256, 128
+    Before = _predicated_canonical_split_k(M, N, K_total, K_tile)
+
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910B)
+    with passes.PassContext(
+        [], memory_planner=passes.MemoryPlanner.PYPTO, enable_pypto_l0c_double_buffer=True
+    ):
+        allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+    acc_buffers = {
+        line.strip().split(":")[0]
+        for line in ir.python_print(allocated).splitlines()
+        if "tile.alloc(pl.Mem.Acc" in line
+    }
+    assert len(acc_buffers) == 2, (
+        f"a 6-tile canonical split-K grid must rotate over two L0C buffers, got {sorted(acc_buffers)}"
+    )
+
+
+def test_canonical_split_k_peeled_spelling_shares_one_slot_per_tile():
+    """The peeled spelling has TWO MADs per output tile; both must take that tile's slot.
+
+    ``if k0 == 0: matmul else: matmul_acc`` puts two cube MADs in each cloned loop, and
+    they write the same accumulator -- so they belong to the same L0C buffer and must
+    carry the same stage. What has to alternate is the TILE, not the MAD. Stamping per
+    MAD instead of per tile would split one accumulator across both slots and destroy
+    the rotation, so this pins the grouping the predicated spelling cannot exercise.
+
+    The invariant underneath is a documented precondition of the consumer, not just a
+    symptom: ``MemoryReuse`` reads membership off the SHARING GROUP and takes the first
+    non-empty member, on the stated assumption that every member carries the same one.
+    The peeled spelling's two MADs land in one sharing group through the phi, so a
+    per-MAD slot would put two CONFLICTING memberships in that group and the lookup
+    would resolve them by iteration order -- silently, with no assert and nothing to
+    fail. The per-tile slot is what keeps that assumption true.
+
+    The full lowering is also exercised: both branches write one constant slot,
+    so the if-phi carries a preselected handle rather than choosing a slot at
+    runtime and is representable by PTOAS multi-buffer codegen.
+    """
+    M, N, K_total, K_tile = 256, 384, 256, 128
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[M, K_total], pl.BF16],
+            b: pl.Tensor[[K_total, N], pl.BF16],
+            c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        ) -> pl.Tensor[[M, N], pl.FP32]:
+            acc_init: pl.Tile[[M, N], pl.FP32, pl.Mem.Acc] = pl.tile.create(
+                [M, N], dtype=pl.FP32, target_memory=pl.Mem.Acc
+            )
+            for k0, (acc_iter,) in pl.pipeline(0, K_total, K_tile, init_values=(acc_init,), stage=2):
+                at: pl.Tile[[M, K_tile], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    a, [0, k0], [M, K_tile], target_memory=pl.Mem.Mat
+                )
+                bt: pl.Tile[[K_tile, N], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    b, [k0, 0], [K_tile, N], target_memory=pl.Mem.Mat
+                )
+                if k0 == 0:
+                    acc_first: pl.Tile[[M, N], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(at, bt)
+                    acc_phi: pl.Tile[[M, N], pl.FP32, pl.Mem.Acc] = pl.yield_(acc_first)
+                else:
+                    acc_next: pl.Tile[[M, N], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(acc_iter, at, bt)
+                    acc_phi: pl.Tile[[M, N], pl.FP32, pl.Mem.Acc] = pl.yield_(acc_next)
+                acc: pl.Tile[[M, N], pl.FP32, pl.Mem.Acc] = pl.yield_(acc_phi)
+            c = pl.tile.store(acc, [0, 0], c)
+            return c
+
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910B)
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+        after = passes.auto_tile_matmul_l0()(Before)
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+    printed = ir.python_print(after)
+
+    tiles = printed.count("pl.tile.store(")
+    assert tiles == 6, printed
+    slots = re.findall(r'"pipeline_membership": "2097152:(\d+)"', printed)
+    # Two MADs per tile, every one stamped: 12 stamps as 6 same-slot pairs, "001100110011".
+    assert len(slots) == 2 * tiles, f"both MADs of every tile must be stamped: {slots}"
+    runs = [slot for slot, _ in itertools.groupby(slots)]
+    assert runs == ["0", "1", "0", "1", "0", "1"], f"one run per tile, alternating: {slots}"
+    assert all(len(list(g)) == 2 for _, g in itertools.groupby(slots)), (
+        f"each tile's two MADs must share its slot: {slots}"
+    )
+
+    from pypto.pypto_core import codegen  # noqa: PLC0415
+
+    func = next(func for func in optimized.functions.values() if func.name == "kernel")
+    pto = codegen.PTOCodegen().generate(ir.Program([func], func.name, optimized.span), emit_tile_addr=False)
+    assert pto.count("pto.alloc_multi_tile") >= 1, pto
+    assert pto.count("pto.multi_tile_get") >= 2, pto
+    acc_copies = [line for line in pto.splitlines() if "pto.tmov" in line and line.count("loc=acc") >= 2]
+    assert not acc_copies, acc_copies
 
 
 if __name__ == "__main__":

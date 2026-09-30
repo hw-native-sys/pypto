@@ -245,6 +245,11 @@ def test_auto_tiled_matmul_extracts_l0_windows_from_mat(
     assert names["buffer.extract"] >= 2 and names["buffer.matmul"] + names["buffer.matmul_acc"] >= 2
     text = _compile_native(tmp_path, lowered, ascend_backend, planner != passes.MemoryPlanner.PTOAS)
     assert "pto.textract ins(" in text
+    if planner == passes.MemoryPlanner.PTOAS and ascend_backend == BackendType.Ascend950:
+        assert names["buffer.alloc_multi"] == 1
+        assert names["buffer.get_slot"] == 2
+        assert "pto.alloc_multi_tile" in text and "count=2" in text
+        assert text.count("pto.multi_tile_get") == 2
 
 
 @pl.program

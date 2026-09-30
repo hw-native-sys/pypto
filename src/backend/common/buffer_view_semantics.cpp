@@ -11,6 +11,7 @@
 
 #include "pypto/backend/common/buffer_view_semantics.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -93,6 +94,29 @@ void ValidateMatrixReshape(const ir::BufferTypePtr& source, const ir::BufferType
 void ValidateBufferSubview(const std::vector<ir::ExprPtr>& args, const ir::TypePtr& result) {
   INTERNAL_CHECK(args.size() == 2 && args[0] && args[1])
       << "Internal error: buffer.subview requires a source and offsets tuple";
+  auto matrix = ir::As<ir::BufferType>(args[0]->GetType());
+  if (matrix && matrix->memory_space_ == ir::MemorySpace::Acc) {
+    auto view = ir::As<ir::BufferType>(result);
+    auto offsets = ir::As<ir::MakeTuple>(args[1]);
+    CHECK(view && view->memory_space_ == matrix->memory_space_ && matrix->shape_.size() == 2 &&
+          view->shape_.size() == 2 && view->dtype_ == matrix->dtype_ && view->blayout_ == matrix->blayout_ &&
+          view->slayout_ == matrix->slayout_ && view->fractal_ == matrix->fractal_ &&
+          view->pad_ == matrix->pad_ && view->compact_ == matrix->compact_ && offsets &&
+          offsets->elements_.size() == 2)
+        << "buffer.subview of Acc storage requires compatible rank-2 descriptors";
+    for (size_t axis = 0; axis < 2; ++axis) {
+      auto offset = ir::As<ir::ConstInt>(offsets->elements_[axis]);
+      CHECK(offset && offset->dtype() == DataType::INDEX && offset->value_ == 0 &&
+            view->shape_[axis] <= matrix->shape_[axis] && view->valid_shape_[axis] >= 0 &&
+            matrix->valid_shape_[axis] == matrix->shape_[axis])
+          << "buffer.subview of Acc storage requires a zero-offset static view within a full-valid slot";
+    }
+    // L0C's N-fractal column pitch depends on its physical row count. A
+    // zero-offset alias can narrow columns or valid rows, but cannot repack rows.
+    CHECK(view->shape_[0] == matrix->shape_[0])
+        << "buffer.subview of Acc storage requires equal physical row counts to preserve L0C stride";
+    return;
+  }
   auto source = StaticViewDescriptor(args[0]->GetType(), "buffer.subview");
   auto destination = StaticViewDescriptor(result, "buffer.subview");
   CHECK(source->dtype_ == DataType::UINT8 && destination->dtype_ == DataType::UINT8 &&

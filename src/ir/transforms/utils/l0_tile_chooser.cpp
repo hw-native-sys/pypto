@@ -98,6 +98,7 @@ struct Candidate {
   int64_t padded_compute = 0;
   double load_cycles = 0;  // C_load — a wall-tie-break (hidden under max() when MAD-bound)
   Regime regime;           // the (stationarity, dbC) this tile was scored under
+  DbcEmissionRoute dbc_route = DbcEmissionRoute::kUnsupported;
 };
 
 // All legal k values for a fixed (m, n), ascending. k is a REAL search axis:
@@ -144,6 +145,12 @@ std::vector<int> EnumerateLegalKs(int m, int n, const L0TileConfig& cfg, int64_t
 // below; forward-declared so EstimateTraffic mirrors the same min-hoist route).
 bool OSHoldsHoldA(int m, int n, const L0TileConfig& cfg);
 
+// Both single-C and dbC use this emitted operand schedule. In particular,
+// spanning one source K block does not imply reuse across a canonical grid.
+bool StreamsBothOperands(int k, const L0TileConfig& cfg) {
+  return k < cfg.K || cfg.full_k_dbc_route == DbcEmissionRoute::kUnrolledGrid;
+}
+
 // L1<->L0 operand + drain traffic in BYTES for the chosen tile under its regime.
 // Inspection-only (the chooser ranks by the roofline wall, not this value); the
 // reload counts follow the regime's stationarity, mirroring LoadCycles so the
@@ -172,10 +179,10 @@ int64_t EstimateTraffic(int m, int n, int k, const L0TileConfig& cfg, const Regi
     case Stationarity::kOutputStationary:
       // Full-K OS hoists one operand (mirror LoadCycles' min-hoist via OSHoldsHoldA so
       // this metric matches the wall the tile was scored under); split-K re-streams both.
-      if (static_cast<int64_t>(k) >= K && OSHoldsHoldA(m, n, cfg)) {
+      if (!StreamsBothOperands(k, cfg) && OSHoldsHoldA(m, n, cfg)) {
         a_traffic = static_cast<int64_t>(cfg.bytes_a) * M * K;           // A held once
         b_traffic = static_cast<int64_t>(cfg.bytes_b) * K * N * ceil_m;  // B streamed
-      } else if (static_cast<int64_t>(k) >= K) {
+      } else if (!StreamsBothOperands(k, cfg)) {
         a_traffic = static_cast<int64_t>(cfg.bytes_a) * M * K * ceil_n;  // A streamed
         b_traffic = static_cast<int64_t>(cfg.bytes_b) * K * N;           // B held once
       } else {
@@ -186,11 +193,21 @@ int64_t EstimateTraffic(int m, int n, int k, const L0TileConfig& cfg, const Regi
   }
   const int64_t gamma_c = cfg.c_read ? 2 : 1;
   const int64_t c_traffic = gamma_c * static_cast<int64_t>(cfg.bytes_c) * M * N;
-  return a_traffic + b_traffic + c_traffic;
+  const int64_t repetitions = std::max(1, cfg.reduction_iterations);
+  CHECK(a_traffic + b_traffic <= (std::numeric_limits<int64_t>::max() - c_traffic) / repetitions)
+      << "ChooseL0Tile: repeated reduction traffic exceeds int64 range";
+  return (a_traffic + b_traffic) * repetitions + c_traffic;
+}
+
+int64_t RepeatedReductionWork(int64_t work, const L0TileConfig& cfg) {
+  const int64_t count = std::max(1, cfg.reduction_iterations);
+  CHECK(work >= 0 && work <= std::numeric_limits<int64_t>::max() / count)
+      << "ChooseL0Tile: repeated reduction work exceeds int64 range";
+  return work * count;
 }
 
 int64_t PaddedComputeVolume(int m, int n, int k, const L0TileConfig& cfg) {
-  return CeilDiv(cfg.M, m) * m * CeilDiv(cfg.N, n) * n * CeilDiv(cfg.K, k) * k;
+  return RepeatedReductionWork(CeilDiv(cfg.M, m) * m * CeilDiv(cfg.N, n) * n * CeilDiv(cfg.K, k) * k, cfg);
 }
 
 // Roofline cost model (output-stationary, single L0C -- the algorithm
@@ -219,7 +236,7 @@ int64_t MadCycles(int m, int n, int k, const L0TileConfig& cfg) {
   const int64_t k_fractals = num_full * CeilDiv(k, kt) + (k_tail > 0 ? CeilDiv(k_tail, kt) : 0);
   const int64_t per_mn =
       k_blocks * cfg.mad_head + cpr * CeilDiv(m, cfg.align_m) * k_fractals * CeilDiv(n, cfg.align_n);
-  return CeilDiv(cfg.M, m) * CeilDiv(cfg.N, n) * per_mn;
+  return RepeatedReductionWork(CeilDiv(cfg.M, m) * CeilDiv(cfg.N, n) * per_mn, cfg);
 }
 
 // Bandwidth-weighted held-A vs held-B interior load cycles for a full-K OS tile
@@ -258,6 +275,45 @@ int64_t PipelinedInnerFullTiles(int m, int n, const L0TileConfig& cfg, Stationar
   return PipelinedRowsOuter(m, n, cfg, stat) ? cfg.N / n : cfg.M / m;
 }
 
+// Can the emitter actually realize a dbC=2 ping-pong for this (m, n, k)?
+// The public DbcRealizable(cfg, result) below is this same predicate reached
+// through L0TileResult; the enumerator needs it before a result exists.
+//
+// dbC=2 needs two INDEPENDENT output tiles: consecutive K blocks accumulate into
+// the same L0C tile and are serially dependent, so only an M/N split can supply
+// the second ping/pong stage. Both emitters can supply it, but they count it
+// differently:
+//
+//   full-K (k == K) -> BuildFullKPipelined. The dbC marker rides the moving
+//     INNER loop, so that loop alone must hold >= 2 tiles; the stationary outer
+//     axis may have one. Floor division is deliberate -- a peeled partial
+//     boundary tile is emitted straight-line OUTSIDE the pipelined loops, where
+//     CanonicalizeIOOrder never reaches it, so it cannot be a ping/pong stage.
+//
+//   split-K (k < K) -> BuildSplitKGrid. The M/N grid is emitted UNROLLED and
+//     each output tile's accumulator is stamped with its own slot, so any two
+//     output tiles ping-pong -- a boundary tile included, since it is an
+//     ordinary member of the unrolled sequence, not a peeled tail. A caller
+//     whose uniform slot representation cannot preserve a row-boundary L0C
+//     stride sets allow_unrolled_dbc_m_boundary=false.
+DbcEmissionRoute DbcRouteForK(int k, const L0TileConfig& cfg) {
+  return k == cfg.K ? cfg.full_k_dbc_route : cfg.split_k_dbc_route;
+}
+
+bool DbcRealizableTile(int m, int n, const L0TileConfig& cfg, Stationarity stat, DbcEmissionRoute route) {
+  if (cfg.reduction_iterations == 0) return false;
+  switch (route) {
+    case DbcEmissionRoute::kPipelinedInner:
+      return PipelinedInnerFullTiles(m, n, cfg, stat) >= 2;
+    case DbcEmissionRoute::kUnrolledGrid:
+      return (cfg.allow_unrolled_dbc_m_boundary || cfg.M % m == 0) &&
+             CeilDiv(cfg.M, m) * CeilDiv(cfg.N, n) >= 2;
+    case DbcEmissionRoute::kUnsupported:
+      return false;
+  }
+  return false;
+}
+
 // L1->L0 load cost (cycles). The MTE1 pipe is shared, so A and B loads serialize;
 // each is weighted by its port bandwidth (the 2:1 L0A/L0B asymmetry). The reload
 // counts depend on the stationarity / reuse route. The full-K emitter
@@ -273,7 +329,7 @@ int64_t PipelinedInnerFullTiles(int m, int n, const L0TileConfig& cfg, Stationar
 //   held B (k==K) : A streamed (M*K*ceil_n) ; B once (K*N)
 //   OS, k==K      : min(held-A, held-B) route (the emit hoists the cheaper)
 //   OS, k<K       : both re-streamed (A M*K*ceil_n, B K*N*ceil_m)
-double LoadCycles(int m, int n, int k, const L0TileConfig& cfg, const Regime& r) {
+double SingleReductionLoadCycles(int m, int n, int k, const L0TileConfig& cfg, const Regime& r) {
   const double M = cfg.M, N = cfg.N, K = cfg.K;
   const double ceil_n = static_cast<double>(CeilDiv(cfg.N, n));
   const double ceil_m = static_cast<double>(CeilDiv(cfg.M, m));
@@ -287,7 +343,7 @@ double LoadCycles(int m, int n, int k, const L0TileConfig& cfg, const Regime& r)
     case Stationarity::kBStationary:
       return held_b;  // B held (requires k == K)
     case Stationarity::kOutputStationary:
-      if (k >= static_cast<int>(K)) {
+      if (!StreamsBothOperands(k, cfg)) {
         // Route through the shared hoist decision so the scored cost matches the
         // operand BuildFullKPipelined actually hoists (recorded in os_holds_a).
         return OSHoldsHoldA(m, n, cfg) ? held_a : held_b;
@@ -296,6 +352,10 @@ double LoadCycles(int m, int n, int k, const L0TileConfig& cfg, const Regime& r)
       return (ba * M * K * ceil_n) / cfg.bw_a + (bb * K * N * ceil_m) / cfg.bw_b;
   }
   return std::min(held_a, held_b);
+}
+
+double LoadCycles(int m, int n, int k, const L0TileConfig& cfg, const Regime& r) {
+  return SingleReductionLoadCycles(m, n, k, cfg, r) * std::max(1, cfg.reduction_iterations);
 }
 
 // The odd part of x: x divided by its largest power-of-2 factor (odd(8)=1,
@@ -361,15 +421,41 @@ double DrainCycles(int m, int n, const L0TileConfig& cfg) {
 // average tile (C_tile=compute/T, D_tile=drain/T); on a peeled-tail grid the actual
 // exposed tile is smaller, so this is a slight -- and safe (conservative) --
 // over-correction. Tail-accurate pricing is a follow-up (see docs).
-int64_t WallCycles(int m, int n, int k, const L0TileConfig& cfg, const Regime& r) {
+int64_t WallCycles(int m, int n, int k, const L0TileConfig& cfg, const Regime& r,
+                   DbcEmissionRoute dbc_route) {
   const double compute = std::max(LoadCycles(m, n, k, cfg, r), static_cast<double>(MadCycles(m, n, k, cfg)));
   const double drain = DrainCycles(m, n, cfg);
   double wall;
-  if (r.dbc) {
-    const double num_tiles = static_cast<double>(CeilDiv(cfg.M, m) * CeilDiv(cfg.N, n));
-    wall = std::max(compute, drain) + std::min(compute, drain) / num_tiles;
-  } else {
+  if (!r.dbc) {
     wall = compute + drain;
+  } else {
+    const int64_t ceil_m = CeilDiv(cfg.M, m);
+    const int64_t ceil_n = CeilDiv(cfg.N, n);
+    const int64_t total_tiles = ceil_m * ceil_n;
+    const double compute_per_tile = compute / static_cast<double>(total_tiles);
+    const double drain_per_tile = drain / static_cast<double>(total_tiles);
+    if (dbc_route == DbcEmissionRoute::kUnrolledGrid) {
+      // One straight-line output sequence: every tile after the first overlaps
+      // the preceding drain, so the complete grid pays one fill/drain bubble.
+      wall = static_cast<double>(total_tiles) * std::max(compute_per_tile, drain_per_tile) +
+             std::min(compute_per_tile, drain_per_tile);
+    } else {
+      INTERNAL_CHECK(dbc_route == DbcEmissionRoute::kPipelinedInner)
+          << "Internal error: dbC candidate has no emission route";
+      // BuildFullKPipelined starts one moving-inner pipeline for every full tile
+      // on the stationary outer axis. Each such invocation pays its own bubble.
+      // The L-shaped boundary is peeled outside those loops and remains fully
+      // exposed, so it contributes compute + drain rather than hidden drain.
+      const int64_t full_m = cfg.M / m;
+      const int64_t full_n = cfg.N / n;
+      const int64_t interior_tiles = full_m * full_n;
+      const bool rows_outer = PipelinedRowsOuter(m, n, cfg, r.stat);
+      const int64_t pipeline_invocations = rows_outer ? full_m : full_n;
+      const int64_t exposed_tiles = total_tiles - interior_tiles;
+      wall = static_cast<double>(interior_tiles) * std::max(compute_per_tile, drain_per_tile) +
+             static_cast<double>(pipeline_invocations) * std::min(compute_per_tile, drain_per_tile) +
+             static_cast<double>(exposed_tiles) * (compute_per_tile + drain_per_tile);
+    }
   }
   // Guard the float->int cast: a non-finite or out-of-exact-range wall would be UB.
   // Given the validated positive bandwidths and aligned-bounded dims this never fires.
@@ -429,8 +515,9 @@ std::optional<Candidate> MakeCandidate(int m, int n, int k, const L0TileConfig& 
   c.m = m;
   c.n = n;
   c.k = k;
+  c.dbc_route = regime.dbc ? DbcRouteForK(k, cfg) : DbcEmissionRoute::kUnsupported;
   c.traffic = EstimateTraffic(m, n, k, cfg, regime);
-  c.cost_cycles = WallCycles(m, n, k, cfg, regime);
+  c.cost_cycles = WallCycles(m, n, k, cfg, regime, c.dbc_route);
   c.padded_compute = PaddedComputeVolume(m, n, k, cfg);
   c.load_cycles = LoadCycles(m, n, k, cfg, regime);
   c.regime = regime;
@@ -443,14 +530,11 @@ std::optional<Candidate> MakeCandidate(int m, int n, int k, const L0TileConfig& 
 // is a true exhaustive search over the regime's tile shapes, not (m, n) with a
 // largest-k shortcut.
 //
-// require_inner_pair: only tiles with at least two full interior iterations on
-//   the moving inner axis are considered. BuildFullKPipelined attaches the dbC
-//   marker to that loop only, so the stationary outer axis may have one tile.
-//   Use floor division here: a peeled partial-boundary tile is emitted outside
-//   the pipeline and cannot provide the second ping/pong stage.
 // require_full_k: only tiles that reduce K in a single pass (k == K) are
-//   considered -- needed for the operand-stationary routes (A/B held across K)
-//   and for the dbC=2 ping-pong (realized only by the full-K pipelined emitter).
+//   considered -- needed for the operand-stationary routes, which pin A or B in
+//   L0 across the whole reduction.
+// A dbC=2 regime additionally drops every (m, n, k) the emitter cannot realize
+// as a two-slot ping-pong (DbcRealizable, route-aware).
 //
 // Complexity: O((C0 / align^2) * (K / align_k)) per matmul -- the (m, n) grid is
 // bounded by AlignUp(AlignUp(m,box_align_m),l0c_align_m) *
@@ -459,7 +543,7 @@ std::optional<Candidate> MakeCandidate(int m, int n, int k, const L0TileConfig& 
 // runs once per matmul op (matmul ops are O(N)), so the pass stays linear in
 // the IR.
 std::optional<Candidate> EnumerateBest(const L0TileConfig& cfg, const Regime& regime, int64_t A0, int64_t B0,
-                                       int64_t C0, bool require_inner_pair, bool require_full_k) {
+                                       int64_t C0, bool require_full_k) {
   const int64_t m_hi = cfg.allow_padding ? AlignUp(static_cast<int64_t>(cfg.M), cfg.align_m) : cfg.M;
   int64_t n_hi = cfg.allow_padding ? AlignUp(static_cast<int64_t>(cfg.N), cfg.align_n) : cfg.N;
   if (cfg.max_n > 0) n_hi = std::min<int64_t>(n_hi, cfg.max_n);
@@ -482,12 +566,31 @@ std::optional<Candidate> EnumerateBest(const L0TileConfig& cfg, const Regime& re
     if (physical_m > C0 / static_cast<int64_t>(*boxed_min_n)) break;
     const int64_t n_max = std::min<int64_t>(n_hi, C0 / physical_m);
     for (int64_t n = cfg.min_n; n <= n_max; n += cfg.align_n) {
-      if (require_inner_pair &&
-          PipelinedInnerFullTiles(static_cast<int>(m), static_cast<int>(n), cfg, regime.stat) < 2) {
-        continue;
-      }
+      // Necessary condition for both routes (floor >= 2 implies ceil >= 2), so it
+      // is k-independent and can skip the k enumeration outright -- the early-out
+      // the per-(m, n) gate used to provide before dbC became route-aware.
+      if (regime.dbc && CeilDiv(cfg.M, m) * CeilDiv(cfg.N, n) < 2) continue;
       for (const int k : EnumerateLegalKs(static_cast<int>(m), static_cast<int>(n), cfg, A0, B0)) {
         if (require_full_k && k != cfg.K) continue;
+        // A canonical source pipeline remains around the emitted inner K
+        // pipeline. LowerPipelineLoops composes both memberships; budget the
+        // resulting physical copies before selection, not after allocation.
+        const auto db = DeriveOperandDB(regime.stat);
+        const int64_t depth_a = k < cfg.K ? (db.a ? 2LL : 1LL) * cfg.reduction_pipeline_stages
+                                          : std::max(db.a ? 2 : 1, cfg.reduction_pipeline_stages);
+        const int64_t depth_b = k < cfg.K ? (db.b ? 2LL : 1LL) * cfg.reduction_pipeline_stages
+                                          : std::max(db.b ? 2 : 1, cfg.reduction_pipeline_stages);
+        const auto physical_m = BoxedExtent(static_cast<int>(m), cfg.box_align_m);
+        const auto physical_n = BoxedExtent(static_cast<int>(n), cfg.box_align_n);
+        if (!physical_m || !physical_n || *physical_m > cfg.l0a_bytes / cfg.bytes_a / depth_a / k ||
+            *physical_n > cfg.l0b_bytes / cfg.bytes_b / depth_b / k) {
+          continue;
+        }
+        const DbcEmissionRoute route = DbcRouteForK(k, cfg);
+        if (regime.dbc &&
+            !DbcRealizableTile(static_cast<int>(m), static_cast<int>(n), cfg, regime.stat, route)) {
+          continue;
+        }
         auto c = MakeCandidate(static_cast<int>(m), static_cast<int>(n), k, cfg, C0, regime);
         if (c && (!best || Better(*c, *best, cfg))) best = c;
       }
@@ -513,10 +616,20 @@ int64_t L0cBudget(const L0TileConfig& cfg, const Regime& r) {
 
 }  // namespace
 
+bool DbcRealizable(const L0TileConfig& cfg, const L0TileResult& res) {
+  return DbcRealizableTile(res.m, res.n, cfg, res.stationarity, res.dbc_emission_route);
+}
+
 L0TileResult ChooseL0Tile(const L0TileConfig& cfg) {
   // 1. Validate inputs.
   CHECK(cfg.M > 0 && cfg.N > 0 && cfg.K > 0)
       << "ChooseL0Tile: M, N, K must all be positive (got " << cfg.M << ", " << cfg.N << ", " << cfg.K << ")";
+  CHECK(cfg.reduction_iterations >= 0)
+      << "ChooseL0Tile: reduction_iterations must be nonnegative (zero means unknown)";
+  CHECK(cfg.reduction_pipeline_stages > 0) << "ChooseL0Tile: reduction_pipeline_stages must be positive";
+  CHECK(cfg.full_k_dbc_route != DbcEmissionRoute::kUnrolledGrid ||
+        (!cfg.allow_a_stationary && !cfg.allow_b_stationary))
+      << "ChooseL0Tile: unrolled full-K grids cannot retain operands across output tiles";
   CHECK(cfg.l0a_bytes > 0 && cfg.l0b_bytes > 0 && cfg.l0c_bytes > 0)
       << "ChooseL0Tile: L0 capacities must be positive";
   CHECK(cfg.bytes_a > 0 && cfg.bytes_b > 0 && cfg.bytes_c > 0)
@@ -594,12 +707,11 @@ L0TileResult ChooseL0Tile(const L0TileConfig& cfg) {
   //    objective couples m, n, k non-separably (the BW-weighted load-optimal
   //    aspect m:n = bytes_b*BW_A : bytes_a*BW_B = 2:1 for BF16 trades against the
   //    per-tile MAD head and ceil waste), so we score every legal tile.
-  std::optional<Candidate> best =
-      EnumerateBest(cfg, base_regime, A0, B0, C0_base, /*require_inner_pair=*/false,
-                    /*require_full_k=*/false);
+  std::optional<Candidate> best = EnumerateBest(cfg, base_regime, A0, B0, C0_base, /*require_full_k=*/false);
   CHECK(best) << "ChooseL0Tile: no legal (m, n, k) tile found for M=" << cfg.M << ", N=" << cfg.N
               << ", K=" << cfg.K << ". This indicates the hardware capacity is below the configured "
               << "minimum tile shape; check L0a/L0b/L0c bytes and min_m/min_n/min_k.";
+  std::optional<Candidate> best_single_c = best;
 
   // Explore the rest of the design space only when the baseline actually tiles
   // the output. A full [M, N, K] tile that fits one L0C is "already L0-sized":
@@ -618,27 +730,71 @@ L0TileResult ChooseL0Tile(const L0TileConfig& cfg) {
       const int64_t a0 = L0aBudget(cfg, db);
       const int64_t b0 = L0bBudget(cfg, db);
       const bool is_os = stat == Stationarity::kOutputStationary;
-      for (int dbc = 0; dbc <= (cfg.allow_double_buffer_c ? 1 : 0); ++dbc) {
+      for (int dbc = 0; dbc <= (cfg.allow_double_buffer_c && cfg.reduction_iterations > 0 ? 1 : 0); ++dbc) {
         const Regime r{stat, /*dbc=*/dbc == 1};
         if (is_os && !r.dbc) continue;  // baseline, already scored
         const int64_t c0 = L0cBudget(cfg, r);
         if (!min_c_elements || c0 < static_cast<int64_t>(*min_c_elements)) {
           continue;  // can't fit the physical minimum tile
         }
-        // Operand-stationary pins an operand across K (k == K); dbC=2 needs the
-        // full-K emitter and at least two full iterations of its moving inner
-        // loop. The stationary outer axis may contain a single tile.
-        const bool require_full_k = !is_os || r.dbc;
-        const bool require_inner_pair = r.dbc;
-        auto cand = EnumerateBest(cfg, r, a0, b0, c0, require_inner_pair, require_full_k);
+        // Operand-stationary pins an operand in L0 across K, so it needs k == K.
+        // dbC=2 does not: both the full-K and the split-K emitter realize the
+        // two-slot ping-pong, so its own per-tile eligibility is decided inside
+        // EnumerateBest by DbcRealizable, which knows which route a k selects.
+        const bool require_full_k = !is_os;
+        auto cand = EnumerateBest(cfg, r, a0, b0, c0, require_full_k);
+        if (cand && !r.dbc &&
+            (!best_single_c || cand->cost_cycles < best_single_c->cost_cycles ||
+             (cand->cost_cycles == best_single_c->cost_cycles && Better(*cand, *best_single_c, cfg)))) {
+          best_single_c = cand;
+        }
         // Cross-regime tie policy: a non-baseline regime is adopted only on a
         // STRICTLY lower wall, so an equal-wall A/B-stationary or dbC=2 candidate
-        // never displaces the already-scored output-stationary baseline. This is
-        // a deterministic "prefer the simpler lowering" rule, not enumeration
-        // order. (Within a regime, Better() applies the full lexicographic key.)
-        if (cand && cand->cost_cycles < best->cost_cycles) best = cand;
+        // never displaces the already-scored output-stationary baseline -- a
+        // deterministic "prefer the simpler lowering" rule. (Within a regime,
+        // Better() applies the full lexicographic key.)
+        //
+        // One directed exception, and it is not a new principle: Better() already
+        // breaks wall-ties on the lower HIDDEN load as its 4th lex key. This applies
+        // that same accepted belief across one regime boundary, which dbC=2 at k < K
+        // newly made reachable. An exact wall tie between those routes is a tie only
+        // under the model's IDEALIZED reload counts (perfect L1 residency, no MTE
+        // contention) -- the bandwidth constants are device-fit, the reload counts are
+        // not -- and a split-K plan re-streams BOTH operands where a full-K plan holds
+        // one in L0. At an equal predicted wall the extra traffic buys nothing, so
+        // prefer the plan that loads less.
+        //
+        // The rule is closed because only (OS, dbc=1) can ever yield k < K:
+        // require_full_k = !is_os pins both operand-stationary regimes to k == K, and
+        // (OS, dbc=0) is the already-scored baseline. So the incumbent it fires against
+        // is always that one plan, every candidate reached after it is full-K, and the
+        // winner is itself full-K and immune to the rule thereafter -- deterministic,
+        // no oscillation.
+        //
+        // Guarded on load_cycles, not merely on k == K: the two sides are scored by
+        // different wall formulas over different drain counts, so k == K alone is a
+        // proxy that could in principle select the HIGHER-traffic plan -- the exact
+        // opposite of the reason above. Test the quantity the rationale names. The
+        // other conjuncts keep it narrow: it can never displace the output-stationary
+        // baseline, and can never ENABLE dbC on a tie (which would shrink the tile to
+        // the L0C/2 budget for no modeled gain).
+        if (cand) {
+          const bool strictly_better = cand->cost_cycles < best->cost_cycles;
+          const bool tie_prefers_resident_operand = cand->cost_cycles == best->cost_cycles &&
+                                                    best->regime.dbc && best->k != cfg.K &&
+                                                    cand->k == cfg.K && cand->load_cycles < best->load_cycles;
+          if (strictly_better || tie_prefers_resident_operand) best = cand;
+        }
       }
     }
+  }
+
+  // A second accumulator is an optimization, never a tie-break preference. The
+  // selected dbC schedule must beat the best complete single-L0C schedule by the
+  // primary wall objective; equal predicted wall keeps the simpler one-buffer
+  // lowering regardless of secondary tile-shape keys or enumeration order.
+  if (best->regime.dbc && best_single_c && best->cost_cycles >= best_single_c->cost_cycles) {
+    best = best_single_c;
   }
 
   L0TileResult result;
@@ -650,6 +806,7 @@ L0TileResult ChooseL0Tile(const L0TileConfig& cfg) {
   result.padded_compute_volume = best->padded_compute;
   result.stationarity = best->regime.stat;
   result.double_buffer_c = best->regime.dbc;
+  result.dbc_emission_route = best->regime.dbc ? best->dbc_route : DbcEmissionRoute::kUnsupported;
   // Record the full-K OS hoist (bandwidth-weighted held-A vs held-B) so
   // BuildFullKPipelined emits the same operand the wall was scored under. Only
   // consulted for output-stationary k == K; A/B-stationary force the loop order

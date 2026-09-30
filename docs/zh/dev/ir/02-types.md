@@ -55,12 +55,17 @@ Void call 应放在 `EvalStmt` 中，不能绑定变量、用作操作数、放�
 物理形状静态、列数大于一的稠密 ND 二维 FP16/BF16/FP32/INT32 Tensor。
 算术配方分别施加更窄的 dtype 契约。规范化后的 Tensor
 返回值是这些参数的别名，原生内核仍返回 void。Buffer 参数 ABI、原生函数
-结果、动态或非连续 view、slot、helper 和其他物理布局尚未支持，会明确报错。
+结果、动态或非连续 view、动态 slot、helper 和其他物理布局尚未支持，会明确报错。
 Buffer 类型 dump 使用原生 `pypto.ir.BufferType(...)` 构造表达式，
 二进制序列化保留完整描述符。目前尚不支持通过 DSL parser 重新解析
 完整的 buffer 程序 dump。
 
 #### Buffer 算子契约
+
+静态槽组使用 `buffer.alloc_multi`（结果为 `MultiBufferType`）和
+`buffer.get_slot`（静态 INDEX 选择一个 `BufferType` 别名）。这两个内部算子
+在原生 PTOAS 代码生成中保留物理分离的槽位，不初始化或复制数据。
+别名验证保留每个槽位的字节窗口，不会将每次选择视为独立分配。
 
 算子注册默认为 `OpIRStage::Functional`。内部 buffer 算子显式选择
 `OpIRStage::Buffer` 并调用 `set_internal_only()`。结果数量必须声明：

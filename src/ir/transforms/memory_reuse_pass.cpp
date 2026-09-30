@@ -3174,7 +3174,11 @@ class IndependentlyBoundCollector : public IRVisitor {
     if (pinned_bases_.count(base) == 0) return;
     if (AsVarLike(op->value_)) return;  // bare SSA alias — same data
     if (auto call = As<Call>(op->value_);
-        call && call->op_ && op_predicates::OutputInheritsSourceBuffer(call->op_->name_)) {
+        call && call->op_ &&
+        (IsOp(call, "tile.create") || op_predicates::OutputInheritsSourceBuffer(call->op_->name_))) {
+      // tile.create declares uninitialized storage, not a value whose bytes
+      // must survive the first write. In particular, a split-K carry seed may
+      // share its slot with the initializing matmul inside the loop.
       return;
     }
     auto liveness = var_liveness_.find(op->var_.get());
