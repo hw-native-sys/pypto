@@ -130,7 +130,10 @@ def package_generated_sources(directory: Path, kind: BuildKind) -> None:
         orchestration["signature"] = _encode_signature(orchestration.get("signature", []))
         runtime_config = getattr(config, "RUNTIME_CONFIG", {})
         # Reject non-serializable build inputs instead of persisting repr(object).
-        encode_manifest({"kernels": kernels, "orchestration": orchestration, "runtime": runtime_config})
+        metadata = encode_manifest(
+            {"kernels": kernels, "orchestration": orchestration, "runtime": runtime_config}
+        )
+        (chip / "kernel_config.json").write_bytes(metadata)
         text = (
             "from pathlib import Path\n"
             "from simpler.task_interface import ArgDirection as _D\n"

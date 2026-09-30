@@ -109,6 +109,7 @@ class ArtifactLookup:
     status: LookupStatus
     handle: ArtifactHandle | None = None
     reason: str | None = None
+    manifest: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -294,12 +295,14 @@ class ArtifactStore:
         except OSError as exc:
             return ArtifactLookup(LookupStatus.STORAGE_ERROR, reason=str(exc))
         try:
-            read_manifest(directory, key, spec)
+            manifest = read_manifest(directory, key, spec)
         except (ValueError, FileNotFoundError, UnicodeError, RecursionError) as exc:
             return ArtifactLookup(LookupStatus.INVALID, reason=str(exc))
         except OSError as exc:
             return ArtifactLookup(LookupStatus.STORAGE_ERROR, reason=str(exc))
-        return ArtifactLookup(LookupStatus.HIT, ArtifactHandle(directory, key, spec, self.root))
+        return ArtifactLookup(
+            LookupStatus.HIT, ArtifactHandle(directory, key, spec, self.root), manifest=manifest
+        )
 
     def get_or_build(
         self, key: ArtifactKey, spec: ArtifactSpec, builder: Callable[[Path], T]
