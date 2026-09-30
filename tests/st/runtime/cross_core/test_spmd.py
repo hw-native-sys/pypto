@@ -365,6 +365,42 @@ class SPMDSyncStartMixedProgram:
 
 
 @pl.program
+class SPMDEarlyResolveProgram:
+    """Single SPMD submission with allow_early_resolve=True: elementwise add over 4 blocks.
+
+    Executes the speculative-dispatch hint end to end. This proves the flag survives
+    lowering and does not change the computed result; it does not observe whether the
+    dispatch was staged early, which needs a swimlane / L2 record.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def spmd_add(
+        self,
+        a: pl.Tensor[[512, 128], pl.FP32],
+        b: pl.Tensor[[512, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+    ) -> pl.Tensor[[512, 128], pl.FP32]:
+        block_idx = pl.tile.get_block_idx()
+        offset = block_idx * 128
+        tile_a = pl.load(a, [offset, 0], [128, 128])
+        tile_b = pl.load(b, [offset, 0], [128, 128])
+        tile_c = pl.add(tile_a, tile_b)
+        out = pl.store(tile_c, [offset, 0], out)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        a: pl.Tensor[[512, 128], pl.FP32],
+        b: pl.Tensor[[512, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+    ) -> pl.Tensor[[512, 128], pl.FP32]:
+        with pl.spmd(4, allow_early_resolve=True):
+            out = self.spmd_add(a, b, out)
+        return out
+
+
+@pl.program
 class SPMDGMPipeBufferProgram:
     # No UP_DOWN split: runtime shards __gm_pipe_buffer by SPMD block_idx only; dual-AIV
     # split would run two lanes per block on the same slice and corrupt the pipe workspace.
@@ -568,6 +604,26 @@ class SPMDSyncStartMixedTestCase(_BaseSPMDTestCase):
         tensors["out"][:] = tensors["a"] + tensors["b"]
 
 
+class SPMDEarlyResolveTestCase(_BaseSPMDTestCase):
+    """SPMD single submit with allow_early_resolve=True: elementwise add, 4 blocks x [128, 128]."""
+
+    def get_name(self) -> str:
+        return "spmd_early_resolve_512x128"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [TOTAL_ROWS, TILE_COLS], DataType.FP32, init_value=torch.randn),
+            TensorSpec("b", [TOTAL_ROWS, TILE_COLS], DataType.FP32, init_value=torch.randn),
+            TensorSpec("out", [TOTAL_ROWS, TILE_COLS], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return SPMDEarlyResolveProgram
+
+    def compute_expected(self, tensors, params=None):
+        tensors["out"][:] = tensors["a"] + tensors["b"]
+
+
 class SPMDGMPipeBufferTestCase(_BaseSPMDTestCase):
     """SPMD mixed-kernel down-proj residual golden test for gm_pipe_buffer path."""
 
@@ -622,7 +678,6 @@ class TestSPMDOperations:
         """Wide escalating dispatch covers the smaller 3-submit escalating case."""
         self._run_case(test_runner, SPMDEscalating5TestCase(platform=platform))
 
-    @pytest.mark.xfail(reason="SPMD+MixedKernel precision issue under investigation")
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_spmd_mixed_kernel(self, test_runner, platform):
         """SPMD MixedKernel: matmul + bias (cube + vector → AIC + AIV split)."""
@@ -637,6 +692,11 @@ class TestSPMDOperations:
     def test_spmd_sync_start_mixed(self, test_runner, platform):
         """4 submissions: T0 baseline + T1/T2/T3 with sync_start=True, mirroring the sync_start test."""
         self._run_case(test_runner, SPMDSyncStartMixedTestCase(platform=platform))
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_spmd_early_resolve(self, test_runner, platform):
+        """allow_early_resolve=True on a pl.spmd dispatch executes and matches the golden."""
+        self._run_case(test_runner, SPMDEarlyResolveTestCase(platform=platform))
 
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_spmd_gm_pipe_buffer_golden(self, test_runner, platform):

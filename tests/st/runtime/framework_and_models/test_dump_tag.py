@@ -33,7 +33,12 @@ exercises two of them on-board:
    used here because ``@pl.jit`` has no ``pl.submit`` / ``pl.manual_scope``.
    A 2-stage submit pipeline tags only stage1, so stage2 must be filtered out.
 
-In both scenarios, with ``--dump-args`` the runtime's selective-dump filter
+3. ``pl.spmd(..., dumps=[...])`` via the same harness — ``TestSpmdDumps*``
+   below. The grid-scope spelling keeps the marks on the scope rather than a
+   Submit carrier; a two-dispatch pipeline dumps only the first, so the same
+   selective filter must hold.
+
+In every scenario, with ``--dump-args`` the runtime's selective-dump filter
 retains only the tagged bindings in the manifest, so each test asserts both the
 positive (tagged present) and negative (untagged filtered) paths in one pass.
 
@@ -454,6 +459,178 @@ class TestSubmitDumpsManifest:
     def test_dumped_roles_cover_input_and_inout(self, submit_dumps_manifest):
         """``dumps=[x, scratch]`` dumps one input (x) and one inout (scratch) slot."""
         roles = {e["role"] for e in submit_dumps_manifest}
+        assert "input" in roles, f"missing role=input entries; have {sorted(roles)}"
+        assert "inout" in roles, f"missing role=inout entries; have {sorted(roles)}"
+
+
+# ===========================================================================
+# pl.spmd(..., dumps=[...]) — grid-dispatch selective dump (PTOTestCase harness)
+# ===========================================================================
+#
+# The third ``dumps=`` front-end. On an SPMD grid dispatch the marks ride the
+# scope itself rather than a Submit carrier, so the same runtime filter must
+# retain them — and must still drop the second, undumped dispatch.
+
+_SPMD_DUMPS_ROWS = 512
+_SPMD_DUMPS_COLS = 128
+_SPMD_DUMPS_BLOCKS = 4
+_SPMD_DUMPS_BLOCK_ROWS = _SPMD_DUMPS_ROWS // _SPMD_DUMPS_BLOCKS
+
+
+def _build_spmd_dumps_program():
+    """Build a two-dispatch SPMD pipeline with ``dumps=`` on the first dispatch only."""
+    ROWS, COLS, BLOCKS = _SPMD_DUMPS_ROWS, _SPMD_DUMPS_COLS, _SPMD_DUMPS_BLOCKS
+    BLOCK_ROWS = _SPMD_DUMPS_BLOCK_ROWS
+
+    @pl.program
+    class SpmdDumpsProgram:
+        """``out = (x + 1) * 2`` over row blocks; only the first grid dumps x + scratch."""
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def add_one(
+            self,
+            x: pl.Tensor[[ROWS, COLS], pl.FP32],
+            scratch: pl.InOut[pl.Tensor[[ROWS, COLS], pl.FP32]],
+        ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+            block_idx = pl.tile.get_block_idx()
+            row = block_idx * BLOCK_ROWS
+            t: pl.Tile[[BLOCK_ROWS, COLS], pl.FP32] = pl.load(x, [row, 0], [BLOCK_ROWS, COLS])
+            r: pl.Tile[[BLOCK_ROWS, COLS], pl.FP32] = pl.add(t, 1.0)  # x + 1
+            # Read scratch (init 0.0) so it is a genuine InOut slot: adding the
+            # zero-initialised buffer leaves the result == x + 1, and the read
+            # makes codegen register scratch via add_inout (dump role "inout").
+            s: pl.Tile[[BLOCK_ROWS, COLS], pl.FP32] = pl.load(scratch, [row, 0], [BLOCK_ROWS, COLS])
+            acc: pl.Tile[[BLOCK_ROWS, COLS], pl.FP32] = pl.add(r, s)  # (x + 1) + 0
+            ret: pl.Tensor[[ROWS, COLS], pl.FP32] = pl.store(acc, [row, 0], scratch)
+            return ret
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def scale(
+            self,
+            scratch: pl.Tensor[[ROWS, COLS], pl.FP32],
+            out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+        ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+            block_idx = pl.tile.get_block_idx()
+            row = block_idx * BLOCK_ROWS
+            t: pl.Tile[[BLOCK_ROWS, COLS], pl.FP32] = pl.load(scratch, [row, 0], [BLOCK_ROWS, COLS])
+            r: pl.Tile[[BLOCK_ROWS, COLS], pl.FP32] = pl.mul(t, 2.0)  # scratch * 2
+            ret: pl.Tensor[[ROWS, COLS], pl.FP32] = pl.store(r, [row, 0], out)
+            return ret
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            x: pl.Tensor[[ROWS, COLS], pl.FP32],
+            scratch: pl.InOut[pl.Tensor[[ROWS, COLS], pl.FP32]],
+            out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+        ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+            # First grid dumps its input x and inout scratch; the second has no
+            # dumps=, so the selective filter must drop it entirely.
+            with pl.spmd(BLOCKS, dumps=[x, scratch]):
+                scratch = self.add_one(x, scratch)
+            with pl.spmd(BLOCKS):
+                out = self.scale(scratch, out)
+            return out
+
+    return SpmdDumpsProgram
+
+
+class _SpmdDumpsPipelinePTO(PTOTestCase):
+    """``out = (x + 1) * 2`` via two SPMD dispatches; the first carries dumps=."""
+
+    __test__ = False
+
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
+
+    def get_name(self) -> str:
+        return f"spmd_dumps_pipeline_{_SPMD_DUMPS_ROWS}x{_SPMD_DUMPS_COLS}"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("x", [_SPMD_DUMPS_ROWS, _SPMD_DUMPS_COLS], DataType.FP32, init_value=torch.randn),
+            TensorSpec("scratch", [_SPMD_DUMPS_ROWS, _SPMD_DUMPS_COLS], DataType.FP32, init_value=0.0),
+            TensorSpec(
+                "out", [_SPMD_DUMPS_ROWS, _SPMD_DUMPS_COLS], DataType.FP32, init_value=0.0, is_output=True
+            ),
+        ]
+
+    def get_program(self) -> Any:
+        return _build_spmd_dumps_program()
+
+    def compute_expected(self, tensors, params=None):
+        # out = (x + 1) * 2 element-wise.
+        tensors["out"][:] = (tensors["x"] + 1.0) * 2.0
+
+
+class TestSpmdDumpsCorrectness:
+    """Numerical correctness — guards that grid ``dumps=`` is inert to the result."""
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_pipeline_correctness(self, test_runner, platform):
+        result = test_runner.run(_SpmdDumpsPipelinePTO(platform=platform))
+        assert result.passed, f"spmd dumps= pipeline execution failed: {result.error}"
+
+
+@pytest.fixture(scope="module")
+def spmd_dumps_manifest_file(test_runner) -> Path:
+    """Run the SPMD dump pipeline once with --dump-args and return the manifest path."""
+    if not test_runner.config.enable_dump_args:
+        pytest.skip("pass --dump-args to validate the spmd dumps= manifest")
+    if test_runner.config.codegen_only:
+        pytest.skip("--codegen-only skips device execution; no manifest is written")
+
+    pattern = "*/dfx_outputs/args_dump/args_dump.json"
+    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob(pattern))
+    result = test_runner.run(_SpmdDumpsPipelinePTO())
+    assert result.passed, f"spmd dumps= pipeline failed: {result.error}"
+
+    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob(pattern))
+    new_files = after - before
+    assert new_files, "No args_dump.json was generated for the spmd dumps= run"
+    return max(new_files, key=lambda p: p.stat().st_mtime)
+
+
+@pytest.fixture(scope="module")
+def spmd_dumps_manifest(spmd_dumps_manifest_file: Path) -> list[dict]:
+    """Parse ``args_dump.json`` and return the entry list (the ``args`` key)."""
+    manifest = json.loads(spmd_dumps_manifest_file.read_text())
+    assert isinstance(manifest, dict), (
+        f"{spmd_dumps_manifest_file}: expected a dict, got {type(manifest).__name__}"
+    )
+    entries = manifest.get("args")
+    assert isinstance(entries, list) and entries, (
+        f"{spmd_dumps_manifest_file}: 'args' missing or empty — dump pipeline produced no entries"
+    )
+    return entries
+
+
+@pytest.mark.inline_case(
+    reason="the fixture runs the case itself and both tests read the artifact it wrote; "
+    "declaring it would add a second dumps= case to the shared device batch for no "
+    "verification gain beyond the manifest it already writes."
+)
+class TestSpmdDumpsManifest:
+    """Manifest validation for grid ``dumps=`` — only runs when ``--dump-args`` is enabled."""
+
+    def test_only_dumped_dispatch_appears(self, spmd_dumps_manifest):
+        """Selective dump must drop the second, undumped dispatch.
+
+        Only the first grid carries ``dumps=[x, scratch]``; the second has no
+        ``dumps=``, so the manifest must contain entries from a single task.
+        """
+        task_ids = {e["task_id"] for e in spmd_dumps_manifest}
+        assert len(task_ids) == 1, (
+            f"selective dump should retain entries from a single dispatch, "
+            f"found {len(task_ids)} task_ids={sorted(task_ids)}"
+        )
+
+    def test_dumped_roles_cover_input_and_inout(self, spmd_dumps_manifest):
+        """``dumps=[x, scratch]`` dumps one input (x) and one inout (scratch) slot."""
+        roles = {e["role"] for e in spmd_dumps_manifest}
         assert "input" in roles, f"missing role=input entries; have {sorted(roles)}"
         assert "inout" in roles, f"missing role=inout entries; have {sorted(roles)}"
 

@@ -42,10 +42,11 @@ def test_torch_dtype_str_supports_mx_dtypes(dtype_name):
 # ---------------------------------------------------------------------------
 # Module-level helpers used by callable-global inlining tests.
 # These mirror the real-world pattern in
-# tests/st/codegen/test_paged_attention_spmd.py where the test module binds
-# ``golden = _spmd_module.golden`` at top level and ``compute_expected``
-# delegates to it. _extract_closure_constants must inline these into the
-# generated golden.py so compute_golden can resolve the reference.
+# tests/st/runtime/framework_and_models/test_paged_attention_spmd.py where the
+# test module binds ``golden = _spmd_module.golden`` at top level and
+# ``compute_expected`` delegates to it. _extract_closure_constants must inline
+# these into the generated golden.py so compute_golden can resolve the
+# reference.
 # ---------------------------------------------------------------------------
 
 
