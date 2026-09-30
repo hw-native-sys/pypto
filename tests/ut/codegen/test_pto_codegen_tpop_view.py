@@ -14,11 +14,13 @@ the reserved C2V slot, delivered via the pipe. Since InitMemRef now leaves the
 tpop result MemRef-less, a ``pl.reshape`` over it inherits no MemRef and codegen
 lowers it to ``pto.treshape`` reading the popped tile directly — instead of a
 fresh, disconnected ``pto.alloc_tile`` the popped data is never moved into.
+An *identity* reshape over it is folded away by FoldNoOpReshape instead, so
+consumers read the popped tile itself and keep its runtime valid extent.
 """
 
 import pypto.language as pl
 import pytest
-from pypto import backend, codegen
+from pypto import backend, codegen, ir, passes
 from pypto.backend import BackendType
 from pypto.ir import OptimizationStrategy, PassManager
 
@@ -200,6 +202,55 @@ def test_pto_codegen_transpose_view_over_tpop_lowers_to_treshape():
     assert consumer.find("pto.tfree_from_aic") > consumer.find("pto.treshape") > 0, (
         "tfree must come after the treshape view:\n" + consumer
     )
+
+
+@pl.program
+class TpopDynamicValidReshape:
+    """A cube result with a runtime valid row count, reshaped on the vector side."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[16, 128], pl.BF16],
+        w: pl.Tensor[[128, 128], pl.BF16],
+        vr: pl.Scalar[pl.INDEX],
+        out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+    ) -> pl.Tensor[[16, 128], pl.FP32]:
+        ta = pl.load(a, [0, 0], [16, 128], valid_shape=[vr, 128], target_memory=pl.Mem.Mat)
+        tw = pl.load(w, [0, 0], [128, 128], target_memory=pl.Mem.Mat)
+        c = pl.matmul(pl.move(ta, target_memory=pl.Mem.Left), pl.move(tw, target_memory=pl.Mem.Right))
+        cv = pl.move(
+            c, target_memory=pl.Mem.Vec, blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box
+        )
+        # Rank-raising reshape: FlattenTileNdTo2D collapses it back to [16, 128],
+        # an identity over the MemRef-less popped tile.
+        r = pl.reshape(cv, [16, 1, 128])
+        back = pl.reshape(r, [16, 128])
+        return pl.store(back, [0, 0], out)
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_identity_reshape_over_dynamic_valid_tpop_reads_the_popped_tile(planner):
+    """The store must read the popped tile, whose tpop carries the runtime extent.
+
+    A ``pto.treshape`` view has no valid_row / valid_col operands, so a surviving
+    reshape here would hand ``pto.tstore`` a tile whose runtime valid extent is
+    never set -- on device, the store wrote nothing at all.
+    """
+    with passes.PassContext([], memory_planner=planner):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(TpopDynamicValidReshape)
+    aiv = next(f for f in optimized.functions.values() if f.func_type == pl.FunctionType.AIV)
+    mlir = PTOCodegen().generate(
+        ir.Program([aiv], aiv.name, optimized.span), emit_tile_addr=planner != passes.MemoryPlanner.PTOAS
+    )
+    body = mlir if isinstance(mlir, str) else "".join(mlir.values())
+
+    assert "pto.treshape" not in body, body
+    # Lane 0 pops the tile with the runtime extent (`vr`) as operands and stores it directly.
+    tpop_lines = [ln.strip() for ln in body.splitlines() if "pto.tpop_from_aic(%arg" in ln]
+    assert len(tpop_lines) == 1, body
+    tpop_ssa = tpop_lines[0].split(" = ", 1)[0]
+    assert f"pto.tstore ins({tpop_ssa} :" in body, body
 
 
 if __name__ == "__main__":
