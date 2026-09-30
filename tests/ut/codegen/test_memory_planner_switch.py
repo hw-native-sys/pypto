@@ -20,7 +20,8 @@ The three product modes exercise different ownership boundaries:
    ``addr`` operand on ``pto.alloc_tile`` (required at ptoas
    ``--pto-level=level2``, which rejects any ``addr`` operand).
 
-The default (``MemoryPlanner.PYPTO``) preserves the pre-existing behaviour:
+The default (``MemoryPlanner.DSA_RP``) uses the in-tree capacity-constrained
+planner. ``MemoryPlanner.PYPTO`` preserves the legacy behaviour explicitly:
 both passes run and codegen bakes ``addr`` for ``--pto-level=level3``.
 """
 
@@ -72,6 +73,30 @@ class LoopCarriedAdd:
             acc_next: pl.Tile[[64, 64], pl.FP32] = pl.add(acc_i, t)
             r = pl.yield_(acc_next)
         out: pl.Tensor[[64, 64], pl.FP32] = pl.store(r, [0, 0], output)
+        return out
+
+
+@pl.program
+class ConsecutiveLoopCarriedAdd:
+    """Two update loops whose return values share one carried allocation."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        b: pl.Tensor[[64, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        seed: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Vec)
+        for _i, (first_i,) in pl.range(2, init_values=(seed,)):
+            first_next: pl.Tile[[64, 64], pl.FP32] = pl.add(first_i, first_i)
+            first_result = pl.yield_(first_next)
+        for _j, (second_i,) in pl.range(2, init_values=(first_result,)):
+            second_next: pl.Tile[[64, 64], pl.FP32] = pl.add(second_i, second_i)
+            second_result = pl.yield_(second_next)
+        residual: pl.Tile[[64, 64], pl.FP32] = pl.load(b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Vec)
+        final: pl.Tile[[64, 64], pl.FP32] = pl.add(second_result, residual)
+        out: pl.Tensor[[64, 64], pl.FP32] = pl.store(final, [0, 0], output)
         return out
 
 
@@ -148,6 +173,16 @@ def _run_pipeline(
     return optimized, list(pm.pass_names)
 
 
+def _run_default_pipeline(program: ir.Program = ElementwiseAdd) -> tuple[ir.Program, list[str]]:
+    """Run the Default pipeline without overriding PassContext's planner."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+    with passes.PassContext([]):
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program)
+    return optimized, list(pm.pass_names)
+
+
 def _codegen(optimized: ir.Program, *, emit_tile_addr: bool) -> str:
     func = next(f for f in optimized.functions.values() if f.name == "kernel")
     single = ir.Program([func], "kernel", optimized.span)
@@ -159,9 +194,20 @@ def _codegen(optimized: ir.Program, *, emit_tile_addr: bool) -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_pass_context_default_planner_is_pypto():
+def test_pass_context_default_planner_is_dsa_rp():
+    assert passes.get_default_memory_planner() == passes.MemoryPlanner.DSA_RP
     ctx = passes.PassContext([])
-    assert ctx.get_memory_planner() == passes.MemoryPlanner.PYPTO
+    assert ctx.get_memory_planner() == passes.MemoryPlanner.DSA_RP
+
+
+def test_default_pipeline_matches_explicit_dsa_rp():
+    default_program, default_pass_names = _run_default_pipeline()
+    explicit_program, explicit_pass_names = _run_pipeline(passes.MemoryPlanner.DSA_RP)
+
+    assert default_pass_names == explicit_pass_names
+    assert "MemoryReuse" not in default_pass_names
+    assert "AllocateMemoryAddr" in default_pass_names
+    assert ir.python_print(default_program) == ir.python_print(explicit_program)
 
 
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS])
@@ -292,6 +338,21 @@ def test_dsa_rp_loop_carry_is_in_place_with_resolved_address():
         handle in addr_by_handle and addr_by_handle[handle] == addr_by_handle[out_handle]
         for handle in in_handles
     ), f"DSA_RP must place the loop-carried input and output at one physical address:\n{mlir}"
+
+
+def test_dsa_rp_consecutive_loop_return_keeps_carried_buffer_live():
+    """A later load must not overwrite a carry returned through two loops."""
+
+    optimized, _ = _run_pipeline(passes.MemoryPlanner.DSA_RP, ConsecutiveLoopCarriedAdd)
+    mlir = _codegen(optimized, emit_tile_addr=True)
+    alloc_lines = [line for line in mlir.splitlines() if "pto.alloc_tile" in line]
+    seed_alloc = next(line for line in alloc_lines if "%seed" in line)
+    residual_alloc = next(line for line in alloc_lines if "%residual" in line)
+    seed_addr = seed_alloc.split("addr =")[1].split()[0]
+    residual_addr = residual_alloc.split("addr =")[1].split()[0]
+    assert seed_addr != residual_addr, (
+        f"the load after the second loop must not clobber its still-live carried result:\n{mlir}"
+    )
 
 
 @pytest.mark.parametrize(

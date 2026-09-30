@@ -120,7 +120,7 @@ class TestGating:
     """The planner gate decides whether the pass does anything at all."""
 
     def test_pypto_planner_leaves_the_loop_for_replication(self):
-        """Under the default planner no region is emitted, so nothing is bound."""
+        """Under the legacy PyPTO planner no region is emitted, so nothing is bound."""
         after = _run_to_slots(SingleLoad, passes.MemoryPlanner.PYPTO)
         assert _slotted_memrefs(after) == {}
         assert len(_pipeline_loops(after)) == 1, "the loop must stay Pipeline for LowerPipelineLoops"
