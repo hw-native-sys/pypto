@@ -1244,21 +1244,24 @@ def shls(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
     Computes lhs << rhs element-wise. Maps to the TSHLS hardware intrinsic.
 
     Note:
-        The scalar shift amount must be zero or positive; negative values are
-        not supported by the hardware and will be rejected by codegen.
+        A constant shift amount must be in ``[0, bit_width - 1]``. PTOAS uses a
+        signless scalar count, so literals paired with unsigned tiles use the
+        signed integer dtype of the same width.
 
     Args:
         lhs: Tile (TileType)
-        rhs: Scalar shift amount; must be >= 0. A constant literal is re-stamped
-            to the lhs element dtype (the IR permits any integer width -- codegen
-            casts the shift count to i32); a typed Expr is used as-is
+        rhs: Scalar shift amount. A constant literal is re-stamped to the signed
+            integer dtype with the same width as the lhs; a typed Expr is used
+            as-is
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for element-wise bitwise left shift with scalar
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
+    rhs_expr = _normalize_signless_same_width_scalar_operand(
+        lhs, rhs, actual_span, wrap_unsigned_constants=False
+    )
     return _ir_core.create_op_call("tile.shls", [lhs, rhs_expr], {}, actual_span)
 
 
@@ -1285,21 +1288,24 @@ def shrs(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
     Computes lhs >> rhs element-wise. Maps to the TSHRS hardware intrinsic.
 
     Note:
-        The scalar shift amount must be zero or positive; negative values are
-        not supported by the hardware and will be rejected by codegen.
+        A constant shift amount must be in ``[0, bit_width - 1]``. PTOAS uses a
+        signless scalar count, so literals paired with unsigned tiles use the
+        signed integer dtype of the same width.
 
     Args:
         lhs: Tile (TileType)
-        rhs: Scalar shift amount; must be >= 0. A constant literal is re-stamped
-            to the lhs element dtype (the IR permits any integer width -- codegen
-            casts the shift count to i32); a typed Expr is used as-is
+        rhs: Scalar shift amount. A constant literal is re-stamped to the signed
+            integer dtype with the same width as the lhs; a typed Expr is used
+            as-is
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for element-wise bitwise right shift with scalar
     """
     actual_span = _get_span_or_capture(span)
-    rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
+    rhs_expr = _normalize_signless_same_width_scalar_operand(
+        lhs, rhs, actual_span, wrap_unsigned_constants=False
+    )
     return _ir_core.create_op_call("tile.shrs", [lhs, rhs_expr], {}, actual_span)
 
 
