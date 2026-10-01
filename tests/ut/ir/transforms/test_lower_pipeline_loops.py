@@ -653,5 +653,120 @@ class TestAccumulatorMembership:
         )
 
 
+def _lower_pipeline_with_seed_predicate(start: int, stop: int, step: int, stage: int = 2) -> list[str]:
+    """Lower a `pl.pipeline` loop whose body seeds an accumulator with `init_cond=(i == 0)`.
+
+    The accumulator is carried through `init_values=` / `pl.yield_` rather than
+    reassigned in the body: these tests run the pass directly, with verification on, so
+    the input must already be SSA. (The tensor-level `acc = pl.matmul_acc(acc, ...)`
+    spelling seen elsewhere is legal only because that path runs `ConvertToSSA` first.)
+
+    The operands are sliced *outside* the loop so the loop variable appears only in the
+    predicate; a negative `start` would otherwise produce negative slice offsets.
+    Returns the printed IR lines of the lowered program.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(strict_ssa=True)
+        def main(
+            self,
+            x: pl.Tensor[[16, 64], pl.BF16],
+            w: pl.Tensor[[2, 64, 64], pl.BF16],
+            out: pl.Out[pl.Tensor[[1, 16, 64], pl.FP32]],
+        ) -> pl.Tensor[[1, 16, 64], pl.FP32]:
+            seed = pl.tensor.create([1, 16, 64], pl.FP32)
+            a_fixed = pl.tensor.slice(x, [16, 64], [0, 0])
+            w_fixed = pl.tensor.slice(w, [1, 64, 64], [0, 0, 0])
+            for i, (acc,) in pl.pipeline(start, stop, step, stage=stage, init_values=(seed,)):
+                nxt = pl.matmul_acc(acc, a_fixed, w_fixed, b_trans=True, init_cond=(i == 0))
+                r = pl.yield_(nxt)
+            return pl.tensor.assemble(out, r, [0, 0, 0])
+
+    return ir.python_print(passes.lower_pipeline_loops()(Before)).splitlines()
+
+
+class TestReplicaSeedPredicateFoldIsGatedOnTheLoopBound:
+    """A replica whose index can never be zero loses its `== 0` predicate; one whose
+    index *can* be zero keeps it.
+
+    `AutoTileMatmulL0` spells the split-K seed test as `init_cond=(ko == 0)`, and
+    `ReplicateBody` substitutes `loop_var → base + k*step`, so replica k>0's predicate
+    becomes `Eq(base + k*step, 0)` — decidable, but never a *literal*, so the emitter's
+    `ConstBool` fold in `make_acc_codegen` cannot consume it and the kernel carries a
+    branch on a compile-time constant (see
+    `tests/ut/codegen/test_matmul_init_cond.py::TestAutoTiledPredicateFolds`).
+
+    Folding it is only sound when the replica's index cannot be zero. Replica `k`
+    executes at `start + j*(factor*step) + k*step`, so `start + step` is the index
+    *nearest* zero and the fold is gated on `sign(start + step) == sign(step)`.
+
+    Both sides of that gate are pinned here, because getting it wrong is a miscompile
+    rather than a missed optimisation:
+
+    * `start = 0`  → replica 1 indexes `{2, 6, 10}`: nothing to test, fold it.
+    * `start = -2` → replica 1 indexes `{0, 4}`, so `ko + 2 == 0` is **true** at
+      `ko = -2`. Folding it would make the first K block *accumulate* onto an
+      uninitialised accumulator instead of overwriting it.
+
+    Replica 0's predicate is never folded either way — it is what seeds the
+    accumulator in the first place.
+    """
+
+    @staticmethod
+    def _seed_predicates(start: int, stop: int, step: int) -> list[str]:
+        """The `init_cond=` spellings of every replicated seed site, in order."""
+        return [
+            ln.strip() for ln in _lower_pipeline_with_seed_predicate(start, stop, step) if "init_cond=" in ln
+        ]
+
+    def test_unreachable_zero_folds_the_replica_predicate(self):
+        """`start = 0`: replica 1's predicate is false everywhere, so it becomes a literal.
+
+        This is the direction that fails on the unpatched pass — nothing folds at all,
+        so the emitter branches on a constant and doubles the emitted MADs.
+        """
+        predicates = self._seed_predicates(0, 12, 2)
+        assert len(predicates) == 2, f"stage=2 must replicate the seed site twice: {predicates}"
+
+        # Replica 0 seeds the accumulator: its predicate is genuinely runtime and stays.
+        assert re.search(r"init_cond=i == 0\b", predicates[0]), (
+            f"replica 0 must keep its runtime seed test, got: {predicates[0]}"
+        )
+        # Replica 1 can never index zero, so the fold must have replaced its comparison
+        # with a literal. The pass injects the BOOL-typed `ConstInt` a DSL
+        # `init_cond=False` produces (that is the spelling the printer/parser
+        # round-trips), which prints as `pl.const(0, pl.BOOL)`.
+        assert re.search(r"init_cond=(False|pl\.const\(0,\s*pl\.BOOL\))", predicates[1]), (
+            "replica 1 can never index zero, so its predicate must fold to a literal "
+            f"`false`; got: {predicates[1]}"
+        )
+        assert not re.search(r"init_cond=i\b", predicates[1]), (
+            f"the folded predicate must not still compare the loop variable: {predicates[1]}"
+        )
+
+    def test_reachable_zero_keeps_the_replica_predicate(self):
+        """`start = -2, step = 2`: replica 1 indexes `{0, 4}`, so the predicate is live.
+
+        Folding here would be a *miscompile*: replica 1's first iteration is where the
+        accumulator gets seeded, and `tile.create` leaves L0C undefined.
+        """
+        predicates = self._seed_predicates(-2, 6, 2)
+        assert len(predicates) == 2, f"stage=2 must replicate the seed site twice: {predicates}"
+
+        assert re.search(r"init_cond=i == 0\b", predicates[0]), (
+            f"replica 0 must keep its runtime seed test, got: {predicates[0]}"
+        )
+        # `-2 + 4j + 2` hits 0 at j = 0, so replica 1's predicate is reachable and must
+        # survive verbatim as `i + 2 == 0`.
+        assert not re.search(r"init_cond=(False|pl\.const\(0,\s*pl\.BOOL\))", predicates[1]), (
+            "replica 1's seed test is reachable (its first index is 0) and must not be "
+            f"folded away — folding it accumulates onto an uninitialised accumulator: {predicates[1]}"
+        )
+        assert re.search(r"init_cond=i \+ 2 == 0\b", predicates[1]), (
+            f"replica 1's predicate must survive verbatim as `i + 2 == 0`, got: {predicates[1]}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

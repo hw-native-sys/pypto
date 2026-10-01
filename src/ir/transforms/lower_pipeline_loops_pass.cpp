@@ -12,6 +12,7 @@
 #include <any>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -23,12 +24,14 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
@@ -161,6 +164,129 @@ class PipelineMembershipTagger : public IRMutator {
 };
 
 /**
+ * @brief Rewrite a replicated clone's provably-dead accumulate predicate to the
+ *        literal `false` the backend's `init_cond` fold consumes.
+ *
+ * `AutoTileMatmulL0` emits the accumulate predicate as `Eq(ko, 0)` on the K-loop
+ * variable, and `ReplicateBody` substitutes `loop_var → base + k*step`. Clone
+ * k>0's predicate therefore becomes `Eq(base + k*step, 0)`. The arithmetic
+ * simplifier gets *almost* there and stops: its `Eq` rules rewrite
+ * `x + c1 == c2` to `x == c2 - c1`, giving `Eq(base, -k*step)`, and then no `Eq`
+ * rule consults the `ConstIntBoundAnalyzer` bound the simplifier had already
+ * installed for `base`. The predicate is **decidable, but never a literal** —
+ * the deciding information is present in the same compilation and unused, and
+ * the rule that would consume it belongs to a shared rewriter, not here.
+ *
+ * The backend fold in `make_acc_codegen` (`pto_ops_elementwise.cpp`) consumes
+ * only a literal, and says so: *"a predicate the arithmetic simplifier folded
+ * (e.g. `ko == 0` after `LowerPipelineLoops` replicates the K-loop) arrives as a
+ * `ConstBool`; missing either one leaves an `scf.if` on a compile-time constant,
+ * doubling the emitted MADs."* So an unfurled predicate emits both arms of the
+ * MAD and a branch the scheduler has to route events around. This mutator closes
+ * that gap at the one layer that can see the answer.
+ *
+ * **Soundness is the caller's obligation:** `dead_index_` must be an expression
+ * that cannot evaluate to zero for any iteration of the clone it is applied to.
+ * `ReplicaIndexIsProvablyNonZero` below establishes exactly that for the main
+ * loop; the tail needs nothing (its base is a constant, so `OffsetIndex` already
+ * folds the predicate).
+ *
+ * Scope: only `Eq(X, 0)` in a **Call argument** is rewritten — that is where `init_cond`
+ * lives, and the only position whose consumer is the emitter's literal fold. A
+ * comparison anywhere else in the clone is left alone, including the
+ * `And(user_cond, ko == 0)` a 4-operand `tile.matmul_acc` composes: folding the inner
+ * half of a composed predicate is a general simplification and belongs to
+ * `rewrite_simplify`, not to this pass. Within that scope the match is exact — `X` must
+ * be structurally equal to *this clone's own* substituted index, so a same-named
+ * variable from an unrelated scope can never match, and the injected literal is BOOL-typed
+ * like the `Eq` it replaces, so the rewrite preserves the node's type and the enclosing
+ * Call's arity.
+ */
+class DeadInitCondFolder : public IRMutator {
+ public:
+  explicit DeadInitCondFolder(ExprPtr dead_index) : dead_index_(std::move(dead_index)) {}
+
+  ExprPtr VisitExpr_(const CallPtr& op) override {
+    auto visited = IRMutator::VisitExpr_(op);
+    auto call = As<Call>(visited);
+    if (!call) return visited;
+
+    bool changed = false;
+    std::vector<ExprPtr> new_args = call->args_;
+    for (auto& arg : new_args) {
+      if (auto replacement = FoldIfDead(arg)) {
+        arg = std::move(replacement);
+        changed = true;
+      }
+    }
+    if (!changed) return visited;
+    return std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_, call->attrs_,
+                                  call->GetType(), call->span_);
+  }
+
+ private:
+  /// The clone's substituted loop-var expression — proven never-zero by the caller.
+  ExprPtr dead_index_;
+
+  /// `ConstBool(false)` when @p arg is `Eq(dead_index_, 0)` in either operand
+  /// order, otherwise null.
+  ExprPtr FoldIfDead(const ExprPtr& arg) const {
+    auto eq = As<Eq>(arg);
+    if (!eq) return nullptr;
+    if (IsDeadIndex(eq->left_) && IsZeroLiteral(eq->right_)) return FalseLiteral(eq->span_);
+    if (IsDeadIndex(eq->right_) && IsZeroLiteral(eq->left_)) return FalseLiteral(eq->span_);
+    return nullptr;
+  }
+
+  bool IsDeadIndex(const ExprPtr& expr) const { return structural_equal(expr, dead_index_); }
+
+  static bool IsZeroLiteral(const ExprPtr& expr) {
+    auto constant = As<ConstInt>(expr);
+    return constant && constant->value_ == 0;
+  }
+
+  /// The literal `false`, in the spelling the printer/parser round-trips: a BOOL-typed
+  /// `ConstInt`, which is also what a DSL `init_cond=False` produces and the first thing
+  /// `make_acc_codegen` folds. A `ConstBool` would be accepted by that emitter too, but it
+  /// would not survive the pass-output print→parse equality check this pass is held to —
+  /// the parser reads the printed literal back as a BOOL-typed `ConstInt`.
+  static ExprPtr FalseLiteral(const Span& span) {
+    return std::make_shared<ConstInt>(0, DataType::BOOL, span);
+  }
+};
+
+/// Whether a clone `k > 0`'s substituted index is provably never zero, for a main
+/// loop over `[main_start, …)` with stride @p step.
+///
+/// Clone `k` executes at `main_start + j*(factor*step) + k*step`. With `factor >= 1`
+/// and `k >= 1`, both offsets carry @p step 's sign — so every index of every such
+/// clone is bounded away from zero by `main_start + step`, the one nearest zero:
+///
+///   step > 0  →  index >= main_start + step   — sound to fold when that is > 0
+///   step < 0  →  index <= main_start + step   — sound to fold when that is < 0
+///
+/// Equivalently: @p main_start is a compile-time constant and `main_start + step`
+/// has the same sign as @p step. A runtime `main_start` (the dynamic-bounds path)
+/// yields no bound, so nothing is folded there — the predicated form is kept.
+///
+/// The bound is only trusted when the addition is representable: a valid loop can
+/// start near either extreme (say `main_start = INT64_MAX - 1` with `step = 2`),
+/// and `*start + step` would then be signed overflow — UB during compilation. When
+/// the sum does not fit, this conservatively reports "not provable", which keeps
+/// the predicated form.
+bool ReplicaIndexIsProvablyNonZero(const ExprPtr& main_start, int64_t step) {
+  auto start = EvalConstInt(main_start);
+  if (!start.has_value()) return false;
+  const int64_t s = *start;
+  if (step > 0) {
+    if (s > std::numeric_limits<int64_t>::max() - step) return false;
+    return s + step > 0;
+  }
+  if (s < std::numeric_limits<int64_t>::min() - step) return false;
+  return s + step < 0;
+}
+
+/**
  * @brief Mutator that lowers user-written `pl.pipeline(N, stage=F)` loops
  *        (`ForKind::Pipeline` + `attrs_["pipeline_stages"] == F` with `F > 1`)
  *        into a replicated main loop plus a modulo-dispatch remainder.
@@ -260,6 +386,9 @@ class LowerPipelineMutator : public IRMutator {
    *    or with the previous clone's yielded expressions (when k > 0)
    *  - is DeepCloned with `clone_def_vars=true` so nested definitions get fresh SSA vars
    *  - has its trailing `YieldStmt` (if any) stripped into the next clone's substitution
+   *  - when `fold_dead_init_cond` is set, has `Eq(base + k*step, 0)` rewritten to a
+   *    literal `false` (k > 0 only — see `DeadInitCondFolder`; clone 0 initialises
+   *    the accumulator, so its predicate is load-bearing and is always kept)
    *
    * Returns the concatenated body (a `SeqStmts` of the stripped clones) paired with
    * the last clone's yielded expressions. For loops without iter_args, the yield
@@ -271,7 +400,8 @@ class LowerPipelineMutator : public IRMutator {
   };
 
   ReplicatedRegion ReplicateBody(const ForStmtPtr& op, const StmtPtr& body, int64_t n_clones, int64_t step,
-                                 const ExprPtr& base, const std::vector<ExprPtr>& initial_iter_substitutes) {
+                                 const ExprPtr& base, const std::vector<ExprPtr>& initial_iter_substitutes,
+                                 bool fold_dead_init_cond) {
     Span sp = op->span_;
     INTERNAL_CHECK_SPAN(initial_iter_substitutes.size() == op->iter_args_.size(), sp)
         << "Internal error: iter substitute count mismatch";
@@ -292,7 +422,12 @@ class LowerPipelineMutator : public IRMutator {
     const bool loop_double_buffers_c = op->GetAttr<bool>(kPipelineDoubleBufferCAttr, false);
     for (int64_t k = 0; k < n_clones; ++k) {
       std::unordered_map<const Var*, ExprPtr> sub_map;
-      sub_map[op->loop_var_.get()] = OffsetIndex(base, k * step, sp);
+      // This clone's substitute for the loop variable. Kept in a named local
+      // because the dead-predicate fold has to recognise it again inside the
+      // clone, and the fold must key on *this* expression — not on the source
+      // loop variable, which the clone no longer mentions.
+      const ExprPtr substituted_index = OffsetIndex(base, k * step, sp);
+      sub_map[op->loop_var_.get()] = substituted_index;
       for (size_t j = 0; j < op->iter_args_.size(); ++j) {
         sub_map[op->iter_args_[j].get()] = (k == 0) ? initial_iter_substitutes[j] : prev_yields[j];
       }
@@ -301,6 +436,12 @@ class LowerPipelineMutator : public IRMutator {
       INTERNAL_CHECK_SPAN(cloned_yields.size() == op->iter_args_.size(), sp)
           << "Internal error: loop body must yield " << op->iter_args_.size() << " values for iter_args, got "
           << cloned_yields.size();
+      // Fold before tagging: the fold is a pure predicate rewrite, and the tagger
+      // rebuilds every tile-defining Call anyway.
+      if (fold_dead_init_cond && k > 0) {
+        DeadInitCondFolder folder(substituted_index);
+        cloned_stmts = folder.VisitStmt(cloned_stmts);
+      }
       // Tag this clone's tile definitions with (group, stage=k) so MemoryReuse
       // keeps the F clones' buffers apart (explicit ping-pong constraint).
       PipelineMembershipTagger tagger(group, static_cast<int32_t>(k), loop_double_buffers_c);
@@ -339,7 +480,8 @@ class LowerPipelineMutator : public IRMutator {
       initial_substitutes.push_back(fresh);
     }
 
-    auto region = ReplicateBody(op, body, factor, step, new_loop_var, initial_substitutes);
+    auto region = ReplicateBody(op, body, factor, step, new_loop_var, initial_substitutes,
+                                /*fold_dead_init_cond=*/ReplicaIndexIsProvablyNonZero(main_start, step));
 
     // Body = replicated clones, followed by YieldStmt(last_yields) when iter_args exist.
     std::vector<StmtPtr> body_parts = {region.body};
@@ -374,7 +516,12 @@ class LowerPipelineMutator : public IRMutator {
    */
   ReplicatedRegion BuildTailSeq(const ForStmtPtr& op, const StmtPtr& body, int64_t k_clones, int64_t step,
                                 const ExprPtr& base_index, const std::vector<ExprPtr>& iter_init_values) {
-    return ReplicateBody(op, body, k_clones, step, base_index, iter_init_values);
+    // No dead-predicate fold on this path. A static tail's base is a constant, so
+    // `OffsetIndex` folds the predicate to a literal on its own; the dynamic
+    // cascade's base is the runtime `main_end` var, for which `main_start` gives
+    // no compile-time bound and nothing can be proven.
+    return ReplicateBody(op, body, k_clones, step, base_index, iter_init_values,
+                         /*fold_dead_init_cond=*/false);
   }
 
   /**
