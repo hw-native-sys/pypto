@@ -344,20 +344,57 @@ class SlotBindingMutator : public IRMutator {
     return result;
   }
 
-  /// Can the loop's induction variable index the slots directly as `iv % factor`?
+  /// Can the loop's induction variable index the slots?
   ///
-  /// ptoas matches the *affine form* of the slot index to decide which accesses
-  /// share a slot, and that match is what earns the rotation its per-slot dynamic
-  /// event ids. A general `((iv - start) / step) % factor` would have to be
-  /// materialized as an intermediate SSA value, which risks losing exactly the
-  /// analysis this transform exists to trigger — so any loop whose slot index is
-  /// not literally `iv % factor` is left to `LowerPipelineLoops`.
+  /// Two accepted shapes, and they exist for the same reason: the slot operand
+  /// has to stay an expression ptoas can reason about, never a byte offset.
+  ///
+  /// * `step == 1` with an aligned `start` means the induction variable **is**
+  ///   the rotation counter, so the slot is literally `iv % factor`. That is the
+  ///   form the affine analysis matches by construction, and it is still emitted
+  ///   for exactly these loops, unchanged.
+  /// * Any other constant `step` counts iterations, not induction values, so the
+  ///   rotation counter is `(iv - start) / step` and the slot is
+  ///   `((iv - start) / step) % factor`. The division is exact by construction
+  ///   (`iv` only ever takes `start + j*step`), so this is still a remainder over
+  ///   a single SSA value — not a folded byte offset — and ptoas' slot accounting
+  ///   keys on that value rather than on its shape.
+  ///
+  /// The second shape is what admits a compiler-generated K-loop
+  /// (`pl.pipeline(0, 512, k, stage=2)`, `step == k`), which is the dominant
+  /// kernel shape in the stack and previously fell through to replication.
+  ///
+  /// A runtime `step` or `start` is still declined: the slot would then depend on
+  /// a value the analysis cannot bound.
+  ///
+  /// **`start` must also be non-negative**, and that is not a formality — both
+  /// emitted shapes need the induction variable to be non-negative for the slot
+  /// to land in `[0, factor)`:
+  ///
+  /// * `iv % factor` is a *signed* remainder, so a negative `iv` yields a
+  ///   negative slot (`(-1) % 2 == -1`) and addresses before the region.
+  /// * the counter form subtracts `start`, and `iv - start` is not representable
+  ///   for a sufficiently negative `start`. `pl.pipeline(INT64_MIN, 1, 1 << 61,
+  ///   stage=3)` runs five iterations and reaches `iv = 0`, where
+  ///   `0 - INT64_MIN` overflows; the wrapped quotient then makes `remsi` select
+  ///   slot `-1` of a three-slot allocation.
+  ///
+  /// The first bullet is pre-existing — `start = -2, step = 1, factor = 2`
+  /// satisfies `start % factor == 0` and emits a negative slot today — so this
+  /// requirement closes both. A loop that starts negative is better served by
+  /// replication, which handles arbitrary bounds.
   static bool LoopShapeAllowsSlots(const ForStmtPtr& op, int64_t factor) {
     if (factor < kMinSlots || factor > kMaxSlots) return false;
     auto step = As<ConstInt>(op->step_);
-    if (!step || step->value_ != 1) return false;
+    if (!step || step->value_ <= 0) return false;
     auto start = As<ConstInt>(op->start_);
-    if (!start || start->value_ % factor != 0) return false;
+    if (!start || start->value_ < 0) return false;
+    if (step->value_ == 1) {
+      // Keep the narrow form, and the narrow requirement, exactly as before.
+      return start->value_ % factor == 0;
+    }
+    // `((iv - start) / step) % factor` is well-formed: `iv >= start >= 0` keeps
+    // the subtraction non-negative and bounded by the loop's own span.
     return true;
   }
 
@@ -499,8 +536,7 @@ class SlotBindingMutator : public IRMutator {
     // identity, so a fresh Var per candidate keeps the regions apart without a
     // name-uniqueness scheme.
     auto base = std::make_shared<Var>("pipe_" + candidate.var->name_hint_, GetPtrType(), span);
-    ExprPtr slot_index =
-        MakeFloorMod(op->loop_var_, std::make_shared<ConstInt>(factor, DataType::INDEX, span), span);
+    ExprPtr slot_index = BuildSlotIndex(op, factor, span);
     auto memref = std::make_shared<MemRef>(std::static_pointer_cast<const Var>(base), int64_t{0}, uint64_t{0},
                                            span, /*is_pinned=*/true, static_cast<uint64_t>(factor),
                                            std::make_optional(slot_index));
@@ -510,6 +546,32 @@ class SlotBindingMutator : public IRMutator {
 
     LOG_DEBUG << "LowerPipelineToSlots: '" << candidate.var->name_hint_ << "' -> slot ("
               << op->loop_var_->name_hint_ << " % " << factor << ") of a " << factor << "-slot allocation";
+  }
+
+  /// The slot operand for `op`: `iv % factor` when the induction variable is
+  /// already the rotation counter, else `((iv - start) / step) % factor`.
+  ///
+  /// Both are a remainder over one SSA value, which is the property the ptoas
+  /// slot accounting keys on: `findMultiTileSlotExpr` returns whatever
+  /// `pto.multi_tile_get` carries, and only the identity of that value — not its
+  /// arithmetic shape — decides whether two accesses are provably the same slot.
+  ///
+  /// `step == 1` loops keep the literal `iv % factor` they have always had, so
+  /// their emitted IR is untouched.
+  static ExprPtr BuildSlotIndex(const ForStmtPtr& op, int64_t factor, const Span& span) {
+    auto factor_expr = std::make_shared<ConstInt>(factor, DataType::INDEX, span);
+    auto step = As<ConstInt>(op->step_);
+    INTERNAL_CHECK(step) << "LowerPipelineToSlots: slot index requested for a loop with a non-constant step";
+    if (step->value_ == 1) {
+      return MakeFloorMod(op->loop_var_, factor_expr, span);
+    }
+    auto start = As<ConstInt>(op->start_);
+    INTERNAL_CHECK(start)
+        << "LowerPipelineToSlots: slot index requested for a loop with a non-constant start";
+    auto counter = MakeFloorDiv(
+        MakeSub(op->loop_var_, std::make_shared<ConstInt>(start->value_, DataType::INDEX, span), span),
+        std::make_shared<ConstInt>(step->value_, DataType::INDEX, span), span);
+    return MakeFloorMod(counter, factor_expr, span);
   }
 
   /// Old tile Var -> the same tile bound to a slot. Registered before the body is
