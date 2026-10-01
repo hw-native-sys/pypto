@@ -687,6 +687,32 @@ One SPMD grid avoids both: `require_sync_start` admits all blocks together and
 per-card admission guarantee, not a global simultaneous start across ranks — the
 ready barrier absorbs cross-rank launch skew.
 
+### `pld.tensor.reduce_scatter`
+
+```text
+pld.tensor.reduce_scatter(target, signal, *, op: ReduceOp = ReduceOp.Sum) -> DistributedTensorType(target)
+```
+
+`target` is `[NR, SIZE]`. Each rank stages all `NR` chunks before the call; after
+it, rank `r`'s row `[r, 0:SIZE]` holds the element-wise reduction of chunk `r`
+across every rank (Sum/Max/Min/Prod by `ReduceOp`). Signal shape `[NR, 1]`.
+
+The row is walked in UB-sized chunks of at most 16 KiB. A static `SIZE` that fits
+one chunk keeps the single-tile path (ready barrier, peer loop, post-reduce
+barrier, store, epilogue); anything larger, or a symbolic `SIZE`, uses the
+chunked path: one ready barrier, then a read-complete barrier per chunk on
+generation `1 + chunk_index`, with a ragged final chunk carried as
+`valid_shape = min(chunk_cols, SIZE - offset)`. Either way a self-clearing
+epilogue restores the signal (see
+[Barrier-signal protocol](#barrier-signal-protocol)), so one signal serves
+back-to-back calls.
+
+Chunking is what makes a large or symbolic `SIZE` expressible at all: the
+single-tile form allocates the whole row as one VEC tile, which overflows UB for
+a real payload and is rejected by PTOAS whenever the row's byte width is not
+32-byte aligned. A symbolic `SIZE` must be runtime-bound by a kernel scalar, loop
+variable, or physical tensor-shape parameter.
+
 ### `pld.system.notify` (TNOTIFY)
 
 ```text
@@ -799,6 +825,7 @@ dispatches before the final `Simplify`.
   `test_l3_allgather.py`, `test_l3_reduce_scatter.py`, `test_l3_broadcast.py`
   (each likewise dynamic-NR, P=2/P=4),
   `test_l3_tensor_allreduce_intrinsic.py`, `test_l3_tensor_allreduce_ring_intrinsic.py`,
+  `test_l3_tensor_reduce_scatter_intrinsic.py`, `test_l3_tensor_reduce_scatter_chunked.py`,
   `test_l3_allreduce_ring.py` (hand-rolled ring RS+AG), `test_l3_host_tensor_allreduce.py`,
   `test_l3_host_tensor_allreduce_ring.py`,
   `test_l3_ep_dispatch_combine.py`, `test_l3_notify_wait.py`,
