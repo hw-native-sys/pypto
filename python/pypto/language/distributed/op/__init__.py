@@ -29,10 +29,17 @@ from . import system_ops as system
 from . import tensor_ops as tensor
 from . import tile_ops as tile
 from .unified_ops import (
+    all_gather,
+    all_reduce,
+    all_to_all,
+    all_to_all_v,
     alloc_window_buffer,
+    barrier,
+    broadcast,
     get_comm_ctx,
     nranks,
     rank,
+    reduce_scatter,
     remote_load,
     remote_store,
     window,
@@ -40,10 +47,17 @@ from .unified_ops import (
 )
 
 __all__ = [
+    "all_gather",
+    "all_reduce",
+    "all_to_all",
+    "all_to_all_v",
     "alloc_window_buffer",
+    "barrier",
+    "broadcast",
     "get_comm_ctx",
     "nranks",
     "rank",
+    "reduce_scatter",
     "remote_load",
     "remote_store",
     "system",
