@@ -32,6 +32,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -497,6 +498,21 @@ REGISTER_DISTRIBUTED_OP(tensor_slice, "tensor.slice") {
       CHECK(ci) << "tensor.slice drop_dims entries must be ConstInt";
       drop_dims.insert(ci->value_);
     }
+  }
+
+  // NZ blocking changes the IR coordinates to rank-5 physical extents, but
+  // the HOST orchestrator indexes the original logical torch tensor (or a
+  // StackedDeviceTensor).  A scalar leading index is the one case where the
+  // logical form is recoverable without carrying every logical dimension: the
+  // trailing axes are the whole shard and must not be emitted at all.
+  const auto host_leading_index = op->GetAttr<ExprPtr>(ir::kNzHostLeadingIndexAttr, nullptr);
+  if (host_leading_index) {
+    const std::string offset_i = codegen.GetExprAsCode(host_leading_index);
+    std::ostringstream line;
+    line << "tensors[\"" << lhs << "\"] = tensors[\"" << input_name << "\"][" << offset_i << "]";
+    codegen.Emit(line.str());
+    dist_codegen.MarkDeclared(lhs);
+    return "";
   }
 
   std::ostringstream indices;

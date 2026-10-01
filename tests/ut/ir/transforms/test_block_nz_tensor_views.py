@@ -650,6 +650,33 @@ def test_blocks_a_leading_axis_slice():
     assert _values(slice_type.shape) == [2, 16, 16, 16, 32]
 
 
+def test_a_non_host_slice_may_drop_a_non_leading_axis():
+    """A scalar index on an axis other than 0 still blocks outside HOST code.
+
+    The pass records a HOST-only metadata attr for HOST distributed codegen,
+    which only supports a scalar leading-axis index; that constraint must not
+    leak into a non-HOST kernel, which never reads the attr at all.
+    """
+
+    @pl.jit(auto_scope=False)
+    def _drops_axis_one(
+        x: pl.Tensor[[64, 512], pl.INT8],
+        w: pl.Tensor[[1, 4, 256, 512], pl.INT8, pl.NZ],
+        out: pl.Out[pl.Tensor[[64, 256], pl.INT32]],
+    ):
+        w_expert: pl.Tensor[[1, 256, 512], pl.INT8, pl.NZ] = w[:, 2]
+        with pl.scope():
+            for _ in pl.spmd(1, name_hint="drops_axis_one"):
+                xt = pl.slice(x, [64, 512], [0, 0])
+                acc = pl.matmul(xt, w_expert[0:1, 0:256, 0:512], b_trans=True, out_dtype=pl.INT32)
+                out[0:64, 0:256] = pl.reshape(acc, [64, 256])
+        return out
+
+    _, _, tm, sd, cx, dyn = _drops_axis_one._bind_args_from_signature({})
+    after = _run(_drops_axis_one._compile_to_program(tm, sd, cx, dyn, pl))
+    assert len(_nz_slices(after)) == 1
+
+
 def test_rejects_a_leading_window_under_a_spanning_axis():
     """Two narrowed leading axes do not fold into one contiguous batch run.
 
