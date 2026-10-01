@@ -2431,6 +2431,343 @@ class TestWindowLocalMetadata:
         assert "data" not in metas
 
 
+class TestPldTensorRebindPreservesMetadata:
+    """A qualified (3+-segment) call -- ``pld.tensor.all_to_all_v(...)``,
+    ``pl.tensor.slice(...)``, etc. -- is invisible to the one-level
+    ``pl.<op>(...)`` branch in ``_update_local_tensor_meta`` (``fn.value`` is
+    itself an ``ast.Attribute``, not a ``Name``), so before this fix it fell
+    through to ``local.pop()`` instead of either computing real metadata or
+    the managed collectives' documented rebind-target metadata (#2638).
+    Dispatch is now an explicit allow-list keyed by the full dotted path
+    (``_qualified_call_handlers``): an unlisted path still safely drops --
+    it never silently fabricates or reuses stale metadata for an op this
+    walker hasn't vetted. Each collective's handler reads its own
+    documented rebind operand directly (``_same_operand_meta``), not the
+    LHS name blindly, so a rebind to a *different* name than the operand
+    still gets the operand's real metadata instead of leaking whatever the
+    LHS name previously held."""
+
+    def test_all_to_all_v_rebind_keeps_metadata(self):
+        # Mirrors the real usage in
+        # tests/st/distributed/collectives/test_l2_tensor_all_to_all_v.py:
+        # ``data`` is rebound through the same collective it's passed into as
+        # the staging window (real signature: all_to_all_v(input, target,
+        # signal, send_counts, recv_counts, *, core_num=1) -- tensor_ops.py).
+        def body(stage, data, signal, send_counts, recv_counts):
+            data = pld.tensor.all_to_all_v(stage, data, signal, send_counts, recv_counts, core_num=1)
+            return data
+
+        seed = {
+            "stage": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
+            "data": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
+            "signal": TensorMeta(shape=(4, 1), dtype=DataType.INT32),
+            "send_counts": TensorMeta(shape=(4,), dtype=DataType.INT32),
+            "recv_counts": TensorMeta(shape=(4, 1), dtype=DataType.INT32),
+        }
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert metas["data"] == seed["data"]
+
+    def test_broadcast_rebind_keeps_metadata(self):
+        # A second collective, confirming the allow-list is generic and not
+        # accidentally specific to all_to_all_v's argument shape. Real DSL
+        # signature: broadcast(target, signal, *, root).
+        def body(target, signal):
+            target = pld.tensor.broadcast(target, signal, root=0)
+            return target
+
+        seed = {
+            "target": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
+            "signal": TensorMeta(shape=(4, 1), dtype=DataType.INT32),
+        }
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert metas["target"] == seed["target"]
+
+    def test_fresh_name_rebind_gets_target_operand_metadata(self):
+        """Binding a collective's result to a *fresh* name --
+        ``result = f(..., data, ...)`` instead of ``data = f(..., data,
+        ...)`` -- now gets ``data``'s (the real ``target`` operand's)
+        metadata, computed directly rather than assumed absent. This used
+        to be an accepted, documented limitation of a bare
+        ``preserve_existing``; ``_same_operand_meta`` closes it as a side
+        effect of reading the operand instead of the LHS name."""
+
+        def body(stage, data, signal, send_counts, recv_counts):
+            result = pld.tensor.all_to_all_v(stage, data, signal, send_counts, recv_counts, core_num=1)
+            return result
+
+        seed = {
+            "stage": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
+            "data": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
+            "signal": TensorMeta(shape=(4, 1), dtype=DataType.INT32),
+            "send_counts": TensorMeta(shape=(4,), dtype=DataType.INT32),
+            "recv_counts": TensorMeta(shape=(4, 1), dtype=DataType.INT32),
+        }
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert metas["result"] == seed["data"]
+
+    def test_rebind_to_a_different_stale_name_gets_operand_metadata_not_the_stale_one(self):
+        """The bug a review pass caught in the first version of this fix:
+        ``old = pld.tensor.broadcast(window, signal, root=0)`` where ``old``
+        already holds *different* stale metadata than ``window``. A blind
+        ``preserve_existing`` would have kept ``old``'s stale (32, 32) FP16
+        entry; the correct answer is ``window``'s (64, 64) FP32 one, since
+        that's the operand the collective actually rebinds."""
+
+        def body(window, signal):
+            old = pld.tensor.broadcast(window, signal, root=0)
+            return old
+
+        seed = {
+            "window": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
+            "signal": TensorMeta(shape=(4, 1), dtype=DataType.INT32),
+            "old": TensorMeta(shape=(32, 32), dtype=DataType.FP16),
+        }
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert metas["old"] == seed["window"]
+
+    def test_pl_tensor_dim_is_not_mistaken_for_a_pld_rebind(self):
+        """Guards the review trap: ``pl.tensor.dim`` is also a two-level-plus
+        attribute call, but it returns a scalar and is already modeled by the
+        separate dim-alias mechanism (``_extract_dim_alias`` /
+        ``_update_dim_values``) -- it must stay absent from
+        ``_qualified_call_handlers``, not be treated as an
+        unlisted-but-safe-to-preserve tensor rebind."""
+
+        def body(a):
+            d = pl.tensor.dim(a, 0)
+            return d
+
+        seed = {"a": TensorMeta(shape=(64, 64), dtype=DataType.FP32)}
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert "d" not in metas
+
+    def test_window_three_segment_form_gets_metadata(self):
+        """``pld.tensor.window`` (3-segment) reuses the exact same
+        ``_window_meta`` handler ``pld.window`` (2-segment) already has, so
+        it computes REAL metadata now -- not just a safe drop. Seeding a
+        stale, differently shaped/dtyped entry under the same name and
+        confirming it's overwritten (not preserved) locks in that the
+        qualified dispatch actually recomputes rather than reuses whatever
+        was there before."""
+
+        def body(buf):
+            win = pld.tensor.window(buf, [128, 128], dtype=pl.FP32)
+            return win
+
+        seed = {
+            "buf": TensorMeta(shape=(1,), dtype=DataType.INT64),
+            "win": TensorMeta(shape=(64, 64), dtype=DataType.FP16),
+        }
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert metas["win"] == TensorMeta(shape=(128, 128), dtype=DataType.FP32)
+
+    def test_pl_tensor_slice_three_segment_form_gets_metadata(self):
+        """``pl.tensor.slice(...)`` is real, already-shipping DSL syntax
+        (e.g. tests/st/runtime/framework_and_models/test_graph_execution.py),
+        and was silently dropping metadata for the identical reason as
+        #2638 before this fix generalized the walker past depth-1."""
+
+        def body(src):
+            view = pl.tensor.slice(src, [4, 8], [0, 0])
+            return view
+
+        seed = {"src": TensorMeta(shape=(4, 8), dtype=DataType.FP32)}
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert metas["view"] == TensorMeta(shape=(4, 8), dtype=DataType.FP32)
+
+    def test_pl_tensor_reshape_three_segment_form_gets_metadata(self):
+        """``pl.tensor.reshape(...)`` is real, already-shipping DSL syntax
+        (e.g. tests/ut/language/test_unified_ops.py), the same latent gap as
+        ``pl.tensor.slice``."""
+
+        def body(src):
+            flat = pl.tensor.reshape(src, [128, 128])
+            return flat
+
+        seed = {"src": TensorMeta(shape=(2, 64, 128), dtype=DataType.BF16)}
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert metas["flat"] == TensorMeta(shape=(128, 128), dtype=DataType.BF16)
+
+    def test_alloc_window_buffer_does_not_preserve_stale_metadata(self):
+        """``pld.tensor.alloc_window_buffer`` returns a ``Ptr``, not a
+        tensor -- it is deliberately absent from ``_qualified_call_handlers``,
+        so a rebind through it must still drop whatever stale ``TensorMeta``
+        the name held rather than preserving it (the defect a blanket
+        namespace-only match would reintroduce)."""
+
+        def body():
+            buf = pld.tensor.alloc_window_buffer(256, name="buf")
+            return buf
+
+        seed = {"buf": TensorMeta(shape=(64, 64), dtype=DataType.FP16)}
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert "buf" not in metas
+
+    def test_window_three_segment_form_missing_dtype_untracked(self):
+        """The identical "handler present but declines" case
+        ``test_window_missing_dtype_untracked`` already covers for the
+        2-segment spelling, now for the 3-segment one: ``_qualified_call_meta``
+        must not conflate "handler ran and returned None" with "preserve
+        existing"."""
+
+        def body(buf):
+            win = pld.tensor.window(buf, [1, 256])  # no dtype= kw
+            return win
+
+        metas = _extract_local_tensor_metas(body, seed_meta={})
+        assert "win" not in metas
+
+    def test_all_to_all_v_rebind_inside_a_for_loop_keeps_metadata(self):
+        """Exercises the recursive self-call in ``_walk_local_tensor_meta_stmts``,
+        which threads ``qualified_call_handlers`` into nested bodies
+        separately from the direct call -- a dropped or misordered parameter
+        there would only break a rebind inside a block like this one, which
+        none of the other (top-level-only) tests above would catch."""
+
+        def body(stage, data, signal, send_counts, recv_counts, n):
+            for _ in pl.range(n):
+                data = pld.tensor.all_to_all_v(stage, data, signal, send_counts, recv_counts, core_num=1)
+            return data
+
+        seed = {
+            "stage": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
+            "data": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
+            "signal": TensorMeta(shape=(4, 1), dtype=DataType.INT32),
+            "send_counts": TensorMeta(shape=(4,), dtype=DataType.INT32),
+            "recv_counts": TensorMeta(shape=(4, 1), dtype=DataType.INT32),
+        }
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert metas["data"] == seed["data"]
+
+    def test_call_rooted_attribute_chain_is_not_mistaken_for_a_qualified_call(self):
+        """``_flatten_dotted_call`` returns None for a callee that isn't a
+        pure attribute/name chain -- e.g. one rooted at a Call rather than a
+        Name, named in the helper's own docstring as an unresolvable shape.
+        Must still safely drop rather than crash or misidentify the call."""
+
+        def body(other):
+            x = other().tensor.window([1, 1], dtype=pl.FP32)
+            return x
+
+        metas = _extract_local_tensor_metas(body, seed_meta={})
+        assert "x" not in metas
+
+    def test_slice_with_drop_dims_declines_rather_than_advertise_the_wrong_rank(self):
+        """A second review pass caught this: ``_slice_meta`` never read
+        ``drop_dims``, so a rank-reducing slice was inferred at the
+        pre-drop rank -- ``pl.tensor.slice(src, [1, 64], [0, 0],
+        drop_dims=[0])`` would have been recorded as shape (1, 64) although
+        the real result is (64,). Pre-existing gap in the shared handler
+        (also reachable through the 2-segment ``pl.slice`` spelling before
+        this fix), newly exercised through qualified dispatch. Must decline
+        rather than advertise the wrong rank."""
+
+        def body(src):
+            view = pl.tensor.slice(src, [1, 64], [0, 0], drop_dims=[0])
+            return view
+
+        seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert "view" not in metas
+
+    def test_slice_with_an_explicitly_empty_drop_dims_still_gets_metadata(self):
+        """A third review pass caught this: an explicitly empty
+        ``drop_dims=[]`` drops nothing, so it's a no-op that the
+        drop_dims guard above must not blanket-decline -- only a
+        *non-empty* ``drop_dims`` actually rank-reduces the result."""
+
+        def body(src):
+            view = pl.tensor.slice(src, [4, 64], [0, 0], drop_dims=[])
+            return view
+
+        seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert metas["view"] == seed["src"]
+
+    def test_slice_with_a_closure_constant_empty_drop_dims_still_gets_metadata(self):
+        """A fourth review pass caught this: the empty-``drop_dims`` check
+        above inspected the raw AST node, so ``drop_dims=EMPTY`` (a name
+        bound to a closure or module-level ``[]`` constant) looked like an
+        opaque, non-empty operand -- not a no-op -- and declined metadata
+        that was previously inferred. Fold the operand before classifying
+        it, the same way the ``shape`` operand already does."""
+
+        EMPTY: list[int] = []
+
+        def body(src):
+            view = pl.tensor.slice(src, [4, 64], [0, 0], drop_dims=EMPTY)
+            return view
+
+        seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert metas["view"] == seed["src"]
+
+    def test_slice_with_a_name_bound_to_none_drop_dims_still_gets_metadata(self):
+        """A fifth review pass: a global/closure name bound to ``None``
+        (not ``[]``) is also a no-op -- ``drop_dims=NONE_DIMS`` must not be
+        treated as non-empty just because it's a ``Name`` rather than a
+        literal ``None``."""
+
+        NONE_DIMS: list[int] | None = None
+
+        def body(src):
+            view = pl.tensor.slice(src, [4, 64], [0, 0], drop_dims=NONE_DIMS)
+            return view
+
+        seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert metas["view"] == seed["src"]
+
+    def test_slice_with_a_constexpr_empty_drop_dims_still_gets_metadata(self):
+        """Same review pass: a ``pl.constexpr`` parameter bound to ``[]``
+        needs ``scope.fold()`` first (its own, narrower mechanism) before
+        the empty-list check can see it -- ``scope.value()`` alone only
+        resolves ordinary closure/module names, not constexpr bindings."""
+
+        def body(src, dd):
+            view = pl.tensor.slice(src, [4, 64], [0, 0], drop_dims=dd)
+            return view
+
+        seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
+        metas = _extract_local_tensor_metas(body, seed_meta=seed, constexpr_values={"dd": "[]"})
+        assert metas["view"] == seed["src"]
+
+    def test_slice_with_an_unresolvable_local_drop_dims_declines_rather_than_guess(self):
+        """A sixth review pass caught this: resolving a Name's bound value
+        returns ``None`` both for a genuine ``drop_dims=None`` binding and
+        for a local parameter forwarding ``drop_dims`` (unresolvable
+        statically -- its real value only exists at runtime). Conflating
+        the two would treat a real, non-empty runtime ``drop_dims`` as a
+        no-op and advertise the wrong, pre-drop rank. A local/shadowed name
+        must always decline, never be assumed empty."""
+
+        def body(src, drop_dims):
+            view = pl.tensor.slice(src, [1, 64], [0, 0], drop_dims=drop_dims)
+            return view
+
+        seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert "view" not in metas
+
+    def test_slice_and_reshape_qualified_calls_accept_the_tensor_keyword(self):
+        """The same review pass: ``pl.slice``/``pl.reshape``'s real first
+        parameter is named ``tensor`` (tensor_ops.py), not ``input`` --
+        ``_slice_meta``/``_reshape_meta`` were matching the wrong keyword
+        name, invisible for a positional call (``_call_operand`` checks the
+        positional slot first) but silently dropping metadata for an
+        explicit-keyword one, on both the 2- and 3-segment spellings."""
+
+        def body(src):
+            sliced = pl.tensor.slice(tensor=src, shape=[4, 64], offset=[0, 0])
+            flat = pl.tensor.reshape(tensor=src, shape=[256])
+            return sliced, flat
+
+        seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert metas["sliced"] == seed["src"]
+        assert metas["flat"] == TensorMeta(shape=(256,), dtype=DataType.FP32)
+
+
 class TestDtypeOperandResolution:
     """A ``dtype=`` operand is resolved by value, not by its ``pl.<NAME>``
     spelling, so the inferred meta matches what the specializer folds into the
