@@ -48,6 +48,7 @@
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
@@ -797,9 +798,13 @@ class InitMemRefMutator : public IRMutator {
     // zero-copy view / plain alias chained off one — stays MemRef-less, so
     // AllocateMemoryAddr reserves no phantom buffer and no fresh, disconnected
     // buffer is created.
-    if (As<TileType>(op->var_->GetType()) && ProducesBufferLessTile(new_value, [](const Var* v) {
-          return !GetTypeMemRef(v->GetType()).has_value();
-        })) {
+    auto receive = As<Call>(new_value);
+    const bool owned_receive =
+        receive && (IsOp(receive, "tile.tpop_from_aic") || IsOp(receive, "tile.tpop_from_aiv")) &&
+        receive->GetAttr<bool>(kSoftwarePipelineSlotsAttr, false) && HasUserBinding(op->var_->GetType());
+    if (As<TileType>(op->var_->GetType()) && !owned_receive &&
+        ProducesBufferLessTile(new_value,
+                               [](const Var* v) { return !GetTypeMemRef(v->GetType()).has_value(); })) {
       return MakeMemRefLessAssign(op, new_value);
     }
 

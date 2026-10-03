@@ -43,6 +43,7 @@
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/software_pipeline.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -531,21 +532,14 @@ FunctionPtr TransformLowerPipelineToSlots(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "LowerPipelineToSlots cannot run on null function";
   if (!func->body_) return func;
 
-  // Only ptoas' memory planner emits a multi-buffer region today: PTO codegen's
-  // `PlanMultiBufferRegions` bails under the PyPTO planner, so a rotation
-  // synthesized here would resolve to a runtime address on an ordinary
-  // `alloc_tile` and buy nothing. Every loop then stays untouched and
-  // `LowerPipelineLoops` replicates it, keeping the default pipeline
-  // byte-identical.
-  //
-  // This is a property of the current codegen gate, NOT of ptoas: given
-  // `alloc_multi_tile addr = <constant base>`, ptoas 0.55 derives the same
-  // per-slot dynamic-event synchronization at `--pto-level=level3` as it does at
-  // level2 (measured: identical sync-op sequence). Widening the gate needs the
-  // PyPTO address allocator to reserve `slot_count * slot_size` for the region
-  // base and codegen to emit that address, so it is left to a follow-up.
   auto* ctx = PassContext::Current();
-  if (ctx == nullptr || ctx->GetMemoryPlanner() != MemoryPlanner::PtoAS) return func;
+  if (ctx == nullptr) return func;
+  if (ctx->GetMemoryPlanner() == MemoryPlanner::PyPTO && ctx->GetEnableSoftwarePipeline()) {
+    return LowerSoftwarePipeline(func);
+  }
+  // The opt-in fixed-address software pipeline and the existing PTOAS slot
+  // rotation are separate paths. The default PyPTO planner still unrolls.
+  if (ctx->GetMemoryPlanner() != MemoryPlanner::PtoAS) return func;
 
   SlotBindingMutator mutator;
   PinnedAllocCollector pinned(ctx->GetBackendHandler());

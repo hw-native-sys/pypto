@@ -196,7 +196,8 @@ void PTOCodegen::VisitExpr_(const ir::FloorDivPtr& op) {
   VisitBinaryArithExpr(op, "arith.divsi", "arith.divf");
 }
 void PTOCodegen::VisitExpr_(const ir::FloorModPtr& op) {
-  VisitBinaryArithExpr(op, "arith.remsi", "arith.remf");
+  VisitBinaryArithExpr(op, fs_.unsigned_slot_remainders.count(op.get()) ? "arith.remui" : "arith.remsi",
+                       "arith.remf");
 }
 
 // ========================================================================

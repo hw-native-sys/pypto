@@ -474,7 +474,7 @@ Two properties matter:
   share a slot, and that is what earns the rotation per-slot (dynamic) event ids —
   iteration *i*'s load overlapping iteration *i-1*'s compute.
 
-`PlanMultiBufferRegions` decides eligibility before the body walk; a shape ptoas
+Under the PTOAS planner, `PlanMultiBufferRegions` decides eligibility before the body walk; a shape ptoas
 cannot describe (slots holding differently shaped tiles, slots declaring
 different valid shapes, two slots live at once inside a loop, a space other than
 Vec / Mat / Acc, a runtime valid shape, a slot carried out of an `if` or loop as
@@ -490,22 +490,24 @@ top of each other.
 | Two slots filled and read in the same iteration | ≤ 0.55 guards only the first `multi_tile_get`; the second load races the next iteration's write (measured wrong on device with 0.54). 0.56+ guards the body with one static event for the whole region — correct, but none of the per-slot overlap the region form exists for | [PTOAS#1118](https://github.com/hw-native-sys/PTOAS/issues/1118), fixed in 0.56 |
 | Prefetch: slot 0 filled before the loop, then each iteration fills slot `(i+1) % 2` while reading slot `i % 2` | ≤ 0.62 primes and drains both slots' events as for a one-slot rotation, off by one here: wrong data for an even trip count, a device hang for an odd one. 0.63 primes only the slot the loop writes first; 0.64 and 0.65 prime both again | [PTOAS#1519](https://github.com/hw-native-sys/PTOAS/issues/1519), fixed in 0.63, regressed in 0.64 |
 
-`CoLiveSlotCollector` counts slot selections per loop body, so it cannot tell the
-two forms apart, and the second bug is back after its fix. Measured on device, the
-prefetch form runs correctly under 0.63, but under 0.64 and 0.65 it returns a later
-block's data for an even trip count and hangs for an odd one; the same-iteration
-form runs correctly under 0.65. Codegen therefore refuses both and points at the
-PyPTO planner, whose baked-address `alloc_tile` path runs the same-iteration form
-correctly on device.
-Straight-line code is unaffected — with no loop there is no cross-iteration reuse
-to guard. Lifting the restriction is one condition in `PlanMultiBufferRegions`;
-it needs a pinned ptoas that runs the prefetch form correctly on device.
+`CoLiveSlotCollector` retains the conservative rejection on the legacy PTOAS
+planner path. The prefetch regression recorded above remains a toolchain
+constraint; enabling software pipelining is not a toolchain correctness guarantee.
+With `enable_software_pipeline=True` and the PyPTO planner, codegen accepts
+canonical co-live Vec slots after validating static, uniform geometry, the fixed
+region base, slot stride and alignment. The slot expression must be a constant or
+a nonnegative loop induction variable plus a nonnegative constant, modulo the
+slot count; these slot remainders emit `arith.remui` locally.
 
-Under `PYPTO` no region is emitted at all: a region at `--pto-level=level3` needs
-an explicit base `addr`, which codegen does not emit yet. ptoas is not the limit —
-given a constant `addr` it has derived the same per-slot sync at level3 as at
-level2 since 0.55 ([PTOAS#1106](https://github.com/hw-native-sys/PTOAS/issues/1106),
-closed).
+At level3, static straight-line schedules use `pto.alloc_multi_tile addr = <base>`;
+runtime or predicated schedules use addressed parent buffers and `pto.subview`.
+Both preserve the complete slot allocation owned by PyPTO. Dynamic subviews
+currently receive conservative synchronization in stock PTOAS
+([#1587](https://github.com/hw-native-sys/PTOAS/issues/1587)). Unsupported user-declared regions keep
+the ordinary fixed-address `alloc_tile` path, which preserves their separation.
+With the option disabled, PyPTO codegen continues to use that original path.
+See [LowerPipelineToSlots](../passes/30-lower_pipeline_to_slots.md) for the
+preload/main/drain transformation and its whole-loop fallback rules.
 
 ### Load Operation Transformation
 

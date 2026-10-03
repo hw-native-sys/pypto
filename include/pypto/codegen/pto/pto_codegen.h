@@ -20,6 +20,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -140,10 +141,12 @@ class PTOCodegen : public CodegenBase {
    *        constants section, which are deduplicated across every use so no
    *        single span fits them; and any operation whose span is unknown or
    *        carries no filename. When false, emit no locations at all.
+   * @param enable_software_pipeline Enable fixed-address multi-buffer regions
+   *        and canonical unsigned slot indices under the PyPTO memory planner.
    * @return MLIR code as string
    */
-  std::string Generate(const ir::ProgramPtr& program, bool emit_tile_addr = true,
-                       bool emit_source_loc = true);
+  std::string Generate(const ir::ProgramPtr& program, bool emit_tile_addr = true, bool emit_source_loc = true,
+                       bool enable_software_pipeline = false);
 
   // CodegenBase interface (unified API for operator codegen callbacks)
   [[nodiscard]] std::string GetCurrentResultTarget() const override;
@@ -743,6 +746,11 @@ class PTOCodegen : public CodegenBase {
    * disjoint byte ranges within that parameter.
    */
   [[nodiscard]] std::string GetGMSlotBufferSSAForPipe(int pipe_id, int dir_mask);
+  /// An owned receive uses the standard GM-entry FIFO surface; the following
+  /// TLOAD writes the allocation chosen by PyPTO's memory planner.
+  [[nodiscard]] ir::TileTypePtr GetGMPipeEntryType(int pipe_id, int direction, bool consumer) const;
+  [[nodiscard]] std::string EmitGMPipeEntryDescriptor(int pipe_id, int direction,
+                                                      const ir::TileTypePtr& tile);
 
   /**
    * @brief Whether physical addresses are baked into the emitted PTO.
@@ -891,14 +899,20 @@ class PTOCodegen : public CodegenBase {
 
   /// One author-declared multi-slot allocation (`pl.MemRef(slots=N)`), lowered to
   /// a ptoas `pto.alloc_multi_tile` region whose slots are selected per use by
-  /// `pto.multi_tile_get`. PTOAS-planner mode only — see PlanMultiBufferRegions.
+  /// `pto.multi_tile_get`. Also used with fixed addresses by software pipelines.
   struct MultiBufferRegion {
-    std::string region_ssa;     ///< The `%mb` handle the slots are taken from
-    std::string mtb_type_str;   ///< `!pto.multi_tile_buf<<slot>, count=N>`
-    std::string slot_type_str;  ///< The single-slot `!pto.tile_buf<...>` type
+    std::string region_ssa;       ///< The `%mb` handle the slots are taken from
+    std::string mtb_type_str;     ///< `!pto.multi_tile_buf<<slot>, count=N>`
+    std::string slot_type_str;    ///< The single-slot `!pto.tile_buf<...>` type
+    std::string parent_type_str;  ///< Optional flat parent for ordinary slot subviews
+    std::string flat_slot_type_str;
+    int64_t slot_elements = 0;
+    std::string addr_ssa;       ///< Constant base address under the PyPTO planner
     std::string valid_row_ssa;  ///< valid_row operand (shared by every slot)
     std::string valid_col_ssa;  ///< valid_col operand (shared by every slot)
-    uint64_t count = 1;         ///< Slot count, in [2, 16] (the ptoas bound)
+    uint64_t count = 1;         ///< Slots per backend region, in [2, 16]
+    /// Optional contiguous banks: (region SSA, fixed base address SSA).
+    std::vector<std::pair<std::string, std::string>> banks;
   };
 
   /**
@@ -954,27 +968,21 @@ class PTOCodegen : public CodegenBase {
    * region and derive per-slot (dynamic event id) synchronization from the slot
    * expression. Emitting N unrelated `alloc_tile`s instead throws that away.
    *
-   * Runs only under the PTOAS memory planner (`emit_tile_addr_ == false`). Under
-   * the PyPTO planner, ptoas runs at `--pto-level=level3`, where a region needs an
-   * explicit `addr` base that codegen does not emit, so the baked-address
-   * `alloc_tile` path stays. ptoas itself handles such a region: given a constant
-   * `addr`, it has derived the same per-slot sync at level3 as at level2 since 0.55
-   * (hw-native-sys/PTOAS#1106, closed).
+   * Runs under the PTOAS planner or, when software pipelining is enabled, with
+   * a constant region base assigned by the PyPTO planner.
    *
    * A region is eligible when every tile bound to that allocation selects a slot,
    * the slots share one tile_buf type and one static valid extent, at most one of
    * them is live per loop iteration, the memory space is a local one ptoas supports
-   * for multi_tile_buf (vec / mat / acc), and the count is within ptoas's `[2, 16]`.
+   * for multi_tile_buf (vec / mat / acc), and each backend region has 2..16 slots.
+   * Proven fixed-address hierarchical regions may contain several such banks.
    *
-   * The one-slot-per-iteration condition is a ptoas synchronization limit, not a
-   * typing one (hw-native-sys/PTOAS#1519 in the pinned ptoas) — see
-   * CoLiveSlotCollector.
+   * The opt-in fixed-address path additionally supports canonical co-live slot
+   * expressions, whose event priming and draining were fixed in PTOAS 0.63.
    *
-   * Anything else is a `ValueError` naming the shape, *not* a fallback: under this
-   * planner per-slot `alloc_tile`s would leave ptoas free to plan the slots on top
-   * of each other, which is the one thing the declaration exists to prevent. The
-   * ordinary `alloc_tile` path is reached only when no region is planned at all —
-   * under the PyPTO planner, or for an allocation that declares no slots.
+   * Unsupported declarations keep their addressed alloc_tile form under PyPTO.
+   * Under PTOAS they raise a ValueError: separate unaddressed alloc_tile ops
+   * would not preserve the declared separation between slots.
    *
    * @param func The function being generated (scanned for tile phis, which take a
    *             head-declared handle a per-use slot cannot provide)
@@ -992,12 +1000,14 @@ class PTOCodegen : public CodegenBase {
    * Emitted where the ordinary `alloc_tile` would be — at the tile's definition —
    * so a runtime slot index (`l0c[i % 2]`) is read inside the loop that names it.
    *
-   * @return false when no region was planned for `memref`'s allocation — it
-   *         declares no slots, or the PyPTO planner is in use. An allocation that
-   *         declares slots this planner cannot describe never reaches here:
-   *         PlanMultiBufferRegions has already raised.
+   * @return false when no region was planned, including addressed declarations
+   *         that keep ordinary alloc_tile lowering. Unsupported declarations
+   *         under the PTOAS planner have already raised in PlanMultiBufferRegions.
    */
-  bool TryEmitMultiTileGet(const ir::MemRefPtr& memref, const std::string& tile_buf, const ir::Span& span);
+  bool TryEmitMultiTileGet(const ir::TileTypePtr& type, const std::string& tile_buf, const ir::Span& span);
+
+  /// Existing operand whose region slot is also the in-place compute result.
+  [[nodiscard]] ir::VarPtr FindMultiTileInputAlias(const ir::AssignStmtPtr& stmt) const;
 
   /**
    * @brief Emit the `pto.alloc_multi_tile` declarations in the function head.
@@ -1053,9 +1063,15 @@ class PTOCodegen : public CodegenBase {
 
     /// Eligible multi-buffer regions, keyed by the allocation's base Ptr.
     std::map<const ir::Var*, MultiBufferRegion> multi_buffer_regions;
+    /// Full IR slot expression -> (constant bank, canonical index within bank).
+    std::map<const ir::Expr*, std::pair<uint64_t, ir::ExprPtr>> banked_slot_indices;
     /// The same regions in discovery order — the map is keyed by pointer, which
     /// is not a stable order to emit declarations in.
     std::vector<const ir::Var*> multi_buffer_region_order;
+    /// Slot remainders proven to have nonnegative operands in canonical loops.
+    std::set<const ir::Expr*> unsigned_slot_remainders;
+    /// Canonical (induction, offset, count) remainders in one statement region.
+    std::map<std::tuple<const ir::Expr*, int64_t, int64_t>, std::string> slot_index_ssa;
 
     int temp_counter = 0;
     std::set<std::string> used_ssa_names;
@@ -1166,6 +1182,7 @@ class PTOCodegen : public CodegenBase {
       memref_identity_mixed_types.clear();
       emitted_tile_alloc_names.clear();
       multi_buffer_regions.clear();
+      banked_slot_indices.clear();
       multi_buffer_region_order.clear();
 
       tuple_element_index.clear();
@@ -1199,6 +1216,7 @@ class PTOCodegen : public CodegenBase {
   std::ostringstream stream_;
   int indent_level_ = 0;
   std::map<std::pair<int, int>, int64_t> gm_slot_buffer_offsets_;
+  std::map<std::pair<int, int>, std::pair<ir::TileTypePtr, ir::TileTypePtr>> gm_pipe_entries_;
 
   /// True when the module needs the wrapper-defined counter-completion adapter.
   bool needs_deferred_completion_adapter_ = false;
@@ -1212,6 +1230,9 @@ class PTOCodegen : public CodegenBase {
   /// When false, `pto.alloc_tile` omits the physical `addr` operand so the
   /// ptoas PlanMemory pass owns allocation (--pto-level=level2). Set by Generate.
   bool emit_tile_addr_ = true;
+
+  /// Opt in to fixed-address multi-buffer regions and canonical slot codegen.
+  bool enable_software_pipeline_ = false;
 
   /// When false, no operation carries a trailing `loc(...)`. Set by Generate.
   bool emit_source_loc_ = true;

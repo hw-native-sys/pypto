@@ -1784,6 +1784,7 @@ def generate(
     emit_source_loc: bool | None = None,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind | None = None,
+    enable_software_pipeline: bool = False,
 ) -> dict[str, str]:
     """Generate all PTO backend output files (kernels + orchestration + config).
 
@@ -1812,6 +1813,8 @@ def generate(
         runtime: Simpler runtime ABI to target; its wire name is written to
             ``RUNTIME_CONFIG["runtime"]`` in the generated ``kernel_config.py``.
             None uses ``RuntimeKind.TENSORMAP_AND_RINGBUFFER``.
+        enable_software_pipeline: Emit fixed-address multi-buffer regions for
+            eligible slot allocations created by software-pipeline lowering.
 
     Returns:
         Dict mapping relative file paths to their content.
@@ -1838,6 +1841,7 @@ def generate(
             emit_source_loc=emit_source_loc,
             dump_ptoas_passes=dump_ptoas_passes,
             runtime=runtime,
+            enable_software_pipeline=enable_software_pipeline,
         )
 
     # L2-only program with multiple Orchestrations: emit each as a
@@ -1853,6 +1857,7 @@ def generate(
             emit_source_loc=emit_source_loc,
             dump_ptoas_passes=dump_ptoas_passes,
             runtime=runtime,
+            enable_software_pipeline=enable_software_pipeline,
         )
 
     return _generate_single_chip(
@@ -1863,6 +1868,7 @@ def generate(
         emit_source_loc=emit_source_loc,
         dump_ptoas_passes=dump_ptoas_passes,
         runtime=runtime,
+        enable_software_pipeline=enable_software_pipeline,
     )
 
 
@@ -1875,6 +1881,7 @@ def _generate_with_distributed(
     emit_source_loc: bool = True,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
+    enable_software_pipeline: bool = False,
 ) -> dict[str, str]:
     """Generate artifacts for a distributed (L3+) program.
 
@@ -1909,6 +1916,7 @@ def _generate_with_distributed(
                 emit_source_loc=emit_source_loc,
                 dump_ptoas_passes=dump_ptoas_passes,
                 runtime=runtime,
+                enable_software_pipeline=enable_software_pipeline,
             )
             for path, content in chip_files.items():
                 result_files[f"next_levels/{func.name}/{path}"] = content
@@ -2115,6 +2123,7 @@ def _generate_multi_chip(
     emit_source_loc: bool = True,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
+    enable_software_pipeline: bool = False,
 ) -> dict[str, str]:
     """Generate artifacts for an L2-only program with multiple Orchestrations.
 
@@ -2140,6 +2149,7 @@ def _generate_multi_chip(
             emit_source_loc=emit_source_loc,
             dump_ptoas_passes=dump_ptoas_passes,
             runtime=runtime,
+            enable_software_pipeline=enable_software_pipeline,
         )
         for path, content in chip_files.items():
             result_files[f"next_levels/{func.name}/{path}"] = content
@@ -2155,6 +2165,7 @@ def _generate_single_chip(
     emit_source_loc: bool = True,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
+    enable_software_pipeline: bool = False,
 ) -> dict[str, str]:
     """Generate artifacts for a single-chip (L0-L2) program.
 
@@ -2235,7 +2246,10 @@ def _generate_single_chip(
             stage = StageRecord(name=f"kernel_codegen:{group_name}", start=time.perf_counter())
             ir_record = StageRecord(name="ir_to_mlir", start=time.perf_counter())
             pto_code = _codegen_core.PTOCodegen().generate(
-                grouped_program, emit_tile_addr=emit_tile_addr, emit_source_loc=emit_source_loc
+                grouped_program,
+                emit_tile_addr=emit_tile_addr,
+                emit_source_loc=emit_source_loc,
+                enable_software_pipeline=enable_software_pipeline,
             )
             ir_record.end = time.perf_counter()
             stage.children.append(ir_record)
@@ -2262,7 +2276,10 @@ def _generate_single_chip(
             stage = StageRecord(name=f"kernel_codegen:{func.name}", start=time.perf_counter())
             ir_record = StageRecord(name="ir_to_mlir", start=time.perf_counter())
             pto_code = _codegen_core.PTOCodegen().generate(
-                single_program, emit_tile_addr=emit_tile_addr, emit_source_loc=emit_source_loc
+                single_program,
+                emit_tile_addr=emit_tile_addr,
+                emit_source_loc=emit_source_loc,
+                enable_software_pipeline=enable_software_pipeline,
             )
             ir_record.end = time.perf_counter()
             stage.children.append(ir_record)

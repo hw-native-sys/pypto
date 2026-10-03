@@ -9,6 +9,7 @@
 
 """Tests for the shared IR pass pipeline."""
 
+import importlib
 import json
 import re
 from contextlib import nullcontext
@@ -78,6 +79,71 @@ def test_buffer_ir_option_survives_nested_pipeline_contexts(tmp_path, mode, enab
         ctx = passes.PassContext.current()
         assert ctx is not None and ctx.get_enable_buffer_ir() == enabled
     assert seen and all(value == enabled for value in seen)
+
+
+@pytest.mark.parametrize("mode", ["plain", "dump", "profiling", "dump_and_profiling"])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_software_pipeline_option_survives_nested_pipeline_contexts(tmp_path, mode, enabled):
+    """Dump and profiling contexts must preserve the selected lowering strategy."""
+    seen: list[bool] = []
+
+    def observe(_pass: passes.Pass, _program: ir.Program) -> None:
+        ctx = passes.PassContext.current()
+        assert ctx is not None
+        seen.append(ctx.get_enable_software_pipeline())
+
+    instrument = passes.CallbackInstrument(before_pass=observe, name="ObserveSoftwarePipeline")
+    profiling = CompileProfiler() if "profiling" in mode else nullcontext()
+    with passes.PassContext([instrument], enable_software_pipeline=enabled), profiling:
+        result = _run_pass_pipeline(
+            _scalar_program(),
+            operation="lower",
+            dump_passes="dump" in mode,
+            passes_dump_dir=str(tmp_path / "passes"),
+        )
+        assert result.enable_software_pipeline == enabled
+        ctx = passes.PassContext.current()
+        assert ctx is not None and ctx.get_enable_software_pipeline() == enabled
+    assert seen and all(value == enabled for value in seen)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_compile_forwards_context_software_pipeline_to_codegen(tmp_path, monkeypatch, enabled):
+    """Codegen runs after the inner pass context exits, so the option is explicit."""
+    compile_module = importlib.import_module("pypto.ir.compile")
+    generate = compile_module.generate
+    seen = []
+
+    def observe_generate(*args, **kwargs):
+        seen.append(kwargs["enable_software_pipeline"])
+        return generate(*args, **kwargs)
+
+    monkeypatch.setattr(compile_module, "generate", observe_generate)
+    with passes.PassContext([], enable_software_pipeline=enabled):
+        ir.compile(
+            _scalar_program(),
+            output_dir=str(tmp_path / "compiled"),
+            skip_ptoas=True,
+            dump_passes=False,
+        )
+    assert seen == [enabled]
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_explicit_software_pipeline_option_conflicts_with_active_context(enabled):
+    with passes.PassContext([]), pytest.raises(RuntimeError, match=r"lower\(\).*enable_software_pipeline"):
+        _run_pass_pipeline(_scalar_program(), operation="lower", enable_software_pipeline=enabled)
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS])
+def test_software_pipeline_rejects_unsupported_planners(planner):
+    with pytest.raises(ValueError, match="enable_software_pipeline requires memory_planner=PYPTO"):
+        passes.PassContext([], memory_planner=planner, enable_software_pipeline=True)
+
+
+def test_software_pipeline_rejects_buffer_ir():
+    with pytest.raises(ValueError, match="enable_software_pipeline does not support enable_buffer_ir=True"):
+        passes.PassContext([], enable_buffer_ir=True, enable_software_pipeline=True)
 
 
 def test_run_pass_pipeline_names_diagnostic_conflict_for_lower():
