@@ -129,8 +129,13 @@ runs while `matmul_{i+1}` executes on the other slot.
 The planners preserve that intent differently. For eligible PTOAS pipelines,
 [`LowerPipelineToSlots`](30-lower_pipeline_to_slots.md) expresses the stages as
 slots in one allocation; declined loops flow to
-[`LowerPipelineLoops`](31-lower_pipeline_loops.md), and PTOAS assigns the
-resulting stage buffers distinct offsets itself. `PYPTO` uses the flat depth-2
+[`LowerPipelineLoops`](31-lower_pipeline_loops.md). For a full-K dbC moving
+loop, that pass binds its fresh Acc results to constant slots `stage % 2` of
+one explicit two-slot region. Membership alone does not constrain PTOAS's
+allocator: ordinary stage allocations can otherwise share one address and
+serialize the drain and next MAD. Sequential regions remain eligible for
+lifetime-aware physical reuse. Separate slots preserve buffering intent;
+actual overlap and profitability require device measurement. `PYPTO` uses the flat depth-2
 `pipeline_membership` emitted by `LowerPipelineLoops`, and `MemoryReuse`'s
 capacity gate (#1475) keeps the buffers distinct to the affordable depth.
 `DSA_RP` also skips `MemoryReuse`; it represents pipeline-stage separations as

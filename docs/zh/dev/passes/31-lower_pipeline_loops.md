@@ -28,6 +28,13 @@
 
 **流水线位置**: 位于 [`SkewCrossCorePipeline`](29-skew_cross_core_pipeline.md)（及 [`NormalizeReturnOrder`](28-normalize_return_order.md)）之后、`CanonicalizeIOOrder` 与 `InitMemRef` 之前。跨核（cube/vector）pipeline 循环已被上游 skew pass 改写为 `ForKind::Sequential`，因此到这里只剩**同核** pipeline 循环（GM→L1、L1→L0、嵌套 matmul stage 循环）仍为 `ForKind::Pipeline`，由本 pass 复制。此时 tile 结构决策已完成；同时早于 `CanonicalizeIOOrder`/`InitMemRef`/`MemoryReuse`，使其看到每个副本独立的 tile 变量。
 
+在 `memory_planner=PTOAS` 下，full-K dbC 循环还把每个复制 stage 的新建累加器
+绑定到共享双槽区域的常量槽 `stage % 2`。PTOAS 不读取 membership，因此即使
+逻辑生命周期不重叠，也需要显式存储声明。主循环与剥离尾部区域仍可按生命周期
+独立复用。运行时索引的多槽预取形式仍被 codegen 的 PTOAS 安全检查阻止；
+例外要求新建 Acc dbC stage 上的私有编译器来源标记；单独的常量索引不会允许
+无关的用户自定义多槽循环。
+
 ## API
 
 | C++ | Python | 级别 |

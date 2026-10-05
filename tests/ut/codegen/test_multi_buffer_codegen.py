@@ -23,6 +23,7 @@ does not emit — so the baked-address ``pto.alloc_tile`` path stays.
 # DSL function bodies are parsed as AST, not executed — suppress pyright errors.
 # pyright: reportUndefinedVariable=false
 
+import re
 from pathlib import Path
 
 import pypto.language as pl
@@ -45,6 +46,8 @@ MIXED_VALID = pl.MemRef(slots=2)
 RUNTIME_VALID = pl.MemRef(slots=2)
 CO_LIVE = pl.MemRef(slots=2)
 PREFETCH = pl.MemRef(slots=2)
+STATIC_PREFETCH = pl.MemRef(slots=2)
+MIXED_INDEX_SLOTS = pl.MemRef(slots=2)
 SIBLING_LOOPS = pl.MemRef(slots=2)
 SEQUENTIAL_A = pl.MemRef(slots=2)
 SEQUENTIAL_B = pl.MemRef(slots=2)
@@ -208,6 +211,59 @@ class CoLiveSlotsInLoop:
                 b, [i * 64, 0], [64, 64], target_memory=pl.MemorySpace.Vec
             )
             s: pl.Tile[[64, 64], pl.FP32] = pl.add(lo, hi)
+            output = pl.store(s, [i * 64, 0], output)
+        return output
+
+
+@pl.program
+class StaticPrefetchSlotInLoop:
+    """Unrolling a prefetch can turn every rotating index into a constant."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[320, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+    ) -> pl.Tensor[[256, 64], pl.FP32]:
+        pre: pl.Tile[[64, 64], pl.FP32, STATIC_PREFETCH[0], pl.Mem.Vec] = pl.load(  # noqa: F841
+            a, [0, 0], [64, 64]
+        )
+        for i in pl.range(2):
+            next1: pl.Tile[[64, 64], pl.FP32, STATIC_PREFETCH[1], pl.Mem.Vec] = pl.load(  # noqa: F841
+                a, [(2 * i + 1) * 64, 0], [64, 64]
+            )
+            cur0: pl.Tile[[64, 64], pl.FP32, STATIC_PREFETCH[0], pl.Mem.Vec] = pl.tile.create(
+                [64, 64], dtype=pl.FP32, target_memory=pl.Mem.Vec
+            )
+            s0 = pl.add(cur0, cur0)
+            output = pl.store(s0, [2 * i * 64, 0], output)
+            next0: pl.Tile[[64, 64], pl.FP32, STATIC_PREFETCH[0], pl.Mem.Vec] = pl.load(  # noqa: F841
+                a, [(2 * i + 2) * 64, 0], [64, 64]
+            )
+            cur1: pl.Tile[[64, 64], pl.FP32, STATIC_PREFETCH[1], pl.Mem.Vec] = pl.tile.create(
+                [64, 64], dtype=pl.FP32, target_memory=pl.Mem.Vec
+            )
+            s1 = pl.add(cur1, cur1)
+            output = pl.store(s1, [(2 * i + 1) * 64, 0], output)
+        return output
+
+
+@pl.program
+class MixedIndexSlotsInLoop:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[256, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+    ) -> pl.Tensor[[256, 64], pl.FP32]:
+        for i in pl.range(4):
+            lo: pl.Tile[[64, 64], pl.FP32, MIXED_INDEX_SLOTS[0], pl.Mem.Vec] = pl.load(
+                a, [i * 64, 0], [64, 64]
+            )
+            hi: pl.Tile[[64, 64], pl.FP32, MIXED_INDEX_SLOTS[(i + 1) % 2], pl.Mem.Vec] = pl.load(
+                a, [i * 64, 0], [64, 64]
+            )
+            s = pl.add(lo, hi)
             output = pl.store(s, [i * 64, 0], output)
         return output
 
@@ -844,6 +900,8 @@ class TestUnsupportedShapesAreLoud:
             (RuntimeValidShapeSlots, "runtime valid shape"),
             (CoLiveSlotsInLoop, "two of its slots are live at once inside a loop"),
             (PrefetchSlotInLoop, "two of its slots are live at once inside a loop"),
+            (StaticPrefetchSlotInLoop, "two of its slots are live at once inside a loop"),
+            (MixedIndexSlotsInLoop, "two of its slots are live at once inside a loop"),
             (UnsubscriptedBinding, "without selecting a slot"),
         ],
         ids=[
@@ -853,6 +911,8 @@ class TestUnsupportedShapesAreLoud:
             "runtime-valid-shape",
             "co-live-slots-in-loop",
             "prefetch-slot-in-loop",
+            "static-prefetch-slot-in-loop",
+            "mixed-index-slots-in-loop",
             "unsubscripted-binding",
         ],
     )
@@ -1014,6 +1074,68 @@ def test_declared_accumulator_placeholder_is_not_a_competing_live_value():
     text = _codegen(Before, passes.MemoryPlanner.PTOAS)
     assert len(_lines(text, "pto.alloc_multi_tile")) == 1
     assert "pto.tmatmul" in text
+
+
+@pytest.mark.parametrize("vec_left", [False, True], ids=["H4-mat-left", "T8-vec-left"])
+def test_full_k_dbc_preserves_two_acc_slots_in_native_ptoas(vec_left, tmp_path):
+    """Membership alone is not a reservation under the PTOAS planner."""
+    M, N, K = (128, 384, 64) if vec_left else (128, 512, 128)
+    left_space = pl.Mem.Vec if vec_left else pl.Mem.Mat
+
+    @pl.program
+    class FullK:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[M, K], pl.BF16],
+            b: pl.Tensor[[K, N], pl.BF16],
+            c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        ) -> pl.Tensor[[M, N], pl.FP32]:
+            at = pl.tile.load(a, [0, 0], [M, K], target_memory=left_space)
+            bt = pl.tile.load(b, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+            acc = pl.tile.matmul(at, bt)
+            c = pl.tile.store(acc, [0, 0], c)
+            return c
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(FullK)
+    # Vec-left staging outlines a Group; verify the cube member, not its wrapper.
+    modules = []
+    for func in optimized.functions.values():
+        if func.func_type not in (ir.FunctionType.InCore, ir.FunctionType.AIC, ir.FunctionType.AIV):
+            continue
+        modules.append(
+            codegen.PTOCodegen().generate(ir.Program([func], func.name, optimized.span), emit_tile_addr=False)
+        )
+    # The pipe verifier requires both sides of a Group in one native module.
+    header = modules[0].splitlines()[0]
+    assert all(module.splitlines()[0] == header for module in modules)
+    mlir = header + "\n" + "\n".join("\n".join(module.splitlines()[1:-1]) for module in modules) + "\n}\n"
+    acc_regions = [line for line in _lines(mlir, "pto.alloc_multi_tile") if "loc=acc" in line]
+    assert len(acc_regions) == 1, mlir
+    assert "count=2" in acc_regions[0], mlir
+    # A peeled odd final tile may reselect stage 0 outside the main loop.
+    assert len([line for line in _lines(mlir, "pto.multi_tile_get") if "loc=acc" in line]) >= 2, mlir
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    source = tmp_path / "full_k_dbc.pto"
+    output = tmp_path / "full_k_dbc.cpp"
+    source.write_text(mlir)
+    _run_ptoas(str(source), str(output), ["--pto-arch=a2", "--pto-level=level2", "--enable-insert-sync"])
+    cpp = next(part for part in output.read_text().split("AICORE void ") if "TileType::Acc" in part)
+    constants = {name: int(value) for name, value in re.findall(r"const int64_t (\w+) = (\d+);", cpp)}
+    acc_handles = re.findall(r"Tile<TileType::Acc, float, (\d+), (\d+),[^\n]*> (\w+) =", cpp)
+    ranges = set()
+    for rows, cols, handle in acc_handles:
+        assignment = re.search(rf"uint64_t (\w+) = \(uint64_t\) (\w+);\s*TASSIGN\({handle}, \1\);", cpp)
+        assert assignment is not None, cpp
+        start = constants[assignment[2]]
+        ranges.add((start, start + int(rows) * int(cols) * 4))
+    assert len(ranges) == 2, (ranges, cpp)
+    first, second = sorted(ranges)
+    assert first[1] <= second[0], ranges
 
 
 if __name__ == "__main__":

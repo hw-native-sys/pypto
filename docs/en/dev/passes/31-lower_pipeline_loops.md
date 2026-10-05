@@ -29,6 +29,15 @@ Internally, `pl.pipeline(...)` emits `ForStmt(kind=ForKind::Pipeline, attrs={"pi
 
 **Pipeline position**: After [`SkewCrossCorePipeline`](29-skew_cross_core_pipeline.md) (and [`NormalizeReturnOrder`](28-normalize_return_order.md)), before `CanonicalizeIOOrder` and `InitMemRef`. Cross-core (cube/vector) pipeline loops are skewed to `ForKind::Sequential` by the upstream skew pass, so by here only **same-core** pipeline loops (GM→L1, L1→L0, nested matmul stage loops) remain `ForKind::Pipeline` for this pass to replicate. Late enough that all tile-structural decisions are made; early enough that `CanonicalizeIOOrder` / `InitMemRef` / `MemoryReuse` see distinct tile vars per clone.
 
+Under `memory_planner=PTOAS`, a full-K dbC loop additionally binds each
+replicated stage's fresh accumulator to constant slot `stage % 2` of a shared
+two-slot region. PTOAS does not consume membership, so this explicit storage
+is required even when the logical lifetimes do not overlap. Main and peeled
+tail regions remain independently reusable by lifetime. Runtime-indexed
+multi-slot prefetch forms remain blocked by codegen's PTOAS safety check.
+The exemption requires private compiler provenance on fresh Acc dbC stages;
+constant indices alone do not admit unrelated user-authored multi-slot loops.
+
 ## API
 
 | C++ | Python | Level |

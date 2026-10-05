@@ -51,6 +51,7 @@
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/multi_buffer_reuse.h"
@@ -256,10 +257,12 @@ class UnsupportedTilePhiBaseCollector : public ir::IRVisitor {
 //   0.63 fixed it; 0.64 and 0.65 prime both slots again and fail on device the
 //   same two ways.
 //
-// This collector only counts slot selections per loop body, so it cannot tell the
-// two apart, and the pinned ptoas still has the second bug. Both are rejected
-// rather than miscompiled, and the author is pointed at the PyPTO planner, whose
-// baked-address alloc_tile path runs the same-iteration form correctly on device.
+// Constant indices alone do not distinguish these forms: an unrolled prefetch
+// can also use literals. Only compiler-proven fresh Acc dbC stages receive an
+// exemption; LowerPipelineLoops emits those as compute/drain pairs with constant
+// slots. Unrelated multi-slot loops retain the conservative rejection, including
+// static-index prefetch. The author is pointed at the PyPTO planner, whose
+// baked-address alloc_tile path runs the same-iteration form correctly.
 // The ping-pong the region form exists for takes ONE slot per iteration and is
 // guarded correctly. Straight-line code is untouched: with no loop there is no
 // cross-iteration reuse to guard.
@@ -279,8 +282,20 @@ class CoLiveSlotCollector : public ir::IRVisitor {
           // co-live slots. This is how an accumulator is threaded through a
           // sequence of in-place MADs. Reject only when one loop body selects
           // structurally different slots of the same region.
-          auto [it, fresh] = per_loop_first_slot_.try_emplace(memref->base_.get(), *memref->slot_index_);
-          if (!fresh && !ir::structural_equal(it->second, *memref->slot_index_)) {
+          const auto call = As<ir::Call>(op->value_);
+          const auto slot = As<ir::ConstInt>(*memref->slot_index_);
+          const bool compiler_dbc = call && call->GetAttr<bool>(ir::kCompilerPtoasDbCStageAttr, false) &&
+                                    tile_type->GetMemorySpace() == ir::MemorySpace::Acc &&
+                                    memref->slot_count_ == 2 && slot &&
+                                    (slot->value_ == 0 || slot->value_ == 1) &&
+                                    (ir::IsOp(call, "tile.matmul") || ir::IsOp(call, "tile.matmul_bias"));
+          auto [it, fresh] = per_loop_first_slot_.try_emplace(
+              memref->base_.get(), SlotUse{*memref->slot_index_, compiler_dbc, false});
+          auto& use = it->second;
+          use.compiler_dbc_only = use.compiler_dbc_only && compiler_dbc;
+          use.distinct_slots =
+              use.distinct_slots || (!fresh && !ir::structural_equal(use.first_slot, *memref->slot_index_));
+          if (use.distinct_slots && !use.compiler_dbc_only) {
             bases.insert(memref->base_.get());
           }
         }
@@ -303,7 +318,12 @@ class CoLiveSlotCollector : public ir::IRVisitor {
   }
 
   int loop_depth_ = 0;
-  std::map<const ir::Var*, ir::ExprPtr> per_loop_first_slot_;
+  struct SlotUse {
+    ir::ExprPtr first_slot;
+    bool compiler_dbc_only;
+    bool distinct_slots;
+  };
+  std::map<const ir::Var*, SlotUse> per_loop_first_slot_;
 };
 
 // The (valid_row, valid_col) extents a tile declares, when both are compile-time.

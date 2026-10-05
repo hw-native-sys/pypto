@@ -31,6 +31,11 @@ namespace ir {
 /// deliberately do not carry it.
 inline constexpr const char* kCompilerTensorToTileMatBridgeAttr = "__compiler_tensor_to_tile_mat_bridge";
 
+/// Private provenance on fresh Acc MAD results bound by LowerPipelineLoops to
+/// constant dbC slots. PTO codegen admits this compiler-generated compute/drain
+/// form without admitting unrelated (possibly prefetched) multi-slot loops.
+inline constexpr const char* kCompilerPtoasDbCStageAttr = "__compiler_ptoas_dbc_stage";
+
 /// Attribute key for ``pl.pipeline(N, stage=F)`` — appears on ``ForStmt.attrs_``
 /// if and only if ``ForStmt.kind_ == ForKind::Pipeline`` (bidirectional invariant
 /// enforced by the structural verifier ``PipelineLoopValid``).

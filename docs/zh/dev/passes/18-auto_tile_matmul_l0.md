@@ -124,7 +124,10 @@ issue #1908 在某些链式 Mat-scratch 布局下仍可能导致操作数缓冲�
 三种 planner 以不同方式保留该意图。对符合条件的 PTOAS 流水线，
 [`LowerPipelineToSlots`](30-lower_pipeline_to_slots.md) 把各 stage 表示成同一分配的
 slot；被拒绝的循环继续交给 [`LowerPipelineLoops`](31-lower_pipeline_loops.md)，
-PTOAS 自行把对应 stage buffer 放到不同 offset。`PYPTO` 使用
+对 full-K dbC 的移动循环，该 pass 把新建 Acc 结果绑定到同一显式双槽区域的
+常量槽 `stage % 2`。单独的 membership 无法约束 PTOAS 分配器：普通 stage
+分配可能共用一个地址，从而串行化 drain 和下一次 MAD。顺序区域仍可按生命周期
+复用物理存储。分离槽位保留缓冲意图，实际重叠和收益仍须设备测量。`PYPTO` 使用
 `LowerPipelineLoops` 发出的扁平 depth-2 `pipeline_membership`，由
 `MemoryReuse` 的容量门控（#1475）在可负担深度内保持 buffer 分离。`DSA_RP`
 也跳过 `MemoryReuse`；它把流水线 stage 分离表示为硬约束，

@@ -23,14 +23,19 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/memory_space.h"
+#include "pypto/ir/memref.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/pipeline_loop_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -108,8 +113,12 @@ int64_t GetConstIntValue(const ExprPtr& expr, const std::string& what) {
 /// before changing either.
 class PipelineMembershipTagger : public IRMutator {
  public:
-  PipelineMembershipTagger(int32_t group, int32_t stage, bool loop_double_buffers_c)
-      : group_(group), stage_(stage), loop_double_buffers_c_(loop_double_buffers_c) {}
+  PipelineMembershipTagger(int32_t group, int32_t stage, bool loop_double_buffers_c,
+                           VarPtr acc_slot_base = nullptr)
+      : group_(group),
+        stage_(stage),
+        loop_double_buffers_c_(loop_double_buffers_c),
+        acc_slot_base_(std::move(acc_slot_base)) {}
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     // Recurse first so nested control flow (e.g. an inner lowered pipeline) is
@@ -152,6 +161,26 @@ class PipelineMembershipTagger : public IRMutator {
     new_attrs.emplace_back(kPipelineMembershipAttr, std::move(packed));
     auto new_call = std::make_shared<Call>(call->op_, call->args_, call->kwargs_, std::move(new_attrs),
                                            call->GetType(), call->span_);
+    if (is_cube_accumulator && acc_slot_base_) {
+      INTERNAL_CHECK_SPAN(!acc_slot_bound_ && (IsOp(call, "tile.matmul") || IsOp(call, "tile.matmul_bias")),
+                          assign->span_)
+          << "Internal error: full-K dbC stage must define one fresh accumulator";
+      INTERNAL_CHECK_SPAN(!tile_type->memref_.has_value(), assign->span_)
+          << "Internal error: dbC pipeline cannot replace caller-owned accumulator storage";
+      auto slot = std::make_shared<ConstInt>(stage_ % 2, DataType::INDEX, assign->span_);
+      auto memref = std::make_shared<MemRef>(acc_slot_base_, int64_t{0}, uint64_t{0}, assign->span_,
+                                             /*is_pinned=*/true, /*slot_count=*/uint64_t{2},
+                                             std::make_optional<ExprPtr>(slot));
+      auto slotted_type = CloneTypeWithMemRef(tile_type, std::optional<MemRefPtr>(memref));
+      auto slotted_var = std::make_shared<Var>(assign->var_->name_hint_, slotted_type, assign->span_);
+      var_remap_[assign->var_.get()] = slotted_var;
+      acc_slot_bound_ = true;
+      auto slot_attrs = new_call->attrs_;
+      slot_attrs.emplace_back(kCompilerPtoasDbCStageAttr, true);
+      new_call = std::make_shared<Call>(new_call->op_, new_call->args_, new_call->kwargs_,
+                                        std::move(slot_attrs), slotted_type, new_call->span_);
+      return std::make_shared<AssignStmt>(slotted_var, new_call, assign->span_);
+    }
     return std::make_shared<AssignStmt>(assign->var_, new_call, assign->span_);
   }
 
@@ -159,6 +188,8 @@ class PipelineMembershipTagger : public IRMutator {
   int32_t group_;
   int32_t stage_;
   bool loop_double_buffers_c_;
+  VarPtr acc_slot_base_;
+  bool acc_slot_bound_ = false;
 };
 
 /**
@@ -291,6 +322,15 @@ class LowerPipelineMutator : public IRMutator {
     // (co-live drain ping-pong); every other pipeline loop leaves cube accumulators
     // untagged (see the tagger). Read the attr once, not per clone.
     const bool loop_double_buffers_c = op->GetAttr<bool>(kPipelineDoubleBufferCAttr, false);
+    // PTOAS does not consume pipeline membership. Preserve the dbC intent as
+    // one region with constant per-clone slots; ordinary intermediate tiles
+    // still use lifetime-based allocation. The base is shared across clones,
+    // but not across unrelated replicated regions.
+    const auto* ctx = PassContext::Current();
+    VarPtr acc_slot_base;
+    if (loop_double_buffers_c && ctx && ctx->GetMemoryPlanner() == MemoryPlanner::PtoAS) {
+      acc_slot_base = std::make_shared<Var>("pipeline_dbc_" + std::to_string(group), GetPtrType(), sp);
+    }
     for (int64_t k = 0; k < n_clones; ++k) {
       std::unordered_map<const Var*, ExprPtr> sub_map;
       sub_map[op->loop_var_.get()] = OffsetIndex(base, k * step, sp);
@@ -304,7 +344,7 @@ class LowerPipelineMutator : public IRMutator {
           << cloned_yields.size();
       // Tag this clone's tile definitions with (group, stage=k) so MemoryReuse
       // keeps the F clones' buffers apart (explicit ping-pong constraint).
-      PipelineMembershipTagger tagger(group, static_cast<int32_t>(k), loop_double_buffers_c);
+      PipelineMembershipTagger tagger(group, static_cast<int32_t>(k), loop_double_buffers_c, acc_slot_base);
       cloned_stmts = tagger.VisitStmt(cloned_stmts);
       clones.push_back(cloned_stmts);
       prev_yields = std::move(cloned_yields);
