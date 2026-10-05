@@ -2556,8 +2556,9 @@ std::pair<std::vector<StmtPtr>, VarPtr> BuildFullKPipelined(const MatmulTiling& 
     // accumulator that drains each L0C result before the next matmul overwrites
     // it; with dbC=2 the SAME order is the ping-pong, because the two tiles land
     // in different L0C slots and store_i therefore runs under matmul_{i+1}.  The
-    // dbC attr adds the slot separation (membership), not a reorder. Under PTOAS,
-    // ptoas places the distinct live ranges. Under PYPTO, flat depth-2 pipeline
+    // dbC attr adds slot separation, not a reorder. LowerPipelineLoops binds
+    // the replicated Acc results to explicit constant slots under PTOAS, which
+    // does not consume membership. Under PYPTO, flat depth-2 pipeline
     // membership keeps MemoryReuse from coalescing the pair; DSA_RP initially
     // exports it as a strict separation. In all cases tile i's FIXPIPE drain
     // overlaps tile i+1's MAD. The moving-operand extract is double-buffered
@@ -2565,8 +2566,7 @@ std::pair<std::vector<StmtPtr>, VarPtr> BuildFullKPipelined(const MatmulTiling& 
     std::vector<std::pair<std::string, std::any>> inner_attrs = {{kPipelineStagesAttr, /*pipeline_stages=*/2},
                                                                  {kPipelineOverlapStoresAttr, false}};
     // Only dbC=2 loops carry the attr (absent ⇒ false), so non-dbC=2 emit is
-    // unchanged.  It lifts the moving-loop stores above both matmuls in
-    // CanonicalizeIOOrder to keep the two L0C accumulators co-live.
+    // unchanged. It declares the two Acc stages without changing their order.
     if (t.double_buffer_c) inner_attrs.emplace_back(kPipelineDoubleBufferCAttr, true);
     auto inner_rv = std::make_shared<Var>(base + "_irv", out_type, sp);
     auto inner_for = std::make_shared<ForStmt>(

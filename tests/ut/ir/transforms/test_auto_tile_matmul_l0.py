@@ -3081,11 +3081,14 @@ class TestAutoTileMatmulL0MNTiling:
                     f"{planner} must emit the ping-pong order (matmul, store, ...), got: {seq}"
                 )
 
-        # The planner gate shows up in the SLOT COUNT: PTOAS takes the dbC=2 plan
-        # and keeps two co-live accumulators; the default PyPTO planner stays dbC=1
-        # on the same shape and coalesces to one.
+        # PTOAS realizes dbC with two slots in one region, not two roots whose
+        # ordinary lifetimes its allocator could coalesce. Default PyPTO keeps
+        # dbC disabled on the same shape and uses one accumulator.
         ptoas_accs = acc_buffers(passes.MemoryPlanner.PTOAS)
-        assert len(ptoas_accs) == 2, f"dbC=2 (PTOAS) must keep two co-live L0C buffers, got: {ptoas_accs}"
+        assert len(ptoas_accs) == 1, f"dbC=2 (PTOAS) uses one explicit two-slot region: {ptoas_accs}"
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+        assert "slots=2" in ir.python_print(allocated), ir.python_print(allocated)
         pypto_accs = acc_buffers(passes.MemoryPlanner.PYPTO)
         assert len(pypto_accs) == 1, f"dbC=1 (PyPTO default) must use one L0C buffer, got: {pypto_accs}"
 
