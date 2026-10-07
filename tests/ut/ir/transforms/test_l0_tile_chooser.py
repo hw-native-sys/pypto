@@ -1258,5 +1258,23 @@ class TestL0TilingRooflineMigration:
         assert _capacities_ok(r.m, r.n, r.k, cfg)
 
 
+@pytest.mark.parametrize("dbc", [False, True])
+@pytest.mark.parametrize("K", [96, 160])
+@pytest.mark.parametrize("min_k", [16, 64])
+def test_k_alignment_is_not_offset_by_a_smaller_minimum(K, dbc, min_k):
+    """A 16-element lower bound must not shift a 32-element K grid to 16/48."""
+    cfg = _default_config(M=512, N=32, K=K)
+    cfg.bytes_a = cfg.bytes_b = 1
+    cfg.align_k = 32
+    cfg.min_k = min_k
+    cfg.l0c_align_m = 32
+    cfg.allow_k_boundary = True
+    cfg.allow_double_buffer_c = dbc
+    result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+    assert result.k >= 32 and result.k % 32 == 0
+    assert (K % result.k) % 32 == 0
+    assert _capacities_ok(result.m, result.n, result.k, cfg, dbc=result.double_buffer_c)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

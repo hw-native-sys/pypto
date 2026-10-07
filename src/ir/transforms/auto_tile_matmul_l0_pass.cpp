@@ -1103,6 +1103,17 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   cfg.align_n = handler->GetL0FractalAlignment();
   cfg.align_k = handler->GetL0FractalAlignment();
   cfg.l0c_align_m = handler->GetL0cMAlignment(out_tile->dtype_);
+  // Extracts/moves materialize the implicit Left/Right layouts, even when
+  // the input lives in Mat or Vec. Their packed K axes are dtype-dependent:
+  // INT8 requires 32 elements, not the backend's generic 16-element grid.
+  const auto left_alignment = tile_view_semantics::GetBoxedTileAlignment(
+      tile_view_semantics::GetImplicitTileView(lhs_tile->shape_, MemorySpace::Left), lhs_tile->dtype_);
+  const auto right_alignment = tile_view_semantics::GetBoxedTileAlignment(
+      tile_view_semantics::GetImplicitTileView(rhs_tile->shape_, MemorySpace::Right), rhs_tile->dtype_);
+  INTERNAL_CHECK_SPAN(left_alignment && right_alignment, assign->span_)
+      << "Internal error: L0 matrix operand boxing is not statically known";
+  cfg.align_k =
+      static_cast<int>(std::max<int64_t>({cfg.align_k, left_alignment->cols, right_alignment->rows}));
   if (is_bias) {
     const auto lhs_alignment = tile_view_semantics::GetBoxedTileAlignment(*lhs_tile);
     const auto rhs_alignment = tile_view_semantics::GetBoxedTileAlignment(*rhs_tile);
@@ -1158,6 +1169,7 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   cfg.min_m = handler->GetMinL0TileDim();
   cfg.min_n = handler->GetMinL0TileDim();
   cfg.min_k = handler->GetMinL0TileDim();
+  cfg.min_k = std::max(cfg.min_k, cfg.align_k);
   if (is_bias) {
     cfg.min_m = std::max(cfg.min_m, cfg.align_m);
     cfg.min_n = std::max(cfg.min_n, cfg.align_n);
@@ -1244,18 +1256,18 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   cfg.allow_padding = false;
   // Permit a non-divisor final K block: the chooser may return a k that does not
   // divide K, and BuildKLoopRewrite peels the partial last K iteration.  The peel
-  // is only valid when K is 16-aligned — then the tail K - floor(K/k)*k is itself
-  // 16-aligned (ptoas requires 16-aligned tile cols).  A non-16-aligned K has no
-  // valid K-tiling (any tail or whole-K block has non-fractal cols), so skip it
+  // is only valid when K obeys the emitted operand K alignment — then the tail
+  // K - floor(K/k)*k obeys that same alignment. A misaligned K has no valid
+  // K-tiling (any tail or whole-K block violates operand boxing), so skip it
   // here with a perf hint rather than emit invalid extracts (the pre-roofline path
   // also bailed on unsupported K).
   cfg.allow_k_boundary = true;
   if (K % cfg.align_k != 0) {
-    hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-007",
-                       op_name + ": K=" + std::to_string(K) + " is not a multiple of the cube fractal " +
-                           std::to_string(cfg.align_k) +
-                           " — non-16-aligned K is unsupported; left untouched.",
-                       assign->span_);
+    hints.emplace_back(
+        DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-007",
+        op_name + ": K=" + std::to_string(K) + " is not a multiple of the required L0 operand K alignment " +
+            std::to_string(cfg.align_k) + " — misaligned K blocks and tails are unsupported; left untouched.",
+        assign->span_);
     return std::nullopt;
   }
 

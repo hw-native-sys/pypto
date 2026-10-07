@@ -110,8 +110,7 @@ struct Candidate {
 //   * legacy (no relaxation): aligned k that DIVIDE K -- the pass has no
 //     K-boundary handling, so a non-divisor k would be skipped (PH-AT-007).
 //   * allow_k_boundary: any aligned k <= capacity, PLUS k == K when the full K
-//     reduction fits one L0 block (a single block; K is 16-aligned, so k == K is
-//     too -- ptoas requires 16-aligned tile cols).
+//     reduction fits one L0 block (a single block; K and k == K obey align_k).
 //   * allow_padding: aligned k bounded by the aligned-up problem size.
 std::vector<int> EnumerateLegalKs(int m, int n, const L0TileConfig& cfg, int64_t A0, int64_t B0) {
   std::vector<int> ks;
@@ -130,11 +129,11 @@ std::vector<int> EnumerateLegalKs(int m, int n, const L0TileConfig& cfg, int64_t
   const int64_t k_hi = AlignDown(std::min(cap, k_problem), cfg.align_k);
   // allow_k_boundary admits a NON-DIVISOR k (the K-peel) ONLY when K is itself
   // align_k-aligned: then every full block AND the peeled tail (K - floor(K/k)*k)
-  // are 16-aligned, which ptoas requires for tile cols. A non-16-aligned K has no
-  // valid k-tiling (a non-fractal tail or whole-K block), so it yields no candidate
+  // obey the emitted operand alignment. A misaligned K has no valid k-tiling
+  // (an illegally boxed tail or whole-K block), so it yields no candidate
   // here and the pass skips the matmul (PH-AT-007) rather than emit invalid extracts.
   const bool peel_ok = cfg.allow_k_boundary && (cfg.K % cfg.align_k == 0);
-  for (int64_t k = cfg.min_k; k <= k_hi; k += cfg.align_k) {
+  for (int64_t k = AlignUp(static_cast<int64_t>(cfg.min_k), cfg.align_k); k <= k_hi; k += cfg.align_k) {
     if (!cfg.allow_padding && !peel_ok && cfg.K % k != 0) continue;  // divisors only
     ks.push_back(static_cast<int>(k));
   }

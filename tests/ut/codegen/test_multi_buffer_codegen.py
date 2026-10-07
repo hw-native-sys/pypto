@@ -1138,5 +1138,46 @@ def test_full_k_dbc_preserves_two_acc_slots_in_native_ptoas(vec_left, tmp_path):
     assert first[1] <= second[0], ranges
 
 
+@pytest.mark.parametrize("dbc", [False, True], ids=["single-C", "dbC-enabled"])
+@pytest.mark.parametrize("M,N,K", [(48, 400, 96), (512, 32, 96), (48, 400, 160)])
+def test_int8_auto_tile_k_matches_native_operand_boxing(M, N, K, dbc, tmp_path):
+    """Non-biased INT8 must not select 16/48-wide L0 K blocks or tails."""
+    boxed_n = (N + 31) // 32 * 32
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[M, K], pl.INT8],
+            b: pl.Tensor[[K, N], pl.INT8],
+            out: pl.Out[pl.Tensor[[M, N], pl.INT32]],
+        ) -> pl.Tensor[[M, N], pl.INT32]:
+            at = pl.load(a, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+            bt = pl.load(b, [0, 0], [K, boxed_n], valid_shape=[K, N], target_memory=pl.Mem.Mat)
+            acc = pl.tile.matmul(at, bt)
+            return pl.store(acc, [0, 0], out)
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+    with passes.PassContext(
+        [], memory_planner=passes.MemoryPlanner.PYPTO, enable_pypto_l0c_double_buffer=dbc
+    ):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+    func = next(func for func in optimized.functions.values() if func.name == "kernel")
+    mlir = codegen.PTOCodegen().generate(ir.Program([func], func.name, optimized.span), emit_tile_addr=True)
+    left_k = re.findall(r"!pto.tile_buf<loc=left,[^>]*cols=(\d+)", mlir)
+    right_k = re.findall(r"!pto.tile_buf<loc=right,[^>]*rows=(\d+)", mlir)
+    assert left_k and right_k, mlir
+    assert all(int(k) % 32 == 0 for k in left_k + right_k), mlir
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    source = tmp_path / "int8_k_boxing.pto"
+    output = tmp_path / "int8_k_boxing.cpp"
+    source.write_text(mlir)
+    _run_ptoas(str(source), str(output), ["--pto-arch=a2", "--pto-level=level3", "--enable-insert-sync"])
+    assert output.is_file()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
