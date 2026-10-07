@@ -442,6 +442,33 @@ def test_predicated_canonical_input_shape():
     assert "== 0)" in printed
 
 
+def _assert_int8_l0_k_alignment(program):
+    """All canonical MADs use the native 32-element INT8 K box."""
+
+    class Operands(ir.IRVisitor):
+        def __init__(self):
+            super().__init__()
+            self.count = 0
+
+        def visit_call(self, op):
+            if op.op.name in {_TILE_MATMUL_OP, _TILE_MATMUL_ACC_OP}:
+                start = int(op.op.name == _TILE_MATMUL_ACC_OP)
+                lhs, rhs = op.args[start : start + 2]
+                assert isinstance(lhs.type, ir.TileType)
+                assert isinstance(rhs.type, ir.TileType)
+                assert lhs.type.memory_space == ir.MemorySpace.Left
+                assert rhs.type.memory_space == ir.MemorySpace.Right
+                left_k, right_k = lhs.type.shape[1], rhs.type.shape[0]
+                assert isinstance(left_k, ir.ConstInt) and isinstance(right_k, ir.ConstInt)
+                assert left_k.value == right_k.value and left_k.value % 32 == 0
+                self.count += 1
+            super().visit_call(op)
+
+    operands = Operands()
+    operands.visit_program(program)
+    assert operands.count > 0
+
+
 def test_issue_2232_loop_level_mn_tiling():
     """The full [16, 1152] accumulator disappears. AutoTile clones the source
     split-K loop once per output-N tile, narrows the GM loads, completes all
@@ -453,8 +480,11 @@ def test_issue_2232_loop_level_mn_tiling():
     printed = ir.python_print(after)
     assert "pl.Tile[[16, 1152], pl.INT32" not in printed
     assert "[128, 1152], [128, 1152]" not in printed
-    assert printed.count("in pl.pipeline(8, stage=2") == 2
-    assert printed.count("pl.tile.store(") == 2
+    # Legal 32-wide INT8 K blocks need more Right storage than the previous
+    # (unemittable) 16-wide choice, so capacity now requires three N tiles.
+    assert printed.count("in pl.pipeline(8, stage=2") == 3
+    assert printed.count("pl.tile.store(") == 3
+    _assert_int8_l0_k_alignment(after)
     assert "n0__ssa_v0 + " in printed
     # The local matmul/matmul_acc path still applies the supported inner K
     # blocking after the enclosing loop has been output-tiled.
@@ -472,8 +502,9 @@ def test_predicated_issue_2232_loop_level_mn_tiling():
     printed = ir.python_print(after)
     assert "pl.Tile[[16, 1152], pl.INT32" not in printed
     assert "[128, 1152], [128, 1152]" not in printed
-    assert printed.count("in pl.pipeline(8, stage=2") == 2
-    assert printed.count("pl.tile.store(") == 2
+    assert printed.count("in pl.pipeline(8, stage=2") == 3
+    assert printed.count("pl.tile.store(") == 3
+    _assert_int8_l0_k_alignment(after)
     assert "n0__ssa_v0 + " in printed
     assert "target_memory=pl.Mem.Right" in printed
     assert "pl.tile.matmul_acc(" in printed
