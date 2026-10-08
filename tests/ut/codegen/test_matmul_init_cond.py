@@ -230,13 +230,23 @@ class TestAutoTiledPredicateFolds:
     """The K-loop `AutoTileMatmulL0` generates must not pay for its predicate.
 
     The pass emits `tile.matmul_acc(..., init_cond=(ko == 0))`. Once
-    `LowerPipelineLoops` replicates the loop and the enclosing loop is
-    eliminated, each replica's predicate is a compile-time literal — and the
-    emitter must fold it to a single MAD. It reaches codegen as a `ConstBool`
-    (the arithmetic simplifier's product), *not* the BOOL-typed `ConstInt` a
-    DSL-level `init_cond=True` produces, so an emitter that folded only
-    `ConstInt` would silently emit an `scf.if` on a constant and double the MADs
-    of every folded K block.
+    `LowerPipelineLoops` replicates the loop, each replica's predicate is a
+    compile-time literal — and the emitter must fold it to a single MAD. It
+    reaches codegen as a `ConstBool` (the arithmetic simplifier's product),
+    *not* the BOOL-typed `ConstInt` a DSL-level `init_cond=True` produces, so an
+    emitter that folded only `ConstInt` would silently emit an `scf.if` on a
+    constant and double the MADs of every folded K block.
+
+    There are two regimes, and only the second one is the interesting one:
+
+    * **the K-loop is eliminated** (a single full-K block, or a trip count that
+      a later pass unrolls): the predicate folds to a literal trivially;
+    * **the K-loop survives** replication: replica k > 0's predicate is
+      `ko + k*step == 0`, which is *decidable* but never a *literal*, because
+      the simplifier has no bound for the loop variable. Nothing later folds
+      it, so the branch reaches the emitted kernel. Reproducing this needed a
+      split-K shape that leaves a multi-iteration main loop — see
+      `test_surviving_k_loop_...` below.
     """
 
     def test_folded_predicate_emits_one_mad_per_block_and_no_branch(self):
@@ -262,6 +272,53 @@ class TestAutoTiledPredicateFolds:
         # each, which is what an unfolded predicate would produce.
         assert mlir.count("pto.tmatmul.acc") == 1, mlir
         assert mlir.count("pto.tmatmul ") == 1, mlir
+
+    def test_surviving_k_loop_folds_the_replica_predicate_but_keeps_the_seed_test(self):
+        """A K-loop that *survives* replication must not keep a dead arm.
+
+        `128x512 @ 512x128` at `stage=2` tiles K into 128-wide blocks, so the
+        trip count is 4: the replicated main loop runs twice (and the tail is
+        empty). The two replicas then differ in a way the eliminated-loop shape
+        above cannot show — replica 0's `ko == 0` is a *genuine* runtime test
+        (`ko` takes both 0 and 256), while replica 1's `ko + 128 == 0` is false
+        for every iteration. The simplifier normalises the latter to
+        `ko == -128` and stops, because `ko` has no bound it can consult; the
+        loop's own bound does, and that is what the pass must use.
+
+        Only replica 1's arm may disappear. Deleting replica 0's would be a
+        miscompile: its predicate is what initialises the accumulator
+        (`tile.create` leaves L0C undefined), so dropping it makes every result
+        accumulate onto garbage.
+        """
+
+        @pl.program
+        class AutoTiledSplitK:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[128, 512], pl.FP16],
+                b: pl.Tensor[[512, 128], pl.FP16],
+                output: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                a_mat = pl.tile.load(a, [0, 0], [128, 512], target_memory=pl.MemorySpace.Mat)
+                b_mat = pl.tile.load(b, [0, 0], [512, 128], target_memory=pl.MemorySpace.Mat)
+                out_tile = pl.tile.matmul(a_mat, b_mat)
+                return pl.store(out_tile, [0, 0], output)
+
+        mlir = _generate_default_mlir(AutoTiledSplitK)
+        # Replica 0's `ko == 0` is runtime and legitimately branches; the bug
+        # this guards is the *second* branch, on replica 1's dead predicate.
+        # `== 1` (not `<= 1`): the seeding branch must survive, so a run that
+        # emits no branch at all fails here instead of passing vacuously.
+        assert mlir.count("scf.if") == 1, (
+            "replica 0's runtime seed test must be the only branch; a replica "
+            "whose index cannot be zero must not emit a branch on a constant\n" + mlir
+        )
+        # One overwrite, and only the seeding replica can reach it. An unfolded
+        # predicate emits a second (unreachable) overwrite arm.
+        assert mlir.count("pto.tmatmul ") == 1, "exactly one replica initialises the accumulator\n" + mlir
+        # Both replicas still accumulate on the steady path.
+        assert mlir.count("pto.tmatmul.acc") == 2, mlir
 
 
 class TestGroupedOperandsCarryPredicate:

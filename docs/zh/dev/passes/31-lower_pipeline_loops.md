@@ -54,6 +54,7 @@ for i in pl.pipeline(64, stage=4):
 
 - **主循环**：步长为 `F*step`，循环体为 `F` 份副本组成的 `SeqStmts`，kind 仍为 `ForKind::Pipeline`，属性下调为 `1`（降级后的标记位）。kind 与属性成对保留以维持 `PipelineLoopValid` 不变量，使 IR 在 print/parse 往返中保持一致（输出形式为 `pl.pipeline(..., stage=1)`）。
 - **克隆细节**：每份副本通过 `DeepClone(body, {loop_var → new_var + k * step}, clone_def_vars=true)` 生成。每个副本拥有新鲜的定义变量，既保持 SSA，又给 `MemoryReuse` 提供独立的 tile 身份。
+- **种子谓词常量折叠**：对每一份 `k > 0` 的副本，其 `Call` 实参中形如 `Eq(new_var + k*step, 0)` 的表达式（即 `AutoTileMatmulL0` 为 split-K 累加器种子生成的写法）会被改写为字面量 `false`。该折叠以循环自身的边界为门控：仅当 `start` 是编译期常量、且 `start + step` 与 `step` 同号时才生效 —— 副本 `k` 的索引为 `start + j*(F*step) + k*step`，因此 `start + step` 是所有副本索引中**最接近 0** 的那个。第 0 份副本永不折叠：它的 `loop_var == 0` 判断正是累加器的初始化来源。若不做此折叠，谓词虽然可判定但永远不是字面量，发射器便会在编译期常量上分支，使发射的 MAD 数量翻倍（参见 `tests/ut/codegen/test_matmul_init_cond.py`）。
 
 `stage=1` 是无操作触发：本 Pass 保留循环原样（kind 与属性都不动），仅递归进入循环体处理嵌套 pipeline。`CanonicalizeIOOrder` 随后基于该标记位完成 IO 重排并降级 kind / 移除属性。用户手写的 `pl.pipeline(stage=1)` 与 `factor>1` 路径输出后的循环走相同流程 —— 都需要 IO 重排但无需进一步复制；这也使再次运行 `LowerPipelineLoops` 自然幂等。
 
