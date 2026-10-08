@@ -322,8 +322,17 @@ class TestFallback:
 
         self._assert_declined(Before)
 
-    def test_non_unit_step(self):
-        """``((iv - start) / step) % F`` is not an affine form ptoas matches."""
+    def test_stepped_loop_is_admitted_with_a_counter_based_rotation(self):
+        """A non-unit step counts iterations, so the slot is the counter mod F.
+
+        The induction variable is not the rotation counter here: with ``step ==
+        64`` over ``[0, 256)`` the loop runs four times but ``i`` only ever takes
+        ``0/64/128/192``. Indexing slots by ``i`` directly would touch two slots
+        out of range, so the slot is ``(i - start) / step % F`` — a remainder over
+        a single SSA value, which is the property ptoas' slot accounting keys on
+        (it returns whatever ``pto.multi_tile_get`` carries and requires only that
+        two slots share the *identity* of that value, not its shape).
+        """
 
         @pl.program
         class Before:
@@ -337,6 +346,157 @@ class TestFallback:
                     t: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [i, 0], [64, 64])
                     e: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.exp(t)
                     nxt: pl.Tensor[[256, 64], pl.FP32] = pl.store(e, [i, 0], acc)
+                    y = pl.yield_(nxt)
+                return y
+
+        after = _run_to_slots(Before, passes.MemoryPlanner.PTOAS)
+        assert set(_slotted_memrefs(after)) == {"t"}
+        assert _pipeline_loops(after) == [], "a slotted loop carries its ping-pong in the slots"
+        assert _load_count(after) == _load_count(Before), "one body, not F copies"
+
+        # The slot must be the *counter*, not the raw induction variable: with
+        # step 64 over [0, 256) `i` only takes 0/64/128/192, so `i % 2` would index
+        # the two-slot region out of range. It is `(i - start) / step % F` — still
+        # a remainder over one SSA value, which is the property ptoas keys on.
+        memref = _slotted_memrefs(after)["t"]
+        slot = memref.slot_index_
+        assert slot is not None, "a slotted MemRef must carry its slot index"
+        assert not isinstance(slot, ir.Var), f"the slot must be the counter, not the raw iv: {slot}"
+        assert isinstance(slot, ir.FloorMod), f"the slot must be a remainder, got {type(slot).__name__}"
+        counter = slot.left
+        assert isinstance(counter, ir.FloorDiv), (
+            f"the rotation counter must be a division, got {type(counter).__name__}"
+        )
+
+    def test_a_negative_start_is_declined(self):
+        """A negative start cannot index a slot, in either form.
+
+        ``iv % factor`` is a *signed* remainder, so `start = -2, step = 1` yields
+        `(-1) % 2 == -1` — a slot before the region. That shape satisfies the old
+        `start % factor == 0` test, so it reached codegen; this gate closes that
+        pre-existing hole as well as guarding the counter form, where
+        `iv - start` is not representable for a sufficiently negative start.
+
+        The load address is loop-invariant on purpose: a negative start would
+        otherwise produce negative slice offsets and the shape would not parse.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[256, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                for i, (acc,) in pl.pipeline(-2, 6, 1, stage=2, init_values=(out,)):
+                    t: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                    e: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.exp(t)
+                    nxt: pl.Tensor[[64, 64], pl.FP32] = pl.store(e, [0, 0], acc)
+                    y = pl.yield_(nxt)
+                return y
+
+        self._assert_declined(Before)
+
+    def test_a_start_whose_counter_would_overflow_is_declined(self):
+        """The counter subtracts `start`, so a start near the type's floor is out.
+
+        `pl.pipeline(INT64_MIN, 1, 1 << 61, stage=3)` runs five iterations and
+        reaches `iv = 0`, where `0 - INT64_MIN` is not representable. The wrapped
+        quotient would then make the remainder select slot `-1` of a three-slot
+        region — an access before the allocation. Replication handles these bounds
+        correctly, so declining is the right answer.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[256, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                for i, (acc,) in pl.pipeline(-(2**63), 1, 1 << 61, stage=3, init_values=(out,)):
+                    t: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                    e: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.exp(t)
+                    nxt: pl.Tensor[[64, 64], pl.FP32] = pl.store(e, [0, 0], acc)
+                    y = pl.yield_(nxt)
+                return y
+
+        self._assert_declined(Before)
+
+    def test_a_stop_whose_final_update_would_overflow_is_declined(self):
+        """A stepped loop's last `iv + step` update must stay representable.
+
+        `pl.pipeline(INT64_MAX - 4, INT64_MAX, 3, stage=3)` runs two iterations, at
+        `INT64_MAX - 4` and `INT64_MAX - 1`, but the retained `scf.for` then computes
+        `INT64_MAX - 1 + 3`, which overflows the signed index and can keep the loop
+        running. Replication emits the tail copies with no loop, so declining is right.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[256, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                for i, (acc,) in pl.pipeline(2**63 - 5, 2**63 - 1, 3, stage=3, init_values=(out,)):
+                    t: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                    e: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.exp(t)
+                    nxt: pl.Tensor[[64, 64], pl.FP32] = pl.store(e, [0, 0], acc)
+                    y = pl.yield_(nxt)
+                return y
+
+        self._assert_declined(Before)
+
+    def test_a_stop_with_room_for_the_final_update_is_admitted(self):
+        """The bound is tight: `stop == INT64_MAX - (step - 1)` still fits.
+
+        `pl.pipeline(INT64_MAX - 7, INT64_MAX - 2, 3, stage=2)` iterates at
+        `INT64_MAX - 7` and `INT64_MAX - 4`; the update after the last one is
+        `INT64_MAX - 1`, which is representable, so the loop is slotted.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[256, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                for i, (acc,) in pl.pipeline(2**63 - 8, 2**63 - 3, 3, stage=2, init_values=(out,)):
+                    t: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                    e: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.exp(t)
+                    nxt: pl.Tensor[[64, 64], pl.FP32] = pl.store(e, [0, 0], acc)
+                    y = pl.yield_(nxt)
+                return y
+
+        after = _run_to_slots(Before, passes.MemoryPlanner.PTOAS)
+        assert set(_slotted_memrefs(after)) == {"t"}
+
+    def test_a_stepped_loop_with_a_runtime_stop_is_declined(self):
+        """A runtime `stop` cannot be shown to leave room for `iv + step`.
+
+        Unlike `step == 1`, a stepped loop can overshoot `stop`, so it is only
+        admitted with a constant `stop` the pass can bound.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[256, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+                n: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                for i, (acc,) in pl.pipeline(0, n, 2, stage=2, init_values=(out,)):
+                    t: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                    e: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.exp(t)
+                    nxt: pl.Tensor[[64, 64], pl.FP32] = pl.store(e, [0, 0], acc)
                     y = pl.yield_(nxt)
                 return y
 
@@ -507,25 +667,33 @@ class TestChaining:
     """The two passes are complementary, not alternatives."""
 
     def test_declined_loop_is_still_replicated_by_lower_pipeline_loops(self):
-        """A step-64 loop takes no slot, so it must still get its F body copies."""
+        """A loop this pass declines must still get its F body copies.
+
+        Declined here on the pinned-slot budget rather than on the loop shape: the
+        slots are pinned, so two 128 KB slots exceed the Vec budget and ptoas would
+        answer the region with a hard ``overflow`` error instead of degrading. The
+        loop shape itself is no longer a reason to decline — a non-unit step takes
+        the counter-based rotation.
+        """
 
         @pl.program
         class Before:
             @pl.function
             def main(
                 self,
-                a: pl.Tensor[[256, 64], pl.FP32],
-                out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
-            ) -> pl.Tensor[[256, 64], pl.FP32]:
-                for i, (acc,) in pl.pipeline(0, 256, 64, stage=2, init_values=(out,)):
-                    t: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [i, 0], [64, 64])
-                    e: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.exp(t)
-                    nxt: pl.Tensor[[256, 64], pl.FP32] = pl.store(e, [i, 0], acc)
+                a: pl.Tensor[[512, 256], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 256], pl.FP32]],
+            ) -> pl.Tensor[[512, 256], pl.FP32]:
+                for i, (acc,) in pl.pipeline(0, 4, 1, stage=2, init_values=(out,)):
+                    t: pl.Tile[[128, 256], pl.FP32, pl.Mem.Vec] = pl.load(a, [i * 128, 0], [128, 256])
+                    e: pl.Tile[[128, 256], pl.FP32, pl.Mem.Vec] = pl.exp(t)
+                    nxt: pl.Tensor[[512, 256], pl.FP32] = pl.store(e, [i * 128, 0], acc)
                     y = pl.yield_(nxt)
                 return y
 
         before_loads = _load_count(Before)
         after_slots = _run_to_slots(Before, passes.MemoryPlanner.PTOAS)
+        assert _slotted_memrefs(after_slots) == {}, "the budget gate must decline this"
         with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
             replicated = passes.lower_pipeline_loops()(after_slots)
         assert _load_count(replicated) == 2 * before_loads

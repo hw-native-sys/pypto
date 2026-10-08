@@ -88,7 +88,7 @@ Codegen **refuses** a region it cannot describe rather than degrading it, becaus
 | Static valid shape | A region declares one static extent for all its slots |
 | Not carried into a phi | A tile that is yielded, or used as a nested loop's `init_values`, makes that phi share its MemRef. Both reach the phi the same way — one through a `YieldStmt`, the other through `IterArg::initValue_`. Checked through **alias roots**: `InitMemRef` shares one MemRef across a bare `a = b` tile copy and across a view / in-place result, so yielding an alias carries the original's slot just as yielding it directly would |
 | Not consumed by a view / in-place op | Such a result *is* its source's buffer, so it would land on the same allocation with a different `tile_buf` type |
-| `step == 1` and `start % F == 0` | See below |
+| Constant `step > 0`, constant `start` | See below |
 | No enclosing pipeline loop was declined | See below |
 | Slots fit the memory space | See below |
 
@@ -102,7 +102,26 @@ silently losing the per-stage privacy the `pl.pipeline(stage=F)` annotation aske
 an author-bound tile is skipped without affecting the loop, because declining over it would
 push its declaration onto the replication path, which rejects it.
 
-**Why the slot index must be literally `iv % F`.** ptoas matches the *affine form* of the slot index to decide which accesses share a slot, and that match is what earns the rotation its per-slot dynamic event ids — handing it a folded byte offset defeats the analysis. A general `((iv - start) / step) % F` would have to be materialized as an intermediate SSA value, risking the loss of exactly the analysis this transform exists to trigger. Loops whose index cannot be written directly are left to replication.
+**Why the slot index is `iv % F` when it can be, and `((iv - start) / step) % F` otherwise.**
+ptoas' slot accounting reads the value `pto.multi_tile_get` carries and reasons about
+`(symbol + offset) mod N`; what it needs is for two accesses to share the *identity* of that
+symbol, not for the expression to have a particular shape. So both forms qualify, and which one
+is emitted depends on whether the induction variable **is** the rotation counter:
+
+- `step == 1` with an aligned `start` — it is, so the slot is literally `iv % F`.
+- any other constant `step` — it is not (`iv` takes `start + j*step`), so the slot is
+  `((iv - start) / step) % F`. The division is exact by construction, so this is still a
+  remainder over a single SSA value, never a folded byte offset.
+
+A runtime `step` or `start` is still declined: the slot would then depend on a value the analysis
+cannot bound. A stepped loop (`step > 1`) is also declined unless `stop` is a constant no larger
+than `INT64_MAX - (step - 1)`: the retained `scf.for` computes `iv + step` after its last
+iteration, and that update can overshoot `stop` by up to `step - 1`, overflowing the signed index.
+`pl.pipeline(INT64_MAX - 4, INT64_MAX, 3, stage=3)` is the shape this closes. `step == 1` cannot
+overshoot, so it keeps a runtime `stop`. Note that the counter form loses the `kDisjoint` inference for an
+`(iv + c) % N`-style pair, because the constant peel sits above the division and the two sides
+end up with different symbols; that degrades to `kUnknown`, which the callers treat
+conservatively (the dependency is kept), never to a wrong answer.
 
 **Why the slots must fit on chip.** The declared slots are **pinned**: `InitMemRef`
 sizes the allocation at `F * slot_size` and ptoas may not reuse any of it, so this pass

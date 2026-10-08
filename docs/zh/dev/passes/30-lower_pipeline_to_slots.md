@@ -88,7 +88,7 @@ codegen 对无法描述的 region 是**硬拒**而非降级，因为退回逐 sl
 | 静态 valid shape | 一个 region 为其所有 slot 声明唯一的静态 extent |
 | 未被带入 phi | 被 yield 的 tile，或被用作嵌套循环 `init_values` 的 tile，都会让那个 phi 共享它的 MemRef。两者殊途同归——前者经由 `YieldStmt`，后者经由 `IterArg::initValue_`。判定基于**别名根**：`InitMemRef` 会让裸的 `a = b` tile 拷贝、以及 view / 原地算子的结果共享同一个 MemRef，因此 yield 一个别名与直接 yield 原 tile 一样会把槽位带进 phi |
 | 未被 view / 原地 op 消费 | 这类结果**就是**其源的缓冲，会落到同一分配上却带着不同的 `tile_buf` 类型 |
-| `step == 1` 且 `start % F == 0` | 见下 |
+| 常量 `step > 0`、常量 `start` | 见下 |
 | 没有被拒绝的外层 pipeline 循环 | 见下 |
 | slot 放得进该内存空间 | 见下 |
 
@@ -100,7 +100,24 @@ shape、phi、view / 原地算子）只对**真正想要 slot** 的 load 生效�
 `pl.pipeline(stage=F)` 所要求的按 stage 私有缓冲就被静默丢失了。只有作者已绑定的 tile 会被跳过
 而不影响整个循环——因为为它拒绝循环反而会把该声明推上复制路径，而复制路径会拒绝它。
 
-**为什么 slot 索引必须字面上是 `iv % F`。** ptoas 依据 slot 索引的**仿射形式**来判定哪些访问共享一个 slot，而这个匹配正是轮转拿到 per-slot 动态 event id 的依据——喂给它一个折叠后的字节偏移会让分析失效。一般形式 `((iv - start) / step) % F` 必须物化为中间 SSA 值，有丢掉本变换赖以生效的那个分析的风险。索引无法直接写成该形式的循环一律留给复制路径。
+**为什么 slot 索引在能写成 `iv % F` 时就是它，否则是 `((iv - start) / step) % F`。**
+ptoas 的 slot 计数读取 `pto.multi_tile_get` 携带的那个值，并围绕 `(symbol + offset) mod N`
+推理；它需要的是两处访问共享该 symbol 的**同一性**，而不是表达式具有某种特定形状。因此两种
+形式都合格，具体发出哪一种取决于归纳变量**是否就是**轮转计数器：
+
+- `step == 1` 且 `start` 对齐——是，所以 slot 字面上就是 `iv % F`。
+- 其他任何常量 `step`——不是（`iv` 取 `start + j*step`），所以 slot 是
+  `((iv - start) / step) % F`。该除法按构造恰好整除，因此这仍然是对**单个** SSA 值取余，
+  而绝不是被折叠的字节偏移。
+
+运行期的 `step` 或 `start` 仍然会被拒绝：此时 slot 会依赖分析无法定界的一个值。带步长的循环
+（`step > 1`）还要求 `stop` 为常量且不超过 `INT64_MAX - (step - 1)`，否则同样会被拒绝：保留下来的
+`scf.for` 会在最后一次迭代之后计算 `iv + step`，该更新最多可能越过 `stop` 共 `step - 1`，从而使有符号
+index 溢出。`pl.pipeline(INT64_MAX - 4, INT64_MAX, 3, stage=3)` 就是被堵住的形态。`step == 1` 不会越过
+`stop`，因此仍允许运行期 `stop`。
+注意计数器形式会丢掉 `(iv + c) % N` 这类配对的 `kDisjoint` 推断，因为常量剥离位于除法
+**之上**，两侧最终得到不同的 symbol；这只会退化为 `kUnknown`——调用方按保守方式处理
+（保留依赖），而不会给出错误答案。
 
 **为什么 slot 必须放得下。** 声明出来的 slot 是**钉住**的：`InitMemRef` 按 `F * slot_size`
 给出分配，ptoas 不得复用其中任何一部分，因此这些字节由本 pass 直接负责。否则一个有多个合格 load
