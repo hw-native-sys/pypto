@@ -376,7 +376,7 @@ jobs:
             --env GIT_CONFIG_KEY_0=safe.directory \
             --env GIT_CONFIG_VALUE_0=/workspace \
             "$CODEX_REVIEW_IMAGE" \
-            --model gpt-6-sol \
+            --model gpt-6.1-sol \
             --config 'model_reasoning_effort="high"' \
             --config 'sqlite_home="/codex-state"' \
             --sandbox read-only \
@@ -527,7 +527,7 @@ jobs:
             ALL_PROXY=http://127.0.0.1:7895 \
             NO_PROXY=localhost,127.0.0.1,::1 \
             codex \
-              --model gpt-6-sol \
+              --model gpt-6.1-sol \
               --config 'model_reasoning_effort="none"' \
               --sandbox read-only \
               --ask-for-approval never \
