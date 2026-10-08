@@ -889,7 +889,11 @@ def _body_local_names(func: Any) -> set[str]:
     rule through ``_BodyTransformer._used_names``; keeping one definition here
     is what stops a folded value and the emitted source from disagreeing.
     """
-    definition = _get_func_def(func)
+    return _definition_local_names(_get_func_def(func))
+
+
+def _definition_local_names(definition: ast.FunctionDef) -> set[str]:
+    """Read local bindings without consulting mutable globals or closures."""
     local_names = {arg.arg for arg in ast.walk(definition.args) if isinstance(arg, ast.arg)}
     local_names.update(
         node.id
@@ -906,8 +910,17 @@ def _constant_dependency_names(func: Any) -> tuple[str, ...]:
     names resolve in the defining namespace independently of body locals.
     Decorators and defaults are already evaluated when the function is defined.
     """
-    definition = _get_func_def(func)
-    local_names = _body_local_names(func)
+    return _constant_names_in_definition(_get_func_def(func))
+
+
+@functools.lru_cache(maxsize=512)
+def _constant_names_in_definition(definition: ast.FunctionDef) -> tuple[str, ...]:
+    """Cache structure only; callers still resolve current values on every request.
+
+    Key on the read-only parsed definition, not a namespace snapshot. A newly
+    parsed/replaced definition gets its own entry, and retention is bounded.
+    """
+    local_names = _definition_local_names(definition)
     names = {
         node.id
         for statement in definition.body
@@ -1739,13 +1752,21 @@ def _extract_call_args_for_dep(
 
 def _dep_call_nodes(caller_func: Any, dep_call_name: str) -> list[ast.Call]:
     """Every call to ``dep_call_name`` in ``caller_func``'s body, in source order."""
-    func_def = _get_func_def(caller_func)
-    calls = [
-        node
-        for node in ast.walk(func_def)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == dep_call_name
-    ]
-    return sorted(calls, key=lambda call: (call.lineno, call.col_offset))
+    # Return a fresh list so a caller cannot modify the cached index.
+    return list(_calls_in_definition(_get_func_def(caller_func)).get(dep_call_name, ()))
+
+
+@functools.lru_cache(maxsize=512)
+def _calls_in_definition(definition: ast.FunctionDef) -> dict[str, tuple[ast.Call, ...]]:
+    """Index all direct call sites once per read-only parsed definition."""
+    calls: dict[str, list[ast.Call]] = {}
+    for node in ast.walk(definition):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            calls.setdefault(node.func.id, []).append(node)
+    return {
+        name: tuple(sorted(nodes, key=lambda call: (call.lineno, call.col_offset)))
+        for name, nodes in calls.items()
+    }
 
 
 def _fold_call_site_constant(

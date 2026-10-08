@@ -21,6 +21,7 @@ import pypto.language.distributed as pld
 import pytest
 from pypto.ir import OptimizationStrategy, PassManager
 from pypto.ir.compiled_program import CompiledProgram
+from pypto.jit import decorator
 from pypto.jit.decorator import (
     _SYNTHESIZED_DYN_PREFIX,
     JITFunction,
@@ -3709,6 +3710,56 @@ class TestRuntimeSizedLocalExtents:
         assert isinstance(dim, DynDim)
         assert dim.name == "M"
         assert not dim.synthesized
+
+
+def test_structural_analysis_reuses_ast_without_rescanning(monkeypatch):
+    """Warm source queries must not walk an unchanged AST for each dependency."""
+    definition = ast.parse(
+        "def entry(x: 'Tensor[ROWS]'):\n    local = first(x, SCALE)\n    return second(local, SHIFT)\n"
+    ).body[0]
+    monkeypatch.setattr(decorator, "_get_func_def", lambda _: definition)
+    func = object()
+    names = decorator._constant_dependency_names(func)
+    first = decorator._dep_call_nodes(func, "first")
+    assert set(names) == {"first", "second", "SCALE", "SHIFT", "Tensor", "ROWS"}
+    assert len(first) == 1
+
+    def unexpected_walk(_):
+        pytest.fail("An unchanged function's structural queries rescanned its AST")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ast, "walk", unexpected_walk)
+        assert decorator._constant_dependency_names(func) == names
+        assert decorator._dep_call_nodes(func, "first") == first
+        assert len(decorator._dep_call_nodes(func, "second")) == 1
+        assert decorator._dep_call_nodes(func, "missing") == []
+
+
+def test_structural_analysis_follows_replaced_definition(monkeypatch):
+    """Replacing the parsed definition cannot reuse the old source structure."""
+    func = object()
+    original = ast.parse("def entry(x): return first(x, OLD)").body[0]
+    replacement = ast.parse("def entry(x): return second(x, NEW)").body[0]
+    monkeypatch.setattr(decorator, "_get_func_def", lambda _: original)
+    assert decorator._constant_dependency_names(func) == ("OLD", "first")
+    assert len(decorator._dep_call_nodes(func, "first")) == 1
+    monkeypatch.setattr(decorator, "_get_func_def", lambda _: replacement)
+    assert decorator._constant_dependency_names(func) == ("NEW", "second")
+    assert decorator._dep_call_nodes(func, "first") == []
+    assert len(decorator._dep_call_nodes(func, "second")) == 1
+
+
+def test_cached_call_sites_preserve_order_and_list_isolation(monkeypatch):
+    """Call-site order is lexical, and mutating a result cannot poison the cache."""
+    definition = ast.parse(
+        "def entry(x):\n    first(first(x))\n    obj.first(x)\n    return first(x)\n"
+    ).body[0]
+    monkeypatch.setattr(decorator, "_get_func_def", lambda _: definition)
+    func = object()
+    calls = decorator._dep_call_nodes(func, "first")
+    assert [(node.lineno, node.col_offset) for node in calls] == [(2, 4), (2, 10), (4, 11)]
+    calls.clear()
+    assert len(decorator._dep_call_nodes(func, "first")) == 3
 
 
 if __name__ == "__main__":
