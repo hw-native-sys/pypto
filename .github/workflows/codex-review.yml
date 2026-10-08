@@ -528,7 +528,7 @@ jobs:
             NO_PROXY=localhost,127.0.0.1,::1 \
             codex \
               --model gpt-6.1-sol \
-              --config 'model_reasoning_effort="none"' \
+              --config 'model_reasoning_effort="low"' \
               --sandbox read-only \
               --ask-for-approval never \
               exec --skip-git-repo-check \
