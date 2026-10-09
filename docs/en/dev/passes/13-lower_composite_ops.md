@@ -268,15 +268,16 @@ Compared to the original pull-based allgather (4-arg with a separate `out` tenso
 
 ### `pld.tensor.reduce_scatter`
 
-Decomposes into the same phase shape as `allreduce`'s rectangle path:
+`target` has shape `[NR, SIZE]`; each rank stages all `NR` chunks before the call. After the call, rank `r`'s row `[r, 0:SIZE]` holds the element-wise reduction of chunk `r` across all ranks (Sum/Max/Min/Prod by `ReduceOp`).
 
-- Phase 2a/2b: ready barrier (generation 1)
-- Phase 3: for each peer, `remote_load` chunk `r` from peer `p` and accumulate into a local scratch with the `ReduceOp`-matching tile op (`tile.add` / `tile.maximum` / `tile.minimum` / `tile.mul`)
-- Phase 3.5a/3.5b: post-reduce barrier (generation 2)
-- Phase 4: `tile.store` the reduced chunk `r` back into `target[r, 0:SIZE]`
-- Epilogue: subtract 2 from every non-self cell
+The rule emits one of two schedules, selected by the extent:
 
-`target` has shape `[NR, SIZE]`; each rank stages all `NR` chunks before the call. After the call, rank `r`'s row `[r, 0:SIZE]` holds the element-wise reduction of chunk `r` across all ranks (Sum/Max/Min/Prod by `ReduceOp`). The post-reduce barrier is required for the same WAR reason as `allreduce`.
+- **Single tile** — a static `SIZE` of at most one 16-KiB chunk keeps the original rectangle-path recipe: ready barrier (generation 1), then for each peer `remote_load` chunk `r` and accumulate with the `ReduceOp`-matching tile op (`tile.add` / `tile.maximum` / `tile.minimum` / `tile.mul`), post-reduce barrier (generation 2), `tile.store` the reduced chunk back into `target[r, 0:SIZE]`, and an epilogue that subtracts 2 from every non-self cell. The post-reduce barrier is required for the same WAR reason as `allreduce`.
+- **Chunked** — anything larger, or a symbolic `SIZE`, walks that same row in UB-sized chunks. One ready barrier (generation 1) covers the whole call; each chunk then takes its own read-complete barrier on generation `1 + chunk_index`, so no rank overwrites chunk `k` of its row before every peer has read it. A chunk's physical width is the selected static width and its `valid_shape` is `min(chunk_cols, SIZE - offset)`: the ragged final chunk is zero-filled before reduction (`tile.fillpad_inplace`) and narrowed again before store (`tile.set_validshape`), so it neither reads nor stores past the logical extent. The epilogue subtracts `1 + ceil(SIZE / chunk_cols)` from every non-self cell, built as an IR expression because `SIZE` may be a runtime scalar.
+
+Chunking is what makes a large or symbolic `SIZE` expressible at all. The single-tile form allocates the whole row as one VEC tile, which overflows UB for a real payload (one FP32 row is 20 KiB at `D = 5120`) and is rejected by PTOAS whenever the row's byte width is not 32-byte aligned.
+
+A symbolic `SIZE` must be runtime-bound by a kernel scalar, loop variable, or physical tensor-shape parameter; a type-metadata-only symbol is rejected during PTO codegen, on the same terms as mesh allreduce.
 
 All four `ReduceOp`s are supported — `kSum`, `kMax`, `kMin`, and `kProd` — routed through the shared `Reduce()` helper, the same dispatch the allreduce rules use.
 
