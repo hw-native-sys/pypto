@@ -42,6 +42,7 @@ for i in pl.unroll(0, 6, 2):
 | `start`, `stop`, `step` must be integer constants | Values needed at compile time |
 | `step` must be non-zero | Prevents infinite loops |
 | Input Unroll loops must have no SSA `iter_args` | This pass expands non-SSA bodies; run it before `ConvertToSSA` |
+| trip count must be ≤ 1024 (`kMaxUnrollIterations`) | Caps compile-time expansion — a larger trip count raises `ValueError`; restructure the loop or use `pl.range()` |
 
 The IR can nevertheless represent `ForKind.Unroll` with `iter_args`, for example
 when `ConvertToSSA` is run directly on an accumulator loop. Printer and parser

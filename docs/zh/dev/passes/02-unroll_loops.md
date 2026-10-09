@@ -42,6 +42,7 @@ for i in pl.unroll(0, 6, 2):
 | `start`、`stop`、`step` 必须为整数常量 | 编译时需要确定值 |
 | `step` 不能为零 | 防止无限循环 |
 | 输入 Unroll 循环不能带 SSA `iter_args` | 此 Pass 展开非 SSA 循环体，必须先于 `ConvertToSSA` 运行 |
+| 行程数（trip count）必须 ≤ 1024（`kMaxUnrollIterations`） | 限制编译期展开规模 —— 超出会抛出 `ValueError`；请重构循环或改用 `pl.range()` |
 
 IR 仍可表示带 `iter_args` 的 `ForKind.Unroll`，例如直接对累加器循环运行
 `ConvertToSSA` 时会产生该过渡形式。打印器和解析器通过

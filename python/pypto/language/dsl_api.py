@@ -330,6 +330,10 @@ def unroll(
     UnrollLoops requires non-SSA input: in executable kernels use ordinary
     assignments and run UnrollLoops before ConvertToSSA.
 
+    The trip count is capped at 1024 iterations by the ``UnrollLoops`` pass
+    (``kMaxUnrollIterations``); a larger loop raises ``ValueError`` — use
+    ``range()`` (a device-side loop) for larger trip counts.
+
     Args:
         *args: Positional arguments (stop) or (start, stop) or (start, stop, step).
             Each argument must be an int literal (compile-time constant).
