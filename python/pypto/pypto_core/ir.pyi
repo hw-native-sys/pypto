@@ -3490,7 +3490,7 @@ class LaneInvariantArg(enum.Enum):
 
     Declared only for the arguments an operator's own ``f_deduce_type`` cannot
     speak about; ``LowerAutoVectorSplit`` decides every other operand by
-    re-deducing the halved call. See ``docs/en/dev/passes/22-lower_auto_vector_split.md``.
+    re-deducing the halved call. See ``docs/en/dev/passes/23-lower_auto_vector_split.md``.
     """
 
     Scratch = ...

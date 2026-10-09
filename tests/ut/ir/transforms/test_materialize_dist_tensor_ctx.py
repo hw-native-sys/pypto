@@ -91,7 +91,7 @@ def _apply(program: ir.Program) -> ir.Program:
 
 
 def _derive_and_materialize(program: ir.Program) -> ir.Program:
-    """DeriveCallDirections (pass 41) then MaterializeDistTensorCtx (pass 47).
+    """DeriveCallDirections (pass 43) then MaterializeDistTensorCtx (pass 49).
 
     Pass 40 is what stamps ``arg_directions`` on each call, so running it first
     lets a DSL-authored ``Before`` reach pass 46 in the shape the pipeline

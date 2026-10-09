@@ -294,8 +294,13 @@ void OpRegistryEntry::ValidateCall(const std::vector<ExprPtr>& args, const TypeP
 
 void ValidateKwargs(const std::vector<std::pair<std::string, std::any>>& kwargs,
                     const std::unordered_map<std::string, std::type_index>& allowed_kwargs,
-                    const std::string& op_name) {
+                    const std::string& op_name,
+                    const std::unordered_map<std::string, std::string>* rejected_kwargs) {
   for (const auto& [key, value] : kwargs) {
+    if (rejected_kwargs) {
+      auto rejected = rejected_kwargs->find(key);
+      if (rejected != rejected_kwargs->end()) throw ValueError(rejected->second);
+    }
     auto it = allowed_kwargs.find(key);
     if (it == allowed_kwargs.end()) {
       throw ValueError("Unknown kwarg '" + key + "' for operator '" + op_name + "'");
@@ -396,8 +401,9 @@ TypePtr OpRegistry::ResolveAndValidateCallType(const OpRegistryEntry& entry, con
   try {
     if (!kwargs.empty()) {
       const auto& allowed_kwargs = op->GetAttrs();
-      if (!allowed_kwargs.empty() || entry.GetIRStage() == OpIRStage::Buffer) {
-        ValidateKwargs(kwargs, allowed_kwargs, op_name);
+      const auto& rejected_kwargs = entry.GetRejectedKwargs();
+      if (!allowed_kwargs.empty() || !rejected_kwargs.empty() || entry.GetIRStage() == OpIRStage::Buffer) {
+        ValidateKwargs(kwargs, allowed_kwargs, op_name, &rejected_kwargs);
       }
     }
 

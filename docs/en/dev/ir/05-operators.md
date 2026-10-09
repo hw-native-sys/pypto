@@ -150,6 +150,7 @@ auto dynamic_dim = make_int(kDynamicDim);
 | `add_argument(name, desc)` | Positional Expr argument | `.add_argument("lhs", "Left tensor")` |
 | `no_argument()` | No arguments (sync ops) | `.no_argument()` |
 | `set_attr<T>(name)` | Kwarg schema (T: bool, int, DataType, etc.) | `.set_attr<bool>("a_trans")` |
+| `reject_kwarg(name, msg)` | Reject a retired kwarg with an actionable message instead of "Unknown kwarg" | `.reject_kwarg("core_num", "pass it as the 6th operand")` |
 | `f_deduce_type(fn)` | Type deduction function | `.f_deduce_type(DeduceAddType)` |
 | `set_core_affinity(a)` | Which core executes the op (**placement**) | `.set_core_affinity(core_affinity::CoreAffinity::VECTOR)` |
 | `set_no_duplicate()` | Op must not run on a second core (**replication**) | `.set_no_duplicate()` |
@@ -312,7 +313,7 @@ yields no value — no phi is materialized on the Acc tile.
 "Literal" covers **both** spellings a constant predicate arrives in: a DSL
 `init_cond=True`/`False` reaches the emitter as a BOOL-typed `ConstInt`, while a
 predicate an earlier pass folded reaches it as a `ConstBool` — which is what the
-generated `ko == 0` becomes when [`LowerPipelineLoops`](../passes/31-lower_pipeline_loops.md)
+generated `ko == 0` becomes when [`LowerPipelineLoops`](../passes/32-lower_pipeline_loops.md)
 replicates the K-loop *and* the enclosing loop is eliminated, so each replica's
 index is a literal. Both pick an arm outright, and an emitter that folded only
 one of the two would double the MADs of every K block it missed.

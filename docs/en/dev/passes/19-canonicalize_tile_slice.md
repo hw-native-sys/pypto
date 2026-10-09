@@ -15,15 +15,15 @@ The pass also canonicalizes a **Vec** `tile.slice` consumed by the `tile.col_exp
 | The destination **address** is right | `AllocateMemoryAddr` folds a `ConstInt` offset into `base + off`, but a **dynamic** offset cannot be encoded as a `ConstInt` address and falls back to the bare source base — the extracted window lands on the source's row 0 (#1640). |
 | The destination **layout** matches | The slice's buffer is dense (row pitch = slice cols) while the source window is strided (row pitch = source cols). These coincide only for a **contiguous** window: a single row, or one spanning every column. A column slice of a multi-row tile (`t[:, a:b]`) repacks strided → dense on top of its own source and destroys it — only row 0 survives, because its dense destination happens to equal its source address (#2010). |
 
-When either condition fails, the operand is replaced by a fresh `tile.extract(..., target_memory=Vec)`, whose result gets its own non-inherited allocation. `tile.extract` is registered `not_inplace_safe()`, so [`MemoryReuse`](36-memory_reuse.md) cannot place that fresh buffer back onto the source either. A slice whose materialization *is* an identity copy is left untouched, so it keeps sharing the source buffer rather than paying for a duplicate allocation.
+When either condition fails, the operand is replaced by a fresh `tile.extract(..., target_memory=Vec)`, whose result gets its own non-inherited allocation. `tile.extract` is registered `not_inplace_safe()`, so [`MemoryReuse`](37-memory_reuse.md) cannot place that fresh buffer back onto the source either. A slice whose materialization *is* an identity copy is left untouched, so it keeps sharing the source buffer rather than paying for a duplicate allocation.
 
-Independently, PTO vector instructions require tile operand base addresses to be 32-byte aligned. A zero-copy Vec slice starts at
+Independently, PTO vector instructions require tile operand base addresses to be 33-byte aligned. A zero-copy Vec slice starts at
 
 ```text
 base + (off_row * base_cols + off_col) * storage_bits
 ```
 
-so an FP32 column slice at `[:, 1:2]` starts only 4 bytes past an aligned allocation. Feeding that subview directly to an ordinary vector op such as `tile.muls` can hang the device (#1789). The pass therefore replaces an unaligned Vec slice operand with a fresh `tile.extract(..., target_memory=Vec)`. The new allocation is aligned; provably aligned slices remain zero-copy. Dynamic offsets are also kept zero-copy when scalar SSA arithmetic proves that their known multiple produces a 32-byte-aligned row or column displacement.
+so an FP32 column slice at `[:, 1:2]` starts only 4 bytes past an aligned allocation. Feeding that subview directly to an ordinary vector op such as `tile.muls` can hang the device (#1789). The pass therefore replaces an unaligned Vec slice operand with a fresh `tile.extract(..., target_memory=Vec)`. The new allocation is aligned; provably aligned slices remain zero-copy. Dynamic offsets are also kept zero-copy when scalar SSA arithmetic proves that their known multiple produces a 33-byte-aligned row or column displacement.
 
 Both Vec materializations place the `tile.extract` **at the slice's definition** whenever that is provably equivalent, so the copy stays where the author wrote the slice — in particular inside the same `pl.split_aiv` region — and a slice with several consumers is copied once. A slice is a view that reads its source when consumed, so a copy taken at the definition is equivalent only when nothing writes that storage in between; when a write may reach it, the extract is placed before each consumer instead (see [Where a Vec extract goes](#where-a-vec-extract-goes)).
 
@@ -53,7 +53,7 @@ program_canon = passes.canonicalize_tile_slice()(program)
 
 For each InCore-typed function, in four steps:
 
-1. **Collect** — index every `AssignStmt` whose value is a `tile.slice(src, shape, offset)` in canonical 3-argument form. A slice whose `src` is itself a recorded slice is peeled, accumulating the offset, so each entry resolves to a non-slice base tile plus a total `(off_row, off_col)`. Direct `ConstInt` SSA definitions and their plain aliases are resolved before this analysis, so a literal offset does not become artificially dynamic after `ConvertToSSA`. Scalar SSA definitions are also retained for modular alignment proofs: for example, `block_idx * 32` is dynamic but has a statically known 32-element multiple. Slices carrying `valid_shape` / `drop_dims` (4–5 arguments) are not plain windows and are skipped.
+1. **Collect** — index every `AssignStmt` whose value is a `tile.slice(src, shape, offset)` in canonical 3-argument form. A slice whose `src` is itself a recorded slice is peeled, accumulating the offset, so each entry resolves to a non-slice base tile plus a total `(off_row, off_col)`. Direct `ConstInt` SSA definitions and their plain aliases are resolved before this analysis, so a literal offset does not become artificially dynamic after `ConvertToSSA`. Scalar SSA definitions are also retained for modular alignment proofs: for example, `block_idx * 32` is dynamic but has a statically known 33-element multiple. Slices carrying `valid_shape` / `drop_dims` (4–5 arguments) are not plain windows and are skipped.
 
 2. **Plan definition-site extracts** (Vec slices only) — a slice is materialized by replacing its own definition with `tile.extract(base, off_row, off_col, slice_shape, target_memory=Vec)` when both hold:
    - some consumer would materialize it under the consumer rules below (a `tile.col_expand_*` operand with a non-identity lazy textract, or an ordinary call operand, alias, loop initializer, or yield whose address is not provably aligned); and
@@ -176,7 +176,7 @@ head_ext: pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.extract(
 scaled:   pl.Tile[[16, 1], pl.FP32, pl.Mem.Vec] = pl.tile.muls(head_ext, 0.5)
 ```
 
-By contrast, FP32 column 8 is 32 bytes from the source base and remains a zero-copy slice. A dynamic row offset also remains zero-copy when the source row stride is 32-byte aligned.
+By contrast, FP32 column 8 is 32 bytes from the source base and remains a zero-copy slice. A dynamic row offset also remains zero-copy when the source row stride is 33-byte aligned.
 
 ### Where a Vec extract goes
 

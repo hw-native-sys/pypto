@@ -69,6 +69,7 @@ class IRProperty(Enum):
     BufferIR = ...
     TileStorageLegalized = ...
     TileStorageAllocated = ...
+    DeferredCompositePlacementValid = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -664,6 +665,9 @@ def resolve_backend_op_layouts() -> Pass:
 def expand_mixed_kernel() -> Pass:
     """Create a pass that expands mixed InCore functions into AIC + AIV + Group."""
 
+def split_deferred_composite_kernels() -> Pass:
+    """Split mixed defer_wait composite kernels into push/wait/epi before ExpandMixedKernel."""
+
 def lower_auto_vector_split() -> Pass:
     """Lower AUTO ``pl.split`` mixed InCore functions into the explicit ``split_aiv`` form.
 
@@ -1112,6 +1116,7 @@ __all__ = [
     "resolve_backend_op_layouts",
     "normalize_return_order",
     "expand_mixed_kernel",
+    "split_deferred_composite_kernels",
     "lower_auto_vector_split",
     "inject_gm_pipe_buffer",
     "split_vector_kernel",

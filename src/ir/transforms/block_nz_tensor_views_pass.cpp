@@ -32,7 +32,7 @@
  *
  *   Phase 1 — every TensorType tagged ``TensorLayout::NZ`` gets its shape
  *             replaced by ``BlockNzShape``. The stride slot is left empty for
- *             ``MaterializeTensorStrides`` (pass 33) to fill; because a blocked
+ *             ``MaterializeTensorStrides`` (pass 34) to fill; because a blocked
  *             NZ shape's row-major strides *are* pto-isa's NZ strides, that
  *             pass needs no NZ-specific rule.
  *

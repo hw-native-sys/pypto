@@ -1,0 +1,197 @@
+# MaterializeCommDomainScopes Pass
+
+## Overview
+
+`MaterializeCommDomainScopes` walks each host-orchestration function and assembles the
+host-side metadata that the distributed runtime needs in order to size and
+populate per-rank communication windows. It is the structural analogue of
+[`InitMemRef`](35-init_memref.md): it traces an allocation through to its
+consumption points, constructs a back-reference object, and threads it onto
+the IR types so downstream codegen has O(1) access.
+
+| Aspect | `MemRef` side | `WindowBuffer` side |
+| ------ | ------------- | ------------------- |
+| Allocation op | `tile.alloc(memory_space, size_in_bytes)` | `pld.tensor.alloc_window_buffer(size_in_bytes)` |
+| Assignment LHS at parse time | `Var(PtrType)` | `Var(PtrType)` (same singleton) |
+| Wrapper Var subclass | `MemRef` | `WindowBuffer` |
+| Wrapper's SSA-edge type | `MemRefType` (singleton) | `WindowBufferType` (singleton) |
+| Built by | `InitMemRef` | **`MaterializeCommDomainScopes`** (this pass) |
+| Threaded back onto | `TensorType.memref_` | `DistributedTensorType.window_buffer_` |
+| IR-level registry | `Program.functions_` (alloc stmts) | `CommDomainScopeStmt` wrapping each host_orch body (one per inferred comm domain) |
+
+## Position in the pipeline
+
+```text
+... -> ExpandManualPhaseFence -> SynthesizeAllReduceSignals -> MaterializeCommDomainScopes -> LowerHostTensorCollectives -> MaterializeDistTensorCtx -> Simplify (final)
+```
+
+The pass runs near the end of the default pipeline, immediately before
+[`LowerHostTensorCollectives`](48-lower_host_tensor_collectives.md) and the final
+`Simplify`. None of the intervening passes between `InlineFunctions` and here
+touches the host_orch alloc/window/dispatch chain: host_orch is never
+tile-lowered, and L2 (chip-level) orchestrations are never inlined into L3, so
+the alloc / view / dispatch sites this pass needs are still discoverable. Running
+late keeps the producing IR fully canonicalised before the descriptor analysis
+kicks in, and any constant folding that the trailing `Simplify` does on the
+collected sizes is applied uniformly.
+
+## Algorithm
+
+For every host-orchestration function (`Function::level_ == Level::HOST` and
+`Function::role_ == Role::Orchestrator`, regardless of `func_type_`):
+
+1. **Collect allocations.** Find every `AssignStmt` whose RHS is a
+   `pld.tensor.alloc_window_buffer(size, *, name)` Call. Record `(ptr_var, size_expr,
+   name, span, call)`.
+
+2. **Collect views.** For every `AssignStmt` whose RHS is a
+   `pld.tensor.window(ptr_var, [shape], *, dtype)` Call referencing a recorded
+   `ptr_var`, record the binding `view_var → alloc`.
+
+3. **Scan dispatches.** Walk the body with a stack of enclosing `ForStmt`s.
+   For every Call whose `op_` is a `GlobalVar` resolving to a chip-level
+   orchestration, read `attrs["device"]` and infer a **device descriptor**
+   from the device expression in the current loop context:
+
+   | `device=` shape | Descriptor |
+   | --------------- | ---------- |
+   | `ConstInt(N)` | `subset = {N}` |
+   | `IterArg of for r in pl.range(pld.system.world_size())` | `kAll` |
+   | `IterArg of for r in pl.range(ConstInt(N))` | `subset = {0, …, N − 1}` |
+   | other | `pypto::ValueError` |
+
+   Every positional dispatch arg that is a recorded view Var contributes that
+   descriptor to its underlying allocation.
+
+4. **Merge descriptors.** Per allocation, fold every recorded descriptor:
+   any `kAll` ⇒ `kAll`; otherwise union the subsets. A host-level collective's
+   signal (and, for `pld.tensor.all_to_all_v`, its `recv_counts`) carries no
+   `device=` of its own, so it inherits device coverage from the collective's
+   paired data/target allocation instead — a call may register more than one
+   such pairing sharing the same data allocation (`all_to_all_v` registers two:
+   one for `signal`, one for `recv_counts`).
+
+5. **Materialise `WindowBuffer`s.** For each allocation construct
+   `WindowBuffer(base = ptr_var, size = size_expr, load_from_host = false,
+   store_to_host = false)`. The `Var::name_hint_` is inherited from
+   `ptr_var->name_hint_`. (Host-staging flags are placeholders for N4+.)
+
+6. **Rewrite view types** *(host_orch only)*. For every view binding, mint a
+   fresh `Var` of the same `name_hint_` whose type is
+   `DistributedTensorType(shape, dtype, memref, tensor_view, wb)` and run
+   `Substitute` to swap every reference to the old view Var with the fresh
+   one. `Substitute` rewrites *references* only, so the Call that defines each
+   re-typed Var is then re-minted with the same `window_buffer_`-bearing type —
+   otherwise the assignment ends the pass with the back-reference on its LHS
+   and not on its RHS, violating
+   [`AssignTypeSymmetry`](99-verifier.md#built-in-rules). The re-mint only ever
+   *adds* the back-reference: it keeps the rebuilt type only when that type is
+   structurally equal to the Var's, so a genuine shape / dtype / view
+   disagreement is left for the verifier to report. Two `pld.tensor.window`
+   views over the same allocation share the same
+   `shared_ptr<const WindowBuffer>`. Chip-orch / InCore parameter types are
+   not touched.
+
+7. **Cluster into comm domains.** Walk the allocation list in source order;
+   append a slot to the first existing comm domain whose merged device
+   descriptor matches, or open a new one.
+
+8. **Wrap the body in scope statements.** Build a chain of nested
+   `CommDomainScopeStmt`s — one per comm domain, outer = first declared,
+   inner = last — and substitute it for the host_orch function body. Each
+   scope carries its `devices` list and its slot vector; `name_hint_` is
+   set to `"comm_d<n>"` so codegen emits the matching `__comm_d<n>` handle
+   variable verbatim.
+
+## Sanity checks
+
+The pass raises `pypto::ValueError` (carrying the alloc's span) if:
+
+- An allocation has no `pld.tensor.window` materialisation (dead alloc).
+- An allocation has at least one view but no chip-orch dispatch consumes it.
+- The `device=` expression on a dispatch is something other than `ConstInt`
+  or a recognised `pl.range` induction var.
+- Two allocations within the same comm domain share a `name_hint_` (the
+  parser already enforces global uniqueness; the pass re-asserts).
+- A `pld.tensor.all_to_all_v` call sits inside a `for`/`while` loop in a HOST
+  orchestrator — dynamic re-invocation needs loop-carried window lifetime
+  management this compiler does not model yet (the credit-based signal itself
+  is reusable across sequential calls); same restriction `LowerCompositeOps`
+  enforces on the InCore path.
+
+## Output invariants
+
+After the pass:
+
+- Every host_orch function whose body contains at least one alloc has its
+  body wrapped in a chain of nested `CommDomainScopeStmt`s (one per
+  inferred comm domain, outer = first declared, inner = last).
+  Allocation-free host_orchs are left unchanged.
+- Every `pld.tensor.window` result Var's type is a `DistributedTensorType` whose
+  `window_buffer_` field points to the corresponding `WindowBuffer`, and the
+  defining Call carries that same type — both sides of the assignment agree.
+- Every host-level `pld.tensor.allreduce` call has two positional arguments
+  after [`SynthesizeAllReduceSignals`](46-synthesize_allreduce_signals.md) runs.
+  For an omitted user signal, the second argument is a synthesized Var produced
+  by a preceding `pld.tensor.window` assignment.
+- `pld.tensor.window` views over the same allocation share the same
+  `shared_ptr<const WindowBuffer>` — pointer-equality is a load-bearing
+  invariant for downstream codegen.
+- Chip-orchestration and InCore parameter types remain `nullopt` on
+  `window_buffer_`. N7 codegen reads the back-reference at the *host_orch*
+  dispatch site and threads the matching `CommContext` pointer explicitly.
+
+## Text round-trip
+
+The ordinary authoring DSL continues to infer communication domains. Printed IR
+records the materialized state using private `pl._dump` spellings:
+
+- `comm_domain(name=..., devices=..., slots=[...], attrs={...})` preserves the
+  scope boundary, device list, ordered slots, and attributes.
+- `window_buffer("buf_window", base="buf", size=16, load_from_host=..., store_to_host=...)`
+  defines a slot; `window_ref("buf_window")` refers to that same object from tensor types.
+  The label is a text-format reference, not a device ID, slot index, or IR field.
+  Labels derive from the printed base variable; suffixes distinguish different
+  windows sharing that base. Earlier numeric IDs remain readable.
+- `alloc_window_buffer(size, name=...)` preserves the allocation's logical name
+  independently of an SSA-renamed result variable.
+- `call(op, args, result_type, kwargs=..., attrs=...)` restores a Call directly,
+  accepting any result type supported by the type parser. The printer uses it
+  for distributed calls whose recorded type must be preserved, including an
+  absent back-reference; inference can differ after a pass rewrites the operands.
+
+The parser records window descriptors before parsing the body and resolves them
+when their allocation and size expressions are available. Scope slots and tensor
+back-references share one reconstructed `WindowBuffer`. These spellings are IR
+text syntax, not operations that execute in a kernel.
+The descriptor's `base` names the allocation variable defined in the body;
+`window_buffer(...)` adds no allocation statement. Its `size` and the allocation
+Call's size argument are separate recorded IR fields and are both retained.
+Empty scopes print `pass`. Scalar attribute literals such as `-1` remain scalars;
+`pl.const(-1, pl.INDEX)` records an IR expression instead.
+
+For a self-contained program, `parse(python_print(program))` must be structurally
+equal to `program`, with equal structural hashes. No lowering pass is rerun by
+the parser or required from the caller. Statement fragments with references to
+absent definitions are outside this contract. Legacy informational
+`"window_buffer=<name>"` markers remain readable but do not encode a reference.
+
+## Pass properties
+
+| Field | Value |
+| ----- | ----- |
+| `required` | `{}` |
+| `produced` | `{IRProperty::CommDomainScopesMaterialized}` |
+| `invalidated` | `{}` |
+
+## Reference
+
+- Source: [src/ir/transforms/materialize_comm_domain_scopes_pass.cpp](../../../../src/ir/transforms/materialize_comm_domain_scopes_pass.cpp)
+- Header: [include/pypto/ir/transforms/passes.h](../../../../include/pypto/ir/transforms/passes.h)
+- Schema: [include/pypto/ir/program.h](../../../../include/pypto/ir/program.h)
+  defines `WindowBuffer`;
+  [include/pypto/ir/stmt.h](../../../../include/pypto/ir/stmt.h) defines
+  `CommDomainScopeStmt`.
+- DSL: [`pld.tensor.alloc_window_buffer`](../../../../python/pypto/language/distributed/op/tensor_ops.py),
+  [`pld.tensor.window`](../../../../python/pypto/language/distributed/op/tensor_ops.py),
+  [`pld.system.world_size`](../../../../python/pypto/language/distributed/op/system_ops.py).

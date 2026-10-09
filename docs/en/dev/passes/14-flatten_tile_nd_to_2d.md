@@ -58,7 +58,7 @@ Per-statement handling:
 | `tile.transpose` | Sole owner of `pto.ttrans` scratch materialization. Arrives 3-arg (input, axis1, axis2). **2D**: create one scratch tile (shape = SOURCE page, in the input's memory space) and emit the codegen-ready 4-arg `tile.transpose(in, a1, a2, scratch)`. **>2D** (last-two-axes swap): unroll into per-batch 2D transposes, with source-shaped `[A, B]` scratch views sliced from a padded `[batch*scratch_page_rows, B]` pool, then assemble into the merged 2D output. A batch-axis swap is a user error |
 | `tile.batch_matmul` | Expand to per-batch 2D `tile.matmul`, honoring batch broadcast. A b_trans/a_trans operand arrives as a zero-copy `tile.transpose_view` over a natural load (no transpose-at-load, no copy); the tile-level op carries no transpose semantic. Each operand is handled identically (see operand handling below). **When the result is itself a batched accumulator** (a downstream `tile.batch_matmul_acc` keeps writing it), the pages are written into ONE column-packed `Acc` tile with `tile.matmul_acc(window, lhs_b, rhs_b, init_cond=True)` instead — see [Batched accumulators pack along columns](#batched-accumulators-pack-along-columns) |
 | `tile.batch_matmul_acc` | Expand to per-batch 2D `tile.matmul_acc`, taking one window of the (already-flattened) accumulator per batch index: the **column** window `[0, b*N]` of an `[M, B*N]` tile when the chain is column-packed, the legacy **row** window `[b*M, 0]` of a `[B*M, N]` tile otherwise — see [Batched accumulators pack along columns](#batched-accumulators-pack-along-columns). Memory-space decisions the pass does not already state (Vec/Acc round-trips on a row-packed accumulator, retargetable producer promotion of an upstream `tile.create`, TileView refresh) are deferred to `InferTileMemorySpace` (pass 20) — flatten emits no inline `tile.move` |
-| `tile.reshape` / `tile.reinterpret_view` (>2D result) | Rewrite the literal target-shape operand to the merged 2D `[product(leading), last]` and re-deduce. These are the only tile ops whose result rank comes from a shape operand rather than from an operand's type, so the generic path below cannot lower them — it rebuilds the call with the *same* ND tuple and the rank>2 result survives the pass, to be typed from its first two dimensions by `ExtractTileTypeInfo` in PTO codegen. The collapse is exactly semantics-preserving here: a tile is one contiguous row-major run, so `[2, 8, 128]` and `[16, 128]` name the same elements in the same order. The 2D reshape that results is often the identity, which `FoldNoOpReshape` (pass 38) then removes. A safe batch-only reshape feeding `tile.batch_matmul` is peeled by the lowering instead (see above) and never reaches this branch |
+| `tile.reshape` / `tile.reinterpret_view` (>2D result) | Rewrite the literal target-shape operand to the merged 2D `[product(leading), last]` and re-deduce. These are the only tile ops whose result rank comes from a shape operand rather than from an operand's type, so the generic path below cannot lower them — it rebuilds the call with the *same* ND tuple and the rank>2 result survives the pass, to be typed from its first two dimensions by `ExtractTileTypeInfo` in PTO codegen. The collapse is exactly semantics-preserving here: a tile is one contiguous row-major run, so `[2, 8, 128]` and `[16, 128]` name the same elements in the same order. The 2D reshape that results is often the identity, which `FoldNoOpReshape` (pass 39) then removes. A safe batch-only reshape feeding `tile.batch_matmul` is peeled by the lowering instead (see above) and never reaches this branch |
 | Other tile ops (>2D) | Substitute vars, re-create with 2D types |
 | 1D/2D tile ops | Unchanged |
 
@@ -126,12 +126,12 @@ destination compactly from a bare pointer and carries no destination stride
 (hw-native-sys/pto-isa#253), so the row-packed `[B*M, N]` shape has no correct
 lowering at all: only the first 16 columns of each page would land right. That is
 the shape `CanonicalizeTileSlice` (pass 19) rejects; see
-[18-canonicalize_tile_slice.md](19-canonicalize_tile_slice.md).
+[19-canonicalize_tile_slice.md](19-canonicalize_tile_slice.md).
 
 A **column** window spans the parent's full row extent, so the window's own
 compact geometry and the parent's coincide and the discarded stride cannot
 matter. `GetSliceAccumulatorGeometry` gives exactly this shape its NZ-exact byte
-offset (see [33-init_memref.md](34-init_memref.md)).
+offset (see [35-init_memref.md](35-init_memref.md)).
 
 ### What changes on the producer
 

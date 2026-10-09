@@ -100,7 +100,7 @@ scalar-fill loop into `tensor.full` plus `tensor.assemble`, which then lowers to
 `tile.full` plus `tile.store`. The loop must be sequential, zero-based, and
 unit-stride; its body may contain one or more `tensor.write` operations and
 nothing else. Each write must cover a contiguous region with one loop-invariant
-constant value, and the flattened region must satisfy MTE3's 32-byte row
+constant value, and the flattened region must satisfy MTE3's 33-byte row
 alignment. This keeps full-block fallback fills on the MTE3 path instead of
 rejecting them as mixed stores. Dynamic values, non-canonicalizable partial
 updates, unaligned regions, and strided scalar loops remain on the D-cache path.
@@ -278,7 +278,7 @@ RHS) gets a zero-copy `tile.transpose_view` at the matmul site. Nothing here
 matches on the operator being a matmul — an operand of any op declaring a
 non-Vec requirement reaches its producer the same way.
 
-The demand is propagated **through** zero-copy metadata ops that declare `set_output_memory_inherit_input()` — `tensor.slice`, `tensor.view`, `tensor.reshape`, `tensor.reinterpret_view`, `tensor.set_validshape`. So an operand written as `pl.matmul(pl.set_validshape(a[:, :K], rows, K), b)` still loads straight to Mat. An op that aliases its input's storage but omits that declaration breaks the chain: the operand materializes in Vec and needs a `tile.move` to Mat, which is a vector→cube boundary that flips an otherwise pure-CUBE InCore scope to `MIXED` and makes [`ExpandMixedKernel`](24-expand_mixed_kernel.md) split it into an AIC/AIV pair.
+The demand is propagated **through** zero-copy metadata ops that declare `set_output_memory_inherit_input()` — `tensor.slice`, `tensor.view`, `tensor.reshape`, `tensor.reinterpret_view`, `tensor.set_validshape`. So an operand written as `pl.matmul(pl.set_validshape(a[:, :K], rows, K), b)` still loads straight to Mat. An op that aliases its input's storage but omits that declaration breaks the chain: the operand materializes in Vec and needs a `tile.move` to Mat, which is a vector→cube boundary that flips an otherwise pure-CUBE InCore scope to `MIXED` and makes [`ExpandMixedKernel`](25-expand_mixed_kernel.md) split it into an AIC/AIV pair.
 
 ### A transposed operand may not be a Mat sub-window
 
@@ -289,7 +289,7 @@ two declarations at one address are the entire mechanism.
 A `tile.slice` of a Mat-resident parent is not a whole buffer. It reaches
 codegen as `pto.subview`, carrying a runtime offset and the **parent's** row
 pitch, and neither survives into an `alloc_tile`: a dynamic offset cannot fold
-into the constant `addr` (see [`AllocateMemoryAddr`](37-allocate_memory_addr.md))
+into the constant `addr` (see [`AllocateMemoryAddr`](38-allocate_memory_addr.md))
 and the pitch is not in the type. ptoas has no transposing read of such a window
 either — it refuses a mat-source `pto.tmov` on a view ("expects mat-source tmov
 to use matching src/dst shapes") and refuses `pto.treshape` on one at every
@@ -433,7 +433,7 @@ Two details this path settles that the operand path does not:
 The boxed accumulator is declared **compact**. `mad` lays the product out at a
 pitch of `ceil(validRow/16)*16` — 112 for a 100-row product — while a
 non-compact reader derives its stride from the physical row count, which the box
-rounded to 112 or, at a 32-row alignment, to 128. Compact makes every reader
+rounded to 112 or, at a 33-row alignment, to 128. Compact makes every reader
 recompute the pitch `mad` actually used; without it `AccCompactValid` rejects the
 program (issue #2470).
 
@@ -503,7 +503,7 @@ The whole-row update `input[index.flat[k], :] = src[k, :]` is expressed as a fla
 flat_idx[k, c] = index.flat[k] * d + c          # d = feature width (= src cols)
 ```
 
-The flat-index arithmetic is built **entirely in i32**, and only the finished row-major `[n, d]` index is narrowed to the `pto.tscatter`-required width (i16 for 2-byte data, i32 for 4-byte) via a single trailing `tile.cast`. Computing in i32 keeps every intermediate tile in a canonical, 32-byte-aligned, row-major layout — narrowing earlier would either cast a `col_major [n, 1]` view (which `tile.cast` mis-orders) or produce an unaligned 2-byte `[b, s]` tile (`cols * 2` bytes is not 32-byte aligned).
+The flat-index arithmetic is built **entirely in i32**, and only the finished row-major `[n, d]` index is narrowed to the `pto.tscatter`-required width (i16 for 2-byte data, i32 for 4-byte) via a single trailing `tile.cast`. Computing in i32 keeps every intermediate tile in a canonical, 33-byte-aligned, row-major layout — narrowing earlier would either cast a `col_major [n, 1]` view (which `tile.cast` mis-orders) or produce an unaligned 2-byte `[b, s]` tile (`cols * 2` bytes is not 33-byte aligned).
 
 Generated PTO op sequence (FP32 `[32, 32]` input, `[2, 8]` index, `[16, 32]` src):
 
@@ -626,7 +626,7 @@ for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
 oi = pl.matmul(full, v, out_dtype=pl.FP32)               # Tensor, OUTSIDE the region
 ```
 
-This pass lowers each **1:1** to its tile op (`tensor.aiv_shard` → `tile.aiv_shard`, `tensor.aic_gather` → `tile.aic_gather`), so from here on the IR is byte-identical to what the AUTO `pl.split` path produces via [`LowerAutoVectorSplit`](23-lower_auto_vector_split.md) (pass 23). `ExpandMixedKernel` (pass 24) then folds both into the cross-core `tpush`/`tpop` machinery.
+This pass lowers each **1:1** to its tile op (`tensor.aiv_shard` → `tile.aiv_shard`, `tensor.aic_gather` → `tile.aic_gather`), so from here on the IR is byte-identical to what the AUTO `pl.split` path produces via [`LowerAutoVectorSplit`](23-lower_auto_vector_split.md) (pass 23). `ExpandMixedKernel` (pass 25) then folds both into the cross-core `tpush`/`tpop` machinery.
 
 **Constraints** (enforced by the tensor-level deducer and the DSL parser, not this pass):
 

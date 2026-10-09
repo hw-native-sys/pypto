@@ -629,6 +629,29 @@ class OpRegistryEntry {
     return *this;
   }
 
+  /**
+   * @brief Reject a kwarg with an operator-specific diagnostic
+   *
+   * For a kwarg that this operator once declared (or that callers commonly
+   * guess) and that must now be spelled another way, e.g. an argument that moved
+   * from a kwarg to a positional operand. `ValidateKwargs` reports `message`
+   * instead of the generic "Unknown kwarg" error, so the user is told how to fix
+   * the call. Registering a rejected key also turns kwarg validation on for an
+   * operator that declares no attrs, which `ValidateKwargs` otherwise skips.
+   *
+   * @param key The rejected kwarg key
+   * @param message Full diagnostic shown to the user (should say what to do instead)
+   * @return Reference to this entry for method chaining
+   */
+  inline OpRegistryEntry& reject_kwarg(const std::string& key, std::string message) {
+    rejected_kwargs_[key] = std::move(message);
+    return *this;
+  }
+
+  [[nodiscard]] const std::unordered_map<std::string, std::string>& GetRejectedKwargs() const {
+    return rejected_kwargs_;
+  }
+
   /// Set fixed output memory space (e.g., matmul -> Acc)
   inline OpRegistryEntry& set_output_memory(MemorySpace space) {
     EnsureMemorySpec();
@@ -1176,6 +1199,8 @@ class OpRegistryEntry {
   std::map<size_t, BufferResultSpec> buffer_results_;
   std::set<size_t> workspace_args_;          ///< Args written as scratch rather than as results
   std::optional<std::string> template_dir_;  ///< Package resource for builtin templates.
+  std::unordered_map<std::string, std::string>
+      rejected_kwargs_;  ///< Kwargs rejected with a custom diagnostic
 };
 
 /**
@@ -1400,12 +1425,15 @@ class OpRegistry {
  * @param kwargs The kwargs to validate
  * @param allowed_kwargs Map of allowed kwarg keys to expected types
  * @param op_name Operator name for error messages
- * @throws ValueError if unknown kwarg
+ * @param rejected_kwargs Optional map of kwarg keys to the diagnostic reported instead of the
+ *        generic "Unknown kwarg" error (see OpRegistryEntry::reject_kwarg)
+ * @throws ValueError if unknown or rejected kwarg
  * @throws TypeError if type mismatch
  */
 void ValidateKwargs(const std::vector<std::pair<std::string, std::any>>& kwargs,
                     const std::unordered_map<std::string, std::type_index>& allowed_kwargs,
-                    const std::string& op_name);
+                    const std::string& op_name,
+                    const std::unordered_map<std::string, std::string>* rejected_kwargs = nullptr);
 
 /**
  * @brief Read a required kwarg by key from a deducer kwargs list, throwing if absent.

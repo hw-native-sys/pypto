@@ -125,6 +125,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "TileStorageLegalized";
     case IRProperty::TileStorageAllocated:
       return "TileStorageAllocated";
+    case IRProperty::DeferredCompositePlacementValid:
+      return "DeferredCompositePlacementValid";
     default:
       return "Unknown";
   }
@@ -190,7 +192,8 @@ const IRPropertySet& GetVerifiedProperties() {
                                    IRProperty::FixpipeEpilogueValid,
                                    IRProperty::AccCompactValid,
                                    IRProperty::AtomicAddDtypeValid,
-                                   IRProperty::AccStorePhaseValid};
+                                   IRProperty::AccStorePhaseValid,
+                                   IRProperty::DeferredCompositePlacementValid};
   return props;
 }
 
@@ -214,12 +217,19 @@ VerificationLevel GetDefaultVerificationLevel() {
 }
 
 const IRPropertySet& GetStructuralProperties() {
-  static const IRPropertySet props{IRProperty::TypeChecked,         IRProperty::BreakContinueValid,
-                                   IRProperty::NoRedundantBlocks,   IRProperty::UseAfterDef,
-                                   IRProperty::OutParamNotShadowed, IRProperty::NoNestedInCore,
-                                   IRProperty::InOutUseValid,       IRProperty::PipelineLoopValid,
-                                   IRProperty::ArrayNotEscaped,     IRProperty::ManualDepsOnSubmitOnly,
-                                   IRProperty::AtomicAddDtypeValid, IRProperty::NoScalarKernelReturn};
+  static const IRPropertySet props{IRProperty::TypeChecked,
+                                   IRProperty::BreakContinueValid,
+                                   IRProperty::NoRedundantBlocks,
+                                   IRProperty::UseAfterDef,
+                                   IRProperty::OutParamNotShadowed,
+                                   IRProperty::NoNestedInCore,
+                                   IRProperty::InOutUseValid,
+                                   IRProperty::PipelineLoopValid,
+                                   IRProperty::ArrayNotEscaped,
+                                   IRProperty::ManualDepsOnSubmitOnly,
+                                   IRProperty::AtomicAddDtypeValid,
+                                   IRProperty::NoScalarKernelReturn,
+                                   IRProperty::DeferredCompositePlacementValid};
   return props;
 }
 

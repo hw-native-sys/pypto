@@ -148,7 +148,7 @@ Address emission depends only on the allocation operand; the legacy
 operands remain in their lexical scope. No logical `TileType` or `MemRef` is
 reconstructed, and no implicit tile allocation pass runs on this path. The
 pipeline with `enable_buffer_ir=True` converts Tile IR before emission through
-[LowerTileToBuffer](../passes/54-lower_tile_to_buffer.md).
+[LowerTileToBuffer](../passes/55-lower_tile_to_buffer.md).
 
 Static storage views use ordinary SSA alias edges in the same Buffer stage:
 
@@ -400,7 +400,7 @@ The packed canonical formulas (`BuildLogicalStridesFromLayout` in
   canonical for the carried layout.
 - **Explicit** — every dimension's stride is spelled out.
 
-The [`MaterializeTensorStrides`](../passes/33-materialize_tensor_strides.md)
+The [`MaterializeTensorStrides`](../passes/34-materialize_tensor_strides.md)
 pass rewrites every implicit form to its explicit packed canonical so
 codegen sees a single contract. The `TensorViewCanonical` `IRProperty` +
 verifier enforces this:

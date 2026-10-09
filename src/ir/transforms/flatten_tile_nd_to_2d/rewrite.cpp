@@ -204,7 +204,7 @@ VarPtr TryFoldNdAssembleOffset(const CallPtr& call, const AssignStmtPtr& assign,
  * exactly semantics-preserving for a reshape: a tile is one contiguous
  * row-major run, so `[2, 8, 128]` and `[16, 128]` name the same elements in the
  * same order. The 2D-target reshape that results is often the identity, which
- * `FoldNoOpReshape` (pass 38) then removes.
+ * `FoldNoOpReshape` (pass 39) then removes.
  *
  * A safe batch-only reshape feeding `tile.batch_matmul` is peeled by
  * `NormalizeBatchMatmulOperand` before this runs and never reaches here.

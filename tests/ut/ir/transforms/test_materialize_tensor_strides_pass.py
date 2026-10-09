@@ -543,7 +543,7 @@ def test_tuple_return_type_materialized():
     """Both elements of a Tuple return signature are DN-packed.
 
     ``[4, 8] -> [1, 4]`` and ``[2, 4, 8] -> [32, 1, 4]`` per the DN formula
-    (doc 32-materialize_tensor_strides.md "Stride Formulas").
+    (doc 34-materialize_tensor_strides.md "Stride Formulas").
     """
 
     @pl.program

@@ -48,7 +48,7 @@ batch 具化为 `1`。PTOAS 直接校验这个 arity——rank-4 的 view 会被
 
 因此一旦 shape 被分块，NZ 就是行主序家族的普通成员，
 `BuildLogicalStridesFromLayout` 通过与 ND 相同的 `BuildRowMajorStrides` 路径处理
-它。stride 由 `MaterializeTensorStrides`（pass 33）稍后填充；本 pass 只改写 shape。
+它。stride 由 `MaterializeTensorStrides`（pass 34）稍后填充；本 pass 只改写 shape。
 
 这修正了 RFC #1300 中"NZ 没有 logical-stride 表示"的结论——该结论对逻辑 2-D shape
 成立，对分块后的 rank-5 shape 不成立。
@@ -376,5 +376,5 @@ packer 负责生成 fractal 字节；此外还有切片用例分别钉住两个�
 ## 相关文档
 
 - [14-flatten_tile_nd_to_2d.md](14-flatten_tile_nd_to_2d.md) —— 对 NZ 源跳过 ND2NZ 窗口塌缩
-- [32-materialize_tensor_strides.md](33-materialize_tensor_strides.md) —— 填充分块 NZ stride
+- [34-materialize_tensor_strides.md](34-materialize_tensor_strides.md) —— 填充分块 NZ stride
 - [../ir/02-types.md](../ir/02-types.md) —— `TensorLayout` 与 `TensorView`

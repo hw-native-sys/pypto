@@ -913,7 +913,7 @@ void OpConversionRegistry::RegisterMemoryOps() {
               // The destination space is not decided yet (see above), so size the
               // tile against the largest on-chip buffer: anything over that cannot
               // fit anywhere and is worth catching early. The exact per-space check
-              // belongs to AllocateMemoryAddr (pass 37), once the space is known.
+              // belongs to AllocateMemoryAddr (pass 38), once the space is known.
               uint64_t mem_size = 0;
               for (MemorySpace space : {MemorySpace::Vec, MemorySpace::Mat, MemorySpace::Acc}) {
                 mem_size = std::max(mem_size, be->GetMemSize(space));

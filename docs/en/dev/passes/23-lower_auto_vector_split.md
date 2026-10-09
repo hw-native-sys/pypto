@@ -8,7 +8,7 @@ halves only the **vector sub-region** along the split axis, injects
 
 This is the **live auto-split lowering path**: it always runs, immediately
 before `ExpandMixedKernel`. After it runs, every split function reaches
-[`SplitVectorKernel`](26-split_vector_kernel.md) already `split_aiv`-marked,
+[`SplitVectorKernel`](27-split_vector_kernel.md) already `split_aiv`-marked,
 so that pass only stamps attributes (its split_aiv arm) — its former per-op
 halving driver was deleted, and the halving machinery now lives solely in
 `split_axis_utils`, shared by this pass.
@@ -374,7 +374,7 @@ The two vocabularies live on different ops:
 - **`tile.aiv_shard` / `tile.aic_gather` carry the MODE** (`0` / `1` / `2`). This
   pass stamps `int(mode)` — the author's axis, nothing more.
 - **`tile.tpush_*` / `tile.tpop_*` / `system.tfree_*` carry the CODE** (`0`..`4`),
-  chosen by [ExpandMixedKernel](24-expand_mixed_kernel.md) from that mode plus the
+  chosen by [ExpandMixedKernel](25-expand_mixed_kernel.md) from that mode plus the
   full-width tile's extents (`split_axis::ShardSplitCode`) when it folds the
   boundary into a transport pair. PTO codegen prints it verbatim as `{split = N}`.
 
@@ -514,7 +514,7 @@ halving — offsets (`AdjustOffsets`), per-lane valid extents
 (`LocalizeValidDimForSplit`), the shard's own type
 (`LocalizeShardValidForLane`) — while the physical box stays `ceil(box / 2)`, so
 buffers and slot sizes are unchanged. It is stamped on the boundary op as
-`lane_stride=S` so [ExpandMixedKernel](24-expand_mixed_kernel.md) derives the
+`lane_stride=S` so [ExpandMixedKernel](25-expand_mixed_kernel.md) derives the
 transport code from the same partition. A `tile.reshape` that migrates the split
 axis inside a rebalanced body is rejected: a migrated axis carries its own half,
 which cannot express a partition balanced on another axis.
@@ -1075,8 +1075,8 @@ end-to-end `pl.split` golden scenarios in
 
 - [`ResolveBackendOpLayouts`](22-resolve_backend_op_layouts.md) — runs
   immediately before.
-- [`ExpandMixedKernel`](24-expand_mixed_kernel.md) — runs immediately after;
+- [`ExpandMixedKernel`](25-expand_mixed_kernel.md) — runs immediately after;
   folds `tile.aiv_shard` / `tile.aic_gather` into split-stamped `tpush`/`tpop`.
-- [`SplitVectorKernel`](26-split_vector_kernel.md) — downstream; only stamps
+- [`SplitVectorKernel`](27-split_vector_kernel.md) — downstream; only stamps
   attrs for the `split_aiv` functions this pass produces, plus the no-split
   dual-AIV path.

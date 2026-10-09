@@ -435,8 +435,8 @@ inline constexpr const char* kAttrSpmdUnwrapped = "spmd_unwrapped";
  * vector sub-lanes of a mixed kernel.
  *
  * Value type: ``bool``. Written by ``LowerAutoVectorSplit`` (pass 23) and
- * ``SplitVectorKernel`` (pass 26) onto the AIV lane, and by
- * ``ExpandMixedKernel`` (pass 24) for the backend-inferred no-split case
+ * ``SplitVectorKernel`` (pass 27) onto the AIV lane, and by
+ * ``ExpandMixedKernel`` (pass 25) for the backend-inferred no-split case
  * (``BackendHandler::RequiresNoSplitDualAivDispatch``). Read by PTO codegen
  * (``PTOCodegen::IsDualAivDispatchFunction`` — subblock-aware emission),
  * orchestration codegen (both-lanes MixedKernel dispatch) and
@@ -457,8 +457,8 @@ inline constexpr const char* kAttrDualAivDispatch = "dual_aiv_dispatch";
  * Value type: ``bool``. Written by ``ScopeOutliner`` (pass 8) when it outlines a
  * CORE_GROUP scope containing ``SplitAivScopeStmt`` regions, and re-stamped by
  * ``LowerAutoVectorSplit`` (pass 23) on the functions it lowers. Read by
- * ``SplitVectorKernel`` (pass 26, to stamp ``dual_aiv_dispatch`` without
- * re-halving an already-lowered body), ``MemoryReuse`` (pass 36 — it gates the
+ * ``SplitVectorKernel`` (pass 27, to stamp ``dual_aiv_dispatch`` without
+ * re-halving an already-lowered body), ``MemoryReuse`` (pass 37 — it gates the
  * Ascend910B ``tile.load`` + ``tpop_from_aic`` in-place hazard guard) and
  * ``VerifyAivSplit`` (provenance for the boundary-op checks). Never stripped.
  *
@@ -521,9 +521,9 @@ inline constexpr const char* kAttrBuiltinTemplateVars = "builtin_template_vars";
  *
  * Value type: ``bool``; **absent means true**, so only the opt-out (``false``)
  * is ever stored. Written by the ``@pl.function(auto_scope=False)`` decorator and
- * by ``MaterializeRuntimeScopes`` (pass 49), which stamps ``false`` on the
+ * by ``MaterializeRuntimeScopes`` (pass 51), which stamps ``false`` on the
  * functions it has already processed. Read by that same pass (idempotence),
- * ``AutoDeriveTaskDependencies`` (pass 42), ``VerifyRuntimeScopesMaterialized``
+ * ``AutoDeriveTaskDependencies`` (pass 44), ``VerifyRuntimeScopesMaterialized``
  * and the Python printer.
  *
  * Decorator-only, for the same reason as ``kAttrExternalSource`` — see there.

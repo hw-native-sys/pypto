@@ -135,6 +135,7 @@ auto dynamic_dim = make_int(kDynamicDim);
 | `add_argument(name, desc)` | 位置 Expr 参数 | `.add_argument("lhs", "Left tensor")` |
 | `no_argument()` | 无参数（同步操作） | `.no_argument()` |
 | `set_attr<T>(name)` | Kwarg 模式（T: bool, int, DataType 等） | `.set_attr<bool>("a_trans")` |
+| `reject_kwarg(name, msg)` | 以可操作的提示拒绝已废弃的 kwarg，而不是报 "Unknown kwarg" | `.reject_kwarg("core_num", "pass it as the 6th operand")` |
 | `f_deduce_type(fn)` | 类型推导函数 | `.f_deduce_type(DeduceAddType)` |
 | `set_core_affinity(a)` | 算子在哪个核上执行（**放置**） | `.set_core_affinity(core_affinity::CoreAffinity::VECTOR)` |
 | `set_no_duplicate()` | 算子不得在第二个核上运行（**复制**） | `.set_no_duplicate()` |
@@ -282,7 +283,7 @@ init 操作数。由于 `matmul_acc` 是原地操作（`set_output_reuses_input(
 
 「字面量」涵盖常量谓词到达 emitter 时的**两种**形态：DSL 写法 `init_cond=True`/
 `False` 到达时是 BOOL 类型的 `ConstInt`，而被更早的 pass 折叠过的谓词到达时是
-`ConstBool` —— 当 [`LowerPipelineLoops`](../passes/31-lower_pipeline_loops.md)
+`ConstBool` —— 当 [`LowerPipelineLoops`](../passes/32-lower_pipeline_loops.md)
 复制 K-loop *且*外层循环被消除、每个副本的索引成为字面量时，生成的 `ko == 0` 正是
 这种形态。两者都会直接选定一个分支；若 emitter 只折叠其中一种，未覆盖到的每个 K
 block 都会发出双倍 MAD。
