@@ -728,8 +728,22 @@ def allreduce(
             (keyword-only). Must be a positive compile-time Python integer and
             may not exceed the configured backend's AIV core count. Defaults to
             1. Multicore is ``mode="mesh"`` only — ``mode="ring"`` requires
-            ``core_num=1``. InCore calls must keep this value at 1 and use an
-            enclosing :func:`pl.spmd` for multi-core execution.
+            ``core_num=1``. InCore calls must keep this value at 1 — see the
+            warning below on why an enclosing :func:`pl.spmd` is not a
+            multi-core path.
+
+    .. warning::
+
+        **An enclosing** :func:`pl.spmd` **does not parallelise an InCore
+        collective.** The lowering is block-unaware: it never reads the block
+        index, so every block of a ``pl.spmd(N)`` scope runs the *whole* peer
+        loop. The same bytes are pushed to the same peers ``N`` times — the
+        transfer is duplicated, not divided. The barrier is affected too: its
+        expected credit is the compile-time constant ``1`` while ``N`` blocks
+        each notify ``+1``, so it releases once a peer's *first* block has
+        notified rather than its last. Multi-core InCore collectives are not
+        available yet; issue the collective from a single-block scope and use
+        ``core_num`` on the HOST rail for multi-core execution.
 
     Returns:
         The rebound :class:`pld.DistributedTensor` view of ``target`` —
