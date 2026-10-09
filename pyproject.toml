@@ -95,6 +95,9 @@ fixable = ["ALL"]
 # imports in these two modules are deliberately not at the top of the file.
 "python/pypto/runtime/task_interface.py" = ["E402"]
 "python/pypto/runtime/kernel_compiler.py" = ["E402"]
+# Vendored boundary stubs: the nanobind-stubgen output interleaves the build
+# marker with imports and embeds unreflowed C++ docstrings.
+"typings/**" = ["E402", "E501"]
 # The unit suite must set PYPTO_SKIP_RUNTIME_PIN_CHECK before its first `pypto` import.
 "tests/ut/conftest.py" = ["E402"]
 # DSL type annotations (pl.Tile[..., pl.TileView(...)]) exceed line-length;
