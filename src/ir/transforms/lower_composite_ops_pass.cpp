@@ -2198,6 +2198,25 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
   b.EmitFor(
       "peer", zero_idx, comm.nranks_idx, one_idx,
       [&](LoweringBuilder& body, const VarPtr& peer) {
+        // A runtime extent narrower than the stage flakes on device (zeroed
+        // top-rank rows): the TPUT single-shot path spans the un-narrowed stage
+        // width.  Narrow the stage's valid shape to the transfer width (bounded
+        // by the stage's own columns) before the push — the same narrowing the
+        // ring reduce-scatter / ring allgather emit ("so the TPUT single-shot
+        // path reads exactly the transfer width").  Statically sized transfers
+        // already get a stage <= the transfer from MakeCollectiveStageShape, and
+        // sub-byte packed dtypes (FP4) require a static even packed valid
+        // dimension, so both keep the raw stage.
+        ExprPtr push_stage = put_stage;
+        if (!As<ConstInt>(size_expr) && chunk_geometry.storage_bits >= 8) {
+          auto stage_shape_tuple = As<MakeTuple>(stage_shape);
+          INTERNAL_CHECK_SPAN(stage_shape_tuple, span)
+              << "pld.tensor.allgather stage shape must be a MakeTuple";
+          auto stage_valid_cols = MakeMin(stage_shape_tuple->elements_[1], size_expr, span);
+          push_stage = body.Bind(
+              "ag_stage_valid",
+              reg.Create("tile.set_validshape", {put_stage, one_idx, stage_valid_cols}, {}, span), span);
+        }
         // pld.tile.put(dst, peer, src, stage, dst_offsets, src_offsets, shape):
         // push local_data contents to every peer's window at row my_rank.
         // src is the original Tensor local_data — pld.tile.put handles
@@ -2205,7 +2224,7 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
         body.Bind(
             "push",
             reg.Create("pld.tile.put",
-                       {target, peer, local_data, put_stage, my_rank_offsets, zero_row_offsets, chunk_shape},
+                       {target, peer, local_data, push_stage, my_rank_offsets, zero_row_offsets, chunk_shape},
                        {{"atomic", static_cast<int>(AtomicType::kNone)}}, span),
             span);
       },
