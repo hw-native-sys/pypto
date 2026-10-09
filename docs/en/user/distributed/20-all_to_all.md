@@ -56,9 +56,11 @@ a wrong value, not a subtle shape issue.
 
 ## Walkthrough
 
-Both modes share one `[nr, SIZE]` window. Rank `r` writes its chunk-for-`d`
-at row `r` of destination `d`'s window, then reads row `src` of its own
-window. The hand-rolled kernel uses step 06's `put`:
+Both modes share one `[nr, SIZE]` window. Rank `r`'s chunk-for-`d` ends up at
+row `r` of destination `d`'s window, then rank `d` reads row `src` of its
+own window — in the hand-rolled kernel the caller does the write explicitly;
+in the reveal below, the push happens inside the call instead. The
+hand-rolled kernel uses step 06's `put`:
 
 ```python
 @pl.function(type=pl.FunctionType.InCore)
@@ -115,15 +117,27 @@ The reveal replaces phases 1–3 with one call:
 
 ### The IR diff (the teaching artifact)
 
+Like step 13's push/pull reversal, the interesting part isn't which bytes
+move — both modes move the same chunks to the same destinations — it's which
+side of the transfer the barrier lands on.
+
 - `--mode hand` lowers to the three phases above: `P` puts (one per
-  destination), the `Set`/`Ge(1)` barrier, and the read-back loop.
-- `--mode builtin` expands into the same shape: your per-destination chunks
-  pushed via `pld.tile.put`, then the barrier, then the row read-back. Note
-  the barrier's role here — because the transfers come *first*, it is a
-  completion barrier telling you every peer's push has landed, not a
-  readiness barrier gating a read. The composite also appends a self-clearing
-  epilogue, so the signal is reusable on the next call. (The HOST builtin adds
-  orchestration-level chunking for large transfers.)
+  destination), then the `Set`/`Ge(1)` barrier, then the read-back loop — the
+  barrier comes *after* your own pushes but *before* you trust any peer's,
+  because your reads would otherwise race their pushes.
+- `--mode builtin` expands into the same shape — your per-destination chunks
+  pushed via `pld.tile.put`, then the barrier, then the row read-back — but
+  the barrier's role has flipped. Because the transfers come *first*, it is a
+  **completion** barrier telling you every peer's push has landed, not a
+  **readiness** barrier gating a read.
+- The composite appends a **self-clearing epilogue** after the barrier that
+  subtracts this call's credits back out, so the same signal is reusable by a
+  later collective ([21-putting_it_together](21-putting_it_together.md)). The
+  HOST builtin additionally chunks large transfers at the orchestration
+  level — the InCore composite this example uses does not need to.
+- That barrier-role flip is the lesson of this diff: whether a barrier gates
+  a read or confirms a write depends on which side of the transfer it sits
+  on, not on anything about barriers themselves.
 
 **Cost card (per rank):** every rank sends a *different* `N/P` slice to each
 peer — `(P-1)/P · N` bytes received, and no two ranks receive the same bytes.
