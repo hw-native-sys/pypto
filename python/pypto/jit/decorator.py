@@ -380,6 +380,16 @@ def _annotation_layout(annotation: Any, param_name: str, func_name: str) -> _ir.
     )
 
 
+@cache_in_snapshot
+def _function_signature(func: Any) -> inspect.Signature:
+    """Share signature introspection within a request, refreshing on the next call.
+
+    Argument binding and annotation resolution still use the current request's
+    values. Only the immutable Signature object is shared by the helpers.
+    """
+    return inspect.signature(func)
+
+
 def _param_layouts(func: Any, func_name: str) -> dict[str, _ir.TensorLayout]:
     """Map parameter name → annotated layout, for params that declare one.
 
@@ -396,7 +406,7 @@ def _param_layouts(func: Any, func_name: str) -> dict[str, _ir.TensorLayout]:
         Layout per parameter name; parameters without one are absent
     """
     try:
-        sig = inspect.signature(func)
+        sig = _function_signature(func)
     except (TypeError, ValueError):
         return {}
     ann_ns = _annotation_namespace(func, sig)
@@ -431,7 +441,7 @@ def _constexpr_params(func: Any) -> list[str]:
     from pypto.language.typing.constexpr import ConstexprMarker  # noqa: PLC0415
 
     try:
-        sig = inspect.signature(func)
+        sig = _function_signature(func)
     except (TypeError, ValueError):
         return []
     ann_ns = _annotation_namespace(func, sig)
@@ -1999,10 +2009,10 @@ def _expand_constexpr_variants(
     variants_by_func: dict[int, list[_VariantKey]] = {id(entry._func): [entry_key]}
 
     for dep in reversed(deps_topo):
-        # Both lists cost a full ``inspect.signature`` with annotation
-        # resolution, so they are derived once per dep rather than per call
-        # site. A dep declaring no constexpr parameter cannot split at all, and
-        # skips call-site folding entirely.
+        # Derive both lists once per dep rather than per call site; signature
+        # introspection is shared within the request, while constexpr annotation
+        # resolution still reads this request's namespace. A dep declaring no
+        # constexpr parameter cannot split and skips call-site folding entirely.
         signature = (_constexpr_params(dep._func), dep._param_names())
         splits = bool(signature[0])
         for caller_func, call_name in callers_by_id.get(id(dep._func), ()):
@@ -2463,7 +2473,7 @@ class _CachedDepGraph:
 def _layout_dependency_names(func: Any) -> tuple[str, ...]:
     """Capture roots read by postponed parameter annotations once per function."""
     names: set[str] = set()
-    for name, param in inspect.signature(func).parameters.items():
+    for name, param in _function_signature(func).parameters.items():
         if name == "self" or not isinstance(param.annotation, str):
             continue
         try:
@@ -2865,7 +2875,7 @@ class JITFunction:
     # ------------------------------------------------------------------
 
     def _param_names(self) -> list[str]:
-        return [p for p in inspect.signature(self._func).parameters if p != "self"]
+        return [p for p in _function_signature(self._func).parameters if p != "self"]
 
     def _bind_args(
         self, args: tuple[Any, ...], kwargs: dict[str, Any]
@@ -2899,7 +2909,7 @@ class JITFunction:
         each dep's effective map without recomputing.
         """
         param_names = self._param_names()
-        sig = inspect.signature(self._func)
+        sig = _function_signature(self._func)
         try:
             bound = sig.bind(*args, **kwargs)
             bound.apply_defaults()
@@ -3003,7 +3013,7 @@ class JITFunction:
         from pypto.language.typing.tensor import Tensor  # noqa: PLC0415
 
         param_names = self._param_names()
-        sig = inspect.signature(self._func)
+        sig = _function_signature(self._func)
 
         # Namespace for resolving string annotations (``from __future__ import
         # annotations``): the function's globals merged with its closure free-vars,

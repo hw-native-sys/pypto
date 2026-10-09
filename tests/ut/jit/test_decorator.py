@@ -14,7 +14,10 @@ import importlib
 import inspect
 import re
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
+from types import SimpleNamespace
 
 import pypto.language as pl
 import pypto.language.distributed as pld
@@ -22,6 +25,7 @@ import pytest
 from pypto.ir import OptimizationStrategy, PassManager
 from pypto.ir.compiled_program import CompiledProgram
 from pypto.jit import decorator
+from pypto.jit._source import capture_namespaces
 from pypto.jit.decorator import (
     _SYNTHESIZED_DYN_PREFIX,
     JITFunction,
@@ -3760,6 +3764,111 @@ def test_cached_call_sites_preserve_order_and_list_isolation(monkeypatch):
     assert [(node.lineno, node.col_offset) for node in calls] == [(2, 4), (2, 10), (4, 11)]
     calls.clear()
     assert len(decorator._dep_call_nodes(func, "first")) == 3
+
+
+def test_signature_helpers_share_one_request(monkeypatch):
+    def func(x, block: pl.constexpr = 16):
+        pass
+
+    original = inspect.signature
+    calls = []
+
+    def counted(fn):
+        calls.append(fn)
+        return original(fn)
+
+    monkeypatch.setattr(inspect, "signature", counted)
+    with capture_namespaces():
+        assert decorator.JITFunction._param_names(SimpleNamespace(_func=func)) == ["x", "block"]
+        bound = decorator._function_signature(func).bind(7)
+        bound.apply_defaults()
+        assert bound.arguments == {"x": 7, "block": 16}
+        assert decorator._constexpr_params(func) == ["block"]
+        assert decorator._param_layouts(func, "func") == {}
+        with capture_namespaces():
+            assert decorator._function_signature(func).bind(9, 32).arguments == {"x": 9, "block": 32}
+    assert calls == [func]
+
+
+def test_signature_refreshes_defaults_annotations_and_custom_signature():
+    def func(x, block: pl.constexpr = 16, *, scale=1):
+        pass
+
+    with capture_namespaces():
+        assert decorator._constexpr_params(func) == ["block"]
+        assert decorator._function_signature(func).parameters["block"].default == 16
+    func.__defaults__ = (32,)
+    func.__kwdefaults__ = {"scale": 2}
+    func.__annotations__["block"] = int
+    with capture_namespaces():
+        bound = decorator._function_signature(func).bind(9)
+        bound.apply_defaults()
+        assert bound.arguments == {"x": 9, "block": 32, "scale": 2}
+        assert decorator._constexpr_params(func) == []
+    func.__signature__ = inspect.Signature([inspect.Parameter("value", inspect.Parameter.KEYWORD_ONLY)])
+    with capture_namespaces():
+        assert decorator._function_signature(func).bind(value=4).arguments == {"value": 4}
+        with pytest.raises(TypeError):
+            decorator._function_signature(func).bind(4)
+
+
+def test_signature_snapshot_released_after_failure():
+    def func(value=1):
+        pass
+
+    with pytest.raises(RuntimeError), capture_namespaces():
+        assert decorator._function_signature(func).parameters["value"].default == 1
+        raise RuntimeError("abort request")
+    func.__defaults__ = (2,)
+    assert decorator._function_signature(func).parameters["value"].default == 2
+    func.__defaults__ = (3,)
+    assert decorator._function_signature(func).parameters["value"].default == 3
+
+
+def test_signature_requests_are_thread_local(monkeypatch):
+    def func(value=1):
+        pass
+
+    original = inspect.signature
+    calls = []
+    barrier = Barrier(2)
+
+    def counted(fn):
+        calls.append(fn)
+        return original(fn)
+
+    def query():
+        with capture_namespaces():
+            first = decorator._function_signature(func)
+            barrier.wait(timeout=10)
+            assert decorator._function_signature(func) is first
+            return first
+
+    monkeypatch.setattr(inspect, "signature", counted)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(query) for _ in range(2)]
+        results = [future.result() for future in futures]
+    assert results[0] == results[1]
+    assert results[0] is not results[1]
+    assert calls == [func, func]
+
+
+def test_signature_preserves_string_annotations_and_introspection_errors():
+    def func(value):
+        pass
+
+    func.__annotations__ = {"value": "pl.constexpr"}
+    with capture_namespaces():
+        assert decorator._constexpr_params(func) == ["value"]
+    func.__annotations__["value"] = "int"
+    with capture_namespaces():
+        assert decorator._constexpr_params(func) == []
+    func.__signature__ = object()
+    with capture_namespaces():
+        assert decorator._constexpr_params(func) == []
+        assert decorator._param_layouts(func, "func") == {}
+        with pytest.raises(TypeError):
+            decorator._function_signature(func)
 
 
 if __name__ == "__main__":
