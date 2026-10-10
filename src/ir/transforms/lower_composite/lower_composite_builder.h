@@ -60,7 +60,7 @@ struct CommSetup {
 // The temp counter is borrowed from the mutator so unique temp names span
 // distinct composite-op calls in the same function. Barrier generations are
 // call-local (see the self-clearing credit-barrier protocol in
-// lower_composite_ops_pass.cpp), so each LoweringBuilder instance — one per
+// lower_composite_common.h), so each LoweringBuilder instance — one per
 // top-level composite-op call — owns its own ``barrier_count_`` that always
 // starts at 0.
 // ============================================================================
@@ -142,7 +142,7 @@ class LoweringBuilder {
                    const ExprPtr& row_offset, const ExprPtr& expected, const std::string& suffix,
                    const Span& span);
 
-  // ---- Self-clearing credit barrier protocol (see lower_composite_ops_pass.cpp's file-header comment) ----
+  // ---- Self-clearing credit barrier protocol (see lower_composite_common.h's protocol comment) ----
 
   /// Emit one complete cross-rank barrier on ``signal``: ``AtomicAdd(1)`` into
   /// every peer's cell, then wait for this call's generation on every peer's

@@ -28,10 +28,9 @@ The empty `PassProperties` contract (`kLowerCompositeOpsProperties` in `include/
 
 ## Architecture
 
-The pass spans two translation units: `LoweringBuilder` and its helpers were extracted into
-`src/ir/transforms/lower_composite/lower_composite_builder.{h,cpp}` (plan 70) so the shared
-scratchpad/control-flow machinery isn't tied to one giant file; the rule table and mutator stay in
-`src/ir/transforms/lower_composite_ops_pass.cpp`, which `#include`s the new header:
+The pass is split across several translation units. Shared builder and collective
+helpers live under `src/ir/transforms/lower_composite/`; the dispatcher and
+mutator remain in `src/ir/transforms/lower_composite_ops_pass.cpp`:
 
 ```text
 src/ir/transforms/lower_composite/lower_composite_builder.h / .cpp
@@ -43,22 +42,45 @@ src/ir/transforms/lower_composite/lower_composite_builder.h / .cpp
                               / EmitIf / EmitIfExpr + NotEq scalar guard)
   MakeNegation              — file-local scalar/tile negation helper used by builder rules
 
-src/ir/transforms/lower_composite_ops_pass.cpp
+src/ir/transforms/lower_composite/lower_composite_common.h / .cpp
+  Shared shape, target-validation, signal, chunk-geometry, and staging helpers
+
+src/ir/transforms/lower_composite_rules.h
   CompositeLoweringFn       — (call, visited_args, builder) -> result expr
-  Lower<Op>Rule             — one rule function per composite op (LowerSinRule,
-                              LowerCosRule, LowerTensorAllReduceRule, ...)
+  Collective rule declarations for allreduce and allgather
+
+src/ir/transforms/lower_composite/lower_composite_allreduce.cpp
+  LowerTensorAllReduceRule — mesh and ring allreduce lowering
+
+src/ir/transforms/lower_composite/lower_composite_allgather.cpp
+  LowerTensorAllGatherRule — allgather lowering
+
+src/ir/transforms/lower_composite_ops_pass.cpp
+  Lower<Op>Rule             — local rule functions (LowerSinRule, LowerCosRule,
+                              LowerTensorBroadcastRule, ...)
   LookupCompositeRule       — file-local op-name → rule dispatch table (kRules)
   LowerCompositeOpsMutator  — walks the function, looks up a rule per Call
 ```
 
-Adding a new single-result composite op (rule + dispatch-table edits stay in
-`lower_composite_ops_pass.cpp`; only touch `lower_composite_builder.{h,cpp}` if the rule needs a
-new builder primitive):
+Adding a new single-result composite op:
 
-1. Write a `Lower<Op>Rule(call, args, builder)` function. It receives the original `CallPtr` (use `call->span_`, `call->kwargs_`, `call->op_->name_` as needed), the visited arg expressions (var-remap already applied), and a `LoweringBuilder` whose `Bind` helper appends an `AssignStmt` per intermediate temp. For rules that need control flow, use `builder.EmitFor` / `builder.EmitForReduce` / `builder.EmitIf` / `builder.EmitIfExpr` — each takes a body callback that receives a nested builder sharing the same temp counter, so emitted temps stay uniquely named regardless of nesting depth. `LowerTensorAllReduceRule` is the canonical example of a control-flow-bearing rule (ready barrier plus chunked remote_load+accumulate / barrier / store for mesh; `LowerTensorRingAllReduceRule` adds a chunked RS+AG ring schedule dispatched via a `mode` kwarg).
-2. Add a `{"<op>", &Lower<Op>Rule}` row to `kRules` inside `LookupCompositeRule`.
+1. Write a `Lower<Op>Rule(call, args, builder)` function in
+   `lower_composite_ops_pass.cpp` for a small/local rule, or in a dedicated
+   translation unit under `lower_composite/` for a substantial collective rule.
+   It receives the original `CallPtr` (use `call->span_`, `call->kwargs_`,
+   `call->op_->name_` as needed), the visited arg expressions (var-remap already
+   applied), and a `LoweringBuilder` whose `Bind` helper appends an `AssignStmt`
+   per intermediate temp. For rules that need control flow, use
+   `builder.EmitFor` / `builder.EmitForReduce` / `builder.EmitIf` /
+   `builder.EmitIfExpr` — each takes a body callback that receives a nested
+   builder sharing the same temp counter, so emitted temps stay uniquely named
+   regardless of nesting depth.
+2. For a dedicated rule, declare it in `lower_composite_rules.h` and add its
+   implementation file to `PYPTO_SOURCES` in `CMakeLists.txt`.
+3. Add a `{"<op>", &Lower<Op>Rule}` row to `kRules` inside
+   `LookupCompositeRule` in `lower_composite_ops_pass.cpp`.
 
-Multi-result rules return `MakeTuple`; the mutator maps both the original result and ordinary SSA aliases of that tuple, so direct projections and alias-chain projections expose the same destinations. When the table grows past a handful of entries — or a rule wants its own translation unit — promote it back to a standalone registry under `src/ir/transforms/composite_ops/`.
+Multi-result rules return `MakeTuple`; the mutator maps both the original result and ordinary SSA aliases of that tuple, so direct projections and alias-chain projections expose the same destinations. Shared lowering helpers belong in `lower_composite_common.{h,cpp}`. Keep the dispatcher focused on registration and mutator behavior; put substantial collective implementations in their own translation units.
 
 ## Algorithm (`tile.tquant_mx` rule)
 

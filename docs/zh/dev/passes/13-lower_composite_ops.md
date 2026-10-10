@@ -28,9 +28,9 @@ host-orchestrator 中的 `pld.tensor.allreduce` 调用会跳过本 Pass：`Synth
 
 ## 架构 (Architecture)
 
-本 Pass 现在跨两个翻译单元：`LoweringBuilder` 及其辅助设施已抽取到
-`src/ir/transforms/lower_composite/lower_composite_builder.{h,cpp}`（plan 70），使共享的暂存区/控制流机制不再绑定在一个巨型文件里；规则表和 mutator 仍留在
-`src/ir/transforms/lower_composite_ops_pass.cpp` 中，该文件 `#include` 新头文件：
+本 Pass 拆分在多个翻译单元 (translation unit) 中。共享的 builder 与集合通信辅助设施位于
+`src/ir/transforms/lower_composite/` 下；分发器 (dispatcher) 与 mutator 仍位于
+`src/ir/transforms/lower_composite_ops_pass.cpp`：
 
 ```text
 src/ir/transforms/lower_composite/lower_composite_builder.h / .cpp
@@ -42,20 +42,42 @@ src/ir/transforms/lower_composite/lower_composite_builder.h / .cpp
                               / EmitIf / EmitIfExpr + NotEq 标量比较)
   MakeNegation              — builder 规则使用的文件内标量/tile 取负辅助函数
 
-src/ir/transforms/lower_composite_ops_pass.cpp
+src/ir/transforms/lower_composite/lower_composite_common.h / .cpp
+  共享的 shape、target 校验、signal、分块几何与 staging 辅助函数
+
+src/ir/transforms/lower_composite/lower_composite_rules.h
   CompositeLoweringFn       — (call, visited_args, builder) -> 结果表达式
-  Lower<Op>Rule             — 每个组合算子一个规则函数（LowerSinRule、
-                              LowerCosRule、LowerTensorAllReduceRule ...）
+  allreduce 与 allgather 的集合通信规则声明
+
+src/ir/transforms/lower_composite/lower_composite_allreduce.cpp
+  LowerTensorAllReduceRule — mesh 与 ring allreduce 降级
+
+src/ir/transforms/lower_composite/lower_composite_allgather.cpp
+  LowerTensorAllGatherRule — allgather 降级
+
+src/ir/transforms/lower_composite_ops_pass.cpp
+  Lower<Op>Rule             — 本地规则函数（LowerSinRule、LowerCosRule、
+                              LowerTensorBroadcastRule ...）
   LookupCompositeRule       — 文件内的「算子名 → 规则」分发表 (kRules)
   LowerCompositeOpsMutator  — 遍历函数，对每个 Call 查表
 ```
 
-新增一个单结果组合算子的步骤（规则与分发表改动留在 `lower_composite_ops_pass.cpp` 内；只有当规则需要新的 builder 基本能力时才需要改动 `lower_composite_builder.{h,cpp}`）：
+新增一个单结果组合算子的步骤：
 
-1. 写一个 `Lower<Op>Rule(call, args, builder)` 函数。它接收原始 `CallPtr`（按需用 `call->span_`、`call->kwargs_`、`call->op_->name_`）、已 visit 过的参数表达式（已应用 var-remap）以及一个 `LoweringBuilder`，其 `Bind` 助手会为每个中间临时变量追加一条 `AssignStmt`。需要控制流的规则可以用 `builder.EmitFor` / `builder.EmitForReduce` / `builder.EmitIf` / `builder.EmitIfExpr`——每个都接收一个 body 回调，回调里收到的嵌套 builder 与外层共享同一个 temp 计数器，因此发射的临时变量名跨任意嵌套深度都唯一。`LowerTensorAllReduceRule` 是含控制流规则的范例（mesh 使用 ready 屏障，加分块 remote_load+accumulate / 屏障 / store；`LowerTensorRingAllReduceRule` 则通过 `mode` kwarg 分发，增加分块 RS+AG ring 调度）。
-2. 在 `LookupCompositeRule` 的 `kRules` 里加一条 `{"<op>", &Lower<Op>Rule}`。
+1. 对于小型/本地规则，在 `lower_composite_ops_pass.cpp` 中编写
+   `Lower<Op>Rule(call, args, builder)`；对于较大的集合通信规则，在
+   `lower_composite/` 下单独的翻译单元中实现。函数接收原始 `CallPtr`（按需使用
+   `call->span_`、`call->kwargs_`、`call->op_->name_`）、已 visit 过的参数表达式（已应用
+   var-remap）以及一个 `LoweringBuilder`，其 `Bind` 助手会为每个中间临时变量追加一条
+   `AssignStmt`。需要控制流的规则可以使用 `builder.EmitFor` / `builder.EmitForReduce` /
+   `builder.EmitIf` / `builder.EmitIfExpr`——每个都接收一个 body 回调，回调中的嵌套
+   builder 与外层共享同一个 temp 计数器，因此发射的临时变量名跨任意嵌套深度都唯一。
+2. 对于单独的规则，在 `lower_composite_rules.h` 中声明，并在 `CMakeLists.txt` 的
+   `PYPTO_SOURCES` 中加入其实现文件。
+3. 在 `lower_composite_ops_pass.cpp` 的 `LookupCompositeRule` 中，在 `kRules` 里加一条
+   `{"<op>", &Lower<Op>Rule}`。
 
-多结果规则返回 `MakeTuple`；mutator 会同时映射原始结果及该 tuple 的普通 SSA alias，因此直接投影和 alias 链投影都会暴露同一组 destination。当分发表条目增多——或某条规则需要独立的翻译单元时——再把它拆回 `src/ir/transforms/composite_ops/` 下的独立注册表。
+多结果规则返回 `MakeTuple`；mutator 会同时映射原始结果及该 tuple 的普通 SSA alias，因此直接投影和 alias 链投影都会暴露同一组 destination。共享的降级辅助函数应放在 `lower_composite_common.{h,cpp}` 中。分发器应专注于注册与 mutator 行为；较大的集合通信实现应放在独立的翻译单元中。
 
 ## 算法（`tile.tquant_mx` 规则）
 
