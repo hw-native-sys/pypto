@@ -18,6 +18,7 @@ import ctypes
 import importlib
 import re
 import warnings
+from pathlib import Path
 
 import pypto.language as pl
 import pytest
@@ -525,7 +526,6 @@ class TestCompileFromSignature:
         resolve it (via globals + closure free-vars), not fail to parse the
         string annotation."""
         import importlib.util  # noqa: PLC0415
-        from pathlib import Path  # noqa: PLC0415
 
         fixture_path = Path(__file__).parent / "_sig_closure_fixture.py"
         spec = importlib.util.spec_from_file_location("_sig_closure_fixture", fixture_path)

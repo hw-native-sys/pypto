@@ -61,7 +61,6 @@ using pto_ops_detail::CheckArity;
 using pto_ops_detail::EmitFlatOffsetSSAFromValues;
 using pto_ops_detail::EmitIndexOperand;
 using pto_ops_detail::EmitPartitionViewPTO;
-using pto_ops_detail::ExpandPackedFp4GmLastAxis;
 using pto_ops_detail::GetDimStrings;
 using pto_ops_detail::GetIndexOffsetCodes;
 using pto_ops_detail::GetSizeCodes;
@@ -154,14 +153,6 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   std::vector<std::string> partition_dims = GetDimStrings(valid_shape_tuple->elements_);
   std::vector<std::string> offset_codes = GetIndexOffsetCodes(offsets_tuple->elements_, codegen);
   std::vector<std::string> size_codes = GetSizeCodes(valid_shape_tuple->elements_, codegen);
-  const ir::ExprPtr last_size =
-      valid_shape_tuple->elements_.empty() ? nullptr : valid_shape_tuple->elements_.back();
-  const ir::ExprPtr last_offset =
-      offsets_tuple->elements_.empty() ? nullptr : offsets_tuple->elements_.back();
-  const ir::TensorLayout gm_layout =
-      tensor_type->tensor_view_.has_value() ? tensor_type->tensor_view_->layout : ir::TensorLayout::ND;
-  ExpandPackedFp4GmLastAxis(tensor_type->dtype_, offset_codes, size_codes, partition_dims, codegen, last_size,
-                            last_offset, gm_layout);
   std::string tensor_view = codegen.GetOrCreateTensorView(tensor);
   std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
 
@@ -266,12 +257,6 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     auto partition_dims = GetDimStrings(shape_elems);
     auto offset_codes = GetIndexOffsetCodes(offset_elems, codegen);
     auto size_codes = GetSizeCodes(shape_elems, codegen);
-    const ir::ExprPtr last_size = shape_elems.empty() ? nullptr : shape_elems.back();
-    const ir::ExprPtr last_offset = offset_elems.empty() ? nullptr : offset_elems.back();
-    const ir::TensorLayout gm_layout =
-        tensor_type->tensor_view_.has_value() ? tensor_type->tensor_view_->layout : ir::TensorLayout::ND;
-    ExpandPackedFp4GmLastAxis(tensor_type->dtype_, offset_codes, size_codes, partition_dims, codegen,
-                              last_size, last_offset, gm_layout);
     partition_type = MakePartitionTensorViewType(partition_dims, dtype_str);
     partition_view = EmitPartitionViewPTO(output_tensor->name_hint_, tensor_view, tensor_view_type,
                                           partition_type, offset_codes, size_codes, codegen);
@@ -305,13 +290,6 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     std::vector<std::string> partition_dims = {height_dim, width_dim};
     auto offset_codes = GetIndexOffsetCodes(offsets_tuple->elements_, codegen);
     std::vector<std::string> size_codes = {height_code, width_code};
-    const ir::ExprPtr last_size = valid_shape.size() > 1 ? valid_shape[1] : nullptr;
-    const ir::ExprPtr last_offset =
-        offsets_tuple->elements_.empty() ? nullptr : offsets_tuple->elements_.back();
-    const ir::TensorLayout gm_layout =
-        tensor_type->tensor_view_.has_value() ? tensor_type->tensor_view_->layout : ir::TensorLayout::ND;
-    ExpandPackedFp4GmLastAxis(tensor_type->dtype_, offset_codes, size_codes, partition_dims, codegen,
-                              last_size, last_offset, gm_layout);
     partition_type = MakePartitionTensorViewType(partition_dims, dtype_str);
     partition_view = EmitPartitionViewPTO(output_tensor->name_hint_, tensor_view, tensor_view_type,
                                           partition_type, offset_codes, size_codes, codegen);
@@ -1045,9 +1023,6 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
     std::vector<std::string> stride_names(rank);
     for (size_t j = 0; j < rank; ++j) stride_names[j] = emit_dim(view.stride[j]);
 
-    codegen.ExpandPackedFp4MakeTensorViewDims(lhs_type->dtype_, view.layout, lhs_type->shape_,
-                                              shape_dim_names, &view.stride, stride_names);
-
     std::string layout_str = "nd";
     switch (view.layout) {
       case ir::TensorLayout::DN:
@@ -1164,14 +1139,17 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
     // v0.52), so the all-ones case needs no special handling: a raw `!pto.ptr`
     // operand is rejected outright, at parse without a type annotation and by
     // the lowering pass with one.
+    // PackFp4 rewrites shapes/offsets to carrier units; Expand so partition
+    // windows match the nibble-expanded parent make_tensor_view (same as tile.load).
+    std::vector<std::string> partition_dims = GetDimStrings(shapes_tuple->elements_);
+    std::vector<std::string> offset_codes = GetIndexOffsetCodes(offsets_tuple->elements_, codegen);
+    std::vector<std::string> size_codes = GetSizeCodes(shapes_tuple->elements_, codegen);
     const std::string tensor_view = codegen.GetOrCreateTensorView(tensor_var);
     const std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
-    const std::string partition_type =
-        MakePartitionTensorViewType(GetDimStrings(shapes_tuple->elements_), dtype_str);
+    const std::string partition_type = MakePartitionTensorViewType(partition_dims, dtype_str);
     const std::string payload_view =
         EmitPartitionViewPTO(tensor_var->name_hint_, tensor_view, tensor_view_type, partition_type,
-                             GetIndexOffsetCodes(offsets_tuple->elements_, codegen),
-                             GetSizeCodes(shapes_tuple->elements_, codegen), codegen);
+                             offset_codes, size_codes, codegen);
     codegen.Emit("pto.cmo.cacheinvalid " + payload_view + " single_cache_line : " + partition_type);
     return std::string("");
   });

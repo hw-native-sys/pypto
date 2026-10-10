@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""PTO codegen checks for hand-written FP4E2M1X2 GM expand (carrier → nibble ABI)."""
+"""PTO codegen checks for hand-written FP4E2M1X2 GM carrier units (PTOAS v0.67+)."""
 
 import pypto.language as pl
 import pytest
@@ -38,8 +38,8 @@ def _emit_incore_mlir(program) -> str:
     return "\n".join(parts)
 
 
-def test_fp4e2m1x2_make_tensor_view_expands_to_nibble_units():
-    """Param + InCore tensor.view + rank-3 leading strides expand carrier→nibble."""
+def test_fp4e2m1x2_make_tensor_view_preserves_carrier_units():
+    """Param views, InCore views and partitions retain carrier geometry."""
 
     @pl.program
     class Rank2:
@@ -54,12 +54,11 @@ def test_fp4e2m1x2_make_tensor_view_expands_to_nibble_units():
 
     mlir = _emit_incore_mlir(Rank2)
     views = [line for line in mlir.splitlines() if "pto.make_tensor_view" in line and "f4E2M1x2" in line]
-    assert views and all("512" in line for line in views), mlir
-    # Carrier IR last-axis 256 must not appear unexpanded on make_tensor_view.
-    assert all("%c256_index" not in line for line in views), mlir
-    # Static ConstInt partition last-axis expand folds *2 (carrier 256 → nibble 512).
+    assert views and all("shape = [%c2_index, %c256_index]" in line for line in views), mlir
+    assert all("strides = [%c256_index, %c1_index]" in line for line in views), mlir
     partitions = [line for line in mlir.splitlines() if "partition_view" in line]
-    assert partitions and all("%c512_index" in line for line in partitions), mlir
+    assert partitions and all("%c256_index" in line for line in partitions), mlir
+    assert all("2x256x!pto.f4E2M1x2" in line for line in partitions), mlir
 
     @pl.program
     class Rank3:
@@ -75,15 +74,10 @@ def test_fp4e2m1x2_make_tensor_view_expands_to_nibble_units():
     assert "!pto.f4E2M1x2" in mlir3
     views3 = [line for line in mlir3.splitlines() if "pto.make_tensor_view" in line and "f4E2M1x2" in line]
     assert views3, mlir3
-    # Carrier [2,16,32] → nibble shape last-axis 32*2=64 (ConstInt fold).
-    assert all("shape = [%c2_index, %c16_index, %c64_index]" in line for line in views3), mlir3
-    # Leading strides expand via *2: row pitch 32*16 then *2 → 1024; mid stride 32*2 → 64.
+    assert all("shape = [%c2_index, %c16_index, %c32_index]" in line for line in views3), mlir3
     assert "arith.muli %c32_index, %c16_index : index" in mlir3, mlir3
-    assert "arith.muli %c32_index, %c2_index : index" in mlir3, mlir3
-    assert any(
-        "arith.muli" in line and "_s0," in line and "%c2_index" in line for line in mlir3.splitlines()
-    ), mlir3
-    assert all("%c1_index]" in line for line in views3), mlir3
+    assert "arith.muli %c32_index, %c2_index : index" not in mlir3, mlir3
+    assert all("strides = [" in line and ", %c32_index, %c1_index]" in line for line in views3), mlir3
 
 
 def test_fp4e2m1x2_rejects_column_vector_last_carrier_dim_one():
@@ -104,7 +98,7 @@ def test_fp4e2m1x2_rejects_column_vector_last_carrier_dim_one():
 
 
 def test_fp4e2m1x2_rejects_explicit_dn_param_annotation():
-    """Non-ND annotations on packed FP4E2M1X2 are rejected at make_tensor_view."""
+    """Non-ND annotations on packed FP4E2M1X2 are rejected by PackFp4."""
 
     @pl.program
     class DnAnnotated:
@@ -120,7 +114,7 @@ def test_fp4e2m1x2_rejects_explicit_dn_param_annotation():
         ) -> pl.Tensor[[16, 32], pl.FP4E2M1X2]:
             return pl.store(pl.load(src, [0, 0], [16, 32]), [0, 0], out)
 
-    with pytest.raises(ValueError, match=r"FP4E2M1X2 supports ND layout only"):
+    with pytest.raises(ValueError, match=r"FP4 DN layout is unsupported"):
         _emit_incore_mlir(DnAnnotated)
 
 
@@ -154,3 +148,7 @@ def test_fp4e2m1x2_slice_cast_and_vec_move():
     mlir_m = _emit_incore_mlir(MoveProg)
     assert "!pto.f4E2M1x2" in mlir_m
     assert "pto.tmov" in mlir_m or "pto.tload" in mlir_m
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

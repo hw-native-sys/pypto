@@ -270,7 +270,7 @@ StmtPtr SSAVerifier::GetLastStmt(const StmtPtr& stmt) {
     return GetLastStmt(scope->body_);
   }
   // A SplitAivScopeStmt is likewise SSA-transparent (non-boundary, lowered in
-  // place by pass 23); look through it to find the trailing yield.
+  // place by pass 24); look through it to find the trailing yield.
   if (auto scope = As<SplitAivScopeStmt>(stmt)) {
     return GetLastStmt(scope->body_);
   }

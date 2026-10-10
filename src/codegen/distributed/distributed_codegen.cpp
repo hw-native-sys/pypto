@@ -365,91 +365,10 @@ void DistributedCodegen::CollectHostOrchVarDefs(const ir::FunctionPtr& func) {
   collector.VisitStmt(func->body_);
 }
 
-namespace {
-
-// Extract a constant int from a tensor-shape sub-expression, or nullopt.
-std::optional<int64_t> ConstIntFromShapeExpr(const ir::ExprPtr& expr) {
-  if (auto ci = ir::As<ir::ConstInt>(expr)) return ci->value_;
-  return std::nullopt;
-}
-
-// True iff ``v`` is the Var ``target``. Raw pointer identity is sound: the IR
-// holds the canonical shared_ptr graph, so each Var has exactly one address
-// (matching ``CollectVarsFromShapeExpr``'s own ``Var*`` dedup).
-bool IsTargetVar(const ir::ExprPtr& v, const ir::VarPtr& target) {
-  auto var = ir::As<ir::Var>(v);
-  return var && var.get() == target.get();
-}
-
-}  // namespace
-
 std::string DistributedCodegen::InvertShapeDimForVar(const ir::ExprPtr& dim_expr,
                                                      const ir::VarPtr& target_var,
                                                      const std::string& shape_access) const {
-  // Bare var: shape == var  ->  var = shape_access.
-  if (IsTargetVar(dim_expr, target_var)) return shape_access;
-
-  // Add: shape == var + c (either operand order)  ->  var = (shape - c).
-  if (auto add = ir::As<ir::Add>(dim_expr)) {
-    if (IsTargetVar(add->left_, target_var)) {
-      if (auto c = ConstIntFromShapeExpr(add->right_)) {
-        return "(" + shape_access + " - " + std::to_string(*c) + ")";
-      }
-    }
-    if (IsTargetVar(add->right_, target_var)) {
-      if (auto c = ConstIntFromShapeExpr(add->left_)) {
-        return "(" + shape_access + " - " + std::to_string(*c) + ")";
-      }
-    }
-    return "";
-  }
-
-  // Sub: shape == var - c  ->  var = (shape + c);
-  //      shape == c - var  ->  var = (c - shape).
-  if (auto sub = ir::As<ir::Sub>(dim_expr)) {
-    if (IsTargetVar(sub->left_, target_var)) {
-      if (auto c = ConstIntFromShapeExpr(sub->right_)) {
-        return "(" + shape_access + " + " + std::to_string(*c) + ")";
-      }
-    }
-    if (IsTargetVar(sub->right_, target_var)) {
-      if (auto c = ConstIntFromShapeExpr(sub->left_)) {
-        return "(" + std::to_string(*c) + " - " + shape_access + ")";
-      }
-    }
-    return "";
-  }
-
-  // Mul is commutative: shape == var * c (either order)  ->  var = (shape // c).
-  // Integer ``//`` (not ``/``) keeps the recovered dim int-typed for slice
-  // bounds. ``c == 0`` is rejected (non-invertible).
-  if (auto mul = ir::As<ir::Mul>(dim_expr)) {
-    if (IsTargetVar(mul->left_, target_var)) {
-      if (auto c = ConstIntFromShapeExpr(mul->right_); c && *c != 0) {
-        return "(" + shape_access + " // " + std::to_string(*c) + ")";
-      }
-    }
-    if (IsTargetVar(mul->right_, target_var)) {
-      if (auto c = ConstIntFromShapeExpr(mul->left_); c && *c != 0) {
-        return "(" + shape_access + " // " + std::to_string(*c) + ")";
-      }
-    }
-    return "";
-  }
-
-  // FloorDiv is non-commutative: only shape == var // c inverts (to
-  // var = shape * c). ``c // var`` is not uniquely invertible against a runtime
-  // shape, so ``(c, var)`` is rejected.
-  if (auto fdiv = ir::As<ir::FloorDiv>(dim_expr)) {
-    if (IsTargetVar(fdiv->left_, target_var)) {
-      if (auto c = ConstIntFromShapeExpr(fdiv->right_); c && *c != 0) {
-        return "(" + shape_access + " * " + std::to_string(*c) + ")";
-      }
-    }
-    return "";
-  }
-
-  return "";
+  return codegen::InvertShapeDimForVar(dim_expr, target_var, shape_access, ShapeInvertDialect::kPython);
 }
 
 void DistributedCodegen::EmitHostOrchDynamicDimBindings(const ir::FunctionPtr& func) {
@@ -482,12 +401,9 @@ void DistributedCodegen::EmitHostOrchDynamicDimBindings(const ir::FunctionPtr& f
           dyn_var_best.emplace(key, DimSource{dyn_var, param_name, static_cast<int>(dim_idx), dim});
           continue;
         }
-        // Upgrade source if the previously-seen dim is non-invertible and this
-        // one is, so a symbol first seen in a non-invertible form still gets
-        // pinned to a recoverable shape.
-        const bool prev_invertible = !InvertShapeDimForVar(it->second.expr, it->second.var, "S").empty();
-        const bool cur_invertible = !InvertShapeDimForVar(dim, dyn_var, "S").empty();
-        if (!prev_invertible && cur_invertible) {
+        // Prefer a more faithful recovery source (bare K over FloorDiv(K,2)).
+        if (codegen::ShapeDimInvertRank(dim, dyn_var) >
+            codegen::ShapeDimInvertRank(it->second.expr, it->second.var)) {
           it->second = DimSource{dyn_var, param_name, static_cast<int>(dim_idx), dim};
         }
       }
