@@ -171,7 +171,10 @@ def _describe_tensor(tensor: torch.Tensor, info: ParamInfo, index: int, npu: Any
         raise ValueError(
             f"Parameter {info.name!r} has an invalid logical data pointer for its storage offset"
         )
-    device = tensor.device.index
+    # torch's stubs type device.index as ``int`` and pyright narrows on
+    # assignment, but it is None at runtime for an unindexed device ("cpu",
+    # "npu"); the cast keeps the guard below meaningful.
+    device = cast("int | None", tensor.device.index)
     if device is None or device < 0:
         raise ValueError(f"Parameter {info.name!r} requires an indexed NPU device, got {tensor.device}")
     metadata = TensorMetadata(

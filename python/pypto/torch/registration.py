@@ -16,8 +16,8 @@ public kernel-mode registration are deliberately supplied by later integration.
 import ctypes
 import keyword
 import re
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Callable, Sequence
+from typing import Any, cast
 
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
@@ -28,6 +28,11 @@ from pypto.pypto_core.ir import ParamDirection
 from .interop import _scalar_value
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+# torch._check is private API: typed in newer torch stubs, Unknown under the
+# 2.8.0 the pre-commit hook pins. Resolve it through getattr so both surfaces
+# check the calls identically instead of trading ignore comments across versions.
+_torch_check = cast("Callable[[object, Callable[[], str]], None]", getattr(torch, "_check"))
 
 
 def _check_name(name: str) -> None:
@@ -60,8 +65,8 @@ def _check_scalar(value: Any, info: ParamInfo) -> None:
             minimum, maximum = (-(1 << (bits - 1)), (1 << (bits - 1)) - 1) if signed else (0, (1 << bits) - 1)
             # torch's stubs lack int comparison overloads on the symbolic union;
             # SymInt/SymFloat/SymBool all support them at runtime.
-            torch._check(value >= minimum, lambda: f"Parameter {info.name!r} is below {info.dtype} range")  # pyright: ignore[reportOperatorIssue]
-            torch._check(value <= maximum, lambda: f"Parameter {info.name!r} exceeds {info.dtype} range")  # pyright: ignore[reportOperatorIssue]
+            _torch_check(value >= minimum, lambda: f"Parameter {info.name!r} is below {info.dtype} range")  # pyright: ignore[reportOperatorIssue, reportUnknownArgumentType]
+            _torch_check(value <= maximum, lambda: f"Parameter {info.name!r} exceeds {info.dtype} range")  # pyright: ignore[reportOperatorIssue, reportUnknownArgumentType]
         return
     if type(value) not in (int, float, bool):
         raise TypeError(f"Parameter {info.name!r} expects a {kind} scalar, got {type(value).__name__}")
@@ -164,7 +169,7 @@ class RegistrationSignature:
                 raise ValueError(f"Parameter {info.name!r} expects rank {len(info.shape)}, got {arg.ndim}")
             for expected, actual in zip(info.shape, arg.shape, strict=True):
                 if expected != -1:
-                    torch._check(
+                    _torch_check(
                         actual == expected, lambda: f"Parameter {info.name!r} has incompatible shape"
                     )
         result = tuple(bound[index] for index in self._return_aliases)

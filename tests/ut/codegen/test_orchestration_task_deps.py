@@ -1386,7 +1386,7 @@ def test_compiler_dep_carry_array_sized_by_outer_loop_trip_count():
             return x
 
         @pl.function(type=pl.FunctionType.Orchestration)
-        def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:  # pyright: ignore[reportReturnType] — DSL body: the parser collects the return paths; pyright cannot see them all
             with pl.manual_scope():
                 prev = pl.system.task_invalid()
                 for _i in pl.range(M):

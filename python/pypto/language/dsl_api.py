@@ -15,9 +15,10 @@ from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union, cast, overload
 
 if TYPE_CHECKING:
-    from pypto.language.typing import Array, Scalar, Tensor, Tile
+    from pypto.language.typing import Array, Tensor, Tile
     from pypto.pypto_core import ir
 
+from pypto.language.typing.scalar import Scalar
 from pypto.pypto_core import ir as _ir
 
 from .optimizations import Optimization
@@ -867,7 +868,7 @@ class SpmdContext:
 
 
 def spmd(
-    core_num: RangeArg,
+    core_num: int | Scalar | _ir.Expr,
     *,
     sync_start: bool = False,
     name_hint: str = "",
@@ -933,7 +934,8 @@ def spmd(
 
     Args:
         core_num: Number of blocks for SPMD dispatch. Positional; accepts a
-            Python ``int`` or any ``ir.Expr`` of integer type. Closure-captured
+            Python ``int``, a ``Scalar`` facade, or any ``ir.Expr`` of integer
+            type. Closure-captured
             integer constants and closure arithmetic are folded to ``ConstInt``
             by the parser and ``Simplify``; non-foldable expressions flow
             through to codegen unchanged. Pass
@@ -1046,8 +1048,18 @@ def spmd(
         >>> with pl.spmd(4, deps=[gate_tid], predicate=(row_count[0, 0] > 0)) as tid:
         ...     out = self.expert(x, out)
     """
-    if isinstance(core_num, bool) or not isinstance(core_num, (int, _ir.Expr)):
-        raise ValueError(f"core_num must be a positive integer or ir.Expr, got {core_num!r}")
+    # A Scalar facade (``pl.min`` and friends return Scalar) carries the
+    # count as its wrapped expression; unwrap before validation so traced
+    # bodies can size a launch off a computed count.
+    if isinstance(core_num, Scalar):
+        core_num = core_num.unwrap()
+    # bool is an int subclass and must not pose as a core count; the isinstance
+    # pair is a mistyped-input guard (the annotation is the contract).
+    if (
+        not isinstance(core_num, (int, _ir.Expr))  # pyright: ignore[reportUnnecessaryIsInstance]
+        or isinstance(core_num, bool)
+    ):
+        raise ValueError(f"core_num must be a positive int, a Scalar, or an ir.Expr, got {core_num!r}")
     if isinstance(core_num, int) and core_num <= 0:
         raise ValueError(f"core_num must be a positive integer, got {core_num!r}")
     return SpmdContext(

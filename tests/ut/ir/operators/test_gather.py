@@ -29,6 +29,8 @@ the PTO IR manual, ``pto.tgather`` index-form checks):
 * ``dst`` dtype equals ``src``; ``dst`` shape equals ``indices``.
 """
 
+from typing import Any
+
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir
@@ -290,8 +292,10 @@ class TestGatherWrapperDelegation:
         span = ir.Span.unknown()
         src = ir.Var("src", ir.TensorType([2, 32], DataType.FP32), span)
         idx = ir.Var("idx", ir.TensorType([2, 16], DataType.INT32), span)
-        ir_options = options if "mask_pattern" in options else {**options, "index": idx}
-        dsl_options = options if "mask_pattern" in options else {**options, "index": pl.Tensor(expr=idx)}
+        ir_options: dict[str, Any] = options if "mask_pattern" in options else {**options, "index": idx}
+        dsl_options: dict[str, Any] = (
+            options if "mask_pattern" in options else {**options, "index": pl.Tensor(expr=idx)}
+        )
         actual = pl.gather(pl.Tensor(expr=src), **dsl_options)
         assert isinstance(actual, pl.Tensor)
         ir.assert_structural_equal(actual.unwrap(), tensor.gather(src, **ir_options))
@@ -301,8 +305,13 @@ class TestGatherWrapperDelegation:
         span = ir.Span.unknown()
         src = ir.Var("src", ir.TensorType([2, 32], DataType.FP32), span)
         kv = ir.ConstFloat(1.0, DataType.FP32, span)
-        threshold = {"dsl": pl.Scalar(expr=kv), "ir": kv, "literal": 1.0}[scalar_form]
-        options = {"cmp_mode": "gt", "out_cols": 8, "offset": 4, "count_dtype": DataType.UINT32}
+        threshold: Any = {"dsl": pl.Scalar(expr=kv), "ir": kv, "literal": 1.0}[scalar_form]
+        options: dict[str, Any] = {
+            "cmp_mode": "gt",
+            "out_cols": 8,
+            "offset": 4,
+            "count_dtype": DataType.UINT32,
+        }
         actual = pl.gather(pl.Tensor(expr=src), kvalue=threshold, **options)
         expected = tensor.gather(src, kvalue=kv, **options)
         assert isinstance(actual, tuple) and len(actual) == 2

@@ -344,7 +344,7 @@ def test_manual_scope_with_submit_suppresses_inner_for_wrap():
             return a
 
         @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
-        def orch(self, a: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:
+        def orch(self, a: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:  # pyright: ignore[reportReturnType] — DSL body: the parser collects the return paths; pyright cannot see them all
             with pl.scope():
                 with pl.manual_scope():
                     for i in pl.range(4):

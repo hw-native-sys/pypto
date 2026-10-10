@@ -172,18 +172,22 @@ def resolve_persistent(
         reason = extra.failure or "; ".join(f"{f.component}: {f.reason}" for f in identity.failures)
         _bypass(reason)
         return build()
+    specialization: str | None = None
+    specialization_failure: str | None = None
     with time_stage("lookup_ns"):
         kind = BuildKind.DISTRIBUTED if distributed else BuildKind.SINGLE_CHIP
         source_before = source()
         try:
             specialization = _specialization_digest(object_key)
         except Exception as exc:
-            identity_failure = f"Specialization identity unavailable: {exc}"
-        else:
-            identity_failure = None
-    if identity_failure is not None:
-        _bypass(identity_failure)
+            specialization_failure = f"Specialization identity unavailable: {exc}"
+    if specialization_failure is not None:
+        # Same fallback as an unusable toolchain identity above: record the
+        # bypass and fall back to a plain, uncached build. Outside the timing
+        # block, so the uncached build is not charged to lookup_ns.
+        _bypass(specialization_failure)
         return build()
+    assert specialization is not None  # bound exactly when the digest succeeded
     with time_stage("lookup_ns"):
         semantic = _semantic_environment()
         compatible = (

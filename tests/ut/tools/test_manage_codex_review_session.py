@@ -12,6 +12,7 @@ import importlib.util
 import json
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -36,7 +37,7 @@ def manager(monkeypatch):
 @pytest.fixture
 def state(manager, monkeypatch):
     """Model serialized host operations; only the exact PR's two volumes may be touched."""
-    state = {
+    state: dict[str, Any] = {
         "pr": {
             "number": 12,
             "state": "OPEN",

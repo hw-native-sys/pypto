@@ -600,7 +600,7 @@ class TestAnnotationLayoutReachesTheProgram:
 
         span = exc_info.value.span
         assert span is not None
-        assert span["filename"].endswith("test_jit_compile_extraction.py")
+        assert str(span["filename"]).endswith("test_jit_compile_extraction.py")
 
 
 @jit.incore

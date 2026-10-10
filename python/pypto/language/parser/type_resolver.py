@@ -1190,9 +1190,8 @@ class TypeResolver:
     def _resolve_tuple_subscript_type(self, subscript_node: ast.Subscript) -> ir.TupleType:
         """Resolve pl.Tuple[T1, T2, ...] or pl.Tuple[()] annotation to ir.TupleType."""
         slice_value = subscript_node.slice
-        # Handle empty tuple: pl.Tuple[()]
-        if isinstance(slice_value, ast.Constant) and slice_value.value == ():
-            return ir.TupleType([])
+        # Handle empty tuple: pl.Tuple[()] — in parsed source ``()`` is always an
+        # ast.Tuple with zero elements, never an ast.Constant.
         if isinstance(slice_value, ast.Tuple) and len(slice_value.elts) == 0:
             return ir.TupleType([])
         elts = slice_value.elts if isinstance(slice_value, ast.Tuple) else [slice_value]

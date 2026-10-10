@@ -219,6 +219,18 @@ class Scalar(metaclass=ScalarMeta):
         return Scalar(expr=other >> self.unwrap())
 
     # ------------------------------------------------------------------
+    # Unary operators — mirror the AST parser's supported set
+    # (parse_unaryop: USub → ir.neg, Invert → ir.bit_not; UAdd is rejected
+    # by the AST, so ``+scalar`` stays a Python TypeError here too).
+    # ------------------------------------------------------------------
+
+    def __neg__(self) -> "Scalar":
+        return Scalar(expr=-self.unwrap())
+
+    def __invert__(self) -> "Scalar":
+        return Scalar(expr=~self.unwrap())
+
+    # ------------------------------------------------------------------
     # Comparison operators — return Scalar wrapping the IR comparison node.
     # ------------------------------------------------------------------
 

@@ -10,6 +10,7 @@
 """Regression tests for compiled kernel binary cache identity."""
 
 import importlib
+from typing import Any
 
 import pytest
 from pypto._external_source import kernel_binary_cache_path
@@ -32,7 +33,7 @@ class _Compiler:
         return f"{kwargs['core_type']} binary".encode()
 
 
-def _kernel(source, core_type, func_id):
+def _kernel(source, core_type, func_id) -> dict[str, Any]:
     return {
         "source": str(source),
         "core_type": core_type,

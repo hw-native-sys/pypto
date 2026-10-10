@@ -43,11 +43,13 @@ _TORCH_DTYPE_NAMES: dict[torch.dtype, str] = {
     torch.uint8: "torch.uint8",
     torch.bool: "torch.bool",
 }
-for _name in ("uint16", "uint32", "uint64"):
-    _dt = getattr(torch, _name, None)
-    if _dt is not None:
-        _TORCH_DTYPE_NAMES[_dt] = f"torch.{_name}"
-del _name, _dt
+_TORCH_DTYPE_NAMES.update(
+    {
+        dt: f"torch.{name}"
+        for name in ("uint16", "uint32", "uint64")
+        if (dt := getattr(torch, name, None)) is not None
+    }
+)
 
 
 def write_run_script(
@@ -174,11 +176,9 @@ _INT_DTYPES: set[torch.dtype] = {
     torch.int64,
     torch.uint8,
 }
-for _uint_name in ("uint16", "uint32", "uint64"):
-    _uint_dt = getattr(torch, _uint_name, None)
-    if _uint_dt is not None:
-        _INT_DTYPES.add(_uint_dt)
-del _uint_name, _uint_dt
+_INT_DTYPES.update(
+    dt for name in ("uint16", "uint32", "uint64") if (dt := getattr(torch, name, None)) is not None
+)
 
 
 def _init_expr_for(p: ParamInfo) -> str:
