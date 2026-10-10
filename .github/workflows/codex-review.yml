@@ -19,6 +19,7 @@ on:
 permissions: {}
 
 env:
+  # This digest contains Codex CLI 0.161.0, verified with gpt-6.1-sol.
   CODEX_REVIEW_IMAGE: localhost:5000/pypto-codex-review@sha256:518e4bd03afaad04fd1a65df32f75b8a6ec2d4cdfc34f200bf0d2b9c8d7b69c6
   CODEX_PROXY_IMAGE: localhost:5000/pypto-codex-proxy@sha256:632f77b3544d5c663cb08ac48b2150a7bfa6cb9bac0852fbcf620b1d4e284a6b
   CODEX_EGRESS_NETWORK: pypto-codex-egress
