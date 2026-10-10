@@ -2069,8 +2069,8 @@ jobs:
     # first per-PR run of those paths on real A5 silicon.
     #
     # --- mixed-kernel-tests-a5 ---
-    # Scope — cross_core/test_cross_core.py, already validated on the a5 profile
-    # elsewhere (it runs on a5sim in the job below), so a red result here means a
+    # Scope — cross_core/test_cross_core.py plus the A5 transpose-view regression,
+    # already validated on the a5 profile, so a red result here means a
     # regression and not an unvalidated combination: V<->C tpush/tpop over all
     # three split modes (UP_DOWN / LEFT_RIGHT / none), multi-pipe, explicit
     # slot_num (arch-aware sizing), bidirectional-in-spmd.
@@ -2198,6 +2198,7 @@ jobs:
           task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 3600 \
             --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && python -m pytest \
               tests/st/runtime/cross_core/test_cross_core.py \
+              tests/st/runtime/cross_core/test_v2c_transpose_view.py \
               -v --forked --platform=a5 --device=\$TASK_DEVICE"
 
       - name: mx-tests-a5
