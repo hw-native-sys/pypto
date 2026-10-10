@@ -2078,20 +2078,18 @@ class Specializer:
             func_def
         )
 
-        # Inline helpers are spliced at the call site before SSA conversion,
-        # so their parameters are already in-place aliases of the caller's
-        # variables — `pl.Out[...]` / `pl.InOut[...]` is redundant ceremony
-        # there. Warn the user so they migrate to bare `pl.Tensor[...]`, and drop
-        # the wrapper from the generated source so downstream passes see the
-        # simpler form.
+        # Inline helpers share the caller's tensor storage, so writes do not
+        # need Out/InOut annotations at this eliminated call boundary. Local
+        # name rebindings remain local; InlineFunctions separates their handles.
+        # Warn on the redundant wrapper and emit bare tensor annotations.
         is_inline = ctx.func_type == "inline"
         if is_inline and (out_params or inout_params):
             warnings.warn(
                 f"@pl.jit.inline helper '{ctx.source_def_name}' uses pl.Out[...]/pl.InOut[...] on "
                 f"parameter(s) {(out_params + inout_params)!r}. Direction annotations are "
                 f"deprecated for inline helpers because the body is spliced at the call "
-                f"site before SSA conversion — the parameter is already an "
-                f"in-place alias of the caller's variable. Drop the wrapper; "
+                f"site before SSA conversion — tensor writes reach the caller's "
+                f"storage while name rebindings stay local. Drop the wrapper; "
                 f"bare pl.Tensor[...] works the same.",
                 DeprecationWarning,
                 stacklevel=2,
@@ -2381,8 +2379,8 @@ class Specializer:
         generated source would fail to parse.
 
         When ``is_inline`` is True, ``pl.Out[...]`` / ``pl.InOut[...]`` wrappers
-        are stripped from tensor params — inline helpers don't have a calling
-        convention boundary, so the direction tag carries no information.
+        are stripped from tensor params — inlining preserves writes to shared
+        storage and separates local name rebindings without a direction tag.
 
         Params listed in ``distributed_params`` round-trip as
         ``pld.DistributedTensor[...]`` and trigger the corresponding import in

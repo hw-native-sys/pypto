@@ -40,6 +40,7 @@
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/result_alias_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
@@ -205,6 +206,98 @@ struct SplicedInlineBody {
 };
 
 using InlineFunctionMap = std::unordered_map<std::string, FunctionPtr>;
+
+// Direct substitution at def-sites is safe only while a shaped parameter keeps
+// naming its own storage. If any definition can change that binding, use one
+// callee-local handle for the entire call, initialized before its control flow.
+// Writes through that handle still alias the argument's storage; value-producing
+// assignments and loop/branch results cannot retarget the caller's variable.
+// Collect this alongside the existing def/use walk, without per-param scans.
+class InlineParamDefCollector : public var_collectors::VarDefUseCollector {
+ public:
+  explicit InlineParamDefCollector(const std::vector<VarPtr>& params) {
+    for (const auto& param : params) {
+      params_.insert(param.get());
+      aliases_.try_emplace(param.get());
+    }
+  }
+
+  // Alias edges are deliberately undirected: a mutable alias may change on a
+  // later loop iteration or in another branch. Only a component whose every
+  // definition preserves one parameter's storage permits direct substitution.
+  // One graph walk handles cycles and backedges in O(nodes + alias edges).
+  std::unordered_set<const Var*> LocalBindings() const {
+    std::unordered_set<const Var*> visited;
+    std::unordered_set<const Var*> result;
+    for (const auto& [start, edges] : aliases_) {
+      if (!visited.insert(start).second) continue;
+      std::vector<const Var*> pending{start};
+      std::vector<const Var*> params;
+      bool changes_value = false;
+      while (!pending.empty()) {
+        const Var* var = pending.back();
+        pending.pop_back();
+        if (params_.count(var)) params.push_back(var);
+        changes_value |= value_defs_.count(var) > 0 || (params_.count(var) == 0 && var_defs.count(var) == 0);
+        for (const Var* source : aliases_.at(var)) {
+          if (visited.insert(source).second) pending.push_back(source);
+        }
+      }
+      if (changes_value || params.size() > 1) result.insert(params.begin(), params.end());
+    }
+    return result;
+  }
+
+ protected:
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    ExprPtr source = op->value_;
+    if (auto call = As<Call>(source)) {
+      auto index = ResultAliasedArgIndex(call);
+      source = index ? call->args_[*index] : nullptr;
+    }
+    auto source_var = AsVarLike(source);
+    aliases_.try_emplace(op->var_.get());
+    if (source_var) {
+      aliases_[op->var_.get()].push_back(source_var.get());
+      aliases_[source_var.get()].push_back(op->var_.get());
+    } else {
+      // Submit results (tuple projections) and unknown calls conservatively
+      // require a local handle; they are not converted into ordinary Calls.
+      value_defs_.insert(op->var_.get());
+    }
+    VarDefUseCollector::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    RecordResults(op->return_vars_);
+    RecordResults(op->iter_args_);
+    VarDefUseCollector::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    RecordResults(op->return_vars_);
+    RecordResults(op->iter_args_);
+    VarDefUseCollector::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    RecordResults(op->return_vars_);
+    VarDefUseCollector::VisitStmt_(op);
+  }
+
+ private:
+  template <typename VarPtrT>
+  void RecordResults(const std::vector<VarPtrT>& vars) {
+    for (const auto& var : vars) {
+      aliases_.try_emplace(var.get());
+      value_defs_.insert(var.get());
+    }
+  }
+
+  std::unordered_set<const Var*> params_;
+  std::unordered_set<const Var*> value_defs_;
+  std::unordered_map<const Var*, std::vector<const Var*>> aliases_;
+};
 
 // Conflicting argument extents may leave a callee dimension unbound. Reject it
 // only if it survives cloning; a helper using just the actual arguments remains
@@ -855,27 +948,27 @@ class InlineCallsMutator : public IRMutator {
         << " argument(s) but callee expects " << callee->params_.size()
         << " (parser/type-checker should have caught arity mismatch before InlineFunctions)";
 
-    var_collectors::VarDefUseCollector def_collector;
+    InlineParamDefCollector def_collector(callee->params_);
     def_collector.VisitStmt(callee->body_);
+    const auto local_bindings = def_collector.LocalBindings();
 
     // 1. Build the seed substitution map for DeepClone:
     //    - Each param Var → its actual-arg Expr. The same substitution is
     //      consulted at both use-sites and def-sites of the param, so a
     //      rebinding `out = pl.assemble(out, ...)` where `out` is a param
     //      becomes `q_out = pl.assemble(q_out, ...)` when the actual arg is
-    //      the Var `q_out` (the natural pre-SSA in-place semantics for
-    //      pl.Out, tensor / tile and Array parameters).
+    //      the Var `q_out` and the shaped binding is proven to keep that
+    //      storage. Array and explicit scalar output conventions are preserved.
     //    - Some actual args are instead bound to a fresh Var ahead of the body,
     //      and that Var is substituted — exactly the IR the parser emits when
     //      the caller names the argument itself (`cr = c[r]; f(x, cr)`):
     //        * A rebound param whose arg is not an assignable Var (a slice
     //          `c[r]`, an IterArg, a computed scalar). Substituting it would put
     //          that Expr on the LHS of the rebinding.
-    //        * A rebound pass-by-value param — a plain scalar that is neither
-    //          `pl.Out` nor `pl.InOut`. Substituting it at the def-site would
-    //          splice the callee's `n = n + 1` onto the caller's own Var, so
-    //          every later read of the caller's argument would see the callee's
-    //          update.
+    //        * A rebound plain scalar, or a tensor / tile whose binding may
+    //          change. The local handle preserves storage writes without
+    //          splicing `t = add(t, t)` onto the caller's own Var. It is bound
+    //          before the body so SSA carries it through branches and loops.
     //        * A computed tensor / tile arg (a `Call`, e.g. `a[r]`). Python
     //          evaluates it once at the call; substituting it would re-evaluate
     //          it at every use, inside the callee's `pl.spmd` / `pl.pipeline` /
@@ -896,28 +989,18 @@ class InlineCallsMutator : public IRMutator {
       const bool rebound = def_collector.var_defs.count(param.get()) > 0;
       const bool computed_shaped =
           As<Call>(actual) && actual_type && (AsTensorTypeLike(actual_type) || As<TileType>(actual_type));
-      // Whether a rebinding of this param is pass-by-value, as in Python, and so
-      // must NOT land on the caller's own Var. Only a plain scalar is: every
-      // other param kind names storage the callee rebinds in place.
-      //   * A tensor / tile / Array param is a handle. Its rebinding IS the
-      //     in-place update — `c[...] = v` parses as
-      //     `c = pl.tensor.assemble(c, ...)` and `a[i] = v` as
-      //     `a = pl.array.update_element(a, i, v)` — so the caller must see it.
-      //     `@pl.jit.inline` strips Out/InOut from shaped params for exactly
-      //     this reason, so direction alone cannot be the test. Binding a
-      //     temporary here is also not merely redundant: it emits a bare
-      //     `arr_inline0 = arr` alias, and orchestration codegen can only
-      //     declare an array Var from `array.create` or an alias onto a backing
-      //     array, never from its type.
-      //   * An explicit `pl.Out` / `pl.InOut` scalar is the author opting in.
-      // Substituting a pass-by-value arg at the *def*-site would splice the
-      // callee's `n = n + 1` onto the caller's Var and silently change every
-      // later read of it.
+      // Scalar value rebinding and shaped-handle rebinding stay callee-local.
+      // Direction alone cannot classify the latter: @pl.jit.inline strips
+      // Out/InOut, and even an explicitly annotated output can be rebound to
+      // a new value without writing its old storage. Array's existing update
+      // convention is separate: a bare array alias is not codegen-declarable.
       const ParamDirection direction = callee->param_directions_[i];
       const TypePtr param_type = param->GetType();
-      const bool pass_by_value_rebind = param_type && As<ScalarType>(param_type) &&
-                                        direction != ParamDirection::Out &&
-                                        direction != ParamDirection::InOut;
+      const bool scalar_value_rebind = As<ScalarType>(param_type) && direction != ParamDirection::Out &&
+                                       direction != ParamDirection::InOut;
+      const bool shaped_value_rebind =
+          (AsTensorTypeLike(param_type) || As<TileType>(param_type)) && local_bindings.count(param.get()) > 0;
+      const bool pass_by_value_rebind = scalar_value_rebind || shaped_value_rebind;
       if ((rebound && (!assignable || pass_by_value_rebind)) || computed_shaped) {
         INTERNAL_CHECK_SPAN(actual_type, actual->span_)
             << "Internal error: argument bound at the call site for inline parameter '" << param->name_hint_
