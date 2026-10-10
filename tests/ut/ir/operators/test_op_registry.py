@@ -1545,6 +1545,7 @@ _IN_PLACE_OPS = [
         "tile.scatter",
         "tile.scatter_mask",
         "tile.scatter_update",
+        "tile.set_validshape",
         "tile.store",
         "tile.tget_scale_addr",
     )

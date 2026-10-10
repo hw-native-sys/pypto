@@ -35,7 +35,7 @@ program_inlined = inline_pass(program)
 2. **Cycle-detect** the Inline → Inline call graph; raise `pypto::ValueError` naming the cycle if one is found.
 3. **Iterate to fixpoint** — each iteration walks every function (including the Inline ones, so that nested Inline-calls-Inline expands transitively):
    - For every top-level `LHS = inline_call(args)` or `EvalStmt(inline_call(args))` in a function body:
-     - Build the param-substitution map (formal `Var` → actual `Expr`). The map applies at use-sites **and** def-sites, so a callee rebinding `out = pl.tensor.assemble(out, ...)` rebinds the caller's actual `Var` — but only for a param that carries an in-place contract (see [Rebinding a parameter](#rebinding-a-parameter)). Three kinds of actual arg are instead bound to a fresh `<param>_inline<counter>` `Var` ahead of the spliced body, and that `Var` is substituted: the arg of a rebound param that is not an assignable `Var` (a slice `c[r]`, an `IterArg`, a computed scalar); the arg of a rebound pass-by-value param (a plain scalar that is neither `pl.Out` nor `pl.InOut`); and any computed tensor / tile arg (a `Call` such as `a[r]`), which Python evaluates once at the call site. Other args — `Var`s bound to read-only params, scalar expressions, constants — are substituted directly, so shape expressions that read a param still fold.
+     - Build the param-substitution map (formal `Var` → actual `Expr`). The map applies at use-sites **and** def-sites, so a callee rebinding `out = pl.tensor.assemble(out, ...)` rebinds the caller's actual `Var` — but only for a param that carries an in-place contract (see [Rebinding a parameter](#rebinding-a-parameter)). Three kinds of actual arg are instead bound to a fresh `<param>_inline<counter>` `Var` ahead of the spliced body, and that `Var` is substituted: the arg of a rebound param that is not an assignable `Var` (a slice `c[r]`, an `IterArg`, a computed scalar); the arg of a rebound pass-by-value param (a plain scalar that is neither `pl.Out` nor `pl.InOut`, or a tensor / tile whose binding may change); and any computed tensor / tile arg (a `Call` such as `a[r]`), which Python evaluates once at the call site. Other args — `Var`s bound to read-only params, scalar expressions, constants — are substituted directly, so shape expressions that read a param still fold.
      - Bind dynamic symbols in callee parameter types to the actual argument shapes and view metadata, reusing the binding collector for cross-function return types. The bound expressions belong to the caller and are substituted verbatim. Inlining preserves each actual argument's type without imposing the repeated-dimension equality check for surviving calls: a helper may accept logical and padded buffers under one symbolic annotation. Conflicting extents are resolved per operation from its actual operands rather than choosing one global binding.
      - Alpha-rename every locally-bound `Var` in the inlined body to a fresh name (`<orig>_inline<counter>`, with any trailing `_` trimmed off `<orig>`) to avoid collisions across multiple call sites. `DeepClone` creates these locals with their types remapped, including loop/branch results; seeded caller arguments remain unchanged. For example, a callee local with shape `[N, 4]` becomes `[caller_extent, 4]` when its input has that shape, so no callee-only `N` survives in the caller.
      - In the existing `InlineCallsMutator` traversal, visit each cloned body before wiring its return values into the caller. Reuse the same variable map for receivers and downstream uses, without a separate whole-caller specialization walk. Specialize dynamic operation and writeback results through the operator registry, preserving allocation metadata, tile memory space and call attributes. Derive locals from their first assignment using the same `GetAuthoritativeAssignmentType` rule as SSA: known variable, shaped and tuple RHS types supply shape/dtype/view metadata; otherwise retain the LHS type, and preserve an LHS MemRef when the chosen type lacks one. Derive `For`/`While` tensor carries from their actual initializer, and merge results from the corresponding values. Propagate returned types to receivers and downstream uses, including `Submit` results and dependencies, while preserving subsequent rebinding identity. Reject any callee-only dimension still unresolved after specialization; explicitly using an ambiguous dimension requires distinct formal symbols.
@@ -116,13 +116,30 @@ The scope is preserved verbatim and gets outlined by `OutlineIncoreScopes` later
 
 ## Rebinding a parameter
 
-Because substitution reaches def-sites, a callee that rebinds one of its own parameters could land that rebinding on the caller's `Var`. Whether it *should* depends on the parameter's calling convention:
+Tensor storage is shared with the caller, but assigning a new value to a callee's parameter name must not rebind the caller's name. A definition/use walk records alias edges and value-producing definitions before cloning. A linear walk over the alias graph permits direct substitution only when all definitions preserve one parameter's storage; conflicting origins, branches and loop backedges conservatively require a local binding:
 
-| Parameter | Rebinding lands on | Why |
-| --------- | ------------------ | --- |
-| `pl.Out[...]` / `pl.InOut[...]` | the caller's `Var` | The author opted into the in-place contract explicitly. |
-| Any tensor / tile / `Array` param | the caller's `Var` | These params are *handles*, and the rebinding **is** the in-place update: `c[...] = v` parses as `c = pl.tensor.assemble(c, ...)` and `a[i] = v` as `a = pl.array.update_element(a, i, v)`. `@pl.jit.inline` strips `pl.Out` / `pl.InOut` from shaped params for exactly this reason, so direction alone cannot be the test. Binding a temporary here would also emit a bare `arr_inline0 = arr` alias, which orchestration codegen cannot declare — an array `Var` comes from `array.create` or an alias onto a backing array, never from its type. |
-| A plain scalar | a fresh `<param>_inline<counter>` `Var` | Pass-by-value, as in Python. |
+| Parameter / definitions | Rebinding lands on | Why |
+| ----------------------- | ------------------ | --- |
+| Tensor / tile with only proven self-updates, such as `t = pl.tensor.assemble(t, x, [0])` | the caller's `Var` | The result aliases the current destination according to `ResultAliasedArgIndex`. This also preserves existing `set_validshape` refinement behavior. |
+| Tensor / tile with any other definition, including `t = pl.add(t, t)`, `t = other`, or a control-flow result | a fresh `<param>_inline<counter>` `Var` | The callee may change which value its parameter names. This applies regardless of `Out` / `InOut`. |
+| `Array` | the caller's `Var` | Preserve the existing element-update convention; orchestration codegen cannot declare a bare array alias. |
+| An explicit `pl.Out` / `pl.InOut` scalar | the caller's `Var` | Preserve the explicit scalar calling convention. |
+| A plain scalar | a fresh `<param>_inline<counter>` `Var` | Its rebinding is local. |
+
+For a shaped parameter that needs a local binding, initialize that binding once before the entire spliced body. Writes through it still reach the argument's storage until the local name is rebound to another value. Branches and loops carry this local handle through ordinary SSA conversion, including zero-iteration loops. Unknown results and aliases with conflicting definitions conservatively use a local binding too; an operator's ability to reuse an input buffer (`IsInplaceSafe`) alone does not establish a writeback contract.
+
+Call-site `pl.dump_tag` selections follow these local parameter bindings into scopes and nested dispatches, including `pl.submit` and `pl.spmd_submit`. The tags are transferred before recursively expanding nested inline calls, so each helper can map the selection through its own local handles. Submit nodes retain their launch attributes, task dependencies, and existing dump selections.
+
+For example, an inline helper containing `t = pl.add(t, t); return t`, called as `u = self.twice(a)`, expands to:
+
+```python
+t_inline0 = a
+t_inline0 = pl.add(t_inline0, t_inline0)
+u = t_inline0
+w = pl.add(a, u)                         # original a + doubled result
+```
+
+The last line computes `3A`, rather than replacing the caller's `a` and computing `4A`. `@pl.jit.inline` still accepts bare tensor parameters: its straight-line alpha-renaming can already separate local bindings, but loop-body assignments also need this pass's protection.
 
 The last row is the one that is easy to get wrong. Given:
 

@@ -35,7 +35,7 @@ program_inlined = inline_pass(program)
 2. **环检测** Inline → Inline 调用图;若发现环,抛出 `pypto::ValueError` 并在消息中标明环路径。
 3. **迭代到不动点** — 每次迭代遍历所有函数(包括 Inline 函数本身,以便嵌套的 Inline-calls-Inline 也能传递展开):
    - 对函数体中每个顶层 `LHS = inline_call(args)` 或 `EvalStmt(inline_call(args))`:
-     - 构建参数替换映射(形参 `Var` → 实参 `Expr`)。该映射同时作用于使用点**和**定义点,因此被调函数中的重绑定 `out = pl.tensor.assemble(out, ...)` 会重绑定调用方的实参 `Var` —— 但仅限于带有原地(in-place)契约的形参(见[重绑定形参](#重绑定形参))。有三类实参会先在展开体之前绑定到新的 `<param>_inline<counter>` `Var`,再用该 `Var` 替换:被重绑定形参的非可赋值 `Var` 实参(切片 `c[r]`、`IterArg`、计算得到的标量);被重绑定的按值传递形参的实参(即既非 `pl.Out` 也非 `pl.InOut` 的普通标量);以及任何计算得到的 tensor / tile 实参(如 `a[r]` 这样的 `Call`),Python 在调用点对其只求值一次。其余实参 —— 绑定到只读形参的 `Var`、标量表达式、常量 —— 仍直接替换,因此读取形参的形状表达式仍可折叠。
+     - 构建参数替换映射(形参 `Var` → 实参 `Expr`)。该映射同时作用于使用点**和**定义点,因此被调函数中的重绑定 `out = pl.tensor.assemble(out, ...)` 会重绑定调用方的实参 `Var` —— 但仅限于带有原地(in-place)契约的形参(见[重绑定形参](#重绑定形参))。有三类实参会先在展开体之前绑定到新的 `<param>_inline<counter>` `Var`,再用该 `Var` 替换:被重绑定形参的非可赋值 `Var` 实参(切片 `c[r]`、`IterArg`、计算得到的标量);被重绑定的按值传递形参的实参(即既非 `pl.Out` 也非 `pl.InOut` 的普通标量,或绑定可能改变的 tensor / tile);以及任何计算得到的 tensor / tile 实参(如 `a[r]` 这样的 `Call`),Python 在调用点对其只求值一次。其余实参 —— 绑定到只读形参的 `Var`、标量表达式、常量 —— 仍直接替换,因此读取形参的形状表达式仍可折叠。
      - 复用跨函数返回类型的绑定收集逻辑,将被调函数形参类型中的动态符号绑定到实参的形状和视图元数据。绑定后的表达式属于调用方,替换时保持原样。内联保留各实参自身的类型,不会施加保留函数调用时的重复维度相等检查:辅助函数可以用同一个符号标注逻辑缓冲区和填充后的缓冲区。尺寸冲突时,根据每个算子的实际操作数分别推导结果,不任意选择一个全局绑定。
      - 对内联体中每个本地绑定的 `Var` 做 alpha 重命名(`<orig>_inline<counter>`,并去掉 `<orig>` 末尾的 `_`),避免多个调用点之间冲突。`DeepClone` 创建这些局部变量时同步重映射其类型,包括循环和分支结果;映射中预置的调用方实参保持不变。例如,当输入的实参形状为 `[caller_extent, 4]` 时,被调函数中形状为 `[N, 4]` 的局部变量会变为 `[caller_extent, 4]`,不会在调用方留下仅属于被调函数的 `N`。
      - 在现有 `InlineCallsMutator` 遍历中先访问克隆体,再将返回值接入调用方。接收变量和后续使用复用同一份变量映射,无需单独扫描整个调用方进行类型特化。通过算子注册表重新推导动态算子和写回操作的结果,保留分配元数据、tile 内存空间及调用属性。首次赋值与 SSA 共用 `GetAuthoritativeAssignmentType` 规则推导局部变量类型:右侧为类型已知的变量、带形状值或元组时,采用右侧的形状、数据类型和视图元数据;否则保留左侧类型,且选定类型缺少 MemRef 时补回左侧的 MemRef。根据实际初始值推导 `For`/`While` 携带的 tensor 类型,并更新相应合流结果。将返回类型传播到接收变量及后续使用,包括 `Submit` 结果和依赖,同时保留后续重绑定的变量身份。若特化后仍残留无法解析的被调函数专属维度,则报错;需要显式使用有歧义的维度时应使用不同形参符号。
@@ -116,15 +116,32 @@ scope 被原样保留,稍后由 `OutlineIncoreScopes` 提取为独立的 InCore 
 
 ## 重绑定形参
 
-由于替换会作用到定义点,被调函数对自身形参的重绑定有可能落到调用方的 `Var` 上。是否*应该*落上去,取决于该形参的调用约定:
+Tensor 存储与调用方共享,但给被调函数的形参名赋新值不能重绑定调用方的名字。克隆前通过一次定义/使用遍历记录别名边和值定义。线性遍历别名图,仅在所有定义都保持同一个形参存储时允许直接替换;来源冲突、分支和循环回边均保守地使用局部绑定:
 
-| 形参 | 重绑定落在 | 原因 |
-| ---- | ---------- | ---- |
-| `pl.Out[...]` / `pl.InOut[...]` | 调用方的 `Var` | 作者显式选择了原地契约。 |
-| 任意 tensor / tile / `Array` 形参 | 调用方的 `Var` | 这些形参是*句柄*,其重绑定**就是**那次原地更新:`c[...] = v` 解析为 `c = pl.tensor.assemble(c, ...)`,`a[i] = v` 解析为 `a = pl.array.update_element(a, i, v)`。`@pl.jit.inline` 正因如此会剥掉带形状形参上的 `pl.Out` / `pl.InOut`,所以不能仅凭方向(direction)判断。此处若绑定临时变量,还会产生裸的 `arr_inline0 = arr` 别名,而 orchestration codegen 无法声明它 —— array `Var` 只能来自 `array.create` 或对已有后备数组的别名,绝不能由其类型声明。 |
-| 普通标量 | 新的 `<param>_inline<counter>` `Var` | 按值传递,与 Python 一致。 |
+| 形参 / 定义 | 重绑定落在 | 原因 |
+| ----------- | ---------- | ---- |
+| 仅有已证明自更新的 tensor / tile,例如 `t = pl.tensor.assemble(t, x, [0])` | 调用方的 `Var` | `ResultAliasedArgIndex` 声明结果与当前目标共享存储。也保留现有 `set_validshape` 精化行为。 |
+| 含其他任意定义的 tensor / tile,包括 `t = pl.add(t, t)`、`t = other` 或控制流结果 | 新的 `<param>_inline<counter>` `Var` | 被调函数可能改变形参指向的值。无论是否标注 `Out` / `InOut` 都适用。 |
+| `Array` | 调用方的 `Var` | 保留现有元素更新约定;编排代码生成无法声明裸数组别名。 |
+| 显式 `pl.Out` / `pl.InOut` 标量 | 调用方的 `Var` | 保留显式标量调用约定。 |
+| 普通标量 | 新的 `<param>_inline<counter>` `Var` | 重绑定保持局部。 |
 
-最后一行最容易出错。给定:
+需要局部绑定的带形状形参会在整个展开体之前初始化一次。在局部名字绑定到其他值之前,通过它写入仍会到达实参的存储。分支和循环通过常规 SSA 转换携带该局部句柄,包括零次迭代的循环。未知结果和定义存在冲突的别名也保守地使用局部绑定;仅凭算子可以复用输入缓冲区(`IsInplaceSafe`)无法建立写回契约。
+
+调用点的 `pl.dump_tag` 选择会跟随这些局部形参绑定,传入作用域和嵌套调度,包括 `pl.submit` 和 `pl.spmd_submit`。标记在递归展开嵌套内联调用之前转移,因此每个 helper 都可以通过自己的局部句柄映射该选择。Submit 节点保留其启动属性、任务依赖和已有的 dump 选择。
+
+例如,内联 helper 包含 `t = pl.add(t, t); return t`,调用形式为 `u = self.twice(a)`,会展开为:
+
+```python
+t_inline0 = a
+t_inline0 = pl.add(t_inline0, t_inline0)
+u = t_inline0
+w = pl.add(a, u)                         # original a + doubled result
+```
+
+最后一行计算 `3A`,不会替换调用方的 `a` 而算出 `4A`。`@pl.jit.inline` 仍接受普通 tensor 形参:其直线代码的 alpha 重命名已能分离局部绑定,但循环体中的赋值仍需要本 pass 的保护。
+
+普通标量这一行最容易出错。给定:
 
 ```python
 @pl.function(type=pl.FunctionType.Inline)
