@@ -105,8 +105,61 @@ must establish the final base address. Interior members alone are rejected:
 their minimum address cannot prove where the allocation begins. A later
 allocation-fact representation can remove this restriction. PTOAS uses symbolic
 origin zero. Every view must fit within the original capacity, with static
-32-byte-aligned byte offsets, byte counts and physical rows. Strided or boxed
-views and mutable view metadata remain unsupported.
+32-byte-aligned byte offsets, byte counts and physical rows. Boxed views and
+mutable view metadata remain unsupported at the allocation; strided windows
+are defined where they are used (below).
+
+## Windows: slice and assemble
+
+`tile.slice` is a window of its source at possibly runtime offsets, keeping the
+source's row pitch. Its offsets exist only where the slice is written, so the
+window is defined there, not at the allocation, and a relabel of a window is a
+`buffer.reshape` of it at the same place. `tile.assemble` writes in place: the
+source is copied into a window of the result's storage, after copying the
+target into the result when the planner gave them different storage.
+
+```text
+# window = tile.slice(whole, [16, 32], [row, 32]); placed = tile.assemble(canvas, doubled, [16, 0])
+window = buffer.subview(whole_buffer, (row, 32), (16, 32)) : Buffer[[16,32], FP32, Vec]
+buffer.add(window, window, doubled_buffer)
+placed_window = buffer.subview(canvas_buffer, (16, 0), (16, 32)) : Buffer[[16,32], FP32, Vec]
+buffer.copy(doubled_buffer, placed_window)
+```
+
+Every lowered window carries its valid tuple, so PTOAS types each native
+dimension from it. PTOAS cannot legalize a subview of a byte-root relabel, so
+in addressed storage a tile that windows are cut from gets its own allocation
+at its planned address. A source that already is the assembled window was
+written in place and needs no copy. Assembles across memory spaces (the
+fix-pipe Acc to Mat forms) and rank-reducing slices are rejected until their
+recipes exist.
+
+`BufferIR` proves each window disjoint from the destinations written while it
+is read. A runtime-offset window can only be placed within its whole source
+window. When an addressed planner overlaps part of that range with such a
+destination, lowering fails closed instead of guessing that the runtime offset
+avoids it.
+
+## Runtime valid extents
+
+A valid extent that is not a constant (or is the lane-1 `[0, 0]` sentinel)
+makes both descriptor dimensions dynamic, because the native metadata update
+writes both. The allocation starts with its physical extents, and every
+operation that defines such a tile first states the extents it produces with
+`buffer.set_validshape`; `tile.set_validshape` updates the shared handle
+directly. Tiles that name the same storage window and differ only in valid
+extents share one dynamic handle. Windows instead keep per-dimension static or
+dynamic valid extents in their subview, because a view never takes a metadata
+update. A dynamic tile must own its allocation; it cannot share a byte-view
+root.
+
+```text
+# loaded = tile.load(x, [0, 0], [16, 64], [16, cols]); doubled = tile.add(loaded, loaded)
+buffer.set_validshape(loaded_buffer, (16, cols))
+buffer.load(x, (0, 0), (16, cols), loaded_buffer)
+buffer.set_validshape(doubled_buffer, (16, cols))
+buffer.add(loaded_buffer, loaded_buffer, doubled_buffer)
+```
 
 ## Matrix storage and cube recipes
 
@@ -224,8 +277,8 @@ assignments; `FlattenCallExpr` handles nested source expressions beforehand.
 
 ## Initial supported recipes
 
-The current recipes support straight-line kernels, branches and loops with static
-rank-2 dense Vec FP16/BF16/FP32/INT32 tiles with explicit static storage views, static valid extents, ordinary packed ND GM tensors,
+The current recipes support straight-line kernels, branches and loops with
+rank-2 dense Vec FP16/BF16/FP32/INT32 tiles with explicit storage views, use-site windows, static or runtime valid extents, ordinary packed ND GM tensors,
 and default load/store policies, plus the cube path above: Mat loads, Mat to
 Left/Right copies and extracts, matmul/matmul_acc and Acc stores. It converts allocation, create, load, store,
 move, already legalized aliases, and the [typed elementwise recipes](../ir/05-operators.md#typed-buffer-elementwise-recipes).
@@ -234,7 +287,7 @@ FP16/FP32/INT32; BF16 transfer support does not imply arithmetic support.
 Scalar recipe inputs are converted explicitly to the destination dtype before
 Buffer calls are constructed; fill shape/dtype select the destination descriptor.
 
-Helper calls, alternate layouts, dynamic metadata, slots, and
+Helper calls, alternate layouts, slots, and
 other operation recipes are added in subsequent migration slices. Unsupported
 forms fail explicitly. The migration option defaults to false until the
 complete recipe and runtime acceptance matrix is ready.
@@ -252,6 +305,9 @@ and binary persistence, and compiles the resulting PTO with native PTOAS.
 `tests/ut/ir/transforms/test_lower_buffer_views.py` checks authoritative capacity,
 nonzero window offsets, repeated view identity, fail-closed placement diagnostics,
 binary persistence and native compilation on both targets with all three planners.
+It also lowers static and runtime slices, an assemble, and runtime valid extents
+from `tile.load` and `tile.set_validshape`, including the fail-closed partial
+overlap of a runtime window under the addressed planners.
 
 `tests/ut/ir/transforms/test_lower_buffer_matrix.py` lowers explicit and
 auto-tiled cube kernels for FP16, BF16, FP32 and INT8 operands, the three
@@ -268,7 +324,10 @@ the transformed program as `buffer_ir.msgpack` beside the native artifacts.
 `tests/st/runtime/ops/test_buffer_ir.py` provides load/add/mul/store numerical
 cases with orchestration for all three planners, and exact cube cases:
 matmul followed by matmul_acc for FP16/BF16/INT8, a K loop with a runtime
-`init_cond`, an auto-tiled BF16 matmul and a `b_trans` matmul. Run only this targeted file:
+`init_cond`, an auto-tiled BF16 matmul and a `b_trans` matmul. Window and
+valid-extent cases cover a column slice assembled into a new tile, a runtime row
+slice, and runtime valid columns from `tile.load` and `tile.set_validshape`,
+each over four runtime values per artifact. Run only this targeted file:
 
 ```bash
 source .claude/skills/testing/load-env.sh

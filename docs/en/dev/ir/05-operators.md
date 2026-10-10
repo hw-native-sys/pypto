@@ -117,9 +117,13 @@ requires a later recipe. Constant scalar address definitions are evaluated with
 memoization and integer-width checks. Direct emission consumes this verified
 contract without performing allocation or alias analysis.
 
+Table recipes accept dense descriptors whose valid extents are static or
+runtime (`-1`); the native instructions read each handle's current valid
+metadata, which must agree across operands at execution time.
+
 Integer/bitwise operations, `rsqrt` and its optional workspace,
-partial combines, broadcasts, reductions, random generators, other layouts and
-dynamic valid-state recipes remain separate migration work. The public
+partial combines, broadcasts, reductions, random generators and other layouts
+remain separate migration work. The public
 `backend.get_buffer_elementwise_recipe_names()` API returns a sorted independent
 snapshot from this actual table. A listed name denotes the restricted recipe
 above, not every form of that logical operator. Tests exercise public lowering,
