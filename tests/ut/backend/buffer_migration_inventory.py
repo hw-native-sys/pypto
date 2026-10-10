@@ -334,6 +334,9 @@ MIGRATION_FAMILIES = (
         (
             "pld.tile.get",
             "pld.tile.put",
+            "pld.tile.put_async",
+            "pld.tile.async_session",
+            "pld.tile.wait_async_event",
             "pld.tile.remote_load",
             "pld.tile.remote_store",
             "pld.system.notify",

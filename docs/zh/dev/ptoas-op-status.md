@@ -235,10 +235,10 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 | pto.print | cce::printf | internal | ✅ | — | — | — | — | 内部/调试辅助，不独立建 ST |
 | pto.trap | trap | internal | ✅ | — | — | — | — | 内部/调试辅助，不独立建 ST |
 | **通信（14）** |  |  |  |  |  |  |  |  |
-| pto.comm.build_async_session | pto::comm::BuildAsyncSession | comm | ✅ | — | — | — | ❌ | 分布式接口未完成同名 ST |
-| pto.comm.tput_async | TPUT_ASYNC | comm | ✅ | — | — | — | ❌ | 分布式接口未完成同名 ST |
+| pto.comm.build_async_session | pto::comm::BuildAsyncSession | comm | ✅ | — | — | — | ✅ | DSL 接口已落地（`pld.system.async_session`）；同名 ST `test_l3_put_async.py` 已在 onboard a2a3 P=2 通过。SDMA workspace 仅 a2a3；其他平台在 worker 注册阶段失败 |
+| pto.comm.tput_async | TPUT_ASYNC | comm | ✅ | — | — | — | ✅ | DSL 接口已落地（`pld.tensor.put_async`）；同名 ST `test_l3_put_async.py` 已在 onboard a2a3 P=2 通过 |
 | pto.comm.tget_async | TGET_ASYNC | comm | ✅ | — | — | — | ❌ | 分布式接口未完成同名 ST |
-| pto.comm.wait_async_event | AsyncEvent.Wait | comm | ✅ | — | — | — | ❌ | 分布式接口未完成同名 ST |
+| pto.comm.wait_async_event | AsyncEvent.Wait | comm | ✅ | — | — | — | ✅ | DSL 接口已落地（`pld.system.wait_async_event`）；同名 ST `test_l3_put_async.py` 已在 onboard a2a3 P=2 通过 |
 | pto.comm.test_async_event | AsyncEvent.Test | comm | ✅ | — | — | — | ❌ | 分布式接口未完成同名 ST |
 | pto.comm.tput | TPUT | comm | ✅ | — | — | — | ✅ | test_l3_put / remote_store |
 | pto.comm.tget | TGET | comm | ✅ | — | — | — | ✅ | test_l3_get |

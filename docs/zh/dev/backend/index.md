@@ -29,7 +29,7 @@ names = target.get_registered_op_names()
 可通过 `ir.is_op_registered(name)` 区分这些条目。
 
 审核清单位于 `tests/ut/backend/buffer_migration_inventory.py`：
-`MIGRATION_FAMILIES` 将 168 个有效名称分为 22 个算子族，
+`MIGRATION_FAMILIES` 将 171 个有效名称分为 22 个算子族，
 `HISTORICAL_CALLBACKS` 记录 8 个历史回调。注册范围变化时，需要同步更新此模块。
 其校验文件 `tests/ut/backend/test_buffer_migration_inventory.py` 将清单与两个实际后端注册表比较，
 检测名称的新增与删除、重复分类、目标架构变化，以及重新获得 IR 定义的历史回调。
