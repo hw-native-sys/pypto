@@ -1110,6 +1110,9 @@ REGISTER_OP("tile.set_validshape")
     .add_argument("valid_rows", "Number of valid rows (ScalarType INDEX/INT64/UINT64)")
     .add_argument("valid_cols", "Number of valid columns (ScalarType INDEX/INT64/UINT64)")
     .set_output_memory_inherit_input()
+    // Refining metadata preserves the input buffer, just as for tensor.set_validshape.
+    .set_output_reuses_input(0)
+    .no_arg_writes()
     .no_execution_memory_access()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

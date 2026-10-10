@@ -495,9 +495,9 @@ class VarUseCollector : public IRVisitor {
 
 // Transfer an inline call-site's ``kAttrDumpVars`` onto the spliced callee body.
 //
-// The dump entries are caller arg Vars; ``CloneInlineBody`` has already
-// substituted each in for its matching callee param, so a tagged arg consumed
-// inside the callee now appears verbatim in the spliced body. Two carriers are
+// The dump entries include caller arg Vars and any local handles introduced
+// for them by ``CloneInlineBody``. Transfer runs before recursively expanding
+// nested inline calls, so each call can remap its own bindings. Two carriers are
 // stamped (both round-trip and are tracked by Var identity downstream):
 //
 //   * Dispatch scopes (``pl.at`` / ``pl.spmd`` / ``pl.cluster`` / ``pl.graph``)
@@ -942,7 +942,8 @@ class InlineCallsMutator : public IRMutator {
   //      propagate types using the same mappings as subsequent caller uses.
   //   4. Split it into pre-return statements and trailing return values;
   //      reject any non-trailing return.
-  SplicedInlineBody CloneInlineBody(const FunctionPtr& callee, const std::vector<ExprPtr>& args) {
+  SplicedInlineBody CloneInlineBody(const FunctionPtr& callee, const std::vector<ExprPtr>& args,
+                                    std::vector<VarPtr> dump_vars) {
     INTERNAL_CHECK_SPAN(callee->params_.size() == args.size(), callee->span_)
         << "Internal error: inline call to '" << callee->name_ << "' has " << args.size()
         << " argument(s) but callee expects " << callee->params_.size()
@@ -980,6 +981,10 @@ class InlineCallsMutator : public IRMutator {
     //      using the same binding rules as cross-function return-type deduction.
     auto seed = DeduceCallTypeBindings(callee->params_, args);
     std::vector<StmtPtr> arg_bindings;
+    std::unordered_set<const Var*> tagged_args;
+    for (const auto& var : dump_vars) {
+      if (var) tagged_args.insert(var.get());
+    }
     for (size_t i = 0; i < callee->params_.size(); ++i) {
       const VarPtr& param = callee->params_[i];
       ExprPtr actual = args[i];
@@ -1007,6 +1012,9 @@ class InlineCallsMutator : public IRMutator {
             << "' of '" << callee->name_ << "' has no type";
         auto bound = std::make_shared<Var>(FreshName(param->name_hint_), actual_type, actual->span_);
         arg_bindings.push_back(std::make_shared<const AssignStmt>(bound, actual, actual->span_));
+        if (auto var = AsVarLike(actual); var && tagged_args.count(var.get())) {
+          dump_vars.push_back(bound);
+        }
         actual = bound;
       }
       seed[param.get()] = actual;
@@ -1017,6 +1025,12 @@ class InlineCallsMutator : public IRMutator {
     //    Pre-seeding fresh Vars would bypass that remapping: seeded replacements
     //    are intentionally used verbatim to preserve the caller's arguments.
     auto renamed_body = DeepClone(callee->body_, seed, /*clone_def_vars=*/true, FreshName).cloned_body;
+    // Transfer before nested inlining: a nested helper may introduce another
+    // local handle and needs the tag on its call to map that handle in turn.
+    if (!dump_vars.empty()) {
+      InlineDumpVarTransfer attacher(std::move(dump_vars));
+      renamed_body = attacher.VisitStmt(renamed_body);
+    }
     // Preserve seeded caller bindings even when a writeback refines
     // the RHS view; subsequent caller uses must still observe the rebinding.
     for (const auto& param : callee->params_) {
@@ -1224,9 +1238,9 @@ class InlineCallsMutator : public IRMutator {
         call = As<Call>(VisitExpr(call));
         call_dump_vars = call->GetAttr<std::vector<VarPtr>>(kAttrDumpVars);
         if (auto assign = As<AssignStmt>(stmt)) {
-          spliced = SpliceAssignCallSite(callee, call->args_, assign->var_, assign->span_);
+          spliced = SpliceAssignCallSite(callee, call->args_, assign->var_, assign->span_, call_dump_vars);
         } else if (auto eval = As<EvalStmt>(stmt)) {
-          spliced = SpliceInlineCallAsEval(callee, CloneInlineBody(callee, call->args_));
+          spliced = SpliceInlineCallAsEval(callee, CloneInlineBody(callee, call->args_, call_dump_vars));
         }
       }
     }
@@ -1239,18 +1253,11 @@ class InlineCallsMutator : public IRMutator {
           if (auto callee = LookupInlineCallee(call)) {
             call = As<Call>(VisitExpr(call));
             call_dump_vars = call->GetAttr<std::vector<VarPtr>>(kAttrDumpVars);
-            spliced = SpliceInlineCallAsReturn(callee, CloneInlineBody(callee, call->args_), ret->span_);
+            spliced = SpliceInlineCallAsReturn(callee, CloneInlineBody(callee, call->args_, call_dump_vars),
+                                               ret->span_);
           }
         }
       }
-    }
-    // Carry the call-site selective-dump tags onto the spliced scopes — the
-    // inline Call node (which held ``kAttrDumpVars``) is about to be destroyed,
-    // so the dump intent must move onto the surviving scope bodies (see
-    // InlineDumpVarTransfer) to reach the outliner by Var identity.
-    if (spliced.has_value() && !call_dump_vars.empty()) {
-      InlineDumpVarTransfer attacher(std::move(call_dump_vars));
-      for (auto& s : *spliced) s = attacher.VisitStmt(s);
     }
     return spliced;
   }
@@ -1261,8 +1268,9 @@ class InlineCallsMutator : public IRMutator {
   // Function::return_types_ here: an annotation such as ``tuple[T, Scalar]``
   // is one TupleType entry even though the IR ReturnStmt has two values.
   std::vector<StmtPtr> SpliceAssignCallSite(const FunctionPtr& callee, const std::vector<ExprPtr>& args,
-                                            const VarPtr& lhs, const Span& span) {
-    auto body = CloneInlineBody(callee, args);
+                                            const VarPtr& lhs, const Span& span,
+                                            const std::vector<VarPtr>& dump_vars) {
+    auto body = CloneInlineBody(callee, args, dump_vars);
     if (InlineReturnsTuple(callee)) {
       std::vector<ExprPtr> sub;
       auto stmts = SpliceInlineCallAsTupleSub(callee, std::move(body), sub);

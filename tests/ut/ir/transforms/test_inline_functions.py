@@ -1221,6 +1221,107 @@ class TestInlineFunctionsBodyShapes:
 class TestInlineFunctionsDumpMarks:
     """Selective-dump marks (``dump_vars``) on the scopes an Inline body splices in."""
 
+    def test_call_site_tag_follows_local_binding_into_scope(self):
+        """A tagged argument stays selected when the inline parameter is localized."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def helper(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    x = pl.add(x, x)
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                pl.dump_tag(a)
+                r = self.helper(a)
+                return r
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                local = a
+                with pl.at(level=pl.Level.CORE_GROUP, dumps=[local]):
+                    local = pl.add(local, local)
+                r = local
+                return r
+
+        after = passes.inline_functions()(Before)
+        ir.assert_structural_equal(after, Expected)
+        ir.assert_structural_equal(after, pl.parse_program(after.as_python()))
+
+    def test_call_site_tag_follows_local_binding_into_dispatch(self):
+        """A void inline call preserves tags on a nested cross-function dispatch."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def double(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return pl.add(x, x)
+
+            @pl.function(type=pl.FunctionType.Inline)
+            def helper(self, x: pl.Tensor[[64], pl.FP32]):
+                x = self.double(x)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, a: pl.Tensor[[64], pl.FP32]):
+                pl.dump_tag(a)
+                self.helper(a)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def double(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return pl.add(x, x)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, a: pl.Tensor[[64], pl.FP32]):
+                local = a
+                pl.dump_tag(local)
+                local = self.double(local)
+
+        after = passes.inline_functions()(Before)
+        ir.assert_structural_equal(after, Expected)
+        ir.assert_structural_equal(after, pl.parse_program(after.as_python()))
+
+    def test_call_site_tag_follows_nested_local_bindings(self):
+        """A return-position inline call keeps the tag through a second local handle."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def leaf(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    x = pl.add(x, x)
+                return x
+
+            @pl.function(type=pl.FunctionType.Inline)
+            def helper(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                x = self.leaf(x)
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                pl.dump_tag(a)
+                return self.helper(a)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                outer = a
+                inner = outer
+                with pl.at(level=pl.Level.CORE_GROUP, dumps=[inner]):
+                    inner = pl.add(inner, inner)
+                outer = inner
+                return outer
+
+        after = passes.inline_functions()(Before)
+        ir.assert_structural_equal(after, Expected)
+        ir.assert_structural_equal(after, pl.parse_program(after.as_python()))
+
     def test_helper_tag_on_cluster_follows_param_substitution(self):
         """A helper-local ``pl.dump_tag(x)`` lands on its ``pl.cluster`` scope as
         well as on the inner ``pl.at`` carrier; splicing must rename ``x`` to the
@@ -2892,6 +2993,31 @@ class TestInlineFunctionsDynamicShapes:
             @pl.function
             def main(self, out: pl.Tensor[[8, 4], pl.FP32]):
                 out = pl.tensor.set_validshape(out, 3, 4)
+                return out
+
+        after = passes.inline_functions()(Before)
+        ir.assert_structural_equal(after, Expected)
+        ir.assert_structural_equal(passes.convert_to_ssa()(after), passes.convert_to_ssa()(Expected))
+
+    def test_inline_tile_refinement_preserves_caller_rebinding(self):
+        """Tile metadata updates use the same direct writeback contract as tensors."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def refine(self, out: pl.Tile[[8, 4], pl.FP32, pl.TileView(valid_shape=[3, 4])]):
+                out = pl.tile.set_validshape(out, 3, 4)
+
+            @pl.function
+            def main(self, out: pl.Tile[[8, 4], pl.FP32, pl.TileView(valid_shape=[3, 4])]):
+                self.refine(out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, out: pl.Tile[[8, 4], pl.FP32, pl.TileView(valid_shape=[3, 4])]):
+                out = pl.tile.set_validshape(out, 3, 4)
                 return out
 
         after = passes.inline_functions()(Before)

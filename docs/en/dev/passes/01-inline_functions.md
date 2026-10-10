@@ -128,6 +128,8 @@ Tensor storage is shared with the caller, but assigning a new value to a callee'
 
 For a shaped parameter that needs a local binding, initialize that binding once before the entire spliced body. Writes through it still reach the argument's storage until the local name is rebound to another value. Branches and loops carry this local handle through ordinary SSA conversion, including zero-iteration loops. Unknown results and aliases with conflicting definitions conservatively use a local binding too; an operator's ability to reuse an input buffer (`IsInplaceSafe`) alone does not establish a writeback contract.
 
+Call-site `pl.dump_tag` selections follow these local parameter bindings into scopes and nested dispatches. The tags are transferred before recursively expanding nested inline calls, so each helper can map the selection through its own local handles.
+
 For example, an inline helper containing `t = pl.add(t, t); return t`, called as `u = self.twice(a)`, expands to:
 
 ```python
