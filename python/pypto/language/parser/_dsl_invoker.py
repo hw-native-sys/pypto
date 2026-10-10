@@ -28,7 +28,7 @@ to duplicate.
 """
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from pypto.ir.utils import use_parser_span
 from pypto.language.distributed.typing import CommCtx
@@ -119,8 +119,14 @@ def _unwrap_result(value: Any) -> Any:
         value, (Tensor, Tile, Scalar, Array, Ptr, CommCtx, PrefetchAsyncContext, AsyncEvent, AsyncSession)
     ):
         return value.unwrap()
-    if isinstance(value, tuple) and value and all(isinstance(v, (Tensor, Tile, Scalar)) for v in value):
-        unwrapped = tuple(v.unwrap() for v in value)
+    if (
+        isinstance(value, tuple)
+        and value
+        and all(isinstance(v, (Tensor, Tile, Scalar)) for v in cast("tuple[Any, ...]", value))
+    ):
+        # all() proves the element type but cannot narrow; restate it for the unwrap.
+        elems = cast("tuple[Tensor | Tile | Scalar, ...]", value)
+        unwrapped = tuple(v.unwrap() for v in elems)
         common_call: ir.Expr | None = None
         for i, expr in enumerate(unwrapped):
             if not isinstance(expr, ir.TupleGetItemExpr) or expr.index != i:
@@ -134,7 +140,9 @@ def _unwrap_result(value: Any) -> Any:
         if common_call is not None:
             return common_call
         return unwrapped
-    return value
+    # isinstance above narrowed value to a partially-unknown tuple union; the
+    # function's contract is Any, so restate it.
+    return cast("Any", value)
 
 
 def invoke_dsl(

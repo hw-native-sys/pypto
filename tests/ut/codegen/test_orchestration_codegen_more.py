@@ -1527,7 +1527,7 @@ class TestOrchestrationMore:
             span,
         )
 
-        stmts = [
+        stmts: list[ir.Stmt] = [
             ir.AssignStmt(t1_var, static_create_call, span),
             ir.AssignStmt(dyn_n, ir.ConstInt(4, INDEX, span), span),
             ir.AssignStmt(t2_var, dyn_create_call, span),

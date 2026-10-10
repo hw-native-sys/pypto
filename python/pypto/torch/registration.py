@@ -16,8 +16,8 @@ public kernel-mode registration are deliberately supplied by later integration.
 import ctypes
 import keyword
 import re
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Callable, Sequence
+from typing import Any, cast
 
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
@@ -29,10 +29,15 @@ from .interop import _scalar_value
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
+# torch._check is private API: typed in newer torch stubs, Unknown under the
+# 2.8.0 the pre-commit hook pins. Resolve it through getattr so both surfaces
+# check the calls identically instead of trading ignore comments across versions.
+_torch_check = cast("Callable[[object, Callable[[], str]], None]", getattr(torch, "_check"))
+
 
 def _check_name(name: str) -> None:
     """Accept plain dispatcher identifiers without schema punctuation or keywords."""
-    if not isinstance(name, str) or not _IDENTIFIER.fullmatch(name) or keyword.iskeyword(name):
+    if type(name) is not str or not _IDENTIFIER.fullmatch(name) or keyword.iskeyword(name):
         raise ValueError(f"Expected a plain operator or parameter identifier, got {name!r}")
 
 
@@ -58,8 +63,10 @@ def _check_scalar(value: Any, info: ParamInfo) -> None:
             bits = ctypes.sizeof(ctype) * 8
             signed = ctype(-1).value < 0
             minimum, maximum = (-(1 << (bits - 1)), (1 << (bits - 1)) - 1) if signed else (0, (1 << bits) - 1)
-            torch._check(value >= minimum, lambda: f"Parameter {info.name!r} is below {info.dtype} range")
-            torch._check(value <= maximum, lambda: f"Parameter {info.name!r} exceeds {info.dtype} range")
+            # torch's stubs lack int comparison overloads on the symbolic union;
+            # SymInt/SymFloat/SymBool all support them at runtime.
+            _torch_check(value >= minimum, lambda: f"Parameter {info.name!r} is below {info.dtype} range")  # pyright: ignore[reportOperatorIssue, reportUnknownArgumentType]
+            _torch_check(value <= maximum, lambda: f"Parameter {info.name!r} exceeds {info.dtype} range")  # pyright: ignore[reportOperatorIssue, reportUnknownArgumentType]
         return
     if type(value) not in (int, float, bool):
         raise TypeError(f"Parameter {info.name!r} expects a {kind} scalar, got {type(value).__name__}")
@@ -117,7 +124,7 @@ class RegistrationSignature:
     def schema(self, name: str) -> str:
         """Build a schema with explicit mutation and exact input-to-output aliases."""
         _check_name(name)
-        types = []
+        types: list[str] = []
         for index, info in enumerate(self._params):
             if info.shape is None:
                 types.append(_scalar_schema(info))
@@ -162,7 +169,7 @@ class RegistrationSignature:
                 raise ValueError(f"Parameter {info.name!r} expects rank {len(info.shape)}, got {arg.ndim}")
             for expected, actual in zip(info.shape, arg.shape, strict=True):
                 if expected != -1:
-                    torch._check(
+                    _torch_check(
                         actual == expected, lambda: f"Parameter {info.name!r} has incompatible shape"
                     )
         result = tuple(bound[index] for index in self._return_aliases)
@@ -183,5 +190,6 @@ class RegistrationSignature:
                 "Metadata registration requires torch.library.register_fake or impl_abstract support"
             )
         schema = self.schema(name)
-        library.define(schema)
-        register_fake(f"{library.ns}::{name}", self.fake, lib=library)
+        # torch's Library stubs leave define/ns unannotated.
+        library.define(schema)  # pyright: ignore[reportUnknownMemberType]
+        register_fake(f"{library.ns}::{name}", self.fake, lib=library)  # pyright: ignore[reportUnknownMemberType]

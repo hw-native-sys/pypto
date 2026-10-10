@@ -159,8 +159,12 @@ def _fn_taking(*argnames: str):
     def _test(*_args, **_kwargs):
         pass
 
-    _test.__signature__ = inspect.Signature(
-        [inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD) for name in argnames]
+    setattr(
+        _test,
+        "__signature__",
+        inspect.Signature(
+            [inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD) for name in argnames]
+        ),
     )
     return _test
 

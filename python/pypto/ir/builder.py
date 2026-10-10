@@ -18,7 +18,7 @@ import builtins
 import inspect
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, cast
 
 from pypto.pypto_core import DataType, ir
 from pypto.pypto_core.ir import IRBuilder as CppIRBuilder
@@ -1032,7 +1032,7 @@ class ForLoopBuilder(_ReturnVarsAccessor):
             builder: Parent IR builder
         """
         self._builder = builder
-        self._result: ir.ForStmt | None = None
+        self._result = None
         self._iter_args: list[ir.IterArg] = []  # Track iter_args for type inference
         self._return_var_count = 0  # Track number of return_vars added
 
@@ -1146,7 +1146,7 @@ class ForLoopBuilder(_ReturnVarsAccessor):
             ForStmt: The completed for loop IR node
         """
         assert self._result is not None
-        return self._result
+        return cast("ir.ForStmt", self._result)
 
 
 class WhileLoopBuilder(_ReturnVarsAccessor):
@@ -1161,7 +1161,7 @@ class WhileLoopBuilder(_ReturnVarsAccessor):
             builder: Parent IR builder
         """
         self._builder = builder
-        self._result: ir.WhileStmt | None = None
+        self._result = None
         self._iter_args: list[ir.IterArg] = []  # Track iter_args for type inference
         self._return_var_count = 0  # Track number of return_vars added
 
@@ -1293,7 +1293,7 @@ class WhileLoopBuilder(_ReturnVarsAccessor):
             WhileStmt: The completed while loop IR node
         """
         assert self._result is not None
-        return self._result
+        return cast("ir.WhileStmt", self._result)
 
 
 class ScopeBuilder:
@@ -1330,7 +1330,7 @@ class IfStmtBuilder(_ReturnVarsAccessor):
             builder: Parent IR builder
         """
         self._builder = builder
-        self._result: ir.IfStmt | None = None
+        self._result = None
 
     def else_(self, span: ir.Span | None = None) -> None:
         """Begin else branch of the if statement.
@@ -1368,7 +1368,7 @@ class IfStmtBuilder(_ReturnVarsAccessor):
             IfStmt: The completed if statement IR node
         """
         assert self._result is not None
-        return self._result
+        return cast("ir.IfStmt", self._result)
 
 
 class ProgramBuilder:

@@ -36,6 +36,7 @@ import ctypes
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -48,7 +49,7 @@ def _torch_dtype(name: str) -> torch.dtype:
     return dtype
 
 
-def _build_argspec_orch_args(args_spec: list[dict]):
+def _build_argspec_orch_args(args_spec: list[dict[str, Any]]) -> list[Any]:
     """Rebuild ordered args from a recorded spec (see ``runner._build_args_spec``).
 
     Host tensors are reloaded from disk with real data (so data-as-control
@@ -58,7 +59,7 @@ def _build_argspec_orch_args(args_spec: list[dict]):
     The tensors/scalars stay unmaterialized until ``_execute_on_device`` has
     selected their owning Worker.
     """
-    coerced: list = []
+    coerced: list[Any] = []
     for entry in args_spec:
         kind = entry["kind"]
         if kind == "tensor_file":
@@ -74,7 +75,7 @@ def _build_argspec_orch_args(args_spec: list[dict]):
     return coerced
 
 
-def _build_golden_orch_args(golden_path: Path):
+def _build_golden_orch_args(golden_path: Path) -> list[Any]:
     """Regenerate ordered args from ``golden.py``'s ``generate_inputs``."""
     from .device_runner import build_orch_args_from_inputs  # noqa: PLC0415
     from .runner import _load_golden_module  # noqa: PLC0415

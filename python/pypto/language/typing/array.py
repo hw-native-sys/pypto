@@ -45,7 +45,7 @@ def _validate_array_meta_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> 
         raise TypeError(f"Array() takes at most 4 positional arguments but {len(args)} were given")
 
     param_names = ("extent", "dtype", "expr", "_annotation_only")
-    for index, name in enumerate(param_names[: len(args)]):
+    for _index, name in enumerate(param_names[: len(args)]):
         if name in kwargs:
             raise TypeError(f"Array() got multiple values for argument '{name}'")
 
@@ -53,19 +53,26 @@ def _validate_array_meta_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> 
 class ArrayMeta(type):
     """Metaclass enabling ``pl.Array[extent, dtype]`` subscript notation."""
 
-    def __getitem__(cls, item: tuple) -> "Array":
-        if not isinstance(item, tuple) or len(item) != 2:
+    def __getitem__(cls, item: tuple[Any, ...]) -> "Array":
+        # A non-tuple subscript (``pl.Array[4]``) must reach the notation
+        # diagnostic, not a bare ``len()`` TypeError.
+        if not isinstance(item, tuple):  # pyright: ignore[reportUnnecessaryIsInstance]
+            raise TypeError("Array requires [extent, dtype] notation")
+        if len(item) != 2:
             raise TypeError("Array requires [extent, dtype] notation")
         extent, dtype = item
-        return cls(extent, dtype, _annotation_only=True)
+        # The implicit ``cls`` is typed as the metaclass object — rebind to the
+        # Array-family class it actually is.
+        array_cls = cast("type[Array]", cls)
+        return array_cls(extent, dtype, _annotation_only=True)
 
     def __call__(cls, *args: Any, **kwargs: Any) -> "Array":
         _validate_array_meta_call(args, kwargs)
 
-        extent = kwargs.get("extent", args[0] if len(args) > 0 else None)
-        dtype = kwargs.get("dtype", args[1] if len(args) > 1 else None)
-        expr = kwargs.get("expr", args[2] if len(args) > 2 else None)
-        annotation_only = kwargs.get("_annotation_only", args[3] if len(args) > 3 else False)
+        extent: int | None = kwargs.get("extent", args[0] if len(args) > 0 else None)
+        dtype: DataType | None = kwargs.get("dtype", args[1] if len(args) > 1 else None)
+        expr: Expr | None = kwargs.get("expr", args[2] if len(args) > 2 else None)
+        annotation_only: bool = kwargs.get("_annotation_only", args[3] if len(args) > 3 else False)
 
         # Bare `pl.Array(N, dtype)` is treated as annotation by default to mirror
         # Tensor/Tile DSL ergonomics.
@@ -122,8 +129,13 @@ class Array(metaclass=ArrayMeta):
 
     @classmethod
     def __class_getitem__(cls, item: tuple[int, DataType]) -> "Array":
-        """Support static type checkers for ``Array[extent, dtype]`` syntax."""
-        return type(cls).__getitem__(cls, item)
+        """The static-checker hook for ``Array[extent, dtype]`` syntax.
+
+        Runtime never calls this — the ``ArrayMeta.__getitem__`` subscript
+        protocol takes precedence — but pyright resolves class subscripts
+        through this signature.
+        """
+        raise NotImplementedError
 
     # --- Indexing sugar -----------------------------------------------------
 

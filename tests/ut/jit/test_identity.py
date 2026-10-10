@@ -667,9 +667,9 @@ def test_sparse_string_table_does_not_cause_large_reads(tmp_path):
         stream.truncate(names_offset + (1 << 32))
 
     class BoundedReader(io.BufferedReader):
-        def read(self, size=-1):
+        def read(self, size: int | None = -1) -> bytes:
             """Reject oversized metadata reads even when the sparse file can hold them."""
-            assert 0 <= size <= 1024 * 1024
+            assert size is not None and 0 <= size <= 1024 * 1024
             return super().read(size)
 
     with path.open("rb", buffering=0) as stream, BoundedReader(stream) as bounded:

@@ -16,6 +16,7 @@ import json
 import re
 from collections.abc import Iterable, Sequence
 from pathlib import Path
+from typing import cast
 
 _INCLUDE_RE = re.compile(r'^\s*#\s*include\s*([<"])([^>"]+)[>"]', re.MULTILINE)
 
@@ -41,9 +42,11 @@ def decode_external_include_dirs(value: object) -> tuple[str, ...]:
         decoded = json.loads(value)
     except json.JSONDecodeError as e:
         raise ValueError(f"Invalid {EXTERNAL_INCLUDE_DIRS_ATTR} JSON: {e.msg}") from e
-    if not isinstance(decoded, list) or not all(isinstance(path, str) for path in decoded):
+    if not isinstance(decoded, list) or any(
+        not isinstance(path, str) for path in cast("list[object]", decoded)
+    ):
         raise ValueError(f"{EXTERNAL_INCLUDE_DIRS_ATTR} must encode a list of strings, got {decoded!r}")
-    return tuple(decoded)
+    return tuple(cast("list[str]", decoded))
 
 
 def collect_external_source_files(

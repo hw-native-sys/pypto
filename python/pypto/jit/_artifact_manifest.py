@@ -116,9 +116,11 @@ class ArtifactSpec:
     execution_capabilities: ExecutionCapabilities = ExecutionCapabilities()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.state, ArtifactState) or not isinstance(self.build_kind, BuildKind):
+        # Exact-type checks: the manifest deserializes untrusted records, and
+        # bool/int lookalikes must not pose as enum members.
+        if type(self.state) is not ArtifactState or type(self.build_kind) is not BuildKind:
             raise ValueError("Artifact spec requires ArtifactState and BuildKind enum values")
-        if not isinstance(self.execution_capabilities, ExecutionCapabilities):
+        if type(self.execution_capabilities) is not ExecutionCapabilities:
             raise ValueError("Artifact spec requires ExecutionCapabilities")
         required = tuple(sorted(_relative_path(path) for path in self.required_files))
         if not required or len(set(required)) != len(required):

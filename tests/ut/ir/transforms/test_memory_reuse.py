@@ -6237,10 +6237,10 @@ class TestForbidOutputAlias:
         ci_calls: list[ir.Call] = []
 
         class _CiCollector(ir.IRVisitor):
-            def visit_call(self, call: ir.Call) -> None:
-                if call.op.name == ir.get_op("tile.ci").name:
-                    ci_calls.append(call)
-                super().visit_call(call)
+            def visit_call(self, op: ir.Call) -> None:
+                if op.op.name == ir.get_op("tile.ci").name:
+                    ci_calls.append(op)
+                super().visit_call(op)
 
         _CiCollector().visit_program(After)
         assert len(ci_calls) == 1 and len(ci_calls[0].args) == 3

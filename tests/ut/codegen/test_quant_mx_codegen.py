@@ -122,20 +122,20 @@ class TestQuantMxCodegen:
                 self.assign_count = 0
                 self.x2zz_assign = 0
 
-            def visit_eval_stmt(self, stmt):
-                self.eval_count += isinstance(stmt.expr, ir.Call) and stmt.expr.op.name in (
+            def visit_eval_stmt(self, op):
+                self.eval_count += isinstance(op.expr, ir.Call) and op.expr.op.name in (
                     _TQUANT_MX_RAW,
                     _TMOV_X2ZZ,
                 )
-                super().visit_eval_stmt(stmt)
+                super().visit_eval_stmt(op)
 
-            def visit_assign_stmt(self, stmt):
-                if isinstance(stmt.value, ir.Call):
-                    if stmt.value.op.name == _TQUANT_MX_RAW:
+            def visit_assign_stmt(self, op):
+                if isinstance(op.value, ir.Call):
+                    if op.value.op.name == _TQUANT_MX_RAW:
                         self.assign_count += 1
-                    elif stmt.value.op.name == _TMOV_X2ZZ:
+                    elif op.value.op.name == _TMOV_X2ZZ:
                         self.x2zz_assign += 1
-                super().visit_assign_stmt(stmt)
+                super().visit_assign_stmt(op)
 
         collector = Collector()
         collector.visit_program(_optimize(Program))

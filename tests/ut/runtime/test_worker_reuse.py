@@ -313,7 +313,7 @@ class TestActiveChipWorkerLookup:
 # ``_execute_on_device`` directly, so they are skipped when ``simpler`` is not
 # installed (e.g. unit-tests CI).
 try:
-    import simpler  # noqa: F401  # pyright: ignore[reportMissingImports]
+    import simpler  # noqa: F401  # pyright: ignore[reportMissingImports, reportUnusedImport] — presence probe
 except ImportError:
     _has_simpler = False
 else:

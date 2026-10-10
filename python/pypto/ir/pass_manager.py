@@ -470,7 +470,7 @@ class PassManager:
         if output_dir is None:
             raise ValueError("output_dir is required when dumping IR")
 
-        if not isinstance(input_ir, core_ir.Program):
+        if not isinstance(input_ir, core_ir.Program):  # type: ignore[reportUnnecessaryIsInstance]  # defensive; the annotation is the contract
             raise ValueError("dump_ir mode only supports Program input")
 
         os.makedirs(output_dir, exist_ok=True)

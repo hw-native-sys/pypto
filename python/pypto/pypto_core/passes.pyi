@@ -11,7 +11,7 @@
 from collections.abc import Callable
 from enum import Enum
 from types import TracebackType
-from typing import overload
+from typing import Any, overload
 
 from pypto.pypto_core.ir import Function, Program, Span, Stmt
 
@@ -1159,7 +1159,7 @@ class PassProperties:
         produced: IRPropertySet,
         invalidated: IRPropertySet,
     ) -> None: ...
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         """Create pass properties, optionally with required/produced/invalidated sets."""
 
 def create_function_pass(

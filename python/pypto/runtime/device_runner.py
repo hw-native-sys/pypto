@@ -61,10 +61,10 @@ from .elf_parser import extract_text_section
 from .kernel_compiler import KernelCompiler
 from .pto_isa import ensure_pto_isa_root
 from .task_interface import (
-    CallConfig,  # pyright: ignore[reportAttributeAccessIssue]
-    ChipCallable,  # pyright: ignore[reportAttributeAccessIssue]
-    CoreCallable,  # pyright: ignore[reportAttributeAccessIssue]
-    Worker,  # pyright: ignore[reportAttributeAccessIssue]
+    CallConfig,
+    ChipCallable,
+    CoreCallable,
+    Worker,
 )
 
 if TYPE_CHECKING:
@@ -107,7 +107,7 @@ def _load_binary(path: Path) -> bytes | None:
 
 def _kernel_cache_file(
     cache_dir: Path,
-    kernel: dict,
+    kernel: dict[str, Any],
     platform: str,
     pto_isa_root: str,
     runtime_name: str,
@@ -250,7 +250,7 @@ def _temporary_env(env_updates: dict[str, str]):
 
 
 def _compile_single_kernel(
-    kernel: dict,
+    kernel: dict[str, Any],
     compiler: KernelCompiler,
     platform: str,
     pto_isa_root: str,
@@ -425,7 +425,7 @@ def _missing_kernel_config_error(work_dir: Path) -> FileNotFoundError:
                 '       eval "$(pypto-setup --export)"'
             )
 
-    recovery_steps = []
+    recovery_steps: list[str] = []
     if configuration_step is not None:
         recovery_steps.append(configuration_step)
     recovery_steps.extend(
@@ -449,7 +449,9 @@ def _missing_kernel_config_error(work_dir: Path) -> FileNotFoundError:
     )
 
 
-def _compile_and_assemble(
+# Reached only through function-scope lazy imports (pyright's unused analysis
+# discounts cross-module references to private symbols).
+def _compile_and_assemble(  # pyright: ignore[reportUnusedFunction]
     work_dir: Path,
     platform: str,
     *,
@@ -570,7 +572,7 @@ def _compile_and_assemble_locked(
 
     # --- Parallel compilation ---
 
-    def _compile_one_kernel(kernel: dict) -> tuple[int, CoreCallable, bytes]:
+    def _compile_one_kernel(kernel: dict[str, Any]) -> tuple[int, CoreCallable, bytes]:
         func_id = kernel["func_id"]
 
         # Check cache/ for pre-stripped binary (written by prebuild_binaries)
@@ -671,7 +673,7 @@ def _compile_and_assemble_locked(
 # ---------------------------------------------------------------------------
 
 
-def _execute_on_device(  # noqa: PLR0913
+def _execute_on_device(  # pyright: ignore[reportUnusedFunction]  # noqa: PLR0913
     chip_callable: ChipCallable,
     orch_args: list[Any],
     platform: str,
@@ -921,7 +923,7 @@ _OrchArgsTuple = tuple[list[Any], dict[str, Any], dict[str, torch.Tensor], dict[
 
 
 def _collect_orch_args(
-    items: list[tuple[str, torch.Tensor | ctypes._SimpleCData]],
+    items: list[tuple[str, torch.Tensor | ctypes._SimpleCData[Any]]],
     is_output: Callable[[str], bool],
 ) -> _OrchArgsTuple:
     """Normalize ordered ``(name, value)`` pairs for worker-owned packing.
@@ -951,7 +953,10 @@ def _collect_orch_args(
                 outputs[name] = val
             else:
                 inputs[name] = val
-        elif isinstance(val, ctypes._SimpleCData):
+        # The isinstance is provably true under the declared item union, but it is
+        # a deliberate dispatch guard: a type outside the union must fall through
+        # silently rather than reach the scalar branch.
+        elif isinstance(val, ctypes._SimpleCData):  # pyright: ignore[reportUnnecessaryIsInstance]
             orch_args.append(val)
             all_tensors[name] = val.value
 

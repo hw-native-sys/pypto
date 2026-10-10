@@ -16,6 +16,7 @@ nor promise that device binaries have been built or loaded.
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import cast
 
 
 class ArtifactExecutionMode(Enum):
@@ -32,7 +33,7 @@ class ExecutionCapabilities:
     modes: tuple[ArtifactExecutionMode, ...] = (ArtifactExecutionMode.PROGRAM,)
 
     def __post_init__(self) -> None:
-        if not self.modes or any(not isinstance(mode, ArtifactExecutionMode) for mode in self.modes):
+        if not self.modes or any(type(mode) is not ArtifactExecutionMode for mode in self.modes):
             raise ValueError("Execution capabilities require a nonempty collection of ArtifactExecutionMode")
         if len(set(self.modes)) != len(self.modes):
             raise ValueError("Execution capabilities must not contain duplicate modes")
@@ -45,16 +46,18 @@ class ExecutionCapabilities:
     @classmethod
     def from_record(cls, value: object) -> "ExecutionCapabilities":
         """Read an explicit capability list; missing/unknown values are errors."""
-        if not isinstance(value, list) or any(not isinstance(mode, str) for mode in value):
+        if not isinstance(value, list) or any(
+            not isinstance(mode, str) for mode in cast("list[object]", value)
+        ):
             raise ValueError(f"'supported_execution_modes' must be a list of mode names, got {value!r}")
         try:
-            return cls(tuple(ArtifactExecutionMode(mode) for mode in value))
+            return cls(tuple(ArtifactExecutionMode(mode) for mode in cast("list[str]", value)))
         except ValueError as exc:
             raise ValueError(f"Invalid 'supported_execution_modes' {value!r}: {exc}") from exc
 
     def require(self, mode: ArtifactExecutionMode) -> None:
         """Reject incompatible consumers before compilation/loading/execution."""
-        if not isinstance(mode, ArtifactExecutionMode):
+        if type(mode) is not ArtifactExecutionMode:
             raise TypeError(f"Expected ArtifactExecutionMode, got {mode!r}")
         if mode not in self.modes:
             raise ValueError(f"Artifact supports {self.record()}, but the consumer requires {mode.value!r}")

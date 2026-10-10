@@ -42,7 +42,7 @@ import inspect
 import textwrap
 import types
 import warnings
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -181,8 +181,8 @@ class SpecializeContext:
     param_names: list[str]
     tensor_meta: dict[str, TensorMeta]
     scalar_dtypes: dict[str, DataType]
-    dep_names: list[str] = field(default_factory=list)
-    py_globals: Mapping[str, Any] = field(default_factory=dict)
+    dep_names: list[str] = field(default_factory=list[str])
+    py_globals: Mapping[str, Any] = field(default_factory=dict[str, Any])
     orig_file: str | None = None
     orig_start_line: int = 1
     orig_col_offset: int = 0
@@ -201,7 +201,7 @@ class SpecializeContext:
     external_include_dirs: tuple[str, ...] = ()
     # Also appended at the tail (see above): ``call name -> generated function
     # name`` for the deps this function reaches under a different name.
-    dep_func_names: dict[str, str] = field(default_factory=dict)
+    dep_func_names: dict[str, str] = field(default_factory=dict[str, str])
     # Name of the ``def`` inside ``source`` — the Python ``__name__``. It differs
     # from ``func_name`` whenever the JIT layer had to uniquify the generated
     # name (two deps sharing a ``__name__``). Anything that looks the definition
@@ -210,7 +210,7 @@ class SpecializeContext:
     source_func_name: str | None = None
     # Also appended at the tail (see above): ``pl.constexpr`` param name -> the
     # generated-source text its call-site value folds to.
-    constexpr_values: dict[str, str] = field(default_factory=dict)
+    constexpr_values: dict[str, str] = field(default_factory=dict[str, str])
     # Also appended at the tail (see above): ``(call name, ordinal) -> generated
     # function name``, where the ordinal is the call's position among
     # same-named calls in source order. A dep called at two different
@@ -218,7 +218,7 @@ class SpecializeContext:
     # resolve to different generated functions and the call name alone no
     # longer identifies the callee. Empty when every call site of a name
     # reaches the same function, which ``dep_func_names`` already covers.
-    dep_call_variants: dict[tuple[str, int], str] = field(default_factory=dict)
+    dep_call_variants: dict[tuple[str, int], str] = field(default_factory=dict[tuple[str, int], str])
 
     @property
     def source_def_name(self) -> str:
@@ -368,7 +368,7 @@ def _render_free_value(value: Any) -> ast.expr | None:
         # that predates this function.
         return ast.Constant(value=value)
     if isinstance(value, (list, tuple)):
-        elements = [_render_free_value(element) for element in value]
+        elements = [_render_free_value(element) for element in cast("Sequence[Any]", value)]
         if any(element is None for element in elements):
             return None
         rendered = cast("list[ast.expr]", elements)
@@ -568,7 +568,9 @@ def _array_dtype_str(dt: DataType) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _collect_dynamic_dims(
+# Cross-module private helper: production (jit/decorator.py) and the test suite
+# reach it by underscore import; pyright's unused analysis discounts those.
+def _collect_dynamic_dims(  # pyright: ignore[reportUnusedFunction]
     func_def: ast.FunctionDef,
     param_names: set[str],
 ) -> set[tuple[str, int]]:
@@ -629,7 +631,11 @@ def _resolve_dep_call_targets(
     return targets
 
 
-def _collect_dynvar_names(func_def: ast.FunctionDef) -> dict[str, str]:
+# Cross-module private helper: production (jit/decorator.py) and the test suite
+# reach it by underscore import; pyright's unused analysis discounts those.
+def _collect_dynvar_names(  # pyright: ignore[reportUnusedFunction]
+    func_def: ast.FunctionDef,
+) -> dict[str, str]:
     """Collect dynvar assignments from pl.dynamic(...) calls in the function body.
 
     Returns a dict mapping Python variable name → string literal passed to
@@ -663,7 +669,9 @@ def _collect_dynvar_names(func_def: ast.FunctionDef) -> dict[str, str]:
     return result
 
 
-def _collect_annotation_dynamic_dims(
+# Cross-module private helper: production (jit/decorator.py) and the test suite
+# reach it by underscore import; pyright's unused analysis discounts those.
+def _collect_annotation_dynamic_dims(  # pyright: ignore[reportUnusedFunction]
     func: Any,
     param_names: set[str],
 ) -> tuple[set[tuple[str, int]], dict[str, str], dict[str, str]]:
@@ -1273,7 +1281,7 @@ class _BodyTransformer(ast.NodeTransformer):
             if visited is None:
                 pass
             elif isinstance(visited, list):
-                result.extend(visited)
+                result.extend(cast("list[ast.stmt]", visited))
             else:
                 result.append(visited)
         return result or [ast.Pass()]
@@ -1526,8 +1534,8 @@ def _fold_const_names(node: ast.expr, py_globals: Mapping[str, Any]) -> ast.expr
     """
 
     class _Folder(ast.NodeTransformer):
-        def visit_Name(self, name: ast.Name) -> ast.expr:
-            return _fold_free_name(name.id, py_globals, name) or name
+        def visit_Name(self, node: ast.Name) -> ast.expr:
+            return _fold_free_name(node.id, py_globals, node) or node
 
     return _Folder().visit(copy.deepcopy(node))
 
@@ -2118,7 +2126,7 @@ class Specializer:
         # constants that fold into ``Array`` extents), never Python builtins.
         # Type-form annotations never need builtins, so stripping them keeps the
         # best-effort eval from running anything beyond pure type construction.
-        ann_globals = {**ctx.py_globals, "__builtins__": {}}
+        ann_globals: dict[str, Any] = {**ctx.py_globals, "__builtins__": {}}
         scalar_dtype_strs = {
             name: _scalar_dtype_source(text, ann_globals) for name, text in scalar_dtype_strs.items()
         }
@@ -2195,7 +2203,7 @@ class Specializer:
             if item is None:
                 continue
             if isinstance(item, list):
-                flat_body.extend(item)
+                flat_body.extend(cast("list[ast.stmt]", item))
             else:
                 flat_body.append(item)
 

@@ -36,10 +36,11 @@ class CacheConfig:
     def __post_init__(self) -> None:
         if type(self.enabled) is not bool or type(self.readonly) is not bool:
             raise TypeError("CacheConfig.enabled and readonly must be bool")
-        if self.root is not None and not isinstance(self.root, Path):
+        if self.root is not None and not isinstance(self.root, Path):  # pyright: ignore[reportUnnecessaryIsInstance] -- Path subclasses (PosixPath) are valid
             raise TypeError(f"CacheConfig.root must be Path or None, got {self.root!r}")
         if type(self.extra_source_paths) is not tuple or any(
-            not isinstance(p, Path) for p in self.extra_source_paths
+            not isinstance(p, Path)  # pyright: ignore[reportUnnecessaryIsInstance] -- PosixPath et al.
+            for p in self.extra_source_paths
         ):
             raise TypeError("CacheConfig.extra_source_paths must be a tuple of Path objects")
         if self.extra_fingerprint is not None and type(self.extra_fingerprint) is not str:
@@ -84,7 +85,7 @@ _totals = asdict(CacheStats())
 
 def configure_cache(config: CacheConfig | None) -> None:
     """Set process defaults; None restores environment/default precedence."""
-    if config is not None and not isinstance(config, CacheConfig):
+    if config is not None and type(config) is not CacheConfig:
         raise TypeError(f"Expected CacheConfig or None, got {type(config).__name__}")
     with _lock:
         _policy.override = config
@@ -138,7 +139,7 @@ def capture_cache_config(per_call: CacheConfig | None) -> CacheConfig:
             root=Path(root) if root else None,
             readonly=_boolean("PYPTO_CACHE_READONLY", "0" if readonly is None else readonly),
         )
-    if not isinstance(config, CacheConfig):
+    if type(config) is not CacheConfig:
         raise TypeError(f"RunConfig.cache_config must be CacheConfig or None, got {type(config).__name__}")
     if not config.enabled:
         return config

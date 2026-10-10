@@ -10,6 +10,7 @@
 """Runtime scope context managers and submit primitive for the PyPTO Language DSL."""
 
 from enum import Enum
+from types import TracebackType
 from typing import Any
 
 
@@ -65,7 +66,12 @@ class scope:
     def __enter__(self):
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> bool:
         return False
 
 
@@ -116,7 +122,12 @@ class manual_scope:
     def __enter__(self):
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> bool:
         return False
 
 

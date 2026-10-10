@@ -15,9 +15,10 @@ from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union, cast, overload
 
 if TYPE_CHECKING:
-    from pypto.language.typing import Array, Scalar, Tensor, Tile
+    from pypto.language.typing import Array, Tensor, Tile
     from pypto.pypto_core import ir
 
+from pypto.language.typing.scalar import Scalar
 from pypto.pypto_core import ir as _ir
 
 from .optimizations import Optimization
@@ -138,18 +139,22 @@ def _make_range_iterator(
 ) -> RangeIterator[Scalar] | RangeIterator[tuple[Scalar, tuple[Any, ...]]]:
     """Shared implementation for range(), parallel(), unroll(), and pipeline()."""
     if pipeline_stages is not None:
-        if not isinstance(pipeline_stages, int) or isinstance(pipeline_stages, bool) or pipeline_stages < 1:
+        # bool is an int subclass and must not pose as a stage count; the
+        # isinstance pair is a mistyped-input guard (the annotation is the contract).
+        if (
+            not isinstance(pipeline_stages, int)  # pyright: ignore[reportUnnecessaryIsInstance]
+            or isinstance(pipeline_stages, bool)
+            or pipeline_stages < 1
+        ):
             raise ValueError(f"{func_name}() stage must be a positive integer, got {pipeline_stages!r}")
-    kwargs = {
-        "init_values": init_values,
-        "pipeline_stages": pipeline_stages,
-    }
     if len(args) == 1:
-        return RangeIterator(args[0], **kwargs)
+        return RangeIterator(args[0], init_values=init_values, pipeline_stages=pipeline_stages)
     elif len(args) == 2:
-        return RangeIterator(args[1], args[0], **kwargs)
+        return RangeIterator(args[1], args[0], init_values=init_values, pipeline_stages=pipeline_stages)
     elif len(args) == 3:
-        return RangeIterator(args[1], args[0], args[2], **kwargs)
+        return RangeIterator(
+            args[1], args[0], args[2], init_values=init_values, pipeline_stages=pipeline_stages
+        )
     else:
         raise ValueError(f"{func_name}() takes 1 to 3 positional arguments")
 
@@ -863,7 +868,7 @@ class SpmdContext:
 
 
 def spmd(
-    core_num: RangeArg,
+    core_num: int | Scalar | _ir.Expr,
     *,
     sync_start: bool = False,
     name_hint: str = "",
@@ -929,7 +934,8 @@ def spmd(
 
     Args:
         core_num: Number of blocks for SPMD dispatch. Positional; accepts a
-            Python ``int`` or any ``ir.Expr`` of integer type. Closure-captured
+            Python ``int``, a ``Scalar`` facade, or any ``ir.Expr`` of integer
+            type. Closure-captured
             integer constants and closure arithmetic are folded to ``ConstInt``
             by the parser and ``Simplify``; non-foldable expressions flow
             through to codegen unchanged. Pass
@@ -1042,8 +1048,18 @@ def spmd(
         >>> with pl.spmd(4, deps=[gate_tid], predicate=(row_count[0, 0] > 0)) as tid:
         ...     out = self.expert(x, out)
     """
-    if isinstance(core_num, bool) or not isinstance(core_num, (int, _ir.Expr)):
-        raise ValueError(f"core_num must be a positive integer or ir.Expr, got {core_num!r}")
+    # A Scalar facade (``pl.min`` and friends return Scalar) carries the
+    # count as its wrapped expression; unwrap before validation so traced
+    # bodies can size a launch off a computed count.
+    if isinstance(core_num, Scalar):
+        core_num = core_num.unwrap()
+    # bool is an int subclass and must not pose as a core count; the isinstance
+    # pair is a mistyped-input guard (the annotation is the contract).
+    if (
+        not isinstance(core_num, (int, _ir.Expr))  # pyright: ignore[reportUnnecessaryIsInstance]
+        or isinstance(core_num, bool)
+    ):
+        raise ValueError(f"core_num must be a positive int, a Scalar, or an ir.Expr, got {core_num!r}")
     if isinstance(core_num, int) and core_num <= 0:
         raise ValueError(f"core_num must be a positive integer, got {core_num!r}")
     return SpmdContext(
@@ -1271,11 +1287,13 @@ def split_aiv(n: int, *, mode: ir.SplitMode) -> SplitAivContext:
         >>> for _ in pl.split_aiv(2, mode=pl.SplitMode.NONE):
         ...     out = pl.add(mm, bias)  # phase 2, full width on both lanes
     """
-    if isinstance(n, bool) or not isinstance(n, int):
+    # bool is an int subclass and must not pose as the lane count; the isinstance
+    # pair is a mistyped-input guard (the annotation is the contract).
+    if not isinstance(n, int) or isinstance(n, bool):  # pyright: ignore[reportUnnecessaryIsInstance]
         raise ValueError(f"pl.split_aiv(n): n must be the integer 2, got {n!r}")
     if n != 2:
         raise ValueError(f"pl.split_aiv(n): n must be the integer 2 (the two AIV lanes), got {n}")
-    if not isinstance(mode, _ir.SplitMode):
+    if type(mode) is not _ir.SplitMode:
         raise ValueError(f"pl.split_aiv(mode=...): mode must be a pl.SplitMode, got {mode!r}")
     return SplitAivContext(n=n, mode=mode)
 

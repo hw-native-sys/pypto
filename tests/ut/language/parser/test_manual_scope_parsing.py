@@ -134,7 +134,7 @@ class TestManualScopeParsing:
             @pl.program
             class _Prog:
                 @pl.function(type=pl.FunctionType.Orchestration)
-                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:  # pyright: ignore[reportReturnType] — DSL body: the parser collects the return paths; pyright cannot see them all
                     with pl.manual_scope(name="foo"):
                         return x
 
@@ -498,7 +498,7 @@ class Prog:
             @pl.program
             class _Prog:
                 @pl.function(type=pl.FunctionType.Orchestration)
-                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:  # pyright: ignore[reportReturnType] — DSL body: the parser collects the return paths; pyright cannot see them all
                     with pl.manual_scope() as not_supported:  # noqa: F841
                         return x
 

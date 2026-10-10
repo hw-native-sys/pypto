@@ -12,6 +12,7 @@
 import importlib.util
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -207,7 +208,8 @@ def test_stale_dynamic_exceptions_fail(lint, tmp_path):
 @pytest.mark.parametrize("category, reason", [("unknown", "Some input"), ("semantic", "")])
 def test_registry_requires_a_supported_category_and_reason(lint, category, reason):
     registry = _registry()
-    registry["variables"]["PYPTO_KNOWN"] = {"category": category, "reason": reason}
+    variables: dict[str, Any] = registry["variables"]
+    variables["PYPTO_KNOWN"] = {"category": category, "reason": reason}
     with pytest.raises(ValueError, match="category and reason"):
         lint.check_registry(registry)
 

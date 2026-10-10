@@ -100,8 +100,8 @@ def test_serialized_function_rejects_invalid_present_stage(encoded):
 @pytest.mark.parametrize("runtime_binding", [False, True])
 def test_generic_mutator_rebuild_preserves_stage_and_runtime_binding(stage, runtime_binding):
     class ReplaceConstant(ir.IRMutator):
-        def visit_const_int(self, constant):
-            return ir.ConstInt(2, constant.dtype, constant.span)
+        def visit_const_int(self, op):
+            return ir.ConstInt(2, op.dtype, op.span)
 
     original = _function(stage, runtime_binding)
     changed = ReplaceConstant().visit_function(original)

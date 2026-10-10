@@ -69,7 +69,7 @@ def _get_simpler_worker_cls() -> type:
     global _SimplerWorker  # noqa: PLW0603 - module-level cache that tests patch directly
     if _SimplerWorker is None:
         from .task_interface import (  # noqa: PLC0415
-            Worker as _W,  # pyright: ignore[reportAttributeAccessIssue]
+            Worker as _W,
         )
 
         _SimplerWorker = _W
@@ -81,7 +81,7 @@ def _get_simpler_call_config_cls() -> type:
     global _SimplerCallConfig  # noqa: PLW0603 - module-level cache that tests patch directly
     if _SimplerCallConfig is None:
         from .task_interface import (  # noqa: PLC0415
-            CallConfig as _CC,  # pyright: ignore[reportAttributeAccessIssue]
+            CallConfig as _CC,
         )
 
         _SimplerCallConfig = _CC
@@ -196,7 +196,7 @@ class ChipWorker(Worker):
         self._level = level
         self._runtime = runtime
         self._enable_sdma = bool(enable_sdma)
-        self._token: contextvars.Token | None = None
+        self._token: contextvars.Token[tuple[ChipWorker, ...]] | None = None
         # Simpler's owner-side memory API now returns Buffer objects, while
         # PyPTO intentionally keeps its public raw-pointer surface stable.
         self._device_buffers: dict[tuple[int, int], Any] = {}
@@ -366,7 +366,7 @@ class ChipWorker(Worker):
         """
         self._require_initialized("malloc")
         self._require_local_worker_id(worker_id, "malloc")
-        if not isinstance(nbytes, int) or nbytes <= 0:
+        if type(nbytes) is not int or nbytes <= 0:
             raise ValueError(f"nbytes must be a positive int, got {nbytes!r}")
         handle = self._impl.malloc(nbytes)
         try:

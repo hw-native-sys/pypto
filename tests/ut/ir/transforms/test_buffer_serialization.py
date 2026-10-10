@@ -16,7 +16,11 @@ from pypto import DataType, ir
 
 
 def _buffer_type(**overrides: Any) -> ir.BufferType:
-    fields = {"shape": [16, 32], "dtype": DataType.FP16, "memory_space": ir.MemorySpace.Vec}
+    fields: dict[str, Any] = {
+        "shape": [16, 32],
+        "dtype": DataType.FP16,
+        "memory_space": ir.MemorySpace.Vec,
+    }
     return ir.BufferType(**(fields | overrides))
 
 

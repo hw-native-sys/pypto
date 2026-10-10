@@ -88,6 +88,8 @@ def remote_store(
     # Raw ir.Expr (printer round-trip, hand-built IR): dispatch on the IR type.
     # An unrecognised operand falls through to the tensor form, whose deducer
     # produces the diagnostic naming both entry points.
-    if isinstance(src, Expr) and isinstance(src.type, _ir.TileType):
+    # Provably true under the declared union once the Tile and Tensor arms have
+    # returned, but a deliberate dispatch guard: hand-built operands reach here.
+    if isinstance(src, Expr) and isinstance(src.type, _ir.TileType):  # pyright: ignore[reportUnnecessaryIsInstance]
         return _tile.remote_store(src, target, peer, offsets, atomic=atomic)
     return _tensor.remote_store(src, target, peer, offsets, atomic=atomic)

@@ -455,7 +455,14 @@ def _simplify_shape_dims(type_: ir.Type, analyzer: "_arith.Analyzer") -> ir.Type
     if not _shape_has_symbolic_dim(type_):
         return type_
     assert isinstance(type_, (ir.TensorType, ir.TileType))
-    simplified_shape = [analyzer.simplify(d) if isinstance(d, ir.Expr) else d for d in type_.shape]
+    # The isinstance keeps a mistyped shape element diagnosable instead of
+    # crashing the simplify call.
+    simplified_shape = [
+        analyzer.simplify(d)
+        if isinstance(d, ir.Expr)  # pyright: ignore[reportUnnecessaryIsInstance]
+        else d
+        for d in type_.shape
+    ]
     if isinstance(type_, ir.DistributedTensorType):
         return ir.DistributedTensorType(
             simplified_shape, type_.dtype, type_.memref, type_.tensor_view, type_.window_buffer
@@ -1564,9 +1571,10 @@ class ASTParser:
         body = getattr(stmt, "body", None)
         leading: list[str] = []
         if isinstance(body, list) and body:
-            header_end = body[0].lineno - 1
+            stmts = cast("list[ast.stmt]", body)
+            header_end = stmts[0].lineno - 1
             header_ast_end = self._header_ast_end_line(stmt)
-            body_col = body[0].col_offset
+            body_col = stmts[0].col_offset
             for line in sorted(k for k in self._pending_comments if k <= header_end):
                 if stmt.lineno <= line <= header_ast_end:
                     # Header-level comment: either an inline trailer on the
@@ -1722,7 +1730,7 @@ class ASTParser:
             func = stmt.value.func
             if isinstance(func, ast.Attribute) and func.attr == "yield_":
                 # Handle yield assignment
-                yield_exprs = []
+                yield_exprs: list[ir.Expr] = []
                 for arg in stmt.value.args:
                     expr = self.parse_expression(arg)
                     yield_exprs.append(expr)
@@ -1781,7 +1789,9 @@ class ASTParser:
         # via the standard ``override_type`` validation path; the single-LHS
         # Submit handler builds the Submit and binds it to ``var_name`` directly.
         if _is_pl_call(stmt.value, "submit"):
-            if not isinstance(stmt.target, ast.Name):
+            # AnnAssign targets can also be Attribute/Subscript at runtime; the
+            # typeshed type is narrower than the grammar.
+            if not isinstance(stmt.target, ast.Name):  # pyright: ignore[reportUnnecessaryIsInstance]
                 raise ParserSyntaxError(
                     "Annotated assignment of pl.submit must target a simple variable name",
                     span=self.span_tracker.get_span(stmt.target),
@@ -1794,7 +1804,7 @@ class ASTParser:
             # type the way every other annotated RHS does.
             value_expr = self._build_submit_single_lhs_expr(stmt.value)
         elif _is_pl_call(stmt.value, "spmd_submit"):
-            if not isinstance(stmt.target, ast.Name):
+            if not isinstance(stmt.target, ast.Name):  # pyright: ignore[reportUnnecessaryIsInstance]
                 raise ParserSyntaxError(
                     "Annotated assignment of pl.spmd_submit must target a simple variable name",
                     span=self.span_tracker.get_span(stmt.target),
@@ -1806,93 +1816,92 @@ class ASTParser:
 
         # Validate annotation against inferred type; use annotation as override only for memref
         override_type = None
-        if stmt.annotation is not None:
-            # Skip annotations the resolver can't handle:
-            # - String forward refs (e.g. "SomeType")
-            # - pl.UnknownType (emitted by printer for unrepresentable types)
-            # - Singleton marker types the resolver has no entry for
-            #   (pl.MemRefType / pl.Ptr / pld.WindowBufferType): no shape/dtype to
-            #   validate; the Var's type is fully determined by the RHS-inferred
-            #   type. Markers listed in `_MARKER_TYPE_GETTERS` (pl.AsyncEvent,
-            #   pld.CommCtx, ...) resolve normally — for them the kind check is a
-            #   no-op, so they need no entry here under either spelling.
-            ann = stmt.annotation
-            is_unresolvable = (isinstance(ann, ast.Constant) and isinstance(ann.value, str)) or (
-                isinstance(ann, ast.Attribute)
-                and isinstance(ann.value, ast.Name)
-                and (
-                    (ann.value.id == "pl" and ann.attr in ("UnknownType", "MemRefType", "Ptr"))
-                    or (ann.value.id == "pld" and ann.attr == "WindowBufferType")
-                )
+        # Skip annotations the resolver can't handle:
+        # - String forward refs (e.g. "SomeType")
+        # - pl.UnknownType (emitted by printer for unrepresentable types)
+        # - Singleton marker types the resolver has no entry for
+        #   (pl.MemRefType / pl.Ptr / pld.WindowBufferType): no shape/dtype to
+        #   validate; the Var's type is fully determined by the RHS-inferred
+        #   type. Markers listed in `_MARKER_TYPE_GETTERS` (pl.AsyncEvent,
+        #   pld.CommCtx, ...) resolve normally — for them the kind check is a
+        #   no-op, so they need no entry here under either spelling.
+        ann = stmt.annotation
+        is_unresolvable = (isinstance(ann, ast.Constant) and isinstance(ann.value, str)) or (
+            isinstance(ann, ast.Attribute)
+            and isinstance(ann.value, ast.Name)
+            and (
+                (ann.value.id == "pl" and ann.attr in ("UnknownType", "MemRefType", "Ptr"))
+                or (ann.value.id == "pld" and ann.attr == "WindowBufferType")
             )
-            if is_unresolvable:
-                resolved = None
-            else:
-                resolved = self.type_resolver.resolve_type(ann)
-            if resolved is not None and not isinstance(resolved, list):
-                inferred_for_validation = _normalize_inferred_type_for_annotation(resolved, value_expr)
-                self.type_resolver.validate_annotation_consistency(
-                    resolved, inferred_for_validation, var_name, span
-                )
-                if isinstance(value_expr.type, ir.UnknownType):
-                    # Inferred type is unknown (e.g. tpop_from_aiv): use annotation as type
-                    override_type = resolved
-                elif isinstance(resolved, ir.TileType) and isinstance(value_expr.type, ir.TileType):
-                    normalized_inferred = _normalize_inferred_type_for_annotation(resolved, value_expr)
-                    assert isinstance(normalized_inferred, ir.TileType)
-                    # Merge annotation metadata with inferred type: annotation fields
-                    # take priority, but inferred fields fill gaps the annotation doesn't specify.
-                    # This handles memref, memory_space, and tile_view in a single path.
-                    ann_ms = resolved.memory_space
-                    ann_tv = resolved.tile_view
-                    inf_ms = normalized_inferred.memory_space
-                    # For the ND→2D flattening case (FlattenTileNdTo2D), the call infers
-                    # an ND TileType whose tile_view.valid_shape is also ND.  Merging that
-                    # into a 2D type would produce an inconsistent valid_shape.  Detect this
-                    # by comparing dimensionality: if normalized_inferred (which carries the
-                    # annotation's 2D shape for ND→2D) has fewer dims than value_expr.type,
-                    # we're in the ND→2D case and must NOT use the ND tile_view.
-                    # For the 2D→2D case (fresh compilation), the C++ inferred tile_view
-                    # (e.g. col_major for [N,1] Vec) must be preserved so downstream passes
-                    # can see the correct layout.
-                    if len(normalized_inferred.shape) != len(value_expr.type.shape):
-                        # ND→2D: avoid carrying ND valid_shape into 2D type
-                        inf_tv = normalized_inferred.tile_view
-                    else:
-                        # 2D→2D: preserve the actual C++ inferred tile_view
-                        inf_tv = value_expr.type.tile_view
-                    merged_ms = ann_ms if ann_ms is not None else inf_ms
-                    merged_tv = ann_tv if ann_tv is not None else inf_tv
-                    # Build the override whenever the annotation contributes anything
-                    # the raw inferred type does not already carry.  The shape test
-                    # compares against ``value_expr.type`` (the *raw* inferred type),
-                    # not ``normalized_inferred`` — the latter has already adopted the
-                    # annotation's shape for the ND->2D case, so comparing against it
-                    # always matches and the flattened shape would be silently dropped.
-                    # Before memory spaces became optional this was masked: ``merged_ms``
-                    # was never None, so the override was always built.
-                    if (
-                        resolved.memref is not None
-                        or merged_ms is not None
-                        or merged_tv is not None
-                        or not _shape_exprs_match(resolved.shape, value_expr.type.shape)
-                    ):
-                        override_type = ir.TileType(
-                            resolved.shape, resolved.dtype, resolved.memref, merged_tv, merged_ms
-                        )
-                elif isinstance(resolved, ir.DistributedTensorType) and resolved.window_buffer is not None:
-                    override_type = resolved
-                elif isinstance(resolved, ir.ShapedType) and resolved.memref is not None:
-                    override_type = resolved
-                elif isinstance(resolved, ir.TensorType) and resolved.tensor_view is not None:
-                    # Annotation specifies tensor view (stride/layout); preserve it
-                    override_type = resolved
-                elif (
-                    isinstance(resolved, ir.ScalarType)
-                    and isinstance(value_expr.type, ir.ScalarType)
-                    and value_expr.type.dtype == DataType.INDEX
+        )
+        if is_unresolvable:
+            resolved = None
+        else:
+            resolved = self.type_resolver.resolve_type(ann)
+        if resolved is not None and not isinstance(resolved, list):
+            inferred_for_validation = _normalize_inferred_type_for_annotation(resolved, value_expr)
+            self.type_resolver.validate_annotation_consistency(
+                resolved, inferred_for_validation, var_name, span
+            )
+            if isinstance(value_expr.type, ir.UnknownType):
+                # Inferred type is unknown (e.g. tpop_from_aiv): use annotation as type
+                override_type = resolved
+            elif isinstance(resolved, ir.TileType) and isinstance(value_expr.type, ir.TileType):
+                normalized_inferred = _normalize_inferred_type_for_annotation(resolved, value_expr)
+                assert isinstance(normalized_inferred, ir.TileType)
+                # Merge annotation metadata with inferred type: annotation fields
+                # take priority, but inferred fields fill gaps the annotation doesn't specify.
+                # This handles memref, memory_space, and tile_view in a single path.
+                ann_ms = resolved.memory_space
+                ann_tv = resolved.tile_view
+                inf_ms = normalized_inferred.memory_space
+                # For the ND→2D flattening case (FlattenTileNdTo2D), the call infers
+                # an ND TileType whose tile_view.valid_shape is also ND.  Merging that
+                # into a 2D type would produce an inconsistent valid_shape.  Detect this
+                # by comparing dimensionality: if normalized_inferred (which carries the
+                # annotation's 2D shape for ND→2D) has fewer dims than value_expr.type,
+                # we're in the ND→2D case and must NOT use the ND tile_view.
+                # For the 2D→2D case (fresh compilation), the C++ inferred tile_view
+                # (e.g. col_major for [N,1] Vec) must be preserved so downstream passes
+                # can see the correct layout.
+                if len(normalized_inferred.shape) != len(value_expr.type.shape):
+                    # ND→2D: avoid carrying ND valid_shape into 2D type
+                    inf_tv = normalized_inferred.tile_view
+                else:
+                    # 2D→2D: preserve the actual C++ inferred tile_view
+                    inf_tv = value_expr.type.tile_view
+                merged_ms = ann_ms if ann_ms is not None else inf_ms
+                merged_tv = ann_tv if ann_tv is not None else inf_tv
+                # Build the override whenever the annotation contributes anything
+                # the raw inferred type does not already carry.  The shape test
+                # compares against ``value_expr.type`` (the *raw* inferred type),
+                # not ``normalized_inferred`` — the latter has already adopted the
+                # annotation's shape for the ND->2D case, so comparing against it
+                # always matches and the flattened shape would be silently dropped.
+                # Before memory spaces became optional this was masked: ``merged_ms``
+                # was never None, so the override was always built.
+                if (
+                    resolved.memref is not None
+                    or merged_ms is not None
+                    or merged_tv is not None
+                    or not _shape_exprs_match(resolved.shape, value_expr.type.shape)
                 ):
-                    override_type = resolved
+                    override_type = ir.TileType(
+                        resolved.shape, resolved.dtype, resolved.memref, merged_tv, merged_ms
+                    )
+            elif isinstance(resolved, ir.DistributedTensorType) and resolved.window_buffer is not None:
+                override_type = resolved
+            elif isinstance(resolved, ir.ShapedType) and resolved.memref is not None:
+                override_type = resolved
+            elif isinstance(resolved, ir.TensorType) and resolved.tensor_view is not None:
+                # Annotation specifies tensor view (stride/layout); preserve it
+                override_type = resolved
+            elif (
+                isinstance(resolved, ir.ScalarType)
+                and isinstance(value_expr.type, ir.ScalarType)
+                and value_expr.type.dtype == DataType.INDEX
+            ):
+                override_type = resolved
         # A bare int literal parses as an untyped placeholder (``ConstInt(v,
         # INDEX)`` — see ``_normalize_scalar_operand``), so the scalar branch
         # above would otherwise bind an annotated Var to a constant of a
@@ -2134,10 +2143,12 @@ class ASTParser:
                     func = stmt.value.func
                     if isinstance(func, ast.Attribute) and func.attr == "yield_":
                         # Handle yield assignment
-                        yield_exprs = []
+                        yield_exprs: list[ir.Expr] = []
                         for arg in stmt.value.args:
                             expr = self.parse_expression(arg)
-                            if not isinstance(expr, ir.Expr):
+                            # Deliberate backstop: the delegated parser's declared ir.Expr
+                            # return is a lie for a few DSL constructors.
+                            if not isinstance(expr, ir.Expr):  # pyright: ignore[reportUnnecessaryIsInstance]
                                 raise ParserSyntaxError(
                                     f"Yield argument must be an IR expression, got {type(expr)}",
                                     span=self.span_tracker.get_span(arg),
@@ -2736,11 +2747,12 @@ class ASTParser:
             value: Call to pl.yield_()
         """
         # Parse yield expressions
-        yield_exprs = []
+        yield_exprs: list[ir.Expr] = []
         for arg in value.args:
             expr = self.parse_expression(arg)
-            # Ensure it's an IR Expr
-            if not isinstance(expr, ir.Expr):
+            # Deliberate backstop: the delegated parser's declared ir.Expr return
+            # is a lie for a few DSL constructors.
+            if not isinstance(expr, ir.Expr):  # pyright: ignore[reportUnnecessaryIsInstance]
                 raise ParserSyntaxError(
                     f"Yield argument must be an IR expression, got {type(expr)}",
                     span=self.span_tracker.get_span(arg),
@@ -2825,7 +2837,7 @@ class ASTParser:
             hint="Use: for i in pl.range(n) or for i, (var1,) in pl.range(n, init_values=(...,))",
         )
 
-    def _setup_iter_args(self, loop: Any, iter_args_node: ast.AST, init_values: list) -> None:
+    def _setup_iter_args(self, loop: Any, iter_args_node: ast.AST, init_values: list[ir.Expr]) -> None:
         """Set up iter_args and return_vars for Pattern A loops."""
         if not isinstance(iter_args_node, ast.Tuple):
             raise ParserSyntaxError(
@@ -3091,7 +3103,7 @@ class ASTParser:
         elif len(call.args) == 2:
             start = self.parse_expression(call.args[0])
             stop = self.parse_expression(call.args[1])
-        elif len(call.args) >= 3:
+        else:
             start = self.parse_expression(call.args[0])
             stop = self.parse_expression(call.args[1])
             step = self.parse_expression(call.args[2])
@@ -3601,7 +3613,7 @@ class ASTParser:
 
     def _parse_while_init_values(self, while_call: ast.Call) -> list[ir.Expr]:
         """Parse init_values from pl.while_() keyword arguments."""
-        init_values = []
+        init_values: list[ir.Expr] = []
         for keyword in while_call.keywords:
             if keyword.arg == "init_values":
                 if isinstance(keyword.value, (ast.List, ast.Tuple)):
@@ -3874,7 +3886,7 @@ class ASTParser:
         self._check_condition_is_bool(condition, "if", span)
 
         # Track yield output variable names from both branches
-        then_yield_vars = []
+        then_yield_vars: list[tuple[str, ast.expr | None]] = []
 
         # Begin if statement
         with self.builder.if_stmt(condition, span) as if_builder:
@@ -5513,7 +5525,7 @@ class ASTParser:
                 span=self.span_tracker.get_span(iter_call),
                 hint=split_aiv_hint,
             )
-        n_expr = self.parse_expression(cast("ast.expr", iter_call.args[0]))
+        n_expr = self.parse_expression(iter_call.args[0])
         if not (isinstance(n_expr, ir.ConstInt) and n_expr.value == self._SPLIT_AIV_SUBCORE_NUM):
             got = n_expr.value if isinstance(n_expr, ir.ConstInt) else python_print(n_expr, format=False)
             raise ParserSyntaxError(
@@ -5901,7 +5913,7 @@ class ASTParser:
         if not is_core_group:
             # SubWorker scopes are no longer supported as inline `with pl.at(...)`
             # blocks. Declare a SubWorker via @pl.function(level=..., role=Worker).
-            if level is not None and ir.level_to_linqu_level(level) >= 3 and role == ir.Role.SubWorker:
+            if ir.level_to_linqu_level(level) >= 3 and role == ir.Role.SubWorker:
                 raise ParserSyntaxError(
                     "Inline 'with pl.at(level>=HOST, role=pl.Role.SubWorker)' is not supported.",
                     span=span,
@@ -6447,7 +6459,7 @@ class ASTParser:
 
         # Handle tuple return
         if isinstance(stmt.value, ast.Tuple):
-            return_exprs = []
+            return_exprs: list[ir.Expr] = []
             for elt in stmt.value.elts:
                 return_exprs.append(self.parse_expression(elt))
             self.builder.return_stmt(return_exprs, span)
@@ -6494,8 +6506,9 @@ class ASTParser:
         expr = self.parse_expression(stmt.value)
         span = self.span_tracker.get_span(stmt)
 
-        # Validate that we got an IR expression (not a list literal, etc.)
-        if not isinstance(expr, ir.Expr):
+        # Validate that we got an IR expression (not a list literal, etc.); the
+        # delegated parser's declared return is a lie for a few DSL constructors.
+        if not isinstance(expr, ir.Expr):  # pyright: ignore[reportUnnecessaryIsInstance]
             raise ParserSyntaxError(
                 f"Evaluation statement must be an IR expression, got {type(expr).__name__}",
                 span=span,
@@ -6999,7 +7012,7 @@ class ASTParser:
             IR expression (first yielded value for single yield)
         """
         span = self.span_tracker.get_span(call)
-        yield_exprs = []
+        yield_exprs: list[ir.Expr] = []
 
         for arg in call.args:
             expr = self.parse_expression(arg)
@@ -7043,7 +7056,7 @@ class ASTParser:
         # Navigate through attribute chain to find operation
         # e.g., pl.tensor.create_tensor -> ["pl", "tensor", "create_tensor"]
         # e.g., pl.add -> ["pl", "add"]
-        attrs = []
+        attrs: list[str] = []
         node = func
         while isinstance(node, ast.Attribute):
             attrs.insert(0, node.attr)
@@ -7186,14 +7199,14 @@ class ASTParser:
         explicit_lane_stride: ast.expr | None = None
         for kw in call.keywords:
             if kw.arg == "split":
-                explicit_split = cast("ast.expr", kw.value)
+                explicit_split = kw.value
                 continue
             if kw.arg == "lane_stride":
                 # Compiler bookkeeping stamped by LowerAutoVectorSplit when it
                 # balances a ragged boundary across the two AIV lanes; it only
                 # ever appears alongside an explicit ``split=`` in the printed
                 # outlined form, and is accepted here so that round-trips.
-                explicit_lane_stride = cast("ast.expr", kw.value)
+                explicit_lane_stride = kw.value
                 continue
             if kw.arg == "mode":
                 raise ParserSyntaxError(
@@ -7216,7 +7229,7 @@ class ASTParser:
                 span=span,
                 hint=hint,
             )
-        operand_expr = self.parse_expression(cast("ast.expr", call.args[0]))
+        operand_expr = self.parse_expression(call.args[0])
 
         # Reject distributed tensors outright — AIV/AIC split only. This must
         # come BEFORE the TensorType dispatch: ``DistributedTensorType`` is a
@@ -7676,10 +7689,10 @@ class ASTParser:
         """
 
         class _Substituter(ast.NodeTransformer):
-            def visit_Name(self, n: ast.Name) -> ast.AST:  # noqa: N802
-                if n.id == name and isinstance(n.ctx, ast.Load):
-                    return ast.copy_location(ast.Constant(value=value), n)
-                return n
+            def visit_Name(self, node: ast.Name) -> ast.AST:  # noqa: N802
+                if node.id == name and isinstance(node.ctx, ast.Load):
+                    return ast.copy_location(ast.Constant(value=value), node)
+                return node
 
         copied = copy.deepcopy(node)
         return cast(ast.expr, _Substituter().visit(copied))
@@ -9099,9 +9112,11 @@ class ASTParser:
         Returns:
             Dictionary of keyword argument names to values
         """
-        kwargs = {}
+        kwargs: dict[str, Any] = {}
         for keyword in call.keywords:
-            key = keyword.arg
+            # Op-call kwargs are always named; ``**`` spreads are not part of
+            # the op-call grammar (keyword.arg is None only for those).
+            key = cast("str", keyword.arg)
             value = keyword.value
 
             # ``attrs={...}`` is a generic compiler-internal attr dict (e.g.
@@ -9277,7 +9292,7 @@ class ASTParser:
             return self.parse_list(value)
         success, result = self.expr_evaluator.try_eval_expr(value)
         if success and isinstance(result, list):
-            return result
+            return cast("list[Any]", result)
         return self.parse_list(value)
 
     def _dispatch_op(self, module: Any, module_name: str, op_name: str, call: ast.Call) -> ir.Expr:
@@ -9898,7 +9913,7 @@ class ASTParser:
         # call site within a single parser instance (a function body may contain
         # many alloc_window_buffer calls).
         try:
-            cache = ASTParser._dtype_byte_cache  # type: ignore[attr-defined]
+            cache = ASTParser._dtype_byte_cache
         except AttributeError:
             import pypto.language as _pl  # noqa: PLC0415 (lazy import of DataType constants)
 
@@ -9907,7 +9922,7 @@ class ASTParser:
                 val = getattr(_pl, attr_name)
                 if isinstance(val, DataType):
                     cache[attr_name] = val.get_byte()
-            ASTParser._dtype_byte_cache = cache  # type: ignore[attr-defined]
+            ASTParser._dtype_byte_cache = cache
 
         if dtype_name not in cache:
             known = ", ".join(sorted(cache.keys()))
@@ -10394,7 +10409,9 @@ class ASTParser:
         """Render a shape dim for a warning/error message (constant value, else ``?``)."""
         if isinstance(dim, int):
             return str(dim)
-        value = _const_int_value(dim) if isinstance(dim, ir.Expr) else None
+        # The isinstance keeps a mistyped dim diagnosable instead of crashing the
+        # constant lookup.
+        value = _const_int_value(dim) if isinstance(dim, ir.Expr) else None  # pyright: ignore[reportUnnecessaryIsInstance]
         return str(value) if value is not None else "?"
 
     def _resolve_yield_var_type(self, annotation: ast.expr | None) -> ir.Type:
@@ -10454,7 +10471,7 @@ class ASTParser:
         Returns:
             List of tuples (variable_name, type_annotation) where type_annotation is None if not annotated
         """
-        yield_vars = []
+        yield_vars: list[tuple[str, ast.expr | None]] = []
 
         for stmt in stmts:
             # Check for annotated assignment with yield_: var: type = pl.yield_(...)

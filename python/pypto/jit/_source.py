@@ -24,9 +24,9 @@ _UNBOUND = object()
 
 @dataclass
 class _Namespaces:
-    modules: dict[int, dict[str, Any]] = field(default_factory=dict)
-    functions: dict[Any, Mapping[str, Any]] = field(default_factory=dict)
-    values: dict[tuple[Any, Any], Any] = field(default_factory=dict)
+    modules: dict[int, dict[str, Any]] = field(default_factory=dict[int, dict[str, Any]])
+    functions: dict[Any, Mapping[str, Any]] = field(default_factory=dict[Any, Mapping[str, Any]])
+    values: dict[tuple[Any, Any], Any] = field(default_factory=dict[tuple[Any, Any], Any])
 
 
 _ACTIVE_NAMESPACES: ContextVar[_Namespaces | None] = ContextVar("jit_source_namespaces", default=None)

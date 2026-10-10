@@ -65,7 +65,10 @@ def register_op_conversion(from_op: str, to_op: str) -> None:
     _register_simple(from_op, to_op)
 
 
-def op_conversion(from_op: str) -> Callable:
+_ConvertFn = Callable[[ConversionContext, list[Expr], list[tuple[str, Any]], Span], Expr]
+
+
+def op_conversion(from_op: str) -> Callable[[_ConvertFn], _ConvertFn]:
     """Decorator for registering custom conversion functions.
 
     The decorated function receives (ctx, args, kwargs, span) where:
@@ -85,7 +88,7 @@ def op_conversion(from_op: str) -> Callable:
             return tile_ops.matmul(lhs_l0a, rhs_l0b)
     """
 
-    def decorator(func: Callable) -> Callable:
+    def decorator(func: _ConvertFn) -> _ConvertFn:
         def wrapper(
             args: list[Expr], kwargs: list[tuple[str, Any]], span: Span
         ) -> Expr | tuple[list[Stmt], Expr]:

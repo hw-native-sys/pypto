@@ -33,9 +33,9 @@ from .runtime_pin import check_runtime_pin
 check_runtime_pin()
 
 # Simpler is an optional build dependency, absent from compiler-only type-check environments.
-from simpler_setup import KernelCompiler as _SimplerCompilerSDK  # pyright: ignore[reportMissingImports]
-from simpler_setup.compile_paths import compiler_visible_path  # pyright: ignore[reportMissingImports]
-from simpler_setup.toolchain import GxxToolchain  # pyright: ignore[reportMissingImports]
+from simpler_setup import KernelCompiler as _SimplerCompilerSDK
+from simpler_setup.compile_paths import compiler_visible_path
+from simpler_setup.toolchain import GxxToolchain
 
 logger = logging.getLogger(__name__)
 
@@ -185,7 +185,7 @@ class KernelCompiler:
             raise ValueError("pto_isa_root is required for incore compilation")
         toolchain = self.sdk.gxx15 if simulation else self.sdk.ccec
         assert toolchain is not None, f"SDK did not provide an incore toolchain for {self.platform}"
-        includes = []
+        includes: list[str] = []
         if pto_isa_root is not None:
             includes.extend([str(Path(pto_isa_root) / "include"), str(Path(pto_isa_root) / "include/pto")])
         includes.extend(self.get_incore_include_dirs())

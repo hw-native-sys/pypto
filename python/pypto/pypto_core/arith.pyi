@@ -12,7 +12,7 @@
 from collections.abc import Callable
 from enum import IntFlag
 from types import TracebackType
-from typing import ClassVar, overload
+from typing import Any, ClassVar, overload
 
 from pypto.pypto_core.ir import Expr, Var
 
@@ -217,7 +217,7 @@ class TransitiveComparisonAnalyzer:
     def bind(self, var: Var, expr: Expr, allow_override: bool = False) -> None: ...
     @overload
     def bind(self, var: Var, min_val: int, max_val_exclusive: int, allow_override: bool = False) -> None: ...
-    def bind(self, var: Var, *args, **kwargs) -> None:
+    def bind(self, var: Var, *args: Any, **kwargs: Any) -> None:
         """Bind a variable to an expression or half-open range [min_val, max_val_exclusive)."""
         ...
 
@@ -309,7 +309,7 @@ class Analyzer:
     def bind(self, var: Var, expr: Expr, allow_override: bool = False) -> None: ...
     @overload
     def bind(self, var: Var, min_val: int, max_val_exclusive: int, allow_override: bool = False) -> None: ...
-    def bind(self, var: Var, *args, **kwargs) -> None:
+    def bind(self, var: Var, *args: Any, **kwargs: Any) -> None:
         """Bind a variable to an expression or half-open range [min_val, max_val_exclusive)."""
         ...
 

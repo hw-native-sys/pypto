@@ -95,6 +95,9 @@ fixable = ["ALL"]
 # imports in these two modules are deliberately not at the top of the file.
 "python/pypto/runtime/task_interface.py" = ["E402"]
 "python/pypto/runtime/kernel_compiler.py" = ["E402"]
+# Vendored boundary stubs: the nanobind-stubgen output interleaves the build
+# marker with imports and embeds unreflowed C++ docstrings.
+"typings/**" = ["E402", "E501"]
 # The unit suite must set PYPTO_SKIP_RUNTIME_PIN_CHECK before its first `pypto` import.
 "tests/ut/conftest.py" = ["E402"]
 # DSL type annotations (pl.Tile[..., pl.TileView(...)]) exceed line-length;
@@ -154,24 +157,43 @@ cmake.args = [
 ]
 
 [tool.pyright]
+# Strict typing is the default. Trees not yet carried to the strict fixed
+# point carry a relaxed profile below (basic-equivalent checking); the
+# profiles are the migration backlog — delete an entry when its tree goes
+# strict. New files in profiled trees are born basic; files outside the
+# profiles must be born strict.
 include = ["python/pypto", "tests"]
 exclude = ["**/__pycache__", "build", "dist", "tests/st", "tests/ut/jit/test_roundtrip.py"]
 extraPaths = ["python", "."]
-typeCheckingMode = "basic"
+typeCheckingMode = "strict"
 pythonVersion = "3.10"
 reportMissingTypeStubs = false
 reportMissingModuleSource = false
-reportCallIssue = false
-# for dsl parser
-reportAssignmentType = false
-reportOperatorIssue = false
-reportRedeclaration = false
-reportOptionalIterable = false
-reportOptionalSubscript = false
-reportGeneralTypeIssues = false
+reportPrivateUsage = false
+reportUnnecessaryTypeIgnoreComment = true
 
-[tool.pylint]
-# Pylint is not used in this project, but as it is a widely used linter,
-# we provide basic configuration for a consistent developer experience.
-max-line-length = 110
-disable = ["missing-docstring"]
+# The test tree is checked at basic equivalence: the strict-only rule family is
+# off for it (untyped fixtures and traced kernel bodies would otherwise bury
+# the signal under annotation labor and intentional-unused noise). The rules
+# that stay on are the bug-signal ones — attribute access, argument types,
+# return paths. This mirrors the migration line's end-state configuration.
+[[tool.pyright.executionEnvironments]]
+root = "tests"
+reportUnusedClass = false
+reportUnknownVariableType = false
+reportUnknownMemberType = false
+reportUnnecessaryIsInstance = false
+reportMissingTypeArgument = false
+reportUnnecessaryTypeIgnoreComment = false
+reportUnknownLambdaType = false
+reportUnnecessaryCast = false
+reportUnknownParameterType = false
+reportUnknownArgumentType = false
+reportUnusedFunction = false
+reportPossiblyUnboundVariable = false
+reportMissingParameterType = false
+reportUnusedVariable = false
+reportCallIssue = false
+reportAssignmentType = false
+reportRedeclaration = false
+reportGeneralTypeIssues = false

@@ -801,7 +801,7 @@ def _hunk_payload(hunk: DiffHunk) -> dict[str, object]:
 
 def _trace_payload(traces: tuple[PassTrace, ...], source_name: str) -> dict[str, object]:
     """Build the stable, path-free payload consumed by the report."""
-    passes = []
+    passes: list[dict[str, object]] = []
     for trace in traces:
         passes.append(
             {

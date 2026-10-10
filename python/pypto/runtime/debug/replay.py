@@ -49,6 +49,7 @@ from collections.abc import Callable
 from ctypes import _SimpleCData
 from pathlib import Path
 from types import ModuleType
+from typing import Any, cast
 
 import torch
 
@@ -102,7 +103,7 @@ def invalidate_binary_cache(work_dir: Path | str) -> None:
 
 def replay(
     work_dir: Path | str,
-    *tensors: torch.Tensor | DeviceTensor | _SimpleCData,
+    *tensors: torch.Tensor | DeviceTensor | _SimpleCData[Any],
     config: RunConfig | None = None,
     recompile: bool = True,
     rebuild_from_pto: bool = True,
@@ -173,7 +174,9 @@ def replay(
     golden_module = None
     if validate:
         golden_module = _load_golden_module(work_dir)
-        named_defaults = list(golden_module.generate_inputs({"name": "Default"}))
+        named_defaults = cast(
+            "list[tuple[str, Any]]", list(golden_module.generate_inputs({"name": "Default"}))
+        )
         if len(tensors) != len(named_defaults):
             raise ValueError(
                 f"replay(validate=True): expected {len(named_defaults)} tensors "
@@ -291,7 +294,7 @@ def _validate_against_golden_module(
 def _main(
     argv: list[str] | None = None,
     *,
-    inline_inputs: Callable[[], list] | None = None,
+    inline_inputs: Callable[[], list[Any]] | None = None,
     user_compare: Callable[..., None] | None = None,
     default_platform: str = "a2a3sim",
 ) -> int:
@@ -409,6 +412,7 @@ def _main(
         do_validate = args.validate
 
     config = RunConfig(
+        # InitVar cannot coexist with the same-named read property; see RunConfig.
         platform=args.platform,
         device_id=args.device_id,
         enable_pmu=args.pmu,

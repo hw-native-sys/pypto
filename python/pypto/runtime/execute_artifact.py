@@ -213,7 +213,7 @@ def execute_batch_manifest(
     """
     from pypto.runtime import ChipWorker, RunConfig  # noqa: PLC0415
 
-    entries = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    entries: list[dict[str, Any]] = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     if not entries:
         return True
 
@@ -243,7 +243,7 @@ def execute_batch_manifest(
             validate=validate,
         )
 
-    def _run_and_mark(entry: dict) -> None:
+    def _run_and_mark(entry: dict[str, Any]) -> None:
         nonlocal all_ok
         work_dir = Path(entry["work_dir"])
         try:
@@ -276,7 +276,7 @@ def execute_batch_manifest(
     # Reconstruct the whole batch before opening the shared worker so its SDMA
     # capability does not depend on manifest order. Keep setup failures in the
     # prepared list and emit their INFRA markers in manifest order below.
-    prepared: list[tuple[dict, tuple[Any, str, bool] | None, str | None]] = []
+    prepared: list[tuple[dict[str, Any], tuple[Any, str, bool] | None, str | None]] = []
     for entry in entries:
         try:
             rebound = _rebind(Path(entry["work_dir"]), entry["platform"])
@@ -285,7 +285,7 @@ def execute_batch_manifest(
         else:
             prepared.append((entry, rebound, None))
 
-    def _mark_setup_failure(entry: dict, setup_traceback: str | None) -> None:
+    def _mark_setup_failure(entry: dict[str, Any], setup_traceback: str | None) -> None:
         nonlocal all_ok
         assert setup_traceback is not None
         print(setup_traceback, flush=True)
@@ -317,7 +317,11 @@ def execute_batch_manifest(
     )
 
     with ChipWorker(
-        config=RunConfig(platform=shared_platform, device_id=device_id),
+        config=RunConfig(
+            # InitVar cannot coexist with the same-named read property; see RunConfig.
+            platform=shared_platform,
+            device_id=device_id,
+        ),
         runtime=first_runtime,
         enable_sdma=shared_enable_sdma,
     ):

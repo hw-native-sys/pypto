@@ -965,10 +965,23 @@ def random(
     Returns:
         Tile wrapping the random operation.
     """
-    raw_seeds = (key0, key1, counter0, counter1, counter2, counter3)
-    seeds = [v.unwrap() if isinstance(v, Scalar) else v for v in raw_seeds]
+
+    def _seed_expr(seed: int | Scalar) -> int | Expr:
+        return seed.unwrap() if isinstance(seed, Scalar) else seed
+
     vshape = list(valid_shape) if valid_shape is not None else None
-    call_expr = _ir_ops.random(*seeds, list(shape), valid_shape=vshape, dtype=dtype, rounds=rounds)
+    call_expr = _ir_ops.random(
+        _seed_expr(key0),
+        _seed_expr(key1),
+        _seed_expr(counter0),
+        _seed_expr(counter1),
+        _seed_expr(counter2),
+        _seed_expr(counter3),
+        list(shape),
+        valid_shape=vshape,
+        dtype=dtype,
+        rounds=rounds,
+    )
     return Tile(expr=call_expr)
 
 
@@ -3466,6 +3479,19 @@ def mrgsort(
     src3: Tile,
     tmp: Tile,
     exhausted: bool = ...,
+) -> Tile: ...
+
+
+@overload
+def mrgsort(
+    src0: Tile,
+    src1: Tile | None = ...,
+    src2: Tile | None = ...,
+    src3: Tile | None = ...,
+    tmp: Tile | None = ...,
+    exhausted: bool = ...,
+    *,
+    block_len: int | Scalar | None = ...,
 ) -> Tile: ...
 
 

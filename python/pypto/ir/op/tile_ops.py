@@ -445,8 +445,8 @@ def scatter_update(
     input: Expr,
     *args: Expr | int,
     dim: int | Expr | None = None,
-    index: Expr | None = None,
-    src: Expr | None = None,
+    index: Expr | int | None = None,
+    src: Expr | int | None = None,
     span: Span | None = None,
 ) -> Call:
     """Update tile rows at positions specified by 2D index tile with values from src.
@@ -531,7 +531,7 @@ _MGATHER_COALESCE = {"row": 0, "elem": 1}
 _MGATHER_GATHER_OOB = {"undefined": 0, "clamp": 1, "wrap": 2, "zero": 3}
 
 
-def _resolve_mgather_coalesce(coalesce: str | int) -> int:
+def _resolve_mgather_coalesce(coalesce: object) -> int:
     if isinstance(coalesce, str):
         try:
             return _MGATHER_COALESCE[coalesce]
@@ -542,7 +542,7 @@ def _resolve_mgather_coalesce(coalesce: str | int) -> int:
     raise ValueError(f"mgather coalesce must be 'row', 'elem', 0, or 1, got {coalesce!r}")
 
 
-def _resolve_mgather_gather_oob(gather_oob: str | int) -> int:
+def _resolve_mgather_gather_oob(gather_oob: object) -> int:
     if isinstance(gather_oob, str):
         try:
             return _MGATHER_GATHER_OOB[gather_oob]
@@ -3169,7 +3169,7 @@ def reinterpret_view(
     return _ir_core.create_op_call("tile.reinterpret_view", args, {"dtype": dtype}, actual_span)
 
 
-def _normalize_axis_const(axis: int | ConstInt, span: Span, name: str) -> ConstInt:
+def _normalize_axis_const(axis: object, span: Span, name: str) -> ConstInt:
     """Normalize an axis argument (int or ConstInt) into a ConstInt(INDEX) expression."""
     if isinstance(axis, ConstInt):
         return axis
@@ -3526,7 +3526,7 @@ def gather_mask(
 _GATHER_COMPARE_CMP_MODES = ("eq", "ne", "lt", "le", "gt", "ge")
 
 
-def resolve_gather_compare_cmp_mode(cmp_mode: str | int) -> int:
+def resolve_gather_compare_cmp_mode(cmp_mode: object) -> int:
     """Normalize a gather_compare cmp_mode to its integer enum value.
 
     Accepts either a string in ``{"eq", "ne", "lt", "le", "gt", "ge"}`` or

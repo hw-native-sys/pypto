@@ -600,7 +600,7 @@ class TestAnnotationLayoutReachesTheProgram:
 
         span = exc_info.value.span
         assert span is not None
-        assert span["filename"].endswith("test_jit_compile_extraction.py")
+        assert str(span["filename"]).endswith("test_jit_compile_extraction.py")
 
 
 @jit.incore
@@ -1011,7 +1011,7 @@ def _rebind_plain(
     out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
     BLOCK: pl.constexpr,
 ):
-    BLOCK = 32
+    BLOCK = 32  # pyright: ignore[reportConstantRedefinition] — the rebind is the subject under test
     out[0:BLOCK, 0:128] = pl.add(x[0:BLOCK, 0:128], 1.0)
     return out
 
@@ -1022,7 +1022,7 @@ def _rebind_augmented(
     out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
     BLOCK: pl.constexpr,
 ):
-    BLOCK += 1
+    BLOCK += 1  # pyright: ignore[reportConstantRedefinition] — the rebind is the subject under test
     out[0:BLOCK, 0:128] = pl.add(x[0:BLOCK, 0:128], 1.0)
     return out
 
@@ -1033,7 +1033,7 @@ def _rebind_unpacked(
     out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
     BLOCK: pl.constexpr,
 ):
-    _unused, BLOCK = 1, 32
+    _unused, BLOCK = 1, 32  # pyright: ignore[reportConstantRedefinition] — the rebind is the subject under test
     out[0:BLOCK, 0:128] = pl.add(x[0:BLOCK, 0:128], 1.0)
     return out
 
@@ -1045,7 +1045,7 @@ def _rebind_loop_target(
     BLOCK: pl.constexpr,
 ):
     # PLR1704 is the point: this fixture exists to be refused by the specializer.
-    for BLOCK in pl.range(2):  # noqa: PLR1704
+    for BLOCK in pl.range(2):  # noqa: PLR1704  # pyright: ignore[reportConstantRedefinition] — the rebind is the subject under test
         out[0:64, 0:128] = pl.add(x[0:64, 0:128], 1.0)
     return out
 
@@ -1331,7 +1331,7 @@ class TestConstexprThroughDeps:
             o: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
             BLOCK: pl.constexpr,
         ):
-            BLOCK = BLOCK // 2
+            BLOCK = BLOCK // 2  # pyright: ignore[reportConstantRedefinition] — the rebind is the subject under test
             with pl.at(level=pl.Level.CORE_GROUP):
                 pl.store(pl.load(a, [0, 0], [BLOCK, BLOCK]), [0, 0], o)
             return o

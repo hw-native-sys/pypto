@@ -28,6 +28,7 @@ import re
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Any
 
 from pypto import backend as _backend
 from pypto import ir as _ir
@@ -73,7 +74,7 @@ class Tile:
 class Box(Tile):
     """A drawn rectangle: one or more alias tiles sharing a slot and lifetime."""
 
-    aliases: list[str] = field(default_factory=list)
+    aliases: list[str] = field(default_factory=list[str])
     view: bool = False
     conflict: bool = False
 
@@ -98,8 +99,8 @@ class FunctionMap:
     src_start: int
     src_end: int
     source: list[str]
-    spaces: list[SpaceUsage] = field(default_factory=list)
-    boxes: list[Box] = field(default_factory=list)
+    spaces: list[SpaceUsage] = field(default_factory=list[SpaceUsage])
+    boxes: list[Box] = field(default_factory=list[Box])
 
 
 @dataclass
@@ -387,8 +388,11 @@ def build_boxes(tiles: list[Tile]) -> list[Box]:
 def _merge(run: list[Tile]) -> Box:
     """Fold a run of alias tiles into one box. `run` is sorted by `start`."""
     head = run[0]
+    # asdict's value type is Any|int once merged with the end field; keep the
+    # merged bag opaque so Box's typed fields take each value as-is.
+    fields: dict[str, Any] = {**asdict(head), "end": max(t.end for t in run)}
     return Box(
-        **{**asdict(head), "end": max(t.end for t in run)},
+        **fields,
         aliases=[t.name for t in run[1:]],
     )
 

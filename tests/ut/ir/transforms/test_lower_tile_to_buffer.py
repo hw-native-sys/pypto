@@ -55,17 +55,17 @@ class _BufferCalls(ir.IRVisitor):
         assert not isinstance(expr.type, ir.TileType)
         super().visit_expr(expr)
 
-    def visit_call(self, call):
-        assert ir.get_op_ir_stage(call.op.name) == ir.OpIRStage.Buffer
-        self.calls.append(call)
-        super().visit_call(call)
+    def visit_call(self, op):
+        assert ir.get_op_ir_stage(op.op.name) == ir.OpIRStage.Buffer
+        self.calls.append(op)
+        super().visit_call(op)
 
-    def visit_assign_stmt(self, stmt):
-        if isinstance(stmt.var.type, ir.BufferType):
-            assert isinstance(stmt.value, ir.Call)
-            assert stmt.value.op.name == ir.get_op("buffer.alloc").name
-            self.allocations.append(stmt)
-        super().visit_assign_stmt(stmt)
+    def visit_assign_stmt(self, op):
+        if isinstance(op.var.type, ir.BufferType):
+            assert isinstance(op.value, ir.Call)
+            assert op.value.op.name == ir.get_op("buffer.alloc").name
+            self.allocations.append(op)
+        super().visit_assign_stmt(op)
 
 
 def _lower(planner, enabled=True, program=StraightLine):

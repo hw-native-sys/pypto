@@ -195,6 +195,7 @@ class TestMakeCacheKey:
         parameter to stay symbolic.
         """
         _, _, _, _, _, compile_opts = self._make_key(param_names=["B"])
+        assert compile_opts is not None
         assert ("scalar_semantics", SCALAR_SEMANTICS) in compile_opts
 
     def test_param_order_preserved(self):
@@ -238,7 +239,11 @@ class TestMakeCacheKey:
         """A layout can reach the annotation through a variable, leaving the
         source text — and so ``source_hash`` — identical. It must split the key
         on its own."""
-        common = {"param_names": ["a"], "tensor_shapes": {"a": (8, 8)}, "tensor_dtypes": {"a": DataType.FP32}}
+        common: dict[str, Any] = {
+            "param_names": ["a"],
+            "tensor_shapes": {"a": (8, 8)},
+            "tensor_dtypes": {"a": DataType.FP32},
+        }
         k1 = self._make_key(**common, tensor_layouts={"a": ir.TensorLayout.MX_A_ZZ})
         k2 = self._make_key(**common, tensor_layouts={"a": ir.TensorLayout.MX_B_NN})
         assert k1 != k2
@@ -246,7 +251,11 @@ class TestMakeCacheKey:
     def test_different_dep_layouts_cause_miss(self):
         """Same, one call deeper: a layout a *dep* declares appears in no entry
         parameter meta, so it needs its own key component."""
-        common = {"param_names": ["a"], "tensor_shapes": {"a": (8, 8)}, "tensor_dtypes": {"a": DataType.FP32}}
+        common: dict[str, Any] = {
+            "param_names": ["a"],
+            "tensor_shapes": {"a": (8, 8)},
+            "tensor_dtypes": {"a": DataType.FP32},
+        }
         k1 = self._make_key(**common, dep_layouts=(("dep", "x", "TensorLayout.MX_A_ZZ"),))
         k2 = self._make_key(**common, dep_layouts=(("dep", "x", "TensorLayout.MX_B_NN"),))
         assert k1 != k2
@@ -421,7 +430,7 @@ class TestMakeCacheKey:
     @pytest.mark.parametrize("planner", [MemoryPlanner.DSA_RP, MemoryPlanner.PTOAS])
     def test_dbc_double_buffer_flag_does_not_split_automatic_planner_key(self, planner):
         """DSA_RP and PTOAS enable dbC automatically, so the legacy-PyPTO flag is inert."""
-        kwargs = {
+        kwargs: dict[str, Any] = {
             "param_names": ["a"],
             "tensor_shapes": {"a": (8, 8)},
             "tensor_dtypes": {"a": DataType.FP32},
@@ -441,7 +450,7 @@ class TestMakeCacheKey:
         """The runtime is baked into the artifact's ``kernel_config.py`` and decides
         which worker can bind it, so a ``host_build_graph`` call must not reuse a
         ``tensormap_and_ringbuffer`` artifact."""
-        kwargs = {
+        kwargs: dict[str, Any] = {
             "param_names": ["a"],
             "tensor_shapes": {"a": (8, 8)},
             "tensor_dtypes": {"a": DataType.FP32},

@@ -51,20 +51,20 @@ class TestInsertMxScaleAddr:
             return expr.name_hint, expr.unique_id
 
         class _Collect(ir.IRVisitor):
-            def visit_assign_stmt(self, stmt):
-                call = stmt.value if isinstance(stmt.value, ir.Call) else None
+            def visit_assign_stmt(self, op):
+                call = op.value if isinstance(op.value, ir.Call) else None
                 if call is not None and call.op.name == ir.get_op("tile.tget_scale_addr").name:
-                    events.append(("bind", var_ref(stmt.var), var_ref(call.args[0]), var_ref(call.args[1])))
+                    events.append(("bind", var_ref(op.var), var_ref(call.args[0]), var_ref(call.args[1])))
                 elif call is not None and call.op.name == ir.get_op("tile.matmul_mx").name:
                     events.append(("matmul", *(var_ref(arg) for arg in call.args)))
-                super().visit_assign_stmt(stmt)
+                super().visit_assign_stmt(op)
 
-            def visit_if_stmt(self, stmt):
+            def visit_if_stmt(self, op):
                 events.append(("then",))
-                self.visit_stmt(stmt.then_body)
-                if stmt.else_body is not None:
+                self.visit_stmt(op.then_body)
+                if op.else_body is not None:
                     events.append(("else",))
-                    self.visit_stmt(stmt.else_body)
+                    self.visit_stmt(op.else_body)
 
         _Collect().visit_program(program)
         return events

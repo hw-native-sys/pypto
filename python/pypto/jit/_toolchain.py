@@ -269,7 +269,7 @@ def _wrapper_redirects(wrapper: Path) -> list[str]:
         output = _run([str(wrapper), "--show-config"])
     except (OSError, subprocess.SubprocessError) as exc:
         return [f"its configuration could not be read ({exc})"]
-    redirects = []
+    redirects: list[str] = []
     for line in output.splitlines():
         origin, marker, setting = line.partition(") ")
         key, separator, value = setting.partition(" = ")
@@ -579,7 +579,7 @@ def _wheel_inputs(launcher: Path) -> set[Path]:
     paths.update(_elf_inputs(interpreter.resolve(strict=True)))
     # Reduce nested roots before visiting native extensions and bundled ELF
     # libraries, including wheel-specific directories such as numpy.libs.
-    natives = []
+    natives: list[Path] = []
     for root in _component(paths).roots:
         candidates = root.path.rglob("*") if root.path.is_dir() else (root.path,)
         for native in candidates:
@@ -670,7 +670,7 @@ def _ptoas_inputs(launcher: Path, ancestors: frozenset[Path] = frozenset()) -> s
         raise ValueError("PTOAS requires its compatible self-contained CPython installation")
     paths = {launcher, root, prefix, *_elf_inputs(_executable("bash"))}
     paths.update(_elf_inputs(interpreter, library_path))
-    natives = []
+    natives: list[Path] = []
     for directory in (root, Path(stdlib) / "lib-dynload"):
         for native in directory.rglob("*.so"):
             with native.open("rb") as stream:
@@ -724,7 +724,7 @@ def _pto_isa_component(isa_root: Path) -> ComponentInputs:
     Falls back to the content inventory whenever the revision cannot be read or
     the tree cannot be accounted for, so neither weakens anything.
     """
-    from simpler_setup.pto_isa import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+    from simpler_setup.pto_isa import (  # noqa: PLC0415
         get_pto_isa_head,
     )
 

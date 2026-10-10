@@ -29,7 +29,9 @@ def _span_begin(err: ParserError) -> tuple[int, int]:
     """
     sp = err.span
     assert sp is not None, "expected a span on the parser error"
-    return sp["begin_line"], sp["begin_column"]
+    begin_line, begin_column = sp["begin_line"], sp["begin_column"]
+    assert isinstance(begin_line, int) and isinstance(begin_column, int)
+    return begin_line, begin_column
 
 
 def _span_char_index(begin_column: int) -> int:
@@ -583,7 +585,9 @@ def bad(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             pl.parse(code)
         err = exc_info.value
         assert err.span is not None
-        assert err.span["column"] > 0  # Not column 0 — points at 'BadType'
+        span = err.span
+        column = span["column"]
+        assert isinstance(column, int) and column > 0  # Not column 0 — points at 'BadType'
 
     def test_exec_error_column_points_at_non_ascii_attribute(self):
         """The bad-attribute column must survive a non-ASCII identifier.
@@ -604,9 +608,13 @@ def bad(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             pl.parse(code)
         err = exc_info.value
         assert err.span is not None
-        line = code.split("\n")[err.span["begin_line"] - 1]
-        assert line[err.span["begin_column"] - 1 :].startswith("Bad_é_Type"), (
-            f"column {err.span['begin_column']} does not land on the attribute in {line!r}"
+        span = err.span
+        begin_line = span["begin_line"]
+        begin_column = span["begin_column"]
+        assert isinstance(begin_line, int) and isinstance(begin_column, int)
+        line = code.split("\n")[begin_line - 1]
+        assert line[begin_column - 1 :].startswith("Bad_é_Type"), (
+            f"column {begin_column} does not land on the attribute in {line!r}"
         )
 
     def test_exec_error_hint_lists_valid_values(self):
@@ -803,7 +811,9 @@ class Prog:
         begin_line, begin_column = _span_begin(err)
 
         # Module indexing: the span's line must resolve to the with pl.at line.
-        error_line = err.source_lines[begin_line - 1]
+        source_lines = err.source_lines
+        assert source_lines is not None
+        error_line = source_lines[begin_line - 1]
         assert "deps=" in error_line
         # The column must point exactly at the rejected `[seed_tid] + ...` value.
         assert error_line[_span_char_index(begin_column) :].startswith("[seed_tid]")
@@ -829,7 +839,9 @@ class Prog:
         err = exc_info.value
         begin_line, begin_column = _span_begin(err)
 
-        error_line = err.source_lines[begin_line - 1]
+        source_lines = err.source_lines
+        assert source_lines is not None
+        error_line = source_lines[begin_line - 1]
         assert "this_op_does_not_exist" in error_line
         assert error_line[_span_char_index(begin_column) :].startswith("pl.this_op_does_not_exist")
 

@@ -52,10 +52,10 @@ def _load_simpler() -> tuple[Callable[[Any], int], Callable[[], Any]]:
     """
     if "parse_level" not in _simpler_cache:
         try:
-            # type: ignore[import-not-found] applied per-line; noqa: PLC0415 — lazy
-            # import: simpler is optional and may be absent in offline environments.
-            from simpler._log import get_logger  # type: ignore[import-not-found] # noqa: PLC0415
-            from simpler_setup.log_config import parse_level  # type: ignore[import-not-found] # noqa: PLC0415
+            # noqa: PLC0415 — lazy import: simpler is optional at runtime and may be
+            # absent in offline environments (type-checking goes through the vendored stubs).
+            from simpler._log import get_logger  # noqa: PLC0415
+            from simpler_setup.log_config import parse_level  # noqa: PLC0415
         except Exception as exc:  # noqa: BLE001 — surface any partial-install failure as one error
             raise RuntimeError(
                 "PyPTO runtime logger is unavailable; install simpler to use configure_log()"
@@ -108,7 +108,9 @@ def _sync_to_pypto(threshold: int) -> None:
         set_log_level(LogLevel.NONE)
 
 
-def _ensure_configured() -> None:
+# Called cross-module from pypto/runtime/__init__ (pyright's unused analysis
+# discounts cross-module references to private symbols).
+def _ensure_configured() -> None:  # pyright: ignore[reportUnusedFunction]
     """Idempotent env-var bootstrap, called once at ``pypto.runtime`` import.
 
     If the user later calls :func:`configure_log` explicitly, that wins; if
