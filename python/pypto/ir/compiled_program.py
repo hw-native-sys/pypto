@@ -121,9 +121,9 @@ _BUILD_KIND_MARKERS = (
 def _to_runtime_shape(shape: list[int], dtype: DataType) -> list[int]:
     """Convert compiled IR shape to the runtime carrier shape.
 
-    ``DataType.FP4E2M1X2`` last dims already match ``torch.float4_e2m1fn_x2``
-    (no halving). Logical ``DataType.FP4`` still counts nibbles, so the call
-    ABI halves a static last dim at this boundary only.
+    After PackFp4, FP4E2M1X2 last dims already match ``torch.float4_e2m1fn_x2``.
+    Leftover logical ``DataType.FP4`` (pre-pack IR) still counts nibbles, so
+    the call ABI halves a static last dim at this boundary only.
     """
     runtime_shape = list(shape)
     if dtype == DataType.FP4 and runtime_shape[-1] != -1:

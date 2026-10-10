@@ -31,6 +31,7 @@ TENSOR_OPTIMIZATION_PASSES = [
     "Simplify",
     "NormalizeStmtStructure",
     "FlattenCallExpr",
+    "PackFp4",
     *TENSOR_ONLY_PASSES,
     "LowerCompositeOps",
     "FlattenTileNdTo2D",

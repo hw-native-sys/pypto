@@ -235,11 +235,8 @@ class DistributedCodegen : public CodegenBase {
 
   /// Return a Python expression that recovers ``target_var`` from
   /// ``shape_access`` (e.g. ``tensors["x"].shape[1]``), or an empty string if
-  /// the shape dim is not invertible for that var. Supports ``var`` and the
-  /// single-var affine forms ``var +/- c``, ``c - var``, ``var * c`` / ``c *
-  /// var`` (-> ``shape // c``) and ``var // c`` (-> ``shape * c``). Python
-  /// mirror of the device-side ``_invert_shape_dim_for_var`` (integer ``//``
-  /// keeps slice bounds int-typed).
+  /// the shape dim is not invertible for that var. Thin wrapper around the
+  /// shared ``codegen::InvertShapeDimForVar`` (Python ``//`` dialect).
   [[nodiscard]] std::string InvertShapeDimForVar(const ir::ExprPtr& dim_expr, const ir::VarPtr& target_var,
                                                  const std::string& shape_access) const;
 
