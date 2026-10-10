@@ -34,7 +34,7 @@
 //   3. C->V boundary: replace with tile.aiv_shard(full_cube_tile, split=int(M))
 //      -> HALF; seed the shard result into tile_vars like tpop_from_aic.
 //   4. V->C boundary: insert tile.aic_gather(half_vector_tile, split=int(M))
-//      -> FULL, then keep the original cube placement move on the full tile.
+//      -> FULL in Mat; keep a placement move only for another cube memory space.
 //   5. Halve ONLY the vector sub-region (AFFINITY GATE): a tile-producing op is
 //      halved iff it is VECTOR-affine. CUBE-affine ops (matmul operands, the
 //      cube result before the C->V boundary) stay FULL. We assert no CUBE op was
@@ -64,6 +64,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
@@ -369,8 +370,8 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
         }
 
         if (dir == CVDirection::VECTOR_TO_CUBE) {
-          // V->C: HALF vector tile -> FULL via aic_gather, then keep the original
-          // cube-placement move on the gathered FULL tile. The gather result is
+          // V->C: HALF vector tile -> FULL Mat via aic_gather, then place it in
+          // another cube memory space only if needed. The gather result is
           // full (un-tracked); the cube placement move and matmul stay full.
           INTERNAL_CHECK_SPAN(!call->args_.empty(), call->span_)
               << "Internal error: V->C boundary tile.move must carry a source tile";
@@ -429,14 +430,6 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
           auto gather_type = gather->GetType();
           auto gather_typed =
               std::make_shared<Call>(gather->op_, gather->args_, gather->kwargs_, gather_type, gather->span_);
-          // Name the gathered FULL tile with the cube-destination's "_mat" suffix:
-          // ExpandMixedKernel folds this gather into the AIC-side V->C boundary and
-          // names the synthesized tpop after this var. The standalone split_aiv
-          // move-boundary path names that tpop BuildBoundaryTpopName(AIC, dest) =
-          // "<dest>_mat", so matching it here keeps both paths' .pto byte-identical.
-          auto full_mat_var =
-              std::make_shared<Var>(assign->var_->name_hint_ + "_mat", gather_type, assign->span_);
-          result.push_back(std::make_shared<AssignStmt>(full_mat_var, gather_typed, assign->span_));
           // Original cube placement move, now on the FULL gathered tile. Keeping the
           // move's original result type is only valid if the gather reassembled back
           // to exactly that shape — now a genuine invariant, since the gather doubles
@@ -455,6 +448,24 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
                 << "Internal error: aic_gather result dim " << i
                 << " does not match the cube-placement move's result type; the V->C boundary "
                 << "would emit a tile.move whose result shape contradicts its operand";
+          }
+          // The gather already lands in Mat. Bind its result directly instead of
+          // copying the FIFO tile into a second Mat allocation (unsupported by
+          // TMOV). Keeping the consumers on the gathered value also lets
+          // ExpandMixedKernel place tfree after the last extraction, not before
+          // AutoTile's K loop. Left/Right still need their placement move.
+          const bool needs_placement = move_tile->memory_space_ != MemorySpace::Mat;
+          auto full_mat_var = std::make_shared<Var>(
+              assign->var_->name_hint_ + (needs_placement ? "_mat" : ""), gather_type, assign->span_);
+          result.push_back(std::make_shared<AssignStmt>(full_mat_var, gather_typed, assign->span_));
+          if (!needs_placement) {
+            CHECK_SPAN(tile_view_semantics::GetEffectiveTileView(*move_tile) ==
+                           tile_view_semantics::GetEffectiveTileView(*gathered_tile),
+                       call->span_)
+                << "LowerAutoVectorSplit: a Vec->Mat boundary must use the gathered Mat tile's "
+                   "layout and valid shape; a Mat->Mat placement conversion is unsupported";
+            var_replacements[assign->var_.get()] = full_mat_var;
+            continue;
           }
           std::vector<ExprPtr> move_args = call->args_;
           move_args[0] = full_mat_var;
