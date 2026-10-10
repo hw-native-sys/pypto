@@ -75,7 +75,7 @@ def _get_span_or_capture(span: _ir.Span | None = None, frame_offset: int = 1) ->
 
 
 def _normalize_expr(
-    value: int | float | _ir.Expr,
+    value: object,
     span: _ir.Span | None = None,
     int_dtype: DataType = DataType.INDEX,
     float_dtype: DataType = DataType.FP32,
@@ -98,6 +98,7 @@ def _normalize_expr(
         return value
 
     actual_span = span if span is not None else _ir.Span.unknown()
+    value_type = type(value)
 
     if isinstance(value, int):
         return _ir.ConstInt(value, int_dtype, actual_span)
@@ -109,7 +110,7 @@ def _normalize_expr(
         # operator accepts a nested tuple, so name the mistake here rather than
         # letting the generic "cannot convert" message stand.
         raise TypeError(
-            f"Cannot convert {type(value)} to IR expression: expected a scalar, but got the "
+            f"Cannot convert {value_type} to IR expression: expected a scalar, but got the "
             f"sequence {value!r}. Each element of an offsets / shapes / valid_shape argument is "
             f"one dimension's extent, so the argument takes a flat sequence of integer scalars "
             f"-- one bracket level, not nested pairs."
@@ -238,13 +239,15 @@ def default_saturation_mode_for(target_dtype: DataType | int | None) -> int | No
     """
     if target_dtype is None:
         return None
-    dtype = DataType(target_dtype) if isinstance(target_dtype, int) else target_dtype
+    # NOTE: the int spelling has no runtime path — DataType has no constructor
+    # from a type code (mirrors pl.cast in unified_ops); kept verbatim under ignore.
+    dtype = DataType(target_dtype) if isinstance(target_dtype, int) else target_dtype  # type: ignore[reportCallIssue]
     if not dtype.is_int():
         return None
     return SATURATION_MODE_NAMES[DEFAULT_SATURATION_MODE]
 
 
-def resolve_saturation_mode(saturation_mode: str | int) -> int:
+def resolve_saturation_mode(saturation_mode: object) -> int:
     """Resolve destination saturation to int, accepting both names and int values.
 
     Args:
@@ -656,6 +659,7 @@ __all__ = [
     "_normalize_expr",
     "_normalize_scalar_operand",
     "_normalize_shape",
+    "_normalize_signless_same_width_scalar_operand",
     "_to_int32_scalar",
     "_to_make_tuple",
     "has_partial_valid_region",

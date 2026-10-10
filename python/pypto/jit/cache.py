@@ -16,8 +16,9 @@ extents do not create unnecessary specializations.
 
 import dataclasses
 import hashlib
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final, NamedTuple
+from typing import TYPE_CHECKING, Any, Final, NamedTuple, cast
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core.passes import MemoryPlanner, RuntimeKind, runtime_kind_to_name
@@ -32,7 +33,9 @@ if TYPE_CHECKING:
 try:
     from pypto import __version__ as _PYPTO_VERSION
 except Exception:
-    _PYPTO_VERSION = "unknown"
+    # Import-fallback idiom: the except arm rebinds the same name, which pyright
+    # reads as a constant redefinition.
+    _PYPTO_VERSION = "unknown"  # pyright: ignore[reportConstantRedefinition]
 
 SCALAR_SEMANTICS: Final[int] = 2
 """Version of the scalar-parameter contract this key was built under.
@@ -97,7 +100,7 @@ def _freeze(value: Any) -> Any:
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return tuple((f.name, _freeze(getattr(value, f.name))) for f in dataclasses.fields(value))
     if isinstance(value, (list, tuple)):
-        return tuple(_freeze(v) for v in value)
+        return tuple(_freeze(v) for v in cast("Sequence[Any]", value))
     return value
 
 
@@ -208,7 +211,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
     Returns:
         Hashable CacheKey tuple.
     """
-    tensor_infos = []
+    tensor_infos: list[TensorCacheInfo] = []
     for name in param_names:
         if name not in tensor_shapes:
             continue

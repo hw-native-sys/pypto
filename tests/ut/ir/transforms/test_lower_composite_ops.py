@@ -317,9 +317,9 @@ def _collect_op_names(program):
     names = []
 
     class Collector(ir.IRVisitor):
-        def visit_call(self, call):
-            names.append(call.op.name)
-            super().visit_call(call)
+        def visit_call(self, op):
+            names.append(op.op.name)
+            super().visit_call(op)
 
     Collector().visit_program(program)
     return names
@@ -372,18 +372,18 @@ def test_tquant_mx_is_decomposed_to_value_returning_ops(
             self.assign_raw = 0
             self.assign_x2zz = 0
 
-        def visit_eval_stmt(self, stmt):
-            if isinstance(stmt.expr, ir.Call) and stmt.expr.op.name == _OP_TILE_TQUANT_MX_RAW:
+        def visit_eval_stmt(self, op):
+            if isinstance(op.expr, ir.Call) and op.expr.op.name == _OP_TILE_TQUANT_MX_RAW:
                 self.eval_raw += 1
-            super().visit_eval_stmt(stmt)
+            super().visit_eval_stmt(op)
 
-        def visit_assign_stmt(self, stmt):
-            if isinstance(stmt.value, ir.Call):
-                if stmt.value.op.name == _OP_TILE_TQUANT_MX_RAW:
+        def visit_assign_stmt(self, op):
+            if isinstance(op.value, ir.Call):
+                if op.value.op.name == _OP_TILE_TQUANT_MX_RAW:
                     self.assign_raw += 1
-                elif stmt.value.op.name == _OP_TILE_TMOV_X2ZZ:
+                elif op.value.op.name == _OP_TILE_TMOV_X2ZZ:
                     self.assign_x2zz += 1
-            super().visit_assign_stmt(stmt)
+            super().visit_assign_stmt(op)
 
     forms = FormCollector()
     forms.visit_program(After)
@@ -3651,11 +3651,11 @@ def _select_scratch_shapes(prog):
     shapes = []
 
     class Collector(ir.IRVisitor):
-        def visit_call(self, call: ir.Call) -> None:
-            if call.op.name == _OP_TILE_CREATE and isinstance(call.type, ir.TileType):
-                dims = [d.value for d in call.type.shape if isinstance(d, ir.ConstInt)]
-                shapes.append((tuple(dims), call.type.dtype))
-            super().visit_call(call)
+        def visit_call(self, op: ir.Call) -> None:
+            if op.op.name == _OP_TILE_CREATE and isinstance(op.type, ir.TileType):
+                dims = [d.value for d in op.type.shape if isinstance(d, ir.ConstInt)]
+                shapes.append((tuple(dims), op.type.dtype))
+            super().visit_call(op)
 
     Collector().visit_program(prog)
     return shapes
@@ -3738,11 +3738,11 @@ def test_tile_select_keeps_a_narrowed_tail_on_a_materialized_scalar_branch():
     full_valids = []
 
     class Collector(ir.IRVisitor):
-        def visit_call(self, call: ir.Call) -> None:
-            if call.op.name == _OP_TILE_FULL and isinstance(call.type, ir.TileType):
-                valid = call.type.get_effective_tile_view().valid_shape
+        def visit_call(self, op: ir.Call) -> None:
+            if op.op.name == _OP_TILE_FULL and isinstance(op.type, ir.TileType):
+                valid = op.type.get_effective_tile_view().valid_shape
                 full_valids.append([d.value for d in valid if isinstance(d, ir.ConstInt)])
-            super().visit_call(call)
+            super().visit_call(op)
 
     Collector().visit_program(After)
     assert full_valids == [[rows, valid_cols]]

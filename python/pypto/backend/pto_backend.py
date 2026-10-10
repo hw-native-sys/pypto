@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import textwrap
 import time
 from collections import OrderedDict
@@ -31,9 +32,13 @@ from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from importlib import resources
 
-try:
-    from importlib.resources.abc import Traversable  # pyright: ignore[reportMissingImports]
-except ImportError:  # pragma: no cover - fallback for older interpreters
+# importlib.resources.abc is new in 3.11; older interpreters expose the same
+# protocol from importlib.abc. The version check keeps the import statically
+# decidable, so pyright resolves the branch matching the configured
+# pythonVersion instead of reporting a missing module under 3.10 environments.
+if sys.version_info >= (3, 11):
+    from importlib.resources.abc import Traversable
+else:  # pragma: no cover - exercised only on Python < 3.11
     from importlib.abc import Traversable
 from typing import Any
 
@@ -126,7 +131,7 @@ def _get_error_summary(exc: Exception, func_name: str) -> str:
     ptoas_prefix = "ptoas compilation failed:"
     if first_line.startswith(ptoas_prefix):
         first_detail = first_line[len(ptoas_prefix) :].strip()
-        detail_lines = []
+        detail_lines: list[str] = []
         if first_detail:
             detail_lines.append(first_detail)
         detail_lines.extend(lines[1:])

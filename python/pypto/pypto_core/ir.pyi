@@ -9,7 +9,7 @@
 """Type stubs for PyPTO IR (Intermediate Representation) module."""
 
 import enum
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Final, overload
 
 from pypto import DataType
@@ -440,12 +440,17 @@ class TensorView:
     @overload
     def __init__(
         self,
-        stride: Sequence[Expr | int | Scalar],
-        layout: TensorLayout,
-        valid_shape: Sequence[Expr | int | Scalar] = ...,
+        stride: Sequence[Expr | int | Scalar] | None = ...,
+        layout: TensorLayout | None = ...,
+        valid_shape: Sequence[Expr | int | Scalar] | None = ...,
         pad: PadValue = ...,
     ) -> None:
         """Create a tensor view with stride, layout, optional valid shape, and optional pad.
+
+        Models the ``pypto.ir`` factory surface: every field is optional
+        (stride/valid_shape default to empty), but ``layout`` is required
+        whenever any other field is given. Scalars/DynVars are unwrapped to
+        their expressions and ints to ConstInt by the factory.
 
         Args:
             stride: Stride for each dimension (Expr, int, or Scalar/DynVar)
@@ -507,73 +512,18 @@ class TensorType(ShapedType):
     tensor_view: Final[TensorView | None]
     """Optional tensor view information."""
 
-    @overload
-    def __init__(self, shape: Sequence[Expr], dtype: DataType) -> None:
-        """Create a tensor type without memory reference.
-
-        Args:
-            shape: Shape dimensions as Expr nodes
-            dtype: Element data type
-        """
-
-    @overload
-    def __init__(self, shape: Sequence[Expr], dtype: DataType, memref: MemRef | None) -> None:
-        """Create a tensor type with memory reference.
-
-        Args:
-            shape: Shape dimensions as Expr nodes
-            dtype: Element data type
-            memref: Optional memory reference
-        """
-
-    @overload
     def __init__(
         self,
-        shape: Sequence[Expr],
+        shape: Sequence[Expr | int],
         dtype: DataType,
-        memref: MemRef | None,
-        tensor_view: TensorView | None,
+        memref: MemRef | None = ...,
+        tensor_view: TensorView | None = ...,
     ) -> None:
-        """Create a tensor type with memory reference and tensor view.
+        """Create a tensor type with optional memory reference and tensor view.
 
         Args:
-            shape: Shape dimensions as Expr nodes
-            dtype: Element data type
-            memref: Optional memory reference
-            tensor_view: Optional tensor view information
-        """
-
-    @overload
-    def __init__(self, shape: Sequence[int], dtype: DataType) -> None:
-        """Create a tensor type without memory reference.
-
-        Args:
-            shape: Shape dimensions as integers (automatically converted to ConstInt)
-            dtype: Element data type
-        """
-
-    @overload
-    def __init__(self, shape: Sequence[int], dtype: DataType, memref: MemRef | None) -> None:
-        """Create a tensor type with memory reference.
-
-        Args:
-            shape: Shape dimensions as integers (automatically converted to ConstInt)
-            dtype: Element data type
-            memref: Optional memory reference
-        """
-
-    @overload
-    def __init__(
-        self,
-        shape: Sequence[int],
-        dtype: DataType,
-        memref: MemRef | None,
-        tensor_view: TensorView | None,
-    ) -> None:
-        """Create a tensor type with memory reference and tensor view.
-
-        Args:
-            shape: Shape dimensions as integers (automatically converted to ConstInt)
+            shape: Shape dimensions as Expr nodes or integers (ints are
+                auto-converted to ConstInt by the ``pypto.ir`` wrapper)
             dtype: Element data type
             memref: Optional memory reference
             tensor_view: Optional tensor view information
@@ -601,40 +551,14 @@ class DistributedTensorType(TensorType):
     ``pld.DistributedTensor[[N], pl.FP32]``."""
 
     @overload
-    def __init__(self, shape: Sequence[Expr], dtype: DataType) -> None:
-        """Create a distributed tensor type."""
-
-    @overload
-    def __init__(self, shape: Sequence[Expr], dtype: DataType, memref: MemRef | None) -> None:
-        """Create a distributed tensor type with optional memref."""
-
-    @overload
     def __init__(
         self,
-        shape: Sequence[Expr],
+        shape: Sequence[Expr | int],
         dtype: DataType,
-        memref: MemRef | None,
-        tensor_view: TensorView | None,
+        memref: MemRef | None = ...,
+        tensor_view: TensorView | None = ...,
     ) -> None:
         """Create a distributed tensor type with optional memref and tensor_view."""
-
-    @overload
-    def __init__(self, shape: Sequence[int], dtype: DataType) -> None:
-        """Create a distributed tensor type with constant shape."""
-
-    @overload
-    def __init__(self, shape: Sequence[int], dtype: DataType, memref: MemRef | None) -> None:
-        """Create a distributed tensor type with constant shape and optional memref."""
-
-    @overload
-    def __init__(
-        self,
-        shape: Sequence[int],
-        dtype: DataType,
-        memref: MemRef | None,
-        tensor_view: TensorView | None,
-    ) -> None:
-        """Create a distributed tensor type with constant shape, optional memref and tensor_view."""
 
     @overload
     def __init__(self, shape: Sequence[Expr], dtype: DataType, window_buffer: WindowBuffer) -> None:
@@ -727,79 +651,19 @@ class TileType(ShapedType):
     tile_view: Final[TileView | None]
     """Optional tile view information."""
 
-    memory_space: Final[MemorySpace | None]
-    """Memory space (None = not yet inferred)."""
-
-    @overload
-    def __init__(self, shape: Sequence[Expr], dtype: DataType) -> None:
-        """Create a tile type without memory reference.
-
-        Args:
-            shape: Shape dimensions as Expr nodes
-            dtype: Element data type
-        """
-
-    @overload
-    def __init__(self, shape: Sequence[Expr], dtype: DataType, memref: MemRef | None) -> None:
-        """Create a tile type with memory reference.
-
-        Args:
-            shape: Shape dimensions as Expr nodes
-            dtype: Element data type
-            memref: Optional memory reference
-        """
-
-    @overload
     def __init__(
         self,
-        shape: Sequence[Expr],
+        shape: Sequence[Expr | int],
         dtype: DataType,
-        memref: MemRef | None,
-        tile_view: TileView | None,
-        memory_space: MemorySpace | None = None,
+        memref: MemRef | None = ...,
+        tile_view: TileView | None = ...,
+        memory_space: MemorySpace | None = ...,
     ) -> None:
-        """Create a tile type with memory reference, tile view, and memory space.
+        """Create a tile type with optional memory reference, tile view, and memory space.
 
         Args:
-            shape: Shape dimensions as Expr nodes (supports multi-dimensional tensors)
-            dtype: Element data type
-            memref: Optional memory reference
-            tile_view: Optional tile view information
-            memory_space: Optional memory space
-        """
-
-    @overload
-    def __init__(self, shape: Sequence[int], dtype: DataType) -> None:
-        """Create a tile type without memory reference.
-
-        Args:
-            shape: Shape dimensions as integers (automatically converted to ConstInt)
-            dtype: Element data type
-        """
-
-    @overload
-    def __init__(self, shape: Sequence[int], dtype: DataType, memref: MemRef | None) -> None:
-        """Create a tile type with memory reference.
-
-        Args:
-            shape: Shape dimensions as integers (automatically converted to ConstInt)
-            dtype: Element data type
-            memref: Optional memory reference
-        """
-
-    @overload
-    def __init__(
-        self,
-        shape: Sequence[int],
-        dtype: DataType,
-        memref: MemRef | None,
-        tile_view: TileView | None,
-        memory_space: MemorySpace | None = None,
-    ) -> None:
-        """Create a tile type with memory reference, tile view, and memory space.
-
-        Args:
-            shape: Shape dimensions as integers (automatically converted to ConstInt)
+            shape: Shape dimensions as Expr nodes or integers (ints are
+                auto-converted to ConstInt by the ``pypto.ir`` wrapper)
             dtype: Element data type
             memref: Optional memory reference
             tile_view: Optional tile view information
@@ -1295,7 +1159,7 @@ class MemRef(Var):
     def __init__(
         self, memory_space: MemorySpace, addr: Expr | int, size: int, id: int, span: Span = ...
     ) -> None: ...
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         """Create a memory reference.
 
         New API: MemRef(base, byte_offset, size)
@@ -2664,6 +2528,9 @@ class SeqStmts(Stmt):
     stmts: Final[list[Stmt]]
     """List of statements."""
 
+    def __iter__(self) -> Iterator[Stmt]:
+        """Iterate the statements in order (the C++ binding exposes iteration)."""
+
     def __init__(self, stmts: list[Stmt], span: Span) -> None:
         """Create a sequence of statements.
 
@@ -3824,6 +3691,7 @@ class IRBuilder:
         core_num: Expr | None = None,
         sync_start: bool | None = None,
         manual: bool | None = None,
+        attrs: list[tuple[str, Any]] | None = None,
     ) -> None:
         """Begin building a scope statement.
 

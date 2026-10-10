@@ -48,10 +48,10 @@ def _collect_tensor_ops_in_orch(program):
             super().__init__()
             self.ops = []
 
-        def visit_assign_stmt(self, stmt):
-            if hasattr(stmt.value, "op") and stmt.value.op.name.startswith("tensor."):
-                self.ops.append(stmt.value.op.name)
-            super().visit_assign_stmt(stmt)
+        def visit_assign_stmt(self, op):
+            if isinstance(op.value, ir.Call) and op.value.op.name.startswith("tensor."):
+                self.ops.append(op.value.op.name)
+            super().visit_assign_stmt(op)
 
     all_ops = []
     for func in program.functions.values():

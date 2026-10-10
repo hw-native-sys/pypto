@@ -993,7 +993,9 @@ def test_cache_statistics_distinguish_disabled_forced_and_unavailable(
         assert private.program is not None and private._artifact_runtime is None
         unavailable = cache_stats()
         assert unavailable.bypasses - diagnostic.bypasses == 1
-        assert "Unsupported specialization identity type: object" in unavailable.last_bypass_reason
+        last_bypass_reason = unavailable.last_bypass_reason
+        assert last_bypass_reason is not None
+        assert "Unsupported specialization identity type: object" in last_bypass_reason
         assert unavailable.disabled_requests == diagnostic.disabled_requests
         assert unavailable.forced_rebuilds == diagnostic.forced_rebuilds
         assert len(builds) == 3 and not cache_root.exists()
@@ -1124,7 +1126,9 @@ def test_unresolved_linker_dependency_compiles_privately(tmp_path, automatic_jit
             monkeypatch.setattr(_toolchain, "_identity_cache", _toolchain.InstallationIdentityCache())
             private = kernel.compile(config=config)
             assert private.program is not None and private._artifact_runtime is None
-            assert "requires search-path resolution" in cache_stats().last_bypass_reason
+            bypass_reason = cache_stats().last_bypass_reason
+            assert bypass_reason is not None
+            assert "requires search-path resolution" in bypass_reason
     assert len(builds) == 2 and not root.exists()
     assert cache_stats().bypasses - before.bypasses == 2
 

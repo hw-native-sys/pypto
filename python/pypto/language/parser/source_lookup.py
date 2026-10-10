@@ -45,7 +45,7 @@ import linecache
 import os
 import types
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, cast
 
 __all__ = ["DuplicateClassDefinitionError", "get_class_source_lines"]
 
@@ -178,7 +178,10 @@ def _code_objects(value: Any) -> Iterator[types.CodeType]:
     contributes no evidence.
     """
     if isinstance(value, (staticmethod, classmethod)):
-        holders: tuple[Any, ...] = (value.__func__,)
+        # isinstance narrows Any to the unparameterized descriptors; restate the
+        # function type so __func__ stays fully typed.
+        descriptor = cast("staticmethod[Any, Any] | classmethod[Any, Any, Any]", value)
+        holders: tuple[Any, ...] = (descriptor.__func__,)
     elif isinstance(value, property):
         holders = (value.fget, value.fset, value.fdel)
     else:

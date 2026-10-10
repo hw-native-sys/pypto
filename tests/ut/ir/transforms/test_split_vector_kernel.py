@@ -709,7 +709,7 @@ def _count_op_calls(stmt, op_name: str) -> int:
         nonlocal count
         if expr is None:
             return
-        if isinstance(expr, ir.Call) and expr.op is not None and expr.op.name == op_name:
+        if isinstance(expr, ir.Call) and expr.op.name == op_name:
             count += 1
 
     def visit_stmt(s):

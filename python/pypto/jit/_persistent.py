@@ -13,14 +13,14 @@ import logging
 import os
 import tempfile
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextvars import ContextVar
 from dataclasses import fields, is_dataclass
 from enum import Enum
 from functools import cache, lru_cache
 from pathlib import Path
 from time import perf_counter_ns
-from typing import Any
+from typing import Any, cast
 
 from pypto._cache_config import CacheConfig, record_bypass, record_stats, time_stage
 from pypto._identity import digest_record, fingerprint_extra_sources
@@ -62,7 +62,7 @@ def _record(value: Any) -> Any:
     if is_dataclass(value) and not isinstance(value, type):
         return (type(value).__qualname__, {f.name: _record(getattr(value, f.name)) for f in fields(value)})
     if type(value) in (list, tuple, CacheKey):
-        return tuple(_record(item) for item in value)
+        return tuple(_record(item) for item in cast("Sequence[Any]", value))
     # nanobind enum types do not derive from Python's enum.Enum.
     if type(value).__module__.startswith("pypto.pypto_core") and isinstance(
         getattr(value, "name", None), str

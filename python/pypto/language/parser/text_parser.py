@@ -15,6 +15,7 @@ import ast
 import linecache
 import sys
 import types
+from typing import Any
 
 from pypto.pypto_core import ir
 
@@ -38,7 +39,7 @@ def _span_column(source_lines: list[str], lineno: int, col_offset: int) -> int:
     return ast_column_to_span_column(line, col_offset)
 
 
-def _extract_exec_error_line(tb, filename: str) -> int | None:
+def _extract_exec_error_line(tb: types.TracebackType | None, filename: str) -> int | None:
     """Return the last line number in the traceback that comes from the given filename."""
     line_num = None
     while tb is not None:
@@ -48,7 +49,7 @@ def _extract_exec_error_line(tb, filename: str) -> int | None:
     return line_num
 
 
-class _AutoDynVar(dict):
+class _AutoDynVar(dict[str, Any]):
     """Dict subclass that auto-creates DynVar for undefined identifiers during exec.
 
     When re-parsing roundtrip-printed IR, dynamic shape variables like
@@ -62,7 +63,7 @@ class _AutoDynVar(dict):
         if key.startswith("__") and key.endswith("__"):
             raise KeyError(key)
         pl_mod = self.get("pl")
-        if pl_mod is not None and isinstance(key, str):
+        if pl_mod is not None:
             dvar = pl_mod.dynamic(key)
             self[key] = dvar
             return dvar
@@ -70,7 +71,7 @@ class _AutoDynVar(dict):
 
 
 # Maps kwarg name → (enum_map, enum_class_name, pl-qualified name)
-_ENUM_KWARGS: dict[str, tuple[dict, str, str]] = {
+_ENUM_KWARGS: dict[str, tuple[dict[str, Any], str, str]] = {
     "type": (FUNCTION_TYPE_MAP, "FunctionType", "pl.FunctionType"),
     "level": (LEVEL_MAP, "Level", "pl.Level"),
     "role": (ROLE_MAP, "Role", "pl.Role"),
@@ -295,8 +296,8 @@ def parse(
     namespace = exec_ns
 
     # Scan namespace for ir.Function and ir.Program instances
-    functions = []
-    programs = []
+    functions: list[ir.Function] = []
+    programs: list[tuple[str, ir.Program]] = []
     for name, value in namespace.items():
         if isinstance(value, ir.Function):
             functions.append(value)

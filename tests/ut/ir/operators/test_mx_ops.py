@@ -162,6 +162,7 @@ class TestMatmulMxRegistry:
     def test_memory_specs(self):
         assert not hasattr(pl, "tget_scale_addr")
         mx = ir.get_op_memory_spec("tile.matmul_mx")
+        assert mx is not None
         assert mx["output_memory"] == ir.MemorySpace.Acc
         assert mx["input_constraints"] == [
             [ir.MemorySpace.Left],
@@ -170,10 +171,13 @@ class TestMatmulMxRegistry:
             [ir.MemorySpace.RightScale],
         ]
         acc = ir.get_op_memory_spec("tile.matmul_mx_acc")
+        assert acc is not None
         assert acc["input_constraints"][0] == [ir.MemorySpace.Acc]
         bias = ir.get_op_memory_spec("tile.matmul_mx_bias")
+        assert bias is not None
         assert bias["input_constraints"][4] == [ir.MemorySpace.Bias]
         tget = ir.get_op_memory_spec("tile.tget_scale_addr")
+        assert tget is not None
         assert tget["input_constraints"] == []
         assert tget["output_memory"] == "inherit_from_input"
 

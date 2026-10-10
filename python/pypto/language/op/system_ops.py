@@ -137,7 +137,7 @@ def sync_wait(
     return _ir_ops.sync_wait(event_expr, pipe=pipe, core_type=kernel, span=span)
 
 
-def set_ffts(workspace: Tensor, *, span: Span | None = None) -> Call:
+def set_ffts(workspace: object, *, span: Span | None = None) -> Call:
     """Declare the A3 FFTS setup operand for explicit cross-core synchronization."""
     if not isinstance(workspace, Tensor):
         raise TypeError(f"set_ffts workspace must be a Tensor, got {type(workspace).__name__}")
@@ -151,8 +151,8 @@ def syncall(
     *,
     core_type: KernelType = KernelType.MIX,
     mode: SyncAllMode = SyncAllMode.HARD,
-    gm_workspace: Tensor | None = None,
-    used_cores: IntLike | None = None,
+    gm_workspace: object = None,
+    used_cores: object = None,
     span: Span | None = None,
 ) -> Call:
     """Cross-core all-participant barrier (``pto::SYNCALL``).

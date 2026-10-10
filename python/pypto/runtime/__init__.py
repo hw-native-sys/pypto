@@ -58,6 +58,7 @@ Exporting it is for the change that migrates those signatures.
 to the layer it belongs to.
 """
 
+from . import log_config as _log_config
 from .bench import BenchmarkStats, TraceInvocation, TraceSpan, benchmark
 from .device_tensor import DeviceTensor, StackedDeviceTensor
 from .distributed_runner import (
@@ -66,7 +67,6 @@ from .distributed_runner import (
     ReadOnlyHostTensor,
     execute_distributed_compiled,
 )
-from .log_config import _ensure_configured as _ensure_log_configured
 from .log_config import configure_log
 from .log_config import current_level as log_level
 from .pto_isa import ensure_pto_isa_root, pto_isa_include_dir
@@ -90,7 +90,7 @@ from .tensor_spec import ScalarSpec, TensorSpec
 from .worker import ChipWorker, RegistrationHandle
 
 # Honour ``PYPTO_RUNTIME_LOG`` before any runtime entry point runs.
-_ensure_log_configured()
+_log_config._ensure_configured()
 
 __all__ = [
     "benchmark",

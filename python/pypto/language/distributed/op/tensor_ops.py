@@ -65,7 +65,9 @@ def _validate_chunk(chunk_rows: int, chunk_cols: int, op_name: str) -> None:
     dims must be non-negative Python ints (``0`` meaning "full extent").
     """
     for name, value in (("chunk_rows", chunk_rows), ("chunk_cols", chunk_cols)):
-        if not isinstance(value, int) or isinstance(value, bool):
+        # bool is an int subclass, so True/False must not pose as a static dim;
+        # the isinstance pair is a mistyped-input guard (the annotation is the contract).
+        if not isinstance(value, int) or isinstance(value, bool):  # pyright: ignore[reportUnnecessaryIsInstance]
             raise TypeError(f"{op_name} {name} must be an int (static), got {type(value).__name__}")
         if value < 0:
             raise ValueError(f"{op_name} {name} must be non-negative (0 = full), got {value}")
@@ -735,7 +737,12 @@ def allreduce(
         The rebound :class:`pld.DistributedTensor` view of ``target`` —
         identical shape / dtype / window-buffer binding, post-reduce content.
     """
-    if not isinstance(core_num, int) or isinstance(core_num, bool):
+    # bool is an int subclass and must not pose as a core count; the isinstance
+    # pair is a mistyped-input guard (the annotation is the contract).
+    if (
+        not isinstance(core_num, int)  # pyright: ignore[reportUnnecessaryIsInstance]
+        or isinstance(core_num, bool)
+    ):
         raise TypeError(
             "pld.tensor.allreduce core_num must be a positive compile-time int, "
             f"got {type(core_num).__name__}"

@@ -61,7 +61,7 @@ def _infer_tile_memory_space_from_memref(memref: MemRef | None) -> MemorySpace |
 
 
 def _tensor_type_init_wrapper(
-    self,
+    self: TensorType,
     shape: Sequence[int | Expr],
     dtype: DataType,
     memref: MemRef | None = None,
@@ -81,7 +81,7 @@ def _tensor_type_init_wrapper(
 
 
 def _tile_type_init_wrapper(
-    self,
+    self: TileType,
     shape: Sequence[int | Expr],
     dtype: DataType,
     memref: MemRef | None = None,

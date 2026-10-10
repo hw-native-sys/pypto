@@ -629,7 +629,9 @@ def test_scope_predicate_deps_hint_matches_the_form():
     # as-tid form.
     with pytest.raises(ParserSyntaxError) as as_tid:
         _scope_program("rc[0, 0] > 0", deps_src="")
-    assert "deps=[g_tid]" in as_tid.value.hint, as_tid.value.hint
+    as_tid_hint = as_tid.value.hint
+    assert as_tid_hint is not None, as_tid_hint
+    assert "deps=[g_tid]" in as_tid_hint, as_tid_hint
 
     # plain with-form: same advice, and following it now parses.
     plain_src = (
@@ -648,7 +650,9 @@ def test_scope_predicate_deps_hint_matches_the_form():
     )
     with pytest.raises(ParserSyntaxError) as plain:
         pl.parse_program(plain_src)
-    assert "deps=[g_tid]" in plain.value.hint, plain.value.hint
+    plain_hint = plain.value.hint
+    assert plain_hint is not None, plain_hint
+    assert "deps=[g_tid]" in plain_hint, plain_hint
 
     # Taking the hint's advice on the plain form resolves the error.
     pl.parse_program(plain_src.replace("pl.spmd(1, predicate=", "pl.spmd(1, deps=[g_tid], predicate="))
@@ -906,6 +910,7 @@ def test_at_predicate_deps_hint_always_offers_deps():
     with pytest.raises(ParserSyntaxError) as excinfo:
         _at_program("rc[0, 0] > 0", deps_src="")
     hint = excinfo.value.hint
+    assert hint is not None, hint
     assert "deps=[g_tid]" in hint, hint
     assert "does not accept deps=" not in hint, hint
 

@@ -4933,6 +4933,7 @@ class TestBridgedLoadSpaceDerivation:
     def test_cube_operand_stages_through_mat_not_its_constraint(self):
         """tile.matmul demands Left/Right; the bridged loads still land in Mat."""
         matmul_spec = ir.get_op_memory_spec("tile.matmul")
+        assert matmul_spec is not None
         assert matmul_spec["input_constraints"][0] == [MemorySpace.Left]
         assert matmul_spec["input_constraints"][1] == [MemorySpace.Right]
 
@@ -4967,9 +4968,12 @@ class TestBridgedLoadSpaceDerivation:
         """A Vec-constrained consumer bridges straight into Vec -- no staging hop."""
         # The three operands tensor.scatter bridges are consumed by tile.scatter
         # (src, indexes) and by the preserve blend's tile.sel (the else-operand).
-        assert ir.get_op_memory_spec("tile.scatter")["input_constraints"][1] == [MemorySpace.Vec]
-        assert ir.get_op_memory_spec("tile.scatter")["input_constraints"][2] == [MemorySpace.Vec]
-        assert ir.get_op_memory_spec("tile.sel")["input_constraints"][2] == [MemorySpace.Vec]
+        scatter_spec = ir.get_op_memory_spec("tile.scatter")
+        sel_spec = ir.get_op_memory_spec("tile.sel")
+        assert scatter_spec is not None and sel_spec is not None
+        assert scatter_spec["input_constraints"][1] == [MemorySpace.Vec]
+        assert scatter_spec["input_constraints"][2] == [MemorySpace.Vec]
+        assert sel_spec["input_constraints"][2] == [MemorySpace.Vec]
 
         @pl.program
         class Before:
@@ -5006,7 +5010,9 @@ class TestBridgedLoadSpaceDerivation:
         second entry here would ask for a `tile.load` into L0C, which no target
         implements.
         """
-        constraints = ir.get_op_memory_spec("pld.tile.remote_store")["input_constraints"]
+        remote_store_spec = ir.get_op_memory_spec("pld.tile.remote_store")
+        assert remote_store_spec is not None
+        constraints = remote_store_spec["input_constraints"]
         assert constraints[0] == [MemorySpace.Vec, MemorySpace.Acc]
 
     @pytest.mark.parametrize(
@@ -5029,8 +5035,11 @@ class TestBridgedLoadSpaceDerivation:
         to one of the pair fails here with the two spaces named rather than only
         as an import-time throw.
         """
-        flat = ir.get_op_memory_spec(flat_op)["input_constraints"]
-        batch = ir.get_op_memory_spec(batch_op)["input_constraints"]
+        flat_spec = ir.get_op_memory_spec(flat_op)
+        batch_spec = ir.get_op_memory_spec(batch_op)
+        assert flat_spec is not None and batch_spec is not None
+        flat = flat_spec["input_constraints"]
+        batch = batch_spec["input_constraints"]
         assert flat == batch, (
             f"{flat_op} and {batch_op} are the two targets of one rank dispatch but "
             f"demand different memory: {flat} vs {batch}"

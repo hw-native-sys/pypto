@@ -1169,7 +1169,7 @@ def row_prod(input: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tensor.row_prod", [input], {}, actual_span)
 
 
-def col_sum(input: Expr, span: Span | None = None, *, is_binary: bool = False) -> Call:
+def col_sum(input: Expr, span: Span | None = None, *, is_binary: object = False) -> Call:
     """Column-wise sum reduction (reduces along axis=-2, keeps dim).
 
     Output shape is ``[..., 1, N]`` for an input of shape ``[..., M, N]``.
@@ -1743,7 +1743,7 @@ def rsqrt(input: Expr, high_precision: bool = False, span: Span | None = None) -
         Call expression for element-wise reciprocal square root
     """
     actual_span = _get_span_or_capture(span)
-    kwargs: dict = {"high_precision": high_precision} if high_precision else {}
+    kwargs: dict[str, bool] = {"high_precision": high_precision} if high_precision else {}
     return _ir_core.create_op_call("tensor.rsqrt", [input], kwargs, actual_span)
 
 
@@ -1898,8 +1898,8 @@ def reinterpret_view(
 
 def transpose(
     tensor: Expr,
-    axis1: int | ConstInt,
-    axis2: int | ConstInt,
+    axis1: object,
+    axis2: object,
     valid_shape: list[int | Expr] | _ir_core.MakeTuple | None = None,
     span: Span | None = None,
 ) -> Call:
@@ -2046,8 +2046,8 @@ def scatter_update(
     input: Expr,
     *args: Expr | int,
     dim: int | Expr | None = None,
-    index: Expr | None = None,
-    src: Expr | None = None,
+    index: Expr | int | None = None,
+    src: Expr | int | None = None,
     span: Span | None = None,
 ) -> Call:
     """Update input tensor rows at positions specified by 2D index with values from src.

@@ -50,7 +50,7 @@ class TensorSpec:
     name: str
     shape: list[int]
     dtype: torch.dtype
-    init_value: int | float | torch.Tensor | Callable | None = field(default=None)
+    init_value: int | float | torch.Tensor | Callable[..., Any] | None = field(default=None)
     is_output: bool = False
 
     def create_tensor(self) -> torch.Tensor:

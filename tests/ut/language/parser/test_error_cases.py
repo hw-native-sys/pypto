@@ -516,9 +516,15 @@ class TestSourceLocationPreservation:
         span = err.span
         assert span is not None, "ParserError must carry a span for location preservation"
         assert span["filename"], f"span filename must be non-empty, got {span['filename']!r}"
-        assert span["begin_line"] > 0, f"span begin_line must be > 0, got {span['begin_line']}"
+        begin_line = span["begin_line"]
+        assert isinstance(begin_line, int) and begin_line > 0, (
+            f"span begin_line must be > 0, got {begin_line!r}"
+        )
         # Span columns are 1-indexed, so 0 is not a legal column.
-        assert span["begin_column"] >= 1, f"span begin_column must be >= 1, got {span['begin_column']}"
+        begin_column = span["begin_column"]
+        assert isinstance(begin_column, int) and begin_column >= 1, (
+            f"span begin_column must be >= 1, got {begin_column!r}"
+        )
 
     def test_unsupported_type_annotation_carries_span(self):
         """The exact failure mode reported in issue #1200."""

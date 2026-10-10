@@ -44,7 +44,7 @@ class StageRecord:
     name: str
     start: float
     end: float = 0.0
-    children: list["StageRecord"] = field(default_factory=list)
+    children: list["StageRecord"] = field(default_factory=list["StageRecord"])
 
     @property
     def duration(self) -> float:

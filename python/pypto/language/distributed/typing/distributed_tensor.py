@@ -42,13 +42,15 @@ class DistributedTensorMeta(TensorMeta):
     """
 
     def __getitem__(cls, item: Any) -> "DistributedTensor":
-        if (
-            isinstance(item, tuple)
-            and item
-            and isinstance(item[-1], str)
-            and item[-1].startswith("window_buffer=")
-        ):
-            item = item[:-1]
+        # isinstance narrows Any to tuple[Unknown, ...]; rebind the narrowed
+        # container through a cast so element access stays fully typed.
+        if isinstance(item, tuple):
+            args = cast("tuple[Any, ...]", item)
+            if args:
+                last = args[-1]
+                if isinstance(last, str) and last.startswith("window_buffer="):
+                    args = args[:-1]
+            item = args
         return cast("DistributedTensor", super().__getitem__(item))
 
 
@@ -65,7 +67,7 @@ class DistributedTensor(Tensor, metaclass=DistributedTensorMeta):
 
     @classmethod
     def __class_getitem__(cls, item: tuple[Sequence[Any], Any]) -> "DistributedTensor":
-        return type(cls).__getitem__(cls, item)
+        return DistributedTensorMeta.__getitem__(cls, item)
 
 
 __all__ = ["DistributedTensor"]

@@ -27,7 +27,7 @@ def _validate_scalar_meta_call(args: tuple[Any, ...], kwargs: dict[str, Any]) ->
         raise TypeError(f"Scalar() takes at most 3 positional arguments but {len(args)} were given")
 
     param_names = ("dtype", "expr", "_annotation_only")
-    for index, name in enumerate(param_names[: len(args)]):
+    for _index, name in enumerate(param_names[: len(args)]):
         if name in kwargs:
             raise TypeError(f"Scalar() got multiple values for argument '{name}'")
 
@@ -224,12 +224,12 @@ class Scalar(metaclass=ScalarMeta):
 
     def __eq__(self, other: object) -> "Scalar":  # type: ignore[override]
         if not isinstance(other, (Scalar, int, float)):
-            return NotImplemented  # type: ignore[return-value]
+            return NotImplemented
         return Scalar(expr=self.unwrap() == (other.unwrap() if isinstance(other, Scalar) else other))
 
     def __ne__(self, other: object) -> "Scalar":  # type: ignore[override]
         if not isinstance(other, (Scalar, int, float)):
-            return NotImplemented  # type: ignore[return-value]
+            return NotImplemented
         return Scalar(expr=self.unwrap() != (other.unwrap() if isinstance(other, Scalar) else other))
 
     def __hash__(self) -> int:

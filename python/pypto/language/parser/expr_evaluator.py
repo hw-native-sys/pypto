@@ -10,6 +10,7 @@
 """Centralized expression evaluator for resolving Python expressions against closure variables."""
 
 import ast
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from pypto.pypto_core import DataType, ir
@@ -148,7 +149,8 @@ class ExprEvaluator:
             # overloading — keep the IR tree as-is (no constant folding).
             return value.expr
         if isinstance(value, (list, tuple)):
-            return ir.MakeTuple([self.python_value_to_ir(elt, span) for elt in value], span)
+            elements = [self.python_value_to_ir(elt, span) for elt in cast("Sequence[Any]", value)]
+            return ir.MakeTuple(elements, span)
         raise ParserTypeError(
             f"Unsupported closure variable type: {type(value).__name__}",
             span=span,

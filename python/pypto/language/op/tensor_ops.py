@@ -703,9 +703,21 @@ def random(
     Returns:
         Tensor wrapping the random operation.
     """
-    raw_seeds = (key0, key1, counter0, counter1, counter2, counter3)
-    seeds = [v.unwrap() if isinstance(v, Scalar) else v for v in raw_seeds]
-    call_expr = _ir_ops.random(*seeds, _normalize_intlike(shape), dtype=dtype, rounds=rounds)
+
+    def _seed_expr(seed: int | Scalar) -> int | Expr:
+        return seed.unwrap() if isinstance(seed, Scalar) else seed
+
+    call_expr = _ir_ops.random(
+        _seed_expr(key0),
+        _seed_expr(key1),
+        _seed_expr(counter0),
+        _seed_expr(counter1),
+        _seed_expr(counter2),
+        _seed_expr(counter3),
+        _normalize_intlike(shape),
+        dtype=dtype,
+        rounds=rounds,
+    )
     return Tensor(expr=call_expr)
 
 
@@ -2233,6 +2245,18 @@ def mrgsort(src0: Tensor, src1: Tensor, src2: Tensor, *, exhausted: bool = ...) 
 
 @overload
 def mrgsort(src0: Tensor, src1: Tensor, src2: Tensor, src3: Tensor, *, exhausted: bool = ...) -> Tensor: ...
+
+
+@overload
+def mrgsort(
+    src0: Tensor,
+    src1: Tensor | None = ...,
+    src2: Tensor | None = ...,
+    src3: Tensor | None = ...,
+    *,
+    exhausted: bool = ...,
+    block_len: int | Scalar | None = ...,
+) -> Tensor: ...
 
 
 def mrgsort(

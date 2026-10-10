@@ -34,6 +34,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from types import EllipsisType
 from typing import Any
 
 import torch
@@ -68,19 +69,20 @@ class DeviceTensor:
         *,
         buffer: Any | None = None,
     ) -> None:
-        # bool is an int subclass — exclude it explicitly so True/False can't pose as a pointer or dim.
-        if isinstance(data_ptr, bool) or not isinstance(data_ptr, int) or data_ptr <= 0:
+        # bool is an int subclass — an exact-type check excludes it so True/False
+        # can't pose as a pointer or dim.
+        if type(data_ptr) is not int or data_ptr <= 0:
             raise ValueError(f"DeviceTensor.data_ptr must be a positive int, got {data_ptr!r}")
         raw_shape = tuple(shape)
         for d in raw_shape:
-            if isinstance(d, bool) or not isinstance(d, int):
+            if type(d) is not int:
                 raise TypeError(f"DeviceTensor.shape must contain ints, got {raw_shape!r}")
         if not raw_shape:
             raise ValueError("DeviceTensor.shape must be non-empty")
         if any(d <= 0 for d in raw_shape):
             raise ValueError(f"DeviceTensor.shape must be all positive, got {raw_shape}")
         shape_t = raw_shape
-        if not isinstance(dtype, torch.dtype):
+        if type(dtype) is not torch.dtype:
             raise TypeError(f"DeviceTensor.dtype must be torch.dtype, got {type(dtype).__name__}")
         if buffer is not None:
             try:
@@ -172,7 +174,7 @@ class StackedDeviceTensor:
         if len(set(workers_t)) != len(workers_t):
             raise ValueError(f"StackedDeviceTensor.worker_ids must be distinct, got {workers_t}")
         for i, shard in enumerate(shards_t):
-            if not isinstance(shard, DeviceTensor):
+            if type(shard) is not DeviceTensor:
                 raise TypeError(f"shard {i} must be a DeviceTensor, got {type(shard).__name__}")
             if shard.shape != tail:
                 raise ValueError(
@@ -197,7 +199,7 @@ class StackedDeviceTensor:
         """Logical stacked shape, matching the ``DeviceTensor`` interface."""
         return self.full_shape
 
-    def __getitem__(self, idx: int | slice | tuple) -> DeviceTensor:
+    def __getitem__(self, idx: int | slice | tuple[int | slice | EllipsisType, ...]) -> DeviceTensor:
         """Return shard ``i`` for a leading-index ``i`` or ``(i, <full slices>)``.
 
         The generated ``host_orch`` emits either ``x[r]`` or ``x[r, 0:N, 0:M]``,
@@ -212,7 +214,7 @@ class StackedDeviceTensor:
             rank, rest = idx[0], idx[1:]
         else:
             rank, rest = idx, ()
-        if isinstance(rank, bool) or not isinstance(rank, int):
+        if type(rank) is not int:
             raise TypeError(f"StackedDeviceTensor leading index must be int, got {type(rank).__name__}")
         if not 0 <= rank < len(self.shards):
             raise IndexError(f"shard index {rank} out of range [0, {len(self.shards)})")
@@ -303,7 +305,7 @@ def alloc_device_tensor(
     if not shape_t:
         raise ValueError("shape must be non-empty")
     for d in shape_t:
-        if isinstance(d, bool) or not isinstance(d, int):
+        if type(d) is not int:
             raise TypeError(f"shape must contain ints, got {shape_t!r}")
     if any(d <= 0 for d in shape_t):
         raise ValueError(f"shape must contain only positive dimensions, got {shape_t}")

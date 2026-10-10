@@ -1076,7 +1076,7 @@ class TypeResolver:
         slice_value = subscript_node.slice
         elts = slice_value.elts if isinstance(slice_value, ast.Tuple) else [slice_value]
 
-        types = []
+        types: list[ir.Type] = []
         for elt in elts:
             resolved = self.resolve_type(elt)
             if isinstance(resolved, list):
@@ -1284,7 +1284,7 @@ class TypeResolver:
             )
 
         dims: list[int | ir.Expr] = []
-        for i, elem in enumerate(value):
+        for i, elem in enumerate(cast("Sequence[Any]", value)):
             if isinstance(elem, int):
                 dims.append(elem)
             elif isinstance(elem, DynVar):
@@ -2026,7 +2026,7 @@ class TypeResolver:
 
     def _tile_shape_to_expr_list(self, shape: "Sequence[int | ir.Expr]") -> "list[ir.Expr]":
         """Convert a tile shape (list of int or Expr) to a list of Expr for TileView.valid_shape."""
-        result = []
+        result: list[ir.Expr] = []
         for dim in shape:
             if isinstance(dim, int):
                 result.append(ir.ConstInt(dim, DataType.INDEX, ir.Span.unknown()))
@@ -2105,8 +2105,10 @@ class TypeResolver:
             # Backstop: the delegated parser may still return non-Expr (e.g. None)
             # or non-index expressions (e.g. pl.tile.create(...) returns a Tile).
             # The C++ TileView contract is index expressions only.
-            if not isinstance(result, ir.Expr) or not _is_index_expr_type(result.type):
-                got = type(result).__name__ if not isinstance(result, ir.Expr) else type(result.type).__name__
+            # The isinstance pair is a deliberate backstop: the delegated parser's
+            # declared return type is a lie for a few DSL constructors.
+            if not isinstance(result, ir.Expr) or not _is_index_expr_type(result.type):  # pyright: ignore[reportUnnecessaryIsInstance]
+                got = type(result).__name__ if not isinstance(result, ir.Expr) else type(result.type).__name__  # pyright: ignore[reportUnnecessaryIsInstance]
                 raise ParserTypeError(
                     f"TileView field must be an index expression, got {got}: {ast.unparse(node)}",
                     span=self._get_span(node),

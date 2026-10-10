@@ -88,8 +88,8 @@ def _collect_calls(stmt: ir.Stmt) -> list[ir.Call]:
     found: list[ir.Call] = []
 
     class _Collector(ir.IRVisitor):
-        def visit_call(self, call: ir.Call) -> None:
-            found.append(call)
+        def visit_call(self, op: ir.Call) -> None:
+            found.append(op)
 
     _Collector().visit_stmt(stmt)
     return found

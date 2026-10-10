@@ -807,19 +807,20 @@ class _UnplacedNotifyBefore:
 class _WrapNotifyBody(ir.IRMutator):
     """Model pass 23 output using a region, preserving the existing golden body."""
 
-    def visit_function(self, op):
-        stmts = list(op.body.stmts)
+    def visit_function(self, func):
+        assert isinstance(func.body, ir.SeqStmts)  # the pass models a multi-stmt body
+        stmts = list(func.body.stmts)
         region = ir.SplitAivScopeStmt(
-            split=ir.SplitMode.UP_DOWN, body=ir.SeqStmts(stmts[:-1], op.span), span=op.span
+            split=ir.SplitMode.UP_DOWN, body=ir.SeqStmts(stmts[:-1], func.span), span=func.span
         )
         return ir.Function(
-            op.name,
-            list(zip(op.params, op.param_directions)),
-            op.return_types,
-            ir.SeqStmts([region, stmts[-1]], op.span),
-            op.span,
-            op.func_type,
-            attrs=dict(op.attrs),
+            func.name,
+            list(zip(func.params, func.param_directions)),
+            func.return_types,
+            ir.SeqStmts([region, stmts[-1]], func.span),
+            func.span,
+            func.func_type,
+            attrs=dict(func.attrs),
         )
 
 

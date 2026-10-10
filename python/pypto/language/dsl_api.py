@@ -138,18 +138,22 @@ def _make_range_iterator(
 ) -> RangeIterator[Scalar] | RangeIterator[tuple[Scalar, tuple[Any, ...]]]:
     """Shared implementation for range(), parallel(), unroll(), and pipeline()."""
     if pipeline_stages is not None:
-        if not isinstance(pipeline_stages, int) or isinstance(pipeline_stages, bool) or pipeline_stages < 1:
+        # bool is an int subclass and must not pose as a stage count; the
+        # isinstance pair is a mistyped-input guard (the annotation is the contract).
+        if (
+            not isinstance(pipeline_stages, int)  # pyright: ignore[reportUnnecessaryIsInstance]
+            or isinstance(pipeline_stages, bool)
+            or pipeline_stages < 1
+        ):
             raise ValueError(f"{func_name}() stage must be a positive integer, got {pipeline_stages!r}")
-    kwargs = {
-        "init_values": init_values,
-        "pipeline_stages": pipeline_stages,
-    }
     if len(args) == 1:
-        return RangeIterator(args[0], **kwargs)
+        return RangeIterator(args[0], init_values=init_values, pipeline_stages=pipeline_stages)
     elif len(args) == 2:
-        return RangeIterator(args[1], args[0], **kwargs)
+        return RangeIterator(args[1], args[0], init_values=init_values, pipeline_stages=pipeline_stages)
     elif len(args) == 3:
-        return RangeIterator(args[1], args[0], args[2], **kwargs)
+        return RangeIterator(
+            args[1], args[0], args[2], init_values=init_values, pipeline_stages=pipeline_stages
+        )
     else:
         raise ValueError(f"{func_name}() takes 1 to 3 positional arguments")
 
@@ -1271,11 +1275,13 @@ def split_aiv(n: int, *, mode: ir.SplitMode) -> SplitAivContext:
         >>> for _ in pl.split_aiv(2, mode=pl.SplitMode.NONE):
         ...     out = pl.add(mm, bias)  # phase 2, full width on both lanes
     """
-    if isinstance(n, bool) or not isinstance(n, int):
+    # bool is an int subclass and must not pose as the lane count; the isinstance
+    # pair is a mistyped-input guard (the annotation is the contract).
+    if not isinstance(n, int) or isinstance(n, bool):  # pyright: ignore[reportUnnecessaryIsInstance]
         raise ValueError(f"pl.split_aiv(n): n must be the integer 2, got {n!r}")
     if n != 2:
         raise ValueError(f"pl.split_aiv(n): n must be the integer 2 (the two AIV lanes), got {n}")
-    if not isinstance(mode, _ir.SplitMode):
+    if type(mode) is not _ir.SplitMode:
         raise ValueError(f"pl.split_aiv(mode=...): mode must be a pl.SplitMode, got {mode!r}")
     return SplitAivContext(n=n, mode=mode)
 

@@ -22,6 +22,11 @@ import struct
 import sys
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any, cast
+
+# A parsed Chrome Trace Event / API_INSTR JSON record: heterogeneous keys by
+# design, so values stay Any and field access is guarded at use sites.
+Event = dict[str, Any]
 
 # --- visualize_data.bin block container format ---------------------------------
 # Header: contentSize:u64, type:u8, padding:u8, instrVersion:u8, reserve:u8.
@@ -82,14 +87,14 @@ def _parse_detail(detail: str | None) -> dict[str, str]:
     return out
 
 
-def _pair_flag_events(events: list[dict], name: str) -> list[dict]:
+def _pair_flag_events(events: list[Event], name: str) -> list[Event]:
     """Pair the B/E phases of a flag op into begin/end records.
 
     Returns one record per matched pair with keys ``pid``, ``tid``, ``detail``
     (taken from the B phase), ``begin_ts`` and ``end_ts``.
     """
-    open_stack: dict[tuple[str, str], list[dict]] = {}
-    records: list[dict] = []
+    open_stack: dict[tuple[str, str], list[Event]] = {}
+    records: list[Event] = []
     for event in events:
         if event.get("name") != name:
             continue
@@ -110,7 +115,7 @@ def _pair_flag_events(events: list[dict], name: str) -> list[dict]:
     return records
 
 
-def _last_at_or_before(insts_sorted: list[dict], ts: float) -> dict | None:
+def _last_at_or_before(insts_sorted: list[Event], ts: float) -> Event | None:
     """Return the last instruction with ``ts`` <= the given timestamp."""
     found = None
     for inst in insts_sorted:
@@ -121,7 +126,7 @@ def _last_at_or_before(insts_sorted: list[dict], ts: float) -> dict | None:
     return found
 
 
-def _first_at_or_after(insts_sorted: list[dict], ts: float) -> dict | None:
+def _first_at_or_after(insts_sorted: list[Event], ts: float) -> Event | None:
     """Return the first instruction with ``ts`` >= the given timestamp."""
     for inst in insts_sorted:
         if inst["ts"] >= ts:
@@ -140,7 +145,7 @@ def _flag_key(detail: str | None) -> tuple[str, str, str]:
     )
 
 
-def _build_sync_arrows(insts: list[dict], events: list[dict]) -> tuple[list[dict], int]:
+def _build_sync_arrows(insts: list[Event], events: list[Event]) -> tuple[list[Event], int]:
     """Rebuild SET_FLAG/WAIT_FLAG pairs as re-anchored Chrome flow arrows.
 
     Args:
@@ -153,19 +158,19 @@ def _build_sync_arrows(insts: list[dict], events: list[dict]) -> tuple[list[dict
     """
     # Group by the logical pipe (``_pipe``), not the rendered sub-lane tid, so a
     # flag's producer/consumer is found across all sub-lanes of the pipe.
-    by_lane: dict[tuple[str, str], list[dict]] = {}
+    by_lane: dict[tuple[str, str], list[Event]] = {}
     for inst in insts:
         by_lane.setdefault((inst.get("pid", ""), inst.get("_pipe", inst.get("tid", ""))), []).append(inst)
     for lane in by_lane.values():
         lane.sort(key=lambda inst: inst.get("ts", 0.0))
 
-    waits_by_key: dict[tuple[str, tuple[str, str, str]], list[dict]] = {}
+    waits_by_key: dict[tuple[str, tuple[str, str, str]], list[Event]] = {}
     for wait in _pair_flag_events(events, "WAIT_FLAG"):
         waits_by_key.setdefault((wait["pid"], _flag_key(wait["detail"])), []).append(wait)
     for wlist in waits_by_key.values():
         wlist.sort(key=lambda rec: rec["begin_ts"])
 
-    arrows: list[dict] = []
+    arrows: list[Event] = []
     skipped = 0
     flow_id = 0
     for flag in sorted(_pair_flag_events(events, "SET_FLAG"), key=lambda rec: rec["begin_ts"]):
@@ -243,7 +248,7 @@ _LANE_CNAME = {
 }
 
 
-def _assign_sublanes(insts: list[dict]) -> None:
+def _assign_sublanes(insts: list[Event]) -> None:
     """Pack partially-overlapping instructions on each pipe into sub-lanes.
 
     Chrome Trace ``X`` (complete) events on the same ``tid`` must be disjoint or
@@ -256,7 +261,7 @@ def _assign_sublanes(insts: list[dict]) -> None:
     bare pipe name so non-overlapping pipes are unchanged; extra lanes become
     ``"<pipe>#<n>"``.
     """
-    groups: dict[tuple[str, str], list[dict]] = {}
+    groups: dict[tuple[str, str], list[Event]] = {}
     for e in insts:
         groups.setdefault((e.get("pid", ""), e.get("tid", "")), []).append(e)
     for (_, pipe), evs in groups.items():
@@ -276,7 +281,7 @@ def _assign_sublanes(insts: list[dict]) -> None:
             e["_tid"] = pipe if lane == 0 else f"{pipe}#{lane}"
 
 
-def rebuild_trace(raw: dict, keep_scalar: bool = False) -> tuple[dict, int]:
+def rebuild_trace(raw: dict[str, Any], keep_scalar: bool = False) -> tuple[dict[str, Any], int]:
     """Rebuild a raw simulator trace into a clean AI-core pipeline view.
 
     Args:
@@ -287,7 +292,7 @@ def rebuild_trace(raw: dict, keep_scalar: bool = False) -> tuple[dict, int]:
         ``(clean_trace, skipped_arrows)`` — the rebuilt Chrome trace dict and
         the number of sync flags that could not be re-anchored.
     """
-    events = raw.get("traceEvents", [])
+    events: list[Event] = raw.get("traceEvents", [])
 
     def lane_kept(tid: str) -> bool:
         if tid in _DROP_LANES:
@@ -307,7 +312,7 @@ def rebuild_trace(raw: dict, keep_scalar: bool = False) -> tuple[dict, int]:
     # sub-lanes so the viewer shows the true concurrency instead of collapsing it.
     _assign_sublanes(insts)
 
-    out: list[dict] = []
+    out: list[Event] = []
 
     # Rule 3: process/thread metadata for a deterministic dataflow ordering.
     for proc_index, pid in enumerate(sorted({e.get("pid", "") for e in insts})):
@@ -371,7 +376,7 @@ def rebuild_trace(raw: dict, keep_scalar: bool = False) -> tuple[dict, int]:
 
 
 # --- API_INSTR metrics sidecar -------------------------------------------------
-def reshape_metrics(api_instr: dict) -> dict:
+def reshape_metrics(api_instr: dict[str, Any]) -> dict[str, Any]:
     """Reshape the API_INSTR block into per-core instruction records.
 
     The raw block stores each metric as an array indexed by the ``Cores`` list.
@@ -387,13 +392,13 @@ def reshape_metrics(api_instr: dict) -> dict:
         ``column_types`` (the original ``Instructions Dtype`` map).
     """
     cores = api_instr.get("Cores", [])
-    by_core: dict[str, list[dict]] = {core: [] for core in cores}
+    by_core: dict[str, list[dict[str, Any]]] = {core: [] for core in cores}
     for record in api_instr.get("Instructions", []):
         for index, core in enumerate(cores):
-            row: dict = {}
+            row: dict[str, Any] = {}
             for key, value in record.items():
                 field = key.lower().replace(" ", "_")
-                if isinstance(value, list) and len(value) == len(cores):
+                if isinstance(value, list) and len(cast("list[object]", value)) == len(cores):
                     row[field] = value[index]
                 else:
                     row[field] = value

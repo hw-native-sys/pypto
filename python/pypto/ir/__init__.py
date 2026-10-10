@@ -37,7 +37,8 @@ from pypto.pypto_core.passes import (
 from . import directions as _directions
 
 # Import operation modules
-from . import op, operators  # noqa: F401
+from . import op  # noqa: F401
+from . import operators as operators
 
 # Import IR Builder
 from .builder import IRBuilder

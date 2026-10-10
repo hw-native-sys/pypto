@@ -13,6 +13,7 @@ import linecache
 import os
 import re
 import sys
+from typing import Any, cast
 
 from .exceptions import ParserError, SSAViolationError
 
@@ -111,7 +112,7 @@ class ErrorRenderer:
         Returns:
             Formatted error message
         """
-        lines = []
+        lines: list[str] = []
 
         # Error header
         lines.append(self._red(self._bold(f"Error: {error.message}")))
@@ -142,7 +143,7 @@ class ErrorRenderer:
 
         return "\n".join(lines)
 
-    def _extract_span_info(self, span) -> tuple[str, int, int]:
+    def _extract_span_info(self, span: Any) -> tuple[str, int, int]:
         """Extract filename, line, and column from a span (dict or object).
 
         The returned column is the span's own 1-indexed column; use
@@ -155,9 +156,10 @@ class ErrorRenderer:
             Tuple of (filename, line, column)
         """
         if isinstance(span, dict):
-            filename = span.get("filename") or span.get("file", "")
-            line = span.get("begin_line") or span.get("line", 0)
-            column = span.get("begin_column") or span.get("column", 0)
+            fields = cast("dict[str, Any]", span)
+            filename = fields.get("filename") or fields.get("file", "")
+            line = fields.get("begin_line") or fields.get("line", 0)
+            column = fields.get("begin_column") or fields.get("column", 0)
         else:
             filename = getattr(span, "filename", getattr(span, "file", ""))
             line = getattr(span, "begin_line", getattr(span, "line", 0))
@@ -180,7 +182,7 @@ class ErrorRenderer:
         """
         return max(0, column - 1)
 
-    def _format_location(self, span) -> str:
+    def _format_location(self, span: Any) -> str:
         """Format a span as a file:line:column location string.
 
         Args:
@@ -209,7 +211,7 @@ class ErrorRenderer:
         Returns:
             List of formatted lines
         """
-        lines = []
+        lines: list[str] = []
         prev_file, prev_line, prev_col = self._extract_span_info(error.previous_span)
 
         if prev_line <= 0:
@@ -241,7 +243,7 @@ class ErrorRenderer:
         Returns:
             List of formatted lines
         """
-        lines = []
+        lines: list[str] = []
         line_num_width = len(str(min(len(source_lines), line_num + 1)))
         prefix = "     "  # 5 spaces to align with "-->" above
 
@@ -357,7 +359,7 @@ class ErrorRenderer:
         Returns:
             List of formatted lines
         """
-        lines = []
+        lines: list[str] = []
         filename, error_line, error_col = self._extract_span_info(error.span)
 
         source_lines = self._source_lines_for(filename, error.source_lines)

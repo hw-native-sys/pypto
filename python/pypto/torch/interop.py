@@ -18,7 +18,7 @@ import ctypes
 import importlib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
@@ -103,9 +103,10 @@ def _scalar_value(value: Any, info: ParamInfo) -> int | float | bool:
     if ctype is None:
         raise TypeError(f"Parameter {info.name!r} has unsupported scalar dtype {info.dtype}")
     if isinstance(value, ctypes._SimpleCData):
-        if type(value) is not ctype:
-            raise TypeError(f"Parameter {info.name!r} expects {ctype.__name__}, got {type(value).__name__}")
-        value = value.value
+        cdata = cast("ctypes._SimpleCData[Any]", value)
+        if type(cdata) is not ctype:
+            raise TypeError(f"Parameter {info.name!r} expects {ctype.__name__}, got {type(cdata).__name__}")
+        value = cdata.value
     if ctype is ctypes.c_bool:
         if type(value) is not bool:
             raise TypeError(f"Parameter {info.name!r} expects bool, got {type(value).__name__}")

@@ -61,6 +61,7 @@ import textwrap
 import types
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -70,7 +71,7 @@ _AUTO_IMPORT_LINES = {
     "struct": "import struct",
 }
 
-_KNOWN_FACTORIES: dict[Callable, str] = {
+_KNOWN_FACTORIES: dict[Callable[..., Any], str] = {
     torch.randn: "torch.randn",
     torch.rand: "torch.rand",
     torch.zeros: "torch.zeros",
@@ -80,7 +81,7 @@ _KNOWN_FACTORIES: dict[Callable, str] = {
 
 def write_golden(
     tensor_specs: list[TensorSpec],
-    golden_fn: Callable,
+    golden_fn: Callable[..., Any],
     output_path: Path,
     rtol: float = 1e-5,
     atol: float = 1e-5,
@@ -153,7 +154,7 @@ def write_golden(
 
 def generate_golden_source(
     tensor_specs: list[TensorSpec],
-    golden_fn: Callable | None,
+    golden_fn: Callable[..., Any] | None,
     rtol: float,
     atol: float,
     *,
@@ -399,7 +400,8 @@ def _tensor_literal_expr(tensor: torch.Tensor, shape_str: str, dtype_str: str) -
 
     # Tensor small enough to inline as a list literal
     if tensor.numel() <= 100:
-        return f"torch.tensor({tensor.tolist()!r}, dtype={dtype_str})"
+        # torch's stubs leave Tensor.tolist()'s element type unknown.
+        return f"torch.tensor({tensor.tolist()!r}, dtype={dtype_str})"  # pyright: ignore[reportUnknownMemberType]
 
     raise ValueError(
         f"Tensor init_value for {dtype_str} has {tensor.numel()} elements, too large to "
@@ -410,7 +412,7 @@ def _tensor_literal_expr(tensor: torch.Tensor, shape_str: str, dtype_str: str) -
     )
 
 
-def _extract_callable_expr(fn: Callable, preambles: dict[str, str]) -> str | None:
+def _extract_callable_expr(fn: Callable[..., Any], preambles: dict[str, str]) -> str | None:
     """Extract source from a callable and return an expression for golden.py.
 
     Copies the full function definition (with any closure constants) into
@@ -465,7 +467,7 @@ def _torch_dtype_str(dtype: torch.dtype) -> str:
     return result
 
 
-def _extract_compute_golden(golden_fn: Callable) -> str:
+def _extract_compute_golden(golden_fn: Callable[..., Any]) -> str:
     """Extract source of *golden_fn* and rename it to ``compute_golden``.
 
     The resulting string is a properly-indented top-level function definition
@@ -570,7 +572,7 @@ def _inline_bound_self_attributes(source: str, bound_instance: object) -> str:
 
 
 def _extract_closure_constants(
-    fn: Callable,
+    fn: Callable[..., Any],
     _seen_inlined: set[int] | None = None,
 ) -> list[str]:
     """Extract closure and global variable bindings as top-level preamble lines.
@@ -652,7 +654,7 @@ def _extract_closure_constants(
 
 
 def _try_inline_callable_global(
-    value: Callable,
+    value: Callable[..., Any],
     seen_inlined: set[int],
 ) -> list[str] | None:
     """Inline a callable global as a top-level ``def`` block.

@@ -9,7 +9,7 @@
 
 """Type stubs for backend module."""
 
-from typing import ClassVar
+from typing import ClassVar, overload
 
 from pypto import ir
 
@@ -52,12 +52,28 @@ class Core:
 class Cluster:
     """Cluster of cores."""
 
+    @overload
+    def __init__(self, core_counts: dict[Core, int], /) -> None:
+        """Create a cluster from a core-counts map."""
+
+    @overload
+    def __init__(self, core: Core, count: int, /) -> None:
+        """Create a cluster with a single core type repeated ``count`` times."""
+
     @property
     def core_counts(self) -> dict[Core, int]: ...
     def total_core_count(self) -> int: ...
 
 class Die:
     """Die containing clusters."""
+
+    @overload
+    def __init__(self, cluster_counts: dict[Cluster, int], /) -> None:
+        """Create a die from a cluster-counts map."""
+
+    @overload
+    def __init__(self, cluster: Cluster, count: int, /) -> None:
+        """Create a die with a single cluster type repeated ``count`` times."""
 
     @property
     def cluster_counts(self) -> dict[Cluster, int]: ...
@@ -66,6 +82,14 @@ class Die:
 
 class SoC:
     """System on Chip."""
+
+    @overload
+    def __init__(self, die_counts: dict[Die, int], /) -> None:
+        """Create a SoC from a die-counts map."""
+
+    @overload
+    def __init__(self, die: Die, count: int, /) -> None:
+        """Create a SoC with a single die type repeated ``count`` times."""
 
     @property
     def die_counts(self) -> dict[Die, int]: ...

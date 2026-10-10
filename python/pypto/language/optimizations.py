@@ -48,7 +48,7 @@ SPLIT_SLOT_NUM_DEPRECATION = (
 )
 
 
-def _validate_slot_num(slot_num: int, api: str) -> None:
+def _validate_slot_num(slot_num: object, api: str) -> None:
     """Validate a cross-core slot count.
 
     Args:

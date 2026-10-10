@@ -15,9 +15,10 @@ import inspect
 import json
 import math
 import sys
+from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from pypto import CacheConfig, cache_stats
 from pypto.runtime import RunConfig
@@ -26,12 +27,15 @@ from .decorator import JITFunction, _torch_dtype_to_pypto
 
 
 def _object(value: Any, allowed: set[str], label: str) -> dict[str, Any]:
-    if type(value) is not dict or any(type(key) is not str for key in value):
+    if type(value) is not dict:
         raise ValueError(f"{label} must be a JSON object")
-    unknown = set(value) - allowed
+    obj = cast("dict[str, Any]", value)
+    if any(type(key) is not str for key in obj):
+        raise ValueError(f"{label} must be a JSON object")
+    unknown = set(obj) - allowed
     if unknown:
         raise ValueError(f"Unknown {label} fields: {sorted(unknown)}")
-    return value
+    return obj
 
 
 def _path(value: Any, base: Path) -> Path:
@@ -49,7 +53,9 @@ def _cache(value: Any, base: Path) -> CacheConfig:
     if "extra_source_paths" in data:
         if type(data["extra_source_paths"]) is not list:
             raise ValueError("cache.extra_source_paths must be a JSON array")
-        data["extra_source_paths"] = tuple(_path(p, base) for p in data["extra_source_paths"])
+        data["extra_source_paths"] = tuple(
+            _path(p, base) for p in cast("list[Any]", data["extra_source_paths"])
+        )
     return CacheConfig(**data)
 
 
@@ -94,7 +100,7 @@ def _run_config(value: Any, cache: CacheConfig | None, base: Path) -> RunConfig:
         )
         if "device_ids" in dist and (
             type(dist["device_ids"]) is not list
-            or any(type(x) is not int or x < 0 for x in dist["device_ids"])
+            or any(type(x) is not int or x < 0 for x in cast("list[Any]", dist["device_ids"]))
         ):
             raise ValueError("distributed_config.device_ids must be an array of nonnegative integers")
         data["distributed_config"] = DistributedConfig(**dist)
@@ -130,8 +136,11 @@ def _arguments(kernel: JITFunction, request: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"Parameter {name} is not annotated as a tensor")
         data = _object(value, {"shape", "dtype"}, f"tensors.{name}")
         shape, dtype = data.get("shape"), data.get("dtype")
-        if type(shape) is not list or any(type(dim) is not int or dim <= 0 for dim in shape):
+        if type(shape) is not list or any(
+            type(dim) is not int or dim <= 0 for dim in cast("list[Any]", shape)
+        ):
             raise ValueError(f"tensors.{name}.shape must contain positive integer extents")
+        shape = cast("list[int]", shape)
         dtypes = {
             "FP16": torch.float16,
             "BF16": torch.bfloat16,
@@ -147,7 +156,7 @@ def _arguments(kernel: JITFunction, request: dict[str, Any]) -> dict[str, Any]:
         annotation = _resolve_annotation(
             signature.parameters[name].annotation, func_name_lookup(kernel._func)
         )
-        annotated_shape = getattr(annotation, "shape", None)
+        annotated_shape = cast("Sequence[int] | None", getattr(annotation, "shape", None))
         annotated_dtype = getattr(annotation, "dtype", None)
         if annotated_shape is not None and (
             len(shape) != len(annotated_shape)
@@ -176,8 +185,8 @@ def warm(module_name: str, configuration: Path) -> dict[str, Any]:
         raise ValueError("warmup configuration requires a nonempty requests array")
     cache = _cache(data["cache"], path.parent) if "cache" in data else None
     module = importlib.import_module(module_name)
-    prepared = []
-    for raw in requests:
+    prepared: list[tuple[str, JITFunction, RunConfig, dict[str, Any]]] = []
+    for raw in cast("list[Any]", requests):
         request = _object(raw, {"kernel", "run_config", "tensors", "scalars"}, "request")
         name = request.get("kernel")
         if type(name) is not str or not name.isidentifier():
@@ -187,10 +196,12 @@ def warm(module_name: str, configuration: Path) -> dict[str, Any]:
             raise ValueError(f"{module_name}.{name} is not a JIT function")
         config = _run_config(request.get("run_config", {}), cache, path.parent)
         prepared.append((name, kernel, config, _arguments(kernel, request)))
-    results = []
+    results: list[dict[str, Any]] = []
     for name, kernel, config, arguments in prepared:
         compiled = kernel.warmup(**arguments, config=config)
-        runtime = vars(compiled).get("_artifact_runtime")
+        # vars(), not getattr: read the instance dict directly so a property on
+        # the compiled object cannot interpose.
+        runtime: Any = cast("dict[str, Any]", vars(compiled)).get("_artifact_runtime")
         shared = runtime is not None and runtime.handle.spec.state.value == "ready"
         results.append(
             {
@@ -204,7 +215,7 @@ def warm(module_name: str, configuration: Path) -> dict[str, Any]:
 
 def stat(root: Path) -> dict[str, Any]:
     """Scan only JSON manifests and sizes; never import cached executable code."""
-    entries = []
+    entries: list[dict[str, Any]] = []
     if root.exists():
         for path in sorted(root.glob("artifacts/*/*/*/*/artifact_manifest.json")):
             if path.is_symlink() or any(p.is_symlink() for p in path.parents):
@@ -213,7 +224,7 @@ def stat(root: Path) -> dict[str, Any]:
                 if path.stat().st_size > 16 * 1024 * 1024:
                     raise ValueError("Manifest exceeds size limit")
                 manifest = json.loads(path.read_text())
-                files = manifest["files"]
+                files = cast("list[dict[str, Any]]", manifest["files"])
                 size = sum(entry["size"] for entry in files)
                 entries.append({"manifest": str(path), "state": path.parent.name, "payload_bytes": size})
             except (OSError, ValueError, KeyError, TypeError) as exc:
