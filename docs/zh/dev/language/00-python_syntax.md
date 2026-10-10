@@ -174,9 +174,11 @@ Python 变量上。`@pl.jit` 会在一个新的模块命名空间里重新解析
 不属于 Vec / Mat / Acc、valid shape 是运行期值,或某个槽位作为 phi 被带出 `if` / 循环。这些都
 会报出指明具体形态的错误,而不是静默回退,因为回退就等于把你声明的隔离抹掉。
 
-默认的 PyPTO 规划器不受影响:它烘焙地址,沿用 `alloc_tile` 形式。`--pto-level=level3` 下的区域
-需要显式的基地址 `addr`,而 codegen 目前还不发射它;ptoas 自 0.55 起已支持这种形式
-（[PTOAS#1106](https://github.com/hw-native-sys/PTOAS/issues/1106),已关闭）。
+默认 PyPTO 规划器的默认 codegen 仍把地址写入 `alloc_tile`。
+开启 `enable_software_pipeline=True` 后，合格的等大槽位分配可在 level3 下生成
+`alloc_multi_tile addr = <base>`；PyPTO 继续负责地址分配并预留所有槽位。
+同一开关将合格 Vec `pl.pipeline` 循环下降为 preload/main/drain，预取距离为 `stage - 1`。
+参见 [LowerPipelineToSlots](../passes/30-lower_pipeline_to_slots.md)。
 
 声明的名字自成命名空间——不会解析到恰好同名的 Python 变量。内存空间**必须**写（`TileType`
 始终要求 MemRef 与空间成对出现），且绑定到同一块分配的 tile 必须一致。未加注解的 tile 保持

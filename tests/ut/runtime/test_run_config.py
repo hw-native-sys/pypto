@@ -647,6 +647,12 @@ class TestRunConfigCompileForwarding:
 
         assert kwargs["memory_planner"] == MemoryPlanner.DSA_RP
 
+    @pytest.mark.parametrize("enabled", [False, True])
+    def test_compile_kwargs_forwards_software_pipeline(self, enabled):
+        config = RunConfig(enable_software_pipeline=enabled)
+        assert config.compile_kwargs()["enable_software_pipeline"] == enabled
+        assert config.compile_options().enable_software_pipeline == enabled
+
     def test_compile_kwargs_forwards_ptoas_pass_dump(self):
         kwargs = RunConfig(platform="a2a3sim", dump_ptoas_passes=True).compile_kwargs()
 
@@ -662,6 +668,7 @@ class TestRunConfigCompileForwarding:
         kwargs = RunConfig(platform="a2a3sim").compile_kwargs()
 
         assert "memory_planner" not in kwargs
+        assert "enable_software_pipeline" not in kwargs
         assert "output_dir" not in kwargs
         assert "distributed_config" not in kwargs
 

@@ -26,6 +26,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -38,6 +39,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -50,7 +52,9 @@
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/l0c_footprint.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/tile_buf_signature.h"
@@ -216,10 +220,9 @@ class TilePhiBaseCollector : public ir::IRVisitor {
 //   0.63 fixed it; 0.64 and 0.65 prime both slots again and fail on device the
 //   same two ways.
 //
-// This collector only counts slot selections per loop body, so it cannot tell the
-// two apart, and the pinned ptoas still has the second bug. Both are rejected
-// rather than miscompiled, and the author is pointed at the PyPTO planner, whose
-// baked-address alloc_tile path runs the same-iteration form correctly on device.
+// This collector only counts slot selections per loop body. The legacy PTOAS
+// planner path retains its conservative guard. The opt-in path validates slot
+// expressions and uses parent-buffer subviews for runtime/predicated schedules.
 // The ping-pong the region form exists for takes ONE slot per iteration and is
 // guarded correctly. Straight-line code is untouched: with no loop there is no
 // cross-iteration reuse to guard.
@@ -259,6 +262,174 @@ class CoLiveSlotCollector : public ir::IRVisitor {
   int loop_depth_ = 0;
   std::set<const ir::Var*> per_loop_seen_;
 };
+
+// PTOAS recognizes remui(iv + nonnegative_constant, slot_count). Restrict the
+// unsigned spelling to slot metadata whose loop bounds prove that equivalence;
+// ordinary FloorMod expressions retain their existing lowering.
+class CanonicalSlotCollector : public ir::IRVisitor {
+ public:
+  std::set<const ir::Expr*> remainders;
+  std::set<const ir::Var*> unsupported_bases;
+  std::set<const ir::Var*> verified_bases;
+  std::map<const ir::Var*, uint64_t> bank_depths;
+  std::map<const ir::Expr*, std::pair<uint64_t, ExprPtr>> bank_indices;
+
+  void VisitStmt_(const ir::ForStmtPtr& op) override {
+    loops_.emplace(op->loop_var_.get(), op);
+    const bool verified = op->HasAttr(ir::kSoftwarePipelineSlotsAttr);
+    if (verified) ++verified_depth_;
+    ir::IRVisitor::VisitStmt_(op);
+    if (verified) --verified_depth_;
+    loops_.erase(op->loop_var_.get());
+  }
+
+  void VisitStmt_(const ir::AssignStmtPtr& op) override {
+    if (As<ScalarType>(op->var_->GetType())) {
+      definitions_.emplace(op->var_.get(), op->value_);
+      analyzer_.const_int_bound.Update(op->var_, analyzer_.const_int_bound(op->value_));
+    }
+    auto tile = ir::GetTileTypeWithMemRef(op->var_->GetType());
+    if (tile) {
+      const auto memref = ir::GetDefinedMemRef(tile);
+      if (memref->slot_count_ > 1 && memref->slot_index_.has_value()) {
+        if (verified_depth_) verified_bases.insert(memref->base_.get());
+        ExprPtr index = *memref->slot_index_;
+        if (auto var = ir::AsVarLike(index)) {
+          auto definition = definitions_.find(var.get());
+          if (definition != definitions_.end()) index = definition->second;
+        }
+        if (!IsCanonical(index, memref->slot_count_)) {
+          if (!verified_depth_ || !RecognizeBank(*memref->slot_index_, memref)) {
+            unsupported_bases.insert(memref->base_.get());
+          }
+        } else if (As<ir::FloorMod>(index)) {
+          remainders.insert(index.get());
+        }
+      }
+    }
+    ir::IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  ExprPtr ResolveScalarAlias(ExprPtr expr) const {
+    // A fixed bound keeps canonical-form recognition linear in program size.
+    // Shared affine ordinals are emitted once and referenced by several slots.
+    for (int i = 0; i < 8; ++i) {
+      auto var = ir::AsVarLike(expr);
+      if (!var) break;
+      auto it = definitions_.find(var.get());
+      if (it == definitions_.end()) break;
+      expr = it->second;
+    }
+    return expr;
+  }
+
+  bool RecognizeBank(ExprPtr index, const ir::MemRefPtr& memref) {
+    const auto* original_index = index.get();
+    // Preserve a dominating scalar handle for emission; resolve aliases only
+    // for proof. Hoisted waits must not depend on a remainder created in a guard.
+    ExprPtr local_index = index;
+    index = ResolveScalarAlias(index);
+    uint64_t offset = 0;
+    if (auto add = As<ir::Add>(index)) {
+      auto constant = As<ir::ConstInt>(add->right_);
+      if (!constant || constant->value_ < 0) return false;
+      offset = constant->value_;
+      local_index = add->left_;
+      index = ResolveScalarAlias(local_index);
+    }
+    auto mod = As<ir::FloorMod>(index);
+    auto divisor = mod ? As<ir::ConstInt>(mod->right_) : nullptr;
+    if (!divisor || divisor->value_ < kMinMultiTileBufSlots || divisor->value_ > kMaxMultiTileBufSlots) {
+      return false;
+    }
+    const uint64_t depth = divisor->value_;
+    if (memref->slot_count_ % depth || offset % depth || offset >= memref->slot_count_ ||
+        !IsCanonical(index, depth)) {
+      return false;
+    }
+    auto [bank, inserted] = bank_depths.emplace(memref->base_.get(), depth);
+    if (!inserted && bank->second != depth) return false;
+    bank_indices.emplace(original_index, std::make_pair(offset / depth, local_index));
+    remainders.insert(index.get());
+    return true;
+  }
+
+  bool IsCanonical(const ExprPtr& index, uint64_t count) {
+    if (auto constant = As<ir::ConstInt>(index)) {
+      return constant->value_ >= 0 && static_cast<uint64_t>(constant->value_) < count;
+    }
+    auto mod = As<ir::FloorMod>(index);
+    auto scalar = mod ? As<ScalarType>(mod->GetType()) : nullptr;
+    if (!scalar || scalar->dtype_ != DataType::INDEX) return false;
+    auto divisor = As<ir::ConstInt>(mod->right_);
+    if (!divisor || divisor->value_ <= 0 || static_cast<uint64_t>(divisor->value_) != count) return false;
+    ExprPtr induction = ResolveScalarAlias(mod->left_);
+    int64_t offset = 0;
+    int64_t stride = 1;
+    if (auto add = As<ir::Add>(induction)) {
+      auto constant = As<ir::ConstInt>(add->right_);
+      if (!constant || constant->value_ < 0) return false;
+      induction = ResolveScalarAlias(add->left_);
+      offset = constant->value_;
+    }
+    if (auto mul = As<ir::Mul>(induction)) {
+      auto constant = As<ir::ConstInt>(mul->right_);
+      if (!constant || constant->value_ <= 0 || constant->value_ > 64) return false;
+      stride = constant->value_;
+      induction = ResolveScalarAlias(mul->left_);
+    }
+    auto found = loops_.find(ir::AsVarLike(induction).get());
+    if (found == loops_.end()) return false;
+    const auto& loop = found->second;
+    if (stride != 1 && loop->GetAttr<int>(ir::kSoftwarePipelineNestedAttr, 0) < stride) return false;
+    if (!As<ir::ConstInt>(loop->stop_) && !loop->HasAttr(ir::kSoftwarePipelineSlotsAttr)) return false;
+    auto start = As<ir::ConstInt>(loop->start_);
+    const auto stop_bound = analyzer_.const_int_bound(loop->stop_);
+    auto step = As<ir::ConstInt>(loop->step_);
+    return start && step && start->value_ >= 0 && step->value_ > 0 &&
+           ((stride == 1 && offset == 0) ||
+            stop_bound.max_value <= (std::numeric_limits<int64_t>::max() - offset) / stride);
+  }
+
+  std::map<const ir::Var*, ir::ForStmtPtr> loops_;
+  std::map<const ir::Var*, ExprPtr> definitions_;
+  ir::arith::Analyzer analyzer_;
+  unsigned verified_depth_ = 0;
+};
+
+// InitMemRef derives offset = slot_index * slot_size; AllocateMemoryAddr adds
+// the allocation base. Recover only that exact representation, rejecting views
+// and extra offsets rather than silently moving a slot onto different bytes.
+std::optional<int64_t> FixedMultiBufferBase(const ir::MemRefPtr& memref) {
+  if (!memref->slot_index_ || !*memref->slot_index_ || memref->size_ == 0 ||
+      memref->size_ > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+    return std::nullopt;
+  }
+  const auto& index = *memref->slot_index_;
+  const auto stride = static_cast<int64_t>(memref->size_);
+  if (auto constant = As<ir::ConstInt>(index)) {
+    auto address = As<ir::ConstInt>(memref->byte_offset_);
+    if (!address || constant->value_ < 0 || constant->value_ > std::numeric_limits<int64_t>::max() / stride) {
+      return std::nullopt;
+    }
+    const int64_t relative = constant->value_ * stride;
+    if (address->value_ < relative) return std::nullopt;
+    return address->value_ - relative;
+  }
+  auto matches_slot_offset = [&](const ExprPtr& expr) {
+    auto product = As<ir::Mul>(expr);
+    if (!product) return false;
+    auto factor = As<ir::ConstInt>(product->right_);
+    return factor && factor->value_ == stride && ir::AreExprsEqual(product->left_, index);
+  };
+  if (matches_slot_offset(memref->byte_offset_)) return 0;
+  auto address = As<ir::Add>(memref->byte_offset_);
+  if (!address) return std::nullopt;
+  auto base = As<ir::ConstInt>(address->left_);
+  if (!base || base->value_ < 0 || !matches_slot_offset(address->right_)) return std::nullopt;
+  return base->value_;
+}
 
 // The (valid_row, valid_col) extents a tile declares, when both are compile-time.
 //
@@ -718,8 +889,10 @@ void PTOCodegen::WarnIfHighPrecisionIgnored(const std::string& op_name, const st
 // Generate entry and GenerateFunction
 // ========================================================================
 
-std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc) {
+std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc,
+                                 bool enable_software_pipeline) {
   emit_tile_addr_ = emit_tile_addr;
+  enable_software_pipeline_ = enable_software_pipeline;
   emit_source_loc_ = emit_source_loc;
   current_span_ = nullptr;
   stream_.str("");
@@ -758,6 +931,10 @@ std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr,
 }
 
 void PTOCodegen::PrepareGMSlotBufferLayout(const ProgramPtr& program) {
+  gm_pipe_entries_.clear();
+  std::map<std::pair<int, int>, ir::TileTypePtr> producers;
+  std::map<std::pair<int, int>, ir::TileTypePtr> consumers;
+
   std::map<std::pair<int, int>, int> slot_size_by_pipe;
   std::map<std::pair<int, int>, int> slot_count_by_pipe;
 
@@ -765,6 +942,19 @@ void PTOCodegen::PrepareGMSlotBufferLayout(const ProgramPtr& program) {
   scan_stmts = [&](const std::vector<StmtPtr>& stmts) {
     for (const auto& stmt : stmts) {
       auto call = transform_utils::GetCallFromStmt(stmt);
+      if (ir::IsOp(call, "tile.tpush_to_aiv") || ir::IsOp(call, "tile.tpush_to_aic")) {
+        const int direction = ir::IsOp(call, "tile.tpush_to_aiv") ? 1 : 2;
+        producers[{call->GetKwarg<int>("id", 0), direction}] = As<ir::TileType>(call->args_.at(0)->GetType());
+      }
+      if (ir::IsOp(call, "tile.tpop_from_aic") || ir::IsOp(call, "tile.tpop_from_aiv")) {
+        auto assign = As<ir::AssignStmt>(stmt);
+        auto tile = assign ? As<ir::TileType>(assign->var_->GetType()) : nullptr;
+        if (tile && tile->memref_) {
+          const int direction = ir::IsOp(call, "tile.tpop_from_aic") ? 1 : 2;
+          consumers[{call->GetKwarg<int>("id", 0), direction}] = tile;
+        }
+      }
+
       if (ir::op_predicates::IsInitializePipe(call)) {
         const int pipe_id = call->GetKwarg<int>("id", 0);
         const int dir_mask = call->GetKwarg<int>("dir_mask", 0);
@@ -801,6 +991,13 @@ void PTOCodegen::PrepareGMSlotBufferLayout(const ProgramPtr& program) {
     if (func->body_) {
       scan_stmts(FlattenBody(func->body_));
     }
+  }
+
+  for (const auto& [key, consumer] : consumers) {
+    auto producer = producers.find(key);
+    INTERNAL_CHECK(producer != producers.end() && producer->second)
+        << "Owned FIFO receive requires its producer in the codegen module";
+    gm_pipe_entries_.emplace(key, std::make_pair(producer->second, consumer));
   }
 
   // Each pipe's region must advance by its FULL footprint — both rings of a bidirectional pipe,
@@ -1693,7 +1890,7 @@ PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
   auto memref = ir::GetDefinedMemRef(tile_type);
   if (memref && emit_tile_addr_) {
     if (auto const_offset = As<ir::ConstInt>(memref->byte_offset_)) {
-      fields.addr_ssa = GetOrEmitConstant(const_offset->value_, const_offset->dtype());
+      fields.addr_ssa = GetOrEmitConstant(const_offset->value_, DataType::INT64);
     } else if (memref->byte_offset_) {
       // A runtime address: a declared allocation's slot index scaled to a byte
       // offset (`l0c[i % 2]`) and added to the base by AllocateMemoryAddr. The
@@ -1702,26 +1899,54 @@ PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
       fields.addr_ssa = cast_to_i64(GetExprAsCode(memref->byte_offset_), memref->byte_offset_);
     }
   }
+  if (fields.type_str.find("v_row=?") == std::string::npos) fields.valid_row_ssa.clear();
+  if (fields.type_str.find("v_col=?") == std::string::npos) fields.valid_col_ssa.clear();
   return fields;
 }
 
 void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
   fs_.multi_buffer_regions.clear();
+  fs_.banked_slot_indices.clear();
   fs_.multi_buffer_region_order.clear();
 
-  // PyPTO planner (ptoas --pto-level=level3): a level3 region needs an explicit
-  // `addr` base, and the region emitted below carries none, so that planner keeps
-  // the baked-address alloc_tile path. The gap is PyPTO's, not ptoas's: given a
-  // constant `addr`, ptoas has derived the same per-slot sync at level3 as at level2
-  // since 0.55 (hw-native-sys/PTOAS#1106, closed).
-  if (emit_tile_addr_) return;
+  fs_.unsigned_slot_remainders.clear();
+  fs_.slot_index_ssa.clear();
+  if (emit_tile_addr_ && !enable_software_pipeline_) return;
+
+  bool use_addressed_slots = false;
+  if (emit_tile_addr_) {
+    // Stock PTOAS proves multi-tile startup/drain events for static,
+    // straight-line loops. Runtime/predicated schedules use its ordinary
+    // shared-parent/subview API instead; every view retains its alias identity.
+    // Do not encode a stronger event contract using private backend attributes.
+    class SlotSyncScope : public ir::IRVisitor {
+     public:
+      bool addressed = false;
+      void VisitStmt_(const ir::IfStmtPtr&) override { addressed = true; }
+      void VisitStmt_(const ir::WhileStmtPtr&) override { addressed = true; }
+      void VisitStmt_(const ir::ForStmtPtr& loop) override {
+        if (!ir::transform_utils::EvalConstInt(loop->start_) ||
+            !ir::transform_utils::EvalConstInt(loop->stop_) ||
+            !ir::transform_utils::EvalConstInt(loop->step_)) {
+          addressed = true;
+        }
+        ir::IRVisitor::VisitStmt_(loop);
+      }
+    } scope;
+    scope.VisitStmt(func->body_);
+    use_addressed_slots = scope.addressed;
+  }
 
   TilePhiBaseCollector phi_collector;
   CoLiveSlotCollector colive_collector;
+  CanonicalSlotCollector canonical_collector;
   if (func->body_) {
     phi_collector.VisitStmt(func->body_);
     colive_collector.VisitStmt(func->body_);
+    if (emit_tile_addr_) canonical_collector.VisitStmt(func->body_);
   }
+  fs_.unsigned_slot_remainders = std::move(canonical_collector.remainders);
+  fs_.banked_slot_indices = std::move(canonical_collector.bank_indices);
 
   /// One allocation's slots, accumulated over every tile bound to it. `blocker`
   /// is empty while the allocation can still become a region, and otherwise says
@@ -1729,6 +1954,7 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
   /// slotted declaration has no fallback that keeps its slots apart.
   struct Candidate {
     uint64_t count = 1;
+    uint64_t bank_depth = 0;
     std::string slot_type_str;
     /// The valid extent every slot must share, taken from the reference tile.
     /// Held as plain values plus a flag rather than an optional: `blocker` is what
@@ -1740,6 +1966,7 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     ir::VarPtr first_tile;      ///< Diagnostic anchor: the first tile seen
     ir::VarPtr reference_tile;  ///< The first slot-selecting tile: geometry
     std::string blocker;
+    std::optional<int64_t> base_address;
   };
   std::map<const ir::Var*, Candidate> candidates;
   std::vector<const ir::Var*> discovery_order;
@@ -1763,6 +1990,8 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
       // InitMemRef has already rejected a disagreement — so the diagnostic below
       // states the declared count even when no tile selects a slot.
       candidate.count = memref->slot_count_;
+      auto bank = canonical_collector.bank_depths.find(base);
+      if (bank != canonical_collector.bank_depths.end()) candidate.bank_depth = bank->second;
     }
     if (candidate.reference_tile || !memref->slot_index_.has_value() || !*memref->slot_index_) continue;
     // A multi-buffer region's slots never pass through ComputeAllocTileFields:
@@ -1774,7 +2003,8 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     // predates this check and widening it is not this change's business.)
     CheckFlatTileExtents(*tile_type, ExtractTileTypeInfo(*tile_type, GetTypeString(tile_type->dtype_)),
                          &tile_var->span_);
-    candidate.slot_type_str = GetTileBufTypeStringFromTileType(tile_type);
+    candidate.slot_type_str = emit_tile_addr_ ? GetViewTileBufTypeStringFromTileType(tile_type)
+                                              : GetTileBufTypeStringFromTileType(tile_type);
     const auto reference_extents = StaticValidExtents(tile_type);
     candidate.has_extents = reference_extents.has_value();
     candidate.valid_row = candidate.has_extents ? reference_extents->first : 0;
@@ -1793,7 +2023,8 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     if (it == candidates.end()) continue;
     Candidate& candidate = it->second;
     if (!candidate.blocker.empty()) continue;  // first reason wins
-    const std::string type_str = GetTileBufTypeStringFromTileType(tile_type);
+    const std::string type_str = emit_tile_addr_ ? GetViewTileBufTypeStringFromTileType(tile_type)
+                                                 : GetTileBufTypeStringFromTileType(tile_type);
     // Compared separately from the type string, which renders `v_row=?, v_col=?`
     // by design: the region declares ONE valid extent for every slot, so two slots
     // that print alike but differ in valid_shape would silently give one of them
@@ -1807,11 +2038,18 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
       candidate.blocker = "tile '" + tile_var->name_hint_ + "' binds it without selecting a slot";
     } else if (memref->slot_count_ != candidate.count) {
       candidate.blocker = "its tiles disagree on how many slots it has";
-    } else if (candidate.count > kMaxMultiTileBufSlots) {
+    } else if (candidate.bank_depth && !As<ir::ConstInt>(*memref->slot_index_) &&
+               !fs_.banked_slot_indices.count(memref->slot_index_->get())) {
+      candidate.blocker = "its slots mix banked and unbanked dynamic coordinates";
+    } else if (candidate.count > kMaxMultiTileBufSlots && !candidate.bank_depth) {
       candidate.blocker = "ptoas supports " + std::to_string(kMinMultiTileBufSlots) + " to " +
                           std::to_string(kMaxMultiTileBufSlots) + " slots, and it declares " +
                           std::to_string(candidate.count);
-    } else if (type_str != candidate.slot_type_str) {
+    } else if (type_str != candidate.slot_type_str &&
+               !(emit_tile_addr_ && candidate.reference_tile &&
+                 ir::TileBufSignature::FromTileType(*tile_type)
+                     .IsFullSlotAlias(ir::TileBufSignature::FromTileType(
+                         *As<TileType>(candidate.reference_tile->GetType()))))) {
       candidate.blocker = "its slots hold differently shaped tiles, and ptoas slots are uniform";
     } else if (!static_extents || !candidate.has_extents) {
       // Either this tile or the reference slot has a runtime extent; name the one
@@ -1820,7 +2058,10 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
       candidate.blocker = "tile '" + offender->name_hint_ +
                           "' has a runtime valid shape, and a region declares one static extent for "
                           "all its slots";
-    } else if (tile_valid_row != candidate.valid_row || tile_valid_col != candidate.valid_col) {
+    } else if ((tile_valid_row != candidate.valid_row || tile_valid_col != candidate.valid_col) &&
+               !(emit_tile_addr_ && ir::TileBufSignature::FromTileType(*tile_type)
+                                        .IsFullSlotAlias(ir::TileBufSignature::FromTileType(
+                                            *As<TileType>(candidate.reference_tile->GetType()))))) {
       candidate.blocker = "its slots declare different valid shapes (" + std::to_string(candidate.valid_row) +
                           "x" + std::to_string(candidate.valid_col) + " and " +
                           std::to_string(tile_valid_row) + "x" + std::to_string(tile_valid_col) +
@@ -1829,17 +2070,48 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
       candidate.blocker = "ptoas multi-buffer covers the Vec, Mat and Acc memory spaces only";
     } else if (phi_collector.bases.count(memref->base_.get()) != 0) {
       candidate.blocker = "one of its slots is carried out of an if or a loop as a phi";
-    } else if (colive_collector.bases.count(memref->base_.get()) != 0) {
+    } else if (colive_collector.bases.count(memref->base_.get()) != 0 &&
+               (!emit_tile_addr_ || canonical_collector.unsupported_bases.count(memref->base_.get()) != 0)) {
       candidate.blocker =
           "two of its slots are live at once inside a loop, and ptoas mis-synchronizes one form of "
           "that — a slot filled an iteration ahead of its read — into wrong data or a device hang "
           "(hw-native-sys/PTOAS#1519: fixed in 0.63, broken again since 0.64). Take one slot per "
           "iteration, which is the shape the region form accelerates";
     }
+
+    if (emit_tile_addr_ && candidate.blocker.empty()) {
+      const auto space = *tile_type->memory_space_;
+      const auto size = ir::utils::StaticPhysicalAllocationBytes(tile_type, space, GetBackendHandler());
+      const auto alignment = backend_->GetMemAlignment(space);
+      const auto base = FixedMultiBufferBase(memref);
+      // Start with the flat Vec representation used by the software-pipeline
+      // lowering. Packed carriers and matrix padding need a separate stride proof.
+      const auto view = ir::tile_view_semantics::GetEffectiveTileView(*tile_type);
+      if (space != ir::MemorySpace::Vec || tile_type->dtype_.GetBit() < 8 ||
+          view.slayout != ir::TileLayout::none_box || !size || *size != memref->size_ || !base ||
+          (alignment > 0 &&
+           (static_cast<uint64_t>(*base) % alignment != 0 || memref->size_ % alignment != 0))) {
+        candidate.blocker = "its addressed slot stride or region base cannot be represented exactly";
+      } else if (candidate.base_address && *candidate.base_address != *base) {
+        candidate.blocker = "its slots do not share one fixed region base";
+      } else {
+        candidate.base_address = base;
+      }
+    }
   }
 
   for (const ir::Var* base : discovery_order) {
     Candidate& candidate = candidates.at(base);
+    // Ordinary addressed regions retain their per-tile representation. A verified
+    // software schedule also requires slot identity for asynchronous dependencies.
+    if (emit_tile_addr_ && !candidate.blocker.empty()) {
+      CHECK_SPAN(!canonical_collector.verified_bases.count(base), candidate.first_tile->span_)
+          << "Software pipeline slot representation is unsupported for region '" << base->name_hint_
+          << "': " << candidate.blocker << ". Slot identity is required for asynchronous synchronization.";
+      LOG_DEBUG << "Addressed multi-buffer '" << base->name_hint_
+                << "' retained individual tiles: " << candidate.blocker;
+      continue;
+    }
     // Degrading to one alloc_tile per slot would silently undo the separation the
     // author declared — ptoas would be free to plan the slots on top of each
     // other. Say what is unsupported instead.
@@ -1853,12 +2125,41 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
     // slot agrees on it, and that it is static — the region is declared in the
     // function head, where a runtime extent's SSA value is not yet in scope.
     MultiBufferRegion region;
+    if (candidate.base_address) {
+      region.addr_ssa = GetOrEmitConstant(*candidate.base_address, DataType::INT64);
+    }
     region.valid_row_ssa = GetOrEmitConstant(candidate.valid_row, DataType::INDEX);
     region.valid_col_ssa = GetOrEmitConstant(candidate.valid_col, DataType::INDEX);
-    region.count = candidate.count;
+    region.count = candidate.bank_depth ? candidate.bank_depth : candidate.count;
     region.slot_type_str = candidate.slot_type_str;
     region.mtb_type_str = FormatMultiTileBufTypeString(region.slot_type_str, region.count);
     region.region_ssa = NewNamedTemp(base->name_hint_ + "_mb");
+    if (use_addressed_slots) {
+      const auto type = As<TileType>(candidate.reference_tile->GetType());
+      const auto c = ExtractTileTypeInfo(*type, GetTypeString(type->dtype_));
+      region.slot_elements = static_cast<int64_t>(ir::GetDefinedMemRef(type)->size_) /
+                             static_cast<int64_t>(type->dtype_.GetBit() / 8);
+      auto flat_type = [&](int64_t rows, int64_t columns) {
+        return FormatTileBufTypeString("vec", c.dtype_str, rows, columns, ir::TileLayout::row_major,
+                                       ir::TileLayout::none_box, 512, c.pad, c.compact, rows, columns);
+      };
+      // Full rows are contiguous subviews. Cropping columns would retain the
+      // parent's pitch in PTOAS and prevent reshaping back to the tile.
+      region.flat_slot_type_str = flat_type(1, region.slot_elements);
+      region.parent_type_str = flat_type(static_cast<int64_t>(region.count), region.slot_elements);
+    }
+
+    if (candidate.bank_depth) {
+      INTERNAL_CHECK_SPAN(candidate.base_address, candidate.first_tile->span_)
+          << "Internal error: banked software slots require a fixed region address";
+      const auto type = As<TileType>(candidate.reference_tile->GetType());
+      const auto bytes = ir::GetDefinedMemRef(type)->size_;
+      for (uint64_t bank = 0; bank < candidate.count / candidate.bank_depth; ++bank) {
+        const auto address = *candidate.base_address + bank * candidate.bank_depth * bytes;
+        region.banks.emplace_back(NewNamedTemp(base->name_hint_ + "_bank" + std::to_string(bank)),
+                                  GetOrEmitConstant(static_cast<int64_t>(address), DataType::INT64));
+      }
+    }
 
     fs_.multi_buffer_regions.emplace(base, std::move(region));
     fs_.multi_buffer_region_order.push_back(base);
@@ -1871,8 +2172,9 @@ const PTOCodegen::MultiBufferRegion* PTOCodegen::GetMultiBufferRegion(const ir::
   return it != fs_.multi_buffer_regions.end() ? &it->second : nullptr;
 }
 
-bool PTOCodegen::TryEmitMultiTileGet(const ir::MemRefPtr& memref, const std::string& tile_buf,
+bool PTOCodegen::TryEmitMultiTileGet(const ir::TileTypePtr& type, const std::string& tile_buf,
                                      const ir::Span& span) {
+  const auto memref = ir::GetDefinedMemRef(type);
   const MultiBufferRegion* region = GetMultiBufferRegion(memref);
   if (region == nullptr) return false;
 
@@ -1881,7 +2183,24 @@ bool PTOCodegen::TryEmitMultiTileGet(const ir::MemRefPtr& memref, const std::str
   INTERNAL_CHECK_SPAN(memref->slot_index_.has_value() && *memref->slot_index_, span)
       << "Internal error: MemRef on multi-buffer region '" << memref->base_->name_hint_
       << "' carries no slot index";
-  const ExprPtr& slot_index = *memref->slot_index_;
+  ExprPtr slot_index = *memref->slot_index_;
+  std::string region_ssa = region->region_ssa;
+  if (!region->banks.empty()) {
+    uint64_t bank;
+    if (auto constant = As<ir::ConstInt>(slot_index)) {
+      bank = constant->value_ / region->count;
+      slot_index = std::make_shared<ir::ConstInt>(constant->value_ % region->count, DataType::INDEX, span);
+    } else {
+      const auto found = fs_.banked_slot_indices.find(slot_index.get());
+      INTERNAL_CHECK_SPAN(found != fs_.banked_slot_indices.end(), span)
+          << "Internal error: missing proven bank coordinate";
+      bank = found->second.first;
+      slot_index = found->second.second;
+    }
+    INTERNAL_CHECK_SPAN(bank < region->banks.size(), span)
+        << "Internal error: bank coordinate exceeds the declared allocation";
+    region_ssa = region->banks[bank].first;
+  }
 
   // ptoas reads the slot as an `index` SSA and matches its affine form (`iv % N`,
   // `(iv ± c) % N`, a constant) to decide whether two accesses can touch the same
@@ -1897,7 +2216,28 @@ bool PTOCodegen::TryEmitMultiTileGet(const ir::MemRefPtr& memref, const std::str
     CHECK_SPAN(scalar_type && (scalar_type->dtype_.IsInt() || scalar_type->dtype_ == DataType::INDEX), span)
         << "A slot index must be an integer or index expression, got "
         << (scalar_type ? GetTypeString(scalar_type->dtype_) : std::string("a non-scalar"));
-    slot_ssa = GetExprAsCode(slot_index);
+    if (fs_.unsigned_slot_remainders.count(slot_index.get()) != 0) {
+      auto mod = As<ir::FloorMod>(slot_index);
+      ExprPtr induction = mod->left_;
+      int64_t offset = 0;
+      if (auto add = As<ir::Add>(induction)) {
+        offset = As<ir::ConstInt>(add->right_)->value_;
+        induction = add->left_;
+      }
+      const auto key = std::make_tuple(induction.get(), offset, As<ir::ConstInt>(mod->right_)->value_);
+      auto found = fs_.slot_index_ssa.find(key);
+      if (found != fs_.slot_index_ssa.end()) {
+        slot_ssa = found->second;
+      } else {
+        const std::string numerator = GetExprAsCode(mod->left_);
+        const std::string divisor = GetExprAsCode(mod->right_);
+        slot_ssa = NewTemp();
+        Emit(slot_ssa + " = arith.remui " + numerator + ", " + divisor + " : index");
+        fs_.slot_index_ssa.emplace(key, slot_ssa);
+      }
+    } else {
+      slot_ssa = GetExprAsCode(slot_index);
+    }
     if (scalar_type->dtype_ != DataType::INDEX) {
       std::string idx = NewTemp();
       Emit(idx + " = arith.index_cast " + slot_ssa + " : " + GetTypeString(scalar_type->dtype_) +
@@ -1906,25 +2246,97 @@ bool PTOCodegen::TryEmitMultiTileGet(const ir::MemRefPtr& memref, const std::str
     }
   }
 
-  Emit(tile_buf + " = pto.multi_tile_get " + region->region_ssa + "[" + slot_ssa +
-       "] : " + region->mtb_type_str + " -> " + region->slot_type_str);
-  fs_.ssa_to_tile_buf_type[tile_buf] = region->slot_type_str;
+  const auto result_type = GetTileBufTypeStringFromTileType(type);
+  const auto& carrier_type =
+      region->parent_type_str.empty() ? region->slot_type_str : region->flat_slot_type_str;
+  const auto carrier = result_type == carrier_type ? tile_buf : NewNamedTemp("slot_carrier");
+  if (region->parent_type_str.empty()) {
+    Emit(carrier + " = pto.multi_tile_get " + region_ssa + "[" + slot_ssa + "] : " + region->mtb_type_str +
+         " -> " + carrier_type);
+  } else {
+    const auto zero = GetOrEmitConstant(int64_t{0}, DataType::INDEX);
+    Emit(carrier + " = pto.subview " + region_ssa + "[" + slot_ssa + ", " + zero + "] sizes [1, " +
+         std::to_string(region->slot_elements) + "] : " + region->parent_type_str + " -> " + carrier_type);
+  }
+  if (carrier != tile_buf) {
+    Emit(tile_buf + " = pto.treshape " + carrier + " : " + carrier_type + " -> " + result_type);
+  }
+  fs_.ssa_to_tile_buf_type[tile_buf] = result_type;
   return true;
 }
 
 void PTOCodegen::EmitMultiBufferRegionAllocs() {
   for (const ir::Var* base : fs_.multi_buffer_region_order) {
     const MultiBufferRegion& region = fs_.multi_buffer_regions.at(base);
-    // No `addr`: ptoas PlanMemory owns the region's placement, which is the whole
-    // point of describing the slots to it. Under the PyPTO planner no region is
-    // planned at all (see PlanMultiBufferRegions). Both extents are always present —
-    // planning rejects an allocation whose valid shape it cannot state statically.
+    // PyPTO owns a fixed region base; PTOAS planner mode omits the address.
+    // Both extents are static and shared by every slot.
     // Region declarations are synthesized from the whole allocation rather than
     // one statement, so the base variable's span is the closest true source.
     SpanScope base_loc(this, &base->span_);
-    Emit(region.region_ssa + " = pto.alloc_multi_tile valid_row = " + region.valid_row_ssa +
-         " valid_col = " + region.valid_col_ssa + " : " + region.mtb_type_str);
+    if (!region.parent_type_str.empty()) {
+      if (region.banks.empty()) {
+        Emit(region.region_ssa + " = pto.alloc_tile addr = " + region.addr_ssa + " : " +
+             region.parent_type_str);
+      } else {
+        for (const auto& [bank_ssa, bank_addr] : region.banks) {
+          Emit(bank_ssa + " = pto.alloc_tile addr = " + bank_addr + " : " + region.parent_type_str);
+        }
+      }
+      continue;
+    }
+    const std::string address = region.addr_ssa.empty() ? "" : " addr = " + region.addr_ssa;
+    const auto valid_row = region.slot_type_str.find("v_row=?") != std::string::npos
+                               ? " valid_row = " + region.valid_row_ssa
+                               : "";
+    const auto valid_col = region.slot_type_str.find("v_col=?") != std::string::npos
+                               ? " valid_col = " + region.valid_col_ssa
+                               : "";
+    if (region.banks.empty()) {
+      Emit(region.region_ssa + " = pto.alloc_multi_tile" + address + valid_row + valid_col + " : " +
+           region.mtb_type_str);
+    } else {
+      for (const auto& [bank_ssa, bank_addr] : region.banks) {
+        Emit(bank_ssa + " = pto.alloc_multi_tile addr = " + bank_addr + valid_row + valid_col + " : " +
+             region.mtb_type_str);
+      }
+    }
   }
+}
+
+ir::VarPtr PTOCodegen::FindMultiTileInputAlias(const AssignStmtPtr& stmt) const {
+  if (!emit_tile_addr_ || !enable_software_pipeline_) return nullptr;
+  auto result_type = ir::GetTileTypeWithMemRef(stmt->var_->GetType());
+  auto call = As<ir::Call>(stmt->value_);
+  if (!result_type || !call || !call->op_ || !ir::OpRegistry::GetInstance().IsRegistered(call->op_->name_)) {
+    return nullptr;
+  }
+  auto result_memref = ir::GetDefinedMemRef(result_type);
+  if (result_memref->slot_count_ <= 1) return nullptr;
+  const auto& entry = ir::OpRegistry::GetInstance().GetEntry(call->op_->name_);
+  if (!entry.IsInplaceSafe()) return nullptr;
+  for (const auto index : entry.ForbidOutputAliasArgs()) {
+    if (index >= call->args_.size()) continue;
+    auto forbidden_type = ir::GetTileTypeWithMemRef(call->args_[index]->GetType());
+    if (forbidden_type && ir::CompareBaseAddress(ir::GetDefinedMemRef(forbidden_type), result_memref) !=
+                              ir::AddressRelation::kDifferent) {
+      return nullptr;
+    }
+  }
+  const auto result_signature = ir::TileBufSignature::FromTileType(*result_type);
+  for (size_t i = 0; i < call->args_.size(); ++i) {
+    if (entry.ForbidOutputAliasArgs().count(i)) continue;
+    auto input = ir::AsVarLike(call->args_[i]);
+    auto input_type = input ? ir::GetTileTypeWithMemRef(input->GetType()) : nullptr;
+    if (!input_type || !ir::TileBufSignature::FromTileType(*input_type).IsFullSlotAlias(result_signature)) {
+      continue;
+    }
+    auto input_memref = ir::GetDefinedMemRef(input_type);
+    if (input_memref->size_ == result_memref->size_ &&
+        ir::CompareBaseAddress(input_memref, result_memref) == ir::AddressRelation::kSame) {
+      return input;
+    }
+  }
+  return nullptr;
 }
 
 void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
@@ -1947,11 +2359,10 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
 
   // A slot of a declared multi-slot allocation is taken from its region rather
   // than allocated: one `pto.alloc_multi_tile` backs all N, and this use selects
-  // one. Falls through to the ordinary alloc_tile when no region was planned for
-  // the allocation — it declares no slots, or the PyPTO planner is in use. A
-  // slotted allocation this planner cannot describe never gets this far; see
-  // PlanMultiBufferRegions.
-  if (TryEmitMultiTileGet(ir::GetDefinedMemRef(tile_type), tile_buf, tile_var->span_)) {
+  // one. Allocations with no eligible region keep ordinary addressed alloc_tile
+  // lowering. An unsupported unaddressed declaration has already been rejected
+  // by PlanMultiBufferRegions.
+  if (TryEmitMultiTileGet(tile_type, tile_buf, tile_var->span_)) {
     return;
   }
 
@@ -2183,6 +2594,41 @@ std::string PTOCodegen::GetGMSlotBufferSSAForPipe(int pipe_id, int dir_mask) {
   return region_ssa;
 }
 
+ir::TileTypePtr PTOCodegen::GetGMPipeEntryType(int pipe_id, int direction, bool consumer) const {
+  auto it = gm_pipe_entries_.find({pipe_id, direction});
+  if (it == gm_pipe_entries_.end()) return nullptr;
+  return consumer ? it->second.second : it->second.first;
+}
+
+std::string PTOCodegen::EmitGMPipeEntryDescriptor(int pipe_id, int direction, const ir::TileTypePtr& tile) {
+  auto pointer = GetGMSlotBufferSSAForPipe(pipe_id, direction);
+  INTERNAL_CHECK(!pointer.empty()) << "GM-entry pipe requires the GM workspace parameter";
+  const auto dtype = GetTypeString(tile->dtype_);
+  if (tile->dtype_ != fs_.gm_slot_buffer_dtype) {
+    auto cast = NewNamedTemp("pipe_data");
+    Emit(cast + " = pto.castptr " + pointer + " : !pto.ptr<" + GetTypeString(fs_.gm_slot_buffer_dtype) +
+         "> -> !pto.ptr<" + dtype + ">");
+    pointer = cast;
+  }
+  const auto rows = ir::transform_utils::EvalConstInt(tile->shape_.at(0));
+  const auto cols = ir::transform_utils::EvalConstInt(tile->shape_.at(1));
+  INTERNAL_CHECK(rows && cols) << "GM-entry pipe requires static rank-two entries";
+  auto row = GetOrEmitConstant(*rows, DataType::INDEX);
+  auto col = GetOrEmitConstant(*cols, DataType::INDEX);
+  auto one = GetOrEmitConstant(int64_t{1}, DataType::INDEX);
+  // For a column split the consumer's row stride remains the full producer row.
+  auto producer = GetGMPipeEntryType(pipe_id, direction, false);
+  INTERNAL_CHECK(producer && producer->shape_.size() == 2) << "GM-entry pipe requires a rank-two producer";
+  const auto producer_cols = ir::transform_utils::EvalConstInt(producer->shape_[1]);
+  INTERNAL_CHECK(producer_cols) << "GM-entry pipe requires a static producer row stride";
+  auto stride = GetOrEmitConstant(*producer_cols, DataType::INDEX);
+  auto entry = NewNamedTemp("pipe_entry");
+  Emit(entry + " = pto.make_tensor_view " + pointer + ", shape = [" + row + ", " + col + "], strides = [" +
+       stride + ", " + one + "] : !pto.tensor_view<" + std::to_string(*rows) + "x" + std::to_string(*cols) +
+       "x" + dtype + ">");
+  return entry;
+}
+
 bool PTOCodegen::IsAICFunction() const {
   return fs_.current_function && fs_.current_function->func_type_ == ir::FunctionType::AIC;
 }
@@ -2225,6 +2671,10 @@ void PTOCodegen::EmitExtraAllocTiles() {
 // ========================================================================
 
 void PTOCodegen::VisitStmt(const ir::StmtPtr& stmt) {
+  // Never reuse a scalar SSA defined inside a sibling/nested control-flow
+  // region. Within each straight-line body all ring accesses share one index.
+  const bool region_boundary = !As<ir::AssignStmt>(stmt) && !As<ir::EvalStmt>(stmt);
+  if (region_boundary) fs_.slot_index_ssa.clear();
   // Defensive: the first-class SplitAivScopeStmt region is consumed and erased
   // by LowerAutoVectorSplit (pass 23), well before codegen. There is no
   // ScopeStmt handler here, so a survivor would be silently unwrapped by the
@@ -2238,6 +2688,7 @@ void PTOCodegen::VisitStmt(const ir::StmtPtr& stmt) {
   // they frequently rebuild the Call underneath it with a coarser span.
   SpanScope stmt_loc(this, &stmt->span_);
   ir::IRVisitor::VisitStmt(stmt);
+  if (region_boundary) fs_.slot_index_ssa.clear();
 }
 
 void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
@@ -2246,6 +2697,22 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   const bool is_set_validshape = ir::IsOp(call, "tile.set_validshape");
   const bool alias_result_to_in_place_input = ShouldAliasResultToInPlaceInput(op);
   const bool alias_array_update_to_input = ShouldAliasArrayUpdateResultToInput(op);
+  const auto multi_tile_alias = FindMultiTileInputAlias(op);
+  if (multi_tile_alias) {
+    // Preserve the storage identity of an in-place read/write by reusing the
+    // dominating operand handle for the same slot and physical window.
+    const auto source = GetVarName(multi_tile_alias);
+    const auto source_type = GetTileBufTypeStringFromTileType(As<TileType>(multi_tile_alias->GetType()));
+    const auto target_type = GetTileBufTypeStringFromTileType(As<TileType>(op->var_->GetType()));
+    if (source_type == target_type) {
+      BindVarToMlir(op->var_, source);
+    } else {
+      const auto target = NewNamedTemp(op->var_->name_hint_ + "_slot_view");
+      Emit(target + " = pto.treshape " + source + " : " + source_type + " -> " + target_type);
+      BindVarToMlir(op->var_, target);
+      fs_.ssa_to_tile_buf_type[target] = target_type;
+    }
+  }
 
   if (ir::IsOp(call, "pld.tile.remote_load")) {
     auto result_tile_type = As<ir::TileType>(op->var_->GetType());
@@ -2257,7 +2724,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   }
 
   if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
-    if (!is_set_validshape && !alias_result_to_in_place_input) {
+    if (!is_set_validshape && !alias_result_to_in_place_input && !multi_tile_alias) {
       EmitAllocTileForVar(op->var_, tile_type);
     }
   }
@@ -2723,6 +3190,12 @@ std::string PTOCodegen::GetTileBufTypeString(const ir::Var* base_ptr) const {
 std::string PTOCodegen::GetTileBufTypeStringFromTileType(
     const std::shared_ptr<const ir::TileType>& tile_type) const {
   INTERNAL_CHECK(tile_type) << "Internal error: tile_type must not be null";
+  // A slot alias has no valid-shape constructor operands. Preserve the proven
+  // static extent in its type; never replace a dynamic/ragged view with full size.
+  if (enable_software_pipeline_ && emit_tile_addr_ && tile_type->memref_ &&
+      (*tile_type->memref_)->slot_count_ > 1) {
+    return GetViewTileBufTypeStringFromTileType(tile_type);
+  }
   auto memory_space = tile_type->GetMemorySpace();
   INTERNAL_CHECK(memory_space.has_value()) << "Internal error: tile_type must have memory_space";
 

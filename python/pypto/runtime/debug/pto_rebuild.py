@@ -62,18 +62,18 @@ def _disabled_via_env() -> bool:
     )
 
 
-# Matches a `pto.alloc_tile` line that carries a physical `addr =` operand.
+# Matches a `pto.alloc_tile` or `pto.alloc_multi_tile` line that carries a physical `addr =` operand.
 # Scoped to alloc_tile lines specifically so an unrelated `addr =` elsewhere in
 # the `.pto` cannot flip the inferred level (only pto.alloc_tile addr selects
 # PyPTO-owned allocation / level3).
-_ALLOC_TILE_ADDR_RE = re.compile(r"^\s*%\S+\s*=\s*pto\.alloc_tile\b.*\baddr\s*=", re.MULTILINE)
+_ALLOC_TILE_ADDR_RE = re.compile(r"^\s*%\S+\s*=\s*pto\.alloc_(?:multi_)?tile\b.*\baddr\s*=", re.MULTILINE)
 
 
 def _ptoas_flags(pto_content: str) -> list[str]:
     """Base ptoas flags shared with ``pto_backend._get_ptoas_flags``.
 
     The ``--pto-level`` is inferred from the ``.pto`` itself: if any
-    ``pto.alloc_tile`` carries a physical ``addr`` operand, PyPTO owned
+    ``pto.alloc_tile`` / ``pto.alloc_multi_tile`` carries a physical ``addr`` operand, PyPTO owned
     allocation (level3); otherwise the ptoas PlanMemory pass must own it
     (level2). This keeps the rebuild path in sync with whichever
     ``memory_planner`` produced the ``.pto``.

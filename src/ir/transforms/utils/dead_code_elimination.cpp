@@ -385,8 +385,8 @@ void MarkBinderTypeRefsLive(const std::vector<StmtPtr>& stmts, std::unordered_se
 }
 
 std::vector<StmtPtr> EliminateDeadCodeCore(const std::vector<StmtPtr>& stmts,
-                                           const RemovablePredicate& is_removable) {
-  std::unordered_set<const Var*> live;
+                                           const RemovablePredicate& is_removable,
+                                           std::unordered_set<const Var*> live = {}) {
   FindLiveRootsRecursiveImpl(stmts, is_removable, live);
   MarkBinderTypeRefsLive(stmts, live);
 
@@ -740,6 +740,11 @@ std::vector<StmtPtr> RewriteDeadYieldSlotsOnce(const std::vector<StmtPtr>& stmts
 
 std::vector<StmtPtr> EliminateDeadCode(const std::vector<StmtPtr>& stmts) {
   return EliminateDeadCodeCore(stmts, IsRemovableForDefaultDce);
+}
+
+std::vector<StmtPtr> EliminateDeadCode(const std::vector<StmtPtr>& stmts,
+                                       const std::unordered_set<const Var*>& live_outputs) {
+  return EliminateDeadCodeCore(stmts, IsRemovableForDefaultDce, live_outputs);
 }
 
 std::vector<StmtPtr> EliminateDeadScalarAssignments(const std::vector<StmtPtr>& stmts) {

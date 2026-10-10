@@ -120,6 +120,7 @@ class _PassPipelineResult(NamedTuple):
     memory_planner: _passes.MemoryPlanner
     backend_type: BackendType
     runtime: _passes.RuntimeKind
+    enable_software_pipeline: bool
 
 
 def _select_backend(*, backend_type: BackendType, platform: str | None) -> BackendType:
@@ -136,6 +137,7 @@ def _validate_pass_context_conflicts(
     diagnostic_phase: _passes.DiagnosticPhase | None,
     memory_planner: _passes.MemoryPlanner | None,
     runtime: _passes.RuntimeKind | None = None,
+    enable_software_pipeline: bool | None = None,
 ) -> _passes.PassContext | None:
     """Reject explicit pass settings that conflict with an active context."""
     outer = _passes.PassContext.current()
@@ -159,6 +161,11 @@ def _validate_pass_context_conflicts(
             f"{operation}() was called with runtime while a PassContext is already active. "
             "Set the runtime on the existing PassContext instead."
         )
+    if enable_software_pipeline is not None and outer is not None:
+        raise RuntimeError(
+            f"{operation}() was called with enable_software_pipeline while a PassContext is already active. "
+            "Set enable_software_pipeline on the existing PassContext instead."
+        )
     return outer
 
 
@@ -174,6 +181,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
     disabled_diagnostics: _passes.DiagnosticCheckSet | None = None,
     memory_planner: _passes.MemoryPlanner | None = None,
     enable_pypto_l0c_double_buffer: bool | None = None,
+    enable_software_pipeline: bool | None = None,
     runtime: _passes.RuntimeKind | None = None,
     analyze_auto_scopes_for_deps: bool = False,
     extra_instruments: tuple[_passes.PassInstrument, ...] = (),
@@ -189,6 +197,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
         diagnostic_phase=diagnostic_phase,
         memory_planner=memory_planner,
         runtime=runtime,
+        enable_software_pipeline=enable_software_pipeline,
     )
 
     default_disabled = _passes.DiagnosticCheckSet()
@@ -215,6 +224,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
         )
         rt = runtime if runtime is not None else outer.get_runtime()
         buffer_ir = outer.get_enable_buffer_ir()
+        software_pipeline = outer.get_enable_software_pipeline()
     else:
         instruments = list(extra_instruments)
         vlevel = (
@@ -226,7 +236,10 @@ def _run_pass_pipeline(  # noqa: PLR0913
         dbc_flag = enable_pypto_l0c_double_buffer if enable_pypto_l0c_double_buffer is not None else False
         rt = runtime if runtime is not None else _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
         buffer_ir = False
-    ctx = _passes.PassContext(instruments, vlevel, dphase, disabled, mplan, dbc_flag, rt, buffer_ir)
+        software_pipeline = enable_software_pipeline if enable_software_pipeline is not None else False
+    ctx = _passes.PassContext(
+        instruments, vlevel, dphase, disabled, mplan, dbc_flag, rt, buffer_ir, software_pipeline
+    )
 
     if mplan == _passes.MemoryPlanner.PTOAS:
         logger.warning(
@@ -252,7 +265,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
                 output_dir=passes_dump_dir,
             )
 
-    return _PassPipelineResult(transformed_program, mplan, effective_backend_type, rt)
+    return _PassPipelineResult(transformed_program, mplan, effective_backend_type, rt, software_pipeline)
 
 
 def make_default_output_dir(name: str) -> str:
@@ -294,6 +307,7 @@ def compile(  # noqa: PLR0913
     disabled_diagnostics: _passes.DiagnosticCheckSet | None = None,
     memory_planner: _passes.MemoryPlanner | None = None,
     enable_pypto_l0c_double_buffer: bool | None = None,
+    enable_software_pipeline: bool | None = None,
     profiling: bool = False,
     platform: str | None = None,
     distributed_config: Any = None,
@@ -368,6 +382,11 @@ def compile(  # noqa: PLR0913
             off). ``None`` inherits the setting from an active outer
             ``PassContext`` (else ``False``). It has no effect under ``DSA_RP``
             or ``PTOAS``, which enable chooser dbC=2 automatically.
+        enable_software_pipeline: Lower eligible pipeline loops with explicit
+            prefetch and rotating slots instead of unrolling. ``None`` inherits
+            the active ``PassContext`` setting, or defaults to ``False``. Requires
+            ``MemoryPlanner.PYPTO`` and cannot be combined with Buffer IR. Set
+            this on the context when a ``PassContext`` is already active.
         profiling: If True, enable compile profiling that records per-stage
             wall-clock timings.  Results are written to ``output_dir/report/``.
         platform: Target execution platform.  One of ``"a2a3sim"``,
@@ -420,6 +439,7 @@ def compile(  # noqa: PLR0913
         diagnostic_phase=diagnostic_phase,
         memory_planner=memory_planner,
         runtime=runtime,
+        enable_software_pipeline=enable_software_pipeline,
     )
 
     # --- Compile profiling ---------------------------------------------------
@@ -451,6 +471,7 @@ def compile(  # noqa: PLR0913
             disabled_diagnostics=disabled_diagnostics,
             memory_planner=memory_planner,
             enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
+            enable_software_pipeline=enable_software_pipeline,
             runtime=runtime,
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
             extra_instruments=(report_instrument,),
@@ -474,6 +495,7 @@ def compile(  # noqa: PLR0913
                     emit_source_loc=emit_source_loc,
                     dump_ptoas_passes=dump_ptoas_passes,
                     runtime=effective_runtime,
+                    enable_software_pipeline=pipeline.enable_software_pipeline,
                 )
         except PartialCodegenError as exc:
             _write_files(exc.files, output_dir)

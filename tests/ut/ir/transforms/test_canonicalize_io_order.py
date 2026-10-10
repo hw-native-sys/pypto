@@ -53,6 +53,38 @@ def _loop_op_order(program: ir.Program) -> list[str]:
 class TestCanonicalizeIOOrder:
     """Before/Expected pairs verifying the priority-aware topological reorder."""
 
+    def test_nonregistry_op_objects_keep_io_classification(self):
+        """Deserialization and IR builders need not use registry-singleton Op objects."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self, a: pl.Tensor[[2, 64], pl.FP32], out: pl.Tensor[[2, 64], pl.FP32]):
+                for i in pl.pipeline(1, stage=1):
+                    x: pl.Tile[[1, 64], pl.FP32] = pl.tile.load(a, [0, 0], [1, 64])
+                    y: pl.Tile[[1, 64], pl.FP32] = pl.tile.add(x, x)
+                    pl.tile.store(y, [0, 0], out)
+                    z: pl.Tile[[1, 64], pl.FP32] = pl.tile.load(a, [1, 0], [1, 64])
+                    w: pl.Tile[[1, 64], pl.FP32] = pl.tile.add(z, z)
+                    pl.tile.store(w, [1, 0], out)
+
+        class FreshOps(ir.IRMutator):
+            def visit_call(self, call):
+                visited = super().visit_call(call)
+                assert isinstance(visited, ir.Call)
+                return ir.Call(
+                    ir.Op(visited.op.name),
+                    visited.args,
+                    visited.kwargs,
+                    visited.attrs,
+                    visited.type,
+                    visited.span,
+                )
+
+        rebuilt = FreshOps().visit_program(Before)
+        assert _loop_op_order(_run_pass(rebuilt)) == ["load", "load", "compute", "compute", "store", "store"]
+        ir.assert_structural_equal(_run_pass(rebuilt), _run_pass(Before))
+
     def test_symmetric_pingpong_layout(self):
         """[load_0, compute_0, store_0, load_1, compute_1, store_1] →
         [load_0, load_1, compute_0, compute_1, store_0, store_1]."""

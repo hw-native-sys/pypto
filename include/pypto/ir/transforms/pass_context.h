@@ -304,6 +304,9 @@ class PassContext {
    *        runtime switch on this rather than inspecting codegen options.
    * @param enable_buffer_ir Enable the staged Buffer IR development pipeline.
    *        Disabled by default until the migration is complete.
+   * @param enable_software_pipeline Lower eligible pipeline loops to rotating
+   *        slots with explicit prefetch (default: false). Requires PyPTO memory
+   *        planning and the tile IR pipeline.
    */
   explicit PassContext(std::vector<PassInstrumentPtr> instruments,
                        VerificationLevel verification_level = VerificationLevel::Basic,
@@ -311,7 +314,7 @@ class PassContext {
                        DiagnosticCheckSet disabled_diagnostics = {DiagnosticCheck::UnusedControlFlowResult},
                        MemoryPlanner memory_planner = MemoryPlanner::PyPTO,
                        bool enable_pypto_l0c_double_buffer = false, RuntimeKind runtime = kDefaultRuntimeKind,
-                       bool enable_buffer_ir = false);
+                       bool enable_buffer_ir = false, bool enable_software_pipeline = false);
 
   /**
    * @brief Push this context onto the thread-local stack
@@ -386,6 +389,9 @@ class PassContext {
   /// Whether the staged Buffer IR development pipeline is enabled.
   [[nodiscard]] bool GetEnableBufferIR() const;
 
+  /** @brief Whether eligible pipeline loops use explicit software pipelining. */
+  [[nodiscard]] bool GetEnableSoftwarePipeline() const;
+
   /**
    * @brief Get the currently active context (top of thread-local stack)
    * @return Pointer to current context, or nullptr if none
@@ -414,6 +420,7 @@ class PassContext {
   bool enable_pypto_l0c_double_buffer_;
   RuntimeKind runtime_;
   bool enable_buffer_ir_;
+  bool enable_software_pipeline_;
   PassContext* previous_;
 
   static thread_local PassContext* current_;

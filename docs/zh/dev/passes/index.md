@@ -57,7 +57,7 @@ PyPTO IR 变换的参考文档，按阅读顺序组织。实际执行顺序请�
 | 26 | [SplitVectorKernel](26-split_vector_kernel.md) | 标记 split 属性并处理不拆分的双 AIV 路径 |
 | 27 | [StampTfreeSplit](27-stamp_tfree_split.md) | 把每个跨核 tpop 的 split 与 pipe id 复制到与之配对的 tfree 上 |
 | 28 | [NormalizeReturnOrder](28-normalize_return_order.md) | 把每个 InCore 函数的返回元组重排为规范顺序 |
-| 29 | [SkewCrossCorePipeline](29-skew_cross_core_pipeline.md) | 对混合 cube/vector 循环做软流水，使两个核重叠执行 |
+| 29 | [SkewCrossCorePipeline](29-skew_cross_core_pipeline.md) | 联合规划 opt-in 单向 FIFO 流水线，并对混合 cube/vector 循环做 skew |
 | 30 | [LowerPipelineToSlots](30-lower_pipeline_to_slots.md) | 把 `pl.pipeline` 循环体改为轮转一个分配的多个 slot，而不是复制（`memory_planner=PTOAS`） |
 | 31 | [LowerPipelineLoops](31-lower_pipeline_loops.md) | 把 `pl.pipeline(N, stage=F)` 的循环体复制 `F` 份以启用乒乓缓冲 |
 | 32 | [CanonicalizeIOOrder](32-canonicalize_io_order.md) | 按 scalar → load → compute → store 阶梯重排流水循环体内的语句 |

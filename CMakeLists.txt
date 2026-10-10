@@ -278,6 +278,9 @@ set(PYPTO_SOURCES
     src/ir/transforms/utils/op_predicates.cpp
     src/ir/transforms/utils/parent_stmt_analysis.cpp
     src/ir/transforms/utils/pipeline_loop_utils.cpp
+    src/ir/transforms/utils/joint_software_pipeline.cpp
+    src/ir/transforms/utils/nested_pipeline.cpp
+    src/ir/transforms/utils/software_pipeline.cpp
     src/ir/transforms/utils/return_lineage_utils.cpp
     src/ir/transforms/utils/result_alias_utils.cpp
     src/ir/transforms/utils/scalar_output_hoist.cpp
