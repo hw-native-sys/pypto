@@ -7,7 +7,9 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""PTO codegen checks for hand-written FP4E2M1X2 GM expand (carrier → nibble ABI)."""
+"""PTO codegen checks for the PTOAS v0.67 packed FP4 GM carrier ABI."""
+
+import re
 
 import pypto.language as pl
 import pytest
@@ -38,8 +40,8 @@ def _emit_incore_mlir(program) -> str:
     return "\n".join(parts)
 
 
-def test_fp4e2m1x2_make_tensor_view_expands_to_nibble_units():
-    """Param + InCore tensor.view + rank-3 leading strides expand carrier→nibble."""
+def test_fp4e2m1x2_gm_views_preserve_carrier_units():
+    """Parameters, tensor.view, loads and stores retain packed carrier coordinates."""
 
     @pl.program
     class Rank2:
@@ -54,12 +56,13 @@ def test_fp4e2m1x2_make_tensor_view_expands_to_nibble_units():
 
     mlir = _emit_incore_mlir(Rank2)
     views = [line for line in mlir.splitlines() if "pto.make_tensor_view" in line and "f4E2M1x2" in line]
-    assert views and all("512" in line for line in views), mlir
-    # Carrier IR last-axis 256 must not appear unexpanded on make_tensor_view.
-    assert all("%c256_index" not in line for line in views), mlir
-    # Static ConstInt partition last-axis expand folds *2 (carrier 256 → nibble 512).
+    assert views and all("shape = [%c2_index, %c256_index]" in line for line in views), mlir
+    assert all("strides = [%c256_index, %c1_index]" in line for line in views), mlir
+    # PTOAS expands the DMA descriptor itself. Pre-expansion doubles the row pitch.
     partitions = [line for line in mlir.splitlines() if "partition_view" in line]
-    assert partitions and all("%c512_index" in line for line in partitions), mlir
+    assert len(partitions) == 2, mlir
+    assert all("sizes = [%c2_index, %c256_index]" in line for line in partitions), mlir
+    assert all("!pto.partition_tensor_view<2x256x!pto.f4E2M1x2>" in line for line in partitions), mlir
 
     @pl.program
     class Rank3:
@@ -75,15 +78,13 @@ def test_fp4e2m1x2_make_tensor_view_expands_to_nibble_units():
     assert "!pto.f4E2M1x2" in mlir3
     views3 = [line for line in mlir3.splitlines() if "pto.make_tensor_view" in line and "f4E2M1x2" in line]
     assert views3, mlir3
-    # Carrier [2,16,32] → nibble shape last-axis 32*2=64 (ConstInt fold).
-    assert all("shape = [%c2_index, %c16_index, %c64_index]" in line for line in views3), mlir3
-    # Leading strides expand via *2: row pitch 32*16 then *2 → 1024; mid stride 32*2 → 64.
+    assert all("shape = [%c2_index, %c16_index, %c32_index]" in line for line in views3), mlir3
     assert "arith.muli %c32_index, %c16_index : index" in mlir3, mlir3
-    assert "arith.muli %c32_index, %c2_index : index" in mlir3, mlir3
-    assert any(
-        "arith.muli" in line and "_s0," in line and "%c2_index" in line for line in mlir3.splitlines()
-    ), mlir3
-    assert all("%c1_index]" in line for line in views3), mlir3
+    assert "arith.muli %c32_index, %c2_index : index" not in mlir3, mlir3
+    assert all(re.search(r"strides = \[%\w+_s0, %c32_index, %c1_index\]", line) for line in views3), mlir3
+    partitions3 = [line for line in mlir3.splitlines() if "partition_view" in line]
+    assert len(partitions3) == 2, mlir3
+    assert all("sizes = [%c2_index, %c16_index, %c32_index]" in line for line in partitions3), mlir3
 
 
 def test_fp4e2m1x2_rejects_column_vector_last_carrier_dim_one():
@@ -140,6 +141,9 @@ def test_fp4e2m1x2_slice_cast_and_vec_move():
     mlir = _emit_incore_mlir(CastProg)
     assert "!pto.f4E2M1x2" in mlir and "pto.tcvt" in mlir
     assert "pto.ttrans" not in mlir
+    fp4_load = next(line for line in mlir.splitlines() if "partition_view" in line and "f4E2M1x2" in line)
+    assert "offsets = [%c0_index, %c16_index]" in fp4_load, mlir
+    assert "sizes = [%c16_index, %c16_index]" in fp4_load, mlir
 
     @pl.program
     class MoveProg:

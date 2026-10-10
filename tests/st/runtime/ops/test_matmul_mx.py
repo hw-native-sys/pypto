@@ -10,7 +10,8 @@
 """A5 runtime tests for host-prequantized MX matmul.
 
 Native packed-FP4 matmul is intentionally outside the supported surface. The
-FP4×FP8 case explicitly casts its FP4 lhs to FP8E4M3FN before validating both
+FP4×FP8 case uses packed FP4E2M1X2 carrier dimensions and explicitly casts its
+lhs to FP8E4M3FN before validating both
 ``matmul_mx`` and ``matmul_mx_acc`` against an FP32 torch golden. A homogeneous
 MXFP8 case remains as the instruction baseline.
 """
@@ -165,14 +166,15 @@ def mxfp8_matmul(
 
 @pl.jit.incore
 def mxfp4_fp8_matmul_kernel(
-    a: pl.Tensor[[M, K], pl.FP4],
+    a: pl.Tensor[[M, K // 2], pl.FP4E2M1X2],
     a_scale: pl.Tensor[[M, K // 32], pl.FP8E8M0, pl.MX_A_ZZ],
     b: pl.Tensor[[K, N], pl.FP8E4M3FN],
     b_scale: pl.Tensor[[K // 32, N], pl.FP8E8M0, pl.MX_B_NN],
     out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
     out_acc: pl.Out[pl.Tensor[[M, N], pl.FP32]],
 ) -> tuple[pl.Tensor[[M, N], pl.FP32], pl.Tensor[[M, N], pl.FP32]]:
-    lhs = pl.cast(pl.load(a, [0, 0], [M, K]), pl.FP8E4M3FN)
+    # Torch stores two FP4 values per carrier; the cast restores logical K.
+    lhs = pl.cast(pl.load(a, [0, 0], [M, K // 2]), pl.FP8E4M3FN)
     lhs_scale = pl.load(a_scale, [0, 0], [M, K // 32])
     rhs = pl.load(b, [0, 0], [K, N])
     rhs_scale = pl.load(b_scale, [0, 0], [K // 32, N])
@@ -185,7 +187,7 @@ def mxfp4_fp8_matmul_kernel(
 
 @pl.jit
 def mxfp4_fp8_matmul(
-    a: pl.Tensor[[M, K], pl.FP4],
+    a: pl.Tensor[[M, K // 2], pl.FP4E2M1X2],
     a_scale: pl.Tensor[[M, K // 32], pl.FP8E8M0, pl.MX_A_ZZ],
     b: pl.Tensor[[K, N], pl.FP8E4M3FN],
     b_scale: pl.Tensor[[K // 32, N], pl.FP8E8M0, pl.MX_B_NN],

@@ -1332,43 +1332,6 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
   }
 }
 
-void PTOCodegen::ExpandPackedFp4MakeTensorViewDims(DataType dtype, ir::TensorLayout layout,
-                                                   const std::vector<ir::ExprPtr>& shape_exprs,
-                                                   std::vector<std::string>& shape_ssas,
-                                                   const std::vector<ir::ExprPtr>* stride_exprs,
-                                                   std::vector<std::string>& stride_ssas) {
-  // PackFp4 IR / hand-written FP4E2M1X2 / tile_buf use pair (carrier) extents.
-  // pto-isa GetByteSize for float4_e*x2_t treats indices as nibbles
-  // ((n+1)>>1 → bytes), and EmitC expands Tile cols the same way. Expand last
-  // dim + leading strides so GM views share that nibble unit (multi-row TLOAD
-  // pitch matches Tile). Unit table: docs/en/dev/fp4.md#unit-convention
-  if (!dtype.IsPackedFp4() || IsMxTensorLayout(layout) || shape_ssas.empty()) return;
-  const size_t rank = shape_ssas.size();
-  auto two = GetOrEmitConstant(static_cast<int64_t>(2), DataType::INDEX);
-  auto times_two = [&](const std::string& ssa, const ir::ExprPtr& expr) -> std::string {
-    if (expr) {
-      if (auto ci = As<ir::ConstInt>(expr)) {
-        return GetOrEmitConstant(ci->value_ * 2, DataType::INDEX);
-      }
-    }
-    std::string mul = NewTemp();
-    Emit(mul + " = arith.muli " + ssa + ", " + two + " : index");
-    return mul;
-  };
-  ir::ExprPtr last_shape;
-  if (!shape_exprs.empty() && shape_exprs.size() == rank) {
-    last_shape = shape_exprs.back();
-  }
-  shape_ssas.back() = times_two(shape_ssas.back(), last_shape);
-  for (size_t j = 0; j + 1 < rank && j < stride_ssas.size(); ++j) {
-    ir::ExprPtr stride_expr;
-    if (stride_exprs && j < stride_exprs->size()) {
-      stride_expr = (*stride_exprs)[j];
-    }
-    stride_ssas[j] = times_two(stride_ssas[j], stride_expr);
-  }
-}
-
 void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
   // RFC #1300 P7 (canonical codegen).
   //
@@ -1476,8 +1439,6 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
     // but the codegen tolerates absent strides for any path that constructs
     // IR ad-hoc and skips the pipeline).
     std::vector<std::string> stride_names(rank);
-    // Keep a non-optional pointer so later packed-FP4 stride scaling does not
-    // re-touch tensor_view_ (clang-tidy bugprone-unchecked-optional-access).
     const std::vector<ir::ExprPtr>* explicit_strides = nullptr;
     if (tensor_type->tensor_view_.has_value() && !tensor_type->tensor_view_->stride.empty()) {
       explicit_strides = &tensor_type->tensor_view_->stride;
@@ -1537,16 +1498,14 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
       }
     }
 
-    ExpandPackedFp4MakeTensorViewDims(tensor_type->dtype_, layout, tensor_type->shape_, shape_dim_names,
-                                      explicit_strides, stride_names);
-
     // Buffer the statement so Emit() writes it as one line and can suffix the
     // parameter's source location.
     std::ostringstream view_line;
     view_line << tensor_view << " = pto.make_tensor_view ";
     view_line << GetVarName(param);
 
-    // Emit shape (verbatim from IR — canonical, then packed-FP4 nibble expand).
+    // PTOAS v0.67 expects packed FP4 GM views in carrier units, as in the IR.
+    // Its load/store lowering converts transfer descriptors to nibble units.
     view_line << ", shape = [";
     for (size_t j = 0; j < rank; ++j) {
       if (j > 0) view_line << ", ";

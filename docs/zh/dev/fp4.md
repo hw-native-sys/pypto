@@ -25,12 +25,12 @@ NZ / col_major / distributed 的 FP4 族路径在本切片不支持（硬拒随 
 | -- | ---- |
 | 前端逻辑 `pl.FP4` shape / `valid_shape` | nibble |
 | 手写 `pl.FP4E2M1X2` IR / `tile_buf` / Torch ABI | carrier |
-| `make_tensor_view` / `partition_view`（ExpandPackedFp4\* 之后） | nibble（供 pto-isa `GetByteSize`） |
+| 打包 `make_tensor_view` / `partition_view`（PTOAS v0.67+） | carrier；PTOAS 将 DMA 描述符转换为 nibble 单位 |
 | runtime Tensor / `torch.float4_e2m1fn_x2` | carrier 元素 |
 
 多行 ND packed 张量请用 **carrier** 末维与 leading stride（例如每行 512 逻辑
-nibble 写成 `pl.Tensor[[2, 256], pl.FP4E2M1X2]`）。Codegen 会把 GM view 扩到
-nibble 单位，使多行 pitch 与 Tile / pto-isa 一致。在 `FP4E2M1X2` 上误用逻辑宽度，
+nibble 写成 `pl.Tensor[[2, 256], pl.FP4E2M1X2]`）。Codegen 保留 GM view 的 carrier 单位。
+PTOAS v0.67 会将传输描述符转换为 pto-isa 所需的 nibble 单位；PyPTO 再次扩展会导致行步长翻倍。在 `FP4E2M1X2` 上误用逻辑宽度，
 或在无自动打包时用逻辑 `pl.FP4` 多行 ND，可能导致 GM 行 stride 错位——见 issue
 [#2754](https://github.com/hw-native-sys/pypto/issues/2754)。
 
@@ -89,7 +89,7 @@ def fp4x2_to_fp8(
 | ---- | ----- | ---- |
 | 手写 `pl.FP4E2M1X2` | ✅ | packed 路径的首选前端；**仅 ND** |
 | 无 PackFp4 的逻辑 `pl.FP4` | ⚠️ | Prefer Warning；A5 in-core 仍支持逻辑 FP4，并与 FP4E2M1X2 并存 |
-| GM ExpandPackedFp4\*（carrier→nibble） | ✅ | `make_tensor_view` / partition 末轴（ND） |
+| 打包 GM view 保留 carrier 单位 | ✅ | PTOAS v0.67 负责 DMA 转换（ND） |
 | `FP4E2M1X2` ↔ BF16 cast | ✅ | 静默原生 hop；结果 stride 重建为连续 |
 | `FP4E2M1X2` → FP8\* cast | ⚠️ | Warning；更推荐 LUT / 主机 |
 | `FP4` ↔ `FP4E2M1X2` cast | ❌ | 拒绝 |

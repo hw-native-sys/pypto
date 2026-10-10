@@ -28,13 +28,14 @@ strings and the support matrix).
 | ----- | ---- |
 | Frontend logical `pl.FP4` shape / `valid_shape` | nibble |
 | Hand-written `pl.FP4E2M1X2` IR / `tile_buf` / Torch ABI | carrier |
-| `make_tensor_view` / `partition_view` (after ExpandPackedFp4\*) | nibble (for pto-isa `GetByteSize`) |
+| Packed `make_tensor_view` / `partition_view` (PTOAS v0.67+) | carrier; PTOAS converts DMA descriptors to nibble units |
 | runtime Tensor / `torch.float4_e2m1fn_x2` | carrier element |
 
 Write multi-row ND packed tensors with **carrier** last dims and leading strides
 (for example `pl.Tensor[[2, 256], pl.FP4E2M1X2]` for 512 logical nibbles per row).
-Codegen expands GM views to nibble units so multi-row pitch matches Tile /
-pto-isa. Using logical widths on `FP4E2M1X2` (or logical `pl.FP4` multi-row ND
+Codegen preserves carrier units in GM views. PTOAS v0.67 converts transfer
+descriptors to nibble units for pto-isa; expanding them in PyPTO as well doubles
+the row pitch. Using logical widths on `FP4E2M1X2` (or logical `pl.FP4` multi-row ND
 without automatic pack) can mis-size GM row strides — see issue
 [#2754](https://github.com/hw-native-sys/pypto/issues/2754).
 
@@ -93,7 +94,7 @@ Legend: ✅ supported · ⚠️ partial / Warning · ❌ unsupported · ⏳ not 
 | ------- | ----- | ----- |
 | Hand-written `pl.FP4E2M1X2` | ✅ | Preferred frontend for packed paths; **ND only** |
 | Logical `pl.FP4` without PackFp4 | ⚠️ | Prefer warning; A5 in-core still supports legacy logical FP4 alongside FP4E2M1X2 |
-| GM ExpandPackedFp4\* (carrier→nibble) | ✅ | `make_tensor_view` / partition last axis (ND) |
+| Packed GM views in carrier units | ✅ | PTOAS v0.67 handles DMA conversion (ND) |
 | `FP4E2M1X2` ↔ BF16 cast | ✅ | Silent native hop; result strides rebuilt contiguous |
 | `FP4E2M1X2` → FP8\* cast | ⚠️ | Warning; prefer LUT / host |
 | `FP4` ↔ `FP4E2M1X2` cast | ❌ | Rejected |
