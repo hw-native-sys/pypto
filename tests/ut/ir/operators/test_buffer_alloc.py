@@ -182,5 +182,28 @@ def test_allocation_requires_the_internal_explicit_type_builder():
         _ir._create_internal_op_call("buffer.alloc", args, {}, ir.Span.unknown())
 
 
+def test_multi_allocation_and_static_slot_contract():
+    span = ir.Span.unknown()
+    element = descriptor()
+    multi = ir.MultiBufferType(element, 2)
+    allocation = _ir._create_internal_op_call("buffer.alloc_multi", [], {}, multi, span)
+    var = ir.Var("slots", multi, span)
+    for index in (0, 1):
+        slot = _ir._create_internal_op_call("buffer.get_slot", [var, integer(index)], {}, span)
+        ir.assert_structural_equal(slot.type, element)
+    assert ir.get_op_buffer_result_spec("buffer.alloc_multi").behavior == ir.BufferResultBehavior.Allocate
+    assert ir.get_op_buffer_result_spec("buffer.get_slot").alias_arg == 0
+    assert isinstance(allocation.type, ir.MultiBufferType)
+    for index in (-1, 2):
+        with pytest.raises(ValueError, match="within the allocation"):
+            _ir._create_internal_op_call("buffer.get_slot", [var, integer(index)], {}, span)
+    with pytest.raises(ValueError, match="MultiBufferType"):
+        _ir._create_internal_op_call("buffer.alloc_multi", [], {}, element, span)
+    with pytest.raises(ValueError, match="static valid"):
+        _ir._create_internal_op_call(
+            "buffer.alloc_multi", [], {}, ir.MultiBufferType(descriptor(valid_shape=[-1, 32]), 2), span
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

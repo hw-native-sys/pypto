@@ -39,6 +39,7 @@ Numerics are the point: dbC=2 reuses buffers, so a sync error corrupts the resul
 a2a3sim (the 128 KB-L0C chooser regime that selects these dbC tiles).
 """
 
+import re
 from typing import Any
 
 import pypto.language as pl
@@ -293,7 +294,7 @@ class TestDbc2DoubleBuffer:
             (160, 160, 80, 128, 4, _core_passes.l0_tile_chooser.Stationarity.OutputStationary),
             (144, 144, 48, 128, 6, _core_passes.l0_tile_chooser.Stationarity.OutputStationary),
             (256, 256, 32, 256, 8, _core_passes.l0_tile_chooser.Stationarity.BStationary),
-            (448, 448, 112, 128, 16, _core_passes.l0_tile_chooser.Stationarity.OutputStationary),
+            (448, 448, 64, 256, 14, _core_passes.l0_tile_chooser.Stationarity.OutputStationary),
         ],
     )
     def test_direct_store_dbc(
@@ -303,7 +304,8 @@ class TestDbc2DoubleBuffer:
         sync would corrupt the result."""
         choice = _choose_a2a3_fp32_dbc(m, n)
         count = ((m + choice.m - 1) // choice.m) * ((n + choice.n - 1) // choice.n)
-        assert (choice.m, choice.n, choice.k, count) == (tile_m, tile_n, 64, tile_count)
+        expected_k = 64 if (m, n) == (256, 256) else 32
+        assert (choice.m, choice.n, choice.k, count) == (tile_m, tile_n, expected_k, tile_count)
         assert choice.stationarity == stationarity
         assert choice.double_buffer_c
         result = test_runner.run(_DbcDirectStore(m, n, planner=planner, platform=platform))
@@ -382,14 +384,14 @@ class TestDbc2DoubleBuffer:
         ],
     )
     def test_non_divisible_tail_dbc(self, test_runner, platform, planner):
-        """Non-divisible M/N (320x320): the peeled L-shaped tail is emitted straight-line
-        (its drains are not floated), so this exercises dbC interior + exposed tail."""
+        """Non-divisible M/N (320x320): the split-K grid includes a column boundary."""
         choice = _choose_a2a3_fp32_dbc(320, 320)
-        assert (choice.m, choice.n, choice.k) == (64, 128, 64)
+        assert (choice.m, choice.n, choice.k) == (80, 128, 32)
         assert choice.double_buffer_c
         case = _DbcDirectStore(320, 320, planner=planner, platform=platform)
         printed = _printed_after_auto_tile(case, planner)
-        assert printed.count('"pipeline_double_buffer_c": True') == 1
+        stages = re.findall(r'"pipeline_membership": "\d+:(\d+)"', printed)
+        assert stages == ["0", "1"] * 6
         result = test_runner.run(case)
         assert result.passed, f"Test failed: {result.error}"
 

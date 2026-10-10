@@ -847,5 +847,70 @@ def test_matrix_descriptor_rejects_types_the_cube_cannot_hold():
         _emit(_program([allocation], ir_stage=ir.FunctionIRStage.Buffer))
 
 
+@pytest.mark.parametrize("destination_slot", [0, 1])
+def test_multi_buffer_slots_preserve_no_alias_checks(destination_slot, tmp_path):
+    element = _type()
+    multi = ir.MultiBufferType(element, 2)
+    root = ir.Var("slots", multi, SPAN)
+    source, destination = ir.Var("source", element, SPAN), ir.Var("destination", element, SPAN)
+    program = _program(
+        [
+            ir.AssignStmt(root, _call("buffer.alloc_multi", [], multi), SPAN),
+            ir.AssignStmt(source, _call("buffer.get_slot", [root, _int(0)], element), SPAN),
+            ir.AssignStmt(
+                destination, _call("buffer.get_slot", [root, _int(destination_slot)], element), SPAN
+            ),
+            _eval("buffer.recip", source, destination),
+        ],
+        ir_stage=ir.FunctionIRStage.Buffer,
+    )
+    if destination_slot == 0:
+        with pytest.raises(ValueError, match="overlap|disjoint"):
+            _emit(program, flag=False)
+    else:
+        _compile_native(tmp_path, _emit(program, flag=False), addressed=False)
+
+
+def test_static_multi_buffer_slots_and_boundary_view_compile(tmp_path):
+    cover = ir.BufferType(
+        [64, 64],
+        DataType.FP32,
+        ir.MemorySpace.Acc,
+        blayout=ir.TileLayout.col_major,
+        slayout=ir.TileLayout.row_major,
+        fractal=1024,
+    )
+    small = ir.BufferType(
+        [64, 32],
+        DataType.FP32,
+        ir.MemorySpace.Acc,
+        valid_shape=[32, 32],
+        blayout=ir.TileLayout.col_major,
+        slayout=ir.TileLayout.row_major,
+        fractal=1024,
+    )
+    multi = ir.MultiBufferType(cover, 2)
+    root = ir.Var("slots", multi, SPAN)
+    slot0, slot1, view = (
+        ir.Var("s0", cover, SPAN),
+        ir.Var("s1", cover, SPAN),
+        ir.Var("boundary", small, SPAN),
+    )
+    program = _program(
+        [
+            ir.AssignStmt(root, _call("buffer.alloc_multi", [], multi), SPAN),
+            ir.AssignStmt(slot0, _call("buffer.get_slot", [root, _int(0)], cover), SPAN),
+            ir.AssignStmt(slot1, _call("buffer.get_slot", [root, _int(1)], cover), SPAN),
+            ir.AssignStmt(view, _call("buffer.subview", [slot0, _window(0, 0)], small), SPAN),
+        ],
+        ir_stage=ir.FunctionIRStage.Buffer,
+    )
+    text = _emit(program, flag=False)
+    assert text.count("pto.alloc_multi_tile") == 1
+    assert text.count("pto.multi_tile_get") == 2
+    assert "count=2" in text and "pto.subview" in text
+    _compile_native(tmp_path, text, addressed=False)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

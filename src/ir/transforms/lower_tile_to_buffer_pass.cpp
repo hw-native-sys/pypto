@@ -46,6 +46,8 @@
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
+#include "pypto/ir/transforms/utils/multi_buffer_reuse.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/property_verifier_registry.h"
 
@@ -137,10 +139,14 @@ class StorageIndex : public IRVisitor {
     if (auto tile = variable ? As<TileType>(variable->GetType()) : nullptr;
         tile && types_.insert(tile.get()).second) {
       auto memory = GetDefinedMemRef(tile);
-      CHECK_SPAN(memory && memory->base_ && !memory->is_pinned_ && memory->slot_count_ == 1 &&
-                     !memory->slot_index_.has_value(),
+      const bool static_slots = memory && !addressed_ && memory->slot_count_ > 1 && memory->slot_index_ &&
+                                As<ConstInt>(*memory->slot_index_);
+      CHECK_SPAN(memory && memory->base_ &&
+                     (static_slots ||
+                      (!memory->is_pinned_ && memory->slot_count_ == 1 && !memory->slot_index_.has_value())),
                  expr->span_)
-          << "LowerTileToBuffer: tile storage must be planned; multi-slot storage needs its own recipe";
+          << "LowerTileToBuffer: tile storage must be planned; only static addressless multi-slot storage "
+             "has a lowering recipe";
       auto offset = As<ConstInt>(memory->byte_offset_);
       CHECK_SPAN(offset && offset->value_ >= 0, expr->span_)
           << "LowerTileToBuffer: expected a static nonnegative storage window address";
@@ -152,11 +158,44 @@ class StorageIndex : public IRVisitor {
 
   // Each member participates in a fixed number of indexed scans, O(N log N).
   // The resulting aliases are ordinary SSA definitions, not an IR side table.
-  void Finalize() {
+  void Finalize(const FunctionPtr& function) {
     for (auto& [base, storage] : roots) FinalizeRoot(base, storage);
+    // Plan against the original Tile IR, before lowering loses its allocation
+    // lifetimes and operation-level no-alias facts. Use the same planner as
+    // Tile codegen; the result is materialized as ordinary shared Buffer SSA.
+    using RegionKey = std::tuple<MatrixKey, int, uint64_t>;
+    std::map<const Var*, RegionKey> regions;
+    for (const auto& [base, storage] : roots) {
+      if (const auto multi = As<MultiBufferType>(storage.handle->GetType())) {
+        regions.emplace(
+            base, std::make_tuple(MakeMatrixKey(0, multi->element_type_),
+                                  static_cast<int>(multi->element_type_->memory_space_), multi->slot_count_));
+      }
+    }
+    for (const auto& [base, owner] : PlanMultiBufferReuse(function, regions)) {
+      auto& storage = roots.at(base);
+      INTERNAL_CHECK_SPAN(!storage.definitions.empty(), function->span_)
+          << "Internal error: multi-buffer region has no allocation";
+      if (base == owner) {
+        // Allocation declaration order need not match value lifetime order.
+        // Static region handles dominate every get_slot, including aliases
+        // declared earlier than the first live occupant of the shared region.
+        region_prologue.push_back(storage.definitions.front());
+        storage.definitions.erase(storage.definitions.begin());
+        continue;
+      }
+      const auto& shared = roots.at(owner).handle;
+      const std::unordered_map<const Var*, VarPtr> remap{{storage.handle.get(), shared}};
+      storage.definitions.erase(storage.definitions.begin());
+      for (auto& definition : storage.definitions) {
+        definition = transform_utils::Substitute(definition, remap);
+      }
+      storage.handle = shared;
+    }
   }
 
   std::unordered_map<const Var*, BufferStorage> roots;
+  std::vector<StmtPtr> region_prologue;
   std::unordered_map<const TileType*, VarPtr> handles;
   std::unordered_map<const Call*, VarPtr> write_views;
 
@@ -242,6 +281,10 @@ class StorageIndex : public IRVisitor {
           << "Internal error: a planned tile's memory space differs from its allocation";
     }
     const auto capacity = static_cast<uint64_t>(size->value_);
+    if (storage.members.front().memory->slot_count_ > 1) {
+      FinalizeMultiRoot(base, storage, capacity, span);
+      return;
+    }
     // Address placement rebases each member. Only a full-capacity member can
     // establish the origin; guessing the minimum interior address loses bytes.
     std::optional<int64_t> origin = addressed_ ? std::nullopt : std::optional<int64_t>(0);
@@ -340,6 +383,70 @@ class StorageIndex : public IRVisitor {
             type->fractal_,
             static_cast<int>(type->pad_),
             static_cast<int>(type->compact_)};
+  }
+
+  // Keep the allocation as one explicit region: separate addressless allocs
+  // would let PTOAS reuse opposite stages and erase the dbC contract.
+  void FinalizeMultiRoot(const Var* base, BufferStorage& storage, uint64_t capacity, const Span& span) {
+    const auto& first = storage.members.front().memory;
+    const auto count = first->slot_count_;
+    const auto slot_bytes = first->size_;
+    CHECK_SPAN(slot_bytes > 0 && capacity % slot_bytes == 0 && capacity / slot_bytes == count, span)
+        << "LowerTileToBuffer: multi-slot capacity must equal slot count times slot size";
+    BufferTypePtr cover;
+    for (const auto& member : storage.members) {
+      const auto& memory = member.memory;
+      const auto index = memory->slot_index_ ? As<ConstInt>(*memory->slot_index_) : nullptr;
+      const auto offset = As<ConstInt>(memory->byte_offset_);
+      CHECK_SPAN(
+          memory->slot_count_ == count && memory->size_ == slot_bytes && index && index->value_ >= 0 &&
+              index->value_ < count && offset &&
+              static_cast<uint64_t>(offset->value_) == static_cast<uint64_t>(index->value_) * slot_bytes,
+          member.span)
+          << "LowerTileToBuffer: multi-slot members require consistent static slot windows";
+      if (backend::PhysicalBufferBytes(member.descriptor) == slot_bytes &&
+          member.descriptor->valid_shape_ == member.descriptor->shape_) {
+        cover = member.descriptor;
+      }
+    }
+    CHECK_SPAN(cover, span) << "LowerTileToBuffer: multi-slot storage needs a full-slot descriptor";
+    auto multi = std::make_shared<MultiBufferType>(cover, count);
+    storage.handle = std::make_shared<Var>(base->name_hint_ + "_buffers", multi, span);
+    auto allocation = OpRegistry::GetInstance().CreateInternal("buffer.alloc_multi", {}, {}, multi, span);
+    storage.definitions.push_back(std::make_shared<AssignStmt>(storage.handle, allocation, span));
+    std::map<int64_t, VarPtr> slots;
+    std::map<MatrixKey, VarPtr> views;
+    for (const auto& member : storage.members) {
+      const auto slot_index = As<ConstInt>(member.memory->slot_index_.value_or(nullptr));
+      INTERNAL_CHECK_SPAN(slot_index, member.span) << "Internal error: validated static slot is missing";
+      const auto index = slot_index->value_;
+      auto [slot, inserted] = slots.emplace(index, nullptr);
+      if (inserted) {
+        slot->second = std::make_shared<Var>(base->name_hint_ + "_slot", cover, span);
+        auto get = OpRegistry::GetInstance().CreateInternal(
+            "buffer.get_slot", {storage.handle, std::make_shared<ConstInt>(index, DataType::INDEX, span)}, {},
+            span);
+        storage.definitions.push_back(std::make_shared<AssignStmt>(slot->second, get, span));
+      }
+      const auto key = MakeMatrixKey(index, member.descriptor);
+      auto [view, new_view] = views.emplace(key, slot->second);
+      if (new_view && !structural_equal(cover, member.descriptor)) {
+        if (cover->shape_ == member.descriptor->shape_) {
+          view->second = Define(storage, "_view", "buffer.reshape", {slot->second}, member.descriptor, span);
+        } else {
+          std::vector<ExprPtr> zeros{std::make_shared<ConstInt>(0, DataType::INDEX, span),
+                                     std::make_shared<ConstInt>(0, DataType::INDEX, span)};
+          view->second =
+              Define(storage, "_view", "buffer.subview",
+                     {slot->second, std::make_shared<MakeTuple>(zeros, span)}, member.descriptor, span);
+        }
+      }
+      if (member.tile) {
+        handles.emplace(member.tile.get(), view->second);
+      } else {
+        write_views.emplace(member.write_view, view->second);
+      }
+    }
   }
 
   // Fractal descriptors have no byte-view form. Addressed planners already
@@ -834,10 +941,19 @@ ProgramPtr TransformProgram(const ProgramPtr& program) {
     }
     StorageIndex storage(addressed);
     storage.VisitStmt(function->body_);
-    storage.Finalize();
+    storage.Finalize(function);
     TileToBufferMutator mutator(storage);
     auto lowered = std::make_shared<Function>(*function);
     lowered->body_ = mutator.VisitStmt(function->body_);
+    if (!storage.region_prologue.empty()) {
+      auto body = std::move(storage.region_prologue);
+      if (const auto sequence = As<SeqStmts>(lowered->body_)) {
+        body.insert(body.end(), sequence->stmts_.begin(), sequence->stmts_.end());
+      } else {
+        body.push_back(lowered->body_);
+      }
+      lowered->body_ = std::make_shared<SeqStmts>(std::move(body), function->span_);
+    }
     lowered->ir_stage_ = FunctionIRStage::Buffer;
     functions.push_back(std::move(lowered));
   }

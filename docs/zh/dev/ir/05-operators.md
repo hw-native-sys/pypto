@@ -26,6 +26,8 @@
 | `buffer.extract` | 源 buffer、行偏移、列偏移、目标 buffer | Void |
 | `buffer.matmul` | Left buffer、Right buffer、Acc 目标 | Void |
 | `buffer.matmul_acc` | Left buffer、Right buffer、被读写的 Acc buffer | Void |
+| `buffer.alloc_multi` | 无；静态元素描述符和槽数位于结果类型中 | MultiBufferType |
+| `buffer.get_slot` | 多槽分配、静态 INDEX 槽索引 | BufferType 别名 |
 
 这些算子分别声明数据/元数据效应。形状、dtype、valid 状态和别名要求见
 [Buffer 契约](02-types.md#buffer-算子契约)。
