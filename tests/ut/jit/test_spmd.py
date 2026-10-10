@@ -23,8 +23,10 @@ same loop-local names without the renamer emitting an out-of-scope bridge.
 
 import pypto.language as pl
 import pytest
+from pypto import backend
 from pypto.jit.decorator import jit
 from pypto.pypto_core import ir
+from pypto.runtime import RunConfig
 
 # Module-level constants — the JIT specializer inlines module-level ints at
 # their use sites, but does NOT capture function-local closure variables.
@@ -270,6 +272,49 @@ def test_jit_spmd_with_form_as_tid_captures_and_wires_deps():
         f"expected the deps=[tid0] edge to survive as exactly one dep on the consumer "
         f"dispatch, got per-dispatch dep counts {dep_counts}"
     )
+
+
+def test_inline_spmd_reads_loop_carried_tensor(tmp_path):
+    """Issue #2955: both single-trip RMSNorm loops read the current layer input."""
+    backend.reset_for_testing()
+    # Static rows isolate carry cloning from dynamic-dimension roundtrip handling.
+    T = 16
+
+    @pl.jit.inline(auto_scope=False)
+    def norm(x: pl.Tensor[[T, 64], pl.BF16], out: pl.Tensor[[T, 64], pl.BF16]):
+        for b in pl.spmd((T + 7) // 8):
+            r = b * 8
+            n = pl.min(8, T - r)
+            acc = pl.full([1, 8], dtype=pl.FP32, value=0.0)
+            for c in pl.range(0, 64, 128):
+                v = pl.cast(pl.slice(x, [8, 128], [r, c], valid_shape=[n, pl.min(128, 64 - c)]), pl.FP32)
+                v = pl.set_validshape(pl.fillpad(v, pad_value=pl.PadValue.zero), 8, 128)
+                acc = pl.add(acc, pl.reshape(pl.row_sum(pl.mul(v, v)), [1, 8]))
+            inv = pl.reshape(pl.rsqrt(pl.add(pl.mul(acc, 1.0 / 64), 1e-6), high_precision=True), [8, 1])
+            for d in pl.range(0, 64, 128):
+                normalized_input = pl.cast(
+                    pl.slice(x, [8, 128], [r, d], valid_shape=[n, pl.min(128, 64 - d)]), pl.FP32
+                )
+                y = pl.row_expand_mul(normalized_input, inv)
+                out = pl.assemble(
+                    out, pl.set_validshape(pl.cast(y, pl.BF16, mode="rint"), n, pl.min(128, 64 - d)), [r, d]
+                )
+        return out
+
+    @pl.jit
+    def repro(source: pl.Tensor[[T, 64], pl.BF16], output: pl.Out[pl.Tensor[[T, 64], pl.BF16]]):
+        x = pl.create_tensor([T, 64], dtype=pl.BF16)
+        norm(source, x)
+        tmp = pl.create_tensor([T, 64], dtype=pl.BF16)
+        for layer in pl.range(2):
+            norm(x, tmp)
+            x = tmp
+        norm(x, output)
+        return output
+
+    compiled = repro.compile(config=RunConfig(platform="a5", save_kernels_dir=str(tmp_path / "compiled")))
+    assert (compiled.output_dir / "orchestration" / "repro.cpp").is_file()
+    assert list((tmp_path / "compiled").rglob("*.pto"))
 
 
 if __name__ == "__main__":

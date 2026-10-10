@@ -1382,6 +1382,36 @@ class TestConstantIfCollapse:
 
 
 class TestSingleTripLoopCollapse:
+    def test_single_iteration_preserves_enclosing_loop_carry(self):
+        """Lifting sibling inner loops must keep the outer tensor carry bound (#2955)."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, source: pl.Tensor[[8], pl.FP32]) -> pl.Tensor[[8], pl.FP32]:
+                for layer, (x,) in pl.range(2, init_values=(source,)):
+                    for c, (first_iter,) in pl.range(0, 8, 16, init_values=(x,)):
+                        first_value = pl.add(x, x)
+                        first = pl.yield_(first_value)
+                    for c, (second_iter,) in pl.range(0, 8, 16, init_values=(first,)):
+                        second_value = pl.add(x, second_iter)
+                        second = pl.yield_(second_value)
+                    result = pl.yield_(second)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, source: pl.Tensor[[8], pl.FP32]) -> pl.Tensor[[8], pl.FP32]:
+                for layer, (x,) in pl.range(2, init_values=(source,)):
+                    first = pl.add(x, x)
+                    second = pl.add(x, first)
+                    result = pl.yield_(second)
+                return result
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
     def test_single_iteration_lifts_body(self):
         """`for _i in pl.range(1)`: trip 1, body lifted to function level.
 

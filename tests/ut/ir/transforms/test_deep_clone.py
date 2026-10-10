@@ -77,6 +77,70 @@ class TestDeepCloneBasic:
         assert cloned_body is not func.body
 
 
+class TestDeepCloneLoopCarries:
+    """Only carries defined inside the cloned subtree receive fresh identities."""
+
+    @pytest.mark.parametrize("substitute", [False, True])
+    def test_external_iter_arg_is_preserved(self, substitute):
+        span = ir.Span.unknown()
+        scalar = ir.ScalarType(DataType.INDEX)
+        seed = ir.Var("seed", scalar, span)
+        carry = ir.IterArg("carry", scalar, seed, span)
+        body = ir.YieldStmt([carry, carry], span)
+
+        replacement = seed if substitute else carry
+        cloned, var_map = ir.deep_clone(body, var_map=[(carry, seed)] if substitute else [])
+
+        assert isinstance(cloned, ir.YieldStmt)
+        assert all(value is replacement for value in cloned.value)
+        assert not var_map
+
+    def test_external_iter_arg_in_type_is_preserved(self):
+        span = ir.Span.unknown()
+        scalar = ir.ScalarType(DataType.INDEX)
+        seed = ir.Var("seed", scalar, span)
+        carry = ir.IterArg("carry", scalar, seed, span)
+        tensor = ir.Var("tensor", ir.TensorType([carry], DataType.FP32), span)
+
+        cloned, var_map = ir.deep_clone(ir.AssignStmt(tensor, tensor, span))
+
+        assert isinstance(cloned, ir.AssignStmt)
+        assert isinstance(cloned.var.type, ir.TensorType)
+        assert cloned.var.type.shape[0] is carry
+        assert all(original is not carry for original, _ in var_map)
+
+    @pytest.mark.parametrize("loop_kind", ["for", "while"])
+    def test_local_iter_arg_is_cloned_with_external_seed(self, loop_kind):
+        span = ir.Span.unknown()
+        scalar = ir.ScalarType(DataType.INDEX)
+        zero = ir.ConstInt(0, DataType.INDEX, span)
+        one = ir.ConstInt(1, DataType.INDEX, span)
+        outer = ir.IterArg("outer", scalar, zero, span)
+        inner = ir.IterArg("inner", scalar, outer, span)
+        result = ir.Var("result", scalar, span)
+        body = ir.YieldStmt([inner], span)
+        if loop_kind == "for":
+            before = ir.ForStmt(ir.Var("i", scalar, span), zero, one, one, [inner], body, [result], span)
+        else:
+            before = ir.WhileStmt(ir.Lt(inner, one, DataType.BOOL, span), [inner], body, [result], span)
+
+        cloned, var_map = ir.deep_clone(before)
+
+        ir.assert_structural_equal(cloned, before)
+        assert isinstance(cloned, (ir.ForStmt, ir.WhileStmt))
+        new_inner = cloned.iter_args[0]
+        assert new_inner is not inner
+        assert new_inner.initValue is outer
+        assert isinstance(cloned.body, ir.YieldStmt)
+        assert cloned.body.value[0] is new_inner
+        if loop_kind == "while":
+            assert isinstance(cloned, ir.WhileStmt)
+            assert isinstance(cloned.condition, ir.Lt)
+            assert cloned.condition.left is new_inner
+        assert any(original is inner and fresh is new_inner for original, fresh in var_map)
+        assert all(original is not outer for original, _ in var_map)
+
+
 class TestDeepCloneNoSharedIdentity:
     """Tests that deep clone produces no shared Var identity."""
 

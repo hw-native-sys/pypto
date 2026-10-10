@@ -77,6 +77,8 @@ Two folds run inside the `SimplifyMutator` traversal so they share the analyzer'
 
 `DeepClone` with `clone_def_vars=true` is used (rather than an in-place `var_remap_` override on the body) so the unrolled body gets fresh `Var` identities at every DefField, matching `LoopUnrollMutator`. This keeps the lifted copy structurally independent of the original (discarded) loop body and lets the re-visit bind the body's scalars on identities distinct from the surrounding scope.
 
+Only definitions inside the cloned subtree receive fresh identities. A reference to an enclosing loop's `IterArg` must retain that exact object unless explicitly substituted; its defining loop is not being cloned. Local `ForStmt` and `WhileStmt` carries are registered from their `DefField`s before visiting their uses. This prevents folding two sibling single-trip loops from creating two unbound copies of the same outer carry (issue #2955), which would otherwise become invalid SPMD call arguments during outlining.
+
 The choice to substitute `return_vars` via `var_remap_` rather than emit a literal `AssignStmt(rv, yielded)` is deliberate: the orchestration codegen's role-aware name disambiguation (`role == "out"` etc.) collapses several role-tagged SSA versions to the same C++ identifier, so an `out__rv_v2 = out__co_l0_rv_v3` alias would lower to the ill-formed `auto out = out;`. Substituting at use sites side-steps the disambiguation entirely.
 
 #### Escaping return vars

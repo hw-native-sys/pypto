@@ -77,6 +77,8 @@ program_simplified = simplify_pass(program)
 
 在循环体上使用 `DeepClone` 且 `clone_def_vars=true`（而非就地的 `var_remap_` 覆盖），是为了让展开后的循环体在每个定义点获得全新的 `Var` 标识，与 `LoopUnrollMutator` 保持一致。这样提升后的副本在结构上与原（已丢弃的）循环体相互独立，并使重新访问时能在与外围作用域不同的标识上绑定循环体内的标量。
 
+只有克隆子树内部的定义才获得新身份。引用外层循环的 `IterArg` 时，除非显式提供替换映射，否则必须保留原对象，因为其定义所在的循环并未被克隆。子树内部 `ForStmt` 和 `WhileStmt` 的 carry 会在访问其使用点之前通过 `DefField` 注册。这样，折叠两个相邻的单次循环时就不会为同一个外层 carry 创建两个未绑定副本（issue #2955），也不会在后续 outlining 中产生非法的 SPMD 调用实参。
+
 `return_vars` 通过 `var_remap_` 代换而非直接产出 `AssignStmt(rv, yielded)`，这是有意为之：编排（orchestration）代码生成器的角色感知命名消歧（`role == "out"` 等）会把多个 role 标签的 SSA 版本折叠到同一个 C++ 标识符，于是 `out__rv_v2 = out__co_l0_rv_v3` 这样的别名赋值会下沉为不合法的 `auto out = out;`。在使用点代换可以完全绕开消歧。
 
 #### 逃逸的 return var
