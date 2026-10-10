@@ -227,12 +227,16 @@ class TestMatmulMxTypes:
     def test_rejects_native_mxfp4_and_requires_cast(self):
         span = ir.Span.unknown()
         fp4_operands = self._mx_operands(span, n=64, dtype=DataType.FP4)
-        with pytest.raises(ValueError, match=r"requires lhs dtype FP8E4M3FN.*pl.cast"):
+        with pytest.raises(
+            ValueError, match=r"requires lhs dtype FP8E4M3FN.*native FP4/FP4E2M1X2 matmul is not supported"
+        ):
             ir.op.tile.matmul_mx(*fp4_operands, span)
 
         lhs, lhs_scale, _, _ = self._mx_operands(span, n=64)
         _, _, rhs_fp4, rhs_scale = self._mx_operands(span, n=64, dtype=DataType.FP4)
-        with pytest.raises(ValueError, match=r"requires rhs dtype FP8E4M3FN.*pl.cast"):
+        with pytest.raises(
+            ValueError, match=r"requires rhs dtype FP8E4M3FN.*native FP4/FP4E2M1X2 matmul is not supported"
+        ):
             ir.op.tile.matmul_mx(lhs, lhs_scale, rhs_fp4, rhs_scale, span)
 
     def test_rejects_wrong_dtypes_and_alignment(self):

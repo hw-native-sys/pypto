@@ -508,6 +508,10 @@ def _append_dynamic_dim_unpacking(
         source_param = next(param for param in tensor_params if param.name_hint == source_tensor)
         source_type = source_param.type
         assert isinstance(source_type, _ir_core.TensorType)
+        # Torch float4_e2m1fn_x2 last dims are already packed carriers. Logical
+        # DataType.FP4 still counts nibbles, so recover K with ×2. After PackFp4
+        # the dtype is FP4E2M1X2 and the last dim is already in carrier units
+        # (typically K//2); applying ×2 again would yield 4 * runtime.
         logical_scale = (
             2 if source_type.dtype == DataType.FP4 and source_dim_idx == len(source_type.shape) - 1 else 1
         )

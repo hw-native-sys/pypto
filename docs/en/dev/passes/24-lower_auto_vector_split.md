@@ -1,0 +1,1082 @@
+# LowerAutoVectorSplit Pass
+
+Converts an AUTO `pl.split` mixed `InCore` function into the **explicit
+`split_aiv` form** *before* `ExpandMixedKernel`. It inserts `tile.aiv_shard`
+at cube→vector boundaries and `tile.aic_gather` at vector→cube boundaries,
+halves only the **vector sub-region** along the split axis, injects
+`tile.get_subblock_idx()`, and stamps `split` + `split_aiv` on the function.
+
+This is the **live auto-split lowering path**: it always runs, immediately
+before `ExpandMixedKernel`. After it runs, every split function reaches
+[`SplitVectorKernel`](27-split_vector_kernel.md) already `split_aiv`-marked,
+so that pass only stamps attributes (its split_aiv arm) — its former per-op
+halving driver was deleted, and the halving machinery now lives solely in
+`split_axis_utils`, shared by this pass.
+
+This pass lowers each first-class `SplitAivScopeStmt` region in place and
+retains its wrapper. `ExpandMixedKernel` consumes that structure before codegen.
+
+## Why this pass exists
+
+A mixed `InCore` function written with `pl.split` describes cube and vector work
+in one body, with the split intent expressed only by the function-level `split`
+mode. Rather than halve the AIV body op-by-op *after* `ExpandMixedKernel` has
+already split it (the old `SplitVectorKernel` path, which duplicated the boundary
+semantics `tile.aiv_shard` / `tile.aic_gather` already encode), this pass
+rewrites the AUTO body into the same explicit `split_aiv` shape a hand-authored
+kernel uses, *before* that split. `ExpandMixedKernel`'s single op-driven boundary
+arm then folds shard/gather into split-stamped `tpush`/`tpop` for auto and
+hand-written kernels alike — one downstream path. The result is byte-identical to
+the old halving (proved during the staged convergence): both call the same
+`split_axis::ProcessStmts` machinery, and only the entry point differs.
+
+A load whose physical split axis has extent 1 is a replicated broadcast read: it stays unchanged, matching AUTO. It is not marked as a half-width value, so it cannot vouch for unrelated consumers.
+
+## API
+
+| C++ | Python | Level |
+| --- | ------ | ----- |
+| `pass::LowerAutoVectorSplit()` | `passes.lower_auto_vector_split()` | Program-level |
+
+```python
+from pypto import passes
+result = passes.lower_auto_vector_split()(program)
+```
+
+## Pass Properties
+
+| Property | Value |
+| -------- | ----- |
+| Required | `SSAForm`, `IncoreTileOps`, `SplitIncoreOrch`, `TileOps2D`, `TileMemoryInferred`, `NormalizedStmtStructure`, `AivSplitValid` |
+| Produced | `SSAForm`, `IncoreTileOps`, `SplitIncoreOrch`, `TileOps2D`, `TileMemoryInferred`, `NormalizedStmtStructure`, `AivSplitLoweredValid` |
+| Invalidated | `AivSplitValid` |
+
+This pass replaces source `AivSplitValid` with `AivSplitLoweredValid`. The shared
+verifier retains region checks while accepting the supported flat lowered form.
+
+Source: `include/pypto/ir/transforms/pass_properties.h`
+(`kLowerAutoVectorSplitProperties`).
+
+## Scope
+
+A function is rewritten iff **all** of:
+
+- `func_type_ == FunctionType::InCore`, and
+- it carries a function-level split mode (`UpDown` / `LeftRight`,
+  `mode != None`), and
+- it is **not already** `split_aiv` (hand-authored explicit kernels are left
+  untouched — they already carry the explicit shard/gather form), and
+- it is **genuinely mixed** (cube↔vector): its rolled-up affinity is `MIXED`,
+  the same `ClassifyCallAffinity` / `CombineAffinity` decision `ExpandMixedKernel`
+  uses for `is_mixed`.
+
+### The whole-function transpose-split hazard
+
+Before any of that, every `InCore` function carrying a function-level split mode
+is checked for a `tile.transpose` that **swaps the split axis** — including the
+functions this pass then passes through unlowered. The check used to live in
+`ExpandMixedKernel` purely because that pass sees every function; running it over
+the pass-through branch here is what let it move, and without that coverage a
+**pure-vector** `pl.split` kernel would reach `SplitVectorKernel` with a transpose
+it cannot type and miscompile silently. It runs before the lowering branch so its
+specific diagnostic precedes the generic full-width-operand rejection the halving
+would otherwise raise on the same statement. The per-**region** analogue is
+[`AivSplitValid`](99-verifier.md) check (l), backstopped by this pass.
+
+Everything else is passed through unchanged. The last condition matters: a
+**pure-vector** `pl.split` function (an elementwise op split across the two AIV
+lanes, with no cube and no C↔V boundary) has nothing to converge, so it is left
+untouched and `ExpandMixedKernel` converts it to a plain AIV function and strips
+its `split` attr exactly as before. Were it lowered here, it would carry
+`split_aiv` without a `split` mode after that strip, and `SplitVectorKernel` would
+reject it.
+
+**A mixed function whose body still carries a `ScopeStmt` is rejected**, on the
+same rule as the region path below: whole-function halving does not cross a scope
+boundary either. The rolled-up affinity is computed *through* the scope (a scope's
+affinity is its body's), so the pass can tell a mixed scope-bodied function from a
+pure-vector one and reject only the former — a pure-vector body is still passed
+through, not failed. Normally unreachable, since the function-level `split` attr
+this path keys on is written by `OutlineIncoreScopes`, which consumes the scope in
+the same step; it is checked rather than assumed because the alternative failure
+is silent. Before the check, `RollupAffinity` had no `ScopeStmt` arm at all, so any
+scope-bodied function rolled up `SHARED`, read as not-mixed, and was passed through
+**completely unsplit with no diagnostic**.
+
+## Explicit `SplitAivScopeStmt` region path
+
+In addition to the AUTO whole-function path above, an `InCore` function whose body
+still carries one or more `SplitAivScopeStmt` regions takes a separate **region
+path** (`LowerExplicitRegionFunction`), checked **before** the AUTO path. Each
+region carries its own `split_` mode, so this handles the multi-mode case the
+single function-level mode cannot. Region-local `tile_vars` / `var_replacements`
+maps keep a halved var from leaking into a sibling region or an out-of-region op;
+statements **outside** any region are emitted full-width. After all regions are
+lowered, the wrappers remain and the function is stamped `split_aiv`.
+`ExpandMixedKernel` consumes the regions and checks each region's transpose
+hazard against its own mode.
+
+### Shared body admission and AUTO regions
+
+`AnalyzeSplitBody` checks bodies **this pass halved** — the AUTO whole function
+and the boundary-free region — using the tile facts its shape transformation
+established before substitution/cloning. It reconstructs shard and lane-address
+lineage through aliases, tuple projections and loop results. Broadcast reads and
+read-only singleton arithmetic remain neutral, so accepting them cannot certify
+an unrelated full-width consumer. Rank-1 loads and full reshape/reinterpret views
+may stage a subsequent lane-local slice; they do not become half-width facts.
+A region whose boundary the **author** wrote is not scanned at all — see
+[What may appear inside an explicit-boundary region](#what-may-appear-inside-an-explicit-boundary-region).
+
+At control-flow merges, shard facts are intersected per tuple element across both branches. A loop backedge must preserve any shard fact inherited from its initial value. A neutral initial value may become lane-local in the body, but the carry and exit remain neutral; a zero-iteration exit cannot be classified using only its yield.
+
+Diagnostics distinguish full-width operator names (`full_width_vec_ops`) from loop-carry names (`carry_mismatches`), and carry mismatches are reported first when both are present. Every failure here is a compiler postcondition violation — the pass halved the body and left something un-localized — so both use `INTERNAL_CHECK_SPAN` without authoring advice.
+
+After lowering, AUTO wraps a single straight-line vector phase when the same
+structural verifier accepts its region boundaries. It preserves compute order and the lane variable identity. The lane binding moves
+into the region only when no outside statement uses it. Trailing SHARED calls
+before the next compute phase or return belong to the vector phase. Interleaved cube/vector phases, control flow,
+rebalanced `lane_stride` boundaries, and migrated boundary axes retain the flat
+lowered form. Fallback retains halving, offset localization and boundary checks.
+
+`AivSplitValid` validates source authoring before this pass. This pass produces
+`AivSplitLoweredValid`, which accepts retained/synthesized regions and the flat
+lowered fallback. `ExpandMixedKernel` requires and then invalidates that property.
+
+### The out-of-region contract (manual mode)
+
+"Emitted full-width" describes what this pass *does* with an out-of-region
+statement, not what an author may *write* there. A function opening **at least
+one** region enters **manual mode**: the regions own vector placement, and the
+[`AivSplitValid`](99-verifier.md) verifier enforces that division well before
+this pass runs:
+
+| op / value | inside a region | outside every region |
+| ---------- | --------------- | -------------------- |
+| vector compute | AIV | **rejected** — check (e) |
+| `tile.load` / `tile.store` | AIV | allowed (compiler-materialised) |
+| cube compute | **rejected** — check (a) | AIC |
+| `aiv_shard` / `aic_gather` | the boundary | **rejected** — check (c) |
+| `pld.system.notify` | pinned to AIV | duplicated onto both (**not** diagnosed) |
+
+So outside a region this pass sees only cube work, the `tile.load` /
+`tile.store` pairs `ConvertTensorToTileOps` hoists out, and core-agnostic
+scalar / control-flow statements — never full-width vector compute, which must be
+wrapped in `for _ in pl.split_aiv(2, mode=pl.SplitMode.NONE):`. The multi-mode
+goal is *regions only, one per vector phase*; a function with **no** region is
+untouched. Checks (f)/(g) add that a tile crossing a region edge must name the
+crossing, so no implicit cube↔vector crossing reaches this pass.
+
+The last row is **documented, not enforced**, and region placement does not make a
+region mean "exactly once": sharding a once-only side effect across the AIV
+sub-lanes is the author's job, as is the lane rule for a `None`-region V→C
+crossing ([Scopes and Placement](../../user/language/04-scopes.md)).
+
+### Region placement consumed by ExpandMixedKernel
+
+The region itself carries placement until `ExpandMixedKernel`. That pass erases
+wrappers once per function and records eligible calls in a pass-local map over
+the consumed body. No placement or validation attributes are serialized.
+
+| intrinsic affinity | region effect |
+| ------------------ | ------------- |
+| `SHARED`, no stated lane, `set_no_duplicate()` (`pld.system.notify`) | AIV only |
+| duplicate-safe `SHARED` (`pld.system.wait`) | retains both lanes |
+| `VECTOR` | already AIV |
+| stated lane (`tile.create`, explicit `core_type`) | preserves declaration |
+| `MIXED` boundary | keeps both transfer endpoints |
+| `CUBE` compute | rejected inside a region |
+
+This applies equally to synthesized AUTO regions and manual regions, including
+pure-AIV functions. It does not make a side effect execute once across the two
+AIV sublanes; lane-index dispatch remains the author's responsibility.
+
+A function-level AUTO split and explicit `pl.split_aiv` regions are **mutually
+exclusive**, enforced at [`OutlineIncoreScopes`](10-outline_incore_scopes.md)
+while the scope's `split_` and its regions are both still visible; use
+`optimizations=[pl.cross_core_slot(slot_num=N)]` to size the pipe without
+annotating a split.
+
+Three region body shapes are handled, selected by the region's `split_` mode:
+
+- **Data-parallel, full-width body** (`UpDown` / `LeftRight`, no explicit boundary
+  op): the region body holds full-width vector compute. The region path injects a
+  per-region `subblock_idx`, routes the vector ops through the shared
+  `split_axis::ProcessStmts` halving machinery (region-scoped), and validates the
+  per-region transpose hazard. This is the paradigm the auto-converged form
+  produces.
+- **Data-parallel, explicit boundary body** (`UpDown` / `LeftRight` with
+  `tile.aiv_shard` / `tile.aic_gather` already present): the user manually sharded
+  the cube tile and wrote the vector compute on the per-lane half, so the body is
+  **already** in half-width form. The region path detects this
+  (`RegionBodyHasExplicitBoundary`) and **splices the body through unchanged**.
+  Re-halving would double-shard — a downstream Acc→Vec move misread as a fresh
+  cube→vector boundary and rewritten to a second `aiv_shard` — orphaning a halved
+  Acc memref and crashing PTO codegen. `ExpandMixedKernel` folds the boundary into
+  `tpush`/`tpop` as for a hand-authored split_aiv kernel.
+- **Task-parallel body** (`None`): **no split axis** — both AIV lanes run the
+  **full** body for disjoint work the author dispatches via `aiv_id`. The body is
+  **spliced through unchanged** (no halving, no offset localization, no injected
+  `subblock_idx`; the author's `aiv_id = get_subblock_idx()` already carries the
+  lane). `tile.aiv_shard` / `tile.aic_gather` are **accepted** here: with no split
+  axis they cross the boundary without splitting, and `split=0` preserves the
+  shape. Nothing is validated here either — everything is full width. The
+  function is still stamped `split_aiv`, so `SplitVectorKernel` dispatches it to
+  **both** AIV lanes (`dual_aiv_dispatch`) rather than the lane-0-only replay;
+  both therefore push on a V→C crossing, into one shared slot with no
+  arbitration, so the cube receives an unspecified one of the two values unless
+  the author keeps it lane-uniform. Use this mode when the tiles cannot be halved
+  or a reduction must stay full width.
+
+### What may appear inside an explicit-boundary region
+
+**Whatever the author writes.** The body is spliced through **unchanged**, so
+every vector op in it must already be per-lane — one left at full width runs
+identically on both AIV lanes — but establishing that is the **author's
+contract**. Writing `tile.aiv_shard` / `tile.aic_gather` by hand *is* the
+statement "I sharded this myself", and the pass takes it at its word. A body
+mixing the boundary op with a full-width vector op compiles; a later `assemble`
+/ `store` at a lane offset then double-counts. That is the cost of the mode.
+
+An earlier revision ran `ValidateSplitBody` here as a hard `ValueError`, but the
+scan proves *intent*, not *extent* — it already trusted the author on
+`tile.store` offsets and on whether a lane-strided read really partitions. As a
+gate it rejected correct kernels (a lane-invariant broadcast operand; a shard
+arriving through a construct the forward scan cannot follow) while still
+admitting incorrect ones, so it did not deliver the safety that justified
+blocking authoring. The compiler-halved paths keep the same scan, where a
+full-width leftover means the pass's own postcondition failed:
+
+| Path | Who halved the body | Check |
+| ---- | ------------------- | ----- |
+| AUTO whole function | the pass | `INTERNAL_CHECK_SPAN` |
+| Region, `UpDown`/`LeftRight`, no boundary op | the pass | `INTERNAL_CHECK_SPAN` |
+| Region, `UpDown`/`LeftRight`, author wrote the boundary | the author | **none** |
+| Region, `None` (task-parallel) | nobody — all full width | **none** |
+
+Independent checks still reject a manual region: the per-region **transpose
+hazard** (a `tile.transpose` swapping the split axis cannot be *typed* at any
+lane — a representability limit, not a claim about intent),
+[`AivSplitValid`](99-verifier.md)'s checks (a)–(k) twelve passes earlier, and
+the `AivSplitLoweredValid` handoff to `ExpandMixedKernel`.
+
+Because the region is built via the generic `BeginScope`/`EndScope` and is
+non-outlined, it can be **nested** inside a `pl.range` / `pl.pipeline` loop or an
+`if`; the region path recurses into compound statements to lower every region while
+preserving the surrounding control flow.
+
+### Per-lane scattered gather
+
+`pl.gather_row` is the only op that reads GM at an arbitrary **runtime** offset, so
+it is how a paged/top-k row set is sharded across the two AIV lanes: each lane
+assembles half the tile in UB and `pl.aic_gather` hands the reassembled tile to the
+cube.
+
+```python
+with pl.at(level=pl.Level.CORE_GROUP, name_hint="sparse_kv",
+           allow_early_resolve=True):                           # see the ring note below
+    for aiv in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+        ub = pl.full([64, 512], dtype=pl.BF16, value=0.0)       # per-lane HALF extent
+        for k in pl.range(64):
+            src = pl.cast(pl.read(idx, [aiv * 64 + k]), pl.INDEX)
+            ub = pl.gather_row(ub, pool, [k, 0], [src, 0], [1, 512])   # lane-derived src_offset
+        kv = pl.aic_gather(ub)                                  # V2C -> [128, 512] in Mat
+    out[0:16, 0:128] = pl.matmul(q, kv, b_trans=True, out_dtype=pl.FP32)
+```
+
+Two authoring rules make this work:
+
+- **Write the accumulator at the half extent.** `pl.full` is a generator, accepted
+  at whatever extent you give it and never joining the half-width dataflow on its
+  own. The gather is admitted on its lane-derived `src_offset`, and the guard proves
+  *intent*, not *extent* — so a full-extent accumulator would be gathered back to
+  `2 x FULL` and mismatch downstream.
+- **Watch the cross-core ring.** The V2C ring reserves `slot_size x slot_num` bytes
+  of the consuming core's memory (L1 for V2C, UB for C2V), where `slot_size` is the
+  **full** tile the consumer pops (`128 x 512 x 2 = 131072` here) and `slot_num`
+  defaults to **2** — 256 KB of a 512 KB L1, which a kernel pushing once per
+  invocation does not need to exceed. `pl.cross_core_slot(slot_num=N)` retunes it
+  in either direction; grow it too far and `AllocateMemoryAddr` reports the
+  overflow.
+
+`pl.aiv_shard` is **not** an alternative to the half-extent `pl.full` here: it is
+the C→V transfer and needs an `Acc` operand, so it cannot shard a value the
+vector lane produced itself.
+
+### Regions must be scope-free
+
+Region lowering recurses into `ForStmt` / `WhileStmt` / `IfStmt` / `SeqStmts` but
+deliberately **not** into a `ScopeStmt`: a scope carries outlining and
+name-visibility semantics that region-local halving must not reach through. Every
+region must therefore already be scope-free when this pass runs — normally
+guaranteed by [`OutlineIncoreScopes`](10-outline_incore_scopes.md) (pass 9), which
+lifts the enclosing `InCore` scope into its own function.
+
+Pass 8 outlines scopes only out of `Opaque` / `Orchestration` functions, so a
+scope standing inside a function declared `pl.FunctionType.InCore` reaches this
+pass intact. The scope has to be **author-written** — the parser adds none of its
+own there, emitting a top-level region bare so that a printed `*_incore_0`
+reparses to the same IR, and authoring a region in such a function at all is
+rejected earlier by [`AivSplitValid`](99-verifier.md) check (h):
+
+```python
+@pl.function(type=pl.FunctionType.InCore)   # pass 8 skips this function
+def f(self, a: pl.Tensor[[128, 128], pl.FP32],
+      c: pl.Out[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:
+    with pl.at(level=pl.Level.CORE_GROUP):                   # not outlined
+        for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+            base = aiv_id * 64
+            c = pl.store(pl.exp(pl.load(a, [base, 0], [64, 128])), [base, 0], c)
+    return c
+```
+
+After lowering, `LowerExplicitRegionFunction` re-scans the body and rejects any
+region hidden behind a non-split scope with a `ValueError` pointing at the `pl.split_aiv` line. Drop
+the redundant scope, or use plain `@pl.function` / `@pl.jit` (Opaque) so pass 8
+outlines it.
+
+The re-scan then rejects any **other** surviving `ScopeStmt` too, covering the
+mirror case: a scope nested *inside* a region body. The split wrapper itself is allowed, so the first check passes — yet the inner walks (`LowerStmts`,
+`CheckNoCubeTileHalved`, `AnalyzeSplitBody`) step over the scope rather than
+entering it, and the vector ops inside would be spliced out full-width with both
+AIV lanes computing the whole tile. Unreachable from the DSL (pass 8 lifts a
+`with pl.at(...)` inside a region into its own function, and check (h) rejects
+authoring a region in an InCore function the outliner did not produce), so it
+guards IR that skips pass 8 — hand-built, or a deserialized `.pto`.
+
+## Split-axis dispatch
+
+| `SplitMode` (int) | Split axis | Vector sub-region halved on |
+| ----------------- | ---------- | --------------------------- |
+| `None` (0) | — (no split axis) | nothing — task-parallel; tiles stay FULL, `aiv_id` dispatches both lanes |
+| `UpDown` (1) | dim 0 (height) | rows |
+| `LeftRight` (2) | dim 1 (width) | cols |
+
+`SplitDimension(mode)` returns `0` for `UpDown`, `1` for `LeftRight`
+(`split_axis_utils`); it is **not** called for `None` (the region path branches on
+`None` first — there is no axis to derive).
+
+### Split mode vs pto-isa split code
+
+`SplitMode` names the axis the author picked. The `split` attr that reaches the
+device names something narrower — pto-isa's `TileSplitAxis`, which also says how
+the two lanes' **runtime** extents relate, because that is how the consumer finds
+lane 1's band inside the FIFO slot (`popVecTileFromGMFiFo`):
+
+| Code | pto-isa | Lane 1's band starts at | Requires |
+| ---- | ------- | ----------------------- | -------- |
+| 0 | `TILE_NO_SPLIT` | — | single reader |
+| 1 / 2 | `TILE_UP_DOWN` / `TILE_LEFT_RIGHT` | `e1 * pitch` | `e0 == e1` |
+| 3 / 4 | `TILE_UP_DOWN_ODD` / `TILE_LEFT_RIGHT_ODD` | `(e1 + 1) * pitch` | `e0 == e1 + 1` |
+
+The two vocabularies live on different ops:
+
+- **`tile.aiv_shard` / `tile.aic_gather` carry the MODE** (`0` / `1` / `2`). This
+  pass stamps `int(mode)` — the author's axis, nothing more.
+- **`tile.tpush_*` / `tile.tpop_*` / `system.tfree_*` carry the CODE** (`0`..`4`),
+  chosen by [ExpandMixedKernel](25-expand_mixed_kernel.md) from that mode plus the
+  full-width tile's extents (`split_axis::ShardSplitCode`) when it folds the
+  boundary into a transport pair. PTO codegen prints it verbatim as `{split = N}`.
+
+An odd split axis reaches the odd codes in two ways, and the halving treats both
+identically: `ComputeHalfDimSize` gives BOTH lanes the **ceil** half as their
+physical box, and the per-lane valid extent carries the raggedness.
+
+| Boundary tile | Lane boxes | Lane extents | Code |
+| ------------- | ---------- | ------------ | ---- |
+| `[17, 128]`, fully valid | `[9, 128]` | 9 / 8 | 3 |
+| `[16, 128]`, valid `[15, 128]` | `[8, 128]` | 8 / 7 | 3 |
+| `[16, 128]`, fully valid | `[8, 128]` | 8 / 8 | 1 |
+
+## Partially-valid operands across the boundary
+
+A crossing value whose `valid_shape` is short of its physical box is a kernel's
+ragged tail. The Cube→Vector FIFO pins the transported **column** extent to the
+physical one and leaves the **row** extent free (derivation and ISA references:
+[PTO codegen](../codegen/00-pto_codegen.md)). A narrowing on the *split axis* is
+what makes an extent per-lane — lane `L` holds `clamp(V - L*half, 0, half)` — so
+which mode is ragged decides which field has to carry it:
+
+The table is the **shard's** (Cube→Vector) contract; `aic_gather` follows the
+geometric rule at the end of this section instead.
+
+| Ragged axis | Mode | Extent is | Carrier | Status |
+| ----------- | ---- | --------- | ------- | ------ |
+| rows (split axis) | `UpDown` | per-lane | TPOP `valid_row` operand | **supported** when the lanes are placeable (below) |
+| cols (non-split) | `UpDown` | shared, static | full-box transport + static `pto.treshape` | supported |
+| rows (non-split) | `LeftRight` | shared, static | TPOP `valid_row` operand | supported |
+| cols (split axis) | `LeftRight` | per-lane | none | **rejected** |
+| cols, runtime-valued | either | shared, dynamic | none (`treshape` takes no operands) | **rejected** |
+| rows, runtime-valued | `UpDown` | per-lane, dynamic | the boundary op's FULL box + the first consumer's `valid_shape` | supported (see the note below) |
+| rows per-lane **and** cols narrowed | `UpDown` | both | none (`treshape` rewrites both axes) | **rejected** |
+
+`ReshapeSplitAxis` can only ceil-halve the split-axis extent (the lane index is
+not part of an op's type function). `LocalizeExplicitBoundaryValid` repairs that
+guess here, where the region's `aiv_id` is in scope, and carries the per-lane
+extent to consumers that pass `valid_shape` through; one that reshapes the
+logical rectangle is rejected with its span. The AUTO arm applies the same *extent* repair through
+`LocalizeShardValidForLane`; a body whose shard has a runtime extent then goes
+through `DeferAutoRuntimeShardExtents`, which gives that shard the full-box pop and
+guards a store whose lane may be empty, as the region form does, while its consumers
+and loop carries keep the types the halving already gave them. A store whose result is
+read afterwards (a chained store, a loop yield, a return) is the exception: guarding it
+would leave that result conditionally defined, so `pl.split` leaves it unguarded as before.
+
+- **The two lanes' extents must be placeable.** The split-axis extent is not a
+  free field: pto-isa derives lane 1's band from the popped tile's own valid
+  extent — `e1` cells in (`TILE_UP_DOWN`) or `e1 + 1` (the `_ODD` modes). So the
+  placeable shapes are exactly `e0 == e1` (even code), `e0 == e1 + 1` (odd code)
+  and `e1 == 0` (lane 1 pops nothing, so its band is never dereferenced — the
+  even code stays exact). The box partition does not guarantee that for a ragged
+  boundary — 13 of a 16-row box gives 8 and 5 — which is what the balanced
+  partition below is for. When it does not apply, `ShardSplitCode` reports the
+  extents instead, naming what would work.
+- **A runtime split-axis valid extent pops the FULL box.** The split code is a
+  compile-time attr, but which one the lanes need depends on their *runtime*
+  extents: 12 of a 16-row axis leaves them at 8 and 4, 16 leaves them at 8 and 8.
+  No code is right for both, so the boundary op does not carry a per-lane extent
+  at all — `LocalizeExplicitBoundaryValid` (region form) and
+  `DeferAutoRuntimeShardExtents` (`pl.split`) give it the full box
+  (`split_axis::WithFullSplitAxisValid`) and the lane's extent rides on its
+  consumers. That pairs exactly with the even code: the producer lays its rows at
+  their box positions, so lane 1's band sits at the box half and the even code
+  points there, whatever the extent turns out to be. Confirmed on a2a3 for every
+  extent 1..16 of a 16-row boundary. The [pto-isa
+  pop](https://github.com/hw-native-sys/pto-isa/issues/263) does place lane 1 at
+  the popped tile's own extent, as its source reads — the earlier measurement
+  that suggested otherwise came from a probe whose operands were uniform
+  constants, which makes every row and column of the product identical and any
+  band offset indistinguishable.
+- **The same ROW extent on a hand-written `tile.tpop_from_aic` is still
+  misplaced.** `SplitVectorKernel`'s halving localizes a declared `valid_shape`
+  onto the pop itself, where pto-isa reads it as the band offset. Widening only
+  the pop does not fix that path: its consumers inherit the author's declaration
+  and then write partial destinations out of a full source, which measures worse
+  on device. The xfailing params of
+  `tests/st/runtime/cross_core/test_cross_core_split_parity.py` record the regime
+  this affects: `half < V < box` on `UP_DOWN`.
+- **A narrowed COLUMN extent is rejected on every path.** It has no carrier at
+  all — the slot is written at the producer's physical column pitch while the pop
+  rebuilds its geometry from the tile's own `validCol` — and on `LeftRight` it is
+  the split axis, so it would have to be per-lane. `CheckSplitBoundaryCarriesValid`
+  (`src/ir/op/tile_ops/cross_core.cpp`) owns that contract; it runs both in the
+  boundary op's deduction and from `ShardSplitCode`, so a hand-written
+  `tile.tpush_to_aiv` / `tile.tpop_from_aic` pair is held to it too.
+- **An empty lane's store is guarded.** A lane the ragged extent does not reach
+  has extent `0`, and a zero-row `TSTORE` is outside pto-isa's contract
+  (`TSTORE_IMPL` asserts `GetValidRow() > 0`). The store gets a runtime
+  `extent > 0` guard; `tpop` and `tfree` stay **unconditional** — both lanes
+  occupy a slot and both must release it.
+- **The gather is limited by geometry, not the DMA.** A V2C pop lands in an NZ
+  Mat tile (`TLoadGm2L1Nd2nz`), which reads no valid extent at all. What limits
+  `aic_gather` is placement: lane `l` sits at offset `l*half`, so the joined data
+  `[0, v0) ∪ [half, half + v1)` is a rectangle only when the bands abut. That
+  rule is enforced **in this pass**, not in the deducer, which runs before the
+  per-lane extents exist and could only judge the join on its own ceil-div guess.
+  A gather fed by a localized shard is typed exactly — the bands always abut, so
+  the joined extent is the pre-shard `V` — and only a partial that both lanes
+  share is rejected. The same geometry is why the gather has **no odd form**:
+  `GatherSplitCode` always returns an even code and rejects a boundary whose
+  lanes would differ (pad the axis and narrow the cube-side result instead).
+
+## Balancing a ragged boundary across the lanes
+
+The split partitions the split axis between the lanes: lane `L` owns
+`[L*S, L*S + S)` of it. Two partitions are possible, and they differ only when
+the boundary tile is ragged:
+
+| Partition | `S` | Lane extents for a `[16, …]` box valid to 13 | Placeable? |
+| --------- | --- | -------------------------------------------- | ---------- |
+| box (default) | `ceil(box / 2)` = 8 | 8 and 5 | no |
+| **valid** (rebalanced) | `ceil(V / 2)` = 7 | 7 and 6 | yes — `TILE_UP_DOWN_ODD` |
+
+The box partition is universal: it works for every tile in the region whatever
+its valid extent, which is why it is the default. What it cannot do is keep the
+lanes within one cell of each other, and that is exactly what the transport
+needs (see the placeability rule above). Balancing the VALID region instead
+makes `e0 - e1 ∈ {0, 1}` by construction — and splits the real work evenly
+rather than leaving lane 1 the remainder.
+
+`split_axis::ResolveLaneStride` runs over the body before it is rewritten and
+returns the balanced stride only when it is both needed and sound:
+
+- at least one Cube→Vector boundary, all agreeing on the same static
+  `(box, valid)` on the split axis, with `ceil(V / 2) < ceil(box / 2)`
+  (otherwise the box partition already balances);
+- no Vector→Cube boundary (the gather re-joins the lanes positionally at their
+  own extents, which only abut when they are equal);
+- every other split-axis tile in the body derives from that boundary — a tile
+  with an independent origin (a `tile.load`, a generator) spans the FULL box,
+  which the balanced partition would not cover.
+
+Anything else keeps the box partition. The stride then threads through the whole
+halving — offsets (`AdjustOffsets`), per-lane valid extents
+(`LocalizeValidDimForSplit`), the shard's own type
+(`LocalizeShardValidForLane`) — while the physical box stays `ceil(box / 2)`, so
+buffers and slot sizes are unchanged. It is stamped on the boundary op as
+`lane_stride=S` so [ExpandMixedKernel](25-expand_mixed_kernel.md) derives the
+transport code from the same partition. A `tile.reshape` that migrates the split
+axis inside a rebalanced body is rejected: a migrated axis carries its own half,
+which cannot express a partition balanced on another axis.
+
+```python
+# 13 of 16 valid rows, UP_DOWN. Lane 0 takes rows 0-6, lane 1 rows 7-12.
+popped: pl.Tile[[8, 128], pl.FP32, pl.Mem.Vec,
+                pl.TileView(valid_shape=[pl.min(pl.max(13, aiv_id * 7) - aiv_id * 7, 7), 128])
+               ] = pl.tile.aiv_shard(qk, split=1, lane_stride=7)
+out_store = pl.tile.store(popped, [0 + aiv_id * 7, 0], out_0)
+```
+
+Explicit `pl.split_aiv` regions are never rebalanced: their per-lane offsets are
+the author's own (`out[aiv_id * HALF : ...]`), and the compiler must not
+partition the data differently from the way the region indexes it.
+
+## Algorithm
+
+`LowerFunction` rewrites one mixed `InCore` function:
+
+```text
+1. split_dim = SplitDimension(mode); the boundary op carries int(mode).
+2. InjectSubblockIdx(func, is_aiv=true) prepends
+       subblock_idx = tile.get_subblock_idx()
+   to the body (fresh name if 'subblock_idx' is taken).
+2a. ResolveLaneStride(body, split_dim) picks the partition: the balanced
+    ceil(V / 2) for a body that is one ragged crossing, else null (the box
+    partition). It threads through every offset / per-lane extent below.
+3. LowerStmts walks the flat body:
+
+   Boundary tile.move (ClassifyMoveDirection):
+     CUBE_TO_VECTOR — replace the move with
+         tile.aiv_shard(full_cube_tile, split=int(mode)[, lane_stride=S])  -> HALF
+       The deduced HALF type already carries the consuming-lane memory
+       (Vec): the split deducer leaves memory_space null and
+       OpRegistry::Create fills it from tile.aiv_shard's set_output_memory
+       declaration, shared with the explicit form. Seed it into tile_vars (its half
+       extent) and record the old->new var rebind. The cube source (the
+       matmul / Acc result) stays FULL.
+     VECTOR_TO_CUBE — insert
+         tile.aic_gather(half_vector_tile, split=int(mode))  -> FULL
+       resolving the source to its halved var so the gather doubles
+       HALF -> FULL, then keep the original cube-placement move on the
+       gathered FULL tile (named "<dest>_mat" so ExpandMixedKernel's V->C
+       boundary names its synthesized tpop after it).
+
+   Affinity gate (ClassifyCallAffinity):
+     VECTOR-affine leaf — route the single statement through
+       split_axis::ProcessStmts({stmt}, ..., is_aiv=true): the SAME machinery
+       the deleted SplitVectorKernel driver used. Halves tile.load /
+       tile.store / tile.slice / tile.reshape / compute results on split_dim,
+       localizes offsets per subblock, tracks halved vars in tile_vars.
+     CUBE-affine leaf — passed through FULL, never halved.
+
+   ForStmt / IfStmt — recurse into the body for vector content.
+
+4. CheckNoCubeTileHalved re-walks the rebuilt body and asserts no CUBE-affine
+   op consumes or produces a tile in tile_vars (the affinity gate must never
+   leak a halved tile into a cube operand) — INTERNAL_CHECK on failure.
+5. transform_utils::Substitute applies var_replacements; DeepClone detaches
+   shared sub-trees.
+6. WithSplitAivAttrs stamps split + split_aiv (dropping any prior split /
+   split_aiv / dual_aiv_dispatch entries).
+```
+
+The per-op vector halving (shape halved on the split axis, offset localized by
+`subblock_idx * half`, `tile.slice` static-shape-arg halving in lockstep with
+the result type, rank-1-load reshape sliced per lane, reduce-on-split-axis
+rejected, singleton split-dim preserved, loop `iter_arg`/`return_var`
+tracking) is all produced by `split_axis::ProcessStmts` / `ProcessStmt` —
+documented in detail in the shared machinery; the same facts are exercised by
+`tests/ut/ir/transforms/test_lower_auto_vector_split.py`.
+
+Automatic halving rejects the root generators `tile.ci` and `tile.random` when
+their split dimension is non-singleton. Their generated values depend on
+position, so changing only the result type is insufficient: a correct rewrite
+also needs lane-specific shape and generator state, which this pass does not
+synthesize. Move the operation outside the automatically-halved split region.
+Singleton split dimensions and already-half-width explicit-boundary regions
+remain unchanged.
+
+Halving a result is sound only under **two conditions**, asked in this order
+because the first subsumes the second wherever it can speak:
+
+| # | Condition | Decided by | Catches |
+| - | --------- | ---------- | ------- |
+| 1 | the halved node still type-checks against its own arguments | the operator's own `f_deduce_type` — no metadata | a full-width `tile.add` operand, a rank-1 bias on the split axis, `row_argmax`'s shape-matched `tmp`, `tile.transpose_view`'s axis permutation |
+| 2 | an operand condition 1 is **blind** to is lane-local, broadcast along the split axis, or **declared** lane-invariant | a registry declaration | `tile.sel`'s full-width `mask`, which its result deduction never reads |
+
+### Condition 1 — the halved node still type-checks
+
+After rewriting the arguments, the pass re-deduces the result from the arguments
+the trailing `Substitute` will install (each tracked operand swapped for its
+halved replacement) and compares the deduced *physical* shape against the halved
+result type. Valid shape is excluded: `HalveTileShape` localizes it per lane,
+which deduction cannot reproduce. A deduction that rejects the halved arguments
+outright counts as a mismatch too — the operator is refusing the very node it
+would receive.
+
+This asks the operator itself, so it needs no per-operator metadata and cannot go
+stale as operators are added or their contracts change. It is what rejects the
+ordinary case:
+
+```python
+def split_auto(vec: pl.Tile[[256, 128], pl.FP32, pl.Mem.Vec], ...):
+    vec_h = pl.tile.add(vec, vec)   # rejected: `vec` is full width
+```
+
+`vec` is a full-width `InCore` parameter, so nothing inside the region partitions
+it. Halving only the result would emit
+`tile.add([256, 128], [256, 128]) -> [128, 128]`, a node whose declared shape
+contradicts type inference over its own arguments; it does not survive
+print→parse and misleads every later consumer that re-derives types from
+operands. Derive the per-lane half first (`tile.load` / `tile.slice` inside the
+region, or an explicit `pl.tile.aiv_shard`), or keep a value both lanes share
+outside the region.
+
+The same check decides cases a shape heuristic gets wrong in both directions.
+Operands align to the result **from the right**, matching `BroadcastShapes`:
+
+| `tile.add([256, 128], bias)` | `UP_DOWN` (dim 0) | `LEFT_RIGHT` (dim 1) |
+| ---------------------------- | ----------------- | -------------------- |
+| `bias: [128]` | accepted — broadcasts over the split axis | rejected — `BroadcastShapes([256, 64], [128])` fails |
+| `bias: [1, 128]` | accepted — singleton on the split axis | rejected — its dim 1 is full width |
+| `bias: [256, 128]` | rejected | rejected |
+
+and it covers an axis-permuting operator, which no right-alignment rule
+describes:
+
+```python
+def split_auto(data: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec], ...):
+    viewed = pl.tile.transpose_view(data)   # rejected: [128, 1] vs the [256, 1] deduced
+```
+
+`tile.transpose_view` swaps the trailing two dims, so the halved `[128, 1]`
+result contradicts the `[256, 1]` its own operand deduces. Unlike
+`tile.transpose`, this is a pure view and is outside `FindTransposeSplitHazard`,
+which matches `tile.transpose` only.
+
+The shape-describing ops (`tile.full`, `tile.create`, `tile.slice`,
+`tile.reshape`, `tile.reinterpret_view`) rewrite their own operands before this
+check runs, and each has a defined full-width-source meaning.
+
+`tile.reshape` and `tile.reinterpret_view` get that from an earlier rewrite: an
+offsetless view over an untracked source is emitted at full width and followed by
+a per-subblock `tile.slice`, so each lane reads its own half instead of both
+reading the first one. That slice can only be materialized from a **static** half
+extent, so a dynamic split extent over a full-width source is rejected rather
+than left to fall through to plain result halving.
+
+### Condition 2 — operands type deduction is blind to
+
+A deducer that never reads an operand's extent says nothing by accepting it. The
+pass detects that per call, with no metadata: it re-deduces once more with the
+operand **doubled** on the split axis. If deduction throws or the result changes,
+the deducer *pins* that operand and condition 1 already decided it. If the answer
+is unchanged, the operand is *blind*, and only a declaration can say whether full
+width is in contract.
+
+```python
+picked = pl.tile.sel(mask, lhs, rhs, tmp)   # rejected when `mask` is full width
+```
+
+`tile.sel` deduces its result from `BroadcastShapes(lhs, rhs)` alone and checks
+only that `mask` is a `TileType`, so a full-width mask over halved lhs/rhs
+re-deduces perfectly cleanly — yet both lanes would read mask rows `0..127`.
+`tile.sels` is the same shape of trap: it validates that the mask *covers* src's
+valid rows, and an oversized mask satisfies coverage. Both declare only their
+`tmp` position, so their masks are rejected. An operand nobody has classified is
+treated as lane data, which is the safe default.
+
+Restricting this to blind operands is what keeps it in its lane. Without it,
+every operator with a legal full-width operand would need a registry declaration
+purely to suppress a check that had no business running — which is how
+`tile.rsqrt` came to declare a scratch its own deducer requires to match the
+input exactly. `tests/ut/ir/operators/test_lane_invariant_arg_coverage.py`
+measures which operands are blind, fails on a declaration the deducer makes
+unreachable, and pins the blind set so a new operator or a loosened deducer has
+to be classified rather than silently falling through.
+
+**Blind is usually a symptom, and the deducer is usually the cure.** An operand
+lands in the blind set when the deducer never reads its extent — which is often
+just an under-validated contract rather than a genuinely free dimension. Then
+the fix is to *enforce the relation the operator already documents*, not to
+declare the operand lane-invariant: the check now rejects a mis-shaped operand
+for every caller, and the split pass gets a pinned answer for free.
+`tile.scatter_update`'s `index` and `src` were blind because deduction only
+copied the input's type; enforcing what the tensor path's lowering already
+asserts (`src` rows `== b * s`, matching widths) pinned both. A declaration
+would have suppressed the split check *and* left the shape bug in place.
+
+The test for a declaration is *positional correspondence*: does output element
+`i` read operand element `i`? Two kinds of operand answer no.
+
+**Hardware scratch.** A full-width workspace is in contract, and each lane simply
+declares the whole thing:
+
+```python
+scratch = pl.tile.create([256, 128], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+sums = pl.tile.row_sum(v, scratch)      # accepted: [128, 128] x [256, 128] -> [128, 1]
+```
+
+`tile.row_sum` documents its `tmp_tile` as scratch *at least as large as* the
+input, never reads it in `DeduceTileRowReductionType`, and declares it with
+`set_lane_invariant_arg(1)`. `tile.create` is registered `CoreAffinity::SHARED`,
+so [the affinity gate](#the-affinity-gate) deliberately passes it through full
+width and never tracks it — matching on the extent alone would reject the whole
+rms-norm reduction shape.
+
+Its sibling `tile.row_argmax` needs a tmp shaped *exactly* like the source, and
+`DeduceTileRowReductionType` enforces that with `require_exact_tmp_shape`. It
+therefore carries **no** declaration: condition 1 rejects a full-width tmp on its
+own, and a declaration would claim a contract the operator does not grant.
+
+**An operand addressed at absolute indices.**
+
+```python
+indices = pl.tile.load(idx, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+picked = pl.tile.gather(src, indices, tmp)   # accepted: src stays [256, 128]
+```
+
+`tile.gather` computes `out[i] = src[indices[i]]` and takes its result shape from
+`indices`. The index values are absolute into `src`, so halving `indices` already
+gives each lane its own half of the **output** while both read the whole table —
+that is the correct lowering, not a missing shard. `tile.gatherb` is the
+byte-offset form of the same shape. `tile.scatter` and `tile.scatter_update` are
+the write-side dual, addressing a *destination* by absolute index.
+
+**The declaration permits a full-width operand; it does not keep one.** Nothing
+stops the operand's own producer from being halved, and the kinds differ on what
+that means — which is why the registry records *which* kind applies:
+
+| Kind | Full width | Producer partitioned | Example |
+| ---- | ---------- | -------------------- | ------- |
+| `Scratch` | allowed | fine — a halved input takes a halved scratch with it | `row_sum`'s `tmp_tile` |
+| `IndexAddressedSource` | allowed | **rejected** — indices stay absolute, so lane 1 reads the wrong half | `gather`'s `src` |
+| `AbsoluteIndexedDestination` | allowed | **rejected** — the write side of the same defect | `scatter`'s `dst` |
+
+`tile.scatter` writes `dst.flat[indexes[i, j]] = src[i, j]` with *flattened*
+offsets into the whole destination, so a column write encoding `i * dst_cols + c`
+stops matching the moment the row stride halves.
+
+```python
+src = pl.tile.load(tbl, [0, 0], [256, 128], target_memory=pl.Mem.Vec)
+picked = pl.tile.gather(src, indices, tmp)   # rejected: the table was halved
+```
+
+This is the ordinary path rather than a corner: `pl.gather` over a tensor lowers
+to a `tile.load` of the table feeding `tile.gather`, so an author who gathers
+inside a split region hits it by default. Neither condition above sees it — the
+operand is tracked, so condition 2 skips it, and `tile.gather` deduces its result
+from `indices` alone, so condition 1 is satisfied. That is why the absolute-index
+kinds stay declared even where the deducer *does* read the operand: the property
+is not type-expressible in either direction. Produce the table **outside** the
+split region and pass it in; keeping such a producer at full width automatically
+is not implemented.
+
+The absolute-index check runs **before** the halving path, not beside it, because
+the trailing `Substitute` rewrites the argument even where nothing is halved:
+
+- a **singleton result** returns early — `gather` with `[1, N]` indices yields a
+  `[1, N]` result, so the result is untouched while the table under it is still
+  halved;
+- a **tuple result** takes its own path (below), because the generic block follows
+  one `result_split_dim` and a tuple has one *per element*.
+
+### Tuple results — one split axis per element
+
+`tile.gather_compare` returns `Tuple[dst[rows, out_cols], cdst[1, rows]]`. Under a
+row split those two elements do **not** move along the same axis: `dst` halves on
+dim 0, while `cdst` — a single contiguous row of per-row counts — halves on dim 1.
+There is no single result axis to follow, so the generic path cannot express it.
+
+The mapping is **discovered, not declared**: re-deduce the call from the arguments the
+halved node will carry, and read which axis of each element moved. A new tuple-returning
+operator needs no registration, and the mapping cannot go stale the way per-operator
+metadata did (gh#2612). Re-deduction supplies only the *axis*; `HalveTileShape` still
+halves, so odd extents localize per lane as usual.
+
+Every element must halve on exactly one axis. An element that comes back **unchanged**
+is the dangerous case, not the harmless one — the operator produced a full-width output
+from an operand each lane owns only half of, so neither lane holds the whole answer while
+the shape still looks right. That is what correctly rejects a LEFT_RIGHT
+`tile.gather_compare`: both its outputs are sized from the source's *rows*.
+
+`split_axis::RetypeTupleProjection` retypes the `x = tup[i]` projections from the halved
+tuple and records each element's own axis, so a later `tile.store` offsets the right
+dimension. **Both** lowering arms call it — the AUTO arm's affinity gate only routes leaf
+*calls* into `ProcessStmts`, so a projection left to its pass-through fallback would keep
+a full-width declared type over a halved tuple.
+
+A projection need not be bound at all: `pl.tile.store(pair[0], [0, 0], out)` passes the
+`TupleGetItemExpr` **inline**, and nothing hoists it — so anything matching only `Var` on
+a tile operand misses it, and the operand is still substituted afterwards, leaving a
+full-width declared type over per-lane data. `split_axis::OperandSplitInfo` is the single
+answer to "did the split partition this operand, and along which axis"; it handles a
+bound `Var` and an inline projection alike, and `BuildHalvedCallArgs` rebuilds the
+projection over the halved tuple so the type-consistency probe sees per-lane operands
+too. Every consumer goes through them — the generic path's tracked-input scan,
+`LocalizeStoreOffset`, and `GetFirstTileArgMemory` (which reads the operand's *type*, so
+a vector op is no longer misclassified SHARED and replicated onto both lanes).
+
+Everything that asks "was this operand partitioned" goes through `OperandSplitInfo`.
+That question has more consumers than the halving itself, and each answered *no* for an
+inline projection with a different consequence:
+
+| Asks it | Wrong answer costs |
+| ------- | ------------------ |
+| the generic path's tracked-input scan | the result keeps a full-width type over per-lane operands |
+| `LocalizeStoreOffset` | both lanes store to the same rows |
+| `GetFirstTileArgMemory` | a vector op classifies SHARED and is replicated onto both lanes |
+| absolute-index gate | a halved `tile.gather` table under absolute indices — **no diagnostic**, since `gather` sizes its result from `indices` |
+| `tile.reshape` / `tile.reinterpret_view` | a full-width view plus a per-lane slice over an operand about to be halved |
+| `tile.slice` offset | `+ subblock_idx * half` added to an already lane-local offset, so lane 1 reads past the end |
+| the V→C boundary | a legal `tile.move(pair[0], target_memory=Mat)` refused as full width |
+| `RepairIterArgs` (loop init) | the carry, the exit, and everything after the loop stay full width under a halved init |
+| `YieldedTileInfo` (backedge / merge) | **both** ways: a full-width carry fed `pl.yield_(pair[1])` waved through, and a legally halved one refused |
+| `FindFullWidthOperand` (condition 2) | a partitioned projection reported as a full-width operand — a false rejection |
+
+The only `AsVarLike` lookups left in the pass are inside `OperandSplitInfo` /
+`ReplacedOperand` themselves, and the two places that deliberately identify a **whole
+tuple** by variable (`YieldedHalvedTupleType`, `RetypeTupleProjection`). Anything else
+asking about an operand's split belongs in the helper — that is what stops this class
+from recurring one call site at a time.
+
+The boundary also builds its `tile.aic_gather` from `ReplacedOperand`, which rebuilds an
+inline projection over the halved tuple so the gather doubles HALF → FULL either way.
+
+A tuple also crosses **merges and loop carries**, and neither reads its split from
+`tile_vars` — a tuple var is never in it. Both adopt the halved *type* instead, whose
+elements already carry the per-element split, so there is no single axis to record:
+
+| Shape | Repaired by | Agreement rule |
+| ----- | ----------- | -------------- |
+| `if` merge | `RepairIfReturnVars` | both branches must yield the same halved tuple |
+| loop carry + exit | `RepairIterArgs` / `RepairReturnVars` | the backedge `Yield` must match the carry |
+
+The DSL cannot annotate either, but `ConvertToSSA` synthesizes exactly the merge phi for
+a tuple reassigned in a branch, and `pl.range(..., init_values=(tup,))` carries one
+directly.
+
+Two different failures end in a rejection, and the diagnostics keep them apart — one
+message cannot explain both:
+
+| The operator... | Cause | Diagnostic |
+| --------------- | ----- | ---------- |
+| **refuses** the halved arguments | a constraint does not survive halving (`tile.tquant_mx` needs `M % 16 == 0`); or a workspace sized from the full source — after `LowerCompositeOps` decomposes it, `tile.tquant_mx_raw` needs its `[1, groups]` scratch to match a count derived from `src`, and that singleton dim 0 keeps the generic path from halving it. Repartitioning one is **not implemented**: the extent lives in the deducer, and the allocation was already emitted at full width | quote the operator rather than guess which |
+| **accepts** them, but an element did not move | the wrong-contents case above | name the stationary element |
+
+Condition 2 (the blind-operand backstop) is written against a single result axis and does
+not run here. "Every element must move" covers a *primary* per-lane operand left full
+width, but not a *secondary* one no element's shape depends on; no registered
+tuple-returning operator has one, and a new one surfaces in the blind inventory first.
+
+A position that is scratch only in *some* arities cannot be declared:
+`tile.mrgsort_format2`'s `tmp_or_src2` is a third sorted input in a 3/4-way merge
+and workspace in a 2-way one, and the arity is the positional argument count. It
+needs no declaration in practice — the deducer sizes the result from whichever
+position holds `tmp` (always the last), so type consistency decides that position at
+every arity, and the remaining positions are real sorted inputs that must be sharded.
+
+### Carries, merges and dropped axes
+
+Four places rewrite state *around* the halving rather than in it, and each must
+follow the same axis and tracking rules or the conditions above misfire:
+
+- **A store reached as the return expression.** `LocalizeStoreOffset` moves a
+  `tile.store` of a tracked tile to this lane's half, and the *statement shape*
+  decides whether it is reached. `return pl.tile.store(v, [0, 0], out)` is ordinary
+  DSL — nothing normalizes it into an assignment — yet it is neither an `AssignStmt`
+  nor an `EvalStmt`, and the AUTO arm's affinity gate skips it too (no leaf call of
+  its own). `Substitute` still swaps in the halved tile, so both lanes wrote the same
+  rows from different data. `LocalizeReturnStores` covers it from both arms; binding
+  the store to a name first was never meant to be load-bearing.
+
+- **Loop carries.** A carry has three edges, and all three must agree. An
+  `iter_arg` inherits its init value's tracking, so a halved init makes the carry
+  lane-local; the loop-exit `return_var` inherits it in turn so a later
+  `tile.store` gets the per-lane offset. Both the explicit and the AUTO
+  affinity-gated arms share `RepairIterArgs` / `RepairReturnVars` — the AUTO arm
+  recurses through its own walk and cannot reach the explicit path's `ForStmt`
+  branch, so without this a legal tile accumulator has its carry reported as a
+  full-width operand.
+- **The loop backedge.** The third edge is the value the body yields back into
+  the carry, and `ValidateCarryBackedge` is what checks it: the yielded value
+  must be lane-local exactly when the carry is. A halved carry fed a full-width
+  value declares a per-lane type that contradicts the value flowing into it on
+  every iteration after the first — the same defect as an un-sharded operand,
+  which no operand check sees because those inspect a `Call`'s arguments and this
+  is a `Yield`. The check is symmetric, so a lane-local value yielded into a
+  full-width carry is rejected too. It validates rather than repairs: when the
+  yielded value is tracked the trailing `Substitute` already swaps in its halved
+  replacement, and when it is not there is no halved version to substitute.
+
+  An **unbound** backedge — `pl.yield_(pl.tile.add(acc, acc))` — reaches the same
+  rejection by a different route, and gets its own message. Nothing hoists an
+  expression passed to `pl.yield_`, so the call stays inline in the `Yield` where
+  this pass, which halves *statements*, never reaches it. The mismatch wording
+  above would blame the two ends of a carry that is fine; the actionable
+  instruction is to bind the value first.
+- **Branch merges.** An `IfStmt`'s merge variable (`return_vars_`, a `DefField`)
+  is lane-local exactly when the values its branches yield are. Left at its
+  declared full width it contradicts both `Yield` values *and* stays untracked,
+  so a following `tile.store` gets no lane offset and both AIV lanes write from
+  output row 0 — overlapping writes instead of a half each. `RepairIfReturnVars`
+  retypes it from the lowered branches, and both arms call it for the same reason
+  the loop carries need two call sites. The branches must agree: one yielding a
+  halved value while the other yields a full-width one has no single merge type,
+  and is rejected rather than resolved by picking a side. Both branches always
+  exist here: SSA requires an else wherever `return_vars_` are defined, and
+  `ConvertToSSA` synthesizes the else `Yield` for a source-level no-else phi.
+- **`tile.slice` with `drop_dims`.** This op has *two* axis spaces, and the pass
+  crosses between them in both directions. `shape` / `offset` / `valid_shape` are
+  indexed in the **pre-drop** rank; the result is those axes minus `drop_dims`,
+  clamped back to 2D by *prepending* unit axes. So
+  `slice([1, 256, 128], drop_dims=[0]) -> [256, 128]` puts the result's dim 0 on
+  the source's dim 1, and conversely a source dim 0 can land on result dim 1.
+
+  | Direction | Used for |
+  | --------- | -------- |
+  | result axis → pre-drop axis | rewriting the `shape` / `offset` / `valid_shape` tuples, which are indexed pre-drop |
+  | pre-drop axis → result axis | turning a *tracked* source's split axis into the axis that indexes the result type |
+
+  The second direction is the one a tracked source needs: the split axis is
+  carried on the **operand**, while the halving path indexes the **result**.
+  Assuming they coincide made a source axis 0 read the result's synthetic unit
+  axis, take the singleton early-return, and pass the slice through untouched
+  while its source was halved underneath it — a 16-row window over an 8-row
+  source. Both mappings are expressed over the same surviving-axis list, so they
+  are inverses **over the surviving axes**. The synthetic unit axes the 2D clamp
+  prepends have no pre-drop counterpart: result → pre-drop returns them
+  unchanged, and pre-drop → result never produces them, so neither round-trips
+  through the other there.
+
+## The affinity gate
+
+Only **vector** work is halved; cube work stays full. Affinity is decided by
+`core_affinity::ClassifyCallAffinity` (memory-space driven): an op producing or
+consuming a `Vec` tile is `VECTOR`; matmul operands and the Acc/Mat cube result
+are `CUBE`. `tile.aiv_shard` is the seam — FULL cube tile in, HALF vector tile
+out — and `CheckNoCubeTileHalved` is the backstop.
+
+## Example — cube→vector boundary, vector region halved (UpDown)
+
+A mixed kernel: a cube tile (`Mat`) crosses to `Vec`, a vector `add` runs on
+it, the result is stored.
+
+**Before** (post-InferTileMemorySpace mixed `InCore`):
+
+```python
+@pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+def split_auto(qk: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat],
+               out_0: pl.Out[pl.Tensor[[128, 128], pl.FP32]]):
+    popped: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.tile.move(qk, target_memory=pl.Mem.Vec)
+    y: pl.Tile[[128, 128], pl.FP32, pl.Mem.Vec] = pl.add(popped, popped)
+    return pl.store(y, [0, 0], out_0)
+```
+
+**After** (flat fallback: the return expression uses the lane index outside
+the candidate region):
+
+```python
+@pl.function(type=pl.FunctionType.InCore,
+             attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True})
+def split_auto(qk, out_0):
+    subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+    popped: pl.Tile[[64, 128], pl.FP32, pl.Mem.Vec] = pl.tile.aiv_shard(qk, split=1)  # C->V, HALF
+    y: pl.Tile[[64, 128], pl.FP32, pl.Mem.Vec] = pl.add(popped, popped)
+    return pl.store(y, [0 + subblock_idx * 64, 0], out_0)
+```
+
+The cube operand `qk` stays `[128, 128]`; the vector sub-region is halved to
+`[64, 128]` and the store offset is localized per subblock.
+
+## Example — vector→cube boundary stays full (UpDown)
+
+A V→C `tile.move` becomes `tile.aic_gather`; the cube placement move on the
+gathered tile keeps the FULL `[128, 128]` `Mat` shape — the cube side never
+sees a halved tile:
+
+```python
+# `v` is the per-lane HALF the affinity gate produced, e.g. [64, 128].
+gathered_mat: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.aic_gather(v, split=1)
+gathered:     pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.move(gathered_mat,
+                                                                      target_memory=pl.Mem.Mat)
+```
+
+**The operand must be a per-lane half.** `tile.aic_gather` is declared
+HALF → FULL, so the gather doubles `[64, 128] → [128, 128]`, which is exactly the
+FULL result type the cube placement move keeps. That agreement is a
+*precondition*, not a guarantee: a VECTOR value can reach the boundary un-halved
+— a `Vec` parameter used directly, or a tile whose split dim is a singleton the
+affinity gate deliberately preserves. Doubling such an operand would produce a
+`[256, 128]` gather feeding a move still typed `[128, 128]`, contradicting
+`tile.move`'s shape-preserving contract and yielding IR that does not survive
+print→parse. There is no correct gather for a value with no half, so the pass
+**rejects** it with an actionable `ValueError`:
+
+```text
+LowerAutoVectorSplit: the V->C boundary tile.move here carries a full-width
+vector operand 'vec'. tile.aic_gather reassembles the two AIV lanes' per-lane
+halves into the full tile the cube expects, so its operand must be a value the
+split halving produced (a tile.load / tile.slice / elementwise result inside the
+vector sub-region). An un-halved value has no half to gather — either derive the
+per-lane half first (load or slice the value inside the split function) and move
+that to the cube side, or, if the split axis is a singleton that cannot be
+halved, keep the value on the vector side.
+```
+
+**The gather follows the operand's split axis, not the function's.** A
+`tile.reshape` can migrate the split axis — the rms_norm `[N, 1] ↔ [1, N]` column
+reshape moves it from dim 0 to dim 1 — and `TileInfo::split_dim` tracks where it
+ended up. The gather is emitted with the `split` encoding of *that* dim
+(`dim 0 → 1`, `dim 1 → 2`), so a `[1, 8]` lane-local operand under an `UpDown`
+function gathers to `[1, 16]` via `split=2`, matching the move. Doubling the
+function axis instead would yield `[2, 8]`. A tracked split dim outside `{0, 1}`
+cannot be expressed as a `split` attr on a 2D gather and is rejected.
+
+The gather result is `Mat`, not `Vec`: the declared type of a boundary op names
+the **consuming** lane's space, and AIC pops a V→C transfer into L1. (`Vec` would
+name the *producing* lane, contradicting the mirror op `tile.aiv_shard`, which
+declares the vector-side `Vec` for its cube-produced operand.) The cube placement
+move that follows is what puts the tile in its final operand space — `Mat → Left`
+for a matmul operand; the `Mat → Mat` shown here is a no-op that survives only
+because the pass preserves the author's original move.
+
+## Implementation
+
+**Header**: `include/pypto/ir/transforms/passes.h`
+
+```cpp
+Pass LowerAutoVectorSplit();
+```
+
+**Implementation**: `src/ir/transforms/lower_auto_vector_split_pass.cpp`
+
+- `LowerFunction` / `LowerStmts` — boundary rewrite + affinity-gated halving.
+- `MakeReshapeOpCall` — builds `tile.aiv_shard` / `tile.aic_gather` calls.
+- `CheckNoCubeTileHalved` — cube-operand integrity backstop.
+- `WithSplitAivAttrs` — stamps `split` + `split_aiv`.
+
+**Shared machinery**: `src/ir/transforms/utils/split_axis_utils.cpp`
+(`ProcessStmts`, `InjectSubblockIdx`, `SplitDimension`, `IsReduceOnSplitAxis`) —
+the per-op vector halving, shared with `SplitVectorKernel`'s
+`ProcessStandaloneSplitFunction` and the `AivSplitValid` verifier.
+
+**Python binding**: `python/bindings/modules/passes.cpp`
+
+```cpp
+passes.def("lower_auto_vector_split", &pass::LowerAutoVectorSplit, ...);
+```
+
+**Tests**: `tests/ut/ir/transforms/test_lower_auto_vector_split.py`, plus the
+end-to-end `pl.split` golden scenarios in
+`tests/st/codegen/torch/test_torch_codegen_cross_core.py`.
+
+## Related
+
+- [`ResolveBackendOpLayouts`](23-resolve_backend_op_layouts.md) — runs
+  immediately before.
+- [`ExpandMixedKernel`](25-expand_mixed_kernel.md) — runs immediately after;
+  folds `tile.aiv_shard` / `tile.aic_gather` into split-stamped `tpush`/`tpop`.
+- [`SplitVectorKernel`](27-split_vector_kernel.md) — downstream; only stamps
+  attrs for the `split_aiv` functions this pass produces, plus the no-split
+  dual-AIV path.

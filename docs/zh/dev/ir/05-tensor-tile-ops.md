@@ -37,7 +37,7 @@ values = pl.gather(src, index=indices)  # Physical [1, 16], valid [1, 8].
 浮点使用 `tile.extract`，INT16/INT32 使用保持数值不变的整数 `tile.adds(..., 0)`。
 已证明紧凑的计算结果直接复用，不再复制；存储情况未知时仍进行紧凑物化。
 指定 `dim` 时仍按维索引（二维/三维、任意轴），mask/compare
-形式保持不变。详见 [gather 下沉](../passes/11-convert_tensor_to_tile_ops.md#扁平-gather-下沉)。
+形式保持不变。详见 [gather 下沉](../passes/12-convert_tensor_to_tile_ops.md#扁平-gather-下沉)。
 
 对于普通 `TensorType` 操作数，已支持的 Tensor-scalar 算术算子（`adds`、
 `subs`、`muls`、`divs`、`fmods` 以及 scalar `maximum` 或 `minimum`）和
@@ -55,7 +55,7 @@ Scalar 比较与 XOR（`cmp` 和 `xors`）仍不在此规则的支持范围内�
 元数据。比较、XOR、`part_*`、广播、不同有效区域，以及直接使用 distributed
 window 的操作数不在这条规则范围内，因为它们当前的下降或合并契约需要单独处理。
 
-`pl.reinterpret_view(data, dtype, *, shape=None)` 会根据输入分派到等价的 `pl.tensor` 或 `pl.tile` 算子，并保持返回类型种类不变。它是覆盖完全相同字节的零拷贝视图。通用路径支持有/无符号 8/16/32/64 位整数、FP16、BF16 与 FP32；MX 下降额外只允许 INT8↔FP8E4M3FN 和 UINT8↔FP8E8M0 两对等字节 alias。省略 `shape` 时，ND/row-major 缩放最后一轴，DN/col-major 按源/目标字节宽度比例缩放倒数第二轴。显式 shape 必须字节数相等；除非能证明它与自动推导 shape 等价，否则必须完全静态。部分有效的 `valid_shape` 只能使用与自动推导结果等价的 shape。零值/null padding 元数据会保留，依赖 dtype 的 max/min padding 则会清除。初始可执行路径支持 packed ND in-core tensor 及 packed、flat（`none_box`）row/col-major tile；DN tensor 可做类型推导但 Tensor-to-Tile 下降会拒绝，编排层 tensor 暂不支持。
+`pl.reinterpret_view(data, dtype, *, shape=None)` 会根据输入分派到等价的 `pl.tensor` 或 `pl.tile` 算子，并保持返回类型种类不变。它是覆盖完全相同字节的零拷贝视图。通用路径支持有/无符号 8/16/32/64 位整数、FP16、BF16 与 FP32；MX 下降额外只允许 INT8↔FP8E4M3FN 和 UINT8↔FP8E8M0 两对等字节 alias；packed FP4 额外只允许 FP4E2M1X2↔UINT8/INT8。省略 `shape` 时，ND/row-major 缩放最后一轴，DN/col-major 按源/目标字节宽度比例缩放倒数第二轴。显式 shape 必须字节数相等；除非能证明它与自动推导 shape 等价，否则必须完全静态。部分有效的 `valid_shape` 只能使用与自动推导结果等价的 shape。零值/null padding 元数据会保留，依赖 dtype 的 max/min padding 则会清除。初始可执行路径支持 packed ND in-core tensor 及 packed、flat（`none_box`）row/col-major tile；DN tensor 可做类型推导但 Tensor-to-Tile 下降会拒绝，编排层 tensor 暂不支持。
 
 **示例：**
 
@@ -91,7 +91,7 @@ with ib.function("tensor_example") as f:
 | **逐元素** | `tile.add/sub/mul/div` | Tile-Tile 操作 |
 | - | `tile.adds/subs/muls/divs` | Tile-Scalar 操作。**常量**标量操作数会采用 tile 的元素 dtype（裸整数字面量否则会被解析为 `index`，而任何 `pto.t*s` 算子都不接受它）——但整数 tile 上的浮点字面量仍保持 FP32，以保留类型提升语义。显式的 `pl.const(v, dtype)` 属于用户的有意标注，与任何非常量表达式一样保持不变；非常量的 `index` 标量（循环变量、`pl.dim`）会被拒绝——需用 `pl.cast` 转换。`tensor.*s` 同理。 |
 | **一元** | `tile.sqrt` | 逐元素平方根 |
-| **量化** | `tile.tquant_mx` / `pl.quant_mx` | 仅 Ascend950 支持的 **MXFP8** block-32 动态量化，返回 `{FP8E4M3FN quant, FP8E8M0 scale}`；`dtype` 必须为 `FP8E4M3FN`。`group_axis` 对齐 PTOAS `grpAxis`（`1` = A 侧 `[M,K]`，`0` = B 侧 `[N,K]` 并转置）。公开 scale shape 为 `[M,K/32]` / `[K/32,N]`；要求完整有效区域和 `K % 64 == 0`（axis1 还要求 `M % 16 == 0`，axis0 还要求 `N % 32 == 0`）。[Pass 13](../passes/13-lower_composite_ops.md) 生成分组 TQUANT 和 X-to-ZZ TMOV。在 mixed task 内，结果可直接经 V2C 供 `matmul_mx` 使用。MXFP4 quant 暂缓。 |
+| **量化** | `tile.tquant_mx` / `pl.quant_mx` | 仅 Ascend950 支持的 **MXFP8** block-32 动态量化，返回 `{FP8E4M3FN quant, FP8E8M0 scale}`；`dtype` 必须为 `FP8E4M3FN`。`group_axis` 对齐 PTOAS `grpAxis`（`1` = A 侧 `[M,K]`，`0` = B 侧 `[N,K]` 并转置）。公开 scale shape 为 `[M,K/32]` / `[K/32,N]`；要求完整有效区域和 `K % 64 == 0`（axis1 还要求 `M % 16 == 0`，axis0 还要求 `N % 32 == 0`）。[Pass 14](../passes/14-lower_composite_ops.md) 生成分组 TQUANT 和 X-to-ZZ TMOV。在 mixed task 内，结果可直接经 V2C 供 `matmul_mx` 使用。MXFP4 quant 暂缓。 |
 | **变换** | `tile.slice` | 提取子 tile，静态 shape，可选动态 valid_shape |
 | - | `tile.extract` | 从 `src` 在 `(index_row, index_col)` 处提取子 tile —— ISA TEXTRACT Variant 1（Mat→Left/Right，Acc→Mat）。结果 layout 取自 `target_memory` 的隐式 view；`Left`/`Right` 例外，使用 TEXTRACT 侧的 L0 格式（与 `tile.move` 的 TMOV 侧不同） |
 | - | `tile.reshape` | 重塑 tile 维度（元素总数须一致）。会把源的 `valid_shape` 带到结果上，且绝不扩大 —— 见[reshape 与有效区域（valid region）](#reshape-与有效区域valid-region) |
@@ -112,6 +112,11 @@ with ib.function("tensor_example") as f:
 
 `tile.reshape` 保持 dtype、元素总数以及源的有效区域（见下）；`tile.reinterpret_view(data, dtype, *, shape=None)` 改变 dtype，但要求前后总字节数完全相同。省略 `shape` 时，它会根据源/目标 dtype 字节宽度和 tile layout 缩放物理连续轴。在 PTOAS 内存规划下，无论 shape 是否变化，都会下降为保持别名关系的 PTO `treshape` 原语。
 
+Packed `FP4E2M1X2` 的 tile 字节别名需要 PYPTO 或 DSA_RP；PTOAS v0.67
+拒绝 FP4 `treshape`。InCore Tensor reinterpret 会降低为 tile 别名，因此有相同的
+planner 要求；Orchestration Tensor 仍不支持。
+Carrier 单位约定与可用路径见 [FP4](../fp4.md)。
+
 ### tile.move 的结果 view
 
 推导出的结果 `TileView` 按字段分别取值：
@@ -130,7 +135,7 @@ layout 来自目标，因为它描述的是目标缓冲区如何分块，由
 `tile.move` 自己把目标 `memory_space` 打到推导出的类型上（参见
 [类型](02-types.md#tiletype) 中的 `TileType` 契约），因此当结果 view 与目标 space 的
 implicit view 一致时会折叠为 `nullopt` —— 这与
-[`InferTileMemorySpace`](../passes/20-infer_tile_memory_space.md) 为重新定型的 tile
+[`InferTileMemorySpace`](../passes/21-infer_tile_memory_space.md) 为重新定型的 tile
 刷新的 per-space implicit view 是同一套。
 
 `tile.move` 不支持原地执行：在同一 memory space 内，源和结果必须解析到不同地址。
