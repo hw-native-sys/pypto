@@ -455,7 +455,14 @@ def _simplify_shape_dims(type_: ir.Type, analyzer: "_arith.Analyzer") -> ir.Type
     if not _shape_has_symbolic_dim(type_):
         return type_
     assert isinstance(type_, (ir.TensorType, ir.TileType))
-    simplified_shape = [analyzer.simplify(d) if isinstance(d, ir.Expr) else d for d in type_.shape]
+    # The isinstance keeps a mistyped shape element diagnosable instead of
+    # crashing the simplify call.
+    simplified_shape = [
+        analyzer.simplify(d)
+        if isinstance(d, ir.Expr)  # pyright: ignore[reportUnnecessaryIsInstance]
+        else d
+        for d in type_.shape
+    ]
     if isinstance(type_, ir.DistributedTensorType):
         return ir.DistributedTensorType(
             simplified_shape, type_.dtype, type_.memref, type_.tensor_view, type_.window_buffer
@@ -1564,9 +1571,10 @@ class ASTParser:
         body = getattr(stmt, "body", None)
         leading: list[str] = []
         if isinstance(body, list) and body:
-            header_end = body[0].lineno - 1
+            stmts = cast("list[ast.stmt]", body)
+            header_end = stmts[0].lineno - 1
             header_ast_end = self._header_ast_end_line(stmt)
-            body_col = body[0].col_offset
+            body_col = stmts[0].col_offset
             for line in sorted(k for k in self._pending_comments if k <= header_end):
                 if stmt.lineno <= line <= header_ast_end:
                     # Header-level comment: either an inline trailer on the
@@ -1722,7 +1730,7 @@ class ASTParser:
             func = stmt.value.func
             if isinstance(func, ast.Attribute) and func.attr == "yield_":
                 # Handle yield assignment
-                yield_exprs = []
+                yield_exprs: list[ir.Expr] = []
                 for arg in stmt.value.args:
                     expr = self.parse_expression(arg)
                     yield_exprs.append(expr)
@@ -1781,7 +1789,9 @@ class ASTParser:
         # via the standard ``override_type`` validation path; the single-LHS
         # Submit handler builds the Submit and binds it to ``var_name`` directly.
         if _is_pl_call(stmt.value, "submit"):
-            if not isinstance(stmt.target, ast.Name):
+            # AnnAssign targets can also be Attribute/Subscript at runtime; the
+            # typeshed type is narrower than the grammar.
+            if not isinstance(stmt.target, ast.Name):  # pyright: ignore[reportUnnecessaryIsInstance]
                 raise ParserSyntaxError(
                     "Annotated assignment of pl.submit must target a simple variable name",
                     span=self.span_tracker.get_span(stmt.target),
@@ -1794,7 +1804,7 @@ class ASTParser:
             # type the way every other annotated RHS does.
             value_expr = self._build_submit_single_lhs_expr(stmt.value)
         elif _is_pl_call(stmt.value, "spmd_submit"):
-            if not isinstance(stmt.target, ast.Name):
+            if not isinstance(stmt.target, ast.Name):  # pyright: ignore[reportUnnecessaryIsInstance]
                 raise ParserSyntaxError(
                     "Annotated assignment of pl.spmd_submit must target a simple variable name",
                     span=self.span_tracker.get_span(stmt.target),
@@ -2134,10 +2144,12 @@ class ASTParser:
                     func = stmt.value.func
                     if isinstance(func, ast.Attribute) and func.attr == "yield_":
                         # Handle yield assignment
-                        yield_exprs = []
+                        yield_exprs: list[ir.Expr] = []
                         for arg in stmt.value.args:
                             expr = self.parse_expression(arg)
-                            if not isinstance(expr, ir.Expr):
+                            # Deliberate backstop: the delegated parser's declared ir.Expr
+                            # return is a lie for a few DSL constructors.
+                            if not isinstance(expr, ir.Expr):  # pyright: ignore[reportUnnecessaryIsInstance]
                                 raise ParserSyntaxError(
                                     f"Yield argument must be an IR expression, got {type(expr)}",
                                     span=self.span_tracker.get_span(arg),
@@ -2736,11 +2748,12 @@ class ASTParser:
             value: Call to pl.yield_()
         """
         # Parse yield expressions
-        yield_exprs = []
+        yield_exprs: list[ir.Expr] = []
         for arg in value.args:
             expr = self.parse_expression(arg)
-            # Ensure it's an IR Expr
-            if not isinstance(expr, ir.Expr):
+            # Deliberate backstop: the delegated parser's declared ir.Expr return
+            # is a lie for a few DSL constructors.
+            if not isinstance(expr, ir.Expr):  # pyright: ignore[reportUnnecessaryIsInstance]
                 raise ParserSyntaxError(
                     f"Yield argument must be an IR expression, got {type(expr)}",
                     span=self.span_tracker.get_span(arg),
@@ -2825,7 +2838,7 @@ class ASTParser:
             hint="Use: for i in pl.range(n) or for i, (var1,) in pl.range(n, init_values=(...,))",
         )
 
-    def _setup_iter_args(self, loop: Any, iter_args_node: ast.AST, init_values: list) -> None:
+    def _setup_iter_args(self, loop: Any, iter_args_node: ast.AST, init_values: list[ir.Expr]) -> None:
         """Set up iter_args and return_vars for Pattern A loops."""
         if not isinstance(iter_args_node, ast.Tuple):
             raise ParserSyntaxError(
@@ -3601,7 +3614,7 @@ class ASTParser:
 
     def _parse_while_init_values(self, while_call: ast.Call) -> list[ir.Expr]:
         """Parse init_values from pl.while_() keyword arguments."""
-        init_values = []
+        init_values: list[ir.Expr] = []
         for keyword in while_call.keywords:
             if keyword.arg == "init_values":
                 if isinstance(keyword.value, (ast.List, ast.Tuple)):
@@ -3874,7 +3887,7 @@ class ASTParser:
         self._check_condition_is_bool(condition, "if", span)
 
         # Track yield output variable names from both branches
-        then_yield_vars = []
+        then_yield_vars: list[tuple[str, ast.expr | None]] = []
 
         # Begin if statement
         with self.builder.if_stmt(condition, span) as if_builder:
@@ -5513,7 +5526,7 @@ class ASTParser:
                 span=self.span_tracker.get_span(iter_call),
                 hint=split_aiv_hint,
             )
-        n_expr = self.parse_expression(cast("ast.expr", iter_call.args[0]))
+        n_expr = self.parse_expression(iter_call.args[0])
         if not (isinstance(n_expr, ir.ConstInt) and n_expr.value == self._SPLIT_AIV_SUBCORE_NUM):
             got = n_expr.value if isinstance(n_expr, ir.ConstInt) else python_print(n_expr, format=False)
             raise ParserSyntaxError(
@@ -6447,7 +6460,7 @@ class ASTParser:
 
         # Handle tuple return
         if isinstance(stmt.value, ast.Tuple):
-            return_exprs = []
+            return_exprs: list[ir.Expr] = []
             for elt in stmt.value.elts:
                 return_exprs.append(self.parse_expression(elt))
             self.builder.return_stmt(return_exprs, span)
@@ -6494,8 +6507,9 @@ class ASTParser:
         expr = self.parse_expression(stmt.value)
         span = self.span_tracker.get_span(stmt)
 
-        # Validate that we got an IR expression (not a list literal, etc.)
-        if not isinstance(expr, ir.Expr):
+        # Validate that we got an IR expression (not a list literal, etc.); the
+        # delegated parser's declared return is a lie for a few DSL constructors.
+        if not isinstance(expr, ir.Expr):  # pyright: ignore[reportUnnecessaryIsInstance]
             raise ParserSyntaxError(
                 f"Evaluation statement must be an IR expression, got {type(expr).__name__}",
                 span=span,
@@ -6999,7 +7013,7 @@ class ASTParser:
             IR expression (first yielded value for single yield)
         """
         span = self.span_tracker.get_span(call)
-        yield_exprs = []
+        yield_exprs: list[ir.Expr] = []
 
         for arg in call.args:
             expr = self.parse_expression(arg)
@@ -7043,7 +7057,7 @@ class ASTParser:
         # Navigate through attribute chain to find operation
         # e.g., pl.tensor.create_tensor -> ["pl", "tensor", "create_tensor"]
         # e.g., pl.add -> ["pl", "add"]
-        attrs = []
+        attrs: list[str] = []
         node = func
         while isinstance(node, ast.Attribute):
             attrs.insert(0, node.attr)
@@ -7186,14 +7200,14 @@ class ASTParser:
         explicit_lane_stride: ast.expr | None = None
         for kw in call.keywords:
             if kw.arg == "split":
-                explicit_split = cast("ast.expr", kw.value)
+                explicit_split = kw.value
                 continue
             if kw.arg == "lane_stride":
                 # Compiler bookkeeping stamped by LowerAutoVectorSplit when it
                 # balances a ragged boundary across the two AIV lanes; it only
                 # ever appears alongside an explicit ``split=`` in the printed
                 # outlined form, and is accepted here so that round-trips.
-                explicit_lane_stride = cast("ast.expr", kw.value)
+                explicit_lane_stride = kw.value
                 continue
             if kw.arg == "mode":
                 raise ParserSyntaxError(
@@ -7216,7 +7230,7 @@ class ASTParser:
                 span=span,
                 hint=hint,
             )
-        operand_expr = self.parse_expression(cast("ast.expr", call.args[0]))
+        operand_expr = self.parse_expression(call.args[0])
 
         # Reject distributed tensors outright — AIV/AIC split only. This must
         # come BEFORE the TensorType dispatch: ``DistributedTensorType`` is a
@@ -7676,10 +7690,10 @@ class ASTParser:
         """
 
         class _Substituter(ast.NodeTransformer):
-            def visit_Name(self, n: ast.Name) -> ast.AST:  # noqa: N802
-                if n.id == name and isinstance(n.ctx, ast.Load):
-                    return ast.copy_location(ast.Constant(value=value), n)
-                return n
+            def visit_Name(self, node: ast.Name) -> ast.AST:  # noqa: N802
+                if node.id == name and isinstance(node.ctx, ast.Load):
+                    return ast.copy_location(ast.Constant(value=value), node)
+                return node
 
         copied = copy.deepcopy(node)
         return cast(ast.expr, _Substituter().visit(copied))
@@ -9099,9 +9113,11 @@ class ASTParser:
         Returns:
             Dictionary of keyword argument names to values
         """
-        kwargs = {}
+        kwargs: dict[str, Any] = {}
         for keyword in call.keywords:
-            key = keyword.arg
+            # Op-call kwargs are always named; ``**`` spreads are not part of
+            # the op-call grammar (keyword.arg is None only for those).
+            key = cast("str", keyword.arg)
             value = keyword.value
 
             # ``attrs={...}`` is a generic compiler-internal attr dict (e.g.
@@ -9277,7 +9293,7 @@ class ASTParser:
             return self.parse_list(value)
         success, result = self.expr_evaluator.try_eval_expr(value)
         if success and isinstance(result, list):
-            return result
+            return cast("list[Any]", result)
         return self.parse_list(value)
 
     def _dispatch_op(self, module: Any, module_name: str, op_name: str, call: ast.Call) -> ir.Expr:
@@ -9898,7 +9914,7 @@ class ASTParser:
         # call site within a single parser instance (a function body may contain
         # many alloc_window_buffer calls).
         try:
-            cache = ASTParser._dtype_byte_cache  # type: ignore[attr-defined]
+            cache = ASTParser._dtype_byte_cache
         except AttributeError:
             import pypto.language as _pl  # noqa: PLC0415 (lazy import of DataType constants)
 
@@ -9907,7 +9923,7 @@ class ASTParser:
                 val = getattr(_pl, attr_name)
                 if isinstance(val, DataType):
                     cache[attr_name] = val.get_byte()
-            ASTParser._dtype_byte_cache = cache  # type: ignore[attr-defined]
+            ASTParser._dtype_byte_cache = cache
 
         if dtype_name not in cache:
             known = ", ".join(sorted(cache.keys()))
@@ -10394,7 +10410,9 @@ class ASTParser:
         """Render a shape dim for a warning/error message (constant value, else ``?``)."""
         if isinstance(dim, int):
             return str(dim)
-        value = _const_int_value(dim) if isinstance(dim, ir.Expr) else None
+        # The isinstance keeps a mistyped dim diagnosable instead of crashing the
+        # constant lookup.
+        value = _const_int_value(dim) if isinstance(dim, ir.Expr) else None  # pyright: ignore[reportUnnecessaryIsInstance]
         return str(value) if value is not None else "?"
 
     def _resolve_yield_var_type(self, annotation: ast.expr | None) -> ir.Type:
@@ -10454,7 +10472,7 @@ class ASTParser:
         Returns:
             List of tuples (variable_name, type_annotation) where type_annotation is None if not annotated
         """
-        yield_vars = []
+        yield_vars: list[tuple[str, ast.expr | None]] = []
 
         for stmt in stmts:
             # Check for annotated assignment with yield_: var: type = pl.yield_(...)

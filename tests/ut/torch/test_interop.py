@@ -30,8 +30,10 @@ class _NPUTensor(torch.Tensor):
 
     device_index: int = 0
 
+    # Duck-typed stub: the interop layer reads `.device` reflectively, so the
+    # property deliberately does not match TensorBase's declared attribute.
     @property
-    def device(self):
+    def device(self):  # pyright: ignore[reportIncompatibleVariableOverride]
         """Report the stub device without allocating accelerator storage."""
         return SimpleNamespace(type="npu", index=getattr(self, "device_index", 0))
 
@@ -106,11 +108,13 @@ def test_frame_keeps_storage_and_return_aliases_alive(npu):
     del value
     gc.collect()
     assert owner() is not None
-    assert frame.alias_result()[0] is owner()
-    assert frame.alias_result()[1] is owner()
+    alias = frame.alias_result()
+    assert alias is not None
+    assert alias[0] is owner()
+    assert alias[1] is owner()
     assert frame.tensors[0].storage.data_ptr() == frame.tensors[0].metadata.storage_ptr
     npu.get_npu_format.reset_mock()
-    del frame
+    del alias, frame
     gc.collect()
     assert owner() is None
 
@@ -158,6 +162,7 @@ def test_signature_copies_mutable_parameter_metadata(npu):
     """Mutating the caller's ParamInfo later does not change the prepared signature."""
     param = _param()
     signature = interop.CallSignature([param])
+    assert param.shape is not None
     param.shape[0] = 10
     param.dtype = DataType.INT32
     assert signature.describe_call((_tensor(),)).tensors[0].metadata.shape == (2, 3)

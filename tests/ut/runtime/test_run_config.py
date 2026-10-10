@@ -1063,7 +1063,7 @@ class TestOptionObjects:
 # ``simpler`` installed, so the import fails at collection time. Mirror the
 # skip pattern from ``test_worker_reuse.py``.
 try:
-    import simpler  # noqa: F401  # pyright: ignore[reportMissingImports]
+    import simpler  # noqa: F401  # pyright: ignore[reportMissingImports, reportUnusedImport] — presence probe
 except ImportError:
     _has_simpler = False
 else:

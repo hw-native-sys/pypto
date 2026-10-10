@@ -85,7 +85,7 @@ def _make_unary_op(op_name: str):
         Wrapper function
     """
 
-    def wrapper(self) -> _ir.Expr:
+    def wrapper(self: _ir.Expr) -> _ir.Expr:
         span = _capture_call_span()
         return getattr(_ir, op_name)(self, span)
 

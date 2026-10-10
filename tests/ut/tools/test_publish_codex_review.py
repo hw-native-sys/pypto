@@ -13,6 +13,7 @@ import importlib.util
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -1019,7 +1020,7 @@ def test_session_checkpoint_requires_valid_completed_review(publisher, tmp_path,
     """Select the root thread ID and final answer, never a tool result or failed turn."""
     session_id = "12345678-1234-1234-1234-123456789abc"
     result = {"verdict": "pass", "summary": "Reviewed", "findings": []}
-    events = [
+    events: list[dict[str, Any]] = [
         {"type": "thread.started", "thread_id": session_id},
         {"type": "item.completed", "item": {"type": "agent_message", "text": "Working..."}},
         {

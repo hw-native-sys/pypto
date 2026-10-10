@@ -18,7 +18,7 @@ import tempfile
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 _BINARY_CONTEXT_SCHEMA = 2
 _BINARY_CONTEXT_FILENAME = "binary_context.json"
@@ -106,10 +106,10 @@ def invalidate_binary_context(work_dir: Path | str) -> int:
 def _read_binary_context(path: Path) -> dict[str, Any] | None:
     """Read a JSON stamp, treating unreadable or malformed metadata as a cache miss."""
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload: Any = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    return payload if isinstance(payload, dict) else None
+    return cast("dict[str, Any]", payload) if isinstance(payload, dict) else None
 
 
 def prepare_binary_context(work_dir: Path | str, context: BinaryCacheContext | None) -> int:

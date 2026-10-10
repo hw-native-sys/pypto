@@ -107,7 +107,7 @@ class MemRef(_IrMemRef):
     pyright; it never reaches the underlying ``ir.MemRef`` constructor.
     """
 
-    def __getitem__(self, slot: "int | Scalar") -> "MemRef":  # type: ignore[override]
+    def __getitem__(self, slot: "int | Scalar") -> "MemRef":
         """Select one slot of a multi-slot declared allocation.
 
         Widened over ``ir.MemRef.__getitem__`` for the same reason as

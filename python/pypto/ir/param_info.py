@@ -25,7 +25,7 @@ names, so nothing else has to know they moved.
 import ctypes
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import torch
 
@@ -49,6 +49,8 @@ _DATATYPE_TO_TORCH: dict[str, torch.dtype] = {
     "index": torch.int64,
 }
 # uint16/32/64 were added in PyTorch 2.3; register only if available
+_name: str = ""
+_torch_dtype: torch.dtype | None = None
 for _name in ("uint16", "uint32", "uint64"):
     _torch_dtype = getattr(torch, _name, None)
     if _torch_dtype is not None:
@@ -57,6 +59,9 @@ del _name, _torch_dtype
 # Float8 / MX scale dtypes (PyTorch 2.1+ / 2.3+ / 2.7+); map IR string → torch.dtype.
 # Packed MXFP4 (fp4 ↔ float4_e2m1fn_x2) must be here so return-style execution
 # can allocate FP4 outputs after JIT specialization accepts the torch dtype.
+_ir_name: str = ""
+_torch_name: str = ""
+_torch_dtype: torch.dtype | None = None
 for _ir_name, _torch_name in (
     ("fp8e4m3fn", "float8_e4m3fn"),
     ("fp8e5m2", "float8_e5m2"),
@@ -73,7 +78,7 @@ del _ir_name, _torch_name, _torch_dtype
 # IR DataType -> ctypes scalar constructor mapping.
 # Used to wrap Python int/float/bool values into the correct ctypes scalar
 # when calling a compiled program with scalar parameters.
-_DATATYPE_TO_CTYPE: dict[str, type[ctypes._SimpleCData]] = {
+_DATATYPE_TO_CTYPE: "dict[str, type[ctypes._SimpleCData[Any]]]" = {
     "fp16": ctypes.c_float,  # no native half; promote to float
     "fp32": ctypes.c_float,
     "fp64": ctypes.c_double,
@@ -162,3 +167,8 @@ def bind_complete_args(
             f"got {len(args)}. Parameters: {[p.name for p in param_infos]}"
         )
     return list(args)
+
+
+# ``_to_torch_dtype`` is shared (leaf-imported) by the compiled-program tiers;
+# the listing keeps pyright's unused-function check satisfied.
+__all__ = ["_to_torch_dtype"]

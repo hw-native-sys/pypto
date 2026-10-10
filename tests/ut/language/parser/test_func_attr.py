@@ -93,7 +93,7 @@ class P:
                 """Keep this callback docstring."""
                 pl.func_attr({"stationary": x})
                 pl.func_attr({"tag": "callback"})
-                if x is None:
+                if x is None:  # pyright: ignore[reportUnnecessaryComparison] — DSL body: probes the parser's None handling
                     return None
                 return x
 

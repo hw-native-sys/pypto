@@ -195,6 +195,7 @@ class TestMakeCacheKey:
         parameter to stay symbolic.
         """
         _, _, _, _, _, compile_opts = self._make_key(param_names=["B"])
+        assert compile_opts is not None
         assert ("scalar_semantics", SCALAR_SEMANTICS) in compile_opts
 
     def test_param_order_preserved(self):

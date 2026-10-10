@@ -81,7 +81,7 @@ def _resolve_pinned_pto_isa_root() -> str:
     """Resolve the pin once per process (the underlying call takes a file lock)."""
     # noqa: PLC0415 -- importing at module scope would make this module, and
     # therefore ``pypto.runtime``, require simpler in a codegen-only install.
-    from simpler_setup.pto_isa import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+    from simpler_setup.pto_isa import (  # noqa: PLC0415
         ensure_pto_isa_root as _resolve,
     )
 

@@ -20,7 +20,7 @@ import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 import torch
 
@@ -36,6 +36,7 @@ from .compiled_program import (
     _drop_foreign_build_markers,
     _extract_func_param_infos,
     _extract_param_infos,
+    _is_int_list,
     _load_meta,
     _meta_error,
     _param_info_to_dict,
@@ -137,17 +138,20 @@ def _distributed_config_from_dict(meta: dict[str, Any], meta_path: Path) -> Dist
     def _is_int(value: Any) -> bool:
         return isinstance(value, int) and not isinstance(value, bool)
 
-    raw = meta.get("distributed_config", {})
-    if not isinstance(raw, dict):
-        raise _bad(f"'distributed_config' must be an object, got {type(raw).__name__}")
+    def _is_any_dict(value: object) -> TypeGuard[dict[str, Any]]:
+        # Field-level constraints are DistributedConfig's own job (below).
+        return isinstance(value, dict)
+
+    raw_val: object = meta.get("distributed_config", {})
+    if not _is_any_dict(raw_val):
+        raise _bad(f"'distributed_config' must be an object, got {type(raw_val).__name__}")
+    raw = raw_val
     known = {f.name for f in fields(DistributedConfig)}
     unknown = sorted(set(raw) - known)
     if unknown:
         raise _bad(f"'distributed_config' has unknown key(s) {unknown}; known: {sorted(known)}")
 
-    if "device_ids" in raw and not (
-        isinstance(raw["device_ids"], list) and all(_is_int(d) for d in raw["device_ids"])
-    ):
+    if "device_ids" in raw and not _is_int_list(raw["device_ids"]):
         raise _bad(f"'distributed_config.device_ids' must be a list of ints, got {raw['device_ids']!r}")
     for key in ("num_sub_workers", "aicpu_thread_num"):
         if key in raw and not _is_int(raw[key]):
@@ -588,9 +592,13 @@ class DistributedCompiledProgram:
         )
 
     @staticmethod
-    def _build_full_args(input_args, param_infos, output_indices):
+    def _build_full_args(
+        input_args: tuple[CallArg, ...],
+        param_infos: list[_ParamInfo],
+        output_indices: list[int],
+    ) -> list[CallArg]:
         output_set = set(output_indices)
-        all_tensors = []
+        all_tensors: list[CallArg] = []
         input_idx = 0
 
         for i, info in enumerate(param_infos):

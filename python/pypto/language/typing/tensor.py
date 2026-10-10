@@ -30,7 +30,7 @@ def _validate_tensor_meta_call(args: tuple[Any, ...], kwargs: dict[str, Any]) ->
         raise TypeError(f"Tensor() takes at most 6 positional arguments but {len(args)} were given")
 
     param_names = ("shape", "dtype", "expr", "layout", "memref", "_annotation_only")
-    for index, name in enumerate(param_names[: len(args)]):
+    for _index, name in enumerate(param_names[: len(args)]):
         if name in kwargs:
             raise TypeError(f"Tensor() got multiple values for argument '{name}'")
 
@@ -38,7 +38,7 @@ def _validate_tensor_meta_call(args: tuple[Any, ...], kwargs: dict[str, Any]) ->
 class TensorMeta(type):
     """Metaclass for Tensor to enable subscript notation."""
 
-    def __getitem__(cls, item: tuple) -> "Tensor":
+    def __getitem__(cls, item: tuple[Any, ...]) -> "Tensor":
         """Enable Tensor[[shape], dtype], Tensor[[shape], dtype, layout_or_memref],
         and Tensor[[shape], dtype, layout, memref] notation.
 
@@ -48,7 +48,13 @@ class TensorMeta(type):
         Returns:
             Tensor instance with shape, dtype, optional layout/memref.
         """
-        if not isinstance(item, tuple):
+        # The implicit ``cls`` is typed as the metaclass object, which the
+        # ``__call__`` overloads (``cls: type[TensorT]``) cannot bind — rebind
+        # to the Tensor-family class it actually is.
+        tensor_cls = cast("type[Tensor]", cls)
+        # A non-tuple subscript (``pl.Tensor[4]``) must reach the notation
+        # diagnostic, not a bare ``len()`` TypeError.
+        if not isinstance(item, tuple):  # pyright: ignore[reportUnnecessaryIsInstance]
             raise TypeError(
                 "Tensor requires [shape, dtype], [shape, dtype, layout_or_memref], "
                 "or [shape, dtype, layout, memref] notation"
@@ -61,7 +67,7 @@ class TensorMeta(type):
 
         if len(item) == 4:
             shape, dtype, layout, memref = item
-            return cls(
+            return tensor_cls(
                 shape,
                 dtype,
                 layout=layout,
@@ -71,10 +77,10 @@ class TensorMeta(type):
         if len(item) == 3:
             shape, dtype, third = item
             if isinstance(third, MemRef):
-                return cls(shape, dtype, memref=third, _annotation_only=True)
-            return cls(shape, dtype, layout=third, _annotation_only=True)
+                return tensor_cls(shape, dtype, memref=third, _annotation_only=True)
+            return tensor_cls(shape, dtype, layout=third, _annotation_only=True)
         shape, dtype = item
-        return cls(shape, dtype, _annotation_only=True)
+        return tensor_cls(shape, dtype, _annotation_only=True)
 
     @overload
     def __call__(
@@ -98,7 +104,7 @@ class TensorMeta(type):
         _annotation_only: bool = False,
     ) -> TensorT: ...
 
-    def __call__(cls: type[TensorT], *args: Any, **kwargs: Any) -> TensorT:
+    def __call__(cls, *args: Any, **kwargs: Any) -> Any:
         """Enable both Tensor((shape), dtype) syntax and runtime wrapping.
 
         Args:
@@ -115,12 +121,14 @@ class TensorMeta(type):
         _validate_tensor_meta_call(args, kwargs)
 
         # Support metaclass instantiation for annotations
-        shape = kwargs.get("shape", args[0] if len(args) > 0 else None)
-        dtype = kwargs.get("dtype", args[1] if len(args) > 1 else None)
-        expr = kwargs.get("expr", args[2] if len(args) > 2 else None)
-        layout = kwargs.get("layout", args[3] if len(args) > 3 else None)
-        memref = kwargs.get("memref", args[4] if len(args) > 4 else None)
-        annotation_only = kwargs.get("_annotation_only", args[5] if len(args) > 5 else False)
+        shape: Sequence[int] | tuple[Any, Any] | None = kwargs.get(
+            "shape", args[0] if len(args) > 0 else None
+        )
+        dtype: DataType | None = kwargs.get("dtype", args[1] if len(args) > 1 else None)
+        expr: Expr | None = kwargs.get("expr", args[2] if len(args) > 2 else None)
+        layout: TensorLayout | None = kwargs.get("layout", args[3] if len(args) > 3 else None)
+        memref: MemRef | None = kwargs.get("memref", args[4] if len(args) > 4 else None)
+        annotation_only: bool = kwargs.get("_annotation_only", args[5] if len(args) > 5 else False)
 
         if (
             isinstance(shape, tuple)
@@ -130,18 +138,12 @@ class TensorMeta(type):
             and expr is None
         ):
             real_shape, real_dtype = shape
-            return cast(
-                TensorT,
-                type.__call__(cls, real_shape, real_dtype, None, layout, memref, annotation_only),
-            )
+            return type.__call__(cls, real_shape, real_dtype, None, layout, memref, annotation_only)
 
         if dtype is not None and expr is None and not annotation_only:
             annotation_only = True
 
-        return cast(
-            TensorT,
-            type.__call__(cls, shape, dtype, expr, layout, memref, annotation_only),
-        )
+        return type.__call__(cls, shape, dtype, expr, layout, memref, annotation_only)
 
 
 class Tensor(metaclass=TensorMeta):
@@ -220,8 +222,13 @@ class Tensor(metaclass=TensorMeta):
 
     @classmethod
     def __class_getitem__(cls, item: tuple[Sequence[int], DataType]) -> "Tensor":
-        """Support static type checkers for Tensor[[shape], dtype] syntax."""
-        return type(cls).__getitem__(cls, item)
+        """The static-checker hook for ``Tensor[[shape], dtype]`` syntax.
+
+        Runtime never calls this — the ``TensorMeta.__getitem__`` subscript
+        protocol takes precedence — but pyright resolves class subscripts
+        through this signature.
+        """
+        raise NotImplementedError
 
     def bind_dynamic(self, dim: int, var: Any) -> None:
         """Mark a tensor dimension as runtime-dynamic for @pl.jit specialization.

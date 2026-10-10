@@ -149,7 +149,7 @@ def _highlight_python(
 ) -> tuple[str, ...]:
     """Highlight Python syntax and optional changed character ranges."""
     lines = split_source_lines(text)
-    token_spans = _python_token_spans(text, lines)
+    token_spans: list[list[tuple[int, int, str]]] | None = _python_token_spans(text, lines)
     tokenization_failed = token_spans is None
     if token_spans is None:
         token_spans = [[] for _ in lines]

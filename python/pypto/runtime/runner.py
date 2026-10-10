@@ -47,7 +47,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
@@ -75,7 +75,7 @@ def _load_golden_from_data_dir(out_dir: Path, output_names: set[str]) -> dict[st
     """
     if not out_dir.is_dir():
         return None
-    result = {}
+    result: dict[str, torch.Tensor] = {}
     for name in output_names:
         pt_file = out_dir / f"{name}.pt"
         if not pt_file.exists():
@@ -163,11 +163,6 @@ def _parse_platform(platform: str) -> tuple[BackendType, ExecutionMode]:
     raise ValueError(f"Invalid platform {platform!r}. Expected {expected}.")
 
 
-def _backend_type_for_platform(platform: str) -> BackendType:
-    """Return the codegen backend a runtime platform string selects."""
-    return _parse_platform(platform)[0]
-
-
 _BACKEND_TYPE_DEPRECATION = (
     "RunConfig(backend_type=...) is deprecated and has never taken effect: the backend is "
     "derived from platform, which wins. Drop the argument, or pass the platform that implies "
@@ -206,7 +201,7 @@ def _normalize_swimlane_level(value: int | bool, source: str) -> int:
     """
     if isinstance(value, bool):
         return _SWIMLANE_FULL_LEVEL if value else 0
-    if not isinstance(value, int):
+    if type(value) is not int:
         raise TypeError(
             f"{source} must be an int collection level (0-{_SWIMLANE_MAX_LEVEL}) or a bool, "
             f"got {type(value).__name__}"
@@ -450,13 +445,13 @@ class RunConfig:
         # ``ExecutionMode.SIM``, and silently reading it as ONBOARD would turn a
         # simulator request into a hardware run. Reject it here, where the value
         # is still attached to the name the caller typed.
-        if not isinstance(self.arch, BackendType):
+        if type(self.arch) is not BackendType:
             raise TypeError(
                 f"RunConfig.arch must be a BackendType, got {type(self.arch).__name__} "
                 f"({self.arch!r}). Pass BackendType.Ascend910B / Ascend950, or use "
                 f"platform='a2a3sim' to set both axes from the wire spelling."
             )
-        if not isinstance(self.execution_mode, ExecutionMode):
+        if type(self.execution_mode) is not ExecutionMode:
             raise TypeError(
                 f"RunConfig.execution_mode must be an ExecutionMode, got "
                 f"{type(self.execution_mode).__name__} ({self.execution_mode!r}). Pass "
@@ -505,7 +500,7 @@ class RunConfig:
         # validated directly; a list/tuple must have exactly ``_RING_DEPTH``
         # entries and every entry obeys the predicate (a ``0`` entry is the
         # runtime's "leave this ring at its default" sentinel).
-        specs = (
+        specs: tuple[tuple[str, str, Callable[[Any], bool]], ...] = (
             ("ring_task_window", "be a power of 2 >= 4", lambda v: _is_int(v) and _is_pow2(v) and v >= 4),
             (
                 "ring_heap",
@@ -519,7 +514,7 @@ class RunConfig:
             if value is None:
                 continue
             if isinstance(value, (list, tuple)):
-                value = list(value)  # normalize tuple -> list for downstream use
+                value = cast("list[Any]", list(value))  # normalize tuple -> list for downstream use
                 if len(value) != _RING_DEPTH:
                     raise ValueError(
                         f"{name} must have exactly {_RING_DEPTH} entries "
@@ -721,7 +716,7 @@ def _run_config_init(self: RunConfig, *args: Any, **kwargs: Any) -> None:
     _RUN_CONFIG_INIT(self, *args, **kwargs)
 
 
-RunConfig.__init__ = _run_config_init  # type: ignore[method-assign]
+RunConfig.__init__ = _run_config_init
 
 # ``functools.wraps`` copies the dataclass-generated signature, which lists the
 # two axes but not the ``platform=`` spelling the wrapper accepts -- so
@@ -1006,10 +1001,10 @@ def _load_golden_module(golden_path: "Path", module_name: str = "_golden") -> An
 
 
 def _build_args_spec(
-    args: "list[torch.Tensor | DeviceTensor | _SimpleCData]",
+    args: "list[torch.Tensor | DeviceTensor | _SimpleCData[Any]]",
     save_dir: Path,
     run_id: str = "",
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Describe orch arguments for the dep_gen subprocess (see below).
 
     The captured task graph can be routed by tensor *values*, not just scalars
@@ -1028,7 +1023,7 @@ def _build_args_spec(
     the type dispatch in :func:`_coerced_to_orch_args`.
     """
     prefix = f"_dep_gen_arg_{run_id}_" if run_id else "_dep_gen_arg_"
-    spec: list[dict] = []
+    spec: list[dict[str, Any]] = []
     for i, arg in enumerate(args):
         if isinstance(arg, torch.Tensor):
             path = save_dir / f"{prefix}{i}.pt"
@@ -1037,7 +1032,9 @@ def _build_args_spec(
         elif isinstance(arg, DeviceTensor):
             dtype_name = str(arg.dtype).replace("torch.", "")
             spec.append({"kind": "tensor_zeros", "shape": list(arg.shape), "dtype": dtype_name})
-        elif isinstance(arg, _SimpleCData):
+        # Provably true under the declared union, but a deliberate dispatch guard:
+        # out-of-contract types must reach the TypeError below, not this branch.
+        elif isinstance(arg, _SimpleCData):  # pyright: ignore[reportUnnecessaryIsInstance]
             spec.append({"kind": "scalar", "ctype": type(arg).__name__, "value": arg.value})
         else:
             raise TypeError(
@@ -1053,7 +1050,7 @@ def _build_args_spec(
 _DEP_GEN_CAPTURE_TIMEOUT_S = 900
 
 
-def _capture_deps_subprocess(spec: dict, dfx_dir: Path, run_id: str = "") -> None:
+def _capture_deps_subprocess(spec: dict[str, Any], dfx_dir: Path, run_id: str = "") -> None:
     """Capture ``deps.json`` for swimlane in a child process (best-effort).
 
     A child process is used so the SVM host-register mappings the dep_gen
@@ -1090,14 +1087,16 @@ def _capture_deps_subprocess(spec: dict, dfx_dir: Path, run_id: str = "") -> Non
         return
     # Success: drop the transient staged inputs (argspec mode saves the full
     # host tensors, which can run to gigabytes).
-    for entry in spec.get("args", []):
+    for entry in cast("list[dict[str, Any]]", spec.get("args", [])):
         if entry.get("kind") == "tensor_file":
             Path(entry["path"]).unlink(missing_ok=True)
     spec_path.unlink(missing_ok=True)
 
 
-def _coerced_to_orch_args(
-    coerced: list[torch.Tensor | DeviceTensor | _SimpleCData],
+# Reached only through function-scope lazy imports (pyright's unused analysis
+# discounts cross-module references to private symbols).
+def _coerced_to_orch_args(  # pyright: ignore[reportUnusedFunction]
+    coerced: "list[torch.Tensor | DeviceTensor | _SimpleCData[Any]]",
     worker: Any,
 ) -> Any:
     """Pack coerced values into address-free simpler ``TaskArgs``.
@@ -1112,8 +1111,8 @@ def _coerced_to_orch_args(
     :class:`pypto.ir.CompiledProgram` (``_build_orch_args``).
     """
     from .task_interface import (  # noqa: PLC0415
-        TaskArgs,  # pyright: ignore[reportAttributeAccessIssue]
-        scalar_to_uint64,  # pyright: ignore[reportAttributeAccessIssue]
+        TaskArgs,
+        scalar_to_uint64,
     )
     from .tensor_arg import make_tensor_arg  # noqa: PLC0415
 
@@ -1136,7 +1135,9 @@ def _coerced_to_orch_args(
                 orch_args.add_tensor(make_tensor_arg(worker, arg))
             except (TypeError, ValueError) as e:
                 raise ValueError(f"At position {i}: {e}") from e
-        elif isinstance(arg, _SimpleCData):
+        # Provably true under the declared union, but a deliberate dispatch guard:
+        # out-of-contract types must reach the TypeError below, not silently skip.
+        elif isinstance(arg, _SimpleCData):  # pyright: ignore[reportUnnecessaryIsInstance]
             continue  # handled below
         else:
             raise TypeError(
@@ -1172,7 +1173,9 @@ def _apply_ring_overrides(call_config: Any, run_config: "RunConfig | RunOptions"
         call_config.runtime_env.ring_dep_pool = options.ring_dep_pool
 
 
-def _build_call_config(
+# Reached only through function-scope lazy imports (pyright's unused analysis
+# discounts cross-module references to private symbols).
+def _build_call_config(  # pyright: ignore[reportUnusedFunction]
     run_config: "RunConfig",
     *,
     runtime_config: dict[str, Any],
@@ -1192,7 +1195,7 @@ def _build_call_config(
     DFX-enabled calls without a valid prefix).
     """
     from .task_interface import (  # noqa: PLC0415
-        CallConfig,  # pyright: ignore[reportAttributeAccessIssue]
+        CallConfig,
     )
 
     cfg = CallConfig()
@@ -1221,7 +1224,9 @@ def _build_call_config(
     return cfg
 
 
-def _execute_golden_case(
+# Reached only through function-scope lazy imports (pyright's unused analysis
+# discounts cross-module references to private symbols).
+def _execute_golden_case(  # pyright: ignore[reportUnusedFunction]
     work_dir: Path,
     golden_path: Path,
     chip_callable: Any,
@@ -1495,7 +1500,7 @@ def _write_name_map(work_dir: Path, dfx_dir: Path, *, prebuilt: bool = False) ->
 
             func_id_to_name = kernel_name_map(work_dir)
         else:
-            from simpler_setup.tools.swimlane_converter import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+            from simpler_setup.tools.swimlane_converter import (  # noqa: PLC0415
                 load_kernel_config,
             )
 
@@ -1606,7 +1611,7 @@ def _generate_swimlane(
 
 def _execute_compiled(  # noqa: PLR0913
     work_dir: str | Path,
-    args: list[torch.Tensor | DeviceTensor | _SimpleCData],
+    args: "list[torch.Tensor | DeviceTensor | _SimpleCData[Any]]",
     *,
     platform: str,
     device_id: int,
@@ -1770,7 +1775,7 @@ _EXECUTE_COMPILED_DEPRECATION = (
 
 def execute_compiled(  # noqa: PLR0913
     work_dir: str | Path,
-    args: list[torch.Tensor | DeviceTensor | _SimpleCData],
+    args: "list[torch.Tensor | DeviceTensor | _SimpleCData[Any]]",
     *,
     platform: str,
     device_id: int,

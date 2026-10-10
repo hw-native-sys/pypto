@@ -13,7 +13,7 @@ import keyword
 import re
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import torch
 
@@ -974,7 +974,7 @@ def _build_group_meta(program: _ir.Program) -> dict[str, dict[str, Any]]:
 _OP_MAP: dict[str, OpHandler] = {}
 
 
-def _register_reductions(m: dict, prefix: str) -> None:
+def _register_reductions(m: dict[str, OpHandler], prefix: str) -> None:
     """Register row/col reduction handlers (tile forms may carry an ignored tmp_tile)."""
     m[f"{prefix}.row_sum"] = lambda a, _kw: f"{a[0]}.sum(dim=-1, keepdim=True)"
     m[f"{prefix}.row_max"] = lambda a, _kw: f"{a[0]}.amax(dim=-1, keepdim=True)"
@@ -986,7 +986,7 @@ def _register_reductions(m: dict, prefix: str) -> None:
     m[f"{prefix}.col_prod"] = lambda a, _kw: f"{a[0]}.prod(dim=-2, keepdim=True)"
 
 
-def _register_expands(m: dict, prefix: str) -> None:
+def _register_expands(m: dict[str, OpHandler], prefix: str) -> None:
     """Register row/col expand max/min/expdif handlers (torch broadcasting)."""
     m[f"{prefix}.row_expand_max"] = lambda a, _kw: f"torch.maximum({a[0]}, {a[1]})"
     m[f"{prefix}.row_expand_min"] = lambda a, _kw: f"torch.minimum({a[0]}, {a[1]})"
@@ -1571,10 +1571,10 @@ class TorchCodegen(_ir.IRVisitor):
         for s in op.stmts:
             self.visit_stmt(s)
 
-    def visit_break_stmt(self, _op: _ir.BreakStmt) -> None:
+    def visit_break_stmt(self, op: _ir.BreakStmt) -> None:
         self._emit("break")
 
-    def visit_continue_stmt(self, _op: _ir.ContinueStmt) -> None:
+    def visit_continue_stmt(self, op: _ir.ContinueStmt) -> None:
         self._emit("continue")
 
     def visit_yield_stmt(self, op: _ir.YieldStmt) -> None:
@@ -1717,12 +1717,16 @@ def _validate_tensor_dict_arg(name: str, value: Any) -> dict[str, torch.Tensor]:
     if not isinstance(value, dict):
         raise TypeError(f"{name} must be dict[str, Tensor], got {type(value).__name__}")
 
-    for key, tensor in value.items():
+    # isinstance on Any narrows to dict[Unknown, Unknown]; a declared type would
+    # kill the key/value guards, so cast the container after the check and keep
+    # the per-entry isinstance validation below.
+    raw = cast("dict[object, object]", value)
+    for key, tensor in raw.items():
         if not isinstance(key, str):
             raise TypeError(f"{name} key must be str, got {type(key).__name__}")
         if not isinstance(tensor, torch.Tensor):
             raise TypeError(f"{name}[{key!r}] must be torch.Tensor, got {type(tensor).__name__}")
-    return value
+    return cast("dict[str, torch.Tensor]", value)
 
 
 def _validate_non_negative_float_arg(name: str, value: Any) -> float:
@@ -1754,7 +1758,7 @@ def _build_codegen_entry(
     ir_file: Path,
 ) -> tuple[_ir.Function, Callable[..., Any]]:
     parsed = pl.loads(str(ir_file))
-    if not isinstance(parsed, (_ir.Program, _ir.Function)):
+    if not isinstance(parsed, (_ir.Program, _ir.Function)):  # pyright: ignore[reportUnnecessaryIsInstance] -- mistyped-input guard
         raise ValueError(
             f"Parsed object from {ir_file} must be Program/Function, got {type(parsed).__name__}"
         )
@@ -1787,7 +1791,7 @@ def _compare_expected_tensors(
                 f"{ir_file}: expected key {key!r} not found in tensors after execution; "
                 f"available keys: {sorted(run_tensors.keys())}"
             )
-        if not isinstance(actual, torch.Tensor):
+        if not isinstance(actual, torch.Tensor):  # pyright: ignore[reportUnnecessaryIsInstance] -- mistyped-input guard: values come from exec'd generated code
             raise TypeError(
                 f"{ir_file}: tensors[{key!r}] must be torch.Tensor after execution, "
                 f"got {type(actual).__name__}"
@@ -1834,7 +1838,9 @@ def torch_codegen(node: _ir.Program | _ir.Function, *, check_shapes: bool = Fals
 
     if isinstance(node, _ir.Program):
         cg.visit_program(node)
-    elif isinstance(node, _ir.Function):
+    # Provably true under the declared union, but a deliberate dispatch guard:
+    # out-of-contract types must reach the TypeError below, not this branch.
+    elif isinstance(node, _ir.Function):  # pyright: ignore[reportUnnecessaryIsInstance]
         cg.visit_function(node)
     else:
         raise TypeError(f"torch_codegen expects Program or Function, got {type(node).__name__}")

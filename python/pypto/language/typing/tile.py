@@ -13,7 +13,7 @@ Tile represents a tile in unified buffer memory, used for tile-level programming
 """
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, cast
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Expr, MemorySpace, MemRef, TileView
@@ -22,7 +22,7 @@ from pypto.pypto_core.ir import Expr, MemorySpace, MemRef, TileView
 class TileMeta(type):
     """Metaclass for Tile to enable subscript notation."""
 
-    def __getitem__(cls, item: tuple) -> "Tile":
+    def __getitem__(cls, item: tuple[Any, ...]) -> "Tile":
         """Enable Tile[[shape], dtype] annotation syntax.
 
         Args:
@@ -35,7 +35,18 @@ class TileMeta(type):
         Returns:
             Tile instance with shape, dtype, and optional memref / memory space / tile view
         """
-        if not isinstance(item, tuple) or len(item) not in (2, 3, 4, 5):
+        # The implicit ``cls`` is typed as the metaclass object — rebind to
+        # the Tile-family class it actually is.
+        tile_cls = cast("type[Tile]", cls)
+        # A non-tuple subscript (``pl.Tile[4]``) must reach the notation
+        # diagnostic, not a bare ``len()`` TypeError.
+        if not isinstance(item, tuple):  # pyright: ignore[reportUnnecessaryIsInstance]
+            raise TypeError(
+                "Tile requires [shape, dtype], [shape, dtype, memory_space_or_tile_view], "
+                "[shape, dtype, memref, memory_space], or "
+                "[shape, dtype, memref, memory_space, tile_view] notation"
+            )
+        if len(item) not in (2, 3, 4, 5):
             raise TypeError(
                 "Tile requires [shape, dtype], [shape, dtype, memory_space_or_tile_view], "
                 "[shape, dtype, memref, memory_space], or "
@@ -71,7 +82,7 @@ class TileMeta(type):
         if memref is not None and memory_space is None:
             raise TypeError("Tile annotation with MemRef must also specify an explicit MemorySpace")
 
-        return cls(
+        return tile_cls(
             shape,
             dtype,
             memref=memref,
@@ -82,8 +93,8 @@ class TileMeta(type):
 
     def __call__(
         cls,
-        shape=None,
-        dtype=None,
+        shape: Sequence[int] | tuple[Any, Any] | None = None,
+        dtype: DataType | None = None,
         expr: Expr | None = None,
         memref: "MemRef | None" = None,
         memory_space: "MemorySpace | None" = None,
@@ -198,8 +209,13 @@ class Tile(metaclass=TileMeta):
 
     @classmethod
     def __class_getitem__(cls, item: tuple[Sequence[int], DataType]) -> "Tile":
-        """Support static type checkers for Tile[[shape], dtype] syntax."""
-        return type(cls).__getitem__(cls, item)
+        """The static-checker hook for ``Tile[[shape], dtype]`` syntax.
+
+        Runtime never calls this — the ``TileMeta.__getitem__`` subscript
+        protocol takes precedence — but pyright resolves class subscripts
+        through this signature.
+        """
+        raise NotImplementedError
 
     def __getitem__(self, indices: Any) -> Any:
         """Subscript syntax for tile slicing (only valid inside @pl.function)."""

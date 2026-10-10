@@ -15,8 +15,9 @@ import inspect
 import linecache
 import sys
 import textwrap
+import types
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, TypeAlias, TypeVar, cast, overload
 
@@ -256,7 +257,7 @@ def _attach_source_lines_to_error(
 
     # Use the span's filename if it differs (e.g., error in an inline function)
     target_file = source_file
-    if error.span and isinstance(error.span, dict):
+    if error.span and isinstance(error.span, dict):  # pyright: ignore[reportUnnecessaryIsInstance] -- span may be an ir.Span at runtime
         span_file = error.span.get("filename")
         if span_file and span_file != source_file:
             target_file = span_file
@@ -270,7 +271,7 @@ def _attach_source_lines_to_error(
     except (OSError, UnicodeError):
         pass
 
-    cached = linecache.getlines(target_file)
+    cached = linecache.getlines(str(target_file))
     if cached:
         error.source_lines = [line.rstrip("\r\n") for line in cached]
         return
@@ -450,7 +451,7 @@ def _normalize_attrs(attrs: Any) -> dict[str, Any] | None:
             hint='Use a dict, e.g. attrs={"split": pl.SplitMode.UP_DOWN}.',
         )
     result: dict[str, Any] = {}
-    for key, value in attrs.items():
+    for key, value in cast("dict[Any, Any]", attrs).items():
         if not isinstance(key, str):
             raise ParserSyntaxError(
                 f"`@pl.function(attrs=...)` keys must be strings, got {key!r}",
@@ -488,7 +489,7 @@ def _reject_ssa_referencing_attr(key: str, value: Any) -> None:
     the source rather than surfacing later as a structural mismatch.
     """
     if isinstance(value, (list, tuple)):
-        offenders = [v for v in value if isinstance(v, ir.Expr)]
+        offenders = [v for v in cast("Sequence[Any]", value) if isinstance(v, ir.Expr)]
     else:
         offenders = [value] if isinstance(value, ir.Expr) else []
     for expr in offenders:
@@ -672,7 +673,7 @@ def _prescan_reserve_buffers(
             buffer_name_meta[(func_def.name, buf_name)] = meta
 
 
-def _is_class_method(func: Callable) -> bool:
+def _is_class_method(func: Callable[..., Any]) -> bool:
     """Check if a function is a method inside a class (not a standalone function).
 
     Recognizes both classic methods (first parameter ``self``) and self-contained
@@ -710,7 +711,7 @@ def _is_class_method(func: Callable) -> bool:
     return False
 
 
-def _get_source_file(entity: Callable | type) -> str:
+def _get_source_file(entity: Callable[..., Any] | type) -> str:
     """Get source filename for an entity, with fallback to code object attributes.
 
     Args:
@@ -726,7 +727,7 @@ def _get_source_file(entity: Callable | type) -> str:
 
     # Fallback: extract from code object
     if callable(entity) and hasattr(entity, "__code__"):
-        return entity.__code__.co_filename
+        return cast("types.FunctionType", entity).__code__.co_filename
 
     # For classes, find a method with a code object
     if isinstance(entity, type):
@@ -779,7 +780,7 @@ def _find_entity_in_source(
     return source_lines, start_line
 
 
-def _get_source_info(entity: Callable | type, entity_type: str) -> tuple[str, list[str], int]:
+def _get_source_info(entity: Callable[..., Any] | type, entity_type: str) -> tuple[str, list[str], int]:
     """Get source file, source lines, and starting line for an entity.
 
     Tries multiple strategies:
@@ -803,7 +804,7 @@ def _get_source_info(entity: Callable | type, entity_type: str) -> tuple[str, li
     # Get a line number hint from the code object to disambiguate same-name entities
     start_line_hint: int | None = None
     if callable(entity) and hasattr(entity, "__code__"):
-        start_line_hint = entity.__code__.co_firstlineno
+        start_line_hint = cast("types.FunctionType", entity).__code__.co_firstlineno
 
     # Strategy 1: Standard inspect
     try:
@@ -955,7 +956,7 @@ def function(
 
     # Capture the caller's scope for variable resolution in type annotations
     caller_frame = sys._getframe(1)
-    closure_vars = {**caller_frame.f_globals, **caller_frame.f_locals}
+    closure_vars: dict[str, Any] = {**caller_frame.f_globals, **caller_frame.f_locals}
 
     if attrs:
         warnings.warn(
@@ -1070,7 +1071,7 @@ def function(
         return cast(ir.Function, _decorator(func))
 
 
-def inline(func: Callable) -> InlineFunction:
+def inline(func: Callable[..., Any]) -> InlineFunction:
     """Decorator that captures a function for inlining at call sites.
 
     Unlike @pl.function which parses to an ir.Function immediately,
@@ -1090,7 +1091,7 @@ def inline(func: Callable) -> InlineFunction:
         ...     return result
     """
     caller_frame = sys._getframe(1)
-    closure_vars = {**caller_frame.f_globals, **caller_frame.f_locals}
+    closure_vars: dict[str, Any] = {**caller_frame.f_globals, **caller_frame.f_locals}
 
     source_file, source_lines_raw, starting_line = _get_source_info(func, "function")
     source_code = textwrap.dedent("".join(source_lines_raw))
@@ -1159,7 +1160,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
 
     # Capture the caller's scope for variable resolution in type annotations
     caller_frame = sys._getframe(1)
-    closure_vars = {**caller_frame.f_globals, **caller_frame.f_locals}
+    closure_vars: dict[str, Any] = {**caller_frame.f_globals, **caller_frame.f_locals}
 
     def _decorator(c: type) -> ir.Program:
         prof = get_active_profiler()
@@ -1203,8 +1204,8 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
             pending_comments = extract_line_comments(source_code)
 
             # Pass 1: Collect all @pl.function methods and create GlobalVars
-            global_vars = {}
-            func_defs = []
+            global_vars: dict[str, ir.GlobalVar] = {}
+            func_defs: list[ast.FunctionDef] = []
 
             for node in class_def.body:
                 if isinstance(node, ast.FunctionDef):
@@ -1223,8 +1224,8 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
             # Pass 2: Parse each function body with GlobalVar map for cross-function calls
             # Build a map from GlobalVar to parsed functions as we go, so later functions
             # can use return type information from earlier functions
-            functions = []
-            gvar_to_func = {}
+            functions: list[ir.Function] = []
+            gvar_to_func: dict[ir.GlobalVar, ir.Function] = {}
             external_functions: dict[str, ir.Function] = {}
 
             # Pre-scan: collect reserve_buffer metadata from all functions so that

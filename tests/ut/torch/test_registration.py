@@ -219,6 +219,7 @@ def test_invalid_scalar_metadata(dtype, value, error):
 def test_signature_owns_copied_metadata():
     param = _param(direction=ParamDirection.InOut)
     signature = registration.RegistrationSignature([param], return_aliases=(0,))
+    assert param.shape is not None
     param.shape[1] = 8
     param.name = "changed"
     assert " x)" in signature.schema("op")

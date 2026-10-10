@@ -30,6 +30,6 @@ Unknown = ir.UnknownType()
 
 def float64(bits: str) -> float:
     """Decode exactly one IEEE 754 binary64 value, retaining NaN sign and payload."""
-    if not isinstance(bits, str) or re.fullmatch(r"[0-9a-fA-F]{16}", bits) is None:
+    if not isinstance(bits, str) or re.fullmatch(r"[0-9a-fA-F]{16}", bits) is None:  # pyright: ignore[reportUnnecessaryIsInstance] -- mistyped-input guard on raw dump content
         raise ValueError("float64 requires exactly 16 hexadecimal digits")
     return struct.unpack(">d", bytes.fromhex(bits))[0]

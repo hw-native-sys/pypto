@@ -281,7 +281,7 @@ def allreduce(
     op: ReduceOp = ReduceOp.Sum,
     *,
     mode: str = "mesh",
-    core_num: int = 1,
+    core_num: object = 1,
     span: Span | None = None,
 ) -> Call:
     """Build a ``pld.tensor.allreduce(target[, signal])`` Call.

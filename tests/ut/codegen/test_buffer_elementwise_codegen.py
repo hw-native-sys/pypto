@@ -74,15 +74,15 @@ class _Calls(ir.IRVisitor):
         self.allocations: list[ir.AssignStmt] = []
         self.visit_program(program)
 
-    def visit_call(self, call):
-        assert ir.get_op_ir_stage(call.op.name) == ir.OpIRStage.Buffer
-        self.calls.append(call)
-        super().visit_call(call)
+    def visit_call(self, op):
+        assert ir.get_op_ir_stage(op.op.name) == ir.OpIRStage.Buffer
+        self.calls.append(op)
+        super().visit_call(op)
 
-    def visit_assign_stmt(self, statement):
-        if isinstance(statement.var.type, ir.BufferType):
-            self.allocations.append(statement)
-        super().visit_assign_stmt(statement)
+    def visit_assign_stmt(self, op):
+        if isinstance(op.var.type, ir.BufferType):
+            self.allocations.append(op)
+        super().visit_assign_stmt(op)
 
 
 def _lower(high_precision, planner):
@@ -281,8 +281,8 @@ class _RewriteRecipe(ir.IRMutator):
         self.operation = ir.get_op(operation).name
         self.rewrite = rewrite
 
-    def visit_call(self, call):
-        return self.rewrite(call) if call.op.name == self.operation else super().visit_call(call)
+    def visit_call(self, op):
+        return self.rewrite(op) if op.op.name == self.operation else super().visit_call(op)
 
 
 @pytest.mark.usefixtures("ascend_backend")

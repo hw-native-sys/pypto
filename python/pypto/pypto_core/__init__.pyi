@@ -145,10 +145,10 @@ class DataType:
             The type code as an integer
         """
 
-    def __eq__(self, other: DataType) -> bool:
+    def __eq__(self, other: object) -> bool:
         """Equality comparison operator"""
 
-    def __ne__(self, other: DataType) -> bool:
+    def __ne__(self, other: object) -> bool:
         """Inequality comparison operator"""
 
     def __repr__(self) -> str:

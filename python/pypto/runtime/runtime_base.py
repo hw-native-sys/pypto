@@ -217,7 +217,7 @@ class Worker(ABC):
                 f"use this same {worker_name}.alloc_tensor() to create it."
             )
 
-        buffers = getattr(self, "_device_buffers", None)
+        buffers: dict[tuple[int, int], Any] | None = getattr(self, "_device_buffers", None)
         if not isinstance(buffers, dict):
             raise TypeError(
                 f"{label}: {worker_name} does not retain owner Buffers required for DeviceTensor dispatch."

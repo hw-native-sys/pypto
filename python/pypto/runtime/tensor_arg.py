@@ -50,7 +50,7 @@ the owner check below runs on every L2 conversion.
 
 import weakref
 from functools import cache
-from typing import Any
+from typing import Any, cast
 
 _PYPTO_OWNER_REF_ATTR = "_pypto_tensor_owner_ref"
 
@@ -101,7 +101,7 @@ def _validates_liveness_at_submit(worker: Any) -> bool:
 
 def _require_device_tensor_owner(worker: Any, arg: Any) -> None:
     """Require *arg* to be a live DeviceTensor owned by *worker*'s PyPTO wrapper."""
-    worker_dict = getattr(worker, "__dict__", None)
+    worker_dict: dict[str, Any] | None = getattr(worker, "__dict__", None)
     owner_ref = worker_dict.get(_PYPTO_OWNER_REF_ATTR) if isinstance(worker_dict, dict) else None
     if not isinstance(owner_ref, weakref.ReferenceType):
         raise TypeError(
@@ -109,7 +109,7 @@ def _require_device_tensor_owner(worker: Any, arg: Any) -> None:
             "Worker cannot prove that the retained Buffer is live. Dispatch through the same "
             "PyPTO Worker that allocated the tensor."
         )
-    owner = owner_ref()
+    owner = cast(Any, owner_ref())
     if owner is None:
         raise ValueError("DeviceTensor's owning PyPTO Worker no longer exists.")
     if getattr(owner, "_tensor_arg_worker", None) is not worker:
@@ -138,7 +138,7 @@ def _modules() -> tuple[Any, Any, Any]:
     Returns:
         ``(task_interface, device_tensor, torch_interop)`` module objects.
     """
-    from simpler_setup import torch_interop  # pyright: ignore[reportMissingImports]  # noqa: PLC0415
+    from simpler_setup import torch_interop  # noqa: PLC0415
 
     from . import device_tensor, task_interface  # noqa: PLC0415
 

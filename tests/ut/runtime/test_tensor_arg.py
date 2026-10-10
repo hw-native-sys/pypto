@@ -30,7 +30,7 @@ from pypto.runtime import DeviceTensor
 # skip the module when simpler is unavailable (same pattern as
 # test_execute_compiled_device_tensor.py).
 try:
-    import simpler  # noqa: F401  # pyright: ignore[reportMissingImports]
+    import simpler  # noqa: F401  # pyright: ignore[reportMissingImports, reportUnusedImport] — presence probe
 except ImportError:
     _has_simpler = False
 else:

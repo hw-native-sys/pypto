@@ -11,7 +11,7 @@
 
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from pypto._artifact_contract import ArtifactExecutionMode
 from pypto.jit._artifact_manifest import ArtifactState, BuildKind, read_manifest
@@ -170,5 +170,7 @@ def restore_artifact(store: ArtifactStore, handle: ArtifactHandle, run_directory
 
 def runtime_output_directory(compiled: Any) -> Path:
     """Return writable run storage without changing the immutable artifact root."""
-    runtime = vars(compiled).get("_artifact_runtime")
+    # vars(), not getattr: read the instance dict directly so a __getattr__/property
+    # on the compiled object cannot interpose.
+    runtime: Any = cast("dict[str, Any]", vars(compiled)).get("_artifact_runtime")
     return compiled.output_dir if runtime is None else runtime.run_directory

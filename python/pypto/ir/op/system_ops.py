@@ -28,11 +28,20 @@ from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import Call, ConstInt, Expr, PipeType, ScalarType, Span, TensorType
 
 from ..utils import _get_span_or_capture, _to_make_tuple
-from .tile_ops import (  # noqa: F401
-    tpop_from_aic,
-    tpop_from_aiv,
-    tpush_to_aic,
-    tpush_to_aiv,
+
+# Redundant aliases: the PEP 484 re-export form pyright accepts (plain
+# names would be reportUnusedImport in the IR contract tier).
+from .tile_ops import (
+    tpop_from_aic as tpop_from_aic,  # noqa: PLC0414
+)
+from .tile_ops import (
+    tpop_from_aiv as tpop_from_aiv,  # noqa: PLC0414
+)
+from .tile_ops import (
+    tpush_to_aic as tpush_to_aic,  # noqa: PLC0414
+)
+from .tile_ops import (
+    tpush_to_aiv as tpush_to_aiv,  # noqa: PLC0414
 )
 
 
@@ -683,7 +692,7 @@ def tfree_to_aic(
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    kwargs = {}
+    kwargs: dict[str, int] = {}
     if split is not None:
         kwargs["split"] = split
     if id is not None:
@@ -705,7 +714,7 @@ def tfree_to_aiv(
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    kwargs = {}
+    kwargs: dict[str, int] = {}
     if split is not None:
         kwargs["split"] = split
     if id is not None:
