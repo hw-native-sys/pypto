@@ -412,6 +412,7 @@ def _main(
         do_validate = args.validate
 
     config = RunConfig(
+        # InitVar cannot coexist with the same-named read property; see RunConfig.
         platform=args.platform,
         device_id=args.device_id,
         enable_pmu=args.pmu,

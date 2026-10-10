@@ -44,7 +44,7 @@ def review_file(tmp_path):
 @pytest.fixture
 def api(publisher, monkeypatch):
     """Model GitHub reads, writes, and revision races without network access."""
-    state = {
+    state: dict[str, Any] = {
         "pr": {
             "state": "open",
             "draft": False,

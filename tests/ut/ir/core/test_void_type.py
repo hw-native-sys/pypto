@@ -9,6 +9,8 @@
 
 """Void calls execute as statements and never stand in for SSA values."""
 
+from typing import Any
+
 import pytest
 from pypto import DataType, ir
 
@@ -109,7 +111,7 @@ def test_call_metadata_rejects_void_expressions(constructor, key, explicit_span,
 def test_call_metadata_accepts_value_expressions_and_plain_metadata(constructor, result_type, span):
     """Value metadata stays valid even for a call with no result, including after serialization."""
     var = ir.Var("task", ir.ScalarType(DataType.INDEX), span)
-    metadata = {
+    metadata: dict[str, Any] = {
         "core_num": ir.Add(var, ir.ConstInt(1, DataType.INDEX, span), DataType.INDEX, span),
         "predicate": ir.ConstBool(True, span),
         "custom_expr": ir.Call(ir.Op("test.unknown"), [], span),
@@ -246,7 +248,7 @@ def test_submit_metadata_rejects_void_at_construction(field, key, explicit_span,
 def test_submit_value_metadata_round_trips(field, span):
     """Value expressions and plain metadata remain valid on a task launch."""
     device = ir.Var("device", ir.ScalarType(DataType.INDEX), span)
-    metadata = {
+    metadata: dict[str, Any] = {
         "device": device,
         "core_num": ir.Add(device, ir.ConstInt(1, DataType.INDEX, span), DataType.INDEX, span),
         "custom_expr": ir.Call(ir.Op("test.unknown"), [], span),

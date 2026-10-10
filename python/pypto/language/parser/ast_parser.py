@@ -1816,93 +1816,92 @@ class ASTParser:
 
         # Validate annotation against inferred type; use annotation as override only for memref
         override_type = None
-        if stmt.annotation is not None:
-            # Skip annotations the resolver can't handle:
-            # - String forward refs (e.g. "SomeType")
-            # - pl.UnknownType (emitted by printer for unrepresentable types)
-            # - Singleton marker types the resolver has no entry for
-            #   (pl.MemRefType / pl.Ptr / pld.WindowBufferType): no shape/dtype to
-            #   validate; the Var's type is fully determined by the RHS-inferred
-            #   type. Markers listed in `_MARKER_TYPE_GETTERS` (pl.AsyncEvent,
-            #   pld.CommCtx, ...) resolve normally — for them the kind check is a
-            #   no-op, so they need no entry here under either spelling.
-            ann = stmt.annotation
-            is_unresolvable = (isinstance(ann, ast.Constant) and isinstance(ann.value, str)) or (
-                isinstance(ann, ast.Attribute)
-                and isinstance(ann.value, ast.Name)
-                and (
-                    (ann.value.id == "pl" and ann.attr in ("UnknownType", "MemRefType", "Ptr"))
-                    or (ann.value.id == "pld" and ann.attr == "WindowBufferType")
-                )
+        # Skip annotations the resolver can't handle:
+        # - String forward refs (e.g. "SomeType")
+        # - pl.UnknownType (emitted by printer for unrepresentable types)
+        # - Singleton marker types the resolver has no entry for
+        #   (pl.MemRefType / pl.Ptr / pld.WindowBufferType): no shape/dtype to
+        #   validate; the Var's type is fully determined by the RHS-inferred
+        #   type. Markers listed in `_MARKER_TYPE_GETTERS` (pl.AsyncEvent,
+        #   pld.CommCtx, ...) resolve normally — for them the kind check is a
+        #   no-op, so they need no entry here under either spelling.
+        ann = stmt.annotation
+        is_unresolvable = (isinstance(ann, ast.Constant) and isinstance(ann.value, str)) or (
+            isinstance(ann, ast.Attribute)
+            and isinstance(ann.value, ast.Name)
+            and (
+                (ann.value.id == "pl" and ann.attr in ("UnknownType", "MemRefType", "Ptr"))
+                or (ann.value.id == "pld" and ann.attr == "WindowBufferType")
             )
-            if is_unresolvable:
-                resolved = None
-            else:
-                resolved = self.type_resolver.resolve_type(ann)
-            if resolved is not None and not isinstance(resolved, list):
-                inferred_for_validation = _normalize_inferred_type_for_annotation(resolved, value_expr)
-                self.type_resolver.validate_annotation_consistency(
-                    resolved, inferred_for_validation, var_name, span
-                )
-                if isinstance(value_expr.type, ir.UnknownType):
-                    # Inferred type is unknown (e.g. tpop_from_aiv): use annotation as type
-                    override_type = resolved
-                elif isinstance(resolved, ir.TileType) and isinstance(value_expr.type, ir.TileType):
-                    normalized_inferred = _normalize_inferred_type_for_annotation(resolved, value_expr)
-                    assert isinstance(normalized_inferred, ir.TileType)
-                    # Merge annotation metadata with inferred type: annotation fields
-                    # take priority, but inferred fields fill gaps the annotation doesn't specify.
-                    # This handles memref, memory_space, and tile_view in a single path.
-                    ann_ms = resolved.memory_space
-                    ann_tv = resolved.tile_view
-                    inf_ms = normalized_inferred.memory_space
-                    # For the ND→2D flattening case (FlattenTileNdTo2D), the call infers
-                    # an ND TileType whose tile_view.valid_shape is also ND.  Merging that
-                    # into a 2D type would produce an inconsistent valid_shape.  Detect this
-                    # by comparing dimensionality: if normalized_inferred (which carries the
-                    # annotation's 2D shape for ND→2D) has fewer dims than value_expr.type,
-                    # we're in the ND→2D case and must NOT use the ND tile_view.
-                    # For the 2D→2D case (fresh compilation), the C++ inferred tile_view
-                    # (e.g. col_major for [N,1] Vec) must be preserved so downstream passes
-                    # can see the correct layout.
-                    if len(normalized_inferred.shape) != len(value_expr.type.shape):
-                        # ND→2D: avoid carrying ND valid_shape into 2D type
-                        inf_tv = normalized_inferred.tile_view
-                    else:
-                        # 2D→2D: preserve the actual C++ inferred tile_view
-                        inf_tv = value_expr.type.tile_view
-                    merged_ms = ann_ms if ann_ms is not None else inf_ms
-                    merged_tv = ann_tv if ann_tv is not None else inf_tv
-                    # Build the override whenever the annotation contributes anything
-                    # the raw inferred type does not already carry.  The shape test
-                    # compares against ``value_expr.type`` (the *raw* inferred type),
-                    # not ``normalized_inferred`` — the latter has already adopted the
-                    # annotation's shape for the ND->2D case, so comparing against it
-                    # always matches and the flattened shape would be silently dropped.
-                    # Before memory spaces became optional this was masked: ``merged_ms``
-                    # was never None, so the override was always built.
-                    if (
-                        resolved.memref is not None
-                        or merged_ms is not None
-                        or merged_tv is not None
-                        or not _shape_exprs_match(resolved.shape, value_expr.type.shape)
-                    ):
-                        override_type = ir.TileType(
-                            resolved.shape, resolved.dtype, resolved.memref, merged_tv, merged_ms
-                        )
-                elif isinstance(resolved, ir.DistributedTensorType) and resolved.window_buffer is not None:
-                    override_type = resolved
-                elif isinstance(resolved, ir.ShapedType) and resolved.memref is not None:
-                    override_type = resolved
-                elif isinstance(resolved, ir.TensorType) and resolved.tensor_view is not None:
-                    # Annotation specifies tensor view (stride/layout); preserve it
-                    override_type = resolved
-                elif (
-                    isinstance(resolved, ir.ScalarType)
-                    and isinstance(value_expr.type, ir.ScalarType)
-                    and value_expr.type.dtype == DataType.INDEX
+        )
+        if is_unresolvable:
+            resolved = None
+        else:
+            resolved = self.type_resolver.resolve_type(ann)
+        if resolved is not None and not isinstance(resolved, list):
+            inferred_for_validation = _normalize_inferred_type_for_annotation(resolved, value_expr)
+            self.type_resolver.validate_annotation_consistency(
+                resolved, inferred_for_validation, var_name, span
+            )
+            if isinstance(value_expr.type, ir.UnknownType):
+                # Inferred type is unknown (e.g. tpop_from_aiv): use annotation as type
+                override_type = resolved
+            elif isinstance(resolved, ir.TileType) and isinstance(value_expr.type, ir.TileType):
+                normalized_inferred = _normalize_inferred_type_for_annotation(resolved, value_expr)
+                assert isinstance(normalized_inferred, ir.TileType)
+                # Merge annotation metadata with inferred type: annotation fields
+                # take priority, but inferred fields fill gaps the annotation doesn't specify.
+                # This handles memref, memory_space, and tile_view in a single path.
+                ann_ms = resolved.memory_space
+                ann_tv = resolved.tile_view
+                inf_ms = normalized_inferred.memory_space
+                # For the ND→2D flattening case (FlattenTileNdTo2D), the call infers
+                # an ND TileType whose tile_view.valid_shape is also ND.  Merging that
+                # into a 2D type would produce an inconsistent valid_shape.  Detect this
+                # by comparing dimensionality: if normalized_inferred (which carries the
+                # annotation's 2D shape for ND→2D) has fewer dims than value_expr.type,
+                # we're in the ND→2D case and must NOT use the ND tile_view.
+                # For the 2D→2D case (fresh compilation), the C++ inferred tile_view
+                # (e.g. col_major for [N,1] Vec) must be preserved so downstream passes
+                # can see the correct layout.
+                if len(normalized_inferred.shape) != len(value_expr.type.shape):
+                    # ND→2D: avoid carrying ND valid_shape into 2D type
+                    inf_tv = normalized_inferred.tile_view
+                else:
+                    # 2D→2D: preserve the actual C++ inferred tile_view
+                    inf_tv = value_expr.type.tile_view
+                merged_ms = ann_ms if ann_ms is not None else inf_ms
+                merged_tv = ann_tv if ann_tv is not None else inf_tv
+                # Build the override whenever the annotation contributes anything
+                # the raw inferred type does not already carry.  The shape test
+                # compares against ``value_expr.type`` (the *raw* inferred type),
+                # not ``normalized_inferred`` — the latter has already adopted the
+                # annotation's shape for the ND->2D case, so comparing against it
+                # always matches and the flattened shape would be silently dropped.
+                # Before memory spaces became optional this was masked: ``merged_ms``
+                # was never None, so the override was always built.
+                if (
+                    resolved.memref is not None
+                    or merged_ms is not None
+                    or merged_tv is not None
+                    or not _shape_exprs_match(resolved.shape, value_expr.type.shape)
                 ):
-                    override_type = resolved
+                    override_type = ir.TileType(
+                        resolved.shape, resolved.dtype, resolved.memref, merged_tv, merged_ms
+                    )
+            elif isinstance(resolved, ir.DistributedTensorType) and resolved.window_buffer is not None:
+                override_type = resolved
+            elif isinstance(resolved, ir.ShapedType) and resolved.memref is not None:
+                override_type = resolved
+            elif isinstance(resolved, ir.TensorType) and resolved.tensor_view is not None:
+                # Annotation specifies tensor view (stride/layout); preserve it
+                override_type = resolved
+            elif (
+                isinstance(resolved, ir.ScalarType)
+                and isinstance(value_expr.type, ir.ScalarType)
+                and value_expr.type.dtype == DataType.INDEX
+            ):
+                override_type = resolved
         # A bare int literal parses as an untyped placeholder (``ConstInt(v,
         # INDEX)`` — see ``_normalize_scalar_operand``), so the scalar branch
         # above would otherwise bind an annotated Var to a constant of a
@@ -3104,7 +3103,7 @@ class ASTParser:
         elif len(call.args) == 2:
             start = self.parse_expression(call.args[0])
             stop = self.parse_expression(call.args[1])
-        elif len(call.args) >= 3:
+        else:
             start = self.parse_expression(call.args[0])
             stop = self.parse_expression(call.args[1])
             step = self.parse_expression(call.args[2])
@@ -5914,7 +5913,7 @@ class ASTParser:
         if not is_core_group:
             # SubWorker scopes are no longer supported as inline `with pl.at(...)`
             # blocks. Declare a SubWorker via @pl.function(level=..., role=Worker).
-            if level is not None and ir.level_to_linqu_level(level) >= 3 and role == ir.Role.SubWorker:
+            if ir.level_to_linqu_level(level) >= 3 and role == ir.Role.SubWorker:
                 raise ParserSyntaxError(
                     "Inline 'with pl.at(level>=HOST, role=pl.Role.SubWorker)' is not supported.",
                     span=span,

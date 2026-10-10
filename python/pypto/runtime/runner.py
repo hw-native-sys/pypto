@@ -438,6 +438,53 @@ class RunConfig:
     memory_planner: MemoryPlanner | None = None
     dump_ptoas_passes: bool = False
 
+    if TYPE_CHECKING:
+        # The runtime ``__init__`` wrapper installed at the bottom of this
+        # module also accepts ``platform=`` — the wire spelling that sets
+        # both axes — and the deprecated keywords. Pyright synthesizes the
+        # constructor from the dataclass fields, which lists neither, so
+        # every ``RunConfig(platform="a2a3sim")`` call (the spelling the
+        # docstring and ``__signature__`` advertise) reads as a static error.
+        # Declare the extended surface here. The field list mirrors the
+        # dataclass body above and must stay in sync: a field added there
+        # without a line here fails every static call site of it, so drift
+        # fails loud instead of silent. The deprecated keywords
+        # (``backend_type``, ``enable_l2_swimlane``) are deliberately absent
+        # — accepted for compatibility, not offered.
+        def __init__(  # noqa: PLR0913 — mirrors the dataclass surface
+            self,
+            *,
+            arch: BackendType = ...,
+            execution_mode: ExecutionMode = ...,
+            platform: str | None = ...,
+            device_id: int = ...,
+            rtol: float = ...,
+            atol: float = ...,
+            strategy: OptimizationStrategy = ...,
+            dump_passes: bool | PassDumpLevel = ...,
+            save_kernels: bool = ...,
+            save_kernels_dir: str | None = ...,
+            codegen_only: bool = ...,
+            enable_chip_swimlane: int | bool = ...,
+            enable_dump_args: int = ...,
+            enable_pmu: int = ...,
+            enable_dep_gen: bool = ...,
+            enable_scope_stats: bool = ...,
+            compile_profiling: bool = ...,
+            diagnostic_phase: DiagnosticPhase | None = ...,
+            disabled_diagnostics: DiagnosticCheckSet | None = ...,
+            golden_data_dir: str | None = ...,
+            aicpu_thread_num: int | None = ...,
+            ring_task_window: int | list[int] | tuple[int, ...] | None = ...,
+            ring_heap: int | list[int] | tuple[int, ...] | None = ...,
+            ring_dep_pool: int | list[int] | tuple[int, ...] | None = ...,
+            cache_config: CacheConfig | None = ...,
+            distributed_config: "DistributedConfig | None" = ...,
+            analyze_auto_scopes_for_deps: bool = ...,
+            memory_planner: MemoryPlanner | None = ...,
+            dump_ptoas_passes: bool = ...,
+        ) -> None: ...
+
     def __post_init__(self) -> None:
         # The two axes replace what used to be a membership test on the packed
         # platform string. They make a *disagreeing* platform unrepresentable,
@@ -1273,7 +1320,7 @@ def _execute_golden_case(  # pyright: ignore[reportUnusedFunction]
     result = golden_module.generate_inputs(params)
 
     output_names = set(getattr(golden_module, "__outputs__", []))
-    orch_args, all_tensors, inputs, outputs = build_orch_args_from_inputs(result, output_names)
+    orch_args, _all_tensors, inputs, outputs = build_orch_args_from_inputs(result, output_names)
 
     # Load pre-computed golden from data/out/ if available
     out_dir = golden_path.parent / "data" / "out"
@@ -1688,7 +1735,9 @@ def _execute_compiled(  # noqa: PLR0913
         if platform != artifact_runtime.platform:
             raise ValueError("Cannot override the platform of an immutable runtime artifact")
         chip_callable, runtime_name, runtime_config = artifact_runtime.load()["."]
-        work_dir = artifact_runtime.run_directory
+        # ``artifact_runtime`` is untyped here; uphold the local invariant that
+        # ``work_dir`` is a ``Path`` from the coercion at the top of this function.
+        work_dir = Path(artifact_runtime.run_directory)
     enable_sdma = bool(runtime_config.get("enable_sdma", False))
 
     # Caller-supplied values take precedence over the RUNTIME_CONFIG baked

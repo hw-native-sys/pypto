@@ -420,7 +420,8 @@ class TestAsyncDispatchHandle:
         m = patched_setup
         compiled = _fake_compiled([_param("a", [16, 16])], [])
         compiled.output_dir = tmp_path
-        natives = [_ControlledNativeHandle(), _ImmediateNativeHandle()]
+        native = _ControlledNativeHandle()
+        natives = [native, _ImmediateNativeHandle()]
         m["submit_dispatch"].side_effect = natives
         rt = DistributedWorker(compiled)
         arg = _resident(rt, (16, 16))
@@ -434,11 +435,11 @@ class TestAsyncDispatchHandle:
                 )
             )
             caller.start()
-            assert natives[0].result_started.wait(timeout=2)
+            assert native.result_started.wait(timeout=2)
             clear.assert_not_called()
             assert m["submit_dispatch"].call_count == 1
 
-            natives[0].complete()
+            native.complete()
             caller.join(timeout=2)
             assert not caller.is_alive()
             clear.assert_called_once_with(tmp_path / "dfx_outputs")

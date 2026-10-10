@@ -29,7 +29,9 @@ def _span_begin(err: ParserError) -> tuple[int, int]:
     """
     sp = err.span
     assert sp is not None, "expected a span on the parser error"
-    return sp["begin_line"], sp["begin_column"]
+    begin_line, begin_column = sp["begin_line"], sp["begin_column"]
+    assert isinstance(begin_line, int) and isinstance(begin_column, int)
+    return begin_line, begin_column
 
 
 def _span_char_index(begin_column: int) -> int:

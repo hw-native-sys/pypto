@@ -13,6 +13,7 @@ import dataclasses
 import sys
 import types
 import warnings
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1091,13 +1092,17 @@ class TestExecuteOnDeviceDfxValidation:
     def test_dfx_without_output_prefix_raises_for_each_flag(self):
         from pypto.runtime.device_runner import _execute_on_device  # noqa: PLC0415
 
-        for flag in [
+        # Heterogeneous flag dicts; the ``dict[str, Any]`` element type
+        # keeps ``**flag`` unpacking honest against the keyword surface
+        # (``enable_pmu`` is an int level, the rest bools).
+        flags: list[dict[str, Any]] = [
             {"enable_chip_swimlane": True},
             {"enable_dump_args": True},
             {"enable_pmu": 2},
             {"enable_dep_gen": True},
             {"enable_scope_stats": True},
-        ]:
+        ]
+        for flag in flags:
             with pytest.raises(ValueError, match="output_prefix is required"):
                 _execute_on_device(
                     chip_callable=MagicMock(),

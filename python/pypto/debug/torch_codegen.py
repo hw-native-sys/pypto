@@ -883,8 +883,8 @@ def _collect_cross_core_split_from_stmt(stmt: _ir.Stmt, out: set[int]) -> None:
         return
 
     if isinstance(stmt, (_ir.ReturnStmt, _ir.YieldStmt)):
-        values = stmt.value if stmt.value is not None else []
-        for v in values:
+        # ReturnStmt/YieldStmt carry a (possibly empty) list per the IR contract.
+        for v in stmt.value:
             _collect_cross_core_split_from_expr(v, out)
         return
 
@@ -918,8 +918,8 @@ def _collect_cross_core_split_from_stmt(stmt: _ir.Stmt, out: set[int]) -> None:
 
 def _collect_cross_core_splits(func: _ir.Function) -> set[int]:
     splits: set[int] = set()
-    if func.body is not None:
-        _collect_cross_core_split_from_stmt(func.body, splits)
+    # Function.body is non-optional per the IR contract (SeqStmts for the empty case).
+    _collect_cross_core_split_from_stmt(func.body, splits)
     return splits
 
 

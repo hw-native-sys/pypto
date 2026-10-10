@@ -55,7 +55,7 @@ def _program(addressed: bool, byte_offset: int) -> ir.Program:
     store = _ir._create_internal_op_call(
         "buffer.store", [reshaped, _tuple(0, 0), _tuple(8, 64), output], {}, _SPAN
     )
-    statements = [
+    statements: list[ir.Stmt] = [
         assign(root, "buffer.alloc", alloc_args),
         assign(window, "buffer.subview", [root, _tuple(byte_offset // 32, 0)]),
         assign(typed, "buffer.reshape", [window]),

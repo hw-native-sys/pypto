@@ -317,7 +317,11 @@ def execute_batch_manifest(
     )
 
     with ChipWorker(
-        config=RunConfig(platform=shared_platform, device_id=device_id),
+        config=RunConfig(
+            # InitVar cannot coexist with the same-named read property; see RunConfig.
+            platform=shared_platform,
+            device_id=device_id,
+        ),
         runtime=first_runtime,
         enable_sdma=shared_enable_sdma,
     ):
