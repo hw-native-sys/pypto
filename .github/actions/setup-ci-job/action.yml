@@ -637,7 +637,27 @@ runs:
         # activate.sh has already put the right libstdc++ first (conda's lib
         # prefix, or the bundle's), so the probe no longer splices one in by
         # hand. ptoas needs GLIBCXX_3.4.29; older device hosts stop at 3.4.28.
-        "$PTOAS_ROOT/bin/ptoas" --version
+        # CANN's set_env.sh prepends its site-packages to PYTHONPATH, so
+        # ptoas would import CANN's online-build package instead of the wheel.
+        # Keep the job venv first for numpy, then ptoas-bin, then CANN.
+        # Rebuild on every source because set_env.sh prepends CANN each time.
+        _PYPTO_PTOAS_SITE="$("$PTOAS_ROOT/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+        echo "_PYPTO_PTOAS_SITE=$_PYPTO_PTOAS_SITE" >> activate.sh
+        cat >> activate.sh <<'EOF'
+        _PYPTO_PP=""
+        _PYPTO_IFS="$IFS"; IFS=":"
+        for _p in ${PYTHONPATH:-}; do
+          case "$_p" in ""|"$_PYPTO_SITE"|"$_PYPTO_PTOAS_SITE") continue ;; esac
+          _PYPTO_PP="${_PYPTO_PP:+$_PYPTO_PP:}$_p"
+        done
+        IFS="$_PYPTO_IFS"
+        export PYTHONPATH="$_PYPTO_SITE:$_PYPTO_PTOAS_SITE${_PYPTO_PP:+:$_PYPTO_PP}"
+        EOF
+        ( source activate.sh
+          source activate.sh
+          "$PTOAS_ROOT/bin/python" -c 'import os, sys, sysconfig, ptoas; s=os.path.realpath(sysconfig.get_paths()["purelib"]); p=os.path.realpath(ptoas.__file__); sys.exit(0 if p.startswith(s+os.sep) else f"::error::ptoas -> {p} (outside ptoas-bin {s})")'
+          "$PTOAS_ROOT/bin/ptoas" --version
+        )
 
     - name: Show ccache stats (before)
       shell: bash
