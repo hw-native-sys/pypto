@@ -447,6 +447,11 @@ def constant_source(value: Any) -> str | None:
     parameter folds by exactly the rule a module-level constant follows, so the
     two can never admit different value types.
     """
+    # ast.Constant emits repr for these exact immutable types. Avoid creating
+    # and traversing an AST; subclasses and floats retain the general renderer.
+    value_type = type(value)
+    if value is None or value_type is bool or value_type is int or value_type is str:
+        return repr(value)
     rendered = _render_free_value(value)
     return None if rendered is None else ast.unparse(rendered)
 
@@ -468,8 +473,12 @@ def free_name_source(name: str, py_globals: Mapping[str, Any]) -> str | None:
     extent does. Hashing the rendered *text* rather than the value keeps the two
     definitions from drifting — the key depends on precisely what gets emitted.
     """
-    rendered = _bind_free_name(name, py_globals)
-    return None if rendered is None else ast.unparse(rendered)
+    if name not in py_globals:
+        return None
+    value = py_globals[name]
+    if value is _UNBOUND:
+        return None
+    return constant_source(value)
 
 
 def _fold_free_name(name: str, py_globals: Mapping[str, Any], node: ast.expr) -> ast.expr | None:

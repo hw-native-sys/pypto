@@ -16,6 +16,7 @@ import warnings
 
 import pypto.language as pl
 import pytest
+from pypto.jit import specializer
 from pypto.jit.specializer import (
     DynDim,
     SpecializeContext,
@@ -2211,6 +2212,87 @@ class TestRenamedGeneratedFunction:
         )
         with pytest.warns(DeprecationWarning, match="helper' uses pl.Out"):
             specialize("_T", [ctx])
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        True,
+        False,
+        0,
+        1,
+        -1,
+        2**100,
+        "",
+        "a\n'b",
+        "中文",
+        0.0,
+        -0.0,
+        float("inf"),
+        float("-inf"),
+        float("nan"),
+        [1, 2],
+        (True, 1),
+    ],
+)
+def test_constant_text_matches_ast_rendering(value):
+    expected = ast.unparse(_render_free_value(value))
+    assert specializer.constant_source(value) == expected
+    assert specializer.free_name_source("value", {"value": value}) == expected
+
+
+def test_exact_literal_text_skips_ast_rendering(monkeypatch):
+    assert specializer.constant_source(True) == "True"
+    assert specializer.constant_source(1) == "1"
+    assert specializer.constant_source(False) == "False"
+    assert specializer.constant_source(0) == "0"
+
+    def unexpected_unparse(_):
+        pytest.fail("An exact literal used the AST renderer")
+
+    monkeypatch.setattr(ast, "unparse", unexpected_unparse)
+    assert specializer.constant_source(True) == "True"
+    assert specializer.constant_source(1) == "1"
+    assert specializer.constant_source(False) == "False"
+    assert specializer.constant_source(0) == "0"
+    assert specializer.constant_source(137) == "137"
+    assert specializer.constant_source("fresh literal") == "'fresh literal'"
+
+
+def test_constant_text_observes_rebinding_and_container_mutation():
+    namespace = {"value": 16, "shape": [16, 32]}
+    assert specializer.free_name_source("value", namespace) == "16"
+    namespace["value"] = 32
+    assert specializer.free_name_source("value", namespace) == "32"
+    assert specializer.free_name_source("shape", namespace) == "[16, 32]"
+    namespace["shape"][0] = 64
+    assert specializer.free_name_source("shape", namespace) == "[64, 32]"
+    del namespace["value"]
+    assert specializer.free_name_source("value", namespace) is None
+
+
+def test_literal_subclass_keeps_existing_rendering():
+    class NamedInt(int):
+        def __repr__(self):
+            return "custom_integer"
+
+    value = NamedInt(1)
+    assert specializer.constant_source(value) == ast.unparse(_render_free_value(value))
+    assert specializer.constant_source(value) != specializer.constant_source(1)
+
+
+def test_literal_fast_path_uses_type_identity_not_metaclass_equality():
+    class EqualMeta(type):
+        __hash__ = None
+
+        def __eq__(cls, other):
+            return True
+
+    class Opaque(metaclass=EqualMeta):
+        pass
+
+    assert specializer.constant_source(Opaque()) is None
 
 
 if __name__ == "__main__":
