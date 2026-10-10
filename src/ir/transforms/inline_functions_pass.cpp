@@ -505,8 +505,8 @@ class VarUseCollector : public IRVisitor {
 //     the same scope-level carrier ``pl.dump_tag`` seeds at parse, printed back
 //     as each construct's ``dumps=``. The outliner later maps it onto the
 //     synthesised dispatch.
-//   * Nested cross-function (``GlobalVar``) Calls that take a tagged arg get it
-//     merged into the Call's ``kAttrDumpVars``. This is what makes a tag survive
+//   * Nested cross-function (``GlobalVar``) Calls and Submits that take a tagged
+//     arg get it merged into their ``kAttrDumpVars``. This makes a tag survive
 //     *multi-level* inlining: when the callee itself just forwards the arg into
 //     a deeper ``self.foo(...)`` (no scope of its own consumes it), the tag
 //     rides that Call so the next inline iteration (or the final dispatch, if
@@ -532,23 +532,38 @@ class InlineDumpVarTransfer : public IRMutator {
   // a dump mark off it (and ``pl.split_aiv`` has no ``dumps=`` to print one as).
   // The enclosing InCore scope carries the mark instead.
 
-  ExprPtr VisitExpr_(const CallPtr& op) override {
+  ExprPtr VisitExpr_(const CallPtr& op) override { return AttachCall(op); }
+  ExprPtr VisitExpr_(const SubmitPtr& op) override { return AttachCall(op); }
+
+ private:
+  template <typename CallT>
+  ExprPtr AttachCall(const std::shared_ptr<const CallT>& op) {
     // Recurse first so nested args (this pass runs pre-flatten, so a call arg
-    // may itself be a dispatch Call) are mutated before we stamp the attr.
+    // may itself be a dispatch Call) and Submit deps are visited before stamping.
+    // MutableCopy preserves the Call/Submit kind and all launch fields.
     auto mutated_expr = IRMutator::VisitExpr_(op);
-    auto mutated_call = As<Call>(mutated_expr);
+    auto mutated_call = As<CallT>(mutated_expr);
     // Only cross-function dispatches carry a round-trippable dump attr; skip
     // builtin tile/tensor ops (OpExpr callee).
     if (!mutated_call || !As<GlobalVar>(mutated_call->op_)) return mutated_expr;
-    auto existing = mutated_call->GetAttr<std::vector<VarPtr>>(kAttrDumpVars);
+    auto existing = mutated_call->template GetAttr<std::vector<VarPtr>>(kAttrDumpVars);
     auto merged = Merge(existing, ArgVarSet(mutated_call->args_));
     if (!Changed(existing, merged)) return mutated_expr;
+    // Dispatch dump attrs use positional-argument order in the parser and
+    // printer. Preserve every selection while retaining that roundtrip order.
+    std::unordered_set<const Var*> selected;
+    for (const auto& var : merged) selected.insert(var.get());
+    merged.clear();
+    for (const auto& arg : mutated_call->args_) {
+      if (auto var = AsVarLike(arg); var && selected.count(var.get())) {
+        merged.push_back(var);
+      }
+    }
     auto result = MutableCopy(mutated_call);
     result->attrs_ = WithDumpVarsAttr(mutated_call->attrs_, std::move(merged));
     return result;
   }
 
- private:
   template <typename ScopeT>
   StmtPtr Attach(const std::shared_ptr<const ScopeT>& op) {
     // Recurse first so nested scopes / dispatch calls also receive their tags.

@@ -1286,6 +1286,76 @@ class TestInlineFunctionsDumpMarks:
         ir.assert_structural_equal(after, Expected)
         ir.assert_structural_equal(after, pl.parse_program(after.as_python()))
 
+    def test_call_site_tag_follows_local_binding_into_submits(self):
+        """Both submit forms preserve dependencies, existing dumps, and repeated args."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                y: pl.Tensor[[64], pl.FP32],
+                z: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return pl.add(x, pl.add(y, z))
+
+            @pl.function(type=pl.FunctionType.Inline)
+            def helper(
+                self, x: pl.Tensor[[64], pl.FP32], y: pl.Tensor[[64], pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    prior = pl.system.task_dummy(deps=[])
+                    first, first_tid = pl.submit(self.kernel, x, y, x, deps=[prior], dumps=[y, y])
+                    x = first
+                    second, second_tid = pl.spmd_submit(
+                        self.kernel, x, y, x, core_num=2, deps=[first_tid], dumps=[y, y]
+                    )
+                    x = second
+                    _fence = pl.system.task_dummy(deps=[second_tid])
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self, a: pl.Tensor[[64], pl.FP32], b: pl.Tensor[[64], pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                pl.dump_tag(a)
+                result = self.helper(a, b)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                y: pl.Tensor[[64], pl.FP32],
+                z: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return pl.add(x, pl.add(y, z))
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self, a: pl.Tensor[[64], pl.FP32], b: pl.Tensor[[64], pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                local = a
+                with pl.manual_scope():
+                    prior = pl.system.task_dummy(deps=[])
+                    first, first_tid = pl.submit(self.kernel, local, b, local, deps=[prior], dumps=[b, local])
+                    local = first
+                    second, second_tid = pl.spmd_submit(
+                        self.kernel, local, b, local, core_num=2, deps=[first_tid], dumps=[b, local]
+                    )
+                    local = second
+                    _fence = pl.system.task_dummy(deps=[second_tid])
+                result = local
+                return result
+
+        after = passes.inline_functions()(Before)
+        ir.assert_structural_equal(after, Expected)
+        ir.assert_structural_equal(after, pl.parse_program(after.as_python()))
+        ir.assert_structural_equal(passes.convert_to_ssa()(after), passes.convert_to_ssa()(Expected))
+
     def test_call_site_tag_follows_nested_local_bindings(self):
         """A return-position inline call keeps the tag through a second local handle."""
 
