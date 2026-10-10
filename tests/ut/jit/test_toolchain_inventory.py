@@ -27,6 +27,11 @@ from pypto._identity import (
 from pypto.jit import _toolchain
 
 
+@pytest.fixture(autouse=True)
+def content_policy(monkeypatch):
+    monkeypatch.setenv("PYPTO_CACHE_IDENTITY", "content")
+
+
 def test_component_preserves_content_changes_without_metadata_change(tmp_path):
     header = tmp_path / "include/header.h"
     header.parent.mkdir()
@@ -958,10 +963,10 @@ def test_a_root_reached_through_a_symlink_still_finds_the_subtree(tmp_path):
 def compiler_metadata(monkeypatch):
     """Keep discovery tests independent of the host, not just of its runtime.
 
-    capture_toolchain gives up before discovery for two host-dependent reasons
-    -- an optional runtime that is not installed, and an implicit dependency
-    override that is set -- and either one silently turns a test of the memo
-    into a test of that refusal.
+    capture_toolchain gives up before discovery for host-dependent reasons
+    -- an optional runtime or PTOAS that is not installed, and an implicit
+    dependency override that is set -- and any of them silently turns a test
+    of the memo into a test of that refusal.
     """
     monkeypatch.setitem(sys.modules, "simpler_setup", None)
     monkeypatch.setitem(sys.modules, "simpler", None)
@@ -970,17 +975,19 @@ def compiler_metadata(monkeypatch):
         "pypto.runtime.kernel_compiler",
         SimpleNamespace(KernelCompiler=SimpleNamespace(_sanitizers=None)),
     )
+    monkeypatch.setattr(_toolchain, "find_ptoas_binary", lambda: sys.executable)
     for override in _IMPLICIT_DEPENDENCY_OVERRIDES:
         monkeypatch.delenv(override, raising=False)
 
 
 @pytest.mark.usefixtures("compiler_metadata")
 @pytest.mark.parametrize("error_type", [AttributeError, KeyError])
-def test_adapter_drift_returns_unavailable_evidence(monkeypatch, error_type):
+def test_adapter_drift_returns_unavailable_evidence(monkeypatch, tmp_path, error_type):
     def fail(*args):
         raise error_type("changed compiler inventory")
 
     monkeypatch.setattr(_toolchain, "_compiler", fail)
+    monkeypatch.setenv("PTOAS_ROOT", str(tmp_path / "missing_ptoas"))
     result = _toolchain.capture_toolchain("a2a3", "tensormap_and_ringbuffer")
     assert not result.usable and result.digest is None
     assert "changed compiler inventory" in result.failures[0].reason

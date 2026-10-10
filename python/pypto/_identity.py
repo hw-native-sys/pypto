@@ -446,9 +446,11 @@ def fingerprint_extra_sources(
 class ComponentInputs:
     """Inventory supplied by a dependency-aware compiler/toolchain adapter.
 
-    An adapter must leave ``unavailable_reason`` set until it has accounted
-    for all resources and dynamic dependencies, even if it knows some files.
-    A caller-supplied application fingerprint cannot complete this inventory.
+    An adapter must leave ``unavailable_reason`` set until it has established
+    the evidence required by its identity policy. Content inventories account
+    for resources and dynamic dependencies; build identities explicitly trust
+    published build/version identifiers. Application fingerprints cannot replace
+    missing installation evidence.
 
     ``verified_revision`` is the narrow exception to reading contents: an
     adapter may supply a revision when some *other* mechanism has already
@@ -465,8 +467,8 @@ class ComponentInputs:
     in place is invisible to it. Use it only where the deployment establishes
     that the component arrives as an unmodified published build, and record
     that reasoning where the adapter sets it. It is not interchangeable with
-    ``verified_revision`` and must not be treated as precedent for another
-    component.
+    ``verified_revision``. The JIT build policy uses distinct version tags for
+    its component records; it does not claim they prove installed contents.
 
     ``reported_version`` may accompany ``roots``. A component whose files come
     from more than one source -- a vendor package that states its own build

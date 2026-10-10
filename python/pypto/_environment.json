@@ -151,6 +151,14 @@
       "category": "nonsemantic",
       "reason": "Persistent storage location, captured separately from content identity."
     },
+    "PYPTO_CACHE_EPOCH": {
+      "category": "semantic",
+      "reason": "Explicit installation revision token invalidating cached artifacts after same-version local patches."
+    },
+    "PYPTO_CACHE_IDENTITY": {
+      "category": "tool_resolution",
+      "reason": "Selects build identifiers or the legacy content inventory; policies use distinct persistent identities."
+    },
     "PYPTO_CACHE_READONLY": {
       "category": "nonsemantic",
       "reason": "Persistent storage write policy, captured per request."

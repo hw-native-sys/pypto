@@ -143,50 +143,76 @@ removal of cache entries or lock files.
 
 ## Toolchain support and cost
 
-The initial adapter supports Linux ELF GCC toolchains, the CANN BiSheng layout,
-standalone ELF PTOAS, the packaged CPython PTOAS launcher grammar, and standard
-pip/uv console scripts for PTOAS wheels with the NumPy dependency. Wheel
-inventories include the selected virtualenv/interpreter, all installed package
-resources, startup inputs, and native dependencies; import redirects are rejected. It hashes
-installation content, compiler subprograms/resources, implicit include roots,
-link inputs, Python/native runtime files and resolved ELF dependencies. Unknown
-launchers, online-built PTOAS extensions, unsupported compiler layouts, sanitizer
-builds and implicit dependency overrides such as `CPATH` or `LD_PRELOAD` bypass
-persistence. The latest bypass reason is available in
-`cache_stats().last_bypass_reason`, even when INFO logging is disabled. Every
-bypass is also logged by `pypto.jit._persistent` at INFO.
+The default `PYPTO_CACHE_IDENTITY=build` policy identifies the effective tools
+used for compilation. It compares those identities with the artifact's build
+identities; it does not add an independent expected-version or pin audit.
 
-ELF64 identity omits only verified non-allocated debug payloads outside all
-program segments. It retains every ELF, program, and section header, including
-`.bss` size, flags, alignment, symbol tables, and bytes outside sections.
-Omitted sections must be `SHT_PROGBITS` with no flags or only `SHF_COMPRESSED`;
-for example, `.comment` sections carrying `SHF_MERGE | SHF_STRINGS` stay hashed.
-An input changed during inventory is reported as an unavailable identity.
-Same-layout debug-content edits do not invalidate identity; debug rebuilds that
-change layout may conservatively invalidate it. Unsupported or malformed ELF
-layouts use whole-file SHA-256. Artifact manifests always hash complete files.
+| Component | Identity evidence |
+| --------- | ----------------- |
+| PyPTO | Package Python source and bundled codegen template contents, the actually imported native extension's full GNU ELF Build-ID, and Python version/ABI. |
+| Runtime | A clean source checkout revision or installed build revision, actual native extension Build-ID, runtime Python sources, and available runtime/PTO-ISA build metadata. A dirty source checkout bypasses persistence. |
+| PTO-ISA | The revision selected by the runtime's `pto_isa.pin`. Checkout acquisition and validation happen on compilation misses. |
+| PTOAS | For a standard wheel launcher: metadata from its selected interpreter's package, its selected NumPy wheel record, native compiler Build-ID, interpreter startup `.pth` files and non-stdlib startup modules. Missing startup or wheel evidence and unsupported launchers bypass persistence. Standalone ELF builds use Build-ID. |
+| Device and orchestration tools | Selected compiler paths/versions, the invoked executable's and executed GCC driver's Build-IDs, and GCC helper Build-IDs, plus CANN installation build version and linker Build-ID. Unrecognized compiler wrappers or missing CANN build versions bypass persistence. |
 
-Implicit linker scripts support absolute `INPUT`/`GROUP` dependencies, nested
-`AS_NEEDED`, and `OUTPUT_FORMAT`/`OUTPUT_ARCH` declarations. Dependencies are
-followed recursively with the selected sysroot. Relative inputs, `-l` names,
-`SEARCH_DIR`, `INCLUDE`, and unknown syntax bypass persistence until the complete
-linker search context can be modeled; ordinary private compilation still works.
+Native files without a usable Build-ID fall back to content hashing. Build IDs
+are read from small ELF notes, not by reading the complete shared object. Wheel
+PTOAS discovery does not import its compiler package. The selected interpreter's
+startup search path and hook files also participate in the key. Missing
+evidence bypasses persistence; it never creates an `UNKNOWN` cache key.
+Existing runtime ABI and minimum PTOAS compatibility checks remain in place
+on their normal paths.
+PTOAS packages with an `_online` build directory bypass persistence because a
+local extension rebuild can leave the reported version unchanged.
 
-Successful installation identities are memoized within each process by tool
-selection and resolved component inventory. A working-directory change reruns
-discovery because relative search roots can select different tools; components
-with unchanged inventories reuse their existing content digests. Installed
-files must remain immutable for the process lifetime; restart after replacing
-them. Additional application sources are refreshed each request. Paths currently
-participate in identity, so moving an installation may cause a miss.
+Python roots and native origins are resolved from actual imports. This supports
+`pip install`, `pip install -e`, and `PYTHONPATH`, including source Python paired
+with an editable installation's native extension. Distribution metadata alone
+never identifies the imported PyPTO compiler.
 
-Cold inventory reads are deliberately conservative and can be expensive. One
-local CANN/PTOAS installation took approximately 12 seconds for its first content
-inventory; that measurement is not a general performance claim. Each new
-independent process currently pays this cost. A disk memo based only on path,
-size, mtime and inode cannot prove unchanged contents and is not used. Statistics
-include identity and validation time. Deployment without a verifiable local
-toolchain is a separate protocol and is not enabled by this API.
+This policy trusts published native build/version identifiers. It does not scan
+system headers, CPython's standard library, or transitive dynamic libraries.
+Source runtime checkouts must have no tracked or untracked Git changes. After
+patching installed inputs without changing their published identity, set a new
+`PYPTO_CACHE_EPOCH` value or clear the cache. Installed files must remain
+immutable within a process; restart after
+replacing them. Application extra sources are still refreshed on every request.
+Effective selection inputs, including paths and environment overrides, remain
+part of the key, so moving an installation can cause a miss.
+
+`PYPTO_CACHE_IDENTITY=content` retains the previous Linux dependency inventory:
+ELF dependency closures, compiler resources, implicit includes, link inputs and
+Python/native runtime contents. It retains the existing PTOAS/CANN reported
+version and verified PTO-ISA revision shortcuts; it is not a byte audit of every
+vendor installation. Unsupported launchers, sanitizer builds, and unmodeled
+implicit overrides such as `CPATH` or `LD_PRELOAD` bypass persistence. Both
+policies report bypass reasons in `cache_stats().last_bypass_reason`. The
+policies have separate identities and do not reuse one another's entries.
+
+Artifact payloads still undergo complete manifest/content validation. Newly
+packaged artifacts carry `kernel_config.json` so READY discovery does not execute
+Python configuration. Restoration reuses the lookup's validated manifest and
+constructs native callables without importing Worker/communication setup.
+If the GENERATED slot is missing or damaged, lookup searches at most 32 READY
+stage directories under the exact artifact key. Each candidate's own JSON must
+derive its directory's spec digest and pass full manifest/payload validation;
+multiple valid candidates are rejected.
+
+Measure first hits in independent processes with:
+
+```bash
+PYTHONPATH=python python tests/benchmarks/jit_cache_latency.py \
+  --cache-root /tmp/pypto-jit-benchmark --runs 5 --output build/jit-latency.json
+```
+
+Use an installed environment's Python and omit `PYTHONPATH` to test a wheel.
+The first child populates the cache; every measured child must report a READY
+hit with zero builds and bypasses. The interval includes first identity capture
+and first warmup/callable restoration, excluding Python process startup, initial
+imports, tensor creation, and device execution. Slow fallback probes, cold
+filesystem pages, or large artifacts can exceed 100 ms; this is a measurement
+target, not a latency guarantee. No cross-process timestamp-based identity memo
+is used.
 
 ## Statistics and CLI
 
