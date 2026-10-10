@@ -141,7 +141,7 @@ w = pl.add(a, u)                         # original a + doubled result
 
 最后一行计算 `3A`,不会替换调用方的 `a` 而算出 `4A`。`@pl.jit.inline` 仍接受普通 tensor 形参:其直线代码的 alpha 重命名已能分离局部绑定,但循环体中的赋值仍需要本 pass 的保护。
 
-最后一行最容易出错。给定:
+普通标量这一行最容易出错。给定:
 
 ```python
 @pl.function(type=pl.FunctionType.Inline)
