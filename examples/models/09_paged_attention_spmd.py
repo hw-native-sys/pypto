@@ -43,6 +43,8 @@ Tensor layout:
   out:         [batch * num_heads, head_dim]                    FP32
   config:      [7]  (batch, num_heads, kv_head_num, head_dim,
                      block_size, block_num_capacity, active_block_num)  INT64
+
+Run:  python examples/models/09_paged_attention_spmd.py -p a2a3sim
 """
 
 import argparse
