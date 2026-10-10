@@ -1051,7 +1051,7 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   // PTOAS level2 owns implicit-tmp materialization as part of PlanMemory. PyPTO
   // and DSA-RP instead emit fixed addresses and invoke level3. CI/TCVT scratch
   // remains restricted to A2/A3, while TSORT32 scratch is level-driven.
-  const MemoryPlanner planner = ctx ? ctx->GetMemoryPlanner() : MemoryPlanner::PyPTO;
+  const MemoryPlanner planner = ctx ? ctx->GetMemoryPlanner() : kDefaultMemoryPlanner;
   if (handler != nullptr && (planner == MemoryPlanner::PyPTO || planner == MemoryPlanner::DsaRP)) {
     MaterializePtoLevel3ScratchMutator materializer(handler->RequiresLevel3TmpScratch());
     normalized_func = materializer.VisitFunction(normalized_func);
@@ -1084,7 +1084,7 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
           << "\")) is not supported under memory_planner=PTOAS: ptoas owns memory planning and "
              "would be free to coalesce the allocations you separated. Declare it with "
              "pl.MemRef(slots=N) — N slots become one ptoas multi-buffer region whose slots ptoas "
-             "keeps disjoint — or compile with the default PyPTO memory planner.";
+             "keeps disjoint — or compile with the default DSA_RP memory planner.";
     }
   }
 

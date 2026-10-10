@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <set>
 #include <vector>
 
 #include "pypto/ir/expr.h"
@@ -38,12 +39,22 @@ struct AllocationSeparation {
   std::vector<AllocationSeparationReason> reasons;
 };
 
+struct AllocationSameBaseOrDisjoint {
+  size_t first;
+  size_t second;
+};
+
 /**
  * @brief Compiler-derived inputs to DSA placement and reuse-hazard recognition.
  */
 struct AllocationPlan {
   std::vector<LifetimeInterval> intervals;
   std::vector<AllocationSeparation> separations;
+  std::vector<AllocationSameBaseOrDisjoint> same_base_or_disjoint;
+  /// Inputs whose final read may share an operation boundary with an
+  /// explicitly in-place-safe result. Every such candidate is additionally
+  /// constrained to same-base aliasing or disjoint ranges.
+  std::set<size_t> read_before_write_inputs;
   /// Full byte extent of each author-declared allocation. This can exceed any
   /// member MemRef when the declaration contains multiple runtime-selected
   /// slots.

@@ -24,8 +24,8 @@ differences a user hits.
 
 | Planner | Who allocates | Notes |
 | ------- | ------------- | ----- |
-| `PYPTO` (default) | `MemoryReuse` + `AllocateMemoryAddr` bake addresses | The [memory map](../tools/02-memory-map.md) can draw the result |
-| `DSA_RP` | PyPTO's in-tree capacity-constrained planner | |
+| `PYPTO` | Legacy `MemoryReuse` + `AllocateMemoryAddr` bake addresses | The [memory map](../tools/02-memory-map.md) can draw the result |
+| `DSA_RP` (default) | PyPTO's in-tree capacity-constrained planner | The [memory map](../tools/02-memory-map.md) can draw the result |
 | `PTOAS` | ptoas `PlanMemory` owns reuse and addressing | PyPTO's allocation passes are skipped, so pass dumps carry no offsets |
 
 ## Verification levels
