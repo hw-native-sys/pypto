@@ -37,16 +37,18 @@ The contract asserted here has four sides:
    architecture that does not map GM twice — a5 — emits the attribute and no
    offset, and the declaration has no effect there.
 
-The assembler's own acceptance of the attribute is not asserted here: every UT
-runs with ``skip_ptoas=True``, so these tests stop at the emitted MLIR text (the
-same contract as the MX ``layout`` attribute in ``test_mx_ops_codegen.py``).
+Most tests stop at emitted MLIR. The L2-hint integration cases also run the
+installed stock PTOAS and PyPTO finalization, checking the actual ISA calls
+under both memory planners and inside structured control flow.
 """
 
 import pypto.language as pl
 import pytest
 from pypto import LogLevel, backend, codegen, ir, set_log_level
-from pypto.backend import BackendType
+from pypto.backend import BackendType, pto_backend
+from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir import OptimizationStrategy, PassManager
+from pypto.pypto_core import passes
 
 # The exact attribute PTOAS >= v0.64 consumes on `pto.tload`.
 BYPASS_ATTR = "cache_policy = #pto.load_cache_policy<l2_bypass>"
@@ -393,6 +395,216 @@ def test_no_cache_bypass_warning_is_emitted(program_cls, capfd):
     """
     _incore_mlir(program_cls)
     assert _warnings(capfd) == []
+
+
+@pytest.mark.parametrize("load_hint", list(pl.LoadL2Hint))
+def test_explicit_load_hint_is_not_silently_dropped(load_hint):
+    @pl.program
+    class HintedLoad:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self, x: pl.Tensor[[32, 32], pl.FP32], out: pl.Out[pl.Tensor[[32, 32], pl.FP32]]
+        ) -> pl.Tensor[[32, 32], pl.FP32]:
+            t = pl.load(x, [0, 0], [32, 32], l2_hint=load_hint)
+            out = pl.store(t, [0, 0], out)
+            return out
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend950)
+    mlir = _incore_mlir(HintedLoad)
+    assert f"__pypto_l2_hint_begin load {load_hint.name}" in mlir
+
+
+@pytest.mark.parametrize("store_hint", list(pl.StoreL2Hint))
+def test_explicit_store_hint_is_not_silently_dropped(store_hint):
+    @pl.program
+    class HintedStore:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self, x: pl.Tensor[[32, 32], pl.FP32], out: pl.Out[pl.Tensor[[32, 32], pl.FP32]]
+        ) -> pl.Tensor[[32, 32], pl.FP32]:
+            t = pl.load(x, [0, 0], [32, 32])
+            out = pl.store(t, [0, 0], out, l2_hint=store_hint)
+            return out
+
+    mlir = _incore_mlir(HintedStore)
+    assert f"__pypto_l2_hint_begin store {store_hint.name}" in mlir
+
+
+def test_explicit_hint_overrides_scope_cache_declaration():
+    @pl.program
+    class HintedScope:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self, x: pl.Tensor[[32, 32], pl.FP32], out: pl.Out[pl.Tensor[[32, 32], pl.FP32]]
+        ) -> pl.Tensor[[32, 32], pl.FP32]:
+            pl.func_attr({"cache_policy": [(0, 1)]})
+            t = pl.load(x, [0, 0], [32, 32], l2_hint=pl.LoadL2Hint.NormalFirstVictim)
+            return pl.store(t, [0, 0], out)
+
+    mlir = _incore_mlir(HintedScope)
+    assert "__pypto_l2_hint_begin load NormalFirstVictim" in mlir
+    assert BYPASS_ATTR not in mlir
+    assert OFFSET_PARAM not in mlir
+
+
+@pytest.mark.parametrize(
+    "hint", [pl.LoadL2Hint.NotAllocKeep, pl.LoadL2Hint.NotAllocClean, pl.LoadL2Hint.NotAllocDrop]
+)
+def test_a2a3_not_alloc_hint_requires_runtime_bypass(hint):
+    @pl.program
+    class HintedLoad:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self, x: pl.Tensor[[32, 32], pl.FP32], out: pl.Out[pl.Tensor[[32, 32], pl.FP32]]
+        ) -> pl.Tensor[[32, 32], pl.FP32]:
+            t = pl.load(x, [0, 0], [32, 32], l2_hint=hint)
+            return pl.store(t, [0, 0], out)
+
+    with pytest.raises(ValueError, match="use cache=CachePolicy.BYPASS"):
+        _incore_mlir(HintedLoad)
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+@pytest.mark.parametrize("load_hint", list(pl.LoadL2Hint))
+def test_l2_hints_reach_isa_with_stock_ptoas(tmp_path, planner, load_hint):
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    store_hint = list(pl.StoreL2Hint)[list(pl.LoadL2Hint).index(load_hint) % len(pl.StoreL2Hint)]
+
+    @pl.program
+    class HintedTransfers:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self, x: pl.Tensor[[32, 32], pl.FP32], out: pl.Out[pl.Tensor[[32, 32], pl.FP32]]
+        ) -> pl.Tensor[[32, 32], pl.FP32]:
+            t = pl.load(x, [0, 0], [32, 32], l2_hint=load_hint)
+            return pl.store(t, [0, 0], out, l2_hint=store_hint)
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend950)
+    with passes.PassContext([], memory_planner=planner):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(HintedTransfers)
+    mlir = codegen.PTOCodegen().generate(optimized, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+    cpp = pto_backend._compile_pto_module(mlir, "hinted_transfers", str(tmp_path), planner)
+    assert f"TLOAD<pto::TLoadL2Hint::{load_hint.name}>" in cpp
+    assert f"TSTORE<pto::TStoreL2Hint::{store_hint.name}>" in cpp
+    assert "__pypto_l2_hint" not in cpp
+    assert (tmp_path / "ptoas" / "hinted_transfers.cpp").read_text() == cpp
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_l2_hints_stay_with_transfers_in_control_flow(tmp_path, planner):
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+
+    @pl.program
+    class HintedControlFlow:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[64, 32], pl.FP32],
+            out: pl.Out[pl.Tensor[[64, 32], pl.FP32]],
+            flag: pl.Scalar[pl.INT32],
+        ) -> pl.Tensor[[64, 32], pl.FP32]:
+            for i, (out_iter,) in pl.range(2, init_values=(out,)):
+                offset = i * 32
+                if flag == 0:
+                    tile = pl.load(x, [offset, 0], [32, 32], l2_hint=pl.LoadL2Hint.NormalLastVictim)
+                else:
+                    tile = pl.load(x, [offset, 0], [32, 32])
+                updated = pl.store(tile, [offset, 0], out_iter, l2_hint=pl.StoreL2Hint.NotAllocClean)
+                result = pl.yield_(updated)
+            return result
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend950)
+    with passes.PassContext([], memory_planner=planner):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(HintedControlFlow)
+    mlir = codegen.PTOCodegen().generate(optimized, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+    cpp = pto_backend._compile_pto_module(mlir, "hinted_control_flow", str(tmp_path), planner)
+    assert cpp.count("TLOAD<pto::TLoadL2Hint::NormalLastVictim>") == 1
+    assert cpp.count("TLOAD(") == 1
+    assert cpp.count("TSTORE<pto::TStoreL2Hint::NotAllocClean>") == 1
+    assert "__pypto_l2_hint" not in cpp
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+@pytest.mark.parametrize("with_relu", [False, True])
+def test_store_l2_hint_preserves_epilogue_with_stock_ptoas(tmp_path, planner, with_relu):
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+
+    @pl.program
+    class HintedWriteback:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 64], pl.INT8],
+            y: pl.Tensor[[32, 64], pl.INT8],
+            out: pl.Out[pl.Tensor[[16, 32], pl.FP16]],
+        ) -> pl.Tensor[[16, 32], pl.FP16]:
+            lhs = pl.load(x, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
+            rhs = pl.load(y, [0, 0], [32, 64], target_memory=pl.Mem.Mat)
+            acc = pl.tile.matmul(
+                pl.tile.move(lhs, target_memory=pl.Mem.Left),
+                pl.tile.move(pl.tile.transpose_view(rhs), target_memory=pl.Mem.Right),
+            )
+            return pl.store(
+                acc,
+                [0, 0],
+                out,
+                atomic=pl.AtomicType.Add,
+                pre_quant=1.0 / 1024,
+                pre_relu=with_relu,
+                l2_hint=pl.StoreL2Hint.NormalPersistent,
+            )
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend950)
+    with passes.PassContext([], memory_planner=planner):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(HintedWriteback)
+    mlir = codegen.PTOCodegen().generate(optimized, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+    cpp = pto_backend._compile_pto_module(mlir, "hinted_writeback", str(tmp_path), planner)
+    store = next(line for line in cpp.splitlines() if "TSTORE<" in line)
+    assert "TSTORE<pto::TStoreL2Hint::NormalPersistent," in store
+    assert "AtomicType::AtomicAdd" in store
+    assert ("ReluPreMode::NormalRelu" in store) == with_relu
+    assert store.rsplit(">(", 1)[1].count(",") == 2  # Destination, accumulator, packed scale.
+    assert "981467136" in cpp  # FP32 bits of 1 / 1024.
+    assert "__pypto_l2_hint" not in cpp
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+def test_store_l2_hint_preserves_phase_with_stock_ptoas(tmp_path, planner):
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+
+    @pl.program
+    class HintedPhase:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[1, 128], pl.FP32],
+            y: pl.Tensor[[128, 64], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+        ) -> pl.Tensor[[1, 64], pl.FP32]:
+            lhs = pl.load(x, [0, 0], [1, 128], target_memory=pl.Mem.Mat)
+            rhs = pl.load(y, [0, 0], [128, 64], target_memory=pl.Mem.Mat)
+            acc = pl.tile.gemv(lhs, rhs, acc_phase=pl.AccPhase.Final)
+            return pl.store(
+                acc, [0, 0], out, st_phase=pl.STPhase.Final, l2_hint=pl.StoreL2Hint.NormalPersistent
+            )
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+    with passes.PassContext([], memory_planner=planner):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(HintedPhase)
+    mlir = codegen.PTOCodegen().generate(optimized, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+    cpp = pto_backend._compile_pto_module(mlir, "hinted_phase", str(tmp_path), planner)
+    store = next(line for line in cpp.splitlines() if "TSTORE<" in line)
+    assert "TSTORE<pto::TStoreL2Hint::NormalPersistent, STPhase::Final>" in store
+    assert "__pypto_l2_hint" not in cpp
 
 
 if __name__ == "__main__":

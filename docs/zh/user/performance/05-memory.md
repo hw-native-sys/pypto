@@ -222,6 +222,19 @@ load 上显式的 `cache=` 永远优先于作用域声明，两个方向都成�
 驱动返回 0，读取退化为普通的带缓存访问，结果依然正确。a5 不做双重映射，声明在那里会被
 接受但当前不改变任何东西。未作声明的读取在所有目标上都逐字节不受影响。
 
+### 显式 L2 hint
+
+`pl.LoadL2Hint` 和 `pl.StoreL2Hint` 为 `pl.load` 和 `pl.store` 的 `l2_hint=`
+参数提供 PTO-ISA hint 枚举。例如，`pl.LoadL2Hint.NormalLastVictim` 请求降低
+缓存行的淘汰优先级。load 与 store 的编码不同，必须使用对应操作的枚举。
+
+PyPTO 在最终处理生成的 C++ 时，将这些 hint 传递给 PTO-ISA 模板参数。
+该路径使用现有 PTOAS v0.65，无需修改汇编器；同步分析和内存规划仍使用普通的
+搬运操作。
+精细化硬件行为需要 A5；A2/A3 的 bypass load 应使用 `CachePolicy.BYPASS`。
+架构限制、优先级与完整 hint 表见
+[GM 缓存策略](../../dev/language/05-cache-policy.md)。
+
 ## 参见
 
 - [运行时作用域](../tasks/01-scopes.md) —— 把作用域当作依赖语义选择来看。

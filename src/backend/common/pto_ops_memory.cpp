@@ -174,6 +174,16 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   tload_line << tile_buf << " : " << tile_buf_type << ")";
 
   std::vector<std::string> attrs;
+  if (op->HasKwarg("l2_hint")) {
+    const int hint = op->GetKwarg<int>("l2_hint", 0);
+    CHECK_SPAN(hint < 4 || codegen.GetBackendHandler()->GetPtoTargetArch() != "a2a3", op->span_)
+        << "LoadL2Hint.NotAlloc* requires A5; use cache=CachePolicy.BYPASS on A2/A3";
+    // Stock PTOAS preserves these comments. PyPTO finalization uses them to
+    // select this transfer's ISA overload; PTOAS still sees the real load's
+    // memory effects and pipe for planning and synchronization.
+    codegen.Emit("emitc.verbatim \"// __pypto_l2_hint_begin load " +
+                 ir::LoadL2HintToString(static_cast<ir::LoadL2Hint>(hint)) + "\"");
+  }
   if (is_mx_load) {
     attrs.push_back("layout = #pto.layout<" + pto_layout + ">");
   }
@@ -205,6 +215,9 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
     }
   }
   codegen.Emit(tload_line.str());
+  if (op->HasKwarg("l2_hint")) {
+    codegen.Emit("emitc.verbatim \"// __pypto_l2_hint_end\"");
+  }
 
   // No follow-up `pto.set_validshape` is emitted: every `pto.alloc_tile`
   // already carries the desired `valid_row` / `valid_col` operands, and the
@@ -379,7 +392,15 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     }
     tstore_line << "}";
   }
+  if (op->HasKwarg("l2_hint")) {
+    codegen.Emit("emitc.verbatim \"// __pypto_l2_hint_begin store " +
+                 ir::StoreL2HintToString(static_cast<ir::StoreL2Hint>(op->GetKwarg<int>("l2_hint", 0))) +
+                 "\"");
+  }
   codegen.Emit(tstore_line.str());
+  if (op->HasKwarg("l2_hint")) {
+    codegen.Emit("emitc.verbatim \"// __pypto_l2_hint_end\"");
+  }
 
   auto result_var = codegen.GetCurrentResultVar();
   if (result_var != nullptr) {

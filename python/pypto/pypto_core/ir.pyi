@@ -391,6 +391,24 @@ class PadValue(enum.Enum):
     min = ...
     """Min value padding."""
 
+class LoadL2Hint(enum.IntEnum):
+    """Per-transfer L2 hint with PTO-ISA encodings."""
+
+    NormalFirstVictim = 0
+    NormalLastVictim = 1
+    NormalPersistent = 2
+    NotAllocKeep = 4
+    NotAllocClean = 5
+    NotAllocDrop = 6
+
+class StoreL2Hint(enum.IntEnum):
+    """Per-transfer L2 hint with PTO-ISA encodings."""
+
+    NormalFirstVictim = 0
+    NormalLastVictim = 1
+    NormalPersistent = 2
+    NotAllocClean = 4
+
 class CachePolicy(enum.IntEnum):
     """GM cache-access policy declared for a tensor read.
 

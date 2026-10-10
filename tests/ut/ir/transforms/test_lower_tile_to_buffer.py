@@ -594,5 +594,27 @@ class TypedTransfers:
     assert output.is_file()
 
 
+@pytest.mark.parametrize(
+    "load_hint,store_hint",
+    [
+        (pl.LoadL2Hint.NormalFirstVictim, None),
+        (None, pl.StoreL2Hint.NormalFirstVictim),
+    ],
+)
+def test_buffer_lowering_does_not_drop_explicit_l2_hint(load_hint, store_hint):
+    @pl.program
+    class Hinted:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self, source: pl.Tensor[[16, 32], pl.FP32], output: pl.Out[pl.Tensor[[16, 32], pl.FP32]]
+        ) -> pl.Tensor[[16, 32], pl.FP32]:
+            value = pl.load(source, [0, 0], [16, 32], l2_hint=load_hint)
+            out = pl.store(value, [0, 0], output, l2_hint=store_hint)
+            return out
+
+    with pytest.raises(ValueError, match="explicit l2_hint requires a Buffer transfer recipe"):
+        _lower(passes.MemoryPlanner.PYPTO, program=Hinted)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

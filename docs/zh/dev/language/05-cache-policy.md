@@ -12,6 +12,43 @@
 > 属性，外加一个携带该设备 uncached 别名距离的 `offset` 操作数，由汇编器加到该条
 > load 的源地址上。参见[codegen 发射什么](#codegen-发射什么)与[架构差异](#架构差异)。
 
+## 显式的单次搬运 L2 hint（前端接口）
+
+`pl.load(..., l2_hint=pl.LoadL2Hint.NormalLastVictim)` 和
+`pl.store(..., l2_hint=pl.StoreL2Hint.NotAllocClean)` 为这次搬运记录显式的
+PTO-ISA hint，与原有 `CachePolicy` 契约分开。省略参数时不记录 hint；显式的 0
+会被保留。
+
+| LoadL2Hint | 编码 | StoreL2Hint | 编码 |
+| ---------- | ---- | ----------- | ---- |
+| NormalFirstVictim | 0 | NormalFirstVictim | 0 |
+| NormalLastVictim | 1 | NormalLastVictim | 1 |
+| NormalPersistent | 2 | NormalPersistent | 2 |
+| NotAllocKeep | 4 | — | — |
+| NotAllocClean | 5 | NotAllocClean | 4 |
+| NotAllocDrop | 6 | — | — |
+
+DSL 要求使用与搬运方向对应的枚举。PyPTO IR 在 `l2_hint` kwarg 中保存原始整数
+编码，校验允许的值，并在打印时恢复枚举。这些 hint 仅支持单次访问；
+`pl.set_cache_policy` 仍只接受 `CachePolicy`。
+
+**接入方式：** 不需要修改 PTOAS。PyPTO 保留普通的 `pto.tload` /
+`pto.tstore` 操作供 PTOAS 分析同步和内存分配，并用 `emitc.verbatim` 标记
+包围每次带 hint 的搬运。在处理生成的 C++ 时，PyPTO 消费这些标记，将所选
+PTO-ISA 模板参数放在最前面，包括显式选择的零值 hint。现有 store 的 phase、
+atomic 和量化参数保持不变。
+
+该路径支持当前固定的 PTOAS v0.65，以及 PyPTO 和 PTOAS 两种内存规划方式。
+带标记的搬运缺失、格式错误或无法唯一匹配时会报错；调试重编译路径使用同一
+处理逻辑。使用 `skip_ptoas=True` 时，PTO 文件会保留标记：单独运行 PTOAS
+得到的中间 C++ 仍需经过 PyPTO 的最终处理。
+
+显式 `l2_hint` 优先于作用域缓存声明；同一个 load 同时指定 `cache` 与
+`l2_hint` 会报错。A5 支持精细化硬件 hint。A2/A3 的普通 hint 和 store hint
+没有不同的硬件效果；其 load `NotAlloc*` 会被拒绝，应使用提供运行时地址别名
+偏移量的 `CachePolicy.BYPASS`。Buffer lowering 在搬运描述支持 hint 前会拒绝
+显式 hint。现有 `DEFAULT` / `BYPASS` 行为保持不变。
+
 ## 两个书写面
 
 | 书写面 | 粒度 | 写法 | 适用场景 |

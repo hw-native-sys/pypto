@@ -9226,5 +9226,40 @@ class TestB03TriAndGatherOps:
             )
 
 
+@pytest.mark.parametrize("hint", [-1, 3, 7, 255, 256])
+def test_load_rejects_invalid_l2_hint(hint):
+    src = ir.Var("src", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown())
+    with pytest.raises(ValueError, match="l2_hint must encode LoadL2Hint"):
+        tile.load(src, [0, 0], [32, 32], l2_hint=hint)
+
+
+@pytest.mark.parametrize("hint", [-1, 3, 5, 6, 255, 256])
+def test_store_rejects_invalid_l2_hint(hint):
+    src = _partial_tile([32, 32], [32, 32])
+    dst = ir.Var("dst", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown())
+    with pytest.raises(ValueError, match="l2_hint must encode StoreL2Hint"):
+        tile.store(src, [0, 0], dst, l2_hint=hint)
+
+
+def test_load_rejects_store_l2_hint_enum():
+    src = pl.Tensor(expr=ir.Var("src", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown()))
+    with pytest.raises(TypeError, match="load l2_hint must be LoadL2Hint"):
+        pl.load(src, [0, 0], [32, 32], l2_hint=cast(Any, pl.StoreL2Hint.NotAllocClean))
+
+
+def test_store_rejects_load_l2_hint_enum():
+    src = pl.Tile(expr=_partial_tile([32, 32], [32, 32]))
+    dst = pl.Tensor(expr=ir.Var("dst", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown()))
+    with pytest.raises(TypeError, match="store l2_hint must be StoreL2Hint"):
+        pl.store(src, [0, 0], dst, l2_hint=cast(Any, pl.LoadL2Hint.NotAllocKeep))
+
+
+@pytest.mark.parametrize("cache", [ir.CachePolicy.DEFAULT, ir.CachePolicy.BYPASS])
+def test_load_rejects_cache_and_l2_hint_together(cache):
+    src = ir.Var("src", ir.TensorType([32, 32], DataType.FP32), ir.Span.unknown())
+    with pytest.raises(ValueError, match="cannot specify both cache and l2_hint"):
+        tile.load(src, [0, 0], [32, 32], cache=int(cache), l2_hint=0)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

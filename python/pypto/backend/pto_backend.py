@@ -44,6 +44,7 @@ from pypto._function_attrs import (
     DUAL_AIV_DISPATCH_ATTR,
     EXTERNAL_SOURCE_ATTR,
 )
+from pypto.backend._l2_hint import apply_l2_hints
 from pypto.backend._ptoas_locate import PTOAS_RELATIVE_PATHS as _PTOAS_RELATIVE_PATHS
 from pypto.backend._ptoas_locate import PTOAS_RELEASES_URL as _PTOAS_RELEASES_URL
 from pypto.backend._ptoas_locate import check_ptoas_version as _check_ptoas_version
@@ -1523,7 +1524,12 @@ def _compile_pto_module(
     )
 
     with open(cpp_path) as f:
-        return f.read()
+        raw_cpp = f.read()
+    cpp = apply_l2_hints(raw_cpp)
+    if cpp != raw_cpp:
+        with open(cpp_path, "w") as f:
+            f.write(cpp)
+    return cpp
 
 
 def _emit_single_function_output(

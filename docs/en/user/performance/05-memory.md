@@ -272,6 +272,20 @@ zero, which leaves the read ordinary and correct. A5 does not map GM twice, so a
 declaration is accepted there and currently changes nothing. A read that declares
 nothing is unaffected on every target, byte for byte.
 
+### Explicit L2 hints
+
+`pl.LoadL2Hint` and `pl.StoreL2Hint` expose PTO-ISA hint names for the
+`l2_hint=` argument of `pl.load` and `pl.store`. For example,
+`pl.LoadL2Hint.NormalLastVictim` requests a lower eviction priority.
+Load and store encodings differ, so the enum must match the operation.
+
+PyPTO forwards these hints to the PTO-ISA template parameters when finalizing
+generated C++. It uses the existing PTOAS v0.65 release; no assembler changes
+are required. Synchronization and memory planning still see ordinary transfers.
+Fine-grained hardware behavior requires A5; on A2/A3 use `CachePolicy.BYPASS`
+for bypass loads. See [GM cache policy](../../dev/language/05-cache-policy.md)
+for architecture restrictions, precedence, and the complete hint table.
+
 ## See also
 
 - [Runtime scopes](../tasks/01-scopes.md) — scopes as a dependency-semantics choice.

@@ -310,5 +310,27 @@ def test_conflicting_policies_for_one_tensor_are_rejected():
                 return out
 
 
+@pytest.mark.parametrize("load_hint", list(pl.LoadL2Hint))
+@pytest.mark.parametrize("store_hint", list(pl.StoreL2Hint))
+def test_l2_hint_roundtrip(load_hint, store_hint):
+    """Preserve the exact load/store enum, including the explicit zero hint."""
+
+    @pl.program
+    class Hinted:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self, x: pl.Tensor[[32, 32], pl.FP32], out: pl.Out[pl.Tensor[[32, 32], pl.FP32]]
+        ) -> pl.Tensor[[32, 32], pl.FP32]:
+            t = pl.load(x, [0, 0], [32, 32], l2_hint=load_hint)
+            out = pl.store(t, [0, 0], out, l2_hint=store_hint)
+            return out
+
+    text = ir.python_print(Hinted)
+    assert f"l2_hint=pl.LoadL2Hint.{load_hint.name}" in text
+    assert f"l2_hint=pl.StoreL2Hint.{store_hint.name}" in text
+    ir.assert_structural_equal(Hinted, _reparse(Hinted))
+    ir.assert_structural_equal(Hinted, ir.deserialize(ir.serialize(Hinted)))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

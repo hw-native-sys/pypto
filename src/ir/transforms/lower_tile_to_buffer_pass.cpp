@@ -668,6 +668,8 @@ class TileToBufferMutator : public IRMutator {
       return Empty(call->span_);
     }
     if (IsOp(call, "tile.load")) {
+      CHECK_SPAN(!call->HasKwarg("l2_hint"), call->span_)
+          << "LowerTileToBuffer: explicit l2_hint requires a Buffer transfer recipe";
       INTERNAL_CHECK_SPAN(result && call->args_.size() >= 3, call->span_)
           << "Internal error: malformed tile.load";
       CHECK_SPAN(GetIntKwarg(call->kwargs_, "cache", 0) == 0, call->span_)
@@ -677,6 +679,8 @@ class TileToBufferMutator : public IRMutator {
                        call->span_);
     }
     if (IsOp(call, "tile.store")) {
+      CHECK_SPAN(!call->HasKwarg("l2_hint"), call->span_)
+          << "LowerTileToBuffer: explicit l2_hint requires a Buffer transfer recipe";
       INTERNAL_CHECK_SPAN(call->args_.size() == 3, call->span_)
           << "Internal error: dense rank-2 tile.store requires three operands";
       CHECK_SPAN(

@@ -806,6 +806,27 @@ enum class CachePolicy : uint8_t {
   kBypass = 1,   ///< Streaming access, declared to bypass the cache
 };
 
+/** @brief Per-transfer L2 hints; values match PTO-ISA TLoadL2Hint. */
+enum class LoadL2Hint : uint8_t {
+  NormalFirstVictim = 0,
+  NormalLastVictim = 1,
+  NormalPersistent = 2,
+  NotAllocKeep = 4,
+  NotAllocClean = 5,
+  NotAllocDrop = 6,
+};
+
+/** @brief Per-transfer L2 hints; store encodings differ from load encodings. */
+enum class StoreL2Hint : uint8_t {
+  NormalFirstVictim = 0,
+  NormalLastVictim = 1,
+  NormalPersistent = 2,
+  NotAllocClean = 4,
+};
+
+std::string LoadL2HintToString(LoadL2Hint hint);
+std::string StoreL2HintToString(StoreL2Hint hint);
+
 /**
  * @brief Convert CachePolicy to string ("default" / "bypass")
  */

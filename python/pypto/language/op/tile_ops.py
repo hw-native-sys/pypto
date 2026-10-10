@@ -181,9 +181,11 @@ from pypto.pypto_core.ir import (
     AtomicType,
     CachePolicy,
     Expr,
+    LoadL2Hint,
     MemorySpace,
     PadValue,
     Span,
+    StoreL2Hint,
     STPhase,
     TileLayout,
 )
@@ -402,6 +404,7 @@ def load(
     target_memory: MemorySpace | None = None,
     clamp: bool = False,
     cache: CachePolicy | None = None,
+    l2_hint: LoadL2Hint | None = None,
 ) -> Tile:
     """Copy data from tensor to unified buffer (tile).
 
@@ -446,6 +449,9 @@ def load(
             uncached alias on A2/A3 — the only architecture that maps GM twice,
             and the only one where the declaration has an effect today; DEFAULT
             emits nothing.
+        l2_hint: Explicit per-load PTO-ISA hint. ``None`` leaves the hint
+            unspecified; an explicit ``NormalFirstVictim`` retains its zero
+            encoding. This is distinct from the semantic ``cache`` policy.
 
     Returns:
         Tile wrapping the load operation
@@ -456,6 +462,8 @@ def load(
         >>> # streaming read, no cache reuse expected
         >>> tile = load(tensor, [0, 0], [32, 32], cache=pl.CachePolicy.BYPASS)
     """
+    if l2_hint is not None and not isinstance(l2_hint, LoadL2Hint):
+        raise TypeError(f"load l2_hint must be LoadL2Hint, got {type(l2_hint).__name__}")
     if valid_shape is None:
         valid_shape = shapes
     call_expr = _ir_ops.load(
@@ -466,6 +474,7 @@ def load(
         target_memory,
         clamp=clamp,
         cache=None if cache is None else int(cache),
+        l2_hint=None if l2_hint is None else int(l2_hint),
     )
     return Tile(expr=call_expr)
 
@@ -480,6 +489,7 @@ def store(
     st_phase: STPhase = STPhase.Unspecified,
     pre_quant: float | None = None,
     pre_relu: bool = False,
+    l2_hint: StoreL2Hint | None = None,
 ) -> _TensorT:
     """Copy data from tile back to tensor.
 
@@ -520,6 +530,9 @@ def store(
             ``maximum(tile, 0) * pre_quant`` and not
             ``maximum(tile * pre_quant, 0)``. The two agree for every positive
             scale and differ at every element for a negative one.
+        l2_hint: Explicit per-store PTO-ISA hint. Use ``StoreL2Hint`` rather
+            than ``LoadL2Hint``: their not-allocate encodings differ.
+            ``None`` leaves the hint unspecified.
 
     Returns:
         Tensor wrapping the store operation
@@ -536,6 +549,8 @@ def store(
         >>> # INT32 accumulator dequantized and ReLU'd straight into FP16 GM
         >>> result = store(acc_i32, [0, 0], out_f16, pre_quant=1.0 / 1024, pre_relu=True)
     """
+    if l2_hint is not None and not isinstance(l2_hint, StoreL2Hint):
+        raise TypeError(f"store l2_hint must be StoreL2Hint, got {type(l2_hint).__name__}")
     normalized_offsets = _normalize_intlike(offsets)
     normalized_shapes = _normalize_intlike(shapes) if shapes is not None else None
     call_expr = _ir_ops.store(
@@ -547,6 +562,7 @@ def store(
         st_phase=st_phase,
         pre_quant=pre_quant,
         pre_relu=pre_relu,
+        l2_hint=None if l2_hint is None else int(l2_hint),
     )
     return output_tensor.__class__(expr=call_expr)
 

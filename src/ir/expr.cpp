@@ -142,6 +142,38 @@ bool AreExprVectorsEqual(const std::vector<ExprPtr>& v1, const std::vector<ExprP
   return true;
 }
 
+std::string LoadL2HintToString(LoadL2Hint hint) {
+  switch (hint) {
+    case LoadL2Hint::NormalFirstVictim:
+      return "NormalFirstVictim";
+    case LoadL2Hint::NormalLastVictim:
+      return "NormalLastVictim";
+    case LoadL2Hint::NormalPersistent:
+      return "NormalPersistent";
+    case LoadL2Hint::NotAllocKeep:
+      return "NotAllocKeep";
+    case LoadL2Hint::NotAllocClean:
+      return "NotAllocClean";
+    case LoadL2Hint::NotAllocDrop:
+      return "NotAllocDrop";
+  }
+  throw TypeError("Unknown LoadL2Hint value: " + std::to_string(static_cast<int>(hint)));
+}
+
+std::string StoreL2HintToString(StoreL2Hint hint) {
+  switch (hint) {
+    case StoreL2Hint::NormalFirstVictim:
+      return "NormalFirstVictim";
+    case StoreL2Hint::NormalLastVictim:
+      return "NormalLastVictim";
+    case StoreL2Hint::NormalPersistent:
+      return "NormalPersistent";
+    case StoreL2Hint::NotAllocClean:
+      return "NotAllocClean";
+  }
+  throw TypeError("Unknown StoreL2Hint value: " + std::to_string(static_cast<int>(hint)));
+}
+
 std::string CachePolicyToString(CachePolicy policy) {
   switch (policy) {
     case CachePolicy::kDefault:

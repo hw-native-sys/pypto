@@ -366,12 +366,21 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
     tile_view.valid_shape = valid_shape_tuple->elements_;
   }
 
+  // Raw hint encodings follow PTO-ISA, independently of CachePolicy values.
+  const int l2_hint = GetKwarg<int>(kwargs, "l2_hint", 0);
+  CHECK(l2_hint == 0 || l2_hint == 1 || l2_hint == 2 || l2_hint == 4 || l2_hint == 5 || l2_hint == 6)
+      << "The operator " << op_name << " l2_hint must encode LoadL2Hint (0, 1, 2, 4, 5, 6), got " << l2_hint;
+
   // Optional GM cache-access policy. Absent = the caller stated none; an
   // explicit kDefault is distinct from absence and out-ranks a scope-level
   // declaration downstream. Range-checked here, at the op boundary, for the
   // same reason `atomic` is: the DSL types it as CachePolicy, but the text
   // parser and hand-built or deserialized IR can hand over any int, and an
   // unknown one would otherwise surface at codegen with no context.
+  const auto has_kwarg = [&](const char* name) {
+    return std::any_of(kwargs.begin(), kwargs.end(), [&](const auto& kwarg) { return kwarg.first == name; });
+  };
+  CHECK(!(has_kwarg("cache") && has_kwarg("l2_hint"))) << "tile.load cannot specify both cache and l2_hint";
   const int cache = GetKwarg<int>(kwargs, "cache", static_cast<int>(CachePolicy::kDefault));
   CHECK(cache == static_cast<int>(CachePolicy::kDefault) || cache == static_cast<int>(CachePolicy::kBypass))
       << "The operator " << op_name
@@ -492,6 +501,9 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
         << dt.ToString();
   }
 
+  const int l2_hint = GetKwarg<int>(kwargs, "l2_hint", 0);
+  CHECK(l2_hint == 0 || l2_hint == 1 || l2_hint == 2 || l2_hint == 4)
+      << "The operator " << op_name << " l2_hint must encode StoreL2Hint (0, 1, 2, 4), got " << l2_hint;
   const int st_phase = GetKwarg<int>(kwargs, "st_phase", static_cast<int>(STPhase::kUnspecified));
   CHECK(IsValidSTPhase(st_phase))
       << "The operator " << op_name
@@ -1311,6 +1323,7 @@ REGISTER_OP("tile.load")
     // Declared GM cache-access policy, carried as an int (``ir::CachePolicy``)
     // so serialization / structural comparison need no new enum arm.
     .set_attr<int>("cache")
+    .set_attr<int>("l2_hint")
     // No fallback: when target_memory is absent, memory_space stays unresolved and
     // InferTileMemorySpace picks the space from consumer demand.
     .set_output_memory_from_kwarg("target_memory")
@@ -1330,6 +1343,7 @@ REGISTER_OP("tile.store")
                   "Injected by FlattenTileNdTo2D for ND tensors.")
     .set_attr<int>("atomic")
     .set_attr<int>("st_phase")
+    .set_attr<int>("l2_hint")
     // FIXPIPE pre-ops on an Acc->GM writeback (`pto.tstore`): `pre_quant` is an
     // FP32 scale the accumulator is multiplied by on the way out, `pre_relu` an
     // activation applied after that multiply and the destination clamp. Both are

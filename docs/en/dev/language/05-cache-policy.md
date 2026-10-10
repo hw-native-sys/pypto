@@ -15,6 +15,48 @@ unchanged from the DSL to codegen.
 > source address. See [What codegen emits](#what-codegen-emits) and
 > [Architectures](#architectures).
 
+## Explicit per-transfer L2 hints (frontend interface)
+
+`pl.load(..., l2_hint=pl.LoadL2Hint.NormalLastVictim)` and
+`pl.store(..., l2_hint=pl.StoreL2Hint.NotAllocClean)` record an explicit PTO-ISA
+hint on that transfer. This is separate from the existing `CachePolicy`
+contract. Omission records no hint; an explicit zero is preserved.
+
+| LoadL2Hint | Encoding | StoreL2Hint | Encoding |
+| ---------- | -------- | ----------- | -------- |
+| NormalFirstVictim | 0 | NormalFirstVictim | 0 |
+| NormalLastVictim | 1 | NormalLastVictim | 1 |
+| NormalPersistent | 2 | NormalPersistent | 2 |
+| NotAllocKeep | 4 | — | — |
+| NotAllocClean | 5 | NotAllocClean | 4 |
+| NotAllocDrop | 6 | — | — |
+
+The DSL requires the enum appropriate to the transfer direction. PyPTO IR
+stores its exact integer encoding in the `l2_hint` kwarg, validates the allowed
+values, and restores the enum when printing. These hints are per-access only;
+`pl.set_cache_policy` continues to accept only `CachePolicy`.
+
+**Integration:** no PTOAS changes are required. PyPTO keeps ordinary
+`pto.tload` / `pto.tstore` operations for PTOAS synchronization and memory
+planning, and surrounds each hinted transfer with `emitc.verbatim` markers.
+When finalizing the generated C++, PyPTO consumes the markers and prepends
+the selected PTO-ISA template parameter, including an explicit zero-valued
+hint. Existing store phase, atomic, and quantization arguments are preserved.
+
+This works with the pinned PTOAS v0.65 release and with either PyPTO or PTOAS
+memory planning. A missing, malformed, or ambiguous marked transfer is an
+error. The debug rebuild path uses the same finalization. With
+`skip_ptoas=True`, the PTO file retains these markers: running PTOAS alone
+produces intermediate C++ that still needs PyPTO's finalization.
+
+An explicit `l2_hint` overrides a scope cache declaration. Specifying both
+`cache` and `l2_hint` on one load is an error. A5 supports the fine-grained
+hardware hints. A2/A3 normal hints and store hints have no distinct hardware
+effect; load `NotAlloc*` is rejected there: use `CachePolicy.BYPASS`, which
+supplies the runtime address-alias offset. Buffer lowering rejects explicit
+hints until its transfer recipe supports them. Existing `DEFAULT` /
+`BYPASS` behavior is unchanged.
+
 ## Two surfaces
 
 | Surface | Granularity | Written as | Use when |

@@ -1576,6 +1576,10 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
         stream_ << prefix_ << ".AtomicType." << AtomicTypeToString(static_cast<AtomicType>(int_val));
       } else if (key == "acc_phase") {
         stream_ << prefix_ << ".AccPhase." << AccPhaseToString(static_cast<AccPhase>(int_val));
+      } else if (key == "l2_hint" && IsOp(op, "tile.load")) {
+        stream_ << prefix_ << ".LoadL2Hint." << LoadL2HintToString(static_cast<LoadL2Hint>(int_val));
+      } else if (key == "l2_hint" && IsOp(op, "tile.store")) {
+        stream_ << prefix_ << ".StoreL2Hint." << StoreL2HintToString(static_cast<StoreL2Hint>(int_val));
       } else if (key == "st_phase") {
         stream_ << prefix_ << ".STPhase." << STPhaseToString(static_cast<STPhase>(int_val));
       } else {

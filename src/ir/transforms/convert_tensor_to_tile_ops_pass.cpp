@@ -334,8 +334,9 @@ void AppendCachePolicyKwarg(const ExprPtr& src, const CachePolicyByParam& polici
   if (!var) return;
   auto it = policies.find(var.get());
   if (it == policies.end()) return;
-  const bool stated_explicitly =
-      std::any_of(kwargs->begin(), kwargs->end(), [](const auto& kv) { return kv.first == "cache"; });
+  const bool stated_explicitly = std::any_of(kwargs->begin(), kwargs->end(), [](const auto& kv) {
+    return kv.first == "cache" || kv.first == "l2_hint";
+  });
   if (stated_explicitly) return;
   kwargs->emplace_back("cache", it->second);
 }
