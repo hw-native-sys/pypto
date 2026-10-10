@@ -1260,6 +1260,67 @@ class Program:
         assert "windowize" not in main.attrs
         assert outlined.attrs["windowize"] is True
 
+    @pytest.mark.parametrize(
+        "access",
+        [
+            pytest.param("first = out", id="alias"),
+            pytest.param("pair = (out, x)\n            first = pair[0]", id="tuple"),
+            pytest.param(
+                "pair = (out, x)\n            pair2 = pair\n            first = pair2[0]", id="tuple_alias"
+            ),
+            pytest.param(
+                "pair = (out, x)\n"
+                "            for i, (p,) in pl.range(2, init_values=(pair,)):\n"
+                "                p2 = pl.yield_(p)\n"
+                "            first = p2[0]",
+                id="tuple_loop_carry",
+            ),
+            pytest.param(
+                "pair = (out, x)\n"
+                "            for i, (p,) in pl.range(2, init_values=(pair,)):\n"
+                "                inner = p[0]\n"
+                "                inner_back = pl.load(inner, [128, 0], [128, 128])\n"
+                "                p2 = pl.yield_(p)\n"
+                "            first = p2[0]",
+                id="tuple_loop_carry_read_in_body",
+            ),
+        ],
+    )
+    def test_value_reading_localized_store_result_takes_the_window(self, access):
+        """Any non-Call value that reads a narrowed store result -- an alias, a
+        tuple, a projection of it, an alias of that tuple, or a loop carry of it
+        -- takes the window type, so its assignment keeps
+        ``var.type == value.type``, and a load through it is rebased to the
+        window like a load of the store result itself."""
+        program = pl.parse_program(
+            f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        x: pl.Tensor[[512, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+    ) -> pl.Tensor[[512, 128], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP, windowize=True):
+            tile = pl.load(x, [128, 0], [128, 128])
+            out = pl.store(tile, [128, 0], out)
+            {access}
+            back = pl.load(first, [128, 0], [128, 128])
+        return out
+"""
+        )
+
+        after = _run_to_optimize_orch_tensors(program)
+
+        printed = ir.python_print(_get_function(after, "main_incore_0__windowed"))
+        assert "first__ssa_v0: pl.Tensor[[128, 128]" in printed, printed
+        assert "pl.tile.load(first__ssa_v0, [0, 0]," in printed, printed
+        # No load through a value derived from the store result keeps its
+        # parent-relative offset (``inner`` is read inside the loop body).
+        assert "pl.tile.load(inner__ssa_v0, [128, 0]," not in printed, printed
+        assert "__FREE_VAR" not in printed, printed
+
     def test_default_does_not_windowize_without_kernel_attr(self):
         @pl.program
         class Before:

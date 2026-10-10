@@ -188,6 +188,7 @@ def test_get_structural_properties():
     assert props.contains(passes.IRProperty.BreakContinueValid)
     assert props.contains(passes.IRProperty.NoRedundantBlocks)
     assert props.contains(passes.IRProperty.OutParamNotShadowed)
+    assert props.contains(passes.IRProperty.AssignTypeSymmetry)
     assert not props.contains(passes.IRProperty.SSAForm)
 
 
