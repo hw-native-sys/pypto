@@ -1511,6 +1511,14 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
       return std::string("");
     }
 
+    // PTOAS v0.67 cannot infer the byte width of !pto.f4E2M1x2 for
+    // treshape/bitcast. Addressed aliases above work without either op.
+    // Reject unresolved FP4 tile aliases instead of emitting invalid PTO IR.
+    CHECK_SPAN(!source_tile->dtype_.IsPackedFp4() && !result_tile->dtype_.IsPackedFp4(), op->span_)
+        << "tile.reinterpret_view: FP4E2M1X2 tile aliases require PYPTO or DSA_RP addressed memory; "
+           "PTOAS v0.67 does not support FP4 tile treshape. Select the PYPTO or DSA_RP memory "
+           "planner for packed FP4 reinterpret views";
+
     // PTOAS treshape is the byte-preserving dtype/shape reinterpret primitive.
     // Use it even when the shape is unchanged: pto.bitcast does not preserve the
     // source tile payload on current A2/A3 runtimes.

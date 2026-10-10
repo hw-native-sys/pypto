@@ -19,19 +19,31 @@ NZ / col_major / distributed 的 FP4 族路径在本切片不支持（硬拒随 
 
 `tensor` / `tile` 的 `reshape` 与 `transpose` 会拒绝 FP4 族（见报错与支持矩阵）。
 
+`reinterpret_view` 仅允许 **等字节** 的 `FP4E2M1X2` ↔ `UINT8` / `INT8` 别名（shape
+不变）。需要前导维 flatten 时，请走 `reinterpret_view` → `UINT8` → `reshape`，不要
+依赖 packed-FP4 的 `reshape`。PTOAS v0.67+ 分离 carrier 寻址和 nibble DMA
+描述符，修复多行 TLOAD/TSTORE pitch
+（[PTOAS #1575](https://github.com/hw-native-sys/PTOAS/issues/1575)）。
+
+Tile 字节别名需要 PYPTO 或 DSA_RP planner，以同一 buffer 地址生成别名。
+PTOAS v0.67 仍拒绝 `!pto.f4E2M1x2` 的 `treshape` / `bitcast`；PyPTO 对未分配地址的
+tile 别名明确报错。InCore 中的 Tensor reinterpret 会降低为上述 tile 别名，因此有
+相同的 planner 要求。Orchestration Tensor reinterpret 仍不支持。
+
 ## 单位约定
 
 | 层 | 单位 |
 | -- | ---- |
 | 前端逻辑 `pl.FP4` shape / `valid_shape` | nibble |
 | 手写 `pl.FP4E2M1X2` IR / `tile_buf` / Torch ABI | carrier |
-| `make_tensor_view` / `partition_view`（ExpandPackedFp4\* 之后） | nibble（供 pto-isa `GetByteSize`） |
+| `make_tensor_view` / `partition_view` / offset / stride | carrier |
+| PTOAS TLOAD/TSTORE 传输描述符 | nibble（供 pto-isa `GetByteSize`） |
 | runtime Tensor / `torch.float4_e2m1fn_x2` | carrier 元素 |
 
 多行 ND packed 张量请用 **carrier** 末维与 leading stride（例如每行 512 逻辑
-nibble 写成 `pl.Tensor[[2, 256], pl.FP4E2M1X2]`）。Codegen 会把 GM view 扩到
-nibble 单位，使多行 pitch 与 Tile / pto-isa 一致。在 `FP4E2M1X2` 上误用逻辑宽度，
-或在无自动打包时用逻辑 `pl.FP4` 多行 ND，可能导致 GM 行 stride 错位——见 issue
+nibble 写成 `pl.Tensor[[2, 256], pl.FP4E2M1X2]`）。PyPTO 原样输出 carrier 几何；PTOAS v0.67+ 仅扩展传输描述符。
+在 `FP4E2M1X2` 上误用逻辑宽度，或在无自动打包时用逻辑 `pl.FP4` 多行 ND，
+可能导致 GM 行 stride 错位——见 issue
 [#2754](https://github.com/hw-native-sys/pypto/issues/2754)。
 
 ## Cast 策略（Ascend950）
@@ -89,20 +101,25 @@ def fp4x2_to_fp8(
 | ---- | ----- | ---- |
 | 手写 `pl.FP4E2M1X2` | ✅ | packed 路径的首选前端；**仅 ND** |
 | 无 PackFp4 的逻辑 `pl.FP4` | ⚠️ | Prefer Warning；A5 in-core 仍支持逻辑 FP4，并与 FP4E2M1X2 并存 |
-| GM ExpandPackedFp4\*（carrier→nibble） | ✅ | `make_tensor_view` / partition 末轴（ND） |
+| GM view / partition 使用 carrier 单位 | ✅ | PTOAS v0.67+ 仅扩展传输描述符 |
 | `FP4E2M1X2` ↔ BF16 cast | ✅ | 静默原生 hop；结果 stride 重建为连续 |
 | `FP4E2M1X2` → FP8\* cast | ⚠️ | Warning；更推荐 LUT / 主机 |
 | `FP4` ↔ `FP4E2M1X2` cast | ❌ | 拒绝 |
 | 自动 PackFp4 | ⏳ | 后续 |
 | `FP4E2M1X2` 的 `reshape` / `transpose` / DN / NZ / 列向量 `[M,1]` / layout `tensor.view` | ❌ | 仅 ND row-major；隐式 DN 与显式 layout 转化硬拒 |
+| `reinterpret_view` `FP4E2M1X2` ↔ `UINT8`/`INT8` | ✅ | 同 shape 字节别名；前导维 flatten 前先走此路径 |
+| `reinterpret_view` 其他 FP4 族组合 | ❌ | 逻辑 FP4 与非等字节别名均拒绝 |
+| 多行 packed-FP4 GM DMA pitch | ✅ | PTOAS v0.67+ 分离寻址与传输单位 |
 | `matmul_mx` 原生 FP4 数据 | ⏳ | 需要时先 cast lhs 到 FP8 |
 
 ## 推荐路径
 
 1. 手写 `pl.FP4E2M1X2` 并用物理 carrier shape（避免 `#2754` 类 stride 问题）。
-2. 需要更宽浮点时 cast 到 BF16。
-3. FP4→FP8 优先 **LUT / 主机**；设备 cast 仅 Warning。
-4. 仅在接受不完整路径时保留逻辑 `pl.FP4`，直到 PackFp4 落地。
+2. paged cache flatten：`pl.reshape(pl.reinterpret_view(cache, pl.UINT8), …)`，再在
+   `cast` 前 reinterpret 回 `FP4E2M1X2`（或保持 UINT8 nibble ABI）。
+3. 需要更宽浮点时 cast 到 BF16。
+4. FP4→FP8 优先 **LUT / 主机**；设备 cast 仅 Warning。
+5. 仅在接受不完整路径时保留逻辑 `pl.FP4`，直到 PackFp4 落地。
 
 ## 另见
 

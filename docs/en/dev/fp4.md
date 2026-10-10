@@ -22,20 +22,34 @@ FP4-family paths are unsupported in this slice (hard rejects land with PackFp4).
 `tensor` / `tile` `reshape` and `transpose` reject the FP4 family (see error
 strings and the support matrix).
 
+`reinterpret_view` allows only **byte-identical** `FP4E2M1X2` ↔ `UINT8` / `INT8`
+aliases (same shape). Prefer `reinterpret_view` → `UINT8` → `reshape` when a
+leading-dimension flatten is required; do not rely on packed-FP4 `reshape`.
+PTOAS v0.67+ fixes multi-row TLOAD/TSTORE pitch by separating carrier
+addressing from nibble DMA descriptors
+([PTOAS #1575](https://github.com/hw-native-sys/PTOAS/issues/1575)).
+
+Tile byte aliases require the PYPTO or DSA_RP planner, which emits an addressed
+alias at the same buffer. PTOAS v0.67 still rejects `treshape` / `bitcast` of
+`!pto.f4E2M1x2`; PyPTO reports this explicitly for unresolved tile aliases.
+InCore tensor reinterpret operations lower to these tile aliases and require
+the same planners. Orchestration tensor reinterpretation remains unsupported.
+
 ## Unit convention
 
 | Layer | Unit |
 | ----- | ---- |
 | Frontend logical `pl.FP4` shape / `valid_shape` | nibble |
 | Hand-written `pl.FP4E2M1X2` IR / `tile_buf` / Torch ABI | carrier |
-| `make_tensor_view` / `partition_view` (after ExpandPackedFp4\*) | nibble (for pto-isa `GetByteSize`) |
+| `make_tensor_view` / `partition_view` / offsets / strides | carrier |
+| PTOAS TLOAD/TSTORE transfer descriptor | nibble (for pto-isa `GetByteSize`) |
 | runtime Tensor / `torch.float4_e2m1fn_x2` | carrier element |
 
 Write multi-row ND packed tensors with **carrier** last dims and leading strides
 (for example `pl.Tensor[[2, 256], pl.FP4E2M1X2]` for 512 logical nibbles per row).
-Codegen expands GM views to nibble units so multi-row pitch matches Tile /
-pto-isa. Using logical widths on `FP4E2M1X2` (or logical `pl.FP4` multi-row ND
-without automatic pack) can mis-size GM row strides — see issue
+PyPTO emits carrier geometry unchanged; PTOAS v0.67+ expands only the
+transfer descriptor. Using logical widths on `FP4E2M1X2` (or logical `pl.FP4`
+multi-row ND without automatic pack) can mis-size GM row strides — see issue
 [#2754](https://github.com/hw-native-sys/pypto/issues/2754).
 
 ## Cast policy (Ascend950)
@@ -93,20 +107,25 @@ Legend: ✅ supported · ⚠️ partial / Warning · ❌ unsupported · ⏳ not 
 | ------- | ----- | ----- |
 | Hand-written `pl.FP4E2M1X2` | ✅ | Preferred frontend for packed paths; **ND only** |
 | Logical `pl.FP4` without PackFp4 | ⚠️ | Prefer warning; A5 in-core still supports legacy logical FP4 alongside FP4E2M1X2 |
-| GM ExpandPackedFp4\* (carrier→nibble) | ✅ | `make_tensor_view` / partition last axis (ND) |
+| GM views / partitions in carrier units | ✅ | PTOAS v0.67+ expands only transfer descriptors |
 | `FP4E2M1X2` ↔ BF16 cast | ✅ | Silent native hop; result strides rebuilt contiguous |
 | `FP4E2M1X2` → FP8\* cast | ⚠️ | Warning; prefer LUT / host |
 | `FP4` ↔ `FP4E2M1X2` cast | ❌ | Rejected |
 | Automatic PackFp4 | ⏳ | Follow-up |
 | `reshape` / `transpose` / DN / NZ / column-vector `[M,1]` / layout `tensor.view` for `FP4E2M1X2` | ❌ | ND row-major only; implicit DN and explicit layout conversion hard-rejected |
+| `reinterpret_view` `FP4E2M1X2` ↔ `UINT8`/`INT8` | ✅ | Same-shape byte alias; use before `reshape` for leading-dim flatten |
+| `reinterpret_view` other FP4-family pairs | ❌ | Logical FP4 and non-byte aliases rejected |
+| Multi-row packed-FP4 GM DMA pitch | ✅ | PTOAS v0.67+ separates addressing and transfer units |
 | `matmul_mx` native FP4 data | ⏳ | Cast lhs to FP8 first when needed |
 
 ## Recommended paths
 
 1. Hand-write `pl.FP4E2M1X2` with physical carrier shapes (avoids `#2754`-class stride bugs).
-2. Cast to BF16 when a native wider float is enough.
-3. Prefer **LUT / host** for FP4→FP8; device cast is Warning-only.
-4. Keep logical `pl.FP4` only if you accept the incomplete path until PackFp4 lands.
+2. For paged-cache flatten: `pl.reshape(pl.reinterpret_view(cache, pl.UINT8), …)` then
+   reinterpret back to `FP4E2M1X2` before `cast` (or stay on a UINT8 nibble ABI).
+3. Cast to BF16 when a native wider float is enough.
+4. Prefer **LUT / host** for FP4→FP8; device cast is Warning-only.
+5. Keep logical `pl.FP4` only if you accept the incomplete path until PackFp4 lands.
 
 ## See also
 
