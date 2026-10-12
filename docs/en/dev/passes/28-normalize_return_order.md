@@ -101,6 +101,8 @@ return lineage because their boundary analyses do not track tensor roots through
 these merges; accepting them could freeze a call-varying boundary slice on replay.
 Variable roots and failures are cached across branch arms and
 return values, avoiding repeated work for sequential conditional writebacks.
+Writeback chains are checked at their final result: temporarily narrowing valid
+shape and restoring it with `tensor.assemble` still allows a parameter return.
 
 **This step is what makes the return→param map readable without an analysis.**
 Once it has run, return position `j` writes back param `i` exactly when
@@ -264,6 +266,7 @@ full set of cases:
 - `test_branch_writeback_and_wrapper_return_reference_param` — same-buffer branches and wrapper forwarding (#2966)
 - `test_branch_return_with_unproven_identity_is_not_canonicalized` — conflicting, fresh, view, and valid-shape branches
 - `test_writeback_after_branch_merge_preserves_returned_valid_shape` — narrowed metadata after a merge, in both return orders
+- `test_restored_writeback_metadata_references_param` — restored and narrowed results sharing lineage, in both return orders
 - `test_sequential_branch_writebacks_share_lineage` — 48 sequential merges share cached lineage
 
 ## Implementation

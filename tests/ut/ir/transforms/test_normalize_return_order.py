@@ -844,6 +844,34 @@ class {name}:
         assert values[int(narrowed_first)] is params[0]
         assert values[int(not narrowed_first)] is not params[0]
 
+    @pytest.mark.parametrize("restored_first", [False, True])
+    def test_restored_writeback_metadata_references_param(self, restored_first):
+        """Validate final metadata rather than rejecting an intermediate narrowing."""
+        program_source = """
+@pl.program
+class {name}:
+    @pl.function(type=pl.FunctionType.AIV, strict_ssa=True)
+    def kernel(
+        self, out: pl.InOut[pl.Tensor[[4, 16], pl.FP32]], tail: pl.Tensor[[2, 16], pl.FP32]
+    ) -> tuple[pl.Tensor[[4, 16], pl.FP32], pl.Tensor[[4, 16], pl.FP32]]:
+        narrowed = pl.tensor.set_validshape(out, 2, 16)
+        restored = pl.tensor.assemble(narrowed, tail, [2, 0])
+        return {returned}
+"""
+        before_return = "restored, narrowed" if restored_first else "narrowed, restored"
+        expected_return = "out, narrowed" if restored_first else "narrowed, out"
+        Before = pl.parse(program_source.replace("{name}", "Before").replace("{returned}", before_return))
+        Expected = pl.parse(
+            program_source.replace("{name}", "Expected").replace("{returned}", expected_return)
+        )
+        assert isinstance(Before, ir.Program)
+        assert isinstance(Expected, ir.Program)
+        After = _run_normalize_direct(Before)
+        ir.assert_structural_equal(After, Expected)
+        values, params = self._return_values(After, "kernel")
+        assert values[int(not restored_first)] is params[0]
+        assert values[int(restored_first)] is not params[0]
+
     def test_sequential_branch_writebacks_share_lineage(self):
         """A linear sequence of merges must not trigger an exponential lineage walk."""
         updates = "\n".join(

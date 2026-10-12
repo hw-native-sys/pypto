@@ -85,6 +85,8 @@ builtin 回写、tuple 调用的 `TupleGetItem`，以及 Group/Spmd 包装函数
 拒绝通过合流追踪返回值：其边界分析尚不支持合流张量的来源，接受这种返回值可能
 导致 replay 时冻结随调用变化的边界切片。变量的参数根和
 失败结果在分支及多个返回值之间共享缓存，避免连续条件回写重复追踪前驱合流。
+回写链检查最终结果的类型：临时收窄有效形状后用 `tensor.assemble` 恢复，仍可将
+返回值规范化为参数引用。
 
 **正是这一步让"返回 → 参数"映射无需分析即可读出。** 它运行之后，返回位置 `j`
 写回参数 `i` 当且仅当 `ReturnStmt->value_[j]` 就**是** `params_[i]`（指针同一
@@ -236,6 +238,7 @@ class Module:
 - `test_branch_writeback_and_wrapper_return_reference_param` —— 同一缓冲区的分支回写及 wrapper 转发（#2966）
 - `test_branch_return_with_unproven_identity_is_not_canonicalized` —— 来源冲突、新张量、视图及有效形状分支
 - `test_writeback_after_branch_merge_preserves_returned_valid_shape` —— 两种返回顺序下保留合流后收窄的元数据
+- `test_restored_writeback_metadata_references_param` —— 两种返回顺序下，共享血缘的恢复结果与收窄结果
 - `test_sequential_branch_writebacks_share_lineage` —— 48 次连续合流共享血缘缓存
 
 ## 实现

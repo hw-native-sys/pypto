@@ -142,32 +142,46 @@ TraceContext& Ctx() {
 std::vector<std::optional<size_t>> ReturnedParamIndicesImpl(const FunctionPtr& func,
                                                             const ProgramPtr& program);
 
-using VarRootMap = std::unordered_map<const Var*, const Var*>;
+struct VarLineage {
+  const Var* root = nullptr;
+  TypePtr returned_type;
+};
+using VarRootMap = std::unordered_map<const Var*, VarLineage>;
 
 // Trace each body var once, caching both roots and failures across branch arms
-// and return values. A provisional nullptr also stops cycles without copying
+// and return values. A provisional empty lineage stops cycles without copying
 // the active path at every merge. Alias chains remain iterative.
-const Var* TraceVar(const Var* var, const BodyIndexCollector& index, const ParamIndexMap& param_indices,
-                    const ProgramPtr& program, VarRootMap& memo, bool check_writeback_types = false) {
-  std::vector<const Var*> path;
-  auto finish = [&](const Var* root) {
-    for (const Var* traversed : path) memo[traversed] = root;
-    return root;
+VarLineage TraceVar(const Var* var, const BodyIndexCollector& index, const ParamIndexMap& param_indices,
+                    const ProgramPtr& program, VarRootMap& memo) {
+  // Aliases and validated user calls forward their source type. Builtin
+  // writebacks retain their own final type, allowing intermediate narrowing
+  // followed by restoration without poisoning the cached storage lineage.
+  std::vector<std::pair<const Var*, bool>> path;
+  auto finish = [&](const Var* root, TypePtr returned_type = nullptr) {
+    VarLineage lineage{root, std::move(returned_type)};
+    for (auto it = path.rbegin(); it != path.rend(); ++it) {
+      if (!it->second) lineage.returned_type = it->first->GetType();
+      memo[it->first] = lineage;
+    }
+    return lineage;
   };
   while (var) {
     if (auto it = memo.find(var); it != memo.end()) {
-      return finish(it->second);
+      return finish(it->second.root, it->second.returned_type);
     }
-    memo.emplace(var, nullptr);
-    path.push_back(var);
+    memo.emplace(var, VarLineage{});
+    path.emplace_back(var, false);
     if (param_indices.count(var)) return finish(var);
 
     if (auto merge_it = index.merge_srcs.find(var); merge_it != index.merge_srcs.end()) {
       const Var* root = nullptr;
       for (const Var* source : merge_it->second) {
-        const Var* branch_root = TraceVar(source, index, param_indices, program, memo, check_writeback_types);
-        if (!branch_root || (root && branch_root != root)) return finish(nullptr);
-        root = branch_root;
+        auto branch = TraceVar(source, index, param_indices, program, memo);
+        if (!branch.root || (root && branch.root != root) ||
+            !structural_equal(branch.returned_type, branch.root->GetType())) {
+          return finish(nullptr);
+        }
+        root = branch.root;
       }
       // Sharing storage is insufficient when the merged value changes its view.
       return finish(root && structural_equal(var->GetType(), root->GetType()) ? root : nullptr);
@@ -183,6 +197,7 @@ const Var* TraceVar(const Var* var, const BodyIndexCollector& index, const Param
     const auto& value = def_it->second->value_;
 
     if (auto rhs_var = AsVarLike(value)) {
+      path.back().second = true;
       var = rhs_var.get();
       continue;
     }
@@ -205,6 +220,7 @@ const Var* TraceVar(const Var* var, const BodyIndexCollector& index, const Param
       if (mapped >= call->args_.size()) return finish(nullptr);
       auto arg_var = AsVarLike(call->args_[mapped]);
       if (!arg_var) return finish(nullptr);
+      path.back().second = true;
       var = arg_var.get();
       continue;
     }
@@ -216,13 +232,6 @@ const Var* TraceVar(const Var* var, const BodyIndexCollector& index, const Param
       if (auto aliased = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size())) {
         auto arg_var = AsVarLike(call->args_[*aliased]);
         if (!arg_var) return finish(nullptr);
-        // Validate type-changing writebacks in their defining function, before
-        // caching a root. Call-result shape Vars may belong to a callee, so a
-        // caller-side comparison against its parameter would reject valid calls.
-        if (check_writeback_types && AsTensorTypeLike(var->GetType()) &&
-            !structural_equal(var->GetType(), arg_var->GetType())) {
-          return finish(nullptr);
-        }
         var = arg_var.get();
         continue;
       }
@@ -253,6 +262,7 @@ const Var* TraceVar(const Var* var, const BodyIndexCollector& index, const Param
         if (mapped >= call->args_.size()) return finish(nullptr);
         auto arg_var = AsVarLike(call->args_[mapped]);
         if (!arg_var) return finish(nullptr);
+        path.back().second = true;
         var = arg_var.get();
         continue;
       }
@@ -273,9 +283,10 @@ std::vector<std::optional<size_t>> TraceExprsToParamIndices(const std::vector<Ex
   for (const auto& expr : exprs) {
     std::optional<size_t> idx;
     if (auto var = AsVarLike(expr)) {
-      if (const Var* root =
-              TraceVar(var.get(), index, param_indices, program, memo, /*check_writeback_types=*/true)) {
-        auto param_it = param_indices.find(root);
+      auto lineage = TraceVar(var.get(), index, param_indices, program, memo);
+      if (lineage.root && (!AsTensorTypeLike(var->GetType()) ||
+                           structural_equal(lineage.returned_type, lineage.root->GetType()))) {
+        auto param_it = param_indices.find(lineage.root);
         if (param_it != param_indices.end()) idx = param_it->second;
       }
     }
@@ -526,7 +537,7 @@ VarPtr TraceToParam(const VarPtr& var, const StmtPtr& body, const std::vector<Va
   index.VisitStmt(body);
   auto param_indices = IndexParams(params);
   VarRootMap memo;
-  const Var* root = TraceVar(var.get(), index, param_indices, program, memo);
+  const Var* root = TraceVar(var.get(), index, param_indices, program, memo).root;
   if (!root) return nullptr;
   auto param_it = param_indices.find(root);
   return param_it == param_indices.end() ? nullptr : params[param_it->second];
