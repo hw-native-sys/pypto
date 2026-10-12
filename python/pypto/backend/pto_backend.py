@@ -1386,7 +1386,7 @@ def _build_group_mapping(
 
 
 def _get_ptoas_flags(
-    memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
+    memory_planner: _passes.MemoryPlanner,
     passes_dump_dir: str | None = None,
 ) -> list[str]:
     """Build the common ptoas flag list for kernel compilation.
@@ -1499,7 +1499,7 @@ def _compile_pto_module(
     pto_code: str,
     unit_name: str,
     output_dir: str,
-    memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
+    memory_planner: _passes.MemoryPlanner,
     dump_ptoas_passes: bool = False,
 ) -> str:
     """Run ptoas for one MLIR module and return the generated C++."""
@@ -1532,7 +1532,7 @@ def _emit_single_function_output(
     pto_code: str,
     output_dir: str,
     skip_ptoas: bool,
-    memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
+    memory_planner: _passes.MemoryPlanner,
     dump_ptoas_passes: bool = False,
 ) -> None:
     """Emit output files for one InCore function."""
@@ -1562,7 +1562,7 @@ def _emit_group_output(
     pto_code: str,
     output_dir: str,
     skip_ptoas: bool,
-    memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
+    memory_planner: _passes.MemoryPlanner,
     dump_ptoas_passes: bool = False,
 ) -> None:
     """Emit output files for one grouped MLIR module."""
@@ -1644,7 +1644,7 @@ def _emit_unit(
     unit: _CodegenUnit,
     output_dir: str,
     skip_ptoas: bool,
-    memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
+    memory_planner: _passes.MemoryPlanner,
     dump_ptoas_passes: bool = False,
 ) -> _EmitResult:
     """Run ptoas + wrapper generation for one codegen unit.
@@ -1717,7 +1717,7 @@ def _run_ptoas_phase(
     prof: CompileProfiler | None,
     result_files: dict[str, str],
     errors: list[tuple[str, Exception]],
-    memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
+    memory_planner: _passes.MemoryPlanner,
     dump_ptoas_passes: bool = False,
 ) -> None:
     """Phase 2: run ptoas for all codegen units, sequentially or in parallel."""
@@ -1801,7 +1801,7 @@ def generate(
         output_dir: Base output directory (used for ptoas intermediates when skip_ptoas=False)
         skip_ptoas: When True, skip the ptoas compilation step and return raw MLIR
             content in result_files with .pto extension instead of compiled .cpp wrappers.
-        memory_planner: Who plans on-chip buffer memory. None uses ``MemoryPlanner.PYPTO``.
+        memory_planner: Who plans on-chip buffer memory. None uses ``MemoryPlanner.DSA_RP``.
         emit_source_loc: When True, suffix each emitted ``.pto`` operation with an
             MLIR ``loc("file":line:col)`` from the IR Span so ptoas diagnostics
             name the user's source. None reads the ``PYPTO_EMIT_PTO_LOC``
@@ -1817,7 +1817,7 @@ def generate(
         Dict mapping relative file paths to their content.
     """
     if memory_planner is None:
-        memory_planner = _passes.MemoryPlanner.PYPTO
+        memory_planner = _passes.get_default_memory_planner()
     if emit_source_loc is None:
         emit_source_loc = emit_source_loc_default()
     if runtime is None:
@@ -1871,7 +1871,7 @@ def _generate_with_distributed(
     output_dir: str,
     skip_ptoas: bool,
     *,
-    memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
+    memory_planner: _passes.MemoryPlanner,
     emit_source_loc: bool = True,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
@@ -2111,7 +2111,7 @@ def _generate_multi_chip(
     output_dir: str,
     skip_ptoas: bool = False,
     *,
-    memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
+    memory_planner: _passes.MemoryPlanner,
     emit_source_loc: bool = True,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
@@ -2151,7 +2151,7 @@ def _generate_single_chip(
     output_dir: str,
     skip_ptoas: bool = False,
     *,
-    memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
+    memory_planner: _passes.MemoryPlanner,
     emit_source_loc: bool = True,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,

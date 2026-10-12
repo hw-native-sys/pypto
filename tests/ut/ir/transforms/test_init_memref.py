@@ -1247,12 +1247,17 @@ class TestPtoLevel3Scratch:
 
     @staticmethod
     def _run(
-        program: ir.Program, backend_type: BackendType, planner=passes.MemoryPlanner.PYPTO
+        program: ir.Program,
+        backend_type: BackendType,
+        planner: passes.MemoryPlanner | None = None,
     ) -> ir.Program:
         _backend.reset_for_testing()
         _backend.set_backend_type(backend_type)
         try:
-            with passes.PassContext([], memory_planner=planner):
+            context = (
+                passes.PassContext([]) if planner is None else passes.PassContext([], memory_planner=planner)
+            )
+            with context:
                 return passes.init_mem_ref()(program)
         finally:
             _backend.reset_for_testing()
@@ -1272,8 +1277,13 @@ class TestPtoLevel3Scratch:
         ("dtype", "expected_cols"),
         [(pl.INT32, 192), (pl.UINT32, 192), (pl.INT16, 448), (pl.UINT16, 448)],
     )
-    def test_a2a3_ci_scratch_is_allocated_by_width(self, dtype, expected_cols):
-        after = self._run(self._ci_program(dtype), BackendType.Ascend910B)
+    @pytest.mark.parametrize(
+        "planner",
+        [None, passes.MemoryPlanner.PYPTO],
+        ids=["default-dsa-rp", "legacy-pypto"],
+    )
+    def test_a2a3_ci_scratch_is_allocated_by_width(self, dtype, expected_cols, planner):
+        after = self._run(self._ci_program(dtype), BackendType.Ascend910B, planner=planner)
         ci = self._calls(after, ir.get_op("tile.ci").name)
         assert len(ci) == 1 and len(ci[0].args) == 3
         tmp = cast(ir.TileType, ci[0].args[2].type)
@@ -1334,8 +1344,13 @@ class TestPtoLevel3Scratch:
         ("src_dtype", "dst_dtype", "expected_bytes"),
         [(pl.FP32, pl.INT16, 1024), (pl.FP16, pl.INT16, 64), (pl.FP16, pl.INT8, 160)],
     )
-    def test_a2a3_narrowing_cast_scratch(self, src_dtype, dst_dtype, expected_bytes):
-        after = self._run(self._cast_program(src_dtype, dst_dtype), BackendType.Ascend910B)
+    @pytest.mark.parametrize(
+        "planner",
+        [None, passes.MemoryPlanner.PYPTO],
+        ids=["default-dsa-rp", "legacy-pypto"],
+    )
+    def test_a2a3_narrowing_cast_scratch(self, src_dtype, dst_dtype, expected_bytes, planner):
+        after = self._run(self._cast_program(src_dtype, dst_dtype), BackendType.Ascend910B, planner=planner)
         cast_call = self._calls(after, ir.get_op("tile.cast").name)[0]
         assert len(cast_call.args) == 2
         tmp = cast(ir.TileType, cast_call.args[1].type)

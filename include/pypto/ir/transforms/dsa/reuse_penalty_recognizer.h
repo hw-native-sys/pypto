@@ -39,21 +39,42 @@ struct RecognizedReusePenalty {
 };
 
 /**
+ * @brief How the recognizer enumerates candidate allocation pairs.
+ *
+ * Both strategies return the same relations. `ReferenceAllPairs` is the
+ * readable specification — every allocation pair, filtered by the promotion
+ * policy — and exists so tests can pin the indexed sweep the compiler runs.
+ */
+enum class ReuseEnumeration : uint8_t {
+  IndexedSweep,
+  ReferenceAllPairs,
+};
+
+/**
  * @brief Recognize the compiler's built-in DSA reuse-penalty policy.
  *
  * The recognizer emits one unit-weight relation per buffer pair for which
- * physical reuse can introduce a cross-pipe WAR or WAW handoff. It requires
- * a complete access set, full-allocation handoff endpoints, and a verified
- * initial write. Same-pipe, partial-view, structurally ambiguous, and
- * uncertain handoffs remain unpenalized.
+ * physical reuse can introduce a cross-resource WAR or WAW handoff. It keeps
+ * the maximal accesses of the earlier allocation and the complete minimal
+ * initial-write frontier of the later one, then promotes a pair when some
+ * maximal access and some first write use two different abstract resources.
+ * A pair is eligible only when both allocations have a complete, classified,
+ * full-allocation access set and a verified initial write. Same-resource,
+ * partial-view, structurally ambiguous, and uncertain handoffs remain
+ * unpenalized, as do correctness and pipeline-intent separations.
  *
- * The active backend supplies execution-pipe classification for supported
- * operation and direct-memory-route combinations. The recognizer does not
- * invoke or simulate ptoas, and skips calls whose backend pipe or physical
- * access contract is unknown.
+ * Ordering comes from a chain-cover reachability index over the statement
+ * dependency graph: each abstract resource is one completion-ordered issue
+ * chain, so one query costs O(1) and the whole index costs O(V + E) for a
+ * fixed number of resources. The recognizer does not invoke or simulate ptoas.
+ *
+ * The route taxonomy is target independent. The active backend decides only
+ * whether the selected SoC can perform an operation's transfer at all, and an
+ * operation it cannot classify leaves its allocations unpenalized.
  */
 [[nodiscard]] std::vector<RecognizedReusePenalty> RecognizeReusePenalties(
-    const FunctionPtr& func, const AllocationPlan& allocation_plan, const backend::Backend& backend);
+    const FunctionPtr& func, const AllocationPlan& allocation_plan, const backend::Backend& backend,
+    ReuseEnumeration enumeration = ReuseEnumeration::IndexedSweep);
 
 }  // namespace dsa_adapter
 }  // namespace ir
