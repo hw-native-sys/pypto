@@ -78,6 +78,12 @@ builtin 回写、tuple 调用的 `TupleGetItem`，以及 Group/Spmd 包装函数
 把每个可追踪到参数的 tensor 返回值替换为参数 `Var` 本身。无法追踪的值
 （kernel 内部分配的输出）和标量保留原表达式。
 
+张量 `IfStmt` 合流仅在所有分支都追踪到同一个参数，且合流值与该参数类型一致时
+才能继续追踪。实际返回的张量也必须与参数类型一致，包括视图（view）和有效形状
+（valid shape）元数据；合流后的 `tensor.set_validshape` 结果不能通过规范化丢失这些
+元数据。来源冲突、新分配张量或改变视图的分支保持原返回表达式。变量的参数根和
+失败结果在分支及多个返回值之间共享缓存，避免连续条件回写重复追踪前驱合流。
+
 **正是这一步让"返回 → 参数"映射无需分析即可读出。** 它运行之后，返回位置 `j`
 写回参数 `i` 当且仅当 `ReturnStmt->value_[j]` 就**是** `params_[i]`（指针同一
 性）——这正是 `IRProperty::ReturnParamsExplicit` 所断言的。因此位于本 pass 及其
@@ -152,6 +158,7 @@ SSA 重命名。在 Graph 被排除期间，这张映射全部返回 `nullopt`�
 | 约束 | 原因 |
 | ---- | ---- |
 | Step A 仅重写 `InCore` 函数 | 其他函数类型（`Orchestration` / `Group` / `Spmd` / `Graph` / opaque）遵循用户声明的返回形态；它们的调用端在 Step B 中被重映射。`Group`/`Spmd`/`Graph` 的返回值在 Step A0 中仍会被规范化为参数引用，但不会被重排 |
+| Step A0 要求类型兼容的分支一致性（branch consensus） | 所有分支必须追踪到同一参数；合流值和实际返回张量都必须保留参数的类型、视图和有效形状 |
 | Step A0 不改动 kernel 内部分配的输出与标量 | 只有参数回写必须显式化；没有参数血缘的返回值没有可引用的参数 |
 | `out_indices.size() > ret_to_param.size()` 时跳过 | 不完整分析不能产生越界置换 —— 保留原状，让 verifier 捕获不一致 |
 | 恒等置换 ⇒ 不重写 | 避免不必要的 `Function` 克隆，使 Pass 幂等 |
@@ -224,6 +231,10 @@ class Module:
 - `test_three_returns_scrambled` —— 三元置换
 - `test_2d_tensor_reorder` —— 2 维 tensor / 多维 offset
 - `test_inout_param_reorder` —— `InOut` 参数同样参与重排
+- `test_branch_writeback_and_wrapper_return_reference_param` —— 同一缓冲区的分支回写及 wrapper 转发（#2966）
+- `test_branch_return_with_unproven_identity_is_not_canonicalized` —— 来源冲突、新张量、视图及有效形状分支
+- `test_writeback_after_branch_merge_preserves_returned_valid_shape` —— 两种返回顺序下保留合流后收窄的元数据
+- `test_sequential_branch_writebacks_share_lineage` —— 48 次连续合流共享血缘缓存
 
 ## 实现
 

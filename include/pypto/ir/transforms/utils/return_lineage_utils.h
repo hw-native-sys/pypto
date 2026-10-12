@@ -32,9 +32,10 @@ namespace return_lineage {
 /// type-compatible param, builtin writeback ops (``tensor.assemble``, ``tile.store``,
 /// ``tensor.set_validshape``), TupleGetItem of a user-call result, and
 /// user calls (single- and tuple-result) — recursing into callees with
-/// memoization and a cycle guard. Group/Spmd wrappers with no top-level
-/// ReturnStmt resolve through their unique returning inner call; a wrapper that
-/// *does* return, but returns the forwarded tuple of a multi-result inner call
+/// memoization and a cycle guard. Tensor return values must have the same type
+/// as the resolved parameter, including view and valid-shape metadata.
+/// Group/Spmd wrappers with no top-level ReturnStmt resolve through their unique returning inner call; a
+/// wrapper that *does* return, but returns the forwarded tuple of a multi-result inner call
 /// (``result = self.inner(...); return result``), is expanded position-by-
 /// position through that call — only when the wrapper declares that many flat
 /// return positions, so a single ``pl.Tuple[...]`` return (one TupleType in

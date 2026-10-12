@@ -148,7 +148,7 @@ using VarRootMap = std::unordered_map<const Var*, const Var*>;
 // and return values. A provisional nullptr also stops cycles without copying
 // the active path at every merge. Alias chains remain iterative.
 const Var* TraceVar(const Var* var, const BodyIndexCollector& index, const ParamIndexMap& param_indices,
-                    const ProgramPtr& program, VarRootMap& memo) {
+                    const ProgramPtr& program, VarRootMap& memo, bool check_writeback_types = false) {
   std::vector<const Var*> path;
   auto finish = [&](const Var* root) {
     for (const Var* traversed : path) memo[traversed] = root;
@@ -165,7 +165,7 @@ const Var* TraceVar(const Var* var, const BodyIndexCollector& index, const Param
     if (auto merge_it = index.merge_srcs.find(var); merge_it != index.merge_srcs.end()) {
       const Var* root = nullptr;
       for (const Var* source : merge_it->second) {
-        const Var* branch_root = TraceVar(source, index, param_indices, program, memo);
+        const Var* branch_root = TraceVar(source, index, param_indices, program, memo, check_writeback_types);
         if (!branch_root || (root && branch_root != root)) return finish(nullptr);
         root = branch_root;
       }
@@ -216,6 +216,13 @@ const Var* TraceVar(const Var* var, const BodyIndexCollector& index, const Param
       if (auto aliased = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size())) {
         auto arg_var = AsVarLike(call->args_[*aliased]);
         if (!arg_var) return finish(nullptr);
+        // Validate type-changing writebacks in their defining function, before
+        // caching a root. Call-result shape Vars may belong to a callee, so a
+        // caller-side comparison against its parameter would reject valid calls.
+        if (check_writeback_types && AsTensorTypeLike(var->GetType()) &&
+            !structural_equal(var->GetType(), arg_var->GetType())) {
+          return finish(nullptr);
+        }
         var = arg_var.get();
         continue;
       }
@@ -266,7 +273,8 @@ std::vector<std::optional<size_t>> TraceExprsToParamIndices(const std::vector<Ex
   for (const auto& expr : exprs) {
     std::optional<size_t> idx;
     if (auto var = AsVarLike(expr)) {
-      if (const Var* root = TraceVar(var.get(), index, param_indices, program, memo)) {
+      if (const Var* root =
+              TraceVar(var.get(), index, param_indices, program, memo, /*check_writeback_types=*/true)) {
         auto param_it = param_indices.find(root);
         if (param_it != param_indices.end()) idx = param_it->second;
       }

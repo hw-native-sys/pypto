@@ -91,6 +91,14 @@ and Group/Spmd wrapper calls) and replaces every tensor return value that
 traces to a param with the param `Var` itself. Untraceable values
 (kernel-allocated outputs) and scalars keep their original expression.
 
+Tensor `IfStmt` merges are traced only when every branch resolves to the same
+parameter and the merge type matches that parameter. The actual returned tensor
+must also match the parameter type, including view and valid-shape metadata;
+a `tensor.set_validshape` after the merge cannot discard that metadata by
+canonicalizing its result. Conflicting, fresh, or view-changing branches stay
+uncanonicalized. Variable roots and failures are cached across branch arms and
+return values, avoiding repeated work for sequential conditional writebacks.
+
 **This step is what makes the return→param map readable without an analysis.**
 Once it has run, return position `j` writes back param `i` exactly when
 `ReturnStmt->value_[j]` *is* `params_[i]` by pointer identity — which is what
@@ -175,6 +183,7 @@ buffer, just under a new index.
 | Constraint | Reason |
 | ---------- | ------ |
 | Only `InCore` functions are rewritten in Step A | Other function kinds (`Orchestration` / `Group` / `Spmd` / `Graph` / opaque) follow the user's declared return shape; their callers are remapped in Step B. `Group`/`Spmd`/`Graph` returns are still canonicalized to params in Step A0, but never reordered |
+| Step A0 requires type-compatible branch consensus | Every branch must resolve to the same parameter; both the merge and actual returned tensor must preserve its type/view/valid shape |
 | Step A0 leaves kernel-allocated outputs and scalars untouched | Only param writebacks must be explicit; a return value with no param lineage has no param to reference |
 | Skips functions where `out_indices.size() > ret_to_param.size()` | An incomplete analysis must not produce an out-of-bounds permutation — leave the function as-is so the verifier can flag the inconsistency |
 | Permutation is identity ⇒ no rewrite | Avoids spurious `Function` clones and keeps the pass idempotent |
@@ -249,6 +258,10 @@ full set of cases:
 - `test_three_returns_scrambled` — three-way permutation
 - `test_2d_tensor_reorder` — 2-D tensors / multi-dim offsets
 - `test_inout_param_reorder` — `InOut` participates in reordering
+- `test_branch_writeback_and_wrapper_return_reference_param` — same-buffer branches and wrapper forwarding (#2966)
+- `test_branch_return_with_unproven_identity_is_not_canonicalized` — conflicting, fresh, view, and valid-shape branches
+- `test_writeback_after_branch_merge_preserves_returned_valid_shape` — narrowed metadata after a merge, in both return orders
+- `test_sequential_branch_writebacks_share_lineage` — 48 sequential merges share cached lineage
 
 ## Implementation
 

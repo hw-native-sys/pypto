@@ -808,6 +808,42 @@ class Before:
         assert values[0] is before_values[0]
         assert all(values[0] is not param for param in params)
 
+    @pytest.mark.parametrize("narrowed_first", [False, True])
+    def test_writeback_after_branch_merge_preserves_returned_valid_shape(self, narrowed_first):
+        """Final type checks also apply when the merge root is already cached."""
+
+        program_source = """
+@pl.program
+class {name}:
+    @pl.function(type=pl.FunctionType.AIV, strict_ssa=True)
+    def kernel(
+        self, out: pl.InOut[pl.Tensor[[4, 16], pl.FP32]], condition: pl.Scalar[pl.BOOL]
+    ) -> tuple[pl.Tensor[[4, 16], pl.FP32], pl.Tensor[[4, 16], pl.FP32]]:
+        if condition:
+            then_value = pl.tile.full([1, 16], pl.FP32, 1.0)
+            then_out = pl.store(then_value, [0, 0], out)
+            merged_out = pl.yield_(then_out)
+        else:
+            else_value = pl.tile.full([1, 16], pl.FP32, 0.0)
+            else_out = pl.store(else_value, [0, 0], out)
+            merged_out = pl.yield_(else_out)
+        result = pl.tensor.set_validshape(merged_out, 2, 16)
+        return {returned}
+"""
+        before_return = "result, merged_out" if narrowed_first else "merged_out, result"
+        expected_return = "result, out" if narrowed_first else "out, result"
+        Before = pl.parse(program_source.replace("{name}", "Before").replace("{returned}", before_return))
+        Expected = pl.parse(
+            program_source.replace("{name}", "Expected").replace("{returned}", expected_return)
+        )
+        assert isinstance(Before, ir.Program)
+        assert isinstance(Expected, ir.Program)
+        After = _run_normalize_direct(Before)
+        ir.assert_structural_equal(After, Expected)
+        values, params = self._return_values(After, "kernel")
+        assert values[int(narrowed_first)] is params[0]
+        assert values[int(not narrowed_first)] is not params[0]
+
     def test_sequential_branch_writebacks_share_lineage(self):
         """A linear sequence of merges must not trigger an exponential lineage walk."""
         updates = "\n".join(
