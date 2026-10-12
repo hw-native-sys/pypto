@@ -15,13 +15,14 @@ takes slot k" — which is exactly ptoas's ``pto.alloc_multi_tile`` /
 as one region and derive per-slot (dynamic event id) synchronization from the
 slot expression, instead of seeing N unrelated buffers.
 
-Only under the **PTOAS** planner. Under the PyPTO planner ptoas runs at
-``--pto-level=level3``, where a region needs an explicit ``addr`` base that codegen
-does not emit — so the baked-address ``pto.alloc_tile`` path stays.
+The default PyPTO path keeps ordinary addressed allocations. Software-pipeline
+mode opts in to fixed-address regions at ``--pto-level=level3``.
 """
 
 # DSL function bodies are parsed as AST, not executed — suppress pyright errors.
 # pyright: reportUndefinedVariable=false
+
+import re
 
 import pypto.language as pl
 import pytest
@@ -41,6 +42,55 @@ RUNTIME_VALID = pl.MemRef(slots=2)
 CO_LIVE = pl.MemRef(slots=2)
 PREFETCH = pl.MemRef(slots=2)
 SIBLING_LOOPS = pl.MemRef(slots=2)
+PREFETCHED = pl.MemRef(slots=3)
+REVERSE_SLOTS = pl.MemRef(slots=2)
+
+
+@pl.program
+class PrefetchedSlots:
+    """Two preloads followed by load-next / compute-current and two drain steps."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 1024], pl.FP32],
+        output: pl.Out[pl.Tensor[[64, 1024], pl.FP32]],
+    ) -> pl.Tensor[[64, 1024], pl.FP32]:
+        _first: pl.Tile[[1, 1024], pl.FP32, PREFETCHED[0], pl.Mem.Vec] = pl.load(a, [0, 0], [1, 1024])
+        _second: pl.Tile[[1, 1024], pl.FP32, PREFETCHED[1], pl.Mem.Vec] = pl.load(a, [1, 0], [1, 1024])
+        for i in pl.range(62):
+            _future: pl.Tile[[1, 1024], pl.FP32, PREFETCHED[(i + 2) % 3], pl.Mem.Vec] = pl.load(
+                a, [i + 2, 0], [1, 1024]
+            )
+            current: pl.Tile[[1, 1024], pl.FP32, PREFETCHED[i % 3], pl.Mem.Vec] = pl.tile.create(
+                [1, 1024], pl.FP32, target_memory=pl.Mem.Vec
+            )
+            y: pl.Tile[[1, 1024], pl.FP32, PREFETCHED[i % 3], pl.Mem.Vec] = pl.add(current, 1.0)
+            output = pl.store(y, [i, 0], output)
+        penultimate: pl.Tile[[1, 1024], pl.FP32, PREFETCHED[2], pl.Mem.Vec] = pl.tile.create(
+            [1, 1024], pl.FP32, target_memory=pl.Mem.Vec
+        )
+        output = pl.store(pl.add(penultimate, 1.0), [62, 0], output)
+        last: pl.Tile[[1, 1024], pl.FP32, PREFETCHED[0], pl.Mem.Vec] = pl.tile.create(
+            [1, 1024], pl.FP32, target_memory=pl.Mem.Vec
+        )
+        output = pl.store(pl.add(last, 1.0), [63, 0], output)
+        return output
+
+
+@pl.program
+class ReverseConstantSlots:
+    """The first tile names slot 1; its address is not the allocation base."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        first: pl.Tile[[64, 64], pl.FP32, REVERSE_SLOTS[1], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+        second: pl.Tile[[64, 64], pl.FP32, REVERSE_SLOTS[0], pl.Mem.Vec] = pl.exp(first)
+        return pl.store(second, [0, 0], output)
 
 
 @pl.program
@@ -292,11 +342,13 @@ class SingleSlotDeclaration:
         return pl.store(t0, [0, 0], output)
 
 
-def _codegen(program: ir.Program, planner: passes.MemoryPlanner) -> str:
+def _codegen(
+    program: ir.Program, planner: passes.MemoryPlanner, *, enable_software_pipeline: bool = False
+) -> str:
     """Compile ``program``'s InCore kernel under ``planner`` and emit its PTO IR."""
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend910B)
-    with passes.PassContext([], memory_planner=planner):
+    with passes.PassContext([], memory_planner=planner, enable_software_pipeline=enable_software_pipeline):
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
         optimized = pm.run_passes(program)
     func = next(f for f in optimized.functions.values() if f.name == "kernel")
@@ -304,7 +356,9 @@ def _codegen(program: ir.Program, planner: passes.MemoryPlanner) -> str:
     # The planner also decides the address mode: PTOAS plans (no addr, level2),
     # PyPTO bakes (addr, level3) — same pairing compile() applies.
     emit_tile_addr = planner == passes.MemoryPlanner.PYPTO
-    return codegen.PTOCodegen().generate(single, emit_tile_addr=emit_tile_addr)
+    return codegen.PTOCodegen().generate(
+        single, emit_tile_addr=emit_tile_addr, enable_software_pipeline=enable_software_pipeline
+    )
 
 
 def _lines(mlir: str, needle: str) -> list[str]:
@@ -406,12 +460,7 @@ class TestFallbacks:
     """Everything the ptoas multi-buffer form does not cover keeps alloc_tile."""
 
     def test_pypto_planner_keeps_baked_addresses(self):
-        """level3 gets no region: codegen emits no `addr` base for one.
-
-        ptoas is not the limit — given a constant `addr` it has derived per-slot sync
-        at level3 since 0.55 (hw-native-sys/PTOAS#1106, closed). Emitting the region's
-        base is the missing PyPTO side, so the baked-address path stays.
-        """
+        """Without the opt-in flag, level3 retains its original allocation path."""
         mlir = _codegen(RotatingSlot, passes.MemoryPlanner.PYPTO)
         assert not _lines(mlir, "pto.alloc_multi_tile"), f"level3 must not use a region:\n{mlir}"
         assert not _lines(mlir, "pto.multi_tile_get"), f"level3 must not use a region:\n{mlir}"
@@ -433,6 +482,275 @@ class TestFallbacks:
         mlir = _codegen(SingleSlotDeclaration, passes.MemoryPlanner.PYPTO)
         assert not _lines(mlir, "pto.alloc_multi_tile"), f"a single slot is not a region:\n{mlir}"
         assert _lines(mlir, "pto.alloc_tile"), f"expected the ordinary alloc path:\n{mlir}"
+
+
+class TestFixedAddressMultiBuffer:
+    @pytest.mark.parametrize("stage", [2, 3, 4])
+    def test_compute_chain_reuses_one_input_region_through_the_store(self, stage):
+        """Last-use compute chains share an input region without extra UB storage."""
+
+        @pl.program
+        class BinaryChain:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[65, 1024], pl.FP32],
+                b: pl.Tensor[[65, 1024], pl.FP32],
+                output: pl.Out[pl.Tensor[[65, 1024], pl.FP32]],
+            ) -> pl.Tensor[[65, 1024], pl.FP32]:
+                for i in pl.pipeline(65, stage=stage):
+                    lhs = pl.load(a, [i, 0], [1, 1024])
+                    rhs = pl.load(b, [i, 0], [1, 1024])
+                    intermediate = pl.add(lhs, rhs)
+                    result = pl.add(intermediate, 1.0)
+                    output = pl.store(result, [i, 0], output)
+                return output
+
+        mlir = _codegen(BinaryChain, passes.MemoryPlanner.PYPTO, enable_software_pipeline=True)
+        regions = _lines(mlir, "pto.alloc_multi_tile")
+        assert len(regions) == 2, mlir
+        assert all(f"count={stage}" in line for line in regions), mlir
+        # Two input streams retain exactly stage-1 preloads plus one steady load.
+        assert len(_lines(mlir, "pto.tload")) == 2 * stage, mlir
+        assert len(_lines(mlir, "pto.tstore")) == stage, mlir
+        handle_regions = {
+            line.split("=")[0].strip(): line.split("pto.multi_tile_get ")[1].split("[")[0]
+            for line in _lines(mlir, "pto.multi_tile_get")
+        }
+        input_regions = {
+            handle_regions[line.split("outs(")[1].split(" :")[0].strip()]
+            for line in _lines(mlir, "pto.tload")
+        }
+        stored_handles = [line.split("ins(")[1].split(" :")[0].strip() for line in _lines(mlir, "pto.tstore")]
+        output_regions = {handle_regions[handle] for handle in stored_handles}
+        assert len(input_regions) == 2 and len(output_regions) == 1, mlir
+        assert output_regions <= input_regions, mlir
+        additions = _lines(mlir, "pto.tadds ")
+        assert len(additions) == len(stored_handles), mlir
+        for addition, stored in zip(additions, stored_handles, strict=True):
+            intermediate = addition.split("ins(")[1].split(",")[0].strip()
+            result = addition.split("outs(")[1].split(" :")[0].strip()
+            assert intermediate == result, "Last-use compute must retain the same slot handle"
+            assert result == stored, "The store must consume the exact current output-slot handle"
+
+        constants = {
+            name: int(value) for name, value in re.findall(r"(%\w+) = arith.constant (\d+) : i64", mlir)
+        }
+        region_ranges = []
+        for region in regions:
+            address = constants[region.split("addr = ")[1].split()[0]]
+            region_ranges.append((address, address + stage * 4096))
+        region_ranges.sort()
+        assert all(first[1] <= second[0] for first, second in zip(region_ranges, region_ranges[1:]))
+        ordinary_addresses = {
+            constants[line.split("addr = ")[1].split()[0]] for line in _lines(mlir, "pto.alloc_tile")
+        }
+        assert not ordinary_addresses, "The last-use chain needs no independent temporary"
+        assert max(end for _, end in region_ranges) == 2 * stage * 4096
+
+    def test_two_inputs_have_distinct_fixed_regions_and_inplace_compute(self):
+        """Exercise compiler slots at a nonzero base and keep ordinary modulo signed."""
+
+        @pl.program
+        class TwoInputs:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 1024], pl.FP32],
+                b: pl.Tensor[[64, 1024], pl.FP32],
+                output: pl.Out[pl.Tensor[[64, 1024], pl.FP32]],
+            ) -> pl.Tensor[[64, 1024], pl.FP32]:
+                for i in pl.pipeline(64, stage=3):
+                    row = (i + 1) % 64
+                    lhs = pl.load(a, [i, 0], [1, 1024])
+                    rhs = pl.load(b, [row, 0], [1, 1024])
+                    result = pl.add(lhs, rhs)
+                    output = pl.store(result, [i, 0], output)
+                return output
+
+        mlir = _codegen(TwoInputs, passes.MemoryPlanner.PYPTO, enable_software_pipeline=True)
+        regions = _lines(mlir, "pto.alloc_multi_tile")
+        assert len(regions) == 2, mlir
+        assert all("count=3" in line for line in regions), mlir
+        addresses = {line.split("addr = ")[1].split()[0] for line in regions}
+        assert addresses == {"%c0_i64", "%c12288_i64"}, mlir
+        assert len(_lines(mlir, "pto.tload")) == 6, mlir
+        assert len(_lines(mlir, "pto.tadd ")) == 3, mlir
+        assert _lines(mlir, "arith.remui"), mlir
+        assert _lines(mlir, "arith.remsi"), mlir
+        handle_regions = {
+            line.split("=")[0].strip(): line.split("pto.multi_tile_get ")[1].split("[")[0]
+            for line in _lines(mlir, "pto.multi_tile_get")
+        }
+        for line in _lines(mlir, "pto.tadd "):
+            first_input = line.split("ins(")[1].split(",")[0].strip()
+            output = line.split("outs(")[1].split(" :")[0].strip()
+            assert handle_regions[first_input] == handle_regions[output], line
+            assert first_input == output, "In-place slot compute must preserve PTOAS slot SSA identity"
+
+    def test_prefetch_uses_one_addressed_region_and_unsigned_slot_indices(self):
+        mlir = _codegen(PrefetchedSlots, passes.MemoryPlanner.PYPTO, enable_software_pipeline=True)
+        regions = _lines(mlir, "pto.alloc_multi_tile")
+        assert len(regions) == 1, mlir
+        assert "addr = %c0_i64" in regions[0], mlir
+        assert "count=3" in regions[0], mlir
+        assert "v_row=1, v_col=1024" in regions[0], mlir
+        assert "valid_row =" not in regions[0], mlir
+        assert len(_lines(mlir, "scf.for")) == 1, mlir
+        assert len(_lines(mlir, "pto.tload")) == 3, mlir
+        assert len(_lines(mlir, "pto.tstore")) == 3, mlir
+        assert len(_lines(mlir, "arith.remui")) >= 2, mlir
+        assert not _lines(mlir, "arith.remsi"), mlir
+        gets = _lines(mlir, "pto.multi_tile_get")
+        handles = {line.split("=")[0].strip() for line in gets}
+        assert len(gets) >= 6, mlir
+        assert not (handles & {line.split("=")[0].strip() for line in _lines(mlir, "pto.alloc_tile")})
+        steady_add = _lines(mlir, "pto.tadds ")[0]
+        first_input = steady_add.split("ins(")[1].split(",")[0].strip()
+        output = steady_add.split("outs(")[1].split(" :")[0].strip()
+        assert first_input == output, "Duplicate same-slot gets prevent PTOAS from deriving overlap"
+
+    def test_first_selected_slot_is_not_used_as_the_region_base(self):
+        mlir = _codegen(ReverseConstantSlots, passes.MemoryPlanner.PYPTO, enable_software_pipeline=True)
+        region = _lines(mlir, "pto.alloc_multi_tile")
+        assert len(region) == 1, mlir
+        assert "addr = %c0_i64" in region[0], mlir
+        assert "count=2" in region[0], mlir
+        gets = _lines(mlir, "pto.multi_tile_get")
+        assert len(gets) == 2, "A different output slot must retain its own handle"
+        assert "[%c1_index]" in gets[0], mlir
+
+    @pytest.mark.parametrize("program", [MixedSlotShapes, MixedSlotValidShapes, RuntimeValidShapeSlots])
+    def test_unsupported_region_keeps_the_existing_addressed_path(self, program):
+        mlir = _codegen(program, passes.MemoryPlanner.PYPTO, enable_software_pipeline=True)
+        assert not _lines(mlir, "pto.alloc_multi_tile"), mlir
+        assert _lines(mlir, "pto.alloc_tile"), mlir
+
+    def test_default_prefetch_codegen_still_uses_individual_allocations(self):
+        mlir = _codegen(PrefetchedSlots, passes.MemoryPlanner.PYPTO)
+        assert not _lines(mlir, "pto.alloc_multi_tile"), mlir
+        assert _lines(mlir, "arith.remsi"), mlir
+
+    @pytest.mark.parametrize("unsupported_index", [False, True])
+    def test_shared_nested_ordinal_retains_slot_identity(self, unsupported_index):
+        @pl.program
+        class SharedOrdinal:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 64], pl.FP32],
+                output: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ):
+                for group in pl.range(
+                    8, attrs={"software_pipeline_slots": 3, "software_pipeline_nested_stride": 2}
+                ):
+                    ordinal = group * 2
+                    slot = ordinal % 2
+                    _tile: pl.Tile[[1, 64], pl.FP32, PREFETCH[slot], pl.Mem.Vec] = pl.load(
+                        a, [ordinal, 0], [1, 64]
+                    )
+                    current: pl.Tile[[1, 64], pl.FP32, PREFETCH[slot], pl.Mem.Vec] = pl.tile.create(
+                        [1, 64], pl.FP32, target_memory=pl.Mem.Vec
+                    )
+                    output = pl.store(current, [ordinal, 0], output)
+
+        if unsupported_index:
+            unsupported = pl.parse_program(
+                SharedOrdinal.as_python().replace("ordinal % 2", "(group // 2) % 2")
+            )
+            with pytest.raises(ValueError, match="Slot identity is required"):
+                _codegen(unsupported, passes.MemoryPlanner.PYPTO, enable_software_pipeline=True)
+            return
+        mlir = _codegen(SharedOrdinal, passes.MemoryPlanner.PYPTO, enable_software_pipeline=True)
+        assert len(_lines(mlir, "pto.alloc_multi_tile")) == 1, mlir
+        assert _lines(mlir, "pto.multi_tile_get"), mlir
+        assert _lines(mlir, "arith.remui"), mlir
+        assert not _lines(mlir, "arith.remsi"), mlir
+
+
+@pytest.mark.parametrize("count", [6, 192])
+def test_guarded_hierarchical_slots_keep_explicit_parent_aliases(count):
+    banked = pl.MemRef("hierarchical", slots=count)
+
+    @pl.program
+    class Banked:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[16, 64], pl.FP32],
+            output: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ):
+            prime: pl.Tile[[1, 64], pl.FP32, banked[5], pl.Mem.Vec] = pl.load(a, [0, 0], [1, 64])
+            output = pl.store(prime, [0, 0], output)
+            for group in pl.range(
+                8, attrs={"software_pipeline_slots": 3, "software_pipeline_nested_stride": 8}
+            ):
+                parent_slot = group % 3
+                slot = parent_slot + 3
+                if group < 7:
+                    value: pl.Tile[[1, 64], pl.FP32, banked[slot], pl.Mem.Vec] = pl.load(
+                        a, [group, 0], [1, 64]
+                    )
+                    _stored = pl.store(value, [group, 0], output)
+
+    mlir = _codegen(Banked, passes.MemoryPlanner.PYPTO, enable_software_pipeline=True)
+    assert not _lines(mlir, "pto.alloc_multi_tile")
+    allocations = _lines(mlir, "pto.alloc_tile addr =")
+    assert len(allocations) == count // 3
+    constants = {name: int(value) for name, value in re.findall(r"(%\w+) = arith.constant (\d+) : i64", mlir)}
+    addresses = [constants[re.search(r"addr = (%\w+)", line)[1]] for line in allocations]
+    assert addresses == [3 * 256 * bank for bank in range(count // 3)]
+    views = _lines(mlir, "pto.subview")
+    assert len(views) == 2 and all("sizes [1, 64]" in view for view in views)
+    parent = allocations[1].strip().split(" = ")[0]
+    assert all(f"pto.subview {parent}[" in view for view in views)
+    assert mlir.index("arith.remui") < mlir.index("scf.if"), mlir
+
+
+def test_distinct_affine_slot_indices_do_not_share_a_cached_remainder():
+    left_slots = pl.MemRef("left_slots", slots=6)
+    right_slots = pl.MemRef("right_slots", slots=6)
+
+    @pl.program
+    class DifferentStrides:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, x: pl.Tensor[[4, 64], pl.FP32], y: pl.Out[pl.Tensor[[4, 64], pl.FP32]]):
+            for i in pl.range(4, attrs={"software_pipeline_slots": 3, "software_pipeline_nested_stride": 3}):
+                left: pl.Tile[[1, 64], pl.FP32, left_slots[(i * 2) % 6], pl.Mem.Vec] = pl.load(
+                    x, [i, 0], [1, 64]
+                )
+                right: pl.Tile[[1, 64], pl.FP32, right_slots[(i * 3) % 6], pl.Mem.Vec] = pl.load(
+                    x, [i, 0], [1, 64]
+                )
+                result = pl.add(left, right)
+                _stored = pl.store(result, [i, 0], y)
+
+    pto = _codegen(DifferentStrides, passes.MemoryPlanner.PYPTO, enable_software_pipeline=True)
+    # At i=1 these coordinates are 2 and 3; their SSA values cannot be shared.
+    remainders = _lines(pto, "arith.remui")
+    assert len(remainders) == 2
+    selected = _lines(pto, "pto.multi_tile_get")
+    assert len(selected) == 2
+    assert selected[0].split("[")[1].split("]")[0] != selected[1].split("[")[1].split("]")[0]
+
+
+@pytest.mark.parametrize("offset", [-1, 1, 24])
+def test_unproved_hierarchical_bank_is_rejected(offset):
+    banked = pl.MemRef("hierarchical", slots=24)
+
+    @pl.program
+    class InvalidBank:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, a: pl.Tensor[[16, 64], pl.FP32], output: pl.Out[pl.Tensor[[16, 64], pl.FP32]]):
+            for group in pl.range(
+                8, attrs={"software_pipeline_slots": 3, "software_pipeline_nested_stride": 8}
+            ):
+                slot = group % 3 + offset
+                value: pl.Tile[[1, 64], pl.FP32, banked[slot], pl.Mem.Vec] = pl.load(a, [group, 0], [1, 64])
+                output = pl.store(value, [group, 0], output)
+
+    with pytest.raises(ValueError, match="Slot identity is required"):
+        _codegen(InvalidBank, passes.MemoryPlanner.PYPTO, enable_software_pipeline=True)
 
 
 class TestUnsupportedShapesAreLoud:

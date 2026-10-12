@@ -830,6 +830,57 @@ def test_pass_context_conflict_is_rejected_before_cache_lookup(kernel, compile_c
     assert len(compile_calls) == 1
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_software_pipeline_conflict_is_rejected_before_cache_lookup(kernel, compile_calls, enabled):
+    config = RunConfig(enable_software_pipeline=enabled)
+    kernel.compile(config=config)
+    with passes.PassContext([]), pytest.raises(RuntimeError, match="enable_software_pipeline.*PassContext"):
+        kernel.compile(config=config)
+    assert len(compile_calls) == 1
+
+
+def test_software_pipeline_cache_separates_effective_modes(kernel, compile_calls):
+    ordinary = kernel.compile()
+    enabled = kernel.compile(config=RunConfig(enable_software_pipeline=True))
+    assert enabled is not ordinary
+    assert kernel.compile(config=RunConfig(enable_software_pipeline=False)) is ordinary
+    with passes.PassContext([], enable_software_pipeline=True):
+        assert kernel.compile() is enabled
+    assert kernel.compile() is ordinary
+    assert len(compile_calls) == 2
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_lower_forwards_software_pipeline_run_config(kernel, monkeypatch, enabled):
+    compile_module = importlib.import_module("pypto.ir.compile")
+    seen = []
+    run_pipeline = compile_module._run_pass_pipeline
+
+    def observe_pipeline(*args, **kwargs):
+        seen.append(kwargs["enable_software_pipeline"])
+        return run_pipeline(*args, **kwargs)
+
+    monkeypatch.setattr(compile_module, "_run_pass_pipeline", observe_pipeline)
+    kernel.lower(config=RunConfig(enable_software_pipeline=enabled))
+    assert seen == [enabled]
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_compile_forwards_run_config_software_pipeline_to_codegen(kernel, monkeypatch, enabled):
+    compile_module = importlib.import_module("pypto.ir.compile")
+    generate = compile_module.generate
+    seen = []
+
+    def observe_generate(*args, **kwargs):
+        seen.append(kwargs["enable_software_pipeline"])
+        assert passes.PassContext.current() is None
+        return generate(*args, **kwargs)
+
+    monkeypatch.setattr(compile_module, "generate", observe_generate)
+    kernel.compile(config=RunConfig(enable_software_pipeline=enabled))
+    assert seen == [enabled]
+
+
 def test_failed_diagnostic_compile_preserves_ordinary_entry(kernel, compile_calls, monkeypatch):
     cached = kernel.compile()
 

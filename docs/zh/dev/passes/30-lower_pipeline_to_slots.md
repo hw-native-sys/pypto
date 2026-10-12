@@ -1,8 +1,36 @@
 # LowerPipelineToSlots Pass
 
-把 `pl.pipeline(N, stage=F)` 循环改为让**一份**循环体轮转同一个分配的 `F` 个 slot，而不是把循环体复制 `F` 份。
+把合格的 `pl.pipeline(N, stage=F)` 循环下降为现有 slot MemRef。默认 PyPTO 路径保留 unroll + reorder；`enable_software_pipeline=True` 开启固定地址的显式预取。原有 PTOAS planner 轮转路径单独保留。
 
-## 概述
+## 确定性的嵌套数据流规则
+
+同一生产者调度器处理带或不带子 pipeline 的单向 FIFO 循环。
+辅助 GM 加载采用声明作用域的 stage 和 S-1 提前量；固定 unroll 工作没有额外的两槽特化。
+
+对于可证明安全的嵌套流水，每个分配在各层 pipeline 作用域都有版本坐标。
+外层 stage=A、内层 stage=B 时预留 A*B 个版本；再嵌套 stage=C 时预留 A*B*C。
+版本数量由 stage 决定，不由子循环迭代次数决定；外层自身的分配仍只有 A 个版本。
+
+InitMemRef 之后，MemoryReuse 在各层统一使用共享生命周期分析和算子别名契约决定复用。计算产生的 store 结果可覆盖
+最后使用且兼容的输入；store 延长该存储的异步生命周期，不强制独立 output ring。
+必须共享的 view 保持源身份；无法安全复用输入的结果保留普通分配，不由调度 pass 创建 output ring。
+
+物理布局把外层坐标放在最快变化的维度：两层为
+`(child_iteration % B) * A + (root_iteration % A)`，更深层使用 stage 的混合进制余数。
+PyPTO 预留完整乘积区域。运行时或带条件的调度使用固定地址父 buffer 与显式 slot subview，
+保留全部物理槽及坐标，不依赖 PTOAS 私有事件边界契约。
+
+无外层条件保护的定长子循环使用连续序号
+`parent * child_trip_count + child_iteration`。先预载 `S-1` 个输入，随后
+在每个子 phase 发起超前 `S-1` 次迭代的输入，包括跨父迭代边界的输入。
+未来加载保留自己的地址与有效性条件，并检查未来父迭代未越界。提前量还受同一物理槽
+两次使用的最短距离限制，避免短子循环覆盖仍存活的父版本；分配深度不缩减。
+父层计算顺序不变。无法证明可跨越外层条件时，保留局部预取。
+
+InitMemRef 物化存储，MemoryReuse 决定复用，AllocateMemoryAddr 检查最终容量。
+调度 pass 不维护另一套容量预算，也不降低声明的槽数。
+
+## 原有轮转方案概述
 
 `pl.pipeline(N, stage=F)` 表达的是乒乓缓冲的诉求。[`LowerPipelineLoops`](31-lower_pipeline_loops.md) 用**复制**来兑现：把循环体复制 `F` 份，每份都有全新的定义变量，于是各份的 tile 是彼此独立的 MemRef，`MemoryReuse` 不允许把它们合并。这条路可行，但代价是 `F` 倍的代码量、一套静态/动态余数派发，以及为了隔开各份副本而存在的 `pipeline_membership` 机制。
 
@@ -21,7 +49,7 @@ for i in pl.range(64):
     pl.tile.store(x, [i * 128], out)
 ```
 
-**不引入新的 IR op，也不新增用户可见开关。** 合成出来的 MemRef 与作者手写的声明形状完全一致，因此 [`InitMemRef`](34-init_memref.md) 走同一条路径解析它，codegen 也分辨不出这个轮转是作者写的还是编译器推导的。
+**原有轮转方案不需要新的 IR op 或额外开关。** 合成出来的 MemRef 与作者手写的声明形状完全一致，因此 [`InitMemRef`](34-init_memref.md) 走同一条路径解析它，codegen 也分辨不出这个轮转是作者写的还是编译器推导的。
 
 由于边界、步长和 `iter_args` 都没有改动，不存在需要派发的余数——动态 trip count 完全不需要特殊处理。
 
@@ -29,22 +57,95 @@ for i in pl.range(64):
 
 **流水位置**：在 [`SkewCrossCorePipeline`](29-skew_cross_core_pipeline.md) 之后，紧接 [`LowerPipelineLoops`](31-lower_pipeline_loops.md) 之前。足够晚，内存空间已推断、tile 结构已定型；又足够早，`InitMemRef` 还没有给这些 tile 分配编译器自己的 MemRef。
 
+对于有界局部嵌套 pipeline，同一规划器保留各子循环的 stage，并专门化为共享的
+仿射槽流。详见[嵌套作用域规则与限制](29-skew_cross_core_pipeline.md#嵌套局部-pipeline-作用域)。
+
 ## 两个 pass 是互补关系，不是二选一
 
 两者都会执行，且按此顺序。本 pass 只接手能证明安全的循环并将其降级；**凡是它不接手的循环都保持 `ForKind::Pipeline`**，由 `LowerPipelineLoops` 照旧复制。不会因为本 pass 的存在而让任何循环失去乒乓——matmul L0 stage 循环、嵌套 pipeline、形状特殊的循环都仍然走复制路径。
 
 这与 [`SkewCrossCorePipeline`](29-skew_cross_core_pipeline.md) 的做法同构：它处理跨核 pipeline 循环，其余原样留下。
 
-## 自门控于 `memory_planner=PTOAS`
+## 可选的 PyPTO 软件流水
 
-在默认的 PyPTO planner 下，本 pass 对每个函数都原样返回，因此那条路径保持**字节一致**。
+按编译开启新调度，DSL 保持不变：
 
-这个门控划的是"region 在哪里被**发出**"，而不是"ptoas 在哪里**能用** region"。PTO codegen 的 `PlanMultiBufferRegions` 在 PyPTO planner 下直接返回，所以在那条路上合成的轮转只会落成一条运行时地址的普通 `alloc_tile`——正确，但拿不到本变换赖以生效的 slot 分析。
+```python
+import pypto.language as pl
+from pypto.runtime import RunConfig
 
-**限制不在 ptoas。** 给定 `pto.alloc_multi_tile addr = <常量 base>`，ptoas 0.55 在 `--pto-level=level3` 下推导出的 per-slot 动态 event 同步与 level2 一致——在一个预取循环上实测，归一化 event id 后同步算子序列逐条相同（prime 两个 event、按 slot 键控的 `wait_flag`/`set_flag`、两个 drain）。ptoas 0.54 则不会，这正是较早的
-[PTOAS#1106](https://github.com/hw-native-sys/PTOAS/issues/1106) 所描述的情形。
+@pl.jit
+def vec_add(x: pl.Tensor[[64, 1024], pl.FP32],
+            y: pl.Out[pl.Tensor[[64, 1024], pl.FP32]]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        for i in pl.pipeline(64, stage=3):
+            y[i:i + 1, :] = pl.add(x[i:i + 1, :], 1.0)
+    return y
 
-因此放宽门控要做的是 PyPTO 侧而非上游的工作：地址分配器需要为 region base 预留 `slot_count * slot_size`，codegen 需要把该地址发到 region 上。这属于后续工作；在它落地之前，本 pass 只覆盖 codegen 路径已经存在的那个 planner。
+vec_add.compile(config=RunConfig(enable_software_pipeline=True, codegen_only=True))
+```
+
+`PassContext([], enable_software_pipeline=True)` 和
+`ir.compile(..., enable_software_pipeline=True)` 使用同一配置。context 默认值为 `False`；
+compile/RunConfig 未指定时继承当前 context。已有 context 时显式传入编译选项会报错。
+生效的开关参与 JIT 缓存键，并通过 profiling 和 pass dump 的嵌套 context 传递。
+首版要求 PyPTO 内存规划器和现有 Tile IR 流水线，不支持开发中的 Buffer IR 路径。
+
+单条局部数据流有 `S` 个槽位时，预取距离为 `P = S - 1`：
+
+1. 预加载逻辑迭代 `0 .. P-1`。
+2. 对 `t = 0 .. N-P-1`，先把 `t+P` 加载到 `(t+P) % S`，再使用 `t % S` 计算、写回 `t`。
+3. 计算、写回剩下的 `P` 次迭代。
+
+变换复用普通语句、循环和 `MemRef` 槽位元数据，通过 `tile.create` 获取已填充存储的句柄，
+不增加 IR 节点或算子。主循环降为顺序循环，后续 unroll 和 IO reorder 不再改动其调度。
+槽位下标局部生成 `arith.remui`，不改变一般标量取模的语义。计算结果复用输入槽位时，
+codegen 也复用已定义的 tile 句柄；分别发射等价的槽位取模 SSA 可能妨碍 PTOAS 推导动态 event 调度。
+
+PyPTO 预留完整 region 并分配基地址。在 PTOAS level3 下，
+静态直线调度生成 `pto.alloc_multi_tile addr = ...` 和 `pto.multi_tile_get`。
+运行时或带条件的调度使用 `pto.alloc_tile addr = <base>` 和 `pto.subview`，保留完整槽分配及已证明的
+静态有效维度。两者都不使用 PTOAS 内存规划；最终容量检查在 AllocateMemoryAddr 完成。
+单层与嵌套流水在 InitMemRef 之后，由 MemoryReuse 统一使用既有算子契约和共享生命周期分析：
+
+- GM load 拥有 `S` 槽输入区域。
+- 原地安全的计算可以继续使用最后一次读取的输入槽。INT32 到 FP32 等同元素位宽转换、
+  完整的一维 reshape 别名复用 `TileBufSignature` 的物理布局证明。仍存活的别名、禁止别名
+  的参数或不兼容布局会阻止复用。结果的整个别名族必须适合完整槽；较窄的 view 保留普通存储。
+- MemoryReuse 决定末端 store 源是否复用输入版本；否则使用普通分配，不由调度 pass 创建 output ring。
+  同时存在 store 和 compute 消费者的值仍不支持。
+- 独立中间量及 reduction scratch 保持普通分配。常驻的完整 Vec tile 可以留在循环外。
+  可写参数必须在 registry 声明为 workspace，且由未绑定的 `tile.create` 独立分配；
+  同时作为循环数据读取的 workspace 会被拒绝。已有 reduction 复用原有的
+  `LaneInvariantArg::Scratch` 契约。
+  这些分配均计入容量检查。
+
+例如，accumulator load 可经 cast、ReLU、列广播乘法原地复用同一槽；row-sum 的输出和
+scratch 独立；最后的乘法可复用已最后使用的 KV-scale 槽。三槽 128x64 score epilogue
+只需 accumulator 与 scale 两个 ring，无需复制所有中间量。
+
+强制别名 view 由 `InitMemRef` 继承源分配。Codegen 只在已证明时使用静态有效维度，
+用现有 `pto.treshape` 表达槽位 view，并在每个直线语句区域共享规范槽位下标 SSA。
+不会把动态或部分有效维度替换成完整形状。
+
+局部路径支持有效范围完整的二维平坦 Vec tile、2–4 个 stage、非负常量起点和正常量步长。
+动态边界使用受保护的预载与归一化循环；有溢出风险的路径保留原调度。
+有界嵌套作用域遵循前述存储和预取规则。不支持的副作用、真正的数据递推和无法证明的
+别名关系会使整条循环回退。单层静态循环的次数小于预载距离时也保留既有路径。
+
+前置的[联合阶段](29-skew_cross_core_pipeline.md#单向-fifo-的联合流水线)
+使用标准 GM-entry pipe 操作处理合格的单向 AIC→AIV 循环。
+消费者保留单份外层循环体和动态槽位选择；一般反馈和多消息调度不在本优化范围内。
+
+**性能限制：** 原版 PTOAS 可能对槽位互不重叠的动态 subview 仍插入保守同步。
+它不会移除必要同步，但可能阻止 MTE2 与向量计算重叠，见
+[PTOAS #1587](https://github.com/hw-native-sys/PTOAS/issues/1587)。
+因此，开启该变换不保证性能提升。
+
+## 原有 PTOAS planner 轮转
+
+新开关关闭时，`memory_planner=PTOAS` 保留本文原有的单循环体 `iv % F` 轮转。
+默认 PyPTO planner 且新开关关闭时，本 pass 保持所有循环不变。
 
 ## API
 
@@ -58,7 +159,7 @@ with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
     result = passes.lower_pipeline_to_slots()(program)
 ```
 
-## 行为
+## 原有轮转方案的行为
 
 对于 `F > 1` 且通过下列全部门槛的 `ForStmt(kind == ForKind::Pipeline, attrs["pipeline_stages"] == F)`：
 
@@ -129,7 +230,7 @@ scf.for %i = %c0_index to %c4_index step %c1_index {
 }
 ```
 
-循环按原步长前进且只有一份循环体，region 不带 `addr`——由 ptoas `PlanMemory` 放置，这正是它能把第 *i* 次迭代的 load 与第 *i-1* 次的计算重叠起来的原因。
+原有轮转循环按原步长前进且只有一份循环体，region 不带 `addr`，由 PTOAS 放置。保留 region 和槽位身份才能推导逐槽位同步，实现迭代间重叠。
 
 ## 相关
 
@@ -138,3 +239,11 @@ scf.for %i = %c0_index to %c4_index step %c1_index {
 - [`InitMemRef`](34-init_memref.md) —— 解析合成出来的声明
 - [PTO codegen](../codegen/00-pto_codegen.md) —— 把 slot 下降为 ptoas region
 - [Python 语法：槽位](../language/00-python_syntax.md#槽位) —— 同一声明的手写形式
+
+### 动态边界调度
+
+符合条件的动态循环保留 guarded preload 和一条归一化循环体。
+PyPTO 内部调度属性不会作为 assembler 契约输出。
+运行时或带条件的循环使用固定地址父 buffer 与显式 slot subview，保留槽数、固定分配基址及已证明的静态有效维度。
+PTOAS 为这些标准操作插入同步，不需要私有能力开关；A5 保留既有 fallback。
+保守同步可能使传输串行，因此 overlap 和数值正确性需要分别验证。

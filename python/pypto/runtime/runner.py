@@ -402,6 +402,10 @@ class RunConfig:
             ``PassContext``, or to ``PYPTO`` when none is active.
             Forwarded to ``ir.compile()``, which rejects it when a
             ``PassContext`` is already active — set it on that context instead.
+        enable_software_pipeline: Use explicit prefetch and rotating slots for
+            eligible pipeline loops. ``None`` inherits the active ``PassContext``
+            or defaults to ``False``. Requires ``PYPTO`` memory planning. Set it
+            on the context when a ``PassContext`` is already active.
     """
 
     __test__ = False  # Not a pytest test class
@@ -442,6 +446,7 @@ class RunConfig:
     analyze_auto_scopes_for_deps: bool = False
     memory_planner: MemoryPlanner | None = None
     dump_ptoas_passes: bool = False
+    enable_software_pipeline: bool | None = None
 
     def __post_init__(self) -> None:
         # The two axes replace what used to be a membership test on the packed
@@ -565,7 +570,8 @@ class RunConfig:
         and ``golden_data_dir`` reach neither phase: only the system-test
         harness reads them, to compare a dispatch against its golden.
 
-        ``output_dir``, ``distributed_config`` and ``memory_planner`` are
+        ``output_dir``, ``distributed_config``, ``memory_planner`` and
+        ``enable_software_pipeline`` are
         forwarded only when set, so an unset value defers to ``ir.compile()``'s
         own default. That matters for ``memory_planner`` in particular:
         ``ir.compile()`` rejects an explicit planner while a ``PassContext`` is
@@ -594,6 +600,7 @@ class RunConfig:
             analyze_auto_scopes_for_deps=self.analyze_auto_scopes_for_deps,
             output_dir=self.save_kernels_dir,
             memory_planner=self.memory_planner,
+            enable_software_pipeline=self.enable_software_pipeline,
             distributed_config=self.distributed_config,
         )
 
@@ -897,11 +904,12 @@ class CompileOptions:
     analyze_auto_scopes_for_deps: bool = False
     # Absent rather than ``None`` in ``as_compile_kwargs`` when unset, so
     # ``ir.compile``'s own default applies. That is load-bearing for
-    # ``memory_planner``: an explicit one is rejected while a ``PassContext`` is
-    # active, so an unset planner has to defer to that context.
+    # ``memory_planner`` and ``enable_software_pipeline``: explicit values are
+    # rejected while a ``PassContext`` is active, so unset values defer to it.
     output_dir: str | None = None
     memory_planner: MemoryPlanner | None = None
     distributed_config: "DistributedConfig | None" = None
+    enable_software_pipeline: bool | None = None
 
     def as_compile_kwargs(self) -> dict[str, Any]:
         """Return these options as :func:`pypto.ir.compile` keyword arguments."""
@@ -915,7 +923,7 @@ class CompileOptions:
             "disabled_diagnostics": self.disabled_diagnostics,
             "analyze_auto_scopes_for_deps": self.analyze_auto_scopes_for_deps,
         }
-        for name in ("output_dir", "memory_planner", "distributed_config"):
+        for name in ("output_dir", "memory_planner", "distributed_config", "enable_software_pipeline"):
             value = getattr(self, name)
             if value is not None:
                 kwargs[name] = value

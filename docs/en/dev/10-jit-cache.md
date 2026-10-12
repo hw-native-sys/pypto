@@ -241,7 +241,7 @@ are finite JSON numbers or booleans; they complete the binding but no longer
 select an artifact, since a scalar parameter is a runtime value. Omit them
 unless the request also names sample tensors, which makes the binding positional.
 
-Serializable `run_config` fields are `platform`, `strategy`, `memory_planner`,
+Serializable `run_config` fields are `platform`, `strategy`, `memory_planner`, `enable_software_pipeline`,
 `distributed_config`, `dump_passes`, `dump_ptoas_passes`, `save_kernels`, and
 `save_kernels_dir`; enums use their Python member names. Distributed settings
 accept `device_ids`, `num_sub_workers`, `runtime`, and `aicpu_thread_num`.

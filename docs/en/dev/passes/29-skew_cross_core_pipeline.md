@@ -2,11 +2,73 @@
 
 Software-pipelines mixed cube/vector (cross-core) `pl.pipeline` loops so the two cores overlap, replacing the legacy unroll+IO-cluster handling of cross-core loops. Runs immediately before [`LowerPipelineToSlots`](30-lower_pipeline_to_slots.md), and so ahead of [`LowerPipelineLoops`](31-lower_pipeline_loops.md).
 
+## Joint one-way FIFO pipeline
+
+With `enable_software_pipeline=True` and the PyPTO planner, the program-level
+phase matches the generated AIC/AIV endpoints before scheduling. It checks the
+Group ABI, source-loop identity, FIFO geometry, split and reservation/import
+identity. One unconditional C2V transfer per iteration is supported. Feedback,
+multiple receive sites and unproved motion retain the established lowering.
+
+For FIFO capacity F and local stage S, the receive lead is `min(F,S)-1`.
+PyPTO explicitly emits guarded startup receives and future receives, then
+consumes the current UB version. Receives and ordinary GM loads share the
+local scheduling machinery; child stages multiply the input version count.
+
+The receive owns an ordinary PyPTO allocation. Codegen uses PTOAS's existing
+GM-entry pipe API:
+
+```text
+AIC: TALLOC(entry) -> TSTORE(acc, entry) -> TPUSH(entry)
+AIV: TPOP(entry) -> TLOAD(entry, UB slot) -> TFREE(entry)
+                                      -> compute(UB slot)
+```
+
+GM entry release is ordered after the MTE2 read. The local slot stays live through
+its last compute/store use. No second local FIFO reservation is allocated.
+PTOAS owns cross-core credits and local synchronization through its standard
+pipe operations and automatic sync pass. The model writes `aiv_shard`, not
+events or addresses. There are no private assembler attributes or capability flags.
+
+Memory reuse is decided after `InitMemRef`: `MemoryReuse` consumes shared
+lifetime facts and operator alias contracts, including compiler-declared input
+versions. It may forward an in-place-safe chain into a last-used input slot.
+Other outputs and workspace use ordinary allocation; the scheduling pass does
+not prescribe output rings or perform a separate capacity calculation.
+
+## Nested local pipeline scopes
+
+The version count is the product of enclosing stages. Root stage 3 and child
+stage 2 give six input versions, independent of the child trip count. The root
+coordinate varies fastest:
+`(child_iteration % 2) * 3 + root_iteration % 3`.
+
+Bounded child loops are specialized into phases of one outer loop. Continuous
+streams preserve S-1 lookahead across parent boundaries. Predicated streams
+retain their own guards; lookahead never exceeds the earliest physical-slot
+reuse distance. This protects short children without reducing their declared depth.
+Parent computation and effect order are preserved.
+
+Limits remain: A2/A3 dense full Vec tiles, stages 2–4, bounded normalized outer
+ordinals, fixed positive child steps, at most four child levels and 64 specialized
+phases. Escaping child state and child communication are not optimized.
+Capacity overflow is diagnosed by the memory-planning passes.
+
+Codegen retains fixed-address multi-tile regions for static straight-line
+schedules. Runtime or predicated schedules use addressed parent buffers and explicit slot subviews, with
+the same full slot allocation and index expressions. This avoids relying on
+unimplemented runtime startup/drain proofs in stock PTOAS. Its conservative
+synchronization may reduce overlap; compilation, numerical correctness and
+performance must be evaluated separately.
+
+AIC keeps its established schedule in the one-way path. General round-trip and
+longer phase-graph optimization remains a separate design target.
+
 ## Overview
 
 On A2/A3 a fused cube+vector kernel (e.g. flash-decode `qk_pv`) round-trips through GM: the cube (AIC) sends scores to the vector (AIV) via `tile.tpush_to_aiv` and gets the softmax result back via `tile.tpop_from_aiv`; the vector mirrors this with `tile.tpop_from_aic` / `tile.tpush_to_aic`. Run naively, each core stalls waiting for the other.
 
-The old approach unrolled these loops (`pl.pipeline(stage=F)`) and let `CanonicalizeIOOrder` cluster the cross-core ops — which produced *back-to-back* `tpop`s that serialised the consumer. `SkewCrossCorePipeline` instead software-pipelines the loop:
+The old approach unrolled these loops (`pl.pipeline(stage=F)`) and let `CanonicalizeIOOrder` cluster the cross-core ops — which does not express an explicit producer/consumer phase lead. `SkewCrossCorePipeline` instead software-pipelines the loop:
 
 - **Single round-trip, producer role** — exactly one `tpush` and one `tpop`, and the `tpush`'s backward slice does not feed the body via an SSA edge (the cube: `QK → tpush`, `tpop → SV`). The two halves are linked only by the in-order cross-core FIFO, so the producer runs **`D = max(2, stage-1)` iterations ahead** (cross-core defaults to depth-2): a `produce(start … start+(D-1)·step)` prologue, a `ForKind::Sequential` steady loop whose loop var `k` leads each group and pairs the group's `D` produces `produce(k+i·step)` with the trailing `D` consumes `consume(k-(D-i)·step)`, stepping `k` by `D·step` over `[start+D·step, start+trip·step)`, and a `consume(last D)` epilogue. The cube issues group k's `D` `QK`s while the vector runs group (k-D)'s `D` softmaxes. See [Skew depth](#skew-depth-stage) for `D` selection and the buffer-separation it buys.
 - **Consumer role, or multi-round-trip** — the lead op feeds the body via SSA (the vector: the popped scores feed softmax), or there is more than one message per FIFO direction. The loop is **demoted to a plain `ForKind::Sequential` loop** (body unchanged). This drops the unroll's back-to-back `tpop` while preserving the in-order FIFO; cross-core overlap then comes from the *peer* core's producer skew putting each tile in the FIFO a step early, so the in-order `tpop` never blocks.

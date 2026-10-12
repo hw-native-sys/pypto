@@ -446,7 +446,7 @@ scf.for %i = %c0_index to %c4_index step %c1_index {
   （`i % 2`）判断哪些访问可能落在同一槽位，这才是轮转能拿到按槽位的（动态）event id 的原因
   ——第 *i* 轮的 load 由此与第 *i-1* 轮的计算重叠。
 
-`PlanMultiBufferRegions` 在遍历函数体之前判定适用性；ptoas 无法描述的形态（各槽位 tile 形状
+PTOAS planner 下，`PlanMultiBufferRegions` 在遍历函数体之前判定适用性；ptoas 无法描述的形态（各槽位 tile 形状
 不一致、各槽位声明的 valid shape 不一致、循环内有两个槽位同时活跃、内存空间不属于
 Vec / Mat / Acc、valid shape 是运行期值、某个槽位作为 phi 被带出 `if` 或循环、槽位数不在
 ptoas 的 `[2, 16]` 内）会报 `ValueError` 并指明具体形态，因为回退成逐槽位
@@ -460,17 +460,19 @@ ptoas 的 `[2, 16]` 内）会报 `ValueError` 并指明具体形态，因为回�
 | 同一轮迭代内填充并读取两个槽位 | ≤ 0.55 只保护**第一个** `multi_tile_get`，第二个 load 与下一轮迭代的写入竞争（0.54 真机实测算错）。0.56 起用整个区域的一个静态 event 保护循环体——正确，但没有区域形式赖以存在的逐槽位重叠 | [PTOAS#1118](https://github.com/hw-native-sys/PTOAS/issues/1118)，0.56 修复 |
 | 预取：循环前填充槽位 0，之后每轮迭代填充槽位 `(i+1) % 2`、同时读取槽位 `i % 2` | ≤ 0.62 像一槽位轮转那样为两个槽位的 event 都做 prime 和 drain，在这里差一：迭代次数为偶数时算错，为奇数时设备挂死。0.63 只 prime 循环最先写入的那个槽位；0.64 和 0.65 又对两个槽位都做 prime | [PTOAS#1519](https://github.com/hw-native-sys/PTOAS/issues/1519)，0.63 修复，0.64 回退 |
 
-`CoLiveSlotCollector` 只按循环体统计槽位选取次数，分不清这两种形态，而第二个缺陷在修复后又
-回来了。真机实测：预取形态在 0.63 下运行正确，但在 0.64 和 0.65 下迭代次数为偶数时读到后面
-块的数据、为奇数时挂死；同轮迭代形态在 0.65 下运行正确。因此代码生成对两者都拒绝，并指向
-PyPTO planner——它的固化地址 `alloc_tile` 路径在真机上能正确运行同轮迭代那种形态。直线代码
-不受影响：没有循环就没有跨迭代复用需要保护。放宽限制只需改 `PlanMultiBufferRegions` 里一个
-条件，但前提是固定的 ptoas 能在真机上正确运行预取形态。
+`CoLiveSlotCollector` 在原有 PTOAS planner 路径上保留保守拒绝。上表记录的预取回退仍是
+工具链约束；开启软件流水并不保证工具链同步正确。在 PyPTO planner 下开启
+`enable_software_pipeline=True` 后，codegen 校验静态等大几何信息、region 固定基地址、
+槽位步长和对齐，允许规范的 Vec 共活槽位。槽位表达式可以是常量，或非负循环变量加
+非负常量后对槽位数取模；这些槽位取模局部生成 `arith.remui`。
 
-`PYPTO` 模式下则完全不发射区域：`--pto-level=level3` 下的区域需要显式的基地址 `addr`，而
-codegen 目前还不发射它。限制不在 ptoas——给定常量 `addr`，ptoas 自 0.55 起在 level3 下推导出的
-逐槽位同步与 level2 相同（[PTOAS#1106](https://github.com/hw-native-sys/PTOAS/issues/1106)，
-已关闭）。
+在 level3 下，静态直线调度发射 `pto.alloc_multi_tile addr = <base>`；
+运行时或带条件的调度使用固定地址父 buffer 与 `pto.subview`。
+两者都保留由 PyPTO 规划的完整槽分配。原版 PTOAS 对动态 subview 的同步仍较保守，
+见 [#1587](https://github.com/hw-native-sys/PTOAS/issues/1587)。
+不支持的用户声明区域仍走普通固定地址 `alloc_tile`，继续保持槽位隔离。
+关闭开关时，PyPTO codegen 保持原有路径。preload/main/drain 变换及整循环回退规则见
+[LowerPipelineToSlots](../passes/30-lower_pipeline_to_slots.md)。
 
 ### 加载操作转换
 

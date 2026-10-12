@@ -298,6 +298,7 @@ class PassContext:
         enable_pypto_l0c_double_buffer: bool = False,
         runtime: RuntimeKind = RuntimeKind.TENSORMAP_AND_RINGBUFFER,
         enable_buffer_ir: bool = False,
+        enable_software_pipeline: bool = False,
     ) -> None:
         """Create a PassContext with instruments and pass configuration (incl. memory planner).
 
@@ -313,6 +314,10 @@ class PassContext:
 
         ``enable_buffer_ir`` enables the staged Buffer IR development pipeline.
         It defaults to false while the migration is incomplete.
+
+        ``enable_software_pipeline`` uses explicit prefetch and rotating slots for
+        eligible pipeline loops. It requires ``PYPTO`` memory planning and cannot
+        be combined with ``enable_buffer_ir``. The default keeps unroll lowering.
         """
         ...
 
@@ -345,6 +350,10 @@ class PassContext:
 
     def get_enable_buffer_ir(self) -> bool:
         """Whether the staged Buffer IR development pipeline is enabled."""
+        ...
+
+    def get_enable_software_pipeline(self) -> bool:
+        """Get whether eligible pipeline loops use explicit software pipelining."""
         ...
 
     def get_enable_pypto_l0c_double_buffer(self) -> bool:
@@ -459,23 +468,17 @@ def skew_cross_core_pipeline() -> Pass:
 def lower_pipeline_to_slots() -> Pass:
     """Create a pass that multi-buffers ``pl.pipeline`` loops via MemRef slots.
 
-    Runs immediately before ``lower_pipeline_loops``. Instead of replicating the
-    body ``F`` times, keeps one body and rebinds every top-level ``tile.load`` /
-    ``tile.read`` whose arguments read the induction variable onto
-    ``pl.MemRef(name, slots=F)[iv % F]``, then demotes the loop to
-    ``ForKind.Sequential`` with ``pipeline_stages`` stripped. Bounds, step and
-    ``iter_args`` are untouched, so no remainder dispatch is needed.
+    Runs immediately before ``lower_pipeline_loops``. With ``PYPTO`` memory
+    planning and ``enable_software_pipeline=True``, emits explicit preload,
+    steady-state and drain phases using existing loops, MemRef slots and tile
+    ops. The prefetch distance is ``stage - 1``; no new IR nodes are introduced.
 
-    Self-gated on ``memory_planner=PTOAS``: only that planner's codegen path emits
-    a ptoas multi-buffer region today, so under the default PyPTO planner the pass
-    returns every function untouched. The gate tracks that codegen limitation, not
-    a ptoas one — an addressed region synchronizes identically at level3, and
-    widening the gate is follow-up work in the address allocator. Loops it
-    declines — an unsupported
-    slot count, a step other than 1, a start not a multiple of ``F``, no eligible
-    load, an unsupported memory space or runtime valid shape, a tile carried out as
-    a phi or consumed by a view op, or nesting under a declined pipeline loop — are
-    left intact for ``lower_pipeline_loops`` to replicate.
+    With ``PTOAS`` memory planning, preserves the existing same-iteration slot
+    rotation: eligible top-level loads are rebound onto
+    ``pl.MemRef(name, slots=F)[iv % F]`` without explicit prefetch. Accepted loops
+    become ``ForKind.Sequential`` with ``pipeline_stages`` stripped. Declined
+    loops remain intact for ``lower_pipeline_loops`` to replicate. The default
+    ``PYPTO`` path remains unchanged when the software pipeline flag is off.
 
     Returns:
         Function-level pass

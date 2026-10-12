@@ -2830,6 +2830,27 @@ Pass ExpandMixedKernel() {
       }
       const auto& placement = consumer.aiv_only_calls;
 
+      // Preserve the common logical loop identity across AIC/AIV pruning.
+      // Only the opt-in joint planner consumes this private provenance.
+      if (auto* context = PassContext::Current(); context && context->GetEnableSoftwarePipeline()) {
+        class StampPipelineFamily : public IRMutator {
+         public:
+          StmtPtr VisitStmt_(const ForStmtPtr& loop) override {
+            auto visited = As<ForStmt>(IRMutator::VisitStmt_(loop));
+            if (visited->kind_ != ForKind::Pipeline) return visited;
+            auto result = MutableCopy(visited);
+            result->attrs_.emplace_back("software_pipeline_family", ++next_id_);
+            return result;
+          }
+
+         private:
+          int next_id_ = 0;
+        } stamp;
+        auto stamped = MutableCopy(func);
+        stamped->body_ = stamp.VisitStmt(func->body_);
+        func = stamped;
+      }
+
       // Check if function is mixed (recursive analysis detects ops inside loops/conditionals)
       auto stmts = FlattenBody(func->body_);
       auto tpop_defs = CollectTpopDefs(stmts);

@@ -2,11 +2,58 @@
 
 对 cube/vector 混合（跨核）的 `pl.pipeline` 循环做软流水（skew），使两个核相互重叠，替代旧的「unroll + IO 聚类」跨核处理方式。紧接在 [`LowerPipelineToSlots`](30-lower_pipeline_to_slots.md) 之前运行，因而也早于 [`LowerPipelineLoops`](31-lower_pipeline_loops.md)。
 
+## 单向 FIFO 的联合流水线
+
+启用 `enable_software_pipeline=True` 且使用 PyPTO planner 时，程序级阶段先核对
+编译器生成的 AIC/AIV 端点，包括 Group ABI、源循环身份、FIFO 几何、split 和
+reserve/import 配对。每轮支持一个无条件 C2V 传输；反馈、多接收点和未证明的移动保留既有 lowering。
+
+FIFO 容量 F、局部 stage S 对应接收提前量 `min(F,S)-1`。
+PyPTO 显式生成受保护的启动接收、未来接收和当前 UB 版本消费。
+接收与普通 GM load 共用局部调度规则，子层 stage 相乘得到输入版本数。
+
+接收结果拥有普通的 PyPTO 分配，codegen 使用 PTOAS 已有的 GM-entry pipe API：
+
+```text
+AIC: TALLOC(entry) -> TSTORE(acc, entry) -> TPUSH(entry)
+AIV: TPOP(entry) -> TLOAD(entry, UB slot) -> TFREE(entry)
+                                      -> compute(UB slot)
+```
+
+GM entry 释放排在 MTE2 读取之后；UB 槽的生命周期延续到最后一次计算或 store 使用。
+不再额外分配一套 local FIFO reservation。PTOAS 通过标准 pipe 操作和自动同步 pass
+管理跨核 credit 与核内同步。模型编写 `aiv_shard`，不编写事件或地址；
+生成代码没有私有 assembler 属性或能力开关。
+
+内存复用在 `InitMemRef` 之后决定。`MemoryReuse` 使用共享生命周期分析和算子别名契约，
+可让原地安全的计算链继续使用最后使用的输入槽。
+其余输出和 workspace 走普通分配；调度 pass 不指定 output ring，也不单独计算容量。
+
+## 嵌套局部 pipeline 作用域
+
+输入版本数为各层 stage 的乘积：外层 3、内层 2 对应六个版本，与内层迭代次数无关。
+物理坐标为 `(child_iteration % 2) * 3 + root_iteration % 3`，外层变化最快。
+
+有界子循环专门化为一条外层循环的各 phase。连续流跨父迭代保持 S-1 提前量；
+条件流保留自己的 guard，提前量不得超过物理槽最早复用距离。
+因此短子循环不会覆盖仍存活的父版本，也不需要缩减声明的深度。
+父层计算及副作用顺序保持不变。
+
+当前限制：A2/A3 完整二维 Vec、stage 2–4、有界且规范化的外层坐标、固定正步长子循环，
+最多四层子循环和 64 个专门化 phase。逃逸的子层状态及子层通信不优化。
+容量超限由后续内存规划 pass 诊断。
+
+静态直线调度保留固定地址 multi-tile codegen；运行时或带条件的调度使用固定地址父 buffer 与显式 slot subview，
+保留同样的完整槽分配及坐标。此路径不依赖原版 PTOAS 尚未实现的运行时启动/排空证明。
+后端保守同步可能降低 overlap，编译通过、数值正确与性能必须分别验证。
+
+单向路径的 AIC 保留既有调度；通用往返及更长 phase graph 优化仍是独立的设计目标。
+
 ## 概述
 
 在 A2/A3 上，cube+vector 融合 kernel（例如 flash-decode `qk_pv`）通过 GM 往返：cube（AIC）用 `tile.tpush_to_aiv` 把 scores 发给 vector（AIV），再用 `tile.tpop_from_aiv` 取回 softmax 结果；vector 侧对称地使用 `tile.tpop_from_aic` / `tile.tpush_to_aic`。若直接顺序执行，两个核会互相等待而 stall。
 
-旧方案对这些循环做 unroll（`pl.pipeline(stage=F)`）并由 `CanonicalizeIOOrder` 聚类跨核算子 —— 这会产生**背靠背的 `tpop`**，把消费者串行化。`SkewCrossCorePipeline` 改为对循环做软流水：
+旧方案对这些循环做 unroll（`pl.pipeline(stage=F)`）并由 `CanonicalizeIOOrder` 聚类跨核算子 —— 这没有显式表达生产者与消费者之间的 phase 提前量。`SkewCrossCorePipeline` 改为对循环做软流水：
 
 - **单次往返、生产者角色** —— 恰好一个 `tpush` 和一个 `tpop`，且 `tpush` 的反向切片不通过 SSA 边喂给 body（cube：`QK → tpush`，`tpop → SV`）。两半仅通过有序的跨核 FIFO 关联，于是让生产者**提前 `D = max(2, stage-1)` 个迭代**运行（跨核默认 depth-2）：`produce(start … start+(D-1)·step)` 序言（prologue）、一个 `ForKind::Sequential` 稳态循环（其循环变量 `k` 作为每组的首个 produce 索引，把该组的 `D` 个 produce `produce(k+i·step)` 与滞后的 `D` 个 consume `consume(k-(D-i)·step)` 配对，`k` 以 `D·step` 为步长取值 `[start+D·step, start+trip·step)`）、以及 `consume(最后 D 个)` 尾声（epilogue）。cube 发出第 k 组的 `D` 个 `QK` 时，vector 正在跑第 k-D 组的 `D` 个 softmax。详见 [skew 深度](#skew-深度stage)。
 - **消费者角色，或多次往返** —— lead 算子通过 SSA 喂给 body（vector：弹出的 scores 喂给 softmax），或某个 FIFO 方向上有多于一条消息。此时**降级为普通的 `ForKind::Sequential` 循环**（body 不变）。这消除了 unroll 的背靠背 `tpop`，同时保持 FIFO 的有序性；跨核重叠则来自**对端**核的生产者 skew —— 它提前一步把每个 tile 放入 FIFO，使本核有序的 `tpop` 不再 block。

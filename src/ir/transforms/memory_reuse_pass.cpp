@@ -60,6 +60,7 @@
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/reserve_buffer_utils.h"
+#include "pypto/ir/transforms/utils/tile_buf_signature.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -2998,9 +2999,12 @@ class WrittenWorkspaceCollector : public IRVisitor {
   // lowered to a loop by LowerPipelineToSlots / LowerPipelineLoops (passes
   // 30-31), well before this pass.
   void VisitStmt_(const ForStmtPtr& op) override {
+    const bool software_pipeline = op->HasAttr(kSoftwarePipelineSlotsAttr);
+    if (software_pipeline) ++software_pipeline_depth_;
     ++loop_depth_;
     IRVisitor::VisitStmt_(op);
     --loop_depth_;
+    if (software_pipeline) --software_pipeline_depth_;
   }
 
   void VisitStmt_(const WhileStmtPtr& op) override {
@@ -3022,8 +3026,13 @@ class WrittenWorkspaceCollector : public IRVisitor {
     // workspace contract.
     const auto* entry = LookupOpEntry(op);
     if (entry == nullptr) return;
-    for (const size_t index : entry->GetWorkspaceArgs()) {
-      if (index >= args.size() || !entry->MayWriteArg(index)) continue;
+    for (size_t index = 0; index < args.size(); ++index) {
+      // A lowered pipeline also recognizes legacy scratch-role declarations.
+      // Keep their hidden writes isolated across iterations without changing
+      // allocation policy for ordinary loops when the option is disabled.
+      const bool pipeline_scratch =
+          software_pipeline_depth_ > 0 && entry->GetLaneInvariantArgKind(index) == LaneInvariantArg::Scratch;
+      if (!(entry->IsWorkspaceArg(index) && entry->MayWriteArg(index)) && !pipeline_scratch) continue;
       // AsVarLike, not As<Var>: a workspace can reach the op as a loop IterArg
       // when the call sits inside a loop body.
       auto workspace = AsVarLike(args[index]);
@@ -3040,6 +3049,7 @@ class WrittenWorkspaceCollector : public IRVisitor {
   }
 
   int loop_depth_ = 0;
+  int software_pipeline_depth_ = 0;
   std::unordered_set<const Var*> workspaces_;
   std::unordered_set<const Var*> bases_;
   std::unordered_set<const Var*> looping_workspaces_;
@@ -4092,6 +4102,111 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const ReuseMap& reuse_map,
   return mutator.VisitStmt(stmt);
 }
 
+/// Forward a last-used logical input version through an in-place-safe op.
+/// Scheduling only declares input versions. This placement decision runs after
+/// InitMemRef and uses the shared lifetime facts and operator alias contracts.
+/// A fixed number of indexed walks keeps the additional work O(N log N).
+StmtPtr ReuseSoftwarePipelineInputs(const StmtPtr& body, const LifetimeAnalysisResult& lifetimes,
+                                    const std::set<const Var*>& declared_bases) {
+  class Facts : public IRVisitor {
+   public:
+    std::vector<AssignStmtPtr> assigns;
+    std::map<const Var*, const Var*> aliases;
+    std::set<const Var*> version_bases;
+    std::set<const Var*> partial_view_bases;
+    const Var* Root(const Var* var) const {
+      auto it = aliases.find(var);
+      return it == aliases.end() ? var : it->second;
+    }
+    void VisitStmt_(const AssignStmtPtr& stmt) override {
+      if (auto tile = As<TileType>(stmt->var_->GetType()); tile && tile->memref_) {
+        assigns.push_back(stmt);
+        auto call = As<Call>(stmt->value_);
+        auto source = AsVarLike(stmt->value_);
+        if (call && op_predicates::IsBufferAliasingViewOp(call->op_->name_) && !call->args_.empty()) {
+          source = AsVarLike(call->args_[0]);
+        }
+        if (source) {
+          const auto* root = Root(source.get());
+          aliases.emplace(stmt->var_.get(), root);
+          const auto source_type = As<TileType>(root->GetType());
+          const auto& ref = *tile->memref_;
+          // Moving an ordinary result into a uniform slot must preserve every
+          // view in its allocation family, not just the defining result type.
+          if (ref->slot_count_ == 1 && source_type && source_type->memref_ &&
+              (!TileBufSignature::FromTileType(*tile).IsFullSlotAlias(
+                   TileBufSignature::FromTileType(*source_type)) ||
+               !structural_equal(ref->byte_offset_, (*source_type->memref_)->byte_offset_))) {
+            partial_view_bases.insert(ref->base_.get());
+          }
+        }
+        if (call && call->GetAttr<bool>(kSoftwarePipelineSlotsAttr, false)) {
+          version_bases.insert((*tile->memref_)->base_.get());
+        }
+      }
+      IRVisitor::VisitStmt_(stmt);
+    }
+  } facts;
+  facts.VisitStmt(body);
+  if (facts.version_bases.empty()) return body;
+  std::map<const Var*, int> last_use;
+  for (const auto& [var, interval] : lifetimes.var_liveness) {
+    last_use[facts.Root(var)] = std::max(last_use[facts.Root(var)], interval.second);
+  }
+  ReuseMap reuse;
+  std::map<const Var*, VarPtr> storage;
+  for (const auto& stmt : facts.assigns) {
+    auto call = As<Call>(stmt->value_);
+    if (!call || !OpRegistry::GetInstance().IsRegistered(call->op_->name_) ||
+        facts.aliases.count(stmt->var_.get())) {
+      continue;
+    }
+    auto output = As<TileType>(stmt->var_->GetType());
+    INTERNAL_CHECK_SPAN(output && output->memref_, stmt->span_)
+        << "Internal error: software pipeline reuse requires an allocated tile";
+    const auto* output_base = (*output->memref_)->base_.get();
+    if (declared_bases.count(output_base) || facts.partial_view_bases.count(output_base)) continue;
+    const auto& entry = OpRegistry::GetInstance().GetEntry(call->op_->name_);
+    if (!entry.IsInplaceSafe() || entry.GetCrossCoreRole()) continue;
+    auto def = lifetimes.var_liveness.find(stmt->var_.get());
+    if (def == lifetimes.var_liveness.end()) continue;
+    auto resolved = [&](const VarPtr& var) {
+      auto it = storage.find(facts.Root(var.get()));
+      return it == storage.end() ? var : it->second;
+    };
+    std::set<const Var*> forbidden;
+    for (const auto arg : entry.ForbidOutputAliasArgs()) {
+      if (arg >= call->args_.size()) continue;
+      auto var = AsVarLike(call->args_[arg]);
+      if (!var) continue;
+      auto ref = GetTypeMemRef(resolved(var)->GetType());
+      if (ref && *ref) forbidden.insert((*ref)->base_.get());
+    }
+    for (size_t i = 0; i < call->args_.size(); ++i) {
+      if (entry.GetArgEffect(i, call->kwargs_) != ArgEffect::Read || entry.IsWorkspaceArg(i)) continue;
+      auto input = AsVarLike(call->args_[i]);
+      if (!input || !last_use.count(facts.Root(input.get())) ||
+          last_use.at(facts.Root(input.get())) != def->second.first) {
+        continue;
+      }
+      auto source = resolved(input);
+      auto tile = As<TileType>(source->GetType());
+      if (!tile || !tile->memref_) continue;
+      const auto& ref = *tile->memref_;
+      if (ref->slot_count_ <= 1 || !facts.version_bases.count(ref->base_.get()) ||
+          forbidden.count(ref->base_.get()) || output->memory_space_ != tile->memory_space_ ||
+          output->dtype_.GetBit() != tile->dtype_.GetBit() ||
+          !TileBufSignature::FromTileType(*output).IsFullSlotAlias(TileBufSignature::FromTileType(*tile))) {
+        continue;
+      }
+      reuse.emplace(stmt->var_, ReusePlacement{source, 0});
+      storage.emplace(stmt->var_.get(), source);
+      break;
+    }
+  }
+  return reuse.empty() ? body : ApplyMemRefSharing(body, reuse, lifetimes.var_sharing_groups);
+}
+
 /**
  * @brief Align loop-carried MemRefs to their initValue, top-down (fixes #1352).
  *
@@ -5129,8 +5244,10 @@ class StripPipelineMembershipMutator : public IRMutator {
   ExprPtr VisitExpr_(const CallPtr& op) override {
     auto visited = IRMutator::VisitExpr_(op);
     auto call = As<Call>(visited);
-    if (!call || !call->HasAttr(kPipelineMembershipAttr)) return visited;
-    auto new_attrs = StripAttr(call->attrs_, kPipelineMembershipAttr);
+    if (!call || (!call->HasAttr(kPipelineMembershipAttr) && !call->HasAttr(kSoftwarePipelineSlotsAttr))) {
+      return visited;
+    }
+    auto new_attrs = StripAttr(StripAttr(call->attrs_, kPipelineMembershipAttr), kSoftwarePipelineSlotsAttr);
     return std::make_shared<Call>(call->op_, call->args_, call->kwargs_, std::move(new_attrs),
                                   call->GetType(), call->span_);
   }
@@ -5423,13 +5540,25 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
     return func;
   }
 
+  auto planned_func = func;
+  if (auto* context = PassContext::Current(); context && context->GetEnableSoftwarePipeline()) {
+    auto constraints = AnalyzeAllocationConstraints(func, analysis_result, "MemoryReuse");
+    new_body = ReuseSoftwarePipelineInputs(new_body, analysis_result, constraints.declared_allocation_bases);
+    if (new_body != func->body_) {
+      auto updated = MutableCopy(func);
+      updated->body_ = new_body;
+      planned_func = updated;
+      analysis_result = AnalyzeAllocationLifetimes(new_body);
+    }
+  }
+
   // Step 2: Identify reuse opportunities.  On Ascend910B split-AIV functions,
   // collect the load + tpop_from_aic hazard inputs so the reuse decision never
   // forms the hazardous in-place sharing (folds in the former
   // LegalizePTOBufferReuse responsibility).  Off-910B the inputs stay empty and
   // reuse behaviour is unchanged.
   const AllocationConstraintAnalysis constraint_analysis =
-      AnalyzeAllocationConstraints(func, analysis_result, "MemoryReuse");
+      AnalyzeAllocationConstraints(planned_func, analysis_result, "MemoryReuse");
   const HazardInputs& hazard = constraint_analysis.target_hazard_inputs;
   const ForbidAliasMap& forbid_alias = constraint_analysis.forbid_alias;
 
@@ -5458,7 +5587,7 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
       analysis_result.lifetimes, hazard, forbid_alias, analysis_result.phi_family_ids,
       analysis_result.var_sharing_groups, analysis_result.var_liveness, analysis_result.pipeline_membership,
       analysis_result.pipeline_load_tiles, analysis_result.subrange_unsafe_groups, reserved_end_by_space,
-      pinned_bases, func, &hints);
+      pinned_bases, planned_func, &hints);
   // Surface capacity-forced pipeline-depth reductions (perf hints) and legacy-fallback overflows
   // (warnings) through the unified diagnostic channel → perf_hints.log / stderr.
   if (!hints.empty()) EmitDiagnostics(hints, "MemoryReuse");

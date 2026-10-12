@@ -57,6 +57,19 @@ struct TileBufSignature {
   }
   bool operator!=(const TileBufSignature& o) const { return !(*this == o); }
 
+  /// Whole-slot reinterpretation with unchanged element width. Dynamic or
+  /// partial valid extents need a separate metadata/lifetime proof.
+  [[nodiscard]] bool IsFullSlotAlias(const TileBufSignature& other) const {
+    if (dtype.GetBit() != other.dtype.GetBit() || v_row_dynamic || v_col_dynamic || other.v_row_dynamic ||
+        other.v_col_dynamic || v_row != rows || v_col != cols || other.v_row != other.rows ||
+        other.v_col != other.cols) {
+      return false;
+    }
+    auto same_dtype = *this;
+    same_dtype.dtype = other.dtype;
+    return same_dtype.IsPTOMaterializable(other);
+  }
+
   /**
    * @brief Check whether two signatures are storage-compatible
    *

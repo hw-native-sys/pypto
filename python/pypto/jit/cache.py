@@ -138,6 +138,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
     dep_layouts: tuple[tuple[str, str, str], ...] = (),
     runtime: RuntimeKind = RuntimeKind.TENSORMAP_AND_RINGBUFFER,
     enable_buffer_ir: bool = False,
+    enable_software_pipeline: bool = False,
 ) -> CacheKey:
     """Build a cache key for a JIT call site.
 
@@ -204,6 +205,8 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         enable_buffer_ir: Staged Buffer IR development opt-in from the active
             ``PassContext``. It changes storage legalization and separates
             artifacts from the default pipeline under every memory planner.
+        enable_software_pipeline: Effective software pipeline opt-in. Separates
+            rotating-slot kernels from kernels produced by unroll lowering.
 
     Returns:
         Hashable CacheKey tuple.
@@ -239,6 +242,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         ("dep_layouts", dep_layouts),
         ("runtime", runtime_kind_to_name(runtime)),
         ("enable_buffer_ir", enable_buffer_ir),
+        ("enable_software_pipeline", enable_software_pipeline),
     )
     return CacheKey(
         source_hash,
