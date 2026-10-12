@@ -2189,7 +2189,8 @@ jobs:
         # Mechanism B: one task-submit card session wrapping a single pytest run
         # (no precompile pipeline), executed in-process on the borrowed card. The
         # suite is parametrized over the platform ids, so --platform=a5 selects
-        # exactly the a5 variants and deselects the a2a3-marked ones.
+        # exactly the a5 variants and deselects the a2a3-marked ones. The FP32
+        # cases verify entry initialization after deliberately enabling HF32.
         # --forked isolates each case's device init, as the daily a5 job does.
         run: |
           source activate.sh
@@ -2198,6 +2199,7 @@ jobs:
           task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 3600 \
             --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && python -m pytest \
               tests/st/runtime/cross_core/test_cross_core.py \
+              tests/st/runtime/ops/test_matmul.py::test_fp32_matmul_clears_inherited_hf32 \
               -v --forked --platform=a5 --device=\$TASK_DEVICE"
 
       - name: mx-tests-a5

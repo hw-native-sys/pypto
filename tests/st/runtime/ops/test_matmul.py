@@ -25,7 +25,7 @@ from examples.intermediate.matmul_acc import matmul_acc_64
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto import backend as _backend
 from pypto import ir, passes
-from pypto.backend import BackendType
+from pypto.backend import BackendType, pto_backend
 from pypto.pypto_core import passes as _core_passes
 from pypto.pypto_core.passes import MemoryPlanner
 from pypto.runtime.runner import RunConfig
@@ -44,6 +44,54 @@ from pypto.runtime.runner import RunConfig
 # even where the golden is ~0 and rtol contributes nothing.
 _FP32_MATMUL_RTOL = 1e-4
 _FP32_MATMUL_ATOL = 1e-4
+
+
+@pytest.mark.platforms("a2a3", "a5")
+@pytest.mark.parametrize("split_k", [False, True], ids=["matmul", "matmul_acc"])
+def test_fp32_matmul_clears_inherited_hf32(test_config, monkeypatch, split_k):
+    """A device cube entry must clear HF32 even when the preceding task enabled it."""
+    generate_wrapper = pto_backend._generate_kernel_wrapper
+
+    def poison_inherited_mode(func, ptoas_code, **kwargs):
+        source = generate_wrapper(func, ptoas_code, **kwargs)
+        marker = "    set_atomic_none();\n"
+        assert marker in source
+        # Emulate the incoming register state before the entry's own reset.
+        poison = "#if defined(__DAV_CUBE__)\n    set_ctrl(sbitset1(get_ctrl(), pto::MAD_MODE_BIT));\n#endif\n"
+        return source.replace(marker, marker + poison, 1)
+
+    monkeypatch.setattr(pto_backend, "_generate_kernel_wrapper", poison_inherited_mode)
+
+    @pl.jit
+    def fp32_matmul(
+        a: pl.Tensor[[256, 256], pl.FP32],
+        b: pl.Tensor[[256, 256], pl.FP32],
+        c: pl.Out[pl.Tensor[[256, 256], pl.FP32]],
+    ):
+        for mb in pl.parallel(0, 256, 64):
+            for nb in pl.parallel(0, 256, 64):
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    if split_k:
+                        acc = pl.create_tensor([64, 64], dtype=pl.FP32)
+                        for kb in pl.range(4):
+                            k0 = kb * 64
+                            lhs = a[mb : mb + 64, k0 : k0 + 64]
+                            rhs = b[k0 : k0 + 64, nb : nb + 64]
+                            acc = pl.matmul_acc(acc, lhs, rhs, init_cond=(kb == 0))
+                    else:
+                        acc = pl.matmul(a[mb : mb + 64, :], b[:, nb : nb + 64])
+                    c[mb : mb + 64, nb : nb + 64] = acc
+        return c
+
+    generator = torch.Generator().manual_seed(0)
+    a = torch.randn(256, 256, generator=generator)
+    b = torch.randn(256, 256, generator=generator)
+    out = torch.full((256, 256), float("nan"))
+    if test_config.codegen_only:
+        fp32_matmul.compile(config=test_config)
+    else:
+        fp32_matmul(a, b, out, config=test_config)
+        torch.testing.assert_close(out, a @ b, rtol=1e-3, atol=1e-3)
 
 
 @pl.jit

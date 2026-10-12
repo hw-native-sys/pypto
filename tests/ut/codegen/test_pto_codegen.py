@@ -1784,6 +1784,23 @@ class TestGenerateKernelWrapper:
         # Tensors-first: a=arg0, out=arg1, s=arg2
         assert "my_kernel(a, out, s);" in wrapper
 
+    def test_clears_inherited_hf32_mode_on_device_cube_before_forwarding(self):
+        func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
+        entry = wrapper[wrapper.index("void kernel_entry(__gm__ int64_t* args)") :]
+        reset = "set_ctrl(sbitset0(get_ctrl(), pto::MAD_MODE_BIT));"
+
+        assert entry.count(reset) == 1
+        assert (
+            "#if defined(__DAV_CUBE__) && !defined(__CPU_SIM) && !defined(__COSTMODEL)\n"
+            "    // Start cube tasks in FP32 mode, independent of a prior task's HF32 setting.\n"
+            f"    {reset}\n"
+            "#endif"
+        ) in entry
+        assert entry.index(reset) < entry.index("// Unpack tensor: a")
+        assert entry.index(reset) < entry.index("my_kernel(a, out, s);")
+        assert "set_ctrl(sbitset1" not in entry
+
     def test_defer_wait_wrapper_forwards_raw_args_through_checked_adapter(self):
         @pl.program
         class DeferredWrapperProgram:
