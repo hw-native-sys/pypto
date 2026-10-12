@@ -99,7 +99,11 @@ def test_subview_result_keeps_the_element_type_and_fits_the_source(descriptor, m
 
 def test_subview_result_may_have_a_narrower_static_valid_window():
     narrowed = _descriptor((64, 32), valid_shape=[32, 32])
-    ir.assert_structural_equal(_view("buffer.subview", [_var(), _offsets()], narrowed).type, narrowed)
+    with pytest.raises(ValueError, match="requires a valid-extents tuple"):
+        _view("buffer.subview", [_var(), _offsets()], narrowed)
+    ir.assert_structural_equal(
+        _view("buffer.subview", [_var(), _offsets(), _offsets(32, 32)], narrowed).type, narrowed
+    )
 
 
 @pytest.mark.parametrize(
@@ -175,6 +179,39 @@ def test_subview_rejects_non_vec_or_non_dense_sources():
     )
     with pytest.raises(ValueError, match="dense rank-2 row-major Vec"):
         _view("buffer.subview", [_var(mat), _offsets()], _fp32((16, 64)))
+
+
+@pytest.mark.parametrize("axis", [0, 1])
+@pytest.mark.parametrize("extent", [-1, 0, 65])
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_subview_rejects_constant_valid_extents_outside_the_window(axis, extent, dynamic):
+    valid: list[ir.Expr] = (
+        [
+            ir.Var("rows", ir.ScalarType(DataType.INDEX), _SPAN),
+            ir.Var("cols", ir.ScalarType(DataType.INDEX), _SPAN),
+        ]
+        if dynamic
+        else list(_offsets(16, 32).elements)
+    )
+    valid[axis] = ir.ConstInt(extent, DataType.INDEX, _SPAN)
+    descriptor = _fp32((16, 32), valid_shape=[-1, -1] if dynamic else [16, 32])
+    with pytest.raises(ValueError, match="must be positive and no greater than"):
+        _view("buffer.subview", [_var(_fp32((64, 64))), _offsets(), ir.MakeTuple(valid, _SPAN)], descriptor)
+
+
+@pytest.mark.parametrize("valid", [(1, 1), (16, 32)])
+@pytest.mark.parametrize("axis", [0, 1])
+def test_subview_requires_static_descriptor_dimensions_for_literal_extents(valid, axis):
+    dimensions = list(valid)
+    dimensions[axis] = -1
+    descriptor = _fp32((16, 32), valid_shape=dimensions)
+    with pytest.raises(ValueError, match="must be nonconstant for a dynamic descriptor dimension"):
+        _view("buffer.subview", [_var(_fp32((64, 64))), _offsets(), _offsets(*valid)], descriptor)
+    descriptor = _fp32((16, 32), valid_shape=list(valid))
+    call = _view(
+        "buffer.subview", [_var(_fp32((64, 64))), _offsets(), _offsets(valid[0], valid[1])], descriptor
+    )
+    ir.assert_structural_equal(call.type, descriptor)
 
 
 if __name__ == "__main__":

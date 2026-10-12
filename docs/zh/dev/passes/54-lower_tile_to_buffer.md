@@ -109,7 +109,9 @@ placed_window = buffer.subview(canvas_buffer, (16, 0), (16, 32)) : Buffer[[16,32
 buffer.copy(doubled_buffer, placed_window)
 ```
 
-每个 lowering 生成的窗口都带 valid 元组，PTOAS 据此确定原生每一维的类型。PTOAS 无法合法化
+每个 lowering 生成的窗口都带 valid 元组，PTOAS 据此确定原生每一维的类型。
+常量 valid extent 必须为正且位于窗口范围内；valid extent 为零的 slice 和 assemble 窗口会被拒绝。
+PTOAS 无法合法化
 对字节根重新标注结果的 subview，因此在带地址的存储中，被切窗口的 tile 在其规划地址上有自己的分配。
 源本身就是 assemble 目标窗口时，数据已原地写好，不需要拷贝。跨内存空间的 assemble（fix-pipe 的
 Acc 到 Mat 形式）和降秩 slice 在对应配方完成前会被拒绝。
@@ -119,11 +121,18 @@ Acc 到 Mat 形式）和降秩 slice 在对应配方完成前会被拒绝。
 
 ## 运行时 valid extent {#runtime-valid-extents}
 
+Assemble 扩大有效区域时，保留原目标数据的复制会通过与原有效矩形匹配的视图写入。
+子视图的字面量有效范围必须与结果的对应静态维度一致；动态结果维度必须使用非常量范围。
+
 非常量的 valid extent（或 lane-1 的 `[0, 0]` 哨兵）会让描述符的两个维度都变为动态，
 因为原生元数据更新总是同时写两维。分配以物理大小作为初始值，定义此类 tile 的每个操作先用
 `buffer.set_validshape` 声明自己产生的 extent；`tile.set_validshape` 直接更新共享的句柄。
 指向同一存储窗口、仅 valid extent 不同的 tile 共用一个动态句柄。窗口则在其 subview 中逐维保持
 静态或动态，因为视图从不接受元数据更新。动态 tile 必须拥有自己的分配，不能共享字节视图根。
+
+当算术操作组合具有不同有效范围描述符的窗口句柄和分配句柄时，零偏移子视图会为输入和目标
+提供一致的逐维描述符。Assemble 的复制源也使用同样的转换。这些视图保留原有存储并使用当前
+显式有效范围，不增加数据复制，也不更新窗口的元数据。
 
 ```text
 # loaded = tile.load(x, [0, 0], [16, 64], [16, cols]); doubled = tile.add(loaded, loaded)

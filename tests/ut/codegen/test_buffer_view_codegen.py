@@ -112,5 +112,50 @@ def test_buffer_views_round_trip_and_emit_one_native_operation_per_call(
     assert "TMOV(" not in cpp and "TEXTRACT(" not in cpp
 
 
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+def test_narrowed_static_subview_emits_native_valid_extents(tmp_path: Path, ascend_backend: BackendType):
+    root_type = ir.BufferType([8, 32], DataType.FP32, ir.MemorySpace.Vec)
+    view_type = ir.BufferType([8, 32], DataType.FP32, ir.MemorySpace.Vec, valid_shape=[4, 16])
+    root, view = ir.Var("root", root_type, _SPAN), ir.Var("view", view_type, _SPAN)
+    output = ir.Var("output", ir.TensorType([4, 16], DataType.FP32), _SPAN)
+    alloc = _ir._create_internal_op_call("buffer.alloc", [_tuple()], {}, root_type, _SPAN)
+    subview = _ir._create_internal_op_call(
+        "buffer.subview", [root, _tuple(0, 0), _tuple(4, 16)], {}, view_type, _SPAN
+    )
+    fill = _ir._create_internal_op_call(
+        "buffer.full", [ir.ConstFloat(1.0, DataType.FP32, _SPAN), root], {}, _SPAN
+    )
+    store = _ir._create_internal_op_call(
+        "buffer.store", [view, _tuple(0, 0), _tuple(4, 16), output], {}, _SPAN
+    )
+    function = ir.Function(
+        "kernel",
+        [(output, ir.ParamDirection.Out)],
+        [],
+        ir.SeqStmts(
+            [
+                ir.AssignStmt(root, alloc, _SPAN),
+                ir.EvalStmt(fill, _SPAN),
+                ir.AssignStmt(view, subview, _SPAN),
+                ir.EvalStmt(store, _SPAN),
+            ],
+            _SPAN,
+        ),
+        _SPAN,
+        type=ir.FunctionType.InCore,
+        ir_stage=ir.FunctionIRStage.Buffer,
+    )
+    text = codegen.PTOCodegen().generate(
+        ir.Program([function], "NarrowedSubview", _SPAN), emit_source_loc=False
+    )
+    assert re.search(r"pto.subview .* valid \[.*\].*v_row=4, v_col=16", text)
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    source, output_file = tmp_path / "narrowed.pto", tmp_path / "narrowed.cpp"
+    source.write_text(text)
+    arch = "a2" if ascend_backend == BackendType.Ascend910B else "a5"
+    _run_ptoas(str(source), str(output_file), [f"--pto-arch={arch}", "--pto-level=level2"])
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

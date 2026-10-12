@@ -764,5 +764,101 @@ def test_original_view_result_descriptor_is_validated():
     )
 
 
+@pytest.mark.parametrize("byte_root", [False, True])
+@pytest.mark.parametrize("destination_address", [2048, 8192])
+def test_nested_subview_uses_inherited_pitch_after_typed_or_byte_root(byte_root, destination_address):
+    root_type = (
+        ir.BufferType([128, 32], DataType.UINT8, ir.MemorySpace.Vec)
+        if byte_root
+        else ir.BufferType([16, 64], DataType.FP32, ir.MemorySpace.Vec)
+    )
+    root = _var("root", root_type)
+    statements: list[ir.Stmt] = [
+        ir.AssignStmt(root, _call("buffer.alloc", [ir.MakeTuple([], SPAN), _int(0)], root_type), SPAN)
+    ]
+    source = root
+    if byte_root:
+        source = _var("typed", ir.BufferType([16, 64], DataType.FP32, ir.MemorySpace.Vec))
+        statements.append(ir.AssignStmt(source, _call("buffer.reshape", [root], source.type), SPAN))
+    parent = _var("parent", ir.BufferType([16, 16], DataType.FP32, ir.MemorySpace.Vec))
+    child = _var("child", ir.BufferType([8, 16], DataType.FP32, ir.MemorySpace.Vec))
+    destination = _var("destination", child.type)
+    for result, operand, row in ((parent, source, 0), (child, parent, 8)):
+        offsets = ir.MakeTuple([_int(row), _int(0)], SPAN)
+        statements.append(
+            ir.AssignStmt(result, _call("buffer.subview", [operand, offsets], result.type), SPAN)
+        )
+    statements.extend(
+        [
+            ir.AssignStmt(
+                destination,
+                _call("buffer.alloc", [ir.MakeTuple([], SPAN), _int(destination_address)], destination.type),
+                SPAN,
+            ),
+            ir.EvalStmt(_call("buffer.copy", [child, destination]), SPAN),
+        ]
+    )
+    program = _program(ir.SeqStmts(statements, SPAN))
+    # Row 8 is 8 * 64 * 4 = 2048 bytes from the root, even though the parent is only 16 columns wide.
+    if destination_address == 2048:
+        _assert_error(program, "partially overlapping")
+    else:
+        assert _verify(program) == []
+
+
+@pytest.mark.parametrize("reshape", [False, True])
+@pytest.mark.parametrize("destination_address", [10240, 16384])
+def test_static_child_of_runtime_window_keeps_conservative_bounds(reshape, destination_address):
+    root = _var("root", ir.BufferType([64, 64], DataType.FP32, ir.MemorySpace.Vec))
+    parent = _var("parent", ir.BufferType([32, 64], DataType.FP32, ir.MemorySpace.Vec))
+    child = _var("child", ir.BufferType([16, 64], DataType.FP32, ir.MemorySpace.Vec))
+    destination = _var("destination", child.type)
+    row = _var("row", ir.ScalarType(DataType.INDEX))
+    statements: list[ir.Stmt] = [
+        ir.AssignStmt(root, _call("buffer.alloc", [ir.MakeTuple([], SPAN), _int(0)], root.type), SPAN),
+        ir.AssignStmt(
+            parent, _call("buffer.subview", [root, ir.MakeTuple([row, _int(0)], SPAN)], parent.type), SPAN
+        ),
+    ]
+    if reshape:
+        relabel = _var("relabel", parent.type)
+        statements.append(ir.AssignStmt(relabel, _call("buffer.reshape", [parent], relabel.type), SPAN))
+        parent = relabel
+    statements.extend(
+        [
+            ir.AssignStmt(
+                child,
+                _call("buffer.subview", [parent, ir.MakeTuple([_int(8), _int(0)], SPAN)], child.type),
+                SPAN,
+            ),
+            ir.AssignStmt(
+                destination,
+                _call("buffer.alloc", [ir.MakeTuple([], SPAN), _int(destination_address)], destination.type),
+                SPAN,
+            ),
+            ir.EvalStmt(_call("buffer.copy", [child, destination]), SPAN),
+        ]
+    )
+    program = _program(ir.SeqStmts(statements, SPAN), [row])
+    # For row=32 the child reads rows 40..55, overlapping the placed destination at row 40.
+    if destination_address == 10240:
+        _assert_error(program, "partially overlapping")
+    else:
+        assert _verify(program) == []
+
+
+def test_equal_conservative_ranges_do_not_prove_exact_aliasing():
+    root = _var("root", ir.BufferType([64, 64], DataType.FP32, ir.MemorySpace.Vec))
+    row = _var("row", ir.ScalarType(DataType.INDEX))
+    source = _var("source", ir.BufferType([16, 64], DataType.FP32, ir.MemorySpace.Vec))
+    destination = _var("destination", source.type)
+    statements: list[ir.Stmt] = [ir.AssignStmt(root, _allocation(root.type), SPAN)]
+    for result, offset in ((source, row), (destination, ir.Add(row, _int(8), DataType.INDEX, SPAN))):
+        call = _call("buffer.subview", [root, ir.MakeTuple([offset, _int(0)], SPAN)], result.type)
+        statements.append(ir.AssignStmt(result, call, SPAN))
+    statements.append(ir.EvalStmt(_call("buffer.copy", [source, destination]), SPAN))
+    _assert_error(_program(ir.SeqStmts(statements, SPAN), [row]), "partially overlapping")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

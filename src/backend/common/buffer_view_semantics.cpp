@@ -97,7 +97,7 @@ void ValidateMatrixReshape(const ir::BufferTypePtr& source, const ir::BufferType
 // offsets. Static byte windows of the UINT8[N,32] storage root are the
 // full-width special case. A result valid dimension is either static in the
 // descriptor or dynamic (-1); the optional valid tuple states every dimension
-// and is required when any is dynamic.
+// and is required when any is dynamic or smaller than the physical shape.
 void ValidateBufferSubview(const std::vector<ir::ExprPtr>& args, const ir::TypePtr& result) {
   INTERNAL_CHECK((args.size() == 2 || args.size() == 3) && args[0] && args[1])
       << "Internal error: buffer.subview requires a source, an offsets tuple and optional valid extents";
@@ -127,8 +127,9 @@ void ValidateBufferSubview(const std::vector<ir::ExprPtr>& args, const ir::TypeP
     }
   }
   const bool dynamic = destination->valid_shape_[0] < 0 || destination->valid_shape_[1] < 0;
-  CHECK(!dynamic || args.size() == 3)
-      << "buffer.subview requires a valid-extents tuple when its result has a dynamic valid dimension";
+  CHECK((!dynamic && destination->valid_shape_ == destination->shape_) || args.size() == 3)
+      << "buffer.subview requires a valid-extents tuple when its result has dynamic or narrowed valid "
+         "dimensions";
   if (args.size() == 3) {
     auto valid = ir::As<ir::MakeTuple>(args[2]);
     CHECK(valid && valid->elements_.size() == 2) << "buffer.subview valid extents must be a rank-2 MakeTuple";
@@ -137,10 +138,18 @@ void ValidateBufferSubview(const std::vector<ir::ExprPtr>& args, const ir::TypeP
       auto scalar = extent ? ir::As<ir::ScalarType>(extent->GetType()) : nullptr;
       CHECK(scalar && (scalar->dtype_.IsInt() || scalar->dtype_ == DataType::INDEX))
           << "buffer.subview valid extent " << axis << " must be an integer or INDEX scalar";
+      auto constant = ir::As<ir::ConstInt>(extent);
+      if (constant) {
+        CHECK(constant->value_ > 0 && constant->value_ <= destination->shape_[axis])
+            << "buffer.subview valid extent " << axis << " must be positive and no greater than "
+            << destination->shape_[axis];
+      }
       if (destination->valid_shape_[axis] >= 0) {
-        auto constant = ir::As<ir::ConstInt>(extent);
         CHECK(constant && constant->value_ == destination->valid_shape_[axis])
             << "buffer.subview valid extent " << axis << " must equal the static descriptor dimension";
+      } else {
+        CHECK(!constant) << "buffer.subview valid extent " << axis
+                         << " must be nonconstant for a dynamic descriptor dimension";
       }
     }
   }

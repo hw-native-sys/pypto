@@ -117,6 +117,8 @@ window is defined there, not at the allocation, and a relabel of a window is a
 `buffer.reshape` of it at the same place. `tile.assemble` writes in place: the
 source is copied into a window of the result's storage, after copying the
 target into the result when the planner gave them different storage.
+When assemble enlarges the valid region, the preservation copy writes through
+a view matching the target's original valid rectangle.
 
 ```text
 # window = tile.slice(whole, [16, 32], [row, 32]); placed = tile.assemble(canvas, doubled, [16, 0])
@@ -127,7 +129,10 @@ buffer.copy(doubled_buffer, placed_window)
 ```
 
 Every lowered window carries its valid tuple, so PTOAS types each native
-dimension from it. PTOAS cannot legalize a subview of a byte-root relabel, so
+dimension from it. Constant valid extents must be positive and fit the window.
+Each literal extent requires the same static result dimension, while a dynamic
+result dimension requires a nonconstant extent.
+Zero-valid slice and assemble windows are rejected. PTOAS cannot legalize a subview of a byte-root relabel, so
 in addressed storage a tile that windows are cut from gets its own allocation
 at its planned address. A source that already is the assembled window was
 written in place and needs no copy. Assembles across memory spaces (the
@@ -152,6 +157,12 @@ extents share one dynamic handle. Windows instead keep per-dimension static or
 dynamic valid extents in their subview, because a view never takes a metadata
 update. A dynamic tile must own its allocation; it cannot share a byte-view
 root.
+
+When arithmetic combines window and allocation handles with different valid
+descriptors, zero-offset subviews give the operands and destination matching
+per-dimension descriptors. Assemble uses the same bridge for its copy source.
+These views preserve storage and use the current explicit valid extents; they
+add no data copies or metadata updates to a window.
 
 ```text
 # loaded = tile.load(x, [0, 0], [16, 64], [16, cols]); doubled = tile.add(loaded, loaded)

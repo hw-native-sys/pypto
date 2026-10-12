@@ -61,7 +61,7 @@ parameters support dense ND rank-2 FP16/BF16/FP32/INT32 tensors with static
 physical shapes and more than one column. Arithmetic recipes impose their own
 narrower dtype contracts. Normalized Tensor returns alias those parameters;
 the native kernel still returns void. Buffer parameter ABI, native function
-results, dynamic or strided views, slots, helpers, and other physical layouts are not yet supported
+results, boxed subviews, mutable view metadata at allocation, slots, helpers, and other physical layouts are not yet supported
 and produce explicit errors. Buffer type dumps use native
 `pypto.ir.BufferType(...)` constructors; binary serialization preserves their
 complete descriptors. Reparsing complete buffer-program dumps through the
@@ -163,7 +163,10 @@ row-major rank-2 Vec buffer: the result keeps the source's element type and row
 pitch, and its static shape must fit the source. Offsets are integer or `INDEX`
 scalars, constant or runtime; constant offsets are bounds-checked. The optional
 valid tuple states every result valid extent (constants for static descriptor
-dimensions) and is required when a result dimension is dynamic. Full-width
+dimensions) and is required when a result dimension is dynamic or its static
+valid extent is smaller than the physical shape. Constant valid operands must
+be positive and no larger than the corresponding window dimension; zero-valid
+windows are not supported. Full-width
 `UINT8[N,32]` byte windows of a storage root are the static special case. `buffer.reshape` preserves the exact physical byte count and accepts
 static dense row-major rank-2 Vec FP16, BF16, FP32, INT16, INT32 and UINT8 descriptors, with physical
 rows aligned to 32 bytes. In Mat, Left, Right and Acc it only relabels one
@@ -174,10 +177,13 @@ Every intermediate shape, dtype and valid extent is explicit in its result type.
 `buffer.set_validshape` cannot mutate these static view handles.
 
 A runtime-offset window is only known to lie within its source window, so
-`BufferIR` uses that whole source range when proving disjointness.
+`BufferIR` uses that whole source range when proving disjointness, including
+through subsequent static subviews and reshapes. Equal conservative ranges
+do not prove exact aliasing.
 
-`BufferIR` memoizes root identity, relative offset and byte extent for these
-views. Elementwise recipes, and copies involving views, check source/destination
+`BufferIR` memoizes root identity, relative offset, byte extent, inherited row
+pitch and offset certainty for these views. Subviews retain their parent's pitch;
+reshapes establish the result layout's pitch. Elementwise recipes, and copies involving views, check source/destination
 windows using relative offsets within one root or effective addresses across
 placed roots. Distinct addressless allocations are disjoint; distinct unproven
 incoming roots are not a disjointness proof. Same-root disjoint windows remain

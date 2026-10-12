@@ -784,6 +784,22 @@ class TileToBufferMutator : public IRMutator {
         tuple->span_);
   }
 
+  static MakeTuplePtr ZeroOffsets(const Span& span) {
+    auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+    return std::make_shared<MakeTuple>(std::vector<ExprPtr>{zero, zero}, span);
+  }
+
+  // Allocation metadata updates make both dimensions dynamic. A use-site
+  // subview instead types each dimension from its explicit valid operand.
+  // Bridge those representations without changing storage or copying data.
+  VarPtr WindowHandle(const ExprPtr& tile, std::vector<StmtPtr>& out) {
+    auto handle = Handle(tile);
+    const auto descriptor = WindowDescriptor(As<TileType>(tile->GetType()), tile->span_);
+    if (structural_equal(handle->GetType(), descriptor)) return handle;
+    return DefineWindow(handle->name_hint_ + "_valid_window", handle, ZeroOffsets(tile->span_), descriptor,
+                        Valid(tile), out, tile->span_);
+  }
+
   StmtPtr Operation(const std::string& name, const std::vector<ExprPtr>& args, const Span& span) const {
     return std::make_shared<EvalStmt>(OpRegistry::GetInstance().CreateInternal(name, args, span), span);
   }
@@ -821,7 +837,9 @@ class TileToBufferMutator : public IRMutator {
       INTERNAL_CHECK_SPAN(result && call->args_.size() >= 3, call->span_)
           << "Internal error: tile.slice requires a source, shape, offsets and a result";
       const auto tile = As<TileType>(result->GetType());
-      CHECK_SPAN(tile->shape_.size() == 2 && As<TileType>(call->args_[0]->GetType())->shape_.size() == 2,
+      const auto drop_dims = call->args_.size() == 5 ? As<MakeTuple>(call->args_[4]) : nullptr;
+      CHECK_SPAN((!drop_dims || drop_dims->elements_.empty()) && tile->shape_.size() == 2 &&
+                     As<TileType>(call->args_[0]->GetType())->shape_.size() == 2,
                  call->span_)
           << "LowerTileToBuffer: rank-reducing tile.slice requires a Buffer view recipe";
       std::vector<StmtPtr> out;
@@ -881,7 +899,19 @@ class TileToBufferMutator : public IRMutator {
       std::vector<StmtPtr> out;
       const auto destination = Handle(result);
       const auto target = Handle(call->args_[0]);
-      if (target != destination) out.push_back(Operation("buffer.copy", {target, destination}, call->span_));
+      if (target != destination) {
+        auto copy_target = target;
+        auto copy_destination = destination;
+        if (!structural_equal(target->GetType(), destination->GetType())) {
+          // Assemble can enlarge the valid region. Preserve only the old
+          // target rectangle through a destination view with its descriptor.
+          copy_target = WindowHandle(call->args_[0], out);
+          copy_destination =
+              DefineWindow(result->name_hint_ + "_preserved_window", destination, ZeroOffsets(call->span_),
+                           As<BufferType>(copy_target->GetType()), Valid(call->args_[0]), out, call->span_);
+        }
+        out.push_back(Operation("buffer.copy", {copy_target, copy_destination}, call->span_));
+      }
       const auto source = Handle(call->args_[1]);
       const auto offsets = Offsets(call->args_[2]);
       // A source that already is this window was written in place.
@@ -890,10 +920,11 @@ class TileToBufferMutator : public IRMutator {
           structural_equal(origin->second.second, offsets)) {
         return std::make_shared<SeqStmts>(out, call->span_);
       }
-      const auto source_type = As<BufferType>(source->GetType());
+      const auto copy_source = WindowHandle(call->args_[1], out);
+      const auto source_type = As<BufferType>(copy_source->GetType());
       auto window = DefineWindow(result->name_hint_ + "_window", destination, offsets, source_type,
                                  Valid(call->args_[1]), out, call->span_);
-      out.push_back(Operation("buffer.copy", {source, window}, call->span_));
+      out.push_back(Operation("buffer.copy", {copy_source, window}, call->span_));
       return std::make_shared<SeqStmts>(out, call->span_);
     }
     if (IsOp(call, "tile.reshape") || IsOp(call, "tile.reinterpret_view")) {
@@ -954,15 +985,24 @@ class TileToBufferMutator : public IRMutator {
       INTERNAL_CHECK_SPAN(call->args_.size() == entry.GetArgumentCount(), call->span_)
           << "Internal error: malformed Tile elementwise recipe operand count";
       ValidateKwargs(call->kwargs_, entry.GetOp()->GetAttrs(), call->op_->name_);
-      const auto destination = Handle(result);
+      auto destination = Handle(result);
       const auto dtype = As<BufferType>(destination->GetType())->dtype_;
-      std::vector<ExprPtr> args;
+      bool needs_windows = false;
       for (const auto& input : recipe->inputs) {
         INTERNAL_CHECK_SPAN(input.logical_index < call->args_.size(), call->span_)
             << "Internal error: malformed Tile elementwise recipe operands";
+        if (input.kind == backend::BufferElementwiseOperandKind::Buffer &&
+            !structural_equal(Handle(call->args_[input.logical_index])->GetType(), destination->GetType())) {
+          needs_windows = true;
+        }
+      }
+      std::vector<StmtPtr> out;
+      if (needs_windows) destination = WindowHandle(result, out);
+      std::vector<ExprPtr> args;
+      for (const auto& input : recipe->inputs) {
         const auto& source = call->args_[input.logical_index];
         if (input.kind == backend::BufferElementwiseOperandKind::Buffer) {
-          args.push_back(Handle(source));
+          args.push_back(needs_windows ? WindowHandle(source, out) : Handle(source));
         } else {
           // Scalar representation belongs to the lowering contract. The emitter
           // consumes the resulting type and never repairs element operands.
@@ -984,7 +1024,8 @@ class TileToBufferMutator : public IRMutator {
       // kwargs retain their typed schema and are checked during construction.
       const auto kwargs = IsOp(call, "tile.full") ? decltype(call->kwargs_){} : call->kwargs_;
       auto lowered = OpRegistry::GetInstance().CreateInternal(recipe->buffer_op, args, kwargs, call->span_);
-      return std::make_shared<EvalStmt>(lowered, call->span_);
+      out.push_back(std::make_shared<EvalStmt>(lowered, call->span_));
+      return std::make_shared<SeqStmts>(out, call->span_);
     }
     if (IsOp(call, "tile.transpose_view")) {
       // StorageIndex already declared the relabelled window at the source's

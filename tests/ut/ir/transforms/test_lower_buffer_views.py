@@ -356,5 +356,106 @@ def test_runtime_valid_extents_update_the_handle_metadata(
     assert "v_row=?, v_col=?" in text and text.count("pto.set_validshape") == updates
 
 
+@pytest.mark.parametrize("planner", _PLANNERS)
+def test_rank_reducing_slice_is_rejected_even_when_type_inference_pads_to_rank_two(planner):
+    @pl.program
+    class ColumnSlice:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self, x: pl.Tensor[[16, 32], pl.FP32], out: pl.Out[pl.Tensor[[1, 16], pl.FP32]]
+        ) -> pl.Tensor[[1, 16], pl.FP32]:
+            whole = pl.load(x, [0, 0], [16, 32])
+            column = pl.tile.slice(whole, [16, 1], [0, 0], drop_dims=[1])
+            result = pl.store(column, [0, 0], out)
+            return result
+
+    with pytest.raises(ValueError, match="rank-reducing tile.slice"):
+        _lower_default(ColumnSlice, planner)
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("valid", ["[16, cols]", "[rows, 32]", "[rows, cols]"])
+@pytest.mark.parametrize("operation", ["pl.add(window, window)", "pl.add(window, loaded)", "pl.exp(window)"])
+def test_runtime_valid_window_arithmetic_compiles(
+    tmp_path: Path, ascend_backend: BackendType, valid: str, operation: str
+) -> None:
+    program = pl.parse_program(f"""
+@pl.program
+class WindowArithmetic:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64, 64], pl.FP32], rows: pl.Scalar[pl.INDEX],
+               cols: pl.Scalar[pl.INDEX], out: pl.Out[pl.Tensor[[16, 32], pl.FP32]]
+               ) -> pl.Tensor[[16, 32], pl.FP32]:
+        whole = pl.load(x, [0, 0], [64, 64])
+        window = pl.tile.slice(whole, [16, 32], [0, 0], valid_shape={valid})
+        loaded = pl.tile.load(x, [0, 0], [16, 32], {valid}, target_memory=pl.MemorySpace.Vec)
+        computed = {operation}
+        result = pl.store(computed, [0, 0], out)
+        return result
+""")
+    lowered = _lower_default(program, passes.MemoryPlanner.PTOAS)
+    assert not _calls(lowered, "buffer.copy")
+    text = _compile(tmp_path, lowered, ascend_backend, addressed=False)
+    assert "pto.subview" in text and "pto.set_validshape" in text
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("valid", ["[16, cols]", "[rows, 32]", "[rows, cols]"])
+@pytest.mark.parametrize("source", ["loaded", "window"])
+def test_runtime_valid_assemble_compiles(
+    tmp_path: Path, ascend_backend: BackendType, valid: str, source: str
+) -> None:
+    program = pl.parse_program(f"""
+@pl.program
+class RuntimeAssemble:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64, 32], pl.FP32], rows: pl.Scalar[pl.INDEX],
+               cols: pl.Scalar[pl.INDEX], out: pl.Out[pl.Tensor[[32, 32], pl.FP32]]
+               ) -> pl.Tensor[[32, 32], pl.FP32]:
+        whole = pl.load(x, [0, 0], [64, 32])
+        window = pl.tile.slice(whole, [16, 32], [0, 0], valid_shape={valid})
+        loaded = pl.tile.load(x, [0, 0], [16, 32], {valid}, target_memory=pl.MemorySpace.Vec)
+        canvas = pl.tile.full([32, 32], dtype=pl.FP32, value=0.0)
+        assembled = pl.tile.assemble(canvas, {source}, [16, 0])
+        result = pl.store(assembled, [0, 0], out)
+        return result
+""")
+    lowered = _lower_default(program, passes.MemoryPlanner.PTOAS)
+    (copy,) = _calls(lowered, "buffer.copy")
+    ir.assert_structural_equal(copy.args[0].type, copy.args[1].type)
+    text = _compile(tmp_path, lowered, ascend_backend, addressed=False)
+    assert "pto.tmov ins(" in text
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("planner", _PLANNERS)
+def test_assemble_preserves_a_partially_valid_target(
+    tmp_path: Path, ascend_backend: BackendType, planner: passes.MemoryPlanner
+) -> None:
+    @pl.program
+    class GrowValidTarget:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self, x: pl.Tensor[[32, 32], pl.FP32], out: pl.Out[pl.Tensor[[32, 32], pl.FP32]]
+        ) -> pl.Tensor[[32, 32], pl.FP32]:
+            target = pl.tile.load(x, [0, 0], [32, 32], [16, 32], target_memory=pl.MemorySpace.Vec)
+            source = pl.load(x, [16, 0], [16, 32])
+            assembled = pl.tile.assemble(target, source, [16, 0])
+            result = pl.store(assembled, [0, 0], out)
+            return result
+
+    if planner == passes.MemoryPlanner.PTOAS:
+        with pytest.raises(ValueError, match="cannot share an addressless storage root"):
+            _lower_default(GrowValidTarget, planner)
+        return
+    lowered = _lower_default(GrowValidTarget, planner)
+    copies = _calls(lowered, "buffer.copy")
+    assert copies
+    for copy in copies:
+        ir.assert_structural_equal(copy.args[0].type, copy.args[1].type)
+    text = _compile(tmp_path, lowered, ascend_backend, addressed=True)
+    assert "pto.tmov ins(" in text
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
