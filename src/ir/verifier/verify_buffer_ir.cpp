@@ -574,8 +574,9 @@ class BufferIRPropertyVerifierImpl : public PropertyVerifier {
       if (!function) continue;
       selected_pipeline |= function->HasAttr(kAttrBufferIrSelected);
       if (!IsInCoreType(function->func_type_) ||
-          (!IsBufferIRSelected(function) && function->ir_stage_ != FunctionIRStage::Buffer))
+          (!IsBufferIRSelected(function) && function->ir_stage_ != FunctionIRStage::Buffer)) {
         continue;
+      }
       BufferIRVisitor visitor(diagnostics, function->name_);
       visitor.VisitFunction(function);
       // Other verifiers assume intact structural nodes. The diagnostics above

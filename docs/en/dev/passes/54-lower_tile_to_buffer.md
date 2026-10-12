@@ -19,7 +19,9 @@ propagates; there is no catch-and-recompile fallback.
 
 The first rollout accepts straight-line static rank-2 dense Vec FP32 kernels made
 from ordinary packed ND GM loads, `add`, `mul` and stores. Tiles have full static
-valid extents and 32-byte-aligned rows. The accepted target is a2/a3 with PYPTO, DSA_RP and PTOAS planners.
+valid extents and 32-byte-aligned rows. GM return aliases must resolve to parameters
+whose types match the declared results, including TensorView metadata; kernels
+with mismatched return views retain Tile IR. The accepted target is a2/a3 with PYPTO, DSA_RP and PTOAS planners.
 A5 retains Tile IR until its default rollout has clean runtime acceptance. Reductions, other arithmetic, control flow,
 views, slots, helper ABIs and cross-core resources remain Tile in the normal
 pipeline. Existing production recipes may support more through explicit low-level

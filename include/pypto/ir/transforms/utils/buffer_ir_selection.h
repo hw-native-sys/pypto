@@ -15,7 +15,9 @@
 #include <vector>
 
 #include "pypto/ir/function.h"
+#include "pypto/ir/transforms/ir_property.h"
 #include "pypto/ir/transforms/pass_context.h"
+#include "pypto/ir/verifier/diagnostic_check_registry.h"
 
 namespace pypto::ir {
 

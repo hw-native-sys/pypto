@@ -82,7 +82,7 @@ PyPTO IR 变换的参考文档，按阅读顺序组织。实际执行顺序请�
 | 51 | [ClassifyIterArgCarry](51-classify_iter_arg_carry.md) | 把编排层 `ForStmt` 的每个 iter_arg 分类为平凡别名或需物化的重绑定携带 |
 | 52 | [InsertCommFence](52-insert_comm_fence.md) | 为每个发布性写入打标记（本地：region `system.cacheinvalid` + `system.fence`；远端写：仅 fence；opaque 写：whole-GM），并为每个 wait 插入 whole-GM `system.cacheinvalid`；notify 本身不加任何标记 |
 | 53 | [MaterializeValidShapeSymbols](53-materialize_valid_shape_symbols.md) | 将设备 kernel 中无法绑定的 `valid_shape` 符号转换为前置的 `Scalar[INDEX]` 参数，并传入调用方的实际有效范围 |
-| 54 | [LowerTileToBuffer](54-lower_tile_to_buffer.md) | 按迁移选项将完成规划的 Tile 存储最终转换为显式 Buffer 操作 |
+| 54 | [LowerTileToBuffer](54-lower_tile_to_buffer.md) | 默认将选中 kernel 的已规划 Tile 存储转换为显式 Buffer 操作，其余 kernel 保留 Tile |
 
 ## 默认流水线之外
 

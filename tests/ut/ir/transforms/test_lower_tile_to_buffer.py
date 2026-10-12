@@ -752,6 +752,89 @@ class Transfer:
     assert function.ir_stage == (ir.FunctionIRStage.Buffer if selected else ir.FunctionIRStage.Functional)
 
 
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("op_name", ["tile.load", "tile.store", "tile.add", "tile.mul"])
+def test_call_attributes_outside_lowering_contract_keep_whole_kernel_on_tile(planner, op_name):
+    class AddAttribute(ir.IRMutator):
+        def visit_call(self, call):
+            if call.op.name == ir.get_op(op_name).name:
+                return ir.Call(
+                    call.op, call.args, call.kwargs, {"unsupported_metadata": True}, call.type, call.span
+                )
+            return super().visit_call(call)
+
+    # Stamp physical Tile calls at the selection boundary, after the frontend
+    # tensor-to-tile rewrite has established the calls being classified.
+    with passes.PassContext([], memory_planner=planner):
+        manager = PassManager(OptimizationStrategy.Default)
+        boundary = manager.get_pass_names().index("SelectBufferIRFunctions")
+        program = StraightLine
+        for transform in manager.passes[:boundary]:
+            program = transform(program)
+    program = AddAttribute().visit_program(program)
+    outputs = []
+    for enabled in (False, True):
+        with passes.PassContext([], memory_planner=planner, enable_buffer_ir=enabled):
+            result = program
+            for transform in manager.passes[boundary:]:
+                result = transform(result)
+        function = result.get_function("kernel")
+        assert function is not None
+        if enabled:
+            assert function.attrs["buffer_ir_selected"] is False
+        assert function.ir_stage == ir.FunctionIRStage.Functional
+        outputs.append(function.body)
+    ir.assert_structural_equal(*outputs, enable_auto_mapping=True)
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+def test_gm_return_view_mismatch_keeps_whole_kernel_on_tile(tmp_path, planner):
+    @pl.program
+    class AssembleOutput:
+        @pl.function(type=pl.FunctionType.InCore)
+        def compute(
+            self,
+            source: pl.Tensor[[4, 16], pl.FP32],
+            output: pl.Out[pl.Tensor[[4, 16], pl.FP32]],
+        ) -> pl.Tensor[[4, 16], pl.FP32]:
+            tile = pl.load(source, [0, 0], [4, 16])
+            return pl.store(tile, [0, 0], output)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            source: pl.Tensor[[4, 16], pl.FP32],
+            output: pl.Out[pl.Tensor[[2, 4, 16], pl.FP32]],
+        ) -> pl.Tensor[[2, 4, 16], pl.FP32]:
+            for index in pl.range(2):
+                chunk = pl.create_tensor([4, 16], dtype=pl.FP32)
+                chunk = self.compute(source, chunk)
+                output = pl.assemble(output, chunk, [index, 0, 0])
+            return output
+
+    outputs = []
+    for enabled in (False, True):
+        with passes.PassContext([], memory_planner=planner, enable_buffer_ir=enabled):
+            result = PassManager(OptimizationStrategy.Default).run_passes(AssembleOutput)
+        function = result.get_function("compute")
+        assert function is not None
+        if enabled:
+            assert function.attrs["buffer_ir_selected"] is False
+        assert function.ir_stage == ir.FunctionIRStage.Functional
+        outputs.append(function.body)
+    ir.assert_structural_equal(*outputs, enable_auto_mapping=True)
+    single = ir.Program([function], "Compute", function.span)
+    text = codegen.PTOCodegen().generate(single, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+    assert "pto.tload" in text and "pto.tstore" in text
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    source, output = tmp_path / "assemble.pto", tmp_path / "assemble.cpp"
+    source.write_text(text)
+    level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+    _run_ptoas(str(source), str(output), [f"--pto-level={level}", "--pto-arch=a2"])
+    assert output.is_file()
+
+
 def test_device_helper_callee_is_not_selected_as_a_kernel():
     prepared = StraightLine
     with passes.PassContext([]):

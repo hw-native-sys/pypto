@@ -24,6 +24,7 @@ torch_codegen(node: _ir.Program | _ir.Function, check_shapes: bool = False) -> s
 
 - 保持 IR 到 Python 表达式/语句的可读映射
 - 尽量覆盖 tensor/tile 常见算子
+- 为 `kernel.lower()` 和 `CompiledProgram.validate_ir()` 执行默认稠密 Vec Buffer load/add/mul/store 子集，包括目标写入和存储别名；其他 Buffer 配方暂不在此调试子集内。 Buffer Pass dump 同时保留可读 Python 文本和无损 `.msgpack` 文件；Buffer 文本不是可执行 DSL，因此 `validate_ir()` 从后者重放。
 - 支持 cross-core `tpush/tpop` 的并发语义模拟
 - 对可疑输入提供可定位的错误信息（超时、split 维度不合法等）
 

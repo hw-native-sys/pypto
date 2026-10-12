@@ -538,6 +538,30 @@ def _tile_store(tile, offsets, output_tensor, atomic=0):
         output_tensor[slices] = tile[valid_slices]
     return output_tensor
 
+def _buffer_set_valid(buffer, valid_shape):
+    buffer._pypto_valid_shape = tuple(int(s) for s in valid_shape)
+    return buffer
+
+def _buffer_alloc(shape, dtype, valid_shape, dynamic_valid):
+    dynamic = iter(dynamic_valid)
+    valid = tuple(next(dynamic) if s < 0 else s for s in valid_shape)
+    return _buffer_set_valid(torch.empty(shape, dtype=dtype), valid)
+
+def _buffer_active(buffer):
+    return buffer[tuple(slice(0, s) for s in buffer._pypto_valid_shape)]
+
+def _buffer_load(tensor, offsets, valid, destination):
+    data = _tile_load(tensor, offsets, valid)
+    destination[tuple(slice(0, int(s)) for s in valid)].copy_(data)
+
+def _buffer_store(source, offsets, valid, tensor):
+    data = source[tuple(slice(0, int(s)) for s in valid)]
+    _tile_store(data, offsets, tensor)
+
+def _buffer_subview(source, offsets, shape, valid):
+    slices = tuple(slice(int(o), int(o) + s) for o, s in zip(offsets, shape))
+    return _buffer_set_valid(source[slices], valid)
+
 def _tensor_slice(tensor, offsets, shapes, valid_shape=None):
     offsets_t = _coerce_shape(offsets)
     shapes_t = _coerce_shape(shapes)
@@ -1147,6 +1171,18 @@ def _register_ops() -> None:  # noqa: PLR0915
     m["tile.addsc"] = lambda a, _kw: f"({a[0]} + {a[1]} + {a[2]})"
     m["tile.subsc"] = lambda a, _kw: f"({a[0]} - {a[1]} + {a[2]})"
 
+    # --- Default Buffer rollout: explicit destination writes ---
+    m["buffer.load"] = lambda a, _kw: f"_buffer_load({', '.join(a)})"
+    m["buffer.store"] = lambda a, _kw: f"_buffer_store({', '.join(a)})"
+    m["buffer.set_validshape"] = lambda a, _kw: f"_buffer_set_valid({a[0]}, {a[1]})"
+    m["buffer.copy"] = lambda a, _kw: f"_buffer_active({a[1]}).copy_(_buffer_active({a[0]}))"
+    m["buffer.add"] = lambda a, _kw: (
+        f"_buffer_active({a[2]}).copy_(_buffer_active({a[0]}) + _buffer_active({a[1]}))"
+    )
+    m["buffer.mul"] = lambda a, _kw: (
+        f"_buffer_active({a[2]}).copy_(_buffer_active({a[0]}) * _buffer_active({a[1]}))"
+    )
+
     # --- Cross-core pipe ops ---
     m["tile.tpush_to_aiv"] = _handle_tpush_to_aiv
     m["tile.tpush_to_aic"] = _handle_tpush_to_aic
@@ -1452,6 +1488,18 @@ class TorchCodegen(_ir.IRVisitor):
         else:
             self._expr_result = operand
 
+    def _buffer_descriptor(self, op: _ir.Call) -> _ir.BufferType:
+        """Keep physical layouts outside the default dense Vec subset explicit."""
+        descriptor = op.type
+        if (
+            not isinstance(descriptor, _ir.BufferType)
+            or descriptor.memory_space != _ir.MemorySpace.Vec
+            or descriptor.blayout != _ir.TileLayout.row_major
+            or descriptor.slayout != _ir.TileLayout.none_box
+        ):
+            raise ValueError("torch_codegen supports only dense row-major Vec Buffer descriptors")
+        return descriptor
+
     def visit_call(self, op: _ir.Call) -> None:
         op_name = op.op.name
         handler = _OP_MAP.get(op_name)
@@ -1460,7 +1508,25 @@ class TorchCodegen(_ir.IRVisitor):
         arg_strs = [self._visit_expr_str(a) for a in op.args]
         kw = dict(op.kwargs) if op.kwargs else {}
 
-        if op_name == _ir.get_op("tensor.view").name:
+        if op_name == _ir.get_op("buffer.alloc").name:
+            descriptor = self._buffer_descriptor(op)
+            self._expr_result = (
+                f"_buffer_alloc({tuple(descriptor.shape)!r}, {_torch_dtype(descriptor.dtype)}, "
+                f"{tuple(descriptor.valid_shape)!r}, {arg_strs[0]})"
+            )
+        elif op_name == _ir.get_op("buffer.subview").name:
+            descriptor = self._buffer_descriptor(op)
+            valid = arg_strs[2] if len(arg_strs) == 3 else repr(tuple(descriptor.valid_shape))
+            self._expr_result = (
+                f"_buffer_subview({arg_strs[0]}, {arg_strs[1]}, {tuple(descriptor.shape)!r}, {valid})"
+            )
+        elif op_name == _ir.get_op("buffer.reshape").name:
+            descriptor = self._buffer_descriptor(op)
+            self._expr_result = (
+                f"_buffer_set_valid({arg_strs[0]}.view({_torch_dtype(descriptor.dtype)})"
+                f".view({tuple(descriptor.shape)!r}), {tuple(descriptor.valid_shape)!r})"
+            )
+        elif op_name == _ir.get_op("tensor.view").name:
             if len(arg_strs) >= 2:
                 result_view = getattr(op.type, "tensor_view", None)
                 is_dn = result_view is not None and result_view.layout == _ir.TensorLayout.DN
@@ -1753,7 +1819,8 @@ def _collect_pass_ir_files(ir_dir: str) -> list[Path]:
 def _build_codegen_entry(
     ir_file: Path,
 ) -> tuple[_ir.Function, Callable[..., Any]]:
-    parsed = pl.loads(str(ir_file))
+    binary_path = ir_file.with_suffix(".msgpack")
+    parsed = _ir.deserialize(binary_path.read_bytes()) if binary_path.is_file() else pl.loads(str(ir_file))
     if not isinstance(parsed, (_ir.Program, _ir.Function)):
         raise ValueError(
             f"Parsed object from {ir_file} must be Program/Function, got {type(parsed).__name__}"

@@ -574,7 +574,7 @@ class TestPlatformMatrixCollection:
         for item in self._items(pinned):
             conf._collect_test_case_from_item(item, seen, None, "a2a3")
 
-        assert list(seen) == ["abs_pin_key@a5@default"]
+        assert list(seen) == ["abs_pin_key@a5@default@buffer_ir"]
         assert all(c is pinned for c in seen.values()), "a pinned case is never copied"
 
     def test_an_unpinned_case_still_spans_the_matrix(self):
@@ -587,7 +587,7 @@ class TestPlatformMatrixCollection:
         for item in items:
             conf._collect_test_case_from_item(item, seen, None, "a2a3")
 
-        assert sorted(seen) == [f"abs_free_key@{p}@default" for p in sorted(self.PLATFORMS)]
+        assert sorted(seen) == [f"abs_free_key@{p}@default@buffer_ir" for p in sorted(self.PLATFORMS)]
         assert len({id(c) for c in seen.values()}) == 4
         assert declared.get_platform() is None, "the declaration itself stays unbound"
 

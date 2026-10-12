@@ -15,7 +15,8 @@ PTO codegen 直接接收分配句柄和目标操作数。
 
 首批支持 a2/a3 上 PYPTO、DSA_RP、PTOAS 规划器的直线型静态二维 FP32
 kernel：稠密 Vec、完整静态 valid shape、32 字节对齐行，以及普通紧密 ND GM 的
-load、add、mul、store。A5 在默认流水线保持 Tile，待取得完整通过的运行时验收后再开放。
+load、add、mul、store。GM 返回别名必须解析到参数，其类型（包括 TensorView 元数据）
+须与声明的返回类型一致；返回视图不匹配的 kernel 保持 Tile。A5 在默认流水线保持 Tile，待取得完整通过的运行时验收后再开放。
 其他算术、reduction、控制流、视图、槽位、helper ABI 和
 跨核资源在正常流水线保持 Tile。已有生产配方可通过显式底层 pass 流水线开发和测试，
 配方存在本身不代表默认支持。

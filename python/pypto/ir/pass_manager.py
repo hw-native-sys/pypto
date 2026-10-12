@@ -13,6 +13,7 @@ import os
 import re
 from collections.abc import Callable
 from enum import Enum, unique
+from pathlib import Path
 
 from pypto.compile_profiling import CompileProfiler
 from pypto.pypto_core import ir as core_ir
@@ -80,6 +81,20 @@ def _format_warnings(
             out.append(f"{dump_filename}: warning: {d.message} [{d.rule_name}]")
 
     return "\n".join(out) + "\n" if out else ""
+
+
+def _write_ir_dump(program: core_ir.Program, path: str, prefix: str, explicit_layout: bool) -> str:
+    """Keep readable dumps and lossless Buffer companions together."""
+    content = python_print(program, prefix=prefix, explicit_layout=explicit_layout)
+    Path(path).write_text(content if content.endswith("\n") else content + "\n")
+    binary_path = Path(path).with_suffix(".msgpack")
+    if any(function.ir_stage == core_ir.FunctionIRStage.Buffer for function in program.functions.values()):
+        # Buffer Python text is diagnostic, not executable DSL. Reuse the same
+        # binary boundary as the roundtrip instrument for numerical replay.
+        binary_path.write_bytes(core_ir.serialize(program))
+    else:
+        binary_path.unlink(missing_ok=True)
+    return content
 
 
 PassFactory = Callable[[], passes.Pass]
@@ -483,11 +498,7 @@ class PassManager:
 
         # Save frontend IR
         frontend_path = os.path.join(output_dir, "00_frontend.py")
-        with open(frontend_path, "w") as f:
-            content = python_print(input_ir, prefix=prefix, explicit_layout=explicit_layout)
-            f.write(content)
-            if not content.endswith("\n"):
-                f.write("\n")
+        _write_ir_dump(input_ir, frontend_path, prefix, explicit_layout)
 
         # Use instrument for IR dumping -- verification handled by C++ pipeline.
         # Snapshot the pipeline-derived names for stable callback indexing during
@@ -522,11 +533,7 @@ class PassManager:
 
             # Dump IR
             dump_path = os.path.join(output_dir, f"{stem}.py")
-            with open(dump_path, "w") as f:
-                content = python_print(program, prefix=prefix, explicit_layout=explicit_layout)
-                f.write(content)
-                if not content.endswith("\n"):
-                    f.write("\n")
+            content = _write_ir_dump(program, dump_path, prefix, explicit_layout)
 
             # Dump per-pass warnings alongside the IR
             if not effective_checks.empty():

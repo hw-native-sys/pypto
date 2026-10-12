@@ -1123,6 +1123,10 @@ class TileToBufferMutator : public IRMutator {
 // is interpreted as an unsupported capability: malformed selected IR must fail.
 class FirstBufferKernelSupport : public IRVisitor {
  public:
+  explicit FirstBufferKernelSupport(const FunctionPtr& function) : return_types_(function->return_types_) {
+    for (const auto& param : function->params_) tensor_aliases_.emplace(param.get(), param);
+  }
+
   bool supported = true;
   bool has_load = false;
   bool has_store = false;
@@ -1192,9 +1196,45 @@ class FirstBufferKernelSupport : public IRVisitor {
 
  protected:
   void VisitVarLike_(const VarPtr&) override {}
+  void VisitStmt_(const AssignStmtPtr& assign) override {
+    IRVisitor::VisitStmt_(assign);
+    if (!supported || !As<TensorType>(assign->var_->GetType())) return;
+    ExprPtr source = assign->value_;
+    if (auto call = As<Call>(source); call && IsOp(call, "tile.store") && call->args_.size() == 3) {
+      source = call->args_[2];
+    }
+    auto var = AsVarLike(source);
+    auto alias = tensor_aliases_.find(var.get());
+    if (alias != tensor_aliases_.end()) tensor_aliases_.emplace(assign->var_.get(), alias->second);
+  }
+
+  void VisitStmt_(const ReturnStmtPtr& ret) override {
+    // Buffer lowering erases store-result and plain GM aliases. Its codegen ABI
+    // requires the resulting parameter type to match the declared result,
+    // including TensorView metadata introduced by earlier frontend passes.
+    if (ret->value_.size() != return_types_.size()) {
+      supported = false;
+      return;
+    }
+    for (size_t i = 0; i < ret->value_.size(); ++i) {
+      auto value = AsVarLike(ret->value_[i]);
+      auto alias = tensor_aliases_.find(value.get());
+      if (alias == tensor_aliases_.end() || !structural_equal(alias->second->GetType(), return_types_[i])) {
+        supported = false;
+        return;
+      }
+    }
+    IRVisitor::VisitStmt_(ret);
+  }
+
   void VisitExpr_(const SubmitPtr&) override { supported = false; }
   void VisitExpr_(const CallPtr& call) override {
     if (As<GlobalVar>(call->op_)) {
+      supported = false;
+      return;
+    }
+    // Selection must reject metadata that the final lowering cannot carry.
+    if (!StripAttr(call->attrs_, kPipelineMembershipAttr).empty()) {
       supported = false;
       return;
     }
@@ -1215,14 +1255,17 @@ class FirstBufferKernelSupport : public IRVisitor {
   }
 
  private:
+  const std::vector<TypePtr>& return_types_;
+  std::unordered_map<const Var*, VarPtr> tensor_aliases_;
   std::unordered_set<const Type*> checked_types_;
 };
 
 FunctionPtr SelectBufferFunction(const FunctionPtr& function, bool device_helper) {
   if (!IsInCoreType(function->func_type_) || function->ir_stage_ == FunctionIRStage::Buffer ||
-      function->HasAttr(kAttrBufferIrSelected))
+      function->HasAttr(kAttrBufferIrSelected)) {
     return function;
-  FirstBufferKernelSupport support;
+  }
+  FirstBufferKernelSupport support(function);
   const auto* context = PassContext::Current();
   support.supported =
       !device_helper && (!context || context->GetEnableBufferIR()) && backend::BackendConfig::IsConfigured();
