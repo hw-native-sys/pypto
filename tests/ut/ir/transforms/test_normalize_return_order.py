@@ -738,10 +738,34 @@ class TestReturnParamsAreStructurallyExplicit:
                 result = self.kernel(out, condition)
                 return result
 
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV, strict_ssa=True)
+            def kernel(
+                self, out: pl.InOut[pl.Tensor[[4, 16], pl.FP32]], condition: pl.Scalar[pl.BOOL]
+            ) -> pl.Tensor[[4, 16], pl.FP32]:
+                if condition:
+                    value_then = pl.tile.full([1, 16], pl.FP32, 1.0)
+                    out_then = pl.store(value_then, [0, 0], out)
+                    _merged_out, _merged_value = pl.yield_(out_then, value_then)
+                else:
+                    value_else = pl.tile.full([1, 16], pl.FP32, 0.0)
+                    out_else = pl.store(value_else, [0, 0], out)
+                    _merged_out, _merged_value = pl.yield_(out_else, value_else)
+                return out
+
+            @pl.function(type=pl.FunctionType.Spmd, strict_ssa=True)
+            def wrapper(
+                self, out: pl.InOut[pl.Tensor[[4, 16], pl.FP32]], condition: pl.Scalar[pl.BOOL]
+            ) -> pl.Tensor[[4, 16], pl.FP32]:
+                _result = self.kernel(out, condition)
+                return out
+
         Before = passes.convert_to_ssa()(Before)
         values, params = self._return_values(Before, "kernel")
         assert values[0] is not params[0]
         After = _run_normalize_direct(Before)
+        ir.assert_structural_equal(After, Expected)
         for name in ("kernel", "wrapper"):
             values, params = self._return_values(After, name)
             assert values[0] is params[0]
@@ -773,12 +797,49 @@ class Before:
         return result
 """)
 
+        assert isinstance(Before, ir.Program)
         Before = passes.convert_to_ssa()(Before)
+        # These cases must leave the complete input program unchanged.
+        Expected = Before
         before_values, _ = self._return_values(Before, "kernel")
         After = _run_normalize_direct(Before)
+        ir.assert_structural_equal(After, Expected)
         values, params = self._return_values(After, "kernel")
         assert values[0] is before_values[0]
         assert all(values[0] is not param for param in params)
+
+    def test_sequential_branch_writebacks_share_lineage(self):
+        """A linear sequence of merges must not trigger an exponential lineage walk."""
+        updates = "\n".join(
+            f"""        if condition:
+            then_value_{i} = pl.tile.full([1, 16], pl.FP32, 1.0)
+            context = pl.store(then_value_{i}, [0, 0], context)
+        else:
+            else_value_{i} = pl.tile.full([1, 16], pl.FP32, 0.0)
+            context = pl.store(else_value_{i}, [0, 0], context)"""
+            for i in range(48)
+        )
+        program_source = f"""
+@pl.program
+class {{name}}:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(
+        self, out: pl.InOut[pl.Tensor[[4, 16], pl.FP32]], condition: pl.Scalar[pl.BOOL]
+    ) -> pl.Tensor[[4, 16], pl.FP32]:
+        context = out
+{updates}
+        return {{returned}}
+"""
+        Before = pl.parse(program_source.replace("{name}", "Before").replace("{returned}", "context"))
+        Expected = pl.parse(program_source.replace("{name}", "Expected").replace("{returned}", "out"))
+        assert isinstance(Before, ir.Program)
+        assert isinstance(Expected, ir.Program)
+        Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
+        After = _run_normalize_direct(Before)
+        ir.assert_structural_equal(After, Expected)
+        values, params = self._return_values(After, "kernel")
+        assert values[0] is params[0]
 
     def test_multi_out_kernel_returns_reference_their_params(self):
         """Each returned tensor IS the param object, not an SSA alias of it."""
