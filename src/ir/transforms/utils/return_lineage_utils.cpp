@@ -412,7 +412,8 @@ std::vector<std::optional<size_t>> ReturnedParamIndicesImpl(const FunctionPtr& f
     return result;
   };
 
-  BodyIndexCollector index(/*collect_if_merges=*/true);
+  // Graph boundary analyses do not propagate tensor roots through If merges yet.
+  BodyIndexCollector index(/*collect_if_merges=*/func->func_type_ != FunctionType::Graph);
   index.VisitStmt(func->body_);
   if (!index.first_return || index.first_return->value_.empty()) {
     if (IsWrapperType(func->func_type_)) {

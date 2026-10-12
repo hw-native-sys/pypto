@@ -96,7 +96,10 @@ parameter and the merge type matches that parameter. The actual returned tensor
 must also match the parameter type, including view and valid-shape metadata;
 a `tensor.set_validshape` after the merge cannot discard that metadata by
 canonicalizing its result. Conflicting, fresh, or view-changing branches stay
-uncanonicalized. Variable roots and failures are cached across branch arms and
+uncanonicalized. Graph functions retain their existing rejection of merge-based
+return lineage because their boundary analyses do not track tensor roots through
+these merges; accepting them could freeze a call-varying boundary slice on replay.
+Variable roots and failures are cached across branch arms and
 return values, avoiding repeated work for sequential conditional writebacks.
 
 **This step is what makes the return→param map readable without an analysis.**
@@ -183,7 +186,7 @@ buffer, just under a new index.
 | Constraint | Reason |
 | ---------- | ------ |
 | Only `InCore` functions are rewritten in Step A | Other function kinds (`Orchestration` / `Group` / `Spmd` / `Graph` / opaque) follow the user's declared return shape; their callers are remapped in Step B. `Group`/`Spmd`/`Graph` returns are still canonicalized to params in Step A0, but never reordered |
-| Step A0 requires type-compatible branch consensus | Every branch must resolve to the same parameter; both the merge and actual returned tensor must preserve its type/view/valid shape |
+| Step A0 requires type-compatible branch consensus outside Graph functions | Every branch must resolve to the same parameter; both the merge and actual returned tensor must preserve its type/view/valid shape. Graph merge returns remain unsupported |
 | Step A0 leaves kernel-allocated outputs and scalars untouched | Only param writebacks must be explicit; a return value with no param lineage has no param to reference |
 | Skips functions where `out_indices.size() > ret_to_param.size()` | An incomplete analysis must not produce an out-of-bounds permutation — leave the function as-is so the verifier can flag the inconsistency |
 | Permutation is identity ⇒ no rewrite | Avoids spurious `Function` clones and keeps the pass idempotent |

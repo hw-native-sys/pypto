@@ -34,6 +34,7 @@ namespace return_lineage {
 /// user calls (single- and tuple-result) — recursing into callees with
 /// memoization and a cycle guard. Tensor return values must have the same type
 /// as the resolved parameter, including view and valid-shape metadata.
+/// Graph functions exclude IfStmt merges until their boundary analyses support them.
 /// Group/Spmd wrappers with no top-level ReturnStmt resolve through their unique returning inner call; a
 /// wrapper that *does* return, but returns the forwarded tuple of a multi-result inner call
 /// (``result = self.inner(...); return result``), is expanded position-by-
@@ -99,7 +100,7 @@ ReturnStmtPtr FindFirstReturn(const StmtPtr& body);
 /// With @p trace_if_merges, this additionally follows tensor IfStmt merges
 /// when every branch resolves to the same param. Conflicting or untraceable
 /// branches remain nullopt, as do merges with a different type/view from the param.
-/// ReturnedParamIndices uses the same branch consensus for function returns.
+/// ReturnedParamIndices uses the same branch consensus for non-Graph function returns.
 ///
 /// @return one entry per Var containing its matching param index, or nullopt.
 std::vector<std::optional<size_t>> TraceToParamIndicesForOutlining(const std::vector<VarPtr>& vars,

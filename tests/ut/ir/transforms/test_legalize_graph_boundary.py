@@ -1437,6 +1437,42 @@ class TestRegionAllocationHoisting:
 
 
 class TestBoundaryLegality:
+    def test_branch_merged_return_with_dynamic_boundary_slice_is_rejected(self):
+        """Graph boundary analyses cannot yet track tensor roots through If merges."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(
+                self,
+                a: pl.Tensor[[256, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+                condition: pl.Scalar[pl.BOOL],
+                offset: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[256, 128], pl.FP32]:
+                if condition:
+                    merged = a
+                else:
+                    merged = a
+                view = pl.tensor.slice(merged, [128, 128], [offset, 0])
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    tile = pl.load(view, [0, 0], [128, 128])
+                    pl.store(tile, [0, 0], c)
+                return merged
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[256, 128], pl.FP32],
+                c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+                condition: pl.Scalar[pl.BOOL],
+                offset: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[256, 128], pl.FP32]:
+                return self.layer(a, c, condition, offset)
+
+        with pytest.raises(ValueError, match="returns a value it computed"):
+            _legalize_outlined(Before)
+
     def test_graph_without_tensor_parameters_is_rejected(self):
         @pl.program
         class Before:
