@@ -844,20 +844,32 @@ class {name}:
         assert values[int(narrowed_first)] is params[0]
         assert values[int(not narrowed_first)] is not params[0]
 
+    @pytest.mark.parametrize("branch_narrowing", [False, True])
     @pytest.mark.parametrize("restored_first", [False, True])
-    def test_restored_writeback_metadata_references_param(self, restored_first):
+    def test_restored_writeback_metadata_references_param(self, restored_first, branch_narrowing):
         """Validate final metadata rather than rejecting an intermediate narrowing."""
+        if branch_narrowing:
+            narrowing = """        if condition:
+            then_out = pl.tensor.set_validshape(out, 2, 16)
+            narrowed = pl.yield_(then_out)
+        else:
+            else_out = pl.tensor.set_validshape(out, 2, 16)
+            narrowed = pl.yield_(else_out)"""
+        else:
+            narrowing = "        narrowed = pl.tensor.set_validshape(out, 2, 16)"
         program_source = """
 @pl.program
 class {name}:
     @pl.function(type=pl.FunctionType.AIV, strict_ssa=True)
     def kernel(
-        self, out: pl.InOut[pl.Tensor[[4, 16], pl.FP32]], tail: pl.Tensor[[2, 16], pl.FP32]
+        self, out: pl.InOut[pl.Tensor[[4, 16], pl.FP32]], tail: pl.Tensor[[2, 16], pl.FP32],
+        condition: pl.Scalar[pl.BOOL]
     ) -> tuple[pl.Tensor[[4, 16], pl.FP32], pl.Tensor[[4, 16], pl.FP32]]:
-        narrowed = pl.tensor.set_validshape(out, 2, 16)
+{narrowing}
         restored = pl.tensor.assemble(narrowed, tail, [2, 0])
         return {returned}
 """
+        program_source = program_source.replace("{narrowing}", narrowing)
         before_return = "restored, narrowed" if restored_first else "narrowed, restored"
         expected_return = "out, narrowed" if restored_first else "narrowed, out"
         Before = pl.parse(program_source.replace("{name}", "Before").replace("{returned}", before_return))

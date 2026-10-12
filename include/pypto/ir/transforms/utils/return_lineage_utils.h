@@ -29,7 +29,7 @@ namespace return_lineage {
 ///
 /// Follows SSA rebinds (var-to-var assigns, For/While iter args and
 /// return_vars), tensor IfStmt merges whose branches resolve to the same
-/// type-compatible param, builtin writeback ops (``tensor.assemble``, ``tile.store``,
+/// param, builtin writeback ops (``tensor.assemble``, ``tile.store``,
 /// ``tensor.set_validshape``), TupleGetItem of a user-call result, and
 /// user calls (single- and tuple-result) — recursing into callees with
 /// memoization and a cycle guard. Tensor return values must have the same type
@@ -99,7 +99,7 @@ ReturnStmtPtr FindFirstReturn(const StmtPtr& body);
 /// The body is indexed once and parameter positions are shared across all Vars.
 /// With @p trace_if_merges, this additionally follows tensor IfStmt merges
 /// when every branch resolves to the same param. Conflicting or untraceable
-/// branches remain nullopt, as do merges with a different type/view from the param.
+/// branches remain nullopt, as do final results with a different type/view from the param.
 /// ReturnedParamIndices uses the same branch consensus for non-Graph function returns.
 ///
 /// @return one entry per Var containing its matching param index, or nullopt.

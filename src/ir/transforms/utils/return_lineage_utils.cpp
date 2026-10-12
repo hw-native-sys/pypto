@@ -175,16 +175,20 @@ VarLineage TraceVar(const Var* var, const BodyIndexCollector& index, const Param
 
     if (auto merge_it = index.merge_srcs.find(var); merge_it != index.merge_srcs.end()) {
       const Var* root = nullptr;
+      TypePtr returned_type = var->GetType();
       for (const Var* source : merge_it->second) {
         auto branch = TraceVar(source, index, param_indices, program, memo);
-        if (!branch.root || (root && branch.root != root) ||
-            !structural_equal(branch.returned_type, branch.root->GetType())) {
-          return finish(nullptr);
+        if (!branch.root || (root && branch.root != root)) return finish(nullptr);
+        if (!returned_type || !branch.returned_type ||
+            !structural_equal(returned_type, branch.returned_type)) {
+          returned_type = nullptr;
         }
         root = branch.root;
       }
-      // Sharing storage is insufficient when the merged value changes its view.
-      return finish(root && structural_equal(var->GetType(), root->GetType()) ? root : nullptr);
+      // Keep storage consensus through narrowed merges; an outer writeback may
+      // restore the final type. Inconsistent branch metadata stays unknown.
+      path.back().second = true;
+      return finish(root, std::move(returned_type));
     }
 
     if (auto carry_it = index.carry_src.find(var); carry_it != index.carry_src.end()) {
@@ -284,8 +288,9 @@ std::vector<std::optional<size_t>> TraceExprsToParamIndices(const std::vector<Ex
     std::optional<size_t> idx;
     if (auto var = AsVarLike(expr)) {
       auto lineage = TraceVar(var.get(), index, param_indices, program, memo);
-      if (lineage.root && (!AsTensorTypeLike(var->GetType()) ||
-                           structural_equal(lineage.returned_type, lineage.root->GetType()))) {
+      if (lineage.root &&
+          (!AsTensorTypeLike(var->GetType()) ||
+           (lineage.returned_type && structural_equal(lineage.returned_type, lineage.root->GetType())))) {
         auto param_it = param_indices.find(lineage.root);
         if (param_it != param_indices.end()) idx = param_it->second;
       }

@@ -92,8 +92,9 @@ traces to a param with the param `Var` itself. Untraceable values
 (kernel-allocated outputs) and scalars keep their original expression.
 
 Tensor `IfStmt` merges are traced only when every branch resolves to the same
-parameter and the merge type matches that parameter. The actual returned tensor
-must also match the parameter type, including view and valid-shape metadata;
+parameter. Storage consensus is kept separately from merge metadata, so narrowing
+inside both branches can be restored after the merge. The actual returned tensor
+must match the parameter type, including view and valid-shape metadata;
 a `tensor.set_validshape` after the merge cannot discard that metadata by
 canonicalizing its result. Conflicting, fresh, or view-changing branches stay
 uncanonicalized. Graph functions retain their existing rejection of merge-based
@@ -188,7 +189,7 @@ buffer, just under a new index.
 | Constraint | Reason |
 | ---------- | ------ |
 | Only `InCore` functions are rewritten in Step A | Other function kinds (`Orchestration` / `Group` / `Spmd` / `Graph` / opaque) follow the user's declared return shape; their callers are remapped in Step B. `Group`/`Spmd`/`Graph` returns are still canonicalized to params in Step A0, but never reordered |
-| Step A0 requires type-compatible branch consensus outside Graph functions | Every branch must resolve to the same parameter; both the merge and actual returned tensor must preserve its type/view/valid shape. Graph merge returns remain unsupported |
+| Step A0 requires type-compatible branch consensus outside Graph functions | Every branch must resolve to the same parameter; the final returned tensor must preserve its type/view/valid shape. Intermediate narrowing may be restored. Graph merge returns remain unsupported |
 | Step A0 leaves kernel-allocated outputs and scalars untouched | Only param writebacks must be explicit; a return value with no param lineage has no param to reference |
 | Skips functions where `out_indices.size() > ret_to_param.size()` | An incomplete analysis must not produce an out-of-bounds permutation — leave the function as-is so the verifier can flag the inconsistency |
 | Permutation is identity ⇒ no rewrite | Avoids spurious `Function` clones and keeps the pass idempotent |
