@@ -93,7 +93,9 @@ traces to a param with the param `Var` itself. Untraceable values
 
 Tensor `IfStmt` merges are traced only when every branch resolves to the same
 parameter. Storage consensus is kept separately from merge metadata, so narrowing
-inside both branches can be restored after the merge. The actual returned tensor
+inside both branches can be restored after the merge. Merge metadata comes from
+the traced branch types, including caller types forwarded by validated calls.
+The actual returned tensor
 must match the parameter type, including view and valid-shape metadata;
 a `tensor.set_validshape` after the merge cannot discard that metadata by
 canonicalizing its result. Conflicting, fresh, or view-changing branches stay
@@ -265,6 +267,7 @@ full set of cases:
 - `test_2d_tensor_reorder` — 2-D tensors / multi-dim offsets
 - `test_inout_param_reorder` — `InOut` participates in reordering
 - `test_branch_writeback_and_wrapper_return_reference_param` — same-buffer branches and wrapper forwarding (#2966)
+- `test_dynamic_branch_call_returns_reference_caller_param` — generated phi types retaining callee-local shape Vars
 - `test_branch_return_with_unproven_identity_is_not_canonicalized` — conflicting, fresh, view, and valid-shape branches
 - `test_writeback_after_branch_merge_preserves_returned_valid_shape` — narrowed metadata after a merge, in both return orders
 - `test_restored_writeback_metadata_references_param` — restored and narrowed results sharing lineage, in both return orders

@@ -79,7 +79,8 @@ builtin 回写、tuple 调用的 `TupleGetItem`，以及 Group/Spmd 包装函数
 （kernel 内部分配的输出）和标量保留原表达式。
 
 张量 `IfStmt` 合流仅在所有分支都追踪到同一个参数时才能继续追踪。存储来源一致性
-与合流元数据分别保留，因此两个分支内部的收窄可以在合流后恢复。实际返回的张量
+与合流元数据分别保留，因此两个分支内部的收窄可以在合流后恢复。合流元数据取自
+追踪后的分支类型，包括已验证调用转发的 caller 类型。实际返回的张量
 必须与参数类型一致，包括视图（view）和有效形状
 （valid shape）元数据；合流后的 `tensor.set_validshape` 结果不能通过规范化丢失这些
 元数据。来源冲突、新分配张量或改变视图的分支保持原返回表达式。Graph 函数继续
@@ -237,6 +238,7 @@ class Module:
 - `test_2d_tensor_reorder` —— 2 维 tensor / 多维 offset
 - `test_inout_param_reorder` —— `InOut` 参数同样参与重排
 - `test_branch_writeback_and_wrapper_return_reference_param` —— 同一缓冲区的分支回写及 wrapper 转发（#2966）
+- `test_dynamic_branch_call_returns_reference_caller_param` —— 生成的 phi 类型保留 callee 局部形状变量
 - `test_branch_return_with_unproven_identity_is_not_canonicalized` —— 来源冲突、新张量、视图及有效形状分支
 - `test_writeback_after_branch_merge_preserves_returned_valid_shape` —— 两种返回顺序下保留合流后收窄的元数据
 - `test_restored_writeback_metadata_references_param` —— 两种返回顺序下，共享血缘的恢复结果与收窄结果

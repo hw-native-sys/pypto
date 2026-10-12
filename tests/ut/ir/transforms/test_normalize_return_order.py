@@ -770,6 +770,62 @@ class TestReturnParamsAreStructurallyExplicit:
             values, params = self._return_values(After, name)
             assert values[0] is params[0]
 
+    def test_dynamic_branch_call_returns_reference_caller_param(self):
+        """Merge metadata must use caller types forwarded by validated callees."""
+        program_source = """
+@pl.program
+class {name}:
+    @pl.function(type=pl.FunctionType.AIV, strict_ssa=True)
+    def write(
+        self, inner_n: pl.Scalar[pl.INDEX], out: pl.InOut[pl.Tensor[[inner_n, 16], pl.FP32]]
+    ) -> pl.Tensor[[inner_n, 16], pl.FP32]:
+        return out
+
+    @pl.function(type=pl.FunctionType.Spmd, strict_ssa=True)
+    def wrapper(
+        self, outer_n: pl.Scalar[pl.INDEX], out: pl.InOut[pl.Tensor[[outer_n, 16], pl.FP32]],
+        condition: pl.Scalar[pl.BOOL]
+    ) -> pl.Tensor[[outer_n, 16], pl.FP32]:
+        if condition:
+            then_out = self.write(outer_n, out)
+            merged = pl.yield_(then_out)
+        else:
+            else_out = self.write(outer_n, out)
+            merged = pl.yield_(else_out)
+        return {returned}
+"""
+        Before = pl.parse(program_source.replace("{name}", "Before").replace("{returned}", "merged"))
+        Expected = pl.parse(program_source.replace("{name}", "Expected").replace("{returned}", "out"))
+        assert isinstance(Before, ir.Program)
+        assert isinstance(Expected, ir.Program)
+
+        def retain_callee_shape_vars(program: ir.Program) -> ir.Program:
+            callee = program.get_function("write")
+            assert callee is not None
+            replacements: dict[int, ir.Var] = {}
+
+            class RetainCalleeShapeVars(ir.IRMutator):
+                def visit_var(self, op: ir.Var) -> ir.Expr:
+                    if op.name_hint != "merged":
+                        return op
+                    if op.unique_id not in replacements:
+                        replacements[op.unique_id] = ir.Var(op.name_hint, callee.params[1].type, op.span)
+                    return replacements[op.unique_id]
+
+            return RetainCalleeShapeVars().visit_program(program)
+
+        # Generated calls/phis can retain callee-local shape Vars until launch
+        # legalization. Model that intermediate type without changing its roots.
+        Before = retain_callee_shape_vars(Before)
+        Expected = retain_callee_shape_vars(Expected)
+        # Launch legalization remaps these provisional type Vars; this test
+        # isolates the return-lineage query that must work before that remap.
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            After = _run_normalize_direct(Before)
+        ir.assert_structural_equal(After, Expected)
+        values, params = self._return_values(After, "wrapper")
+        assert values[0] is params[1]
+
     @pytest.mark.parametrize("other_source", ["parameter", "fresh", "view", "valid_shape"])
     def test_branch_return_with_unproven_identity_is_not_canonicalized(self, other_source):
         source = {

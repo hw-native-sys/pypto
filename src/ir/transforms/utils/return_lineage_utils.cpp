@@ -175,12 +175,14 @@ VarLineage TraceVar(const Var* var, const BodyIndexCollector& index, const Param
 
     if (auto merge_it = index.merge_srcs.find(var); merge_it != index.merge_srcs.end()) {
       const Var* root = nullptr;
-      TypePtr returned_type = var->GetType();
+      TypePtr returned_type;
       for (const Var* source : merge_it->second) {
         auto branch = TraceVar(source, index, param_indices, program, memo);
         if (!branch.root || (root && branch.root != root)) return finish(nullptr);
-        if (!returned_type || !branch.returned_type ||
-            !structural_equal(returned_type, branch.returned_type)) {
+        if (!root) {
+          returned_type = branch.returned_type;
+        } else if (!returned_type || !branch.returned_type ||
+                   !structural_equal(returned_type, branch.returned_type)) {
           returned_type = nullptr;
         }
         root = branch.root;
