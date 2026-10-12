@@ -502,3 +502,10 @@ result = verify_pass(program)
 测试覆盖在 `tests/ut/ir/transforms/test_verifier.py` 中：有效/无效程序验证、基于属性的选择、异常与诊断模式、Pass 集成、诊断字段访问、报告生成、结构性/默认属性集。
 
 UseAfterDef 专项覆盖在 `tests/ut/ir/transforms/test_verify_use_after_def.py` 中：有效程序（参数、链式赋值、for 循环体、循环后 return_var）、无效程序（先用后定义、循环变量越界、分支定义不可见于外层）、错误码/规则名验证、结构性属性成员验证。
+
+### 混合 Tile/Buffer 程序
+
+默认流水线在存储合法化前记录 `buffer_ir_selected`。Tile 存储属性仅检查选中函数；
+`BufferIR` 检查其最终表示以及已经标为 Buffer 的函数。混合程序的 SSA、严格词法
+作用域、赋值类型对称、类型/调用签名和 Submit 元数据验证仍覆盖整个程序，
+未选中 Tile 函数不需要满足 Buffer 专属表示契约。

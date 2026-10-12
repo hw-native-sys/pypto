@@ -591,3 +591,6 @@ print(p.get_produced_properties())   # {SSAForm}
 `LowerAutoVectorSplit` 要求 `AivSplitValid` 并产生 `AivSplitLoweredValid`。
 `ExpandMixedKernel` 消费保留/合成的区域以及受支持的 flat fallback，然后使 lowered
 属性失效。pass 顺序不变。
+
+默认 Buffer 路径在存储合法化前选择完整支持的 kernel，详见
+[整函数选择](54-lower_tile_to_buffer.md#默认整函数选择)。

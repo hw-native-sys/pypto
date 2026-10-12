@@ -89,7 +89,7 @@ class Case:
     rtol: float = 1e-5
     atol: float = 1e-5
     compare: Any | None = None
-    enable_buffer_ir: bool = False
+    enable_buffer_ir: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.kernel, (JitKernel, ProgramKernel, IRKernel)):

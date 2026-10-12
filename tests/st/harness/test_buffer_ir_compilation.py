@@ -59,18 +59,19 @@ def test_buffer_mode_has_a_distinct_cache_key_without_changing_ordinary_cases():
 
 
 @pytest.mark.skipif(find_ptoas_binary() is None, reason="PTOAS is required for native source compilation")
+@pytest.mark.parametrize("enabled", [False, True], ids=["off", "on"])
 @pytest.mark.parametrize("in_pool", [False, True], ids=["inline", "pool_thread"])
 @pytest.mark.parametrize(
     "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
 )
-def test_actual_compile_paths_preserve_case_mode_and_planner(tmp_path, planner, in_pool):
-    case = _case(planner)
+def test_actual_compile_paths_preserve_case_mode_and_planner(tmp_path, planner, in_pool, enabled):
+    case = _case(planner, enabled)
     tr._install_backend(BackendType.Ascend910B)
     if in_pool:
         work_dir = tmp_path / "pool"
         # This context lives on the parent thread and intentionally disagrees.
         # The worker must reconstruct settings from the case, not inherit it.
-        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO, enable_buffer_ir=False):
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO, enable_buffer_ir=not enabled):
             with ThreadPoolExecutor(max_workers=1) as pool:
                 pool.submit(tr._compile_for_cache, case, work_dir, "a2a3", False, False, None).result()
     else:
@@ -81,10 +82,14 @@ def test_actual_compile_paths_preserve_case_mode_and_planner(tmp_path, planner, 
         assert result.passed, result.error
         work_dir = tmp_path / case.get_name()
 
-    restored = ir.deserialize((work_dir / "buffer_ir.msgpack").read_bytes())
-    assert isinstance(restored, ir.Program)
-    devices = [f for f in restored.functions.values() if ir.is_incore_type(f.func_type)]
-    assert devices and all(f.ir_stage == ir.FunctionIRStage.Buffer for f in devices)
+    receipt = work_dir / "buffer_ir.msgpack"
+    if enabled:
+        restored = ir.deserialize(receipt.read_bytes())
+        assert isinstance(restored, ir.Program)
+        devices = [f for f in restored.functions.values() if ir.is_incore_type(f.func_type)]
+        assert devices and all(f.ir_stage == ir.FunctionIRStage.Buffer for f in devices)
+    else:
+        assert not receipt.exists()
     native = list((work_dir / "ptoas").glob("*.pto"))
     assert native
     text = "\n".join(path.read_text() for path in native)
@@ -102,7 +107,7 @@ def test_buffer_case_rejects_a_compiler_that_leaves_functional_device_ir(tmp_pat
         return passes.simplify()(program)
 
     monkeypatch.setattr(tr.ir, "compile", leave_functional)
-    with pytest.raises(ValueError, match="did not convert every device function"):
+    with pytest.raises(ValueError, match="did not select/convert every device function"):
         tr._compile_case_program(case, program, output_dir=str(tmp_path), memory_planner=None)
     assert not (tmp_path / "buffer_ir.msgpack").exists()
 

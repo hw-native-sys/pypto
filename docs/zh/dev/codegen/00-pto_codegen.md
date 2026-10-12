@@ -55,7 +55,8 @@ ABI。Tensor 返回值保留在 IR 中供编排处理别名，不产生原生返
 存在时才发射地址，不受旧发射标志影响。GM 传输不创建 buffer、不推导
 valid 状态更新，也不重建逻辑 Tile。
 
-设置 `enable_buffer_ir=True` 时，流水线在进入此直接路径前执行 `LowerTileToBuffer`。
+默认 `enable_buffer_ir=True` 时，流水线仅对选中完整 kernel 执行 `LowerTileToBuffer`。
+未支持 kernel 保持 Functional Tile IR；`False` 对所有 kernel 使用 Tile 路径。
 迁移期间默认流水线仍保持 Functional 阶段。
 描述符、方向、动态窗口和 ABI 限制见 [Buffer 契约](../ir/02-types.md#buffer-算子契约)。
 原生编译测试验证语法和操作数数据流；数值执行是单独的集成验收要求。

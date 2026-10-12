@@ -65,7 +65,7 @@ def case(  # noqa: PLR0913 — every knob mirrors one Case field; grouping them 
     rtol: float = 1e-5,
     atol: float = 1e-5,
     compare: Any | None = None,
-    enable_buffer_ir: bool = False,
+    enable_buffer_ir: bool = True,
 ) -> Case:
     """Build one :class:`~harness.core.case.Case`.
 
@@ -93,7 +93,7 @@ def case(  # noqa: PLR0913 — every knob mirrors one Case field; grouping them 
         strategy: Pass-pipeline optimization strategy.
         memory_planner: On-chip memory planner.
         enable_pypto_l0c_double_buffer: Opt in to dbC=2 under the PyPTO planner.
-        enable_buffer_ir: Use the staged Buffer pipeline in every compile path;
+        enable_buffer_ir: Select supported whole kernels for Buffer IR (default True);
             retain the verified final program as ``buffer_ir.msgpack``.
         rtol: Relative tolerance for the default elementwise comparison.
         atol: Absolute tolerance for the default elementwise comparison.

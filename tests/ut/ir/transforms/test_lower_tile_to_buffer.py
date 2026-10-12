@@ -13,6 +13,7 @@ from collections import Counter
 
 import pypto.language as pl
 import pytest
+from buffer_pipeline_utils import buffer_recipe_pipeline
 from pypto import DataType, ir, passes
 from pypto.backend import BackendType
 from pypto.backend._ptoas_locate import find_ptoas_binary
@@ -70,9 +71,9 @@ class _BufferCalls(ir.IRVisitor):
 
 def _lower(planner, enabled=True, program=StraightLine):
     with passes.PassContext([], memory_planner=planner, enable_buffer_ir=enabled):
-        manager = PassManager.get_strategy(OptimizationStrategy.Default)
-        result = manager.run_passes(program)
-    return result, manager.pass_names
+        manager = buffer_recipe_pipeline()
+        result = manager.run(program)
+    return result, manager.get_pass_names()
 
 
 @pytest.mark.parametrize("planner", _PLANNERS)
@@ -147,7 +148,7 @@ def test_default_pipeline_stays_functional_until_the_coordinated_switch(planner)
 @pytest.mark.parametrize("planner", _PLANNERS)
 def test_enabled_pipeline_roundtrip_preserves_buffer_representation(planner):
     with passes.PassContext([make_roundtrip_instrument()], memory_planner=planner, enable_buffer_ir=True):
-        result = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(StraightLine)
+        result = buffer_recipe_pipeline().run(StraightLine)
     kernel = result.get_function("kernel")
     assert kernel is not None and kernel.ir_stage == ir.FunctionIRStage.Buffer
     assert _BufferCalls(result).allocations
@@ -177,9 +178,9 @@ def test_lowering_never_falls_back_to_legacy_codegen_for_an_unimplemented_recipe
             return out
 
     with passes.PassContext([], passes.VerificationLevel.NONE, memory_planner=planner, enable_buffer_ir=True):
-        manager = PassManager.get_strategy(OptimizationStrategy.Default)
+        manager = buffer_recipe_pipeline()
         with pytest.raises(ValueError, match="no conversion recipe for 'tile.rsqrt'"):
-            manager.run_passes(ReciprocalSquareRoot)
+            manager.run(ReciprocalSquareRoot)
 
 
 @pl.program
@@ -552,7 +553,7 @@ class TypedTransfers:
 
     instrument = passes.CallbackInstrument(before_pass=before, name="CaptureTypedStorage")
     with passes.PassContext([instrument], memory_planner=planner, enable_buffer_ir=True):
-        lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+        lowered = buffer_recipe_pipeline().run(program)
     assert len(planned) == 1
     dtype = getattr(DataType, dtype_name)
     tile_types = [
@@ -592,6 +593,209 @@ class TypedTransfers:
     level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
     _run_ptoas(str(source), str(output), [f"--pto-arch={arch}", f"--pto-level={level}"])
     assert output.is_file()
+
+
+@pl.program
+class MixedRollout:
+    @pl.function(type=pl.FunctionType.InCore)
+    def supported(
+        self,
+        a: pl.Tensor[[16, 32], pl.FP32],
+        b: pl.Tensor[[16, 32], pl.FP32],
+        out: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+    ) -> pl.Tensor[[16, 32], pl.FP32]:
+        x = pl.load(a, [0, 0], [16, 32])
+        y = pl.load(b, [0, 0], [16, 32])
+        return pl.store(pl.mul(pl.add(x, y), y), [0, 0], out)
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def unsupported(
+        self, a: pl.Tensor[[16, 32], pl.FP32], out: pl.Out[pl.Tensor[[16, 1], pl.FP32]]
+    ) -> pl.Tensor[[16, 1], pl.FP32]:
+        x = pl.load(a, [0, 0], [16, 32])
+        tmp = pl.create_tile([16, 32], pl.FP32)
+        return pl.store(pl.row_sum(x, tmp_tile=tmp), [0, 0], out)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        a: pl.Tensor[[16, 32], pl.FP32],
+        b: pl.Tensor[[16, 32], pl.FP32],
+        scratch: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+        out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+    ) -> pl.Tensor[[16, 1], pl.FP32]:
+        with pl.manual_scope():
+            scratch, first = pl.submit(self.supported, a, b, scratch)
+            out, second = pl.submit(self.unsupported, scratch, out, deps=[first])
+        return out
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("enabled", [None, True, False], ids=["default", "on", "off"])
+def test_default_rollout_selects_whole_kernels_and_preserves_submit(planner, enabled):
+    options = {} if enabled is None else {"enable_buffer_ir": enabled}
+    with passes.PassContext([], memory_planner=planner, **options):
+        result = PassManager(OptimizationStrategy.Default).run_passes(MixedRollout)
+    selected = result.get_function("supported")
+    unsupported = result.get_function("unsupported")
+    assert selected is not None and unsupported is not None
+    assert selected.ir_stage == (
+        ir.FunctionIRStage.Functional if enabled is False else ir.FunctionIRStage.Buffer
+    )
+    assert unsupported.ir_stage == ir.FunctionIRStage.Functional
+    submits = [
+        stmt.value
+        for stmt in statements(result)
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Submit)
+    ]
+    assert len(submits) == 2
+    assert len(submits[1].deps) == 1
+    assert submits[0].op.name == "supported"
+    assert submits[1].op.name == "unsupported"
+    for function in (selected, unsupported):
+        single = ir.Program([function], "Single", function.span)
+        text = codegen.PTOCodegen().generate(single, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+        assert "pto.tstore" in text
+    restored = ir.deserialize(ir.serialize(result))
+    ir.assert_structural_equal(result, restored, enable_auto_mapping=True)
+
+
+def test_default_rollout_without_context():
+    result = PassManager(OptimizationStrategy.Default).run_passes(StraightLine)
+    function = result.get_function("kernel")
+    assert function is not None and function.ir_stage == ir.FunctionIRStage.Buffer
+
+
+def test_selected_kernel_failure_is_not_retried_as_tile():
+    seen = []
+
+    def reject_lowering(pass_obj, program):
+        if pass_obj.get_name() == "LowerTileToBuffer":
+            seen.append(program.get_function("kernel").attrs["buffer_ir_selected"])
+            raise RuntimeError("selected Buffer compilation failed")
+
+    instrument = passes.CallbackInstrument(before_pass=reject_lowering, name="RejectSelectedBuffer")
+    with passes.PassContext([instrument]):
+        with pytest.raises(RuntimeError, match="selected Buffer compilation failed"):
+            PassManager(OptimizationStrategy.Default).run_passes(StraightLine)
+    assert seen == [True]
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("planner", _PLANNERS)
+def test_default_rollout_native_compilation(tmp_path, ascend_backend, planner):
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    with passes.PassContext([], memory_planner=planner):
+        result = PassManager(OptimizationStrategy.Default).run_passes(StraightLine)
+    function = result.get_function("kernel")
+    expected = (
+        ir.FunctionIRStage.Buffer
+        if ascend_backend == BackendType.Ascend910B
+        else ir.FunctionIRStage.Functional
+    )
+    assert function is not None and function.ir_stage == expected
+    assert function.attrs["buffer_ir_selected"] == (ascend_backend == BackendType.Ascend910B)
+    source, output = tmp_path / "default.pto", tmp_path / "default.cpp"
+    source.write_text(
+        codegen.PTOCodegen().generate(result, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+    )
+    arch = "a2" if ascend_backend == BackendType.Ascend910B else "a5"
+    level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+    _run_ptoas(str(source), str(output), [f"--pto-level={level}", f"--pto-arch={arch}"])
+    assert output.is_file()
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("program", [MixedBranch, NestedBranch])
+def test_unselected_control_flow_retains_the_off_storage_path(planner, program):
+    outputs = []
+    for enabled in (False, True):
+        with passes.PassContext([], memory_planner=planner, enable_buffer_ir=enabled):
+            result = PassManager(OptimizationStrategy.Default).run_passes(program)
+        function = result.get_function("kernel")
+        assert function is not None
+        assert function.ir_stage == ir.FunctionIRStage.Functional
+        outputs.append(function.body)
+    ir.assert_structural_equal(*outputs, enable_auto_mapping=True)
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize(
+    "dtype_name,valid_shape,selected",
+    [
+        ("FP32", [16, 32], True),
+        ("FP16", [16, 32], False),
+        ("BF16", [16, 32], False),
+        ("INT32", [16, 32], False),
+        ("FP32", [13, 24], False),
+    ],
+)
+def test_default_rollout_keeps_other_dtypes_and_partial_views_on_tile(
+    planner, dtype_name, valid_shape, selected
+):
+    program = pl.parse_program(f"""
+@pl.program
+class Transfer:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, source: pl.Tensor[[16, 32], pl.{dtype_name}],
+               output: pl.Out[pl.Tensor[[16, 32], pl.{dtype_name}]]
+               ) -> pl.Tensor[[16, 32], pl.{dtype_name}]:
+        value = pl.load(source, [0, 0], [16, 32], valid_shape={valid_shape})
+        return pl.store(value, [0, 0], output)
+""")
+    with passes.PassContext([], memory_planner=planner):
+        result = PassManager(OptimizationStrategy.Default).run_passes(program)
+    function = result.get_function("kernel")
+    assert function is not None
+    assert function.attrs["buffer_ir_selected"] is selected
+    assert function.ir_stage == (ir.FunctionIRStage.Buffer if selected else ir.FunctionIRStage.Functional)
+
+
+def test_device_helper_callee_is_not_selected_as_a_kernel():
+    prepared = StraightLine
+    with passes.PassContext([]):
+        for transform in PassManager(OptimizationStrategy.Default).passes:
+            if transform.get_name() == "SelectBufferIRFunctions":
+                break
+            prepared = transform(prepared)
+        kernel = prepared.get_function("kernel")
+        assert kernel is not None
+        call = ir.Call(ir.GlobalVar("kernel"), kernel.params, {}, kernel.return_types[0], kernel.span)
+        caller = ir.Function(
+            "caller",
+            list(zip(kernel.params, kernel.param_directions)),
+            kernel.return_types,
+            ir.ReturnStmt([call], kernel.span),
+            kernel.span,
+            type=ir.FunctionType.InCore,
+        )
+        selected = passes.select_buffer_ir_functions()(ir.Program([kernel, caller], "Helpers", kernel.span))
+    assert all(function.attrs["buffer_ir_selected"] is False for function in selected.functions.values())
+
+
+def test_mixed_buffer_verifier_checks_unselected_function_bindings():
+    with passes.PassContext([]):
+        result = PassManager(OptimizationStrategy.Default).run_passes(MixedRollout)
+    tile_function = result.get_function("unsupported")
+    assert tile_function is not None
+    undefined = ir.Var("undefined", tile_function.params[0].type, tile_function.span)
+    malformed = ir.Function(
+        tile_function.name,
+        list(zip(tile_function.params, tile_function.param_directions)),
+        tile_function.return_types,
+        ir.ReturnStmt([undefined], tile_function.span),
+        tile_function.span,
+        type=tile_function.func_type,
+        attrs=tile_function.attrs,
+    )
+    functions = [malformed if f.name == tile_function.name else f for f in result.functions.values()]
+    mixed = ir.Program(functions, result.name, result.span)
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.BufferIR)
+    diagnostics = passes.PropertyVerifierRegistry.verify(properties, mixed)
+    assert diagnostics
+    assert any("undefined" in diagnostic.message for diagnostic in diagnostics)
 
 
 if __name__ == "__main__":

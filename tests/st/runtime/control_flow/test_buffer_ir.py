@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Numerical Buffer branch/carry acceptance with several runtime paths per artifact."""
+"""Explicit Buffer branch/carry recipe acceptance beyond the default rollout."""
 
 import pypto.language as pl
 import pytest
@@ -28,6 +28,8 @@ def _branch_kernel(
     flag: pl.Scalar[pl.INT64],
     base: pl.Scalar[pl.INT64],
 ):
+    # Recipe-level acceptance uses already-selected IR; normal rollout is tested separately.
+    pl.func_attr({"buffer_ir_selected": True})
     lhs = pl.load(a, [0, 0], [_ROWS, _COLS])
     rhs = pl.load(b, [0, 0], [_ROWS, _COLS])
     if flag > 0:
@@ -60,6 +62,8 @@ def _for_kernel(
     flag: pl.Scalar[pl.INT64],
     base: pl.Scalar[pl.INT64],
 ):
+    # Recipe-level acceptance uses already-selected IR; normal rollout is tested separately.
+    pl.func_attr({"buffer_ir_selected": True})
     lhs = pl.load(a, [0, 0], [_ROWS, _COLS])
     rhs = pl.load(b, [0, 0], [_ROWS, _COLS])
     for _i, (left, row, right, column, gm) in pl.range(0, count, init_values=(lhs, 0, rhs, 0, out)):
@@ -100,6 +104,8 @@ def _while_kernel(
     flag: pl.Scalar[pl.INT64],
     base: pl.Scalar[pl.INT64],
 ):
+    # Recipe-level acceptance uses already-selected IR; normal rollout is tested separately.
+    pl.func_attr({"buffer_ir_selected": True})
     lhs = pl.load(a, [0, 0], [_ROWS, _COLS])
     rhs = pl.load(b, [0, 0], [_ROWS, _COLS])
     for left, row, right, column, gm in pl.while_(init_values=(lhs, 0, rhs, 0, out)):
@@ -141,6 +147,8 @@ def _nested_kernel(
     inner_count: pl.Scalar[pl.INT64],
     base: pl.Scalar[pl.INT64],
 ):
+    # Recipe-level acceptance uses already-selected IR; normal rollout is tested separately.
+    pl.func_attr({"buffer_ir_selected": True})
     lhs = pl.load(a, [0, 0], [_ROWS, _COLS])
     rhs = pl.load(b, [0, 0], [_ROWS, _COLS])
     for _i, (outer,) in pl.range(outer_count, init_values=(lhs,)):
@@ -174,6 +182,8 @@ def _fanout_kernel(
     count: pl.Scalar[pl.INT64],
     base: pl.Scalar[pl.INT64],
 ):
+    # Recipe-level acceptance uses already-selected IR; normal rollout is tested separately.
+    pl.func_attr({"buffer_ir_selected": True})
     lhs = pl.load(a, [0, 0], [_ROWS, _COLS])
     rhs = pl.load(b, [0, 0], [_ROWS, _COLS])
     for _i, (left, row, right, column) in pl.range(0, count, init_values=(lhs, 0, rhs, 0)):

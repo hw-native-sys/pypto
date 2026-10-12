@@ -210,7 +210,7 @@ class PTOTestCase(ABC):
         strategy: OptimizationStrategy | None = None,
         memory_planner: MemoryPlanner | None = None,
         enable_pypto_l0c_double_buffer: bool | None = None,
-        enable_buffer_ir: bool = False,
+        enable_buffer_ir: bool = True,
     ):
         """Initialize test case.
 

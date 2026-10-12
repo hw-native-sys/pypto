@@ -68,8 +68,8 @@ program = passes.materialize_semantic_aliases()(program)
 ### 分阶段启用的 Buffer IR 流水线
 
 `PassContext(enable_buffer_ir=True)` 启用 Buffer IR 迁移中的存储合法化部分。
-这个临时开发选项默认为 false；单独启用它不表示所有 Tile 算子和控制流形式都已
-支持降低到 Buffer IR。C++ 访问器为 `GetEnableBufferIR()`，Python 访问器为
+该选项默认 true；先由 `SelectBufferIRFunctions` 选择整个 kernel，
+仅对选中函数启用 Buffer 特有存储改写。C++ 访问器为 `GetEnableBufferIR()`，Python 访问器为
 `get_enable_buffer_ir()`。编译、IR dump 和 profiling 保留当前选项，所有内存
 规划器的 JIT 缓存键都会区分该选项的值。
 
@@ -154,4 +154,7 @@ pipeline-slot 元数据）的变量渲染成同一个 `tile_buf` handle，因此
 如果所需的同空间复制无法实现，会提前报错。例如，不能通过 Acc 到 Acc 的复制
 保留仍然活跃的 Acc 输入。兼容 carry 仍可使用已有的带条件检查的累加器生产者
 合并。无法判定的视图地址和同时重叠的目标窗口必须在最终 Buffer lowering 前
-解决。默认的旧路径保持原有行为。
+解决。未选中 kernel 和显式 Off 模式保持原有 Tile 行为。
+
+默认 Buffer 路径在存储合法化前选择完整支持的 kernel，详见
+[整函数选择](54-lower_tile_to_buffer.md#默认整函数选择)。

@@ -297,7 +297,7 @@ class PassContext:
         memory_planner: MemoryPlanner = MemoryPlanner.PYPTO,
         enable_pypto_l0c_double_buffer: bool = False,
         runtime: RuntimeKind = RuntimeKind.TENSORMAP_AND_RINGBUFFER,
-        enable_buffer_ir: bool = False,
+        enable_buffer_ir: bool = True,
     ) -> None:
         """Create a PassContext with instruments and pass configuration (incl. memory planner).
 
@@ -311,8 +311,8 @@ class PassContext:
         ``kernel_config.py``. Passes that legalize runtime-specific IR read it
         from the context.
 
-        ``enable_buffer_ir`` enables the staged Buffer IR development pipeline.
-        It defaults to false while the migration is incomplete.
+        ``enable_buffer_ir`` defaults to true and selects supported whole kernels
+        for Buffer IR. Unsupported kernels retain Tile; false selects Tile for all.
         """
         ...
 
@@ -344,7 +344,7 @@ class PassContext:
         ...
 
     def get_enable_buffer_ir(self) -> bool:
-        """Whether the staged Buffer IR development pipeline is enabled."""
+        """Whether supported whole kernels use Buffer IR."""
         ...
 
     def get_enable_pypto_l0c_double_buffer(self) -> bool:
@@ -832,6 +832,10 @@ def materialize_valid_shape_symbols() -> Pass:
     at every call/submit site.
     """
 
+def select_buffer_ir_functions() -> Pass:
+    """Select supported whole kernels before Buffer storage legalization."""
+    ...
+
 def lower_tile_to_buffer() -> Pass:
     """Replace planned device Tile storage with explicit Buffer IR.
 
@@ -1121,6 +1125,7 @@ __all__ = [
     "legalize_graph_boundary",
     "materialize_valid_shape_symbols",
     "lower_tile_to_buffer",
+    "select_buffer_ir_functions",
     "flatten_call_expr",
     "inline_functions",
     "normalize_stmt_structure",

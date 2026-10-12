@@ -137,7 +137,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
     tensor_layouts: dict[str, "TensorLayout | None"] | None = None,
     dep_layouts: tuple[tuple[str, str, str], ...] = (),
     runtime: RuntimeKind = RuntimeKind.TENSORMAP_AND_RINGBUFFER,
-    enable_buffer_ir: bool = False,
+    enable_buffer_ir: bool = True,
 ) -> CacheKey:
     """Build a cache key for a JIT call site.
 
@@ -201,9 +201,9 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
             artifact's ``kernel_config.py`` and decides which worker can bind
             the program; without it a ``host_build_graph`` call would silently
             reuse a ``tensormap_and_ringbuffer`` artifact.
-        enable_buffer_ir: Staged Buffer IR development opt-in from the active
+        enable_buffer_ir: Whole-kernel Buffer IR selection from the active
             ``PassContext``. It changes storage legalization and separates
-            artifacts from the default pipeline under every memory planner.
+            artifacts from explicit Off mode under every memory planner.
 
     Returns:
         Hashable CacheKey tuple.
@@ -239,6 +239,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         ("dep_layouts", dep_layouts),
         ("runtime", runtime_kind_to_name(runtime)),
         ("enable_buffer_ir", enable_buffer_ir),
+        ("buffer_ir_version", 1 if enable_buffer_ir else 0),
     )
     return CacheKey(
         source_hash,

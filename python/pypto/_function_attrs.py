@@ -20,6 +20,9 @@ disagree, so a key added or renamed on one side cannot silently drift from the
 other.
 """
 
+# Immutable whole-kernel selection, retained through storage and lowering (bool).
+BUFFER_IR_SELECTED_ATTR = "buffer_ir_selected"
+
 # AIV kernel running on BOTH vector sub-lanes of a mixed kernel (bool).
 DUAL_AIV_DISPATCH_ATTR = "dual_aiv_dispatch"
 
@@ -50,6 +53,7 @@ AUTO_SCOPE_ATTR = "auto_scope"
 
 __all__ = [
     "AUTO_SCOPE_ATTR",
+    "BUFFER_IR_SELECTED_ATTR",
     "BUILTIN_TEMPLATE_DIR_ATTR",
     "BUILTIN_TEMPLATE_VARS_ATTR",
     "DUAL_AIV_DISPATCH_ATTR",

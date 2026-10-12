@@ -602,3 +602,6 @@ print(p.get_produced_properties())   # {SSAForm}
 `LowerAutoVectorSplit` requires `AivSplitValid` and produces `AivSplitLoweredValid`.
 `ExpandMixedKernel` consumes retained/synthesized regions and the supported flat
 fallback, then invalidates the lowered property. Pass order is unchanged.
+
+The default Buffer rollout selects complete supported kernels before storage
+legalization; see [whole-kernel selection](54-lower_tile_to_buffer.md#default-whole-kernel-selection).

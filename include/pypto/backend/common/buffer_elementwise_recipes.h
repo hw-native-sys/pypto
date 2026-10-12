@@ -44,6 +44,7 @@ struct BufferElementwiseRecipe {
   BufferPrecisionKind precision = BufferPrecisionKind::None;
   BufferElementwiseTypePolicy types = BufferElementwiseTypePolicy::DenseFP32;
   BufferDestinationAliasPolicy destination_alias = BufferDestinationAliasPolicy::ExactOrDisjoint;
+  bool default_enabled = false;  ///< Accepted by the first whole-kernel rollout.
 };
 
 const std::vector<BufferElementwiseRecipe>& GetBufferElementwiseRecipes();

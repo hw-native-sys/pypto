@@ -301,6 +301,9 @@ Pass MaterializeValidShapeSymbols();
  */
 Pass LowerTileToBuffer();
 
+/// Select whole kernels for the default Buffer rollout before storage legalization.
+Pass SelectBufferIRFunctions();
+
 /**
  * @brief Make every FunctionType::Graph function legal to record and replay
  *

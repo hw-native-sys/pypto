@@ -364,7 +364,7 @@ class PassManager:
         # MemoryReuse yet still select dbC=2, coalescing the two co-live L0C accumulators
         # into one shrunk single-buffer tile (see _check_planner_consistency).
         self._construction_planner = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
-        self._construction_buffer_ir = ctx.get_enable_buffer_ir() if ctx else False
+        self._construction_buffer_ir = ctx.get_enable_buffer_ir() if ctx else True
         skipped_mem_planning_passes: tuple[str, ...]
         if self._construction_planner == passes.MemoryPlanner.PTOAS:
             skipped_mem_planning_passes = ("MemoryReuse", "AllocateMemoryAddr")
@@ -383,6 +383,8 @@ class PassManager:
         )
         for pass_factory in pass_factories:
             pass_obj = pass_factory()
+            if self._construction_buffer_ir and pass_obj.get_name() == "MaterializeSemanticAliases":
+                self._pipeline.add_pass(passes.select_buffer_ir_functions())
             if self._construction_buffer_ir and pass_obj.get_name() == "AllocateMemoryAddr":
                 self._pipeline.add_pass(passes.verify_tile_storage())
             if pass_obj.get_name() in skipped_mem_planning_passes:
@@ -418,7 +420,7 @@ class PassManager:
         """
         ctx = passes.PassContext.current()
         run_planner = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
-        run_buffer_ir = ctx.get_enable_buffer_ir() if ctx else False
+        run_buffer_ir = ctx.get_enable_buffer_ir() if ctx else True
         if run_buffer_ir != self._construction_buffer_ir:
             raise RuntimeError(
                 "PassManager enable_buffer_ir changed after construction. Build and run the "
@@ -570,7 +572,7 @@ class PassManager:
         mplan = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
         dbc_flag = ctx.get_enable_pypto_l0c_double_buffer() if ctx else False
         runtime = ctx.get_runtime() if ctx else passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
-        buffer_ir = ctx.get_enable_buffer_ir() if ctx else False
+        buffer_ir = ctx.get_enable_buffer_ir() if ctx else True
         outer_phase = ctx.get_diagnostic_phase() if ctx else passes.get_default_diagnostic_phase()
         if outer_phase == passes.DiagnosticPhase.POST_PASS:
             inner_phase = passes.DiagnosticPhase.PRE_PIPELINE
@@ -623,7 +625,7 @@ class PassManager:
         mplan = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
         dbc_flag = ctx.get_enable_pypto_l0c_double_buffer() if ctx else False
         runtime = ctx.get_runtime() if ctx else passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
-        buffer_ir = ctx.get_enable_buffer_ir() if ctx else False
+        buffer_ir = ctx.get_enable_buffer_ir() if ctx else True
         dphase = ctx.get_diagnostic_phase() if ctx else passes.get_default_diagnostic_phase()
         if ctx:
             disabled = ctx.get_disabled_diagnostics()

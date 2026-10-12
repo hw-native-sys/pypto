@@ -15,11 +15,11 @@ from pathlib import Path
 
 import pypto.language as pl
 import pytest
+from buffer_pipeline_utils import buffer_recipe_pipeline
 from pypto import DataType, ir, passes
 from pypto.backend import BackendType
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import _run_ptoas
-from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import codegen
 
 from .buffer_test_utils import statements
@@ -31,7 +31,7 @@ pytestmark = pytest.mark.usefixtures("ascend_backend")
 
 def _lower(program: ir.Program, planner: passes.MemoryPlanner) -> ir.Program:
     with passes.PassContext([], memory_planner=planner, enable_buffer_ir=True):
-        lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
+        lowered = buffer_recipe_pipeline().run(program)
     restored = ir.deserialize(ir.serialize(lowered))
     assert isinstance(restored, ir.Program)
     ir.assert_structural_equal(lowered, restored, enable_auto_mapping=True)

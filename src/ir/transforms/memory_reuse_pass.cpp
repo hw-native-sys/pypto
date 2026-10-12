@@ -53,6 +53,7 @@
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/allocation_constraint_analysis.h"
 #include "pypto/ir/transforms/utils/attrs.h"
+#include "pypto/ir/transforms/utils/buffer_ir_selection.h"
 #include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memory_footprint.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
@@ -5288,6 +5289,7 @@ StmtPtr NormalizeIdentityCopyBuffersBeforeYieldFixup(const StmtPtr& body) {
 // the must-alias buffers and ptoas PlanMemory does the reuse.
 FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "MaterializeSemanticAliases cannot run on null function";
+  BufferIRFunctionScope buffer_scope(func);
 
   // Orchestration bodies submit tasks and never hold TileType variables; a
   // Graph body is orchestration too, so it is skipped for the same reason.
@@ -5405,6 +5407,7 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
 
 FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "MemoryReusePass cannot run on null function";
+  BufferIRFunctionScope buffer_scope(func);
 
   // Orchestration bodies submit tasks and never hold TileType variables, so
   // there is nothing for memory reuse to do — skip them silently. A Graph body

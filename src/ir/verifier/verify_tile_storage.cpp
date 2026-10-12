@@ -35,6 +35,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/buffer_ir_selection.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
@@ -259,7 +260,8 @@ class TileStoragePropertyVerifier : public PropertyVerifier {
   void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
     for (const auto& [name, function] : program->functions_) {
       (void)name;
-      if (IsInCoreType(function->func_type_)) {
+      if (IsInCoreType(function->func_type_) && IsBufferIRSelected(function) &&
+          function->ir_stage_ != FunctionIRStage::Buffer) {
         TileStorageVisitor(diagnostics, physical_).VisitFunction(function);
       }
     }

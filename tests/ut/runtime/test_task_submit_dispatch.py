@@ -70,6 +70,8 @@ def _planner_case():
 
 
 def _write_minimal_compile_output(_program, *, output_dir, **_kwargs):
+    assert test_runner.passes.PassContext.current().get_memory_planner() == MemoryPlanner.DSA_RP
+    assert test_runner.passes.PassContext.current().get_enable_buffer_ir() is False
     work_dir = Path(output_dir)
     (work_dir / "kernels").mkdir(parents=True)
     (work_dir / "kernels" / "kernel.cpp").touch()
@@ -136,7 +138,7 @@ def test_precompile_forwards_session_memory_planner(tmp_path):
             analyze_auto_scopes_for_deps=False,
             session_memory_planner=MemoryPlanner.DSA_RP,
         )
-    assert ir_compile.call_args.kwargs["memory_planner"] == MemoryPlanner.DSA_RP
+    assert "memory_planner" not in ir_compile.call_args.kwargs
 
 
 def test_inline_compile_forwards_session_memory_planner():
@@ -156,7 +158,7 @@ def test_inline_compile_forwards_session_memory_planner():
     ):
         result = test_runner.TestRunner(config)._run_inline(case, "a2a3sim")
     assert result.passed, result.error
-    assert ir_compile.call_args.kwargs["memory_planner"] == MemoryPlanner.DSA_RP
+    assert "memory_planner" not in ir_compile.call_args.kwargs
 
 
 # ---------------------------------------------------------------------------

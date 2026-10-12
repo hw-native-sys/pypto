@@ -97,11 +97,14 @@ inline const PassProperties kMaterializeDistTensorCtxProperties{
 //    Signature-and-call rewrite only; touches no structural property.
 inline const PassProperties kMaterializeValidShapeSymbolsProperties{};
 
+// Selection only annotates functions; it preserves all structural properties.
+inline const PassProperties kSelectBufferIRFunctionsProperties{};
+
 // Final device representation boundary. Addressed planners additionally prove
 // TileStorageAllocated inside the pass; PTOAS retains symbolic root identities.
 inline const PassProperties kLowerTileToBufferProperties{
-    .required = {IRProperty::SplitIncoreOrch, IRProperty::SSAForm, IRProperty::NoNestedCalls,
-                 IRProperty::ReturnParamsExplicit, IRProperty::TileStorageLegalized},
+    .required = {IRProperty::SplitIncoreOrch, IRProperty::SSAForm, IRProperty::ReturnParamsExplicit,
+                 IRProperty::TileStorageLegalized},
     .produced = {IRProperty::BufferIR},
     .invalidated = {IRProperty::HasMemRefs, IRProperty::IncoreTileOps, IRProperty::AllocatedMemoryAddr,
                     IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::TileTypeCoherence,

@@ -552,3 +552,12 @@ result = verify_pass(program)
 Test coverage in `tests/ut/ir/transforms/test_verifier.py`: valid/invalid program verification, property-based selection, exception vs. diagnostic modes, pass integration, diagnostic field access, report generation, structural/default property sets.
 
 UseAfterDef-specific coverage in `tests/ut/ir/transforms/test_verify_use_after_def.py`: valid programs (params, chained assigns, for loop body, return_var after loop), invalid programs (use-before-def, loop var out of scope, branch def not visible outside), error code/rule name verification, structural property membership.
+
+### Mixed Tile/Buffer programs
+
+The default rollout records `buffer_ir_selected` before storage legalization.
+Tile storage properties check only selected functions; `BufferIR` checks their
+final representation (and any function already marked Buffer). For a mixed
+program, SSA, strict lexical scope, assignment symmetry, type/call signatures
+and Submit metadata checks still cover the entire program. Unselected Tile
+functions are not required to satisfy Buffer representation contracts.

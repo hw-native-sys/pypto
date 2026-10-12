@@ -13,11 +13,11 @@ from collections import Counter
 
 import pypto.language as pl
 import pytest
+from buffer_pipeline_utils import buffer_recipe_pipeline
 from pypto import DataType, InternalError, backend, ir, passes
 from pypto.backend import BackendType
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import _generate_kernel_wrapper, _run_ptoas
-from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import codegen
 
 _SPAN = ir.Span.unknown()
@@ -87,9 +87,7 @@ class _Calls(ir.IRVisitor):
 
 def _lower(high_precision, planner):
     with passes.PassContext([], memory_planner=planner, enable_buffer_ir=True):
-        return PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
-            _public_program(high_precision)
-        )
+        return buffer_recipe_pipeline().run(_public_program(high_precision))
 
 
 def _emit(program):
@@ -206,9 +204,7 @@ class ScalarRecipes:
 
 def _lower_scalars(scalar_dtype, fill_value, planner):
     with passes.PassContext([], memory_planner=planner, enable_buffer_ir=True):
-        return PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
-            _scalar_program(scalar_dtype, fill_value)
-        )
+        return buffer_recipe_pipeline().run(_scalar_program(scalar_dtype, fill_value))
 
 
 @pytest.mark.parametrize("ascend_backend", _BACKENDS, indirect=True)
@@ -270,7 +266,7 @@ def _planned_scalar_program():
 
     instrument = passes.CallbackInstrument(before_pass=capture, name="CapturePlannedScalarRecipe")
     with passes.PassContext([instrument], memory_planner=passes.MemoryPlanner.PYPTO, enable_buffer_ir=True):
-        PassManager.get_strategy(OptimizationStrategy.Default).run_passes(_scalar_program("INDEX", "2"))
+        buffer_recipe_pipeline().run(_scalar_program("INDEX", "2"))
     assert len(captured) == 1
     return captured[0]
 
@@ -403,7 +399,7 @@ class SpmdQuery:
     # The enabled pipeline, including source-level nested queries, must reach
     # explicit Buffer calls after FlattenCallExpr has introduced query SSA.
     with passes.PassContext([], memory_planner=planner, enable_buffer_ir=True):
-        lowered = PassManager.get_strategy().run_passes(program)
+        lowered = buffer_recipe_pipeline().run(program)
     restored = ir.deserialize(ir.serialize(lowered))
     assert isinstance(restored, ir.Program)
     ir.assert_structural_equal(lowered, restored, enable_auto_mapping=True)

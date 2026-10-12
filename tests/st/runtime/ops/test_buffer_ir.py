@@ -17,7 +17,7 @@ whose artifact executes. A passing legacy kernel cannot satisfy these checks.
 import pypto.language as pl
 import pytest
 import torch
-from harness import st
+from harness import DataType, TensorSpec, st
 from pypto import ir, passes
 
 _ROWS, _COLS = 16, 32
@@ -54,7 +54,6 @@ _PLANNERS = (passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.Mem
             name=f"buffer_arithmetic_{planner.name.lower()}",
             golden=lambda tensors: (tensors["a"] + tensors["b"]) * tensors["b"],
             memory_planner=planner,
-            enable_buffer_ir=True,
             rtol=1e-6,
             atol=1e-6,
         )
@@ -69,7 +68,12 @@ def test_public_buffer_arithmetic(case_run, request):
         program = ir.deserialize((case_run.work_dir / "buffer_ir.msgpack").read_bytes())
         assert isinstance(program, ir.Program)
         kernels = [f for f in program.functions.values() if ir.is_incore_type(f.func_type)]
-        assert kernels and all(f.ir_stage == ir.FunctionIRStage.Buffer for f in kernels)
+        expected = (
+            ir.FunctionIRStage.Buffer
+            if case_run.case.platform in ("a2a3", "a2a3sim")
+            else ir.FunctionIRStage.Functional
+        )
+        assert kernels and all(f.ir_stage == expected for f in kernels)
         native = list((case_run.work_dir / "ptoas").glob("*.pto"))
         assert native, "The executed artifact has no generated PTO source"
         text = "\n".join(path.read_text() for path in native)
@@ -80,8 +84,86 @@ def test_public_buffer_arithmetic(case_run, request):
         assert (" addr = " in text) == (case_run.case.memory_planner != passes.MemoryPlanner.PTOAS)
 
 
+@pl.program
+class _MixedProgram:
+    @pl.function(type=pl.FunctionType.InCore)
+    def supported(
+        self,
+        a: pl.Tensor[[16, 32], pl.FP32],
+        b: pl.Tensor[[16, 32], pl.FP32],
+        out: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+    ) -> pl.Tensor[[16, 32], pl.FP32]:
+        x = pl.load(a, [0, 0], [16, 32])
+        y = pl.load(b, [0, 0], [16, 32])
+        return pl.store(pl.mul(pl.add(x, y), y), [0, 0], out)
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def unsupported(
+        self, a: pl.Tensor[[16, 32], pl.FP32], out: pl.Out[pl.Tensor[[16, 1], pl.FP32]]
+    ) -> pl.Tensor[[16, 1], pl.FP32]:
+        x = pl.load(a, [0, 0], [16, 32])
+        tmp = pl.create_tile([16, 32], pl.FP32)
+        return pl.store(pl.row_sum(x, tmp_tile=tmp), [0, 0], out)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        a: pl.Tensor[[16, 32], pl.FP32],
+        b: pl.Tensor[[16, 32], pl.FP32],
+        scratch: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+        out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+    ) -> pl.Tensor[[16, 1], pl.FP32]:
+        with pl.manual_scope():
+            scratch, first = pl.submit(self.supported, a, b, scratch)
+            out, second = pl.submit(self.unsupported, scratch, out, deps=[first])
+        return out
+
+
+@st.cases(
+    *[
+        st.case(
+            _MixedProgram,
+            tensors=[
+                TensorSpec("a", [_ROWS, _COLS], DataType.FP32, init_value=_A),
+                TensorSpec("b", [_ROWS, _COLS], DataType.FP32, init_value=_B),
+                TensorSpec("scratch", [_ROWS, _COLS], DataType.FP32, init_value=-777.0, is_output=True),
+                TensorSpec("out", [_ROWS, 1], DataType.FP32, init_value=-777.0, is_output=True),
+            ],
+            name=f"mixed_buffer_{planner.name.lower()}_{enabled}",
+            golden=lambda tensors: {
+                "scratch": (tensors["a"] + tensors["b"]) * tensors["b"],
+                "out": ((tensors["a"] + tensors["b"]) * tensors["b"]).sum(dim=1, keepdim=True),
+            },
+            memory_planner=planner,
+            enable_buffer_ir=enabled,
+            rtol=1e-6,
+            atol=1e-6,
+        )
+        for planner in _PLANNERS
+        for enabled in (False, True)
+    ]
+)
+def test_mixed_buffer_tile_manual_dependency(case_run, request):
+    case_run.assert_passed()
+    if request.config.getoption("--precompile-workers") is None:
+        return
+    assert case_run.work_dir is not None
+    receipt = case_run.work_dir / "buffer_ir.msgpack"
+    if not case_run.case.get_enable_buffer_ir():
+        assert not receipt.exists()
+        return
+    program = ir.deserialize(receipt.read_bytes())
+    assert isinstance(program, ir.Program)
+    kernels = [f for f in program.functions.values() if ir.is_incore_type(f.func_type)]
+    assert len(kernels) == 2
+    expected = {ir.FunctionIRStage.Functional}
+    if case_run.case.platform in ("a2a3", "a2a3sim"):
+        expected.add(ir.FunctionIRStage.Buffer)
+    assert {f.ir_stage for f in kernels} == expected
+
+
 def _executed_native(case_run, request) -> str | None:
-    """Native source of the executed artifact, after checking its Buffer stage."""
+    """Native source of a recipe fixture, including its explicit selection receipt."""
     case_run.assert_passed()
     assert case_run.case.get_enable_buffer_ir()
     if request.config.getoption("--precompile-workers") is None:
@@ -90,7 +172,14 @@ def _executed_native(case_run, request) -> str | None:
     program = ir.deserialize((case_run.work_dir / "buffer_ir.msgpack").read_bytes())
     assert isinstance(program, ir.Program)
     kernels = [f for f in program.functions.values() if ir.is_incore_type(f.func_type)]
-    assert kernels and all(f.ir_stage == ir.FunctionIRStage.Buffer for f in kernels)
+    assert kernels
+    for function in kernels:
+        expected = (
+            ir.FunctionIRStage.Buffer
+            if function.attrs["buffer_ir_selected"]
+            else ir.FunctionIRStage.Functional
+        )
+        assert function.ir_stage == expected
     native = list((case_run.work_dir / "ptoas").glob("*.pto"))
     assert native, "The executed artifact has no generated PTO source"
     text = "\n".join(path.read_text() for path in native)
@@ -104,6 +193,8 @@ _M = _K = _N = 64
 
 @pl.jit.incore
 def _cube_twice(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
+    # Recipe-level acceptance uses already-selected IR; normal rollout is tested separately.
+    pl.func_attr({"buffer_ir_selected": True})
     a_mat = pl.load(a, [0, 0], [_M, _K], target_memory=pl.MemorySpace.Mat)
     b_mat = pl.load(b, [0, 0], [_K, _N], target_memory=pl.MemorySpace.Mat)
     a_left = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
@@ -121,6 +212,8 @@ def _cube_twice_entry(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
 
 @pl.jit.incore
 def _cube_k_loop(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
+    # Recipe-level acceptance uses already-selected IR; normal rollout is tested separately.
+    pl.func_attr({"buffer_ir_selected": True})
     acc: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Acc] = pl.tile.create(
         [16, 16], pl.FP32, target_memory=pl.MemorySpace.Acc
     )
@@ -259,6 +352,8 @@ def _wider_accumulator_kernel(overwrite: bool):
     # is [16, 16], one whole 16-column Acc fractal box. The cube writes whole
     # boxes, so columns 16..31 must keep the seed product.
     def kernel(lhs: pl.Tensor, seed: pl.Tensor, partial: pl.Tensor, out: pl.Out[pl.Tensor]):
+        # Exercise the existing cube recipe independently of default kernel selection.
+        pl.func_attr({"buffer_ir_selected": True})
         lhs_mat = pl.load(lhs, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
         seed_mat = pl.load(seed, [0, 0], [16, 32], target_memory=pl.MemorySpace.Mat)
         partial_mat = pl.load(
@@ -341,6 +436,8 @@ _VIEW_INPUT = (_VIEW_GRID.remainder(37) - 18) / 8
 
 @pl.jit.incore
 def _slice_assemble_kernel(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
+    # Recipe-level acceptance uses already-selected IR; normal rollout is tested separately.
+    pl.func_attr({"buffer_ir_selected": True})
     whole = pl.load(x, [0, 0], [64, 64])
     window = pl.tile.slice(whole, [16, 32], [16, 32])
     doubled = pl.add(window, window)
@@ -367,6 +464,8 @@ def _slice_assemble_golden(tensors) -> torch.Tensor:
 def _runtime_slice_kernel(
     x: pl.Tensor, out: pl.InOut[pl.Tensor], row: pl.Scalar[pl.INDEX], base: pl.Scalar[pl.INDEX]
 ):
+    # Recipe-level acceptance uses already-selected IR; normal rollout is tested separately.
+    pl.func_attr({"buffer_ir_selected": True})
     whole = pl.load(x, [0, 0], [64, 64])
     window = pl.tile.slice(whole, [16, 64], [row, 0])
     doubled = pl.add(window, window)
@@ -393,6 +492,8 @@ def _runtime_slice_golden(tensors) -> torch.Tensor:
 def _valid_load_kernel(
     x: pl.Tensor, out: pl.InOut[pl.Tensor], cols: pl.Scalar[pl.INDEX], base: pl.Scalar[pl.INDEX]
 ):
+    # Recipe-level acceptance uses already-selected IR; normal rollout is tested separately.
+    pl.func_attr({"buffer_ir_selected": True})
     loaded: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(
         x, [0, 0], [16, 64], [16, cols], target_memory=pl.MemorySpace.Vec
     )
@@ -413,6 +514,8 @@ def _valid_load_entry(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
 def _set_valid_kernel(
     x: pl.Tensor, out: pl.InOut[pl.Tensor], cols: pl.Scalar[pl.INDEX], base: pl.Scalar[pl.INDEX]
 ):
+    # Recipe-level acceptance uses already-selected IR; normal rollout is tested separately.
+    pl.func_attr({"buffer_ir_selected": True})
     loaded = pl.load(x, [0, 0], [16, 64])
     narrowed = pl.tile.set_validshape(loaded, 16, cols)
     doubled = pl.add(narrowed, narrowed)

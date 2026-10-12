@@ -31,6 +31,13 @@ from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 _LOAD_LIKE_OPS = frozenset({ir.get_op("tile.load").name, ir.get_op("tile.read").name})
 
 
+@pytest.fixture(autouse=True)
+def legacy_storage_context(pass_verification_instruments):
+    """These tests exercise the legacy Tile storage algorithm directly."""
+    with passes.PassContext(pass_verification_instruments, enable_buffer_ir=False):
+        yield
+
+
 def _run_pipeline(program: ir.Program) -> ir.Program:
     """Run init_mem_ref + materialize_semantic_aliases + memory_reuse pipeline.
 
@@ -3873,7 +3880,7 @@ class TestTopDownRetargeter:
                     output = pl.tensor.assemble(output, tile, [region_index * 16, 0])
                 return output
 
-        with passes.PassContext([], memory_planner=planner):
+        with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
             lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(NestedAccumulator)
         aic_functions = [
             function for function in lowered.functions.values() if function.func_type == ir.FunctionType.AIC
@@ -3983,7 +3990,7 @@ class TestTopDownRetargeter:
 
         # BASIC verification: the coalescing fix makes the peeled IR round-trip
         # clean, so this exercises the legality check, not just the buffer count.
-        with passes.PassContext([], passes.VerificationLevel.BASIC):
+        with passes.PassContext([], passes.VerificationLevel.BASIC, enable_buffer_ir=False):
             legacy_after = passes.memory_reuse()(
                 passes.materialize_semantic_aliases()(
                     passes.init_mem_ref()(passes.lower_pipeline_loops()(Before))
@@ -3998,6 +4005,7 @@ class TestTopDownRetargeter:
             [],
             passes.VerificationLevel.BASIC,
             memory_planner=passes.MemoryPlanner.DSA_RP,
+            enable_buffer_ir=False,
         ):
             dsa_after = passes.materialize_semantic_aliases()(
                 passes.init_mem_ref()(passes.lower_pipeline_loops()(Before))
@@ -5005,7 +5013,7 @@ class SharedSuffix:
 
         peeled = passes.init_mem_ref()(passes.lower_pipeline_loops()(Before))
 
-        with passes.PassContext([], passes.VerificationLevel.BASIC):
+        with passes.PassContext([], passes.VerificationLevel.BASIC, enable_buffer_ir=False):
             legacy_after = passes.memory_reuse()(passes.materialize_semantic_aliases()(peeled))
         _assert_single_acc_buffer_no_move(legacy_after, "PYPTO")
 
@@ -5013,6 +5021,7 @@ class SharedSuffix:
             [],
             passes.VerificationLevel.BASIC,
             memory_planner=passes.MemoryPlanner.DSA_RP,
+            enable_buffer_ir=False,
         ):
             dsa_after = passes.materialize_semantic_aliases()(peeled)
         _assert_single_acc_buffer_no_move(dsa_after, "DSA_RP")
@@ -5911,7 +5920,7 @@ class TestAscend910BLoadTpopHazard:
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
         try:
-            with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA_RP):
+            with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA_RP, enable_buffer_ir=False):
                 after = passes.allocate_memory_addr()(
                     passes.materialize_semantic_aliases()(passes.init_mem_ref()(self._build_program()))
                 )
@@ -7116,7 +7125,7 @@ class TestCapacityGatedReuse:
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
         Before = self._two_stage_matmuls(a_shape=(16, 128), b_shape=(128, 192))
-        with passes.PassContext([passes.ReportInstrument(str(tmp_path))]):
+        with passes.PassContext([passes.ReportInstrument(str(tmp_path))], enable_buffer_ir=False):
             passes.memory_reuse()(passes.init_mem_ref()(Before))
         log = tmp_path / "perf_hints.log"
         assert log.exists(), "a capacity-reduced pipeline depth must emit a perf hint, not serialize silently"
@@ -7140,6 +7149,7 @@ class TestCapacityGatedReuse:
         with passes.PassContext(
             [passes.ReportInstrument(str(tmp_path))],
             memory_planner=passes.MemoryPlanner.DSA_RP,
+            enable_buffer_ir=False,
         ):
             After = passes.allocate_memory_addr()(passes.init_mem_ref()(Before))
 
@@ -7157,6 +7167,7 @@ class TestCapacityGatedReuse:
         with passes.PassContext(
             [passes.ReportInstrument(str(tmp_path))],
             memory_planner=passes.MemoryPlanner.DSA_RP,
+            enable_buffer_ir=False,
         ):
             After = passes.allocate_memory_addr()(passes.init_mem_ref()(Before))
 
@@ -7408,7 +7419,7 @@ class TestCapacityGatedReuse:
                 out2 = pl.store(m2, [0, 0], out2)
                 return out2
 
-        with passes.PassContext([passes.ReportInstrument(str(tmp_path))]):
+        with passes.PassContext([passes.ReportInstrument(str(tmp_path))], enable_buffer_ir=False):
             after_reuse = passes.memory_reuse()(passes.init_mem_ref()(Before))
         bases = self._collect_bases(after_reuse, ("r0", "r1"))
         assert bases["r0"] is bases["r1"], "co-resident non-pipeline tile must force fallback to merge"
@@ -7592,7 +7603,7 @@ class TestCapacityGatedReuse:
 
         # Empty-instruments context suppresses the autouse SSA verification: this kernel
         # intentionally reassigns `out` per stage (non-SSA input) to model the stage clones.
-        with passes.PassContext([]):
+        with passes.PassContext([], enable_buffer_ir=False):
             after = passes.memory_reuse()(passes.init_mem_ref()(Before))
         bases = self._collect_bases(after, ("r0", "r1", "r2", "r3"))
         assert len({b.name_hint for b in bases.values()}) == 2, "exactly 2 ping-pong buffers at F=2"
@@ -7826,7 +7837,7 @@ class TestCapacityGatedReuse:
 
         # Empty-instruments context suppresses the autouse SSA verification: this kernel
         # intentionally reassigns `oa`/`ob` per stage (non-SSA input) to model the stage clones.
-        with passes.PassContext([]):
+        with passes.PassContext([], enable_buffer_ir=False):
             after = passes.memory_reuse()(passes.init_mem_ref()(Before))
         bases = self._collect_bases(after, ("ra0", "ra1", "rb0", "rb1"))
         assert bases["ra0"] is bases["ra1"], "max_relief sheds the larger-slot group A to depth 1"

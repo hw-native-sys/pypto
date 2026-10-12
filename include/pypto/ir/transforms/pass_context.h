@@ -302,8 +302,8 @@ class PassContext {
    * @param runtime Which Simpler runtime ABI to target (default:
    *        TensorMapAndRingBuffer). Passes that must legalize IR for a specific
    *        runtime switch on this rather than inspecting codegen options.
-   * @param enable_buffer_ir Enable the staged Buffer IR development pipeline.
-   *        Disabled by default until the migration is complete.
+   * @param enable_buffer_ir Enable Buffer IR for supported whole kernels (default: true).
+   *        Unsupported kernels retain Tile IR; selected-kernel failures propagate.
    */
   explicit PassContext(std::vector<PassInstrumentPtr> instruments,
                        VerificationLevel verification_level = VerificationLevel::Basic,
@@ -311,7 +311,7 @@ class PassContext {
                        DiagnosticCheckSet disabled_diagnostics = {DiagnosticCheck::UnusedControlFlowResult},
                        MemoryPlanner memory_planner = MemoryPlanner::PyPTO,
                        bool enable_pypto_l0c_double_buffer = false, RuntimeKind runtime = kDefaultRuntimeKind,
-                       bool enable_buffer_ir = false);
+                       bool enable_buffer_ir = true);
 
   /**
    * @brief Push this context onto the thread-local stack
@@ -383,7 +383,7 @@ class PassContext {
    */
   [[nodiscard]] RuntimeKind GetRuntime() const;
 
-  /// Whether the staged Buffer IR development pipeline is enabled.
+  /// Whether supported whole kernels use Buffer IR.
   [[nodiscard]] bool GetEnableBufferIR() const;
 
   /**

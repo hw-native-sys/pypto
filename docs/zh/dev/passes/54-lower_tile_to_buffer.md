@@ -3,6 +3,32 @@
 在最终设备表示边界，将完成存储规划的 Tile SSA 转换成显式 Buffer 操作。
 PTO codegen 直接接收分配句柄和目标操作数。
 
+## 默认整函数选择
+
+`enable_buffer_ir` 保持 bool 接口，默认 `True`。正常流水线在 `InitMemRef` 之后、
+`MaterializeSemanticAliases` 之前执行 `SelectBufferIRFunctions`，将选择记录为函数
+属性 `buffer_ir_selected`。存储改写后不重新选择。仅选中的函数执行 Buffer 特有存储
+合法化、存储验证和最终转换；其他函数保留 Tile。代码生成按最终函数 stage 分发，
+同一 orchestration 可调用两种表示，Submit 返回值、task ID 和依赖保持原有语义。
+最终结构、SSA、类型和调用验证仍覆盖整个程序。选中后出现编译、验证或执行错误
+直接报告，不捕获错误后重新编译 Tile。
+
+首批支持 a2/a3 上 PYPTO、DSA_RP、PTOAS 规划器的直线型静态二维 FP32
+kernel：稠密 Vec、完整静态 valid shape、32 字节对齐行，以及普通紧密 ND GM 的
+load、add、mul、store。A5 在默认流水线保持 Tile，待取得完整通过的运行时验收后再开放。
+其他算术、reduction、控制流、视图、槽位、helper ABI 和
+跨核资源在正常流水线保持 Tile。已有生产配方可通过显式底层 pass 流水线开发和测试，
+配方存在本身不代表默认支持。
+
+```text
+默认 / True: load -> add -> mul -> store  => Buffer
+默认 / True: load -> reduction -> store   => Tile（整个 kernel）
+False:       两种 kernel                 => Tile
+```
+
+用 `PassContext([], enable_buffer_ir=False)` 选择旧路径。JIT 缓存包含 bool 与 Buffer
+语义版本；嵌套 dump/profiling 上下文、预编译 worker 和调试重编译保持有效开关值。
+
 ## 位置与 API
 
 迁移期间，在同一个上下文中创建并运行默认流水线：
@@ -251,7 +277,7 @@ GM load/store 保留匹配的元素类型，不插入转换。`add`/`mul` 支持
 BF16 传输支持不代表算术支持。
 
 辅助函数调用、其他布局、多槽位和其他操作转换由后续迁移切片补齐。
-暂不支持的形式会显式报错。在完整转换与运行时验收矩阵通过前，迁移选项默认关闭。
+显式底层转换对未支持形式报错；正常流水线将未支持的完整 kernel 保留为 Tile。
 
 二进制序列化保留显式表示和函数阶段。当前 Python 诊断打印器不支持 Buffer DSL 解析往返。
 

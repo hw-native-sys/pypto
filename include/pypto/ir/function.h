@@ -430,6 +430,11 @@ inline ParamDirection StringToParamDirection(const std::string& str) {
  */
 inline constexpr const char* kAttrSpmdUnwrapped = "spmd_unwrapped";
 
+// Immutable whole-kernel selection written by SelectBufferIRFunctions before
+// storage legalization. Read by storage passes, verifiers and final lowering;
+// retained through serialization. Absence denotes a low-level pass pipeline.
+inline constexpr const char* kAttrBufferIrSelected = "buffer_ir_selected";
+
 /**
  * @brief Reserved Function attr key marking an AIV kernel that runs on BOTH
  * vector sub-lanes of a mixed kernel.

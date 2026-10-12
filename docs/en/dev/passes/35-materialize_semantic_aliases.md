@@ -78,9 +78,9 @@ rewrites), and skips `Orchestration` functions (no TileType variables).
 ### Staged Buffer IR pipeline
 
 `PassContext(enable_buffer_ir=True)` enables the storage-legalization portion of
-the Buffer IR migration. The temporary development option defaults to false;
-it does not by itself promise that every Tile operation or control-flow form
-can be lowered to Buffer IR. The C++ accessor is `GetEnableBufferIR()` and the
+the Buffer IR migration. The option defaults to true. `SelectBufferIRFunctions` records whole-kernel
+support before this pass; only selected functions receive Buffer-specific
+rewrites. Unsupported functions keep the Tile storage path. The C++ accessor is `GetEnableBufferIR()` and the
 Python accessor is `get_enable_buffer_ir()`. Compilation, IR dumping and
 profiling preserve the active option, and JIT cache keys distinguish its value
 for every memory planner.
@@ -185,4 +185,7 @@ Mat, Left, Right, and Acc transfers receive an early diagnostic; a live Acc inpu
 by an Acc-to-Acc move. The existing guarded accumulator producer coalescing
 remains available for compatible carries. Ambiguous view addresses and
 simultaneously overlapping destination windows must be resolved before final
-Buffer lowering. The default legacy path retains its previous behavior.
+Buffer lowering. Unselected kernels and explicit Off mode retain their previous Tile behavior.
+
+The default Buffer rollout selects complete supported kernels before storage
+legalization; see [whole-kernel selection](54-lower_tile_to_buffer.md#default-whole-kernel-selection).

@@ -203,8 +203,7 @@ def _compile_case_program(test_case: PTOTestCase, program: ir.Program, **kwargs:
     A parent-thread PassContext cannot configure the precompile pool. Capture
     the actual final pass output so numerical success cannot hide a legacy run.
     """
-    if not _case_uses_buffer_ir(test_case):
-        return ir.compile(program, **kwargs)
+    enabled = _case_uses_buffer_ir(test_case)
 
     final_program: ir.Program | None = None
 
@@ -227,14 +226,21 @@ def _compile_case_program(test_case: PTOTestCase, program: ir.Program, **kwargs:
             "enable_pypto_l0c_double_buffer": outer.get_enable_pypto_l0c_double_buffer(),
             "runtime": outer.get_runtime(),
         }
-    with passes.PassContext(instruments, memory_planner=planner, enable_buffer_ir=True, **inherited):
+    with passes.PassContext(instruments, memory_planner=planner, enable_buffer_ir=enabled, **inherited):
         compiled = ir.compile(program, **kwargs)
+
+    if not enabled:
+        return compiled
 
     if final_program is None:
         raise ValueError(f"Buffer case {test_case.get_name()} produced no final pass output")
     devices = [f for f in final_program.functions.values() if ir.is_incore_type(f.func_type)]
-    if not devices or any(f.ir_stage != ir.FunctionIRStage.Buffer for f in devices):
-        raise ValueError(f"Buffer case {test_case.get_name()} did not convert every device function")
+    if not devices or any(
+        f.ir_stage != ir.FunctionIRStage.Buffer
+        and ("buffer_ir_selected" not in f.attrs or f.attrs["buffer_ir_selected"])
+        for f in devices
+    ):
+        raise ValueError(f"Buffer case {test_case.get_name()} did not select/convert every device function")
     receipt = Path(kwargs["output_dir"]) / "buffer_ir.msgpack"
     receipt.write_bytes(ir.serialize(final_program))
     return compiled

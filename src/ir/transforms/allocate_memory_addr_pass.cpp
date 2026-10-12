@@ -49,6 +49,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/attrs.h"
+#include "pypto/ir/transforms/utils/buffer_ir_selection.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/cross_core_pipe.h"
 #include "pypto/ir/transforms/utils/lifetime_analysis.h"
@@ -586,6 +587,7 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> PlanWithDsaRP(
  * and the alloc statement arguments in place.
  */
 FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
+  BufferIRFunctionScope buffer_scope(func);
   // Only InCore-variant functions use reserve_buffer / tile memory allocation.
   // Spmd, Group, Orchestration, and Opaque functions do not have on-chip tile buffers.
   if (!IsInCoreType(func->func_type_)) {

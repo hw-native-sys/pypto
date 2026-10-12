@@ -24,6 +24,9 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/backend_config.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/backend/common/buffer_elementwise_recipes.h"
 #include "pypto/backend/common/buffer_type_support.h"
 #include "pypto/backend/common/buffer_view_semantics.h"
@@ -47,6 +50,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/attrs.h"
+#include "pypto/ir/transforms/utils/buffer_ir_selection.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/property_verifier_registry.h"
@@ -80,12 +84,15 @@ std::vector<int64_t> DescriptorValid(const std::vector<ExprPtr>& valid, const st
   return result;
 }
 
+bool IsDenseVecTile(const TileTypePtr& tile, const TileView& view) {
+  return tile->shape_.size() == 2 && backend::IsDenseBufferTransferDtype(tile->dtype_) &&
+         tile->GetMemorySpace() == MemorySpace::Vec && view.blayout == TileLayout::row_major &&
+         view.slayout == TileLayout::none_box && view.fractal == 512 && view.pad == PadValue::null &&
+         view.compact == CompactMode::null;
+}
+
 void CheckDenseVecTile(const TileTypePtr& tile, const TileView& view, const Span& span) {
-  CHECK_SPAN(tile->shape_.size() == 2 && backend::IsDenseBufferTransferDtype(tile->dtype_) &&
-                 tile->GetMemorySpace() == MemorySpace::Vec && view.blayout == TileLayout::row_major &&
-                 view.slayout == TileLayout::none_box && view.fractal == 512 && view.pad == PadValue::null &&
-                 view.compact == CompactMode::null,
-             span)
+  CHECK_SPAN(IsDenseVecTile(tile, view), span)
       << "LowerTileToBuffer: this recipe requires dense rank-2 Vec FP16/BF16/FP32/INT32 tiles";
 }
 
@@ -1111,16 +1118,187 @@ class TileToBufferMutator : public IRMutator {
   std::unordered_map<const Var*, ExprPtr> tensor_aliases_;
 };
 
+// Capability is decided before any Buffer-specific storage mutation. This is
+// deliberately narrower than the explicit low-level lowering API. No exception
+// is interpreted as an unsupported capability: malformed selected IR must fail.
+class FirstBufferKernelSupport : public IRVisitor {
+ public:
+  bool supported = true;
+  bool has_load = false;
+  bool has_store = false;
+
+  static bool ConstantEquals(const ExprPtr& value, int64_t expected) {
+    const auto constant = As<ConstInt>(value);
+    return constant && constant->value_ == expected;
+  }
+
+  static bool SameShape(const std::vector<ExprPtr>& lhs, const std::vector<ExprPtr>& rhs) {
+    return lhs.size() == rhs.size() &&
+           std::equal(lhs.begin(), lhs.end(), rhs.begin(),
+                      [](const ExprPtr& a, const ExprPtr& b) { return structural_equal(a, b); });
+  }
+
+  static bool StaticShape(const std::vector<ExprPtr>& shape) {
+    return shape.size() == 2 && As<ConstInt>(shape[0]) && As<ConstInt>(shape[1]) &&
+           As<ConstInt>(shape[0])->value_ > 0 && As<ConstInt>(shape[1])->value_ > 1;
+  }
+
+  void CheckType(const TypePtr& type) {
+    if (!checked_types_.insert(type.get()).second) return;
+    if (auto tile = As<TileType>(type)) {
+      const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
+      if (!StaticShape(tile->shape_) || tile->dtype_ != DataType::FP32 || !IsDenseVecTile(tile, view)) {
+        supported = false;
+        return;
+      }
+      const auto cols = As<ConstInt>(tile->shape_[1])->value_;
+      supported &= cols % 8 == 0 && (!view.start_offset || ConstantEquals(view.start_offset, 0));
+      supported &= view.stride.empty() || (view.stride.size() == 2 && ConstantEquals(view.stride[0], cols) &&
+                                           ConstantEquals(view.stride[1], 1));
+      supported &= view.valid_shape.empty() || SameShape(view.valid_shape, tile->shape_);
+      if (const auto memory = tile->memref_.value_or(nullptr)) {
+        supported &= memory->slot_count_ == 1 && !memory->slot_index_;
+      }
+    } else if (auto tensor = As<TensorType>(type)) {
+      supported &= StaticShape(tensor->shape_) && tensor->dtype_ == DataType::FP32;
+      if (supported && tensor->tensor_view_) {
+        const auto& view = *tensor->tensor_view_;
+        supported &= view.layout == TensorLayout::ND && view.pad == PadValue::null;
+        supported &= view.valid_shape.empty() || SameShape(view.valid_shape, tensor->shape_);
+        supported &=
+            view.stride.empty() || (view.stride.size() == 2 &&
+                                    ConstantEquals(view.stride[0], As<ConstInt>(tensor->shape_[1])->value_) &&
+                                    ConstantEquals(view.stride[1], 1));
+      }
+    } else if (!As<ScalarType>(type) && !As<PtrType>(type) && !As<VoidType>(type) && !As<TupleType>(type)) {
+      supported = false;
+    }
+  }
+
+  void VisitExpr(const ExprPtr& expr) override {
+    if (!supported || !expr) return;
+    CheckType(expr->GetType());
+    IRVisitor::VisitExpr(expr);
+  }
+
+  void VisitStmt(const StmtPtr& stmt) override {
+    if (!supported) return;
+    if (!As<SeqStmts>(stmt) && !As<AssignStmt>(stmt) && !As<EvalStmt>(stmt) && !As<ReturnStmt>(stmt)) {
+      supported = false;
+      return;
+    }
+    IRVisitor::VisitStmt(stmt);
+  }
+
+ protected:
+  void VisitVarLike_(const VarPtr&) override {}
+  void VisitExpr_(const SubmitPtr&) override { supported = false; }
+  void VisitExpr_(const CallPtr& call) override {
+    if (As<GlobalVar>(call->op_)) {
+      supported = false;
+      return;
+    }
+    if (IsOp(call, "tile.load")) {
+      has_load = true;
+      supported &= GetIntKwarg(call->kwargs_, "cache", 0) == 0;
+    } else if (IsOp(call, "tile.store")) {
+      has_store = true;
+      supported &= GetIntKwarg(call->kwargs_, "atomic", 0) == 0 &&
+                   GetIntKwarg(call->kwargs_, "st_phase", 0) == 0 &&
+                   !GetOptionalDoubleKwarg(call->kwargs_, "pre_quant") &&
+                   !GetKwargOr<bool>(call->kwargs_, "pre_relu", false);
+    } else if (!IsOp(call, "tile.alloc")) {
+      const auto* recipe = backend::FindLogicalBufferElementwiseRecipe(call->op_->name_);
+      supported &= recipe && recipe->default_enabled;
+    }
+    IRVisitor::VisitExpr_(call);
+  }
+
+ private:
+  std::unordered_set<const Type*> checked_types_;
+};
+
+FunctionPtr SelectBufferFunction(const FunctionPtr& function, bool device_helper) {
+  if (!IsInCoreType(function->func_type_) || function->ir_stage_ == FunctionIRStage::Buffer ||
+      function->HasAttr(kAttrBufferIrSelected))
+    return function;
+  FirstBufferKernelSupport support;
+  const auto* context = PassContext::Current();
+  support.supported =
+      !device_helper && (!context || context->GetEnableBufferIR()) && backend::BackendConfig::IsConfigured();
+  if (support.supported) {
+    const auto arch = backend::BackendConfig::GetBackend()->GetHandler()->GetPtoTargetArch();
+    support.supported = arch == "a2a3";
+  }
+  for (const auto& param : function->params_) {
+    // This rollout has no device helper ABI or runtime scalar inputs.
+    if (!As<TensorType>(param->GetType())) support.supported = false;
+    support.CheckType(param->GetType());
+  }
+  for (const auto& type : function->return_types_) {
+    if (!As<TensorType>(type)) support.supported = false;
+    support.CheckType(type);
+  }
+  support.VisitStmt(function->body_);
+  auto selected = std::make_shared<Function>(*function);
+  selected->attrs_.emplace_back(kAttrBufferIrSelected,
+                                support.supported && support.has_load && support.has_store);
+  return selected;
+}
+
+// A GM-shaped function called from device code is still a helper, not a
+// separately dispatched kernel. Keep both caller and callee out of this rollout.
+class DeviceHelperCollector : public IRVisitor {
+ public:
+  std::unordered_set<std::string> callees;
+
+ protected:
+  void VisitVarLike_(const VarPtr&) override {}
+  void VisitExpr_(const CallPtr& call) override { Collect(call); }
+  void VisitExpr_(const SubmitPtr& submit) override {
+    Collect(submit);
+    for (const auto& dep : submit->deps_) VisitExpr(dep);
+  }
+
+ private:
+  template <typename CallLike>
+  void Collect(const CallLike& call) {
+    if (auto global = As<GlobalVar>(call->op_)) callees.insert(global->name_);
+    for (const auto& arg : call->args_) VisitExpr(arg);
+  }
+};
+
+ProgramPtr SelectBufferFunctions(const ProgramPtr& program) {
+  DeviceHelperCollector helpers;
+  for (const auto& [global, function] : program->functions_) {
+    if (IsInCoreType(function->func_type_)) helpers.VisitStmt(function->body_);
+  }
+  std::vector<FunctionPtr> functions;
+  functions.reserve(program->functions_.size());
+  for (const auto& [global, function] : program->functions_) {
+    functions.push_back(SelectBufferFunction(function, helpers.callees.count(function->name_) != 0));
+  }
+  return std::make_shared<Program>(functions, program->name_, program->span_);
+}
+
 ProgramPtr TransformProgram(const ProgramPtr& program) {
   const auto* context = PassContext::Current();
   const bool addressed = !context || context->GetMemoryPlanner() != MemoryPlanner::PtoAS;
   auto& verifiers = PropertyVerifierRegistry::GetInstance();
+  std::vector<FunctionPtr> selected;
+  for (const auto& [global, function] : program->functions_) {
+    if (IsInCoreType(function->func_type_) && IsBufferIRSelected(function)) selected.push_back(function);
+  }
+  if (selected.empty()) return program;
+  verifiers.VerifyOrThrow({IRProperty::NoNestedCalls},
+                          std::make_shared<Program>(selected, program->name_, program->span_));
   verifiers.VerifyOrThrow({IRProperty::TileStorageLegalized}, program);
   if (addressed) verifiers.VerifyOrThrow({IRProperty::TileStorageAllocated}, program);
   std::vector<FunctionPtr> functions;
   functions.reserve(program->functions_.size());
   for (const auto& [global, function] : program->functions_) {
-    if (!IsInCoreType(function->func_type_) || function->ir_stage_ == FunctionIRStage::Buffer) {
+    if (!IsInCoreType(function->func_type_) || function->ir_stage_ == FunctionIRStage::Buffer ||
+        !IsBufferIRSelected(function)) {
       functions.push_back(function);
       continue;
     }
@@ -1145,6 +1323,11 @@ ProgramPtr TransformProgram(const ProgramPtr& program) {
 }  // namespace
 
 namespace pass {
+
+Pass SelectBufferIRFunctions() {
+  return CreateProgramPass(SelectBufferFunctions, "SelectBufferIRFunctions",
+                           kSelectBufferIRFunctionsProperties);
+}
 
 Pass LowerTileToBuffer() {
   return CreateProgramPass(TransformProgram, "LowerTileToBuffer", kLowerTileToBufferProperties);

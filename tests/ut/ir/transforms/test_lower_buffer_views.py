@@ -14,11 +14,11 @@ from pathlib import Path
 import pypto
 import pypto.language as pl
 import pytest
+from buffer_pipeline_utils import buffer_recipe_pipeline
 from pypto import DataType, ir, passes
 from pypto.backend import BackendType
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import _run_ptoas
-from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import codegen
 
 from .buffer_test_utils import statements
@@ -195,8 +195,8 @@ def test_automatic_views_compile_without_new_allocations_or_data_copies(
         result = _lower(_planned_program(addressed), planner)
     else:
         with passes.PassContext([], memory_planner=planner, enable_buffer_ir=True):
-            manager = PassManager.get_strategy(OptimizationStrategy.Default)
-            result = manager.run_passes(_reshaped_load(dtype_name))
+            manager = buffer_recipe_pipeline()
+            result = manager.run(_reshaped_load(dtype_name))
     restored = _verify_round_trip(result)
     assert len(_calls(restored, "buffer.alloc")) == 1
     text = codegen.PTOCodegen().generate(restored, emit_tile_addr=False, emit_source_loc=False)
@@ -277,7 +277,7 @@ def _buffer_type(call: ir.Call) -> ir.BufferType:
 
 def _lower_default(program: ir.Program, planner: passes.MemoryPlanner) -> ir.Program:
     with passes.PassContext([], memory_planner=planner, enable_buffer_ir=True):
-        return _verify_round_trip(PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program))
+        return _verify_round_trip(buffer_recipe_pipeline().run(program))
 
 
 def _compile(tmp_path: Path, program: ir.Program, backend: BackendType, addressed: bool) -> str:

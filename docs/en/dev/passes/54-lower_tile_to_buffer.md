@@ -4,9 +4,40 @@ Converts planned device Tile SSA into explicit Buffer operations at the final
 device representation boundary. PTO codegen receives allocation handles and
 destination operands directly.
 
+## Default whole-kernel selection
+
+`enable_buffer_ir` is a bool and defaults to `True`. The normal pipeline runs
+`SelectBufferIRFunctions` immediately before `MaterializeSemanticAliases`, after
+`InitMemRef`. Selection is recorded in the function's `buffer_ir_selected`
+attribute and is never recomputed after storage rewrites. Only selected functions
+receive Buffer storage legalization, storage verification and final conversion.
+Unselected functions retain the Tile pipeline. Codegen dispatches by final function
+stage, so one orchestration can call both representations with unchanged Submit
+results and dependencies. Final structural, SSA, type and call checks cover the
+whole program. A selected kernel's compilation, verification or execution error
+propagates; there is no catch-and-recompile fallback.
+
+The first rollout accepts straight-line static rank-2 dense Vec FP32 kernels made
+from ordinary packed ND GM loads, `add`, `mul` and stores. Tiles have full static
+valid extents and 32-byte-aligned rows. The accepted target is a2/a3 with PYPTO, DSA_RP and PTOAS planners.
+A5 retains Tile IR until its default rollout has clean runtime acceptance. Reductions, other arithmetic, control flow,
+views, slots, helper ABIs and cross-core resources remain Tile in the normal
+pipeline. Existing production recipes may support more through explicit low-level
+pass pipelines; their availability alone does not widen default acceptance.
+
+```text
+Default / True: load -> add -> mul -> store  => Buffer
+Default / True: load -> reduction -> store   => Tile (whole kernel)
+False:          both kernels                => Tile
+```
+
+Use `PassContext([], enable_buffer_ir=False)` for the legacy path. JIT keys
+include the bool and a Buffer semantics version; nested dump/profiling contexts,
+precompile workers and debug recompilation preserve the effective value.
+
 ## Placement and API
 
-During migration, construct and run the default pipeline in the same context:
+Construct and run the default pipeline in the same context:
 
 ```python
 from pypto import passes
@@ -299,9 +330,8 @@ Scalar recipe inputs are converted explicitly to the destination dtype before
 Buffer calls are constructed; fill shape/dtype select the destination descriptor.
 
 Helper calls, alternate layouts, slots, and
-other operation recipes are added in subsequent migration slices. Unsupported
-forms fail explicitly. The migration option defaults to false until the
-complete recipe and runtime acceptance matrix is ready.
+other operation recipes are added in subsequent migration slices. Explicit
+low-level conversion diagnoses unsupported forms. The normal pipeline applies the narrower whole-kernel selection described above.
 
 Binary serialization preserves the explicit representation and function stage.
 The current Python diagnostic printer is not a Buffer DSL parser round trip.
@@ -329,7 +359,7 @@ For numerical system tests, declare `st.case(..., enable_buffer_ir=True,
 memory_planner=...)` on the public `@pl.jit` entry. The harness applies the option
 inside both inline and precompile-worker compilations; an outer test-thread
 `PassContext` alone does not configure worker threads. Enabled cases have distinct
-cache keys. The harness checks the actual final device function stages and saves
+cache keys. The harness checks that selected device functions reach Buffer stage and saves
 the transformed program as `buffer_ir.msgpack` beside the native artifacts.
 
 `tests/st/runtime/ops/test_buffer_ir.py` provides load/add/mul/store numerical

@@ -35,6 +35,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/utils/buffer_ir_selection.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -567,22 +568,36 @@ class BufferIRPropertyVerifierImpl : public PropertyVerifier {
   void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
     if (!program) return;
     std::vector<FunctionPtr> functions;
+    bool selected_pipeline = false;
+    bool malformed = false;
     for (const auto& [global_var, function] : program->functions_) {
-      if (!function || !IsInCoreType(function->func_type_)) continue;
+      if (!function) continue;
+      selected_pipeline |= function->HasAttr(kAttrBufferIrSelected);
+      if (!IsInCoreType(function->func_type_) ||
+          (!IsBufferIRSelected(function) && function->ir_stage_ != FunctionIRStage::Buffer))
+        continue;
       BufferIRVisitor visitor(diagnostics, function->name_);
       visitor.VisitFunction(function);
       // Other verifiers assume intact structural nodes. The diagnostics above
       // already reject missing callees or assignment fields; do not send those
       // malformed functions into verifiers with stronger input assumptions.
+      malformed |= visitor.HasMalformedStructure();
       if (!visitor.HasMalformedStructure()) functions.push_back(function);
     }
     if (functions.empty()) return;
-    // Existing verifiers own binding and lexical definition checks. Restrict their
-    // input to device functions so this property leaves orchestration alone.
-    auto device_program = std::make_shared<Program>(functions, program->name_, program->span_);
+    // Low-level representation checks remain scoped to device functions. In a
+    // selected pipeline, unchanged Tile kernels and orchestration still share
+    // SSA, lexical scope, call signatures and Submit dependencies with Buffer.
+    auto device_program = selected_pipeline && !malformed
+                              ? program
+                              : std::make_shared<Program>(functions, program->name_, program->span_);
     CreateSSAPropertyVerifier()->Verify(device_program, diagnostics);
     CreateLexicalUseAfterDefPropertyVerifier()->Verify(device_program, diagnostics);
     CreateAssignTypeSymmetryPropertyVerifier()->Verify(device_program, diagnostics);
+    if (selected_pipeline && !malformed) {
+      CreateTypeCheckPropertyVerifier()->Verify(program, diagnostics);
+      CreateManualDepsOnSubmitOnlyPropertyVerifier()->Verify(program, diagnostics);
+    }
   }
 };
 
