@@ -716,6 +716,70 @@ class TestReturnParamsAreStructurallyExplicit:
             return list(ret.value), list(func.params)
         raise AssertionError(f"function '{func_name}' not found")
 
+    def test_branch_writeback_and_wrapper_return_reference_param(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self, out: pl.InOut[pl.Tensor[[4, 16], pl.FP32]], condition: pl.Scalar[pl.BOOL]
+            ) -> pl.Tensor[[4, 16], pl.FP32]:
+                if condition:
+                    value = pl.tile.full([1, 16], pl.FP32, 1.0)
+                    out = pl.store(value, [0, 0], out)
+                else:
+                    value = pl.tile.full([1, 16], pl.FP32, 0.0)
+                    out = pl.store(value, [0, 0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Spmd)
+            def wrapper(
+                self, out: pl.InOut[pl.Tensor[[4, 16], pl.FP32]], condition: pl.Scalar[pl.BOOL]
+            ) -> pl.Tensor[[4, 16], pl.FP32]:
+                result = self.kernel(out, condition)
+                return result
+
+        Before = passes.convert_to_ssa()(Before)
+        values, params = self._return_values(Before, "kernel")
+        assert values[0] is not params[0]
+        After = _run_normalize_direct(Before)
+        for name in ("kernel", "wrapper"):
+            values, params = self._return_values(After, name)
+            assert values[0] is params[0]
+
+    @pytest.mark.parametrize("other_source", ["parameter", "fresh", "view", "valid_shape"])
+    def test_branch_return_with_unproven_identity_is_not_canonicalized(self, other_source):
+        source = {
+            "parameter": "other",
+            "fresh": "pl.create_tensor([4, 16], dtype=pl.FP32)",
+            "view": "pl.tensor.view(out, [4, 16])",
+            "valid_shape": "pl.tensor.set_validshape(out, 2, 16)",
+        }[other_source]
+        then_source = source if other_source in ("view", "valid_shape") else "pl.store(value, [0, 0], out)"
+        Before = pl.parse(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(
+        self,
+        out: pl.InOut[pl.Tensor[[4, 16], pl.FP32]],
+        other: pl.InOut[pl.Tensor[[4, 16], pl.FP32]],
+        condition: pl.Scalar[pl.BOOL],
+    ) -> pl.Tensor[[4, 16], pl.FP32]:
+        if condition:
+            value = pl.tile.full([1, 16], pl.FP32, 1.0)
+            result = {then_source}
+        else:
+            result = {source}
+        return result
+""")
+
+        Before = passes.convert_to_ssa()(Before)
+        before_values, _ = self._return_values(Before, "kernel")
+        After = _run_normalize_direct(Before)
+        values, params = self._return_values(After, "kernel")
+        assert values[0] is before_values[0]
+        assert all(values[0] is not param for param in params)
+
     def test_multi_out_kernel_returns_reference_their_params(self):
         """Each returned tensor IS the param object, not an SSA alias of it."""
 

@@ -28,6 +28,7 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/wrapper_call_utils.h"
@@ -58,8 +59,7 @@ ParamIndexMap IndexParams(const std::vector<VarPtr>& params) {
 
 // Per-body index: topmost ReturnStmt, per-var defining AssignStmt, loop-carry
 // edges (iter_arg / tensor return_var -> init value var), and optionally tensor
-// IfStmt merge edges. If merges are collected only for the scope outliner: the
-// general ReturnedParamIndices contract deliberately remains unchanged.
+// IfStmt merge edges. Return queries and scope outlining share branch consensus.
 class BodyIndexCollector : public IRVisitor {
  public:
   explicit BodyIndexCollector(bool collect_if_merges = false) : collect_if_merges_(collect_if_merges) {}
@@ -157,7 +157,8 @@ const Var* TraceVar(const Var* var, const BodyIndexCollector& index, const Param
         if (!branch_root || (root && branch_root != root)) return nullptr;
         root = branch_root;
       }
-      return root;
+      // Sharing storage is insufficient when the merged value changes its view.
+      return root && structural_equal(var->GetType(), root->GetType()) ? root : nullptr;
     }
 
     if (auto carry_it = index.carry_src.find(var); carry_it != index.carry_src.end()) {
@@ -391,7 +392,7 @@ std::vector<std::optional<size_t>> ReturnedParamIndicesImpl(const FunctionPtr& f
     return result;
   };
 
-  BodyIndexCollector index;
+  BodyIndexCollector index(/*collect_if_merges=*/true);
   index.VisitStmt(func->body_);
   if (!index.first_return || index.first_return->value_.empty()) {
     if (IsWrapperType(func->func_type_)) {

@@ -302,6 +302,64 @@ def test_nested_inline_conditional_output_keeps_dynamic_shape(conditional, tmp_p
     assert compiled is not None
 
 
+@pytest.mark.parametrize("platform", ["a2a3", "a2a3sim"])
+def test_dynamic_spmd_branch_writebacks_preserve_preallocated_buffer(platform, tmp_path):
+    """Both branch writebacks retain context's identity through the SPMD wrapper (#2966)."""
+    n_dim = pl.dynamic("N")
+
+    @pl.jit
+    def branch_buffer_identity(
+        flags: pl.Tensor[[n_dim], pl.INT32],
+        output: pl.Out[pl.Tensor[[n_dim, 16], pl.FP32]],
+    ):
+        flags.bind_dynamic(0, n_dim)
+        output.bind_dynamic(0, n_dim)
+        n = pl.tensor.dim(flags, 0)
+        context = pl.create_tensor([4 * n, 16], dtype=pl.FP32)
+        for row in pl.spmd(n, name_hint="branch_store"):
+            if pl.read(flags, [row]) >= 0:
+                value = pl.full([1, 16], dtype=pl.FP32, value=1.0)
+                for head in pl.unroll(4):
+                    position = head * n + row
+                    context[position : position + 1, 0:16] = value
+            else:
+                empty_value = pl.full([1, 16], dtype=pl.FP32, value=0.0)
+                for head in pl.unroll(4):
+                    position = head * n + row
+                    context[position : position + 1, 0:16] = empty_value
+        for row in pl.spmd(n, name_hint="consume"):
+            output[row : row + 1, 0:16] = context[row : row + 1, 0:16]
+        return output
+
+    # Outlined call-result types retain callee-local shape Vars until legalization.
+    # Use binary roundtrip for intermediates and verify SSA/use-after-def on final IR.
+    lowered_programs: list[ir.Program] = []
+
+    def check_binary_roundtrip(_pass, intermediate):
+        ir.assert_structural_equal(
+            intermediate, ir.deserialize(ir.serialize(intermediate)), enable_auto_mapping=True
+        )
+        lowered_programs[:] = [intermediate]
+
+    with passes.PassContext([passes.CallbackInstrument(after_pass=check_binary_roundtrip)]):
+        compiled = branch_buffer_identity.compile(
+            config=RunConfig(
+                platform=platform, codegen_only=True, save_kernels=True, save_kernels_dir=str(tmp_path)
+            )
+        )
+    assert compiled is not None
+    assert lowered_programs
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.SSAForm)
+    properties.insert(passes.IRProperty.UseAfterDef)
+    diagnostics = passes.PropertyVerifierRegistry.verify(properties, lowered_programs[0])
+    assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+    code = (compiled.output_dir / "orchestration" / "branch_buffer_identity.cpp").read_text()
+    assert code.count(".launch_spec.set_block_num(") == 2
+    assert code.count("} else {") == 2
+    assert list(compiled.output_dir.rglob("*.pto"))
+
+
 @pytest.mark.parametrize("auto_deps", [False, True])
 @pytest.mark.parametrize("scope_inside_loop", [False, True])
 @pytest.mark.parametrize("nested_scopes", [0, 1, 3])

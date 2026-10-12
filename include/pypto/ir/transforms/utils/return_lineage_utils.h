@@ -28,7 +28,8 @@ namespace return_lineage {
 /// Trace the first value of @p func's topmost ReturnStmt back to a Param.
 ///
 /// Follows SSA rebinds (var-to-var assigns, For/While iter args and
-/// return_vars), builtin writeback ops (``tensor.assemble``, ``tile.store``,
+/// return_vars), tensor IfStmt merges whose branches resolve to the same
+/// type-compatible param, builtin writeback ops (``tensor.assemble``, ``tile.store``,
 /// ``tensor.set_validshape``), TupleGetItem of a user-call result, and
 /// user calls (single- and tuple-result) — recursing into callees with
 /// memoization and a cycle guard. Group/Spmd wrappers with no top-level
@@ -96,8 +97,8 @@ ReturnStmtPtr FindFirstReturn(const StmtPtr& body);
 /// The body is indexed once and parameter positions are shared across all Vars.
 /// With @p trace_if_merges, this additionally follows tensor IfStmt merges
 /// when every branch resolves to the same param. Conflicting or untraceable
-/// branches remain nullopt; this branch consensus is intentionally local to
-/// generated InCore functions and does not change ReturnedParamIndices.
+/// branches remain nullopt, as do merges with a different type/view from the param.
+/// ReturnedParamIndices uses the same branch consensus for function returns.
 ///
 /// @return one entry per Var containing its matching param index, or nullopt.
 std::vector<std::optional<size_t>> TraceToParamIndicesForOutlining(const std::vector<VarPtr>& vars,
@@ -108,8 +109,8 @@ std::vector<std::optional<size_t>> TraceToParamIndicesForOutlining(const std::ve
 
 /// Trace @p var defined in @p body back to one of @p params (pointer identity).
 ///
-/// Same lineage rules as ReturnedParamIndex but scoped to an arbitrary
-/// body/param-set. Use TraceToParamIndicesForOutlining for multiple Vars.
+/// Follows SSA and call/writeback lineage without IfStmt merges, scoped to an
+/// arbitrary body/param-set. Use TraceToParamIndicesForOutlining for multiple Vars.
 ///
 /// @return the matching param, or nullptr when untraceable.
 VarPtr TraceToParam(const VarPtr& var, const StmtPtr& body, const std::vector<VarPtr>& params,
