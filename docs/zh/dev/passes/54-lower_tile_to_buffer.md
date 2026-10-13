@@ -13,12 +13,25 @@ PTO codegen 直接接收分配句柄和目标操作数。
 最终结构、SSA、类型和调用验证仍覆盖整个程序。选中后出现编译、验证或执行错误
 直接报告，不捕获错误后重新编译 Tile。
 
-首批支持 a2/a3 上 PYPTO、DSA_RP、PTOAS 规划器的直线型静态二维 FP32
-kernel：稠密 Vec、完整静态 valid shape、32 字节对齐行，以及普通紧密 ND GM 的
-load、add、mul、store。GM 返回别名必须解析到参数，其类型（包括 TensorView 元数据）
-须与声明的返回类型一致；返回视图不匹配的 kernel 保持 Tile。A5 在默认流水线保持 Tile，待取得完整通过的运行时验收后再开放。
-其他算术、reduction、控制流、视图、槽位、helper ABI 和
-跨核资源在正常流水线保持 Tile。已有生产配方可通过显式底层 pass 流水线开发和测试，
+默认支持 a2/a3 上 PYPTO、DSA_RP、PTOAS 规划器的直线型静态二维稠密 Vec kernel。
+物理行须按 32 字节对齐；valid 可以是物理 shape 内的静态部分矩形。
+
+| 算子 | 元素类型 |
+| ---- | -------- |
+| 普通紧密 ND GM load/store | FP16、BF16、FP32、INT32 |
+| add、mul | FP16、FP32、INT32 |
+| sub、div、maximum、minimum、abs、exp、sqrt、neg、relu、log、recip | FP32 |
+| adds、subs、muls、divs、maximums、minimums、lrelu、full | FP32 |
+
+标量参数遵循已有 scalar ABI，元素标量在 lowering 中显式转换。
+`full` 后接 store 的无 load kernel 也可入选。BF16 传输不包含 BF16 算术或填充。
+`recip` 的独立目的地由存储合法化和验证保证；精度属性保留原生既有策略。
+GM 返回别名必须解析到参数，其类型（包括 TensorView 元数据）须与声明的返回类型一致；
+返回视图不匹配的 kernel 保持 Tile。
+
+A5 在默认流水线保持 Tile，待取得运行时验收后再开放。
+reduction、控制流、逻辑视图、runtime valid shape、槽位、helper ABI 和跨核资源
+在正常流水线保持 Tile。已有生产配方可通过显式底层 pass 流水线开发和测试，
 配方存在本身不代表默认支持。
 
 ```text

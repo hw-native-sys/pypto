@@ -21,6 +21,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/type.h"
 
@@ -46,31 +47,158 @@ const std::vector<BufferElementwiseRecipe>& GetBufferElementwiseRecipes() {
        BufferElementwiseTypePolicy::MatchingVec,
        BufferDestinationAliasPolicy::ExactOrDisjoint,
        true},
-      {"tile.sub", "buffer.sub", "pto.tsub", {{0}, {1}}},
-      {"tile.div", "buffer.div", "pto.tdiv", {{0}, {1}}, BufferPrecisionKind::Div},
-      {"tile.maximum", "buffer.maximum", "pto.tmax", {{0}, {1}}},
-      {"tile.minimum", "buffer.minimum", "pto.tmin", {{0}, {1}}},
-      {"tile.abs", "buffer.abs", "pto.tabs", {{0}}},
-      {"tile.exp", "buffer.exp", "pto.texp", {{0}}},
-      {"tile.sqrt", "buffer.sqrt", "pto.tsqrt", {{0}}},
-      {"tile.neg", "buffer.neg", "pto.tneg", {{0}}},
-      {"tile.relu", "buffer.relu", "pto.trelu", {{0}}},
-      {"tile.log", "buffer.log", "pto.tlog", {{0}}, BufferPrecisionKind::Log},
+      {"tile.sub",
+       "buffer.sub",
+       "pto.tsub",
+       {{0}, {1}},
+       BufferPrecisionKind::None,
+       BufferElementwiseTypePolicy::DenseFP32,
+       BufferDestinationAliasPolicy::ExactOrDisjoint,
+       true},
+      {"tile.div",
+       "buffer.div",
+       "pto.tdiv",
+       {{0}, {1}},
+       BufferPrecisionKind::Div,
+       BufferElementwiseTypePolicy::DenseFP32,
+       BufferDestinationAliasPolicy::ExactOrDisjoint,
+       true},
+      {"tile.maximum",
+       "buffer.maximum",
+       "pto.tmax",
+       {{0}, {1}},
+       BufferPrecisionKind::None,
+       BufferElementwiseTypePolicy::DenseFP32,
+       BufferDestinationAliasPolicy::ExactOrDisjoint,
+       true},
+      {"tile.minimum",
+       "buffer.minimum",
+       "pto.tmin",
+       {{0}, {1}},
+       BufferPrecisionKind::None,
+       BufferElementwiseTypePolicy::DenseFP32,
+       BufferDestinationAliasPolicy::ExactOrDisjoint,
+       true},
+      {"tile.abs",
+       "buffer.abs",
+       "pto.tabs",
+       {{0}},
+       BufferPrecisionKind::None,
+       BufferElementwiseTypePolicy::DenseFP32,
+       BufferDestinationAliasPolicy::ExactOrDisjoint,
+       true},
+      {"tile.exp",
+       "buffer.exp",
+       "pto.texp",
+       {{0}},
+       BufferPrecisionKind::None,
+       BufferElementwiseTypePolicy::DenseFP32,
+       BufferDestinationAliasPolicy::ExactOrDisjoint,
+       true},
+      {"tile.sqrt",
+       "buffer.sqrt",
+       "pto.tsqrt",
+       {{0}},
+       BufferPrecisionKind::None,
+       BufferElementwiseTypePolicy::DenseFP32,
+       BufferDestinationAliasPolicy::ExactOrDisjoint,
+       true},
+      {"tile.neg",
+       "buffer.neg",
+       "pto.tneg",
+       {{0}},
+       BufferPrecisionKind::None,
+       BufferElementwiseTypePolicy::DenseFP32,
+       BufferDestinationAliasPolicy::ExactOrDisjoint,
+       true},
+      {"tile.relu",
+       "buffer.relu",
+       "pto.trelu",
+       {{0}},
+       BufferPrecisionKind::None,
+       BufferElementwiseTypePolicy::DenseFP32,
+       BufferDestinationAliasPolicy::ExactOrDisjoint,
+       true},
+      {"tile.log",
+       "buffer.log",
+       "pto.tlog",
+       {{0}},
+       BufferPrecisionKind::Log,
+       BufferElementwiseTypePolicy::DenseFP32,
+       BufferDestinationAliasPolicy::ExactOrDisjoint,
+       true},
       {"tile.recip",
        "buffer.recip",
        "pto.trecip",
        {{0}},
        BufferPrecisionKind::Recip,
        BufferElementwiseTypePolicy::DenseFP32,
-       BufferDestinationAliasPolicy::Disjoint},
-      {"tile.adds", "buffer.adds", "pto.tadds", {{0}, {1, Kind::ElementScalar}}},
-      {"tile.subs", "buffer.subs", "pto.tsubs", {{0}, {1, Kind::ElementScalar}}},
-      {"tile.muls", "buffer.muls", "pto.tmuls", {{0}, {1, Kind::ElementScalar}}},
-      {"tile.divs", "buffer.divs", "pto.tdivs", {{0}, {1, Kind::ElementScalar}}},
-      {"tile.maximums", "buffer.maximums", "pto.tmaxs", {{0}, {1, Kind::ElementScalar}}},
-      {"tile.minimums", "buffer.minimums", "pto.tmins", {{0}, {1, Kind::ElementScalar}}},
-      {"tile.lrelu", "buffer.lrelu", "pto.tlrelu", {{0}, {1, Kind::ElementScalar}}},
-      {"tile.full", "buffer.full", "pto.texpands", {{1, Kind::ElementScalar}}},
+       BufferDestinationAliasPolicy::Disjoint,
+       true},
+      {"tile.adds",
+       "buffer.adds",
+       "pto.tadds",
+       {{0}, {1, Kind::ElementScalar}},
+       BufferPrecisionKind::None,
+       BufferElementwiseTypePolicy::DenseFP32,
+       BufferDestinationAliasPolicy::ExactOrDisjoint,
+       true},
+      {"tile.subs",
+       "buffer.subs",
+       "pto.tsubs",
+       {{0}, {1, Kind::ElementScalar}},
+       BufferPrecisionKind::None,
+       BufferElementwiseTypePolicy::DenseFP32,
+       BufferDestinationAliasPolicy::ExactOrDisjoint,
+       true},
+      {"tile.muls",
+       "buffer.muls",
+       "pto.tmuls",
+       {{0}, {1, Kind::ElementScalar}},
+       BufferPrecisionKind::None,
+       BufferElementwiseTypePolicy::DenseFP32,
+       BufferDestinationAliasPolicy::ExactOrDisjoint,
+       true},
+      {"tile.divs",
+       "buffer.divs",
+       "pto.tdivs",
+       {{0}, {1, Kind::ElementScalar}},
+       BufferPrecisionKind::None,
+       BufferElementwiseTypePolicy::DenseFP32,
+       BufferDestinationAliasPolicy::ExactOrDisjoint,
+       true},
+      {"tile.maximums",
+       "buffer.maximums",
+       "pto.tmaxs",
+       {{0}, {1, Kind::ElementScalar}},
+       BufferPrecisionKind::None,
+       BufferElementwiseTypePolicy::DenseFP32,
+       BufferDestinationAliasPolicy::ExactOrDisjoint,
+       true},
+      {"tile.minimums",
+       "buffer.minimums",
+       "pto.tmins",
+       {{0}, {1, Kind::ElementScalar}},
+       BufferPrecisionKind::None,
+       BufferElementwiseTypePolicy::DenseFP32,
+       BufferDestinationAliasPolicy::ExactOrDisjoint,
+       true},
+      {"tile.lrelu",
+       "buffer.lrelu",
+       "pto.tlrelu",
+       {{0}, {1, Kind::ElementScalar}},
+       BufferPrecisionKind::None,
+       BufferElementwiseTypePolicy::DenseFP32,
+       BufferDestinationAliasPolicy::ExactOrDisjoint,
+       true},
+      {"tile.full",
+       "buffer.full",
+       "pto.texpands",
+       {{1, Kind::ElementScalar}},
+       BufferPrecisionKind::None,
+       BufferElementwiseTypePolicy::DenseFP32,
+       BufferDestinationAliasPolicy::ExactOrDisjoint,
+       true},
   };
   return recipes;
 }
@@ -102,6 +230,44 @@ std::vector<std::string> GetBufferElementwiseRecipeNames() {
   return names;
 }
 
+namespace {
+bool SupportsElementwiseDtype(const BufferElementwiseRecipe& recipe, DataType dtype) {
+  if (recipe.types == BufferElementwiseTypePolicy::DenseFP32) return dtype == DataType::FP32;
+  return dtype == DataType::FP16 || dtype == DataType::FP32 || dtype == DataType::INT32;
+}
+}  // namespace
+
+bool SupportsLogicalBufferElementwise(const BufferElementwiseRecipe& recipe, const ir::CallPtr& call) {
+  const auto destination = ir::As<ir::TileType>(call->GetType());
+  if (!destination) return false;
+  const auto dtype = destination->dtype_;
+  if (!SupportsElementwiseDtype(recipe, dtype)) return false;
+  const auto view = ir::tile_view_semantics::GetEffectiveTileView(*destination);
+  const auto& valid = view.valid_shape.empty() ? destination->shape_ : view.valid_shape;
+  for (const auto& input : recipe.inputs) {
+    if (input.logical_index >= call->args_.size()) return false;
+    const auto type = call->args_[input.logical_index]->GetType();
+    if (input.kind == BufferElementwiseOperandKind::ElementScalar) {
+      const auto scalar = ir::As<ir::ScalarType>(type);
+      if (!scalar) return false;
+      const auto source = scalar->dtype_;
+      if (!source.IsSignedInt() && source != DataType::INDEX && source != DataType::FP16 &&
+          source != DataType::BF16 && source != DataType::FP32)
+        return false;
+    } else {
+      const auto tile = ir::As<ir::TileType>(type);
+      if (!tile || tile->dtype_ != dtype || tile->GetMemorySpace() != ir::MemorySpace::Vec) return false;
+      const auto source_view = ir::tile_view_semantics::GetEffectiveTileView(*tile);
+      const auto& source_valid = source_view.valid_shape.empty() ? tile->shape_ : source_view.valid_shape;
+      if (valid.size() != source_valid.size()) return false;
+      for (size_t i = 0; i < valid.size(); ++i) {
+        if (!ir::structural_equal(valid[i], source_valid[i])) return false;
+      }
+    }
+  }
+  return destination->GetMemorySpace() == ir::MemorySpace::Vec;
+}
+
 void ValidateBufferElementwiseOperands(const BufferElementwiseRecipe& recipe,
                                        const std::vector<ir::ExprPtr>& args) {
   CHECK(args.size() == recipe.inputs.size() + 1)
@@ -129,12 +295,12 @@ void ValidateBufferElementwiseOperands(const BufferElementwiseRecipe& recipe,
   if (recipe.types == BufferElementwiseTypePolicy::MatchingVec) {
     // These are the arithmetic types validated on both current targets. BF16
     // transfer support does not establish a portable native add/mul contract.
-    CHECK(descriptor->dtype_ == DataType::FP16 || descriptor->dtype_ == DataType::FP32 ||
-          descriptor->dtype_ == DataType::INT32)
+    CHECK(SupportsElementwiseDtype(recipe, descriptor->dtype_))
         << recipe.buffer_op << " currently requires FP16/FP32/INT32 arithmetic operands";
   }
   if (recipe.types == BufferElementwiseTypePolicy::DenseFP32) {
-    CHECK(descriptor->dtype_ == DataType::FP32) << recipe.buffer_op << " currently requires FP32 operands";
+    CHECK(SupportsElementwiseDtype(recipe, descriptor->dtype_))
+        << recipe.buffer_op << " currently requires FP32 operands";
     CHECK((descriptor->shape_.size() == 1 || descriptor->shape_.size() == 2) &&
           descriptor->blayout_ == ir::TileLayout::row_major &&
           descriptor->slayout_ == ir::TileLayout::none_box && descriptor->fractal_ == 512 &&

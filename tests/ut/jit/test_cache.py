@@ -434,9 +434,12 @@ class TestMakeCacheKey:
 
     @pytest.mark.parametrize("planner", [MemoryPlanner.PYPTO, MemoryPlanner.DSA_RP, MemoryPlanner.PTOAS])
     def test_buffer_ir_splits_key_for_every_planner(self, planner):
-        assert self._make_key(memory_planner=planner) != self._make_key(
-            memory_planner=planner, enable_buffer_ir=True
-        )
+        off = self._make_key(memory_planner=planner)
+        on = self._make_key(memory_planner=planner, enable_buffer_ir=True)
+        assert off != on
+        assert off.compile_opts is not None and on.compile_opts is not None
+        assert ("buffer_ir_version", 0) in off.compile_opts
+        assert ("buffer_ir_version", 2) in on.compile_opts
 
     def test_runtime_splits_key(self):
         """The runtime is baked into the artifact's ``kernel_config.py`` and decides
@@ -1182,9 +1185,9 @@ class TestConstexprParameters:
         kernel = pl.jit(_constexpr_kernel)
         source = kernel.lower(x, out, 1.0, 16).as_python()
 
-        # Post-pipeline, so assert on the tile the constant sized rather than
+        # Post-pipeline, so assert on the buffer the constant sized rather than
         # the pre-SSA call text.
-        assert "pl.Tile[[16, 16], pl.FP32" in source
+        assert re.search(r"pypto\.ir\.BufferType\(\s*\[16, 16\],\s*pypto\.ir\.DataType\.FP32", source)
         assert "BLOCK" not in source
         assert "pl.Scalar[pl.FP32]" in source, "the runtime scalar still survives as a parameter"
 

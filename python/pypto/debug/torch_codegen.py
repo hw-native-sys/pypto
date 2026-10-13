@@ -1176,12 +1176,33 @@ def _register_ops() -> None:  # noqa: PLR0915
     m["buffer.store"] = lambda a, _kw: f"_buffer_store({', '.join(a)})"
     m["buffer.set_validshape"] = lambda a, _kw: f"_buffer_set_valid({a[0]}, {a[1]})"
     m["buffer.copy"] = lambda a, _kw: f"_buffer_active({a[1]}).copy_(_buffer_active({a[0]}))"
-    m["buffer.add"] = lambda a, _kw: (
-        f"_buffer_active({a[2]}).copy_(_buffer_active({a[0]}) + _buffer_active({a[1]}))"
-    )
-    m["buffer.mul"] = lambda a, _kw: (
-        f"_buffer_active({a[2]}).copy_(_buffer_active({a[0]}) * _buffer_active({a[1]}))"
-    )
+    # Evaluate all inputs before copy_ so exact source/destination aliases remain safe.
+    for suffix in (
+        "add",
+        "sub",
+        "mul",
+        "div",
+        "maximum",
+        "minimum",
+        "abs",
+        "exp",
+        "sqrt",
+        "neg",
+        "relu",
+        "log",
+        "recip",
+    ):
+        handler = m[f"tile.{suffix}"]
+        m[f"buffer.{suffix}"] = lambda a, kw, fn=handler: (
+            f"_buffer_active({a[-1]}).copy_({fn([f'_buffer_active({v})' for v in a[:-1]], kw)})"
+        )
+    for suffix in ("adds", "subs", "muls", "divs", "maximums", "minimums", "lrelu"):
+        handler = m[f"tile.{suffix}"]
+        m[f"buffer.{suffix}"] = lambda a, kw, fn=handler: (
+            f"_buffer_active({a[-1]}).copy_("
+            f"{fn([f'_buffer_active({a[0]})', f'torch.as_tensor({a[1]}, dtype={a[0]}.dtype)'], kw)})"
+        )
+    m["buffer.full"] = lambda a, _kw: f"_buffer_active({a[1]}).fill_({a[0]})"
 
     # --- Cross-core pipe ops ---
     m["tile.tpush_to_aiv"] = _handle_tpush_to_aiv
@@ -1483,7 +1504,9 @@ class TorchCodegen(_ir.IRVisitor):
             self._expr_result = f"abs({operand})"
         elif isinstance(op, _ir.Cast):
             self._expr_result = (
-                f"{operand}.to({_torch_dtype(op.dtype)})" if hasattr(op, "dtype") else f"int({operand})"
+                f"torch.as_tensor({operand}).to({_torch_dtype(op.dtype)})"
+                if hasattr(op, "dtype")
+                else f"int({operand})"
             )
         else:
             self._expr_result = operand

@@ -44,7 +44,7 @@ struct BufferElementwiseRecipe {
   BufferPrecisionKind precision = BufferPrecisionKind::None;
   BufferElementwiseTypePolicy types = BufferElementwiseTypePolicy::DenseFP32;
   BufferDestinationAliasPolicy destination_alias = BufferDestinationAliasPolicy::ExactOrDisjoint;
-  bool default_enabled = false;  ///< Accepted by the first whole-kernel rollout.
+  bool default_enabled = false;  ///< Accepted forms may use the default whole-kernel path.
 };
 
 const std::vector<BufferElementwiseRecipe>& GetBufferElementwiseRecipes();
@@ -53,6 +53,9 @@ const BufferElementwiseRecipe* FindBufferElementwiseRecipe(const std::string& na
 
 /// Sorted snapshot of actual logical names; physical forms remain recipe-limited.
 std::vector<std::string> GetBufferElementwiseRecipeNames();
+
+/// Non-throwing logical form check before storage planning.
+bool SupportsLogicalBufferElementwise(const BufferElementwiseRecipe& recipe, const ir::CallPtr& call);
 
 /// Validate the real explicit operands; does not create or mutate logical Tile IR.
 void ValidateBufferElementwiseOperands(const BufferElementwiseRecipe& recipe,

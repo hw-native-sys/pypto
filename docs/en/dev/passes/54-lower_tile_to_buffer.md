@@ -17,15 +17,30 @@ results and dependencies. Final structural, SSA, type and call checks cover the
 whole program. A selected kernel's compilation, verification or execution error
 propagates; there is no catch-and-recompile fallback.
 
-The first rollout accepts straight-line static rank-2 dense Vec FP32 kernels made
-from ordinary packed ND GM loads, `add`, `mul` and stores. Tiles have full static
-valid extents and 32-byte-aligned rows. GM return aliases must resolve to parameters
-whose types match the declared results, including TensorView metadata; kernels
-with mismatched return views retain Tile IR. The accepted target is a2/a3 with PYPTO, DSA_RP and PTOAS planners.
-A5 retains Tile IR until its default rollout has clean runtime acceptance. Reductions, other arithmetic, control flow,
-views, slots, helper ABIs and cross-core resources remain Tile in the normal
-pipeline. Existing production recipes may support more through explicit low-level
-pass pipelines; their availability alone does not widen default acceptance.
+The default a2/a3 rollout accepts straight-line static rank-2 dense Vec kernels
+with PYPTO, DSA_RP and PTOAS planners. Physical rows must be 32-byte aligned;
+valid extents may be static partial rectangles within the physical shape.
+
+| Operations | Element types |
+| ---------- | ------------- |
+| Ordinary packed ND GM load/store | FP16, BF16, FP32, INT32 |
+| add, mul | FP16, FP32, INT32 |
+| sub, div, maximum, minimum, abs, exp, sqrt, neg, relu, log, recip | FP32 |
+| adds, subs, muls, divs, maximums, minimums, lrelu, full | FP32 |
+
+Scalar parameters use the existing scalar ABI; element operands receive explicit
+conversion during lowering. `full` followed by store also qualifies without a
+load. BF16 transfer support does not include BF16 arithmetic or fill. `recip`
+requires a distinct destination, enforced by storage legalization and verification.
+Precision attributes retain their existing native policy. GM return aliases must
+resolve to parameters whose types match the declared results, including TensorView
+metadata; kernels with mismatched return views retain Tile IR.
+
+A5 retains Tile IR until its default rollout has clean runtime acceptance.
+Reductions, control flow, logical views, runtime valid shapes, slots, helper ABIs
+and cross-core resources remain Tile in the normal pipeline. Existing production
+recipes may support more through explicit low-level pass pipelines; their
+availability alone does not widen default acceptance.
 
 ```text
 Default / True: load -> add -> mul -> store  => Buffer

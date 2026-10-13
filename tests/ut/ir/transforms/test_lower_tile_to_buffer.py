@@ -725,13 +725,13 @@ def test_unselected_control_flow_retains_the_off_storage_path(planner, program):
     "dtype_name,valid_shape,selected",
     [
         ("FP32", [16, 32], True),
-        ("FP16", [16, 32], False),
-        ("BF16", [16, 32], False),
-        ("INT32", [16, 32], False),
-        ("FP32", [13, 24], False),
+        ("FP16", [16, 32], True),
+        ("BF16", [16, 32], True),
+        ("INT32", [16, 32], True),
+        ("FP32", [13, 24], True),
     ],
 )
-def test_default_rollout_keeps_other_dtypes_and_partial_views_on_tile(
+def test_default_rollout_selects_typed_transfers_and_static_partial_views(
     planner, dtype_name, valid_shape, selected
 ):
     program = pl.parse_program(f"""

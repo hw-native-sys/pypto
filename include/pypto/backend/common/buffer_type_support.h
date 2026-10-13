@@ -14,6 +14,7 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/ir/memory_space.h"
+#include "pypto/ir/type.h"
 
 namespace pypto::backend {
 
@@ -22,6 +23,14 @@ namespace pypto::backend {
 inline bool IsDenseBufferTransferDtype(DataType dtype) {
   return dtype == DataType::FP16 || dtype == DataType::BF16 || dtype == DataType::FP32 ||
          dtype == DataType::INT32;
+}
+
+/// Logical descriptor shape shared by default selection and final lowering.
+inline bool IsDenseVecBufferTile(const ir::TileTypePtr& tile, const ir::TileView& view) {
+  return tile->shape_.size() == 2 && IsDenseBufferTransferDtype(tile->dtype_) &&
+         tile->GetMemorySpace() == ir::MemorySpace::Vec && view.blayout == ir::TileLayout::row_major &&
+         view.slayout == ir::TileLayout::none_box && view.fractal == 512 && view.pad == ir::PadValue::null &&
+         view.compact == ir::CompactMode::null;
 }
 
 /// On-chip spaces whose descriptors carry a cube fractal layout. Their bytes
