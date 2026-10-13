@@ -254,16 +254,21 @@ def test_loop_carried_if_phi_shares_the_accumulator_handle():
     assert "pto.tmov" not in mlir, f"a shared handle needs no copy:\n{mlir}"
 
 
-def test_loop_carried_if_phi_keeps_baked_addr_aliasing_under_pypto():
-    """Default planner: each var keeps its own alloc_tile, aliased by a shared addr."""
+@pytest.mark.parametrize("enable_buffer_ir", [False, True])
+def test_loop_carried_if_phi_keeps_baked_addr_aliasing_under_pypto(enable_buffer_ir):
+    """The carry shares storage in both Tile and Buffer IR."""
     reset_for_testing()
     set_backend_type(BackendType.Ascend910B)
-    optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(LoopCarriedIfPhiProgram)
+    with passes.PassContext([], enable_buffer_ir=enable_buffer_ir):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(LoopCarriedIfPhiProgram)
     func = next(f for f in optimized.functions.values() if f.name == "kernel")
     mlir = codegen.PTOCodegen().generate(_ir.Program([func], "kernel", optimized.span))
 
     decls = [ln for ln in mlir.splitlines() if "= pto.alloc_tile" in ln]
-    assert len(decls) > 1, f"PyPTO planner declares one alloc_tile per var:\n{mlir}"
+    if enable_buffer_ir:
+        assert len(decls) == 1, f"Buffer IR uses one shared carry handle:\n{mlir}"
+    else:
+        assert len(decls) > 1, f"Tile IR declares one alloc_tile per var:\n{mlir}"
     addrs = {_first_group(r"addr = (%[A-Za-z0-9_]+)", ln) for ln in decls}
     assert len(addrs) == 1, f"the aliased tiles must share one baked addr, got {addrs}:\n{mlir}"
 

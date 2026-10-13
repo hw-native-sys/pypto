@@ -17,7 +17,7 @@ results and dependencies. Final structural, SSA, type and call checks cover the
 whole program. A selected kernel's compilation, verification or execution error
 propagates; there is no catch-and-recompile fallback.
 
-The default a2/a3 rollout accepts straight-line static rank-2 dense Vec kernels
+The default a2/a3 rollout accepts static rank-2 dense Vec kernels
 with PYPTO, DSA_RP and PTOAS planners. Physical rows must be 32-byte aligned;
 valid extents may be static partial rectangles within the physical shape.
 
@@ -36,8 +36,17 @@ Precision attributes retain their existing native policy. GM return aliases must
 resolve to parameters whose types match the declared results, including TensorView
 metadata; kernels with mismatched return views retain Tile IR.
 
+Structured If/For/While regions may carry Tiles, scalars and aliases of one GM
+parameter. Both branch arms must resolve a GM result to the same parameter;
+loop backedges must preserve the initial GM alias. For loops require an INDEX
+induction variable and a provably positive constant step. Dynamic/negative steps,
+changing GM aliases, region-local returns, unsigned scalar arithmetic and device
+helper calls remain outside the default contract. Tile carry copies are planned
+before lowering; scalar yields assign simultaneously, including swaps in Torch
+numerical debugging. Block and subblock queries use their existing Buffer recipes.
+
 A5 retains Tile IR until its default rollout has clean runtime acceptance.
-Reductions, control flow, logical views, runtime valid shapes, slots, helper ABIs
+Reductions, logical views, runtime valid shapes, slots, helper ABIs
 and cross-core resources remain Tile in the normal pipeline. Existing production
 recipes may support more through explicit low-level pass pipelines; their
 availability alone does not widen default acceptance.

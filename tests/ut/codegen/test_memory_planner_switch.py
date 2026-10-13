@@ -134,7 +134,10 @@ class StationaryMatmulPipelinedK:
 
 
 def _run_pipeline(
-    memory_planner: passes.MemoryPlanner, program: ir.Program = ElementwiseAdd
+    memory_planner: passes.MemoryPlanner,
+    program: ir.Program = ElementwiseAdd,
+    *,
+    enable_buffer_ir: bool = True,
 ) -> tuple[ir.Program, list[str]]:
     """Run the Default pipeline under a PassContext with the given planner.
 
@@ -142,7 +145,7 @@ def _run_pipeline(
     """
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend910B)
-    with passes.PassContext([], memory_planner=memory_planner):
+    with passes.PassContext([], memory_planner=memory_planner, enable_buffer_ir=enable_buffer_ir):
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
         optimized = pm.run_passes(program)
     return optimized, list(pm.pass_names)
@@ -266,13 +269,22 @@ def test_ptoas_loop_carry_is_in_place_single_handle():
     assert len(acc_allocs) == 1, f"accumulator buffer must have exactly one alloc_tile:\n{mlir}"
 
 
-def test_pypto_loop_carry_uses_shared_addr():
-    optimized, _ = _run_pipeline(passes.MemoryPlanner.PYPTO, LoopCarriedAdd)
+@pytest.mark.parametrize("enable_buffer_ir", [False, True])
+def test_pypto_loop_carry_uses_shared_addr(enable_buffer_ir):
+    optimized, _ = _run_pipeline(
+        passes.MemoryPlanner.PYPTO, LoopCarriedAdd, enable_buffer_ir=enable_buffer_ir
+    )
     mlir = _codegen(optimized, emit_tile_addr=True)
     alloc_lines = [ln for ln in mlir.splitlines() if "pto.alloc_tile" in ln]
     addrs = [ln.split("addr =")[1].split()[0] for ln in alloc_lines if "addr =" in ln]
-    # In level3 the loop-carry aliasing is carried by two allocs sharing an addr.
-    assert len(addrs) != len(set(addrs)), f"PYPTO mode must alias the accumulator via a shared addr:\n{mlir}"
+    if enable_buffer_ir:
+        assert len(addrs) == 2 and len(set(addrs)) == 2, mlir
+        tadd = next(line for line in mlir.splitlines() if "pto.tadd" in line)
+        inputs = tadd.split("ins(")[1].split(":")[0].split(",")
+        output = tadd.split("outs(")[1].split(":")[0].strip()
+        assert output in [value.strip() for value in inputs], tadd
+    else:
+        assert len(addrs) != len(set(addrs)), f"Tile IR must alias the carry via a shared addr:\n{mlir}"
 
 
 def test_dsa_rp_loop_carry_is_in_place_with_resolved_address():

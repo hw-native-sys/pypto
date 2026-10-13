@@ -396,7 +396,8 @@ def _site_of(diag: passes.Diagnostic) -> tuple[str, int, int, str]:
     return (diag.span.filename, diag.span.begin_line, diag.span.begin_column, diag.message.split(" ", 1)[0])
 
 
-def test_dedup_collapses_repeated_site_a3():
+@pytest.mark.parametrize("enable_buffer_ir", [False, True])
+def test_dedup_collapses_repeated_site_a3(enable_buffer_ir):
     """Post-pipeline hits are keyed one-per-source-site (issue #1305 ask 4).
 
     Runs the default pipeline over a loop kernel and asserts that both loads
@@ -434,8 +435,9 @@ def test_dedup_collapses_repeated_site_a3():
                 acc = pl.add(acc, t)
             return pl.store(acc, [0, 0], out)
 
-    pm = PassManager.get_strategy(OptimizationStrategy.Default)
-    post = pm.run_passes(LoopLoadProg)
+    with passes.PassContext([], enable_buffer_ir=enable_buffer_ir):
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        post = pm.run_passes(LoopLoadProg)
     diags = _run_perf_hint_check(post)
     perf_hints = [d for d in diags if d.severity == passes.DiagnosticSeverity.PerfHint]
     assert len(perf_hints) >= 1
@@ -447,7 +449,8 @@ def test_dedup_collapses_repeated_site_a3():
     # the coarsening regression: if the two loads shared the `def` span they
     # would dedup into ONE tile.load hit, and a set of one load site plus one
     # store site is still trivially unique. Pinning the count is what fails.
-    load_sites = {site for site in sites if site[3] == "tile.load"}
+    load_op = "buffer.load" if enable_buffer_ir else "tile.load"
+    load_sites = {site for site in sites if site[3] == load_op}
     assert len(load_sites) == 2, f"expected the entry and per-iteration load as distinct sites: {sites}"
 
     # Dedup invariant: every surviving hit is at a distinct (file, line, col, op)

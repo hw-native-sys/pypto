@@ -203,5 +203,151 @@ class ScalarPower:
     assert _kernel(program).ir_stage == ir.FunctionIRStage.Functional
 
 
+def _control_flow_program(kind, step="1", change_alias=False):
+    header = (
+        "for left, right, row, gm in pl.while_(init_values=(lhs, rhs, 0, out)):\n"
+        "            pl.cond(row < count)"
+        if kind == "while"
+        else f"for i, (left, right, row, gm) in pl.range(0, count, {step}, init_values=(lhs, rhs, 0, out)):"
+    )
+    backedge = "other" if change_alias else "stored"
+    return pl.parse_program(f"""
+@pl.program
+class ControlFlow:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, a: pl.Tensor[[16, 32], pl.FP32], b: pl.Tensor[[16, 32], pl.FP32],
+               out: pl.InOut[pl.Tensor[[32, 32], pl.FP32]], other: pl.InOut[pl.Tensor[[32, 32], pl.FP32]],
+               count: pl.Scalar[pl.INT64], flag: pl.Scalar[pl.BOOL], step: pl.Scalar[pl.INT64]
+               ) -> tuple[pl.Tensor[[32, 32], pl.FP32], pl.Tensor[[32, 32], pl.FP32]]:
+        lhs = pl.load(a, [0, 0], [16, 32])
+        rhs = pl.load(b, [0, 0], [16, 32])
+        {header}
+            if flag:
+                chosen = pl.yield_(left)
+            else:
+                chosen = pl.yield_(right)
+            stored = pl.store(chosen, [row, 0], gm)
+            final_left, final_right, final_row, final_gm = pl.yield_(right, left, row + 1, {backedge})
+        value = pl.sub(final_left, pl.mul(final_right, rhs))
+        result = pl.store(value, [final_row, 0], final_gm)
+        saved = pl.store(lhs, [0, 0], other)
+        return result, saved
+""")
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("kind", ["for", "while"])
+@pytest.mark.parametrize("enabled", [None, True, False])
+def test_default_control_flow_preserves_swaps_live_inputs_and_gm_carries(planner, kind, enabled):
+    if enabled is False:
+        # Selection is disabled before planning. The legacy DSA-RP while path
+        # independently rejects this storage pattern; it is not a Buffer fallback.
+        with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
+            selected = passes.select_buffer_ir_functions()(_control_flow_program(kind))
+        assert _kernel(selected).attrs["buffer_ir_selected"] is False
+        return
+    program = _lower(_control_flow_program(kind), planner, enabled)
+    assert _kernel(program).ir_stage == (
+        ir.FunctionIRStage.Functional if enabled is False else ir.FunctionIRStage.Buffer
+    )
+    namespace = {}
+    exec(torch_codegen(program), namespace)  # noqa: S102
+    a = torch.linspace(-1, 1, 512).reshape(16, 32)
+    b = torch.linspace(0.5, 2, 512).reshape(16, 32)
+    for count in range(4):
+        for flag in (False, True):
+            out = torch.full((32, 32), -777.0)
+            saved = torch.full((32, 32), -555.0)
+            expected = out.clone()
+            left, right = a, b
+            for row in range(count):
+                expected[row : row + 16] = left if flag else right
+                left, right = right, left
+            expected[count : count + 16] = left - right * b
+            namespace["kernel"](a, b, out, saved, count, flag, 1)
+            torch.testing.assert_close(out, expected)
+            torch.testing.assert_close(saved[:16], a)
+            assert torch.all(saved[16:] == -555)
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize(
+    "kind,step,change_alias",
+    [
+        ("for", "step", False),
+        ("for", "-1", False),
+        ("for", "1", True),
+        ("while", "1", True),
+    ],
+)
+def test_unsupported_step_and_changing_gm_carry_are_rejected_before_storage(
+    planner, kind, step, change_alias
+):
+    with passes.PassContext([], memory_planner=planner):
+        manager = PassManager(OptimizationStrategy.Default)
+        boundary = manager.get_pass_names().index("SelectBufferIRFunctions")
+        program = _control_flow_program(kind, step, change_alias)
+        for transform in manager.passes[: boundary + 1]:
+            program = transform(program)
+    assert _kernel(program).attrs["buffer_ir_selected"] is False
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("kind", ["for", "while"])
+def test_scalar_carry_swaps_are_simultaneous_in_buffer_debug(planner, kind):
+    header = (
+        "for row, column, i in pl.while_(init_values=(0, 16, 0)):\n            pl.cond(i < count)"
+        if kind == "while"
+        else "for j, (row, column, i) in pl.range(count, init_values=(0, 16, 0)):"
+    )
+    program = pl.parse_program(f"""
+@pl.program
+class ScalarSwap:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, a: pl.Tensor[[16, 32], pl.FP32], out: pl.InOut[pl.Tensor[[32, 64], pl.FP32]],
+               count: pl.Scalar[pl.INT64]) -> pl.Tensor[[32, 64], pl.FP32]:
+        x = pl.load(a, [0, 0], [16, 32])
+        {header}
+            final_row, final_column, final_i = pl.yield_(column, row, i + 1)
+        return pl.store(x, [final_row, final_column], out)
+""")
+    program = _lower(program, planner)
+    assert _kernel(program).ir_stage == ir.FunctionIRStage.Buffer
+    namespace = {}
+    exec(torch_codegen(program), namespace)  # noqa: S102
+    a = torch.arange(512, dtype=torch.float32).reshape(16, 32)
+    for count in range(4):
+        out = torch.full((32, 64), -777.0)
+        expected = out.clone()
+        row, column = (0, 16) if count % 2 == 0 else (16, 0)
+        expected[row : row + 16, column : column + 32] = a
+        namespace["kernel"](a, out, count)
+        torch.testing.assert_close(out, expected)
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("same_alias", [True, False])
+def test_branch_gm_aliases_must_resolve_to_one_parameter(planner, same_alias):
+    other = "a" if same_alias else "b"
+    program = pl.parse_program(f"""
+@pl.program
+class SelectGM:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, a: pl.Tensor[[16, 32], pl.FP32], b: pl.Tensor[[16, 32], pl.FP32],
+               out: pl.Out[pl.Tensor[[16, 32], pl.FP32]], flag: pl.Scalar[pl.BOOL]
+               ) -> pl.Tensor[[16, 32], pl.FP32]:
+        if flag:
+            source = pl.yield_(a)
+        else:
+            source = pl.yield_({other})
+        x = pl.load(source, [0, 0], [16, 32])
+        return pl.store(x, [0, 0], out)
+""")
+    result = _lower(program, planner)
+    assert _kernel(result).ir_stage == (
+        ir.FunctionIRStage.Buffer if same_alias else ir.FunctionIRStage.Functional
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

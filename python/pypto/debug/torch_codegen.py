@@ -1204,6 +1204,10 @@ def _register_ops() -> None:  # noqa: PLR0915
         )
     m["buffer.full"] = lambda a, _kw: f"_buffer_active({a[1]}).fill_({a[0]})"
 
+    m["buffer.get_block_idx"] = lambda _a, _kw: "0"
+    m["buffer.get_block_num"] = lambda _a, _kw: "1"
+    m["buffer.get_subblock_idx"] = lambda _a, _kw: "_get_subblock_idx()"
+
     # --- Cross-core pipe ops ---
     m["tile.tpush_to_aiv"] = _handle_tpush_to_aiv
     m["tile.tpush_to_aic"] = _handle_tpush_to_aic
@@ -1668,9 +1672,10 @@ class TorchCodegen(_ir.IRVisitor):
 
     def visit_yield_stmt(self, op: _ir.YieldStmt) -> None:
         if self._yield_targets and op.value:
-            for target, val_expr in zip(self._yield_targets, op.value):
-                val = self._visit_expr_str(val_expr)
-                self._emit(f"{target} = {val}")
+            # Region yields assign simultaneously. Sequential writes corrupt swaps
+            # when a later operand reads an earlier target (including scalar carries).
+            values = [self._visit_expr_str(value) for value in op.value]
+            self._emit(f"{', '.join(self._yield_targets)} = {', '.join(values)}")
 
     def visit_for_stmt(self, op: _ir.ForStmt) -> None:
         loop_var = self._name_of(op.loop_var)

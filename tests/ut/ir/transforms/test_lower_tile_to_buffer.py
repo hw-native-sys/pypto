@@ -708,16 +708,13 @@ def test_default_rollout_native_compilation(tmp_path, ascend_backend, planner):
 
 @pytest.mark.parametrize("planner", _PLANNERS)
 @pytest.mark.parametrize("program", [MixedBranch, NestedBranch])
-def test_unselected_control_flow_retains_the_off_storage_path(planner, program):
-    outputs = []
+def test_default_control_flow_selects_buffer_and_off_retains_tile(planner, program):
     for enabled in (False, True):
         with passes.PassContext([], memory_planner=planner, enable_buffer_ir=enabled):
             result = PassManager(OptimizationStrategy.Default).run_passes(program)
         function = result.get_function("kernel")
         assert function is not None
-        assert function.ir_stage == ir.FunctionIRStage.Functional
-        outputs.append(function.body)
-    ir.assert_structural_equal(*outputs, enable_auto_mapping=True)
+        assert function.ir_stage == (ir.FunctionIRStage.Buffer if enabled else ir.FunctionIRStage.Functional)
 
 
 @pytest.mark.parametrize("planner", _PLANNERS)

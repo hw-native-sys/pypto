@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -41,6 +42,7 @@
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/buffer_ir_selection.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -134,7 +136,8 @@ class BufferKernelSupport : public IRVisitor {
 
   void VisitStmt(const StmtPtr& stmt) override {
     if (!supported) return;
-    if (!As<SeqStmts>(stmt) && !As<AssignStmt>(stmt) && !As<EvalStmt>(stmt) && !As<ReturnStmt>(stmt)) {
+    if (!As<SeqStmts>(stmt) && !As<AssignStmt>(stmt) && !As<EvalStmt>(stmt) && !As<ReturnStmt>(stmt) &&
+        !As<IfStmt>(stmt) && !As<ForStmt>(stmt) && !As<WhileStmt>(stmt) && !As<YieldStmt>(stmt)) {
       supported = false;
       return;
     }
@@ -180,7 +183,7 @@ class BufferKernelSupport : public IRVisitor {
     // Buffer lowering erases store-result and plain GM aliases. Its codegen ABI
     // requires the resulting parameter type to match the declared result,
     // including TensorView metadata introduced by earlier frontend passes.
-    if (ret->value_.size() != return_types_.size()) {
+    if (region_ || ret->value_.size() != return_types_.size()) {
       supported = false;
       return;
     }
@@ -194,6 +197,56 @@ class BufferKernelSupport : public IRVisitor {
     }
     IRVisitor::VisitStmt_(ret);
   }
+
+  void VisitStmt_(const IfStmtPtr& branch) override {
+    VisitExpr(branch->condition_);
+    Region then_region(branch->return_vars_);
+    CheckRegion(branch->then_body_, then_region);
+    Region else_region(branch->return_vars_);
+    if (branch->else_body_) CheckRegion(*branch->else_body_, else_region);
+    for (size_t i = 0; supported && i < branch->return_vars_.size(); ++i) {
+      const auto& result = branch->return_vars_[i];
+      CheckRegionType(result->GetType());
+      if (As<TensorType>(result->GetType())) {
+        const auto& alias = then_region.aliases[i];
+        if (!alias || alias != else_region.aliases[i]) {
+          supported = false;
+          return;
+        }
+        tensor_aliases_.emplace(result.get(), alias);
+      }
+    }
+  }
+
+  void VisitStmt_(const YieldStmtPtr& yield) override {
+    if (!region_ || yield->value_.size() != region_->results.size()) {
+      supported = false;
+      return;
+    }
+    region_->yielded = true;
+    for (size_t i = 0; supported && i < yield->value_.size(); ++i) {
+      CheckRegionType(region_->results[i]->GetType());
+      VisitExpr(yield->value_[i]);
+      if (As<TensorType>(region_->results[i]->GetType())) {
+        region_->aliases[i] = TensorAlias(yield->value_[i]);
+        supported &= region_->aliases[i] != nullptr;
+      }
+    }
+  }
+
+  void VisitStmt_(const ForStmtPtr& loop) override {
+    supported &= GetScalarDtype(loop->loop_var_) == DataType::INDEX;
+    for (const auto& bound : {loop->start_, loop->stop_, loop->step_}) {
+      VisitExpr(bound);
+      const auto dtype = GetScalarDtype(bound);
+      supported &= dtype == DataType::INDEX || dtype.IsSignedInt();
+    }
+    const auto step = transform_utils::EvalConstInt(loop->step_);
+    supported &= step && *step > 0;
+    CheckLoop(loop);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& loop) override { CheckLoop(loop); }
 
   void VisitExpr_(const SubmitPtr&) override { supported = false; }
   void VisitExpr_(const CallPtr& call) override {
@@ -217,6 +270,9 @@ class BufferKernelSupport : public IRVisitor {
                    GetIntKwarg(call->kwargs_, "st_phase", 0) == 0 &&
                    !GetOptionalDoubleKwarg(call->kwargs_, "pre_quant") &&
                    !GetKwargOr<bool>(call->kwargs_, "pre_relu", false);
+    } else if (IsOp(call, "tile.get_block_idx") || IsOp(call, "tile.get_block_num") ||
+               IsOp(call, "tile.get_subblock_idx")) {
+      supported &= call->args_.empty() && call->kwargs_.empty();
     } else if (!IsOp(call, "tile.alloc")) {
       const auto* recipe = backend::FindLogicalBufferElementwiseRecipe(call->op_->name_);
       supported &=
@@ -227,6 +283,70 @@ class BufferKernelSupport : public IRVisitor {
   }
 
  private:
+  void CheckRegionType(const TypePtr& type) {
+    supported &= As<TileType>(type) || As<TensorType>(type) || As<ScalarType>(type);
+    CheckType(type);
+  }
+
+  struct Region {
+    explicit Region(const std::vector<VarPtr>& results) : results(results), aliases(results.size()) {}
+    const std::vector<VarPtr>& results;
+    std::vector<VarPtr> aliases;
+    bool yielded = false;
+  };
+
+  VarPtr TensorAlias(const ExprPtr& value) const {
+    const auto var = AsVarLike(value);
+    const auto alias = tensor_aliases_.find(var.get());
+    return alias == tensor_aliases_.end() ? nullptr : alias->second;
+  }
+
+  void CheckRegion(const StmtPtr& body, Region& region) {
+    auto* outer = region_;
+    region_ = &region;
+    VisitStmt(body);
+    supported &= region.results.empty() || region.yielded;
+    region_ = outer;
+  }
+
+  template <typename LoopPtr>
+  void CheckLoop(const LoopPtr& loop) {
+    if (!supported || loop->iter_args_.size() != loop->return_vars_.size()) {
+      supported = false;
+      return;
+    }
+    // SSA identities are unique across regions. Retaining each normalized alias
+    // once avoids copying an ever-growing map at nested branches and loops.
+    for (size_t i = 0; supported && i < loop->iter_args_.size(); ++i) {
+      const auto& argument = loop->iter_args_[i];
+      CheckRegionType(argument->GetType());
+      CheckRegionType(loop->return_vars_[i]->GetType());
+      VisitExpr(argument->initValue_);
+      if (As<TensorType>(argument->GetType())) {
+        const auto alias = TensorAlias(argument->initValue_);
+        if (!alias) {
+          supported = false;
+          return;
+        }
+        tensor_aliases_.emplace(argument.get(), alias);
+      }
+    }
+    if constexpr (std::is_same_v<LoopPtr, WhileStmtPtr>) VisitExpr(loop->condition_);
+    Region region(loop->return_vars_);
+    CheckRegion(loop->body_, region);
+    for (size_t i = 0; supported && i < loop->iter_args_.size(); ++i) {
+      const auto& argument = loop->iter_args_[i];
+      if (As<TensorType>(argument->GetType())) {
+        const auto initial = TensorAlias(argument->initValue_);
+        if (region.aliases[i] != initial) {
+          supported = false;
+          return;
+        }
+        tensor_aliases_.emplace(loop->return_vars_[i].get(), initial);
+      }
+    }
+  }
+
   void CheckTransferParameter(const CallPtr& call, size_t index, bool load) {
     if (index >= call->args_.size()) {
       supported = false;
@@ -242,6 +362,7 @@ class BufferKernelSupport : public IRVisitor {
     supported &= load ? direction != ParamDirection::Out : direction != ParamDirection::In;
   }
 
+  Region* region_ = nullptr;
   const std::vector<TypePtr>& return_types_;
   std::unordered_map<const Var*, ParamDirection> directions_;
   std::unordered_map<const Var*, VarPtr> tensor_aliases_;
