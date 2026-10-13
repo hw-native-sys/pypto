@@ -18,6 +18,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -619,11 +620,110 @@ class MoveCollector : public IRVisitor {
 // Phase 3: Mutate - set memory_space_, insert tile.move, substitute args
 // ============================================================================
 
+// Track transpose views through identity-only SSA edges. Branch results are
+// transparent only when every path has the same source, and loop carries only
+// when the yielded value aliases the unchanged iter_arg.
+class TransposeViewProvenanceCollector : public IRVisitor {
+ public:
+  const std::unordered_map<const Var*, VarPtr>& GetTransposeSources() {
+    for (const auto& [var, _] : direct_sources_) Resolve(var);
+    for (const auto& [var, _] : transparent_inputs_) Resolve(var);
+    return resolved_sources_;
+  }
+
+ protected:
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (auto call = As<Call>(op->value_); IsOp(call, "tile.transpose_view") && call->args_.size() == 1) {
+      if (auto source = AsVarLike(call->args_[0])) direct_sources_[op->var_.get()] = source;
+    } else if (auto source = AsVarLike(op->value_)) {
+      transparent_inputs_[op->var_.get()] = {source};
+      alias_roots_[op->var_.get()] = CanonicalAlias(source.get());
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const IfStmtPtr& op) override {
+    IRVisitor::VisitStmt_(op);
+    if (!op->else_body_.has_value()) return;
+    auto then_yield = GetLastYieldStmt(op->then_body_);
+    auto else_yield = GetLastYieldStmt(*op->else_body_);
+    if (!then_yield || !else_yield) return;
+
+    for (size_t i = 0;
+         i < op->return_vars_.size() && i < then_yield->value_.size() && i < else_yield->value_.size(); ++i) {
+      auto then_var = AsVarLike(then_yield->value_[i]);
+      auto else_var = AsVarLike(else_yield->value_[i]);
+      if (then_var && else_var) transparent_inputs_[op->return_vars_[i].get()] = {then_var, else_var};
+    }
+  }
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    IRVisitor::VisitStmt_(op);
+    RecordPassThroughCarries(op->iter_args_, op->return_vars_, op->body_);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    IRVisitor::VisitStmt_(op);
+    RecordPassThroughCarries(op->iter_args_, op->return_vars_, op->body_);
+  }
+
+ private:
+  std::unordered_map<const Var*, VarPtr> direct_sources_;
+  std::unordered_map<const Var*, std::vector<VarPtr>> transparent_inputs_;
+  std::unordered_map<const Var*, const Var*> alias_roots_;
+  std::unordered_map<const Var*, VarPtr> resolved_sources_;
+  std::unordered_set<const Var*> resolution_attempted_;
+
+  const Var* CanonicalAlias(const Var* var) const {
+    auto it = alias_roots_.find(var);
+    return it == alias_roots_.end() ? var : it->second;
+  }
+
+  void RecordPassThroughCarries(const std::vector<IterArgPtr>& iter_args,
+                                const std::vector<VarPtr>& return_vars, const StmtPtr& body) {
+    auto yield = GetLastYieldStmt(body);
+    if (!yield) return;
+    for (size_t i = 0; i < iter_args.size() && i < return_vars.size() && i < yield->value_.size(); ++i) {
+      auto yielded = AsVarLike(yield->value_[i]);
+      auto init = AsVarLike(iter_args[i]->initValue_);
+      if (!yielded || !init || CanonicalAlias(yielded.get()) != iter_args[i].get()) continue;
+      transparent_inputs_[iter_args[i].get()] = {init};
+      transparent_inputs_[return_vars[i].get()] = {iter_args[i]};
+    }
+  }
+
+  VarPtr Resolve(const Var* var) {
+    if (!var || !resolution_attempted_.insert(var).second) {
+      auto it = resolved_sources_.find(var);
+      return it == resolved_sources_.end() ? nullptr : it->second;
+    }
+    if (auto direct = direct_sources_.find(var); direct != direct_sources_.end()) {
+      resolved_sources_[var] = direct->second;
+      return direct->second;
+    }
+    auto inputs = transparent_inputs_.find(var);
+    if (inputs == transparent_inputs_.end() || inputs->second.empty()) return nullptr;
+
+    VarPtr source;
+    for (const auto& input : inputs->second) {
+      auto candidate = Resolve(input.get());
+      if (!candidate || (source && source.get() != candidate.get())) return nullptr;
+      source = candidate;
+    }
+    if (source) resolved_sources_[var] = source;
+    return source;
+  }
+};
+
 class TileMemorySpaceMutator : public IRMutator {
  public:
   TileMemorySpaceMutator(const std::map<VarPtr, MemorySpace>& var_memory,
-                         const std::set<MoveKey, MoveKeyLess>& needed_moves, std::set<VarPtr> params)
-      : var_memory_(var_memory), needed_moves_(needed_moves), params_(std::move(params)) {}
+                         const std::set<MoveKey, MoveKeyLess>& needed_moves, std::set<VarPtr> params,
+                         std::unordered_map<const Var*, VarPtr> transpose_sources)
+      : var_memory_(var_memory),
+        needed_moves_(needed_moves),
+        params_(std::move(params)),
+        transpose_sources_(std::move(transpose_sources)) {}
 
  protected:
   // When promoting to a new memory_space, refresh the layout pieces (blayout/
@@ -1000,6 +1100,7 @@ class TileMemorySpaceMutator : public IRMutator {
   const std::map<VarPtr, MemorySpace>& var_memory_;
   const std::set<MoveKey, MoveKeyLess>& needed_moves_;
   std::set<VarPtr> params_;
+  const std::unordered_map<const Var*, VarPtr> transpose_sources_;
   std::map<VarPtr, ExprPtr> var_cache_;
   std::map<MoveKey, ExprPtr, MoveKeyLess> created_moves_;
   // One entry per active SeqStmts scope holding the keys inserted into
@@ -1091,11 +1192,53 @@ class TileMemorySpaceMutator : public IRMutator {
           (key.second == MemorySpace::LeftScale || key.second == MemorySpace::RightScale);
       if (needs_mx_scale_staging) {
         InsertScaleMxMoveStmt(stmts, var, key.second, span, required_blayout, required_slayout);
-      } else {
+      } else if (!InsertTransposeViewCubeStaging(stmts, var, key.second, span, required_blayout,
+                                                 required_slayout)) {
         InsertMoveStmt(stmts, var, key.second, span, required_blayout, required_slayout);
       }
       changed = true;
     }
+  }
+
+  bool InsertTransposeViewCubeStaging(std::vector<StmtPtr>& stmts, const VarPtr& view_var, MemorySpace target,
+                                      const Span& span, std::optional<TileLayout> required_blayout,
+                                      std::optional<TileLayout> required_slayout) {
+    if (target != MemorySpace::Mat && target != MemorySpace::Left && target != MemorySpace::Right) {
+      return false;
+    }
+    auto source_it = transpose_sources_.find(view_var.get());
+    if (source_it == transpose_sources_.end()) return false;
+    const auto& source_var = source_it->second;
+    auto source_mem_it = var_memory_.find(source_var);
+    if (source_mem_it == var_memory_.end() || source_mem_it->second != MemorySpace::Vec) return false;
+
+    // Keep the cross-core V2C payload in the source's natural orientation.
+    // A transpose_view aliases its input bytes; moving that Vec view directly
+    // makes A5 TINSERT interpret a transposed logical view as an NZ payload and
+    // can leave the V2C handshake stalled. Stage the natural tile into Mat,
+    // rebuild the zero-copy view on the cube side, then place it in Left/Right.
+    MoveKey source_mat_key = {source_var, MemorySpace::Mat};
+    if (created_moves_.count(source_mat_key) == 0) {
+      InsertMoveStmt(stmts, source_var, MemorySpace::Mat, span);
+    }
+    auto staged_source = AsVarLike(created_moves_.at(source_mat_key));
+    INTERNAL_CHECK_SPAN(staged_source, span) << "Mat-staged transpose source is not a Var expression";
+
+    auto& registry = OpRegistry::GetInstance();
+    auto view_call = registry.Create("tile.transpose_view", {staged_source}, {}, span);
+    auto staged_view = std::make_shared<Var>(view_var->name_hint_ + "_Mat", view_call->GetType(), span);
+    var_cache_[staged_view] = staged_view;
+    stmts.push_back(std::make_shared<AssignStmt>(staged_view, view_call, span));
+
+    ExprPtr result = staged_view;
+    if (target != MemorySpace::Mat) {
+      InsertMoveStmt(stmts, staged_view, target, span, required_blayout, required_slayout);
+      result = created_moves_.at({staged_view, target});
+    }
+    MoveKey original_key = {view_var, target};
+    created_moves_[original_key] = result;
+    if (!scope_inserted_stack_.empty()) scope_inserted_stack_.back().push_back(original_key);
+    return true;
   }
 
   void InsertScaleMxMoveStmt(std::vector<StmtPtr>& stmts, const VarPtr& original_var,
@@ -1204,12 +1347,16 @@ FunctionPtr TransformInferTileMemorySpace(const FunctionPtr& func) {
   MoveCollector collector(var_memory);
   collector.VisitStmt(func->body_);
 
+  TransposeViewProvenanceCollector provenance_collector;
+  provenance_collector.VisitStmt(func->body_);
+
   // Phase 3: Mutate — set memory_space_ on types, insert moves, substitute args,
   // rewrite target_memory kwargs on retargetable producers to stay consistent.
   // MX scale-address binding (tile.tget_scale_addr) is inserted afterwards by
   // InsertMxScaleAddr, once every operand memory space is concrete.
   TileMemorySpaceMutator mutator(var_memory, collector.GetNeededMoves(),
-                                 std::set<VarPtr>(func->params_.begin(), func->params_.end()));
+                                 std::set<VarPtr>(func->params_.begin(), func->params_.end()),
+                                 provenance_collector.GetTransposeSources());
   auto new_body = mutator.VisitStmt(func->body_);
 
   auto inferred_func = MutableCopy(func);
