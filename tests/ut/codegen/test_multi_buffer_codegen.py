@@ -1179,5 +1179,45 @@ def test_int8_auto_tile_k_matches_native_operand_boxing(M, N, K, dbc, tmp_path):
     assert output.is_file()
 
 
+@pytest.mark.parametrize("dbc", [False, True], ids=["single-C", "dbC-enabled"])
+@pytest.mark.parametrize("dtype,out_dtype", [(pl.INT8, pl.INT32), (pl.BF16, pl.FP32)])
+@pytest.mark.parametrize("M,N,K", [(48, 400, 96), (48, 17, 96), (17, 400, 160), (7, 7, 160)])
+def test_auto_tile_padded_output_has_no_empty_native_partitions(M, N, K, dtype, out_dtype, dbc, tmp_path):
+    """Whole padding blocks are storage, not zero-sized output work."""
+    physical_m, physical_n = 64, 416
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[M, K], dtype],
+            b: pl.Tensor[[K, N], dtype],
+            out: pl.Out[pl.Tensor[[M, N], out_dtype]],
+        ) -> pl.Tensor[[M, N], out_dtype]:
+            at = pl.load(a, [0, 0], [physical_m, K], valid_shape=[M, K], target_memory=pl.Mem.Mat)
+            bt = pl.load(b, [0, 0], [K, physical_n], valid_shape=[K, N], target_memory=pl.Mem.Mat)
+            acc = pl.tile.matmul(at, bt)
+            return pl.store(acc, [0, 0], out)
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+    with passes.PassContext(
+        [], memory_planner=passes.MemoryPlanner.PYPTO, enable_pypto_l0c_double_buffer=dbc
+    ):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+    func = next(func for func in optimized.functions.values() if func.name == "kernel")
+    mlir = codegen.PTOCodegen().generate(ir.Program([func], func.name, optimized.span), emit_tile_addr=True)
+    assert "pto.tmatmul" in mlir
+    assert not re.search(r"v_(?:row|col)=0(?:[,>])", mlir), mlir
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    source = tmp_path / "padded_output.pto"
+    output = tmp_path / "padded_output.cpp"
+    source.write_text(mlir)
+    _run_ptoas(str(source), str(output), ["--pto-arch=a2", "--pto-level=level3", "--enable-insert-sync"])
+    assert output.is_file()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

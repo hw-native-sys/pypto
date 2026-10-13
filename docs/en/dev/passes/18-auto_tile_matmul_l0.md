@@ -262,6 +262,19 @@ class After:
         ...
 ```
 
+### Static padding is not output work
+
+For a supported M/N placement, positive static output valid extents bound the
+work grid, rounded up to the emitted L0 tile alignment. The chooser uses the
+same bounds for enumeration, cost, and dbC eligibility as both grid emitters.
+For example, a Mat operand with physical N=416 and valid N=400 must not produce
+an extra zero-width output tile at column 400. Partial final fractals still
+carry their original valid extents. Physical source/result and Mat-scratch
+storage shapes are retained separately; the existing full-N Bias restriction
+and arbitrary-accumulator K-only contract are preserved. Unknown or zero valid
+extents retain the existing physical-bound behavior; this static rule does not
+claim runtime empty-tile handling for dynamic extents.
+
 ### Row-narrowed left operand: the seed declares `compact`
 
 When the left operand's valid rows are not provably its physical rows, the

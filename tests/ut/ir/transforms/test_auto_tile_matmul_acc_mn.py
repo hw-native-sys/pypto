@@ -676,8 +676,8 @@ def test_already_padded_output_localizes_valid_shape_across_mn_grid():
     """Explicit M/N grid offsets intersect, rather than reset, valid_shape.
 
     The physical output is 288 columns but only 272 are logical. AutoTile must
-    therefore keep the final physical 32-column panel at valid N=16 even though
-    that panel is emitted by BuildSplitKGrid with a nonzero output offset.
+    cover exactly 272 columns, without creating work for the padding-only
+    final 16 columns. The original input/output storage boxes stay unchanged.
     """
     _backend.reset_for_testing()
     _backend.set_backend_type(BackendType.Ascend910B)
@@ -719,15 +719,70 @@ def test_already_padded_output_localizes_valid_shape_across_mn_grid():
     printed = ir.python_print(after)
     assert printed.count("pl.tile.store(") >= 4
     assert "pl.TileView(valid_shape=[" in printed
-    assert re.search(
-        r"pl\.Tile\[\[\d+, 32\], pl\.INT32, pl\.Mem\.Acc, pl\.TileView\(valid_shape=\[\d+, 16\]\)\]",
-        printed,
-    ), printed
-    assert re.search(
-        r"pl\.Tile\[\[\d+, 32\], pl\.INT8, pl\.Mem\.Right, "
-        r"pl\.TileView\(valid_shape=\[\d+, 16\], compact=pl\.CompactMode\.normal\)\]",
-        printed,
-    ), printed
+    covered = set()
+    for store in _collect_store_calls(after):
+        offsets = store.args[1]
+        tile_type = store.args[0].type
+        assert isinstance(offsets, ir.MakeTuple)
+        assert isinstance(tile_type, ir.TileType)
+        coordinates = []
+        for index in offsets.elements:
+            assert isinstance(index, ir.ConstInt)
+            coordinates.append(int(index.value))
+        dimensions = []
+        for dim in tile_type.shape:
+            assert isinstance(dim, ir.ConstInt)
+            dimensions.append(int(dim.value))
+        row, col = coordinates
+        height, width = dimensions
+        assert row + height <= 512 and col + width <= 272, printed
+        cells = set(itertools.product(range(row, row + height), range(col, col + width)))
+        assert not covered.intersection(cells), printed
+        covered.update(cells)
+    assert len(covered) == 512 * 272, printed
+
+
+def test_padded_arbitrary_acc_keeps_physical_k_only_contract():
+    """A caller-owned accumulator cannot be shrunk into an unsupported M/N fold."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910B)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tile[[64, 2048], pl.INT8, pl.Mem.Mat],
+            b: pl.Tile[[2048, 32], pl.INT8, pl.Mem.Mat, pl.TileView(valid_shape=[2048, 16])],
+            c: pl.Tile[[64, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[64, 16])],
+        ) -> pl.Tile[[64, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[64, 16])]:
+            result = pl.tile.matmul_acc(c, a, b)
+            return result
+
+    printed = ir.python_print(passes.auto_tile_matmul_l0()(Before))
+    assert "pl.pipeline(" in printed, printed
+    assert "pl.Tile[[64, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[64, 16])]" in printed
+
+
+def test_below_minimum_physical_n_is_not_expanded_by_padding_bound():
+    """A sub-fractal input retains the chooser's existing unsupported-shape behavior."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910B)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tile[[64, 128], pl.BF16, pl.Mem.Mat],
+            b: pl.Tile[[128, 8], pl.BF16, pl.Mem.Mat],
+            out: pl.Out[pl.Tensor[[64, 8], pl.FP32]],
+        ) -> pl.Tensor[[64, 8], pl.FP32]:
+            c = pl.tile.matmul(a, b)
+            return pl.tile.store(c, [0, 0], out)
+
+    after = passes.auto_tile_matmul_l0()(Before)
+    ir.assert_structural_equal(Before, after)
 
 
 def test_symbolic_padded_output_localizes_valid_shape_across_mn_grid():
@@ -944,8 +999,8 @@ def test_row_narrowed_matmul_declares_a_compact_accumulator_seed():
                 [64, 2048],
                 pl.INT8,
                 pl.Mem.Mat,
-                pl.TileView(valid_shape=[16, 2048]),
-            ] = pl.tile.load(lhs, [0, 0], [64, 2048], valid_shape=[16, 2048], target_memory=pl.Mem.Mat)
+                pl.TileView(valid_shape=[13, 2048]),
+            ] = pl.tile.load(lhs, [0, 0], [64, 2048], valid_shape=[13, 2048], target_memory=pl.Mem.Mat)
             rhs_mat: pl.Tile[[2048, 128], pl.INT8, pl.Mem.Mat] = pl.tile.load(
                 rhs, [0, 0], [2048, 128], target_memory=pl.Mem.Mat
             )
@@ -953,7 +1008,7 @@ def test_row_narrowed_matmul_declares_a_compact_accumulator_seed():
                 [64, 128],
                 pl.INT32,
                 pl.Mem.Acc,
-                pl.TileView(valid_shape=[16, 128], compact=pl.CompactMode.normal),
+                pl.TileView(valid_shape=[13, 128], compact=pl.CompactMode.normal),
             ] = pl.tile.matmul(lhs_mat, rhs_mat)
             out = pl.tile.store(product, [0, 0], out)
             return out
@@ -961,10 +1016,10 @@ def test_row_narrowed_matmul_declares_a_compact_accumulator_seed():
     after = passes.auto_tile_matmul_l0()(Before)
     printed = ir.python_print(after)
 
-    assert re.search(r"pl\.tile\.create\(\s*\[64, 128\][^)]*compact=True", printed, re.S), (
+    assert re.search(r"pl\.tile\.create\(\s*\[16, 128\][^)]*compact=True", printed, re.S), (
         f"the synthesized accumulator seed must declare compact=True:\n{printed}"
     )
-    acc_views = re.findall(r"pl\.Mem\.Acc,\s*pl\.TileView\((valid_shape=\[16,[^)]*)\)", printed, re.S)
+    acc_views = re.findall(r"pl\.Mem\.Acc,\s*pl\.TileView\((valid_shape=\[13,[^)]*)\)", printed, re.S)
     assert acc_views, printed
     for view in acc_views:
         assert "compact=pl.CompactMode.normal" in view, (

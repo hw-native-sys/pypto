@@ -782,6 +782,9 @@ struct MatmulTiling {
   bool stage_lhs_to_mat = false;
   int64_t M = 0, N = 0, K = 0;
   int64_t m = 0, n = 0, k = 0;
+  /// Output work bounds, excluding complete padding-only L0 blocks. Keep M/N
+  /// above as the physical source/result shape (including Mat-scratch storage).
+  int64_t grid_m = 0, grid_n = 0;
   /// Logical output extents. Ordinarily identical to M/N; a box-padded
   /// boundary matmul keeps the larger physical M/N in the operands/result.
   ExprPtr output_valid_m = nullptr;
@@ -1271,6 +1274,27 @@ std::optional<MatmulTiling> AnalyzeMatmul(
     return std::nullopt;
   }
 
+  // Mat storage can have a larger box than the actual output (e.g. INT8
+  // valid N=400 in a 416-column Mat tile). Enumerating that padding as output
+  // work produces empty partitions and MADs with valid N=0. Bound both the
+  // chooser and emitters by the same minimal aligned work rectangle; retain
+  // the source/result box separately. A partial last fractal is still real
+  // work and keeps its original valid extent. Dynamic extents keep the
+  // existing physical-bound policy; their runtime value is not guessed here.
+  auto work_extent = [](int64_t physical, const ExprPtr& valid, int alignment) {
+    const auto extent = As<ConstInt>(valid);
+    if (!extent || extent->value_ <= 0) return physical;
+    return std::min(physical, ((extent->value_ - 1) / alignment + 1) * alignment);
+  };
+  // Without an M/N placement we must retain the whole physical accumulator
+  // contract, notably for arbitrary matmul_acc K-only rewrites. A resident
+  // Bias operand likewise requires full N because it cannot be windowed.
+  if (dbc_eligibility == DbcSemanticEligibility::kEnabled) {
+    cfg.M = static_cast<int>(work_extent(M, output_valid_shape[0], cfg.align_m));
+    cfg.N = static_cast<int>(std::min<int64_t>(
+        N, std::max<int64_t>(cfg.min_n, work_extent(N, output_valid_shape[1], cfg.align_n))));
+  }
+
   utils::L0TileResult res;
   try {
     res = utils::ChooseL0Tile(cfg);
@@ -1336,6 +1360,8 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   t.m = res.m;
   t.n = res.n;
   t.k = res.k;
+  t.grid_m = cfg.M;
+  t.grid_n = cfg.N;
   t.output_valid_m = output_valid_shape[0];
   t.output_valid_n = output_valid_shape[1];
   t.stationarity = res.stationarity;
@@ -2510,8 +2536,8 @@ std::pair<std::vector<StmtPtr>, VarPtr> BuildFullKPipelined(const MatmulTiling& 
 
   // Interior = the region tiled by FULL m x n blocks; the L-shaped partial
   // boundary beyond it is peeled into straight-line tiles below.
-  const int64_t full_m = (t.M / t.m) * t.m;
-  const int64_t full_n = (t.N / t.n) * t.n;
+  const int64_t full_m = (t.grid_m / t.m) * t.m;
+  const int64_t full_n = (t.grid_n / t.n) * t.n;
 
   std::vector<StmtPtr> stmts;
   MatmulTiling emitted = t;
@@ -2614,12 +2640,13 @@ std::pair<std::vector<StmtPtr>, VarPtr> BuildFullKPipelined(const MatmulTiling& 
   // [0, full_m) x [full_n, N).  Either is empty when its dim divides evenly.
   // step 0 is used by the interior placement; the tail continues from step 1.
   int tail_step = 1;
-  for (int64_t ni = 0; full_m < t.M && ni < t.N; ni += t.n) {
-    chain = EmitFullKTile(stmts, emitted, placer, chain, full_m, ni, t.M - full_m,
-                          std::min<int64_t>(t.n, t.N - ni), base, tail_step++);
+  for (int64_t ni = 0; full_m < t.grid_m && ni < t.grid_n; ni += t.n) {
+    chain = EmitFullKTile(stmts, emitted, placer, chain, full_m, ni, t.grid_m - full_m,
+                          std::min<int64_t>(t.n, t.grid_n - ni), base, tail_step++);
   }
-  for (int64_t mi = 0; full_n < t.N && mi < full_m; mi += t.m) {
-    chain = EmitFullKTile(stmts, emitted, placer, chain, mi, full_n, t.m, t.N - full_n, base, tail_step++);
+  for (int64_t mi = 0; full_n < t.grid_n && mi < full_m; mi += t.m) {
+    chain =
+        EmitFullKTile(stmts, emitted, placer, chain, mi, full_n, t.m, t.grid_n - full_n, base, tail_step++);
   }
   return {std::move(stmts), chain};
 }
@@ -2633,8 +2660,8 @@ std::pair<std::vector<StmtPtr>, VarPtr> BuildFullKPipelined(const MatmulTiling& 
 std::pair<std::vector<StmtPtr>, VarPtr> BuildSplitKGrid(const MatmulTiling& t, SubtilePlacer& placer) {
   const Span sp = t.assign->span_;
   const std::string base = t.assign->var_->name_hint_;
-  const int64_t num_m = (t.M + t.m - 1) / t.m;
-  const int64_t num_n = (t.N + t.n - 1) / t.n;
+  const int64_t num_m = (t.grid_m + t.m - 1) / t.m;
+  const int64_t num_n = (t.grid_n + t.n - 1) / t.n;
 
   std::vector<StmtPtr> stmts;
   MatmulTiling emitted = t;
@@ -2651,10 +2678,10 @@ std::pair<std::vector<StmtPtr>, VarPtr> BuildSplitKGrid(const MatmulTiling& t, S
   int step = 0;
   for (int64_t nj = 0; nj < num_n; ++nj) {
     const int64_t ni = nj * t.n;
-    const int64_t n_eff = std::min<int64_t>(t.n, t.N - ni);
+    const int64_t n_eff = std::min<int64_t>(t.n, t.grid_n - ni);
     for (int64_t mj = 0; mj < num_m; ++mj) {
       const int64_t mi = mj * t.m;
-      const int64_t m_eff = std::min<int64_t>(t.m, t.M - mi);
+      const int64_t m_eff = std::min<int64_t>(t.m, t.grid_m - mi);
       const std::string tbase = base + "_t" + std::to_string(step);
 
       auto inner =
