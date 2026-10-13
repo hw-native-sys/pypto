@@ -472,9 +472,11 @@ out_store = pl.tile.store(popped, [0 + aiv_id * 7, 0], out_0)
        旧->新 var 重绑。cube 源（matmul / Acc 结果）保持全尺寸。
      VECTOR_TO_CUBE —— 插入
          tile.aic_gather(half_vector_tile, split=int(mode))  -> 全
-       将源解析到其折半后的 var 使 gather 把 半 -> 全 翻倍，随后保留对折叠后全尺寸
-       tile 的原 cube 放置 move（命名为 "<dest>_mat"，以便 ExpandMixedKernel 的
-       V->C 边界据此命名其合成的 tpop）。
+       将源解析到其折半后的 var，使 gather 把 半 -> 全 翻倍。对于具有隐式 Mat
+       视图（保留原 valid_shape）的 Mat 目标，将 gather 直接绑定到原目标变量，
+       不再保留 Mat -> Mat 放置 move。拒绝不兼容的显式 Mat 视图。对于其他 cube
+       内存空间，保留对 gather 全尺寸 tile 的原放置 move（命名为 "<dest>_mat"，
+       以便 ExpandMixedKernel 的 V->C 边界据此命名其合成的 tpop）。
 
    亲和性门控（ClassifyCallAffinity）：
      VECTOR 亲和叶子 —— 将单条语句送入

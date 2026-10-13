@@ -557,9 +557,13 @@ partition the data differently from the way the region indexes it.
      VECTOR_TO_CUBE — insert
          tile.aic_gather(half_vector_tile, split=int(mode))  -> FULL
        resolving the source to its halved var so the gather doubles
-       HALF -> FULL, then keep the original cube-placement move on the
-       gathered FULL tile (named "<dest>_mat" so ExpandMixedKernel's V->C
-       boundary names its synthesized tpop after it).
+       HALF -> FULL. For a Mat destination with an implicit Mat view
+       (preserving the authored valid_shape), bind the gather directly to
+       the original destination; no Mat -> Mat placement move remains.
+       Reject incompatible explicit Mat views. For other cube memory
+       spaces, keep the original placement move on the gathered FULL tile
+       (named "<dest>_mat" so ExpandMixedKernel's V->C boundary names its
+       synthesized tpop after it).
 
    Affinity gate (ClassifyCallAffinity):
      VECTOR-affine leaf — route the single statement through
