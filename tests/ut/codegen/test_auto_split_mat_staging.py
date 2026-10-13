@@ -79,5 +79,73 @@ def test_auto_split_mat_staging(tmp_path, ascend_backend, b_trans):
         assert list((tmp_path / "kernels").rglob("*.cpp"))
 
 
+@pytest.mark.parametrize("slot_num", [1, 2])
+@pytest.mark.parametrize("place_first", [False, True])
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+def test_two_retained_mat_operands_require_two_fifo_slots(tmp_path, ascend_backend, slot_num, place_first):
+    """Two gathers before either placement cannot share a one-slot ring."""
+
+    @pl.jit
+    def two_operands(
+        a: pl.Tensor[[32, 32], pl.FP16],
+        b: pl.Tensor[[32, 32], pl.FP16],
+        out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+    ):
+        for _ in pl.spmd(
+            1,
+            optimizations=[pl.cross_core_slot(slot_num=slot_num), pl.split(pl.SplitMode.UP_DOWN)],
+        ):
+            av = pl.add(pl.load(a, [0, 0], [32, 32]), 1.0)
+            bv = pl.add(pl.load(b, [0, 0], [32, 32]), 1.0)
+            am = pl.move(av, target_memory=pl.Mem.Mat)
+            bm = pl.move(bv, target_memory=pl.Mem.Mat)
+            al = pl.move(am, target_memory=pl.Mem.Left)
+            br = pl.move(bm, target_memory=pl.Mem.Right)
+            out = pl.store(pl.matmul(al, br), [0, 0], out)
+        return out
+
+    @pl.jit
+    def early_placement(
+        a: pl.Tensor[[32, 32], pl.FP16],
+        b: pl.Tensor[[32, 32], pl.FP16],
+        out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+    ):
+        for _ in pl.spmd(
+            1,
+            optimizations=[pl.cross_core_slot(slot_num=slot_num), pl.split(pl.SplitMode.UP_DOWN)],
+        ):
+            # Repeated and nested handoffs need one slot, not one per gather.
+            for _iteration in pl.range(2):
+                av = pl.add(pl.load(a, [0, 0], [32, 32]), 1.0)
+                bv = pl.add(pl.load(b, [0, 0], [32, 32]), 1.0)
+                am = pl.move(av, target_memory=pl.Mem.Mat)
+                al = pl.move(am, target_memory=pl.Mem.Left)
+                bm = pl.move(bv, target_memory=pl.Mem.Mat)
+                br = pl.move(bm, target_memory=pl.Mem.Right)
+                out = pl.store(pl.matmul(al, br), [0, 0], out)
+        return out
+
+    config = RunConfig(
+        platform="a5" if ascend_backend == BackendType.Ascend950 else "a2a3",
+        codegen_only=True,
+        save_kernels=True,
+        save_kernels_dir=str(tmp_path),
+    )
+    if slot_num == 1 and not place_first:
+        with pytest.raises(ValueError, match="slot_num=1 is insufficient for 2 simultaneously retained"):
+            two_operands.compile(config=config)
+        assert not list(tmp_path.rglob("*.pto"))
+    else:
+        kernel = early_placement if place_first else two_operands
+        kernel.compile(config=config)
+        pto = "\n".join(path.read_text() for path in tmp_path.rglob("*.pto"))
+        lines = pto.splitlines()
+        pops = [i for i, line in enumerate(lines) if "pto.tpop_from_aiv" in line]
+        frees = [i for i, line in enumerate(lines) if "pto.tfree_from_aiv" in line]
+        assert len(pops) == len(frees) == 2
+        assert (frees[0] < pops[1]) if place_first else (pops[1] < frees[0])
+        assert f"slot_num = {slot_num}" in pto or f"slot_num={slot_num}" in pto
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -298,6 +298,11 @@ Two authoring rules make this work:
   invocation does not need to exceed. `pl.cross_core_slot(slot_num=N)` retunes it
   in either direction; grow it too far and `AllocateMemoryAddr` reports the
   overflow.
+  Automatic pipe setup checks the finalized pop/free schedule: retaining two
+  gathered Mat tiles before either is released requires at least two slots.
+  An insufficient depth is rejected; increase `cross_core_slot(slot_num=N)` or
+  place/consume the first tile before gathering the next. Repeated sequential
+  gathers do not require additional slots once their preceding tiles are freed.
 
 `pl.aiv_shard` is **not** an alternative to the half-extent `pl.full` here: it is
 the C→V transfer and needs an `Acc` operand, so it cannot shard a value the

@@ -41,6 +41,51 @@ namespace {
 
 const auto& FlattenBody = transform_utils::FlattenToStmts;
 
+// Inspect the finalized consumer schedule, not the number of syntactic
+// gathers or pipeline stages: a slot is reusable only after its tfree.
+// Branches are exclusive and balanced loop bodies reuse their slots each
+// iteration. This traversal is linear in the statement tree.
+int RequiredConsumerDepth(const std::vector<StmtPtr>& stmts, core_affinity::CoreSide side, int& live) {
+  int peak = live;
+  for (const auto& stmt : stmts) {
+    auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt);
+    auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt);
+    auto call = assign ? std::dynamic_pointer_cast<const Call>(assign->value_)
+                       : (eval ? std::dynamic_pointer_cast<const Call>(eval->expr_) : nullptr);
+    if (call && call->op_) {
+      if (call->op_->name_ == core_side_ops::TPopOp(side)) {
+        peak = std::max(peak, ++live);
+      } else if (call->op_->name_ == core_side_ops::TFreeOp(side)) {
+        --live;
+      }
+    }
+    if (auto loop = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+      int body_live = live;
+      peak = std::max(peak, RequiredConsumerDepth(FlattenBody(loop->body_), side, body_live));
+      CHECK_SPAN(body_live <= live, loop->span_)
+          << "Automatic cross-core pipe cannot bound retained popped tiles across loop iterations; "
+             "place/consume and release each gathered tile within its iteration.";
+      live = std::max(live, body_live);
+    } else if (auto loop = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+      int body_live = live;
+      peak = std::max(peak, RequiredConsumerDepth(FlattenBody(loop->body_), side, body_live));
+      CHECK_SPAN(body_live <= live, loop->span_)
+          << "Automatic cross-core pipe cannot bound retained popped tiles across loop iterations; "
+             "place/consume and release each gathered tile within its iteration.";
+      live = std::max(live, body_live);
+    } else if (auto branch = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+      int then_live = live;
+      int else_live = live;
+      peak = std::max(peak, RequiredConsumerDepth(FlattenBody(branch->then_body_), side, then_live));
+      if (branch->else_body_) {
+        peak = std::max(peak, RequiredConsumerDepth(FlattenBody(*branch->else_body_), side, else_live));
+      }
+      live = std::max(then_live, else_live);
+    }
+  }
+  return peak;
+}
+
 }  // namespace
 
 std::optional<int64_t> TryGetNonNegativeConstInt(const ExprPtr& expr) {
@@ -295,6 +340,16 @@ AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const s
         << "Cross-core slot_num override must be positive: " << slot_num_override.value();
   }
   const int effective_slot_num = slot_num_override.value_or(kDefaultAutoPipeSlotNum);
+  int aic_live = 0;
+  int aiv_live = 0;
+  const int required_slot_num =
+      std::max(RequiredConsumerDepth(aic_stmts, core_affinity::CoreSide::AIC, aic_live),
+               RequiredConsumerDepth(aiv_stmts, core_affinity::CoreSide::AIV, aiv_live));
+  CHECK_SPAN(effective_slot_num >= required_slot_num, span)
+      << "Automatic cross-core pipe slot_num=" << effective_slot_num << " is insufficient for "
+      << required_slot_num
+      << " simultaneously retained popped tiles; set cross_core_slot(slot_num=" << required_slot_num
+      << ") or place/consume each gathered tile before gathering the next.";
   // Bound-check the slot size before multiplying so an oversized inferred size
   // can't overflow the int64 buffer_size computation.
   const int64_t slot_size_i64 = common_slot_size.value();

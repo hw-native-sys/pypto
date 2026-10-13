@@ -254,6 +254,10 @@ with pl.at(level=pl.Level.CORE_GROUP, name_hint="sparse_kv",
   `128 x 512 x 2 = 131072`——而 `slot_num` 默认取 **2**，相当于在 512 KB 的 L1 中占用
   256 KB；每次调用只 push 一次的 kernel 无需超过该深度。`pl.cross_core_slot(slot_num=N)`
   可双向调整该值；若调得过大，`AllocateMemoryAddr` 会报告溢出并指出被预留的字节数。
+  自动 pipe 初始化会检查最终的 pop/free 调度：若两个 gather 的 Mat tile 在释放前
+  同时保留，至少需要两个 slot。深度不足时会拒绝编译；增大
+  `cross_core_slot(slot_num=N)`，或先放置/消费第一个 tile 再 gather 下一个。
+  前一个 tile 已释放的顺序 gather 不需要额外 slot。
 
 `pl.aiv_shard` 在这里**不能**替代半 extent 的 `pl.full`：它是 C→V 传输，要求操作数位于
 `Acc`（cube 产出），因此无法对 vector lane 自己产生的值做切分。
