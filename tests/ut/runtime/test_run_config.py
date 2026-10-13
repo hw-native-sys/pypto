@@ -1185,8 +1185,14 @@ def test_replace_backend_type_preserves_execution_mode():
 def test_invalid_new_backend_type_is_rejected():
     with pytest.raises(TypeError, match="BackendType"):
         RunConfig(backend_type="a5")
-    with pytest.raises(TypeError, match="ExecutionMode"):
-        CompileOptions(execution_mode=cast(Any, "sim"))
+
+
+@pytest.mark.parametrize("mode", [None, "sim"])
+def test_compile_options_rejects_invalid_execution_mode(mode):
+    with pytest.raises(TypeError, match="CompileOptions.execution_mode must be an ExecutionMode"):
+        CompileOptions(execution_mode=mode)
+    with pytest.raises(TypeError, match="CompileOptions.execution_mode must be an ExecutionMode"):
+        dataclasses.replace(CompileOptions(), execution_mode=mode)
 
 
 if __name__ == "__main__":

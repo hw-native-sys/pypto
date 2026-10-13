@@ -186,6 +186,10 @@ the backend and derived platform. Either axis can be overridden independently
 without rewriting metadata. Existing runtime binding and cache restrictions
 still apply. Reloading does not rerun code generation.
 
+When selecting the target without a legacy `platform`, `CompileOptions` requires
+an `ExecutionMode` enum value. Omit `execution_mode` to use SIM; explicitly
+passing `None` or a string raises `TypeError`.
+
 During migration, `platform=`, `.platform`, and RunConfig's `arch` field remain
 compatible. A legacy platform still selects both axes and wins over backend_type;
 RunConfig retains its warning when those two disagree. `ir.compile` rejects an

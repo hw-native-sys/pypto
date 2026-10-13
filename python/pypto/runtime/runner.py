@@ -908,6 +908,10 @@ class CompileOptions:
     distributed_config: "DistributedConfig | None" = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.execution_mode, ExecutionMode):
+            raise TypeError(
+                f"CompileOptions.execution_mode must be an ExecutionMode, got {self.execution_mode!r}"
+            )
         _resolve_target(self.backend_type, self.execution_mode)
 
     @property

@@ -172,6 +172,10 @@ compiled = ir.compile(
 两个维度均可独立覆盖，且不会改写元数据。已有 Worker 绑定和缓存限制仍然适用；
 重新加载不会重新运行代码生成。
 
+不使用旧 `platform` 选择目标时，`CompileOptions` 要求执行方式为 `ExecutionMode`
+枚举值。省略 `execution_mode` 使用默认 SIM；显式传入 `None` 或字符串会抛出
+`TypeError`。
+
 迁移期间保留 `platform=`、`.platform` 和 RunConfig 的 `arch` 字段。旧 platform
 仍决定两个轴，并优先于 backend_type；RunConfig 对两者冲突保留原有警告。
 `ir.compile` 拒绝同时显式指定但不一致的 execution_mode 和 platform。
