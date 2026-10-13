@@ -10,6 +10,7 @@
 """Internal device-binary records and read-only callable reconstruction."""
 
 import hashlib
+import importlib
 import json
 import shutil
 import stat
@@ -165,14 +166,30 @@ def _prune_build_outputs(chip: Path) -> None:
         path.unlink(missing_ok=True)
 
 
-def ready_spec(directory: Path, generated: ArtifactSpec) -> ArtifactSpec:
+def ready_spec(directory: Path, generated: ArtifactSpec, *, metadata_only: bool = False) -> ArtifactSpec:
     """Declare every final binary and child manifest before looking up READY."""
     from ._artifact_sources import read_kernel_config  # noqa: PLC0415
 
     required = set(generated.required_files) | {BINARY_MANIFEST}
     for chip in chip_directories(directory, generated.build_kind).values():
         prefix = chip.relative_to(directory)
-        config = read_kernel_config(chip / "kernel_config.py")
+        metadata = chip / "kernel_config.json"
+        if metadata.is_file():
+            # Metadata may be inspected speculatively before lookup validation.
+            # It only selects a slot; the selected READY payload is fully validated.
+            with _relative_file(chip, "kernel_config.json").open("rb") as stream:
+                raw = stream.read(16 * 1024 * 1024 + 1)
+            if len(raw) > 16 * 1024 * 1024:
+                raise ValueError(f"Kernel configuration metadata is too large: {chip}")
+            record = json.loads(raw, object_pairs_hook=_unique_object)
+            config = ModuleType("_pypto_ready_config")
+            config.__dict__.update(KERNELS=record["kernels"], ORCHESTRATION=record["orchestration"])
+            for entry in [*config.KERNELS, config.ORCHESTRATION]:
+                entry["source"] = str(chip / entry["source"])
+        elif metadata_only:
+            raise ValueError(f"Kernel configuration metadata is unavailable: {chip}")
+        else:
+            config = read_kernel_config(chip / "kernel_config.py")
         # GENERATED may have inherited legacy outputs declared by its caller.
         # They are not part of the READY loading contract.
         sidecars = {str(path.relative_to(directory)) for path in _build_outputs(config)}
@@ -285,6 +302,20 @@ def read_prebuilt(
     return result
 
 
+def _native_callable_interface() -> Any:
+    """Keep existing ABI guards while avoiding installed runtime worker imports."""
+    from .runtime_pin import check_runtime_pin  # noqa: PLC0415
+
+    check_runtime_pin()
+    simpler = importlib.import_module("simpler")
+    origin = getattr(simpler, "__file__", None)
+    if origin and (Path(origin).resolve().parents[2] / ".git").exists():
+        # The editable runtime's public module checks its Python checkout
+        # against the installed extension. Preserve that guard on this layout.
+        return importlib.import_module("simpler.task_interface")
+    return importlib.import_module("_task_interface")
+
+
 def load_prebuilt(
     directory: Path,
     platform: str,
@@ -299,14 +330,12 @@ def load_prebuilt(
     files. Without it, this helper hashes binaries (including private fallback).
     """
     records = read_prebuilt(directory, platform, kind, _validated_files=_validated_files)
-    # Simpler's optional native interface has no static stubs (as in task_interface.py).
-    from simpler.task_interface import ArgDirection  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
-
+    # Installed READY loading needs native constructors, not Worker setup.
+    native = _native_callable_interface()
+    ArgDirection = native.ArgDirection
+    ChipCallable = native.ChipCallable
+    CoreCallable = native.CoreCallable
     from ._callable_identity import register_callable_identity  # noqa: PLC0415
-    from .task_interface import (  # noqa: PLC0415
-        ChipCallable,  # pyright: ignore[reportAttributeAccessIssue]
-        CoreCallable,  # pyright: ignore[reportAttributeAccessIssue]
-    )
 
     result = {}
     for name, record in records.items():

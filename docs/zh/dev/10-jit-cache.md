@@ -115,39 +115,60 @@ with_ir = decode.compile(config=RunConfig(cache_config=pypto.CacheConfig(enabled
 
 ## 工具链支持与开销
 
-首个适配器支持 Linux ELF GCC 工具链、CANN BiSheng 布局、独立 ELF PTOAS，以及
-打包 CPython PTOAS 的启动脚本语法及带 NumPy 依赖的 PTOAS wheel 标准 pip/uv 入口脚本。
-wheel 清单覆盖实际虚拟环境与解释器、全部安装包资源、启动输入及原生依赖；拒绝导入重定向。
-标识覆盖安装内容、编译器子程序与资源、隐式包含
-目录、链接输入、Python/native 运行时文件以及 ELF 动态依赖。未知启动脚本、在线构建的
-PTOAS 扩展、不支持的编译器布局、sanitizer 构建，以及 `CPATH`、`LD_PRELOAD` 等隐式
-依赖覆盖会旁路持久缓存。最新原因可通过 `cache_stats().last_bypass_reason` 获取，
-无需开启 INFO 日志。每次旁路也由 `pypto.jit._persistent` 以 INFO 级别记录。
+默认的 `PYPTO_CACHE_IDENTITY=build` 标识本次编译实际选择的工具，并与缓存构建时的
+身份匹配；不会另外增加 expected 版本或 pin 一致性审计。
 
-ELF64 身份仅忽略经验证不分配内存且位于所有程序段之外的调试数据。
-所有 ELF 头、程序头和节头均保留，包括 `.bss` 大小、标志、对齐信息、符号表
-及节之外的字节。被忽略的节必须为 `SHT_PROGBITS`，且无标志或仅有
-`SHF_COMPRESSED`；例如，带有 `SHF_MERGE | SHF_STRINGS` 的 `.comment` 节
-仍参与哈希。清单读取期间发生变化的输入会返回不可用的身份。
-布局不变的调试数据修改不影响身份；改变布局的调试重编译
-可能保守地使缓存失效。不支持或格式错误的 ELF 布局回退为整文件 SHA-256。
-产物清单始终对完整文件进行哈希。
+| 组件 | 身份依据 |
+| ---- | -------- |
+| PyPTO | Python 包源码与打包的代码生成模板内容、实际导入扩展的完整 GNU ELF Build-ID、Python 版本及 ABI。 |
+| Runtime | 干净的源码 checkout 版本或安装构建版本、实际原生扩展 Build-ID、Python 源码及可用的 runtime/PTO-ISA 构建元数据；源码 checkout 有未提交更改时绕过持久缓存。 |
+| PTO-ISA | runtime 的 `pto_isa.pin` 选定的版本；仅编译未命中时获取并校验 checkout。 |
+| PTOAS | 标准 wheel 启动器使用其解释器实际选中的包元数据、NumPy wheel 记录、原生编译器 Build-ID、启动 `.pth` 文件与非标准库启动模块；缺少启动或 wheel 证据、不支持的启动器会绕过持久缓存。独立 ELF 使用 Build-ID。 |
+| 设备及编排工具链 | 选中的编译器路径/版本、调用入口及实际执行的 GCC 驱动的 Build-ID、GCC 辅助程序 Build-ID、CANN 安装构建版本及链接器 Build-ID；无法识别编译器 wrapper 或缺少 CANN 构建版本时绕过持久缓存。 |
 
-隐式链接脚本支持绝对路径的 `INPUT`/`GROUP` 依赖、嵌套 `AS_NEEDED` 以及
-`OUTPUT_FORMAT`/`OUTPUT_ARCH` 声明，按选定的 sysroot 递归追踪依赖。
-相对路径、`-l` 名称、`SEARCH_DIR`、`INCLUDE` 和未知语法需要完整的链接器搜索上下文，
-当前会旁路持久缓存，继续普通私有编译。
+原生文件缺少可用 Build-ID 时回退到内容哈希。Build-ID 从小型 ELF note 读取，不读取
+整个动态库。wheel PTOAS 探测不导入其编译器包；选中解释器的启动搜索路径和钩子文件
+也参与 key。身份不可用时绕过缓存，不生成共用的 `UNKNOWN` key。现有 runtime ABI 及 PTOAS
+最低版本检查仍在原有路径执行。
+带有 `_online` 构建目录的 PTOAS 包会绕过持久缓存，因为本地扩展重编可能不会改变
+报告的版本。
 
-成功的安装标识在每个进程内按工具选择和解析后的组件清单记忆化（memoization）。
-工作目录变化会重新发现工具，因为相对搜索路径可能选择不同工具；清单未变的组件直接
-复用内容摘要。进程存活期间安装文件须保持不变，替换
-后重启进程。额外应用源码每次请求重新读取。当前路径也参与标识，移动安装可能未命中。
+Python 根目录和原生扩展位置来自实际导入结果，支持 `pip install`、`pip install -e`
+及 `PYTHONPATH`，包括源码 Python 配合 editable 安装扩展的布局。不单独依赖包分发
+元数据来判断实际导入的 PyPTO 编译器。
 
-首次内容清单读取较保守，可能耗时较长。一套本地 CANN/PTOAS 安装的首次清单约需
-12 秒；该测量不代表通用性能结论。当前每个独立新进程都需要支付这项成本。仅依赖路径、
-大小、mtime 和 inode 的磁盘记忆不能证明内容未变，因此不采用。统计包含标识计算和
-校验时间。没有可验证本地工具链的
-部署需要另一套协议，本 API 尚不支持。
+此策略信任发布的原生构建/版本标识，不扫描系统头文件、Python 标准库或传递动态库
+依赖。源码 runtime checkout 必须没有已跟踪或未跟踪的 Git 更改。若修改已安装的输入而
+没有更新版本标识，应设置新的 `PYPTO_CACHE_EPOCH` 或清空缓存。进程内安装文件应保持
+不变，替换后重启进程。
+应用的额外源码仍逐请求重新读取。有效选择输入（路径、环境覆盖等）参与 key，移动
+安装位置可能导致未命中。
+
+`PYPTO_CACHE_IDENTITY=content` 保留之前的 Linux 依赖清单：ELF 依赖闭包、编译器资源、
+隐式 include、链接输入和 Python/native runtime 内容。它仍保留原有 PTOAS/CANN
+报告版本及经验证 PTO-ISA revision 的快捷路径，不代表对所有厂商文件逐字节审计。
+不支持的启动器、sanitizer 构建以及 `CPATH`、`LD_PRELOAD` 等未建模隐式覆盖会绕过
+缓存。两种策略均通过 `cache_stats().last_bypass_reason` 报告原因，身份相互隔离。
+
+缓存产物仍进行完整 manifest/内容校验。新打包的产物携带 `kernel_config.json`，READY
+发现无需执行 Python 配置。恢复复用 lookup 已验证的 manifest，直接构造原生 callable，
+无需导入 Worker/通信初始化模块。
+若 GENERATED 槽缺失或损坏，查找仅扫描同一 artifact key 下最多 32 个 READY 阶段目录。
+每个候选目录自身的 JSON 必须推导出与目录一致的 spec 摘要，且通过完整 manifest/产物
+校验；多个有效候选会被拒绝。
+
+用独立进程测量首次命中：
+
+```bash
+PYTHONPATH=python python tests/benchmarks/jit_cache_latency.py \
+  --cache-root /tmp/pypto-jit-benchmark --runs 5 --output build/jit-latency.json
+```
+
+验证 wheel 时使用安装环境的 Python 并去掉 `PYTHONPATH`。第一个子进程填充缓存，
+其余每个测量进程都必须 READY 命中且无构建、无 bypass。计时包含首次身份检查、首次
+warmup 及 callable 恢复，不包含进程启动、初始 import、张量创建和设备执行。慢速探测
+回退、文件系统冷页或大型产物可能超过 100 ms；这是测量目标，不是延迟保证。
+没有使用基于文件时间戳的跨进程身份 memo。
 
 ## 统计与 CLI
 
