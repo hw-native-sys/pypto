@@ -116,3 +116,80 @@ def test_buffer_storage_views_alias_bytes_and_destination_writes():
     output = torch.empty_like(source)
     namespace["kernel"](source, output)
     torch.testing.assert_close(output, source * 2)
+
+
+@pytest.mark.parametrize("address", [0, 64])
+@pytest.mark.parametrize("valid_rows", [1, 2])
+def test_addressed_vec_allocations_share_partial_storage(address, valid_rows):
+    span = ir.Span.unknown()
+    whole_type = ir.BufferType([4, 8], pl.FP32, ir.MemorySpace.Vec)
+    window_type = ir.BufferType([2, 8], pl.FP32, ir.MemorySpace.Vec, valid_shape=[valid_rows, 8])
+    whole = ir.Var("whole", whole_type, span)
+    window = ir.Var("window", window_type, span)
+    source = ir.Var("source", ir.TensorType([4, 8], pl.FP32), span)
+    output = ir.Var("output", source.type, span)
+
+    def dims(*values):
+        return ir.MakeTuple([ir.ConstInt(value, pl.INDEX, span) for value in values], span)
+
+    def call(name, args, type_=None):
+        return ir.Call(ir.get_op(name), args, {}, type_ or ir.VoidType(), span)
+
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(
+                whole, call("buffer.alloc", [dims(), ir.ConstInt(address, pl.INDEX, span)], whole_type), span
+            ),
+            ir.AssignStmt(
+                window,
+                call("buffer.alloc", [dims(), ir.ConstInt(address + 32, pl.INDEX, span)], window_type),
+                span,
+            ),
+            ir.EvalStmt(call("buffer.load", [source, dims(0, 0), dims(4, 8), whole]), span),
+            ir.EvalStmt(call("buffer.add", [window, window, window]), span),
+            ir.EvalStmt(call("buffer.store", [whole, dims(0, 0), dims(4, 8), output]), span),
+        ],
+        span,
+    )
+    function = ir.Function("kernel", [source, output], [], body, span, ir_stage=ir.FunctionIRStage.Buffer)
+    namespace = {}
+    exec(torch_codegen(function), namespace)  # noqa: S102
+    data = torch.arange(32, dtype=torch.float32).reshape(4, 8)
+    result = torch.empty_like(data)
+    namespace["kernel"](data, result)
+    expected = data.clone()
+    expected[1 : 1 + valid_rows] *= 2
+    torch.testing.assert_close(result, expected)
+
+
+@jit.incore
+def _overlapping_window(source: pl.Tensor, out: pl.Out[pl.Tensor]):
+    whole = pl.load(source, [0, 0], [32, 64])
+    window = pl.tile.slice(whole, [32, 32], [0, 0])
+    placed = pl.tile.assemble(whole, window, [0, 16])
+    return pl.store(placed, [0, 0], out)
+
+
+@jit
+def window_debug(source: pl.Tensor, out: pl.Out[pl.Tensor]):
+    return _overlapping_window(source, out)
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+def test_public_compiled_window_snapshot_replays_buffer_dump(tmp_path, monkeypatch, planner):
+    monkeypatch.setenv("PTOAS_ROOT", str(tmp_path / "missing_ptoas"))
+    source = torch.arange(2048, dtype=torch.float32).reshape(32, 64)
+    expected = source.clone()
+    expected[:, 16:48] = source[:, :32]
+    config = RunConfig(platform="a2a3sim", save_kernels_dir=str(tmp_path / "compiled"), dump_passes=True)
+    with passes.PassContext([], memory_planner=planner):
+        compiled = window_debug.compile(source, torch.empty_like(source), config=config)
+    dump = next((compiled.output_dir / "passes_dump").glob("*LowerTileToBuffer.msgpack"))
+    program = ir.deserialize(dump.read_bytes())
+    assert isinstance(program, ir.Program)
+    assert any(function.ir_stage == ir.FunctionIRStage.Buffer for function in program.functions.values())
+    compiled.validate_ir({"source": source, "out": torch.empty_like(source)}, {"out": expected})
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

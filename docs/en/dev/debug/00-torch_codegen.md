@@ -28,6 +28,8 @@ torch_codegen(node: _ir.Program | _ir.Function, check_shapes: bool = False) -> s
 - Simulate concurrent cross-core `tpush/tpop` behavior.
 - Provide actionable diagnostics for suspicious inputs (timeouts, invalid split dimensions, etc.).
 
+Addressed Vec and cube allocations share one byte pool per memory space and function invocation. Overlapping addresses therefore alias even across distinct allocation handles; addressless allocations remain independent. Window views retain their parent pitch and have independent valid metadata.
+
 ### Non-goals
 
 - No performance optimization.

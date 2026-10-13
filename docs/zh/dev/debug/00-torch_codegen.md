@@ -28,6 +28,8 @@ torch_codegen(node: _ir.Program | _ir.Function, check_shapes: bool = False) -> s
 - 支持 cross-core `tpush/tpop` 的并发语义模拟
 - 对可疑输入提供可定位的错误信息（超时、split 维度不合法等）
 
+已寻址的 Vec 与 cube 分配在每个函数调用、每个内存空间中共享一个字节存储池。不同分配句柄的地址重叠时也会共享数据；不带地址的分配保持独立。窗口视图保留父行距，且各自持有独立的 valid 元数据。
+
 ### 非目标
 
 - 不追求执行性能
