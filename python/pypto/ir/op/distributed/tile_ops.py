@@ -228,4 +228,68 @@ def get(
     return _ir_core.create_op_call("pld.tile.get", args, {}, actual_span)
 
 
-__all__ = ["get", "remote_load", "remote_store", "put"]
+def async_session(scratch: Expr, *, sync_id: int = 0, block_bytes: int = 0, span: Span | None = None) -> Call:
+    """Build a ``pld.tile.async_session(scratch)`` Call (post-conversion form).
+
+    ``scratch`` is the Vec(UB) buffer pto-isa ``BuildSdmaSession`` bounces
+    descriptor and completion words through; ``ConvertTensorToTileOps``
+    materializes it as a 256 B INT8 ``tile.create``.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    attrs: dict[str, int] = {}
+    if sync_id:
+        attrs["sync_id"] = int(sync_id)
+    if block_bytes:
+        attrs["block_bytes"] = int(block_bytes)
+    return _ir_core.create_op_call("pld.tile.async_session", [scratch], attrs, actual_span)
+
+
+def put_async(
+    dst: Expr,
+    peer: int | Expr,
+    src: Expr,
+    session: Expr,
+    *,
+    dst_offsets: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    src_offsets: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Build a ``pld.tile.put_async(dst, peer, src, session)`` Call (post-conversion form).
+
+    Carries no staging tile: PTOAS ``pto.comm.tput_async`` takes no ``buf(...)``
+    operand group because SDMA moves GM->GM directly.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
+    has_region = dst_offsets is not None or src_offsets is not None or shape is not None
+    if has_region and (dst_offsets is None or src_offsets is None or shape is None):
+        raise ValueError("pld.tile.put_async dst_offsets, src_offsets, and shape must be provided together")
+    args = [dst, peer_expr, src, session]
+    if has_region:
+        assert dst_offsets is not None
+        assert src_offsets is not None
+        assert shape is not None
+        args.extend(
+            [
+                _to_make_tuple(dst_offsets, actual_span),
+                _to_make_tuple(src_offsets, actual_span),
+                _to_make_tuple(shape, actual_span),
+            ]
+        )
+    return _ir_core.create_op_call("pld.tile.put_async", args, {}, actual_span)
+
+
+def wait_async_event(event: Expr, session: Expr, scratch: Expr, *, span: Span | None = None) -> Call:
+    """Build a ``pld.tile.wait_async_event(event, session, scratch)`` Call.
+
+    ``scratch`` is the session's Vec(UB) buffer, threaded in by
+    ``ConvertTensorToTileOps`` so its live range spans the whole async window —
+    pto-isa reads the completion word back through ``session.tmpBufAddr``, which
+    points into it.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("pld.tile.wait_async_event", [event, session, scratch], {}, actual_span)
+
+
+__all__ = ["async_session", "get", "put", "put_async", "remote_load", "remote_store", "wait_async_event"]
