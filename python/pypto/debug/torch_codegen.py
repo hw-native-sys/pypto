@@ -1476,11 +1476,14 @@ class TorchCodegen(_ir.IRVisitor):
             self.visit_expr(expr)
         return self._expr_result
 
-    def _has_body_content(self, stmt: _ir.Stmt) -> bool:
-        """Check if a statement body produces any lines."""
-        if isinstance(stmt, _ir.SeqStmts):
-            return len(stmt.stmts) > 0
-        return True
+    def _emit_body(self, stmt: _ir.Stmt) -> None:
+        """Emit an indented suite, including pass when its IR emits no statements."""
+        self._indent += 1
+        start = len(self._lines)
+        self.visit_stmt(stmt)
+        if len(self._lines) == start:
+            self._emit("pass")
+        self._indent -= 1
 
     def _emit_iter_arg_inits(self, iter_args: list[_ir.IterArg]) -> list[str]:
         """Emit init assignments for SSA iter_args and return their names."""
@@ -1837,11 +1840,7 @@ class TorchCodegen(_ir.IRVisitor):
         self._yield_targets = iter_arg_names
 
         self._emit(f"for {loop_var} in range({start}, {stop}, {step}):")
-        self._indent += 1
-        self.visit_stmt(op.body)
-        if not op.iter_args and not self._has_body_content(op.body):
-            self._emit("pass")
-        self._indent -= 1
+        self._emit_body(op.body)
 
         self._yield_targets = old_targets
         self._alias_return_vars(op.return_vars, iter_arg_names)
@@ -1854,9 +1853,7 @@ class TorchCodegen(_ir.IRVisitor):
 
         cond = self._visit_expr_str(op.condition)
         self._emit(f"while {cond}:")
-        self._indent += 1
-        self.visit_stmt(op.body)
-        self._indent -= 1
+        self._emit_body(op.body)
 
         self._yield_targets = old_targets
         self._alias_return_vars(op.return_vars, iter_arg_names)
@@ -1870,19 +1867,11 @@ class TorchCodegen(_ir.IRVisitor):
         self._yield_targets = return_var_names
 
         self._emit(f"if {cond}:")
-        self._indent += 1
-        self.visit_stmt(op.then_body)
-        if not self._has_body_content(op.then_body):
-            self._emit("pass")
-        self._indent -= 1
+        self._emit_body(op.then_body)
 
         if op.else_body is not None:
             self._emit("else:")
-            self._indent += 1
-            self.visit_stmt(op.else_body)
-            if not self._has_body_content(op.else_body):
-                self._emit("pass")
-            self._indent -= 1
+            self._emit_body(op.else_body)
 
         self._yield_targets = old_targets
 

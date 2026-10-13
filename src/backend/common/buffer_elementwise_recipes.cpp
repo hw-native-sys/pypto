@@ -19,6 +19,7 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/tile_view_semantics.h"
@@ -252,11 +253,16 @@ bool SupportsLogicalBufferElementwise(const BufferElementwiseRecipe& recipe, con
       if (!scalar) return false;
       const auto source = scalar->dtype_;
       if (!source.IsSignedInt() && source != DataType::INDEX && source != DataType::FP16 &&
-          source != DataType::BF16 && source != DataType::FP32)
+          source != DataType::BF16 && source != DataType::FP32) {
         return false;
+      }
     } else {
       const auto tile = ir::As<ir::TileType>(type);
       if (!tile || tile->dtype_ != dtype || tile->GetMemorySpace() != ir::MemorySpace::Vec) return false;
+      if (tile->shape_.size() != destination->shape_.size()) return false;
+      for (size_t i = 0; i < tile->shape_.size(); ++i) {
+        if (!ir::structural_equal(tile->shape_[i], destination->shape_[i])) return false;
+      }
       const auto source_view = ir::tile_view_semantics::GetEffectiveTileView(*tile);
       const auto& source_valid = source_view.valid_shape.empty() ? tile->shape_ : source_view.valid_shape;
       if (valid.size() != source_valid.size()) return false;

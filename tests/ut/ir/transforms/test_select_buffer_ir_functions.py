@@ -118,6 +118,30 @@ def test_default_recipes_select_emit_roundtrip_and_execute(planner, enabled, ope
 
 
 @pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("enabled", [None, True, False])
+@pytest.mark.parametrize("rhs_rows", [1, 16])
+def test_elementwise_selection_requires_matching_physical_shapes(planner, enabled, rhs_rows):
+    program = pl.parse_program(f"""
+@pl.program
+class PhysicalShapes:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, a: pl.Tensor[[16, 32], pl.FP32], b: pl.Tensor[[16, 32], pl.FP32],
+               out: pl.Out[pl.Tensor[[16, 32], pl.FP32]]) -> pl.Tensor[[16, 32], pl.FP32]:
+        x = pl.load(a, [0, 0], [16, 32], valid_shape=[1, 32])
+        y = pl.load(b, [0, 0], [{rhs_rows}, 32], valid_shape=[1, 32])
+        value = pl.add(x, y)
+        return pl.store(value, [0, 0], out)
+""")
+    lowered = _lower(program, planner, enabled)
+    selected = enabled is not False and rhs_rows == 16
+    assert _kernel(lowered).ir_stage == (
+        ir.FunctionIRStage.Buffer if selected else ir.FunctionIRStage.Functional
+    )
+    text = codegen.PTOCodegen().generate(lowered, emit_tile_addr=False, emit_source_loc=False)
+    assert "pto.tadd" in text and "pto.tstore" in text
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
 @pytest.mark.parametrize("dtype", ["FP16", "INT32", "BF16"])
 @pytest.mark.parametrize("operation", ["add", "mul"])
 def test_arithmetic_dtype_contract_is_narrower_than_transfer(planner, dtype, operation):
@@ -347,6 +371,16 @@ class SelectGM:
     assert _kernel(result).ir_stage == (
         ir.FunctionIRStage.Buffer if same_alias else ir.FunctionIRStage.Functional
     )
+    restored = ir.deserialize(ir.serialize(result))
+    assert isinstance(restored, ir.Program)
+    namespace = {}
+    exec(torch_codegen(restored), namespace)  # noqa: S102
+    a = torch.arange(512, dtype=torch.float32).reshape(16, 32)
+    b = -a - 1
+    for flag in (False, True):
+        out = torch.empty_like(a)
+        namespace["kernel"](a, b, out, flag)
+        torch.testing.assert_close(out, a if flag or same_alias else b)
 
 
 if __name__ == "__main__":

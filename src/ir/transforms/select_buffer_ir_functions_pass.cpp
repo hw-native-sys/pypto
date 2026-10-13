@@ -30,11 +30,9 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
-#include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
-#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -43,7 +41,6 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/attrs.h"
-#include "pypto/ir/transforms/utils/buffer_ir_selection.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
@@ -190,8 +187,9 @@ class BufferKernelSupport : public IRVisitor {
     if (IsMatrixType(assign->var_->GetType())) {
       ExprPtr source = assign->value_;
       if (auto call = As<Call>(source);
-          call && (IsOp(call, "tile.matmul_acc") || IsOp(call, "tile.transpose_view")))
+          call && (IsOp(call, "tile.matmul_acc") || IsOp(call, "tile.transpose_view"))) {
         source = call->args_[0];
+      }
       const auto alias = StableAlias(source);
       matrix_aliases_.emplace(assign->var_.get(), alias ? alias : assign->var_);
       return;

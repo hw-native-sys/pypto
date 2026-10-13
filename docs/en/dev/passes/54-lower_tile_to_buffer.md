@@ -20,6 +20,8 @@ propagates; there is no catch-and-recompile fallback.
 The default a2/a3 rollout accepts static rank-2 dense Vec and ordinary cube kernels
 with PYPTO, DSA_RP and PTOAS planners. Physical rows must be 32-byte aligned;
 valid extents may be static partial rectangles within the physical shape.
+Elementwise Tile operands and their destination must have matching physical shapes
+and valid extents; matching valid extents alone do not qualify.
 
 | Operations | Element types |
 | ---------- | ------------- |

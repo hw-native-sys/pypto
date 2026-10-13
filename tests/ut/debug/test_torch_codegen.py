@@ -1337,6 +1337,34 @@ def test_binary_ir_expressions():
     assert "(a + b)" in code
 
 
+@pytest.mark.parametrize("kind", ["if", "for", "while"])
+@pytest.mark.parametrize("body_kind", ["empty", "yield", "nested_yield"])
+def test_regions_with_no_emitted_statements_execute(kind, body_kind):
+    if body_kind == "empty":
+        body = ir.SeqStmts([], _span())
+    elif body_kind == "yield":
+        body = ir.YieldStmt([], _span())
+    else:
+        body = ir.SeqStmts([ir.SeqStmts([ir.YieldStmt([], _span())], _span())], _span())
+    flag = _scalar("flag", DataType.BOOL)
+    if kind == "if":
+        region = ir.IfStmt(flag, body, body, [], _span())
+    elif kind == "for":
+        region = ir.ForStmt(_scalar("i"), _int(0), _int(3), _int(1), [], body, [], _span())
+    else:
+        region = ir.WhileStmt(ir.ConstBool(False, _span()), [], body, [], _span())
+    function = _simple_function(
+        "kernel",
+        [flag],
+        ir.SeqStmts([region, ir.ReturnStmt([_int(7)], _span())], _span()),
+        [ir.ScalarType(DataType.INT64)],
+    )
+    namespace = {}
+    exec(torch_codegen(function), namespace)  # noqa: S102
+    assert namespace["kernel"](False) == 7
+    assert namespace["kernel"](True) == 7
+
+
 def test_break_continue():
     """BreakStmt and ContinueStmt should emit break/continue."""
     i = _scalar("i")
