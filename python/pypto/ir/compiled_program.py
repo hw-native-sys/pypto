@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Any, TypeAlias, TypeGuard
 import torch
 
 from pypto._artifact_contract import ArtifactExecutionMode, ExecutionCapabilities
+from pypto._target import ExecutionMode, _parse_platform, _platform_string, _resolve_target
 from pypto.backend import BackendType
 from pypto.pypto_core import DataType
 from pypto.pypto_core import backend as _backend_core
@@ -758,6 +759,23 @@ def _default_platform(backend_type: BackendType) -> str:
     return _backend_core.get_backend_instance(backend_type).get_handler().get_default_sim_platform()
 
 
+def _reload_platform(
+    persisted_backend: BackendType,
+    persisted_platform: str | None,
+    *,
+    backend_type: BackendType | None,
+    execution_mode: ExecutionMode | None,
+    platform: str | None,
+) -> str | None:
+    """Apply target overrides, retaining the persisted value of an omitted axis."""
+    if backend_type is None and execution_mode is None:
+        return platform or persisted_platform
+    if execution_mode is None and platform is None:
+        execution_mode = _parse_platform(persisted_platform or _default_platform(persisted_backend))[1]
+    target_backend = persisted_backend if backend_type is None else backend_type
+    return _platform_string(*_resolve_target(target_backend, execution_mode, platform))
+
+
 def _write_debug_runner(
     output_dir: Path,
     platform: str,
@@ -908,6 +926,7 @@ class CompiledProgram(_RuntimeFacade):
         *,
         backend_type: BackendType = BackendType.Ascend910B,
         platform: str | None = None,
+        execution_mode: ExecutionMode | None = None,
         _param_infos: list[_ParamInfo] | None = None,
         _output_indices: list[int] | None = None,
         _return_types: list[Any] | None = None,
@@ -924,7 +943,11 @@ class CompiledProgram(_RuntimeFacade):
         self._program = program
         self._output_dir = Path(output_dir).resolve()
         self._backend_type = backend_type
-        self._platform = platform or _default_platform(backend_type)
+        self._platform = (
+            platform or _default_platform(backend_type)
+            if execution_mode is None
+            else _platform_string(*_resolve_target(backend_type, execution_mode, platform))
+        )
         # Lazy metadata -- extracted on first call, or supplied by from_dir()
         self._param_infos = _param_infos
         self._output_indices = _output_indices
@@ -1088,6 +1111,7 @@ class CompiledProgram(_RuntimeFacade):
         *,
         platform: str | None = None,
         backend_type: BackendType | None = None,
+        execution_mode: ExecutionMode | None = None,
     ) -> "CompiledProgram":
         """Reconstruct a single-chip program from an existing ``build_output/`` dir.
 
@@ -1111,8 +1135,11 @@ class CompiledProgram(_RuntimeFacade):
             platform: Override the persisted platform (e.g. swap ``a2a3sim`` ->
                 ``a2a3`` to replay on hardware). ``None`` keeps the persisted
                 value.
+            execution_mode: Override the execution mode, retaining the persisted
+                backend unless backend_type is also supplied.
             backend_type: Override the persisted codegen backend. ``None`` keeps
-                the persisted value.
+                the persisted value. An override retains the saved execution mode
+                unless execution_mode or a legacy platform is also supplied.
 
         Returns:
             A :class:`CompiledProgram` whose ``__call__`` and runtime-artefact
@@ -1142,6 +1169,13 @@ class CompiledProgram(_RuntimeFacade):
                 f"— reload one of those). Recompile via ir.compile() to refresh."
             )
         meta = _load_meta(meta_path, filename=_COMPILED_META_FILENAME, schema=_COMPILED_META_SCHEMA)
+        platform = _reload_platform(
+            meta["backend_type"],
+            meta["platform"],
+            backend_type=backend_type,
+            execution_mode=execution_mode,
+            platform=platform,
+        )
         param_infos = meta["param_infos"]
         output_indices = [i for i, p in enumerate(param_infos) if p.direction == ParamDirection.Out]
         # ``return_types`` contents are never inspected at runtime — only the
@@ -1183,6 +1217,11 @@ class CompiledProgram(_RuntimeFacade):
     def backend_type(self) -> BackendType:
         """Backend type used during compilation."""
         return self._backend_type
+
+    @property
+    def execution_mode(self) -> ExecutionMode:
+        """Simulator or onboard execution for this artifact."""
+        return _parse_platform(self._platform)[1]
 
     @property
     def platform(self) -> str:
@@ -1521,6 +1560,16 @@ class _SubChipCallable(_RuntimeFacade):
     @property
     def output_dir(self) -> Path:
         return self._output_dir
+
+    @property
+    def backend_type(self) -> BackendType:
+        """Backend selected by the parent artifact's target."""
+        return _parse_platform(self._platform)[0]
+
+    @property
+    def execution_mode(self) -> ExecutionMode:
+        """Simulator or onboard execution for this artifact."""
+        return _parse_platform(self._platform)[1]
 
     @property
     def platform(self) -> str:

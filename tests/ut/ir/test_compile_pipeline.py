@@ -19,6 +19,7 @@ from pypto import DataType, ir
 from pypto.compile_profiling import CompileProfiler
 from pypto.ir.compile import _run_pass_pipeline
 from pypto.pypto_core import passes
+from pypto.runtime import ExecutionMode
 
 
 def _scalar_program() -> ir.Program:
@@ -208,6 +209,23 @@ def test_default_output_dir_name_leads_with_timestamp(tmp_path, monkeypatch):
 
     assert output_dir.parent == tmp_path
     assert re.fullmatch(rf"{re.escape(program.name)}_\d{{8}}_\d{{6}}_\w+", output_dir.name), output_dir.name
+
+
+@pytest.mark.parametrize("mode", ["sim", 1, True])
+def test_compile_rejects_invalid_mode_before_creating_output(tmp_path, mode):
+    output_dir = tmp_path / "invalid_target"
+    with pytest.raises(TypeError, match="execution_mode"):
+        ir.compile(_scalar_program(), execution_mode=mode, output_dir=str(output_dir))
+    assert not output_dir.exists()
+
+
+def test_compile_rejects_conflicting_mode_before_creating_output(tmp_path):
+    output_dir = tmp_path / "conflicting_target"
+    with pytest.raises(ValueError, match="conflicts"):
+        ir.compile(
+            _scalar_program(), platform="a5", execution_mode=ExecutionMode.SIM, output_dir=str(output_dir)
+        )
+    assert not output_dir.exists()
 
 
 if __name__ == "__main__":

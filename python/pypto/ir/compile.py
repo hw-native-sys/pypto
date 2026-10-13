@@ -16,6 +16,7 @@ from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from pypto._target import ExecutionMode, _platform_string, _resolve_target
 from pypto.backend import BackendType
 from pypto.backend.pto_backend import PartialCodegenError, generate, multi_chip_orch_names
 from pypto.compile_profiling import CompileProfiler, get_active_profiler
@@ -106,13 +107,7 @@ def _add_headers_to_file(cpp_file: str) -> None:
 
 def _backend_type_for_platform(platform: str | None, fallback: BackendType) -> BackendType:
     """Return the codegen backend selected by a runtime platform string."""
-    if platform is None:
-        return fallback
-    if platform in ("a2a3", "a2a3sim"):
-        return BackendType.Ascend910B
-    if platform in ("a5", "a5sim"):
-        return BackendType.Ascend950
-    raise ValueError(f"Invalid platform {platform!r}. Expected 'a2a3sim', 'a2a3', 'a5sim', or 'a5'.")
+    return _resolve_target(fallback, platform=platform)[0]
 
 
 class _PassPipelineResult(NamedTuple):
@@ -296,6 +291,7 @@ def compile(  # noqa: PLR0913
     enable_pypto_l0c_double_buffer: bool | None = None,
     profiling: bool = False,
     platform: str | None = None,
+    execution_mode: ExecutionMode | None = None,
     distributed_config: Any = None,
     analyze_auto_scopes_for_deps: bool = False,
     emit_source_loc: bool | None = None,
@@ -374,6 +370,9 @@ def compile(  # noqa: PLR0913
             ``"a2a3"``, ``"a5sim"``, or ``"a5"``.  Defaults to the
             simulator for the given *backend_type*.  When set, it also
             selects the matching codegen backend.
+        execution_mode: Simulator or onboard execution. Defaults to SIM when
+            platform is absent, otherwise inherits the legacy platform. An
+            explicit mode must agree with an explicit platform.
         distributed_config: Optional :class:`DistributedConfig` for L3+
             distributed programs.  When ``None`` (default), auto-detected
             from the program: if L3+ functions are found, a default
@@ -407,6 +406,8 @@ def compile(  # noqa: PLR0913
         >>> c = compiled(a, b)          # return style
         >>> compiled(a, b, c, config=RunConfig(device_id=1))  # specify device
     """
+    backend_type, mode = _resolve_target(backend_type, execution_mode, platform)
+    platform = _platform_string(backend_type, mode)
     _select_backend(backend_type=backend_type, platform=platform)
 
     if output_dir is None:

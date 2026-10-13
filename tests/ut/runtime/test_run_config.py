@@ -13,7 +13,7 @@ import dataclasses
 import sys
 import types
 import warnings
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -844,15 +844,12 @@ class TestOptionObjects:
     # RunConfig field -> the option-object field it becomes. Only the renames
     # are listed; everything else keeps its name.
     #
-    # ``arch`` and ``execution_mode`` are the two axes ``RunConfig`` chooses;
-    # the views carry the wire spelling that serializes them, so both map onto
-    # ``platform``. The split stops at the class that *chooses* a target — the
-    # views, the artifact and the worker only *carry* one.
+    # CompileOptions names the architecture backend_type; execution_mode keeps
+    # its name. Runtime mappings still serialize both axes as platform.
     _COMPILE_RENAMES = {
         "save_kernels_dir": "output_dir",
         "compile_profiling": "profiling",
-        "arch": "platform",
-        "execution_mode": "platform",
+        "arch": "backend_type",
     }
     _HARNESS_ONLY = {"rtol", "atol", "golden_data_dir", "save_kernels", "codegen_only"}
     # Consumed by JIT before choosing a compiled object, not by compiler or launcher.
@@ -1157,6 +1154,39 @@ class TestExecuteOnDeviceDfxValidation:
         call_config = worker.init.call_args.kwargs["prewarm_config"]
         # Simpler maps bool True to its full chip-swimlane collection level.
         assert call_config.enable_chip_swimlane == 4
+
+
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize("mode", [ExecutionMode.ONBOARD, ExecutionMode.SIM])
+def test_backend_type_and_execution_mode_match_legacy_target(backend_type, mode):
+    """New callers must produce exactly the legacy compile/cache identity."""
+    config = RunConfig(backend_type=backend_type, execution_mode=mode)
+    legacy = RunConfig(platform=config.platform)
+    assert config.backend_type == backend_type
+    assert config.execution_mode is mode
+    assert config.compile_kwargs() == legacy.compile_kwargs()
+    assert config.run_options() == legacy.run_options()
+    options = CompileOptions(backend_type=backend_type, execution_mode=mode)
+    assert options == CompileOptions(platform=config.platform)
+    assert options.as_compile_kwargs() == legacy.compile_kwargs()
+
+
+def test_replace_backend_type_preserves_execution_mode():
+    config = RunConfig(backend_type=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD)
+    changed = dataclasses.replace(config, backend_type=BackendType.Ascend910B)
+    assert changed.platform == "a2a3"
+    assert config.platform == "a5"
+    options = config.compile_options()
+    assert dataclasses.replace(options, execution_mode=ExecutionMode.SIM).platform == "a5sim"
+    assert dataclasses.replace(options, platform="a2a3sim").backend_type == BackendType.Ascend910B
+    assert cast(Any, CompileOptions)("a5", options.strategy).execution_mode is ExecutionMode.ONBOARD
+
+
+def test_invalid_new_backend_type_is_rejected():
+    with pytest.raises(TypeError, match="BackendType"):
+        RunConfig(backend_type="a5")
+    with pytest.raises(TypeError, match="ExecutionMode"):
+        CompileOptions(execution_mode=cast(Any, "sim"))
 
 
 if __name__ == "__main__":

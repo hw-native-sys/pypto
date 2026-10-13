@@ -48,6 +48,8 @@ import weakref
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
+from pypto._target import ExecutionMode
+from pypto.backend import BackendType
 from pypto.pypto_core.passes import RuntimeKind, runtime_kind_to_name
 
 from .runner import RunConfig
@@ -456,6 +458,16 @@ class ChipWorker(Worker):
     @property
     def level(self) -> int:
         return self._level
+
+    @property
+    def backend_type(self) -> BackendType:
+        """Target architecture selected by this worker's configuration."""
+        return self._config.backend_type
+
+    @property
+    def execution_mode(self) -> ExecutionMode:
+        """Simulator or onboard execution."""
+        return self._config.execution_mode
 
     @property
     def platform(self) -> str:

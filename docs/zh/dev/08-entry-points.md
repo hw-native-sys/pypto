@@ -141,33 +141,48 @@ compiled(*tensors, config=config)
 
 | 由谁读取 | 类型 | 字段 |
 | -------- | ---- | ---- |
-| `ir.compile` | `CompileOptions` | `platform`、`strategy`、`dump_passes`、`dump_ptoas_passes`、`profiling`（`compile_profiling`）、`diagnostic_phase`、`disabled_diagnostics`、`analyze_auto_scopes_for_deps`、`output_dir`（`save_kernels_dir`）、`memory_planner`、`distributed_config` |
+| `ir.compile` | `CompileOptions` | `backend_type`、`execution_mode`（兼容旧 `platform`）、`strategy`、`dump_passes`、`dump_ptoas_passes`、`profiling`（`compile_profiling`）、`diagnostic_phase`、`disabled_diagnostics`、`analyze_auto_scopes_for_deps`、`output_dir`（`save_kernels_dir`）、`memory_planner`、`distributed_config` |
 | 派发 | `RunOptions` | `platform`、`device_id`、`aicpu_thread_num`、`ring_*` 覆写项（[Ring 尺寸](05-runtime-ring-sizing.md)），以及内嵌的 `DfxOptions` |
 | 一次派发采集哪些诊断 | `DfxOptions` | `enable_chip_swimlane`、`enable_dump_args`、`enable_pmu`、`enable_dep_gen`、`enable_scope_stats`（[DFX](03-runtime-dfx.md)） |
 | 仅系统测试 harness | —— | `rtol`、`atol`、`golden_data_dir`、`save_kernels`、`codegen_only` |
-| 无人读取 —— 派生 | —— | `backend_type`，是 `platform` 上的只读属性，不是字段 |
+| 无人读取 —— 派生 | —— | `backend_type`，是 RunConfig 的 `arch` 存储字段的构造及读取别名 |
 
-**`platform` 是两个决策，所以 `RunConfig` 存两个字段。** 这个字符串打包了架构
-（`a2a3` / `a5`）和执行模式（`sim` 后缀），而两者各由不同的消费者读取：编译只取架构 ——
-codegen 根本看不到这个字符串 —— 装配层按后缀选 `.so` 还是 `.o`，worker 则比对整个 token。
-因此 `RunConfig` 携带 `arch: BackendType` 与 `execution_mode: ExecutionMode`，
-`platform` 降为把二者序列化出来的派生属性：
+**使用 `backend_type` 和 `execution_mode` 选择目标。** 架构决定编译 lowering
+与 codegen；执行方式决定仿真或真机二进制的编译及派发。`RunConfig`、
+`CompileOptions` 和 `ir.compile` 均支持这两个参数：
 
 ```python
-RunConfig(arch=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD).platform  # "a5"
-RunConfig(platform="a5").arch                                                         # Ascend950
+from pypto.backend import BackendType
+from pypto.runtime import CompileOptions, ExecutionMode, RunConfig
+
+config = RunConfig(
+    backend_type=BackendType.Ascend950,
+    execution_mode=ExecutionMode.ONBOARD,
+)
+compiled = ir.compile(program, **config.compile_kwargs())
+# Equivalent direct compilation:
+compiled = ir.compile(
+    program, backend_type=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD,
+)
 ```
 
-`platform=` 仍然可以构造（238 处调用点在用），并会同时设置两个轴。其余一切不动：
-`cfg.platform` 依旧是普通 `str`，所以产物 sidecar、`--platform`、simpler 的
-`Worker(platform=...)` 都无感。拆分只落在**选择**目标的地方；产物、worker 与装配层
-只是**携带**它，继续用字符串。
+默认目标仍为 Ascend910B + SIM。编译产物提供两个目标属性；
+`from_dir(..., execution_mode=...)` 可以覆盖持久化的执行方式，
+`from_dir(..., backend_type=...)` 则保留持久化的执行方式，同时更新后端和派生 platform。
+两个维度均可独立覆盖，且不会改写元数据。已有 Worker 绑定和缓存限制仍然适用；
+重新加载不会重新运行代码生成。
 
-随之消失两样东西：`__post_init__` 不再拿四个字面量校验字符串、也不再用它蕴含的 backend
-把字符串重拼一遍 —— 一个与自身架构矛盾的 platform 已经不是能被构造出来的值。而 `arch`
-的类型就是 `BackendType`、不是第三个枚举，所以 `backend_type` 只是这个字段在编译器词汇下的
-名字，而非与之竞争的输入：`CompileOptions` 不带它，`ir.compile` 保留该参数仅供完全不传
-platform 的调用方使用。
+迁移期间保留 `platform=`、`.platform` 和 RunConfig 的 `arch` 字段。旧 platform
+仍决定两个轴，并优先于 backend_type；RunConfig 对两者冲突保留原有警告。
+`ir.compile` 拒绝同时显式指定但不一致的 execution_mode 和 platform。
+RunConfig、CompileOptions 的旧 platform 优先于两个轴，以兼容
+`dataclasses.replace(config, platform=...)`。不传 platform 时，backend_type
+现在会真正选择架构，RunConfig 不再丢弃它。
+
+RunConfig 暂时用 arch 存储架构，backend_type 是构造及读取别名；
+CompileOptions 保存 backend_type、execution_mode。配置向编译器的映射、产物文件、
+CLI 兼容路径、缓存 key 与 Simpler SDK 调用继续使用内部规范平台编码，
+因此新旧写法对应同一缓存身份。本次不改变运行配置默认值或进程级后端选择限制。
 
 `RunConfig.compile_options()` / `run_options()` / `dfx_options()` 是这个聚合体上的视图，
 而 `compile_kwargs()` 就是 `compile_options().as_compile_kwargs()`。`CompileOptions`

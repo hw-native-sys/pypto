@@ -17,6 +17,7 @@ import pathlib
 import sys
 import types
 import warnings
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -40,7 +41,7 @@ from pypto.ir.distributed_compiled_program import (
     DistributedCompiledProgram,
 )
 from pypto.ir.param_info import _ParamInfo, bind_complete_args
-from pypto.runtime import DeviceTensor, RunConfig, StackedDeviceTensor
+from pypto.runtime import DeviceTensor, ExecutionMode, RunConfig, StackedDeviceTensor
 
 
 @contextlib.contextmanager
@@ -477,10 +478,19 @@ class TestCompileReturnsCompiledProgram:
         # Metadata works on the original program
         assert result.param_names == ["a", "b", "c"]
 
-    def test_compile_platform_selects_codegen_backend(self, tmp_path):
+    @pytest.mark.parametrize("arch_name", ["a2a3", "a5"])
+    @pytest.mark.parametrize("mode_name", ["SIM", "ONBOARD"])
+    @pytest.mark.parametrize("legacy", [True, False])
+    def test_compile_platform_selects_codegen_backend(self, tmp_path, arch_name, mode_name, legacy):
         """platform='a5sim' should compile with the Ascend950 PTO backend."""
         import pypto.language as pl  # noqa: PLC0415
 
+        target = BackendType.Ascend950 if arch_name == "a5" else BackendType.Ascend910B
+        mode = ExecutionMode[mode_name]
+        platform = arch_name + ("sim" if mode is ExecutionMode.SIM else "")
+        options: dict[str, Any] = (
+            {"platform": platform} if legacy else {"backend_type": target, "execution_mode": mode}
+        )
         backend.reset_for_testing()
         try:
 
@@ -504,15 +514,16 @@ class TestCompileReturnsCompiledProgram:
                 output_dir=output_dir,
                 dump_passes=False,
                 skip_ptoas=True,
-                platform="a5sim",
+                **options,
             )
 
             pto_files = list(result.output_dir.rglob("*.pto"))
             assert isinstance(result, CompiledProgram)
-            assert result.backend_type == BackendType.Ascend950
-            assert result.platform == "a5sim"
+            assert result.backend_type == target
+            assert result.platform == platform
+            assert result.execution_mode is mode
             assert pto_files
-            assert 'pto.target_arch = "a5"' in pto_files[0].read_text()
+            assert f'pto.target_arch = "{arch_name}"' in pto_files[0].read_text()
         finally:
             backend.reset_for_testing()
 
@@ -1732,6 +1743,56 @@ def test_parameter_metadata_rejects_non_string_layout(layout):
     payload["layout"] = layout
     with pytest.raises(ValueError, match="layout"):
         _param_info_from_dict(payload)
+
+
+@pytest.mark.filterwarnings("error::DeprecationWarning")
+@pytest.mark.parametrize(
+    ("persisted_backend", "target_backend", "target_name"),
+    [
+        (BackendType.Ascend910B, BackendType.Ascend950, "a5"),
+        (BackendType.Ascend950, BackendType.Ascend910B, "a2a3"),
+    ],
+)
+@pytest.mark.parametrize("persisted_mode", [None, ExecutionMode.SIM, ExecutionMode.ONBOARD])
+@pytest.mark.parametrize("override_mode", [None, ExecutionMode.SIM, ExecutionMode.ONBOARD])
+def test_reload_backend_override_keeps_target_consistent(
+    tmp_path, persisted_backend, target_backend, target_name, persisted_mode, override_mode
+):
+    CompiledProgram(
+        _make_program_with_orchestration(),
+        str(tmp_path),
+        backend_type=persisted_backend,
+        execution_mode=persisted_mode or ExecutionMode.SIM,
+    )
+    meta_path = tmp_path / _COMPILED_META_FILENAME
+    if persisted_mode is None:
+        payload = json.loads(meta_path.read_text())
+        del payload["platform"]
+        meta_path.write_text(json.dumps(payload))
+    metadata = meta_path.read_bytes()
+
+    restored = CompiledProgram.from_dir(tmp_path, backend_type=target_backend, execution_mode=override_mode)
+    expected_mode = override_mode or persisted_mode or ExecutionMode.SIM
+    assert restored.backend_type == target_backend
+    assert restored.execution_mode is expected_mode
+    assert restored.platform == target_name + ("sim" if expected_mode is ExecutionMode.SIM else "")
+    assert meta_path.read_bytes() == metadata
+
+
+def test_reload_execution_mode_keeps_backend_and_metadata(tmp_path):
+    cp = CompiledProgram(
+        _make_program_with_orchestration(),
+        str(tmp_path),
+        backend_type=BackendType.Ascend950,
+        execution_mode=ExecutionMode.SIM,
+    )
+    metadata = (tmp_path / _COMPILED_META_FILENAME).read_bytes()
+    reloaded = CompiledProgram.from_dir(tmp_path, execution_mode=ExecutionMode.ONBOARD)
+    assert cp.platform == "a5sim"
+    assert reloaded.backend_type == BackendType.Ascend950
+    assert reloaded.execution_mode is ExecutionMode.ONBOARD
+    assert reloaded.platform == "a5"
+    assert (tmp_path / _COMPILED_META_FILENAME).read_bytes() == metadata
 
 
 if __name__ == "__main__":

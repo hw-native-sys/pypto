@@ -30,7 +30,7 @@ from pypto.ir.distributed_compiled_program import (
     DistributedConfig,
 )
 from pypto.pypto_core.ir import ParamDirection
-from pypto.runtime import DeviceTensor, StackedDeviceTensor
+from pypto.runtime import DeviceTensor, ExecutionMode, StackedDeviceTensor
 
 
 @pl.program
@@ -423,6 +423,49 @@ def test_distributed_reload_rejects_legacy_or_kernel_metadata(compiled, tmp_path
     path.write_text(json.dumps(meta))
     with pytest.raises(ValueError, match="recompile"):
         DistributedCompiledProgram.from_dir(tmp_path)
+
+
+@pytest.mark.filterwarnings("error::DeprecationWarning")
+@pytest.mark.parametrize(
+    ("persisted_backend", "target_backend", "target_name"),
+    [
+        (BackendType.Ascend910B, BackendType.Ascend950, "a5"),
+        (BackendType.Ascend950, BackendType.Ascend910B, "a2a3"),
+    ],
+)
+@pytest.mark.parametrize("persisted_mode", [None, ExecutionMode.SIM, ExecutionMode.ONBOARD])
+@pytest.mark.parametrize("override_mode", [None, ExecutionMode.SIM, ExecutionMode.ONBOARD])
+def test_reload_backend_override_keeps_target_consistent(
+    tmp_path, persisted_backend, target_backend, target_name, persisted_mode, override_mode
+):
+    DistributedCompiledProgram(
+        _L3AddProgram,
+        str(tmp_path),
+        backend_type=persisted_backend,
+        execution_mode=persisted_mode or ExecutionMode.SIM,
+    )
+    meta_path = tmp_path / _DISTRIBUTED_META_FILENAME
+    if persisted_mode is None:
+        payload = json.loads(meta_path.read_text())
+        del payload["platform"]
+        meta_path.write_text(json.dumps(payload))
+    metadata = meta_path.read_bytes()
+
+    restored = DistributedCompiledProgram.from_dir(
+        tmp_path, backend_type=target_backend, execution_mode=override_mode
+    )
+    expected_mode = override_mode or persisted_mode or ExecutionMode.SIM
+    assert restored.backend_type == target_backend
+    assert restored.execution_mode is expected_mode
+    assert restored.platform == target_name + ("sim" if expected_mode is ExecutionMode.SIM else "")
+    assert meta_path.read_bytes() == metadata
+
+
+def test_from_dir_overrides_execution_mode(compiled, tmp_path):
+    restored = DistributedCompiledProgram.from_dir(tmp_path, execution_mode=ExecutionMode.ONBOARD)
+    assert restored.backend_type == compiled.backend_type
+    assert restored.execution_mode is ExecutionMode.ONBOARD
+    assert restored.platform == "a2a3"
 
 
 if __name__ == "__main__":
