@@ -835,22 +835,20 @@ subblock 本地化。
 
 ## 示例 —— vector→cube 边界保持全尺寸（UpDown）
 
-V→C `tile.move` 变为 `tile.aic_gather`；对折叠后 tile 的 cube 放置 move 保持全尺寸
-`[128, 128]` `Mat`——cube 侧绝不会看到折半 tile：
+V→C `tile.move` 变为 `tile.aic_gather`。当目标为 `Mat` 时，gather 直接提供全尺寸
+`[128, 128]` tile，不再保留 `Mat → Mat` 放置 move；cube 侧绝不会看到折半 tile：
 
 ```python
 # `v` 是 affinity gate 产出的每 lane 折半 tile，例如 [64, 128]。
-gathered_mat: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.aic_gather(v, split=1)
-gathered:     pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.move(gathered_mat,
-                                                                      target_memory=pl.Mem.Mat)
+gathered: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.aic_gather(v, split=1)
 ```
 
 **操作数必须是每 lane 的折半 tile。** `tile.aic_gather` 声明为 HALF → FULL，因此
-gather 把 `[64, 128]` 加倍为 `[128, 128]`，恰好等于 cube 放置 move 所保留的全尺寸
+gather 把 `[64, 128]` 加倍为 `[128, 128]`，恰好等于原始边界 move 请求的全尺寸
 结果类型。这种一致性是**前置条件**而非保证：向量值可能以未折半的形式到达边界——
 例如直接使用的 `Vec` 参数，或 split 维为 1 而被 affinity gate 特意保留的 tile。对
-这类操作数做加倍会得到 `[256, 128]` 的 gather，而其后的 move 仍是 `[128, 128]`，
-这与 `tile.move` 的保形契约矛盾，且产生的 IR 无法通过 print→parse 往返。既然没有
+这类操作数做加倍会得到 `[256, 128]` 的 gather，而目标仍是 `[128, 128]`，
+这与原始 move 的保形契约矛盾，且产生的 IR 无法通过 print→parse 往返。既然没有
 折半就不存在正确的 gather，本 pass 会以可操作的 `ValueError` **拒绝**它：
 
 ```text
@@ -874,9 +872,14 @@ gather 的 `split` 属性，会被拒绝。
 
 gather 结果是 `Mat` 而非 `Vec`：边界算子声明的类型指的是**消费侧** lane 的空间，
 而 AIC 会把 V→C 传输 pop 进 L1。（`Vec` 指的是*生产侧* lane，与镜像算子
-`tile.aiv_shard` 相矛盾——后者为其 cube 产出的操作数声明向量侧的 `Vec`。）随后的
-cube 放置 move 才把 tile 放到最终的操作数空间——matmul 操作数为 `Mat → Left`；
-此处的 `Mat → Mat` 是空操作，仅因本 pass 保留了作者原有的 move 而存在。
+`tile.aiv_shard` 相矛盾——后者为其 cube 产出的操作数声明向量侧的 `Vec`。）仅当
+目标为其他 cube 内存空间时才保留放置 move，例如 matmul 操作数的 `Mat → Left`、
+`Mat → Right`，或 `Mat → Bias`。
+
+**直接复用 Mat 必须保留请求的 tile 视图（tile view）。** 传输使用 Mat 的隐式布局，
+并保留原始目标的 `valid_shape`。若显式布局、步幅、填充值、偏移或紧凑模式与该
+可实现视图不一致，则以 `ValueError` 拒绝，而不是静默丢弃这些设置或生成不受支持
+的 `Mat → Mat` 转换。
 
 ## 实现
 

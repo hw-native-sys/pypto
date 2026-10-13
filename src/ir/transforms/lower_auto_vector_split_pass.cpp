@@ -34,7 +34,8 @@
 //   3. C->V boundary: replace with tile.aiv_shard(full_cube_tile, split=int(M))
 //      -> HALF; seed the shard result into tile_vars like tpop_from_aic.
 //   4. V->C boundary: insert tile.aic_gather(half_vector_tile, split=int(M))
-//      -> FULL, then keep the original cube placement move on the full tile.
+//      -> FULL Mat; reuse it directly for Mat destinations with a realizable
+//      view, and retain placement moves only for other cube memory spaces.
 //   5. Halve ONLY the vector sub-region (AFFINITY GATE): a tile-producing op is
 //      halved iff it is VECTOR-affine. CUBE-affine ops (matmul operands, the
 //      cube result before the C->V boundary) stay FULL. We assert no CUBE op was

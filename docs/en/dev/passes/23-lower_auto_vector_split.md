@@ -991,25 +991,23 @@ The cube operand `qk` stays `[128, 128]`; the vector sub-region is halved to
 
 ## Example — vector→cube boundary stays full (UpDown)
 
-A V→C `tile.move` becomes `tile.aic_gather`; the cube placement move on the
-gathered tile keeps the FULL `[128, 128]` `Mat` shape — the cube side never
-sees a halved tile:
+A V→C `tile.move` becomes `tile.aic_gather`. For a `Mat` destination, the
+gather directly supplies the FULL `[128, 128]` tile; no `Mat → Mat` placement
+move remains. The cube side never sees a halved tile:
 
 ```python
 # `v` is the per-lane HALF the affinity gate produced, e.g. [64, 128].
-gathered_mat: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.aic_gather(v, split=1)
-gathered:     pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.move(gathered_mat,
-                                                                      target_memory=pl.Mem.Mat)
+gathered: pl.Tile[[128, 128], pl.FP32, pl.Mem.Mat] = pl.tile.aic_gather(v, split=1)
 ```
 
 **The operand must be a per-lane half.** `tile.aic_gather` is declared
 HALF → FULL, so the gather doubles `[64, 128] → [128, 128]`, which is exactly the
-FULL result type the cube placement move keeps. That agreement is a
+FULL result type requested by the original boundary move. That agreement is a
 *precondition*, not a guarantee: a VECTOR value can reach the boundary un-halved
 — a `Vec` parameter used directly, or a tile whose split dim is a singleton the
 affinity gate deliberately preserves. Doubling such an operand would produce a
-`[256, 128]` gather feeding a move still typed `[128, 128]`, contradicting
-`tile.move`'s shape-preserving contract and yielding IR that does not survive
+`[256, 128]` gather for a destination still typed `[128, 128]`, contradicting
+the original move's shape-preserving contract and yielding IR that does not survive
 print→parse. There is no correct gather for a value with no half, so the pass
 **rejects** it with an actionable `ValueError`:
 
@@ -1036,10 +1034,15 @@ cannot be expressed as a `split` attr on a 2D gather and is rejected.
 The gather result is `Mat`, not `Vec`: the declared type of a boundary op names
 the **consuming** lane's space, and AIC pops a V→C transfer into L1. (`Vec` would
 name the *producing* lane, contradicting the mirror op `tile.aiv_shard`, which
-declares the vector-side `Vec` for its cube-produced operand.) The cube placement
-move that follows is what puts the tile in its final operand space — `Mat → Left`
-for a matmul operand; the `Mat → Mat` shown here is a no-op that survives only
-because the pass preserves the author's original move.
+declares the vector-side `Vec` for its cube-produced operand.) A placement move
+is retained only for another cube memory space, such as `Mat → Left` or
+`Mat → Right` for a matmul operand, or `Mat → Bias`.
+
+**Direct Mat reuse must preserve the requested tile view.** The transfer uses
+Mat's implicit layout and preserves the original destination's `valid_shape`.
+An explicit layout, stride, padding, offset, or compact-mode setting that
+differs from this realizable view is rejected with a `ValueError`, rather than
+silently discarded or lowered to an unsupported `Mat → Mat` conversion.
 
 ## Implementation
 
