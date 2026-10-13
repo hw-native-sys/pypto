@@ -147,5 +147,123 @@ def test_two_retained_mat_operands_require_two_fifo_slots(tmp_path, ascend_backe
         assert f"slot_num = {slot_num}" in pto or f"slot_num={slot_num}" in pto
 
 
+@pytest.mark.parametrize("third_pop, slot_num", [(False, 2), (True, 2), (True, 3)])
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+def test_reverse_consumption_preserves_fifo_prefix(tmp_path, ascend_backend, third_pop, slot_num):
+    """Finishing the second tile first must not release the first tile's slot."""
+
+    @pl.jit
+    def reverse_two(
+        a: pl.Tensor[[32, 32], pl.FP16],
+        b: pl.Tensor[[32, 32], pl.FP16],
+        out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+    ):
+        for _ in pl.spmd(
+            1,
+            optimizations=[pl.cross_core_slot(slot_num=slot_num), pl.split(pl.SplitMode.UP_DOWN)],
+        ):
+            av = pl.add(pl.load(a, [0, 0], [32, 32]), 1.0)
+            bv = pl.add(pl.load(b, [0, 0], [32, 32]), 1.0)
+            am = pl.move(av, target_memory=pl.Mem.Mat)
+            bm = pl.move(bv, target_memory=pl.Mem.Mat)
+            br = pl.move(bm, target_memory=pl.Mem.Right)
+            al = pl.move(am, target_memory=pl.Mem.Left)
+            out = pl.store(pl.matmul(al, br), [0, 0], out)
+        return out
+
+    @pl.jit
+    def reverse_three(
+        a: pl.Tensor[[32, 32], pl.FP16],
+        b: pl.Tensor[[32, 32], pl.FP16],
+        c: pl.Tensor[[32, 32], pl.FP16],
+        out_a: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+        out_c: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+    ):
+        for _ in pl.spmd(
+            1,
+            optimizations=[pl.cross_core_slot(slot_num=slot_num), pl.split(pl.SplitMode.UP_DOWN)],
+        ):
+            av = pl.add(pl.load(a, [0, 0], [32, 32]), 1.0)
+            bv = pl.add(pl.load(b, [0, 0], [32, 32]), 1.0)
+            cv = pl.add(pl.load(c, [0, 0], [32, 32]), 1.0)
+            am = pl.move(av, target_memory=pl.Mem.Mat)
+            bm = pl.move(bv, target_memory=pl.Mem.Mat)
+            br = pl.move(bm, target_memory=pl.Mem.Right)
+            cm = pl.move(cv, target_memory=pl.Mem.Mat)
+            al = pl.move(am, target_memory=pl.Mem.Left)
+            cl = pl.move(cm, target_memory=pl.Mem.Left)
+            out_a = pl.store(pl.matmul(al, br), [0, 0], out_a)
+            out_c = pl.store(pl.matmul(cl, br), [0, 0], out_c)
+        return out_a, out_c
+
+    kernel = reverse_three if third_pop else reverse_two
+    config = RunConfig(
+        platform="a5" if ascend_backend == BackendType.Ascend950 else "a2a3",
+        codegen_only=True,
+        save_kernels=True,
+        save_kernels_dir=str(tmp_path),
+    )
+    if third_pop and slot_num == 2:
+        with pytest.raises(ValueError, match="slot_num=2 is insufficient for 3 simultaneously retained"):
+            kernel.compile(config=config)
+        assert not list(tmp_path.rglob("*.pto"))
+        return
+
+    kernel.compile(config=config)
+    pto = "\n".join(path.read_text() for path in tmp_path.rglob("*.pto"))
+    lines = pto.splitlines()
+    pops = [i for i, line in enumerate(lines) if "pto.tpop_from_aiv" in line]
+    frees = [i for i, line in enumerate(lines) if "pto.tfree_from_aiv" in line]
+    assert len(pops) == len(frees) == (3 if third_pop else 2)
+    first_tile = re.search(r"(%[\w]+) = pto.tpop_from_aiv", lines[pops[0]])
+    assert first_tile is not None
+    first_consumers = [i for i, line in enumerate(lines) if f"pto.tmov ins({first_tile[1]} :" in line]
+    assert first_consumers
+    assert max(first_consumers) < frees[0] < frees[1]
+    assert pops[-1] < frees[0]
+    if find_ptoas_binary() is not None:
+        assert list((tmp_path / "kernels").rglob("*.cpp"))
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+def test_nested_handoff_cannot_release_an_enclosing_fifo_tile(tmp_path, ascend_backend):
+    """A nested last-use finalizer must not free past an enclosing live pop."""
+
+    @pl.jit
+    def nested_reverse(
+        a: pl.Tensor[[32, 32], pl.FP16],
+        b: pl.Tensor[[32, 32], pl.FP16],
+        inner_out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+        outer_out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+    ):
+        for _ in pl.spmd(
+            1,
+            optimizations=[pl.cross_core_slot(slot_num=3), pl.split(pl.SplitMode.UP_DOWN)],
+        ):
+            base_l = pl.move(pl.load(a, [0, 0], [32, 32], target_memory=pl.Mem.Mat), pl.Mem.Left)
+            base_r = pl.move(pl.load(b, [0, 0], [32, 32], target_memory=pl.Mem.Mat), pl.Mem.Right)
+            av = pl.add(pl.load(a, [0, 0], [32, 32]), 1.0)
+            am = pl.move(av, target_memory=pl.Mem.Mat)
+            for _iteration in pl.range(2):
+                bv = pl.add(pl.load(b, [0, 0], [32, 32]), 1.0)
+                bm = pl.move(bv, target_memory=pl.Mem.Mat)
+                br = pl.move(bm, target_memory=pl.Mem.Right)
+                inner_out = pl.store(pl.matmul(base_l, br), [0, 0], inner_out)
+            al = pl.move(am, target_memory=pl.Mem.Left)
+            outer_out = pl.store(pl.matmul(al, base_r), [0, 0], outer_out)
+        return inner_out, outer_out
+
+    with pytest.raises(ValueError, match="requires FIFO release order"):
+        nested_reverse.compile(
+            config=RunConfig(
+                platform="a5" if ascend_backend == BackendType.Ascend950 else "a2a3",
+                codegen_only=True,
+                save_kernels=True,
+                save_kernels_dir=str(tmp_path),
+            )
+        )
+    assert not list(tmp_path.rglob("*.pto"))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

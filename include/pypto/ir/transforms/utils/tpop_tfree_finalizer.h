@@ -56,7 +56,8 @@ const Var* CanonicalizeTpopRef(const Var* var, const std::unordered_map<const Va
 ///
 /// Ensures every generated tpop chain frees the canonical tile value and that
 /// each tfree stays at or after the tile's last use, including nested control
-/// flow bodies.
+/// flow bodies. Within each body, releases follow pop order per pipe: a later
+/// tile cannot release its slot until the preceding FIFO prefix is finished.
 std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_affinity::CoreSide side,
                                         const std::unordered_map<const Var*, VarPtr>& tpop_var_remap);
 

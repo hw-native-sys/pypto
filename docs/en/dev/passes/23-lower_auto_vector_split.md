@@ -303,6 +303,11 @@ Two authoring rules make this work:
   An insufficient depth is rejected; increase `cross_core_slot(slot_num=N)` or
   place/consume the first tile before gathering the next. Repeated sequential
   gathers do not require additional slots once their preceding tiles are freed.
+  Hardware releases the oldest FIFO slot, not an arbitrary named tile. The
+  finalizer therefore delays a later tile's release until all earlier pops on
+  that pipe have finished, and admission counts this repaired schedule. A
+  nested scope that would release an enclosing retained tile out of order is
+  rejected; place/consume that tile before entering the nested handoff.
 
 `pl.aiv_shard` is **not** an alternative to the half-extent `pl.full` here: it is
 the C→V transfer and needs an `Acc` operand, so it cannot shard a value the

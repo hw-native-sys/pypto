@@ -258,6 +258,10 @@ with pl.at(level=pl.Level.CORE_GROUP, name_hint="sparse_kv",
   同时保留，至少需要两个 slot。深度不足时会拒绝编译；增大
   `cross_core_slot(slot_num=N)`，或先放置/消费第一个 tile 再 gather 下一个。
   前一个 tile 已释放的顺序 gather 不需要额外 slot。
+  硬件释放的是最早的 FIFO slot，而非任意指定的 tile。因此，finalizer 会等待同一
+  pipe 上更早的 pop 都使用完毕，再释放较晚的 tile；准入检查统计修复后的调度。
+  若嵌套 scope 会乱序释放外层仍保留的 tile，则拒绝编译；应在进入嵌套 handoff 前
+  放置/消费该 tile。
 
 `pl.aiv_shard` 在这里**不能**替代半 extent 的 `pl.full`：它是 C→V 传输，要求操作数位于
 `Acc`（cube 产出），因此无法对 vector lane 自己产生的值做切分。

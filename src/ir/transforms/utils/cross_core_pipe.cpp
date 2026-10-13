@@ -41,12 +41,32 @@ namespace {
 
 const auto& FlattenBody = transform_utils::FlattenToStmts;
 
-// Inspect the finalized consumer schedule, not the number of syntactic
-// gathers or pipeline stages: a slot is reusable only after its tfree.
-// Branches are exclusive and balanced loop bodies reuse their slots each
-// iteration. This traversal is linear in the statement tree.
-int RequiredConsumerDepth(const std::vector<StmtPtr>& stmts, core_affinity::CoreSide side, int& live) {
-  int peak = live;
+struct ConsumerFifo {
+  std::vector<const Var*> pops;
+  size_t next_free = 0;
+};
+
+// Inspect the finalized FIFO schedule, not merely the number of live values:
+// the emitted tfree has no tile operand and releases the oldest slot. Nested
+// scopes must preserve their incoming FIFO ownership; otherwise reject the
+// unsupported schedule rather than silently releasing an enclosing tile.
+// Checkpoint/rewind avoids copying live queues at each nesting level: O(N).
+int RequiredConsumerDepth(const std::vector<StmtPtr>& stmts, core_affinity::CoreSide side,
+                          ConsumerFifo& fifo) {
+  int peak = static_cast<int>(fifo.pops.size() - fifo.next_free);
+  auto visit_body = [&](const StmtPtr& body) {
+    const size_t entry_tail = fifo.pops.size();
+    const size_t entry_head = fifo.next_free;
+    const int body_peak = RequiredConsumerDepth(FlattenBody(body), side, fifo);
+    const bool unchanged = fifo.next_free == entry_head && fifo.pops.size() == entry_tail;
+    const bool empty_on_both_sides = entry_head == entry_tail && fifo.next_free == fifo.pops.size();
+    CHECK_SPAN(unchanged || empty_on_both_sides, body->span_)
+        << "Automatic cross-core pipe does not support FIFO ownership escaping a control-flow body; "
+           "place/consume and release each gathered tile within its scope.";
+    fifo.pops.resize(entry_tail);
+    fifo.next_free = entry_head;
+    peak = std::max(peak, body_peak);
+  };
   for (const auto& stmt : stmts) {
     auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt);
     auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt);
@@ -54,33 +74,27 @@ int RequiredConsumerDepth(const std::vector<StmtPtr>& stmts, core_affinity::Core
                        : (eval ? std::dynamic_pointer_cast<const Call>(eval->expr_) : nullptr);
     if (call && call->op_) {
       if (call->op_->name_ == core_side_ops::TPopOp(side)) {
-        peak = std::max(peak, ++live);
+        INTERNAL_CHECK_SPAN(assign, stmt->span_) << "Internal error: tpop must bind a tile";
+        fifo.pops.push_back(assign->var_.get());
+        peak = std::max(peak, static_cast<int>(fifo.pops.size() - fifo.next_free));
       } else if (call->op_->name_ == core_side_ops::TFreeOp(side)) {
-        --live;
+        auto tile = call->args_.empty() ? nullptr : AsVarLike(call->args_[0]);
+        CHECK_SPAN(tile && fifo.next_free < fifo.pops.size() && fifo.pops[fifo.next_free] == tile.get(),
+                   stmt->span_)
+            << "Automatic cross-core pipe requires FIFO release order; a retained earlier tile "
+               "must be consumed before a later gathered tile is released.";
+        ++fifo.next_free;
       }
     }
     if (auto loop = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-      int body_live = live;
-      peak = std::max(peak, RequiredConsumerDepth(FlattenBody(loop->body_), side, body_live));
-      CHECK_SPAN(body_live <= live, loop->span_)
-          << "Automatic cross-core pipe cannot bound retained popped tiles across loop iterations; "
-             "place/consume and release each gathered tile within its iteration.";
-      live = std::max(live, body_live);
+      visit_body(loop->body_);
     } else if (auto loop = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-      int body_live = live;
-      peak = std::max(peak, RequiredConsumerDepth(FlattenBody(loop->body_), side, body_live));
-      CHECK_SPAN(body_live <= live, loop->span_)
-          << "Automatic cross-core pipe cannot bound retained popped tiles across loop iterations; "
-             "place/consume and release each gathered tile within its iteration.";
-      live = std::max(live, body_live);
+      visit_body(loop->body_);
     } else if (auto branch = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-      int then_live = live;
-      int else_live = live;
-      peak = std::max(peak, RequiredConsumerDepth(FlattenBody(branch->then_body_), side, then_live));
+      visit_body(branch->then_body_);
       if (branch->else_body_) {
-        peak = std::max(peak, RequiredConsumerDepth(FlattenBody(*branch->else_body_), side, else_live));
+        visit_body(*branch->else_body_);
       }
-      live = std::max(then_live, else_live);
     }
   }
   return peak;
@@ -340,11 +354,11 @@ AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const s
         << "Cross-core slot_num override must be positive: " << slot_num_override.value();
   }
   const int effective_slot_num = slot_num_override.value_or(kDefaultAutoPipeSlotNum);
-  int aic_live = 0;
-  int aiv_live = 0;
+  ConsumerFifo aic_fifo;
+  ConsumerFifo aiv_fifo;
   const int required_slot_num =
-      std::max(RequiredConsumerDepth(aic_stmts, core_affinity::CoreSide::AIC, aic_live),
-               RequiredConsumerDepth(aiv_stmts, core_affinity::CoreSide::AIV, aiv_live));
+      std::max(RequiredConsumerDepth(aic_stmts, core_affinity::CoreSide::AIC, aic_fifo),
+               RequiredConsumerDepth(aiv_stmts, core_affinity::CoreSide::AIV, aiv_fifo));
   CHECK_SPAN(effective_slot_num >= required_slot_num, span)
       << "Automatic cross-core pipe slot_num=" << effective_slot_num << " is insufficient for "
       << required_slot_num

@@ -11,6 +11,7 @@
 
 #include "pypto/ir/transforms/utils/tpop_tfree_finalizer.h"
 
+#include <algorithm>
 #include <any>
 #include <cstddef>
 #include <functional>
@@ -384,16 +385,30 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
 
   std::vector<bool> remove_existing_tfree(normalized_inputs.size(), false);
   std::unordered_map<size_t, std::vector<StmtPtr>> deferred_tfrees;
+  // A hardware tfree releases the oldest slot of its pipe, not the tile
+  // operand retained in IR. Later pops must therefore wait for the entire
+  // preceding FIFO prefix, even when their own last uses occur earlier.
+  std::map<int, size_t> preceding_release;
   for (const auto* var : tpop_order) {
     auto& chain = chains.find(var)->second;
-    if (chain.tfree_idx == no_tfree || chain.tfree_idx < chain.last_use_idx) {
-      if (chain.tfree_idx != no_tfree) {
-        remove_existing_tfree[chain.tfree_idx] = true;
-      }
-      deferred_tfrees[chain.last_use_idx].push_back(std::make_shared<EvalStmt>(
-          CreateTfree(side, chain.tpop_var, normalized_inputs[chain.tpop_idx]->span_, chain.pipe_id),
-          normalized_inputs[chain.tpop_idx]->span_));
+    size_t release_idx = chain.last_use_idx;
+    if (chain.tfree_idx != no_tfree) {
+      release_idx = std::max(release_idx, chain.tfree_idx);
+      remove_existing_tfree[chain.tfree_idx] = true;
     }
+    auto& prefix_release = preceding_release[chain.pipe_id.value_or(0)];
+    release_idx = std::max(release_idx, prefix_release);
+    prefix_release = release_idx;
+    // Retiming an authored free must preserve its explicit kwargs. Alias
+    // operands were canonicalized above; only synthesized frees inherit the
+    // originating pop's pipe id here.
+    auto free_stmt =
+        chain.tfree_idx != no_tfree
+            ? normalized_inputs[chain.tfree_idx]
+            : std::make_shared<EvalStmt>(
+                  CreateTfree(side, chain.tpop_var, normalized_inputs[chain.tpop_idx]->span_, chain.pipe_id),
+                  normalized_inputs[chain.tpop_idx]->span_);
+    deferred_tfrees[release_idx].push_back(free_stmt);
   }
 
   std::vector<StmtPtr> result;
