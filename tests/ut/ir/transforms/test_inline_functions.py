@@ -158,9 +158,8 @@ class TestInlineFunctionsCallSiteForms:
         Call — together with its write through the ``pl.Out`` arg — vanished
         without a diagnostic. ``main`` collapsed to a bare ``return x``.
 
-        Now the discarded ``Call(writeout, x, out)`` is re-emitted as an
-        EvalStmt, which the fixpoint loop expands on the next iteration into
-        ``writeout``'s own spliced body — the assemble below."""
+        Nested inline expansion preserves ``writeout``'s spliced body — the
+        assemble below — even when the outer helper's result is discarded."""
 
         @pl.program
         class Before:
@@ -208,7 +207,7 @@ class TestInlineFunctionsCallSiteForms:
         """Same shape as above, but the wrapper forwards to a NON-Inline
         function: the re-emitted EvalStmt stays an ordinary cross-function
         dispatch, exactly as if the author had written ``self.inner(...)`` at the
-        call site. Nothing in the fixpoint loop expands it (``inner`` is not
+        call site. The inliner does not expand it (``inner`` is not
         Inline), and nothing may delete it either — ``inner`` writes ``out``."""
 
         @pl.program
@@ -557,7 +556,7 @@ class TestInlineFunctionsMultiCallSite:
 
 
 class TestInlineFunctionsNested:
-    """Inline calls Inline: pass iterates to fixpoint."""
+    """Inline calls Inline: recursive cloning preserves transitive calls."""
 
     def test_inline_calls_inline(self):
         """A → B (both Inline) → caller. Both inlined."""
@@ -1507,9 +1506,8 @@ class TestInlineFunctionsDeadCode:
         """An Inline function with no call sites is removed from the program and
         the surviving caller body is left byte-for-byte unchanged.
 
-        ``unused`` has no Call site, so the fixpoint loop never splices it (no
-        ``any_changed``); the cleanup phase (src lines 596-603) drops it purely
-        because ``func_type_ == Inline``. ``main`` carries no inline call, so it
+        ``unused`` has no Call site; cleanup drops it because its
+        ``func_type_ == Inline``. ``main`` carries no inline call, so it
         passes through verbatim — hence Expected is just ``main`` alone."""
 
         @pl.program
@@ -3039,6 +3037,118 @@ class TestInlineFunctionsDynamicShapes:
                 a = first
                 b = second
                 return pl.add(a, x), pl.add(b, padded)
+
+        after = passes.inline_functions()(Before)
+        ir.assert_structural_equal(after, Expected)
+        ir.assert_structural_equal(passes.convert_to_ssa()(after), passes.convert_to_ssa()(Expected))
+
+    def test_nested_alias_return_refines_callers_valid_shape(self):
+        """Factoring a metadata update into an inline helper keeps its caller binding."""
+        rows = pl.dynamic("NESTED_ALIAS_ROWS")
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def refine(self, t: pl.Tensor[[rows, 4], pl.FP32]) -> pl.Tensor[[rows, 4], pl.FP32]:
+                refined = pl.tensor.set_validshape(t, 3, 4)
+                return refined
+
+            @pl.function(type=pl.FunctionType.Inline)
+            def outer(self, t: pl.Tensor[[rows, 4], pl.FP32]):
+                t = self.refine(t)
+
+            @pl.function
+            def main(self, t: pl.Tensor[[8, 4], pl.FP32]):
+                self.outer(t)
+                return t
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, t: pl.Tensor[[8, 4], pl.FP32]):
+                refined = pl.tensor.set_validshape(t, 3, 4)
+                t = refined
+                return t
+
+        after = passes.inline_functions()(Before)
+        ssa = passes.convert_to_ssa()(after)
+        main = ssa.get_function("main")
+        assert main is not None and isinstance(main.body, ir.SeqStmts)
+        result = main.body.stmts[-1]
+        assert isinstance(result, ir.ReturnStmt)
+        result_type = result.value[0].type
+        assert isinstance(result_type, ir.TensorType)
+        view = result_type.tensor_view
+        valid_shape = view.valid_shape if view is not None and view.valid_shape else result_type.shape
+        assert len(valid_shape) == 2
+        for dim, expected in zip(valid_shape, [3, 4]):
+            assert isinstance(dim, ir.ConstInt)
+            assert dim.value == expected
+        ir.assert_structural_equal(after, Expected)
+        ir.assert_structural_equal(ssa, passes.convert_to_ssa()(Expected))
+
+    def test_nested_fresh_return_keeps_callers_binding(self):
+        """Expanding a generic nested helper must not turn fresh results into writebacks."""
+        rows = pl.dynamic("NESTED_FRESH_ROWS")
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def double(self, t: pl.Tensor[[rows, 4], pl.FP32]) -> pl.Tensor[[rows, 4], pl.FP32]:
+                doubled = pl.add(t, t)
+                return doubled
+
+            @pl.function(type=pl.FunctionType.Inline)
+            def outer(self, t: pl.Tensor[[rows, 4], pl.FP32]):
+                t = self.double(t)
+
+            @pl.function
+            def main(self, t: pl.Tensor[[8, 4], pl.FP32]):
+                self.outer(t)
+                return t
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, t: pl.Tensor[[8, 4], pl.FP32]):
+                local = t
+                doubled = pl.add(local, local)
+                local = doubled
+                return t
+
+        after = passes.inline_functions()(Before)
+        ir.assert_structural_equal(after, Expected)
+        ir.assert_structural_equal(passes.convert_to_ssa()(after), passes.convert_to_ssa()(Expected))
+
+    def test_nested_identity_return_materializes_original_scalar_def(self):
+        """An analysis-only no-op elimination must not expose a non-Var assignment target."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def identity(self, n: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                return n
+
+            @pl.function(type=pl.FunctionType.Inline)
+            def outer(self, n: pl.Scalar[pl.INDEX]) -> pl.Scalar[pl.INDEX]:
+                n = self.identity(n)
+                return n
+
+            @pl.function
+            def main(self, k: pl.Scalar[pl.INDEX]):
+                constant = self.outer(3)
+                computed = self.outer(k + 1)
+                return constant + computed
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, k: pl.Scalar[pl.INDEX]):
+                local_constant = 3
+                constant = local_constant
+                local_computed = k + 1
+                computed = local_computed
+                return constant + computed
 
         after = passes.inline_functions()(Before)
         ir.assert_structural_equal(after, Expected)
