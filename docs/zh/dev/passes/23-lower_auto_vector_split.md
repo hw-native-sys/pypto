@@ -840,7 +840,9 @@ subblock 本地化。
 
 目标为 Mat 的 V→C `tile.move` 直接变为全尺寸 `[128, 128]` Mat 的 `tile.aic_gather`，
 不产生 Mat→Mat 复制。其他 cube 目标仍保留放置 move。若显式 Mat 布局或有效形状转换
-无法由 gather 表达，则拒绝该转换，而不是静默丢弃：
+无法由 gather 表达，则拒绝该转换，而不是静默丢弃。直接复用 Mat 时，检查使用消费侧
+的隐式 Mat 布局及 gather 的 `valid_shape`。部分有效范围会被保留；gather 的临时
+向量布局视图并不表示用户请求了布局转换：
 
 ```python
 # `v` 是 affinity gate 产出的每 lane 折半 tile，例如 [64, 128]。

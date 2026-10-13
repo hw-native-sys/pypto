@@ -998,7 +998,10 @@ The cube operand `qk` stays `[128, 128]`; the vector sub-region is halved to
 A V→C `tile.move` targeting Mat becomes `tile.aic_gather` directly, with the
 FULL `[128, 128]` Mat shape. No Mat→Mat copy is emitted. Non-Mat cube targets
 retain their placement move. Explicit Mat layout/valid-shape conversions that
-the gather cannot represent are rejected rather than silently discarded:
+the gather cannot represent are rejected rather than silently discarded.
+For direct Mat reuse, the check uses the consumer's implicit Mat layout with
+the gathered `valid_shape`. A partial valid extent is preserved; the gather's
+provisional vector-style view does not make it a requested layout conversion:
 
 ```python
 # `v` is the per-lane HALF the affinity gate produced, e.g. [64, 128].

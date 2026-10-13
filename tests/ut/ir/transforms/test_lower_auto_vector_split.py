@@ -1639,6 +1639,40 @@ def test_vc_boundary_reuses_full_mat_gather_without_placement_move():
     ir.assert_structural_equal(_lower(Before), Expected)
 
 
+def test_vc_mat_boundary_preserves_partial_valid_shape():
+    """Partial validity does not request a Vec-to-Mat layout conversion."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def split_auto(data: pl.Tensor[[64, 64], pl.FP32]):
+            pl.func_attr({"split": pl.SplitMode.UP_DOWN})
+            v = pl.tile.load(data, [0, 0], [64, 64], valid_shape=[64, 48], target_memory=pl.Mem.Vec)
+            cube = pl.tile.move(v, target_memory=pl.Mem.Mat)
+            pl.tile.store(cube, [0, 0], data)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def split_auto(data: pl.Tensor[[64, 64], pl.FP32]):
+            pl.func_attr({"split": pl.SplitMode.UP_DOWN, "split_aiv": True})
+            subblock_idx = pl.tile.get_subblock_idx()
+            v = pl.tile.load(
+                data, [0 + subblock_idx * 32, 0], [32, 64], valid_shape=[32, 48], target_memory=pl.Mem.Vec
+            )
+            cube: pl.Tile[
+                [64, 64],
+                pl.FP32,
+                pl.Mem.Mat,
+                pl.TileView(
+                    valid_shape=[64, 48], blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major
+                ),
+            ] = pl.tile.aic_gather(v, split=1)
+            pl.tile.store(cube, [0, 0], data)
+
+    ir.assert_structural_equal(_lower(Before), Expected)
+
+
 @pytest.mark.parametrize("destination", [pl.Mem.Left, pl.Mem.Right])
 def test_vc_boundary_preserves_non_mat_placement(destination):
     """Gather replaces transport, not the required Mat->L0 placement."""
@@ -1666,7 +1700,8 @@ def test_vc_boundary_preserves_non_mat_placement(destination):
     ir.assert_structural_equal(_lower(Before), Expected)
 
 
-def test_vc_mat_boundary_rejects_layout_conversion():
+@pytest.mark.parametrize("valid_cols", [64, 48])
+def test_vc_mat_boundary_rejects_layout_conversion(valid_cols):
     """Eliding the redundant move must not silently drop an explicit layout."""
 
     @pl.program
@@ -1674,7 +1709,7 @@ def test_vc_mat_boundary_rejects_layout_conversion():
         @pl.function(type=pl.FunctionType.InCore)
         def split_auto(data: pl.Tensor[[64, 64], pl.FP32]):
             pl.func_attr({"split": pl.SplitMode.UP_DOWN})
-            v = pl.tile.load(data, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
+            v = pl.tile.load(data, [0, 0], [64, 64], valid_shape=[64, valid_cols], target_memory=pl.Mem.Vec)
             cube = pl.tile.move(v, target_memory=pl.Mem.Mat, blayout=pl.TileLayout.row_major)
             pl.tile.store(cube, [0, 0], data)
 

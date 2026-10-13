@@ -455,15 +455,26 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
           // ExpandMixedKernel place tfree after the last extraction, not before
           // AutoTile's K loop. Left/Right still need their placement move.
           const bool needs_placement = move_tile->memory_space_ != MemorySpace::Mat;
+          if (!needs_placement) {
+            // The gather's inferred type can carry a Vec-style view when its
+            // valid_shape is partial. The actual AIC pop uses implicit Mat
+            // layout, preserving the gathered logical extent, not that view.
+            TileView transfer_view =
+                tile_view_semantics::GetImplicitTileView(gathered_tile->shape_, MemorySpace::Mat);
+            transfer_view.valid_shape = tile_view_semantics::GetEffectiveTileView(*gathered_tile).valid_shape;
+            CHECK_SPAN(tile_view_semantics::GetEffectiveTileView(*move_tile) == transfer_view, call->span_)
+                << "LowerAutoVectorSplit: a Vec->Mat boundary must use the gathered Mat tile's "
+                   "layout and valid shape; a Mat->Mat placement conversion is unsupported";
+            // Keep the realizable destination type on the directly reused
+            // gather so its consumers retain the authored valid_shape.
+            gather_type = call->GetType();
+            gather_typed = std::make_shared<Call>(gather->op_, gather->args_, gather->kwargs_, gather_type,
+                                                  gather->span_);
+          }
           auto full_mat_var = std::make_shared<Var>(
               assign->var_->name_hint_ + (needs_placement ? "_mat" : ""), gather_type, assign->span_);
           result.push_back(std::make_shared<AssignStmt>(full_mat_var, gather_typed, assign->span_));
           if (!needs_placement) {
-            CHECK_SPAN(tile_view_semantics::GetEffectiveTileView(*move_tile) ==
-                           tile_view_semantics::GetEffectiveTileView(*gathered_tile),
-                       call->span_)
-                << "LowerAutoVectorSplit: a Vec->Mat boundary must use the gathered Mat tile's "
-                   "layout and valid shape; a Mat->Mat placement conversion is unsupported";
             var_replacements[assign->var_.get()] = full_mat_var;
             continue;
           }
