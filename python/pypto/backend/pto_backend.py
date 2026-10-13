@@ -49,6 +49,7 @@ from pypto._function_attrs import (
     DUAL_AIV_DISPATCH_ATTR,
     EXTERNAL_SOURCE_ATTR,
 )
+from pypto.backend._host_tensor_args import host_tensor_indices as _host_tensor_indices
 from pypto.backend._ptoas_locate import PTOAS_RELATIVE_PATHS as _PTOAS_RELATIVE_PATHS
 from pypto.backend._ptoas_locate import PTOAS_RELEASES_URL as _PTOAS_RELEASES_URL
 from pypto.backend._ptoas_locate import check_ptoas_version as _check_ptoas_version
@@ -314,13 +315,23 @@ static __aicore__ void pypto_register_counter_completion(
         // A supported dispatcher always supplies a live task token and slab.
         // If the token is corrupted but the slab pointers remain coherent,
         // publish a scheduler-visible error instead of returning as an
-        // ordinary completed task. defer_flush validates the token, so mark
-        // only this local AsyncCtx copy valid after recording the error.
+        // ordinary completed task. The task handle is opaque and remains
+        // invalid: flush the two error fields directly instead of minting one.
         if (ctx.completion_count != nullptr && ctx.completion_error_code != nullptr) {
             *ctx.completion_count = 0;
             *ctx.completion_error_code = SIMPLER_ERROR_ASYNC_COMPLETION_INVALID;
-            ctx.task_token.raw = 0;
-            pto2::detail::defer_flush(ctx);
+            pto2::detail::defer_flush_range(ctx.completion_count, sizeof(*ctx.completion_count));
+            pto2::detail::defer_flush_range(ctx.completion_error_code, sizeof(*ctx.completion_error_code));
+#if defined(__CCE_KT_TEST__) || defined(__CCE_AICORE__) || defined(__DAV_C220__)
+#if defined(__CPU_SIM)
+            dsb(0);
+#else
+            dsb(DSB_DDR);
+#endif
+            pipe_barrier(PIPE_ALL);
+#else
+            __asm__ __volatile__("" ::: "memory");
+#endif
             return;
         }
 #if defined(__CPU_SIM)
@@ -1197,6 +1208,7 @@ def _generate_config_file(
     func_name_to_external_include_dirs: dict[str, tuple[str, ...]] | None = None,
     enable_sdma: bool = False,
     runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
+    host_tensor_indices: list[int] | None = None,
 ) -> str:
     """Generate kernel_config.py content.
 
@@ -1243,6 +1255,8 @@ def _generate_config_file(
         f'\t"runtime": "{runtime_name}",',
         '\t"aicpu_thread_num": 0,',
     ]
+    if host_tensor_indices:
+        runtime_lines.append(f'\t"host_tensor_indices": {host_tensor_indices},')
     if enable_sdma:
         runtime_lines.append('\t"enable_sdma": True,')
     runtime_lines.append("}\n")
@@ -2315,6 +2329,9 @@ def _generate_single_chip(
             }
             all_kernels_external = all(name in codegen_free_kernels for name in orch_result.func_name_to_id)
             if not skip_ptoas or all_kernels_external:
+                host_indices = (
+                    _host_tensor_indices(orch_func) if runtime == _passes.RuntimeKind.HOST_BUILD_GRAPH else []
+                )
                 result_files["kernel_config.py"] = _generate_config_file(
                     orch_func.name,
                     orch_result.func_name_to_id,
@@ -2325,6 +2342,7 @@ def _generate_single_chip(
                     func_name_to_external_include_dirs,
                     enable_sdma=any(_uses_sdma_workspace(func) for func in emitted_incore_funcs),
                     runtime=runtime,
+                    host_tensor_indices=host_indices,
                 )
         except Exception as e:
             logger.error("Failed to generate orchestration '%s': %s", orch_func.name, e)

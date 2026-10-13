@@ -74,7 +74,7 @@ would compile, but lose the parameter origin:
 
 ```cpp
 const auto batch = args.scalar(0);  // preserves the parameter origin
-int64_t n = batch.to<int64_t>();    // explicitly reads the recording-time value
+int64_t n = args.scalar<int64_t>(0);    // explicitly reads the recording-time value
 g0_params_t0.add_scalar(n);         // the task no longer inherits the parameter
 ```
 
@@ -308,9 +308,13 @@ the map is all-nullopt and the hoists silently do nothing.
 
 Scalar-only control flow that submits no tasks may still read boundary values,
 for example `for i in pl.range(n)`. Codegen emits explicit typed reads such as
-`n.to<int64_t>()` in value contexts, including loop bounds and scalar carry
-initializers. Task argument forwarding keeps the `InheritableScalar` wrapper,
-including for floating-point parameters, so replay retains the parameter origin.
+`args.scalar<int64_t>(slot)` in value contexts, including loop bounds and scalar
+carry initializers. The call site declares every slot read this way with
+`add_static_scalar`: its value participates in the runtime's replay compatibility
+check. A changed static value falls back to ordinary execution; the existing
+recording is not replaced for that Graph key. Parameters used only for task
+argument forwarding keep the `InheritableScalar` wrapper and remain dynamic,
+including floating-point parameters, so replay retains their parameter origin.
 The orchestration entry reads its scalar inputs with `orch_args.scalar<T>(i)`,
 which decodes values directly in both supported runtimes.
 
@@ -378,3 +382,18 @@ instead of the graph heap, which is independent of where the caller puts it.
 
 - [Pass Manager](00-pass_manager.md) — full pipeline order
 - [MaterializeRuntimeScopes](50-materialize_runtime_scopes.md) — runs immediately after
+
+## Host control tensors
+
+With `host_build_graph`, orchestration-level `tensor.read` and `tensor.write`
+operate on ready CPU tensor arguments. Generated argument metadata selects
+`HOST/NONE` transfers for those arguments; ordinary device tensors retain their
+normal upload behavior. This metadata is preserved by saved artifacts and worker
+reuse. Control tensors must stay alive until the call completes.
+
+A control tensor (including a view or loop-carried alias) cannot also be passed
+to a device kernel through the same argument. Pass host control data and device
+data in separate parameters. Host writes do not upload to device storage.
+Runtime allocations and values produced by device tasks in the current graph
+cannot be read during host graph construction. Passing a `DeviceTensor` for a
+host control parameter raises an error before dispatch.

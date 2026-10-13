@@ -862,6 +862,18 @@ class _RuntimeFacade:
         assert self._runtime_name is not None
         return self._runtime_name
 
+    def _host_tensor_indices(self) -> tuple[int, ...] | list[int]:
+        """Read argument transfers without compiling binaries or opening a worker."""
+        if self._runtime_config is not None:
+            return self._runtime_config.get("host_tensor_indices", ())
+        from pypto.runtime._artifact_sources import read_kernel_config  # noqa: PLC0415
+
+        config_path = self._output_dir / "kernel_config.py"
+        if not config_path.exists():
+            return ()
+        config = read_kernel_config(config_path)
+        return getattr(config, "RUNTIME_CONFIG", {}).get("host_tensor_indices", ())
+
     @property
     def runtime_config(self) -> dict[str, Any]:
         """``RUNTIME_CONFIG`` dict from ``kernel_config.py`` (e.g. ``aicpu_thread_num``)."""
@@ -1295,7 +1307,7 @@ class CompiledProgram(_RuntimeFacade):
             _coerced_to_orch_args,
         )
 
-        orch_args = _coerced_to_orch_args(coerced, worker)
+        orch_args = _coerced_to_orch_args(coerced, worker, self._host_tensor_indices())
         return orch_args, coerced, return_style
 
     def _build_call_config(
@@ -1554,7 +1566,7 @@ class _SubChipCallable(_RuntimeFacade):
             _coerced_to_orch_args,
         )
 
-        orch_args = _coerced_to_orch_args(coerced, worker)
+        orch_args = _coerced_to_orch_args(coerced, worker, self._host_tensor_indices())
         return orch_args, coerced, return_style
 
     def _build_call_config(

@@ -86,6 +86,8 @@ struct IterArgCarryPlan {
 
 using namespace pypto::ir;  // NOLINT(build/namespaces)
 
+using GraphStaticScalarSlots = std::map<std::string, std::unordered_set<size_t>>;
+
 CoreType InferFunctionCoreType(const FunctionPtr& func) {
   // After ExpandMixedKernel runs (part of the Default pipeline), every InCore
   // function reaching codegen has been split into AIC, AIV, or Group / Spmd
@@ -357,11 +359,20 @@ class OrchestrationStmtCodegen : public CodegenBase {
   void SetTaskVarPrefix(std::string prefix) { task_var_prefix_ = std::move(prefix); }
 
   void SetGraphScalarParams(const std::vector<VarPtr>& params) {
+    size_t scalar_index = 0;
     for (const auto& param : params) {
+      if (AsTensorTypeLike(param->GetType())) continue;
       if (As<ScalarType>(param->GetType())) {
-        graph_scalar_params_.insert(param.get());
+        graph_scalar_params_.emplace(param.get(), scalar_index);
       }
+      ++scalar_index;
     }
+  }
+
+  const std::unordered_set<size_t>& GetGraphScalarValueReads() const { return graph_scalar_value_reads_; }
+
+  void SetGraphStaticScalarSlots(GraphStaticScalarSlots slots) {
+    graph_static_scalar_slots_ = std::move(slots);
   }
 
   /// Reserve identifiers the emitted C++ function already declares outside the
@@ -586,7 +597,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
     if (auto var = AsVarLike(expr); var && graph_scalar_params_.count(var.get())) {
       auto scalar_type = As<ScalarType>(var->GetType());
       INTERNAL_CHECK_SPAN(scalar_type, expr->span_) << "Internal error: Graph scalar must have ScalarType";
-      return GetVarName(var) + ".to<" + scalar_type->dtype_.ToCTypeString() + ">()";
+      const size_t slot = graph_scalar_params_.at(var.get());
+      graph_scalar_value_reads_.insert(slot);
+      return "args.scalar<" + scalar_type->dtype_.ToCTypeString() + ">(" + std::to_string(slot) + ")";
     }
     return CodegenBase::GenerateExprString(expr);
   }
@@ -2279,6 +2292,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
     params.reserve(callee_func->params_.size());
     auto push_call_arg = [&](size_t arg_idx) {
       params.push_back(BuildOneArgParam(call, callee_name, call_arg_directions, arg_idx));
+      // Graph arguments retain their value category: to_u64(float_var) is an
+      // rvalue and would declare a changing float static instead of dynamic.
+      // The runtime performs the scalar bit encoding itself.
+      if (callee_func->func_type_ == FunctionType::Graph && As<ScalarType>(call->args_[arg_idx]->GetType())) {
+        if (auto var = AsVarLike(call->args_[arg_idx])) {
+          params.back().value = GetVarName(var);
+        }
+      }
       if (!dump_var_set.empty()) {
         if (auto v = AsVarLike(call->args_[arg_idx])) {
           params.back().dump = dump_var_set.count(v.get()) > 0;
@@ -3669,12 +3690,20 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // `rt_submit_graph(GraphFunction, const GraphTaskArgs&)` — the boundary
     // container is its own `Arg` instantiation, sized by GRAPH_MAX_*_ARGS.
     EmitTaskParamsDecl(task_var, "GraphTaskArgs");
+    const auto slots_it = graph_static_scalar_slots_.find(callee_func->name_);
+    INTERNAL_CHECK_SPAN(slots_it != graph_static_scalar_slots_.end(), call->span_)
+        << "Internal error: Graph scalar usage was not collected for '" << callee_func->name_ << "'";
+    size_t scalar_index = 0;
     for (const auto& p : params) {
       INTERNAL_CHECK_SPAN(p.direction != ArgDirection::Output, call->span_)
           << "Internal error: Graph function '" << callee_func->name_
           << "' has a runtime-allocated output argument; a recorded graph's boundary tensors must "
              "already exist so replay can patch their addresses.";
-      EmitIndentedLine(task_var + "." + ArgDirectionToMethodName(p.direction) + "(" + p.value + ");");
+      const char* method = ArgDirectionToMethodName(p.direction);
+      if (p.direction == ArgDirection::Scalar && slots_it->second.count(scalar_index++)) {
+        method = "add_static_scalar";
+      }
+      EmitIndentedLine(task_var + "." + method + "(" + p.value + ");");
     }
     EmitSelectiveDumpCall(task_var, params);
     EmitIndentedLine("rt_submit_graph(&" + GraphFunctionSymbol(callee_func->name_) + ", " + task_var + ");");
@@ -4628,7 +4657,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
   int* next_func_id_;
   std::unordered_map<const Var*, std::string> emit_name_map_;
   // Only Graph boundary scalars are wrappers; body-local scalars hold values.
-  std::unordered_set<const Var*> graph_scalar_params_;
+  std::unordered_map<const Var*, size_t> graph_scalar_params_;
+  // Value reads freeze host computation into a Graph definition. Its caller
+  // must declare those slots static so changed values invalidate replay.
+  mutable std::unordered_set<size_t> graph_scalar_value_reads_;
+  GraphStaticScalarSlots graph_static_scalar_slots_;
   std::set<std::string> declared_var_names_;
   std::set<std::string> param_name_set_;
   std::map<std::string, int> param_name_to_orch_index_;
@@ -4873,7 +4906,7 @@ std::string GenerateGraphFunctions(const ProgramPtr& program, const FunctionPtr&
                                    std::map<std::string, int>* func_name_to_id,
                                    std::map<std::string, CoreType>* func_name_to_core_type,
                                    std::map<std::string, std::vector<std::string>>* func_name_to_signature,
-                                   int* next_func_id) {
+                                   int* next_func_id, GraphStaticScalarSlots* static_scalar_slots) {
   std::ostringstream oss;
   int graph_index = 0;
   for (const auto& graph_func : CollectReferencedGraphFunctions(program, entry)) {
@@ -4915,6 +4948,7 @@ std::string GenerateGraphFunctions(const ProgramPtr& program, const FunctionPtr&
     body_codegen.PrepareCrossScopeTaskIdHoists(graph_func->body_);
     body_codegen.SetInitialIndent(4);
     body_codegen.VisitStmt(graph_func->body_);
+    (*static_scalar_slots)[graph_func->name_] = body_codegen.GetGraphScalarValueReads();
 
     // Signature fixed by `using GraphFunction = void (*)(const GraphTaskArgs &)`
     // in the runtime's orchestration_api.h; `rt_submit_graph` takes that pointer.
@@ -5072,6 +5106,13 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   // so the outermost ``SIMPLER_SCOPE()`` is now emitted by the scope handler at the
   // base indent (4) rather than by a hardcoded wrapper below; the body lands at 8.
   stmt_codegen.SetInitialIndent(4);
+  // Generate Graph bodies first: their actual value reads determine which
+  // boundary slots the entry must declare static for safe replay.
+  GraphStaticScalarSlots graph_static_scalar_slots;
+  const std::string graph_functions =
+      GenerateGraphFunctions(program, func, &func_name_to_id, &func_name_to_core_type,
+                             &func_name_to_signature, &next_func_id, &graph_static_scalar_slots);
+  stmt_codegen.SetGraphStaticScalarSlots(std::move(graph_static_scalar_slots));
   stmt_codegen.VisitStmt(func->body_);
 
   oss << GenerateIncludes(false, stmt_codegen.NeedsVectorInclude());
@@ -5082,8 +5123,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
 
   // Each Graph function referenced by this entry is emitted once, ahead of the
   // entry that launches it, so the call site can take its address.
-  oss << GenerateGraphFunctions(program, func, &func_name_to_id, &func_name_to_core_type,
-                                &func_name_to_signature, &next_func_id);
+  oss << graph_functions;
 
   oss << "__attribute__((visibility(\"default\")))\n";
   oss << "void aicpu_orchestration_entry(const ChipTaskArgs& orch_args) {\n";

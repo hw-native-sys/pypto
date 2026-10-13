@@ -351,7 +351,7 @@ class TestExecuteOnDeviceReuse:
 
             # Reuse path: the active ChipWorker's run was invoked, no new init/close.
             assert fake_simpler_worker.run.call_count == 1
-            pack.assert_called_once_with(orch_args, fake_simpler_worker)
+            pack.assert_called_once_with(orch_args, fake_simpler_worker, ())
             assert fake_simpler_worker.run.call_args.args[1] is wire_args
             assert fake_simpler_worker.init.call_count == 0
             assert fake_simpler_worker.close.call_count == 0
@@ -389,7 +389,7 @@ class TestExecuteOnDeviceReuse:
         )
         assert one_shot.init.call_count == 1
         assert one_shot.run.call_count == 1
-        pack.assert_called_once_with(orch_args, one_shot)
+        pack.assert_called_once_with(orch_args, one_shot, ())
         assert one_shot.run.call_args.args[1] is wire_args
         assert one_shot.close.call_count == 1
 

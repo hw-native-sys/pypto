@@ -80,6 +80,11 @@ class AddressSpace(enum.IntEnum):
 
     DEVICE = 1
 
+class TensorTransfer(enum.IntEnum):
+    NONE = 0
+    H2D = 1
+    D2H = 2
+
 class AccessMode(enum.IntEnum):
     READ = 0
 
@@ -222,7 +227,7 @@ class ChipTensor:
 
 class ChipStorageTaskArgs:
     def __init__(self) -> None: ...
-    def add_tensor(self, t: ChipTensor) -> None:
+    def add_tensor(self, t: ChipTensor, *, transfer: TensorTransfer | None = ...) -> None:
         """Add a ChipTensor. Must be called before any add_scalar()."""
 
     def add_scalar(self, s: object) -> None:
@@ -236,6 +241,7 @@ class ChipStorageTaskArgs:
     def scalar(self, i: int) -> int:
         """Return the scalar at index i."""
 
+    def transfer(self, i: int) -> TensorTransfer: ...
     def tensor_count(self) -> int: ...
     def scalar_count(self) -> int: ...
     def clear(self) -> None: ...
@@ -265,7 +271,9 @@ class TaskHandle:
 
 class TaskArgs:
     def __init__(self) -> None: ...
-    def add_tensor(self, t: Tensor, tag: TensorArgType = TensorArgType.INPUT) -> None:
+    def add_tensor(
+        self, t: Tensor, tag: TensorArgType = TensorArgType.INPUT, *, transfer: TensorTransfer | None = ...
+    ) -> None:
         """
         Add a Tensor arg (the self-describing wire view built by Buffer.tensor) with an optional TensorArgType tag (default INPUT).
         """
@@ -295,6 +303,7 @@ class TaskArgs:
     def set_tag(self, i: int, tag: TensorArgType) -> None:
         """Set the TensorArgType tag for the tensor at index i."""
 
+    def transfer(self, i: int) -> TensorTransfer: ...
     def tensor_count(self) -> int: ...
     def scalar_count(self) -> int: ...
     def identities(self) -> list:

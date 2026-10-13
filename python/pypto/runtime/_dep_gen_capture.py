@@ -148,6 +148,7 @@ def main(argv: list[str]) -> int:
         level=level,
         aicpu_thread_num=aicpu_thread_num,
         enable_sdma=enable_sdma,
+        host_tensor_indices=runtime_config.get("host_tensor_indices", ()),
         output_prefix=str(dfx_dir),
         enable_dep_gen=True,
         config=config,

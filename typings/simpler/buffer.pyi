@@ -31,6 +31,9 @@ from _task_interface import (
 from _task_interface import (
     Tensor as Tensor,
 )
+from _task_interface import (
+    TensorTransfer as TensorTransfer,
+)
 
 class Buffer:
     """Owner-side registry object for one shared backing."""
@@ -75,6 +78,7 @@ __all__ = [
     "BackendKind",
     "Buffer",
     "Tensor",
+    "TensorTransfer",
     "mint_owner_instance_id",
     "wrap_fork_inherited",
 ]

@@ -821,7 +821,7 @@ class TestCompiledProgramExtraction:
         assert orch_args == "fake_orch_args"
         assert coerced == [a, b, c]
         assert return_style is False
-        oa_helper.assert_called_once_with([a, b, c], worker)
+        oa_helper.assert_called_once_with([a, b, c], worker, ())
 
     def test_build_orch_args_return_style_allocates_output(self, tmp_path):
         """Return-style: only inputs passed; output auto-allocated at output_indices."""
@@ -1028,7 +1028,7 @@ class TestSubChipCallableExtraction:
         assert orch_args == "fake_orch_args"
         assert coerced == [a, b, c]
         assert return_style is False
-        oa_helper.assert_called_once_with([a, b, c], worker)
+        oa_helper.assert_called_once_with([a, b, c], worker, ())
 
     def test_load_after_first_access_is_noop(self, tmp_path):
         sub = self._make_subchip(tmp_path)
@@ -1168,7 +1168,7 @@ class TestCompiledMetaAndFromDir:
             with patch("pypto.runtime.runner._coerced_to_orch_args") as oa_helper:
                 oa_helper.return_value = "fake_orch_args"
                 orch_args, coerced, return_style = reloaded._build_orch_args(*args, worker=worker)
-                oa_helper.assert_called_once_with(args, worker)
+                oa_helper.assert_called_once_with(args, worker, ())
             with _fake_call_config(call_config):
                 assert reloaded._build_call_config(RunConfig()) is call_config
 

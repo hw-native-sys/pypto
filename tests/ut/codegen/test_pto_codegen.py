@@ -1843,7 +1843,8 @@ class TestGenerateKernelWrapper:
         )
         assert wrapper.count("*ctx.completion_count = 0;") == 2
         assert "*ctx.completion_error_code = SIMPLER_ERROR_ASYNC_COMPLETION_INVALID;" in wrapper
-        assert "ctx.task_token.raw = 0;" in wrapper
+        assert "defer_flush_range(ctx.completion_count, sizeof(*ctx.completion_count))" in wrapper
+        assert "defer_flush_range(ctx.completion_error_code, sizeof(*ctx.completion_error_code))" in wrapper
         assert "__builtin_trap();" in wrapper and "trap();" in wrapper
         assert "expected < 0 || expected > kMaxExpected" in wrapper
         assert wrapper.index("expected < 0 || expected > kMaxExpected") < wrapper.index(

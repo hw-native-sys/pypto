@@ -572,18 +572,113 @@ def test_graph_scalar_value_reads_compile_and_preserve_task_forwarding(tmp_path)
     _assert_orchestration_compiles(main_cpp)
 
     body = _graph_body(orch)
-    for name, cpp_type in (
-        ("start", "int64_t"),
-        ("n", "int64_t"),
-        ("step", "int64_t"),
-        ("enabled", "bool"),
-        ("scale", "float"),
+    for slot, (name, cpp_type) in enumerate(
+        (("start", "int64_t"), ("n", "int64_t"), ("step", "int64_t"), ("enabled", "bool"), ("scale", "float"))
     ):
-        assert f"{name}.to<{cpp_type}>()" in body, body
+        assert f"args.scalar<{cpp_type}>({slot})" in body, body
+        assert f".add_static_scalar({name})" in _entry_body(orch), orch
     # Reading a value elsewhere must not discard its origin when forwarding it.
-    assert re.search(r"float \w+ = scale\.to<float>\(\);", body), body
+    assert re.search(r"float \w+ = args\.scalar<float>\(4\);", body), body
     assert ".add_scalar(n)" in body, body
     assert ".add_scalar(scale)" in body, body
+
+
+@pl.program
+class _MixedScalarUses:
+    @pl.function(type=pl.FunctionType.Graph)
+    def layer(
+        self,
+        a: pl.Tensor[[128, 128], pl.FP32],
+        n: pl.Scalar[pl.INDEX],
+        c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+        scale: pl.Scalar[pl.FP32],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        for _ in pl.range(n):
+            pass
+        with pl.at(level=pl.Level.CORE_GROUP):
+            t = pl.load(a, [0, 0], [128, 128])
+            t = pl.mul(t, scale)
+            pl.store(t, [0, 0], c)
+        return c
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        a: pl.Tensor[[128, 128], pl.FP32],
+        n: pl.Scalar[pl.INDEX],
+        c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]],
+        scale: pl.Scalar[pl.FP32],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        c = self.layer(a, n, c, scale)
+        return c
+
+
+def test_graph_scalar_declarations_and_forwarding_execute_against_runtime(tmp_path):
+    """Exercise generated scalar packing with the real runtime's checked reads."""
+    orch = _compile_orch(_MixedScalarUses)
+    main_cpp = tmp_path / "main.cpp"
+    main_cpp.write_text(orch)
+    _assert_orchestration_compiles(main_cpp)
+    body = _graph_body(orch)
+    assert "args.scalar<int64_t>(0)" in body
+    assert ".add_scalar(scale)" in body
+    assert "args.scalar<float>(1)" not in body
+
+    boundary = re.search(r"GraphTaskArgs (\w+);(.*?)rt_submit_graph", _entry_body(orch), re.DOTALL)
+    assert boundary is not None, orch
+    scalar_packing = "\n".join(
+        line for line in boundary[2].splitlines() if re.search(r"\.add_(?:static_)?scalar\(", line)
+    )
+    assert scalar_packing.count(";") == 2, scalar_packing
+    source = tmp_path / "scalar_contract.cpp"
+    source.write_text(
+        f"""#include <cassert>
+#include "types.h"
+
+int main() {{
+    for (int invocation = 0; invocation < 2; ++invocation) {{
+        int64_t n = 3 + invocation;
+        float scale = invocation == 0 ? 1.25f : -2.5f;
+        GraphTaskArgs {boundary[1]};
+        {scalar_packing}
+        assert(!{boundary[1]}.scalar_dynamic(0));
+        assert({boundary[1]}.scalar_dynamic(1));
+        GraphTaskArgs args;
+        args.gen_scalar_params_from_args({boundary[1]});
+        assert(args.scalar<int64_t>(0) == n);
+        const auto forwarded_scale = args.scalar(1);
+        CoreTaskArgs task;
+        task.add_scalar(forwarded_scale);
+        assert(task.scalar(0).origin() == args.scalar(1).origin());
+        uint64_t bits[1];
+        task.pack_scalars(bits);
+        assert(from_u64<float>(bits[0]) == scale);
+    }}
+}}
+"""
+    )
+    repo_root = Path(__file__).resolve().parents[3]
+    compiler = shutil.which("g++") or shutil.which("c++")
+    if compiler is None:
+        pytest.skip("no C++ compiler available")
+    binary = tmp_path / "scalar_contract"
+    result = subprocess.run(
+        [
+            compiler,
+            "-std=c++17",
+            *_runtime_include_args(repo_root),
+            str(source),
+            str(repo_root / "runtime/src/common/task_interface/assert_compat.cpp"),
+            "-o",
+            str(binary),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    result = subprocess.run([str(binary)], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
 
 
 def test_graph_helper_defines_the_dynamic_dims_its_body_reads():

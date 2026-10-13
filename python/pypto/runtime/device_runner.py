@@ -691,6 +691,7 @@ def _execute_on_device(  # pyright: ignore[reportUnusedFunction]  # noqa: PLR091
     enable_scope_stats: bool = False,
     config: RunConfig | None = None,
     runtime_env: dict[str, str] | None = None,
+    host_tensor_indices: tuple[int, ...] | list[int] = (),
 ) -> None:
     """Execute *chip_callable* on device via Simpler's unified ``Worker``.
 
@@ -826,7 +827,7 @@ def _execute_on_device(  # pyright: ignore[reportUnusedFunction]  # noqa: PLR091
         if active is not None:
             from .runner import _coerced_to_orch_args  # noqa: PLC0415
 
-            wire_args = _coerced_to_orch_args(orch_args, active._impl)
+            wire_args = _coerced_to_orch_args(orch_args, active._impl, host_tensor_indices)
             active._run_chip(chip_callable, wire_args, cfg)
             return
         # The one-shot path opens its own device context, so it takes the same
@@ -846,7 +847,7 @@ def _execute_on_device(  # pyright: ignore[reportUnusedFunction]  # noqa: PLR091
         try:
             from .runner import _coerced_to_orch_args  # noqa: PLC0415
 
-            wire_args = _coerced_to_orch_args(orch_args, worker)
+            wire_args = _coerced_to_orch_args(orch_args, worker, host_tensor_indices)
             # Simpler's L2 ABI now dispatches by callable id (see runtime PR #710);
             # register the callable, run it, then close — close() runs finalize()
             # so explicit unregister is unnecessary here.

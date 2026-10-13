@@ -63,7 +63,7 @@ self.layer(cur, wq_view(i), i, i * 5120)     # 算术搬到了这里
 
 ```cpp
 const auto batch = args.scalar(0);  // preserves the parameter origin
-int64_t n = batch.to<int64_t>();    // explicitly reads the recording-time value
+int64_t n = args.scalar<int64_t>(0);    // explicitly reads the recording-time value
 g0_params_t0.add_scalar(n);         // the task no longer inherits the parameter
 ```
 
@@ -259,8 +259,11 @@ c_1` —— 返回的是重绑定而不是形参本身，所以 Graph 一直依�
 
 不提交任务的纯标量控制流仍可以读取边界数值，例如 `for i in pl.range(n)`。
 代码生成在循环边界、标量循环携带值的初始值等数值上下文中，显式生成
-`n.to<int64_t>()` 这样的按类型读取。转发任务参数时则保留 `InheritableScalar`
-包装对象，浮点参数也一样，从而让回放保留形参来源。
+`args.scalar<int64_t>(slot)` 这样的按类型读取。调用点用 `add_static_scalar`
+声明所有以此方式读取的参数槽，使其数值参与 runtime 的回放兼容性检查。
+静态参数（static parameter）的数值改变后会回退到普通执行；同一 Graph key
+已有的录制不会被替换。仅用于任务参数转发的参数保留 `InheritableScalar`
+包装对象并保持动态（dynamic），浮点参数也一样，从而让回放保留形参来源。
 编排入口使用 `orch_args.scalar<T>(i)` 读取标量输入；这一接口在两种受支持的
 runtime 中都能直接按类型解码数值。
 
@@ -321,3 +324,14 @@ verifier 拒绝本 pass 刚刚产出的 IR。
 
 - [Pass Manager](00-pass_manager.md) —— 完整流水线顺序
 - [MaterializeRuntimeScopes](50-materialize_runtime_scopes.md) —— 紧随其后运行
+
+## Host 控制张量
+
+使用 `host_build_graph` 时，编排层的 `tensor.read` 和 `tensor.write` 操作已就绪的
+CPU 张量参数。生成的参数元数据为这些参数选择 `HOST/NONE` 传输；普通设备数据仍按原有
+方式上传。保存的构建产物和复用的 worker 均保留该元数据。控制张量必须存活至调用完成。
+
+控制张量（包括其视图或循环携带的别名）不能通过同一个参数同时传给设备 kernel。
+请使用不同参数分别传递 host 控制数据和设备数据。Host 写入不会上传到设备存储。
+构图期间不能读取 runtime 分配的张量或本次图中设备任务产生的数据。
+为 host 控制参数传入 `DeviceTensor` 时，会在派发前报错。

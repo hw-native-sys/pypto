@@ -131,3 +131,49 @@ def test_tensors_keep_order_and_scalars_use_separate_pool(task_args_fixture):
     assert task_args.add_tensor.call_args_list[0].args == (wire_first,)
     assert task_args.add_tensor.call_args_list[1].args == (wire_second,)
     assert task_args.add_scalar.call_count == 1
+
+
+def test_host_control_transfer_leaves_device_data_uploaded(task_args_fixture):
+    from pypto.runtime.runner import _coerced_to_orch_args  # noqa: PLC0415
+
+    TensorTransfer = pytest.importorskip("simpler.buffer").TensorTransfer
+
+    task_args, owner = task_args_fixture
+    with patch("simpler_setup.torch_interop.make_tensor_arg", side_effect=["data", "control"]):
+        _coerced_to_orch_args([torch.zeros(4), ctypes.c_int32(7), torch.ones(2)], owner, [1])
+    assert task_args.add_tensor.call_args_list[0].args == ("data",)
+    assert task_args.add_tensor.call_args_list[0].kwargs == {}
+    assert task_args.add_tensor.call_args_list[1].args == ("control",)
+    assert task_args.add_tensor.call_args_list[1].kwargs == {"transfer": TensorTransfer.NONE}
+
+
+def test_device_tensor_cannot_supply_host_control(task_args_fixture):
+    from pypto.runtime.runner import _coerced_to_orch_args  # noqa: PLC0415
+
+    _, owner = task_args_fixture
+    device = DeviceTensor(0xABCD, (8,), torch.int32)
+    with pytest.raises(ValueError, match="host control flow; pass a CPU tensor"):
+        _coerced_to_orch_args([device], owner, [0])
+
+
+def test_real_runtime_preserves_host_control_transfer():
+    pytest.importorskip("simpler.task_interface")
+    from pypto.runtime.runner import _coerced_to_orch_args  # noqa: PLC0415
+
+    buffer_module = pytest.importorskip("simpler.buffer")
+    TensorTransfer = buffer_module.TensorTransfer
+    DataType = pytest.importorskip("simpler.task_interface").DataType
+
+    host = torch.ones(4)
+    backing = buffer_module.wrap_fork_inherited(
+        host.data_ptr(), 16, buffer_module.mint_owner_instance_id(), 1
+    )
+    try:
+        tensor = backing.tensor(shapes=(4,), dtype=DataType.FLOAT32)
+        with patch("pypto.runtime.tensor_arg.make_tensor_arg", return_value=tensor):
+            args = _coerced_to_orch_args([host, ctypes.c_int32(7), host], object(), [1])
+        assert args.transfer(0) == TensorTransfer.H2D
+        assert args.transfer(1) == TensorTransfer.NONE
+        assert args.tensor(0).buffer == args.tensor(1).buffer
+    finally:
+        backing.close()

@@ -1145,6 +1145,7 @@ def _capture_deps_subprocess(spec: dict[str, Any], dfx_dir: Path, run_id: str = 
 def _coerced_to_orch_args(  # pyright: ignore[reportUnusedFunction]
     coerced: "list[torch.Tensor | DeviceTensor | _SimpleCData[Any]]",
     worker: Any,
+    host_tensor_indices: tuple[int, ...] | list[int] = (),
 ) -> Any:
     """Pack coerced values into address-free simpler ``TaskArgs``.
 
@@ -1164,6 +1165,8 @@ def _coerced_to_orch_args(  # pyright: ignore[reportUnusedFunction]
     from .tensor_arg import make_tensor_arg  # noqa: PLC0415
 
     orch_args = TaskArgs()
+    host_slots = set(host_tensor_indices)
+    tensor_slot = 0
     for i, arg in enumerate(coerced):
         if isinstance(arg, torch.Tensor):
             if not arg.is_contiguous():
@@ -1176,8 +1179,20 @@ def _coerced_to_orch_args(  # pyright: ignore[reportUnusedFunction]
                     f"Tensor at position {i} is on {arg.device}, expected CPU. "
                     f"Call .cpu() before packing into orch_args."
                 )
-            orch_args.add_tensor(make_tensor_arg(worker, arg))
+            tensor = make_tensor_arg(worker, arg)
+            if tensor_slot in host_slots:
+                from simpler.buffer import TensorTransfer  # noqa: PLC0415
+
+                orch_args.add_tensor(tensor, transfer=TensorTransfer.NONE)
+            else:
+                orch_args.add_tensor(tensor)
+            tensor_slot += 1
         elif isinstance(arg, DeviceTensor):
+            if tensor_slot in host_slots:
+                raise ValueError(
+                    f"Tensor at position {i} is used by HBG host control flow; pass a CPU tensor"
+                )
+            tensor_slot += 1
             try:
                 orch_args.add_tensor(make_tensor_arg(worker, arg))
             except (TypeError, ValueError) as e:
@@ -1191,6 +1206,8 @@ def _coerced_to_orch_args(  # pyright: ignore[reportUnusedFunction]
                 f"Argument at position {i} must be torch.Tensor, DeviceTensor or "
                 f"ctypes scalar, got {type(arg).__name__}"
             )
+    if any(type(slot) is not int or slot < 0 or slot >= tensor_slot for slot in host_slots):
+        raise ValueError("Invalid host_tensor_indices in runtime configuration")
     for arg in coerced:
         if isinstance(arg, _SimpleCData):
             orch_args.add_scalar(scalar_to_uint64(arg))
@@ -1312,6 +1329,13 @@ def _execute_golden_case(  # pyright: ignore[reportUnusedFunction]
         validate_golden,
     )
 
+    host_tensor_indices: list[int] = []
+    if runtime_name == "host_build_graph":
+        from ._artifact_sources import read_kernel_config  # noqa: PLC0415
+
+        kernel_config = read_kernel_config(work_dir / "kernel_config.py")
+        host_tensor_indices = kernel_config.RUNTIME_CONFIG.get("host_tensor_indices", ())
+
     # Load golden.py to get generate_inputs and compute_golden
     golden_module = _load_golden_module(golden_path)
 
@@ -1344,6 +1368,7 @@ def _execute_golden_case(  # pyright: ignore[reportUnusedFunction]
             runtime_name,
             device_id,
             enable_sdma=enable_sdma,
+            host_tensor_indices=host_tensor_indices,
             output_prefix=str(dfx_dir) if dfx_dir is not None else None,
             enable_chip_swimlane=pass_dfx.enable_chip_swimlane,
             enable_dump_args=pass_dfx.enable_dump_args,
@@ -1763,6 +1788,7 @@ def _execute_compiled(  # noqa: PLR0913
             level=level,
             aicpu_thread_num=effective_aicpu_thread_num,
             enable_sdma=enable_sdma,
+            host_tensor_indices=runtime_config.get("host_tensor_indices", ()),
             output_prefix=str(dfx_dir) if dfx_dir is not None else None,
             enable_chip_swimlane=pass_dfx.enable_chip_swimlane,
             enable_dump_args=pass_dfx.enable_dump_args,
