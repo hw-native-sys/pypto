@@ -255,6 +255,8 @@ including fresh, scalar, ambiguous, untraceable, or duplicate outputs — the
 original contract is preserved, so SSA order never becomes a guessed
 Out-writeback ABI.
 
+**Caller result types**: return types on the generated Call or Submit substitute the outlined function's fresh parameters with the actual caller arguments. Dynamic shape/view expressions must refer to caller variables, including inside tuple results; callee signatures keep their own parameter identities.
+
 **Naming**:
 
 - Default: `{original_func}_incore_{counter}` (e.g., `main_incore_0`, `main_incore_1`)

@@ -9,7 +9,7 @@ IR before PTO codegen.
 After `InitMemRef` and `MaterializeSemanticAliases` finalize allocation
 identities, the LHS and RHS of a `tile.reshape` may already point at the same
 `MemRef` root *and* carry identical
-`TileBufSignature`s. In that case the reshape is a no-op at the PTO level —
+`TileBufSignature`s. When their logical types also match, the reshape is a no-op at the PTO level —
 the per-var alloc model has pre-declared LHS with the same shape, layout,
 fractal, valid-shape and pad as RHS, and they share one allocation identity. There
 is nothing for `pto.treshape` to do.
@@ -69,7 +69,7 @@ program_folded = fold_pass(program)
 
 For each InCore-type function (others returned unchanged) `FoldNoOpReshapeMutator`
 walks the body. For every `AssignStmt` whose value is a `Call` to
-`tile.reshape`, it checks four conditions:
+`tile.reshape`, it checks five conditions:
 
 1. **LHS and source are tiles**: both `assign.var.type` and the source
    argument's type cast successfully to `TileType`.
@@ -77,14 +77,15 @@ walks the body. For every `AssignStmt` whose value is a `Call` to
    neither is null.
 3. **Same MemRef root**: `lhs_tile.memref->base.get() == rhs_tile.memref->base.get()`.
 4. **Identical signatures**: `TileBufSignature::FromTileType(lhs) == TileBufSignature::FromTileType(rhs)`.
+5. **Equal logical types**: source and result types are structurally equal. A rank-one `[N]` tile and a rank-two `[1, N]` tile can have identical PTO signatures, but still require an explicit reshape in typed IR.
 
-When all four hold, the `AssignStmt(lhs, Call(tile.reshape, [src, shape]))`
+When all five hold, the `AssignStmt(lhs, Call(tile.reshape, [src, shape]))`
 is replaced by `AssignStmt(lhs, src)`. The Call is dropped entirely; LHS
 becomes a pure alias of RHS at that statement, and downstream uses see
 exactly the same MemRef and type they did before.
 
 The pass touches no other statement form and never modifies a reshape
-whose LHS/RHS differ in any of those four ways — those cases require real
+whose LHS/RHS differ in any of those five ways — those cases require real
 `pto.treshape` emission.
 
 | Source pattern | Action |

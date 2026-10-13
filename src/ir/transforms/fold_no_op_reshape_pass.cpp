@@ -20,6 +20,7 @@
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/tile_buf_signature.h"
 #include "pypto/ir/type.h"
@@ -50,6 +51,10 @@ bool IsNoOpReshape(const AssignStmtPtr& assign) {
   auto lhs_tile = As<TileType>(assign->var_->GetType());
   auto rhs_tile = As<TileType>(src_var->GetType());
   if (!lhs_tile || !rhs_tile) return false;
+
+  // PTO normalizes a 1D tile to [1, N], but the IR types remain distinct.
+  // A plain assignment must preserve the logical type as well as storage.
+  if (!structural_equal(lhs_tile, rhs_tile)) return false;
 
   // Both sides must be backed by the same MemRef. MemoryReuse makes this
   // decision; if it didn't, the reshape is a real shape change and PTO must

@@ -62,18 +62,19 @@ program_folded = fold_pass(program)
 ## 算法
 
 对每一个 InCore 类型函数（其它原样返回），`FoldNoOpReshapeMutator` 遍历其函数体。
-对于每一条 `value` 是 `tile.reshape` Call 的 `AssignStmt`，依次检查四个条件：
+对于每一条 `value` 是 `tile.reshape` Call 的 `AssignStmt`，依次检查五个条件：
 
 1. **LHS 与源都是 tile**：`assign.var.type` 与第一个参数的类型都能成功转为 `TileType`。
 2. **两侧都有 MemRef**：双方的 `tile_type.memref_` 均已设置且不为空。
 3. **同一个 MemRef 根**：`lhs_tile.memref->base.get() == rhs_tile.memref->base.get()`。
 4. **签名相同**：`TileBufSignature::FromTileType(lhs) == TileBufSignature::FromTileType(rhs)`。
+5. **逻辑类型相等**：源与结果类型结构相等。一维 `[N]` tile 与二维 `[1, N]` tile 可以具有相同的 PTO 签名，但在带类型的 IR 中仍需保留显式 reshape。
 
-四者全部满足时，将 `AssignStmt(lhs, Call(tile.reshape, [src, shape]))` 替换为
+五者全部满足时，将 `AssignStmt(lhs, Call(tile.reshape, [src, shape]))` 替换为
 `AssignStmt(lhs, src)`。Call 被整个丢弃；自该语句起 LHS 成为 RHS 的纯别名，下游使用
 看到的 MemRef 与类型与之前完全一致。
 
-该 Pass 不修改任何其它语句形式；任何在以上四点中存在差异的 reshape 都被保留 ——
+该 Pass 不修改任何其它语句形式；任何在以上五点中存在差异的 reshape 都被保留 ——
 这些情况需要真正的 `pto.treshape`。
 
 | 源模式 | 行为 |

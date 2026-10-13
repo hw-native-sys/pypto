@@ -50,6 +50,71 @@ class TestOutlineIncoreScopes:
             and stmt.value.tuple is tuple_var
         ]
 
+    def test_dynamic_return_types_use_caller_shape_vars(self):
+        """Outlined tuple results must use the caller's shape identities."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                n: pl.Scalar[pl.INDEX],
+                source: pl.Tensor[[64, 8], pl.FP32],
+                output: pl.Out[pl.Tensor[[64, 8], pl.FP32]],
+            ) -> pl.Tensor[[64, 8], pl.FP32]:
+                view = pl.tensor.slice(source, [n, 8], [0, 0])
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="kernel"):
+                    if n > 0:
+                        first = pl.add(view, view)
+                        second = pl.mul(view, view)
+                    else:
+                        first = view
+                        second = view
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="async_kernel", allow_early_resolve=True):
+                    if n > 0:
+                        third = pl.add(first, second)
+                        fourth = pl.mul(first, second)
+                    else:
+                        third = first
+                        fourth = second
+                assembled = pl.tensor.assemble(output, third, [0, 0])
+                result = pl.tensor.assemble(assembled, fourth, [0, 0])
+                return result
+
+        before = passes.convert_to_ssa()(Before)
+        after = passes.outline_incore_scopes()(before)
+        props = passes.IRPropertySet()
+        props.insert(passes.IRProperty.SSAForm)
+        props.insert(passes.IRProperty.UseAfterDef)
+        props.insert(passes.IRProperty.AssignTypeSymmetry)
+        assert not passes.PropertyVerifierRegistry.verify(props, before)
+        diagnostics = passes.PropertyVerifierRegistry.verify(props, after)
+        assert not diagnostics, [d.message for d in diagnostics]
+
+        caller = after.get_function("main")
+        assert caller is not None
+        launches = []
+
+        class CollectLaunches(ir.IRVisitor):
+            def visit_call(self, op):
+                if isinstance(op.op, ir.GlobalVar):
+                    launches.append(op)
+                super().visit_call(op)
+
+            def visit_submit(self, op):
+                launches.append(op)
+                super().visit_submit(op)
+
+        CollectLaunches().visit_function(caller)
+        assert len(launches) == 2
+        for launch, use_submit in zip(launches, [False, True], strict=True):
+            assert isinstance(launch, ir.Submit if use_submit else ir.Call)
+            assert isinstance(launch.type, ir.TupleType)
+            assert len(launch.type.types) == (3 if use_submit else 2)
+            for result_type in launch.type.types[:2]:
+                assert isinstance(result_type, ir.TensorType)
+                ir.assert_structural_equal(result_type.shape[0], caller.params[0])
+
     def test_outline_simple_incore_scope(self):
         """Test outlining a simple InCore scope."""
 

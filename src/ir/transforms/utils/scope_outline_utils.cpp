@@ -1784,6 +1784,7 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
       }
     }
     [[nodiscard]] const std::unordered_map<const Expr*, ExprPtr>& GetVarRemap() const { return var_remap_; }
+    TypePtr RemapType(const TypePtr& type) { return RemapTypeViaVisitor(type); }
   };
   TrackingSubstituteMutator subst_mutator(var_substitution_map);
   auto transformed_body = subst_mutator.VisitStmt(pre_sub_body);
@@ -2207,7 +2208,21 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   // Determine call return type. When ``task_id_var`` is set, append the
   // TaskId element at the tail of the (already flat) return-type tuple so
   // the augmentation matches the ``pl.submit(...)`` shape.
-  std::vector<TypePtr> effective_return_types = return_types;
+  // Callee return types refer to fresh parameter identities. Instantiate them
+  // with caller arguments before attaching them to a Call or Submit; otherwise
+  // dynamic shapes leak callee-local Vars into caller assignments and uses.
+  std::unordered_map<const Var*, VarPtr> caller_var_map;
+  for (size_t i = 0; i < input_params.size(); ++i) {
+    auto caller_var = AsVarLike(call_args[i]);
+    INTERNAL_CHECK_SPAN(caller_var, op->span_) << "Internal error: outlined argument is not a variable";
+    caller_var_map.emplace(input_params[i].get(), caller_var);
+  }
+  TrackingSubstituteMutator caller_type_mutator(caller_var_map);
+  std::vector<TypePtr> effective_return_types;
+  effective_return_types.reserve(return_types.size() + (scope_task_id_var ? 1 : 0));
+  for (const auto& return_type : return_types) {
+    effective_return_types.push_back(caller_type_mutator.RemapType(return_type));
+  }
   if (scope_task_id_var) {
     effective_return_types.push_back(std::make_shared<ScalarType>(DataType::TASK_ID));
   }
