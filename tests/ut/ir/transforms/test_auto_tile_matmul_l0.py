@@ -3075,7 +3075,7 @@ class TestAutoTileMatmulL0MNTiling:
             _backend.reset_for_testing()
             _backend.set_backend_type(BackendType.Ascend910B)
             with passes.PassContext([], memory_planner=planner):
-                allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+                allocated = _default_allocation_snapshot(Before)
             return {
                 line.strip().split(":")[0]
                 for line in ir.python_print(allocated).splitlines()
@@ -3390,7 +3390,7 @@ class TestAutoTileMatmulL0MNTiling:
                 memory_planner=planner,
                 enable_pypto_l0c_double_buffer=planner == passes.MemoryPlanner.PYPTO,
             ):
-                allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+                allocated = _default_allocation_snapshot(Before)
             allocated_text = ir.python_print(allocated)
             if planner == passes.MemoryPlanner.PYPTO:
                 acc_buffers = {

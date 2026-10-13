@@ -32,6 +32,18 @@ _TILE_STORE_OP = ir.get_op("tile.store").name
 _TILE_MATMUL_OP = ir.get_op("tile.matmul").name
 _TILE_MATMUL_ACC_OP = ir.get_op("tile.matmul_acc").name
 
+
+def _default_allocation_snapshot(program: ir.Program) -> ir.Program:
+    """Inspect Tile storage before Buffer lowering, while checking the full pipeline."""
+    snapshot = None
+    for transform in PassManager(OptimizationStrategy.Default).passes:
+        if transform.get_name() == "LowerTileToBuffer":
+            snapshot = program
+        program = transform(program)
+    assert snapshot is not None
+    return snapshot
+
+
 M = 16
 N = 1152
 K_TOTAL = 1024
@@ -785,6 +797,32 @@ def test_below_minimum_physical_n_is_not_expanded_by_padding_bound():
     ir.assert_structural_equal(Before, after)
 
 
+def test_mat_scratch_preserves_producer_valid_reduction_extent():
+    """A boxed producer must not expose unwritten columns to a chained MAD."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend950)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tile[[64, 64], pl.FP32, pl.Mem.Mat],
+            b: pl.Tile[[64, 64], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[64, 13])],
+            e: pl.Tile[[64, 16], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[13, 16])],
+            out: pl.Out[pl.Tensor[[64, 16], pl.FP32]],
+        ) -> pl.Tensor[[64, 16], pl.FP32]:
+            c = pl.tile.matmul(a, b)
+            d = pl.tile.matmul(c, e)
+            return pl.tile.store(d, [0, 0], out)
+
+    after = passes.auto_tile_matmul_l0()(Before)
+    printed = ir.python_print(after)
+    assert "pl.tile.assemble(" in printed, printed
+    assert "pl.tile.set_validshape(" in printed, printed
+    assert "pl.Tile[[64, 64], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[64, 13])]" in printed
+
+
 def test_symbolic_padded_output_localizes_valid_shape_across_mn_grid():
     """The sub-grid intersection remains symbolic when valid N is dynamic."""
     _backend.reset_for_testing()
@@ -1237,7 +1275,7 @@ def test_canonical_split_k_dbc_membership_survives_inner_k_retiling(source_k_til
     before = _predicated_canonical_split_k(256, 384, 512, source_k_tile)
     with passes.PassContext([], memory_planner=planner, enable_pypto_l0c_double_buffer=True):
         after = passes.auto_tile_matmul_l0()(before)
-        allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(before)
+        allocated = _default_allocation_snapshot(before)
     printed = ir.python_print(after)
     assert printed.count("pl.tile.store(") == 6, printed
     stages = re.findall(r'"pipeline_membership": "2097152:(\d+)"', printed)
@@ -1284,7 +1322,7 @@ def test_canonical_split_k_grid_allocates_two_l0c_slots():
     with passes.PassContext(
         [], memory_planner=passes.MemoryPlanner.PYPTO, enable_pypto_l0c_double_buffer=True
     ):
-        allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+        allocated = _default_allocation_snapshot(Before)
     acc_buffers = {
         line.strip().split(":")[0]
         for line in ir.python_print(allocated).splitlines()

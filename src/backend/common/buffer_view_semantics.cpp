@@ -103,6 +103,7 @@ void ValidateBufferSubview(const std::vector<ir::ExprPtr>& args, const ir::TypeP
       << "Internal error: buffer.subview requires a source, an offsets tuple and optional valid extents";
   auto matrix = ir::As<ir::BufferType>(args[0]->GetType());
   if (matrix && matrix->memory_space_ == ir::MemorySpace::Acc) {
+    CHECK(args.size() == 2) << "buffer.subview of Acc storage takes valid extents from its static descriptor";
     auto view = ir::As<ir::BufferType>(result);
     auto offsets = ir::As<ir::MakeTuple>(args[1]);
     CHECK(view && view->memory_space_ == matrix->memory_space_ && matrix->shape_.size() == 2 &&

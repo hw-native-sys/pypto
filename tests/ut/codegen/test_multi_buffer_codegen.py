@@ -28,6 +28,7 @@ from pathlib import Path
 
 import pypto.language as pl
 import pytest
+from buffer_pipeline_utils import buffer_recipe_pipeline
 from pypto import backend, ir
 from pypto.backend import BackendType
 from pypto.backend._ptoas_locate import find_ptoas_binary
@@ -564,8 +565,12 @@ def _codegen(program: ir.Program, planner: passes.MemoryPlanner, *, buffer_ir: b
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend950 if buffer_ir else BackendType.Ascend910B)
     with passes.PassContext([], memory_planner=planner, enable_buffer_ir=buffer_ir):
-        pm = PassManager.get_strategy(OptimizationStrategy.Default)
-        optimized = pm.run_passes(program)
+        if buffer_ir:
+            optimized = buffer_recipe_pipeline().run(program)
+            kernel = optimized.get_function("kernel")
+            assert kernel is not None and kernel.ir_stage == ir.FunctionIRStage.Buffer
+        else:
+            optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
     func = next(f for f in optimized.functions.values() if f.name == "kernel")
     single = ir.Program([func], "kernel", optimized.span)
     # The planner also decides the address mode: PTOAS plans (no addr, level2),
@@ -655,11 +660,16 @@ class TestPtoasPlannerEmitsMultiBuffer:
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend950)
         with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
-            planned = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
-                SequentialCompatibleRegions
-            )
+            planned = SequentialCompatibleRegions
+            for transform in PassManager(OptimizationStrategy.Default).passes:
+                if transform.get_name() == "LowerTileToBuffer":
+                    break
+                if transform.get_name() != "SelectBufferIRFunctions":
+                    planned = transform(planned)
             reordered = ReverseAllocations().visit_program(planned)
             lowered = passes.lower_tile_to_buffer()(reordered)
+            kernel = lowered.get_function("kernel")
+            assert kernel is not None and kernel.ir_stage == ir.FunctionIRStage.Buffer
         mlir = codegen.PTOCodegen().generate(lowered, emit_tile_addr=False)
         assert mlir.count("pto.alloc_multi_tile") == 1
         assert mlir.index("pto.alloc_multi_tile") < mlir.index("pto.multi_tile_get")
@@ -676,7 +686,7 @@ class TestPtoasPlannerEmitsMultiBuffer:
         backend.set_backend_type(BackendType.Ascend950)
         with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=True):
             with pytest.raises(ValueError, match="equal physical row counts"):
-                PassManager.get_strategy(OptimizationStrategy.Default).run_passes(MixedAccRowStrides)
+                buffer_recipe_pipeline().run(MixedAccRowStrides)
 
     def test_first_branch_producer_selects_slot_before_if(self, tmp_path: Path):
         """Hoisting a phi cannot sever it from the explicit region."""
@@ -1216,6 +1226,40 @@ def test_auto_tile_padded_output_has_no_empty_native_partitions(M, N, K, dtype, 
     output = tmp_path / "padded_output.cpp"
     source.write_text(mlir)
     _run_ptoas(str(source), str(output), ["--pto-arch=a2", "--pto-level=level3", "--enable-insert-sync"])
+    assert output.is_file()
+
+
+def test_auto_tile_ptoas_dynamic_valid_rows_selects_single_c(tmp_path):
+    """Runtime valid extents cannot be represented by static PTOAS slot regions."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[128, 128], pl.BF16],
+            b: pl.Tensor[[128, 512], pl.BF16],
+            out: pl.Out[pl.Tensor[[128, 512], pl.FP32]],
+            rows: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[128, 512], pl.FP32]:
+            at = pl.load(a, [0, 0], [128, 128], valid_shape=[rows, 128], target_memory=pl.Mem.Mat)
+            bt = pl.load(b, [0, 0], [128, 512], target_memory=pl.Mem.Mat)
+            c = pl.tile.matmul(at, bt)
+            return pl.store(c, [0, 0], out)
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+    mlir = codegen.PTOCodegen().generate(optimized, emit_tile_addr=False)
+    assert "pto.tmatmul" in mlir
+    assert not any("loc=acc" in line for line in _lines(mlir, "pto.alloc_multi_tile")), mlir
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    source = tmp_path / "dynamic_valid.pto"
+    output = tmp_path / "dynamic_valid.cpp"
+    source.write_text(mlir)
+    _run_ptoas(str(source), str(output), ["--pto-arch=a2", "--pto-level=level2", "--enable-insert-sync"])
     assert output.is_file()
 
 

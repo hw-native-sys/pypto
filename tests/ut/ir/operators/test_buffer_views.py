@@ -238,5 +238,12 @@ def test_acc_subview_can_narrow_columns_and_valid_rows():
     ir.assert_structural_equal(view.type, result)
 
 
+def test_acc_subview_does_not_ignore_vec_runtime_valid_tuple():
+    source = ir.BufferType([64, 64], DataType.FP32, ir.MemorySpace.Acc)
+    result = ir.BufferType([64, 32], DataType.FP32, ir.MemorySpace.Acc)
+    with pytest.raises(ValueError, match="takes valid extents from its static descriptor"):
+        _view("buffer.subview", [_var(source), _offsets(), _offsets(64, 16)], result)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

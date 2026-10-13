@@ -275,6 +275,12 @@ and arbitrary-accumulator K-only contract are preserved. Unknown or zero valid
 extents retain the existing physical-bound behavior; this static rule does not
 claim runtime empty-tile handling for dynamic extents.
 
+An assembled Mat scratch restores the producer's valid rectangle before it is
+passed to consumers, even though its physical allocation retains the original
+box. PTOAS explicit dbC regions require static valid extents; runtime-valid
+outputs therefore exclude dbC before selection and retain single-C candidates.
+This restriction does not disable dbC for the other memory planners.
+
 ### Row-narrowed left operand: the seed declares `compact`
 
 When the left operand's valid rows are not provably its physical rows, the

@@ -1241,6 +1241,13 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   // contract with the planner/opt-in policy before dbC enters the design space.
   cfg.allow_double_buffer_c = dbc_eligibility == DbcSemanticEligibility::kEnabled &&
                               (memory_planner != MemoryPlanner::PyPTO || pypto_dbc);
+  // PTOAS multi-buffer regions require static valid extents for their slots.
+  // Reject unsupported dynamic views before selection, not after shrinking
+  // the tile to the double-buffer budget.
+  if (memory_planner == MemoryPlanner::PtoAS &&
+      (!As<ConstInt>(output_valid_shape[0]) || !As<ConstInt>(output_valid_shape[1]))) {
+    cfg.allow_double_buffer_c = false;
+  }
   cfg.full_k_dbc_route = full_k_dbc_route;
   cfg.reduction_iterations = reduction_iterations;
   cfg.reduction_pipeline_stages = reduction_pipeline_stages;
@@ -2831,7 +2838,19 @@ std::optional<std::pair<std::vector<StmtPtr>, VarPtr>> TryFoldMatScratch(const M
   // Acc->GM, so the hiding upside is smaller here, but the mechanism is the same.)
   const bool full_k = t.k == t.K;
   auto [stmts, scratch] = full_k ? BuildFullKPipelined(t, placer) : BuildSplitKGrid(t, placer);
-  return std::make_pair(std::move(stmts), scratch);
+  const auto valid_m = As<ConstInt>(t.output_valid_m);
+  const auto valid_n = As<ConstInt>(t.output_valid_n);
+  if (valid_m && valid_n && valid_m->value_ == t.M && valid_n->value_ == t.N) {
+    return std::make_pair(std::move(stmts), scratch);
+  }
+  // The scratch retains the original physical box, but only the producer's
+  // valid rectangle has been written. Preserve that contract for consumers,
+  // including when this output becomes their reduction dimension.
+  auto view = OpRegistry::GetInstance().Create("tile.set_validshape",
+                                               {scratch, t.output_valid_m, t.output_valid_n}, sp);
+  auto valid_scratch = std::make_shared<Var>(base + "_valid", view->GetType(), sp);
+  stmts.push_back(std::make_shared<AssignStmt>(valid_scratch, view, sp));
+  return std::make_pair(std::move(stmts), valid_scratch);
 }
 
 /// Classify the one semantic M/N placement this local matmul may use. The same
