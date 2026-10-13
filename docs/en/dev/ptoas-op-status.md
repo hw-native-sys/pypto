@@ -170,14 +170,14 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.tand | TAND | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 hardware passes signed/unsigned 8/16-bit patterns across full, row-tail, column-tail, and combined-tail shapes; A5 hardware verification pending |
 | pto.tor | TOR | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 hardware passes signed/unsigned 8/16-bit patterns across full, row-tail, column-tail, and combined-tail shapes; A5 hardware verification pending |
 | pto.txor | TXOR | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 hardware passes signed/unsigned 8/16-bit patterns with explicit tmp across all four shape classes; IR UT covers alias rejection; A5 hardware verification pending |
-| pto.tshl | TSHL | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
-| pto.tshr | TSHR | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
+| pto.tshl | TSHL | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | A2/A3 hardware evidence covers signed/unsigned 16-bit counts; active cases cover all signed/unsigned 8/16/32-bit widths, count boundaries, and full/row/column/combined valid shapes on A2/A3 and A5, with expanded hardware execution pending |
+| pto.tshr | TSHR | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | A2/A3 hardware evidence covers signed arithmetic and unsigned logical 16-bit shifts; active cases cover all signed/unsigned 8/16/32-bit widths, count boundaries, and full/row/column/combined valid shapes on A2/A3 and A5, with expanded hardware execution pending |
 | pto.tnot | TNOT | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | covered by the pre-existing same-name `tile.not` ST |
 | pto.tands | TANDS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 hardware passes signed/unsigned 8/16-bit tiles with immediate/SSA scalars across all four shape classes; A5 hardware verification pending |
 | pto.tors | TORS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 hardware passes signed/unsigned 8/16-bit tiles with immediate/SSA scalars across all four shape classes; A5 hardware verification pending |
 | pto.txors | TXORS | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A2/A3 hardware passes signed/unsigned 8/16-bit tiles with immediate/SSA scalars and explicit tmp across all four shape classes; IR UT covers alias rejection; A5 hardware verification pending |
-| pto.tshls | TSHLS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
-| pto.tshrs | TSHRS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | path exists; historical ISA/semantic issue requires revalidation against the current pin |
+| pto.tshls | TSHLS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | active A5 cases cover signed/unsigned 8/16/32-bit tiles, scalar boundaries, and all valid-shape modes; A2/A3 supports 16/32-bit tiles but pinned pto-isa `TShiftCheck` compares dst valid rows with src valid columns, so only square-valid cases are executable until upstream is fixed |
+| pto.tshrs | TSHRS | tile+tensor | ✅ | ✅ | ✅ | ❌ | — | active A5 cases cover signed/unsigned 8/16/32-bit tiles, scalar boundaries, and all valid-shape modes; A2/A3 supports 16/32-bit tiles but pinned pto-isa `TShiftCheck` compares dst valid rows with src valid columns, so only square-valid cases are executable until upstream is fixed |
 | **Data Rearrangement (15)** |  |  |  |  |  |  |  |  |
 | pto.tconcat | TCONCAT | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tconcatidx | TCONCAT (indexed) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
@@ -274,6 +274,6 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.tassign | TASSIGN | internal | ✅ | — | — | — | — | inactive backend hook; no standalone ST |
 
 **Stats**: 204 public/compatibility PTOAS ops; 113 have a pypto tile frontend and 75 have a tensor frontend
-(plus four non-tile/tensor `pl.prefetch.*` ops); 121 have same-name ST coverage
-(117 regular STs and 4 distributed STs); 51 lack same-name ST coverage (41 regular and 10 distributed);
+(plus four non-tile/tensor `pl.prefetch.*` ops); 136 have same-name ST coverage
+(132 regular STs and 4 distributed STs); 36 lack same-name ST coverage (26 regular and 10 distributed);
 the remaining 32 ops are not suitable for standalone STs.

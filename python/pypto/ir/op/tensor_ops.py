@@ -834,10 +834,9 @@ def _bitwise_dispatch(
 ) -> Call:
     """Build a tensor bitwise/shift call, routing a scalar ``rhs`` to ``scalar_op``.
 
-    Bitwise ops are integer-only, so an untyped literal keeps
-    ``_normalize_scalar_operand``'s INT32 default instead of the FP32 fallback the
-    arithmetic wrappers use — a float shift or mask has no meaning here and is
-    rejected by type deduction rather than silently promoted.
+    Integer literals use the same-width signed scalar encoding required by
+    PTOAS. Shift counts retain their original value for range checking; masks
+    may use the corresponding unsigned bit pattern.
 
     Args:
         tensor_op: Registered op name for the tensor-tensor form
@@ -850,10 +849,10 @@ def _bitwise_dispatch(
         Call expression for the selected operator
     """
     actual_span = _get_span_or_capture(span)
-    if scalar_op in {"tensor.ands", "tensor.ors", "tensor.xors"}:
-        rhs_expr = _normalize_signless_same_width_scalar_operand(lhs, rhs, actual_span)
-    else:
-        rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
+    is_shift = scalar_op in {_ir_core.get_op("tensor.shls").name, _ir_core.get_op("tensor.shrs").name}
+    rhs_expr = _normalize_signless_same_width_scalar_operand(
+        lhs, rhs, actual_span, wrap_unsigned_constants=not is_shift
+    )
     chosen = scalar_op if isinstance(rhs_expr.type, ScalarType) else tensor_op
     return _ir_core.create_op_call(chosen, [lhs, rhs_expr], {}, actual_span)
 
@@ -861,10 +860,10 @@ def _bitwise_dispatch(
 def _bitwise_scalar(op_name: str, lhs: Expr, rhs: int | Expr, span: Span | None) -> Call:
     """Build a tensor-scalar bitwise/shift call (the explicit ``*s`` entry points)."""
     actual_span = _get_span_or_capture(span)
-    if op_name in {"tensor.ands", "tensor.ors", "tensor.xors"}:
-        rhs_expr = _normalize_signless_same_width_scalar_operand(lhs, rhs, actual_span)
-    else:
-        rhs_expr = _normalize_scalar_operand(lhs, rhs, actual_span)
+    is_shift = op_name in {_ir_core.get_op("tensor.shls").name, _ir_core.get_op("tensor.shrs").name}
+    rhs_expr = _normalize_signless_same_width_scalar_operand(
+        lhs, rhs, actual_span, wrap_unsigned_constants=not is_shift
+    )
     return _ir_core.create_op_call(op_name, [lhs, rhs_expr], {}, actual_span)
 
 
@@ -984,6 +983,10 @@ def shl(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
     Automatically selects between tensor.shl (tensor << tensor) and
     tensor.shls (tensor << scalar) based on the rhs type.
 
+    Both tensors must use the same signed or unsigned 8/16/32-bit dtype.
+    Shift amounts must be in ``[0, bit_width - 1]``; constant scalar counts
+    outside that range are rejected when the op is built.
+
     Args:
         lhs: Left-hand side tensor (integer dtype)
         rhs: Shift amount as a tensor or integer scalar
@@ -999,13 +1002,14 @@ def shls(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
     """Element-wise bitwise left shift of tensor by scalar.
 
     Note:
-        The shift amount must be zero or positive. A negative constant is
-        rejected when the op is built; a negative value only known at runtime
-        is undefined behaviour on the hardware.
+        The shift amount must be in ``[0, bit_width - 1]``. An out-of-range
+        constant is rejected when the op is built; callers must ensure runtime
+        values are in range. Integer literals use the signed scalar dtype of
+        the same width as the tensor, including unsigned tensors.
 
     Args:
-        lhs: Left-hand side tensor (integer dtype)
-        rhs: Shift amount; must be >= 0
+        lhs: Left-hand side tensor (signed or unsigned 8/16/32-bit integer dtype)
+        rhs: Same-width signed scalar shift amount; must be in ``[0, bit_width - 1]``
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -1022,6 +1026,10 @@ def shr(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
     arithmetic for signed dtypes and logical for unsigned ones, matching the
     tile ops and the underlying ISA.
 
+    Both tensors must use the same signed or unsigned 8/16/32-bit dtype.
+    Shift amounts must be in ``[0, bit_width - 1]``; constant scalar counts
+    outside that range are rejected when the op is built.
+
     Args:
         lhs: Left-hand side tensor (integer dtype)
         rhs: Shift amount as a tensor or integer scalar
@@ -1037,13 +1045,14 @@ def shrs(lhs: Expr, rhs: int | Expr, span: Span | None = None) -> Call:
     """Element-wise bitwise right shift of tensor by scalar.
 
     Note:
-        The shift amount must be zero or positive. A negative constant is
-        rejected when the op is built; a negative value only known at runtime
-        is undefined behaviour on the hardware.
+        The shift amount must be in ``[0, bit_width - 1]``. An out-of-range
+        constant is rejected when the op is built; callers must ensure runtime
+        values are in range. Integer literals use the signed scalar dtype of
+        the same width as the tensor, including unsigned tensors.
 
     Args:
-        lhs: Left-hand side tensor (integer dtype)
-        rhs: Shift amount; must be >= 0
+        lhs: Left-hand side tensor (signed or unsigned 8/16/32-bit integer dtype)
+        rhs: Same-width signed scalar shift amount; must be in ``[0, bit_width - 1]``
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:

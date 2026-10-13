@@ -530,8 +530,13 @@ def _normalize_signless_same_width_scalar_operand(
     span: _ir.Span,
     *,
     retype_constants: bool = False,
+    wrap_unsigned_constants: bool = True,
 ) -> _ir.Expr:
-    """Normalize constants to PTOAS's same-width signless scalar encoding."""
+    """Normalize constants to PTOAS's same-width signless scalar encoding.
+
+    Shift counts disable unsigned bit-pattern wrapping so type deduction can
+    reject the original out-of-range value instead of a wrapped valid count.
+    """
     is_placeholder = not isinstance(scalar, _ir.Expr) or (
         isinstance(scalar, _ir.ConstInt) and scalar.dtype == DataType.INDEX
     )
@@ -557,7 +562,7 @@ def _normalize_signless_same_width_scalar_operand(
 
     signed_dtype, bits = signed_dtype_and_bits
     value = scalar_expr.value
-    if value >= 1 << (bits - 1):
+    if wrap_unsigned_constants and value >= 1 << (bits - 1):
         value -= 1 << bits
     return _ir.ConstInt(value, signed_dtype, span)
 

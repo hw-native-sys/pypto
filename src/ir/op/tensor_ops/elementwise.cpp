@@ -226,12 +226,10 @@ static void CheckBitwiseShapesMatch(const std::shared_ptr<const TensorType>& lhs
 }
 
 // Tensor-tensor bitwise/shift ops require equally shaped integer tensors.
-// AND/OR/XOR accept only matching 8/16/32-bit dtypes supported by their tile
-// lowering, while SHL/SHR keep the lhs element type because the shift count
-// does not participate in the result type.
+// All forms require matching 8/16/32-bit dtypes supported by tile lowering.
 TypePtr DeduceTensorOpBitwiseBinaryType(const std::vector<ExprPtr>& args,
                                         const std::vector<std::pair<std::string, std::any>>& kwargs,
-                                        const std::string& op_name, bool is_shift,
+                                        const std::string& op_name,
                                         bool preserve_matching_valid_shape = true) {
   CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
                           << args.size();
@@ -251,15 +249,13 @@ TypePtr DeduceTensorOpBitwiseBinaryType(const std::vector<ExprPtr>& args,
   CHECK(tensor_type2->dtype_.IsInt())
       << "The operator " << op_name << " requires an integer tensor dtype, but got "
       << tensor_type2->dtype_.ToString();
-  if (!is_shift) {
-    CHECK(IsPtoasBitwiseDataType(tensor_type1->dtype_) && IsPtoasBitwiseDataType(tensor_type2->dtype_))
-        << "The operator " << op_name
-        << " requires operand dtypes in {INT8, UINT8, INT16, UINT16, INT32, UINT32}, but got "
-        << tensor_type1->dtype_.ToString() << " and " << tensor_type2->dtype_.ToString();
-    CHECK(tensor_type1->dtype_ == tensor_type2->dtype_)
-        << "The operator " << op_name << " requires both operands to have the same dtype, but got "
-        << tensor_type1->dtype_.ToString() << " and " << tensor_type2->dtype_.ToString();
-  }
+  CHECK(IsPtoasBitwiseDataType(tensor_type1->dtype_) && IsPtoasBitwiseDataType(tensor_type2->dtype_))
+      << "The operator " << op_name
+      << " requires operand dtypes in {INT8, UINT8, INT16, UINT16, INT32, UINT32}, but got "
+      << tensor_type1->dtype_.ToString() << " and " << tensor_type2->dtype_.ToString();
+  CHECK(tensor_type1->dtype_ == tensor_type2->dtype_)
+      << "The operator " << op_name << " requires both operands to have the same dtype, but got "
+      << tensor_type1->dtype_.ToString() << " and " << tensor_type2->dtype_.ToString();
 
   CheckBitwiseShapesMatch(tensor_type1, tensor_type2, op_name);
 
@@ -271,19 +267,13 @@ TypePtr DeduceTensorOpBitwiseBinaryType(const std::vector<ExprPtr>& args,
   return std::make_shared<TensorType>(tensor_type1->shape_, tensor_type1->dtype_);
 }
 
-// Tensor-scalar bitwise/shift ops. Bitwise masks use the same-width signless
-// i8/i16/i32 encoding required by their tile lowering. Shift amounts retain
-// their separate integer-to-i32 lowering contract. The result keeps the
-// tensor's element type.
+// Tensor-scalar bitwise/shift ops use the same-width signless i8/i16/i32 scalar
+// encoding required by tile lowering. The result keeps the tensor element type.
 // Layered on the shared scalar deducer exactly as tensor.subs is (below): it already
 // validates arity and both operand kinds and, with preserve_lhs_dtype, returns the lhs
 // element type unchanged.
-// ``is_shift`` additionally rejects a statically negative shift count. It is scoped to
-// the shift ops on purpose: a negative *mask* is meaningful (``x & -1`` sets all bits),
-// whereas a negative shift distance has no defined result at any layer. Nothing
-// downstream catches it — PTO codegen maps tile.shls/shrs straight onto
-// pto.tshls/tshrs (src/backend/common/pto_ops_elementwise.cpp) with no range guard — so
-// a constant caught here would otherwise reach the hardware as garbage.
+// Shift counts must additionally be in [0, bit_width - 1]. Negative masks remain
+// valid for AND/OR/XOR, where -1 represents all bits set.
 TypePtr DeduceTensorOpBitwiseScalarType(const std::vector<ExprPtr>& args,
                                         const std::vector<std::pair<std::string, std::any>>& kwargs,
                                         const std::string& op_name, bool is_shift = false,
@@ -297,22 +287,22 @@ TypePtr DeduceTensorOpBitwiseScalarType(const std::vector<ExprPtr>& args,
   CHECK(scalar_type->dtype_.IsInt()) << "The operator " << op_name
                                      << " requires the shift/bitwise scalar to be an integer type, but got "
                                      << scalar_type->dtype_.ToString();
+  CHECK(IsPtoasBitwiseDataType(tensor_type->dtype_))
+      << "The operator " << op_name
+      << " requires tensor dtype in {INT8, UINT8, INT16, UINT16, INT32, UINT32}, but got "
+      << tensor_type->dtype_.ToString();
+  const auto expected_scalar_dtype = GetPtoasBitwiseScalarDataType(tensor_type->dtype_);
+  CHECK(scalar_type->dtype_ == expected_scalar_dtype)
+      << "The operator " << op_name << " requires a same-width signless scalar encoding for tensor dtype "
+      << tensor_type->dtype_.ToString() << ", but got " << scalar_type->dtype_.ToString() << "; expected "
+      << expected_scalar_dtype.ToString();
   if (is_shift) {
     if (auto shift_count = As<ConstInt>(args[1])) {
-      CHECK(shift_count->value_ >= 0)
-          << "The operator " << op_name << " requires a non-negative shift count, but got "
-          << shift_count->value_ << ". A negative shift distance has no defined result.";
+      CHECK(shift_count->value_ >= 0 &&
+            static_cast<size_t>(shift_count->value_) < tensor_type->dtype_.GetBit())
+          << "The operator " << op_name << " requires a scalar shift count in [0, "
+          << tensor_type->dtype_.GetBit() - 1 << "], but got " << shift_count->value_;
     }
-  } else {
-    CHECK(IsPtoasBitwiseDataType(tensor_type->dtype_))
-        << "The operator " << op_name
-        << " requires tensor dtype in {INT8, UINT8, INT16, UINT16, INT32, UINT32}, but got "
-        << tensor_type->dtype_.ToString();
-    const auto expected_scalar_dtype = GetPtoasBitwiseScalarDataType(tensor_type->dtype_);
-    CHECK(scalar_type->dtype_ == expected_scalar_dtype)
-        << "The operator " << op_name << " requires a same-width signless scalar encoding for tensor dtype "
-        << tensor_type->dtype_.ToString() << ", but got " << scalar_type->dtype_.ToString() << "; expected "
-        << expected_scalar_dtype.ToString();
   }
   return result_type;
 }
@@ -540,27 +530,10 @@ REGISTER_OP("tensor.cmp")
 // allocates so tensor-level callers never see it (same treatment as the
 // high-precision tensor.rsqrt scratch).
 //
-// Dtype strictness deliberately mirrors the *IR contract* of the tile op each one
-// lowers onto, not the current per-backend gaps:
-//   * tensor.not accepts int16/uint16 only, because tile.not's own type deduction
-//     does (src/ir/op/tile_ops/unary.cpp) — TNOT is a 16-bit-element instruction.
-//   * tensor.and/or/xor/shl/shr accept any integer width, because their tile
-//     counterparts do (DeduceTileOpElementwiseBinaryType(require_int) /
-//     DeduceTileOpShiftBinaryType).
-// Narrower *device* limits exist today on a2a3 — ptoas rejects pto.tand/tor/tshl/tshr
-// outright and TXOR/TXORS want int16/uint16 (see tests/st/runtime/ops/test_bitwise.py,
-// tracked in #1846). Encoding those here would make the tensor op stricter than the
-// tile op it lowers to, and would need reverting when the backend catches up; instead
-// these ops inherit the fixes automatically.
-//
-// Shape strictness is the opposite call, for a reason worth stating: a missing
-// row/col-expand *instruction* is permanent, not a backend that is catching up. There is
-// no pto.trowexpandand and none is planned, so a broadcasting operand pair can never
-// lower — rejecting it is describing the ISA, not freezing a temporary gap. (The tile
-// deducers still broadcast here, so pl.tile.and_([M,N],[M,1]) type-checks and fails
-// later; tightening those shared helpers touches shipped ops and is left as follow-up.
-// tensor.fmod and tensor.part_* have the same missing-row-expand shape and are likewise
-// unguarded today.)
+// Match the tile contract: binary operands have identical shapes and matching
+// 8/16/32-bit integer dtypes, and scalar forms use same-width signed IR encoding.
+// tensor.not instead accepts int16/uint16 only, matching the TNOT instruction.
+// No row/col-expand bitwise or shift instruction exists to lower broadcasting.
 // ============================================================================
 
 REGISTER_OP("tensor.and")
@@ -570,7 +543,7 @@ REGISTER_OP("tensor.and")
     .add_argument("rhs", "Right-hand side tensor (TensorType, integer dtype)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTensorOpBitwiseBinaryType(args, kwargs, "tensor.and", false);
+      return DeduceTensorOpBitwiseBinaryType(args, kwargs, "tensor.and");
     });
 
 REGISTER_OP("tensor.ands")
@@ -590,7 +563,7 @@ REGISTER_OP("tensor.or")
     .add_argument("rhs", "Right-hand side tensor (TensorType, integer dtype)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTensorOpBitwiseBinaryType(args, kwargs, "tensor.or", false);
+      return DeduceTensorOpBitwiseBinaryType(args, kwargs, "tensor.or");
     });
 
 REGISTER_OP("tensor.ors")
@@ -611,7 +584,7 @@ REGISTER_OP("tensor.xor")
     .add_argument("rhs", "Right-hand side tensor (TensorType, integer dtype)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTensorOpBitwiseBinaryType(args, kwargs, "tensor.xor", false, false);
+      return DeduceTensorOpBitwiseBinaryType(args, kwargs, "tensor.xor", false);
     });
 
 REGISTER_OP("tensor.xors")
@@ -632,14 +605,14 @@ REGISTER_OP("tensor.shl")
     .add_argument("rhs", "Shift-amount tensor (TensorType, integer dtype)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTensorOpBitwiseBinaryType(args, kwargs, "tensor.shl", true);
+      return DeduceTensorOpBitwiseBinaryType(args, kwargs, "tensor.shl");
     });
 
 REGISTER_OP("tensor.shls")
     .set_op_category("TensorOp")
     .set_description("Element-wise bitwise left shift of an integer tensor by an integer scalar")
     .add_argument("lhs", "Left-hand side tensor (TensorType, integer dtype)")
-    .add_argument("rhs", "Shift amount (ScalarType, integer dtype); must be >= 0")
+    .add_argument("rhs", "Same-width signed scalar shift amount; must be in [0, bit_width - 1]")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorOpBitwiseScalarType(args, kwargs, "tensor.shls", true);
@@ -652,14 +625,14 @@ REGISTER_OP("tensor.shr")
     .add_argument("rhs", "Shift-amount tensor (TensorType, integer dtype)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTensorOpBitwiseBinaryType(args, kwargs, "tensor.shr", true);
+      return DeduceTensorOpBitwiseBinaryType(args, kwargs, "tensor.shr");
     });
 
 REGISTER_OP("tensor.shrs")
     .set_op_category("TensorOp")
     .set_description("Element-wise bitwise right shift of an integer tensor by an integer scalar")
     .add_argument("lhs", "Left-hand side tensor (TensorType, integer dtype)")
-    .add_argument("rhs", "Shift amount (ScalarType, integer dtype); must be >= 0")
+    .add_argument("rhs", "Same-width signed scalar shift amount; must be in [0, bit_width - 1]")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorOpBitwiseScalarType(args, kwargs, "tensor.shrs", true);
