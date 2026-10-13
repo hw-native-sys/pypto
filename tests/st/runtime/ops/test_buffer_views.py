@@ -66,6 +66,7 @@ _SOURCE = (torch.arange(512, dtype=torch.float32).reshape(16, 32) * 13 - 1777) /
         for dtype in (torch.float16, torch.bfloat16, torch.float32, torch.int32)
     ]
 )
+@pytest.mark.platforms("a2a3", "a2a3sim", reason="Default Buffer rollout is limited to a2/a3.")
 def test_public_buffer_views(case_run, request):
     case_run.assert_passed()
     assert case_run.case.get_enable_buffer_ir()

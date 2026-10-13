@@ -259,6 +259,7 @@ _NESTED_CONFIG = torch.tensor([[0, 3], [1, 2], [2, 0], [2, 3]], dtype=torch.int6
         for planner in _PLANNERS
     ]
 )
+@pytest.mark.platforms("a2a3", "a2a3sim", reason="Default Buffer rollout is limited to a2/a3.")
 def test_public_buffer_control_flow(case_run, request):
     case_run.assert_passed()
     assert case_run.case.get_enable_buffer_ir()

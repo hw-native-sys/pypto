@@ -413,7 +413,8 @@ def _wider_golden(tensors, overwrite: bool) -> torch.Tensor:
 )
 def test_public_buffer_product_view_leaves_the_wider_accumulator_intact(case_run, request):
     text = _executed_native(case_run, request)
-    if text is not None:
+    # Static product descriptors belong to Buffer IR; A5 retains Tile valid operands.
+    if text is not None and case_run.case.platform in ("a2a3", "a2a3sim"):
         written = [
             line
             for line in text.splitlines()
