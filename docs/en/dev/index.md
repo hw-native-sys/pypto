@@ -180,6 +180,12 @@ the separate publishing job. Review output is rejected if it contains an exact
 long-form value from the Codex credential and is labelled as automated,
 untrusted content when posted.
 
+Review result uploads have three attempts, each limited to two minutes. Failed
+attempts wait 10 and then 30 seconds before retrying, replacing any leftover
+artifact with the same run-specific name. Retries stop after a successful upload
+or cancellation. If all attempts fail, the review job fails and publishing does
+not run; a completed assessment alone does not make the job successful.
+
 ChatGPT-managed Codex authentication is refreshed by a trusted weekly or manual
 maintenance run that has no checkout and uses an empty temporary directory.
 The refresh is serialized with reviews by a host lock and updates the persistent

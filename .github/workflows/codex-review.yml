@@ -496,7 +496,10 @@ jobs:
           echo "completed=true" >>"$GITHUB_OUTPUT"
 
       - name: Upload review result
+        id: upload_review
         if: steps.codex.outputs.completed == 'true'
+        continue-on-error: true
+        timeout-minutes: 2
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: codex-review-${{ github.run_id }}-${{ github.run_attempt }}
@@ -505,6 +508,44 @@ jobs:
           retention-days: 1
           compression-level: 9
           include-hidden-files: false
+          overwrite: true
+
+      - name: Wait before retrying review result upload
+        if: ${{ !cancelled() && steps.upload_review.outcome == 'failure' }}
+        run: sleep 10
+
+      - name: Retry review result upload
+        id: upload_review_retry
+        if: ${{ !cancelled() && steps.upload_review.outcome == 'failure' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codex-review-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/codex-review.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 9
+          include-hidden-files: false
+          overwrite: true
+
+      - name: Wait before final review result upload attempt
+        if: ${{ !cancelled() && steps.upload_review_retry.outcome == 'failure' }}
+        run: sleep 30
+
+      - name: Final review result upload attempt
+        id: upload_review_final
+        if: ${{ !cancelled() && steps.upload_review_retry.outcome == 'failure' }}
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codex-review-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/codex-review.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 9
+          include-hidden-files: false
+          overwrite: true
 
       - name: Remove review checkout
         if: ${{ always() && steps.workspace.outputs.path != '' }}

@@ -13,6 +13,7 @@ import importlib.util
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -1049,6 +1050,86 @@ def test_session_checkpoint_requires_valid_completed_review(publisher, tmp_path,
     else:
         assert publisher.extract_session(source, output) == session_id
         assert json.loads(output.read_text()) == result
+
+
+@pytest.mark.parametrize(
+    "completed,outcomes,cancel_after,waits,publishes",
+    [
+        (True, ("success",), None, [], True),
+        (True, ("failure", "success"), None, [10], True),
+        (True, ("failure", "failure", "success"), None, [10, 30], True),
+        (True, ("failure", "failure", "failure"), None, [10, 30], False),
+        (False, (), None, [], False),
+        (True, (), 0, [], False),
+        (True, ("failure",), 1, [], False),
+        (True, ("failure", "failure"), 2, [10], False),
+        (True, ("cancelled",), None, [], False),
+        (True, ("failure", "failure", "cancelled"), None, [10, 30], False),
+    ],
+)
+def test_review_upload_retries_preserve_publish_gate(
+    workflow, completed, outcomes, cancel_after, waits, publishes
+):
+    """Evaluate real step gates, including outcome before continue-on-error conversion."""
+    jobs = workflow["jobs"]
+    steps = jobs["review"]["steps"]
+    first = next(i for i, step in enumerate(steps) if step["name"] == "Upload review result")
+    last = next(i for i, step in enumerate(steps) if step["name"] == "Remove review checkout")
+    context: dict[str, Any] = {"steps": {"codex": {"outputs": {"completed": "true" if completed else ""}}}}
+    cancelled = cancel_after == 0
+    success = True
+    attempts = 0
+    actual_waits = []
+    for step in steps[first:last]:
+        if not workflow_expression(
+            step["if"], context, cancelled=cancelled, success=success and not cancelled
+        ):
+            if "id" in step:
+                context["steps"][step["id"]] = {"outcome": "skipped", "conclusion": "skipped"}
+            continue
+        if "uses" not in step:
+            assert step["run"].startswith("sleep ")
+            actual_waits.append(int(step["run"].removeprefix("sleep ")))
+            continue
+        outcome = outcomes[attempts]
+        attempts += 1
+        conclusion = "success" if outcome == "failure" and step.get("continue-on-error", False) else outcome
+        context["steps"][step["id"]] = {"outcome": outcome, "conclusion": conclusion}
+        success = success and conclusion == "success"
+        cancelled = cancelled or outcome == "cancelled" or attempts == cancel_after
+    assert attempts == len(outcomes)
+    assert actual_waits == waits
+    publish_context = {
+        "needs": {
+            "review": {
+                "result": "cancelled" if cancelled else "success" if success else "failure",
+                "outputs": context["steps"]["codex"]["outputs"],
+            }
+        }
+    }
+    assert bool(workflow_expression(jobs["publish"]["if"], publish_context, cancelled=cancelled)) == publishes
+
+
+def test_review_upload_attempts_replace_only_current_run_artifact(workflow):
+    """Partial uploads cannot conflict on retry, and the final failure stays fatal."""
+    steps = workflow["jobs"]["review"]["steps"]
+    uploads = [step for step in steps if step.get("id", "").startswith("upload_review")]
+    assert len(uploads) == 3
+    expected = {
+        "name": "codex-review-${{ github.run_id }}-${{ github.run_attempt }}",
+        "path": "${{ runner.temp }}/codex-review.json",
+        "if-no-files-found": "error",
+        "retention-days": 1,
+        "compression-level": 9,
+        "include-hidden-files": False,
+        "overwrite": True,
+    }
+    for upload in uploads:
+        assert upload["uses"] == "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+        assert upload["timeout-minutes"] == 2
+        assert upload["with"] == expected
+    assert all(upload["continue-on-error"] for upload in uploads[:2])
+    assert not uploads[-1].get("continue-on-error", False)
 
 
 if __name__ == "__main__":
