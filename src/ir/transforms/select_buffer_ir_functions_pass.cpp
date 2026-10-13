@@ -41,6 +41,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/attrs.h"
+#include "pypto/ir/transforms/utils/buffer_view_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
@@ -55,7 +56,8 @@ namespace {
 // is interpreted as an unsupported capability: malformed selected IR must fail.
 class BufferKernelSupport : public IRVisitor {
  public:
-  explicit BufferKernelSupport(const FunctionPtr& function) : return_types_(function->return_types_) {
+  explicit BufferKernelSupport(const FunctionPtr& function)
+      : return_types_(function->return_types_), views_(function->body_) {
     for (size_t i = 0; i < function->params_.size(); ++i) {
       const auto& param = function->params_[i];
       if (As<TensorType>(param->GetType())) {
@@ -255,6 +257,9 @@ class BufferKernelSupport : public IRVisitor {
     for (size_t i = 0; supported && i < yield->value_.size(); ++i) {
       CheckRegionType(region_->results[i]->GetType());
       VisitExpr(yield->value_[i]);
+      // A region result cannot export a branch-local window handle. Window
+      // carries require scalar metadata and explicit reconstruction first.
+      supported &= !views_.IsWindow(yield->value_[i]);
       if (NeedsStableAlias(region_->results[i]->GetType())) {
         region_->aliases[i] = StableAlias(yield->value_[i]);
         supported &= region_->aliases[i] != nullptr;
@@ -300,14 +305,22 @@ class BufferKernelSupport : public IRVisitor {
                    GetIntKwarg(call->kwargs_, "st_phase", 0) == 0 &&
                    !GetOptionalDoubleKwarg(call->kwargs_, "pre_quant") &&
                    !GetKwargOr<bool>(call->kwargs_, "pre_relu", false);
-    } else if (IsOp(call, "tile.reshape")) {
+    } else if (IsOp(call, "tile.slice") || IsOp(call, "tile.assemble")) {
+      CheckWindowCall(call);
+    } else if (IsOp(call, "tile.reshape") || IsOp(call, "tile.reinterpret_view")) {
       const auto source = call->args_.empty() ? nullptr : As<TileType>(call->args_[0]->GetType());
       const auto destination = As<TileType>(call->GetType());
       const auto source_bytes = TileBytes(source);
-      supported &=
-          call->args_.size() == 2 && call->kwargs_.empty() && source && destination &&
-          source->GetMemorySpace() == MemorySpace::Vec && destination->GetMemorySpace() == MemorySpace::Vec &&
-          source->dtype_ == destination->dtype_ && source_bytes && source_bytes == TileBytes(destination);
+      supported &= source && destination && source->GetMemorySpace() == MemorySpace::Vec &&
+                   destination->GetMemorySpace() == MemorySpace::Vec && source_bytes &&
+                   source_bytes == TileBytes(destination) && views_.HasDenseRowPitch(call->args_[0]);
+      if (IsOp(call, "tile.reshape")) {
+        supported &= call->args_.size() == 2 && call->kwargs_.empty() && source && destination &&
+                     source->dtype_ == destination->dtype_;
+      } else {
+        supported &= (call->args_.size() == 1 || call->args_.size() == 2) && call->kwargs_.size() == 1 &&
+                     call->kwargs_[0].first == "dtype";
+      }
     } else if (IsOp(call, "tile.move") || IsOp(call, "tile.extract") || IsOp(call, "tile.transpose_view") ||
                IsOp(call, "tile.matmul") || IsOp(call, "tile.matmul_acc")) {
       CheckMatrixCall(call);
@@ -326,6 +339,58 @@ class BufferKernelSupport : public IRVisitor {
   }
 
  private:
+  void CheckWindowCall(const CallPtr& call) {
+    const bool slice = IsOp(call, "tile.slice");
+    if (call->args_.size() < 3) {
+      supported = false;
+      return;
+    }
+    const auto parent = As<TileType>(call->args_[0]->GetType());
+    const auto window = As<TileType>(slice ? call->GetType() : call->args_[1]->GetType());
+    const auto offsets = As<MakeTuple>(call->args_[2]);
+    if (!parent || !window || parent->GetMemorySpace() != MemorySpace::Vec ||
+        window->GetMemorySpace() != MemorySpace::Vec || parent->dtype_ != window->dtype_ ||
+        !StaticShape(parent->shape_) || !StaticShape(window->shape_) || !offsets ||
+        offsets->elements_.size() != 2) {
+      supported = false;
+      return;
+    }
+    for (size_t i = 0; i < 2; ++i) {
+      const auto offset = As<ConstInt>(offsets->elements_[i]);
+      supported &=
+          offset && offset->value_ >= 0 &&
+          offset->value_ <= As<ConstInt>(parent->shape_[i])->value_ - As<ConstInt>(window->shape_[i])->value_;
+    }
+    if (slice) {
+      supported &= call->kwargs_.empty() && call->args_.size() <= 5;
+      const auto parent_view = views_.Get(call->args_[0]);
+      supported &= !parent_view.window || parent_view.root != nullptr;
+      if (call->args_.size() == 5) {
+        const auto dropped = As<MakeTuple>(call->args_[4]);
+        supported &= dropped && dropped->elements_.empty();
+      }
+    } else {
+      supported &= call->args_.size() == 3 && !views_.IsWindow(call->args_[0]) &&
+                   !GetOptionalDoubleKwarg(call->kwargs_, "pre_quant") &&
+                   !GetKwargOr<bool>(call->kwargs_, "pre_relu", false);
+      // Native Vec TMOV preserves row stride; copying a strided window into
+      // a destination with a different pitch needs a separate transfer recipe.
+      const auto source_view = views_.Get(call->args_[1]);
+      supported &= source_view.row_bytes && source_view.row_bytes == views_.Get(call->args_[0]).row_bytes &&
+                   (!source_view.window || (source_view.root && source_view.offsets));
+    }
+    if (!views_.IsWindow(call->args_[0])) {
+      const auto memory = parent->memref_.value_or(nullptr);
+      if (memory) {
+        const auto [entry, inserted] = window_parents_.emplace(memory->base_.get(), parent);
+        // One symbolic allocation can have only one native typed parent.
+        // Conflicting parent interpretations need additional legalization.
+        supported &= inserted || (entry->second->dtype_ == parent->dtype_ &&
+                                  SameShape(entry->second->shape_, parent->shape_));
+      }
+    }
+  }
+
   static std::optional<uint64_t> TileBytes(const TileTypePtr& tile) {
     if (!tile || !StaticShape(tile->shape_)) return std::nullopt;
     const std::vector<int64_t> shape{As<ConstInt>(tile->shape_[0])->value_,
@@ -452,6 +517,7 @@ class BufferKernelSupport : public IRVisitor {
       CheckRegionType(argument->GetType());
       CheckRegionType(loop->return_vars_[i]->GetType());
       VisitExpr(argument->initValue_);
+      supported &= !views_.IsWindow(argument->initValue_);
       if (NeedsStableAlias(argument->GetType())) {
         const auto alias = StableAlias(argument->initValue_);
         if (!alias) {
@@ -494,6 +560,8 @@ class BufferKernelSupport : public IRVisitor {
 
   Region* region_ = nullptr;
   const std::vector<TypePtr>& return_types_;
+  BufferViewAnalysis views_;
+  std::unordered_map<const Var*, TileTypePtr> window_parents_;
   std::unordered_map<const Var*, ParamDirection> directions_;
   std::unordered_map<const Var*, VarPtr> tensor_aliases_;
   std::unordered_map<const Var*, VarPtr> matrix_aliases_;

@@ -46,6 +46,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
@@ -55,6 +56,8 @@
 #include "pypto/ir/transforms/utils/allocation_constraint_analysis.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/buffer_ir_selection.h"
+#include "pypto/ir/transforms/utils/buffer_view_analysis.h"
+#include "pypto/ir/transforms/utils/l0c_footprint.h"
 #include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memory_footprint.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
@@ -199,6 +202,86 @@ std::pair<VarPtr, StmtPtr> CreateStorageMove(const VarPtr& source, const MemRefP
   auto move_stmt = std::make_shared<AssignStmt>(moved_var, move_call, source->span_);
   return {moved_var, move_stmt};
 }
+
+// Preserve an assemble source before its destination can overwrite the same
+// storage family. The copy is explicit before planning, so every planner sees
+// its lifetime, capacity and no-alias constraints. Exact self-writes stay views.
+class SnapshotAssembleSources : public IRMutator {
+ public:
+  explicit SnapshotAssembleSources(const FunctionPtr& function) : views_(function->body_) {
+    names_.Collect(function->body_, function->params_);
+  }
+
+  std::vector<StmtPtr> allocations;
+
+ protected:
+  ExprPtr VisitExpr_(const IterArgPtr& argument) override { return argument; }
+
+  StmtPtr VisitStmt_(const AssignStmtPtr& assign) override {
+    const auto call = As<Call>(assign->value_);
+    if (!call || !IsOp(call, "tile.assemble")) return assign;
+    const auto target = GetTileTypeWithMemRef(call->args_[0]->GetType());
+    const auto source = AsVarLike(call->args_[1]);
+    const auto source_type = source ? GetTileTypeWithMemRef(source->GetType()) : nullptr;
+    if (!target || !source_type || source_type->GetMemorySpace() != MemorySpace::Vec ||
+        target->GetMemorySpace() != MemorySpace::Vec ||
+        GetDefinedMemRef(target)->base_ != GetDefinedMemRef(source_type)->base_) {
+      return assign;
+    }
+    const auto slice = views_.Get(source).slice;
+    if (slice && slice->args_[0] == call->args_[0] && structural_equal(slice->args_[2], call->args_[2])) {
+      return assign;
+    }
+    const auto view = views_.Get(source);
+    const auto copied_source = view.window ? view.root : source;
+    CHECK_SPAN(copied_source && (!view.window || view.offsets), call->span_)
+        << "Buffer IR overlapping assemble requires a static window of a typed allocation";
+    const auto copied_type = GetTileTypeWithMemRef(copied_source->GetType());
+    const auto size = utils::StaticPhysicalAllocationBytes(copied_type, MemorySpace::Vec, nullptr);
+    CHECK_SPAN(size, call->span_) << "Buffer IR assemble snapshots require a static source allocation";
+    auto base = std::make_shared<Var>(names_.Fresh("mem_assemble_source_"), GetPtrType(), call->span_);
+    auto memory = std::make_shared<MemRef>(base, int64_t{0}, *size, call->span_);
+    allocations.push_back(CreateAllocStatement(memory, MemorySpace::Vec));
+    auto [snapshot, copy] = CreateStorageMove(
+        copied_source, memory, MemorySpace::Vec, [](const ExprPtr& value) { return value; },
+        names_.Fresh("assemble_source_"));
+    std::vector<StmtPtr> statements{copy};
+    if (view.window) {
+      std::vector<ExprPtr> offsets;
+      for (const auto offset : *view.offsets) {
+        offsets.push_back(std::make_shared<ConstInt>(offset, DataType::INDEX, call->span_));
+      }
+      const auto valid = tile_view_semantics::GetEffectiveTileView(*source_type).valid_shape;
+      auto window_call = OpRegistry::GetInstance().Create(
+          "tile.slice",
+          {snapshot, std::make_shared<MakeTuple>(source_type->shape_, call->span_),
+           std::make_shared<MakeTuple>(offsets, call->span_),
+           std::make_shared<MakeTuple>(valid, call->span_)},
+          {}, call->span_);
+      const auto old_memory = GetDefinedMemRef(source_type);
+      const auto old_origin = As<ConstInt>(GetDefinedMemRef(copied_type)->byte_offset_);
+      const auto old_offset = As<ConstInt>(old_memory->byte_offset_);
+      CHECK_SPAN(old_origin && old_offset, call->span_)
+          << "Buffer IR static assemble snapshot requires constant relative storage offsets";
+      auto window_memory = std::make_shared<MemRef>(base, old_offset->value_ - old_origin->value_,
+                                                    old_memory->size_, call->span_);
+      auto window = std::make_shared<Var>(names_.Fresh("assemble_window_"),
+                                          CloneTypeWithMemRef(source_type, window_memory), call->span_);
+      statements.push_back(std::make_shared<AssignStmt>(window, window_call, call->span_));
+      snapshot = window;
+    }
+    auto args = call->args_;
+    args[1] = snapshot;
+    auto rewritten = std::make_shared<Call>(*call);
+    rewritten->args_ = std::move(args);
+    statements.push_back(std::make_shared<AssignStmt>(assign->var_, rewritten, assign->span_));
+    return std::make_shared<SeqStmts>(statements, assign->span_);
+  }
+
+ private:
+  BufferViewAnalysis views_;
+  StorageNameSupply names_;
+};
 
 /// Describes where a TileType Var is defined.
 struct VarDef {
@@ -2945,7 +3028,9 @@ class ForbidAliasCollector : public IRVisitor {
   // also viewed/reshaped elsewhere) would never be looked up. Forbidden input
   // *values* need no such mapping: enforcement compares physical MemRef bases,
   // which every group member already shares.
-  explicit ForbidAliasCollector(const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups) {
+  ForbidAliasCollector(const std::map<VarPtr, std::vector<VarPtr>>& sharing_groups,
+                       const BufferViewAnalysis* views)
+      : views_(views) {
     for (const auto& [var, group] : sharing_groups) {
       if (!group.empty()) member_to_rep_[var.get()] = group[0].get();
     }
@@ -2987,6 +3072,19 @@ class ForbidAliasCollector : public IRVisitor {
         if (op_predicates::CastRequiresDisjointSource(call, !IsA5Target())) {
           forbid_arg(0);
         }
+        // In-place safety permits exact aliases, not a packed output placed
+        // inside a strided input window. Constrain the input's whole storage
+        // family before either planner chooses addresses.
+        if (views_ && !op_predicates::OutputInheritsSourceBuffer(call->op_->name_)) {
+          for (size_t i = 0; i < call->args_.size(); ++i) {
+            if (views_->IsWindow(call->args_[i])) forbid_arg(i);
+          }
+        }
+        if (views_ && IsOp(call, "tile.assemble")) {
+          const auto target = GetTypeMemRef(call->args_[0]->GetType()).value_or(nullptr);
+          const auto source = GetTypeMemRef(call->args_[1]->GetType()).value_or(nullptr);
+          if (target && source && target->base_ != source->base_) forbid_arg(1);
+        }
         RecordForOutput(op->var_, forbidden_inputs);
         // tile.transpose is registered not_inplace_safe(), so its output is
         // already forbidden from aliasing any input above (pto.ttrans writes
@@ -3013,6 +3111,7 @@ class ForbidAliasCollector : public IRVisitor {
   }
 
   ForbidAliasMap forbidden_;
+  const BufferViewAnalysis* views_;
   std::map<const Var*, std::vector<VarPtr>> tuple_forbidden_;
   std::map<const Var*, const Var*> member_to_rep_;  ///< sharing-group member -> representative
 };
@@ -5421,6 +5520,9 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
   StmtPtr new_body = func->body_;
   const auto* ctx = PassContext::Current();
   if (ctx != nullptr && ctx->GetEnableBufferIR()) {
+    SnapshotAssembleSources snapshots(func);
+    new_body = snapshots.VisitStmt(new_body);
+    new_body = InsertAllocsIntoBody(new_body, snapshots.allocations);
     // Resolve identity/view lineage before indexing old-value observations.
     // Branch storage is still provisional here: every dependent alias must
     // remain unsettled until CanonicalizeBranchStorage/YieldFixup selects it.
@@ -5700,7 +5802,10 @@ AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& fun
   result.target_hazard_inputs.looping_written_workspaces = workspace_collector.TakeLoopingVars();
   result.target_hazard_inputs.looping_written_workspace_bases = workspace_collector.TakeLoopingBases();
 
-  ForbidAliasCollector forbid_collector(lifetimes.var_sharing_groups);
+  const auto* context = PassContext::Current();
+  std::optional<BufferViewAnalysis> views;
+  if (context && context->GetEnableBufferIR() && IsBufferIRSelected(func)) views.emplace(func->body_);
+  ForbidAliasCollector forbid_collector(lifetimes.var_sharing_groups, views ? &*views : nullptr);
   forbid_collector.VisitStmt(func->body_);
   result.forbid_alias = forbid_collector.Take();
   return result;

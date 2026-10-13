@@ -542,10 +542,17 @@ def _buffer_set_valid(buffer, valid_shape):
     buffer._pypto_valid_shape = tuple(int(s) for s in valid_shape)
     return buffer
 
-def _buffer_alloc(shape, dtype, valid_shape, dynamic_valid):
+def _buffer_alloc(pools, space, address, shape, dtype, valid_shape, dynamic_valid):
     dynamic = iter(dynamic_valid)
     valid = tuple(next(dynamic) if s < 0 else s for s in valid_shape)
-    return _buffer_set_valid(torch.empty(shape, dtype=dtype), valid)
+    if address is None:
+        buffer = torch.empty(shape, dtype=dtype)
+    else:
+        size = torch.empty((), dtype=dtype).element_size()
+        for extent in shape:
+            size *= extent
+        buffer = pools[space][address:address + size].view(dtype).view(shape)
+    return _buffer_set_valid(buffer, valid)
 
 class _MatrixBuffer:
     # Each descriptor indexes shared physical bytes, including fractal relabels.
@@ -692,10 +699,13 @@ def _assemble(target, source, offsets, atomic=0):
     valid_shape = getattr(source, "_pypto_valid_shape", tuple(source.shape))
     slices = tuple(slice(o, o + s) for o, s in zip(offsets_t, valid_shape))
     valid_slices = tuple(slice(0, s) for s in valid_shape)
+    # Read the complete logical operand before writing a possibly overlapping
+    # destination. Torch's strided assignment need not snapshot that operand.
+    values = source[valid_slices].clone()
     if atomic:
-        target[slices] += source[valid_slices]
+        target[slices] += values
     else:
-        target[slices] = source[valid_slices]
+        target[slices] = values
     return target
 
 def _acc_init(acc, prod, init_cond):
@@ -1345,29 +1355,25 @@ _BINARY_OP_STR: dict[type, str] = {
 # ---------------------------------------------------------------------------
 
 
-class _MatrixAllocationSizes(_ir.IRVisitor):
-    """Index addressed cube allocations once so overlapping descriptors share bytes."""
+class _BufferAllocationSizes(_ir.IRVisitor):
+    """Index addressed allocations once so overlapping descriptors share bytes."""
 
     def __init__(self) -> None:
         super().__init__()
         self.sizes: dict[int, int] = {}
-        self.has_matrix = False
+        self.has_buffer = False
 
     def visit_iter_arg(self, op: _ir.IterArg) -> None:
         pass
 
     def visit_call(self, op: _ir.Call) -> None:
         descriptor = op.type
-        if (
-            op.op.name == _ir.get_op("buffer.alloc").name
-            and isinstance(descriptor, _ir.BufferType)
-            and descriptor.memory_space != _ir.MemorySpace.Vec
-        ):
-            self.has_matrix = True
+        if op.op.name == _ir.get_op("buffer.alloc").name and isinstance(descriptor, _ir.BufferType):
+            self.has_buffer = True
             if len(op.args) == 2:
                 address = op.args[1]
                 if not isinstance(address, _ir.ConstInt) or address.value < 0:
-                    raise ValueError("torch_codegen requires static nonnegative matrix allocation addresses")
+                    raise ValueError("torch_codegen requires static nonnegative buffer allocation addresses")
                 size = descriptor.dtype.get_bit() // 8
                 for extent in descriptor.shape:
                     size *= extent
@@ -1394,7 +1400,7 @@ class TorchCodegen(_ir.IRVisitor):
         # reusing object ids for short-lived nanobind wrappers.
         self._seen_var_refs: list[_ir.Var] = []
         self._name_counter: dict[str, int] = {}
-        self._matrix_pools_name = "matrix_storage"
+        self._buffer_pools_name = "buffer_storage"
         self._yield_targets: list[str] = []  # names to assign on yield
         self._check_shapes: bool = check_shapes
         self._group_meta: dict[str, dict[str, Any]] = group_meta or {}
@@ -1557,12 +1563,12 @@ class TorchCodegen(_ir.IRVisitor):
                 # so only check dtype — not shape — for all function params.
                 self._emit_shape_dtype_check(self._name_of(p), p.type, shape=False)
         self._emit_dyn_dim_symbols(func)
-        allocations = _MatrixAllocationSizes()
+        allocations = _BufferAllocationSizes()
         allocations.visit_stmt(func.body)
-        self._matrix_pools_name = self._unique_name("matrix_storage")
-        if allocations.has_matrix:
+        self._buffer_pools_name = self._unique_name("buffer_storage")
+        if allocations.has_buffer:
             self._emit(
-                f"{self._matrix_pools_name} = "
+                f"{self._buffer_pools_name} = "
                 f"{{space: torch.empty(size, dtype=torch.uint8) "
                 f"for space, size in {allocations.sizes!r}.items()}}"
             )
@@ -1664,15 +1670,16 @@ class TorchCodegen(_ir.IRVisitor):
         op_name = op.op.name
         if op_name == _ir.get_op("buffer.alloc").name:
             descriptor = self._buffer_descriptor(op)
+            address = arg_strs[1] if len(arg_strs) == 2 else "None"
             if descriptor.memory_space == _ir.MemorySpace.Vec:
                 self._expr_result = (
-                    f"_buffer_alloc({tuple(descriptor.shape)!r}, {_torch_dtype(descriptor.dtype)}, "
+                    f"_buffer_alloc({self._buffer_pools_name}, {descriptor.memory_space.value}, {address}, "
+                    f"{tuple(descriptor.shape)!r}, {_torch_dtype(descriptor.dtype)}, "
                     f"{tuple(descriptor.valid_shape)!r}, {arg_strs[0]})"
                 )
             else:
-                address = arg_strs[1] if len(arg_strs) == 2 else "None"
                 self._expr_result = (
-                    f"_matrix_alloc({self._matrix_pools_name}, {descriptor.memory_space.value}, {address}, "
+                    f"_matrix_alloc({self._buffer_pools_name}, {descriptor.memory_space.value}, {address}, "
                     f"{self._matrix_descriptor_args(descriptor)})"
                 )
         elif op_name == _ir.get_op("buffer.subview").name:
