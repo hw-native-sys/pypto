@@ -34,22 +34,31 @@ def buffer_debug(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
     return _arithmetic(a, b, out)
 
 
+@jit
+def matrix_debug(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        out[:, :] = pl.matmul(a[:, :], b[:, :], b_trans=True, out_dtype=pl.FP32)
+    return out
+
+
+@pytest.mark.parametrize("matrix", [False, True])
 @pytest.mark.parametrize("planner", _PLANNERS)
 def test_public_lower_and_compiled_pass_dumps_remain_numerically_debuggable(
-    tmp_path, monkeypatch, planner, pass_verification_instruments
+    tmp_path, monkeypatch, planner, pass_verification_instruments, matrix
 ):
     monkeypatch.setenv("PTOAS_ROOT", str(tmp_path / "missing_ptoas"))
     a = torch.arange(512, dtype=torch.float32).reshape(16, 32) / 32
     b = torch.linspace(-1, 1, 512).reshape(16, 32)
-    out = torch.empty_like(a)
-    expected = (a + b) * b
+    out = torch.empty((16, 16)) if matrix else torch.empty_like(a)
+    expected = a @ b.T if matrix else (a + b) * b
+    kernel = matrix_debug if matrix else buffer_debug
     config = RunConfig(
         platform="a2a3sim",
         save_kernels_dir=str(tmp_path / "compiled"),
         dump_passes=True,
     )
     with passes.PassContext(pass_verification_instruments, memory_planner=planner):
-        program = buffer_debug.lower(a, b, out, config=config)
+        program = kernel.lower(a, b, out, config=config)
     assert any(function.ir_stage == ir.FunctionIRStage.Buffer for function in program.functions.values())
     entry = next(
         function for function in program.functions.values() if ir.is_orchestration_like(function.func_type)
@@ -60,14 +69,14 @@ def test_public_lower_and_compiled_pass_dumps_remain_numerically_debuggable(
     torch.testing.assert_close(out, expected)
 
     with passes.PassContext(pass_verification_instruments, memory_planner=planner):
-        compiled = buffer_debug.compile(a, b, out, config=config)
+        compiled = kernel.compile(a, b, out, config=config)
     final_dump = next((compiled.output_dir / "passes_dump").glob("*LowerTileToBuffer.py"))
     final_program = ir.deserialize(final_dump.with_suffix(".msgpack").read_bytes())
     assert isinstance(final_program, ir.Program)
     assert any(
         function.ir_stage == ir.FunctionIRStage.Buffer for function in final_program.functions.values()
     )
-    compiled.validate_ir({"a": a, "b": b, "out": torch.empty_like(a)}, {"out": expected})
+    compiled.validate_ir({"a": a, "b": b, "out": torch.empty_like(out)}, {"out": expected})
 
 
 def test_buffer_storage_views_alias_bytes_and_destination_writes():

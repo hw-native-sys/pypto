@@ -43,27 +43,27 @@ def _setup_backend():
     backend.reset_for_testing()
 
 
-class _TileLoadCollector(ir.IRVisitor):
-    """Collect every ``tile.load`` Call in the visited IR."""
+class _LoadCollector(ir.IRVisitor):
+    """Collect every Tile or Buffer load Call in the visited IR."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.op_name = ir.get_op("tile.load").name
+        self.op_names = {ir.get_op("tile.load").name, ir.get_op("buffer.load").name}
         self.found: list[ir.Call] = []
 
     def visit_call(self, op: ir.Call) -> None:
-        if op.op.name == self.op_name:
+        if op.op.name in self.op_names:
             self.found.append(op)
         super().visit_call(op)
 
 
 def _loads_by_source(program: ir.Program) -> dict[str, list[ir.Call]]:
-    """Group every ``tile.load`` in ``program`` by the name of the tensor it reads.
+    """Group every Tile or Buffer load in ``program`` by the name of the tensor it reads.
 
     Keyed on the SSA name because the pipeline renames and re-homes functions;
     the source Var itself stays the kernel parameter the declaration resolved to.
     """
-    collector = _TileLoadCollector()
+    collector = _LoadCollector()
     for func in program.functions.values():
         collector.visit_function(func)
 
@@ -149,7 +149,7 @@ def test_undeclared_program_carries_no_cache_kwarg():
     after = _run_default_pipeline(_demo_program(declare=False))
     loads = _loads_by_source(after)
 
-    assert loads, "expected the pipeline to emit tile.loads"
+    assert loads, "expected the pipeline to emit loads"
     for calls in loads.values():
         assert all("cache" not in load.kwargs for load in calls)
 

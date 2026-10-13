@@ -24,7 +24,7 @@ torch_codegen(node: _ir.Program | _ir.Function, check_shapes: bool = False) -> s
 
 - Keep IR-to-Python expression/statement mapping readable.
 - Cover common tensor/tile operations.
-- Execute the default dense Vec Buffer transfers and registered vector/scalar arithmetic (including full), including destination writes and storage aliases, for `kernel.lower()` and `CompiledProgram.validate_ir()`. Structured control flow preserves simultaneous scalar yields and planned Tile carry copies; matrix expansion requires separate acceptance. Buffer pass dumps retain readable Python text and a lossless `.msgpack` companion; `validate_ir()` replays the companion because Buffer text is not executable DSL.
+- Execute the default dense Vec Buffer transfers and registered vector/scalar arithmetic (including full), including destination writes and storage aliases, for `kernel.lower()` and `CompiledProgram.validate_ir()`. Structured control flow preserves simultaneous scalar yields and planned Tile carry copies; ordinary cube operations model fractal layouts and shared physical storage, including transpose and wider accumulator views. Buffer pass dumps retain readable Python text and a lossless `.msgpack` companion; `validate_ir()` replays the companion because Buffer text is not executable DSL.
 - Simulate concurrent cross-core `tpush/tpop` behavior.
 - Provide actionable diagnostics for suspicious inputs (timeouts, invalid split dimensions, etc.).
 

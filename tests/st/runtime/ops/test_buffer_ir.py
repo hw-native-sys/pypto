@@ -173,6 +173,8 @@ def _executed_native(case_run, request) -> str | None:
     assert isinstance(program, ir.Program)
     kernels = [f for f in program.functions.values() if ir.is_incore_type(f.func_type)]
     assert kernels
+    if case_run.case.platform in ("a2a3", "a2a3sim"):
+        assert all(function.ir_stage == ir.FunctionIRStage.Buffer for function in kernels)
     for function in kernels:
         expected = (
             ir.FunctionIRStage.Buffer
@@ -193,8 +195,6 @@ _M = _K = _N = 64
 
 @pl.jit.incore
 def _cube_twice(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
-    # Recipe-level acceptance uses already-selected IR; normal rollout is tested separately.
-    pl.func_attr({"buffer_ir_selected": True})
     a_mat = pl.load(a, [0, 0], [_M, _K], target_memory=pl.MemorySpace.Mat)
     b_mat = pl.load(b, [0, 0], [_K, _N], target_memory=pl.MemorySpace.Mat)
     a_left = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
@@ -212,8 +212,6 @@ def _cube_twice_entry(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
 
 @pl.jit.incore
 def _cube_k_loop(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
-    # Recipe-level acceptance uses already-selected IR; normal rollout is tested separately.
-    pl.func_attr({"buffer_ir_selected": True})
     acc: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Acc] = pl.tile.create(
         [16, 16], pl.FP32, target_memory=pl.MemorySpace.Acc
     )
@@ -352,8 +350,6 @@ def _wider_accumulator_kernel(overwrite: bool):
     # is [16, 16], one whole 16-column Acc fractal box. The cube writes whole
     # boxes, so columns 16..31 must keep the seed product.
     def kernel(lhs: pl.Tensor, seed: pl.Tensor, partial: pl.Tensor, out: pl.Out[pl.Tensor]):
-        # Exercise the existing cube recipe independently of default kernel selection.
-        pl.func_attr({"buffer_ir_selected": True})
         lhs_mat = pl.load(lhs, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
         seed_mat = pl.load(seed, [0, 0], [16, 32], target_memory=pl.MemorySpace.Mat)
         partial_mat = pl.load(

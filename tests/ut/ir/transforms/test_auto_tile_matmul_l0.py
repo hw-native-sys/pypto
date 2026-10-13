@@ -46,6 +46,19 @@ from pypto import ir, passes
 from pypto.backend import BackendType
 
 
+def _default_allocation_snapshot(program: ir.Program) -> ir.Program:
+    """Inspect planner-owned Tile allocations while still running the full pipeline."""
+    from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+    snapshot = None
+    for transform in PassManager(OptimizationStrategy.Default).passes:
+        if transform.get_name() == "LowerTileToBuffer":
+            snapshot = program
+        program = transform(program)
+    assert snapshot is not None
+    return snapshot
+
+
 class TestAutoTileMatmulL0ExplicitL0Diagnostics:
     """Actionable failures for manual L0 operands that cannot fit."""
 
@@ -2956,7 +2969,6 @@ class TestAutoTileMatmulL0MNTiling:
         the two co-live L0C accumulators in distinct buffers. Default off: the same shape
         coalesces to a single accumulator. Pins the opt-in gate + the end-to-end
         allocation (the golden test above only pins the emit ordering)."""
-        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
         @pl.program
         class Before:
@@ -2979,7 +2991,7 @@ class TestAutoTileMatmulL0MNTiling:
 
         def acc_buffer_count() -> int:
             """Distinct L0C (Acc) buffers after the full Default pipeline."""
-            prog = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+            prog = _default_allocation_snapshot(Before)
             bases = {
                 line.strip().split(":")[0]
                 for line in ir.python_print(prog).splitlines()
@@ -3016,7 +3028,6 @@ class TestAutoTileMatmulL0MNTiling:
         the inner loop carrying ``pipeline_double_buffer_c``. PYPTO requires
         its legacy opt-in; DSA_RP enables dbC automatically and ignores it.
         """
-        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
         K = 128
         _backend.reset_for_testing()
@@ -3040,12 +3051,12 @@ class TestAutoTileMatmulL0MNTiling:
         pypto_opt_in = planner == passes.MemoryPlanner.PYPTO
         with passes.PassContext([], memory_planner=planner, enable_pypto_l0c_double_buffer=pypto_opt_in):
             tiled = passes.auto_tile_matmul_l0()(Before)
-            optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+            optimized = _default_allocation_snapshot(Before)
 
         if planner == passes.MemoryPlanner.DSA_RP:
             with passes.PassContext([], memory_planner=planner, enable_pypto_l0c_double_buffer=True):
                 explicit_tiled = passes.auto_tile_matmul_l0()(Before)
-                explicit_optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+                explicit_optimized = _default_allocation_snapshot(Before)
             ir.assert_structural_equal(tiled, explicit_tiled)
             ir.assert_structural_equal(optimized, explicit_optimized)
 
@@ -3232,7 +3243,6 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
 
     def test_marks_only_direct_inner_pipeline_when_two_accumulators_fit(self):
         """#2131 shape: shared L0A, moving L0B, and two 8 KiB L0C slots."""
-        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910B)
@@ -3265,7 +3275,7 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
 
         # PyPTO must preserve the two Acc slots without requiring the chooser's
         # experimental enable_pypto_l0c_double_buffer flag.
-        allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+        allocated = _default_allocation_snapshot(Before)
         allocated_text = ir.python_print(allocated)
 
         def alloc_bases(space: str) -> set[str]:
@@ -3292,7 +3302,6 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
         Complete pairs are scheduled as ``MMSS`` and an odd final stage as
         ``MS``; they must not become ``inner_stage`` co-live accumulators.
         """
-        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910B)
@@ -3315,7 +3324,7 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
                 sequence.append("S")
         assert expected in "".join(sequence), f"expected depth-two dbC chunks, got: {sequence}"
 
-        allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+        allocated = _default_allocation_snapshot(Before)
         acc_allocs = {
             line.strip().split(":")[0]
             for line in ir.python_print(allocated).splitlines()
@@ -3369,13 +3378,10 @@ class TestAutoTileMatmulL0ExistingPipelineDbC:
     def test_int32_dbc_allocations_use_non_overlapping_physical_ranges(self):
         """The admitted 16x512 INT32 ping-pong gets two physical 64 KiB
         allocations, not adjacent logical 32 KiB ranges that overlap in SRAM."""
-        from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910B)
-        allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
-            self._int8_pipeline(tile_n=512)
-        )
+        allocated = _default_allocation_snapshot(self._int8_pipeline(tile_n=512))
         printed = ir.python_print(allocated)
         alloc_lines = [line for line in printed.splitlines() if "tile.alloc(pl.Mem.Acc" in line]
         assert len(alloc_lines) == 2

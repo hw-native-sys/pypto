@@ -17,7 +17,7 @@ results and dependencies. Final structural, SSA, type and call checks cover the
 whole program. A selected kernel's compilation, verification or execution error
 propagates; there is no catch-and-recompile fallback.
 
-The default a2/a3 rollout accepts static rank-2 dense Vec kernels
+The default a2/a3 rollout accepts static rank-2 dense Vec and ordinary cube kernels
 with PYPTO, DSA_RP and PTOAS planners. Physical rows must be 32-byte aligned;
 valid extents may be static partial rectangles within the physical shape.
 
@@ -49,6 +49,17 @@ Static dense Vec reshape preserves equal physical bytes and supports repeated
 views of one planned allocation. Static nonnegative MemRef offsets must be
 32-byte aligned. Lowering verifies allocation capacity and window bounds; a
 selected malformed window fails instead of falling back to Tile IR.
+
+The ordinary cube path uses GM -> Mat -> Left/Right -> Acc -> GM, with
+`move`, `extract`, `transpose_view`, `matmul` and `matmul_acc`. FP16/BF16/FP32
+operands accumulate in FP32; INT8 operands accumulate in INT32. Literal and
+runtime `init_cond` select initializing or accumulating writes. Wider Acc valid
+regions use a product-shaped descriptor over the same storage. Matrix region
+carries must preserve one storage alias; arbitrary matrix carry copies, MX,
+FIFO, slots, scaled/quantized writeback and workspace operations remain excluded.
+Torch debugging models fractal layouts and shared addressed matrix storage,
+including transpose relabels and product views. Only complete untouched Acc
+boxes have defined preservation outside a partially valid product.
 
 A5 retains Tile IR until its default rollout has clean runtime acceptance.
 Reductions, slice/assemble/reinterpret views, runtime valid shapes, slots, helper ABIs

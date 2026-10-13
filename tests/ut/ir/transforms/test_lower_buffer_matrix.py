@@ -15,11 +15,14 @@ from pathlib import Path
 
 import pypto.language as pl
 import pytest
+import torch
 from buffer_pipeline_utils import buffer_recipe_pipeline
 from pypto import DataType, ir, passes
 from pypto.backend import BackendType
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import _run_ptoas
+from pypto.debug import torch_codegen
+from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import codegen
 
 from .buffer_test_utils import statements
@@ -161,7 +164,7 @@ def test_init_cond_selects_explicit_initializing_and_accumulating_writes(
     assert text.count("scf.if") == branches
 
 
-def _wider_accumulator(init_cond: str) -> ir.Program:
+def _wider_accumulator(init_cond: str, valid_columns: int = 24) -> ir.Program:
     return pl.parse_program(f"""
 @pl.program
 class WiderAccumulator:
@@ -174,8 +177,9 @@ class WiderAccumulator:
         seed_mat: pl.Tile[[16, 32], pl.FP16, pl.MemorySpace.Mat] = pl.load(
             seed, [0, 0], [16, 32], target_memory=pl.MemorySpace.Mat)
         partial_mat: pl.Tile[
-            [16, 32], pl.FP16, pl.MemorySpace.Mat, pl.TileView(valid_shape=[16, 24])
-        ] = pl.load(partial, [0, 0], [16, 32], valid_shape=[16, 24], target_memory=pl.MemorySpace.Mat)
+            [16, 32], pl.FP16, pl.MemorySpace.Mat, pl.TileView(valid_shape=[16, {valid_columns}])
+        ] = pl.load(partial, [0, 0], [16, 32], valid_shape=[16, {valid_columns}],
+                    target_memory=pl.MemorySpace.Mat)
         lhs_left = pl.move(lhs_mat, target_memory=pl.MemorySpace.Left)
         seed_right = pl.move(seed_mat, target_memory=pl.MemorySpace.Right)
         partial_right = pl.move(partial_mat, target_memory=pl.MemorySpace.Right)
@@ -406,6 +410,121 @@ def test_matmul_kwargs_are_rejected_rather_than_dropped():
     kernel.body.append(ir.AssignStmt(product, call, _SPAN))
     with pytest.raises(ValueError, match="unmodelled"):
         _lower_planned(kernel.program(), passes.MemoryPlanner.PTOAS)
+
+
+def _default_matrix(program, planner, enabled=None):
+    options = {} if enabled is None else {"enable_buffer_ir": enabled}
+    with passes.PassContext([], memory_planner=planner, **options):
+        result = PassManager(OptimizationStrategy.Default).run_passes(program)
+    kernels = [f for f in result.functions.values() if ir.is_incore_type(f.func_type)]
+    assert kernels and all(
+        f.ir_stage == (ir.FunctionIRStage.Functional if enabled is False else ir.FunctionIRStage.Buffer)
+        for f in kernels
+    )
+    namespace = {}
+    if enabled is not False:
+        restored = ir.deserialize(ir.serialize(result))
+        assert isinstance(restored, ir.Program)
+        ir.assert_structural_equal(result, restored, enable_auto_mapping=True)
+        exec(torch_codegen(restored), namespace)  # noqa: S102
+    return namespace
+
+
+def _matrix_data(rows, cols, dtype, modulus=7):
+    values = torch.arange(rows * cols).reshape(rows, cols).remainder(modulus) - modulus // 2
+    return values.to(dtype) if dtype == torch.int8 else values.to(dtype) / 4
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("enabled", [None, True, False])
+@pytest.mark.parametrize(
+    "operand,dtype",
+    [("FP16", torch.float16), ("BF16", torch.bfloat16), ("FP32", torch.float32), ("INT8", torch.int8)],
+)
+def test_default_cube_debug_uses_explicit_writes(planner, enabled, operand, dtype):
+    accumulator = "INT32" if dtype == torch.int8 else "FP32"
+    namespace = _default_matrix(_explicit_matmul(operand, accumulator), planner, enabled)
+    if enabled is False:
+        return
+    a, b = _matrix_data(64, 64, dtype), _matrix_data(64, 64, dtype, 5)
+    acc_dtype = torch.int32 if dtype == torch.int8 else torch.float32
+    output = torch.full((64, 64), -777, dtype=acc_dtype)
+    namespace["kernel"](a, b, output)
+    torch.testing.assert_close(output, 2 * (a.to(acc_dtype) @ b.to(acc_dtype)), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("transpose", [False, True])
+def test_default_cube_debug_extracts_and_relabels_shared_storage(planner, transpose):
+    namespace = _default_matrix(TransposedOperand if transpose else AutoTiledMatmul, planner)
+    a = _matrix_data(16 if transpose else 128, 128 if transpose else 512, torch.bfloat16)
+    b = _matrix_data(128 if transpose else 512, 128, torch.bfloat16, 5)
+    output = torch.full((a.shape[0], 128), -777.0)
+    namespace["kernel"](a, b, output)
+    torch.testing.assert_close(output, a.float() @ (b.float().T if transpose else b.float()), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize(
+    "init_cond", ["", ", init_cond=True", ", init_cond=False", ", init_cond=(flag == 0)"]
+)
+@pytest.mark.parametrize("valid_columns", [16, 24])
+def test_default_cube_debug_product_view_preserves_untouched_boxes(planner, init_cond, valid_columns):
+    # The device writes whole Acc boxes: only complete untouched boxes are asserted.
+    original = _wider_accumulator(init_cond, valid_columns)
+    namespace = _default_matrix(original, planner)
+    lhs = _matrix_data(16, 16, torch.float16)
+    seed = _matrix_data(16, 32, torch.float16, 5)
+    partial = _matrix_data(16, 32, torch.float16, 3)
+    first = lhs.float() @ seed.float()
+    second = lhs.float() @ partial[:, :valid_columns].float()
+    for flag in (0, 1):
+        overwrite = init_cond == ", init_cond=True" or (init_cond.endswith("(flag == 0)") and flag == 0)
+        output = torch.full((16, 32), -777.0)
+        namespace["kernel"](lhs, seed, partial, flag, output)
+        torch.testing.assert_close(
+            output[:, :valid_columns],
+            second if overwrite else first[:, :valid_columns] + second,
+            rtol=0,
+            atol=0,
+        )
+
+        if valid_columns == 16:
+            torch.testing.assert_close(output[:, 16:], first[:, 16:], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+def test_default_cube_debug_runtime_initialization(planner):
+    namespace = _default_matrix(_conditional_accumulation("(k0 == 0)"), planner)
+    a, b = _matrix_data(16, 64, torch.float32), _matrix_data(64, 16, torch.float32, 5)
+    output = torch.full((16, 16), -777.0)
+    namespace["kernel"](a, b, output)
+    torch.testing.assert_close(output, a @ b, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+def test_default_matrix_carry_rejects_storage_swaps_before_planning(planner):
+    original = pl.parse_program("""
+@pl.program
+class MatrixSwap:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, a: pl.Tensor[[16, 16], pl.FP16], b: pl.Tensor[[16, 16], pl.FP16],
+               out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+        lhs = pl.load(a, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
+        rhs = pl.load(b, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
+        first = pl.matmul(lhs, rhs)
+        second = pl.matmul(lhs, rhs)
+        for i, (left, right) in pl.range(3, init_values=(first, second)):
+            final_left, final_right = pl.yield_(right, left)
+        return pl.store(final_left, [0, 0], out)
+""")
+    with passes.PassContext([], memory_planner=planner):
+        manager = PassManager(OptimizationStrategy.Default)
+        boundary = manager.get_pass_names().index("SelectBufferIRFunctions")
+        for transform in manager.passes[: boundary + 1]:
+            original = transform(original)
+    kernel = original.get_function("kernel")
+    assert kernel is not None and kernel.attrs["buffer_ir_selected"] is False
 
 
 if __name__ == "__main__":

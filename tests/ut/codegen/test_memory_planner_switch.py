@@ -133,6 +133,39 @@ class StationaryMatmulPipelinedK:
         return result
 
 
+def _calls_with_loop_depth(program):
+    class Collector(ir.IRVisitor):
+        def __init__(self):
+            super().__init__()
+            self.depth = 0
+            self.calls = []
+
+        def visit_iter_arg(self, op):
+            pass
+
+        def visit_call(self, op):
+            self.calls.append((op, self.depth))
+            super().visit_call(op)
+
+    collector = Collector()
+    for function in program.functions.values():
+        pending = [(function.body, 0)]
+        while pending:
+            statement, depth = pending.pop()
+            if isinstance(statement, ir.SeqStmts):
+                pending.extend((child, depth) for child in reversed(statement.stmts))
+            elif isinstance(statement, ir.ForStmt):
+                pending.append((statement.body, depth + 1))
+            elif isinstance(statement, ir.IfStmt):
+                if statement.else_body is not None:
+                    pending.append((statement.else_body, depth))
+                pending.append((statement.then_body, depth))
+            else:
+                collector.depth = depth
+                collector.visit_stmt(statement)
+    return collector.calls
+
+
 def _run_pipeline(
     memory_planner: passes.MemoryPlanner,
     program: ir.Program = ElementwiseAdd,
@@ -314,24 +347,30 @@ def test_dsa_rp_loop_carry_is_in_place_with_resolved_address():
         passes.MemoryPlanner.PTOAS,
     ],
 )
-def test_stationary_matmul_loop_allocates_with_one_lhs_load(planner):
+@pytest.mark.parametrize("enabled", [False, True])
+def test_stationary_matmul_loop_allocates_with_one_lhs_load(planner, enabled):
     """All planners accept the extended Mat/L0A lifetime and emit one LHS load."""
-    optimized, _ = _run_pipeline(planner, StationaryMatmulLoop)
-    printed = ir.python_print(optimized)
-    lines = printed.splitlines()
-    loop_line = next(i for i, line in enumerate(lines) if "for n" in line)
-    lhs_loads = [i for i, line in enumerate(lines) if "lhs__ssa_v0_mat" in line and "tile.load" in line]
-    lhs_left_moves = [
-        i for i, line in enumerate(lines) if "lhs__ssa_v0_mat_Left" in line and "tile.move" in line
+    optimized, _ = _run_pipeline(planner, StationaryMatmulLoop, enable_buffer_ir=enabled)
+    calls = _calls_with_loop_depth(optimized)
+    load_name = ir.get_op("buffer.load" if enabled else "tile.load").name
+    copy_name = ir.get_op("buffer.copy" if enabled else "tile.move").name
+    lhs_loads = [
+        (call, depth)
+        for call, depth in calls
+        if call.op.name == load_name
+        and isinstance(call.args[0], ir.Var)
+        and call.args[0].name_hint.startswith("lhs")
     ]
-    rhs_loads = [i for i, line in enumerate(lines) if "rhs_n__tile" in line and "tile.load" in line]
-
-    assert len(lhs_loads) == 1
-    assert len(lhs_left_moves) == 1
-    assert len(rhs_loads) == 1
-    assert lhs_loads[0] < loop_line
-    assert lhs_left_moves[0] < loop_line
-    assert rhs_loads[0] > loop_line
+    rhs_loads = [
+        (call, depth)
+        for call, depth in calls
+        if call.op.name == load_name
+        and isinstance(call.args[0], ir.Var)
+        and call.args[0].name_hint.startswith("rhs")
+    ]
+    entry_copies = [call for call, depth in calls if call.op.name == copy_name and depth == 0]
+    assert len(lhs_loads) == len(rhs_loads) == len(entry_copies) == 1
+    assert lhs_loads[0][1] == 0 and rhs_loads[0][1] > 0
 
     # Codegen is the end-to-end allocation gate. PyPTO must emit resolved
     # addresses; PTOAS must retain auto-placement allocs for PlanMemory.
@@ -353,21 +392,28 @@ def test_stationary_matmul_loop_allocates_with_one_lhs_load(planner):
         passes.MemoryPlanner.PTOAS,
     ],
 )
-def test_nested_autotile_pipeline_allocates_safely(planner):
+@pytest.mark.parametrize("enabled", [False, True])
+def test_nested_autotile_pipeline_allocates_safely(planner, enabled):
     """Resident Mat panel plus loop-local ping/pong allocates under either planner."""
-    optimized, _ = _run_pipeline(planner, StationaryMatmulPipelinedK)
-    printed = ir.python_print(optimized)
-    lines = printed.splitlines()
+    optimized, _ = _run_pipeline(planner, StationaryMatmulPipelinedK, enable_buffer_ir=enabled)
+    calls = _calls_with_loop_depth(optimized)
+    load_name = ir.get_op("buffer.load" if enabled else "tile.load").name
+    extract_name = ir.get_op("buffer.extract" if enabled else "tile.extract").name
     lhs_loads = [
-        index for index, line in enumerate(lines) if "lhs__ssa_v0_mat" in line and "tile.load" in line
+        (call, depth)
+        for call, depth in calls
+        if call.op.name == load_name
+        and isinstance(call.args[0], ir.Var)
+        and call.args[0].name_hint.startswith("lhs")
     ]
-    assert len(lhs_loads) == 1
-    user_loop = next(i for i, line in enumerate(lines) if "for n__idx" in line)
-    k_loop = next(i for i, line in enumerate(lines) if "for c_n__tile_l0_ko" in line)
-    lhs_extracts = [i for i, line in enumerate(lines) if "c_n__tile_l0_a" in line and "tile.extract" in line]
-    assert lhs_loads[0] < user_loop < k_loop
-    assert len(lhs_extracts) == 2
-    assert all(index > k_loop for index in lhs_extracts)
+    lhs_extracts = [
+        (call, depth)
+        for call, depth in calls
+        if call.op.name == extract_name
+        and (call.args[-1].type if enabled else call.type).memory_space == ir.MemorySpace.Left
+    ]
+    assert len(lhs_loads) == 1 and lhs_loads[0][1] == 0
+    assert len(lhs_extracts) == 2 and all(depth >= 2 for _, depth in lhs_extracts)
 
     emits_addresses = planner != passes.MemoryPlanner.PTOAS
     mlir = _codegen(optimized, emit_tile_addr=emits_addresses)

@@ -13,7 +13,7 @@ PTO codegen 直接接收分配句柄和目标操作数。
 最终结构、SSA、类型和调用验证仍覆盖整个程序。选中后出现编译、验证或执行错误
 直接报告，不捕获错误后重新编译 Tile。
 
-默认支持 a2/a3 上 PYPTO、DSA_RP、PTOAS 规划器的静态二维稠密 Vec kernel。
+默认支持 a2/a3 上 PYPTO、DSA_RP、PTOAS 规划器的静态二维稠密 Vec 和普通 cube kernel。
 物理行须按 32 字节对齐；valid 可以是物理 shape 内的静态部分矩形。
 
 | 算子 | 元素类型 |
@@ -39,6 +39,14 @@ block/subblock 查询使用已有 Buffer 配方。
 静态稠密 Vec reshape 保持物理字节数不变，支持同一已规划分配的多个视图。
 静态非负 MemRef 偏移必须按 32 字节对齐。lowering 验证分配容量及窗口边界；
 选中的非法窗口直接报错，不回退到 Tile IR。
+
+普通 cube 路径为 GM -> Mat -> Left/Right -> Acc -> GM，支持 `move`、`extract`、
+`transpose_view`、`matmul` 和 `matmul_acc`。FP16/BF16/FP32 输入以 FP32 累加，
+INT8 输入以 INT32 累加。常量或运行时 `init_cond` 选择初始化或累加写入。
+较宽的 Acc valid 区域通过同一存储上的乘积视图写入。矩阵区域 carry 必须保持
+同一存储别名；任意矩阵 carry 复制、MX、FIFO、槽位、缩放/量化写回和 workspace
+操作仍不在默认范围。Torch 调试模拟分形布局及共享的已寻址矩阵存储，保留
+转置重标记和乘积视图；部分有效乘积之外仅完整未触及的 Acc box 保证保留。
 
 A5 在默认流水线保持 Tile，待取得运行时验收后再开放。
 reduction、slice/assemble/reinterpret 视图、runtime valid shape、槽位、helper ABI 和跨核资源

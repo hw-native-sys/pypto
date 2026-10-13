@@ -44,7 +44,7 @@ same contract as the MX ``layout`` attribute in ``test_mx_ops_codegen.py``).
 
 import pypto.language as pl
 import pytest
-from pypto import LogLevel, backend, codegen, ir, set_log_level
+from pypto import LogLevel, backend, codegen, ir, passes, set_log_level
 from pypto.backend import BackendType
 from pypto.ir import OptimizationStrategy, PassManager
 
@@ -262,8 +262,10 @@ def test_the_declaration_adds_only_the_attribute_offset_and_parameter():
     kernel's MLIR must reproduce the undeclared kernel's, line for line. That is
     what keeps the declaration a property of the load rather than a codegen mode.
     """
-    with_decl = _incore_mlir(DeclaredBypass)
-    without_decl = _incore_mlir(PlainMatmul)
+    # Compare the policy within Tile IR: bypass keeps a kernel off the Buffer path.
+    with passes.PassContext([], enable_buffer_ir=False):
+        with_decl = _incore_mlir(DeclaredBypass)
+        without_decl = _incore_mlir(PlainMatmul)
 
     assert BYPASS_ATTR in with_decl, f"declared kernel emitted no bypass hint:\n{with_decl}"
     assert BYPASS_ATTR not in without_decl, f"undeclared kernel must carry no hint:\n{without_decl}"

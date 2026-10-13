@@ -46,6 +46,7 @@
 #include "pypto/ir/transforms/utils/buffer_ir_selection.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -91,15 +92,26 @@ class BufferKernelSupport : public IRVisitor {
     if (!checked_types_.insert(type.get()).second) return;
     if (auto tile = As<TileType>(type)) {
       const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
-      if (!StaticShape(tile->shape_) || !backend::IsDenseVecBufferTile(tile, view)) {
+      if (!StaticShape(tile->shape_)) {
         supported = false;
         return;
       }
       const auto cols = As<ConstInt>(tile->shape_[1])->value_;
-      supported &= cols % (256 / tile->dtype_.GetBit()) == 0 &&
-                   (!view.start_offset || ConstantEquals(view.start_offset, 0));
-      supported &= view.stride.empty() || (view.stride.size() == 2 && ConstantEquals(view.stride[0], cols) &&
-                                           ConstantEquals(view.stride[1], 1));
+      const auto space = tile->GetMemorySpace();
+      if (space && backend::IsMatrixBufferSpace(*space)) {
+        const auto box = tile_view_semantics::GetBoxedTileAlignment(view, tile->dtype_);
+        supported &= backend::IsMatrixBufferDtype(*space, tile->dtype_) && box &&
+                     (view.fractal == (*space == MemorySpace::Acc ? 1024 : 512)) &&
+                     (view.blayout == TileLayout::row_major || view.blayout == TileLayout::col_major) &&
+                     view.pad == PadValue::null && view.compact == CompactMode::null && view.stride.empty();
+        if (box) supported &= As<ConstInt>(tile->shape_[0])->value_ % box->rows == 0 && cols % box->cols == 0;
+      } else {
+        supported &= backend::IsDenseVecBufferTile(tile, view) && cols % (256 / tile->dtype_.GetBit()) == 0;
+        supported &=
+            view.stride.empty() || (view.stride.size() == 2 && ConstantEquals(view.stride[0], cols) &&
+                                    ConstantEquals(view.stride[1], 1));
+      }
+      supported &= !view.start_offset || ConstantEquals(view.start_offset, 0);
       if (!view.valid_shape.empty()) {
         supported &= view.valid_shape.size() == tile->shape_.size();
         for (size_t i = 0; supported && i < view.valid_shape.size(); ++i) {
@@ -113,7 +125,8 @@ class BufferKernelSupport : public IRVisitor {
                      offset->value_ >= 0 && offset->value_ % 32 == 0;
       }
     } else if (auto tensor = As<TensorType>(type)) {
-      supported &= StaticShape(tensor->shape_) && backend::IsDenseBufferTransferDtype(tensor->dtype_);
+      supported &= StaticShape(tensor->shape_) &&
+                   (backend::IsDenseBufferTransferDtype(tensor->dtype_) || tensor->dtype_ == DataType::INT8);
       if (supported && tensor->tensor_view_) {
         const auto& view = *tensor->tensor_view_;
         supported &= view.layout == TensorLayout::ND && view.pad == PadValue::null;
@@ -173,7 +186,17 @@ class BufferKernelSupport : public IRVisitor {
 
   void VisitStmt_(const AssignStmtPtr& assign) override {
     IRVisitor::VisitStmt_(assign);
-    if (!supported || !As<TensorType>(assign->var_->GetType())) return;
+    if (!supported) return;
+    if (IsMatrixType(assign->var_->GetType())) {
+      ExprPtr source = assign->value_;
+      if (auto call = As<Call>(source);
+          call && (IsOp(call, "tile.matmul_acc") || IsOp(call, "tile.transpose_view")))
+        source = call->args_[0];
+      const auto alias = StableAlias(source);
+      matrix_aliases_.emplace(assign->var_.get(), alias ? alias : assign->var_);
+      return;
+    }
+    if (!As<TensorType>(assign->var_->GetType())) return;
     ExprPtr source = assign->value_;
     if (auto call = As<Call>(source); call && IsOp(call, "tile.store") && call->args_.size() == 3) {
       source = call->args_[2];
@@ -211,13 +234,13 @@ class BufferKernelSupport : public IRVisitor {
     for (size_t i = 0; supported && i < branch->return_vars_.size(); ++i) {
       const auto& result = branch->return_vars_[i];
       CheckRegionType(result->GetType());
-      if (As<TensorType>(result->GetType())) {
+      if (NeedsStableAlias(result->GetType())) {
         const auto& alias = then_region.aliases[i];
         if (!alias || alias != else_region.aliases[i]) {
           supported = false;
           return;
         }
-        tensor_aliases_.emplace(result.get(), alias);
+        AliasMap(result->GetType()).emplace(result.get(), alias);
       }
     }
   }
@@ -231,8 +254,8 @@ class BufferKernelSupport : public IRVisitor {
     for (size_t i = 0; supported && i < yield->value_.size(); ++i) {
       CheckRegionType(region_->results[i]->GetType());
       VisitExpr(yield->value_[i]);
-      if (As<TensorType>(region_->results[i]->GetType())) {
-        region_->aliases[i] = TensorAlias(yield->value_[i]);
+      if (NeedsStableAlias(region_->results[i]->GetType())) {
+        region_->aliases[i] = StableAlias(yield->value_[i]);
         supported &= region_->aliases[i] != nullptr;
       }
     }
@@ -266,10 +289,12 @@ class BufferKernelSupport : public IRVisitor {
     if (IsOp(call, "tile.load")) {
       has_load = true;
       CheckTransferParameter(call, 0, true);
+      CheckTransferTypes(call, true);
       supported &= GetIntKwarg(call->kwargs_, "cache", 0) == 0;
     } else if (IsOp(call, "tile.store")) {
       has_store = true;
       CheckTransferParameter(call, 2, false);
+      CheckTransferTypes(call, false);
       supported &= GetIntKwarg(call->kwargs_, "atomic", 0) == 0 &&
                    GetIntKwarg(call->kwargs_, "st_phase", 0) == 0 &&
                    !GetOptionalDoubleKwarg(call->kwargs_, "pre_quant") &&
@@ -278,9 +303,13 @@ class BufferKernelSupport : public IRVisitor {
       const auto source = call->args_.empty() ? nullptr : As<TileType>(call->args_[0]->GetType());
       const auto destination = As<TileType>(call->GetType());
       const auto source_bytes = TileBytes(source);
-      supported &= call->args_.size() == 2 && call->kwargs_.empty() && source && destination &&
-                   source->dtype_ == destination->dtype_ && source_bytes &&
-                   source_bytes == TileBytes(destination);
+      supported &=
+          call->args_.size() == 2 && call->kwargs_.empty() && source && destination &&
+          source->GetMemorySpace() == MemorySpace::Vec && destination->GetMemorySpace() == MemorySpace::Vec &&
+          source->dtype_ == destination->dtype_ && source_bytes && source_bytes == TileBytes(destination);
+    } else if (IsOp(call, "tile.move") || IsOp(call, "tile.extract") || IsOp(call, "tile.transpose_view") ||
+               IsOp(call, "tile.matmul") || IsOp(call, "tile.matmul_acc")) {
+      CheckMatrixCall(call);
     } else if (IsOp(call, "tile.create")) {
       supported &= As<TileType>(call->GetType()) != nullptr;
     } else if (IsOp(call, "tile.get_block_idx") || IsOp(call, "tile.get_block_num") ||
@@ -303,6 +332,74 @@ class BufferKernelSupport : public IRVisitor {
     return backend::PhysicalBufferBytes(std::make_shared<BufferType>(shape, tile->dtype_, MemorySpace::Vec));
   }
 
+  static std::vector<ExprPtr> ValidShape(const TileTypePtr& tile) {
+    const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
+    return view.valid_shape.empty() ? tile->shape_ : view.valid_shape;
+  }
+
+  void CheckTransferTypes(const CallPtr& call, bool load) {
+    if (call->args_.size() < 3) {
+      supported = false;
+      return;
+    }
+    const auto tile = As<TileType>(load ? call->GetType() : call->args_[0]->GetType());
+    const auto tensor = As<TensorType>(call->args_[load ? 0 : 2]->GetType());
+    if (!tile || !tensor) {
+      supported = false;
+      return;
+    }
+    const auto space = tile->GetMemorySpace();
+    if (space == MemorySpace::Vec || (load && space == MemorySpace::Mat)) {
+      supported &= tile->dtype_ == tensor->dtype_;
+    } else {
+      supported &=
+          !load && space == MemorySpace::Acc && CubeWritebackSupportsDataType(tile->dtype_, tensor->dtype_);
+    }
+  }
+
+  void CheckMatrixCall(const CallPtr& call) {
+    const auto destination = As<TileType>(call->GetType());
+    const auto source = call->args_.empty() ? nullptr : As<TileType>(call->args_[0]->GetType());
+    if (!source || !destination) {
+      supported = false;
+      return;
+    }
+    if (IsOp(call, "tile.move") || IsOp(call, "tile.extract")) {
+      supported &= source->GetMemorySpace() == MemorySpace::Mat &&
+                   (destination->GetMemorySpace() == MemorySpace::Left ||
+                    destination->GetMemorySpace() == MemorySpace::Right) &&
+                   source->dtype_ == destination->dtype_;
+      if (IsOp(call, "tile.move")) {
+        supported &= SameShape(source->shape_, destination->shape_) &&
+                     SameShape(ValidShape(source), ValidShape(destination));
+      } else {
+        supported &= call->args_.size() == 4;
+      }
+    } else if (IsOp(call, "tile.transpose_view")) {
+      supported &=
+          call->args_.size() == 1 && call->kwargs_.empty() && source->GetMemorySpace() == MemorySpace::Mat &&
+          destination->GetMemorySpace() == MemorySpace::Mat && source->dtype_ == destination->dtype_ &&
+          TileBytes(source) && TileBytes(source) == TileBytes(destination);
+    } else {
+      const bool accumulate = IsOp(call, "tile.matmul_acc");
+      const size_t lhs_index = accumulate ? 1 : 0;
+      if (call->args_.size() < lhs_index + 2) {
+        supported = false;
+        return;
+      }
+      const auto lhs = As<TileType>(call->args_[lhs_index]->GetType());
+      const auto rhs = As<TileType>(call->args_[lhs_index + 1]->GetType());
+      supported &= lhs && rhs && call->kwargs_.empty() && call->args_.size() <= (accumulate ? 4 : 2) &&
+                   destination->GetMemorySpace() == MemorySpace::Acc;
+      if (!supported) return;
+      supported &= lhs->GetMemorySpace() == MemorySpace::Left &&
+                   rhs->GetMemorySpace() == MemorySpace::Right && lhs->dtype_ == rhs->dtype_ &&
+                   backend::IsCubeOperandDtype(lhs->dtype_) &&
+                   destination->dtype_ == MatmulAccumulatorDataType(lhs->dtype_, rhs->dtype_);
+      if (accumulate) supported &= source->GetMemorySpace() == MemorySpace::Acc;
+    }
+  }
+
   void CheckRegionType(const TypePtr& type) {
     supported &= As<TileType>(type) || As<TensorType>(type) || As<ScalarType>(type);
     CheckType(type);
@@ -315,10 +412,22 @@ class BufferKernelSupport : public IRVisitor {
     bool yielded = false;
   };
 
-  VarPtr TensorAlias(const ExprPtr& value) const {
+  static bool IsMatrixType(const TypePtr& type) {
+    const auto tile = As<TileType>(type);
+    return tile && tile->GetMemorySpace() && backend::IsMatrixBufferSpace(*tile->GetMemorySpace());
+  }
+
+  static bool NeedsStableAlias(const TypePtr& type) { return As<TensorType>(type) || IsMatrixType(type); }
+
+  std::unordered_map<const Var*, VarPtr>& AliasMap(const TypePtr& type) {
+    return IsMatrixType(type) ? matrix_aliases_ : tensor_aliases_;
+  }
+
+  VarPtr StableAlias(const ExprPtr& value) {
     const auto var = AsVarLike(value);
-    const auto alias = tensor_aliases_.find(var.get());
-    return alias == tensor_aliases_.end() ? nullptr : alias->second;
+    auto& aliases = AliasMap(value->GetType());
+    const auto alias = aliases.find(var.get());
+    return alias == aliases.end() ? nullptr : alias->second;
   }
 
   void CheckRegion(const StmtPtr& body, Region& region) {
@@ -342,13 +451,13 @@ class BufferKernelSupport : public IRVisitor {
       CheckRegionType(argument->GetType());
       CheckRegionType(loop->return_vars_[i]->GetType());
       VisitExpr(argument->initValue_);
-      if (As<TensorType>(argument->GetType())) {
-        const auto alias = TensorAlias(argument->initValue_);
+      if (NeedsStableAlias(argument->GetType())) {
+        const auto alias = StableAlias(argument->initValue_);
         if (!alias) {
           supported = false;
           return;
         }
-        tensor_aliases_.emplace(argument.get(), alias);
+        AliasMap(argument->GetType()).emplace(argument.get(), alias);
       }
     }
     if constexpr (std::is_same_v<LoopPtr, WhileStmtPtr>) VisitExpr(loop->condition_);
@@ -356,13 +465,13 @@ class BufferKernelSupport : public IRVisitor {
     CheckRegion(loop->body_, region);
     for (size_t i = 0; supported && i < loop->iter_args_.size(); ++i) {
       const auto& argument = loop->iter_args_[i];
-      if (As<TensorType>(argument->GetType())) {
-        const auto initial = TensorAlias(argument->initValue_);
+      if (NeedsStableAlias(argument->GetType())) {
+        const auto initial = StableAlias(argument->initValue_);
         if (region.aliases[i] != initial) {
           supported = false;
           return;
         }
-        tensor_aliases_.emplace(loop->return_vars_[i].get(), initial);
+        AliasMap(argument->GetType()).emplace(loop->return_vars_[i].get(), initial);
       }
     }
   }
@@ -386,6 +495,7 @@ class BufferKernelSupport : public IRVisitor {
   const std::vector<TypePtr>& return_types_;
   std::unordered_map<const Var*, ParamDirection> directions_;
   std::unordered_map<const Var*, VarPtr> tensor_aliases_;
+  std::unordered_map<const Var*, VarPtr> matrix_aliases_;
   std::unordered_set<const Type*> checked_types_;
 };
 
