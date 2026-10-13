@@ -150,3 +150,7 @@ def test_preparation_and_container_use_fresh_checkout(review_steps):
         "Review in an isolated container"
     )
     assert "src=$PWD,dst=/workspace,readonly" in container["run"]
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
