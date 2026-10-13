@@ -174,23 +174,54 @@ jobs:
         with:
           name: codex-context-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/codex-context
+      - name: Create a fresh review checkout directory
+        id: workspace
+        run: |
+          set -Eeuo pipefail
+          review_checkout=$(mktemp -d "$GITHUB_WORKSPACE/codex-review.XXXXXX")
+          chmod 755 "$review_checkout"
+          printf 'path=%s\n' "${review_checkout#"$GITHUB_WORKSPACE/"}" >>"$GITHUB_OUTPUT"
+
       - name: Checkout PR head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.prepare.outputs.head }}
+          path: ${{ steps.workspace.outputs.path }}
           fetch-depth: 0
+          filter: ""
           persist-credentials: false
           # Fork contents are reviewed only inside the credential-isolated container.
           allow-unsafe-pr-checkout: true
 
-      - name: Ensure base and trusted workflow commits are available
+      - name: Fetch and verify complete review objects
+        working-directory: ${{ steps.workspace.outputs.path }}
+        env:
+          BASE_SHA: ${{ needs.prepare.outputs.base }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head }}
+          GIT_NO_LAZY_FETCH: "1"
         run: |
-          git fetch --no-tags --depth=1 \
-            origin "${{ needs.prepare.outputs.base }}"
-          git fetch --no-tags --depth=1 origin "$TRUSTED_WORKFLOW_SHA"
+          set -Eeuo pipefail
+          # Fetch complete ancestry and file contents before entering the sandbox.
+          git fetch --no-tags origin "$BASE_SHA" "$HEAD_SHA" "$TRUSTED_WORKFLOW_SHA"
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          test "$(git rev-parse --is-shallow-repository)" = false
+          if git config --get-regexp \
+            '^(extensions\.partialclone|remote\..*\.(promisor|partialclonefilter))$'
+          then
+            echo "Review checkout must not be a partial clone" >&2
+            exit 1
+          fi
+          merge_base=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+          git rev-list --objects --missing=error \
+            "$BASE_SHA" "$HEAD_SHA" "$merge_base" "$TRUSTED_WORKFLOW_SHA" >/dev/null
+          # Render patches, including binary contents, without repository diff helpers.
+          git --no-pager diff --no-ext-diff --no-textconv --binary \
+            --ignore-submodules=none "$merge_base" "$HEAD_SHA" >/dev/null
+          echo "Complete review diff verified: $merge_base..$HEAD_SHA"
 
       - name: Review in an isolated container
         id: codex
+        working-directory: ${{ steps.workspace.outputs.path }}
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -358,7 +389,7 @@ jobs:
             --memory 2g \
             --cpus 4 \
             --user 1002:1003 \
-            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
+            --mount "type=bind,src=$PWD,dst=/workspace,readonly" \
             --mount "type=bind,src=$schema,dst=/review-schema.json,readonly" \
             --tmpfs /tmp:rw,nosuid,nodev,noexec,size=256m,mode=1777 \
             --tmpfs /codex-home:rw,nosuid,nodev,size=64m,uid=1002,gid=1003,mode=0700 \
@@ -474,6 +505,12 @@ jobs:
           retention-days: 1
           compression-level: 9
           include-hidden-files: false
+
+      - name: Remove review checkout
+        if: ${{ always() && steps.workspace.outputs.path != '' }}
+        env:
+          REVIEW_CHECKOUT: ${{ steps.workspace.outputs.path }}
+        run: rm -rf -- "$GITHUB_WORKSPACE/$REVIEW_CHECKOUT"
 
   auth-maintenance:
     if: >-

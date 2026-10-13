@@ -134,6 +134,12 @@ head 已更新时，会跳过审查和产物发布。GitHub 状态仍可能在�
 辅助脚本测试检查。审查工作流使用宿主机解释器，不安装 Python，也不依赖审查容器内的
 Python 版本。
 
+每次审查都将 PR 的精确 head 检出到唯一目录中的全新完整 Git 仓库，不复用运行器
+缓存的对象库。启动容器前，宿主机获取 base、head 和可信工作流提交的完整历史，
+拒绝浅克隆（shallow clone）和部分克隆（partial clone），验证可达对象齐全，并生成
+merge base 到 head 的完整 diff，包括二进制内容。如果缺少对象，任务会在审查开始前
+失败；容器无需获得 Git fetch 权限。审查结束后会删除临时检出目录。
+
 Codex 在只读容器中以 UID/GID `1002:1003` 运行；仓库以只读方式挂载，同时移除
 能力（capability）、实施资源限制并使用内部 Docker 网络。拥有 PR 写权限的 GitHub
 令牌（token）仅提供给独立的发布任务（publishing job）。如果审查输出包含 Codex
