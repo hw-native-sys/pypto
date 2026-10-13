@@ -20,6 +20,7 @@
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/tile_buf_signature.h"
 #include "pypto/ir/type.h"
@@ -30,11 +31,14 @@ namespace pass {
 
 namespace {
 
-/// Returns true if @p assign is `lhs = tile.reshape(src, shape)` where the
-/// LHS and the source share the same MemRef root and produce identical
-/// `TileBufSignature`s. In that case the reshape is a pure no-op at the PTO
-/// level (the per-var alloc model already pre-declared LHS with the same
-/// shape and addr) and we can replace the call with a Var-to-Var assignment.
+/// Returns true if @p assign is `lhs = tile.reshape(src, shape)` that is a pure
+/// no-op, so the call can be replaced with a Var-to-Var assignment. That holds
+/// when either:
+///  - the LHS and the source share the same MemRef root and produce identical
+///    `TileBufSignature`s (the per-var alloc model already pre-declared LHS with
+///    the same shape and addr), or
+///  - neither side owns a MemRef and the two tile types are structurally equal
+///    (see below).
 bool IsNoOpReshape(const AssignStmtPtr& assign) {
   if (!assign || !assign->var_) return false;
   auto call = As<Call>(assign->value_);
@@ -50,6 +54,21 @@ bool IsNoOpReshape(const AssignStmtPtr& assign) {
   auto lhs_tile = As<TileType>(assign->var_->GetType());
   auto rhs_tile = As<TileType>(src_var->GetType());
   if (!lhs_tile || !rhs_tile) return false;
+
+  // A buffer-less tile -- a cross-core tpop result, or a view chained off one --
+  // has no allocation to compare, and a reshape of it lowers to a `pto.treshape`
+  // view. That op takes no valid_row / valid_col operands, so a symbolic
+  // valid_shape on the view is never set at runtime and consumers read an
+  // uninitialized extent. An identity reshape of one -- e.g. a rank-raising
+  // [16, 128] -> [16, 1, 128] that FlattenTileNdTo2D collapses back to [16, 128]
+  // -- is a no-op, and folding it is what keeps the runtime extent: the LHS
+  // becomes the source value, whose tpop carries it as operands. Require the
+  // full types to match, not just the TileBufSignature, which collapses every
+  // symbolic valid dim to one "dynamic" flag and so cannot prove the LHS denotes
+  // the same runtime extent.
+  if (!lhs_tile->memref_.has_value() && !rhs_tile->memref_.has_value()) {
+    return structural_equal(assign->var_->GetType(), src_var->GetType());
+  }
 
   // Both sides must be backed by the same MemRef. MemoryReuse makes this
   // decision; if it didn't, the reshape is a real shape change and PTO must
