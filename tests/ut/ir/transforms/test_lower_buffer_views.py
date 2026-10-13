@@ -14,11 +14,14 @@ from pathlib import Path
 import pypto
 import pypto.language as pl
 import pytest
+import torch
 from buffer_pipeline_utils import buffer_recipe_pipeline
 from pypto import DataType, ir, passes
 from pypto.backend import BackendType
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import _run_ptoas
+from pypto.debug import torch_codegen
+from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import codegen
 
 from .buffer_test_utils import statements
@@ -455,6 +458,59 @@ def test_assemble_preserves_a_partially_valid_target(
         ir.assert_structural_equal(copy.args[0].type, copy.args[1].type)
     text = _compile(tmp_path, lowered, ascend_backend, addressed=True)
     assert "pto.tmov ins(" in text
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("enabled", [None, True, False])
+@pytest.mark.parametrize("dtype_name", ["FP16", "BF16", "FP32", "INT32"])
+def test_default_reshape_preserves_bytes_in_debug(planner, enabled, dtype_name):
+    options = {} if enabled is None else {"enable_buffer_ir": enabled}
+    with passes.PassContext([], memory_planner=planner, **options):
+        result = PassManager(OptimizationStrategy.Default).run_passes(_reshaped_load(dtype_name))
+    kernel = result.get_function("kernel")
+    assert kernel is not None
+    assert kernel.ir_stage == (
+        ir.FunctionIRStage.Functional if enabled is False else ir.FunctionIRStage.Buffer
+    )
+    if enabled is False:
+        return
+    restored = _verify_round_trip(result)
+    assert len(_calls(restored, "buffer.alloc")) == 1
+    assert not _calls(restored, "buffer.copy")
+    dtype = {"FP16": torch.float16, "BF16": torch.bfloat16, "FP32": torch.float32, "INT32": torch.int32}[
+        dtype_name
+    ]
+    source = torch.arange(512).remainder(113).to(dtype).reshape(16, 32)
+    output = torch.full((8, 64), -777, dtype=dtype)
+    namespace = {}
+    exec(torch_codegen(restored), namespace)  # noqa: S102
+    namespace["kernel"](source, output)
+    torch.testing.assert_close(output, source.reshape(8, 64), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("offset", [0, 32, 64, 1024])
+def test_default_planned_window_keeps_capacity_and_aliases(planner, offset):
+    original = _planned_program(planner != passes.MemoryPlanner.PTOAS, offset=offset)
+    with passes.PassContext([], memory_planner=planner):
+        selected = passes.select_buffer_ir_functions()(original)
+    kernel = selected.get_function("kernel")
+    assert kernel is not None and kernel.attrs["buffer_ir_selected"] is True
+    result = _verify_round_trip(_lower(selected, planner))
+    assert len(_calls(result, "buffer.alloc")) == 1
+    assert not _calls(result, "buffer.copy")
+    output = torch.full((16, 64), -777.0)
+    namespace = {}
+    exec(torch_codegen(result), namespace)  # noqa: S102
+    namespace["kernel"](output)
+    torch.testing.assert_close(output, torch.full_like(output, 1.25), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("offset", [-32, 16])
+def test_default_selection_rejects_unaligned_or_negative_windows(offset):
+    selected = passes.select_buffer_ir_functions()(_planned_program(False, offset=offset))
+    kernel = selected.get_function("kernel")
+    assert kernel is not None and kernel.attrs["buffer_ir_selected"] is False
 
 
 if __name__ == "__main__":

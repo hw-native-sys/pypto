@@ -439,7 +439,7 @@ class TestMakeCacheKey:
         assert off != on
         assert off.compile_opts is not None and on.compile_opts is not None
         assert ("buffer_ir_version", 0) in off.compile_opts
-        assert ("buffer_ir_version", 3) in on.compile_opts
+        assert ("buffer_ir_version", 4) in on.compile_opts
 
     def test_runtime_splits_key(self):
         """The runtime is baked into the artifact's ``kernel_config.py`` and decides

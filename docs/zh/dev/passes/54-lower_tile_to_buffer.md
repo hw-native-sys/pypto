@@ -36,8 +36,12 @@ For 要求 INDEX 归纳变量和可证明为正的常量步长。动态/负步�
 Tile carry 的复制在 lowering 前规划；标量 yield 同时赋值，Torch 调试也保留交换语义。
 block/subblock 查询使用已有 Buffer 配方。
 
+静态稠密 Vec reshape 保持物理字节数不变，支持同一已规划分配的多个视图。
+静态非负 MemRef 偏移必须按 32 字节对齐。lowering 验证分配容量及窗口边界；
+选中的非法窗口直接报错，不回退到 Tile IR。
+
 A5 在默认流水线保持 Tile，待取得运行时验收后再开放。
-reduction、逻辑视图、runtime valid shape、槽位、helper ABI 和跨核资源
+reduction、slice/assemble/reinterpret 视图、runtime valid shape、槽位、helper ABI 和跨核资源
 在正常流水线保持 Tile。已有生产配方可通过显式底层 pass 流水线开发和测试，
 配方存在本身不代表默认支持。
 

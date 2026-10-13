@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
@@ -24,6 +25,7 @@
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/backend/common/buffer_elementwise_recipes.h"
 #include "pypto/backend/common/buffer_type_support.h"
+#include "pypto/backend/common/buffer_view_semantics.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -106,7 +108,9 @@ class BufferKernelSupport : public IRVisitor {
         }
       }
       if (const auto memory = tile->memref_.value_or(nullptr)) {
-        supported &= !memory->is_pinned_ && memory->slot_count_ == 1 && !memory->slot_index_;
+        const auto offset = As<ConstInt>(memory->byte_offset_);
+        supported &= !memory->is_pinned_ && memory->slot_count_ == 1 && !memory->slot_index_ && offset &&
+                     offset->value_ >= 0 && offset->value_ % 32 == 0;
       }
     } else if (auto tensor = As<TensorType>(type)) {
       supported &= StaticShape(tensor->shape_) && backend::IsDenseBufferTransferDtype(tensor->dtype_);
@@ -270,6 +274,15 @@ class BufferKernelSupport : public IRVisitor {
                    GetIntKwarg(call->kwargs_, "st_phase", 0) == 0 &&
                    !GetOptionalDoubleKwarg(call->kwargs_, "pre_quant") &&
                    !GetKwargOr<bool>(call->kwargs_, "pre_relu", false);
+    } else if (IsOp(call, "tile.reshape")) {
+      const auto source = call->args_.empty() ? nullptr : As<TileType>(call->args_[0]->GetType());
+      const auto destination = As<TileType>(call->GetType());
+      const auto source_bytes = TileBytes(source);
+      supported &= call->args_.size() == 2 && call->kwargs_.empty() && source && destination &&
+                   source->dtype_ == destination->dtype_ && source_bytes &&
+                   source_bytes == TileBytes(destination);
+    } else if (IsOp(call, "tile.create")) {
+      supported &= As<TileType>(call->GetType()) != nullptr;
     } else if (IsOp(call, "tile.get_block_idx") || IsOp(call, "tile.get_block_num") ||
                IsOp(call, "tile.get_subblock_idx")) {
       supported &= call->args_.empty() && call->kwargs_.empty();
@@ -283,6 +296,13 @@ class BufferKernelSupport : public IRVisitor {
   }
 
  private:
+  static std::optional<uint64_t> TileBytes(const TileTypePtr& tile) {
+    if (!tile || !StaticShape(tile->shape_)) return std::nullopt;
+    const std::vector<int64_t> shape{As<ConstInt>(tile->shape_[0])->value_,
+                                     As<ConstInt>(tile->shape_[1])->value_};
+    return backend::PhysicalBufferBytes(std::make_shared<BufferType>(shape, tile->dtype_, MemorySpace::Vec));
+  }
+
   void CheckRegionType(const TypePtr& type) {
     supported &= As<TileType>(type) || As<TensorType>(type) || As<ScalarType>(type);
     CheckType(type);

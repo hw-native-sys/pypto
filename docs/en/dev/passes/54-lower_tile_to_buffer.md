@@ -45,8 +45,13 @@ helper calls remain outside the default contract. Tile carry copies are planned
 before lowering; scalar yields assign simultaneously, including swaps in Torch
 numerical debugging. Block and subblock queries use their existing Buffer recipes.
 
+Static dense Vec reshape preserves equal physical bytes and supports repeated
+views of one planned allocation. Static nonnegative MemRef offsets must be
+32-byte aligned. Lowering verifies allocation capacity and window bounds; a
+selected malformed window fails instead of falling back to Tile IR.
+
 A5 retains Tile IR until its default rollout has clean runtime acceptance.
-Reductions, logical views, runtime valid shapes, slots, helper ABIs
+Reductions, slice/assemble/reinterpret views, runtime valid shapes, slots, helper ABIs
 and cross-core resources remain Tile in the normal pipeline. Existing production
 recipes may support more through explicit low-level pass pipelines; their
 availability alone does not widen default acceptance.
