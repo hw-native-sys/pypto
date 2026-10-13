@@ -300,6 +300,13 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     return analyzer_->Simplify(remapped);
   }
 
+  ExprPtr VisitExpr_(const IterArgPtr& op) override {
+    // Loop headers rebuild IterArgs once, before visiting their uses. Treat a
+    // use as a leaf like Var: the base mutator would revisit its type/init and
+    // could mint an undeclared clone when folding a MemRef offset in a branch.
+    return VisitExpr_(std::static_pointer_cast<const Var>(op));
+  }
+
   /// Refresh the Call's result type_ so the in-memory IR matches what a
   /// fresh parse would produce (needed for roundtrip structural equality).
   ///

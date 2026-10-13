@@ -553,6 +553,108 @@ class TestControlFlow:
         assert isinstance(condition, ir.Lt)
         assert condition.left.same_as(iter_arg)
 
+    def test_tensor_iter_arg_memref_offset_preserves_identity(self):
+        """Folding a use's MemRef offset must not invent a new carry definition."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                offset: pl.Scalar[pl.INDEX],
+                cond: pl.Scalar[pl.BOOL],
+                source: pl.Tensor[[8, 8], pl.FP32],
+            ):
+                view: pl.Tensor[[4, 8], pl.FP32, pl.MemRef("mem", offset * 8 * 4, 128)] = pl.tensor.slice(
+                    source, [4, 8], [offset, 0]
+                )
+                for i, (carry,) in pl.parallel(4, init_values=(view,)):
+                    if cond:
+                        pl.tensor.write(carry, [i, 0], pl.const(1.0, pl.FP32))
+                    else:
+                        pl.tensor.write(carry, [i, 0], pl.const(2.0, pl.FP32))
+                    _result = pl.yield_(carry)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                offset: pl.Scalar[pl.INDEX],
+                cond: pl.Scalar[pl.BOOL],
+                source: pl.Tensor[[8, 8], pl.FP32],
+            ):
+                view: pl.Tensor[[4, 8], pl.FP32, pl.MemRef("mem", offset * 8 * 4, 128)] = pl.tensor.slice(
+                    source, [4, 8], [offset, 0]
+                )
+                for i, (carry,) in pl.parallel(4, init_values=(view,)):
+                    if cond:
+                        pl.tensor.write(carry, [i, 0], pl.const(1.0, pl.FP32))
+                    else:
+                        pl.tensor.write(carry, [i, 0], pl.const(2.0, pl.FP32))
+                    _result = pl.yield_(carry)
+
+        props = passes.IRPropertySet()
+        props.insert(passes.IRProperty.SSAForm)
+        props.insert(passes.IRProperty.UseAfterDef)
+        assert not passes.PropertyVerifierRegistry.verify(props, Before)
+        after = passes.simplify()(Before)
+        diagnostics = passes.PropertyVerifierRegistry.verify(props, after)
+        assert not diagnostics, [d.message for d in diagnostics]
+        ir.assert_structural_equal(after, Expected)
+
+    def test_while_tensor_iter_arg_memref_offset_preserves_identity(self):
+        """Folding a use's MemRef offset must not invent a new carry definition."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                offset: pl.Scalar[pl.INDEX],
+                cond: pl.Scalar[pl.BOOL],
+                source: pl.Tensor[[8, 8], pl.FP32],
+            ):
+                view: pl.Tensor[[4, 8], pl.FP32, pl.MemRef("mem", offset * 8 * 4, 128)] = pl.tensor.slice(
+                    source, [4, 8], [offset, 0]
+                )
+                for (carry,) in pl.while_(init_values=(view,)):
+                    pl.cond(0 < offset)
+                    if cond:
+                        pl.tensor.write(carry, [0, 0], pl.const(1.0, pl.FP32))
+                    else:
+                        pl.tensor.write(carry, [0, 0], pl.const(2.0, pl.FP32))
+                    _result = pl.yield_(carry)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                offset: pl.Scalar[pl.INDEX],
+                cond: pl.Scalar[pl.BOOL],
+                source: pl.Tensor[[8, 8], pl.FP32],
+            ):
+                view: pl.Tensor[[4, 8], pl.FP32, pl.MemRef("mem", offset * 8 * 4, 128)] = pl.tensor.slice(
+                    source, [4, 8], [offset, 0]
+                )
+                for (carry,) in pl.while_(init_values=(view,)):
+                    pl.cond(0 < offset)
+                    if cond:
+                        pl.tensor.write(carry, [0, 0], pl.const(1.0, pl.FP32))
+                    else:
+                        pl.tensor.write(carry, [0, 0], pl.const(2.0, pl.FP32))
+                    _result = pl.yield_(carry)
+
+        props = passes.IRPropertySet()
+        props.insert(passes.IRProperty.SSAForm)
+        props.insert(passes.IRProperty.UseAfterDef)
+        assert not passes.PropertyVerifierRegistry.verify(props, Before)
+        after = passes.simplify()(Before)
+        diagnostics = passes.PropertyVerifierRegistry.verify(props, after)
+        assert not diagnostics, [d.message for d in diagnostics]
+        ir.assert_structural_equal(after, Expected)
+
     def test_while_body_fold_does_not_leak_var_remap_past_the_loop(self):
         """A fold inside a while body must not rewrite uses after the loop.
 
