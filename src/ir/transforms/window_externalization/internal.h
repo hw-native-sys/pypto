@@ -192,6 +192,8 @@ FunctionPtr RewriteCallee(const ProgramPtr& program, const FunctionPtr& func,
 
 /// Rewrite window writes / reads inside a cloned callee body to the local
 /// window shape. Implemented in localizers.cpp.
+/// Returns nullptr when a For carry changes its localized window provenance,
+/// or localized values cross unsupported If results or While carries/yields.
 StmtPtr LocalizeWindowWrites(const StmtPtr& body,
                              const std::unordered_map<const Var*, OutputRewriteInfo>& out_info_by_var,
                              const std::unordered_map<const Var*, ExprPtr>& new_out_vars,

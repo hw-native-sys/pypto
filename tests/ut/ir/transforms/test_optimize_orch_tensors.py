@@ -640,6 +640,62 @@ class TestLoopHoisting:
 class TestAssembleParentStrides:
     """Pattern 2: Attach parent-derived strides to Out params for assemble patterns."""
 
+    @pytest.mark.parametrize(
+        "access",
+        [
+            pytest.param("alias = stored\n        first = alias", id="alias_chain"),
+            pytest.param("pair = (stored, x)\n        first = pair[0]", id="tuple_projection"),
+            pytest.param(
+                "alias = stored\n        pair = (alias, x)\n        other = pair\n        first = other[0]",
+                id="tuple_alias",
+            ),
+            pytest.param(
+                "pair = (stored, x)\n        destination = pair[0]\n"
+                "        again = pl.tile.store(tile, [0, 0], destination)\n        first = again",
+                id="store_through_projection",
+            ),
+        ],
+    )
+    def test_output_stride_propagates_through_aliases(self, access):
+        """Pattern 2 propagates the store's refined view without windowization."""
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        x: pl.Tensor[[128, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        tile = pl.tile.load(x, [0, 0], [64, 64], [64, 64])
+        stored = pl.tile.store(tile, [0, 0], out)
+        {access}
+        back = pl.tile.load(first, [0, 0], [64, 64], [64, 64])
+        return stored
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        x: pl.Tensor[[128, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        chunk = pl.tensor.create([64, 64], dtype=pl.FP32)
+        result = self.kernel(x, chunk)
+        assembled = pl.tensor.assemble(out, result, [32, 32])
+        return assembled
+"""
+        before = pl.parse_program(source)
+        expected = pl.parse_program(
+            source.replace(
+                "out: pl.Out[pl.Tensor[[64, 64], pl.FP32]]",
+                "out: pl.Out[pl.Tensor[[64, 64], pl.FP32, "
+                "pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND)]]",
+            )
+        )
+        after = passes.optimize_orch_tensors()(before)
+        ir.assert_structural_equal(after, expected)
+        assert after.get_function("kernel__windowed") is None
+
     def test_out_param_gets_parent_stride(self):
         """When InCore result feeds tensor.assemble in orch, Out param gets parent strides."""
 
@@ -941,6 +997,56 @@ class TestAssembleLoopRewrite:
 
 class TestSliceInputStrides:
     """Pattern 4: Attach parent-derived strides to In params for slice patterns."""
+
+    @pytest.mark.parametrize(
+        "access",
+        [
+            pytest.param("alias = x\n        first = alias", id="alias_chain"),
+            pytest.param("pair = (x, x)\n        first = pair[0]", id="tuple_projection"),
+            pytest.param(
+                "alias = x\n        pair = (alias, x)\n        other = pair\n        first = other[1]",
+                id="tuple_alias",
+            ),
+        ],
+    )
+    def test_slice_input_stride_propagates_through_aliases(self, access):
+        """Pattern 4 must update every alias without relying on windowization."""
+        source = f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        x: pl.Tensor[[64, 64], pl.FP32],
+        out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        {access}
+        tile = pl.tile.load(first, [0, 0], [64, 64], [64, 64])
+        stored = pl.tile.store(tile, [0, 0], out)
+        return stored
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        x: pl.Tensor[[128, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        chunk = pl.tensor.slice(x, [64, 64], [32, 32])
+        result = self.kernel(chunk, out)
+        return result
+"""
+        before = pl.parse_program(source)
+        # The golden infers all local value types from an explicitly strided
+        # parameter. It never runs the pass under test.
+        expected = pl.parse_program(
+            source.replace(
+                "x: pl.Tensor[[64, 64], pl.FP32]",
+                "x: pl.Tensor[[64, 64], pl.FP32, pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND)]",
+            )
+        )
+        after = passes.optimize_orch_tensors()(before)
+        ir.assert_structural_equal(after, expected)
+        assert after.get_function("kernel__windowed") is None
 
     def test_in_param_gets_parent_stride_from_slice(self):
         """When orch slices a 2D parent and passes result to InCore In param, param gets parent strides."""
@@ -1320,6 +1426,165 @@ class Program:
         # parent-relative offset (``inner`` is read inside the loop body).
         assert "pl.tile.load(inner__ssa_v0, [128, 0]," not in printed, printed
         assert "__FREE_VAR" not in printed, printed
+
+    @pytest.mark.parametrize("localized", [False, True])
+    @pytest.mark.parametrize(
+        "control_flow",
+        [
+            pytest.param(
+                "if n > 0:\n"
+                "                alias = pair\n"
+                "                joined = pl.yield_(alias)\n"
+                "            else:\n"
+                "                alias = pair\n"
+                "                joined = pl.yield_(alias)",
+                id="if_result",
+            ),
+            pytest.param(
+                "for p, i in pl.while_(init_values=(pair, 0)):\n"
+                "                pl.cond(i < n)\n"
+                "                alias = p\n"
+                "                joined, final_i = pl.yield_(alias, i + 1)",
+                id="while_carry",
+            ),
+            pytest.param(
+                "initial = (x, x)\n"
+                "            for p, i in pl.while_(init_values=(initial, 0)):\n"
+                "                pl.cond(i < n)\n"
+                "                alias = pair\n"
+                "                joined, final_i = pl.yield_(alias, i + 1)",
+                id="while_yield",
+            ),
+        ],
+    )
+    def test_localized_control_flow_tuple_results_fall_back(self, control_flow, localized):
+        """Unsupported localized results decline the whole candidate; ordinary
+        tuples crossing the same control flow still permit windowization.
+        """
+        value = "stored" if localized else "x"
+        program = pl.parse_program(
+            f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        x: pl.Tensor[[512, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        n: pl.Scalar[pl.INDEX],
+    ) -> pl.Tensor[[512, 128], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP, windowize=True):
+            tile = pl.load(x, [128, 0], [128, 128])
+            stored = pl.store(tile, [128, 0], out)
+            pair = ({value}, x)
+            {control_flow}
+            first = joined[0]
+            back = pl.load(first, [128, 0], [128, 128])
+        return stored
+"""
+        )
+        after = _run_to_optimize_orch_tensors(program)
+        if localized:
+            assert after.get_function("main_incore_0__windowed") is None
+            ir.assert_structural_equal(after, _strip_windowize_attrs(_run_prereqs_only(program)))
+        else:
+            assert after.get_function("main_incore_0__windowed") is not None
+
+    @pytest.mark.parametrize("trip_count", [2, 3])
+    def test_tuple_carry_changing_windows_keeps_full_tensor_arguments(self, trip_count):
+        """A carry that swaps outputs cannot use one static offset per element."""
+        program = pl.parse_program(
+            f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        x: pl.Tensor[[512, 128], pl.FP32],
+        out_a: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        out_b: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+    ) -> tuple[pl.Tensor[[512, 128], pl.FP32], pl.Tensor[[512, 128], pl.FP32]]:
+        with pl.at(level=pl.Level.CORE_GROUP, windowize=True):
+            tile = pl.load(x, [0, 0], [128, 128])
+            out_a = pl.store(tile, [128, 0], out_a)
+            out_b = pl.store(tile, [256, 0], out_b)
+            pair = (out_a, out_b)
+            for i, (p,) in pl.range({trip_count}, init_values=(pair,)):
+                swapped = (p[1], p[0])
+                p2 = pl.yield_(swapped)
+            first = p2[0]
+            back = pl.load(first, [256, 0], [128, 128])
+        return out_a, out_b
+"""
+        )
+        after = _run_to_optimize_orch_tensors(program)
+        assert after.get_function("main_incore_0__windowed") is None
+        ir.assert_structural_equal(after, _strip_windowize_attrs(_run_prereqs_only(program)))
+        kernel = _get_function(after, "main_incore_0")
+        printed = ir.python_print(kernel)
+        assert "pl.tile.load(first__ssa_v0, [256, 0]," in printed, printed
+        assert "__FREE_VAR" not in printed, printed
+
+    @pytest.mark.parametrize("localized", [False, True])
+    def test_repeated_nested_tuple_values_preserve_window_offsets(self, localized):
+        """Repeated nested values preserve localized and empty provenance.
+
+        Nested tuples are constructed through inferred values, without nested
+        type annotations. Run only the target pass: print/parse roundtrips do
+        not support those annotations, and unrelated passes need not process
+        the DAG to exercise the localizer's resource use.
+        """
+        depth = 12
+        source = "stored" if localized else "x"
+        bindings = [f"pair0 = ({source}, {source})"]
+        bindings += [f"pair{i} = (pair{i - 1}, pair{i - 1})" for i in range(1, depth)]
+        bindings += [
+            f"for i, (p,) in pl.range(2, init_values=(pair{depth - 1},)):",
+            "    same = (p[0], p[1])",
+            "    p2 = pl.yield_(same)",
+            "value0 = p2[0]",
+        ]
+        bindings += [f"value{i} = value{i - 1}[0]" for i in range(1, depth)]
+        access = "\n        ".join(bindings)
+        program = pl.parse_program(
+            f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        x: pl.Tensor[[512, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+    ) -> pl.Tensor[[512, 128], pl.FP32]:
+        pl.func_attr({{"windowize": True}})
+        tile = pl.tile.load(x, [128, 0], [128, 128], [128, 128])
+        stored = pl.tile.store(tile, [128, 0], out)
+        {access}
+        back = pl.tile.load(value{depth - 1}, [128, 0], [128, 128], [128, 128])
+        return stored
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        x: pl.Tensor[[512, 128], pl.FP32],
+        out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+    ) -> pl.Tensor[[512, 128], pl.FP32]:
+        result = self.kernel(x, out)
+        return result
+"""
+        )
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            after = passes.optimize_orch_tensors()(program)
+        kernel = _get_function(after, "kernel__windowed")
+        loads = _calls_named(ir.Program([kernel], "Windowed", kernel.span), "tile.load")
+        assert len(loads) == 2
+        offsets = loads[1].args[1]
+        assert isinstance(offsets, ir.MakeTuple)
+        values = []
+        for value in offsets.elements:
+            assert isinstance(value, ir.ConstInt)
+            values.append(value.value)
+        assert values == ([0, 0] if localized else [128, 0])
 
     def test_default_does_not_windowize_without_kernel_attr(self):
         @pl.program

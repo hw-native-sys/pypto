@@ -34,6 +34,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
@@ -78,6 +79,24 @@ std::vector<ExprPtr> ComputeRowMajorStrides(const std::vector<ExprPtr>& shape) {
     product *= dims[i - 1];
   }
   return strides;
+}
+
+/// Preserve assignment symmetry when input/output stride refinement rewrites
+/// a value. Tuple and projection constructors infer their types from operands;
+/// remapping the LHS makes subsequent uses follow those refined types too.
+AssignStmtPtr RetypeStrideRefinedAssignment(const AssignStmtPtr& original, const AssignStmtPtr& rewritten,
+                                            std::unordered_map<const Var*, VarPtr>& remap) {
+  const auto& value_type = rewritten->value_->GetType();
+  if (rewritten->value_.get() == original->value_.get() ||
+      structural_equal(rewritten->var_->GetType(), value_type) ||
+      !structural_equal(original->var_->GetType(), original->value_->GetType())) {
+    return rewritten;
+  }
+  auto fresh = std::make_shared<Var>(original->var_->name_hint_, value_type, original->var_->span_);
+  remap[original->var_.get()] = fresh;
+  auto assign = MutableCopy(rewritten);
+  assign->var_ = fresh;
+  return assign;
 }
 
 bool IsTensorTypedArg(const ExprPtr& arg) {
@@ -923,7 +942,7 @@ class AssembleParentStridesOptimizer {
    public:
     void AddSubstitution(const Var* old_ptr, const VarPtr& new_var) {
       subs_[old_ptr] = new_var;
-      new_param_ptrs_.insert(new_var.get());
+      refined_vars_.insert(new_var.get());
     }
 
    protected:
@@ -936,20 +955,20 @@ class AssembleParentStridesOptimizer {
     }
 
     StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
-      auto visited = IRMutator::VisitStmt_(op);
-      auto assign = As<AssignStmt>(visited);
-      if (!assign) return visited;
+      auto assign = RetypeStrideRefinedAssignment(op, As<AssignStmt>(IRMutator::VisitStmt_(op)), var_remap_);
+      if (assign->var_.get() != op->var_.get()) refined_vars_.insert(assign->var_.get());
 
       auto call = As<Call>(assign->value_);
       if (!call || !IsOp(call, "tile.store") || call->args_.size() < 3) return assign;
 
       auto out_var = AsVarLike(call->args_[2]);
-      if (!out_var || !new_param_ptrs_.count(out_var.get())) return assign;
+      if (!out_var || !refined_vars_.count(out_var.get())) return assign;
 
       auto out_type = out_var->GetType();
       auto new_call = std::make_shared<Call>(call->op_, call->args_, call->kwargs_, out_type, call->span_);
       auto new_var = std::make_shared<Var>(assign->var_->name_hint_, out_type, assign->var_->span_);
       var_remap_[op->var_.get()] = new_var;
+      refined_vars_.insert(new_var.get());
       auto result = MutableCopy(assign);
       result->var_ = new_var;
       result->value_ = new_call;
@@ -958,7 +977,7 @@ class AssembleParentStridesOptimizer {
 
    private:
     std::unordered_map<const Var*, VarPtr> subs_;
-    std::unordered_set<const Var*> new_param_ptrs_;
+    std::unordered_set<const Var*> refined_vars_;
     std::unordered_map<const Var*, VarPtr> var_remap_;
   };
 
@@ -1562,6 +1581,10 @@ class SliceInputStridesOptimizer {
       auto it = subs_.find(op.get());
       if (it != subs_.end()) return it->second;
       return op;
+    }
+
+    StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+      return RetypeStrideRefinedAssignment(op, As<AssignStmt>(IRMutator::VisitStmt_(op)), subs_);
     }
 
    private:

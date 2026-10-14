@@ -60,6 +60,8 @@ for i in pl.range(N, init_values=[init_buf]):
 
 **方案**：分析编排函数中的 `tensor.assemble(parent, incore_result, offset)` 模式，将父张量的形状作为 `TensorView` 步长附加到 InCore 函数的 `Out` 参数类型上，使 `tile.store` 能使用正确的内存布局。
 
+细化后的输出视图类型会传播到存储结果、局部别名、元组构造和投影。通过这些值进行的后续加载和存储保留父张量推导的步长，即使未启用窗口化（windowization），赋值两侧也保持类型对称。
+
 ### 模式 3：Assemble 循环重写（AssembleLoopRewriter）
 
 **问题**：InCore 函数包含一个通过 `tile.assemble` 将结果累积到 iter-arg 的 `for` 循环，然后存储最终结果。`tile.assemble` 每次迭代都创建中间 tile 副本。
@@ -73,6 +75,8 @@ for i in pl.range(N, init_values=[init_buf]):
 **问题**：当编排函数将切片张量（`tensor.slice`）作为 `In` 参数传递给 InCore 函数时，InCore 函数的参数使用连续步长（从自身形状计算），而非父张量的步长。当切片是父张量的非连续视图时，这会导致错误的内存访问。
 
 **方案**：分析编排函数中的 `tensor.slice(parent, size, offset)` 模式。当切片结果作为 `In` 参数传递给 InCore 调用时，将父张量形状推导出的步长通过 `TensorView` 附加到 InCore 函数的 `In` 参数类型上，使 `tile.load` 能使用正确的内存布局。
+
+细化后的输入视图类型也会传播到局部别名、元组构造和元组投影，使后续使用保留父张量步长，并保持赋值两侧类型对称。
 
 声明为 `pl.NZ` 的 `In` 参数会被跳过：其字节按分形分块排列，行主序的父张量步长无法描述它。`BlockNzTensorViews` 会从分块形状推导其步长，并拒绝显式步长。
 
@@ -116,6 +120,8 @@ loop-carried iter-arg 不会被这样折叠。
 - 写入必须是静态可证明的局部 `tile.store` 窗口或聚合窗口循环
 - window shape 和 offset 必须足够静态，能够物化为 `tensor.slice`
 - offset 必须是该 pass 可接受的外层循环变量仿射表达式
+- 局部化张量或元组经由 `IfStmt` 分支结果或 `WhileStmt` 携带值/产出值传递时，在这些结构支持窗口来源（window provenance）传播前，被调用函数保持完整张量基线
+- 局部化循环携带值（loop carry）中每个被 yield 的张量或 tuple 元素必须保持同一个输出窗口；如果窗口来源（provenance）发生变化（例如交换 offset 不同的输出），callee 保持 full-tensor baseline
 - multi-`Out` 改写采用逐输出策略：每个 `Out` 参数独立评估 window eligibility，不满足条件的输出保持 full-tensor baseline 参数
 - 如果同一 callsite 中多个被 externalize 的 `Out` 参数解析到同一个 parent tensor，该 callsite 保持 full-tensor；Pattern 5 不尝试把多个 `tensor.assemble` 串成同一个 parent state
 - 顺序循环 sibling 只有在每个被改写 `Out` 都能证明跨 sibling iteration 不重叠时才改写

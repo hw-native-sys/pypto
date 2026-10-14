@@ -274,7 +274,9 @@ class StaticPieceLoopExternalizer : public IRMutator {
       new_out_vars.emplace(target_var.get(), target_var);
     }
 
-    return LocalizeWindowWrites(body, out_info_by_var, new_out_vars, rewrite_context_);
+    auto localized = LocalizeWindowWrites(body, out_info_by_var, new_out_vars, rewrite_context_);
+    if (!localized) return std::nullopt;
+    return localized;
   }
 
   ForStmtPtr target_loop_;
@@ -553,6 +555,7 @@ FunctionPtr RewriteCallee(const ProgramPtr& program, const FunctionPtr& func,
       }
 
       new_body = LocalizeWindowWrites(new_body, out_info_by_var, new_out_vars, rewrite_context);
+      if (!new_body) return nullptr;
     }
   } else {
     std::unordered_map<const Var*, OutputRewriteInfo> out_info_by_var;
@@ -566,6 +569,7 @@ FunctionPtr RewriteCallee(const ProgramPtr& program, const FunctionPtr& func,
       new_out_vars.emplace(new_out.get(), new_out);
     }
     new_body = LocalizeWindowWrites(new_body, out_info_by_var, new_out_vars, rewrite_context);
+    if (!new_body) return nullptr;
   }
 
   std::unordered_map<const Var*, InputRewriteInfo> in_info_by_var;

@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -38,29 +39,25 @@ using transform_utils::FlattenToStmts;
 
 namespace {
 
-/// Which localized output a value reads, shaped like the value: ``info`` for a
-/// tensor, one entry per element for a tuple (nested for a nested tuple).
+/// Immutable provenance DAG: tuple aliases and repeated elements share nodes.
+/// A null pointer means no localized element, so emptiness is constant-time.
+struct WindowProvenance;
+using WindowProvenancePtr = std::shared_ptr<const WindowProvenance>;
 struct WindowProvenance {
   const OutputRewriteInfo* info = nullptr;
-  std::vector<WindowProvenance> elements;
-
-  /// True when nothing in the value reads a localized output -- including a
-  /// tuple whose elements are all empty, which must not take the localized
-  /// path (it would rewrite and re-copy state for every such loop carry).
-  [[nodiscard]] bool Empty() const {
-    return info == nullptr &&
-           std::all_of(elements.begin(), elements.end(), [](const WindowProvenance& e) { return e.Empty(); });
-  }
+  std::vector<WindowProvenancePtr> elements;
 };
 
 class WindowWriteLocalizer : public IRMutator {
-  using TupleProvenanceMap = std::unordered_map<const Var*, WindowProvenance>;
+  using TupleProvenanceMap = std::unordered_map<const Var*, WindowProvenancePtr>;
 
  public:
   WindowWriteLocalizer(const std::unordered_map<const Var*, OutputRewriteInfo>& out_info_by_var,
                        const std::unordered_map<const Var*, ExprPtr>& new_out_vars,
                        WindowRewriteContext& rewrite_context)
       : out_info_by_var_(out_info_by_var), new_out_vars_(new_out_vars), rewrite_context_(rewrite_context) {}
+
+  [[nodiscard]] bool failed() const { return failed_; }
 
  protected:
   ExprPtr VisitExpr_(const VarPtr& op) override {
@@ -72,6 +69,8 @@ class WindowWriteLocalizer : public IRMutator {
   }
 
   ExprPtr VisitExpr_(const IterArgPtr& op) override {
+    auto remap_it = result_var_remap_.find(op.get());
+    if (remap_it != result_var_remap_.end()) return remap_it->second;
     auto out_it = new_out_vars_.find(op.get());
     if (out_it != new_out_vars_.end()) return out_it->second;
     return IRMutator::VisitExpr_(op);
@@ -164,70 +163,102 @@ class WindowWriteLocalizer : public IRMutator {
     return assign;
   }
 
+  StmtPtr VisitStmt_(const IfStmtPtr& op) override {
+    auto result = As<IfStmt>(IRMutator::VisitStmt_(op));
+    if (HasLocalizedYield(result->then_body_) ||
+        (result->else_body_ && HasLocalizedYield(*result->else_body_))) {
+      // Branch joins do not yet propagate window provenance to their results.
+      // Decline the candidate before an unretyped join can escape the callee.
+      failed_ = true;
+      return op;
+    }
+    return result;
+  }
+
+  StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
+    for (const auto& arg : op->iter_args_) {
+      auto init = VisitExpr(arg->initValue_);
+      if (ProvenanceOf(init, arg->initValue_) || LookupVarProvenance(arg, arg)) {
+        // While carries are not localized: their condition and zero-trip
+        // results need the same type/provenance repair as their body yields.
+        failed_ = true;
+        return op;
+      }
+    }
+    auto result = As<WhileStmt>(IRMutator::VisitStmt_(op));
+    if (HasLocalizedYield(result->body_)) {
+      failed_ = true;
+      return op;
+    }
+    return result;
+  }
+
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
     auto new_loop = MutableCopy(op);
     new_loop->start_ = VisitExpr(op->start_);
     new_loop->stop_ = VisitExpr(op->stop_);
     new_loop->step_ = VisitExpr(op->step_);
 
-    std::unordered_map<const Var*, OutputRewriteInfo> nested_out_info(out_info_by_var_.begin(),
-                                                                      out_info_by_var_.end());
-    std::unordered_map<const Var*, ExprPtr> nested_new_out_vars(new_out_vars_.begin(), new_out_vars_.end());
-    bool changed = false;
-
+    std::vector<WindowProvenancePtr> initial_provenance;
+    initial_provenance.reserve(op->iter_args_.size());
     for (size_t i = 0; i < new_loop->iter_args_.size() && i < new_loop->return_vars_.size(); ++i) {
-      auto old_iter_arg = new_loop->iter_args_[i];
-      auto old_return_var = new_loop->return_vars_[i];
+      const auto& old_iter_arg = op->iter_args_[i];
+      const auto& old_return_var = op->return_vars_[i];
       auto init_expr = VisitExpr(old_iter_arg->initValue_);
       auto provenance = ProvenanceOf(init_expr, old_iter_arg->initValue_);
+      // Aggregate-output analysis can seed the carry directly, after narrowing
+      // its type, even though its init is not itself a localized result.
+      if (!provenance) provenance = LookupVarProvenance(old_iter_arg, old_iter_arg);
+      initial_provenance.push_back(provenance);
+      if (!provenance && init_expr.get() == old_iter_arg->initValue_.get()) continue;
 
-      if (provenance.Empty()) {
-        // Not localized. A rewritten init (e.g. a re-minted Var) still needs a
-        // new IterArg, and the body's references must follow it.
-        if (init_expr.get() != old_iter_arg->initValue_.get()) {
-          auto new_iter_arg = std::make_shared<IterArg>(old_iter_arg->name_hint_, old_iter_arg->GetType(),
-                                                        init_expr, old_iter_arg->span_);
-          nested_new_out_vars[old_iter_arg.get()] = new_iter_arg;
-          new_loop->iter_args_[i] = new_iter_arg;
-          changed = true;
-        }
-        continue;
-      }
-
-      // Localized: the carry takes the init's narrowed window type — a tensor,
-      // or a tuple holding one — and so does the value the loop returns.
-      auto narrowed_type = init_expr->GetType();
+      const auto& carry_type = provenance ? init_expr->GetType() : old_iter_arg->GetType();
       auto new_iter_arg =
-          std::make_shared<IterArg>(old_iter_arg->name_hint_, narrowed_type, init_expr, old_iter_arg->span_);
-      auto new_return_var =
-          std::make_shared<Var>(old_return_var->name_hint_, narrowed_type, old_return_var->span_);
-
-      nested_new_out_vars[old_iter_arg.get()] = new_iter_arg;
-      nested_new_out_vars[new_iter_arg.get()] = new_iter_arg;
-      result_var_remap_[old_return_var.get()] = new_return_var;
-      if (provenance.info) {
-        nested_out_info[old_iter_arg.get()] = *provenance.info;
-        nested_out_info[new_iter_arg.get()] = *provenance.info;
-        result_var_output_info_[new_return_var.get()] = provenance.info;
-      } else {
-        tuple_provenance_[new_iter_arg.get()] = provenance;
-        tuple_provenance_[new_return_var.get()] = std::move(provenance);
-      }
-
+          std::make_shared<IterArg>(old_iter_arg->name_hint_, carry_type, init_expr, old_iter_arg->span_);
+      result_var_remap_[old_iter_arg.get()] = new_iter_arg;
+      RecordProvenance(new_iter_arg.get(), provenance);
       new_loop->iter_args_[i] = new_iter_arg;
-      new_loop->return_vars_[i] = new_return_var;
-      changed = true;
+      if (provenance) {
+        auto new_return_var =
+            std::make_shared<Var>(old_return_var->name_hint_, carry_type, old_return_var->span_);
+        result_var_remap_[old_return_var.get()] = new_return_var;
+        RecordProvenance(new_return_var.get(), provenance);
+        new_loop->return_vars_[i] = new_return_var;
+      }
     }
 
-    if (!changed) return IRMutator::VisitStmt_(op);
-
-    WindowWriteLocalizer nested_localizer(nested_out_info, nested_new_out_vars, result_var_remap_,
-                                          result_var_output_info_, tuple_provenance_, rewrite_context_);
-    new_loop->body_ = nested_localizer.VisitStmt(new_loop->body_);
+    // SSA identities are unique across scopes; one traversal can retain their
+    // mappings without copying growing maps into every nested loop.
+    new_loop->body_ = VisitStmt(op->body_);
+    if (initial_provenance.empty()) return new_loop;
+    auto stmts = FlattenToStmts(new_loop->body_);
+    auto yield = stmts.empty() ? nullptr : As<YieldStmt>(stmts.back());
+    if (!yield || yield->value_.size() != initial_provenance.size()) {
+      failed_ = true;
+      return op;
+    }
+    for (size_t i = 0; i < initial_provenance.size(); ++i) {
+      if (!SameProvenance(initial_provenance[i], ProvenanceOf(yield->value_[i], nullptr))) {
+        // A changing carry has no static offset valid for every iteration,
+        // including zero trips. Decline the whole candidate rather than
+        // silently rebasing a later access with the init's output window.
+        failed_ = true;
+        return op;
+      }
+    }
     return new_loop;
   }
 
  private:
+  bool HasLocalizedYield(const StmtPtr& body) const {
+    auto yield = transform_utils::GetLastYieldStmt(body);
+    if (!yield) return false;
+    for (const auto& value : yield->value_) {
+      if (ProvenanceOf(value, nullptr)) return true;
+    }
+    return false;
+  }
+
   const OutputRewriteInfo* LookupOutputInfo(const Var* var) const {
     auto info_it = out_info_by_var_.find(var);
     if (info_it != out_info_by_var_.end()) return &info_it->second;
@@ -237,11 +268,12 @@ class WindowWriteLocalizer : public IRMutator {
 
   /// Provenance of a Var, looked up by its rewritten identity first and its
   /// original one second: a tensor's output info, or a tuple's elements.
-  WindowProvenance LookupVarProvenance(const ExprPtr& rewritten, const ExprPtr& original) const {
+  WindowProvenancePtr LookupVarProvenance(const ExprPtr& rewritten, const ExprPtr& original) const {
     for (const auto& expr : {rewritten, original}) {
       auto var = AsVarLike(expr);
       if (!var) continue;
-      if (const auto* info = LookupOutputInfo(var.get())) return {info, {}};
+      if (const auto* info = LookupOutputInfo(var.get()))
+        return std::make_shared<WindowProvenance>(WindowProvenance{info, {}});
       auto it = tuple_provenance_.find(var.get());
       if (it != tuple_provenance_.end()) return it->second;
     }
@@ -251,24 +283,28 @@ class WindowWriteLocalizer : public IRMutator {
   /// Provenance of a non-Call value built from Vars, tuples, and projections,
   /// nested to any depth. @p original is the same value before rewriting (or
   /// null), used to find Vars the rewrite did not re-mint.
-  WindowProvenance ProvenanceOf(const ExprPtr& rewritten, const ExprPtr& original) const {
+  WindowProvenancePtr ProvenanceOf(const ExprPtr& rewritten, const ExprPtr& original) const {
     if (AsVarLike(rewritten)) return LookupVarProvenance(rewritten, original);
     if (auto tuple = As<MakeTuple>(rewritten)) {
       auto original_tuple = As<MakeTuple>(original);
-      WindowProvenance result;
-      result.elements.reserve(tuple->elements_.size());
+      std::vector<WindowProvenancePtr> elements;
+      elements.reserve(tuple->elements_.size());
+      bool localized = false;
       for (size_t i = 0; i < tuple->elements_.size(); ++i) {
         ExprPtr original_element =
             original_tuple && i < original_tuple->elements_.size() ? original_tuple->elements_[i] : nullptr;
-        result.elements.push_back(ProvenanceOf(tuple->elements_[i], original_element));
+        auto element = ProvenanceOf(tuple->elements_[i], original_element);
+        localized |= element != nullptr;
+        elements.push_back(std::move(element));
       }
-      return result;
+      if (!localized) return nullptr;
+      return std::make_shared<WindowProvenance>(WindowProvenance{nullptr, std::move(elements)});
     }
     if (auto item = As<TupleGetItemExpr>(rewritten)) {
       auto original_item = As<TupleGetItemExpr>(original);
       auto tuple = ProvenanceOf(item->tuple_, original_item ? original_item->tuple_ : nullptr);
-      if (item->index_ >= 0 && static_cast<size_t>(item->index_) < tuple.elements.size()) {
-        return tuple.elements[item->index_];
+      if (tuple && item->index_ >= 0 && static_cast<size_t>(item->index_) < tuple->elements.size()) {
+        return tuple->elements[item->index_];
       }
     }
     return {};
@@ -289,11 +325,7 @@ class WindowWriteLocalizer : public IRMutator {
     auto new_var = std::make_shared<Var>(assign->var_->name_hint_, narrowed_type, assign->var_->span_);
     result_var_remap_[op->var_.get()] = new_var;
     auto provenance = ProvenanceOf(assign->value_, op->value_);
-    if (provenance.info) {
-      result_var_output_info_[new_var.get()] = provenance.info;
-    } else if (!provenance.Empty()) {
-      tuple_provenance_[new_var.get()] = std::move(provenance);
-    }
+    RecordProvenance(new_var.get(), provenance);
     assign->var_ = new_var;
     return assign;
   }
@@ -303,17 +335,31 @@ class WindowWriteLocalizer : public IRMutator {
     return FlattenGeneratedScalarExprWithLocalTemps(expr, name_prefix, span, stmts, rewrite_context_);
   }
 
-  WindowWriteLocalizer(const std::unordered_map<const Var*, OutputRewriteInfo>& out_info_by_var,
-                       const std::unordered_map<const Var*, ExprPtr>& new_out_vars,
-                       std::unordered_map<const Var*, VarPtr> result_var_remap,
-                       std::unordered_map<const Var*, const OutputRewriteInfo*> result_var_output_info,
-                       TupleProvenanceMap tuple_provenance, WindowRewriteContext& rewrite_context)
-      : out_info_by_var_(out_info_by_var),
-        new_out_vars_(new_out_vars),
-        result_var_remap_(std::move(result_var_remap)),
-        result_var_output_info_(std::move(result_var_output_info)),
-        tuple_provenance_(std::move(tuple_provenance)),
-        rewrite_context_(rewrite_context) {}
+  void RecordProvenance(const Var* var, const WindowProvenancePtr& provenance) {
+    if (!provenance) return;
+    if (provenance->info) {
+      result_var_output_info_[var] = provenance->info;
+    } else {
+      tuple_provenance_[var] = provenance;
+    }
+  }
+
+  /// Memoized DAG equality avoids revisiting a repeated tuple subtree.
+  bool SameProvenance(const WindowProvenancePtr& lhs, const WindowProvenancePtr& rhs) {
+    if (lhs == rhs) return true;
+    if (!lhs || !rhs || lhs->info != rhs->info || lhs->elements.size() != rhs->elements.size()) {
+      return false;
+    }
+    const auto key = std::make_pair(lhs, rhs);
+    auto cached = provenance_equality_.find(key);
+    if (cached != provenance_equality_.end()) return cached->second;
+    bool equal = true;
+    for (size_t i = 0; i < lhs->elements.size() && equal; ++i) {
+      equal = SameProvenance(lhs->elements[i], rhs->elements[i]);
+    }
+    provenance_equality_.emplace(key, equal);
+    return equal;
+  }
 
   const std::unordered_map<const Var*, OutputRewriteInfo>& out_info_by_var_;
   const std::unordered_map<const Var*, ExprPtr>& new_out_vars_;
@@ -321,6 +367,8 @@ class WindowWriteLocalizer : public IRMutator {
   std::unordered_map<const Var*, const OutputRewriteInfo*> result_var_output_info_;
   /// Provenance of each re-minted tuple Var that holds localized values.
   TupleProvenanceMap tuple_provenance_;
+  std::map<std::pair<WindowProvenancePtr, WindowProvenancePtr>, bool> provenance_equality_;
+  bool failed_ = false;
   WindowRewriteContext& rewrite_context_;
 };
 
@@ -399,7 +447,8 @@ StmtPtr LocalizeWindowWrites(const StmtPtr& body,
                              const std::unordered_map<const Var*, ExprPtr>& new_out_vars,
                              WindowRewriteContext& rewrite_context) {
   WindowWriteLocalizer localizer(out_info_by_var, new_out_vars, rewrite_context);
-  return localizer.VisitStmt(body);
+  auto localized = localizer.VisitStmt(body);
+  return localizer.failed() ? nullptr : localized;
 }
 
 StmtPtr LocalizeWindowReads(const StmtPtr& body,
