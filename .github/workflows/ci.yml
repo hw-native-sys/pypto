@@ -1612,6 +1612,77 @@ jobs:
         with:
           checkout-path: dist-checkout
 
+  pypto-lib-compile:
+    # Compile all formal library entrypoints on CPU hosts; runtime coverage stays
+    # in pypto-lib-model. Device-only entries are still compiled here.
+    needs: [changes, toolchain, pre-commit, clang-tidy]
+    if: needs.changes.outputs.docs_only != 'true'
+    permissions:
+      contents: read
+    runs-on: [self-hosted, linux, cpu]
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [a2a3, a5]
+    defaults:
+      run:
+        working-directory: lib-compile-checkout
+    env:
+      PTOAS_ROOT: ${{ github.workspace }}/lib-compile-checkout/ptoas-bin
+      PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
+      PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_X86_64: ${{ needs.toolchain.outputs.ptoas_sha256_x86_64 }}
+      CMAKE_BUILD_PARALLEL_LEVEL: 16
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_MAXSIZE: 30G
+      CCACHE_UMASK: '000'
+      PYPTO_GOLDEN_NUM_THREADS: 1
+      OMP_NUM_THREADS: 1
+      PYPTO_CODEGEN_MAX_WORKERS: 2
+    steps:
+      - name: Fetch composite action definitions
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/actions
+          clean: false
+          persist-credentials: false
+
+      - name: Setup CI job
+        uses: ./.github/actions/setup-ci-job
+        with:
+          checkout-path: lib-compile-checkout
+          needs-device: 'false'
+          toolchain: bundle
+          pip-cache-name: pip-lib
+          pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+
+      - name: Clone current pypto-lib
+        run: |
+          git clone --depth 1 https://github.com/hw-native-sys/pypto-lib.git build/pypto-lib
+
+      - name: Compile every formal library entry
+        env:
+          LIB_PLATFORM: ${{ matrix.platform }}
+        run: |
+          source activate.sh
+          python tests/ci/compile_pypto_lib.py --lib build/pypto-lib \
+            --platform "$LIB_PLATFORM" --jobs 4 --timeout 1200 \
+            --output build/lib-compile-results
+
+      - name: Upload compilation logs and manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pypto-lib-compile-${{ matrix.platform }}
+          path: |
+            lib-compile-checkout/build/lib-compile-results/manifest.json
+            lib-compile-checkout/build/lib-compile-results/results.json
+            lib-compile-checkout/build/lib-compile-results/**/compile.log
+            lib-compile-checkout/build/lib-compile-results/**/compilations.json
+          retention-days: 7
+
   pypto-lib-model:
     # No container: each model run borrows an NPU from the host-level
     # `task-submit --device auto` queue (mechanism B — the whole `python

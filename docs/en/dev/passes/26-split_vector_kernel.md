@@ -29,8 +29,11 @@ it **no longer halves any function body**:
 > lives in `split_axis_utils`, called by `LowerAutoVectorSplit` — see that
 > pass's doc for the per-op rewrite rules.
 
-Lane-1 `IfStmt` results inherit the rewritten branch-yield types, and subsequent
-uses reference those rebuilt results. Both branches must yield matching types.
+Lane-1 `IfStmt` tile results retain the original join's layout and padding
+metadata with zero valid shape, and subsequent uses reference those rebuilt
+results. Branch tiles can have different padding metadata; the replay must not
+require full structural equality or adopt one branch's padding for the join.
+Non-tile results inherit the rewritten then-yield type.
 
 ## API
 

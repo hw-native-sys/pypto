@@ -108,6 +108,27 @@ Python DSL → IR（不可变树）→ Pass Pipeline（20+ passes）→ CodeGen
 
 **与 pypto 的接口：** pypto-lib 程序就是标准的 pypto 程序 — 使用相同的 `@pl.program`/`@pl.function` DSL，通过相同的流水线编译。两者之间没有特殊 API；pypto-lib 是 pypto 框架的使用者。
 
+**编译器 CI 覆盖：** `pypto-lib-compile` job 编译 pypto-lib 的
+`.github/scripts/detect_changes.py --all` 选出的全部正式可运行入口，
+按库的平台归属规则分别覆盖 A2/A3 和 A5。排除草稿、不可独立运行的辅助模块，
+以及仅使用 CPU 的 GLM 权重往返测试；
+辅助模块通过调用它们的入口进行覆盖。编译不需要 NPU，因此仅支持真机的入口也会纳入。
+适配器强制 `golden.run` 使用仅编译模式（compile-only），同时记录直接编译调用，
+并强制执行 PTOAS，覆盖前端、passes、验证、代码生成和 PTOAS。
+不构建设备二进制，也不验证数值结果；
+`pypto-lib-model` 提供独立的设备冒烟测试。
+
+激活已构建的 PyPTO 环境并配置固定版本的 PTOAS 后，可本地复现：
+
+```bash
+python tests/ci/compile_pypto_lib.py --lib /path/to/pypto-lib \
+  --platform a2a3 --jobs 4 --output build/lib-compile-a2a3
+```
+
+使用 `--platform a5` 重复测试。每个入口默认超时 1200 秒，可通过
+`--timeout` 修改。编译失败、进程失败、超时和未记录到编译均会使 job 失败。
+CI 上传逐入口日志、结果，以及记录库版本和所选入口的清单。
+
 ### PTOAS — PTO 汇编器与优化器
 
 基于 MLIR 的汇编器，消费 pypto codegen 生成的 `.pto` 文件，产出优化后的 C++ 内核代码。

@@ -108,6 +108,29 @@ A library of real-world models and primitive tensor functions built **on top of*
 
 **Interface with pypto:** pypto-lib programs are standard pypto programs — they use the same `@pl.program`/`@pl.function` DSL and compile through the same pipeline. No special API exists between them; pypto-lib is a consumer of the pypto framework.
 
+**Compiler CI coverage:** The `pypto-lib-compile` job compiles all formal runnable
+entries selected by pypto-lib's `.github/scripts/detect_changes.py --all`, using
+its platform ownership rules for A2/A3 and A5. Drafts and non-runnable helpers are
+excluded, including the CPU-only GLM weights round-trip test; helpers are exercised
+through their callers. Device-only entries are included because compilation needs
+no NPU. The adapter forces `golden.run` into compile-only mode, records direct
+compile calls, and requires PTOAS. Coverage includes frontend, passes, verification,
+codegen, and PTOAS.
+This does not build device binaries or check numerical results; `pypto-lib-model`
+provides the separate device smoke tests.
+
+To reproduce after activating a built PyPTO environment with the pinned PTOAS:
+
+```bash
+python tests/ci/compile_pypto_lib.py --lib /path/to/pypto-lib \
+  --platform a2a3 --jobs 4 --output build/lib-compile-a2a3
+```
+
+Repeat with `--platform a5`. Each entry has a 1200-second timeout (override with
+`--timeout`). Compilation failures, process failures, timeouts, and zero recorded
+compilations fail the job. CI uploads per-entry logs, results, and a manifest
+containing the tested library revision and selected entries.
+
 ### PTOAS — PTO Assembler & Optimizer
 
 An MLIR-based assembler that consumes `.pto` files produced by pypto's codegen and produces optimized C++ kernel code.

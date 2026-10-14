@@ -219,5 +219,80 @@ class Before:
     assert result.value.args[0] is merged
 
 
+def test_replay_if_preserves_join_metadata_with_different_branch_memrefs():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
+        def main_aiv(
+            self, flag: pl.Scalar[pl.BOOL], out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            slot = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+            pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot)
+            tile: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=0)
+            if flag:
+                alias = pl.mul(tile, 2.0)
+            else:
+                alias = pl.tile.full([16, 16], dtype=pl.FP32, value=0.0)
+            result = pl.mul(alias, 4.0)
+            pl.tfree_to_aic(tile)
+            updated = pl.store(result, [0, 0], out)
+            return updated
+
+    before = passes.convert_to_ssa()(Before)
+    function = before.get_function("main_aiv")
+    assert function is not None and isinstance(function.body, ir.SeqStmts)
+    original = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.IfStmt))
+    # Branch-local storage is not part of the join type. Model an explicit
+    # producer allocation below the DSL parser; type verification stays enabled.
+    assert isinstance(original.then_body, ir.SeqStmts)
+    producer = original.then_body.stmts[0]
+    assert isinstance(producer, ir.AssignStmt) and isinstance(producer.value, ir.Call)
+    allocated_type = ir.TileType(
+        [16, 16], pl.FP32, memref=ir.MemRef("branch_storage", producer.span), memory_space=ir.MemorySpace.Vec
+    )
+    allocated = ir.Var(producer.var.name_hint, allocated_type, producer.span)
+    call = producer.value
+    then_body = ir.SeqStmts(
+        [
+            ir.AssignStmt(
+                allocated, ir.Call(call.op, call.args, call.kwargs, allocated_type, call.span), producer.span
+            ),
+            ir.YieldStmt([allocated], original.span),
+        ],
+        original.span,
+    )
+    branch = ir.IfStmt(original.condition, then_body, original.else_body, original.return_vars, original.span)
+    body = ir.SeqStmts([branch if stmt is original else stmt for stmt in function.body.stmts], function.span)
+    function = ir.Function(
+        function.name,
+        list(zip(function.params, function.param_directions)),
+        function.return_types,
+        body,
+        function.span,
+        type=function.func_type,
+        attrs=function.attrs,
+    )
+    before = ir.Program([function], "BranchStorage", function.span)
+    _verify_assignments(before)
+    after = passes.split_vector_kernel()(before)
+    _verify_assignments(after)
+    _, replay = _lanes(after)
+    branch = next(stmt for stmt in replay.stmts if isinstance(stmt, ir.IfStmt))
+    merged = branch.return_vars[0]
+    _assert_empty_tile(merged.type)
+    assert isinstance(merged.type, ir.TileType)
+    assert isinstance(original.return_vars[0].type, ir.TileType)
+    assert merged.type.memref is original.return_vars[0].type.memref
+    assert isinstance(branch.then_body, ir.SeqStmts)
+    assert isinstance(branch.else_body, ir.SeqStmts)
+    then_yield = branch.then_body.stmts[-1]
+    else_yield = branch.else_body.stmts[-1]
+    assert isinstance(then_yield, ir.YieldStmt) and isinstance(else_yield, ir.YieldStmt)
+    then_type = then_yield.value[0].type
+    else_type = else_yield.value[0].type
+    assert isinstance(then_type, ir.TileType) and isinstance(else_type, ir.TileType)
+    assert then_type.memref is not else_type.memref
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -38,7 +38,6 @@
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
-#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
@@ -507,10 +506,13 @@ std::vector<StmtPtr> BuildNoSplitLane1ReplayStmts(const std::vector<StmtPtr>& st
                             if_stmt->span_)
             << "Internal error: replay IfStmt yield arity must match its results";
         for (size_t i = 0; i < if_stmt->return_vars_.size(); ++i) {
-          auto type = then_yield->value_[i]->GetType();
-          INTERNAL_CHECK_SPAN(structural_equal(type, else_yield->value_[i]->GetType()), if_stmt->span_)
-              << "Internal error: replay IfStmt branches must yield matching result types";
           const auto& original = if_stmt->return_vars_[i];
+          // The original result already describes the branch join. Yielded
+          // tiles may have distinct padding/layout metadata, so copying one
+          // branch or requiring full structural equality is not valid here.
+          auto type = std::dynamic_pointer_cast<const TileType>(original->GetType())
+                          ? WithZeroValidShape(original->GetType(), original->span_)
+                          : then_yield->value_[i]->GetType();
           if (type != original->GetType()) {
             auto replacement = std::make_shared<Var>(original->name_hint_, type, original->span_);
             new_if->return_vars_[i] = replacement;
