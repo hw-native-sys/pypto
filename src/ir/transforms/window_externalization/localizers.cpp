@@ -9,7 +9,6 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -272,8 +271,9 @@ class WindowWriteLocalizer : public IRMutator {
     for (const auto& expr : {rewritten, original}) {
       auto var = AsVarLike(expr);
       if (!var) continue;
-      if (const auto* info = LookupOutputInfo(var.get()))
+      if (const auto* info = LookupOutputInfo(var.get())) {
         return std::make_shared<WindowProvenance>(WindowProvenance{info, {}});
+      }
       auto it = tuple_provenance_.find(var.get());
       if (it != tuple_provenance_.end()) return it->second;
     }

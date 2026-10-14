@@ -39,6 +39,14 @@ namespace {
 /// value to agree with.
 class AssignCountVisitor : public IRVisitor {
  public:
+  explicit AssignCountVisitor(const std::vector<VarPtr>& params) {
+    // A parameter is already defined on entry; its first assignment is a
+    // pre-SSA rebind, even when it is the only AssignStmt targeting that Var.
+    for (const auto& param : params) {
+      if (param) ++counts_[param.get()];
+    }
+  }
+
   [[nodiscard]] const std::unordered_map<const Var*, size_t>& counts() const { return counts_; }
 
  protected:
@@ -124,7 +132,7 @@ class AssignTypeSymmetryPropertyVerifierImpl : public PropertyVerifier {
     if (!program) return;
     for (const auto& [global_var, func] : program->functions_) {
       if (!func || !func->body_) continue;
-      AssignCountVisitor counter;
+      AssignCountVisitor counter(func->params_);
       counter.VisitStmt(func->body_);
       AssignTypeSymmetryVisitor visitor(diagnostics, func->name_, counter.counts());
       visitor.VisitStmt(func->body_);

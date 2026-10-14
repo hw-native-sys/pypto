@@ -663,7 +663,11 @@ class TestInlineFunctionsDynamicTypes:
                 caller_alias = source
                 _caller_rows = pl.tensor.dim(caller_alias, 0)
 
-        after = passes.inline_functions()(Before)
+        # This regression deliberately supplies stale alias types to the
+        # normalization pass; verify its repaired output, not that input.
+        instrument = passes.VerificationInstrument(passes.VerificationMode.AFTER)
+        with passes.PassContext([instrument]):
+            after = passes.inline_functions()(Before)
         props = passes.IRPropertySet()
         props.insert(passes.IRProperty.AssignTypeSymmetry)
         for actual, expected in (
@@ -707,7 +711,11 @@ class TestInlineFunctionsDynamicTypes:
                 caller_alias = source
                 _caller_rows = pl.tensor.dim(caller_alias, 0)
 
-        after = passes.inline_functions()(Before)
+        # This regression deliberately supplies stale alias types to the
+        # normalization pass; verify its repaired output, not that input.
+        instrument = passes.VerificationInstrument(passes.VerificationMode.AFTER)
+        with passes.PassContext([instrument]):
+            after = passes.inline_functions()(Before)
         props = passes.IRPropertySet()
         props.insert(passes.IRProperty.AssignTypeSymmetry)
         for actual, expected in (
@@ -736,7 +744,11 @@ class TestInlineFunctionsDynamicTypes:
             def main(self, source: pl.Tile[[4, 8], pl.FP32]):
                 _alias = source
 
-        after = passes.inline_functions()(Before)
+        # This regression deliberately supplies stale alias types to the
+        # normalization pass; verify its repaired output, not that input.
+        instrument = passes.VerificationInstrument(passes.VerificationMode.AFTER)
+        with passes.PassContext([instrument]):
+            after = passes.inline_functions()(Before)
         ir.assert_structural_equal(after, Expected)
         ir.assert_structural_equal(passes.convert_to_ssa()(after), passes.convert_to_ssa()(Expected))
 

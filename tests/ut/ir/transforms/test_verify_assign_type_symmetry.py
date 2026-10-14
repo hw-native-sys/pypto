@@ -343,6 +343,18 @@ def test_rebound_var_is_not_a_violation():
     assert len(_verify(ir.Program([func], "RebindTest", _SPAN))) == 0
 
 
+def test_first_assignment_to_a_parameter_is_a_rebind():
+    """The function entry binding is the parameter's first definition."""
+    vec = _tile([16, 64], memory_space=ir.MemorySpace.Vec)
+    acc = _tile([16, 64], memory_space=ir.MemorySpace.Acc)
+    dst = ir.Var("dst", vec, _SPAN)
+    src = ir.Var("src", acc, _SPAN)
+    body = ir.AssignStmt(dst, src, _SPAN)
+    func = ir.Function("main_incore_0", [dst, src], [], body, _SPAN, ir.FunctionType.InCore)
+    assert not ir.structural_equal(dst.type, src.type)
+    assert not _verify(ir.Program([func], "ParameterRebind", _SPAN))
+
+
 def test_dsl_rebind_tolerated_before_ssa_and_clean_after():
     """The same shape in real DSL: ``t`` is loaded, then rebound by ``pl.add``.
 
