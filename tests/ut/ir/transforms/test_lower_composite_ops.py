@@ -2228,6 +2228,168 @@ def test_reduce_scatter_supports_all_reduce_ops():
         )
 
 
+def _build_reduce_scatter_sized(size, dtype=pl.FP32):
+    """Build an InCore reduce_scatter with a literal extent ``size``."""
+    nr = _REDUCE_SCATTER_NRANKS
+
+    @pl.program
+    class ReduceScatterSized:
+        @pl.function(type=pl.FunctionType.InCore)
+        def reduce_step(
+            self,
+            data: pl.InOut[pld.DistributedTensor[[nr, size], dtype]],
+            signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[nr, size], dtype]:
+            data = pld.tensor.reduce_scatter(data, signal, op=pld.ReduceOp.Sum)
+            return data
+
+    return ReduceScatterSized
+
+
+def _run_default_pipeline(pm, program):
+    """Run the production Default strategy with pass verification.
+
+    Reaching PTO codegen needs the whole pipeline: the bare LowerCompositeOps
+    pass leaves DistributedTensor params without their CommCtx, which codegen
+    rejects. A dynamic dimension appearing only on DistributedTensor is not yet
+    self-contained in Python printer roundtrips, so the global RoundtripInstrument
+    is replaced with a before/after verification instrument -- the same workaround
+    ``test_allreduce_dynamic_mesh_lowering_reaches_pto_codegen`` relies on.
+    """
+    from pypto.pypto_core import passes as _core_passes  # noqa: PLC0415
+
+    ctx = _core_passes.PassContext(
+        [_core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)]
+    )
+    with ctx:
+        return pm.run_passes(program)
+
+
+def test_reduce_scatter_chunks_an_extent_larger_than_one_chunk(default_pass_manager, ascend_backend):
+    """An extent past one 16-KiB chunk walks the row in chunks.
+
+    The single-tile path loads the whole ``[1, SIZE]`` row into one Vec tile. For
+    FP32 the chunk budget is 4096 elements, so SIZE=8192 would reserve 32 KiB; the
+    chunked path must bound the tile at one chunk and loop instead. The
+    small-static path stays on the old route and is pinned separately by
+    ``test_reduce_scatter_emits_for_and_if_control_flow`` (SIZE=16 -> 6 ForStmts).
+    """
+    from pypto import codegen  # noqa: PLC0415
+
+    # 8192 FP32 elements = two 16-KiB chunks.
+    After = _run_default_pipeline(default_pass_manager, _build_reduce_scatter_sized(8192))
+
+    op_names = set(_collect_op_names(After))
+    assert "pld.tensor.reduce_scatter" not in op_names
+    # Markers of the chunked route: a ragged load whose padding is zeroed and a
+    # narrowed alias before store. Neither appears on the single-tile path.
+    assert "tile.fillpad_inplace" in op_names
+    assert "tile.set_validshape" in op_names
+
+    # 7 ForStmts against the single-tile path's 6: the chunk loop is added, and the
+    # two whole-row barriers collapse into one ready barrier plus one per chunk.
+    collector = _StmtKindCollector()
+    collector.visit_program(After)
+    assert collector.for_count == 7, f"expected 7 ForStmts, got {collector.for_count}"
+
+    func = After.get_function("reduce_step")
+    assert func is not None
+    mlir = codegen.PTOCodegen().generate(ir.Program([func], func.name, After.span))
+
+    # The accumulator is one chunk wide, not SIZE wide -- this is the whole fix.
+    assert "cols=4096" in mlir, mlir
+    assert "cols=8192" not in mlir, mlir
+    assert "scf.for" in mlir
+
+
+def _collect_calls_named(prog, wanted):
+    """Collect every ``Call`` whose operator name is in ``wanted``."""
+
+    class _NamedCallCollector(ir.IRVisitor):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def visit_call(self, op: ir.Call) -> None:
+            if op.op.name in wanted:
+                self.calls.append(op)
+            super().visit_call(op)
+
+    collector = _NamedCallCollector()
+    collector.visit_program(prog)
+    return collector.calls
+
+
+def test_reduce_scatter_fp16_tail_widens_the_remote_read(default_pass_manager, ascend_backend):
+    """An FP16 ragged tail reads at the tile alignment, not its logical width.
+
+    A2/A3 peer MTE transfers must end on a 32-byte boundary, so the final FP16
+    chunk -- a single element at ``SIZE = 8193`` -- cannot be remote-loaded at
+    its logical width. The chunked path must widen the physical read to the
+    aligned element count, let it spill into the window's reserved tail, and
+    re-narrow before reduction.
+
+    This is invisible to an FP32 sweep: 32 bytes divides evenly by an FP32
+    element, so the FP32 path needs no widening and stays correct without it.
+    Comparing the two dtypes is what makes the guard real rather than assumed.
+    """
+    # FP16 chunk budget is 8192 elements (16 KiB / 2 B); 8193 is chunk + 1, so
+    # the final chunk has a one-element tail -- the reported failure shape.
+    fp16 = _run_default_pipeline(default_pass_manager, _build_reduce_scatter_sized(8193, dtype=pl.FP16))
+    fp32 = _run_default_pipeline(default_pass_manager, _build_reduce_scatter_sized(8193, dtype=pl.FP32))
+
+    fp16_loads = _collect_calls_named(fp16, {"pld.tile.remote_load"})
+    assert fp16_loads, "chunked FP16 lowering emitted no remote_load"
+    assert all(call.kwargs.get("allow_physical_tail_padding") is True for call in fp16_loads), (
+        f"FP16 remote_load must declare the physical tail: {[call.kwargs for call in fp16_loads]}"
+    )
+
+    # FP32 depends on the widening NOT happening: an unaligned FP32 span is
+    # already valid, and padding it would read past a window that reserves none.
+    fp32_loads = _collect_calls_named(fp32, {"pld.tile.remote_load"})
+    assert fp32_loads, "chunked FP32 lowering emitted no remote_load"
+    assert all("allow_physical_tail_padding" not in call.kwargs for call in fp32_loads), (
+        f"FP32 remote_load must not widen its read: {[call.kwargs for call in fp32_loads]}"
+    )
+
+
+def test_reduce_scatter_accepts_a_dynamic_extent(default_pass_manager, ascend_backend):
+    """A symbolic extent lowers instead of requiring a static, chunk-sized SIZE.
+
+    Modelled on ``test_allreduce_dynamic_mesh_lowering_reaches_pto_codegen``: a
+    runtime extent takes the full chunk bound and reaches PTO codegen with a
+    dynamic transfer, so the caller no longer has to know the extent at compile
+    time.
+    """
+    from pypto import codegen  # noqa: PLC0415
+
+    n = pl.dynamic("REDUCE_SCATTER_DYNAMIC_N")
+    nr = _REDUCE_SCATTER_NRANKS
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def reduce_step(
+            self,
+            data: pl.InOut[pld.DistributedTensor[[nr, n], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[nr, n], pl.FP32]:
+            data = pld.tensor.reduce_scatter(data, signal, op=pld.ReduceOp.Sum)
+            return data
+
+    After = _run_default_pipeline(default_pass_manager, Before)
+
+    assert "pld.tensor.reduce_scatter" not in set(_collect_op_names(After))
+
+    func = After.get_function("reduce_step")
+    assert func is not None
+    mlir = codegen.PTOCodegen().generate(ir.Program([func], func.name, After.span))
+
+    assert "scf.for" in mlir
+    # A runtime extent takes the full chunk bound.
+    assert "cols=4096" in mlir, mlir
+
+
 # ============================================================================
 # pld.tensor.allreduce ring mode lowering
 #
