@@ -168,3 +168,56 @@ class Before:
         assert remainder.value.op.name == expected_op
         if expected_op == "tile.create":
             _assert_empty_tile(remainder.var.type)
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_replay_if_result_inherits_yielded_tile_type(nested):
+    inner = "alias = tile"
+    if nested:
+        inner = (
+            "if flag:\n                alias = tile"
+            "\n            else:\n                alias = pl.mul(tile, 2.0)"
+        )
+    before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.AIV)
+    def main_aiv(self, flag: pl.Scalar[pl.BOOL],
+                 out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+        pl.func_attr({{"dual_aiv_dispatch": True}})
+        slot = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+        pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot)
+        tile: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=0)
+        if flag:
+            {inner}
+        else:
+            alias = pl.mul(tile, 3.0)
+        result = pl.mul(alias, 4.0)
+        pl.tfree_to_aic(tile)
+        updated = pl.store(result, [0, 0], out)
+        return updated
+""")
+    before = passes.convert_to_ssa()(before)
+    after = passes.split_vector_kernel()(before)
+    _verify_assignments(after)
+    _, replay = _lanes(after)
+    branch = next(stmt for stmt in replay.stmts if isinstance(stmt, ir.IfStmt))
+    assert len(branch.return_vars) == 1
+    merged = branch.return_vars[0]
+    _assert_empty_tile(merged.type)
+    for body in [branch.then_body, branch.else_body]:
+        assert isinstance(body, ir.SeqStmts)
+        yielded = body.stmts[-1]
+        assert isinstance(yielded, ir.YieldStmt)
+        ir.assert_structural_equal(merged.type, yielded.value[0].type)
+    result = next(
+        stmt
+        for stmt in replay.stmts
+        if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint.startswith("result")
+    )
+    assert isinstance(result.value, ir.Call)
+    assert result.value.args[0] is merged
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

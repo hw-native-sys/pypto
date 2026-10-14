@@ -277,9 +277,12 @@ In a selected pipeline, the existing `SSAVerify`, `UseAfterDefCheck`, and
 `AssignTypeSymmetry` verifiers cover the whole program, together with
 `TypeChecked` and `ManualDepsOnSubmitOnly`: callers and unselected functions
 must still agree on bindings and call types. Explicit low-level verification
-without selection remains scoped to the checked device functions. Malformed
-device nodes are excluded from composition to avoid sending invalid structures
-to verifiers with stronger assumptions. These diagnostics retain their existing
+without selection remains scoped to the checked device functions. If a selected
+pipeline contains malformed device nodes, composition falls back to eligible,
+structurally intact device functions for `SSAVerify`, `UseAfterDefCheck`, and
+`AssignTypeSymmetry`; `TypeChecked` and `ManualDepsOnSubmitOnly` are skipped.
+This avoids sending invalid structures to verifiers with stronger assumptions.
+If no eligible functions remain, composition is skipped. These diagnostics retain their existing
 rule names. Use-after-definition checks use strict lexical scopes: definitions
 inside a branch cannot escape through the legacy form without region results.
 For a `WindowBuffer` expression, the strict checker visits its size at every use

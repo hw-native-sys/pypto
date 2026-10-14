@@ -172,5 +172,103 @@ class Program:
     ir.assert_structural_equal(after, expected, enable_auto_mapping=True)
 
 
+@pytest.mark.parametrize("flow", ["if", "if_else", "mixed", "loop"])
+@pytest.mark.parametrize("whole", [False, True])
+def test_pre_ssa_reassignments_preserve_control_flow(flow, whole):
+    initial = "ret = self.kernel(a, b)"
+    if flow == "if_else":
+        body = (
+            "if flag > 0:\n            ret = self.kernel(a, b)"
+            "\n        else:\n            ret = self.kernel(other_a, other_b)"
+        )
+    elif flow == "loop":
+        body = initial + (
+            "\n        for i in pl.range(flag):"
+            "\n            ret = self.kernel(other_a, other_b)"
+            "\n            other_a = ret[1]"
+            "\n            other_b = ret[0]"
+        )
+    else:
+        rhs = "(other_b, other_a)" if flow == "mixed" else "self.kernel(other_a, other_b)"
+        body = initial + f"\n        if flag > 0:\n            ret = {rhs}"
+    returned = "ret" if whole else "ret[0], ret[1]"
+    before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, a: pl.Out[pl.Tensor[[4, 16], pl.FP32]],
+               b: pl.Out[pl.Tensor[[4, 16], pl.FP16]]) -> tuple[
+                   pl.Tensor[[4, 16], pl.FP16], pl.Tensor[[4, 16], pl.FP32]]:
+        tile = pl.load(a, [0, 0], [4, 16])
+        written = pl.store(tile, [0, 0], a)
+        return b, a
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, flag: pl.Scalar[pl.INDEX], a: pl.Tensor[[4, 16], pl.FP32],
+             b: pl.Tensor[[4, 16], pl.FP16], other_a: pl.Tensor[[4, 16], pl.FP32],
+             other_b: pl.Tensor[[4, 16], pl.FP16]) -> tuple[
+                 pl.Tensor[[4, 16], pl.FP16], pl.Tensor[[4, 16], pl.FP32]]:
+        {body}
+        return {returned}
+""")
+    after = passes.normalize_return_order()(before)
+    kernel = after.get_function("kernel")
+    assert kernel is not None
+    assert isinstance(kernel.return_types[0], ir.TensorType)
+    assert kernel.return_types[0].dtype == pl.FP32
+    _verify_types(after)
+    after = passes.convert_to_ssa()(after)
+    _verify_types(after)
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.SSAForm)
+    assert not passes.PropertyVerifierRegistry.verify(properties, after)
+    reference, actual = {}, {}
+    exec(torch_codegen(before), reference)  # noqa: S102
+    exec(torch_codegen(after), actual)  # noqa: S102
+    tensors = [
+        torch.full((4, 16), i, dtype=dtype)
+        for i, dtype in enumerate([torch.float32, torch.float16, torch.float32, torch.float16], start=1)
+    ]
+    for flag in [0, 1, 2]:
+        expected = reference["main"](flag, *tensors)
+        result = actual["main"](flag, *tensors)
+        for got, want in zip(result, expected):
+            torch.testing.assert_close(got, want)
+
+
+def test_pre_ssa_submit_reassignment_preserves_merge_and_task_id():
+    before = pl.parse_program("""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, a: pl.Out[pl.Tensor[[4, 16], pl.FP32]],
+               b: pl.Out[pl.Tensor[[4, 16], pl.FP16]]) -> tuple[
+                   pl.Tensor[[4, 16], pl.FP16], pl.Tensor[[4, 16], pl.FP32]]:
+        tile = pl.load(a, [0, 0], [4, 16])
+        written = pl.store(tile, [0, 0], a)
+        return b, a
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, flag: pl.Scalar[pl.BOOL], a: pl.Tensor[[4, 16], pl.FP32],
+             b: pl.Tensor[[4, 16], pl.FP16]) -> tuple[
+                 pl.Tensor[[4, 16], pl.FP16], pl.Tensor[[4, 16], pl.FP32]]:
+        with pl.manual_scope():
+            ret = pl.submit(self.kernel, a, b)
+            if flag:
+                ret = pl.submit(self.kernel, a, b)
+            b1 = ret[0]
+            a1 = ret[1]
+            tid = ret[2]
+            followup = pl.submit(self.kernel, a1, b1, deps=[tid])
+        return b1, a1
+""")
+    after = passes.convert_to_ssa()(passes.normalize_return_order()(before))
+    _verify_types(after)
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.SSAForm)
+    properties.insert(passes.IRProperty.ManualDepsOnSubmitOnly)
+    assert not passes.PropertyVerifierRegistry.verify(properties, after)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

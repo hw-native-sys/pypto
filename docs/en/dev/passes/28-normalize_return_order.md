@@ -179,6 +179,10 @@ For each non-InCore function in the (already-Step-A-rewritten) program,
   element, dependencies, and launch metadata are unchanged.
 - Records the old result `Var` together with its replacement and permutation
   in `reordered_tuple_vars_`.
+- For bindings defined more than once before SSA conversion, assigns each
+  reordered call to a fresh physical temporary and writes its logical tuple
+  back to the original binding. Branches and loops retain a shared identity
+  that `ConvertToSSA` can merge, including mixed reordered/non-reordered assignments.
 - Removes a tracked entry whenever its `Var` is reassigned (call to a
   non-reordered function, non-call RHS, etc.) so identity-based lookups
   never read a stale binding.

@@ -29,6 +29,9 @@ it **no longer halves any function body**:
 > lives in `split_axis_utils`, called by `LowerAutoVectorSplit` — see that
 > pass's doc for the per-op rewrite rules.
 
+Lane-1 `IfStmt` results inherit the rewritten branch-yield types, and subsequent
+uses reference those rebuilt results. Both branches must yield matching types.
+
 ## API
 
 | C++ | Python | Level |

@@ -15,6 +15,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -30,6 +31,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -325,8 +327,19 @@ FunctionPtr ReorderReturns(const FunctionPtr& func, const std::vector<int>& perm
 class TupleIndexPermutationMutator : public IRMutator {
  public:
   TupleIndexPermutationMutator(const std::unordered_map<std::string, std::vector<int>>& permutations,
-                               bool flat_returns)
-      : permutations_(permutations), flat_returns_(flat_returns) {}
+                               const FunctionPtr& func)
+      : permutations_(permutations), flat_returns_(func->return_types_.size() > 1) {
+    // Before SSA, one binding can have definitions in multiple branches or
+    // loops. Keep those definitions in logical order under their original Var
+    // so ConvertToSSA can still discover and merge the shared binding.
+    var_collectors::VarDefUseCollector collector;
+    collector.VisitStmt(func->body_);
+    std::unordered_set<const Var*> defined;
+    for (const auto& param : func->params_) defined.insert(param.get());
+    for (const auto* var : collector.var_defs_ordered) {
+      if (!defined.insert(var).second) rebound_vars_.insert(var);
+    }
+  }
 
  protected:
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
@@ -360,6 +373,13 @@ class TupleIndexPermutationMutator : public IRMutator {
       }
       auto result = std::make_shared<Var>(op->var_->name_hint_, type, op->var_->span_);
       reordered_tuple_vars_[op->var_.get()] = {result, &permutation, nullptr};
+      if (rebound_vars_.count(op->var_.get())) {
+        auto logical = VisitExpr(op->var_);
+        reordered_tuple_vars_.erase(op->var_.get());
+        return SeqStmts::Flatten({std::make_shared<AssignStmt>(result, new_value, op->span_),
+                                  std::make_shared<AssignStmt>(op->var_, logical, op->span_)},
+                                 op->span_);
+      }
       return std::make_shared<AssignStmt>(result, new_value, op->span_);
     }
 
@@ -421,6 +441,7 @@ class TupleIndexPermutationMutator : public IRMutator {
 
   const std::unordered_map<std::string, std::vector<int>>& permutations_;
   bool flat_returns_;
+  std::unordered_set<const Var*> rebound_vars_;
   std::unordered_map<const Expr*, ReorderedTuple> reordered_tuple_vars_;
 };
 
@@ -475,7 +496,7 @@ Pass NormalizeReturnOrder() {
     std::vector<FunctionPtr> final_functions;
     for (const auto& func : functions) {
       if (!IsInCoreType(func->func_type_)) {
-        TupleIndexPermutationMutator mutator(permutations, func->return_types_.size() > 1);
+        TupleIndexPermutationMutator mutator(permutations, func);
         auto new_body = mutator.VisitStmt(func->body_);
         if (new_body.get() != func->body_.get()) {
           final_functions.push_back(std::make_shared<Function>(

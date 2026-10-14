@@ -38,6 +38,7 @@
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
@@ -496,6 +497,27 @@ std::vector<StmtPtr> BuildNoSplitLane1ReplayStmts(const std::vector<StmtPtr>& st
       new_if->condition_ = SubstituteExprIfNeeded(if_stmt->condition_, replacements);
       new_if->then_body_ = loop_repair::MakeBody(new_then_stmts, if_stmt->span_);
       new_if->else_body_ = new_else;
+      if (!if_stmt->return_vars_.empty()) {
+        auto then_yield = transform_utils::GetLastYieldStmt(new_if->then_body_);
+        auto else_yield = new_else ? transform_utils::GetLastYieldStmt(*new_else) : nullptr;
+        INTERNAL_CHECK_SPAN(then_yield && else_yield, if_stmt->span_)
+            << "Internal error: replay IfStmt results require yields in both branches";
+        INTERNAL_CHECK_SPAN(then_yield->value_.size() == if_stmt->return_vars_.size() &&
+                                else_yield->value_.size() == if_stmt->return_vars_.size(),
+                            if_stmt->span_)
+            << "Internal error: replay IfStmt yield arity must match its results";
+        for (size_t i = 0; i < if_stmt->return_vars_.size(); ++i) {
+          auto type = then_yield->value_[i]->GetType();
+          INTERNAL_CHECK_SPAN(structural_equal(type, else_yield->value_[i]->GetType()), if_stmt->span_)
+              << "Internal error: replay IfStmt branches must yield matching result types";
+          const auto& original = if_stmt->return_vars_[i];
+          if (type != original->GetType()) {
+            auto replacement = std::make_shared<Var>(original->name_hint_, type, original->span_);
+            new_if->return_vars_[i] = replacement;
+            replacements[original.get()] = replacement;
+          }
+        }
+      }
       result.push_back(new_if);
       continue;
     }

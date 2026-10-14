@@ -23,6 +23,9 @@
 > 现位于 `split_axis_utils`，由 `LowerAutoVectorSplit` 调用——逐算子改写规则见该 pass
 > 文档。
 
+Lane-1 的 `IfStmt` 结果继承重写后的分支 yield 类型，后续使用引用重建后的结果变量。
+两个分支必须产生一致的类型。
+
 ## API
 
 | C++ | Python | 层级 |
