@@ -282,6 +282,91 @@ def test_policy_and_epoch_changes_do_not_reuse_process_memo(selected_build, monk
     assert not _toolchain.capture_toolchain("a2a3sim", "runtime").usable
 
 
+@pytest.mark.parametrize("selection", ["cwd", "PATH"])
+def test_search_change_that_selects_another_tool_changes_identity(
+    selected_build, monkeypatch, tmp_path, selection
+):
+    monkeypatch.setenv("PYPTO_CACHE_IDENTITY", "build")
+    monkeypatch.setattr(_toolchain, "_compiler", lambda *args: selected_build.compiler)
+    monkeypatch.setattr(_toolchain, "_identities", {})
+    monkeypatch.setitem(
+        sys.modules,
+        "pypto.runtime.kernel_compiler",
+        SimpleNamespace(KernelCompiler=SimpleNamespace(_sanitizers="")),
+    )
+    first_directory = tmp_path / "first"
+    second_directory = tmp_path / "second"
+    first_directory.mkdir()
+    second_directory.mkdir()
+    monkeypatch.chdir(first_directory)
+    monkeypatch.setenv("PATH", str(first_directory))
+    selections = []
+
+    def find():
+        selected = str(Path.cwd()) if selection == "cwd" else os.environ["PATH"]
+        selections.append(selected)
+        return selected
+
+    monkeypatch.setattr(_toolchain, "find_ptoas_binary", find)
+    first = _toolchain.capture_toolchain("a2a3sim", "runtime")
+    if selection == "cwd":
+        monkeypatch.chdir(second_directory)
+    else:
+        monkeypatch.setenv("PATH", str(second_directory))
+    second = _toolchain.capture_toolchain("a2a3sim", "runtime")
+    assert first.usable and second.usable
+    assert first.pypto == second.pypto
+    assert first.ptoas != second.ptoas and first.digest != second.digest
+    assert selections == [str(first_directory), str(second_directory)]
+
+
+@pytest.mark.parametrize(
+    "setting", ["PYPTO_CACHE_IDENTITY", "PYPTO_CACHE_EPOCH", "PYTHONOPTIMIZE", "LD_LIBRARY_PATH"]
+)
+def test_policy_epoch_and_execution_overrides_remain_in_identity(monkeypatch, setting):
+    component = _toolchain.ComponentInputs(unavailable_reason=None, reported_version="same-build")
+    inputs = _toolchain.ToolchainInputs(component, component, component, component, component)
+    monkeypatch.setenv("PYPTO_CACHE_IDENTITY", "build")
+    monkeypatch.delenv("PYPTO_CACHE_EPOCH", raising=False)
+    monkeypatch.delenv("PYTHONOPTIMIZE", raising=False)
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+    monkeypatch.setattr(_toolchain, "_identities", {})
+    monkeypatch.setattr(_toolchain, "find_ptoas_binary", lambda: "ptoas")
+    monkeypatch.setattr(_toolchain, "_selected_compiler", lambda platform: None)
+    monkeypatch.setattr(identity, "discover_builds", lambda *args: inputs)
+    monkeypatch.setattr(_toolchain, "_discover", lambda *args: inputs)
+    first = _toolchain.capture_toolchain("a2a3sim", "runtime")
+    monkeypatch.setenv(setting, "content" if setting == "PYPTO_CACHE_IDENTITY" else "1")
+    second = _toolchain.capture_toolchain("a2a3sim", "runtime")
+    assert first.usable and second.usable and first.digest != second.digest
+
+
+def test_relative_compiler_search_is_resolved_again_after_chdir(monkeypatch, tmp_path):
+    class Compiler:
+        _sanitizers = ""
+
+        def __init__(self, platform):
+            self.selected_path = Path("bin/c++").absolute()
+
+    monkeypatch.setitem(
+        sys.modules, "pypto.runtime.kernel_compiler", SimpleNamespace(KernelCompiler=Compiler)
+    )
+    monkeypatch.setenv("PATH", "bin")
+    monkeypatch.chdir(tmp_path)
+    _toolchain._compiler.cache_clear()
+    try:
+        first = _toolchain._selected_compiler("a2a3sim")
+        assert _toolchain._selected_compiler("a2a3sim") is first
+        other = tmp_path / "other"
+        other.mkdir()
+        monkeypatch.chdir(other)
+        second = _toolchain._selected_compiler("a2a3sim")
+        assert first.selected_path == tmp_path / "bin/c++"
+        assert second.selected_path == other / "bin/c++"
+    finally:
+        _toolchain._compiler.cache_clear()
+
+
 def test_ptoas_probe_uses_script_directory_before_importing_helpers(tmp_path):
     launcher_dir = tmp_path / "bin"
     package = launcher_dir / "ptoas"

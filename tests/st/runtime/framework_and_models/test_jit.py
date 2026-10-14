@@ -67,7 +67,7 @@ def persistent_add(x: pl.Tensor[[16, 16], pl.FP32], out: pl.Out[pl.Tensor[[16, 1
     return out
 
 
-def _persistent_process(root, platform, device_id, consume, connection):
+def _persistent_process(root, platform, device_id, consume, connection, change_search=False):
     """Fresh interpreter: ordinary execution publishes, then readonly reuse executes."""
     phase = "consumer" if consume else "producer"
     cache_logger = logging.getLogger("pypto.jit._persistent")
@@ -80,6 +80,13 @@ def _persistent_process(root, platform, device_id, consume, connection):
         from pypto.runtime.kernel_compiler import KernelCompiler  # noqa: PLC0415
 
         os.environ.pop("PYPTO_PROG_BUILD_DIR", None)
+        if consume and change_search:
+            # The tools are unchanged, but the fresh consumer must rediscover
+            # them from another cwd and an extended executable search path.
+            directory = Path(root).parent / "consumer-cwd"
+            directory.mkdir()
+            os.chdir(directory)
+            os.environ["PATH"] = os.pathsep.join((str(directory), os.environ.get("PATH", "")))
         config = RunConfig(
             platform=platform,
             device_id=device_id,
@@ -118,7 +125,8 @@ def _persistent_process(root, platform, device_id, consume, connection):
 class TestJITExecution:
     """End-to-end tests for @pl.jit compile + execute on device."""
 
-    def test_persistent_cache_across_processes(self, test_config, tmp_path):
+    @pytest.mark.parametrize("change_search", [False, True])
+    def test_persistent_cache_across_processes(self, test_config, tmp_path, change_search):
         """READY reuses every stage in a new process and executes numerically.
 
         Run in a standalone pytest invocation, before its parent initializes
@@ -132,7 +140,14 @@ class TestJITExecution:
             receiving, sending = context.Pipe(duplex=False)
             process = context.Process(
                 target=_persistent_process,
-                args=(str(root), test_config.platform, test_config.device_id, consume, sending),
+                args=(
+                    str(root),
+                    test_config.platform,
+                    test_config.device_id,
+                    consume,
+                    sending,
+                    change_search,
+                ),
             )
             process.start()
             sending.close()

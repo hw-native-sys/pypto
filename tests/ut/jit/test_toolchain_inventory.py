@@ -994,7 +994,9 @@ def test_adapter_drift_returns_unavailable_evidence(monkeypatch, tmp_path, error
 
 
 @pytest.mark.usefixtures("compiler_metadata")
-def test_chdir_rediscovers_but_reuses_identical_component_digests(tmp_path, monkeypatch):
+@pytest.mark.parametrize("policy", ["build", "content"])
+@pytest.mark.parametrize("selection", ["cwd", "PATH"])
+def test_search_changes_rediscover_but_reuse_identical_evidence(tmp_path, monkeypatch, policy, selection):
     import pypto._identity as identity_module  # noqa: PLC0415
 
     payload = tmp_path / "toolchain"
@@ -1017,16 +1019,24 @@ def test_chdir_rediscovers_but_reuses_identical_component_digests(tmp_path, monk
         reads.append(roots)
         return fingerprint(roots)
 
+    monkeypatch.setenv("PYPTO_CACHE_IDENTITY", policy)
+    monkeypatch.delenv("PYPTO_CACHE_EPOCH", raising=False)
     monkeypatch.setattr(_toolchain, "_discover", discover)
+    monkeypatch.setattr("pypto.jit._build_identity.discover_builds", discover)
     monkeypatch.setattr(identity_module, "fingerprint_content", read)
     monkeypatch.chdir(tmp_path)
     first = _toolchain.capture_toolchain("a2a3", "tensormap_and_ringbuffer")
     other = tmp_path / "other"
     other.mkdir()
-    monkeypatch.chdir(other)
+    assert _toolchain.capture_toolchain("a2a3", "tensormap_and_ringbuffer") is first
+    assert discoveries == [tmp_path]
+    if selection == "cwd":
+        monkeypatch.chdir(other)
+    else:
+        monkeypatch.setenv("PATH", os.pathsep.join((os.environ.get("PATH", ""), str(other))))
     second = _toolchain.capture_toolchain("a2a3", "tensormap_and_ringbuffer")
     assert first.usable and second == first
-    assert discoveries == [tmp_path, other]
+    assert discoveries == [tmp_path, other if selection == "cwd" else tmp_path]
     assert len(reads) == 1
 
 

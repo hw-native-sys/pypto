@@ -7,13 +7,12 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Content identity primitives for the planned persistent artifact store.
+"""Identity primitives for the persistent artifact store.
 
-These helpers are deliberately not called by JIT dispatch. A toolchain adapter
-must supply a complete dependency inventory before its component is usable;
-hashing a compiler executable alone is not evidence of a complete toolchain.
-No version string, Git revision, file timestamp, or build ID substitutes for
-file contents. Loaded installations are immutable during a process's lifetime.
+Adapters declare content inventories, verified revisions, or reported build
+identities according to their policy. Declared roots are always hashed; version
+and revision evidence never replaces explicitly listed contents. Loaded
+installations are immutable during a process's lifetime.
 """
 
 import hashlib

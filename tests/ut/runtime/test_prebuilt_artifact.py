@@ -14,6 +14,7 @@ import json
 import shutil
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from enum import Enum
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -572,7 +573,7 @@ def test_orphan_ready_rejects_ambiguous_valid_stages(tmp_path, fake_runtime):
     shutil.rmtree(generated.directory)
     result = JITArtifactStore(store.root, readonly=True).lookup_ready(generated.key, generated.spec)
     assert result.status is LookupStatus.INVALID and result.handle is None
-    assert "Ambiguous READY stages" in result.reason
+    assert result.reason is not None and "Ambiguous READY stages" in result.reason
 
 
 def test_orphan_ready_rejects_malformed_candidate(tmp_path, fake_runtime):
@@ -591,6 +592,41 @@ def test_orphan_ready_rejects_malformed_candidate(tmp_path, fake_runtime):
     (runtime.handle.directory / "kernel_config.json").write_bytes(b"\xff")
     result = JITArtifactStore(store.root, readonly=True).lookup_ready(generated.key, generated.spec)
     assert result.status is LookupStatus.MISS and result.handle is None
+
+
+@pytest.mark.parametrize("count", [32, 33])
+def test_orphan_ready_candidate_limit_stops_directory_iteration(tmp_path, monkeypatch, count):
+    store = JITArtifactStore(tmp_path / "cache", readonly=True)
+    key, generated = _key(), _spec()
+    parent = store._slot(key, generated).parent.parent
+    parent.mkdir(parents=True)
+    visited = []
+    closed = []
+
+    def entries():
+        for index in range(count):
+            visited.append(index)
+            yield SimpleNamespace(name=f"{index:064x}", is_dir=lambda **kwargs: True)
+        if count > 32:
+            raise AssertionError("scanned past the first excess candidate")
+
+    @contextmanager
+    def scandir(directory):
+        assert directory == parent
+        try:
+            yield entries()
+        finally:
+            closed.append(True)
+
+    monkeypatch.setattr("pypto.jit._persistent.os.scandir", scandir)
+    result = store.lookup_ready(key, generated)
+    assert len(visited) == count and closed == [True]
+    assert result.handle is None
+    if count == 32:
+        assert result.status is LookupStatus.MISS
+    else:
+        assert result.status is LookupStatus.INVALID
+        assert result.reason is not None and "Too many READY candidates" in result.reason
 
 
 def test_ready_spec_enumerates_all_child_binaries(tmp_path, fake_runtime):

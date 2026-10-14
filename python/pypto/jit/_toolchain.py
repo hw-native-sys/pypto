@@ -918,7 +918,7 @@ def _discover(compiler: Any, ptoas: str, runtime_name: str) -> ToolchainInputs:
 
 
 @lru_cache(maxsize=32)
-def _compiler(platform: str, path: str | None, sdk: str | None, sanitizers: str) -> Any:
+def _compiler(platform: str, path: str | None, sdk: str | None, sanitizers: str, cwd: str) -> Any:
     """Cache immutable compiler metadata by effective selection inputs."""
     from pypto.runtime.kernel_compiler import KernelCompiler  # noqa: PLC0415
 
@@ -930,7 +930,11 @@ def _selected_compiler(platform: str) -> Any:
     from pypto.runtime.kernel_compiler import KernelCompiler  # noqa: PLC0415
 
     compiler = _compiler(
-        platform, os.environ.get("PATH"), os.environ.get("ASCEND_HOME_PATH"), KernelCompiler._sanitizers
+        platform,
+        os.environ.get("PATH"),
+        os.environ.get("ASCEND_HOME_PATH"),
+        KernelCompiler._sanitizers,
+        os.getcwd(),
     )
     if compiler._sanitizers:
         raise ValueError("Sanitized compiler installations require a cache adapter")
@@ -963,14 +967,12 @@ def capture_toolchain(platform: str, runtime_name: str) -> ToolchainIdentity:
         # Installed paths (including launcher symlinks) are immutable for the
         # process lifetime. Re-resolve on selection changes, including cwd for
         # relative search roots; do not probe every executable on an object hit.
-        selected = (
+        build_context = (
             policy,
             os.environ.get("PYPTO_CACHE_EPOCH"),
             platform,
             runtime_name,
             sanitizers,
-            os.getcwd(),
-            os.environ.get("PATH"),
             os.environ.get("ASCEND_HOME_PATH"),
             os.environ.get("PTOAS_ROOT"),
             os.environ.get("LD_LIBRARY_PATH"),
@@ -994,6 +996,11 @@ def capture_toolchain(platform: str, runtime_name: str) -> ToolchainIdentity:
             os.environ.get("CCACHE_PREFIX"),
             os.environ.get("CCACHE_PREFIX_CPP"),
         )
+        # cwd/PATH select tools and trigger rediscovery. Their raw spelling is
+        # not build evidence: unchanged effective tools may reuse disk entries.
+        # Retain other overrides conservatively (e.g. loader/interpreter flags
+        # can affect execution even when selected executable paths are equal).
+        selected = (os.getcwd(), os.environ.get("PATH"), build_context)
         with _discovery_lock:
             identity = _identities.get(selected)
             if identity is None:
@@ -1009,7 +1016,7 @@ def capture_toolchain(platform: str, runtime_name: str) -> ToolchainIdentity:
                 identity = _identity_cache.capture(inputs)
                 if identity.usable:
                     if policy == "build" or os.environ.get("PYPTO_CACHE_EPOCH"):
-                        identity = replace(identity, pypto=digest_record((identity.pypto, selected)))
+                        identity = replace(identity, pypto=digest_record((identity.pypto, build_context)))
                     _identities[selected] = identity
             return identity
     except Exception as exc:

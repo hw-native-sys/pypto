@@ -124,22 +124,23 @@ class JITArtifactStore(ArtifactStore):
         try:
             check_directory(parent)
             with os.scandir(parent) as entries:
-                candidates = sorted(
-                    entry.name
-                    for entry in entries
-                    if re.fullmatch(r"[0-9a-f]{64}", entry.name) and entry.is_dir(follow_symlinks=False)
-                )
+                candidates: list[str] = []
+                for entry in entries:
+                    if re.fullmatch(r"[0-9a-f]{64}", entry.name) and entry.is_dir(follow_symlinks=False):
+                        candidates.append(entry.name)
+                        if len(candidates) > _MAX_READY_CANDIDATES:
+                            return ArtifactLookup(
+                                LookupStatus.INVALID, reason=f"Too many READY candidates under {parent}"
+                            )
         except FileNotFoundError:
             return ArtifactLookup(LookupStatus.MISS)
         except ValueError as exc:
             return ArtifactLookup(LookupStatus.INVALID, reason=str(exc))
         except OSError as exc:
             return ArtifactLookup(LookupStatus.STORAGE_ERROR, reason=str(exc))
-        if len(candidates) > _MAX_READY_CANDIDATES:
-            return ArtifactLookup(LookupStatus.INVALID, reason=f"Too many READY candidates under {parent}")
         hit: ArtifactLookup | None = None
         failure = ArtifactLookup(LookupStatus.MISS)
-        for digest in candidates:
+        for digest in sorted(candidates):
             directory = parent / digest / ArtifactState.BINARY_READY.value
             try:
                 check_directory(directory)

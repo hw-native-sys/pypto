@@ -30,12 +30,13 @@ kernel. The build host still needs the target compiler, SDK and host runtime.
 
 1. Capture specialization, source namespaces, effective compiler options and
    cache policy. Diagnostics and explicit output requests compile afresh.
-2. Establish full source, application-input and toolchain content identities.
+2. Establish source, application-input and policy-selected toolchain identities.
    Unsupported or unreadable identity inputs report a bypass.
 3. Look for a compatible live object. Persistent objects additionally match the
    captured cache root and read-only policy.
-4. Validate GENERATED metadata and check its complete READY specification.
-   Prefer READY; restore generated code if binaries have not been published.
+4. Read GENERATED's JSON hint to select a READY specification and validate the
+   complete READY payload. If the hint is missing or unusable, try bounded READY
+   discovery under the same key. Otherwise validate and restore GENERATED.
 5. On a miss, build privately under the per-key transaction, package extern
    inputs, recheck mutable sources, and publish immutable GENERATED output.
 6. Execution or warmup completes the runtime's binary transaction and publishes
@@ -177,8 +178,14 @@ patching installed inputs without changing their published identity, set a new
 `PYPTO_CACHE_EPOCH` value or clear the cache. Installed files must remain
 immutable within a process; restart after
 replacing them. Application extra sources are still refreshed on every request.
-Effective selection inputs, including paths and environment overrides, remain
-part of the key, so moving an installation can cause a miss.
+The process memo and persisted identity have separate roles. A change to `cwd`
+or `PATH` reruns discovery (including compiler metadata for relative paths).
+If discovery identifies the same effective tools and dependencies, their disk
+cache identity stays unchanged; adding an unused absolute directory to `PATH`
+does not by itself invalidate entries. Actual selected paths/builds still
+participate, so selecting or moving a tool can cause a miss. Other overrides,
+including loader/interpreter settings, remain conservatively in the build key.
+`PYPTO_CACHE_IDENTITY` and `PYPTO_CACHE_EPOCH` retain their separate namespaces.
 
 `PYPTO_CACHE_IDENTITY=content` retains the previous Linux dependency inventory:
 ELF dependency closures, compiler resources, implicit includes, link inputs and
@@ -193,8 +200,10 @@ Artifact payloads still undergo complete manifest/content validation. Newly
 packaged artifacts carry `kernel_config.json` so READY discovery does not execute
 Python configuration. Restoration reuses the lookup's validated manifest and
 constructs native callables without importing Worker/communication setup.
-If the GENERATED slot is missing or damaged, lookup searches at most 32 READY
-stage directories under the exact artifact key. Each candidate's own JSON must
+If the GENERATED slot is missing or damaged, lookup collects at most 32 matching
+spec directories under the exact artifact key. It stops on the 33rd matching
+directory, without scanning the remaining entries or validating any candidate.
+Nonmatching names and symlinks do not count. Within the limit, each candidate's READY JSON must
 derive its directory's spec digest and pass full manifest/payload validation;
 multiple valid candidates are rejected.
 

@@ -25,7 +25,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from pypto._identity import ComponentInputs, ToolchainInputs, _file_digest, digest_record
 
@@ -77,7 +77,7 @@ def python_sources(root: Path) -> str:
     Paths and bytes both participate. Installation files are immutable within
     a process, just as imported modules are; a fresh process detects edits.
     """
-    records = []
+    records: list[tuple[str, str]] = []
     base = os.fspath(root)
     for directory, dirs, files in os.walk(base, onerror=_walk_error):
         dirs[:] = sorted(d for d in dirs if d not in ("__pycache__", ".git", "_assets"))
@@ -230,17 +230,28 @@ def _startup_identity(selected_modules: dict[str, Any]) -> tuple[Any, ...]:
         or not isinstance(modules, list)
         or not isinstance(search_path, list)
         or unresolved != []
-        or len(hooks) > 256
+    ):
+        raise ValueError("PTOAS interpreter startup evidence is unavailable")
+    hooks = cast(list[object], hooks)
+    modules = cast(list[object], modules)
+    search_path = cast(list[object], search_path)
+    if (
+        len(hooks) > 256
         or len(modules) > 512
         or len(search_path) > 512
         or any(type(path) is not str for path in (*hooks, *search_path))
     ):
         raise ValueError("PTOAS interpreter startup evidence is unavailable")
-    loaded = []
+    hooks = cast(list[str], hooks)
+    search_path = cast(list[str], search_path)
+    loaded: list[tuple[str, str]] = []
     for entry in modules:
-        if not isinstance(entry, (list, tuple)) or len(entry) != 2 or any(type(v) is not str for v in entry):
+        if not isinstance(entry, (list, tuple)):
             raise ValueError(f"Invalid PTOAS startup module evidence: {entry!r}")
-        loaded.append(tuple(entry))
+        fields = cast(list[object] | tuple[object, ...], entry)
+        if len(fields) != 2 or type(fields[0]) is not str or type(fields[1]) is not str:
+            raise ValueError(f"Invalid PTOAS startup module evidence: {entry!r}")
+        loaded.append((fields[0], fields[1]))
     paths = {Path(path) for path in hooks}
     paths.update(Path(path) for _, path in loaded)
     files = [(str(path), _file_digest(path)[1]) for path in sorted(paths)]
@@ -311,7 +322,7 @@ def _compiler_identity(selected: str) -> tuple[Any, ...]:
 
 def _local_builds(
     compiler: Any, runtime_name: str, pypto_sources: list[tuple[str, str]]
-) -> tuple[ComponentInputs, ...]:
+) -> tuple[ComponentInputs, ComponentInputs, ComponentInputs, ComponentInputs]:
     """Identify the actual imports, selected tools and resolver-selected ISA."""
     from ._toolchain import _cann_install_version, _run  # noqa: PLC0415
 
