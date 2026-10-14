@@ -57,7 +57,7 @@ _identities: dict[tuple[Any, ...], ToolchainIdentity] = {}
 _C_LOCALE = {"LC_ALL": "C", "LANG": "C", "LANGUAGE": ""}
 
 
-def _run(command: list[str]) -> str:
+def _run(command: list[str], *, cwd: Path | None = None) -> str:
     result = subprocess.run(
         command,
         capture_output=True,
@@ -65,12 +65,25 @@ def _run(command: list[str]) -> str:
         timeout=30,
         check=True,
         env={**os.environ, **_C_LOCALE},
+        cwd=cwd,
     )
     return result.stdout + result.stderr
 
 
-def _executable(name: str) -> Path:
-    selected = shutil.which(name)
+def _which(name: str, cwd: Path | None = None) -> str | None:
+    """Resolve relative executable paths as a subprocess in cwd would."""
+    if cwd is None:
+        return shutil.which(name)
+    if os.path.dirname(name):
+        return shutil.which(str(cwd / name))
+    search = os.pathsep.join(
+        str(cwd / entry) for entry in os.environ.get("PATH", os.defpath).split(os.pathsep)
+    )
+    return shutil.which(name, path=search)
+
+
+def _executable(name: str, *, cwd: Path | None = None) -> Path:
+    selected = _which(name, cwd)
     if selected is None:
         raise ValueError(f"Compiler executable is unavailable: {name}")
     path = Path(selected).resolve(strict=True)
@@ -80,7 +93,7 @@ def _executable(name: str) -> Path:
     return path
 
 
-def _invocable(name: str) -> Path:
+def _invocable(name: str, *, cwd: Path | None = None) -> Path:
     """Return the compiler as the build invokes it, without resolving it.
 
     A compiler on PATH may be a wrapper that dispatches on argv[0]: ccache
@@ -96,7 +109,7 @@ def _invocable(name: str) -> Path:
     The file behind the name still has to be an ELF image; a wrapper written
     as a shell script needs its own dependency adapter, exactly as before.
     """
-    selected = shutil.which(name)
+    selected = _which(name, cwd)
     if selected is None:
         raise ValueError(f"Compiler executable is unavailable: {name}")
     path = Path(selected)
@@ -257,7 +270,7 @@ _WRAPPER_VARIABLES = tuple(sorted({name for names in _WRAPPER_SELECTION.values()
 _WRAPPER_REDIRECTS = ("compiler", "path", "prefix_command", "prefix_command_cpp")
 
 
-def _wrapper_redirects(wrapper: Path) -> list[str]:
+def _wrapper_redirects(wrapper: Path, *, cwd: Path | None = None) -> list[str]:
     """Report every configured redirect of a wrapper, with where it came from.
 
     A prefix is the case the rest of this module cannot see: it applies to
@@ -267,7 +280,8 @@ def _wrapper_redirects(wrapper: Path) -> list[str]:
     artifacts.
     """
     try:
-        output = _run([str(wrapper), "--show-config"])
+        command = [str(wrapper), "--show-config"]
+        output = _run(command) if cwd is None else _run(command, cwd=cwd)
     except (OSError, subprocess.SubprocessError) as exc:
         return [f"its configuration could not be read ({exc})"]
     redirects: list[str] = []
@@ -279,7 +293,7 @@ def _wrapper_redirects(wrapper: Path) -> list[str]:
     return redirects
 
 
-def _driver_executed(output: str, executable: Path) -> Path:
+def _driver_executed(output: str, executable: Path, *, cwd: Path | None = None) -> Path:
     """Return the compiler driver the invocation actually ran.
 
     Invoking through a wrapper reaches a different binary: ccache's shim execs
@@ -299,7 +313,10 @@ def _driver_executed(output: str, executable: Path) -> Path:
     driver = None
     for line in output.splitlines():
         if line.startswith("COLLECT_GCC="):
-            driver = Path(line.partition("=")[2].strip()).resolve(strict=True)
+            selected = line.partition("=")[2].strip()
+            if cwd is not None:
+                selected = _which(selected, cwd) or str(cwd / selected)
+            driver = Path(selected).resolve(strict=True)
             break
     if driver is None:
         raise ValueError(f"Cannot identify the compiler driver actually executed: {executable}")
@@ -311,7 +328,7 @@ def _driver_executed(output: str, executable: Path) -> Path:
             raise ValueError(
                 f"Compiler wrapper with untracked selection inputs: {invoked.name} at {executable}"
             )
-        redirects = _wrapper_redirects(invoked)
+        redirects = _wrapper_redirects(invoked) if cwd is None else _wrapper_redirects(invoked, cwd=cwd)
         if redirects:
             raise ValueError(
                 f"Compiler wrapper redirects compilation beyond this inventory: "
@@ -967,6 +984,13 @@ def capture_toolchain(platform: str, runtime_name: str) -> ToolchainIdentity:
         # Installed paths (including launcher symlinks) are immutable for the
         # process lifetime. Re-resolve on selection changes, including cwd for
         # relative search roots; do not probe every executable on an object hit.
+        loader_path = os.environ.get("LD_LIBRARY_PATH")
+        # The loader accepts both ':' and ';'; an empty entry also means cwd.
+        loader_cwd = (
+            os.getcwd()
+            if loader_path is not None and any(not os.path.isabs(p) for p in re.split("[:;]", loader_path))
+            else None
+        )
         build_context = (
             policy,
             os.environ.get("PYPTO_CACHE_EPOCH"),
@@ -975,7 +999,8 @@ def capture_toolchain(platform: str, runtime_name: str) -> ToolchainIdentity:
             sanitizers,
             os.environ.get("ASCEND_HOME_PATH"),
             os.environ.get("PTOAS_ROOT"),
-            os.environ.get("LD_LIBRARY_PATH"),
+            loader_path,
+            loader_cwd,
             os.environ.get("PTOAS_PYTHON"),
             os.environ.get("PYTHONPATH"),
             os.environ.get("PYTHONHOME"),

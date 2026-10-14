@@ -23,6 +23,7 @@ import struct
 import sys
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from email.parser import BytesParser
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, cast
@@ -139,7 +140,9 @@ stdlib = os.path.abspath(os.path.dirname(site.__file__))
 site_roots = [os.path.abspath(root) for root in site.getsitepackages()]
 if site.ENABLE_USER_SITE:
     site_roots.append(os.path.abspath(site.getusersitepackages()))
-hook_roots = sorted(set(site_roots + [os.path.abspath(root) for root in sys.path if root]))
+# Only site directories process .pth files. A directory added by a path-only
+# .pth entry contributes imports, but does not execute its own .pth files.
+hook_roots = sorted(set(site_roots))
 hooks = []
 for root in hook_roots:
     if not os.path.isdir(root):
@@ -172,13 +175,33 @@ for name, module in startup:
         unresolved.append(name)
 ptoas = importlib.util.find_spec('ptoas')
 numpy = importlib.util.find_spec('numpy')
+package_names = ('ptoas', 'ptodsl', 'TileOps', 'SoftOps')
+packages = {}
+for name in package_names:
+    spec = importlib.util.find_spec(name)
+    packages[name] = None if spec is None else (
+        spec.origin,
+        list(getattr(sys.modules.get(name), '__path__', spec.submodule_search_locations) or ()),
+    )
+loaded_packages = []
+for name, module in tuple(sys.modules.items()):
+    if name.partition('.')[0] in package_names:
+        loaded_packages.append(
+            (name, getattr(module, '__file__', None), list(getattr(module, '__path__', ())))
+        )
 print(repr({
+    'interpreter_version': sys.version,
+    'interpreter_cache_tag': sys.implementation.cache_tag,
     'ptoas': ptoas.origin if ptoas is not None else None,
     'numpy': numpy.origin if numpy is not None else None,
+    'ptoas_packages': packages,
+    'loaded_ptoas_packages': loaded_packages,
     'startup_hooks': hooks,
     'startup_modules': modules,
     'startup_path': sys.path,
     'startup_unresolved': sorted(set(unresolved)),
+    'startup_customizations': [name for name in ('sitecustomize', 'usercustomize')
+                               if importlib.util.find_spec(name) is not None],
 }))
 """
 
@@ -195,6 +218,10 @@ def _ptoas_identity(selected: str) -> Any:
     except ValueError as exc:
         raise ValueError(f"Unsupported PTOAS launcher for build identity: {launcher}") from exc
     selected_modules = ast.literal_eval(_run([str(interpreter), "-c", _PTOAS_PROBE, str(launcher.parent)]))
+    version = selected_modules.get("interpreter_version")
+    cache_tag = selected_modules.get("interpreter_cache_tag")
+    if not isinstance(version, str) or not version or not isinstance(cache_tag, str) or not cache_tag:
+        raise ValueError(f"PTOAS interpreter version/ABI evidence is unavailable: {interpreter}")
     origin = selected_modules.get("ptoas")
     if not isinstance(origin, str):
         raise ValueError(f"Cannot resolve PTOAS package from {launcher}")
@@ -205,18 +232,78 @@ def _ptoas_identity(selected: str) -> Any:
     natives = sorted(package.glob("_core*.so"))
     if not natives:
         raise ValueError(f"PTOAS wheel has no native compiler module: {package}")
-    metadata = sorted(package.parent.glob("ptoas-*.dist-info/METADATA"))
-    if len(metadata) != 1:
+    metadata = sorted(package.parent.glob("ptoas-*.dist-info"))
+    if len(metadata) != 1 or not all(
+        (metadata[0] / name).is_file() for name in ("METADATA", "WHEEL", "RECORD")
+    ):
         raise ValueError(f"PTOAS wheel metadata is unavailable or ambiguous: {package}")
+    _validate_wheel_requirements(metadata[0] / "METADATA", ["numpy"])
+    packages = _ptoas_package_identity(selected_modules, package)
     return (
         str(launcher),
         _file_digest(launcher)[1],
-        str(interpreter),
-        _file_digest(metadata[0])[1],
+        (str(interpreter), version, cache_tag, native_build_id(interpreter)),
+        [(name, _file_digest(metadata[0] / name)[1]) for name in ("METADATA", "WHEEL", "RECORD")],
+        packages,
         [(str(p), native_build_id(p)) for p in natives],
         numpy_identity,
         _startup_identity(selected_modules),
     )
+
+
+def _ptoas_package_identity(selected_modules: dict[str, Any], package: Path) -> tuple[Any, ...]:
+    """Reject package redirects outside the wheel covered by its RECORD."""
+    names = ("ptoas", "ptodsl", "TileOps", "SoftOps")
+    packages = selected_modules.get("ptoas_packages")
+    loaded = selected_modules.get("loaded_ptoas_packages")
+    if not isinstance(packages, dict) or not isinstance(loaded, list):
+        raise ValueError("PTOAS package origin evidence is unavailable")
+    packages = cast(dict[str, object], packages)
+    loaded = cast(list[object], loaded)
+    if set(packages) != set(names):
+        raise ValueError("PTOAS package origin evidence is unavailable")
+    records: list[tuple[str, str, list[str]]] = []
+    for name in names:
+        entry = packages[name]
+        expected = package.parent / name
+        if not isinstance(entry, (tuple, list)):
+            raise ValueError(f"PTOAS package origin evidence is unavailable: {name}")
+        fields = cast(tuple[object, ...] | list[object], entry)
+        if len(fields) != 2 or not isinstance(fields[0], str) or not isinstance(fields[1], list):
+            raise ValueError(f"PTOAS package origin evidence is unavailable: {name}")
+        paths = cast(list[object], fields[1])
+        if (
+            len(paths) != 1
+            or not isinstance(paths[0], str)
+            or Path(fields[0]).resolve(strict=True) != expected / "__init__.py"
+            or Path(paths[0]).resolve(strict=True) != expected
+        ):
+            raise ValueError(f"PTOAS wheel uses an unsupported package origin or external redirect: {name}")
+        records.append((name, fields[0], [paths[0]]))
+    loaded_records: list[tuple[str, str, list[str]]] = []
+    for entry in loaded:
+        if not isinstance(entry, (tuple, list)):
+            raise ValueError("PTOAS loaded package origin evidence is unavailable")
+        fields = cast(tuple[object, ...] | list[object], entry)
+        if (
+            len(fields) != 3
+            or not isinstance(fields[0], str)
+            or not isinstance(fields[1], str)
+            or not isinstance(fields[2], list)
+            or fields[0].partition(".")[0] not in names
+        ):
+            raise ValueError("PTOAS loaded package origin evidence is unavailable")
+        paths = cast(list[object], fields[2])
+        if any(not isinstance(path, str) for path in paths):
+            raise ValueError("PTOAS loaded package path evidence is unavailable")
+        paths = cast(list[str], paths)
+        root = package.parent / fields[0].partition(".")[0]
+        if root not in Path(fields[1]).resolve(strict=True).parents or any(
+            not Path(path).resolve(strict=True).is_relative_to(root) for path in paths
+        ):
+            raise ValueError(f"PTOAS wheel uses an external import redirect: {fields[0]}")
+        loaded_records.append((fields[0], fields[1], paths))
+    return (records, loaded_records)
 
 
 def _startup_identity(selected_modules: dict[str, Any]) -> tuple[Any, ...]:
@@ -230,8 +317,9 @@ def _startup_identity(selected_modules: dict[str, Any]) -> tuple[Any, ...]:
         or not isinstance(modules, list)
         or not isinstance(search_path, list)
         or unresolved != []
+        or selected_modules.get("startup_customizations") != []
     ):
-        raise ValueError("PTOAS interpreter startup evidence is unavailable")
+        raise ValueError("PTOAS interpreter startup evidence is unavailable or uses custom startup code")
     hooks = cast(list[object], hooks)
     modules = cast(list[object], modules)
     search_path = cast(list[object], search_path)
@@ -244,6 +332,12 @@ def _startup_identity(selected_modules: dict[str, Any]) -> tuple[Any, ...]:
         raise ValueError("PTOAS interpreter startup evidence is unavailable")
     hooks = cast(list[str], hooks)
     search_path = cast(list[str], search_path)
+    # A -c probe cannot reproduce arbitrary script-mode startup code. Even a
+    # hook skipped by this probe can load different compiler inputs in PTOAS.
+    for hook in hooks:
+        with Path(hook).open() as stream:
+            if any(line.removeprefix("\ufeff").startswith(("import ", "import\t")) for line in stream):
+                raise ValueError(f"PTOAS executable startup hook requires a cache adapter: {hook}")
     loaded: list[tuple[str, str]] = []
     for entry in modules:
         if not isinstance(entry, (list, tuple)):
@@ -252,10 +346,22 @@ def _startup_identity(selected_modules: dict[str, Any]) -> tuple[Any, ...]:
         if len(fields) != 2 or type(fields[0]) is not str or type(fields[1]) is not str:
             raise ValueError(f"Invalid PTOAS startup module evidence: {entry!r}")
         loaded.append((fields[0], fields[1]))
+    if any(name in ("sitecustomize", "usercustomize") for name, _ in loaded):
+        raise ValueError("PTOAS interpreter uses custom startup code")
     paths = {Path(path) for path in hooks}
     paths.update(Path(path) for _, path in loaded)
     files = [(str(path), _file_digest(path)[1]) for path in sorted(paths)]
     return (hooks, loaded, search_path, files)
+
+
+def _validate_wheel_requirements(metadata: Path, expected: list[str]) -> None:
+    """Reject dependencies outside the installed-wheel adapter's fixed scope."""
+    with metadata.open("rb") as stream:
+        requirements = BytesParser().parse(stream, headersonly=True).get_all("Requires-Dist", [])
+    if requirements != expected:
+        raise ValueError(
+            f"Unsupported wheel dependency declarations for {metadata.parent.name}: {requirements}"
+        )
 
 
 def _numpy_wheel_identity(numpy_origin: Any, interpreter: Path) -> tuple[Any, ...]:
@@ -270,6 +376,7 @@ def _numpy_wheel_identity(numpy_origin: Any, interpreter: Path) -> tuple[Any, ..
         (numpy_metadata[0] / name).is_file() for name in ("METADATA", "WHEEL", "RECORD")
     ):
         raise ValueError(f"Selected NumPy wheel identity is unavailable: {numpy_package}")
+    _validate_wheel_requirements(numpy_metadata[0] / "METADATA", [])
     return (
         str(numpy_package),
         [(name, _file_digest(numpy_metadata[0] / name)[1]) for name in ("METADATA", "WHEEL", "RECORD")],
@@ -294,26 +401,27 @@ def discover_builds(compiler: Callable[[], Any], ptoas: str, runtime_name: str) 
         return ToolchainInputs(*components[:3], _reported(assembler.result()), components[3])
 
 
-def _compiler_identity(selected: str) -> tuple[Any, ...]:
+def _compiler_identity(selected: str, cwd: Path | None = None) -> tuple[Any, ...]:
     from ._toolchain import _driver_executed, _executable, _invocable, _run  # noqa: PLC0415
 
-    invoked = _invocable(selected)
+    context = {} if cwd is None else {"cwd": cwd}
+    invoked = _invocable(selected, **context)
 
     # GCC selects these programs independently of its driver. Query the same
     # invocation used for compilation so wrapper and PATH selection are honored.
     def selected_program(name: str) -> tuple[str, str, tuple[str, str]]:
-        answer = _run([str(invoked), f"-print-prog-name={name}"]).strip()
+        answer = _run([str(invoked), f"-print-prog-name={name}"], **context).strip()
         if not answer or "\n" in answer:
             raise ValueError(f"Cannot identify GCC's selected {name}: {invoked}")
-        path = _executable(answer)
+        path = _executable(answer, **context)
         return (name, str(path), native_build_id(path))
 
     with ThreadPoolExecutor(max_workers=6) as pool:
-        executed = pool.submit(_run, [str(invoked), "-E", "-x", "c++", "-v", os.devnull])
-        version = pool.submit(_run, [str(invoked), "--version"])
+        executed = pool.submit(_run, [str(invoked), "-E", "-x", "c++", "-v", os.devnull], **context)
+        version = pool.submit(_run, [str(invoked), "--version"], **context)
         programs = list(pool.map(selected_program, ("cc1plus", "collect2", "as", "ld")))
         reported_version = version.result().strip()
-        driver = _driver_executed(executed.result(), invoked)
+        driver = _executable(str(_driver_executed(executed.result(), invoked, **context)), **context)
     invoked_native = invoked.resolve(strict=True)
     invoked_id = native_build_id(invoked_native)
     driver_id = invoked_id if driver == invoked_native else native_build_id(driver)
@@ -324,15 +432,16 @@ def _local_builds(
     compiler: Any, runtime_name: str, pypto_sources: list[tuple[str, str]]
 ) -> tuple[ComponentInputs, ComponentInputs, ComponentInputs, ComponentInputs]:
     """Identify the actual imports, selected tools and resolver-selected ISA."""
-    from ._toolchain import _cann_install_version, _run  # noqa: PLC0415
+    from ._toolchain import _cann_install_version, _executable, _run  # noqa: PLC0415
 
     if sys.platform != "linux":
         raise ValueError(f"Unsupported build identity platform: {sys.platform}")
+    interpreter = Path(sys.executable).resolve(strict=True)
     native = _module_path("pypto.pypto_core")
     runtime_native = _module_path("_task_interface")
     runtime_module = importlib.import_module("_task_interface")
     revision = getattr(runtime_module, "__build_commit__", "")
-    root = compiler.project_root
+    root = Path(compiler.project_root).resolve(strict=True)
     # Source builds compile orchestration helpers from the runtime checkout;
     # wheels ship those sources under _assets and record their build revision.
     if (root / ".git").exists():
@@ -344,17 +453,19 @@ def _local_builds(
         raise ValueError(f"Runtime source build revision is unavailable: {root}")
     metadata_path = root / "build/lib/pto_isa_build.json"
     runtime_build = metadata_path.read_bytes() if metadata_path.is_file() else None
-    device: list[Any] = [_compiler_identity(compiler._orchestration_toolchain(runtime_name).cxx_path)]
+    device: list[Any] = [_compiler_identity(compiler._orchestration_toolchain(runtime_name).cxx_path, root)]
     if compiler.platform.endswith("sim"):
-        device.append(_compiler_identity(compiler.sdk.gxx15.cxx_path))
+        device.append(_compiler_identity(compiler.sdk.gxx15.cxx_path, root))
     else:
-        ccec = Path(compiler.sdk.ccec.cxx_path).resolve(strict=True)
+        # Installation metadata cannot identify an arbitrary launcher's dispatch target.
+        ccec = _executable(compiler.sdk.ccec.cxx_path, cwd=root)
         cann_layout = tuple(p.name for p in ccec.parents[:3]) == ("bin", "bisheng_compiler", "tools")
         cann_version = _cann_install_version(ccec.parents[3]) if cann_layout else ""
         if not cann_version:
             raise ValueError(f"CANN installation build version is unavailable: {ccec}")
         device.append((str(ccec), cann_version))
-        linker = Path(compiler.sdk.ccec.linker_path).resolve(strict=True)
+        # A launcher's bytes do not identify the linker it dispatches to.
+        linker = _executable(compiler.sdk.ccec.linker_path, cwd=root)
         device.append((str(linker), native_build_id(linker)))
     return (
         _reported(
@@ -364,6 +475,8 @@ def _local_builds(
                 native_build_id(native),
                 sys.version,
                 sys.implementation.cache_tag,
+                str(interpreter),
+                native_build_id(interpreter),
             )
         ),
         _reported(

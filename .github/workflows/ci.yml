@@ -1356,7 +1356,8 @@ jobs:
         # The parent must never have initialized the card: earlier direct tests
         # retain process-level device state even after Worker.close(), so spawned
         # consumers cannot map registers (halMemCtl EACCES). A per-test fork does
-        # not release that parent's state. Keep both fresh-process cache checks.
+        # not release that parent's state. Cover both READY reuse and startup-hook
+        # bypass with the test's explicit, isolated PTOAS interpreter setup.
         run: |
           source activate.sh
           task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 600 \

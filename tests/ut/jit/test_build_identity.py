@@ -17,6 +17,7 @@ import runpy
 import struct
 import subprocess
 import sys
+import venv
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -38,6 +39,7 @@ def _elf(path, build_id):
     struct.pack_into("<Q", program, 32, len(note))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(header + program + note)
+    path.chmod(0o755)
     return path
 
 
@@ -115,10 +117,9 @@ def selected_build(tmp_path, monkeypatch):
             read_pto_isa_pin=lambda path: path.read_text().strip(),
         ),
     )
-    monkeypatch.setattr(_toolchain, "_invocable", lambda path: Path(path))
-    monkeypatch.setattr(_toolchain, "_executable", lambda path: Path(path))
+    monkeypatch.setattr(_toolchain, "_invocable", lambda path, **kwargs: Path(path))
 
-    def run(args):
+    def run(args, **kwargs):
         if args[1] == "-E":
             return f"COLLECT_GCC={cxx}\n"
         if args[1].startswith("-print-prog-name="):
@@ -161,6 +162,38 @@ def test_editable_native_build_and_effective_dependencies_invalidate(selected_bu
     assert _capture(build).runtime != first.runtime
 
 
+@pytest.mark.parametrize("change", ["build_id", "content_fallback", "resolved_path"])
+def test_running_interpreter_replacement_changes_identity(selected_build, tmp_path, monkeypatch, change):
+    interpreter = _elf(tmp_path / "python", b"i" * 20)
+    if change == "content_fallback":
+        interpreter.write_bytes(b"interpreter build one")
+    monkeypatch.setattr(sys, "executable", str(interpreter))
+    first = _capture(selected_build)
+    assert first.usable
+    if change == "resolved_path":
+        replacement = _elf(tmp_path / "other/python", b"i" * 20)
+        monkeypatch.setattr(sys, "executable", str(replacement))
+    elif change == "build_id":
+        _elf(interpreter, b"j" * 20)
+    else:
+        interpreter.write_bytes(b"interpreter build two")
+    # sys.version, cache_tag and all PyPTO files remain unchanged.
+    second = _capture(selected_build)
+    assert second.usable
+    assert second.pypto != first.pypto
+    assert second.runtime == first.runtime
+
+
+def test_running_interpreter_symlink_alias_preserves_identity(selected_build, tmp_path, monkeypatch):
+    interpreter = _elf(tmp_path / "python", b"i" * 20)
+    monkeypatch.setattr(sys, "executable", str(interpreter))
+    first = _capture(selected_build)
+    alias = tmp_path / "python-alias"
+    alias.symlink_to(interpreter)
+    monkeypatch.setattr(sys, "executable", str(alias))
+    assert _capture(selected_build).pypto == first.pypto
+
+
 @pytest.mark.parametrize("program", ["as", "ld"])
 def test_selected_gcc_helper_rebuild_changes_identity(selected_build, program):
     first = _capture(selected_build)
@@ -172,7 +205,7 @@ def test_unknown_elf_wrapper_does_not_get_a_build_identity(selected_build, monke
     wrapper = _elf(tmp_path / "untracked-wrapper", b"w" * 20)
     real_driver = _elf(tmp_path / "real-gcc", b"g" * 20)
 
-    def run(args):
+    def run(args, **kwargs):
         if args[1] == "-E":
             return f"COLLECT_GCC={real_driver}\n"
         if args[1].startswith("-print-prog-name="):
@@ -181,6 +214,32 @@ def test_unknown_elf_wrapper_does_not_get_a_build_identity(selected_build, monke
 
     monkeypatch.setattr(_toolchain, "_run", run)
     with pytest.raises(ValueError, match="untracked selection inputs"):
+        identity._compiler_identity(str(wrapper))
+
+
+@pytest.mark.parametrize("kind", ["script", "script_symlink", "non_executable_elf"])
+def test_gcc_wrapper_rejects_unsupported_executed_driver(selected_build, monkeypatch, tmp_path, kind):
+    wrapper = _elf(tmp_path / "ccache", b"w" * 20)
+    driver = _elf(tmp_path / "driver", b"d" * 20)
+    if kind == "non_executable_elf":
+        driver.chmod(0o644)
+        reason = "Compiler executable is unavailable"
+    else:
+        driver.write_text('#!/bin/sh\nexec real-gcc "$@"\n')
+        reason = "Unsupported compiler launcher"
+        if kind == "script_symlink":
+            alias = tmp_path / "driver-alias"
+            alias.symlink_to(driver)
+            driver = alias
+    original_run = _toolchain._run
+
+    def run(args, **kwargs):
+        if args[1] == "-E":
+            return f"COLLECT_GCC={driver}\n"
+        return original_run(args, **kwargs)
+
+    monkeypatch.setattr(_toolchain, "_run", run)
+    with pytest.raises(ValueError, match=reason):
         identity._compiler_identity(str(wrapper))
 
 
@@ -214,11 +273,11 @@ def test_dirty_runtime_checkout_has_no_build_identity(selected_build, monkeypatc
     )
     compiler_run = _toolchain._run
 
-    def run(args):
+    def run(args, **kwargs):
         if args[0] == "git":
             result = subprocess.run(args, check=True, capture_output=True, text=True)
             return result.stdout + result.stderr
-        return compiler_run(args)
+        return compiler_run(args, **kwargs)
 
     monkeypatch.setattr(_toolchain, "_run", run)
     assert _capture(selected_build).usable
@@ -385,6 +444,8 @@ def test_ptoas_probe_uses_script_directory_before_importing_helpers(tmp_path):
     )
     record = ast.literal_eval(result.stdout)
     assert record["ptoas"] == str(origin)
+    assert record["interpreter_version"] == sys.version
+    assert record["interpreter_cache_tag"] == sys.implementation.cache_tag
     assert isinstance(record["startup_hooks"], list)
     assert isinstance(record["startup_modules"], list)
     assert record["startup_unresolved"] == []
@@ -416,57 +477,95 @@ def test_unidentifiable_ptoas_startup_module_has_no_identity():
         )
 
 
-def test_ptoas_resolves_selected_interpreter_without_importing_compiler(tmp_path, monkeypatch):
+@pytest.fixture
+def selected_ptoas_wheel(tmp_path, monkeypatch):
     launcher = tmp_path / "bin/ptoas"
     launcher.parent.mkdir()
-    launcher.write_text("#!/selected/python\n")
+    interpreter = _elf(tmp_path / "selected/python", b"i" * 20)
+    launcher.write_text(f"#!{interpreter}\n")
     package = tmp_path / "selected/site-packages/ptoas"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text("raise AssertionError('must not import')")
     core = _elf(package / "_core.so", b"a" * 20)
     metadata = package.parent / "ptoas-0.65.dev1.dist-info/METADATA"
     metadata.parent.mkdir()
-    metadata.write_text("Name: ptoas\nVersion: 0.65.dev1\n")
+    metadata.write_text("Name: ptoas\nVersion: 0.65.dev1\nRequires-Dist: numpy\n")
+    for name in ("WHEEL", "RECORD"):
+        (metadata.parent / name).write_text(name)
+    package_origins = {}
+    for name in ("ptoas", "ptodsl", "TileOps", "SoftOps"):
+        root = package.parent / name
+        root.mkdir(exist_ok=True)
+        (root / "__init__.py").write_text("raise AssertionError('must not import compiler packages')")
+        package_origins[name] = (str(root / "__init__.py"), [str(root)])
+    package_evidence = {"ptoas_packages": package_origins, "loaded_ptoas_packages": []}
     numpy = package.parent / "numpy/__init__.py"
     numpy.parent.mkdir()
     numpy.write_text("raise AssertionError('must not import NumPy')")
     numpy_metadata = package.parent / "numpy-2.2.6.dist-info"
     numpy_metadata.mkdir()
     for name in ("METADATA", "WHEEL", "RECORD"):
-        (numpy_metadata / name).write_text(name)
+        (numpy_metadata / name).write_text("Name: numpy\nVersion: 2.2.6\n" if name == "METADATA" else name)
     startup_hook = tmp_path / "selected/site-packages/startup.pth"
-    startup_hook.write_text("import sitecustomize\n")
+    startup_hook.write_text("/original/package/path\n")
     startup_module = tmp_path / "selected/site-packages/sitecustomize.py"
     startup_module.write_text("value = 1\n")
     calls = []
-    monkeypatch.setattr(_toolchain, "_console_interpreter", lambda path: Path("/selected/python"))
+    monkeypatch.setattr(_toolchain, "_console_interpreter", lambda path: interpreter)
+    interpreter_evidence = {
+        "interpreter_version": "3.10.19 (selected build)",
+        "interpreter_cache_tag": "cpython-310",
+    }
 
     def probe(command):
         calls.append(command)
         return repr(
             {
+                **interpreter_evidence,
+                **package_evidence,
                 "ptoas": str(package / "__init__.py"),
                 "numpy": str(numpy),
                 "startup_hooks": [str(startup_hook)],
-                "startup_modules": [["sitecustomize", str(startup_module)]],
+                "startup_modules": [["startup_module", str(startup_module)]],
+                "startup_customizations": [],
                 "startup_path": [str(launcher.parent), str(package.parent)],
                 "startup_unresolved": [],
             }
         )
 
     monkeypatch.setattr(_toolchain, "_run", probe)
+    return SimpleNamespace(
+        launcher=launcher,
+        interpreter=interpreter,
+        interpreter_evidence=interpreter_evidence,
+        package_evidence=package_evidence,
+        calls=calls,
+        package=package,
+        core=core,
+        metadata=metadata,
+        numpy_metadata=numpy_metadata,
+        startup_hook=startup_hook,
+        startup_module=startup_module,
+    )
+
+
+def test_ptoas_resolves_selected_interpreter_without_importing_compiler(selected_ptoas_wheel):
+    wheel = selected_ptoas_wheel
+    launcher, core, metadata = wheel.launcher, wheel.core, wheel.metadata
+    package, numpy_metadata = wheel.package, wheel.numpy_metadata
+    startup_hook, startup_module = wheel.startup_hook, wheel.startup_module
     first = identity._ptoas_identity(str(launcher))
-    assert calls[0][0] == "/selected/python"
+    assert wheel.calls[0][0] == str(wheel.interpreter)
     _elf(core, b"b" * 20)
     assert identity._ptoas_identity(str(launcher)) != first
     _elf(core, b"a" * 20)
-    metadata.write_text("Name: ptoas\nVersion: 0.65.dev2\n")
+    metadata.write_text("Name: ptoas\nVersion: 0.65.dev2\nRequires-Dist: numpy\n")
     assert identity._ptoas_identity(str(launcher)) != first
-    metadata.write_text("Name: ptoas\nVersion: 0.65.dev1\n")
+    metadata.write_text("Name: ptoas\nVersion: 0.65.dev1\nRequires-Dist: numpy\n")
     assert identity._ptoas_identity(str(launcher)) == first
-    startup_hook.write_text("import sitecustomize # changed\n")
+    startup_hook.write_text("/changed/package/path\n")
     assert identity._ptoas_identity(str(launcher)) != first
-    startup_hook.write_text("import sitecustomize\n")
+    startup_hook.write_text("/original/package/path\n")
     startup_module.write_text("value = 2\n")
     assert identity._ptoas_identity(str(launcher)) != first
     startup_module.write_text("value = 1\n")
@@ -478,13 +577,14 @@ def test_ptoas_resolves_selected_interpreter_without_importing_compiler(tmp_path
     metadata.unlink()
     with pytest.raises(ValueError, match="metadata is unavailable or ambiguous"):
         identity._ptoas_identity(str(launcher))
-    metadata.write_text("Name: ptoas\nVersion: 0.65.dev1\n")
+    metadata.write_text("Name: ptoas\nVersion: 0.65.dev1\nRequires-Dist: numpy\n")
     second_metadata = package.parent / "ptoas-0.66.dist-info/METADATA"
     second_metadata.parent.mkdir()
     second_metadata.write_text("Name: ptoas\nVersion: 0.66\n")
     with pytest.raises(ValueError, match="metadata is unavailable or ambiguous"):
         identity._ptoas_identity(str(launcher))
     second_metadata.unlink()
+    second_metadata.parent.rmdir()
     (numpy_metadata / "RECORD").write_text("new NumPy wheel build")
     assert identity._ptoas_identity(str(launcher)) != first
     (numpy_metadata / "RECORD").unlink()
@@ -493,6 +593,134 @@ def test_ptoas_resolves_selected_interpreter_without_importing_compiler(tmp_path
     (package / "_online").mkdir()
     with pytest.raises(ValueError, match="online build has no stable published identity"):
         identity._ptoas_identity(str(launcher))
+
+
+@pytest.mark.parametrize("distribution", ["ptoas", "numpy"])
+@pytest.mark.parametrize(
+    "requirement", ["extra-compiler-package", "extra-compiler-package; python_version >= '3.10'"]
+)
+def test_ptoas_rejects_untracked_wheel_dependencies(selected_ptoas_wheel, distribution, requirement):
+    wheel = selected_ptoas_wheel
+    metadata = wheel.metadata if distribution == "ptoas" else wheel.numpy_metadata / "METADATA"
+    assert identity._ptoas_identity(str(wheel.launcher))
+    with metadata.open("a") as stream:
+        stream.write(f"Requires-Dist: {requirement}\n")
+    with pytest.raises(ValueError, match="Unsupported wheel dependency declarations"):
+        identity._ptoas_identity(str(wheel.launcher))
+
+
+def test_ptoas_requires_expected_numpy_declaration(selected_ptoas_wheel):
+    wheel = selected_ptoas_wheel
+    wheel.metadata.write_text("Name: ptoas\nVersion: 0.65.dev1\n")
+    with pytest.raises(ValueError, match="Unsupported wheel dependency declarations"):
+        identity._ptoas_identity(str(wheel.launcher))
+
+
+@pytest.mark.parametrize("name", ["WHEEL", "RECORD"])
+def test_ptoas_wheel_build_record_changes_identity(selected_ptoas_wheel, name):
+    wheel = selected_ptoas_wheel
+    first = identity._ptoas_identity(str(wheel.launcher))
+    (wheel.metadata.parent / name).write_text("same version, different wheel build")
+    assert identity._ptoas_identity(str(wheel.launcher)) != first
+
+
+@pytest.mark.parametrize("name", ["WHEEL", "RECORD"])
+def test_ptoas_requires_complete_wheel_metadata(selected_ptoas_wheel, name):
+    wheel = selected_ptoas_wheel
+    (wheel.metadata.parent / name).unlink()
+    with pytest.raises(ValueError, match="metadata is unavailable or ambiguous"):
+        identity._ptoas_identity(str(wheel.launcher))
+
+
+@pytest.mark.parametrize("name", ["ptodsl", "TileOps", "SoftOps"])
+@pytest.mark.parametrize(
+    "redirect", ["origin", "namespace", "search_path", "symlink", "loaded_origin", "loaded_path"]
+)
+def test_ptoas_rejects_auxiliary_package_redirect(selected_ptoas_wheel, tmp_path, name, redirect):
+    wheel = selected_ptoas_wheel
+    outside = tmp_path / "editable" / name
+    outside.mkdir(parents=True)
+    origin = outside / "__init__.py"
+    origin.write_text("value = 1")
+    packages = wheel.package_evidence["ptoas_packages"]
+    installed = wheel.package.parent / name
+    if redirect == "origin":
+        packages[name] = (str(origin), [str(outside)])
+    elif redirect == "namespace":
+        packages[name] = (None, [str(outside)])
+    elif redirect == "search_path":
+        packages[name] = (str(installed / "__init__.py"), [str(installed), str(outside)])
+    elif redirect == "symlink":
+        (installed / "__init__.py").unlink()
+        installed.rmdir()
+        installed.symlink_to(outside, target_is_directory=True)
+    elif redirect == "loaded_origin":
+        wheel.package_evidence["loaded_ptoas_packages"] = [(f"{name}.helper", str(origin), [])]
+    else:
+        wheel.package_evidence["loaded_ptoas_packages"] = [
+            (name, str(installed / "__init__.py"), [str(outside)])
+        ]
+    with pytest.raises(ValueError, match="PTOAS.*(origin|redirect)"):
+        identity._ptoas_identity(str(wheel.launcher))
+
+
+@pytest.mark.parametrize("name", ["ptodsl", "TileOps", "SoftOps"])
+@pytest.mark.parametrize("redirect", ["PYTHONPATH", "pth"])
+def test_ptoas_probe_detects_auxiliary_redirect_without_importing(
+    selected_ptoas_wheel, tmp_path, name, redirect
+):
+    wheel = selected_ptoas_wheel
+    outside = tmp_path / "external"
+    root = outside / name
+    root.mkdir(parents=True)
+    origin = root / "__init__.py"
+    origin.write_text("raise AssertionError('must not import auxiliary compiler package')")
+    prefix = ""
+    search = os.pathsep.join((str(outside), str(wheel.package.parent)))
+    if redirect == "pth":
+        hooks = tmp_path / "hooks"
+        hooks.mkdir()
+        (hooks / "redirect.pth").write_text(f"import sys; sys.path.insert(1, {str(outside)!r})\n")
+        prefix = f"import site; site.addsitedir({str(hooks)!r})\n"
+        search = str(wheel.package.parent)
+    result = subprocess.run(
+        [sys.executable, "-S", "-c", prefix + identity._PTOAS_PROBE, str(wheel.launcher.parent)],
+        env={**os.environ, "PYTHONPATH": search},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    record = ast.literal_eval(result.stdout)
+    assert record["ptoas_packages"][name][0] == str(origin)
+    with pytest.raises(ValueError, match="external redirect"):
+        identity._ptoas_package_identity(record, wheel.package)
+
+
+@pytest.mark.parametrize("change", ["version", "cache_tag", "build_id", "contents"])
+def test_ptoas_interpreter_replacement_changes_identity(selected_ptoas_wheel, change):
+    wheel = selected_ptoas_wheel
+    if change == "contents":
+        wheel.interpreter.write_bytes(b"\x7fELF-interpreter-a")
+    first = identity._ptoas_identity(str(wheel.launcher))
+    assert identity._ptoas_identity(str(wheel.launcher)) == first
+    if change == "version":
+        wheel.interpreter_evidence["interpreter_version"] = "3.10.20 (selected build)"
+    elif change == "cache_tag":
+        wheel.interpreter_evidence["interpreter_cache_tag"] = "cpython-311"
+    elif change == "build_id":
+        _elf(wheel.interpreter, b"j" * 20)
+    else:
+        wheel.interpreter.write_bytes(b"\x7fELF-interpreter-b")
+    assert identity._ptoas_identity(str(wheel.launcher)) != first
+
+
+@pytest.mark.parametrize("field", ["interpreter_version", "interpreter_cache_tag"])
+@pytest.mark.parametrize("value", [None, "", 310])
+def test_ptoas_requires_interpreter_evidence(selected_ptoas_wheel, field, value):
+    wheel = selected_ptoas_wheel
+    wheel.interpreter_evidence[field] = value
+    with pytest.raises(ValueError, match="interpreter version/ABI evidence is unavailable"):
+        identity._ptoas_identity(str(wheel.launcher))
 
 
 def test_unknown_ptoas_launcher_has_no_build_identity(tmp_path, monkeypatch):
@@ -519,6 +747,226 @@ def test_cann_without_install_version_has_no_build_identity(
     monkeypatch.setattr(_toolchain, "_cann_install_version", lambda root: "" if recognized_layout else "v1")
     with pytest.raises(ValueError, match="CANN installation build version is unavailable"):
         identity.discover_builds(lambda: selected_build.compiler, "ptoas-1", "runtime")
+
+
+@pytest.fixture
+def selected_device_build(selected_build, monkeypatch, tmp_path):
+    ccec = _elf(tmp_path / "tools/bisheng_compiler/bin/ccec", b"e" * 20)
+    linker = _elf(tmp_path / "ld.lld", b"l" * 20)
+    selected_build.compiler.platform = "a2a3"
+    selected_build.compiler.sdk.ccec = SimpleNamespace(cxx_path=str(ccec), linker_path=str(linker))
+    monkeypatch.setattr(_toolchain, "_cann_install_version", lambda root: "v1")
+    return selected_build
+
+
+@pytest.mark.parametrize("kind", ["script", "script_symlink", "non_executable_elf"])
+@pytest.mark.parametrize("tool", ["cxx_path", "linker_path"])
+def test_unsupported_device_tool_bypasses_persistence(
+    selected_device_build, monkeypatch, tmp_path, kind, tool
+):
+    executable = Path(getattr(selected_device_build.compiler.sdk.ccec, tool))
+    if kind == "non_executable_elf":
+        executable.chmod(0o644)
+        reason = "Compiler executable is unavailable"
+    else:
+        executable.write_text('#!/bin/sh\nexec device-tool "$@"\n')
+        reason = "Unsupported compiler launcher"
+        if kind == "script_symlink":
+            alias = tmp_path / "executable-alias"
+            alias.symlink_to(executable)
+            setattr(selected_device_build.compiler.sdk.ccec, tool, str(alias))
+
+    monkeypatch.setenv("PYPTO_CACHE_IDENTITY", "build")
+    monkeypatch.setattr(_toolchain, "_identities", {})
+    monkeypatch.setattr(_toolchain, "_selected_compiler", lambda platform: selected_device_build.compiler)
+    monkeypatch.setattr(_toolchain, "find_ptoas_binary", lambda: "ptoas-1")
+    # The same launcher can select different binaries without changing its bytes.
+    for name, build_id in (("first", b"a" * 20), ("second", b"b" * 20)):
+        target = _elf(tmp_path / name / "device-tool", build_id)
+        monkeypatch.setenv("PATH", str(target.parent))
+        captured = _toolchain.capture_toolchain("a2a3", "runtime")
+        assert not captured.usable
+        assert captured.digest is None
+        assert any(reason in failure.reason for failure in captured.failures)
+
+
+@pytest.mark.parametrize("kind", ["elf", "elf_symlink", "elf_without_build_id"])
+def test_native_device_linker_changes_invalidate_identity(selected_device_build, tmp_path, kind):
+    linker = Path(selected_device_build.compiler.sdk.ccec.linker_path)
+    if kind == "elf_symlink":
+        alias = tmp_path / "linker-alias"
+        alias.symlink_to(linker)
+        selected_device_build.compiler.sdk.ccec.linker_path = str(alias)
+    elif kind == "elf_without_build_id":
+        linker.write_bytes(b"\x7fELF-no-build-id-a")
+    first = _capture(selected_device_build)
+    assert first.usable
+    if kind == "elf_without_build_id":
+        linker.write_bytes(b"\x7fELF-no-build-id-b")
+    else:
+        _elf(linker, b"m" * 20)
+    second = _capture(selected_device_build)
+    assert second.usable
+    assert first.device_toolchain != second.device_toolchain
+    assert first.digest != second.digest
+
+
+@pytest.mark.parametrize("hook", ["sitecustomize", "executable_pth"])
+def test_script_only_startup_code_bypasses_identity(tmp_path, hook):
+    environment = tmp_path / "environment"
+    venv.EnvBuilder(with_pip=False).create(environment)
+    interpreter = environment / "bin/python"
+    site = next((environment / "lib").glob("python*/site-packages"))
+    helper = site / "actual_only.py"
+    helper.write_text("value = 1\n")
+    conditional = "import sys; sys.argv[0] != '-c' and __import__('actual_only')\n"
+    (site / ("sitecustomize.py" if hook == "sitecustomize" else "startup.pth")).write_text(conditional)
+    launcher = environment / "bin/ptoas"
+    launcher.write_text("import sys; print('actual_only' in sys.modules)\n")
+    env = {**os.environ, "PYTHONPATH": "", "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1"}
+    actual = subprocess.run(
+        [str(interpreter), str(launcher)], env=env, check=True, capture_output=True, text=True
+    )
+    assert actual.stdout.strip() == "True"
+    for value in (1, 2):
+        helper.write_text(f"value = {value}\n")
+        probe = subprocess.run(
+            [str(interpreter), "-c", identity._PTOAS_PROBE, str(launcher.parent)],
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        record = ast.literal_eval(probe.stdout)
+        assert "actual_only" not in dict(record["startup_modules"])
+        with pytest.raises(ValueError, match="startup"):
+            identity._startup_identity(record)
+
+
+def test_path_only_startup_does_not_execute_dependency_pth(tmp_path):
+    environment = tmp_path / "environment"
+    venv.EnvBuilder(with_pip=False).create(environment)
+    site = next((environment / "lib").glob("python*/site-packages"))
+    dependencies = tmp_path / "dependencies"
+    dependencies.mkdir()
+    (dependencies / "not_processed.pth").write_text("import nonexistent_startup_module\n")
+    path_file = site / "dependencies.pth"
+    path_file.write_text(f"{dependencies}\n")
+    result = subprocess.run(
+        [str(environment / "bin/python"), "-c", identity._PTOAS_PROBE, str(environment / "bin")],
+        env={**os.environ, "PYTHONPATH": "", "PYTHONNOUSERSITE": "1"},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    record = ast.literal_eval(result.stdout)
+    assert record["startup_hooks"] == [str(path_file)]
+    assert str(dependencies) in record["startup_path"]
+    assert identity._startup_identity(record)
+
+
+@pytest.mark.parametrize(
+    "hook", ["sitecustomize", "usercustomize", "space", "tab", "bom", "missing_evidence"]
+)
+def test_unsupported_startup_has_no_build_identity(selected_ptoas_wheel, monkeypatch, hook):
+    wheel = selected_ptoas_wheel
+    probe = _toolchain._run
+    record = ast.literal_eval(probe([]))
+    if hook in ("sitecustomize", "usercustomize"):
+        record["startup_customizations"] = [hook]
+    elif hook == "missing_evidence":
+        del record["startup_customizations"]
+    elif hook == "bom":
+        wheel.startup_hook.write_text("\ufeffimport startup_hook\n")
+    else:
+        wheel.startup_hook.write_text("import" + (" " if hook == "space" else "\t") + "startup_hook\n")
+    monkeypatch.setattr(_toolchain, "_run", lambda command: repr(record))
+    with pytest.raises(ValueError, match="startup"):
+        identity._ptoas_identity(str(wheel.launcher))
+
+
+@pytest.mark.parametrize(
+    "loader", ["lib", "", ":/absolute", "/absolute:", "/absolute;lib", None, "/absolute"]
+)
+def test_loader_relative_entries_preserve_execution_cwd(tmp_path, monkeypatch, loader):
+    component = _toolchain.ComponentInputs(unavailable_reason=None, reported_version="same-build")
+    inputs = _toolchain.ToolchainInputs(component, component, component, component, component)
+    monkeypatch.setattr(_toolchain, "_identities", {})
+    monkeypatch.setattr(_toolchain, "find_ptoas_binary", lambda: "ptoas")
+    monkeypatch.setattr(_toolchain, "_selected_compiler", lambda platform: None)
+    monkeypatch.setattr(identity, "discover_builds", lambda *args: inputs)
+    monkeypatch.setattr(_toolchain, "_discover", lambda *args: inputs)
+    monkeypatch.setenv("PYPTO_CACHE_IDENTITY", "build")
+    if loader is None:
+        monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+    else:
+        monkeypatch.setenv("LD_LIBRARY_PATH", loader)
+    monkeypatch.chdir(tmp_path)
+    first = _toolchain.capture_toolchain("a2a3", "runtime")
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    second = _toolchain.capture_toolchain("a2a3", "runtime")
+    assert first.usable and second.usable
+    if loader in (None, "/absolute"):
+        assert first.digest == second.digest
+    else:
+        assert first.digest != second.digest
+
+
+@pytest.mark.parametrize("selection", ["relative_compiler", "relative_path", "empty_path"])
+def test_compiler_probe_uses_build_directory(tmp_path, monkeypatch, selection):
+    caller, project = tmp_path / "caller", tmp_path / "project"
+    for root in (caller, project):
+        (root / "bin").mkdir(parents=True)
+        _elf(root / "bin/g++", b"g" * 20)
+        _elf(root / "g++", b"g" * 20)
+        for name in ("cc1plus", "collect2", "as", "ld"):
+            _elf(root / "bin" / name, root.name.encode().ljust(20, b"x"))
+            _elf(root / name, root.name.encode().ljust(20, b"x"))
+    monkeypatch.chdir(caller)
+    relative = "" if selection == "empty_path" else "bin"
+    monkeypatch.setenv("PATH", relative)
+    assert _toolchain._run(
+        [sys.executable, "-S", "-c", "import os; print(os.getcwd())"], cwd=project
+    ).strip() == str(project)
+
+    def probe(args, *, cwd=None):
+        assert cwd == project
+        if args[1] == "-E":
+            return f"COLLECT_GCC={args[0]}\n"
+        if args[1] == "--version":
+            return "gcc test build"
+        return args[1].partition("=")[2]
+
+    monkeypatch.setattr(_toolchain, "_run", probe)
+    selected = "bin/g++" if selection == "relative_compiler" else "g++"
+    first = identity._compiler_identity(selected, project)
+    helpers = {name: path for name, path, _ in first[-1]}
+    assert helpers["as"] == str(project / relative / "as")
+    assert helpers["ld"] == str(project / relative / "ld")
+    _elf(caller / relative / "as", b"c" * 20)
+    assert identity._compiler_identity(selected, project) == first
+    _elf(project / relative / "as", b"p" * 20)
+    assert identity._compiler_identity(selected, project) != first
+    assert Path.cwd() == caller
+
+
+def test_build_probes_and_wrapper_configuration_use_project_cwd(selected_build, monkeypatch, tmp_path):
+    root = selected_build.root
+    wrapper = _elf(tmp_path / "ccache", b"w" * 20)
+    selected_build.compiler._orchestration_toolchain = lambda name: SimpleNamespace(cxx_path=str(wrapper))
+    original_run = _toolchain._run
+    calls = []
+
+    def run(args, *, cwd=None):
+        calls.append((args, cwd))
+        return original_run(args, cwd=cwd)
+
+    monkeypatch.setattr(_toolchain, "_run", run)
+    assert _capture(selected_build).usable
+    assert calls and all(cwd == root for _, cwd in calls)
+    assert any(args[1] == "--show-config" for args, _ in calls)
 
 
 if __name__ == "__main__":

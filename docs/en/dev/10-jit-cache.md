@@ -150,16 +150,23 @@ identities; it does not add an independent expected-version or pin audit.
 
 | Component | Identity evidence |
 | --------- | ----------------- |
-| PyPTO | Package Python source and bundled codegen template contents, the actually imported native extension's full GNU ELF Build-ID, and Python version/ABI. |
+| PyPTO | Package Python source and bundled codegen template contents, the actually imported native extension's full GNU ELF Build-ID, and the running Python interpreter's version/ABI, resolved executable path and native Build-ID (or content hash). |
 | Runtime | A clean source checkout revision or installed build revision, actual native extension Build-ID, runtime Python sources, and available runtime/PTO-ISA build metadata. A dirty source checkout bypasses persistence. |
 | PTO-ISA | The revision selected by the runtime's `pto_isa.pin`. Checkout acquisition and validation happen on compilation misses. |
-| PTOAS | For a standard wheel launcher: metadata from its selected interpreter's package, its selected NumPy wheel record, native compiler Build-ID, interpreter startup `.pth` files and non-stdlib startup modules. Missing startup or wheel evidence and unsupported launchers bypass persistence. Standalone ELF builds use Build-ID. |
-| Device and orchestration tools | Selected compiler paths/versions, the invoked executable's and executed GCC driver's Build-IDs, and GCC helper Build-IDs, plus CANN installation build version and linker Build-ID. Unrecognized compiler wrappers or missing CANN build versions bypass persistence. |
+| PTOAS | For a standard wheel launcher: the selected Python interpreter's version, ABI cache tag and native Build-ID (or content hash), the selected PTOAS wheel's `METADATA`/`WHEEL`/`RECORD`, its selected NumPy wheel record, native compiler Build-ID, path-only interpreter startup `.pth` files and non-stdlib startup modules. The `ptoas`, `ptodsl`, `TileOps`, and `SoftOps` package origins and search paths must stay inside that wheel; external redirects bypass persistence. Only PTOAS→NumPy and NumPy→no dependencies are supported; other declared requirements bypass persistence. Missing startup or wheel evidence and unsupported launchers also bypass persistence. Standalone ELF builds use Build-ID. |
+| Device and orchestration tools | Selected compiler paths/versions, the invoked executable's and executed GCC driver's Build-IDs, and GCC helper Build-IDs, plus CANN installation build version and linker Build-ID. Unrecognized compiler wrappers, non-ELF executed GCC drivers, CCEC compiler or device linker launchers, or missing CANN build versions bypass persistence. The CCEC compiler and device linker must be executable ELF files; ELF files without a Build-ID use a content hash. |
 
 Native files without a usable Build-ID fall back to content hashing. Build IDs
 are read from small ELF notes, not by reading the complete shared object. Wheel
 PTOAS discovery does not import its compiler package. The selected interpreter's
-startup search path and hook files also participate in the key. Missing
+startup search path and hook files also participate in the key. Executable
+`.pth` entries and discoverable `sitecustomize`/`usercustomize` modules bypass
+persistence: a `python -c` probe cannot reproduce arbitrary console-script
+startup behavior. This includes setuptools environments with an executable
+`distutils-precedence.pth`. Such environments still compile and execute, but
+lose cross-process READY reuse under the build policy. A wheel interpreter
+without executable startup hooks retains the fast path; path-only `.pth`
+entries remain supported. No full compiler-package import is introduced. Missing
 evidence bypasses persistence; it never creates an `UNKNOWN` cache key.
 Existing runtime ABI and minimum PTOAS compatibility checks remain in place
 on their normal paths.
@@ -185,6 +192,11 @@ cache identity stays unchanged; adding an unused absolute directory to `PATH`
 does not by itself invalidate entries. Actual selected paths/builds still
 participate, so selecting or moving a tool can cause a miss. Other overrides,
 including loader/interpreter settings, remain conservatively in the build key.
+If `LD_LIBRARY_PATH` contains a relative or empty entry (using `:` or `;`),
+the execution `cwd` also participates; absolute-only entries do not force
+invalidation after `chdir`. Build-policy compiler discovery resolves executable
+paths, GCC helpers, and wrapper configuration from `KernelCompiler.project_root`,
+and runs compiler probes there, matching actual binary compilation.
 `PYPTO_CACHE_IDENTITY` and `PYPTO_CACHE_EPOCH` retain their separate namespaces.
 
 `PYPTO_CACHE_IDENTITY=content` retains the previous Linux dependency inventory:
