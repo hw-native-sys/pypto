@@ -374,5 +374,120 @@ def test_ssa_contract_is_local_to_orchestration(function_type):
         _verify(ir.Program([f for f in after.functions.values() if f.name != "reassigned"], "ssa", span))
 
 
+def _unused_nested_launch(*, submit, count=None, live=False, task_dependency=False, supplied=True):
+    span = ir.Span.unknown()
+    tensor = ir.TensorType([16], DataType.FP32)
+    a = ir.Var("a", tensor, span)
+    packed_type = ir.TupleType([tensor, tensor])
+    packed = ir.MakeTuple([a, a], span)
+    kernel = ir.Function(
+        "nested_kernel",
+        [(a, ir.ParamDirection.Out)],
+        [packed_type, tensor],
+        ir.ReturnStmt([packed, a], span),
+        span,
+        type=ir.FunctionType.Spmd,
+    )
+    a = ir.Var("a", tensor, span)
+    n = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
+    core_num = n if count is None else ir.ConstInt(count, DataType.INDEX, span)
+    result_type = ir.TupleType([packed_type, tensor])
+    args = [a] if supplied else []
+    if submit:
+        result_type = ir.TupleType([packed_type, tensor, ir.ScalarType(DataType.TASK_ID)])
+        launch = ir.Submit(
+            ir.GlobalVar("nested_kernel"),
+            args,
+            [],
+            kwargs={},
+            attrs={},
+            type=result_type,
+            span=span,
+            core_num=core_num,
+        )
+    else:
+        launch = ir.Call(ir.GlobalVar("nested_kernel"), args, {}, {"core_num": core_num}, result_type, span)
+    result = ir.Var("result", result_type, span)
+    nested = ir.Var("nested", packed_type, span)
+    leaf = ir.Var("leaf", tensor, span)
+    alias = ir.Var("alias", tensor, span)
+    other = ir.Var("other", tensor, span)
+    body: list[ir.Stmt] = [
+        ir.AssignStmt(result, launch, span),
+        ir.AssignStmt(nested, ir.TupleGetItemExpr(result, 0, span), span),
+        ir.AssignStmt(leaf, ir.TupleGetItemExpr(nested, 1, span), span),
+        ir.AssignStmt(alias, leaf, span),
+        ir.AssignStmt(other, ir.TupleGetItemExpr(result, 1, span), span),
+    ]
+    if task_dependency:
+        tid = ir.Var("tid", ir.ScalarType(DataType.TASK_ID), span)
+        body.append(ir.AssignStmt(tid, ir.TupleGetItemExpr(result, 2, span), span))
+        dummy = ir.Call(
+            ir.get_op("system.task_dummy"),
+            [],
+            {},
+            {"manual_dep_edges": [tid], "dummy_task": True},
+            ir.ScalarType(DataType.TASK_ID),
+            span,
+        )
+        body.append(ir.EvalStmt(dummy, span))
+    scoped: ir.Stmt
+    if submit:
+        scope = ir.RuntimeScopeStmt(manual=True, body=ir.SeqStmts(body, span), span=span)
+        scoped = ir.SeqStmts([scope, ir.ReturnStmt([alias] if live else [], span)], span)
+    else:
+        scoped = ir.SeqStmts([*body, ir.ReturnStmt([alias] if live else [], span)], span)
+    main = ir.Function(
+        "main",
+        [a, n],
+        [tensor] if live else [],
+        scoped,
+        span,
+        type=ir.FunctionType.Orchestration,
+    )
+    return ir.Program([kernel, main], "unused_nested", span)
+
+
+@pytest.mark.parametrize("count", [None, 0, 3])
+def test_unused_nested_launch_results_do_not_require_empty_path_values(count):
+    after = passes.legalize_spmd_launches()(_unused_nested_launch(submit=False, count=count))
+    _verify(after)
+    main = after.get_function("main")
+    assert main is not None
+    main_program = ir.Program([main], "main", main.span)
+    guards = _nodes(main_program, ir.IfStmt)
+    assert len(guards) == (1 if count is None else 0)
+    if guards:
+        assert not guards[0].return_vars
+        assert all(not stmt.value for stmt in _nodes(main_program, ir.YieldStmt))
+    launches = [op for op in _nodes(main_program, ir.Call) if op.op.name == "nested_kernel"]
+    assert len(launches) == (0 if count == 0 else 1)
+    remaining = ir.python_print(main_program)
+    for name in ["nested:", "leaf:", "alias:", "other:"]:
+        assert name not in remaining
+    twice = passes.legalize_spmd_launches()(after)
+    ir.assert_structural_equal(after, twice)
+
+
+def test_live_nested_return_is_not_discarded():
+    with pytest.raises(ValueError, match="return 0 cannot be mapped"):
+        passes.legalize_spmd_launches()(_unused_nested_launch(submit=False, live=True))
+
+
+def test_task_dependency_keeps_launch_result_live():
+    with pytest.raises(ValueError, match="return 0 cannot be mapped"):
+        passes.legalize_spmd_launches()(_unused_nested_launch(submit=True, task_dependency=True))
+
+
+def test_unused_submit_retains_its_scheduling_result_contract():
+    with pytest.raises(ValueError, match="return 0 cannot be mapped"):
+        passes.legalize_spmd_launches()(_unused_nested_launch(submit=True))
+
+
+def test_unused_nested_result_still_requires_preallocated_outputs():
+    with pytest.raises(ValueError, match="not preallocated"):
+        passes.legalize_spmd_launches()(_unused_nested_launch(submit=True, supplied=False))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

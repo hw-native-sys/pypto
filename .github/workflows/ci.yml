@@ -1613,18 +1613,24 @@ jobs:
           checkout-path: dist-checkout
 
   pypto-lib-compile:
-    # Compile all formal library entrypoints on CPU hosts; runtime coverage stays
-    # in pypto-lib-model. Device-only entries are still compiled here.
+    # Compile all formal library entrypoints without executing device code.
+    # A2/A3 extern wrappers import CANN devkit headers, available on npu hosts.
     needs: [changes, toolchain, pre-commit, clang-tidy]
     if: needs.changes.outputs.docs_only != 'true'
     permissions:
       contents: read
-    runs-on: [self-hosted, linux, cpu]
+    runs-on: [self-hosted, linux, "${{ matrix.runner }}"]
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        platform: [a2a3, a5]
+        include:
+          - platform: a2a3
+            runner: npu
+            needs-cann: 'true'
+          - platform: a5
+            runner: cpu
+            needs-cann: 'false'
     defaults:
       run:
         working-directory: lib-compile-checkout
@@ -1653,7 +1659,8 @@ jobs:
         uses: ./.github/actions/setup-ci-job
         with:
           checkout-path: lib-compile-checkout
-          needs-device: 'false'
+          # This setup input activates CANN; compilation never acquires a device.
+          needs-device: ${{ matrix.needs-cann }}
           toolchain: bundle
           pip-cache-name: pip-lib
           pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}

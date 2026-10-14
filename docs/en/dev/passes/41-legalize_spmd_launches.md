@@ -30,6 +30,15 @@ return that cannot be mapped to an existing Tensor is rejected. The empty path
 does not initialize output bytes: a consumer sees the buffer's previous contents.
 A launch already proven positive can still use runtime-allocated outputs.
 
+Unused tuple projections and Tensor/tuple aliases do not make a launch result
+escape. The pass removes those dead bindings before deciding whether a result
+needs preservation. If no result escapes, the positive branch still evaluates
+the launch for its writes, while the empty branch needs no result values.
+This also handles unused nested tuples introduced by scope outlining without
+changing their return structure or relaxing the checks on live returns.
+Calls, Submit dependencies, TaskId bindings and references in scope metadata
+remain live. Missing Out/InOut arguments are rejected even for unused results.
+
 ## SSA and dependencies
 
 Conceptual IR (the printed spelling of temporaries may differ):
@@ -77,7 +86,8 @@ SSAForm: InitMemRef has invalidated that property for late device IR. It invalid
 directions, runtime scope materialization and loop carry classification, which
 must run after the control-flow change. The pass is idempotent and needs no
 configuration flag. Traversals and cached callee/tuple lookups are linear in
-the IR and call argument sizes.
+the IR and call argument sizes. Result liveness uses indexed binding edges and
+a worklist, including transitive tuple projection/alias chains.
 
 Codegen repeats the arithmetic check as a preflight and rejects a potentially
 non-positive launch if legalization was omitted or a later pass introduced one.

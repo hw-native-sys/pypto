@@ -119,6 +119,10 @@ codegen, and PTOAS.
 This does not build device binaries or check numerical results; `pypto-lib-model`
 provides the separate device smoke tests.
 
+The A2/A3 compile leg runs on a CANN-equipped `npu` host and activates the
+toolkit so external CCE wrappers can resolve devkit headers at import time.
+It does not acquire or execute on an NPU. The A5 leg runs on a `cpu` host.
+
 To reproduce after activating a built PyPTO environment with the pinned PTOAS:
 
 ```bash
@@ -128,7 +132,9 @@ python tests/ci/compile_pypto_lib.py --lib /path/to/pypto-lib \
 
 Repeat with `--platform a5`. Each entry has a 1200-second timeout (override with
 `--timeout`). Compilation failures, process failures, timeouts, and zero recorded
-compilations fail the job. CI uploads per-entry logs, results, and a manifest
+compilations fail the job. Malformed or unreadable receipts fail their entry
+without aborting the remaining entries or losing the matrix summary.
+CI uploads per-entry logs, results, and a manifest
 containing the tested library revision and selected entries.
 
 ### PTOAS — PTO Assembler & Optimizer

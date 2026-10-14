@@ -118,6 +118,10 @@ Python DSL → IR（不可变树）→ Pass Pipeline（20+ passes）→ CodeGen
 不构建设备二进制，也不验证数值结果；
 `pypto-lib-model` 提供独立的设备冒烟测试。
 
+A2/A3 编译分支运行在安装了 CANN 的 `npu` 主机上，并激活工具包，
+以便外部 CCE 封装在导入时解析开发套件头文件。
+该分支不申请或执行 NPU；A5 分支运行在 `cpu` 主机上。
+
 激活已构建的 PyPTO 环境并配置固定版本的 PTOAS 后，可本地复现：
 
 ```bash
@@ -127,6 +131,7 @@ python tests/ci/compile_pypto_lib.py --lib /path/to/pypto-lib \
 
 使用 `--platform a5` 重复测试。每个入口默认超时 1200 秒，可通过
 `--timeout` 修改。编译失败、进程失败、超时和未记录到编译均会使 job 失败。
+损坏或不可读的编译回执只使对应入口失败，不会中断其他入口或丢失矩阵汇总。
 CI 上传逐入口日志、结果，以及记录库版本和所选入口的清单。
 
 ### PTOAS — PTO 汇编器与优化器

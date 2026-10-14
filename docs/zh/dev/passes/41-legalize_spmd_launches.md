@@ -27,6 +27,13 @@ callee 参数，再映射到调用方实参。多输出、重排返回和 view �
 后续 consumer 看到的是 buffer 之前的内容。已经证明为正的 launch
 仍可使用 runtime 自动分配的输出。
 
+没有被使用的元组投影和 Tensor/元组别名不会使 launch 结果逃逸。
+此 pass 在判断结果是否需要保留之前清理这些无用绑定。如果没有结果逃逸，
+正分支仍执行 launch 以保留写入副作用，空分支则不需要构造返回值。
+这也覆盖了 scope outlining 生成的无用嵌套元组，无需改变返回结构或放宽
+对活跃返回值的检查。Call、Submit 依赖、TaskId 绑定和 scope metadata 中的
+引用仍被保留。即使结果未使用，缺失 Out/InOut 实参也仍会报错。
+
 ## SSA 与依赖
 
 概念 IR（实际打印的临时变量名称可能不同）：
@@ -70,6 +77,8 @@ NormalizedStmtStructure。改写每个 Orchestration 函数前后都会验证其
 在后期设备 IR 中失效。控制流改写使调用方向、runtime
 scope 和循环 carry 分类失效，这些分析必须随后运行。此 pass 具有幂等性，
 无需配置开关。遍历和缓存查找的复杂度与 IR 及调用参数总大小呈线性关系。
+结果活跃性分析（result liveness）通过绑定边索引和工作列表处理传递的元组
+投影/别名链。
 
 Codegen 还会再次进行算术检查；如果遗漏此 pass，或后续 pass 引入了没有正数
 保护的 launch，会在代码生成前报错。

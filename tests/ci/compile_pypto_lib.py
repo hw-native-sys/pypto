@@ -179,7 +179,14 @@ def run_case(lib: Path, entry: str, platform: str, output: Path, timeout: int) -
                 os.killpg(proc.pid, signal.SIGKILL)
                 code = proc.wait()
                 log.write(f"\nTimed out after {timeout}s\n")
-    results = json.loads(receipt.read_text()) if receipt.exists() else []
+    try:
+        results = json.loads(receipt.read_text()) if receipt.exists() else []
+    except (json.JSONDecodeError, OSError):
+        results = []
+    if not isinstance(results, list) or any(
+        not isinstance(result, dict) or not isinstance(result.get("passed"), bool) for result in results
+    ):
+        results = []
     passed = code == 0 and bool(results) and all(result["passed"] for result in results)
     return {
         "entry": entry,

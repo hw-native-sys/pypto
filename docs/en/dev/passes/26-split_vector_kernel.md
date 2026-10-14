@@ -33,7 +33,14 @@ Lane-1 `IfStmt` tile results retain the original join's layout and padding
 metadata with zero valid shape, and subsequent uses reference those rebuilt
 results. Branch tiles can have different padding metadata; the replay must not
 require full structural equality or adopt one branch's padding for the join.
-Non-tile results inherit the rewritten then-yield type.
+Tensor results use the common replayed yield type when both branches agree,
+preserving their backing view. Otherwise, non-tile results retain the original
+join type; metadata-only `tensor.view` aliases restore that contract for tensor
+destinations with different shapes without writing the destination.
+Before reusing a join type, its shape and view expressions are remapped to the
+replay lane's scalar definitions, so cloning cannot bind them to lane 0 locals.
+Inserted aliases remain inside any terminal runtime or AIV-split scope,
+preserving its attributes and the definitions used by its yield.
 
 ## API
 

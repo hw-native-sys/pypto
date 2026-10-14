@@ -92,6 +92,34 @@ def test_timeout_cannot_reuse_previous_receipt(library, tmp_path):
     assert result["compilations"] == []
 
 
+@pytest.mark.parametrize("receipt", ["[", "null", "{}", "[{}]", '[{"passed": "true"}]'])
+def test_invalid_receipt_fails_without_aborting(library, tmp_path, receipt):
+    (library / "models/case.py").write_text(
+        "from golden import run\nrun('ok', [])\n"
+        f"import json\njson.dumps = lambda *args, **kwargs: {receipt!r}\n"
+    )
+    result = audit.run_case(library, "models/case.py", "a2a3", tmp_path / "out", 10)
+    assert result["exit_code"] == 0
+    assert not result["passed"]
+    assert result["compilations"] == []
+
+
+def test_unreadable_receipt_fails_without_aborting(library, tmp_path, monkeypatch):
+    (library / "models/case.py").write_text("from golden import run\nrun('ok', [])")
+    original_read = Path.read_text
+
+    def read_text(path, *args, **kwargs):
+        if path.name == "compilations.json":
+            raise OSError("Receipt is unreadable")
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    result = audit.run_case(library, "models/case.py", "a5", tmp_path / "out", 10)
+    assert result["exit_code"] == 0
+    assert not result["passed"]
+    assert result["compilations"] == []
+
+
 def test_entry_arguments_preserve_declared_ranks(tmp_path):
     script = tmp_path / "distributed.py"
     script.write_text('# ci: devices=4\nparser.add_argument("--compile-only")\n')
@@ -128,7 +156,7 @@ def test_selector_failure_is_not_empty_success(library):
         audit.select_entries(library, "a5")
 
 
-@pytest.mark.parametrize(("kernel", "status"), [("ok", 0), ("bad", 1)])
+@pytest.mark.parametrize(("kernel", "status"), [("ok", 0), ("bad", 1), ("truncated", 1)])
 def test_manifest_uses_library_selector(library, tmp_path, monkeypatch, kernel, status):
     selector = library / ".github/scripts/detect_changes.py"
     selector.parent.mkdir(parents=True)
@@ -136,7 +164,10 @@ def test_manifest_uses_library_selector(library, tmp_path, monkeypatch, kernel, 
         "import sys\nassert sys.argv[1:] == ['--all', '--platform', 'a5']\n"
         "print('models/case.py models/glm5_3_flash/weights.py')\n"
     )
-    (library / "models/case.py").write_text(f"from golden import run\nrun({kernel!r}, [])")
+    body = f"from golden import run\nrun({kernel!r}, [])"
+    if kernel == "truncated":
+        body += "\nimport json\njson.dumps = lambda *args, **kwargs: '['\n"
+    (library / "models/case.py").write_text(body)
     audit.subprocess.run(["git", "init", str(library)], check=True, capture_output=True)
     audit.subprocess.run(
         [
