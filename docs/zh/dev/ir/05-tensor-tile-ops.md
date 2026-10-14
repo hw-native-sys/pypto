@@ -57,6 +57,11 @@ window 的操作数不在这条规则范围内，因为它们当前的下降或�
 
 `pl.reinterpret_view(data, dtype, *, shape=None)` 会根据输入分派到等价的 `pl.tensor` 或 `pl.tile` 算子，并保持返回类型种类不变。它是覆盖完全相同字节的零拷贝视图。通用路径支持有/无符号 8/16/32/64 位整数、FP16、BF16 与 FP32；MX 下降额外只允许 INT8↔FP8E4M3FN 和 UINT8↔FP8E8M0 两对等字节 alias。省略 `shape` 时，ND/row-major 缩放最后一轴，DN/col-major 按源/目标字节宽度比例缩放倒数第二轴。显式 shape 必须字节数相等；除非能证明它与自动推导 shape 等价，否则必须完全静态。部分有效的 `valid_shape` 只能使用与自动推导结果等价的 shape。零值/null padding 元数据会保留，依赖 dtype 的 max/min padding 则会清除。初始可执行路径支持 packed ND in-core tensor 及 packed、flat（`none_box`）row/col-major tile；DN tensor 可做类型推导但 Tensor-to-Tile 下降会拒绝，编排层 tensor 暂不支持。
 
+UINT8 → FP4E2M1X2 是 Ascend950 上额外的 **tile-only** 字节 alias：要求二维
+packed row-major Vec，carrier shape 和字节数不变，仅支持 PYPTO 或 DSA_RP
+内存规划器。此类型对会拒绝 PTOAS 规划器、tensor alias、逆向 alias 及显式
+变形。契约、验证与 benchmark 见 [FP4 UB 解码](../fp4.md#通过-ub-alias-解码-uint8-carrierascend950)。
+
 **示例：**
 
 ```python
@@ -110,7 +115,7 @@ with ib.function("tensor_example") as f:
 中。编译器会把量化数据与 FP8E8M0 scale 直接经 V2C 传递，同时保留 scale
 的逻辑 fractal-32 布局。
 
-`tile.reshape` 保持 dtype、元素总数以及源的有效区域（见下）；`tile.reinterpret_view(data, dtype, *, shape=None)` 改变 dtype，但要求前后总字节数完全相同。省略 `shape` 时，它会根据源/目标 dtype 字节宽度和 tile layout 缩放物理连续轴。在 PTOAS 内存规划下，无论 shape 是否变化，都会下降为保持别名关系的 PTO `treshape` 原语。
+`tile.reshape` 保持 dtype、元素总数以及源的有效区域（见下）；`tile.reinterpret_view(data, dtype, *, shape=None)` 改变 dtype，但要求前后总字节数完全相同。省略 `shape` 时，它会根据源/目标 dtype 字节宽度和 tile layout 缩放物理连续轴。在 PTOAS 内存规划下，无论 shape 是否变化，都会下降为保持别名关系的 PTO `treshape` 原语；UINT8→FP4E2M1X2 是例外：PTOAS 0.65 的 `treshape` 拒绝此 dtype，因此该类型对仅支持 PYPTO 或 DSA_RP。
 
 ### tile.move 的结果 view
 

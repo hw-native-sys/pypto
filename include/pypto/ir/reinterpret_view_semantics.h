@@ -262,20 +262,25 @@ inline ReinterpretViewPlan Resolve(const std::vector<ExprPtr>& source_shape,
                                    const std::vector<ExprPtr>& source_valid_shape, DataType source_dtype,
                                    DataType target_dtype, size_t contiguous_axis,
                                    const std::optional<std::vector<ExprPtr>>& requested_shape,
-                                   const std::string& op_name, const Span& span) {
+                                   const std::string& op_name, const Span& span,
+                                   bool allow_fp4_byte_alias = false) {
   const bool mx_alias = (source_dtype == DataType::INT8 && target_dtype == DataType::FP8E4M3FN) ||
                         (source_dtype == DataType::FP8E4M3FN && target_dtype == DataType::INT8) ||
                         (source_dtype == DataType::UINT8 && target_dtype == DataType::FP8E8M0) ||
                         (source_dtype == DataType::FP8E8M0 && target_dtype == DataType::UINT8);
+  // Opt in only from tile inference after validating the UB carrier contract.
+  // Tensor inference deliberately retains the default rejection of packed FP4.
+  const bool fp4_byte_alias =
+      allow_fp4_byte_alias && source_dtype == DataType::UINT8 && target_dtype == DataType::FP4E2M1X2;
   const bool uses_unsupported_fp8 =
       (!IsSupportedDType(source_dtype) && source_dtype.IsFloat() && source_dtype.GetBit() == 8) ||
       (!IsSupportedDType(target_dtype) && target_dtype.IsFloat() && target_dtype.GetBit() == 8);
-  CHECK_SPAN(mx_alias || !uses_unsupported_fp8, span)
+  CHECK_SPAN(mx_alias || fp4_byte_alias || !uses_unsupported_fp8, span)
       << op_name << " only supports FP8 reinterpretation for INT8<->FP8E4M3FN and UINT8<->FP8E8M0";
-  CHECK_SPAN(IsSupportedDType(source_dtype) || mx_alias, span)
+  CHECK_SPAN(IsSupportedDType(source_dtype) || mx_alias || fp4_byte_alias, span)
       << op_name << " does not support source dtype " << source_dtype.ToString()
       << "; FP8 aliases are limited to INT8<->FP8E4M3FN and UINT8<->FP8E8M0";
-  CHECK_SPAN(IsSupportedDType(target_dtype) || mx_alias, span)
+  CHECK_SPAN(IsSupportedDType(target_dtype) || mx_alias || fp4_byte_alias, span)
       << op_name << " does not support target dtype " << target_dtype.ToString()
       << "; FP8 aliases are limited to INT8<->FP8E4M3FN and UINT8<->FP8E8M0";
   CHECK_SPAN(source_dtype != target_dtype, span)

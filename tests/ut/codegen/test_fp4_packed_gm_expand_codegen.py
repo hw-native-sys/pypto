@@ -9,6 +9,8 @@
 
 """PTO codegen checks for hand-written FP4E2M1X2 GM expand (carrier → nibble ABI)."""
 
+import re
+
 import pypto.language as pl
 import pytest
 from pypto import ir
@@ -23,19 +25,66 @@ def _reset_backend_after_test():
     reset_for_testing()
 
 
-def _emit_incore_mlir(program) -> str:
+def _emit_incore_mlir(program, planner=passes.MemoryPlanner.PYPTO) -> str:
     reset_for_testing()
     set_backend_type(BackendType.Ascend950)
-    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
+    with passes.PassContext([], memory_planner=planner):
         optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
     parts: list[str] = []
     for func in optimized.functions.values():
         if func.func_type in (pl.FunctionType.Orchestration, pl.FunctionType.Group):
             continue
         single = ir.Program([func], func.name, optimized.span)
-        result = codegen.PTOCodegen().generate(single, emit_tile_addr=True)
+        result = codegen.PTOCodegen().generate(single, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
         parts.append(result if isinstance(result, str) else "".join(result.values()))
     return "\n".join(parts)
+
+
+def _uint8_ub_fp4_decode_program():
+    @pl.program
+    class Decode:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            packed: pl.Tensor[[96, 320], pl.UINT8],
+            output: pl.Out[pl.Tensor[[96, 640], pl.BF16]],
+        ) -> pl.Tensor[[96, 640], pl.BF16]:
+            payload = pl.tile.load(packed, [32, 32], [32, 256])
+            fp4 = pl.reinterpret_view(payload, pl.FP4E2M1X2)
+            decoded = pl.cast(fp4, pl.BF16)
+            return pl.tile.store(decoded, [32, 64], output)
+
+    return Decode
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+def test_uint8_ub_fp4_alias_is_consumed_by_native_cast_and_store(planner):
+    mlir = _emit_incore_mlir(_uint8_ub_fp4_decode_program(), planner)
+    assert mlir.count("pto.tcvt ") == 1, mlir
+    assert mlir.count("pto.tload ") == mlir.count("pto.tstore ") == 1, mlir
+    cast = next(line for line in mlir.splitlines() if "pto.tcvt " in line)
+    assert "dtype=!pto.f4E2M1x2, rows=32, cols=256" in cast, cast
+    assert "dtype=bf16, rows=32, cols=512" in cast, cast
+    gm_views = [
+        line for line in mlir.splitlines() if "pto.make_tensor_view" in line or "pto.partition_view" in line
+    ]
+    assert gm_views and all("f4E2M1x2" not in line for line in gm_views), mlir
+    assert not any(op in mlir for op in ("pto.tand", "pto.tshr", "pto.tshl", "pto.tscatter")), mlir
+
+    assert "pto.treshape" not in mlir, mlir
+    aliases = [
+        line
+        for line in mlir.splitlines()
+        if "pto.alloc_tile" in line and ("dtype=ui8" in line or "dtype=!pto.f4E2M1x2" in line)
+    ]
+    assert len(aliases) == 2, mlir
+    addresses = [match.group(1) for line in aliases if (match := re.search(r"addr = ([^, ]+)", line))]
+    assert len(addresses) == 2 and addresses[0] == addresses[1], aliases
+
+
+def test_uint8_ub_fp4_alias_rejects_ptoas_memory_planner():
+    with pytest.raises(ValueError, match="FP4E2M1X2 UB alias requires memory_planner=PYPTO or DSA_RP"):
+        _emit_incore_mlir(_uint8_ub_fp4_decode_program(), passes.MemoryPlanner.PTOAS)
 
 
 def test_fp4e2m1x2_make_tensor_view_expands_to_nibble_units():

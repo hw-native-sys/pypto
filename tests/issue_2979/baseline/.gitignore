@@ -1,0 +1,6 @@
+*.py
+*.cpp
+builds.json
+results.json
+safe-offset-build.json
+safe-offset-result.json

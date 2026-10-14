@@ -15,6 +15,7 @@ contains distinct positive and negative FP32 values so an accidental numeric
 conversion, element reorder, truncation, or duplication is observable.
 """
 
+from dataclasses import replace
 from typing import Any
 
 import pypto.language as pl
@@ -152,6 +153,83 @@ class TestReinterpretView:
         result = test_runner.run(NarrowerElementReinterpretTestCase(planner))
         assert result.passed, (
             f"width-changing reinterpret_view ({_planner_tag(planner)}) failed: {result.error}"
+        )
+
+
+def make_fp4_byte_decode_region(row_start: int, column_start: int):
+    """Decode two tiles through one UB allocation, retaining GM byte offsets."""
+
+    @pl.jit(auto_scope=False)
+    def decode(
+        packed: pl.Tensor[[128, 320], pl.UINT8],
+        output: pl.InOut[pl.Tensor[[128, 640], pl.BF16]],
+    ):
+        with pl.spmd(1, sync_start=False):
+            worker = pl.tile.get_block_idx()
+            for row in pl.range(row_start + worker * 64, row_start + 64, 32):
+                payload = pl.tile.load(packed, [row, column_start], [32, 256])
+                fp4 = pl.reinterpret_view(payload, pl.FP4E2M1X2)
+                decoded = pl.cast(fp4, pl.BF16)
+                pl.tile.store(decoded, [row, column_start * 2], output)
+        return output
+
+    return decode
+
+
+def fp4_byte_reference_bits(packed: torch.Tensor) -> torch.Tensor:
+    """Independent E2M1 LUT of BF16 bit patterns, including both signed zeros."""
+    lut = torch.tensor(
+        [
+            0x0000,
+            0x3F00,
+            0x3F80,
+            0x3FC0,
+            0x4000,
+            0x4040,
+            0x4080,
+            0x40C0,
+            0x8000,
+            0xBF00,
+            0xBF80,
+            0xBFC0,
+            0xC000,
+            0xC040,
+            0xC080,
+            0xC0C0,
+        ],
+        dtype=torch.int32,
+    ).to(torch.int16)
+    codes = torch.stack((packed & 15, packed >> 4), dim=-1).long()
+    return lut[codes].reshape(packed.shape[0], packed.shape[1] * 2)
+
+
+@pytest.mark.platforms("a5")
+@pytest.mark.parametrize("planner", [MemoryPlanner.PYPTO, MemoryPlanner.DSA_RP], ids=_planner_tag)
+@pytest.mark.parametrize(("row_start", "column_start"), [(0, 0), (32, 0), (64, 32)])
+def test_fp4_byte_decode_offsets_and_reuse_are_bit_exact(test_config, planner, row_start, column_start):
+    decode = make_fp4_byte_decode_region(row_start, column_start)
+    packed = torch.zeros((128, 320), dtype=torch.uint8)
+    output = torch.empty((128, 640), dtype=torch.bfloat16)
+    config = replace(test_config, memory_planner=planner)
+    compiled = decode.compile(packed, output, config=config)
+    if config.codegen_only:
+        return
+
+    for repeat in range(3):
+        # Each loaded row contains every packed byte; the row shift makes a
+        # wrong physical row observable, and repeat changes reused buffers.
+        packed[:] = ((torch.arange(320)[None, :] + 17 * torch.arange(128)[:, None] + 37 * repeat) % 256).to(
+            torch.uint8
+        )
+        expected_bits = torch.full((128, 640), 0x7FC1, dtype=torch.int16)
+        output.view(torch.int16).copy_(expected_bits)
+        expected_bits[row_start : row_start + 64, column_start * 2 : column_start * 2 + 512] = (
+            fp4_byte_reference_bits(packed[row_start : row_start + 64, column_start : column_start + 256])
+        )
+        compiled(packed, output, config=config)
+        assert torch.equal(output.view(torch.int16), expected_bits), (
+            f"{_planner_tag(planner)}: BF16 bit mismatch at row={row_start}, "
+            f"column={column_start}, repeat={repeat}"
         )
 
 

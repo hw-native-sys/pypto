@@ -1,0 +1,7 @@
+.local/
+builds-*.json
+results-*.json
+baseline/builds.json
+baseline/results.json
+baseline/safe-offset-build.json
+baseline/safe-offset-result.json

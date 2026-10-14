@@ -1499,6 +1499,10 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     INTERNAL_CHECK_SPAN(source_tile && result_tile, op->span_)
         << "Internal error: tile.reinterpret_view requires TileType source and result";
 
+    CHECK_SPAN(result_tile->dtype_ != DataType::FP4E2M1X2 || codegen.EmitTileAddr(), op->span_)
+        << "UINT8 -> FP4E2M1X2 UB alias requires memory_planner=PYPTO or DSA_RP; "
+           "PTOAS 0.65 treshape does not support packed FP4 aliases";
+
     const std::string result_type = codegen.GetTileBufTypeStringFromTileType(result_tile);
     const bool result_has_memref = result_tile->memref_.has_value();
     const std::string existing_type = codegen.GetSSATileBufType(result_target);

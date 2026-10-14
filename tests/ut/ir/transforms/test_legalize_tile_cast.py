@@ -239,6 +239,25 @@ def test_a5_fp4e2m1x2_to_bf16_cast_is_silent_and_expands_last_dim(capfd):
     assert shapes.cast_out_shape == (16, 64)
 
 
+def test_a5_uint8_ub_alias_to_bf16_stays_one_native_cast():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            packed: pl.Tensor[[32, 256], pl.UINT8],
+            output: pl.Out[pl.Tensor[[32, 512], pl.BF16]],
+        ) -> pl.Tensor[[32, 512], pl.BF16]:
+            payload = pl.tile.load(packed, [0, 0], [32, 256])
+            fp4 = pl.reinterpret_view(payload, pl.FP4E2M1X2)
+            decoded = pl.cast(fp4, pl.BF16)
+            return pl.tile.store(decoded, [0, 0], output)
+
+    after = _run(Before, BackendType.Ascend950)
+    ir.assert_structural_equal(after, Before)
+    assert _cast_pairs(after) == [("fp4e2m1x2", "bfloat16")]
+
+
 def test_a5_fp4e2m1x2_to_fp8_cast_emits_warning(capfd):
     """Hand-written FP4E2M1X2→FP8* is allowed with the same Warning as logical FP4."""
     from pypto import LogLevel, get_log_level, set_log_level  # noqa: PLC0415

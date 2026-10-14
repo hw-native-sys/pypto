@@ -2381,6 +2381,10 @@ class TestTensorReinterpretViewIR:
         with pytest.raises(ValueError, match="does not support target dtype"):
             tensor.reinterpret_view(self._var([8, 16], DataType.FP32), DataType.INT4)
 
+    def test_fp4_byte_alias_is_not_enabled_for_tensors(self):
+        with pytest.raises(ValueError, match="only supports FP8 reinterpretation"):
+            tensor.reinterpret_view(self._var([32, 256], DataType.UINT8), DataType.FP4E2M1X2)
+
     def test_rejects_strided_tensor(self):
         view = ir.TensorView([32, 1], ir.TensorLayout.ND)
         with pytest.raises(ValueError, match="only supports packed tensors"):

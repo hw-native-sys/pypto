@@ -3152,6 +3152,10 @@ def reinterpret_view(
 ) -> Call:
     """Reinterpret a tile over the same bytes with a different dtype.
 
+    UINT8 -> FP4E2M1X2 is a same-shape packed byte alias for 2D row-major
+    Vec tiles. It does not enable FP4 tensor aliases or explicit reshapes.
+    A5 codegen supports PYPTO / DSA_RP planning for this alias.
+
     Args:
         data: Input tile expression
         dtype: Target element dtype
