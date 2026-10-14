@@ -69,7 +69,7 @@ UINT8 → FP4E2M1X2 is an additional **tile-only** byte alias for Ascend950:
 2D packed row-major Vec, unchanged carrier shape and byte size, with PYPTO or
 DSA_RP memory planning. PTOAS planning, tensor aliases, reverse aliases, and
 explicit reshaping are rejected for this pair. See [FP4 UB decoding](../fp4.md#decode-a-uint8-carrier-through-a-ub-alias-ascend950)
-for the contract, validation, and benchmark.
+for the contract and usage example.
 
 **Example:**
 

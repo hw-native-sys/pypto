@@ -60,7 +60,7 @@ window 的操作数不在这条规则范围内，因为它们当前的下降或�
 UINT8 → FP4E2M1X2 是 Ascend950 上额外的 **tile-only** 字节 alias：要求二维
 packed row-major Vec，carrier shape 和字节数不变，仅支持 PYPTO 或 DSA_RP
 内存规划器。此类型对会拒绝 PTOAS 规划器、tensor alias、逆向 alias 及显式
-变形。契约、验证与 benchmark 见 [FP4 UB 解码](../fp4.md#通过-ub-alias-解码-uint8-carrierascend950)。
+变形。契约与用法示例见 [FP4 UB 解码](../fp4.md#通过-ub-alias-解码-uint8-carrierascend950)。
 
 **示例：**
 
