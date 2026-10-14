@@ -317,3 +317,24 @@ def test_older_version_still_leaves_the_generated_pto(tmp_path, monkeypatch):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize(
+    "returncode,stdout,stderr,expected",
+    [
+        (-11, "", "", "(signal 11) no diagnostic output"),
+        (1, "", "bad tile", "(exit code 1) bad tile"),
+        (2, "assembler error", "", "(exit code 2) assembler error"),
+    ],
+)
+def test_run_ptoas_reports_process_failure(monkeypatch, returncode, stdout, stderr, expected):
+    monkeypatch.setattr(pto_backend, "_find_ptoas_binary", lambda: "ptoas")
+    monkeypatch.setattr(pto_backend, "_check_ptoas_version", lambda _: None)
+    monkeypatch.setattr(
+        pto_backend.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr),
+    )
+    with pytest.raises(RuntimeError) as exc:
+        pto_backend._run_ptoas("kernel.pto", "kernel.cpp")
+    assert str(exc.value) == f"ptoas compilation failed: {expected}"

@@ -145,19 +145,23 @@ SSA 重命名。在 Graph 被排除期间，这张映射全部返回 `nullopt`�
 ### Step B —— 重映射调用端的 `TupleGetItemExpr`
 
 对（Step A 已重写后的）程序中的每个非 InCore 函数，
-`TupleIndexPermutationMutator` 单次 SSA 遍历做两件事：
+`TupleIndexPermutationMutator` 在单次 SSA 遍历中：
 
-- 对每个 RHS 是 `Call(GlobalVar)`、且被调函数在 Step A 中被重排序的
-  `AssignStmt`，把 `assign.var → permutation_ref` 记入
-  `reordered_tuple_vars_` 映射。
+- 对每个 RHS 是 `Call(GlobalVar)` 或 `Submit(GlobalVar)`、且被调函数已被重排的
+  `AssignStmt`，同步置换表达式的元组元素类型，并创建使用该类型的新结果 `Var`。
+  置换的是调用端已实例化的类型，因此保留 caller 的局部 shape 符号。
+  Submit 末尾的 `TASK_ID`、依赖及启动元数据保持不变。
+- 在 `reordered_tuple_vars_` 中记录旧结果 `Var`、新绑定和置换。
 - 一旦该 `Var` 被重新赋值（赋给非重排序函数的调用、非 Call 表达式等），立即
   移除其条目，避免基于身份的查找读到失效绑定。
 - 对每个 `TupleGetItemExpr(tuple_var, k)`，若 `tuple_var` 在该映射中，把索
-  引重写为 `permutation[k]`。
+  引重写为 `permutation[k]`，并使用新的元组绑定。
+- 整元组使用（包括别名和转发）通过投影构造原逻辑顺序的元组；每个定义缓存一次，
+  不重复执行调用。声明多个平铺返回位置的函数会把逻辑元组展开为对应返回值。
 
 由于 Step A 重写函数签名与 Step B 重写调用端索引在同一次 Pass 调用中完成，
 出口程序状态自洽：每个 tuple 元素仍然绑定到同一个物理输出 buffer，只是用
-新的下标访问。
+新的下标访问；即使输出的 dtype 或 shape 不同，调用、绑定和投影类型也保持一致。
 
 ## 约束
 
@@ -168,7 +172,7 @@ SSA 重命名。在 Graph 被排除期间，这张映射全部返回 `nullopt`�
 | Step A0 不改动 kernel 内部分配的输出与标量 | 只有参数回写必须显式化；没有参数血缘的返回值没有可引用的参数 |
 | `out_indices.size() > ret_to_param.size()` 时跳过 | 不完整分析不能产生越界置换 —— 保留原状，让 verifier 捕获不一致 |
 | 恒等置换 ⇒ 不重写 | 避免不必要的 `Function` 克隆，使 Pass 幂等 |
-| Step B 仅改写 `VisitExpr` 后 tuple 操作数仍为已记录 `Var` 的 `TupleGetItemExpr` | Mutator 保留 `Var` 节点身份，因此操作数指针在 `reordered_tuple_vars_` 中仍是有效的查找键；即便未来某次改写返回新节点，查找 post-visit 的指针也能保证正确性 |
+| Step B 记录原结果 `Var` 并创建带有新类型的绑定 | 投影使用新的物理元组，其他消费者保留旧逻辑顺序；不修改现有 IR 节点 |
 
 ## 示例
 

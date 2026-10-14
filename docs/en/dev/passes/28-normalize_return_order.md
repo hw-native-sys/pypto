@@ -172,19 +172,28 @@ the values.
 For each non-InCore function in the (already-Step-A-rewritten) program,
 `TupleIndexPermutationMutator` does a single SSA pass that:
 
-- Tracks every `AssignStmt` whose RHS is a `Call(GlobalVar)` to a
-  function reordered in Step A, recording `assign.var → permutation_ref`
-  in a `reordered_tuple_vars_` map.
+- For every `AssignStmt` whose RHS is a `Call(GlobalVar)` or `Submit(GlobalVar)`
+  to a reordered function, permutes the expression's tuple element types and
+  creates a result `Var` with that type. It permutes the caller-instantiated
+  types, preserving caller-local shape symbols. Submit's trailing `TASK_ID`
+  element, dependencies, and launch metadata are unchanged.
+- Records the old result `Var` together with its replacement and permutation
+  in `reordered_tuple_vars_`.
 - Removes a tracked entry whenever its `Var` is reassigned (call to a
   non-reordered function, non-call RHS, etc.) so identity-based lookups
   never read a stale binding.
 - For every `TupleGetItemExpr(tuple_var, k)` whose `tuple_var` is in the
-  tracked map, rewrites the index to `permutation[k]`.
+  tracked map, uses the replacement tuple and index `permutation[k]`.
+- For a whole-tuple use (including aliases and forwarding), constructs a tuple
+  of projections in the original logical order. This view is cached per
+  definition and never repeats the call. Flat function returns expand the
+  logical tuple into their declared return positions.
 
 Because Step A rewrites function signatures and Step B rewrites call-site
 index access in the same pass invocation, the program is consistent at
 exit: each tuple element is still bound to the same physical output
-buffer, just under a new index.
+buffer, just under a new index, and the call, binding, and projection types
+agree even when outputs have different dtypes or shapes.
 
 ## Constraints
 
@@ -195,7 +204,7 @@ buffer, just under a new index.
 | Step A0 leaves kernel-allocated outputs and scalars untouched | Only param writebacks must be explicit; a return value with no param lineage has no param to reference |
 | Skips functions where `out_indices.size() > ret_to_param.size()` | An incomplete analysis must not produce an out-of-bounds permutation — leave the function as-is so the verifier can flag the inconsistency |
 | Permutation is identity ⇒ no rewrite | Avoids spurious `Function` clones and keeps the pass idempotent |
-| Step B only rewrites `TupleGetItemExpr` whose tuple operand resolves to a tracked `Var` after `VisitExpr` | The mutator preserves `Var` node identity, so the operand pointer stays valid as a key in `reordered_tuple_vars_`; if a future change ever returned a fresh node, looking up the post-visit pointer keeps the check correct |
+| Step B tracks the original result `Var` and creates a fresh typed binding | Projections use the new physical tuple; other consumers retain the old logical order. Existing IR nodes are not mutated |
 
 ## Example
 

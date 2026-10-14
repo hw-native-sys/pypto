@@ -23,6 +23,8 @@
 
 `PassProperties` 为空（`include/pypto/ir/transforms/pass_properties.h` 中的 `kSimplifyProperties`）是有意为之：Simplify 足够保守，会保留调用方此前可能已经建立的所有属性（`SSAForm`、`NormalizedStmtStructure`、`IncoreTileOps` 等）——它只重写表达式、删除标量绑定，从不改变语句结构。
 
+整数及 INDEX 表达式重写保留声明的结果类型。若化简选中的操作数具有不同的整数类型，会保留转换（插入 cast，或折叠为对应类型的常量）。例如，结果声明为 INT32 的 `(index + 1) - 1` 会化简为 `cast(index, INT32)`。
+
 ## 使用时机
 
 - 在 SSA 转换之后、tile pipeline 检查类型/shape 之前，把标量常量传播进去。

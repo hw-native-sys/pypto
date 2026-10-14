@@ -38,6 +38,7 @@
 #include "pypto/ir/transforms/base/functor.h"
 #include "pypto/ir/type.h"
 #include "src/ir/arith/constraint_extract.h"
+#include "src/ir/arith/simplify_utils.h"
 
 namespace pypto {
 namespace ir {
@@ -57,7 +58,7 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr(const ExprPtr& expr) {
       stype && stype->dtype_.IsFloat()) {
     return expr;
   }
-  return ExprFunctor<ExprPtr>::VisitExpr(expr);
+  return PreserveIntegerResultType(expr, ExprFunctor<ExprPtr>::VisitExpr(expr));
 }
 
 ExprPtr RewriteSimplifier::Impl::RecursiveRewrite(const ExprPtr& expr) {

@@ -38,6 +38,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/transforms/base/functor.h"
 #include "pypto/ir/type.h"
+#include "src/ir/arith/simplify_utils.h"
 
 namespace pypto {
 namespace ir {
@@ -73,7 +74,7 @@ ExprPtr CanonicalSimplifier::Impl::VisitExpr(const ExprPtr& expr) {
       stype && stype->dtype_.IsFloat()) {
     return expr;
   }
-  return ExprFunctor<ExprPtr>::VisitExpr(expr);
+  return PreserveIntegerResultType(expr, ExprFunctor<ExprPtr>::VisitExpr(expr));
 }
 
 CompareResult CanonicalSimplifier::Impl::TryCompare(const ExprPtr& /*x*/, int64_t /*val*/) {

@@ -236,8 +236,11 @@ WindowBuffer 直接出现在表达式中时（包括 `EvalStmt` 和调用参数�
 多个位置共享的窗口只进行一次表示检查。
 `Submit` 同样不能消费或产生设备 buffer 句柄。
 
-该检查仅针对设备函数组合已有的 `SSAVerify`、`UseAfterDefCheck` 和
-`AssignTypeSymmetry` 验证器；这些诊断保留原有规则名称。先定义后使用检查采用严格
+表示检查针对已选择或已处于 Buffer 阶段的设备函数。在选择后的流水线中，已有的
+`SSAVerify`、`UseAfterDefCheck`、`AssignTypeSymmetry` 验证器与 `TypeChecked`、
+`ManualDepsOnSubmitOnly` 一起检查整个程序：调用端和未选择函数的绑定、调用类型仍须一致。
+没有选择标记的显式底层验证仅组合被检查的设备函数。结构损坏的设备节点不进入组合检查，
+以免送入假定结构完整的验证器。这些诊断保留原有规则名称。先定义后使用检查采用严格
 的词法作用域：分支内定义不能通过无区域结果的旧式形式逃逸。
 对于 `WindowBuffer` 表达式，严格检查器在每个使用位置遍历 size，防止共享窗口隐藏
 未定义或超出作用域的尺寸。分配的指针载体继续豁免；独立的旧式 `UseAfterDef` 行为不变。

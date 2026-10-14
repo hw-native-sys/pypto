@@ -255,17 +255,19 @@ CallPtr RebuildLane1CallWithZeroValidShape(const CallPtr& call, const ExprReplac
     auto create_op = OpRegistry::GetInstance().GetOp("tile.create");
     return std::make_shared<Call>(create_op, std::vector<ExprPtr>{new_args[1]}, std::move(kwargs), new_type,
                                   call->span_);
-  } else if (IsOp(call, "tile.transpose")) {
+  } else if (IsOp(call, "tile.transpose") || IsOp(call, "tile.fmods") || IsOp(call, "tile.rems")) {
     // tile.transpose lowers to a pto-isa op that hangs the AICore (507018) when
     // every operand is a zero-valid replay tile — the same static/zero-valid
     // hazard gh#1649 hit for subview slices. The replay result is discarded, so
     // emit an empty tile of the result shape instead of running the transpose.
+    // Scalar remainder similarly requires positive valid extents on A2/A3;
+    // its pure computation has no work to do on the empty replay lane.
     auto new_type = WithZeroValidShape(call->GetType(), call->span_);
     auto tile_type = std::dynamic_pointer_cast<const TileType>(new_type);
     // Fail loud (like the tile.slice branch) rather than silently fall through to
     // the generic rebuild below, which would replay the hang-prone transpose.
     INTERNAL_CHECK_SPAN(tile_type != nullptr, call->span_)
-        << "Internal error: tile.transpose must produce a TileType, but got "
+        << "Internal error: " << call->op_->name_ << " must produce a TileType, but got "
         << (new_type ? new_type->TypeName() : "null");
     std::vector<ExprPtr> shape_elems(tile_type->shape_.begin(), tile_type->shape_.end());
     auto shape_tuple = std::make_shared<MakeTuple>(std::move(shape_elems), call->span_);
@@ -396,14 +398,25 @@ std::vector<StmtPtr> BuildNoSplitLane1ReplayStmts(const std::vector<StmtPtr>& st
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
       auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
       if (!call || !call->op_) {
-        result.push_back(SubstituteStmtIfNeeded(stmt, replacements));
+        // Aliases must inherit the replay value's type, including the empty
+        // tile view introduced on lane 1, and propagate it to later uses.
+        auto new_value = SubstituteExprIfNeeded(assign->value_, replacements);
+        auto new_var =
+            std::make_shared<Var>(assign->var_->name_hint_, new_value->GetType(), assign->var_->span_);
+        replacements[assign->var_.get()] = new_var;
+        result.push_back(std::make_shared<AssignStmt>(new_var, new_value, assign->span_));
         continue;
       }
 
       if (IsOp(call, "tile.store") && call->args_.size() >= 3) {
         auto passthrough = SubstituteExprIfNeeded(call->args_[2], replacements);
         replacements[assign->var_.get()] = passthrough;
-        result.push_back(std::make_shared<AssignStmt>(assign->var_, passthrough, assign->span_));
+        // The store result may use callee-local shape symbols while the
+        // destination uses caller-local symbols. The bypass takes its type
+        // from the actual destination, rather than the removed store call.
+        auto new_var =
+            std::make_shared<Var>(assign->var_->name_hint_, passthrough->GetType(), assign->var_->span_);
+        result.push_back(std::make_shared<AssignStmt>(new_var, passthrough, assign->span_));
         continue;
       }
 
@@ -539,15 +552,8 @@ FunctionPtr ProcessNoSplitDualAivFunction(const FunctionPtr& func) {
   INTERNAL_CHECK(RequiresNoSplitDualAivSync(func))
       << "Internal error: ProcessNoSplitDualAivFunction requires dual-dispatch AIV marker";
 
-  std::unordered_map<const Var*, ExprPtr> param_replacements;
-  std::vector<VarPtr> new_params;
-  new_params.reserve(func->params_.size());
-  for (const auto& param : func->params_) {
-    auto new_param = std::make_shared<Var>(param->name_hint_, param->GetType(), param->span_);
-    new_params.push_back(new_param);
-    param_replacements[param.get()] = new_param;
-  }
-
+  // The signature is unchanged. Retain its parameter identities so shapes in
+  // parameter and return types keep referring to their scalar definitions.
   auto injected = InjectSubblockIdx(func, /*is_aiv=*/true);
   INTERNAL_CHECK(!injected.body_stmts.empty())
       << "Internal error: dual-dispatch no-split AIV body must contain injected subblock_idx";
@@ -555,7 +561,7 @@ FunctionPtr ProcessNoSplitDualAivFunction(const FunctionPtr& func) {
   auto hoisted_prefix = SplitNoSplitSharedPipeSetupPrefix(guarded_stmts);
   auto lane0_body = loop_repair::MakeBody(hoisted_prefix.branch_stmts, func->span_);
 
-  ExprReplacementMap lane1_replacements = param_replacements;
+  ExprReplacementMap lane1_replacements;
   auto lane1_stmts = BuildNoSplitLane1ReplayStmts(hoisted_prefix.branch_stmts, lane1_replacements);
   auto lane1_body = loop_repair::MakeBody(lane1_stmts, func->span_);
   auto [lane1_cloned_body, lane1_clone_map_unused] = DeepClone(lane1_body);
@@ -572,14 +578,10 @@ FunctionPtr ProcessNoSplitDualAivFunction(const FunctionPtr& func) {
                         hoisted_prefix.shared_setup_stmts.end());
   new_body_stmts.push_back(branch_stmt);
   StmtPtr new_body = loop_repair::MakeBody(new_body_stmts, func->span_);
-  if (!param_replacements.empty()) {
-    new_body = transform_utils::Substitute(new_body, param_replacements);
-  }
   auto [cloned_body, clone_map_unused] = DeepClone(new_body);
   (void)clone_map_unused;
 
   auto new_func = MutableCopy(func);
-  new_func->params_ = new_params;
   new_func->body_ = cloned_body;
   return new_func;
 }

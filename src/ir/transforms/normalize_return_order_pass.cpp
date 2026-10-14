@@ -320,79 +320,108 @@ FunctionPtr ReorderReturns(const FunctionPtr& func, const std::vector<int>& perm
   return new_func;
 }
 
-// Mutator that applies return-order permutations to TupleGetItemExpr indices
-// in orchestration / opaque functions that call reordered InCore functions.
+// Keep the physical result tuple in the callee's new order. Projections use
+// the matching permutation; whole-tuple consumers retain the old logical order.
 class TupleIndexPermutationMutator : public IRMutator {
  public:
-  explicit TupleIndexPermutationMutator(const std::unordered_map<std::string, std::vector<int>>& permutations)
-      : permutations_(permutations) {}
+  TupleIndexPermutationMutator(const std::unordered_map<std::string, std::vector<int>>& permutations,
+                               bool flat_returns)
+      : permutations_(permutations), flat_returns_(flat_returns) {}
 
  protected:
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto new_value = VisitExpr(op->value_);
-
-    if (op->var_) {
-      // Both Call and Submit (pl.submit inside pl.manual_scope) launch a callee
-      // whose Out-param return order may have been reordered in Step A; the
-      // result tuple's TupleGetItem indices must be remapped the same way.
-      // Submit is a sibling ObjectKind of Call, so As<Call> alone misses it
-      // (see .claude/rules/pass-submit-awareness.md).
-      OpPtr callee_op;
-      if (auto call = As<Call>(new_value)) {
-        callee_op = call->op_;
-      } else if (auto submit = As<Submit>(new_value)) {
-        callee_op = submit->op_;
+    OpPtr callee;
+    const auto call = As<Call>(new_value);
+    const auto submit = As<Submit>(new_value);
+    if (call) callee = call->op_;
+    if (submit) callee = submit->op_;
+    const auto global = std::dynamic_pointer_cast<const GlobalVar>(callee);
+    const auto found = global ? permutations_.find(global->name_) : permutations_.end();
+    if (found != permutations_.end()) {
+      const auto& permutation = found->second;
+      const auto tuple_type = As<TupleType>(new_value->GetType());
+      INTERNAL_CHECK_SPAN(tuple_type && tuple_type->types_.size() >= permutation.size(), op->span_)
+          << "NormalizeReturnOrder: call result does not contain all permuted returns";
+      // Permute caller-instantiated types, not callee-local shape symbols.
+      // Submit's trailing TASK_ID stays outside the permutation.
+      auto types = tuple_type->types_;
+      for (size_t i = 0; i < permutation.size(); ++i) {
+        types[permutation[i]] = tuple_type->types_[i];
       }
-      // Track call/submit results to reordered functions so we can remap
-      // TupleGetItemExpr indices on those results later. A Submit's trailing
-      // Scalar[TASK_ID] tuple element is never permuted: the permutation only
-      // covers the callee's return values, and the index_ < perm.size() bound
-      // in VisitExpr_(TupleGetItemExpr) skips it.
-      if (auto global_var = std::dynamic_pointer_cast<const GlobalVar>(callee_op)) {
-        auto perm_it = permutations_.find(global_var->name_);
-        if (perm_it != permutations_.end() && !perm_it->second.empty()) {
-          reordered_tuple_vars_[op->var_.get()] = &perm_it->second;
-        } else {
-          // Reassigned to a non-reordered call: remove stale entry.
-          reordered_tuple_vars_.erase(op->var_.get());
-        }
+      auto type = std::make_shared<TupleType>(types);
+      if (call) {
+        new_value =
+            std::make_shared<Call>(call->op_, call->args_, call->kwargs_, call->attrs_, type, call->span_);
       } else {
-        // Non-call/submit assignment (or non-GlobalVar callee): stale mapping.
-        reordered_tuple_vars_.erase(op->var_.get());
+        new_value = std::make_shared<Submit>(
+            submit->op_, submit->args_, submit->deps_, submit->kwargs_, submit->attrs_, type, submit->span_,
+            submit->core_num_, submit->sync_start_, submit->allow_early_resolve_, submit->predicate_);
       }
+      auto result = std::make_shared<Var>(op->var_->name_hint_, type, op->var_->span_);
+      reordered_tuple_vars_[op->var_.get()] = {result, &permutation, nullptr};
+      return std::make_shared<AssignStmt>(result, new_value, op->span_);
     }
 
-    if (new_value.get() != op->value_.get()) {
-      return std::make_shared<AssignStmt>(op->var_, new_value, op->span_);
-    }
+    // A source-level Var can be rebound before SSA conversion. Its subsequent
+    // uses must not retain the permutation of an earlier call assignment.
+    reordered_tuple_vars_.erase(op->var_.get());
+    if (new_value != op->value_) return std::make_shared<AssignStmt>(op->var_, new_value, op->span_);
     return op;
   }
 
   ExprPtr VisitExpr_(const TupleGetItemExprPtr& op) override {
-    auto new_tuple = IRMutator::VisitExpr(op->tuple_);
+    const auto found = reordered_tuple_vars_.find(op->tuple_.get());
+    if (found == reordered_tuple_vars_.end()) return IRMutator::VisitExpr_(op);
+    const auto& tuple = found->second;
+    return std::make_shared<TupleGetItemExpr>(tuple.physical, PermuteIndex(tuple, op->index_), op->span_);
+  }
 
-    int new_index = op->index_;
-    // Only consider the transformed tuple node (new_tuple).  If VisitExpr
-    // replaced it, any identity-based lookup on op->tuple_ would be stale.
-    if (auto var = As<Var>(new_tuple)) {
-      auto it = reordered_tuple_vars_.find(var.get());
-      if (it != reordered_tuple_vars_.end()) {
-        const auto& perm = *it->second;
-        if (op->index_ >= 0 && op->index_ < static_cast<int>(perm.size()) && perm[op->index_] != kNoParam) {
-          new_index = perm[op->index_];
-        }
+  ExprPtr VisitExpr_(const VarPtr& op) override {
+    const auto found = reordered_tuple_vars_.find(op.get());
+    if (found == reordered_tuple_vars_.end()) return IRMutator::VisitExpr_(op);
+    auto& tuple = found->second;
+    if (!tuple.logical) {
+      const auto type = As<TupleType>(tuple.physical->GetType());
+      std::vector<ExprPtr> elements;
+      elements.reserve(type->types_.size());
+      for (size_t i = 0; i < type->types_.size(); ++i) {
+        elements.push_back(std::make_shared<TupleGetItemExpr>(
+            tuple.physical, PermuteIndex(tuple, static_cast<int>(i)), op->span_));
+      }
+      // Cache one logical view per definition: aliases/forwarding must not
+      // repeatedly rebuild the same tuple or evaluate the call a second time.
+      tuple.logical = std::make_shared<MakeTuple>(elements, op->span_);
+    }
+    return tuple.logical;
+  }
+
+  StmtPtr VisitStmt_(const ReturnStmtPtr& op) override {
+    auto rewritten = IRMutator::VisitStmt_(op);
+    const auto returned = As<ReturnStmt>(rewritten);
+    if (flat_returns_ && rewritten != op && returned->value_.size() == 1) {
+      if (const auto tuple = As<MakeTuple>(returned->value_[0])) {
+        return std::make_shared<ReturnStmt>(tuple->elements_, op->span_);
       }
     }
-
-    if (new_tuple.get() != op->tuple_.get() || new_index != op->index_) {
-      return std::make_shared<TupleGetItemExpr>(new_tuple, new_index, op->span_);
-    }
-    return op;
+    return rewritten;
   }
 
  private:
+  struct ReorderedTuple {
+    VarPtr physical;
+    const std::vector<int>* permutation;
+    ExprPtr logical;
+  };
+
+  static int PermuteIndex(const ReorderedTuple& tuple, int index) {
+    return index >= 0 && index < static_cast<int>(tuple.permutation->size()) ? (*tuple.permutation)[index]
+                                                                             : index;
+  }
+
   const std::unordered_map<std::string, std::vector<int>>& permutations_;
-  std::unordered_map<const Var*, const std::vector<int>*> reordered_tuple_vars_;
+  bool flat_returns_;
+  std::unordered_map<const Expr*, ReorderedTuple> reordered_tuple_vars_;
 };
 
 }  // namespace
@@ -446,7 +475,7 @@ Pass NormalizeReturnOrder() {
     std::vector<FunctionPtr> final_functions;
     for (const auto& func : functions) {
       if (!IsInCoreType(func->func_type_)) {
-        TupleIndexPermutationMutator mutator(permutations);
+        TupleIndexPermutationMutator mutator(permutations, func->return_types_.size() > 1);
         auto new_body = mutator.VisitStmt(func->body_);
         if (new_body.get() != func->body_.get()) {
           final_functions.push_back(std::make_shared<Function>(

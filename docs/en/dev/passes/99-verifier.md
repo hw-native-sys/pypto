@@ -272,9 +272,15 @@ expression, including `EvalStmt` and call arguments; their representation is che
 Scalar GM metadata and its ordinary pointer carrier remain valid.
 `Submit` cannot consume or produce device buffer handles either.
 
-The check composes the existing `SSAVerify`, `UseAfterDefCheck`, and
-`AssignTypeSymmetry` verifiers on device functions only. These diagnostics retain
-their existing rule names. Use-after-definition checks use strict lexical scopes: definitions
+Representation checks apply to selected or already-Buffer device functions.
+In a selected pipeline, the existing `SSAVerify`, `UseAfterDefCheck`, and
+`AssignTypeSymmetry` verifiers cover the whole program, together with
+`TypeChecked` and `ManualDepsOnSubmitOnly`: callers and unselected functions
+must still agree on bindings and call types. Explicit low-level verification
+without selection remains scoped to the checked device functions. Malformed
+device nodes are excluded from composition to avoid sending invalid structures
+to verifiers with stronger assumptions. These diagnostics retain their existing
+rule names. Use-after-definition checks use strict lexical scopes: definitions
 inside a branch cannot escape through the legacy form without region results.
 For a `WindowBuffer` expression, the strict checker visits its size at every use
 site, so a shared window cannot hide an undefined or out-of-scope size. Its allocation

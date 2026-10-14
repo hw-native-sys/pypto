@@ -23,6 +23,8 @@ The pass runs **twice** in the `Default` strategy of `pass_manager.py`:
 
 The empty `PassProperties` contract (`kSimplifyProperties` in `include/pypto/ir/transforms/pass_properties.h`) is intentional: Simplify is conservative enough to preserve every property its callers may have established (`SSAForm`, `NormalizedStmtStructure`, `IncoreTileOps`, ...) — it only rewrites expressions and prunes scalar bindings, never restructures statements.
 
+Integer and INDEX rewrites preserve the expression's declared result dtype. If simplification selects an operand of a different integer dtype, it retains the conversion with a cast (or folds it into a typed constant). For example, an INT32 `(index + 1) - 1` becomes `cast(index, INT32)`.
+
 ## When to Use
 
 - After SSA conversion to propagate scalar constants into types/shapes before the tile pipeline inspects them.

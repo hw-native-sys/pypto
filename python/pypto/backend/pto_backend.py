@@ -245,7 +245,9 @@ def _run_ptoas(
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"ptoas compilation timed out after {exc.timeout}s") from exc
     if result.returncode != 0:
-        raise RuntimeError(f"ptoas compilation failed: {result.stderr.strip()}")
+        status = f"signal {-result.returncode}" if result.returncode < 0 else f"exit code {result.returncode}"
+        detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic output"
+        raise RuntimeError(f"ptoas compilation failed: ({status}) {detail}")
 
 
 _KERNEL_HEADER = """\
