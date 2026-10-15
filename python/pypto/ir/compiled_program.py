@@ -139,7 +139,20 @@ def _to_runtime_shape(shape: list[int], dtype: DataType) -> list[int]:
 
 
 def _validate_fp4_carrier_shape(shape: Sequence[int], info: "_ParamInfo") -> None:
-    """Validate the runtime x2 carrier shape for one FP4 / FP4E2M1X2 parameter."""
+    """Validate the runtime x2 carrier shape for one FP4 / FP4E2M1X2 parameter.
+
+    A torch ``float4_e2m1fn_x2`` tensor's shape counts *carrier* elements
+    (1 byte = 2 nibbles), while a logical ``pl.FP4`` annotation counts
+    nibbles. The compiler halves the IR's static last dim into the runtime
+    carrier shape (``_to_runtime_shape``), and the JIT specializer doubles a
+    dummy carrier last dim back into nibbles at the annotation boundary
+    (``decorator._extract_tensor_meta``). Passing a tensor whose shape is
+    *logical* (last dim 2x the carrier count) used to slip through silently:
+    the two rewrites cancelled in the metadata while the real buffer stayed
+    2x narrower, so every GM row read past its true end -- silent data
+    corruption. Enforce the equality here so the mismatch fails loudly at
+    dispatch instead.
+    """
     if info.dtype not in (DataType.FP4, DataType.FP4E2M1X2):
         return
     if not shape:
@@ -148,6 +161,23 @@ def _validate_fp4_carrier_shape(shape: Sequence[int], info: "_ParamInfo") -> Non
         raise TypeError(
             f"Packed FP4 parameter {info.name!r} requires a positive runtime x2 carrier last dimension; "
             f"got shape {tuple(shape)}"
+        )
+    # Blocked layouts (NZ / MX_*) address a rank-5 shape the caller does not
+    # allocate directly; comparing those needs the caller's logical shape
+    # re-blocked first (see ``_arg_shape_as_declared``), so leave them to the
+    # layout-aware paths rather than guess a rule here.
+    if info.shape is None or info.layout not in (None, "ND"):
+        return
+    mismatch = len(shape) != len(info.shape) or any(
+        expected_dim >= 0 and expected_dim != actual_dim
+        for expected_dim, actual_dim in zip(info.shape, shape, strict=False)
+    )
+    if mismatch:
+        raise TypeError(
+            f"Packed FP4 parameter {info.name!r} expects runtime x2 carrier shape {tuple(info.shape)} "
+            f"(torch.float4_e2m1fn_x2 dims count carriers, 1 byte = 2 nibbles; a logical pl.FP4 "
+            f"annotation halves its last dim at this boundary); got tensor shape {tuple(shape)}. "
+            f"A logical-shape tensor here makes every GM row read 2x past its true end."
         )
 
 

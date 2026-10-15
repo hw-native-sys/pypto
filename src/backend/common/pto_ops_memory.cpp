@@ -65,6 +65,7 @@ using pto_ops_detail::ExpandPackedFp4GmLastAxis;
 using pto_ops_detail::GetDimStrings;
 using pto_ops_detail::GetIndexOffsetCodes;
 using pto_ops_detail::GetSizeCodes;
+using pto_ops_detail::HalveFp4GmPartitionOffsets;
 using pto_ops_detail::MakePartitionTensorViewType;
 
 // Helper function for StoreFP
@@ -162,6 +163,8 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
       tensor_type->tensor_view_.has_value() ? tensor_type->tensor_view_->layout : ir::TensorLayout::ND;
   ExpandPackedFp4GmLastAxis(tensor_type->dtype_, offset_codes, size_codes, partition_dims, codegen, last_size,
                             last_offset, gm_layout);
+  HalveFp4GmPartitionOffsets(tensor_type->dtype_, gm_layout, offset_codes, offsets_tuple->elements_, codegen,
+                             op->span_);
   std::string tensor_view = codegen.GetOrCreateTensorView(tensor);
   std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
 
@@ -272,6 +275,8 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
         tensor_type->tensor_view_.has_value() ? tensor_type->tensor_view_->layout : ir::TensorLayout::ND;
     ExpandPackedFp4GmLastAxis(tensor_type->dtype_, offset_codes, size_codes, partition_dims, codegen,
                               last_size, last_offset, gm_layout);
+    HalveFp4GmPartitionOffsets(tensor_type->dtype_, gm_layout, offset_codes, offset_elems, codegen,
+                               op->span_);
     partition_type = MakePartitionTensorViewType(partition_dims, dtype_str);
     partition_view = EmitPartitionViewPTO(output_tensor->name_hint_, tensor_view, tensor_view_type,
                                           partition_type, offset_codes, size_codes, codegen);
@@ -312,6 +317,8 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
         tensor_type->tensor_view_.has_value() ? tensor_type->tensor_view_->layout : ir::TensorLayout::ND;
     ExpandPackedFp4GmLastAxis(tensor_type->dtype_, offset_codes, size_codes, partition_dims, codegen,
                               last_size, last_offset, gm_layout);
+    HalveFp4GmPartitionOffsets(tensor_type->dtype_, gm_layout, offset_codes, offsets_tuple->elements_,
+                               codegen, op->span_);
     partition_type = MakePartitionTensorViewType(partition_dims, dtype_str);
     partition_view = EmitPartitionViewPTO(output_tensor->name_hint_, tensor_view, tensor_view_type,
                                           partition_type, offset_codes, size_codes, codegen);

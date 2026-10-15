@@ -373,7 +373,28 @@ TypePtr DeduceTileReinterpretViewType(const std::vector<ExprPtr>& args,
       source_view.fractal == tile_view_semantics::kMXScaleFractal && complete_mx_scale_layout &&
       ((tile_type->dtype_ == DataType::UINT8 && target_dtype == DataType::FP8E8M0) ||
        (tile_type->dtype_ == DataType::FP8E8M0 && target_dtype == DataType::UINT8));
-  CHECK_SPAN(source_view.slayout == TileLayout::none_box || mx_scale_byte_alias, args[0]->span_)
+  // The INT8<->FP8E4M3FN pair aliases one raw byte per element with no
+  // reinterpretation of the payload, so it is layout-agnostic: fractal (Mat)
+  // tiles may carry the alias too. The FP4->FP8 [N,K] rhs path relies on this
+  // -- PTOAS's treshape rejects an FP8E4M3FN source, so the transpose_view
+  // runs on the INT8 alias and the result flips back to FP8E4M3FN in place.
+  const bool fp8_data_byte_alias =
+      (tile_type->dtype_ == DataType::INT8 && target_dtype == DataType::FP8E4M3FN) ||
+      (tile_type->dtype_ == DataType::FP8E4M3FN && target_dtype == DataType::INT8);
+  // t12 (KN cast NZ direct-write): UINT16 -> FP8E4M3FN on an NZ fractal tile
+  // is the LUT-cast pair view — each u16 lane holds the little-endian FP8
+  // byte pair of two adjacent last-axis elements. The reinterpret doubles the
+  // last axis and is chunk-level layout-preserving: one 32-byte NZ chunk of
+  // 16 u16 lanes is exactly one 32-byte NZ chunk of 32 FP8 elements at the
+  // same buffer offset (docs-deepgemm-p2/kn-cast-reuse.md §6.2-1 algebra).
+  // Only the NZ (col_major) form is claimed; ZN is not exercised.
+  const bool fp8_fractal_pair_alias =
+      (tile_type->dtype_ == DataType::UINT16 && target_dtype == DataType::FP8E4M3FN &&
+       source_view.slayout == TileLayout::row_major && source_view.blayout == TileLayout::col_major &&
+       tile_type->shape_.size() == 2);
+  CHECK_SPAN(source_view.slayout == TileLayout::none_box || mx_scale_byte_alias || fp8_data_byte_alias ||
+                 fp8_fractal_pair_alias,
+             args[0]->span_)
       << kOpName
       << " only supports flat tiles with slayout=none_box, except UINT8/FP8E8M0 MX-scale byte aliases";
   CHECK_SPAN(source_view.blayout == TileLayout::row_major || source_view.blayout == TileLayout::col_major,
@@ -398,6 +419,42 @@ TypePtr DeduceTileReinterpretViewType(const std::vector<ExprPtr>& args,
     requested_shape = reinterpret_view_semantics::ExtractShape(args[1], kOpName);
     CHECK_SPAN(source_view.blayout != TileLayout::col_major || requested_shape->size() >= 2, args[1]->span_)
         << kOpName << " requires target rank >= 2 for col_major layout";
+  }
+
+  if (fp8_fractal_pair_alias) {
+    // Direct construction: double the last (fractal-IC) axis, keep the view.
+    // The generic Resolve would double the contiguous axis, which for
+    // col_major is the FIRST axis — wrong for the pair view (pairs live
+    // along the last axis by the FP4 x2 packing).
+    // Keep the doubled axis STATIC when the source is static (MakeMul would
+    // produce a dynamic expression and ExpandMixedKernel requires static
+    // cross-core tile sizes).
+    auto doubled = [](const std::vector<ExprPtr>& dims) {
+      std::vector<ExprPtr> out = dims;
+      if (auto c = As<ConstInt>(out[1])) {
+        out[1] = std::make_shared<ConstInt>(c->value_ * 2, DataType::INDEX, c->span_);
+      } else {
+        out[1] = MakeMul(out[1], std::make_shared<ConstInt>(2, DataType::INDEX, Span::unknown()));
+      }
+      return out;
+    };
+    std::vector<ExprPtr> result_shape = doubled(tile_type->shape_);
+    // Codex P2 (PR#2987 round 6): an explicit requested shape used to be
+    // silently ignored on this branch, returning the doubled geometry for any
+    // request. Validate it against the only supported pair geometry instead.
+    if (requested_shape.has_value()) {
+      CHECK_SPAN(tile_view_semantics::ShapeExprListsEquivalent(*requested_shape, result_shape),
+                 args[1]->span_)
+          << kOpName << " UINT16 -> FP8E4M3FN pair alias supports only the automatically doubled "
+          << "last-axis shape; omit the shape argument or request exactly that geometry";
+    }
+    TileView result_view = source_view;
+    result_view.valid_shape = doubled(source_view.valid_shape);
+    result_view.pad = reinterpret_view_semantics::NormalizePad(source_view.pad);
+    result_view.stride.clear();
+    result_view.start_offset = nullptr;
+    return std::make_shared<TileType>(std::move(result_shape), target_dtype, std::nullopt,
+                                      std::make_optional(std::move(result_view)), tile_type->memory_space_);
   }
 
   const size_t contiguous_axis = source_view.blayout == TileLayout::col_major ? tile_type->shape_.size() - 2
@@ -474,9 +531,9 @@ TypePtr DeduceTileTransposeViewType(const std::vector<ExprPtr>& args,
   // tile.transpose_view(input) — zero-copy fractal-layout reinterpretation that swaps
   // the trailing two dims and maps the block/scatter layout to its transpose
   // dual (NZ<->ZN, NN<->ZZ, ND<->DN). A tile and its dual over the same bytes are
-  // mutual transposes (docs/_build/nz_zn_layout_qa.md), so the result aliases the
-  // source buffer byte-for-byte — no data movement is emitted in codegen, and
-  // InitMemRef shares the source MemRef via set_output_memory_inherit_input.
+  // mutual transposes (docs-deepgemm-p2/nk-implementation-map.md §2.2, ZN[N,K] off == NZ[K,N] off
+  // byte-for-byte), so the result aliases the source buffer byte-for-byte — no data movement is emitted in
+  // codegen, and InitMemRef shares the source MemRef via set_output_memory_inherit_input.
   CHECK(args.size() == 1) << "tile.transpose_view requires exactly 1 argument (input), but got "
                           << args.size();
 

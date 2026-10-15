@@ -1511,6 +1511,26 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
       return std::string("");
     }
 
+    // A 1-byte dtype alias (INT8<->FP8E4M3FN) whose auto-shape equals the
+    // source shape is a pure relabel of one buffer address: when the result
+    // var owns an inherited MemRef, its own alloc_tile at that address already
+    // carries the target type, so the alias needs no op at all -- the same
+    // "two alloc_tile decls at the same addr ARE the mechanism" the
+    // transpose_view handler below relies on. PTOAS's treshape rejects
+    // FP8E4M3FN on either side, so the relabel must not go through it.
+    const bool byte_pair_alias =
+        (source_tile->dtype_ == DataType::INT8 && result_tile->dtype_ == DataType::FP8E4M3FN) ||
+        (source_tile->dtype_ == DataType::FP8E4M3FN && result_tile->dtype_ == DataType::INT8);
+    const bool same_shape =
+        result_tile->shape_.size() == source_tile->shape_.size() &&
+        ir::tile_view_semantics::ShapeExprListsEquivalent(result_tile->shape_, source_tile->shape_);
+    if (codegen.EmitTileAddr() && result_has_memref && byte_pair_alias && same_shape &&
+        ir::tile_view_semantics::ShapeExprListsEquivalent(
+            ir::tile_view_semantics::GetEffectiveTileView(*result_tile).valid_shape,
+            ir::tile_view_semantics::GetEffectiveTileView(*source_tile).valid_shape)) {
+      return std::string("");
+    }
+
     // PTOAS treshape is the byte-preserving dtype/shape reinterpret primitive.
     // Use it even when the shape is unchanged: pto.bitcast does not preserve the
     // source tile payload on current A2/A3 runtimes.

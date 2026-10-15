@@ -334,7 +334,10 @@ class TestMxMatmulCodegen:
                 pl.store(pl.matmul_mx(ta, tas, tb, tbs), [0, 0], out)
 
         mlir = _emit_incore_mlir(Program)
-        assert mlir.count("pto.tcvt") == 3
+        # Gather route (LUT + tgather since t18): the data-path cast is a
+        # single u8->u16 zero-extend; the LUT table construction adds a few
+        # tcvt on the tiny [1,256] tile.
+        assert "pto.tgather" in mlir, mlir
         assert "dtype=!pto.f4E2M1x2, rows=128, cols=32" in mlir
         assert "pto.tmatmul.mx" in mlir
         assert mlir.count("pto.tget_scale_addr") == 2

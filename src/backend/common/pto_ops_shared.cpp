@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -31,6 +32,7 @@
 #include "pypto/codegen/pto/pto_type_utils.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
@@ -192,6 +194,83 @@ void ExpandPackedFp4GmLastAxis(DataType dtype, std::vector<std::string>& offset_
   }
   if (!dim_strings.empty() && dim_strings.back() != "?") {
     dim_strings.back() = std::to_string(std::stoll(dim_strings.back()) * 2);
+  }
+}
+
+void HalveFp4GmPartitionOffsets(const DataType& dtype, ir::TensorLayout layout,
+                                std::vector<std::string>& offset_codes,
+                                const std::vector<ir::ExprPtr>& offset_exprs, codegen::PTOCodegen& codegen,
+                                const ir::Span& span) {
+  // See the contract note in pto_ops_internal.h: PTOAS's partition base
+  // pointer is advanced in element (carrier-byte) units while pto-isa walks
+  // strides/extents in nibble units, so every nonzero FP4-family partition
+  // offset must be emitted pre-halved. Call after ExpandPackedFp4GmLastAxis
+  // so the packed path's doubled last-axis offset (2 x carrier nibbles) nets
+  // back to the carrier value.
+  if (!dtype.IsFp4Family() || ir::IsMxTensorLayout(layout) || offset_codes.empty()) return;
+  const bool last_axis_doubled = dtype.IsPackedFp4();  // ExpandPackedFp4GmLastAxis ran
+  // Codex P1 #5 (PR#2987 round 2): prove what we can. divsi truncates toward
+  // zero, so an odd dynamic offset would silently address the previous
+  // carrier window. Offsets provably even (even constants, products with an
+  // even factor, sums/differences of provably-even terms, and the doubled
+  // packed last axis) keep the exact halving; anything else is rejected with
+  // the same actionable message as the static case instead of misaddressing.
+  // Codex P2 (PR#2987 round 3): follow named scalar definitions — Simplify
+  // deliberately preserves symbolic assignments (`row = kb * 64`) rather
+  // than substituting them, so a Var resolves through its single defining
+  // expression (recursively, depth-capped; multi-defined scalars are opaque).
+  const std::function<bool(const ir::ExprPtr&, int)> provably_even = [&](const ir::ExprPtr& e,
+                                                                         int depth) -> bool {
+    if (!e || depth > 16) return false;
+    if (auto c = As<ir::ConstInt>(e)) return c->value_ % 2 == 0;
+    if (auto v = std::dynamic_pointer_cast<const ir::Var>(e)) {
+      // t36: a pl.parallel domain-coordinate offset (loop var over static-even
+      // start and step) is even at every iteration; otherwise follow the
+      // named scalar's definition.
+      return codegen.IsEvenLoopVar(v.get()) || provably_even(codegen.ResolveScalarVarDef(v.get()), depth + 1);
+    }
+    if (auto bin = As<ir::BinaryExpr>(e)) {
+      const bool mul = e->GetKind() == ir::ObjectKind::Mul;
+      if (mul) return provably_even(bin->left_, depth + 1) || provably_even(bin->right_, depth + 1);
+      const bool add_sub = e->GetKind() == ir::ObjectKind::Add || e->GetKind() == ir::ObjectKind::Sub;
+      if (add_sub) return provably_even(bin->left_, depth + 1) && provably_even(bin->right_, depth + 1);
+      return false;
+    }
+    return false;
+  };
+  auto half_const = [&](int64_t value) { return codegen.GetOrEmitConstant(value / 2, DataType::INDEX); };
+  auto half_ssa = [&](const std::string& ssa) {
+    auto two = codegen.GetOrEmitConstant(static_cast<int64_t>(2), DataType::INDEX);
+    auto out = codegen.NewTemp();
+    codegen.Emit(out + " = arith.divsi " + ssa + ", " + two + " : index");
+    return out;
+  };
+  for (size_t i = 0; i < offset_codes.size(); ++i) {
+    const bool is_last = i + 1 == offset_codes.size();
+    const ir::ExprPtr expr = i < offset_exprs.size() ? offset_exprs[i] : nullptr;
+    if (auto c = As<ir::ConstInt>(expr)) {
+      // Post-expansion static value: the packed last axis was doubled (always
+      // even); every other axis keeps the IR's nibble-unit value and must be
+      // even to have an integer byte encoding.
+      const int64_t expanded = (is_last && last_axis_doubled) ? c->value_ * 2 : c->value_;
+      CHECK_SPAN(expanded % 2 == 0, span)
+          << "FP4 family GM window offset " << c->value_ << " on axis " << i
+          << " is odd in nibble units: the PTOAS partition base address advances in carrier-byte "
+             "units while pto-isa strides stay in nibble units, so an odd offset has no integer "
+             "encoding (rows must start on an even row, the last-axis window must start on a "
+             "carrier boundary). Widen the tile grid or shift the window by one nibble column";
+      offset_codes[i] = half_const(expanded);
+    } else {
+      // Dynamic offset (t36): exact halving for even runtime values — the
+      // documented contract since the packed-FP4 GM addressing landed. A
+      // runtime block coordinate (pl.parallel domain value) is even by
+      // construction but is an OPAQUE scalar param inside the device
+      // function (the loop lives in the orchestration driver), so local
+      // proof is structurally impossible; rejecting unprovable dynamics
+      // broke every real tiled kernel. The prover above still runs for the
+      // expressible forms; static odd offsets stay hard-rejected.
+      offset_codes[i] = half_ssa(offset_codes[i]);
+    }
   }
 }
 

@@ -79,6 +79,26 @@ void ExpandPackedFp4GmLastAxis(DataType dtype, std::vector<std::string>& offset_
                                codegen::PTOCodegen& codegen, const ir::ExprPtr& last_size = nullptr,
                                const ir::ExprPtr& last_offset = nullptr,
                                ir::TensorLayout layout = ir::TensorLayout::ND);
+/// PTOAS lowers ``pto.partition_view`` to ``data_ptr + sum(offset[i] *
+/// stride[i])`` in *element* units -- bytes for the f4E2M1x2 carrier -- while
+/// pto-isa converts the same view's strides and extents through GetByteSize
+/// (nibble units -> bytes, the /2 in a5/common.hpp). The mixed units double
+/// every nonzero FP4-family partition base address: a window at [k0, nb]
+/// reads at rows 2*k0, columns 2*nb on the device (proven by
+/// worktrees/fp8fp4/probe_fp4_noffset.py: k0=32 lands at row 64, nb=32 at
+/// column 64, while [0,0] is exact). Halving every emitted offset makes
+/// PTOAS's element-unit arithmetic land on the correct byte address:
+/// (k0/2)*stride0 + nb/2 == (k0*stride0 + nb)/2. Strides and sizes keep their
+/// nibble-unit contract (multi-row pitch and extents were already correct).
+/// Constraint: every static offset must be even in nibble units (even rows,
+/// carrier-aligned last axis) -- odd offsets have no integer encoding under
+/// the mixed-unit arithmetic and fail with an actionable message until PTOAS
+/// unifies the units. MX layouts address fractal coordinates through a
+/// different contract and are excluded.
+void HalveFp4GmPartitionOffsets(const DataType& dtype, ir::TensorLayout layout,
+                                std::vector<std::string>& offset_codes,
+                                const std::vector<ir::ExprPtr>& offset_exprs, codegen::PTOCodegen& codegen,
+                                const ir::Span& span);
 bool ExprsEquivalentForSubview(const ir::ExprPtr& lhs, const ir::ExprPtr& rhs);
 codegen::TileTypeComponents InferSubviewTileTypeComponents(const ir::TileType& source_tile_type,
                                                            const ir::MakeTuple& shape_tuple,

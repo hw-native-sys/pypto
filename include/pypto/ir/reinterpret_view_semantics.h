@@ -47,7 +47,10 @@ inline bool IsSupportedDType(DataType dtype) {
   return dtype == DataType::INT8 || dtype == DataType::INT16 || dtype == DataType::INT32 ||
          dtype == DataType::INT64 || dtype == DataType::UINT8 || dtype == DataType::UINT16 ||
          dtype == DataType::UINT32 || dtype == DataType::UINT64 || dtype == DataType::FP16 ||
-         dtype == DataType::FP32 || dtype == DataType::BF16;
+         dtype == DataType::FP32 || dtype == DataType::BF16 ||
+         // The packed FP4 carrier is one byte per element, byte-addressable
+         // like UINT8 (the FP4 GM/tile ABI keeps carrier coordinates).
+         dtype == DataType::FP4E2M1X2;
 }
 
 /** Preserve only dtype-independent padding across a reinterpret view. */
@@ -267,26 +270,67 @@ inline ReinterpretViewPlan Resolve(const std::vector<ExprPtr>& source_shape,
                         (source_dtype == DataType::FP8E4M3FN && target_dtype == DataType::INT8) ||
                         (source_dtype == DataType::UINT8 && target_dtype == DataType::FP8E8M0) ||
                         (source_dtype == DataType::FP8E8M0 && target_dtype == DataType::UINT8);
+  // A UINT16 lane holding two adjacent FP8E4M3FN bytes (little-endian pair)
+  // relabels to a 2x-element FP8 tile: the exit view of the FP4->FP8 in-kernel
+  // bit-op chain (see LegalizeTileCast). Byte-preserving, same as the INT8
+  // alias above, only with a 2:1 element ratio on the contiguous axis.
+  const bool u16_fp8_pair_alias = (source_dtype == DataType::UINT16 && target_dtype == DataType::FP8E4M3FN) ||
+                                  (source_dtype == DataType::FP8E4M3FN && target_dtype == DataType::UINT16);
+  const bool alias = mx_alias || u16_fp8_pair_alias;
+  // Logical FP4 counts nibbles; its carrier equivalent (FP4E2M1X2) counts
+  // bytes. Normalize a logical-FP4 source to carrier coordinates first -- the
+  // contiguous axis halves (a static even extent is already guaranteed by FP4
+  // ShapedType validation) -- so the byte-preserving machinery below works in
+  // whole bytes. The result is exactly the physical tile the backend emits.
+  std::vector<ExprPtr> normalized_shape = source_shape;
+  std::vector<ExprPtr> normalized_valid = source_valid_shape;
+  if (source_dtype == DataType::FP4) {
+    auto halve = [&](const std::vector<ExprPtr>& extents, const std::string& what) -> std::vector<ExprPtr> {
+      std::vector<ExprPtr> out = extents;
+      auto value = As<ConstInt>(out[contiguous_axis]);
+      if (value) {
+        CHECK_SPAN(value->value_ % 2 == 0, span)
+            << op_name << " " << what << " nibble axis " << contiguous_axis << " (" << value->value_
+            << ") must be even to view a logical FP4 tile as carriers";
+        out[contiguous_axis] = std::make_shared<ConstInt>(value->value_ / 2, value->dtype(), span);
+      } else {
+        // Codex P2 (PR#2987 round 2): a dynamic nibble extent halves
+        // symbolically as extent // 2 — exact for even runtime values, the
+        // same contract the FP4 GM window-offset halving documents (a logical
+        // FP4 extent is even by construction: nibbles come in carrier-byte
+        // pairs). The old native-hop cast chain never needed the halving, so
+        // this restores dynamic-extent support for the LUT route.
+        out[contiguous_axis] =
+            MakeFloorDiv(out[contiguous_axis], std::make_shared<ConstInt>(2, DataType::INDEX, span), span);
+      }
+      return out;
+    };
+    normalized_shape = halve(source_shape, "shape");
+    if (!source_valid_shape.empty()) {
+      normalized_valid = halve(source_valid_shape, "valid_shape");
+    }
+    source_dtype = DataType::FP4E2M1X2;
+  }
   const bool uses_unsupported_fp8 =
       (!IsSupportedDType(source_dtype) && source_dtype.IsFloat() && source_dtype.GetBit() == 8) ||
       (!IsSupportedDType(target_dtype) && target_dtype.IsFloat() && target_dtype.GetBit() == 8);
-  CHECK_SPAN(mx_alias || !uses_unsupported_fp8, span)
+  CHECK_SPAN(alias || !uses_unsupported_fp8, span)
       << op_name << " only supports FP8 reinterpretation for INT8<->FP8E4M3FN and UINT8<->FP8E8M0";
-  CHECK_SPAN(IsSupportedDType(source_dtype) || mx_alias, span)
+  CHECK_SPAN(IsSupportedDType(source_dtype) || alias, span)
       << op_name << " does not support source dtype " << source_dtype.ToString()
       << "; FP8 aliases are limited to INT8<->FP8E4M3FN and UINT8<->FP8E8M0";
-  CHECK_SPAN(IsSupportedDType(target_dtype) || mx_alias, span)
+  CHECK_SPAN(IsSupportedDType(target_dtype) || alias, span)
       << op_name << " does not support target dtype " << target_dtype.ToString()
       << "; FP8 aliases are limited to INT8<->FP8E4M3FN and UINT8<->FP8E8M0";
   CHECK_SPAN(source_dtype != target_dtype, span)
       << op_name << " requires source and target dtypes to differ; use reshape/view for shape-only changes";
-  detail::ValidatePhysicalShape(source_shape, "source shape", op_name, span);
-  detail::ValidateValidShape(source_valid_shape, source_shape, op_name, span);
+  detail::ValidatePhysicalShape(normalized_shape, "source shape", op_name, span);
+  detail::ValidateValidShape(normalized_valid, normalized_shape, op_name, span);
 
   const size_t src_bytes = source_dtype.GetByte();
   const size_t dst_bytes = target_dtype.GetByte();
   std::optional<std::vector<ExprPtr>> auto_shape =
-      detail::TryBuildAutoShape(source_shape, contiguous_axis, src_bytes, dst_bytes, span);
+      detail::TryBuildAutoShape(normalized_shape, contiguous_axis, src_bytes, dst_bytes, span);
 
   std::vector<ExprPtr> target_shape;
   if (requested_shape.has_value()) {
@@ -295,24 +339,25 @@ inline ReinterpretViewPlan Resolve(const std::vector<ExprPtr>& source_shape,
     const bool matches_auto =
         auto_shape.has_value() && tile_view_semantics::ShapeExprListsEquivalent(target_shape, *auto_shape);
     if (!matches_auto) {
-      detail::CheckExplicitByteSize(source_shape, target_shape, src_bytes, dst_bytes, op_name, span);
+      detail::CheckExplicitByteSize(normalized_shape, target_shape, src_bytes, dst_bytes, op_name, span);
     }
   } else {
     // Use the diagnostic-producing path when automatic widening is not provable.
-    target_shape = auto_shape.has_value() ? *auto_shape
-                                          : detail::BuildAutoShape(source_shape, contiguous_axis, src_bytes,
-                                                                   dst_bytes, "shape", op_name, span);
+    target_shape = auto_shape.has_value()
+                       ? *auto_shape
+                       : detail::BuildAutoShape(normalized_shape, contiguous_axis, src_bytes, dst_bytes,
+                                                "shape", op_name, span);
   }
 
   const bool has_explicit_valid = !source_valid_shape.empty();
-  const bool is_partial =
-      has_explicit_valid && !tile_view_semantics::ShapeExprListsEquivalent(source_valid_shape, source_shape);
-  const std::vector<ExprPtr>& effective_valid = has_explicit_valid ? source_valid_shape : source_shape;
+  const bool is_partial = has_explicit_valid &&
+                          !tile_view_semantics::ShapeExprListsEquivalent(normalized_valid, normalized_shape);
+  const std::vector<ExprPtr>& effective_valid = has_explicit_valid ? normalized_valid : normalized_shape;
 
   if (requested_shape.has_value() && is_partial) {
     if (!auto_shape.has_value()) {
-      auto_shape =
-          detail::BuildAutoShape(source_shape, contiguous_axis, src_bytes, dst_bytes, "shape", op_name, span);
+      auto_shape = detail::BuildAutoShape(normalized_shape, contiguous_axis, src_bytes, dst_bytes, "shape",
+                                          op_name, span);
     }
     CHECK_SPAN(tile_view_semantics::ShapeExprListsEquivalent(target_shape, *auto_shape), span)
         << op_name

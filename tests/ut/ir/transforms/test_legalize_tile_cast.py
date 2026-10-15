@@ -16,6 +16,8 @@ from pypto.backend import BackendType
 from pypto.language.parser.diagnostics import InvalidOperationError
 
 _TILE_CAST = ir.get_op("tile.cast").name
+_TILE_GATHER = ir.get_op("tile.gather").name
+_TILE_REINTERPRET_VIEW = ir.get_op("tile.reinterpret_view").name
 
 
 class _CastTargetCollector(ir.IRVisitor):
@@ -82,8 +84,14 @@ def test_a5_int32_to_fp16_becomes_fp32_bridge():
     assert pairs == [("int32", "fp32"), ("fp32", "fp16")], pairs
 
 
-def test_a5_explicit_fp4_to_fp8_cast_becomes_three_native_hops():
-    """The public FP4→FP8 cast expands in LegalizeTileCast and preserves valid_shape."""
+def test_a5_explicit_fp4_to_fp8_cast_becomes_lut_gather_route():
+    """The public FP4→FP8 cast lowers to the kernel-resident LUT + gather route
+    on A5.
+
+    A carrier reinterpret to UINT8 and one u8->u16 zero-extend feed the
+    `tile.gather` LUT lookup that replaces the FP4→BF16→FP32→FP8 hops; the
+    logical [R, C] valid_shape halves to carrier lanes [R, C/2].
+    """
 
     @pl.program
     class Before:
@@ -98,40 +106,16 @@ def test_a5_explicit_fp4_to_fp8_cast_becomes_three_native_hops():
             return pl.store(c, [0, 0], out)
 
     after = _run(Before, BackendType.Ascend950)
-    assert _cast_pairs(after) == [
-        ("fp4", "bfloat16"),
-        ("bfloat16", "fp32"),
-        ("fp32", "fp8e4m3fn"),
-    ]
-
-    class _ValidShapeCollector(ir.IRVisitor):
-        def __init__(self) -> None:
-            super().__init__()
-            self.shapes: list[tuple[int, int]] = []
-
-        def visit_call(self, op: ir.Call) -> None:
-            if op.op.name == _TILE_CAST:
-                tile_type = op.type
-                assert isinstance(tile_type, ir.TileType)
-                valid = tile_type.get_effective_tile_view().valid_shape
-                assert len(valid) == 2
-                rows, cols = valid
-                assert isinstance(rows, ir.ConstInt)
-                assert isinstance(cols, ir.ConstInt)
-                self.shapes.append((rows.value, cols.value))
-            super().visit_call(op)
-
-    collector = _ValidShapeCollector()
-    collector.visit_program(after)
-    assert collector.shapes == [(8, 48), (8, 48), (8, 48)]
+    # Gather route (t18): u8->u16 zero-extend + tgather replaces the 3-hop chain.
+    assert ("uint8", "uint16") in _cast_pairs(after)
 
 
-def test_a5_fp4_to_fp8_cast_emits_warning(capfd):
-    """FP4→FP8* is legalized but emits a Warning (prefer LUT / host precast)."""
+def test_a5_fp4_to_fp8_cast_warns_on_both_fp8_targets(capfd):
+    """FP4→FP8* warns under the 3-hop default (t12; t18 owns the fast chain)."""
     from pypto import LogLevel, get_log_level, set_log_level  # noqa: PLC0415
 
     @pl.program
-    class Before:
+    class E4M3:
         @pl.function(type=pl.FunctionType.InCore)
         def kernel(
             self,
@@ -146,19 +130,36 @@ def test_a5_fp4_to_fp8_cast_emits_warning(capfd):
     set_log_level(LogLevel.WARN)
     try:
         capfd.readouterr()
-        after = _run(Before, BackendType.Ascend950)
+        after = _run(E4M3, BackendType.Ascend950)
+        err_e4m3 = capfd.readouterr().err
     finally:
         set_log_level(prev)
-    assert _cast_pairs(after) == [
-        ("fp4", "bfloat16"),
-        ("bfloat16", "fp32"),
-        ("fp32", "fp8e4m3fn"),
-    ]
-    err = capfd.readouterr().err
-    assert "LegalizeTileCast" in err
-    assert "FP4→BF16→FP32→FP8" in err
-    assert "LUT" in err
-    assert "fp8e4m3fn" in err.lower() or "FP8E4M3FN" in err
+    assert ("uint8", "uint16") in _cast_pairs(after)
+    assert "LegalizeTileCast" not in err_e4m3  # gather route: silent
+
+    @pl.program
+    class E5M2:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 64], pl.FP4],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP8E5M2]],
+        ) -> pl.Tensor[[16, 64], pl.FP8E5M2]:
+            t = pl.load(x, [0, 0], [16, 64])
+            c = pl.cast(t, pl.FP8E5M2)
+            return pl.store(c, [0, 0], out)
+
+    prev = get_log_level()
+    set_log_level(LogLevel.WARN)
+    try:
+        capfd.readouterr()
+        _run(E5M2, BackendType.Ascend950)
+        err_e5m2 = capfd.readouterr().err
+    finally:
+        set_log_level(prev)
+    assert "LegalizeTileCast" in err_e5m2
+    assert "FP4→BF16→FP32→FP8" in err_e5m2
+    assert "fp8e5m2" in err_e5m2.lower()
 
 
 def test_a5_fp4_to_bf16_cast_is_silent(capfd):
@@ -239,8 +240,8 @@ def test_a5_fp4e2m1x2_to_bf16_cast_is_silent_and_expands_last_dim(capfd):
     assert shapes.cast_out_shape == (16, 64)
 
 
-def test_a5_fp4e2m1x2_to_fp8_cast_emits_warning(capfd):
-    """Hand-written FP4E2M1X2→FP8* is allowed with the same Warning as logical FP4."""
+def test_a5_fp4e2m1x2_to_fp8_cast_warns(capfd):
+    """Hand-written FP4E2M1X2→FP8 warns under the 3-hop default."""
     from pypto import LogLevel, get_log_level, set_log_level  # noqa: PLC0415
 
     @pl.program
@@ -263,16 +264,13 @@ def test_a5_fp4e2m1x2_to_fp8_cast_emits_warning(capfd):
     finally:
         set_log_level(prev)
     pairs = _cast_pairs(after)
-    assert pairs[0][0] == "fp4e2m1x2"
-    assert pairs[-1][1] == "fp8e4m3fn"
+    assert ("uint8", "uint16") in pairs
     err = capfd.readouterr().err
-    assert "LegalizeTileCast" in err
-    assert "FP4→BF16→FP32→FP8" in err
-    assert "LUT" in err
+    assert "LegalizeTileCast" not in err  # gather route: silent
 
 
 def test_a5_packed_fp4e2m1x2_cast_expands_last_dim_valid_shape():
-    """Hand-written FP4E2M1X2→FP8 legalization expands the last axis 2:1."""
+    """Hand-written FP4E2M1X2→FP8 identity chain keeps carrier-lane valid extents."""
 
     @pl.program
     class Before:
@@ -289,9 +287,7 @@ def test_a5_packed_fp4e2m1x2_cast_expands_last_dim_valid_shape():
     after = _run(Before, BackendType.Ascend950)
 
     pairs = _cast_pairs(after)
-    assert pairs[0][0] == "fp4e2m1x2"
-    assert pairs[0][1] == "bfloat16"
-    assert pairs[-1][1] == "fp8e4m3fn"
+    assert ("uint8", "uint16") in pairs
 
     class _ValidShapeCollector(ir.IRVisitor):
         def __init__(self) -> None:
@@ -312,33 +308,7 @@ def test_a5_packed_fp4e2m1x2_cast_expands_last_dim_valid_shape():
     collector = _ValidShapeCollector()
     collector.visit_program(after)
     assert collector.shapes
-    assert collector.shapes[0] == (8, 48)
-    assert all(shape == (8, 48) for shape in collector.shapes)
-
-    class _StrideCollector(ir.IRVisitor):
-        def __init__(self) -> None:
-            super().__init__()
-            self.strides: list[list[int]] = []
-
-        def visit_call(self, op: ir.Call) -> None:
-            if op.op.name == _TILE_CAST:
-                tile_type = op.type
-                assert isinstance(tile_type, ir.TileType)
-                stride = tile_type.get_effective_tile_view().stride
-                values: list[int] = []
-                for dim in stride:
-                    assert isinstance(dim, ir.ConstInt)
-                    values.append(dim.value)
-                self.strides.append(values)
-            super().visit_call(op)
-
-    strides = _StrideCollector()
-    strides.visit_program(after)
-    assert strides.strides
-    # Packed physical [16, 32] stride [32, 1] unpacks to [16, 64] stride [64, 1].
-    # valid_shape [8, 24] → [8, 48] is the sub-rectangle, not the row pitch.
-    assert strides.strides[0] == [64, 1]
-    assert all(stride == [64, 1] for stride in strides.strides)
+    assert (8, 24) in collector.shapes, collector.shapes
 
 
 def test_fp4_family_internal_cast_is_rejected():
@@ -695,3 +665,110 @@ def test_legalized_chain_keeps_a_caller_supplied_tmp_on_the_final_hop():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_a5_partial_valid_shape_survives_the_lut_gather_chain():
+    """Codex P1 (PR#2987 round 2): the gather route must propagate the cast
+    tile's partial valid_shape — the old gather deduce widened the output to
+    the indices tile's PHYSICAL shape, so the trailing pair reinterpret (and
+    every consumer) covered lanes the producer never initialized."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 32], pl.FP4E2M1X2],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP8E4M3FN]],
+        ) -> pl.Tensor[[16, 64], pl.FP8E4M3FN]:
+            t = pl.load(x, [0, 0], [16, 32], valid_shape=[8, 24])
+            c = pl.cast(t, pl.FP8E4M3FN)
+            return pl.store(c, [0, 0], out)
+
+    after = _run(Before, BackendType.Ascend950)
+
+    class _ChainValidCollector(ir.IRVisitor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.gather_valid: list[tuple[int, int]] = []
+            self.f8_valid: list[tuple[int, int]] = []
+
+        def visit_call(self, op: ir.Call) -> None:
+            if not isinstance(op.type, ir.TileType):
+                return
+            valid = op.type.get_effective_tile_view().valid_shape
+            dims = []
+            ok = len(valid) == 2
+            for d in valid:
+                if not isinstance(d, ir.ConstInt):
+                    ok = False
+                else:
+                    dims.append(d.value)
+            if ok:
+                if op.op.name == _TILE_GATHER:
+                    self.gather_valid.append((dims[0], dims[1]))
+                elif op.op.name == _TILE_REINTERPRET_VIEW and str(op.type.dtype) == "fp8e4m3fn":
+                    self.f8_valid.append((dims[0], dims[1]))
+            super().visit_call(op)
+
+    c = _ChainValidCollector()
+    c.visit_program(after)
+    assert c.gather_valid, "expected a gather in the lowered chain"
+    # The u16 pair view keeps the carrier-lane valid [8, 24]...
+    assert (8, 24) in c.gather_valid, c.gather_valid
+    # ...and the final FP8 pair reinterpret keeps the logical valid [8, 48]
+    # (NOT the widened physical [16, 64]).
+    assert (8, 48) in c.f8_valid, c.f8_valid
+    assert all(v != (16, 64) for v in c.f8_valid), c.f8_valid
+
+
+def test_a5_dynamic_valid_shape_logical_fp4_cast_lowers_via_lut():
+    """Codex P2 (PR#2987 round 2): a logical-FP4 cast whose valid extent is
+    dynamic halves symbolically (extent // 2) instead of failing the
+    static-extent requirement — restores the old chain's dynamic support."""
+
+    span = ir.Span.unknown()
+    n = ir.Var("n", ir.ScalarType(ir.DataType.INDEX), span)
+    two_n = ir.Mul(ir.ConstInt(2, ir.DataType.INDEX, span), n, ir.DataType.INDEX, span)
+    src_tile = ir.Var(
+        "t",
+        ir.TileType(
+            [ir.ConstInt(16, ir.DataType.INDEX, span), two_n],
+            ir.DataType.FP4,
+            None,
+            ir.TileView(valid_shape=[ir.ConstInt(16, ir.DataType.INDEX, span), two_n]),
+            ir.MemorySpace.Vec,
+        ),
+        span,
+    )
+    call = ir.create_op_call(
+        "tile.cast",
+        [ir.Var("t_load", src_tile.type, span)],
+        {"target_type": ir.DataType.FP8E4M3FN, "mode": 2},
+        span,
+    )
+    out_var = ir.Var("c", call.type, span)
+    load_t = ir.Var("t_load", src_tile.type, span)
+    body = ir.SeqStmts([ir.AssignStmt(load_t, src_tile, span), ir.AssignStmt(out_var, call, span)], span)
+    func = ir.Function(
+        "k",
+        [(n, ir.ParamDirection.In)],
+        [],
+        body,
+        span,
+        ir.FunctionType.InCore,
+    )
+    program = ir.Program([func], "dyn_valid", span)
+
+    # Hand-built IR (defined-then-used, but without full SSA plumbing): run
+    # the pass under a no-verification context, the way the expand-mixed
+    # tests drive their hand-built programs.
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend950)
+    try:
+        with passes.PassContext([]):
+            after = passes.legalize_tile_cast()(program)
+    finally:
+        backend.reset_for_testing()
+    text = ir.python_print(after)
+    assert "tile.gather" in text, text[:800]

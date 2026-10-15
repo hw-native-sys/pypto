@@ -320,6 +320,18 @@ class BackendHandler {
   [[nodiscard]] virtual bool RequiresRuntimeSubblockBridge() const = 0;
 
   /**
+   * @brief Whether LegalizeTileCast may lower FP4-family -> FP8E4M3FN/E5M2
+   *        casts to the in-kernel identity bit-op chain.
+   *
+   * The chain (reinterpret to UINT8 carriers -> native U8->U16 cast ->
+   * nibble arithmetic -> reinterpret to FP8) needs the backend's UINT16
+   * elementwise ops and byte-preserving `pto.treshape` dtype views, which the
+   * a5 pipeline provides. Backends without those primitives keep the
+   * FP4->BF16->FP32->FP8 multi-hop expansion.
+   */
+  [[nodiscard]] virtual bool LowersFp4ToFp8InKernel() const { return false; }
+
+  /**
    * @brief Whether mixed kernels with no split mode (or `SplitMode::None`)
    *        must still be dispatched on both AIV lanes for cross-core sync.
    *
