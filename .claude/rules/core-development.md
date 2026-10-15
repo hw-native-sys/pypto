@@ -14,34 +14,11 @@ Fundamental development principles for the PyPTO project. All contributors shoul
 - Helpful error messages with context and solutions
 - Documentation from user's perspective with working examples
 
-```python
-# ✅ Good
-expr.set_shape([2, 3, 4])  # Clear setter
-raise ValueError(f"Invalid shape {shape}: expected 3D, got {len(shape)}D")
-
-# ❌ Bad
-expr.shape(2, 3, 4)  # Setter or getter?
-raise ValueError("Invalid shape")  # No context
-```
-
 ## 2. Code Quality Principles
 
 ### DRY: Reduce Code Through Reuse
 
-**Extract common patterns when seen 2+ times:**
-
-```python
-# ✅ Good - Reusable validation
-def validate_positive_int(value: int, name: str) -> None:
-    if not isinstance(value, int):
-        raise TypeError(f"{name} must be int, got {type(value)}")
-    if value <= 0:
-        raise ValueError(f"{name} must be positive, got {value}")
-
-def set_rank(self, rank: int) -> None:
-    validate_positive_int(rank, "rank")
-    self._rank = rank
-```
+**Extract common patterns when seen 2+ times**, e.g. share positive-integer validation across setters.
 
 ### Clean Code Practices
 
@@ -49,6 +26,28 @@ def set_rank(self, rank: int) -> None:
 - **Small, focused functions**: One function, one purpose
 - **Remove dead code**: Delete commented code, use git history
 - **Use existing utilities**: Don't reimplement standard functions
+
+### Sufficient Code Comments (Required)
+
+**New and modified code must include enough comments for a maintainer to understand
+non-obvious logic and preserve its correctness without reconstructing the PR history.**
+
+- Explain design decisions, correctness invariants, assumptions, and edge cases
+  beside the relevant code. PR descriptions and external docs do not replace local explanations.
+- Introduce complex algorithms and multi-stage traversals with their purpose,
+  stage ordering, and state/cache lifetime or invalidation requirements.
+- Document non-obvious field contracts: units, coordinate origins, ownership/aliasing,
+  and the meanings of null, unknown, and sentinel values.
+- Explain hardware/backend restrictions, special constants, conservative fallbacks,
+  and workarounds, including why an apparently simpler alternative is unsafe.
+- In regression tests, explain the failure scenario and non-obvious expected results,
+  including expectations that differ by backend.
+- Keep comments accurate when behavior changes; preserve or relocate useful rationale
+  during refactoring. Remove obsolete explanations.
+- Explain **why** and the relevant contract; avoid restating obvious operations or
+  adding comments merely to meet a line-count quota. Use English by default.
+
+**Review requirement:** Flag missing or stale explanations at the specific location.
 
 ### Fix Linter Errors
 
@@ -139,6 +138,7 @@ Before committing:
 - [ ] Modern language features used (Python 3.10+, C++17+)
 - [ ] APIs are intuitive with clear error messages
 - [ ] Common patterns extracted (no duplication)
+- [ ] Comments explain non-obvious logic and contracts and match the current code
 - [ ] Linter errors fixed, not suppressed
 - [ ] No hardcoded secrets or absolute paths
 - [ ] External input validated, safe APIs only
