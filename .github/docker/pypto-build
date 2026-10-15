@@ -1,0 +1,118 @@
+#!/bin/bash
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+#
+# Build the bind-mounted PyPTO checkout (and simpler) inside the dev image.
+#
+#   pypto-build                 build pypto, then install ./runtime (simpler)
+#   pypto-build --pypto-only    skip simpler — enough for UT / codegen work
+#   pypto-build --clean         drop the CMake cache first
+#
+# Native CMake, deliberately, not `pip install -e .`: python/bindings/CMakeLists.txt
+# branches on SKBUILD_MODE, and a scikit-build-configured build/ puts the
+# extension in build/python/bindings/ instead of python/pypto/. With that cache
+# in place every later `cmake --build build` succeeds while Python keeps
+# importing a stale python/pypto/pypto_core.*.so — C++ edits appear to do
+# nothing at all.
+set -euo pipefail
+
+pypto_only=false
+clean=false
+for arg in "$@"; do
+    case "$arg" in
+        --pypto-only) pypto_only=true ;;
+        --clean) clean=true ;;
+        -h|--help) echo 'Usage: pypto-build [--pypto-only] [--clean]'; exit 0 ;;
+        *) echo "pypto-build: unknown argument '$arg'" >&2; exit 2 ;;
+    esac
+done
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$here/pypto-activate.sh"
+
+if [ ! -f "$PYPTO_SRC/CMakeLists.txt" ]; then
+    echo "pypto-build: no PyPTO checkout at $PYPTO_SRC" >&2
+    echo "  Mount one:  docker run -v /path/to/pypto:/workspace/pypto ..." >&2
+    echo "  Or point PYPTO_SRC at where it is mounted." >&2
+    exit 1
+fi
+cd "$PYPTO_SRC"
+
+# The loader may replace an environment request with a machine profile. Keep
+# a smaller explicit request while never exceeding that profile's limit.
+requested_jobs="${PYPTO_BUILD_JOBS:-}"
+source .claude/skills/testing/load-env.sh
+jobs="$PYPTO_BUILD_JOBS"
+if [ -n "$requested_jobs" ]; then
+    [[ "$requested_jobs" =~ ^[1-9][0-9]*$ ]] || {
+        echo 'PYPTO_BUILD_JOBS must be a positive integer' >&2; exit 2;
+    }
+    if [ "$requested_jobs" -lt "$jobs" ]; then jobs="$requested_jobs"; fi
+fi
+export PYPTO_BUILD_JOBS="$jobs" CMAKE_BUILD_PARALLEL_LEVEL="$jobs" MAX_JOBS="$jobs"
+export MAKEFLAGS="-j$jobs"
+
+# ---------------------------------------------------------------------------
+# ccache, when the image has it (the `sim` layer installs it; the lean
+# on-device image does not, because it needs apt).
+#
+# Split by what actually decides an object's ABI. simpler links pto-isa, so its
+# objects must be isolated by the pinned pto-isa commit: reusing objects built
+# against an older pin produces a non-deterministic segfault inside
+# simpler_setup/kernel_compiler.py — a cache-poisoning signature that reads as a
+# code bug. Upstream CI scopes this with CCACHE_NAMESPACE, which needs
+# ccache >= 4.8; jammy ships 4.5.1 and drops the variable silently, so the pin
+# goes in the cache *path* instead, which every ccache understands. pypto's own
+# objects never see pto-isa, so they keep one cache across pin bumps.
+#
+# Nothing depends on this: without ccache, ninja's incremental build in the
+# mounted build/ dir still makes repeat builds cheap.
+# ---------------------------------------------------------------------------
+cache_root="${PYPTO_HOME}/cache/ccache"
+pin="$(cat runtime/pto_isa.pin 2>/dev/null || echo unpinned)"
+export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-20G}"
+mkdir -p "$cache_root/pypto" "$cache_root/simpler-$pin" 2>/dev/null || true
+
+if $clean; then
+    rm -rf build
+fi
+if [ -f build/CMakeCache.txt ] && grep -q '^SKBUILD' build/CMakeCache.txt; then
+    echo "==> build/ was configured by scikit-build (pip); reconfiguring natively"
+    rm -rf build
+fi
+
+echo "==> building pypto ($jobs jobs, $CXX)"
+export CCACHE_DIR="$cache_root/pypto"
+cmake -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-RelWithDebInfo}" \
+    -Dnanobind_DIR="$(python -c 'import nanobind; print(nanobind.cmake_dir())')"
+cmake --build build --parallel "$jobs"
+
+python -c 'import pypto.language as pl; print(f"pypto ok — {len(pl.__all__)} exports")'
+
+if ! $pypto_only; then
+    if [ ! -f runtime/pyproject.toml ]; then
+        echo "pypto-build: runtime/ is empty — run 'git submodule update --init --recursive'" >&2
+        exit 1
+    fi
+    echo "==> installing simpler (pto-isa pin ${pin:0:12})"
+    # uv, not pip: this venv was created by `uv venv` and has no pip in it.
+    # --no-build-isolation because the backend (scikit-build-core, nanobind) is
+    # already installed here, and an isolated build env would have to reach a
+    # package index that is not always reachable from behind a corporate proxy.
+    #
+    # The first run also clones the pinned pto-isa into runtime/build/pto-isa
+    # (HTTPS, GitHub with a GitCode fallback); it is reused untouched afterwards.
+    export CCACHE_DIR="$cache_root/simpler-$pin"
+    uv pip install --python "$(command -v python)" --no-build-isolation ./runtime
+    python -c 'import simpler.task_interface; print("simpler ok")'
+fi
+
+echo "==> done. Next: pypto-doctor, or run a model:"
+echo "    python \$PYPTO_LIB_SRC/models/qwen3_14b/decode_fwd.py -p a2a3 -d \${PYPTO_DEVICE:-0}"
