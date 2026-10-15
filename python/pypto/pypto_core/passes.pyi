@@ -301,10 +301,9 @@ class PassContext:
     ) -> None:
         """Create a PassContext with instruments and pass configuration (incl. memory planner).
 
-        ``enable_pypto_l0c_double_buffer`` opts the legacy ``PYPTO`` planner in
-        to chooser-emitted L0C double-buffering (dbC=2; experimental, default
-        off). It has no effect under ``DSA_RP`` or ``PTOAS``, which enable
-        chooser dbC=2 automatically.
+        ``enable_pypto_l0c_double_buffer`` is retained for compatibility but
+        has no effect: automatic dbC is disabled for all planners. Explicit
+        buffering declarations are preserved.
 
         ``runtime`` selects the target Simpler runtime ABI; its wire name is
         what lands in ``RUNTIME_CONFIG["runtime"]`` in the generated
@@ -348,7 +347,7 @@ class PassContext:
         ...
 
     def get_enable_pypto_l0c_double_buffer(self) -> bool:
-        """Whether chooser-emitted dbC=2 is enabled under legacy PYPTO."""
+        """Return the stored legacy flag; automatic dbC remains disabled."""
         ...
 
     def get_instruments(self) -> list[PassInstrument]:
@@ -995,6 +994,13 @@ class l0_tile_chooser:
         AStationary = 1
         BStationary = 2
 
+    class DbcEmissionRoute(Enum):
+        """Concrete output-grid schedule used to realize L0C double buffering."""
+
+        Unsupported = 0
+        PipelinedInner = 1
+        UnrolledGrid = 2
+
     class L0TileConfig:
         """Inputs to choose_l0_tile: problem dims + hardware + realizable-mask gates.
 
@@ -1029,6 +1035,11 @@ class l0_tile_chooser:
         allow_a_stationary: bool
         allow_b_stationary: bool
         allow_double_buffer_c: bool
+        full_k_dbc_route: l0_tile_chooser.DbcEmissionRoute
+        reduction_iterations: int
+        reduction_pipeline_stages: int
+        split_k_dbc_route: l0_tile_chooser.DbcEmissionRoute
+        allow_unrolled_dbc_m_boundary: bool
         c_read: bool
         bw_a: float
         bw_b: float
@@ -1056,6 +1067,7 @@ class l0_tile_chooser:
         stationarity: l0_tile_chooser.Stationarity
         os_holds_a: bool
         double_buffer_c: bool
+        dbc_emission_route: l0_tile_chooser.DbcEmissionRoute
         perf_hint: str
 
     @staticmethod

@@ -270,6 +270,26 @@ buffer.add(loaded_buffer, loaded_buffer, doubled_buffer)
 
 ## Matrix storage and cube recipes
 
+Static addressless slot groups are retained as `buffer.alloc_multi` with a
+`MultiBufferType` and explicit `buffer.get_slot` selections. PTOAS receives one
+`pto.alloc_multi_tile` region, so opposite dbC stages remain physically distinct;
+they are not converted to independently reusable allocations. Every member must
+agree on slot count, slot size and its static byte offset. A full-slot descriptor
+provides the covering geometry. Smaller Acc tiles use compatible zero-offset
+subviews; repeated slot/descriptor pairs share one handle. Buffer verification
+tracks the selected slot's byte window, including aliases of boundary views.
+Dynamic slot indices remain unsupported by this conversion recipe.
+
+Before discarding Tile allocation facts, lowering uses the same multi-buffer
+reuse planner as Tile codegen. Compatible regions with disjoint conservative
+lifetimes share one `buffer.alloc_multi` handle. Overlapping regions, operation
+no-alias constraints against every prior occupant, and target hazards prevent
+unsafe sharing. Logical pipeline groups remain distinct. Thus crossing Buffer
+IR does not multiply physical storage for sequential dbC grids.
+Static physical region allocations are emitted in a function-entry prologue so
+they dominate all slot views, even if logical declarations precede the first
+live occupant. Slot/view definitions retain their original declaration sites.
+
 Mat, Left, Right and Acc tiles keep their resolved fractal layout in the
 `BufferType` (`blayout`, `slayout`, `fractal`, `compact`). Their physical
 extents are already whole fractal boxes, and a fractal window has no row-major
@@ -394,9 +414,9 @@ FP16/FP32/INT32; BF16 transfer support does not imply arithmetic support.
 Scalar recipe inputs are converted explicitly to the destination dtype before
 Buffer calls are constructed; fill shape/dtype select the destination descriptor.
 
-Helper calls, alternate layouts, slots, and
-other operation recipes are added in subsequent migration slices. Explicit
-low-level conversion diagnoses unsupported forms. The normal pipeline applies the narrower whole-kernel selection described above.
+Helper calls, alternate layouts, dynamic slots, and other operation recipes
+are added in subsequent migration slices. Explicit low-level conversion diagnoses
+unsupported forms. The normal pipeline applies the narrower whole-kernel selection described above.
 
 Binary serialization preserves the explicit representation and function stage.
 The current Python diagnostic printer is not a Buffer DSL parser round trip.
