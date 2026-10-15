@@ -1766,5 +1766,35 @@ class TestWindowBufferIdentity:
         assert ir.structural_equal(scope(False), scope(False), enable_auto_mapping=True)
 
 
+@pytest.mark.parametrize("shared_subtree", [False, True])
+def test_shared_nodes_do_not_bypass_variable_bijection(shared_subtree):
+    span = ir.Span.unknown()
+    scalar = ir.ScalarType(DataType.INT64)
+    x = ir.Var("x", scalar, span)
+    y = ir.Var("y", scalar, span)
+    lhs = ir.Add(x, x, DataType.INT64, span)
+    rhs = ir.Add(x, y, DataType.INT64, span)
+    if shared_subtree:
+        lhs, rhs = (
+            ir.Add(lhs, lhs, DataType.INT64, span),
+            ir.Add(ir.Add(y, y, DataType.INT64, span), lhs, DataType.INT64, span),
+        )
+    assert not ir.structural_equal(lhs, rhs, True)
+    assert not ir.structural_equal(rhs, lhs, True)
+    with pytest.raises(ValueError, match="mapping inconsistent"):
+        ir.assert_structural_equal(lhs, rhs, True)
+
+
+def test_shared_use_must_respect_parameter_mapping():
+    span = ir.Span.unknown()
+    scalar = ir.ScalarType(DataType.INT64)
+    x = ir.Var("x", scalar, span)
+    y = ir.Var("y", scalar, span)
+    lhs = ir.Function("f", [x], [scalar], ir.ReturnStmt([x], span), span)
+    rhs = ir.Function("g", [y], [scalar], ir.ReturnStmt([x], span), span)
+    assert not ir.structural_equal(lhs, rhs)
+    assert not ir.structural_equal(rhs, lhs)
+
+
 if __name__ == "__main__":
     pytest.main(["-v", __file__])

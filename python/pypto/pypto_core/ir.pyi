@@ -2829,71 +2829,110 @@ class WindowBuffer(Var):
     ) -> None:
         """Create a WindowBuffer wrapping the given Ptr ``base`` Var."""
 
+class StructuralComparisonMode(enum.Enum):
+    """Default syntax/type compatibility or exact Strict structure."""
+
+    Default = ...
+    Strict = ...
+
+class StructuralComparisonUnsupported(TypeError):
+    """Strict comparison cannot safely represent the input; this is not inequality."""
+
+    reason: str
+    field_path: str
+
 @overload
-def structural_hash(node: IRNode, enable_auto_mapping: bool = False) -> int: ...
+def structural_hash(
+    node: IRNode,
+    enable_auto_mapping: bool = False,
+    *,
+    mode: StructuralComparisonMode = StructuralComparisonMode.Default,
+) -> int: ...
 @overload
-def structural_hash(node: Type, enable_auto_mapping: bool = False) -> int: ...
-def structural_hash(node: IRNode | Type, enable_auto_mapping: bool = False) -> int:
-    """Compute deterministic structural hash of an IR node or type.
+def structural_hash(
+    node: Type,
+    enable_auto_mapping: bool = False,
+    *,
+    mode: StructuralComparisonMode = StructuralComparisonMode.Default,
+) -> int: ...
+@overload
+def structural_hash(
+    *,
+    type: Type,
+    enable_auto_mapping: bool = False,
+    mode: StructuralComparisonMode = StructuralComparisonMode.Default,
+) -> int:
+    """Compute a process-local structural hash; equal structures have equal hashes.
 
-    Hashes based on node structure; variable identity is part of the hash unless
-    auto-mapping is enabled. The hash is deterministic within a single process run.
-    For IR nodes: ignores source location (Span).
-    If enable_auto_mapping=True, variable names are ignored (e.g., x+1 and y+1 hash the same).
-    If enable_auto_mapping=False (default), different variable objects produce different hashes.
-    For types: enable_auto_mapping only affects variables embedded in the type (e.g., shape expressions).
-
-    Args:
-        node: IR node or type to compute hash for
-        enable_auto_mapping: Whether to ignore variable identity and auto-map variables
-
-    Returns:
-        Hash value of the object structure
+    Bound variables are alpha-renamed. Free variables preserve identity unless
+    enable_auto_mapping is True. Span, function names and bound names are ignored.
+    Strict compares exact dtype, float bits, operator kind and semantic fields;
+    unsupported storage or unresolved structure raises StructuralComparisonUnsupported.
+    Always use identical options for hashing and equality.
     """
 
 @overload
-def structural_equal(lhs: IRNode, rhs: IRNode, enable_auto_mapping: bool = False) -> bool: ...
+def structural_equal(
+    lhs: IRNode,
+    rhs: IRNode,
+    enable_auto_mapping: bool = False,
+    *,
+    mode: StructuralComparisonMode = StructuralComparisonMode.Default,
+) -> bool: ...
 @overload
-def structural_equal(lhs: Type, rhs: Type, enable_auto_mapping: bool = False) -> bool: ...
-def structural_equal(lhs: IRNode | Type, rhs: IRNode | Type, enable_auto_mapping: bool = False) -> bool:
-    """Check if two IR nodes or types are structurally equal.
+def structural_equal(
+    lhs: Type,
+    rhs: Type,
+    enable_auto_mapping: bool = False,
+    *,
+    mode: StructuralComparisonMode = StructuralComparisonMode.Default,
+) -> bool: ...
+def structural_equal(
+    lhs: IRNode | Type,
+    rhs: IRNode | Type,
+    enable_auto_mapping: bool = False,
+    *,
+    mode: StructuralComparisonMode = StructuralComparisonMode.Default,
+) -> bool:
+    """Check structural equality under the selected comparison policy.
 
-    Ignores source location (Span). Returns True if objects have identical structure.
-    If enable_auto_mapping=True, automatically map variables (e.g., x+1 equals y+1).
-    If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same name).
-
-    Args:
-        lhs: Left-hand side IR node or type
-        rhs: Right-hand side IR node or type
-        enable_auto_mapping: Whether to automatically map variables
-
-    Returns:
-        True if objects are structurally equal, False otherwise
+    Bound variables are alpha-renamed. Free variables preserve identity unless
+    enable_auto_mapping is True. Span, function names and bound names are ignored.
+    Strict compares exact dtype, float bits, operator kind and semantic fields;
+    unsupported storage or unresolved structure raises StructuralComparisonUnsupported.
+    Always use identical options for hashing and equality.
     """
 
 @overload
-def assert_structural_equal(lhs: IRNode, rhs: IRNode, enable_auto_mapping: bool = False) -> None: ...
-@overload
-def assert_structural_equal(lhs: Type, rhs: Type, enable_auto_mapping: bool = False) -> None: ...
 def assert_structural_equal(
-    lhs: IRNode | Type, rhs: IRNode | Type, enable_auto_mapping: bool = False
+    lhs: IRNode,
+    rhs: IRNode,
+    enable_auto_mapping: bool = False,
+    *,
+    mode: StructuralComparisonMode = StructuralComparisonMode.Default,
+) -> None: ...
+@overload
+def assert_structural_equal(
+    lhs: Type,
+    rhs: Type,
+    enable_auto_mapping: bool = False,
+    *,
+    mode: StructuralComparisonMode = StructuralComparisonMode.Default,
+) -> None: ...
+def assert_structural_equal(
+    lhs: IRNode | Type,
+    rhs: IRNode | Type,
+    enable_auto_mapping: bool = False,
+    *,
+    mode: StructuralComparisonMode = StructuralComparisonMode.Default,
 ) -> None:
-    """Assert two IR nodes or types are structurally equal.
+    """Assert structural equality, raising ValueError with the first mismatch path.
 
-    Like structural_equal but raises ValueError with detailed error message showing
-    the first mismatch location and Python-printed IR context. Useful for debugging.
-
-    Ignores source location (Span).
-    If enable_auto_mapping=True, automatically map variables (e.g., x+1 equals y+1).
-    If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same name).
-
-    Args:
-        lhs: Left-hand side IR node or type
-        rhs: Right-hand side IR node or type
-        enable_auto_mapping: Whether to automatically map variables
-
-    Raises:
-        ValueError: If objects are not structurally equal, with detailed diagnostic message
+    Bound variables are alpha-renamed. Free variables preserve identity unless
+    enable_auto_mapping is True. Span, function names and bound names are ignored.
+    Strict compares exact dtype, float bits, operator kind and semantic fields;
+    unsupported storage or unresolved structure raises StructuralComparisonUnsupported.
+    Always use identical options for hashing and equality.
     """
 
 def attach_leading_comments(stmt: Stmt, comments: list[str]) -> Stmt:

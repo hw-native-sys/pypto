@@ -393,8 +393,8 @@ class TestFlattenTileNdTo2DUnchanged:
             ) -> pl.Tensor[[32, 64], pl.FP32]:
                 x_tile: pl.Tile[[32, 64], pl.FP32] = pl.load(x, [0, 0], [32, 64])
                 y_tile: pl.Tile[[32, 64], pl.FP32] = pl.tile.add(x_tile, x_tile)
-                out_0: pl.Tensor[[32, 64], pl.FP32] = pl.store(y_tile, [0, 0], out_0)
-                return out_0
+                out_store: pl.Tensor[[32, 64], pl.FP32] = pl.store(y_tile, [0, 0], out_0)
+                return out_store
 
             @pl.function
             def main(self, x: pl.Tensor[[32, 64], pl.FP32]) -> pl.Tensor[[32, 64], pl.FP32]:
@@ -1567,8 +1567,8 @@ class TestFlattenTileNdTo2DAssemble:
                 page: pl.Tile[[8, 16], pl.FP32] = pl.tile.full([8, 16], dtype=pl.FP32, value=1.0)
                 acc: pl.Tile[[32, 16], pl.FP32] = pl.tile.create([32, 16], dtype=pl.FP32)
                 acc2: pl.Tile[[32, 16], pl.FP32] = pl.tile.assemble(acc, page, [16, 0])
-                out_0: pl.Tensor[[32, 16], pl.FP32] = pl.store(acc2, [0, 0], out_0)
-                return out_0
+                out_store: pl.Tensor[[32, 16], pl.FP32] = pl.store(acc2, [0, 0], out_0)
+                return out_store
 
             @pl.function
             def main(self, x: pl.Tensor[[32, 16], pl.FP32]) -> pl.Tensor[[32, 16], pl.FP32]:

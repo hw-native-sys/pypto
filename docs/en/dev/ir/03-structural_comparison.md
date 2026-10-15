@@ -2,16 +2,17 @@
 
 ## Overview
 
-PyPTO provides two utility functions for comparing IR nodes by structure rather than pointer identity:
+PyPTO provides three utility functions for comparing IR nodes by structure rather than pointer identity:
 
 ```python
-structural_equal(lhs, rhs, enable_auto_mapping=False) -> bool
-structural_hash(node, enable_auto_mapping=False) -> int
+structural_equal(lhs, rhs, enable_auto_mapping=False, *, mode=StructuralComparisonMode.Default) -> bool
+structural_hash(node, enable_auto_mapping=False, *, mode=StructuralComparisonMode.Default) -> int
+assert_structural_equal(lhs, rhs, enable_auto_mapping=False, *, mode=StructuralComparisonMode.Default) -> None
 ```
 
 **Use Cases:** CSE, IR optimization, pattern matching, testing
 
-**Key Feature:** Both functions ignore `Span` (source location), focusing only on logical structure.
+**Key Feature:** All three functions ignore `Span` (source location), focusing only on logical structure.
 
 ### Floating-point constants
 
@@ -47,11 +48,12 @@ ir.assert_structural_equal(x1, x2, enable_auto_mapping=True)  # True
 
 ## Comparison Process
 
-The `structural_equal` function follows these steps:
+In `Default` mode, `structural_equal` follows these steps:
 
 1. **Fast Path Checks**
-   - Reference equality: If same pointer, return `true`
-   - Null check: If either is null, return `false`
+   - Null check: two null nodes compare equal; one null node compares unequal
+   - Shared nodes still establish and check variable bindings, including shared subtrees
+   - Only scalar constants retain the same-pointer shortcut
    - Type check: Compare `TypeName()` - must match exactly
 
 2. **Type Dispatch**
@@ -191,7 +193,8 @@ assert ir.structural_hash(c1) == ir.structural_hash(c2)
 
 ### Hash Consistency Guarantee
 
-**Rule:** If `structural_equal(a, b, mode)` is `True`, then `structural_hash(a, mode) == structural_hash(b, mode)`
+**Rule:** For supported inputs, equality implies equal hashes when both operations use the same
+`enable_auto_mapping` and `mode` options. A hash match alone does not imply equality.
 
 ### Using with Containers
 
@@ -223,7 +226,13 @@ class StructuralEqual {
 
   bool EqualVar(const VarPtr& lhs, const VarPtr& rhs) {
     if (!enable_auto_mapping_) {
-      return lhs.get() == rhs.get();  // Strict pointer equality
+      auto l = lhs_to_rhs_var_map_.find(lhs);
+      auto r = rhs_to_lhs_var_map_.find(rhs);
+      if (l != lhs_to_rhs_var_map_.end() || r != rhs_to_lhs_var_map_.end()) {
+        return l != lhs_to_rhs_var_map_.end() && r != rhs_to_lhs_var_map_.end()
+            && l->second == rhs && r->second == lhs;
+      }
+      return lhs.get() == rhs.get();  // Unbound free-variable identity
     }
 
     // Check type equality first
@@ -251,7 +260,7 @@ class StructuralEqual {
 
 **Key Points:**
 
-- Without auto-mapping: strict identity comparison (pointer equality for `structural_equal`, unique IDs for `structural_hash`)
+- Without auto-mapping: references to definitions follow the binding map; free variables preserve identity
 - With auto-mapping: establish and enforce consistent mapping
 - Type equality checked before mapping
 - Bidirectional maps prevent inconsistent mappings
@@ -284,9 +293,9 @@ bool EqualWithFields(const NodePtr& lhs_op, const NodePtr& rhs_op) {
 }
 ```
 
-### Types Are Compared by Hand, Not by Reflection
+### Default Type Comparison Uses Explicit Dispatch
 
-`Expr` and `Stmt` go through the reflection visitor above. **`Type` does not.**
+In `Default` mode, `Expr` and `Stmt` use the reflection visitor above; `Type` uses explicit dispatch.
 Four independent if/else ladders each re-encode "what fields does this Type
 have", and nothing links them:
 
@@ -297,7 +306,7 @@ have", and nothing links them:
 | `SerializeType` | `src/ir/serialization/serializer.cpp` |
 | `DeserializeType` | `src/ir/serialization/deserializer.cpp` |
 
-**Adding a Type means editing all four.** A Type added to three of them
+**Adding a Type means updating all four and the Strict projection dispatcher.** A Type added to three of them
 compiles, passes serialization round-trips, and compares correctly — then hits
 `HashType`'s trailing `INTERNAL_CHECK(false)` the first time a user writes
 `hash(t)` or puts the Type in a `set`. That breaks the equal-nodes-hash-equally
@@ -327,6 +336,96 @@ Three dispatch hazards to mirror across the ladders:
 `tests/ut/ir/transforms/test_hash.py::TestHashTypeLadderParity` walks every
 Python-constructible Type and fails when one is missing from `HashType`. Add a
 factory there for each new Type.
+
+## Strict Comparison for Optimization Candidates
+
+`StructuralComparisonMode.Strict` compares the exact supported IR structure. It is
+intended for checking candidates before an optimization such as function deduplication.
+The default mode and `Type.__eq__` / `Type.__hash__` retain their compatibility behavior.
+The existing positional `enable_auto_mapping` argument remains valid; `mode` is keyword-only
+in Python. The Type hash overload also retains the `type=` keyword.
+
+```python
+from pypto import DataType, ir
+
+strict = ir.StructuralComparisonMode.Strict
+span = ir.Span.unknown()
+a = ir.ConstFloat(0.0, DataType.FP32, span)
+b = ir.ConstFloat(-0.0, DataType.FP32, span)
+assert ir.structural_equal(a, b)  # Default numerical comparison
+assert not ir.structural_equal(a, b, mode=strict)  # Exact stored bits
+```
+
+```cpp
+using namespace pypto::ir;
+StructuralComparisonOptions options{StructuralComparisonMode::Strict, false};
+bool same = structural_equal(lhs, rhs, options);
+uint64_t fingerprint = structural_hash(lhs, options);
+// For supported inputs, this throws ValueError exactly when same is false.
+assert_structural_equal(lhs, rhs, options);
+```
+
+| Property | Strict behavior |
+| -------- | --------------- |
+| Source spans, comments, function and bound-variable names | Ignored through `IgnoreField` |
+| Definitions and uses | Alpha-renamed consistently; alias patterns are preserved |
+| Free variables | Identity preserved unless `enable_auto_mapping=True` |
+| Scalar dtypes | Exact, including `INDEX` versus `INT64` |
+| Floating values | Exact stored bits, including signed zero and NaN payload/sign |
+| Operators | Kind and name, independent of pointer identity |
+| Attributes | Unique keys sorted before traversal; value types and vector order retained |
+| Types and views | Reflected fields, including layout, shape, valid shape and nullable offsets |
+| Function metadata | Directions, return types, attrs, function kind and runtime-binding flag |
+| Call and Submit | Distinct kinds; all reflected scheduling fields participate |
+
+A Function reserves every parameter before examining its signature, so a tensor shape
+may reference a later scalar parameter. Symbols in physical parameter shapes and bare
+parameter `valid_shape` slots are additional bindings. Compound `valid_shape` expressions
+must refer to these bindings or scalar parameters. Return types, bodies, and attributes
+share the same function binding context. Program functions have independent contexts;
+program map keys and callee names remain significant. An IterArg initializer is an outer
+reference, not an additional definition introduced by the IterArg's `DefField`.
+
+Strict comparison assumes well-formed SSA and does not replace scope, closure, effect,
+or call-graph verification. An optimization must check those preconditions separately.
+In particular, an equal fingerprint does not authorize merging effectful functions.
+
+### Unsupported Inputs
+
+All three Strict operations raise `ir.StructuralComparisonUnsupported` (a `TypeError`)
+when the input cannot be represented safely, even when comparing an object to itself.
+This outcome is distinct from inequality. The exception exposes `reason` and `field_path`.
+
+Explicit storage is currently unsupported: `MemRef`, `WindowBuffer`, `MemRefType`,
+`PtrType`, `WindowBufferType`, `CommCtxType`, and attached storage anywhere in a type,
+body, signature, view, or attribute. The traversal also rejects unresolved/unknown types,
+unknown attribute payload types, duplicate attribute keys, repeated variable definitions,
+shared statement objects, cycles, and node/type nesting beyond 512 levels.
+A nullable view offset is supported and remains distinct from a zero-valued offset.
+
+```python
+try:
+    fingerprint = ir.structural_hash(candidate, mode=ir.StructuralComparisonMode.Strict)
+except ir.StructuralComparisonUnsupported as error:
+    reason, field_path = error.reason, error.field_path
+    # Skip this optimization candidate; do not turn unsupported into equality.
+```
+
+### Shared Projection and Complexity
+
+Strict equality, hashing, and assertion diagnostics use one reflection-based projection
+for Expr, Stmt, Function, Type, TensorView and TileView fields. A first traversal reserves
+bindings; a second traversal builds immutable records containing scalar values and child
+record IDs. Records are interned by exact ordered keys. Equality compares IDs in a shared
+arena, never hashes. Hashes combine child hashes rather than arena IDs, so separate calls
+agree. Assertions walk differing records to report a field path and exact scalar values.
+
+Memoization distinguishes definitions from uses and belongs to one function context.
+Pure expression DAG sharing does not affect equality and does not expand into a tree.
+For N distinct visited nodes plus their field/string data, projection uses O(N log N)
+time and O(N) space. Hashes are process-local fingerprints, not persistent cache keys.
+Default equality separately memoizes successful node pairs with the binding generation
+and comparison context, so its shared-node correctness fix also avoids tree expansion.
 
 ## Summary
 

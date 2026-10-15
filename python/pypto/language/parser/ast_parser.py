@@ -3589,8 +3589,8 @@ class ASTParser:
 
         Placed right after ``dump_vars`` and before ``task_id_var`` / ``slot_num``
         for the same reason :meth:`_merge_forward_sticky_dump` picks that slot:
-        ``structural_equal`` compares attrs positionally, so first parse and
-        print -> reparse must agree on the order.
+        keeping a canonical order makes first parse and print -> reparse stable.
+        Structural comparison treats attrs as an order-insensitive key map.
         """
         if not decls:
             return attrs
@@ -5647,8 +5647,8 @@ class ASTParser:
         synthesised dispatch receives as an arg. Entries the scope never consumes
         are dropped later by the outliner. ``dump_vars`` is kept before
         ``task_id_var`` so a print -> reparse (which rebuilds the canonical order
-        via :meth:`_parse_at_meta`) compares equal under structural_equal's
-        positional attr check.
+        via :meth:`_parse_at_meta`) preserves the printed attr order.
+        Structural comparison itself ignores the order of attr keys.
         """
         if scope_kind == ir.ScopeKind.Runtime:
             return attrs
@@ -5670,7 +5670,7 @@ class ASTParser:
         # Insert ``dump_vars`` before ``task_id_var`` AND before the trailing
         # ``slot_num`` so the canonical order (dump_vars ... task_id_var,
         # slot_num) matches what a print -> reparse rebuilds via _parse_at_meta +
-        # _append_split_slot_num_attr; structural_equal compares attrs positionally.
+        # _append_split_slot_num_attr; structural equality ignores attr key order.
         insert_at = next(
             (i for i, (k, _) in enumerate(new_attrs) if k in {"task_id_var", "slot_num"}),
             len(new_attrs),

@@ -841,6 +841,7 @@ class StructuralEqualImpl {
 
  private:
   bool Equal(const IRNodePtr& lhs, const IRNodePtr& rhs);
+  bool EqualUncached(const IRNodePtr& lhs, const IRNodePtr& rhs);
   bool EqualVar(const VarPtr& lhs, const VarPtr& rhs);
   bool EqualMemRef(const MemRefPtr& lhs, const MemRefPtr& rhs);
   bool EqualIterArg(const IterArgPtr& lhs, const IterArgPtr& rhs);
@@ -934,6 +935,9 @@ class StructuralEqualImpl {
   bool map_window_slots_ = false;
   std::unordered_map<VarPtr, VarPtr> lhs_to_rhs_var_map_;
   std::unordered_map<VarPtr, VarPtr> rhs_to_lhs_var_map_;
+  // A successful comparison can be reused only while the binding environment
+  // is unchanged. In particular, a formerly free shared Var may later bind.
+  std::map<std::tuple<const IRNode*, const IRNode*, bool, bool>, size_t> equal_memo_;
   std::vector<std::string> path_;  // Only used in assert mode
   std::vector<std::string> field_name_stack_;
   std::vector<std::string> node_type_stack_;
@@ -973,7 +977,22 @@ class StructuralEqualImpl {
 
 template <bool AssertMode>
 bool StructuralEqualImpl<AssertMode>::Equal(const IRNodePtr& lhs, const IRNodePtr& rhs) {
-  if (lhs.get() == rhs.get()) return true;
+  const auto key = std::make_tuple(lhs.get(), rhs.get(), enable_auto_mapping_, IsLoopVarFieldContext());
+  auto found = equal_memo_.find(key);
+  if (found != equal_memo_.end() && found->second == lhs_to_rhs_var_map_.size()) return true;
+  const bool result = EqualUncached(lhs, rhs);
+  if (result) equal_memo_[key] = lhs_to_rhs_var_map_.size();
+  return result;
+}
+
+template <bool AssertMode>
+bool StructuralEqualImpl<AssertMode>::EqualUncached(const IRNodePtr& lhs, const IRNodePtr& rhs) {
+  // Shared nodes still have to establish/check the variable bijection. Skipping
+  // a shared subtree can otherwise make x+x equal to x+y under auto-mapping.
+  if (!lhs && !rhs) return true;
+  // Scalar constants cannot contain bindings. Preserve Default's existing
+  // same-object NaN behavior without skipping variable-bearing subtrees.
+  if (lhs && lhs == rhs && (As<ConstInt>(lhs) || As<ConstFloat>(lhs) || As<ConstBool>(lhs))) return true;
 
   if (!lhs || !rhs) {
     if constexpr (AssertMode) ThrowMismatch("One node is null, the other is not", lhs, rhs);
@@ -1417,8 +1436,9 @@ bool StructuralEqualImpl<AssertMode>::EqualVar(const VarPtr& lhs, const VarPtr& 
     auto lhs_it = lhs_to_rhs_var_map_.find(lhs);
     auto rhs_it = rhs_to_lhs_var_map_.find(rhs);
     // Case 1: already mapped to the same variable
-    if (lhs_it != lhs_to_rhs_var_map_.end() && rhs_it != rhs_to_lhs_var_map_.end()) {
-      if (lhs_it->second != rhs || rhs_it->second != lhs) {
+    if (lhs_it != lhs_to_rhs_var_map_.end() || rhs_it != rhs_to_lhs_var_map_.end()) {
+      if (lhs_it == lhs_to_rhs_var_map_.end() || rhs_it == rhs_to_lhs_var_map_.end() ||
+          lhs_it->second != rhs || rhs_it->second != lhs) {
         if constexpr (AssertMode) {
           ThrowMismatch("Variable mapping inconsistent (without auto-mapping)",
                         std::static_pointer_cast<const IRNode>(lhs),

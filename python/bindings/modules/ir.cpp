@@ -1531,54 +1531,64 @@ void BindIR(nb::module_& m) {
 
 #undef BIND_UNARY_EXPR
 
-  // Bind structural hash and equality functions
-  // structural_hash overloads share the same auto-mapping semantics:
-  //   enable_auto_mapping=True  -> variable names are ignored (x+1 and y+1 hash the same)
-  //   enable_auto_mapping=False -> variable identity is preserved deterministically
-  ir.def("structural_hash", static_cast<uint64_t (*)(const IRNodePtr&, bool)>(&structural_hash),
-         nb::arg("node"), nb::arg("enable_auto_mapping") = false,
-         "Compute deterministic structural hash of an IR node (ignores Span). "
-         "If enable_auto_mapping=True, variable names are ignored (e.g., x+1 and y+1 hash the same). "
-         "If enable_auto_mapping=False (default), different variable objects produce different hashes.");
-  ir.def("structural_hash", static_cast<uint64_t (*)(const TypePtr&, bool)>(&structural_hash),
-         nb::arg("type"), nb::arg("enable_auto_mapping") = false,
-         "Compute deterministic structural hash of a type. "
-         "enable_auto_mapping only affects variables embedded in the type (e.g., shape expressions).");
+  nb::enum_<StructuralComparisonMode>(ir, "StructuralComparisonMode")
+      .value("Default", StructuralComparisonMode::Default)
+      .value("Strict", StructuralComparisonMode::Strict);
+  static nb::exception<StructuralComparisonUnsupported> unsupported(ir, "StructuralComparisonUnsupported",
+                                                                    PyExc_TypeError);
+  nb::register_exception_translator([](const std::exception_ptr& error, void*) {
+    try {
+      if (error) std::rethrow_exception(error);
+    } catch (const StructuralComparisonUnsupported& e) {
+      nb::object instance = nb::borrow<nb::object>(unsupported.ptr())(e.what());
+      instance.attr("reason") = nb::str(e.reason().c_str());
+      instance.attr("field_path") = nb::str(e.field_path().c_str());
+      PyErr_SetObject(unsupported.ptr(), instance.ptr());
+    }
+  });
 
-  ir.def("structural_equal",
-         static_cast<bool (*)(const IRNodePtr&, const IRNodePtr&, bool)>(&structural_equal), nb::arg("lhs"),
-         nb::arg("rhs"), nb::arg("enable_auto_mapping") = false,
-         "Check if two IR nodes are structurally equal. "
-         "Ignores source location (Span). Returns True if IR nodes have identical structure. "
-         "If enable_auto_mapping=True, automatically map variables (e.g., x+1 equals y+1). "
-         "If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same "
-         "name).");
-  ir.def("structural_equal", static_cast<bool (*)(const TypePtr&, const TypePtr&, bool)>(&structural_equal),
-         nb::arg("lhs"), nb::arg("rhs"), nb::arg("enable_auto_mapping") = false,
-         "Check if two types are structurally equal. "
-         "Ignores source location (Span). Returns True if types have identical structure. "
-         "If enable_auto_mapping=True, automatically map variables (e.g., x+1 equals y+1). "
-         "If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same "
-         "name).");
-
-  ir.def("assert_structural_equal",
-         static_cast<void (*)(const IRNodePtr&, const IRNodePtr&, bool)>(&assert_structural_equal),
-         nb::arg("lhs"), nb::arg("rhs"), nb::arg("enable_auto_mapping") = false,
-         "Assert two IR nodes are structurally equal. "
-         "Raises ValueError with detailed error message showing the first mismatch location if they differ. "
-         "Ignores source location (Span). "
-         "If enable_auto_mapping=True, automatically map variables (e.g., x+1 equals y+1). "
-         "If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same "
-         "name).");
-  ir.def("assert_structural_equal",
-         static_cast<void (*)(const TypePtr&, const TypePtr&, bool)>(&assert_structural_equal),
-         nb::arg("lhs"), nb::arg("rhs"), nb::arg("enable_auto_mapping") = false,
-         "Assert two types are structurally equal. "
-         "Raises ValueError with detailed error message showing the first mismatch location if they differ. "
-         "Ignores source location (Span). "
-         "If enable_auto_mapping=True, automatically map variables (e.g., x+1 equals y+1). "
-         "If enable_auto_mapping=False (default), variable objects must be exactly the same (not just same "
-         "name).");
+  auto bind_comparison = [&](auto pointer) {
+    using Ptr = decltype(pointer);
+    ir.def(
+        "structural_hash",
+        [](const Ptr& node, bool auto_mapping, StructuralComparisonMode mode) {
+          return structural_hash(node, StructuralComparisonOptions{mode, auto_mapping});
+        },
+        nb::arg("node"), nb::arg("enable_auto_mapping") = false, nb::kw_only(),
+        nb::arg("mode") = StructuralComparisonMode::Default,
+        "Hash IR structure with the same mode and variable policy as structural_equal. "
+        "Definitions are alpha-renamed; free variables preserve identity unless auto-mapping is enabled. "
+        "Strict mode compares exact dtype and float bits and rejects unsupported storage.");
+    ir.def(
+        "structural_equal",
+        [](const Ptr& lhs, const Ptr& rhs, bool auto_mapping, StructuralComparisonMode mode) {
+          return structural_equal(lhs, rhs, StructuralComparisonOptions{mode, auto_mapping});
+        },
+        nb::arg("lhs"), nb::arg("rhs"), nb::arg("enable_auto_mapping") = false, nb::kw_only(),
+        nb::arg("mode") = StructuralComparisonMode::Default,
+        "Compare IR structure, ignoring source locations and bound names. "
+        "Free variables preserve identity unless auto-mapping is enabled. "
+        "Strict mode compares exact dtype, float bits, operator kind and semantic fields.");
+    ir.def(
+        "assert_structural_equal",
+        [](const Ptr& lhs, const Ptr& rhs, bool auto_mapping, StructuralComparisonMode mode) {
+          assert_structural_equal(lhs, rhs, StructuralComparisonOptions{mode, auto_mapping});
+        },
+        nb::arg("lhs"), nb::arg("rhs"), nb::arg("enable_auto_mapping") = false, nb::kw_only(),
+        nb::arg("mode") = StructuralComparisonMode::Default,
+        "Assert structural equality under the same policy as structural_equal. "
+        "Raises ValueError with a mismatch path, or StructuralComparisonUnsupported in strict mode.");
+  };
+  bind_comparison(IRNodePtr{});
+  bind_comparison(TypePtr{});
+  // Preserve the original Type overload's keyword spelling as well as node=.
+  ir.def(
+      "structural_hash",
+      [](const TypePtr& type, bool auto_mapping, StructuralComparisonMode mode) {
+        return structural_hash(type, StructuralComparisonOptions{mode, auto_mapping});
+      },
+      nb::arg("type"), nb::arg("enable_auto_mapping") = false, nb::kw_only(),
+      nb::arg("mode") = StructuralComparisonMode::Default);
 
   // Serialization functions
   ir.def(

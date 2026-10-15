@@ -2,16 +2,17 @@
 
 ## 概述
 
-PyPTO 提供两个工具函数，用于按结构而非指针标识比较 IR 节点：
+PyPTO 提供三个工具函数，用于按结构而非指针标识比较 IR 节点：
 
 ```python
-structural_equal(lhs, rhs, enable_auto_mapping=False) -> bool
-structural_hash(node, enable_auto_mapping=False) -> int
+structural_equal(lhs, rhs, enable_auto_mapping=False, *, mode=StructuralComparisonMode.Default) -> bool
+structural_hash(node, enable_auto_mapping=False, *, mode=StructuralComparisonMode.Default) -> int
+assert_structural_equal(lhs, rhs, enable_auto_mapping=False, *, mode=StructuralComparisonMode.Default) -> None
 ```
 
 **使用场景：** CSE、IR 优化、模式匹配、测试
 
-**核心特性：** 两个函数都忽略 `Span`（源位置），仅关注逻辑结构。
+**核心特性：** 三个函数都忽略 `Span`（源位置），仅关注逻辑结构。
 
 ### 浮点常量
 
@@ -46,11 +47,12 @@ ir.assert_structural_equal(x1, x2, enable_auto_mapping=True)  # True
 
 ## 比较流程
 
-`structural_equal` 函数遵循以下步骤：
+在 `Default` 模式下，`structural_equal` 函数遵循以下步骤：
 
 1. **快速路径检查**
-   - 引用相等性：如果是同一指针，返回 `true`
-   - 空值检查：如果任一为空，返回 `false`
+   - 空值检查：两个空节点相等，只有一个为空时不相等
+   - 共享节点及其子树仍会建立并校验变量绑定
+   - 仅标量常量保留同指针快速路径
    - 类型检查：比较 `TypeName()` -- 必须完全匹配
 
 2. **类型分发**
@@ -190,7 +192,7 @@ assert ir.structural_hash(c1) == ir.structural_hash(c2)
 
 ### 哈希一致性保证
 
-**规则：** 如果 `structural_equal(a, b, mode)` 为 `True`，则 `structural_hash(a, mode) == structural_hash(b, mode)`
+**规则：** 对受支持输入，使用相同的 `enable_auto_mapping` 和 `mode` 选项时，相等必然具有相同哈希；哈希相同并不代表相等。
 
 ### 与容器配合使用
 
@@ -222,7 +224,13 @@ class StructuralEqual {
 
   bool EqualVar(const VarPtr& lhs, const VarPtr& rhs) {
     if (!enable_auto_mapping_) {
-      return lhs.get() == rhs.get();  // Strict pointer equality
+      auto l = lhs_to_rhs_var_map_.find(lhs);
+      auto r = rhs_to_lhs_var_map_.find(rhs);
+      if (l != lhs_to_rhs_var_map_.end() || r != rhs_to_lhs_var_map_.end()) {
+        return l != lhs_to_rhs_var_map_.end() && r != rhs_to_lhs_var_map_.end()
+            && l->second == rhs && r->second == lhs;
+      }
+      return lhs.get() == rhs.get();  // Unbound free-variable identity
     }
 
     // Check type equality first
@@ -250,7 +258,7 @@ class StructuralEqual {
 
 **关键要点：**
 
-- 无自动映射时：严格的标识比较（`structural_equal` 使用指针相等性，`structural_hash` 使用唯一 ID）
+- 无自动映射时：定义的引用遵循绑定映射，自由变量保留标识
 - 有自动映射时：建立并强制执行一致映射
 - 映射前先检查类型相等性
 - 双向映射防止不一致的映射
@@ -283,9 +291,9 @@ bool EqualWithFields(const NodePtr& lhs_op, const NodePtr& rhs_op) {
 }
 ```
 
-### Type 的比较是手写的，而非基于反射
+### Default 模式的 Type 比较使用显式分发
 
-`Expr` 和 `Stmt` 走上面的反射访问器，**`Type` 不走**。四条彼此独立的 if/else
+在 `Default` 模式下，`Expr` 和 `Stmt` 使用上述反射访问器，`Type` 使用显式分发。四条彼此独立的 if/else
 分支链各自重新描述了"这个 Type 有哪些字段"，而它们之间没有任何关联：
 
 | 分支链 (ladder) | 位置 |
@@ -295,7 +303,7 @@ bool EqualWithFields(const NodePtr& lhs_op, const NodePtr& rhs_op) {
 | `SerializeType` | `src/ir/serialization/serializer.cpp` |
 | `DeserializeType` | `src/ir/serialization/deserializer.cpp` |
 
-**新增一个 Type 意味着要同时修改这四处。** 只加到其中三处的 Type 能通过编译、
+**新增 Type 时需要同时更新这四处和 Strict 投影的类型分发。** 只加到其中三处的 Type 能通过编译、
 能通过序列化往返、比较行为也正确 —— 直到用户第一次写 `hash(t)` 或把该 Type 放进
 `set`，才会撞上 `HashType` 末尾的 `INTERNAL_CHECK(false)`。这会破坏上文
 "相等的节点哈希值也相等"的保证：`structural_equal` 接受的输入，
@@ -321,6 +329,85 @@ bool EqualWithFields(const NodePtr& lhs_op, const NodePtr& rhs_op) {
 `tests/ut/ir/transforms/test_hash.py::TestHashTypeLadderParity` 会遍历每一个
 可由 Python 构造的 Type，当某个 Type 在 `HashType` 中缺失时测试失败。每新增一个
 Type，都要在那里补上对应的工厂函数。
+
+## 用于优化候选项的严格比较
+
+`StructuralComparisonMode.Strict` 比较受支持 IR 的精确结构，可用于函数去重等优化的候选检查。
+默认模式和 `Type.__eq__` / `Type.__hash__` 保留兼容行为。Python 继续支持原有位置参数
+`enable_auto_mapping`，新增的 `mode` 只能按关键字传入。Type 哈希重载也保留 `type=` 关键字。
+
+```python
+from pypto import DataType, ir
+
+strict = ir.StructuralComparisonMode.Strict
+span = ir.Span.unknown()
+a = ir.ConstFloat(0.0, DataType.FP32, span)
+b = ir.ConstFloat(-0.0, DataType.FP32, span)
+assert ir.structural_equal(a, b)  # Default numerical comparison
+assert not ir.structural_equal(a, b, mode=strict)  # Exact stored bits
+```
+
+```cpp
+using namespace pypto::ir;
+StructuralComparisonOptions options{StructuralComparisonMode::Strict, false};
+bool same = structural_equal(lhs, rhs, options);
+uint64_t fingerprint = structural_hash(lhs, options);
+// For supported inputs, this throws ValueError exactly when same is false.
+assert_structural_equal(lhs, rhs, options);
+```
+
+| 属性 | Strict 行为 |
+| ---- | ----------- |
+| 源码位置、注释、函数名及绑定变量名 | 通过 `IgnoreField` 忽略 |
+| 定义与引用 | 一致地进行 α 重命名（alpha-renaming），保留别名关系 |
+| 自由变量 | 默认保留标识，仅在 `enable_auto_mapping=True` 时映射 |
+| 标量数据类型 | 精确区分，包括 `INDEX` 与 `INT64` |
+| 浮点值 | 比较存储位，包括正负零及 NaN 载荷、符号 |
+| 算子 | 比较种类和名称，不依赖指针 |
+| 属性 | 唯一键排序后遍历，保留值类型和向量顺序 |
+| 类型与视图 | 反射字段，包括布局、形状、有效形状和可空偏移 |
+| 函数元数据 | 参数方向、返回类型、属性、函数种类和运行时绑定标志 |
+| Call 与 Submit | 区分节点种类，比较所有反射调度字段 |
+
+Function 在检查签名之前预先绑定所有参数，因此张量形状可以引用后面的标量参数。
+参数物理形状中的符号、参数 `valid_shape` 中的裸符号也作为绑定。
+复合 `valid_shape` 表达式必须引用这些绑定或标量参数。返回类型、函数体和属性共享函数绑定上下文。
+Program 中各函数拥有独立上下文，程序映射键和被调用函数名仍参与比较。
+IterArg 初值是外部引用，不会因 IterArg 所在的 `DefField` 而成为额外定义。
+
+严格比较假设输入为合法 SSA，不能替代作用域、闭包、副作用或调用图校验。
+优化调用方必须单独检查这些前置条件；指纹相同本身不能证明可以合并有副作用的函数。
+
+### 不支持的输入
+
+三个 Strict 操作都会在输入无法安全表示时抛出 `ir.StructuralComparisonUnsupported`
+（`TypeError` 的子类），即使比较对象与自身也是如此。这与不相等不同。
+异常提供 `reason` 和 `field_path`。
+
+目前不支持显式存储：`MemRef`、`WindowBuffer`、`MemRefType`、`PtrType`、
+`WindowBufferType`、`CommCtxType`，以及类型、函数体、签名、视图或属性中的附加存储。
+遍历还拒绝未解析/未知类型、未知属性载荷类型、重复属性键、重复变量定义、共享语句对象、环，
+以及超过 512 层的节点/类型嵌套。可空视图偏移受支持，且与值为零的偏移不同。
+
+```python
+try:
+    fingerprint = ir.structural_hash(candidate, mode=ir.StructuralComparisonMode.Strict)
+except ir.StructuralComparisonUnsupported as error:
+    reason, field_path = error.reason, error.field_path
+    # Skip this optimization candidate; do not turn unsupported into equality.
+```
+
+### 共享投影与复杂度
+
+Strict 的相等、哈希和断言诊断共享一套基于反射的投影（projection），覆盖 Expr、Stmt、
+Function、Type、TensorView 和 TileView。第一次遍历预留绑定，第二次遍历建立包含标量值和
+子记录 ID 的不可变记录，以精确有序键进行驻留。相等性比较共享存储中的记录 ID，不比较哈希。
+哈希组合子记录的哈希而非 ID，因此独立调用仍然一致。断言沿不同记录输出字段路径和精确标量值。
+
+记忆化区分定义和引用，且仅属于单个函数上下文。纯表达式 DAG 的共享方式不影响相等性，
+也不会展开成树。N 表示不同的被访问节点及其字段/字符串数据总量时，投影时间为 O(N log N)，
+空间为 O(N)。哈希是进程内指纹，不用于持久缓存键。
+Default 相等比较另外使用绑定代数和比较上下文缓存成功的节点对，修复共享节点正确性的同时避免树展开。
 
 ## 总结
 
