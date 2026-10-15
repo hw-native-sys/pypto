@@ -53,8 +53,10 @@ from pypto.runtime.distributed_runner import (
     _collect_l3_swimlane,
     _construct_worker,
     _make_call_config,
+    _register_callables,
     _reset_dfx_dispatch_state,
     _submit_chip,
+    add_chip_tensor_arg,
 )
 from pypto.runtime.runner import RunConfig
 
@@ -2202,6 +2204,44 @@ class TestAssembleChipCallables:
         _, _, enable_sdma = _assemble_chip_callables(compiled)
 
         assert enable_sdma is True
+
+    @pytest.mark.parametrize("artifact_cached", [False, True])
+    def test_host_transfer_contract_survives_registration(
+        self, tmp_path, stub_device_runner, monkeypatch, artifact_cached
+    ):
+        compiled = self._build(tmp_path, ["chip_a", "chip_b"])
+        chips = {
+            "chip_a": (object(), "host_build_graph", {"host_tensor_indices": [1]}),
+            "chip_b": (object(), "host_build_graph", {}),
+        }
+        if artifact_cached:
+            compiled._artifact_runtime = SimpleNamespace(load=lambda: chips)
+        else:
+            stub_device_runner._compile_and_assemble.side_effect = list(chips.values())
+        callables, _, _ = _assemble_chip_callables(compiled)
+        worker = MagicMock()
+        _, registered = _register_callables(worker, {}, callables)
+        buffer_module = ModuleType("simpler.buffer")
+        none_transfer = object()
+        setattr(buffer_module, "TensorTransfer", SimpleNamespace(NONE=none_transfer))
+        monkeypatch.setitem(sys.modules, "simpler.buffer", buffer_module)
+        tensor = torch.zeros(2)
+        wire = object()
+        args = MagicMock()
+        with patch.object(
+            importlib.import_module("pypto.runtime.tensor_arg"), "make_tensor_arg", return_value=wire
+        ):
+            add_chip_tensor_arg(args, worker, tensor, "INOUT", registered, "chip_a", 1)
+            args.add_tensor.assert_called_once_with(wire, "INOUT", transfer=none_transfer)
+            args.reset_mock()
+            add_chip_tensor_arg(args, worker, tensor, "INPUT", registered, "chip_a", 0)
+            args.add_tensor.assert_called_once_with(wire, "INPUT")
+            args.reset_mock()
+            add_chip_tensor_arg(args, worker, tensor, "INOUT", registered, "chip_b", 1)
+            args.add_tensor.assert_called_once_with(wire, "INOUT")
+            resident = DeviceTensor(0xABCD, (2,), torch.float32)
+            with pytest.raises(ValueError, match="host control tensor slot 1 requires a CPU tensor"):
+                add_chip_tensor_arg(args, worker, resident, "INOUT", registered, "chip_a", 1)
 
     def test_raises_on_inconsistent_runtime(self, tmp_path, stub_device_runner):
         compiled = self._build(tmp_path, ["chip_a", "chip_b"])

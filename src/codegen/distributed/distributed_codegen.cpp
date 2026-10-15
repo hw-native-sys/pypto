@@ -263,7 +263,7 @@ void DistributedCodegen::EmitImports() {
   // ``_submit_chip`` resolves a comm-less dispatch's chip and namespaces the
   // per-dispatch DFX ``output_prefix`` (``<base>/rank{worker}/d{k}``); the
   // namespacing half is a no-op when DFX is off.
-  emitter_.EmitLine("from pypto.runtime.distributed_runner import _submit_chip");
+  emitter_.EmitLine("from pypto.runtime.distributed_runner import add_chip_tensor_arg, _submit_chip");
 }
 
 void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
@@ -1125,6 +1125,7 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
   // would be rejected at run time. Order within the scalar list is preserved,
   // so the layout still matches the callee parameter list.
   std::vector<std::string> scalar_lines;
+  size_t tensor_index = 0;
 
   for (size_t i = 0; i < call->args_.size(); ++i) {
     if (ir::IsA<ir::CommCtxType>(call->args_[i]->GetType())) {
@@ -1142,6 +1143,7 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
     // ObjectKind match, so plain TensorType falls through to the worker-aware
     // make_tensor_arg path.
     if (auto dist_type = ir::As<ir::DistributedTensorType>(call->args_[i]->GetType())) {
+      ++tensor_index;
       INTERNAL_CHECK_SPAN(!rank_expr.empty(), call->span_)
           << "Call passing DistributedTensor args must carry device= attr "
              "(N3 parser writes attrs[\"device\"] on chip-orch dispatch sites)";
@@ -1173,8 +1175,15 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
       if (i < callee->param_directions_.size()) {
         tag = ParamDirectionToTensorArgType(callee->param_directions_[i]);
       }
-      emitter_.EmitLine(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + arg_str + "\"]), " +
-                        tag + ")");
+      if (is_sub) {
+        emitter_.EmitLine(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + arg_str +
+                          "\"]), " + tag + ")");
+      } else {
+        emitter_.EmitLine("add_chip_tensor_arg(" + ta_var + ", orch._worker, tensors[\"" + arg_str + "\"], " +
+                          tag + ", callables, \"" + callee->name_ + "\", " + std::to_string(tensor_index) +
+                          ")");
+      }
+      ++tensor_index;
       continue;
     }
 

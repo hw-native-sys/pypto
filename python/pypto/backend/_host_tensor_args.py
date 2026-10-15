@@ -22,6 +22,8 @@ class _HostAccess(ir.IRVisitor):
         self.host: set[ir.Var] = set()
         self.device: set[ir.Var] = set()
         self.yields: list[list[ir.Var]] = []
+        self.predicate: ir.Expr | None = None
+        self.in_predicate = False
 
     def root(self, value: ir.Var) -> int:
         var = value.unique_id
@@ -62,7 +64,7 @@ class _HostAccess(ir.IRVisitor):
             arg = op.args[0]
             if not isinstance(arg, ir.Var):
                 raise ValueError("HBG host tensor access requires an external tensor argument")
-            self.host.add(arg)
+            (self.device if self.in_predicate else self.host).add(arg)
         elif isinstance(op.op, ir.GlobalVar):
             self.device.update(
                 arg for arg in op.args if isinstance(arg, ir.Var) and isinstance(arg.type, ir.TensorType)
@@ -72,10 +74,25 @@ class _HostAccess(ir.IRVisitor):
         self.record_call(op)
         super().visit_call(op)
 
+    def visit_submit(self, op: ir.Submit) -> None:
+        self.record_call(op)
+        previous = self.predicate
+        self.predicate = op.predicate
+        try:
+            super().visit_submit(op)
+        finally:
+            self.predicate = previous
+
     def visit_expr(self, expr: ir.Expr) -> None:
-        if isinstance(expr, ir.Submit):
-            self.record_call(expr)
-        super().visit_expr(expr)
+        # Keep the base visitor's traversal of args, launch settings and attrs.
+        # Only the predicate subtree is evaluated by the device scheduler.
+        previous = self.in_predicate
+        if self.predicate is not None and expr.same_as(self.predicate):
+            self.in_predicate = True
+        try:
+            super().visit_expr(expr)
+        finally:
+            self.in_predicate = previous
 
     def visit_if_stmt(self, op: ir.IfStmt) -> None:
         self.yields.append(op.return_vars)

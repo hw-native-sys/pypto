@@ -377,6 +377,41 @@ def _collect_program_swimlane(compiled: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
+class _ChipCallables(dict[str, Any]):
+    """Chip callables (or registered handles) with their tensor transfer contracts."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.host_tensor_indices: dict[str, frozenset[int]] = {}
+
+    def add(self, name: str, value: Any, config: dict[str, Any]) -> None:
+        self[name] = value
+        self.host_tensor_indices[name] = frozenset(config.get("host_tensor_indices", ()))
+
+
+def add_chip_tensor_arg(
+    args: Any,
+    worker: Any,
+    tensor: Any,
+    tag: Any,
+    callables: dict[str, Any],
+    name: str,
+    index: int,
+) -> None:
+    """Pack a chip argument using the callee's emitted host-control contract."""
+    from .tensor_arg import make_tensor_arg  # noqa: PLC0415
+
+    host_slots = callables.host_tensor_indices.get(name, ()) if isinstance(callables, _ChipCallables) else ()
+    if index in host_slots:
+        from simpler.buffer import TensorTransfer  # noqa: PLC0415
+
+        if not isinstance(tensor, torch.Tensor) or tensor.device.type != "cpu":
+            raise ValueError(f"Chip {name!r} host control tensor slot {index} requires a CPU tensor")
+        args.add_tensor(make_tensor_arg(worker, tensor), tag, transfer=TensorTransfer.NONE)
+    else:
+        args.add_tensor(make_tensor_arg(worker, tensor), tag)
+
+
 def _assemble_chip_callables(
     compiled: DistributedCompiledProgram,
 ) -> tuple[dict[str, Any], str, bool]:
@@ -391,12 +426,15 @@ def _assemble_chip_callables(
     artifact_runtime = vars(compiled).get("_artifact_runtime")
     if artifact_runtime is not None:
         chips = artifact_runtime.load()
+        callables = _ChipCallables()
+        for name, (chip_callable, _, config) in chips.items():
+            callables.add(name, chip_callable, config)
         return (
-            {name: value[0] for name, value in chips.items()},
+            callables,
             next(iter(chips.values()))[1],
             any(bool(value[2].get("enable_sdma", False)) for value in chips.values()),
         )
-    chip_callables: dict[str, Any] = {}
+    chip_callables = _ChipCallables()
     runtime_name: str | None = None
     enable_sdma = False
     next_levels_dir = compiled.output_dir / "next_levels"
@@ -412,7 +450,7 @@ def _assemble_chip_callables(
             chip_callable, chip_runtime, chip_runtime_config = _compile_and_assemble(
                 chip_dir, compiled.platform
             )
-            chip_callables[chip_dir.name] = chip_callable
+            chip_callables.add(chip_dir.name, chip_callable, chip_runtime_config)
             enable_sdma = enable_sdma or bool(chip_runtime_config.get("enable_sdma", False))
             if runtime_name is None:
                 runtime_name = chip_runtime
@@ -605,7 +643,11 @@ def _register_callables(
     # ``Any`` here and threaded straight back into ``submit_sub`` /
     # ``submit_next_level``, which accept the handle.
     sub_ids: dict[str, Any] = {name: w.register(fn) for name, fn in sub_worker_fns.items()}
-    chip_cids: dict[str, Any] = {name: w.register(cc) for name, cc in chip_callables.items()}
+    chip_cids = _ChipCallables()
+    for name, cc in chip_callables.items():
+        chip_cids[name] = w.register(cc)
+    if isinstance(chip_callables, _ChipCallables):
+        chip_cids.host_tensor_indices = chip_callables.host_tensor_indices.copy()
     return sub_ids, chip_cids
 
 

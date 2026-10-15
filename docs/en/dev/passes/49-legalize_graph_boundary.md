@@ -3,12 +3,13 @@
 Makes every `FunctionType::Graph` function legal for the `host_build_graph`
 runtime to record and replay: hoists the boundary scalars a Graph body derives,
 the boundary views it takes and the intermediates it allocates out to its call
-sites, and rejects the boundaries the runtime would decline to cache.
+sites, and rejects unsupported boundaries before runtime submission.
 
 ## Overview
 
 The `host_build_graph` runtime records a Graph function's task topology on its
-first call and replays that recording afterwards. Replay patches only two
+first call for a Graph key and replays that recording afterwards. Construction
+Config values contribute to that key. Replay patches only two
 things: the addresses of the boundary tensors, and the values of the boundary
 scalars. Everything else — node count, shapes, dependency edges, block counts —
 is frozen into the recorded Definition.
@@ -20,22 +21,20 @@ That makes four classes of problem possible:
 | A boundary scalar is *derived* inside the region | Explicitly extracting a value loses its parameter origin and freezes it into the recording; implicit conversion is rejected | **Step A** — hoists the computation to the call site, or leaves it alone when the frozen value is provably the right one |
 | A view of a boundary tensor is taken *inside* the region | Freezes the first call's offset and patches only the address, so a later call reads call one's window | **Step B** — hoists the view to the call site, or accepts it when its window is replay-invariant |
 | The region allocates its own intermediates | Records them correctly, on a heap it never reclaims mid-run, so the live set grows with the number of submissions | **Step C** — hoists the allocation to the call site as an `InOut` boundary tensor |
-| The boundary itself is not cacheable | Declines to cache and silently runs the region as ordinary tasks | **Step D** — rejects it at compile time |
+| The boundary itself is not cacheable | Reports an invalid Graph submission | **Step D** — rejects it at compile time |
 
 The first two can produce wrong answers when values lose their replay linkage.
 The third produces correct answers that run out of memory, or merely slower, as
-the layer count grows. The last produces
-correct answers with none of the intended speedup — invisible to any numerical
-test, which is why the checks live here rather than being left to a runtime log
-line.
+the layer count grows. The last is rejected at runtime; compile-time checks
+report statically decidable problems against the source program earlier.
 
 ## Step A — derived boundary scalars
 
 A boundary scalar carries its **parameter origin** in the runtime's
 `InheritableScalar` wrapper. `args.scalar(k)` returns that wrapper; forwarding
 it through `add_scalar` preserves the parameter index that replay refreshes.
-Explicitly extracting a value with `to<T>()` loses that origin; implicit integer
-conversion and arithmetic on the wrapper are rejected. Step A moves derived
+Construction values read from Config do not carry that origin; the wrapper
+provides no value-read accessor or implicit integer conversion. Step A moves derived
 computations outside the Graph body:
 
 ```python
@@ -74,7 +73,7 @@ would compile, but lose the parameter origin:
 
 ```cpp
 const auto batch = args.scalar(0);  // preserves the parameter origin
-int64_t n = args.scalar<int64_t>(0);    // explicitly reads the recording-time value
+int64_t n = from_u64<int64_t>(config.scalar_0);  // reads a construction value
 g0_params_t0.add_scalar(n);         // the task no longer inherits the parameter
 ```
 
@@ -109,7 +108,7 @@ value:
 | ---- | ------------------------ |
 | a literal | trivially |
 | the induction variable of a **constant-trip** loop | recording walks the loop once and bakes each iteration's literal into that iteration's own node; constant bounds mean every later call walks the identical sequence |
-| `tensor.dim` of a boundary tensor parameter, with a literal axis | `graph_boundary_matches` compares each boundary tensor's `ndims`, `shapes` and `strides` against the recorded `GraphBoundarySignature` and declines the cached graph on any mismatch, so a boundary shape cannot change within one recording |
+| `tensor.dim` of a boundary tensor parameter, with a literal axis | `graph_boundary_matches` compares each boundary tensor's `ndims`, `shapes` and `strides` against the recorded `GraphBoundarySignature` and rejects a submission on any mismatch, so a boundary shape cannot change within one recording |
 
 **Scalar parameters are deliberately excluded from the invariant set.** The
 runtime patches a boundary scalar's slot on every call — which is exactly what
@@ -122,7 +121,7 @@ the whole shape.
 
 `DataType::TASK_ID` operands are skipped outright rather than classified. A task
 id is never a boundary scalar — the recording captures dependency structure
-itself, and `graph_boundary_matches` refuses any call carrying an explicit
+itself, and the runtime refuses any Graph submission carrying an explicit
 dependency (`explicit_dep_count() != 0`), so an id produced outside the region
 can never reach a replay. This matters because the scalar check runs over
 *every* call's arguments, so `seeds[0] = seed` — an `array.update_element` into a
@@ -307,14 +306,17 @@ the map is all-nullopt and the hoists silently do nothing.
 ## Step D — boundary legality
 
 Scalar-only control flow that submits no tasks may still read boundary values,
-for example `for i in pl.range(n)`. Codegen emits explicit typed reads such as
-`args.scalar<int64_t>(slot)` in value contexts, including loop bounds and scalar
-carry initializers. The call site declares every slot read this way with
-`add_static_scalar`: its value participates in the runtime's replay compatibility
-check. A changed static value falls back to ordinary execution; the existing
-recording is not replaced for that Graph key. Parameters used only for task
-argument forwarding keep the `InheritableScalar` wrapper and remain dynamic,
-including floating-point parameters, so replay retains their parameter origin.
+for example `for i in pl.range(n)`. Codegen places each value read during graph
+construction in a generated `simpler::hbg::ConfigBase` subclass. Its hash and
+equality compare the same encoded scalar bits. The runtime includes this Config
+in the Graph key, so a changed construction value records a distinct definition.
+The Config also includes tensor shapes, strides, storage sizes, alias partitions,
+and relative offsets within each partition. A changed boundary layout therefore
+selects a compatible definition; relocated buffers and uniformly shifted views
+retain the same key. Absolute device addresses are not part of this key.
+The body decodes these fields with `from_u64<T>`; boundary scalar handles have
+no value-read accessor. Task argument forwarding retains `InheritableScalar`
+handles, including floating-point parameters, so replay preserves their origin.
 The orchestration entry reads its scalar inputs with `orch_args.scalar<T>(i)`,
 which decodes values directly in both supported runtimes.
 
@@ -335,7 +337,7 @@ which decodes values directly in both supported runtimes.
 | No *call-varying* scalar computed inline at a task argument | Step A hoists *named* derived values; an expression written inline at the call has no name to hoist and no boundary slot, so it would be frozen at the first call's value. A replay-invariant expression is accepted — the freeze is harmless |
 | No Graph calls a Graph | The runtime cannot record a graph from inside one it is already recording |
 | Every parameter supplied at the call site | A `Submit` may normally pass a prefix and let the runtime allocate the tail `Out` params; a Graph has no such tail |
-| No explicit dependencies on the launch | An explicit dependency edge makes the launch uncacheable, so the region would silently run as ordinary tasks |
+| No explicit dependencies on the launch | The runtime rejects explicit dependencies across a Graph boundary |
 | No dispatch predicate on the launch | A predicate on a graph launch is neither honoured nor rejected — the runtime silently zeroes it, so the region would run unconditionally |
 
 ## Position in the pipeline
@@ -389,7 +391,8 @@ With `host_build_graph`, orchestration-level `tensor.read` and `tensor.write`
 operate on ready CPU tensor arguments. Generated argument metadata selects
 `HOST/NONE` transfers for those arguments; ordinary device tensors retain their
 normal upload behavior. This metadata is preserved by saved artifacts and worker
-reuse. Control tensors must stay alive until the call completes.
+reuse, including distributed chip dispatch. Scheduler predicate operands remain
+device tensors and use the normal device transfer path. Control tensors must stay alive until the call completes.
 
 A control tensor (including a view or loop-carried alias) cannot also be passed
 to a device kernel through the same argument. Pass host control data and device

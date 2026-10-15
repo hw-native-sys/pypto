@@ -2,12 +2,12 @@
 
 让每个 `FunctionType::Graph` 函数都能被 `host_build_graph` runtime 合法地录制与
 回放：把 Graph 函数体内派生出来的边界标量、取出的边界视图、以及自己分配的中间
-张量都外提到调用点，并拒绝那些 runtime 不会缓存的边界形态。
+张量都外提到调用点，并在 runtime 提交前拒绝不支持的边界形态。
 
 ## 概述
 
-`host_build_graph` runtime 在第一次调用时录制 Graph 函数的任务拓扑，之后回放这份
-录制。回放只 patch 两样东西：边界张量的地址，以及边界标量的值。其余一切 —— 节点
+`host_build_graph` runtime 在同一 Graph key 的第一次调用时录制任务拓扑，之后回放这份
+录制。构图 Config 的值参与 Graph key。回放只 patch 两样东西：边界张量的地址，以及边界标量的值。其余一切 —— 节点
 数、形状、依赖边、block 数 —— 都被烙进录制下来的 Definition。
 
 由此产生四类问题：
@@ -17,18 +17,17 @@
 | 边界标量在区域内被**派生**出来 | 显式提取数值会丢失形参来源并冻结进录制；隐式转换会被拒绝 | **Step A** —— 把计算外提到调用点；当冻结下来的值可证明就是正确值时，原地保留 |
 | 边界张量的视图在区域**内部**取出 | 冻结第一次调用的偏移，只 patch 地址，于是后续调用读到的是第一次调用的窗口 | **Step B** —— 把视图外提到调用点；当其窗口对回放不变时，原地保留 |
 | 区域自己分配中间张量 | 能正确录制，但分配在一块运行期间从不回收的堆上，于是活跃集随提交次数增长 | **Step C** —— 把分配外提到调用点，成为 `InOut` 边界张量 |
-| 边界本身不可缓存 | 拒绝缓存，静默地按普通任务执行该区域 | **Step D** —— 编译期拒绝 |
+| 边界本身不可缓存 | 报告非法 Graph 提交 | **Step D** —— 编译期拒绝 |
 
-前两类在数值丢失回放关联时可能产生错误结果。第三类结果正确，但随着层数增长会耗尽内存、或者只是变慢。最
-后一类结果正确但完全没有预期的加速 —— 任何数值测试都看不见，这正是这些检查放在
-这里、而不是交给一条 runtime 日志的原因。
+前两类在数值丢失回放关联时可能产生错误结果。第三类结果正确，但随着层数增长会耗尽内存或变慢。
+最后一类会被 runtime 拒绝；编译期检查提前针对源程序报告可静态判定的问题。
 
 ## Step A —— 派生的边界标量
 
 边界标量通过 runtime 的 `InheritableScalar` 包装对象携带**形参来源**。
 `args.scalar(k)` 返回该包装对象，通过 `add_scalar` 转发时保留回放需要刷新的形参
-索引。通过 `to<T>()` 显式提取数值会丢失这一来源；包装对象的隐式整数转换和
-算术运算会被拒绝。Step A 将派生计算移到 Graph 函数体之外：
+索引。读取 Config 得到的构图值不携带这一来源；包装对象不提供数值读取接口或
+隐式整数转换。Step A 将派生计算移到 Graph 函数体之外：
 
 ```python
 @pl.function(type=pl.FunctionType.Graph)
@@ -63,7 +62,7 @@ self.layer(cur, wq_view(i), i, i * 5120)     # 算术搬到了这里
 
 ```cpp
 const auto batch = args.scalar(0);  // preserves the parameter origin
-int64_t n = args.scalar<int64_t>(0);    // explicitly reads the recording-time value
+int64_t n = from_u64<int64_t>(config.scalar_0);  // reads a construction value
 g0_params_t0.add_scalar(n);         // the task no longer inherits the parameter
 ```
 
@@ -103,7 +102,7 @@ g0_params_t0.add_scalar(n);         // the task no longer inherits the parameter
 的，所以拒绝它等于把整类写法排除在外。
 
 `DataType::TASK_ID` 操作数直接跳过，不做分类。task id 从来就不是边界标量 —— 录制
-本身捕获的就是依赖结构，而 `graph_boundary_matches` 会拒绝任何携带显式依赖的调用
+本身捕获的就是依赖结构，而 runtime 会拒绝任何携带显式依赖的 Graph 提交
 （`explicit_dep_count() != 0`），所以区域外产生的 id 根本到不了回放。这一点之所以
 重要，是因为标量检查会扫描*每一个* Call 的实参：于是 `seeds[0] = seed` —— 一次写入
 `TASK_ID` 型 `pl.array` 的 `array.update_element` —— 看起来就像一个任务在消费边界
@@ -257,13 +256,14 @@ c_1` —— 返回的是重绑定而不是形参本身，所以 Graph 一直依�
 
 ## Step D —— 边界合法性
 
-不提交任务的纯标量控制流仍可以读取边界数值，例如 `for i in pl.range(n)`。
-代码生成在循环边界、标量循环携带值的初始值等数值上下文中，显式生成
-`args.scalar<int64_t>(slot)` 这样的按类型读取。调用点用 `add_static_scalar`
-声明所有以此方式读取的参数槽，使其数值参与 runtime 的回放兼容性检查。
-静态参数（static parameter）的数值改变后会回退到普通执行；同一 Graph key
-已有的录制不会被替换。仅用于任务参数转发的参数保留 `InheritableScalar`
-包装对象并保持动态（dynamic），浮点参数也一样，从而让回放保留形参来源。
+不提交任务的纯标量控制流仍可读取边界值，例如 `for i in pl.range(n)`。
+代码生成将构图时读取的值放入生成的 `simpler::hbg::ConfigBase` 子类，
+哈希和相等比较使用同一组编码后的标量位。runtime 将 Config 纳入 Graph key，
+因此构图值改变时会录制独立的图定义。Config 还包含张量形状、步长、存储大小、
+别名分区以及分区内的相对偏移。边界布局改变时会选择兼容的图定义；缓冲区重定位
+或同一分区的视图整体平移仍使用相同的 key，绝对设备地址不参与 key。函数体通过 `from_u64<T>` 解码字段；
+边界标量句柄本身不提供数值读取接口。任务参数转发仍保留 `InheritableScalar`
+句柄，包括浮点参数，使回放保留参数来源。
 编排入口使用 `orch_args.scalar<T>(i)` 读取标量输入；这一接口在两种受支持的
 runtime 中都能直接按类型解码数值。
 
@@ -284,7 +284,7 @@ runtime 中都能直接按类型解码数值。
 | 任务实参里不得内联计算**逐次变化**的标量 | Step A 只上提**具名**的派生值；写在调用处的内联表达式没有名字可提、也没有边界 slot，会被冻结在首次调用的值上。回放不变的表达式会被接受 —— 冻结它是无害的 |
 | Graph 不能调用 Graph | runtime 无法在正在录制的 graph 内部再录一个 graph |
 | 调用点必须传满全部形参 | `Submit` 通常允许只传前缀、由 runtime 分配尾部 `Out` 形参；Graph 没有这种尾部 |
-| launch 上不能带显式依赖 | 显式依赖边会让该次 launch 不可缓存，区域就会静默退化成普通任务 |
+| launch 上不能带显式依赖 | runtime 拒绝跨越 Graph 边界的显式依赖 |
 | launch 上不能带 dispatch predicate | graph launch 上的 predicate 既不被遵守也不被拒绝 —— runtime 静默清零它，于是区域会无条件执行 |
 
 ## 在流水线中的位置
@@ -335,3 +335,6 @@ CPU 张量参数。生成的参数元数据为这些参数选择 `HOST/NONE` 传
 请使用不同参数分别传递 host 控制数据和设备数据。Host 写入不会上传到设备存储。
 构图期间不能读取 runtime 分配的张量或本次图中设备任务产生的数据。
 为 host 控制参数传入 `DeviceTensor` 时，会在派发前报错。
+
+分布式芯片派发同样保留主机控制张量的传输元数据。调度器谓词（Scheduler Predicate）的
+操作数仍属于设备张量，使用普通设备传输路径，不作为主机读取处理。

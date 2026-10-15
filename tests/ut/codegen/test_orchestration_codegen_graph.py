@@ -575,10 +575,10 @@ def test_graph_scalar_value_reads_compile_and_preserve_task_forwarding(tmp_path)
     for slot, (name, cpp_type) in enumerate(
         (("start", "int64_t"), ("n", "int64_t"), ("step", "int64_t"), ("enabled", "bool"), ("scale", "float"))
     ):
-        assert f"args.scalar<{cpp_type}>({slot})" in body, body
-        assert f".add_static_scalar({name})" in _entry_body(orch), orch
+        assert f"from_u64<{cpp_type}>(_pypto_graph_config.scalar_{slot})" in body, body
+        assert f".scalar_{slot} = to_u64({name})" in _entry_body(orch), orch
     # Reading a value elsewhere must not discard its origin when forwarding it.
-    assert re.search(r"float \w+ = args\.scalar<float>\(4\);", body), body
+    assert re.search(r"float \w+ = from_u64<float>\(_pypto_graph_config.scalar_4\);", body), body
     assert ".add_scalar(n)" in body, body
     assert ".add_scalar(scale)" in body, body
 
@@ -614,15 +614,15 @@ class _MixedScalarUses:
 
 
 def test_graph_scalar_declarations_and_forwarding_execute_against_runtime(tmp_path):
-    """Exercise generated scalar packing with the real runtime's checked reads."""
+    """Exercise generated scalar packing with the real runtime's Config keys and inherited handles."""
     orch = _compile_orch(_MixedScalarUses)
     main_cpp = tmp_path / "main.cpp"
     main_cpp.write_text(orch)
     _assert_orchestration_compiles(main_cpp)
     body = _graph_body(orch)
-    assert "args.scalar<int64_t>(0)" in body
+    assert "from_u64<int64_t>(_pypto_graph_config.scalar_0)" in body
     assert ".add_scalar(scale)" in body
-    assert "args.scalar<float>(1)" not in body
+    assert "_pypto_graph_config.scalar_1" not in body
 
     boundary = re.search(r"GraphTaskArgs (\w+);(.*?)rt_submit_graph", _entry_body(orch), re.DOTALL)
     assert boundary is not None, orch
@@ -630,22 +630,43 @@ def test_graph_scalar_declarations_and_forwarding_execute_against_runtime(tmp_pa
         line for line in boundary[2].splitlines() if re.search(r"\.add_(?:static_)?scalar\(", line)
     )
     assert scalar_packing.count(";") == 2, scalar_packing
+    config_definition = re.search(
+        r"struct (\w+Config) : simpler::hbg::ConfigBase \{.*?\n\};", orch, re.DOTALL
+    )
+    assert config_definition is not None, orch
+    config_packing = "\n".join(line for line in boundary[2].splitlines() if "_config" in line)
+    config_preamble = orch[
+        orch.index("static std::vector<uint64_t> pypto_graph_boundary_layout") : orch.index(
+            "static void pypto_graph_"
+        )
+    ]
     source = tmp_path / "scalar_contract.cpp"
     source.write_text(
         f"""#include <cassert>
 #include "types.h"
+#include "host_build_graph/graph_config.h"
+#include "host_build_graph/graph_boundary_match.h"
+{config_preamble}
 
 int main() {{
+    uint64_t previous_hash = 0;
     for (int invocation = 0; invocation < 2; ++invocation) {{
         int64_t n = 3 + invocation;
         float scale = invocation == 0 ? 1.25f : -2.5f;
         GraphTaskArgs {boundary[1]};
         {scalar_packing}
-        assert(!{boundary[1]}.scalar_dynamic(0));
-        assert({boundary[1]}.scalar_dynamic(1));
+        {config_packing}
+        const auto config = {boundary[1]}_config;
+        assert(from_u64<int64_t>(config.scalar_0) == n);
+        assert(config == config);
+        assert(config.hash() != previous_hash);
+        previous_hash = config.hash();
+        auto changed = config;
+        changed.scalar_0 = to_u64(n + 1);
+        assert(!(config == changed));
+        assert(config.hash() != changed.hash());
         GraphTaskArgs args;
         args.gen_scalar_params_from_args({boundary[1]});
-        assert(args.scalar<int64_t>(0) == n);
         const auto forwarded_scale = args.scalar(1);
         CoreTaskArgs task;
         task.add_scalar(forwarded_scale);
@@ -654,6 +675,34 @@ int main() {{
         task.pack_scalars(bits);
         assert(from_u64<float>(bits[0]) == scale);
     }}
+    auto layout = [](uint64_t address, uint64_t start, uint64_t view_offset,
+                     uint32_t view_shape, bool alias) {{
+        simpler::hbg::Tensor whole{{}};
+        whole.buffer.addr = address;
+        whole.buffer.size = 256;
+        whole.ndims = 1;
+        whole.shapes[0] = 32;
+        whole.strides[0] = 1;
+        whole.start_offset = start;
+        simpler::hbg::Tensor view = whole;
+        view.buffer.addr = alias ? address : address + 4096;
+        view.start_offset = start + view_offset;
+        view.shapes[0] = view_shape;
+        GraphTaskArgs boundary;
+        boundary.add_input(whole);
+        boundary.add_input(view);
+        return pypto_graph_boundary_layout(boundary);
+    }};
+    {config_definition[1]} first, relocated, different_view, different_alias, different_shape;
+    first.boundary = layout(4096, 0, 32, 8, true);
+    relocated.boundary = layout(8192, 16, 32, 8, true);
+    different_view.boundary = layout(4096, 0, 64, 8, true);
+    different_alias.boundary = layout(4096, 0, 32, 8, false);
+    different_shape.boundary = layout(4096, 0, 32, 4, true);
+    assert(first == relocated && first.hash() == relocated.hash());
+    assert(!(first == different_view) && first.hash() != different_view.hash());
+    assert(!(first == different_alias) && first.hash() != different_alias.hash());
+    assert(!(first == different_shape) && first.hash() != different_shape.hash());
 }}
 """
     )

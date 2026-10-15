@@ -9,6 +9,9 @@
 
 """HBG control tensor transfer selection and rejection of mixed storage roles."""
 
+import sys
+from types import ModuleType, SimpleNamespace
+
 import pypto.language as pl
 import pytest
 from pypto.backend._host_tensor_args import host_tensor_indices
@@ -83,14 +86,66 @@ def test_host_access_through_slice_selects_source_parameter():
     assert host_tensor_indices(_main(SlicedControl)) == [0]
 
 
-def test_compile_emits_host_control_metadata(tmp_path):
+def test_compile_emits_host_control_metadata(tmp_path, monkeypatch):
     from pypto.ir.compile import compile as ir_compile  # noqa: PLC0415
     from pypto.ir.compiled_program import CompiledProgram  # noqa: PLC0415
     from pypto.runtime._artifact_sources import read_kernel_config  # noqa: PLC0415
 
+    # Configuration loading needs only signature enum names, not a native runtime.
+    task_interface = ModuleType("simpler.task_interface")
+    setattr(task_interface, "ArgDirection", SimpleNamespace(IN=0, OUT=1, INOUT=2, SCALAR=3))
+    monkeypatch.setitem(sys.modules, "simpler.task_interface", task_interface)
     with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
         compiled = ir_compile(HostControl, output_dir=str(tmp_path), platform="a2a3sim")
     config = read_kernel_config(tmp_path / "kernel_config.py")
     assert config.RUNTIME_CONFIG["host_tensor_indices"] == [1]
     assert isinstance(compiled, CompiledProgram)
     assert compiled._host_tensor_indices() == [1]
+
+
+@pl.program
+class PredicateControl:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, data: pl.Tensor[[8], pl.INT32]):
+        pass
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, data: pl.Tensor[[8], pl.INT32], gate: pl.Tensor[[8], pl.INT32]):
+        with pl.manual_scope():
+            _ = pl.spmd_submit(self.kernel, data, core_num=1, predicate=(gate[0] > 0))
+
+
+@pl.program
+class MixedPredicateControl:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, data: pl.Tensor[[8], pl.INT32]):
+        pass
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, data: pl.Tensor[[8], pl.INT32], gate: pl.Tensor[[8], pl.INT32]):
+        pl.tensor.read(gate, [0])
+        with pl.manual_scope():
+            _ = pl.spmd_submit(self.kernel, data, core_num=1, predicate=(gate[0] > 0))
+
+
+@pl.program
+class InternalPredicateControl:
+    @pl.function(type=pl.FunctionType.AIV)
+    def kernel(self, data: pl.Tensor[[8], pl.INT32]):
+        pass
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, data: pl.Tensor[[8], pl.INT32]):
+        gate = pl.create_tensor([8], dtype=pl.INT32)
+        with pl.manual_scope():
+            _ = pl.spmd_submit(self.kernel, data, core_num=1, predicate=(gate[0] > 0))
+
+
+@pytest.mark.parametrize("program", [PredicateControl, InternalPredicateControl])
+def test_scheduler_predicate_is_not_a_host_read(program):
+    assert host_tensor_indices(_main(program)) == []
+
+
+def test_predicate_and_host_read_of_same_storage_is_rejected():
+    with pytest.raises(ValueError, match="separate tensor arguments"):
+        host_tensor_indices(_main(MixedPredicateControl))

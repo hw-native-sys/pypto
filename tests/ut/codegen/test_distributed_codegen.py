@@ -503,8 +503,8 @@ class TestDistributedCodegen:
         assert code.count("torch.zeros(") == 2
         assert code.count(".share_memory_()") == 2
         # Plain host tensors use the worker-aware address-free wire helper.
-        assert 'make_tensor_arg(orch._worker, tensors["a' in code
-        assert 'make_tensor_arg(orch._worker, tensors["b' in code
+        assert re.search(r'add_chip_tensor_arg\([^,]+, orch\._worker, tensors\["a', code)
+        assert re.search(r'add_chip_tensor_arg\([^,]+, orch\._worker, tensors\["b', code)
 
     def test_host_orch_create_tensor_hoisted_to_alloc_intermediates(self):
         """HOST-orch tensor.create lifts to _alloc_intermediates(tensors).
@@ -752,3 +752,32 @@ class TestChipTaskCollection:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_chip_tensor_transfer_slots_ignore_scalar_parameters():
+    @pl.program
+    class Program:
+        @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+        def chip(
+            self,
+            data: pl.Tensor[[8], pl.INT32],
+            n: pl.Scalar[pl.INT32],
+            gate: pl.InOut[pl.Tensor[[2], pl.INT32]],
+        ):
+            value = pl.tensor.read(gate, [0])
+            pl.tensor.write(gate, [1], value + n)
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def main(
+            self,
+            data: pl.Tensor[[8], pl.INT32],
+            n: pl.Scalar[pl.INT32],
+            gate: pl.InOut[pl.Tensor[[2], pl.INT32]],
+        ):
+            self.chip(data, n, gate)
+
+    code = codegen.DistributedCodegen().generate(passes.convert_to_ssa()(Program))
+    assert re.search(r'add_chip_tensor_arg\([^\n]+TensorArgType.INPUT, callables, "chip", 0\)', code)
+    assert re.search(r'add_chip_tensor_arg\([^\n]+TensorArgType.INOUT, callables, "chip", 1\)', code)
+    assert code.count(".add_scalar(") == 1
+    compile(code, "host_orch.py", "exec")
