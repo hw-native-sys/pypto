@@ -202,13 +202,15 @@ ARG PYPTO_LIB_REF=main
 # repo's own rule is that the job count is stated rather than inferred.
 ARG DIST_BUILD_JOBS=2
 
+# Branch refs retain their upstream so the shipped updater can fast-forward.
+# Git detaches tags and commit IDs, preserving reproducible pinned builds.
 RUN set -eu; \
     git clone "$PYPTO_REPO" /workspace/pypto; \
-    git -C /workspace/pypto checkout --detach "$PYPTO_REF"; \
+    git -C /workspace/pypto checkout "$PYPTO_REF" --; \
     git config --global --add safe.directory /workspace/pypto; \
     git -C /workspace/pypto submodule update --init --recursive; \
     git clone "$PYPTO_LIB_REPO" /workspace/pypto-lib; \
-    git -C /workspace/pypto-lib checkout --detach "$PYPTO_LIB_REF"
+    git -C /workspace/pypto-lib checkout "$PYPTO_LIB_REF" --
 
 # Builds pypto, then simpler, and clones the pinned pto-isa into the source
 # tree's runtime/build/pto-isa.

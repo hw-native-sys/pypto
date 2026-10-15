@@ -50,7 +50,9 @@ sha="$(sed -n "s/^${sha_key}=//p" "$toolchain_env")"
 
 # Normalize the executable banner ("ptoas [version] [v]X.Y") before comparing
 # it with the v-prefixed pin; comparing raw strings reinstalls on every update.
-if ! $force && output="$("$PTOAS_ROOT/bin/ptoas" --version 2>/dev/null)" &&
+# The standalone installer also runs in older images without our activation.
+# Ignore inherited CANN/PyPTO import paths so both probes inspect this venv's wheel.
+if ! $force && output="$(PYTHONPATH= "$PTOAS_ROOT/bin/ptoas" --version 2>/dev/null)" &&
     [[ "$output" =~ ptoas[[:space:]]+(version[[:space:]]+)?v?([0-9]+(\.[0-9]+)+) ]] &&
     [ "${BASH_REMATCH[2]}" = "${version#v}" ]; then
     echo "PTOAS $version already installed at $PTOAS_ROOT"
@@ -73,4 +75,4 @@ if [ ! -x "$PTOAS_ROOT/bin/python" ]; then
     uv venv --python "$python" "$PTOAS_ROOT"
 fi
 uv pip install --python "$PTOAS_ROOT/bin/python" --force-reinstall "$download_dir/$wheel"
-"$PTOAS_ROOT/bin/ptoas" --version
+PYTHONPATH= "$PTOAS_ROOT/bin/ptoas" --version

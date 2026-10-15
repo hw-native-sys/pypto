@@ -378,7 +378,7 @@ bash "$PYPTO_SRC/.github/docker/pypto-update.sh" --no-pull --jobs 2
 | `--no-pull` | Keep source and submodules unchanged; align PTOAS and rebuild |
 | `--reinstall-deps` | Refresh Python dependencies using the shared setup script |
 | `--proxy http://host:port` | Set HTTP and HTTPS proxies for this invocation |
-| `--remote-submodules` | Explicitly track submodule remotes instead of pinned commits |
+| `--remote-submodules` | Track submodule remotes across repeated updates; commit drift is allowed, local edits are rejected |
 | `--jobs N` | Build job count capped by machine limits; otherwise use the repository resource loader |
 | `--skip-doctor` | Skip the closing checks when no device is exposed |
 
@@ -386,12 +386,16 @@ To fix only a stale PTOAS, without updating source or rebuilding:
 
 ```bash
 bash "$PYPTO_SRC/.github/docker/pypto-install-ptoas.sh"
+source "$PYPTO_SRC/.github/docker/pypto-activate.sh"
 "$PTOAS_ROOT/bin/ptoas" --version
 ```
 
 The installer reads the checkout's version and architecture-specific SHA256, verifies
 the release wheel before changing the installation, and installs into
 `${PTOAS_ROOT:-/opt/pypto/ptoas}`. It accepts `--force` to reinstall the same version.
+In an older image, source the checkout's activation helper in each new shell before
+using PTOAS; selecting its executable alone does not prevent CANN's Python package from
+shadowing the pinned wheel. The installer isolates its own version probes automatically.
 The environment must already contain uv and CPython 3.10, as the published image does.
 Run `pypto-setup.sh` from a complete checkout to provision a different CANN container;
 it installs the same helper sources and uses `build-constraints.txt` for build tools.
@@ -400,6 +404,11 @@ it installs the same helper sources and uses `build-constraints.txt` for build t
 its PTO-ISA pin. It deliberately avoids `pip install -e .`: a scikit-build-configured
 `build/` can place the extension outside the source import path. Build parallelism comes
 from `.claude/skills/testing/load-env.sh`, with two jobs on unclassified machines.
+Existing native builds keep their CMake generator; fresh builds use Ninja. Caches from
+a different absolute path are refreshed automatically when mounted into the container.
+`pypto-doctor` checks the installed simpler build revision against the mounted `runtime/`.
+It warns when `runtime/` has uncommitted changes, because a matching revision cannot
+prove that the installed binding includes those edits.
 
 ### Building the development image
 
@@ -415,6 +424,9 @@ docker buildx build --load --target dist \
   --tag pypto-dev:a3-dist .
 ```
 
+The default `main` refs stay on tracking branches so `pypto-update.sh` can pull updates.
+Tag and commit refs produce detached checkouts; use `--no-pull` for those pinned builds.
+
 For an AMD64 image, build on an x86_64 host with a CANN base tag supporting
 `linux/amd64`; confirm that support before building. Publish to a separate architecture
 tag first, and validate both `pypto-doctor` and a model on the matching NPU host before
@@ -424,6 +436,10 @@ build only.
 Use `.github/docker/pypto-dev.sh build a3` for a local environment image and
 `.github/docker/pypto-dev.sh run a3 0` to create or re-enter a container. The launcher
 supports CANN tag, image, cache-volume, and proxy overrides; see its source for details.
+With Ascend Docker Runtime, the selected physical card is logical device `0` inside the
+container, so the launcher exports `PYPTO_DEVICE=0`. Privileged access keeps the physical
+card index. `pypto-doctor` probes that same selected device. Linked worktree mounts also
+expose the common Git metadata at its original path so Git remains usable inside the container.
 
 ### Without Ascend Docker Runtime
 

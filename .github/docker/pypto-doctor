@@ -125,21 +125,24 @@ fi
 # Run against CANN's own interpreter, not PyPTO's venv: the `acl` module is a
 # compiled extension shipped for the base image's Python (3.11 or 3.12), so it
 # cannot be imported from the 3.10 venv this script otherwise runs in.
+device_id="${PYPTO_DEVICE:-0}"
 cann_py="$(ls -d /usr/local/python3.*/bin/python3 2>/dev/null | head -1)"
 if [ -z "$cann_py" ]; then
     warn "no CANN interpreter found under /usr/local/python3.* — cannot probe device access"
 elif acl_out="$(PYTHONPATH="${ASCEND_HOME_PATH:-/missing-cann}/python/site-packages" "$cann_py" -c '
+import sys
 import acl
 init = acl.init()
-dev = acl.rt.set_device(0)
-total = acl.rt.get_mem_info(1)[1]
+dev = acl.rt.set_device(int(sys.argv[1]))
+# A failed device selection must remain a failure, not get masked by a memory query.
+total = acl.rt.get_mem_info(1)[1] if init == 0 and dev == 0 else 0
 print("%d %d %d" % (init, dev, total // 1024 // 1024))
-' 2>/dev/null)"; then
+' "$device_id" 2>/dev/null)"; then
     set -- $acl_out
     if [ "${1:-1}" = 0 ] && [ "${2:-1}" = 0 ]; then
-        ok "device access: aclrtSetDevice(0) ok, ${3}MB HBM visible"
+        ok "device access: aclrtSetDevice($device_id) ok, ${3}MB HBM visible"
     else
-        bad "device access refused: acl.init=$1 aclrtSetDevice=$2"
+        bad "device access refused (device $device_id): acl.init=$1 aclrtSetDevice=$2"
         echo "        the container cannot reach a card. Either run it with"
         echo "        --runtime=ascend -e ASCEND_VISIBLE_DEVICES=<card> (needs"
         echo "        Ascend-Docker-Runtime registered on the host), or --privileged."
@@ -183,8 +186,19 @@ if pypto_file="$(python -c 'import pypto; print(pypto.__file__)' 2>/dev/null)"; 
 else
     warn "pypto not importable yet — run pypto-build"
 fi
-if err="$(python -c 'import simpler.task_interface' 2>&1)"; then
+# A site-packages install has no adjacent Git checkout for simpler's own guard.
+# Compare its build stamp against the mounted runtime before importing the binding.
+if err="$(python -c '
+import sys
+from pypto.runtime.runtime_pin import check_runtime_pin, runtime_tree_is_dirty
+status = check_runtime_pin()
+import simpler.task_interface
+# Matching Git revisions cannot establish whether uncommitted ABI edits were built.
+sys.exit(3 if runtime_tree_is_dirty(status) else 0)
+' 2>&1)"; then
     ok "simpler binding matches its source tree"
+elif [ "$?" -eq 3 ]; then
+    warn "runtime/ has uncommitted changes; the matching build stamp cannot prove the binding is current — rerun pypto-build"
 elif printf '%s' "$err" | grep -q 'ModuleNotFoundError'; then
     warn "simpler not installed yet — run pypto-build"
 else
