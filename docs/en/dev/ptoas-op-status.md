@@ -35,7 +35,7 @@ The `system-tests-a5sim` CI job runs the `fillpad_inplace` planner/view regressi
 with its pinned PTOAS installation, before installing the device runtime:
 
 ```bash
-python -m pytest tests/ut/codegen/test_ptoas_planner_views.py --require-ptoas -k "fillpad or inplace_alias" -v
+python -m pytest tests/ut/codegen/ --require-ptoas -m ptoas_compile -v
 ```
 
 `--require-ptoas` fails test setup when PTOAS is missing, cannot run, or is older
@@ -43,6 +43,12 @@ than the supported version, so native compilation cannot silently skip for a
 missing compiler. The tests cover PTOAS-owned memory planning and the PYPTO/DSA_RP
 comparison paths on both backends. This guard checks MLIR and compilation to C++;
 it does not replace device numerical tests or exhaustively validate the planner.
+
+To extend this guard, add `@pytest.mark.ptoas_compile` to a regression test under
+`tests/ut/codegen/`. The test must assert the relevant generated-code semantics
+and actually invoke PTOAS compilation; the marker only selects tests. CI discovers
+marked tests across this directory, so new operators or test files need no workflow
+change. Keep `--require-ptoas` in CI to reject an unavailable compiler.
 
 ## Legend
 

@@ -2406,12 +2406,12 @@ jobs:
           "$PTOAS_ROOT/bin/python" -m pip install "$PTOAS_WHEEL"
           "$PTOAS_ROOT/bin/ptoas" --version
 
-      - name: Test PTOAS planner view compilation
+      - name: Test PTOAS compilation regressions
         # Reuse the pinned compiler above. Missing or incompatible PTOAS must
         # fail this step instead of skipping the native compilation assertions.
         run: >-
-          python -m pytest tests/ut/codegen/test_ptoas_planner_views.py
-          --require-ptoas -k "fillpad or inplace_alias" -v
+          python -m pytest tests/ut/codegen/
+          --require-ptoas -m ptoas_compile -v
 
       - name: Install simpler
         run: |
