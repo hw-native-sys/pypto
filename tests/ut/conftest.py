@@ -51,7 +51,11 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Fail CI before optional compiler checks inside individual tests can skip."""
+    """Register compilation coverage and fail CI before optional checks can skip."""
+    config.addinivalue_line(
+        "markers",
+        "ptoas_compile: invokes PTOAS compilation to check generated-code regressions",
+    )
     if not config.getoption("--require-ptoas"):
         return
     binary = find_ptoas_binary()

@@ -179,6 +179,7 @@ def _assert_fillpad_view(mlir: str, pad: int) -> None:
     assert mlir.count("= pto.alloc_tile") == 1, mlir
 
 
+@pytest.mark.ptoas_compile
 def test_inplace_alias_preserves_output_view(tmp_path: Path):
     """Dynamic input validity must not erase the padded result's type (#2869)."""
     mlir = _emit_pto(InplaceFillPadProgram, passes.MemoryPlanner.PTOAS)
@@ -203,6 +204,7 @@ def _compile_fillpad(mlir: str, tmp_path: Path, planner: passes.MemoryPlanner) -
     assert "TFILLPAD<pto::TFillPadMode::InPlace>" in cpp, cpp
 
 
+@pytest.mark.ptoas_compile
 @pytest.mark.parametrize("pad_value", [pl.PadValue.zero, pl.PadValue.max, pl.PadValue.min])
 @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
 @pytest.mark.parametrize(
@@ -289,6 +291,7 @@ class FillpadBranchProgram:
         return pl.store(result, [0, 0], out)
 
 
+@pytest.mark.ptoas_compile
 @pytest.mark.parametrize("program", [FillpadSubviewProgram, FillpadLoopProgram, FillpadBranchProgram])
 def test_fillpad_inplace_composed_views(tmp_path: Path, program):
     """Rebound padded handles survive subviews, valid updates, and control flow."""

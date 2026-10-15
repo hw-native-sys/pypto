@@ -26,13 +26,18 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 `fillpad_inplace` 的内存规划和视图回归测试：
 
 ```bash
-python -m pytest tests/ut/codegen/test_ptoas_planner_views.py --require-ptoas -k "fillpad or inplace_alias" -v
+python -m pytest tests/ut/codegen/ --require-ptoas -m ptoas_compile -v
 ```
 
 当 PTOAS 缺失、无法运行或版本低于支持范围时，`--require-ptoas` 会在测试初始化阶段失败，
 避免因编译器缺失而静默跳过原生编译。测试覆盖两个后端的 PTOAS 内存规划路径，以及
 PYPTO/DSA_RP 对照路径。此看护检查 MLIR 和生成 C++ 的编译过程；不能替代设备数值测试，
 也不代表已穷举验证整个内存规划器。
+
+扩展看护时，在 `tests/ut/codegen/` 下的回归测试上添加 `@pytest.mark.ptoas_compile`。
+测试必须断言相关的生成代码语义，并实际调用 PTOAS 编译；标记只负责选择测试。
+CI 会发现该目录下所有带此标记的测试，因此新增算子或测试文件无须修改工作流。
+CI 中应保留 `--require-ptoas`，确保编译器不可用时失败。
 
 ## 图例
 
