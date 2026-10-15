@@ -119,9 +119,7 @@ def _prepare_cache_ptoas(directory, monkeypatch, startup_hook):
     monkeypatch.setenv("PTOAS_ROOT", str(directory))
 
 
-def _persistent_process(
-    root, platform, device_id, consume, connection, change_search=False, startup_hook=False
-):
+def _persistent_process(root, platform, device_id, consume, connection, change_search=False):
     """Fresh interpreter: ordinary execution publishes, then readonly reuse executes."""
     phase = "consumer" if consume else "producer"
     cache_logger = logging.getLogger("pypto.jit._persistent")
@@ -151,39 +149,31 @@ def _persistent_process(
             raise AssertionError("READY execution invoked a compiler stage")
 
         with pytest.MonkeyPatch.context() as guard:
-            if consume and not startup_hook:
+            if consume:
                 guard.setattr(persistent_add, "_compile", forbidden)
                 guard.setattr(KernelCompiler, "compile_incore", forbidden)
                 guard.setattr(KernelCompiler, "compile_orchestration", forbidden)
                 guard.setattr("pypto.backend.pto_backend._run_ptoas", forbidden)
             x = torch.full((16, 16), 2.0)
             out = torch.zeros_like(x)
-            if startup_hook:
-                # Bypass deliberately does not retain a compiled object; inspect
-                # and execute this result without requesting a second build.
-                compiled = persistent_add.compile(config=config)
-                compiled(x, out, config=config)
-            else:
-                persistent_add(x, out, config=config)
-                compiled = persistent_add.compile(config=config)
+            persistent_add(x, out, config=config)
+            compiled = persistent_add.compile(config=config)
+            torch.testing.assert_close(out, torch.full_like(out, 5.0))
+            # The same JIT object must reuse its compiled object on subsequent
+            # calls, including in interpreters with executable startup hooks.
+            guard.setattr(persistent_add, "_compile", forbidden)
+            out.zero_()
+            persistent_add(x, out, config=config)
             torch.testing.assert_close(out, torch.full_like(out, 5.0))
             stats = cache_stats()
-            if startup_hook:
-                assert compiled._artifact_runtime is None
-                assert compiled.program is not None
-                assert stats.bypasses > 0
-                assert "executable startup hook" in (stats.last_bypass_reason or "")
-                assert stats.ready_hits == 0
-                assert stats.generation_builds == 1
-                assert stats.binary_builds == 1
-            else:
-                assert stats.bypasses == 0, stats.last_bypass_reason
-                assert compiled._artifact_runtime is not None
-                assert compiled._artifact_runtime.handle.spec.state.value == "ready"
-                assert (compiled.program is None) == consume
-                assert stats.ready_hits == int(consume)
-                assert stats.generation_builds == int(not consume)
-                assert stats.binary_builds == int(not consume)
+            assert stats.bypasses == 0, stats.last_bypass_reason
+            assert stats.object_hits >= 2
+            assert compiled._artifact_runtime is not None
+            assert compiled._artifact_runtime.handle.spec.state.value == "ready"
+            assert (compiled.program is None) == consume
+            assert stats.ready_hits == int(consume)
+            assert stats.generation_builds == int(not consume)
+            assert stats.binary_builds == int(not consume)
         connection.send(None)
     except BaseException:
         connection.send(f"Persistent cache {phase} failed:\n{traceback.format_exc()}")
@@ -196,11 +186,11 @@ class TestJITExecution:
     """End-to-end tests for @pl.jit compile + execute on device."""
 
     @pytest.mark.parametrize("change_search", [False, True])
-    @pytest.mark.parametrize("startup_hook", [False, True], ids=["ready", "startup-bypass"])
+    @pytest.mark.parametrize("startup_hook", [False, True], ids=["ready", "startup-ready"])
     def test_persistent_cache_across_processes(
         self, test_config, tmp_path, monkeypatch, change_search, startup_hook
     ):
-        """Verify numerical READY reuse and conservative startup-hook bypass.
+        """Verify numerical READY and object reuse with and without startup hooks.
 
         Run in a standalone pytest invocation, before its parent initializes
         any device. CI selects this node separately from the direct-test shard.
@@ -229,7 +219,6 @@ class TestJITExecution:
                     consume,
                     sending,
                     change_search,
-                    startup_hook,
                 ),
             )
             process.start()
@@ -246,8 +235,7 @@ class TestJITExecution:
                     process.terminate()
                     process.join(timeout=20)
         assert not list(root.rglob("__pycache__"))
-        if startup_hook:
-            assert not list(root.rglob("artifact_manifest.json"))
+        assert list(root.rglob("artifact_manifest.json"))
 
     def test_warmup_then_execute_without_recompiling(self, test_config, monkeypatch):
         """Prepare from annotations without a worker, then execute those binaries."""

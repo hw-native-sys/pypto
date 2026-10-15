@@ -527,7 +527,6 @@ def selected_ptoas_wheel(tmp_path, monkeypatch):
                 "numpy": str(numpy),
                 "startup_hooks": [str(startup_hook)],
                 "startup_modules": [["startup_module", str(startup_module)]],
-                "startup_customizations": [],
                 "startup_path": [str(launcher.parent), str(package.parent)],
                 "startup_unresolved": [],
             }
@@ -812,7 +811,7 @@ def test_native_device_linker_changes_invalidate_identity(selected_device_build,
 
 
 @pytest.mark.parametrize("hook", ["sitecustomize", "executable_pth"])
-def test_script_only_startup_code_bypasses_identity(tmp_path, hook):
+def test_script_only_startup_dependency_requires_manual_invalidation(tmp_path, hook):
     environment = tmp_path / "environment"
     venv.EnvBuilder(with_pip=False).create(environment)
     interpreter = environment / "bin/python"
@@ -828,6 +827,7 @@ def test_script_only_startup_code_bypasses_identity(tmp_path, hook):
         [str(interpreter), str(launcher)], env=env, check=True, capture_output=True, text=True
     )
     assert actual.stdout.strip() == "True"
+    identities = []
     for value in (1, 2):
         helper.write_text(f"value = {value}\n")
         probe = subprocess.run(
@@ -839,8 +839,10 @@ def test_script_only_startup_code_bypasses_identity(tmp_path, hook):
         )
         record = ast.literal_eval(probe.stdout)
         assert "actual_only" not in dict(record["startup_modules"])
-        with pytest.raises(ValueError, match="startup"):
-            identity._startup_identity(record)
+        identities.append(identity._startup_identity(record))
+    # This hidden dependency is outside the probe contract: callers must bump
+    # PYPTO_CACHE_EPOCH (or disable persistence) when changing such inputs.
+    assert identities[0] == identities[1]
 
 
 def test_path_only_startup_does_not_execute_dependency_pth(tmp_path):
@@ -865,24 +867,30 @@ def test_path_only_startup_does_not_execute_dependency_pth(tmp_path):
     assert identity._startup_identity(record)
 
 
-@pytest.mark.parametrize(
-    "hook", ["sitecustomize", "usercustomize", "space", "tab", "bom", "missing_evidence"]
-)
-def test_unsupported_startup_has_no_build_identity(selected_ptoas_wheel, monkeypatch, hook):
+@pytest.mark.parametrize("hook", ["sitecustomize", "usercustomize", "space", "tab", "bom"])
+def test_executable_startup_files_participate_in_build_identity(selected_ptoas_wheel, monkeypatch, hook):
     wheel = selected_ptoas_wheel
-    probe = _toolchain._run
-    record = ast.literal_eval(probe([]))
+    record = ast.literal_eval(_toolchain._run([]))
     if hook in ("sitecustomize", "usercustomize"):
-        record["startup_customizations"] = [hook]
-    elif hook == "missing_evidence":
-        del record["startup_customizations"]
-    elif hook == "bom":
-        wheel.startup_hook.write_text("\ufeffimport startup_hook\n")
+        record["startup_modules"] = [(hook, str(wheel.startup_module))]
+        changed_file = wheel.startup_module
     else:
-        wheel.startup_hook.write_text("import" + (" " if hook == "space" else "\t") + "startup_hook\n")
+        prefix = "\ufeffimport " if hook == "bom" else "import" + (" " if hook == "space" else "\t")
+        wheel.startup_hook.write_text(prefix + "startup_hook\n")
+        changed_file = wheel.startup_hook
+    monkeypatch.setattr(_toolchain, "_run", lambda command: repr(record))
+    first = identity._ptoas_identity(str(wheel.launcher))
+    assert first == identity._ptoas_identity(str(wheel.launcher))
+    changed_file.write_text(changed_file.read_text() + "# changed startup input\n")
+    assert first != identity._ptoas_identity(str(wheel.launcher))
+
+
+def test_missing_startup_evidence_has_no_build_identity(selected_ptoas_wheel, monkeypatch):
+    record = ast.literal_eval(_toolchain._run([]))
+    del record["startup_hooks"]
     monkeypatch.setattr(_toolchain, "_run", lambda command: repr(record))
     with pytest.raises(ValueError, match="startup"):
-        identity._ptoas_identity(str(wheel.launcher))
+        identity._ptoas_identity(str(selected_ptoas_wheel.launcher))
 
 
 @pytest.mark.parametrize(

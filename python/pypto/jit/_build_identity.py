@@ -200,8 +200,6 @@ print(repr({
     'startup_modules': modules,
     'startup_path': sys.path,
     'startup_unresolved': sorted(set(unresolved)),
-    'startup_customizations': [name for name in ('sitecustomize', 'usercustomize')
-                               if importlib.util.find_spec(name) is not None],
 }))
 """
 
@@ -317,9 +315,8 @@ def _startup_identity(selected_modules: dict[str, Any]) -> tuple[Any, ...]:
         or not isinstance(modules, list)
         or not isinstance(search_path, list)
         or unresolved != []
-        or selected_modules.get("startup_customizations") != []
     ):
-        raise ValueError("PTOAS interpreter startup evidence is unavailable or uses custom startup code")
+        raise ValueError("PTOAS interpreter startup evidence is unavailable")
     hooks = cast(list[object], hooks)
     modules = cast(list[object], modules)
     search_path = cast(list[object], search_path)
@@ -332,12 +329,6 @@ def _startup_identity(selected_modules: dict[str, Any]) -> tuple[Any, ...]:
         raise ValueError("PTOAS interpreter startup evidence is unavailable")
     hooks = cast(list[str], hooks)
     search_path = cast(list[str], search_path)
-    # A -c probe cannot reproduce arbitrary script-mode startup code. Even a
-    # hook skipped by this probe can load different compiler inputs in PTOAS.
-    for hook in hooks:
-        with Path(hook).open() as stream:
-            if any(line.removeprefix("\ufeff").startswith(("import ", "import\t")) for line in stream):
-                raise ValueError(f"PTOAS executable startup hook requires a cache adapter: {hook}")
     loaded: list[tuple[str, str]] = []
     for entry in modules:
         if not isinstance(entry, (list, tuple)):
@@ -346,8 +337,9 @@ def _startup_identity(selected_modules: dict[str, Any]) -> tuple[Any, ...]:
         if len(fields) != 2 or type(fields[0]) is not str or type(fields[1]) is not str:
             raise ValueError(f"Invalid PTOAS startup module evidence: {entry!r}")
         loaded.append((fields[0], fields[1]))
-    if any(name in ("sitecustomize", "usercustomize") for name, _ in loaded):
-        raise ValueError("PTOAS interpreter uses custom startup code")
+    # Hash observed startup inputs without rejecting executable hooks. Inputs
+    # loaded only in script mode require explicit cache invalidation; the -c
+    # probe cannot discover arbitrary conditional startup dependencies.
     paths = {Path(path) for path in hooks}
     paths.update(Path(path) for _, path in loaded)
     files = [(str(path), _file_digest(path)[1]) for path in sorted(paths)]
