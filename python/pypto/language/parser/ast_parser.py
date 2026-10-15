@@ -379,6 +379,25 @@ def _collect_type_symbol_ids(param_type: ir.Type) -> set[int]:
     return symbol_ids
 
 
+class _ShapeDimAliasExpander(ir.IRMutator):
+    """Expand direct dimension-read temporaries only for annotation comparison."""
+
+    def __init__(self, aliases: dict[int, ir.Call]) -> None:
+        super().__init__()
+        self.aliases = aliases
+
+    def visit_var(self, op: ir.Var) -> ir.Expr:
+        return self.aliases.get(op.unique_id, op)
+
+    def visit_iter_arg(self, op: ir.IterArg) -> ir.Expr:
+        return op
+
+    def visit_call(self, op: ir.Call) -> ir.Expr:
+        # A dimension read is an atomic shape value. Do not traverse the
+        # tensor operand's type or substitute unrelated scalar computations.
+        return op
+
+
 def _shape_exprs_match(lhs: Sequence[ir.Expr], rhs: Sequence[ir.Expr]) -> bool:
     """Return whether two shape-like expression lists are statically identical."""
     if len(lhs) != len(rhs):
@@ -869,6 +888,9 @@ class ASTParser:
         # bare extent of a tensor param, keyed by ``Var.unique_id`` (see
         # ``_fold_tensor_dim``). Per-function; reset in parse_function.
         self._param_dim_symbols: set[int] = set()
+        # Only fresh scalar bindings to tensor.dim are eligible for shape
+        # annotation comparison. Reassigning a binding invalidates its alias.
+        self._shape_dim_aliases: dict[int, ir.Call] = {}
 
         # Current function's auto_scope flag (set during parse_function). When
         # True (default) the compiler owns AUTO scope placement, so a hand-placed
@@ -1116,6 +1138,7 @@ class ASTParser:
         self._func_auto_scope = bool((func_attrs or {}).get(AUTO_SCOPE_ATTR, True))
         self._func_type = func_type
         self._param_dim_symbols = set()
+        self._shape_dim_aliases = {}
         func_span = self.span_tracker.get_span(func_def)
 
         # Enter function scope
@@ -1897,12 +1920,17 @@ class ASTParser:
                 # Annotation specifies tensor view (stride/layout); preserve it
                 override_type = resolved
             elif type(resolved) is ir.TensorType and type(value_expr.type) is ir.TensorType:
-                # Flattening changes evaluated shape operands to temporaries
-                # while the printed type retains its declarative expression.
-                # Keep the validated annotation on print/parse round-trips.
-                override_type = ir.TensorType(
-                    resolved.shape, resolved.dtype, value_expr.type.memref, value_expr.type.tensor_view
-                )
+                # Restore declarative shapes only when direct tensor.dim
+                # temporaries prove them identical to the inferred shape.
+                # Other annotations must not override computed extents.
+                expander = _ShapeDimAliasExpander(self._shape_dim_aliases)
+                if all(
+                    ir.structural_equal(ann_dim, expander.visit_expr(inf_dim))
+                    for ann_dim, inf_dim in zip(resolved.shape, value_expr.type.shape)
+                ):
+                    override_type = ir.TensorType(
+                        resolved.shape, resolved.dtype, value_expr.type.memref, value_expr.type.tensor_view
+                    )
             elif (
                 isinstance(resolved, ir.ScalarType)
                 and isinstance(value_expr.type, ir.ScalarType)
@@ -2024,7 +2052,7 @@ class ASTParser:
         # extent. Rebind the name to a fresh let rather than assigning *through* the
         # alias into the symbol itself.
         if self._is_param_dim_symbol(existing_var):
-            return self.builder.let(var_name, value_expr, type=override_type, span=span)
+            existing_var = None
 
         if existing_var is not None and type(existing_var) is ir.Var and not self.scope_manager.strict_ssa:
             # Reject changes to the storage contract (#642). Pre-SSA tensor
@@ -2060,9 +2088,13 @@ class ASTParser:
                         existing_var.type,
                         value_expr.span,
                     )
+            self._shape_dim_aliases.pop(existing_var.unique_id, None)
             self.builder.assign(existing_var, value_expr, span=span)
             return existing_var
-        return self.builder.let(var_name, value_expr, type=override_type, span=span)
+        var = self.builder.let(var_name, value_expr, type=override_type, span=span)
+        if isinstance(value_expr, ir.Call) and value_expr.op.name == ir.get_op("tensor.dim").name:
+            self._shape_dim_aliases[var.unique_id] = value_expr
+        return var
 
     def parse_assignment(self, stmt: ast.Assign) -> None:  # noqa: PLR0912
         """Parse regular assignment: var = value or tuple unpacking.

@@ -1452,24 +1452,35 @@ class TypeResolver:
             and node.func.value.attr == "tensor"
             and isinstance(node.func.value.value, ast.Name)
             and node.func.value.value.id == "pl"
-            and len(node.args) == 2
-            and not node.keywords
-            and isinstance(node.args[0], ast.Name)
-            and self.scope_lookup is not None
         ):
-            # The printer retains dimension reads in tensor types. Reconstruct
-            # only this pure read, without evaluating arbitrary calls or
-            # applying the statement parser's dynamic-symbol fold.
-            tensor = self.scope_lookup(node.args[0].id)
-            axis = self._rebuild_composite_dim(node.args[1])
-            if isinstance(tensor, ir.Expr) and isinstance(axis, ir.ConstInt):
-                return ir.create_op_call("tensor.dim", [tensor, axis], span)
+            return self._rebuild_tensor_dim(node)
         if isinstance(node, ast.BinOp) and type(node.op) in self._SHAPE_BINOPS:
             lhs = self._rebuild_composite_dim(node.left)
             rhs = self._rebuild_composite_dim(node.right)
             if lhs is None or rhs is None:
                 return None
             return getattr(ir, self._SHAPE_BINOPS[type(node.op)])(lhs, rhs, span)
+        return None
+
+    def _rebuild_tensor_dim(self, call: ast.Call) -> ir.Expr | None:
+        """Rebuild a pure dimension read with positional or keyword operands."""
+        if len(call.args) > 2 or self.scope_lookup is None:
+            return None
+        operands: dict[str, ast.expr] = dict(zip(("tensor", "axis"), call.args))
+        for keyword in call.keywords:
+            if keyword.arg not in {"tensor", "axis"} or keyword.arg in operands:
+                return None
+            operands[keyword.arg] = keyword.value
+        tensor_node = operands.get("tensor")
+        axis_node = operands.get("axis")
+        if not isinstance(tensor_node, ast.Name) or axis_node is None:
+            return None
+        # Reconstruct only this pure read, without evaluating arbitrary calls
+        # or applying the statement parser's dynamic-symbol fold.
+        tensor = self.scope_lookup(tensor_node.id)
+        axis = self._rebuild_composite_dim(axis_node)
+        if isinstance(tensor, ir.Expr) and isinstance(axis, ir.ConstInt):
+            return ir.create_op_call("tensor.dim", [tensor, axis], self._get_span(call))
         return None
 
     def _get_span(self, node: ast.AST) -> ir.Span:

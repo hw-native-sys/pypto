@@ -834,7 +834,14 @@ static std::string MakeTensorDimCodegenPTO(const CallPtr& op, codegen::CodegenBa
   auto shape = input_tensor->shape_[axis];
   // Read the declared extent directly, including composite scalar expressions.
   // No tensor_view needs to have been emitted for the operand yet.
-  auto shape_name = codegen.EmitCastToIndex(shape, codegen.GetExprAsCode(shape));
+  std::string shape_name;
+  if (auto constant = ir::As<ir::ConstInt>(shape)) {
+    // Extents are INDEX values regardless of a constant's declared signedness.
+    // arith.index_cast cannot consume the ui64 emitted for a UINT64 constant.
+    shape_name = codegen.GetOrEmitConstant(constant->value_, DataType::INDEX);
+  } else {
+    shape_name = codegen.EmitCastToIndex(shape, codegen.GetExprAsCode(shape));
+  }
   codegen.SetCurrentExprValue(shape_name);
   auto target_var = codegen.GetCurrentResultVar();
   if (target_var != nullptr && !shape_name.empty()) {

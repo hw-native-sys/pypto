@@ -850,8 +850,10 @@ class Prog:
 
 @pytest.mark.parametrize("extent", ["8", "N"])
 @pytest.mark.parametrize("axis", [0, -2])
-def test_tensor_dim_parameter_shape_roundtrips(extent, axis):
+@pytest.mark.parametrize("arguments", ["x, {axis}", "x, axis={axis}", "tensor=x, axis={axis}"])
+def test_tensor_dim_parameter_shape_roundtrips(extent, axis, arguments):
     """Dependent annotations are parsed as IR, never evaluated as Python."""
+    dim_arguments = arguments.replace("{axis}", f"pl.const({axis}, pl.INDEX)")
     source = f"""
 N = pl.dynamic("N")
 
@@ -859,7 +861,7 @@ N = pl.dynamic("N")
 class Before:
     @pl.function(type=pl.FunctionType.InCore)
     def main(self, x: pl.Tensor[[{extent}, 32], pl.FP32],
-             view: pl.Tensor[[pl.tensor.dim(x, pl.const({axis}, pl.INDEX)) * 2, 16], pl.FP32]):
+             view: pl.Tensor[[pl.tensor.dim({dim_arguments}) * 2, 16], pl.FP32]):
         return view
 """
     before = pl.parse(source)
@@ -867,6 +869,48 @@ class Before:
     assert "pl.tensor.dim(" in printed
     after = pl.parse(printed)
     ir.assert_structural_equal(before, after)
+
+
+@pytest.mark.parametrize(
+    "setup, extent",
+    [
+        ("", "8"),
+        ("", "rows"),
+        ("n = pl.tensor.dim(x, 0)", "n * 3"),
+        ("n = pl.tensor.dim(x, 0)\n    n = rows", "n * 2"),
+    ],
+)
+def test_tensor_dim_annotation_keeps_unproven_inferred_shape(setup, extent):
+    """An annotation cannot replace a different or unproven runtime extent."""
+    source = f"""
+@pl.function(type=pl.FunctionType.InCore)
+def main(x: pl.Tensor[[8, 16], pl.FP32], rows: pl.Scalar[pl.INDEX]):
+    {setup}
+    view: pl.Tensor[[pl.tensor.dim(x, 0) * 2, 16], pl.FP32] = pl.reshape(x, [{extent}, 16])
+    return view
+"""
+    func = pl.parse(source)
+    assert isinstance(func, ir.Function)
+    assert isinstance(func.body, ir.SeqStmts)
+    assign = next(s for s in func.body.stmts if isinstance(s, ir.AssignStmt) and s.var.name_hint == "view")
+    ir.assert_structural_equal(assign.var.type, assign.value.type)
+
+
+@pytest.mark.parametrize("extent", ["8", "N"])
+def test_tensor_dim_annotation_recovers_flattened_read(extent):
+    """A direct dimension temporary proves the declarative shape unchanged."""
+    source = f"""
+N = pl.dynamic("N")
+@pl.function(type=pl.FunctionType.InCore)
+def main(x: pl.Tensor[[{extent}, 16], pl.FP32]):
+    n = pl.tensor.dim(x, 0)
+    view: pl.Tensor[[pl.tensor.dim(x, 0) * 2, 16], pl.FP32] = pl.reshape(x, [n * 2, 16])
+    return view
+"""
+    before = pl.parse(source)
+    printed = ir.python_print(before)
+    assert "view: pl.Tensor[[pl.tensor.dim(" in printed
+    ir.assert_structural_equal(before, pl.parse('N = pl.dynamic("N")\n' + printed))
 
 
 if __name__ == "__main__":

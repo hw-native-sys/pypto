@@ -46,7 +46,10 @@ declared extent as an INDEX operand, including constant, symbolic and composite
 extents; it does not require an existing tensor view for `x` or a prior IR fold.
 Only scalar symbols in that extent become dynamic-dimension ABI arguments, not
 the tensor operand itself. Printed type annotations preserve these reads when
-parsed again, without evaluating parameter references as Python values.
+parsed again, without evaluating parameter references as Python values. Shape-only
+assignment annotations replace an inferred shape only when direct dimension-read temporaries
+prove structural equivalence; otherwise the inferred runtime shape is retained.
+Constant extents are emitted directly as INDEX, including unsigned constants.
 
 ## Architecture
 

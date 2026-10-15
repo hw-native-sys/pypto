@@ -3557,6 +3557,25 @@ def test_pto_codegen_tensor_dim_in_parameter_shape(extent_kind, axis):
     assert len(wrapper_args) == (2 if extent_kind == "constant" else 3)
 
 
+@pytest.mark.parametrize("dtype", [DataType.UINT8, DataType.UINT32, DataType.UINT64])
+def test_tensor_dim_unsigned_constant_extent_ptoas(tmp_path, dtype):
+    """Unsigned constant extents must become INDEX without an invalid cast."""
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType([ir.ConstInt(8, dtype, span), 16], DataType.FP32)
+    ib = IRBuilder()
+    with ib.function("unsigned_dim", type=ir.FunctionType.InCore) as f:
+        source = f.param("source", tensor_type)
+        ib.let("extent", tensor_ops.dim(source, 0))
+        ib.return_stmt()
+    mlir = _generate_mlir(ir.Program([f.get_result()], "UnsignedDim", span))
+    assert "arith.constant 8 : index" in mlir
+    assert not re.search(r"arith.index_cast[^\n]*: ui\d+ to index", mlir)
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    cpp = pto_backend._compile_pto_module(mlir, "unsigned_dim", str(tmp_path))
+    assert "unsigned_dim" in cpp
+
+
 def test_tensor_dim_view_loop_compiles_without_folding(tmp_path):
     """The reported runtime loop compiles while retaining dim in tensor types."""
 
