@@ -69,6 +69,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
@@ -185,6 +186,137 @@ std::unordered_set<std::string> CollectBodyVarNames(const StmtPtr& body) {
   return names;
 }
 
+// Predict migrated carry axes before rewriting their bodies. This is one SSA
+// walk, not an iterative lowering attempt: independent body values (for example
+// row_max -> reshape) establish the backedge partition. Only local full/reshape
+// initializers are eligible; external full-width operands retain their guard.
+class LoopCarryPartitionAnalysis : public IRVisitor {
+ public:
+  explicit LoopCarryPartitionAnalysis(int split_dim) : split_dim_(split_dim) {}
+  std::unordered_map<const Var*, int> partitions;
+
+ protected:
+  void VisitExpr(const ExprPtr&) override {}
+  void VisitStmt_(const SplitAivScopeStmtPtr&) override {}
+
+  void VisitStmt_(const AssignStmtPtr& stmt) override {
+    auto call = AsCall(stmt->value_);
+    auto type = As<TileType>(stmt->var_->GetType());
+    if (!call || !call->op_ || !type) return;
+    if (IsOp(call, "tile.load") && type->shape_.size() < 2) return;
+    if (IsOp(call, "tile.full") ||
+        (IsOp(call, "tile.reshape") && local_initializers_.count(call->args_[0].get()))) {
+      local_initializers_.insert(stmt->var_.get());
+    }
+    const auto direction = ClassifyMoveDirection(call);
+    if (direction != CVDirection::CUBE_TO_VECTOR && ClassifyCallAffinity(call) != CoreAffinity::VECTOR) {
+      return;
+    }
+    int axis = split_dim_;
+    const Expr* tracked_input = nullptr;
+    for (const auto& arg : call->args_) {
+      auto it = axes_.find(arg.get());
+      if (it != axes_.end()) {
+        axis = it->second;
+        tracked_input = arg.get();
+        break;
+      }
+    }
+    if (tracked_input && IsOp(call, "tile.reshape")) {
+      axis = split_axis::ReshapeSplitDimension(call, axis);
+    }
+    if (split_axis::IsReduceOnSplitAxis(call, axis)) return;
+    if (axis >= static_cast<int>(type->shape_.size()) || split_axis::IsSingletonSplitAxis(*type, axis)) {
+      return;
+    }
+    axes_[stmt->var_.get()] = axis;
+  }
+
+  void VisitStmt_(const ForStmtPtr& loop) override { VisitLoop(loop); }
+  void VisitStmt_(const WhileStmtPtr& loop) override { VisitLoop(loop); }
+
+ private:
+  template <typename Loop>
+  void VisitLoop(const Loop& loop) {
+    for (const auto& carry : loop->iter_args_) {
+      auto init_axis = axes_.find(carry->initValue_.get());
+      if (init_axis != axes_.end()) axes_[carry.get()] = init_axis->second;
+    }
+    VisitStmt(loop->body_);
+    auto yield = transform_utils::GetLastYieldStmt(loop->body_);
+    if (!yield) return;
+    for (size_t i = 0; i < loop->iter_args_.size() && i < yield->value_.size(); ++i) {
+      const auto& carry = loop->iter_args_[i];
+      auto updated = axes_.find(yield->value_[i].get());
+      if (updated == axes_.end()) continue;
+      const int axis = updated->second;
+      auto type = As<TileType>(carry->GetType());
+      // Limit entry slicing to static, even migrated axes. Ordinary broadcast
+      // carries and already partitioned initializers keep their existing path.
+      if (!type || axes_.count(carry.get()) || axis == split_dim_ ||
+          !local_initializers_.count(carry->initValue_.get()) ||
+          !split_axis::IsSingletonSplitAxis(*type, split_dim_) ||
+          axis >= static_cast<int>(type->shape_.size())) {
+        continue;
+      }
+      auto extent = As<ConstInt>(type->shape_[axis]);
+      if (!extent || extent->value_ <= 1 || extent->value_ % 2 != 0) continue;
+      partitions[carry.get()] = axis;
+      axes_[carry.get()] = axis;
+      if (i < loop->return_vars_.size()) axes_[loop->return_vars_[i].get()] = axis;
+    }
+  }
+
+  int split_dim_;
+  std::unordered_map<const Expr*, int> axes_;
+  std::unordered_set<const Expr*> local_initializers_;
+};
+
+// Materialize a separate initializer for this carry, leaving any other uses of
+// the original initializer full width. RepairIterArgs still handles ordinary
+// entry tracking; only a proven migrated backedge needs this extra slice.
+std::vector<IterArgPtr> RepairAutoIterArgs(const std::vector<IterArgPtr>& iter_args,
+                                           const std::unordered_map<const Var*, int>& partitions,
+                                           std::vector<StmtPtr>& prefix,
+                                           std::unordered_map<const Var*, TileInfo>& tile_vars,
+                                           std::unordered_map<const Var*, VarPtr>& replacements,
+                                           const ExprPtr& lane, const ExprPtr& lane_stride,
+                                           std::unordered_set<std::string>& used_names) {
+  auto repaired = split_axis::RepairIterArgs(iter_args, tile_vars, replacements, lane, lane_stride);
+  for (size_t i = 0; i < iter_args.size(); ++i) {
+    const auto& carry = iter_args[i];
+    auto planned = partitions.find(carry.get());
+    if (planned == partitions.end() || tile_vars.count(carry.get())) continue;
+    CHECK_SPAN(!lane_stride, carry->span_)
+        << "LowerAutoVectorSplit: a migrated loop-carry axis cannot use a ragged boundary partition";
+    const int axis = planned->second;
+    auto type = As<TileType>(carry->GetType());
+    INTERNAL_CHECK_SPAN(type, carry->span_) << "Internal error: partitioned carry must be a tile";
+    auto shape = type->shape_;
+    shape[axis] = split_axis::ComputeHalfDimSize(shape[axis]);
+    std::vector<ExprPtr> offsets(shape.size(), std::make_shared<ConstInt>(0, DataType::INDEX, carry->span_));
+    offsets[axis] = std::make_shared<Mul>(lane, shape[axis], DataType::INDEX, carry->span_);
+    auto init = transform_utils::Substitute(carry->initValue_, replacements);
+    auto slice = OpRegistry::GetInstance().Create("tile.slice",
+                                                  {init, std::make_shared<MakeTuple>(shape, carry->span_),
+                                                   std::make_shared<MakeTuple>(offsets, carry->span_)},
+                                                  {}, carry->span_);
+    auto name = auto_name::GenerateFreshNameLike(carry->name_hint_ + "_init_shard", used_names);
+    used_names.insert(name);
+    auto local_init = std::make_shared<Var>(name, slice->GetType(), carry->span_);
+    prefix.push_back(std::make_shared<AssignStmt>(local_init, slice, carry->span_));
+    auto local_carry =
+        std::make_shared<IterArg>(carry->name_hint_, slice->GetType(), local_init, carry->span_);
+    TileInfo info{shape[axis], axis};
+    tile_vars[local_init.get()] = info;
+    tile_vars[carry.get()] = info;
+    tile_vars[local_carry.get()] = info;
+    replacements[carry.get()] = local_carry;
+    repaired[i] = local_carry;
+  }
+  return repaired;
+}
+
 // Affinity-gated lowering of a flat statement list.
 //
 // tile_vars / var_replacements thread the per-var halved-extent tracking and the
@@ -198,7 +330,13 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
                                 const ExprPtr& subblock_idx,
                                 std::unordered_map<const Var*, VarPtr>& var_replacements,
                                 std::unordered_set<std::string>& used_names,
-                                const ExprPtr& lane_stride = nullptr) {
+                                const ExprPtr& lane_stride = nullptr,
+                                const std::unordered_map<const Var*, int>* carry_partitions = nullptr) {
+  LoopCarryPartitionAnalysis analysis(split_dim);
+  if (!carry_partitions) {
+    for (const auto& stmt : stmts) analysis.VisitStmt(stmt);
+    carry_partitions = &analysis.partitions;
+  }
   std::vector<StmtPtr> result;
   result.reserve(stmts.size());
 
@@ -529,11 +667,11 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
       // ProcessStmts, so it cannot reach that branch and used to leave every
       // iter_arg full width and untracked -- a legal tile accumulator whose init
       // was halved then had its carry reported as a full-width operand.
-      auto new_iter_args = split_axis::RepairIterArgs(for_stmt->iter_args_, tile_vars, var_replacements,
-                                                      subblock_idx, lane_stride);
+      auto new_iter_args = RepairAutoIterArgs(for_stmt->iter_args_, *carry_partitions, result, tile_vars,
+                                              var_replacements, subblock_idx, lane_stride, used_names);
       auto body = transform_utils::FlattenToStmts(for_stmt->body_);
       auto new_body = LowerStmts(body, mode, split_dim, tile_vars, subblock_idx, var_replacements, used_names,
-                                 lane_stride);
+                                 lane_stride, carry_partitions);
       split_axis::ValidateCarryBackedge(loop_repair::MakeBody(new_body, for_stmt->span_), new_iter_args,
                                         tile_vars, var_replacements, for_stmt->span_);
       auto new_return_vars = split_axis::RepairReturnVars(for_stmt->return_vars_, new_iter_args, tile_vars,
@@ -545,12 +683,12 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
     if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
       auto then_body = transform_utils::FlattenToStmts(if_stmt->then_body_);
       auto new_then = LowerStmts(then_body, mode, split_dim, tile_vars, subblock_idx, var_replacements,
-                                 used_names, lane_stride);
+                                 used_names, lane_stride, carry_partitions);
       std::optional<StmtPtr> new_else;
       if (if_stmt->else_body_.has_value()) {
         auto else_body = transform_utils::FlattenToStmts(*if_stmt->else_body_);
         auto new_else_stmts = LowerStmts(else_body, mode, split_dim, tile_vars, subblock_idx,
-                                         var_replacements, used_names, lane_stride);
+                                         var_replacements, used_names, lane_stride, carry_partitions);
         new_else = loop_repair::MakeBody(new_else_stmts, if_stmt->span_);
       }
       // Same merge repair as split_axis::ProcessStmt's IfStmt branch. This arm
@@ -570,11 +708,11 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
     }
     if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
       // Same carry repair as the ForStmt arm above.
-      auto new_iter_args = split_axis::RepairIterArgs(while_stmt->iter_args_, tile_vars, var_replacements,
-                                                      subblock_idx, lane_stride);
+      auto new_iter_args = RepairAutoIterArgs(while_stmt->iter_args_, *carry_partitions, result, tile_vars,
+                                              var_replacements, subblock_idx, lane_stride, used_names);
       auto body = transform_utils::FlattenToStmts(while_stmt->body_);
       auto new_body = LowerStmts(body, mode, split_dim, tile_vars, subblock_idx, var_replacements, used_names,
-                                 lane_stride);
+                                 lane_stride, carry_partitions);
       split_axis::ValidateCarryBackedge(loop_repair::MakeBody(new_body, while_stmt->span_), new_iter_args,
                                         tile_vars, var_replacements, while_stmt->span_);
       auto new_return_vars = split_axis::RepairReturnVars(while_stmt->return_vars_, new_iter_args, tile_vars,

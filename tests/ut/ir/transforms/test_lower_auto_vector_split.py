@@ -2951,6 +2951,167 @@ def test_loop_carried_tile_accumulator_is_tracked():
     assert "pl.tile.store(acc_loop, [0 + subblock_idx * 64, 0]" in store_line
 
 
+@pytest.mark.parametrize("steps", [0, 2])
+def test_row_vector_loop_carry_follows_reshaped_reduction(steps):
+    """A local row initializer must follow the reduction's migrated head axis."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def main(
+            cube: pl.Tile[[16, 16], pl.FP32, pl.Mem.Mat],
+            out: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+        ) -> pl.Tensor[[1, 16], pl.FP32]:
+            initial = pl.tile.full([1, 16], dtype=pl.FP32, value=-100.0)
+            for i, (maximum,) in pl.range(steps, init_values=(initial,)):
+                scores = pl.tile.move(cube, target_memory=pl.Mem.Vec)
+                tmp = pl.tile.create([16, 16], dtype=pl.FP32)
+                column = pl.tile.row_max(scores, tmp_tile=tmp)
+                row = pl.tile.reshape(column, [1, 16])
+                updated = pl.tile.maximum(maximum, row)
+                result = pl.yield_(updated)
+            stored = pl.tile.store(result, [0, 0], out)
+            return stored
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True})
+        def main(
+            cube: pl.Tile[[16, 16], pl.FP32, pl.Mem.Mat],
+            out: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+        ) -> pl.Tensor[[1, 16], pl.FP32]:
+            lane = pl.tile.get_subblock_idx()
+            initial = pl.tile.full([1, 16], dtype=pl.FP32, value=-100.0)
+            local_initial = pl.tile.slice(initial, [1, 8], [0, lane * 8])
+            for i, (maximum,) in pl.range(steps, init_values=(local_initial,)):
+                scores = pl.tile.aiv_shard(cube, split=1)
+                tmp = pl.tile.create([16, 16], dtype=pl.FP32)
+                column = pl.tile.row_max(scores, tmp_tile=tmp)
+                row = pl.tile.reshape(column, [1, 8])
+                updated = pl.tile.maximum(maximum, row)
+                result = pl.yield_(updated)
+            stored = pl.tile.store(result, [0, 0 + lane * 8], out)
+            return stored
+
+    ir.assert_structural_equal(_lower(Before), Expected)
+
+
+@pytest.mark.parametrize("steps", [0, 2])
+def test_row_vector_while_carry_follows_reshaped_reduction(steps):
+    """A local row initializer must follow the reduction's migrated head axis."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def main(
+            cube: pl.Tile[[16, 16], pl.FP32, pl.Mem.Mat],
+            out: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+        ) -> pl.Tensor[[1, 16], pl.FP32]:
+            initial = pl.tile.full([1, 16], dtype=pl.FP32, value=-100.0)
+            for i, maximum in pl.while_(init_values=(0, initial)):
+                pl.cond(i < steps)
+                scores = pl.tile.move(cube, target_memory=pl.Mem.Vec)
+                tmp = pl.tile.create([16, 16], dtype=pl.FP32)
+                column = pl.tile.row_max(scores, tmp_tile=tmp)
+                row = pl.tile.reshape(column, [1, 16])
+                updated = pl.tile.maximum(maximum, row)
+                counter, result = pl.yield_(i + 1, updated)
+            stored = pl.tile.store(result, [0, 0], out)
+            return stored
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True})
+        def main(
+            cube: pl.Tile[[16, 16], pl.FP32, pl.Mem.Mat],
+            out: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+        ) -> pl.Tensor[[1, 16], pl.FP32]:
+            lane = pl.tile.get_subblock_idx()
+            initial = pl.tile.full([1, 16], dtype=pl.FP32, value=-100.0)
+            local_initial = pl.tile.slice(initial, [1, 8], [0, lane * 8])
+            for i, maximum in pl.while_(init_values=(0, local_initial)):
+                pl.cond(i < steps)
+                scores = pl.tile.aiv_shard(cube, split=1)
+                tmp = pl.tile.create([16, 16], dtype=pl.FP32)
+                column = pl.tile.row_max(scores, tmp_tile=tmp)
+                row = pl.tile.reshape(column, [1, 8])
+                updated = pl.tile.maximum(maximum, row)
+                counter, result = pl.yield_(i + 1, updated)
+            stored = pl.tile.store(result, [0, 0 + lane * 8], out)
+            return stored
+
+    ir.assert_structural_equal(_lower(Before), Expected)
+
+
+@pytest.mark.parametrize("platform", ["a5", "a2a3"])
+@pytest.mark.parametrize("variant", ["row", "column", "no_split"])
+def test_compile_row_vector_loop_state(platform, variant, tmp_path):
+    """Issue #2991 and its controls compile through codegen on both targets."""
+    state_rows, state_cols = (16, 1) if variant == "column" else (1, 16)
+    split = pl.SplitMode.NONE if variant == "no_split" else pl.SplitMode.UP_DOWN
+
+    @pl.jit(auto_scope=False)
+    def entry(
+        query: pl.Tensor[[16, 16], pl.BF16],
+        keys: pl.Tensor[[16, 16], pl.BF16],
+        output: pl.Out[pl.Tensor[[state_rows, state_cols], pl.FP32]],
+    ):
+        with pl.spmd(1, name_hint="carry_max", optimizations=[pl.split(split)]):
+            block = pl.tile.get_block_idx()
+            q = pl.tile.load(query, [block * 16, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
+            k = pl.tile.load(keys, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
+            maximum = pl.reshape(pl.tile.full([1, 16], dtype=pl.FP32, value=-1e30), [state_rows, state_cols])
+            for part in pl.range(2):
+                product = pl.tile.matmul(q, pl.tile.transpose_view(k))
+                scores = pl.tile.move(
+                    product,
+                    pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
+                reduction_tmp = pl.tile.create([16, 16], dtype=pl.FP32)
+                score_max = pl.reshape(pl.row_max(scores, tmp_tile=reduction_tmp), [state_rows, state_cols])
+                maximum = pl.maximum(maximum, score_max)
+            pl.tile.store(maximum, [0, 0], output)
+        return output
+
+    _backend.reset_for_testing()
+    # Full-pipeline property checks remain enabled. The pass-level tests above
+    # also check roundtrips; the inactive A2/A3 no-split lane is not reparsable
+    # because its reductions intentionally carry an empty valid region.
+    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+        compiled = entry.compile(
+            config=RunConfig(platform=platform, codegen_only=True, save_kernels_dir=str(tmp_path))
+        )
+    assert compiled.program is not None
+    assert list(compiled.output_dir.rglob("*.pto"))
+
+
+def test_row_vector_loop_carry_with_external_initializer_is_rejected():
+    """Backedge inference must not silently partition an external full tile."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def main(
+            cube: pl.Tile[[16, 16], pl.FP32, pl.Mem.Mat],
+            initial: pl.Tile[[1, 16], pl.FP32, pl.Mem.Vec],
+            out: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+        ) -> pl.Tensor[[1, 16], pl.FP32]:
+            for i, (maximum,) in pl.range(2, init_values=(initial,)):
+                scores = pl.tile.move(cube, target_memory=pl.Mem.Vec)
+                tmp = pl.tile.create([16, 16], dtype=pl.FP32)
+                column = pl.tile.row_max(scores, tmp_tile=tmp)
+                row = pl.tile.reshape(column, [1, 16])
+                updated = pl.tile.maximum(maximum, row)
+                result = pl.yield_(updated)
+            stored = pl.tile.store(result, [0, 0], out)
+            return stored
+
+    with pytest.raises(ValueError, match="full-width operand 'maximum'"):
+        _lower(Before)
+
+
 def test_slice_drop_dims_maps_the_result_axis_back_to_the_source_axis():
     """shape / offset / valid_shape are indexed in the PRE-DROP rank.
 

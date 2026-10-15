@@ -910,26 +910,10 @@ bool HasAutoEquivalentReinterpretShape(const CallPtr& call) {
   return true;
 }
 
-// Handle a tile.reshape whose input is an already-split tile. Reshape preserves
-// row-major element order, so the split partition (first half vs second half of
-// the input's split dim) lands on a specific result dimension; this finds it and
-// halves that dimension, re-tracking the (possibly migrated) split axis.
-//
-// Returns: the rewritten statement when the split axis migrates to a *different*
-// result dim (e.g. the rms_norm [N,1]->[1,N] column reshape); nullptr when it
-// stays on the same dim index OR the row-major partition cannot be flat-tracked
-// (caller falls through to generic halving, which also covers dynamic dims and
-// the non-contiguous LEFT_RIGHT prefix); throws (reject) only when flat-tracking
-// applies but no result dim carries the halved split cleanly -- rather than
-// silently miscompile.
-StmtPtr TryMigrateReshapeSplit(const CallPtr& call, const std::shared_ptr<const AssignStmt>& assign,
-                               const std::shared_ptr<const TileType>& in_tt, int in_split_dim,
-                               const ExprPtr& subblock_idx,
-                               std::unordered_map<const Var*, TileInfo>& tile_vars,
-                               std::unordered_map<const Var*, VarPtr>& var_replacements,
+int InferReshapeSplitDimension(const CallPtr& call, const TileTypePtr& in_tt, int in_split_dim,
                                const ExprPtr& lane_stride) {
   auto res_tt = std::dynamic_pointer_cast<const TileType>(call->GetType());
-  if (!res_tt || call->args_.size() < 2) return nullptr;
+  if (!res_tt || call->args_.size() < 2) return in_split_dim;
   INTERNAL_CHECK_SPAN(in_split_dim >= 0 && in_split_dim < static_cast<int>(in_tt->shape_.size()), call->span_)
       << "Internal error: input split dim " << in_split_dim << " out of bounds for rank "
       << in_tt->shape_.size();
@@ -960,9 +944,9 @@ StmtPtr TryMigrateReshapeSplit(const CallPtr& call, const std::shared_ptr<const 
         << " cannot carry it, and an odd axis cannot be tracked through the reshape (its two lanes hold "
            "different extents). Pad that axis to an even extent and narrow it back with "
            "pl.tile.set_validshape(...), or keep the reshape out of the split scope.";
-    return nullptr;
+    return in_split_dim;
   }
-  if (prefix_in != 1 || !orig_c || inner_in < 0) return nullptr;
+  if (prefix_in != 1 || !orig_c || inner_in < 0) return in_split_dim;
 
   // Number of elements in the first half (row-major) of the split partition.
   const int64_t split_flat = (orig_c->value_ / 2) * inner_in;
@@ -972,10 +956,10 @@ StmtPtr TryMigrateReshapeSplit(const CallPtr& call, const std::shared_ptr<const 
   int64_t prefix_out = 1;
   for (int d = 0; d < static_cast<int>(res_tt->shape_.size()); ++d) {
     auto out_c = std::dynamic_pointer_cast<const ConstInt>(res_tt->shape_[d]);
-    if (!out_c) return nullptr;  // dynamic result dim -> defer to generic
+    if (!out_c) return in_split_dim;  // dynamic result dim -> defer to generic
     const int64_t inner_out =
         StaticDimProduct(res_tt->shape_, d + 1, static_cast<int>(res_tt->shape_.size()));
-    if (inner_out < 0) return nullptr;
+    if (inner_out < 0) return in_split_dim;
     if (prefix_out == 1 && (out_c->value_ % 2) == 0 && (out_c->value_ / 2) * inner_out == split_flat) {
       d_out = d;
       break;
@@ -992,7 +976,7 @@ StmtPtr TryMigrateReshapeSplit(const CallPtr& call, const std::shared_ptr<const 
 
   // Split axis stays on the same dim index -> generic halving handles it; only
   // migrate when it actually moves.
-  if (d_out == in_split_dim) return nullptr;
+  if (d_out == in_split_dim) return in_split_dim;
 
   // A migrated axis carries its own half, which is derived from the RESULT dim's
   // box — it cannot express a partition balanced on another axis's valid extent.
@@ -1002,6 +986,31 @@ StmtPtr TryMigrateReshapeSplit(const CallPtr& call, const std::shared_ptr<const 
       << " inside a split region whose ragged boundary was balanced across the two AIV lanes. The two "
          "partitions cannot be reconciled: pad the boundary tile's valid extent to its physical box "
          "with pl.tile.set_validshape(...), or move the reshape out of the split scope.";
+
+  return d_out;
+}
+
+// Handle a tile.reshape whose input is an already-split tile. Reshape preserves
+// row-major element order, so the split partition (first half vs second half of
+// the input's split dim) lands on a specific result dimension; this finds it and
+// halves that dimension, re-tracking the (possibly migrated) split axis.
+//
+// Returns: the rewritten statement when the split axis migrates to a *different*
+// result dim (e.g. the rms_norm [N,1]->[1,N] column reshape); nullptr when it
+// stays on the same dim index OR the row-major partition cannot be flat-tracked
+// (caller falls through to generic halving, which also covers dynamic dims and
+// the non-contiguous LEFT_RIGHT prefix); throws (reject) only when flat-tracking
+// applies but no result dim carries the halved split cleanly -- rather than
+// silently miscompile.
+StmtPtr TryMigrateReshapeSplit(const CallPtr& call, const std::shared_ptr<const AssignStmt>& assign,
+                               const std::shared_ptr<const TileType>& in_tt, int in_split_dim,
+                               const ExprPtr& subblock_idx,
+                               std::unordered_map<const Var*, TileInfo>& tile_vars,
+                               std::unordered_map<const Var*, VarPtr>& var_replacements,
+                               const ExprPtr& lane_stride) {
+  const int d_out = InferReshapeSplitDimension(call, in_tt, in_split_dim, lane_stride);
+  if (d_out == in_split_dim) return nullptr;
+  auto res_tt = std::dynamic_pointer_cast<const TileType>(call->GetType());
 
   // Halve the migrated dim on both the reshape target arg and the result type.
   ExprPtr half_dim_size = ComputeHalfDimSize(res_tt->shape_[d_out]);
@@ -1680,6 +1689,12 @@ std::string ReserveFreshName(std::unordered_set<std::string>& used_names, const 
 }
 
 }  // namespace
+
+int ReshapeSplitDimension(const CallPtr& call, int input_split_dim) {
+  auto input = std::dynamic_pointer_cast<const TileType>(call->args_[0]->GetType());
+  INTERNAL_CHECK_SPAN(input, call->span_) << "Internal error: reshape input must be a tile";
+  return InferReshapeSplitDimension(call, input, input_split_dim, nullptr);
+}
 
 // Shared loop/branch carry repair. Extracted so the AUTO affinity-gated path in
 // lower_auto_vector_split_pass.cpp gets the same treatment as ProcessStmts: it

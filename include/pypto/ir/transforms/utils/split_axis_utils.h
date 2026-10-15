@@ -343,6 +343,10 @@ struct TransposeSplitHazard {
  */
 TransposeSplitHazard FindTransposeSplitHazard(const StmtPtr& body, int split_dim);
 
+/// Map an already partitioned reshape input axis to the result axis using the
+/// same representability checks as lowering. Operates on the original full types.
+int ReshapeSplitDimension(const CallPtr& call, int input_split_dim);
+
 /**
  * @brief Halve every split-axis tile along a statement list (recursive driver).
  *

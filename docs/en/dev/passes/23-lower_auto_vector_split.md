@@ -912,6 +912,16 @@ follow the same axis and tracking rules or the conditions above misfire:
   recurses through its own walk and cannot reach the explicit path's `ForStmt`
   branch, so without this a legal tile accumulator has its carry reported as a
   full-width operand.
+- **Migrated loop state.** Under `UP_DOWN`, a `[1, H]` initializer is normally
+  replicated, but `row_max([H, K]) -> reshape([1, H])` partitions its update on
+  dimension 1. The AUTO path first analyzes the body for a backedge partition.
+  For a local `tile.full` initializer (optionally reshaped), a static even migrated
+  extent is sliced before the loop: `[1, H/2]` at `[0, lane * H/2]`. Entry, backedge,
+  and exit then agree, including when the loop executes zero times. The original
+  initializer stays full width for other uses. This applies to `for` and `while`
+  carries; it does not infer arbitrary cyclic partition constraints, partition
+  external initializers, or reconcile migrated axes with ragged boundary strides.
+  Existing operand and backedge checks still validate the rewritten body.
 - **The loop backedge.** The third edge is the value the body yields back into
   the carry, and `ValidateCarryBackedge` is what checks it: the yielded value
   must be lane-local exactly when the carry is. A halved carry fed a full-width
