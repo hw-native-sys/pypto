@@ -190,6 +190,46 @@ REGISTER_OP("buffer.alloc")
                                  const std::vector<std::pair<std::string, std::any>>&,
                                  const TypePtr& result_type) { ValidateBufferAlloc(args, result_type); });
 
+REGISTER_OP("buffer.alloc_multi")
+    .set_description("Declare distinct addressless slots with one static physical descriptor")
+    .no_argument()
+    .set_op_category("BufferOp")
+    .set_ir_stage(OpIRStage::Buffer)
+    .set_internal_only()
+    .set_output_arity(1)
+    .set_buffer_result_behavior(BufferResultBehavior::Allocate)
+    .f_validate_explicit_type([](const std::vector<ExprPtr>& args,
+                                 const std::vector<std::pair<std::string, std::any>>&,
+                                 const TypePtr& result) {
+      auto multi = As<MultiBufferType>(result);
+      CHECK(args.empty() && multi) << "buffer.alloc_multi requires no operands and a MultiBufferType";
+      for (auto extent : multi->element_type_->valid_shape_) {
+        CHECK(extent >= 0) << "buffer.alloc_multi requires static valid extents";
+      }
+    });
+
+REGISTER_OP("buffer.get_slot")
+    .set_description("Select a static slot without copying or initializing its contents")
+    .set_op_category("BufferOp")
+    .set_ir_stage(OpIRStage::Buffer)
+    .set_internal_only()
+    .add_argument("allocation", "Multi-buffer allocation")
+    .add_argument("index", "Static INDEX slot number")
+    .set_output_arity(1)
+    .set_buffer_arg_effect(0, BufferAccess::None, BufferAccess::Read)
+    .set_buffer_non_memory_arg(1)
+    .set_buffer_result_behavior(BufferResultBehavior::Alias, 0)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>&) -> TypePtr {
+      CHECK(args.size() == 2 && args[0] && args[1]) << "buffer.get_slot requires allocation and index";
+      auto multi = As<MultiBufferType>(args[0]->GetType());
+      auto index = As<ConstInt>(args[1]);
+      CHECK(multi && index && index->dtype() == DataType::INDEX && index->value_ >= 0 &&
+            index->value_ < multi->slot_count_)
+          << "buffer.get_slot requires a static INDEX within the allocation's slots";
+      return multi->element_type_;
+    });
+
 // Runtime valid state belongs to the handle. Updating it does not create a
 // second handle or write data, and must not change immutable descriptor fields.
 REGISTER_OP("buffer.set_validshape")

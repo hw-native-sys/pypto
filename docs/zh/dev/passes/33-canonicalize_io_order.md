@@ -53,7 +53,9 @@ result = passes.canonicalize_io_order()(program)
 
 每一步在 `ready`（所有前驱已发射）的语句中，发射 `(tier, stage, sub, original_index)` 最小者 —— `tier` 为标量 compute=0、load=1、tile-compute/store=2；`stage` 取语句的 `pipeline_membership`（这样 tile 定义与消费它的 store 共享同一 stage）；`sub` 为 compute=0、store=1。于是 load（tier 1）聚集在所有 compute/store 之前，而 compute/store 这一档里每个 stage 的 compute 先于其 store、再到下一个 stage。非流水线区域无 membership（`stage` 为空），tier/sub 排序退化为原先的 标量 → load → compute → store 阶梯。
 
-对于带 `pipeline_double_buffer_c=true` 的循环，compute/store key 改为按 `stage/2` 分组，并在每组内让 compute 先于 drain。于是深度 4 的源流水线发射 `M0 M1 S0 S1 M2 M3 S2 S3`：操作数 membership 仍保留深度 4，而 cube 产生的 Acc membership 在调度后对 2 取模，使 `MemoryReuse` 恰好保留两块 L0C。
+带 `pipeline_double_buffer_c=true` 的循环使用与其他流水线**相同**的 compute/store key，因此深度 4 的源流水线发射 `M0 S0 M1 S1 M2 S2 M3 S3`。该顺序本身就是 dbC 的 ping-pong：每个 drain 紧跟在产生它的那条 MAD 之后发射，并在下一条 MAD 于另一块累加器上执行时同时进行。该属性在此处的唯一作用是：调度后把 cube 产生的 Acc membership 对 2 取模，使操作数 membership 保留深度 4，而 `MemoryReuse` 恰好保留两块 L0C。
+
+> 在 dbC 发射被修正之前，该 key 会按 `stage/2` 分组并发射 `M0 M1 S0 S1 M2 M3 S2 S3`，这会把每个 drain 推迟到它本应重叠的计算之后。这样做原本是为了强制累加器生命周期重叠，从而让分配器把它们分开——但分离实际由取模后的 membership 承担，因此该重排没有带来分离，反而丢掉了重叠。Ascend 910B2 上的实测显示该重排本身的收益 ≤ 0.08 µs。
 
 示例 —— 输入 `[scalar_0, load_0, compute_0, store_0, scalar_1, load_1, compute_1, store_1]`，每个克隆的 load 读其 scalar、每个 compute 读其 load、每个 store 读其 scalar 与 compute：
 
