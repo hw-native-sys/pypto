@@ -34,6 +34,10 @@ python -m pytest tests/ut/codegen/ --require-ptoas -m ptoas_compile -v
 PYPTO/DSA_RP 对照路径。此看护检查 MLIR 和生成 C++ 的编译过程；不能替代设备数值测试，
 也不代表已穷举验证整个内存规划器。
 
+输入由本地分配支撑时，填充结果使用动态有效范围的 reshape 别名，并显式初始化为完整
+tile 范围。这保留了后续 `set_validshape` 更新，包括运行时边界以及对原填充句柄的使用。
+切片及其他不可修改有效范围的视图输入仍使用静态有效范围，原有的有效范围更新限制保持不变。
+
 扩展看护时，在 `tests/ut/codegen/` 下的回归测试上添加 `@pytest.mark.ptoas_compile`。
 测试必须断言相关的生成代码语义，并实际调用 PTOAS 编译；标记只负责选择测试。
 CI 会发现该目录下所有带此标记的测试，因此新增算子或测试文件无须修改工作流。
@@ -46,8 +50,9 @@ CI 中应保留 `--require-ptoas`，确保编译器不可用时失败。
 python -m pytest tests/st/runtime/ops/test_fillpad_inplace.py --memory-planner=ptoas --platform=a2a3sim,a5sim --forked -v
 ```
 
-这六个用例将完整的 `[64, 64]` 输出与参考结果比较：前 48 行保留输入，
-后 16 行分别填充零、正无穷或负无穷。它们为编译看护补充模拟器数值覆盖，
+六个基础用例将完整的 `[64, 64]` 输出与参考结果比较：前 48 行保留输入，
+后 16 行分别填充零、正无穷或负无穷。另六个用例覆盖填充后静态或动态更新有效范围，
+再通过原填充别名执行填充的场景。它们为编译看护补充模拟器数值覆盖，
 并不代表编译测试中的所有视图组合都已验证设备执行正确性。
 
 ## 图例
@@ -207,7 +212,7 @@ python -m pytest tests/st/runtime/ops/test_fillpad_inplace.py --memory-planner=p
 | pto.textract | TEXTRACT | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tfillpad | TFILLPAD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tfillpad_expand | TFILLPAD_EXPAND | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.tfillpad_inplace | TFILLPAD_INPLACE | tile | ✅ | ✅ | ❌ | ❌ | — | 发射 `pto.tfillpad`；PTOAS 内存规划通过 `pto.treshape` 别名保留目标 pad 和完整有效范围，同时保持输入视图不变 |
+| pto.tfillpad_inplace | TFILLPAD_INPLACE | tile | ✅ | ✅ | ❌ | ❌ | — | 发射 `pto.tfillpad`；PTOAS 内存规划通过 `pto.treshape` 别名保留目标 pad 和完整有效范围；由本地分配支撑的结果保留运行时有效范围更新能力 |
 | pto.textract_fp | TEXTRACT_FP / TEXTRACT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
 | pto.tinsert_fp | TINSERT_FP / TINSERT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
 | **排序（2）** |  |  |  |  |  |  |  |  |

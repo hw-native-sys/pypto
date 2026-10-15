@@ -44,6 +44,12 @@ missing compiler. The tests cover PTOAS-owned memory planning and the PYPTO/DSA_
 comparison paths on both backends. This guard checks MLIR and compilation to C++;
 it does not replace device numerical tests or exhaustively validate the planner.
 
+For an allocation-backed input, the padded result uses a dynamic-valid reshape
+alias initialized to the full tile extent. This preserves subsequent
+`set_validshape` updates, including runtime bounds and uses of the original padded
+handle. Slice and other non-mutable view inputs retain the static-valid lowering;
+the existing restrictions on updating their validity still apply.
+
 To extend this guard, add `@pytest.mark.ptoas_compile` to a regression test under
 `tests/ut/codegen/`. The test must assert the relevant generated-code semantics
 and actually invoke PTOAS compilation; the marker only selects tests. CI discovers
@@ -57,10 +63,12 @@ After installing the runtime, the same CI job also runs the existing
 python -m pytest tests/st/runtime/ops/test_fillpad_inplace.py --memory-planner=ptoas --platform=a2a3sim,a5sim --forked -v
 ```
 
-These six cases compare the full `[64, 64]` output against a reference: the first
+The six basic cases compare the full `[64, 64]` output against a reference: the first
 48 rows retain the input, and the last 16 rows contain zero, positive infinity,
-or negative infinity. This complements the compilation guard with simulator
-numerical coverage; it does not establish on-device correctness for every view
+or negative infinity. Six more cases cover padding followed by static/runtime
+validity updates and another fill through the original padded alias. This
+complements the compilation guard with simulator numerical coverage; it does not
+establish on-device correctness for every view
 composition covered by the compilation tests.
 
 ## Legend
@@ -225,7 +233,7 @@ composition covered by the compilation tests.
 | pto.textract | TEXTRACT | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tfillpad | TFILLPAD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tfillpad_expand | TFILLPAD_EXPAND | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.tfillpad_inplace | TFILLPAD_INPLACE | tile | ✅ | ✅ | ❌ | ❌ | — | emits `pto.tfillpad`; PTOAS planning uses a `pto.treshape` alias for the destination pad and full valid shape while preserving the input view |
+| pto.tfillpad_inplace | TFILLPAD_INPLACE | tile | ✅ | ✅ | ❌ | ❌ | — | emits `pto.tfillpad`; PTOAS planning preserves the destination pad/full validity with a `pto.treshape` alias; allocation-backed results retain runtime validity updates |
 | pto.textract_fp | TEXTRACT_FP / TEXTRACT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
 | pto.tinsert_fp | TINSERT_FP / TINSERT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
 | **Sorting (2)** |  |  |  |  |  |  |  |  |

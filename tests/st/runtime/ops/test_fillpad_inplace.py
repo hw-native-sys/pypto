@@ -22,8 +22,11 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
+from harness import st
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto.ir.pass_manager import OptimizationStrategy
+from pypto.pypto_core.passes import MemoryPlanner
+from pypto.runtime.tensor_spec import ScalarSpec
 
 # --- Programs ---
 
@@ -210,6 +213,65 @@ class TestFillpadInplace:
         """Verify fillpad_inplace fills the padding region with FP32 min value (-inf)."""
         result = test_runner.run(FillpadInplaceMinTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
+
+
+@pl.jit
+def fillpad_then_narrow_static(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+    """A post-padding validity update must mutate the original padded handle."""
+    with pl.at(level=pl.Level.CORE_GROUP):
+        src = pl.load(x, [0, 0], [64, 64], valid_shape=[48, 64])
+        padded = pl.tile.fillpad_inplace(src, pad_value=pl.PadValue.zero)
+        _narrowed = pl.tile.set_validshape(padded, 32, 48)
+        repadded = pl.tile.fillpad_inplace(padded, pad_value=pl.PadValue.max)
+        pl.store(repadded, [0, 0], out)
+    return out
+
+
+@pl.jit
+def fillpad_then_narrow_dynamic(
+    x: pl.Tensor, out: pl.Out[pl.Tensor], rows: pl.Scalar[pl.INDEX], cols: pl.Scalar[pl.INDEX]
+):
+    """Runtime bounds also preserve alias mutation, including previously padded rows."""
+    with pl.at(level=pl.Level.CORE_GROUP):
+        src = pl.load(x, [0, 0], [64, 64], valid_shape=[48, 64])
+        padded = pl.tile.fillpad_inplace(src, pad_value=pl.PadValue.zero)
+        _narrowed = pl.tile.set_validshape(padded, rows, cols)
+        repadded = pl.tile.fillpad_inplace(padded, pad_value=pl.PadValue.max)
+        pl.store(repadded, [0, 0], out)
+    return out
+
+
+def _fillpad_narrow_cases():
+    for kernel, bounds in (
+        (fillpad_then_narrow_static, (32, 48)),
+        (fillpad_then_narrow_dynamic, (32, 48)),
+        (fillpad_then_narrow_dynamic, (56, 48)),
+    ):
+        rows, cols = bounds
+        # Nonzero deterministic input distinguishes preserved data from padding.
+        x = torch.arange(1, 48 * 64 + 1, dtype=torch.float32).reshape(48, 64)
+        padded = torch.zeros(64, 64, dtype=torch.float32)
+        padded[:48, :] = x
+        expected = torch.full((64, 64), float("inf"), dtype=torch.float32)
+        expected[:rows, :cols] = padded[:rows, :cols]
+        dynamic = kernel is fillpad_then_narrow_dynamic
+        scalar_args = bounds if dynamic else ()
+        yield st.case(
+            kernel,
+            x,
+            torch.empty(64, 64, dtype=torch.float32),
+            *scalar_args,
+            name=f"fillpad_after_{'dynamic' if dynamic else 'static'}_narrow_{rows}x{cols}",
+            scalars=[ScalarSpec("rows", rows), ScalarSpec("cols", cols)] if dynamic else [],
+            memory_planner=MemoryPlanner.PTOAS,
+            golden=lambda _tensors, expected=expected: expected,
+        )
+
+
+@st.cases(*_fillpad_narrow_cases())
+def test_fillpad_inplace_after_set_validshape(case_run):
+    """The second fill must observe the narrowed metadata through the old alias."""
+    case_run.assert_passed()
 
 
 if __name__ == "__main__":

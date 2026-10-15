@@ -1981,6 +1981,7 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
   Emit(line.str());
 
   fs_.ssa_to_tile_buf_type[tile_buf] = fields.type_str;
+  RegisterMutableTileName(tile_buf);
 }
 
 // ========================================================================
@@ -2120,6 +2121,14 @@ void PTOCodegen::RegisterTileViewName(const std::string& ssa_name) { fs_.tile_vi
 
 bool PTOCodegen::IsTileViewName(const std::string& ssa_name) const {
   return fs_.tile_view_names.count(ssa_name) > 0;
+}
+
+void PTOCodegen::RegisterMutableTileName(const std::string& ssa_name) {
+  fs_.mutable_tile_names.insert(ssa_name);
+}
+
+bool PTOCodegen::IsMutableTileName(const std::string& ssa_name) const {
+  return fs_.mutable_tile_names.count(ssa_name) > 0;
 }
 
 void PTOCodegen::RegisterSubviewMaterialization(const std::string& subview_ssa,
