@@ -378,6 +378,21 @@ void CollectVarsFromShapeExprImpl(const ExprPtr& expr, std::set<const ir::Var*>&
     return;
   }
   if (auto call = As<ir::Call>(expr)) {
+    if (ir::IsOp(call, "tensor.dim")) {
+      INTERNAL_CHECK_SPAN(call->args_.size() == 2, call->span_) << "tensor.dim requires a tensor and an axis";
+      auto tensor = ir::AsTensorTypeLike(call->args_[0]->GetType());
+      auto axis_expr = As<ir::ConstInt>(call->args_[1]);
+      INTERNAL_CHECK_SPAN(tensor && axis_expr, call->span_)
+          << "tensor.dim requires a tensor and a constant axis";
+      int64_t axis = axis_expr->value_;
+      if (axis < 0) axis += static_cast<int64_t>(tensor->shape_.size());
+      INTERNAL_CHECK_SPAN(axis >= 0 && static_cast<size_t>(axis) < tensor->shape_.size(), call->span_)
+          << "tensor.dim axis is out of range";
+      // The tensor operand is not a scalar ABI argument. Only symbols in the
+      // selected declared extent must be recovered from runtime tensor shapes.
+      CollectVarsFromShapeExprImpl(tensor->shape_[axis], seen, out);
+      return;
+    }
     for (const auto& arg : call->args_) {
       CollectVarsFromShapeExprImpl(arg, seen, out);
     }
@@ -2511,8 +2526,8 @@ std::string PTOCodegen::GetExprAsCode(const ExprPtr& expr) {
     return result;
   }
 
-  LOG_ERROR << "GetExprAsCode for unsupported expression type";
-  return "";
+  INTERNAL_CHECK_SPAN(false, expr->span_)
+      << "Internal error: PTO expression emitter produced no SSA operand for " << expr->TypeName();
 }
 
 std::string PTOCodegen::GetTypeString(const DataType& dtype) const {

@@ -1896,6 +1896,13 @@ class ASTParser:
             elif isinstance(resolved, ir.TensorType) and resolved.tensor_view is not None:
                 # Annotation specifies tensor view (stride/layout); preserve it
                 override_type = resolved
+            elif type(resolved) is ir.TensorType and type(value_expr.type) is ir.TensorType:
+                # Flattening changes evaluated shape operands to temporaries
+                # while the printed type retains its declarative expression.
+                # Keep the validated annotation on print/parse round-trips.
+                override_type = ir.TensorType(
+                    resolved.shape, resolved.dtype, value_expr.type.memref, value_expr.type.tensor_view
+                )
             elif (
                 isinstance(resolved, ir.ScalarType)
                 and isinstance(value_expr.type, ir.ScalarType)

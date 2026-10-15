@@ -70,6 +70,12 @@ class FlattenCallExprMutator : public IRMutator {
   StmtPtr VisitStmt_(const GraphScopeStmtPtr& op) override;
 
   // Expression visitors
+  // Types are declarative expressions, not statement evaluation sites. Walking
+  // a Var's type with this mutator would extract shape calls into temporaries
+  // in the current body, rebuild the Var, and strand loop/header references.
+  // Preserve both variable identities and their embedded shape expressions.
+  ExprPtr VisitExpr_(const VarPtr& op) override { return op; }
+  ExprPtr VisitExpr_(const IterArgPtr& op) override { return op; }
   ExprPtr VisitExpr_(const CallPtr& op) override;
   ExprPtr VisitExpr_(const SubmitPtr& op) override;
   ExprPtr VisitExpr_(const AddPtr& op) override;

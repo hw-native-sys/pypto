@@ -41,6 +41,13 @@ constants block is finalized, so a constant that appears only inside a shape or
 stride expression — e.g. the `2` in a composite parameter dim `M * 2` — is still
 declared in the constants block before its use.
 
+Shape expressions may retain `tensor.dim(x, axis)`. Codegen emits the selected
+declared extent as an INDEX operand, including constant, symbolic and composite
+extents; it does not require an existing tensor view for `x` or a prior IR fold.
+Only scalar symbols in that extent become dynamic-dimension ABI arguments, not
+the tensor operand itself. Printed type annotations preserve these reads when
+parsed again, without evaluating parameter references as Python values.
+
 ## Architecture
 
 ### Explicit Buffer input

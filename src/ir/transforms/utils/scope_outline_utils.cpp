@@ -615,6 +615,20 @@ class StoreEvalToAssignMutator : public IRMutator {
   std::unordered_set<const Var*> claimed_;
 };
 
+/// Collect tensor operands in shape expressions without traversing their types.
+class TensorTypeDependencyCollector : public IRVisitor {
+ public:
+  std::vector<const Var*> tensors;
+
+ protected:
+  void VisitExpr_(const VarPtr& op) override {
+    if (AsTensorTypeLike(op->GetType())) tensors.push_back(op.get());
+  }
+  void VisitExpr_(const IterArgPtr& op) override {
+    if (AsTensorTypeLike(op->GetType())) tensors.push_back(op.get());
+  }
+};
+
 /**
  * @brief Collect the *upward-exposed* uses of a subtree — variables read
  *        before the subtree (re)defines them.
@@ -633,8 +647,9 @@ class StoreEvalToAssignMutator : public IRMutator {
  * On SSA input the two agree exactly: no Var is defined twice, so a variable
  * defined inside the body can never also be read ahead of that definition.
  * The traversal order deliberately mirrors ``VarDefUseCollector`` so the
- * derived parameter order is unchanged; only *when* a definition is recorded
- * differs (after the assigned value is visited, matching ``SSAVerifier``).
+ * derived parameter order is unchanged except that tensors referenced by a
+ * captured variable's shape precede that variable. Definitions are recorded
+ * after the assigned value is visited, matching ``SSAVerifier``.
  */
 class UpwardExposedUseCollector : public IRVisitor {
  public:
@@ -708,6 +723,14 @@ class UpwardExposedUseCollector : public IRVisitor {
  private:
   void RecordUse(const Var* var) {
     if (var && defined_.count(var) == 0 && live_in_.insert(var).second) {
+      // A retained tensor.dim in a captured type names another tensor. Capture
+      // that tensor before its dependent parameter so the outlined signature
+      // is self-contained. Bare dimension symbols remain signature-bound.
+      if (auto type = AsTensorTypeLike(var->GetType())) {
+        TensorTypeDependencyCollector dependencies;
+        for (const auto& dim : type->shape_) dependencies.VisitExpr(dim);
+        for (const Var* dependency : dependencies.tensors) RecordUse(dependency);
+      }
       ordered.push_back(var);
     }
   }

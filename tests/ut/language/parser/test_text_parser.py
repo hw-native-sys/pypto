@@ -848,5 +848,26 @@ class Prog:
         _assert_caret_on_line(err, expected_substring="this_op_does_not_exist")
 
 
+@pytest.mark.parametrize("extent", ["8", "N"])
+@pytest.mark.parametrize("axis", [0, -2])
+def test_tensor_dim_parameter_shape_roundtrips(extent, axis):
+    """Dependent annotations are parsed as IR, never evaluated as Python."""
+    source = f"""
+N = pl.dynamic("N")
+
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def main(self, x: pl.Tensor[[{extent}, 32], pl.FP32],
+             view: pl.Tensor[[pl.tensor.dim(x, pl.const({axis}, pl.INDEX)) * 2, 16], pl.FP32]):
+        return view
+"""
+    before = pl.parse(source)
+    printed = ir.python_print(before)
+    assert "pl.tensor.dim(" in printed
+    after = pl.parse(printed)
+    ir.assert_structural_equal(before, after)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
