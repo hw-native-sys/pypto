@@ -9,7 +9,6 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include <algorithm>
 #include <any>
 #include <array>
 #include <cstddef>
@@ -118,7 +117,6 @@ class Projection {
   void VisitIgnoreField(F&&) {}
   template <typename F>
   void VisitUsualField(F&& visit) {
-    if (skip_scope_body_ && !path_.empty() && path_.back() == "body") return;
     visit();
   }
   template <typename F>
@@ -150,13 +148,17 @@ class Projection {
   }
 
  private:
-  [[noreturn]] void Unsupported(const std::string& reason) const {
+  std::string CurrentPath() const {
     std::string path = "root";
     for (const auto& part : path_) {
       if (path.size() >= 1024) break;
       path += "." + part.substr(0, 128);
     }
-    throw StructuralComparisonUnsupported(reason, path);
+    return path.substr(0, 1024);
+  }
+
+  [[noreturn]] void Unsupported(const std::string& reason) const {
+    throw StructuralComparisonUnsupported(reason, CurrentPath());
   }
 
   Id Intern(std::string tag, std::string atom = "", Fields fields = {}) {
@@ -164,11 +166,21 @@ class Projection {
   }
 
   template <typename T>
-  Id Reflect(const T& value, const std::string& tag) {
+  Id Reflect(const T& value, const std::string& tag, bool skip_body = false) {
     auto fields = std::apply(
         [&](auto&&... descriptors) {
-          return reflection::FieldIterator<T, Projection, decltype(descriptors)...>::Visit(value, *this,
-                                                                                           descriptors...);
+          Fields result;
+          auto visit = [&](const auto& desc) {
+            // VisitUsualField runs before PushFieldName, so inspect the current
+            // descriptor here. Only this scope's body is deferred; metadata and
+            // any nested reflected values retain their normal traversal.
+            if (skip_body && std::string(desc.name) == "body") return;
+            auto field = reflection::FieldIterator<T, Projection, std::decay_t<decltype(desc)>>::Visit(
+                value, *this, desc);
+            result.insert(result.end(), field.begin(), field.end());
+          };
+          (visit(descriptors), ...);
+          return result;
         },
         T::GetFieldDescriptors());
     return Intern(tag, "", std::move(fields));
@@ -209,11 +221,16 @@ class Projection {
     size_t first;
     size_t last;
   };
+  struct UseEdge {
+    size_t child;
+    std::string suffix;
+  };
   struct UseRecord {
     UseRange range;
     const Var* variable;
-    std::vector<size_t> children;
-    std::string path;
+    std::vector<UseEdge> children;
+    std::string first_path;
+    std::string last_path;
   };
 
   // Expressions/types have no binding side effects. Propagate the earliest and
@@ -223,37 +240,47 @@ class Projection {
   size_t BeginUses(const void* object, bool definition, const Var* variable) {
     auto [it, inserted] = use_index_.emplace(std::make_pair(object, definition), uses_.size());
     size_t id = it->second;
+    const std::string path = CurrentPath();
     if (inserted) {
-      std::string path = "root";
-      for (const auto& part : path_) {
-        if (path.size() >= 1024) break;
-        path += "." + part.substr(0, 128);
-      }
-      uses_.push_back({{position_, position_}, definition ? nullptr : variable, {}, std::move(path)});
+      uses_.push_back({{position_, position_}, definition ? nullptr : variable, {}, path, path});
     } else {
       uses_[id].range.last = position_;
+      uses_[id].last_path = path;
     }
-    if (use_parent_ != kForever) uses_[use_parent_].children.push_back(id);
+    if (use_parent_ != kForever) {
+      auto& parent = uses_[use_parent_];
+      // Children are traversed only on the parent's first use. Retain the
+      // relative field path so later uses can report the same leaf accurately.
+      parent.children.push_back({id, path.substr(parent.first_path.size())});
+    }
     use_parent_ = id;
     return id;
   }
 
   void CheckVisibility() {
     for (auto it = use_postorder_.rbegin(); it != use_postorder_.rend(); ++it) {
-      const auto range = uses_[*it].range;
-      for (size_t child : uses_[*it].children) {
-        auto& target = uses_[child].range;
-        target.first = std::min(target.first, range.first);
-        target.last = std::max(target.last, range.last);
+      const auto& source = uses_[*it];
+      for (const auto& edge : source.children) {
+        auto& target = uses_[edge.child];
+        if (source.range.first < target.range.first) {
+          target.range.first = source.range.first;
+          target.first_path = (source.first_path + edge.suffix).substr(0, 1024);
+        }
+        if (source.range.last > target.range.last) {
+          target.range.last = source.range.last;
+          target.last_path = (source.last_path + edge.suffix).substr(0, 1024);
+        }
       }
     }
     for (const auto& use : uses_) {
       auto binding = bindings_.find(use.variable);
       if (binding == bindings_.end()) continue;  // True open capture, not a local binder.
       auto lifetime = lifetimes_.find(use.variable);
-      if (lifetime == lifetimes_.end() || use.range.first < lifetime->second.first ||
-          use.range.last >= lifetime->second.last) {
-        throw StructuralComparisonUnsupported("BindingNotVisible", use.path);
+      if (lifetime == lifetimes_.end() || use.range.first < lifetime->second.first) {
+        throw StructuralComparisonUnsupported("BindingNotVisible", use.first_path);
+      }
+      if (use.range.last >= lifetime->second.last) {
+        throw StructuralComparisonUnsupported("BindingNotVisible", use.last_path);
       }
     }
   }
@@ -323,9 +350,7 @@ class Projection {
     } else if (auto scope = As<ScopeStmt>(stmt)) {
       // Scope metadata is evaluated on entry; these straight-line regions do
       // not hide definitions from subsequent statements (see ScopeStmt).
-      skip_scope_body_ = true;
-      DispatchNode(stmt);
-      skip_scope_body_ = false;
+      DispatchNode(stmt, true);
       CheckField("body", scope->body_);
     } else {
       DispatchNode(stmt);
@@ -346,7 +371,9 @@ class Projection {
       auto [it, inserted] = free_ids_.emplace(var.get(), free_ids_.size());
       binding = {"free_mapped", it->second};
     }
+    path_.emplace_back("type");
     Fields fields{{"type", Value(var->GetType())}};
+    path_.pop_back();
     fields.emplace_back("binding", Intern(binding.category, std::to_string(binding.id)));
     // A use references the IterArg binder; its initial value belongs to the
     // enclosing loop's definition, not to every use of that IterArg.
@@ -413,10 +440,10 @@ class Projection {
     return result;
   }
 
-  Id DispatchNode(const IRNodePtr& node) {
-#define PROJECT_NODE(T)                       \
-  if (auto value = As<T>(node)) {             \
-    return Reflect(*value, node->TypeName()); \
+  Id DispatchNode(const IRNodePtr& node, bool skip_body = false) {
+#define PROJECT_NODE(T)                                  \
+  if (auto value = As<T>(node)) {                        \
+    return Reflect(*value, node->TypeName(), skip_body); \
   }
     PROJECT_NODE(ConstInt)
     PROJECT_NODE(ConstFloat)
@@ -540,7 +567,7 @@ class Projection {
   }
 
   Id Value(const std::string& value) { return Intern("string", value); }
-  Id Value(const DataType& value) { return Intern("dtype", value.ToString()); }
+  Id Value(const DataType& value) { return Intern("dtype", std::to_string(value.Code())); }
   Id Value(const TensorView& value) { return Reflect(value, "TensorView"); }
   Id Value(const TileView& value) { return Reflect(value, "TileView"); }
 
@@ -623,7 +650,6 @@ class Projection {
   bool map_free_;
   bool collecting_ = false;
   bool checking_visibility_ = false;
-  bool skip_scope_body_ = false;
   size_t position_ = 0;
   size_t use_parent_ = kForever;
   std::map<std::pair<const void*, bool>, size_t> use_index_;

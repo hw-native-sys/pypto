@@ -39,6 +39,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/type.h"
+#include "utils/structural_comparison_cache.h"
 
 namespace pypto {
 namespace ir {
@@ -427,7 +428,11 @@ class StructuralHasher {
     INTERNAL_CHECK(var) << "structural_hash encountered null Var back-reference";
     auto it = var_identity_map_.find(var);
     if (it != var_identity_map_.end()) return it->second;
-    if (!enable_auto_mapping_) return static_cast<result_type>(var->UniqueId());
+    if (!enable_auto_mapping_) {
+      hash_value_map_.DependOn(cache_parent_, var.get());
+      return static_cast<result_type>(var->UniqueId());
+    }
+    hash_value_map_.Bind(var.get());
     result_type h = static_cast<result_type>(free_var_counter_++);
     var_identity_map_.emplace(var, h);
     return h;
@@ -436,9 +441,11 @@ class StructuralHasher {
   bool enable_auto_mapping_;
   bool map_window_slots_ = false;
   // EqualVar checks types only while mapping; loop_var also relaxes syntax
-  // dtypes. Cached subtrees must respect both context and binding generation.
+  // dtypes. Cache by context and invalidate only affected variable dependencies.
   using CacheKey = std::tuple<const IRNode*, bool, bool>;
-  std::map<CacheKey, std::pair<size_t, result_type>> hash_value_map_;
+  using HashCache = structural_comparison_detail::BindingAwareCache<CacheKey, const Var*, result_type>;
+  HashCache hash_value_map_;
+  HashCache::Entry* cache_parent_ = nullptr;
   std::unordered_map<VarPtr, result_type> var_identity_map_;
   int64_t free_var_counter_ = 0;
   std::vector<std::string> field_name_stack_;
@@ -671,17 +678,22 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
 StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) {
   INTERNAL_CHECK(node) << "structural_hash received null IR node";
 
+  const auto key = std::make_tuple(node.get(), enable_auto_mapping_, IsLoopVarFieldContext());
+  auto& cached = hash_value_map_.Get(key, cache_parent_);
+  if (cached.value) return *cached.value;
+  auto* saved_parent = cache_parent_;
+  cache_parent_ = &cached;
+
   // Var equality uses EqualType directly, preserving the enclosing loop_var
   // context. Reflecting Var would push a "type" field and lose that context.
+  // Cache the complete hash too: repeated auto-mapped uses must not traverse
+  // the variable's type again. Free identities still register dependencies.
   if (auto var = As<Var>(node)) {
     result_type h = std::hash<std::string>{}(var->TypeName());
     if (enable_auto_mapping_) h = hash_combine(h, HashType(var->GetType()));
-    return hash_combine(h, HashVarIdentity(var));
-  }
-  const auto key = std::make_tuple(node.get(), enable_auto_mapping_, IsLoopVarFieldContext());
-  auto it = hash_value_map_.find(key);
-  if (it != hash_value_map_.end() && it->second.first == var_identity_map_.size()) {
-    return it->second.second;
+    cached.value = hash_combine(h, HashVarIdentity(var));
+    cache_parent_ = saved_parent;
+    return *cached.value;
   }
 
   result_type hash_value = 0;
@@ -743,7 +755,8 @@ StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) 
     throw pypto::TypeError("Unknown IR node type in StructuralHasher::HashNode");
   }
 
-  hash_value_map_[key] = {var_identity_map_.size(), hash_value};
+  cached.value = hash_value;
+  cache_parent_ = saved_parent;
   return hash_value;
 }
 

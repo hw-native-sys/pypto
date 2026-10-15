@@ -1796,5 +1796,54 @@ def test_shared_use_must_respect_parameter_mapping():
     assert not ir.structural_equal(rhs, lhs)
 
 
+@pytest.mark.parametrize("bind_right", [False, True])
+def test_cached_free_variable_equality_is_invalidated_on_either_binding_side(bind_right):
+    span = ir.Span.unknown()
+    x = ir.Var("x", ir.ScalarType(DataType.INT64), span)
+    y = ir.Var("y", x.type, span)
+    one = ir.ConstInt(1, DataType.INT64, span)
+    shared = ir.Add(x, x, DataType.INT64, span)
+    shared = ir.Add(shared, shared, DataType.INT64, span)
+
+    def sequence(bound):
+        return ir.SeqStmts(
+            [ir.EvalStmt(shared, span), ir.AssignStmt(bound, one, span), ir.EvalStmt(shared, span)],
+            span,
+        )
+
+    lhs, rhs = (sequence(y), sequence(x)) if bind_right else (sequence(x), sequence(y))
+    assert not ir.structural_equal(lhs, rhs)
+    with pytest.raises(ValueError, match="Variable mapping inconsistent"):
+        ir.assert_structural_equal(lhs, rhs)
+
+
+@pytest.mark.parametrize("free_variable", [False, True])
+def test_default_equality_reuses_shared_dags_across_unrelated_bindings(free_variable):
+    span = ir.Span.unknown()
+    leaf = (
+        ir.Var("capture", ir.ScalarType(DataType.INT64), span)
+        if free_variable
+        else ir.ConstInt(1, DataType.INT64, span)
+    )
+
+    def sequence(prefix):
+        shared = leaf
+        for _ in range(64):
+            shared = ir.Add(shared, shared, DataType.INT64, span)
+        stmts = []
+        for i in range(256):
+            fresh = ir.Var(f"{prefix}{i}", ir.ScalarType(DataType.INT64), span)
+            stmts += [
+                ir.AssignStmt(fresh, ir.ConstInt(1, DataType.INT64, span), span),
+                ir.EvalStmt(shared, span),
+            ]
+        return ir.SeqStmts(stmts, span)
+
+    lhs, rhs = sequence("a"), sequence("b")
+    assert ir.structural_equal(lhs, rhs)
+    ir.assert_structural_equal(lhs, rhs)
+    assert ir.structural_hash(lhs) == ir.structural_hash(rhs)
+
+
 if __name__ == "__main__":
     pytest.main(["-v", __file__])

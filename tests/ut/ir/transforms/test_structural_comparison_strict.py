@@ -643,5 +643,162 @@ def test_default_hash_revisits_subtree_after_a_binding_is_introduced():
     assert ir.structural_hash(lhs) == ir.structural_hash(rhs)
 
 
+@pytest.mark.parametrize("placement", ["standalone", "sequence", "nested", "function"])
+@pytest.mark.parametrize("kind", ["incore", "spmd"])
+def test_scope_body_is_checked_once_and_definitions_flow_out(placement, kind):
+    def build(name):
+        x = var(name)
+        body = ir.AssignStmt(x, ir.ConstInt(1, D.INT64, SPAN), SPAN)
+        scope = (
+            ir.InCoreScopeStmt(body=body, span=SPAN)
+            if kind == "incore"
+            else ir.SpmdScopeStmt(4, body=body, span=SPAN)
+        )
+        if placement == "standalone":
+            return scope
+        if placement == "nested":
+            scope = ir.InCoreScopeStmt(body=scope, span=SPAN)
+        result = ir.SeqStmts([scope, ir.ReturnStmt([x], SPAN)], SPAN)
+        if placement == "function":
+            return ir.Function(name, [], [x.type], result, SPAN)
+        return result
+
+    equal(build("x"), build("y"))
+
+
+@pytest.mark.parametrize("placement", ["standalone", "sequence", "nested", "function"])
+def test_scope_metadata_cannot_reference_body_local_binding(placement):
+    x = var("x")
+    body = ir.AssignStmt(x, ir.ConstInt(4, D.INT64, SPAN), SPAN)
+    scope = ir.SpmdScopeStmt(x, body=body, span=SPAN)
+    if placement == "sequence":
+        root = ir.SeqStmts([scope], SPAN)
+    elif placement == "nested":
+        root = ir.InCoreScopeStmt(body=scope, span=SPAN)
+    elif placement == "function":
+        root = ir.Function("f", [], [], scope, SPAN)
+    else:
+        root = scope
+    assert_unsupported(root)
+
+
+def test_scope_metadata_can_reference_function_parameter():
+    def build(name):
+        count = var(name)
+        scope = ir.SpmdScopeStmt(count, body=ir.ReturnStmt([], SPAN), span=SPAN)
+        return ir.Function(name, [count], [], scope, SPAN)
+
+    equal(build("x"), build("y"))
+
+
+@pytest.mark.parametrize("location", ["type", "attribute"])
+def test_unknown_dtype_codes_remain_distinct_after_deserialization(location):
+    payload = ir.serialize(var("x"))
+    encoded_dtype = b"\xa5dtype" + bytes([D.INT64.code()])
+    assert payload.count(encoded_dtype) == 1
+
+    def decoded(code):
+        restored = ir.deserialize(payload.replace(encoded_dtype, b"\xa5dtype" + bytes([code])))
+        assert isinstance(restored, ir.Var)
+        assert isinstance(restored.type, ir.ScalarType)
+        assert restored.type.dtype.code() == code
+        assert restored.type.dtype.to_string() == "unknown"
+        return restored.type if location == "type" else call({"dtype": restored.type.dtype})
+
+    equal(decoded(0x60), decoded(0x60))
+    equal(decoded(0x60), decoded(0x61), False)
+
+
+def test_default_hash_invalidates_cached_ancestors_and_type_uses():
+    x, y = var("x"), var("y")
+    extent = add(x, x)
+    shared = ir.Var("tensor", ir.TensorType([extent], D.FP32), SPAN)
+    # A Var's type is visited in a definition field. The expression reference
+    # shares the same extent DAG before and after the scalar becomes bound.
+    before = ir.EvalStmt(add(extent, extent), SPAN)
+    lhs = ir.SeqStmts(
+        [before, ir.AssignStmt(x, ir.ConstInt(1, D.INT64, SPAN), SPAN), ir.AssignStmt(shared, call(), SPAN)],
+        SPAN,
+    )
+    other = ir.Var("other", ir.TensorType([add(y, y)], D.FP32), SPAN)
+    rhs = ir.SeqStmts(
+        [before, ir.AssignStmt(y, ir.ConstInt(1, D.INT64, SPAN), SPAN), ir.AssignStmt(other, call(), SPAN)],
+        SPAN,
+    )
+    assert ir.structural_equal(lhs, rhs)
+    assert ir.structural_hash(lhs) == ir.structural_hash(rhs)
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_signature_symbols_inside_tuple_constructors(nested):
+    def kernel(name, repeated=True):
+        n, m = var(name, D.INDEX), var(name, D.INDEX)
+        pair = ir.MakeTuple([n, n if repeated else m], SPAN)
+        if nested:
+            pair = ir.TupleGetItemExpr(ir.MakeTuple([pair], SPAN), 0, SPAN)
+        extent = ir.TupleGetItemExpr(pair, 0, SPAN)
+        tensor = ir.Var(name, ir.TensorType([extent], D.FP32), SPAN)
+        return function(name, [tensor])
+
+    equal(kernel("left"), kernel("right"))
+    equal(kernel("left"), kernel("right", repeated=False), False)
+
+
+def test_unbound_valid_shape_symbol_inside_tuple_is_rejected():
+    extent = ir.TupleGetItemExpr(ir.MakeTuple([var("n", D.INDEX)], SPAN), 0, SPAN)
+    tensor = ir.Var(
+        "tensor",
+        ir.TensorType(
+            [16], D.FP32, tensor_view=ir.TensorView(valid_shape=[extent], layout=ir.TensorLayout.ND)
+        ),
+        SPAN,
+    )
+    assert_unsupported(function("kernel", [tensor]), "UnboundValidShapeSymbol")
+
+
+@pytest.mark.parametrize("scope", ["branch", "for", "while"])
+@pytest.mark.parametrize("location", ["direct", "shared", "type"])
+@pytest.mark.parametrize("before", [False, True])
+def test_visibility_error_reports_invalid_use_endpoint(scope, location, before):
+    x = var("local")
+    shared = add(add(x, x), x)
+    use = {
+        "direct": x,
+        "shared": shared,
+        "type": ir.Var("tensor", ir.TensorType([shared], D.FP32), SPAN),
+    }[location]
+    body = ir.SeqStmts([ir.AssignStmt(x, ir.ConstInt(1, D.INT64, SPAN), SPAN), ir.EvalStmt(use, SPAN)], SPAN)
+    if scope == "branch":
+        region = ir.IfStmt(ir.ConstBool(True, SPAN), body, None, [], SPAN)
+    elif scope == "for":
+        region = ir.ForStmt(
+            var("i", D.INDEX),
+            ir.ConstInt(0, D.INDEX, SPAN),
+            ir.ConstInt(1, D.INDEX, SPAN),
+            ir.ConstInt(1, D.INDEX, SPAN),
+            [],
+            body,
+            [],
+            SPAN,
+        )
+    else:
+        region = ir.WhileStmt(ir.ConstBool(True, SPAN), [], body, [], SPAN)
+    outside = ir.EvalStmt(use, SPAN)
+    root = ir.SeqStmts([outside, region] if before else [region, outside], SPAN)
+    prefix = f"root.stmts.[{0 if before else 1}].expr"
+    if location == "type":
+        prefix += ".type.shape.[0]"
+    suffixes = [""] if location == "direct" else [".left.left", ".left.right", ".right"]
+    for operation in (
+        lambda: ir.structural_hash(root, mode=STRICT),
+        lambda: ir.structural_equal(root, root, mode=STRICT),
+        lambda: ir.assert_structural_equal(root, root, mode=STRICT),
+    ):
+        with pytest.raises(ir.StructuralComparisonUnsupported) as exc:
+            operation()
+        assert exc.value.reason == "BindingNotVisible"
+        assert exc.value.field_path in {prefix + suffix for suffix in suffixes}
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

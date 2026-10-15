@@ -713,5 +713,33 @@ def test_loop_var_hash_tracks_syntax_context_and_mapping(reuse, ordinary_first):
     assert ir.structural_hash(lhs) == ir.structural_hash(rhs)
 
 
+@pytest.mark.parametrize("type_kind", ["tensor", "tuple"])
+@pytest.mark.parametrize("auto_mapping", [False, True])
+def test_repeated_variable_with_large_type(type_kind, auto_mapping):
+    """Repeated uses preserve identity and share the complete variable hash."""
+    span = ir.Span.unknown()
+    size = 1024
+    scalar = ir.ScalarType(DataType.INT64)
+    if type_kind == "tensor":
+        shape = [ir.ConstInt(i + 1, DataType.INDEX, span) for i in range(size)]
+        type_ = ir.TensorType(shape, DataType.FP32)
+    else:
+        type_ = ir.TupleType([ir.TupleType([scalar, scalar])] * size)
+    variable = ir.Var("value", type_, span)
+    renamed = ir.Var("renamed", type_, span) if auto_mapping else variable
+    left = ir.SeqStmts([ir.EvalStmt(variable, span) for _ in range(size)], span)
+    right = ir.SeqStmts([ir.EvalStmt(renamed, span) for _ in range(size)], span)
+    assert ir.structural_equal(left, right, enable_auto_mapping=auto_mapping)
+    assert ir.structural_hash(left, enable_auto_mapping=auto_mapping) == ir.structural_hash(
+        right, enable_auto_mapping=auto_mapping
+    )
+    other = ir.Var("other", type_, span)
+    distinct = ir.SeqStmts([*left.stmts[:-1], ir.EvalStmt(other, span)], span)
+    assert not ir.structural_equal(left, distinct, enable_auto_mapping=auto_mapping)
+    assert ir.structural_hash(left, enable_auto_mapping=auto_mapping) != ir.structural_hash(
+        distinct, enable_auto_mapping=auto_mapping
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

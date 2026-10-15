@@ -43,6 +43,8 @@ void VisitShapeVars(const ExprPtr& root, std::unordered_set<const Expr*>& seen, 
       pending.push_back(unary->operand_);
     } else if (auto call = As<Call>(expr)) {
       pending.insert(pending.end(), call->args_.rbegin(), call->args_.rend());
+    } else if (auto tuple = As<MakeTuple>(expr)) {
+      pending.insert(pending.end(), tuple->elements_.rbegin(), tuple->elements_.rend());
     } else if (auto item = As<TupleGetItemExpr>(expr)) {
       pending.push_back(item->tuple_);
     }

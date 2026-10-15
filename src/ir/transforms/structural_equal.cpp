@@ -44,6 +44,7 @@
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/type.h"
+#include "utils/structural_comparison_cache.h"
 
 namespace pypto {
 namespace ir {
@@ -935,9 +936,13 @@ class StructuralEqualImpl {
   bool map_window_slots_ = false;
   std::unordered_map<VarPtr, VarPtr> lhs_to_rhs_var_map_;
   std::unordered_map<VarPtr, VarPtr> rhs_to_lhs_var_map_;
-  // A successful comparison can be reused only while the binding environment
-  // is unchanged. In particular, a formerly free shared Var may later bind.
-  std::map<std::tuple<const IRNode*, const IRNode*, bool, bool>, size_t> equal_memo_;
+  // Track left/right binding dependencies separately: the same Var pointer
+  // can occur on both sides without sharing its mapping role.
+  using CacheKey = std::tuple<const IRNode*, const IRNode*, bool, bool>;
+  using BindingKey = std::pair<const Var*, bool>;
+  using EqualCache = structural_comparison_detail::BindingAwareCache<CacheKey, BindingKey, bool>;
+  EqualCache equal_memo_;
+  typename EqualCache::Entry* cache_parent_ = nullptr;
   std::vector<std::string> path_;  // Only used in assert mode
   std::vector<std::string> field_name_stack_;
   std::vector<std::string> node_type_stack_;
@@ -978,10 +983,15 @@ class StructuralEqualImpl {
 template <bool AssertMode>
 bool StructuralEqualImpl<AssertMode>::Equal(const IRNodePtr& lhs, const IRNodePtr& rhs) {
   const auto key = std::make_tuple(lhs.get(), rhs.get(), enable_auto_mapping_, IsLoopVarFieldContext());
-  auto found = equal_memo_.find(key);
-  if (found != equal_memo_.end() && found->second == lhs_to_rhs_var_map_.size()) return true;
+  auto& cached = equal_memo_.Get(key, cache_parent_);
+  if (cached.value) return *cached.value;
+  auto* saved_parent = cache_parent_;
+  cache_parent_ = &cached;
   const bool result = EqualUncached(lhs, rhs);
-  if (result) equal_memo_[key] = lhs_to_rhs_var_map_.size();
+  // Failed comparisons may already have changed bindings. Only successful
+  // comparisons are reusable, as in the original memoization contract.
+  if (result) cached.value = true;
+  cache_parent_ = saved_parent;
   return result;
 }
 
@@ -1458,6 +1468,8 @@ bool StructuralEqualImpl<AssertMode>::EqualVar(const VarPtr& lhs, const VarPtr& 
       }
       return false;
     }
+    equal_memo_.DependOn(cache_parent_, {lhs.get(), false});
+    equal_memo_.DependOn(cache_parent_, {rhs.get(), true});
     return true;
   }
 
@@ -1498,6 +1510,8 @@ bool StructuralEqualImpl<AssertMode>::EqualVar(const VarPtr& lhs, const VarPtr& 
     return false;
   }
 
+  equal_memo_.Bind({lhs.get(), false});
+  equal_memo_.Bind({rhs.get(), true});
   lhs_to_rhs_var_map_[lhs] = rhs;
   rhs_to_lhs_var_map_[rhs] = lhs;
   return true;

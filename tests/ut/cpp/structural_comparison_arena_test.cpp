@@ -15,6 +15,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
+
+#include "ir/transforms/utils/structural_comparison_cache.h"
 
 namespace {
 namespace detail = pypto::ir::structural_comparison_detail;
@@ -72,10 +75,89 @@ void TestDigestDoesNotDependOnArenaIds() {
   b = right.Intern("pair", "", {{"left", b}, {"right", b}});
   assert(left.Hash(a) == right.Hash(b));
 }
+
+void TestBindingInvalidatesOnlyDependentAncestors() {
+  detail::BindingAwareCache<int, int, uint64_t> cache;
+  auto& root = cache.Get(0);
+  auto& left = cache.Get(1, &root);
+  auto& right = cache.Get(2, &root);
+  auto& leaf = cache.Get(3, &left);
+  cache.Get(3, &right);  // A cached child must still record its new parent.
+  cache.DependOn(&leaf, 7);
+  root.value = left.value = right.value = leaf.value = 1;
+  cache.Bind(8);
+  assert(root.value && left.value && right.value && leaf.value);
+  cache.Bind(7);
+  assert(!root.value && !left.value && !right.value && !leaf.value);
+  root.value = left.value = right.value = leaf.value = 2;
+  cache.Bind(9);
+  assert(root.value && left.value && right.value && leaf.value);
+}
+
+void TestUnrelatedBindingsPreserveSharedDagTraversalBound() {
+  for (bool free_variable : {false, true}) {
+    detail::BindingAwareCache<size_t, size_t, uint64_t> cache;
+    constexpr size_t kNodes = 2048;
+    size_t visits = 0;
+    auto hash = [&](auto&& self, size_t node,
+                    detail::BindingAwareCache<size_t, size_t, uint64_t>::Entry* parent) -> uint64_t {
+      auto& entry = cache.Get(node, parent);
+      if (entry.value) return *entry.value;
+      ++visits;
+      if (node == 0) {
+        if (free_variable) cache.DependOn(&entry, 0);
+        entry.value = 1;
+      } else {
+        auto left = self(self, node - 1, &entry);
+        auto right = self(self, node - 1, &entry);
+        entry.value = left + right;
+      }
+      return *entry.value;
+    };
+    for (size_t variable = 1; variable <= kNodes; ++variable) {
+      hash(hash, kNodes, nullptr);
+      cache.Bind(variable);
+    }
+    assert(visits == kNodes + 1);
+  }
+}
+
+void TestEqualityCacheBindingRolesAndTraversalBound() {
+  using Cache = detail::BindingAwareCache<size_t, std::pair<size_t, bool>, bool>;
+  for (bool right_binding : {false, true}) {
+    Cache cache;
+    constexpr size_t kNodes = 2048;
+    size_t visits = 0;
+    auto equal = [&](auto&& self, size_t node, Cache::Entry* parent) -> bool {
+      auto& entry = cache.Get(node, parent);
+      if (entry.value) return *entry.value;
+      ++visits;
+      if (node == 0) {
+        cache.DependOn(&entry, {0, false});
+        cache.DependOn(&entry, {0, true});
+        entry.value = true;
+      } else {
+        entry.value = self(self, node - 1, &entry) && self(self, node - 1, &entry);
+      }
+      return *entry.value;
+    };
+    for (size_t variable = 1; variable <= kNodes; ++variable) {
+      assert(equal(equal, kNodes, nullptr));
+      cache.Bind({variable, right_binding});
+    }
+    assert(visits == kNodes + 1);
+    cache.Bind({0, right_binding});
+    assert(!cache.Get(kNodes).value);
+    assert(!cache.Get(0).value);
+  }
+}
 }  // namespace
 
 int main() {
   TestCollisionsDoNotImplyEquality();
   TestSharedDagSizeAndLookupBound();
   TestDigestDoesNotDependOnArenaIds();
+  TestBindingInvalidatesOnlyDependentAncestors();
+  TestUnrelatedBindingsPreserveSharedDagTraversalBound();
+  TestEqualityCacheBindingRolesAndTraversalBound();
 }

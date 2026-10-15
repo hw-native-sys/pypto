@@ -381,7 +381,8 @@ assert_structural_equal(lhs, rhs, options);
 A Function reserves every parameter before examining its signature, so a tensor shape
 may reference a later scalar parameter. Symbols in physical parameter shapes and bare
 parameter `valid_shape` slots are additional bindings. Their classification is shared with
-`MaterializeValidShapeSymbols`. Compound `valid_shape` expressions
+`MaterializeValidShapeSymbols`, including symbols nested inside tuple constructors
+and tuple-item expressions. Compound `valid_shape` expressions
 must refer to these bindings or scalar parameters. Return types, bodies, and attributes
 share the same function binding context. Program functions have independent contexts;
 program map keys and callee names remain significant. An IterArg initializer is an outer
@@ -409,7 +410,8 @@ Explicit storage is currently unsupported: `MemRef`, `WindowBuffer`, `MemRefType
 body, signature, view, or attribute. The traversal also rejects unresolved/unknown types,
 unknown attribute payload types, duplicate attribute keys, repeated variable definitions,
 shared statement objects, cycles, and node/type nesting beyond 512 levels.
-Invalid binding visibility reports `reason="BindingNotVisible"`.
+Invalid binding visibility reports `reason="BindingNotVisible"`; `field_path` identifies
+the invalid use, including a later scope escape through a shared expression or type.
 A nullable view offset is supported and remains distinct from a zero-valued offset.
 
 ```python
@@ -435,11 +437,14 @@ Memoization distinguishes definitions from uses and belongs to one function cont
 Pure expression DAG sharing does not affect equality and does not expand into a tree.
 For N distinct visited nodes plus their field/string data, projection uses O(N log N)
 time and O(N) space. Hashes are process-local fingerprints, not persistent cache keys.
-Default equality separately memoizes successful node pairs with the binding generation
-and comparison context, so its shared-node correctness fix also avoids tree expansion.
-Default hashing also separates mapping and loop-variable contexts, invalidates cached
-subtrees when bindings change, and retains stable variable identities across contexts.
-Its loop-variable dtype relaxation matches Default equality.
+Default equality memoizes successful node pairs by comparison context. Default hashing
+also separates mapping and loop-variable contexts and retains stable variable identities.
+Both use reverse dependency edges to invalidate only cached ancestors of a previously
+free variable when that variable becomes bound; unrelated bindings preserve cached
+shared subtrees. Equality tracks left and right binding roles independently.
+Variable hashes include their type traversal in this cache, so repeated auto-mapped
+uses of one variable do not rescan its type.
+Hashing's loop-variable dtype relaxation matches Default equality.
 
 ## Summary
 

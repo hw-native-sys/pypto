@@ -254,5 +254,41 @@ def test_submit_omitting_out_param_that_declares_symbol_is_a_user_error():
     assert "Pass the argument explicitly" in message, message
 
 
+@pytest.mark.parametrize("physical_bound", [False, True])
+def test_tuple_constructor_symbols_in_signature_shapes(physical_bound):
+    span = ir.Span.unknown()
+    symbol = ir.Var("n", ir.ScalarType(pl.INDEX), span)
+    extent = ir.TupleGetItemExpr(ir.MakeTuple([symbol], span), 0, span)
+    tensor_type = ir.TensorType(
+        [extent] if physical_bound else [16],
+        pl.FP32,
+        tensor_view=ir.TensorView(
+            valid_shape=[symbol] if physical_bound else [extent], layout=ir.TensorLayout.ND
+        ),
+    )
+    tensor = ir.Var("tensor", tensor_type, span)
+    kernel = ir.Function(
+        "kernel",
+        [tensor],
+        [tensor_type],
+        ir.ReturnStmt([tensor], span),
+        span,
+        type=ir.FunctionType.InCore,
+    )
+    before = ir.Program([kernel], "program", span)
+    if physical_bound:
+        # Text parsing folds [n][0] to n. Keep this raw-IR tuple fixture while
+        # retaining pass property verification and a binary roundtrip check.
+        with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+            after = passes.materialize_valid_shape_symbols()(before)
+        ir.assert_structural_equal(after, before)
+        restored = ir.deserialize(ir.serialize(after))
+        ir.assert_structural_equal(after, restored)
+        assert ir.structural_hash(after) == ir.structural_hash(restored)
+    else:
+        with pytest.raises(ValueError, match="compound valid_shape"):
+            passes.materialize_valid_shape_symbols()(before)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
