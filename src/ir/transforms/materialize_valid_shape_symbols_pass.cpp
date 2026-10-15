@@ -14,7 +14,6 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -23,12 +22,12 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/program.h"
-#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/printer.h"
+#include "pypto/ir/transforms/utils/signature_symbols.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -36,20 +35,6 @@ namespace pypto {
 namespace ir {
 
 namespace {
-
-/// A device kernel's valid_shape symbol that nothing in the kernel can bind,
-/// together with the declared parameter slots that name it.
-///
-/// `symbol` is the `pl.dynamic()` Var itself. `DynVar.unwrap()` already builds it
-/// as a `Scalar[INDEX]` Var shared by every annotation that mentions it, so
-/// appending it to `params_` binds every occurrence at once — no type rewrite.
-struct ValidShapeSymbol {
-  VarPtr symbol;
-  /// (tensor param index, position within that parameter's valid_shape). Every
-  /// entry names the symbol *bare*, so the call site reads the actual extent
-  /// straight out of the argument's valid_shape at the same position.
-  std::vector<std::pair<size_t, size_t>> slots;
-};
 
 struct FunctionValidShapePlan {
   std::vector<ValidShapeSymbol> symbols;  ///< deterministic: declaration order
@@ -70,115 +55,20 @@ struct FunctionValidShapePlan {
   }
 }
 
-/// Collect the Vars a shape/valid_shape expression reads, in first-seen order.
-void CollectShapeVars(const ExprPtr& expr, std::unordered_set<const Var*>* seen, std::vector<VarPtr>* out) {
-  if (!expr) return;
-  if (auto var = AsVarLike(expr)) {
-    if (seen->insert(var.get()).second) out->push_back(var);
-    return;
-  }
-  if (auto binary = As<BinaryExpr>(expr)) {
-    CollectShapeVars(binary->left_, seen, out);
-    CollectShapeVars(binary->right_, seen, out);
-    return;
-  }
-  if (auto unary = As<UnaryExpr>(expr)) {
-    CollectShapeVars(unary->operand_, seen, out);
-    return;
-  }
-  if (auto call = As<Call>(expr)) {
-    for (const auto& arg : call->args_) CollectShapeVars(arg, seen, out);
-    return;
-  }
-  if (auto tget = As<TupleGetItemExpr>(expr)) {
-    CollectShapeVars(tget->tuple_, seen, out);
-  }
-  // Constants and anything else contribute no symbol.
-}
-
-/// Symbols the kernel can already resolve: physical tensor dimensions (the
-/// wrapper recovers those from the runtime tensor's `shapes[]`) and its own
-/// scalar parameters.
-[[nodiscard]] std::unordered_set<const Var*> CollectBoundSymbols(const FunctionPtr& func) {
-  std::unordered_set<const Var*> bound;
-  for (const auto& param : func->params_) {
-    auto tensor_type = AsTensorTypeLike(param->GetType());
-    if (!tensor_type) {
-      bound.insert(param.get());
-      continue;
-    }
-    std::unordered_set<const Var*> seen;
-    std::vector<VarPtr> vars;
-    for (const auto& dim : tensor_type->shape_) CollectShapeVars(dim, &seen, &vars);
-    for (const auto& var : vars) bound.insert(var.get());
-  }
-  return bound;
-}
-
-/// The valid_shape the author declared on a parameter, or nullptr when the
-/// parameter is fully valid. Deliberately NOT GetEffectiveTensorValidShape:
-/// that substitutes the physical shape, whose symbols are already bound.
-[[nodiscard]] const std::vector<ExprPtr>* GetDeclaredValidShape(const ExprPtr& /*unused*/,
-                                                                const TensorTypePtr& tensor_type) {
-  if (!tensor_type->tensor_view_.has_value()) return nullptr;
-  const auto& valid_shape = tensor_type->tensor_view_->valid_shape;
-  if (valid_shape.empty()) return nullptr;
-  return &valid_shape;
-}
-
 [[nodiscard]] FunctionValidShapePlan BuildPlan(const FunctionPtr& func) {
-  FunctionValidShapePlan plan;
-  if (!IsDeviceKernel(func)) return plan;
-
-  const auto bound = CollectBoundSymbols(func);
-
-  // Pass 1: every parameter slot that names an unbound symbol *bare* is a place
-  // the call site can read the value from.
-  std::unordered_map<const Var*, size_t> symbol_index;
-  for (size_t i = 0; i < func->params_.size(); ++i) {
-    auto tensor_type = AsTensorTypeLike(func->params_[i]->GetType());
-    if (!tensor_type) continue;
-    const auto* valid_shape = GetDeclaredValidShape(func->params_[i], tensor_type);
-    if (valid_shape == nullptr) continue;
-    for (size_t d = 0; d < valid_shape->size(); ++d) {
-      auto var = AsVarLike((*valid_shape)[d]);
-      if (!var || bound.count(var.get()) != 0) continue;
-      auto it = symbol_index.find(var.get());
-      if (it == symbol_index.end()) {
-        symbol_index.emplace(var.get(), plan.symbols.size());
-        plan.symbols.push_back(ValidShapeSymbol{var, {{i, d}}});
-      } else {
-        plan.symbols[it->second].slots.emplace_back(i, d);
-      }
-    }
+  if (!IsDeviceKernel(func)) return {};
+  auto classification = ClassifySignatureSymbols(func);
+  for (const auto& missing : classification.unbound) {
+    const auto& param = func->params_[missing.parameter];
+    CHECK_SPAN(false, param->span_)
+        << "MaterializeValidShapeSymbols: parameter '" << param->name_hint_ << "' of kernel '" << func->name_
+        << "' uses symbol '" << missing.symbol->name_hint_
+        << "' only inside the compound valid_shape expression '" << PythonPrint(missing.expression)
+        << "', so its value cannot be read from the call site. Declare the symbol on its own in "
+           "some parameter's pl.TensorView(valid_shape=...), or pass the extent as a "
+           "pl.Scalar[pl.INDEX] parameter and use it in pl.load(..., valid_shape=[...]).";
   }
-
-  // Pass 2: a symbol reachable only through a compound slot has no bare slot to
-  // read, so the call site cannot invert it. Reject rather than emit a kernel
-  // whose valid extent is silently wrong.
-  for (size_t i = 0; i < func->params_.size(); ++i) {
-    auto tensor_type = AsTensorTypeLike(func->params_[i]->GetType());
-    if (!tensor_type) continue;
-    const auto* valid_shape = GetDeclaredValidShape(func->params_[i], tensor_type);
-    if (valid_shape == nullptr) continue;
-    for (const auto& dim : *valid_shape) {
-      if (AsVarLike(dim)) continue;  // bare symbols handled above
-      std::unordered_set<const Var*> seen;
-      std::vector<VarPtr> vars;
-      CollectShapeVars(dim, &seen, &vars);
-      for (const auto& var : vars) {
-        if (bound.count(var.get()) != 0) continue;
-        CHECK_SPAN(symbol_index.count(var.get()) != 0, func->params_[i]->span_)
-            << "MaterializeValidShapeSymbols: parameter '" << func->params_[i]->name_hint_ << "' of kernel '"
-            << func->name_ << "' uses symbol '" << var->name_hint_
-            << "' only inside the compound valid_shape expression '" << PythonPrint(dim)
-            << "', so its value cannot be read from the call site. Declare the symbol on its own in "
-               "some parameter's pl.TensorView(valid_shape=...), or pass the extent as a "
-               "pl.Scalar[pl.INDEX] parameter and use it in pl.load(..., valid_shape=[...]).";
-      }
-    }
-  }
-  return plan;
+  return {std::move(classification.valid_shape)};
 }
 
 /// Add one `Scalar[INDEX]` parameter per unbindable symbol, in plan order.

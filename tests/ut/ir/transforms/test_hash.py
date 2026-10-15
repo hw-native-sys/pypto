@@ -687,5 +687,31 @@ class TestHashTypeLadderParity:
         assert isinstance(ir.structural_hash(Mod), int)
 
 
+@pytest.mark.parametrize("reuse", [False, True])
+@pytest.mark.parametrize("ordinary_first", [False, True])
+def test_loop_var_hash_tracks_syntax_context_and_mapping(reuse, ordinary_first):
+    span = ir.Span.unknown()
+
+    def build(dtype):
+        i = ir.Var("i", ir.ScalarType(dtype), span)
+        one = ir.ConstInt(1, dtype, span)
+        ordinary = ir.EvalStmt(one, span)
+        loop = ir.ForStmt(
+            i,
+            ir.ConstInt(0, dtype, span),
+            one,
+            one if reuse else ir.ConstInt(1, dtype, span),
+            [],
+            ir.EvalStmt(i, span),
+            [],
+            span,
+        )
+        return ir.SeqStmts([ordinary, loop] if ordinary_first else [loop, ordinary], span)
+
+    lhs, rhs = build(DataType.INDEX), build(DataType.INT64)
+    assert ir.structural_equal(lhs, rhs)
+    assert ir.structural_hash(lhs) == ir.structural_hash(rhs)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

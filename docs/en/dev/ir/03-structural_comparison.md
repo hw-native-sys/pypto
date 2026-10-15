@@ -380,15 +380,23 @@ assert_structural_equal(lhs, rhs, options);
 
 A Function reserves every parameter before examining its signature, so a tensor shape
 may reference a later scalar parameter. Symbols in physical parameter shapes and bare
-parameter `valid_shape` slots are additional bindings. Compound `valid_shape` expressions
+parameter `valid_shape` slots are additional bindings. Their classification is shared with
+`MaterializeValidShapeSymbols`. Compound `valid_shape` expressions
 must refer to these bindings or scalar parameters. Return types, bodies, and attributes
 share the same function binding context. Program functions have independent contexts;
 program map keys and callee names remain significant. An IterArg initializer is an outer
 reference, not an additional definition introduced by the IterArg's `DefField`.
 
-Strict comparison assumes well-formed SSA and does not replace scope, closure, effect,
-or call-graph verification. An optimization must check those preconditions separately.
-In particular, an equal fingerprint does not authorize merging effectful functions.
+Strict rejects local bindings used before definition or outside their lexical scope,
+including uses hidden in types and attributes. Assignments bind after their RHS; loop
+initializers use the outer scope; loop and branch results bind after the region finishes.
+Loop-body and branch-local definitions do not escape. Shared expressions are checked at
+all use sites. True open captures retain free-variable semantics; they do not become
+bound merely because another function defines the same object.
+
+These checks do not replace full SSA, closure, effect, or call-graph verification.
+An optimization must check those preconditions separately. In particular, an equal
+fingerprint does not authorize merging effectful functions.
 
 ### Unsupported Inputs
 
@@ -401,6 +409,7 @@ Explicit storage is currently unsupported: `MemRef`, `WindowBuffer`, `MemRefType
 body, signature, view, or attribute. The traversal also rejects unresolved/unknown types,
 unknown attribute payload types, duplicate attribute keys, repeated variable definitions,
 shared statement objects, cycles, and node/type nesting beyond 512 levels.
+Invalid binding visibility reports `reason="BindingNotVisible"`.
 A nullable view offset is supported and remains distinct from a zero-valued offset.
 
 ```python
@@ -414,9 +423,11 @@ except ir.StructuralComparisonUnsupported as error:
 ### Shared Projection and Complexity
 
 Strict equality, hashing, and assertion diagnostics use one reflection-based projection
-for Expr, Stmt, Function, Type, TensorView and TileView fields. A first traversal reserves
-bindings; a second traversal builds immutable records containing scalar values and child
-record IDs. Records are interned by exact ordered keys. Equality compares IDs in a shared
+for Expr, Stmt, Function, Type, TensorView and TileView fields. Preparation reserves
+binding IDs, then checks lexical visibility. Each binder has a contiguous lifetime;
+earliest/latest use positions propagate through expression/type DAG edges in reverse
+postorder, checking every use without repeated subtree scans. The final traversal builds
+immutable records containing scalar values and child record IDs. Records are interned by exact ordered keys. Equality compares IDs in a shared
 arena, never hashes. Hashes combine child hashes rather than arena IDs, so separate calls
 agree. Assertions walk differing records to report a field path and exact scalar values.
 
@@ -426,6 +437,9 @@ For N distinct visited nodes plus their field/string data, projection uses O(N l
 time and O(N) space. Hashes are process-local fingerprints, not persistent cache keys.
 Default equality separately memoizes successful node pairs with the binding generation
 and comparison context, so its shared-node correctness fix also avoids tree expansion.
+Default hashing also separates mapping and loop-variable contexts, invalidates cached
+subtrees when bindings change, and retains stable variable identities across contexts.
+Its loop-variable dtype relaxation matches Default equality.
 
 ## Summary
 

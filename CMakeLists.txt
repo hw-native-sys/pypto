@@ -273,6 +273,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/structural_equal.cpp
     src/ir/transforms/structural_comparison_strict.cpp
     src/ir/transforms/structural_hash.cpp
+    src/ir/transforms/utils/signature_symbols.cpp
     src/ir/transforms/utils/acc_init_builder.cpp
     src/ir/transforms/utils/narrow_loop_carry.cpp
     src/ir/transforms/utils/buffer_root_collector.cpp

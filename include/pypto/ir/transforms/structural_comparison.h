@@ -57,6 +57,8 @@ class StructuralComparisonUnsupported : public pypto::TypeError {
 };
 
 /// Strict uses exact dtype/float bits and binding identities, and rejects explicit storage.
+/// Local use-before-definition and scope escape raise StructuralComparisonUnsupported.
+/// Open captures retain free-variable semantics; callers still verify closure/effects.
 /// All three operations share the same projection. Hashes are process-local, not persistent keys.
 uint64_t structural_hash(const IRNodePtr& node, const StructuralComparisonOptions& options);
 uint64_t structural_hash(const TypePtr& type, const StructuralComparisonOptions& options);

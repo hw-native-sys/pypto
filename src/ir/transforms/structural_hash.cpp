@@ -427,15 +427,18 @@ class StructuralHasher {
     INTERNAL_CHECK(var) << "structural_hash encountered null Var back-reference";
     auto it = var_identity_map_.find(var);
     if (it != var_identity_map_.end()) return it->second;
-    result_type h = enable_auto_mapping_ ? static_cast<result_type>(free_var_counter_++)
-                                         : static_cast<result_type>(var->UniqueId());
+    if (!enable_auto_mapping_) return static_cast<result_type>(var->UniqueId());
+    result_type h = static_cast<result_type>(free_var_counter_++);
     var_identity_map_.emplace(var, h);
     return h;
   }
 
   bool enable_auto_mapping_;
   bool map_window_slots_ = false;
-  std::unordered_map<IRNodePtr, result_type> hash_value_map_;
+  // EqualVar checks types only while mapping; loop_var also relaxes syntax
+  // dtypes. Cached subtrees must respect both context and binding generation.
+  using CacheKey = std::tuple<const IRNode*, bool, bool>;
+  std::map<CacheKey, std::pair<size_t, result_type>> hash_value_map_;
   std::unordered_map<VarPtr, result_type> var_identity_map_;
   int64_t free_var_counter_ = 0;
   std::vector<std::string> field_name_stack_;
@@ -668,9 +671,17 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
 StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) {
   INTERNAL_CHECK(node) << "structural_hash received null IR node";
 
-  auto it = hash_value_map_.find(node);
-  if (it != hash_value_map_.end()) {
-    return it->second;
+  // Var equality uses EqualType directly, preserving the enclosing loop_var
+  // context. Reflecting Var would push a "type" field and lose that context.
+  if (auto var = As<Var>(node)) {
+    result_type h = std::hash<std::string>{}(var->TypeName());
+    if (enable_auto_mapping_) h = hash_combine(h, HashType(var->GetType()));
+    return hash_combine(h, HashVarIdentity(var));
+  }
+  const auto key = std::make_tuple(node.get(), enable_auto_mapping_, IsLoopVarFieldContext());
+  auto it = hash_value_map_.find(key);
+  if (it != hash_value_map_.end() && it->second.first == var_identity_map_.size()) {
+    return it->second.second;
   }
 
   result_type hash_value = 0;
@@ -723,32 +734,16 @@ StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) 
   HASH_DISPATCH(Program)
   HASH_DISPATCH(WindowBuffer)
 
-  // Free Var types (including MemRef and IterArg) that may be mapped to other free vars.
-  // These have already been dispatched above for field hashing;
-  // here we add the variable identity hash.
-  auto hash_var_identity = [&](uint64_t unique_id) {
-    if (enable_auto_mapping_) {
-      hash_value = hash_combine(hash_value, free_var_counter_++);
-    } else {
-      hash_value = hash_combine(hash_value, unique_id);
-    }
-  };
-
   auto kind = node->GetKind();
-  if (kind == ObjectKind::WindowBuffer) {
-    // A tensor type in the scope body may already have mapped this window at a
-    // definition site. Reuse that identity when the scope's slots are visited.
-    hash_value =
-        hash_combine(hash_value, HashVarIdentity(std::static_pointer_cast<const WindowBuffer>(node)));
-  } else if (kind == ObjectKind::MemRef || kind == ObjectKind::IterArg || kind == ObjectKind::Var) {
-    hash_var_identity(static_cast<const Var*>(node.get())->UniqueId());
+  if (kind == ObjectKind::WindowBuffer || kind == ObjectKind::MemRef || kind == ObjectKind::IterArg) {
+    hash_value = hash_combine(hash_value, HashVarIdentity(std::static_pointer_cast<const Var>(node)));
   }
 
   if (!dispatched) {
     throw pypto::TypeError("Unknown IR node type in StructuralHasher::HashNode");
   }
 
-  hash_value_map_.emplace(node, hash_value);
+  hash_value_map_[key] = {var_identity_map_.size(), hash_value};
   return hash_value;
 }
 

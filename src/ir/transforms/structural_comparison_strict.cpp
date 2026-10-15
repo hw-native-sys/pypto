@@ -9,99 +9,74 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <any>
 #include <array>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
+#include <ios>
+#include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <tuple>
 #include <type_traits>
+#include <typeinfo>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include "pypto/core/any_cast.h"
+#include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
+#include "pypto/core/logging.h"
+#include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
-#include "pypto/ir/memref.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/signature_symbols.h"
+#include "pypto/ir/type.h"
+#include "utils/structural_comparison_arena.h"
 
 namespace pypto::ir {
 namespace {
 
-// Exact interning, not hash-based equality. Each record contains only scalar
-// payloads and child IDs; shared DAGs are never expanded into trees. Ordered
-// indexing costs O(N log N) including all fields/string bytes, with O(N) space.
-// Digests use child digests, NOT arena IDs, so independent invocations agree.
-using Id = size_t;
-using Fields = std::vector<std::pair<std::string, Id>>;
-using Key = std::tuple<std::string, std::string, Fields>;
+using structural_comparison_detail::Fields;
+using structural_comparison_detail::Id;
+using Arena = structural_comparison_detail::ExactArena<>;
 
-uint64_t Combine(uint64_t seed, uint64_t value) {
-  return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2));
+std::string Mismatch(const Arena& arena, Id lhs, Id rhs) {
+  std::string path = "root";
+  while (true) {
+    const auto& [lt, la, lf] = arena.GetKey(lhs);
+    const auto& [rt, ra, rf] = arena.GetKey(rhs);
+    if (lt != rt || la != ra || lf.size() != rf.size()) {
+      return "Strict structural mismatch at " + path + ": " + lt + "(" + la.substr(0, 128) + ", " +
+             std::to_string(lf.size()) + " fields) != " + rt + "(" + ra.substr(0, 128) + ", " +
+             std::to_string(rf.size()) + " fields)";
+    }
+    size_t i = 0;
+    while (i < lf.size() && lf[i] == rf[i]) ++i;
+    INTERNAL_CHECK(i < lf.size()) << "Different interned records must have a differing field";
+    if (lf[i].first != rf[i].first) {
+      return "Strict structural mismatch at " + path + ": field " + lf[i].first.substr(0, 128) +
+             " != " + rf[i].first.substr(0, 128);
+    }
+    if (path.size() < 1024) path += "." + lf[i].first.substr(0, 128);
+    lhs = lf[i].second;
+    rhs = rf[i].second;
+  }
 }
-
-struct Record {
-  Key key;
-  uint64_t hash;
-};
-
-class Arena {
- public:
-  Arena() { Intern("null", "", {}); }
-
-  Id Intern(std::string tag, std::string atom, Fields fields = {}) {
-    Key key{std::move(tag), std::move(atom), std::move(fields)};
-    auto found = index_.find(key);
-    if (found != index_.end()) return found->second;
-    uint64_t hash =
-        Combine(std::hash<std::string>{}(std::get<0>(key)), std::hash<std::string>{}(std::get<1>(key)));
-    for (const auto& [name, child] : std::get<2>(key)) {
-      hash = Combine(hash, std::hash<std::string>{}(name));
-      hash = Combine(hash, records_[child].hash);
-    }
-    Id id = records_.size();
-    index_.emplace(key, id);
-    records_.push_back({std::move(key), hash});
-    return id;
-  }
-
-  uint64_t Hash(Id id) const { return records_[id].hash; }
-
-  std::string Mismatch(Id lhs, Id rhs) const {
-    std::string path = "root";
-    while (true) {
-      const auto& [lt, la, lf] = records_[lhs].key;
-      const auto& [rt, ra, rf] = records_[rhs].key;
-      if (lt != rt || la != ra || lf.size() != rf.size()) {
-        return "Strict structural mismatch at " + path + ": " + lt + "(" + la.substr(0, 128) + ", " +
-               std::to_string(lf.size()) + " fields) != " + rt + "(" + ra.substr(0, 128) + ", " +
-               std::to_string(rf.size()) + " fields)";
-      }
-      size_t i = 0;
-      while (i < lf.size() && lf[i] == rf[i]) ++i;
-      INTERNAL_CHECK(i < lf.size()) << "Different interned records must have a differing field";
-      if (lf[i].first != rf[i].first) {
-        return "Strict structural mismatch at " + path + ": field " + lf[i].first.substr(0, 128) +
-               " != " + rf[i].first.substr(0, 128);
-      }
-      if (path.size() < 1024) path += "." + lf[i].first.substr(0, 128);
-      lhs = lf[i].second;
-      rhs = rf[i].second;
-    }
-  }
-
- private:
-  std::map<Key, Id> index_;
-  std::vector<Record> records_;
-};
 
 struct Binding {
   std::string category;
@@ -109,8 +84,8 @@ struct Binding {
 };
 
 // One reflection projection supplies strict equality, hashing and diagnostics.
-// The first traversal reserves DefField identities. The second traversal uses
-// the frozen bindings, with independent memo tables for definitions/references.
+// Preparation reserves DefField identities and checks lexical use intervals.
+// Projection uses frozen bindings, with separate definition/reference caches.
 // Function contexts are independent even when the input shares node pointers.
 class Projection {
  public:
@@ -123,13 +98,19 @@ class Projection {
     PrepareFunction(root);
     collecting_ = true;
     Value(root);
+    node_cache_ = {};
+    type_cache_.clear();
+    checking_visibility_ = true;
+    Value(root);
+    CheckVisibility();
+    checking_visibility_ = false;
     collecting_ = false;
     node_cache_ = {};
     type_cache_.clear();
     return Value(root);
   }
 
-  result_type InitResult() const { return {}; }
+  [[nodiscard]] result_type InitResult() const { return {}; }
   void PushFieldName(const char* name) { path_.emplace_back(name); }
   void PopFieldName() { path_.pop_back(); }
 
@@ -137,6 +118,7 @@ class Projection {
   void VisitIgnoreField(F&&) {}
   template <typename F>
   void VisitUsualField(F&& visit) {
+    if (skip_scope_body_ && !path_.empty() && path_.back() == "body") return;
     visit();
   }
   template <typename F>
@@ -199,71 +181,160 @@ class Projection {
     }
   }
 
-  void CollectShapeSymbols(const ExprPtr& expr, bool bind, std::unordered_set<const Expr*>& visited) {
-    std::vector<ExprPtr> pending{expr};
-    while (!pending.empty()) {
-      auto current = std::move(pending.back());
-      pending.pop_back();
-      if (!current || !visited.insert(current.get()).second) continue;
-      if (auto var = AsVarLike(current)) {
-        auto scalar = As<ScalarType>(var->GetType());
-        if (!scalar || (scalar->dtype_ != DataType::INDEX && scalar->dtype_ != DataType::INT64)) {
-          Unsupported("UnsupportedSignatureSymbol");
-        }
-        if (bind)
-          Reserve(var, "symbol");
-        else if (!bindings_.count(var.get()))
-          Unsupported("UnboundValidShapeSymbol");
-      } else if (auto binary = As<BinaryExpr>(current)) {
-        pending.push_back(binary->right_);
-        pending.push_back(binary->left_);
-      } else if (auto unary = As<UnaryExpr>(current)) {
-        pending.push_back(unary->operand_);
-      } else if (auto call = As<Call>(current)) {
-        pending.insert(pending.end(), call->args_.rbegin(), call->args_.rend());
-      } else if (auto item = As<TupleGetItemExpr>(current)) {
-        pending.push_back(item->tuple_);
-      }
-    }
-  }
-
   template <typename T>
   void PrepareFunction(const std::shared_ptr<const T>& root) {
     if constexpr (std::is_base_of_v<IRNode, T>) {
       function_ = As<Function>(std::static_pointer_cast<const IRNode>(root));
       if (!function_) return;
-      // Reserve every parameter before looking at any type (forward references
-      // to scalar parameters are legal in parameter shape annotations).
       for (const auto& param : function_->params_) Reserve(param, "bound");
-      std::unordered_set<const Expr*> shapes;
-      for (const auto& param : function_->params_) {
-        if (auto tensor = AsTensorTypeLike(param->GetType())) {
-          for (const auto& dim : tensor->shape_) CollectShapeSymbols(dim, true, shapes);
+      auto symbols = ClassifySignatureSymbols(function_);
+      auto reserve_symbol = [&](const VarPtr& var) {
+        auto scalar = As<ScalarType>(var->GetType());
+        if (!scalar || (scalar->dtype_ != DataType::INDEX && scalar->dtype_ != DataType::INT64)) {
+          Unsupported("UnsupportedSignatureSymbol");
         }
+        Reserve(var, "symbol");
+      };
+      for (const auto& var : symbols.bound) {
+        if (!bindings_.count(var.get())) reserve_symbol(var);
       }
-      // Bare valid-shape slots are runtime-readable sources. A compound slot
-      // must use an already bound symbol, as in MaterializeValidShapeSymbols.
-      for (const auto& param : function_->params_) {
-        if (auto tensor = AsTensorTypeLike(param->GetType()); tensor && tensor->tensor_view_) {
-          for (const auto& dim : tensor->tensor_view_->valid_shape) {
-            if (auto var = AsVarLike(dim)) {
-              std::unordered_set<const Expr*> seen;
-              CollectShapeSymbols(var, true, seen);
-            }
-          }
-        }
+      for (const auto& symbol : symbols.valid_shape) reserve_symbol(symbol.symbol);
+      if (!symbols.unbound.empty()) Unsupported("UnboundValidShapeSymbol");
+      for (const auto& [var, binding] : bindings_) lifetimes_[var] = {0, kForever};
+    }
+  }
+
+  static constexpr size_t kForever = std::numeric_limits<size_t>::max();
+  struct UseRange {
+    size_t first;
+    size_t last;
+  };
+  struct UseRecord {
+    UseRange range;
+    const Var* variable;
+    std::vector<size_t> children;
+    std::string path;
+  };
+
+  // Expressions/types have no binding side effects. Propagate the earliest and
+  // latest use through their DAG in reverse postorder. A lexical binding is one
+  // contiguous interval, so checking those two endpoints proves visibility at
+  // every use without rescanning a shared expression at each statement.
+  size_t BeginUses(const void* object, bool definition, const Var* variable) {
+    auto [it, inserted] = use_index_.emplace(std::make_pair(object, definition), uses_.size());
+    size_t id = it->second;
+    if (inserted) {
+      std::string path = "root";
+      for (const auto& part : path_) {
+        if (path.size() >= 1024) break;
+        path += "." + part.substr(0, 128);
       }
-      std::unordered_set<const Expr*> valid;
-      for (const auto& param : function_->params_) {
-        if (auto tensor = AsTensorTypeLike(param->GetType()); tensor && tensor->tensor_view_) {
-          for (const auto& dim : tensor->tensor_view_->valid_shape) CollectShapeSymbols(dim, false, valid);
-        }
+      uses_.push_back({{position_, position_}, definition ? nullptr : variable, {}, std::move(path)});
+    } else {
+      uses_[id].range.last = position_;
+    }
+    if (use_parent_ != kForever) uses_[use_parent_].children.push_back(id);
+    use_parent_ = id;
+    return id;
+  }
+
+  void CheckVisibility() {
+    for (auto it = use_postorder_.rbegin(); it != use_postorder_.rend(); ++it) {
+      const auto range = uses_[*it].range;
+      for (size_t child : uses_[*it].children) {
+        auto& target = uses_[child].range;
+        target.first = std::min(target.first, range.first);
+        target.last = std::max(target.last, range.last);
+      }
+    }
+    for (const auto& use : uses_) {
+      auto binding = bindings_.find(use.variable);
+      if (binding == bindings_.end()) continue;  // True open capture, not a local binder.
+      auto lifetime = lifetimes_.find(use.variable);
+      if (lifetime == lifetimes_.end() || use.range.first < lifetime->second.first ||
+          use.range.last >= lifetime->second.last) {
+        throw StructuralComparisonUnsupported("BindingNotVisible", use.path);
       }
     }
   }
 
+  template <typename T>
+  void CheckField(const char* name, const T& value, bool definition = false) {
+    path_.emplace_back(name);
+    defining_ = definition;
+    Value(value);
+    defining_ = false;
+    path_.pop_back();
+  }
+
+  void Activate(const VarPtr& var) {
+    lifetimes_[var.get()] = {++position_, kForever};
+    scope_definitions_.push_back(var.get());
+  }
+
+  void RestoreScope(size_t checkpoint) {
+    ++position_;
+    while (scope_definitions_.size() > checkpoint) {
+      lifetimes_[scope_definitions_.back()].last = position_;
+      scope_definitions_.pop_back();
+    }
+  }
+
+  void DefineResults(const std::vector<VarPtr>& results) {
+    CheckField("return_vars", results, true);
+    for (const auto& result : results) Activate(result);
+  }
+
+  Id CheckStatement(const StmtPtr& stmt) {
+    ++position_;
+    if (auto assign = As<AssignStmt>(stmt)) {
+      CheckField("value", assign->value_);
+      CheckField("var", assign->var_, true);
+      Activate(assign->var_);
+    } else if (auto loop = As<ForStmt>(stmt)) {
+      CheckField("attrs", loop->attrs_);
+      CheckField("start", loop->start_);
+      CheckField("stop", loop->stop_);
+      CheckField("step", loop->step_);
+      CheckField("loop_var", loop->loop_var_, true);
+      CheckField("iter_args", loop->iter_args_, true);
+      size_t checkpoint = scope_definitions_.size();
+      Activate(loop->loop_var_);
+      for (const auto& iter : loop->iter_args_) Activate(iter);
+      CheckField("body", loop->body_);
+      RestoreScope(checkpoint);
+      DefineResults(loop->return_vars_);
+    } else if (auto loop = As<WhileStmt>(stmt)) {
+      CheckField("iter_args", loop->iter_args_, true);
+      size_t checkpoint = scope_definitions_.size();
+      for (const auto& iter : loop->iter_args_) Activate(iter);
+      CheckField("condition", loop->condition_);
+      CheckField("body", loop->body_);
+      RestoreScope(checkpoint);
+      DefineResults(loop->return_vars_);
+    } else if (auto branch = As<IfStmt>(stmt)) {
+      CheckField("condition", branch->condition_);
+      size_t checkpoint = scope_definitions_.size();
+      CheckField("then_body", branch->then_body_);
+      RestoreScope(checkpoint);
+      CheckField("else_body", branch->else_body_);
+      RestoreScope(checkpoint);
+      DefineResults(branch->return_vars_);
+    } else if (auto scope = As<ScopeStmt>(stmt)) {
+      // Scope metadata is evaluated on entry; these straight-line regions do
+      // not hide definitions from subsequent statements (see ScopeStmt).
+      skip_scope_body_ = true;
+      DispatchNode(stmt);
+      skip_scope_body_ = false;
+      CheckField("body", scope->body_);
+    } else {
+      DispatchNode(stmt);
+    }
+    return 0;
+  }
+
   Id Variable(const VarPtr& var, bool definition) {
-    if (collecting_ && definition) {
+    if (collecting_ && !checking_visibility_ && definition) {
       if (!definitions_.insert(var.get()).second) Unsupported("RepeatedDefinition");
       Reserve(var, "bound");
     }
@@ -301,24 +372,40 @@ class Projection {
     defining_ = false;
     // Repeated definitions must be checked before memoization.
     const auto variable = AsVarLike(As<Expr>(node));
-    if (collecting_ && definition && variable && definitions_.count(variable.get())) {
+    if (collecting_ && !checking_visibility_ && definition && variable &&
+        definitions_.count(variable.get())) {
       Unsupported("RepeatedDefinition");
+    }
+    const size_t saved_parent = use_parent_;
+    size_t use_id = kForever;
+    if (checking_visibility_) {
+      if (As<Expr>(node)) {
+        use_id = BeginUses(node.get(), definition, variable.get());
+      } else {
+        use_parent_ = kForever;
+      }
     }
     auto& cache = node_cache_[definition ? 1 : 0];
     auto cached = cache.find(node.get());
     if (cached != cache.end()) {
       if (collecting_ && As<Stmt>(node)) Unsupported("SharedStatement");
       defining_ = definition;
+      use_parent_ = saved_parent;
       return cached->second;
     }
     if (depth_ >= 512) Unsupported("DepthLimitExceeded");
     if (!active_.insert(node.get()).second) Unsupported("CyclicStructure");
     ++depth_;
     Id result;
-    if (variable)
+    if (variable) {
       result = Variable(variable, definition);
-    else
+    } else if (checking_visibility_ && As<Stmt>(node)) {
+      result = CheckStatement(As<Stmt>(node));
+    } else {
       result = DispatchNode(node);
+    }
+    if (use_id != kForever) use_postorder_.push_back(use_id);
+    use_parent_ = saved_parent;
     --depth_;
     active_.erase(node.get());
     cache.emplace(node.get(), result);
@@ -378,12 +465,19 @@ class Projection {
       default:
         break;
     }
+    const size_t saved_parent = use_parent_;
+    size_t use_id = checking_visibility_ ? BeginUses(type.get(), false, nullptr) : kForever;
     auto cached = type_cache_.find(type.get());
-    if (cached != type_cache_.end()) return cached->second;
+    if (cached != type_cache_.end()) {
+      use_parent_ = saved_parent;
+      return cached->second;
+    }
     if (depth_ >= 512) Unsupported("DepthLimitExceeded");
     if (!active_.insert(type.get()).second) Unsupported("CyclicStructure");
     ++depth_;
     Id result = DispatchType(type);
+    if (use_id != kForever) use_postorder_.push_back(use_id);
+    use_parent_ = saved_parent;
     --depth_;
     active_.erase(type.get());
     type_cache_.emplace(type.get(), result);
@@ -528,6 +622,15 @@ class Projection {
   Arena& arena_;
   bool map_free_;
   bool collecting_ = false;
+  bool checking_visibility_ = false;
+  bool skip_scope_body_ = false;
+  size_t position_ = 0;
+  size_t use_parent_ = kForever;
+  std::map<std::pair<const void*, bool>, size_t> use_index_;
+  std::vector<UseRecord> uses_;
+  std::vector<size_t> use_postorder_;
+  std::unordered_map<const Var*, UseRange> lifetimes_;
+  std::vector<const Var*> scope_definitions_;
   bool defining_ = false;
   size_t depth_ = 0;
   FunctionPtr function_;
@@ -549,7 +652,7 @@ bool EqualStrict(const Root& lhs, const Root& rhs, bool map_free, bool assert_eq
   Projection right(arena, map_free);
   Id l = left.Run(lhs);
   Id r = right.Run(rhs);
-  if (l != r && assert_equal) throw ValueError(arena.Mismatch(l, r));
+  if (l != r && assert_equal) throw ValueError(Mismatch(arena, l, r));
   return l == r;
 }
 

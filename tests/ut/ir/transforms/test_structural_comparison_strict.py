@@ -405,5 +405,243 @@ def test_generated_graphs_preserve_equivalence_under_renaming_and_sharing(seed):
     equal(a, c)
 
 
+def assert_unsupported(node, reason="BindingNotVisible"):
+    for operation in (
+        lambda: ir.structural_hash(node, mode=STRICT),
+        lambda: ir.structural_equal(node, node, mode=STRICT),
+        lambda: ir.assert_structural_equal(node, node, mode=STRICT),
+    ):
+        with pytest.raises(ir.StructuralComparisonUnsupported) as exc:
+            operation()
+        assert exc.value.reason == reason
+        assert exc.value.field_path.startswith("root")
+
+
+@pytest.mark.parametrize("location", ["rhs", "before", "type", "attr", "shared"])
+def test_local_binder_must_be_visible_at_every_use(location):
+    x = var("x")
+    one = ir.ConstInt(1, D.INT64, SPAN)
+    shared = add(x, one)
+    if location == "rhs":
+        body = ir.AssignStmt(x, shared, SPAN)
+    else:
+        use = {
+            "before": x,
+            "type": ir.Var("tensor", ir.TensorType([x], D.FP32), SPAN),
+            "attr": call({"capture": x}),
+            "shared": shared,
+        }[location]
+        body = ir.SeqStmts(
+            [ir.EvalStmt(use, SPAN), ir.AssignStmt(x, one, SPAN), ir.EvalStmt(shared, SPAN)], SPAN
+        )
+    assert_unsupported(body)
+
+
+@pytest.mark.parametrize("escape", ["direct", "shared", "type", "attr", "sibling"])
+def test_branch_binder_cannot_escape_even_through_cached_dag(escape):
+    x = var("x")
+    use = {
+        "direct": x,
+        "shared": add(x, x),
+        "type": ir.Var("tensor", ir.TensorType([x], D.FP32), SPAN),
+        "attr": call({"hidden": x}),
+        "sibling": add(x, x),
+    }[escape]
+    then = ir.SeqStmts([ir.AssignStmt(x, ir.ConstInt(1, D.INT64, SPAN), SPAN), ir.EvalStmt(use, SPAN)], SPAN)
+    branch = ir.IfStmt(
+        ir.ConstBool(True, SPAN), then, ir.EvalStmt(use, SPAN) if escape == "sibling" else None, [], SPAN
+    )
+    assert_unsupported(ir.SeqStmts([branch, ir.EvalStmt(use, SPAN)], SPAN))
+
+
+def test_if_results_bind_after_both_branches_and_shadow_names_are_irrelevant():
+    def build(prefix):
+        seed, local, result = var(prefix), var(prefix), var(prefix)
+        branch = ir.IfStmt(
+            ir.ConstBool(True, SPAN),
+            ir.SeqStmts([ir.AssignStmt(local, seed, SPAN), ir.YieldStmt([local], SPAN)], SPAN),
+            ir.YieldStmt([seed], SPAN),
+            [result],
+            SPAN,
+        )
+        body = ir.SeqStmts([branch, ir.ReturnStmt([result, seed], SPAN)], SPAN)
+        return ir.Function(prefix, [seed], [seed.type, seed.type], body, SPAN)
+
+    equal(build("same"), build("renamed"))
+    result = var("result")
+    assert_unsupported(
+        ir.IfStmt(ir.ConstBool(True, SPAN), ir.YieldStmt([result], SPAN), None, [result], SPAN)
+    )
+
+
+@pytest.mark.parametrize("loop_kind", ["for", "while"])
+@pytest.mark.parametrize("invalid", [None, "escape", "init", "result", "local"])
+def test_loop_binding_lifetimes(loop_kind, invalid):
+    def build(prefix):
+        seed, output, local = var(prefix), var(prefix), var(prefix)
+        outputs = [var(prefix), output]
+        first = ir.IterArg(prefix, seed.type, seed, SPAN)
+        second = ir.IterArg(prefix, seed.type, first if invalid == "init" else seed, SPAN)
+        yielded = output if invalid == "result" else second
+        body = ir.SeqStmts([ir.AssignStmt(local, first, SPAN), ir.YieldStmt([first, yielded], SPAN)], SPAN)
+        if loop_kind == "for":
+            loop = ir.ForStmt(
+                var(prefix, D.INDEX),
+                ir.ConstInt(0, D.INDEX, SPAN),
+                ir.ConstInt(4, D.INDEX, SPAN),
+                ir.ConstInt(1, D.INDEX, SPAN),
+                [first, second],
+                body,
+                outputs,
+                SPAN,
+            )
+        else:
+            loop = ir.WhileStmt(ir.Lt(first, second, D.BOOL, SPAN), [first, second], body, outputs, SPAN)
+        returned = first if invalid == "escape" else local if invalid == "local" else output
+        return ir.Function(
+            prefix, [seed], [seed.type], ir.SeqStmts([loop, ir.ReturnStmt([returned], SPAN)], SPAN), SPAN
+        )
+
+    if invalid:
+        assert_unsupported(build("x"))
+    else:
+        equal(build("x"), build("y"))
+
+
+def test_signature_metadata_does_not_capture_a_later_local_definition():
+    local = var("n", D.INDEX)
+    tensor = ir.Var(
+        "t",
+        ir.TensorType([16], D.FP32, tensor_view=ir.TensorView(stride=[local], layout=ir.TensorLayout.ND)),
+        SPAN,
+    )
+    body = ir.AssignStmt(local, ir.ConstInt(1, D.INDEX, SPAN), SPAN)
+    assert_unsupported(ir.Function("f", [tensor], [], body, SPAN))
+
+
+def test_compound_valid_shape_can_use_a_later_bare_slot():
+    def build(prefix):
+        n = var(prefix, D.INDEX)
+        params = [
+            ir.Var(
+                prefix + str(i),
+                ir.TensorType(
+                    [16],
+                    D.FP32,
+                    tensor_view=ir.TensorView(stride=[1], valid_shape=[extent], layout=ir.TensorLayout.ND),
+                ),
+                SPAN,
+            )
+            for i, extent in enumerate([ir.Mul(n, ir.ConstInt(2, D.INDEX, SPAN), D.INDEX, SPAN), n])
+        ]
+        return function(prefix, params)
+
+    equal(build("n"), build("m"))
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        ir.VoidType,
+        ir.PrefetchAsyncContextType,
+        ir.AsyncEventType,
+        ir.AsyncSessionType,
+        lambda: ir.ScalarType(D.FP32),
+        lambda: ir.TensorType([16], D.FP32),
+        lambda: ir.DistributedTensorType([16], D.FP32),
+        lambda: ir.TileType([16, 16], D.FP32),
+        lambda: ir.ArrayType(D.INT32, 16),
+        lambda: ir.BufferType([16, 16], D.FP32, ir.MemorySpace.Mat),
+        lambda: ir.MultiBufferType(ir.BufferType([16, 16], D.FP32, ir.MemorySpace.Mat), 2),
+        lambda: ir.TupleType([ir.ScalarType(D.INT32), ir.TileType([16, 16], D.FP32)]),
+    ],
+)
+def test_supported_type_projection_parity(factory):
+    equal(factory(), factory())
+
+
+@pytest.mark.parametrize(
+    "field,changed",
+    [
+        ("valid_shape", [8, 16]),
+        ("stride", [32, 1]),
+        ("start_offset", 0),
+        ("blayout", ir.TileLayout.col_major),
+        ("slayout", ir.TileLayout.row_major),
+        ("fractal", 1024),
+        ("pad", ir.PadValue.zero),
+    ],
+)
+def test_tile_view_single_field_changes(field, changed):
+    lhs = ir.TileType([16, 16], D.FP32, tile_view=ir.TileView())
+    rhs = ir.TileType([16, 16], D.FP32, tile_view=ir.TileView(**{field: changed}))
+    equal(lhs, rhs, False)
+
+
+def test_many_uses_of_large_shared_type():
+    def build(prefix):
+        n = var(prefix, D.INDEX)
+        shape = n
+        for _ in range(60):
+            shape = ir.Add(shape, shape, D.INDEX, SPAN)
+        tensor = ir.TensorType([shape], D.FP32)
+        params = [ir.Var(f"{prefix}{i}", tensor, SPAN) for i in range(100)]
+        return function(prefix, params)
+
+    equal(build("n"), build("m"))
+
+
+@pytest.mark.parametrize(
+    "type_factory",
+    [
+        lambda: ir.MemRef(ir.Var("base", ir.PtrType(), SPAN), 0, 64, SPAN).type,
+        ir.PtrType,
+        ir.WindowBufferType,
+        ir.CommCtxType,
+    ],
+)
+def test_resource_marker_types_are_unsupported(type_factory):
+    node = type_factory()
+    with pytest.raises(ir.StructuralComparisonUnsupported, match="UnsupportedStorage"):
+        ir.structural_hash(node, mode=STRICT)
+
+
+@pytest.mark.parametrize("attached", [False, True])
+def test_window_storage_is_unsupported(attached):
+    base = ir.Var("base", ir.PtrType(), SPAN)
+    window = ir.WindowBuffer(base, ir.ConstInt(64, D.INDEX, SPAN), span=SPAN)
+    if attached:
+        node = ir.Var(
+            "slice", ir.DistributedTensorType([ir.ConstInt(16, D.INDEX, SPAN)], D.FP32, window), SPAN
+        )
+    else:
+        node = window
+    assert_unsupported(node, "UnsupportedStorage")
+
+
+def test_open_stride_symbol_is_not_implicitly_bound():
+    def build(prefix):
+        n = var(prefix, D.INDEX)
+        tensor = ir.TensorType([16], D.FP32, tensor_view=ir.TensorView(stride=[n], layout=ir.TensorLayout.ND))
+        return function(prefix, [ir.Var(prefix + "_tensor", tensor, SPAN)])
+
+    equal(build("n"), build("m"), False)
+    equal(build("n"), build("m"), auto=True)
+
+
+def test_default_hash_revisits_subtree_after_a_binding_is_introduced():
+    x, y = var("x"), var("y")
+    shared = add(x, x)
+    one = ir.ConstInt(1, D.INT64, SPAN)
+    lhs = ir.SeqStmts(
+        [ir.EvalStmt(shared, SPAN), ir.AssignStmt(x, one, SPAN), ir.EvalStmt(shared, SPAN)], SPAN
+    )
+    rhs = ir.SeqStmts(
+        [ir.EvalStmt(shared, SPAN), ir.AssignStmt(y, one, SPAN), ir.EvalStmt(add(y, y), SPAN)], SPAN
+    )
+    assert ir.structural_equal(lhs, rhs)
+    assert ir.structural_hash(lhs) == ir.structural_hash(rhs)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

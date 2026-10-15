@@ -20,3 +20,9 @@ add_test(
     NAME pypto_dsa_reuse_penalty_solver_test
     COMMAND pypto_dsa_reuse_penalty_solver_test
 )
+
+add_executable(pypto_structural_comparison_arena_test structural_comparison_arena_test.cpp)
+target_include_directories(pypto_structural_comparison_arena_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+# Keep assert-based checks enabled in release builds as well.
+target_compile_options(pypto_structural_comparison_arena_test PRIVATE -UNDEBUG)
+add_test(NAME pypto_structural_comparison_arena_test COMMAND pypto_structural_comparison_arena_test)
