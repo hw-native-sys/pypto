@@ -2426,6 +2426,13 @@ jobs:
           fi
           python -c "import pypto, simpler; print('env OK:', pypto.__file__)"
 
+      - name: Test fillpad_inplace numerical correctness with PTOAS
+        # The default ST planner is PYPTO. Select PTOAS explicitly to exercise
+        # shared views and compare both valid and padded rows with the golden.
+        run: >-
+          python -m pytest tests/st/runtime/ops/test_fillpad_inplace.py
+          --memory-planner=ptoas --platform=a2a3sim,a5sim --forked -v
+
       - name: Test A5 system tests (simulator)
         # TestMscatter is deselected: the a5 simulator compiles incore kernels
         # against the runtime's bundled pto-isa, which still clones from the
