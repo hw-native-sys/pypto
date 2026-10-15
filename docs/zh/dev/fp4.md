@@ -67,6 +67,12 @@ alias 仅接受 UINT8 → FP4E2M1X2，要求二维 packed row-major Vec tile、
 逆向 alias、逻辑 FP4 alias、tensor alias 及通过此 alias 改变 shape 均被拒绝。
 GM load 可使用非零偏移；它与 UB tile 的 `start_offset` 不同。
 
+源 tile 必须具有显式地址的内存引用（MemRef），其字节跨度必须等于静态 carrier
+元素数。非连续 UB 列切片（包括其 alias 和 reshape）以及 `tile.tpop_from_aic`
+等无 MemRef 的输入，会在生成 FP4 转换前被拒绝。请直接从 UINT8 GM 加载所需窗口，
+得到连续 UB tile 后再创建 alias。保留下来的 UB 切片还要求静态偏移和连续行；
+GM load 仍可使用运行时偏移。
+
 **PTOAS 0.65 足以支持 PYPTO 和 DSA_RP 内存规划器**：两者生成有显式地址的
 类型 alias，并通过 A5 逐位测试。此 alias 会拒绝 PTOAS 内存规划器，因为 0.65
 的 `pto.treshape` 不支持 packed FP4。其他 reinterpret-view dtype 保持原有

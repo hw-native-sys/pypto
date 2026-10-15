@@ -74,6 +74,13 @@ logical FP4 aliases, tensor aliases, and reshaping through this alias are
 rejected. GM load offsets may be nonzero; they are distinct from a UB tile's
 `start_offset`.
 
+The source must have an address-backed MemRef whose byte span equals the
+static carrier element count. Noncontiguous UB column slices (including aliases
+and reshapes of them) and MemRef-less inputs such as `tile.tpop_from_aic` are
+rejected before emitting the FP4 conversion. Load the desired window directly
+from UINT8 GM into a dense UB tile instead. A surviving UB slice also requires
+a static offset and contiguous rows; a GM load may still use runtime offsets.
+
 PTOAS **0.65 is sufficient with PYPTO and DSA_RP memory planning**. Both emit
 address-backed typed aliases and pass bitwise A5 tests. The PTOAS memory planner
 is rejected for this alias: its `pto.treshape` primitive rejects packed FP4 in

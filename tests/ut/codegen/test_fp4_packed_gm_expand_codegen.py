@@ -87,6 +87,77 @@ def test_uint8_ub_fp4_alias_rejects_ptoas_memory_planner():
         _emit_incore_mlir(_uint8_ub_fp4_decode_program(), passes.MemoryPlanner.PTOAS)
 
 
+def _uint8_slice_fp4_decode_program(parent_cols, column_offset):
+    @pl.program
+    class DecodeSlice:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            packed: pl.Tensor[[32, parent_cols], pl.UINT8],
+            output: pl.Out[pl.Tensor[[32, 512], pl.BF16]],
+        ) -> pl.Tensor[[32, 512], pl.BF16]:
+            payload = pl.tile.load(packed, [0, 0], [32, parent_cols])
+            window = pl.tile.slice(payload, [32, 256], [0, column_offset])
+            fp4 = pl.reinterpret_view(window, pl.FP4E2M1X2)
+            return pl.tile.store(pl.cast(fp4, pl.BF16), [0, 0], output)
+
+    return DecodeSlice
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+@pytest.mark.parametrize(("parent_cols", "column_offset"), [(512, 256), (320, 32)])
+def test_uint8_ub_fp4_alias_rejects_noncontiguous_slice(planner, parent_cols, column_offset):
+    program = _uint8_slice_fp4_decode_program(parent_cols, column_offset)
+    with pytest.raises(ValueError, match="FP4E2M1X2 UB alias requires a contiguous UINT8 tile"):
+        _emit_incore_mlir(program, planner)
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+def test_uint8_ub_fp4_alias_rejects_noncontiguous_slice_through_views(planner):
+    @pl.program
+    class DecodeAliasedSlice:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            packed: pl.Tensor[[32, 512], pl.UINT8],
+            output: pl.Out[pl.Tensor[[16, 1024], pl.BF16]],
+        ) -> pl.Tensor[[16, 1024], pl.BF16]:
+            payload = pl.tile.load(packed, [0, 0], [32, 512])
+            window = pl.tile.slice(payload, [32, 256], [0, 256])
+            alias = window
+            reshaped = pl.tile.reshape(alias, [16, 512])
+            fp4 = pl.reinterpret_view(reshaped, pl.FP4E2M1X2)
+            return pl.tile.store(pl.cast(fp4, pl.BF16), [0, 0], output)
+
+    with pytest.raises(ValueError, match="FP4E2M1X2 UB alias requires a contiguous UINT8 tile"):
+        _emit_incore_mlir(DecodeAliasedSlice, planner)
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+def test_uint8_ub_fp4_alias_accepts_contiguous_slice(planner):
+    mlir = _emit_incore_mlir(_uint8_slice_fp4_decode_program(256, 0), planner)
+    assert mlir.count("pto.tcvt ") == 1, mlir
+    assert "pto.treshape" not in mlir, mlir
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+def test_uint8_ub_fp4_alias_rejects_memref_less_tpop(planner):
+    @pl.program
+    class DecodePop:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(self, output: pl.Out[pl.Tensor[[32, 512], pl.BF16]]) -> pl.Tensor[[32, 512], pl.BF16]:
+            buf = pl.reserve_buffer(name="c2v_slot_buffer", size=16384, base=0x1000)
+            pl.aiv_initialize_pipe(dir_mask=1, slot_size=8192, c2v_consumer_buf=buf)
+            payload: pl.Tile[[32, 256], pl.UINT8, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=0)
+            fp4 = pl.reinterpret_view(payload, pl.FP4E2M1X2)
+            decoded = pl.cast(fp4, pl.BF16)
+            pl.tfree_to_aic(payload)
+            return pl.tile.store(decoded, [0, 0], output)
+
+    with pytest.raises(ValueError, match="FP4E2M1X2 UB alias requires an address-backed tile"):
+        _emit_incore_mlir(DecodePop, planner)
+
+
 def test_fp4e2m1x2_make_tensor_view_expands_to_nibble_units():
     """Param + InCore tensor.view + rank-3 leading strides expand carrier→nibble."""
 

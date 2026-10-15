@@ -1507,6 +1507,36 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     const bool result_has_memref = result_tile->memref_.has_value();
     const std::string existing_type = codegen.GetSSATileBufType(result_target);
 
+    if (result_tile->dtype_ == DataType::FP4E2M1X2) {
+      CHECK_SPAN(source_tile->memref_.has_value() && result_has_memref && !existing_type.empty() &&
+                     existing_type == result_type,
+                 op->span_)
+          << "UINT8 -> FP4E2M1X2 UB alias requires an address-backed tile; MemRef-less inputs such as "
+             "tile.tpop_from_aic are unsupported. Load a dense UINT8 tile from GM before aliasing";
+
+      // Slice types omit the parent pitch. InitMemRef retains the touched byte
+      // envelope, including inter-row gaps, through aliases and reshapes. Only
+      // a tight UINT8 span can be relabeled as a dense packed-FP4 allocation.
+      const auto rows = ir::As<ir::ConstInt>(source_tile->shape_[0]);
+      const auto cols = ir::As<ir::ConstInt>(source_tile->shape_[1]);
+      const uint64_t span_bytes = (*source_tile->memref_)->size_;
+      CHECK_SPAN(
+          rows && cols && rows->value_ > 0 && cols->value_ > 0 &&
+              span_bytes / static_cast<uint64_t>(rows->value_) == static_cast<uint64_t>(cols->value_) &&
+              span_bytes % static_cast<uint64_t>(rows->value_) == 0,
+          op->span_)
+          << "UINT8 -> FP4E2M1X2 UB alias requires a contiguous UINT8 tile with a tight byte span; "
+             "noncontiguous UB slices are unsupported. Slice the GM tensor and load the window instead";
+      if (const auto* window = codegen.GetSubviewMaterialization(codegen.GetExprAsCode(op->args_[0]))) {
+        CHECK_SPAN(
+            window->const_offset && (window->view_rows == 1 ||
+                                     (window->source_cols > 0 && window->view_cols == window->source_cols)),
+            op->span_)
+            << "UINT8 -> FP4E2M1X2 UB alias requires a contiguous UINT8 tile with a static UB offset; "
+               "slice the GM tensor and load the window instead";
+      }
+    }
+
     // With baked addresses, the result's own alloc_tile at the inherited
     // address is already the typed alias. PTOAS-planner mode shares one handle,
     // so it must materialize a typed SSA view below.
