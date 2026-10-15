@@ -20,6 +20,20 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 - 高层测试若最终生成其他 PTO op，不算同名覆盖。例如 collective 被拆成
   `tput/tget/tnotify/twait`，不能计为 `tbroadcast/tgather/tscatter/treduce` 的 ST。
 
+## 内存规划视图编译看护（Planner View Compilation Guard）
+
+`system-tests-a5sim` CI 作业使用固定版本的 PTOAS，在安装设备运行时之前运行
+`fillpad_inplace` 的内存规划和视图回归测试：
+
+```bash
+python -m pytest tests/ut/codegen/test_ptoas_planner_views.py --require-ptoas -k "fillpad or inplace_alias" -v
+```
+
+当 PTOAS 缺失、无法运行或版本低于支持范围时，`--require-ptoas` 会在测试初始化阶段失败，
+避免因编译器缺失而静默跳过原生编译。测试覆盖两个后端的 PTOAS 内存规划路径，以及
+PYPTO/DSA_RP 对照路径。此看护检查 MLIR 和生成 C++ 的编译过程；不能替代设备数值测试，
+也不代表已穷举验证整个内存规划器。
+
 ## 图例
 
 - **级别**：PyPTO 注册/生成层级（tile / tensor / tile+tensor / comm / internal）。
