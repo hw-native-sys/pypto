@@ -154,6 +154,27 @@ def test_uint8_ub_fp4_alias_rejects_nested_noncontiguous_slice(planner):
 
 
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+def test_uint8_ub_fp4_alias_rejects_dynamic_ub_offset_through_reshape(planner):
+    @pl.program
+    class DecodeDynamicSlice:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            packed: pl.Tensor[[64, 256], pl.UINT8],
+            start: pl.Scalar[pl.INT64],
+            output: pl.Out[pl.Tensor[[16, 1024], pl.BF16]],
+        ) -> pl.Tensor[[16, 1024], pl.BF16]:
+            payload = pl.tile.load(packed, [0, 0], [64, 256])
+            window = pl.tile.slice(payload, [32, 256], [start, 0])
+            reshaped = pl.tile.reshape(window, [16, 512])
+            fp4 = pl.reinterpret_view(reshaped, pl.FP4E2M1X2)
+            return pl.tile.store(pl.cast(fp4, pl.BF16), [0, 0], output)
+
+    with pytest.raises(ValueError, match="FP4E2M1X2 UB alias requires a contiguous UINT8 tile"):
+        _emit_incore_mlir(DecodeDynamicSlice, planner)
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
 def test_uint8_ub_fp4_alias_accepts_contiguous_slice(planner):
     mlir = _emit_incore_mlir(_uint8_slice_fp4_decode_program(256, 0), planner)
     assert mlir.count("pto.tcvt ") == 1, mlir

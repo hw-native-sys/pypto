@@ -724,10 +724,12 @@ class InitMemRefMutator : public IRMutator {
     }
     if (auto call = As<Call>(new_value); call && IsOp(call, "tile.reinterpret_view")) {
       auto result_tile = As<TileType>(op->var_->GetType());
-      CHECK_SPAN(!result_tile || result_tile->dtype_ != DataType::FP4E2M1X2 || !non_dense_source, call->span_)
-          << "UINT8 -> FP4E2M1X2 UB alias requires a contiguous UINT8 tile; noncontiguous UB slice "
-             "provenance survives nested slices, aliases and reshapes. Slice the GM tensor and load "
-             "the window instead";
+      CHECK_SPAN(!result_tile || result_tile->dtype_ != DataType::FP4E2M1X2 ||
+                     (!non_dense_source && As<ConstInt>(parent_memref->byte_offset_)),
+                 call->span_)
+          << "UINT8 -> FP4E2M1X2 UB alias requires a contiguous UINT8 tile with a static UB offset; "
+             "unsupported slice provenance survives nested slices, aliases and reshapes. Slice the "
+             "GM tensor and load the window instead";
     }
 
     // Compute additional byte offset from the view op (if applicable)
