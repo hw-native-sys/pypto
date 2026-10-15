@@ -52,7 +52,11 @@ Reshape and reinterpret preserve equal physical bytes and require dense source
 row pitch, including single-row sources. Vec assemble requires a non-window target and matching source/target
 row pitches. An overlapping source is preserved by an explicit copy of its
 full typed parent before planning, followed by reconstruction of the source
-window; an exact self-write needs no snapshot. Arithmetic destinations cannot
+window; an exact self-write or provably disjoint static byte spans need no snapshot.
+The disjointness proof uses inherited row pitch and includes gaps between rows,
+matching the verifier's conservative storage ranges. It compares shared allocation
+origins and byte offsets across chained assemble results, without changing the
+logical parent used for an overlapping-source snapshot. Arithmetic destinations cannot
 reuse the storage family of a window they read.
 
 Static dense Vec reshape supports repeated views of one planned allocation. Static nonnegative MemRef offsets must be
