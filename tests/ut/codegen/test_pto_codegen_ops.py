@@ -4638,6 +4638,8 @@ class TestCastAddressValidation:
             if planner == passes.MemoryPlanner.PYPTO:
                 after = passes.memory_reuse()(after)
             after = passes.allocate_memory_addr()(after)
+            # Cross-core frees inherit their split from TPOP before codegen.
+            after = passes.stamp_tfree_split()(after)
 
         memrefs = {}
 
