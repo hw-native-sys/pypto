@@ -1687,15 +1687,16 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
       tile_buf_type = codegen.GetCurrentResultTileBufTypeStringFromTileType();
     }
 
-    // `pto.set_validshape` mutates the operand's `valid_row` / `valid_col`
-    // operands. A *view* — the `pto.subview` a tile.slice lowers to, or a
-    // `pto.treshape` — has none: it carries its valid extent in its own type, so
+    // `pto.set_validshape` mutates runtime validity. Most views — the
+    // `pto.subview` a tile.slice lowers to, or a static-valid `pto.treshape` —
+    // cannot support that: they carry their valid extent in their own type, so
     // ptoas rejects the runtime op against one ("expects source tile_buf to have
     // dynamic validShape (?, ?)" / "requires a locally bound tile source"). Every
-    // other handle (an alloc, an `scf.if` result, a cross-core pop slot) takes the
-    // runtime op unchanged.
+    // other handle takes the runtime op unchanged. A fillpad destination rooted
+    // in a local allocation is an explicit exception: its dynamic-valid reshape
+    // is initialized at creation, and all holders share the same mutable handle.
     //
-    // Ask whether the operand IS a view, tracked at the two emission sites above.
+    // Ask whether the operand IS a view, tracked where each view is emitted.
     // The rendered valid dims cannot answer it in either direction: a tile.slice
     // given a runtime `valid_shape` renders `v_row=?, v_col=?` just as an
     // alloc-backed handle does.
@@ -1708,7 +1709,7 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     // provenance is exactly the trap that silently shifted DeepSeek-V4-Flash
     // decode_csa numerics while this path was being developed. A view's extent is
     // already first-class at the slice, so point there instead.
-    CHECK_SPAN(!codegen.IsTileViewName(tile_buf), op->span_)
+    CHECK_SPAN(!codegen.IsTileViewName(tile_buf) || codegen.IsMutableTileName(tile_buf), op->span_)
         << "pl.set_validshape cannot narrow a tile view (a slice or reshape result): a view carries "
            "its valid extent in its type, not in the runtime operands this lowers to. Narrow at the "
            "slice itself -- pl.tile.slice(tile, shape, offset, valid_shape=[...]), which also accepts "

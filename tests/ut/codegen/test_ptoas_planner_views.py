@@ -167,13 +167,15 @@ def _assert_fillpad_view(mlir: str, pad: int) -> None:
     src_type, dst_type = _tile_buf_types(fillpad)
     assert "pad=0>" in src_type, fillpad
     assert f"pad={pad}>" in dst_type, fillpad
-    assert "v_row=64, v_col=64" in dst_type, fillpad
+    assert "v_row=?, v_col=?" in dst_type, fillpad
     src = re.search(r"ins\((%[\w.$]+)", fillpad)
     dst = re.search(r"outs\((%[\w.$]+)", fillpad)
     assert src and dst, fillpad
     assert src[1] != dst[1], fillpad
     view = _sole_line(mlir, f"{dst[1]} = pto.treshape")
     assert f"pto.treshape {src[1]} : {src_type} -> {dst_type}" in view, view
+    initialized = f"pto.set_validshape {dst[1]}, %c64_index, %c64_index : {dst_type}"
+    assert initialized in mlir and mlir.index(initialized) < mlir.index(fillpad.strip()), mlir
     store = _sole_line(mlir, "pto.tstore")
     assert f"ins({dst[1]} : {dst_type})" in store, store
     assert mlir.count("= pto.alloc_tile") == 1, mlir
@@ -188,9 +190,11 @@ def test_inplace_alias_preserves_output_view(tmp_path: Path):
     assert "pad=0>" in src_type, fillpad
     assert "pad=1>" in dst_type, fillpad
     assert "v_row=?, v_col=?" in src_type, fillpad
-    assert "v_row=16, v_col=16" in dst_type, fillpad
+    assert "v_row=?, v_col=?" in dst_type, fillpad
     view = _sole_line(mlir, "= pto.treshape")
     assert view.endswith(f"-> {dst_type}"), view
+    dst = re.search(r"outs\((%[\w.$]+)", fillpad)
+    assert dst and f"pto.set_validshape {dst[1]}, %c16_index, %c16_index" in mlir, mlir
     store = _sole_line(mlir, "pto.tstore")
     assert _tile_buf_types(store) == [dst_type], store
     assert mlir.count("= pto.alloc_tile") == 1, mlir
@@ -301,8 +305,67 @@ def test_fillpad_inplace_composed_views(tmp_path: Path, program):
     for line in fillpads:
         dst_type = _tile_buf_types(line)[1]
         assert "pad=1>" in dst_type, line
-        assert "v_row=?" not in dst_type and "v_col=?" not in dst_type, line
+        if "v_row=?" in dst_type:
+            dst = re.search(r"outs\((%[\w.$]+)", line)
+            assert dst and f"pto.set_validshape {dst[1]}, %c16_index, %c16_index" in mlir, mlir
+        else:
+            assert "v_col=?" not in dst_type, line
     _compile_fillpad(mlir, tmp_path, passes.MemoryPlanner.PTOAS)
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("dynamic_bounds", [False, True])
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PTOAS, passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP]
+)
+def test_fillpad_inplace_then_set_validshape(tmp_path: Path, dynamic_bounds, backend_type, planner):
+    """Narrowing the padded handle must also affect uses of its original alias."""
+
+    @pl.program
+    class DynamicBounds:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[48, 64], pl.FP32],
+            rows: pl.Scalar[pl.INDEX],
+            cols: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            src = pl.load(x, [0, 0], [64, 64], valid_shape=[48, 64])
+            padded = pl.tile.fillpad_inplace(src, pad_value=pl.PadValue.zero)
+            _narrowed = pl.tile.set_validshape(padded, rows, cols)
+            # Use the pre-update alias: set_validshape mutates that same handle.
+            repadded = pl.tile.fillpad_inplace(padded, pad_value=pl.PadValue.max)
+            return pl.store(repadded, [0, 0], out)
+
+    @pl.program
+    class StaticBounds:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self, x: pl.Tensor[[48, 64], pl.FP32], out: pl.Out[pl.Tensor[[64, 64], pl.FP32]]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            src = pl.load(x, [0, 0], [64, 64], valid_shape=[48, 64])
+            padded = pl.tile.fillpad_inplace(src, pad_value=pl.PadValue.zero)
+            _narrowed = pl.tile.set_validshape(padded, 32, 48)
+            repadded = pl.tile.fillpad_inplace(padded, pad_value=pl.PadValue.max)
+            return pl.store(repadded, [0, 0], out)
+
+    reset_for_testing()
+    set_backend_type(backend_type)
+    with passes.PassContext([], memory_planner=planner):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
+            DynamicBounds if dynamic_bounds else StaticBounds
+        )
+    mlir = codegen.PTOCodegen().generate(optimized, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+    fillpads = [line for line in mlir.splitlines() if "pto.tfillpad" in line]
+    assert len(fillpads) == 2, mlir
+    first_dst = re.search(r"outs\((%[\w.$]+)", fillpads[0])
+    second_src = re.search(r"ins\((%[\w.$]+)", fillpads[1])
+    assert first_dst and second_src and first_dst[1] == second_src[1], mlir
+    assert "v_row=?, v_col=?" in _tile_buf_types(fillpads[0])[1], mlir
+    assert f"pto.set_validshape {first_dst[1]}," in mlir, mlir
+    _compile_fillpad(mlir, tmp_path, planner)
 
 
 # Reshape of a subview: def/use tile_buf types must agree

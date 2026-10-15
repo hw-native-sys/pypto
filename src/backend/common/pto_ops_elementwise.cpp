@@ -30,6 +30,7 @@
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/pto/pto_codegen.h"
+#include "pypto/codegen/pto/pto_type_utils.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/arith/analyzer.h"
@@ -1160,8 +1161,31 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
       INTERNAL_CHECK_SPAN(result_type, op->span_)
           << "Internal error: tile.fillpad_inplace requires a TileType result";
       // The shared input handle retains its original validity and pad metadata.
-      // Give the full, padded result its own view of the same storage for PTOAS.
-      codegen.SetCurrentResultBuf(EnsureTileViewSsa(op->args_[0], result_type, codegen, "fillpad_dst_view"));
+      // A local allocation can supply a dynamic-valid reshape whose metadata
+      // remains mutable after padding. Initialize it to the full extent before
+      // filling: TRESHAPE alone leaves dynamic validity at zero. Do not mutate
+      // the input handle, whose original valid extent identifies the pad region.
+      const std::string src = codegen.GetExprAsCode(op->args_[0]);
+      if (codegen.IsMutableTileName(src)) {
+        const std::string dst = codegen.NewNamedTemp("fillpad_dst_view");
+        const std::string dst_type = codegen.GetTileBufTypeStringFromTileType(result_type);
+        const auto dims =
+            codegen::ExtractTileTypeInfo(*result_type, codegen.GetTypeString(result_type->dtype_));
+        const std::string rows = codegen.GetOrEmitConstant(dims.rows, DataType::INDEX);
+        const std::string cols = codegen.GetOrEmitConstant(dims.cols, DataType::INDEX);
+        codegen.Emit(dst + " = pto.treshape " + src + " : " + codegen.GetExprTypeAnnotation(op->args_[0]) +
+                     " -> " + dst_type);
+        codegen.RegisterTileBufType(dst, dst_type);
+        codegen.RegisterTileViewName(dst);
+        codegen.RegisterMutableTileName(dst);
+        codegen.Emit("pto.set_validshape " + dst + ", " + rows + ", " + cols + " : " + dst_type);
+        codegen.SetCurrentResultBuf(dst);
+      } else {
+        // Subviews and loop-carried values cannot be runtime-updated by PTOAS.
+        // Preserve their existing static-valid view lowering.
+        codegen.SetCurrentResultBuf(
+            EnsureTileViewSsa(op->args_[0], result_type, codegen, "fillpad_dst_view"));
+      }
     }
     codegen.Emit("pto.tfillpad " + GenerateInsOutsClause(op, codegen));
     return std::string("");
