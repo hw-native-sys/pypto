@@ -402,13 +402,14 @@ class RunConfig:
         # Declare the extended surface here. The field list mirrors the
         # dataclass body above and must stay in sync: a field added there
         # without a line here fails every static call site of it, so drift
-        # fails loud instead of silent. The deprecated keywords
-        # (``backend_type``, ``enable_l2_swimlane``) are deliberately absent
-        # — accepted for compatibility, not offered.
+        # fails loud instead of silent. The backend_type constructor alias is
+        # supported alongside arch. The deprecated enable_l2_swimlane keyword
+        # is deliberately absent — accepted for compatibility, not offered.
         def __init__(  # noqa: PLR0913 — mirrors the dataclass surface
             self,
             *,
             arch: BackendType = ...,
+            backend_type: BackendType = ...,
             execution_mode: ExecutionMode = ...,
             platform: str | None = ...,
             device_id: int = ...,
@@ -908,7 +909,7 @@ class CompileOptions:
     distributed_config: "DistributedConfig | None" = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.execution_mode, ExecutionMode):
+        if type(self.execution_mode) is not ExecutionMode:
             raise TypeError(
                 f"CompileOptions.execution_mode must be an ExecutionMode, got {self.execution_mode!r}"
             )

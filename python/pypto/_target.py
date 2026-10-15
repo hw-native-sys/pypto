@@ -71,13 +71,16 @@ def _resolve_target(
     An explicit new execution mode must agree with a legacy platform. An
     omitted mode inherits that platform, or defaults to the simulator.
     """
-    if execution_mode is not None and not isinstance(execution_mode, ExecutionMode):
+    if execution_mode is not None and type(execution_mode) is not ExecutionMode:
         raise TypeError(f"execution_mode must be an ExecutionMode, got {execution_mode!r}")
     if platform is not None:
         arch, mode = _parse_platform(platform)
         if execution_mode is not None and execution_mode is not mode:
             raise ValueError(f"execution_mode={execution_mode.name} conflicts with platform={platform!r}")
         return arch, mode
-    if not isinstance(backend_type, BackendType):
+    if type(backend_type) is not BackendType:
         raise TypeError(f"backend_type must be a BackendType, got {backend_type!r}")
     return backend_type, execution_mode if execution_mode is not None else ExecutionMode.SIM
+
+
+__all__ = ["ExecutionMode", "_parse_platform", "_platform_string", "_resolve_target"]

@@ -1184,7 +1184,7 @@ def test_replace_backend_type_preserves_execution_mode():
 
 def test_invalid_new_backend_type_is_rejected():
     with pytest.raises(TypeError, match="BackendType"):
-        RunConfig(backend_type="a5")
+        RunConfig(backend_type=cast(Any, "a5"))
 
 
 @pytest.mark.parametrize("mode", [None, "sim"])
