@@ -22,6 +22,12 @@ namespace pypto {
 namespace ir {
 namespace op_predicates {
 
+/// Whether tile.cast must keep its result disjoint from its source. Widening
+/// casts are unsafe in place on every target. A2/A3 narrowing casts process all
+/// row heads before the tails, so later output rows can overwrite unread input.
+/// Callers without a resolved target must conservatively pass is_a2a3=true.
+bool CastRequiresDisjointSource(const CallPtr& call, bool is_a2a3);
+
 /// Index of the argument a builtin *output-side* op binds its result to.
 ///
 /// These ops do not allocate: they bind a fresh SSA var to a buffer an existing

@@ -28,6 +28,16 @@ namespace op_predicates {
 
 using core_affinity::CrossCoreRole;
 
+bool CastRequiresDisjointSource(const CallPtr& call, bool is_a2a3) {
+  if (!IsOp(call, "tile.cast") || call->args_.empty()) return false;
+  const auto source = As<TileType>(call->args_[0]->GetType());
+  const auto result = As<TileType>(call->GetType());
+  if (!source || !result) return false;
+  const auto source_bits = source->dtype_.GetBit();
+  const auto result_bits = result->dtype_.GetBit();
+  return result_bits > source_bits || (is_a2a3 && result_bits < source_bits);
+}
+
 namespace {
 
 bool HasRole(const CallPtr& call, CrossCoreRole expected) {

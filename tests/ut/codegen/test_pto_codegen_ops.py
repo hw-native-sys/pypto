@@ -4534,6 +4534,86 @@ class TestTileMoveAccAddressInvariant:
         )
 
 
+class TestCastAddressValidation:
+    """Explicit MemRefs must not bypass cast source/destination separation."""
+
+    @pytest.mark.parametrize(
+        ("source_dtype", "result_dtype"),
+        [(DataType.FP32, DataType.BF16), (DataType.BF16, DataType.FP32), (DataType.FP32, DataType.INT32)],
+    )
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+    @pytest.mark.parametrize("dst_offset", [0, 32, 33792])
+    @pytest.mark.parametrize("shared_base", [False, True])
+    @pytest.mark.parametrize("symbolic", [False, True])
+    def test_cast_physical_ranges(
+        self, backend_type, dst_offset, shared_base, symbolic, source_dtype, result_dtype
+    ):
+        span = ir.Span.unknown()
+        shape = [16, 528]
+        source_size = 16 * 528 * source_dtype.get_byte()
+        result_size = 16 * 528 * result_dtype.get_byte()
+        source_base = ir.Var("source_base", ir.PtrType(), span)
+        result_base = source_base if shared_base else ir.Var("result_base", ir.PtrType(), span)
+        address = ir.Var("address", ir.ScalarType(DataType.INT64), span)
+        source_offset = address if symbolic else ir.ConstInt(0, DataType.INT64, span)
+        result_offset = ir.ConstInt(dst_offset, DataType.INT64, span)
+        if symbolic:
+            result_offset = ir.Add(address, result_offset, DataType.INT64, span)
+        source_type = ir.TileType(
+            shape,
+            source_dtype,
+            ir.MemRef(source_base, source_offset, source_size, span),
+            None,
+            ir.MemorySpace.Vec,
+        )
+        result_type = ir.TileType(
+            shape,
+            result_dtype,
+            ir.MemRef(result_base, result_offset, result_size, span),
+            None,
+            ir.MemorySpace.Vec,
+        )
+        x = ir.Var("x", ir.TensorType(shape, source_dtype), span)
+        y = ir.Var("y", ir.TensorType(shape, result_dtype), span)
+        source = ir.Var("source", source_type, span)
+        result = ir.Var("result", result_type, span)
+        output = ir.Var("output", y.type, span)
+        offsets = ir.MakeTuple([ir.ConstInt(0, DataType.INDEX, span)] * 2, span)
+        sizes = ir.MakeTuple([ir.ConstInt(n, DataType.INDEX, span) for n in shape], span)
+        load = ir.Call(ir.get_op("tile.load"), [x, offsets, sizes], {}, source_type, span)
+        cast = ir.Call(
+            ir.get_op("tile.cast"), [source], {"target_type": result_dtype, "mode": 1}, result_type, span
+        )
+        store = ir.Call(ir.get_op("tile.store"), [result, offsets, y], y.type, span)
+        body = ir.SeqStmts(
+            [
+                ir.AssignStmt(source, load, span),
+                ir.AssignStmt(result, cast, span),
+                ir.AssignStmt(output, store, span),
+                ir.ReturnStmt([output], span),
+            ],
+            span,
+        )
+        function = ir.Function(
+            "cast_ranges",
+            [(x, ir.ParamDirection.In), (y, ir.ParamDirection.Out), (address, ir.ParamDirection.In)],
+            [y.type],
+            body,
+            span,
+            ir.FunctionType.InCore,
+        )
+        program = ir.Program([function], "cast_ranges", span)
+        backend.set_backend_type(backend_type)
+        requires_disjoint = result_dtype.get_bit() > source_dtype.get_bit() or (
+            backend_type == BackendType.Ascend910B and result_dtype.get_bit() < source_dtype.get_bit()
+        )
+        if requires_disjoint and dst_offset < source_size:
+            with pytest.raises(ValueError, match="tile.cast.*requires non-overlapping"):
+                codegen.PTOCodegen().generate(program)
+        else:
+            assert "pto.tcvt" in codegen.PTOCodegen().generate(program)
+
+
 class TestTileMoveAddressValidation:
     """Baked-address tile.move rejects in-place source/destination addresses."""
 

@@ -642,7 +642,8 @@ class TestDtype:
     """
 
     def test_cross_dtype_can_reuse(self):
-        """All tiles collapse onto one buffer regardless of FP32/BF16 dtype."""
+        """A5 retains safe cross-dtype cast reuse; A2/A3 requires separation."""
+        backend.set_backend_type(BackendType.Ascend950)
 
         @pl.program
         class Before:
@@ -694,7 +695,8 @@ class TestDtype:
                 )
                 return result
 
-        After = _run_pipeline(Before)
+        with passes.PassContext([], enable_buffer_ir=False):
+            After = _run_pipeline(Before)
         ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
@@ -6710,7 +6712,7 @@ class TestForbidOutputAlias:
         input elements not yet converted. The bf16 input here reuses a dead FP32
         buffer (cross-dtype reuse) so it is large enough to hold the FP32 output,
         making the in-place upcast reachable — the guard must forbid it.
-        Narrowing / same-width casts stay in-place-safe.
+        A2/A3 narrowing casts also require disjoint storage (#2973).
         """
 
         @pl.program
@@ -6736,6 +6738,72 @@ class TestForbidOutputAlias:
         assert bases["r"] != bases["bf"], (
             f"widening cast output must not alias its input buffer, but both bind to {bases['r']}"
         )
+
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+    @pytest.mark.parametrize("width", [128, 528])
+    def test_narrowing_cast_source_is_disjoint(self, planner, width):
+        """A2/A3 TCVT must not overwrite an unread source tail, including views."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[16, width], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, width], pl.BF16]],
+                valid_rows: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[16, width], pl.BF16]:
+                source = pl.load(x, [0, 0], [16, width], valid_shape=[valid_rows, width])
+                viewed = pl.reshape(source, [16, width])
+                result = pl.cast(viewed, pl.BF16)
+                return pl.store(result, [0, 0], out)
+
+        with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
+            after = passes.infer_tile_memory_space()(Before)
+            after = passes.init_mem_ref()(after)
+            after = passes.materialize_semantic_aliases()(after)
+            if planner == passes.MemoryPlanner.PYPTO:
+                after = passes.memory_reuse()(after)
+            after = passes.allocate_memory_addr()(after)
+        ranges = _collect_allocated_tile_ranges(after)
+        source_offset, source_size = ranges["source"]
+        result_offset, result_size = ranges["result"]
+        assert source_offset + source_size <= result_offset or result_offset + result_size <= source_offset
+
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+    def test_narrowing_cast_loop_carry_is_disjoint(self, planner):
+        """Retargeting a cast onto a loop carry must preserve source separation."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[16, 528], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 528], pl.BF16]],
+            ) -> pl.Tensor[[16, 528], pl.BF16]:
+                initial = pl.tile.create([16, 528], dtype=pl.BF16, target_memory=pl.Mem.Vec)
+                for _, (carry,) in pl.range(2, init_values=(initial,)):
+                    source = pl.load(x, [0, 0], [16, 528])
+                    result = pl.cast(source, pl.BF16)
+                    final = pl.yield_(result)
+                return pl.store(final, [0, 0], out)
+
+        with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
+            after = passes.infer_tile_memory_space()(Before)
+            after = passes.init_mem_ref()(after)
+            after = passes.materialize_semantic_aliases()(after)
+            if planner == passes.MemoryPlanner.PYPTO:
+                after = passes.memory_reuse()(after)
+            after = passes.allocate_memory_addr()(after)
+        ranges = _collect_allocated_tile_ranges(after)
+        source_offset, source_size = ranges["source"]
+        result_offset, result_size = ranges["result"]
+        assert source_offset + source_size <= result_offset or result_offset + result_size <= source_offset
 
     def test_col_expand_mul_output_does_not_alias_col_vector(self):
         """col_expand_mul output must not alias its broadcast column vector.
