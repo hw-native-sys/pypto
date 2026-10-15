@@ -39,6 +39,17 @@ PYPTO/DSA_RP 对照路径。此看护检查 MLIR 和生成 C++ 的编译过程�
 CI 会发现该目录下所有带此标记的测试，因此新增算子或测试文件无须修改工作流。
 CI 中应保留 `--require-ptoas`，确保编译器不可用时失败。
 
+安装运行时之后，同一 CI 作业还会在两个模拟器上显式使用 PTOAS 内存规划，
+运行现有的 `fillpad_inplace` 数值测试：
+
+```bash
+python -m pytest tests/st/runtime/ops/test_fillpad_inplace.py --memory-planner=ptoas --platform=a2a3sim,a5sim --forked -v
+```
+
+这六个用例将完整的 `[64, 64]` 输出与参考结果比较：前 48 行保留输入，
+后 16 行分别填充零、正无穷或负无穷。它们为编译看护补充模拟器数值覆盖，
+并不代表编译测试中的所有视图组合都已验证设备执行正确性。
+
 ## 图例
 
 - **级别**：PyPTO 注册/生成层级（tile / tensor / tile+tensor / comm / internal）。

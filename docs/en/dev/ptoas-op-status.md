@@ -50,6 +50,19 @@ and actually invoke PTOAS compilation; the marker only selects tests. CI discove
 marked tests across this directory, so new operators or test files need no workflow
 change. Keep `--require-ptoas` in CI to reject an unavailable compiler.
 
+After installing the runtime, the same CI job also runs the existing
+`fillpad_inplace` numerical tests with PTOAS memory planning on both simulators:
+
+```bash
+python -m pytest tests/st/runtime/ops/test_fillpad_inplace.py --memory-planner=ptoas --platform=a2a3sim,a5sim --forked -v
+```
+
+These six cases compare the full `[64, 64]` output against a reference: the first
+48 rows retain the input, and the last 16 rows contain zero, positive infinity,
+or negative infinity. This complements the compilation guard with simulator
+numerical coverage; it does not establish on-device correctness for every view
+composition covered by the compilation tests.
+
 ## Legend
 
 - **Level**: PyPTO registration/generation level (tile / tensor / tile+tensor / comm /
