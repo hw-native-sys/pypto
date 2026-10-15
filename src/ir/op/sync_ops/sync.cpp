@@ -14,10 +14,12 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/any_cast.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -25,9 +27,58 @@ namespace ir {
 
 namespace {
 
+constexpr int kPipelineEventSlots = 8;
+
 // Helper to deduce UnknownType (for ops with no return value)
 TypePtr DeduceUnknownType(const std::vector<ExprPtr>& args,
                           const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  return GetUnknownType();
+}
+
+TypePtr DeducePipelineFlagType(const std::vector<ExprPtr>& args,
+                               const std::vector<std::pair<std::string, std::any>>& kwargs,
+                               const char* name) {
+  CHECK(args.size() <= 1) << name << " accepts at most one dynamic event-id operand";
+  bool has_src = false;
+  bool has_dst = false;
+  bool has_static_id = false;
+  int src = -1;
+  int dst = -1;
+  for (const auto& [key, value] : kwargs) {
+    if (key == "src_pipe" || key == "dst_pipe") {
+      int pipe = AnyCast<int>(value, key);
+      CHECK(pipe >= static_cast<int>(PipeType::MTE1) && pipe < static_cast<int>(PipeType::ALL))
+          << name << " " << key << " must be a concrete PipeType, got " << pipe;
+      if (key == "src_pipe") {
+        CHECK(!has_src) << name << " has duplicate src_pipe";
+        has_src = true;
+        src = pipe;
+      } else {
+        CHECK(!has_dst) << name << " has duplicate dst_pipe";
+        has_dst = true;
+        dst = pipe;
+      }
+    } else if (key == "event_id") {
+      CHECK(!has_static_id) << name << " has duplicate event_id";
+      int id = AnyCast<int>(value, key);
+      CHECK(id >= 0 && id < kPipelineEventSlots) << name << " event_id must be in [0, 7], got " << id;
+      has_static_id = true;
+    } else if (key == "core_type") {
+      const auto core = AnyCast<std::string>(value, key);
+      CHECK(core == "aic" || core == "aiv") << name << " core_type must be 'aic' or 'aiv', got " << core;
+    } else {
+      CHECK(false) << name << " has unknown attribute '" << key << "'";
+    }
+  }
+  CHECK(has_src && has_dst) << name << " requires src_pipe and dst_pipe";
+  CHECK(src != dst) << name << " requires different source and destination pipes";
+  CHECK(has_static_id != (args.size() == 1))
+      << name << " requires exactly one static event_id attribute or dynamic event-id operand";
+  if (!args.empty()) {
+    CHECK(args[0]) << name << " dynamic event id is null";
+    auto type = As<ScalarType>(args[0]->GetType());
+    CHECK(type && type->dtype_ == DataType::INDEX) << name << " dynamic event id must be a ScalarType(INDEX)";
+  }
   return GetUnknownType();
 }
 
@@ -58,6 +109,30 @@ REGISTER_OP("system.sync_dst")
     .set_attr<int>("wait_pipe")
     .set_attr<int>("event_id")
     .f_deduce_type(DeduceUnknownType);
+
+REGISTER_OP("system.set_flag")
+    .set_description("Signal an intra-core hardware pipeline event")
+    .set_op_category("SyncOp")
+    .add_argument("event_id_dyn", "Optional dynamic INDEX event id")
+    .set_attr<int>("src_pipe")
+    .set_attr<int>("dst_pipe")
+    .set_attr<int>("event_id")
+    .set_attr<std::string>("core_type")
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeducePipelineFlagType(args, kwargs, "system.set_flag");
+    });
+
+REGISTER_OP("system.wait_flag")
+    .set_description("Wait on an intra-core hardware pipeline event")
+    .set_op_category("SyncOp")
+    .add_argument("event_id_dyn", "Optional dynamic INDEX event id")
+    .set_attr<int>("src_pipe")
+    .set_attr<int>("dst_pipe")
+    .set_attr<int>("event_id")
+    .set_attr<std::string>("core_type")
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeducePipelineFlagType(args, kwargs, "system.wait_flag");
+    });
 
 // Register system.bar_v (Vector Barrier)
 // Attributes: None

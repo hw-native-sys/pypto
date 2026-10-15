@@ -564,6 +564,31 @@ void RegisterCrossCoreOps(Backend& backend, const std::unordered_set<std::string
     backend.RegisterOp(op_name).f_codegen(std::move(fn));
   };
 
+  auto emit_flag = [](const ir::CallPtr& op, codegen::CodegenBase& base, const char* instruction) {
+    auto& codegen = AsPto(base);
+    const int src = op->GetKwarg<int>("src_pipe");
+    const int dst = op->GetKwarg<int>("dst_pipe");
+    const std::string src_name = "PIPE_" + ir::PipeTypeToString(static_cast<ir::PipeType>(src));
+    const std::string dst_name = "PIPE_" + ir::PipeTypeToString(static_cast<ir::PipeType>(dst));
+    if (op->args_.empty()) {
+      codegen.Emit(std::string("pto.") + instruction + "[\"" + src_name + "\", \"" + dst_name +
+                   "\", \"EVENT_ID" + std::to_string(op->GetKwarg<int>("event_id")) + "\"]");
+    } else {
+      INTERNAL_CHECK_SPAN(op->args_.size() == 1, op->span_)
+          << "Internal error: flag has multiple event operands";
+      const auto event = EmitIndexOperand(codegen, op->args_[0], "pipeline flag event id");
+      codegen.Emit(std::string("pto.") + instruction + "_dyn [#pto.pipe<" + src_name + ">, #pto.pipe<" +
+                   dst_name + ">, " + event + "]");
+    }
+    return std::string("");
+  };
+  reg("system.set_flag", [emit_flag](const ir::CallPtr& op, codegen::CodegenBase& base) {
+    return emit_flag(op, base, "set_flag");
+  });
+  reg("system.wait_flag", [emit_flag](const ir::CallPtr& op, codegen::CodegenBase& base) {
+    return emit_flag(op, base, "wait_flag");
+  });
+
   reg("tile.tpush_to_aiv", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTpushCodegenPTO("aiv", op, codegen);
   });

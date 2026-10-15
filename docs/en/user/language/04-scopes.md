@@ -343,6 +343,31 @@ reached the call's arguments. Getting this right is the author's job.
 
 ### Cross-lane ordering is yours too
 
+For dependencies **between hardware pipelines on one core**, use
+`pl.set_flag(src_pipe, dst_pipe, event_id=0, *, core_type=None)` after the
+producer and `pl.wait_flag(src_pipe, dst_pipe, event_id=0, *, core_type=None)`
+before the consumer. For example, an AIV load on MTE2 followed by vector work
+can use:
+
+```python
+pl.set_flag(pl.PipeType.MTE2, pl.PipeType.V, 0)
+pl.wait_flag(pl.PipeType.MTE2, pl.PipeType.V, 0)
+```
+
+Both calls are side-effect statements. The three identifiers must match in a
+pair. Source and destination must be different concrete `pl.PipeType` values;
+`ALL` is not an event endpoint. A literal event ID is 0 through 7. An INDEX
+scalar can select an event ID at runtime, but must evaluate to 0 through 7.
+Each flag is consumed by one wait, so loops that reuse a slot must finish its
+previous handshake first. In a mixed InCore function, pass
+`core_type=pl.KernelType.AIC` or `AIV` to keep the call on that kernel;
+otherwise it is emitted on both. These operations do not synchronize AIC with
+AIV and do not publish GM cache lines. PTOAS's current automatic sync pass
+skips a function containing static explicit flags, so the author must provide
+all required pipeline dependencies in that function. Dynamic-only flags do not
+currently trigger that skip in PTOAS; use a static flag pair when taking over
+sync placement for the whole function.
+
 AIC and AIV run **asynchronously**. A boundary op orders the one value it carries — that
 is what the transfer is — but nothing orders a cube-lane write against a vector-lane read
 of the same **GM buffer**. Publish the producer's cache lines and issue a GM fence, place a

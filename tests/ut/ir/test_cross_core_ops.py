@@ -169,6 +169,43 @@ def test_cross_core_sync_static_and_dynamic_event_ids():
     assert dynamic_wait.kwargs["core_type"] == "aic"
 
 
+def test_pipeline_flags_static_and_dynamic_ir():
+    span = ir.Span.unknown()
+    set_call = system_ops.set_flag(ir.PipeType.MTE2, ir.PipeType.V, 7, span=span)
+    event = ir.Var("event", ir.ScalarType(DataType.INDEX), span)
+    wait_call = system_ops.wait_flag(
+        ir.PipeType.MTE2, ir.PipeType.V, event, core_type=system_ops.KernelType.AIV, span=span
+    )
+    assert isinstance(set_call.type, ir.UnknownType)
+    assert set_call.args == []
+    assert set_call.kwargs["event_id"] == 7
+    assert wait_call.args == [event]
+    assert "event_id" not in wait_call.kwargs
+    assert wait_call.kwargs["core_type"] == "aiv"
+
+
+@pytest.mark.parametrize("event_id", [-1, 8, True])
+def test_pipeline_flag_rejects_invalid_static_event(event_id):
+    with pytest.raises((TypeError, ValueError)):
+        system_ops.set_flag(ir.PipeType.MTE2, ir.PipeType.V, event_id)
+
+
+def test_pipeline_flag_rejects_invalid_ir():
+    span = ir.Span.unknown()
+    with pytest.raises((TypeError, ValueError), match="different"):
+        system_ops.set_flag(ir.PipeType.V, ir.PipeType.V)
+    with pytest.raises((TypeError, ValueError), match="concrete"):
+        ir.create_op_call(
+            "system.wait_flag",
+            [],
+            {"src_pipe": ir.PipeType.ALL, "dst_pipe": ir.PipeType.V, "event_id": 0},
+            span,
+        )
+    bad_event = ir.Var("event", ir.ScalarType(DataType.INT32), span)
+    with pytest.raises((TypeError, ValueError), match="INDEX"):
+        system_ops.wait_flag(ir.PipeType.MTE2, ir.PipeType.V, bad_event)
+
+
 @pytest.mark.parametrize("core_type", ["aic", "aiv", "aic_only", "mix", 0])
 def test_cross_core_sync_rejects_non_enum_core_type(core_type):
     """``core_type`` is enum-only: the lowered attr spelling is not an input."""

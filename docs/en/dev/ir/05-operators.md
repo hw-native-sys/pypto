@@ -621,10 +621,19 @@ flat gather, valid-region semantics, tile layouts, and mask patterns.
 | `system.syncall` | Cross-core all-participant barrier (`pto::SYNCALL`). Attr `mode` `"hard"` (FFTS, no operands) or `"soft"` (GM-polling, operands) | `core_type` (`"aiv_only"` \| `"aic_only"` \| `"mix"`), `mode` (`"hard"` \| `"soft"`) |
 | `system.sync_src` | Set sync flag | `set_pipe`, `wait_pipe`, `event_id` |
 | `system.sync_dst` | Wait sync flag | `set_pipe`, `wait_pipe`, `event_id` |
+| `system.set_flag` / `system.wait_flag` | Explicit intra-core pipeline event | `src_pipe`, `dst_pipe`, static `event_id` or one dynamic INDEX operand; optional `core_type` |
 | `system.task_invalid` | Sentinel `TaskId::invalid()` — "no producer" seed for a TaskId carry | None |
 | `system.task_is_valid` | Test whether a `TASK_ID` value is a valid (non-sentinel) handle | None; sole positional arg is the TaskId Var |
 | `system.available_cluster_count` | This run's MIX cluster (= AIC) count, read from the device. Result `Scalar[INT32]` | None |
 | `system.available_aiv_count` | This run's standalone AIV core count, read from the device. Result `Scalar[INT32]` | None |
+
+The explicit flag calls have `UnknownType` and are retained as `EvalStmt(Call)`.
+`src_pipe` and `dst_pipe` are distinct concrete `PipeType` values (not `ALL`).
+Exactly one event form is present: a literal `event_id` in `[0, 7]`, or one
+`ScalarType(INDEX)` operand whose runtime value must stay in that range.
+`core_type` is optional `"aic"` / `"aiv"` IR metadata for mixed-kernel placement.
+Codegen emits `pto.set_flag` / `pto.wait_flag`, or the `_dyn` variants for an
+INDEX operand. The calls do not represent cross-core synchronization.
 
 `system.syncall` has two modes, selected by its `mode` **IR attribute**; the Python surfaces spell them as `pl.SyncAllMode` members instead (see below). The **hard** form (attr `"hard"`, the default) emits an FFTS barrier that waits for **all** physical cores of the selected `core_type`; the kernel must be launched at full occupancy (one block per physical core) **and with `sync_start=True`** (so all blocks are co-resident — a non-sync_start launch may dispatch blocks in waves and deadlock the barrier), or it deadlocks (AICore error 507018). The **soft** form (attr `"soft"`) polls a shared GM workspace and so works at **partial** occupancy. `gm_workspace` is a shared, zero-initialized GM `INT32` tensor containing at least 16 elements (64 bytes). Pass it as a kernel parameter so all blocks share one buffer; it must occupy an exclusive cache line and be zero-initialized before its first use.
 

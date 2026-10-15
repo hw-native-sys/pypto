@@ -551,6 +551,38 @@ def test_explicit_sync_core_type_routes_each_event_to_one_lane():
     assert "system.sync_wait" not in aiv_ops
 
 
+def test_pipeline_flags_core_type_routes_pairs_to_matching_lane():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def explicit_flags(self, x: pl.Tensor[[16], pl.FP32]) -> pl.Tensor[[16], pl.FP32]:
+            pl.set_flag(pl.PipeType.MTE2, pl.PipeType.V, 0, core_type=pl.KernelType.AIV)
+            pl.wait_flag(pl.PipeType.MTE2, pl.PipeType.V, 0, core_type=pl.KernelType.AIV)
+            pl.set_flag(pl.PipeType.MTE1, pl.PipeType.M, 1, core_type=pl.KernelType.AIC)
+            pl.wait_flag(pl.PipeType.MTE1, pl.PipeType.M, 1, core_type=pl.KernelType.AIC)
+            return x
+
+    after = _run_pipeline(Before)
+    aic = next(f for f in after.functions.values() if f.func_type == ir.FunctionType.AIC)
+    aiv = next(f for f in after.functions.values() if f.func_type == ir.FunctionType.AIV)
+    assert [_op_name(s) for s in ir.flatten_to_stmts(aic.body)].count("system.set_flag") == 1
+    assert [_op_name(s) for s in ir.flatten_to_stmts(aic.body)].count("system.wait_flag") == 1
+    assert [_op_name(s) for s in ir.flatten_to_stmts(aiv.body)].count("system.set_flag") == 1
+    assert [_op_name(s) for s in ir.flatten_to_stmts(aiv.body)].count("system.wait_flag") == 1
+    aic_flags = [
+        s.expr
+        for s in ir.flatten_to_stmts(aic.body)
+        if isinstance(s, ir.EvalStmt) and isinstance(s.expr, ir.Call) and "flag" in _op_name(s)
+    ]
+    aiv_flags = [
+        s.expr
+        for s in ir.flatten_to_stmts(aiv.body)
+        if isinstance(s, ir.EvalStmt) and isinstance(s.expr, ir.Call) and "flag" in _op_name(s)
+    ]
+    assert {call.kwargs["src_pipe"] for call in aic_flags} == {int(pl.PipeType.MTE1)}
+    assert {call.kwargs["src_pipe"] for call in aiv_flags} == {int(pl.PipeType.MTE2)}
+
+
 def test_v2c_boundary_uses_nz_layout_on_a2a3():
     """On Ascend910B, cross-core push needs no layout adaptation on the AIV side.
 

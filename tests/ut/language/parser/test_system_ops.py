@@ -19,6 +19,20 @@ from pypto.pypto_core import DataType
 class TestSystemOpsParsing:
     """Tests for parsing pl.system.* operations in the DSL."""
 
+    def test_pipeline_flags_round_trip(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV)
+            def main(self, x: pl.Tensor[[16], pl.FP32]) -> pl.Tensor[[16], pl.FP32]:
+                pl.set_flag(pl.PipeType.MTE2, pl.PipeType.V, 2)
+                pl.wait_flag(pl.PipeType.MTE2, pl.PipeType.V, 2)
+                return x
+
+        printed = Before.as_python()
+        assert "system.set_flag" in printed
+        assert "system.wait_flag" in printed
+        ir.assert_structural_equal(Before, pl.parse_program(printed))
+
     def test_sync_src_round_trip(self):
         """Test round-trip for pl.system.sync_src."""
 

@@ -310,6 +310,8 @@ MIGRATION_FAMILIES = (
             "system.cacheinvalid",
             "system.sync_set",
             "system.sync_wait",
+            "system.set_flag",
+            "system.wait_flag",
             "system.set_ffts",
             "system.syncall",
         ),

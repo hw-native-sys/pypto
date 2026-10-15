@@ -307,6 +307,24 @@ for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
 
 ### 跨 lane 的定序同样由你负责
 
+同一核内不同硬件流水线之间的依赖，可以在生产者之后调用
+`pl.set_flag(src_pipe, dst_pipe, event_id=0, *, core_type=None)`，在消费者之前调用
+`pl.wait_flag(src_pipe, dst_pipe, event_id=0, *, core_type=None)`。例如 MTE2 加载后由向量流水线使用：
+
+```python
+pl.set_flag(pl.PipeType.MTE2, pl.PipeType.V, 0)
+pl.wait_flag(pl.PipeType.MTE2, pl.PipeType.V, 0)
+```
+
+两者都是有副作用的语句，一对操作的三个标识必须一致。源和目标必须是不同的具体
+`pl.PipeType`；`ALL` 不能作为事件端点。常量事件 ID 为 0 到 7。也可传入运行时
+INDEX scalar，但其实际值必须在 0 到 7 之间。一个 flag 只供一次 wait 消费；循环重用
+事件槽前，必须完成上一次配对。在混合 InCore 函数中，指定
+`core_type=pl.KernelType.AIC` 或 `AIV` 可将操作限制在对应核；省略时两侧都会生成。
+这两个操作既不在 AIC 与 AIV 之间同步，也不发布 GM cache line。目前 PTOAS 自动插同步
+流程会跳过含有静态显式 flag 的函数，因此该函数所需的全部流水线依赖须由作者提供。
+仅有动态 flag 尚不会触发 PTOAS 的跳过逻辑；若要接管整个函数的同步放置，请使用一对静态 flag。
+
 AIC 与 AIV **异步**运行。边界算子只为它所搬运的那一个值定序 —— 这正是这次传输的含义 ——
 但没有任何东西能为 cube lane 的写与 vector lane 对同一块 **GM 缓冲区**的读定序。先发布 producer
 的 cache line 并执行 GM fence，再在阶段之间放置跨核 barrier，最后在 consumer 读之前使其 cache

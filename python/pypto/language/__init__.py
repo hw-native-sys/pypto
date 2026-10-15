@@ -92,12 +92,14 @@ from .op.system_ops import (
     aiv_initialize_pipe,
     import_peer_buffer,
     reserve_buffer,
+    set_flag,
     tfree_to_aic,
     tfree_to_aiv,
     tpop_from_aic,
     tpop_from_aiv,
     tpush_to_aic,
     tpush_to_aiv,
+    wait_flag,
 )
 from .op.tensor_ops import ci as arange
 
@@ -361,6 +363,8 @@ __all__ = [
     "prefetch",
     "tile",
     "system",
+    "set_flag",
+    "wait_flag",
     "tensor",
     # Unified dispatch
     "add",

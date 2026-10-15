@@ -5254,6 +5254,31 @@ class TestCrossCoreSyncCodegen:
         assert "pto.sync.wait <PIPE_MTE2>, %" in mlir
 
 
+def test_pipeline_flags_codegen_static_and_dynamic():
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.AIV)
+        def kernel(
+            self, x: pl.Tensor[[16], pl.FP32], event_id: pl.Scalar[pl.INDEX]
+        ) -> pl.Tensor[[16], pl.FP32]:
+            pl.set_flag(pl.PipeType.MTE2, pl.PipeType.V, 3)
+            pl.wait_flag(pl.PipeType.MTE2, pl.PipeType.V, 3)
+            pl.set_flag(pl.PipeType.V, pl.PipeType.MTE3, event_id)
+            pl.wait_flag(pl.PipeType.V, pl.PipeType.MTE3, event_id)
+            return x
+
+    optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Prog)
+    func = next(iter(optimized.functions.values()))
+    mlir = codegen.PTOCodegen().generate(ir.Program([func], func.name, optimized.span))
+    assert 'pto.set_flag["PIPE_MTE2", "PIPE_V", "EVENT_ID3"]' in mlir
+    assert 'pto.wait_flag["PIPE_MTE2", "PIPE_V", "EVENT_ID3"]' in mlir
+    assert "pto.set_flag_dyn [#pto.pipe<PIPE_V>, #pto.pipe<PIPE_MTE3>, %" in mlir
+    assert "pto.wait_flag_dyn [#pto.pipe<PIPE_V>, #pto.pipe<PIPE_MTE3>, %" in mlir
+
+
 class TestSyncAllCodegen:
     """Tests that pl.system.syncall lowers to pto.syncall (hard/FFTS form)."""
 
