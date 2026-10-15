@@ -53,6 +53,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core_affinity_kind.h"
@@ -332,10 +333,11 @@ std::vector<StmtPtr> LowerStmts(const std::vector<StmtPtr>& stmts, SplitMode mod
                                 std::unordered_set<std::string>& used_names,
                                 const ExprPtr& lane_stride = nullptr,
                                 const std::unordered_map<const Var*, int>* carry_partitions = nullptr) {
-  LoopCarryPartitionAnalysis analysis(split_dim);
+  std::optional<LoopCarryPartitionAnalysis> analysis;
   if (!carry_partitions) {
-    for (const auto& stmt : stmts) analysis.VisitStmt(stmt);
-    carry_partitions = &analysis.partitions;
+    analysis.emplace(split_dim);
+    for (const auto& stmt : stmts) analysis->VisitStmt(stmt);
+    carry_partitions = &analysis->partitions;
   }
   std::vector<StmtPtr> result;
   result.reserve(stmts.size());
