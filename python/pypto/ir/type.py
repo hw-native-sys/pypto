@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import (
     CompactMode,
+    DistributedTensorType,
     Expr,
     MemorySpace,
     MemRef,
@@ -22,6 +23,8 @@ from pypto.pypto_core.ir import (
     TensorType,
     TileLayout,
     TileType,
+    TupleType,
+    Type,
 )
 from pypto.pypto_core.ir import (
     TensorView as _TensorViewBase,
@@ -31,6 +34,48 @@ from pypto.pypto_core.ir import (
 )
 
 from .utils import _normalize_expr, _normalize_shape
+
+
+def _merge_annotation_metadata(annotation: Type, inferred: Type) -> Type:
+    """Fill omitted metadata from inference without changing annotated value types.
+
+    Callers validate type kinds, shapes, and dtypes separately. Omitted views and
+    memory spaces inherit inference. Allocation annotations, including their
+    absence, remain exact. Tuple DAGs are merged once per type pair.
+    """
+    cache: dict[tuple[int, int], tuple[Type, Type, Type]] = {}
+
+    def merge(ann: Type, inf: Type) -> Type:
+        key = (id(ann), id(inf))
+        if key in cache:
+            return cache[key][2]
+        result = ann
+        if type(ann) is not type(inf):
+            return ann
+        if isinstance(ann, TupleType) and isinstance(inf, TupleType):
+            if len(ann.types) == len(inf.types):
+                result = TupleType([merge(a, i) for a, i in zip(ann.types, inf.types)])
+        elif isinstance(ann, TileType) and isinstance(inf, TileType):
+            result = TileType(
+                ann.shape,
+                ann.dtype,
+                ann.memref,
+                ann.tile_view if ann.tile_view is not None else inf.tile_view,
+                ann.memory_space if ann.memory_space is not None else inf.memory_space,
+            )
+        elif isinstance(ann, TensorType) and isinstance(inf, TensorType):
+            memref = ann.memref
+            view = ann.tensor_view if ann.tensor_view is not None else inf.tensor_view
+            if isinstance(ann, DistributedTensorType) and isinstance(inf, DistributedTensorType):
+                window = ann.window_buffer
+                result = DistributedTensorType(ann.shape, ann.dtype, memref, view, window)
+            else:
+                result = TensorType(ann.shape, ann.dtype, memref, view)
+        cache[key] = (ann, inf, result)
+        return result
+
+    return merge(annotation, inferred)
+
 
 # Store the original native __init__
 _native_tensor_type_init = TensorType.__init__
@@ -197,4 +242,4 @@ class TileView(metaclass=_TileViewMeta):
     """TileView factory: accepts Expr or int in valid_shape/stride."""
 
 
-__all__ = ["TensorType", "TileType", "TensorView", "TileView"]
+__all__ = ["TensorType", "TileType", "TensorView", "TileView", "_merge_annotation_metadata"]

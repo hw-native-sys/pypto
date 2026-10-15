@@ -866,6 +866,7 @@ class TypeResolver:
             return None
         span = self._get_span(node)
 
+        inline = None
         # Two spellings reach here: a reference to a declared variable, and the
         # inline `pl.MemRef("name", slots=N)[k]` the printer emits for a dump.
         if isinstance(node.value, ast.Name):
@@ -905,6 +906,8 @@ class TypeResolver:
                 span=span,
                 hint=f"Subscript within [0, {slot_count}), or declare more slots",
             )
+        if inline is not None:
+            return ir.MemRef(inline.base_, 0, 0, span, is_pinned=True, slots=slot_count, slot=index)
         return self._make_declared_memref(decl_name, span, slots=slot_count, slot=index)
 
     def _resolve_slot_of_resolved_memref(
@@ -1689,6 +1692,8 @@ class TypeResolver:
         inferred_type: ir.Type,
         var_name: str,
         span: ir.Span | None,
+        *,
+        _visited: dict[tuple[int, int], tuple[ir.Type, ir.Type]] | None = None,
     ) -> None:
         """Validate that a user-written type annotation is consistent with the inferred type.
 
@@ -1700,12 +1705,20 @@ class TypeResolver:
             inferred_type: Type inferred from the RHS expression
             var_name: Variable name for error messages
             span: Source span for error location
+            _visited: Internal memo retaining type pairs while traversing tuple DAGs
 
         Raises:
             ParserTypeError: If the annotation contradicts the inferred type
         """
         if isinstance(inferred_type, ir.UnknownType):
             return
+
+        if _visited is None:
+            _visited = {}
+        key = (id(annotation_type), id(inferred_type))
+        if key in _visited:
+            return
+        _visited[key] = (annotation_type, inferred_type)
 
         ann_kind = type(annotation_type)
         inf_kind = type(inferred_type)
@@ -1718,6 +1731,20 @@ class TypeResolver:
                 span=span,
                 hint=f"Change annotation to: {ir.python_print_type(inferred_type)}",
             )
+
+        if isinstance(annotation_type, ir.TupleType) and isinstance(inferred_type, ir.TupleType):
+            if len(annotation_type.types) != len(inferred_type.types):
+                raise ParserTypeError(
+                    f"Type annotation for '{var_name}' has {len(annotation_type.types)} tuple elements "
+                    f"but expression has {len(inferred_type.types)}",
+                    span=span,
+                    hint=f"Change annotation to: {ir.python_print_type(inferred_type)}",
+                )
+            for index, (ann, inf) in enumerate(zip(annotation_type.types, inferred_type.types)):
+                self.validate_annotation_consistency(
+                    ann, inf, f"{var_name}[{index}]", span, _visited=_visited
+                )
+            return
 
         # Check dtype for types that expose it (ScalarType and ShapedType)
         self._check_dtype_consistency(annotation_type, inferred_type, var_name, span)
@@ -2052,7 +2079,11 @@ class TypeResolver:
         attribute access, etc.) fall through to the same expression parser
         that the DSL uses everywhere else.
         """
-        val = self._try_resolve_int(node)
+        typed = self._contains_pl_const(node)
+        rebuilt = self._rebuild_composite_dim(node) if typed else None
+        if rebuilt is not None:
+            return rebuilt
+        val = None if typed else self._try_resolve_int(node)
         if val is not None:
             return ir.ConstInt(val, DataType.INDEX, self._get_span(node))
         if isinstance(node, ast.Name):
@@ -2237,6 +2268,12 @@ class TypeResolver:
         # multi-slot declaration so the dump reparses.
         if len(node.args) == 1 and all(kw.arg == "slots" for kw in node.keywords):
             name_node = node.args[0]
+            if isinstance(name_node, ast.Name) and self.scope_lookup is not None:
+                base = self.scope_lookup(name_node.id)
+                if isinstance(base, ir.Var) and isinstance(base.type, ir.PtrType):
+                    return ir.MemRef(
+                        base, 0, 0, span, is_pinned=True, slots=self._resolve_slots_kwarg(node, span)
+                    )
             if not (
                 isinstance(name_node, ast.Constant) and isinstance(name_node.value, str) and name_node.value
             ):
@@ -2353,9 +2390,13 @@ class TypeResolver:
 
     def _resolve_memref_byte_offset(self, node: ast.expr) -> "ir.Expr":
         """Resolve a MemRef byte_offset to an IR expression (int, variable, or arithmetic)."""
+        # Runtime pl.const returns a Python number. Rebuild explicitly typed
+        # offsets from syntax before constant evaluation loses their dtype.
+        if self._contains_pl_const(node):
+            return self._parse_tileview_expr(node)
         value = self._try_resolve_int(node)
         if value is not None:
-            return ir.ConstInt(value, DataType.INDEX, self._get_span(node))
+            return ir.ConstInt(value, DataType.INT64, self._get_span(node))
 
         # Try resolving as a variable reference (for symbolic offsets)
         if isinstance(node, ast.Name) and self.scope_lookup is not None:

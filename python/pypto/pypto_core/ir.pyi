@@ -2829,14 +2829,16 @@ class WindowBuffer(Var):
     ) -> None:
         """Create a WindowBuffer wrapping the given Ptr ``base`` Var."""
 
-class StructuralComparisonMode(enum.Enum):
-    """Default syntax/type compatibility or exact Strict structure."""
+def _without_type_memref(type: Type) -> Type:
+    """Remove allocation annotations from shaped and tuple value types."""
+    ...
 
-    Default = ...
-    Strict = ...
+def verify_structural_bindings(node: IRNode) -> None:
+    """Verify local definition uniqueness and lexical visibility; allow open captures."""
+    ...
 
 class StructuralComparisonUnsupported(TypeError):
-    """Strict comparison cannot safely represent the input; this is not inequality."""
+    """Structural comparison cannot safely represent the input; this is not inequality."""
 
     reason: str
     field_path: str
@@ -2845,29 +2847,24 @@ class StructuralComparisonUnsupported(TypeError):
 def structural_hash(
     node: IRNode,
     enable_auto_mapping: bool = False,
-    *,
-    mode: StructuralComparisonMode = StructuralComparisonMode.Default,
 ) -> int: ...
 @overload
 def structural_hash(
     node: Type,
     enable_auto_mapping: bool = False,
-    *,
-    mode: StructuralComparisonMode = StructuralComparisonMode.Default,
 ) -> int: ...
 @overload
 def structural_hash(
     *,
     type: Type,
     enable_auto_mapping: bool = False,
-    mode: StructuralComparisonMode = StructuralComparisonMode.Default,
 ) -> int:
     """Compute a process-local structural hash; equal structures have equal hashes.
 
     Bound variables are alpha-renamed. Free variables preserve identity unless
     enable_auto_mapping is True. Span, function names and bound names are ignored.
-    Strict compares exact dtype, float bits, operator kind and semantic fields;
-    unsupported storage or unresolved structure raises StructuralComparisonUnsupported.
+    Compares exact dtype, float bits, operator kind and semantic fields;
+    Storage is included. Unsupported attribute payloads raise StructuralComparisonUnsupported.
     Always use identical options for hashing and equality.
     """
 
@@ -2876,30 +2873,24 @@ def structural_equal(
     lhs: IRNode,
     rhs: IRNode,
     enable_auto_mapping: bool = False,
-    *,
-    mode: StructuralComparisonMode = StructuralComparisonMode.Default,
 ) -> bool: ...
 @overload
 def structural_equal(
     lhs: Type,
     rhs: Type,
     enable_auto_mapping: bool = False,
-    *,
-    mode: StructuralComparisonMode = StructuralComparisonMode.Default,
 ) -> bool: ...
 def structural_equal(
     lhs: IRNode | Type,
     rhs: IRNode | Type,
     enable_auto_mapping: bool = False,
-    *,
-    mode: StructuralComparisonMode = StructuralComparisonMode.Default,
 ) -> bool:
     """Check structural equality under the selected comparison policy.
 
     Bound variables are alpha-renamed. Free variables preserve identity unless
     enable_auto_mapping is True. Span, function names and bound names are ignored.
-    Strict compares exact dtype, float bits, operator kind and semantic fields;
-    unsupported storage or unresolved structure raises StructuralComparisonUnsupported.
+    Compares exact dtype, float bits, operator kind and semantic fields;
+    Storage is included. Unsupported attribute payloads raise StructuralComparisonUnsupported.
     Always use identical options for hashing and equality.
     """
 
@@ -2908,30 +2899,24 @@ def assert_structural_equal(
     lhs: IRNode,
     rhs: IRNode,
     enable_auto_mapping: bool = False,
-    *,
-    mode: StructuralComparisonMode = StructuralComparisonMode.Default,
 ) -> None: ...
 @overload
 def assert_structural_equal(
     lhs: Type,
     rhs: Type,
     enable_auto_mapping: bool = False,
-    *,
-    mode: StructuralComparisonMode = StructuralComparisonMode.Default,
 ) -> None: ...
 def assert_structural_equal(
     lhs: IRNode | Type,
     rhs: IRNode | Type,
     enable_auto_mapping: bool = False,
-    *,
-    mode: StructuralComparisonMode = StructuralComparisonMode.Default,
 ) -> None:
     """Assert structural equality, raising ValueError with the first mismatch path.
 
     Bound variables are alpha-renamed. Free variables preserve identity unless
     enable_auto_mapping is True. Span, function names and bound names are ignored.
-    Strict compares exact dtype, float bits, operator kind and semantic fields;
-    unsupported storage or unresolved structure raises StructuralComparisonUnsupported.
+    Compares exact dtype, float bits, operator kind and semantic fields;
+    Storage is included. Unsupported attribute payloads raise StructuralComparisonUnsupported.
     Always use identical options for hashing and equality.
     """
 

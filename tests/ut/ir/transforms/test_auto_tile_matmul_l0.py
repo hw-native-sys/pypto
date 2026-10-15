@@ -711,7 +711,7 @@ class TestAutoTileMatmulL0KOnly:
         once = passes.auto_tile_matmul_l0()(Before)
         # First run must have rewritten — otherwise the idempotency check is
         # vacuously true.
-        with pytest.raises(ValueError, match="Structural equality"):
+        with pytest.raises(ValueError, match="Structural mismatch"):
             ir.assert_structural_equal(once, Before)
         twice = passes.auto_tile_matmul_l0()(once)
         ir.assert_structural_equal(twice, once)
@@ -1954,7 +1954,7 @@ class TestAutoTileMatmulL0MNTiling:
 
         After = passes.auto_tile_matmul_l0()(Before)
         # Sanity: the pass actually tiled (otherwise the numeric check is vacuous).
-        with pytest.raises(ValueError, match="Structural equality"):
+        with pytest.raises(ValueError, match="Structural mismatch"):
             ir.assert_structural_equal(After, Before)
         ok, max_diff = _torch_codegen_matches_matmul(After, 512, 512, 512)
         assert ok, f"512×512 M/N-tiled output mismatch: max abs diff {max_diff:.3e}"
@@ -1986,7 +1986,7 @@ class TestAutoTileMatmulL0MNTiling:
                 return out
 
         After = passes.auto_tile_matmul_l0()(Before)
-        with pytest.raises(ValueError, match="Structural equality"):
+        with pytest.raises(ValueError, match="Structural mismatch"):
             ir.assert_structural_equal(After, Before)
         ok, max_diff = _torch_codegen_matches_matmul(After, 384, 384, 512)
         assert ok, f"384×384 partial-tile output mismatch: max abs diff {max_diff:.3e}"
@@ -4189,7 +4189,7 @@ class TestAutoTileMatmulL0Skips:
                 return out
 
         incore_after = passes.auto_tile_matmul_l0()(InCoreProg)
-        with pytest.raises(ValueError, match="Structural equality"):
+        with pytest.raises(ValueError, match="Structural mismatch"):
             ir.assert_structural_equal(incore_after, InCoreProg)
 
 

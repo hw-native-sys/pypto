@@ -9,11 +9,10 @@
 
 """Tests for MemoryReusePass.
 
-Most tests use the Before/Expected pattern with
-``ir.assert_structural_equal(After, Expected)``.
-DefFields always auto-map, so ``enable_auto_mapping=True`` is unnecessary.
-This aligns MemRef objects consistently: if two tiles share a MemRef in
-``After``, the corresponding tiles in ``Expected`` must also share.
+Hand-written expectations normalize inferred Call result MemRefs explicitly.
+Exact comparison still checks all variable storage fields and allocation alias
+patterns. Roundtrip instruments compare the original IR without normalization.
+DefFields always alpha-map; open references retain their identity by default.
 """
 
 import re
@@ -25,6 +24,8 @@ from pypto.arith import Analyzer
 from pypto.backend import BackendType
 from pypto.ir.op import tile
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+
+from .storage_test_utils import without_call_memrefs
 
 # Tile-producing reads from GM. Built through the getter so a renamed operator fails at import
 # rather than silently dropping out of the membership test below.
@@ -331,7 +332,7 @@ class TestBasic:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_sequential(self):
         """Sequential chain: tile_a/c/e share one buffer, tile_b/d share another."""
@@ -384,10 +385,10 @@ class TestBasic:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_different_sizes(self):
-        """Different-shaped tiles cannot reuse each other's buffer."""
+        """Smaller tiles can reuse a dead larger allocation when lifetimes permit."""
 
         @pl.program
         class Before:
@@ -409,8 +410,8 @@ class TestBasic:
                 result_f: pl.Tensor[[32, 32], pl.FP32] = pl.store(tile_f, [0, 0], output_b)
                 return result_f
 
-        # tile_a/tile_e share mem_vec_4 (16384 bytes). tile_b/tile_f share mem_vec_5
-        # (4096 bytes). Different sizes never alias.
+        # tile_b fits in the dead tile_a allocation; tile_f overlaps tile_e
+        # and needs its own smaller allocation.
         @pl.program
         class Expected:
             @pl.function
@@ -429,9 +430,9 @@ class TestBasic:
                 _result_a: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_2", 0, 16384)] = pl.tile.store(
                     tile_a, [0, 0], output_a
                 )
-                tile_b: pl.Tile[[32, 32], pl.FP32, pl.MemRef(mem_vec_5, 0, 4096), pl.Mem.Vec] = pl.tile.load(
-                    input_b, [0, 0], [32, 32], [32, 32]
-                )
+                tile_b: pl.Tile[
+                    [32, 32], pl.FP32, pl.MemRef(mem_vec_4, pl.const(0, pl.INDEX), 4096), pl.Mem.Vec
+                ] = pl.tile.load(input_b, [0, 0], [32, 32], [32, 32])
                 _result_b: pl.Tensor[[32, 32], pl.FP32, pl.MemRef("mem_ddr_3", 0, 4096)] = pl.tile.store(
                     tile_b, [0, 0], output_b
                 )
@@ -450,7 +451,7 @@ class TestBasic:
                 return result_f
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_empty_function(self):
         """Empty function (no TileType) should pass through unchanged."""
@@ -474,7 +475,7 @@ class TestBasic:
                 return output
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_transitive_conflict(self):
         """Transitive conflict: tile_c and tile_d cannot share."""
@@ -528,7 +529,7 @@ class TestBasic:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
 class TestAllocCleanup:
@@ -579,7 +580,7 @@ class TestAllocCleanup:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_partial_reuse_with_overlapping_lifetimes(self):
         """When some lifetimes truly overlap, only partial reuse happens.
@@ -627,7 +628,7 @@ class TestAllocCleanup:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
 class TestDtype:
@@ -679,22 +680,22 @@ class TestDtype:
                 tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.add(
                     tile_a, tile_a
                 )
-                tile_cast: pl.Tile[[64, 64], pl.BF16, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
-                    pl.tile.cast(tile_b, target_type=pl.BF16, mode="round")
-                )
-                tile_d: pl.Tile[[64, 64], pl.BF16, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.add(
-                    tile_cast, tile_cast
-                )
-                tile_e: pl.Tile[[64, 64], pl.BF16, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.add(
-                    tile_d, tile_d
-                )
+                tile_cast: pl.Tile[
+                    [64, 64], pl.BF16, pl.MemRef(mem_vec_2, pl.const(0, pl.INDEX), 8192), pl.Mem.Vec
+                ] = pl.tile.cast(tile_b, target_type=pl.BF16, mode="round")
+                tile_d: pl.Tile[
+                    [64, 64], pl.BF16, pl.MemRef(mem_vec_2, pl.const(0, pl.INDEX), 8192), pl.Mem.Vec
+                ] = pl.tile.add(tile_cast, tile_cast)
+                tile_e: pl.Tile[
+                    [64, 64], pl.BF16, pl.MemRef(mem_vec_2, pl.const(0, pl.INDEX), 8192), pl.Mem.Vec
+                ] = pl.tile.add(tile_d, tile_d)
                 result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
                     tile_e, [0, 0], output
                 )
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
 class TestFillpad:
@@ -760,7 +761,7 @@ class TestFillpad:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_fillpad_different_pad_can_reuse(self):
         """Two fillpad outputs with different pad values share one buffer."""
@@ -840,7 +841,7 @@ class TestFillpad:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_fillpad_same_pad_can_reuse(self):
         """Two fillpad outputs with identical TileView attributes CAN reuse."""
@@ -919,7 +920,7 @@ class TestFillpad:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
 class TestValidShapeDivergence:
@@ -986,7 +987,9 @@ class TestValidShapeDivergence:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(
+            without_call_memrefs(After), without_call_memrefs(Expected), enable_auto_mapping=True
+        )
 
     def test_non_2d_divergent_valid_shape_can_reuse(self):
         """3D tiles with divergent ``valid_shape`` share a MemRef (gate removed)."""
@@ -1086,7 +1089,9 @@ class TestValidShapeDivergence:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+        ir.assert_structural_equal(
+            without_call_memrefs(After), without_call_memrefs(Expected), enable_auto_mapping=True
+        )
 
 
 def _collect_tile_memref_bases(program: ir.Program) -> dict[str, str]:
@@ -1458,7 +1463,7 @@ class TestViewOps:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_reshape_not_broken_by_memory_reuse(self):
         """MemoryReuse should propagate reuse to ALL variables sharing MemRef.
@@ -1514,7 +1519,7 @@ class TestViewOps:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_reshape_shared_buffer_can_be_reused_after_all_dead(self):
         """After all aliases are dead, shared buffer can be reused."""
@@ -1565,7 +1570,7 @@ class TestViewOps:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
 class TestInplaceOps:
@@ -1680,7 +1685,7 @@ class TestInplaceOps:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_move_output_must_not_alias_input(self):
         """tile.move's output must get a buffer distinct from its input.
@@ -1776,7 +1781,7 @@ class TestInplaceOps:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_inplace_safe_op_allows_producer_consumer_reuse(self):
         """tile.add (inplace-safe) CAN reuse its input's buffer."""
@@ -1815,7 +1820,7 @@ class TestInplaceOps:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_ands_no_producer_consumer_reuse(self):
         """tile.ands must NOT reuse its input's buffer."""
@@ -1855,7 +1860,7 @@ class TestInplaceOps:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_xors_no_producer_consumer_reuse(self):
         """tile.xors must NOT reuse its input's buffer."""
@@ -1903,7 +1908,7 @@ class TestInplaceOps:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_xor_output_does_not_alias_sources_or_tmp(self):
         """TXOR decomposition requires four distinct live buffers."""
@@ -1994,7 +1999,7 @@ class TestInplaceOps:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
 class TestYieldFixup:
@@ -2055,7 +2060,7 @@ class TestYieldFixup:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_simple_loop_memrefs_unified(self):
         """Simple loop: iter_arg/initValue/return_var/next_0 all land in a
@@ -2105,7 +2110,7 @@ class TestYieldFixup:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_multiple_iter_args_producers_retyped_independently(self):
         """With 2 iter_args, the retargeter retypes each yield producer
@@ -2176,7 +2181,7 @@ class TestYieldFixup:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_if_stmt_return_var_memref_patched(self):
         """tile_b/tile_c reuse tile_a's MemRef; if_result picks up the patched MemRef."""
@@ -2254,7 +2259,7 @@ class TestYieldFixup:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_if_stmt_tile_move_when_branch_memrefs_differ(self):
         """When IfStmt branches yield tiles with different MemRefs, the pass
@@ -2329,7 +2334,7 @@ class TestYieldFixup:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_if_phi_arm_yielding_iter_arg_still_copies_into_the_phi_buffer(self):
         """Every arm of an if-phi must write the phi's buffer, IterArg arms included.
@@ -2394,9 +2399,9 @@ class TestYieldFixup:
                 mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 8192)
                 mem_vec_5: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 mem_vec_6: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-                src_tile: pl.Tile[[1, 2048], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
-                    pl.tile.load(src_tensor, [0, 0], [1, 2048], [1, 2048], target_memory=pl.Mem.Vec)
-                )
+                src_tile: pl.Tile[
+                    [1, 2048], pl.FP32, pl.MemRef(mem_vec_6, pl.const(0, pl.INDEX), 8192), pl.Mem.Vec
+                ] = pl.tile.load(src_tensor, [0, 0], [1, 2048], [1, 2048], target_memory=pl.Mem.Vec)
                 idx_tile: pl.Tile[[1, 2048], pl.UINT32, pl.MemRef(mem_vec_4, 0, 8192), pl.Mem.Vec] = (
                     pl.tile.load(idx_tensor, [0, 0], [1, 2048], [1, 2048], target_memory=pl.Mem.Vec)
                 )
@@ -2424,16 +2429,16 @@ class TestYieldFixup:
                     result: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
                         pl.yield_(phi_mv)
                     )
-                vals: pl.Tile[[1, 2048], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
-                    pl.tile.gather_mask(result, mask_pattern=pl.tile.MaskPattern.P0101)
-                )
+                vals: pl.Tile[
+                    [1, 2048], pl.FP32, pl.MemRef(mem_vec_6, pl.const(0, pl.INDEX), 8192), pl.Mem.Vec
+                ] = pl.tile.gather_mask(result, mask_pattern=pl.tile.MaskPattern.P0101)
                 out_val: pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_2", 0, 8192)] = pl.tile.store(
                     vals, [0, 0], val_output
                 )
                 return out_val
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
         _assert_if_phi_arms_write_the_phi_buffer(After)
 
     def test_if_phi_arm_yielding_iter_arg_makes_the_carry_buffer_canonical(self):
@@ -2495,9 +2500,9 @@ class TestYieldFixup:
                 mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 8192)
                 mem_vec_5: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 mem_vec_6: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-                src_tile: pl.Tile[[1, 2048], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
-                    pl.tile.load(src_tensor, [0, 0], [1, 2048], [1, 2048], target_memory=pl.Mem.Vec)
-                )
+                src_tile: pl.Tile[
+                    [1, 2048], pl.FP32, pl.MemRef(mem_vec_6, pl.const(0, pl.INDEX), 8192), pl.Mem.Vec
+                ] = pl.tile.load(src_tensor, [0, 0], [1, 2048], [1, 2048], target_memory=pl.Mem.Vec)
                 idx_tile: pl.Tile[[1, 2048], pl.UINT32, pl.MemRef(mem_vec_4, 0, 8192), pl.Mem.Vec] = (
                     pl.tile.load(idx_tensor, [0, 0], [1, 2048], [1, 2048], target_memory=pl.Mem.Vec)
                 )
@@ -2522,16 +2527,16 @@ class TestYieldFixup:
                     result: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
                         pl.yield_(phi)
                     )
-                vals: pl.Tile[[1, 2048], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
-                    pl.tile.gather_mask(result, mask_pattern=pl.tile.MaskPattern.P0101)
-                )
+                vals: pl.Tile[
+                    [1, 2048], pl.FP32, pl.MemRef(mem_vec_6, pl.const(0, pl.INDEX), 8192), pl.Mem.Vec
+                ] = pl.tile.gather_mask(result, mask_pattern=pl.tile.MaskPattern.P0101)
                 out_val: pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_2", 0, 8192)] = pl.tile.store(
                     vals, [0, 0], val_output
                 )
                 return out_val
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
         _assert_if_phi_arms_write_the_phi_buffer(After)
 
     def test_carry_writebacks_run_before_they_are_overwritten(self):
@@ -2608,7 +2613,7 @@ class TestYieldFixup:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
         _assert_carry_writebacks_do_not_clobber(After)
 
     def test_carry_writeback_cycle_is_broken_with_a_spill_buffer(self):
@@ -2684,7 +2689,7 @@ class TestYieldFixup:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
         _assert_carry_writebacks_do_not_clobber(After)
 
     def test_carry_writeback_distinguishes_slots_of_one_allocation(self):
@@ -2778,9 +2783,9 @@ class TestYieldFixup:
                 mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 8192)
                 mem_vec_5: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 mem_vec_6: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-                src_tile: pl.Tile[[1, 2048], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
-                    pl.tile.load(src_tensor, [0, 0], [1, 2048], [1, 2048], target_memory=pl.Mem.Vec)
-                )
+                src_tile: pl.Tile[
+                    [1, 2048], pl.FP32, pl.MemRef(mem_vec_6, pl.const(0, pl.INDEX), 8192), pl.Mem.Vec
+                ] = pl.tile.load(src_tensor, [0, 0], [1, 2048], [1, 2048], target_memory=pl.Mem.Vec)
                 idx_tile: pl.Tile[[1, 2048], pl.UINT32, pl.MemRef(mem_vec_4, 0, 8192), pl.Mem.Vec] = (
                     pl.tile.load(idx_tensor, [0, 0], [1, 2048], [1, 2048], target_memory=pl.Mem.Vec)
                 )
@@ -2801,16 +2806,16 @@ class TestYieldFixup:
                     r_outer: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
                         pl.yield_(r_inner)
                     )
-                vals: pl.Tile[[1, 2048], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
-                    pl.tile.gather_mask(r_outer, mask_pattern=pl.tile.MaskPattern.P0101)
-                )
+                vals: pl.Tile[
+                    [1, 2048], pl.FP32, pl.MemRef(mem_vec_6, pl.const(0, pl.INDEX), 8192), pl.Mem.Vec
+                ] = pl.tile.gather_mask(r_outer, mask_pattern=pl.tile.MaskPattern.P0101)
                 out_val: pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_2", 0, 8192)] = pl.tile.store(
                     vals, [0, 0], val_output
                 )
                 return out_val
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
         _assert_carry_yield_lands_in_its_buffer(After)
 
     def test_carry_held_in_one_dynamic_slot_needs_no_copy(self):
@@ -3064,7 +3069,7 @@ class TestControlFlow:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_different_if_branches_can_share(self):
         """Variables in different IfStmt branches CAN share MemRef (non-overlapping lifetimes)."""
@@ -3132,7 +3137,7 @@ class TestControlFlow:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_loop_local_var_can_be_reused(self):
         """Loop-local vars share a scratch buffer; the yield producer is
@@ -3201,7 +3206,7 @@ class TestControlFlow:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_nested_for_loops_outer_var_extends_to_outer_end(self):
         """Variable defined before nested loops, used in inner loop body --
@@ -3280,7 +3285,7 @@ class TestControlFlow:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_if_without_else_branch(self):
         """IfStmt with only then branch (no else): tile_a is alive through the
@@ -3339,7 +3344,7 @@ class TestControlFlow:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_for_with_if_multiple_vars_competing(self):
         """ForStmt with IfStmt inside: `tile_a` and `tile_b` are live across
@@ -3423,7 +3428,7 @@ class TestControlFlow:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_branch_local_var_does_not_leak(self):
         """A variable defined and consumed entirely inside one IfStmt branch
@@ -3489,7 +3494,7 @@ class TestControlFlow:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_if_phi_read_after_branch_blocks_reuse(self):
         """An scf.if return_var (phi) read *after* the branch keeps its buffer
@@ -3568,7 +3573,7 @@ class TestControlFlow:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_loop_return_var_blocks_init_memref_reuse(self):
         """Return_var used after loop must block reuse of initValue's MemRef.
@@ -3649,7 +3654,7 @@ class TestControlFlow:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
 def _assert_single_acc_buffer_no_move(after: ir.Program, label: str) -> None:
@@ -3764,7 +3769,7 @@ class TestTopDownRetargeter:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_padded_acc_initializer_preserves_valid_shape_and_coalesces(self):
         """A ``set_validshape`` Acc initializer stays on the loop accumulator allocation.
@@ -3887,10 +3892,19 @@ class TestTopDownRetargeter:
         ]
         assert len(aic_functions) == 1
 
-        body = aic_functions[0].as_python()
-        assert "pl.tile.matmul_acc(" in body
+        calls = []
+
+        class CollectCalls(ir.IRVisitor):
+            def visit_call(self, op):
+                calls.append(op)
+                super().visit_call(op)
+
+        CollectCalls().visit_function(aic_functions[0])
+        assert any(call.op.name == ir.get_op("tile.matmul_acc").name for call in calls)
         assert not any(
-            "pl.tile.move(" in line and "target_memory=pl.Mem.Acc" in line for line in body.splitlines()
+            call.op.name == ir.get_op("tile.move").name
+            and call.kwargs.get("target_memory") == ir.MemorySpace.Acc
+            for call in calls
         )
 
         aic = aic_functions[0]
@@ -4094,7 +4108,7 @@ class TestTopDownRetargeter:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_failed_if_retarget_rolls_back_successful_sibling_arm(self):
         """A declined branch must not leak rewrites planned for its sibling.
@@ -4777,7 +4791,7 @@ class SharedSuffix:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_retargeter_declines_when_read_after_nested_if(self):
         """Regression test for the ancestor-walking liveness check.
@@ -4871,7 +4885,7 @@ class SharedSuffix:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_retargeter_declines_for_not_inplace_safe_op(self):
         """Regression test for the not_inplace_safe check.
@@ -4936,9 +4950,9 @@ class SharedSuffix:
                 mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 8192)
                 mem_vec_5: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
                 mem_vec_6: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-                src_tile: pl.Tile[[1, 2048], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
-                    pl.tile.load(src_tensor, [0, 0], [1, 2048], [1, 2048])
-                )
+                src_tile: pl.Tile[
+                    [1, 2048], pl.FP32, pl.MemRef(mem_vec_6, pl.const(0, pl.INDEX), 8192), pl.Mem.Vec
+                ] = pl.tile.load(src_tensor, [0, 0], [1, 2048], [1, 2048])
                 idx_tile: pl.Tile[[1, 2048], pl.UINT32, pl.MemRef(mem_vec_4, 0, 8192), pl.Mem.Vec] = (
                     pl.tile.load(idx_tensor, [0, 0], [1, 2048], [1, 2048])
                 )
@@ -4956,16 +4970,16 @@ class SharedSuffix:
                     result: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
                         pl.yield_(merged_mv)
                     )
-                vals: pl.Tile[[1, 2048], pl.FP32, pl.MemRef(mem_vec_6, 0, 16384), pl.Mem.Vec] = (
-                    pl.tile.gather_mask(result, mask_pattern=pl.tile.MaskPattern.P0101)
-                )
+                vals: pl.Tile[
+                    [1, 2048], pl.FP32, pl.MemRef(mem_vec_6, pl.const(0, pl.INDEX), 8192), pl.Mem.Vec
+                ] = pl.tile.gather_mask(result, mask_pattern=pl.tile.MaskPattern.P0101)
                 out_val: pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_2", 0, 8192)] = pl.tile.store(
                     vals, [0, 0], val_output
                 )
                 return out_val
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_predicated_pipelined_kloop_uses_one_acc_buffer(self):
         """The migration target for the peel the sibling test rejects.
@@ -5152,7 +5166,7 @@ class SharedSuffix:
                 return result
 
         After = _run_pipeline(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
         # Sanity: split metadata round-trips through the pass.
         after_vp = After.get_function("vector_producer")

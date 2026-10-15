@@ -919,7 +919,7 @@ class TestAssertStructuralEqual:
         c1 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
         c2 = ir.ConstInt(2, DataType.INT64, ir.Span.unknown())
 
-        with pytest.raises(ValueError, match=r"value mismatch.*1 != 2"):
+        with pytest.raises(ValueError, match=r"value.*1, 0 fields.*2, 0 fields"):
             ir.assert_structural_equal(c1, c2)
 
     def test_assert_type_mismatch(self):
@@ -928,7 +928,7 @@ class TestAssertStructuralEqual:
         c = ir.ConstInt(1, DataType.INT64, span)
         v = ir.Var("x", ir.ScalarType(DataType.INT64), span)
 
-        with pytest.raises(ValueError, match="Node type mismatch.*ConstInt != Var"):
+        with pytest.raises(ValueError, match="root: ConstInt.*Var"):
             ir.assert_structural_equal(c, v)
 
     def test_assert_binary_expr_mismatch(self):
@@ -940,7 +940,7 @@ class TestAssertStructuralEqual:
         add_expr = ir.Add(x, y, DataType.INT64, span)
         sub_expr = ir.Sub(x, y, DataType.INT64, span)
 
-        with pytest.raises(ValueError, match="Node type mismatch.*Add != Sub"):
+        with pytest.raises(ValueError, match="root: Add.*Sub"):
             ir.assert_structural_equal(add_expr, sub_expr)
 
     def test_assert_nested_mismatch_with_path(self):
@@ -955,7 +955,7 @@ class TestAssertStructuralEqual:
         # x + 2
         expr2 = ir.Add(x, c2, DataType.INT64, span)
 
-        with pytest.raises(ValueError, match=r"value mismatch.*1 != 2") as exc_info:
+        with pytest.raises(ValueError, match=r"value.*1, 0 fields.*2, 0 fields") as exc_info:
             ir.assert_structural_equal(expr1, expr2, enable_auto_mapping=True)
 
         # Error path (first line) uses field names, not C++ type names
@@ -977,7 +977,7 @@ class TestAssertStructuralEqual:
         seq1 = ir.SeqStmts([stmt1], span)
         seq2 = ir.SeqStmts([stmt1, stmt2], span)
 
-        with pytest.raises(ValueError, match="Vector size mismatch.*1 items != 2 items"):
+        with pytest.raises(ValueError, match="root.stmts.*1 fields.*2 fields"):
             ir.assert_structural_equal(seq1, seq2, enable_auto_mapping=True)
 
     def test_assert_variable_mapping_conflict(self):
@@ -993,7 +993,7 @@ class TestAssertStructuralEqual:
         # y + z (cannot map x to both y and z)
         expr2 = ir.Add(y, z, dtype, span)
 
-        with pytest.raises(ValueError, match="Variable mapping inconsistent"):
+        with pytest.raises(ValueError, match="binding:"):
             ir.assert_structural_equal(expr1, expr2, enable_auto_mapping=True)
 
     def test_assert_dtype_mismatch(self):
@@ -1002,7 +1002,7 @@ class TestAssertStructuralEqual:
         c1 = ir.ConstInt(1, DataType.INT64, span)
         c2 = ir.ConstInt(1, DataType.INT32, span)
 
-        with pytest.raises(ValueError, match="ScalarType dtype mismatch.*int64 != int32"):
+        with pytest.raises(ValueError, match="dtype.*20.*19"):
             ir.assert_structural_equal(c1, c2)
 
     def test_assert_null_vs_nonnull(self):
@@ -1013,11 +1013,11 @@ class TestAssertStructuralEqual:
         y = ir.Var("y", ir.ScalarType(dtype), span)
 
         # If with else branch
-        if_stmt1 = ir.IfStmt(x, ir.AssignStmt(x, y, span), ir.AssignStmt(y, x, span), [], span)
+        if_stmt1 = ir.IfStmt(x, ir.EvalStmt(y, span), ir.EvalStmt(x, span), [], span)
         # If without else branch
-        if_stmt2 = ir.IfStmt(x, ir.AssignStmt(x, y, span), None, [], span)
+        if_stmt2 = ir.IfStmt(x, ir.EvalStmt(y, span), None, [], span)
 
-        with pytest.raises(ValueError, match="Optional field presence mismatch"):
+        with pytest.raises(ValueError, match="else_body.*some.*none"):
             ir.assert_structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=True)
 
     def test_assert_function_mismatch(self):
@@ -1033,7 +1033,7 @@ class TestAssertStructuralEqual:
         func1 = ir.Function("test", [x], [ir.ScalarType(dtype)], body1, span)
         func2 = ir.Function("test", [x], [ir.ScalarType(dtype)], body2, span)
 
-        with pytest.raises(ValueError, match="Node type mismatch.*AssignStmt != YieldStmt"):
+        with pytest.raises(ValueError, match="root.body: AssignStmt.*YieldStmt"):
             ir.assert_structural_equal(func1, func2, enable_auto_mapping=True)
 
     def test_assert_type_mismatch_in_var(self):
@@ -1042,7 +1042,7 @@ class TestAssertStructuralEqual:
         x1 = ir.Var("x", ir.ScalarType(DataType.INT64), span)
         x2 = ir.Var("x", ir.ScalarType(DataType.INT32), span)
 
-        with pytest.raises(ValueError, match="ScalarType dtype mismatch.*int64 != int32"):
+        with pytest.raises(ValueError, match="dtype.*20.*19"):
             ir.assert_structural_equal(x1, x2, enable_auto_mapping=True)
 
     def test_assert_tensor_shape_mismatch(self):
@@ -1056,7 +1056,7 @@ class TestAssertStructuralEqual:
         type1 = ir.TensorType([c4, c8], DataType.FP32)  # 2D tensor
         type2 = ir.TensorType([c4], DataType.FP32)  # 1D tensor
 
-        with pytest.raises(ValueError, match="TensorType shape rank mismatch.*2 != 1"):
+        with pytest.raises(ValueError, match="root.shape.*2 fields.*1 fields"):
             ir.assert_structural_equal(type1, type2)
 
     def test_assert_with_auto_mapping_enabled(self):
@@ -1077,7 +1077,7 @@ class TestAssertStructuralEqual:
         ir.assert_structural_equal(expr1, expr2, enable_auto_mapping=True)
 
         # Should raise without auto_mapping
-        with pytest.raises(ValueError, match="Variable pointer mismatch"):
+        with pytest.raises(ValueError, match="binding: free_identity"):
             ir.assert_structural_equal(expr1, expr2, enable_auto_mapping=False)
 
     def test_assert_complex_nested_structure(self):
@@ -1098,12 +1098,12 @@ class TestAssertStructuralEqual:
         then_body2 = ir.AssignStmt(y, ir.Add(y, c2, dtype, span), span)
         if_stmt2 = ir.IfStmt(x, then_body2, None, [], span)
 
-        with pytest.raises(ValueError, match=r"value mismatch.*1 != 2") as exc_info:
+        with pytest.raises(ValueError, match=r"value.*1, 0 fields.*2, 0 fields") as exc_info:
             ir.assert_structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=True)
 
         # Verify error message contains path information
         error_msg = str(exc_info.value)
-        assert "Structural equality assertion failed" in error_msg
+        assert "Structural mismatch at root.then_body.value.right.value" in error_msg
 
     def test_assert_equal_types(self):
         """Test assert_structural_equal with Type objects."""
@@ -1118,7 +1118,7 @@ class TestAssertStructuralEqual:
         dtype1 = ir.ScalarType(DataType.INT64)
         dtype2 = ir.ScalarType(DataType.FP32)
 
-        with pytest.raises(ValueError, match="ScalarType dtype mismatch.*int64 != fp32"):
+        with pytest.raises(ValueError, match="dtype.*20.*52"):
             ir.assert_structural_equal(dtype1, dtype2)
 
     def test_assert_tuple_type_size_mismatch(self):
@@ -1129,7 +1129,7 @@ class TestAssertStructuralEqual:
         tuple1 = ir.TupleType([t1, t2])
         tuple2 = ir.TupleType([t1])
 
-        with pytest.raises(ValueError, match="TupleType size mismatch.*2 != 1"):
+        with pytest.raises(ValueError, match="root.types.*2 fields.*1 fields"):
             ir.assert_structural_equal(tuple1, tuple2)
 
 
@@ -1196,8 +1196,8 @@ class TestAssertStructuralEqualPath:
 
         path = _get_mismatch_path(prog1, prog2)
 
-        assert "at:" in path
-        assert "['main'].body[1]" in path  # transparent folding: body[1] not body.stmts[1]
+        assert "Structural mismatch at root" in path
+        assert "root.functions.main.value.body.stmts.[1]" in path
         assert "Function" not in path
         assert "SeqStmts" not in path
         assert "AssignStmt" not in path
@@ -1251,8 +1251,8 @@ class TestAssertStructuralEqualPath:
 
         path = _get_mismatch_path(prog1, prog2)
 
-        assert "at:" in path
-        assert "['main'].body[0].body[1]" in path  # nested transparent folding
+        assert "Structural mismatch at root" in path
+        assert "root.functions.main.value.body.stmts.[0].body.stmts.[1]" in path  # nested transparent folding
         assert "Function" not in path
         assert "SeqStmts" not in path
         assert "ForStmt" not in path
@@ -1299,8 +1299,8 @@ class TestAssertStructuralEqualPath:
 
         path = _get_mismatch_path(prog1, prog2)
 
-        assert "at:" in path
-        assert "['main'].body[0].body.then_body" in path
+        assert "Structural mismatch at root" in path
+        assert "root.functions.main.value.body.stmts.[0].body.then_body" in path
         assert "Function" not in path
         assert "SeqStmts" not in path
         assert "ForStmt" not in path
@@ -1342,8 +1342,8 @@ class TestAssertStructuralEqualPath:
 
         path = _get_mismatch_path(prog1, prog2)
 
-        assert "at:" in path
-        assert "['main'].body[0].var" in path  # mismatch in var_ field
+        assert "Structural mismatch at root" in path
+        assert "root.functions.main.value.body.stmts.[0].var" in path  # mismatch in var_ field
         assert "SeqStmts" not in path
         assert "AssignStmt" not in path
 
@@ -1365,8 +1365,8 @@ class TestAssertStructuralEqualPath:
 
         path = _get_mismatch_path(prog1, prog2)
 
-        assert "at:" in path
-        assert "['main'].params[0]" in path  # mismatch in first param
+        assert "Structural mismatch at root" in path
+        assert "root.functions.main.value.params.[0]" in path  # mismatch in first param
         assert "SeqStmts" not in path
         assert "Function" not in path
 
@@ -1398,8 +1398,8 @@ class TestAssertStructuralEqualPath:
 
         path = _get_mismatch_path(prog1, prog2)
 
-        assert "at:" in path
-        assert "['main'].body[0].else_body" in path
+        assert "Structural mismatch at root" in path
+        assert "root.functions.main.value.body.stmts.[0].else_body" in path
         assert "SeqStmts" not in path
         assert "IfStmt" not in path
 
@@ -1437,8 +1437,8 @@ class TestAssertStructuralEqualPath:
 
         path = _get_mismatch_path(prog1, prog2)
 
-        assert "at:" in path
-        assert "['main'].body[0].stop" in path
+        assert "Structural mismatch at root" in path
+        assert "root.functions.main.value.body.stmts.[0].stop" in path
         assert "SeqStmts" not in path
         assert "ForStmt" not in path
 
@@ -1466,8 +1466,8 @@ class TestAssertStructuralEqualPath:
 
         path = _get_mismatch_path(prog1, prog2)
 
-        assert "at:" in path
-        assert "['other'].body[0]" in path  # second function's mismatch
+        assert "Structural mismatch at root" in path
+        assert "root.functions.other.value.body.stmts.[0]" in path  # second function's mismatch
         assert "SeqStmts" not in path
         assert "Function" not in path
 
@@ -1613,9 +1613,9 @@ class TestSubNodeComparison:
 
         path = _get_mismatch_path(for0, for1)
 
-        assert "at:" in path
+        assert "Structural mismatch at root" in path
         assert "stop" in path  # relative to ForStmt (no leading dot at root)
-        assert "['main']" not in path  # no program-level prefix
+        assert "root.functions.main.value" not in path  # no program-level prefix
 
     def test_compare_functions_from_same_program(self):
         """Compare two Function nodes - path is relative to Function: 'body[0]'"""
@@ -1634,10 +1634,10 @@ class TestSubNodeComparison:
 
         path = _get_mismatch_path(prog["main"], prog["helper"])
 
-        assert "at:" in path
-        assert "body[0]" in path  # Function.body field + transparent SeqStmts (no leading dot at root)
-        assert "['main']" not in path
-        assert "['helper']" not in path
+        assert "Structural mismatch at root" in path
+        assert "body.stmts.[0]" in path  # Function.body field + transparent SeqStmts (no leading dot at root)
+        assert "root.functions.main.value" not in path
+        assert "root.functions.helper.value" not in path
 
     def test_compare_seqstmts_from_two_functions(self):
         """Compare SeqStmts bodies - SeqStmts transparent → path: '[0]'"""
@@ -1658,9 +1658,9 @@ class TestSubNodeComparison:
         assert main is not None and helper is not None
         path = _get_mismatch_path(main.body, helper.body)
 
-        assert "at:" in path
+        assert "Structural mismatch at root" in path
         assert "[0]" in path  # SeqStmts transparent: index with no field prefix
-        assert "['main']" not in path
+        assert "root.functions.main.value" not in path
         assert "body" not in path  # SeqStmts field name suppressed
 
 
@@ -1781,7 +1781,7 @@ def test_shared_nodes_do_not_bypass_variable_bijection(shared_subtree):
         )
     assert not ir.structural_equal(lhs, rhs, True)
     assert not ir.structural_equal(rhs, lhs, True)
-    with pytest.raises(ValueError, match="mapping inconsistent"):
+    with pytest.raises(ValueError, match="binding:"):
         ir.assert_structural_equal(lhs, rhs, True)
 
 
@@ -1813,7 +1813,7 @@ def test_cached_free_variable_equality_is_invalidated_on_either_binding_side(bin
 
     lhs, rhs = (sequence(y), sequence(x)) if bind_right else (sequence(x), sequence(y))
     assert not ir.structural_equal(lhs, rhs)
-    with pytest.raises(ValueError, match="Variable mapping inconsistent"):
+    with pytest.raises(ValueError, match="binding:"):
         ir.assert_structural_equal(lhs, rhs)
 
 

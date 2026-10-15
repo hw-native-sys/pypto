@@ -283,7 +283,7 @@ def test_per_lane_extent_propagates_through_a_vector_consumer():
     """
     aiv = _aiv_body(str(ragged_rows_with_compute.lower(config=RunConfig(platform="a2a3"))))
 
-    exp_line = next((line for line in aiv.splitlines() if "pl.tile.exp(" in line), None)
+    exp_line = next((line for line in aiv.splitlines() if '"tile.exp"' in line), None)
     assert exp_line is not None, aiv
     # Both the shard and the op that consumes it carry a lane-aware extent.
     assert aiv.count("aiv_id") >= 2, aiv

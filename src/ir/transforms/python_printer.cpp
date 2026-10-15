@@ -422,6 +422,8 @@ class IRPythonPrinter : public IRVisitor {
   // Python-eval folding `32 + 32` into `64`. Bare literals stay the default
   // everywhere else.
   bool typed_index_consts_ = false;
+  bool force_recorded_call_ = false;
+  std::unordered_map<const Type*, bool> storage_type_cache_;
 
   // Helper methods
   std::string GetIndent() const;
@@ -439,7 +441,7 @@ class IRPythonPrinter : public IRVisitor {
   // name a Var whose printed name was disambiguated (two loops both spelled `i`
   // print as `i` and `i_1`), and a fresh printer would emit the bare name_hint_
   // and rebind it to the wrong Var on reparse.
-  std::string PrintSubExpr(const ExprPtr& expr) const;
+  std::string PrintSubExpr(const ExprPtr& expr, bool typed_index = false) const;
 
   // Build var_rename_map_ from a body stmt (and optional params).
   // Assigns unique suffixed names (e.g., "i", "i_1") when two distinct Vars share a name.
@@ -575,6 +577,7 @@ class IRPythonPrinter : public IRVisitor {
   // Statement body visitor with SSA-style handling
   void VisitStmtBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars = {});
   void PrintYieldAssignmentVars(const std::vector<VarPtr>& return_vars);
+  void PrintYieldWithResults(const YieldStmtPtr& yield, const std::vector<VarPtr>& return_vars);
 
   // Binary/unary operator helpers (reuse precedence logic)
   void PrintBinaryOp(const BinaryExprPtr& op, const char* op_symbol);
@@ -594,6 +597,7 @@ class IRPythonPrinter : public IRVisitor {
   std::string GetWindowBufferName(const WindowBufferPtr& window);
   std::string PrintWindowBuffer(const WindowBufferPtr& window);
   void PrintCall(const CallPtr& op);
+  bool HasStorageType(const TypePtr& type);
   std::string PrintTileView(const TileView& tile_view, const std::vector<ExprPtr>& tile_shape,
                             const std::optional<MemorySpace>& memory_space = std::nullopt);
   std::string PrintTensorView(const TensorView& tensor_view, const std::vector<ExprPtr>& tensor_shape);
@@ -1067,10 +1071,33 @@ void IRPythonPrinter::PrintAttrValue(const std::any& value, const Span& span) {
   }
 }
 
+bool IRPythonPrinter::HasStorageType(const TypePtr& type) {
+  if (!type) return false;
+  if (auto found = storage_type_cache_.find(type.get()); found != storage_type_cache_.end()) {
+    return found->second;
+  }
+  bool result = false;
+  if (auto shaped = As<ShapedType>(type)) {
+    result = shaped->memref_.has_value();
+  } else if (auto tuple = As<TupleType>(type)) {
+    result = std::any_of(tuple->types_.begin(), tuple->types_.end(),
+                         [&](const TypePtr& element) { return HasStorageType(element); });
+  }
+  storage_type_cache_.emplace(type.get(), result);
+  return result;
+}
+
 void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   INTERNAL_CHECK_SPAN(op->op_, op->span_) << "Call has null op";
   auto distributed_type = As<DistributedTensorType>(op->GetType());
-  if (!distributed_type || (comm_domain_depth_ == 0 && !distributed_type->window_buffer_.has_value())) {
+  // Type deduction may propagate an operand's allocation into the result,
+  // while the recorded call retains an allocation-free value type. Preserve
+  // the recorded type using the existing lossless dump form.
+  const bool storage_call = std::exchange(force_recorded_call_, false) || HasStorageType(op->GetType()) ||
+                            std::any_of(op->args_.begin(), op->args_.end(),
+                                        [&](const ExprPtr& arg) { return HasStorageType(arg->GetType()); });
+  if (!storage_call &&
+      (!distributed_type || (comm_domain_depth_ == 0 && !distributed_type->window_buffer_.has_value()))) {
     PrintCall(op);
     return;
   }
@@ -1647,6 +1674,10 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
 
 void IRPythonPrinter::VisitExpr_(const SubmitPtr& op) {
   INTERNAL_CHECK_SPAN(op->op_, op->span_) << "Submit has null op";
+  const bool recorded = HasStorageType(op->GetType()) ||
+                        std::any_of(op->args_.begin(), op->args_.end(),
+                                    [&](const ExprPtr& arg) { return HasStorageType(arg->GetType()); });
+  if (recorded) stream_ << prefix_ << "._dump.submit(";
   // Submit normally appears inside a Program (manual_scope body of a
   // function), so the callee is emitted as ``self.<kernel_name>``. When a
   // Submit is printed standalone (debugging, unit tests that build IR by
@@ -1781,6 +1812,7 @@ void IRPythonPrinter::VisitExpr_(const SubmitPtr& op) {
     stream_ << "}";
   }
   stream_ << ")";
+  if (recorded) stream_ << ", " << Print(op->GetType()) << ")";
 }
 
 void IRPythonPrinter::VisitExpr_(const MakeTuplePtr& op) {
@@ -1963,7 +1995,9 @@ void IRPythonPrinter::VisitStmt_(const AssignStmtPtr& op) {
     stream_ << ": " << Print(op->var_->GetType());
   }
   stream_ << " = ";
+  force_recorded_call_ = As<Call>(op->value_) && HasStorageType(op->var_->GetType());
   VisitExpr(op->value_);
+  force_recorded_call_ = false;
 }
 
 void IRPythonPrinter::VisitStmt_(const IfStmtPtr& op) {
@@ -2718,6 +2752,27 @@ void IRPythonPrinter::PrintYieldAssignmentVars(const std::vector<VarPtr>& return
   }
 }
 
+void IRPythonPrinter::PrintYieldWithResults(const YieldStmtPtr& yield_stmt,
+                                            const std::vector<VarPtr>& return_vars) {
+  stream_ << GetIndent();
+  PrintLeadingComments(yield_stmt);
+  PrintYieldAssignmentVars(return_vars);
+  stream_ << " = " << prefix_ << (return_vars.size() > 1 ? "._dump.yield_(" : ".yield_(");
+  for (size_t i = 0; i < yield_stmt->value_.size(); ++i) {
+    if (i > 0) stream_ << ", ";
+    VisitExpr(yield_stmt->value_[i]);
+  }
+  if (return_vars.size() > 1) {
+    stream_ << ", types=[";
+    for (size_t k = 0; k < return_vars.size(); ++k) {
+      if (k > 0) stream_ << ", ";
+      stream_ << Print(return_vars[k]->GetType());
+    }
+    stream_ << "]";
+  }
+  stream_ << ")";
+}
+
 void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars) {
   // A single-statement SeqStmts is a transparent wrapper (e.g. a user-written
   // `with pl.auto_scope():` body before NormalizeStmtStructure collapses it).
@@ -2732,15 +2787,7 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
   if (auto yield_stmt = As<YieldStmt>(body)) {
     // If parent has return_vars, wrap yield as assignment
     if (!yield_stmt->value_.empty() && !return_vars.empty()) {
-      stream_ << GetIndent();
-      PrintLeadingComments(yield_stmt);
-      PrintYieldAssignmentVars(return_vars);
-      stream_ << " = " << prefix_ << ".yield_(";
-      for (size_t i = 0; i < yield_stmt->value_.size(); ++i) {
-        if (i > 0) stream_ << ", ";
-        VisitExpr(yield_stmt->value_[i]);
-      }
-      stream_ << ")";
+      PrintYieldWithResults(yield_stmt, return_vars);
     } else {
       stream_ << GetIndent();
       PrintLeadingComments(yield_stmt);
@@ -2760,16 +2807,7 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
       bool is_last = (i == seq_stmts->stmts_.size() - 1);
       if (auto yield_stmt = As<YieldStmt>(stmt)) {
         if (is_last && !yield_stmt->value_.empty() && !return_vars.empty()) {
-          // Wrap as assignment
-          stream_ << GetIndent();
-          PrintLeadingComments(yield_stmt);
-          PrintYieldAssignmentVars(return_vars);
-          stream_ << " = " << prefix_ << ".yield_(";
-          for (size_t j = 0; j < yield_stmt->value_.size(); ++j) {
-            if (j > 0) stream_ << ", ";
-            VisitExpr(yield_stmt->value_[j]);
-          }
-          stream_ << ")";
+          PrintYieldWithResults(yield_stmt, return_vars);
         } else {
           stream_ << GetIndent();
           PrintLeadingComments(yield_stmt);
@@ -2811,11 +2849,12 @@ std::string IRPythonPrinter::GetVarName(const Var* var) const {
   return var->name_hint_ + suffix;
 }
 
-std::string IRPythonPrinter::PrintSubExpr(const ExprPtr& expr) const {
+std::string IRPythonPrinter::PrintSubExpr(const ExprPtr& expr, bool typed_index) const {
   IRPythonPrinter sub_printer(prefix_);
   sub_printer.var_rename_map_ = var_rename_map_;
   sub_printer.dyn_var_rename_map_ = dyn_var_rename_map_;
   sub_printer.free_body_vars_ = free_body_vars_;
+  sub_printer.typed_index_consts_ = typed_index;
   return sub_printer.Print(expr);
 }
 
@@ -3417,11 +3456,8 @@ void IRPythonPrinter::VisitProgram(const ProgramPtr& program) {
 }
 
 std::string IRPythonPrinter::PrintExprForType(const ExprPtr& expr) {
-  // Top-level static dims always print bare regardless of dtype: dim dtype is
-  // insignificant for static shapes (structural equality compares ConstInt by
-  // value) and bare literals reparse to the canonical INDEX form. Only leaves
-  // inside composite trees need pl.const typing — see typed_index_consts_.
-  if (auto const_int = As<ConstInt>(expr)) {
+  // Bare dimensions reparse as INDEX. Preserve every other stored dtype.
+  if (auto const_int = As<ConstInt>(expr); const_int && const_int->dtype() == DataType::INDEX) {
     return std::to_string(const_int->value_);
   }
   if (auto var = As<Var>(expr)) {
@@ -3452,7 +3488,12 @@ std::string IRPythonPrinter::PrintMemRef(const MemRef& memref) {
   // invented pair would make it indistinguishable from a compiler allocation on
   // reparse.
   if (memref.is_pinned_) {
-    oss << prefix_ << ".MemRef(\"" << GetVarName(memref.base_.get()) << "\"";
+    oss << prefix_ << ".MemRef(";
+    if (!printing_signature_ && body_defined_vars_.count(memref.base_.get())) {
+      oss << GetVarName(memref.base_.get());
+    } else {
+      oss << std::quoted(GetVarName(memref.base_.get()));
+    }
     // `slots=` is what makes the subscript below legal on reparse, so it has to
     // ride along; omitted at 1 so an unsubscripted declaration prints as before.
     if (memref.slot_count_ > 1) oss << ", slots=" << memref.slot_count_;
@@ -3483,7 +3524,7 @@ std::string IRPythonPrinter::PrintMemRef(const MemRef& memref) {
   // Print byte offset off the main stream, but with this printer's naming state:
   // a dynamic offset (a tile.slice view) names loop vars, which may have been
   // disambiguated.
-  oss << ", " << PrintSubExpr(memref.byte_offset_);
+  oss << ", " << PrintSubExpr(memref.byte_offset_, true);
 
   // Print size
   oss << ", " << memref.size_;

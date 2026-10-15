@@ -83,6 +83,34 @@ inline TypePtr CloneTypeWithMemRef(const TypePtr& type, const std::optional<MemR
   return type;
 }
 
+/// Remove allocation annotations before comparing value descriptors. Keep
+/// window identity, layouts, and every other type field. Memoize tuple DAGs.
+inline TypePtr CloneTypeWithoutMemRef(const TypePtr& root) {
+  std::unordered_map<const Type*, TypePtr> cache;
+  auto strip = [&](auto&& self, const TypePtr& type) -> TypePtr {
+    if (!type) return type;
+    if (auto found = cache.find(type.get()); found != cache.end()) {
+      return found->second;
+    }
+    TypePtr result = type;
+    if (auto tuple = As<TupleType>(type)) {
+      std::vector<TypePtr> elements;
+      bool changed = false;
+      for (const auto& element : tuple->types_) {
+        auto next = self(self, element);
+        changed |= next != element;
+        elements.push_back(std::move(next));
+      }
+      if (changed) result = std::make_shared<TupleType>(std::move(elements));
+    } else if (auto shaped = As<ShapedType>(type); shaped && shaped->memref_) {
+      result = CloneTypeWithMemRef(type, std::nullopt);
+    }
+    cache.emplace(type.get(), result);
+    return result;
+  };
+  return strip(strip, root);
+}
+
 /// Keep newly inferred shape / dtype / view metadata, filling only missing storage metadata.
 /// Op type deduction may omit a declared MemRef or tile memory space. For a
 /// re-deduced assignment, carry them from the assigned Var's type: ConvertToSSA

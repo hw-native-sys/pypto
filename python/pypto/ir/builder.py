@@ -23,6 +23,7 @@ from typing import Any, cast
 from pypto.pypto_core import DataType, ir
 from pypto.pypto_core.ir import IRBuilder as CppIRBuilder
 
+from .type import _merge_annotation_metadata
 from .utils import _normalize_expr
 
 
@@ -1073,7 +1074,7 @@ class ForLoopBuilder(_ReturnVarsAccessor):
         inferred_type = init_expr.type
 
         # If explicit type is provided, validate it matches the inferred type
-        if type is not None and type != inferred_type:
+        if type is not None and ir._without_type_memref(type) != ir._without_type_memref(inferred_type):
             raise ValueError(
                 f"Type mismatch in iter_arg for '{name}':\n"
                 f"  Inferred type: {inferred_type}\n"
@@ -1125,8 +1126,12 @@ class ForLoopBuilder(_ReturnVarsAccessor):
                 )
             final_type = inferred_type
         else:
+            if inferred_type is not None:
+                type = _merge_annotation_metadata(type, inferred_type)
             # Validate provided type if we have inferred type
-            if inferred_type is not None and type != inferred_type:
+            if inferred_type is not None and ir._without_type_memref(type) != ir._without_type_memref(
+                inferred_type
+            ):
                 raise ValueError(
                     f"Type mismatch in return_var '{name}':\n"
                     f"  Inferred type (from iter_arg): {inferred_type}\n"
@@ -1202,7 +1207,7 @@ class WhileLoopBuilder(_ReturnVarsAccessor):
         inferred_type = init_expr.type
 
         # If explicit type is provided, validate it matches the inferred type
-        if type is not None and type != inferred_type:
+        if type is not None and ir._without_type_memref(type) != ir._without_type_memref(inferred_type):
             raise ValueError(
                 f"Type mismatch in iter_arg for '{name}':\n"
                 f"  Inferred type: {inferred_type}\n"
@@ -1272,8 +1277,12 @@ class WhileLoopBuilder(_ReturnVarsAccessor):
                 )
             final_type = inferred_type
         else:
+            if inferred_type is not None:
+                type = _merge_annotation_metadata(type, inferred_type)
             # Validate provided type if we have inferred type
-            if inferred_type is not None and type != inferred_type:
+            if inferred_type is not None and ir._without_type_memref(type) != ir._without_type_memref(
+                inferred_type
+            ):
                 raise ValueError(
                     f"Type mismatch in return_var '{name}':\n"
                     f"  Inferred type (from iter_arg): {inferred_type}\n"

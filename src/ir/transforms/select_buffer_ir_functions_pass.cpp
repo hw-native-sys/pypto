@@ -41,6 +41,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/attrs.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
@@ -215,7 +216,9 @@ class BufferKernelSupport : public IRVisitor {
     for (size_t i = 0; i < ret->value_.size(); ++i) {
       auto value = AsVarLike(ret->value_[i]);
       auto alias = tensor_aliases_.find(value.get());
-      if (alias == tensor_aliases_.end() || !structural_equal(alias->second->GetType(), return_types_[i])) {
+      if (alias == tensor_aliases_.end() ||
+          !structural_equal(CloneTypeWithoutMemRef(alias->second->GetType()),
+                            CloneTypeWithoutMemRef(return_types_[i]))) {
         supported = false;
         return;
       }

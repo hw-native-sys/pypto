@@ -53,6 +53,7 @@
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/parent_stmt_analysis.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -595,8 +596,8 @@ void BindIR(nb::module_& m) {
       "reference to the source WindowBuffer allocation.");
   dist_tensor_type_class.def(nb::init<std::vector<ExprPtr>, DataType, std::optional<MemRefPtr>,
                                       std::optional<TensorView>, std::optional<WindowBufferPtr>>(),
-                             nb::arg("shape"), nb::arg("dtype"), nb::arg("memref"), nb::arg("tensor_view"),
-                             nb::arg("window_buffer"),
+                             nb::arg("shape"), nb::arg("dtype"), nb::arg("memref").none(),
+                             nb::arg("tensor_view").none(), nb::arg("window_buffer").none(),
                              "Create a distributed tensor type preserving all optional metadata.");
   BindFields<DistributedTensorType>(dist_tensor_type_class);
 
@@ -1531,9 +1532,6 @@ void BindIR(nb::module_& m) {
 
 #undef BIND_UNARY_EXPR
 
-  nb::enum_<StructuralComparisonMode>(ir, "StructuralComparisonMode")
-      .value("Default", StructuralComparisonMode::Default)
-      .value("Strict", StructuralComparisonMode::Strict);
   static nb::exception<StructuralComparisonUnsupported> unsupported(ir, "StructuralComparisonUnsupported",
                                                                     PyExc_TypeError);
   nb::register_exception_translator([](const std::exception_ptr& error, void*) {
@@ -1551,44 +1549,41 @@ void BindIR(nb::module_& m) {
     using Ptr = decltype(pointer);
     ir.def(
         "structural_hash",
-        [](const Ptr& node, bool auto_mapping, StructuralComparisonMode mode) {
-          return structural_hash(node, StructuralComparisonOptions{mode, auto_mapping});
-        },
-        nb::arg("node"), nb::arg("enable_auto_mapping") = false, nb::kw_only(),
-        nb::arg("mode") = StructuralComparisonMode::Default,
-        "Hash IR structure with the same mode and variable policy as structural_equal. "
+        [](const Ptr& node, bool auto_mapping) { return structural_hash(node, auto_mapping); },
+        nb::arg("node"), nb::arg("enable_auto_mapping") = false,
+        "Hash IR structure with the same variable policy as structural_equal. "
         "Definitions are alpha-renamed; free variables preserve identity unless auto-mapping is enabled. "
-        "Strict mode compares exact dtype and float bits and rejects unsupported storage.");
+        "Compares exact dtype and float bits, including attached storage.");
     ir.def(
         "structural_equal",
-        [](const Ptr& lhs, const Ptr& rhs, bool auto_mapping, StructuralComparisonMode mode) {
-          return structural_equal(lhs, rhs, StructuralComparisonOptions{mode, auto_mapping});
+        [](const Ptr& lhs, const Ptr& rhs, bool auto_mapping) {
+          return structural_equal(lhs, rhs, auto_mapping);
         },
-        nb::arg("lhs"), nb::arg("rhs"), nb::arg("enable_auto_mapping") = false, nb::kw_only(),
-        nb::arg("mode") = StructuralComparisonMode::Default,
+        nb::arg("lhs"), nb::arg("rhs"), nb::arg("enable_auto_mapping") = false,
         "Compare IR structure, ignoring source locations and bound names. "
         "Free variables preserve identity unless auto-mapping is enabled. "
-        "Strict mode compares exact dtype, float bits, operator kind and semantic fields.");
+        "Compares exact dtype, float bits, operator kind and semantic fields.");
     ir.def(
         "assert_structural_equal",
-        [](const Ptr& lhs, const Ptr& rhs, bool auto_mapping, StructuralComparisonMode mode) {
-          assert_structural_equal(lhs, rhs, StructuralComparisonOptions{mode, auto_mapping});
+        [](const Ptr& lhs, const Ptr& rhs, bool auto_mapping) {
+          assert_structural_equal(lhs, rhs, auto_mapping);
         },
-        nb::arg("lhs"), nb::arg("rhs"), nb::arg("enable_auto_mapping") = false, nb::kw_only(),
-        nb::arg("mode") = StructuralComparisonMode::Default,
+        nb::arg("lhs"), nb::arg("rhs"), nb::arg("enable_auto_mapping") = false,
         "Assert structural equality under the same policy as structural_equal. "
-        "Raises ValueError with a mismatch path, or StructuralComparisonUnsupported in strict mode.");
+        "Raises ValueError with a mismatch path, or StructuralComparisonUnsupported.");
   };
   bind_comparison(IRNodePtr{});
   bind_comparison(TypePtr{});
   // Preserve the original Type overload's keyword spelling as well as node=.
   ir.def(
       "structural_hash",
-      [](const TypePtr& type, bool auto_mapping, StructuralComparisonMode mode) {
-        return structural_hash(type, StructuralComparisonOptions{mode, auto_mapping});
-      },
-      nb::arg("type"), nb::arg("enable_auto_mapping") = false, nb::kw_only(),
-      nb::arg("mode") = StructuralComparisonMode::Default);
+      [](const TypePtr& type, bool auto_mapping) { return structural_hash(type, auto_mapping); },
+      nb::arg("type"), nb::arg("enable_auto_mapping") = false);
+
+  ir.def("_without_type_memref", &CloneTypeWithoutMemRef, nb::arg("type"),
+         "Remove binding-owned allocation annotations for explicit value-type compatibility checks.");
+  ir.def("verify_structural_bindings", &verify_structural_bindings, nb::arg("node"),
+         "Verify binding visibility and unique definitions; comparison itself does not validate IR.");
 
   // Serialization functions
   ir.def(

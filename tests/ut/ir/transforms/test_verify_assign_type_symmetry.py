@@ -12,7 +12,7 @@
 The verifier asserts that every ``AssignStmt(var, value)`` satisfies
 ``structural_equal(var.type, value.type)`` — covering dtype, shape,
 memory_space, and tile_view/tensor_view. ``memref`` is intentionally excluded
-(``structural_equal`` treats it as an allocation detail; see
+(the verifier explicitly removes allocation annotations before comparison; see
 ``test_memref_difference_is_tolerated_by_design``). It catches passes that
 mutate one side of an assignment without keeping the other in sync (e.g. #1262,
 where ``InferTileMemorySpace`` wrote ``Mem.Acc`` onto a Var whose producing
@@ -269,19 +269,15 @@ def test_shape_mismatch_detected():
 
 
 def test_memref_difference_is_tolerated_by_design():
-    """A MemRef difference is NOT flagged — by design.
+    """Value compatibility explicitly ignores allocation annotations.
 
-    ``structural_equal`` (the IR's own type-equality contract, used by the
-    roundtrip verifier) deliberately excludes ``memref_`` from type comparison:
-    a MemRef is an allocation detail bound to the Var, not part of the value's
-    structural type. The verifier reuses ``structural_equal``, so MemRef
-    asymmetry — which legitimately arises after ``InitMemRef`` annotates Vars
-    while transient producer results stay unbound — is intentionally out of
-    scope. MemRef correctness is governed by ``HasMemRefs`` / ``AllocatedMemoryAddr``.
+    Exact structural equality includes storage. AssignTypeSymmetry removes
+    allocation annotations because InitMemRef assigns them to Vars while Call
+    results can remain allocation-free. Dedicated memory verifiers check storage.
     """
     with_ref = _tile([16, 64], memref=ir.MemRef("mem_vec_0", 0, 256), memory_space=ir.MemorySpace.Vec)
     without_ref = _tile([16, 64], memref=None, memory_space=ir.MemorySpace.Vec)
-    assert ir.structural_equal(with_ref, without_ref)  # pin the underlying contract
+    assert not ir.structural_equal(with_ref, without_ref)
     assert len(_verify(_one_assign_program(with_ref, without_ref))) == 0
 
 

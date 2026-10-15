@@ -39,6 +39,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
@@ -293,7 +294,8 @@ class BufferEmissionPreflight : public ir::IRVisitor {
       for (size_t i = 0; i < ret->value_.size(); ++i) {
         auto value = ir::AsVarLike(ret->value_[i]);
         CHECK_SPAN(value && tensor_parameters_.count(value.get()) != 0 &&
-                       ir::structural_equal(value->GetType(), function_->return_types_[i]),
+                       ir::structural_equal(ir::CloneTypeWithoutMemRef(value->GetType()),
+                                            ir::CloneTypeWithoutMemRef(function_->return_types_[i])),
                    ret->span_)
             << "Direct Buffer IR returns must be normalized GM tensor parameters";
       }

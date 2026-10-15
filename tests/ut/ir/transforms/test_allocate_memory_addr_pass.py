@@ -22,13 +22,15 @@ from pypto.backend import (
     set_backend_type,
 )
 
+from .storage_test_utils import without_call_memrefs
+
 
 def test_allocate_memory_addr_simple():
     """Simple function: Vec tiles get 32-byte aligned addresses at offsets 0 and 16384."""
 
     @pl.program
     class Before:
-        @pl.function
+        @pl.function(type=pl.FunctionType.InCore)
         def main(
             self,
             input_a: pl.Tensor[[64, 64], pl.FP32],
@@ -41,7 +43,7 @@ def test_allocate_memory_addr_simple():
 
     @pl.program
     class Expected:
-        @pl.function
+        @pl.function(type=pl.FunctionType.InCore)
         def main(
             self,
             input_a: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
@@ -62,7 +64,7 @@ def test_allocate_memory_addr_simple():
 
     After = passes.init_mem_ref()(Before)
     After = passes.allocate_memory_addr()(After)
-    ir.assert_structural_equal(After, Expected)
+    ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
 def test_allocate_memory_addr_multiple_tiles():
@@ -70,7 +72,7 @@ def test_allocate_memory_addr_multiple_tiles():
 
     @pl.program
     class Before:
-        @pl.function
+        @pl.function(type=pl.FunctionType.InCore)
         def main(
             self,
             input_a: pl.Tensor[[64, 64], pl.FP32],
@@ -84,7 +86,7 @@ def test_allocate_memory_addr_multiple_tiles():
 
     @pl.program
     class Expected:
-        @pl.function
+        @pl.function(type=pl.FunctionType.InCore)
         def main(
             self,
             input_a: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
@@ -109,7 +111,7 @@ def test_allocate_memory_addr_multiple_tiles():
 
     After = passes.init_mem_ref()(Before)
     After = passes.allocate_memory_addr()(After)
-    ir.assert_structural_equal(After, Expected)
+    ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
 def test_allocate_memory_addr_resolves_auto_reserve_buffer_before_tiles():
@@ -153,7 +155,7 @@ def test_allocate_memory_addr_resolves_auto_reserve_buffer_before_tiles():
 
     After = passes.init_mem_ref()(Before)
     After = passes.allocate_memory_addr()(After)
-    ir.assert_structural_equal(After, Expected)
+    ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
 def test_allocate_memory_addr_rejects_overlapping_reserve_buffer_ranges():
@@ -254,7 +256,7 @@ def test_allocate_memory_addr_reuses_right_buffer_when_moves_sink_to_consumer():
     After = passes.init_mem_ref()(After)
     After = passes.memory_reuse()(After)
     After = passes.allocate_memory_addr()(After)
-    ir.assert_structural_equal(After, Expected)
+    ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
 def test_allocate_memory_addr_empty_function():
@@ -262,18 +264,18 @@ def test_allocate_memory_addr_empty_function():
 
     @pl.program
     class Before:
-        @pl.function
+        @pl.function(type=pl.FunctionType.InCore)
         def main(self, output: pl.Tensor[[64, 64], pl.FP32]) -> pl.Tensor[[64, 64], pl.FP32]:
             return output
 
     @pl.program
     class Expected:
-        @pl.function
+        @pl.function(type=pl.FunctionType.InCore)
         def main(self, output: pl.Tensor[[64, 64], pl.FP32]) -> pl.Tensor[[64, 64], pl.FP32]:
             return output
 
     After = passes.allocate_memory_addr()(Before)
-    ir.assert_structural_equal(After, Expected)
+    ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
 def test_allocate_memory_addr_dsa_rp_accepts_singleton_return_body():
@@ -300,7 +302,7 @@ def test_allocate_memory_addr_allocs_are_prepended_to_body():
 
     @pl.program
     class Before:
-        @pl.function
+        @pl.function(type=pl.FunctionType.InCore)
         def main(
             self,
             input_a: pl.Tensor[[64, 64], pl.FP32],
@@ -313,7 +315,7 @@ def test_allocate_memory_addr_allocs_are_prepended_to_body():
 
     @pl.program
     class Expected:
-        @pl.function
+        @pl.function(type=pl.FunctionType.InCore)
         def main(
             self,
             input_a: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
@@ -335,7 +337,7 @@ def test_allocate_memory_addr_allocs_are_prepended_to_body():
 
     After = passes.init_mem_ref()(Before)
     After = passes.allocate_memory_addr()(After)
-    ir.assert_structural_equal(After, Expected)
+    ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
 def test_allocate_memory_addr_raw_pointer_uniqueness():
@@ -343,7 +345,7 @@ def test_allocate_memory_addr_raw_pointer_uniqueness():
 
     @pl.program
     class Before:
-        @pl.function
+        @pl.function(type=pl.FunctionType.InCore)
         def main(
             self,
             input_a: pl.Tensor[[64, 64], pl.FP32],
@@ -357,7 +359,7 @@ def test_allocate_memory_addr_raw_pointer_uniqueness():
 
     @pl.program
     class Expected:
-        @pl.function
+        @pl.function(type=pl.FunctionType.InCore)
         def main(
             self,
             input_a: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
@@ -383,7 +385,7 @@ def test_allocate_memory_addr_raw_pointer_uniqueness():
 
     After = passes.init_mem_ref()(Before)
     After = passes.allocate_memory_addr()(After)
-    ir.assert_structural_equal(After, Expected)
+    ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
 def test_allocated_memory_addr_verifier_passes_after_add_alloc():
@@ -391,7 +393,7 @@ def test_allocated_memory_addr_verifier_passes_after_add_alloc():
 
     @pl.program
     class Before:
-        @pl.function
+        @pl.function(type=pl.FunctionType.InCore)
         def main(
             self,
             input_a: pl.Tensor[[64, 64], pl.FP32],
@@ -404,7 +406,7 @@ def test_allocated_memory_addr_verifier_passes_after_add_alloc():
 
     @pl.program
     class Expected:
-        @pl.function
+        @pl.function(type=pl.FunctionType.InCore)
         def main(
             self,
             input_a: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
@@ -426,7 +428,7 @@ def test_allocated_memory_addr_verifier_passes_after_add_alloc():
 
     After = passes.init_mem_ref()(Before)
     After = passes.allocate_memory_addr()(After)
-    ir.assert_structural_equal(After, Expected)
+    ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
 def test_memrefs_before_allocate_have_unallocated_addr():
@@ -440,7 +442,7 @@ def test_memrefs_before_allocate_have_unallocated_addr():
 
     @pl.program
     class Before:
-        @pl.function
+        @pl.function(type=pl.FunctionType.InCore)
         def main(
             self,
             input_a: pl.Tensor[[64, 64], pl.FP32],
@@ -480,7 +482,7 @@ def test_allocated_memory_addr_verifier_via_pipeline():
 
     @pl.program
     class Before:
-        @pl.function
+        @pl.function(type=pl.FunctionType.InCore)
         def main(
             self,
             input_a: pl.Tensor[[64, 64], pl.FP32],
@@ -526,7 +528,7 @@ def test_allocated_memory_addr_verifier_errors_when_vec_exceeds_safe_cap():
 
         @pl.program
         class Before:
-            @pl.function
+            @pl.function(type=pl.FunctionType.InCore)
             def main(
                 self,
                 input_a: pl.Tensor[[64, 752], pl.FP32],
@@ -544,7 +546,9 @@ def test_allocated_memory_addr_verifier_errors_when_vec_exceeds_safe_cap():
         pipeline = passes.PassPipeline()
         pipeline.add_pass(passes.allocate_memory_addr())
         with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.AFTER)]):
-            with pytest.raises(pypto.Error, match=r"Vec buffer usage .* exceeds platform limit"):
+            with pytest.raises(
+                (pypto.Error, ValueError), match=r"Vec buffer usage .* exceeds platform limit"
+            ):
                 pipeline.run(program)
     finally:
         reset_for_testing()
@@ -697,7 +701,7 @@ def test_allocate_memory_addr_uses_default_policy_without_backend():
 
         @pl.program
         class Before:
-            @pl.function
+            @pl.function(type=pl.FunctionType.InCore)
             def main(
                 self,
                 input_a: pl.Tensor[[64, 64], pl.FP32],
@@ -713,7 +717,7 @@ def test_allocate_memory_addr_uses_default_policy_without_backend():
 
         @pl.program
         class Expected:
-            @pl.function
+            @pl.function(type=pl.FunctionType.InCore)
             def main(
                 self,
                 input_a: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
@@ -742,7 +746,7 @@ def test_allocate_memory_addr_uses_default_policy_without_backend():
 
         After = passes.init_mem_ref()(Before)
         After = passes.allocate_memory_addr()(After)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
     finally:
         if was_configured:
             reset_for_testing()
@@ -769,7 +773,7 @@ def test_allocate_memory_addr_preserves_sibling_slice_offsets():
 
     @pl.program
     class Before:
-        @pl.function
+        @pl.function(type=pl.FunctionType.InCore)
         def main(
             self,
             input_a: pl.Tensor[[8, 16], pl.FP32],
@@ -790,7 +794,7 @@ def test_allocate_memory_addr_preserves_sibling_slice_offsets():
 
     @pl.program
     class Expected:
-        @pl.function
+        @pl.function(type=pl.FunctionType.InCore)
         def main(
             self,
             input_a: pl.Tensor[[8, 16], pl.FP32, pl.MemRef("mem_ddr_0", 0, 512)],
@@ -822,7 +826,7 @@ def test_allocate_memory_addr_preserves_sibling_slice_offsets():
 
     After = passes.init_mem_ref()(Before)
     After = passes.allocate_memory_addr()(After)
-    ir.assert_structural_equal(After, Expected)
+    ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
 def _tile_memrefs_by_name(program: ir.Program) -> dict[str, ir.MemRef]:
@@ -1007,7 +1011,7 @@ def test_allocate_memory_addr_resolves_aic_reserve_buffer_in_mat_space():
 
     After = passes.init_mem_ref()(Before)
     After = passes.allocate_memory_addr()(After)
-    ir.assert_structural_equal(After, Expected)
+    ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
 def test_allocate_memory_addr_honors_explicit_reserve_buffer_base():
@@ -1064,7 +1068,7 @@ def test_allocate_memory_addr_honors_explicit_reserve_buffer_base():
 
     After = passes.init_mem_ref()(Before)
     After = passes.allocate_memory_addr()(After)
-    ir.assert_structural_equal(After, Expected)
+    ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
 def test_allocate_memory_addr_skips_non_incore_function():

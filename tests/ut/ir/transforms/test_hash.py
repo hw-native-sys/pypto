@@ -463,7 +463,7 @@ class TestHashTypeLadderParity:
         assert not missing, (
             f"Type classes with no structural_hash coverage: {sorted(missing)}. "
             "Add a factory to _TYPE_FACTORIES, and a matching branch to "
-            "HashType in src/ir/transforms/structural_hash.cpp."
+            "DispatchType in src/ir/transforms/structural_comparison.cpp."
         )
 
     def test_array_type_is_usable_as_a_dict_key(self):
@@ -574,13 +574,8 @@ class TestHashTypeLadderParity:
             rhs, enable_auto_mapping=True
         )
 
-    def test_auto_mapped_window_buffers_of_different_size_hash_together(self):
-        """Regression: differing buffer fields must not split the hash.
-
-        Under auto-mapping these two types are ``structural_equal`` (EqualVar
-        maps the buffers), so they must hash alike even though the buffers
-        differ in size and staging flags.
-        """
+    def test_auto_mapping_preserves_window_buffer_fields(self):
+        """Mapping storage identities must still compare sizes and staging flags."""
         first = ir.DistributedTensorType(
             _dims(64),
             DataType.FP32,
@@ -597,8 +592,8 @@ class TestHashTypeLadderParity:
                 _span(),
             ),
         )
-        assert ir.structural_equal(first, second, enable_auto_mapping=True)
-        assert ir.structural_hash(first, enable_auto_mapping=True) == ir.structural_hash(
+        assert not ir.structural_equal(first, second, enable_auto_mapping=True)
+        assert ir.structural_hash(first, enable_auto_mapping=True) != ir.structural_hash(
             second, enable_auto_mapping=True
         )
 
@@ -689,7 +684,7 @@ class TestHashTypeLadderParity:
 
 @pytest.mark.parametrize("reuse", [False, True])
 @pytest.mark.parametrize("ordinary_first", [False, True])
-def test_loop_var_hash_tracks_syntax_context_and_mapping(reuse, ordinary_first):
+def test_loop_var_dtype_remains_exact_with_shared_constants(reuse, ordinary_first):
     span = ir.Span.unknown()
 
     def build(dtype):
@@ -709,8 +704,8 @@ def test_loop_var_hash_tracks_syntax_context_and_mapping(reuse, ordinary_first):
         return ir.SeqStmts([ordinary, loop] if ordinary_first else [loop, ordinary], span)
 
     lhs, rhs = build(DataType.INDEX), build(DataType.INT64)
-    assert ir.structural_equal(lhs, rhs)
-    assert ir.structural_hash(lhs) == ir.structural_hash(rhs)
+    assert not ir.structural_equal(lhs, rhs)
+    assert ir.structural_hash(lhs) != ir.structural_hash(rhs)
 
 
 @pytest.mark.parametrize("type_kind", ["tensor", "tuple"])

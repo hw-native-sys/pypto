@@ -22,6 +22,7 @@ from pypto._function_attrs import AUTO_SCOPE_ATTR, EXTERNAL_SOURCE_ATTR
 from pypto.ir import IRBuilder
 from pypto.ir import op as ir_op
 from pypto.ir.printer import python_print
+from pypto.ir.type import _merge_annotation_metadata  # noqa: PLC2701
 from pypto.language import _dump
 from pypto.language.distributed import op as _dsl_pld
 from pypto.language.dsl_api import RangeIterator as _DslRangeIterator
@@ -476,8 +477,7 @@ def _types_match(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
     """Return whether two IR types are structurally equal after TileView normalization.
 
     Uses C++ ``structural_equal`` (via ``==``) instead of comparing printed
-    strings.  Note: ``structural_equal`` intentionally skips the ``memref``
-    field on TileType/TensorType — memref identity is not relevant for
+    strings. This caller explicitly removes ``memref`` metadata: it is irrelevant for
     parser-level type matching because the Var (not the Call) carries the
     authoritative memref via ``override_type``.
 
@@ -490,8 +490,8 @@ def _types_match(lhs: ir.Type | None, rhs: ir.Type | None) -> bool:
         return True
     if lhs is None or rhs is None:
         return lhs is rhs
-    lhs = _normalize_type_for_syntax_match(lhs)
-    rhs = _normalize_type_for_syntax_match(rhs)
+    lhs = _normalize_type_for_syntax_match(ir._without_type_memref(lhs))
+    rhs = _normalize_type_for_syntax_match(ir._without_type_memref(rhs))
     assert lhs is not None
     assert rhs is not None
     if type(lhs) is not type(rhs):
@@ -1814,7 +1814,7 @@ class ASTParser:
         else:
             value_expr = self.parse_expression(stmt.value)
 
-        # Validate annotation against inferred type; use annotation as override only for memref
+        # Validate annotation value types and preserve omitted inferred metadata.
         override_type = None
         # Skip annotations the resolver can't handle:
         # - String forward refs (e.g. "SomeType")
@@ -1843,7 +1843,9 @@ class ASTParser:
             self.type_resolver.validate_annotation_consistency(
                 resolved, inferred_for_validation, var_name, span
             )
-            if isinstance(value_expr.type, ir.UnknownType):
+            if isinstance(resolved, ir.TupleType):
+                override_type = _merge_annotation_metadata(resolved, value_expr.type)
+            elif isinstance(value_expr.type, ir.UnknownType):
                 # Inferred type is unknown (e.g. tpop_from_aiv): use annotation as type
                 override_type = resolved
             elif isinstance(resolved, ir.TileType) and isinstance(value_expr.type, ir.TileType):
@@ -1902,49 +1904,14 @@ class ASTParser:
                 and value_expr.type.dtype == DataType.INDEX
             ):
                 override_type = resolved
-        # A bare int literal parses as an untyped placeholder (``ConstInt(v,
-        # INDEX)`` — see ``_normalize_scalar_operand``), so the scalar branch
-        # above would otherwise bind an annotated Var to a constant of a
-        # different dtype: ``acc: pl.Scalar[pl.INT64] = 0`` produced
-        # ``AssignStmt(Var[INT64], ConstInt[INDEX])``, violating
-        # AssignTypeSymmetry. The mismatch only surfaces much later — Simplify
-        # propagates the constant into a loop's ``iter_arg`` init, where
-        # TypeCheck compares it against the declared carry dtype. Re-stamp the
-        # placeholder to the annotated dtype instead. The dtype stays integral:
-        # ``validate_annotation_consistency`` already rejected an int literal
-        # under a float annotation (float literals never carry INDEX).
-        if isinstance(override_type, ir.ScalarType) and isinstance(value_expr, ir.ConstInt):
-            value_expr = ir.ConstInt(value_expr.value, override_type.dtype, value_expr.span)
-        elif (
-            isinstance(override_type, ir.ScalarType)
-            and isinstance(value_expr.type, ir.ScalarType)
-            and value_expr.type.dtype == DataType.INDEX
-            and override_type.dtype != DataType.INDEX
-        ):
-            # Same asymmetry, one step harder: a *non-constant* INDEX RHS cannot
-            # be re-stamped, because its dtype is a result of its operands
-            # (``pl.cast(i, pl.INT32) + 1`` re-normalizes back to INDEX through
-            # ``_normalize_scalar_operand``). Wrap it in the cast the annotation
-            # is asking for, so ``v: pl.Scalar[pl.INT32] = <INDEX expr>`` binds an
-            # INT32 Var to an INT32 value.
-            #
-            # Left asymmetric, this survives every pass and dies inside PTOAS:
-            # the scalar emitter dispatches on the Var's IR dtype, decides no
-            # cast is needed, and emits the ``index`` SSA value into an ``i32``
-            # operand -- MLIR that names neither the variable nor the user's
-            # line (``use of value '%2' expects different type than prior uses:
-            # 'i32' vs 'index'``). See #2779.
-            if isinstance(value_expr, ir.Call):
-                # Keep the call's inferred dtype: re-stamping it does not change
-                # the type its emitter produces. Materialize it before casting
-                # so orchestration codegen still sees a statement-level call.
-                value_expr = self.builder.let(f"{var_name}_index", value_expr, span=value_expr.span)
-            value_expr = ir.cast(value_expr, override_type.dtype, value_expr.span)
+        if isinstance(override_type, (ir.ScalarType, ir.TupleType)):
+            value_expr = self._convert_annotation_scalars(value_expr, override_type, var_name)
         # If annotation syntax determines the result type more precisely than the
         # raw call inference, rebuild the Call with that type so structural
         # equality sees the same IR after print→parse.
         if (
             override_type is not None
+            and not _is_dump_call(stmt.value, "call")
             and isinstance(value_expr, ir.Call)
             and (
                 (
@@ -1983,6 +1950,62 @@ class ASTParser:
         # Track buffer metadata for attribute access (e.g., pipe_buf.base)
         if isinstance(stmt.value, ast.Call):
             self._track_buffer_meta(var_name, stmt.value)
+
+    def _convert_annotation_scalars(self, value: ir.Expr, annotation: ir.Type, name: str) -> ir.Expr:
+        """Convert annotated scalars, including scalars nested inside tuples.
+
+        Integer-compatible annotations can request real dtype conversions.
+        Plan them from types first, so metadata-only annotations preserve the
+        original expression. Retain type objects with the memo keys to prevent
+        Python object IDs from being recycled during tuple-DAG traversal.
+        """
+        plans: dict[tuple[int, int], tuple[ir.Type, ir.Type, bool]] = {}
+
+        def needs_conversion(actual: ir.Type, target: ir.Type) -> bool:
+            key = (id(actual), id(target))
+            if key in plans:
+                return plans[key][2]
+            if isinstance(actual, ir.ScalarType) and isinstance(target, ir.ScalarType):
+                needed = actual.dtype != target.dtype
+            elif isinstance(actual, ir.TupleType) and isinstance(target, ir.TupleType):
+                needed = any(needs_conversion(a, t) for a, t in zip(actual.types, target.types))
+            else:
+                needed = False
+            plans[key] = (actual, target, needed)
+            return needed
+
+        def convert(expr: ir.Expr, target: ir.Type, hint: str) -> ir.Expr:
+            if not needs_conversion(expr.type, target):
+                return expr
+            if isinstance(target, ir.ScalarType):
+                if isinstance(expr, ir.ConstInt):
+                    # Bare literals start as INDEX placeholders. Stamp the value
+                    # too, or SSA substitution can give loop carries the wrong dtype.
+                    return ir.ConstInt(expr.value, target.dtype, expr.span)
+                if isinstance(expr, ir.Call):
+                    # Preserve the dtype actually emitted by the producer (#2779)
+                    # and keep calls at statement level before casting their result.
+                    expr = self.builder.let(f"{hint}_index", expr, span=expr.span)
+                return ir.cast(expr, target.dtype, expr.span)
+            assert isinstance(target, ir.TupleType)
+            if isinstance(expr, ir.MakeTuple):
+                elements = list(expr.elements)
+            else:
+                # A tuple-producing Call/Submit must run once, with its original
+                # result type. Cast the extracted values rather than relabeling
+                # the producer's ABI or nesting repeated calls in MakeTuple.
+                if not isinstance(expr, ir.Var):
+                    expr = self.builder.let(f"{hint}_source", expr, span=expr.span)
+                elements = [ir.TupleGetItemExpr(expr, i, expr.span) for i in range(len(target.types))]
+            return ir.MakeTuple(
+                [
+                    convert(element, t, f"{hint}_{i}")
+                    for i, (element, t) in enumerate(zip(elements, target.types))
+                ],
+                expr.span,
+            )
+
+        return convert(value, annotation, name)
 
     def _assign_or_let(
         self,
@@ -3019,8 +3042,12 @@ class ASTParser:
             # Yield-LHS names if present; else synthetic `_out` names (pre-SSA).
             if not is_simple_for and range_args["init_values"]:
                 if loop_output_vars:
+                    annotations = dict(self._scan_for_yields(stmt.body))
                     for rv_name in loop_output_vars:
-                        loop.return_var(rv_name)
+                        annotation = annotations.get(rv_name)
+                        loop.return_var(
+                            rv_name, self._resolve_yield_var_type(annotation) if annotation else None
+                        )
                 else:
                     assert iter_args_node is not None
                     assert isinstance(iter_args_node, ast.Tuple)
@@ -3813,8 +3840,12 @@ class ASTParser:
 
             # Yield-LHS names if present; else synthetic `_out` names (pre-SSA).
             if loop_output_vars:
+                annotations = dict(self._scan_for_yields(stmt.body))
                 for var_name in loop_output_vars:
-                    loop.return_var(var_name)
+                    annotation = annotations.get(var_name)
+                    loop.return_var(
+                        var_name, self._resolve_yield_var_type(annotation) if annotation else None
+                    )
             else:
                 for iter_arg_node in iter_args_node.elts:
                     assert isinstance(iter_arg_node, ast.Name)
@@ -6864,6 +6895,33 @@ class ASTParser:
             result = ir_op(result, val, span)
         return result
 
+    def _parse_recorded_submit(self, call: ast.Call) -> ir.Submit:
+        """Restore a Submit result type independently of callee inference."""
+        span = self.span_tracker.get_span(call)
+        if len(call.args) != 2 or call.keywords:
+            raise ParserSyntaxError("_dump.submit requires a submit expression and result type", span=span)
+        inner = call.args[0]
+        if not (_is_pl_call(inner, "submit") or _is_pl_call(inner, "spmd_submit")):
+            raise ParserSyntaxError("_dump.submit requires pl.submit or pl.spmd_submit", span=span)
+        submit = self._build_submit_single_lhs_expr(inner, is_spmd=_is_pl_call(inner, "spmd_submit"))
+        assert isinstance(submit, ir.Submit)
+        result_type = self.type_resolver.resolve_type(call.args[1])
+        if isinstance(result_type, list):
+            result_type = ir.TupleType(result_type)
+        return ir.Submit(
+            submit.op,
+            submit.args,
+            submit.deps,
+            submit.kwargs,
+            submit.attrs,
+            result_type,
+            span,
+            core_num=submit.core_num,
+            sync_start=submit.sync_start,
+            allow_early_resolve=submit.allow_early_resolve,
+            predicate=submit.predicate,
+        )
+
     def parse_call(self, call: ast.Call) -> ir.Expr:
         """Parse function call.
 
@@ -6973,6 +7031,8 @@ class ASTParser:
     def _parse_dump_call(self, call: ast.Call) -> ir.Expr:
         """Read private spellings that preserve the recorded IR structure."""
         span = self.span_tracker.get_span(call)
+        if _is_dump_call(call, "submit"):
+            return self._parse_recorded_submit(call)
         if _is_dump_call(call, "call"):
             return self._parse_recorded_call(call)
         if _is_dump_call(call, "window_buffer") or _is_dump_call(call, "window_ref"):
@@ -10462,6 +10522,21 @@ class ASTParser:
                 hint=f"Use an explicit boolean comparison, e.g. `{kind} x != 0:` or `{kind} x > 0:`",
             )
 
+    def _dump_yield_types(self, call: ast.Call, count: int) -> list[ast.expr | None]:
+        """Read lossless result annotations from a printed multi-result yield."""
+        if not _is_dump_call(call, "yield_"):
+            return [None] * count
+        if len(call.keywords) != 1 or call.keywords[0].arg != "types":
+            raise ParserSyntaxError(
+                "_dump.yield_ requires a types list", span=self.span_tracker.get_span(call)
+            )
+        types = call.keywords[0].value
+        if not isinstance(types, ast.List) or len(types.elts) != count:
+            raise ParserSyntaxError(
+                "_dump.yield_ types must match the number of results", span=self.span_tracker.get_span(call)
+            )
+        return list(types.elts)
+
     def _scan_for_yields(self, stmts: list[ast.stmt]) -> list[tuple[str, ast.expr | None]]:
         """Scan statements for yield assignments to determine output variable names and types.
 
@@ -10494,9 +10569,10 @@ class ASTParser:
                     elif isinstance(target, ast.Tuple) and isinstance(stmt.value, ast.Call):
                         func = stmt.value.func
                         if isinstance(func, ast.Attribute) and func.attr == "yield_":
-                            for elt in target.elts:
+                            annotations = self._dump_yield_types(stmt.value, len(target.elts))
+                            for i, elt in enumerate(target.elts):
                                 if isinstance(elt, ast.Name):
-                                    yield_vars.append((elt.id, None))
+                                    yield_vars.append((elt.id, annotations[i]))
 
             # Skip nested if statements — each nested if's yields are
             # its own return_vars, handled by parse_if_statement when

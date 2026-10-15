@@ -61,8 +61,8 @@ SignatureSymbols ClassifySignatureSymbols(const FunctionPtr& function) {
   };
   std::unordered_set<const Expr*> physical;
   for (const auto& param : function->params_) {
-    if (auto tensor = AsTensorTypeLike(param->GetType())) {
-      for (const auto& dim : tensor->shape_) VisitShapeVars(dim, physical, bind);
+    if (auto shaped = As<ShapedType>(param->GetType())) {
+      for (const auto& dim : shaped->shape_) VisitShapeVars(dim, physical, bind);
     } else {
       bind(param);
     }

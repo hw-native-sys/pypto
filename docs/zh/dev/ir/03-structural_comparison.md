@@ -1,444 +1,114 @@
-# PyPTO 结构比较
+# 结构比较
 
-## 概述
-
-PyPTO 提供三个工具函数，用于按结构而非指针标识比较 IR 节点：
-
-```python
-structural_equal(lhs, rhs, enable_auto_mapping=False, *, mode=StructuralComparisonMode.Default) -> bool
-structural_hash(node, enable_auto_mapping=False, *, mode=StructuralComparisonMode.Default) -> int
-assert_structural_equal(lhs, rhs, enable_auto_mapping=False, *, mode=StructuralComparisonMode.Default) -> None
-```
-
-**使用场景：** CSE、IR 优化、模式匹配、测试
-
-**核心特性：** 三个函数都忽略 `Span`（源位置），仅关注逻辑结构。
-
-### 浮点常量
-
-`ConstFloat` 比较其 dtype 及存储的 binary64 值。有限值使用数值相等关系
-（包括 `+0.0 == -0.0`）；无穷按符号区分。NaN 仅在 binary64 位模式相同
-（包括符号和 payload）时结构相等。因此，保留位模式的 NaN 可以通过 dump
-round-trip 的结构比较，不同 NaN 编码仍不相等。相等常量的结构哈希也相等。
-这不会改变 IEEE 运行时比较语义，也不会改变浮点 keyword/attribute 元数据
-所使用的独立比较规则。
-
-## 引用相等性与结构相等性
-
-### 引用相等性（默认 `==`）
-
-比较指针地址（O(1)，快速）：
+`structural_equal`、`structural_hash` 和 `assert_structural_equal` 使用唯一的精确结构语义，
+不提供比较模式。`Type.__eq__` 和 `Type.__hash__` 使用同一实现。
 
 ```python
 from pypto import DataType, ir
 
-x1 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
-x2 = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
-assert x1 != x2  # Different pointers
-```
-
-### 结构相等性
-
-比较内容和结构：
-
-```python
-ir.assert_structural_equal(x1, x2, enable_auto_mapping=True)  # True
-```
-
-## 比较流程
-
-在 `Default` 模式下，`structural_equal` 函数遵循以下步骤：
-
-1. **快速路径检查**
-   - 空值检查：两个空节点相等，只有一个为空时不相等
-   - 共享节点及其子树仍会建立并校验变量绑定
-   - 仅标量常量保留同指针快速路径
-   - 类型检查：比较 `TypeName()` -- 必须完全匹配
-
-2. **类型分发**
-   - 变量有特殊处理（自动映射）
-   - 其他类型使用基于反射的字段比较
-
-3. **基于字段的递归比较**
-   - 通过 `GetFieldDescriptors()` 获取字段描述符
-   - 使用反射遍历所有字段
-   - 根据类型比较每个字段
-   - 用 AND 逻辑合并结果
-
-## 反射与字段类型
-
-反射系统定义三种字段类型：
-
-| 字段类型 | 自动映射 | 是否比较？ | 使用场景 | 效果 |
-| -------- | -------- | ---------- | -------- | ---- |
-| **IgnoreField** | 不适用 | 否 | 源位置（`Span`）、名称 | 始终视为相等 |
-| **UsualField** | 跟随参数设置 | 是 | 操作数、表达式、类型 | 使用当前 `enable_auto_mapping` 进行比较 |
-| **DefField** | 始终启用 | 是 | 变量定义、参数 | 始终使用自动映射 |
-
-### 字段定义示例
-
-```cpp
-class IRNode {
-  Span span_;
-  static constexpr auto GetFieldDescriptors() {
-    return std::make_tuple(
-      reflection::IgnoreField(&IRNode::span_, "span")
-    );
-  }
-};
-
-class BinaryExpr : public Expr {
-  ExprPtr left_;
-  ExprPtr right_;
-  static constexpr auto GetFieldDescriptors() {
-    return std::tuple_cat(
-      Expr::GetFieldDescriptors(),
-      std::make_tuple(
-        reflection::UsualField(&BinaryExpr::left_, "left"),
-        reflection::UsualField(&BinaryExpr::right_, "right")
-      )
-    );
-  }
-};
-
-class AssignStmt : public Stmt {
-  VarPtr var_;     // Definition
-  ExprPtr value_;  // Usage
-  static constexpr auto GetFieldDescriptors() {
-    return std::tuple_cat(
-      Stmt::GetFieldDescriptors(),
-      std::make_tuple(
-        reflection::DefField(&AssignStmt::var_, "var"),
-        reflection::UsualField(&AssignStmt::value_, "value")
-      )
-    );
-  }
-};
-```
-
-### DefField 的重要性
-
-DefField 表示变量定义。比较定义时，我们关注的是结构位置，而非标识：
-
-```python
-# Build: x = y
-x1 = ir.Var("x", ir.ScalarType(DataType.INT64), span)
-y1 = ir.Var("y", ir.ScalarType(DataType.INT64), span)
-stmt1 = ir.AssignStmt(x1, y1, span)
-
-# Build: a = b
-a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
-b = ir.Var("b", ir.ScalarType(DataType.INT64), span)
-stmt2 = ir.AssignStmt(a, b, span)
-
-# var_ is DefField, so x1 and a are mapped automatically
-ir.assert_structural_equal(stmt1, stmt2, enable_auto_mapping=True)
-```
-
-## structural_equal 函数
-
-### 基本用法
-
-```python
-# Same value
-c1 = ir.ConstInt(42, DataType.INT64, ir.Span.unknown())
-c2 = ir.ConstInt(42, DataType.INT64, ir.Span.unknown())
-ir.assert_structural_equal(c1, c2)  # True
-
-# Different types
-var = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
-const = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
-assert not ir.structural_equal(var, const)  # False
-```
-
-### 自动映射行为
-
-| 场景 | enable_auto_mapping=False | enable_auto_mapping=True |
-| ---- | ------------------------- | ------------------------ |
-| 相同变量指针 | 相等 | 相等 |
-| 不同变量指针 | 不相等 | 相等（如果类型匹配） |
-| 一致映射（`x + x` vs `y + y`） | 不相等 | 相等 |
-| 不一致映射（`x + x` vs `y + z`） | 不相等 | 不相等 |
-
-### 何时启用自动映射
-
-| 使用场景 | 设置 |
-| -------- | ---- |
-| Pass 变换测试（Before/Expected 模式） | `False`（默认）— DefField 始终自动映射 |
-| 序列化往返测试 | `True` — 反序列化的变量不会是 DefField |
-| 不考虑变量名的模式匹配 | `True` |
-| 优化规则的模板匹配 | `True` |
-| 使用相同变量的精确匹配 | `False` |
-| CSE（公共子表达式消除） | `False` |
-
-> **为何 pass 测试不需要：** `VisitDefField` 内部始终启用自动映射
-> （见 `structural_equal.cpp:650`），填充双向变量映射表。
-> 当相同的变量之后作为 UsualField 引用出现时，会在映射表中找到 —
-> 即使 `enable_auto_mapping=False`。
-
-## structural_hash 函数
-
-### 基本用法
-
-```python
-c1 = ir.ConstInt(42, DataType.INT64, ir.Span.unknown())
-c2 = ir.ConstInt(42, DataType.INT64, ir.Span.unknown())
-assert ir.structural_hash(c1) == ir.structural_hash(c2)
-```
-
-### 确定性
-
-`structural_hash` 在单次进程运行中是确定性的。变量标识基于构造时分配的单调递增唯一 ID（`Var::unique_id_`），而非指针地址或 `name_hint_` 字符串，因此相同的构造序列始终产生相同的哈希值。`name_hint_` 字段属于 `IgnoreField`，不参与结构比较和哈希计算。
-
-### 哈希一致性保证
-
-**规则：** 对受支持输入，使用相同的 `enable_auto_mapping` 和 `mode` 选项时，相等必然具有相同哈希；哈希相同并不代表相等。
-
-### 与容器配合使用
-
-```python
-class CSEPass:
-    def __init__(self):
-        self.expr_cache = {}
-
-    def deduplicate(self, expr):
-        hash_val = ir.structural_hash(expr, enable_auto_mapping=False)
-        if hash_val in self.expr_cache:
-            for cached_expr in self.expr_cache[hash_val]:
-                if ir.structural_equal(expr, cached_expr, enable_auto_mapping=False):
-                    return cached_expr
-            self.expr_cache[hash_val].append(expr)
-        else:
-            self.expr_cache[hash_val] = [expr]
-        return expr
-```
-
-## 自动映射算法
-
-实现维护双向映射：
-
-```cpp
-class StructuralEqual {
-  std::unordered_map<VarPtr, VarPtr> lhs_to_rhs_var_map_;
-  std::unordered_map<VarPtr, VarPtr> rhs_to_lhs_var_map_;
-
-  bool EqualVar(const VarPtr& lhs, const VarPtr& rhs) {
-    if (!enable_auto_mapping_) {
-      auto l = lhs_to_rhs_var_map_.find(lhs);
-      auto r = rhs_to_lhs_var_map_.find(rhs);
-      if (l != lhs_to_rhs_var_map_.end() || r != rhs_to_lhs_var_map_.end()) {
-        return l != lhs_to_rhs_var_map_.end() && r != rhs_to_lhs_var_map_.end()
-            && l->second == rhs && r->second == lhs;
-      }
-      return lhs.get() == rhs.get();  // Unbound free-variable identity
-    }
-
-    // Check type equality first
-    if (!EqualType(lhs->GetType(), rhs->GetType())) return false;
-
-    // Check existing mapping
-    auto it = lhs_to_rhs_var_map_.find(lhs);
-    if (it != lhs_to_rhs_var_map_.end()) {
-      return it->second == rhs;  // Verify consistent
-    }
-
-    // Ensure rhs not already mapped to different lhs
-    auto rhs_it = rhs_to_lhs_var_map_.find(rhs);
-    if (rhs_it != rhs_to_lhs_var_map_.end() && rhs_it->second != lhs) {
-      return false;
-    }
-
-    // Create new mapping
-    lhs_to_rhs_var_map_[lhs] = rhs;
-    rhs_to_lhs_var_map_[rhs] = lhs;
-    return true;
-  }
-};
-```
-
-**关键要点：**
-
-- 无自动映射时：定义的引用遵循绑定映射，自由变量保留标识
-- 有自动映射时：建立并强制执行一致映射
-- 映射前先检查类型相等性
-- 双向映射防止不一致的映射
-
-## 实现细节
-
-### 哈希合并算法
-
-使用 Boost 风格的算法：
-
-```cpp
-inline uint64_t hash_combine(uint64_t seed, uint64_t value) {
-  return seed ^ (value + 0x9e3779b9 + (seed << 6) + (seed >> 2));
-}
-```
-
-### 基于反射的字段访问器
-
-无需类型特定代码的通用遍历：
-
-```cpp
-template <typename NodePtr>
-bool EqualWithFields(const NodePtr& lhs_op, const NodePtr& rhs_op) {
-  using NodeType = typename NodePtr::element_type;
-  auto descriptors = NodeType::GetFieldDescriptors();
-  return std::apply([&](auto&&... descs) {
-    return reflection::FieldIterator<...>::Visit(
-      *lhs_op, *rhs_op, *this, descs...);
-  }, descriptors);
-}
-```
-
-### Default 模式的 Type 比较使用显式分发
-
-在 `Default` 模式下，`Expr` 和 `Stmt` 使用上述反射访问器，`Type` 使用显式分发。四条彼此独立的 if/else
-分支链各自重新描述了"这个 Type 有哪些字段"，而它们之间没有任何关联：
-
-| 分支链 (ladder) | 位置 |
-| --------------- | ---- |
-| `EqualType` | `src/ir/transforms/structural_equal.cpp` |
-| `HashType` | `src/ir/transforms/structural_hash.cpp` |
-| `SerializeType` | `src/ir/serialization/serializer.cpp` |
-| `DeserializeType` | `src/ir/serialization/deserializer.cpp` |
-
-**新增 Type 时需要同时更新这四处和 Strict 投影的类型分发。** 只加到其中三处的 Type 能通过编译、
-能通过序列化往返、比较行为也正确 —— 直到用户第一次写 `hash(t)` 或把该 Type 放进
-`set`，才会撞上 `HashType` 末尾的 `INTERNAL_CHECK(false)`。这会破坏上文
-"相等的节点哈希值也相等"的保证：`structural_equal` 接受的输入，
-`structural_hash` 却拒绝。
-
-有三类分发陷阱需要在各条分支链之间保持一致：
-
-- **子类 kind。** `As<T>()` 是精确的 `ObjectKind` 匹配，因此
-  `As<TensorType>(dt)` 对 `DistributedTensorType` 按设计返回 `nullptr`
-  （见 `include/pypto/ir/kind_traits.h`）。共用同一分支时必须显式列出两个 kind
-  并使用 `static_pointer_cast` —— 参见 `.claude/rules/ir-kind-traits.md`。
-- **仅子类持有的字段。** `DistributedTensorType::window_buffer_` 在
-  `TensorType` 上没有对应字段；共用分支必须在 kind 判断的保护下对它做哈希与比较。
-- **可为空的字段。** 没有非空不变式的裸 `ExprPtr` 字段 —— 例如
-  `TileView::start_offset`，默认构造函数与 `pl.TileView(...)` 都会将其留空 ——
-  是一种*合法且可区分*的状态，而不是构造错误。`EqualType` 通过容忍空值的
-  `Equal(...)` 天然支持这一点，因此 `HashType` 必须对它哈希一个存在性标记，
-  而不是用 `INTERNAL_CHECK` 断言。只在一条分支链上加断言，会以与"漏掉某个
-  Type"相同的方式破坏上述保证：`structural_equal` 判定与自身相等的值，
-  `structural_hash` 却会中止。`HashType` 中的 `INTERNAL_CHECK` 应当只用于
-  确实不可能为空的字段，例如 `shape_` 的元素。
-
-`tests/ut/ir/transforms/test_hash.py::TestHashTypeLadderParity` 会遍历每一个
-可由 Python 构造的 Type，当某个 Type 在 `HashType` 中缺失时测试失败。每新增一个
-Type，都要在那里补上对应的工厂函数。
-
-## 用于优化候选项的严格比较
-
-`StructuralComparisonMode.Strict` 比较受支持 IR 的精确结构，可用于函数去重等优化的候选检查。
-默认模式和 `Type.__eq__` / `Type.__hash__` 保留兼容行为。Python 继续支持原有位置参数
-`enable_auto_mapping`，新增的 `mode` 只能按关键字传入。Type 哈希重载也保留 `type=` 关键字。
-
-```python
-from pypto import DataType, ir
-
-strict = ir.StructuralComparisonMode.Strict
 span = ir.Span.unknown()
+x = ir.Var("x", ir.ScalarType(DataType.INDEX), span)
+y = ir.Var("y", ir.ScalarType(DataType.INDEX), span)
+assert not ir.structural_equal(x, y)
+assert ir.structural_equal(x, y, enable_auto_mapping=True)
+assert ir.structural_hash(x, True) == ir.structural_hash(y, True)
+ir.assert_structural_equal(x, y, True)
+```
+
+## 相等契约
+
+| 字段 | 比较方式 |
+| ---- | -------- |
+| 源码位置、注释、函数名、绑定变量名 | 通过 `IgnoreField` 忽略 |
+| 定义与引用 | 一致地重命名绑定变量，保留别名关系 |
+| 自由变量 | 保留身份，除非设置 `enable_auto_mapping=True` |
+| 标量 dtype | 精确比较原始编码，区分 `INDEX` 与 `INT64` |
+| 浮点数 | 比较存储位，包括正负零和 NaN 的载荷、符号 |
+| 算子 | 比较种类和名称，不依赖指针相同 |
+| 属性 | 唯一键排序，保留值类型和向量顺序 |
+| 类型与视图 | 比较所有反射字段，包括附带存储与可空偏移 |
+| 函数元信息 | 方向、返回类型、属性、种类、阶段和运行时绑定标志 |
+| Call 与 Submit | 种类不同，所有反射调度字段参与比较 |
+
+`f(x) = x + x` 与 `g(y) = y + y` 相等；将第二个 `y` 改为另一个参数后不相等。
+共享纯表达式子树不改变结构相等性。
+
+```python
 a = ir.ConstFloat(0.0, DataType.FP32, span)
 b = ir.ConstFloat(-0.0, DataType.FP32, span)
-assert ir.structural_equal(a, b)  # Default numerical comparison
-assert not ir.structural_equal(a, b, mode=strict)  # Exact stored bits
+assert not ir.structural_equal(a, b)
+assert not ir.structural_equal(
+    ir.ConstInt(1, DataType.INDEX, span),
+    ir.ConstInt(1, DataType.INT64, span),
+)
 ```
 
-```cpp
-using namespace pypto::ir;
-StructuralComparisonOptions options{StructuralComparisonMode::Strict, false};
-bool same = structural_equal(lhs, rhs, options);
-uint64_t fingerprint = structural_hash(lhs, options);
-// For supported inputs, this throws ValueError exactly when same is false.
-assert_structural_equal(lhs, rhs, options);
-```
+Function 在遍历签名前预留全部参数绑定，因此较早参数的形状可以引用较晚的标量参数。
+物理参数形状中的符号和裸 `valid_shape` 槽位符号也属于绑定。
+分类逻辑与 `MaterializeValidShapeSymbols` 共用，并遍历 tuple 构造与取项表达式。
+其他开放引用保留自由变量语义。Program 中各函数的上下文独立；映射键和被调用函数名仍参与比较。
 
-| 属性 | Strict 行为 |
-| ---- | ----------- |
-| 源码位置、注释、函数名及绑定变量名 | 通过 `IgnoreField` 忽略 |
-| 定义与引用 | 一致地进行 α 重命名（alpha-renaming），保留别名关系 |
-| 自由变量 | 默认保留标识，仅在 `enable_auto_mapping=True` 时映射 |
-| 标量数据类型 | 精确区分，包括 `INDEX` 与 `INT64` |
-| 浮点值 | 比较存储位，包括正负零及 NaN 载荷、符号 |
-| 算子 | 比较种类和名称，不依赖指针 |
-| 属性 | 唯一键排序后遍历，保留值类型和向量顺序 |
-| 类型与视图 | 反射字段，包括布局、形状、有效形状和可空偏移 |
-| 函数元数据 | 参数方向、返回类型、属性、函数种类和运行时绑定标志 |
-| Call 与 Submit | 区分节点种类，比较所有反射调度字段 |
+## 存储与未完成的 IR
 
-Function 在检查签名之前预先绑定所有参数，因此张量形状可以引用后面的标量参数。
-参数物理形状中的符号、参数 `valid_shape` 中的裸符号也作为绑定；符号分类与
-`MaterializeValidShapeSymbols` 共享实现，包括嵌套在元组构造和元组元素表达式中的符号。
-复合 `valid_shape` 表达式必须引用这些绑定或标量参数。返回类型、函数体和属性共享函数绑定上下文。
-Program 中各函数拥有独立上下文，程序映射键和被调用函数名仍参与比较。
-IterArg 初值是外部引用，不会因 IterArg 所在的 `DefField` 而成为额外定义。
+支持 `MemRef`、`WindowBuffer`、指针和资源标记类型以及附带存储。
+存储描述符保留分配基址引用、几何信息、槽位表达式与暂存标志。
+不能仅因尺寸相同就合并不同的分配引用关系。UnknownType 可以与 UnknownType 比较，
+但相等并不证明类型推断已经完成。
 
-严格比较拒绝局部变量在定义前或词法作用域之外被使用，包括隐藏在类型和属性中的引用。
-赋值在 RHS 之后引入绑定，循环初值在外围作用域求值，循环与分支结果在区域结束后绑定。
-循环体和分支的局部定义不能逃逸；共享表达式会检查所有使用位置。
-真正的外部捕获仍按自由变量处理，不会因为另一函数定义了同一对象就变成绑定变量。
-
-这些检查不能替代完整 SSA、闭包、副作用或调用图校验。优化调用方必须单独检查这些前置条件；
-指纹相同本身不能证明可以合并有副作用的函数。
-
-### 不支持的输入
-
-三个 Strict 操作都会在输入无法安全表示时抛出 `ir.StructuralComparisonUnsupported`
-（`TypeError` 的子类），即使比较对象与自身也是如此。这与不相等不同。
-异常提供 `reason` 和 `field_path`。
-
-目前不支持显式存储：`MemRef`、`WindowBuffer`、`MemRefType`、`PtrType`、
-`WindowBufferType`、`CommCtxType`，以及类型、函数体、签名、视图或属性中的附加存储。
-遍历还拒绝未解析/未知类型、未知属性载荷类型、重复属性键、重复变量定义、共享语句对象、环，
-以及超过 512 层的节点/类型嵌套。绑定不可见时报告 `reason="BindingNotVisible"`，
-`field_path` 指向非法使用的位置，包括通过共享表达式或类型发生的后续作用域逃逸。
-可空视图偏移受支持，且与值为零的偏移不同。
+结构比较不验证 SSA、作用域合法性、闭包、副作用或某项优化的候选资格。
+非法 IR 与自身比较可能相等。优化 pass 应先验证自己的前提条件。
 
 ```python
-try:
-    fingerprint = ir.structural_hash(candidate, mode=ir.StructuralComparisonMode.Strict)
-except ir.StructuralComparisonUnsupported as error:
-    reason, field_path = error.reason, error.field_path
-    # Skip this optimization candidate; do not turn unsupported into equality.
+ir.verify_structural_bindings(function)
+fingerprint = ir.structural_hash(function)
 ```
 
-### 共享投影与复杂度
+`verify_structural_bindings` 检查重复定义、定义前使用和局部变量越出词法作用域，
+包括类型与属性内的引用。赋值在右侧求值后建立绑定，循环初值使用外层作用域，
+区域结果在区域结束后绑定。分支和循环局部变量不能逃逸；直线 scope 定义可流出。
+允许开放捕获。该验证器还检查签名符号资格并拒绝共享语句对象，
+不能替代完整编译器验证或优化的副作用检查。
 
-Strict 的相等、哈希和断言诊断共享一套基于反射的投影（projection），覆盖 Expr、Stmt、
-Function、Type、TensorView 和 TileView。准备阶段先预留绑定 ID，再检查词法可见性。
-每个绑定对应连续的生命周期区间；沿表达式/类型 DAG 逆后序传播最早和最晚使用位置，
-无需重复扫描子树即可检查所有引用。最后遍历建立包含标量值和子记录 ID 的不可变记录，
-以精确有序键进行驻留。相等性比较共享存储中的记录 ID，不比较哈希。
-哈希组合子记录的哈希而非 ID，因此独立调用仍然一致。断言沿不同记录输出字段路径和精确标量值。
+## 诊断与不支持的载荷
 
-记忆化区分定义和引用，且仅属于单个函数上下文。纯表达式 DAG 的共享方式不影响相等性，
-也不会展开成树。N 表示不同的被访问节点及其字段/字符串数据总量时，投影时间为 O(N log N)，
-空间为 O(N)。哈希是进程内指纹，不用于持久缓存键。
-Default 相等比较按比较上下文缓存成功的节点对。Default 哈希也区分映射与循环变量上下文，
-并保持稳定变量标识。两者均在自由变量被绑定时，通过反向依赖边仅使引用该变量的祖先节点缓存失效；
-无关绑定保留共享子树缓存。相等比较分别跟踪左侧与右侧的绑定角色。
-变量哈希也在该缓存中保存类型遍历的结果，因此对同一变量重复自动映射引用时无需重新扫描其类型。
-哈希的循环变量数据类型宽松规则与 Default 相等比较一致。
+`assert_structural_equal` 在不相等时抛出含首个差异字段路径的 `ValueError`。
+未知属性载荷类型、重复属性键、环或超过 512 层的节点/类型嵌套，
+会抛出带 `reason` 和 `field_path` 的 `StructuralComparisonUnsupported`（TypeError 子类）。
+无法表示与不相等是两种不同结果。绑定验证使用相同错误格式；
+`BindingNotVisible` 指向实际非法使用，包括共享表达式或类型的后续越界使用。
 
-## 总结
+## 实现与复杂度
 
-**关键要点：**
+反射描述符决定比较字段：`IgnoreField` 跳过元信息，`UsualField` 遍历结构，
+`DefField` 建立绑定。`src/ir/transforms/structural_comparison.cpp` 中的统一投影
+提供相等、哈希和诊断：先预留绑定身份，再创建包含精确标量和子记录编号的不可变记录。
+记录按完整有序键驻留。相等判断比较共享 arena 中的编号，不比较哈希值。
+哈希组合子节点哈希而非编号，因此独立调用结果一致。
 
-1. **三种字段类型**：
-   - `IgnoreField`：从不比较（Span、名称）
-   - `UsualField`：使用用户设置的 `enable_auto_mapping` 进行比较
-   - `DefField`：始终使用自动映射
+缓存区分定义和引用，并属于单个函数上下文。表达式和类型 DAG 不展开为树。
+设 N 为访问节点数加字段和字符串数据规模，投影时间复杂度为 O(N log N)，空间为 O(N)。
+绑定验证通过 DAG 边传播使用区间，避免重复遍历共享子树。
 
-2. **自动映射**：
-   - 模式匹配时启用
-   - 精确 CSE 时禁用
-   - 始终保持一致性：维护双射变量映射
+哈希是进程内指纹，不是持久缓存键。哈希与相等必须采用一致的 `enable_auto_mapping` 策略，
+合并候选前必须对哈希匹配结果再进行相等检查。
 
-3. **哈希一致性**：
-   - 相等的节点产生相等的哈希值（有保证）
-   - 两个函数使用相同的 `enable_auto_mapping` 设置
+## 从宽松比较迁移
 
-关于 IR 节点类型和构造，请参阅 [IR 概述](00-overview.md)。
+结构比较不再将整数语法 dtype 视为可互换、不再按数值比较浮点数，也不再忽略附带内存引用。
+需要类型兼容判断的调用方应明确哪些字段与该操作无关。
+打印器和解析器应保留精确 dtype，或由调用方在比较前显式规范化语法。
+不要在结构比较器中加入兼容例外。元组注解会递归校验元素的类型种类、形状和数据类型。
+省略的视图和内存空间从推导类型继承，带注解的循环结果也遵循此规则。
+分配注解保持精确，包括未指定分配的情况。
+
+## 无损文本往返
+
+打印器保留非 INDEX 形状维度的数据类型及带类型的偏移表达式。带存储信息的调用使用
+私有语法 `pl._dump.call` 和 `pl._dump.submit`，以独立于算子或被调用函数的类型推导，
+保留已记录的结果类型。多结果区域使用 `pl._dump.yield_(..., types=[...])`。
+这些是解析器标记，不属于内核编写 API。往返检查显式映射开放引用，因为重建会创建
+新的对象；定义关系与存储别名仍然参与精确比较。
+
+函数内仅通过存储描述符引用的分配基址属于隐式资源绑定。MemRef 的身份由基址及描述符
+字段决定，而非描述符对象的地址。WindowBuffer 保留资源绑定及全部存储字段。因此，
+重命名或序列化后的函数可以相等，同时仍保持分配与窗口的别名关系。

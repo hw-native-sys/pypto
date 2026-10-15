@@ -82,14 +82,14 @@ def test_per_lane_gather_row_lowers_to_split_aiv_kernels():
     aiv = text.split("def sparse_kv_aiv")[1].split("def ")[0]
     # Half extent per lane, gathered at a lane-derived source offset.
     assert "pl.Tile[[64, 512], pl.BF16" in aiv
-    assert "pl.tile.gather_row(" in aiv
-    assert "pl.tile.tpush_to_aic(" in aiv
+    assert '"tile.gather_row"' in aiv
+    assert '"tile.tpush_to_aic"' in aiv
 
     aic = text.split("def sparse_kv_aic")[1].split("def ")[0]
     # The cube pops the reassembled FULL tile into L1 and matmuls it.
     assert "pl.tile.tpop_from_aiv(" in aic
     assert "pl.Tile[[128, 512], pl.BF16" in aic
-    assert "pl.tile.matmul" in aic
+    assert '"tile.matmul_acc"' in aic
     # The ring was sized by pl.cross_core_slot, not the 8-slot default.
     assert "slot_num=2" in aic
     assert "size=262144" in aic

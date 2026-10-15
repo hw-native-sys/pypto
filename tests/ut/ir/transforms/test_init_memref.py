@@ -9,11 +9,10 @@
 
 """Tests for InitMemRefPass.
 
-Most tests use the Before/Expected pattern with
-``ir.assert_structural_equal(After, Expected)``.
-DefFields always auto-map, so ``enable_auto_mapping=True`` is unnecessary.
-This aligns MemRef objects consistently: if two tiles share a MemRef in
-``After``, the corresponding tiles in ``Expected`` must also share.
+Hand-written expectations normalize inferred Call result MemRefs explicitly.
+Exact comparison still checks all variable storage fields and allocation alias
+patterns. Roundtrip instruments compare the original IR without normalization.
+DefFields always alpha-map; open references retain their identity by default.
 
 Two tests are kept as raw-IR / diagnostic tests because the inputs cannot be
 expressed via the DSL:
@@ -34,6 +33,8 @@ from pypto import ir, passes
 from pypto.backend import BackendType
 from pypto.ir import MemorySpace
 from pypto.ir.op import tile as tile_ops
+
+from .storage_test_utils import without_call_memrefs
 
 
 class TestBasic:
@@ -88,7 +89,7 @@ class TestBasic:
                 return result
 
         After = passes.init_mem_ref()(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_matmul_pipeline(self):
         """load→move→matmul→store: Vec/Mat/Left/Right/Acc memory spaces each get their own MemRef."""
@@ -155,7 +156,7 @@ class TestBasic:
                 return result
 
         After = passes.init_mem_ref()(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     @pytest.mark.parametrize(
         ("backend_type", "expected_acc_bytes"),
@@ -249,7 +250,7 @@ class TestBasic:
             printed,
         )
         view = re.search(
-            r"lower: .*pl\.MemRef\((mem_acc_\d+), (?:8192|pl\.const\(8192, pl\.INT64\)), 8192\), "
+            r"lower: .*pl\.MemRef\((mem_acc_\d+), pl\.const\(8192, pl\.INDEX\), 8192\), "
             r"pl\.Mem\.Acc",
             printed,
         )
@@ -296,7 +297,7 @@ class TestMemRefSharing:
                 return result
 
         After = passes.init_mem_ref()(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_view_op_shares_memref_with_input(self):
         """tile.reshape chain shares a single MemRef (only 1 alloc needed)."""
@@ -342,7 +343,7 @@ class TestMemRefSharing:
                 return result
 
         After = passes.init_mem_ref()(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_view_over_tpop_result_is_memref_less(self):
         """A cross-core tpop result and any view chained off it stay MemRef-less.
@@ -412,7 +413,7 @@ class TestMemRefSharing:
             [passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)],
         ):
             After = passes.init_mem_ref()(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_matmul_acc_shares_memref_with_accumulator(self):
         """tile.matmul_acc output shares MemRef with its accumulator input (arg[0])."""
@@ -485,7 +486,7 @@ class TestMemRefSharing:
                 return result
 
         After = passes.init_mem_ref()(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
 class TestSliceView:
@@ -546,12 +547,12 @@ class TestSliceView:
                 tile_a: pl.Tile[[8, 16], pl.FP32, pl.MemRef(mem_vec_3, 0, 512), pl.Mem.Vec] = pl.tile.load(
                     input_a, [0, 0], [8, 16], [8, 16], target_memory=pl.Mem.Vec
                 )
-                s0: pl.Tile[[1, 16], pl.FP32, pl.MemRef(mem_vec_3, 0, 64), pl.Mem.Vec] = pl.tile.slice(
-                    tile_a, [1, 16], [0, 0]
+                s0: pl.Tile[[1, 16], pl.FP32, pl.MemRef(mem_vec_3, pl.const(0, pl.INDEX), 64), pl.Mem.Vec] = (
+                    pl.tile.slice(tile_a, [1, 16], [0, 0])
                 )
-                s1: pl.Tile[[1, 16], pl.FP32, pl.MemRef(mem_vec_3, 64, 64), pl.Mem.Vec] = pl.tile.slice(
-                    tile_a, [1, 16], [1, 0]
-                )
+                s1: pl.Tile[
+                    [1, 16], pl.FP32, pl.MemRef(mem_vec_3, pl.const(64, pl.INDEX), 64), pl.Mem.Vec
+                ] = pl.tile.slice(tile_a, [1, 16], [1, 0])
                 r0: pl.Tensor[[1, 16], pl.FP32, pl.MemRef("mem_ddr_1", 0, 64)] = pl.tile.store(
                     s0, [0, 0], out0
                 )
@@ -561,7 +562,7 @@ class TestSliceView:
                 return r0
 
         After = passes.init_mem_ref()(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     @pytest.mark.parametrize("dtype", [pl.FP4, pl.INT4, pl.UINT4, pl.HF4])
     def test_four_bit_dtypes_share_packed_allocation_accounting(self, dtype):
@@ -579,7 +580,7 @@ class TestSliceView:
                 return pl.store(tile_a, [0, 0], output)
 
         printed = ir.python_print(passes.init_mem_ref()(Before))
-        zero = r"(?:0|pl\.const\(0, pl\.INT64\))"
+        zero = r"pl\.const\(0, pl\.INT64\)"
         assert re.search(rf'input_a: .*pl\.MemRef\("mem_ddr_0", {zero}, 64\)', printed), printed
         assert re.search(rf'output: .*pl\.MemRef\("mem_ddr_1", {zero}, 64\)', printed), printed
         assert re.search(rf"tile_a: .*pl\.MemRef\(mem_vec_\d+, {zero}, 64\)", printed), printed
@@ -601,7 +602,7 @@ class TestSliceView:
         printed = ir.python_print(passes.init_mem_ref()(Before))
         assert "pl.tile.alloc(pl.Mem.Vec, 64)" in printed
         assert re.search(
-            r"row: .*pl\.MemRef\(mem_vec_\d+, (?:8|pl\.const\(8, pl\.INT64\)), 8\)",
+            r"row: .*pl\.MemRef\(mem_vec_\d+, pl\.const\(8, pl\.INDEX\), 8\)",
             printed,
         ), printed
 
@@ -679,7 +680,7 @@ class TestSliceView:
             printed,
         )
         view = re.search(
-            r"win: .*pl\.MemRef\((mem_acc_\d+), (?:8192|pl\.const\(8192, pl\.INT64\)), 8192\), "
+            r"win: .*pl\.MemRef\((mem_acc_\d+), pl\.const\(8192, pl\.INDEX\), 8192\), "
             r"pl\.Mem\.Acc",
             printed,
         )
@@ -699,7 +700,7 @@ class TestSliceView:
 
         printed = ir.python_print(passes.init_mem_ref()(self._acc_column_window_program(0)))
         assert re.search(
-            r"win: .*pl\.MemRef\(mem_acc_\d+, (?:0|pl\.const\(0, pl\.INT64\)), 8192\), pl\.Mem\.Acc",
+            r"win: .*pl\.MemRef\(mem_acc_\d+, pl\.const\(0, pl\.INDEX\), 8192\), pl\.Mem\.Acc",
             printed,
         ), printed
 
@@ -748,7 +749,7 @@ class TestSliceView:
         ranges = {}
         for name in ("w0", "w1"):
             match = re.search(
-                rf"{name}: .*pl\.MemRef\(mem_acc_\d+, (?:pl\.const\()?(\d+)(?:, pl\.INT64\))?, (\d+)\), "
+                rf"{name}: .*pl\.MemRef\(mem_acc_\d+, (?:pl\.const\()?(\d+)(?:, pl\.INDEX\))?, (\d+)\), "
                 r"pl\.Mem\.Acc",
                 printed,
             )
@@ -777,7 +778,7 @@ class TestSliceView:
 
         printed = ir.python_print(passes.init_mem_ref()(self._acc_column_window_program(8, window_cols=16)))
         assert re.search(
-            r"win: .*pl\.MemRef\(mem_acc_\d+, (?:32|pl\.const\(32, pl\.INT64\)), 15424\), pl\.Mem\.Acc",
+            r"win: .*pl\.MemRef\(mem_acc_\d+, pl\.const\(32, pl\.INDEX\), 15424\), pl\.Mem\.Acc",
             printed,
         ), printed
 
@@ -825,7 +826,7 @@ class TestSliceView:
 
         printed = ir.python_print(passes.init_mem_ref()(Before))
         assert re.search(
-            r"win: .*pl\.MemRef\(mem_acc_\d+, t \* 64 \* 16 \* 4, 4096\), pl\.Mem\.Acc",
+            r"win: .*pl\.MemRef\(mem_acc_\d+, t \* pl\.const\(64, pl\.INDEX\) \* pl\.const\(16, pl\.INDEX\) \* pl\.const\(4, pl\.INDEX\), 4096\), pl\.Mem\.Acc",
             printed,
         ), printed
         assert "* 64 * 256 * 4" not in printed, printed
@@ -860,7 +861,7 @@ class TestSliceView:
         printed = ir.python_print(passes.init_mem_ref()(Before))
         assert "pl.tile.alloc(pl.Mem.Vec, 16384)" in printed
         assert re.search(
-            r"win: .*pl\.MemRef\(mem_vec_\d+, (?:512|pl\.const\(512, pl\.INT64\)), 15872\), "
+            r"win: .*pl\.MemRef\(mem_vec_\d+, pl\.const\(512, pl\.INDEX\), 15872\), "
             r"pl\.Mem\.Vec",
             printed,
         ), printed
@@ -870,11 +871,10 @@ class TestYieldMemRef:
     """MemRef propagation through yield in ForStmt and IfStmt."""
 
     def test_for_loop_carry_memref_relationships(self):
-        """ForStmt: initValue/iter_arg share MemRef, yield/return_var share MemRef.
+        """ForStmt: initValue, iter_arg and return_var share the carry MemRef.
 
-        Group A (initValue↔iter_arg) uses ``mem_vec_2``; Group B (yield↔return_var)
-        uses ``mem_vec_4``. The two groups have different MemRefs — the yield-to-
-        iter_arg mismatch is resolved later by MemoryReuse.
+        The carry uses ``mem_vec_2`` and the yielded producer uses ``mem_vec_4``.
+        Downstream alias materialization resolves the yield-to-carry mismatch.
         """
 
         @pl.program
@@ -918,7 +918,7 @@ class TestYieldMemRef:
                     acc_next: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
                         pl.tile.add(acc, other_tile)
                     )
-                    acc_out: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
+                    acc_out: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = (
                         pl.yield_(acc_next)
                     )
                 result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
@@ -927,7 +927,7 @@ class TestYieldMemRef:
                 return result
 
         After = passes.init_mem_ref()(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_for_multi_iter_arg_each_carry_independent_memref(self):
         """ForStmt with two iter_args: each carry group resolves independently.
@@ -998,7 +998,7 @@ class TestYieldMemRef:
                 return result
 
         After = passes.init_mem_ref()(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_if_yield_return_var_shares_memref(self):
         """IfStmt: return_var shares MemRef with the then-branch yield value."""
@@ -1072,7 +1072,7 @@ class TestYieldMemRef:
                 return result
 
         After = passes.init_mem_ref()(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
     def test_tile_alias_shares_source_memref(self):
         """Tile alias (``a = b``) shares MemRef with source tile, not a fresh one."""
@@ -1133,7 +1133,7 @@ class TestYieldMemRef:
                 return result
 
         After = passes.init_mem_ref()(Before)
-        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
 class TestDynamicValidShape:

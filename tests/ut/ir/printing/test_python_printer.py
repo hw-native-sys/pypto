@@ -78,7 +78,7 @@ def test_python_print_tensor_type_annotation():
     result = assign.as_python()
 
     assert "a:" in result or "a :" in result
-    assert "pl.Tensor[[64, 128], pl.FP32]" in result
+    assert "pl.Tensor[[pl.const(64, pl.INT32), pl.const(128, pl.INT32)], pl.FP32]" in result
 
 
 def test_python_print_function_with_annotations():
@@ -511,7 +511,7 @@ def test_python_print_tile_type():
     result = assign.as_python()
 
     assert "t:" in result
-    assert "pl.Tile[[16, 16], pl.FP16]" in result
+    assert "pl.Tile[[pl.const(16, pl.INT32), pl.const(16, pl.INT32)], pl.FP16]" in result
 
 
 def test_python_print_tile_type_prints_explicit_tile_memory_space():
@@ -524,7 +524,7 @@ def test_python_print_tile_type_prints_explicit_tile_memory_space():
 
     result = ir.python_print_type(tile_type)
 
-    assert 'pl.MemRef("mem_vec_0", 0, 512)' in result
+    assert 'pl.MemRef("mem_vec_0", pl.const(0, pl.INDEX), 512)' in result
     assert ", pl.Mem.Vec" in result
 
 
@@ -545,7 +545,7 @@ def test_python_print_tile_type_explicit_layout_default_omits_implicit():
 
     result = python_print(acc)
 
-    assert result == "pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc]"
+    assert result == "pl.Tile[[pl.const(128, pl.INT32), pl.const(128, pl.INT32)], pl.FP32, pl.Mem.Acc]"
     assert "TileView" not in result
 
 
@@ -561,7 +561,7 @@ def test_python_print_tile_type_explicit_layout_resolves_acc():
     result = python_print(acc, explicit_layout=True)
 
     assert result == (
-        "pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc, "
+        "pl.Tile[[pl.const(128, pl.INT32), pl.const(128, pl.INT32)], pl.FP32, pl.Mem.Acc, "
         "pl.TileView(blayout=pl.TileLayout.col_major, "
         "slayout=pl.TileLayout.row_major, fractal=1024)]"
     )
@@ -599,7 +599,10 @@ def test_python_print_tile_type_explicit_layout_roundtrips_to_canonical():
 
     # The explicit view matched the implicit Acc view -> canonicalized to nullopt.
     assert reconstructed.tile_view is None
-    assert python_print(reconstructed) == "pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc]"
+    assert (
+        python_print(reconstructed)
+        == "pl.Tile[[pl.const(128, pl.INT32), pl.const(128, pl.INT32)], pl.FP32, pl.Mem.Acc]"
+    )
 
 
 def test_python_print_distributed_tensor_preserves_window_reference():
@@ -1174,8 +1177,8 @@ def test_python_print_const_float_default_dtype():
     assert result == "1.0"
 
 
-def test_python_print_tensor_shape_dims_always_bare():
-    """Test that tensor shape dimensions always print as bare integers."""
+def test_python_print_tensor_shape_dims_preserve_dtype():
+    """Test that tensor shape dimensions retain their integer dtype."""
     span = ir.Span.unknown()
     # Use INT32 (non-default) dtype for shape dims
     dim1 = ir.ConstInt(64, DataType.INT32, span)
@@ -1183,19 +1186,19 @@ def test_python_print_tensor_shape_dims_always_bare():
     tensor_type = ir.TensorType([dim1, dim2], DataType.FP32)
 
     result = ir.python_print_type(tensor_type)
-    # Shape dims should be bare integers, NOT pl.const(...)
-    assert "pl.Tensor[[64, 128], pl.FP32]" == result
+    # Non-INDEX shape dimensions need explicit dtype annotations
+    assert "pl.Tensor[[pl.const(64, pl.INT32), pl.const(128, pl.INT32)], pl.FP32]" == result
 
 
-def test_python_print_tile_shape_dims_always_bare():
-    """Test that tile shape dimensions always print as bare integers."""
+def test_python_print_tile_shape_dims_preserve_dtype():
+    """Test that tile shape dimensions retain their integer dtype."""
     span = ir.Span.unknown()
     dim1 = ir.ConstInt(16, DataType.INT32, span)
     dim2 = ir.ConstInt(16, DataType.INT32, span)
     tile_type = ir.TileType([dim1, dim2], DataType.FP16)
 
     result = ir.python_print_type(tile_type)
-    assert "pl.Tile[[16, 16], pl.FP16]" == result
+    assert "pl.Tile[[pl.const(16, pl.INT32), pl.const(16, pl.INT32)], pl.FP16]" == result
 
 
 def test_python_print_concise_assignment():
@@ -1567,7 +1570,7 @@ def test_composite_shape_dim_roundtrips(dim_factory):
     prog = _make_program_with_shape_dim(dim_factory(m, span))
     printed = python_print(prog, format=False)
     reparsed = pl.parse(printed)
-    ir.assert_structural_equal(prog, reparsed)
+    ir.assert_structural_equal(prog, reparsed, enable_auto_mapping=True)
     # Printing must also be a fixed point.
     assert python_print(reparsed, format=False) == printed
 
@@ -2118,3 +2121,57 @@ def test_dep_edge_attrs_are_rejected_outside_task_dummy():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize("multiple", [False, True])
+def test_loop_result_storage_annotations_roundtrip(multiple):
+    """Result storage is independent of both initializer and yielded value types."""
+    result_type = 'pl.Tensor[[4], pl.FP32, pl.MemRef("result", 16, 16)]'
+    initial_type = 'pl.Tensor[[4], pl.FP32, pl.MemRef("initial", 0, 16)]'
+    yield_line = (
+        f"x, y = pl._dump.yield_(a, b, types=[{result_type}, {initial_type}])"
+        if multiple
+        else f"x: {result_type} = pl.yield_(a)"
+    )
+    variables = "a, b" if multiple else "a,"
+    seeds = "seed, seed" if multiple else "seed,"
+    source = f"""@pl.program
+class Example:
+    @pl.function
+    def main(self, seed: {initial_type}):
+        for i, ({variables}) in pl.range(2, init_values=({seeds})):
+            {yield_line}
+        return x
+"""
+    program = pl.parse_program(source)
+    function = next(iter(program.functions.values()))
+    assert isinstance(function.body, ir.SeqStmts)
+    loop = function.body.stmts[0]
+    assert isinstance(loop, ir.ForStmt)
+    result_descriptor = loop.return_vars[0].type
+    assert isinstance(result_descriptor, ir.TensorType) and result_descriptor.memref is not None
+    assert isinstance(result_descriptor.memref.byte_offset_, ir.ConstInt)
+    assert result_descriptor.memref.byte_offset_.value == 16
+    if multiple:
+        second_type = loop.return_vars[1].type
+        assert isinstance(second_type, ir.TensorType) and second_type.memref is not None
+        assert isinstance(second_type.memref.byte_offset_, ir.ConstInt)
+        assert second_type.memref.byte_offset_.value == 0
+    printed = ir.python_print(program)
+    reparsed = pl.parse_program(printed)
+    ir.assert_structural_equal(program, reparsed)
+    assert ir.structural_hash(program) == ir.structural_hash(reparsed)
+
+
+@pytest.mark.parametrize("types", ["[]", "[pl.FP32]", "pl.FP32"])
+def test_multi_result_dump_yield_rejects_wrong_type_count(types):
+    source = f"""@pl.program
+class Example:
+    @pl.function
+    def main(self, seed: pl.Tensor[[4], pl.FP32]):
+        for i, (a, b) in pl.range(2, init_values=(seed, seed)):
+            x, y = pl._dump.yield_(a, b, types={types})
+        return x
+"""
+    with pytest.raises(ParserSyntaxError, match="types must match the number of results"):
+        pl.parse_program(source)

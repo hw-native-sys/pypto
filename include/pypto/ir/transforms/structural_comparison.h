@@ -24,15 +24,7 @@
 namespace pypto {
 namespace ir {
 
-/// Default preserves syntax/type-checking compatibility; Strict compares exact supported IR structure.
-enum class StructuralComparisonMode { Default, Strict };
-
-struct StructuralComparisonOptions {
-  StructuralComparisonMode mode = StructuralComparisonMode::Default;
-  bool enable_auto_mapping = false;
-};
-
-/// A strict comparison cannot safely represent this input. This is not inequality.
+/// A structural comparison cannot safely represent this input. This is not inequality.
 class StructuralComparisonUnsupported : public pypto::TypeError {
  public:
   StructuralComparisonUnsupported(const std::string& reason, const std::string& field_path)
@@ -56,18 +48,14 @@ class StructuralComparisonUnsupported : public pypto::TypeError {
   std::string field_path_;
 };
 
-/// Strict uses exact dtype/float bits and binding identities, and rejects explicit storage.
-/// Local use-before-definition and scope escape raise StructuralComparisonUnsupported.
-/// Open captures retain free-variable semantics; callers still verify closure/effects.
-/// All three operations share the same projection. Hashes are process-local, not persistent keys.
-uint64_t structural_hash(const IRNodePtr& node, const StructuralComparisonOptions& options);
-uint64_t structural_hash(const TypePtr& type, const StructuralComparisonOptions& options);
-bool structural_equal(const IRNodePtr& lhs, const IRNodePtr& rhs, const StructuralComparisonOptions& options);
-bool structural_equal(const TypePtr& lhs, const TypePtr& rhs, const StructuralComparisonOptions& options);
-void assert_structural_equal(const IRNodePtr& lhs, const IRNodePtr& rhs,
-                             const StructuralComparisonOptions& options);
-void assert_structural_equal(const TypePtr& lhs, const TypePtr& rhs,
-                             const StructuralComparisonOptions& options);
+/// Verify local binding visibility and unique definitions independently of comparison.
+/// Open captures are allowed; closure/effect checks belong to the caller.
+void verify_structural_bindings(const IRNodePtr& node);
+
+/// All comparisons use exact scalar dtypes, floating-point bits, and reflected
+/// semantic fields, including storage. Names and spans marked IgnoreField are
+/// omitted. Definitions are alpha-renamed; free references follow the flag below.
+/// Hashes are process-local fingerprints and must be confirmed with equality.
 
 /**
  * @brief Compute structural hash of an IR node
@@ -126,7 +114,7 @@ bool structural_equal(const TypePtr& lhs, const TypePtr& rhs, bool enable_auto_m
  * @brief Assert two IR nodes are structurally equal
  *
  * Like structural_equal but throws ValueError with detailed error message
- * showing the first mismatch location and Python-printed IR context.
+ * showing the first differing field path and exact scalar values.
  * Useful for debugging and testing.
  *
  * @param lhs First IR node

@@ -5138,7 +5138,7 @@ def test_e2e_none_region_v2c_crossing_lowers_to_split_zero_transport():
         return out
 
     aic, aiv = _e2e_kernel_text(none_v2c)
-    assert "pl.tile.tpush_to_aic(" in aiv and "split=0" in aiv
+    assert '"tile.tpush_to_aic"' in aiv and '"split": 0' in aiv
     assert "pl.tile.tpop_from_aiv(split=0)" in aic
     # Full width on both ends: the crossing preserved the shape.
     assert "pl.Tile[[64, 64], pl.FP16" in aiv
@@ -5172,7 +5172,7 @@ def test_e2e_none_region_c2v_crossing_lowers_to_split_zero_transport():
         return out
 
     aic, aiv = _e2e_kernel_text(none_c2v)
-    assert "pl.tile.tpush_to_aiv(" in aic and "split=0" in aic
+    assert '"tile.tpush_to_aiv"' in aic and '"split": 0' in aic
     assert "pl.tile.tpop_from_aic(split=0)" in aiv
     assert "pl.Tile[[64, 64], pl.FP32" in aiv
     assert "pl.tile.aiv_shard" not in aic and "pl.tile.aiv_shard" not in aiv

@@ -294,7 +294,7 @@ def test_deep_tail_is_rebalanced_onto_the_valid_region():
     assert "pl.tile.tpop_from_aic(split=3, lane_stride=7)" in aiv, aiv
     # clamp(13 - lane * 7, 0, 7) -> 7 and 6.
     assert re.search(r"pl\.const\(13, pl\.INDEX\)[^]]*?pl\.const\(7, pl\.INDEX\)", aiv), aiv
-    assert re.search(r"pl\.tile\.store\([^)]*subblock_idx \* 7", aiv), aiv
+    assert re.search(r'"tile\.store", \[[^)]*subblock_idx \* 7', aiv), aiv
     assert "subblock_idx * 8" not in aiv, f"the box partition must not survive:\n{aiv}"
 
 

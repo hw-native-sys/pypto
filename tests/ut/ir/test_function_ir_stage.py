@@ -54,7 +54,7 @@ def test_function_stage_participates_in_structural_identity():
     buffer = _function(ir.FunctionIRStage.Buffer)
     assert not ir.structural_equal(functional, buffer, enable_auto_mapping=True)
     assert ir.structural_hash(functional) != ir.structural_hash(buffer)
-    with pytest.raises(ValueError, match="FunctionIRStage mismatch"):
+    with pytest.raises(ValueError, match=r"root\.ir_stage"):
         ir.assert_structural_equal(functional, buffer, enable_auto_mapping=True)
 
 

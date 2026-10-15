@@ -395,7 +395,7 @@ class TestForStmtEquality:
         for_stmt2 = ir.ForStmt(j, start, stop, step, [], assign, [], span)
 
         assert not ir.structural_equal(for_stmt1, for_stmt2)
-        with pytest.raises(ValueError, match="Variable mapping inconsistent"):
+        with pytest.raises(ValueError, match="binding:"):
             ir.assert_structural_equal(for_stmt1, for_stmt2)
 
     def test_for_stmt_different_range_not_equal(self):
@@ -754,7 +754,7 @@ class TestForKindEquality:
         assign2 = ir.AssignStmt(i2, start2, span)
         for_stmt2 = ir.ForStmt(i2, start2, stop2, step2, [], assign2, [], span, ir.ForKind.Parallel)
 
-        with pytest.raises(ValueError, match=r"ForKind mismatch"):
+        with pytest.raises(ValueError, match=r"root\.kind"):
             ir.assert_structural_equal(for_stmt1, for_stmt2)
 
 

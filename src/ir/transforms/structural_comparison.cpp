@@ -9,6 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include "pypto/ir/transforms/structural_comparison.h"
+
 #include <any>
 #include <array>
 #include <cstddef>
@@ -38,11 +40,11 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/reflection/field_visitor.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
-#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/signature_symbols.h"
 #include "pypto/ir/type.h"
 #include "utils/structural_comparison_arena.h"
@@ -60,7 +62,7 @@ std::string Mismatch(const Arena& arena, Id lhs, Id rhs) {
     const auto& [lt, la, lf] = arena.GetKey(lhs);
     const auto& [rt, ra, rf] = arena.GetKey(rhs);
     if (lt != rt || la != ra || lf.size() != rf.size()) {
-      return "Strict structural mismatch at " + path + ": " + lt + "(" + la.substr(0, 128) + ", " +
+      return "Structural mismatch at " + path + ": " + lt + "(" + la.substr(0, 128) + ", " +
              std::to_string(lf.size()) + " fields) != " + rt + "(" + ra.substr(0, 128) + ", " +
              std::to_string(rf.size()) + " fields)";
     }
@@ -68,7 +70,7 @@ std::string Mismatch(const Arena& arena, Id lhs, Id rhs) {
     while (i < lf.size() && lf[i] == rf[i]) ++i;
     INTERNAL_CHECK(i < lf.size()) << "Different interned records must have a differing field";
     if (lf[i].first != rf[i].first) {
-      return "Strict structural mismatch at " + path + ": field " + lf[i].first.substr(0, 128) +
+      return "Structural mismatch at " + path + ": field " + lf[i].first.substr(0, 128) +
              " != " + rf[i].first.substr(0, 128);
     }
     if (path.size() < 1024) path += "." + lf[i].first.substr(0, 128);
@@ -82,8 +84,9 @@ struct Binding {
   uint64_t id;
 };
 
-// One reflection projection supplies strict equality, hashing and diagnostics.
-// Preparation reserves DefField identities and checks lexical use intervals.
+// One reflection projection supplies equality, hashing and diagnostics.
+// Preparation reserves DefField identities; the independent verifier also
+// checks lexical use intervals.
 // Projection uses frozen bindings, with separate definition/reference caches.
 // Function contexts are independent even when the input shares node pointers.
 class Projection {
@@ -99,14 +102,21 @@ class Projection {
     Value(root);
     node_cache_ = {};
     type_cache_.clear();
-    checking_visibility_ = true;
-    Value(root);
-    CheckVisibility();
-    checking_visibility_ = false;
+    if (verify_bindings_) {
+      checking_visibility_ = true;
+      Value(root);
+      CheckVisibility();
+      checking_visibility_ = false;
+    }
     collecting_ = false;
     node_cache_ = {};
     type_cache_.clear();
     return Value(root);
+  }
+
+  void Verify(const IRNodePtr& root) {
+    verify_bindings_ = true;
+    Run(root);
   }
 
   [[nodiscard]] result_type InitResult() const { return {}; }
@@ -202,7 +212,8 @@ class Projection {
       auto symbols = ClassifySignatureSymbols(function_);
       auto reserve_symbol = [&](const VarPtr& var) {
         auto scalar = As<ScalarType>(var->GetType());
-        if (!scalar || (scalar->dtype_ != DataType::INDEX && scalar->dtype_ != DataType::INT64)) {
+        if (verify_bindings_ &&
+            (!scalar || (scalar->dtype_ != DataType::INDEX && scalar->dtype_ != DataType::INT64))) {
           Unsupported("UnsupportedSignatureSymbol");
         }
         Reserve(var, "symbol");
@@ -211,7 +222,7 @@ class Projection {
         if (!bindings_.count(var.get())) reserve_symbol(var);
       }
       for (const auto& symbol : symbols.valid_shape) reserve_symbol(symbol.symbol);
-      if (!symbols.unbound.empty()) Unsupported("UnboundValidShapeSymbol");
+      if (verify_bindings_ && !symbols.unbound.empty()) Unsupported("UnboundValidShapeSymbol");
       for (const auto& [var, binding] : bindings_) lifetimes_[var] = {0, kForever};
     }
   }
@@ -360,13 +371,17 @@ class Projection {
 
   Id Variable(const VarPtr& var, bool definition) {
     if (collecting_ && !checking_visibility_ && definition) {
-      if (!definitions_.insert(var.get()).second) Unsupported("RepeatedDefinition");
+      if (!definitions_.insert(var.get()).second && verify_bindings_) Unsupported("RepeatedDefinition");
       Reserve(var, "bound");
     }
     Binding binding{"free_identity", var->UniqueId()};
     auto found = bindings_.find(var.get());
     if (found != bindings_.end()) {
       binding = found->second;
+    } else if (!collecting_ &&
+               (implicit_allocations_.count(var.get()) || implicit_storage_.count(var.get()))) {
+      auto [it, inserted] = implicit_ids_.emplace(var.get(), implicit_ids_.size());
+      binding = {implicit_allocations_.count(var.get()) ? "allocation" : "storage", it->second};
     } else if (!collecting_ && map_free_) {
       auto [it, inserted] = free_ids_.emplace(var.get(), free_ids_.size());
       binding = {"free_mapped", it->second};
@@ -382,24 +397,41 @@ class Projection {
       fields.emplace_back("initValue", Value(iter->initValue_));
       path_.pop_back();
     }
+    if (var->GetKind() == ObjectKind::WindowBuffer) {
+      fields.emplace_back("storage", DispatchNode(var));
+    }
     return Intern(var->TypeName(), "", std::move(fields));
   }
 
   Id Node(const IRNodePtr& node) {
     if (!node) return 0;
-    if (node->GetKind() == ObjectKind::MemRef || node->GetKind() == ObjectKind::WindowBuffer) {
-      Unsupported("UnsupportedStorage");
-    }
     if (auto func = As<Function>(node); func && func != function_) {
       if (collecting_) return 0;
       Projection child(arena_, map_free_);
+      child.verify_bindings_ = verify_bindings_;
       return child.Run(func);
     }
     const bool definition = defining_;
     defining_ = false;
     // Repeated definitions must be checked before memoization.
-    const auto variable = AsVarLike(As<Expr>(node));
-    if (collecting_ && !checking_visibility_ && definition && variable &&
+    VarPtr variable = AsVarLike(As<Expr>(node));
+    if (node->GetKind() == ObjectKind::MemRef || node->GetKind() == ObjectKind::WindowBuffer) {
+      // MemRef is a value descriptor: allocation identity is its base, not
+      // the descriptor object's address. WindowBuffer is a bound resource.
+      if (node->GetKind() == ObjectKind::WindowBuffer) {
+        variable = std::static_pointer_cast<const Var>(node);
+      }
+      if (collecting_ && function_) {
+        // Storage descriptors in a function declare implicit resource identities.
+        // Preserve their alias pattern across serialization and renaming.
+        const auto base = node->GetKind() == ObjectKind::MemRef
+                              ? std::static_pointer_cast<const MemRef>(node)->base_
+                              : std::static_pointer_cast<const WindowBuffer>(node)->base_;
+        implicit_allocations_.insert(base.get());
+        if (variable) implicit_storage_.insert(variable.get());
+      }
+    }
+    if (verify_bindings_ && collecting_ && !checking_visibility_ && definition && variable &&
         definitions_.count(variable.get())) {
       Unsupported("RepeatedDefinition");
     }
@@ -415,7 +447,7 @@ class Projection {
     auto& cache = node_cache_[definition ? 1 : 0];
     auto cached = cache.find(node.get());
     if (cached != cache.end()) {
-      if (collecting_ && As<Stmt>(node)) Unsupported("SharedStatement");
+      if (verify_bindings_ && collecting_ && As<Stmt>(node)) Unsupported("SharedStatement");
       defining_ = definition;
       use_parent_ = saved_parent;
       return cached->second;
@@ -445,6 +477,8 @@ class Projection {
   if (auto value = As<T>(node)) {                        \
     return Reflect(*value, node->TypeName(), skip_body); \
   }
+    PROJECT_NODE(MemRef)
+    PROJECT_NODE(WindowBuffer)
     PROJECT_NODE(ConstInt)
     PROJECT_NODE(ConstFloat)
     PROJECT_NODE(ConstBool)
@@ -480,18 +514,7 @@ class Projection {
   }
 
   Id Type(const TypePtr& type) {
-    if (!type) Unsupported("NullType");
-    switch (type->GetKind()) {
-      case ObjectKind::MemRefType:
-      case ObjectKind::PtrType:
-      case ObjectKind::WindowBufferType:
-      case ObjectKind::CommCtxType:
-        Unsupported("UnsupportedStorage");
-      case ObjectKind::UnknownType:
-        Unsupported("UnresolvedType");
-      default:
-        break;
-    }
+    if (!type) return 0;
     const size_t saved_parent = use_parent_;
     size_t use_id = checking_visibility_ ? BeginUses(type.get(), false, nullptr) : kForever;
     auto cached = type_cache_.find(type.get());
@@ -516,6 +539,11 @@ class Projection {
   if (auto value = As<T>(type)) {             \
     return Reflect(*value, type->TypeName()); \
   }
+    PROJECT_TYPE(UnknownType)
+    PROJECT_TYPE(MemRefType)
+    PROJECT_TYPE(PtrType)
+    PROJECT_TYPE(WindowBufferType)
+    PROJECT_TYPE(CommCtxType)
     PROJECT_TYPE(VoidType)
     PROJECT_TYPE(ScalarType)
     PROJECT_TYPE(TensorType)
@@ -648,6 +676,7 @@ class Projection {
 
   Arena& arena_;
   bool map_free_;
+  bool verify_bindings_ = false;
   bool collecting_ = false;
   bool checking_visibility_ = false;
   size_t position_ = 0;
@@ -664,6 +693,9 @@ class Projection {
   uint64_t next_symbol_ = 0;
   std::unordered_map<const Var*, Binding> bindings_;
   std::unordered_map<const Var*, uint64_t> free_ids_;
+  std::unordered_map<const Var*, uint64_t> implicit_ids_;
+  std::unordered_set<const Var*> implicit_allocations_;
+  std::unordered_set<const Var*> implicit_storage_;
   std::unordered_set<const Var*> definitions_;
   std::array<std::unordered_map<const IRNode*, Id>, 2> node_cache_;
   std::unordered_map<const ir::Type*, Id> type_cache_;
@@ -672,7 +704,7 @@ class Projection {
 };
 
 template <typename Root>
-bool EqualStrict(const Root& lhs, const Root& rhs, bool map_free, bool assert_equal) {
+bool EqualStructure(const Root& lhs, const Root& rhs, bool map_free, bool assert_equal) {
   Arena arena;
   Projection left(arena, map_free);
   Projection right(arena, map_free);
@@ -683,45 +715,33 @@ bool EqualStrict(const Root& lhs, const Root& rhs, bool map_free, bool assert_eq
 }
 
 template <typename Root>
-uint64_t HashStrict(const Root& root, bool map_free) {
+uint64_t HashStructure(const Root& root, bool map_free) {
   Arena arena;
   Projection projection(arena, map_free);
   return arena.Hash(projection.Run(root));
 }
 
-void CheckMode(StructuralComparisonMode mode) {
-  CHECK(mode == StructuralComparisonMode::Default || mode == StructuralComparisonMode::Strict)
-      << "Invalid structural comparison mode";
-}
-
 }  // namespace
 
-#define DEFINE_OPTIONS_OVERLOADS(T)                                                                      \
-  uint64_t structural_hash(const T& node, const StructuralComparisonOptions& options) {                  \
-    CheckMode(options.mode);                                                                             \
-    if (options.mode == StructuralComparisonMode::Default) {                                             \
-      return structural_hash(node, options.enable_auto_mapping);                                         \
-    }                                                                                                    \
-    return HashStrict(node, options.enable_auto_mapping);                                                \
-  }                                                                                                      \
-  bool structural_equal(const T& lhs, const T& rhs, const StructuralComparisonOptions& options) {        \
-    CheckMode(options.mode);                                                                             \
-    if (options.mode == StructuralComparisonMode::Default) {                                             \
-      return structural_equal(lhs, rhs, options.enable_auto_mapping);                                    \
-    }                                                                                                    \
-    return EqualStrict(lhs, rhs, options.enable_auto_mapping, false);                                    \
-  }                                                                                                      \
-  void assert_structural_equal(const T& lhs, const T& rhs, const StructuralComparisonOptions& options) { \
-    CheckMode(options.mode);                                                                             \
-    if (options.mode == StructuralComparisonMode::Default) {                                             \
-      assert_structural_equal(lhs, rhs, options.enable_auto_mapping);                                    \
-    } else {                                                                                             \
-      EqualStrict(lhs, rhs, options.enable_auto_mapping, true);                                          \
-    }                                                                                                    \
+void verify_structural_bindings(const IRNodePtr& node) {
+  Arena arena;
+  Projection projection(arena, false);
+  projection.Verify(node);
+}
+
+#define DEFINE_COMPARISON_OVERLOADS(T)                                                 \
+  uint64_t structural_hash(const T& node, bool enable_auto_mapping) {                  \
+    return HashStructure(node, enable_auto_mapping);                                   \
+  }                                                                                    \
+  bool structural_equal(const T& lhs, const T& rhs, bool enable_auto_mapping) {        \
+    return EqualStructure(lhs, rhs, enable_auto_mapping, false);                       \
+  }                                                                                    \
+  void assert_structural_equal(const T& lhs, const T& rhs, bool enable_auto_mapping) { \
+    EqualStructure(lhs, rhs, enable_auto_mapping, true);                               \
   }
 
-DEFINE_OPTIONS_OVERLOADS(IRNodePtr)
-DEFINE_OPTIONS_OVERLOADS(TypePtr)
-#undef DEFINE_OPTIONS_OVERLOADS
+DEFINE_COMPARISON_OVERLOADS(IRNodePtr)
+DEFINE_COMPARISON_OVERLOADS(TypePtr)
+#undef DEFINE_COMPARISON_OVERLOADS
 
 }  // namespace pypto::ir

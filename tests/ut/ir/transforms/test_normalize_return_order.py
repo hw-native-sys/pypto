@@ -822,7 +822,8 @@ class {name}:
         # isolates the return-lineage query that must work before that remap.
         with passes.PassContext([], passes.VerificationLevel.NONE):
             After = _run_normalize_direct(Before)
-        ir.assert_structural_equal(After, Expected)
+        # Callee-local shape symbols are open references in this provisional wrapper.
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
         values, params = self._return_values(After, "wrapper")
         assert values[0] is params[1]
 

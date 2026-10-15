@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Exact structural comparison for kernel deduplication candidates."""
+"""Exact structural comparison and independently invoked binding verification."""
 
 import random
 import struct
@@ -16,7 +16,8 @@ import pytest
 from pypto import DataType as D
 from pypto import ir
 
-STRICT = ir.StructuralComparisonMode.Strict
+from .storage_test_utils import without_call_memrefs
+
 SPAN = ir.Span.unknown()
 
 
@@ -36,14 +37,14 @@ def function(name, params, returns=None, attrs=None):
 
 
 def equal(lhs, rhs, expected=True, auto=False):
-    assert ir.structural_equal(lhs, rhs, auto, mode=STRICT) is expected
-    assert ir.structural_equal(rhs, lhs, auto, mode=STRICT) is expected
+    assert ir.structural_equal(lhs, rhs, auto) is expected
+    assert ir.structural_equal(rhs, lhs, auto) is expected
     if expected:
-        ir.assert_structural_equal(lhs, rhs, auto, mode=STRICT)
-        assert ir.structural_hash(lhs, auto, mode=STRICT) == ir.structural_hash(rhs, auto, mode=STRICT)
+        ir.assert_structural_equal(lhs, rhs, auto)
+        assert ir.structural_hash(lhs, auto) == ir.structural_hash(rhs, auto)
     else:
-        with pytest.raises(ValueError, match="Strict structural mismatch at"):
-            ir.assert_structural_equal(lhs, rhs, auto, mode=STRICT)
+        with pytest.raises(ValueError, match="Structural mismatch at"):
+            ir.assert_structural_equal(lhs, rhs, auto)
 
 
 def call(attrs=None, op=None):
@@ -57,13 +58,12 @@ def call(attrs=None, op=None):
     )
 
 
-def test_old_positional_arguments_and_default_mode():
+def test_positional_and_keyword_arguments():
     x, y = var("x"), var("y")
     assert ir.structural_equal(x, y, True)
-    assert ir.structural_equal(x, y, True, mode=ir.StructuralComparisonMode.Default)
     assert ir.structural_hash(x, True) == ir.structural_hash(y, True)
     assert ir.structural_hash(type=x.type) == ir.structural_hash(x.type)
-    assert ir.structural_hash(type=x.type, mode=STRICT) == ir.structural_hash(node=x.type, mode=STRICT)
+    assert ir.structural_hash(type=x.type) == ir.structural_hash(node=x.type)
 
 
 @pytest.mark.parametrize("auto", [False, True])
@@ -107,6 +107,13 @@ def test_signature_shape_symbols_are_bound_bijectively():
     equal(kernel("f", [n, n]), kernel("g", [m, k]), False)
 
 
+def test_tile_signature_shape_symbols_are_bound():
+    n, m = var("n", D.INDEX), var("m", D.INDEX)
+    lhs = function("f", [ir.Var("x", ir.TileType([n], D.FP32), SPAN)])
+    rhs = function("g", [ir.Var("y", ir.TileType([m], D.FP32), SPAN)])
+    equal(lhs, rhs)
+
+
 def test_shape_can_reference_later_scalar_parameter():
     n, m = var("n", D.INDEX), var("m", D.INDEX)
     x = ir.Var("x", ir.TensorType([n], D.FP32), SPAN)
@@ -118,7 +125,6 @@ def test_shape_can_reference_later_scalar_parameter():
 def test_signed_zero_is_exact(dtype):
     lhs = ir.ConstFloat(0.0, dtype, SPAN)
     rhs = ir.ConstFloat(-0.0, dtype, SPAN)
-    assert ir.structural_equal(lhs, rhs)
     equal(lhs, rhs, False)
 
 
@@ -133,10 +139,9 @@ def test_nan_bits_are_reflexive_and_payload_sensitive():
     equal(lhs, nan(0xFFF8000000000001), False)
 
 
-def test_integer_syntax_relaxation_is_default_only():
+def test_integer_dtypes_are_exact():
     lhs = ir.ConstInt(1, D.INDEX, SPAN)
     rhs = ir.ConstInt(1, D.INT64, SPAN)
-    assert ir.structural_equal(lhs, rhs)
     equal(lhs, rhs, False)
 
 
@@ -170,13 +175,13 @@ def test_attribute_type_and_value_are_exact(left, right):
 def test_duplicate_attribute_keys_are_unsupported():
     node = call([("flag", True), ("flag", True)])
     with pytest.raises(ir.StructuralComparisonUnsupported, match="DuplicateAttribute"):
-        ir.structural_hash(node, mode=STRICT)
+        ir.structural_hash(node)
     with pytest.raises(ir.StructuralComparisonUnsupported):
-        ir.structural_equal(node, node, mode=STRICT)
+        ir.structural_equal(node, node)
 
 
 @pytest.mark.parametrize("location", ["type", "tuple", "parameter", "return", "local", "attr"])
-def test_storage_is_rejected_everywhere(location):
+def test_storage_is_supported_everywhere(location):
     base = ir.Var("base", ir.PtrType(), SPAN)
     tensor = ir.TensorType([16], D.FP32, ir.MemRef(base, 0, 64, SPAN))
     x = ir.Var("x", tensor, SPAN)
@@ -188,24 +193,15 @@ def test_storage_is_rejected_everywhere(location):
         "local": ir.AssignStmt(x, x, SPAN),
         "attr": call({"hidden": x}),
     }[location]
-    with pytest.raises(ir.StructuralComparisonUnsupported) as exc:
-        ir.structural_hash(node, mode=STRICT)
-    assert exc.value.reason == "UnsupportedStorage"
-    assert "memref" in exc.value.field_path
-    for compare in (ir.structural_equal, ir.assert_structural_equal):
-        with pytest.raises(ir.StructuralComparisonUnsupported):
-            if isinstance(node, ir.Type):
-                compare(node, node, mode=STRICT)
-            else:
-                compare(node, node, mode=STRICT)
+    equal(node, node)
 
 
-def test_default_type_equality_still_ignores_attached_memref():
+def test_type_equality_includes_attached_memref():
     base = ir.Var("base", ir.PtrType(), SPAN)
     lhs = ir.TensorType([16], D.FP32, ir.MemRef(base, 0, 1024, SPAN))
     rhs = ir.TensorType([16], D.FP32, ir.MemRef(base, 512, 1024, SPAN))
-    assert lhs == rhs
-    assert hash(lhs) == hash(rhs)
+    assert lhs != rhs
+    equal(lhs, rhs, False)
 
 
 def test_nullable_tile_view_and_layout():
@@ -269,9 +265,7 @@ def test_pure_dag_sharing_is_not_identity():
 
 def test_mismatch_diagnostic_has_field_and_float_bits():
     with pytest.raises(ValueError, match=r"root.value.*0x"):
-        ir.assert_structural_equal(
-            ir.ConstFloat(0.0, D.FP32, SPAN), ir.ConstFloat(-0.0, D.FP32, SPAN), mode=STRICT
-        )
+        ir.assert_structural_equal(ir.ConstFloat(0.0, D.FP32, SPAN), ir.ConstFloat(-0.0, D.FP32, SPAN))
 
 
 def test_program_function_contexts_are_independent():
@@ -333,7 +327,7 @@ def test_valid_shape_symbols_need_runtime_readable_sources():
 
     equal(kernel("f"), kernel("g"))
     with pytest.raises(ir.StructuralComparisonUnsupported, match="UnboundValidShapeSymbol"):
-        ir.structural_hash(kernel("bad", True), mode=STRICT)
+        ir.verify_structural_bindings(kernel("bad", True))
 
 
 def test_repeated_definition_is_unsupported():
@@ -346,12 +340,11 @@ def test_repeated_definition_is_unsupported():
         SPAN,
     )
     with pytest.raises(ir.StructuralComparisonUnsupported, match="RepeatedDefinition"):
-        ir.structural_hash(body, mode=STRICT)
+        ir.verify_structural_bindings(body)
 
 
-def test_unresolved_types_are_unsupported():
-    with pytest.raises(ir.StructuralComparisonUnsupported, match="UnresolvedType"):
-        ir.structural_equal(ir.UnknownType(), ir.UnknownType(), mode=STRICT)
+def test_unresolved_types_are_structurally_comparable():
+    equal(ir.UnknownType(), ir.UnknownType())
 
 
 def test_depth_limit_is_explicit_instead_of_stack_overflow():
@@ -359,7 +352,7 @@ def test_depth_limit_is_explicit_instead_of_stack_overflow():
     for _ in range(600):
         expr = add(expr, ir.ConstInt(1, D.INT64, SPAN))
     with pytest.raises(ir.StructuralComparisonUnsupported, match="DepthLimitExceeded"):
-        ir.structural_hash(expr, mode=STRICT)
+        ir.structural_hash(expr)
 
 
 def test_signature_depth_limit_is_explicit():
@@ -368,13 +361,13 @@ def test_signature_depth_limit_is_explicit():
         extent = ir.Add(extent, ir.ConstInt(1, D.INDEX, SPAN), D.INDEX, SPAN)
     node = function("f", [ir.Var("x", ir.TensorType([extent], D.FP32), SPAN)])
     with pytest.raises(ir.StructuralComparisonUnsupported, match="DepthLimitExceeded"):
-        ir.structural_hash(node, mode=STRICT)
+        ir.structural_hash(node)
 
 
 def test_shared_statement_is_unsupported():
     stmt = ir.ReturnStmt([], SPAN)
     with pytest.raises(ir.StructuralComparisonUnsupported, match="SharedStatement"):
-        ir.structural_hash(ir.SeqStmts([stmt, stmt], SPAN), mode=STRICT)
+        ir.verify_structural_bindings(ir.SeqStmts([stmt, stmt], SPAN))
 
 
 @pytest.mark.parametrize("seed", range(10))
@@ -406,11 +399,7 @@ def test_generated_graphs_preserve_equivalence_under_renaming_and_sharing(seed):
 
 
 def assert_unsupported(node, reason="BindingNotVisible"):
-    for operation in (
-        lambda: ir.structural_hash(node, mode=STRICT),
-        lambda: ir.structural_equal(node, node, mode=STRICT),
-        lambda: ir.assert_structural_equal(node, node, mode=STRICT),
-    ):
+    for operation in (lambda: ir.verify_structural_bindings(node),):
         with pytest.raises(ir.StructuralComparisonUnsupported) as exc:
             operation()
         assert exc.value.reason == reason
@@ -600,14 +589,13 @@ def test_many_uses_of_large_shared_type():
         ir.CommCtxType,
     ],
 )
-def test_resource_marker_types_are_unsupported(type_factory):
+def test_resource_marker_types_are_supported(type_factory):
     node = type_factory()
-    with pytest.raises(ir.StructuralComparisonUnsupported, match="UnsupportedStorage"):
-        ir.structural_hash(node, mode=STRICT)
+    equal(node, type_factory())
 
 
 @pytest.mark.parametrize("attached", [False, True])
-def test_window_storage_is_unsupported(attached):
+def test_window_storage_is_supported(attached):
     base = ir.Var("base", ir.PtrType(), SPAN)
     window = ir.WindowBuffer(base, ir.ConstInt(64, D.INDEX, SPAN), span=SPAN)
     if attached:
@@ -616,7 +604,7 @@ def test_window_storage_is_unsupported(attached):
         )
     else:
         node = window
-    assert_unsupported(node, "UnsupportedStorage")
+    equal(node, node)
 
 
 def test_open_stride_symbol_is_not_implicitly_bound():
@@ -629,7 +617,7 @@ def test_open_stride_symbol_is_not_implicitly_bound():
     equal(build("n"), build("m"), auto=True)
 
 
-def test_default_hash_revisits_subtree_after_a_binding_is_introduced():
+def test_hash_revisits_subtree_after_a_binding_is_introduced():
     x, y = var("x"), var("y")
     shared = add(x, x)
     one = ir.ConstInt(1, D.INT64, SPAN)
@@ -639,8 +627,8 @@ def test_default_hash_revisits_subtree_after_a_binding_is_introduced():
     rhs = ir.SeqStmts(
         [ir.EvalStmt(shared, SPAN), ir.AssignStmt(y, one, SPAN), ir.EvalStmt(add(y, y), SPAN)], SPAN
     )
-    assert ir.structural_equal(lhs, rhs)
-    assert ir.structural_hash(lhs) == ir.structural_hash(rhs)
+    equal(lhs, rhs, False)
+    assert_unsupported(lhs)
 
 
 @pytest.mark.parametrize("placement", ["standalone", "sequence", "nested", "function"])
@@ -709,7 +697,7 @@ def test_unknown_dtype_codes_remain_distinct_after_deserialization(location):
     equal(decoded(0x60), decoded(0x61), False)
 
 
-def test_default_hash_invalidates_cached_ancestors_and_type_uses():
+def test_hash_invalidates_cached_ancestors_and_type_uses():
     x, y = var("x"), var("y")
     extent = add(x, x)
     shared = ir.Var("tensor", ir.TensorType([extent], D.FP32), SPAN)
@@ -725,8 +713,8 @@ def test_default_hash_invalidates_cached_ancestors_and_type_uses():
         [before, ir.AssignStmt(y, ir.ConstInt(1, D.INT64, SPAN), SPAN), ir.AssignStmt(other, call(), SPAN)],
         SPAN,
     )
-    assert ir.structural_equal(lhs, rhs)
-    assert ir.structural_hash(lhs) == ir.structural_hash(rhs)
+    equal(lhs, rhs, False)
+    assert_unsupported(lhs)
 
 
 @pytest.mark.parametrize("nested", [False, True])
@@ -789,16 +777,71 @@ def test_visibility_error_reports_invalid_use_endpoint(scope, location, before):
     if location == "type":
         prefix += ".type.shape.[0]"
     suffixes = [""] if location == "direct" else [".left.left", ".left.right", ".right"]
-    for operation in (
-        lambda: ir.structural_hash(root, mode=STRICT),
-        lambda: ir.structural_equal(root, root, mode=STRICT),
-        lambda: ir.assert_structural_equal(root, root, mode=STRICT),
-    ):
+    for operation in (lambda: ir.verify_structural_bindings(root),):
         with pytest.raises(ir.StructuralComparisonUnsupported) as exc:
             operation()
         assert exc.value.reason == "BindingNotVisible"
         assert exc.value.field_path in {prefix + suffix for suffix in suffixes}
 
 
+@pytest.mark.parametrize("shared_allocation", [False, True])
+def test_function_storage_aliases_survive_renaming_and_serialization(shared_allocation):
+    def build(prefix, share):
+        a = ir.Var(prefix + "a", ir.PtrType(), SPAN)
+        b = a if share else ir.Var(prefix + "b", ir.PtrType(), SPAN)
+        params = [
+            ir.Var(prefix + str(i), ir.TensorType([16], D.FP32, ir.MemRef(base, 0, 64, SPAN)), SPAN)
+            for i, base in enumerate([a, b])
+        ]
+        return function(prefix, params)
+
+    lhs = build("left", shared_allocation)
+    equal(lhs, build("right", shared_allocation))
+    equal(lhs, build("different", not shared_allocation), False)
+    equal(lhs, ir.deserialize(ir.serialize(lhs)))
+
+
+def test_memref_descriptor_sharing_does_not_change_allocation_aliases():
+    base = ir.Var("base", ir.PtrType(), SPAN)
+    first = ir.MemRef(base, 0, 64, SPAN)
+    second = ir.MemRef(base, 0, 64, SPAN)
+    equal(first, second)
+    equal(first, ir.MemRef(base, 16, 64, SPAN), False)
+    other_base = ir.Var("base", ir.PtrType(), SPAN)
+    equal(first, ir.MemRef(other_base, 0, 64, SPAN), False)
+    equal(first, ir.MemRef(other_base, 0, 64, SPAN), auto=True)
+
+
+def test_comparison_does_not_implicitly_verify_binding_validity():
+    x = var("x")
+    malformed = ir.SeqStmts(
+        [ir.EvalStmt(x, SPAN), ir.AssignStmt(x, ir.ConstInt(1, D.INT64, SPAN), SPAN)], SPAN
+    )
+    equal(malformed, malformed)
+    with pytest.raises(ir.StructuralComparisonUnsupported, match="BindingNotVisible"):
+        ir.verify_structural_bindings(malformed)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_storage_test_normalization_keeps_variable_allocations():
+    """Normalizing inferred Call metadata must not hide storage pass regressions."""
+
+    def program(offset, call_memref):
+        base = ir.Var("base", ir.PtrType(), SPAN)
+        memref = ir.MemRef(base, offset, 16, SPAN)
+        shape = [ir.ConstInt(4, D.INDEX, SPAN)]
+        type_ = ir.TensorType(shape, D.FP32, memref)
+        result = ir.Var("result", type_, SPAN)
+        call_type = type_ if call_memref else ir.TensorType(shape, D.FP32)
+        call = ir.Call(ir.GlobalVar("callee"), [], call_type, SPAN)
+        body = ir.SeqStmts([ir.AssignStmt(result, call, SPAN), ir.ReturnStmt([result], SPAN)], SPAN)
+        func = ir.Function("main", [], [], body, SPAN)
+        return ir.Program([func], "Example", SPAN)
+
+    lhs, rhs = program(0, False), program(0, True)
+    equal(lhs, rhs, False)
+    equal(without_call_memrefs(lhs), without_call_memrefs(rhs))
+    equal(without_call_memrefs(lhs), without_call_memrefs(program(16, True)), False)

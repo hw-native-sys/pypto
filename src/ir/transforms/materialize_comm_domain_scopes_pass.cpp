@@ -38,6 +38,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
@@ -614,7 +615,7 @@ class DefiningCallRetyper : public IRMutator {
 
     auto retyped = std::make_shared<const DistributedTensorType>(
         call_dt->shape_, call_dt->dtype_, call_dt->memref_, call_dt->tensor_view_, var_dt->window_buffer_);
-    if (!structural_equal(retyped, var_dt)) return base;
+    if (!structural_equal(CloneTypeWithoutMemRef(retyped), CloneTypeWithoutMemRef(var_dt))) return base;
 
     auto new_call =
         std::make_shared<Call>(call->op_, call->args_, call->kwargs_, call->attrs_, retyped, call->span_);

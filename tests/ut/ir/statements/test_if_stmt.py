@@ -448,7 +448,10 @@ class TestIfStmtAutoMapping:
         if_stmt2 = ir.IfStmt(condition2, assign2_then, assign2_else, [], ir.Span.unknown())
 
         ir.assert_structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=True)
-        assert not ir.structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=False)
+        # Definitions are alpha-renamed even in invalid use-before-definition IR.
+        ir.assert_structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=False)
+        with pytest.raises(ir.StructuralComparisonUnsupported, match="BindingNotVisible"):
+            ir.verify_structural_bindings(if_stmt1)
 
         hash_with_auto1 = ir.structural_hash(if_stmt1, enable_auto_mapping=True)
         hash_with_auto2 = ir.structural_hash(if_stmt2, enable_auto_mapping=True)
@@ -456,7 +459,7 @@ class TestIfStmtAutoMapping:
 
         hash_without_auto1 = ir.structural_hash(if_stmt1, enable_auto_mapping=False)
         hash_without_auto2 = ir.structural_hash(if_stmt2, enable_auto_mapping=False)
-        assert hash_without_auto1 != hash_without_auto2
+        assert hash_without_auto1 == hash_without_auto2
 
     def test_auto_mapping_if_stmt_different_structure(self):
         """Test auto mapping with IfStmt where structure differs."""

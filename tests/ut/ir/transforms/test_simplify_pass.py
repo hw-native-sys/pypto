@@ -27,6 +27,8 @@ import pytest
 from pypto import ir, passes
 from pypto.pypto_core import DataType
 
+from .storage_test_utils import without_call_memrefs
+
 _OP_PLD_TENSOR_ALLREDUCE = ir.get_op("pld.tensor.allreduce").name
 
 # ============================================================================
@@ -601,7 +603,7 @@ class TestControlFlow:
         after = passes.simplify()(Before)
         diagnostics = passes.PropertyVerifierRegistry.verify(props, after)
         assert not diagnostics, [d.message for d in diagnostics]
-        ir.assert_structural_equal(after, Expected)
+        ir.assert_structural_equal(without_call_memrefs(after), without_call_memrefs(Expected))
 
     def test_while_tensor_iter_arg_memref_offset_preserves_identity(self):
         """Folding a use's MemRef offset must not invent a new carry definition."""
@@ -653,7 +655,7 @@ class TestControlFlow:
         after = passes.simplify()(Before)
         diagnostics = passes.PropertyVerifierRegistry.verify(props, after)
         assert not diagnostics, [d.message for d in diagnostics]
-        ir.assert_structural_equal(after, Expected)
+        ir.assert_structural_equal(without_call_memrefs(after), without_call_memrefs(Expected))
 
     def test_while_body_fold_does_not_leak_var_remap_past_the_loop(self):
         """A fold inside a while body must not rewrite uses after the loop.

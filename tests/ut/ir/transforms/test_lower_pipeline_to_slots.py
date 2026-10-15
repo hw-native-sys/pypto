@@ -94,8 +94,18 @@ def _pipeline_loops(program: ir.Program) -> list[ir.ForStmt]:
 
 def _load_count(program: ir.Program) -> int:
     """How many tile.load calls the program contains (replication detector)."""
-    text = program.as_python()
-    return text.count("pl.load(") + text.count("tile.load(")
+
+    class CountLoads(ir.IRVisitor):
+        count = 0
+
+        def visit_call(self, op):
+            if op.op.name == ir.get_op("tile.load").name:
+                self.count += 1
+            super().visit_call(op)
+
+    visitor = CountLoads()
+    visitor.visit_program(program)
+    return visitor.count
 
 
 @pl.program

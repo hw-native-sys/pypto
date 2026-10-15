@@ -16,8 +16,8 @@ from pypto.pypto_core import passes as _passes
 def _assert_structural_hash_equal(original: _ir.IRNode, restored: _ir.IRNode, pass_name: str) -> None:
     """Enforce the equal-IR/equal-hash contract after a roundtrip."""
     try:
-        original_hash = _ir.structural_hash(original)
-        restored_hash = _ir.structural_hash(restored)
+        original_hash = _ir.structural_hash(original, enable_auto_mapping=True)
+        restored_hash = _ir.structural_hash(restored, enable_auto_mapping=True)
     except Exception as exc:
         raise RuntimeError(
             f"[RoundtripInstrument] Structural hash computation failed after pass '{pass_name}'.\n{exc}"
@@ -37,6 +37,10 @@ def make_roundtrip_instrument() -> _passes.CallbackInstrument:
     2. Parses the text back to an IR Program (``parse``).
     3. Asserts structural equality between the original and re-parsed programs.
     4. Checks that their structural hashes are equal, using the same mapping policy.
+
+    Reconstruction creates fresh objects for open symbolic references. Both
+    equality and hashing explicitly alpha-map free variables while preserving
+    their reference pattern.
 
     A failure means the printer or parser cannot faithfully represent the IR
     produced by that pass, or structural hashing violates the equal-IR/equal-hash contract.
@@ -63,7 +67,7 @@ def make_roundtrip_instrument() -> _passes.CallbackInstrument:
         if any(func.ir_stage == _ir.FunctionIRStage.Buffer for func in program.functions.values()):
             try:
                 restored = _ir.deserialize(_ir.serialize(program))
-                _ir.assert_structural_equal(program, restored)
+                _ir.assert_structural_equal(program, restored, enable_auto_mapping=True)
             except Exception as exc:
                 raise RuntimeError(
                     f"[RoundtripInstrument] Binary roundtrip failed after pass '{pass_name}'.\n{exc}"
@@ -102,7 +106,7 @@ def make_roundtrip_instrument() -> _passes.CallbackInstrument:
 
         # --- Step 3: structural equality ---
         try:
-            _ir.assert_structural_equal(program, reparsed)
+            _ir.assert_structural_equal(program, reparsed, enable_auto_mapping=True)
         except Exception as exc:
             error_msg = str(exc)
             raise RuntimeError(

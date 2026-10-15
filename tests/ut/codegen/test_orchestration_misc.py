@@ -1065,7 +1065,7 @@ class TestScalarCarryPhiCodegen:
                 a: pl.Tensor[[16, 16], pl.FP32],
                 d: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
-                for _k, (acc,) in pl.range(8, init_values=(4,)):
+                for _k, (acc,) in pl.range(8, init_values=(pl.const(4, pl.INT64),)):
                     d = self.kernel_add(a, d)
                     acc_out: pl.Scalar[pl.INT64] = pl.yield_(acc)
                 for _ in pl.range(acc_out):
