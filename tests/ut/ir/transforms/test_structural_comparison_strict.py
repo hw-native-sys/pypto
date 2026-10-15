@@ -192,10 +192,12 @@ def test_storage_is_rejected_everywhere(location):
         ir.structural_hash(node, mode=STRICT)
     assert exc.value.reason == "UnsupportedStorage"
     assert "memref" in exc.value.field_path
-    with pytest.raises(ir.StructuralComparisonUnsupported):
-        ir.structural_equal(node, node, mode=STRICT)
-    with pytest.raises(ir.StructuralComparisonUnsupported):
-        ir.assert_structural_equal(node, node, mode=STRICT)
+    for compare in (ir.structural_equal, ir.assert_structural_equal):
+        with pytest.raises(ir.StructuralComparisonUnsupported):
+            if isinstance(node, ir.Type):
+                compare(node, node, mode=STRICT)
+            else:
+                compare(node, node, mode=STRICT)
 
 
 def test_default_type_equality_still_ignores_attached_memref():
