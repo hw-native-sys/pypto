@@ -47,6 +47,7 @@ import warnings
 from pathlib import Path
 from typing import Any
 
+from pypto._target import _parse_platform
 from pypto.ir.compiled_program import _COMPILED_META_FILENAME, _COMPILED_META_SCHEMA, _load_meta
 from pypto.runtime.runner import (
     _SWIMLANE_CLI_HELP,
@@ -316,10 +317,11 @@ def execute_batch_manifest(
         if rebound is not None and str(entry["platform"]) == shared_platform and rebound[1] == first_runtime
     )
 
+    backend_type, execution_mode = _parse_platform(shared_platform)
     with ChipWorker(
         config=RunConfig(
-            # InitVar cannot coexist with the same-named read property; see RunConfig.
-            platform=shared_platform,
+            backend_type=backend_type,
+            execution_mode=execution_mode,
             device_id=device_id,
         ),
         runtime=first_runtime,

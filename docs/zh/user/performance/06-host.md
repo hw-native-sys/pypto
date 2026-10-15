@@ -1,5 +1,9 @@
 # Host
 
+> **旧 Python 接口示例：** 本页为兼容现有用法保留 `platform=` 调用，
+> 这些调用会发出 `DeprecationWarning`；新代码应使用 `backend_type` 和
+> `execution_mode`。参见[目标映射](../../dev/08-entry-points.md#迁移旧-platform-示例)。
+
 host 侧唯一一个能压过其他所有开销的成本：拷贝了本来不需要动的数据。
 
 > **前置**：能跑起一个 kernel 就够了。

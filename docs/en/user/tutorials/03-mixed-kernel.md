@@ -1,5 +1,9 @@
 # Mixed Kernels
 
+> **Legacy Python API examples:** `platform=` calls on this page are retained for
+> compatibility. They emit `DeprecationWarning`; new code should use
+> `backend_type` and `execution_mode`. See the [target mapping](../../dev/08-entry-points.md#legacy-platform-examples).
+
 Cube and vector working at the same time, inside one scope.
 
 > **Prerequisites:** [Tiled matmul](02-matmul.md).

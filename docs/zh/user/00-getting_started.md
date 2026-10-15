@@ -1,5 +1,9 @@
 # 在设备上运行
 
+> **旧 Python 接口示例：** 本页为兼容现有用法保留 `platform=` 调用，
+> 这些调用会发出 `DeprecationWarning`；新代码应使用 `backend_type` 和
+> `execution_mode`。参见[目标映射](../dev/08-entry-points.md#迁移旧-platform-示例)。
+
 数据常驻 worker、显式派发、性能测量，以及分布式程序的运行。
 
 > **本页处于过渡状态。** 其入门部分已迁至 [快速上手](02-quickstart.md)。这里保留的是设备执行

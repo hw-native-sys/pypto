@@ -27,6 +27,10 @@ All three modes use a ``@pl.jit`` kernel and the new
   5. ``worker.close()`` cleaning up cids + DeviceTensors in one shot
 
 Run:  python examples/runtime/explicit_dispatch.py
+
+Legacy Python API example: platform= calls below are retained for compatibility
+and emit DeprecationWarning. New Python code should use backend_type and
+execution_mode; see docs/en/dev/08-entry-points.md#legacy-platform-examples.
 """
 
 from __future__ import annotations

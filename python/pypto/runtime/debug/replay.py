@@ -37,7 +37,7 @@ Python::
     replay(
         "build_output/_jit_xxx/",
         a, b, c,
-        config=RunConfig(platform="a2a3sim", enable_pmu=2, enable_chip_swimlane=4),
+        config=RunConfig(enable_pmu=2, enable_chip_swimlane=4),
     )
 """
 
@@ -211,7 +211,9 @@ def replay(
             DistributedCompiledProgram,
         )
 
-        compiled = DistributedCompiledProgram.from_dir(work_dir, platform=config.platform)
+        compiled = DistributedCompiledProgram.from_dir(
+            work_dir, backend_type=config.backend_type, execution_mode=config.execution_mode
+        )
         compiled(*tensors, config=config)
     else:
         _execute_compiled(

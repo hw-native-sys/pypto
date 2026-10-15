@@ -1,5 +1,9 @@
 # 调度调优
 
+> **旧 Python 接口示例：** 本页为兼容现有用法保留 `platform=` 调用，
+> 这些调用会发出 `DeprecationWarning`；新代码应使用 `backend_type` 和
+> `execution_mode`。参见[目标映射](../../dev/08-entry-points.md#迁移旧-platform-示例)。
+
 搞清运行时拿你的图做了什么，然后凭证据去改。
 
 > **前置**：[塑形任务图](04-task-graph.md)。

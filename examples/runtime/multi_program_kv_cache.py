@@ -39,6 +39,10 @@ This needs a real device + the ``simpler`` runtime; without one it prints a
 skip notice instead of failing.
 
 Run:  python examples/runtime/multi_program_kv_cache.py
+
+Legacy Python API example: platform= calls below are retained for compatibility
+and emit DeprecationWarning. New Python code should use backend_type and
+execution_mode; see docs/en/dev/08-entry-points.md#legacy-platform-examples.
 """
 
 from __future__ import annotations

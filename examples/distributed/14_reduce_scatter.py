@@ -35,6 +35,10 @@ The cost card: the first half of two-phase all-reduce — each rank ends with
 ``N/P`` elements reduced, ``(P-1)/P * N`` bytes received.
 
 Run + walkthrough: see docs/en/user/distributed/19-reduce_scatter.md
+
+Legacy Python API example: platform= calls below are retained for compatibility
+and emit DeprecationWarning. New Python code should use backend_type and
+execution_mode; see docs/en/dev/08-entry-points.md#legacy-platform-examples.
 """
 
 import argparse

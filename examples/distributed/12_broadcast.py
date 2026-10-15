@@ -29,6 +29,10 @@ The cost card: root writes ``N`` bytes, every peer reads them — ``(P-1)*N``
 total bytes in one round; the round trip, not the bytes, is what you feel.
 
 Run + walkthrough: see docs/en/user/distributed/17-broadcast.md
+
+Legacy Python API example: platform= calls below are retained for compatibility
+and emit DeprecationWarning. New Python code should use backend_type and
+execution_mode; see docs/en/dev/08-entry-points.md#legacy-platform-examples.
 """
 
 import argparse

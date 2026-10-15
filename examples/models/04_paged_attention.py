@@ -31,6 +31,10 @@ Shared InCore kernels (module-level @pl.function):
   kernel_pv_matmul, kernel_online_update
 
 These can be imported and reused by other @pl.program definitions.
+
+Legacy Python API example: platform= calls below are retained for compatibility
+and emit DeprecationWarning. New Python code should use backend_type and
+execution_mode; see docs/en/dev/08-entry-points.md#legacy-platform-examples.
 """
 
 import argparse

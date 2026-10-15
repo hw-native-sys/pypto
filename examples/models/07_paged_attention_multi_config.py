@@ -42,6 +42,10 @@ Module-level InCore kernels (reusable, importable):
 Factory functions for multi-block kernels:
   make_kernel_qk_matmul()
   make_kernel_pv_matmul()
+
+Legacy Python API example: platform= calls below are retained for compatibility
+and emit DeprecationWarning. New Python code should use backend_type and
+execution_mode; see docs/en/dev/08-entry-points.md#legacy-platform-examples.
 """
 
 # DSL function bodies are parsed as AST — dynamic var names look undefined to pyright.

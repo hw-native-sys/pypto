@@ -42,6 +42,10 @@ missing barrier would let the load race the peer's store; the golden
 ``y[r] = x[(r+1) % N]`` holds only because the barrier ordered them.
 
 Run + walkthrough: see docs/en/user/distributed/09-barrier.md
+
+Legacy Python API example: platform= calls below are retained for compatibility
+and emit DeprecationWarning. New Python code should use backend_type and
+execution_mode; see docs/en/dev/08-entry-points.md#legacy-platform-examples.
 """
 
 import argparse

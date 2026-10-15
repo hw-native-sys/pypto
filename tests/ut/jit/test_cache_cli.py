@@ -45,16 +45,25 @@ def _write(tmp_path, requests, **extra):
     return path
 
 
-def test_metadata_only_warmup_and_relative_paths(tmp_path, cli_kernel):
+@pytest.mark.filterwarnings("error::DeprecationWarning")
+@pytest.mark.parametrize("platform", [None, "a2a3", "a2a3sim", "a5", "a5sim"])
+def test_metadata_only_warmup_and_relative_paths(tmp_path, cli_kernel, platform):
     module, calls = cli_kernel
     path = _write(
         tmp_path,
-        [{"kernel": "kernel", "tensors": {n: {"shape": [16, 16], "dtype": "FP32"} for n in ("x", "out")}}],
+        [
+            {
+                "kernel": "kernel",
+                "tensors": {n: {"shape": [16, 16], "dtype": "FP32"} for n in ("x", "out")},
+                "run_config": {"platform": platform} if platform is not None else {},
+            }
+        ],
         cache={"enabled": True, "root": "cache", "extra_source_paths": ["sources"]},
     )
     result = warm(module, path)
     assert result["requests"][0]["storage"] == "private"
     assert len(calls) == 1
+    assert calls[0]["config"].platform == (platform or "a2a3sim")
     assert calls[0]["x"].device.type == "meta"
     assert calls[0]["config"].cache_config.root == tmp_path / "cache"
     assert calls[0]["config"].cache_config.extra_source_paths == (tmp_path / "sources",)

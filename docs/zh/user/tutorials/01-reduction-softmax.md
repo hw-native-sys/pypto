@@ -1,5 +1,9 @@
 # 规约与 softmax
 
+> **旧 Python 接口示例：** 本页为兼容现有用法保留 `platform=` 调用，
+> 这些调用会发出 `DeprecationWarning`；新代码应使用 `backend_type` 和
+> `execution_mode`。参见[目标映射](../../dev/08-entry-points.md#迁移旧-platform-示例)。
+
 一个输出元素依赖于整行的场合，tile 词汇多出两种形状。
 
 > **前置**：[第一个算子](00-elementwise.md)。

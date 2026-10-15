@@ -1,5 +1,9 @@
 # 管理任务依赖
 
+> **旧 Python 接口示例：** 本页为兼容现有用法保留 `platform=` 调用，
+> 这些调用会发出 `DeprecationWarning`；新代码应使用 `backend_type` 和
+> `execution_mode`。参见[目标映射](../../dev/08-entry-points.md#迁移旧-platform-示例)。
+
 运行时为什么有时会把本可同时跑的活排成一队，以及该怎么办。
 
 > **前置**：[任务与定序](../tasks/index.md) —— 本页假定你已经知道 `deps=`、`manual_scope`、`no_dep_args` **是什么**。这里把它们当作调优决策来讲。

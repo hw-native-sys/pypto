@@ -1795,5 +1795,21 @@ def test_reload_execution_mode_keeps_backend_and_metadata(tmp_path):
     assert (tmp_path / _COMPILED_META_FILENAME).read_bytes() == metadata
 
 
+def test_reload_platform_warns_but_explicit_mode_and_metadata_are_silent(tmp_path):
+    CompiledProgram(_make_program_with_orchestration(), str(tmp_path), backend_type=BackendType.Ascend950)
+    metadata = (tmp_path / _COMPILED_META_FILENAME).read_bytes()
+    with pytest.warns(DeprecationWarning, match=r"CompiledProgram.from_dir\(platform=") as caught:
+        legacy = CompiledProgram.from_dir(tmp_path, platform="a5")
+    assert len(caught) == 1
+    assert caught[0].filename == __file__
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        explicit = CompiledProgram.from_dir(tmp_path, execution_mode=ExecutionMode.ONBOARD)
+        persisted = CompiledProgram.from_dir(tmp_path)
+        assert explicit.platform == legacy.platform == "a5"
+        assert persisted.execution_mode is ExecutionMode.SIM
+    assert (tmp_path / _COMPILED_META_FILENAME).read_bytes() == metadata
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

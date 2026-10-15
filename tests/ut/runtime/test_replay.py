@@ -21,7 +21,8 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from pypto.runtime import RunConfig
+from pypto.backend import BackendType
+from pypto.runtime import ExecutionMode, RunConfig
 
 # ``pypto.runtime.debug.__init__`` re-exports ``replay`` (the function),
 # which shadows the ``replay`` submodule on attribute lookup. Resolve the
@@ -247,7 +248,9 @@ def test_replay_routes_l3_through_distributed_compiled_program(tmp_path: Path) -
         patch.object(replay_module, "_execute_compiled") as ec,
     ):
         replay(work_dir, a, b, config=RunConfig(platform="a2a3sim"), rebuild_from_pto=False, recompile=False)
-    from_dir.assert_called_once_with(work_dir, platform="a2a3sim")
+    from_dir.assert_called_once_with(
+        work_dir, backend_type=BackendType.Ascend910B, execution_mode=ExecutionMode.SIM
+    )
     ec.assert_not_called()  # single-chip path must not be taken for L3
     compiled = from_dir.return_value
     compiled.assert_called_once()

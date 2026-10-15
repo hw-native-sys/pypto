@@ -30,6 +30,10 @@ receives ``(P-1)/P * N`` bytes in one round — the same bytes as the two-phase
 all-reduce's gather phase.
 
 Run + walkthrough: see docs/en/user/distributed/18-allgather.md
+
+Legacy Python API example: platform= calls below are retained for compatibility
+and emit DeprecationWarning. New Python code should use backend_type and
+execution_mode; see docs/en/dev/08-entry-points.md#legacy-platform-examples.
 """
 
 import argparse

@@ -48,7 +48,9 @@ from pypto.runtime import RunConfig
 
 assert importlib.import_module('json').loads('{"ok": true}')['ok']
 config = RunConfig(platform='a2a3sim')
-assert config.compile_kwargs()['platform'] == 'a2a3sim'
+assert config.compile_kwargs()['backend_type'] == config.backend_type
+assert config.compile_kwargs()['execution_mode'] is config.execution_mode
+assert 'platform' not in config.compile_kwargs()
 """)
     assert result.returncode == 0, result.stderr
 

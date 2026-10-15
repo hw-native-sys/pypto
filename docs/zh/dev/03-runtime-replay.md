@@ -1,5 +1,9 @@
 # 重放已有的 `build_output`
 
+> **旧 Python 接口示例：** 本页为兼容现有用法保留 `platform=` 调用，
+> 这些调用会发出 `DeprecationWarning`；新代码应使用 `backend_type` 和
+> `execution_mode`。参见[目标映射](08-entry-points.md#迁移旧-platform-示例)。
+
 在不从 DSL 重新编译的前提下，重跑、修改并重新测量一个已编译的
 `build_output/<jit_dir>/`。本页引用的各项诊断开关记录在
 [运行时 DFX 开关](03-runtime-dfx.md)。

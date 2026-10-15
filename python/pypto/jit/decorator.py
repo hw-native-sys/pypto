@@ -75,6 +75,7 @@ from typing import Any, NamedTuple, cast
 from pypto._cache_config import capture_cache_config, record_stats, time_stage
 from pypto._external_source import external_source_digest
 from pypto._identity import digest_record
+from pypto._target import _platform_string
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import emit_source_loc_default
 from pypto.compile_profiling import get_active_profiler
@@ -3549,6 +3550,7 @@ class JITFunction:
         )
 
         compile_kwargs, bypass_cache = _resolve_compile_request(run_config)
+        target_platform = _platform_string(compile_kwargs["backend_type"], compile_kwargs["execution_mode"])
         cache_config = capture_cache_config(getattr(run_config, "cache_config", None))
         record_stats(requests=1)
         if not cache_config.enabled:
@@ -3589,7 +3591,7 @@ class JITFunction:
             dynamic_dims={
                 (n, i) for n, m in specialization.tensor_meta.items() for i in m.dynamic_dim_indices()
             },
-            platform=compile_kwargs["platform"],
+            platform=target_platform,
             strategy=compile_kwargs["strategy"],
             distributed_config=compile_kwargs.get("distributed_config"),
             analyze_auto_scopes_for_deps=compile_kwargs["analyze_auto_scopes_for_deps"],
@@ -3610,7 +3612,7 @@ class JITFunction:
                     cache_config,
                     build,
                     self._persistent_source_digest,
-                    platform=compile_kwargs["platform"],
+                    platform=target_platform,
                     runtime_name=runtime_kind_to_name(_resolve_runtime()),
                     distributed=self._func_type == "host",
                 )
@@ -3761,7 +3763,9 @@ class JITFunction:
             ):
                 ...
 
-            worker = ChipWorker(config=RunConfig(platform="a2a3"))
+            from pypto.runtime import ChipWorker, ExecutionMode, RunConfig
+
+            worker = ChipWorker(config=RunConfig(execution_mode=ExecutionMode.ONBOARD))
 
             # From sample tensors (shape/dtype read; contents ignored):
             compiled = my_kernel.compile(sample_x, sample_w, sample_out, 128)

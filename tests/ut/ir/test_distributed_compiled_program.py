@@ -16,6 +16,7 @@ owner Buffer/provenance cannot belong to a temporary one-shot Worker.
 """
 
 import json
+import warnings
 from unittest.mock import patch
 
 import pypto.language as pl
@@ -466,6 +467,21 @@ def test_from_dir_overrides_execution_mode(compiled, tmp_path):
     assert restored.backend_type == compiled.backend_type
     assert restored.execution_mode is ExecutionMode.ONBOARD
     assert restored.platform == "a2a3"
+
+
+def test_reload_platform_warns_but_explicit_mode_and_metadata_are_silent(compiled, tmp_path):
+    metadata = (tmp_path / _DISTRIBUTED_META_FILENAME).read_bytes()
+    with pytest.warns(DeprecationWarning, match=r"DistributedCompiledProgram.from_dir\(platform=") as caught:
+        legacy = DistributedCompiledProgram.from_dir(tmp_path, platform="a2a3")
+    assert len(caught) == 1
+    assert caught[0].filename == __file__
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        explicit = DistributedCompiledProgram.from_dir(tmp_path, execution_mode=ExecutionMode.ONBOARD)
+        persisted = DistributedCompiledProgram.from_dir(tmp_path)
+        assert explicit.platform == legacy.platform == "a2a3"
+        assert persisted.execution_mode is ExecutionMode.SIM
+    assert (tmp_path / _DISTRIBUTED_META_FILENAME).read_bytes() == metadata
 
 
 if __name__ == "__main__":

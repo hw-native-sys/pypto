@@ -1,5 +1,9 @@
 # 三层编程模型（The Three-Level Programming Model）
 
+> **旧 Python 接口示例：** 本页为兼容现有用法保留 `platform=` 调用，
+> 这些调用会发出 `DeprecationWarning`；新代码应使用 `backend_type` 和
+> `execution_mode`。参见[目标映射](../../dev/08-entry-points.md#迁移旧-platform-示例)。
+
 标注分布式程序的三个层级——主机编排器、每设备编排、设备 kernel——并看清
 每一层由哪个处理器运行。
 

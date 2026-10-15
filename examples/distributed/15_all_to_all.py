@@ -33,6 +33,10 @@ The cost card: every rank sends a *different* ``N/P`` slice to each peer —
 ``(P-1)/P * N`` bytes received, and no two ranks want the same bytes.
 
 Run + walkthrough: see docs/en/user/distributed/20-all_to_all.md
+
+Legacy Python API example: platform= calls below are retained for compatibility
+and emit DeprecationWarning. New Python code should use backend_type and
+execution_mode; see docs/en/dev/08-entry-points.md#legacy-platform-examples.
 """
 
 import argparse

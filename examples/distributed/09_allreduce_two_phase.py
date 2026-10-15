@@ -28,6 +28,10 @@ slices, compared with a tolerance. Run at P>=4 to see the traffic difference
 from mesh (P=2 collapses the two algorithms into the same exchange).
 
 Run + walkthrough: see docs/en/user/distributed/14-allreduce_two_phase.md
+
+Legacy Python API example: platform= calls below are retained for compatibility
+and emit DeprecationWarning. New Python code should use backend_type and
+execution_mode; see docs/en/dev/08-entry-points.md#legacy-platform-examples.
 """
 
 import argparse

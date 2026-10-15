@@ -9,6 +9,7 @@
 
 """Target architecture and execution-mode normalization shared by compiler and runtime."""
 
+import warnings
 from enum import Enum, auto
 
 from pypto.backend import BackendType
@@ -83,4 +84,19 @@ def _resolve_target(
     return backend_type, execution_mode if execution_mode is not None else ExecutionMode.SIM
 
 
-__all__ = ["ExecutionMode", "_parse_platform", "_platform_string", "_resolve_target"]
+def _warn_deprecated_platform(api: str) -> None:
+    """Warn at a public legacy input boundary, pointing to its caller."""
+    warnings.warn(
+        f"{api}(platform=...) is deprecated; use backend_type and execution_mode instead.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+
+
+__all__ = [
+    "ExecutionMode",
+    "_parse_platform",
+    "_platform_string",
+    "_resolve_target",
+    "_warn_deprecated_platform",
+]

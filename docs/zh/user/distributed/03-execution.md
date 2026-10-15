@@ -1,5 +1,9 @@
 # 执行
 
+> **旧 Python 接口示例：** 本页为兼容现有用法保留 `platform=` 调用，
+> 这些调用会发出 `DeprecationWarning`；新代码应使用 `backend_type` 和
+> `execution_mode`。参见[目标映射](../../dev/08-entry-points.md#迁移旧-platform-示例)。
+
 一次性的编译并派发调用足以应付快速测试。生产代码则会将设置成本——
 fork chip 进程、组装 kernel——分摊到可复用的 `DistributedWorker` 上的多次
 派发中。

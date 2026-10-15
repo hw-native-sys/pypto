@@ -134,9 +134,14 @@ def main(argv: list[str]) -> int:
     if aicpu_thread_num is None:
         aicpu_thread_num = runtime_config.get("aicpu_thread_num")
 
+    from pypto._target import _parse_platform  # noqa: PLC0415
+
     from .runner import RunConfig  # noqa: PLC0415
 
-    config = RunConfig(platform=platform, **spec.get("ring_overrides", {}))
+    backend_type, execution_mode = _parse_platform(platform)
+    config = RunConfig(
+        backend_type=backend_type, execution_mode=execution_mode, **spec.get("ring_overrides", {})
+    )
 
     dfx_dir.mkdir(parents=True, exist_ok=True)
     _execute_on_device(

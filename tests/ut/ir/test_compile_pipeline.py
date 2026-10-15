@@ -11,6 +11,7 @@
 
 import json
 import re
+import warnings
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -226,6 +227,24 @@ def test_compile_rejects_conflicting_mode_before_creating_output(tmp_path):
             _scalar_program(), platform="a5", execution_mode=ExecutionMode.SIM, output_dir=str(output_dir)
         )
     assert not output_dir.exists()
+
+
+@pytest.mark.parametrize("legacy", [True, False])
+def test_compile_platform_deprecation_does_not_leak_into_new_api(tmp_path, legacy):
+    from pypto.runtime import CompileOptions  # noqa: PLC0415
+
+    kwargs = CompileOptions(execution_mode=ExecutionMode.ONBOARD).as_compile_kwargs()
+    kwargs.update(output_dir=str(tmp_path), skip_ptoas=True, dump_passes=False)
+    if legacy:
+        with pytest.warns(DeprecationWarning, match=r"ir.compile\(platform=") as caught:
+            compiled = ir.compile(_scalar_program(), platform="a2a3", **kwargs)
+        assert len(caught) == 1
+        assert caught[0].filename == __file__
+    else:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            compiled = ir.compile(_scalar_program(), **kwargs)
+    assert compiled.platform == "a2a3"
 
 
 if __name__ == "__main__":

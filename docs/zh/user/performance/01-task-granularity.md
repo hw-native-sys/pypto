@@ -1,5 +1,9 @@
 # 任务粒度
 
+> **旧 Python 接口示例：** 本页为兼容现有用法保留 `platform=` 调用，
+> 这些调用会发出 `DeprecationWarning`；新代码应使用 `backend_type` 和
+> `execution_mode`。参见[目标映射](../../dev/08-entry-points.md#迁移旧-platform-示例)。
+
 派发不是免费的。把 InCore 函数的尺寸定在「核把时间花在算，而不是花在等着被告知算什么」的那个点上。
 
 > **前置**：[读泳道图](00-swimlane.md)。

@@ -1,5 +1,9 @@
 # 缩小精度差距
 
+> **旧 Python 接口示例：** 本页为兼容现有用法保留 `platform=` 调用，
+> 这些调用会发出 `DeprecationWarning`；新代码应使用 `backend_type` 和
+> `execution_mode`。参见[目标映射](../../dev/08-entry-points.md#迁移旧-platform-示例)。
+
 结果与 golden 对不上。本页讲的是**按什么顺序去怀疑**，不是 API 参考。
 
 > **前置**：[第一个算子](../tutorials/00-elementwise.md) —— 本页假定你已经有那里的 `allclose` 对比。

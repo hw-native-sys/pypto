@@ -98,7 +98,12 @@ L3 那个是纯粹改名 —— 它本来就是 `from_dir` 加一次调用：
 execute_distributed_compiled(work_dir, args, config=cfg, platform="a2a3")
 
 # after
-ir.DistributedCompiledProgram.from_dir(work_dir, platform="a2a3")(*args, config=cfg)
+from pypto.backend import BackendType
+from pypto.runtime import ExecutionMode
+
+ir.DistributedCompiledProgram.from_dir(
+    work_dir, backend_type=BackendType.Ascend910B, execution_mode=ExecutionMode.ONBOARD,
+)(*args, config=cfg)
 ```
 
 **L2 那个不是**，因为两条路径的优先级规则不同：
@@ -118,13 +123,37 @@ ir.DistributedCompiledProgram.from_dir(work_dir, platform="a2a3")(*args, config=
 execute_compiled(work_dir, args, platform="a2a3", device_id=0, config=cfg)
 
 # after —— 由 cfg 承载全部执行期设置
-cfg = dataclasses.replace(cfg, platform="a2a3", device_id=0)
+from pypto.backend import BackendType
+from pypto.runtime import ExecutionMode
+
+cfg = dataclasses.replace(
+    cfg, backend_type=BackendType.Ascend910B, execution_mode=ExecutionMode.ONBOARD, device_id=0,
+)
 ir.CompiledProgram.from_dir(work_dir)(*args, config=cfg)
 ```
 
 `dfx` 与 `aicpu_thread_num` 不需要翻译：各个 DFX 开关与 `aicpu_thread_num`
-本来就是 `RunConfig` 的字段。而 `from_dir(platform=...)` 仍决定**不带 config**
-那次调用的 platform。
+本来就是 `RunConfig` 的字段。传给
+`from_dir(backend_type=..., execution_mode=...)` 的目标用于**不带 config** 的调用。
+
+## 迁移旧 platform 示例
+
+部分指南和可运行示例保留 `platform=`，用于展示对现有调用方及基于 platform 的
+测试配置的兼容性。这些示例明确标记为**旧接口示例**：该 Python 参数会发出
+`DeprecationWarning`，将此警告视为错误时会失败。新 Python 代码应从
+`pypto.backend` 导入 `BackendType`，从 `pypto.runtime` 导入 `ExecutionMode`，
+然后用下表中的两个字段替换 `platform=`：
+
+| 旧 `platform` | `backend_type` | `execution_mode` |
+| ------------- | -------------- | ---------------- |
+| `"a2a3"` | `BackendType.Ascend910B` | `ExecutionMode.ONBOARD` |
+| `"a2a3sim"` | `BackendType.Ascend910B` | `ExecutionMode.SIM` |
+| `"a5"` | `BackendType.Ascend950` | `ExecutionMode.ONBOARD` |
+| `"a5sim"` | `BackendType.Ascend950` | `ExecutionMode.SIM` |
+
+此映射适用于 `RunConfig`、`CompileOptions`、`ir.compile`、两种产物的 `from_dir`
+方法及 `dataclasses.replace(config, ...)`。CLI 的 `--platform` 参数、warmup JSON、
+产物元数据和派生的 `.platform` 属性保留现有字符串格式，不触发 Python API 弃用警告。
 
 ## 用同一个 config 驱动两个阶段
 
@@ -132,7 +161,10 @@ ir.CompiledProgram.from_dir(work_dir)(*args, config=cfg)
 `ir.compile` 的关键字参数，因此一个 config 对象可以驱动两个阶段：
 
 ```python
-config = RunConfig(platform="a2a3")
+from pypto.backend import BackendType
+from pypto.runtime import ExecutionMode, RunConfig
+
+config = RunConfig(backend_type=BackendType.Ascend910B, execution_mode=ExecutionMode.ONBOARD)
 compiled = ir.compile(program, **config.compile_kwargs())
 compiled(*tensors, config=config)
 ```
@@ -176,7 +208,11 @@ compiled = ir.compile(
 枚举值。省略 `execution_mode` 使用默认 SIM；显式传入 `None` 或字符串会抛出
 `TypeError`。
 
-迁移期间保留 `platform=`、`.platform` 和 RunConfig 的 `arch` 字段。旧 platform
+`RunConfig`、`CompileOptions`（含位置参数形式）、`ir.compile`、
+`CompiledProgram.from_dir` 和 `DistributedCompiledProgram.from_dir` 的
+`platform=` 输入已弃用，调用时发出 `DeprecationWarning`；请改用
+`backend_type` 和 `execution_mode`。目前未指定移除版本。读取派生的 `.platform`
+属性仍不产生警告，RunConfig 的 `arch` 字段保持兼容。旧 platform
 仍决定两个轴，并优先于 backend_type；RunConfig 对两者冲突保留原有警告。
 `ir.compile` 拒绝同时显式指定但不一致的 execution_mode 和 platform。
 RunConfig、CompileOptions 的旧 platform 优先于两个轴，以兼容
@@ -184,7 +220,8 @@ RunConfig、CompileOptions 的旧 platform 优先于两个轴，以兼容
 现在会真正选择架构，RunConfig 不再丢弃它。
 
 RunConfig 暂时用 arch 存储架构，backend_type 是构造及读取别名；
-CompileOptions 保存 backend_type、execution_mode。配置向编译器的映射、产物文件、
+CompileOptions 保存 backend_type、execution_mode。配置向编译器的映射传递
+`backend_type` 和 `execution_mode`，因此新接口编译不会产生旧接口警告。产物文件、
 CLI 兼容路径、缓存 key 与 Simpler SDK 调用继续使用内部规范平台编码，
 因此新旧写法对应同一缓存身份。本次不改变运行配置默认值或进程级后端选择限制。
 
@@ -194,9 +231,9 @@ CLI 兼容路径、缓存 key 与 Simpler SDK 调用继续使用内部规范平�
 因为它存在的意义就是用编译器自己的词汇说出编译侧；它也可以独立使用：
 
 ```python
-from pypto.runtime import CompileOptions
+from pypto.runtime import CompileOptions, ExecutionMode
 
-compiled = ir.compile(program, **CompileOptions(platform="a2a3").as_compile_kwargs())
+compiled = ir.compile(program, **CompileOptions(execution_mode=ExecutionMode.ONBOARD).as_compile_kwargs())
 ```
 
 **三个里只导出两个**，因为只有两个是调用方真能交出去的东西。`CompileOptions` 如上，

@@ -14,6 +14,10 @@ BLOCK_SIZE_DYN), while load operations use closure variables (_Q_TILE, _HEAD_DIM
 _BLOCK_SIZE) captured from build_dynamic_paged_attention_program().
 Orchestration-level tensor shapes also use pl.dynamic() variables so the program
 accepts any batch size at runtime.
+
+Legacy Python API example: platform= calls below are retained for compatibility
+and emit DeprecationWarning. New Python code should use backend_type and
+execution_mode; see docs/en/dev/08-entry-points.md#legacy-platform-examples.
 """
 
 # DSL function bodies are parsed as AST — dynamic var names look undefined to pyright.

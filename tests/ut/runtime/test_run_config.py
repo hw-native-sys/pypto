@@ -207,30 +207,48 @@ class TestSwimlaneAliasDeprecation:
 
     def test_deprecated_kwarg_maps_and_warns(self):
         with pytest.warns(DeprecationWarning, match="enable_l2_swimlane is deprecated"):
-            cfg = RunConfig(platform="a5", enable_l2_swimlane=2)
+            cfg = RunConfig(
+                backend_type=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD, enable_l2_swimlane=2
+            )
         assert cfg.enable_chip_swimlane == 2
 
     def test_deprecated_kwarg_still_normalizes_bool(self):
         with pytest.warns(DeprecationWarning):
-            assert RunConfig(platform="a5", enable_l2_swimlane=True).enable_chip_swimlane == 4
+            assert (
+                RunConfig(
+                    backend_type=BackendType.Ascend950,
+                    execution_mode=ExecutionMode.ONBOARD,
+                    enable_l2_swimlane=True,
+                ).enable_chip_swimlane
+                == 4
+            )
         with pytest.warns(DeprecationWarning):
-            assert RunConfig(platform="a5", enable_l2_swimlane=False).enable_chip_swimlane == 0
+            assert (
+                RunConfig(
+                    backend_type=BackendType.Ascend950,
+                    execution_mode=ExecutionMode.ONBOARD,
+                    enable_l2_swimlane=False,
+                ).enable_chip_swimlane
+                == 0
+            )
 
     def test_alias_read_returns_canonical_without_warning(self, recwarn):
         # Reads stay silent on purpose: dataclasses.replace() goes through this
         # property, so warning here would fire on unrelated replace() calls.
-        cfg = RunConfig(platform="a5", enable_chip_swimlane=3)
+        cfg = RunConfig(
+            backend_type=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD, enable_chip_swimlane=3
+        )
         assert cfg.enable_l2_swimlane == 3
         assert not [w for w in recwarn if issubclass(w.category, DeprecationWarning)]
 
     def test_alias_assignment_warns_and_writes_through(self):
-        cfg = RunConfig(platform="a5")
+        cfg = RunConfig(backend_type=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD)
         with pytest.warns(DeprecationWarning, match="enable_l2_swimlane is deprecated"):
             cfg.enable_l2_swimlane = 2
         assert cfg.enable_chip_swimlane == 2
 
     def test_alias_assignment_normalizes_and_validates(self):
-        cfg = RunConfig(platform="a5")
+        cfg = RunConfig(backend_type=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD)
         with pytest.warns(DeprecationWarning):
             cfg.enable_l2_swimlane = True
         assert cfg.enable_chip_swimlane == 4
@@ -242,10 +260,17 @@ class TestSwimlaneAliasDeprecation:
             pytest.raises(ValueError, match="pass only enable_chip_swimlane"),
             pytest.warns(DeprecationWarning),
         ):
-            RunConfig(platform="a5", enable_chip_swimlane=1, enable_l2_swimlane=3)
+            RunConfig(
+                backend_type=BackendType.Ascend950,
+                execution_mode=ExecutionMode.ONBOARD,
+                enable_chip_swimlane=1,
+                enable_l2_swimlane=3,
+            )
 
     def test_canonical_name_does_not_warn(self, recwarn):
-        cfg = RunConfig(platform="a5", enable_chip_swimlane=2)
+        cfg = RunConfig(
+            backend_type=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD, enable_chip_swimlane=2
+        )
         assert cfg.enable_chip_swimlane == 2
         assert not [w for w in recwarn if issubclass(w.category, DeprecationWarning)]
 
@@ -253,7 +278,9 @@ class TestSwimlaneAliasDeprecation:
         # Regression guard for the alias design: an alias *field* (or InitVar)
         # would be re-supplied by replace() from the old instance and could
         # silently override the value the caller just passed.
-        cfg = RunConfig(platform="a5", enable_chip_swimlane=4)
+        cfg = RunConfig(
+            backend_type=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD, enable_chip_swimlane=4
+        )
         assert dataclasses.replace(cfg, enable_chip_swimlane=1).enable_chip_swimlane == 1
         assert dataclasses.replace(cfg, enable_chip_swimlane=0).enable_chip_swimlane == 0
         assert dataclasses.replace(cfg, enable_dep_gen=True).enable_chip_swimlane == 4
@@ -777,19 +804,12 @@ class TestRunConfigCompileForwarding:
         assert kwargs["enable_sdma"] is expected_enable_sdma
 
     def test_compile_kwargs_name_the_target_once(self):
-        """Only ``platform`` is forwarded; ``ir.compile`` derives the backend from it.
-
-        Forwarding both would offer a pairing that cannot take effect —
-        ``ir.compile`` lets ``platform`` win whenever one is given — so the
-        config states the target once and the compiler resolves it.
-        """
-        cfg = RunConfig(platform="a5sim")
+        """The compiler receives the two axes without deprecated inputs."""
+        cfg = RunConfig(backend_type=BackendType.Ascend950)
         kwargs = cfg.compile_kwargs()
-
-        assert kwargs["platform"] == "a5sim"
-        assert "backend_type" not in kwargs
-        # Still readable on the config, as the backend that platform selected.
-        assert cfg.backend_type == BackendType.Ascend950
+        assert kwargs["backend_type"] == BackendType.Ascend950
+        assert kwargs["execution_mode"] is ExecutionMode.SIM
+        assert "platform" not in kwargs
 
     def test_a_backend_type_that_contradicts_the_platform_warns(self):
         """It was always discarded here; now it says so."""
@@ -798,32 +818,19 @@ class TestRunConfigCompileForwarding:
 
         assert cfg.backend_type == BackendType.Ascend950
 
-    def test_replace_can_switch_platform_without_warning(self):
-        """``backend_type`` must not be a field, or ``replace`` re-supplies a stale one.
-
-        ``dataclasses.replace`` passes every field of the existing instance back
-        to ``__init__``. As a field, ``backend_type`` would arrive holding the
-        *old* platform's backend, indistinguishable from a caller who typed a
-        contradicting value — so switching platform would warn, and raise under
-        warnings-as-errors.
-        """
+    def test_replace_platform_warns_without_a_stale_backend_warning(self):
         assert "backend_type" not in {f.name for f in dataclasses.fields(RunConfig)}
-
-        cfg = RunConfig(platform="a2a3")
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", DeprecationWarning)
+        cfg = RunConfig(execution_mode=ExecutionMode.ONBOARD)
+        with pytest.warns(DeprecationWarning, match=r"RunConfig\(platform=") as caught:
             switched = dataclasses.replace(cfg, platform="a5")
-
+        assert len(caught) == 1
         assert switched.platform == "a5"
         assert switched.backend_type == BackendType.Ascend950
 
-    def test_a_backend_type_that_agrees_with_the_platform_is_silent(self):
-        import warnings  # noqa: PLC0415
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", DeprecationWarning)
+    def test_matching_backend_only_warns_about_platform(self):
+        with pytest.warns(DeprecationWarning, match=r"RunConfig\(platform=") as caught:
             cfg = RunConfig(platform="a5sim", backend_type=BackendType.Ascend950)
-
+        assert len(caught) == 1
         assert cfg.backend_type == BackendType.Ascend950
 
     def test_compile_kwargs_forward_distributed_config_by_identity(self):
@@ -901,7 +908,9 @@ class TestOptionObjects:
         kwargs = CompileOptions(platform="a5sim").as_compile_kwargs()
 
         assert set(kwargs) <= set(inspect.signature(ir.compile).parameters)
-        assert kwargs["platform"] == "a5sim"
+        assert kwargs["backend_type"] == BackendType.Ascend950
+        assert kwargs["execution_mode"] is ExecutionMode.SIM
+        assert "platform" not in kwargs
         # Unset optionals stay absent so ir.compile's own defaults apply.
         assert "memory_planner" not in kwargs
         assert "output_dir" not in kwargs
@@ -994,7 +1003,7 @@ class TestOptionObjects:
         assert RunConfig(platform="a5sim").platform == "a5sim"
 
     def test_replace_by_either_axis_or_by_platform(self):
-        """``replace`` works through both spellings, and neither warns.
+        """``replace`` works through both spellings; only legacy platform warns.
 
         ``replace(cfg, platform=...)`` re-supplies both axes from the instance
         alongside the new platform. The platform has to win over that echo —
@@ -1007,6 +1016,7 @@ class TestOptionObjects:
             warnings.simplefilter("error", DeprecationWarning)
             assert dataclasses.replace(cfg, arch=BackendType.Ascend910B).platform == "a2a3"
             assert dataclasses.replace(cfg, execution_mode=ExecutionMode.SIM).platform == "a5sim"
+        with pytest.warns(DeprecationWarning, match=r"RunConfig\(platform="):
             assert dataclasses.replace(cfg, platform="a2a3sim").platform == "a2a3sim"
 
     def test_an_invalid_platform_string_still_names_the_four_spellings(self):
@@ -1193,6 +1203,43 @@ def test_compile_options_rejects_invalid_execution_mode(mode):
         CompileOptions(execution_mode=mode)
     with pytest.raises(TypeError, match="CompileOptions.execution_mode must be an ExecutionMode"):
         dataclasses.replace(CompileOptions(), execution_mode=mode)
+
+
+@pytest.mark.parametrize("config_type", [RunConfig, CompileOptions])
+@pytest.mark.parametrize(
+    ("platform", "backend", "mode"),
+    [
+        ("a2a3", BackendType.Ascend910B, ExecutionMode.ONBOARD),
+        ("a2a3sim", BackendType.Ascend910B, ExecutionMode.SIM),
+        ("a5", BackendType.Ascend950, ExecutionMode.ONBOARD),
+        ("a5sim", BackendType.Ascend950, ExecutionMode.SIM),
+    ],
+)
+def test_legacy_platform_warns_at_caller_and_preserves_target(config_type, platform, backend, mode):
+    with pytest.warns(DeprecationWarning, match="use backend_type and execution_mode") as caught:
+        legacy = config_type(platform=platform)
+    assert len(caught) == 1
+    assert caught[0].filename == __file__
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        preferred = config_type(backend_type=backend, execution_mode=mode)
+        assert legacy == preferred
+        assert legacy.platform == preferred.platform == platform
+        assert dataclasses.replace(preferred).platform == platform
+        options = preferred.compile_options() if config_type is RunConfig else preferred
+        kwargs = options.as_compile_kwargs()
+        assert kwargs["backend_type"] == backend
+        assert kwargs["execution_mode"] is mode
+        assert "platform" not in kwargs
+
+
+def test_positional_compile_options_platform_is_deprecated():
+    with pytest.warns(DeprecationWarning, match=r"CompileOptions\(platform=") as caught:
+        options = cast(Any, CompileOptions)("a5")
+    assert len(caught) == 1
+    assert caught[0].filename == __file__
+    assert options.backend_type == BackendType.Ascend950
+    assert options.execution_mode is ExecutionMode.ONBOARD
 
 
 if __name__ == "__main__":

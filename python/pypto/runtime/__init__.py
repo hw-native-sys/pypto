@@ -22,7 +22,7 @@ one config object can drive both phases::
     from pypto import ir
     from pypto.runtime import RunConfig
 
-    config = RunConfig(platform="a2a3sim")
+    config = RunConfig()
     compiled = ir.compile(MyProgram, **config.compile_kwargs())
 
     a = torch.full((128, 128), 2.0)

@@ -1,5 +1,9 @@
 # 运行期 DFX
 
+> **旧 Python 接口示例：** 本页为兼容现有用法保留 `platform=` 调用，
+> 这些调用会发出 `DeprecationWarning`；新代码应使用 `backend_type` 和
+> `execution_mode`。参见[目标映射](../../dev/08-entry-points.md#迁移旧-platform-示例)。
+
 五个互相独立的采集开关。每个记录什么、落在哪、用什么打开。
 
 ## 概念

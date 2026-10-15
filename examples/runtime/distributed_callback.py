@@ -35,6 +35,10 @@ callback, mirroring tests/st/distributed/test_l3_distributed.py.
 
 Run:  python examples/runtime/distributed_callback.py
       (needs the simpler L3 runtime; defaults to the a2a3 simulator platform)
+
+Legacy Python API example: platform= calls below are retained for compatibility
+and emit DeprecationWarning. New Python code should use backend_type and
+execution_mode; see docs/en/dev/08-entry-points.md#legacy-platform-examples.
 """
 
 import pypto.language as pl

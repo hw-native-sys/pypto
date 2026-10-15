@@ -1,5 +1,9 @@
 # 单任务 Ring 尺寸配置（Per-Task Ring Sizing）
 
+> **旧 Python 接口示例：** 本页为兼容现有用法保留 `platform=` 调用，
+> 这些调用会发出 `DeprecationWarning`；新代码应使用 `backend_type` 和
+> `execution_mode`。参见[目标映射](08-entry-points.md#迁移旧-platform-示例)。
+
 PyPTO 通过 [`RunConfig`](../../../python/pypto/runtime/runner.py) 上的三个可选
 覆盖项暴露 Simpler 的单任务 ring 尺寸配置。它们让你在单次派发中为运行时的
 单任务 ring 资源设置尺寸，而无需改动已编译产物或任何全局状态。该能力同时适用于

@@ -22,6 +22,10 @@ Nothing is shared yet: every rank writes its own slice and reads it back, and
 (barrier signals, remote_load/store, put/get) will live.
 
 Run + walkthrough: see docs/en/user/distributed/08-window_buffer.md
+
+Legacy Python API example: platform= calls below are retained for compatibility
+and emit DeprecationWarning. New Python code should use backend_type and
+execution_mode; see docs/en/dev/08-entry-points.md#legacy-platform-examples.
 """
 
 import argparse

@@ -26,6 +26,10 @@ Concepts introduced:
 
 Run:  python examples/intermediate/07_task_graph.py
 Next: examples/advanced/03_mixed_kernel.py
+
+Legacy Python API example: platform= calls below are retained for compatibility
+and emit DeprecationWarning. New Python code should use backend_type and
+execution_mode; see docs/en/dev/08-entry-points.md#legacy-platform-examples.
 """
 
 import pypto.language as pl

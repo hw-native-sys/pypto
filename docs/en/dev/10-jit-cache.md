@@ -1,5 +1,9 @@
 # Persistent JIT Cache
 
+> **Legacy Python API examples:** `platform=` calls on this page are retained for
+> compatibility. They emit `DeprecationWarning`; new code should use
+> `backend_type` and `execution_mode`. See the [target mapping](08-entry-points.md#legacy-platform-examples).
+
 Persistent caching is opt-in. It reuses generated code and complete binaries
 across processes, while each JIT function also retains live compiled objects.
 Cached artifacts contain executable code: use a cache with trusted writers.

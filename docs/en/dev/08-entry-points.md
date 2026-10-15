@@ -109,7 +109,12 @@ The L3 one is a plain rename — it already was `from_dir` plus a call:
 execute_distributed_compiled(work_dir, args, config=cfg, platform="a2a3")
 
 # after
-ir.DistributedCompiledProgram.from_dir(work_dir, platform="a2a3")(*args, config=cfg)
+from pypto.backend import BackendType
+from pypto.runtime import ExecutionMode
+
+ir.DistributedCompiledProgram.from_dir(
+    work_dir, backend_type=BackendType.Ascend910B, execution_mode=ExecutionMode.ONBOARD,
+)(*args, config=cfg)
 ```
 
 **The L2 one is not**, because the two paths disagree on precedence:
@@ -129,13 +134,40 @@ would move the run to the simulator. Fold them into the config:
 execute_compiled(work_dir, args, platform="a2a3", device_id=0, config=cfg)
 
 # after -- cfg carries every execution setting
-cfg = dataclasses.replace(cfg, platform="a2a3", device_id=0)
+from pypto.backend import BackendType
+from pypto.runtime import ExecutionMode
+
+cfg = dataclasses.replace(
+    cfg, backend_type=BackendType.Ascend910B, execution_mode=ExecutionMode.ONBOARD, device_id=0,
+)
 ir.CompiledProgram.from_dir(work_dir)(*args, config=cfg)
 ```
 
 `dfx` and `aicpu_thread_num` need no translation: the DFX toggles and
-`aicpu_thread_num` are already `RunConfig` fields. `from_dir(platform=...)`
-still decides the platform for a call made *without* a config.
+`aicpu_thread_num` are already `RunConfig` fields. The target passed to
+`from_dir(backend_type=..., execution_mode=...)` applies to a call made
+*without* a config.
+
+## Legacy platform examples
+
+Some guides and runnable examples retain `platform=` to illustrate compatibility
+with existing callers and platform-based test fixtures. Those examples are
+explicitly marked **legacy**: the Python argument emits `DeprecationWarning`
+and fails when that warning is treated as an error. For new Python code, import
+`BackendType` from `pypto.backend` and `ExecutionMode` from `pypto.runtime`, then
+replace `platform=` with both fields below:
+
+| Legacy `platform` | `backend_type` | `execution_mode` |
+| ----------------- | -------------- | ---------------- |
+| `"a2a3"` | `BackendType.Ascend910B` | `ExecutionMode.ONBOARD` |
+| `"a2a3sim"` | `BackendType.Ascend910B` | `ExecutionMode.SIM` |
+| `"a5"` | `BackendType.Ascend950` | `ExecutionMode.ONBOARD` |
+| `"a5sim"` | `BackendType.Ascend950` | `ExecutionMode.SIM` |
+
+This applies to `RunConfig`, `CompileOptions`, `ir.compile`, both artifact
+`from_dir` methods, and `dataclasses.replace(config, ...)`. The CLI `--platform`
+flag, warmup JSON, artifact metadata, and derived `.platform` properties retain
+their existing string format and do not trigger the Python API deprecation.
 
 ## Driving both phases from one config
 
@@ -144,7 +176,10 @@ still decides the platform for a call made *without* a config.
 arguments, so one config object drives both phases:
 
 ```python
-config = RunConfig(platform="a2a3")
+from pypto.backend import BackendType
+from pypto.runtime import ExecutionMode, RunConfig
+
+config = RunConfig(backend_type=BackendType.Ascend910B, execution_mode=ExecutionMode.ONBOARD)
 compiled = ir.compile(program, **config.compile_kwargs())
 compiled(*tensors, config=config)
 ```
@@ -190,8 +225,12 @@ When selecting the target without a legacy `platform`, `CompileOptions` requires
 an `ExecutionMode` enum value. Omit `execution_mode` to use SIM; explicitly
 passing `None` or a string raises `TypeError`.
 
-During migration, `platform=`, `.platform`, and RunConfig's `arch` field remain
-compatible. A legacy platform still selects both axes and wins over backend_type;
+The `platform=` input is deprecated in `RunConfig`, `CompileOptions` (including
+its positional form), `ir.compile`, `CompiledProgram.from_dir`, and
+`DistributedCompiledProgram.from_dir`. These calls emit `DeprecationWarning`;
+use `backend_type` and `execution_mode` instead. No removal version is scheduled.
+Reading the derived `.platform` property remains silent, and RunConfig's `arch`
+field remains compatible. A legacy platform still selects both axes and wins over backend_type;
 RunConfig retains its warning when those two disagree. `ir.compile` rejects an
 explicit execution_mode that contradicts an explicit platform. In RunConfig and
 CompileOptions the legacy platform wins over both axes, preserving
@@ -200,8 +239,10 @@ selects the architecture (it is no longer discarded by RunConfig).
 
 `RunConfig` temporarily stores its architecture as `arch`; backend_type is its
 constructor/read alias. CompileOptions stores backend_type and execution_mode.
-Their compile mappings, artifact sidecars, CLI compatibility paths, cache keys,
-and Simpler SDK calls retain the canonical internal platform encoding. New and
+Their compile mappings forward `backend_type` and `execution_mode`, so new-style
+compilation does not emit a legacy warning. Artifact sidecars, CLI compatibility
+paths, cache keys, and Simpler SDK calls retain the canonical internal platform
+encoding. New and
 legacy requests therefore identify the same cache entry. This change does not
 alter per-call config defaulting or the process-global backend selection rule.
 
@@ -212,9 +253,9 @@ the aggregate, and `compile_kwargs()` is `compile_options().as_compile_kwargs()`
 own vocabulary, and it stands alone:
 
 ```python
-from pypto.runtime import CompileOptions
+from pypto.runtime import CompileOptions, ExecutionMode
 
-compiled = ir.compile(program, **CompileOptions(platform="a2a3").as_compile_kwargs())
+compiled = ir.compile(program, **CompileOptions(execution_mode=ExecutionMode.ONBOARD).as_compile_kwargs())
 ```
 
 **Only two of the three are exported**, because only two are things a caller can

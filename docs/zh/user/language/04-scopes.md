@@ -1,5 +1,9 @@
 # 作用域与放置
 
+> **旧 Python 接口示例：** 本页为兼容现有用法保留 `platform=` 调用，
+> 这些调用会发出 `DeprecationWarning`；新代码应使用 `backend_type` 和
+> `execution_mode`。参见[目标映射](../../dev/08-entry-points.md#迁移旧-platform-示例)。
+
 代码在哪里执行：把一个区域标记为设备工作、把协同调度的核归组、把一个 kernel 铺开到多个 block。
 
 > **前置**：[函数与程序](01-functions.md) 与 [编程模型 § 执行模型](../03-programming-model.md#执行模型)。

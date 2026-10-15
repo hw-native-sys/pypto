@@ -22,6 +22,10 @@ This is the same skeleton as 01_hello_rank; the point here is the labels — thr
 functions, three levels, one processor each.
 
 Run + walkthrough: see docs/en/user/distributed/07-programming_model.md
+
+Legacy Python API example: platform= calls below are retained for compatibility
+and emit DeprecationWarning. New Python code should use backend_type and
+execution_mode; see docs/en/dev/08-entry-points.md#legacy-platform-examples.
 """
 
 import argparse

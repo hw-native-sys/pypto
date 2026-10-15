@@ -165,16 +165,18 @@ def test_work_dir_and_platform_are_required():
         main(["--device-id", "0"])
 
 
-def _manifest(tmp_path, *work_dirs):
+def _manifest(tmp_path, *work_dirs, platform="a2a3"):
     p = tmp_path / "m.json"
-    p.write_text(json.dumps([{"work_dir": str(wd), "platform": "a2a3"} for wd in work_dirs]))
+    p.write_text(json.dumps([{"work_dir": str(wd), "platform": platform} for wd in work_dirs]))
     return p
 
 
-def test_execute_batch_runs_all_in_one_worker(tmp_path, capsys, stub_compile_and_assemble):
+@pytest.mark.filterwarnings("error::DeprecationWarning")
+@pytest.mark.parametrize("platform", ["a2a3", "a2a3sim", "a5", "a5sim"])
+def test_execute_batch_runs_all_in_one_worker(tmp_path, capsys, stub_compile_and_assemble, platform):
     """A batch opens ONE ChipWorker and runs every artifact under it."""
     wd1, wd2 = tmp_path / "a", tmp_path / "b"
-    manifest = _manifest(tmp_path, wd1, wd2)
+    manifest = _manifest(tmp_path, wd1, wd2, platform=platform)
     chipworker = MagicMock()
     with (
         patch("pypto.runtime.ChipWorker", return_value=chipworker) as cw,
@@ -183,6 +185,8 @@ def test_execute_batch_runs_all_in_one_worker(tmp_path, capsys, stub_compile_and
         all_ok = execute_batch_manifest(manifest, 3, validate=False)
     assert all_ok is True
     cw.assert_called_once()  # ONE ChipWorker for the whole batch
+    assert cw.call_args.kwargs["config"].platform == platform
+    assert cw.call_args.kwargs["config"].device_id == 3
     assert cw.call_args.kwargs["enable_sdma"] is False
     chipworker.__enter__.assert_called_once()
     assert on_dev.call_count == 2  # one device run per artifact, reusing the worker

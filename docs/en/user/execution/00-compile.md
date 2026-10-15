@@ -1,5 +1,9 @@
 # Compiling
 
+> **Legacy Python API examples:** `platform=` calls on this page are retained for
+> compatibility. They emit `DeprecationWarning`; new code should use
+> `backend_type` and `execution_mode`. See the [target mapping](../../dev/08-entry-points.md#legacy-platform-examples).
+
 Turning a program or a `@pl.jit` kernel into device kernels and host orchestration.
 
 ## Concept

@@ -1,5 +1,9 @@
 # Per-Task Ring Sizing
 
+> **Legacy Python API examples:** `platform=` calls on this page are retained for
+> compatibility. They emit `DeprecationWarning`; new code should use
+> `backend_type` and `execution_mode`. See the [target mapping](08-entry-points.md#legacy-platform-examples).
+
 PyPTO exposes Simpler's per-task ring sizing as three optional overrides on
 [`RunConfig`](../../../python/pypto/runtime/runner.py). They let you size the
 runtime's per-task ring resources for a single dispatch without touching the

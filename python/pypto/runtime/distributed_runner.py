@@ -1659,7 +1659,7 @@ def _execute_distributed(  # pyright: ignore[reportUnusedFunction]
 _EXECUTE_DISTRIBUTED_COMPILED_DEPRECATION = (
     "pypto.runtime.execute_distributed_compiled is deprecated; reconstruct the "
     "artifact and call it: ir.DistributedCompiledProgram.from_dir(output_dir, "
-    "platform=...)(*args, config=...). The directory-driven function will be "
+    "backend_type=..., execution_mode=...)(*args, config=...). The directory-driven function will be "
     "removed in a future release."
 )
 
@@ -1690,7 +1690,12 @@ def execute_distributed_compiled(
         execute_distributed_compiled(work_dir, args, config=cfg, platform="a2a3")
 
         # after
-        ir.DistributedCompiledProgram.from_dir(work_dir, platform="a2a3")(*args, config=cfg)
+        from pypto.backend import BackendType
+        from pypto.runtime import ExecutionMode
+
+        ir.DistributedCompiledProgram.from_dir(
+            work_dir, backend_type=BackendType.Ascend910B, execution_mode=ExecutionMode.ONBOARD,
+        )(*args, config=cfg)
 
     Emits a :class:`DeprecationWarning`; behaviour is unchanged.
 

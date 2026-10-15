@@ -1,5 +1,9 @@
 # Operator System
 
+> **Legacy Python API examples:** `platform=` calls on this page are retained for
+> compatibility. They emit `DeprecationWarning`; new code should use
+> `backend_type` and `execution_mode`. See the [target mapping](../08-entry-points.md#legacy-platform-examples).
+
 Type-safe operator definitions with automatic type deduction, organized into modular categories (TensorOp, TileOp, SyncOp, CrossCoreOp).
 
 ## Operator Categories

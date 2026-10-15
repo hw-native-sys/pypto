@@ -29,6 +29,10 @@ Same golden as steps 08/09: every rank receives the element-wise sum of all
 rank slices, compared with a tolerance.
 
 Run + walkthrough: see docs/en/user/distributed/15-allreduce_ring.md
+
+Legacy Python API example: platform= calls below are retained for compatibility
+and emit DeprecationWarning. New Python code should use backend_type and
+execution_mode; see docs/en/dev/08-entry-points.md#legacy-platform-examples.
 """
 
 import argparse

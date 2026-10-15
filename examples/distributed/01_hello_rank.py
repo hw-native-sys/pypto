@@ -28,6 +28,10 @@ scalar wedged between tensors fails at runtime with "cannot add tensor after
 scalar".
 
 Run + walkthrough: see docs/en/user/distributed/06-hello_rank.md
+
+Legacy Python API example: platform= calls below are retained for compatibility
+and emit DeprecationWarning. New Python code should use backend_type and
+execution_mode; see docs/en/dev/08-entry-points.md#legacy-platform-examples.
 """
 
 import argparse

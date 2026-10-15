@@ -1,5 +1,9 @@
 # 读泳道图
 
+> **旧 Python 接口示例：** 本页为兼容现有用法保留 `platform=` 调用，
+> 这些调用会发出 `DeprecationWarning`；新代码应使用 `backend_type` 和
+> `execution_mode`。参见[目标映射](../../dev/08-entry-points.md#迁移旧-platform-示例)。
+
 整块芯片的逐任务计时：每个任务什么时候被派发、它的核什么时候真正开始跑、什么时候结束。
 
 > **前置**：一个能跑起来的 kernel。本页全是度量，不改任何东西。

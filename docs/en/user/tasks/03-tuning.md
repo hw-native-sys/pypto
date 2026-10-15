@@ -1,5 +1,9 @@
 # Refining the Graph
 
+> **Legacy Python API examples:** `platform=` calls on this page are retained for
+> compatibility. They emit `DeprecationWarning`; new code should use
+> `backend_type` and `execution_mode`. See the [target mapping](../../dev/08-entry-points.md#legacy-platform-examples).
+
 Removing an edge that is not real, skipping a task that is not needed, and letting the
 scheduler start early.
 

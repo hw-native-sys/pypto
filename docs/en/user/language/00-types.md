@@ -1,5 +1,9 @@
 # Types
 
+> **Legacy Python API examples:** `platform=` calls on this page are retained for
+> compatibility. They emit `DeprecationWarning`; new code should use
+> `backend_type` and `execution_mode`. See the [target mapping](../../dev/08-entry-points.md#legacy-platform-examples).
+
 Every value in a PyPTO program carries a type that says where it lives and how wide its
 elements are. Getting the annotation right is how you tell the compiler what to allocate
 and what it is allowed to do.

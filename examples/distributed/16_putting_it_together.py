@@ -32,6 +32,10 @@ miniature. The same pattern scales to real models — AllGather-GEMM
 dispatch/combine is an all-to-all built from step 15's pattern.
 
 Run + walkthrough: see docs/en/user/distributed/21-putting_it_together.md
+
+Legacy Python API example: platform= calls below are retained for compatibility
+and emit DeprecationWarning. New Python code should use backend_type and
+execution_mode; see docs/en/dev/08-entry-points.md#legacy-platform-examples.
 """
 
 import argparse

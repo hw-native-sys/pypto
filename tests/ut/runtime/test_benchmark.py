@@ -1074,10 +1074,12 @@ def test_benchmark_binds_worker_to_compiled_sdma_capability(artifact_enable_sdma
     assert ctor.call_args.kwargs["enable_sdma"] is expected
 
 
-def test_benchmark_platform_device_id_build_runconfig():
-    _stats, _worker, ctor, _cfg, _parse = _run_benchmark(rounds=1, warmup=0, platform="a2a3", device_id=2)
+@pytest.mark.filterwarnings("error::DeprecationWarning")
+@pytest.mark.parametrize("platform", [None, "a2a3", "a2a3sim", "a5", "a5sim"])
+def test_benchmark_platform_device_id_build_runconfig(platform):
+    _stats, _worker, ctor, _cfg, _parse = _run_benchmark(rounds=1, warmup=0, platform=platform, device_id=2)
     rc = ctor.call_args.args[0]  # ChipWorker(rc, runtime=...)
-    assert rc.platform == "a2a3"
+    assert rc.platform == (platform or "a2a3sim")
     assert rc.device_id == 2
 
 

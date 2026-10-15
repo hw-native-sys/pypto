@@ -1,5 +1,9 @@
 # 你好，Rank（Hello, Rank）
 
+> **旧 Python 接口示例：** 本页为兼容现有用法保留 `platform=` 调用，
+> 这些调用会发出 `DeprecationWarning`；新代码应使用 `backend_type` 和
+> `execution_mode`。参见[目标映射](../../dev/08-entry-points.md#迁移旧-platform-示例)。
+
 运行你的第一个双 rank 程序：每个 rank 将自己的索引加到输出的对应 slice 上，
 golden 证明每个 rank 恰好触碰了自己的那一行。
 

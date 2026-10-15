@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from pypto import CacheConfig, cache_stats
+from pypto._target import _parse_platform
 from pypto.runtime import RunConfig
 
 from .decorator import JITFunction, _torch_dtype_to_pypto
@@ -104,6 +105,8 @@ def _run_config(value: Any, cache: CacheConfig | None, base: Path) -> RunConfig:
         ):
             raise ValueError("distributed_config.device_ids must be an array of nonnegative integers")
         data["distributed_config"] = DistributedConfig(**dist)
+    if data.get("platform") is not None:
+        data["backend_type"], data["execution_mode"] = _parse_platform(data.pop("platform"))
     return RunConfig(cache_config=cache, **data)
 
 

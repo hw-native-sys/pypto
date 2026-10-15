@@ -23,7 +23,7 @@ Compilation is :func:`pypto.ir.compile`'s job; nothing here compiles for you.
     from pypto import ir
     from pypto.runtime import RunConfig
 
-    config = RunConfig(platform="a2a3sim")
+    config = RunConfig()
     compiled = ir.compile(MyProgram, **config.compile_kwargs())
 
     a = torch.full((128, 128), 2.0)
@@ -51,7 +51,13 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 
 from pypto._cache_config import CacheConfig
-from pypto._target import ExecutionMode, _parse_platform, _platform_string, _resolve_target
+from pypto._target import (
+    ExecutionMode,
+    _parse_platform,
+    _platform_string,
+    _resolve_target,
+    _warn_deprecated_platform,
+)
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassDumpLevel
 from pypto.pypto_core.passes import DiagnosticCheckSet, DiagnosticPhase, MemoryPlanner
@@ -190,7 +196,7 @@ class RunConfig:
         execution_mode: :class:`ExecutionMode.SIM` or ``ONBOARD``.
         platform: **Not a field** — the wire spelling of the two axes above
             (``"a2a3sim"`` / ``"a2a3"`` / ``"a5sim"`` / ``"a5"``), derived on
-            read. Accepted as a constructor keyword, where it sets both axes.
+            read. Deprecated as a constructor keyword; use backend_type and execution_mode.
         device_id: Hardware device index (ignored for simulator).
         backend_type: Preferred constructor keyword for the architecture.
             Stored in the compatibility ``arch`` field and readable as a property.
@@ -688,6 +694,7 @@ def _run_config_init(self: RunConfig, *args: Any, **kwargs: Any) -> None:
     """``RunConfig.__init__`` that also accepts ``platform=`` and the deprecated keywords."""
     has_platform = "platform" in kwargs
     if has_platform:
+        _warn_deprecated_platform("RunConfig")
         # ``platform=`` is the wire spelling of the two axes, and setting it
         # sets both. It deliberately wins over an ``arch=`` / ``execution_mode=``
         # in the same call rather than reporting a conflict -- the class is
@@ -876,9 +883,10 @@ class CompileOptions:
     compiles needs this and not a :class:`RunConfig`::
 
         from pypto import ir
-        from pypto.runtime import CompileOptions
+        from pypto.runtime import CompileOptions, ExecutionMode
 
-        compiled = ir.compile(program, **CompileOptions(platform="a2a3").as_compile_kwargs())
+        options = CompileOptions(execution_mode=ExecutionMode.ONBOARD)
+        compiled = ir.compile(program, **options.as_compile_kwargs())
 
     Field names are ``ir.compile``'s, not ``RunConfig``'s: what ``RunConfig``
     spells ``save_kernels_dir`` and ``compile_profiling`` are ``output_dir`` and
@@ -886,9 +894,9 @@ class CompileOptions:
     the compiler names it.
 
     ``backend_type`` and ``execution_mode`` select the target. The legacy
-    ``platform`` constructor keyword still sets both and wins over echoed
-    fields from ``dataclasses.replace``. The compiler mapping retains its
-    canonical platform string so existing consumers and cache keys agree.
+    ``platform`` constructor keyword is deprecated; it still sets both and wins over echoed
+    fields from ``dataclasses.replace``. The compiler mapping forwards the
+    explicit target axes; caches and artifact metadata retain canonical platform strings.
     """
 
     backend_type: BackendType = field(default_factory=lambda: BackendType.Ascend910B, kw_only=True)
@@ -923,7 +931,8 @@ class CompileOptions:
     def as_compile_kwargs(self) -> dict[str, Any]:
         """Return these options as :func:`pypto.ir.compile` keyword arguments."""
         kwargs: dict[str, Any] = {
-            "platform": self.platform,
+            "backend_type": self.backend_type,
+            "execution_mode": self.execution_mode,
             "strategy": self.strategy,
             "dump_passes": self.dump_passes,
             "dump_ptoas_passes": self.dump_ptoas_passes,
@@ -950,6 +959,7 @@ def _compile_options_init(self: CompileOptions, *args: Any, **kwargs: Any) -> No
             raise TypeError("CompileOptions received platform both positionally and by keyword")
         kwargs["platform"], args = args[0], args[1:]
     if "platform" in kwargs:
+        _warn_deprecated_platform("CompileOptions")
         kwargs["backend_type"], kwargs["execution_mode"] = _parse_platform(kwargs.pop("platform"))
     _COMPILE_OPTIONS_INIT(self, *args, **kwargs)
 
@@ -1855,13 +1865,19 @@ def execute_compiled(  # noqa: PLR0913
         execute_compiled(work_dir, args, platform="a2a3", device_id=0, config=cfg)
 
         # after -- ``cfg`` carries every execution setting
-        cfg = dataclasses.replace(cfg, platform="a2a3", device_id=0)
+        from pypto.backend import BackendType
+        from pypto.runtime import ExecutionMode
+
+        cfg = dataclasses.replace(
+            cfg, backend_type=BackendType.Ascend910B, execution_mode=ExecutionMode.ONBOARD, device_id=0,
+        )
         ir.CompiledProgram.from_dir(work_dir)(*args, config=cfg)
 
     ``dfx`` and ``aicpu_thread_num`` have no separate spelling on that path:
     the DFX toggles and ``aicpu_thread_num`` are already ``RunConfig`` fields,
-    read fresh on every dispatch. ``from_dir(platform=...)`` still decides the
-    platform for a call made *without* a config.
+    read fresh on every dispatch. The target passed to
+    ``from_dir(backend_type=..., execution_mode=...)`` applies to a call made
+    *without* a config.
 
     Emits a :class:`DeprecationWarning` and forwards to the same implementation
     the artifact path uses. Behaviour of this function is unchanged; only the

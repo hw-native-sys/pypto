@@ -4008,7 +4008,9 @@ class TestCompileKwargForwarding:
         assert captured["strategy"] == OptimizationStrategy.Default
         assert captured["dump_passes"] is True
         assert captured["profiling"] is True
-        assert captured["platform"] == "a2a3sim"
+        assert captured["backend_type"] == cfg.backend_type
+        assert captured["execution_mode"] is cfg.execution_mode
+        assert "platform" not in captured
         assert captured["analyze_auto_scopes_for_deps"] is True
         assert "skip_ptoas" in captured
         # distributed_config reaches ir.compile() so a @pl.jit.host entry can

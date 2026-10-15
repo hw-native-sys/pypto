@@ -1,5 +1,9 @@
 # Functions and Program Structure
 
+> **Legacy Python API examples:** `platform=` calls on this page are retained for
+> compatibility. They emit `DeprecationWarning`; new code should use
+> `backend_type` and `execution_mode`. See the [target mapping](../08-entry-points.md#legacy-platform-examples).
+
 Function declaration forms, parameter directions, cross-module reuse, and how to
 print IR back to Python syntax.
 

@@ -21,13 +21,14 @@ import warnings
 
 import pypto.language as pl
 import pytest
+from pypto.backend import BackendType
 from pypto.compile_profiling import CompileProfiler
 from pypto.ir import OptimizationStrategy, PassDumpLevel
 from pypto.ir.compiled_program import CompiledProgram
 from pypto.jit.decorator import jit
 from pypto.language.parser.diagnostics.exceptions import ParserTypeError
 from pypto.pypto_core import ir, passes
-from pypto.runtime.runner import RunConfig
+from pypto.runtime.runner import ExecutionMode, RunConfig
 
 
 @pytest.fixture(autouse=True)
@@ -750,7 +751,9 @@ def test_default_and_runtime_only_requests_share_cache(kernel, compile_calls):
         assert kernel.compile() is cached
     assert len(compile_calls) == 1
     kwargs = compile_calls[0][0]
-    assert kwargs["platform"] == "a2a3sim"
+    assert kwargs["backend_type"] == BackendType.Ascend910B
+    assert kwargs["execution_mode"] is ExecutionMode.SIM
+    assert "platform" not in kwargs
     assert kwargs["dump_passes"] is PassDumpLevel.NONE
 
 
@@ -1402,6 +1405,19 @@ def test_jit_fixture_detects_printer_failure(monkeypatch, pass_verification_inst
     else:
         # Explicit basic/none modes do not request a print/reparse check.
         assert isinstance(add_kernel.lower(x, x, torch.empty_like(x)), ir.Program)
+
+
+@pytest.mark.parametrize("platform", ["a2a3", "a2a3sim", "a5", "a5sim"])
+def test_deprecated_and_explicit_target_share_cache(kernel, compile_calls, platform):
+    with pytest.warns(DeprecationWarning, match=r"RunConfig\(platform="):
+        legacy = RunConfig(platform=platform)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        explicit = RunConfig(backend_type=legacy.backend_type, execution_mode=legacy.execution_mode)
+        artifact = kernel.compile(config=explicit)
+        assert kernel.compile(config=legacy) is artifact
+    assert len(compile_calls) == 1
+    assert next(iter(kernel._cache)).platform == platform
 
 
 if __name__ == "__main__":

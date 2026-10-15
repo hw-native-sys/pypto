@@ -1,5 +1,9 @@
 # Runtime DFX (Design For X) Flags
 
+> **Legacy Python API examples:** `platform=` calls on this page are retained for
+> compatibility. They emit `DeprecationWarning`; new code should use
+> `backend_type` and `execution_mode`. See the [target mapping](08-entry-points.md#legacy-platform-examples).
+
 PyPTO exposes Simpler's five runtime diagnostic sub-features as independent
 toggles on [`RunConfig`](../../../python/pypto/runtime/runner.py). Each
 toggle maps to a field on Simpler's `CallConfig` and to the matching pytest

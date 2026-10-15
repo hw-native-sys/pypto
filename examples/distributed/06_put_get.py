@@ -24,6 +24,10 @@ Two modes, one step:
     x[(r+1) % N]``
 
 Run + walkthrough: see docs/en/user/distributed/11-put_get.md
+
+Legacy Python API example: platform= calls below are retained for compatibility
+and emit DeprecationWarning. New Python code should use backend_type and
+execution_mode; see docs/en/dev/08-entry-points.md#legacy-platform-examples.
 """
 
 import argparse

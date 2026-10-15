@@ -16,7 +16,12 @@ from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from pypto._target import ExecutionMode, _platform_string, _resolve_target
+from pypto._target import (
+    ExecutionMode,
+    _platform_string,
+    _resolve_target,
+    _warn_deprecated_platform,
+)
 from pypto.backend import BackendType
 from pypto.backend.pto_backend import PartialCodegenError, generate, multi_chip_orch_names
 from pypto.compile_profiling import CompileProfiler, get_active_profiler
@@ -366,7 +371,8 @@ def compile(  # noqa: PLR0913
             or ``PTOAS``, which enable chooser dbC=2 automatically.
         profiling: If True, enable compile profiling that records per-stage
             wall-clock timings.  Results are written to ``output_dir/report/``.
-        platform: Target execution platform.  One of ``"a2a3sim"``,
+        platform: Deprecated; use backend_type and execution_mode.
+            Target execution platform. One of ``"a2a3sim"``,
             ``"a2a3"``, ``"a5sim"``, or ``"a5"``.  Defaults to the
             simulator for the given *backend_type*.  When set, it also
             selects the matching codegen backend.
@@ -406,6 +412,8 @@ def compile(  # noqa: PLR0913
         >>> c = compiled(a, b)          # return style
         >>> compiled(a, b, c, config=RunConfig(device_id=1))  # specify device
     """
+    if platform is not None:
+        _warn_deprecated_platform("ir.compile")
     backend_type, mode = _resolve_target(backend_type, execution_mode, platform)
     platform = _platform_string(backend_type, mode)
     _select_backend(backend_type=backend_type, platform=platform)

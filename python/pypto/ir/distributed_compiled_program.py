@@ -25,7 +25,13 @@ from typing import TYPE_CHECKING, Any, TypeGuard
 import torch
 
 from pypto._artifact_contract import ArtifactExecutionMode, ExecutionCapabilities
-from pypto._target import ExecutionMode, _parse_platform, _platform_string, _resolve_target
+from pypto._target import (
+    ExecutionMode,
+    _parse_platform,
+    _platform_string,
+    _resolve_target,
+    _warn_deprecated_platform,
+)
 from pypto.backend import BackendType
 from pypto.pypto_core.ir import ParamDirection, Program, Role, level_to_linqu_level
 from pypto.runtime.device_tensor import DeviceTensor, StackedDeviceTensor
@@ -187,7 +193,9 @@ class DistributedCompiledProgram:
 
     **One-shot dispatch**::
 
-        compiled = ir.compile(MyProgram, platform="a2a3", distributed_config=dc)
+        from pypto.runtime import ExecutionMode
+
+        compiled = ir.compile(MyProgram, execution_mode=ExecutionMode.ONBOARD, distributed_config=dc)
         compiled(host_inputs, host_outputs)   # blocks until all ranks finish
 
     **Persistent dispatch** (repeated launches without re-registering)::
@@ -317,7 +325,8 @@ class DistributedCompiledProgram:
             output_dir: A build directory produced by a prior ``ir.compile`` of
                 a distributed (L3+) program. Must contain
                 ``distributed_meta.json``.
-            platform: Override the persisted platform (e.g. swap ``a2a3sim`` →
+            platform: Deprecated; use backend_type and execution_mode.
+                Override the persisted platform (e.g. swap ``a2a3sim`` →
                 ``a2a3`` to replay on hardware). ``None`` keeps the persisted
                 value.
             execution_mode: Override the execution mode, retaining the persisted
@@ -339,6 +348,8 @@ class DistributedCompiledProgram:
             ValueError: ``distributed_meta.json`` is unreadable, malformed, or
                 records a ``schema`` version incompatible with this pypto build.
         """
+        if platform is not None:
+            _warn_deprecated_platform("DistributedCompiledProgram.from_dir")
         meta_path = Path(output_dir).resolve() / _DISTRIBUTED_META_FILENAME
         if not meta_path.exists():
             raise FileNotFoundError(

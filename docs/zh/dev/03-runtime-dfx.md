@@ -1,5 +1,9 @@
 # 运行时 DFX（Design For X）开关
 
+> **旧 Python 接口示例：** 本页为兼容现有用法保留 `platform=` 调用，
+> 这些调用会发出 `DeprecationWarning`；新代码应使用 `backend_type` 和
+> `execution_mode`。参见[目标映射](08-entry-points.md#迁移旧-platform-示例)。
+
 PyPTO 将 Simpler 的五项运行时诊断子功能以独立开关的形式暴露在
 [`RunConfig`](../../../python/pypto/runtime/runner.py) 上。每个开关都映射到
 Simpler 的 `CallConfig` 字段，以及 `tests/st/conftest.py` 中对应的 pytest

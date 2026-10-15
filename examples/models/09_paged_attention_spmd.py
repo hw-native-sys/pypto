@@ -43,6 +43,10 @@ Tensor layout:
   out:         [batch * num_heads, head_dim]                    FP32
   config:      [7]  (batch, num_heads, kv_head_num, head_dim,
                      block_size, block_num_capacity, active_block_num)  INT64
+
+Legacy Python API example: platform= calls below are retained for compatibility
+and emit DeprecationWarning. New Python code should use backend_type and
+execution_mode; see docs/en/dev/08-entry-points.md#legacy-platform-examples.
 """
 
 import argparse

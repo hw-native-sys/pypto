@@ -1,5 +1,9 @@
 # Execution
 
+> **Legacy Python API examples:** `platform=` calls on this page are retained for
+> compatibility. They emit `DeprecationWarning`; new code should use
+> `backend_type` and `execution_mode`. See the [target mapping](../../dev/08-entry-points.md#legacy-platform-examples).
+
 A one-off compile-and-dispatch call is enough for a quick test. Production
 code instead amortizes setup — forking chip processes, assembling kernels —
 across many dispatches on a reusable `DistributedWorker`.

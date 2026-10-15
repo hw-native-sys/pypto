@@ -43,7 +43,13 @@ from typing import TYPE_CHECKING, Any, TypeAlias, TypeGuard
 import torch
 
 from pypto._artifact_contract import ArtifactExecutionMode, ExecutionCapabilities
-from pypto._target import ExecutionMode, _parse_platform, _platform_string, _resolve_target
+from pypto._target import (
+    ExecutionMode,
+    _parse_platform,
+    _platform_string,
+    _resolve_target,
+    _warn_deprecated_platform,
+)
 from pypto.backend import BackendType
 from pypto.pypto_core import DataType
 from pypto.pypto_core import backend as _backend_core
@@ -1123,16 +1129,17 @@ class CompiledProgram(_RuntimeFacade):
         orchestration cpp / ``.pto``, then re-measure)::
 
             from pypto.ir import CompiledProgram
-            from pypto.runtime import benchmark
+            from pypto.runtime import ExecutionMode, benchmark
 
-            compiled = CompiledProgram.from_dir(work_dir, platform="a2a3")
+            compiled = CompiledProgram.from_dir(work_dir, execution_mode=ExecutionMode.ONBOARD)
             stats = benchmark(compiled, args, rounds=100)
 
         Args:
             output_dir: A build directory produced by a prior ``ir.compile`` of a
                 single-orchestration (L2) program. Must contain
                 ``compiled_meta.json``.
-            platform: Override the persisted platform (e.g. swap ``a2a3sim`` ->
+            platform: Deprecated; use backend_type and execution_mode.
+                Override the persisted platform (e.g. swap ``a2a3sim`` ->
                 ``a2a3`` to replay on hardware). ``None`` keeps the persisted
                 value.
             execution_mode: Override the execution mode, retaining the persisted
@@ -1159,6 +1166,8 @@ class CompiledProgram(_RuntimeFacade):
             ValueError: ``compiled_meta.json`` is unreadable, malformed, or
                 records a ``schema`` version incompatible with this pypto build.
         """
+        if platform is not None:
+            _warn_deprecated_platform("CompiledProgram.from_dir")
         meta_path = Path(output_dir).resolve() / _COMPILED_META_FILENAME
         if not meta_path.exists():
             raise FileNotFoundError(

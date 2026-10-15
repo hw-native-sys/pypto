@@ -47,6 +47,10 @@ Concepts introduced:
     something the recording can reproduce
 
 Run:  python examples/advanced/04_moe_graph_predicate.py -p a2a3sim
+
+Legacy Python API example: platform= calls below are retained for compatibility
+and emit DeprecationWarning. New Python code should use backend_type and
+execution_mode; see docs/en/dev/08-entry-points.md#legacy-platform-examples.
 """
 
 import argparse

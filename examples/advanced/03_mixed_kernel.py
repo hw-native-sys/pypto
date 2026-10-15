@@ -31,6 +31,10 @@ Run:  python examples/advanced/03_mixed_kernel.py
       python examples/advanced/03_mixed_kernel.py --mode staged
       python examples/advanced/03_mixed_kernel.py --mode left_right
 Next: examples/models/qwen3_jit/kernels/projection.py — a mixed kernel in a real model
+
+Legacy Python API example: platform= calls below are retained for compatibility
+and emit DeprecationWarning. New Python code should use backend_type and
+execution_mode; see docs/en/dev/08-entry-points.md#legacy-platform-examples.
 """
 
 import argparse

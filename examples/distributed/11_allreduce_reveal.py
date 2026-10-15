@@ -30,6 +30,10 @@ rank slices, compared with a tolerance. Run ``--mode mesh`` and ``--mode ring``
 at P>=4 and compare the lowered IR in the walkthrough.
 
 Run + walkthrough: see docs/en/user/distributed/16-allreduce_reveal.md
+
+Legacy Python API example: platform= calls below are retained for compatibility
+and emit DeprecationWarning. New Python code should use backend_type and
+execution_mode; see docs/en/dev/08-entry-points.md#legacy-platform-examples.
 """
 
 import argparse

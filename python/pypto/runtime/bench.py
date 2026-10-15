@@ -53,6 +53,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pypto._target import _parse_platform
+
 from .log_config import configure_log, current_level
 from .runner import RunConfig
 from .worker import ChipWorker
@@ -1453,7 +1455,11 @@ def benchmark(
                     if config is not None:
                         rc = config
                     else:
-                        rc_kwargs: dict[str, Any] = {"platform": platform or compiled.platform}
+                        backend_type, execution_mode = _parse_platform(platform or compiled.platform)
+                        rc_kwargs: dict[str, Any] = {
+                            "backend_type": backend_type,
+                            "execution_mode": execution_mode,
+                        }
                         if device_id is not None:
                             rc_kwargs["device_id"] = device_id
                         rc = RunConfig(**rc_kwargs)

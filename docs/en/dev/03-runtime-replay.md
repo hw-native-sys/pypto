@@ -1,5 +1,9 @@
 # Replaying an Existing `build_output`
 
+> **Legacy Python API examples:** `platform=` calls on this page are retained for
+> compatibility. They emit `DeprecationWarning`; new code should use
+> `backend_type` and `execution_mode`. See the [target mapping](08-entry-points.md#legacy-platform-examples).
+
 Re-run, edit, and re-measure a previously compiled `build_output/<jit_dir>/`
 without recompiling from the DSL. The diagnostic flags referenced throughout are
 documented in [Runtime DFX Flags](03-runtime-dfx.md).

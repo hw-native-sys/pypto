@@ -1,5 +1,9 @@
 # InCore 函数调优
 
+> **旧 Python 接口示例：** 本页为兼容现有用法保留 `platform=` 调用，
+> 这些调用会发出 `DeprecationWarning`；新代码应使用 `backend_type` 和
+> `execution_mode`。参见[目标映射](../../dev/08-entry-points.md#迁移旧-platform-示例)。
+
 把条本身变短：让搬运与计算重叠、换算法、迎合硬件的粒度，以及——当别的都赢不了时——干脆不用 PyPTO 写这个 kernel。
 
 > **前置**：前面几页。如果条与条之间的间隙仍然是主要开销，本页为时过早。

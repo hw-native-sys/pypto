@@ -1,5 +1,9 @@
 # 实例
 
+> **旧 Python 接口示例：** 本页为兼容现有用法保留 `platform=` 调用，
+> 这些调用会发出 `DeprecationWarning`；新代码应使用 `backend_type` 和
+> `execution_mode`。参见[目标映射](../../dev/08-entry-points.md#迁移旧-platform-示例)。
+
 五个差距，逐一收敛。其中两个最后根本不是 bug —— 这正是那个排序的意义。
 
 > **前置**：[缩小精度差距](00-workflow.md)。
