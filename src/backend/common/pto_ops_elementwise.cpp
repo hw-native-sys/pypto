@@ -453,28 +453,32 @@ static std::string MakeTcvtCodegenPTO(const CallPtr& op, codegen::CodegenBase& c
     const auto source_type = As<ir::TileType>(op->args_[0]->GetType());
     const auto result = codegen.GetCurrentResultVar();
     const auto result_type = result ? As<ir::TileType>(result->GetType()) : nullptr;
-    INTERNAL_CHECK_SPAN(source_type && result_type && source_type->memref_ && result_type->memref_ &&
-                            *source_type->memref_ && *result_type->memref_,
-                        op->span_)
-        << "Internal error: tile.cast requires source and result MemRefs before PTO codegen";
-    const auto& source_memref = *source_type->memref_;
-    const auto& result_memref = *result_type->memref_;
-    // At level3 offsets are physical addresses, even for distinct allocation
-    // bases. Compare complete byte windows, not just base or pointer equality.
-    ir::arith::Analyzer analyzer;
-    const auto distance = As<ir::ConstInt>(analyzer.Simplify(std::make_shared<ir::Sub>(
-        result_memref->byte_offset_, source_memref->byte_offset_, DataType::INT64, op->span_)));
-    bool overlaps = ir::MemRef::MayAlias(source_memref, result_memref);
-    if (distance) {
-      // Subtracting a shared symbolic address also exposes a constant distance.
-      overlaps = distance->value_ >= 0
-                     ? static_cast<uint64_t>(distance->value_) < source_memref->size_
-                     : static_cast<uint64_t>(-(distance->value_ + 1)) + 1 < result_memref->size_;
+    INTERNAL_CHECK_SPAN(source_type && result_type, op->span_)
+        << "Internal error: tile.cast requires source and result TileTypes before PTO codegen";
+    const auto source_memref = source_type->memref_.value_or(nullptr);
+    const auto result_memref = result_type->memref_.value_or(nullptr);
+    INTERNAL_CHECK_SPAN(result_memref, op->span_)
+        << "Internal error: tile.cast requires a result MemRef before PTO codegen";
+    // TPOP tiles and their views are backed by reserved pipe storage, not a
+    // general-pool MemRef. Their runtime-owned address cannot be compared here.
+    if (source_memref) {
+      // At level3 offsets are physical addresses, even for distinct allocation
+      // bases. Compare complete byte windows, not just base or pointer equality.
+      ir::arith::Analyzer analyzer;
+      const auto distance = As<ir::ConstInt>(analyzer.Simplify(std::make_shared<ir::Sub>(
+          result_memref->byte_offset_, source_memref->byte_offset_, DataType::INT64, op->span_)));
+      bool overlaps = ir::MemRef::MayAlias(source_memref, result_memref);
+      if (distance) {
+        // Subtracting a shared symbolic address also exposes a constant distance.
+        overlaps = distance->value_ >= 0
+                       ? static_cast<uint64_t>(distance->value_) < source_memref->size_
+                       : static_cast<uint64_t>(-(distance->value_ + 1)) + 1 < result_memref->size_;
+      }
+      CHECK_SPAN(!overlaps, op->span_)
+          << "tile.cast from " << source_type->dtype_.ToString() << " to " << result_type->dtype_.ToString()
+          << " requires non-overlapping source and destination memory on "
+          << codegen.GetBackendHandler()->GetPtoTargetArch();
     }
-    CHECK_SPAN(!overlaps, op->span_) << "tile.cast from " << source_type->dtype_.ToString() << " to "
-                                     << result_type->dtype_.ToString()
-                                     << " requires non-overlapping source and destination memory on "
-                                     << codegen.GetBackendHandler()->GetPtoTargetArch();
   }
 
   const int mode = op->GetKwarg<int>("mode");

@@ -4613,6 +4613,54 @@ class TestCastAddressValidation:
         else:
             assert "pto.tcvt" in codegen.PTOCodegen().generate(program)
 
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+    @pytest.mark.parametrize("source_dtype,result_dtype", [(pl.FP32, pl.BF16), (pl.BF16, pl.FP32)])
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+    def test_cast_from_pipe_owned_tile_and_view(self, backend_type, source_dtype, result_dtype, planner):
+        """TPOP storage has no MemRef; casts must still allocate and emit normally."""
+        backend.set_backend_type(backend_type)
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.AIV)
+            def consumer(self):
+                pipe = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=pipe)
+                received: pl.Tile[[16, 16], source_dtype, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
+                direct: pl.Tile[[16, 16], result_dtype, pl.Mem.Vec] = pl.cast(received, result_dtype)
+                viewed: pl.Tile[[8, 32], source_dtype, pl.Mem.Vec] = pl.tile.reshape(received, [8, 32])
+                converted: pl.Tile[[8, 32], result_dtype, pl.Mem.Vec] = pl.cast(viewed, result_dtype)
+                pl.tfree_to_aic(received)
+
+        with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
+            after = passes.init_mem_ref()(Program)
+            after = passes.materialize_semantic_aliases()(after)
+            if planner == passes.MemoryPlanner.PYPTO:
+                after = passes.memory_reuse()(after)
+            after = passes.allocate_memory_addr()(after)
+
+        memrefs = {}
+
+        class CollectMemRefs(ir.IRVisitor):
+            def visit_assign_stmt(self, stmt):
+                if isinstance(stmt.var.type, ir.TileType):
+                    memrefs[stmt.var.name_hint] = stmt.var.type.memref
+                super().visit_assign_stmt(stmt)
+
+        CollectMemRefs().visit_stmt(next(iter(after.functions.values())).body)
+        assert memrefs["received"] is None
+        assert memrefs["viewed"] is None
+        for name in ("direct", "converted"):
+            assert memrefs[name] is not None
+            offset = memrefs[name].byte_offset_
+            assert isinstance(offset, ir.ConstInt)
+            assert offset.value + memrefs[name].size_ <= 0x1000 or offset.value >= 0x2000
+
+        mlir = codegen.PTOCodegen().generate(after)
+        assert "pto.tpop_from_aic" in mlir
+        assert mlir.count("pto.tcvt") == 2
+        assert "pto.treshape" in mlir
+
 
 class TestTileMoveAddressValidation:
     """Baked-address tile.move rejects in-place source/destination addresses."""
