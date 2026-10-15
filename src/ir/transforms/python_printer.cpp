@@ -100,7 +100,7 @@ bool SpmdInlineBodyPreservesAttrs(const InCoreScopeStmtPtr& incore) {
   // Only these attributes are reconstructed by the flattened SPMD spelling.
   // Keep the explicit InCore header for scoped metadata such as dump_vars.
   for (const auto& [key, value] : incore->attrs_) {
-    if (key != "slot_num" && key != kAttrCachePolicyVars) return false;
+    if (key != "slot_num" && key != "local_slot_num" && key != kAttrCachePolicyVars) return false;
   }
   return true;
 }
@@ -2289,7 +2289,11 @@ void IRPythonPrinter::PrintScopeOptimizations(SplitMode split, const ScopeStmtPt
   }
   if (has_slot_num) {
     if (has_mode) stream_ << ", ";
-    stream_ << prefix_ << ".cross_core_slot(slot_num=" << slot_num_holder->GetAttr<int>("slot_num", 0) << ")";
+    stream_ << prefix_ << ".cross_core_slot(slot_num=" << slot_num_holder->GetAttr<int>("slot_num", 0);
+    if (slot_num_holder->HasAttr("local_slot_num")) {
+      stream_ << ", local_slot_num=" << slot_num_holder->GetAttr<int>("local_slot_num", 0);
+    }
+    stream_ << ")";
   }
   stream_ << "]";
 }

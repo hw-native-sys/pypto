@@ -16,7 +16,7 @@ from pl.at().
 """
 
 import warnings
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 import pypto.language as pl
 import pytest
@@ -484,6 +484,65 @@ def test_split_without_slot_num_emits_no_warning():
             with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
                 y = pl.add(x, x)
             return y
+
+
+@pytest.mark.parametrize("scope", ["at", "for_spmd", "with_spmd", "with_spmd_id"])
+@pytest.mark.parametrize("split", [False, True])
+def test_local_slot_num_scope_roundtrip(scope, split):
+    """Both depths survive every scope spelling, with and without splitting."""
+    entries = "pl.cross_core_slot(slot_num=4, local_slot_num=1)"
+    if split:
+        entries = "pl.split(pl.SplitMode.UP_DOWN), " + entries
+    headers = {
+        "at": f"with pl.at(level=pl.Level.CORE_GROUP, optimizations=[{entries}]):",
+        "for_spmd": f"for i in pl.spmd(4, optimizations=[{entries}]):",
+        "with_spmd": f"with pl.spmd(4, optimizations=[{entries}]):",
+        "with_spmd_id": f"with pl.spmd(4, optimizations=[{entries}]) as i:",
+    }
+    before = parse_program(
+        "@pl.program\nclass Program:\n"
+        "    @pl.function(type=pl.FunctionType.Orchestration)\n"
+        "    def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:\n"
+        f"        {headers[scope]}\n"
+        "            block = pl.tile.get_block_idx()\n"
+        "            y = pl.add(x, x)\n"
+        "        return y\n"
+    )
+    printed = str(before)
+    assert "pl.cross_core_slot(slot_num=4, local_slot_num=1)" in printed
+    ir.assert_structural_equal(before, parse_program(printed))
+    outlined = passes.outline_incore_scopes()(passes.convert_to_ssa()(before))
+    incore = [f for f in outlined.functions.values() if f.func_type == ir.FunctionType.InCore]
+    assert len(incore) == 1
+    assert incore[0].attrs["slot_num"] == 4
+    assert incore[0].attrs["local_slot_num"] == 1
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "True", "1.5", "5"])
+def test_local_slot_num_parser_rejects_invalid_depth(value):
+    source = (
+        "@pl.program\nclass Program:\n"
+        "    @pl.function\n"
+        "    def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:\n"
+        "        with pl.at(level=pl.Level.CORE_GROUP, "
+        f"optimizations=[pl.cross_core_slot(slot_num=4, local_slot_num={value})]):\n"
+        "            y = pl.add(x, x)\n"
+        "        return y\n"
+    )
+    with pytest.raises(ParserSyntaxError, match="local_slot_num"):
+        parse_program(source)
+
+
+def test_local_slot_num_factory_defaults_and_validation():
+    assert pl.cross_core_slot(slot_num=4).local_slot_num is None
+    assert pl.cross_core_slot(slot_num=4, local_slot_num=1).local_slot_num == 1
+    assert pl.cross_core_slot(slot_num=4, local_slot_num=4).local_slot_num == 4
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, 5])
+def test_local_slot_num_factory_rejects_invalid_depth(value: Any):
+    with pytest.raises(ValueError, match="local_slot_num"):
+        pl.cross_core_slot(slot_num=4, local_slot_num=value)
 
 
 if __name__ == "__main__":
