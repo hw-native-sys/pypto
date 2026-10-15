@@ -233,6 +233,7 @@ class SnapshotAssembleSources : public IRMutator {
       return assign;
     }
     const auto view = views_.Get(source);
+    if (HasDisjointWindows(call, source_type, view)) return assign;
     const auto copied_source = view.window ? view.root : source;
     CHECK_SPAN(copied_source && (!view.window || view.offsets), call->span_)
         << "Buffer IR overlapping assemble requires a static window of a typed allocation";
@@ -279,6 +280,47 @@ class SnapshotAssembleSources : public IRMutator {
   }
 
  private:
+  bool HasDisjointWindows(const CallPtr& call, const TileTypePtr& source_type,
+                          const BufferViewAnalysis::View& source) const {
+    const auto target = views_.Get(call->args_[0]);
+    if (!source.window || !source.root || target.window || !source.offsets || !source.row_bytes ||
+        source.row_bytes != target.row_bytes || source_type->shape_.size() != 2) {
+      return false;
+    }
+    // Assemble results retain the destination allocation under a new SSA name.
+    // Compare physical origins without changing the logical root used by snapshots.
+    const auto root_type = GetTileTypeWithMemRef(source.root->GetType());
+    const auto target_type = GetTileTypeWithMemRef(call->args_[0]->GetType());
+    if (!root_type || !target_type) return false;
+    const auto root_memory = GetDefinedMemRef(root_type);
+    const auto target_memory = GetDefinedMemRef(target_type);
+    if (root_memory->base_ != target_memory->base_) return false;
+    const auto root_origin = As<ConstInt>(root_memory->byte_offset_);
+    const auto target_origin = As<ConstInt>(target_memory->byte_offset_);
+    if (!root_origin || !target_origin || root_origin->value_ < 0 || target_origin->value_ < 0) return false;
+    const auto offsets = As<MakeTuple>(call->args_[2]);
+    if (!offsets || offsets->elements_.size() != 2) return false;
+    const auto row = As<ConstInt>(offsets->elements_[0]);
+    const auto col = As<ConstInt>(offsets->elements_[1]);
+    const auto rows = As<ConstInt>(source_type->shape_[0]);
+    const auto cols = As<ConstInt>(source_type->shape_[1]);
+    if (!row || !col || !rows || !cols || row->value_ < 0 || col->value_ < 0 || rows->value_ <= 0 ||
+        cols->value_ <= 0) {
+      return false;
+    }
+    // Match the verifier's conservative first-to-last-byte envelope. Separate
+    // columns across multiple rows may still require a snapshot under this
+    // contract; do not replace it with a weaker rectangle-overlap check.
+    const __int128 pitch = *source.row_bytes;
+    const __int128 element = source_type->dtype_.GetBit() / 8;
+    const __int128 source_start =
+        root_origin->value_ + (*source.offsets)[0] * pitch + (*source.offsets)[1] * element;
+    const __int128 target_start = target_origin->value_ + row->value_ * pitch + col->value_ * element;
+    const __int128 bytes = (rows->value_ - 1) * pitch + cols->value_ * element;
+    return source_start <= target_start ? target_start - source_start >= bytes
+                                        : source_start - target_start >= bytes;
+  }
+
   BufferViewAnalysis views_;
   StorageNameSupply names_;
 };
