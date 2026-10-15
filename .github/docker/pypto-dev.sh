@@ -115,6 +115,16 @@ run)
     device_id="${1:-0}"
     src="${PYPTO_SRC_HOST:-$repo_root}"
     lib="${PYPTO_LIB_SRC_HOST:-$(dirname "$repo_root")/pypto-lib}"
+    # Linked worktrees store an absolute gitdir outside their source directory.
+    # Keep that metadata reachable at its original path after mounting the source
+    # at /workspace/pypto, so update/build can still resolve the checkout and pin.
+    git_mount=()
+    for checkout in "$src" "$lib"; do
+        if [ -f "$checkout/.git" ]; then
+            git_common="$(git -C "$checkout" rev-parse --path-format=absolute --git-common-dir)"
+            git_mount+=(-v "$git_common:$git_common")
+        fi
+    done
     lib_mount=()
     if [ -d "$lib" ]; then
         lib_mount=(-v "$lib:/workspace/pypto-lib")
@@ -150,8 +160,11 @@ run)
         # every board on the machine and the runtime deliberately exposes one.
         # That is the isolation working, not a fault; aclrtSetDevice succeeds.
         device_args=(--runtime=ascend -e "ASCEND_VISIBLE_DEVICES=$device_id")
+        # A single selected physical card is logical device 0 inside the container.
+        container_device=0
         ;;
     privileged)
+        container_device="$device_id"
         # No runtime: name the devices, mount the driver tree *whole* (with only
         # lib64 + version.info npu-smi cannot reach the board at all, -9005),
         # and take the privilege hit. This hands over every card on the host.
@@ -195,10 +208,11 @@ run)
         --shm-size=16g \
         "${device_args[@]}" \
         -v "$src:/workspace/pypto" \
+        "${git_mount[@]}" \
         "${lib_mount[@]}" \
         -v "$cache_volume:/opt/pypto/cache" \
         "${proxy_env[@]}" \
-        -e "PYPTO_DEVICE=$device_id" \
+        -e "PYPTO_DEVICE=$container_device" \
         "$IMAGE:$chip"
     ;;
 *)

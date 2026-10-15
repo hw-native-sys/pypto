@@ -89,7 +89,24 @@ fi
 
 echo "==> building pypto ($jobs jobs, $CXX)"
 export CCACHE_DIR="$cache_root/pypto"
-cmake -B build -G Ninja \
+# Keep native generators, including Makefiles. A host cache also records absolute
+# paths that change under a container bind mount; refresh just CMake's cache/state
+# in that case, preserving the generator and other files in the build directory.
+configure_args=()
+if [ -f build/CMakeCache.txt ]; then
+    cached_source="$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' build/CMakeCache.txt)"
+    cached_build="$(sed -n 's/^CMAKE_CACHEFILE_DIR:INTERNAL=//p' build/CMakeCache.txt)"
+    source_dir="$(pwd -P)"
+    if [ "$cached_source" != "$source_dir" ] || [ "$cached_build" != "$source_dir/build" ]; then
+        echo "==> build/ was configured at another path; refreshing CMake state"
+        configure_args=(--fresh)
+        generator="$(sed -n 's/^CMAKE_GENERATOR:INTERNAL=//p' build/CMakeCache.txt)"
+        if [ -n "$generator" ]; then configure_args+=(-G "$generator"); fi
+    fi
+else
+    configure_args=(-G Ninja)
+fi
+cmake -B build "${configure_args[@]}" \
     -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-RelWithDebInfo}" \
     -Dnanobind_DIR="$(python -c 'import nanobind; print(nanobind.cmake_dir())')"
 cmake --build build --parallel "$jobs"

@@ -350,7 +350,7 @@ bash "$PYPTO_SRC/.github/docker/pypto-update.sh" --no-pull --jobs 2
 | `--no-pull` | 不改变源码和子模块；对齐 PTOAS 并重建 |
 | `--reinstall-deps` | 使用共享 setup 脚本刷新 Python 依赖 |
 | `--proxy http://host:port` | 为本次运行设置 HTTP 和 HTTPS 代理 |
-| `--remote-submodules` | 显式追踪子模块远程，而不是跟随所 pin 的提交 |
+| `--remote-submodules` | 支持反复跟踪子模块远程；允许提交偏离 pin，但拒绝本地文件改动 |
 | `--jobs N` | 正整数构建并行度，受机器限制约束；否则使用仓库资源限制加载器 |
 | `--skip-doctor` | 没有暴露设备时跳过收尾检查 |
 
@@ -358,11 +358,14 @@ bash "$PYPTO_SRC/.github/docker/pypto-update.sh" --no-pull --jobs 2
 
 ```bash
 bash "$PYPTO_SRC/.github/docker/pypto-install-ptoas.sh"
+source "$PYPTO_SRC/.github/docker/pypto-activate.sh"
 "$PTOAS_ROOT/bin/ptoas" --version
 ```
 
 安装器读取 checkout 中的版本及架构对应的 SHA256，在改变安装前校验 release wheel，
 安装到 `${PTOAS_ROOT:-/opt/pypto/ptoas}`。`--force` 可重装同一版本。
+使用旧镜像时，每个新 shell 使用 PTOAS 前都要 source checkout 中的激活脚本；只选择可执行文件
+仍可能加载 CANN 的 Python 包，覆盖固定版本的 wheel。安装器会自动隔离自身版本探测的导入路径。
 环境需要已有 uv 和 CPython 3.10，已发布镜像满足这个条件。在其他 CANN 容器中配置环境时，
 从完整 checkout 运行 `pypto-setup.sh`；它安装同一份辅助脚本，并通过
 `build-constraints.txt` 约束构建工具。
@@ -370,6 +373,10 @@ bash "$PYPTO_SRC/.github/docker/pypto-install-ptoas.sh"
 `pypto-build` 使用原生 CMake，安装与 checkout 匹配的 simpler，并遵循其中的 PTO-ISA pin。
 它刻意避免 `pip install -e .`：scikit-build 配置过的 `build/` 可能把扩展放到源码导入路径之外。
 并行度通过 `.claude/skills/testing/load-env.sh` 加载，未分类的机器默认使用两个任务。
+已有原生构建保留其 CMake generator，新构建使用 Ninja。挂载到容器后，
+如果缓存记录的绝对路径不同，会自动刷新 CMake 状态。
+`pypto-doctor` 检查已安装 simpler 的构建版本是否与挂载的 `runtime/` 匹配。
+如果 `runtime/` 有未提交改动，会给出警告，因为版本一致无法证明已安装 binding 包含这些改动。
 
 ### 构建开发镜像
 
@@ -385,6 +392,9 @@ docker buildx build --load --target dist \
   --tag pypto-dev:a3-dist .
 ```
 
+默认的 `main` 引用保留跟踪分支，因此 `pypto-update.sh` 可以拉取更新。
+标签和提交引用使用分离 HEAD；这类固定版本构建应使用 `--no-pull`。
+
 构建 AMD64 镜像时，使用 x86_64 宿主机及支持 `linux/amd64` 的 CANN 基础镜像标签；
 构建前先确认该标签支持目标架构。先发布独立架构标签，在对应 NPU 宿主机上通过
 `pypto-doctor` 和模型验证后，再组合多架构 manifest。无 NPU 时构建成功只验证镜像构建过程。
@@ -392,6 +402,10 @@ docker buildx build --load --target dist \
 本地环境镜像可以用 `.github/docker/pypto-dev.sh build a3` 构建，
 用 `.github/docker/pypto-dev.sh run a3 0` 创建或重新进入容器。
 启动器支持 CANN 标签、镜像、缓存卷和代理覆盖，具体见源码。
+使用 Ascend Docker Runtime 时，选中的物理卡在容器内对应逻辑设备 `0`，因此启动器导出
+`PYPTO_DEVICE=0`。privileged 模式保留物理卡编号；`pypto-doctor` 探测同一个选定设备。
+挂载关联工作树（linked worktree）时，
+启动器还会把共享 Git 元数据挂到原始路径，以便在容器中继续使用 Git。
 
 ### 不装 Ascend Docker Runtime
 
