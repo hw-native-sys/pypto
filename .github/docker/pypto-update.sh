@@ -80,6 +80,8 @@ else
     echo "No pypto-lib checkout at $PYPTO_LIB_SRC; skipping its update"
 fi
 if $pull; then
+    status_args=(--porcelain)
+    if $remote_submodules; then status_args+=(--ignore-submodules=all); fi
     for repo in "${repos[@]}"; do
         git -C "$repo" rev-parse --is-inside-work-tree >/dev/null
         current_branch="$(git -C "$repo" symbolic-ref --quiet --short HEAD)" || {
@@ -89,9 +91,31 @@ if $pull; then
             echo "$repo is on $current_branch, expected $branch; select the branch explicitly" >&2
             exit 1
         fi
-        [ -z "$(git -C "$repo" status --porcelain)" ] || {
+        repo_status="$(git -C "$repo" status "${status_args[@]}")" || exit 1
+        [ -z "$repo_status" ] || {
             echo "$repo has local changes; commit/stash them or use --no-pull" >&2; exit 1;
         }
+        if $remote_submodules; then
+            # An explicitly staged gitlink is a user edit, not the unstaged drift
+            # produced by --remote. Keep it protected even when status hides links.
+            git -C "$repo" diff --cached --quiet --ignore-submodules=none || {
+                echo "$repo has local changes; commit/stash them or use --no-pull" >&2; exit 1;
+            }
+            # Remote tracking deliberately moves submodule HEADs off their gitlinks.
+            # Ignore only that expected drift: check every populated submodule for
+            # tracked/untracked edits separately, including nested submodules.
+            git -C "$repo" submodule foreach --quiet --recursive '
+                git diff --cached --quiet --ignore-submodules=none || {
+                    echo "submodule $displaypath has local changes; commit/stash them or use --no-pull" >&2
+                    exit 1
+                }
+                submodule_status="$(git status --porcelain --ignore-submodules=all)" || exit 1
+                test -z "$submodule_status" || {
+                    echo "submodule $displaypath has local changes; commit/stash them or use --no-pull" >&2
+                    exit 1
+                }
+            ' || exit 1
+        fi
         git -C "$repo" rev-parse --verify '@{upstream}' >/dev/null || {
             echo "$repo needs a tracking branch or --no-pull" >&2; exit 1;
         }

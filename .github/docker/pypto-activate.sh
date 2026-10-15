@@ -35,28 +35,28 @@ unset _pypto_cann_env
 # shellcheck disable=SC1091
 source "$PYPTO_HOME/venv/bin/activate"
 
-# Put the venv's site-packages at the FRONT of PYTHONPATH. CANN's set_env.sh
-# puts its own there, and it carries Python packages — built for the base
-# image's 3.11/3.12 — that would otherwise shadow what is installed here.
-#
-# Prepended unconditionally, with no "already present" guard: this file is
-# sourced more than once per session and each source re-runs set_env.sh, which
-# re-prepends CANN's dir. A guard that skipped on finding the venv dir anywhere
-# would leave that fresh CANN copy in front of it. The duplicates left behind
-# are harmless and bounded by the number of sources.
-_pypto_site="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])' 2>/dev/null)"
-if [ -n "$_pypto_site" ]; then
-    export PYTHONPATH="$_pypto_site${PYTHONPATH:+:$PYTHONPATH}"
-fi
-unset _pypto_site
-
 # --- ptoas ----------------------------------------------------------------
-# Its own venv: ptoas is invoked as an executable, so only bin/ is exposed and
-# its dependency closure never mixes with PyPTO's.
 export PTOAS_ROOT="${PTOAS_ROOT:-$PYPTO_HOME/ptoas}"
 # CANN prepends its online-build assembler on every activation. Prepend ours
 # again even when it already appears later in PATH.
 export PATH="$PTOAS_ROOT/bin:$PATH"
+
+# PYTHONPATH is searched before either interpreter's site-packages, so selecting
+# the pinned executable alone still lets it import CANN's bundled ptoas. Keep
+# PyPTO's packages first (including numpy), then the pinned PTOAS packages, then
+# CANN. Rebuild this order on every source because set_env.sh prepends CANN again.
+_pypto_site="$("$PYPTO_HOME/venv/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])' 2>/dev/null)"
+_ptoas_site=""
+if [ -x "$PTOAS_ROOT/bin/python" ]; then
+    _ptoas_site="$("$PTOAS_ROOT/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])' 2>/dev/null)"
+fi
+if [ -n "$_ptoas_site" ]; then
+    export PYTHONPATH="$_ptoas_site${PYTHONPATH:+:$PYTHONPATH}"
+fi
+if [ -n "$_pypto_site" ]; then
+    export PYTHONPATH="$_pypto_site${PYTHONPATH:+:$PYTHONPATH}"
+fi
+unset _pypto_site _ptoas_site
 
 # --- Compilers ------------------------------------------------------------
 # The base image's g++ (11) is the right default: simpler's runtime is C++17,
@@ -77,14 +77,23 @@ fi
 # A native (non-scikit-build) CMake build puts pypto_core.*.so straight into
 # $PYPTO_SRC/python/pypto, which is the tree `import pypto` must find. pypto-lib
 # is a plain source checkout and is imported the same way.
+# Reinsert checkout paths on every activation: the venv was just prepended above
+# and may contain an installed PyPTO that would otherwise shadow the mounted tree.
+_pypto_pp=""
+_pypto_ifs="$IFS"; IFS=:
+for _pypto_path in ${PYTHONPATH:-}; do
+    case "$_pypto_path" in
+        ""|"$PYPTO_SRC/python"|"$PYPTO_LIB_SRC") continue ;;
+    esac
+    _pypto_pp="${_pypto_pp:+$_pypto_pp:}$_pypto_path"
+done
+IFS="$_pypto_ifs"
+export PYTHONPATH="$_pypto_pp"
 for _pypto_path in "$PYPTO_SRC/python" "$PYPTO_LIB_SRC"; do
     [ -d "$_pypto_path" ] || continue
-    case ":$PYTHONPATH:" in
-        *":$_pypto_path:"*) ;;
-        *) export PYTHONPATH="$_pypto_path${PYTHONPATH:+:$PYTHONPATH}" ;;
-    esac
+    export PYTHONPATH="$_pypto_path${PYTHONPATH:+:$PYTHONPATH}"
 done
-unset _pypto_path
+unset _pypto_path _pypto_pp _pypto_ifs
 
 export PATH="$PYPTO_HOME/bin:$PATH"
 
