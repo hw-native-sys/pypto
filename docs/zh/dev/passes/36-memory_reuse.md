@@ -78,7 +78,7 @@ program_optimized = reuse_pass(program)
 - **No-alias 守护**（算子语义）：定义复用变量的算子可以禁止其输出与某些输入操作数共享缓冲区——因为硬件在**写输出的同时读取**这些输入,原地写会中途破坏该算子。三个来源汇入同一个"每个输出禁止 alias 的输入集合"（`ForbidAliasCollector`）：
   - `not_inplace_safe()` —— 该算子无法以 `src == dst` 运行，因此其输出不得 alias **任何**输入操作数。
   - `forbid_output_alias(i)` —— 该算子对其值操作数 in-place-safe，但在写输出时读取**某个特定**操作数，因此输出不得 alias 该操作数的缓冲区。
-  - **改变位宽的 `tile.cast`** —— 所有目标上的升精度转换都要求源、目标缓冲区不重叠。A2/A3 降精度转换也要求不重叠：TCVT 先处理所有行的完整 repeat，再处理各行尾部，后续行的输出可能覆盖尚未读取的源尾部（[#2973](https://github.com/hw-native-sys/pypto/issues/2973)）。该保守规则不依赖 shape 或动态 valid shape；A5 降精度及同宽转换仍允许复用。同一判定同时用于 PyPTO 与 DSA_RP 内存规划器、控制流目标重定向以及 PTO codegen 对显式物理地址的校验。由 PTOAS 分配内存时尚未确定物理地址，因此跳过该地址校验。
+  - **改变位宽的 `tile.cast`** —— 所有目标上的升精度转换都要求源、目标缓冲区不重叠。A2/A3 降精度转换也要求不重叠：TCVT 先处理所有行的完整 repeat，再处理各行尾部，后续行的输出可能覆盖尚未读取的源尾部（[#2973](https://github.com/hw-native-sys/pypto/issues/2973)）。该保守规则不依赖 shape 或动态 valid shape；A5 降精度及同宽转换仍允许复用。同一判定同时用于 PyPTO 与 DSA_RP 内存规划器、控制流目标重定向以及 PTO codegen 对显式物理地址的校验。由 PTOAS 分配内存时尚未确定物理地址，因此跳过该地址校验。TPOP 源及其视图使用不带 MemRef 的预留管道存储；codegen 仅校验显式源地址，转换结果仍分配在通用内存池中。
 
   MemoryReuse 拒绝将输出放到任一禁止操作数的**物理缓冲区**上,并通过 reuse-map 合并**与** VIEW 继承（`reshape`/`slice` 共享其源的 MemRef base）解析每个操作数——因此间接到达的禁止操作数（其 owner tile 被复用到别的缓冲区,或经 view 占用）也能被捕获。对于返回 tuple 的算子，约束会从 tuple 临时变量传播到每个 tile 类型的 `TupleGetItem` 结果。
 
