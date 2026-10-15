@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Issue #2902: auto-split Vec operands must reuse their gathered Mat storage."""
+"""Issues #2902 and #2992: Vec operands must reuse their gathered Mat storage."""
 
 import re
 
@@ -16,6 +16,29 @@ import pytest
 from pypto.backend import BackendType
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.runtime import RunConfig
+
+
+def _assert_single_mat_handoff(pto: str, min_consumers: int = 1) -> str:
+    """Check direct Mat consumption and release after the last FIFO tile use."""
+    lines = pto.splitlines()
+    pops = [(i, line) for i, line in enumerate(lines) if "pto.tpop_from_aiv" in line]
+    assert len(pops) == 1
+    pop_idx, pop = pops[0]
+    popped = re.search(r"(%[\w]+) = pto.tpop_from_aiv", pop)
+    assert popped is not None, pop
+    consumers = [
+        i
+        for i, line in enumerate(lines)
+        if f"pto.textract ins({popped[1]}," in line or f"pto.tmov ins({popped[1]} :" in line
+    ]
+    assert len(consumers) >= min_consumers, pto
+    frees = [i for i, line in enumerate(lines) if "pto.tfree_from_aiv" in line]
+    assert len(frees) == 1
+    assert pop_idx < min(consumers) <= max(consumers) < frees[0]
+    for line in pto.splitlines():
+        if "pto.tmov " in line:
+            assert line.count("loc=mat") < 2, line
+    return pop
 
 
 @pytest.mark.parametrize("b_trans", [False, True])
@@ -54,27 +77,64 @@ def test_auto_split_mat_staging(tmp_path, ascend_backend, b_trans):
     files = list(tmp_path.rglob("*.pto"))
     assert files
     pto = "\n".join(path.read_text() for path in files)
-    # There is exactly one Vec->cube crossing. Its consumers must read the popped
-    # Mat directly, and the FIFO release must follow the final use. A5's larger
-    # operand capacity permits a whole-tile placement rather than K extracts.
-    lines = pto.splitlines()
-    pops = [(i, line) for i, line in enumerate(lines) if "pto.tpop_from_aiv" in line]
-    assert len(pops) == 1
-    pop_idx, pop = pops[0]
-    popped = re.search(r"(%[\w]+) = pto.tpop_from_aiv", pop)
-    assert popped is not None, pop
-    consumers = [
-        i
-        for i, line in enumerate(lines)
-        if f"pto.textract ins({popped[1]}," in line or f"pto.tmov ins({popped[1]} :" in line
-    ]
-    assert len(consumers) >= (2 if ascend_backend == BackendType.Ascend910B else 1), pto
-    frees = [i for i, line in enumerate(lines) if "pto.tfree_from_aiv" in line]
-    assert len(frees) == 1
-    assert pop_idx < min(consumers) <= max(consumers) < frees[0]
-    for line in pto.splitlines():
-        if "pto.tmov " in line:
-            assert line.count("loc=mat") < 2, line
+    _assert_single_mat_handoff(pto, min_consumers=2 if ascend_backend == BackendType.Ascend910B else 1)
+    if find_ptoas_binary() is not None:
+        assert list((tmp_path / "kernels").rglob("*.cpp"))
+
+
+@pytest.mark.parametrize("split_mode", [pl.SplitMode.NONE, pl.SplitMode.UP_DOWN])
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+def test_explicit_vec_to_mat_qk_pv(tmp_path, ascend_backend, split_mode):
+    """An authored NZ Vec->Mat boundary needs no copy, even without K tiling (#2992)."""
+
+    @pl.jit(auto_scope=False)
+    def entry(
+        query: pl.Tensor[[16, 16], pl.BF16],
+        keys: pl.Tensor[[16, 16], pl.BF16],
+        values: pl.Tensor[[16, 16], pl.BF16],
+        output: pl.Out[pl.Tensor[[16, 16], pl.BF16]],
+    ):
+        with pl.spmd(
+            1, name_hint="qk_pv", optimizations=[pl.split(split_mode), pl.cross_core_slot(slot_num=1)]
+        ):
+            block = pl.tile.get_block_idx()
+            q = pl.tile.load(query, [block * 16, 0], [16, 16], target_memory=pl.Mem.Mat)
+            k = pl.tile.load(keys, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            v = pl.tile.load(values, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            qk = pl.tile.matmul(q, pl.tile.transpose_view(k))
+            scores = pl.tile.move(
+                qk, pl.Mem.Vec, blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box
+            )
+            probabilities = pl.exp(scores)
+            weights = pl.tile.move(
+                pl.cast(probabilities, pl.BF16, mode="rint"),
+                pl.Mem.Mat,
+                blayout=pl.TileLayout.col_major,
+                slayout=pl.TileLayout.row_major,
+            )
+            pv = pl.tile.matmul(weights, v)
+            result = pl.tile.move(
+                pv, pl.Mem.Vec, blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box
+            )
+            pl.tile.store(pl.cast(result, pl.BF16, mode="rint"), [block * 16, 0], output)
+        return output
+
+    entry.compile(
+        config=RunConfig(
+            platform="a5" if ascend_backend == BackendType.Ascend950 else "a2a3",
+            codegen_only=True,
+            save_kernels=True,
+            save_kernels_dir=str(tmp_path),
+        )
+    )
+    files = list(tmp_path.rglob("*.pto"))
+    assert files
+    pto = "\n".join(path.read_text() for path in files)
+    pop = _assert_single_mat_handoff(pto)
+    split_code = 0 if split_mode == pl.SplitMode.NONE else 1
+    assert f"split = {split_code}" in pop
+    assert "loc=mat, dtype=bf16, rows=16, cols=16" in pop
+    assert "blayout=col_major, slayout=row_major" in pop
     if find_ptoas_binary() is not None:
         assert list((tmp_path / "kernels").rglob("*.cpp"))
 
