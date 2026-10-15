@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import os
 import shlex
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -313,6 +315,44 @@ def test_older_version_still_leaves_the_generated_pto(tmp_path, monkeypatch):
 
     assert (out / "ptoas" / "kernel_a.pto").read_text() == "module {}"
     assert _calls(ptoas) == ["--version"]
+
+
+@pytest.mark.parametrize(
+    "compiler,required,exit_code,diagnostic",
+    [
+        ("missing", True, pytest.ExitCode.USAGE_ERROR, "--require-ptoas requires PTOAS"),
+        ("old", True, pytest.ExitCode.USAGE_ERROR, "requires PTOAS >="),
+        ("broken", True, pytest.ExitCode.USAGE_ERROR, "Could not determine the version"),
+        ("missing", False, pytest.ExitCode.OK, "1 skipped"),
+    ],
+)
+def test_required_ptoas_prevents_silent_compilation_skip(tmp_path, compiler, required, exit_code, diagnostic):
+    """CI must fail for unavailable PTOAS; ordinary local tests may still skip."""
+    root = tmp_path / "ptoas"
+    if compiler != "missing":
+        version = _OLDER if compiler == "old" else _PINNED
+        _make_versioned_ptoas(root / "bin" / "ptoas", f"ptoas {version}", int(compiler == "broken"))
+    command = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "tests/ut/codegen/test_ptoas_planner_views.py::test_inplace_alias_preserves_output_view",
+        "-q",
+    ]
+    if required:
+        command.append("--require-ptoas")
+    result = subprocess.run(
+        command,
+        cwd=_REPO_ROOT,
+        env=os.environ | {"PTOAS_ROOT": str(root), "PYTEST_ADDOPTS": ""},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == exit_code, output
+    assert diagnostic in output, output
 
 
 if __name__ == "__main__":

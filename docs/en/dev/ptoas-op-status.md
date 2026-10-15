@@ -29,6 +29,21 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
   `tput/tget/tnotify/twait` does not count as ST coverage for
   `tbroadcast/tgather/tscatter/treduce`.
 
+## Planner View Compilation Guard
+
+The `system-tests-a5sim` CI job runs the `fillpad_inplace` planner/view regressions
+with its pinned PTOAS installation, before installing the device runtime:
+
+```bash
+python -m pytest tests/ut/codegen/test_ptoas_planner_views.py --require-ptoas -k "fillpad or inplace_alias" -v
+```
+
+`--require-ptoas` fails test setup when PTOAS is missing, cannot run, or is older
+than the supported version, so native compilation cannot silently skip for a
+missing compiler. The tests cover PTOAS-owned memory planning and the PYPTO/DSA_RP
+comparison paths on both backends. This guard checks MLIR and compilation to C++;
+it does not replace device numerical tests or exhaustively validate the planner.
+
 ## Legend
 
 - **Level**: PyPTO registration/generation level (tile / tensor / tile+tensor / comm /

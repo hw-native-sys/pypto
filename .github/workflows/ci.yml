@@ -2406,6 +2406,13 @@ jobs:
           "$PTOAS_ROOT/bin/python" -m pip install "$PTOAS_WHEEL"
           "$PTOAS_ROOT/bin/ptoas" --version
 
+      - name: Test PTOAS planner view compilation
+        # Reuse the pinned compiler above. Missing or incompatible PTOAS must
+        # fail this step instead of skipping the native compilation assertions.
+        run: >-
+          python -m pytest tests/ut/codegen/test_ptoas_planner_views.py
+          --require-ptoas -k "fillpad or inplace_alias" -v
+
       - name: Install simpler
         run: |
           whl="$(ls wheelhouse/simpler-*.whl 2>/dev/null | head -1)"
