@@ -80,6 +80,14 @@ class Ascend950Handler : public BackendHandler {
   [[nodiscard]] bool RequiresRuntimeSubblockBridge() const override { return false; }
   [[nodiscard]] bool RequiresNoSplitDualAivDispatch() const override { return false; }
   [[nodiscard]] bool SplitsCubeToVectorTransportInHardware() const override { return true; }
+  // A5 lowers FP4 -> FP8 casts in-kernel via the kernel-resident 256-entry
+  // u16 LUT + tgather route (LegalizeTileCast; default ON). The earlier
+  // identity bit-op chain variant was measured as a large end-to-end
+  // regression (49 materialized intermediate tile ops, ~4.19x UB
+  // bytes/elem, 1.87-6.16x slower end-to-end vs the FP4->BF16->FP32->FP8
+  // hops) and its rewriter was removed; the LUT route replaced it at
+  // ~4 B/elem.
+  [[nodiscard]] bool LowersFp4ToFp8InKernel() const override { return true; }
   // A5 acc->mat tinsert accepts dst=f32, so the Mat scratch may stay f32.
   [[nodiscard]] bool RequiresLowPrecisionMatScratch() const override { return false; }
 

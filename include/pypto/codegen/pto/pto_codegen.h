@@ -20,6 +20,8 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -326,6 +328,25 @@ class PTOCodegen : public CodegenBase {
    * @brief Get the IR variable currently being assigned
    */
   [[nodiscard]] ir::VarPtr GetCurrentResultVar() const;
+
+  /**
+   * @brief Resolve a scalar Var to its single defining expression in the
+   *        current function body (Codex t32 / PR#2987 round 3).
+   *
+   * Simplify deliberately preserves symbolic scalar assignments (``row = kb*64``)
+   * instead of substituting them, so analyses that need the expression must
+   * follow the definition themselves. Returns nullptr for parameters, loop
+   * induction variables, and Vars with zero or multiple definitions.
+   */
+  [[nodiscard]] ir::ExprPtr ResolveScalarVarDef(const ir::Var* var) const;
+
+  /**
+   * @brief True when *var* is a ForStmt induction variable whose static start
+   *        and step are both even, so every runtime value is even (t36 /
+   *        PR#2987 device validation: the `pl.parallel` domain-coordinate
+   *        offset pattern).
+   */
+  [[nodiscard]] bool IsEvenLoopVar(const ir::Var* var) const;
 
   /**
    * @brief Get tensor_view type string for a TensorType (e.g., "!pto.tensor_view<?x?xf32>")
@@ -1128,6 +1149,19 @@ class PTOCodegen : public CodegenBase {
     /// resolves its destinations by lookup rather than by rescanning the body.
     std::map<const ir::Var*, std::vector<ir::VarPtr>> tuple_element_index;
 
+    /// Scalar (non-Tile) Var -> its single defining expression in the current
+    /// function body, built once on function entry (Codex t32: the FP4 GM
+    /// offset evenness proof follows named scalar definitions — Simplify
+    /// deliberately keeps symbolic assignments rather than substituting).
+    /// A Var with zero or multiple definitions is absent from the map.
+    std::unordered_map<const ir::Var*, ir::ExprPtr> scalar_var_defs;
+
+    /// ForStmt induction variables whose static start AND step are both even
+    /// (t36): every runtime value is start + k*step, so such a loop var is
+    /// provably even — the canonical `for nb in pl.parallel(0, N, N_TILE)`
+    /// offset pattern the t30 proof wrongly rejected.
+    std::unordered_set<const ir::Var*> even_loop_vars;
+
     std::string current_expr_value;
     std::vector<std::string> yield_buffer;
 
@@ -1169,6 +1203,8 @@ class PTOCodegen : public CodegenBase {
       multi_buffer_region_order.clear();
 
       tuple_element_index.clear();
+      scalar_var_defs.clear();
+      even_loop_vars.clear();
       current_function.reset();
       current_result_var.reset();
       current_result_buf.clear();
@@ -1193,6 +1229,13 @@ class PTOCodegen : public CodegenBase {
   };
 
   /// Function-level mutable state, reset per GenerateFunction call.
+  /// t36: NAMES of ForStmt induction vars with static-even start/step across
+  /// the WHOLE program (orchestration-side loops live in a different function
+  /// than the device body that consumes the coordinate as a scalar param; the
+  /// call plumbing preserves the name). Device-side HalveFp4GmPartitionOffsets
+  /// falls back to this name set when the local pointer set has no match.
+  std::unordered_set<std::string> program_even_loop_var_names_;
+
   FunctionState fs_;
 
   // Module-level output stream (persists across functions)

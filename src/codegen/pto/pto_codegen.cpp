@@ -26,6 +26,8 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -546,6 +548,45 @@ class TupleConsumerCollector : public ir::IRVisitor {
   std::map<const ir::Var*, std::vector<ir::VarPtr>> index_;
 };
 
+/// Codex t32 (PR#2987 round 3): scalar Var -> single defining expression.
+/// A Var assigned more than once (loop-carried SSA re-binding) or never
+/// assigned in this body is recorded as nullptr — ResolveScalarVarDef then
+/// treats it as opaque.
+class ScalarDefCollector : public ir::IRVisitor {
+ public:
+  [[nodiscard]] std::unordered_map<const ir::Var*, ir::ExprPtr> Take() { return std::move(defs_); }
+  [[nodiscard]] std::unordered_set<const ir::Var*> TakeEvenLoopVars() { return std::move(even_loop_vars_); }
+
+ protected:
+  void VisitStmt_(const ir::AssignStmtPtr& op) override {
+    if (As<ir::TileType>(op->var_->GetType()) == nullptr) {
+      const ir::Var* key = op->var_.get();
+      const auto it = defs_.find(key);
+      if (it == defs_.end()) {
+        defs_.emplace(key, op->value_);
+      } else {
+        it->second = nullptr;  // multiply defined -> opaque
+      }
+    }
+    ir::IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const ir::ForStmtPtr& op) override {
+    // t36: an induction variable over static-even start and step takes only
+    // even values (start + k*step); record it for the evenness proof.
+    auto start_c = As<ir::ConstInt>(op->start_);
+    auto step_c = As<ir::ConstInt>(op->step_);
+    if (start_c && step_c && start_c->value_ % 2 == 0 && step_c->value_ % 2 == 0) {
+      even_loop_vars_.insert(op->loop_var_.get());
+    }
+    ir::IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  std::unordered_map<const ir::Var*, ir::ExprPtr> defs_;
+  std::unordered_set<const ir::Var*> even_loop_vars_;
+};
+
 }  // namespace
 
 std::vector<VarPtr> CollectVarsFromShapeExpr(const ExprPtr& expr) {
@@ -731,6 +772,33 @@ std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr,
   gm_slot_buffer_offsets_.clear();
   needs_deferred_completion_adapter_ = false;
   reported_precision_sites_.clear();
+  program_even_loop_var_names_.clear();
+  {
+    // t36: orchestration-side loops with static-even start/step produce even
+    // domain coordinates consumed by device functions as scalar params (the
+    // call plumbing preserves the name). Index the names once, program-wide.
+    class EvenLoopNameCollector : public ir::IRVisitor {
+     protected:
+      void VisitStmt_(const ir::ForStmtPtr& op) override {
+        auto start_c = As<ir::ConstInt>(op->start_);
+        auto step_c = As<ir::ConstInt>(op->step_);
+        if (start_c && step_c && start_c->value_ % 2 == 0 && step_c->value_ % 2 == 0) {
+          names_.insert(op->loop_var_->name_hint_);
+        }
+        ir::IRVisitor::VisitStmt_(op);
+      }
+      std::unordered_set<std::string> names_;
+      friend PTOCodegen;
+
+     public:
+      std::unordered_set<std::string> Take() { return std::move(names_); }
+    } collector;
+    for (const auto& [gvar, func] : program->functions_) {
+      (void)gvar;
+      if (func->body_) collector.VisitStmt(func->body_);
+    }
+    program_even_loop_var_names_ = collector.Take();
+  }
   PrepareGMSlotBufferLayout(program);
 
   const std::string target_arch = backend_->GetHandler()->GetPtoTargetArch();
@@ -911,6 +979,16 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     TupleConsumerCollector collector;
     collector.VisitStmt(func->body_);
     fs_.tuple_element_index = collector.Take();
+  }
+
+  // Codex t32 (PR#2987 round 3): index scalar definitions once so analyses
+  // (the FP4 GM offset evenness proof) can follow named scalars such as
+  // `row = kb * 64` without rescanning the body per lookup.
+  {
+    ScalarDefCollector collector;
+    collector.VisitStmt(func->body_);
+    fs_.scalar_var_defs = collector.Take();
+    fs_.even_loop_vars = collector.TakeEvenLoopVars();
   }
 
   // Collect dyn-dim Vars from tensor-parameter shapes once. The same list
@@ -2425,6 +2503,24 @@ void PTOCodegen::VisitExpr_(const CallPtr& op) {
 std::string PTOCodegen::GetCurrentResultTarget() const { return fs_.current_result_buf; }
 
 ir::VarPtr PTOCodegen::GetCurrentResultVar() const { return fs_.current_result_var; }
+
+ir::ExprPtr PTOCodegen::ResolveScalarVarDef(const ir::Var* var) const {
+  if (var == nullptr) return nullptr;
+  const auto it = fs_.scalar_var_defs.find(var);
+  if (it == fs_.scalar_var_defs.end() || it->second == nullptr) return nullptr;
+  return it->second;
+}
+
+bool PTOCodegen::IsEvenLoopVar(const ir::Var* var) const {
+  if (var == nullptr) return false;
+  if (fs_.even_loop_vars.count(var) > 0) return true;
+  // t36: the offset var may be the device-function scalar PARAM carrying an
+  // orchestration-side even loop coordinate (same name). Only fall back when
+  // the current function does not itself define/rebind the name — a local
+  // binding was already analyzed by the pointer path above.
+  return fs_.scalar_var_defs.find(var) == fs_.scalar_var_defs.end() &&
+         program_even_loop_var_names_.count(var->name_hint_) > 0;
+}
 
 std::vector<ir::VarPtr> PTOCodegen::ResolveTupleResultElements(const ir::VarPtr& tuple_var,
                                                                size_t arity) const {

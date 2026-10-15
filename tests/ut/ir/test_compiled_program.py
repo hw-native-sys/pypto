@@ -29,10 +29,12 @@ from pypto.ir.compiled_program import (
     _COMPILED_META_SCHEMA,
     CompiledProgram,
     _build_full_args,
+    _coerce_args,
     _extract_param_infos,
     _param_info_from_dict,
     _param_info_to_dict,
     _validate_device_tensor,
+    _validate_fp4_carrier_shape,
     _validate_stacked_tensor,
 )
 from pypto.ir.distributed_compiled_program import (
@@ -1732,6 +1734,97 @@ def test_parameter_metadata_rejects_non_string_layout(layout):
     payload["layout"] = layout
     with pytest.raises(ValueError, match="layout"):
         _param_info_from_dict(payload)
+
+
+def _fp4_info(shape, layout="ND", dtype=DataType.FP4):
+    return _ParamInfo("b", ir.ParamDirection.In, list(shape), dtype, layout)
+
+
+class TestValidateFp4CarrierShape:
+    """The FP4 dispatch boundary must reject a logical (nibble) tensor shape.
+
+    A logical ``pl.FP4`` annotation halves its static last dim into the runtime
+    x2 carrier shape, and the JIT specializer doubles a dummy carrier last dim
+    back into nibbles. A host tensor declared with the *logical* shape used to
+    cancel those rewrites in the metadata while staying 2x narrower than the
+    compiled GM view, so every tiled-load row read past its true end -- silent
+    data corruption (fp4-x2 stride doubling). The validator must turn that
+    into a loud TypeError naming the expected carrier shape.
+    """
+
+    def test_matching_carrier_shape_passes(self):
+        assert _validate_fp4_carrier_shape([256, 64], _fp4_info([256, 64])) is None
+
+    def test_packed_dtype_uses_carrier_shape_directly(self):
+        # FP4E2M1X2 annotations are already carrier-shaped; no halving anywhere.
+        assert _validate_fp4_carrier_shape([256, 64], _fp4_info([256, 64], dtype=DataType.FP4E2M1X2)) is None
+
+    def test_logical_shape_is_rejected(self):
+        # The regression this guards: annotation [256, 128] nibbles compiles to
+        # runtime carrier [256, 64]; a [256, 128] torch x2 tensor is 2x too wide.
+        with pytest.raises(TypeError, match="expects runtime x2 carrier shape \\(256, 64\\)"):
+            _validate_fp4_carrier_shape([256, 128], _fp4_info([256, 64]))
+
+    def test_rank_mismatch_is_rejected(self):
+        with pytest.raises(TypeError, match="expects runtime x2 carrier shape"):
+            _validate_fp4_carrier_shape([256, 64, 1], _fp4_info([256, 64]))
+
+    def test_leading_dim_mismatch_is_rejected(self):
+        with pytest.raises(TypeError, match="got tensor shape \\(512, 64\\)"):
+            _validate_fp4_carrier_shape([512, 64], _fp4_info([256, 64]))
+
+    def test_dynamic_dims_are_skipped(self):
+        # Dynamic dims (-1) in the compiled shape accept any runtime extent.
+        assert _validate_fp4_carrier_shape([7, 64], _fp4_info([-1, 64])) is None
+        assert _validate_fp4_carrier_shape([7, 9], _fp4_info([-1, -1])) is None
+
+    def test_blocked_layouts_defer_to_layout_aware_validation(self):
+        # NZ / MX layouts address a blocked rank-5 shape the caller does not
+        # allocate directly; the equality is left to the layout-aware paths.
+        assert (
+            _validate_fp4_carrier_shape([2, 4, 256, 512], _fp4_info([8, 16, 16, 16, 32], layout="NZ")) is None
+        )
+
+    def test_scalar_metadata_skips_equality(self):
+        assert (
+            _validate_fp4_carrier_shape([256, 64], _ParamInfo("b", ir.ParamDirection.In, None, DataType.FP4))
+            is None
+        )
+
+    @pytest.mark.parametrize("dtype", [DataType.FP4, DataType.FP4E2M1X2])
+    def test_empty_and_nonpositive_shapes_still_rejected(self, dtype):
+        with pytest.raises(TypeError, match="rank >= 1"):
+            _validate_fp4_carrier_shape([], _fp4_info([256, 64], dtype=dtype))
+        with pytest.raises(TypeError, match="positive runtime x2 carrier last dimension"):
+            _validate_fp4_carrier_shape([256, 0], _fp4_info([256, 64], dtype=dtype))
+
+    def test_non_fp4_dtype_is_untouched(self):
+        # Non-FP4 params never hit the FP4 rules, whatever the shape.
+        assert _validate_fp4_carrier_shape([256, 128], _fp4_info([256, 64], dtype=DataType.FP32)) is None
+
+
+class TestCoerceArgsFp4CarrierShape:
+    """The torch-tensor dispatch path enforces the FP4 carrier equality.
+
+    ``DeviceTensor`` args were already shape-checked per dim; the host
+    ``torch.Tensor`` branch only ran the FP4 positivity check, which is where
+    the logical-shaped tensor slipped through to a silent GM overread.
+    """
+
+    def _coerce(self, tensor, info):
+        return _coerce_args((tensor,), [info], [], [], caller_name="kernel")
+
+    def test_logical_shaped_torch_tensor_is_rejected(self):
+        info = _fp4_info([256, 64])
+        logical = torch.empty(256, 128, dtype=torch.float4_e2m1fn_x2)
+        with pytest.raises(TypeError, match="expects runtime x2 carrier shape \\(256, 64\\)"):
+            self._coerce(logical, info)
+
+    def test_carrier_shaped_torch_tensor_passes(self):
+        info = _fp4_info([256, 64])
+        carrier = torch.empty(256, 64, dtype=torch.float4_e2m1fn_x2)
+        coerced, _ = self._coerce(carrier, info)
+        assert coerced == [carrier]
 
 
 if __name__ == "__main__":

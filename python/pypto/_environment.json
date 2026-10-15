@@ -175,6 +175,10 @@
       "category": "semantic",
       "reason": "Resolve effective source-location emission into compilation options."
     },
+    "PYPTO_FP4_CAST_NZ_DIRECT": {
+      "category": "semantic",
+      "reason": "Selects the experimental NZ-direct store lowering in LegalizeTileCast; changes generated code and must be part of the compilation identity."
+    },
     "PYPTO_LOG_LEVEL": {
       "category": "nonsemantic",
       "reason": "Logging threshold; does not select compiler transformations."

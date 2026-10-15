@@ -24,6 +24,7 @@ import pypto
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
+from pypto.ir.op import tile_ops as T
 
 # ---------------------------------------------------------------------------
 # Shared helpers: program builders and pass invocation
@@ -5166,6 +5167,277 @@ class TestManualPipeVtoCFractalAdapt:
 
         Once = _expand_raw(Before)
         ir.assert_structural_equal(passes.expand_mixed_kernel()(Once), Once)
+
+
+# ---------------------------------------------------------------------------
+# Transpose-fusion eligibility (PR#2987 review, Majors 2 and 3)
+# ---------------------------------------------------------------------------
+
+
+def _count_assign_calls(func, op_name) -> int:
+    """Count top-level AssignStmt calls of *op_name* in one split function."""
+    if func is None:
+        return 0
+    return sum(
+        1
+        for stmt in _flatten_top_level_stmts(func.body)
+        if isinstance(stmt, ir.AssignStmt)
+        and isinstance(stmt.value, ir.Call)
+        and stmt.value.op.name == op_name
+    )
+
+
+class TestTransposeFusionEligibility:
+    """The E-fix may fuse a ``tile.transpose_view`` into the boundary tpop only
+    when the transpose is the boundary destination's SOLE consumer AND the
+    boundary is move-driven (PR#2987 review, Majors 2/3).
+
+    Fused   = the transpose_view statement is skipped (the pop declares the
+              transposed type) -> 0 remaining ``tile.transpose_view`` calls.
+    Unfused = the transpose_view statement remains -> exactly 1 call.
+    """
+
+    def _control_program(self):
+        """Sole-consumer Route-E chain (no second reader of the boundary
+        destination): the transpose_view must fuse into the pop."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[32, 64], pl.FP8E4M3FN],
+                a_scale: pl.Tensor[[32, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[64, 64], pl.FP8E4M3FN],
+                b_scale: pl.Tensor[[2, 64], pl.FP8E8M0, pl.MX_B_NN],
+                w: pl.Tensor[[32, 64], pl.FP8E4M3FN],
+                y: pl.Tensor[[64, 64], pl.FP8E4M3FN],
+                out1: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
+                out2: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
+            ) -> pl.Tensor[[32, 64], pl.FP32]:
+                lhs = pl.load(a, [0, 0], [32, 64])
+                lhs_scale = pl.load(a_scale, [0, 0], [32, 2])
+                b_vec = pl.load(b, [0, 0], [64, 64])
+                b_mat = pl.move(
+                    b_vec,
+                    target_memory=pl.Mem.Mat,
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.row_major,
+                )  # V2C boundary (move-driven); b_mat is the boundary destination.
+                b_t = pl.tile.transpose_view(b_mat)  # the fusion candidate
+                b_s = pl.load(b_scale, [0, 0], [2, 64])
+                acc = pl.matmul_mx(lhs, lhs_scale, b_t, b_s)
+                pl.store(acc, [0, 0], out1)
+                w_mat = pl.load(w, [0, 0], [32, 64], target_memory=pl.Mem.Mat)
+                w_left = pl.move(w_mat, target_memory=pl.Mem.Left)
+                y_mat = pl.load(y, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
+                z2 = pl.matmul(w_left, pl.move(y_mat, target_memory=pl.Mem.Right))
+                out2_store: pl.Tensor[[32, 64], pl.FP32] = pl.store(z2, [0, 0], out2)
+                return out2_store
+
+        return Before
+
+    def _second_reader_program(self):
+        """Same chain, plus a second reader of the boundary destination b_mat
+        nested inside the matmul call arguments (invisible to a scan that only
+        counts direct Var args of AssignStmt call values)."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[32, 64], pl.FP8E4M3FN],
+                a_scale: pl.Tensor[[32, 2], pl.FP8E8M0, pl.MX_A_ZZ],
+                b: pl.Tensor[[64, 64], pl.FP8E4M3FN],
+                b_scale: pl.Tensor[[2, 64], pl.FP8E8M0, pl.MX_B_NN],
+                w: pl.Tensor[[32, 64], pl.FP8E4M3FN],
+                y: pl.Tensor[[64, 64], pl.FP8E4M3FN],
+                out1: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
+                out2: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
+            ) -> pl.Tensor[[32, 64], pl.FP32]:
+                lhs = pl.load(a, [0, 0], [32, 64])
+                lhs_scale = pl.load(a_scale, [0, 0], [32, 2])
+                b_vec = pl.load(b, [0, 0], [64, 64])
+                b_mat = pl.move(
+                    b_vec,
+                    target_memory=pl.Mem.Mat,
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.row_major,
+                )  # V2C boundary (move-driven); b_mat is the boundary destination.
+                b_t = pl.tile.transpose_view(b_mat)  # would fuse if sole consumer
+                b_s = pl.load(b_scale, [0, 0], [2, 64])
+                acc = pl.matmul_mx(lhs, lhs_scale, b_t, b_s)
+                pl.store(acc, [0, 0], out1)
+                w_mat = pl.load(w, [0, 0], [32, 64], target_memory=pl.Mem.Mat)
+                w_left = pl.move(w_mat, target_memory=pl.Mem.Left)
+                # Second reader of b_mat, nested inside the matmul arguments:
+                pl.load(y, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
+                z2 = pl.matmul(w_left, pl.move(b_mat, target_memory=pl.Mem.Right))
+                out2_store: pl.Tensor[[32, 64], pl.FP32] = pl.store(z2, [0, 0], out2)
+                return out2_store
+
+        return Before
+
+    def test_sole_consumer_move_driven_boundary_fuses(self):
+        """Control: move-driven boundary + transpose as the sole consumer fuses
+        (the transpose_view statement disappears)."""
+        after = _expand(self._control_program())
+        aic = after.get_function("main_incore_0_aic")
+        assert aic is not None
+        assert _count_assign_calls(aic, _TILE_TRANSPOSE_VIEW) == 0, (
+            "sole-consumer move-driven boundary must fuse the transpose into the pop"
+        )
+        assert "__FREE_VAR" not in ir.python_print(after)
+
+    def test_nested_second_reader_blocks_fusion(self):
+        """PR#2987 Major 2: a second reader of the boundary destination that
+        only appears nested inside another call's arguments must still block
+        the fusion — the popped tile keeps its original type and the
+        transpose_view statement remains."""
+        after = _expand(self._second_reader_program())
+        aic = after.get_function("main_incore_0_aic")
+        assert aic is not None
+        assert _count_assign_calls(aic, _TILE_TRANSPOSE_VIEW) == 1, (
+            "a nested second reader of the boundary destination must block the "
+            "transpose fusion (the second matmul would read transposed bytes as "
+            "the original layout)"
+        )
+        assert "__FREE_VAR" not in ir.python_print(after)
+
+    def test_pre_loop_boundary_in_loop_transpose_not_fused(self):
+        """Codex P2 (PR#2987): a boundary created BEFORE a mixed loop whose
+        transpose_view sits INSIDE the loop must not be marked fused by the
+        child BuildCoreBody invocation — the pop is emitted by the parent
+        with the ORIGINAL type, so fusing would delete the transpose and
+        remap its consumers onto the untransposed pop."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[64, 64], pl.FP8E4M3FN],
+                w: pl.Tensor[[32, 64], pl.FP8E4M3FN],
+                a: pl.Tensor[[4, 32, 16], pl.FP8E4M3FN],
+                c: pl.Tensor[[32, 64], pl.FP8E4M3FN],
+                out: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
+            ) -> pl.Tensor[[32, 64], pl.FP32]:
+                # Pre-loop: vector producer -> Mat boundary (the ONLY boundary).
+                x_vec = pl.load(x, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
+                x_mat = pl.move(
+                    x_vec,
+                    target_memory=pl.Mem.Mat,
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.row_major,
+                )
+                w_mat = pl.load(w, [0, 0], [32, 64], target_memory=pl.Mem.Mat)
+                w_left = pl.move(w_mat, target_memory=pl.Mem.Left)
+                c_vec = pl.load(c, [0, 0], [32, 64], target_memory=pl.Mem.Vec)
+                out_store: pl.Tensor[[32, 64], pl.FP32] = pl.store(pl.cast(c_vec, pl.FP32), [0, 0], out)
+                # Mixed loop (the vector cast keeps the affinity MIXED so the
+                # parent recurses); the transpose of the pre-loop boundary
+                # tile lives inside the loop.
+                for kb in pl.pipeline(0, 4, stage=1):
+                    av = pl.load(a, [kb, 0, 0], [1, 32, 16])
+                    pl.cast(pl.reshape(av, [32, 16]), pl.FP16)  # vector op
+                    t = pl.tile.transpose_view(x_mat)  # the P2 bug site
+                    z = pl.matmul(w_left, pl.move(t, target_memory=pl.Mem.Right))
+                    out_store = pl.store(z, [0, 0], out)
+                return out_store
+
+        after = _expand(Before)
+        aic = after.get_function("main_incore_0_aic")
+        assert aic is not None
+        aic_text = ir.python_print(aic)
+        assert aic_text.count(_TILE_TRANSPOSE_VIEW) == 1, (
+            "a transpose_view of a pre-loop boundary tile must survive inside "
+            "the loop (python_print of the AIC function): fusion against the "
+            "parent-emitted pop would delete it and remap consumers onto the "
+            "untransposed pop"
+        )
+        # The pop keeps the ORIGINAL (untransposed) transfer type.
+        assert "tpop_from_aiv" in aic_text
+
+    def test_op_driven_boundary_never_fuses(self):
+        """PR#2987 Major 3: an op-driven boundary (the explicit split-reshape
+        ``tile.aic_gather``) whose destination feeds a sole-consumer
+        transpose_view must NOT fuse: the generated pop keeps the op-driven
+        shape and the transpose_view statement remains."""
+        span = ir.Span.unknown()
+        MS = ir.MemorySpace
+        FP32 = pypto.DataType.FP32
+        INDEX = pypto.DataType.INDEX
+
+        def tt(shape, view, mem):
+            return ir.TileType(shape, FP32, None, view, mem)
+
+        half_rows, cols = 64, 128
+        nz_view = ir.TileView(
+            valid_shape=[ir.ConstInt(128, INDEX, span), ir.ConstInt(cols, INDEX, span)],
+            blayout=pl.TileLayout.col_major,
+            slayout=pl.TileLayout.row_major,
+        )
+        a = ir.Var("a", tt([half_rows, cols], None, MS.Vec), span)
+        c = ir.Var("c", tt([128, cols], None, MS.Left), span)
+        out_0 = ir.Var("out_0", ir.TensorType([128, cols], FP32), span)
+
+        add = T.add(a, a, span)
+        assert isinstance(add.type, ir.TileType)
+        half2 = ir.Var("half2", tt(list(add.type.shape), add.type.tile_view, MS.Vec), span)
+        gather = T.aic_gather(half2, split=1, span=span)
+        full = ir.Var("full", tt([128, cols], nz_view, MS.Mat), span)
+        tv = T.transpose_view(full, span)
+        assert isinstance(tv.type, ir.TileType)
+        x_t = ir.Var("x_t", tt(list(tv.type.shape), tv.type.tile_view, MS.Mat), span)
+        rhs_move = T.move(x_t, MS.Right, span=span)
+        assert isinstance(rhs_move.type, ir.TileType)
+        rhs = ir.Var("rhs", tt(list(rhs_move.type.shape), rhs_move.type.tile_view, MS.Right), span)
+        matmul = T.matmul(c, rhs, span)
+        assert isinstance(matmul.type, ir.TileType)
+        z = ir.Var("z", tt(list(matmul.type.shape), matmul.type.tile_view, MS.Acc), span)
+        move_vec = T.move(z, MS.Vec, span=span)
+        assert isinstance(move_vec.type, ir.TileType)
+        z_vec = ir.Var("z_vec", tt(list(move_vec.type.shape), move_vec.type.tile_view, MS.Vec), span)
+        store = T.store(z_vec, [0, 0], out_0, span=span)
+        out_store = ir.Var("out_store", store.type, span)
+
+        body = ir.SeqStmts(
+            [
+                ir.AssignStmt(half2, add, span),
+                ir.AssignStmt(full, gather, span),
+                ir.AssignStmt(x_t, tv, span),
+                ir.AssignStmt(rhs, rhs_move, span),
+                ir.AssignStmt(z, matmul, span),
+                ir.AssignStmt(z_vec, move_vec, span),
+                ir.AssignStmt(out_store, store, span),
+                ir.ReturnStmt([out_store], span),
+            ],
+            span,
+        )
+        func = ir.Function(
+            "split_aiv",
+            [(a, ir.ParamDirection.In), (c, ir.ParamDirection.In), (out_0, ir.ParamDirection.Out)],
+            [out_0.type],
+            body,
+            span,
+            ir.FunctionType.InCore,
+            attrs={"split": pl.SplitMode.UP_DOWN, "split_aiv": True},
+        )
+        program = ir.Program([func], "test_op_driven_transpose", span)
+
+        # Bare expand (no convert_to_ssa / infer_tile_memory_space): the
+        # hand-built body carries explicit memory spaces already, and InCore
+        # parameters with TileType are only valid pre-infer (same style as
+        # test_expand_mixed_kernel_split_aiv.py).
+        after = passes.expand_mixed_kernel()(program)
+        aic = after.get_function("split_aiv_aic")
+        assert aic is not None
+        assert _count_assign_calls(aic, _TILE_TRANSPOSE_VIEW) == 1, (
+            "an op-driven boundary must never fuse the transpose into the pop "
+            "(the generated push/split still follow the op-driven shape)"
+        )
+        assert "__FREE_VAR" not in ir.python_print(after)
 
 
 if __name__ == "__main__":

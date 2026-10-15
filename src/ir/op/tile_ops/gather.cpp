@@ -25,6 +25,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <typeinfo>
 #include <utility>
 #include <vector>
 
@@ -49,33 +50,35 @@ static TypePtr DeduceTileGatherType(const std::vector<ExprPtr>& args,
   CHECK(args.size() == 3) << "The operator " << op_name
                           << " requires 3 arguments (src, indices, tmp), but got " << args.size();
 
-  // First arg: src tile (f16, f32, i16, or i32)
+  // First arg: src tile (f16, f32, i16, i32, or u16 for the FP4->FP8 LUT)
   auto src_type = As<TileType>(args[0]->GetType());
   CHECK(src_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
                   << args[0]->GetType()->TypeName();
   CHECK(src_type->dtype_ == DataType::FP16 || src_type->dtype_ == DataType::FP32 ||
-        src_type->dtype_ == DataType::INT16 || src_type->dtype_ == DataType::INT32)
-      << "The operator " << op_name << " requires src dtype to be FP16, FP32, INT16, or INT32, but got "
+        src_type->dtype_ == DataType::INT16 || src_type->dtype_ == DataType::INT32 ||
+        src_type->dtype_ == DataType::UINT16)
+      << "The operator " << op_name
+      << " requires src dtype to be FP16, FP32, INT16, INT32, or UINT16, but got "
       << src_type->dtype_.ToString();
 
-  // Second arg: indices tile. i32 is valid with any src; i16 is valid only with a
-  // 16-bit src (FP16/INT16). The A5 (Ascend950) tgather b16 form pairs a 2-byte
-  // src with 2-byte indices, whereas a 32-bit src uses the b32 form that reads
-  // each index as a u32 — so an INT16 index with a 32-bit src is unsafe on every
-  // target, not merely arch-gated. That universal constraint is checked here in
-  // the backend-agnostic deducer; A2/A3's i32-only rule is still enforced later
-  // by the PTOAS verifier (PTO IR manual, tgather index-form checks — A2/A3 vs
-  // A5).
+  // Second arg: indices tile. i32/u32 is valid with any src; i16/u16 is valid
+  // only with a 16-bit src (FP16/INT16/UINT16). The A5 (Ascend950) tgather b16
+  // form pairs a 2-byte src with 2-byte indices, whereas a 32-bit src uses the
+  // b32 form that reads each index as a u32 — so a 16-bit index with a 32-bit
+  // src is unsafe on every target, not merely arch-gated. That universal
+  // constraint is checked here in the backend-agnostic deducer; A2/A3's
+  // i32-only rule is still enforced later by the PTOAS verifier.
   auto idx_type = As<TileType>(args[1]->GetType());
   CHECK(idx_type) << "The operator " << op_name << " requires second argument to be a TileType, but got "
                   << args[1]->GetType()->TypeName();
-  const bool idx_is_i16 = idx_type->dtype_ == DataType::INT16;
-  const bool src_is_16bit = src_type->dtype_ == DataType::FP16 || src_type->dtype_ == DataType::INT16;
+  const bool idx_is_i16 = idx_type->dtype_ == DataType::INT16 || idx_type->dtype_ == DataType::UINT16;
+  const bool src_is_16bit = src_type->dtype_ == DataType::FP16 || src_type->dtype_ == DataType::INT16 ||
+                            src_type->dtype_ == DataType::UINT16;
   CHECK(idx_type->dtype_ == DataType::INT32 || (idx_is_i16 && src_is_16bit))
       << "The operator " << op_name
-      << " requires indices dtype INT32 (any src), or INT16 with a 16-bit src "
-         "(FP16/INT16); INT16 indices with a 32-bit src are unsafe (tgather b32 "
-         "reads them as u32). Got indices "
+      << " requires indices dtype INT32 (any src), or INT16/UINT16 with a 16-bit src "
+         "(FP16/INT16/UINT16); 16-bit indices with a 32-bit src are unsafe (tgather "
+         "b32 reads them as u32). Got indices "
       << idx_type->dtype_.ToString() << " with src " << src_type->dtype_.ToString();
 
   // Third arg: tmp workspace tile. A5 (Ascend950) does not read tmp in the
@@ -90,8 +93,31 @@ static TypePtr DeduceTileGatherType(const std::vector<ExprPtr>& args,
 
   // Output: shape from indices tile, dtype from src tile, propagate tile_view
   TileView tile_view;
-  tile_view.valid_shape = idx_type->shape_;
+  // Codex P1 (PR#2987 round 2): the output's VALID extent must come from the
+  // indices tile's EFFECTIVE valid_shape, not its physical shape_. The FP4->FP8
+  // LUT cast feeds a zero-extended carrier view whose valid extent can be
+  // narrower than the allocated tile (pl.load(..., valid_shape=[...])); taking
+  // the physical shape widened the gather result (and the trailing pair-view
+  // reinterpret) to cover lanes the producer never initialized, so consumers
+  // read gathered garbage in the tail region.
+  tile_view.valid_shape = tile_view_semantics::GetEffectiveTileView(*idx_type).valid_shape;
   InheritTileViewLayout(tile_view, src_type);
+  // t12 (KN cast NZ direct-write): optional dst_nz=true relabels the output
+  // view as NZ (col_major + row_major fractal). This is a CONTRACT with the
+  // device-side gather implementation: the pto-isa a5 TGather NZ variant must
+  // store the gathered lanes directly at NZ-fractal addresses (vsstb block
+  // striding), so the tile really is in NZ arrangement and the V2C boundary
+  // needs no adapt move. Only meaningful for producers that know the consumer
+  // wants NZ (the FP4->FP8 LUT cast feeding a KN-form matmul_mx rhs).
+  for (const auto& [key, value] : kwargs) {
+    const bool* dst_nz = key == "dst_nz" ? std::any_cast<bool>(&value) : nullptr;
+    if (dst_nz != nullptr && *dst_nz) {
+      tile_view.blayout = TileLayout::col_major;
+      tile_view.slayout = TileLayout::row_major;
+      tile_view.stride.clear();
+      tile_view.start_offset = nullptr;
+    }
+  }
   return std::make_shared<TileType>(idx_type->shape_, src_type->dtype_, std::nullopt, tile_view);
 }
 

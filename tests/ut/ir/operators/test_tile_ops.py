@@ -4027,6 +4027,28 @@ class TestTileReinterpretViewIR:
         assert call.type.dtype == target_dtype
         assert self._shape_values(call.type) == [16, 64]
 
+    def test_nz_pair_alias_accepts_exact_doubled_explicit_shape(self):
+        """Codex P2 (PR#2987 round 6): the UINT16 -> FP8E4M3FN NZ pair alias
+        accepts an explicit shape equal to the doubled pair geometry."""
+        view = ir.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major)
+        call = tile.reinterpret_view(
+            self._var([16, 16], DataType.UINT16, view), DataType.FP8E4M3FN, shape=[16, 32]
+        )
+
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.dtype == DataType.FP8E4M3FN
+        assert self._shape_values(call.type) == [16, 32]
+
+    def test_nz_pair_alias_rejects_mismatched_explicit_shape(self):
+        """Codex P2 (PR#2987 round 6): an explicit shape that is NOT the
+        doubled pair geometry (e.g. doubling the wrong axis) must be rejected,
+        not silently replaced by the doubled last-axis shape."""
+        view = ir.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major)
+        with pytest.raises(ValueError, match=r"pair alias"):
+            tile.reinterpret_view(
+                self._var([16, 16], DataType.UINT16, view), DataType.FP8E4M3FN, shape=[32, 16]
+            )
+
     @pytest.mark.parametrize("layout", [ir.TileLayout.row_major, ir.TileLayout.col_major])
     def test_complete_mx_scale_byte_alias_preserves_layout(self, layout):
         view = ir.TileView(blayout=layout, slayout=layout, fractal=32)

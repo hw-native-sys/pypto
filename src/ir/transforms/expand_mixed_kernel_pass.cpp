@@ -41,6 +41,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
@@ -1524,6 +1525,34 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
   }
 }
 
+/// Counts every Var READ in a statement list (PR#2987 review, Major 2).
+/// The E-fix sole-consumer guard must see consumers in ALL statement forms:
+/// the old scan only counted direct Call args of AssignStmt values, so a
+/// boundary destination read by an EvalStmt call (or a Var nested inside a
+/// composite argument of any statement) was invisible — the guard would
+/// report "sole consumer" while a second reader existed, and the fused
+/// transpose type would corrupt it. AssignStmt definitions (var_) are NOT
+/// reads and are excluded; everything else is walked in full, including
+/// nested statement regions.
+class VarReadCounter : public IRVisitor {
+ public:
+  std::unordered_map<const Var*, std::size_t> counts;
+
+  void VisitExpr_(const VarPtr& op) override { ++counts[op.get()]; }
+};
+
+std::unordered_map<const Var*, std::size_t> CountVarReads(const std::vector<StmtPtr>& stmts) {
+  VarReadCounter counter;
+  for (const auto& stmt : stmts) {
+    if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+      counter.VisitExpr(assign->value_);  // read side only; var_ is a definition
+    } else {
+      counter.VisitStmt(stmt);  // EvalStmt and every other statement form
+    }
+  }
+  return std::move(counter.counts);
+}
+
 /// Build the body for one core side (AIC or AIV), filtering statements by affinity
 /// and replacing CV boundary moves with TPUSH/TPOP ops.
 /// tpop_var_remap collects dest_var and (when source_tile is a Var) source_tile pointers
@@ -1531,17 +1560,101 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
 /// post-move variable can be updated via pointer-based substitution.
 /// superseded_tpop_vars tracks source Vars whose defining tpop is superseded by a
 /// boundary-generated tpop, so the original tpop can be eliminated.
-std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& stmts,
-                                   const std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
-                                   const std::map<const Stmt*, CVBoundaryMove>& boundary_moves,
-                                   std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
-                                   std::unordered_set<const Var*>& superseded_tpop_vars,
-                                   const std::map<const Stmt*, GmSyncPush>& gm_sync_pushes,
-                                   const std::map<const Stmt*, std::vector<GmSyncPop>>& gm_sync_pops) {
+std::vector<StmtPtr> BuildCoreBody(
+    CoreSide side, const std::vector<StmtPtr>& stmts,
+    const std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
+    const std::map<const Stmt*, CVBoundaryMove>& boundary_moves,
+    std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
+    std::unordered_set<const Var*>& superseded_tpop_vars,
+    const std::map<const Stmt*, GmSyncPush>& gm_sync_pushes,
+    const std::map<const Stmt*, std::vector<GmSyncPop>>& gm_sync_pops,
+    const std::unordered_map<const Var*, const CVBoundaryMove*>& boundary_by_dest,
+    const std::unordered_map<const Var*, size_t>& consumer_counts) {
   const auto* handler = PassContext::Current()->GetBackendHandler();
   // AIC keeps CUBE, skips VECTOR; AIV keeps VECTOR, skips CUBE
   CoreAffinity keep_affinity = (side == CoreSide::AIC) ? CoreAffinity::CUBE : CoreAffinity::VECTOR;
   CoreAffinity skip_affinity = (side == CoreSide::AIC) ? CoreAffinity::VECTOR : CoreAffinity::CUBE;
+
+  // t24/E-fix: detect tile.transpose_view ops that consume boundary move
+  // destinations. The pop for such boundaries will declare the TRANSPOSED
+  // type directly (zero-cost relabel, no treshape on the FIFO slot). This
+  // is the NK Route E enabler: cast → move(→Mat) → transpose_view chain
+  // where the transpose is fused into the pop instead of being a separate
+  // pto.treshape op (which PTOAS rejects for FP8 on memref-less slots).
+  //
+  // t27 guards (review findings from the E-fix audit):
+  //  G1 sole-consumer: if the boundary dest is consumed by anything OTHER
+  //     than this single transpose_view (a second user would silently read
+  //     the transposed bytes as if they were the original layout), do NOT
+  //     fuse. The pop keeps the original type and the transpose_view emits
+  //     its usual treshape path.
+  //  G2 needs_post_move: when the boundary requires a post-tpop move to a
+  //     consumer-side memory, the post-move target carries the ORIGINAL
+  //     type. Fusing the transposed type into the pop would leave the
+  //     post-move mismatched and the transpose output var dangling. Skip
+  //     fusion there too.
+  std::unordered_map<const Var*, TypePtr> fused_transpose_types;
+  std::unordered_set<const Var*> fused_transpose_results;               // transpose_view output vars to skip
+  std::unordered_map<const Var*, const Var*> transpose_result_by_dest;  // G2 bail-out index
+  {
+    // Codex P2 (PR#2987): only boundaries whose move statement is in THIS
+    // invocation's statement list get their pop emitted (and typed) here.
+    // A boundary created before a mixed loop is popped by the PARENT
+    // invocation with the original transfer type; a transpose_view inside
+    // the loop must therefore not be marked fused against it — the child
+    // would delete the transpose and remap its consumers onto the
+    // untransposed parent pop (observed: dangling __FREE_VAR references /
+    // wrong-shape consumers). The same guard covers the mirror case (move
+    // inside the loop, transpose after it): the parent must not fuse
+    // against a pop only the child emits.
+    std::unordered_set<const Var*> locally_popped_dests;
+    for (const auto& stmt : stmts) {
+      if (boundary_moves.count(stmt.get()) > 0) {
+        locally_popped_dests.insert(boundary_moves.at(stmt.get()).dest_var.get());
+      }
+    }
+    // Pass 1: consumer read counts, computed ONCE at function level by the
+    // caller and shared with every recursive call (Codex P2, PR#2987 round 6 —
+    // per-level recounting made depth-N mixed nesting quadratic). A boundary
+    // dest that feeds a transpose_view is only fusable when the
+    // transpose_view is its SOLE consumer; the function-wide count is
+    // conservative here (a var read anywhere blocks fusion).
+    // Codex P2 (PR#2987 round 5): the destination index is built ONCE at
+    // function level (first occurrence wins, matching the old
+    // break-on-first-match scan) and shared across every recursive
+    // BuildCoreBody call — N sibling mixed regions no longer pay N rebuilds
+    // of the full-function map.
+    // Codex P2 (PR#2987 round 4): the G2 bail-out at the pop site used to
+    // rescan the whole statement list per needs_post_move boundary. Index
+    // boundary-destination -> transpose result var here (first match wins,
+    // matching the old break-on-first scan).
+    // Pass 2: collect fusable transpose_views.
+    for (const auto& stmt : stmts) {
+      auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt);
+      if (!assign) continue;
+      auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
+      if (!call || call->args_.size() != 1) continue;
+      if (!IsOp(call, "tile.transpose_view")) continue;
+      auto src_var = std::dynamic_pointer_cast<const Var>(call->args_[0]);
+      if (!src_var) continue;
+      auto bm_it = boundary_by_dest.find(src_var.get());
+      if (bm_it == boundary_by_dest.end()) continue;
+      const CVBoundaryMove& bm = *bm_it->second;
+      // Op-driven pop shapes differ from the move-destination shape; never
+      // fuse the transpose into the pop (PR#2987 review, Major 3).
+      if (bm.op_driven) continue;
+      // Codex P2: fusion is only valid against a pop this invocation emits.
+      if (locally_popped_dests.find(src_var.get()) == locally_popped_dests.end()) continue;
+      // G1: the transpose_view must be the SOLE consumer of the boundary dest.
+      auto cnt_it = consumer_counts.find(src_var.get());
+      if (cnt_it == consumer_counts.end() || cnt_it->second != 1) continue;
+      // (G2 needs_post_move is enforced at the pop site, where the flag is
+      // computed with the full side/is_mx_scale context.)
+      fused_transpose_types[src_var.get()] = assign->var_->GetType();
+      fused_transpose_results.insert(assign->var_.get());
+      transpose_result_by_dest.emplace(src_var.get(), assign->var_.get());
+    }
+  }
 
   // For boundary moves: the "push" side sends data, the "pop" side receives it.
   // AIC: C→V = push to AIV, V→C = pop from AIV
@@ -1588,6 +1701,27 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
         const bool is_mx_scale_boundary = has_mx_scale_boundary && handler->RequiresVtoCFractalAdapt();
         if (bm.direction == push_direction) {
           ExprPtr push_source = bm.source_tile;
+          // Device-verified hazard (defect C, 2026-10): a DATA-PARALLEL split
+          // push (both lanes TPUSH half a tile that the cube TPPOPs whole)
+          // deadlocks the device or corrupts a few random tiles at scale on
+          // the current PTOAS/pto-isa split-pipe protocol. Dense
+          // 4096x7168x16384 FP4-cast kernels with pl.split(UP_DOWN) failed
+          // SCHEDULER_TIMEOUT / 1-2 corrupted tiles in most runs while the
+          // identical no-split kernel passed repeatedly; slot_num=4, stage=1
+          // and LEFT_RIGHT all still failed (fp8fp4 worktree
+          // probe_fp4_dense_stab.py). The lane/consumer synchronization is
+          // inside the closed TPUSH/TPOP TileSplitAxis protocol, so PyPTO can
+          // only flag it: drop pl.split for this region until it is fixed
+          // upstream.
+          if (side == CoreSide::AIV && op_split != kSplitNone) {
+            LOG_WARN << "[SplitPipeHazard] " << stmt->span_.to_string()
+                     << ": a data-parallel pl.split region pushes tiles to the cube "
+                        "(tile.tpush_to_aic with a split code): on the current PTOAS/pto-isa build "
+                        "this combination can deadlock the device (scheduler timeout, lane poisoned) "
+                        "or silently corrupt a few tiles at scale -- the lane/consumer "
+                        "synchronization lives in the closed TPUSH/TPOP split-pipe protocol. Drop "
+                        "pl.split for this region until the pipe protocol is fixed upstream";
+          }
           // AIV V->C push: insert tile.move (tmov) to adapt the source into
           // the required fractal layout before tpush.
           // On Ascend950 both cross as NZ: Left -> NZ, and Right -> NZ too, because
@@ -1618,17 +1752,56 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
                   tile_view_semantics::GetEffectiveTileView(*push_dest_type));
             }
 
-            auto tmov_type = std::make_shared<TileType>(src_type->shape_, src_type->dtype_, std::nullopt,
-                                                        fractal_view, MemorySpace::Vec);
-            std::string src_name = "tile";
-            if (auto sv = std::dynamic_pointer_cast<const Var>(bm.source_tile)) {
-              src_name = sv->name_hint_;
+            // t12 (KN cast NZ direct-write): when the source tile already
+            // carries the required fractal layout, the adapt move is an
+            // identity copy — skip it. BuildCrossCoreTransferView preserves
+            // every source-view field except blayout/slayout, so for the
+            // op-driven boundary (the matmul_mx V2C push, where the view is
+            // derived from THIS source) matching layouts imply a full view
+            // identity. Producers opt in by emitting the gather with an NZ
+            // output view (tile.gather dst_nz / PYPTO_FP4_CAST_NZ_DIRECT).
+            const TileView src_eff_view = tile_view_semantics::GetEffectiveTileView(*src_type);
+            // Full field comparison makes the identity determination safe for
+            // both op-driven and tile.move boundaries: if every layout field
+            // of the computed fractal view matches the source's effective
+            // view, the adapt move copies identical bytes to identical
+            // addresses. (t12 finding: the matmul_mx rhs V2C boundary is
+            // tile.move-driven, not op-driven.)
+            // R2 hardening (t12 review): the comparison must cover the
+            // remaining TileView fields too. For a tile.move-driven boundary
+            // the fractal view is derived from the MOVE DESTINATION, so a
+            // source matching only blayout/slayout/compact/pad could differ
+            // in fractal geometry, valid_shape, stride or start_offset — the
+            // adapt move would then be a real rearrangement, and skipping it
+            // would silently corrupt the push. BuildCrossCoreTransferView
+            // copies all of those fields from the source, so the intended
+            // dst_nz case (whose stride/start_offset are cleared by the
+            // gather deduce) still compares equal and still skips.
+            const bool adapt_is_identity =
+                fractal_view.blayout == src_eff_view.blayout &&
+                fractal_view.slayout == src_eff_view.slayout &&
+                fractal_view.blayout == TileLayout::col_major &&
+                fractal_view.compact == src_eff_view.compact && fractal_view.pad == src_eff_view.pad &&
+                fractal_view.fractal == src_eff_view.fractal &&
+                AreExprVectorsEqual(fractal_view.valid_shape, src_eff_view.valid_shape) &&
+                AreExprVectorsEqual(fractal_view.stride, src_eff_view.stride) &&
+                AreExprsEqual(fractal_view.start_offset, src_eff_view.start_offset);
+            if (adapt_is_identity) {
+              push_source = bm.source_tile;
+            } else {
+              auto tmov_type = std::make_shared<TileType>(src_type->shape_, src_type->dtype_, std::nullopt,
+                                                          fractal_view, MemorySpace::Vec);
+              std::string src_name = "tile";
+              if (auto sv = std::dynamic_pointer_cast<const Var>(bm.source_tile)) {
+                src_name = sv->name_hint_;
+              }
+              bool is_nz = (fractal_view.blayout == TileLayout::col_major);
+              auto tmov_var =
+                  std::make_shared<Var>(src_name + (is_nz ? "_nz" : "_zn"), tmov_type, stmt->span_);
+              auto tmov_call = CreateMove(bm.source_tile, MemorySpace::Vec, tmov_type, stmt->span_);
+              result.push_back(std::make_shared<AssignStmt>(tmov_var, tmov_call, stmt->span_));
+              push_source = tmov_var;
             }
-            bool is_nz = (fractal_view.blayout == TileLayout::col_major);
-            auto tmov_var = std::make_shared<Var>(src_name + (is_nz ? "_nz" : "_zn"), tmov_type, stmt->span_);
-            auto tmov_call = CreateMove(bm.source_tile, MemorySpace::Vec, tmov_type, stmt->span_);
-            result.push_back(std::make_shared<AssignStmt>(tmov_var, tmov_call, stmt->span_));
-            push_source = tmov_var;
           }
           result.push_back(std::make_shared<EvalStmt>(
               CreateTpush(push_op, push_source, stmt->span_, op_split, op_lane_stride), stmt->span_));
@@ -1677,6 +1850,30 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
           auto tt = std::dynamic_pointer_cast<const TileType>(tpop_type);
           auto tpop_result_type = std::make_shared<TileType>(tt->shape_, tt->dtype_, std::nullopt,
                                                              fractal_view, tt->memory_space_);
+          // t24/E-fix: if the pop destination is consumed by a fused
+          // tile.transpose_view, use the transposed type directly. The pop
+          // declares the ZN/NZ dual view (zero-cost, no treshape needed).
+          // t27/G2: needs_post_move emits a move to the ORIGINAL type after
+          // the pop — fusing the transposed type there would corrupt that
+          // move and dangle the transpose output. Skip fusion entirely.
+          auto fused_it = fused_transpose_types.find(bm.dest_var.get());
+          if (fused_it != fused_transpose_types.end() && !needs_post_move) {
+            if (auto transposed_tt = std::dynamic_pointer_cast<const TileType>(fused_it->second)) {
+              tpop_result_type = std::make_shared<TileType>(
+                  transposed_tt->shape_, transposed_tt->dtype_, std::nullopt,
+                  tile_view_semantics::GetEffectiveTileView(*transposed_tt), transposed_tt->memory_space_);
+            }
+          } else if (fused_it != fused_transpose_types.end() && needs_post_move) {
+            // G2 bail-out: the pre-scan recorded this pair, but the pop site
+            // proved a post-move is needed. Un-fuse: drop the skip so the
+            // transpose_view takes its normal (treshape) path. Indexed at
+            // pre-scan time (Codex P2, PR#2987 round 4) instead of rescanning
+            // the statement list here.
+            if (const auto tr_it = transpose_result_by_dest.find(bm.dest_var.get());
+                tr_it != transpose_result_by_dest.end()) {
+              fused_transpose_results.erase(tr_it->second);
+            }
+          }
           auto tpop_var = std::make_shared<Var>(tpop_name, tpop_result_type, stmt->span_);
           if (!needs_post_move) {
             tpop_var_remap[bm.dest_var.get()] = tpop_var;
@@ -1718,6 +1915,21 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
     // Skip original tpop statements whose results are superseded by boundary-generated tpops
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
       if (superseded_tpop_vars.count(assign->var_.get()) > 0) continue;
+      // t24/E-fix: skip fused transpose_views — the pop already carries the
+      // transposed type. Remap the transpose_view's result to the pop var so
+      // downstream consumers reference the pop directly.
+      if (fused_transpose_results.count(assign->var_.get()) > 0) {
+        auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
+        if (call && call->args_.size() == 1) {
+          if (auto src_var = std::dynamic_pointer_cast<const Var>(call->args_[0])) {
+            auto remap_it = tpop_var_remap.find(src_var.get());
+            if (remap_it != tpop_var_remap.end()) {
+              tpop_var_remap[assign->var_.get()] = remap_it->second;
+            }
+          }
+        }
+        continue;
+      }
     }
 
     // GM cross-lane sync (issue #1433): on the consumer lane, emit a fence tpop
@@ -1749,19 +1961,21 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
       // Recurse into compound statements, building pruned copies
       if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
         auto new_body = BuildCoreBody(side, FlattenBody(for_stmt->body_), stmt_map, boundary_moves,
-                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops,
+                                      boundary_by_dest, consumer_counts);
         auto new_for = MutableCopy(for_stmt);
         new_for->body_ = MakeBody(new_body, for_stmt->span_);
         result.push_back(new_for);
       } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
         auto new_then = BuildCoreBody(side, FlattenBody(if_stmt->then_body_), stmt_map, boundary_moves,
-                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops,
+                                      boundary_by_dest, consumer_counts);
         std::optional<StmtPtr> new_else;
         const auto& else_body = if_stmt->else_body_;
         if (else_body.has_value()) {
-          auto new_else_stmts =
-              BuildCoreBody(side, FlattenBody(*else_body), stmt_map, boundary_moves, tpop_var_remap,
-                            superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+          auto new_else_stmts = BuildCoreBody(side, FlattenBody(*else_body), stmt_map, boundary_moves,
+                                              tpop_var_remap, superseded_tpop_vars, gm_sync_pushes,
+                                              gm_sync_pops, boundary_by_dest, consumer_counts);
           new_else = MakeBody(new_else_stmts, if_stmt->span_);
         }
         auto new_if = MutableCopy(if_stmt);
@@ -1770,7 +1984,8 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
         result.push_back(new_if);
       } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
         auto new_body = BuildCoreBody(side, FlattenBody(while_stmt->body_), stmt_map, boundary_moves,
-                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops,
+                                      boundary_by_dest, consumer_counts);
         auto new_while = MutableCopy(while_stmt);
         new_while->body_ = MakeBody(new_body, while_stmt->span_);
         result.push_back(new_while);
@@ -2045,8 +2260,22 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
 
   // Build AIC body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aic_tpop_remap;
-  auto aic_stmts = BuildCoreBody(CoreSide::AIC, stmts, stmt_map, boundary_moves, aic_tpop_remap,
-                                 superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+  // Codex P2 (PR#2987 round 5): function-level destination index, built once
+  // and shared by the AIC/AIV builds and every recursive call below.
+  std::unordered_map<const Var*, const CVBoundaryMove*> boundary_by_dest;
+  for (const auto& [bstmt, bm] : boundary_moves) {
+    boundary_by_dest.emplace(bm.dest_var.get(), &bm);
+  }
+  // Codex P2 (PR#2987 round 6): count Var reads ONCE over the whole function
+  // body and share the table with both core-side builds and every recursive
+  // BuildCoreBody call — per-level recounting made depth-N mixed nesting
+  // quadratic. The function-wide count is conservative for the sole-consumer
+  // fusion check (a var read anywhere blocks fusion) and identical to the old
+  // per-level count for every var whose uses stay inside its defining region.
+  std::unordered_map<const Var*, size_t> consumer_counts = CountVarReads(stmts);
+  auto aic_stmts =
+      BuildCoreBody(CoreSide::AIC, stmts, stmt_map, boundary_moves, aic_tpop_remap, superseded_tpop_vars,
+                    gm_sync_pushes, gm_sync_pops, boundary_by_dest, consumer_counts);
 
   // Remove ReturnStmt from AIC (AIC doesn't return values)
   std::vector<StmtPtr> aic_stmts_no_return;
@@ -2076,8 +2305,9 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
 
   // Build AIV body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aiv_tpop_remap;
-  auto aiv_stmts = BuildCoreBody(CoreSide::AIV, stmts, stmt_map, boundary_moves, aiv_tpop_remap,
-                                 superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
+  auto aiv_stmts =
+      BuildCoreBody(CoreSide::AIV, stmts, stmt_map, boundary_moves, aiv_tpop_remap, superseded_tpop_vars,
+                    gm_sync_pushes, gm_sync_pops, boundary_by_dest, consumer_counts);
   auto aiv_final = FinalizeTpopTfrees(
       FinalizeSplitCoreBody(aiv_stmts, original_def_map, remap_keys(aiv_tpop_remap), func->params_),
       CoreSide::AIV, aiv_tpop_remap);
