@@ -421,6 +421,14 @@ inline TileView GetEffectiveTileView(const TileType& tile_type) {
   return GetImplicitTileView(tile_type.shape_, tile_type.memory_space_);
 }
 
+/// Public FP8E8M0 scale boxing, shared by deduction and cross-core transport.
+inline bool IsMxScaleView(const TileType& tile_type) {
+  const TileView view = GetEffectiveTileView(tile_type);
+  return tile_type.dtype_ == DataType::FP8E8M0 && view.fractal == kMXScaleFractal &&
+         view.blayout == view.slayout &&
+         (view.blayout == TileLayout::row_major || view.blayout == TileLayout::col_major);
+}
+
 /// TileType overload that first resolves implicit memory-space layout.
 inline std::optional<BoxedTileAlignment> GetBoxedTileAlignment(const TileType& tile_type) {
   return GetBoxedTileAlignment(GetEffectiveTileView(tile_type), tile_type.dtype_);

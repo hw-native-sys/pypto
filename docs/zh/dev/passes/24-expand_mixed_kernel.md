@@ -177,6 +177,19 @@ carrier 使用 `tile.set_validshape` 扩大有效范围；这样 slice/reshape v
 的元数据也不会改变。消费侧仍忽略原始逻辑有效区之外的 padding。完整 carrier 的字节数必须放得进
 配对 pipe 的 `slot_size`。
 
+显式 `pl.aic_gather` 使用同一条 MX carrier 路径。类型推导保留 FP8E8M0 的 row/row/32、
+col/col/32 scale 布局，以及张量级 `MX_A_ZZ` / `MX_B_NN`，使后续 Mat→LeftScale/RightScale
+移动仍能识别 scale 格式。普通 shard/gather tile 继续使用目标内存空间的常规传输布局。
+
+`SplitMode.NONE` 保留逻辑形状。对于完全有效的 scale box，`UP_DOWN` 拼接 MX_A_ZZ 的行带，
+`LEFT_RIGHT` 拼接 MX_B_NN 的列带。后者的转置视图会把两端的物理分片轴都转换为 UP_DOWN，
+而 Mat pop 保留完整的逻辑 col/col 形状。Carrier 校验将每个生产者与对应的半份逻辑形状比较，
+并按两条 lane 的总大小检查槽位。沿 scale group 轴分片和部分有效的分片 scale box 需要额外的
+分块布局传输处理，因此会被拒绝。
+
+Gather 得到的 Mat tile 会占用 FIFO 槽位，直到消费者释放它们。若先 gather 全部四个 MX matmul
+操作数再消费，需要设置 `pl.cross_core_slot(slot_num=4)`；即使 scale 布局正确，两个槽位仍不够。
+
 ### 覆盖槽位数（`slot_num`）
 
 默认槽位数（`cross_core_pipe::kDefaultAutoPipeSlotNum` = 2）可以通过

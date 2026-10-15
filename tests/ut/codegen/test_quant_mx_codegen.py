@@ -10,12 +10,14 @@
 """PTO codegen tests for MX quantization operators."""
 
 import re
+from pathlib import Path
 
 import pypto.language as pl
 import pytest
 from pypto import backend, codegen, ir
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.runtime import RunConfig
 
 _TQUANT_MX_RAW = ir.get_op("tile.tquant_mx_raw").name
 _TMOV_X2ZZ = ir.get_op("tile.tmov_x2zz").name
@@ -45,6 +47,81 @@ def _allocation_range(mlir, name_fragment):
 
 
 class TestQuantMxCodegen:
+    @pytest.mark.parametrize(("case", "slot_num"), [("direct", 4), ("none", 4), ("split", 4), ("none", 2)])
+    def test_public_mx_gather_compiles(self, case, slot_num, tmp_path):
+        """Both public MX scale orientations survive an explicit AIV/AIC crossing."""
+
+        @pl.jit
+        def direct(
+            query: pl.Tensor[[64, 128], pl.BF16],
+            rhs: pl.Tensor[[64, 128], pl.BF16],
+            output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ):
+            with pl.spmd(1, optimizations=[pl.cross_core_slot(slot_num=slot_num)]):
+                _block = pl.tile.get_block_idx()
+                q_mx, q_scale = pl.quant_mx(pl.load(query, [0, 0], [64, 128]), group_axis=1)
+                b_mx, b_scale = pl.quant_mx(pl.load(rhs, [0, 0], [64, 128]), group_axis=0)
+                output = pl.store(pl.matmul_mx(q_mx, q_scale, b_mx, b_scale), [0, 0], output)
+            return output
+
+        @pl.jit
+        def none_gather(
+            query: pl.Tensor[[64, 128], pl.BF16],
+            rhs: pl.Tensor[[64, 128], pl.BF16],
+            output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ):
+            with pl.spmd(1, optimizations=[pl.cross_core_slot(slot_num=slot_num)]):
+                _block = pl.tile.get_block_idx()
+                for _lane in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+                    q_mx_lane, q_scale_lane = pl.quant_mx(pl.load(query, [0, 0], [64, 128]), group_axis=1)
+                    b_mx_lane, b_scale_lane = pl.quant_mx(pl.load(rhs, [0, 0], [64, 128]), group_axis=0)
+                    q_mx = pl.aic_gather(q_mx_lane)
+                    q_scale = pl.aic_gather(q_scale_lane)
+                    b_mx = pl.aic_gather(b_mx_lane)
+                    b_scale = pl.aic_gather(b_scale_lane)
+                output = pl.store(pl.matmul_mx(q_mx, q_scale, b_mx, b_scale), [0, 0], output)
+            return output
+
+        @pl.jit
+        def split_gather(
+            query: pl.Tensor[[64, 128], pl.BF16],
+            rhs: pl.Tensor[[128, 64], pl.FP8E4M3FN],
+            rhs_scale: pl.Tensor[[4, 64], pl.FP8E8M0, pl.MX_B_NN],
+            output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ):
+            with pl.spmd(1, optimizations=[pl.cross_core_slot(slot_num=slot_num)]):
+                _block = pl.tile.get_block_idx()
+                b_mx = pl.load(rhs, [0, 0], [128, 64], target_memory=pl.Mem.Mat)
+                b_scale = pl.load(rhs_scale, [0, 0], [4, 64], target_memory=pl.Mem.Mat)
+                for lane in pl.split_aiv(2, mode=pl.SplitMode.UP_DOWN):
+                    q_mx_lane, q_scale_lane = pl.quant_mx(
+                        pl.load(query, [lane * 32, 0], [32, 128]), group_axis=1
+                    )
+                    q_mx = pl.aic_gather(q_mx_lane)
+                    q_scale = pl.aic_gather(q_scale_lane)
+                output = pl.store(pl.matmul_mx(q_mx, q_scale, b_mx, b_scale), [0, 0], output)
+            return output
+
+        kernel = {
+            "direct": direct,
+            "none": none_gather,
+            "split": split_gather,
+        }[case]
+        config = RunConfig(platform="a5", save_kernels_dir=str(tmp_path))
+        if slot_num == 2:
+            with pytest.raises(ValueError, match="slot_num=2 is insufficient for 4"):
+                kernel.compile(config=config)
+            return
+        compiled = kernel.compile(config=config)
+        mlir = "\n".join(path.read_text() for path in Path(compiled.output_dir).rglob("*.pto"))
+        assert "pto.tmatmul.mx" in mlir
+        scale_pops = [line for line in mlir.splitlines() if "pto.tpop" in line and "f8E8M0" in line]
+        assert len(scale_pops) == (1 if case == "split" else 2)
+        assert all("fractal=32" in line for line in scale_pops)
+        assert any("blayout=row_major, slayout=row_major" in line for line in scale_pops)
+        if case != "split":
+            assert any("blayout=col_major, slayout=col_major" in line for line in scale_pops)
+
     @pytest.mark.parametrize(
         ("group_axis", "src_shape", "out_shape"),
         [

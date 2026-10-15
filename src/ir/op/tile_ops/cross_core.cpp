@@ -27,6 +27,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
@@ -239,19 +240,25 @@ TypePtr DeduceSplitReshape(const std::vector<ExprPtr>& args,
                    << args[0]->GetType()->TypeName();
 
   const int split = ReadSplitAttr(kwargs, op_name, args[0]->span_);
+  // MX scales carry a semantic 32-byte box layout through the V2C boundary.
+  // Ordinary tiles still get a fresh view: inheriting an Acc layout on a
+  // shard would disagree with its Vec consumers and print/parse deduction.
+  TileView tile_view;
+  if (!halve && tile_view_semantics::IsMxScaleView(*tile_type)) {
+    const auto source_view = tile_view_semantics::GetEffectiveTileView(*tile_type);
+    tile_view.blayout = source_view.blayout;
+    tile_view.slayout = source_view.slayout;
+    tile_view.fractal = source_view.fractal;
+  }
   if (split == 0) {
-    // No split axis: preserve shape and valid_shape exactly. The type is still
-    // rebuilt (rather than returned as-is) so the boundary result keeps the same
-    // "fresh tile, no inherited layout / memref" shape the halving path produces
-    // — the memory space comes from set_output_memory, and the layout is
-    // re-attached downstream.
-    TileView no_split_view;
-    no_split_view.valid_shape = GetValidShape(tile_type);
+    // No split axis: preserve shape and valid_shape, but never alias the
+    // producer's memref. set_output_memory supplies the destination space.
+    tile_view.valid_shape = GetValidShape(tile_type);
     // No split axis, but the column field is still pinned by the FIFO transport.
-    CheckSplitBoundaryCarriesValid(op_name, tile_type->shape_, no_split_view.valid_shape,
+    CheckSplitBoundaryCarriesValid(op_name, tile_type->shape_, tile_view.valid_shape,
                                    /*split_axis=*/-1, halve, args[0]->span_);
     return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt,
-                                      std::move(no_split_view));
+                                      std::move(tile_view));
   }
 
   CHECK_SPAN(tile_type->shape_.size() == 2, args[0]->span_)
@@ -264,15 +271,7 @@ TypePtr DeduceSplitReshape(const std::vector<ExprPtr>& args,
   auto reshaped =
       ReshapeSplitAxis(tile_type->shape_, GetValidShape(tile_type), axis, halve, op_name, args[0]->span_);
 
-  // The result is a fresh per-lane (shard) / re-joined (gather) tile along the
-  // split axis. Only the halved/doubled valid_shape is carried; the source's
-  // explicit blayout/slayout is intentionally NOT inherited. Inheriting a
-  // non-implicit layout (e.g. an Acc operand's col_major) makes the result type
-  // diverge from the deduction fixpoint that downstream elementwise consumers
-  // (which re-derive layout from their inputs) and a print->parse round-trip
-  // reconstruct — the boundary's true memory layout is re-attached by the
-  // lowering pass (ReshapeTypeWithMemory) and normalized downstream.
-  TileView tile_view;
+  // Shape changes do not change an MX scale's boxing or orientation.
   tile_view.valid_shape = std::move(reshaped.valid);
   return std::make_shared<TileType>(std::move(reshaped.shape), tile_type->dtype_, std::nullopt,
                                     std::move(tile_view));
@@ -329,16 +328,19 @@ TypePtr DeduceSplitReshapeTensor(const std::vector<ExprPtr>& args,
   auto reshaped =
       ReshapeSplitAxis(tensor_type->shape_, std::move(valid), axis, halve, op_name, args[0]->span_);
 
-  // Fresh per-lane (shard) / re-joined (gather) tensor along the split axis; only
-  // the halved/doubled valid_shape is carried (no layout inheritance — same
-  // rationale as the tile deducer). Memory space is a tile-level concept and is
-  // re-attached when ConvertTensorToTileOps lowers this to tile.aiv_shard.
+  // Fresh tensor storage with reshaped valid extents. MX gather layout is
+  // semantic (scale orientation), so retain it just as the tile deducer does;
+  // ordinary tensors keep the existing ND boundary contract.
   //
   // A redundant view needs no guard here: TensorType's constructor canonicalizes
   // it away, clearing a valid_shape equal to the shape and then resetting the
   // otherwise-default view to nullopt (CanonicalizeTensorViewInPlace). Same as
   // the tile deducer above, which hands TileType an unconditional TileView.
-  TensorView tensor_view({}, TensorLayout::ND, std::move(reshaped.valid));
+  TensorLayout layout = TensorLayout::ND;
+  if (!halve && tensor_type->tensor_view_ && IsMxTensorLayout(tensor_type->tensor_view_->layout)) {
+    layout = tensor_type->tensor_view_->layout;
+  }
+  TensorView tensor_view({}, layout, std::move(reshaped.valid));
   return std::make_shared<TensorType>(std::move(reshaped.shape), tensor_type->dtype_, std::nullopt,
                                       std::make_optional(std::move(tensor_view)));
 }

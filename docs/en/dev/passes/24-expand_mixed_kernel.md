@@ -204,6 +204,24 @@ original logical scale metadata unchanged. The consumer still ignores padding
 outside its original logical valid region. The carrier's full byte size must fit
 the paired pipe's `slot_size`.
 
+Explicit `pl.aic_gather` uses the same MX carrier path. Its type deduction keeps
+FP8E8M0 row/row/32 and col/col/32 scale layouts (and tensor-level `MX_A_ZZ` /
+`MX_B_NN`), so the following Mat→LeftScale/RightScale move sees the scale format.
+Ordinary shard/gather tiles still use the destination's normal transfer layout.
+
+`SplitMode.NONE` preserves the logical shape. For fully valid scale boxes,
+`UP_DOWN` gathers MX_A_ZZ row bands and `LEFT_RIGHT` gathers MX_B_NN column bands.
+The latter's transpose view changes both endpoints' physical split to UP_DOWN;
+the Mat pop retains the full logical col/col shape. Carrier validation compares
+each producer with its half of that logical shape and sizes the slot for both
+lanes. Scale-group-axis splits and partially valid split scale boxes are rejected
+because they need additional boxed-layout transport handling.
+
+Gathered Mat tiles retain FIFO slots until their consumers release them. Gathering
+all four MX matmul operands before consuming any requires
+`pl.cross_core_slot(slot_num=4)`; two slots are insufficient even with correct
+scale layouts.
+
 ### Overriding the slot count (`slot_num`)
 
 The default slot count (`cross_core_pipe::kDefaultAutoPipeSlotNum` = 2) can be

@@ -55,6 +55,122 @@ def _expand_raw(program):
     return passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(passes.convert_to_ssa()(program)))
 
 
+@pytest.mark.parametrize(
+    ("layout", "out_rows", "out_cols"),
+    [(pl.TileLayout.row_major, 64, 4), (pl.TileLayout.col_major, 4, 64)],
+)
+def test_explicit_mx_scale_gather_carrier(layout, out_rows, out_cols):
+    """Logical A rows and B columns both travel as contiguous row/row bands."""
+    if layout == pl.TileLayout.row_major:
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                scale: pl.Tile[
+                    [32, 4],
+                    pl.FP8E8M0,
+                    pl.Mem.Vec,
+                    pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.row_major, fractal=32),
+                ],
+            ):
+                pl.func_attr({"split": pl.SplitMode.UP_DOWN, "split_aiv": True})
+                gathered = pl.tile.aic_gather(scale, split=1)
+                _placed = pl.tile.move(gathered, target_memory=pl.Mem.LeftScale)
+    else:
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                scale: pl.Tile[
+                    [4, 32],
+                    pl.FP8E8M0,
+                    pl.Mem.Vec,
+                    pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.col_major, fractal=32),
+                ],
+            ):
+                pl.func_attr({"split": pl.SplitMode.LEFT_RIGHT, "split_aiv": True})
+                gathered = pl.tile.aic_gather(scale, split=2)
+                _placed = pl.tile.move(gathered, target_memory=pl.Mem.RightScale)
+
+    ir.assert_structural_equal(Before, pl.parse_program(ir.python_print(Before)))
+    after = passes.expand_mixed_kernel()(Before)
+    ir.assert_structural_equal(after, passes.expand_mixed_kernel()(after))
+    ir.assert_structural_equal(after, pl.parse_program(ir.python_print(after)))
+    pushes, pops = [], []
+    for function in after.functions.values():
+        for stmt in _flatten_top_level_stmts(function.body):
+            if _get_stmt_op_name(stmt) == _TILE_TPUSH_TO_AIC:
+                assert isinstance(stmt, ir.EvalStmt)
+                pushes.append(stmt.expr)
+            elif _get_stmt_op_name(stmt) == _TILE_TPOP_FROM_AIV:
+                assert isinstance(stmt, ir.AssignStmt)
+                pops.append(stmt.value)
+    assert len(pushes) == len(pops) == 1
+    assert pushes[0].kwargs["split"] == pops[0].kwargs["split"] == 1
+    assert _const_tile_shape(pushes[0].args[0].type) == [32, 4]
+    assert _const_tile_shape(pops[0].type) == [out_rows, out_cols]
+    assert pushes[0].args[0].type.get_effective_tile_view().blayout == pl.TileLayout.row_major
+    assert pops[0].type.get_effective_tile_view().blayout == layout
+
+
+@pytest.mark.parametrize(
+    ("rows", "valid_rows", "message"),
+    [
+        (32, 16, "fully valid per-lane scale boxes"),
+        (17, 17, "requires complete 16x2"),
+    ],
+)
+def test_explicit_mx_scale_gather_rejects_unsupported_boxes(rows, valid_rows, message):
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            scale: pl.Tile[
+                [rows, 4],
+                pl.FP8E8M0,
+                pl.Mem.Vec,
+                pl.TileView(
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.row_major,
+                    fractal=32,
+                    valid_shape=[valid_rows, 4],
+                ),
+            ],
+        ):
+            pl.func_attr({"split_aiv": True})
+            gathered = pl.tile.aic_gather(scale, split=1)
+            _placed = pl.tile.move(gathered, target_memory=pl.Mem.LeftScale)
+
+    with pytest.raises(ValueError, match=message):
+        passes.expand_mixed_kernel()(Before)
+
+
+def test_explicit_mx_scale_gather_rejects_group_axis():
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            scale: pl.Tile[
+                [32, 4],
+                pl.FP8E8M0,
+                pl.Mem.Vec,
+                pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.row_major, fractal=32),
+            ],
+        ):
+            pl.func_attr({"split_aiv": True})
+            gathered = pl.tile.aic_gather(scale, split=2)
+            _placed = pl.tile.move(gathered, target_memory=pl.Mem.LeftScale)
+
+    with pytest.raises(ValueError, match="splitting the scale-group axis"):
+        passes.expand_mixed_kernel()(Before)
+
+
 def _get_stmt_op_name(stmt):
     """Return the op name for AssignStmt/EvalStmt calls, or empty string."""
     if (

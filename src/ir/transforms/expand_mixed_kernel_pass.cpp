@@ -741,18 +741,13 @@ CallPtr CreateMove(const ExprPtr& tile, MemorySpace target_memory, const TypePtr
   return std::make_shared<Call>(op, std::vector<ExprPtr>{tile}, std::move(kwargs), result_type, span);
 }
 
-bool IsMxScaleView(const TileType& type) {
-  const TileView view = tile_view_semantics::GetEffectiveTileView(type);
-  return type.dtype_ == DataType::FP8E8M0 && view.fractal == tile_view_semantics::kMXScaleFractal &&
-         view.blayout == view.slayout &&
-         (view.blayout == TileLayout::row_major || view.blayout == TileLayout::col_major);
-}
+using tile_view_semantics::IsMxScaleView;
 
 // Route every FP8E8M0 scale-view V2C boundary through the dedicated MX carrier
 // planner. It handles both matching layouts and real producer-to-consumer
 // layout conversion before constructing the physical row/row carrier.
 bool IsMxScaleBoundary(const CVBoundaryMove& boundary) {
-  if (boundary.op_driven || boundary.direction != CVDirection::VECTOR_TO_CUBE) return false;
+  if (boundary.direction != CVDirection::VECTOR_TO_CUBE) return false;
   auto source_type = As<TileType>(boundary.source_tile->GetType());
   auto dest_type = As<TileType>(boundary.dest_var->GetType());
   if (!source_type || !dest_type || !IsMxScaleView(*source_type) || !IsMxScaleView(*dest_type) ||
@@ -1069,8 +1064,9 @@ void ValidateMxCarrierSize(const TileType& carrier_type, const MxV2CContract& co
   CHECK_SPAN(*carrier_bytes > 0 && *carrier_bytes % 32 == 0, span)
       << "MX V2C pipe id " << contract.pipe_id << " carrier size " << *carrier_bytes
       << " bytes is not a positive 32-byte multiple";
-  CHECK_SPAN(*carrier_bytes <= contract.slot_size, span)
-      << "MX V2C pipe id " << contract.pipe_id << " carrier needs " << *carrier_bytes
+  const int64_t slot_bytes = *carrier_bytes * (contract.split == kSplitNone ? 1 : 2);
+  CHECK_SPAN(slot_bytes <= contract.slot_size, span)
+      << "MX V2C pipe id " << contract.pipe_id << " carrier needs " << slot_bytes
       << " bytes but slot_size is " << contract.slot_size;
 }
 
@@ -1078,7 +1074,7 @@ StmtPtr AdaptMxV2CPush(const EvalStmtPtr& stmt, const CallPtr& push, const MxV2C
                        const TileDefMap& definitions) {
   const ExprPtr& source = push->args_[0];
   auto source_type = As<TileType>(source->GetType());
-  const auto& consumer_type = contract.consumer_type;
+  auto consumer_type = contract.consumer_type;
   INTERNAL_CHECK_SPAN(source_type && consumer_type, stmt->span_) << "MX V2C contract requires tile types";
 
   CHECK_SPAN(IsMxScaleView(*source_type) && IsMxScaleView(*consumer_type), stmt->span_)
@@ -1089,6 +1085,30 @@ StmtPtr AdaptMxV2CPush(const EvalStmtPtr& stmt, const CallPtr& push, const MxV2C
       source_type->memory_space_ == MemorySpace::Vec && consumer_type->memory_space_ == MemorySpace::Mat,
       stmt->span_)
       << "MX V2C pipe id " << contract.pipe_id << " requires a Vec producer and Mat consumer";
+  if (contract.split != kSplitNone) {
+    // The ND insert copies complete scale boxes contiguously. A row/row
+    // carrier can join row bands; col/col logical scales first transpose to
+    // that carrier, so their logical column bands use the same physical split.
+    CHECK_SPAN(contract.split == kSplitUpDown, stmt->span_)
+        << "MX V2C scale gather supports row bands for MX_A_ZZ and column bands for MX_B_NN; "
+           "splitting the scale-group axis requires a boxed carrier conversion";
+    CHECK_SPAN(IsFullValid(*source_type) && IsFullValid(*consumer_type), stmt->span_)
+        << "MX V2C split scale gather requires fully valid per-lane scale boxes";
+    const auto box = tile_view_semantics::GetBoxedTileAlignment(*source_type);
+    const auto rows = As<ConstInt>(source_type->shape_[0]);
+    const auto cols = As<ConstInt>(source_type->shape_[1]);
+    CHECK_SPAN(box && rows && cols && rows->value_ % box->rows == 0 && cols->value_ % box->cols == 0,
+               stmt->span_)
+        << "MX V2C split scale gather requires complete 16x2 (MX_A_ZZ) or 2x16 (MX_B_NN) "
+           "per-lane boxes with static shapes";
+    auto shape = consumer_type->shape_;
+    auto view = tile_view_semantics::GetEffectiveTileView(*consumer_type);
+    const size_t axis = view.blayout == TileLayout::row_major ? 0 : 1;
+    shape[axis] = split_axis::ComputeHalfDimSize(shape[axis]);
+    view.valid_shape = shape;
+    consumer_type = std::make_shared<TileType>(std::move(shape), consumer_type->dtype_, std::nullopt,
+                                               std::move(view), MemorySpace::Mat);
+  }
   if (IsCanonicalMxCarrier(source, *consumer_type, definitions)) {
     ValidateMxCarrierSize(*source_type, contract, stmt->span_);
     return stmt;
@@ -1577,7 +1597,7 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
         // code, whose lane 1 band sits one cell past its own extent. Derived
         // from the FULL (cube-side) tile: the shard's operand, the gather's
         // result.
-        const int op_split = bm.op_driven ? BoundaryTransportSplitCode(bm, stmt->span_) : kSplitNone;
+        int op_split = bm.op_driven ? BoundaryTransportSplitCode(bm, stmt->span_) : kSplitNone;
         // Only the Cube -> Vector direction is ever rebalanced, so only its
         // transport carries the stride.
         const int op_lane_stride =
@@ -1586,6 +1606,14 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
         CHECK_SPAN(!has_mx_scale_boundary || handler->RequiresVtoCFractalAdapt(), stmt->span_)
             << "Automatic quant_mx-to-matmul_mx scale transport requires an A5 backend";
         const bool is_mx_scale_boundary = has_mx_scale_boundary && handler->RequiresVtoCFractalAdapt();
+        if (is_mx_scale_boundary && op_split != kSplitNone) {
+          const auto consumer = As<TileType>(bm.dest_var->GetType());
+          if (tile_view_semantics::GetEffectiveTileView(*consumer).blayout == TileLayout::col_major) {
+            // MX_B uses a transposed row/row carrier. Both pipe endpoints must
+            // name its physical axis; the Mat pop retains the logical view.
+            op_split = op_split == kSplitLeftRight ? kSplitUpDown : kSplitLeftRight;
+          }
+        }
         if (bm.direction == push_direction) {
           ExprPtr push_source = bm.source_tile;
           // AIV V->C push: insert tile.move (tmov) to adapt the source into

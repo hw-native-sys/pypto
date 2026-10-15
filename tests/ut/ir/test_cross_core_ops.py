@@ -299,6 +299,56 @@ def test_shard_allows_static_narrow_columns():
     assert shard.type.shape == [8, 128]
 
 
+@pytest.mark.parametrize("split", [0, 1, 2])
+@pytest.mark.parametrize(
+    ("layout", "shape", "target"),
+    [
+        (ir.TileLayout.row_major, [32, 4], ir.MemorySpace.LeftScale),
+        (ir.TileLayout.col_major, [4, 32], ir.MemorySpace.RightScale),
+    ],
+)
+def test_gather_preserves_mx_scale_layout(split, layout, shape, target):
+    """A gathered public MX scale remains usable by its cube scale operand."""
+    span = ir.Span.unknown()
+    source = ir.Var(
+        "scale",
+        ir.TileType(
+            shape,
+            DataType.FP8E8M0,
+            tile_view=ir.TileView(blayout=layout, slayout=layout, fractal=32),
+            memory_space=ir.MemorySpace.Vec,
+        ),
+        span,
+    )
+    gathered = ir.create_op_call("tile.aic_gather", [source], {"split": split}, span)
+    # Exercise the actual consumer before checking metadata: this used to raise
+    # "requires the source Mat tile to use the matching row/row/32 layout".
+    moved = ir.create_op_call("tile.move", [gathered], {"target_memory": target}, span)
+    expected_shape = shape.copy()
+    if split:
+        expected_shape[split - 1] *= 2
+    assert isinstance(moved.type, ir.TileType)
+    assert isinstance(gathered.type, ir.TileType)
+    assert moved.type.shape == expected_shape
+    view = gathered.type.get_effective_tile_view()
+    assert (view.blayout, view.slayout, view.fractal) == (layout, layout, 32)
+
+
+@pytest.mark.parametrize("split", [0, 1, 2])
+@pytest.mark.parametrize("layout", [ir.TensorLayout.MX_A_ZZ, ir.TensorLayout.MX_B_NN])
+def test_tensor_gather_preserves_mx_scale_layout(split, layout):
+    span = ir.Span.unknown()
+    source = ir.Var(
+        "scale",
+        ir.TensorType([32, 32], DataType.FP8E8M0, tensor_view=ir.TensorView([], layout)),
+        span,
+    )
+    gathered = ir.create_op_call("tensor.aic_gather", [source], {"split": split}, span)
+    assert isinstance(gathered.type, ir.TensorType)
+    assert gathered.type.tensor_view is not None
+    assert gathered.type.tensor_view.layout == layout
+
+
 def test_gather_defers_the_band_rule_to_lowering():
     """The deducer does NOT judge whether the two lanes' bands abut.
 
