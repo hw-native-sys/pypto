@@ -42,6 +42,7 @@ class Ascend910BHandler : public BackendHandler {
   [[nodiscard]] bool HonorsHighPrecisionAlgorithm() const override { return false; }
 
   [[nodiscard]] bool RequiresGMPipeBuffer() const override { return true; }
+  [[nodiscard]] bool SupportsLocalPipeDepth() const override { return true; }
   [[nodiscard]] bool RequiresSplitLoadTpopWorkaround() const override { return true; }
 
   // A2/A3 has no int32 ordering compare; pto-isa substitutes an equality

@@ -32,6 +32,7 @@ class TestBackendHandlerValues:
 
         assert handler.honors_high_precision_algorithm() is False
         assert handler.requires_gm_pipe_buffer() is True
+        assert handler.supports_local_pipe_depth() is True
         assert handler.requires_split_load_tpop_workaround() is True
         assert handler.requires_level3_tmp_scratch() is True
         assert handler.requires_vto_c_fractal_adapt() is False
@@ -49,6 +50,7 @@ class TestBackendHandlerValues:
 
         assert handler.honors_high_precision_algorithm() is True
         assert handler.requires_gm_pipe_buffer() is False
+        assert handler.supports_local_pipe_depth() is False
         assert handler.requires_split_load_tpop_workaround() is False
         assert handler.requires_level3_tmp_scratch() is False
         assert handler.requires_vto_c_fractal_adapt() is True
@@ -96,11 +98,14 @@ class TestGlobalHandlerAccessor:
         handler = _backend_core.get_handler()
         assert handler.get_pto_target_arch() == "a2a3"
         assert handler.requires_gm_pipe_buffer() is True
+        # Python callers can feature-detect local depth before building a pipe.
+        assert handler.supports_local_pipe_depth() is True
 
     def test_global_handler_matches_configured_backend_950(self):
         _backend_core.set_backend_type(_backend_core.BackendType.Ascend950)
         handler = _backend_core.get_handler()
         assert handler.get_pto_target_arch() == "a5"
+        assert handler.supports_local_pipe_depth() is False
         assert handler.requires_vto_c_fractal_adapt() is True
 
     def test_global_handler_raises_when_not_configured(self):

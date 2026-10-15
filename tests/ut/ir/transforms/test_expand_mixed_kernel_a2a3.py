@@ -1209,6 +1209,105 @@ def test_split_slot_num_override_sizes_c2v_ring_on_a2a3():
     ir.assert_structural_equal(After, Expected)
 
 
+def test_local_slot_num_sizes_reserve_and_both_peer_initializers():
+    """Local depth 4 reserves four tiles while transport retains sixteen slots."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main_incore_0(
+            self,
+            x: pl.Tensor[[16, 128], pl.BF16],
+            y: pl.Tensor[[128, 64], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ) -> pl.Tensor[[16, 64], pl.FP32]:
+            pl.func_attr({"split": pl.SplitMode.UP_DOWN, "slot_num": 16, "local_slot_num": 4})
+            x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+            x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+            y_mat = pl.load(y, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+            y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+            z_tile = pl.matmul(x_left, y_right)
+            z_vec = pl.move(
+                z_tile,
+                target_memory=pl.MemorySpace.Vec,
+                blayout=pl.TileLayout.row_major,
+                slayout=pl.TileLayout.none_box,
+            )
+            out_0 = pl.store(z_vec, [0, 0], out_0)
+            return out_0
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIC)
+        def main_incore_0_aic(
+            self,
+            x: pl.Tensor[[16, 128], pl.BF16],
+            y: pl.Tensor[[128, 64], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ):
+            pl.func_attr({"split": pl.SplitMode.UP_DOWN, "slot_num": 16, "local_slot_num": 4})
+            main_incore_0_c2v_slot_buffer_import = pl.import_peer_buffer(
+                name="main_incore_0_c2v_slot_buffer", peer_func="main_incore_0_aiv"
+            )
+            pl.aic_initialize_pipe(
+                main_incore_0_c2v_slot_buffer_import,
+                pl.const(0, pl.INT32),
+                dir_mask=1,
+                slot_size=4096,
+                slot_num=16,
+                local_slot_num=4,
+            )
+            x_mat: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat] = pl.load(
+                x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+            )
+            x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+            y_mat: pl.Tile[[128, 64], pl.BF16, pl.MemorySpace.Mat] = pl.load(
+                y, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat
+            )
+            y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+            z_tile = pl.matmul(x_left, y_right)
+            pl.tpush_to_aiv(z_tile, split=0)
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def main_incore_0_aiv(
+            self,
+            x: pl.Tensor[[16, 128], pl.BF16],
+            y: pl.Tensor[[128, 64], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ) -> pl.Tensor[[16, 64], pl.FP32]:
+            pl.func_attr({"split": pl.SplitMode.UP_DOWN, "slot_num": 16, "local_slot_num": 4})
+            main_incore_0_c2v_slot_buffer = pl.reserve_buffer(
+                name="main_incore_0_c2v_slot_buffer", size=16384, base=-1
+            )
+            pl.aiv_initialize_pipe(
+                main_incore_0_c2v_slot_buffer,
+                pl.const(0, pl.INT32),
+                dir_mask=1,
+                slot_size=4096,
+                slot_num=16,
+                local_slot_num=4,
+            )
+            z_vec: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=0)
+            out_0_store: pl.Tensor[[16, 64], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
+            pl.tfree_to_aic(z_vec)
+            return out_0_store
+
+        @pl.function(type=pl.FunctionType.Group)
+        def main_incore_0(
+            self,
+            x: pl.Tensor[[16, 128], pl.BF16],
+            y: pl.Tensor[[128, 64], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ) -> pl.Tensor[[16, 64], pl.FP32]:
+            pl.func_attr({"split": pl.SplitMode.UP_DOWN, "slot_num": 16, "local_slot_num": 4})
+            self.main_incore_0_aic(x, y, out_0)
+            self.main_incore_0_aiv(x, y, out_0)
+            return out_0
+
+    After = _run_pipeline(Before)
+    ir.assert_structural_equal(After, Expected)
+
+
 # ---------------------------------------------------------------------------
 # Backstop: direct invocation that skips LowerAutoVectorSplit.
 #

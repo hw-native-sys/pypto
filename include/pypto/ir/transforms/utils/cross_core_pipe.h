@@ -97,18 +97,20 @@ CallPtr CreateImportPeerBuffer(const std::string& buffer_name, const std::string
 // never falls back to its own `dir_mask` derivation for a pipe pypto built.
 CallPtr CreateInitializePipe(core_affinity::CoreSide side, int dir_mask, int slot_size_bytes,
                              const ExprPtr& c2v_consumer_buf, const ExprPtr& v2c_consumer_buf, int slot_num,
-                             const Span& span);
+                             std::optional<int> local_slot_num, const Span& span);
 
 void CollectCrossCorePipeMetadata(const std::vector<StmtPtr>& stmts, CrossCorePipeMetadata& metadata);
 CrossCorePipeMetadata CollectDominatingPipeSetupMetadata(const std::vector<StmtPtr>& stmts);
 
 // `slot_num_override` (from pl.cross_core_slot(slot_num=N)) overrides the ring depth used to size
-// the reserved buffer and the emitted initialize_pipe `slot_num` attribute. nullopt selects
-// `kDefaultAutoPipeSlotNum`; either way the attribute is emitted.
+// the transport ring and emitted initialize_pipe `slot_num` attribute. nullopt selects
+// `kDefaultAutoPipeSlotNum`; either way the attribute is emitted. A local override
+// sizes only the on-chip reserve and is emitted on both peers on supporting backends.
 AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const std::string& aic_name,
                                            const std::string& aiv_name, const std::vector<StmtPtr>& aic_stmts,
                                            const std::vector<StmtPtr>& aiv_stmts,
-                                           std::optional<int> slot_num_override, const Span& span);
+                                           std::optional<int> slot_num_override,
+                                           std::optional<int> local_slot_num_override, const Span& span);
 
 std::vector<StmtPtr> PrependPipeSetup(const std::vector<StmtPtr>& prologue, const std::vector<StmtPtr>& body);
 

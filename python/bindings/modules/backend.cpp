@@ -147,6 +147,8 @@ void BindBackend(nb::module_& m) {
            "high_precision=True emits (ignored on Ascend910B)")
       .def("requires_gm_pipe_buffer", &BackendHandler::RequiresGMPipeBuffer,
            "Whether ExpandMixedKernel must inject the GM-backed pipe slot buffer")
+      .def("supports_local_pipe_depth", &BackendHandler::SupportsLocalPipeDepth,
+           "Whether cross-core pipes support a local consumer depth independent of the transport ring")
       .def("requires_split_load_tpop_workaround", &BackendHandler::RequiresSplitLoadTpopWorkaround,
            "Whether MemoryReuse must apply the load + tpop_from_aic in-place hazard guard")
       .def("requires_level3_tmp_scratch", &BackendHandler::RequiresLevel3TmpScratch,

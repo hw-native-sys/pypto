@@ -157,7 +157,8 @@ V2C pipe `id` 及出现顺序配对 push/pop，从实际消费方 `tpop` 契约�
 - `id`：自动生成 setup 时省略，因此 PTOAS 使用默认 frontend pipe id `0`
 - `slot_size`：所有方向中 tile 字节大小的最大值（`shape * dtype bits / 8`）
 - `slot_num`：环形缓冲深度——每个方向默认均为 `2`，且始终显式发射；可按 scope 覆盖（见下文）
-- `buffer_size`：`slot_num * slot_size`
+- `local_slot_num`：可选的 A2/A3 本地消费者深度；省略时使用 `slot_num`
+- `buffer_size`：指定本地深度时为 `slot_size * local_slot_num`，否则为 `slot_size * slot_num`
 - buffer 名称：`<func>_c2v_slot_buffer` / `<func>_v2c_slot_buffer`
 - reserve-buffer 的 `base`：插入时统一使用 `AUTO`，随后由 `AllocateMemoryAddr` 解析成显式地址
 
@@ -209,9 +210,8 @@ with pl.at(level=pl.Level.CORE_GROUP,
 ```
 
 该值作为 `slot_num` scope 属性记录，由 `OutlineIncoreScopes` 传播到被 outline
-函数的 `slot_num` 属性，并在此 Pass 读取。它同时决定保留 buffer 的大小
-（`slot_size * slot_num`）与发射的 `initialize_pipe` 的 `slot_num` 属性，使 PTOAS
-与自动保留的 buffer 保持一致。无论 scope 是否覆盖该值，自动 setup **始终**发射该属性：
+函数的 `slot_num` 属性，并在此 Pass 读取。它决定传输环和发射的 `initialize_pipe`
+的 `slot_num` 属性。未指定本地深度时，它也决定保留 buffer 的大小（`slot_size * slot_num`）。无论 scope 是否覆盖该值，自动 setup **始终**发射该属性：
 缺少该子句时 PTOAS 会按 `dir_mask` 自行推导深度（单向 8、双向 4），从而越过按更浅
 的环预留的 buffer。只有手写的 `pl.system.{aic,aiv}_initialize_pipe` 仍会走到该回退路径。`slot_num`
 必须为正数，且与拆分**正交**——它只决定数据通道的大小，不划分计算。它对 scope 实际
@@ -225,13 +225,23 @@ scope：完全没有 split 的内核同样会驱动一条（a2a3 上通过双 AI
 现在会在任何携带 `pl.split_aiv` 区域的 scope 上拒绝它。请把该值迁移到
 `pl.cross_core_slot(slot_num=N)`；打印器已统一输出为该形式。
 
-> 将逻辑环深与更小的本地驻留窗口解耦（`local_slot_num < slot_num`，仅 a2/a3 的
-> 优化）目前尚未在自动拆分路径暴露——如需该能力请使用手动的
-> `pl.aic_initialize_pipe` / `pl.aiv_initialize_pipe` 系统算子。
->
-> 该手动路径同样仅限 a2/a3，且不只限于 `local_slot_num < slot_num` 的情形：
-> 950 前端 pipe lowering 下，ptoas 会拒绝 `pto.{aic,aiv}_initialize_pipe` 上的
-> `local_slot_num` 操作数（无论取值为何），因此在 a5 上必须完全省略该操作数。
+在 A2/A3 上，可用 `local_slot_num` 缩小片上消费者 FIFO，同时保持 GM 传输环深度：
+
+```python
+with pl.spmd(4, optimizations=[pl.cross_core_slot(slot_num=4, local_slot_num=1)]):
+    ...
+```
+
+两个深度都必须为正整数，且 `local_slot_num <= slot_num`。省略 `local_slot_num`
+（或传入 `None`）保留现有空间占用。Outliner 传播两个属性；两端初始化操作发射相同的
+显式本地深度，每个片上 reserve 按 `slot_size * local_slot_num` 分配。
+GM 分配仍使用 `slot_num`，公共最大 `slot_size` 的计算保持不变。
+Pass 会检查最终 FIFO 调度；如果本地深度小于同时保留的消费者 pop 数量，则拒绝编译。
+它不会为了适配较小深度而重排消费者。
+
+A5 拒绝显式本地深度，即使其值等于 `slot_num`，因为 PTOAS 的该前端 pipe lowering
+不支持此属性。编写可移植源码时应省略它。与 `slot_num` 一样，它对没有自动跨核 pipe
+的 scope 不生效。
 
 对于消费侧跨核 tile，该 Pass 还会保证每个 `tile.tpop_*` 都有匹配的
 `system.tfree_*`。若现有 `tfree` 明显过早，Pass 会在不重排彼此独立 `tpop`

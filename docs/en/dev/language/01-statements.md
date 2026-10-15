@@ -156,6 +156,11 @@ in one list (e.g. `[pl.split(MODE), pl.cross_core_slot(slot_num=4)]`):
 | `pl.split(MODE)` | both | Sets the inner InCore's `split_` field (cross-core transfer hint, consumed by `ExpandMixedKernel` / `MemoryReuse`). The with-form gains an inner `InCoreScopeStmt` wrapper around the call. |
 | `pl.cross_core_slot(slot_num=N)` | both | Sets the inner InCore's `slot_num` attr — the slot count (ring depth) of the automatic cross-core pipe, consumed by `ExpandMixedKernel`. Sizes a data channel only; it does **not** partition work, so it coexists with `pl.split_aiv` regions where `pl.split(...)` does not. Omit to keep the default depth of 2 per active direction. |
 
+`pl.cross_core_slot(slot_num=N, local_slot_num=L)` additionally sets the A2/A3
+local consumer depth (`1 <= L <= N`). Omitting `L` preserves the ring-depth-sized
+reserve. An explicit local depth is unsupported on A5. See
+[ExpandMixedKernel](../passes/24-expand_mixed_kernel.md#overriding-the-slot-count-slot_num).
+
 > `pl.split(MODE, slot_num=N)` is a deprecated alias for the slot count and warns
 > — see [ExpandMixedKernel](../passes/24-expand_mixed_kernel.md#overriding-the-slot-count-slot_num).
 

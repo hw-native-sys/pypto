@@ -2118,12 +2118,16 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group, c
 
   const std::string aic_name = func->name_ + "_aic";
   const std::string aiv_name = func->name_ + "_aiv";
-  // Cross-core ring depth from pl.split(mode, slot_num=N), propagated as a
-  // function attr by the outliner. nullopt keeps the hardcoded 8/4 default.
+  // Pipe depths from pl.cross_core_slot, propagated as function attrs by the
+  // outliner. Omission preserves the default transport depth and local footprint.
   std::optional<int> slot_num_override =
       func->HasAttr("slot_num") ? std::optional<int>(func->GetAttr<int>("slot_num", 0)) : std::nullopt;
-  auto automatic_pipe_setup = BuildAutomaticPipeSetup(func->name_, aic_name, aiv_name, aic_final, aiv_final,
-                                                      slot_num_override, func->span_);
+  std::optional<int> local_slot_num_override =
+      func->HasAttr("local_slot_num") ? std::optional<int>(func->GetAttr<int>("local_slot_num", 0))
+                                      : std::nullopt;
+  auto automatic_pipe_setup =
+      BuildAutomaticPipeSetup(func->name_, aic_name, aiv_name, aic_final, aiv_final, slot_num_override,
+                              local_slot_num_override, func->span_);
   aic_final = PrependPipeSetup(automatic_pipe_setup.aic_stmts, aic_final);
   // Keep a leading get_subblock_idx binding (injected by the auto pl.split
   // LowerAutoVectorSplit path) above the pipe setup, matching the standalone

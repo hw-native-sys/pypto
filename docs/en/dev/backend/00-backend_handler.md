@@ -57,6 +57,7 @@ to global state.
 | `GetExtraPtoasFlags()` | extra ptoas flags | `[]` | `["--pto-arch", "a5"]` |
 | `HonorsHighPrecisionAlgorithm()` | PTO-ISA selects a distinct algorithm from the `precisionType` attribute that `high_precision=True` emits; when false, both PTO emitters (Tile op callbacks and Buffer IR) warn that the request is dropped | `false` | `true` |
 | `RequiresGMPipeBuffer()` | inject GM-backed pipe slot in `ExpandMixedKernel` | `true` | `false` |
+| `SupportsLocalPipeDepth()` | local consumer depth can differ from the cross-core transport ring depth | `true` | `false` |
 | `RequiresSplitLoadTpopWorkaround()` | MemoryReuse load + tpop_from_aic in-place hazard guard | `true` | `false` |
 | `RequiresLevel3TmpScratch()` | InitMemRef materialize level-3 explicit tmp; codegen static-view bridges | `true` | `false` |
 | `RequiresVtoCFractalAdapt()` | AIV-side V-to-C fractal adapter `tile.move` | `false` | `true` |
@@ -96,6 +97,7 @@ handler = _backend_core.get_backend_instance(BackendType.Ascend950).get_handler(
 
 handler.get_pto_target_arch()             # "a2a3" or "a5"
 handler.requires_runtime_subblock_bridge()  # bool
+handler.supports_local_pipe_depth()       # True on A2/A3, False on A5
 handler.get_extra_ptoas_flags()           # list[str]
 ```
 

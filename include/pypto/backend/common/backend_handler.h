@@ -224,6 +224,10 @@ class BackendHandler {
    */
   [[nodiscard]] virtual bool RequiresGMPipeBuffer() const = 0;
 
+  /// Whether frontend pipes can size local consumer storage independently of
+  /// the transport ring. A5 local-to-local pipes use the transport depth itself.
+  [[nodiscard]] virtual bool SupportsLocalPipeDepth() const { return false; }
+
   /**
    * @brief Whether this backend needs the MemoryReuse load + tpop_from_aic
    *        in-place hazard guard for split-AIV functions.

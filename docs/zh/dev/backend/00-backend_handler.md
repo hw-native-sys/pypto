@@ -54,6 +54,7 @@ if (backend::GetBackendType() != backend::BackendType::Ascend910B) { ... }
 | `GetExtraPtoasFlags()` | ptoas 额外参数 | `[]` | `["--pto-arch", "a5"]` |
 | `HonorsHighPrecisionAlgorithm()` | PTO-ISA 是否会根据 `high_precision=True` 生成的 `precisionType` 属性选择不同算法；为 false 时两个 PTO 发射路径（Tile 算子回调与 Buffer IR）都会告警该请求被丢弃 | `false` | `true` |
 | `RequiresGMPipeBuffer()` | `ExpandMixedKernel` 是否注入 GM 槽位缓冲 | `true` | `false` |
+| `SupportsLocalPipeDepth()` | 本地消费者深度是否可独立于跨核传输环深度设置 | `true` | `false` |
 | `RequiresSplitLoadTpopWorkaround()` | MemoryReuse 是否做 load + tpop_from_aic 原地复用危害规避 | `true` | `false` |
 | `RequiresLevel3TmpScratch()` | InitMemRef 是否物化 level-3 显式 tmp；codegen static-view 桥接 | `true` | `false` |
 | `RequiresVtoCFractalAdapt()` | AIV 端 V→C tpush 是否需要 fractal 适配 `tile.move` | `false` | `true` |
@@ -93,6 +94,7 @@ handler = _backend_core.get_backend_instance(BackendType.Ascend950).get_handler(
 
 handler.get_pto_target_arch()              # "a2a3" 或 "a5"
 handler.requires_runtime_subblock_bridge()  # bool
+handler.supports_local_pipe_depth()        # A2/A3 为 True，A5 为 False
 handler.get_extra_ptoas_flags()            # list[str]
 ```
 

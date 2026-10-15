@@ -1947,12 +1947,14 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
       outlined_attrs.emplace_back("split", static_cast<int>(split));
     }
   };
-  // Propagate the optional cross-core ring depth (pl.split(mode, slot_num=N))
-  // from the scope's attrs onto the outlined function, where ExpandMixedKernel
-  // reads it to size the automatic cube->vector pipe.
+  // Propagate transport and optional local depths from pl.cross_core_slot to
+  // the outlined function, where ExpandMixedKernel builds the automatic pipe.
   auto append_slot_num_attr = [&]() {
     if (op->HasAttr("slot_num")) {
       outlined_attrs.emplace_back("slot_num", op->GetAttr<int>("slot_num", 0));
+    }
+    if (op->HasAttr("local_slot_num")) {
+      outlined_attrs.emplace_back("local_slot_num", op->GetAttr<int>("local_slot_num", 0));
     }
   };
   auto append_windowize_attr = [&]() {
