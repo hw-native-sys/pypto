@@ -862,7 +862,8 @@ def test_path_only_startup_does_not_execute_dependency_pth(tmp_path):
         text=True,
     )
     record = ast.literal_eval(result.stdout)
-    assert record["startup_hooks"] == [str(path_file)]
+    # Some interpreters report both lib and its lib64 alias as site roots.
+    assert {Path(hook).resolve() for hook in record["startup_hooks"]} == {path_file.resolve()}
     assert str(dependencies) in record["startup_path"]
     assert identity._startup_identity(record)
 
