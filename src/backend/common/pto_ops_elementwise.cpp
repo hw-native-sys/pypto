@@ -186,7 +186,6 @@ static const std::unordered_set<std::string_view>& LayoutAwareOps() {
       "tile.row_expand_expdif",
       // Padding writes the tile's physical edge.
       "tile.fillpad",
-      "tile.fillpad_inplace",
       // Fractal / window / index addressed.
       "tile.matmul",
       "tile.matmul_mx",
@@ -1053,8 +1052,6 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.row_expand_expdif", "pto.trowexpandexpdif", 2},
     // Padding operations
     {"tile.fillpad",         "pto.tfillpad",         1},
-    // Inplace variant: set_output_reuses_input(0) makes src/dst share UB addr.
-    {"tile.fillpad_inplace", "pto.tfillpad",         1},
     // Matrix multiplication operations (PipeType::M → CUBE/AIC core)
     {"tile.matmul",          "pto.tmatmul",          2},
     {"tile.matmul_mx",       "pto.tmatmul.mx",       4},
@@ -1151,6 +1148,24 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     if (exclude_ops.count(op_name) > 0) return;
     backend.RegisterOp(op_name).f_codegen(std::move(fn));
   };
+
+  reg("tile.fillpad_inplace", [](const CallPtr& op, codegen::CodegenBase& codegen_base) {
+    auto& codegen = AsPto(codegen_base);
+    CheckArity(op, "pto.tfillpad", 1);
+    if (!codegen.EmitTileAddr()) {
+      const auto& result_var = codegen.GetCurrentResultVar();
+      INTERNAL_CHECK_SPAN(result_var, op->span_)
+          << "Internal error: tile.fillpad_inplace requires a result variable";
+      auto result_type = As<ir::TileType>(result_var->GetType());
+      INTERNAL_CHECK_SPAN(result_type, op->span_)
+          << "Internal error: tile.fillpad_inplace requires a TileType result";
+      // The shared input handle retains its original validity and pad metadata.
+      // Give the full, padded result its own view of the same storage for PTOAS.
+      codegen.SetCurrentResultBuf(EnsureTileViewSsa(op->args_[0], result_type, codegen, "fillpad_dst_view"));
+    }
+    codegen.Emit("pto.tfillpad " + GenerateInsOutsClause(op, codegen));
+    return std::string("");
+  });
 
   auto register_precision_op = [&](const char* op_name, const char* pto_op_name, size_t arity,
                                    const char* attr_kind) {

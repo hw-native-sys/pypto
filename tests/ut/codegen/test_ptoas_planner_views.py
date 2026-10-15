@@ -21,12 +21,14 @@ default PyPTO planner hides then have to be emitted correctly:
 """
 
 import re
+from pathlib import Path
 
 import pypto.language as pl
 import pytest
 from _pto_loc_common import strip_loc
 from pypto import ir as _ir
-from pypto.backend import BackendType, reset_for_testing, set_backend_type
+from pypto.backend import BackendType, pto_backend, reset_for_testing, set_backend_type
+from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import codegen, passes
 
@@ -159,26 +161,145 @@ class InplaceFillPadProgram:
         return pl.store(padded, [0, 0], out)
 
 
-def test_inplace_alias_keeps_shared_handle_definition_type():
-    """An alias result must not re-type the already-defined shared tile_buf SSA.
-
-    PTOAS mode collapses ``src`` and ``padded`` onto one handle because
-    ``tile.fillpad_inplace`` reuses its input MemRef. The result TileType carries
-    new pad metadata, but MLIR SSA types are fixed by the original alloc_tile
-    definition, so every later use of that handle must retain the definition's
-    annotation.
-    """
-    mlir = _emit_pto(InplaceFillPadProgram, passes.MemoryPlanner.PTOAS)
-    alloc = _sole_line(mlir, "= pto.alloc_tile")
+def _assert_fillpad_view(mlir: str, pad: int) -> None:
+    """The input handle stays immutable; a typed alias carries the full result."""
     fillpad = _sole_line(mlir, "pto.tfillpad")
+    src_type, dst_type = _tile_buf_types(fillpad)
+    assert "pad=0>" in src_type, fillpad
+    assert f"pad={pad}>" in dst_type, fillpad
+    assert "v_row=64, v_col=64" in dst_type, fillpad
+    src = re.search(r"ins\((%[\w.$]+)", fillpad)
+    dst = re.search(r"outs\((%[\w.$]+)", fillpad)
+    assert src and dst, fillpad
+    assert src[1] != dst[1], fillpad
+    view = _sole_line(mlir, f"{dst[1]} = pto.treshape")
+    assert f"pto.treshape {src[1]} : {src_type} -> {dst_type}" in view, view
     store = _sole_line(mlir, "pto.tstore")
+    assert f"ins({dst[1]} : {dst_type})" in store, store
+    assert mlir.count("= pto.alloc_tile") == 1, mlir
 
-    alloc_types = _tile_buf_types(alloc)
-    fillpad_types = _tile_buf_types(fillpad)
-    store_types = _tile_buf_types(store)
-    assert len(alloc_types) == 1 and len(fillpad_types) == 2 and len(store_types) == 1, mlir
-    assert fillpad_types == [alloc_types[0], alloc_types[0]], f"{alloc}\n{fillpad}"
-    assert store_types == alloc_types, f"{alloc}\n{store}"
+
+def test_inplace_alias_preserves_output_view(tmp_path: Path):
+    """Dynamic input validity must not erase the padded result's type (#2869)."""
+    mlir = _emit_pto(InplaceFillPadProgram, passes.MemoryPlanner.PTOAS)
+    fillpad = _sole_line(mlir, "pto.tfillpad")
+    src_type, dst_type = _tile_buf_types(fillpad)
+    assert "pad=0>" in src_type, fillpad
+    assert "pad=1>" in dst_type, fillpad
+    assert "v_row=?, v_col=?" in src_type, fillpad
+    assert "v_row=16, v_col=16" in dst_type, fillpad
+    view = _sole_line(mlir, "= pto.treshape")
+    assert view.endswith(f"-> {dst_type}"), view
+    store = _sole_line(mlir, "pto.tstore")
+    assert _tile_buf_types(store) == [dst_type], store
+    assert mlir.count("= pto.alloc_tile") == 1, mlir
+    _compile_fillpad(mlir, tmp_path, passes.MemoryPlanner.PTOAS)
+
+
+def _compile_fillpad(mlir: str, tmp_path: Path, planner: passes.MemoryPlanner) -> None:
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path), memory_planner=planner)
+    assert "TFILLPAD<pto::TFillPadMode::InPlace>" in cpp, cpp
+
+
+@pytest.mark.parametrize("pad_value", [pl.PadValue.zero, pl.PadValue.max, pl.PadValue.min])
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PTOAS, passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP]
+)
+def test_fillpad_inplace_native(
+    tmp_path: Path, pad_value: pl.PadValue, backend_type: BackendType, planner: passes.MemoryPlanner
+):
+    """The original partial-row fill compiles to the in-place ISA form."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self, x: pl.Tensor[[48, 64], pl.FP32], out: pl.Out[pl.Tensor[[64, 64], pl.FP32]]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            src = pl.load(x, [0, 0], [64, 64], valid_shape=[48, 64])
+            padded = pl.tile.fillpad_inplace(src, pad_value=pad_value)
+            return pl.store(padded, [0, 0], out)
+
+    reset_for_testing()
+    set_backend_type(backend_type)
+    with passes.PassContext([], memory_planner=planner):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Program)
+    mlir = codegen.PTOCodegen().generate(optimized, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+    if planner == passes.MemoryPlanner.PTOAS:
+        _assert_fillpad_view(mlir, pad_value.value)
+    _compile_fillpad(mlir, tmp_path, planner)
+
+
+@pl.program
+class FillpadSubviewProgram:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        x: pl.Tensor[[128, 64], pl.FP32],
+        rows: pl.Scalar[pl.INDEX],
+        cols: pl.Scalar[pl.INDEX],
+        out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        src = pl.load(x, [0, 0], [128, 64])
+        window = pl.tile.slice(src, [64, 64], [32, 0], valid_shape=[rows, cols])
+        padded = pl.tile.fillpad_inplace(window, pad_value=pl.PadValue.zero)
+        alias = padded
+        return pl.store(alias, [0, 0], out)
+
+
+@pl.program
+class FillpadLoopProgram:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        x: pl.Tensor[[16, 16], pl.FP32],
+        rows: pl.Scalar[pl.INDEX],
+        cols: pl.Scalar[pl.INDEX],
+        out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        src = pl.load(x, [0, 0], [16, 16], valid_shape=[rows, cols])
+        seed = pl.tile.fillpad_inplace(src, pad_value=pl.PadValue.zero)
+        for i, (carry,) in pl.range(2, init_values=(seed,)):
+            padded = pl.tile.fillpad_inplace(carry, pad_value=pl.PadValue.zero)
+            result = pl.yield_(padded)
+        return pl.store(result, [0, 0], out)
+
+
+@pl.program
+class FillpadBranchProgram:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        x: pl.Tensor[[16, 16], pl.FP32],
+        rows: pl.Scalar[pl.INDEX],
+        cols: pl.Scalar[pl.INDEX],
+        out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        src = pl.load(x, [0, 0], [16, 16], valid_shape=[rows, cols])
+        if rows < 8:
+            padded = pl.tile.fillpad_inplace(src, pad_value=pl.PadValue.zero)
+            result = pl.yield_(padded)
+        else:
+            narrowed = pl.tile.set_validshape(src, 8, cols)
+            other = pl.tile.fillpad_inplace(narrowed, pad_value=pl.PadValue.zero)
+            result = pl.yield_(other)
+        return pl.store(result, [0, 0], out)
+
+
+@pytest.mark.parametrize("program", [FillpadSubviewProgram, FillpadLoopProgram, FillpadBranchProgram])
+def test_fillpad_inplace_composed_views(tmp_path: Path, program):
+    """Rebound padded handles survive subviews, valid updates, and control flow."""
+    mlir = _emit_pto(program, passes.MemoryPlanner.PTOAS)
+    fillpads = [line for line in mlir.splitlines() if "pto.tfillpad" in line]
+    assert fillpads, mlir
+    for line in fillpads:
+        dst_type = _tile_buf_types(line)[1]
+        assert "pad=1>" in dst_type, line
+        assert "v_row=?" not in dst_type and "v_col=?" not in dst_type, line
+    _compile_fillpad(mlir, tmp_path, passes.MemoryPlanner.PTOAS)
 
 
 # Reshape of a subview: def/use tile_buf types must agree
