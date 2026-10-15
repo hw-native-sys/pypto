@@ -4627,9 +4627,9 @@ class TestCastAddressValidation:
                 pipe = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
                 pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=pipe)
                 received: pl.Tile[[16, 16], source_dtype, pl.Mem.Vec] = pl.tpop_from_aic(split=0)
-                direct: pl.Tile[[16, 16], result_dtype, pl.Mem.Vec] = pl.cast(received, result_dtype)
+                _direct: pl.Tile[[16, 16], result_dtype, pl.Mem.Vec] = pl.cast(received, result_dtype)
                 viewed: pl.Tile[[8, 32], source_dtype, pl.Mem.Vec] = pl.tile.reshape(received, [8, 32])
-                converted: pl.Tile[[8, 32], result_dtype, pl.Mem.Vec] = pl.cast(viewed, result_dtype)
+                _converted: pl.Tile[[8, 32], result_dtype, pl.Mem.Vec] = pl.cast(viewed, result_dtype)
                 pl.tfree_to_aic(received)
 
         with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
@@ -4644,15 +4644,15 @@ class TestCastAddressValidation:
         memrefs = {}
 
         class CollectMemRefs(ir.IRVisitor):
-            def visit_assign_stmt(self, stmt):
-                if isinstance(stmt.var.type, ir.TileType):
-                    memrefs[stmt.var.name_hint] = stmt.var.type.memref
-                super().visit_assign_stmt(stmt)
+            def visit_assign_stmt(self, op):
+                if isinstance(op.var.type, ir.TileType):
+                    memrefs[op.var.name_hint] = op.var.type.memref
+                super().visit_assign_stmt(op)
 
         CollectMemRefs().visit_stmt(next(iter(after.functions.values())).body)
         assert memrefs["received"] is None
         assert memrefs["viewed"] is None
-        for name in ("direct", "converted"):
+        for name in ("_direct", "_converted"):
             assert memrefs[name] is not None
             offset = memrefs[name].byte_offset_
             assert isinstance(offset, ir.ConstInt)
