@@ -53,6 +53,7 @@ from typing import Any, cast
 
 import torch
 
+from pypto._target import _parse_platform
 from pypto.runtime._binary_cache import binary_context_lock, invalidate_binary_context
 from pypto.runtime.debug.pto_rebuild import rebuild_kernel_cpp_from_pto
 from pypto.runtime.device_tensor import DeviceTensor
@@ -413,9 +414,10 @@ def _main(
         tensors = [v for _, v in _load_named_inputs_from_golden(args.work_dir)]
         do_validate = args.validate
 
+    backend_type, execution_mode = _parse_platform(args.platform)
     config = RunConfig(
-        # InitVar cannot coexist with the same-named read property; see RunConfig.
-        platform=args.platform,
+        backend_type=backend_type,
+        execution_mode=execution_mode,
         device_id=args.device_id,
         enable_pmu=args.pmu,
         enable_chip_swimlane=(args.swimlane_level if args.swimlane_level is not None else args.swimlane),

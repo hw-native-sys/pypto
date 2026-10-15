@@ -16,6 +16,7 @@ without the optional ``simpler`` runtime package.
 from __future__ import annotations
 
 import importlib
+import warnings
 from pathlib import Path
 from unittest.mock import patch
 
@@ -629,6 +630,38 @@ def test_cli_standalone_missing_golden_still_raises(tmp_path: Path) -> None:
     work_dir = _make_build_output(tmp_path)
     with pytest.raises(FileNotFoundError, match=r"golden\.py"):
         _main([str(work_dir)])
+
+
+@pytest.mark.parametrize("explicit_flag", [False, True])
+@pytest.mark.parametrize(
+    ("platform", "backend", "mode"),
+    [
+        ("a2a3", BackendType.Ascend910B, ExecutionMode.ONBOARD),
+        ("a2a3sim", BackendType.Ascend910B, ExecutionMode.SIM),
+        ("a5", BackendType.Ascend950, ExecutionMode.ONBOARD),
+        ("a5sim", BackendType.Ascend950, ExecutionMode.SIM),
+    ],
+)
+def test_cli_platform_remains_supported_with_warnings_as_errors(
+    tmp_path, platform, backend, mode, explicit_flag
+):
+    """CLI flags and generated runner defaults must not use deprecated Python inputs."""
+    work_dir = _make_build_output(tmp_path)
+    argv = [str(work_dir)]
+    if explicit_flag:
+        argv.extend(["--platform", platform])
+    with (
+        warnings.catch_warnings(),
+        patch.object(replay_module, "replay") as dispatch,
+        patch.object(replay_module, "_load_named_inputs_from_golden", return_value=[]),
+    ):
+        warnings.simplefilter("error", DeprecationWarning)
+        assert _main(argv, default_platform="a5sim" if explicit_flag else platform) == 0
+    dispatch.assert_called_once()
+    config = dispatch.call_args.kwargs["config"]
+    assert config.backend_type == backend
+    assert config.execution_mode is mode
+    assert config.platform == platform
 
 
 if __name__ == "__main__":
