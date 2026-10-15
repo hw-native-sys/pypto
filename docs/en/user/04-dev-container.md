@@ -84,8 +84,10 @@ Three commands are on `PATH` inside the container, from `/opt/pypto/bin`:
 | `pypto-build` | Rebuilds the checkout at `$PYPTO_SRC` with native CMake, then installs `./runtime` (`simpler`) |
 | `pypto-activate.sh` | The environment itself — sourced as the shell's rcfile and as `BASH_ENV`, so `docker exec … bash -c '…'` sees the same environment as a login shell |
 
-A fourth script, `pypto-update.sh`, ships inside the source tree rather than on `PATH` —
-see [Updating the source and rebuilding](#updating-the-source-and-rebuilding).
+The repository now maintains the updater and installer alongside these helpers. Images
+rebuilt from it install them on `PATH`; the verified older image above may still carry
+its updater only inside the source tree. See
+[Updating the source and rebuilding](#updating-the-source-and-rebuilding).
 
 The image also ships a `pto-isa` checkout matching the pinned runtime, so a first run does
 not clone it over the network.
@@ -348,71 +350,80 @@ there is, and it is almost certainly not the one `simpler` was built from. Run
 
 ### Updating the source and rebuilding
 
-Pulling the latest main, editing C++ in a volume, or mounting a different checkout — all
-three end in a rebuild. The image ships a script that does the whole sequence:
+The maintained helpers are in [`.github/docker/`](../../../.github/docker/). Images
+rebuilt from this Dockerfile install them under `/opt/pypto/bin`, which remains visible
+when a bind mount covers `/workspace`. Existing published images may still have the old
+updater only in their bundled checkout; use the repository copy below in those images.
+
+For a checkout with a tracking branch and no local changes:
 
 ```bash
-/workspace/pypto/.github/docker/pypto-update.sh
+bash "$PYPTO_SRC/.github/docker/pypto-update.sh"
 ```
 
-It pulls pypto (submodules included) and pypto-lib, reinstalls ptoas if
-`toolchain/versions.env` has moved, runs `pypto-build`, and closes with `pypto-doctor`.
-Unlike the other three commands it is **not** on `PATH` — invoke it by the full path above.
+This fast-forwards each existing repository on its current tracking branch, updates
+pinned submodules, installs the PTOAS release in `toolchain/versions.env` if necessary,
+rebuilds PyPTO and simpler, and runs `pypto-doctor`. It never switches branches or resets
+commits. A detached checkout, divergent branch, or local changes require you to resolve
+that state yourself or use `--no-pull`.
+
+For edits in a bind-mounted checkout, preserve the source and rebuild:
+
+```bash
+bash "$PYPTO_SRC/.github/docker/pypto-update.sh" --no-pull --jobs 2
+```
 
 | Flag | Effect |
 | ---- | ------ |
-| `--no-pull` | Rebuild only, keeping local edits |
-| `--reinstall-deps` | Reinstall the pip dependencies too (torch, numpy, clang-tidy, …) |
-| `--proxy http://host:port` | Proxy for the git pulls and the ptoas download |
-| `--remote-submodules` | Track each submodule's own remote instead of the pinned commits |
-| `--jobs N` | Build parallelism |
-| `--skip-doctor` | Skip the closing `pypto-doctor` |
+| `--no-pull` | Keep source and submodules unchanged; align PTOAS and rebuild |
+| `--reinstall-deps` | Refresh Python dependencies using the shared setup script |
+| `--proxy http://host:port` | Set HTTP and HTTPS proxies for this invocation |
+| `--remote-submodules` | Explicitly track submodule remotes instead of pinned commits |
+| `--jobs N` | Build job count capped by machine limits; otherwise use the repository resource loader |
+| `--skip-doctor` | Skip the closing checks when no device is exposed |
 
-> **It discards local work, committed included.** The pull is
-> `git reset --hard origin/main`, which moves the branch itself — committing first does
-> not save you, since the commit simply stops being reachable from the branch. Either use
-> `--no-pull`, or leave a reference behind before running it:
->
-> ```bash
-> git -C /workspace/pypto branch backup/before-update
-> ```
->
-> Untracked files are left alone, which is also why the script does not delete itself: it
-> is untracked in that checkout.
-
-**Only two of the three cases can run it.** The script lives in the image's own source
-tree, not in the repository and not on `PATH`, so a bind mount over `/workspace` hides it
-along with everything else the image had there. A named volume is fine — an empty one is
-pre-populated from the image, the script included. With a bind-mounted checkout, rebuild
-by hand:
+To fix only a stale PTOAS, without updating source or rebuilding:
 
 ```bash
-git -C /workspace/pypto pull
-git -C /workspace/pypto submodule update --init --recursive
-git -C /workspace/pypto-lib pull
-pypto-build
-pypto-doctor
+bash "$PYPTO_SRC/.github/docker/pypto-install-ptoas.sh"
+"$PTOAS_ROOT/bin/ptoas" --version
 ```
 
-These steps are a **partial** stand-in, not an equivalent. Two things the script does are
-missing: it reinstalls ptoas when `toolchain/versions.env` moves the pin, and it passes
-proxy and job-count settings through to both. Check the assembler by hand after a pin
-bump:
+The installer reads the checkout's version and architecture-specific SHA256, verifies
+the release wheel before changing the installation, and installs into
+`${PTOAS_ROOT:-/opt/pypto/ptoas}`. It accepts `--force` to reinstall the same version.
+The environment must already contain uv and CPython 3.10, as the published image does.
+Run `pypto-setup.sh` from a complete checkout to provision a different CANN container;
+it installs the same helper sources and uses `build-constraints.txt` for build tools.
+
+`pypto-build` uses native CMake, installs the simpler matching the checkout, and follows
+its PTO-ISA pin. It deliberately avoids `pip install -e .`: a scikit-build-configured
+`build/` can place the extension outside the source import path. Build parallelism comes
+from `.claude/skills/testing/load-env.sh`, with two jobs on unclassified machines.
+
+### Building the development image
+
+Build from the repository root on the target architecture. `deps` provides the
+environment, `sim` adds GCC/G++ 15, and `dist` also clones and builds PyPTO and pypto-lib:
 
 ```bash
-grep '^PTOAS_VERSION=' /workspace/pypto/toolchain/versions.env
-/opt/pypto/ptoas/bin/ptoas --version
+docker buildx build --load --target dist \
+  --file .github/docker/pypto_dev.Dockerfile \
+  --build-arg DIST_BUILD_JOBS=2 \
+  --build-arg PYPTO_REF=<pypto-commit> \
+  --build-arg PYPTO_LIB_REF=<pypto-lib-commit> \
+  --tag pypto-dev:a3-dist .
 ```
 
-`pypto-build` rebuilds PyPTO with native CMake, installs the `simpler` matching the
-current `runtime/` source, and resolves the `pto-isa` pin that source names. It
-deliberately does not use `pip install -e .`: a scikit-build-configured `build/` puts the
-extension under `build/python/bindings/` instead of `python/pypto/`, after which every
-later build succeeds while Python keeps importing a stale `.so` — C++ edits appear to do
-nothing at all.
+For an AMD64 image, build on an x86_64 host with a CANN base tag supporting
+`linux/amd64`; confirm that support before building. Publish to a separate architecture
+tag first, and validate both `pypto-doctor` and a model on the matching NPU host before
+combining architecture manifests. A successful build without an NPU verifies the image
+build only.
 
-What `pypto-build` does **not** do is move ptoas — that is the one step only
-`pypto-update.sh` performs.
+Use `.github/docker/pypto-dev.sh build a3` for a local environment image and
+`.github/docker/pypto-dev.sh run a3 0` to create or re-enter a container. The launcher
+supports CANN tag, image, cache-volume, and proxy overrides; see its source for details.
 
 ### Without Ascend Docker Runtime
 
@@ -470,7 +481,7 @@ renumbers cards, and exposes only the ones you named.
 | `npu-smi` reports `-9005`, or `DrvMngGetConsoleLogLevel failed (ret=4)` | `npu-smi` tries to enumerate the whole machine while only some cards are exposed | Harmless. Trust `pypto-doctor`'s `device access: aclrtSetDevice(0) ok` instead |
 | `/workspace/pypto` does not exist | Bind mount one level too high | Mount the directory containing `pypto/`: `-v "$PWD/workspace:/workspace"`, not `-v "$PWD:/workspace"` |
 | `pypto-doctor` says the simpler binding does not match its source | The mounted source differs from what the image built | `pypto-build && pypto-doctor` |
-| Codegen fails with `ptoas at '...' is version X, but PyPTO requires PTOAS >= vY` | The source pins a newer ptoas than the image ships (0.61) — after pulling, or with a current checkout mounted over `/workspace` | `/workspace/pypto/.github/docker/pypto-update.sh` — the only step that reinstalls ptoas. A bind mount hides it, and the manual rebuild in [Updating the source and rebuilding](#updating-the-source-and-rebuilding) does not reinstall ptoas; install the version in `toolchain/versions.env` and point `PTOAS_ROOT` at it, as the [FAQ](appendix/01-faq.md#compiling) describes |
+| Codegen fails with `ptoas at '...' is version X, but PyPTO requires PTOAS >= vY` | PTOAS is older than the checkout requires | Run the repository installer in [Updating the source and rebuilding](#updating-the-source-and-rebuilding); it also works with bind mounts and older images |
 | `pto-isa` tries to clone over the network | The mounted source bumped `runtime/pto_isa.pin`, or the managed checkout was modified | Expected after a pin bump. If GitHub HTTP/2 is unstable, `git config --global http.version HTTP/1.1` — the resolver retries GitHub and then falls back to the GitCode mirror |
 
 ### Triaging `507018`

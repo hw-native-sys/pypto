@@ -124,6 +124,9 @@ def check_file_header(file_path: Path) -> tuple[bool, str]:
         return False, "File is empty"
 
     actual_lines = content.split("\n")
+    # Executable scripts keep the interpreter directive before the license.
+    if actual_lines[0].startswith("#!"):
+        actual_lines = actual_lines[1:]
 
     # Check if file has enough lines
     if len(actual_lines) < len(expected_lines):
