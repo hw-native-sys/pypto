@@ -308,12 +308,12 @@ for aiv_id in pl.split_aiv(2, mode=pl.SplitMode.NONE):
 ### 跨 lane 的定序同样由你负责
 
 同一核内不同硬件流水线之间的依赖，可以在生产者之后调用
-`pl.set_flag(src_pipe, dst_pipe, event_id=0, *, core_type=None)`，在消费者之前调用
-`pl.wait_flag(src_pipe, dst_pipe, event_id=0, *, core_type=None)`。例如 MTE2 加载后由向量流水线使用：
+`pl.system.set_flag(src_pipe, dst_pipe, event_id=0, *, core_type=None)`，在消费者之前调用
+`pl.system.wait_flag(src_pipe, dst_pipe, event_id=0, *, core_type=None)`。例如 MTE2 加载后由向量流水线使用：
 
 ```python
-pl.set_flag(pl.PipeType.MTE2, pl.PipeType.V, 0)
-pl.wait_flag(pl.PipeType.MTE2, pl.PipeType.V, 0)
+pl.system.set_flag(pl.PipeType.MTE2, pl.PipeType.V, 0)
+pl.system.wait_flag(pl.PipeType.MTE2, pl.PipeType.V, 0)
 ```
 
 两者都是有副作用的语句，一对操作的三个标识必须一致。源和目标必须是不同的具体

@@ -344,14 +344,14 @@ reached the call's arguments. Getting this right is the author's job.
 ### Cross-lane ordering is yours too
 
 For dependencies **between hardware pipelines on one core**, use
-`pl.set_flag(src_pipe, dst_pipe, event_id=0, *, core_type=None)` after the
-producer and `pl.wait_flag(src_pipe, dst_pipe, event_id=0, *, core_type=None)`
+`pl.system.set_flag(src_pipe, dst_pipe, event_id=0, *, core_type=None)` after the
+producer and `pl.system.wait_flag(src_pipe, dst_pipe, event_id=0, *, core_type=None)`
 before the consumer. For example, an AIV load on MTE2 followed by vector work
 can use:
 
 ```python
-pl.set_flag(pl.PipeType.MTE2, pl.PipeType.V, 0)
-pl.wait_flag(pl.PipeType.MTE2, pl.PipeType.V, 0)
+pl.system.set_flag(pl.PipeType.MTE2, pl.PipeType.V, 0)
+pl.system.wait_flag(pl.PipeType.MTE2, pl.PipeType.V, 0)
 ```
 
 Both calls are side-effect statements. The three identifiers must match in a

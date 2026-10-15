@@ -32,11 +32,11 @@ def explicit_flags_double(
 ):
     for _ in pl.spmd(1):
         loaded: pl.Tile[[ROWS, COLS], pl.FP32, pl.Mem.Vec] = pl.load(x, [0, 0], [ROWS, COLS])
-        pl.set_flag(pl.PipeType.MTE2, pl.PipeType.V, 0)
-        pl.wait_flag(pl.PipeType.MTE2, pl.PipeType.V, 0)
+        pl.system.set_flag(pl.PipeType.MTE2, pl.PipeType.V, 0)
+        pl.system.wait_flag(pl.PipeType.MTE2, pl.PipeType.V, 0)
         doubled: pl.Tile[[ROWS, COLS], pl.FP32, pl.Mem.Vec] = pl.add(loaded, loaded)
-        pl.set_flag(pl.PipeType.V, pl.PipeType.MTE3, 0)
-        pl.wait_flag(pl.PipeType.V, pl.PipeType.MTE3, 0)
+        pl.system.set_flag(pl.PipeType.V, pl.PipeType.MTE3, 0)
+        pl.system.wait_flag(pl.PipeType.V, pl.PipeType.MTE3, 0)
         out = pl.store(doubled, [0, 0], out)
     return out
 

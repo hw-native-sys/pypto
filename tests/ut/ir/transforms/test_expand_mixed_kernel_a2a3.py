@@ -556,10 +556,10 @@ def test_pipeline_flags_core_type_routes_pairs_to_matching_lane():
     class Before:
         @pl.function(type=pl.FunctionType.InCore)
         def explicit_flags(self, x: pl.Tensor[[16], pl.FP32]) -> pl.Tensor[[16], pl.FP32]:
-            pl.set_flag(pl.PipeType.MTE2, pl.PipeType.V, 0, core_type=pl.KernelType.AIV)
-            pl.wait_flag(pl.PipeType.MTE2, pl.PipeType.V, 0, core_type=pl.KernelType.AIV)
-            pl.set_flag(pl.PipeType.MTE1, pl.PipeType.M, 1, core_type=pl.KernelType.AIC)
-            pl.wait_flag(pl.PipeType.MTE1, pl.PipeType.M, 1, core_type=pl.KernelType.AIC)
+            pl.system.set_flag(pl.PipeType.MTE2, pl.PipeType.V, 0, core_type=pl.KernelType.AIV)
+            pl.system.wait_flag(pl.PipeType.MTE2, pl.PipeType.V, 0, core_type=pl.KernelType.AIV)
+            pl.system.set_flag(pl.PipeType.MTE1, pl.PipeType.M, 1, core_type=pl.KernelType.AIC)
+            pl.system.wait_flag(pl.PipeType.MTE1, pl.PipeType.M, 1, core_type=pl.KernelType.AIC)
             return x
 
     after = _run_pipeline(Before)

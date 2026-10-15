@@ -5264,10 +5264,10 @@ def test_pipeline_flags_codegen_static_and_dynamic():
         def kernel(
             self, x: pl.Tensor[[16], pl.FP32], event_id: pl.Scalar[pl.INDEX]
         ) -> pl.Tensor[[16], pl.FP32]:
-            pl.set_flag(pl.PipeType.MTE2, pl.PipeType.V, 3)
-            pl.wait_flag(pl.PipeType.MTE2, pl.PipeType.V, 3)
-            pl.set_flag(pl.PipeType.V, pl.PipeType.MTE3, event_id)
-            pl.wait_flag(pl.PipeType.V, pl.PipeType.MTE3, event_id)
+            pl.system.set_flag(pl.PipeType.MTE2, pl.PipeType.V, 3)
+            pl.system.wait_flag(pl.PipeType.MTE2, pl.PipeType.V, 3)
+            pl.system.set_flag(pl.PipeType.V, pl.PipeType.MTE3, event_id)
+            pl.system.wait_flag(pl.PipeType.V, pl.PipeType.MTE3, event_id)
             return x
 
     optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Prog)
