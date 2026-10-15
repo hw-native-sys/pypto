@@ -13,6 +13,9 @@ import pypto.language as pl
 import pytest
 import torch
 from pypto import ir, passes
+from pypto.backend import BackendType
+from pypto.backend._ptoas_locate import find_ptoas_binary
+from pypto.backend.pto_backend import _run_ptoas
 from pypto.debug import torch_codegen
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import codegen
@@ -381,6 +384,350 @@ class SelectGM:
         out = torch.empty_like(a)
         namespace["kernel"](a, b, out, flag)
         torch.testing.assert_close(out, a if flag or same_alias else b)
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("enabled", [None, False])
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+def test_static_windows_use_default_pipeline_and_preserve_source(
+    tmp_path, ascend_backend, planner, nested, enabled
+):
+    window = (
+        "outer = pl.tile.slice(whole, [32, 48], [16, 16])\n"
+        "        window = pl.tile.slice(outer, [16, 32], [0, 16])"
+        if nested
+        else "window = pl.tile.slice(whole, [16, 32], [16, 32])"
+    )
+    program = pl.parse_program(f"""
+@pl.program
+class StaticWindows:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64, 64], pl.FP32],
+               out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+               placed_out: pl.Out[pl.Tensor[[32, 32], pl.FP32]]
+               ) -> pl.Tensor[[64, 64], pl.FP32]:
+        whole = pl.load(x, [0, 0], [64, 64])
+        {window}
+        doubled = pl.add(window, window)
+        canvas = pl.tile.full([32, 32], dtype=pl.FP32, value=-777.0)
+        placed = pl.tile.assemble(canvas, doubled, [16, 0])
+        pl.store(placed, [0, 0], placed_out)
+        return pl.store(whole, [0, 0], out)
+""")
+    lowered = _lower(program, planner, enabled)
+    assert _kernel(lowered).ir_stage == (
+        ir.FunctionIRStage.Functional
+        if enabled is False or ascend_backend == BackendType.Ascend950
+        else ir.FunctionIRStage.Buffer
+    )
+    restored = ir.deserialize(ir.serialize(lowered))
+    assert isinstance(restored, ir.Program)
+    ir.assert_structural_equal(lowered, restored, enable_auto_mapping=True)
+    text = codegen.PTOCodegen().generate(
+        restored, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS, emit_source_loc=False
+    )
+    assert "pto.subview" in text
+    namespace = {}
+    exec(torch_codegen(restored), namespace)  # noqa: S102
+    x = torch.arange(4096, dtype=torch.float32).reshape(64, 64)
+    out = torch.empty_like(x)
+    placed = torch.empty((32, 32))
+    namespace["kernel"](x, out, placed)
+    torch.testing.assert_close(out, x)
+    expected = torch.full_like(placed, -777)
+    expected[16:] = x[16:32, 32:] * 2
+    torch.testing.assert_close(placed, expected)
+    if find_ptoas_binary() is not None:
+        source = tmp_path / "window.pto"
+        source.write_text(text)
+        level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+        arch = "a2" if ascend_backend == BackendType.Ascend910B else "a5"
+        _run_ptoas(str(source), str(tmp_path / "window.cpp"), [f"--pto-arch={arch}", f"--pto-level={level}"])
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("column", [0, 16, 32])
+def test_overlapping_assemble_snapshots_source_before_write(tmp_path, planner, column):
+    program = pl.parse_program(f"""
+@pl.program
+class OverlappingAssemble:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[32, 64], pl.FP32],
+               out: pl.Out[pl.Tensor[[32, 64], pl.FP32]]) -> pl.Tensor[[32, 64], pl.FP32]:
+        whole = pl.load(x, [0, 0], [32, 64])
+        source = pl.tile.slice(whole, [32, 32], [0, 0])
+        placed = pl.tile.assemble(whole, source, [0, {column}])
+        return pl.store(placed, [0, 0], out)
+""")
+    lowered = _lower(program, planner)
+    assert _kernel(lowered).ir_stage == ir.FunctionIRStage.Buffer
+    text = codegen.PTOCodegen().generate(lowered, emit_source_loc=False)
+    # Exact self-writes need no copy; other cases still have overlapping byte envelopes.
+    assert text.count("pto.alloc_tile") == (1 if column == 0 else 2)
+    namespace = {}
+    exec(torch_codegen(lowered), namespace)  # noqa: S102
+    x = torch.arange(2048, dtype=torch.float32).reshape(32, 64)
+    out = torch.empty_like(x)
+    namespace["kernel"](x, out)
+    expected = x.clone()
+    expected[:, column : column + 32] = x[:, :32]
+    torch.testing.assert_close(out, expected)
+    if find_ptoas_binary() is not None:
+        source = tmp_path / "assemble.pto"
+        source.write_text(text)
+        level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+        _run_ptoas(str(source), str(tmp_path / "assemble.cpp"), ["--pto-arch=a2", f"--pto-level={level}"])
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("nested", [False, True])
+def test_disjoint_assemble_fits_one_large_allocation(tmp_path, planner, reverse, nested):
+    row = 64 if reverse else 0
+    target_row = 0 if reverse else 64
+    window = (
+        f"outer = pl.tile.slice(whole, [96, 256], [{row // 2}, 0])\n"
+        f"        source = pl.tile.slice(outer, [64, 256], [{row // 2}, 0])"
+        if nested
+        else f"source = pl.tile.slice(whole, [64, 256], [{row}, 0])"
+    )
+    program = pl.parse_program(f"""
+@pl.program
+class DisjointAssemble:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[128, 256], pl.FP32],
+               out: pl.Out[pl.Tensor[[128, 256], pl.FP32]]) -> pl.Tensor[[128, 256], pl.FP32]:
+        whole = pl.load(x, [0, 0], [128, 256])
+        {window}
+        placed = pl.tile.assemble(whole, source, [{target_row}, 0])
+        return pl.store(placed, [0, 0], out)
+""")
+    lowered = _lower(program, planner)
+    assert _kernel(lowered).ir_stage == ir.FunctionIRStage.Buffer
+    text = codegen.PTOCodegen().generate(lowered, emit_source_loc=False)
+    # One parent is 128 KiB; an unnecessary snapshot exceeds the 184 KiB Vec limit.
+    assert text.count("pto.alloc_tile") == 1
+    namespace = {}
+    exec(torch_codegen(lowered), namespace)  # noqa: S102
+    x = torch.arange(128 * 256, dtype=torch.float32).reshape(128, 256)
+    out = torch.empty_like(x)
+    namespace["kernel"](x, out)
+    expected = x.clone()
+    expected[target_row : target_row + 64] = x[row : row + 64]
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+    if find_ptoas_binary() is not None:
+        source = tmp_path / "disjoint.pto"
+        source.write_text(text)
+        level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+        _run_ptoas(str(source), str(tmp_path / "disjoint.cpp"), ["--pto-arch=a2", f"--pto-level={level}"])
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("reslice", [False, True])
+def test_chained_disjoint_assembles_preserve_allocation_origin(tmp_path, planner, reverse, reslice):
+    row = 96 if reverse else 0
+    targets = [64, 32, 0] if reverse else [32, 64, 96]
+    source = f"source = pl.tile.slice(first, [32, 256], [{targets[0]}, 0])" if reslice else ""
+    source_name = "source" if reslice else "window"
+    program = pl.parse_program(f"""
+@pl.program
+class ChainedAssemble:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[128, 256], pl.FP32],
+               out: pl.Out[pl.Tensor[[128, 256], pl.FP32]]) -> pl.Tensor[[128, 256], pl.FP32]:
+        whole = pl.load(x, [0, 0], [128, 256])
+        window = pl.tile.slice(whole, [32, 256], [{row}, 0])
+        first = pl.tile.assemble(whole, window, [{targets[0]}, 0])
+        {source}
+        second = pl.tile.assemble(first, {source_name}, [{targets[1]}, 0])
+        third = pl.tile.assemble(second, {source_name}, [{targets[2]}, 0])
+        return pl.store(third, [0, 0], out)
+""")
+    lowered = _lower(program, planner)
+    assert _kernel(lowered).ir_stage == ir.FunctionIRStage.Buffer
+    text = codegen.PTOCodegen().generate(lowered, emit_source_loc=False)
+    assert text.count("pto.alloc_tile") == 1
+    namespace = {}
+    exec(torch_codegen(lowered), namespace)  # noqa: S102
+    x = torch.arange(128 * 256, dtype=torch.float32).reshape(128, 256)
+    out = torch.empty_like(x)
+    namespace["kernel"](x, out)
+    torch.testing.assert_close(out, x[row : row + 32].repeat(4, 1), rtol=0, atol=0)
+    if find_ptoas_binary() is not None:
+        source_file = tmp_path / "chained.pto"
+        source_file.write_text(text)
+        level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+        _run_ptoas(str(source_file), str(tmp_path / "chained.cpp"), ["--pto-arch=a2", f"--pto-level={level}"])
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+def test_chained_overlapping_assemble_snapshots_updated_parent(tmp_path, planner):
+    @pl.program
+    class ChainedOverlap:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self, x: pl.Tensor[[32, 64], pl.FP32], out: pl.Out[pl.Tensor[[32, 64], pl.FP32]]
+        ) -> pl.Tensor[[32, 64], pl.FP32]:
+            whole = pl.load(x, [0, 0], [32, 64])
+            window = pl.tile.slice(whole, [8, 64], [0, 0])
+            first = pl.tile.assemble(whole, window, [8, 0])
+            updated = pl.tile.slice(first, [16, 64], [8, 0])
+            second = pl.tile.assemble(first, updated, [16, 0])
+            return pl.store(second, [0, 0], out)
+
+    lowered = _lower(ChainedOverlap, planner)
+    assert _kernel(lowered).ir_stage == ir.FunctionIRStage.Buffer
+    text = codegen.PTOCodegen().generate(lowered, emit_source_loc=False)
+    assert text.count("pto.alloc_tile") == 2
+    namespace = {}
+    exec(torch_codegen(lowered), namespace)  # noqa: S102
+    x = torch.arange(2048, dtype=torch.float32).reshape(32, 64)
+    out = torch.empty_like(x)
+    namespace["kernel"](x, out)
+    expected = x.clone()
+    expected[8:16] = x[:8]
+    expected[16:] = expected[8:24].clone()
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+    if find_ptoas_binary() is not None:
+        source_file = tmp_path / "chained_overlap.pto"
+        source_file.write_text(text)
+        level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+        _run_ptoas(
+            str(source_file), str(tmp_path / "chained_overlap.cpp"), ["--pto-arch=a2", f"--pto-level={level}"]
+        )
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("view_kind", ["allocation", "full_width"])
+@pytest.mark.parametrize("source_dtype,target_dtype", [("FP32", "INT32"), ("FP16", "FP32")])
+def test_contiguous_reinterpret_preserves_bit_patterns(
+    tmp_path, planner, view_kind, source_dtype, target_dtype
+):
+    rows = 16 if view_kind == "full_width" else 32
+    cols = 32 if source_dtype == "FP16" else 64
+    view = {
+        "allocation": "window = whole",
+        "full_width": "window = pl.tile.slice(whole, [16, 64], [16, 0])",
+    }[view_kind]
+    program = pl.parse_program(f"""
+@pl.program
+class Reinterpret:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[32, 64], pl.{source_dtype}],
+               out: pl.Out[pl.Tensor[[{rows}, {cols}], pl.{target_dtype}]]
+               ) -> pl.Tensor[[{rows}, {cols}], pl.{target_dtype}]:
+        whole = pl.load(x, [0, 0], [32, 64])
+        {view}
+        bits = pl.tile.reinterpret_view(window, pl.{target_dtype})
+        return pl.store(bits, [0, 0], out)
+""")
+    lowered = _lower(program, planner)
+    assert _kernel(lowered).ir_stage == ir.FunctionIRStage.Buffer
+    namespace = {}
+    exec(torch_codegen(lowered), namespace)  # noqa: S102
+    dtype = torch.float16 if source_dtype == "FP16" else torch.float32
+    target = torch.int32 if target_dtype == "INT32" else torch.float32
+    x = torch.arange(2048, dtype=dtype).reshape(32, 64)
+    out = torch.empty((rows, cols), dtype=target)
+    namespace["kernel"](x, out)
+    expected = (x[16:] if view_kind == "full_width" else x).view(target)
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+    if find_ptoas_binary() is not None:
+        source = tmp_path / "reinterpret.pto"
+        source.write_text(codegen.PTOCodegen().generate(lowered, emit_source_loc=False))
+        level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+        _run_ptoas(str(source), str(tmp_path / "reinterpret.cpp"), ["--pto-arch=a2", f"--pto-level={level}"])
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("rows", [1, 16])
+@pytest.mark.parametrize("operation", ["reinterpret", "reshape"])
+def test_strided_relabels_remain_outside_default_buffer_contract(planner, rows, operation):
+    dtype = "INT32" if operation == "reinterpret" else "FP32"
+    expression = (
+        "pl.tile.reinterpret_view(window, pl.INT32)"
+        if operation == "reinterpret"
+        else f"pl.reshape(window, [{rows}, 32])"
+    )
+    program = pl.parse_program(f"""
+@pl.program
+class StridedRelabel:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[32, 64], pl.FP32],
+               out: pl.Out[pl.Tensor[[{rows}, 32], pl.{dtype}]]
+               ) -> pl.Tensor[[{rows}, 32], pl.{dtype}]:
+        whole = pl.load(x, [0, 0], [32, 64])
+        window = pl.tile.slice(whole, [{rows}, 32], [0, 0])
+        bits = {expression}
+        return pl.store(bits, [0, 0], out)
+""")
+    assert _kernel(_lower(program, planner)).ir_stage == ir.FunctionIRStage.Functional
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+def test_reshaped_allocation_is_a_native_window_parent(tmp_path, planner):
+    @pl.program
+    class ReshapedParent:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self, x: pl.Tensor[[32, 64], pl.FP32], out: pl.Out[pl.Tensor[[8, 64], pl.FP32]]
+        ) -> pl.Tensor[[8, 64], pl.FP32]:
+            whole = pl.load(x, [0, 0], [32, 64])
+            parent = pl.reshape(whole, [16, 128])
+            window = pl.tile.slice(parent, [8, 64], [8, 32])
+            return pl.store(window, [0, 0], out)
+
+    lowered = _lower(ReshapedParent, planner)
+    assert _kernel(lowered).ir_stage == ir.FunctionIRStage.Buffer
+    namespace = {}
+    exec(torch_codegen(lowered), namespace)  # noqa: S102
+    x = torch.arange(2048, dtype=torch.float32).reshape(32, 64)
+    out = torch.empty((8, 64))
+    namespace["kernel"](x, out)
+    torch.testing.assert_close(out, x.reshape(16, 128)[8:, 32:96])
+    if find_ptoas_binary() is not None:
+        source = tmp_path / "parent.pto"
+        source.write_text(codegen.PTOCodegen().generate(lowered, emit_source_loc=False))
+        level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+        _run_ptoas(str(source), str(tmp_path / "parent.cpp"), ["--pto-arch=a2", f"--pto-level={level}"])
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+def test_conflicting_typed_window_parents_stay_tile(planner):
+    @pl.program
+    class ConflictingParents:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self, x: pl.Tensor[[64, 64], pl.FP32], out: pl.Out[pl.Tensor[[32, 64], pl.FP32]]
+        ) -> pl.Tensor[[32, 64], pl.FP32]:
+            whole = pl.load(x, [0, 0], [64, 64])
+            first = pl.tile.slice(whole, [16, 64], [0, 0])
+            out = pl.store(first, [0, 0], out)
+            parent = pl.reshape(whole, [32, 128])
+            second = pl.tile.slice(parent, [16, 64], [16, 32])
+            return pl.store(second, [16, 0], out)
+
+    assert _kernel(_lower(ConflictingParents, planner)).ir_stage == ir.FunctionIRStage.Functional
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("dynamic", ["offset", "valid"])
+def test_dynamic_window_forms_remain_tile(planner, dynamic):
+    offset = "rows" if dynamic == "offset" else "0"
+    valid = ", valid_shape=[rows, 32]" if dynamic == "valid" else ""
+    program = pl.parse_program(f"""
+@pl.program
+class DynamicWindow:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64, 64], pl.FP32], rows: pl.Scalar[pl.INDEX],
+               out: pl.Out[pl.Tensor[[16, 32], pl.FP32]]) -> pl.Tensor[[16, 32], pl.FP32]:
+        whole = pl.load(x, [0, 0], [64, 64])
+        window = pl.tile.slice(whole, [16, 32], [{offset}, 0]{valid})
+        return pl.store(window, [0, 0], out)
+""")
+    assert _kernel(_lower(program, planner)).ir_stage == ir.FunctionIRStage.Functional
 
 
 if __name__ == "__main__":

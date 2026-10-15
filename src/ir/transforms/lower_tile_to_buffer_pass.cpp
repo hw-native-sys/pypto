@@ -350,9 +350,25 @@ class StorageIndex : public IRVisitor {
       descriptors.emplace(key, member.descriptor);
       member_keys.push_back(std::move(key));
     }
+    std::set<ViewKey> source_keys;
+    for (size_t i = 0; i < storage.members.size(); ++i) {
+      if (window_sources_.count(storage.members[i].tile.get())) source_keys.insert(member_keys[i]);
+    }
     const auto& first = *descriptors.begin();
+    const auto preferred = source_keys.empty() ? first.second : descriptors.at(*source_keys.begin());
     const bool direct = descriptors.size() == 1 && std::get<0>(first.first) == 0 &&
                         backend::DenseBufferBytes(first.second) == capacity;
+    // Static valid extents belong to descriptors, not storage. Keep one typed
+    // allocation when its full-capacity members need a native window parent.
+    // Other interpretations reshape that root, without making the parent of
+    // a subview itself a byte-root relabel (unsupported by PTOAS).
+    const bool typed_root =
+        !direct && std::all_of(descriptors.begin(), descriptors.end(), [&](const auto& entry) {
+          return std::get<0>(entry.first) == 0 &&
+                 (!source_keys.empty() || (entry.second->dtype_ == first.second->dtype_ &&
+                                           entry.second->shape_ == first.second->shape_)) &&
+                 backend::DenseBufferBytes(entry.second) == capacity && !HasDynamicValid(entry.second);
+        });
     CHECK_SPAN(direct || capacity % 32 == 0, span)
         << "LowerTileToBuffer: byte storage views require allocation capacity aligned to 32 bytes";
     for (const auto& [key, descriptor] : descriptors) {
@@ -362,8 +378,10 @@ class StorageIndex : public IRVisitor {
     }
     auto root_type =
         direct ? first.second
-               : std::make_shared<BufferType>(std::vector<int64_t>{static_cast<int64_t>(capacity / 32), 32},
-                                              DataType::UINT8, MemorySpace::Vec);
+        : typed_root
+            ? std::make_shared<BufferType>(preferred->shape_, preferred->dtype_, MemorySpace::Vec)
+            : std::make_shared<BufferType>(std::vector<int64_t>{static_cast<int64_t>(capacity / 32), 32},
+                                           DataType::UINT8, MemorySpace::Vec);
     storage.handle = std::make_shared<Var>(base->name_hint_ + "_buffer", root_type, span);
     // A runtime valid dimension starts as its physical extent; each defining
     // operation then states the valid extents it produces.
@@ -378,15 +396,31 @@ class StorageIndex : public IRVisitor {
     auto allocation = OpRegistry::GetInstance().CreateInternal("buffer.alloc", args, {}, root_type, span);
     storage.definitions.push_back(std::make_shared<AssignStmt>(storage.handle, allocation, span));
 
-    std::set<ViewKey> source_keys;
-    for (size_t i = 0; i < storage.members.size(); ++i) {
-      if (window_sources_.count(storage.members[i].tile.get())) source_keys.insert(member_keys[i]);
-    }
     std::map<ViewKey, VarPtr> views;
     std::map<std::pair<uint64_t, uint64_t>, VarPtr> byte_windows;
     for (const auto& [key, descriptor] : descriptors) {
       if (direct) {
         views.emplace(key, storage.handle);
+        continue;
+      }
+      if (typed_root && descriptor->shape_ == root_type->shape_ && descriptor->dtype_ == root_type->dtype_) {
+        if (descriptor->valid_shape_ == root_type->valid_shape_) {
+          views.emplace(key, storage.handle);
+        } else {
+          std::vector<ExprPtr> zeros(2, std::make_shared<ConstInt>(0, DataType::INDEX, span));
+          std::vector<ExprPtr> valid;
+          for (const auto extent : descriptor->valid_shape_) {
+            valid.push_back(std::make_shared<ConstInt>(extent, DataType::INDEX, span));
+          }
+          views.emplace(key, Define(storage, "_valid", "buffer.subview",
+                                    {storage.handle, std::make_shared<MakeTuple>(zeros, span),
+                                     std::make_shared<MakeTuple>(valid, span)},
+                                    descriptor, span));
+        }
+        continue;
+      }
+      if (typed_root && !source_keys.count(key)) {
+        views.emplace(key, Define(storage, "_view", "buffer.reshape", {storage.handle}, descriptor, span));
         continue;
       }
       if (source_keys.count(key)) {

@@ -242,7 +242,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         ("dep_layouts", dep_layouts),
         ("runtime", runtime_kind_to_name(runtime)),
         ("enable_buffer_ir", enable_buffer_ir),
-        ("buffer_ir_version", 5 if enable_buffer_ir else 0),
+        ("buffer_ir_version", 6 if enable_buffer_ir else 0),
     )
     return CacheKey(
         source_hash,

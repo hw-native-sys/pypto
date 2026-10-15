@@ -34,7 +34,9 @@ from pypto.pypto_core import codegen, passes
 def _run_passes(program, planner: passes.MemoryPlanner):
     reset_for_testing()
     set_backend_type(BackendType.Ascend910B)
-    with passes.PassContext([], memory_planner=planner):
+    # These regressions exercise the legacy Tile emitter's planner-dependent
+    # alias forms. Default Buffer views have separate selection/native tests.
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
         return PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
 
 

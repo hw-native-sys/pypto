@@ -37,7 +37,14 @@ For 要求 INDEX 归纳变量和可证明为正的常量步长。动态/负步�
 Tile carry 的复制在 lowering 前规划；标量 yield 同时赋值，Torch 调试也保留交换语义。
 block/subblock 查询使用已有 Buffer 配方。
 
-静态稠密 Vec reshape 保持物理字节数不变，支持同一已规划分配的多个视图。
+静态 Vec slice（包括嵌套 slice）保持父视图的行距。reshape 和 reinterpret 保持物理字节数不变，
+要求源行距稠密，单行源也须满足此要求。Vec assemble 要求目标不是窗口，且源与目标行距相同。发生源/目标重叠时，
+在规划前显式复制完整的带类型父视图，再重建源窗口；精确原位写入或已证明不相交的静态字节范围不需要快照。
+不相交证明使用继承的行距，并包含行间空隙，与验证器的保守存储范围一致。
+它通过共享分配的起点和字节偏移识别连续 assemble 的结果，保留重叠源快照所需的逻辑父视图。
+算术目标不能复用正在读取的窗口所属存储组。
+
+静态稠密 Vec reshape 支持同一已规划分配的多个视图。
 静态非负 MemRef 偏移必须按 32 字节对齐。lowering 验证分配容量及窗口边界；
 选中的非法窗口直接报错，不回退到 Tile IR。
 
@@ -50,8 +57,9 @@ INT8 输入以 INT32 累加。常量或运行时 `init_cond` 选择初始化或�
 转置重标记和乘积视图；部分有效乘积之外仅完整未触及的 Acc box 保证保留。
 
 A5 在默认流水线保持 Tile，待取得运行时验收后再开放。
-reduction、slice/assemble/reinterpret 视图、runtime valid shape、槽位、helper ABI 和跨核资源
-在正常流水线保持 Tile。已有生产配方可通过显式底层 pass 流水线开发和测试，
+reduction、运行时 offset/valid shape、窗口区域 carry、非连续 relabel、行距不兼容或目标为窗口的
+assemble、槽位、helper ABI 和跨核资源在正常流水线保持 Tile。同一符号分配需要多个不同形状或
+类型的窗口父视图时也保持 Tile；对已 relabel 的窗口再 slice 同样尚未开放。已有生产配方可通过显式底层 pass 流水线开发和测试，
 配方存在本身不代表默认支持。
 
 ```text
@@ -154,6 +162,10 @@ value = buffer.reshape(window) : Buffer[[16,32], FP32, Vec]
 所有视图必须位于原始容量内，字节偏移、字节大小和物理行均须静态且按 32 字节对齐。
 分配处仍不支持分形布局的视图和可变视图元数据；带步长的窗口在使用处定义（见下文）。
 
+覆盖完整容量且需要窗口父视图的成员使用该父视图的带类型分配，其他解释通过 reshape 获得。
+静态 valid 矩形使用独立的零偏移子视图，因此不带地址的 PTOAS 存储也能保留部分有效的 assemble
+目标，无须第二次分配。
+
 ## 窗口：slice 与 assemble {#windows-slice-and-assemble}
 
 `tile.slice` 是源在（可能为运行时的）偏移处的窗口，保持源的行距。它的偏移只在 slice 所在位置
@@ -171,13 +183,14 @@ buffer.copy(doubled_buffer, placed_window)
 
 每个 lowering 生成的窗口都带 valid 元组，PTOAS 据此确定原生每一维的类型。
 常量 valid extent 必须为正且位于窗口范围内；valid extent 为零的 slice 和 assemble 窗口会被拒绝。
-PTOAS 无法合法化
-对字节根重新标注结果的 subview，因此在带地址的存储中，被切窗口的 tile 在其规划地址上有自己的分配。
+PTOAS 无法合法化对字节根重新标注结果的 subview。因此覆盖完整容量的窗口父视图保留带类型的根；
+其他共享已寻址存储中的窗口父视图在其规划地址上使用别名分配。
 源本身就是 assemble 目标窗口时，数据已原地写好，不需要拷贝。跨内存空间的 assemble（fix-pipe 的
 Acc 到 Mat 形式）和降秩 slice 在对应配方完成前会被拒绝。
 
 `BufferIR` 证明每个窗口在被读取期间与写入的目标不重叠。运行时偏移的窗口只能按整个源窗口定位；
 带地址的规划器把这类目标放在该范围的一部分上时，lowering 会失败，而不是假定运行时偏移能避开它。
+共享分配约束会在 PYPTO 和 DSA_RP 中阻止窗口算术发生这种复用，也覆盖显式底层流水线中的运行时偏移。
 
 ## 运行时 valid extent {#runtime-valid-extents}
 

@@ -47,8 +47,19 @@ helper calls remain outside the default contract. Tile carry copies are planned
 before lowering; scalar yields assign simultaneously, including swaps in Torch
 numerical debugging. Block and subblock queries use their existing Buffer recipes.
 
-Static dense Vec reshape preserves equal physical bytes and supports repeated
-views of one planned allocation. Static nonnegative MemRef offsets must be
+Static Vec slices, including nested slices, keep their parent's row pitch.
+Reshape and reinterpret preserve equal physical bytes and require dense source
+row pitch, including single-row sources. Vec assemble requires a non-window target and matching source/target
+row pitches. An overlapping source is preserved by an explicit copy of its
+full typed parent before planning, followed by reconstruction of the source
+window; an exact self-write or provably disjoint static byte spans need no snapshot.
+The disjointness proof uses inherited row pitch and includes gaps between rows,
+matching the verifier's conservative storage ranges. It compares shared allocation
+origins and byte offsets across chained assemble results, without changing the
+logical parent used for an overlapping-source snapshot. Arithmetic destinations cannot
+reuse the storage family of a window they read.
+
+Static dense Vec reshape supports repeated views of one planned allocation. Static nonnegative MemRef offsets must be
 32-byte aligned. Lowering verifies allocation capacity and window bounds; a
 selected malformed window fails instead of falling back to Tile IR.
 
@@ -64,8 +75,11 @@ including transpose relabels and product views. Only complete untouched Acc
 boxes have defined preservation outside a partially valid product.
 
 A5 retains Tile IR until its default rollout has clean runtime acceptance.
-Reductions, slice/assemble/reinterpret views, runtime valid shapes, slots, helper ABIs
-and cross-core resources remain Tile in the normal pipeline. Existing production
+Reductions, runtime offsets/valid shapes, window region carries, strided relabels,
+assemble with incompatible pitches or window targets, slots, helper ABIs and
+cross-core resources remain Tile in the normal pipeline. A symbolic allocation
+requiring several differently shaped or typed window parents also remains Tile,
+as does slicing a relabelled window. Existing production
 recipes may support more through explicit low-level pass pipelines; their
 availability alone does not widen default acceptance.
 
@@ -160,6 +174,10 @@ multiple static descriptors or smaller windows, lowering declares one full-valid
 `buffer.reshape` aliases. Equal descriptor/window pairs share one SSA handle,
 including separate Tile variables that name the same view. A single descriptor
 covering the full allocation keeps the direct typed-allocation form.
+Full-capacity members that need a window parent use that parent's typed
+allocation; other interpretations reshape it. Static valid rectangles use
+independent zero-offset subviews, so addressless PTOAS storage can preserve a
+partially valid assemble target without a second allocation.
 
 ```text
 # Planned allocation: capacity 4096, effective base address 8192.
@@ -207,9 +225,10 @@ Every lowered window carries its valid tuple, so PTOAS types each native
 dimension from it. Constant valid extents must be positive and fit the window.
 Each literal extent requires the same static result dimension, while a dynamic
 result dimension requires a nonconstant extent.
-Zero-valid slice and assemble windows are rejected. PTOAS cannot legalize a subview of a byte-root relabel, so
-in addressed storage a tile that windows are cut from gets its own allocation
-at its planned address. A source that already is the assembled window was
+Zero-valid slice and assemble windows are rejected. PTOAS cannot legalize a
+subview of a byte-root relabel. Full-capacity window parents therefore retain
+typed roots; for other shared addressed storage, a window parent gets an alias
+allocation at its planned address. A source that already is the assembled window was
 written in place and needs no copy. Assembles across memory spaces (the
 fix-pipe Acc to Mat forms) and rank-reducing slices are rejected until their
 recipes exist.
@@ -218,7 +237,9 @@ recipes exist.
 is read. A runtime-offset window can only be placed within its whole source
 window. When an addressed planner overlaps part of that range with such a
 destination, lowering fails closed instead of guessing that the runtime offset
-avoids it.
+avoids it. The shared allocation constraints prevent this reuse for window
+arithmetic in both PYPTO and DSA_RP, including explicit low-level pipelines
+with runtime offsets.
 
 ## Runtime valid extents
 

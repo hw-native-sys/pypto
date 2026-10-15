@@ -91,5 +91,196 @@ def test_public_buffer_views(case_run, request):
         assert (" addr = " in text) == (case_run.case.memory_planner != passes.MemoryPlanner.PTOAS)
 
 
+@pl.jit.incore
+def _static_windows_kernel(source: pl.Tensor, out: pl.InOut[pl.Tensor]):
+    whole = pl.load(source, [0, 0], [64, 64])
+    outer = pl.tile.slice(whole, [32, 48], [16, 16])
+    window = pl.tile.slice(outer, [16, 32], [0, 16])
+    doubled = pl.add(window, window)
+    target = pl.load(source, [0, 0], [32, 32])
+    placed = pl.tile.assemble(target, doubled, [16, 0])
+    out = pl.store(placed, [0, 0], out)
+    out = pl.store(whole, [64, 0], out)
+    return out
+
+
+@pl.jit
+def _static_windows_entry(source: pl.Tensor, out: pl.InOut[pl.Tensor]):
+    return _static_windows_kernel(source, out)
+
+
+@pl.jit.incore
+def _overlapping_assemble_kernel(source: pl.Tensor, out: pl.Out[pl.Tensor]):
+    whole = pl.load(source, [0, 0], [32, 64])
+    window = pl.tile.slice(whole, [32, 32], [0, 0])
+    placed = pl.tile.assemble(whole, window, [0, 16])
+    return pl.store(placed, [0, 0], out)
+
+
+@pl.jit
+def _overlapping_assemble_entry(source: pl.Tensor, out: pl.Out[pl.Tensor]):
+    return _overlapping_assemble_kernel(source, out)
+
+
+@pl.jit.incore
+def _disjoint_assemble_kernel(source: pl.Tensor, out: pl.Out[pl.Tensor]):
+    whole = pl.load(source, [0, 0], [128, 256])
+    outer = pl.tile.slice(whole, [96, 256], [0, 0])
+    window = pl.tile.slice(outer, [64, 256], [0, 0])
+    placed = pl.tile.assemble(whole, window, [64, 0])
+    return pl.store(placed, [0, 0], out)
+
+
+@pl.jit
+def _disjoint_assemble_entry(source: pl.Tensor, out: pl.Out[pl.Tensor]):
+    return _disjoint_assemble_kernel(source, out)
+
+
+@pl.jit.incore
+def _chained_disjoint_assemble_kernel(source: pl.Tensor, out: pl.Out[pl.Tensor]):
+    whole = pl.load(source, [0, 0], [128, 256])
+    window = pl.tile.slice(whole, [32, 256], [0, 0])
+    first = pl.tile.assemble(whole, window, [32, 0])
+    second = pl.tile.assemble(first, window, [64, 0])
+    updated = pl.tile.slice(second, [32, 256], [64, 0])
+    third = pl.tile.assemble(second, updated, [96, 0])
+    return pl.store(third, [0, 0], out)
+
+
+@pl.jit
+def _chained_disjoint_assemble_entry(source: pl.Tensor, out: pl.Out[pl.Tensor]):
+    return _chained_disjoint_assemble_kernel(source, out)
+
+
+@pl.jit.incore
+def _reinterpret_window_kernel(source: pl.Tensor, out: pl.Out[pl.Tensor]):
+    whole = pl.load(source, [0, 0], [32, 64])
+    window = pl.tile.slice(whole, [16, 64], [16, 0])
+    bits = pl.tile.reinterpret_view(window, pl.INT32)
+    return pl.store(bits, [0, 0], out)
+
+
+@pl.jit
+def _reinterpret_window_entry(source: pl.Tensor, out: pl.Out[pl.Tensor]):
+    return _reinterpret_window_kernel(source, out)
+
+
+def _static_windows_golden(tensors):
+    source = tensors["source"]
+    out = tensors["out"].clone()
+    out[:32, :32] = source[:32, :32]
+    out[16:32, :32] = source[16:32, 32:] * 2
+    out[64:] = source
+    return {"out": out}
+
+
+def _overlapping_assemble_golden(tensors):
+    source = tensors["source"]
+    out = source.clone()
+    out[:, 16:48] = source[:, :32]
+    return {"out": out}
+
+
+def _disjoint_assemble_golden(tensors):
+    source = tensors["source"]
+    out = source.clone()
+    out[64:] = source[:64]
+    return {"out": out}
+
+
+def _chained_disjoint_assemble_golden(tensors):
+    return {"out": tensors["source"][:32].repeat(4, 1)}
+
+
+def _reinterpret_window_golden(tensors):
+    return {"out": tensors["source"][16:].view(torch.int32)}
+
+
+@st.cases(
+    *[
+        st.case(
+            _static_windows_entry,
+            torch.arange(4096, dtype=torch.float32).reshape(64, 64).to(dtype),
+            torch.full((128, 64), -777, dtype=dtype),
+            name=f"static_windows_{planner.name.lower()}_{str(dtype).removeprefix('torch.')}",
+            golden=_static_windows_golden,
+            memory_planner=planner,
+            rtol=0,
+            atol=0,
+        )
+        for planner in _PLANNERS
+        for dtype in (torch.float16, torch.float32, torch.int32)
+    ],
+    *[
+        st.case(
+            _overlapping_assemble_entry,
+            torch.arange(2048, dtype=torch.float32).reshape(32, 64),
+            torch.empty((32, 64)),
+            name=f"overlapping_assemble_{planner.name.lower()}",
+            golden=_overlapping_assemble_golden,
+            memory_planner=planner,
+            rtol=0,
+            atol=0,
+        )
+        for planner in _PLANNERS
+    ],
+    *[
+        st.case(
+            _disjoint_assemble_entry,
+            torch.arange(128 * 256, dtype=torch.float32).reshape(128, 256),
+            torch.empty((128, 256)),
+            name=f"disjoint_assemble_{planner.name.lower()}",
+            golden=_disjoint_assemble_golden,
+            memory_planner=planner,
+            rtol=0,
+            atol=0,
+        )
+        for planner in _PLANNERS
+    ],
+    *[
+        st.case(
+            _chained_disjoint_assemble_entry,
+            torch.arange(128 * 256, dtype=torch.float32).reshape(128, 256),
+            torch.empty((128, 256)),
+            name=f"chained_disjoint_assemble_{planner.name.lower()}",
+            golden=_chained_disjoint_assemble_golden,
+            memory_planner=planner,
+            rtol=0,
+            atol=0,
+        )
+        for planner in _PLANNERS
+    ],
+    *[
+        st.case(
+            _reinterpret_window_entry,
+            torch.arange(2048, dtype=torch.float32).reshape(32, 64),
+            torch.empty((16, 64), dtype=torch.int32),
+            name=f"reinterpret_window_{planner.name.lower()}",
+            golden=_reinterpret_window_golden,
+            memory_planner=planner,
+            rtol=0,
+            atol=0,
+        )
+        for planner in _PLANNERS
+    ],
+)
+@pytest.mark.platforms("a2a3", "a2a3sim", reason="Static Buffer views default to a2/a3.")
+def test_default_static_buffer_windows(case_run, request):
+    case_run.assert_passed()
+    if request.config.getoption("--precompile-workers") is not None:
+        assert case_run.work_dir is not None
+        program = ir.deserialize((case_run.work_dir / "buffer_ir.msgpack").read_bytes())
+        assert isinstance(program, ir.Program)
+        kernels = [
+            function for function in program.functions.values() if ir.is_incore_type(function.func_type)
+        ]
+        assert len(kernels) == 1 and kernels[0].ir_stage == ir.FunctionIRStage.Buffer
+        sources = list((case_run.work_dir / "ptoas").glob("*.pto"))
+        assert len(sources) == 1
+        assert "pto.subview" in sources[0].read_text()
+        if "disjoint_assemble" in request.node.name:
+            assert sources[0].read_text().count("pto.alloc_tile") == 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
