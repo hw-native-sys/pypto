@@ -7,37 +7,12 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""On-device validation of AutoTileMatmulL0's dbC=2 (double-buffered L0C) emit.
+"""Golden checks on historical AutoTile dbC shapes with automatic dbC disabled.
 
-Chooser-selected dbC=2 keeps two co-live L0C accumulators so tile i's FIXPIPE
-drain overlaps tile i+1's MAD. It is reachable under all three memory planners:
-  - ``memory_planner=MemoryPlanner.PTOAS`` (automatic): PTOAS skips MemoryReuse, so
-    InitMemRef keeps the two buffers distinct and ptoas places them.
-  - ``memory_planner=MemoryPlanner.DSA_RP`` (automatic): DSA-RP skips legacy
-    MemoryReuse and places the two co-live accumulators itself.
-  - ``memory_planner=MemoryPlanner.PYPTO`` + ``enable_pypto_l0c_double_buffer=True``
-    (experimental opt-in): MemoryReuse runs, but its capacity gate (#1475) keeps the
-    two co-live accumulators in distinct buffers via their flat depth-2
-    ``pipeline_membership``, then AllocateMemoryAddr places them.
-Under the default PyPTO planner (flag off) these shapes get one accumulator and
-would not exercise the feature.
-
-Coverage:
-  - minimal one-dimensional 1x2 / 2x1 grids under both in-tree planners;
-  - direct-store (Acc->GM) sweep over chooser-pinned 4 / 6 / 8 / 16-tile grids,
-    under all three planners —
-    the WAR reuse boundary (tile i+2's matmul into a buffer must wait for tile i's
-    drain out of it) is enforced by ptoas sync (PTOAS) or PyPTO codegen sync (PyPTO),
-    so a value check on a >=4-tile grid is the primary correctness gate for each
-    allocation path;
-  - the formerly disabled PTOAS 384x256 operand-allocation case, now a 12-tile grid;
-  - Mat-scratch (Acc->Mat, ``tile.assemble``) chained producer — the L1 drain path;
-  - a non-divisible M/N shape — the peeled L-tail (its drains are not floated).
-
-Numerics are the point: dbC=2 reuses buffers, so a sync error corrupts the result
-(a wrong-order drain/MAD), which a golden comparison catches.  Platforms: a2a3 /
-a2a3sim (the 128 KB-L0C chooser regime that selects these dbC tiles).
-"""
+The legacy opt-in is exercised under every planner. These workloads retain
+ordinary tiling and operand pipelines, while accumulator selection uses single-C.
+Explicit multi-buffer emission is covered by codegen and lowering unit tests.
+The historical filename is retained for existing targeted test invocations."""
 
 from typing import Any
 
@@ -55,7 +30,7 @@ PLATFORMS_DBC = ["a2a3", "a2a3sim"]
 
 
 def _choose_a2a3_dbc(m: int, k: int, n: int, *, bytes_a: int, bytes_b: int):
-    """Return a calibrated 910B dbC=2 design point used by this suite."""
+    """Return the single-C 910B choice for a historical dbC problem."""
     cfg = _core_passes.l0_tile_chooser.L0TileConfig()
     cfg.M, cfg.K, cfg.N = m, k, n
     cfg.l0a_bytes = cfg.l0b_bytes = 64 * 1024
@@ -63,7 +38,7 @@ def _choose_a2a3_dbc(m: int, k: int, n: int, *, bytes_a: int, bytes_b: int):
     cfg.bytes_a, cfg.bytes_b, cfg.bytes_c = bytes_a, bytes_b, 4
     cfg.allow_a_stationary = True
     cfg.allow_b_stationary = True
-    cfg.allow_double_buffer_c = True
+    cfg.allow_double_buffer_c = False
     cfg.allow_k_boundary = True
     return _core_passes.l0_tile_chooser.choose_l0_tile(cfg)
 
@@ -73,7 +48,7 @@ def _choose_a2a3_fp32_dbc(m: int, n: int):
 
 
 def _printed_after_auto_tile(test_case: PTOTestCase, planner: MemoryPlanner) -> str:
-    """Lower a device case through AutoTile so structural dbC assertions match compilation."""
+    """Lower a device case through AutoTile to check the single-C policy."""
     _backend.reset_for_testing()
     _backend.set_backend_type(BackendType.Ascend910B)
     program = test_case.get_program()
@@ -94,7 +69,7 @@ def _printed_after_auto_tile(test_case: PTOTestCase, planner: MemoryPlanner) -> 
 
 
 class _DbcDirectStore(PTOTestCase):
-    """``a @ b`` -> [M, N] FP32 direct-stored to GM with full-K dbC=2 tiling."""
+    """Direct-store matmul on shapes formerly used for automatic dbC."""
 
     __test__ = False
 
@@ -175,10 +150,11 @@ class _DbcDirectStore(PTOTestCase):
 
 
 class _DbcMatScratch(PTOTestCase):
-    """Chained ``(a @ b) @ e``: the oversized [256, 256] bf16 producer is assembled
-    into an L1/Mat scratch (Acc->Mat ``tile.assemble``) and consumed on-chip.  Under
-    PTOAS the full-K producer is a dbC=2 128x128 grid whose assemble drains are floated
-    to keep the two accumulators co-live."""
+    """Chained ``(a @ b) @ e`` with an on-chip L1/Mat intermediate.
+
+    The oversized producer is assembled with ``tile.assemble`` and consumed
+    on-chip. AutoTile selects single-C under every planner.
+    """
 
     __test__ = False
 
@@ -272,12 +248,10 @@ class _DbcMatScratch(PTOTestCase):
 
 
 class TestDbc2DoubleBuffer:
-    """dbC=2 L0C double-buffer under PYPTO, DSA-RP, and PTOAS."""
+    """Automatic dbC stays disabled under PYPTO, DSA-RP, and PTOAS."""
 
-    # Exact calibrated chooser contracts: (M, N, tile_m, tile_n, tile_count).
-    # The 144x144 case is the real odd 3x2 grid. The sweep gives the device agent
-    # a drain-hiding curve; the last tile's drain is always exposed, so the hidden
-    # fraction should approach 1 as the tile count grows.
+    # Historical shapes retain golden coverage; old dbC geometries are no
+    # longer asserted because AutoTile selects a fresh single-C plan.
     @pytest.mark.parametrize("platform", PLATFORMS_DBC)
     @pytest.mark.parametrize(
         "planner",
@@ -293,20 +267,22 @@ class TestDbc2DoubleBuffer:
             (160, 160, 80, 128, 4, _core_passes.l0_tile_chooser.Stationarity.OutputStationary),
             (144, 144, 48, 128, 6, _core_passes.l0_tile_chooser.Stationarity.OutputStationary),
             (256, 256, 32, 256, 8, _core_passes.l0_tile_chooser.Stationarity.BStationary),
-            (448, 448, 112, 128, 16, _core_passes.l0_tile_chooser.Stationarity.OutputStationary),
+            (448, 448, 64, 256, 14, _core_passes.l0_tile_chooser.Stationarity.OutputStationary),
         ],
     )
     def test_direct_store_dbc(
         self, test_runner, platform, planner, m, n, tile_m, tile_n, tile_count, stationarity
     ):
-        """Direct-store (Acc->GM) dbC=2 across a tile-count sweep; a wrong reuse-WAR
-        sync would corrupt the result."""
+        """Retain direct-store numerical coverage with single-C selection."""
         choice = _choose_a2a3_fp32_dbc(m, n)
         count = ((m + choice.m - 1) // choice.m) * ((n + choice.n - 1) // choice.n)
-        assert (choice.m, choice.n, choice.k, count) == (tile_m, tile_n, 64, tile_count)
-        assert choice.stationarity == stationarity
-        assert choice.double_buffer_c
-        result = test_runner.run(_DbcDirectStore(m, n, planner=planner, platform=platform))
+        assert count >= 1
+        assert not choice.double_buffer_c
+        case = _DbcDirectStore(m, n, planner=planner, platform=platform)
+        printed = _printed_after_auto_tile(case, planner)
+        assert "pipeline_double_buffer_c" not in printed
+        assert "slots=2" not in printed
+        result = test_runner.run(case)
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.parametrize("platform", PLATFORMS_DBC)
@@ -325,27 +301,23 @@ class TestDbc2DoubleBuffer:
         ],
     )
     def test_one_dimensional_dbc(self, test_runner, platform, planner, m, n, tile_m, tile_n, holds_a):
-        """A singleton outer axis still permits two moving-inner dbC stages."""
+        """Singleton axes do not automatically enable accumulator ping-pong."""
         choice = _choose_a2a3_fp32_dbc(m, n)
-        assert (choice.m, choice.n, choice.k) == (tile_m, tile_n, 64)
-        assert choice.stationarity == _core_passes.l0_tile_chooser.Stationarity.OutputStationary
-        assert choice.os_holds_a is holds_a
-        assert choice.double_buffer_c
+        assert not choice.double_buffer_c
 
         case = _DbcDirectStore(m, n, planner=planner, platform=platform)
         printed = _printed_after_auto_tile(case, planner)
-        assert printed.count('"pipeline_double_buffer_c": True') == 1
+        assert "pipeline_double_buffer_c" not in printed
         result = test_runner.run(case)
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.parametrize("platform", PLATFORMS_DBC)
     def test_ptoas_384x256_operand_allocation(self, test_runner, platform):
-        """Formerly disabled PTOAS operand-buffer overflow, now a 12x1 grid."""
+        """Retain numerical coverage of the formerly oversized PTOAS operand."""
         choice = _choose_a2a3_fp32_dbc(384, 256)
         count = ((384 + choice.m - 1) // choice.m) * ((256 + choice.n - 1) // choice.n)
-        assert (choice.m, choice.n, choice.k, count) == (32, 256, 64, 12)
-        assert choice.stationarity == _core_passes.l0_tile_chooser.Stationarity.BStationary
-        assert choice.double_buffer_c
+        assert count >= 1
+        assert not choice.double_buffer_c
         result = test_runner.run(_DbcDirectStore(384, 256, planner=MemoryPlanner.PTOAS, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
@@ -359,16 +331,12 @@ class TestDbc2DoubleBuffer:
         ],
     )
     def test_mat_scratch_dbc(self, test_runner, platform, planner):
-        """Both matmuls in the Mat-scratch chain use dbC=2 L1 drains.
-
-        Also covers #1995's PTOAS accumulator-handle fix.
-        """
+        """Retain the Mat-scratch chain and its golden check with single-C."""
         choice = _choose_a2a3_dbc(256, 64, 256, bytes_a=2, bytes_b=2)
-        assert (choice.m, choice.n, choice.k) == (64, 256, 64)
-        assert choice.double_buffer_c
+        assert not choice.double_buffer_c
         case = _DbcMatScratch(planner=planner, platform=platform)
         printed = _printed_after_auto_tile(case, planner)
-        assert printed.count('"pipeline_double_buffer_c": True') == 2
+        assert "pipeline_double_buffer_c" not in printed
         result = test_runner.run(case)
         assert result.passed, f"Test failed: {result.error}"
 
@@ -382,14 +350,13 @@ class TestDbc2DoubleBuffer:
         ],
     )
     def test_non_divisible_tail_dbc(self, test_runner, platform, planner):
-        """Non-divisible M/N (320x320): the peeled L-shaped tail is emitted straight-line
-        (its drains are not floated), so this exercises dbC interior + exposed tail."""
+        """Retain padded M/N boundary coverage without automatic dbC."""
         choice = _choose_a2a3_fp32_dbc(320, 320)
-        assert (choice.m, choice.n, choice.k) == (64, 128, 64)
-        assert choice.double_buffer_c
+        assert not choice.double_buffer_c
         case = _DbcDirectStore(320, 320, planner=planner, platform=platform)
         printed = _printed_after_auto_tile(case, planner)
-        assert printed.count('"pipeline_double_buffer_c": True') == 1
+        assert "pipeline_membership" not in printed
+        assert "slots=2" not in printed
         result = test_runner.run(case)
         assert result.passed, f"Test failed: {result.error}"
 

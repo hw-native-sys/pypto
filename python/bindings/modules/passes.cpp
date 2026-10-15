@@ -226,7 +226,7 @@ void BindPass(nb::module_& m) {
              "Host CPU builds the whole task graph up front; required for Graph Execution");
 
   passes.def("runtime_kind_to_name", &RuntimeKindToName, nb::arg("kind"),
-             "Wire name written to RUNTIME_CONFIG[\"runtime\"], e.g. \"host_build_graph\"");
+             R"(Wire name written to RUNTIME_CONFIG["runtime"], e.g. "host_build_graph")");
   passes.def("runtime_kind_from_name", &RuntimeKindFromName, nb::arg("name"),
              "Parse a RUNTIME_CONFIG[\"runtime\"] wire name back into a RuntimeKind");
 
@@ -360,8 +360,8 @@ void BindPass(nb::module_& m) {
            nb::arg("enable_pypto_l0c_double_buffer") = false, nb::arg("runtime") = kDefaultRuntimeKind,
            nb::arg("enable_buffer_ir") = true,
            "Create a PassContext with instruments, verification level, diagnostic phase gate, "
-           "optional disabled diagnostic checks, memory planner selection, the experimental "
-           "legacy-PyPTO chooser-emitted L0C double-buffer (dbC=2) opt-in, and the target Simpler "
+           "optional disabled diagnostic checks, memory planner selection, the inactive "
+           "legacy L0C double-buffer compatibility flag, and the target Simpler "
            "runtime ABI, and default-on whole-kernel Buffer IR selection")
       .def("__enter__",
            [](PassContext& self) -> PassContext& {
@@ -379,8 +379,7 @@ void BindPass(nb::module_& m) {
       .def("get_memory_planner", &PassContext::GetMemoryPlanner,
            "Get the memory planner selection for this context")
       .def("get_enable_pypto_l0c_double_buffer", &PassContext::GetEnablePyptoL0cDoubleBuffer,
-           "Whether chooser-emitted L0C double-buffering (dbC=2) is enabled under the legacy PyPTO "
-           "memory planner")
+           "Return the stored legacy flag; automatic dbC remains disabled")
       .def("get_runtime", &PassContext::GetRuntime, "Get the target Simpler runtime ABI for this context")
       .def("get_enable_buffer_ir", &PassContext::GetEnableBufferIR,
            "Whether supported whole kernels use Buffer IR")
@@ -880,6 +879,12 @@ void BindPass(nb::module_& m) {
       .value("AStationary", utils::Stationarity::kAStationary)
       .value("BStationary", utils::Stationarity::kBStationary);
 
+  nb::enum_<utils::DbcEmissionRoute>(l0_tile, "DbcEmissionRoute",
+                                     "Concrete output-grid schedule used to realize L0C double buffering")
+      .value("Unsupported", utils::DbcEmissionRoute::kUnsupported)
+      .value("PipelinedInner", utils::DbcEmissionRoute::kPipelinedInner)
+      .value("UnrolledGrid", utils::DbcEmissionRoute::kUnrolledGrid);
+
   nb::class_<utils::L0TileConfig>(
       l0_tile, "L0TileConfig",
       "Inputs to ChooseL0Tile: problem dims + hardware + schedule knobs. max_n caps the logical chosen "
@@ -911,6 +916,11 @@ void BindPass(nb::module_& m) {
       .def_rw("allow_a_stationary", &utils::L0TileConfig::allow_a_stationary)
       .def_rw("allow_b_stationary", &utils::L0TileConfig::allow_b_stationary)
       .def_rw("allow_double_buffer_c", &utils::L0TileConfig::allow_double_buffer_c)
+      .def_rw("full_k_dbc_route", &utils::L0TileConfig::full_k_dbc_route)
+      .def_rw("reduction_iterations", &utils::L0TileConfig::reduction_iterations)
+      .def_rw("reduction_pipeline_stages", &utils::L0TileConfig::reduction_pipeline_stages)
+      .def_rw("split_k_dbc_route", &utils::L0TileConfig::split_k_dbc_route)
+      .def_rw("allow_unrolled_dbc_m_boundary", &utils::L0TileConfig::allow_unrolled_dbc_m_boundary)
       .def_rw("c_read", &utils::L0TileConfig::c_read)
       .def_rw("bw_a", &utils::L0TileConfig::bw_a)
       .def_rw("bw_b", &utils::L0TileConfig::bw_b)
@@ -936,6 +946,7 @@ void BindPass(nb::module_& m) {
       .def_ro("stationarity", &utils::L0TileResult::stationarity)
       .def_ro("os_holds_a", &utils::L0TileResult::os_holds_a)
       .def_ro("double_buffer_c", &utils::L0TileResult::double_buffer_c)
+      .def_ro("dbc_emission_route", &utils::L0TileResult::dbc_emission_route)
       .def_ro("perf_hint", &utils::L0TileResult::perf_hint);
 
   l0_tile.def("choose_l0_tile", &utils::ChooseL0Tile, nb::arg("config"),
