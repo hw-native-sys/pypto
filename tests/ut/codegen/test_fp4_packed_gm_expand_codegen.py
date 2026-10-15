@@ -134,6 +134,26 @@ def test_uint8_ub_fp4_alias_rejects_noncontiguous_slice_through_views(planner):
 
 
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+def test_uint8_ub_fp4_alias_rejects_nested_noncontiguous_slice(planner):
+    @pl.program
+    class DecodeNestedSlice:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            packed: pl.Tensor[[32, 512], pl.UINT8],
+            output: pl.Out[pl.Tensor[[16, 512], pl.BF16]],
+        ) -> pl.Tensor[[16, 512], pl.BF16]:
+            payload = pl.tile.load(packed, [0, 0], [32, 512])
+            first = pl.tile.slice(payload, [32, 256], [0, 256])
+            second = pl.tile.slice(first, [16, 256], [0, 0])
+            fp4 = pl.reinterpret_view(second, pl.FP4E2M1X2)
+            return pl.tile.store(pl.cast(fp4, pl.BF16), [0, 0], output)
+
+    with pytest.raises(ValueError, match="FP4E2M1X2 UB alias requires a contiguous UINT8 tile"):
+        _emit_incore_mlir(DecodeNestedSlice, planner)
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
 def test_uint8_ub_fp4_alias_accepts_contiguous_slice(planner):
     mlir = _emit_incore_mlir(_uint8_slice_fp4_decode_program(256, 0), planner)
     assert mlir.count("pto.tcvt ") == 1, mlir

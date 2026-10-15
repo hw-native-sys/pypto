@@ -713,6 +713,23 @@ class InitMemRefMutator : public IRMutator {
     if (!parent_memref_opt.has_value()) return nullptr;
     const auto& parent_memref = *parent_memref_opt;
 
+    // A nested slice can narrow a strided window's byte envelope back to its
+    // dense size without removing the parent's row gaps. Preserve that fact
+    // through every storage-sharing view instead of inferring it at codegen
+    // from only the final MemRef size.
+    bool non_dense_source = non_dense_view_memrefs_.count(parent_memref) != 0;
+    if (auto parent_tile = As<TileType>(source->GetType())) {
+      const auto dense_bytes = utils::StaticPhysicalAllocationBytes(parent_tile, MemorySpace::Vec, handler_);
+      non_dense_source = non_dense_source || !dense_bytes || *dense_bytes != parent_memref->size_;
+    }
+    if (auto call = As<Call>(new_value); call && IsOp(call, "tile.reinterpret_view")) {
+      auto result_tile = As<TileType>(op->var_->GetType());
+      CHECK_SPAN(!result_tile || result_tile->dtype_ != DataType::FP4E2M1X2 || !non_dense_source, call->span_)
+          << "UINT8 -> FP4E2M1X2 UB alias requires a contiguous UINT8 tile; noncontiguous UB slice "
+             "provenance survives nested slices, aliases and reshapes. Slice the GM tensor and load "
+             "the window instead";
+    }
+
     // Compute additional byte offset from the view op (if applicable)
     ExprPtr additional_offset = MakeZeroByteOffset();
     if (auto call = As<Call>(new_value)) {
@@ -756,6 +773,7 @@ class InitMemRefMutator : public IRMutator {
     MemRefPtr view_memref = is_pure_alias
                                 ? parent_memref
                                 : std::make_shared<MemRef>(parent_memref->base_, total_offset, view_size);
+    if (non_dense_source) non_dense_view_memrefs_.insert(view_memref);
 
     std::optional<MemRefPtr> view_opt = view_memref;
     TypePtr new_type = CloneTypeWithMemRefAndRemapExprs(
@@ -1019,6 +1037,7 @@ class InitMemRefMutator : public IRMutator {
   }
 
   std::map<VarPtr, VarPtr> var_map_;
+  std::set<MemRefPtr> non_dense_view_memrefs_;
   const DeclaredAllocMap& declared_allocs_;
   const backend::BackendHandler* handler_ = nullptr;
   FunctionType func_type_ = FunctionType::InCore;
