@@ -48,9 +48,12 @@ def setup(monkeypatch):
     return state, KernelConfig("a2a3", "tensormap_and_ringbuffer", 0), calls, FakeWorker
 
 
-def artifact(key=b"kernel"):
+def artifact(key=b"kernel", *, requires_sdma=False):
     value = SimpleNamespace(
-        kernel_abi=KernelABI("a2a3", "tensormap_and_ringbuffer", ()), load=lambda: key, _loaded=None
+        kernel_abi=KernelABI("a2a3", "tensormap_and_ringbuffer", ()),
+        load=lambda: key,
+        _loaded=None,
+        requires_sdma=requires_sdma,
     )
     value.identity = lambda: value.kernel_abi.binary_tag() + key
     value.loaded_identity = lambda: value.identity() if value._loaded is not None else None
@@ -682,7 +685,8 @@ def test_specialization_cannot_publish_or_resolve_foreign_registration(setup):
     state.close()
 
 
-def test_native_worker_forwards_dfx_config_and_uses_owner_thread(monkeypatch, tmp_path):
+@pytest.mark.parametrize("enable_sdma", [False, True])
+def test_native_worker_forwards_dfx_config_and_uses_owner_thread(monkeypatch, tmp_path, enable_sdma):
     import sys  # noqa: PLC0415
 
     from pypto.runtime.kernel import abi  # noqa: PLC0415
@@ -691,7 +695,9 @@ def test_native_worker_forwards_dfx_config_and_uses_owner_thread(monkeypatch, tm
     events = []
     cfg = SimpleNamespace(validate=lambda: events.append("validate"))
     worker = SimpleNamespace(
-        kernel_init=lambda device, bins, config: events.append((device, bins, config)),
+        kernel_init=lambda device, bins, config, *, enable_sdma: events.append(
+            (device, bins, config, enable_sdma)
+        ),
         kernel_mode_supported=True,
         kernel_begin_dfx=lambda stream: events.append(("begin", stream, threading.current_thread())),
         kernel_end_dfx=lambda stream: events.append(("end", stream, threading.current_thread())),
@@ -712,7 +718,11 @@ def test_native_worker_forwards_dfx_config_and_uses_owner_thread(monkeypatch, tm
     adapter.worker = None
     adapter._owner = _OwnerThread()
     try:
-        adapter.init(KernelConfig("a2a3", "tensormap_and_ringbuffer", 0, 4, True, True, tmp_path))
+        adapter.init(
+            KernelConfig(
+                "a2a3", "tensormap_and_ringbuffer", 0, 4, True, True, tmp_path, enable_sdma=enable_sdma
+            )
+        )
         adapter.begin_dfx(123)
         adapter.end_dfx(123)
         assert cfg.aicpu_thread_num == 4
@@ -720,7 +730,7 @@ def test_native_worker_forwards_dfx_config_and_uses_owner_thread(monkeypatch, tm
         assert cfg.output_prefix == str(tmp_path)
         assert events == [
             "validate",
-            (0, "bins", cfg),
+            (0, "bins", cfg, enable_sdma),
             ("begin", 123, adapter._owner.thread),
             ("end", 123, adapter._owner.thread),
         ]
@@ -729,20 +739,18 @@ def test_native_worker_forwards_dfx_config_and_uses_owner_thread(monkeypatch, tm
 
 
 def test_kernel_config_normalizes_ring_sizing():
-    # 标量广播到全部 4 个 ring，与 RunOptions 的同名字段语义一致。
+    # Scalars broadcast to all 4 rings, matching RunOptions.
     config = KernelConfig("a2a3", "tensormap_and_ringbuffer", 0, ring_heap=64 * 1024 * 1024)
     assert config.ring_heap == (64 * 1024 * 1024,) * 4
     assert config.ring_task_window is None and config.ring_dep_pool is None
-    # 逐 ring 的列表原样保留，但存成元组：KernelConfig 是 frozen dataclass，
-    # ensure_worker 用相等性判定"同一配置的重复 init 是 no-op"，必须可哈希且稳定。
-    config = KernelConfig(
-        "a2a3", "tensormap_and_ringbuffer", 0, ring_task_window=[16, 32, 128, 256]
-    )
+    # Per-ring lists become tuples so the frozen configuration stays hashable.
+    # ensure_worker uses equality to make repeated init with the same config a no-op.
+    config = KernelConfig("a2a3", "tensormap_and_ringbuffer", 0, ring_task_window=[16, 32, 128, 256])
     assert config.ring_task_window == (16, 32, 128, 256)
     assert hash(config) == hash(
         KernelConfig("a2a3", "tensormap_and_ringbuffer", 0, ring_task_window=(16, 32, 128, 256))
     )
-    # 未设置与设置过的配置不相等，否则第二次 init 会被误判成 no-op。
+    # Explicit sizing must differ from defaults so init detects a config change.
     assert KernelConfig("a2a3", "tensormap_and_ringbuffer", 0) != config
 
 
@@ -761,11 +769,11 @@ def test_kernel_config_rejects_bad_ring_sizing(field, value, match):
 
 
 def test_native_worker_forwards_ring_sizing_only_when_set(monkeypatch, tmp_path):
-    """kernel 模式下 init 是 ring 尺寸的唯一入口，所以这一步必须真的写进 CallConfig。
+    """Kernel init must forward ring sizes through CallConfig.
 
-    arena 由 init_kernel_context -> prepare_kernel_runtime_impl 在 init 期间按
-    CallConfig.runtime_env 建好并冻结，之后的 prepare_callable / launch 都不再
-    携带 CallConfig；写漏了就只能吃编译期默认的 4 x 256 MiB。
+    init_kernel_context -> prepare_kernel_runtime_impl freezes arenas using
+    CallConfig.runtime_env. Later preparation and launches do not carry it;
+    omitting these fields would retain the default 4 x 256 MiB ring heap.
     """
     import sys  # noqa: PLC0415
 
@@ -792,11 +800,11 @@ def test_native_worker_forwards_ring_sizing_only_when_set(monkeypatch, tmp_path)
         return adapter
 
     def fresh():
-        # 真实的 RuntimeEnv 读回来是 4 元列表，未设置即全零；这里用 0 代表"没写过"。
+        # RuntimeEnv exposes four-element lists, initially zero; 0 marks an untouched field here.
         env = SimpleNamespace(ring_task_window=0, ring_heap=0, ring_dep_pool=0)
         cfg = SimpleNamespace(validate=lambda: None, runtime_env=env)
         worker = SimpleNamespace(
-            kernel_init=lambda device, bins, config: None,
+            kernel_init=lambda device, bins, config, *, enable_sdma: None,
             kernel_mode_supported=True,
             finalize=lambda: None,
         )
@@ -821,7 +829,7 @@ def test_native_worker_forwards_ring_sizing_only_when_set(monkeypatch, tmp_path)
     finally:
         adapter.close()
 
-    # 不给 ring 尺寸时一个字段都不能碰，否则 Simpler 落不到自己的编译期默认。
+    # Unspecified sizes must leave fields untouched so Simpler applies its defaults.
     cfg, env, worker = fresh()
     adapter = make_adapter(cfg, worker)
     try:
@@ -829,6 +837,41 @@ def test_native_worker_forwards_ring_sizing_only_when_set(monkeypatch, tmp_path)
         assert (env.ring_task_window, env.ring_heap, env.ring_dep_pool) == (0, 0, 0)
     finally:
         adapter.close()
+
+
+@pytest.mark.parametrize("enable_sdma", [False, True])
+@pytest.mark.parametrize("requires_sdma", [False, True])
+def test_registration_checks_sdma_before_prepare(setup, enable_sdma, requires_sdma):
+    state, config, calls, _ = setup
+    config = replace(config, enable_sdma=enable_sdma)
+    state.ensure_worker(config)
+    value = artifact(requires_sdma=requires_sdma)
+    try:
+        if requires_sdma and not enable_sdma:
+            with pytest.raises(ValueError, match=r"pypto\.torch\.init\(enable_sdma=True\)"):
+                state.ensure_callable(value, config)
+            assert not calls.prepares and not state._registrations and not state._preparing
+            assert state.state is KernelState.READY
+            state.ensure_callable(artifact(b"plain kernel"), config).require_live()
+        else:
+            registration = state.ensure_callable(value, config)
+            assert state.ensure_callable(value, config) is registration
+            registration.require_live()
+        assert len(calls.prepares) == 1
+    finally:
+        state.close()
+
+
+def test_sdma_requirement_is_checked_before_reusing_registration(setup):
+    state, config, calls, _ = setup
+    state.ensure_worker(config)
+    try:
+        state.ensure_callable(artifact(), config)
+        with pytest.raises(ValueError, match="requires SDMA"):
+            state.ensure_callable(artifact(requires_sdma=True), config)
+        assert len(calls.prepares) == 1
+    finally:
+        state.close()
 
 
 if __name__ == "__main__":

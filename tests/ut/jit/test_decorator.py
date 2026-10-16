@@ -17,7 +17,6 @@ import warnings
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
-from types import SimpleNamespace
 
 import pypto.language as pl
 import pypto.language.distributed as pld
@@ -3770,6 +3769,7 @@ def test_signature_helpers_share_one_request(monkeypatch):
     def func(x, block: pl.constexpr = 16):
         pass
 
+    jit_func = JITFunction(func, func_type="orchestration")
     original = inspect.signature
     calls = []
 
@@ -3779,7 +3779,7 @@ def test_signature_helpers_share_one_request(monkeypatch):
 
     monkeypatch.setattr(inspect, "signature", counted)
     with capture_namespaces():
-        assert decorator.JITFunction._param_names(SimpleNamespace(_func=func)) == ["x", "block"]
+        assert jit_func._param_names() == ["x", "block"]
         bound = decorator._function_signature(func).bind(7)
         bound.apply_defaults()
         assert bound.arguments == {"x": 7, "block": 16}

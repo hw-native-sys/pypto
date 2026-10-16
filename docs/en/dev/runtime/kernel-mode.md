@@ -75,13 +75,33 @@ op(x, 2.0, out, config=CompileOptions(analyze_auto_scopes_for_deps=True))  # com
 ```
 
 `init(*, device=None, platform="a2a3", runtime="tensormap_and_ringbuffer",
-aicpu_thread_num=0, enable_chip_swimlane=0, enable_dep_gen=False, output_dir=None)` runs once per process, before the first direct JIT or
+aicpu_thread_num=0, enable_chip_swimlane=0, enable_dep_gen=False, output_dir=None,
+ring_task_window=None, ring_heap=None, ring_dep_pool=None, enable_sdma=False)`
+runs once per process, before the first direct JIT or
 registered torch.ops kernel call and outside graph capture. Before claiming
 kernel mode it checks the target, the current torch_npu device, the framework
 version and that no capture is active. It then claims kernel mode, installs the
 framework shutdown integration and initializes the process Worker on its
 lifecycle thread. It compiles and prepares no operator; every captured
 specialization still needs warmup.
+
+Async prefetch kernels require `pypto.torch.init(enable_sdma=True)`. The setting
+is immutable and is passed to Simpler's `ChipWorker.kernel_init` as the
+`enable_sdma` keyword. Simpler provisions SDMA resources during initialization
+and rejects an unavailable provider. When `bins.sdma_warmup_path` is available,
+it also warms the SDMA control path before returning; otherwise initialization
+succeeds with a warning and the first prefetch incurs cold-start latency. Before preparing or
+reusing a callable registration, PyPTO checks the artifact's existing
+`RUNTIME_CONFIG["enable_sdma"]` requirement against the initialized Worker;
+prebuilt artifacts retain the same requirement. Capture only uses registrations
+prepared during warmup. Workspace ownership remains with the native context.
+
+The runtime and kernel ABI are pinned to Simpler
+`0b34c256ff9c027f1afaf83c9c71eadda8ec2daf`
+([simpler#2583](https://github.com/hw-native-sys/simpler/pull/2583)). Rebuild the
+Simpler binding and runtime, the PyPTO torch_npu adapter, and kernel binaries
+together after updating the pin. PyPTO kernel prefetch onboard validation is
+still pending.
 
 | Situation | Behavior |
 | --------- | -------- |
@@ -464,7 +484,7 @@ context resources currently use Simpler defaults. An incompatible configuration
 is rejected instead of opening another Worker.
 
 The integration SDK is pinned to
-`dd32e1ccd2ab8ae47a5001ee4502ad5daa085f51`. Its supported Python surface is
+`0b34c256ff9c027f1afaf83c9c71eadda8ec2daf`. Its supported Python surface is
 `simpler.task_interface.ChipWorker.kernel_init`, `kernel_prepare_callable`,
 `kernel_begin_dfx`, `kernel_end_dfx` and `finalize`.
 PyPTO's private adapter uses these existing methods. Init and prepare take no

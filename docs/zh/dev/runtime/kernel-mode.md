@@ -59,10 +59,26 @@ op(x, 2.0, out, config=CompileOptions(analyze_auto_scopes_for_deps=True))  # com
 ```
 
 `init(*, device=None, platform="a2a3", runtime="tensormap_and_ringbuffer",
-aicpu_thread_num=0, enable_chip_swimlane=0, enable_dep_gen=False, output_dir=None)` 在每个进程中调用一次，须早于首次直接 JIT 或注册 torch.ops 的 kernel 调用，
+aicpu_thread_num=0, enable_chip_swimlane=0, enable_dep_gen=False, output_dir=None,
+ring_task_window=None, ring_heap=None, ring_dep_pool=None, enable_sdma=False)`
+在每个进程中调用一次，须早于首次直接 JIT 或注册 torch.ops 的 kernel 调用，
 且在 graph capture 之外。认领 kernel mode 之前，它依次检查目标、torch_npu 当前设备、框架版本以及
 当前没有进行中的 capture；随后认领 kernel mode、安装框架退出集成，并在生命周期线程上初始化进程
 Worker。它不编译也不 prepare 任何算子，入图的每个特化仍需 warmup。
+
+异步 prefetch kernel 要求调用 `pypto.torch.init(enable_sdma=True)`。该配置初始化后不可更改，
+通过 `enable_sdma` 关键字传给 Simpler 的 `ChipWorker.kernel_init`。Simpler 在初始化时
+分配 SDMA 资源；没有可用 provider 时应报错。如果 `bins.sdma_warmup_path` 存在，还会在
+返回前预热 SDMA 控制路径；否则初始化仍会成功并发出警告，首次 prefetch 承担冷启动开销。
+PyPTO 在 prepare 或复用
+callable 注册之前，将产物已有的 `RUNTIME_CONFIG["enable_sdma"]` 需求与 Worker 配置匹配；
+prebuilt 产物恢复后保留同样的需求。Capture 只使用 warmup 中已准备的注册，workspace
+仍由原生 context 持有。
+
+Runtime 和 kernel ABI 固定到 Simpler `0b34c256ff9c027f1afaf83c9c71eadda8ec2daf`
+（[simpler#2583](https://github.com/hw-native-sys/simpler/pull/2583)）。更新 pin 后需要一并
+重建 Simpler binding/runtime、PyPTO torch_npu adapter 和 kernel 二进制。
+PyPTO kernel prefetch 的 onboard 验证尚未完成。
 
 | 情形 | 行为 |
 | ---- | ---- |
@@ -361,7 +377,7 @@ Simpler 或 native launch 扩展；`torch` 仍是 PyPTO 的常规依赖。真正
 Worker。`KernelConfig` 固定 platform、runtime、device、AICPU 线程数和 DFX 配置，其他常驻资源
 暂用 simpler 默认值。配置不兼容时报错，不额外创建 Worker。
 
-集成 SDK 固定为 `dd32e1ccd2ab8ae47a5001ee4502ad5daa085f51`。实际 Python 接口为
+集成 SDK 固定为 `0b34c256ff9c027f1afaf83c9c71eadda8ec2daf`。实际 Python 接口为
 `simpler.task_interface.ChipWorker.kernel_init`、`kernel_prepare_callable`、
 `kernel_begin_dfx`、`kernel_end_dfx` 和 `finalize`。PyPTO 内部 adapter
 使用这些已有方法；init/prepare 不接收 caller stream，native context generation 和

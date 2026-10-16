@@ -85,6 +85,7 @@ def eager(monkeypatch):
         image = f"image-{events.builds}".encode()
         return SimpleNamespace(
             kernel_abi=kwargs["_kernel_abi"],
+            requires_sdma=False,
             identity=lambda: image,
             loaded_identity=lambda: image,
             load=lambda: image,

@@ -114,6 +114,14 @@ class KernelArtifact:
             return self._identity
 
     @property
+    def requires_sdma(self) -> bool:
+        """Load artifact metadata and report its SDMA requirement, outside capture."""
+        self.load()
+        with self._lock:
+            assert self._loaded is not None
+            return bool(self._loaded[2].get("enable_sdma", False))
+
+    @property
     def chip_callable(self) -> Any:
         """Return the lazily assembled callable without registering or executing it."""
         return self.load()
