@@ -560,10 +560,18 @@ class SingleSlotDeclaration:
         return pl.store(t0, [0, 0], output)
 
 
-def _codegen(program: ir.Program, planner: passes.MemoryPlanner, *, buffer_ir: bool = False) -> str:
+def _codegen(
+    program: ir.Program,
+    planner: passes.MemoryPlanner,
+    *,
+    buffer_ir: bool = False,
+    backend_type: BackendType | None = None,
+) -> str:
     """Compile ``program``'s InCore kernel under ``planner`` and emit its PTO IR."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend950 if buffer_ir else BackendType.Ascend910)
+    if backend_type is None:
+        backend_type = BackendType.Ascend950 if buffer_ir else BackendType.Ascend910
+    backend.set_backend_type(backend_type)
     with passes.PassContext([], memory_planner=planner, enable_buffer_ir=buffer_ir):
         if buffer_ir:
             optimized = buffer_recipe_pipeline().run(program)
@@ -947,6 +955,22 @@ class TestUnsupportedShapesAreLoud:
         with pytest.raises(ValueError, match=reason):
             _codegen(program, passes.MemoryPlanner.PTOAS)
 
+    @pytest.mark.parametrize("buffer_ir", [False, True], ids=["tile-ir", "buffer-ir"])
+    def test_static_prefetch_guard_is_shared_on_ascend950(self, buffer_ir):
+        """Buffer lowering must not erase the source schedule safety check.
+
+        Both paths target the same backend. Constant slot indices can still
+        describe the prefetch form affected by PTOAS #1519; hoisting get_slot
+        views is not evidence that the native schedule becomes safe.
+        """
+        with pytest.raises(ValueError, match="two of its slots are live at once inside a loop"):
+            _codegen(
+                StaticPrefetchSlotInLoop,
+                passes.MemoryPlanner.PTOAS,
+                buffer_ir=buffer_ir,
+                backend_type=BackendType.Ascend950,
+            )
+
     @pytest.mark.parametrize(
         "program",
         [
@@ -1189,6 +1213,11 @@ def test_full_k_dbc_preserves_two_acc_slots_in_native_ptoas(vec_left, tmp_path):
             return c_r
 
     program = FullK
+    if not vec_left:
+        # The shared guard must retain the fresh compiler-proven Acc exception
+        # on Buffer IR as well as Tile IR; it is not a blanket multi-slot ban.
+        buffered = _codegen(FullK, passes.MemoryPlanner.PTOAS, buffer_ir=True)
+        assert len([line for line in _lines(buffered, "pto.alloc_multi_tile") if "loc=acc" in line]) == 1
     if vec_left:
 
         @pl.program

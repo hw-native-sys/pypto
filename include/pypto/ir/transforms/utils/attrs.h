@@ -79,9 +79,10 @@ inline constexpr const char* kPipelineOverlapStoresAttr = "pipeline_overlap_stor
 /// ``CanonicalizeIOOrder`` rotate that membership to ``stage % 2`` — so a source
 /// pipeline deeper than two keeps its user-selected operand prefetch depth while
 /// L0C still uses exactly two slots. MemoryReuse / AllocateMemoryAddr consume the
-/// membership and keep the pair in distinct buffers; under
-/// ``memory_planner=PTOAS`` MemoryReuse is skipped and InitMemRef keeps them
-/// distinct anyway.
+/// membership and keep the pair in distinct buffers. Under
+/// ``memory_planner=PTOAS``, LowerPipelineLoops binds fresh full-K stages to
+/// constant slots of one explicit two-slot region; InitMemRef or membership
+/// alone cannot prevent PTOAS from co-locating independently allocated stages.
 ///
 /// It deliberately does NOT reorder the body. The ordinary stage-major order
 /// already emits ``matmul_i, drain_i, matmul_{i+1}, drain_{i+1}``, which *is* the
@@ -94,13 +95,10 @@ inline constexpr const char* kPipelineOverlapStoresAttr = "pipeline_overlap_stor
 /// (nothing) once the buffers were already distinct. Separation is carried by the
 /// membership constraint above, so the reorder bought no separation either.
 ///
-/// ``AutoTileMatmulL0`` sets the attr either when the chooser picked
-/// ``double_buffer_c`` (with the accumulator budgeted at L0C/2), or when it
-/// recognizes a user-authored pipeline containing one canonical directly drained
-/// L0 matmul whose path-specific trip-count/Acc-size gate is profitable and whose
-/// conservative whole-function Acc footprint still fits after adding the extra
-/// slot. Direct-to-GM ``tile.store`` and Acc-to-Mat ``tile.assemble`` have
-/// separate conservative admission thresholds.
+/// Automatic dbC selection and existing-pipeline recognition are disabled.
+/// ``AutoTileMatmulL0`` preserves an explicit attr but never infers one. The
+/// retained full-K emitter can attach it if automatic selection is restored
+/// after profitability validation; today the lowering serves explicit IR.
 ///
 /// REALIZABILITY: only ``BuildFullKPipelined`` attaches this attr — it is the
 /// full-K route's mechanism, not dbC's definition. That route has no accumulator

@@ -1386,9 +1386,8 @@ class TestPipelineMatmulAccGateUp(PTOTestCase):
 
 _MATMUL_SHAPES = [(64, 64, 64), (128, 64, 128), (64, 128, 64)]
 _TRANSPOSE_SHAPES = [(64, 64, 64), (128, 64, 128), (64, 128, 64), (32, 64, 32)]
-# Every row is (M, K, N, PyPTO chosen k). Most remain K-only under every
-# planner. The 64x384x256 row deliberately pins the complete-cost model's
-# planner-specific split-K dbC choice under DSA-RP/PTOAS as well.
+# Every row is (M, K, N, chosen k). These remain K-only single-C plans under
+# every planner; automatic accumulator double buffering is disabled.
 _AUTOL0_K_SPLIT_SHAPES = [
     (16, 128, 128, 64),
     (64, 192, 128, 64),
