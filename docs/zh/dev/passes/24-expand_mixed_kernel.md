@@ -309,7 +309,7 @@ program_expanded = expand_pass(program)
       - Ascend950：Left→NZ，Right→ZN，Mat/Vec→保持原始
       - Ascend910B：Left→NZ，Right→NZ（Mat 仅支持 NZ），Mat/Vec→保持原始
   6. 修复两侧函数体中的循环携带状态
-     - 删除在当前核心侧无用的 dead iter_args——"有用"包含循环自身的 yield，
+     - 删除在当前核心侧无用的 dead iter_args——"有用"包含 while 条件，并在循环自身的 yield 上做闭包，
        因此仅被用于喂给另一个存活槽位的 carry（多级 FIFO 轮转）会被保留
      - 为保留下来的 iter_args 补回缺失的 init value 定义
      - 当分支局部值被裁剪后，将悬空 yield 改写为 identity yield
@@ -367,7 +367,7 @@ program_expanded = expand_pass(program)
 
 **拆分后的循环状态修复**：在构建 AIC/AIV 函数体时，Pass 会先保留共享的控制流骨架，因此某一侧可能暂时留下多余的 iter_args、缺失的 init value 定义，或引用已被裁剪分支局部值的 yield。Pass 会先在 DCE 前按固定顺序修复这些情况，再在 DCE 后做一次循环状态归一化，因为某些仅用于过渡的共享别名会在 DCE 后消失，进而让相应 iter_arg 变成真正可删除。最后再运行一次 DCE，清理第二次裁剪后暴露出的 init-value 链。
 
-**哪些 carry 算存活**：只被循环自身尾部 yield 读取的 iter_arg，只要它喂入的槽位存活，它本身就存活——多级 FIFO 正是这种形状：第 `N` 级除了把自己轮转进第 `N-1` 级的那条 yield 之外别无读者。因此存活性分析要在 yield 上做闭包，而不是只看函数体；裁剪后还会断言"保留下来的 yield 值不会引用刚被删除的 carry"。删错 carry 会留下一个自由变量，后续没有任何 Pass 会拒绝它，最终由 PTO codegen 以 "no MLIR mapping for MemRef base ..." 报出。
+**哪些 carry 算存活**：循环体、while 条件中的引用，以及对应循环结果在循环后的使用，都会作为存活性分析的初始依据。即使最终结果未使用，仅被 while 条件读取的 carry 也必须保留。只被循环自身尾部 yield 读取的 iter_arg，只要它喂入的槽位存活，它本身就存活——多级 FIFO 正是这种形状：第 `N` 级除了把自己轮转进第 `N-1` 级的那条 yield 之外别无读者。因此存活性分析要在 yield 上做闭包，而不是只看函数体；裁剪后还会断言"while 条件和保留下来的 yield 值均不会引用刚被删除的 carry"。删错 carry 会留下一个自由变量，后续没有任何 Pass 会拒绝它，最终由 PTO codegen 以 "no MLIR mapping for MemRef base ..." 报出。
 
 **Group 包装函数的参数化返回**：新建的 Group 包装函数在所有
 返回位置都能追踪到参数回写（经 `return_lineage::ReturnedParamIndices`）时，

@@ -1428,6 +1428,214 @@ def test_aiv_gm_write_in_loop_consumed_by_cube_resolves_to_param():
 
 
 # ---------------------------------------------------------------------------
+# Regression (issue #3009): while conditions are uses of loop-carried state,
+# even when the backedge reads an independent value and no result escapes.
+# ---------------------------------------------------------------------------
+
+
+def _assert_split_function_equal(after: ir.Program, expected: ir.Program, name: str) -> None:
+    actual_func = after.get_function(name)
+    expected_func = expected.get_function(name)
+    assert actual_func is not None
+    assert expected_func is not None
+    ir.assert_structural_equal(actual_func, expected_func)
+
+
+def test_while_condition_only_scalar_carry_survives_nested_split():
+    """Issue #3009: a polling carry stays live through the while condition."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def poll(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP16],
+            b: pl.Tensor[[16, 16], pl.FP16],
+            flags: pl.Tensor[[16], pl.INT32],
+            cube_out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            vector_out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+            lane: pl.Scalar[pl.INDEX],
+            worker: pl.Scalar[pl.INDEX],
+        ):
+            a_mat = pl.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            b_mat = pl.load(b, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.move(a_mat, target_memory=pl.Mem.Left)
+            right = pl.move(b_mat, target_memory=pl.Mem.Right)
+            acc = pl.matmul(left, right)
+            _cube_store = pl.store(acc, [0, 0], cube_out)
+            if lane == 0:
+                if worker == 1:
+                    initial_ready = pl.tensor.read(flags, [0])
+                    for (ready,) in pl.while_(init_values=(initial_ready,)):
+                        pl.cond(pl.cast(ready, pl.INDEX) != 1)
+                        pl.system.cacheinvalid()
+                        next_ready = pl.tensor.read(flags, [0])
+                        _final_ready = pl.yield_(next_ready)
+                    value = pl.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+                    incremented = pl.add(value, 1.0)
+                    _vector_store = pl.store(incremented, [0, 0], vector_out)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def poll_aiv(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP16],
+            b: pl.Tensor[[16, 16], pl.FP16],
+            flags: pl.Tensor[[16], pl.INT32],
+            cube_out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            vector_out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+            lane: pl.Scalar[pl.INDEX],
+            worker: pl.Scalar[pl.INDEX],
+        ):
+            pl.func_attr({"dual_aiv_dispatch": True})
+            if lane == 0:
+                if worker == 1:
+                    initial_ready = pl.tensor.read(flags, [0])
+                    for (ready,) in pl.while_(init_values=(initial_ready,)):
+                        pl.cond(pl.cast(ready, pl.INDEX) != 1)
+                        pl.system.cacheinvalid()
+                        next_ready = pl.tensor.read(flags, [0])
+                        _final_ready = pl.yield_(next_ready)
+                    value = pl.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+                    incremented = pl.add(value, 1.0)
+                    _vector_store = pl.store(incremented, [0, 0], vector_out)
+
+    After = _expand_no_verify(Before)
+    _assert_no_free_var(After)
+    _assert_split_function_equal(After, Expected, "poll_aiv")
+
+
+def test_while_condition_only_tile_read_carry_survives_nested_split():
+    """A Vec load/read backedge stays live even when its result is not exported."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def poll(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP16],
+            b: pl.Tensor[[16, 16], pl.FP16],
+            flags: pl.Tensor[[16], pl.INT32],
+            cube_out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            vector_out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+            lane: pl.Scalar[pl.INDEX],
+            worker: pl.Scalar[pl.INDEX],
+        ):
+            a_mat = pl.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            b_mat = pl.load(b, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.move(a_mat, target_memory=pl.Mem.Left)
+            right = pl.move(b_mat, target_memory=pl.Mem.Right)
+            acc = pl.matmul(left, right)
+            _cube_store = pl.store(acc, [0, 0], cube_out)
+            if lane == 0:
+                if worker == 1:
+                    initial_tile = pl.load(flags, [0], [16], target_memory=pl.Mem.Vec)
+                    initial_ready = pl.tile.read(initial_tile, [0])
+                    for (ready,) in pl.while_(init_values=(initial_ready,)):
+                        pl.cond(pl.cast(ready, pl.INDEX) != 1)
+                        pl.system.cacheinvalid()
+                        flag_tile = pl.load(flags, [0], [16], target_memory=pl.Mem.Vec)
+                        next_ready = pl.tile.read(flag_tile, [0])
+                        _final_ready = pl.yield_(next_ready)
+                    value = pl.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+                    incremented = pl.add(value, 1.0)
+                    _vector_store = pl.store(incremented, [0, 0], vector_out)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def poll_aiv(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP16],
+            b: pl.Tensor[[16, 16], pl.FP16],
+            flags: pl.Tensor[[16], pl.INT32],
+            cube_out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            vector_out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+            lane: pl.Scalar[pl.INDEX],
+            worker: pl.Scalar[pl.INDEX],
+        ):
+            pl.func_attr({"dual_aiv_dispatch": True})
+            if lane == 0:
+                if worker == 1:
+                    initial_tile = pl.load(flags, [0], [16], target_memory=pl.Mem.Vec)
+                    initial_ready = pl.tile.read(initial_tile, [0])
+                    for (ready,) in pl.while_(init_values=(initial_ready,)):
+                        pl.cond(pl.cast(ready, pl.INDEX) != 1)
+                        pl.system.cacheinvalid()
+                        flag_tile = pl.load(flags, [0], [16], target_memory=pl.Mem.Vec)
+                        next_ready = pl.tile.read(flag_tile, [0])
+                        _final_ready = pl.yield_(next_ready)
+                    value = pl.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+                    incremented = pl.add(value, 1.0)
+                    _vector_store = pl.store(incremented, [0, 0], vector_out)
+
+    After = _expand_no_verify(Before)
+    _assert_no_free_var(After)
+    _assert_split_function_equal(After, Expected, "poll_aiv")
+
+
+def test_while_condition_seed_keeps_fifo_dependency_and_prunes_dead_slot():
+    """Condition liveness propagates over the yield without seeding a dead cycle."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def poll_fifo(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP16],
+            b: pl.Tensor[[16, 16], pl.FP16],
+            flags: pl.Tensor[[16], pl.INT32],
+            cube_out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            vector_out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+        ):
+            a_mat = pl.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            b_mat = pl.load(b, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.move(a_mat, target_memory=pl.Mem.Left)
+            right = pl.move(b_mat, target_memory=pl.Mem.Right)
+            acc = pl.matmul(left, right)
+            _cube_store = pl.store(acc, [0, 0], cube_out)
+            first = pl.tensor.read(flags, [0])
+            second = pl.tensor.read(flags, [1])
+            dead = pl.tensor.read(flags, [2])
+            for ready, queued, unused in pl.while_(init_values=(first, second, dead)):
+                pl.cond(pl.cast(ready, pl.INDEX) != 1)
+                pl.system.cacheinvalid()
+                fresh = pl.tensor.read(flags, [0])
+                _final_ready, _final_queued, _final_unused = pl.yield_(queued, fresh, unused)
+            value = pl.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            incremented = pl.add(value, 1.0)
+            _vector_store = pl.store(incremented, [0, 0], vector_out)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def poll_fifo_aiv(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP16],
+            b: pl.Tensor[[16, 16], pl.FP16],
+            flags: pl.Tensor[[16], pl.INT32],
+            cube_out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            vector_out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+        ):
+            pl.func_attr({"dual_aiv_dispatch": True})
+            first = pl.tensor.read(flags, [0])
+            second = pl.tensor.read(flags, [1])
+            for ready, queued in pl.while_(init_values=(first, second)):
+                pl.cond(pl.cast(ready, pl.INDEX) != 1)
+                pl.system.cacheinvalid()
+                fresh = pl.tensor.read(flags, [0])
+                _final_ready, _final_queued = pl.yield_(queued, fresh)
+            value = pl.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+            incremented = pl.add(value, 1.0)
+            _vector_store = pl.store(incremented, [0, 0], vector_out)
+
+    After = _expand_no_verify(Before)
+    _assert_no_free_var(After)
+    _assert_split_function_equal(After, Expected, "poll_fifo_aiv")
+
+
+# ---------------------------------------------------------------------------
 # Regression (issue #2716): a multi-entry FIFO's carries survive the split.
 #
 # A two-entry FIFO rotates: slot 0's next value IS slot 1's iter_arg, so slot 1

@@ -33,6 +33,7 @@ import pytest
 from pypto import backend, codegen, ir, passes
 from pypto.backend import BackendType
 from pypto.backend.pto_backend import _build_group_mapping
+from pypto.runtime import RunConfig
 
 
 def _extract_func_section(mlir_code: str, func_name: str) -> str:
@@ -1704,6 +1705,96 @@ class TestCrossCoreTpushTpopCodegen:
 
 class TestExpandMixedKernelCodegen:
     """Tests that PTO codegen works on AIC/AIV functions produced by expand_mixed_kernel."""
+
+    @pytest.mark.parametrize("tile_polling", [False, True], ids=["scalar", "tile"])
+    @pytest.mark.parametrize("keep_result", [False, True], ids=["unused-result", "used-result"])
+    def test_while_condition_only_iter_arg_codegen(self, tmp_path, tile_polling, keep_result):
+        """Mixed SPMD polling must retain condition-only state even with an unused result (#3009)."""
+
+        @pl.jit
+        def mixed_while_poll(
+            a: pl.Tensor[[32, 16], pl.FP16],
+            b: pl.Tensor[[16, 16], pl.FP16],
+            scratch: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            flags: pl.InOut[pl.Tensor[[16], pl.INT32]],
+            cube_out: pl.Out[pl.Tensor[[32, 16], pl.FP32]],
+            vector_out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            TILE_POLLING: pl.constexpr,
+            KEEP_RESULT: pl.constexpr,
+        ):
+            # Matmul makes this a mixed kernel; the nested AIV branches retain
+            # the producer/consumer shape without requiring device execution.
+            for worker in pl.spmd(2, sync_start=True, name_hint="mixed_while_poll"):
+                ac = pl.load(a, [worker * 16, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
+                bc = pl.load(b, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat)
+                pl.store(pl.matmul(ac, bc, out_dtype=pl.FP32), [worker * 16, 0], cube_out)
+                for lane in pl.split_aiv(2, mode=pl.SplitMode.NONE):
+                    if lane == 0:
+                        if worker == 0:
+                            av = pl.load(a, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec)
+                            pl.store(pl.add(pl.cast(av, pl.FP32), 1.0), [0, 0], scratch)
+                            pl.system.cacheinvalid()
+                            pl.system.fence()
+                            pl.write(flags, [0], pl.const(1, pl.INT32))
+                        elif worker == 1:
+                            if TILE_POLLING:
+                                initial_tile = pl.load(flags, [0], [16], target_memory=pl.MemorySpace.Vec)
+                                initial_ready = pl.tile.read(initial_tile, [0])
+                            else:
+                                initial_ready = pl.read(flags, [0])
+                            for (ready,) in pl.while_(init_values=(initial_ready,)):
+                                pl.cond(ready != 1)
+                                pl.system.cacheinvalid()
+                                if TILE_POLLING:
+                                    flag_tile = pl.load(flags, [0], [16], target_memory=pl.MemorySpace.Vec)
+                                    next_ready = pl.tile.read(flag_tile, [0])
+                                else:
+                                    next_ready = pl.read(flags, [0])
+                                final_ready = pl.yield_(next_ready)
+                            if KEEP_RESULT:
+                                # This control used to hide the bug by making
+                                # the loop result live independently of its condition.
+                                pl.write(flags, [1], final_ready)
+                            pl.system.cacheinvalid()
+                            received = pl.load(scratch, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec)
+                            pl.store(pl.mul(received, 2.0), [0, 0], vector_out)
+            return cube_out, vector_out
+
+        mixed_while_poll.compile(
+            TILE_POLLING=tile_polling,
+            KEEP_RESULT=keep_result,
+            config=RunConfig(
+                backend_type=BackendType.Ascend910B,
+                codegen_only=True,
+                save_kernels=True,
+                save_kernels_dir=str(tmp_path),
+                dump_passes=True,
+            ),
+        )
+        dumps = list((tmp_path / "passes_dump").glob("*after_ExpandMixedKernel.py"))
+        assert dumps, "Expected an ExpandMixedKernel pass dump"
+        expanded = "\n".join(path.read_text() for path in dumps)
+        assert "__FREE_VAR" not in expanded, expanded
+        assert "pl.while_(init_values=" in expanded, expanded
+
+        pto_files = list(tmp_path.rglob("*.pto"))
+        assert pto_files, "Expected generated PTO MLIR"
+        pto = "\n".join(path.read_text() for path in pto_files)
+        loop = re.search(
+            r"scf\.while \([^\n]+\) : \(i32\) -> \(i32\) \{.*?scf\.condition\(.*?"
+            r"\} do \{(?P<body>.*?)scf\.yield (?P<yielded>%\w+) : i32",
+            pto,
+            re.DOTALL,
+        )
+        assert loop is not None, pto
+        # The backedge must yield the freshly read flag, so retaining a reload
+        # while yielding stale state cannot satisfy this polling regression.
+        body = loop.group("body")
+        yielded = loop.group("yielded")
+        reload_op = "pto.tgetval" if tile_polling else "pto.load"
+        assert re.search(rf"^\s*{re.escape(yielded)} = {re.escape(reload_op)} ", body, re.MULTILINE), body
+        if tile_polling:
+            assert "pto.tload " in body, body
 
     @staticmethod
     def _expand_and_generate(program) -> dict[str, str]:

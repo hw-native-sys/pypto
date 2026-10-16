@@ -161,16 +161,15 @@ void PropagateYieldLiveness(const std::vector<StmtPtr>& body_stmts, const std::v
 /// Fail loudly if filtering the yield left a surviving value naming an iter_arg
 /// this loop no longer binds.
 ///
-/// Only the top-level YieldStmts need checking: a slot is dropped only when its
-/// iter_arg is absent from `body_refs`, and that set already covers every other
-/// statement in the body.
+/// Check the loop condition and top-level YieldStmts: `body_refs` already
+/// covers every other statement in the body.
 ///
-/// `PropagateYieldLiveness` makes a hit unreachable, but the alternative to
-/// checking is shipping malformed IR: the free variable survives every later
+/// Condition liveness and `PropagateYieldLiveness` make a hit unreachable, but
+/// the alternative to checking is shipping malformed IR: the free variable survives every later
 /// pass and only surfaces ~30 passes downstream as an opaque PTO codegen assert
 /// ("no MLIR mapping for MemRef base ..."), or — where a repair happens to
 /// reach it — as a silently rewritten carry.
-void CheckNoDroppedIterArgSurvives(const std::vector<StmtPtr>& filtered_body,
+void CheckNoDroppedIterArgSurvives(const std::vector<StmtPtr>& filtered_body, const ExprPtr& condition,
                                    const std::vector<IterArgPtr>& iter_args, const std::vector<bool>& live,
                                    const Span& span) {
   std::unordered_map<const Var*, size_t> dropped;
@@ -179,18 +178,23 @@ void CheckNoDroppedIterArgSurvives(const std::vector<StmtPtr>& filtered_body,
   }
   if (dropped.empty()) return;
 
+  auto check_expr = [&](const ExprPtr& expr, const char* context) {
+    var_collectors::VarDefUseCollector collector;
+    collector.VisitExpr(expr);
+    for (const Var* ref : collector.var_uses) {
+      auto it = dropped.find(ref);
+      INTERNAL_CHECK_SPAN(it == dropped.end(), span)
+          << "Internal error: loop carry '" << iter_args[it->second]->name_hint_ << "' (slot " << it->second
+          << ") was dropped as dead but " << context << " still reads it";
+    }
+  };
+  if (condition) check_expr(condition, "the loop condition");
+
   for (const auto& stmt : filtered_body) {
     auto yield_stmt = std::dynamic_pointer_cast<const YieldStmt>(stmt);
     if (!yield_stmt) continue;
     for (const auto& value : yield_stmt->value_) {
-      var_collectors::VarDefUseCollector collector;
-      collector.VisitExpr(value);
-      for (const Var* ref : collector.var_uses) {
-        auto it = dropped.find(ref);
-        INTERNAL_CHECK_SPAN(it == dropped.end(), span)
-            << "Internal error: loop carry '" << iter_args[it->second]->name_hint_ << "' (slot " << it->second
-            << ") was dropped as dead but a surviving yield value still reads it";
-      }
+      check_expr(value, "a surviving yield value");
     }
   }
 }
@@ -398,15 +402,18 @@ std::vector<StmtPtr> StripDeadIterArgs(const std::vector<StmtPtr>& stmts) {
 
     std::unordered_set<const Var*> body_refs;
     CollectBodyRefsSkippingYield(processed_body, body_refs);
+    var_collectors::VarDefUseCollector condition_refs;
+    if (while_stmt) condition_refs.VisitExpr(while_stmt->condition_);
 
-    // Seed liveness from real body statements and post-loop uses. `body_refs`
-    // deliberately skips the body's own trailing yield, so a carry that is only
+    // Seed liveness from real body statements, the while condition, and post-loop uses.
+    // `body_refs` deliberately skips the body's own trailing yield, so a carry that is only
     // ever rotated into another slot starts out unseeded.
     std::vector<bool> live(iter_args.size(), false);
     for (size_t i = 0; i < iter_args.size(); ++i) {
       bool used_in_body = body_refs.count(iter_args[i].get()) > 0;
+      bool used_in_condition = condition_refs.var_uses.count(iter_args[i].get()) > 0;
       bool return_var_used = i < return_vars.size() && referenced_after(return_vars[i].get(), idx);
-      live[i] = used_in_body || return_var_used;
+      live[i] = used_in_body || used_in_condition || return_var_used;
     }
     // ... then close over the yield, so the second entry of a multi-entry FIFO
     // is kept alive by the live slot it rotates into (issue #2716).
@@ -426,14 +433,17 @@ std::vector<StmtPtr> StripDeadIterArgs(const std::vector<StmtPtr>& stmts) {
       }
     }
 
-    if (kept_indices.size() < iter_args.size() && !processed_body.empty()) {
-      auto filtered_last = FilterYieldStmt(processed_body.back(), kept_indices);
-      if (filtered_last) {
-        processed_body.back() = filtered_last;
-      } else {
-        processed_body.pop_back();
+    if (kept_indices.size() < iter_args.size()) {
+      if (!processed_body.empty()) {
+        auto filtered_last = FilterYieldStmt(processed_body.back(), kept_indices);
+        if (filtered_last) {
+          processed_body.back() = filtered_last;
+        } else {
+          processed_body.pop_back();
+        }
       }
-      CheckNoDroppedIterArgSurvives(processed_body, iter_args, live, span);
+      CheckNoDroppedIterArgSurvives(processed_body, while_stmt ? while_stmt->condition_ : nullptr, iter_args,
+                                    live, span);
     }
 
     result.push_back(
