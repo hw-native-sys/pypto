@@ -1433,13 +1433,12 @@ def test_aiv_gm_write_in_loop_consumed_by_cube_resolves_to_param():
 # ---------------------------------------------------------------------------
 
 
-def _assert_split_function_equal(after: ir.Program, expected: ir.Program, name: str) -> ir.Function:
+def _assert_split_function_equal(after: ir.Program, expected: ir.Program, name: str) -> None:
     actual_func = after.get_function(name)
     expected_func = expected.get_function(name)
     assert actual_func is not None
     assert expected_func is not None
     ir.assert_structural_equal(actual_func, expected_func)
-    return actual_func
 
 
 def test_while_condition_only_scalar_carry_survives_nested_split():
@@ -1633,13 +1632,7 @@ def test_while_condition_seed_keeps_fifo_dependency_and_prunes_dead_slot():
 
     After = _expand_no_verify(Before)
     _assert_no_free_var(After)
-    aiv = _assert_split_function_equal(After, Expected, "poll_fifo_aiv")
-    loop = next(s for s in ir.flatten_to_stmts(aiv.body) if isinstance(s, ir.WhileStmt))
-    assert len(loop.iter_args) == 2
-    tail = ir.flatten_to_stmts(loop.body)[-1]
-    assert isinstance(tail, ir.YieldStmt)
-    assert len(tail.value) == 2
-    assert tail.value[0].same_as(loop.iter_args[1])
+    _assert_split_function_equal(After, Expected, "poll_fifo_aiv")
 
 
 # ---------------------------------------------------------------------------
