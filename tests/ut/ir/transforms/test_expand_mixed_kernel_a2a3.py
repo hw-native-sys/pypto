@@ -1223,7 +1223,7 @@ def test_split_slot_num_override_sizes_c2v_ring_on_a2a3():
 
 
 def test_transpose_hazard_backstopped_when_lowering_is_skipped():
-    """Skipping pass 23 must not silently expand an unsplittable transpose."""
+    """Skipping pass 24 must not silently expand an unsplittable transpose."""
 
     @pl.program
     class Before:

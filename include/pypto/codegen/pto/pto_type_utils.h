@@ -152,7 +152,8 @@ void CheckFlatTileExtents(const ir::TileType& tile_type, const TileTypeComponent
                           const ir::Span* span);
 
 TileTypeComponents ExtractTileTypeInfo(const ir::TileType& tile_type,
-                                       const std::string& dtype_str_override = "");
+                                       const std::string& dtype_str_override = "",
+                                       const ir::Span* span = nullptr);
 
 /// Pack a FIXPIPE scalar pre-quantization scale into the ``pre_quant`` operand word.
 ///

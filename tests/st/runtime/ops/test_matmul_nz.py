@@ -36,7 +36,7 @@ elements, which must not be able to hide under a numeric tolerance.
 
 Requires PTOAS >= 0.61, the first release that treats an explicit ``layout=nz``
 annotation on ``pto.make_tensor_view`` as authoritative instead of re-inferring
-it structurally (see ``docs/en/dev/passes/15-block_nz_tensor_views.md``).
+it structurally (see ``docs/en/dev/passes/16-block_nz_tensor_views.md``).
 """
 
 import pypto.language as pl

@@ -79,13 +79,18 @@ enum CoreType : int {
  * - Acc (L0C): accumulator/output buffer
  * - Mat (L1): staging buffer
  * - LeftScale / RightScale: L0A/L0B MX block-scale sidecars (A5)
+ * - Bias: FIXPIPE bias buffer (counted as cube here on all backends)
+ *
+ * Distinct from ``core_affinity::IsCubeMemorySpace`` (``!= DDR && != Vec``), which
+ * is a separate affinity helper. Today this predicate is used by FP4 cube rejects.
  *
  * @param space Memory space to check
  * @return true if the memory space is used by the CUBE core
  */
 inline bool IsCubeMemorySpace(MemorySpace space) {
   return space == MemorySpace::Left || space == MemorySpace::Right || space == MemorySpace::Acc ||
-         space == MemorySpace::Mat || space == MemorySpace::LeftScale || space == MemorySpace::RightScale;
+         space == MemorySpace::Mat || space == MemorySpace::Bias || space == MemorySpace::LeftScale ||
+         space == MemorySpace::RightScale;
 }
 
 }  // namespace ir

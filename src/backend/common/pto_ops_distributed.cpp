@@ -355,11 +355,13 @@ static std::string MakeRemoteLoadCodegenPTO(const CallPtr& op, codegen::CodegenB
   const std::string dtype_str = codegen.GetTypeString(binding.type->dtype_);
   const auto result_tile_view = ir::tile_view_semantics::GetEffectiveTileView(*result_tile_type);
   const auto& valid_shape_elems = result_tile_view.valid_shape;
-  std::string partition_type = MakePartitionTensorViewType(GetDimStrings(valid_shape_elems), dtype_str);
+  auto offset_codes = GetIndexOffsetCodes(offsets_tuple->elements_, codegen);
+  auto size_codes = GetSizeCodes(valid_shape_elems, codegen);
+  auto dim_strs = GetDimStrings(valid_shape_elems);
+  std::string partition_type = MakePartitionTensorViewType(dim_strs, dtype_str);
   std::string partition_view =
       EmitPartitionViewPTO(binding.var->name_hint_ + "_peer", peer_view.ssa, peer_view.view_type_str,
-                           partition_type, GetIndexOffsetCodes(offsets_tuple->elements_, codegen),
-                           GetSizeCodes(valid_shape_elems, codegen), codegen);
+                           partition_type, offset_codes, size_codes, codegen);
 
   std::string tile_buf = codegen.GetCurrentResultTarget();
   INTERNAL_CHECK_SPAN(!tile_buf.empty(), op->span_)
@@ -431,11 +433,12 @@ static std::string MakeRemoteStoreCodegenPTO(const CallPtr& op, codegen::Codegen
   };
   append_dim(valid_shape[0]);
   append_dim(valid_shape[1]);
+  auto offset_codes = GetIndexOffsetCodes(offsets_tuple->elements_, codegen);
   const std::string partition_type = MakePartitionTensorViewType(dim_strs, dtype_str);
 
-  std::string partition_view = EmitPartitionViewPTO(
-      binding.var->name_hint_ + "_peer", peer_view.ssa, peer_view.view_type_str, partition_type,
-      GetIndexOffsetCodes(offsets_tuple->elements_, codegen), size_codes, codegen);
+  std::string partition_view =
+      EmitPartitionViewPTO(binding.var->name_hint_ + "_peer", peer_view.ssa, peer_view.view_type_str,
+                           partition_type, offset_codes, size_codes, codegen);
 
   std::string tile_buf = codegen.GetVarName(src_tile);
   std::string tile_buf_type = codegen.GetExprTypeAnnotation(op->args_[0]);
@@ -906,7 +909,8 @@ static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
     size_ssa = GetSizeCodes(transfer_shape, codegen);
   }
 
-  std::string partition_type = MakePartitionTensorViewType(GetDimStrings(transfer_shape), dtype_str);
+  auto dim_strs = GetDimStrings(transfer_shape);
+  std::string partition_type = MakePartitionTensorViewType(dim_strs, dtype_str);
 
   // dst: inline peer-offset + addptr + make_tensor_view at the call site, then
   // a full-slice or subregion partition_view.
@@ -1038,7 +1042,8 @@ static std::string MakeGetCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
     size_ssa = GetSizeCodes(transfer_shape, codegen);
   }
 
-  std::string partition_type = MakePartitionTensorViewType(GetDimStrings(transfer_shape), dtype_str);
+  auto dim_strs = GetDimStrings(transfer_shape);
+  std::string partition_type = MakePartitionTensorViewType(dim_strs, dtype_str);
 
   // dst: local tensor_view + full-slice partition_view.
   std::string dst_local_view = codegen.GetOrCreateTensorView(dst_var);

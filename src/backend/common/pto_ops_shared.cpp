@@ -168,33 +168,6 @@ std::vector<std::string> GetSizeCodes(const std::vector<ir::ExprPtr>& exprs, cod
   return codes;
 }
 
-std::string EmitIndexTimesTwo(const std::string& ssa, codegen::PTOCodegen& codegen,
-                              const ir::ExprPtr& expr = nullptr) {
-  if (auto c = As<ir::ConstInt>(expr)) {
-    return codegen.GetOrEmitConstant(c->value_ * 2, DataType::INDEX);
-  }
-  auto two = codegen.GetOrEmitConstant(static_cast<int64_t>(2), DataType::INDEX);
-  auto out = codegen.NewTemp();
-  codegen.Emit(out + " = arith.muli " + ssa + ", " + two + " : index");
-  return out;
-}
-
-void ExpandPackedFp4GmLastAxis(DataType dtype, std::vector<std::string>& offset_codes,
-                               std::vector<std::string>& size_codes, std::vector<std::string>& dim_strings,
-                               codegen::PTOCodegen& codegen, const ir::ExprPtr& last_size,
-                               const ir::ExprPtr& last_offset, ir::TensorLayout layout) {
-  // Match ExpandPackedFp4MakeTensorViewDims: MX layouts keep carrier/physical
-  // SFractal coordinates and must not nibble-expand the last axis.
-  if (!dtype.IsPackedFp4() || ir::IsMxTensorLayout(layout) || size_codes.empty()) return;
-  size_codes.back() = EmitIndexTimesTwo(size_codes.back(), codegen, last_size);
-  if (!offset_codes.empty()) {
-    offset_codes.back() = EmitIndexTimesTwo(offset_codes.back(), codegen, last_offset);
-  }
-  if (!dim_strings.empty() && dim_strings.back() != "?") {
-    dim_strings.back() = std::to_string(std::stoll(dim_strings.back()) * 2);
-  }
-}
-
 bool ExprsEquivalentForSubview(const ir::ExprPtr& lhs, const ir::ExprPtr& rhs) {
   if (lhs.get() == rhs.get()) return true;
   auto lhs_const = As<ir::ConstInt>(lhs);

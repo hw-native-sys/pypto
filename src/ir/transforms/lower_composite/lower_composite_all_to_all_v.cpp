@@ -44,21 +44,23 @@ namespace lower_composite {
 // The 5-arg API signature (input, target, signal,
 // send_counts, recv_counts) extends the symmetric all_to_all's
 // window-as-result pattern: the intrinsic returns target, and the caller
-// reads back from the window with tile.load.  During the push phase each
-// rank also publishes the *clamped* ``clamp(send_counts[dest], 0, MAX_RECV)``
-// into peer ``dest``'s ``recv_counts[my_rank, 0]`` via ``pld.system.notify``
-// (Set) — MPI_Alltoallv recvcounts — so after the barrier the receiver knows
-// which rows of each source's MAX_RECV slot are logically valid. Notify
-// writes a scalar INT32 cell (same path as the barrier signal), so
-// ``recv_counts`` stays ``[NR, 1]`` and no post-convert ``tensor.create``
-// scratch is needed (ConvertTensorToTileOps already ran before this pass).
+// reads back from the window with tile.load. Each rank atomically publishes
+// the clamped count into peer dest's recv_counts[my_rank, 0]. Scalar Set is
+// unsafe here: its DCCI write-back flushes the entire cache line and can
+// overwrite another rank's adjacent count. All count and signal updates must
+// remain atomic, including when their buffers share a cache line.
 //
-// 2-phase push-based decomposition:
+// 3-phase push-based decomposition:
 //
-//   Phase 1 (push):
+//   Phase 1 (receiver-owned reset):
+//     Invalidate cached GM reads, then reset each local count with
+//     AtomicAdd(-old_count). Barrier(Ge 1) certifies that every receiver has
+//     consumed the previous call's counts and completed its reset.
+//
+//   Phase 2 (push):
 //     For each dest ∈ [0, NR):
 //       rows = clamp(send_counts[dest], 0, MAX_RECV)   // runtime scalar read
-//       notify(recv_counts, dest, [my_rank, 0], rows, Set)  // clamped count
+//       notify(recv_counts, dest, [my_rank, 0], rows, AtomicAdd)
 //       // Single pld.tile.put per destination: contiguous [rows, SIZE] block
 //       // at input[dest*MAX_RECV, :] → target[my_rank*MAX_RECV, :]. The
 //       // transfer shape is the runtime [rows, SIZE] (PTOAS accepts dynamic
@@ -66,9 +68,9 @@ namespace lower_composite {
 //       // [stage_rows, stage_cols] tile feeds the TPUT engine, which
 //       // 2-D-slides the transfer through it.
 //
-//   Phase 2: self-clearing credit barrier
-//     EmitBarrier() — AtomicAdd(+1) on every peer cell, then Wait(Ge 1)
-//     EmitEpilogueReset(-1) — subtracts the credit back to zero after the call
+//   Phase 3: completion barrier and self-clearing credits
+//     EmitBarrier() — AtomicAdd(+1) on every peer cell, then Wait(Ge 2)
+//     EmitEpilogueReset(-2) — remove both rounds' credits for window reuse
 //
 // MAX_RECV = target.shape[0] / NR (both must be compile-time constants) is
 // the per-peer *capacity*: it fixes the flat row-index arithmetic
@@ -133,8 +135,6 @@ ExprPtr LowerTensorAllToAllVRule(const CallPtr& call, const std::vector<ExprPtr>
   auto& reg = OpRegistry::GetInstance();
   auto comm = b.EmitCommSetup(target, span);
 
-  auto one_i32 = std::make_shared<ConstInt>(1, DataType::INT32, span);
-
   // SIZE = target[1].
   auto size_expr = target_type->shape_[1];
 
@@ -166,6 +166,31 @@ ExprPtr LowerTensorAllToAllVRule(const CallPtr& call, const std::vector<ExprPtr>
          "every sender needs an equal-capacity slot. Round the window's row count up to a multiple of NR";
   auto max_recv_expr = std::make_shared<ConstInt>(max_recv_value, DataType::INDEX, span);
 
+  // Reset only this receiver's own cells before allowing any rank to publish.
+  // A scalar store (even to zero) can clobber a neighboring count or signal
+  // during whole-line write-back. AtomicAdd avoids that race without padding
+  // the public [NR, 1] layout. The entry rendezvous also prevents a fast rank's
+  // next invocation from overwriting a slower receiver's previous result.
+  b.EmitEval(reg.Create("system.cacheinvalid", {}, {}, span), span);
+  b.EmitFor(
+      "aav_reset_src", zero_idx, comm.nranks_idx, one_idx,
+      [&](LoweringBuilder& body, const VarPtr& src) {
+        auto offsets = tile_conversion_utils::MakeSignalOffsets(src, span);
+        auto old_count =
+            body.Bind("aav_old_count", reg.Create("tensor.read", {recv_counts, offsets}, {}, span), span);
+        // Widen before negation so an arbitrary initial INT32_MIN is safe;
+        // narrowing gives the modulo-2^32 delta for the hardware atomic add.
+        auto reset_delta = body.Bind(
+            "aav_reset_delta",
+            MakeCast(MakeNeg(MakeCast(old_count, DataType::INT64, span), span), DataType::INT32, span), span);
+        body.Bind("aav_count_reset",
+                  reg.Create("pld.system.notify", {recv_counts, comm.my_rank, offsets, reset_delta},
+                             {{"op", static_cast<int>(NotifyOp::kAtomicAdd)}}, span),
+                  span);
+      },
+      span);
+  b.EmitBarrier(signal, comm, "_counts_reset", span);
+
   // Per-destination staging tile, capped to one chunk — pto-isa slides the
   // static [MAX_RECV, SIZE] transfer through it, so the stage need not (and
   // should not) be sized from SIZE.
@@ -173,7 +198,7 @@ ExprPtr LowerTensorAllToAllVRule(const CallPtr& call, const std::vector<ExprPtr>
   auto stage_shape =
       MakeCollectiveStageShape({max_recv_expr, size_expr}, chunk_geometry, span, "pld.tensor.all_to_all_v");
 
-  // ---- Phase 1: push per-destination blocks to peer windows ----
+  // ---- Phase 2: push per-destination blocks to peer windows ----
   // One shared bounded [stage_rows, stage_cols] VEC tile is reused across all
   // destinations. A single pld.tile.put transfers [rows, SIZE], where rows is
   // the runtime count clamped to [0, MAX_RECV], and 2-D-slides that transfer
@@ -220,15 +245,15 @@ ExprPtr LowerTensorAllToAllVRule(const CallPtr& call, const std::vector<ExprPtr>
                       span);
 
         // Publish the *clamped* transfer count into peer dest's
-        // recv_counts[my_rank, 0] via TNOTIFY Set — same scalar-cell path as
-        // the barrier signal, including self (peer offset is 0 for self).
+        // recv_counts[my_rank, 0] via AtomicAdd after the reset rendezvous,
+        // including self (peer offset is 0 for self).
         // Emitted UNCONDITIONALLY, outside the rows > 0 guard below: a
         // destination receiving zero rows still needs recv_counts = 0 published,
         // or it would read a stale count from a previous invocation.
         auto count_i32 = body.Bind("aav_count_i32", MakeCast(rows, DataType::INT32, span), span);
         body.Bind("aav_count_notify",
                   reg.Create("pld.system.notify", {recv_counts, dest_var, my_recv_offsets, count_i32},
-                             {{"op", static_cast<int>(NotifyOp::kSet)}}, span),
+                             {{"op", static_cast<int>(NotifyOp::kAtomicAdd)}}, span),
                   span);
 
         // Single pld.tile.put per destination transferring exactly the rows
@@ -265,10 +290,10 @@ ExprPtr LowerTensorAllToAllVRule(const CallPtr& call, const std::vector<ExprPtr>
       },
       span);
 
-  // ---- Phase 2: self-clearing credit barrier ----
+  // ---- Phase 3: self-clearing credit barrier ----
   const int64_t generation = b.EmitBarrier(signal, comm, "", span);
 
-  // Self-clearing epilogue: exactly one credit per peer this call.
+  // Self-clearing epilogue: remove both reset and completion credits.
   auto total_i32 = std::make_shared<ConstInt>(generation, DataType::INT32, span);
   b.EmitEpilogueReset(signal, comm, total_i32, span);
 

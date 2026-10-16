@@ -976,9 +976,10 @@ def reinterpret_view(
 ) -> Tensor | Tile:
     """Reinterpret the same bytes with a different dtype.
 
-    UINT8 -> FP4E2M1X2 is available only for packed 2D row-major Vec tiles,
-    with unchanged carrier shape. A5 supports this UB alias with PYPTO or
-    DSA_RP memory planning. Tensor inputs retain their existing dtype limits.
+    FP4E2M1X2 <-> UINT8/INT8 preserves the carrier shape. On A5, InCore
+    tensor and tile aliases require dense address-backed 2D row-major Vec
+    storage, a static UB offset, and PYPTO or DSA_RP memory planning.
+    Reshape the byte view separately; orchestration tensor aliases are unsupported.
 
     Args:
         data: Input tensor or tile.

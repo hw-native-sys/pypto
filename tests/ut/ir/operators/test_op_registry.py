@@ -1311,15 +1311,15 @@ class TestArgEffects:
             ("pld.tensor.allreduce", 0, ir.ArgEffect.ReadWrite),
             ("pld.tensor.allreduce", 1, ir.ArgEffect.ReadWrite),
             # A gather/exchange destination is overwritten, not updated: the
-            # lowering only pushes into it and never loads from it. `recv_counts`
-            # is deposited with NotifyOp::Set, so it is not an accumulate either.
+            # lowering only pushes into it and never loads from it.
             ("pld.tensor.allgather", 0, ir.ArgEffect.Read),
             ("pld.tensor.allgather", 1, ir.ArgEffect.Write),
             ("pld.tensor.allgather", 2, ir.ArgEffect.ReadWrite),
             ("pld.tensor.all_to_all", 1, ir.ArgEffect.Write),
             ("pld.tensor.all_to_all_v", 1, ir.ArgEffect.Write),
             ("pld.tensor.all_to_all_v", 3, ir.ArgEffect.Read),
-            ("pld.tensor.all_to_all_v", 4, ir.ArgEffect.Write),
+            # Receiver-owned count reset reads old values before atomic updates.
+            ("pld.tensor.all_to_all_v", 4, ir.ArgEffect.ReadWrite),
             # A reduce destination *is* read — its lowering loads the running
             # value back — so the distinction is per operator, not per family.
             ("pld.tensor.allreduce", 0, ir.ArgEffect.ReadWrite),

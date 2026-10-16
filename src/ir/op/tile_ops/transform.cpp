@@ -400,10 +400,10 @@ TypePtr DeduceTileReinterpretViewType(const std::vector<ExprPtr>& args,
         << kOpName << " requires target rank >= 2 for col_major layout";
   }
 
-  const bool fp4_byte_alias = tile_type->dtype_ == DataType::UINT8 && target_dtype == DataType::FP4E2M1X2;
-  if (tile_type->dtype_.IsFp4Family() || target_dtype.IsFp4Family()) {
-    CHECK_SPAN(fp4_byte_alias, args[0]->span_)
-        << kOpName << " FP4 byte alias only supports UINT8 -> FP4E2M1X2";
+  // Both dtypes name the same bytes. The packed alias may change the label,
+  // but it cannot represent a different pitch, layout or on-chip memory space.
+  const bool involves_packed_fp4 = tile_type->dtype_.IsPackedFp4() || target_dtype.IsPackedFp4();
+  if (involves_packed_fp4) {
     CHECK_SPAN(tile_type->shape_.size() == 2 && source_view.blayout == TileLayout::row_major, args[0]->span_)
         << kOpName << " FP4 byte alias requires a 2D row_major tile with slayout=none_box";
     const auto memory_space = tile_type->GetMemorySpace();
@@ -412,15 +412,14 @@ TypePtr DeduceTileReinterpretViewType(const std::vector<ExprPtr>& args,
     CHECK_SPAN(!requested_shape.has_value() ||
                    tile_view_semantics::ShapeExprListsEquivalent(*requested_shape, tile_type->shape_),
                args[0]->span_)
-        << kOpName
-        << " FP4 byte alias requires the same shape as the UINT8 source (one packed pair per byte)";
+        << kOpName << " FP4E2M1X2 aliases require the same shape; reshape the UINT8/INT8 byte view instead";
   }
 
   const size_t contiguous_axis = source_view.blayout == TileLayout::col_major ? tile_type->shape_.size() - 2
                                                                               : tile_type->shape_.size() - 1;
   auto plan = reinterpret_view_semantics::Resolve(tile_type->shape_, source_view.valid_shape,
                                                   tile_type->dtype_, target_dtype, contiguous_axis,
-                                                  requested_shape, kOpName, args[0]->span_, fp4_byte_alias);
+                                                  requested_shape, kOpName, args[0]->span_);
 
   TileView result_view = source_view;
   result_view.valid_shape = std::move(plan.valid_shape);

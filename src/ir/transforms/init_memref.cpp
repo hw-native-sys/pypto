@@ -723,11 +723,14 @@ class InitMemRefMutator : public IRMutator {
       non_dense_source = non_dense_source || !dense_bytes || *dense_bytes != parent_memref->size_;
     }
     if (auto call = As<Call>(new_value); call && IsOp(call, "tile.reinterpret_view")) {
+      auto source_tile = As<TileType>(source->GetType());
       auto result_tile = As<TileType>(op->var_->GetType());
-      CHECK_SPAN(!result_tile || result_tile->dtype_ != DataType::FP4E2M1X2 ||
-                     (!non_dense_source && As<ConstInt>(parent_memref->byte_offset_)),
-                 call->span_)
-          << "UINT8 -> FP4E2M1X2 UB alias requires a contiguous UINT8 tile with a static UB offset; "
+      const bool fp4_alias = (source_tile && source_tile->dtype_.IsPackedFp4()) ||
+                             (result_tile && result_tile->dtype_.IsPackedFp4());
+      // A reverse packed-to-byte alias drops the same pitch/offset metadata as
+      // byte-to-packed, so neither direction can hide a strided ancestor.
+      CHECK_SPAN(!fp4_alias || (!non_dense_source && As<ConstInt>(parent_memref->byte_offset_)), call->span_)
+          << "FP4E2M1X2 UB alias requires a contiguous byte-carrier tile with a static UB offset; "
              "unsupported slice provenance survives nested slices, aliases and reshapes. Slice the "
              "GM tensor and load the window instead";
     }
