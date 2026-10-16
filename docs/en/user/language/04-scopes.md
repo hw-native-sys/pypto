@@ -367,6 +367,9 @@ skips a function containing static explicit flags, so the author must provide
 all required pipeline dependencies in that function. Dynamic-only flags do not
 currently trigger that skip in PTOAS; use a static flag pair when taking over
 sync placement for the whole function.
+Keep explicit flags outside `pl.pipeline` loops. Pipeline scheduling cannot yet
+preserve their authored order, so PyPTO rejects either flag in such a loop.
+Use `pl.range` when manually synchronizing work inside a loop.
 
 AIC and AIV run **asynchronously**. A boundary op orders the one value it carries — that
 is what the transfer is — but nothing orders a cube-lane write against a vector-lane read

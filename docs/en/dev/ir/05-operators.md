@@ -634,6 +634,8 @@ Exactly one event form is present: a literal `event_id` in `[0, 7]`, or one
 `core_type` is optional `"aic"` / `"aiv"` IR metadata for mixed-kernel placement.
 Codegen emits `pto.set_flag` / `pto.wait_flag`, or the `_dyn` variants for an
 INDEX operand. The calls do not represent cross-core synchronization.
+The `PipelineLoopValid` verifier rejects either call inside a `ForKind::Pipeline`
+loop before pipeline scheduling; explicit flags are supported in ordinary loops.
 
 `system.syncall` has two modes, selected by its `mode` **IR attribute**; the Python surfaces spell them as `pl.SyncAllMode` members instead (see below). The **hard** form (attr `"hard"`, the default) emits an FFTS barrier that waits for **all** physical cores of the selected `core_type`; the kernel must be launched at full occupancy (one block per physical core) **and with `sync_start=True`** (so all blocks are co-resident — a non-sync_start launch may dispatch blocks in waves and deadlock the barrier), or it deadlocks (AICore error 507018). The **soft** form (attr `"soft"`) polls a shared GM workspace and so works at **partial** occupancy. `gm_workspace` is a shared, zero-initialized GM `INT32` tensor containing at least 16 elements (64 bytes). Pass it as a kernel parameter so all blocks share one buffer; it must occupy an exclusive cache line and be zero-initialized before its first use.
 

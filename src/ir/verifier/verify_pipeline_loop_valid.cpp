@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "pypto/core/error.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -32,7 +33,8 @@ namespace {
 /// Either direction failing means the loop is malformed: a Pipeline-kind
 /// without the stage attr would print as plain ``pl.range(...)`` (round-trip
 /// breaks); a Sequential loop carrying ``pipeline_stages`` would mislead
-/// LowerPipelineLoops on a re-run.
+/// LowerPipelineLoops on a re-run. Explicit pipeline flags are also rejected
+/// here before SkewCrossCorePipeline or CanonicalizeIOOrder can reorder them.
 class PipelineLoopValidChecker : public IRVisitor {
  public:
   PipelineLoopValidChecker(std::vector<Diagnostic>& diagnostics, const std::string& func_name)
@@ -55,12 +57,28 @@ class PipelineLoopValidChecker : public IRVisitor {
                                     "`ForKind::Pipeline`. The attr is only meaningful on Pipeline loops.",
                                 op->span_);
     }
+    const bool was_in_pipeline = in_pipeline_;
+    in_pipeline_ |= is_pipeline;
     IRVisitor::VisitStmt_(op);
+    in_pipeline_ = was_in_pipeline;
+  }
+
+  void VisitExpr_(const CallPtr& op) override {
+    if (in_pipeline_ && (IsOp(op, "system.set_flag") || IsOp(op, "system.wait_flag"))) {
+      diagnostics_.emplace_back(DiagnosticSeverity::Error, "PipelineLoopValid", 2,
+                                "Explicit set_flag/wait_flag in function '" + func_name_ +
+                                    "' cannot be used inside pl.pipeline: pipeline scheduling does not "
+                                    "preserve their source order. "
+                                    "Use pl.range for manual flags until pipeline scheduling supports them.",
+                                op->span_);
+    }
+    IRVisitor::VisitExpr_(op);
   }
 
  private:
   std::vector<Diagnostic>& diagnostics_;
   const std::string& func_name_;
+  bool in_pipeline_ = false;
 };
 
 class PipelineLoopValidPropertyVerifierImpl : public PropertyVerifier {
