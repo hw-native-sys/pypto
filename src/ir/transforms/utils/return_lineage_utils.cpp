@@ -128,10 +128,12 @@ class BodyIndexCollector : public IRVisitor {
 // Cross-function memo + cycle guard, shared by the recursive tracer. The
 // per-function result depends only on the callee body, so a thread_local
 // cache bounds total work to one body walk per distinct function reached
-// from the outermost query (cleared when it unwinds).
+// from the outermost function or batched-var query (cleared when it unwinds).
 struct TraceContext {
   std::vector<const Function*> call_stack;
+  std::unordered_set<const Function*> active_functions;
   std::unordered_map<const Function*, std::vector<std::optional<size_t>>> memo;
+  size_t query_depth = 0;
 };
 
 TraceContext& Ctx() {
@@ -139,8 +141,37 @@ TraceContext& Ctx() {
   return ctx;
 }
 
+// Keep callee maps alive while a batch traces several independent Vars. A
+// nested function query must not clear maps still needed by the outer batch.
+struct TraceQueryGuard {
+  TraceQueryGuard() : ctx(Ctx()) { ++ctx.query_depth; }
+  ~TraceQueryGuard() {
+    --ctx.query_depth;
+    if (ctx.query_depth == 0 && ctx.call_stack.empty()) ctx.memo.clear();
+  }
+
+  TraceContext& ctx;
+};
+
 std::vector<std::optional<size_t>> ReturnedParamIndicesImpl(const FunctionPtr& func,
                                                             const ProgramPtr& program);
+
+// Avoid copying an entire tuple return map for each TupleGetItem in a batch.
+// TraceQueryGuard or the enclosing function query owns the reference lifetime.
+const std::vector<std::optional<size_t>>& CachedReturnedParamIndices(const FunctionPtr& func,
+                                                                     const ProgramPtr& program) {
+  static const std::vector<std::optional<size_t>> empty;
+  if (!func || !func->body_) return empty;
+  auto& ctx = Ctx();
+  if (ctx.active_functions.count(func.get()) != 0) {
+    return empty;
+  }
+  if (auto it = ctx.memo.find(func.get()); it != ctx.memo.end()) {
+    return it->second;
+  }
+  auto result = ReturnedParamIndicesImpl(func, program);
+  return ctx.memo.emplace(func.get(), std::move(result)).first->second;
+}
 
 struct VarLineage {
   const Var* root = nullptr;
@@ -219,7 +250,7 @@ VarLineage TraceVar(const Var* var, const BodyIndexCollector& index, const Param
       if (!call || IsBuiltinOp(call->op_->name_)) return finish(nullptr);
       auto callee = program ? program->GetFunction(call->op_->name_) : nullptr;
       if (!callee) return finish(nullptr);
-      auto ret_map = ReturnedParamIndicesImpl(callee, program);
+      const auto& ret_map = CachedReturnedParamIndices(callee, program);
       size_t pos = static_cast<size_t>(tuple_get->index_);
       if (tuple_get->index_ < 0 || pos >= ret_map.size() || !ret_map[pos]) return finish(nullptr);
       size_t mapped = ret_map[pos].value();  // NOLINT(bugprone-unchecked-optional-access)
@@ -262,7 +293,7 @@ VarLineage TraceVar(const Var* var, const BodyIndexCollector& index, const Param
         // Single-result user call: continue from the arg the callee returns.
         auto callee = program ? program->GetFunction(op_name) : nullptr;
         if (!callee) return finish(nullptr);
-        auto ret_map = ReturnedParamIndicesImpl(callee, program);
+        const auto& ret_map = CachedReturnedParamIndices(callee, program);
         if (ret_map.size() != 1 || !ret_map[0]) return finish(nullptr);
         size_t mapped = ret_map[0].value();  // NOLINT(bugprone-unchecked-optional-access)
         if (mapped >= call->args_.size()) return finish(nullptr);
@@ -283,6 +314,7 @@ std::vector<std::optional<size_t>> TraceExprsToParamIndices(const std::vector<Ex
                                                             const BodyIndexCollector& index,
                                                             const ParamIndexMap& param_indices,
                                                             const ProgramPtr& program) {
+  TraceQueryGuard query_guard;
   std::vector<std::optional<size_t>> result;
   result.reserve(exprs.size());
   VarRootMap memo;
@@ -407,7 +439,7 @@ std::vector<std::optional<size_t>> ReturnedParamIndicesImpl(const FunctionPtr& f
   if (!func || !func->body_) return {};
 
   auto& ctx = Ctx();
-  if (std::find(ctx.call_stack.begin(), ctx.call_stack.end(), func.get()) != ctx.call_stack.end()) {
+  if (ctx.active_functions.count(func.get()) != 0) {
     return {};
   }
   if (auto it = ctx.memo.find(func.get()); it != ctx.memo.end()) {
@@ -415,18 +447,21 @@ std::vector<std::optional<size_t>> ReturnedParamIndicesImpl(const FunctionPtr& f
   }
 
   ctx.call_stack.push_back(func.get());
+  ctx.active_functions.insert(func.get());
   bool is_top_level = ctx.call_stack.size() == 1;
   struct Guard {
     TraceContext& ctx;
+    const Function* function;
     bool top_level;
     ~Guard() {
+      ctx.active_functions.erase(function);
       ctx.call_stack.pop_back();
-      if (top_level) ctx.memo.clear();
+      if (top_level && ctx.query_depth == 0) ctx.memo.clear();
     }
-  } guard{ctx, is_top_level};
+  } guard{ctx, func.get(), is_top_level};
 
   auto record = [&](std::vector<std::optional<size_t>> result) {
-    if (!is_top_level) ctx.memo.emplace(func.get(), result);
+    if (!is_top_level || ctx.query_depth != 0) ctx.memo.emplace(func.get(), result);
     return result;
   };
 
@@ -464,6 +499,18 @@ std::vector<std::optional<size_t>> ReturnedParamIndicesImpl(const FunctionPtr& f
     }
   }
   return record(TraceExprsToParamIndices(rets, index, param_indices, program));
+}
+
+std::vector<std::optional<size_t>> TraceVarsToParamIndices(const std::vector<VarPtr>& vars,
+                                                           const StmtPtr& body,
+                                                           const std::vector<VarPtr>& params,
+                                                           const ProgramPtr& program, bool trace_if_merges) {
+  if (!body) return std::vector<std::optional<size_t>>(vars.size());
+
+  BodyIndexCollector index(trace_if_merges);
+  index.VisitStmt(body);
+  return TraceExprsToParamIndices(std::vector<ExprPtr>(vars.begin(), vars.end()), index, IndexParams(params),
+                                  program);
 }
 
 }  // namespace
@@ -524,22 +571,24 @@ std::vector<std::optional<size_t>> ReturnedParamIndices(const FunctionPtr& func,
   return ReturnedParamIndicesImpl(func, program);
 }
 
+std::vector<std::optional<size_t>> TraceToParamIndices(const std::vector<VarPtr>& vars, const StmtPtr& body,
+                                                       const std::vector<VarPtr>& params,
+                                                       const ProgramPtr& program) {
+  return TraceVarsToParamIndices(vars, body, params, program, /*trace_if_merges=*/false);
+}
+
 std::vector<std::optional<size_t>> TraceToParamIndicesForOutlining(const std::vector<VarPtr>& vars,
                                                                    const StmtPtr& body,
                                                                    const std::vector<VarPtr>& params,
                                                                    const ProgramPtr& program,
                                                                    bool trace_if_merges) {
-  if (!body) return std::vector<std::optional<size_t>>(vars.size());
-
-  BodyIndexCollector index(trace_if_merges);
-  index.VisitStmt(body);
-  return TraceExprsToParamIndices(std::vector<ExprPtr>(vars.begin(), vars.end()), index, IndexParams(params),
-                                  program);
+  return TraceVarsToParamIndices(vars, body, params, program, trace_if_merges);
 }
 
 VarPtr TraceToParam(const VarPtr& var, const StmtPtr& body, const std::vector<VarPtr>& params,
                     const ProgramPtr& program) {
   if (!var || !body) return nullptr;
+  TraceQueryGuard query_guard;
   BodyIndexCollector index;
   index.VisitStmt(body);
   auto param_indices = IndexParams(params);

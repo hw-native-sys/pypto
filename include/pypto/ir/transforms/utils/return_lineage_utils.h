@@ -94,6 +94,18 @@ std::optional<size_t> ExplicitReturnedParamIndex(const FunctionPtr& func);
 /// fast path would pick the trailing one, a pre-order walk the nested one.
 ReturnStmtPtr FindFirstReturn(const StmtPtr& body);
 
+/// Trace multiple Vars in @p body back to complete parameter writebacks.
+///
+/// The body is indexed once, and variable roots and callee return maps are
+/// memoized across all Vars. Follows SSA and call/writeback lineage without
+/// IfStmt merges. Tensor results must retain the parameter's full type/view;
+/// slices, views, fresh buffers, and untraceable values remain nullopt.
+///
+/// @return one entry per Var containing its matching param index, or nullopt.
+std::vector<std::optional<size_t>> TraceToParamIndices(const std::vector<VarPtr>& vars, const StmtPtr& body,
+                                                       const std::vector<VarPtr>& params,
+                                                       const ProgramPtr& program);
+
 /// Trace multiple Vars in @p body back to @p params for scope outlining.
 ///
 /// The body is indexed once and parameter positions are shared across all Vars.
@@ -112,7 +124,8 @@ std::vector<std::optional<size_t>> TraceToParamIndicesForOutlining(const std::ve
 /// Trace @p var defined in @p body back to one of @p params (pointer identity).
 ///
 /// Follows SSA and call/writeback lineage without IfStmt merges, scoped to an
-/// arbitrary body/param-set. Use TraceToParamIndicesForOutlining for multiple Vars.
+/// arbitrary body/param-set. Use TraceToParamIndices for multiple Vars that
+/// must retain the parameter's full type/view.
 ///
 /// @return the matching param, or nullptr when untraceable.
 VarPtr TraceToParam(const VarPtr& var, const StmtPtr& body, const std::vector<VarPtr>& params,
