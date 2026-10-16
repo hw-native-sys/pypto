@@ -173,6 +173,9 @@ def _choose_a2a3_l0(
     planner: MemoryPlanner,
     bytes_a: int,
     bytes_b: int,
+    reduction_iterations: int = 1,
+    reduction_pipeline_stages: int = 1,
+    force_output_stationary: bool = False,
 ) -> _core_passes.l0_tile_chooser.L0TileResult:
     """Mirror AutoTileMatmulL0's calibrated 910B chooser configuration.
 
@@ -185,8 +188,10 @@ def _choose_a2a3_l0(
     cfg.l0a_bytes = cfg.l0b_bytes = 64 * 1024
     cfg.l0c_bytes = 128 * 1024
     cfg.bytes_a, cfg.bytes_b, cfg.bytes_c = bytes_a, bytes_b, 4
-    cfg.allow_a_stationary = True
-    cfg.allow_b_stationary = True
+    cfg.allow_a_stationary = not force_output_stationary
+    cfg.allow_b_stationary = not force_output_stationary
+    cfg.reduction_iterations = reduction_iterations
+    cfg.reduction_pipeline_stages = reduction_pipeline_stages
     cfg.allow_double_buffer_c = False
     cfg.allow_k_boundary = True
     return _core_passes.l0_tile_chooser.choose_l0_tile(cfg)
@@ -1896,6 +1901,12 @@ class TestMatmulOperations:
             planner=planner,
             bytes_a=2,
             bytes_b=2,
+            # Canonical accumulation prices the entire reduction, and reserves
+            # operands for the actual enclosing stage=2 pipeline. A stand-alone
+            # query ignores that multiplicity and can choose an illegal K=96.
+            reduction_iterations=case.NUM_CHUNKS,
+            reduction_pipeline_stages=2,
+            force_output_stationary=True,
         )
         assert not choice.double_buffer_c, "the nested-pipeline case must retain a K-only inner split"
         assert choice.k < case.K_CHUNK, "the inner per-chunk matmul must be K-tiled"
