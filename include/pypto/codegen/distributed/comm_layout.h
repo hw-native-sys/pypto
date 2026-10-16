@@ -40,9 +40,10 @@ inline constexpr std::size_t kWindowsOutOffset = offsetof(::CommContext, windows
 inline constexpr std::size_t kWindowSlotStride = sizeof(std::uint64_t);
 inline constexpr std::size_t kCommCtxSize = sizeof(::CommContext);
 // Simpler carves communication buffers sequentially from one device window.
-// Keep every buffer start MTE/CCU-safe, and leave enough physical tail room
-// for an FP16 remote TLOAD rounded to the 32-byte transfer granularity.
-inline constexpr std::size_t kCommBufferAlignmentBytes = 32;
+// Keep distinct buffers on separate 64-byte scalar cache lines: TWAIT and
+// TNOTIFY clean/invalidate whole lines and must not share one with payload.
+// This also satisfies the 32-byte MTE/CCU transfer alignment and tail padding.
+inline constexpr std::size_t kCommBufferAlignmentBytes = 64;
 
 static_assert(kRankIdOffset == 16, "CommContext.rankId offset drift");
 static_assert(kRankNumOffset == 20, "CommContext.rankNum offset drift");

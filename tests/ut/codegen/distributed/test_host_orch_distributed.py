@@ -32,11 +32,13 @@ Plus regressions:
   ``allocate_domain`` wrapper.
 """
 
+import ast
 import os
 import re
 import shutil
 import subprocess
 from importlib import resources
+from typing import Any
 
 import pypto.language as pl
 import pypto.language.distributed as pld
@@ -369,9 +371,9 @@ def test_comm_group_program_emits_domain_provider_with_block():
     # window_size is the sum of aligned physical slot sizes. Each spec keeps
     # its exact logical size in count and exposes only its physical size via
     # nbytes.
-    # Single slot → `window_size=((((64 * 4) + 31) // 32) * 32),`. The inner
+    # Single slot → `window_size=((((64 * 4) + 63) // 64) * 64),`. The inner
     # parentheses come from the Mul expression.
-    aligned_size = r"\(\(\(\(64 \* 4\) \+ 31\) // 32\) \* 32\)"
+    aligned_size = r"\(\(\(\(64 \* 4\) \+ 63\) // 64\) \* 64\)"
     assert re.search(rf"window_size=\({aligned_size}\),", code), code
     assert re.search(
         rf'CommBufferSpec\(name="data_buf", dtype="opaque", count=\(64 \* 4\), nbytes={aligned_size}\),',
@@ -382,6 +384,71 @@ def test_comm_group_program_emits_domain_provider_with_block():
     # ``contexts`` parameter must not appear anywhere.
     assert "contexts[" not in code, code
     assert re.search(r"__comm_d0\[\w+\]\.buffers", code), code
+
+
+@pytest.mark.parametrize("world_size", [2, 4, 8])
+def test_comm_signal_and_payload_never_share_cache_lines(world_size):
+    """Execute generated sizes for the gather/signal/reduce/signal layout."""
+
+    @pl.program
+    class Prog:
+        @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+        def chip_orch(
+            self,
+            gathered: pld.DistributedTensor[[32, 5120], pl.BF16],
+            ready: pld.DistributedTensor[[NRANKS], pl.INT32],
+            partial: pld.DistributedTensor[[32, 5120], pl.FP32],
+            reduced: pld.DistributedTensor[[NRANKS], pl.INT32],
+        ) -> pl.Tensor[[32, 5120], pl.FP32]:
+            return partial  # type: ignore[return-value]
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self) -> pl.Tensor[[32, 5120], pl.FP32]:
+            gather_buf = pld.alloc_window_buffer(32 * 5120 * pl.BF16.get_byte())
+            ready_buf = pld.alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())
+            partial_buf = pld.alloc_window_buffer(32 * 5120 * pl.FP32.get_byte())
+            reduced_buf = pld.alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())
+            gathered = pld.window(gather_buf, [32, 5120], dtype=pl.BF16)
+            ready = pld.window(ready_buf, [NRANKS], dtype=pl.INT32)
+            partial = pld.window(partial_buf, [32, 5120], dtype=pl.FP32)
+            reduced = pld.window(reduced_buf, [NRANKS], dtype=pl.INT32)
+            for rank in pl.range(pld.world_size()):
+                self.chip_orch(gathered, ready, partial, reduced, device=rank)
+            return partial  # type: ignore[return-value]
+
+    tree = ast.parse(_lower(Prog))
+    domain = next(node for node in ast.walk(tree) if isinstance(node, ast.With))
+    allocation = domain.items[0].context_expr
+    assert isinstance(allocation, ast.Call)
+    keywords = {keyword.arg: keyword.value for keyword in allocation.keywords}
+    buffers = keywords["buffers"]
+    assert isinstance(buffers, ast.List)
+    sizes = []
+    for spec in buffers.elts:
+        assert isinstance(spec, ast.Call)
+        fields = {keyword.arg: keyword.value for keyword in spec.keywords}
+        sizes.append(ast.Tuple(elts=[fields["count"], fields["nbytes"]], ctx=ast.Load()))
+    # Run only generated allocation arithmetic, without importing a device runtime.
+    expression = ast.Tuple(
+        elts=[keywords["window_size"], ast.List(elts=sizes, ctx=ast.Load())], ctx=ast.Load()
+    )
+    module = ast.Module(
+        body=[ast.Assign(targets=[ast.Name(id="layout", ctx=ast.Store())], value=expression)],
+        type_ignores=[],
+    )
+    namespace: dict[str, Any] = {"world_size": world_size}
+    exec(compile(ast.fix_missing_locations(module), "<communication layout>", "exec"), namespace)
+    window_size, slots = namespace["layout"]
+    assert [logical for logical, _ in slots] == [327680, world_size * 4, 655360, world_size * 4]
+    offset = 0
+    previous_last_line = -1
+    for logical, physical in slots:
+        assert offset % 64 == 0
+        assert offset // 64 > previous_last_line
+        assert physical >= logical
+        previous_last_line = (offset + logical - 1) // 64
+        offset += physical
+    assert offset == window_size
 
 
 def test_comm_buffer_specs_align_each_physical_allocation():
@@ -408,8 +475,8 @@ def test_comm_buffer_specs_align_each_physical_allocation():
     code = _lower(Prog)
     data_logical = r"\(17 \* 2\)"
     signal_logical = r"\(2 \* 4\)"
-    data_alloc = rf"\(\(\({data_logical} \+ 31\) // 32\) \* 32\)"
-    signal_alloc = rf"\(\(\({signal_logical} \+ 31\) // 32\) \* 32\)"
+    data_alloc = rf"\(\(\({data_logical} \+ 63\) // 64\) \* 64\)"
+    signal_alloc = rf"\(\(\({signal_logical} \+ 63\) // 64\) \* 64\)"
     assert re.search(
         rf'CommBufferSpec\(name="data_buf", dtype="opaque", count={data_logical}, nbytes={data_alloc}\),',
         code,

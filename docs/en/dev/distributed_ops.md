@@ -15,6 +15,13 @@ accept a plain `Tensor` as `src`, and `get`/`tile.get` accept one as `dst` —
 TPUT/TGET only need a readable/writable *local* GM region on that side. The
 window-bound side (`put.dst`, `get.src`) still requires a `DistributedTensor`.
 
+Host codegen rounds each window buffer's physical allocation to 64 bytes and
+sums those padded sizes for the domain capacity. Logical tensor shapes remain
+unchanged. This keeps distinct payload and signal buffers on separate scalar
+cache lines: `TWAIT`/`TNOTIFY` clean and invalidate whole lines, so 32-byte
+transfer alignment alone is insufficient. This does not isolate independently
+written fields inside one buffer; their layout remains the caller's responsibility.
+
 There are **fifteen ops** and **four ABI enums**:
 
 | Op | Direction | Result | Hardware |

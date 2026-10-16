@@ -570,8 +570,8 @@ void DistributedCodegen::VisitStmt_(const ir::CommDomainScopeStmtPtr& op) {
   }
 
   // Simpler places CommBufferSpecs consecutively. Round every physical
-  // allocation up to the transfer alignment so signal buffers following an
-  // odd-sized FP16 data buffer remain CCU-safe. ``count`` below retains the
+  // allocation up to the scalar cache-line alignment so signal buffers cannot
+  // share a line with payload. Odd-sized FP16 buffers remain CCU-safe. ``count`` retains the
   // logical byte count, so the padding is not exposed through a
   // DistributedTensor view. Aligning the final slot also provides safe tail
   // storage for an FP16 remote TLOAD rounded to the same granularity.
