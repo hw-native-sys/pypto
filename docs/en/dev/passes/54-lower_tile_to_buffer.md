@@ -283,8 +283,8 @@ tracks the selected slot's byte window, including aliases of boundary views.
 Dynamic slot indices remain unsupported by this conversion recipe.
 
 Before slot/view definitions are hoisted, lowering runs the same source-schedule
-safety analysis as Tile codegen. Multi-slot prefetch loops affected by PTOAS
-#1519 are rejected even with constant slot indices. Compiler-proven fresh Acc
+safety analysis as Tile codegen. Multi-slot prefetch loops affected by
+PTOAS #1519 are rejected even with constant slot indices. Compiler-proven fresh Acc
 dbC stages retain their existing exception; straight-line slot reuse is unchanged.
 The internal fresh-Acc proof marker is consumed after that check, alongside
 storage-only pipeline membership, rather than forwarded to Buffer operations.

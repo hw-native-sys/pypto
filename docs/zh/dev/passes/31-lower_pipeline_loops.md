@@ -149,6 +149,12 @@ else:
 
 本 Pass 之后，`CanonicalizeIOOrder` 作用于全程序的每一个 `SeqStmts`，将 load 上拉、store 下沉，使各副本的输入 tile 同时活跃，从而 `MemoryReuse` 不能合并它们。主循环与尾部克隆都能从 ping-pong 缓冲中受益。
 
+## 显式 dbC 验证（Explicit dbC validation）
+
+PTOAS 下显式 `pipeline_double_buffer_c` 的每个 stage 必须恰好定义一个新的
+`tile.matmul` 或 `tile.matmul_bias` 累加器，且不得携带显式 MemRef。
+不受支持的累加/多 MAD 循环体及调用方自有存储会产生可操作的用户错误，而非编译器内部错误。
+
 ## 相关
 
 - [`CanonicalizeIOOrder`](32-canonicalize_io_order.md) —— 下一个 Pass，对 `ForKind::Pipeline` 作用域内的 `SeqStmts` 做 IO 顺序规范化

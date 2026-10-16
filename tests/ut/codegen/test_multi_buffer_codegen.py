@@ -858,15 +858,23 @@ class TestPtoasPlannerEmitsMultiBuffer:
         c_region = region_of("c0")
         assert a_region == b_region != c_region, mlir
 
-    def test_mixed_geometry_slot_keeps_distinct_valid_views(self):
+    @pytest.mark.parametrize("buffer_ir", [False, True], ids=["tile-ir", "buffer-ir"])
+    def test_mixed_geometry_slot_keeps_distinct_valid_views(self, buffer_ir, tmp_path):
         """A reused slot must not inherit an earlier subview's valid extent."""
-        mlir = _codegen(MixedGeometryValidViews, passes.MemoryPlanner.PTOAS)
+        mlir = _codegen(MixedGeometryValidViews, passes.MemoryPlanner.PTOAS, buffer_ir=buffer_ir)
         assert len(_lines(mlir, "pto.alloc_multi_tile")) == 1, mlir
         subviews = _lines(mlir, "pto.subview")
         assert len(subviews) == 2, mlir
         assert all("sizes [32, 32]" in view for view in subviews), mlir
         assert any("v_row=16, v_col=32" in view for view in subviews), mlir
         assert any("v_row=32, v_col=32" in view for view in subviews), mlir
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        source, output = tmp_path / "valid_slot_views.pto", tmp_path / "valid_slot_views.cpp"
+        source.write_text(mlir)
+        arch = "a5" if buffer_ir else "a2"
+        _run_ptoas(str(source), str(output), [f"--pto-arch={arch}", "--pto-level=level2"])
+        assert output.is_file()
 
     def test_interleaved_slot_lifetimes_keep_distinct_regions(self):
         """The complete lifetime of every variable sharing a base is considered."""
