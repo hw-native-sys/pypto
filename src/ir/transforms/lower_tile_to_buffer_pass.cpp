@@ -688,11 +688,124 @@ class StorageIndex : public IRVisitor {
   std::unordered_map<const Var*, CallPtr> declarations_;
 };
 
-class TileToBufferMutator : public IRMutator {
+// InitMemRef hoists pointer declarations, not the lifetimes of the values they
+// back. Re-emitting addressless descriptors at those declarations makes PTOAS
+// treat unrelated loop-local accumulators as function-wide storage. Find the
+// lowest common statement ancestor of each root's uses and place its static
+// definitions there. Binary lifting bounds all queries by O(N log N), including
+// deeply nested IR. Explicit multi-buffer regions keep their shared prologue.
+class StorageDefinitionSites : public IRVisitor {
  public:
-  explicit TileToBufferMutator(const StorageIndex& storage) : storage_(storage) {}
+  void VisitStmt(const StmtPtr& stmt) override {
+    if (!stmt) return;
+    const size_t parent = current_;
+    current_ = statements_.size();
+    statements_.push_back(stmt.get());
+    depths_.push_back(current_ == 0 ? 0 : depths_[parent] + 1);
+    std::vector<size_t> ancestors{parent};
+    for (size_t level = 1; (size_t{1} << level) <= depths_.back(); ++level) {
+      const size_t previous = ancestors.back();
+      ancestors.push_back(level - 1 < parents_[previous].size() ? parents_[previous][level - 1] : 0);
+    }
+    parents_.push_back(std::move(ancestors));
+    IRVisitor::VisitStmt(stmt);
+    current_ = parent;
+  }
+
+  [[nodiscard]] std::map<const Stmt*, std::vector<StmtPtr>> Plan(const StorageIndex& storage) const {
+    std::map<const Stmt*, std::vector<StmtPtr>> result;
+    // Definition order follows the source's first use, not pointer order.
+    std::map<size_t, const Var*> ordered;
+    for (const auto& [base, range] : uses_) {
+      const auto root = storage.roots.find(base);
+      if (root != storage.roots.end() && !As<MultiBufferType>(root->second.handle->GetType())) {
+        ordered.emplace(first_use_order_.at(base), base);
+      }
+    }
+    for (const auto& [order, base] : ordered) {
+      const auto& range = uses_.at(base);
+      const auto site = statements_[CommonAncestor(range.first, range.second)];
+      const auto& definitions = storage.roots.at(base).definitions;
+      result[site].insert(result[site].end(), definitions.begin(), definitions.end());
+    }
+    return result;
+  }
 
  protected:
+  void VisitVarLike_(const VarPtr& var) override {
+    const auto memory = GetTypeMemRef(var->GetType());
+    if (!As<TileType>(var->GetType()) || !memory || !(*memory)->base_) return;
+    auto [entry, inserted] = uses_.emplace((*memory)->base_.get(), std::make_pair(current_, current_));
+    if (inserted) first_use_order_.emplace((*memory)->base_.get(), first_use_order_.size());
+    if (!inserted) {
+      entry->second.first = std::min(entry->second.first, current_);
+      entry->second.second = std::max(entry->second.second, current_);
+    }
+  }
+  void VisitExpr_(const IterArgPtr& var) override { VisitVarLike_(var); }
+  void VisitStmt_(const ForStmtPtr& loop) override { VisitLoop(loop); }
+  void VisitStmt_(const WhileStmtPtr& loop) override { VisitLoop(loop); }
+
+ private:
+  template <typename LoopPtr>
+  void VisitLoop(const LoopPtr& loop) {
+    for (const auto& argument : loop->iter_args_) VisitExpr(argument->initValue_);
+    IRVisitor::VisitStmt_(loop);
+  }
+
+  [[nodiscard]] size_t CommonAncestor(size_t left, size_t right) const {
+    if (depths_[left] < depths_[right]) std::swap(left, right);
+    size_t difference = depths_[left] - depths_[right];
+    for (size_t level = 0; difference != 0; ++level, difference >>= 1) {
+      if (difference & 1) left = parents_[left][level];
+    }
+    if (left == right) return left;
+    for (size_t level = parents_[left].size(); level-- > 0;) {
+      const size_t a = level < parents_[left].size() ? parents_[left][level] : 0;
+      const size_t b = level < parents_[right].size() ? parents_[right][level] : 0;
+      if (a != b) {
+        left = a;
+        right = b;
+      }
+    }
+    return parents_[left][0];
+  }
+
+  size_t current_ = 0;
+  std::vector<const Stmt*> statements_;
+  std::vector<size_t> depths_;
+  std::vector<std::vector<size_t>> parents_;
+  std::map<const Var*, std::pair<size_t, size_t>> uses_;
+  std::map<const Var*, size_t> first_use_order_;
+};
+
+class TileToBufferMutator : public IRMutator {
+ public:
+  TileToBufferMutator(const StorageIndex& storage, std::map<const Stmt*, std::vector<StmtPtr>> definitions,
+                      bool addressless)
+      : storage_(storage), definitions_(std::move(definitions)), addressless_(addressless) {}
+
+  StmtPtr VisitStmt(const StmtPtr& stmt) override {
+    auto lowered = IRMutator::VisitStmt(stmt);
+    if (const auto entry = definitions_.find(stmt.get()); entry != definitions_.end()) {
+      auto body = entry->second;
+      body.push_back(lowered);
+      return SeqStmts::Flatten(std::move(body), stmt->span_);
+    }
+    return lowered;
+  }
+
+ protected:
+  StmtPtr VisitStmt_(const SeqStmtsPtr& sequence) override {
+    // The base mutator dispatches children directly through StmtFunctor,
+    // bypassing our placement wrapper. Re-enter VisitStmt for every child and
+    // flatten inserted definition prefixes so region yields remain terminators.
+    std::vector<StmtPtr> body;
+    body.reserve(sequence->stmts_.size());
+    for (const auto& statement : sequence->stmts_) body.push_back(VisitStmt(statement));
+    return SeqStmts::Flatten(std::move(body), sequence->span_);
+  }
+
   ExprPtr VisitExpr_(const VarPtr& var) override {
     if (As<TileType>(var->GetType())) return Handle(var);
     auto alias = tensor_aliases_.find(var.get());
@@ -992,6 +1105,9 @@ class TileToBufferMutator : public IRMutator {
       INTERNAL_CHECK_SPAN(result, call->span_) << "Internal error: allocation has no pointer definition";
       auto found = storage_.roots.find(result.get());
       if (found == storage_.roots.end()) return Empty(call->span_);
+      if (addressless_ && !As<MultiBufferType>(found->second.handle->GetType())) {
+        return Empty(call->span_);
+      }
       return std::make_shared<SeqStmts>(found->second.definitions, call->span_);
     }
     if (IsOp(call, "tile.create")) {
@@ -1271,6 +1387,8 @@ class TileToBufferMutator : public IRMutator {
   }
 
   const StorageIndex& storage_;
+  const std::map<const Stmt*, std::vector<StmtPtr>> definitions_;
+  const bool addressless_;
   std::unordered_map<const TileType*, VarPtr> window_handles_;
   std::unordered_map<const Var*, std::pair<VarPtr, MakeTuplePtr>> window_origins_;
   YieldContext* yield_context_ = nullptr;
@@ -1307,7 +1425,13 @@ ProgramPtr TransformProgram(const ProgramPtr& program) {
     StorageIndex storage(addressed);
     storage.VisitStmt(function->body_);
     storage.Finalize(function);
-    TileToBufferMutator mutator(storage);
+    std::map<const Stmt*, std::vector<StmtPtr>> definitions;
+    if (!addressed) {
+      StorageDefinitionSites sites;
+      sites.VisitStmt(function->body_);
+      definitions = sites.Plan(storage);
+    }
+    TileToBufferMutator mutator(storage, std::move(definitions), !addressed);
     auto lowered = std::make_shared<Function>(*function);
     lowered->body_ = mutator.VisitStmt(function->body_);
     if (!storage.region_prologue.empty()) {

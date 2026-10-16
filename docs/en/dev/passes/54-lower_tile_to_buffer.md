@@ -156,7 +156,12 @@ additional allocation identities. A second traversal replaces each Tile use
 with its Buffer handle and rewrites supported calls. The maps remain private to
 the pass; the output IR contains no conversion side table.
 
-Existing storage definitions determine allocation placement. Conversion adds
+Addressed storage retains its existing allocation placement. Addressless
+single-buffer definitions are placed at the lowest common statement ancestor
+of their source Tile uses, in lexical first-use order. Hoisted pointer declarations
+must not extend loop-local buffer lifetimes to the whole function and prevent
+PTOAS from reusing sequential accumulators. Explicit multi-buffer regions retain
+their shared dominating prologue. Conversion adds
 no scratch allocation, address assignment, or implicit transfer. An exact
 self-copy is removed. Tensor return aliases are normalized to existing GM
 parameters while parameter directions and the orchestration ABI are preserved.
