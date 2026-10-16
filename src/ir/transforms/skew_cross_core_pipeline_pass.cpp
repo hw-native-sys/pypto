@@ -750,6 +750,7 @@ class SkewCrossCoreMutator : public IRMutator {
 
 FunctionPtr TransformSkewCrossCorePipeline(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "SkewCrossCorePipeline cannot run on null function";
+  pipeline_loop::CheckExplicitFlagsOutsidePipeline(func->body_);
   SkewCrossCoreMutator mutator;
   auto new_body = mutator.VisitStmt(func->body_);
   if (new_body.get() == func->body_.get()) return func;

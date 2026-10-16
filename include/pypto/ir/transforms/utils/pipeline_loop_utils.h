@@ -30,7 +30,7 @@ namespace pipeline_loop {
 /// replication), ``SkewCrossCorePipeline`` (cross-core prologue/steady/epilogue
 /// skew), and ``UnrollLoops`` (the throwing const-int accessor only).
 ///
-/// These are pure IR-construction helpers with no pass state. They were
+/// The cloning helpers are pure IR-construction helpers with no pass state. They were
 /// maintained as byte-identical private copies in each pass, which is how the
 /// #2002 cube-accumulator fix came to exist in one copy and not the other. The
 /// membership *taggers* are deliberately NOT here — see the note at the bottom
@@ -49,6 +49,10 @@ namespace pipeline_loop {
 /// @param what  What the value is, for the message (e.g. "step").
 /// @throws pypto::ValueError if @p expr is not a compile-time integer constant.
 int64_t GetConstIntValue(const ExprPtr& expr, const char* pass, const std::string& what);
+
+/// Reject explicit flags inside software-pipelined loops even when optional IR
+/// verification is disabled. Both scheduling passes call this before rewriting.
+void CheckExplicitFlagsOutsidePipeline(const StmtPtr& body);
 
 /// An ``INDEX``-typed ``ConstInt``.
 ExprPtr MakeConstIndex(int64_t value, const Span& span);

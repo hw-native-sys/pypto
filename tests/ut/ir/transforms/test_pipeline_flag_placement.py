@@ -37,6 +37,13 @@ def test_flags_inside_pipeline_rejected_before_skew():
     with pytest.raises(pypto.Error, match="cannot be used inside pl.pipeline"):
         pipeline.run(FlaggedPipeline)
 
+    for scheduler in (passes.skew_cross_core_pipeline, passes.lower_pipeline_loops):
+        pipeline = passes.PassPipeline()
+        pipeline.add_pass(scheduler())
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            with pytest.raises(ValueError, match="cannot be used inside pl.pipeline"):
+                pipeline.run(FlaggedPipeline)
+
 
 def test_flags_in_ordinary_loop_are_allowed():
     @pl.program

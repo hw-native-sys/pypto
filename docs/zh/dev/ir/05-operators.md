@@ -575,7 +575,7 @@ UINT32 + INT32 → INT32 (signed precedence)
 `"aic"` / `"aiv"` IR 元数据。代码生成对应 `pto.set_flag` / `pto.wait_flag`，
 动态 INDEX 操作数则生成 `_dyn` 形式。这些调用不表示跨核同步。
 `PipelineLoopValid` 验证器会在流水线调度前拒绝 `ForKind::Pipeline` 循环中的
-任一操作；普通循环可以使用显式 flag。
+任一操作。即使关闭可选 IR 验证，调度 pass 也会拒绝这种放置方式；普通循环可以使用显式 flag。
 
 `system.syncall` 有两种 mode，由其 `mode` **IR 属性**选择；Python 接口则用 `pl.SyncAllMode` 成员表达（见下文）。**hard** 形态（属性 `"hard"`，默认）下沉为 FFTS 屏障，等待所选 `core_type` 的**全部**物理核到达；kernel 必须以满占用方式启动（每个物理核一个 block）**且带 `sync_start=True`**（使所有 block 同时驻留——非 sync_start 启动可能分波次派发 block 而使屏障死锁），否则屏障死锁（AICore 错误 507018）。**soft** 形态（属性 `"soft"`）轮询一段共享 GM workspace，因此可在**部分**占用下工作。`gm_workspace` 是共享、清零的 GM `INT32` tensor，至少包含 16 个元素（64 字节）。请将它作为 kernel 参数传入，使所有 block 共享同一缓冲；该缓冲必须独占一条 cache line，并在首次使用前清零。
 
