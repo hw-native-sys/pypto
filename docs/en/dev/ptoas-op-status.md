@@ -47,7 +47,8 @@ it does not replace device numerical tests or exhaustively validate the planner.
 For an allocation-backed input, the padded result uses a dynamic-valid reshape
 alias initialized to the full tile extent. This preserves subsequent
 `set_validshape` updates, including runtime bounds and uses of the original padded
-handle. Slice and other non-mutable view inputs retain the static-valid lowering;
+handle. This includes allocations declared at function entry for `if/else` results.
+Slice and other non-mutable view inputs retain the static-valid lowering;
 the existing restrictions on updating their validity still apply.
 
 To extend this guard, add `@pytest.mark.ptoas_compile` to a regression test under
@@ -66,7 +67,8 @@ python -m pytest tests/st/runtime/ops/test_fillpad_inplace.py --memory-planner=p
 The six basic cases compare the full `[64, 64]` output against a reference: the first
 48 rows retain the input, and the last 16 rows contain zero, positive infinity,
 or negative infinity. Six more cases cover padding followed by static/runtime
-validity updates and another fill through the original padded alias. This
+validity updates and another fill through the original padded alias. Four additional
+cases exercise both paths of an `if/else` result before padding and narrowing. This
 complements the compilation guard with simulator numerical coverage; it does not
 establish on-device correctness for every view
 composition covered by the compilation tests.

@@ -2079,6 +2079,9 @@ std::string PTOCodegen::AllocNewTileBuf(const std::string& tile_buf_type_string,
   fs_.extra_alloc_tiles.push_back(
       FunctionState::ExtraAllocTile{name, tile_buf_type_string, addr_ssa, valid_row_ssa, valid_col_ssa});
   fs_.ssa_to_tile_buf_type[name] = tile_buf_type_string;
+  // Head declarations are ordinary allocations too; branch producers may
+  // reuse this handle without going through EmitAllocTileForVar again.
+  RegisterMutableTileName(name);
   return name;
 }
 
@@ -2103,6 +2106,7 @@ bool PTOCodegen::DeclareTileBufAtHead(const std::string& ssa_name, const AllocTi
   fs_.extra_alloc_tiles.push_back(FunctionState::ExtraAllocTile{ssa_name, fields.type_str, fields.addr_ssa,
                                                                 fields.valid_row_ssa, fields.valid_col_ssa});
   fs_.ssa_to_tile_buf_type[ssa_name] = fields.type_str;
+  RegisterMutableTileName(ssa_name);
   return true;
 }
 
