@@ -521,6 +521,255 @@ def test_hand_written_group_submit_remaps_no_dep_override():
     assert list(vec_submit.arg_directions) == []
 
 
+@pytest.mark.parametrize("reuse_members", [False, True])
+def test_hand_written_group_rebinds_shared_inout_results(reuse_members):
+    """Member writebacks bind to the canonical ABI, including private adapters (#3014)."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube_side(
+            self,
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return sink
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def vec_side(
+            self,
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            out: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+            return sink, out
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed(
+            self,
+            out: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+            sink = self.cube_side(sink)
+            sink, out = self.vec_side(sink, out)
+            return sink, out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            out: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+            sink = self.cube_side(sink)
+            return self.mixed(out, sink)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube_side(
+            self,
+            out: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return sink
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def vec_side(
+            self,
+            out: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+            return sink, out
+
+    before = Before
+    if not reuse_members:
+        before = ir.Program(
+            [func for func in Before.functions.values() if func.name != "main"], Before.name, Before.span
+        )
+    after = _run_pipeline(before)
+    group = after.get_function("mixed")
+    assert group is not None
+    member_names = ("mixed_aic_adapter", "mixed_aiv_adapter") if reuse_members else ("cube_side", "vec_side")
+    for actual_name, expected_name in zip(member_names, ("cube_side", "vec_side"), strict=True):
+        member = after.get_function(actual_name)
+        expected = Expected.get_function(expected_name)
+        assert member is not None and expected is not None
+        ir.assert_structural_equal(member, expected)
+        assert "FREE_VAR" not in member.as_python()
+
+    calls = [
+        stmt.value
+        for stmt in ir.flatten_to_stmts(group.body)
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call)
+    ]
+    assert [call.op.name for call in calls] == list(member_names)
+    assert all(list(call.args) == list(group.params) for call in calls)
+    if reuse_members:
+        for name in ("cube_side", "vec_side"):
+            original = Before.get_function(name)
+            retained = after.get_function(name)
+            assert original is not None and retained is not None
+            ir.assert_structural_equal(retained, original)
+
+
+@pytest.mark.parametrize("use_submit", [False, True])
+def test_hand_written_group_rebinds_tuple_writeback_no_dep(use_submit):
+    """Swapped tuple writebacks retain buffer identity and no_dep's canonical position (#3014)."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube_side(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+            return second, first
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def vec_side(
+            self,
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return sink
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_call(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            second, first = self.cube_side(first, second)
+            second = self.vec_side(pl.no_dep(second))
+            return second
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_submit(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            (second, first), _cube_tid = pl.submit(self.cube_side, first, second)
+            second, _vec_tid = pl.submit(self.vec_side, pl.no_dep(second))
+            return second
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube_side(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+            return second, first
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def vec_side(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return second
+
+    group_name = "mixed_submit" if use_submit else "mixed_call"
+    before = ir.Program(
+        [func for func in Before.functions.values() if func.name in ("cube_side", "vec_side", group_name)],
+        Before.name,
+        Before.span,
+    )
+    after = _run_pipeline(before)
+    group = after.get_function(group_name)
+    assert group is not None
+    for name in ("cube_side", "vec_side"):
+        member = after.get_function(name)
+        expected = Expected.get_function(name)
+        assert member is not None and expected is not None
+        ir.assert_structural_equal(member, expected)
+        assert "FREE_VAR" not in member.as_python()
+
+    launch_type = ir.Submit if use_submit else ir.Call
+    launches = [
+        stmt.value
+        for stmt in ir.flatten_to_stmts(group.body)
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, launch_type)
+    ]
+    assert [launch.op.name for launch in launches] == ["cube_side", "vec_side"]
+    assert all(list(launch.args) == list(group.params) for launch in launches)
+    assert launches[1].attrs["arg_direction_overrides"] == [1]
+
+
+@pytest.mark.parametrize("boundary_kind", ["slice", "view", "fresh"])
+def test_hand_written_group_no_dep_rejects_non_writeback_results(boundary_kind):
+    """A member's slice, view or fresh result cannot stand in for a complete Group parameter."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube_slice(
+            self,
+            source: pl.InOut[pl.Tensor[[32, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            result = pl.tensor.slice(source, [16, 16], [16, 0])
+            return result
+
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube_view(
+            self,
+            source: pl.InOut[pl.Tensor[[8, 32], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            result = pl.tensor.view(source, [16, 16])
+            return result
+
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube_fresh(
+            self,
+            source: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            result = pl.tensor.create([16, 16], dtype=pl.FP32)
+            return result
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def vec_side(
+            self,
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return sink
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_slice(
+            self,
+            source: pl.InOut[pl.Tensor[[32, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            local = self.cube_slice(source)
+            return self.vec_side(pl.no_dep(local))
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_view(
+            self,
+            source: pl.InOut[pl.Tensor[[8, 32], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            local = self.cube_view(source)
+            return self.vec_side(pl.no_dep(local))
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_fresh(
+            self,
+            source: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            local = self.cube_fresh(source)
+            return self.vec_side(pl.no_dep(local))
+
+    before = ir.Program(
+        [
+            func
+            for func in Before.functions.values()
+            if func.name in (f"cube_{boundary_kind}", "vec_side", f"mixed_{boundary_kind}")
+        ],
+        Before.name,
+        Before.span,
+    )
+    with pytest.raises(ValueError, match="Cannot map pl.no_dep argument 0 .* to a canonical Group parameter"):
+        _run_pipeline(before)
+
+
 def test_explicit_sync_core_type_routes_each_event_to_one_lane():
     """Mixed JIT kernels must not duplicate set/wait onto both core types."""
 

@@ -34,6 +34,12 @@ members to that Group signature and rewrites both inner `Call` or `Submit` nodes
 to forward the complete list. Unused parameters remain valid wrapper arguments;
 each cloned body still references only the values from its original call.
 
+Member results that write back a complete Group parameter are rebound to that
+parameter in the shared ABI. This includes SSA aliases and reordered tuple
+results from `Call` or `Submit`; `pl.no_dep` follows the same mapping to retain
+its canonical argument position. Views, slices, and newly allocated buffers
+are not complete-parameter writeback aliases.
+
 When both member kernels are exclusive to the Group, their names are preserved.
 If either kernel has another call site, the pass creates a Group-private adapter
 pair and rewrites `import_peer_buffer(peer_func=...)` to the adapter peer names,

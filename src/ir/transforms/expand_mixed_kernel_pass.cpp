@@ -2545,9 +2545,49 @@ class PeerFuncRewriter : public IRMutator {
   std::unordered_map<std::string, std::string> rename_map_;
 };
 
+using GroupAbiParamIndices = std::unordered_map<const Var*, int32_t>;
+
+GroupAbiParamIndices BuildGroupAbiParamIndices(const FunctionPtr& group, const WrapperCallInfo& aic,
+                                               const WrapperCallInfo& aiv, const ProgramPtr& program) {
+  class ArgVarCollector : public IRVisitor {
+   public:
+    std::vector<VarPtr> vars;
+
+   protected:
+    void VisitVarLike_(const VarPtr& var) override {
+      if (seen_.insert(var.get()).second) vars.push_back(var);
+    }
+    // The lineage index follows carry initializers; collect only operands here.
+    void VisitExpr_(const IterArgPtr& var) override { VisitVarLike_(var); }
+
+   private:
+    std::unordered_set<const Var*> seen_;
+  } collector;
+  for (const auto& call : {aic.inner_call, aiv.inner_call}) {
+    for (const auto& arg : call->args_) collector.VisitExpr(arg);
+  }
+
+  // Index the Group body once and share lineage across all queried operands.
+  // Only complete-parameter writebacks qualify: a view or a new buffer must
+  // never be substituted with the Group parameter that happens to precede it.
+  auto indices = return_lineage::TraceToParamIndices(collector.vars, group->body_, group->params_, program);
+  GroupAbiParamIndices result;
+  result.reserve(group->params_.size() + collector.vars.size());
+  for (size_t i = 0; i < group->params_.size(); ++i) {
+    result.emplace(group->params_[i].get(), static_cast<int32_t>(i));
+  }
+  for (size_t i = 0; i < collector.vars.size(); ++i) {
+    if (auto index = indices[i]) {
+      result.emplace(collector.vars[i].get(), static_cast<int32_t>(index.value()));
+    }
+  }
+  return result;
+}
+
 FunctionPtr BuildGroupAbiAdapter(const FunctionPtr& group, const WrapperCallInfo& member,
                                  const std::string& adapter_name,
-                                 const std::unordered_map<std::string, std::string>& peer_renames) {
+                                 const std::unordered_map<std::string, std::string>& peer_renames,
+                                 const GroupAbiParamIndices& canonical_arg_indices) {
   const auto& callee = member.inner_callee;
   const auto& call = member.inner_call;
   INTERNAL_CHECK(group != nullptr && callee != nullptr && call != nullptr)
@@ -2559,10 +2599,13 @@ FunctionPtr BuildGroupAbiAdapter(const FunctionPtr& group, const WrapperCallInfo
   std::vector<VarPtr> adapter_params;
   adapter_params.reserve(group->params_.size());
   std::unordered_map<const Var*, VarPtr> group_to_adapter;
+  group_to_adapter.reserve(canonical_arg_indices.size());
   for (const auto& param : group->params_) {
     auto fresh = std::make_shared<Var>(param->name_hint_, param->GetType(), param->span_);
     adapter_params.push_back(fresh);
-    group_to_adapter.emplace(param.get(), fresh);
+  }
+  for (const auto& [alias, index] : canonical_arg_indices) {
+    group_to_adapter.emplace(alias, adapter_params[static_cast<size_t>(index)]);
   }
 
   // Bind every original member parameter to the corresponding Group call-site
@@ -2587,12 +2630,10 @@ FunctionPtr BuildGroupAbiAdapter(const FunctionPtr& group, const WrapperCallInfo
 class GroupMemberCallRewriter : public IRMutator {
  public:
   GroupMemberCallRewriter(std::unordered_map<std::string, std::string> callee_renames,
-                          std::vector<VarPtr> canonical_args)
-      : callee_renames_(std::move(callee_renames)), canonical_args_(std::move(canonical_args)) {
-    for (size_t i = 0; i < canonical_args_.size(); ++i) {
-      canonical_arg_indices_.emplace(canonical_args_[i].get(), static_cast<int32_t>(i));
-    }
-  }
+                          std::vector<VarPtr> canonical_args, GroupAbiParamIndices canonical_arg_indices)
+      : callee_renames_(std::move(callee_renames)),
+        canonical_args_(std::move(canonical_args)),
+        canonical_arg_indices_(std::move(canonical_arg_indices)) {}
 
  protected:
   ExprPtr VisitExpr_(const CallPtr& op) override {
@@ -2659,7 +2700,7 @@ class GroupMemberCallRewriter : public IRMutator {
 
   std::unordered_map<std::string, std::string> callee_renames_;
   std::vector<VarPtr> canonical_args_;
-  std::unordered_map<const Var*, int32_t> canonical_arg_indices_;
+  GroupAbiParamIndices canonical_arg_indices_;
 };
 
 std::string ReserveAdapterName(const std::string& base, std::unordered_set<std::string>& used_names) {
@@ -2730,8 +2771,12 @@ NormalizedGroups NormalizeHandWrittenGroupAbis(const ProgramPtr& program,
     const std::unordered_map<std::string, std::string> peer_renames = {{aic.inner_callee->name_, aic_name},
                                                                        {aiv.inner_callee->name_, aiv_name}};
 
-    auto normalized_aic = BuildGroupAbiAdapter(group, aic, aic_name, peer_renames);
-    auto normalized_aiv = BuildGroupAbiAdapter(group, aiv, aiv_name, peer_renames);
+    // Compute aliases before cloning either member. Adapter substitution and
+    // no_dep remapping must agree even when the preceding member permutes its
+    // tuple writebacks or is launched through Submit.
+    auto canonical_arg_indices = BuildGroupAbiParamIndices(group, aic, aiv, program);
+    auto normalized_aic = BuildGroupAbiAdapter(group, aic, aic_name, peer_renames, canonical_arg_indices);
+    auto normalized_aiv = BuildGroupAbiAdapter(group, aiv, aiv_name, peer_renames, canonical_arg_indices);
     if (needs_dual_aiv_dispatch) normalized_aiv = WithDualAivDispatch(normalized_aiv);
     if (exclusive_pair) {
       replacements[aic_name] = normalized_aic;
@@ -2745,7 +2790,8 @@ NormalizedGroups NormalizeHandWrittenGroupAbis(const ProgramPtr& program,
                                                                    {aiv.inner_callee->name_, aiv_name}};
     auto mutable_group = MutableCopy(group);
     mutable_group->body_ =
-        GroupMemberCallRewriter(std::move(callee_renames), group->params_).VisitStmt(group->body_);
+        GroupMemberCallRewriter(std::move(callee_renames), group->params_, std::move(canonical_arg_indices))
+            .VisitStmt(group->body_);
     replacements[group->name_] = mutable_group;
   }
 

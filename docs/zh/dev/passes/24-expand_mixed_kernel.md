@@ -32,6 +32,11 @@ active lane 共用同一份 `CoreTaskArgs` payload。因此，两个已编译 ke
 或 `Submit`，使其转发完整参数列表。未使用的参数仍是合法的 wrapper 参数；克隆后的
 函数体依旧只引用原调用实际使用的值。
 
+若成员返回值写回完整的 Group 参数，共享 ABI 会将该返回值重新绑定到对应参数。
+这涵盖 SSA 别名以及 `Call` 或 `Submit` 的乱序 tuple 返回；`pl.no_dep` 也使用同一
+映射，保留其对应的规范参数位置。view、slice 和新分配的 buffer 不属于完整参数的
+写回别名。
+
 当两个成员 kernel 都只属于该 Group 时，保留其原函数名。如果任一 kernel 还有其他
 调用点，Pass 会生成一对 Group 私有 adapter，并把
 `import_peer_buffer(peer_func=...)` 改写为 adapter 的 peer 名称，从而为其他调用者保留
