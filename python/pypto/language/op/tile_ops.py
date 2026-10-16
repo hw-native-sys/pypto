@@ -181,9 +181,11 @@ from pypto.pypto_core.ir import (
     AtomicType,
     CachePolicy,
     Expr,
+    LoadL2Hint,
     MemorySpace,
     PadValue,
     Span,
+    StoreL2Hint,
     STPhase,
     TileLayout,
 )
@@ -443,9 +445,10 @@ def load(
             in both directions: ``cache=CachePolicy.DEFAULT`` opts this one read
             back into the cache inside a bypassing scope. Requires PTOAS >= v0.64,
             where a BYPASS read compiles to a load issued against the page's
-            uncached alias on A2/A3 — the only architecture that maps GM twice,
-            and the only one where the declaration has an effect today; DEFAULT
-            emits nothing.
+            uncached alias on A2/A3. On A5, BYPASS selects ISA NotAllocKeep;
+            DEFAULT emits an ordinary load.
+            A5 also supports the explicit NORMAL_* and NOT_ALLOC_* policies.
+            Their ISA encodings are selected by backend code generation.
 
     Returns:
         Tile wrapping the load operation
@@ -456,6 +459,8 @@ def load(
         >>> # streaming read, no cache reuse expected
         >>> tile = load(tensor, [0, 0], [32, 32], cache=pl.CachePolicy.BYPASS)
     """
+    if isinstance(cache, (LoadL2Hint, StoreL2Hint)):
+        raise TypeError("load cache must be CachePolicy, not a raw ISA hint")
     if valid_shape is None:
         valid_shape = shapes
     call_expr = _ir_ops.load(
@@ -480,6 +485,7 @@ def store(
     st_phase: STPhase = STPhase.Unspecified,
     pre_quant: float | None = None,
     pre_relu: bool = False,
+    cache: CachePolicy | None = None,
 ) -> _TensorT:
     """Copy data from tile back to tensor.
 
@@ -520,6 +526,12 @@ def store(
             ``maximum(tile, 0) * pre_quant`` and not
             ``maximum(tile * pre_quant, 0)``. The two agree for every positive
             scale and differ at every element for a negative one.
+        cache: Optional cache policy. A5 Vec-to-GM stores support DEFAULT,
+            BYPASS, NORMAL_* and NOT_ALLOC_CLEAN. A5 Acc-to-GM stores support
+            only DEFAULT and NORMAL_FIRST_VICTIM with the pinned PTO-ISA;
+            other policies are rejected, including for ReLU and quantized
+            writeback. NOT_ALLOC_KEEP/DROP are load-only. A2/A3 supports
+            DEFAULT stores only.
 
     Returns:
         Tensor wrapping the store operation
@@ -536,6 +548,8 @@ def store(
         >>> # INT32 accumulator dequantized and ReLU'd straight into FP16 GM
         >>> result = store(acc_i32, [0, 0], out_f16, pre_quant=1.0 / 1024, pre_relu=True)
     """
+    if cache is not None and type(cache) is not CachePolicy:
+        raise TypeError(f"store cache must be CachePolicy, got {type(cache).__name__}")
     normalized_offsets = _normalize_intlike(offsets)
     normalized_shapes = _normalize_intlike(shapes) if shapes is not None else None
     call_expr = _ir_ops.store(
@@ -547,6 +561,7 @@ def store(
         st_phase=st_phase,
         pre_quant=pre_quant,
         pre_relu=pre_relu,
+        cache=None if cache is None else int(cache),
     )
     return output_tensor.__class__(expr=call_expr)
 

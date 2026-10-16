@@ -35,6 +35,13 @@ import pytest
 from pypto import ir
 from pypto.language.parser.diagnostics import ParserSyntaxError
 
+_LOAD_POLICIES = list(pl.CachePolicy)
+_STORE_POLICIES = [
+    policy
+    for policy in pl.CachePolicy
+    if policy not in (pl.CachePolicy.NOT_ALLOC_KEEP, pl.CachePolicy.NOT_ALLOC_DROP)
+]
+
 BYPASS = int(ir.CachePolicy.BYPASS)
 DEFAULT = int(ir.CachePolicy.DEFAULT)
 
@@ -308,6 +315,31 @@ def test_conflicting_policies_for_one_tensor_are_rejected():
                     t: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [0, 0], [64, 64])
                     out = pl.store(t, [0, 0], out)
                 return out
+
+
+@pytest.mark.parametrize("load_hint", _LOAD_POLICIES)
+@pytest.mark.parametrize("store_hint", _STORE_POLICIES)
+def test_l2_hint_roundtrip(load_hint, store_hint):
+    """Preserve the exact load/store enum, including the explicit zero hint."""
+
+    @pl.program
+    class Hinted:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self, x: pl.Tensor[[32, 32], pl.FP32], out: pl.Out[pl.Tensor[[32, 32], pl.FP32]]
+        ) -> pl.Tensor[[32, 32], pl.FP32]:
+            t = pl.load(x, [0, 0], [32, 32], cache=load_hint)
+            out = pl.store(t, [0, 0], out, cache=store_hint)
+            return out
+
+    text = ir.python_print(Hinted)
+    if int(load_hint) > 1:
+        assert f"cache=pl.CachePolicy.{load_hint.name}" in text
+    else:
+        assert f"cache={int(load_hint)}" in text
+    assert f"cache=pl.CachePolicy.{store_hint.name}" in text
+    ir.assert_structural_equal(Hinted, _reparse(Hinted))
+    ir.assert_structural_equal(Hinted, ir.deserialize(ir.serialize(Hinted)))
 
 
 if __name__ == "__main__":

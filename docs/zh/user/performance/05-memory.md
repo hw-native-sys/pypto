@@ -221,10 +221,20 @@ load 上显式的 `cache=` 永远优先于作用域声明，两个方向都成�
 （coherency）缺陷 —— 这正是它绝不作为默认、也绝不由编译器推断的原因。编译器会拒绝它能看见的
 那种情况（在作用域会写入的张量上声明 `BYPASS` 是错误），但无法证明一般情形。
 
-**要求 PTOAS >= v0.64，且只在 a2a3 上真正生效。** 在 a2a3 上，`BYPASS` 读取会编译成
+**要求 PTOAS >= v0.64。** 在 a2a3 上，`BYPASS` 读取会编译成
 对该页 uncached 别名的访问，别名距离取自驱动为这块设备报告的值；若设备不提供该别名，
-驱动返回 0，读取退化为普通的带缓存访问，结果依然正确。a5 不做双重映射，声明在那里会被
-接受但当前不改变任何东西。未作声明的读取在所有目标上都逐字节不受影响。
+驱动返回 0，读取退化为普通的带缓存访问，结果依然正确。A5 使用 ISA 缓存控制模式，
+不使用地址别名偏移。未作声明的读取在所有目标上都逐字节不受影响。
+
+### A5 缓存模式
+
+load/store 统一使用 `cache=CachePolicy...`。A5 增加 NORMAL_FIRST_VICTIM、
+NORMAL_LAST_VICTIM、NORMAL_PERSISTENT、NOT_ALLOC_KEEP、NOT_ALLOC_CLEAN、NOT_ALLOC_DROP。
+KEEP/DROP 仅支持 load。后端将 NOT_ALLOC_CLEAN 转换为 load ISA 编码 5 或 store
+编码 4；前端枚举值表达语义，不能直接作为 ISA 位字段。A5 的 BYPASS 读使用
+NotAllocKeep，写使用 NotAllocClean。A2/A3 保留 load 的运行时 offset 路线，并拒绝
+新增模式。作用域声明也使用同一枚举，仅控制读取，显式 load 参数优先。完整映射见
+[GM 缓存策略](../../dev/language/05-cache-policy.md)。
 
 ## 参见
 
