@@ -31,7 +31,7 @@ from pypto.language.op import prefetch_ops as _dsl_prefetch
 from pypto.language.op import system_ops as _dsl_system
 from pypto.language.op import tensor_ops as _dsl_tensor
 from pypto.language.op import tile_ops as _dsl_tile
-from pypto.language.optimizations import SPLIT_SLOT_NUM_DEPRECATION
+from pypto.language.optimizations import SPLIT_SLOT_NUM_DEPRECATION, CrossCoreSlot, cross_core_slot
 from pypto.language.typing.dynamic import DynVar
 from pypto.pypto_core import DataType, ir
 from pypto.pypto_core import arith as _arith
@@ -647,7 +647,7 @@ class _AtKwargState:
     # Optional cross-core pipe slot count from ``pl.cross_core_slot(slot_num=N)``
     # (or the deprecated ``pl.split(mode, slot_num=N)`` spelling). Stored on the
     # scope attrs and propagated to the outlined function attr.
-    split_slot_num: "int | None" = None
+    cross_core_slots: "CrossCoreSlot | None" = None
     # Tracks the ``optimizations=`` kwarg AST so a duplicate ``optimizations=``
     # can be rejected in ``_handle_at_optimizations_kw``.
     new_optimizations_kw: "ast.keyword | None" = field(default=None)
@@ -4118,7 +4118,7 @@ class ASTParser:
         state.new_optimizations_kw = kw
         (
             state.split_mode,
-            state.split_slot_num,
+            state.cross_core_slots,
         ) = self._parse_optimizations_list(kw.value)
 
     def _parse_optimizations_list(
@@ -4128,7 +4128,7 @@ class ASTParser:
         owner: str = "pl.at",
         list_hint: str | None = None,
         entry_hint: str | None = None,
-    ) -> tuple["ir.SplitMode | None", "int | None"]:
+    ) -> tuple["ir.SplitMode | None", "CrossCoreSlot | None"]:
         """Parse ``optimizations=[...]`` for ``pl.at`` or ``pl.spmd``.
 
         Two entries are recognised, freely combinable because they are
@@ -4143,7 +4143,7 @@ class ASTParser:
             entry_hint: Override hint for unsupported list entries.
 
         Returns:
-            Tuple ``(split_mode, split_slot_num)``.
+            Tuple ``(split_mode, cross_core_slots)``.
         """
         if list_hint is None:
             list_hint = "Use optimizations=[pl.split(pl.SplitMode.NONE)]."
@@ -4157,10 +4157,10 @@ class ASTParser:
             )
 
         split_mode: ir.SplitMode | None = None
-        split_slot_num: int | None = None
+        cross_core_slots: CrossCoreSlot | None = None
         seen_split = False
         seen_cross_core_slot = False
-        # Tracks whether split_slot_num came from the deprecated
+        # Tracks whether cross_core_slots came from the deprecated
         # ``pl.split(slot_num=)`` spelling, so a list carrying both sources for
         # one value is rejected instead of letting entry order decide.
         slot_num_from_split = False
@@ -4182,9 +4182,9 @@ class ASTParser:
                             span=self.span_tracker.get_span(entry),
                             hint="Keep only pl.cross_core_slot(slot_num=N).",
                         )
-                    split_slot_num = slot_num
+                    cross_core_slots = CrossCoreSlot(slot_num=slot_num)
                     slot_num_from_split = True
-            elif (slot_num := self._try_parse_pl_cross_core_slot(entry)) is not None:
+            elif (slots := self._try_parse_pl_cross_core_slot(entry)) is not None:
                 if seen_cross_core_slot:
                     raise ParserSyntaxError(
                         "Duplicate 'pl.cross_core_slot(...)' in optimizations=[...]",
@@ -4198,7 +4198,7 @@ class ASTParser:
                         hint="Drop slot_num= from pl.split(...) and keep pl.cross_core_slot(slot_num=N).",
                     )
                 seen_cross_core_slot = True
-                split_slot_num = slot_num
+                cross_core_slots = slots
             else:
                 raise ParserSyntaxError(
                     f"Unsupported entry in {owner}(optimizations=[...])",
@@ -4206,12 +4206,14 @@ class ASTParser:
                     hint=entry_hint,
                 )
 
-        return split_mode, split_slot_num
+        return split_mode, cross_core_slots
 
-    def _parse_spmd_optimizations_list(self, value: ast.expr) -> "tuple[ir.SplitMode | None, int | None]":
-        """Parse ``pl.spmd(..., optimizations=[...])`` — ``pl.split`` only.
+    def _parse_spmd_optimizations_list(
+        self, value: ast.expr
+    ) -> "tuple[ir.SplitMode | None, CrossCoreSlot | None]":
+        """Parse split mode and pipe depths on ``pl.spmd(..., optimizations=[...])``.
 
-        Returns ``(split_mode, split_slot_num)``.
+        Returns ``(split_mode, cross_core_slots)``.
         """
         return self._parse_optimizations_list(
             value,
@@ -4276,11 +4278,11 @@ class ASTParser:
         mode = extract_enum_value(node.args[0], SPLIT_MODE_MAP, "SplitMode", "pl.SplitMode")
         return mode, slot_num
 
-    def _try_parse_pl_cross_core_slot(self, node: ast.expr) -> "int | None":
-        """Return the slot count if the node is ``pl.cross_core_slot(slot_num=N)``; else None.
+    def _try_parse_pl_cross_core_slot(self, node: ast.expr) -> "CrossCoreSlot | None":
+        """Return the pipe depths if the node is ``pl.cross_core_slot(slot_num=N)``; else None.
 
         Also accepts ``pl.optimizations.cross_core_slot(slot_num=N)``. The
-        ``slot_num=`` keyword is required and is the only accepted argument.
+        ``slot_num=`` keyword is required; ``local_slot_num=`` is optional.
         """
         if not self._is_pl_optimization_call(node, "cross_core_slot"):
             return None
@@ -4294,11 +4296,18 @@ class ASTParser:
                 hint=usage_hint,
             )
         slot_num: int | None = None
+        local_slot_num: int | None = None
         for kw in node.keywords:
             if kw.arg == "slot_num":
                 slot_num = self._eval_slot_num_literal(
                     kw.value, "pl.cross_core_slot(slot_num=...)", hint=usage_hint
                 )
+            elif kw.arg == "local_slot_num":
+                # Explicit None has the same default semantics as omission.
+                if not (isinstance(kw.value, ast.Constant) and kw.value.value is None):
+                    local_slot_num = self._eval_slot_num_literal(
+                        kw.value, "pl.cross_core_slot(local_slot_num=...)", hint=usage_hint
+                    )
             else:
                 raise ParserSyntaxError(
                     f"Unknown keyword argument '{kw.arg}' in pl.cross_core_slot()",
@@ -4311,7 +4320,10 @@ class ASTParser:
                 span=self.span_tracker.get_span(node),
                 hint=usage_hint,
             )
-        return slot_num
+        try:
+            return cross_core_slot(slot_num=slot_num, local_slot_num=local_slot_num)
+        except ValueError as exc:
+            raise ParserSyntaxError(str(exc), span=self.span_tracker.get_span(node)) from exc
 
     def _eval_slot_num_literal(self, value: ast.expr, api: str, *, hint: str) -> int:
         """Evaluate a ``slot_num=`` argument as a positive int literal.
@@ -4673,7 +4685,7 @@ class ASTParser:
         bool,
         str,
         "ir.SplitMode | None",
-        "int | None",
+        "CrossCoreSlot | None",
         "list[ir.Var]",
         bool,
         "ir.Expr | None",
@@ -4684,13 +4696,13 @@ class ASTParser:
         Also accepts ``allow_early_resolve=`` (the speculative early-dispatch
         hint), ``predicate=`` (the dispatch predicate) and ``dumps=`` (selective
         tensor dump). The first positional argument is ``core_num`` (range-like).
-        Returns ``(core_num, sync_start, name_hint, split_mode, split_slot_num,
+        Returns ``(core_num, sync_start, name_hint, split_mode, cross_core_slots,
         dep_vars, allow_early_resolve, predicate, dump_vars)`` with
         ``sync_start`` / ``allow_early_resolve`` defaulting to ``False``,
-        ``split_mode`` / ``split_slot_num`` / ``predicate`` to ``None``, and
+        ``split_mode`` / ``cross_core_slots`` / ``predicate`` to ``None``, and
         ``dep_vars`` / ``dump_vars`` to ``[]``.
 
-        ``optimizations=[...]`` accepts only ``pl.split(MODE)`` — see
+        ``optimizations=[...]`` accepts split and pipe-depth entries — see
         :meth:`_parse_spmd_optimizations_list`.
 
         ``deps=[...]`` is accepted on every form. It takes the same shapes as
@@ -4737,7 +4749,7 @@ class ASTParser:
         sync_start: bool = False
         name_hint = ""
         split_mode: ir.SplitMode | None = None
-        split_slot_num: int | None = None
+        cross_core_slots: CrossCoreSlot | None = None
         deps_kw: ast.keyword | None = None
         dump_vars: list[ir.Var] = []
         seen_dumps = False
@@ -4758,7 +4770,7 @@ class ASTParser:
             elif kw.arg == "sync_start":
                 sync_start = self._parse_spmd_bool_literal_kwarg(kw, usage_hint)
             elif kw.arg == "optimizations":
-                split_mode, split_slot_num = self._parse_spmd_optimizations_list(kw.value)
+                split_mode, cross_core_slots = self._parse_spmd_optimizations_list(kw.value)
             elif kw.arg == "deps":
                 deps_kw = kw
             elif kw.arg == "dumps":
@@ -4794,7 +4806,7 @@ class ASTParser:
             sync_start,
             name_hint,
             split_mode,
-            split_slot_num,
+            cross_core_slots,
             dep_vars,
             allow_early_resolve,
             predicate,
@@ -5018,7 +5030,7 @@ class ASTParser:
         sync_start: bool,
         name_hint: str,
         split_mode: "ir.SplitMode | None",
-        split_slot_num: "int | None",
+        cross_core_slots: "CrossCoreSlot | None",
         scope_attrs: "list[tuple[str, Any]]",
     ) -> None:
         """Emit the ``SpmdScopeStmt`` body shared by the plain and ``as tid`` with-forms.
@@ -5056,14 +5068,14 @@ class ASTParser:
         carrier is exempt from that check: the user wrote the InCore scope
         themselves, so the body is taken as deliberate.
         """
-        # ``split_slot_num`` is weighed alongside ``split_mode`` throughout: the
+        # ``cross_core_slots`` is weighed alongside ``split_mode`` throughout: the
         # slot count lands on the *InCore* scope (OutlineIncoreScopes reads
         # ``slot_num`` off InCoreScopeStmt only), so either entry alone is enough
         # to require a carrier — and enough to collide with one the body already
         # provides. Before pl.cross_core_slot existed the two were coupled:
         # slot_num could only arrive via pl.split(mode, slot_num=N), which always
         # set a mode.
-        has_optimization_entry = split_mode is not None or split_slot_num is not None
+        has_optimization_entry = split_mode is not None or cross_core_slots is not None
         carrier = self._explicit_incore_carrier(stmt.body)
         if carrier is not None:
             # The nested ``pl.at(CORE_GROUP)`` already is the carrier, and an
@@ -5072,7 +5084,7 @@ class ASTParser:
             # be pushed into a scope the user wrote by hand — reject both rather
             # than silently picking one or dropping it.
             if has_optimization_entry:
-                carrier_has_entry = carrier.split_mode is not None or carrier.split_slot_num is not None
+                carrier_has_entry = carrier.split_mode is not None or carrier.cross_core_slots is not None
                 where = (
                     "is specified twice: on `pl.spmd(...)` and on the inner"
                     if carrier_has_entry
@@ -5116,7 +5128,7 @@ class ASTParser:
             # (allow_early_resolve, and for the ``as tid`` form task_id_var /
             # manual_dep_edges) ride on the SpmdScopeStmt.
             #
-            # ``split_slot_num`` is checked alongside ``split_mode``: the slot
+            # ``cross_core_slots`` is checked alongside ``split_mode``: the slot
             # count lands on the *InCore* scope (OutlineIncoreScopes reads
             # ``slot_num`` off InCoreScopeStmt only), so taking this wrapper-less
             # path with a slot count set would silently discard it. Before
@@ -5139,7 +5151,7 @@ class ASTParser:
         # rationale).
         spmd_name_hint, incore_name_hint = _split_spmd_for_loop_name_hints(name_hint)
         incore_attrs = self._merge_forward_sticky_dump(None, ir.ScopeKind.InCore)
-        incore_attrs = self._append_split_slot_num_attr(incore_attrs, split_slot_num)
+        incore_attrs = self._append_cross_core_slots_attr(incore_attrs, cross_core_slots)
         # Cache-policy declarations attach to the InCore carrier, not the Spmd
         # scope: the carrier is what gets outlined into the per-block kernel
         # whose params the policy resolves against. That is also the scope the
@@ -5213,7 +5225,7 @@ class ASTParser:
             sync_start,
             name_hint,
             split_mode,
-            split_slot_num,
+            cross_core_slots,
             dep_vars,
             allow_early_resolve,
             predicate,
@@ -5231,7 +5243,7 @@ class ASTParser:
                 sync_start,
                 name_hint,
                 split_mode,
-                split_slot_num,
+                cross_core_slots,
                 dep_vars,
                 allow_early_resolve,
                 predicate,
@@ -5267,7 +5279,7 @@ class ASTParser:
             sync_start,
             name_hint,
             split_mode,
-            split_slot_num,
+            cross_core_slots,
             spmd_attrs,
         )
 
@@ -5280,7 +5292,7 @@ class ASTParser:
         sync_start: bool,
         name_hint: str,
         split_mode: "ir.SplitMode | None",
-        split_slot_num: "int | None",
+        cross_core_slots: "CrossCoreSlot | None",
         dep_vars: "list[ir.Var]",
         allow_early_resolve: bool,
         predicate: "ir.Expr | None",
@@ -5358,7 +5370,7 @@ class ASTParser:
             sync_start,
             name_hint,
             split_mode,
-            split_slot_num,
+            cross_core_slots,
             scope_attrs,
         )
         self._record_scope_producer(stmt.body, tid_var)
@@ -5445,7 +5457,7 @@ class ASTParser:
             sync_start,
             name_hint,
             split_mode,
-            split_slot_num,
+            cross_core_slots,
             dep_vars,
             allow_early_resolve,
             predicate,
@@ -5471,7 +5483,7 @@ class ASTParser:
         # the synthesised inner-kernel Call; the wrapper-dispatch codegen
         # (BuildWrapperReorderedParams) honours that inner call's dump_vars.
         incore_attrs = self._merge_forward_sticky_dump(None, ir.ScopeKind.InCore)
-        incore_attrs = self._append_split_slot_num_attr(incore_attrs, split_slot_num)
+        incore_attrs = self._append_cross_core_slots_attr(incore_attrs, cross_core_slots)
         # Same as the with-form: the declarations belong to the InCore carrier
         # the loop body lowers to, which is also the scope the printer re-emits
         # them from (the ``for i in pl.spmd(...)`` form drops the carrier's
@@ -5729,7 +5741,7 @@ class ASTParser:
         # Insert ``dump_vars`` before ``task_id_var`` AND before the trailing
         # ``slot_num`` so the canonical order (dump_vars ... task_id_var,
         # slot_num) matches what a print -> reparse rebuilds via _parse_at_meta +
-        # _append_split_slot_num_attr; structural equality ignores attr key order.
+        # _append_cross_core_slots_attr; structural equality ignores attr key order.
         insert_at = next(
             (i for i, (k, _) in enumerate(new_attrs) if k in {"task_id_var", "slot_num"}),
             len(new_attrs),
@@ -5912,7 +5924,7 @@ class ASTParser:
         # into split_, pl.cross_core_slot(...) into the slot_num attr. Neither
         # has a meaning on a Hierarchy scope, so reject either at a non-CORE_GROUP
         # level rather than silently attaching a dead attr.
-        if (split_mode is not None or state.split_slot_num is not None) and not is_core_group:
+        if (split_mode is not None or state.cross_core_slots is not None) and not is_core_group:
             raise ParserSyntaxError(
                 "optimizations=[pl.split(...)] / optimizations=[pl.cross_core_slot(...)] are only "
                 "supported with level=pl.Level.CORE_GROUP",
@@ -5937,7 +5949,7 @@ class ASTParser:
         scope_attrs = self._parse_at_meta(
             deps_kw, no_dep_args_kw, dumps_kw, optional_vars, state.allow_early_resolve, predicate, span
         )
-        scope_attrs = self._append_split_slot_num_attr(scope_attrs, state.split_slot_num)
+        scope_attrs = self._append_cross_core_slots_attr(scope_attrs, state.cross_core_slots)
         if state.windowize:
             scope_attrs = list(scope_attrs or [])
             scope_attrs.append(("windowize", True))
@@ -6095,20 +6107,19 @@ class ASTParser:
         return self._parse_submit_predicate_kwarg("pl.at()", [kw])
 
     @staticmethod
-    def _append_split_slot_num_attr(
-        attrs: "list[tuple[str, Any]] | None", slot_num: "int | None"
+    def _append_cross_core_slots_attr(
+        attrs: "list[tuple[str, Any]] | None", slots: "CrossCoreSlot | None"
     ) -> "list[tuple[str, Any]] | None":
-        """Append the ``slot_num`` scope attr (from ``pl.cross_core_slot(slot_num=N)``).
+        """Append pipe depths in a stable order for print/parse round-trips.
 
-        Appended last so a print -> reparse cycle reproduces the same attr order
-        (``optimizations=[...]`` is printed alongside ``deps=`` / ``dumps=``, and
-        slot_num always lands at the tail here on both passes).
-        Returns ``attrs`` unchanged when ``slot_num`` is ``None``.
+        Keep omitted local depth absent so existing scope IR stays unchanged.
         """
-        if slot_num is None:
+        if slots is None:
             return attrs
         result: list[tuple[str, Any]] = list(attrs) if attrs else []
-        result.append(("slot_num", slot_num))
+        result.append(("slot_num", slots.slot_num))
+        if slots.local_slot_num is not None:
+            result.append(("local_slot_num", slots.local_slot_num))
         return result
 
     def _parse_at_meta(

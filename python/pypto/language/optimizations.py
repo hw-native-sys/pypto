@@ -48,21 +48,22 @@ SPLIT_SLOT_NUM_DEPRECATION = (
 )
 
 
-def _validate_slot_num(slot_num: object, api: str) -> None:
+def _validate_slot_num(slot_num: object, api: str, parameter: str = "slot_num") -> None:
     """Validate a cross-core slot count.
 
     Args:
         slot_num: Candidate slot count.
         api: API name used in the error message (e.g. ``"pl.cross_core_slot"``).
+        parameter: Name of the depth parameter being validated.
 
     Raises:
         ValueError: If ``slot_num`` is not a positive integer.
     """
     # bool is a subclass of int — reject it so True/False can't pose as a count.
     if not isinstance(slot_num, int) or isinstance(slot_num, bool):
-        raise ValueError(f"{api} slot_num must be a positive integer, got {slot_num!r}")
+        raise ValueError(f"{api} {parameter} must be a positive integer, got {slot_num!r}")
     if slot_num <= 0:
-        raise ValueError(f"{api} slot_num must be a positive integer, got {slot_num}")
+        raise ValueError(f"{api} {parameter} must be a positive integer, got {slot_num}")
 
 
 class Optimization:
@@ -117,10 +118,11 @@ class CrossCoreSlot(Optimization):
 
     Orthogonal to splitting — it sizes a data channel, it does not partition
     work. Sets the ``slot_num`` scope attr, which ``OutlineIncoreScopes``
-    propagates to the outlined function and ``ExpandMixedKernel`` reads to size
-    **both** the reserved buffer (``slot_size * slot_num``) and the emitted
-    ``initialize_pipe`` ``slot_num`` attribute, in whichever directions the
-    scope actually uses (cube→vector, vector→cube, or both).
+    propagates to the outlined function and ``ExpandMixedKernel`` reads to emit
+    the ``initialize_pipe`` ``slot_num`` attribute, in whichever directions the
+    scope actually uses (cube→vector, vector→cube, or both). The reserved buffer
+    uses ``slot_size * local_slot_num`` when a local depth is supplied, otherwise
+    ``slot_size * slot_num``. The GM ring always retains ``slot_num`` slots.
 
     Omitting the entry keeps the default depth of 2 per live direction — enough
     to double-buffer the handoff while leaving on-chip room for the tiles. The
@@ -128,22 +130,30 @@ class CrossCoreSlot(Optimization):
 
     Args:
         slot_num: Ring depth. Must be a positive integer.
+        local_slot_num: A2/A3 consumer-side local depth. Must be positive and
+            no greater than ``slot_num``. Omission uses ``slot_num``. Explicit
+            values are unsupported on A5, including values equal to ``slot_num``.
     """
 
     slot_num: int
+    local_slot_num: int | None = None
 
 
-def cross_core_slot(*, slot_num: int) -> CrossCoreSlot:
+def cross_core_slot(*, slot_num: int, local_slot_num: int | None = None) -> CrossCoreSlot:
     """Create a ``CrossCoreSlot`` optimization entry.
 
     Args:
         slot_num: Cross-core pipe slot count (ring depth). Must be positive.
+        local_slot_num: Optional A2/A3 local FIFO depth, in ``[1, slot_num]``.
+            Defaults to the ring depth. Explicit values are unsupported on A5.
+            It must accommodate all simultaneously live consumer pops.
 
     Returns:
         ``CrossCoreSlot`` instance for use in ``pl.at(..., optimizations=[...])``.
 
     Raises:
-        ValueError: If ``slot_num`` is not a positive integer.
+        ValueError: If a depth is not a positive integer or the local depth
+            exceeds the ring depth.
 
     Examples:
         >>> # Deepen the auto-inserted ring so the producing core can run further ahead
@@ -152,7 +162,13 @@ def cross_core_slot(*, slot_num: int) -> CrossCoreSlot:
         ...     ...
     """
     _validate_slot_num(slot_num, "pl.cross_core_slot")
-    return CrossCoreSlot(slot_num=slot_num)
+    if local_slot_num is not None:
+        _validate_slot_num(local_slot_num, "pl.cross_core_slot", "local_slot_num")
+        if local_slot_num > slot_num:
+            raise ValueError(
+                f"pl.cross_core_slot local_slot_num ({local_slot_num}) must be <= slot_num ({slot_num})"
+            )
+    return CrossCoreSlot(slot_num=slot_num, local_slot_num=local_slot_num)
 
 
 __all__ = [

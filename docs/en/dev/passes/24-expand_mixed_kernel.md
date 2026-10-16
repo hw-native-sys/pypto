@@ -179,7 +179,8 @@ Setup is derived from the split bodies:
 - `id`: omitted for automatic setup, so PTOAS uses the default frontend pipe id `0`
 - `slot_size`: max tile byte size across all directions (`shape * dtype bits / 8`)
 - `slot_num`: ring depth — `2` by default, in every direction; always emitted explicitly; overridable per scope (see below)
-- `buffer_size`: `slot_num * slot_size`
+- `local_slot_num`: optional A2/A3 local consumer depth; omission uses `slot_num`
+- `buffer_size`: `slot_size * local_slot_num` when supplied, otherwise `slot_size * slot_num`
 - buffer names: `<func>_c2v_slot_buffer` / `<func>_v2c_slot_buffer`
 - reserve-buffer base: `AUTO` on insertion, then resolved to an explicit address by `AllocateMemoryAddr`
 
@@ -242,9 +243,9 @@ with pl.at(level=pl.Level.CORE_GROUP,
 
 The value is carried as the `slot_num` scope attr, propagated by
 `OutlineIncoreScopes` to the outlined function's `slot_num` attr, and read here.
-It drives **both** the reserved buffer (`slot_size * slot_num`) and the emitted
-`initialize_pipe` `slot_num` attribute, so PTOAS and the auto-reserved buffer
-stay consistent. Automatic setup **always** emits the attribute, whether or not
+It drives the transport ring and the emitted `initialize_pipe` `slot_num`
+attribute. Without an explicit local depth, it also sizes the reserved buffer
+(`slot_size * slot_num`). Automatic setup **always** emits the attribute, whether or not
 the scope overrides it: PTOAS derives its own depth from `dir_mask` (8
 unidirectional, 4 bidirectional) when the clause is absent, which would index
 past a buffer reserved for a shallower ring. Only hand-written
@@ -263,15 +264,27 @@ they did not want — the `pl.split(pl.SplitMode.NONE, slot_num=N)` idiom — wh
 Move the value to `pl.cross_core_slot(slot_num=N)`; the printer already
 normalises to that form.
 
-> Decoupling the logical ring depth from a smaller local resident window
-> (`local_slot_num < slot_num`, an a2/a3-only optimisation) is not yet exposed
-> on the automatic split path — use the manual `pl.aic_initialize_pipe` /
-> `pl.aiv_initialize_pipe` system ops for that.
->
-> That manual route is a2/a3-only too, and not just for `local_slot_num <
-> slot_num`: ptoas rejects the `local_slot_num` operand on
-> `pto.{aic,aiv}_initialize_pipe` for the 950 frontend pipe lowering whatever
-> its value, so on a5 the operand must be omitted entirely.
+On A2/A3, set `local_slot_num` to keep a smaller on-chip consumer FIFO while
+retaining the GM transport depth:
+
+```python
+with pl.spmd(4, optimizations=[pl.cross_core_slot(slot_num=4, local_slot_num=1)]):
+    ...
+```
+
+Both counts must be positive integers and `local_slot_num <= slot_num`.
+Omitting `local_slot_num` (or passing `None`) preserves the existing footprint.
+The outliner propagates both attributes; both peer initializers emit the same
+explicit local depth, and each on-chip reserve uses `slot_size * local_slot_num`.
+GM allocation still uses `slot_num`. The common maximum `slot_size` is unchanged.
+The pass checks the finalized FIFO schedule and rejects a local depth smaller
+than the number of simultaneously retained consumer pops. It does not reschedule
+consumers to make a smaller depth fit.
+
+Explicit local depth is rejected on A5, even when equal to `slot_num`, because
+PTOAS does not support the attribute for that frontend pipe lowering. Omit it
+for portable source. Like `slot_num`, it has no effect on scopes without an
+automatic cross-core pipe.
 
 For consumer-side cross-core tiles, the pass also ensures each `tile.tpop_*` has a matching
 `system.tfree_*`. When an existing free is obviously too early, the pass delays it to a later statement in the same
