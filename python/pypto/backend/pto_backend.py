@@ -898,6 +898,30 @@ _SPLIT_FIFO_TEMPLATE_MARKERS = (
 _RUNTIME_SPLIT_FIFO_LANE_ARG = "PYPTO_SPLIT_RUNTIME_LANE_ARG"
 
 
+# A2A3's hardware subblock register can be stale under runtime dispatch. The
+# GM-entry TPOP overload has no explicit-lane form in the pinned PTO ISA, so
+# acquire its unsplit base through the public API and adjust only the view.
+_GLOBAL_SPLIT_FIFO_POP_BRIDGE = """\
+template <typename Pipe, typename GlobalData, TileSplitAxis Split, typename... WaitEvents>
+static __aicore__ inline auto PYPTO_SPLIT_GLOBAL_TPOP(
+    Pipe& pipe, GlobalData& tensor PYPTO_SPLIT_RUNTIME_LANE_ARG(int32_t subblock_id),
+    WaitEvents&... events) {
+#if defined(__CPU_SIM) || defined(__COSTMODEL)
+  return TPOP<Pipe, GlobalData, Split>(pipe, tensor, events...);
+#else
+  auto event = TPOP<Pipe, GlobalData, TileSplitAxis::TILE_NO_SPLIT>(pipe, tensor, events...);
+  constexpr int64_t columns = GlobalData::staticShape[pto::GlobalTensorDim::DIM_4];
+  constexpr int64_t rows = Split == TileSplitAxis::TILE_UP_DOWN
+      ? GlobalData::staticShape[pto::GlobalTensorDim::DIM_3] : 1;
+  static_assert(rows > 0 && columns > 0, "Split GM FIFO payload needs static rows and columns");
+  TASSIGN(tensor, tensor.data() + subblock_id * rows * columns);
+  return event;
+#endif
+}
+
+"""
+
+
 def _second_call_argument_end(code: str, args_start: int, args_end: int, func_name: str) -> int:
     """Return where a runtime lane argument belongs after a FIFO call's tile argument."""
 
@@ -975,6 +999,10 @@ def _forward_runtime_lane_to_split_fifo_calls(
         args_end = _find_matching_delimiter(ptoas_code, args_start, "(", ")")
         if args_end < 0 or args_end >= body_end:
             raise RuntimeError(f"{func.name}: unterminated split {match.group(1)} call")
+        if match.group(1) == "TPOP" and re.search(r"\bGlobalTensor\s*<", template_args):
+            # The explicit-lane PTO-ISA overload accepts local Tiles only.
+            # GM entries use a public no-split pop followed by a lane view.
+            insertions.append((match.start(1), "PYPTO_SPLIT_GLOBAL_"))
         insertion_at = _second_call_argument_end(ptoas_code, args_start, args_end, func.name)
         insertions.append((insertion_at, f" {_RUNTIME_SPLIT_FIFO_LANE_ARG}({subblock_param})"))
         rewritten_counts[match.group(1)] += 1
@@ -1094,6 +1122,8 @@ def _generate_kernel_wrapper(
             f"#define {_RUNTIME_SPLIT_FIFO_LANE_ARG}(subblock_id) , subblock_id\n"
             "#endif\n\n"
         )
+        if "PYPTO_SPLIT_GLOBAL_TPOP<" in ptoas_body:
+            fifo_lane_arg_bridge += _GLOBAL_SPLIT_FIFO_POP_BRIDGE
         fifo_lane_arg_cleanup = f"#undef {_RUNTIME_SPLIT_FIFO_LANE_ARG}\n\n"
 
     # Resolve SPMD block identity once from intrinsic.h::get_block_idx(args) /
@@ -1809,6 +1839,7 @@ def generate(
     emit_source_loc: bool | None = None,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind | None = None,
+    enable_software_pipeline: bool = False,
 ) -> dict[str, str]:
     """Generate all PTO backend output files (kernels + orchestration + config).
 
@@ -1837,6 +1868,8 @@ def generate(
         runtime: Simpler runtime ABI to target; its wire name is written to
             ``RUNTIME_CONFIG["runtime"]`` in the generated ``kernel_config.py``.
             None uses ``RuntimeKind.TENSORMAP_AND_RINGBUFFER``.
+        enable_software_pipeline: Emit fixed-address multi-buffer regions for
+            eligible slot allocations created by software-pipeline lowering.
 
     Returns:
         Dict mapping relative file paths to their content.
@@ -1863,6 +1896,7 @@ def generate(
             emit_source_loc=emit_source_loc,
             dump_ptoas_passes=dump_ptoas_passes,
             runtime=runtime,
+            enable_software_pipeline=enable_software_pipeline,
         )
 
     # L2-only program with multiple Orchestrations: emit each as a
@@ -1878,6 +1912,7 @@ def generate(
             emit_source_loc=emit_source_loc,
             dump_ptoas_passes=dump_ptoas_passes,
             runtime=runtime,
+            enable_software_pipeline=enable_software_pipeline,
         )
 
     return _generate_single_chip(
@@ -1888,6 +1923,7 @@ def generate(
         emit_source_loc=emit_source_loc,
         dump_ptoas_passes=dump_ptoas_passes,
         runtime=runtime,
+        enable_software_pipeline=enable_software_pipeline,
     )
 
 
@@ -1900,6 +1936,7 @@ def _generate_with_distributed(
     emit_source_loc: bool = True,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
+    enable_software_pipeline: bool = False,
 ) -> dict[str, str]:
     """Generate artifacts for a distributed (L3+) program.
 
@@ -1934,6 +1971,7 @@ def _generate_with_distributed(
                 emit_source_loc=emit_source_loc,
                 dump_ptoas_passes=dump_ptoas_passes,
                 runtime=runtime,
+                enable_software_pipeline=enable_software_pipeline,
             )
             for path, content in chip_files.items():
                 result_files[f"next_levels/{func.name}/{path}"] = content
@@ -2140,6 +2178,7 @@ def _generate_multi_chip(
     emit_source_loc: bool = True,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
+    enable_software_pipeline: bool = False,
 ) -> dict[str, str]:
     """Generate artifacts for an L2-only program with multiple Orchestrations.
 
@@ -2165,6 +2204,7 @@ def _generate_multi_chip(
             emit_source_loc=emit_source_loc,
             dump_ptoas_passes=dump_ptoas_passes,
             runtime=runtime,
+            enable_software_pipeline=enable_software_pipeline,
         )
         for path, content in chip_files.items():
             result_files[f"next_levels/{func.name}/{path}"] = content
@@ -2180,6 +2220,7 @@ def _generate_single_chip(
     emit_source_loc: bool = True,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
+    enable_software_pipeline: bool = False,
 ) -> dict[str, str]:
     """Generate artifacts for a single-chip (L0-L2) program.
 
@@ -2260,7 +2301,10 @@ def _generate_single_chip(
             stage = StageRecord(name=f"kernel_codegen:{group_name}", start=time.perf_counter())
             ir_record = StageRecord(name="ir_to_mlir", start=time.perf_counter())
             pto_code = _codegen_core.PTOCodegen().generate(
-                grouped_program, emit_tile_addr=emit_tile_addr, emit_source_loc=emit_source_loc
+                grouped_program,
+                emit_tile_addr=emit_tile_addr,
+                emit_source_loc=emit_source_loc,
+                enable_software_pipeline=enable_software_pipeline,
             )
             ir_record.end = time.perf_counter()
             stage.children.append(ir_record)
@@ -2287,7 +2331,10 @@ def _generate_single_chip(
             stage = StageRecord(name=f"kernel_codegen:{func.name}", start=time.perf_counter())
             ir_record = StageRecord(name="ir_to_mlir", start=time.perf_counter())
             pto_code = _codegen_core.PTOCodegen().generate(
-                single_program, emit_tile_addr=emit_tile_addr, emit_source_loc=emit_source_loc
+                single_program,
+                emit_tile_addr=emit_tile_addr,
+                emit_source_loc=emit_source_loc,
+                enable_software_pipeline=enable_software_pipeline,
             )
             ir_record.end = time.perf_counter()
             stage.children.append(ir_record)

@@ -61,6 +61,7 @@
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/reserve_buffer_utils.h"
+#include "pypto/ir/transforms/utils/tile_buf_signature.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -2965,6 +2966,49 @@ class ForbidAliasCollector : public IRVisitor {
   std::map<const Var*, const Var*> member_to_rep_;  ///< sharing-group member -> representative
 };
 
+/// Summarize repeating scopes by allocation identity in one linear traversal.
+/// Only the outermost enclosing loop matters: sibling inner loops can overlap
+/// through their parent's back edge. A min/max range over loop IDs is a cheap,
+/// conservative summary when the same base appears in several top-level loops.
+class AllocationLoopRangeCollector : public IRVisitor {
+ public:
+  void VisitStmt_(const ForStmtPtr& op) override {
+    const int previous = EnterLoop();
+    IRVisitor::VisitStmt_(op);
+    current_loop_ = previous;
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    const int previous = EnterLoop();
+    IRVisitor::VisitStmt_(op);
+    current_loop_ = previous;
+  }
+
+  void VisitVarLike_(const VarPtr& var) override {
+    if (const Var* base = TileMemRefBase(var)) {
+      auto& range = ranges_[base];
+      if (current_loop_ != 0) {
+        range.first = range.first == 0 ? current_loop_ : std::min(range.first, current_loop_);
+        range.second = std::max(range.second, current_loop_);
+      }
+    }
+    IRVisitor::VisitVarLike_(var);
+  }
+
+  auto Take() { return std::move(ranges_); }
+
+ private:
+  int EnterLoop() {
+    const int previous = current_loop_;
+    if (current_loop_ == 0) current_loop_ = next_loop_++;
+    return previous;
+  }
+
+  int current_loop_ = 0;
+  int next_loop_ = 1;
+  std::unordered_map<const Var*, std::pair<int, int>> ranges_;
+};
+
 /// Collect every tile operand an operator declares as a WRITTEN WORKSPACE.
 ///
 /// `set_workspace_arg(i)` means "compiler-supplied scratch: the hardware writes
@@ -2984,14 +3028,14 @@ class ForbidAliasCollector : public IRVisitor {
 class WrittenWorkspaceCollector : public IRVisitor {
  public:
   void VisitExpr_(const CallPtr& op) override {
-    Record(op->op_, op->args_);
+    Record(op->op_, op->args_, true);
     IRVisitor::VisitExpr_(op);
   }
 
   // The registry keys both call-like kinds the same way; classifying only Call
   // would silently skip an operator launched through pl.submit.
   void VisitExpr_(const SubmitPtr& op) override {
-    Record(op->op_, op->args_);
+    Record(op->op_, op->args_, false);
     IRVisitor::VisitExpr_(op);
   }
 
@@ -2999,9 +3043,12 @@ class WrittenWorkspaceCollector : public IRVisitor {
   // lowered to a loop by LowerPipelineToSlots / LowerPipelineLoops (passes
   // 30-31), well before this pass.
   void VisitStmt_(const ForStmtPtr& op) override {
+    const bool software_pipeline = op->HasAttr(kSoftwarePipelineSlotsAttr);
+    if (software_pipeline) ++software_pipeline_depth_;
     ++loop_depth_;
     IRVisitor::VisitStmt_(op);
     --loop_depth_;
+    if (software_pipeline) --software_pipeline_depth_;
   }
 
   void VisitStmt_(const WhileStmtPtr& op) override {
@@ -3014,17 +3061,29 @@ class WrittenWorkspaceCollector : public IRVisitor {
   std::unordered_set<const Var*> TakeBases() { return std::move(bases_); }
   std::unordered_set<const Var*> TakeLoopingVars() { return std::move(looping_workspaces_); }
   std::unordered_set<const Var*> TakeLoopingBases() { return std::move(looping_bases_); }
+  std::unordered_set<const Var*> TakeScopedPipelineBases() {
+    // An explicit workspace contract or asynchronous scratch call disqualifies
+    // the alias family, even if another use has the legacy scratch role.
+    for (const Var* base : strict_bases_) scoped_pipeline_bases_.erase(base);
+    return std::move(scoped_pipeline_bases_);
+  }
 
  private:
-  void Record(const OpPtr& op, const std::vector<ExprPtr>& args) {
+  void Record(const OpPtr& op, const std::vector<ExprPtr>& args, bool ordinary_call) {
     // LookupOpEntry, not a name lookup: a Submit's callee is a GlobalVar naming
     // a *function*, and resolving that against the operator registry would hand
     // a user function whose name collides with an operator that operator's
     // workspace contract.
     const auto* entry = LookupOpEntry(op);
     if (entry == nullptr) return;
-    for (const size_t index : entry->GetWorkspaceArgs()) {
-      if (index >= args.size() || !entry->MayWriteArg(index)) continue;
+    for (size_t index = 0; index < args.size(); ++index) {
+      // A lowered pipeline also recognizes legacy scratch-role declarations.
+      // Keep their hidden writes isolated across iterations without changing
+      // allocation policy for ordinary loops when the option is disabled.
+      const bool pipeline_scratch =
+          software_pipeline_depth_ > 0 && entry->GetLaneInvariantArgKind(index) == LaneInvariantArg::Scratch;
+      const bool explicit_workspace = entry->IsWorkspaceArg(index) && entry->MayWriteArg(index);
+      if (!explicit_workspace && !pipeline_scratch) continue;
       // AsVarLike, not As<Var>: a workspace can reach the op as a loop IterArg
       // when the call sits inside a loop body.
       auto workspace = AsVarLike(args[index]);
@@ -3032,7 +3091,14 @@ class WrittenWorkspaceCollector : public IRVisitor {
       workspaces_.insert(workspace.get());
       // Record the allocation base as well -- see `written_workspace_bases`.
       const Var* base = TileMemRefBase(workspace);
-      if (base != nullptr) bases_.insert(base);
+      if (base != nullptr) {
+        bases_.insert(base);
+        if (explicit_workspace || !ordinary_call) {
+          strict_bases_.insert(base);
+        } else if (pipeline_scratch) {
+          scoped_pipeline_bases_.insert(base);
+        }
+      }
       if (loop_depth_ > 0) {
         looping_workspaces_.insert(workspace.get());
         if (base != nullptr) looping_bases_.insert(base);
@@ -3041,10 +3107,13 @@ class WrittenWorkspaceCollector : public IRVisitor {
   }
 
   int loop_depth_ = 0;
+  int software_pipeline_depth_ = 0;
   std::unordered_set<const Var*> workspaces_;
   std::unordered_set<const Var*> bases_;
   std::unordered_set<const Var*> looping_workspaces_;
   std::unordered_set<const Var*> looping_bases_;
+  std::unordered_set<const Var*> scoped_pipeline_bases_;
+  std::unordered_set<const Var*> strict_bases_;
 };
 
 /// True only for Ascend910B AIV split-mode functions, which need the load +
@@ -3288,8 +3357,9 @@ ReuseMap IdentifyReuseOpportunities(
     const std::map<const Var*, std::pair<int, int>>& var_liveness,
     const std::map<const Var*, std::vector<std::pair<int32_t, int32_t>>>& pipeline_membership,
     const std::set<const Var*>& pipeline_load_tiles, const std::set<const Var*>& subrange_unsafe_groups,
-    const std::map<MemorySpace, uint64_t>& reserved_end_by_space, const std::set<const Var*>& pinned_bases,
-    const FunctionPtr& func, std::vector<Diagnostic>* out_hints) {
+    const std::map<MemorySpace, uint64_t>& reserved_end_by_space,
+    const std::map<const Var*, uint64_t>& pinned_allocations, const FunctionPtr& func,
+    std::vector<Diagnostic>* out_hints) {
   ReuseMap reuse_map;
 
   // A declared allocation (`pl.Tile[..., pl.MemRef("name"), ...]`) has exactly the membership
@@ -3304,11 +3374,17 @@ ReuseMap IdentifyReuseOpportunities(
   // including the vast majority that declare no allocation at all. Same reason
   // `pipeline_membership` is pre-parsed (see LifetimeAnalysisResult).
   std::vector<bool> is_pinned(lifetimes.size(), false);
-  if (!pinned_bases.empty()) {
+  std::vector<uint64_t> pinned_capacity(lifetimes.size(), 0);
+  if (!pinned_allocations.empty()) {
     for (size_t i = 0; i < lifetimes.size(); ++i) {
       if (!lifetimes[i].variable) continue;
-      auto memref = GetTypeMemRef(lifetimes[i].variable->GetType());
-      is_pinned[i] = memref.has_value() && (*memref)->base_ && pinned_bases.count((*memref)->base_.get()) > 0;
+      const auto allocation = pinned_allocations.find(TileMemRefBase(lifetimes[i].variable));
+      if (allocation == pinned_allocations.end()) continue;
+      is_pinned[i] = true;
+      // A lifetime describes one accessed tile/slot. A pinned allocation owns
+      // the complete declared region, including every co-live prefetch slot;
+      // charging only the tile size misses real overflows and skips relief.
+      pinned_capacity[i] = allocation->second;
     }
   }
 
@@ -3427,15 +3503,38 @@ ReuseMap IdentifyReuseOpportunities(
     return in_workspace_set(interval, hazard.looping_written_workspaces,
                             hazard.looping_written_workspace_bases);
   };
-  auto workspace_blocks = [&is_written_workspace, &is_looping_written_workspace](
-                              const LifetimeInterval& workspace, const LifetimeInterval& other) {
-    // Inside a loop the directional argument collapses: the back edge re-writes
-    // the workspace from the scalar pipe on iteration i+1 while iteration i's
-    // vector reads of anything sharing that buffer -- the TSELS `dst`, say, and
-    // whatever consumes it -- can still be in flight. Lifetime order within one
-    // iteration proves nothing about the next, so a looping workspace takes an
-    // exclusive buffer.
-    if (is_looping_written_workspace(workspace)) return true;
+  // Preserve the original layout when it fits: even safe sharing can introduce
+  // an otherwise unnecessary cross-pipe dependency. Only the capacity-relief
+  // retry below enables the narrower legacy-scratch guard, before depth shedding.
+  bool allow_scoped_workspace_reuse = false;
+  auto workspace_blocks = [&hazard, &allow_scoped_workspace_reuse, &is_written_workspace,
+                           &is_looping_written_workspace](const LifetimeInterval& workspace,
+                                                          const LifetimeInterval& other) {
+    if (is_looping_written_workspace(workspace)) {
+      // A back edge can re-write hidden scratch while a co-resident value from
+      // the previous iteration is still in flight. Keep that guard for all
+      // explicit/unknown workspace effects and for every shared repeating scope.
+      const Var* workspace_base = TileMemRefBase(workspace.variable);
+      if (!allow_scoped_workspace_reuse || hazard.scoped_pipeline_scratch_bases.count(workspace_base) == 0) {
+        return true;
+      }
+
+      // Only allow a LATER allocation after this scratch's complete lifetime,
+      // including the pipeline drain. Earlier readers retain the existing
+      // directional hidden-write guard. Lifetime order inside a parent loop is
+      // insufficient, so both allocation families must also have disjoint
+      // outermost-loop ranges. Existing backend alias synchronization remains
+      // responsible for the transition; this pass inserts no fence or copy.
+      if (other.def_point <= workspace.last_use_point) return true;
+      const auto wi = hazard.allocation_loop_ranges.find(workspace_base);
+      const auto oi = hazard.allocation_loop_ranges.find(TileMemRefBase(other.variable));
+      if (wi == hazard.allocation_loop_ranges.end() || oi == hazard.allocation_loop_ranges.end()) {
+        return true;
+      }
+      const auto& a = wi->second;
+      const auto& b = oi->second;
+      return a.first != 0 && b.first != 0 && a.first <= b.second && b.first <= a.second;
+    }
     return is_written_workspace(workspace) && other.last_use_point <= workspace.def_point;
   };
 
@@ -3625,6 +3724,7 @@ ReuseMap IdentifyReuseOpportunities(
     // and capturing a structured binding name directly is only a C++20 extension (project is C++17).
     auto& space = space_binding;
     auto& indices = indices_binding;
+    allow_scoped_workspace_reuse = false;
     // Largest-first; ties broken by definition order for determinism and so that
     // equal-size workloads reproduce the prior definition-order grouping.
     std::sort(indices.begin(), indices.end(), [&lifetimes](size_t a, size_t b) {
@@ -3692,7 +3792,7 @@ ReuseMap IdentifyReuseOpportunities(
       std::vector<PackedBuffer> buffers;
       for (size_t idx : indices) {
         if (is_pinned[idx]) {
-          buffers.push_back(PackedBuffer{{PackedMember{idx, 0}}, lifetimes[idx].size, true});
+          buffers.push_back(PackedBuffer{{PackedMember{idx, 0}}, pinned_capacity[idx], true});
           continue;
         }
         const auto& cand = lifetimes[idx];
@@ -3782,6 +3882,22 @@ ReuseMap IdentifyReuseOpportunities(
       // Preserve the legacy layout whenever it fits. Only an actual overflow
       // enables subdivision, before sacrificing software-pipeline depth.
       retry_with_subranges();
+      if (cap != 0 && footprint(buffers) > cap &&
+          std::any_of(indices.begin(), indices.end(), [&](size_t index) {
+            return hazard.scoped_pipeline_scratch_bases.count(TileMemRefBase(lifetimes[index].variable)) != 0;
+          })) {
+        // Relax only the retired-scratch constraint, with the same stage depths.
+        // A relaxed FFD predicate need not improve the layout, so retain the
+        // original packing unless this constant extra retry actually saves space.
+        auto original = std::move(buffers);
+        allow_scoped_workspace_reuse = true;
+        buffers = pack(/*allow_subranges=*/false);
+        retry_with_subranges();
+        if (footprint(buffers) >= footprint(original)) {
+          buffers = std::move(original);
+          allow_scoped_workspace_reuse = false;
+        }
+      }
       // Bound the shed re-packs so the loop stays within the pass-complexity budget
       // (.claude/rules/pass-complexity.md). A legitimate shed converges in Σ_g(F_g−1) steps over the few
       // co-live groups, but the pipeline-group count can grow with generated IR, so cap the full re-packs
@@ -4091,6 +4207,111 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const ReuseMap& reuse_map,
 
   MemRefSharingMutator mutator(reuse_map, var_sharing_groups);
   return mutator.VisitStmt(stmt);
+}
+
+/// Forward a last-used logical input version through an in-place-safe op.
+/// Scheduling only declares input versions. This placement decision runs after
+/// InitMemRef and uses the shared lifetime facts and operator alias contracts.
+/// A fixed number of indexed walks keeps the additional work O(N log N).
+StmtPtr ReuseSoftwarePipelineInputs(const StmtPtr& body, const LifetimeAnalysisResult& lifetimes,
+                                    const std::set<const Var*>& declared_bases) {
+  class Facts : public IRVisitor {
+   public:
+    std::vector<AssignStmtPtr> assigns;
+    std::map<const Var*, const Var*> aliases;
+    std::set<const Var*> version_bases;
+    std::set<const Var*> partial_view_bases;
+    const Var* Root(const Var* var) const {
+      auto it = aliases.find(var);
+      return it == aliases.end() ? var : it->second;
+    }
+    void VisitStmt_(const AssignStmtPtr& stmt) override {
+      if (auto tile = As<TileType>(stmt->var_->GetType()); tile && tile->memref_) {
+        assigns.push_back(stmt);
+        auto call = As<Call>(stmt->value_);
+        auto source = AsVarLike(stmt->value_);
+        if (call && op_predicates::IsBufferAliasingViewOp(call->op_->name_) && !call->args_.empty()) {
+          source = AsVarLike(call->args_[0]);
+        }
+        if (source) {
+          const auto* root = Root(source.get());
+          aliases.emplace(stmt->var_.get(), root);
+          const auto source_type = As<TileType>(root->GetType());
+          const auto& ref = *tile->memref_;
+          // Moving an ordinary result into a uniform slot must preserve every
+          // view in its allocation family, not just the defining result type.
+          if (ref->slot_count_ == 1 && source_type && source_type->memref_ &&
+              (!TileBufSignature::FromTileType(*tile).IsFullSlotAlias(
+                   TileBufSignature::FromTileType(*source_type)) ||
+               !structural_equal(ref->byte_offset_, (*source_type->memref_)->byte_offset_))) {
+            partial_view_bases.insert(ref->base_.get());
+          }
+        }
+        if (call && call->GetAttr<bool>(kSoftwarePipelineSlotsAttr, false)) {
+          version_bases.insert((*tile->memref_)->base_.get());
+        }
+      }
+      IRVisitor::VisitStmt_(stmt);
+    }
+  } facts;
+  facts.VisitStmt(body);
+  if (facts.version_bases.empty()) return body;
+  std::map<const Var*, int> last_use;
+  for (const auto& [var, interval] : lifetimes.var_liveness) {
+    last_use[facts.Root(var)] = std::max(last_use[facts.Root(var)], interval.second);
+  }
+  ReuseMap reuse;
+  std::map<const Var*, VarPtr> storage;
+  for (const auto& stmt : facts.assigns) {
+    auto call = As<Call>(stmt->value_);
+    if (!call || !OpRegistry::GetInstance().IsRegistered(call->op_->name_) ||
+        facts.aliases.count(stmt->var_.get())) {
+      continue;
+    }
+    auto output = As<TileType>(stmt->var_->GetType());
+    INTERNAL_CHECK_SPAN(output && output->memref_, stmt->span_)
+        << "Internal error: software pipeline reuse requires an allocated tile";
+    const auto* output_base = (*output->memref_)->base_.get();
+    if (declared_bases.count(output_base) || facts.partial_view_bases.count(output_base)) continue;
+    const auto& entry = OpRegistry::GetInstance().GetEntry(call->op_->name_);
+    if (!entry.IsInplaceSafe() || entry.GetCrossCoreRole()) continue;
+    auto def = lifetimes.var_liveness.find(stmt->var_.get());
+    if (def == lifetimes.var_liveness.end()) continue;
+    auto resolved = [&](const VarPtr& var) {
+      auto it = storage.find(facts.Root(var.get()));
+      return it == storage.end() ? var : it->second;
+    };
+    std::set<const Var*> forbidden;
+    for (const auto arg : entry.ForbidOutputAliasArgs()) {
+      if (arg >= call->args_.size()) continue;
+      auto var = AsVarLike(call->args_[arg]);
+      if (!var) continue;
+      auto ref = GetTypeMemRef(resolved(var)->GetType());
+      if (ref && *ref) forbidden.insert((*ref)->base_.get());
+    }
+    for (size_t i = 0; i < call->args_.size(); ++i) {
+      if (entry.GetArgEffect(i, call->kwargs_) != ArgEffect::Read || entry.IsWorkspaceArg(i)) continue;
+      auto input = AsVarLike(call->args_[i]);
+      if (!input || !last_use.count(facts.Root(input.get())) ||
+          last_use.at(facts.Root(input.get())) != def->second.first) {
+        continue;
+      }
+      auto source = resolved(input);
+      auto tile = As<TileType>(source->GetType());
+      if (!tile || !tile->memref_) continue;
+      const auto& ref = *tile->memref_;
+      if (ref->slot_count_ <= 1 || !facts.version_bases.count(ref->base_.get()) ||
+          forbidden.count(ref->base_.get()) || output->memory_space_ != tile->memory_space_ ||
+          output->dtype_.GetBit() != tile->dtype_.GetBit() ||
+          !TileBufSignature::FromTileType(*output).IsFullSlotAlias(TileBufSignature::FromTileType(*tile))) {
+        continue;
+      }
+      reuse.emplace(stmt->var_, ReusePlacement{source, 0});
+      storage.emplace(stmt->var_.get(), source);
+      break;
+    }
+  }
+  return reuse.empty() ? body : ApplyMemRefSharing(body, reuse, lifetimes.var_sharing_groups);
 }
 
 /**
@@ -5130,8 +5351,10 @@ class StripPipelineMembershipMutator : public IRMutator {
   ExprPtr VisitExpr_(const CallPtr& op) override {
     auto visited = IRMutator::VisitExpr_(op);
     auto call = As<Call>(visited);
-    if (!call || !call->HasAttr(kPipelineMembershipAttr)) return visited;
-    auto new_attrs = StripAttr(call->attrs_, kPipelineMembershipAttr);
+    if (!call || (!call->HasAttr(kPipelineMembershipAttr) && !call->HasAttr(kSoftwarePipelineSlotsAttr))) {
+      return visited;
+    }
+    auto new_attrs = StripAttr(StripAttr(call->attrs_, kPipelineMembershipAttr), kSoftwarePipelineSlotsAttr);
     return std::make_shared<Call>(call->op_, call->args_, call->kwargs_, std::move(new_attrs),
                                   call->GetType(), call->span_);
   }
@@ -5426,13 +5649,25 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
     return func;
   }
 
+  auto planned_func = func;
+  if (auto* context = PassContext::Current(); context && context->GetEnableSoftwarePipeline()) {
+    auto constraints = AnalyzeAllocationConstraints(func, analysis_result, "MemoryReuse");
+    new_body = ReuseSoftwarePipelineInputs(new_body, analysis_result, constraints.declared_allocation_bases);
+    if (new_body != func->body_) {
+      auto updated = MutableCopy(func);
+      updated->body_ = new_body;
+      planned_func = updated;
+      analysis_result = AnalyzeAllocationLifetimes(new_body);
+    }
+  }
+
   // Step 2: Identify reuse opportunities.  On Ascend910B split-AIV functions,
   // collect the load + tpop_from_aic hazard inputs so the reuse decision never
   // forms the hazardous in-place sharing (folds in the former
   // LegalizePTOBufferReuse responsibility).  Off-910B the inputs stay empty and
   // reuse behaviour is unchanged.
   const AllocationConstraintAnalysis constraint_analysis =
-      AnalyzeAllocationConstraints(func, analysis_result, "MemoryReuse");
+      AnalyzeAllocationConstraints(planned_func, analysis_result, "MemoryReuse");
   const HazardInputs& hazard = constraint_analysis.target_hazard_inputs;
   const ForbidAliasMap& forbid_alias = constraint_analysis.forbid_alias;
 
@@ -5461,7 +5696,7 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
       analysis_result.lifetimes, hazard, forbid_alias, analysis_result.phi_family_ids,
       analysis_result.var_sharing_groups, analysis_result.var_liveness, analysis_result.pipeline_membership,
       analysis_result.pipeline_load_tiles, analysis_result.subrange_unsafe_groups, reserved_end_by_space,
-      pinned_bases, func, &hints);
+      constraint_analysis.declared_allocation_sizes, planned_func, &hints);
   // Surface capacity-forced pipeline-depth reductions (perf hints) and legacy-fallback overflows
   // (warnings) through the unified diagnostic channel → perf_hints.log / stderr.
   if (!hints.empty()) EmitDiagnostics(hints, "MemoryReuse");
@@ -5574,6 +5809,12 @@ AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& fun
   result.target_hazard_inputs.written_workspace_bases = workspace_collector.TakeBases();
   result.target_hazard_inputs.looping_written_workspaces = workspace_collector.TakeLoopingVars();
   result.target_hazard_inputs.looping_written_workspace_bases = workspace_collector.TakeLoopingBases();
+  result.target_hazard_inputs.scoped_pipeline_scratch_bases = workspace_collector.TakeScopedPipelineBases();
+  if (!result.target_hazard_inputs.scoped_pipeline_scratch_bases.empty()) {
+    AllocationLoopRangeCollector ranges;
+    ranges.VisitStmt(func->body_);
+    result.target_hazard_inputs.allocation_loop_ranges = ranges.Take();
+  }
 
   ForbidAliasCollector forbid_collector(lifetimes.var_sharing_groups);
   forbid_collector.VisitStmt(func->body_);

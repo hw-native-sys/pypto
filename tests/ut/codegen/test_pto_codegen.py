@@ -227,6 +227,7 @@ def _split_ptoas_output_for(
     runtime_lane_param: bool = False,
     direction: str = "DIR_C2V",
     include_push: bool = False,
+    global_entry: bool = False,
 ) -> str:
     """Return one split PTOAS function, optionally with a V2C push."""
 
@@ -236,6 +237,12 @@ def _split_ptoas_output_for(
     pipe = "v3" if runtime_lane_param else "v2"
     popped = "v4" if runtime_lane_param else "v3"
     produced = "v5" if runtime_lane_param else "v4"
+    popped_type = "Tile<TileType::Vec, float, 8, 16, BLayout::RowMajor>"
+    if global_entry:
+        popped_type = (
+            "GlobalTensor<float, pto::Shape<1, 1, 1, 8, 16>, "
+            "pto::Stride<128, 128, 128, 16, 1>, pto::Layout::ND>"
+        )
     push = ""
     if include_push:
         push = f"""\
@@ -249,10 +256,10 @@ using namespace pto;
 
 AICORE void {func_name}({params}) {{
   auto {pipe} = TPipe<0, Direction::{direction}, 1024, 4, 2, false>(v1, 0, 0);
-  Tile<TileType::Vec, float, 8, 16, BLayout::RowMajor> {popped};
+  {popped_type} {popped};
   Tile<TileType::Vec, bfloat16_t, 8, 16, BLayout::RowMajor> {produced};
   TPOP<TPipe<0, Direction::{direction}, 1024, 4, 2, false>,
-       Tile<TileType::Vec, float, 8, 16, BLayout::RowMajor>,
+       {popped_type},
        TileSplitAxis::TILE_UP_DOWN>({pipe}, {popped});
 {push}
   return;
@@ -1887,7 +1894,8 @@ class TestGenerateKernelWrapper:
         assert "a__ssa_v0_tensor->shapes[0]" in wrapper
         assert "a__ssa_v0_tensor->shapes[1]" in wrapper
 
-    def test_split_aiv_wrapper_uses_runtime_subblock_bridge_on_a2a3(self):
+    @pytest.mark.parametrize("global_entry", [False, True])
+    def test_split_aiv_wrapper_uses_runtime_subblock_bridge_on_a2a3(self, global_entry):
         @pl.program
         class SplitWrapperProgram:
             @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
@@ -1913,8 +1921,16 @@ class TestGenerateKernelWrapper:
 
         wrapper = _generate_kernel_wrapper(
             func,
-            _split_ptoas_output_for(func.name, runtime_lane_param=True),
+            _split_ptoas_output_for(func.name, runtime_lane_param=True, global_entry=global_entry),
         )
+        if global_entry:
+            # GM entries need the public no-split pop plus a runtime lane view;
+            # the explicit-lane TPOP overload accepts local Tiles only.
+            assert "PYPTO_SPLIT_GLOBAL_TPOP<" in wrapper
+            assert "TPOP<Pipe, GlobalData, TileSplitAxis::TILE_NO_SPLIT>" in wrapper
+            assert "TASSIGN(tensor, tensor.data() + subblock_id * rows * columns)" in wrapper
+        else:
+            assert "PYPTO_SPLIT_GLOBAL_TPOP" not in wrapper
         assert "PYPTO_FIXED_SUBBLOCK_ID" not in wrapper
         assert '#include "intrinsic.h"' in wrapper
         assert "[[block_local]]" not in wrapper

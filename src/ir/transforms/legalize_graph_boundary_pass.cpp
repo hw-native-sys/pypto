@@ -1504,10 +1504,15 @@ class CallSiteExtender : public IRMutator {
     std::vector<const HoistedValue*> by_definition;
     by_definition.reserve(plan.hoisted.size());
     for (const auto& h : plan.hoisted) by_definition.push_back(&h);
-    std::stable_sort(by_definition.begin(), by_definition.end(),
-                     [&position](const HoistedValue* a, const HoistedValue* b) {
-                       return position(a->original.get()) < position(b->original.get());
-                     });
+    // Break ties by parameter order: these pointers all name elements of the
+    // same immutable vector. This retains stable replay without libstdc++ 12's
+    // deprecated temporary-buffer path in std::stable_sort.
+    std::sort(by_definition.begin(), by_definition.end(),
+              [&position](const HoistedValue* a, const HoistedValue* b) {
+                const auto a_position = position(a->original.get());
+                const auto b_position = position(b->original.get());
+                return a_position == b_position ? a < b : a_position < b_position;
+              });
 
     size_t next_hoist = 0;
     size_t next_alias = 0;

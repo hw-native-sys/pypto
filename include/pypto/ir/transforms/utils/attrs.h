@@ -31,6 +31,13 @@ namespace ir {
 /// deliberately do not carry it.
 inline constexpr const char* kCompilerTensorToTileMatBridgeAttr = "__compiler_tensor_to_tile_mat_bridge";
 
+/// Compiler-owned normalized iteration coordinates, consumed by PyPTO slot
+/// codegen. These attributes are not private PTOAS scheduling contracts.
+inline constexpr const char* kSoftwarePipelineSlotsAttr = "software_pipeline_slots";
+
+/// Maximum affine ordinal stride certified by nested scope planning.
+inline constexpr const char* kSoftwarePipelineNestedAttr = "software_pipeline_nested_stride";
+
 /// Attribute key for ``pl.pipeline(N, stage=F)`` — appears on ``ForStmt.attrs_``
 /// if and only if ``ForStmt.kind_ == ForKind::Pipeline`` (bidirectional invariant
 /// enforced by the structural verifier ``PipelineLoopValid``).

@@ -231,6 +231,7 @@ REGISTER_OP("tile.row_sum")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .set_arg_effect(0, ArgEffect::Read)
     // TROW* reads the full input row + tmp scratch while writing the reduced
     // output, so the output must not share a buffer with either input.
     .not_inplace_safe()

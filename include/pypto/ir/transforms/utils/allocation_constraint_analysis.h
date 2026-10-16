@@ -15,7 +15,9 @@
 #include <cstdint>
 #include <map>
 #include <set>
+#include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "pypto/ir/expr.h"
@@ -50,6 +52,17 @@ struct AllocationHazardInputs {
   /// runs -- `pl.pipeline` is lowered to a loop by pass 30/31.
   std::unordered_set<const Var*> looping_written_workspaces;
   std::unordered_set<const Var*> looping_written_workspace_bases;
+  /// Legacy scratch recognized only in an actually lowered software pipeline.
+  /// Explicit written-workspace contracts and Submit uses are excluded: their
+  /// hidden effects retain the existing function-wide isolation policy.
+  std::unordered_set<const Var*> scoped_pipeline_scratch_bases;
+  /// For each allocation base, the inclusive range of outermost loop IDs that
+  /// contain any definition or use. {0, 0} means all accesses are straight-line;
+  /// a missing entry is unknown. Disjoint ranges prove there is no shared back
+  /// edge; overlapping ranges conservatively retain isolation, including nested
+  /// loops and bases accessed by several independent loops. Collected only when
+  /// scoped pipeline scratch exists, so the default path pays no extra traversal.
+  std::unordered_map<const Var*, std::pair<int, int>> allocation_loop_ranges;
 };
 
 using AllocationForbidAliasMap = std::map<const Var*, std::vector<VarPtr>>;

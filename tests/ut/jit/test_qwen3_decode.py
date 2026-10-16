@@ -119,6 +119,39 @@ class TestQwen3JITLowering:
                 f"Expected an outlined function for ``pl.at(name_hint='{hint}')``; got functions: {names}"
             )
 
+    def test_input_rmsnorm_keeps_four_stages_and_shared_scratch(self, post_pass):
+        """The default path must fit without reducing the model's pipeline depth.
+
+        Marking every reduction scratch as an exclusive loop workspace changed
+        four sequential reductions from one 32 KiB allocation to four. Keeping
+        only the compile-success check would miss a workaround that silently
+        reduced stage=4 to stage=2, so also pin the four reduction sites.
+        """
+        function = post_pass.get_function("rmsnorm")
+        assert function is not None
+        scratch_bases: list[ir.Var] = []
+        allocation_bytes: list[int] = []
+
+        class Storage(ir.IRVisitor):
+            def visit_call(self, op):
+                if op.op.name == ir.get_op("tile.row_sum").name:
+                    scratch = op.args[1]
+                    assert isinstance(scratch.type, ir.TileType)
+                    assert scratch.type.memref is not None
+                    scratch_bases.append(scratch.type.memref.base_)
+                elif op.op.name == ir.get_op("tile.alloc").name:
+                    size = op.args[1]
+                    assert isinstance(size, ir.ConstInt)
+                    allocation_bytes.append(size.value)
+                super().visit_call(op)
+
+        Storage().visit_stmt(function.body)
+        assert len(scratch_bases) == 4, "Preserve the original four-stage reduction schedule"
+        assert all(base.same_as(scratch_bases[0]) for base in scratch_bases), (
+            "Sequential reductions must retain scratch reuse"
+        )
+        assert sum(allocation_bytes) <= 188416, "The original schedule must fit the 910B UB budget"
+
     def test_qwen3_decode_post_pass_has_orchestration_entry(self, post_pass):
         """The entry function lands as Orchestration after outlining."""
         entry = post_pass.get_function("qwen3_decode")
