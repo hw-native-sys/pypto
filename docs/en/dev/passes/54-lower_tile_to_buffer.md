@@ -58,7 +58,9 @@ operands accumulate in FP32; INT8 operands accumulate in INT32. Literal and
 runtime `init_cond` select initializing or accumulating writes. Wider Acc valid
 regions use a product-shaped descriptor over the same storage. Matrix region
 carries must preserve one storage alias; arbitrary matrix carry copies, MX,
-FIFO, slots, scaled/quantized writeback and workspace operations remain excluded.
+FIFO, scaled/quantized writeback and workspace operations remain excluded.
+Static addressless slots are available through the explicit recipe described
+below; they remain outside default whole-kernel selection.
 Torch debugging models fractal layouts and shared addressed matrix storage,
 including transpose relabels and product views. Only complete untouched Acc
 boxes have defined preservation outside a partially valid product.
@@ -258,6 +260,13 @@ provides the covering geometry. Smaller Acc tiles use compatible zero-offset
 subviews; repeated slot/descriptor pairs share one handle. Buffer verification
 tracks the selected slot's byte window, including aliases of boundary views.
 Dynamic slot indices remain unsupported by this conversion recipe.
+
+Before slot/view definitions are hoisted, lowering runs the same source-schedule
+safety analysis as Tile codegen. Multi-slot prefetch loops affected by PTOAS
+#1519 are rejected even with constant slot indices. Compiler-proven fresh Acc
+dbC stages retain their existing exception; straight-line slot reuse is unchanged.
+The internal fresh-Acc proof marker is consumed after that check, alongside
+storage-only pipeline membership, rather than forwarded to Buffer operations.
 
 Before discarding Tile allocation facts, lowering uses the same multi-buffer
 reuse planner as Tile codegen. Compatible regions with disjoint conservative

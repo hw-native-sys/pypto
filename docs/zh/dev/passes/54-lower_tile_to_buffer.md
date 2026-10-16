@@ -45,8 +45,9 @@ block/subblock 查询使用已有 Buffer 配方。
 `transpose_view`、`matmul` 和 `matmul_acc`。FP16/BF16/FP32 输入以 FP32 累加，
 INT8 输入以 INT32 累加。常量或运行时 `init_cond` 选择初始化或累加写入。
 较宽的 Acc valid 区域通过同一存储上的乘积视图写入。矩阵区域 carry 必须保持
-同一存储别名；任意矩阵 carry 复制、MX、FIFO、槽位、缩放/量化写回和 workspace
-操作仍不在默认范围。Torch 调试模拟分形布局及共享的已寻址矩阵存储，保留
+同一存储别名；任意矩阵 carry 复制、MX、FIFO、缩放/量化写回和 workspace
+操作仍不在默认范围。静态无地址槽位可通过下述显式配方使用，但仍不属于默认
+全 kernel 选择范围。Torch 调试模拟分形布局及共享的已寻址矩阵存储，保留
 转置重标记和乘积视图；部分有效乘积之外仅完整未触及的 Acc box 保证保留。
 
 A5 在默认流水线保持 Tile，待取得运行时验收后再开放。
@@ -211,6 +212,11 @@ buffer.add(loaded_buffer, loaded_buffer, doubled_buffer)
 重叠生命周期、针对全部历史使用者的操作级 no-alias 约束以及目标平台 hazard
 都会阻止不安全复用。逻辑 pipeline group 保持独立，因此连续 dbC 网格跨越
 Buffer IR 边界不会增加物理存储需求。该转换仍只支持静态槽位索引。
+在提升槽位/视图定义之前，lowering 对原 Tile 调度运行与 Tile codegen 共享的安全分析。
+受 PTOAS #1519 影响的多槽位预取循环即使使用常量槽位索引也会被拒绝。
+编译器已证明为新鲜 Acc 的 dbC stage 保留已有例外；直线槽位复用不变。
+内部新鲜 Acc 证明标记在该检查之后与仅用于存储的 pipeline membership 一起消费，
+不会被转发到 Buffer 操作。
 静态物理 region 分配放在函数入口，支配所有 slot view，即使逻辑声明早于
 首个存活使用者；slot/view 定义仍留在原始声明位置。
 

@@ -51,6 +51,7 @@
 #include "pypto/ir/transforms/utils/buffer_ir_selection.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/multi_buffer_reuse.h"
+#include "pypto/ir/transforms/utils/multi_buffer_schedule.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/property_verifier_registry.h"
@@ -197,6 +198,19 @@ class StorageIndex : public IRVisitor {
   // Each member participates in a fixed number of indexed scans, O(N log N).
   // The resulting aliases are ordinary SSA definitions, not an IR side table.
   void Finalize(const FunctionPtr& function) {
+    if (!addressed_) {
+      // Slot/view definitions are hoisted by this lowering. Check the source
+      // Tile schedule first: static indices do not make a prefetched region
+      // safe under PTOAS, and hoisting must not bypass Tile codegen's guard.
+      PtoasMultiBufferLoopSafety safety;
+      if (function->body_) safety.VisitStmt(function->body_);
+      for (const auto& [base, storage] : roots) {
+        CHECK_SPAN(safety.bases.count(base) == 0, storage.members.front().span)
+            << "LowerTileToBuffer: allocation '" << base->name_hint_
+            << "' cannot be lowered to a PTOAS multi-buffer region because "
+            << kUnsafePtoasMultiBufferLoopReason << ". Compile with the default PyPTO memory planner.";
+      }
+    }
     for (auto& [base, storage] : roots) FinalizeRoot(base, storage);
     // Plan against the original Tile IR, before lowering loses its allocation
     // lifetimes and operation-level no-alias facts. Use the same planner as
@@ -913,8 +927,15 @@ class TileToBufferMutator : public IRMutator {
     INTERNAL_CHECK_SPAN(call->op_, call->span_) << "Internal error: device call has no operator";
     // Pipeline membership only constrains storage planning, whose result is
     // already fixed in the MemRefs (AllocateMemoryAddr strips it; PTOAS keeps
-    // it). Every other attribute still needs an explicit conversion contract.
-    CHECK_SPAN(StripAttr(call->attrs_, kPipelineMembershipAttr).empty(), call->span_)
+    // it). The fresh-Acc proof marker is likewise consumed by the shared
+    // schedule check before lowering; it has no Buffer operation semantics.
+    // Only fresh MAD kinds can carry that proof. Every other attribute still
+    // needs an explicit conversion contract.
+    auto remaining_attrs = StripAttr(call->attrs_, kPipelineMembershipAttr);
+    if (IsOp(call, "tile.matmul") || IsOp(call, "tile.matmul_bias")) {
+      remaining_attrs = StripAttr(remaining_attrs, kCompilerPtoasDbCStageAttr);
+    }
+    CHECK_SPAN(remaining_attrs.empty(), call->span_)
         << "LowerTileToBuffer: device-call attributes require an explicit conversion contract";
     for (const auto& [logical, physical] : {std::pair{"tile.get_block_idx", "buffer.get_block_idx"},
                                             std::pair{"tile.get_block_num", "buffer.get_block_num"},
