@@ -1023,6 +1023,17 @@ static void EmitTreshapeViewFromSsa(codegen::PTOCodegen& codegen, const std::str
   codegen.Emit(oss.str());
 }
 
+// A fixed-address result declaration already carries the view over the inherited
+// storage. Without addresses, only the actual source handle can stand in for it:
+// a same-typed MemRef representative may have become stale after an if-phi rebind.
+static bool CanReuseViewTarget(codegen::PTOCodegen& codegen, const std::string& source,
+                               const std::string& target, const std::string& result_type,
+                               bool result_has_memref) {
+  const auto existing_type = codegen.GetSSATileBufType(target);
+  return result_has_memref && !existing_type.empty() && existing_type == result_type &&
+         (codegen.EmitTileAddr() || source == target);
+}
+
 // Same, resolving the source SSA and its type from the IR operand.
 static void EmitTreshapeView(codegen::PTOCodegen& codegen, const ir::ExprPtr& src_arg,
                              std::string result_target, const std::string& result_type,
@@ -1476,13 +1487,14 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     }
     // The no-op check compares against the pre-declared alloc_tile, whose type is
     // always the dynamic-valid form — so it must use `result_type`, not `view_type`.
-    auto existing_type = codegen.GetSSATileBufType(result_target);
-    if (result_has_memref && !existing_type.empty() && existing_type == result_type) {
+    const std::string src_ssa = codegen.GetExprAsCode(op->args_[0]);
+    if (CanReuseViewTarget(codegen, src_ssa, result_target, result_type, result_has_memref)) {
       return std::string("");
     }
 
-    // Fallback: emit pto.treshape reading the source SSA.
-    EmitTreshapeView(codegen, op->args_[0], result_target, view_type, "reshape_buf");
+    // Fallback: emit pto.treshape reading the actual source SSA, including if-phi results.
+    EmitTreshapeViewFromSsa(codegen, src_ssa, GetViewSourceType(codegen, op->args_[0]), result_target,
+                            view_type, "reshape_buf");
     return std::string("");
   });
 
@@ -1634,10 +1646,9 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
       src_type = window->source_type;
     }
 
-    // The result's own alloc_tile already declares the transposed type: it IS
-    // the view, so emit nothing. Mirrors tile.reshape's no-op check.
-    auto existing_type = codegen.GetSSATileBufType(result_target);
-    if (result_has_memref && !existing_type.empty() && existing_type == result_type) {
+    // A matching declaration is sufficient only at a fixed inherited address
+    // or when it is the actual source handle. Mirrors tile.reshape's no-op check.
+    if (CanReuseViewTarget(codegen, src_ssa, result_target, result_type, result_has_memref)) {
       return std::string("");
     }
 

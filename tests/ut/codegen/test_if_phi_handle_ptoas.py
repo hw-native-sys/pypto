@@ -395,5 +395,69 @@ def test_colvec_carry_is_written_back_under_pypto_planner():
     assert written, f"the carry's buffer must be written before the store:\n{mlir}"
 
 
+@pl.program
+class BranchReshapeProgram:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        x: pl.Tensor[[32, 1], pl.FP32],
+        flag: pl.Scalar[pl.INT32],
+        out: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+    ) -> pl.Tensor[[1, 16], pl.FP32]:
+        base = pl.load(x, [0, 0], [32, 1])
+        if flag != 0:
+            row = pl.reshape(base, [1, 32])
+            updated = pl.add(row, 1.0)
+            column = pl.reshape(updated, [32, 1])
+            result = column
+        else:
+            result = base
+        after = pl.reshape(result, [1, 32])
+        head = pl.tile.extract(after, 0, 0, [1, 16], target_memory=pl.Mem.Vec)
+        return pl.store(head, [0, 0], out)
+
+
+@pl.program
+class BranchTransposeViewProgram:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        x: pl.Tensor[[32, 1], pl.FP32],
+        flag: pl.Scalar[pl.INT32],
+        out: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+    ) -> pl.Tensor[[1, 16], pl.FP32]:
+        base = pl.load(x, [0, 0], [32, 1])
+        if flag != 0:
+            row = pl.reshape(base, [1, 32])
+            updated = pl.add(row, 1.0)
+            column = pl.reshape(updated, [32, 1])
+            result = column
+        else:
+            result = base
+        after = pl.tile.transpose_view(result)
+        head = pl.tile.extract(after, 0, 0, [1, 16], target_memory=pl.Mem.Vec)
+        return pl.store(head, [0, 0], out)
+
+
+@pytest.mark.parametrize("program", [BranchReshapeProgram, BranchTransposeViewProgram])
+def test_post_if_view_reads_merged_phi_handle(program):
+    """A same-typed old target cannot replace a view of the actual if result (#3015)."""
+    mlir = _ptoas_pto(program)
+    lines = mlir.splitlines()
+    extract = _sole_line(mlir, "pto.textract ins(")
+    source = _ins_of(extract)
+    view = _sole_line(mlir, f"{source} =")
+    assert "= pto.treshape " in view, mlir
+    phi = _first_group(r"= pto\.treshape (%[A-Za-z0-9_]+)", view)
+
+    # Both branch yields must reach this phi, not an obsolete shared MemRef handle.
+    into_phi = [ln for ln in lines if "pto.tmov" in ln and _outs_of(ln) == phi]
+    assert len(into_phi) == 2, mlir
+    phi_decl = _sole_line(mlir, f"{phi} = pto.alloc_tile")
+    if_line = _sole_line(mlir, "scf.if ")
+    assert lines.index(phi_decl) < lines.index(if_line), mlir
+    assert lines.index(view) > max(lines.index(ln) for ln in into_phi), mlir
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
