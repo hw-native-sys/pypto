@@ -500,15 +500,18 @@ class PTOCodegen : public CodegenBase {
   void RegisterTileViewName(const std::string& ssa_name);
   /// Whether `ssa_name` was emitted as a tile view.
   ///
-  /// A view carries its valid extent in its own type and has no `valid_row` /
-  /// `valid_col` operands, so `pto.set_validshape` cannot mutate one and ptoas
-  /// rejects the attempt. Every other tile handle — an alloc, an `scf.if` result,
-  /// a cross-core pop slot — does accept it.
+  /// Most views carry static valid extents or are not rooted in a local
+  /// allocation, so PTOAS cannot mutate their validity. Explicitly initialized
+  /// dynamic reshape aliases are the exception; see IsMutableTileName.
   ///
   /// View-ness has to be tracked, not inferred from the rendered valid dims: a
   /// `tile.slice` given a runtime `valid_shape` renders `v_row=?, v_col=?`, the
   /// same way an alloc-backed handle does.
   bool IsTileViewName(const std::string& ssa_name) const;
+  /// Record a local dynamic-valid allocation or an initialized dynamic reshape
+  /// of such a handle. Subviews and control-flow arguments are not eligible.
+  void RegisterMutableTileName(const std::string& ssa_name);
+  bool IsMutableTileName(const std::string& ssa_name) const;
   struct SubviewMaterializationInfo {
     std::string source_ssa;
     std::string source_type;
@@ -1050,6 +1053,8 @@ class PTOCodegen : public CodegenBase {
     std::map<std::string, SubviewMaterializationInfo> subview_materializations;
     /// SSA names emitted as tile views (`pto.subview` / `pto.treshape`).
     std::set<std::string> tile_view_names;
+    /// Handles whose runtime valid extents can be updated by pto.set_validshape.
+    std::set<std::string> mutable_tile_names;
 
     /// Eligible multi-buffer regions, keyed by the allocation's base Ptr.
     std::map<const ir::Var*, MultiBufferRegion> multi_buffer_regions;
@@ -1154,6 +1159,7 @@ class PTOCodegen : public CodegenBase {
       ssa_to_tile_buf_type.clear();
       subview_materializations.clear();
       tile_view_names.clear();
+      mutable_tile_names.clear();
 
       temp_counter = 0;
       used_ssa_names.clear();

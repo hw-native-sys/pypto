@@ -30,6 +30,7 @@
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/pto/pto_codegen.h"
+#include "pypto/codegen/pto/pto_type_utils.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/cast_saturation.h"
@@ -184,7 +185,6 @@ static const std::unordered_set<std::string_view>& LayoutAwareOps() {
       "tile.row_expand_expdif",
       // Padding writes the tile's physical edge.
       "tile.fillpad",
-      "tile.fillpad_inplace",
       // Fractal / window / index addressed.
       "tile.matmul",
       "tile.matmul_mx",
@@ -1018,8 +1018,6 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.row_expand_expdif", "pto.trowexpandexpdif", 2},
     // Padding operations
     {"tile.fillpad",         "pto.tfillpad",         1},
-    // Inplace variant: set_output_reuses_input(0) makes src/dst share UB addr.
-    {"tile.fillpad_inplace", "pto.tfillpad",         1},
     // Matrix multiplication operations (PipeType::M → CUBE/AIC core)
     {"tile.matmul",          "pto.tmatmul",          2},
     {"tile.matmul_mx",       "pto.tmatmul.mx",       4},
@@ -1116,6 +1114,47 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     if (exclude_ops.count(op_name) > 0) return;
     backend.RegisterOp(op_name).f_codegen(std::move(fn));
   };
+
+  reg("tile.fillpad_inplace", [](const CallPtr& op, codegen::CodegenBase& codegen_base) {
+    auto& codegen = AsPto(codegen_base);
+    CheckArity(op, "pto.tfillpad", 1);
+    if (!codegen.EmitTileAddr()) {
+      const auto& result_var = codegen.GetCurrentResultVar();
+      INTERNAL_CHECK_SPAN(result_var, op->span_)
+          << "Internal error: tile.fillpad_inplace requires a result variable";
+      auto result_type = As<ir::TileType>(result_var->GetType());
+      INTERNAL_CHECK_SPAN(result_type, op->span_)
+          << "Internal error: tile.fillpad_inplace requires a TileType result";
+      // The shared input handle retains its original validity and pad metadata.
+      // A local allocation can supply a dynamic-valid reshape whose metadata
+      // remains mutable after padding. Initialize it to the full extent before
+      // filling: TRESHAPE alone leaves dynamic validity at zero. Do not mutate
+      // the input handle, whose original valid extent identifies the pad region.
+      const std::string src = codegen.GetExprAsCode(op->args_[0]);
+      if (codegen.IsMutableTileName(src)) {
+        const std::string dst = codegen.NewNamedTemp("fillpad_dst_view");
+        const std::string dst_type = codegen.GetTileBufTypeStringFromTileType(result_type);
+        const auto dims =
+            codegen::ExtractTileTypeInfo(*result_type, codegen.GetTypeString(result_type->dtype_));
+        const std::string rows = codegen.GetOrEmitConstant(dims.rows, DataType::INDEX);
+        const std::string cols = codegen.GetOrEmitConstant(dims.cols, DataType::INDEX);
+        codegen.Emit(dst + " = pto.treshape " + src + " : " + codegen.GetExprTypeAnnotation(op->args_[0]) +
+                     " -> " + dst_type);
+        codegen.RegisterTileBufType(dst, dst_type);
+        codegen.RegisterTileViewName(dst);
+        codegen.RegisterMutableTileName(dst);
+        codegen.Emit("pto.set_validshape " + dst + ", " + rows + ", " + cols + " : " + dst_type);
+        codegen.SetCurrentResultBuf(dst);
+      } else {
+        // Subviews and loop-carried values cannot be runtime-updated by PTOAS.
+        // Preserve their existing static-valid view lowering.
+        codegen.SetCurrentResultBuf(
+            EnsureTileViewSsa(op->args_[0], result_type, codegen, "fillpad_dst_view"));
+      }
+    }
+    codegen.Emit("pto.tfillpad " + GenerateInsOutsClause(op, codegen));
+    return std::string("");
+  });
 
   auto register_precision_op = [&](const char* op_name, const char* pto_op_name, size_t arity,
                                    const char* attr_kind) {

@@ -20,6 +20,43 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 - 高层测试若最终生成其他 PTO op，不算同名覆盖。例如 collective 被拆成
   `tput/tget/tnotify/twait`，不能计为 `tbroadcast/tgather/tscatter/treduce` 的 ST。
 
+## 内存规划视图编译看护（Planner View Compilation Guard）
+
+`system-tests-a5sim` CI 作业使用固定版本的 PTOAS，在安装设备运行时之前运行
+`fillpad_inplace` 的内存规划和视图回归测试：
+
+```bash
+python -m pytest tests/ut/codegen/ --require-ptoas -m ptoas_compile -v
+```
+
+当 PTOAS 缺失、无法运行或版本低于支持范围时，`--require-ptoas` 会在测试初始化阶段失败，
+避免因编译器缺失而静默跳过原生编译。测试覆盖两个后端的 PTOAS 内存规划路径，以及
+PYPTO/DSA_RP 对照路径。此看护检查 MLIR 和生成 C++ 的编译过程；不能替代设备数值测试，
+也不代表已穷举验证整个内存规划器。
+
+输入由本地分配支撑时，填充结果使用动态有效范围的 reshape 别名，并显式初始化为完整
+tile 范围。这保留了后续 `set_validshape` 更新，包括运行时边界以及对原填充句柄的使用，
+也覆盖为 `if/else` 结果在函数入口声明的分配。
+切片及其他不可修改有效范围的视图输入仍使用静态有效范围，原有的有效范围更新限制保持不变。
+
+扩展看护时，在 `tests/ut/codegen/` 下的回归测试上添加 `@pytest.mark.ptoas_compile`。
+测试必须断言相关的生成代码语义，并实际调用 PTOAS 编译；标记只负责选择测试。
+CI 会发现该目录下所有带此标记的测试，因此新增算子或测试文件无须修改工作流。
+CI 中应保留 `--require-ptoas`，确保编译器不可用时失败。
+
+安装运行时之后，同一 CI 作业还会在两个模拟器上显式使用 PTOAS 内存规划，
+运行现有的 `fillpad_inplace` 数值测试：
+
+```bash
+python -m pytest tests/st/runtime/ops/test_fillpad_inplace.py --memory-planner=ptoas --platform=a2a3sim,a5sim --forked -v
+```
+
+六个基础用例将完整的 `[64, 64]` 输出与参考结果比较：前 48 行保留输入，
+后 16 行分别填充零、正无穷或负无穷。另六个用例覆盖填充后静态或动态更新有效范围，
+再通过原填充别名执行填充的场景。额外四个用例覆盖 `if/else` 两条路径合并后再填充并缩小有效范围。
+它们为编译看护补充模拟器数值覆盖，
+并不代表编译测试中的所有视图组合都已验证设备执行正确性。
+
 ## 图例
 
 - **级别**：PyPTO 注册/生成层级（tile / tensor / tile+tensor / comm / internal）。
@@ -177,7 +214,7 @@ lowering/compiler plumbing 使用的额外内部 op 未纳入，也不列 VPTO�
 | pto.textract | TEXTRACT | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tfillpad | TFILLPAD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tfillpad_expand | TFILLPAD_EXPAND | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.tfillpad_inplace | TFILLPAD_INPLACE | tile | ✅ | ✅ | ❌ | ❌ | — | 当前 codegen 发 `pto.tfillpad` |
+| pto.tfillpad_inplace | TFILLPAD_INPLACE | tile | ✅ | ✅ | ❌ | ❌ | — | 发射 `pto.tfillpad`；PTOAS 内存规划通过 `pto.treshape` 别名保留目标 pad 和完整有效范围；由本地分配支撑的结果保留运行时有效范围更新能力 |
 | pto.textract_fp | TEXTRACT_FP / TEXTRACT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
 | pto.tinsert_fp | TINSERT_FP / TINSERT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING：缺完整前端/codegen/ST 链路 |
 | **排序（2）** |  |  |  |  |  |  |  |  |

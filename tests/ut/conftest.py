@@ -32,6 +32,7 @@ import pytest
 from pypto import LogLevel, get_log_level, set_log_level
 from pypto import backend as _backend
 from pypto.backend import BackendType
+from pypto.backend._ptoas_locate import check_ptoas_version, find_ptoas_binary
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import _clear_thread_log_level, passes
 
@@ -39,6 +40,31 @@ from pypto.pypto_core import _clear_thread_log_level, passes
 # mutate it — so every unit test starts from whatever PYPTO_LOG_LEVEL / the
 # build-type default selected for this session. See `_reset_log_level`.
 _INITIAL_LOG_LEVEL: Final[LogLevel] = get_log_level()
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--require-ptoas",
+        action="store_true",
+        help="Fail before running tests if a supported PTOAS compiler is unavailable.",
+    )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Register compilation coverage and fail CI before optional checks can skip."""
+    config.addinivalue_line(
+        "markers",
+        "ptoas_compile: invokes PTOAS compilation to check generated-code regressions",
+    )
+    if not config.getoption("--require-ptoas"):
+        return
+    binary = find_ptoas_binary()
+    if binary is None:
+        raise pytest.UsageError("--require-ptoas requires PTOAS; set PTOAS_ROOT to its installation.")
+    try:
+        check_ptoas_version(binary)
+    except RuntimeError as exc:
+        raise pytest.UsageError(str(exc)) from exc
 
 
 @pytest.fixture

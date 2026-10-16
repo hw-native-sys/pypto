@@ -2406,6 +2406,13 @@ jobs:
           "$PTOAS_ROOT/bin/python" -m pip install "$PTOAS_WHEEL"
           "$PTOAS_ROOT/bin/ptoas" --version
 
+      - name: Test PTOAS compilation regressions
+        # Reuse the pinned compiler above. Missing or incompatible PTOAS must
+        # fail this step instead of skipping the native compilation assertions.
+        run: >-
+          python -m pytest tests/ut/codegen/
+          --require-ptoas -m ptoas_compile -v
+
       - name: Install simpler
         run: |
           whl="$(ls wheelhouse/simpler-*.whl 2>/dev/null | head -1)"
@@ -2418,6 +2425,13 @@ jobs:
             pip install -v ./runtime
           fi
           python -c "import pypto, simpler; print('env OK:', pypto.__file__)"
+
+      - name: Test fillpad_inplace numerical correctness with PTOAS
+        # The default ST planner is PYPTO. Select PTOAS explicitly to exercise
+        # shared views and compare both valid and padded rows with the golden.
+        run: >-
+          python -m pytest tests/st/runtime/ops/test_fillpad_inplace.py
+          --memory-planner=ptoas --platform=a2a3sim,a5sim --forked -v
 
       - name: Test A5 system tests (simulator)
         # TestMscatter is deselected: the a5 simulator compiles incore kernels

@@ -1981,6 +1981,7 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
   Emit(line.str());
 
   fs_.ssa_to_tile_buf_type[tile_buf] = fields.type_str;
+  RegisterMutableTileName(tile_buf);
 }
 
 // ========================================================================
@@ -2078,6 +2079,9 @@ std::string PTOCodegen::AllocNewTileBuf(const std::string& tile_buf_type_string,
   fs_.extra_alloc_tiles.push_back(
       FunctionState::ExtraAllocTile{name, tile_buf_type_string, addr_ssa, valid_row_ssa, valid_col_ssa});
   fs_.ssa_to_tile_buf_type[name] = tile_buf_type_string;
+  // Head declarations are ordinary allocations too; branch producers may
+  // reuse this handle without going through EmitAllocTileForVar again.
+  RegisterMutableTileName(name);
   return name;
 }
 
@@ -2102,6 +2106,7 @@ bool PTOCodegen::DeclareTileBufAtHead(const std::string& ssa_name, const AllocTi
   fs_.extra_alloc_tiles.push_back(FunctionState::ExtraAllocTile{ssa_name, fields.type_str, fields.addr_ssa,
                                                                 fields.valid_row_ssa, fields.valid_col_ssa});
   fs_.ssa_to_tile_buf_type[ssa_name] = fields.type_str;
+  RegisterMutableTileName(ssa_name);
   return true;
 }
 
@@ -2120,6 +2125,14 @@ void PTOCodegen::RegisterTileViewName(const std::string& ssa_name) { fs_.tile_vi
 
 bool PTOCodegen::IsTileViewName(const std::string& ssa_name) const {
   return fs_.tile_view_names.count(ssa_name) > 0;
+}
+
+void PTOCodegen::RegisterMutableTileName(const std::string& ssa_name) {
+  fs_.mutable_tile_names.insert(ssa_name);
+}
+
+bool PTOCodegen::IsMutableTileName(const std::string& ssa_name) const {
+  return fs_.mutable_tile_names.count(ssa_name) > 0;
 }
 
 void PTOCodegen::RegisterSubviewMaterialization(const std::string& subview_ssa,

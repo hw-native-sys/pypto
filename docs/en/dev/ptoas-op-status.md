@@ -29,6 +29,50 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
   `tput/tget/tnotify/twait` does not count as ST coverage for
   `tbroadcast/tgather/tscatter/treduce`.
 
+## Planner View Compilation Guard
+
+The `system-tests-a5sim` CI job runs the `fillpad_inplace` planner/view regressions
+with its pinned PTOAS installation, before installing the device runtime:
+
+```bash
+python -m pytest tests/ut/codegen/ --require-ptoas -m ptoas_compile -v
+```
+
+`--require-ptoas` fails test setup when PTOAS is missing, cannot run, or is older
+than the supported version, so native compilation cannot silently skip for a
+missing compiler. The tests cover PTOAS-owned memory planning and the PYPTO/DSA_RP
+comparison paths on both backends. This guard checks MLIR and compilation to C++;
+it does not replace device numerical tests or exhaustively validate the planner.
+
+For an allocation-backed input, the padded result uses a dynamic-valid reshape
+alias initialized to the full tile extent. This preserves subsequent
+`set_validshape` updates, including runtime bounds and uses of the original padded
+handle. This includes allocations declared at function entry for `if/else` results.
+Slice and other non-mutable view inputs retain the static-valid lowering;
+the existing restrictions on updating their validity still apply.
+
+To extend this guard, add `@pytest.mark.ptoas_compile` to a regression test under
+`tests/ut/codegen/`. The test must assert the relevant generated-code semantics
+and actually invoke PTOAS compilation; the marker only selects tests. CI discovers
+marked tests across this directory, so new operators or test files need no workflow
+change. Keep `--require-ptoas` in CI to reject an unavailable compiler.
+
+After installing the runtime, the same CI job also runs the existing
+`fillpad_inplace` numerical tests with PTOAS memory planning on both simulators:
+
+```bash
+python -m pytest tests/st/runtime/ops/test_fillpad_inplace.py --memory-planner=ptoas --platform=a2a3sim,a5sim --forked -v
+```
+
+The six basic cases compare the full `[64, 64]` output against a reference: the first
+48 rows retain the input, and the last 16 rows contain zero, positive infinity,
+or negative infinity. Six more cases cover padding followed by static/runtime
+validity updates and another fill through the original padded alias. Four additional
+cases exercise both paths of an `if/else` result before padding and narrowing. This
+complements the compilation guard with simulator numerical coverage; it does not
+establish on-device correctness for every view
+composition covered by the compilation tests.
+
 ## Legend
 
 - **Level**: PyPTO registration/generation level (tile / tensor / tile+tensor / comm /
@@ -191,7 +235,7 @@ for lowering/compiler plumbing, plus other dialects such as VPTO, VMI, and SIMT.
 | pto.textract | TEXTRACT | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.tfillpad | TFILLPAD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tfillpad_expand | TFILLPAD_EXPAND | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
-| pto.tfillpad_inplace | TFILLPAD_INPLACE | tile | ✅ | ✅ | ❌ | ❌ | — | the current codegen emits `pto.tfillpad` |
+| pto.tfillpad_inplace | TFILLPAD_INPLACE | tile | ✅ | ✅ | ❌ | ❌ | — | emits `pto.tfillpad`; PTOAS planning preserves the destination pad/full validity with a `pto.treshape` alias; allocation-backed results retain runtime validity updates |
 | pto.textract_fp | TEXTRACT_FP / TEXTRACT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
 | pto.tinsert_fp | TINSERT_FP / TINSERT | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
 | **Sorting (2)** |  |  |  |  |  |  |  |  |
