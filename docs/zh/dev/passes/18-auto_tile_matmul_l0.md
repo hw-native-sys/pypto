@@ -17,7 +17,7 @@ AutoTile 保留已有的 L0 流水线及其显式缓冲声明，不再自动添�
 
 **K 切分 vs M/N 切分。** 当 chooser 返回 `m == M` 且 `n == N` 时，输出的**物理**分配能放进 L0c，因此只切分 K 维（一个 K-loop）。常规容量按 `AlignUp(M, GetL0cMAlignment(dtype)) × N × bytes_c` 计算；例如 Ascend910B 上逻辑 `M = 16` 的 INT32 累加器会占用 32 个物理行。规范 split-K 路径还会把操作数布局的 Mat box 粒度传给 chooser，在选择 tile 前按 `AlignUp(AlignUp(m, box_m), l0c_align_m) × AlignUp(n, box_n) × bytes_c` 计入容量，并同样按补齐后的尺寸检查 L0A/L0B。当返回 `m < M` 或 `n < N` 时，输出会超过 L0c。由于操作数已经是 Mat-resident，*只有*输出溢出：本 pass 把**输出**切成 `ceil(M/m) × ceil(N/n)` 的 `[m, n]` 子块网格（边界处为部分块——`m`/`n` 不必整除 `M`/`N`）。新的普通或带 bias 的 matmul 直接逐子块计算和放置；带 bias 的 matmul 会把仅使用一次、且到 matmul 之间只有同层 load 的完整 bias load，替换为同一无 effect 观测区间内的 `[1,n]` 窗口 load，并且只在每个输出块的第一个 K block 上加一次 bias。对于前端规范的 split-K 形式，则为每个输出子块克隆完整的源 K 归约，使一块 `[m, n]` 累加器完成全部 K block 并 store 后，才开始下一块。因而不会实例化超大的完整 `[M, N]` Acc。输出张量以 SSA 形式在各子块 store 间串联（`out → out_t0 → out_t1 → …`）。
 
-**统一的物理大小契约。** `ChooseL0Tile` 与 `InitMemRef` 共同使用同一个 backend-aware L0C 行占用 helper。规范 split-K 还把共享的 layout-aware Mat box 对齐传给 `ChooseL0Tile`，因此选择阶段会先应用与 load 重建一致的 M/N 补齐，再应用统一的 L0C 行补齐。chooser 或 dbC 规划接纳的 tile 会按容量判断使用的补齐形状分配；两个同时存活的补齐累加器不会被放到逻辑上相邻、但物理上重叠的地址区间。
+**统一的物理大小契约。** `ChooseL0Tile` 与 `InitMemRef` 共同使用同一个 backend-aware L0C 行占用 helper。规范 split-K 还把共享的 layout-aware Mat box 对齐传给 `ChooseL0Tile`，因此选择阶段会先应用与 load 重建一致的 M/N 补齐，再应用统一的 L0C 行补齐。chooser 接纳的 tile 会按容量判断使用的补齐形状分配；两个同时存活的补齐累加器不会被放到逻辑上相邻、但物理上重叠的地址区间。
 
 **Fits-L0c 链式 cast-fold（cast 折叠）。** 当链式 matmul 的 `[M, N]` 结果*能放进* L0c（无需 M/N 切分），但经一次降精度后再喂给第二个 matmul —— `c = matmul(a, b); cb = cast(c, bf16); d = matmul(cb, e)` —— 消费者需要 bf16 中间值位于 **Mat**（L1）。若不处理，`tile.cast` 会 lower 成 **Vector** 的 `pto.tcvt`（一次 cube→vector→cube 往返，在 `[128, 128]` 形状下会撑爆 Vec buffer）。本 pass 改为把 cast 折叠成**一次整窗**的 Acc→Mat `tile.assemble` —— 与超大 Mat-scratch 路径用的是同一个 `MatScratchPlacer`，只是单次 `PlaceAt` 于偏移 `(0, 0)` 而非一个网格 —— 从而让降精度留在 cube 上，作为 FIXPIPE 的 `pto.tinsert`。这是一个与 K 切分无关的 cast-peephole：无论 producer 是保持整体（`k == K`）还是被 K-loop 切分（`k < K`）都会触发，且仅当 cast 结果的每一处使用都是矩阵乘操作数时才折叠（非矩阵乘消费者保留 Vector cast）。折叠还严格对齐 FIXPIPE 能复现的能力——即 **`f32 → bf16/f16`** 降精度、且舍入模式为 **`rint`**（就近、**取偶**），这是 FIXPIPE 固定的 tie 规则——A2/A3 与 A5 一致（pto-isa 的 CPU 参考实现用 `std::bfloat16_t` 降精度、无 arch 分支，且 `pto.tinsert` 不带 `rmode`；两个 backend 仅 scratch dtype 不同，舍入相同）。若源不是 `f32`（例如 `int32` 矩阵乘结果，需要带 scale 的 *dequant*）、为 cast 默认的 **`round`** 模式（就近、**远离零**），或为有方向/截断的模式（`none`/`floor`/`ceil`/`trunc`/`odd`），则都保留 Vector `pto.tcvt`——只有它才会遵循所请求的 `rmode`——并由本 pass 发出指向 `mode="rint"` 的 `PH-AT-010` 提示。同一道 gate（`CastFoldableToFixpipeMat`）也用于下面的超大 Mat-scratch 折叠。超大结果不会到达这个 peephole——它们的 cast 由上面的 M/N 路径逐子块折叠。
 
@@ -119,9 +119,8 @@ program_tiled = l0_tile_pass(program)
 *i+1* 的 MAD 重叠。所有 planner 均禁用自动选择；旧版
 `PassContext(enable_pypto_l0c_double_buffer=True)` 标志不再生效。
 保留的发射逻辑按以下方式表达该存储意图。
-`BuildFullKPipelined` 给移动循环加上 `kPipelineDoubleBufferCAttr`（该标记使
-`LowerPipelineLoops` 为 cube 累加器打上 `pipeline_membership`，并由
-`CanonicalizeIOOrder` 对 2 取模，从而让两个 tile 落在**不同的 L0C slot**；语句顺序不变），
+`BuildFullKPipelined` 给移动循环加上 `kPipelineDoubleBufferCAttr`。该标记使
+`LowerPipelineLoops` 为 cube 累加器打上 `pipeline_membership`。
 `CanonicalizeIOOrder` 保持 `matmul, store, matmul, store` 的交错顺序，并把 cube
 累加器的 membership 对 2 取模，从而让两块累加器分居不同 L0C slot。
 

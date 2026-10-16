@@ -561,9 +561,17 @@ class StorageIndex : public IRVisitor {
         } else {
           std::vector<ExprPtr> zeros{std::make_shared<ConstInt>(0, DataType::INDEX, span),
                                      std::make_shared<ConstInt>(0, DataType::INDEX, span)};
-          view->second =
-              Define(storage, "_view", "buffer.subview",
-                     {slot->second, std::make_shared<MakeTuple>(zeros, span)}, member.descriptor, span);
+          std::vector<ExprPtr> args{slot->second, std::make_shared<MakeTuple>(zeros, span)};
+          // Vec windows state their valid rectangle explicitly. Acc views use
+          // the static descriptor instead, and require the two-operand form.
+          if (member.descriptor->memory_space_ == MemorySpace::Vec) {
+            std::vector<ExprPtr> valid;
+            for (const auto extent : member.descriptor->valid_shape_) {
+              valid.push_back(std::make_shared<ConstInt>(extent, DataType::INDEX, span));
+            }
+            args.push_back(std::make_shared<MakeTuple>(valid, span));
+          }
+          view->second = Define(storage, "_view", "buffer.subview", args, member.descriptor, span);
         }
       }
       if (member.tile) {

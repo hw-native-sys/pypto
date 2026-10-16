@@ -162,11 +162,13 @@ class PipelineMembershipTagger : public IRMutator {
     auto new_call = std::make_shared<Call>(call->op_, call->args_, call->kwargs_, std::move(new_attrs),
                                            call->GetType(), call->span_);
     if (is_cube_accumulator && acc_slot_base_) {
-      INTERNAL_CHECK_SPAN(!acc_slot_bound_ && (IsOp(call, "tile.matmul") || IsOp(call, "tile.matmul_bias")),
-                          assign->span_)
-          << "Internal error: full-K dbC stage must define one fresh accumulator";
-      INTERNAL_CHECK_SPAN(!tile_type->memref_.has_value(), assign->span_)
-          << "Internal error: dbC pipeline cannot replace caller-owned accumulator storage";
+      CHECK_SPAN(!acc_slot_bound_ && (IsOp(call, "tile.matmul") || IsOp(call, "tile.matmul_bias")),
+                 assign->span_)
+          << "Under PTOAS, each pipeline_double_buffer_c stage must define exactly one fresh "
+             "tile.matmul or tile.matmul_bias accumulator; accumulating or multiple MADs are unsupported";
+      CHECK_SPAN(!tile_type->memref_.has_value(), assign->span_)
+          << "Under PTOAS, a pipeline_double_buffer_c accumulator must not carry an explicit MemRef; "
+             "remove its storage binding or disable pipeline_double_buffer_c";
       auto slot = std::make_shared<ConstInt>(stage_ % 2, DataType::INDEX, assign->span_);
       auto memref = std::make_shared<MemRef>(acc_slot_base_, int64_t{0}, uint64_t{0}, assign->span_,
                                              /*is_pinned=*/true, /*slot_count=*/uint64_t{2},

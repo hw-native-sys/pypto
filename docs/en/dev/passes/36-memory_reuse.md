@@ -145,6 +145,13 @@ The cost is the author's to manage: pinning trades capacity for parallelism, and
 over-pinned kernel surfaces as a hard `AllocateMemoryAddr` overflow rather than being
 silently coalesced back.
 
+An uninitialized `tile.create` used only as a bare loop initializer is storage,
+not a competing live value. That initialization-only case is exempt from the
+overlap check. A create that is independently read, written, aliased, or returned
+remains checked, even when its consumers update the storage in place.
+Single-family phi sources use the existing proven alias relation; their full
+union lifetime still conflicts with independently bound values.
+
 **Overlap check.** Two tiles independently bound to the **same slot** must not be live at
 the same time — that is not reuse, it is the later write destroying data the earlier tile
 still needs. The check is per slot, not per allocation: two tiles on *different* slots of a
