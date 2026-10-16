@@ -145,10 +145,12 @@ The cost is the author's to manage: pinning trades capacity for parallelism, and
 over-pinned kernel surfaces as a hard `AllocateMemoryAddr` overflow rather than being
 silently coalesced back.
 
-An uninitialized `tile.create` used only as a bare loop initializer is storage,
-not a competing live value. That initialization-only case is exempt from the
-overlap check. A create that is independently read, written, aliased, or returned
-remains checked, even when its consumers update the storage in place.
+Creates retain their storage occupancy, including reads and writes through loop
+carries and SSA aliases. A canonical Acc carry initialized by a fresh MAD on its
+own loop's first iteration may share that initializing producer's lifetime, but
+only when the empty seed has no independent uses and has one proven initializer.
+The complete seed/carry interval is retained against unrelated occupants; an
+initializing `matmul_acc` is not an exemption from storage-overlap validation.
 Single-family phi sources use the existing proven alias relation; their full
 union lifetime still conflicts with independently bound values.
 

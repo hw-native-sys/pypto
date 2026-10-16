@@ -1276,6 +1276,38 @@ def test_issue_2872_batch_transposed_operands_fit_without_dbc(planner, tmp_path)
     assert output.is_file()
 
 
+@pytest.mark.parametrize(
+    "M,N,K,dtype", [(448, 448, 64, pl.FP32), (320, 320, 64, pl.FP32), (512, 512, 64, pl.BF16)]
+)
+@pytest.mark.parametrize("buffer_ir", [False, True], ids=["tile-ir", "buffer-ir"])
+def test_single_c_mn_grid_fits_native_ptoas(M, N, K, dtype, buffer_ir, tmp_path):
+    """Sequential grid outputs must reuse L0C even through addressless Buffer IR."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[M, K], dtype],
+            b: pl.Tensor[[K, N], dtype],
+            out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        ) -> pl.Tensor[[M, N], pl.FP32]:
+            lhs = pl.load(a, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+            rhs = pl.load(b, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+            product = pl.matmul(lhs, rhs)
+            return pl.store(product, [0, 0], out)
+
+    mlir = _codegen(
+        Before, passes.MemoryPlanner.PTOAS, buffer_ir=buffer_ir, backend_type=BackendType.Ascend910B
+    )
+    source, output = tmp_path / "grid.pto", tmp_path / "grid.cpp"
+    source.write_text(mlir)
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    _run_ptoas(str(source), str(output), ["--pto-arch=a2", "--pto-level=level2", "--enable-insert-sync"])
+    assert output.is_file()
+
+
 @pytest.mark.parametrize("dbc", [False, True], ids=["single-C", "legacy-flag-on"])
 @pytest.mark.parametrize("M,N,K", [(48, 400, 96), (512, 32, 96), (48, 400, 160)])
 def test_int8_auto_tile_k_matches_native_operand_boxing(M, N, K, dbc, tmp_path):
@@ -1314,6 +1346,52 @@ def test_int8_auto_tile_k_matches_native_operand_boxing(M, N, K, dbc, tmp_path):
     output = tmp_path / "int8_k_boxing.cpp"
     source.write_text(mlir)
     _run_ptoas(str(source), str(output), ["--pto-arch=a2", "--pto-level=level3", "--enable-insert-sync"])
+    assert output.is_file()
+
+
+@pytest.mark.parametrize("enable_buffer_ir", [False, True], ids=["buffer-off", "default-selection"])
+def test_outer_pipeline_canonical_k_split_fits_native_ptoas(enable_buffer_ir, tmp_path):
+    """The K=192 chunk's inner split must reserve both enclosing pipeline stages."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[16, 1536], pl.BF16],
+            b: pl.Tensor[[1536, 128], pl.BF16],
+            out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            seed = pl.tile.create([16, 128], dtype=pl.FP32, target_memory=pl.Mem.Acc)
+            for kb, (carry,) in pl.pipeline(8, stage=2, init_values=(seed,)):
+                lhs = pl.load(a, [0, kb * 192], [16, 192], target_memory=pl.Mem.Mat)
+                rhs = pl.load(b, [kb * 192, 0], [192, 128], target_memory=pl.Mem.Mat)
+                if kb == 0:
+                    first = pl.tile.matmul(lhs, rhs)
+                    value = pl.yield_(first)
+                else:
+                    next_value = pl.tile.matmul_acc(carry, lhs, rhs)
+                    value = pl.yield_(next_value)
+                final = pl.yield_(value)
+            return pl.store(final, [0, 0], out)
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+    # Use the real rollout selector: this nested pipeline currently needs Tile
+    # IR's dynamic storage support, not the explicit static-slot Buffer recipe.
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=enable_buffer_ir):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+    function = next(function for function in optimized.functions.values() if function.name == "kernel")
+    mlir = codegen.PTOCodegen().generate(
+        ir.Program([function], function.name, optimized.span), emit_tile_addr=False
+    )
+    right_shapes = re.findall(r"loc=right, dtype=bf16, rows=(\d+), cols=(\d+)", mlir)
+    assert right_shapes and {int(rows) for rows, _ in right_shapes} == {64}, mlir
+    source, output = tmp_path / "outer.pto", tmp_path / "outer.cpp"
+    source.write_text(mlir)
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    _run_ptoas(str(source), str(output), ["--pto-arch=a2", "--pto-level=level2", "--enable-insert-sync"])
     assert output.is_file()
 
 

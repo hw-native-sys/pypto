@@ -8113,6 +8113,43 @@ def test_declared_readable_creates_keep_overlap_validation(overlap):
         assert ranges["first"][0] != ranges["second"][0]
 
 
+@pytest.mark.parametrize("overlap", [False, True], ids=["distinct-slots", "same-slot"])
+def test_declared_readable_create_carries_keep_overlap_validation(overlap):
+    """A carry is another handle for its initializer, not fresh storage."""
+    slots = pl.MemRef(slots=2)
+    second_slot = 0 if overlap else 1
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            x: pl.Scalar[pl.FP32],
+            y: pl.Scalar[pl.FP32],
+            out: pl.Out[pl.Tensor[[1], pl.FP32]],
+        ) -> pl.Tensor[[1], pl.FP32]:
+            first: pl.Tile[[64, 64], pl.FP32, slots[0], pl.Mem.Vec] = pl.tile.create(
+                [64, 64], dtype=pl.FP32, target_memory=pl.Mem.Vec
+            )
+            second: pl.Tile[[64, 64], pl.FP32, slots[second_slot], pl.Mem.Vec] = pl.tile.create(
+                [64, 64], dtype=pl.FP32, target_memory=pl.Mem.Vec
+            )
+            for _, (a, b) in pl.range(2, init_values=(first, second)):
+                pl.tile.write(a, [0, 0], x)
+                pl.tile.write(b, [0, 0], y)
+                av = pl.tile.read(a, [0, 0])
+                bv = pl.tile.read(b, [0, 0])
+                pl.tensor.write(out, [0], av + bv)
+                final_a, final_b = pl.yield_(a, b)
+            return out
+
+    if overlap:
+        with pytest.raises(ValueError, match="bound to the same slot.*live at the same time"):
+            _run_pipeline(Before)
+    else:
+        _run_pipeline(Before)
+
+
 def test_declared_create_used_only_as_accumulator_initializer_is_legal():
     """An empty carry seed need not outlive its first initializing MAD."""
     slots = pl.MemRef(slots=2)
@@ -8137,6 +8174,65 @@ def test_declared_create_used_only_as_accumulator_initializer_is_legal():
     after = _run_pipeline(Before)
     ranges = _collect_allocated_tile_ranges(after)
     assert ranges["seed"][0] == ranges["product"][0]
+
+
+def test_declared_initialized_accumulator_still_occupies_its_slot():
+    """An initializing MAD does not erase the live storage of its carry."""
+    slots = pl.MemRef(slots=2)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            lhs: pl.Tile[[16, 16], pl.BF16, pl.Mem.Left],
+            rhs: pl.Tile[[16, 16], pl.BF16, pl.Mem.Right],
+            out: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+        ) -> pl.Tensor[[16, 32], pl.FP32]:
+            seed: pl.Tile[[16, 16], pl.FP32, slots[0], pl.Mem.Acc] = pl.tile.create(
+                [16, 16], dtype=pl.FP32, target_memory=pl.Mem.Acc
+            )
+            for i, (acc,) in pl.range(2, init_values=(seed,)):
+                product = pl.tile.matmul_acc(acc, lhs, rhs, init_cond=i == 0)
+                final = pl.yield_(product)
+            other: pl.Tile[[16, 16], pl.FP32, slots[0], pl.Mem.Acc] = pl.tile.matmul(lhs, rhs)
+            out = pl.tile.store(final, [0, 0], out)
+            return pl.tile.store(other, [0, 16], out)
+
+    with pytest.raises(ValueError, match="bound to the same slot.*live at the same time"):
+        _run_pipeline(Before)
+
+
+def test_declared_peeled_accumulator_keeps_its_seed_lifetime():
+    """The fresh first MAD and empty seed must retain their union lifetime."""
+    slots = pl.MemRef(slots=2)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            lhs: pl.Tile[[16, 16], pl.BF16, pl.Mem.Left],
+            rhs: pl.Tile[[16, 16], pl.BF16, pl.Mem.Right],
+            out: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+        ) -> pl.Tensor[[16, 32], pl.FP32]:
+            seed: pl.Tile[[16, 16], pl.FP32, slots[0], pl.Mem.Acc] = pl.tile.create(
+                [16, 16], dtype=pl.FP32, target_memory=pl.Mem.Acc
+            )
+            for i, (acc,) in pl.range(2, init_values=(seed,)):
+                if i == 0:
+                    first: pl.Tile[[16, 16], pl.FP32, slots[0], pl.Mem.Acc] = pl.tile.matmul(lhs, rhs)
+                    product = pl.yield_(first)
+                else:
+                    next_value = pl.tile.matmul_acc(acc, lhs, rhs)
+                    product = pl.yield_(next_value)
+                final = pl.yield_(product)
+            other: pl.Tile[[16, 16], pl.FP32, slots[0], pl.Mem.Acc] = pl.tile.matmul(lhs, rhs)
+            out = pl.tile.store(final, [0, 0], out)
+            return pl.tile.store(other, [0, 16], out)
+
+    with pytest.raises(ValueError, match="bound to the same slot.*live at the same time"):
+        _run_pipeline(Before)
 
 
 def test_declared_phi_create_family_still_conflicts_with_independent_value():
