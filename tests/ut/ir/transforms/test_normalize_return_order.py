@@ -523,7 +523,8 @@ class TestNormalizeReturnOrderSubmit:
     ``.claude/rules/pass-submit-awareness.md``).
     """
 
-    def test_submit_swapped_returns_remapped(self):
+    @pytest.mark.parametrize("out_b_rows", [16, 32])
+    def test_submit_swapped_returns_remapped(self, out_b_rows):
         """InCore kernel returns swapped + result consumed via ``pl.submit`` →
         kernel returns reordered AND the submit-result projection indices
         permuted so ``a``/``b`` keep binding the same buffers.
@@ -546,12 +547,12 @@ class TestNormalizeReturnOrderSubmit:
                 self,
                 x: pl.Tensor[[16], pl.FP32],
                 out_a: pl.Out[pl.Tensor[[16], pl.FP32]],
-                out_b: pl.Out[pl.Tensor[[16], pl.FP32]],
-            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]]:
+                out_b: pl.Out[pl.Tensor[[out_b_rows], pl.FP32]],
+            ) -> tuple[pl.Tensor[[out_b_rows], pl.FP32], pl.Tensor[[16], pl.FP32]]:
                 x_tile: pl.Tile[[16], pl.FP32] = pl.load(x, [0], [16])
                 a_tile: pl.Tile[[16], pl.FP32] = pl.tile.add(x_tile, x_tile)
                 b_tile: pl.Tile[[16], pl.FP32] = pl.tile.mul(x_tile, x_tile)
-                out_b_store: pl.Tensor[[16], pl.FP32] = pl.store(b_tile, [0], out_b)
+                out_b_store: pl.Tensor[[out_b_rows], pl.FP32] = pl.store(b_tile, [0], out_b)
                 out_a_store: pl.Tensor[[16], pl.FP32] = pl.store(a_tile, [0], out_a)
                 return (out_b_store, out_a_store)
 
@@ -560,8 +561,8 @@ class TestNormalizeReturnOrderSubmit:
                 self,
                 x: pl.Tensor[[16], pl.FP32],
                 out_a: pl.Out[pl.Tensor[[16], pl.FP32]],
-                out_b: pl.Out[pl.Tensor[[16], pl.FP32]],
-            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]]:
+                out_b: pl.Out[pl.Tensor[[out_b_rows], pl.FP32]],
+            ) -> tuple[pl.Tensor[[out_b_rows], pl.FP32], pl.Tensor[[16], pl.FP32]]:
                 with pl.manual_scope():
                     (a, b), tid = pl.submit(self.kernel, x, out_a, out_b)  # noqa: F841
                 return (a, b)
@@ -573,12 +574,12 @@ class TestNormalizeReturnOrderSubmit:
                 self,
                 x: pl.Tensor[[16], pl.FP32],
                 out_a: pl.Out[pl.Tensor[[16], pl.FP32]],
-                out_b: pl.Out[pl.Tensor[[16], pl.FP32]],
-            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]]:
+                out_b: pl.Out[pl.Tensor[[out_b_rows], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[out_b_rows], pl.FP32]]:
                 x_tile: pl.Tile[[16], pl.FP32] = pl.load(x, [0], [16])
                 a_tile: pl.Tile[[16], pl.FP32] = pl.tile.add(x_tile, x_tile)
                 b_tile: pl.Tile[[16], pl.FP32] = pl.tile.mul(x_tile, x_tile)
-                out_b_store: pl.Tensor[[16], pl.FP32] = pl.store(b_tile, [0], out_b)  # noqa: F841
+                out_b_store: pl.Tensor[[out_b_rows], pl.FP32] = pl.store(b_tile, [0], out_b)  # noqa: F841
                 out_a_store: pl.Tensor[[16], pl.FP32] = pl.store(a_tile, [0], out_a)  # noqa: F841
                 return (out_a, out_b)
 
@@ -587,8 +588,8 @@ class TestNormalizeReturnOrderSubmit:
                 self,
                 x: pl.Tensor[[16], pl.FP32],
                 out_a: pl.Out[pl.Tensor[[16], pl.FP32]],
-                out_b: pl.Out[pl.Tensor[[16], pl.FP32]],
-            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]]:
+                out_b: pl.Out[pl.Tensor[[out_b_rows], pl.FP32]],
+            ) -> tuple[pl.Tensor[[out_b_rows], pl.FP32], pl.Tensor[[16], pl.FP32]]:
                 with pl.manual_scope():
                     # The pass remaps the submit-result projection indices IN
                     # PLACE (statement order preserved), exactly like the Call
@@ -600,7 +601,7 @@ class TestNormalizeReturnOrderSubmit:
                     # (b, a) tuple-unpack would instead reorder the statements
                     # (b before a), which the in-place remap does not do.
                     _submit_tmp = pl.submit(self.kernel, x, out_a, out_b)
-                    a: pl.Tensor[[16], pl.FP32] = _submit_tmp[1]
+                    a: pl.Tensor[[out_b_rows], pl.FP32] = _submit_tmp[1]
                     b: pl.Tensor[[16], pl.FP32] = _submit_tmp[0]
                     tid: pl.Scalar[pl.TASK_ID] = _submit_tmp[2]  # noqa: F841
                 return (a, b)

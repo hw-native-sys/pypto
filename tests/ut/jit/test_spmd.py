@@ -24,6 +24,7 @@ same loop-local names without the renamer emitting an out-of-scope bridge.
 import pypto.language as pl
 import pytest
 from pypto import backend
+from pypto.ir import compile as compile_ir
 from pypto.jit.decorator import jit
 from pypto.pypto_core import ir
 from pypto.runtime import RunConfig
@@ -35,6 +36,30 @@ _HIDDEN = 512
 _K_CHUNK = 128
 _HALF = _HIDDEN // 2  # columns of `hidden` handled by each SPMD block
 _CHUNKS = _HALF // _K_CHUNK  # pl.pipeline iterations per block
+
+
+def test_spmd_scatter_different_output_shapes(tmp_path):
+    """Branch-local stores must preserve the two output tensor identities."""
+    torch = pytest.importorskip("torch")
+
+    @jit
+    def scatter(source: pl.Tensor, local_kv: pl.Out[pl.Tensor], predecessor_kv: pl.Out[pl.Tensor]):
+        with pl.spmd(20, name_hint="cp_swa_augmented_kv_scatter"):
+            block = pl.tile.get_block_idx()
+            if block < 4:
+                for row in pl.range(block * 64, block * 64 + 64, 16):
+                    predecessor_kv[row : row + 16, :] = source[row : row + 16, :]
+            else:
+                for row in pl.range((block - 4) * 64, (block - 4) * 64 + 64, 16):
+                    local_kv[row : row + 16, :] = source[row + 256 : row + 272, :]
+        return local_kv, predecessor_kv
+
+    program = scatter.specialize(
+        torch.empty(1280, 128, dtype=torch.bfloat16),
+        torch.empty(1024, 128, dtype=torch.bfloat16),
+        torch.empty(256, 128, dtype=torch.bfloat16),
+    )
+    compile_ir(program, output_dir=str(tmp_path), skip_ptoas=True)
 
 
 def test_jit_spmd_for_loop():

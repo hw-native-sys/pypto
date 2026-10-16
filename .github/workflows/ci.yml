@@ -1915,7 +1915,7 @@ jobs:
     runs-on: [self-hosted, linux, npu-xp]
     # Matches pypto-serving's own job, which carries these guards over a
     # from-source pypto build. Its comment records that 90 left no headroom once
-    # the DeepSeek steps (2400s client wait under a 3600s task cap) and a cold
+    # the DeepSeek steps (3600s client wait under a 4800s task cap) and a cold
     # pip cache landed in one run. Kept at 120 with DSpark dropped: the margin
     # covers a cold build plus the 8-card matrix, and shrinking it would only
     # trade headroom for nothing.
@@ -2119,14 +2119,14 @@ jobs:
       - name: Run pypto-serving DeepSeek V4 MTP HTTP matrix
         # Multi-card, so it borrows its own eight rather than using this
         # runner's single card, and --ignore-whitelist because the pool the
-        # whitelist exposes is smaller than that. Timeouts follow serving's own
-        # job: the matrix client waits up to 2400s under a 3600s cap.
+        # whitelist exposes is smaller than that. A second server startup can
+        # exceed the old 2400s client wait; allow 3600s under a 4800s task cap.
         env:
           PYPTO_RUNTIME_LOG: error
         run: |
           source activate.sh
           task-submit --device auto --device-num 8 --ignore-whitelist \
-            --timeout 2400 --max-time 3600 \
+            --timeout 3600 --max-time 4800 \
             --run "source $GITHUB_WORKSPACE/serving-checkout/activate.sh && cd $GITHUB_WORKSPACE/pypto-serving && TASK_DEVICE=\$TASK_DEVICE PYTHONPATH=$GITHUB_WORKSPACE/pypto-serving PYPTO_DSV4_MODEL_DIR=$PYPTO_DSV4_MODEL_DIR PYPTO_RUNTIME_LOG=$PYPTO_RUNTIME_LOG python -m pytest tests/test_deepseek_v4_accuracy.py -q -s"
 
       - name: Kill orphaned task-submit tasks
