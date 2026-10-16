@@ -1335,6 +1335,32 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
     stream_ << "}";
   };
 
+  // Flag IR keeps the event as either an attribute or the sole dynamic
+  // operand. Print the public src/dst/event order explicitly; generic Call
+  // printing would put the dynamic operand before src_pipe and dst_pipe.
+  if (IsOp(op, "system.set_flag") || IsOp(op, "system.wait_flag")) {
+    const auto src = static_cast<PipeType>(op->GetKwarg<int>("src_pipe"));
+    const auto dst = static_cast<PipeType>(op->GetKwarg<int>("dst_pipe"));
+    stream_ << "src_pipe=" << prefix_ << ".PipeType." << PipeTypeToString(src) << ", dst_pipe=" << prefix_
+            << ".PipeType." << PipeTypeToString(dst) << ", event_id=";
+    if (op->args_.empty()) {
+      stream_ << op->GetKwarg<int>("event_id");
+    } else {
+      INTERNAL_CHECK_SPAN(op->args_.size() == 1, op->span_)
+          << "Internal error: flag has multiple event operands";
+      VisitExpr(op->args_[0]);
+    }
+    if (op->HasKwarg("core_type")) {
+      const auto core = op->GetKwarg<std::string>("core_type");
+      const char* member = CoreTypeToKernelMember(core, /*is_syncall=*/false);
+      INTERNAL_CHECK_SPAN(member, op->span_) << "Internal error: flag has invalid core_type " << core;
+      stream_ << ", core_type=" << prefix_ << ".KernelType." << member;
+    }
+    print_serialized_attrs(true);
+    stream_ << ")";
+    return;
+  }
+
   // reinterpret_view keeps dtype as the second public-API input and shape as a
   // keyword-only optional input, while the IR stores shape positionally and
   // dtype in kwargs. Print the public ordering explicitly so both tensor and

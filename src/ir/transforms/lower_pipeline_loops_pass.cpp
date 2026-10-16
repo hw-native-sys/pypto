@@ -566,6 +566,7 @@ class LowerPipelineMutator : public IRMutator {
 
 FunctionPtr TransformLowerPipelineLoops(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "LowerPipelineLoops cannot run on null function";
+  pipeline_loop::CheckExplicitFlagsOutsidePipeline(func->body_);
   LowerPipelineMutator mutator;
   auto new_body = mutator.VisitStmt(func->body_);
   if (new_body.get() == func->body_.get()) return func;

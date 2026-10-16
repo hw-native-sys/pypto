@@ -232,6 +232,62 @@ def sync_dst(
     )
 
 
+def _pipeline_flag(
+    name: str,
+    src_pipe: object,
+    dst_pipe: object,
+    event_id: int | Expr,
+    *,
+    core_type: KernelType | None,
+    span: Span | None,
+) -> Call:
+    """Build the explicit intra-core flag IR call."""
+    if not isinstance(src_pipe, PipeType) or not isinstance(dst_pipe, PipeType):
+        raise TypeError(f"{name} src_pipe and dst_pipe must be PipeType values")
+    if PipeType.ALL in (src_pipe, dst_pipe) or src_pipe == dst_pipe:
+        raise ValueError(f"{name} requires two different concrete pipes")
+    args: list[Expr] = []
+    kwargs: dict[str, Any] = {"src_pipe": src_pipe, "dst_pipe": dst_pipe}
+    if isinstance(event_id, ConstInt):
+        event_id = event_id.value
+    if isinstance(event_id, int) and not isinstance(event_id, bool):
+        if not 0 <= event_id <= 7:
+            raise ValueError(f"{name} event_id must be in [0, 7], got {event_id}")
+        kwargs["event_id"] = event_id
+    elif isinstance(event_id, Expr):
+        args.append(event_id)
+    else:
+        raise TypeError(f"{name} event_id must be int or INDEX Expr, got {type(event_id).__name__}")
+    if core_type is not None:
+        _check_enum(core_type, KernelType, "core_type", name, allowed=_SYNC_EVENT_KERNELS)
+        kwargs["core_type"] = _SYNC_EVENT_CORE_TYPE[core_type]
+    return _ir_core.create_op_call(name, args, kwargs, _get_span_or_capture(span, frame_offset=2))
+
+
+def set_flag(
+    src_pipe: PipeType,
+    dst_pipe: PipeType,
+    event_id: int | Expr = 0,
+    *,
+    core_type: KernelType | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Signal an intra-core pipeline event after work on ``src_pipe``."""
+    return _pipeline_flag("system.set_flag", src_pipe, dst_pipe, event_id, core_type=core_type, span=span)
+
+
+def wait_flag(
+    src_pipe: PipeType,
+    dst_pipe: PipeType,
+    event_id: int | Expr = 0,
+    *,
+    core_type: KernelType | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Wait on ``dst_pipe`` for the matching source-pipe signal."""
+    return _pipeline_flag("system.wait_flag", src_pipe, dst_pipe, event_id, core_type=core_type, span=span)
+
+
 _MIN_FFTS_WORKSPACE_ELEMENTS = 256
 
 

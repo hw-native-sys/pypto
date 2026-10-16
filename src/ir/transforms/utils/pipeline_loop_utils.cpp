@@ -19,16 +19,51 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 
 namespace pypto {
 namespace ir {
 namespace pipeline_loop {
+
+namespace {
+
+class ExplicitFlagPlacementChecker : public IRVisitor {
+ public:
+  void VisitStmt_(const ForStmtPtr& op) override {
+    const bool was_in_pipeline = in_pipeline_;
+    in_pipeline_ |= op->kind_ == ForKind::Pipeline;
+    IRVisitor::VisitStmt_(op);
+    in_pipeline_ = was_in_pipeline;
+  }
+
+  void VisitExpr_(const CallPtr& op) override {
+    if (in_pipeline_) {
+      CHECK_SPAN(!IsOp(op, "system.set_flag") && !IsOp(op, "system.wait_flag"), op->span_)
+          << "Explicit set_flag/wait_flag cannot be used inside pl.pipeline: pipeline scheduling does not "
+             "preserve their source order. Use pl.range for manual flags until pipeline scheduling supports "
+             "them.";
+    }
+    IRVisitor::VisitExpr_(op);
+  }
+
+ private:
+  bool in_pipeline_ = false;
+};
+
+}  // namespace
+
+void CheckExplicitFlagsOutsidePipeline(const StmtPtr& body) {
+  ExplicitFlagPlacementChecker checker;
+  checker.VisitStmt(body);
+}
 
 int64_t GetConstIntValue(const ExprPtr& expr, const char* pass, const std::string& what) {
   if (auto value = transform_utils::EvalConstInt(expr)) {

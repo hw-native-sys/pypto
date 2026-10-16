@@ -93,7 +93,8 @@ bool HasStatedLane(const CallPtr& call) {
   // The core_type-dispatched control ops (rules 2a / 2b below). Their lane is
   // author-written, so it is as explicit as a registry declaration even though
   // it is decided per call rather than per op.
-  return IsOp(call, "system.syncall") || IsOp(call, "system.sync_set") || IsOp(call, "system.sync_wait");
+  return IsOp(call, "system.syncall") || IsOp(call, "system.sync_set") || IsOp(call, "system.sync_wait") ||
+         IsOp(call, "system.set_flag") || IsOp(call, "system.wait_flag");
 }
 
 CoreAffinity ClassifyCallAffinity(const CallPtr& call) {
@@ -146,7 +147,8 @@ CoreAffinity ClassifyCallAffinity(const CallPtr& call) {
   // 2b. Explicit cross-core events are shared when authored inside an already
   // typed AIC/AIV function. A mixed InCore kernel, however, needs an explicit
   // target so ExpandMixedKernel retains the set/wait on only that lane.
-  if (IsOp(op, "system.sync_set") || IsOp(op, "system.sync_wait")) {
+  if (IsOp(op, "system.sync_set") || IsOp(op, "system.sync_wait") || IsOp(op, "system.set_flag") ||
+      IsOp(op, "system.wait_flag")) {
     for (const auto& [key, value] : call->kwargs_) {
       if (key != "core_type") continue;
       const auto core_type = AnyCast<std::string>(value, "core_type");

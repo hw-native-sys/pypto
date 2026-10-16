@@ -787,7 +787,14 @@ def test_if_else_with_return_vars():
 
 @pytest.mark.parametrize(
     "op_name",
-    ["system.sync_src", "system.sync_set", "system.sync_wait", "system.set_ffts"],
+    [
+        "system.sync_src",
+        "system.sync_set",
+        "system.sync_wait",
+        "system.set_flag",
+        "system.wait_flag",
+        "system.set_ffts",
+    ],
 )
 def test_system_ops_are_noops(op_name):
     """System ops should emit no-op comments."""
@@ -796,6 +803,12 @@ def test_system_ops_are_noops(op_name):
         call = _op_call(op_name, [], {"set_pipe": 4, "wait_pipe": 5, "event_id": 0})
     elif op_name in ("system.sync_set", "system.sync_wait"):
         call = _op_call(op_name, [], {"pipe": ir.PipeType.MTE2, "event_id": 0})
+    elif op_name in ("system.set_flag", "system.wait_flag"):
+        call = _op_call(
+            op_name,
+            [],
+            {"src_pipe": ir.PipeType.MTE2, "dst_pipe": ir.PipeType.V, "event_id": 0},
+        )
     else:
         workspace = _tensor_var("workspace", [256], DataType.INT64)
         params = [workspace]

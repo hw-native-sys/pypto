@@ -47,6 +47,8 @@ __all__ = [
     "SyncAllMode",
     "sync_src",
     "sync_dst",
+    "set_flag",
+    "wait_flag",
     "sync_set",
     "sync_wait",
     "set_ffts",
@@ -85,6 +87,37 @@ def _kernel_or_none(core_type: KernelType | None, op_name: str) -> KernelType | 
         allowed=_SYNC_EVENT_KERNELS,
         hint=_SYNC_EVENT_MIX_HINT,
     )
+
+
+def set_flag(
+    src_pipe: PipeType,
+    dst_pipe: PipeType,
+    event_id: IntLike = 0,
+    *,
+    core_type: KernelType | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Signal an intra-core event after ``src_pipe`` work completes.
+
+    Pair with :func:`wait_flag` using the same source, destination and event ID.
+    ``core_type`` selects AIC or AIV when a mixed InCore function is split.
+    A dynamic event ID must be an INDEX scalar and evaluate to 0 through 7.
+    """
+    event = event_id.unwrap() if isinstance(event_id, Scalar) else event_id
+    return _ir_ops.set_flag(src_pipe, dst_pipe, event, core_type=core_type, span=span)
+
+
+def wait_flag(
+    src_pipe: PipeType,
+    dst_pipe: PipeType,
+    event_id: IntLike = 0,
+    *,
+    core_type: KernelType | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Block ``dst_pipe`` until the matching source event is signalled."""
+    event = event_id.unwrap() if isinstance(event_id, Scalar) else event_id
+    return _ir_ops.wait_flag(src_pipe, dst_pipe, event, core_type=core_type, span=span)
 
 
 def sync_set(

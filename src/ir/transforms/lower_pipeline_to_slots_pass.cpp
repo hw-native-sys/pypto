@@ -43,6 +43,7 @@
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/pipeline_loop_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -530,6 +531,7 @@ class SlotBindingMutator : public IRMutator {
 FunctionPtr TransformLowerPipelineToSlots(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "LowerPipelineToSlots cannot run on null function";
   if (!func->body_) return func;
+  pipeline_loop::CheckExplicitFlagsOutsidePipeline(func->body_);
 
   // Only ptoas' memory planner emits a multi-buffer region today: PTO codegen's
   // `PlanMultiBufferRegions` bails under the PyPTO planner, so a rotation
