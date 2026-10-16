@@ -15,12 +15,13 @@ import pytest
 from pypto import passes
 
 
-def test_flags_inside_pipeline_rejected_before_skew():
+def test_flags_inside_pipeline_rejected_before_scheduling():
     @pl.program
     class FlaggedPipeline:
         @pl.function(strict_ssa=True)
-        def main(self, x: pl.Tensor[[16], pl.FP32]) -> pl.Tensor[[16], pl.FP32]:
+        def main(self, x: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:
             for _ in pl.pipeline(0, 4, stage=2):
+                _tile: pl.Tile[[16, 16], pl.FP32, pl.Mem.Vec] = pl.load(x, [0, 0], [16, 16])
                 for _ in pl.range(1):
                     pl.system.set_flag(pl.PipeType.MTE2, pl.PipeType.V, 0)
                     pl.system.wait_flag(pl.PipeType.MTE2, pl.PipeType.V, 0)
@@ -37,10 +38,14 @@ def test_flags_inside_pipeline_rejected_before_skew():
     with pytest.raises(pypto.Error, match="cannot be used inside pl.pipeline"):
         pipeline.run(FlaggedPipeline)
 
-    for scheduler in (passes.skew_cross_core_pipeline, passes.lower_pipeline_loops):
+    for scheduler in (
+        passes.skew_cross_core_pipeline,
+        passes.lower_pipeline_loops,
+        passes.lower_pipeline_to_slots,
+    ):
         pipeline = passes.PassPipeline()
         pipeline.add_pass(scheduler())
-        with passes.PassContext([], passes.VerificationLevel.NONE):
+        with passes.PassContext([], passes.VerificationLevel.NONE, memory_planner=passes.MemoryPlanner.PTOAS):
             with pytest.raises(ValueError, match="cannot be used inside pl.pipeline"):
                 pipeline.run(FlaggedPipeline)
 
@@ -58,3 +63,7 @@ def test_flags_in_ordinary_loop_are_allowed():
     pipeline = passes.PassPipeline()
     pipeline.add_pass(passes.skew_cross_core_pipeline())
     assert pipeline.run(OrdinaryLoop) is not None
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

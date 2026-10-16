@@ -51,7 +51,7 @@ namespace pipeline_loop {
 int64_t GetConstIntValue(const ExprPtr& expr, const char* pass, const std::string& what);
 
 /// Reject explicit flags inside software-pipelined loops even when optional IR
-/// verification is disabled. Both scheduling passes call this before rewriting.
+/// verification is disabled. Pipeline lowering passes call this before rewriting.
 void CheckExplicitFlagsOutsidePipeline(const StmtPtr& body);
 
 /// An ``INDEX``-typed ``ConstInt``.
