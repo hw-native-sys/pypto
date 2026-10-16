@@ -368,6 +368,49 @@ def test_fillpad_inplace_then_set_validshape(tmp_path: Path, dynamic_bounds, bac
     _compile_fillpad(mlir, tmp_path, planner)
 
 
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PTOAS, passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP]
+)
+def test_fillpad_branch_result_then_set_validshape(tmp_path: Path, backend_type, planner):
+    """A phi buffer declared at function entry must retain mutable validity."""
+
+    @pl.program
+    class BranchResult:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[48, 64], pl.FP32],
+            rows: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            if rows < 32:
+                left = pl.load(x, [0, 0], [64, 64], valid_shape=[48, 64])
+                merged = pl.yield_(left)
+            else:
+                right = pl.load(x, [0, 0], [64, 64], valid_shape=[48, 64])
+                merged = pl.yield_(right)
+            padded = pl.tile.fillpad_inplace(merged, pad_value=pl.PadValue.zero)
+            _narrowed = pl.tile.set_validshape(padded, rows, 48)
+            repadded = pl.tile.fillpad_inplace(padded, pad_value=pl.PadValue.max)
+            return pl.store(repadded, [0, 0], out)
+
+    reset_for_testing()
+    set_backend_type(backend_type)
+    with passes.PassContext([], memory_planner=planner):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(BranchResult)
+    mlir = codegen.PTOCodegen().generate(optimized, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+    assert "scf.if" in mlir, mlir
+    fillpads = [line for line in mlir.splitlines() if "pto.tfillpad" in line]
+    assert len(fillpads) == 2, mlir
+    first_dst = re.search(r"outs\((%[\w.$]+)", fillpads[0])
+    second_src = re.search(r"ins\((%[\w.$]+)", fillpads[1])
+    assert first_dst and second_src and first_dst[1] == second_src[1], mlir
+    assert "v_row=?, v_col=?" in _tile_buf_types(fillpads[0])[1], mlir
+    _compile_fillpad(mlir, tmp_path, planner)
+
+
 # Reshape of a subview: def/use tile_buf types must agree
 
 PAD, VALID, D = 16, 5, 128
