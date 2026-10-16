@@ -22,7 +22,7 @@ import pypto.language as pl
 import pytest
 import torch
 from examples.intermediate.matmul_acc import matmul_acc_64
-from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
+from harness.core.harness import ALL_PLATFORM_IDS, PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto import backend as _backend
 from pypto import ir, passes
 from pypto.backend import BackendType, pto_backend
@@ -1772,8 +1772,26 @@ class TestMatmulOperations:
         )
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    @pytest.mark.parametrize("planner", _AUTOL0_PLANNERS)
+    @pytest.mark.parametrize(
+        "planner,platform",
+        [
+            pytest.param(
+                planner,
+                platform,
+                id=f"{_planner_tag(planner)}-{platform}",
+                # Mark at collection so the batched harness does not precompile
+                # this known failure. Re-enable when PTOAS can repack the
+                # sequential 16/32 KiB Left buffers into the legal 64 KiB peak.
+                marks=pytest.mark.skip(
+                    reason="PTOAS v0.65 greedy Left allocation needs 96 KiB for a legal 64 KiB chain"
+                )
+                if planner == MemoryPlanner.PTOAS and platform in ("a2a3", "a2a3sim")
+                else (),
+            )
+            for planner in (MemoryPlanner.PYPTO, MemoryPlanner.DSA_RP, MemoryPlanner.PTOAS)
+            for platform in ALL_PLATFORM_IDS
+        ],
+    )
     def test_chained_matmul_mat_scratch(self, test_runner, platform, planner):
         """Chained (a@b)@e with the oversized intermediate kept on-chip in an L1/Mat
         scratch (per-sub-tile Acc->Mat assembles, bf16 downcast fused), consumed by
