@@ -653,5 +653,75 @@ class TestAccumulatorMembership:
         )
 
 
+def test_explicit_ptoas_dbc_accumulating_mad_is_user_error():
+    """The explicit policy is supported only for a fresh output per stage."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            lhs: pl.Tile[[16, 16], pl.BF16, pl.Mem.Left],
+            rhs: pl.Tile[[16, 16], pl.BF16, pl.Mem.Right],
+            seed: pl.Tile[[16, 16], pl.FP32, pl.Mem.Acc],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            for i in pl.pipeline(2, stage=2, attrs={"pipeline_double_buffer_c": True}):
+                acc = pl.tile.matmul_acc(seed, lhs, rhs)
+                _stored = pl.tile.store(acc, [0, 0], out)
+            return out
+
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+        with pytest.raises(ValueError, match="exactly one fresh tile.matmul or tile.matmul_bias"):
+            passes.lower_pipeline_loops()(Before)
+
+
+def test_explicit_ptoas_dbc_multiple_mads_are_user_error():
+    """Two fresh outputs cannot both claim one stage's Acc slot."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            lhs: pl.Tile[[16, 16], pl.BF16, pl.Mem.Left],
+            rhs: pl.Tile[[16, 16], pl.BF16, pl.Mem.Right],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            for i in pl.pipeline(2, stage=2, attrs={"pipeline_double_buffer_c": True}):
+                first = pl.tile.matmul(lhs, rhs)
+                second = pl.tile.matmul(lhs, rhs)
+                _stored = pl.tile.store(first, [0, 0], out)
+                _stored2 = pl.tile.store(second, [0, 0], out)
+            return out
+
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+        with pytest.raises(ValueError, match="exactly one fresh tile.matmul or tile.matmul_bias"):
+            passes.lower_pipeline_loops()(Before)
+
+
+def test_explicit_ptoas_dbc_caller_owned_memref_is_user_error():
+    """Do not silently replace storage explicitly selected by the caller."""
+    slots = pl.MemRef(slots=2)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            lhs: pl.Tile[[16, 16], pl.BF16, pl.Mem.Left],
+            rhs: pl.Tile[[16, 16], pl.BF16, pl.Mem.Right],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            for i in pl.pipeline(2, stage=2, attrs={"pipeline_double_buffer_c": True}):
+                acc: pl.Tile[[16, 16], pl.FP32, slots[0], pl.Mem.Acc] = pl.tile.matmul(lhs, rhs)
+                _stored = pl.tile.store(acc, [0, 0], out)
+            return out
+
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+        with pytest.raises(ValueError, match="must not carry an explicit MemRef"):
+            passes.lower_pipeline_loops()(Before)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

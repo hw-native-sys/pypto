@@ -3366,6 +3366,34 @@ struct BoundMember {
   int last_use_point;
 };
 
+/// Identify real uses of storage handles, excluding only bare loop initializers.
+/// A create used solely to seed a carry supplies uninitialized storage rather
+/// than a value that must survive the carry's initializing write. A read, write,
+/// alias, return, or other independent use must keep the ordinary overlap check.
+/// Do not recursively expand IterArg initializers at body uses: visiting them
+/// once at the loop binding keeps this analysis O(N log N), including nesting.
+class NonInitializerUseCollector : public IRVisitor {
+ public:
+  std::set<const Var*> used;
+
+ protected:
+  void VisitVarLike_(const VarPtr& var) override { used.insert(var.get()); }
+  void VisitExpr_(const IterArgPtr& var) override { VisitVarLike_(var); }
+  void VisitStmt_(const AssignStmtPtr& op) override { VisitExpr(op->value_); }
+  void VisitStmt_(const ForStmtPtr& op) override { VisitLoop(op); }
+  void VisitStmt_(const WhileStmtPtr& op) override { VisitLoop(op); }
+
+ private:
+  template <typename LoopPtr>
+  void VisitLoop(const LoopPtr& op) {
+    for (const auto& argument : op->iter_args_) {
+      // A computed initializer is a value use, not just a storage binding.
+      if (!AsVarLike(argument->initValue_)) VisitExpr(argument->initValue_);
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+};
+
 /// Group the tiles a user *independently bound* to each pinned buffer.
 ///
 /// A tile whose defining op inherits its source's buffer (a view, an in-place
@@ -3376,8 +3404,9 @@ struct BoundMember {
 class IndependentlyBoundCollector : public IRVisitor {
  public:
   IndependentlyBoundCollector(const std::set<const Var*>& pinned_bases,
-                              const std::map<const Var*, std::pair<int, int>>& var_liveness)
-      : pinned_bases_(pinned_bases), var_liveness_(var_liveness) {}
+                              const std::map<const Var*, std::pair<int, int>>& var_liveness,
+                              const std::set<const Var*>& independently_used)
+      : pinned_bases_(pinned_bases), var_liveness_(var_liveness), independently_used_(independently_used) {}
 
   /// One slot of a declared allocation: its base, and the byte offset that tells
   /// slots of the same allocation apart. `InitMemRef` has already consumed the
@@ -3416,10 +3445,10 @@ class IndependentlyBoundCollector : public IRVisitor {
     if (AsVarLike(op->value_)) return;  // bare SSA alias — same data
     if (auto call = As<Call>(op->value_);
         call && call->op_ &&
-        (IsOp(call, "tile.create") || op_predicates::OutputInheritsSourceBuffer(call->op_->name_))) {
-      // tile.create declares uninitialized storage, not a value whose bytes
-      // must survive the first write. In particular, a split-K carry seed may
-      // share its slot with the initializing matmul inside the loop.
+        ((IsOp(call, "tile.create") && independently_used_.count(op->var_.get()) == 0) ||
+         op_predicates::OutputInheritsSourceBuffer(call->op_->name_))) {
+      // Only initialization-only creates may overlap an initializing producer.
+      // Readable or independently written creates still compete for the slot.
       return;
     }
     auto liveness = var_liveness_.find(op->var_.get());
@@ -3435,6 +3464,7 @@ class IndependentlyBoundCollector : public IRVisitor {
 
   const std::set<const Var*>& pinned_bases_;
   const std::map<const Var*, std::pair<int, int>>& var_liveness_;
+  const std::set<const Var*>& independently_used_;
 };
 
 /// Reject a declared allocation whose independently bound tiles are co-live.
@@ -3450,13 +3480,37 @@ class IndependentlyBoundCollector : public IRVisitor {
 /// be quadratic in the member count — which grows with the IR once a binding
 /// inside a loop body is unrolled.
 void ValidateDeclaredAllocs(const StmtPtr& body, const std::set<const Var*>& pinned_bases,
-                            const std::map<const Var*, std::pair<int, int>>& var_liveness) {
+                            const std::map<const Var*, std::pair<int, int>>& var_liveness,
+                            const std::map<const Var*, std::set<int>>& phi_family_ids) {
   if (pinned_bases.empty()) return;
-  IndependentlyBoundCollector collector(pinned_bases, var_liveness);
+  NonInitializerUseCollector uses;
+  uses.VisitStmt(body);
+  IndependentlyBoundCollector collector(pinned_bases, var_liveness, uses.used);
   collector.VisitStmt(body);
 
   for (auto& [slot, members] : collector.by_slot) {
     const Var* base = slot.base;
+    // Branch-local sources of one phi are the same value on mutually exclusive
+    // paths, not independent live occupants. Reuse the lifetime analysis's
+    // proven families and retain their full union interval against other tiles.
+    // Only single-family members are collapsed: transitive union of different
+    // return slots through a multi-family source would invent unsafe aliases.
+    std::map<int, BoundMember> families;
+    std::vector<BoundMember> independent;
+    for (const auto& member : members) {
+      auto ids = phi_family_ids.find(member.var.get());
+      if (ids == phi_family_ids.end() || ids->second.size() != 1) {
+        independent.push_back(member);
+        continue;
+      }
+      auto [family, fresh] = families.emplace(*ids->second.begin(), member);
+      if (!fresh) {
+        family->second.def_point = std::min(family->second.def_point, member.def_point);
+        family->second.last_use_point = std::max(family->second.last_use_point, member.last_use_point);
+      }
+    }
+    for (const auto& [id, member] : families) independent.push_back(member);
+    members = std::move(independent);
     std::sort(members.begin(), members.end(),
               [](const BoundMember& a, const BoundMember& b) { return a.def_point < b.def_point; });
     for (size_t i = 1; i < members.size(); ++i) {
@@ -5955,7 +6009,8 @@ AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& fun
     static_cast<void>(size);
     result.declared_allocation_bases.insert(base);
   }
-  ValidateDeclaredAllocs(func->body_, result.declared_allocation_bases, lifetimes.var_liveness);
+  ValidateDeclaredAllocs(func->body_, result.declared_allocation_bases, lifetimes.var_liveness,
+                         lifetimes.phi_family_ids);
 
   result.needs_load_tpop_hazard_guard = NeedsLoadTpopHazardGuard(func);
   if (result.needs_load_tpop_hazard_guard) {

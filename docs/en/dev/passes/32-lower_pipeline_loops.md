@@ -154,6 +154,13 @@ else:
 
 After this pass, `CanonicalizeIOOrder` runs scoped to the pipeline loop's body, clusters loads at the top and stores at the bottom, and demotes the outer loop's `kind_` to `Sequential` — making the cloned input tiles co-live so `MemoryReuse` keeps them in distinct buffers. Ping-pong buffering applies to both the bulk main loop and the tail clones.
 
+## Explicit dbC validation
+
+Under PTOAS, an explicit `pipeline_double_buffer_c` stage must define exactly
+one fresh `tile.matmul` or `tile.matmul_bias` accumulator without an explicit
+MemRef. Unsupported accumulating/multiple-MAD bodies and caller-owned storage
+produce an actionable user error rather than an internal compiler error.
+
 ## Related
 
 - [`CanonicalizeIOOrder`](33-canonicalize_io_order.md) — the IO-order canonicalization pass that runs next, scoped to pipeline bodies

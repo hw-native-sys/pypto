@@ -4619,6 +4619,7 @@ def test_existing_l0_pipeline_preserves_explicit_buffering_policy(planner, legac
             original + ', attrs={"pipeline_double_buffer_c": True, "pipeline_overlap_stores": False}',
         )
         before = parse_text(source)
+        assert isinstance(before, ir.Program)
     with passes.PassContext([], memory_planner=planner, enable_pypto_l0c_double_buffer=legacy_opt_in):
         after = passes.auto_tile_matmul_l0()(before)
         lowered = passes.lower_pipeline_loops()(after)
