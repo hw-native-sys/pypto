@@ -78,7 +78,8 @@ built     2026-09-14T09:19:43Z
 | `pypto-build` | 用原生 CMake 重建 `$PYPTO_SRC` 下的源码，然后安装 `./runtime`（`simpler`） |
 | `pypto-activate.sh` | 环境本身 —— 既作为 shell 的 rcfile 也作为 `BASH_ENV`，因此 `docker exec … bash -c '…'` 看到的环境与登录 shell 一致 |
 
-第四个脚本 `pypto-update.sh` 不在 `PATH` 上，而是放在源码树里 ——
+仓库现在维护更新器、安装器及这些辅助脚本。重新构建的镜像把它们安装到 `PATH` 上；
+上面已验证的旧镜像仍可能只在源码树中提供更新器。
 见[更新源码并重建](#更新源码并重建)。
 
 镜像还内置了与所 pin 运行时匹配的 `pto-isa` checkout，首次运行不会联网克隆。
@@ -323,62 +324,88 @@ docker run --rm -it \
 
 ### 更新源码并重建
 
-拉取最新的 main、改了卷里的 C++、或挂了另一份 checkout 进来 —— 三种情形最后都要重建。镜像里带了
-一个脚本，把整套流程一次做完：
+维护中的辅助脚本位于 [`.github/docker/`](../../../.github/docker/)。用该 Dockerfile
+重新构建的镜像会把脚本安装到 `/opt/pypto/bin`，绑定挂载覆盖 `/workspace` 后仍然可用。
+已发布的旧镜像可能仍只在自带 checkout 中提供旧更新器；这时使用下面的仓库版本。
+
+对于已经设置跟踪分支且没有本地改动的 checkout：
 
 ```bash
-/workspace/pypto/.github/docker/pypto-update.sh
+bash "$PYPTO_SRC/.github/docker/pypto-update.sh"
 ```
 
-它会拉取 pypto（含子模块）和 pypto-lib，在 `toolchain/versions.env` 变动时重装 ptoas，跑
-`pypto-build`，最后以 `pypto-doctor` 收尾。和前面三个命令不同，它**不在** `PATH` 上 —— 用上面的
-全路径调用。
+它在各个已有仓库的当前跟踪分支上做快进更新，更新所 pin 的子模块，按
+`toolchain/versions.env` 安装所需的 PTOAS，然后重建 PyPTO 和 simpler，最后运行
+`pypto-doctor`。它不会切换分支或 reset 提交。分离 HEAD、分支分叉或本地改动需要先自行处理，
+也可以使用 `--no-pull`。
+
+修改绑定挂载的 checkout 后，保留源码并重建：
+
+```bash
+bash "$PYPTO_SRC/.github/docker/pypto-update.sh" --no-pull --jobs 2
+```
 
 | 参数 | 作用 |
 | ---- | ---- |
-| `--no-pull` | 只重建，保留本地改动 |
-| `--reinstall-deps` | 连 pip 依赖一起重装（torch、numpy、clang-tidy…） |
-| `--proxy http://host:port` | git 拉取和 ptoas 下载走的代理 |
-| `--remote-submodules` | 子模块追各自远程最新，而不是跟随所 pin 的提交 |
-| `--jobs N` | 构建并行度 |
-| `--skip-doctor` | 跳过收尾的 `pypto-doctor` |
+| `--no-pull` | 不改变源码和子模块；对齐 PTOAS 并重建 |
+| `--reinstall-deps` | 使用共享 setup 脚本刷新 Python 依赖 |
+| `--proxy http://host:port` | 为本次运行设置 HTTP 和 HTTPS 代理 |
+| `--remote-submodules` | 支持反复跟踪子模块远程；允许提交偏离 pin，但拒绝本地文件改动 |
+| `--jobs N` | 正整数构建并行度，受机器限制约束；否则使用仓库资源限制加载器 |
+| `--skip-doctor` | 没有暴露设备时跳过收尾检查 |
 
-> **它会丢弃本地工作，已提交的也算。** 拉取用的是 `git reset --hard origin/main`，它移动的是分支
-> 本身 —— 先 commit 救不了你，那个提交只是不再被分支引用而已。要么用 `--no-pull`，要么在跑之前
-> 留一个引用：
->
-> ```bash
-> git -C /workspace/pypto branch backup/before-update
-> ```
->
-> 未跟踪的文件不受影响，这也是它不会把自己删掉的原因：它在那份 checkout 里本身就是未跟踪的。
-
-**三种情形里只有两种跑得了它。** 这个脚本住在镜像自带的源码树里，既不在仓库中也不在 `PATH` 上，
-所以一旦用绑定挂载盖住 `/workspace`，它会和镜像在那儿的其他东西一起被藏起来。命名卷没问题 ——
-空卷会从镜像预填充，脚本一并被复制进去。用绑定挂载的 checkout 时，手工重建：
+只修复过旧的 PTOAS，不更新源码或重建：
 
 ```bash
-git -C /workspace/pypto pull
-git -C /workspace/pypto submodule update --init --recursive
-git -C /workspace/pypto-lib pull
-pypto-build
-pypto-doctor
+bash "$PYPTO_SRC/.github/docker/pypto-install-ptoas.sh"
+source "$PYPTO_SRC/.github/docker/pypto-activate.sh"
+"$PTOAS_ROOT/bin/ptoas" --version
 ```
 
-这几步是**部分**替代，不是等价物。脚本做而这里没做的有两件：`toolchain/versions.env` 的 pin 变动时
-重装 ptoas，以及把代理和并行度设置一路传给两者。pin 变动之后手工比对汇编器：
+安装器读取 checkout 中的版本及架构对应的 SHA256，在改变安装前校验 release wheel，
+安装到 `${PTOAS_ROOT:-/opt/pypto/ptoas}`。`--force` 可重装同一版本。
+使用旧镜像时，每个新 shell 使用 PTOAS 前都要 source checkout 中的激活脚本；只选择可执行文件
+仍可能加载 CANN 的 Python 包，覆盖固定版本的 wheel。安装器会自动隔离自身版本探测的导入路径。
+环境需要已有 uv 和 CPython 3.10，已发布镜像满足这个条件。在其他 CANN 容器中配置环境时，
+从完整 checkout 运行 `pypto-setup.sh`；它安装同一份辅助脚本，并通过
+`build-constraints.txt` 约束构建工具。
+
+`pypto-build` 使用原生 CMake，安装与 checkout 匹配的 simpler，并遵循其中的 PTO-ISA pin。
+它刻意避免 `pip install -e .`：scikit-build 配置过的 `build/` 可能把扩展放到源码导入路径之外。
+并行度通过 `.claude/skills/testing/load-env.sh` 加载，未分类的机器默认使用两个任务。
+已有原生构建保留其 CMake generator，新构建使用 Ninja。挂载到容器后，
+如果缓存记录的绝对路径不同，会自动刷新 CMake 状态。
+`pypto-doctor` 检查已安装 simpler 的构建版本是否与挂载的 `runtime/` 匹配。
+如果 `runtime/` 有未提交改动，会给出警告，因为版本一致无法证明已安装 binding 包含这些改动。
+
+### 构建开发镜像
+
+在目标架构机器上，从仓库根目录构建。`deps` 提供环境，`sim` 增加 GCC/G++ 15，
+`dist` 还会克隆并构建 PyPTO 和 pypto-lib：
 
 ```bash
-grep '^PTOAS_VERSION=' /workspace/pypto/toolchain/versions.env
-/opt/pypto/ptoas/bin/ptoas --version
+docker buildx build --load --target dist \
+  --file .github/docker/pypto_dev.Dockerfile \
+  --build-arg DIST_BUILD_JOBS=2 \
+  --build-arg PYPTO_REF=<pypto-commit> \
+  --build-arg PYPTO_LIB_REF=<pypto-lib-commit> \
+  --tag pypto-dev:a3-dist .
 ```
 
-`pypto-build` 用原生 CMake 重建 PyPTO，安装与当前 `runtime/` 源码匹配的 `simpler`，并解析该源码指定
-的 `pto-isa` pin。它刻意不用 `pip install -e .`：被 scikit-build 配置过的 `build/` 会把扩展放进
-`build/python/bindings/` 而不是 `python/pypto/`，此后每次构建都"成功"，而 Python 一直导入过期的
-`.so` —— C++ 改动看起来完全没生效。
+默认的 `main` 引用保留跟踪分支，因此 `pypto-update.sh` 可以拉取更新。
+标签和提交引用使用分离 HEAD；这类固定版本构建应使用 `--no-pull`。
 
-`pypto-build` **不做**的事情是更新 ptoas —— 这一步只有 `pypto-update.sh` 会做。
+构建 AMD64 镜像时，使用 x86_64 宿主机及支持 `linux/amd64` 的 CANN 基础镜像标签；
+构建前先确认该标签支持目标架构。先发布独立架构标签，在对应 NPU 宿主机上通过
+`pypto-doctor` 和模型验证后，再组合多架构 manifest。无 NPU 时构建成功只验证镜像构建过程。
+
+本地环境镜像可以用 `.github/docker/pypto-dev.sh build a3` 构建，
+用 `.github/docker/pypto-dev.sh run a3 0` 创建或重新进入容器。
+启动器支持 CANN 标签、镜像、缓存卷和代理覆盖，具体见源码。
+使用 Ascend Docker Runtime 时，选中的物理卡在容器内对应逻辑设备 `0`，因此启动器导出
+`PYPTO_DEVICE=0`。privileged 模式保留物理卡编号；`pypto-doctor` 探测同一个选定设备。
+挂载关联工作树（linked worktree）时，
+启动器还会把共享 Git 元数据挂到原始路径，以便在容器中继续使用 Git。
 
 ### 不装 Ascend Docker Runtime
 
@@ -429,7 +456,7 @@ CANN 自己的变量，逻辑编号按列出顺序从 0 开始：
 | `npu-smi` 报 `-9005`，或 `DrvMngGetConsoleLogLevel failed (ret=4)` | 只暴露了部分卡，而 `npu-smi` 试图枚举整机 | 无害。以 `pypto-doctor` 的 `device access: aclrtSetDevice(0) ok` 为准 |
 | `/workspace/pypto` 不存在 | 绑定挂载高了一层 | 挂载包含 `pypto/` 的那一层：用 `-v "$PWD/workspace:/workspace"`，而不是 `-v "$PWD:/workspace"` |
 | `pypto-doctor` 报 simpler binding 与源码不匹配 | 挂进来的源码与镜像构建时用的不是同一份 | `pypto-build && pypto-doctor` |
-| codegen 报 `ptoas at '...' is version X, but PyPTO requires PTOAS >= vY` | 源码 pin 的 ptoas 比镜像自带的（0.61）新 —— 拉取了更新，或把当前 checkout 挂载到 `/workspace` | 跑 `/workspace/pypto/.github/docker/pypto-update.sh` —— 只有它会重装 ptoas。绑定挂载会把它遮住，而[更新源码并重建](#更新源码并重建)里的手动重建不会重装 ptoas；此时按 [FAQ](appendix/01-faq.md#编译) 安装 `toolchain/versions.env` 中的版本，并把 `PTOAS_ROOT` 指向它 |
+| codegen 报 `ptoas at '...' is version X, but PyPTO requires PTOAS >= vY` | PTOAS 低于 checkout 要求的版本 | 按[更新源码并重建](#更新源码并重建)运行仓库中的安装器；绑定挂载和旧镜像也适用 |
 | `pto-isa` 试图联网克隆 | 挂载的源码 bump 了 `runtime/pto_isa.pin`，或 managed checkout 被改动过 | pin 变了之后属于预期行为。若 GitHub HTTP/2 不稳定，执行 `git config --global http.version HTTP/1.1` —— resolver 会重试 GitHub，失败后回退到 GitCode 镜像 |
 
 ### 排查 `507018`
