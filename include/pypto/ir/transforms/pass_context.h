@@ -293,12 +293,9 @@ class PassContext {
    * @param memory_planner Who plans on-chip buffer memory (default: PyPTO).
    *        DsaRP replaces MemoryReuse with in-tree capacity-constrained DSA-RP.
    *        PtoAS skips PyPTO address allocation so ptoas PlanMemory owns it.
-   * @param enable_pypto_l0c_double_buffer Opt the legacy PyPTO planner in to
-   *        chooser-emitted L0C double-buffering (dbC=2; default: false,
-   *        experimental). No effect under DsaRP or PtoAS, which enable chooser
-   *        dbC=2 automatically. When true, AutoTileMatmulL0 may emit two co-live
-   *        L0C accumulators and the legacy PyPTO allocator preserves the
-   *        ping-pong where capacity permits.
+   * @param enable_pypto_l0c_double_buffer Legacy compatibility flag (default:
+   *        false). Automatic dbC is disabled for every planner regardless of
+   *        this flag. Explicit buffering declarations are preserved.
    * @param runtime Which Simpler runtime ABI to target (default:
    *        TensorMapAndRingBuffer). Passes that must legalize IR for a specific
    *        runtime switch on this rather than inspecting codegen options.
@@ -370,9 +367,7 @@ class PassContext {
   [[nodiscard]] MemoryPlanner GetMemoryPlanner() const;
 
   /**
-   * @brief Whether chooser-emitted L0C double-buffering (dbC=2) is enabled under
-   *        the legacy PyPTO planner. Off by default (experimental). No effect
-   *        under DsaRP or PtoAS.
+   * @brief Return the stored legacy flag; automatic dbC remains disabled.
    */
   [[nodiscard]] bool GetEnablePyptoL0cDoubleBuffer() const;
 

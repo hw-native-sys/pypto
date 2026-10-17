@@ -898,6 +898,10 @@ class PTOCodegen : public CodegenBase {
     std::string slot_type_str;  ///< The single-slot `!pto.tile_buf<...>` type
     std::string valid_row_ssa;  ///< valid_row operand (shared by every slot)
     std::string valid_col_ssa;  ///< valid_col operand (shared by every slot)
+    int64_t rows = 0;           ///< Physical rows of the covering slot tile
+    int64_t cols = 0;           ///< Physical columns of the covering slot tile
+    int64_t valid_row = 0;      ///< Static valid rows declared on the region
+    int64_t valid_col = 0;      ///< Static valid columns declared on the region
     uint64_t count = 1;         ///< Slot count, in [2, 16] (the ptoas bound)
   };
 
@@ -927,7 +931,8 @@ class PTOCodegen : public CodegenBase {
    * there is no baked `addr` to alias through. Returns "" when addresses are
    * baked, when `memref` is null, or when no handle is bound yet.
    */
-  [[nodiscard]] std::string TryGetSharedTileBufHandle(const ir::MemRefPtr& memref) const;
+  [[nodiscard]] std::string TryGetSharedTileBufHandle(
+      const ir::MemRefPtr& memref, const std::shared_ptr<const ir::TileType>& tile_type) const;
 
   /**
    * @brief Declare `ssa_name`'s `pto.alloc_tile` in the function head.
@@ -962,9 +967,13 @@ class PTOCodegen : public CodegenBase {
    * (hw-native-sys/PTOAS#1106, closed).
    *
    * A region is eligible when every tile bound to that allocation selects a slot,
-   * the slots share one tile_buf type and one static valid extent, at most one of
-   * them is live per loop iteration, the memory space is a local one ptoas supports
-   * for multi_tile_buf (vec / mat / acc), and the count is within ptoas's `[2, 16]`.
+   * their tile types admit one uniform physical tile that covers every use, at most
+   * one distinct slot is live per loop iteration, the memory space is a local one
+   * ptoas supports for multi_tile_buf (vec / mat / acc), and the count is within
+   * ptoas's `[2, 16]`. Smaller statically shaped uses are emitted as zero-offset
+   * subviews of the selected covering slot. Exact-compatible regions with
+   * disjoint conservative lifetimes share one physical multi-buffer handle;
+   * distinct pipeline groups therefore do not reserve storage permanently.
    *
    * The one-slot-per-iteration condition is a ptoas synchronization limit, not a
    * typing one (hw-native-sys/PTOAS#1519 in the pinned ptoas) — see
@@ -991,13 +1000,16 @@ class PTOCodegen : public CodegenBase {
    *
    * Emitted where the ordinary `alloc_tile` would be — at the tile's definition —
    * so a runtime slot index (`l0c[i % 2]`) is read inside the loop that names it.
+   * When the logical tile is smaller than the region's covering slot, the selected
+   * slot is followed by a zero-offset `pto.subview` of the requested tile type.
    *
    * @return false when no region was planned for `memref`'s allocation — it
    *         declares no slots, or the PyPTO planner is in use. An allocation that
    *         declares slots this planner cannot describe never reaches here:
    *         PlanMultiBufferRegions has already raised.
    */
-  bool TryEmitMultiTileGet(const ir::MemRefPtr& memref, const std::string& tile_buf, const ir::Span& span);
+  bool TryEmitMultiTileGet(const ir::MemRefPtr& memref, const std::shared_ptr<const ir::TileType>& tile_type,
+                           const std::string& tile_buf, const ir::Span& span);
 
   /**
    * @brief Emit the `pto.alloc_multi_tile` declarations in the function head.
@@ -1051,10 +1063,10 @@ class PTOCodegen : public CodegenBase {
     /// SSA names emitted as tile views (`pto.subview` / `pto.treshape`).
     std::set<std::string> tile_view_names;
 
-    /// Eligible multi-buffer regions, keyed by the allocation's base Ptr.
+    /// Eligible logical multi-buffer regions, keyed by allocation base. Entries
+    /// with disjoint lifetimes may share one physical `region_ssa`.
     std::map<const ir::Var*, MultiBufferRegion> multi_buffer_regions;
-    /// The same regions in discovery order — the map is keyed by pointer, which
-    /// is not a stable order to emit declarations in.
+    /// One owner base per physical region, in deterministic emission order.
     std::vector<const ir::Var*> multi_buffer_region_order;
 
     int temp_counter = 0;

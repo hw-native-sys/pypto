@@ -58,7 +58,9 @@ operands accumulate in FP32; INT8 operands accumulate in INT32. Literal and
 runtime `init_cond` select initializing or accumulating writes. Wider Acc valid
 regions use a product-shaped descriptor over the same storage. Matrix region
 carries must preserve one storage alias; arbitrary matrix carry copies, MX,
-FIFO, slots, scaled/quantized writeback and workspace operations remain excluded.
+FIFO, scaled/quantized writeback and workspace operations remain excluded.
+Static addressless slots are available through the explicit recipe described
+below; they remain outside default whole-kernel selection.
 Torch debugging models fractal layouts and shared addressed matrix storage,
 including transpose relabels and product views. Only complete untouched Acc
 boxes have defined preservation outside a partially valid product.
@@ -140,7 +142,12 @@ additional allocation identities. A second traversal replaces each Tile use
 with its Buffer handle and rewrites supported calls. The maps remain private to
 the pass; the output IR contains no conversion side table.
 
-Existing storage definitions determine allocation placement. Conversion adds
+Addressed storage retains its existing allocation placement. Addressless
+single-buffer definitions are placed at the lowest common statement ancestor
+of their source Tile uses, in lexical first-use order. Hoisted pointer declarations
+must not extend loop-local buffer lifetimes to the whole function and prevent
+PTOAS from reusing sequential accumulators. Explicit multi-buffer regions retain
+their shared dominating prologue. Conversion adds
 no scratch allocation, address assignment, or implicit transfer. An exact
 self-copy is removed. Tensor return aliases are normalized to existing GM
 parameters while parameter directions and the orchestration ABI are preserved.
@@ -248,6 +255,33 @@ buffer.add(loaded_buffer, loaded_buffer, doubled_buffer)
 ```
 
 ## Matrix storage and cube recipes
+
+Static addressless slot groups are retained as `buffer.alloc_multi` with a
+`MultiBufferType` and explicit `buffer.get_slot` selections. PTOAS receives one
+`pto.alloc_multi_tile` region, so opposite dbC stages remain physically distinct;
+they are not converted to independently reusable allocations. Every member must
+agree on slot count, slot size and its static byte offset. A full-slot descriptor
+provides the covering geometry. Smaller Acc tiles use compatible zero-offset
+subviews; repeated slot/descriptor pairs share one handle. Buffer verification
+tracks the selected slot's byte window, including aliases of boundary views.
+Dynamic slot indices remain unsupported by this conversion recipe.
+
+Before slot/view definitions are hoisted, lowering runs the same source-schedule
+safety analysis as Tile codegen. Multi-slot prefetch loops affected by
+PTOAS #1519 are rejected even with constant slot indices. Compiler-proven fresh Acc
+dbC stages retain their existing exception; straight-line slot reuse is unchanged.
+The internal fresh-Acc proof marker is consumed after that check, alongside
+storage-only pipeline membership, rather than forwarded to Buffer operations.
+
+Before discarding Tile allocation facts, lowering uses the same multi-buffer
+reuse planner as Tile codegen. Compatible regions with disjoint conservative
+lifetimes share one `buffer.alloc_multi` handle. Overlapping regions, operation
+no-alias constraints against every prior occupant, and target hazards prevent
+unsafe sharing. Logical pipeline groups remain distinct. Thus crossing Buffer
+IR does not multiply physical storage for sequential dbC grids.
+Static physical region allocations are emitted in a function-entry prologue so
+they dominate all slot views, even if logical declarations precede the first
+live occupant. Slot/view definitions retain their original declaration sites.
 
 Mat, Left, Right and Acc tiles keep their resolved fractal layout in the
 `BufferType` (`blayout`, `slayout`, `fractal`, `compact`). Their physical
@@ -373,9 +407,9 @@ FP16/FP32/INT32; BF16 transfer support does not imply arithmetic support.
 Scalar recipe inputs are converted explicitly to the destination dtype before
 Buffer calls are constructed; fill shape/dtype select the destination descriptor.
 
-Helper calls, alternate layouts, slots, and
-other operation recipes are added in subsequent migration slices. Explicit
-low-level conversion diagnoses unsupported forms. The normal pipeline applies the narrower whole-kernel selection described above.
+Helper calls, alternate layouts, dynamic slots, and other operation recipes
+are added in subsequent migration slices. Explicit low-level conversion diagnoses
+unsupported forms. The normal pipeline applies the narrower whole-kernel selection described above.
 
 Binary serialization preserves the explicit representation and function stage.
 The current Python diagnostic printer is not a Buffer DSL parser round trip.

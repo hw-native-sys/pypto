@@ -17,6 +17,7 @@ peeled kernel below therefore has a predicated twin, and
 two retiled programs differ only in that reduction statement.
 """
 
+import itertools
 import re
 
 import pypto.language as pl
@@ -24,10 +25,24 @@ import pytest
 from pypto import backend as _backend
 from pypto import ir, passes
 from pypto.backend import BackendType
+from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.pypto_core import codegen
 
 _TILE_STORE_OP = ir.get_op("tile.store").name
 _TILE_MATMUL_OP = ir.get_op("tile.matmul").name
 _TILE_MATMUL_ACC_OP = ir.get_op("tile.matmul_acc").name
+
+
+def _default_allocation_snapshot(program: ir.Program) -> ir.Program:
+    """Inspect Tile storage before Buffer lowering, while checking the full pipeline."""
+    snapshot = None
+    for transform in PassManager(OptimizationStrategy.Default).passes:
+        if transform.get_name() == "LowerTileToBuffer":
+            snapshot = program
+        program = transform(program)
+    assert snapshot is not None
+    return snapshot
+
 
 M = 16
 N = 1152
@@ -388,16 +403,23 @@ class _PeelToPredicate(ir.IRMutator):
         if not isinstance(stmt, ir.IfStmt) or len(stmt.return_vars) != 1 or stmt.else_body is None:
             return stmt
         arms = []
+        prefixes = []
         for body in (stmt.then_body, stmt.else_body):
-            if not isinstance(body, ir.SeqStmts) or len(body.stmts) != 2:
+            if not isinstance(body, ir.SeqStmts) or len(body.stmts) < 2:
                 return stmt
-            assign = body.stmts[0]
+            assign = body.stmts[-2]
             if not isinstance(assign, ir.AssignStmt) or not isinstance(assign.value, ir.Call):
                 return stmt
             arms.append(assign.value)
+            prefixes.append(list(body.stmts[:-2]))
         seed_call, acc_call = arms
         if seed_call.op.name != _TILE_MATMUL_OP or acc_call.op.name != _TILE_MATMUL_ACC_OP:
             return stmt
+        # Full-K canonical emission now makes the two L0 extracts explicit in
+        # each arm. Hoist one copy only after proving both prefixes equivalent.
+        ir.assert_structural_equal(
+            ir.SeqStmts(prefixes[0], stmt.span), ir.SeqStmts(prefixes[1], stmt.span), True
+        )
         phi = stmt.return_vars[0]
         predicated = ir.Call(
             acc_call.op,
@@ -407,7 +429,7 @@ class _PeelToPredicate(ir.IRMutator):
             phi.type,
             acc_call.span,
         )
-        return ir.AssignStmt(phi, predicated, stmt.span)
+        return ir.SeqStmts([*prefixes[1], ir.AssignStmt(phi, predicated, stmt.span)], stmt.span)
 
 
 def test_issue_2232_canonical_input_shape():
@@ -432,6 +454,33 @@ def test_predicated_canonical_input_shape():
     assert "== 0)" in printed
 
 
+def _assert_int8_l0_k_alignment(program):
+    """All canonical MADs use the native 32-element INT8 K box."""
+
+    class Operands(ir.IRVisitor):
+        def __init__(self):
+            super().__init__()
+            self.count = 0
+
+        def visit_call(self, op):
+            if op.op.name in {_TILE_MATMUL_OP, _TILE_MATMUL_ACC_OP}:
+                start = int(op.op.name == _TILE_MATMUL_ACC_OP)
+                lhs, rhs = op.args[start : start + 2]
+                assert isinstance(lhs.type, ir.TileType)
+                assert isinstance(rhs.type, ir.TileType)
+                assert lhs.type.memory_space == ir.MemorySpace.Left
+                assert rhs.type.memory_space == ir.MemorySpace.Right
+                left_k, right_k = lhs.type.shape[1], rhs.type.shape[0]
+                assert isinstance(left_k, ir.ConstInt) and isinstance(right_k, ir.ConstInt)
+                assert left_k.value == right_k.value and left_k.value % 32 == 0
+                self.count += 1
+            super().visit_call(op)
+
+    operands = Operands()
+    operands.visit_program(program)
+    assert operands.count > 0
+
+
 def test_issue_2232_loop_level_mn_tiling():
     """The full [16, 1152] accumulator disappears. AutoTile clones the source
     split-K loop once per output-N tile, narrows the GM loads, completes all
@@ -443,8 +492,11 @@ def test_issue_2232_loop_level_mn_tiling():
     printed = ir.python_print(after)
     assert "pl.Tile[[16, 1152], pl.INT32" not in printed
     assert "[128, 1152], [128, 1152]" not in printed
-    assert printed.count("in pl.pipeline(8, stage=2") == 2
-    assert printed.count("pl.tile.store(") == 2
+    # Legal 32-wide INT8 K blocks need more Right storage than the previous
+    # (unemittable) 16-wide choice, so capacity now requires three N tiles.
+    assert printed.count("in pl.pipeline(8, stage=2") == 3
+    assert printed.count("pl.tile.store(") == 3
+    _assert_int8_l0_k_alignment(after)
     assert "n0__ssa_v0 + " in printed
     # The local matmul/matmul_acc path still applies the supported inner K
     # blocking after the enclosing loop has been output-tiled.
@@ -462,8 +514,9 @@ def test_predicated_issue_2232_loop_level_mn_tiling():
     printed = ir.python_print(after)
     assert "pl.Tile[[16, 1152], pl.INT32" not in printed
     assert "[128, 1152], [128, 1152]" not in printed
-    assert printed.count("in pl.pipeline(8, stage=2") == 2
-    assert printed.count("pl.tile.store(") == 2
+    assert printed.count("in pl.pipeline(8, stage=2") == 3
+    assert printed.count("pl.tile.store(") == 3
+    _assert_int8_l0_k_alignment(after)
     assert "n0__ssa_v0 + " in printed
     assert "target_memory=pl.Mem.Right" in printed
     assert "pl.tile.matmul_acc(" in printed
@@ -521,39 +574,39 @@ def test_predicated_canonical_split_k_tiles_both_m_and_n_with_boundaries():
 
 def test_padded_n_boundary_retains_valid_shape_through_inner_k_rewrite():
     """A box-padded 16-column output tail remains logically 16 columns when
-    the post-fold matmul is K-tiled again. In particular, the inner loop's Acc
+    the selected inner-K schedule is emitted. In particular, the inner loop's Acc
     initializer must not widen its valid N extent back to the physical 32."""
     before = _lower_to_auto_tile_input(_jit_program(canonical_split_k_n_boundary_retiles_k))
     with passes.PassContext([ir.make_roundtrip_instrument()]):
         after = passes.auto_tile_matmul_l0()(before)
 
     printed = ir.python_print(after)
-    assert printed.count("in pl.pipeline(2, stage=2") == 4
-    assert printed.count("pl.tile.store(") == 4
+    assert printed.count("in pl.pipeline(2, stage=2") == 3
+    assert printed.count("pl.tile.store(") == 3
     assert "[384, 32], [384, 16], target_memory=pl.Mem.Mat" in printed
     assert (
-        "[192, 32], pl.INT8, pl.Mem.Right, pl.TileView(valid_shape=[192, 16], compact=pl.CompactMode.normal)"
+        "[32, 32], pl.INT8, pl.Mem.Right, pl.TileView(valid_shape=[32, 16], compact=pl.CompactMode.normal)"
     ) in printed
-    assert "pl.Tile[[144, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[144, 16])]" in printed
+    assert "pl.Tile[[272, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[272, 16])]" in printed
     assert "pl.tile.set_validshape(" in printed
     assert "pl.tile.store(acc__rv_v2_mn2, [0, 128]" in printed
 
 
 def test_predicated_padded_n_boundary_retains_valid_shape_through_inner_k_rewrite():
-    """Composing the predicated fold with the ordinary inner-K rewrite keeps the
+    """Emitting the selected K schedule in the predicated fold keeps the
     16-column logical tail, exactly as the peeled spelling does."""
     before = _lower_to_auto_tile_input(_jit_program(canonical_split_k_n_boundary_retiles_k_predicated))
     with passes.PassContext([ir.make_roundtrip_instrument()]):
         after = passes.auto_tile_matmul_l0()(before)
 
     printed = ir.python_print(after)
-    assert printed.count("in pl.pipeline(2, stage=2") == 4
-    assert printed.count("pl.tile.store(") == 4
+    assert printed.count("in pl.pipeline(2, stage=2") == 3
+    assert printed.count("pl.tile.store(") == 3
     assert "[384, 32], [384, 16], target_memory=pl.Mem.Mat" in printed
     assert (
-        "[192, 32], pl.INT8, pl.Mem.Right, pl.TileView(valid_shape=[192, 16], compact=pl.CompactMode.normal)"
+        "[32, 32], pl.INT8, pl.Mem.Right, pl.TileView(valid_shape=[32, 16], compact=pl.CompactMode.normal)"
     ) in printed
-    assert "pl.Tile[[144, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[144, 16])]" in printed
+    assert "pl.Tile[[272, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[272, 16])]" in printed
     assert "pl.tile.set_validshape(" in printed
     assert "pl.tile.store(acc__rv_v2_mn2, [0, 128]" in printed
 
@@ -635,8 +688,8 @@ def test_already_padded_output_localizes_valid_shape_across_mn_grid():
     """Explicit M/N grid offsets intersect, rather than reset, valid_shape.
 
     The physical output is 288 columns but only 272 are logical. AutoTile must
-    therefore keep the final physical 32-column panel at valid N=16 even though
-    that panel is emitted by BuildSplitKGrid with a nonzero output offset.
+    cover exactly 272 columns, without creating work for the padding-only
+    final 16 columns. The original input/output storage boxes stay unchanged.
     """
     _backend.reset_for_testing()
     _backend.set_backend_type(BackendType.Ascend910B)
@@ -678,15 +731,96 @@ def test_already_padded_output_localizes_valid_shape_across_mn_grid():
     printed = ir.python_print(after)
     assert printed.count("pl.tile.store(") >= 4
     assert "pl.TileView(valid_shape=[" in printed
-    assert re.search(
-        r"pl\.Tile\[\[\d+, 32\], pl\.INT32, pl\.Mem\.Acc, pl\.TileView\(valid_shape=\[\d+, 16\]\)\]",
-        printed,
-    ), printed
-    assert re.search(
-        r"pl\.Tile\[\[\d+, 32\], pl\.INT8, pl\.Mem\.Right, "
-        r"pl\.TileView\(valid_shape=\[\d+, 16\], compact=pl\.CompactMode\.normal\)\]",
-        printed,
-    ), printed
+    covered = set()
+    for store in _collect_store_calls(after):
+        offsets = store.args[1]
+        tile_type = store.args[0].type
+        assert isinstance(offsets, ir.MakeTuple)
+        assert isinstance(tile_type, ir.TileType)
+        coordinates = []
+        for index in offsets.elements:
+            assert isinstance(index, ir.ConstInt)
+            coordinates.append(int(index.value))
+        dimensions = []
+        for dim in tile_type.shape:
+            assert isinstance(dim, ir.ConstInt)
+            dimensions.append(int(dim.value))
+        row, col = coordinates
+        height, width = dimensions
+        assert row + height <= 512 and col + width <= 272, printed
+        cells = set(itertools.product(range(row, row + height), range(col, col + width)))
+        assert not covered.intersection(cells), printed
+        covered.update(cells)
+    assert len(covered) == 512 * 272, printed
+
+
+def test_padded_arbitrary_acc_keeps_physical_k_only_contract():
+    """A caller-owned accumulator cannot be shrunk into an unsupported M/N fold."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910B)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tile[[64, 2048], pl.INT8, pl.Mem.Mat],
+            b: pl.Tile[[2048, 32], pl.INT8, pl.Mem.Mat, pl.TileView(valid_shape=[2048, 16])],
+            c: pl.Tile[[64, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[64, 16])],
+        ) -> pl.Tile[[64, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[64, 16])]:
+            result = pl.tile.matmul_acc(c, a, b)
+            return result
+
+    printed = ir.python_print(passes.auto_tile_matmul_l0()(Before))
+    assert "pl.pipeline(" in printed, printed
+    assert "pl.Tile[[64, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[64, 16])]" in printed
+
+
+def test_below_minimum_physical_n_is_not_expanded_by_padding_bound():
+    """A sub-fractal input retains the chooser's existing unsupported-shape behavior."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910B)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tile[[64, 128], pl.BF16, pl.Mem.Mat],
+            b: pl.Tile[[128, 8], pl.BF16, pl.Mem.Mat],
+            out: pl.Out[pl.Tensor[[64, 8], pl.FP32]],
+        ) -> pl.Tensor[[64, 8], pl.FP32]:
+            c = pl.tile.matmul(a, b)
+            return pl.tile.store(c, [0, 0], out)
+
+    after = passes.auto_tile_matmul_l0()(Before)
+    ir.assert_structural_equal(Before, after)
+
+
+def test_mat_scratch_preserves_producer_valid_reduction_extent():
+    """A boxed producer must not expose unwritten columns to a chained MAD."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend950)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tile[[64, 64], pl.FP32, pl.Mem.Mat],
+            b: pl.Tile[[64, 64], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[64, 13])],
+            e: pl.Tile[[64, 16], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[13, 16])],
+            out: pl.Out[pl.Tensor[[64, 16], pl.FP32]],
+        ) -> pl.Tensor[[64, 16], pl.FP32]:
+            c = pl.tile.matmul(a, b)
+            d = pl.tile.matmul(c, e)
+            return pl.tile.store(d, [0, 0], out)
+
+    after = passes.auto_tile_matmul_l0()(Before)
+    printed = ir.python_print(after)
+    assert "pl.tile.assemble(" in printed, printed
+    assert "pl.tile.set_validshape(" in printed, printed
+    assert "pl.Tile[[64, 64], pl.FP32, pl.Mem.Mat, pl.TileView(valid_shape=[64, 13])]" in printed
 
 
 def test_symbolic_padded_output_localizes_valid_shape_across_mn_grid():
@@ -847,7 +981,7 @@ def test_canonical_split_k_boundary_codegen_uses_box_aligned_physical_width():
     # carries.  Pin the pair on the buffer the boundary tstore actually drains.
     tail_store = re.search(
         r"pto\.tstore ins\((?P<acc>%[\w.]+) : !pto\.tile_buf<loc=acc, dtype=i32, "
-        r"rows=(?P<rows>128|144), cols=32,[^)]*\) outs\([^)]*<(?P=rows)x16xi32>\)",
+        r"rows=(?P<rows>272), cols=32,[^)]*\) outs\([^)]*<(?P=rows)x16xi32>\)",
         pto,
     )
     assert tail_store, pto
@@ -864,7 +998,7 @@ def test_canonical_split_k_boundary_codegen_uses_box_aligned_physical_width():
         pto,
     ), pto
     assert re.search(
-        r"!pto\.tile_buf<loc=right, dtype=i8, rows=192, cols=32, "
+        r"!pto\.tile_buf<loc=right, dtype=i8, rows=32, cols=32, "
         r"v_row=\?, v_col=\?, blayout=row_major, slayout=col_major, fractal=512, pad=0, compact=1>",
         pto,
     ), pto
@@ -903,8 +1037,8 @@ def test_row_narrowed_matmul_declares_a_compact_accumulator_seed():
                 [64, 2048],
                 pl.INT8,
                 pl.Mem.Mat,
-                pl.TileView(valid_shape=[16, 2048]),
-            ] = pl.tile.load(lhs, [0, 0], [64, 2048], valid_shape=[16, 2048], target_memory=pl.Mem.Mat)
+                pl.TileView(valid_shape=[13, 2048]),
+            ] = pl.tile.load(lhs, [0, 0], [64, 2048], valid_shape=[13, 2048], target_memory=pl.Mem.Mat)
             rhs_mat: pl.Tile[[2048, 128], pl.INT8, pl.Mem.Mat] = pl.tile.load(
                 rhs, [0, 0], [2048, 128], target_memory=pl.Mem.Mat
             )
@@ -912,7 +1046,7 @@ def test_row_narrowed_matmul_declares_a_compact_accumulator_seed():
                 [64, 128],
                 pl.INT32,
                 pl.Mem.Acc,
-                pl.TileView(valid_shape=[16, 128], compact=pl.CompactMode.normal),
+                pl.TileView(valid_shape=[13, 128], compact=pl.CompactMode.normal),
             ] = pl.tile.matmul(lhs_mat, rhs_mat)
             out = pl.tile.store(product, [0, 0], out)
             return out
@@ -920,15 +1054,155 @@ def test_row_narrowed_matmul_declares_a_compact_accumulator_seed():
     after = passes.auto_tile_matmul_l0()(Before)
     printed = ir.python_print(after)
 
-    assert re.search(r"pl\.tile\.create\(\s*\[64, 128\][^)]*compact=True", printed, re.S), (
+    assert re.search(r"pl\.tile\.create\(\s*\[16, 128\][^)]*compact=True", printed, re.S), (
         f"the synthesized accumulator seed must declare compact=True:\n{printed}"
     )
-    acc_views = re.findall(r"pl\.Mem\.Acc,\s*pl\.TileView\((valid_shape=\[16,[^)]*)\)", printed, re.S)
+    acc_views = re.findall(r"pl\.Mem\.Acc,\s*pl\.TileView\((valid_shape=\[13,[^)]*)\)", printed, re.S)
     assert acc_views, printed
     for view in acc_views:
         assert "compact=pl.CompactMode.normal" in view, (
             f"every row-narrowed Acc tile in the K chain must stay compact, got {view!r}:\n{printed}"
         )
+
+
+def _predicated_canonical_split_k(M: int, N: int, K_total: int, K_tile: int):
+    """A canonical ``create -> pl.pipeline K-loop -> store`` reduction, predicated form.
+
+    This is the shape ``TryFoldCanonicalSplitKAcc`` retiles: one accumulator created up
+    front, accumulated across K blocks in a user-written pipeline loop, stored once.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[M, K_total], pl.BF16],
+            b: pl.Tensor[[K_total, N], pl.BF16],
+            c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        ) -> pl.Tensor[[M, N], pl.FP32]:
+            acc_init: pl.Tile[[M, N], pl.FP32, pl.Mem.Acc] = pl.tile.create(
+                [M, N], dtype=pl.FP32, target_memory=pl.Mem.Acc
+            )
+            for k0, (acc_iter,) in pl.pipeline(0, K_total, K_tile, init_values=(acc_init,), stage=2):
+                at: pl.Tile[[M, K_tile], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    a, [0, k0], [M, K_tile], target_memory=pl.Mem.Mat
+                )
+                bt: pl.Tile[[K_tile, N], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    b, [k0, 0], [K_tile, N], target_memory=pl.Mem.Mat
+                )
+                acc_next: pl.Tile[[M, N], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(
+                    acc_iter, at, bt, init_cond=(k0 == 0)
+                )
+                acc: pl.Tile[[M, N], pl.FP32, pl.Mem.Acc] = pl.yield_(acc_next)
+            c = pl.tile.store(acc, [0, 0], c)
+            return c
+
+    return Before
+
+
+@pytest.mark.parametrize("iterations", [2, 8, 32])
+def test_canonical_grid_chooser_receives_complete_reduction(iterations):
+    """The emitted grid must agree with a chooser given the source loop count."""
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910B)
+    before = _predicated_canonical_split_k(256, 384, 128 * iterations, 128)
+    cfg = passes.l0_tile_chooser.L0TileConfig()
+    cfg.M, cfg.N, cfg.K = 256, 384, 128
+    cfg.l0a_bytes = cfg.l0b_bytes = 65536
+    cfg.l0c_bytes = 131072
+    cfg.allow_double_buffer_c = False
+    cfg.allow_unrolled_dbc_m_boundary = False
+    cfg.full_k_dbc_route = passes.l0_tile_chooser.DbcEmissionRoute.UnrolledGrid
+    cfg.reduction_iterations = iterations
+    cfg.reduction_pipeline_stages = 2
+    expected = passes.l0_tile_chooser.choose_l0_tile(cfg)
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+        after = passes.auto_tile_matmul_l0()(before)
+    stores = _collect_store_calls(after)
+    assert len(stores) == ((256 + expected.m - 1) // expected.m) * ((384 + expected.n - 1) // expected.n)
+    output_type = stores[0].args[0].type
+    assert isinstance(output_type, ir.TileType)
+    assert len(output_type.shape) == 2
+    for extent, expected_extent in zip(output_type.shape, (expected.m, expected.n)):
+        assert isinstance(extent, ir.ConstInt)
+        assert extent.value == expected_extent
+    text = ir.python_print(after)
+    assert ("slots=2" in text) == expected.double_buffer_c
+    # Each emitted tile retains the whole original reduction, not one source block.
+    assert text.count(f"pl.pipeline(0, {128 * iterations}, 128,") == len(stores)
+
+
+@pytest.mark.parametrize(
+    ("planner", "dbc"),
+    [
+        (passes.MemoryPlanner.PYPTO, False),
+        (passes.MemoryPlanner.PYPTO, True),
+        (passes.MemoryPlanner.DSA_RP, True),
+        (passes.MemoryPlanner.PTOAS, True),
+    ],
+)
+@pytest.mark.parametrize(
+    ("m", "n", "source_k", "iterations"),
+    [(128, 256, 128, 8), (64, 384, 96, 3), (256, 384, 128, 2), (80, 288, 96, 3)],
+)
+def test_canonical_emits_selected_k_including_boundaries(planner, dbc, m, n, source_k, iterations):
+    """One outer decision must survive emission, without recursive reselection.
+
+    Includes the T2 score/code mismatch, T5 single-C L0B overflow, and padded
+    boundary grids. Check the actual MAD operands, then run allocation/codegen.
+    """
+    _backend.reset_for_testing()
+    _backend.set_backend_type(BackendType.Ascend910B)
+    cfg = passes.l0_tile_chooser.L0TileConfig()
+    cfg.M, cfg.N, cfg.K = m, n, source_k
+    cfg.l0a_bytes = cfg.l0b_bytes = 65536
+    cfg.l0c_bytes = 131072
+    cfg.box_align_m = cfg.box_align_n = 16
+    cfg.allow_k_boundary = True
+    cfg.c_read = True
+    # The legacy flag is accepted by PassContext but automatic dbC is disabled.
+    # Compare emission against the actual single-C design space in every case.
+    cfg.allow_double_buffer_c = False
+    cfg.allow_unrolled_dbc_m_boundary = planner != passes.MemoryPlanner.PTOAS
+    cfg.full_k_dbc_route = passes.l0_tile_chooser.DbcEmissionRoute.UnrolledGrid
+    cfg.reduction_iterations = iterations
+    cfg.reduction_pipeline_stages = 2
+    expected = passes.l0_tile_chooser.choose_l0_tile(cfg)
+    before = _predicated_canonical_split_k(m, n, source_k * iterations, source_k)
+
+    class Operands(ir.IRVisitor):
+        def __init__(self):
+            super().__init__()
+            self.ks = set()
+
+        def visit_call(self, op):
+            if op.op.name in {_TILE_MATMUL_OP, _TILE_MATMUL_ACC_OP}:
+                start = int(op.op.name == _TILE_MATMUL_ACC_OP)
+                lhs, rhs = op.args[start : start + 2]
+                assert isinstance(lhs.type, ir.TileType)
+                assert isinstance(rhs.type, ir.TileType)
+                assert lhs.type.memory_space == ir.MemorySpace.Left
+                assert rhs.type.memory_space == ir.MemorySpace.Right
+                k = lhs.type.shape[1]
+                assert isinstance(k, ir.ConstInt)
+                self.ks.add(k.value)
+                rhs_k = rhs.type.shape[0]
+                assert isinstance(rhs_k, ir.ConstInt)
+                assert rhs_k.value == k.value
+            super().visit_call(op)
+
+    with passes.PassContext([], memory_planner=planner, enable_pypto_l0c_double_buffer=dbc):
+        after = passes.auto_tile_matmul_l0()(before)
+        operands = Operands()
+        operands.visit_program(after)
+        expected_ks = {expected.k}
+        if source_k % expected.k:
+            expected_ks.add(source_k % expected.k)
+        assert operands.ks == expected_ks
+        allocated = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(before)
+    pto = codegen.PTOCodegen().generate(allocated, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+    assert "pto.tmatmul" in pto
 
 
 if __name__ == "__main__":
