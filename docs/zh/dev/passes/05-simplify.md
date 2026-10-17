@@ -59,7 +59,7 @@ program_simplified = simplify_pass(program)
 1. **多次赋值收集**：`MultiAssignCollector` 遍历函数体，记录所有被多次赋值的标量 `Var`。这些 `Var` 不会被绑定到分析器，避免某个过期的值越过后续的重新赋值被使用。仅被赋值一次的 `Var`——即使位于循环体或分支内部——也可以安全绑定：`SimplifyMutator` 会把每个绑定限定在赋值所在的区域内（见阶段 2），在离开该区域时解绑。在 SSA 形式下每个 `Var` 都只被赋值一次，因此不会收集到任何 `Var`。
 2. **`SimplifyMutator` 遍历**：继承自 `arith::IRMutatorWithAnalyzer`。分析器维护一个约束栈（循环变量边界、if 分支条件、标量绑定）。折叠发生在叶子节点而非仅顶层表达式，因为分析器顶层的 `Simplify` 不会递归进入非算术容器（`Call`、`MakeTuple`）：
    - `VarPtr` / `IterArgPtr`：先按变量重映射表替换，再交给分析器化简。循环携带变量的使用点视为叶子节点：仅在循环头重建其类型与初值。在使用点重新处理携带变量的 MemRef 偏移可能产生新的未定义变量，尤其是在作用域独立的不同分支中。
-   - `BinaryExpr` / `UnaryExpr`：先访问子节点，再折叠重建后的节点。
+   - `BinaryExpr` / `UnaryExpr`：先访问子节点，再折叠重建后的节点。结果可由分析器的 `ConstIntBound` 判定的整数比较（作用于有符号整数或 `INDEX` 操作数的 `==`、`!=`、`<`、`<=`、`>`、`>=`）会被替换为 `ConstBool`，适用于任意表达式位置，包括 `Call` 与 `Submit` 实参；参见[操作数中的可证明比较](#操作数中的可证明比较)。
    - `CallPtr`：刷新结果 `type_`，让 shape 参数被折叠后的 Call 与重新解析得到的 Call 在结构上相等。
    - `AssignStmt`：对不在 `multi_assigned_` 中的标量 LHS `Var`，把化简后的 RHS 注册到分析器。函数体顶层的 `ConstInt`/`ConstFloat`/`ConstBool` RHS 会被完整绑定（字面量代入下游使用点）；符号 RHS，或循环/分支内部的常量，只贡献一个 `ConstIntBound`，使恒死的分支守卫得以折叠而不会内联该标量。每个绑定都会被记录，以便所在区域的访问器在退出时解绑。
    - `ForStmt`：在访问循环体前重建 `iter_args_`，使体内的引用对应到新的标识；如果 `start_` 与 `stop_` 都折叠为 `ConstInt` 且 `stop > start`，则在访问循环体期间把循环变量绑定到这一区间，退出时解绑；体内绑定的标量在访问结束后解绑；在访问体之后重建 `return_vars_`，让体内发现的折叠也反映到返回类型中。纯单次/零次循环还会被原地折叠 —— 见下文「控制流折叠」。
@@ -181,6 +181,24 @@ for i in pl.range(0, 8, 2):
 ```
 
 分析器在访问循环体期间得知 `i ∈ [0, 8)`。`CanProve(Not(i == -1))` 成功 —— 该比较静态恒为假 —— 因此 Fold A 丢弃 then 分支并把 else 分支提升到外层 for 体。永远为真的条件走对称路径（丢弃 else，提升 then）。当 IfStmt 拥有 `return_vars_` 时，保留分支末尾的 `YieldStmt` 会被改写为对 return vars 的 `AssignStmt`。
+
+### 操作数中的可证明比较
+
+**变换前**：
+
+```python
+for i, (acc,) in pl.range(0, 512, 128, init_values=(seed,)):
+    nxt = pl.matmul_acc(acc, a, b, init_cond=(flag and (i + 128 == 0)))
+```
+
+**变换后**：
+
+```python
+for i, (acc,) in pl.range(0, 512, 128, init_values=(seed,)):
+    nxt = pl.matmul_acc(acc, a, b, init_cond=False)
+```
+
+仅靠分析器的重写规则，`i + 128 == 0` 只会被改写为 `i == -128`。该折叠依据 `lhs - rhs` 的 `ConstIntBound` 判定比较：已绑定 `i ∈ [0, 512)` 时，`i + 128 ∈ [128, 639]` 不含 0，于是该比较变为 `ConstBool(false)`，随后 `flag and False` 经普通重写规则化简。只有比较节点会被判定；外层的 `and`/`or`/`not` 节点在其操作数成为字面量后自然折叠。判定刻意只读取 `ConstIntBound`，而不调用 Fold A 所用的 `CanProve`：`CanProve` 会回退到传递比较分析器，其搜索会重新扫描全部已知事实，若对每个比较都运行，Pass 的开销将随已绑定标量的数量呈平方增长；并且当 SSA 之前的标量或循环变量被重新赋值时，其传递比较与 int-set 事实不会刷新。浮点操作数从不判定（对 NaN 而言 `x == x` 为假）。边界区间跨越阈值的比较 —— 例如 `i == 256`，或作用于没有任何约束的循环变量（如 `stop` 为运行时值）的比较 —— 保持不变。`LowerPipelineLoops` 为第 0 份之后每一份副本生成的 `init_cond`（`ko + k*step == 0`）正是借此成为字面量，从而让代码生成发射单条 MAD，而不是在编译期常量上分支。
 
 ### 通过标量边界折叠死分支守卫
 

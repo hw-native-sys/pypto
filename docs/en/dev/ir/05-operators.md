@@ -317,19 +317,19 @@ with no init operand, hence the branch. Because `matmul_acc` is in place
 (`set_output_reuses_input(0)`), both arms write the same buffer and the `scf.if`
 yields no value — no phi is materialized on the Acc tile.
 
-"Literal" covers **both** spellings a constant predicate arrives in: a DSL
-`init_cond=True`/`False` reaches the emitter as a BOOL-typed `ConstInt`, while a
-predicate an earlier pass folded reaches it as a `ConstBool` — which is what the
-generated `ko == 0` becomes when [`LowerPipelineLoops`](../passes/31-lower_pipeline_loops.md)
-replicates the K-loop *and* the enclosing loop is eliminated, so each replica's
-index is a literal. Both pick an arm outright, and an emitter that folded only
-one of the two would double the MADs of every K block it missed.
+A literal predicate is a `ConstBool`, whether the user wrote `init_cond=True`/`False`
+or a pass decided it — e.g. replica `k > 0`'s `ko + k*step == 0` after
+[`LowerPipelineLoops`](../passes/31-lower_pipeline_loops.md) replicates the K-loop,
+which [`Simplify`](../passes/05-simplify.md#provable-comparison-in-an-operand) proves
+false from the loop's bound. The emitter also accepts a BOOL-typed `ConstInt`, the
+spelling of IR built directly through the bindings. Either picks an arm outright;
+an emitter that folded neither would double the MADs of every K block.
 
-The fold is therefore conditional on the trip count, not universal: at
-`16x512x64` the pipelined loop disappears and the emitted PTO has no `scf.if`,
-while at `16x2048x64` the replica indices stay symbolic (`ko`, `ko + 256`) and
-two `scf.if`s survive. That is not a regression — the peeled `IfStmt` this
-replaced produced the same two branches for those shapes.
+What remains depends on the trip count: at `16x512x64` the pipelined loop
+disappears and the emitted PTO has no `scf.if`. At `16x2048x64` the main loop
+survives with replica indices `ko` and `ko + 256`; replica 1's test is decided
+(false) and folds, while replica 0's `ko == 0` is a genuine runtime test — it
+seeds the accumulator — so exactly one `scf.if` remains.
 
 The compiler uses the idiom it recommends: `AutoTileMatmulL0` *emits* the
 predicated form for the K-loop of a plain `tile.matmul`, so the `tile.create`

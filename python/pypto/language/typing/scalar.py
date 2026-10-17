@@ -12,7 +12,7 @@
 from typing import Any, TypeAlias, cast
 
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import ConstInt, Expr, Span
+from pypto.pypto_core.ir import ConstBool, Expr, Span
 
 
 def _validate_scalar_meta_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
@@ -342,10 +342,14 @@ BoolLike: TypeAlias = bool | Scalar | Expr
 def predicate_to_expr(value: BoolLike | None, span: Span | None = None) -> Expr | None:
     """Coerce an optional boolean predicate operand to an ``Expr``.
 
-    A Python ``bool`` becomes ``ConstInt(.., BOOL)`` — a compile-time constant an
-    operator's lowering can fold away. A [`Scalar`][pypto.language.Scalar] (typically a comparison
-    such as ``k == 0``) is unwrapped to the symbolic expression it carries, which
-    stays a runtime value.
+    A Python ``bool`` becomes ``ConstBool`` — a compile-time constant an
+    operator's lowering can fold away. ``ConstBool`` is also what the printer
+    writes back as ``True``/``False`` and what ``Simplify`` produces when it
+    decides a predicate, so a literal predicate has one spelling whether the
+    user wrote it or a pass folded it, and it survives a print/parse round trip.
+    A [`Scalar`][pypto.language.Scalar] (typically a comparison such as
+    ``k == 0``) is unwrapped to the symbolic expression it carries, which stays
+    a runtime value.
 
     Args:
         value: Predicate to coerce, or ``None`` to pass through
@@ -357,7 +361,7 @@ def predicate_to_expr(value: BoolLike | None, span: Span | None = None) -> Expr 
     if value is None:
         return None
     if isinstance(value, bool):
-        return ConstInt(int(value), DataType.BOOL, span if span is not None else Span.unknown())
+        return ConstBool(value, span if span is not None else Span.unknown())
     if isinstance(value, Scalar):
         return value.unwrap()
     return value

@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -25,9 +26,11 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/arith/ir_mutator_with_analyzer.h"
+#include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -340,11 +343,105 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   /// (Call, MakeTuple), so an Add buried inside a shape arg would otherwise
   /// reach downstream with patterns like `K + 0` un-folded.
   ExprPtr VisitBinaryExpr_(const BinaryExprPtr& op) override {
-    return analyzer_->Simplify(IRMutator::VisitBinaryExpr_(op));
+    return FoldProvableComparison(analyzer_->Simplify(IRMutator::VisitBinaryExpr_(op)));
   }
 
   ExprPtr VisitUnaryExpr_(const UnaryExprPtr& op) override {
     return analyzer_->Simplify(IRMutator::VisitUnaryExpr_(op));
+  }
+
+  /// Decide an integer comparison from the analyzer's constant bounds, in any
+  /// expression position — including call arguments.
+  ///
+  /// `Analyzer::Simplify` only rewrites a comparison: `ko + 128 == 0` becomes
+  /// `ko == -128` and stops there, because no rewrite rule consults the bound
+  /// on `ko`. This decides it: with `d = Simplify(lhs - rhs)` and `[lo, hi]` the
+  /// `ConstIntBound` of `d`, a comparison is a literal when `[lo, hi]` lies
+  /// entirely on one side of 0 (e.g. `==` is false when `lo > 0 || hi < 0`).
+  /// That is how the `init_cond` of a `tile.matmul_acc` replicated by
+  /// LowerPipelineLoops (`ko + k*step == 0`, with `ko` bound to the main
+  /// loop's `[start, stop)`) becomes a literal instead of reaching codegen as a
+  /// runtime `scf.if`.
+  ///
+  /// Only the `ConstIntBound` sub-analyzer is consulted — deliberately not
+  /// `Analyzer::CanProve`, which Fold A uses for IfStmt conditions:
+  ///  - Cost. `CanProve` falls back to `transitive_cmp`, whose DFS rescans
+  ///    every known fact, so running it once per comparison node would make
+  ///    the pass quadratic in the number of bound scalars. A bound query is
+  ///    one walk of `d`, which `Simplify` has just produced anyway.
+  ///  - Consistency. This pass keeps `ConstIntBound` in step with the IR — a
+  ///    reassigned scalar or loop variable is re-bound, and every binding is
+  ///    unbound on scope exit. `transitive_cmp` and `int_set` are not updated
+  ///    by a reassignment, and `int_set` is not cleared by `Unbind`, so on
+  ///    pre-SSA input they can still claim a stale `[start, stop)` range.
+  ///
+  /// Only signed-integer and INDEX operands are decided: a float comparison is
+  /// not an interval question (`x == x` is false for NaN), and unsigned
+  /// subtraction wraps. The bound of `d` contains every value the bindings
+  /// allow — the loop-var range `[start, stop)` over-approximates the values a
+  /// stepped loop takes — so a literal is produced only when one polarity
+  /// holds for all of them; otherwise the comparison is returned unchanged.
+  ///
+  /// Only comparison nodes are decided. Their children were visited first, so
+  /// a composed predicate (`c and (ko + 128 == 0)`) then reduces through the
+  /// ordinary And/Or/Not rewrite rules once the comparison is a literal. The
+  /// decision runs here, at the pass level, rather than inside
+  /// `RewriteSimplifier`, which the bound query's `Simplify` call re-enters.
+  ExprPtr FoldProvableComparison(const ExprPtr& expr) {
+    auto cmp = As<BinaryExpr>(expr);
+    if (!cmp) return expr;
+    const ObjectKind kind = expr->GetKind();
+    switch (kind) {
+      case ObjectKind::Eq:
+      case ObjectKind::Ne:
+      case ObjectKind::Lt:
+      case ObjectKind::Le:
+      case ObjectKind::Gt:
+      case ObjectKind::Ge:
+        break;
+      default:
+        return expr;
+    }
+    const DataType operand_dtype = GetScalarDtype(cmp->left_);
+    if (!(operand_dtype.IsSignedInt() || operand_dtype == DataType::INDEX)) return expr;
+    if (GetScalarDtype(cmp->right_) != operand_dtype) return expr;
+
+    const auto bound = analyzer_->const_int_bound(analyzer_->Simplify(MakeSub(cmp->left_, cmp->right_)));
+    // `lo`/`hi` bound `lhs - rhs`; each comparison is decided by where that
+    // interval sits relative to 0. kNegInf/kPosInf never satisfy a strict test.
+    const int64_t lo = bound.min_value;
+    const int64_t hi = bound.max_value;
+    std::optional<bool> decided;
+    switch (kind) {
+      case ObjectKind::Eq:
+        if (bound.is_const(0)) decided = true;
+        if (lo > 0 || hi < 0) decided = false;
+        break;
+      case ObjectKind::Ne:
+        if (bound.is_const(0)) decided = false;
+        if (lo > 0 || hi < 0) decided = true;
+        break;
+      case ObjectKind::Lt:
+        if (hi < 0) decided = true;
+        if (lo >= 0) decided = false;
+        break;
+      case ObjectKind::Le:
+        if (hi <= 0) decided = true;
+        if (lo > 0) decided = false;
+        break;
+      case ObjectKind::Gt:
+        if (lo > 0) decided = true;
+        if (hi <= 0) decided = false;
+        break;
+      case ObjectKind::Ge:
+        if (lo >= 0) decided = true;
+        if (hi < 0) decided = false;
+        break;
+      default:
+        break;
+    }
+    if (!decided) return expr;
+    return std::make_shared<const ConstBool>(*decided, expr->span_);
   }
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {

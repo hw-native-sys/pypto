@@ -1434,11 +1434,11 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
       }
 
       // A literal predicate picks one arm outright; only a runtime one branches.
-      // Both spellings reach here: a DSL `init_cond=True/False` arrives as a
-      // BOOL-typed ConstInt, while a predicate the arithmetic simplifier folded
-      // (e.g. `ko == 0` after LowerPipelineLoops replicates the K-loop) arrives
-      // as a ConstBool.  Missing either one leaves an `scf.if` on a compile-time
-      // constant, doubling the emitted MADs.
+      // A DSL `init_cond=True/False` and a predicate Simplify decided (e.g. a
+      // replica's `ko + k*step == 0` after LowerPipelineLoops) both arrive as a
+      // ConstBool; a BOOL-typed ConstInt is still accepted for IR built directly
+      // through the bindings.  Missing either one leaves an `scf.if` on a
+      // compile-time constant, doubling the emitted MADs.
       if (auto init_const = As<ir::ConstInt>(op->args_[3])) {
         codegen.Emit(build(/*initializing=*/init_const->value_ != 0));
         return "";

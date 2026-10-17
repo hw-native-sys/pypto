@@ -59,7 +59,7 @@ Implemented by `TransformSimplify` in `src/ir/transforms/simplify_pass.cpp` in f
 1. **Multi-assign collection** — `MultiAssignCollector` walks the function body and records every scalar `Var` assigned more than once. These are excluded from analyzer binding so a stale value cannot be used past a later reassignment. A `Var` assigned exactly once — even inside a loop body or branch — is safe to bind: `SimplifyMutator` scopes every binding to the region the assignment lives in (see phase 2), unbinding it on region exit. Under SSA every `Var` is single-assigned, so nothing is collected.
 2. **`SimplifyMutator` traversal** — extends `arith::IRMutatorWithAnalyzer`. The analyzer carries a constraint stack (loop-var bounds, if-branch conditions, scalar bindings). Folding happens at the leaves rather than only at top-level expressions because the analyzer's top-level `Simplify` does not recurse into non-arithmetic containers (`Call`, `MakeTuple`):
    - `VarPtr` / `IterArgPtr`: substitute via the var-remap table, then run through the analyzer. Loop-carried uses are leaves: only the loop header rebuilds their type and initial value. Revisiting a carry's MemRef offset at a use site can otherwise create a fresh, undefined variable, especially across separately scoped branches.
-   - `BinaryExpr` / `UnaryExpr`: visit children, then fold the rebuilt node.
+   - `BinaryExpr` / `UnaryExpr`: visit children, then fold the rebuilt node. An integer comparison (`==`, `!=`, `<`, `<=`, `>`, `>=` on signed-integer or `INDEX` operands) whose outcome the analyzer's `ConstIntBound` decides becomes a `ConstBool`, in any expression position including `Call` and `Submit` arguments; see [Provable comparison in an operand](#provable-comparison-in-an-operand).
    - `CallPtr`: refresh the result `type_` so a Call whose shape arguments folded ends up structurally equal to a freshly parsed Call.
    - `AssignStmt`: for a scalar LHS `Var` not in `multi_assigned_`, register the simplified RHS with the analyzer. A `ConstInt`/`ConstFloat`/`ConstBool` RHS at function-body top level is bound fully (the literal is substituted into later uses); a symbolic RHS — or a constant inside a loop/branch — contributes only a `ConstIntBound`, so dead branch guards fold without the scalar being inlined. Every binding is logged so the enclosing region's visitor can unbind it on exit.
    - `ForStmt`: rebuild `iter_args_` before visiting the body so body references pick up the remapped identity; if both `start_` and `stop_` fold to `ConstInt` with `stop > start`, bind the loop var to that range while visiting the body and unbind on exit; scalars bound inside the body are unbound after the visit; rebuild `return_vars_` after the body so folds discovered inside are visible in return types. Pure single-trip and zero-trip loops are also collapsed in-place — see "Control-flow folding" below.
@@ -181,6 +181,24 @@ for i in pl.range(0, 8, 2):
 ```
 
 The analyzer binds `i ∈ [0, 8)` while visiting the loop body. `CanProve(Not(i == -1))` succeeds — the comparison is statically false — so Fold A drops the then branch and lifts the else branch into the surrounding for-body. The same path runs for always-true conditions (drops else, lifts then). When the IfStmt has `return_vars_`, the kept branch's trailing `YieldStmt` is rewritten into `AssignStmt`s on the return vars.
+
+### Provable comparison in an operand
+
+**Before**:
+
+```python
+for i, (acc,) in pl.range(0, 512, 128, init_values=(seed,)):
+    nxt = pl.matmul_acc(acc, a, b, init_cond=(flag and (i + 128 == 0)))
+```
+
+**After**:
+
+```python
+for i, (acc,) in pl.range(0, 512, 128, init_values=(seed,)):
+    nxt = pl.matmul_acc(acc, a, b, init_cond=False)
+```
+
+The analyzer's rewrite rules alone only turn `i + 128 == 0` into `i == -128`. The fold decides the comparison from the `ConstIntBound` of `lhs - rhs`: with `i ∈ [0, 512)` bound, `i + 128 ∈ [128, 639]` excludes 0, so the comparison becomes `ConstBool(false)`, and `flag and False` then reduces through the ordinary rewrite rules. Only comparison nodes are decided; enclosing `and`/`or`/`not` nodes fold once their operands are literals. The decision deliberately reads `ConstIntBound` alone rather than calling `CanProve` (which Fold A uses): `CanProve` falls back to the transitive-comparison analyzer, whose search rescans every known fact and would make the pass quadratic in the number of bound scalars if run per comparison, and its transitive and int-set facts are not refreshed when a pre-SSA scalar or loop variable is reassigned. Float operands are never decided (`x == x` is false for NaN). A comparison whose bound interval straddles the threshold — `i == 256`, or a comparison on a loop variable nothing bounds, e.g. one whose `stop` is a runtime value — is kept. This is how the `init_cond` of every replica `LowerPipelineLoops` produces after the first (`ko + k*step == 0`) becomes a literal, so codegen emits a single MAD instead of a branch on a compile-time constant.
 
 ### Dead branch guard through a scalar bound
 
