@@ -551,6 +551,36 @@ class PipelinedLoad:
         return out
 
 
+@pl.program
+class SteppedPipelinedLoad:
+    """``pl.pipeline`` whose step is not 1.
+
+    The induction variable is not the rotation counter here: over ``[0, 256)``
+    with ``step = 64`` it only ever takes ``0/64/128/192``, so indexing slots by
+    ``i % 2`` directly would reach outside a two-slot region. The rotation counter
+    is ``(i - start) / step``, so the slot is ``((i - start) / step) % F`` — still
+    one remainder over one SSA value, which is the property ptoas' slot accounting
+    reads. Before this shape was admitted, every stepped pipeline fell through to
+    ``LowerPipelineLoops`` and paid ``F`` body copies instead.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[256, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        seed: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Vec)
+        for i, (acc_i,) in pl.pipeline(0, 256, 64, stage=2, init_values=(seed,)):
+            t: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.load(
+                a, [i, 0], [64, 64], target_memory=pl.MemorySpace.Vec
+            )
+            acc_next: pl.Tile[[64, 64], pl.FP32] = pl.add(acc_i, t)
+            r = pl.yield_(acc_next)
+        out: pl.Tensor[[64, 64], pl.FP32] = pl.store(r, [0, 0], output)
+        return out
+
+
 class TestPipelineLowersToARegion:
     """``pl.pipeline`` reaches codegen as one region, not as F copies of the body."""
 
@@ -585,6 +615,60 @@ class TestPipelineLowersToARegion:
         assert _lines(mlir, "pto.alloc_multi_tile") == []
         assert len(_lines(mlir, "pto.tload")) == 3, f"seed + two replicated loads:\n{mlir}"
         assert "step %c2_index" in _lines(mlir, "scf.for")[0]
+
+    def test_a_stepped_pipeline_also_reaches_one_region(self):
+        """A non-unit step is a loop shape, not a reason to replicate the body."""
+        mlir = _codegen(SteppedPipelinedLoad, passes.MemoryPlanner.PTOAS)
+        regions = _lines(mlir, "pto.alloc_multi_tile")
+        assert len(regions) == 1, f"expected exactly one region:\n{mlir}"
+        assert "count=2" in regions[0], regions[0]
+        assert len(_lines(mlir, "pto.multi_tile_get")) == 1, mlir
+
+    def test_a_stepped_slot_is_the_counter_modulo_the_stage_count(self):
+        """The slot is a remainder over the *counter*, never over the raw iv.
+
+        The region's byte offset is derived from the slot index, so a slot that
+        could exceed ``F - 1`` would address outside the allocation. ``i`` reaches
+        192 for this loop, so ``i % 2`` would be wrong even though it is a
+        remainder.
+        """
+        mlir = _codegen(SteppedPipelinedLoad, passes.MemoryPlanner.PTOAS)
+        get = _lines(mlir, "pto.multi_tile_get")[0]
+        slot_ssa = get.split("[")[1].split("]")[0]
+        definition = next(
+            (ln.strip() for ln in mlir.splitlines() if ln.strip().startswith(f"{slot_ssa} =")), None
+        )
+        assert definition is not None, f"slot operand {slot_ssa} has no definition:\n{mlir}"
+        assert "remui" in definition or "remsi" in definition, (
+            f"the slot operand must be the index expression, got: {definition}"
+        )
+        # The remainder is taken over a division (the counter), not over the iv.
+        counter_ssa = definition.split("remui")[-1].split("remsi")[-1].split(",")[0].strip()
+        counter_def = next(
+            (ln.strip() for ln in mlir.splitlines() if ln.strip().startswith(f"{counter_ssa} =")), None
+        )
+        assert counter_def is not None, f"the counter {counter_ssa} has no definition:\n{mlir}"
+        assert "divui" in counter_def or "divsi" in counter_def, (
+            f"the rotation counter must be a division, got: {counter_def}"
+        )
+        assert str(64 * 64 * 4) not in definition, (
+            f"the slot operand must not be scaled to a byte offset: {definition}"
+        )
+
+    def test_a_stepped_loop_keeps_its_own_step(self):
+        """One body, and the loop still strides by the user's step."""
+        mlir = _codegen(SteppedPipelinedLoad, passes.MemoryPlanner.PTOAS)
+        loops = _lines(mlir, "scf.for")
+        assert len(loops) == 1, mlir
+        assert "step %c64_index" in loops[0], f"a slotted loop keeps its step:\n{loops[0]}"
+        assert len(_lines(mlir, "pto.tload")) == 2, f"seed + one body load:\n{mlir}"
+
+    def test_without_the_region_a_stepped_pipeline_is_replicated(self):
+        """The contrast that motivates the shape: F body copies and a doubled step."""
+        mlir = _codegen(SteppedPipelinedLoad, passes.MemoryPlanner.PYPTO)
+        assert _lines(mlir, "pto.alloc_multi_tile") == []
+        assert len(_lines(mlir, "pto.tload")) == 3, f"seed + two replicated loads:\n{mlir}"
+        assert "step %c128_index" in _lines(mlir, "scf.for")[0]
 
 
 if __name__ == "__main__":
