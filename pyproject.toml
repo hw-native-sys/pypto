@@ -63,6 +63,31 @@ dev = [
 # `pip install -r` instead of `pip install -e ".[docs]"`, which would trigger a
 # full C++ build the site does not need.
 
+[dependency-groups]
+# Include the public dev extra and tools needed for builds without isolation.
+dev = [
+    "pypto[dev]",
+    "cmake",
+    "nanobind>=2.0.0,<3",
+    "ninja",
+    "scikit-build-core",
+]
+# Install the pinned hardware runtime only after activating a supported CANN.
+onboard = ["simpler"]
+
+[tool.uv]
+no-build-isolation-package = ["pypto", "simpler"]
+
+[tool.uv.sources]
+# Use CPU wheels without changing the source of other dependencies.
+torch = { index = "pytorch-cpu" }
+simpler = { path = "runtime", editable = true }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
 [project.urls]
 Homepage = "https://github.com/hw-native-sys/pypto"
 Repository = "https://github.com/hw-native-sys/pypto"
