@@ -30,7 +30,7 @@ There are **fifteen ops** and **four ABI enums**:
 | `pld.tensor.reduce_scatter` | reduce and scatter chunks across ranks | `DistributedTensorType` (same as src) | builtin collective |
 | `pld.tensor.allgather` | gather data from all ranks via window | `DistributedTensorType` (same as src) | builtin collective |
 | `pld.tensor.all_to_all` | push-based symmetric personalized exchange — every rank pushes its per-destination chunks to every peer's window via `pld.tensor.put` (TPUT), returns window as result | `DistributedTensorType` (same as src) | composite / HOST builtin |
-| `pld.tensor.all_to_all_v` | variable-size all-to-all (MPI_Alltoallv) — pushes `clamp(send_counts[dest], 0, MAX_RECV)` rows per destination into a flat 2D staging window (transfer size is the runtime row count, so padding never crosses the wire), and fills `recv_counts[src, 0]` so the receiver knows which rows are valid — the builtin kernel pulls ONE word per peer from that peer's own `send_counts` window (scalar read; no fixed-width requirement) and clamps reader-side, gated by a two-round credit barrier; the composite rail publishes via `pld.system.notify` (Set); returns window as result (same window-as-result pattern as symmetric `all_to_all`) | `DistributedTensorType` (same as target) | composite / HOST builtin / CHIP builtin |
+| `pld.tensor.all_to_all_v` | variable-size all-to-all (MPI_Alltoallv) — pushes `clamp(send_counts[dest], 0, MAX_RECV)` rows per destination into a flat 2D staging window (transfer size is the runtime row count, so padding never crosses the wire), and fills `recv_counts[src, 0]` so the receiver knows which rows are valid — the builtin kernel pulls ONE word per peer from that peer's own `send_counts` window (scalar read; no fixed-width requirement) and clamps reader-side, gated by a two-round credit barrier; the composite rail atomically resets local counts, barriers, then publishes via `pld.system.notify` (AtomicAdd) and barriers again; returns window as result (same window-as-result pattern as symmetric `all_to_all`) | `DistributedTensorType` (same as target) | composite / HOST builtin / CHIP builtin |
 | `pld.system.notify` | signal a peer's slot | `Unknown` (side effect) | TNOTIFY |
 | `pld.system.wait` | block on own slot | `Unknown` (side effect) | TWAIT |
 | `pld.system.defer_wait` | defer this task's logical completion on a local counter | `Unknown` (side effect) | Simpler completion runtime (no PTOAS wait op) |
@@ -101,7 +101,7 @@ The flag is orthogonal to affinity (it constrains replication, not placement).
 Its only consumer is `LowerAutoVectorSplit`'s `pl.split_aiv` region placement
 stamp, which pins a region's no-duplicate calls to the AIV lane; see
 `docs/en/dev/ir/05-operators.md` and
-`docs/en/dev/passes/23-lower_auto_vector_split.md`.
+`docs/en/dev/passes/24-lower_auto_vector_split.md`.
 
 **Comm ops written outside every region are still duplicated onto both lanes,
 and nothing diagnoses it.** Putting the comm phase in a `pl.split_aiv` region is
@@ -455,9 +455,12 @@ clamp(send_counts_of[src][my_rank], 0, MAX_RECV)`). The exchange is gated by a
 **two-round credit barrier**: Barrier A (before the pull) certifies every rank
 staged its counts and finished consuming the previous invocation's receive
 window; Barrier B (after the push) certifies every peer read this rank's counts
-and pushed before it returns. The InCore composite rail instead publishes the
-already-clamped count into peer `dest`'s `recv_counts[my_rank, 0]` via
-`pld.system.notify` (Set). The push transfers exactly that many rows — the
+and pushed before it returns. The InCore composite rail atomically resets its
+own receive counts and rendezvous-barriers before publishing the already-clamped
+count into peer `dest`'s `recv_counts[my_rank, 0]` via `pld.system.notify`
+(AtomicAdd), followed by a completion barrier. Both reset and publication use
+atomics: scalar stores would flush an entire cache line and could overwrite a
+neighboring count or signal. The push transfers exactly that many rows — the
 transfer shape is the runtime `[rows, SIZE]`, not the compile-time capacity —
 so padding rows never cross the wire. After the call the receiver uses
 `recv_counts[src, 0]` to identify the valid rows; the remainder of its capacity
@@ -540,7 +543,7 @@ naming the CHIP rail in the diagnostic. The CHIP/L2 rail (below) accepts a
 compile-time `core_num`: it folds the same `B = CalAllToAllVBlocks(P, L)` at
 lowering and attaches it as the launch spec (`core_num=B`, `sync_start`) when
 `B > 1`. A runtime `core_num` is not supported on that rail yet — see
-[`40-lower_l2_tensor_collectives.md`](passes/40-lower_l2_tensor_collectives.md).
+[`41-lower_l2_tensor_collectives.md`](passes/41-lower_l2_tensor_collectives.md).
 
 **CHIP builtin** (`LowerL2TensorCollectives`): the same call written one level
 down, in a CHIP `Orchestration` body rather than in `host_orch`. It is rewritten
@@ -549,7 +552,7 @@ template the HOST rail uses, so the wire behaviour is identical and only the
 dispatch structure differs: the collective becomes one AIV task of the caller's
 own pipeline — no per-device fan-out, no nested L2 dispatch — ordered against
 the surrounding compute by ordinary TensorMap dependencies. See
-[`40-lower_l2_tensor_collectives.md`](passes/40-lower_l2_tensor_collectives.md).
+[`41-lower_l2_tensor_collectives.md`](passes/41-lower_l2_tensor_collectives.md).
 
 **HOST builtin** (`LowerHostTensorCollectives`): the same 5-arg call, made
 from a `host_orch` function, lowers per-device to `builtin.tensor.all_to_all_v`
@@ -630,7 +633,7 @@ dynamic physical target dimension is bound from that tensor parameter.
   every row of the signal afterward.
 
 Host-orchestrator user code may omit `signal` outside `for` and `while` loops;
-the [`SynthesizeAllReduceSignals`](passes/45-synthesize_allreduce_signals.md)
+the [`SynthesizeAllReduceSignals`](passes/46-synthesize_allreduce_signals.md)
 pass inserts a private INT32 signal window with semantic shape
 `[world_size, core_num]`
 for that call (mesh mode only — `mode="ring"` requires an explicit signal). The
@@ -797,11 +800,11 @@ than a PTO tensor view.
 ## Pipeline integration
 
 Comm domains and their slot allocations are materialised by the
-[`MaterializeCommDomainScopes`](passes/46-materialize_comm_domain_scopes.md) pass, which wraps each
+[`MaterializeCommDomainScopes`](passes/47-materialize_comm_domain_scopes.md) pass, which wraps each
 host_orch body in nested `CommDomainScopeStmt` nodes (one per inferred comm domain) and produces the
 per-window `WindowBuffer` records that the runtime binds physical buffers to.
 Host-level tensor collectives are then lowered by
-[`LowerHostTensorCollectives`](passes/47-lower_host_tensor_collectives.md) into internal builtin chip
+[`LowerHostTensorCollectives`](passes/48-lower_host_tensor_collectives.md) into internal builtin chip
 dispatches before the final `Simplify`.
 
 ## Testing

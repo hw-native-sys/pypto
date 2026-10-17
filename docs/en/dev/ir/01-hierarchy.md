@@ -376,8 +376,8 @@ runtime = ir.RuntimeScopeStmt(manual=True, name_hint="", body=body, span=span)
     scope form and `@pl.jit.graph` converge before any later pass sees them
   - `SplitAivScopeStmt` is **non-outlined**: it is transparent to SSA and to the
     outliners (it survives inside an outlined `Function(InCore)` body), then is
-    lowered in place by `LowerAutoVectorSplit` (pass 23), which retains the
-    wrapper. `ExpandMixedKernel` (pass 24) consumes and **erases** it; subsequent
+    lowered in place by `LowerAutoVectorSplit` (pass 24), which retains the
+    wrapper. `ExpandMixedKernel` (pass 25) consumes and **erases** it; subsequent
     passes and codegen see only the per-op
     `aiv_shard` / `aic_gather` / `tpush` / `tpop` markers. A PTO codegen guard
     fails loudly if a `SplitAivScopeStmt` ever survives that far.
@@ -389,7 +389,7 @@ runtime = ir.RuntimeScopeStmt(manual=True, name_hint="", body=body, span=span)
     mode**: the regions are authoritative for vector placement, and the
     `AivSplitValid` verifier rejects vector compute outside every region (write
     a `mode=None` region per full-width phase — see
-    [LowerAutoVectorSplit](../passes/23-lower_auto_vector_split.md)). A
+    [LowerAutoVectorSplit](../passes/24-lower_auto_vector_split.md)). A
     top-level `for aiv_id in pl.split_aiv(...)` is wrapped by the parser in an
     enclosing `InCoreScopeStmt` (so `OutlineIncoreScopes` can outline it), i.e.
     `InCoreScopeStmt{ body: SplitAivScopeStmt{...} }`.

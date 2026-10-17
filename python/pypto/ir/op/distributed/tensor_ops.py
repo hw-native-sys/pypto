@@ -479,10 +479,9 @@ def all_to_all_v(
     window (non-cacheable read; no bulk transfer, so the ``[NR]`` INT32 vector
     is all the buffer needs) and clamps the value reader-side; the builtin
     exchange is gated by a two-round credit barrier (Barrier A before the pull,
-    Barrier B before return). The InCore composite rail publishes the clamped
-    count via ``pld.system.notify``. Powered
-    by LowerCompositeOps into a 2-phase push-based decomposition (push →
-    barrier), returning the target window. Each push transfers exactly
+    Barrier B before return). The InCore composite rail atomically resets local
+    counts and rendezvous-barriers, publishes the clamped count with AtomicAdd,
+    then completion-barriers before returning the target window. Each push transfers exactly
     ``clamp(send_counts[dest], 0, MAX_RECV)`` rows — the transfer extent is the
     runtime ``[rows, SIZE]``, so padding up to the capacity never crosses the
     wire; the caller reads back from the window with ``pl.load``, using
@@ -493,9 +492,8 @@ def all_to_all_v(
     target.shape[0] // NR``: a count above it is capped, and a **negative**
     count is floored at ``0`` — so a negative ``send_counts[dest]`` publishes
     ``recv_counts = 0`` rather than the negative value. The barrier signal is
-    credit-based (reusable across sequential calls; zero-initialise once and do
-    not reset it), and calls nested in ``for``/``while`` loops remain rejected
-    by the compiler.
+    credit-based (reusable across sequential calls and uniform ``for``/``while``
+    loops; zero-initialise once and do not reset it).
 
     .. warning::
 

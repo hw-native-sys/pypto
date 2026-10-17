@@ -57,13 +57,15 @@ std::string DataTypeToMLIR(DataType dtype) {
     return "!pto.f8E8M0";
   } else if (dtype == DataType::HF8) {
     return "!pto.hif8";
-  } else if (dtype == DataType::FP4 || dtype == DataType::FP4E2M1X2) {
+  } else if (dtype.IsLogicalFp4()) {
+    INTERNAL_CHECK(false) << "Internal error: logical DataType::FP4 reached DataTypeToMLIR; PackFp4 must "
+                             "rewrite it to FP4E2M1X2 first";
+  } else if (dtype == DataType::FP4E2M1X2) {
     // MXFP4 E2M1 packed form used by pto-isa / PTOAS for MX matmul. Bare
     // `f4E2M1x2` does not parse in PTOAS (the bare-keyword parser lacks it);
     // the dialect type `!pto.f4E2M1x2` (TableGen mnemonic) is accepted in all
     // emit contexts (ptr<>, tile_buf dtype=, tensor_view element).
-    // Logical FP4 still maps here until PackFp4 lands; FP4E2M1X2 is the
-    // explicit packed carrier.
+    // Logical DataType::FP4 must not reach codegen (PackFp4); no silent map.
     return "!pto.f4E2M1x2";
   } else if (dtype == DataType::INT32) {
     return "i32";
@@ -313,18 +315,28 @@ void CheckFlatTileExtents(const ir::TileType& tile_type, const TileTypeComponent
               "carry one value into a broadcast.";
 }
 
-TileTypeComponents ExtractTileTypeInfo(const ir::TileType& tile_type, const std::string& dtype_str_override) {
+TileTypeComponents ExtractTileTypeInfo(const ir::TileType& tile_type, const std::string& dtype_str_override,
+                                       const ir::Span* span) {
   TileTypeComponents c;
   c.dtype_str = dtype_str_override.empty() ? DataTypeToMLIR(tile_type.dtype_) : dtype_str_override;
 
   // Effective view encodes implicit defaults for the memory space (Mat/Right/Acc),
-  // so read it before lowering the shape. PTOAS represents FP4 Vec tiles in
-  // physical x2-carrier coordinates: the packed BLayout axis is half the PyPTO
-  // logical nibble extent. Matrix spaces deliberately keep their logical MX
-  // dimensions because PTOAS/TMATMUL_MX use a separate packed-matrix contract.
+  // so read it before lowering the shape. After PackFp4, FP4E2M1X2 IR already
+  // uses PTOAS pair/carrier coordinates; emit extents as-is. Logical DataType::FP4
+  // must not reach codegen (PackFp4 rejects leftovers).
   ir::TileView view = ir::tile_view_semantics::GetEffectiveTileView(tile_type);
-  const bool packed_fp4_vec =
-      tile_type.dtype_ == DataType::FP4 && tile_type.GetMemorySpace() == ir::MemorySpace::Vec;
+  // A two-nibble load becomes a one-carrier tile after PackFp4. Later layout
+  // inference can then select col_major even though the wider GM parameter
+  // passed the ND-only guard. Validate the final effective layout on every
+  // tile rendering path before PTOAS expands a different axis for the tile.
+  CHECK_SPAN(!tile_type.dtype_.IsPackedFp4() || view.blayout == ir::TileLayout::row_major,
+             span != nullptr ? *span : ir::Span::unknown())
+      << "FP4E2M1X2 tiles support row_major layout only; a one-carrier column-vector load selects "
+         "unsupported col_major layout. Load a wider row_major tile and use valid_shape to limit "
+         "the transfer (see docs/en/dev/fp4.md)";
+  INTERNAL_CHECK(tile_type.dtype_ != DataType::FP4)
+      << "Internal error: logical DataType::FP4 reached PTO codegen; PackFp4 must rewrite it to "
+         "FP4E2M1X2 first";
 
   // PTO tiles are 2D. A rank>2 tile has no `rows`/`cols` to read: taking the
   // first two dimensions and dropping the rest silently shrinks the tile
@@ -347,13 +359,6 @@ TileTypeComponents ExtractTileTypeInfo(const ir::TileType& tile_type, const std:
       c.rows = 1;
       c.cols = c0->value_;
     }
-  }
-  if (packed_fp4_vec) {
-    int64_t* packed_dim = view.blayout == ir::TileLayout::col_major ? &c.rows : &c.cols;
-    CHECK(*packed_dim > 0 && *packed_dim % 2 == 0)
-        << "FP4 Vec tile packed dimension must be a positive even logical extent for PTOAS, got "
-        << *packed_dim;
-    *packed_dim /= 2;
   }
   // Valid extent is always conveyed dynamically via `valid_row` / `valid_col`
   // operands on `pto.alloc_tile`; the type string therefore always reads

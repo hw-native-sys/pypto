@@ -673,7 +673,7 @@ def allreduce(
     counts do not read or store past the end.
 
     See ``docs/en/dev/distributed_ops.md`` and
-    ``docs/en/dev/passes/13-lower_composite_ops.md`` for the mesh partial-valid /
+    ``docs/en/dev/passes/14-lower_composite_ops.md`` for the mesh partial-valid /
     symbolic-extent target constraints (unchanged by this PR).
 
     **Barrier protocol (self-clearing credit barrier):** every call's
@@ -1055,21 +1055,24 @@ def all_to_all_v(
     AND finished consuming the previous invocation's receive window; Barrier B
     certifies every peer read this rank's counts and pushed its payload, so
     returning — and restaging counts for the next call — is safe. The InCore
-    composite rail instead publishes ``clamp(send_counts[dest], 0, MAX_RECV)``
-    into peer ``dest``'s ``recv_counts[my_rank, 0]`` via ``pld.system.notify``
-    (Set). Either way, after the call ``recv_counts[src, 0]`` tells this rank
+    composite rail atomically resets its own receive counts, rendezvous-barriers,
+    then publishes ``clamp(send_counts[dest], 0, MAX_RECV)`` into peer ``dest``'s
+    ``recv_counts[my_rank, 0]`` via ``pld.system.notify`` (AtomicAdd), followed
+    by a completion barrier. Atomic updates prevent adjacent count cells from
+    clobbering each other through whole-cache-line write-back. Either way,
+    after the call ``recv_counts[src, 0]`` tells this rank
     how many rows ``src`` sent — which is also exactly how many were
     transferred — so use that count to know where to stop reading. This is the
     MPI_Alltoallv recvcounts side. A second call on the same windows must be
     ordered after the first call's local consumer: the receive window is
     overwritten in place.
 
-    The barrier ``signal`` is credit-based, not self-clearing: each call adds
+    The barrier ``signal`` uses self-clearing credits: each call adds
     +1 per round to every peer's slot (wait thresholds 1, then 2) and subtracts
     2 per local slot at the end — never a reset, and never "wait for 1 twice" —
     so back-to-back calls on the same buffer stay ordered. Zero-initialise it
-    once and do not reset it. Calls nested in ``for``/``while`` loops are still
-    rejected by the compiler.
+    once and do not reset it. Calls inside ``for``/``while`` loops are supported
+    when every rank executes the same collective sequence.
 
     Args:
         input: Flat 2D Tensor or DistributedTensor [NR*MAX_RECV, SIZE] with

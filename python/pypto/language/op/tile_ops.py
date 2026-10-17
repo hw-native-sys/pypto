@@ -1626,7 +1626,9 @@ def matmul_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
     Scales use logical ``[M, K/32]`` / ``[K/32, N]`` shapes. Both data tiles
     passed to this operation must be FP8E4M3FN. For the supported FP4 x FP8
     input form, explicitly cast the FP4 lhs to FP8E4M3FN before calling this
-    operation; native FP4 x FP4 is not supported.
+    operation; native FP4 x FP4 and FP8 x FP4 are not supported. Physical K,
+    valid K, and scale groups use the post-cast FP8 tile, not the packed x2
+    carrier.
 
     Args:
         lhs: Left-hand side data tile (FP8E4M3FN)
@@ -1644,8 +1646,7 @@ def matmul_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
 def matmul_mx_acc(acc: Tile, lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
     """MX block-scale matmul with accumulation.
 
-    Data operands follow [`matmul_mx`][pypto.language.tile.matmul_mx]: an FP4 lhs must first be cast to
-    FP8E4M3FN, and the operation itself receives two FP8E4M3FN tiles.
+    Data operands follow [`matmul_mx`][pypto.language.tile.matmul_mx].
 
     Args:
         acc: Accumulator tile
@@ -1666,8 +1667,7 @@ def matmul_mx_acc(acc: Tile, lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: T
 def matmul_mx_bias(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile, bias: Tile) -> Tile:
     """MX block-scale matmul with bias.
 
-    Data operands follow [`matmul_mx`][pypto.language.tile.matmul_mx]: an FP4 lhs must first be cast to
-    FP8E4M3FN, and the operation itself receives two FP8E4M3FN tiles.
+    Data operands follow [`matmul_mx`][pypto.language.tile.matmul_mx].
 
     Args:
         lhs: Left-hand side data tile (FP8E4M3FN)
@@ -2474,10 +2474,10 @@ def reinterpret_view(
 ) -> Tile:
     """Reinterpret a tile over the same bytes with a different dtype.
 
-    UINT8 -> FP4E2M1X2 preserves the carrier shape and requires a packed
-    2D row-major Vec tile. Explicit shape changes are rejected. On A5,
-    PYPTO and DSA_RP memory planning support this UB alias; PTOAS planning
-    is unsupported with PTOAS 0.65.
+    FP4E2M1X2 <-> UINT8/INT8 preserves the carrier shape and requires a
+    dense address-backed 2D row-major Vec tile with a static UB offset.
+    Reshape the byte view separately before aliasing back. On A5, PYPTO
+    and DSA_RP support these aliases; PTOAS v0.67 planning is unsupported.
 
     Args:
         data: Input tile.

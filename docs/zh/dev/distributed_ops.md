@@ -27,7 +27,7 @@ TPUT/TGET 在该侧只需要一段可读/可写的*本地* GM 区域。窗口绑
 | `pld.tensor.reduce_scatter` | 跨 rank 规约并分散 | `DistributedTensorType`（同 src） | builtin collective |
 | `pld.tensor.allgather` | 从所有 rank 收集数据到窗口 | `DistributedTensorType`（同 src） | builtin collective |
 | `pld.tensor.all_to_all` | 基于推送的对称个性化交换——每个 rank 通过 `pld.tensor.put`（TPUT）将自己的各目标 block 推送到每个对等方的窗口中，返回窗口作为结果 | `DistributedTensorType`（同 src） | composite / HOST builtin |
-| `pld.tensor.all_to_all_v` | 变长 all-to-all（MPI_Alltoallv）——按每个目标推送 `clamp(send_counts[dest], 0, MAX_RECV)` 行，写入平面 2D 暂存窗口（传输大小是运行时行数，因此填充不会经过链路），并填充 `recv_counts[src, 0]` 使接收方知道哪些行有效——builtin 内核从每个对端自己的 `send_counts` 窗口中读取自己所需的**一个字**（标量读取，无固定宽度要求）并在读取方做钳制，由两轮信用屏障守护；composite 通路则用 `pld.system.notify`（Set）发布；返回窗口作为结果（与对称 `all_to_all` 相同的窗口即结果模式） | `DistributedTensorType`（与 target 相同） | composite / HOST builtin / CHIP builtin |
+| `pld.tensor.all_to_all_v` | 变长 all-to-all（MPI_Alltoallv）——按每个目标推送 `clamp(send_counts[dest], 0, MAX_RECV)` 行，写入平面 2D 暂存窗口（传输大小是运行时行数，因此填充不会经过链路），并填充 `recv_counts[src, 0]` 使接收方知道哪些行有效——builtin 内核从每个对端自己的 `send_counts` 窗口中读取自己所需的**一个字**（标量读取，无固定宽度要求）并在读取方做钳制，由两轮信用屏障守护；composite 通路先原子清零本地计数并同步，再用 `pld.system.notify`（AtomicAdd）发布并再次同步；返回窗口作为结果（与对称 `all_to_all` 相同的窗口即结果模式） | `DistributedTensorType`（与 target 相同） | composite / HOST builtin / CHIP builtin |
 | `pld.system.notify` | 给 peer 的槽位发信号 | `Unknown`（副作用） | TNOTIFY |
 | `pld.system.wait` | 在自身槽位上阻塞 | `Unknown`（副作用） | TWAIT |
 | `pld.system.defer_wait` | 让本任务的逻辑完成等待本地 counter | `Unknown`（副作用） | Simpler completion runtime（无 PTOAS wait op） |
@@ -89,7 +89,7 @@ SSA 值而存在。
 该标记与亲和性正交（它约束的是复制而非放置位置）。它唯一的消费者是
 `LowerAutoVectorSplit` 的 `pl.split_aiv` 区域放置标记：该 pass 把区域内的
 no-duplicate 调用钉在 AIV 通路上；参见 `docs/zh/dev/ir/05-operators.md` 与
-`docs/zh/dev/passes/23-lower_auto_vector_split.md`。
+`docs/zh/dev/passes/24-lower_auto_vector_split.md`。
 
 **写在所有区域之外的通信算子仍然会被复制到两条通路上，且没有任何诊断会提示这一点。**
 把通信阶段放进 `pl.split_aiv` 区域是作者的职责；参见
@@ -395,8 +395,10 @@ CHIP 通路上，操作数是以函数参数的形式到达的，没有这样的
 整个交换由**两轮信用屏障**守护：Barrier A（拉取前）证明所有 rank 已暂存计数，
 且都已消费上一次调用的接收窗口；Barrier B（推送后）证明每个对端都已读完本 rank
 的计数并完成推送，方可返回。
-InCore composite 通路则把已经钳制过的计数通过 `pld.system.notify`（Set）写入
-对端 `dest` 的 `recv_counts[my_rank, 0]`。推送只传输这么多行——传输形状是运行时
+InCore composite 通路先原子清零本地接收计数并通过屏障同步，再把已钳制的计数通过
+`pld.system.notify`（AtomicAdd）发布到对端 `dest` 的 `recv_counts[my_rank, 0]`，
+最后再执行完成屏障。清零和发布均使用原子更新：标量存储会写回整条缓存行，可能覆盖相邻的
+计数或信号。推送只传输这么多行——传输形状是运行时
 的 `[rows, SIZE]`，而非编译期容量——因此填充行不会经过链路。调用结束之后接收方用
 `recv_counts[src, 0]` 识别有效行；其容量槽的其余部分根本不会被写入。窗口内存
 不*保证*清零，且可能在同一进程内残留，因此这些未触及的字节是未定义的。
@@ -460,14 +462,14 @@ InCore 复合路径只接受编译期的 `core_num = 1`，其他取值会被直�
 信息中指明 CHIP 路径。下文的 CHIP/L2 路径接受编译期的 `core_num`：它在降级时折叠出
 同一个 `B = CalAllToAllVBlocks(P, L)`，并在 `B > 1` 时把它作为启动规格
 （`core_num=B`、`sync_start`）附加到调用上。该路径暂不支持运行期 `core_num`——见
-[`40-lower_l2_tensor_collectives.md`](passes/40-lower_l2_tensor_collectives.md)。
+[`41-lower_l2_tensor_collectives.md`](passes/41-lower_l2_tensor_collectives.md)。
 
 **CHIP builtin**（`LowerL2TensorCollectives`）：同样的调用写在下一层——CHIP
 `Orchestration` 函数体中，而不是 `host_orch` 中。它会被改写成对合成 AIV kernel 的
 调用，该 kernel 由 HOST 路径使用的*同一份* builtin 模板渲染而来，因此链路行为完全
 一致，差别只在派发结构：该集合通信成为调用方自身 pipeline 中的一个 AIV task——不按
 设备扇出，也不产生嵌套 L2 dispatch——并通过普通 TensorMap 依赖与前后计算排序。参见
-[`40-lower_l2_tensor_collectives.md`](passes/40-lower_l2_tensor_collectives.md)。
+[`41-lower_l2_tensor_collectives.md`](passes/41-lower_l2_tensor_collectives.md)。
 
 **HOST builtin**（`LowerHostTensorCollectives`）：同样的 5 参数调用，在
 `host_orch` 函数中发起时，会按设备下降为 `builtin.tensor.all_to_all_v`——
@@ -534,7 +536,7 @@ chunk，Pass 会保留该元数据，并沿用单矩形路径只归约这个矩�
 
 host-orchestrator 用户代码可以省略 `signal`，包括在 `for` / `while`
 循环内；
-[`SynthesizeAllReduceSignals`](passes/45-synthesize_allreduce_signals.md) 阶段会为该 call 插入 private INT32 signal window，
+[`SynthesizeAllReduceSignals`](passes/46-synthesize_allreduce_signals.md) 阶段会为该 call 插入 private INT32 signal window，
 语义 shape 为 `[world_size, core_num]`（仅 mesh 模式 — `mode="ring"` 必须显式传入
 signal）。该阶段会先插入 standalone `world_size = pld.world_size()` binding，
 再用该变量构造 buffer size 和 window shape。自清理协议（参见
@@ -682,10 +684,10 @@ peer 算术；而*远程*操作数
 ## 流水线集成
 
 通信域与其槽位分配由
-[`MaterializeCommDomainScopes`](passes/46-materialize_comm_domain_scopes.md) pass 完成。该 pass 将每个
+[`MaterializeCommDomainScopes`](passes/47-materialize_comm_domain_scopes.md) pass 完成。该 pass 将每个
 host_orch 函数体包裹进嵌套的 `CommDomainScopeStmt` 节点（按推断出的通信域逐层嵌套），并产生运行时据以
 绑定物理缓冲的按窗口 `WindowBuffer` 记录。
-随后 [`LowerHostTensorCollectives`](passes/47-lower_host_tensor_collectives.md) 会在最终
+随后 [`LowerHostTensorCollectives`](passes/48-lower_host_tensor_collectives.md) 会在最终
 `Simplify` 之前把 host-level tensor collectives 降为内部 builtin chip dispatch。
 
 ## 测试

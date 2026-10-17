@@ -132,7 +132,7 @@ vector lane would let the matmul race past the peer data it waits on. Read the
 flag as "must not run on a second core", not as "not idempotent".
 
 `IsNoDuplicate()` reads the axis. Its only consumer is `LowerAutoVectorSplit`'s
-`pl.split_aiv` region placement stamp (pass 23), which pins exactly the
+`pl.split_aiv` region placement stamp (pass 24), which pins exactly the
 no-duplicate calls inside a region to the AIV lane. No verifier rejects anything
 on this axis.
 

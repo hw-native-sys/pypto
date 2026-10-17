@@ -66,8 +66,15 @@ struct MxQuantTypeInfo {
 };
 
 MxQuantTypeInfo ResolveMxQuantType(DataType dtype, const std::string& op_name, const Span& span) {
+  // MXFP4 is intentionally not enabled here. PTOAS can emit f4E2M1x2 via
+  // quant_type=MXFP4, but PyPTO's packed tquant_mx lowering still goes through
+  // a raw INT8 destination plus tile.tmov_x2zz, which assumes one byte per
+  // logical MX element. FP4E2M1X2 is half that size, so reinterpret_view would
+  // mismatch byte counts; K alignment and scale layout would also need a
+  // packed-geometry path. Keep MXFP8-only until that lowering exists.
   CHECK_SPAN(dtype == DataType::FP8E4M3FN, span)
-      << "The operator " << op_name << " requires dtype FP8E4M3FN (MXFP8-only), but got " << dtype.ToString();
+      << "The operator " << op_name << " requires dtype FP8E4M3FN (MXFP8-only), but got " << dtype.ToString()
+      << "; MXFP4/FP4 is blocked on the raw INT8/tmov_x2zz 1-byte-per-logical-element path";
   return {DataType::FP8E4M3FN, DataType::INT8};
 }
 

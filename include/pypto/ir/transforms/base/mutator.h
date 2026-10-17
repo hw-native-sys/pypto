@@ -141,7 +141,7 @@ class IRMutator : public ExprFunctor<ExprPtr>, public StmtFunctor<StmtPtr> {
   /// (var_remap_ or subclass overrides) reaches Var refs that live inside types.
   /// Copy-on-write inside CloneTypeWithMemRefAndRemapExprs returns the original
   /// TypePtr when nothing inside changes.
-  TypePtr RemapTypeViaVisitor(const TypePtr& type);
+  virtual TypePtr RemapTypeViaVisitor(const TypePtr& type);
 
   /// Resolve a var_remap_ hit transitively — the seeded value may itself need
   /// further substitution (its type embeds a Var that's also in var_remap_).

@@ -716,12 +716,14 @@ def test_new_host_collectives_in_host_orchestrator_are_left_for_host_collective_
 
 
 class _StmtProbe(ir.IRVisitor):
-    """Collect ForStmt ``stop`` expressions and AssignStmt values."""
+    """Collect loop bounds, assignments, and evaluated expressions in order."""
 
     def __init__(self) -> None:
         super().__init__()
         self.for_stops: list[ir.Expr] = []
         self.assign_values: list[ir.Expr] = []
+        self.assignments: list[ir.AssignStmt] = []
+        self.values: list[ir.Expr] = []
 
     def visit_for_stmt(self, op: ir.ForStmt) -> None:
         self.for_stops.append(op.stop)
@@ -734,6 +736,11 @@ class _StmtProbe(ir.IRVisitor):
 
     def visit_assign_stmt(self, op: ir.AssignStmt) -> None:
         self.assign_values.append(op.value)
+        self.assignments.append(op)
+        self.values.append(op.value)
+
+    def visit_eval_stmt(self, op: ir.EvalStmt) -> None:
+        self.values.append(op.expr)
 
     def _walk_stmt(self, stmt: ir.Stmt) -> None:
         # The nanobind trampoline does not redispatch nested statement
@@ -747,6 +754,8 @@ class _StmtProbe(ir.IRVisitor):
             self.visit_if_stmt(stmt)
         elif isinstance(stmt, ir.AssignStmt):
             self.visit_assign_stmt(stmt)
+        elif isinstance(stmt, ir.EvalStmt):
+            self.visit_eval_stmt(stmt)
 
 
 def _probe_stmts(prog) -> _StmtProbe:
@@ -848,6 +857,7 @@ class _GuardProbe(ir.IRVisitor):
         super().__init__()
         self.guarded: list[str] = []
         self.unguarded: list[str] = []
+        self.unguarded_calls: list[ir.Call] = []
         self._if_depth = 0
 
     def visit_for_stmt(self, op: ir.ForStmt) -> None:
@@ -864,6 +874,8 @@ class _GuardProbe(ir.IRVisitor):
         if isinstance(op.value, ir.Call):
             bucket = self.guarded if self._if_depth > 0 else self.unguarded
             bucket.append(op.value.op.name)
+            if self._if_depth == 0:
+                self.unguarded_calls.append(op.value)
 
     def _walk_stmt(self, stmt: ir.Stmt) -> None:
         # Same trampoline caveat as _StmtProbe: nested statement callbacks are
@@ -958,10 +970,83 @@ def test_all_to_all_v_count_notify_is_not_inside_the_push_guard():
     notify_op = ir.get_op("pld.system.notify").name
 
     assert put_op in probe.guarded, "the pld.tile.put must sit inside the rows > 0 guard"
-    assert notify_op in probe.unguarded, (
-        "the recv_counts notify must stay OUTSIDE the rows > 0 guard — a zero-row "
-        "destination would otherwise read a stale recv_counts"
+    count_notifies = [
+        call
+        for call in probe.unguarded_calls
+        if call.op.name == notify_op
+        and isinstance(call.args[0], ir.Var)
+        and call.args[0].name_hint == "recv_counts"
+    ]
+    assert len(count_notifies) == 2, (
+        "both recv_counts reset and publication must stay outside the payload guard"
     )
+    assert all(call.kwargs["op"] == int(pld.NotifyOp.AtomicAdd) for call in count_notifies)
+
+
+def test_all_to_all_v_resets_counts_before_atomic_publication():
+    """Receiver-owned reset and two rendezvous prevent adjacent count clobbering."""
+    After = passes.lower_composite_ops()(_build_all_to_all_v_before())
+    probe = _probe_stmts(After)
+    calls = [value for value in probe.values if isinstance(value, ir.Call)]
+    notify_op = ir.get_op("pld.system.notify").name
+    wait_op = ir.get_op("pld.system.wait").name
+    read_op = ir.get_op("tensor.read").name
+    count_updates = [
+        call
+        for call in calls
+        if call.op.name == notify_op
+        and isinstance(call.args[0], ir.Var)
+        and call.args[0].name_hint == "recv_counts"
+    ]
+    assert len(count_updates) == 2
+    reset, publish = count_updates
+
+    def definition(expr: ir.Expr) -> ir.Expr:
+        while isinstance(expr, ir.Var):
+            value = next((stmt.value for stmt in probe.assignments if stmt.var is expr), None)
+            if value is None:
+                break
+            expr = value
+        return expr
+
+    # Negating INT32_MIN in INT32 would overflow before the atomic delta is
+    # formed. The reset must widen the old value before negation, then narrow.
+    delta = definition(reset.args[3])
+    assert isinstance(delta, ir.Cast)
+    assert isinstance(delta.type, ir.ScalarType) and delta.type.dtype == DataType.INT32
+    negated = definition(delta.operand)
+    assert isinstance(negated, ir.Neg)
+    assert isinstance(negated.type, ir.ScalarType) and negated.type.dtype == DataType.INT64
+    widened = definition(negated.operand)
+    assert isinstance(widened, ir.Cast)
+    assert isinstance(widened.type, ir.ScalarType) and widened.type.dtype == DataType.INT64
+    old_count = definition(widened.operand)
+    assert isinstance(old_count, ir.Call) and old_count.op.name == read_op
+    assert old_count.args[0] is reset.args[0]
+    ir.assert_structural_equal(old_count.args[1], reset.args[2])
+    rank = definition(reset.args[1])
+    assert isinstance(rank, ir.Call) and rank.op.name == ir.get_op("pld.system.rank").name
+
+    invalidations = [call for call in calls if call.op.name == ir.get_op("system.cacheinvalid").name]
+    assert len(invalidations) == 1 and not invalidations[0].args, "invalidate all cached GM reads"
+    waits = [call for call in calls if call.op.name == wait_op]
+    assert _static_wait_expectations(After) == [1, 2]
+    put = next(call for call in calls if call.op.name == ir.get_op("pld.tile.put").name)
+    positions = {id(call): i for i, call in enumerate(calls)}
+    assert (
+        positions[id(invalidations[0])]
+        < positions[id(old_count)]
+        < positions[id(reset)]
+        < positions[id(waits[0])]
+        < positions[id(publish)]
+        < positions[id(put)]
+        < positions[id(waits[1])]
+    )
+    assert all(call.kwargs["op"] == int(pld.NotifyOp.AtomicAdd) for call in count_updates)
+    assert ir.get_op("tensor.write").name not in {call.op.name for call in calls}
+    epilogue = [call for call in calls if call.op.name == notify_op][-1]
+    assert epilogue.kwargs["op"] == int(pld.NotifyOp.AtomicAdd)
+    assert isinstance(epilogue.args[3], ir.ConstInt) and epilogue.args[3].value == -2
 
 
 def test_all_to_all_v_in_host_orchestrator_is_left_for_host_collective_lowering():
@@ -2858,6 +2943,31 @@ def _build_two_all_to_all_program():
     return Before
 
 
+def _build_two_all_to_all_v_program():
+    SIZE = _AAV_SIZE
+    nr = _AAV_NRANKS
+    total = _AAV_TOTAL
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def exchange_twice(
+            self,
+            first: pl.Tensor[[total, SIZE], pl.FP32],
+            second: pl.Tensor[[total, SIZE], pl.FP32],
+            first_counts: pl.Tensor[[nr, 1], pl.INT32],
+            second_counts: pl.Tensor[[nr, 1], pl.INT32],
+            data: pl.InOut[pld.DistributedTensor[[total, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+            recv_counts: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[total, SIZE], pl.FP32]:
+            data = pld.tensor.all_to_all_v(first, data, signal, first_counts, recv_counts)
+            data = pld.tensor.all_to_all_v(second, data, signal, second_counts, recv_counts)
+            return data
+
+    return Before
+
+
 def _build_two_allgather_program():
     SIZE = _PROTOCOL_SIZE
     nr = _PROTOCOL_NRANKS
@@ -2940,20 +3050,32 @@ def _build_two_ring_allreduce_program():
 # One builder per collective, with the wait expectations each back-to-back pair
 # must produce. Every call restarts at generation 1 — the epilogue resets the
 # signal to all-zero at the end of each call — so two calls repeat the same
-# sequence rather than accumulating. reduce_scatter barriers twice per call
-# (ready + post-reduce): [1, 2, 1, 2]. The ring allreduce's arbitrary-length
-# schedule (#2161) barriers twice per subchunk (ready + read-complete); at
+# sequence rather than accumulating. all_to_all_v (count reset + completion)
+# and reduce_scatter (ready + post-reduce) barrier twice per call: [1, 2, 1, 2].
+# The ring allreduce's arbitrary-length schedule (#2161) barriers twice per
+# subchunk (ready + read-complete); at
 # NR=2 there is one reduce-scatter round and one allgather round, each with
 # one subchunk, so one call already produces [1, 2, 1, 2] and two calls repeat
 # it.
 _BACK_TO_BACK_CASES = {
     "barrier": (_build_two_barriers_program, [1, 1]),
     "all_to_all": (_build_two_all_to_all_program, [1, 1]),
+    "all_to_all_v": (_build_two_all_to_all_v_program, [1, 2, 1, 2]),
     "allgather": (_build_two_allgather_program, [1, 1]),
     "broadcast": (_build_two_broadcast_program, [1, 1]),
     "reduce_scatter": (_build_two_reduce_scatter_program, [1, 2, 1, 2]),
     "ring_allreduce": (_build_two_ring_allreduce_program, []),
 }
+
+
+def test_all_to_all_v_two_calls_retire_both_barrier_credits():
+    After = passes.lower_composite_ops()(_build_two_all_to_all_v_program())
+    resets = [
+        call.args[3].value
+        for call in _collect_barrier_calls(After).notifies
+        if isinstance(call.args[3], ir.ConstInt) and call.args[3].value < 0
+    ]
+    assert resets == [-2, -2], "each call must remove both reset and completion credits"
 
 
 @pytest.mark.parametrize("collective", sorted(_BACK_TO_BACK_CASES))

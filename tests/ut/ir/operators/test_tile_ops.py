@@ -4013,14 +4013,23 @@ class TestTileReinterpretViewIR:
         assert isinstance(call.type, ir.TileType)
         assert self._shape_values(call.type) == [32]
 
+    @pytest.mark.parametrize(
+        ("source_dtype", "target_dtype"),
+        [
+            (DataType.UINT8, DataType.FP4E2M1X2),
+            (DataType.INT8, DataType.FP4E2M1X2),
+            (DataType.FP4E2M1X2, DataType.UINT8),
+            (DataType.FP4E2M1X2, DataType.INT8),
+        ],
+    )
     @pytest.mark.parametrize("shape", [None, [32, 256]])
-    def test_fp4_byte_alias_preserves_carrier_geometry(self, shape):
+    def test_fp4_byte_alias_preserves_carrier_geometry(self, source_dtype, target_dtype, shape):
         view = ir.TileView(valid_shape=[16, 128], pad=ir.PadValue.zero)
-        source = self._var([32, 256], DataType.UINT8, view)
-        call = tile.reinterpret_view(source, DataType.FP4E2M1X2, shape=shape)
+        source = self._var([32, 256], source_dtype, view)
+        call = tile.reinterpret_view(source, target_dtype, shape=shape)
 
         assert isinstance(call.type, ir.TileType)
-        assert call.type.dtype == DataType.FP4E2M1X2
+        assert call.type.dtype == target_dtype
         assert self._shape_values(call.type) == [32, 256]
         assert isinstance(source.type, ir.TileType)
         assert source.type.dtype.get_byte() == call.type.dtype.get_byte() == 1
@@ -4030,43 +4039,70 @@ class TestTileReinterpretViewIR:
 
     @pytest.mark.parametrize("shape", [[16, 512], [32, 512], [8192]])
     def test_fp4_byte_alias_rejects_explicit_reshape(self, shape):
-        with pytest.raises(ValueError, match="FP4 byte alias requires the same shape"):
+        with pytest.raises(ValueError, match="FP4E2M1X2 aliases require the same shape"):
             tile.reinterpret_view(self._var([32, 256], DataType.UINT8), DataType.FP4E2M1X2, shape=shape)
 
+    @pytest.mark.parametrize(
+        ("source_dtype", "target_dtype"),
+        [
+            (DataType.UINT8, DataType.FP4E2M1X2),
+            (DataType.INT8, DataType.FP4E2M1X2),
+            (DataType.FP4E2M1X2, DataType.UINT8),
+            (DataType.FP4E2M1X2, DataType.INT8),
+        ],
+    )
     @pytest.mark.parametrize("shape", [[256], [1, 32, 256]])
-    def test_fp4_byte_alias_rejects_non_2d_source(self, shape):
+    def test_fp4_byte_alias_rejects_non_2d_source(self, source_dtype, target_dtype, shape):
         with pytest.raises(ValueError, match="FP4 byte alias requires a 2D row_major tile"):
-            tile.reinterpret_view(self._var(shape, DataType.UINT8), DataType.FP4E2M1X2)
+            tile.reinterpret_view(self._var(shape, source_dtype), target_dtype)
 
-    def test_fp4_byte_alias_rejects_col_major(self):
+    @pytest.mark.parametrize(
+        ("source_dtype", "target_dtype"),
+        [
+            (DataType.UINT8, DataType.FP4E2M1X2),
+            (DataType.INT8, DataType.FP4E2M1X2),
+            (DataType.FP4E2M1X2, DataType.UINT8),
+            (DataType.FP4E2M1X2, DataType.INT8),
+        ],
+    )
+    def test_fp4_byte_alias_rejects_col_major(self, source_dtype, target_dtype):
         view = ir.TileView(blayout=ir.TileLayout.col_major, slayout=ir.TileLayout.none_box)
         with pytest.raises(ValueError, match="FP4 byte alias requires a 2D row_major tile"):
-            tile.reinterpret_view(self._var([32, 256], DataType.UINT8, view), DataType.FP4E2M1X2)
+            tile.reinterpret_view(self._var([32, 256], source_dtype, view), target_dtype)
 
-    def test_fp4_byte_alias_rejects_non_vec_memory(self):
+    @pytest.mark.parametrize(
+        ("source_dtype", "target_dtype"),
+        [
+            (DataType.UINT8, DataType.FP4E2M1X2),
+            (DataType.INT8, DataType.FP4E2M1X2),
+            (DataType.FP4E2M1X2, DataType.UINT8),
+            (DataType.FP4E2M1X2, DataType.INT8),
+        ],
+    )
+    def test_fp4_byte_alias_rejects_non_vec_memory(self, source_dtype, target_dtype):
         source = ir.Var(
             "src",
             ir.TileType(
                 [32, 256],
-                DataType.UINT8,
+                source_dtype,
                 tile_view=ir.TileView(blayout=ir.TileLayout.row_major, slayout=ir.TileLayout.none_box),
                 memory_space=ir.MemorySpace.Mat,
             ),
             ir.Span.unknown(),
         )
         with pytest.raises(ValueError, match="FP4 byte alias requires Vec memory"):
-            tile.reinterpret_view(source, DataType.FP4E2M1X2)
+            tile.reinterpret_view(source, target_dtype)
 
     @pytest.mark.parametrize(
         ("source_dtype", "target_dtype"),
         [
-            (DataType.INT8, DataType.FP4E2M1X2),
-            (DataType.UINT8, DataType.FP4),
-            (DataType.FP4E2M1X2, DataType.UINT8),
+            (DataType.FP16, DataType.FP4E2M1X2),
+            (DataType.FP4E2M1X2, DataType.FP16),
+            (DataType.FP8E4M3FN, DataType.FP4E2M1X2),
         ],
     )
     def test_fp4_byte_alias_rejects_other_dtype_pairs(self, source_dtype, target_dtype):
-        with pytest.raises(ValueError, match="FP4 byte alias only supports UINT8 -> FP4E2M1X2"):
+        with pytest.raises(ValueError, match="FP4E2M1X2 aliases are limited to UINT8/INT8"):
             tile.reinterpret_view(self._var([32, 256], source_dtype), target_dtype)
 
     @pytest.mark.parametrize(
@@ -4082,6 +4118,40 @@ class TestTileReinterpretViewIR:
         assert isinstance(call.type, ir.TileType)
         assert call.type.dtype == target_dtype
         assert self._shape_values(call.type) == [16, 64]
+
+    @pytest.mark.parametrize(
+        ("source_dtype", "target_dtype"),
+        [
+            (DataType.FP4E2M1X2, DataType.UINT8),
+            (DataType.UINT8, DataType.FP4E2M1X2),
+            (DataType.FP4E2M1X2, DataType.INT8),
+            (DataType.INT8, DataType.FP4E2M1X2),
+        ],
+    )
+    def test_fp4e2m1x2_byte_alias_preserves_shape(self, source_dtype, target_dtype):
+        call = tile.reinterpret_view(self._var([4, 64], source_dtype), target_dtype)
+
+        assert isinstance(call.type, ir.TileType)
+        assert call.type.dtype == target_dtype
+        assert self._shape_values(call.type) == [4, 64]
+
+    @pytest.mark.parametrize(
+        ("source_dtype", "target_dtype"),
+        [
+            (DataType.FP4E2M1X2, DataType.UINT8),
+            (DataType.UINT8, DataType.FP4E2M1X2),
+            (DataType.FP4E2M1X2, DataType.INT8),
+            (DataType.INT8, DataType.FP4E2M1X2),
+        ],
+    )
+    @pytest.mark.parametrize("shape", [[2, 128], [256]])
+    def test_fp4e2m1x2_byte_alias_rejects_shape_change(self, source_dtype, target_dtype, shape):
+        with pytest.raises(ValueError, match="FP4E2M1X2 aliases require the same shape"):
+            tile.reinterpret_view(self._var([4, 64], source_dtype), target_dtype, shape=shape)
+
+    def test_rejects_logical_fp4_reinterpret(self):
+        with pytest.raises(ValueError, match="does not support source dtype"):
+            tile.reinterpret_view(self._var([4, 64], DataType.FP4), DataType.UINT8)
 
     @pytest.mark.parametrize("layout", [ir.TileLayout.row_major, ir.TileLayout.col_major])
     def test_complete_mx_scale_byte_alias_preserves_layout(self, layout):
