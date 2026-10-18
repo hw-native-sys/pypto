@@ -106,6 +106,17 @@ inline int GetEmittedSaturationMode(const CallPtr& call) {
   return static_cast<int>(EmittedSaturationModeFor(call->GetKwarg<DataType>("target_type")));
 }
 
+/// A2/A3 emulates these non-saturating conversions with a scratch-backed
+/// vector helper. Keep InitMemRef's explicit level-3 scratch and codegen's
+/// implicit level-2 static-view bridge on the same predicate. The caller must
+/// separately check the backend; A5 uses native conversions for these pairs.
+/// INT4 is deliberately excluded: its saturating vconv path has no tmp operand.
+inline bool NeedsA2A3TcvtScratch(DataType src, DataType dst, int saturation_mode) {
+  if (saturation_mode != static_cast<int>(SaturationMode::kOff)) return false;
+  if (src == DataType::FP32 && dst == DataType::INT16) return true;
+  return src == DataType::FP16 && (dst == DataType::INT16 || dst == DataType::INT8 || dst == DataType::UINT8);
+}
+
 inline bool IsValidSaturationMode(int value) {
   return value == static_cast<int>(SaturationMode::kOff) || value == static_cast<int>(SaturationMode::kOn);
 }

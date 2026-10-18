@@ -197,17 +197,6 @@ constexpr int64_t kTcvtScratchAlignBytes = 32;
 
 int64_t CeilDivI64(int64_t num, int64_t den) { return (num + den - 1) / den; }
 
-/// Non-saturating A2/A3 pto.tcvt forms whose ISA implementation needs a tmp.
-/// Mirrors PTOAS v0.60 `makeTCvtTmpType` for FP32->INT16 and FP16->{INT16,INT8,UINT8}.
-///
-/// Excludes INT4: pto-isa routes FP16<->INT4 through saturating `vconv_f162s4*`
-/// without a TmpTileData operand (`kIsNarrowingCvt` does not cover int4). PTOAS
-/// level3 therefore does not require an explicit tcvt tmp for those casts.
-bool TcvtNeedsLevel3Scratch(DataType src, DataType dst) {
-  if (src == DataType::FP32 && dst == DataType::INT16) return true;
-  return src == DataType::FP16 && (dst == DataType::INT16 || dst == DataType::INT8 || dst == DataType::UINT8);
-}
-
 /// Match PTOAS v0.60's makeTCvtTmpType capacity calculation. The returned byte
 /// count is represented as an i8 scratch tile so the shape is also its capacity.
 int64_t TcvtScratchCapacityBytes(const TileTypePtr& src_tile, DataType dst, const Span& span) {
@@ -320,18 +309,9 @@ class MaterializePtoLevel3ScratchMutator : public IRMutator {
       auto src_type = As<TileType>(call->args_[0]->GetType());
       INTERNAL_CHECK_SPAN(src_type, span) << "tile.cast source must be TileType before InitMemRef";
       const DataType dst = call->GetKwarg<DataType>("target_type");
-      if (!TcvtNeedsLevel3Scratch(src_type->dtype_, dst)) return std::nullopt;
-      // The scratch exists only for PTOAS's *non-saturating* narrowing helper,
-      // which emulates the target's overflow behavior with a chunked vector
-      // sequence. A saturating cast is a native conversion that takes no tmp, so
-      // synthesizing one would allocate Vec memory the emitted `pto.tcvt` never
-      // reads. Every pair reaching here narrows to an integer, whose default is
-      // saturating, so only a cast that explicitly opted out needs the buffer. A
-      // caller-supplied tmp is untouched either way: this arm only runs for the
-      // 1-argument form.
-      if (GetSaturationMode(call) != static_cast<int>(SaturationMode::kOff)) {
-        return std::nullopt;
-      }
+      // Saturating/native casts need no scratch. Explicit caller-provided
+      // scratch is preserved because this arm only handles one-argument casts.
+      if (!NeedsA2A3TcvtScratch(src_type->dtype_, dst, GetEmittedSaturationMode(call))) return std::nullopt;
       const int64_t bytes = TcvtScratchCapacityBytes(src_type, dst, span);
       return PtoScratchSpec{MakeStaticShape({1, bytes}, span), DataType::INT8, "tcvt"};
     }

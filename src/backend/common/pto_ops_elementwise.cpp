@@ -426,9 +426,10 @@ static std::string MakePrecisionCodegenPTO(const std::string& pto_op_name, size_
   return "";
 }
 
-// The level3 explicit-tmp form verifies tcvt scratch against src capacity and
-// dst valid_shape. alloc_tile types keep v_row=?, v_col=?, so bridge to
-// static-valid views the same way tprelu / tcolsum do.
+// A2/A3 scratch-backed tcvt requires static validity in both forms: level3
+// verifies an explicit tmp, while level2 sizes an implicit tmp in PlanMemory.
+// alloc_tile types keep v_row=?, v_col=?, so bridge src/dst without changing
+// their allocation handles or allocating scratch on behalf of level2.
 //
 // Both forms carry the same config attr-dict, so the rounding mode and the
 // destination saturation are rendered once, before the form splits. `satmode` is
@@ -485,24 +486,32 @@ static std::string MakeTcvtCodegenPTO(const CallPtr& op, codegen::CodegenBase& c
   config_attr += ", satmode = #pto<saturation_mode " + ir::SaturationModeToPTOString(saturation_mode) + ">";
   config_attr += "}";
 
-  if (op->args_.size() == 2 && codegen.GetBackendHandler()->RequiresLevel3TmpScratch()) {
-    auto src_type = ir::As<ir::TileType>(op->args_[0]->GetType());
-    auto tmp_type = ir::As<ir::TileType>(op->args_[1]->GetType());
+  auto src_type = ir::As<ir::TileType>(op->args_[0]->GetType());
+  INTERNAL_CHECK_SPAN(src_type, op->span_) << "Internal error: tile.cast source must be TileType";
+  const bool explicit_tmp = op->args_.size() == 2;
+  const bool needs_static_views =
+      codegen.GetBackendHandler()->RequiresLevel3TmpScratch() &&
+      (explicit_tmp ||
+       ir::NeedsA2A3TcvtScratch(src_type->dtype_, op->GetKwarg<DataType>("target_type"), saturation_mode));
+  if (needs_static_views) {
     auto dst_var = codegen.GetCurrentResultVar();
     auto dst_type = dst_var ? ir::As<ir::TileType>(dst_var->GetType()) : nullptr;
-    INTERNAL_CHECK(src_type && tmp_type && dst_type);
+    INTERNAL_CHECK_SPAN(dst_type, op->span_) << "Internal error: tile.cast result must be TileType";
     RequireStaticValidShapeForPtoas(src_type, "tile.cast", "src", op->span_);
-    RequireStaticValidShapeForPtoas(tmp_type, "tile.cast", "tmp", op->args_[1]->span_);
     RequireStaticValidShapeForPtoas(dst_type, "tile.cast", "dst", op->span_);
 
     const std::string src_ssa = EnsureStaticViewTileSsa(op->args_[0], codegen, "tcvt_src_view");
-    const std::string tmp_ssa = EnsureStaticViewTileSsa(op->args_[1], codegen, "tcvt_tmp_view");
+    std::vector<std::pair<std::string, std::string>> ins = {
+        {src_ssa, GetTileViewTypeAnnotation(op->args_[0], codegen)}};
+    if (explicit_tmp) {
+      auto tmp_type = ir::As<ir::TileType>(op->args_[1]->GetType());
+      INTERNAL_CHECK_SPAN(tmp_type, op->span_) << "Internal error: tile.cast tmp must be TileType";
+      RequireStaticValidShapeForPtoas(tmp_type, "tile.cast", "tmp", op->args_[1]->span_);
+      const std::string tmp_ssa = EnsureStaticViewTileSsa(op->args_[1], codegen, "tcvt_tmp_view");
+      ins.emplace_back(tmp_ssa, GetTileViewTypeAnnotation(op->args_[1], codegen));
+    }
     const std::string dst_ssa = EnsureStaticViewTileSsa(dst_var, codegen, "tcvt_dst_view");
-
-    EmitInsOutsWithViewTypes(codegen, "pto.tcvt",
-                             {{src_ssa, GetTileViewTypeAnnotation(op->args_[0], codegen)},
-                              {tmp_ssa, GetTileViewTypeAnnotation(op->args_[1], codegen)}},
-                             dst_ssa, dst_type, config_attr);
+    EmitInsOutsWithViewTypes(codegen, "pto.tcvt", ins, dst_ssa, dst_type, config_attr);
     return "";
   }
   codegen.Emit("pto.tcvt " + GenerateInsOutsClause(op, codegen, config_attr));

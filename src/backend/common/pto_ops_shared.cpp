@@ -389,7 +389,7 @@ void RequireStaticValidShapeForPtoas(const std::shared_ptr<const ir::TileType>& 
                                      std::string_view op_name, std::string_view role, const ir::Span& span) {
   CHECK_SPAN(HasStaticValidShape(tile_type), span)
       << op_name << " on A2/A3 requires compile-time static valid_shape on " << role
-      << " for PTOAS level3 tmp verification";
+      << " for PTOAS scratch sizing or verification";
 }
 
 std::string GetTileViewTypeAnnotation(const ir::ExprPtr& expr, codegen::PTOCodegen& codegen) {

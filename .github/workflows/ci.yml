@@ -2440,6 +2440,12 @@ jobs:
         # submodule is bumped past simpler #806. Re-enable once that lands.
         run: pytest tests/st/runtime/ops/test_assemble.py tests/st/runtime/ops/test_gather.py tests/st/runtime/ops/test_gatherb.py tests/st/runtime/ops/test_mscatter.py tests/st/runtime/ops/test_prelu.py tests/st/runtime/ops/test_random.py tests/st/runtime/ops/test_sels.py tests/st/runtime/ops/test_tri.py tests/st/runtime/framework_and_models/test_qwen3_decode_scope3_mixed.py tests/st/runtime/control_flow/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --platform=a5sim --forked -k "not TestMscatter"
 
+      - name: Test cast scratch planning and A2A3 numerical results
+        # This job installs PTOAS, so the codegen matrix also assembles both backends.
+        run: |
+          pytest tests/ut/codegen/test_ptoas_planner_views.py -v -k "tcvt_"
+          pytest tests/st/runtime/ops/test_cast_saturation.py -v --forked --platform=a2a3sim
+
       - name: Test A5 cross-core system tests (simulator)
         run: pytest tests/st/runtime/cross_core/test_cross_core.py -v --forked --platform=a5sim
 

@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Device tests for ``saturation_mode`` on the FP16 -> INT8 cast.
+"""Device tests for cast saturation and A2/A3 scratch planning.
 
 FP16 -> INT8 is the pair the A2/A3 assembler lowers two different ways: without
 saturation it emulates the target's overflow behavior with a chunked vector
@@ -26,14 +26,15 @@ below split accordingly:
                    by a test.
 
 Non-finite inputs (NaN / Inf) are not covered: neither mode defines them.
+The planner matrix additionally covers all four scratch-backed conversions,
+checking exact finite results and preserved output outside partial tiles.
 """
-
-from typing import Any
 
 import pypto.language as pl
 import pytest
 import torch
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from harness import st
+from pypto.pypto_core.passes import MemoryPlanner
 
 N = 128
 
@@ -135,107 +136,115 @@ def _cast_multihop_on_program(
     return _cast_multihop_on_kernel(src, out)
 
 
-class CastMultiHopSaturationCase(PTOTestCase):
-    """FP32 -> INT8 with ON, which reaches the destination through an FP16 hop."""
-
-    __test__ = False
-
-    def __init__(self, *, values: list[float], tag: str):
-        super().__init__(platform="a2a3")
-        self.values = values
-        self.tag = tag
-
-    def get_name(self) -> str:
-        return f"cast_saturation_multihop_on_{self.tag}"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        values = self.values
-
-        def _src() -> torch.Tensor:
-            repeats = (N + len(values) - 1) // len(values)
-            return torch.tensor((values * repeats)[:N], dtype=torch.float32).reshape(1, N)
-
-        return [
-            TensorSpec("src", [1, N], DataType.FP32, init_value=_src),
-            TensorSpec("out", [1, N], DataType.INT8, init_value=torch.zeros, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return _cast_multihop_on_program.specialize()
-
-    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
-        # Every value here is exactly representable in FP16, so the widening hop
-        # is lossless and only the final INT8 hop rounds and clamps.
-        truncated = torch.trunc(tensors["src"].to(torch.float32))
-        tensors["out"][:] = torch.clamp(truncated, -128.0, 127.0).to(torch.int8)
-
-
-class CastSaturationCase(PTOTestCase):
-    """One FP16 -> INT8 cast at one saturation mode over one input set."""
-
-    __test__ = False
-
-    def __init__(self, *, saturation_mode: str | None, values: list[float], tag: str):
-        super().__init__(platform="a2a3")
-        self.saturation_mode = saturation_mode
-        self.values = values
-        self.tag = tag
-
-    def get_name(self) -> str:
-        return f"cast_saturation_{self.saturation_mode or 'default'}_{self.tag}"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("src", [1, N], DataType.FP16, init_value=lambda: _tile(self.values)),
-            TensorSpec("out", [1, N], DataType.INT8, init_value=torch.zeros, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        if self.saturation_mode == "on_explicit_tmp":
-            return _cast_on_explicit_tmp_program.specialize()
-        return _make_program(self.saturation_mode).specialize()
-
-    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
-        truncated = torch.trunc(tensors["src"].to(torch.float32))
-        # Every value in the in-range set already lies inside [-128, 127], so the
-        # clamp is a no-op there and this one expression serves both case shapes.
-        tensors["out"][:] = torch.clamp(truncated, -128.0, 127.0).to(torch.int8)
-
-
-class TestCastSaturation:
-    """FP16 -> INT8 saturation behavior on Ascend 910B."""
-
-    @pytest.mark.parametrize(
-        "saturation_mode",
-        ["on", "on_explicit_tmp", "off", None],
-        ids=["on", "on-explicit-tmp", "off", "default"],
-    )
-    def test_in_range_values_agree_across_modes(self, test_runner, saturation_mode):
-        """Every mode -- including ON with a caller-supplied tmp -- agrees on representable inputs."""
-        result = test_runner.run(
-            CastSaturationCase(saturation_mode=saturation_mode, values=_IN_RANGE, tag="in_range")
+def _saturation_cases():
+    for mode in ("on", "on_explicit_tmp", "off", None):
+        kernel = _cast_on_explicit_tmp_program if mode == "on_explicit_tmp" else _make_program(mode)
+        yield st.case(
+            kernel,
+            _tile(_IN_RANGE),
+            torch.zeros(1, N, dtype=torch.int8),
+            name=f"cast_saturation_{mode or 'default'}_in_range",
+            golden=_saturating_golden,
+            rtol=0,
+            atol=0,
         )
-        assert result.passed, f"in-range cast failed for saturation_mode={saturation_mode}: {result.error}"
-
-    @pytest.mark.parametrize("saturation_mode", ["on", None], ids=["explicit-on", "default"])
-    def test_saturation_clamps_out_of_range_values(self, test_runner, saturation_mode):
-        """Clamping to the INT8 endpoints holds up to the FP16 extrema -- and is the default.
-
-        Running the defaulted kernel through the same expectation is what pins
-        ``"on"`` as the default on hardware, rather than only in the IR.
-        """
-        result = test_runner.run(
-            CastSaturationCase(saturation_mode=saturation_mode, values=_OVERFLOW, tag="overflow")
+    for mode in ("on", None):
+        yield st.case(
+            _make_program(mode),
+            _tile(_OVERFLOW),
+            torch.zeros(1, N, dtype=torch.int8),
+            name=f"cast_saturation_{mode or 'default'}_overflow",
+            golden=_saturating_golden,
+            rtol=0,
+            atol=0,
         )
-        assert result.passed, f"saturating cast failed to clamp: {result.error}"
+    for values, tag in ((_IN_RANGE, "in_range"), (_OVERFLOW, "overflow")):
+        # Construct FP32 inputs directly: casting the FP16 fixture would hide
+        # rounding on the first hop of the FP32 -> FP16 -> INT8 legalization.
+        src = torch.tensor(
+            (values * ((N + len(values) - 1) // len(values)))[:N], dtype=torch.float32
+        ).reshape(1, N)
+        yield st.case(
+            _cast_multihop_on_program,
+            src,
+            torch.zeros(1, N, dtype=torch.int8),
+            name=f"cast_saturation_multihop_on_{tag}",
+            golden=_saturating_golden,
+            rtol=0,
+            atol=0,
+        )
 
-    @pytest.mark.parametrize(
-        "values, tag", [(_IN_RANGE, "in_range"), (_OVERFLOW, "overflow")], ids=["in-range", "overflow"]
-    )
-    def test_multi_hop_cast_saturates_on_its_final_hop(self, test_runner, values, tag):
-        """FP32 -> INT8 goes through FP16, and the requested clamp still applies at the end."""
-        result = test_runner.run(CastMultiHopSaturationCase(values=values, tag=tag))
-        assert result.passed, f"multi-hop saturating cast failed: {result.error}"
+
+def _saturating_golden(tensors):
+    return torch.clamp(torch.trunc(tensors["src"].float()), -128, 127).to(torch.int8)
+
+
+@pytest.mark.platforms("a2a3", "a2a3sim")
+@st.cases(*_saturation_cases())
+def test_cast_saturation(case_run):
+    """Preserve all eight original saturation cases through the shared JIT harness."""
+    case_run.assert_passed()
+
+
+def _make_planner_cast(dst_dtype, rows, valid_rows, valid_cols):
+    @pl.jit
+    def cast_program(src: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            tile = pl.load(src, [0, 0], [rows, N], valid_shape=[valid_rows, valid_cols])
+            converted = pl.cast(tile, dst_dtype, mode="trunc", saturation_mode="off")
+            pl.store(converted, [0, 0], out)
+        return out
+
+    return cast_program
+
+
+def _planner_cases():
+    for src_dtype, dst_dtype, torch_src, torch_dst in (
+        (pl.FP32, pl.INT16, torch.float32, torch.int16),
+        (pl.FP16, pl.INT16, torch.float16, torch.int16),
+        (pl.FP16, pl.INT8, torch.float16, torch.int8),
+        (pl.FP16, pl.UINT8, torch.float16, torch.uint8),
+    ):
+        for rows, valid_rows, valid_cols in ((1, 1, N), (4, 3, 96)):
+            # OFF is only specified here for finite, in-range values. Fractional
+            # values verify truncation, while the 77 sentinel detects writes
+            # outside the partial tile's valid rectangle.
+            if torch_dst == torch.uint8:
+                values = [0.0, 0.5, 1.5, 127.5, 128.5, 254.5, 255.5]
+            elif torch_dst == torch.int16:
+                # 32752 is the largest FP16 value below INT16's upper bound.
+                values = _IN_RANGE + [-32768.0, -32752.0, -1024.5, 1024.5, 32752.0]
+            else:
+                values = _IN_RANGE
+            count = rows * N
+            src = torch.tensor(
+                (values * ((count + len(values) - 1) // len(values)))[:count], dtype=torch_src
+            ).reshape(rows, N)
+            expected = torch.full((rows, N), 77, dtype=torch_dst)
+            expected[:valid_rows, :valid_cols] = torch.trunc(src[:valid_rows, :valid_cols].float()).to(
+                torch_dst
+            )
+            for planner in MemoryPlanner:
+                yield st.case(
+                    _make_planner_cast(dst_dtype, rows, valid_rows, valid_cols),
+                    src,
+                    torch.full((rows, N), 77, dtype=torch_dst),
+                    name=f"cast_scratch_{src_dtype}_{dst_dtype}_{valid_rows}x{valid_cols}_{planner.name}",
+                    memory_planner=planner,
+                    # Exercise tile.cast's static-view bridge even if Buffer IR
+                    # gains support for these conversions in the future.
+                    enable_buffer_ir=False,
+                    golden=lambda _tensors, expected=expected: expected,
+                    rtol=0,
+                    atol=0,
+                )
+
+
+@pytest.mark.platforms("a2a3", "a2a3sim")
+@st.cases(*_planner_cases())
+def test_cast_scratch_across_planners(case_run):
+    """Implicit PTOAS scratch must produce the same exact values as explicit scratch."""
+    case_run.assert_passed()
 
 
 if __name__ == "__main__":

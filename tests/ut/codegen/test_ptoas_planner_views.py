@@ -10,7 +10,7 @@
 """PTO codegen under memory_planner=PTOAS: reserved buffers and view def/use types.
 
 With the PTOAS planner, `MemoryReuse` + `AllocateMemoryAddr` are skipped and ptoas
-`PlanMemory` owns on-chip placement (--pto-level=level2). Two things that the
+`PlanMemory` owns on-chip placement (--pto-level=level2). Contracts that the
 default PyPTO planner hides then have to be emitted correctly:
 
 * `system.reserve_buffer(base=AUTO)` never gets a resolved base, so PTO must emit
@@ -18,6 +18,8 @@ default PyPTO planner hides then have to be emitted correctly:
 * A view chain (`tile.slice` -> `tile.reshape`) no longer folds into per-variable
   `pto.alloc_tile` re-views at one baked address, so it survives as a real
   `pto.subview` + `pto.treshape` pair whose def/use type strings must agree.
+* Scratch-backed A2/A3 casts need static-valid views even when PlanMemory
+  materializes the scratch implicitly from a one-input `pto.tcvt`.
 """
 
 import re
@@ -954,6 +956,107 @@ def test_fillpad_same_mode_after_validshape_update(tmp_path: Path, backend_type:
     assert f"ins({second_dst[1]} : {dst_type})" in _sole_line(mlir, "pto.tstore"), mlir
     assert mlir.count("= pto.alloc_tile") == 1, mlir
     _compile_fillpad(mlir, tmp_path, passes.MemoryPlanner.PTOAS)
+
+
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950], ids=["a2a3", "a5"])
+@pytest.mark.parametrize("planner", list(passes.MemoryPlanner), ids=lambda planner: planner.name)
+@pytest.mark.parametrize(
+    "src_dtype,dst_dtype",
+    [(pl.FP32, pl.INT16), (pl.FP16, pl.INT16), (pl.FP16, pl.INT8), (pl.FP16, pl.UINT8)],
+    ids=["f32-i16", "f16-i16", "f16-i8", "f16-u8"],
+)
+@pytest.mark.parametrize("saturation_mode", ["off", "on"])
+@pytest.mark.parametrize("rows,valid_rows,valid_cols", [(1, 1, 128), (4, 3, 96)], ids=["full", "partial"])
+def test_tcvt_planner_scratch_views(
+    tmp_path, backend_type, planner, src_dtype, dst_dtype, saturation_mode, rows, valid_rows, valid_cols
+):
+    """Implicit scratch needs the same static validity as explicit level-3 scratch.
+
+    The original regression is the full f16-i8/OFF case on A2/A3 with PTOAS.
+    Partial tiles distinguish actual validity from physical capacity; neither
+    padding nor a larger physical extent may become input to the conversion.
+    """
+
+    @pl.program
+    class CastProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self, src: pl.Tensor[[rows, 128], src_dtype], out: pl.Out[pl.Tensor[[rows, 128], dst_dtype]]
+        ):
+            tile = pl.load(src, [0, 0], [rows, 128], valid_shape=[valid_rows, valid_cols])
+            converted = pl.cast(tile, dst_dtype, mode="trunc", saturation_mode=saturation_mode)
+            return pl.store(converted, [0, 0], out)
+
+    native = find_ptoas_binary() is not None
+    with passes.PassContext([], memory_planner=planner):
+        _ir.compile(
+            CastProgram,
+            output_dir=str(tmp_path),
+            backend_type=backend_type,
+            skip_ptoas=not native,
+            dump_passes=False,
+        )
+    mlir = (tmp_path / "ptoas/kernel.pto").read_text()
+    tcvt = _sole_line(mlir, "pto.tcvt")
+    needs_scratch = backend_type == BackendType.Ascend910B and saturation_mode == "off"
+    explicit = needs_scratch and planner != passes.MemoryPlanner.PTOAS
+    assert ("tcvt_tmp_view" in tcvt) == explicit, tcvt
+    assert ("tcvt_src_view" in tcvt) == needs_scratch, tcvt
+    assert mlir.count("pto.alloc_tile") == (3 if explicit else 2), mlir
+    assert (" addr = " in mlir) == (planner != passes.MemoryPlanner.PTOAS), mlir
+    if needs_scratch:
+        assert "v_row=?" not in tcvt and "v_col=?" not in tcvt, tcvt
+        types = _tile_buf_types(tcvt)
+        for tile_type in (types[0], types[-1]):
+            assert f"v_row={valid_rows}, v_col={valid_cols}" in tile_type, tcvt
+    if native:
+        assert "TCVT(" in (tmp_path / "ptoas/kernel.cpp").read_text()
+
+
+@pytest.mark.parametrize(
+    "backend_type,dst_dtype,saturation_mode",
+    [
+        (BackendType.Ascend910B, pl.INT8, "on"),
+        (BackendType.Ascend910B, pl.FP32, "off"),
+        (BackendType.Ascend950, pl.INT8, "off"),
+        (BackendType.Ascend910B, pl.INT8, "off"),
+    ],
+    ids=["a2a3-saturating", "a2a3-widening", "a5-nonsaturating", "a2a3-scratch"],
+)
+def test_tcvt_dynamic_validity_contract(tmp_path, backend_type, dst_dtype, saturation_mode):
+    """Casts without A2/A3 scratch must not acquire a static-validity restriction."""
+
+    @pl.program
+    class DynamicCast:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            src: pl.Tensor[[4, 128], pl.FP16],
+            out: pl.Out[pl.Tensor[[4, 128], dst_dtype]],
+            cols: pl.Scalar[pl.INDEX],
+        ):
+            tile = pl.load(src, [0, 0], [4, 128], valid_shape=[4, cols])
+            converted = pl.cast(tile, dst_dtype, mode="trunc", saturation_mode=saturation_mode)
+            return pl.store(converted, [0, 0], out)
+
+    if backend_type == BackendType.Ascend910B and dst_dtype == pl.INT8 and saturation_mode == "off":
+        # Runtime validity cannot size A2/A3's implicit scratch. Fail at the
+        # source cast with a useful diagnostic, rather than inside PTOAS.
+        with pytest.raises(ValueError, match="requires compile-time static valid_shape"):
+            _emit_pto(DynamicCast, passes.MemoryPlanner.PTOAS)
+        return
+
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+        _ir.compile(
+            DynamicCast,
+            output_dir=str(tmp_path),
+            backend_type=backend_type,
+            skip_ptoas=find_ptoas_binary() is None,
+            dump_passes=False,
+        )
+    mlir = (tmp_path / "ptoas/kernel.pto").read_text()
+    tcvt = _sole_line(mlir, "pto.tcvt")
+    assert "v_col=?" in tcvt and "tcvt_src_view" not in tcvt, tcvt
 
 
 if __name__ == "__main__":

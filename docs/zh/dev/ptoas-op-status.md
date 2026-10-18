@@ -64,6 +64,23 @@ python -m pytest tests/st/runtime/ops/test_fillpad_inplace.py --memory-planner=p
 它们为编译看护补充模拟器数值覆盖，
 并不代表编译测试中的所有视图组合都已验证设备执行正确性。
 
+## Cast 临时空间规划
+
+在 A2/A3 上，非饱和的 FP32 -> INT16 和 FP16 -> INT16/INT8/UINT8 转换
+需要临时空间（scratch）。PyPTO 和 DSA-RP 在 `InitMemRef` 中为 PTOAS level 3
+生成显式临时空间。使用 PTOAS planner 时，由 level 2 负责分配；codegen 提供
+具有静态有效范围的输入、输出 reshape 视图，并保留单输入的 `pto.tcvt` 形式。
+这些视图共享原有缓冲区，保留实际有效形状，包括部分有效的 tile。
+
+只有依赖临时空间的转换（或 A2/A3 上显式传入 tmp 的转换）要求静态有效范围。
+原生饱和转换、其他原生转换及 A5 转换保留原有的动态有效范围行为。
+A2/A3 上依赖临时空间的转换仍不支持运行时有效范围，会在调用 PTOAS 前给出诊断。
+
+`tests/ut/codegen/test_ptoas_planner_views.py` 覆盖四组类型转换、两种饱和模式、
+两种后端、三种 planner，以及完整和部分有效的 tile；安装 PTOAS 时还会实际编译。
+CI 在 A2/A3 模拟器上运行 `tests/st/runtime/ops/test_cast_saturation.py`，
+对比不同 planner 的精确数值结果，并验证部分写回保留有效矩形之外的输出元素。
+
 ## 图例
 
 - **级别**：PyPTO 注册/生成层级（tile / tensor / tile+tensor / comm / internal）。

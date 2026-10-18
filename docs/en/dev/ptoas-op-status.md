@@ -83,6 +83,27 @@ complements the compilation guard with simulator numerical coverage; it does not
 establish on-device correctness for every view
 composition covered by the compilation tests.
 
+## Cast Scratch Planning
+
+On A2/A3, non-saturating FP32 -> INT16 and FP16 -> INT16/INT8/UINT8 casts
+need scratch storage. PyPTO and DSA-RP materialize it in `InitMemRef` for PTOAS
+level 3. With the PTOAS planner, level 2 owns that allocation: codegen supplies
+static-valid source/destination reshape views while keeping the one-input
+`pto.tcvt` form. These views alias the existing buffers and preserve the actual
+valid shape, including partial tiles.
+
+Only scratch-backed casts (or an explicit tmp on A2/A3) require static validity.
+Native saturating casts, other native conversions, and A5 casts retain their
+existing dynamic-validity behavior. Runtime validity on an A2/A3 scratch-backed
+cast remains unsupported and is diagnosed before invoking PTOAS.
+
+`tests/ut/codegen/test_ptoas_planner_views.py` checks all four conversion pairs,
+both saturation modes, both backends, all three planners, and full/partial tiles;
+it also invokes native PTOAS compilation when installed. CI runs
+`tests/st/runtime/ops/test_cast_saturation.py` on the A2/A3 simulator to compare
+exact numerical results across planners and verify that partial stores preserve
+output elements outside the valid rectangle.
+
 ## Legend
 
 - **Level**: PyPTO registration/generation level (tile / tensor / tile+tensor / comm /
