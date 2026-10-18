@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -178,29 +179,100 @@ struct VarLineage {
   TypePtr returned_type;
 };
 using VarRootMap = std::unordered_map<const Var*, VarLineage>;
+using TupleSourceMap = std::unordered_map<const Expr*, ExprPtr>;
+
+struct LineageMemo {
+  VarRootMap var_roots;
+  std::unordered_map<const Expr*, VarLineage> expr_roots;
+  TupleSourceMap tuple_sources;
+};
+
+ExprPtr ResolveTupleSource(ExprPtr expr, const BodyIndexCollector& index, const ProgramPtr& program,
+                           TupleSourceMap& memo);
+
+// Select an original expression, rather than inventing an SSA binding. This
+// lets direct projections and assigned projections share the same lineage.
+ExprPtr ResolveTupleElement(const ExprPtr& tuple, int64_t position, const BodyIndexCollector& index,
+                            const ProgramPtr& program, TupleSourceMap& memo) {
+  if (position < 0) return nullptr;
+  auto source = ResolveTupleSource(tuple, index, program, memo);
+  if (!source) return nullptr;
+  size_t pos = static_cast<size_t>(position);
+  if (auto make_tuple = As<MakeTuple>(source)) {
+    return pos < make_tuple->elements_.size() ? make_tuple->elements_[pos] : nullptr;
+  }
+
+  auto call = AsCallOrSubmitView(source);
+  if (!call || IsBuiltinOp(call->op_->name_)) return nullptr;
+  auto callee = program ? program->GetFunction(call->op_->name_) : nullptr;
+  if (!callee) return nullptr;
+  // A single TupleType return has one return position, not one position per
+  // tuple element. Its nested element ABI is outside the flat return map.
+  if (callee->return_types_.size() == 1 && As<TupleType>(callee->return_types_[0])) return nullptr;
+  const auto& ret_map = CachedReturnedParamIndices(callee, program);
+  if (pos >= ret_map.size() || !ret_map[pos]) return nullptr;
+  size_t mapped = ret_map[pos].value();  // NOLINT(bugprone-unchecked-optional-access)
+  return mapped < call->args_.size() ? call->args_[mapped] : nullptr;
+}
+
+// Tuple aliases and nested projections can share arbitrarily long prefixes.
+// Compress each source chain once, including failures and provisional cycle
+// entries, so querying many projections never rescans their common prefix.
+ExprPtr ResolveTupleSource(ExprPtr expr, const BodyIndexCollector& index, const ProgramPtr& program,
+                           TupleSourceMap& memo) {
+  std::vector<const Expr*> path;
+  auto finish = [&](const ExprPtr& source) {
+    for (const auto* item : path) memo[item] = source;
+    return source;
+  };
+  while (expr) {
+    if (auto it = memo.find(expr.get()); it != memo.end()) {
+      return finish(it->second);
+    }
+    memo.emplace(expr.get(), nullptr);
+    path.push_back(expr.get());
+    if (auto var = AsVarLike(expr)) {
+      auto def = index.var_def.find(var.get());
+      if (def == index.var_def.end()) return finish(nullptr);
+      expr = def->second->value_;
+    } else if (auto projection = As<TupleGetItemExpr>(expr)) {
+      expr = ResolveTupleElement(projection->tuple_, projection->index_, index, program, memo);
+    } else {
+      // Cache Submit's Call view once; rebuilding it for every projection
+      // would repeatedly copy the complete argument vector.
+      if (auto submit = As<Submit>(expr)) return finish(SubmitToCallView(submit));
+      return finish(expr);
+    }
+  }
+  return finish(nullptr);
+}
+
+VarLineage TraceExpr(const ExprPtr& expr, const BodyIndexCollector& index, const ParamIndexMap& param_indices,
+                     const ProgramPtr& program, LineageMemo& memo);
 
 // Trace each body var once, caching both roots and failures across branch arms
 // and return values. A provisional empty lineage stops cycles without copying
 // the active path at every merge. Alias chains remain iterative.
 VarLineage TraceVar(const Var* var, const BodyIndexCollector& index, const ParamIndexMap& param_indices,
-                    const ProgramPtr& program, VarRootMap& memo) {
+                    const ProgramPtr& program, LineageMemo& memo) {
   // Aliases and validated user calls forward their source type. Builtin
   // writebacks retain their own final type, allowing intermediate narrowing
   // followed by restoration without poisoning the cached storage lineage.
+  auto& roots = memo.var_roots;
   std::vector<std::pair<const Var*, bool>> path;
   auto finish = [&](const Var* root, TypePtr returned_type = nullptr) {
     VarLineage lineage{root, std::move(returned_type)};
     for (auto it = path.rbegin(); it != path.rend(); ++it) {
       if (!it->second) lineage.returned_type = it->first->GetType();
-      memo[it->first] = lineage;
+      roots[it->first] = lineage;
     }
     return lineage;
   };
   while (var) {
-    if (auto it = memo.find(var); it != memo.end()) {
+    if (auto it = roots.find(var); it != roots.end()) {
       return finish(it->second.root, it->second.returned_type);
     }
-    memo.emplace(var, VarLineage{});
+    roots.emplace(var, VarLineage{});
     path.emplace_back(var, false);
     if (param_indices.count(var)) return finish(var);
 
@@ -239,27 +311,16 @@ VarLineage TraceVar(const Var* var, const BodyIndexCollector& index, const Param
       continue;
     }
 
-    if (auto tuple_get = As<TupleGetItemExpr>(value)) {
-      // Tuple destructuring of a user call: resolve via the callee's own
-      // returned-param map, then continue from the corresponding arg var.
-      auto tuple_var = AsVarLike(tuple_get->tuple_);
-      if (!tuple_var) return finish(nullptr);
-      auto tuple_def = index.var_def.find(tuple_var.get());
-      if (tuple_def == index.var_def.end()) return finish(nullptr);
-      auto call = AsCallOrSubmitView(tuple_def->second->value_);
-      if (!call || IsBuiltinOp(call->op_->name_)) return finish(nullptr);
-      auto callee = program ? program->GetFunction(call->op_->name_) : nullptr;
-      if (!callee) return finish(nullptr);
-      const auto& ret_map = CachedReturnedParamIndices(callee, program);
-      size_t pos = static_cast<size_t>(tuple_get->index_);
-      if (tuple_get->index_ < 0 || pos >= ret_map.size() || !ret_map[pos]) return finish(nullptr);
-      size_t mapped = ret_map[pos].value();  // NOLINT(bugprone-unchecked-optional-access)
-      if (mapped >= call->args_.size()) return finish(nullptr);
-      auto arg_var = AsVarLike(call->args_[mapped]);
-      if (!arg_var) return finish(nullptr);
+    if (auto projection = As<TupleGetItemExpr>(value)) {
       path.back().second = true;
-      var = arg_var.get();
-      continue;
+      auto selected =
+          ResolveTupleElement(projection->tuple_, projection->index_, index, program, memo.tuple_sources);
+      if (auto source_var = AsVarLike(selected)) {
+        var = source_var.get();
+        continue;
+      }
+      auto lineage = TraceExpr(selected, index, param_indices, program, memo);
+      return finish(lineage.root, lineage.returned_type);
     }
 
     if (auto call = AsCallOrSubmitView(value)) {
@@ -268,7 +329,10 @@ VarLineage TraceVar(const Var* var, const BodyIndexCollector& index, const Param
       // the result inherits that argument's param lineage.
       if (auto aliased = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size())) {
         auto arg_var = AsVarLike(call->args_[*aliased]);
-        if (!arg_var) return finish(nullptr);
+        if (!arg_var) {
+          auto lineage = TraceExpr(call->args_[*aliased], index, param_indices, program, memo);
+          return finish(lineage.root, lineage.returned_type);
+        }
         var = arg_var.get();
         continue;
       }
@@ -298,8 +362,11 @@ VarLineage TraceVar(const Var* var, const BodyIndexCollector& index, const Param
         size_t mapped = ret_map[0].value();  // NOLINT(bugprone-unchecked-optional-access)
         if (mapped >= call->args_.size()) return finish(nullptr);
         auto arg_var = AsVarLike(call->args_[mapped]);
-        if (!arg_var) return finish(nullptr);
         path.back().second = true;
+        if (!arg_var) {
+          auto lineage = TraceExpr(call->args_[mapped], index, param_indices, program, memo);
+          return finish(lineage.root, lineage.returned_type);
+        }
         var = arg_var.get();
         continue;
       }
@@ -310,20 +377,38 @@ VarLineage TraceVar(const Var* var, const BodyIndexCollector& index, const Param
   return finish(nullptr);
 }
 
-std::vector<std::optional<size_t>> TraceExprsToParamIndices(const std::vector<ExprPtr>& exprs,
-                                                            const BodyIndexCollector& index,
-                                                            const ParamIndexMap& param_indices,
-                                                            const ProgramPtr& program) {
+VarLineage TraceExpr(const ExprPtr& expr, const BodyIndexCollector& index, const ParamIndexMap& param_indices,
+                     const ProgramPtr& program, LineageMemo& memo) {
+  if (!expr) return {};
+  if (auto var = AsVarLike(expr)) return TraceVar(var.get(), index, param_indices, program, memo);
+  if (auto it = memo.expr_roots.find(expr.get()); it != memo.expr_roots.end()) {
+    return it->second;
+  }
+  memo.expr_roots.emplace(expr.get(), VarLineage{});
+  VarLineage lineage;
+  if (auto projection = As<TupleGetItemExpr>(expr)) {
+    auto selected =
+        ResolveTupleElement(projection->tuple_, projection->index_, index, program, memo.tuple_sources);
+    lineage = TraceExpr(selected, index, param_indices, program, memo);
+  }
+  memo.expr_roots[expr.get()] = lineage;
+  return lineage;
+}
+
+std::vector<std::optional<size_t>> TraceIndexedExprsToParamIndices(const std::vector<ExprPtr>& exprs,
+                                                                   const BodyIndexCollector& index,
+                                                                   const ParamIndexMap& param_indices,
+                                                                   const ProgramPtr& program) {
   TraceQueryGuard query_guard;
   std::vector<std::optional<size_t>> result;
   result.reserve(exprs.size());
-  VarRootMap memo;
+  LineageMemo memo;
   for (const auto& expr : exprs) {
     std::optional<size_t> idx;
-    if (auto var = AsVarLike(expr)) {
-      auto lineage = TraceVar(var.get(), index, param_indices, program, memo);
+    if (expr) {
+      auto lineage = TraceExpr(expr, index, param_indices, program, memo);
       if (lineage.root &&
-          (!AsTensorTypeLike(var->GetType()) ||
+          (!AsTensorTypeLike(expr->GetType()) ||
            (lineage.returned_type && structural_equal(lineage.returned_type, lineage.root->GetType())))) {
         auto param_it = param_indices.find(lineage.root);
         if (param_it != param_indices.end()) idx = param_it->second;
@@ -375,7 +460,7 @@ std::vector<std::optional<size_t>> ExpandForwardedTupleVar(const Var* tuple_var,
     }
     // A literal tuple construction: each element traces on its own.
     if (auto make_tuple = As<MakeTuple>(value)) {
-      return TraceExprsToParamIndices(make_tuple->elements_, index, param_indices, program);
+      return TraceIndexedExprsToParamIndices(make_tuple->elements_, index, param_indices, program);
     }
     call = AsCallOrSubmitView(value);
     break;
@@ -395,7 +480,7 @@ std::vector<std::optional<size_t>> ExpandForwardedTupleVar(const Var* tuple_var,
   }
   // Args may themselves be assemble / loop-carry chains, so trace them through
   // the same batch path as ordinary returns.
-  return TraceExprsToParamIndices(forwarded_args, index, param_indices, program);
+  return TraceIndexedExprsToParamIndices(forwarded_args, index, param_indices, program);
 }
 
 // Group/Spmd wrappers may end in the inner kernel call with no top-level
@@ -498,19 +583,19 @@ std::vector<std::optional<size_t>> ReturnedParamIndicesImpl(const FunctionPtr& f
       }
     }
   }
-  return record(TraceExprsToParamIndices(rets, index, param_indices, program));
+  return record(TraceIndexedExprsToParamIndices(rets, index, param_indices, program));
 }
 
-std::vector<std::optional<size_t>> TraceVarsToParamIndices(const std::vector<VarPtr>& vars,
-                                                           const StmtPtr& body,
-                                                           const std::vector<VarPtr>& params,
-                                                           const ProgramPtr& program, bool trace_if_merges) {
-  if (!body) return std::vector<std::optional<size_t>>(vars.size());
+std::vector<std::optional<size_t>> TraceBodyExprsToParamIndices(const std::vector<ExprPtr>& exprs,
+                                                                const StmtPtr& body,
+                                                                const std::vector<VarPtr>& params,
+                                                                const ProgramPtr& program,
+                                                                bool trace_if_merges) {
+  if (!body) return std::vector<std::optional<size_t>>(exprs.size());
 
   BodyIndexCollector index(trace_if_merges);
   index.VisitStmt(body);
-  return TraceExprsToParamIndices(std::vector<ExprPtr>(vars.begin(), vars.end()), index, IndexParams(params),
-                                  program);
+  return TraceIndexedExprsToParamIndices(exprs, index, IndexParams(params), program);
 }
 
 }  // namespace
@@ -574,7 +659,15 @@ std::vector<std::optional<size_t>> ReturnedParamIndices(const FunctionPtr& func,
 std::vector<std::optional<size_t>> TraceToParamIndices(const std::vector<VarPtr>& vars, const StmtPtr& body,
                                                        const std::vector<VarPtr>& params,
                                                        const ProgramPtr& program) {
-  return TraceVarsToParamIndices(vars, body, params, program, /*trace_if_merges=*/false);
+  return TraceBodyExprsToParamIndices(std::vector<ExprPtr>(vars.begin(), vars.end()), body, params, program,
+                                      /*trace_if_merges=*/false);
+}
+
+std::vector<std::optional<size_t>> TraceExprsToParamIndices(const std::vector<ExprPtr>& exprs,
+                                                            const StmtPtr& body,
+                                                            const std::vector<VarPtr>& params,
+                                                            const ProgramPtr& program) {
+  return TraceBodyExprsToParamIndices(exprs, body, params, program, /*trace_if_merges=*/false);
 }
 
 std::vector<std::optional<size_t>> TraceToParamIndicesForOutlining(const std::vector<VarPtr>& vars,
@@ -582,7 +675,8 @@ std::vector<std::optional<size_t>> TraceToParamIndicesForOutlining(const std::ve
                                                                    const std::vector<VarPtr>& params,
                                                                    const ProgramPtr& program,
                                                                    bool trace_if_merges) {
-  return TraceVarsToParamIndices(vars, body, params, program, trace_if_merges);
+  return TraceBodyExprsToParamIndices(std::vector<ExprPtr>(vars.begin(), vars.end()), body, params, program,
+                                      trace_if_merges);
 }
 
 VarPtr TraceToParam(const VarPtr& var, const StmtPtr& body, const std::vector<VarPtr>& params,
@@ -592,7 +686,7 @@ VarPtr TraceToParam(const VarPtr& var, const StmtPtr& body, const std::vector<Va
   BodyIndexCollector index;
   index.VisitStmt(body);
   auto param_indices = IndexParams(params);
-  VarRootMap memo;
+  LineageMemo memo;
   const Var* root = TraceVar(var.get(), index, param_indices, program, memo).root;
   if (!root) return nullptr;
   auto param_it = param_indices.find(root);

@@ -33,8 +33,9 @@ active lane 共用同一份 `CoreTaskArgs` payload。因此，两个已编译 ke
 函数体依旧只引用原调用实际使用的值。
 
 若成员返回值写回完整的 Group 参数，共享 ABI 会将该返回值重新绑定到对应参数。
-这涵盖 SSA 别名以及 `Call` 或 `Submit` 的乱序 tuple 返回；`pl.no_dep` 也使用同一
-映射，保留其对应的规范参数位置。view、slice 和新分配的 buffer 不属于完整参数的
+这涵盖 SSA 别名以及 `Call` 或 `Submit` 的乱序 tuple 返回，包括直接传入的 `pair[i]`
+和通过 Group 局部 tuple 别名或嵌套 tuple 进行的索引。`pl.no_dep` 也使用同一张
+表达式映射，保留其对应的规范参数位置。view、slice 和新分配的 buffer 不属于完整参数的
 写回别名。
 
 当两个成员 kernel 都只属于该 Group 时，保留其原函数名。如果任一 kernel 还有其他

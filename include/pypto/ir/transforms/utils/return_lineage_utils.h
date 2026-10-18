@@ -106,6 +106,20 @@ std::vector<std::optional<size_t>> TraceToParamIndices(const std::vector<VarPtr>
                                                        const std::vector<VarPtr>& params,
                                                        const ProgramPtr& program);
 
+/// Expression generalization of TraceToParamIndices.
+///
+/// Also follows direct tuple projections, tuple-variable aliases, and nested
+/// MakeTuple projections. User-call projections use the callee's flat return
+/// positions. The body index, variable roots, tuple sources, and callee return
+/// maps are shared across the batch; unknown or partial-buffer values remain
+/// nullopt under the same full-parameter type/view checks.
+///
+/// @return one entry per expression containing its matching param index, or nullopt.
+std::vector<std::optional<size_t>> TraceExprsToParamIndices(const std::vector<ExprPtr>& exprs,
+                                                            const StmtPtr& body,
+                                                            const std::vector<VarPtr>& params,
+                                                            const ProgramPtr& program);
+
 /// Trace multiple Vars in @p body back to @p params for scope outlining.
 ///
 /// The body is indexed once and parameter positions are shared across all Vars.

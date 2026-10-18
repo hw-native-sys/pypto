@@ -65,6 +65,30 @@ def _op_name(stmt: ir.Stmt) -> str:
     return ""
 
 
+def _swap_aic_aiv_members(program: ir.Program) -> ir.Program:
+    """Reverse a literal-typed fixture's core members while retaining its bodies and ABI."""
+    functions = []
+    for func in program.functions.values():
+        if func.func_type not in (ir.FunctionType.AIC, ir.FunctionType.AIV):
+            functions.append(func)
+            continue
+        swapped_type = ir.FunctionType.AIV if func.func_type == ir.FunctionType.AIC else ir.FunctionType.AIC
+        functions.append(
+            ir.Function(
+                func.name,
+                list(zip(func.params, func.param_directions, strict=True)),
+                func.return_types,
+                func.body,
+                func.span,
+                type=swapped_type,
+                attrs=func.attrs,
+                requires_runtime_binding=func.requires_runtime_binding,
+                ir_stage=func.ir_stage,
+            )
+        )
+    return ir.Program(functions, program.name, program.span)
+
+
 def test_automatic_mx_scale_v2c_requires_a5_backend():
     """A2A3 rejects the A5-only MX byte-preserving V2C transport."""
 
@@ -694,6 +718,307 @@ def test_hand_written_group_rebinds_tuple_writeback_no_dep(use_submit):
     assert [launch.op.name for launch in launches] == ["cube_side", "vec_side"]
     assert all(list(launch.args) == list(group.params) for launch in launches)
     assert launches[1].attrs["arg_direction_overrides"] == [1]
+
+
+@pytest.mark.parametrize("producer_type", [pl.FunctionType.AIC, pl.FunctionType.AIV])
+@pytest.mark.parametrize("projection_index", [0, 1])
+@pytest.mark.parametrize("use_submit", [False, True])
+@pytest.mark.parametrize("no_dep", [False, True])
+def test_hand_written_group_rebinds_direct_tuple_projection(
+    producer_type, projection_index, use_submit, no_dep
+):
+    """Direct tuple arguments retain their selected buffer in either core's adapter (#3014)."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def producer(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+            return second, first
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def consumer(
+            self,
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return sink
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_call_0(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            pair = self.producer(first, second)
+            result = self.consumer(pair[0])
+            return result
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_call_1(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            pair = self.producer(first, second)
+            result = self.consumer(pair[1])
+            return result
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_submit_0(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            pair = pl.submit(self.producer, first, second)
+            result, _consumer_tid = pl.submit(self.consumer, pair[0])
+            return result
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_submit_1(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            pair = pl.submit(self.producer, first, second)
+            result, _consumer_tid = pl.submit(self.consumer, pair[1])
+            return result
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_call_no_dep_0(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            pair = self.producer(first, second)
+            result = self.consumer(pl.no_dep(pair[0]))
+            return result
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_call_no_dep_1(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            pair = self.producer(first, second)
+            result = self.consumer(pl.no_dep(pair[1]))
+            return result
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_submit_no_dep_0(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            pair = pl.submit(self.producer, first, second)
+            result, _consumer_tid = pl.submit(self.consumer, pl.no_dep(pair[0]))
+            return result
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_submit_no_dep_1(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            pair = pl.submit(self.producer, first, second)
+            result, _consumer_tid = pl.submit(self.consumer, pl.no_dep(pair[1]))
+            return result
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def consumer_first(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return first
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def consumer_second(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return second
+
+    launch_kind = "submit" if use_submit else "call"
+    override = "_no_dep" if no_dep else ""
+    group_name = f"mixed_{launch_kind}{override}_{projection_index}"
+    before = ir.Program(
+        [func for func in Before.functions.values() if func.name in ("producer", "consumer", group_name)],
+        Before.name,
+        Before.span,
+    )
+    expected = Expected
+    if producer_type == pl.FunctionType.AIV:
+        before = _swap_aic_aiv_members(before)
+        expected = _swap_aic_aiv_members(expected)
+    after = _run_pipeline(before)
+    producer = after.get_function("producer")
+    original_producer = before.get_function("producer")
+    consumer = after.get_function("consumer")
+    expected_name = "consumer_second" if projection_index == 0 else "consumer_first"
+    expected_consumer = expected.get_function(expected_name)
+    group = after.get_function(group_name)
+    assert producer is not None and original_producer is not None
+    assert consumer is not None and expected_consumer is not None and group is not None
+    ir.assert_structural_equal(producer, original_producer)
+    ir.assert_structural_equal(consumer, expected_consumer)
+    assert "FREE_VAR" not in consumer.as_python()
+
+    launches = [
+        stmt.value
+        for stmt in ir.flatten_to_stmts(group.body)
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, (ir.Call, ir.Submit))
+    ]
+    assert [launch.op.name for launch in launches] == ["producer", "consumer"]
+    assert all(isinstance(launch, ir.Submit if use_submit else ir.Call) for launch in launches)
+    assert all(list(launch.args) == list(group.params) for launch in launches)
+    if no_dep:
+        assert launches[1].attrs["arg_direction_overrides"] == [1 - projection_index]
+
+
+@pytest.mark.parametrize("producer_type", [pl.FunctionType.AIC, pl.FunctionType.AIV])
+@pytest.mark.parametrize("tuple_form", ["alias", "nested"])
+def test_hand_written_group_rebinds_aliased_tuple_projection(producer_type, tuple_form):
+    """Tuple aliases and nested tuple construction preserve the selected writeback."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def producer(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+            return second, first
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def consumer(
+            self,
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return sink
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_alias(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            pair = self.producer(first, second)
+            alias = pair
+            result = self.consumer(alias[0])
+            return result
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_nested(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            pair = self.producer(first, second)
+            nested = ((pair[1], pair[0]), pair)
+            result = self.consumer(pl.no_dep(nested[0][1]))
+            return result
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def consumer(
+            self,
+            first: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            second: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return second
+
+    group_name = f"mixed_{tuple_form}"
+    before = ir.Program(
+        [func for func in Before.functions.values() if func.name in ("producer", "consumer", group_name)],
+        Before.name,
+        Before.span,
+    )
+    expected = Expected
+    if producer_type == pl.FunctionType.AIV:
+        before = _swap_aic_aiv_members(before)
+        expected = _swap_aic_aiv_members(expected)
+    after = _run_pipeline(before)
+    consumer = after.get_function("consumer")
+    expected_consumer = expected.get_function("consumer")
+    group = after.get_function(group_name)
+    assert consumer is not None and expected_consumer is not None and group is not None
+    ir.assert_structural_equal(consumer, expected_consumer)
+    assert "FREE_VAR" not in consumer.as_python()
+    calls = [
+        stmt.value
+        for stmt in ir.flatten_to_stmts(group.body)
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call)
+    ]
+    assert [call.op.name for call in calls] == ["producer", "consumer"]
+    assert all(list(call.args) == list(group.params) for call in calls)
+    if tuple_form == "nested":
+        assert calls[1].attrs["arg_direction_overrides"] == [1]
+
+
+@pytest.mark.parametrize("boundary_kind", ["view", "fresh"])
+def test_hand_written_group_no_dep_rejects_projected_non_writeback_results(boundary_kind):
+    """Projecting a non-writeback tuple element must not turn it into a Group parameter."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def producer_view(
+            self,
+            source: pl.InOut[pl.Tensor[[8, 32], pl.FP32]],
+        ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[8, 32], pl.FP32]]:
+            viewed = pl.tensor.view(source, [16, 16])
+            return viewed, source
+
+        @pl.function(type=pl.FunctionType.AIC)
+        def producer_fresh(
+            self,
+            source: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+            fresh = pl.tensor.create([16, 16], dtype=pl.FP32)
+            return fresh, source
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def consumer(
+            self,
+            sink: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            return sink
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_view(
+            self,
+            source: pl.InOut[pl.Tensor[[8, 32], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            pair = self.producer_view(source)
+            return self.consumer(pl.no_dep(pair[0]))
+
+        @pl.function(type=pl.FunctionType.Group)
+        def mixed_fresh(
+            self,
+            source: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            pair = self.producer_fresh(source)
+            return self.consumer(pl.no_dep(pair[0]))
+
+    before = ir.Program(
+        [
+            func
+            for func in Before.functions.values()
+            if func.name in (f"producer_{boundary_kind}", "consumer", f"mixed_{boundary_kind}")
+        ],
+        Before.name,
+        Before.span,
+    )
+    with pytest.raises(ValueError, match="Cannot map pl.no_dep argument 0 .* to a canonical Group parameter"):
+        _run_pipeline(before)
 
 
 @pytest.mark.parametrize("boundary_kind", ["slice", "view", "fresh"])

@@ -36,8 +36,10 @@ each cloned body still references only the values from its original call.
 
 Member results that write back a complete Group parameter are rebound to that
 parameter in the shared ABI. This includes SSA aliases and reordered tuple
-results from `Call` or `Submit`; `pl.no_dep` follows the same mapping to retain
-its canonical argument position. Views, slices, and newly allocated buffers
+results from `Call` or `Submit`, including direct `pair[i]` arguments and
+projections through Group-local tuple aliases or nested tuples. `pl.no_dep`
+follows the same expression mapping to retain its canonical argument position.
+Views, slices, and newly allocated buffers
 are not complete-parameter writeback aliases.
 
 When both member kernels are exclusive to the Group, their names are preserved.
