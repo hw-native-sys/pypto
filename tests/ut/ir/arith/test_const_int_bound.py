@@ -11,7 +11,7 @@
 
 import pytest
 from pypto import DataType, ir
-from pypto.arith import ConstIntBound, ConstIntBoundAnalyzer
+from pypto.arith import Analyzer, ConstIntBound, ConstIntBoundAnalyzer
 
 S = ir.Span.unknown()
 INT = DataType.INT64
@@ -257,6 +257,83 @@ class TestFloorModBound:
         b = analyzer(ir.FloorMod(ci(17), ci(5), INT, S))
         assert b.min_value == 0
         assert b.max_value == 4  # conservative for mod 5
+
+
+class TestFloorDivModNarrowBounds:
+    @pytest.mark.parametrize("dtype", [DataType.INT8, DataType.INDEX])
+    def test_in_range_divisor_retains_useful_modulo_bound(self, dtype):
+        lhs = ir.Var("x", ir.ScalarType(dtype), S)
+        expr = ir.FloorMod(lhs, ir.ConstInt(3, dtype, S), dtype, S)
+        bound = ConstIntBoundAnalyzer()(expr)
+        assert (bound.min_value, bound.max_value) == (0, 2)
+
+    @pytest.mark.parametrize("op", [ir.FloorDiv, ir.FloorMod])
+    @pytest.mark.parametrize("dtype,bits", [(DataType.INT8, 8), (DataType.INT16, 16), (DataType.INT32, 32)])
+    def test_wrapped_divisor_cannot_prove_outer_sign(self, op, dtype, bits):
+        """A raw positive literal emits as -3, so the result can be negative."""
+        lhs = ir.Var("x", ir.ScalarType(dtype), S)
+        divisor = ir.ConstInt((1 << bits) - 3, dtype, S)
+        inner = op(lhs, divisor, dtype, S)
+        bound_analyzer = ConstIntBoundAnalyzer()
+        bound_analyzer.bind(lhs, 1, 3)
+        assert bound_analyzer(inner).is_everything()
+
+        simplifier = Analyzer()
+        simplifier.bind(lhs, 1, 3)
+        zero = ir.ConstInt(0, dtype, S)
+        for expr in (
+            ir.Min(inner, zero, dtype, S),
+            ir.Max(inner, zero, dtype, S),
+            ir.Le(zero, inner, DataType.BOOL, S),
+        ):
+            ir.assert_structural_equal(simplifier.simplify(expr), expr)
+
+    @pytest.mark.parametrize("op", [ir.FloorDiv, ir.FloorMod])
+    def test_divisor_range_narrowed_to_operation_width_is_unknown(self, op):
+        """A wide operand's positive range becomes negative after i32 narrowing."""
+        lhs = ir.Var("x", ir.ScalarType(DataType.INT32), S)
+        rhs = make_var("divisor")
+        expr = op(lhs, rhs, DataType.INT32, S)
+        bound_analyzer = ConstIntBoundAnalyzer()
+        bound_analyzer.bind(lhs, 1, 3)
+        bound_analyzer.bind(rhs, 2**32 - 3, 2**32 - 2)
+        assert bound_analyzer(expr).is_everything()
+
+    @pytest.mark.parametrize("op", [ir.FloorDiv, ir.FloorMod])
+    def test_wrapped_dividend_has_unknown_bound(self, op):
+        """253 : i8 emits as -3; its stored sign cannot bound the quotient."""
+        dtype = DataType.INT8
+        expr = op(ir.ConstInt(253, dtype, S), ir.ConstInt(-2, dtype, S), dtype, S)
+        bound_analyzer = ConstIntBoundAnalyzer()
+        bound = bound_analyzer(expr)
+        # Actual FloorDiv(-3,-2) is 1 and FloorMod(-3,-2) is -1. The raw
+        # dividend must not establish an exact/sign bound for either operation.
+        assert bound.is_everything()
+
+    @pytest.mark.parametrize("op", [ir.FloorDiv, ir.FloorMod])
+    @pytest.mark.parametrize("cast_kind", ["widen_wrapped_literal", "narrow_literal", "partial_range"])
+    def test_cast_divisor_does_not_hide_wrapped_sign(self, op, cast_kind):
+        dtype = DataType.INT32
+        lhs = ir.Var("x", ir.ScalarType(dtype), S)
+        divisor = make_var("divisor")
+        if cast_kind == "widen_wrapped_literal":
+            rhs = ir.Cast(ir.ConstInt(253, DataType.INT8, S), dtype, S)
+        elif cast_kind == "narrow_literal":
+            # A raw intersection would produce the empty bound [253, 127].
+            rhs = ir.Cast(ci(253), DataType.INT8, S)
+        else:
+            # Clipping [126, 253] to [126, 127] would hide divisor 253 -> -3.
+            rhs = ir.Cast(divisor, DataType.INT8, S)
+        expr = op(lhs, rhs, dtype, S)
+        bound_analyzer = ConstIntBoundAnalyzer()
+        bound_analyzer.bind(lhs, 1, 3)
+        bound_analyzer.bind(divisor, 126, 254)
+        assert bound_analyzer(expr).is_everything()
+        outer = ir.Min(expr, ir.ConstInt(0, dtype, S), dtype, S)
+        simplifier = Analyzer()
+        simplifier.bind(lhs, 1, 3)
+        simplifier.bind(divisor, 126, 254)
+        ir.assert_structural_equal(simplifier.simplify(outer), outer)
 
 
 # ============================================================================

@@ -25,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/arith/const_fold.h"
@@ -110,6 +111,19 @@ static int64_t InfAwarePow(int64_t base, int64_t exp) {
 /// Return the "everything is possible" bound.
 static Bound Everything() { return {Bound::kNegInf, Bound::kPosInf}; }
 
+/// A finite interval is usable only if lowering preserves both its endpoints.
+/// Unknown intervals carry no sign/range facts to invalidate. Reject empty
+/// intervals as well instead of deriving signs from inconsistent endpoints.
+static bool BoundPreservesDtype(const Bound& bound, const ExprPtr& operand, DataType dtype) {
+  if (bound.min_value > bound.max_value) return false;
+  if (bound.is_everything()) return true;
+  const DataType operand_dtype = GetScalarDtype(operand);
+  return detail::ConstIntFitsDtype(bound.min_value, operand_dtype) &&
+         detail::ConstIntFitsDtype(bound.max_value, operand_dtype) &&
+         detail::ConstIntFitsDtype(bound.min_value, dtype) &&
+         detail::ConstIntFitsDtype(bound.max_value, dtype);
+}
+
 /// Four-corner multiplication of two bounds.
 static Bound BoundMul(const Bound& a, const Bound& b) {
   int64_t v0 = InfAwareMul(a.min_value, b.min_value);
@@ -180,7 +194,12 @@ class ConstIntBoundAnalyzer::Impl : public ExprFunctor<Bound> {
  protected:
   // --- Leaf nodes ---
 
-  Bound VisitExpr_(const ConstIntPtr& op) override { return {op->value_, op->value_}; }
+  Bound VisitExpr_(const ConstIntPtr& op) override {
+    // Stored literals need not fit their dtype. Their raw value must not leak
+    // a false sign through enclosing arithmetic or a widening Cast.
+    if (!detail::ConstIntFitsDtype(op->value_, op->dtype())) return Everything();
+    return {op->value_, op->value_};
+  }
 
   Bound VisitExpr_(const ConstFloatPtr& op) override {
     double v = op->value_;
@@ -242,14 +261,28 @@ class ConstIntBoundAnalyzer::Impl : public ExprFunctor<Bound> {
   }
 
   Bound VisitExpr_(const FloorDivPtr& op) override {
+    const DataType dtype = GetScalarDtype(op);
+    if (!detail::FloorDivModOperandsFitDtype(op->left_, op->right_, dtype)) return Everything();
     auto a = VisitExpr(op->left_);
     auto b = VisitExpr(op->right_);
+    // A wide operand can wrap even when it is not a literal. Bounds computed
+    // before that conversion cannot establish the result's sign.
+    if (!BoundPreservesDtype(a, op->left_, dtype) || !BoundPreservesDtype(b, op->right_, dtype)) {
+      return Everything();
+    }
     return BoundFloorDiv(a, b);
   }
 
   Bound VisitExpr_(const FloorModPtr& op) override {
+    const DataType dtype = GetScalarDtype(op);
+    if (!detail::FloorDivModOperandsFitDtype(op->left_, op->right_, dtype)) return Everything();
     auto a = VisitExpr(op->left_);
     auto b = VisitExpr(op->right_);
+    // Enclosing min/max/comparison rewrites also consume these bounds, so the
+    // conservative literal policy must apply beyond direct constant folding.
+    if (!BoundPreservesDtype(a, op->left_, dtype) || !BoundPreservesDtype(b, op->right_, dtype)) {
+      return Everything();
+    }
     return BoundFloorMod(a, b);
   }
 
@@ -360,7 +393,9 @@ class ConstIntBoundAnalyzer::Impl : public ExprFunctor<Bound> {
 
   Bound VisitExpr_(const CastPtr& op) override {
     auto a = VisitExpr(op->operand_);
-    // For Cast to integer type, intersect with the target type's representable range
+    // Narrowing casts wrap instead of clipping. If any source value can fall
+    // outside the target range, retain its entire range: intersecting a positive
+    // interval with INT8's range would hide the negative values produced by wrap.
     auto scalar_type = std::dynamic_pointer_cast<const ScalarType>(op->GetType());
     if (!scalar_type || !scalar_type->dtype_.IsInt()) return Everything();
     size_t bits = scalar_type->dtype_.GetBit();
@@ -373,7 +408,10 @@ class ConstIntBoundAnalyzer::Impl : public ExprFunctor<Bound> {
       type_min = -(static_cast<int64_t>(1) << (bits - 1));
       type_max = (static_cast<int64_t>(1) << (bits - 1)) - 1;
     }
-    return {std::max(a.min_value, type_min), std::min(a.max_value, type_max)};
+    if (a.min_value < type_min || a.max_value > type_max || a.min_value > a.max_value) {
+      return {type_min, type_max};
+    }
+    return a;
   }
 
  private:

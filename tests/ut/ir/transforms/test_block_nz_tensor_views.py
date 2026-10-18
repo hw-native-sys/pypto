@@ -565,9 +565,9 @@ def test_codegen_emits_the_divided_offset():
     clamp = defining_line(offsets[2])
     assert "arith.maxsi" in clamp, clamp
     divide = defining_line(clamp.split("arith.maxsi ", 1)[1].split(",", 1)[0])
-    assert "arith.divsi" in divide and "%c16_index" in divide, divide
+    assert "arith.floordivsi" in divide and "%c16_index" in divide, divide
 
-    dividend = divide.split("arith.divsi ", 1)[1].split(",", 1)[0]
+    dividend = divide.split("arith.floordivsi ", 1)[1].split(",", 1)[0]
     offset_def = defining_line(dividend)
     assert "arith.muli" in offset_def and "%c256_index" in offset_def, offset_def
 

@@ -378,6 +378,7 @@ nav:
           - en/dev/codegen/index.md
           - en/dev/codegen/00-pto_codegen.md
           - en/dev/codegen/01-orchestration_codegen.md
+          - en/dev/codegen/02-kernel_wrapper.md
       - Backend:
           - en/dev/backend/index.md
           - en/dev/backend/00-backend_handler.md

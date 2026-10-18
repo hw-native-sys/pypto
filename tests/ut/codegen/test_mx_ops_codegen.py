@@ -91,7 +91,7 @@ class TestMxMatmulCodegen:
             _run_default_pipeline(Program, BackendType.Ascend910B)
 
     def test_mx_scale_load_accepts_provable_dynamic_offset(self):
-        """Provable MX offsets become FloorDiv in IR; codegen sees divsi + maxsi."""
+        """Provable MX offsets become FloorDiv in IR; codegen sees floordivsi + maxsi."""
 
         @pl.program
         class Program:
@@ -108,7 +108,7 @@ class TestMxMatmulCodegen:
         mlir = _emit_incore_mlir(Program)
         assert "cf.assert" not in mlir
         assert "arith.remui" not in mlir
-        assert "arith.divsi" in mlir or "arith.divui" in mlir
+        assert "arith.floordivsi" in mlir
         assert "pto.tload" in mlir
         assert "{layout = #pto.layout<mx_a_zz>}" in mlir
         partitions = [line for line in mlir.splitlines() if "partition_view" in line]

@@ -10,6 +10,7 @@ IR to generated code. Anything that needs a decision was already decided by a pa
 | ---- | -------------- |
 | [PTO Codegen](00-pto_codegen.md) | Generating PTO-ISA dialect MLIR from PyPTO IR |
 | [Orchestration Code Generation](01-orchestration_codegen.md) | Generating the host-side C++ that submits tasks to the runtime |
+| [PTO Kernel Wrapper Generation](02-kernel_wrapper.md) | Connecting ptoas-generated kernels to runtime dispatch |
 
 ## See Also
 
