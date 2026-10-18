@@ -912,14 +912,19 @@ class PTOCodegen : public CodegenBase {
                                          bool use_physical_valid_shape = false);
 
   /**
-   * @brief The tile_buf handle already bound to the buffer `memref` denotes.
+   * @brief The tile_buf handle already bound to the buffer `tile_type` denotes.
    *
    * Only meaningful under the PTOAS memory planner (`emit_tile_addr_ == false`),
    * where variables denoting the same buffer must share one handle because
    * there is no baked `addr` to alias through. Returns "" when addresses are
-   * baked, when `memref` is null, or when no handle is bound yet.
+   * baked, when `tile_type` has no MemRef, or when no handle is bound yet. Mixed
+   * view types can reuse an already-declared Mat handle only when both branch
+   * yields already share it and its actual SSA type matches `expected_type`.
    */
-  [[nodiscard]] std::string TryGetSharedTileBufHandle(const ir::MemRefPtr& memref) const;
+  [[nodiscard]] std::string TryGetSharedTileBufHandle(const std::shared_ptr<const ir::TileType>& tile_type,
+                                                      const std::string& expected_type,
+                                                      const ir::VarPtr& then_value,
+                                                      const ir::VarPtr& else_value) const;
 
   /**
    * @brief Declare `ssa_name`'s `pto.alloc_tile` in the function head.
@@ -1070,8 +1075,9 @@ class PTOCodegen : public CodegenBase {
     /// a `[1, N]` row-major op result and its `[N, 1]` col-major reshape view,
     /// which occupy the same bytes. Their shared handle carries exactly one type
     /// (differently-typed reads become `pto.treshape` views of it), so it must
-    /// never be re-typed to suit another var. `TryGetSharedTileBufHandle` refuses
-    /// these identities.
+    /// never be re-typed to suit another var. `TryGetSharedTileBufHandle` only
+    /// accepts these identities for an already-declared Mat handle shared by
+    /// both branch yields whose type matches the requested type.
     std::set<std::string> memref_identity_mixed_types;
     /// alloc_tile SSA handles already emitted — dedups the alloc when several
     /// vars share one handle (PTOAS in-place aliasing).

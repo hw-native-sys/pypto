@@ -2044,18 +2044,36 @@ std::string PTOCodegen::AllocNewTileBuf(const std::string& tile_buf_type_string,
   return name;
 }
 
-std::string PTOCodegen::TryGetSharedTileBufHandle(const ir::MemRefPtr& memref) const {
-  if (emit_tile_addr_ || !memref) {
+std::string PTOCodegen::TryGetSharedTileBufHandle(const std::shared_ptr<const ir::TileType>& tile_type,
+                                                  const std::string& expected_type,
+                                                  const ir::VarPtr& then_value,
+                                                  const ir::VarPtr& else_value) const {
+  if (emit_tile_addr_ || !tile_type || !tile_type->memref_.has_value()) {
     return "";
   }
+  auto memref = ir::GetDefinedMemRef(tile_type);
   const std::string ident = MemRefIdentityKey(memref);
-  // A mixed-type identity's handle already carries another var's type; re-typing
-  // it would make one SSA value have two types and ptoas would reject the module.
-  if (fs_.memref_identity_mixed_types.count(ident) != 0) {
-    return "";
-  }
   auto it = fs_.memref_identity_to_mlir.find(ident);
-  return it != fs_.memref_identity_to_mlir.end() ? it->second : std::string{};
+  if (it == fs_.memref_identity_to_mlir.end()) return "";
+  // A mixed-type identity must never re-type the shared SSA. An already-declared
+  // Mat handle shared by both yields can be reused without changing its type.
+  // Before declaration, the pre-populated type may come from another alias.
+  if (fs_.memref_identity_mixed_types.count(ident) != 0) {
+    if (tile_type->GetMemorySpace() != ir::MemorySpace::Mat ||
+        fs_.emitted_tile_alloc_names.count(it->second) == 0 ||
+        GetSSATileBufType(it->second) != expected_type) {
+      return "";
+    }
+    // InitMemRef may inherit only the then arm's storage. That does not prove
+    // the else arm aliases it: reusing an independently live outer Mat here
+    // would let a re-pointed else producer overwrite that outer value.
+    for (const auto& value : {then_value, else_value}) {
+      if (!value) return "";
+      auto source = fs_.var_to_mlir.find(GetVarKey(value));
+      if (source == fs_.var_to_mlir.end() || source->second != it->second) return "";
+    }
+  }
+  return it->second;
 }
 
 bool PTOCodegen::DeclareTileBufAtHead(const std::string& ssa_name, const AllocTileFields& fields) {

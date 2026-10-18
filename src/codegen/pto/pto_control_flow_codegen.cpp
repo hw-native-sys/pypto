@@ -246,6 +246,8 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
     std::vector<std::string> scf_return_names;
     std::vector<std::string> scf_return_types;
     std::vector<std::pair<std::string, AllocTileFields>> deferred_tile_valid_shapes;
+    const auto then_yield = FindBranchYield(op->then_body_);
+    const auto else_yield = op->else_body_ ? FindBranchYield(*op->else_body_) : nullptr;
 
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {
       const auto& return_var = op->return_vars_[i];
@@ -285,7 +287,12 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         // branch producers write the phi handle (they are re-bound to it below,
         // fix #1956) while the loop result and every post-if read still resolve
         // to the shared one, which no branch ever wrote.
-        std::string ret_name = TryGetSharedTileBufHandle(ir::GetDefinedMemRef(tile_type));
+        const auto then_value =
+            then_yield && i < then_yield->value_.size() ? ir::AsVarLike(then_yield->value_[i]) : nullptr;
+        const auto else_value =
+            else_yield && i < else_yield->value_.size() ? ir::AsVarLike(else_yield->value_[i]) : nullptr;
+        std::string ret_name =
+            TryGetSharedTileBufHandle(tile_type, alloc_fields.type_str, then_value, else_value);
         if (!ret_name.empty()) {
           // The shared handle must dominate both branches and the post-if read.
           // Hoist its declaration to the function head unless the body already

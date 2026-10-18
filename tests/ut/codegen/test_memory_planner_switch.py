@@ -133,6 +133,72 @@ class StationaryMatmulPipelinedK:
         return result
 
 
+@pl.program
+class ConditionalGather:
+    """Two conditional writes followed by a differently typed Mat view (#3016)."""
+
+    @pl.function(type=pl.FunctionType.AIC)
+    def kernel(
+        self,
+        x: pl.Tensor[[64, 64], pl.FP16],
+        flag: pl.Scalar[pl.INT32],
+        out: pl.Out[pl.Tensor[[64, 16], pl.FP32]],
+    ) -> pl.Tensor[[64, 16], pl.FP32]:
+        base = pl.tile.create([32, 64], dtype=pl.FP16, target_memory=pl.Mem.Mat)
+        if flag != 0:
+            first = pl.tile.gather_row(base, x, [0, 0], [0, 0], [16, 64])
+        else:
+            first = pl.tile.gather_row(base, x, [0, 0], [16, 0], [16, 64])
+        if flag != 0:
+            second = pl.tile.gather_row(first, x, [16, 0], [32, 0], [16, 64])
+        else:
+            second = pl.tile.gather_row(first, x, [16, 0], [48, 0], [16, 64])
+        transposed = pl.tile.transpose_view(second)
+        rhs = pl.tile.load(x, [0, 0], [32, 16], target_memory=pl.Mem.Mat)
+        left = pl.tile.move(transposed, target_memory=pl.Mem.Left)
+        right = pl.tile.move(rhs, target_memory=pl.Mem.Right)
+        product = pl.tile.matmul(left, right)
+        output = pl.tile.store(product, [0, 0], out)
+        return output
+
+
+def _collect_mat_phi_storage(program: ir.Program):
+    """Collect phi/arm MemRefs and named tile definitions without comparing SSA names."""
+
+    class Collector(ir.IRVisitor):
+        def __init__(self):
+            super().__init__()
+            self.phis = []
+            self.tiles = {}
+
+        def visit_assign_stmt(self, op):
+            if isinstance(op.var.type, ir.TileType):
+                self.tiles[op.var.name_hint] = op.var
+            super().visit_assign_stmt(op)
+
+        def visit_if_stmt(self, op):
+            arms = []
+            for body in (op.then_body, op.else_body):
+                statements = body.stmts if isinstance(body, ir.SeqStmts) else [body]
+                yielded = next(stmt for stmt in statements if isinstance(stmt, ir.YieldStmt))
+                tile_type = yielded.value[0].type
+                assert isinstance(tile_type, ir.TileType)
+                arms.append(tile_type.memref)
+            self.phis.append((op.return_vars[0], arms))
+            super().visit_if_stmt(op)
+
+    collector = Collector()
+    for function in program.functions.values():
+        collector.visit_stmt(function.body)
+    return collector.phis, collector.tiles
+
+
+def _assert_same_mat_window(actual: ir.MemRef, expected: ir.MemRef):
+    assert ir.MemRef.same_allocation(actual, expected)
+    assert ir.structural_equal(actual.byte_offset_, expected.byte_offset_)
+    assert actual.size_ == expected.size_
+
+
 def _calls_with_loop_depth(program):
     class Collector(ir.IRVisitor):
         def __init__(self):
@@ -300,6 +366,215 @@ def test_ptoas_loop_carry_is_in_place_single_handle():
     # The accumulator alloc appears once, not once per SSA name (acc == acc_next).
     acc_allocs = [ln for ln in mlir.splitlines() if "pto.alloc_tile" in ln and out_handle in ln]
     assert len(acc_allocs) == 1, f"accumulator buffer must have exactly one alloc_tile:\n{mlir}"
+
+
+def test_ptoas_conditional_gather_phis_share_the_written_mat_window():
+    """The second update and transpose must observe the first phi's repaired storage."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=False):
+        initialized = passes.init_mem_ref()(passes.convert_to_ssa()(ConditionalGather))
+        after = passes.materialize_semantic_aliases()(initialized)
+
+    phis, tiles = _collect_mat_phi_storage(after)
+    assert len(phis) == 2
+    base = next(var for name, var in tiles.items() if name.startswith("base")).type.memref
+    assert base is not None
+    for phi, arms in phis:
+        assert phi.type.memref is not None
+        _assert_same_mat_window(phi.type.memref, base)
+        for arm in arms:
+            assert arm is not None
+            _assert_same_mat_window(arm, base)
+    transposed = next(var for name, var in tiles.items() if name.startswith("transposed"))
+    _assert_same_mat_window(transposed.type.memref, base)
+
+
+@pytest.mark.parametrize("enable_buffer_ir", [False, True])
+def test_ptoas_conditional_gather_preserves_one_mat_buffer(enable_buffer_ir):
+    """Both branch updates must reach one Mat buffer without an illegal Mat->Mat move."""
+    optimized, _ = _run_pipeline(
+        passes.MemoryPlanner.PTOAS, ConditionalGather, enable_buffer_ir=enable_buffer_ir
+    )
+    mlir = _codegen(optimized, emit_tile_addr=False)
+    moves = [line for line in mlir.splitlines() if "pto.tmov" in line]
+    assert not any(line.count("loc=mat") == 2 for line in moves), mlir
+    bases = {
+        line.split("pto.subview ", 1)[1].split("[", 1)[0]
+        for line in mlir.splitlines()
+        if "pto.subview " in line
+    }
+    assert len(bases) == 1, mlir
+
+
+def test_ptoas_distinct_mat_phi_preserves_independently_live_mixed_view_input():
+    """A differently typed view must not let an else load overwrite a live then input."""
+
+    @pl.program
+    class ConditionalMatLoad:
+        @pl.function(type=pl.FunctionType.AIC)
+        def kernel(
+            self,
+            x: pl.Tensor[[64, 64], pl.FP16],
+            flag: pl.Scalar[pl.INT32],
+            out: pl.Out[pl.Tensor[[128, 16], pl.FP32]],
+        ) -> pl.Tensor[[128, 16], pl.FP32]:
+            base = pl.tile.load(x, [0, 0], [32, 64], target_memory=pl.Mem.Mat)
+            if flag != 0:
+                selected = base
+            else:
+                selected = pl.tile.load(x, [32, 0], [32, 64], target_memory=pl.Mem.Mat)
+            base_transposed = pl.tile.transpose_view(base)
+            selected_transposed = pl.tile.transpose_view(selected)
+            rhs = pl.tile.load(x, [0, 0], [32, 16], target_memory=pl.Mem.Mat)
+            base_left = pl.tile.move(base_transposed, target_memory=pl.Mem.Left)
+            right = pl.tile.move(rhs, target_memory=pl.Mem.Right)
+            base_product = pl.tile.matmul(base_left, right)
+            first_out = pl.tile.store(base_product, [0, 0], out)
+            selected_left = pl.tile.move(selected_transposed, target_memory=pl.Mem.Left)
+            selected_product = pl.tile.matmul(selected_left, right)
+            output = pl.tile.store(selected_product, [64, 0], first_out)
+            return output
+
+    optimized, _ = _run_pipeline(passes.MemoryPlanner.PTOAS, ConditionalMatLoad, enable_buffer_ir=False)
+    mlir = _codegen(optimized, emit_tile_addr=False)
+    loads = [line for line in mlir.splitlines() if "pto.tload" in line]
+    assert len(loads) >= 2, mlir
+    base_handle, else_handle = [line.split("outs(")[1].split(":")[0].strip() for line in loads[:2]]
+    # The base is still read after the merge, independently of the selected value.
+    # Redirecting the else producer into it would corrupt the first output block.
+    # Distinct windows must keep their existing reconciliation fallback.
+    assert base_handle != else_handle, mlir
+
+
+@pytest.mark.parametrize(
+    "difference", ["same_window", "offset", "size", "slot", "allocation", "memory_space"]
+)
+def test_ptoas_if_alias_fixup_only_coalesces_same_mat_window(difference):
+    """Only matching Mat windows are normalized; other yields retain PTOAS handling."""
+    storage = pl.MemRef(slots=2)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 16], pl.FP16],
+            flag: pl.Scalar[pl.INT32],
+        ) -> pl.Tile[[16, 16], pl.FP16, pl.Mem.Mat]:
+            a: pl.Tile[[16, 16], pl.FP16, storage[0], pl.Mem.Mat] = pl.tile.load(
+                x, [0, 0], [16, 16], target_memory=pl.Mem.Mat
+            )
+            b = pl.tile.load(x, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            _destination = pl.tile.create([16, 16], dtype=pl.FP16, target_memory=pl.Mem.Mat)
+            if flag != 0:
+                merged = pl.yield_(a)
+            else:
+                merged = pl.yield_(b)
+            alias = pl.tile.reshape(merged, [16, 16])
+            return alias
+
+    program = Before
+    if difference == "memory_space":
+
+        @pl.program
+        class VectorBefore:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP16],
+                flag: pl.Scalar[pl.INT32],
+            ) -> pl.Tile[[16, 16], pl.FP16, pl.Mem.Vec]:
+                a = pl.tile.load(x, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+                b = pl.tile.load(x, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
+                _destination = pl.tile.create([16, 16], dtype=pl.FP16, target_memory=pl.Mem.Vec)
+                if flag != 0:
+                    merged = pl.yield_(a)
+                else:
+                    merged = pl.yield_(b)
+                alias = pl.tile.reshape(merged, [16, 16])
+                return alias
+
+        program = VectorBefore
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=False):
+        initialized = passes.init_mem_ref()(program)
+        phis, tiles = _collect_mat_phi_storage(initialized)
+        phi = phis[0][0]
+        a_memref = tiles["a"].type.memref
+        b_memref = tiles["b"].type.memref
+        destination = tiles["_destination"].type.memref
+        assert a_memref is not None and b_memref is not None and destination is not None
+        if difference == "offset":
+            b_memref = ir.MemRef(
+                a_memref.base_,
+                ir.ConstInt(a_memref.size_, pl.INDEX, a_memref.span),
+                a_memref.size_,
+                slots=a_memref.slot_count_,
+                slot=a_memref.slot_index_,
+            )
+        elif difference == "size":
+            b_memref = ir.MemRef(
+                a_memref.base_,
+                a_memref.byte_offset_,
+                2 * a_memref.size_,
+                slots=a_memref.slot_count_,
+                slot=a_memref.slot_index_,
+            )
+        elif difference == "slot":
+            # Equal byte offsets alone do not prove equal pipeline slot metadata.
+            b_memref = ir.MemRef(
+                a_memref.base_,
+                a_memref.byte_offset_,
+                a_memref.size_,
+                slots=a_memref.slot_count_,
+                slot=ir.ConstInt(1, pl.INDEX, a_memref.span),
+            )
+        elif difference in ("same_window", "memory_space"):
+            b_memref = a_memref
+
+        # InitMemRef initially inherits the then yield. Give the phi an independent
+        # existing destination so an accidental coalesce becomes observable. Both
+        # offset/size variants fit in the declared two-slot allocation.
+        replacements = {}
+        for old, memref in ((tiles["b"], b_memref), (phi, destination), (tiles["alias"], destination)):
+            tile_type = old.type
+            replacements[old.unique_id] = ir.Var(
+                old.name_hint,
+                ir.TileType(
+                    tile_type.shape,
+                    tile_type.dtype,
+                    memref,
+                    tile_type.tile_view,
+                    tile_type.memory_space,
+                ),
+                old.span,
+            )
+
+        class SetWindows(ir.IRMutator):
+            def visit_var(self, op):
+                return replacements.get(op.unique_id, op)
+
+        before = SetWindows().visit_program(initialized)
+        after = passes.materialize_semantic_aliases()(before)
+
+    if difference == "same_window":
+        phis, tiles = _collect_mat_phi_storage(after)
+        phi, arms = phis[0]
+        _assert_same_mat_window(phi.type.memref, a_memref)
+        for arm in arms:
+            _assert_same_mat_window(arm, a_memref)
+        _assert_same_mat_window(tiles["alias"].type.memref, a_memref)
+        function = next(iter(after.functions.values()))
+        assert isinstance(function.body, ir.SeqStmts)
+        returned = function.body.stmts[-1]
+        assert isinstance(returned, ir.ReturnStmt)
+        assert returned.value[0].same_as(tiles["alias"])
+    else:
+        # The PTOAS false switch still leaves other branch storage to codegen.
+        ir.assert_structural_equal(after, before)
 
 
 @pytest.mark.parametrize("enable_buffer_ir", [False, True])

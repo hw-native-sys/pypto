@@ -194,6 +194,9 @@ physical address for ptoas `PlanMemory`. See
   behavior of the former single `MemoryReuse` pass.
 - `DSA_RP` and `PTOAS` both skip opportunistic MemRef coalescing here; neither
   may undo a must-alias relation established by this pass.
+- On the legacy `PTOAS` path, if both branches yield the same Mat byte window
+  (allocation, offset, size, and pipeline slot), the merged result retains that
+  window without a copy. Distinct branch windows keep their existing handling.
 - Accumulator-phi normalization runs for every memory planner before lifetime
   planning. The legacy `PYPTO` path repeats it after opportunistic reuse because
   reuse can introduce a fresh carry/phi mismatch.

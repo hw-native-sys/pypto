@@ -158,6 +158,9 @@ pipeline-slot 元数据）的变量渲染成同一个 `tile_buf` handle，因此
   `MemoryReuse` pass 的行为。
 - `DSA_RP` 与 `PTOAS` 都跳过这里的机会性 MemRef 合并；二者都不能撤销本 pass
   建立的强制别名关系。
+- 在 legacy `PTOAS` 路径中，若两个分支 yield 同一 Mat 字节窗口（allocation、
+  offset、size 和 pipeline slot 相同），合并结果保留该窗口，无需复制。
+  不同分支窗口沿用原有处理。
 - accumulator-phi 规范化会在 lifetime planning 之前对所有 memory planner 运行。
   legacy `PYPTO` 路径在机会性 reuse 之后会再运行一次，因为 reuse 可能引入新的
   carry/phi mismatch。
