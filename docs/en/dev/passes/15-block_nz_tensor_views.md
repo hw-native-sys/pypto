@@ -134,10 +134,12 @@ the enclosing function in one read-only sweep:
 | `ConstInt` | the value is a multiple | the value is `>= 0` |
 
 Sums and products compose from those; a difference proves divisibility but never
-its sign, so it is refused. Division by a positive constant is proven from its
-dividend rather than from the operation's name: `FloorMod` lowers to
-`arith.remsi` and `FloorDiv` to `arith.divsi`, which truncate toward zero, so
-a negative dividend yields a negative remainder. **Both** columns must hold — see [Why the sign is
+its sign, so it is refused. The current proof conservatively requires a
+non-negative dividend for both operations. Signed integer and `INDEX`
+`FloorMod` codegen corrects `arith.remsi` to floor semantics, so a positive
+divisor yields a non-negative remainder even for a negative dividend; this pass
+does not use that stronger fact. `FloorDiv` still lowers to truncating
+`arith.divsi`. **Both** columns must hold — see [Why the sign is
 proven too](#why-the-sign-is-proven-too). The grouped-matmul weight path that
 motivated the feature therefore compiles:
 

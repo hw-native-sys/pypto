@@ -439,19 +439,24 @@ tile 调用 `set_validshape`。
 %l0c_mb = pto.alloc_multi_tile valid_row = %c64_index valid_col = %c64_index
         : !pto.multi_tile_buf<!pto.tile_buf<loc=vec, dtype=f32, rows=64, cols=64, ...>, count=2>
 scf.for %i = %c0_index to %c4_index step %c1_index {
-  %0 = arith.remsi %i, %c2_index : index
-  %t = pto.multi_tile_get %l0c_mb[%0]
+  %rem = arith.remsi %i, %c2_index : index
+  %negative = arith.cmpi slt, %rem, %c0_index : index
+  %corrected = arith.addi %rem, %c2_index : index
+  %slot = arith.select %negative, %corrected, %rem : index
+  %t = pto.multi_tile_get %l0c_mb[%slot]
      : !pto.multi_tile_buf<..., count=2> -> !pto.tile_buf<loc=vec, ...>
   ...
 }
 ```
 
+有符号整数和 `INDEX` 槽位采用[修正后的向下取模余数](../passes/30-lower_pipeline_to_slots.md#生成的-pto-ir)，保持 Python `%` 的语义。
+
 有两点关键：
 
 - **不带 `addr`。** 区域由 ptoas `PlanMemory` 放置，且它被禁止合并这些槽位——这正是把作者
   声明的隔离带进 `level2` 的方式。
-- **操作数是槽位下标，而不是** `InitMemRef` 由它算出的字节偏移。ptoas 通过匹配下标的仿射形态
-  （`i % 2`）判断哪些访问可能落在同一槽位，这才是轮转能拿到按槽位的（动态）event id 的原因
+- **操作数是槽位下标，而不是** `InitMemRef` 由它算出的字节偏移。修正后的余数直接传入 `multi_tile_get`，
+  不会乘以槽位的字节数。ptoas 识别下标（`i % 2`）以判断哪些访问可能落在同一槽位，这才是轮转能拿到按槽位的（动态）event id 的原因
   ——第 *i* 轮的 load 由此与第 *i-1* 轮的计算重叠。
 
 `PlanMultiBufferRegions` 在遍历函数体之前判定适用性；ptoas 无法描述的形态（各槽位 tile 形状

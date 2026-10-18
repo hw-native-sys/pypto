@@ -936,11 +936,11 @@ def test_rejects_a_reshape_that_is_not_a_whole_tensor_flatten():
 
 
 def test_rejects_a_remainder_of_an_unproven_dividend():
-    """A remainder is only non-negative when its dividend is.
+    """The conservative proof still requires a non-negative dividend.
 
-    ``FloorMod`` lowers to ``arith.remsi``, which truncates toward zero, so
-    ``(blk - 1) % 2`` is -1 on the first block. A difference proves no sign, so
-    the whole offset stays unproven rather than being trusted for its divisor.
+    ``FloorMod`` codegen corrects negative remainders, so ``(blk - 1) % 2``
+    is 1 on the first block. This pass does not use that stronger fact: a
+    difference proves no sign, so the whole offset remains unproven.
     """
 
     @pl.jit

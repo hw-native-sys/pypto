@@ -131,12 +131,28 @@ cannot model.
 %pipe_t_mb = pto.alloc_multi_tile valid_row = %c64_index valid_col = %c64_index
            : !pto.multi_tile_buf<!pto.tile_buf<loc=vec, dtype=f32, rows=64, cols=64, ...>, count=2>
 scf.for %i = %c0_index to %c4_index step %c1_index {
-  %0 = arith.remsi %i, %c2_index : index
-  %t = pto.multi_tile_get %pipe_t_mb[%0] : !pto.multi_tile_buf<..., count=2> -> !pto.tile_buf<...>
+  %rem = arith.remsi %i, %c2_index : index
+  %negative = arith.cmpi slt, %rem, %c0_index : index
+  %corrected = arith.addi %rem, %c2_index : index
+  %slot = arith.select %negative, %corrected, %rem : index
+  %t = pto.multi_tile_get %pipe_t_mb[%slot] : !pto.multi_tile_buf<..., count=2> -> !pto.tile_buf<...>
   pto.tload ins(...) outs(%t : ...)
   ...
 }
 ```
+
+The signed `INDEX` remainder is corrected to floor-modulo semantics before it
+selects the slot. The operand remains a logical index, without byte scaling;
+ptoas can still derive dynamic slot selection and per-slot event ids.
+
+More generally, signed integer and `INDEX` `FloorMod` preserve Python's `%`
+semantics: a nonzero remainder has the divisor's sign. A positive constant
+divisor needs only the negative-remainder check above; a negative constant uses
+a positive-remainder check. For a dynamic divisor, codegen checks that the
+remainder is nonzero and its sign differs from the divisor before adding the
+divisor. For example, `-97 % 24` produces `23`. Division by zero and signed
+minimum modulo `-1` remain outside the operation's valid inputs.
+Floating-point and unsigned lowering and `FloorDiv` are unchanged.
 
 The loop strides by its original step with a single body, and the region carries no `addr` — ptoas `PlanMemory` places it, which is what lets it overlap iteration *i*'s load with iteration *i-1*'s compute.
 

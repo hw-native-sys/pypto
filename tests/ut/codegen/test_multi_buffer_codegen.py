@@ -23,10 +23,14 @@ does not emit — so the baked-address ``pto.alloc_tile`` path stays.
 # DSL function bodies are parsed as AST, not executed — suppress pyright errors.
 # pyright: reportUndefinedVariable=false
 
+import re
+
 import pypto.language as pl
 import pytest
 from pypto import backend, ir
 from pypto.backend import BackendType
+from pypto.backend._ptoas_locate import find_ptoas_binary
+from pypto.backend.pto_backend import _run_ptoas
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import codegen, passes
 
@@ -311,6 +315,36 @@ def _lines(mlir: str, needle: str) -> list[str]:
     return [line.strip() for line in mlir.splitlines() if needle in line]
 
 
+def _assert_logical_slot_index(mlir: str) -> None:
+    """Each selected slot is the corrected ``iv % 2``, without byte scaling."""
+    definitions = {
+        name: expression.split(" loc(", 1)[0]
+        for name, expression in re.findall(r"^\s*(%\w+) = (.+)$", mlir, re.MULTILINE)
+    }
+    loop = re.search(r"scf\.for (%\w+) =", mlir)
+    assert loop is not None, mlir
+    gets = _lines(mlir, "pto.multi_tile_get")
+    assert gets, mlir
+    for get in gets:
+        slot = get.split("[")[1].split("]")[0]
+        selected = re.fullmatch(r"arith\.select (%\w+), (%\w+), (%\w+) : index", definitions.get(slot, ""))
+        assert selected is not None, f"slot {slot} must use the corrected remainder:\n{mlir}"
+        condition, corrected, remainder = selected.groups()
+        division = re.fullmatch(r"arith\.remsi (%\w+), (%\w+) : index", definitions.get(remainder, ""))
+        assert division is not None, f"slot {slot} must depend on a remainder:\n{mlir}"
+        dividend, divisor = division.groups()
+        assert dividend == loop.group(1), f"the slot must depend on the loop index:\n{mlir}"
+        assert definitions[divisor] == "arith.constant 2 : index", mlir
+        assert definitions[corrected] == f"arith.addi {remainder}, {divisor} : index", mlir
+        comparison = re.fullmatch(
+            rf"arith\.cmpi slt, {re.escape(remainder)}, (%\w+) : index", definitions[condition]
+        )
+        assert comparison is not None, f"negative remainders must select the corrected value:\n{mlir}"
+        assert definitions[comparison.group(1)] == "arith.constant 0 : index", mlir
+        # The complete chain is rem/cmp/add/select. A scaled byte offset cannot
+        # reach multi_tile_get through any of these checked operands.
+
+
 def _tile_memrefs(program: ir.Program) -> dict[str, ir.MemRef]:
     """Map every TileType assignment's var name to its MemRef."""
     found: dict[str, ir.MemRef] = {}
@@ -360,20 +394,7 @@ class TestPtoasPlannerEmitsMultiBuffer:
         event ids. Handing it a byte offset (`i % 2 * 16384`) would defeat it.
         """
         mlir = _codegen(RotatingSlot, passes.MemoryPlanner.PTOAS)
-        get = _lines(mlir, "pto.multi_tile_get")[0]
-        slot_ssa = get.split("[")[1].split("]")[0]
-
-        # The slot SSA is defined by a remainder over the loop induction variable,
-        # with no scaling by the slot size in between.
-        definition = next((ln for ln in mlir.splitlines() if ln.strip().startswith(f"{slot_ssa} =")), None)
-        assert definition is not None, f"slot operand {slot_ssa} has no definition:\n{mlir}"
-        assert "remui" in definition or "remsi" in definition, (
-            f"the slot operand must be the index expression, got: {definition}"
-        )
-        slot_bytes = 64 * 64 * 4
-        assert str(slot_bytes) not in definition, (
-            f"the slot operand must not be scaled to a byte offset: {definition}"
-        )
+        _assert_logical_slot_index(mlir)
 
     def test_constant_slots_share_one_region(self):
         """Constant slots are the same story — one region, two selections."""
@@ -568,7 +589,7 @@ class TestPipelineLowersToARegion:
     def test_slot_operand_is_the_affine_index_not_a_byte_offset(self):
         """ptoas matches `i % 2` to earn the rotation its dynamic event ids."""
         mlir = _codegen(PipelinedLoad, passes.MemoryPlanner.PTOAS)
-        assert _lines(mlir, "arith.remsi"), f"the slot index must survive as a remainder:\n{mlir}"
+        _assert_logical_slot_index(mlir)
 
     def test_the_body_is_not_replicated(self):
         """One load in the loop, and the loop still strides by its original step."""
@@ -585,6 +606,56 @@ class TestPipelineLowersToARegion:
         assert _lines(mlir, "pto.alloc_multi_tile") == []
         assert len(_lines(mlir, "pto.tload")) == 3, f"seed + two replicated loads:\n{mlir}"
         assert "step %c2_index" in _lines(mlir, "scf.for")[0]
+
+
+@pytest.mark.parametrize("program", [RotatingSlot, PipelinedLoad], ids=["declared", "pipeline"])
+def test_corrected_slot_preserves_native_dynamic_events(tmp_path, program):
+    """The native consumer retains dynamic addresses and per-slot sync."""
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    mlir = _codegen(program, passes.MemoryPlanner.PTOAS)
+    _assert_logical_slot_index(mlir)
+    source = tmp_path / "rotating_slot.pto"
+    output = tmp_path / "rotating_slot.cpp"
+    source.write_text(mlir)
+    _run_ptoas(str(source), str(output), ["--pto-level=level2", "--pto-arch=a2", "--enable-insert-sync"])
+    cpp = output.read_text()
+    loop = re.search(r"for \(int64_t (\w+) =", cpp)
+    assert loop is not None, cpp
+    loop_iv = loop.group(1)
+    loop_body = cpp[loop.end() :]
+    definitions = dict(re.findall(r"^\s*(?:const )?(?:u?int\d+_t|event_t) (\w+) = (.+);$", cpp, re.MULTILINE))
+
+    def dependencies(value: str) -> set[str]:
+        found: set[str] = set()
+        pending = [value]
+        while pending:
+            current = pending.pop()
+            if current in found:
+                continue
+            found.add(current)
+            pending.extend(re.findall(r"\b\w+\b", definitions.get(current, "")))
+        return found
+
+    remainders = {name for name, expr in definitions.items() if re.search(rf"\b{loop_iv}\s*%", expr)}
+    assert len(remainders) == 1, f"the native loop must retain its remainder:\n{cpp}"
+    remainder = remainders.pop()
+    corrected = {
+        name
+        for name, expr in definitions.items()
+        if "<" in expr and "?" in expr and remainder in dependencies(name)
+    }
+    assert len(corrected) == 1, f"the native loop must retain the floor correction:\n{cpp}"
+    slot = corrected.pop()
+    addresses = re.findall(r"TASSIGN\(\w+, (\w+)\);", loop_body)
+    assert addresses and all(slot in dependencies(address) for address in addresses), (
+        f"the selected tile address must use the corrected slot:\n{cpp}"
+    )
+    for operation in ("wait_flag", "set_flag"):
+        events = re.findall(rf"{operation}\(PIPE_V, PIPE_MTE2, (\w+)\);", loop_body)
+        assert any(slot in dependencies(event) for event in events), (
+            f"{operation} must retain a per-slot dynamic event id:\n{cpp}"
+        )
 
 
 if __name__ == "__main__":

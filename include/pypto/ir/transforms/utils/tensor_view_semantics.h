@@ -458,11 +458,9 @@ inline bool IsProvableNonNegative(const ExprPtr& expr, const NzOffsetFacts& fact
   // non-negative. This is what a split-K block index reaches for --
   // ``(block % OK) * K_SLICE`` names the K half.
   //
-  // The dividend has to be proven too, rather than resting on the name:
-  // ``FloorMod`` lowers to ``arith.remsi`` (``pto_scalar_expr_codegen.cpp``),
-  // which truncates toward zero, so a negative dividend yields a negative
-  // remainder -- and a negative partition offset is clamped to 0 rather than
-  // caught, which is the silent wrong read this whole proof exists to prevent.
+  // Keep the proof conservative: signed integer and INDEX FloorMod codegen
+  // corrects arith.remsi to floor semantics, but this predicate still requires
+  // a non-negative dividend instead of relying on that stronger result bound.
   if (auto mod = As<FloorMod>(expr)) {
     auto divisor = As<ConstInt>(mod->right_);
     return divisor && divisor->value_ > 0 && IsProvableNonNegative(mod->left_, facts, budget);

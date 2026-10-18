@@ -470,20 +470,26 @@ the function head and one slot selection per use:
 %l0c_mb = pto.alloc_multi_tile valid_row = %c64_index valid_col = %c64_index
         : !pto.multi_tile_buf<!pto.tile_buf<loc=vec, dtype=f32, rows=64, cols=64, ...>, count=2>
 scf.for %i = %c0_index to %c4_index step %c1_index {
-  %0 = arith.remsi %i, %c2_index : index
-  %t = pto.multi_tile_get %l0c_mb[%0]
+  %rem = arith.remsi %i, %c2_index : index
+  %negative = arith.cmpi slt, %rem, %c0_index : index
+  %corrected = arith.addi %rem, %c2_index : index
+  %slot = arith.select %negative, %corrected, %rem : index
+  %t = pto.multi_tile_get %l0c_mb[%slot]
      : !pto.multi_tile_buf<..., count=2> -> !pto.tile_buf<loc=vec, ...>
   ...
 }
 ```
+
+Signed integer and `INDEX` slots use [corrected floor remainders](../passes/30-lower_pipeline_to_slots.md#generated-pto-ir), preserving Python's `%` semantics.
 
 Two properties matter:
 
 - **No `addr`.** ptoas `PlanMemory` places the region and is forbidden to merge
   its slots, which is what carries the author's separation into `level2`.
 - **The operand is the slot index, not the byte offset** `InitMemRef` derived from
-  it. ptoas matches the index's affine form (`i % 2`) to decide which accesses can
-  share a slot, and that is what earns the rotation per-slot (dynamic) event ids —
+  it. The corrected remainder feeds `multi_tile_get` directly; it is never scaled
+  by the slot's byte size. ptoas recognizes the index (`i % 2`) to decide which
+  accesses can share a slot, and that earns the rotation per-slot (dynamic) event ids —
   iteration *i*'s load overlapping iteration *i-1*'s compute.
 
 `PlanMultiBufferRegions` decides eligibility before the body walk; a shape ptoas
