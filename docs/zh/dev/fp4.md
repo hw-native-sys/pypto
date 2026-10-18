@@ -31,7 +31,7 @@ NZ / col_major / distributed 的 FP4 族路径在本切片不支持（硬拒随 
 多行 ND packed 张量请用 **carrier** 末维与 leading stride（例如每行 512 逻辑
 nibble 写成 `pl.Tensor[[2, 256], pl.FP4E2M1X2]`）。Codegen 保留 GM view 的 carrier 单位。
 PTOAS v0.67 会将传输描述符转换为 pto-isa 所需的 nibble 单位；PyPTO 再次扩展会导致行步长翻倍。在 `FP4E2M1X2` 上误用逻辑宽度，
-或在无自动打包时用逻辑 `pl.FP4` 多行 ND，可能导致 GM 行 stride 错位——见 issue
+可能导致 GM 行 stride 错位；在自动 PackFp4 将 nibble 尺寸转换为 carrier 之前，in-core PTO codegen 会拒绝逻辑 `pl.FP4`——见 issue
 [#2754](https://github.com/hw-native-sys/pypto/issues/2754)。
 
 ## 通过 UB alias 解码 UINT8 carrier（Ascend950）
@@ -133,7 +133,7 @@ def fp4x2_to_fp8(
 | 特性 | PyPTO | 说明 |
 | ---- | ----- | ---- |
 | 手写 `pl.FP4E2M1X2` | ✅ | packed 路径的首选前端；**仅 ND** |
-| 无 PackFp4 的逻辑 `pl.FP4` | ⚠️ | Prefer Warning；A5 in-core 仍支持逻辑 FP4，并与 FP4E2M1X2 并存 |
+| 无 PackFp4 的逻辑 `pl.FP4` | ❌ | In-core PTO codegen 拒绝 nibble 单位的 GM view；请使用 carrier 尺寸的 `FP4E2M1X2` |
 | 打包 GM view 保留 carrier 单位 | ✅ | PTOAS v0.67 负责 DMA 转换（ND） |
 | UINT8 → FP4E2M1X2 UB alias | ✅ | 二维 packed row-major Vec；carrier shape 不变；仅 PYPTO / DSA_RP |
 | `FP4E2M1X2` ↔ BF16 cast | ✅ | 静默原生 hop；结果 stride 重建为连续 |
@@ -148,7 +148,7 @@ def fp4x2_to_fp8(
 1. 手写 `pl.FP4E2M1X2` 并用物理 carrier shape（避免 `#2754` 类 stride 问题）。
 2. 需要更宽浮点时 cast 到 BF16。
 3. FP4→FP8 优先 **LUT / 主机**；设备 cast 仅 Warning。
-4. 仅在接受不完整路径时保留逻辑 `pl.FP4`，直到 PackFp4 落地。
+4. PackFp4 落地前，in-core GM 访问请使用 `pl.FP4E2M1X2`。
 
 ## 另见
 

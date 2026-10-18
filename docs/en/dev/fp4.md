@@ -35,8 +35,9 @@ Write multi-row ND packed tensors with **carrier** last dims and leading strides
 (for example `pl.Tensor[[2, 256], pl.FP4E2M1X2]` for 512 logical nibbles per row).
 Codegen preserves carrier units in GM views. PTOAS v0.67 converts transfer
 descriptors to nibble units for pto-isa; expanding them in PyPTO as well doubles
-the row pitch. Using logical widths on `FP4E2M1X2` (or logical `pl.FP4` multi-row ND
-without automatic pack) can mis-size GM row strides — see issue
+the row pitch. Using logical widths on `FP4E2M1X2` can mis-size GM row strides;
+logical `pl.FP4` is rejected by in-core PTO codegen until automatic PackFp4
+converts its nibble dimensions to carriers — see issue
 [#2754](https://github.com/hw-native-sys/pypto/issues/2754).
 
 ## Decode a UINT8 carrier through a UB alias (Ascend950)
@@ -144,7 +145,7 @@ Legend: ✅ supported · ⚠️ partial / Warning · ❌ unsupported · ⏳ not 
 | Feature | PyPTO | Notes |
 | ------- | ----- | ----- |
 | Hand-written `pl.FP4E2M1X2` | ✅ | Preferred frontend for packed paths; **ND only** |
-| Logical `pl.FP4` without PackFp4 | ⚠️ | Prefer warning; A5 in-core still supports legacy logical FP4 alongside FP4E2M1X2 |
+| Logical `pl.FP4` without PackFp4 | ❌ | In-core PTO codegen rejects nibble-unit GM views; use `FP4E2M1X2` with carrier dimensions |
 | Packed GM views in carrier units | ✅ | PTOAS v0.67 handles DMA conversion (ND) |
 | UINT8 → FP4E2M1X2 UB alias | ✅ | 2D packed row-major Vec; same carrier shape; PYPTO / DSA_RP only |
 | `FP4E2M1X2` ↔ BF16 cast | ✅ | Silent native hop; result strides rebuilt contiguous |
@@ -159,7 +160,7 @@ Legend: ✅ supported · ⚠️ partial / Warning · ❌ unsupported · ⏳ not 
 1. Hand-write `pl.FP4E2M1X2` with physical carrier shapes (avoids `#2754`-class stride bugs).
 2. Cast to BF16 when a native wider float is enough.
 3. Prefer **LUT / host** for FP4→FP8; device cast is Warning-only.
-4. Keep logical `pl.FP4` only if you accept the incomplete path until PackFp4 lands.
+4. Use `pl.FP4E2M1X2` for in-core GM accesses until PackFp4 lands.
 
 ## See also
 

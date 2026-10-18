@@ -2503,9 +2503,15 @@ std::string PTOCodegen::GetTypeString(const DataType& dtype) const {
     }
     CHECK(false) << dtype_kind << dtype.ToString()
                  << " is not supported for end-to-end in-core codegen on backend '" << arch
-                 << "'. A5 supports FP4 and packed FP4E2M1X2 among FP4-family / 4-bit paths; "
+                 << "'. A5 supports packed FP4E2M1X2 among FP4-family / 4-bit paths; "
                     "INT4 / UINT4 / HF4 are rejected (see docs/en/dev/fp4.md)";
   }
+  // Logical FP4 dimensions count nibbles, while PTOAS v0.67 interprets
+  // !pto.f4E2M1x2 GM views and partition windows as packed carriers. Mapping
+  // FP4 to that type without PackFp4 would double multi-row pitches and can
+  // address beyond the backing allocation. Reject it before emitting any PTO.
+  CHECK(dtype != DataType::FP4) << "Logical FP4 is not supported for in-core PTO codegen with PTOAS v0.67: "
+                                   "use FP4E2M1X2 with physical carrier dimensions (see docs/en/dev/fp4.md)";
   return DataTypeToMLIR(dtype);
 }
 
