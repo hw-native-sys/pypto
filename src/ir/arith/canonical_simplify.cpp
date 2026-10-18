@@ -537,7 +537,15 @@ ExprPtr CanonicalSimplifier::Impl::VisitExpr_(const MulPtr& op) {
 ExprPtr CanonicalSimplifier::Impl::VisitExpr_(const FloorDivPtr& op) {
   ExprPtr a = VisitExpr(op->left_);
   ExprPtr b = VisitExpr(op->right_);
-  if (auto folded = TryConstFoldBinary(ObjectKind::FloorDiv, a, b)) return folded;
+  // Bound-based rewrites also assume stored constants are mathematical values.
+  // Preserve this operation if a literal would wrap during runtime lowering.
+  const DataType dtype = GetScalarDtype(op);
+  if (!detail::FloorDivModOperandsFitDtype(a, b, dtype)) {
+    if (a.get() == op->left_.get() && b.get() == op->right_.get()) return op;
+    // Operand promotion here would change the width used to interpret the literal.
+    return std::make_shared<FloorDiv>(a, b, dtype, op->span_);
+  }
+  if (auto folded = TryConstFoldBinary(ObjectKind::FloorDiv, a, b, dtype)) return folded;
 
   auto ci = As<ConstInt>(b);
   if (ci && ci->value_ > 0) {
@@ -567,7 +575,15 @@ ExprPtr CanonicalSimplifier::Impl::VisitExpr_(const FloorDivPtr& op) {
 ExprPtr CanonicalSimplifier::Impl::VisitExpr_(const FloorModPtr& op) {
   ExprPtr a = VisitExpr(op->left_);
   ExprPtr b = VisitExpr(op->right_);
-  if (auto folded = TryConstFoldBinary(ObjectKind::FloorMod, a, b)) return folded;
+  // Bound-based rewrites also assume stored constants are mathematical values.
+  // Preserve this operation if a literal would wrap during runtime lowering.
+  const DataType dtype = GetScalarDtype(op);
+  if (!detail::FloorDivModOperandsFitDtype(a, b, dtype)) {
+    if (a.get() == op->left_.get() && b.get() == op->right_.get()) return op;
+    // Operand promotion here would change the width used to interpret the literal.
+    return std::make_shared<FloorMod>(a, b, dtype, op->span_);
+  }
+  if (auto folded = TryConstFoldBinary(ObjectKind::FloorMod, a, b, dtype)) return folded;
 
   auto ci = As<ConstInt>(b);
   if (ci && ci->value_ > 0) {

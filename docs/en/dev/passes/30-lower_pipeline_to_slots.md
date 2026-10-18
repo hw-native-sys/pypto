@@ -152,7 +152,11 @@ a positive-remainder check. For a dynamic divisor, codegen checks that the
 remainder is nonzero and its sign differs from the divisor before adding the
 divisor. For example, `-97 % 24` produces `23`. Division by zero and signed
 minimum modulo `-1` remain outside the operation's valid inputs.
-Floating-point and unsigned lowering and `FloorDiv` are unchanged.
+Signed integer and `INDEX` `FloorDiv` use `arith.floordivsi` for the matching
+floor quotient, preserving `a == (a // b) * b + a % b`. Floating-point and
+unsigned lowering are unchanged. Floor-division and floor-modulo constant
+folding leave out-of-range typed literals for runtime evaluation so they cannot
+replace their emitted bit patterns with calculations on the raw stored integers.
 
 The loop strides by its original step with a single body, and the region carries no `addr` — ptoas `PlanMemory` places it, which is what lets it overlap iteration *i*'s load with iteration *i-1*'s compute.
 

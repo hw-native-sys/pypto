@@ -1108,18 +1108,13 @@ def test_float_floor_mod_keeps_float_remainder():
     assert "arith.select" not in mlir
 
 
-@pytest.mark.parametrize(
-    "dtype",
-    [DataType.INT8, DataType.INT16, DataType.INT32, DataType.INT64, DataType.INDEX],
-    ids=["i8", "i16", "i32", "i64", "index"],
-)
-def test_signed_floor_mod_ptoas_matches_python_without_device(tmp_path, dtype):
-    """Execute official PTOAS scalar C++ on CPU, including signed boundary cases.
+def _run_scalar_ptoas_on_cpu(
+    tmp_path, mlir: str, function_name: str, output_count: int, cases: list[tuple[int, int]]
+) -> list[list[int]]:
+    """Run untouched PTOAS arithmetic with device synchronization stubbed on CPU.
 
-    Hardware synchronization has no effect on scalar arithmetic and is stubbed;
-    every modulo, comparison, select, cast, and store comes from PTOAS unchanged.
-    UBSan traps on undefined arithmetic without requiring its runtime library,
-    including eager signed overflow in an unselected correction branch.
+    UBSan traps without its runtime library, including undefined arithmetic in
+    a speculatively evaluated correction branch.
     """
     if find_ptoas_binary() is None:
         pytest.skip("PTOAS is not available")
@@ -1127,23 +1122,7 @@ def test_signed_floor_mod_ptoas_matches_python_without_device(tmp_path, dtype):
     if compiler is None:
         pytest.skip("No C++ compiler is available")
 
-    bits = {DataType.INT8: 8, DataType.INT16: 16, DataType.INT32: 32}.get(dtype, 64)
-    minimum = -(1 << (bits - 1))
-    maximum = (1 << (bits - 1)) - 1
-    divisors = (None, 24, -24, maximum, minimum)
-    effective_divisors = divisors
-    if dtype == DataType.INT32:
-        # Positive INT64 2**32-3 becomes negative i32 -3; the inverse literal
-        # becomes +3. Constant-sign shortcuts must use the emitted i32 sign.
-        divisors += ((1 << 32) - 3, -((1 << 32) - 3))
-        effective_divisors += (-3, 3)
-    elif dtype in (DataType.INT8, DataType.INT16):
-        # Signless i8/i16 constants accept the positive bit pattern for -3.
-        # Its raw Python value must not select the positive-divisor shortcut.
-        divisors += ((1 << bits) - 3,)
-        effective_divisors += (-3,)
-    mlir = _scalar_floor_mod_mlir(dtype, divisors, include_owner=True)
-    cpp = pto_backend._compile_pto_module(mlir, "scalar_floor_mod", str(tmp_path))
+    cpp = pto_backend._compile_pto_module(mlir, function_name, str(tmp_path))
     cpp = _preprocess_ptoas_output(cpp)
     source = f"""
 #include <cstdint>
@@ -1162,14 +1141,14 @@ void dsb(mem_dsb_t) {{}}
 int main() {{
     int64_t dividend, divisor;
     while (std::cin >> dividend >> divisor) {{
-        int64_t output[{len(divisors) + 1}] = {{}};
-        scalar_floor_mod(output, dividend, divisor);
+        int64_t output[{output_count}] = {{}};
+        {function_name}(output, dividend, divisor);
         for (int64_t value : output) std::cout << value << ' ';
         std::cout << '\\n';
     }}
 }}
 """
-    executable = tmp_path / "scalar_floor_mod"
+    executable = tmp_path / function_name
     compiled = subprocess.run(
         [
             compiler,
@@ -1192,6 +1171,37 @@ int main() {{
     )
     assert compiled.returncode == 0, compiled.stderr
 
+    executed = subprocess.run(
+        [str(executable)],
+        input="".join(f"{lhs} {rhs}\n" for lhs, rhs in cases),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert executed.returncode == 0, executed.stderr
+    return [list(map(int, line.split())) for line in executed.stdout.splitlines()]
+
+
+def _signed_floor_divmod_cases(
+    dtype: DataType,
+) -> tuple[tuple[int | None, ...], tuple[int | None, ...], list[tuple[int, int]]]:
+    """Share sign, narrowing, exact-division, and boundary cases for quotient and remainder."""
+    bits = {DataType.INT8: 8, DataType.INT16: 16, DataType.INT32: 32}.get(dtype, 64)
+    minimum = -(1 << (bits - 1))
+    maximum = (1 << (bits - 1)) - 1
+    divisors = (None, 24, -24, maximum, minimum)
+    effective_divisors = divisors
+    if dtype == DataType.INT32:
+        # Positive INT64 2**32-3 becomes negative i32 -3; the inverse literal
+        # becomes +3. Constant-sign shortcuts must use the emitted i32 sign.
+        divisors += ((1 << 32) - 3, -((1 << 32) - 3))
+        effective_divisors += (-3, 3)
+    elif dtype in (DataType.INT8, DataType.INT16):
+        # Signless i8/i16 constants accept the positive bit pattern for -3.
+        # Its raw Python value must not select the positive-divisor shortcut.
+        divisors += ((1 << bits) - 3,)
+        effective_divisors += (-3,)
     cases = [
         (-97, 24),
         (97, -24),
@@ -1217,23 +1227,118 @@ int main() {{
         (maximum, maximum),
     ]
     # MIN / -1 and division by zero are undefined in remsi and excluded.
-    executed = subprocess.run(
-        [str(executable)],
-        input="".join(f"{lhs} {rhs}\n" for lhs, rhs in cases),
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-    assert executed.returncode == 0, executed.stderr
-    actual = [list(map(int, line.split())) for line in executed.stdout.splitlines()]
+    return divisors, effective_divisors, cases
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    [DataType.INT8, DataType.INT16, DataType.INT32, DataType.INT64, DataType.INDEX],
+    ids=["i8", "i16", "i32", "i64", "index"],
+)
+def test_signed_floor_mod_ptoas_matches_python_without_device(tmp_path, dtype):
+    """Execute official PTOAS scalar C++ on CPU, including signed boundary cases.
+
+    Hardware synchronization has no effect on scalar arithmetic and is stubbed;
+    every modulo, comparison, select, cast, and store comes from PTOAS unchanged.
+    UBSan traps on undefined arithmetic without requiring its runtime library,
+    including eager signed overflow in an unselected correction branch.
+    """
+    divisors, effective_divisors, cases = _signed_floor_divmod_cases(dtype)
+    mlir = _scalar_floor_mod_mlir(dtype, divisors, include_owner=True)
+    actual = _run_scalar_ptoas_on_cpu(tmp_path, mlir, "scalar_floor_mod", len(divisors) + 1, cases)
     expected = [
         [lhs % (rhs if divisor is None else divisor) for divisor in effective_divisors] + [48 + lhs % 24]
         for lhs, rhs in cases
     ]
-    assert len(actual) == len(expected), executed.stdout
+    assert len(actual) == len(expected), actual
     for case, values, reference in zip(cases, actual, expected):
         assert values == reference, f"FloorMod results for {dtype}, input pair {case}"
+
+
+def _scalar_floor_divmod_mlir(dtype: DataType, divisors: tuple[int | None, ...] = (None,)) -> str:
+    """Keep quotient/remainder let-bound while separately simplifying their inline reconstruction."""
+    span = ir.Span.unknown()
+    output_type = ir.TensorType([4 * len(divisors)], DataType.INT64)
+    ib = IRBuilder()
+    with ib.function("scalar_floor_divmod", type=ir.FunctionType.InCore) as f:
+        output = f.param("output", output_type)
+        dividend = f.param("dividend", ir.ScalarType(dtype))
+        divisor = f.param("divisor", ir.ScalarType(dtype))
+        f.return_type(output_type)
+        for index, constant in enumerate(divisors):
+            constant_type = DataType.INT64 if dtype == DataType.INT32 else dtype
+            rhs = divisor if constant is None else ir.ConstInt(constant, constant_type, span)
+            quotient_expr = ir.FloorDiv(dividend, rhs, dtype, span)
+            remainder_expr = ir.FloorMod(dividend, rhs, dtype, span)
+            quotient = ib.let(f"quotient_{index}", quotient_expr)
+            remainder = ib.let(f"remainder_{index}", remainder_expr)
+            # A let prevents the simplifier from seeing q/r's defining expressions.
+            # Widen small operands before q * rhs, which can lie just outside
+            # their signed range. INT64/INDEX use same-width wrapping arithmetic.
+            if dtype in (DataType.INT8, DataType.INT16, DataType.INT32):
+                wide_rhs = ir.Cast(ir.Cast(rhs, dtype, span), DataType.INT64, span)
+                product = ir.Mul(ir.Cast(quotient, DataType.INT64, span), wide_rhs, DataType.INT64, span)
+                recombined = ir.Add(product, ir.Cast(remainder, DataType.INT64, span), DataType.INT64, span)
+            else:
+                recombined = ir.Add(ir.Mul(quotient, rhs, dtype, span), remainder, dtype, span)
+            inline = ir.Add(ir.Mul(quotient_expr, rhs, dtype, span), remainder_expr, dtype, span)
+            simplified = arith.Analyzer().simplify(inline)
+            ir.assert_structural_equal(simplified, dividend)
+            for offset, expression in enumerate((quotient, remainder, recombined, simplified)):
+                value = ib.let(f"value_{index}_{offset}", ir.Cast(expression, DataType.INT64, span))
+                ib.let(f"store_{index}_{offset}", tensor_ops.write(output, [4 * index + offset], value))
+        ib.return_stmt(output)
+    return _generate_mlir(ir.Program([f.get_result()], "ScalarFloorDivMod", span))
+
+
+@pytest.mark.parametrize(
+    "dtype", [DataType.INT8, DataType.INT16, DataType.INT32, DataType.INT64, DataType.INDEX]
+)
+def test_signed_floor_div_uses_floor_semantics(dtype):
+    """FloorDiv must agree with FloorMod before and after reconstruction simplification."""
+    span = ir.Span.unknown()
+    folded = arith.fold_const(
+        ir.FloorDiv(ir.ConstInt(-97, dtype, span), ir.ConstInt(24, dtype, span), dtype, span)
+    )
+    assert isinstance(folded, ir.ConstInt)
+    assert folded.value == -5
+    mlir = _scalar_floor_divmod_mlir(dtype)
+    assert "arith.floordivsi" in mlir
+    assert "arith.remsi" in mlir
+
+
+@pytest.mark.parametrize("dtype, opcode", [(DataType.FP32, "arith.divf"), (DataType.UINT32, "arith.divsi")])
+def test_floor_div_preserves_float_and_unsigned_paths(dtype, opcode):
+    """Signed floor rounding must not alter the existing float and unsigned paths."""
+    span = ir.Span.unknown()
+    ib = IRBuilder()
+    with ib.function("scalar_division", type=ir.FunctionType.InCore) as f:
+        lhs = f.param("lhs", ir.ScalarType(dtype))
+        rhs = f.param("rhs", ir.ScalarType(dtype))
+        ib.let("quotient", ir.FloorDiv(lhs, rhs, dtype, span))
+        ib.return_stmt()
+    mlir = _generate_mlir(ir.Program([f.get_result()], "ScalarDivision", span))
+    assert opcode in mlir
+    assert "arith.floordivsi" not in mlir
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    [DataType.INT8, DataType.INT16, DataType.INT32, DataType.INT64, DataType.INDEX],
+    ids=["i8", "i16", "i32", "i64", "index"],
+)
+def test_signed_floor_divmod_ptoas_matches_python_without_device(tmp_path, dtype):
+    """Execute q, r, let-bound q*y+r, and the simplified inline form through PTOAS."""
+    divisors, effective_divisors, cases = _signed_floor_divmod_cases(dtype)
+    mlir = _scalar_floor_divmod_mlir(dtype, divisors)
+    actual = _run_scalar_ptoas_on_cpu(tmp_path, mlir, "scalar_floor_divmod", 4 * len(divisors), cases)
+    assert len(actual) == len(cases), actual
+    for (lhs, rhs), values in zip(cases, actual):
+        expected = []
+        for constant in effective_divisors:
+            divisor = rhs if constant is None else constant
+            expected.extend((lhs // divisor, lhs % divisor, lhs, lhs))
+        assert values == expected, f"FloorDiv/FloorMod results for {dtype}, input pair {(lhs, rhs)}"
 
 
 def test_pto_codegen_tile_mul():

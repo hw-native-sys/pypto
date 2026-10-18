@@ -138,8 +138,8 @@ its sign, so it is refused. The current proof conservatively requires a
 non-negative dividend for both operations. Signed integer and `INDEX`
 `FloorMod` codegen corrects `arith.remsi` to floor semantics, so a positive
 divisor yields a non-negative remainder even for a negative dividend; this pass
-does not use that stronger fact. `FloorDiv` still lowers to truncating
-`arith.divsi`. **Both** columns must hold — see [Why the sign is
+does not use that stronger fact. `FloorDiv` lowers to `arith.floordivsi`, which
+rounds the quotient toward negative infinity. **Both** columns must hold — see [Why the sign is
 proven too](#why-the-sign-is-proven-too). The grouped-matmul weight path that
 motivated the feature therefore compiles:
 

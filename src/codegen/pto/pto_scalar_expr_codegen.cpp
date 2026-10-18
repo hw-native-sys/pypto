@@ -193,7 +193,12 @@ void PTOCodegen::VisitExpr_(const ir::AddPtr& op) { VisitBinaryArithExpr(op, "ar
 void PTOCodegen::VisitExpr_(const ir::SubPtr& op) { VisitBinaryArithExpr(op, "arith.subi", "arith.subf"); }
 void PTOCodegen::VisitExpr_(const ir::MulPtr& op) { VisitBinaryArithExpr(op, "arith.muli", "arith.mulf"); }
 void PTOCodegen::VisitExpr_(const ir::FloorDivPtr& op) {
-  VisitBinaryArithExpr(op, "arith.divsi", "arith.divf");
+  // Match FloorMod's floor semantics so q * divisor + remainder reconstructs
+  // the dividend even when either operand is negative. PTOAS expands the native
+  // floor operation into truncating division plus a conditional correction.
+  const auto dtype = ir::GetScalarDtype(op);
+  const bool signed_integer = dtype == DataType::INDEX || dtype.IsSignedInt();
+  VisitBinaryArithExpr(op, signed_integer ? "arith.floordivsi" : "arith.divsi", "arith.divf");
 }
 void PTOCodegen::VisitExpr_(const ir::FloorModPtr& op) {
   const auto dtype = ir::GetScalarDtype(op);

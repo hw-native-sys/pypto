@@ -11,7 +11,7 @@
 
 import pytest
 from pypto import DataType, ir
-from pypto.arith import fold_const
+from pypto.arith import Analyzer, CanonicalSimplifier, fold_const
 
 S = ir.Span.unknown()
 INT = DataType.INT64
@@ -108,6 +108,68 @@ class TestFloorDivMod:
     def test_floormod_by_zero_raises(self):
         with pytest.raises(ValueError):
             fold_const(ir.FloorMod(ci(5), ci(0), INT, S))
+
+
+class TestFloorDivModNarrowLiterals:
+    @pytest.mark.parametrize("op", [ir.FloorDiv, ir.FloorMod])
+    @pytest.mark.parametrize("dtype,bits", [(DataType.INT8, 8), (DataType.INT16, 16), (DataType.INT32, 32)])
+    def test_out_of_range_literals_keep_runtime_operation(self, op, dtype, bits):
+        """Stored literals can change sign, become zero, or become one when emitted."""
+        modulus = 1 << bits
+        for lhs, rhs in (
+            (1, modulus - 3),
+            (modulus - 3, 2),
+            (modulus - 3, 1),
+            (5, modulus),
+            (5, modulus + 1),
+            (-(2**63), -1),
+        ):
+            expr = op(ir.ConstInt(lhs, dtype, S), ir.ConstInt(rhs, dtype, S), dtype, S)
+            assert fold_const(expr) is None, (lhs, rhs)
+            # Skipping the direct fold must also prevent later bound-based rewrites
+            # from treating e.g. 253 : i8 as a positive divisor.
+            for simplify in (Analyzer().simplify, CanonicalSimplifier()):
+                ir.assert_structural_equal(simplify(expr), expr)
+
+    @pytest.mark.parametrize("op", [ir.FloorDiv, ir.FloorMod])
+    def test_divisor_narrowed_to_operation_dtype_keeps_runtime_operation(self, op):
+        """Both literals fit their own dtype, but i32 emission turns the divisor into -3."""
+        expr = op(ir.ConstInt(1, DataType.INT32, S), ci(2**32 - 3), DataType.INT32, S)
+        assert fold_const(expr) is None
+        for simplify in (Analyzer().simplify, CanonicalSimplifier()):
+            ir.assert_structural_equal(simplify(expr), expr)
+
+    @pytest.mark.parametrize("op", [ir.FloorDiv, ir.FloorMod])
+    def test_simplified_divisor_keeps_operation_width(self, op):
+        """Rebuilding after the RHS folds must still narrow the divisor to i32 (-3)."""
+        dtype = DataType.INT32
+        lhs = ir.Var("x", ir.ScalarType(dtype), S)
+        rhs = ir.Add(ci(2**32 - 4), ci(1), INT, S)
+        expr = op(lhs, rhs, dtype, S)
+        expected = op(lhs, ci(2**32 - 3), dtype, S)
+        for simplify in (Analyzer().simplify, CanonicalSimplifier()):
+            ir.assert_structural_equal(simplify(expr), expected)
+
+    @pytest.mark.parametrize("op", [ir.FloorDiv, ir.FloorMod])
+    def test_out_of_range_divisor_with_variable_keeps_runtime_operation(self, op):
+        dtype = DataType.INT8
+        lhs = ir.Var("x", ir.ScalarType(dtype), S)
+        expr = op(lhs, ir.ConstInt(253, dtype, S), dtype, S)
+        assert fold_const(expr) is None
+        analyzer = Analyzer()
+        analyzer.bind(lhs, 0, 8)
+        # Raw-value bounds would otherwise rewrite x // 253 to 0 or x % 253 to x.
+        for simplify in (analyzer.simplify, CanonicalSimplifier()):
+            ir.assert_structural_equal(simplify(expr), expr)
+
+    @pytest.mark.parametrize("op,expected", [(ir.FloorDiv, -3), (ir.FloorMod, 2)])
+    def test_in_range_operands_still_fold_with_operation_dtype(self, op, expected):
+        # The result belongs to the operation's dtype even if an operand is wider.
+        expr = op(ci(-7), ir.ConstInt(3, DataType.INT32, S), DataType.INT32, S)
+        result = fold_const(expr)
+        assert isinstance(result, ir.ConstInt)
+        assert result.value == expected
+        assert result.dtype == DataType.INT32
 
 
 # ============================================================================
