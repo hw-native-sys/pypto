@@ -194,9 +194,19 @@ physical address for ptoas `PlanMemory`. See
   behavior of the former single `MemoryReuse` pass.
 - `DSA_RP` and `PTOAS` both skip opportunistic MemRef coalescing here; neither
   may undo a must-alias relation established by this pass.
-- On the legacy `PTOAS` path, if both branches yield the same Mat byte window
-  (allocation, offset, size, and pipeline slot), the merged result retains that
-  window without a copy. Distinct branch windows keep their existing handling.
+- On the legacy `PTOAS` path, if both branches yield the same tile byte window
+  (allocation, offset, size, slot count, and slot index), and both yields and the
+  result have the same known memory space, the merged result retains that window
+  without a copy. Semantic aliases follow the repaired result while preserving
+  their type/view metadata. Registered views rebase their relative byte offset
+  onto the repaired source, preserving their own extent and inheriting its
+  pipeline slot identity;
+  subsequent whole-window writeback results follow that view. Reusing an existing
+  mixed-type codegen handle additionally requires matching its declared SSA type,
+  both yields' window and current binding, and scope dominance. If an earlier
+  merge selected a new dominating handle, later merges use that common yielded
+  binding even when the identity map still names a rejected sibling handle.
+  Distinct branch windows keep their existing handling.
 - Accumulator-phi normalization runs for every memory planner before lifetime
   planning. The legacy `PYPTO` path repeats it after opportunistic reuse because
   reuse can introduce a fresh carry/phi mismatch.

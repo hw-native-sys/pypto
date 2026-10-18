@@ -158,8 +158,15 @@ pipeline-slot 元数据）的变量渲染成同一个 `tile_buf` handle，因此
   `MemoryReuse` pass 的行为。
 - `DSA_RP` 与 `PTOAS` 都跳过这里的机会性 MemRef 合并；二者都不能撤销本 pass
   建立的强制别名关系。
-- 在 legacy `PTOAS` 路径中，若两个分支 yield 同一 Mat 字节窗口（allocation、
-  offset、size 和 pipeline slot 相同），合并结果保留该窗口，无需复制。
+- 在 legacy `PTOAS` 路径中，若两个分支 yield 同一 tile 字节窗口（allocation、
+  offset、size、slot 数量及索引相同），且两个 yield 与合并结果具有相同且已确定的
+  存储空间（MemorySpace），合并结果保留该窗口，无需复制。语义别名会跟随修正后的
+  结果，同时保留各自的类型及视图元数据。已注册的视图把相对字节偏移重新关联到
+  修正后的输入，保留自身窗口大小并继承输入的流水线 slot 身份；后续完整窗口写回
+  结果继续跟随该视图。复用具有多种类型别名的 codegen 句柄时，还必须满足实际声明的 SSA 类型
+  匹配、两个 yield 的窗口及当前绑定一致，以及句柄定义支配（dominance）当前 if。
+  若先前的合并选择了新的支配句柄，后续合并使用两个 yield 当前共同绑定的句柄，
+  即使身份映射仍指向此前被拒绝的兄弟分支句柄。
   不同分支窗口沿用原有处理。
 - accumulator-phi 规范化会在 lifetime planning 之前对所有 memory planner 运行。
   legacy `PYPTO` 路径在机会性 reuse 之后会再运行一次，因为 reuse 可能引入新的

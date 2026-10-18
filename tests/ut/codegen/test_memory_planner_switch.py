@@ -27,9 +27,11 @@ both passes run and codegen bakes ``addr`` for ``--pto-level=level3``.
 # DSL function bodies are parsed as AST, not executed — suppress pyright errors.
 # pyright: reportUndefinedVariable=false
 
+import re
+
 import pypto.language as pl
 import pytest
-from pypto import backend, ir
+from pypto import DataType, backend, ir
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import codegen, passes
@@ -162,7 +164,7 @@ class ConditionalGather:
         return output
 
 
-def _collect_mat_phi_storage(program: ir.Program):
+def _collect_tile_phi_storage(program: ir.Program):
     """Collect phi/arm MemRefs and named tile definitions without comparing SSA names."""
 
     class Collector(ir.IRVisitor):
@@ -193,10 +195,16 @@ def _collect_mat_phi_storage(program: ir.Program):
     return collector.phis, collector.tiles
 
 
-def _assert_same_mat_window(actual: ir.MemRef, expected: ir.MemRef):
+def _assert_same_tile_window(actual: ir.MemRef, expected: ir.MemRef):
     assert ir.MemRef.same_allocation(actual, expected)
     assert ir.structural_equal(actual.byte_offset_, expected.byte_offset_)
     assert actual.size_ == expected.size_
+    assert actual.slot_count_ == expected.slot_count_
+    if expected.slot_index_ is None:
+        assert actual.slot_index_ is None
+    else:
+        assert actual.slot_index_ is not None
+        assert ir.structural_equal(actual.slot_index_, expected.slot_index_)
 
 
 def _calls_with_loop_depth(program):
@@ -371,23 +379,23 @@ def test_ptoas_loop_carry_is_in_place_single_handle():
 def test_ptoas_conditional_gather_phis_share_the_written_mat_window():
     """The second update and transpose must observe the first phi's repaired storage."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=False):
         initialized = passes.init_mem_ref()(passes.convert_to_ssa()(ConditionalGather))
         after = passes.materialize_semantic_aliases()(initialized)
 
-    phis, tiles = _collect_mat_phi_storage(after)
+    phis, tiles = _collect_tile_phi_storage(after)
     assert len(phis) == 2
     base = next(var for name, var in tiles.items() if name.startswith("base")).type.memref
     assert base is not None
     for phi, arms in phis:
         assert phi.type.memref is not None
-        _assert_same_mat_window(phi.type.memref, base)
+        _assert_same_tile_window(phi.type.memref, base)
         for arm in arms:
             assert arm is not None
-            _assert_same_mat_window(arm, base)
+            _assert_same_tile_window(arm, base)
     transposed = next(var for name, var in tiles.items() if name.startswith("transposed"))
-    _assert_same_mat_window(transposed.type.memref, base)
+    _assert_same_tile_window(transposed.type.memref, base)
 
 
 @pytest.mark.parametrize("enable_buffer_ir", [False, True])
@@ -405,6 +413,48 @@ def test_ptoas_conditional_gather_preserves_one_mat_buffer(enable_buffer_ir):
         if "pto.subview " in line
     }
     assert len(bases) == 1, mlir
+
+
+def test_ptoas_conditional_inplace_vec_updates_reuse_mixed_view_handle():
+    """A Vec phi with a later reshape preserves its existing in-place destination."""
+
+    @pl.program
+    class ConditionalVecUpdate:
+        @pl.function(type=pl.FunctionType.AIV)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 32], pl.FP32],
+            src: pl.Tensor[[8, 32], pl.FP32],
+            indexes: pl.Tensor[[4, 32], pl.INT32],
+            flag: pl.Scalar[pl.INT32],
+            out: pl.Out[pl.Tensor[[8, 64], pl.FP32]],
+        ) -> pl.Tensor[[8, 64], pl.FP32]:
+            base = pl.tile.load(x, [0, 0], [16, 32], target_memory=pl.Mem.Vec)
+            first_src = pl.tile.load(src, [0, 0], [4, 32], target_memory=pl.Mem.Vec)
+            second_src = pl.tile.load(src, [4, 0], [4, 32], target_memory=pl.Mem.Vec)
+            index = pl.tile.load(indexes, [0, 0], [4, 32], target_memory=pl.Mem.Vec)
+            if flag != 0:
+                selected = pl.tile.scatter(base, first_src, index)
+            else:
+                selected = pl.tile.scatter(base, second_src, index)
+            reshaped = pl.tile.reshape(selected, [8, 64])
+            output = pl.tile.store(reshaped, [0, 0], out)
+            return output
+
+    optimized, _ = _run_pipeline(passes.MemoryPlanner.PTOAS, ConditionalVecUpdate, enable_buffer_ir=False)
+    mlir = _codegen(optimized, emit_tile_addr=False)
+    lines = mlir.splitlines()
+    loads = [line for line in lines if "pto.tload" in line]
+    assert len(loads) == 4, mlir
+    base = loads[0].split("outs(")[1].split(":")[0].strip()
+    updates = [line for line in lines if "pto.tscatter" in line]
+    assert len(updates) == 2, mlir
+    assert all(line.split("outs(")[1].split(":")[0].strip() == base for line in updates), mlir
+    # A differently shaped view makes this storage identity mixed-type. Both
+    # branch writes must still target the initialized Vec buffer and allocate it once.
+    allocations = [line for line in lines if "pto.alloc_tile" in line and "loc=vec" in line]
+    assert len(allocations) == 4, mlir  # The base, two source tiles, and flattened indexes.
+    assert not any("pto.tmov" in line and line.count("loc=vec") == 2 for line in lines), mlir
 
 
 def test_ptoas_distinct_mat_phi_preserves_independently_live_mixed_view_input():
@@ -447,134 +497,521 @@ def test_ptoas_distinct_mat_phi_preserves_independently_live_mixed_view_input():
     assert base_handle != else_handle, mlir
 
 
-@pytest.mark.parametrize(
-    "difference", ["same_window", "offset", "size", "slot", "allocation", "memory_space"]
-)
-def test_ptoas_if_alias_fixup_only_coalesces_same_mat_window(difference):
-    """Only matching Mat windows are normalized; other yields retain PTOAS handling."""
-    storage = pl.MemRef(slots=2)
+@pytest.mark.parametrize("identity_merge", [False, True])
+def test_ptoas_nested_mat_phi_does_not_reuse_sibling_branch_declaration(identity_merge):
+    """A previously emitted sibling Mat handle does not dominate a nested phi."""
 
     @pl.program
-    class Before:
-        @pl.function(type=pl.FunctionType.InCore)
+    class NestedMatPhi:
+        @pl.function(type=pl.FunctionType.AIC)
         def kernel(
             self,
-            x: pl.Tensor[[16, 16], pl.FP16],
-            flag: pl.Scalar[pl.INT32],
-        ) -> pl.Tile[[16, 16], pl.FP16, pl.Mem.Mat]:
-            a: pl.Tile[[16, 16], pl.FP16, storage[0], pl.Mem.Mat] = pl.tile.load(
-                x, [0, 0], [16, 16], target_memory=pl.Mem.Mat
-            )
-            b = pl.tile.load(x, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
-            _destination = pl.tile.create([16, 16], dtype=pl.FP16, target_memory=pl.Mem.Mat)
-            if flag != 0:
-                merged = pl.yield_(a)
+            x: pl.Tensor[[64, 64], pl.FP16],
+            outer_flag: pl.Scalar[pl.INT32],
+            inner_flag: pl.Scalar[pl.INT32],
+            out: pl.Out[pl.Tensor[[64, 16], pl.FP32]],
+        ) -> pl.Tensor[[64, 16], pl.FP32]:
+            rhs = pl.tile.load(x, [0, 0], [32, 16], target_memory=pl.Mem.Mat)
+            right = pl.tile.move(rhs, target_memory=pl.Mem.Right)
+            if outer_flag != 0:
+                first = pl.tile.load(x, [0, 0], [32, 64], target_memory=pl.Mem.Mat)
+                first_view = pl.tile.transpose_view(first)
+                first_left = pl.tile.move(first_view, target_memory=pl.Mem.Left)
+                first_product = pl.tile.matmul(first_left, right)
+                output = pl.tile.store(first_product, [0, 0], out)
             else:
-                merged = pl.yield_(b)
-            alias = pl.tile.reshape(merged, [16, 16])
-            return alias
-
-    program = Before
-    if difference == "memory_space":
-
-        @pl.program
-        class VectorBefore:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                x: pl.Tensor[[16, 16], pl.FP16],
-                flag: pl.Scalar[pl.INT32],
-            ) -> pl.Tile[[16, 16], pl.FP16, pl.Mem.Vec]:
-                a = pl.tile.load(x, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
-                b = pl.tile.load(x, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
-                _destination = pl.tile.create([16, 16], dtype=pl.FP16, target_memory=pl.Mem.Vec)
-                if flag != 0:
-                    merged = pl.yield_(a)
+                if inner_flag != 0:
+                    second = pl.tile.load(x, [0, 0], [32, 64], target_memory=pl.Mem.Mat)
+                    selected = pl.yield_(second)
                 else:
-                    merged = pl.yield_(b)
-                alias = pl.tile.reshape(merged, [16, 16])
-                return alias
+                    third = pl.tile.load(x, [32, 0], [32, 64], target_memory=pl.Mem.Mat)
+                    selected = pl.yield_(third)
+                selected_view = pl.tile.transpose_view(selected)
+                selected_left = pl.tile.move(selected_view, target_memory=pl.Mem.Left)
+                selected_product = pl.tile.matmul(selected_left, right)
+                output = pl.tile.store(selected_product, [0, 0], out)
+            return output
 
-        program = VectorBefore
+    optimized, _ = _run_pipeline(passes.MemoryPlanner.PTOAS, NestedMatPhi, enable_buffer_ir=False)
 
-    backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
-    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=False):
-        initialized = passes.init_mem_ref()(program)
-        phis, tiles = _collect_mat_phi_storage(initialized)
-        phi = phis[0][0]
-        a_memref = tiles["a"].type.memref
-        b_memref = tiles["b"].type.memref
-        destination = tiles["_destination"].type.memref
-        assert a_memref is not None and b_memref is not None and destination is not None
-        if difference == "offset":
-            b_memref = ir.MemRef(
-                a_memref.base_,
-                ir.ConstInt(a_memref.size_, pl.INDEX, a_memref.span),
-                a_memref.size_,
-                slots=a_memref.slot_count_,
-                slot=a_memref.slot_index_,
-            )
-        elif difference == "size":
-            b_memref = ir.MemRef(
-                a_memref.base_,
-                a_memref.byte_offset_,
-                2 * a_memref.size_,
-                slots=a_memref.slot_count_,
-                slot=a_memref.slot_index_,
-            )
-        elif difference == "slot":
-            # Equal byte offsets alone do not prove equal pipeline slot metadata.
-            b_memref = ir.MemRef(
-                a_memref.base_,
-                a_memref.byte_offset_,
-                a_memref.size_,
-                slots=a_memref.slot_count_,
-                slot=ir.ConstInt(1, pl.INDEX, a_memref.span),
-            )
-        elif difference in ("same_window", "memory_space"):
-            b_memref = a_memref
+    if identity_merge:
+        # Insert after Simplify: source-level identity branches would disappear
+        # before reaching the codegen boundary. Both arms yield the first phi,
+        # whose actual handle becomes a head allocation after rejecting the
+        # canonical handle declared only in the sibling outer branch.
+        class InsertIdentityMerge(ir.IRMutator):
+            def __init__(self):
+                super().__init__()
+                self.replacements = {}
+                self.inserted = 0
 
-        # InitMemRef initially inherits the then yield. Give the phi an independent
-        # existing destination so an accidental coalesce becomes observable. Both
-        # offset/size variants fit in the declared two-slot allocation.
-        replacements = {}
-        for old, memref in ((tiles["b"], b_memref), (phi, destination), (tiles["alias"], destination)):
-            tile_type = old.type
-            replacements[old.unique_id] = ir.Var(
-                old.name_hint,
-                ir.TileType(
-                    tile_type.shape,
-                    tile_type.dtype,
-                    memref,
-                    tile_type.tile_view,
-                    tile_type.memory_space,
-                ),
-                old.span,
-            )
-
-        class SetWindows(ir.IRMutator):
             def visit_var(self, op):
-                return replacements.get(op.unique_id, op)
+                return self.replacements.get(op.unique_id, op)
 
-        before = SetWindows().visit_program(initialized)
+            def rewrite_body(self, op):
+                # Re-enter the Python override explicitly: the native trampoline
+                # suppresses recursive calls to an already active override.
+                if isinstance(op, ir.IfStmt):
+                    return self.visit_if_stmt(op)
+                if isinstance(op, ir.SeqStmts):
+                    return ir.SeqStmts([self.rewrite_body(stmt) for stmt in op.stmts], op.span)
+                return self.visit_stmt(op)
+
+            def visit_if_stmt(self, op):
+                result = ir.IfStmt(
+                    self.visit_expr(op.condition),
+                    self.rewrite_body(op.then_body),
+                    self.rewrite_body(op.else_body) if op.else_body is not None else None,
+                    op.return_vars,
+                    op.span,
+                )
+                if len(result.return_vars) != 1 or not isinstance(result.return_vars[0].type, ir.TileType):
+                    return result
+                phi = result.return_vars[0]
+                merged = ir.Var("identity_merged", phi.type, phi.span)
+                following = ir.IfStmt(
+                    result.condition,
+                    ir.YieldStmt([phi], phi.span),
+                    ir.YieldStmt([phi], phi.span),
+                    [merged],
+                    phi.span,
+                )
+                self.replacements[phi.unique_id] = merged
+                self.inserted += 1
+                return ir.SeqStmts([result, following], result.span)
+
+        insert = InsertIdentityMerge()
+        optimized = insert.visit_program(optimized)
+        assert insert.inserted == 1
+
+    # Model coalesced storage across mutually exclusive branches directly in the
+    # lowered IR. PTOAS rejects author-pinned single-slot allocations, so a DSL
+    # MemRef declaration would stop before reaching the codegen boundary here.
+    class CoalesceBranchPanels(ir.IRMutator):
+        def __init__(self):
+            super().__init__()
+            self.memref = None
+            self.variables = {}
+
+        def visit_var(self, op):
+            tile_type = op.type
+            if (
+                not isinstance(tile_type, ir.TileType)
+                or tile_type.memory_space != ir.MemorySpace.Mat
+                or tile_type.memref is None
+                or tile_type.memref.size_ != 4096
+            ):
+                return op
+            if self.memref is None:
+                self.memref = tile_type.memref
+            if op.unique_id not in self.variables:
+                self.variables[op.unique_id] = ir.Var(
+                    op.name_hint,
+                    ir.TileType(
+                        tile_type.shape,
+                        tile_type.dtype,
+                        self.memref,
+                        tile_type.tile_view,
+                        tile_type.memory_space,
+                    ),
+                    op.span,
+                )
+            return self.variables[op.unique_id]
+
+    optimized = CoalesceBranchPanels().visit_program(optimized)
+    mlir = _codegen(optimized, emit_tile_addr=False)
+    lines = mlir.splitlines()
+    panel_loads = [line for line in lines if "pto.tload" in line and "rows=32, cols=64" in line]
+    assert len(panel_loads) == 3, mlir
+    nested_handles = [line.split("outs(")[1].split(":")[0].strip() for line in panel_loads[1:]]
+    assert nested_handles[0] == nested_handles[1], mlir
+    declarations = [i for i, line in enumerate(lines) if f"{nested_handles[0]} = pto.alloc_tile" in line]
+    assert len(declarations) == 1, mlir
+    outer_if = next(i for i, line in enumerate(lines) if "scf.if" in line)
+    # A function-global "already emitted" set includes allocations inside the
+    # sibling then branch. The nested phi needs a head declaration that dominates
+    # both of its producers, regardless of which outer branch executes.
+    assert declarations[0] < outer_if, mlir
+    panel_allocations = [
+        line
+        for line in lines
+        if "pto.alloc_tile" in line and "loc=mat" in line and "rows=32, cols=64" in line
+    ]
+    assert len(panel_allocations) == 2, mlir  # Sibling-local storage and one shared head phi.
+    assert not any("pto.tmov" in line and line.count("loc=mat") == 2 for line in lines), mlir
+    transposes = [line for line in lines if "pto.treshape" in line]
+    assert transposes and f"pto.treshape {nested_handles[0]} :" in transposes[-1], mlir
+
+
+def test_ptoas_nested_mat_phi_reuses_dominating_enclosing_branch_declaration():
+    """An inline Mat declaration in the active outer branch dominates its nested if."""
+
+    @pl.program
+    class NestedGather:
+        @pl.function(type=pl.FunctionType.AIC)
+        def kernel(
+            self,
+            x: pl.Tensor[[64, 64], pl.FP16],
+            outer_flag: pl.Scalar[pl.INT32],
+            inner_flag: pl.Scalar[pl.INT32],
+            out: pl.Out[pl.Tensor[[64, 16], pl.FP32]],
+        ) -> pl.Tensor[[64, 16], pl.FP32]:
+            if outer_flag != 0:
+                output = out
+            else:
+                base = pl.tile.load(x, [0, 0], [32, 64], target_memory=pl.Mem.Mat)
+                if inner_flag != 0:
+                    selected = pl.tile.gather_row(base, x, [0, 0], [0, 0], [16, 64])
+                else:
+                    selected = pl.tile.gather_row(base, x, [0, 0], [32, 0], [16, 64])
+                transposed = pl.tile.transpose_view(selected)
+                rhs = pl.tile.load(x, [0, 0], [32, 16], target_memory=pl.Mem.Mat)
+                left = pl.tile.move(transposed, target_memory=pl.Mem.Left)
+                right = pl.tile.move(rhs, target_memory=pl.Mem.Right)
+                product = pl.tile.matmul(left, right)
+                output = pl.tile.store(product, [0, 0], out)
+            return output
+
+    optimized, _ = _run_pipeline(passes.MemoryPlanner.PTOAS, NestedGather, enable_buffer_ir=False)
+    mlir = _codegen(optimized, emit_tile_addr=False)
+    lines = mlir.splitlines()
+    base_load = next(line for line in lines if "pto.tload" in line)
+    base = base_load.split("outs(")[1].split(":")[0].strip()
+    subview_bases = {
+        line.split("pto.subview ", 1)[1].split("[", 1)[0] for line in lines if "pto.subview " in line
+    }
+    assert subview_bases == {base}, mlir
+    assert not any("pto.tmov" in line and line.count("loc=mat") == 2 for line in lines), mlir
+    declarations = [i for i, line in enumerate(lines) if f"{base} = pto.alloc_tile" in line]
+    if_indices = [i for i, line in enumerate(lines) if "scf.if" in line]
+    assert len(declarations) == 1 and len(if_indices) == 2, mlir
+    # Keep useful reuse inside an active ancestor scope. Requiring every shared
+    # Mat to be head-declared would reintroduce the forbidden Mat-to-Mat copy.
+    assert if_indices[0] < declarations[0] < if_indices[1], mlir
+
+
+def test_ptoas_repaired_mat_phi_preserves_partial_view_and_gather_storage():
+    """Repair a descendant slice descriptor without changing its relative window or slot."""
+    span = ir.Span.unknown()
+    allocation = ir.Var("allocation", ir.PtrType(), span)
+    stale_allocation = ir.Var("stale_allocation", ir.PtrType(), span)
+    slot = ir.ConstInt(1, DataType.INDEX, span)
+    full_offset = ir.ConstInt(4096, DataType.INDEX, span)
+    slice_offset = ir.ConstInt(6144, DataType.INDEX, span)
+    source = ir.MemRef(allocation, full_offset, 4096, slots=2, slot=slot)
+    stale = ir.MemRef(stale_allocation, full_offset, 4096, slots=2, slot=slot)
+    old_slice = ir.MemRef(stale_allocation, slice_offset, 2048, slots=2, slot=slot)
+    full_type = ir.TileType([32, 64], DataType.FP16, source, memory_space=ir.MemorySpace.Mat)
+    base = ir.Var("base", full_type, span)
+    phi = ir.Var("merged", ir.TileType([32, 64], DataType.FP16, stale, memory_space=ir.MemorySpace.Mat), span)
+    slice_type = ir.TileType([16, 64], DataType.FP16, old_slice, memory_space=ir.MemorySpace.Mat)
+    sliced = ir.Var("sliced", slice_type, span)
+    gathered = ir.Var("gathered", slice_type, span)
+    condition = ir.Var("condition", ir.ScalarType(DataType.BOOL), span)
+    x = ir.Var("x", ir.TensorType([64, 64], DataType.FP16), span)
+
+    def dims(*values):
+        return ir.MakeTuple([ir.ConstInt(value, DataType.INDEX, span) for value in values], span)
+
+    body = ir.SeqStmts(
+        [
+            ir.IfStmt(condition, ir.YieldStmt([base], span), ir.YieldStmt([base], span), [phi], span),
+            ir.AssignStmt(
+                sliced,
+                ir.Call(ir.get_op("tile.slice"), [phi, dims(16, 64), dims(16, 0)], slice_type, span),
+                span,
+            ),
+            ir.AssignStmt(
+                gathered,
+                ir.Call(
+                    ir.get_op("tile.gather_row"),
+                    [sliced, x, dims(0, 0), dims(0, 0), dims(16, 64)],
+                    slice_type,
+                    span,
+                ),
+                span,
+            ),
+            ir.ReturnStmt([gathered], span),
+        ],
+        span,
+    )
+    function = ir.Function(
+        "kernel",
+        [allocation, stale_allocation, base, x, condition],
+        [ir.TileType([16, 64], DataType.FP16, memory_space=ir.MemorySpace.Mat)],
+        body,
+        span,
+        type=ir.FunctionType.AIC,
+    )
+    before = ir.Program([function], "Before", span)
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910)
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=False):
+        after = passes.materialize_semantic_aliases()(before)
+    phis, tiles = _collect_tile_phi_storage(after)
+    _assert_same_tile_window(phis[0][0].type.memref, source)
+    expected = ir.MemRef(allocation, slice_offset, 2048, slots=2, slot=slot)
+    for name in ("sliced", "gathered"):
+        tile_type = tiles[name].type
+        assert isinstance(tile_type, ir.TileType) and tile_type.memref is not None
+        _assert_same_tile_window(tile_type.memref, expected)
+        assert tile_type.tile_view == slice_type.tile_view
+
+
+def test_ptoas_loop_mat_identity_phi_gather_writes_nonzero_row_subview():
+    """An IterArg passed through an if still supplies the gather destination subview."""
+
+    @pl.program
+    class LoopGather:
+        @pl.function(type=pl.FunctionType.AIC)
+        def kernel(
+            self,
+            x: pl.Tensor[[64, 64], pl.FP16],
+            out: pl.Out[pl.Tensor[[48, 16], pl.FP32]],
+        ) -> pl.Tensor[[48, 16], pl.FP32]:
+            base = pl.tile.load(x, [0, 0], [32, 64], target_memory=pl.Mem.Mat)
+            rhs = pl.tile.load(x, [0, 0], [64, 16], target_memory=pl.Mem.Mat)
+            right = pl.tile.move(rhs, target_memory=pl.Mem.Right)
+            for i, (carried,) in pl.range(2, init_values=(base,)):
+                window = pl.tile.slice(carried, [16, 64], [16, 0])
+                updated = pl.tile.gather_row(window, x, [0, 0], [16 + i * 16, 0], [16, 64])
+                partial_left = pl.tile.move(updated, target_memory=pl.Mem.Left)
+                partial_product = pl.tile.matmul(partial_left, right)
+                _partial_out = pl.tile.store(partial_product, [0, 0], out)
+                full_update = pl.tile.gather_row(carried, x, [0, 0], [i * 16, 0], [16, 64])
+                result = pl.yield_(full_update)
+            left = pl.tile.move(result, target_memory=pl.Mem.Left)
+            product = pl.tile.matmul(left, right)
+            output = pl.tile.store(product, [16, 0], out)
+            return output
+
+    optimized, _ = _run_pipeline(passes.MemoryPlanner.PTOAS, LoopGather, enable_buffer_ir=False)
+
+    class InsertCarryIdentityMerge(ir.IRMutator):
+        def __init__(self):
+            super().__init__()
+            self.loop_vars = []
+            self.inserted = 0
+
+        def visit_for_stmt(self, op):
+            self.loop_vars.append(op.loop_var)
+            result = super().visit_for_stmt(op)
+            self.loop_vars.pop()
+            return result
+
+        def visit_assign_stmt(self, op):
+            result = super().visit_assign_stmt(op)
+            if (
+                not isinstance(result, ir.AssignStmt)
+                or not isinstance(result.value, ir.Call)
+                or result.value.op.name != ir.get_op("tile.slice").name
+                or not isinstance(result.value.args[0], ir.IterArg)
+            ):
+                return result
+            carried = result.value.args[0]
+            phi = ir.Var("selected_carry", carried.type, result.span)
+            condition = ir.Gt(
+                self.loop_vars[-1], ir.ConstInt(0, DataType.INDEX, result.span), DataType.BOOL, result.span
+            )
+            merge = ir.IfStmt(
+                condition,
+                ir.YieldStmt([carried], result.span),
+                ir.YieldStmt([carried], result.span),
+                [phi],
+                result.span,
+            )
+            call = result.value
+            sliced = ir.AssignStmt(
+                result.var,
+                ir.Call(call.op, [phi, *call.args[1:]], dict(call.kwargs), call.type, call.span),
+                result.span,
+            )
+            self.inserted += 1
+            return ir.SeqStmts([merge, sliced], result.span)
+
+    insert = InsertCarryIdentityMerge()
+    optimized = insert.visit_program(optimized)
+    assert insert.inserted == 1  # Keep the identity if after Simplify has finished.
+    mlir = _codegen(optimized, emit_tile_addr=False)
+    lines = mlir.splitlines()
+    base_load = next(line for line in lines if "pto.tload" in line)
+    base = base_load.split("outs(")[1].split(":")[0].strip()
+    views = {
+        line.split("=", 1)[0].strip(): line.split("pto.subview ", 1)[1].split("[", 1)[0]
+        for line in lines
+        if "pto.subview " in line
+    }
+    lower_views = {
+        line.split("=", 1)[0].strip() for line in lines if "pto.subview " in line and "[%c16_index," in line
+    }
+    gather_loads = [line for line in lines if "pto.tload" in line and "rows=16, cols=64" in line]
+    assert len(gather_loads) == 2 and lower_views, mlir
+    writes_lower_window = False
+    for line in gather_loads:
+        handle = line.split("outs(")[1].split(":")[0].strip()
+        path = {handle}
+        while handle in views:
+            handle = views[handle]
+            path.add(handle)
+        assert handle == base, mlir
+        writes_lower_window |= bool(path & lower_views)
+    assert writes_lower_window, mlir
+    allocations = [line for line in lines if "pto.alloc_tile" in line and "loc=mat" in line]
+    references = re.findall(r"%[\w.$-]+", mlir)
+    live_allocations = {
+        line.split("=", 1)[0].strip()
+        for line in allocations
+        if references.count(line.split("=", 1)[0].strip()) > 1
+    }
+    initial_loads = [line for line in lines if "pto.tload" in line][:2]
+    assert live_allocations == {line.split("outs(")[1].split(":")[0].strip() for line in initial_loads}, mlir
+    assert len(live_allocations) == 2, mlir  # Only the full carried panel and RHS supply live storage.
+    # Slice lowering may reserve an unused window allocation. It must never
+    # supply either gather write; the subview chains above prove both target base.
+    assert all(
+        line.split("=", 1)[0].strip() in live_allocations or "rows=16, cols=64" in line
+        for line in allocations
+    ), mlir
+    assert not any("pto.tmov" in line and line.count("loc=mat") == 2 for line in lines), mlir
+
+
+@pytest.mark.parametrize(
+    "memory_space",
+    [
+        ir.MemorySpace.Mat,
+        ir.MemorySpace.Vec,
+        ir.MemorySpace.Left,
+        ir.MemorySpace.Right,
+        ir.MemorySpace.Acc,
+        ir.MemorySpace.Bias,
+        ir.MemorySpace.LeftScale,
+        ir.MemorySpace.RightScale,
+    ],
+    ids=lambda space: space.name,
+)
+@pytest.mark.parametrize(
+    "difference",
+    [
+        "same_window",
+        "offset",
+        "size",
+        "slot",
+        "slot_count",
+        "allocation",
+        "cross_space",
+        "missing_storage",
+        "unknown_space",
+        "result_space",
+        "missing_result_storage",
+        "unknown_result_space",
+        "all_unknown",
+    ],
+)
+def test_ptoas_if_alias_fixup_only_coalesces_same_tile_window(memory_space, difference):
+    """Reuse requires an exact window and a known, matching space on both yields and phi."""
+    span = ir.Span.unknown()
+    allocation = ir.Var("allocation", ir.PtrType(), span)
+    other_allocation = ir.Var("other_allocation", ir.PtrType(), span)
+    destination_allocation = ir.Var("destination_allocation", ir.PtrType(), span)
+    zero = ir.ConstInt(0, DataType.INDEX, span)
+    one = ir.ConstInt(1, DataType.INDEX, span)
+    a_memref = ir.MemRef(allocation, zero, 1024, slots=2, slot=zero)
+    b_memref = a_memref
+    if difference == "offset":
+        b_memref = ir.MemRef(allocation, ir.ConstInt(1024, DataType.INDEX, span), 1024, slots=2, slot=zero)
+    elif difference == "size":
+        b_memref = ir.MemRef(allocation, zero, 2048, slots=2, slot=zero)
+    elif difference == "slot":
+        b_memref = ir.MemRef(allocation, zero, 1024, slots=2, slot=one)
+    elif difference == "slot_count":
+        b_memref = ir.MemRef(allocation, zero, 1024, slots=3, slot=zero)
+    elif difference == "allocation":
+        b_memref = ir.MemRef(other_allocation, zero, 1024, slots=2, slot=zero)
+    destination = ir.MemRef(destination_allocation, zero, 1024, slots=2, slot=zero)
+    other_space = ir.MemorySpace.Mat if memory_space == ir.MemorySpace.Vec else ir.MemorySpace.Vec
+    b_space = other_space if difference == "cross_space" else memory_space
+    phi_space = other_space if difference == "result_space" else memory_space
+    a_space = memory_space
+    if difference == "unknown_space":
+        b_space = None
+    elif difference == "unknown_result_space":
+        phi_space = None
+    elif difference == "all_unknown":
+        a_space = b_space = phi_space = None
+    dtype = DataType.FP32 if memory_space in (ir.MemorySpace.Acc, ir.MemorySpace.Bias) else DataType.FP16
+    if memory_space in (ir.MemorySpace.LeftScale, ir.MemorySpace.RightScale):
+        dtype = DataType.FP8E8M0
+    source_view = ir.TileView(valid_shape=[16, 16])
+    view = ir.TileView(valid_shape=[4, 32], stride=[32, 1], start_offset=0, pad=ir.PadValue.zero)
+    # TileType rejects unknown spaces together with a physical MemRef. An
+    # unknown-space value therefore also has no initialized storage to reuse.
+    # Known-space values without a MemRef exercise the separate missing-storage guard.
+    a_storage = a_memref if a_space is not None else None
+    b_storage = b_memref if b_space is not None and difference != "missing_storage" else None
+    a = ir.Var("a", ir.TileType([16, 16], dtype, a_storage, source_view, a_space), span)
+    b = ir.Var("b", ir.TileType([16, 16], dtype, b_storage, source_view, b_space), span)
+    phi_memref = destination if phi_space is not None and difference != "missing_result_storage" else None
+    phi_type = ir.TileType([16, 16], dtype, phi_memref, source_view, phi_space)
+    phi = ir.Var("merged", phi_type, span)
+    view_type = ir.TileType([8, 32], dtype, phi_memref, view, phi_space)
+    reshaped = ir.Var("reshaped", view_type, span)
+    alias = ir.Var("alias", view_type, span)
+    condition = ir.Var("condition", ir.ScalarType(DataType.BOOL), span)
+    shape = ir.MakeTuple([ir.ConstInt(8, DataType.INDEX, span), ir.ConstInt(32, DataType.INDEX, span)], span)
+    reshape = ir.Call(ir.get_op("tile.reshape"), [phi, shape], view_type, span)
+    body = ir.SeqStmts(
+        [
+            ir.IfStmt(condition, ir.YieldStmt([a], span), ir.YieldStmt([b], span), [phi], span),
+            ir.AssignStmt(reshaped, reshape, span),
+            ir.AssignStmt(alias, reshaped, span),
+            ir.ReturnStmt([alias], span),
+        ],
+        span,
+    )
+    # Native initialized IR keeps this storage-only test independent of which
+    # producer/load operations a backend supports for Bias and MX scale tiles.
+    # An independent old phi destination makes every attempted repair observable.
+    function = ir.Function(
+        "kernel",
+        [allocation, other_allocation, destination_allocation, a, b, condition],
+        [ir.TileType([8, 32], dtype, tile_view=view, memory_space=phi_space)],
+        body,
+        span,
+        type=ir.FunctionType.InCore,
+    )
+    before = ir.Program([function], "Before", span)
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910)
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=False):
         after = passes.materialize_semantic_aliases()(before)
 
-    if difference == "same_window":
-        phis, tiles = _collect_mat_phi_storage(after)
-        phi, arms = phis[0]
-        _assert_same_mat_window(phi.type.memref, a_memref)
-        for arm in arms:
-            _assert_same_mat_window(arm, a_memref)
-        _assert_same_mat_window(tiles["alias"].type.memref, a_memref)
-        function = next(iter(after.functions.values()))
-        assert isinstance(function.body, ir.SeqStmts)
-        returned = function.body.stmts[-1]
-        assert isinstance(returned, ir.ReturnStmt)
-        assert returned.value[0].same_as(tiles["alias"])
-    else:
-        # The PTOAS false switch still leaves other branch storage to codegen.
+    if difference != "same_window":
+        # Sharing a pointer does not authorize cross-space or uncertain aliases,
+        # and the false switch continues to leave distinct windows to codegen.
         ir.assert_structural_equal(after, before)
+        return
+
+    phis, tiles = _collect_tile_phi_storage(after)
+    new_phi, arms = phis[0]
+    _assert_same_tile_window(new_phi.type.memref, a_memref)
+    assert new_phi.type.memory_space == memory_space
+    assert new_phi.type.tile_view == phi_type.tile_view
+    for arm in arms:
+        _assert_same_tile_window(arm, a_memref)
+    for name in ("reshaped", "alias"):
+        tile_type = tiles[name].type
+        assert isinstance(tile_type, ir.TileType) and tile_type.memref is not None
+        _assert_same_tile_window(tile_type.memref, a_memref)
+        assert tile_type.memory_space == memory_space and tile_type.dtype == dtype
+        assert len(tile_type.shape) == 2
+        for dimension, extent in zip(tile_type.shape, [8, 32]):
+            assert isinstance(dimension, ir.ConstInt) and dimension.value == extent
+        assert tile_type.tile_view == view_type.tile_view
+    new_function = next(iter(after.functions.values()))
+    assert isinstance(new_function.body, ir.SeqStmts)
+    returned = new_function.body.stmts[-1]
+    assert isinstance(returned, ir.ReturnStmt)
+    assert returned.value[0].same_as(tiles["alias"])
 
 
 @pytest.mark.parametrize("enable_buffer_ir", [False, True])
