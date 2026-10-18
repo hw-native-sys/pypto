@@ -32,9 +32,12 @@
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/backend/common/buffer_elementwise_recipes.h"
+#include "pypto/backend/common/op_rules.h"
 #include "pypto/backend/common/soc.h"
+#include "pypto/core/dtype.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/pipe.h"
+#include "pypto/ir/type.h"
 
 namespace nb = nanobind;
 
@@ -207,10 +210,14 @@ void BindBackend(nb::module_& m) {
       .def(
           "plan_op_scratch",
           [](const Backend& target, const std::string& op_name, std::optional<DataType> source_dtype,
-             std::optional<int64_t> source_cols) {
-            return target.PlanOpScratch(op_name, {source_dtype, source_cols});
+             std::optional<int64_t> source_cols, std::optional<DataType> target_dtype,
+             std::optional<bool> saturating, const ir::TileTypePtr& source_tile) {
+            return target.PlanOpScratch(op_name,
+                                        {source_dtype, source_cols, target_dtype, saturating, source_tile});
           },
           nb::arg("op_name"), nb::arg("source_dtype") = nb::none(), nb::arg("source_cols") = nb::none(),
+          nb::kw_only(), nb::arg("target_dtype") = nb::none(), nb::arg("saturating") = nb::none(),
+          nb::arg("source_tile") = nb::none(),
           "Plan compiler-created scratch using this backend's registered rule; None means no rule")
       .def("get_handler", &Backend::GetHandler, nb::rv_policy::reference,
            "Get the per-backend BackendHandler singleton")

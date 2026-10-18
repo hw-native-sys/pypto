@@ -91,6 +91,19 @@ level 3. With the PTOAS planner, level 2 owns that allocation: codegen supplies
 static-valid source/destination reshape views while keeping the one-input
 `pto.tcvt` form. These views alias the existing buffers and preserve the actual
 valid shape, including partial tiles.
+The cast rule registered with `f_plan_scratch` in `pto_ops_cast.cpp` owns scratch
+selection, sizing, and dtype. InitMemRef and codegen query it through
+`Backend::PlanOpScratch("tile.cast", request)`. InitMemRef materializes only a
+`Required` specification; incomplete geometry returns `Unknown` and is diagnosed
+at the call site, rather than being treated as no scratch.
+An explicitly supplied `tmp` bypasses this synthesis rule and keeps its own type
+and capacity. Rank-one sources with explicit scratch remain supported: codegen
+maps their shape and static validity from `[N]` to `[1, N]`.
+
+A2/A3 narrowing casts use disjoint source and destination storage, following
+the shared allocation and codegen safety rule described in
+[MemoryReuse](passes/37-memory_reuse.md). Static-valid views preserve each
+operand's existing storage; they do not make the cast source and destination alias.
 
 Only scratch-backed casts (or an explicit tmp on A2/A3) require static validity.
 Native saturating casts, other native conversions, and A5 casts retain their

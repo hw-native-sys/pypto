@@ -33,7 +33,6 @@
 #include "pypto/codegen/pto/pto_type_utils.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
-#include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/cast_saturation.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
@@ -41,7 +40,6 @@
 #include "pypto/ir/memref.h"
 #include "pypto/ir/phase.h"
 #include "pypto/ir/scalar_expr.h"
-#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 #include "src/backend/common/pto_ops_internal.h"
@@ -70,7 +68,6 @@ using pto_ops_detail::GetTileViewTypeAnnotation;
 using pto_ops_detail::MaterializeSubviewOperandIfNeeded;
 using pto_ops_detail::MutableTileViewShape;
 using pto_ops_detail::RequireStaticValidShapeForPtoas;
-using pto_ops_detail::round_modes;
 
 /// Operators whose PTOAS lowering walks every operand and the result as one flat
 /// run of elements. A `col_major` operand reaching such an op is read with the
@@ -423,98 +420,6 @@ static std::string MakePrecisionCodegenPTO(const std::string& pto_op_name, size_
     codegen.WarnIfHighPrecisionIgnored(op->op_->name_, pto_op_name, op->span_);
   }
   codegen.Emit(code);
-  return "";
-}
-
-// A2/A3 scratch-backed tcvt requires static validity in both forms: level3
-// verifies an explicit tmp, while level2 sizes an implicit tmp in PlanMemory.
-// alloc_tile types keep v_row=?, v_col=?, so bridge src/dst without changing
-// their allocation handles or allocating scratch on behalf of level2.
-//
-// Both forms carry the same config attr-dict, so the rounding mode and the
-// destination saturation are rendered once, before the form splits. `satmode` is
-// always stamped: the IR records only a deviation from the destination's default,
-// and `GetEmittedSaturationMode` resolves both the default and the "whatever the
-// target does" case a float destination leaves open. Omitting the attribute
-// instead would hand the decision to the assembler, whose own default for an
-// omitted `satmode` flipped OFF -> ON in PTOAS v0.63.
-static std::string MakeTcvtCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
-  auto& codegen = AsPto(codegen_base);
-  INTERNAL_CHECK_SPAN(op->args_.size() == 1 || op->args_.size() == 2, op->span_)
-      << "tile.cast requires 1 or 2 arguments (src[, tmp]), but got " << op->args_.size();
-
-  if (codegen.EmitTileAddr() && ir::op_predicates::CastRequiresDisjointSource(
-                                    op, codegen.GetBackendHandler()->GetPtoTargetArch() == "a2a3")) {
-    const auto source_type = As<ir::TileType>(op->args_[0]->GetType());
-    const auto result = codegen.GetCurrentResultVar();
-    const auto result_type = result ? As<ir::TileType>(result->GetType()) : nullptr;
-    INTERNAL_CHECK_SPAN(source_type && result_type, op->span_)
-        << "Internal error: tile.cast requires source and result TileTypes before PTO codegen";
-    const auto source_memref = source_type->memref_.value_or(nullptr);
-    const auto result_memref = result_type->memref_.value_or(nullptr);
-    INTERNAL_CHECK_SPAN(result_memref, op->span_)
-        << "Internal error: tile.cast requires a result MemRef before PTO codegen";
-    // TPOP tiles and their views are backed by reserved pipe storage, not a
-    // general-pool MemRef. Their runtime-owned address cannot be compared here.
-    if (source_memref) {
-      // At level3 offsets are physical addresses, even for distinct allocation
-      // bases. Compare complete byte windows, not just base or pointer equality.
-      ir::arith::Analyzer analyzer;
-      const auto distance = As<ir::ConstInt>(analyzer.Simplify(std::make_shared<ir::Sub>(
-          result_memref->byte_offset_, source_memref->byte_offset_, DataType::INT64, op->span_)));
-      bool overlaps = ir::MemRef::MayAlias(source_memref, result_memref);
-      if (distance) {
-        // Subtracting a shared symbolic address also exposes a constant distance.
-        overlaps = distance->value_ >= 0
-                       ? static_cast<uint64_t>(distance->value_) < source_memref->size_
-                       : static_cast<uint64_t>(-(distance->value_ + 1)) + 1 < result_memref->size_;
-      }
-      CHECK_SPAN(!overlaps, op->span_)
-          << "tile.cast from " << source_type->dtype_.ToString() << " to " << result_type->dtype_.ToString()
-          << " requires non-overlapping source and destination memory on "
-          << codegen.GetBackendHandler()->GetPtoTargetArch();
-    }
-  }
-
-  const int mode = op->GetKwarg<int>("mode");
-  INTERNAL_CHECK_SPAN(mode >= 0 && mode < static_cast<int>(round_modes.size()), op->span_)
-      << "Internal error: tile.cast round mode out of range: " << mode;
-  std::string config_attr = "{rmode = #pto<round_mode " + round_modes.at(mode) + ">";
-  const int saturation_mode = ir::GetEmittedSaturationMode(op);
-  INTERNAL_CHECK_SPAN(ir::IsValidSaturationMode(saturation_mode), op->span_)
-      << "Internal error: tile.cast saturation_mode out of range: " << saturation_mode;
-  config_attr += ", satmode = #pto<saturation_mode " + ir::SaturationModeToPTOString(saturation_mode) + ">";
-  config_attr += "}";
-
-  auto src_type = ir::As<ir::TileType>(op->args_[0]->GetType());
-  INTERNAL_CHECK_SPAN(src_type, op->span_) << "Internal error: tile.cast source must be TileType";
-  const bool explicit_tmp = op->args_.size() == 2;
-  const bool needs_static_views =
-      codegen.GetBackendHandler()->RequiresLevel3TmpScratch() &&
-      (explicit_tmp ||
-       ir::NeedsA2A3TcvtScratch(src_type->dtype_, op->GetKwarg<DataType>("target_type"), saturation_mode));
-  if (needs_static_views) {
-    auto dst_var = codegen.GetCurrentResultVar();
-    auto dst_type = dst_var ? ir::As<ir::TileType>(dst_var->GetType()) : nullptr;
-    INTERNAL_CHECK_SPAN(dst_type, op->span_) << "Internal error: tile.cast result must be TileType";
-    RequireStaticValidShapeForPtoas(src_type, "tile.cast", "src", op->span_);
-    RequireStaticValidShapeForPtoas(dst_type, "tile.cast", "dst", op->span_);
-
-    const std::string src_ssa = EnsureStaticViewTileSsa(op->args_[0], codegen, "tcvt_src_view");
-    std::vector<std::pair<std::string, std::string>> ins = {
-        {src_ssa, GetTileViewTypeAnnotation(op->args_[0], codegen)}};
-    if (explicit_tmp) {
-      auto tmp_type = ir::As<ir::TileType>(op->args_[1]->GetType());
-      INTERNAL_CHECK_SPAN(tmp_type, op->span_) << "Internal error: tile.cast tmp must be TileType";
-      RequireStaticValidShapeForPtoas(tmp_type, "tile.cast", "tmp", op->args_[1]->span_);
-      const std::string tmp_ssa = EnsureStaticViewTileSsa(op->args_[1], codegen, "tcvt_tmp_view");
-      ins.emplace_back(tmp_ssa, GetTileViewTypeAnnotation(op->args_[1], codegen));
-    }
-    const std::string dst_ssa = EnsureStaticViewTileSsa(dst_var, codegen, "tcvt_dst_view");
-    EmitInsOutsWithViewTypes(codegen, "pto.tcvt", ins, dst_ssa, dst_type, config_attr);
-    return "";
-  }
-  codegen.Emit("pto.tcvt " + GenerateInsOutsClause(op, codegen, config_attr));
   return "";
 }
 
@@ -1245,17 +1150,6 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
         })
         .set_input_layout(0, ir::TileLayout::row_major)
         .set_input_layout(1, ir::TileLayout::row_major)
-        .set_output_layout(ir::TileLayout::row_major);
-  }
-
-  // tile.cast (TCVT): pto.tcvt mis-orders elements on a col_major source, so per
-  // ISA the input and output must be row_major (see #1549).
-  if (exclude_ops.count("tile.cast") == 0) {
-    backend.RegisterOp("tile.cast")
-        .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-          return MakeTcvtCodegenPTO(op, codegen);
-        })
-        .set_input_layout(0, ir::TileLayout::row_major)
         .set_output_layout(ir::TileLayout::row_major);
   }
 

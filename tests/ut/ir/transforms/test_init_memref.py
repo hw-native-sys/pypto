@@ -1361,7 +1361,7 @@ class TestPtoLevel3Scratch:
     def test_non_narrowing_cast_has_no_scratch(self):
         """FP32->FP16 narrows, but natively — no helper, so opting out changes nothing.
 
-        Only the pairs `NeedsA2A3TcvtScratch` lists get the emulated lowering;
+        Only pairs selected by the registered cast scratch rule get the emulated lowering;
         this one is a single native tcvt whichever saturation it carries.
         """
         after = self._run(self._cast_program(pl.FP32, pl.FP16), BackendType.Ascend910)

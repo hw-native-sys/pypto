@@ -71,6 +71,18 @@ python -m pytest tests/st/runtime/ops/test_fillpad_inplace.py --memory-planner=p
 生成显式临时空间。使用 PTOAS planner 时，由 level 2 负责分配；codegen 提供
 具有静态有效范围的输入、输出 reshape 视图，并保留单输入的 `pto.tcvt` 形式。
 这些视图共享原有缓冲区，保留实际有效形状，包括部分有效的 tile。
+`pto_ops_cast.cpp` 中通过 `f_plan_scratch` 注册的规则统一决定是否需要临时空间、
+容量与类型。InitMemRef 和代码生成都通过
+`Backend::PlanOpScratch("tile.cast", request)` 查询它。InitMemRef 只根据 `Required`
+规格生成临时 tile；不完整的形状返回 `Unknown`，由调用方在原始算子位置报告错误，
+不会被当成无需临时空间。
+显式传入 `tmp` 时会跳过这条自动生成规则，并保留其原有类型和容量。
+显式临时空间仍支持一维输入：代码生成会将形状及静态有效范围从 `[N]`
+映射为 `[1, N]`。
+
+A2/A3 窄化转换遵循分配与代码生成共享的安全规则，使用互不重叠的输入、输出存储，
+详见 [MemoryReuse](passes/37-memory_reuse.md)。静态有效范围视图保留各自操作数
+原有的存储，不会让转换的输入和输出共享同一缓冲区。
 
 只有依赖临时空间的转换（或 A2/A3 上显式传入 tmp 的转换）要求静态有效范围。
 原生饱和转换、其他原生转换及 A5 转换保留原有的动态有效范围行为。

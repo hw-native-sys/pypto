@@ -26,6 +26,7 @@
  *
  * static const bool kOpsRegistered = [] {
  *   RegisterSelectOps(Backend950::Instance(), BackendType::Ascend950);
+ *   RegisterCastOps(Backend950::Instance(), BackendType::Ascend950);
  *   RegisterPTOOps(Backend950::Instance(), {"tile.matmul"});
  *   return true;
  * }();
@@ -41,6 +42,7 @@ namespace backend {
 
 static const bool kOpsRegistered = [] {
   RegisterSelectOps(Backend950::Instance(), BackendType::Ascend950);
+  RegisterCastOps(Backend950::Instance(), BackendType::Ascend950);
   RegisterPTOOps(Backend950::Instance());
   return true;
 }();

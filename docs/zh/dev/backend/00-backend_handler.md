@@ -64,6 +64,44 @@ if (backend::GetBackendType() != backend::BackendType::Ascend910) { ... }
 | `GetL0cMAlignment(dtype)` | L0C 切分、dbC 容量与分配共同使用的物理 M 行对齐 | INT32 为 32；其余为 16 | 16 |
 | `BuildCrossCoreTransferView(dest, view)` | 跨核传输边界处的 tile 视图 | Mat/Left/Right 转 NZ；Vec 保持原样 | Mat/Left/Right 转 NZ（a5 硬件要求边界为 fractal）；Vec 保持原样 |
 
+## 注册算子规则
+
+`tile.sel`、`tile.sels` 和 `tile.cast` 通过 `f_plan_scratch` 注册临时空间规则。
+Select 的规则位于 `pto_ops_select.cpp`，cast 的规则与其代码生成一起位于
+`pto_ops_cast.cpp`。目标架构在注册时绑定，查询不读取或修改全局后端。
+`tile.sels` 另通过 `f_validate` 注册原有的类型与 MemRef 重叠检查。
+
+Pass 使用 `PassContext::GetBackend()` 获取后端并查询规则。该接口保留现有的全局
+目标解析方式，不引入上下文独立的目标所有权。未配置后端时，独立 select 降低仍保留
+原来的 A5 临时空间规格和类型处理行为。
+
+`Backend::PlanOpScratch` 返回的 `Required` 携带以元素为单位、只读的
+`TileScratchSpec`；`NotRequired` 明确表示无需临时空间；`Unknown` 表示缺少必要
+信息；`Unsupported` 表示该输入不受支持。已注册但没有规则的算子返回 `None`，
+未注册的算子报错。查询本身不生成 IR，也不分配内存。
+
+Cast 查询接收 `source_tile` 中不可变的物理与有效形状、`target_dtype` 和实际的
+`saturating` 模式。若另外提供 `source_dtype`，它必须与 tile 一致。缺少参数或
+容量计算依赖的维度为动态值时返回 `Unknown`；维数不合法时返回 `Unsupported`。
+调用方在原始算子位置给出诊断。A5、原生转换及饱和转换无需静态形状便可返回
+`NotRequired`。
+
+```python
+from pypto import DataType, backend, ir
+
+target = backend.get_backend_instance(backend.BackendType.Ascend910)
+source = ir.TileType([4, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[3, 96]))
+plan = target.plan_op_scratch(
+    "tile.cast", source_tile=source, target_dtype=DataType.INT16, saturating=False
+)
+# Required：INT8 [1, 1152]，部分有效形状的容量计算包含物理行跨度。
+```
+
+`InitMemRef` 与代码生成均查询同一条 cast 规则。PyPTO、DSA-RP 根据返回的规格生成
+显式 tmp；PTOAS 继续拥有隐式临时空间的分配权。代码生成给依赖临时空间的转换补充
+静态有效范围视图。调用方显式传入的 tmp 保持不变，编译器合成规格不会变成对其
+形状或类型的新限制。临时空间的生命周期与复用仍由内存分配及原有别名元数据决定。
+
 ## 内存容量来源
 
 `BackendHandler::GetCapacityBytes(memory_space)` 调用 handler 所属后端的

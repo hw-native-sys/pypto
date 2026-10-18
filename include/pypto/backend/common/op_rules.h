@@ -35,11 +35,16 @@ struct TileScratchSpec {
   int64_t cols;
 };
 
-/// Minimal input to the first registered scratch rules (sel/sels). Missing
-/// physical columns are distinct from zero; no scratch query mutates IR.
+/// Optional inputs to registered scratch rules. Missing information is distinct
+/// from zero/false. Select uses source_dtype/source_cols; cast uses target_dtype,
+/// the effective saturation mode, and immutable source_tile geometry. A supplied
+/// source_dtype must agree with source_tile for cast. No scratch query mutates IR.
 struct OpScratchRequest {
   std::optional<DataType> source_dtype;
   std::optional<int64_t> source_cols;
+  std::optional<DataType> target_dtype = std::nullopt;
+  std::optional<bool> saturating = std::nullopt;
+  ir::TileTypePtr source_tile = nullptr;
 };
 
 enum class OpScratchStatus { Required, NotRequired, Unknown, Unsupported };

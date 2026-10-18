@@ -172,13 +172,22 @@ class Backend:
 
     def get_type_name(self) -> str: ...
     def plan_op_scratch(
-        self, op_name: str, source_dtype: ir.DataType | None = None, source_cols: int | None = None
+        self,
+        op_name: str,
+        source_dtype: ir.DataType | None = None,
+        source_cols: int | None = None,
+        *,
+        target_dtype: ir.DataType | None = None,
+        saturating: bool | None = None,
+        source_tile: ir.TileType | None = None,
     ) -> OpScratchPlan | None:
         """Plan compiler-created scratch without consulting the global backend.
 
         An unregistered operator raises ValueError. None means the registered
         operator has no scratch rule, not that it needs no scratch. Missing
-        physical dimensions can return Unknown. Specs describe synthesis;
+        physical dimensions can return Unknown. Cast uses source_tile for physical
+        and valid geometry, target_dtype, and effective saturating (True means ON).
+        source_dtype, when supplied, must agree with source_tile. Specs describe synthesis;
         they are not exact-shape requirements for caller-provided scratch.
         """
 

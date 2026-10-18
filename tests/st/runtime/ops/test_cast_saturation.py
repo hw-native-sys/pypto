@@ -186,12 +186,12 @@ def test_cast_saturation(case_run):
     case_run.assert_passed()
 
 
-def _make_planner_cast(dst_dtype, rows, valid_rows, valid_cols):
+def _make_planner_cast(dst_dtype, rows, valid_rows, valid_cols, cols=N, saturation_mode="off"):
     @pl.jit
     def cast_program(src: pl.Tensor, out: pl.InOut[pl.Tensor]):
         with pl.at(level=pl.Level.CORE_GROUP):
-            tile = pl.load(src, [0, 0], [rows, N], valid_shape=[valid_rows, valid_cols])
-            converted = pl.cast(tile, dst_dtype, mode="trunc", saturation_mode="off")
+            tile = pl.load(src, [0, 0], [rows, cols], valid_shape=[valid_rows, valid_cols])
+            converted = pl.cast(tile, dst_dtype, mode="trunc", saturation_mode=saturation_mode)
             pl.store(converted, [0, 0], out)
         return out
 
@@ -244,6 +244,47 @@ def _planner_cases():
 @st.cases(*_planner_cases())
 def test_cast_scratch_across_planners(case_run):
     """Implicit PTOAS scratch must produce the same exact values as explicit scratch."""
+    case_run.assert_passed()
+
+
+def _narrowing_tail_cases():
+    # A2/A3 processes every row's aligned head before any masked tail. Cover
+    # native conversions too, and use 192 valid columns to exercise FP16's
+    # 128-element head plus a tail. The scratch matrix already covers FP32 OFF.
+    for src_dtype, dst_dtype, torch_src, torch_dst, cols, valid_cols, saturation in (
+        (pl.FP32, pl.FP16, torch.float32, torch.float16, 128, 96, "off"),
+        (pl.FP32, pl.INT16, torch.float32, torch.int16, 128, 96, "on"),
+        (pl.FP16, pl.INT8, torch.float16, torch.int8, 256, 192, "off"),
+        (pl.FP16, pl.UINT8, torch.float16, torch.uint8, 256, 192, "on"),
+    ):
+        values = [0.5, 1.5, 2.5, 63.5, 126.5]
+        count = 4 * cols
+        src = torch.tensor(
+            (values * ((count + len(values) - 1) // len(values)))[:count], dtype=torch_src
+        ).reshape(4, cols)
+        expected = torch.full((4, cols), 77, dtype=torch_dst)
+        valid = src[:3, :valid_cols]
+        expected[:3, :valid_cols] = (valid if torch_dst.is_floating_point else torch.trunc(valid)).to(
+            torch_dst
+        )
+        for planner in MemoryPlanner:
+            yield st.case(
+                _make_planner_cast(dst_dtype, 4, 3, valid_cols, cols, saturation),
+                src,
+                torch.full((4, cols), 77, dtype=torch_dst),
+                name=f"cast_tail_{src_dtype}_{dst_dtype}_{saturation}_{planner.name}",
+                memory_planner=planner,
+                enable_buffer_ir=False,
+                golden=lambda _tensors, expected=expected: expected,
+                rtol=0,
+                atol=0,
+            )
+
+
+@pytest.mark.platforms("a2a3", "a2a3sim")
+@st.cases(*_narrowing_tail_cases())
+def test_narrowing_cast_head_tail(case_run):
+    """A later output row must not overwrite an earlier row's unread input tail."""
     case_run.assert_passed()
 
 

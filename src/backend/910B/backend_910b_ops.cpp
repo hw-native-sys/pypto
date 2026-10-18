@@ -28,6 +28,7 @@ namespace backend {
 
 static const bool kOpsRegistered = [] {
   RegisterSelectOps(Backend910B::Instance(), BackendType::Ascend910);
+  RegisterCastOps(Backend910B::Instance(), BackendType::Ascend910);
   // MX block-scale matmul, scale-address binding, and quantization are A5-only.
   // Keep them out of the A2/A3 registry so direct codegen cannot emit PTO ops that the target ISA does not
   // support.

@@ -67,7 +67,7 @@ to global state.
 | `GetL0cMAlignment(dtype)` | physical M-row alignment shared by L0C tiling, dbC capacity, and allocation | 32 for INT32; otherwise 16 | 16 |
 | `BuildCrossCoreTransferView(dest, view)` | layout at cross-core transfer boundary | NZ for Mat/Left/Right; preserve for Vec | NZ for Mat/Left/Right; preserve for Vec (a5 hardware also requires fractal at the boundary) |
 
-## Select operator rules
+## Registered operator rules
 
 `tile.sel` and `tile.sels` register their scratch planners in
 `BackendOpInfo::scratch_plan_func`; TSELS also registers its existing dtype and
@@ -101,6 +101,35 @@ through unchanged, including A5 placeholders with other dtypes. This migration
 preserves existing compiler checks; it does not add exact scratch-geometry
 validation or change PTOAS checks. Memory allocation and the existing IR
 workspace/alias metadata remain responsible for lifetime and reuse decisions.
+
+### Cast scratch rules
+
+`tile.cast` registers its scratch planner with `f_plan_scratch` alongside codegen
+in `pto_ops_cast.cpp`. The target is captured during registration; no cast-specific
+handler virtual is needed. `InitMemRef` and codegen both call
+`Backend::PlanOpScratch("tile.cast", request)`.
+
+Cast queries take `source_tile` (the immutable physical and valid geometry),
+`target_dtype`, and the effective `saturating` flag. A separately supplied
+`source_dtype` must agree with the tile. Missing inputs or dynamic geometry
+needed for sizing return `Unknown`; invalid rank returns `Unsupported`.
+Consumers report errors at the call span. A5, native conversion pairs, and
+saturating conversions return `NotRequired` without requiring static geometry.
+
+```python
+from pypto import ir
+
+source = ir.TileType([4, 128], DataType.FP32, tile_view=ir.TileView(valid_shape=[3, 96]))
+plan = target.plan_op_scratch(
+    "tile.cast", source_tile=source, target_dtype=DataType.INT16, saturating=False
+)
+# Required: INT8 [1, 1152], including the physical row pitch for partial validity.
+```
+
+PyPTO and DSA-RP materialize the returned spec in `InitMemRef`; PTOAS retains
+ownership of implicit scratch. Codegen supplies static-valid views for the
+scratch-backed casts. Caller-provided tmp operands are preserved, rather than
+checked against the compiler's synthesis recipe.
 
 ## Memory capacity source
 

@@ -996,7 +996,10 @@ def test_tcvt_planner_scratch_views(
             skip_ptoas=not native,
             dump_passes=False,
         )
-    mlir = (tmp_path / "ptoas/kernel.pto").read_text()
+    # Without PTOAS, compile writes raw MLIR as the kernel output rather than
+    # an assembler intermediate. Keep the structural assertions in both modes.
+    mlir_path = "ptoas/kernel.pto" if native else "kernels/aiv/kernel.pto"
+    mlir = (tmp_path / mlir_path).read_text()
     tcvt = _sole_line(mlir, "pto.tcvt")
     needs_scratch = backend_type == BackendType.Ascend910B and saturation_mode == "off"
     explicit = needs_scratch and planner != passes.MemoryPlanner.PTOAS
@@ -1011,6 +1014,68 @@ def test_tcvt_planner_scratch_views(
             assert f"v_row={valid_rows}, v_col={valid_cols}" in tile_type, tcvt
     if native:
         assert "TCVT(" in (tmp_path / "ptoas/kernel.cpp").read_text()
+
+
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize(
+    "planner", [passes.MemoryPlanner.PTOAS, passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP]
+)
+@pytest.mark.parametrize("valid_cols", [128, 96])
+def test_tcvt_rank_one_with_explicit_scratch(tmp_path: Path, planner, valid_cols):
+    """Caller-owned scratch must not inherit compiler scratch's 2D restriction."""
+
+    @pl.program
+    class CastProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            src: pl.Tensor[[128], pl.FP16],
+            out: pl.Out[pl.Tensor[[1, 128], pl.INT8]],
+        ) -> pl.Tensor[[1, 128], pl.INT8]:
+            tile = pl.tile.load(src, [0], [128], valid_shape=[valid_cols], target_memory=pl.Mem.Vec)
+            # Deliberately larger and a different dtype than synthesized INT8 scratch.
+            tmp = pl.tile.create([1, 256], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+            converted = pl.tile.cast(tile, pl.INT8, mode="trunc", tmp=tmp, saturation_mode="off")
+            # Store requires 2D validity; normalize only after the rank-one cast.
+            converted_2d = pl.tile.reshape(converted, [1, 128])
+            return pl.tile.store(converted_2d, [0, 0], out)
+
+    reset_for_testing()
+    set_backend_type(BackendType.Ascend910B)
+    # Keep rank-one tiles at codegen entry; the default pipeline would first
+    # normalize their geometry and conceal this explicit-scratch regression.
+    with passes.PassContext([], memory_planner=planner):
+        optimized = passes.init_mem_ref()(CastProgram)
+        if planner != passes.MemoryPlanner.PTOAS:
+            optimized = passes.allocate_memory_addr()(optimized)
+
+    casts: list[_ir.Call] = []
+
+    class CastCollector(_ir.IRVisitor):
+        def visit_call(self, op: _ir.Call) -> None:
+            if op.op.name == _ir.get_op("tile.cast").name:
+                casts.append(op)
+            super().visit_call(op)
+
+    CastCollector().visit_program(optimized)
+    assert len(casts) == 1 and len(casts[0].args) == 2
+    source_type = casts[0].args[0].type
+    assert isinstance(source_type, _ir.TileType) and source_type.shape == [128]
+    mlir = codegen.PTOCodegen().generate(optimized, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+    tcvt = _sole_line(mlir, "pto.tcvt")
+    assert "tcvt_tmp_view" in tcvt, tcvt
+    scratch_allocs = [line for line in mlir.splitlines() if "pto.alloc_tile" in line and "dtype=f32" in line]
+    assert len(scratch_allocs) == 1, mlir
+    src_type, tmp_type, dst_type = _tile_buf_types(tcvt)
+    for tile_type in (src_type, dst_type):
+        assert "rows=1, cols=128" in tile_type, tcvt
+        assert f"v_row=1, v_col={valid_cols}" in tile_type, tcvt
+    assert "dtype=f32" in tmp_type and "rows=1, cols=256" in tmp_type, tcvt
+    assert "v_row=1, v_col=256" in tmp_type, tcvt
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path), memory_planner=planner)
+    assert "TCVT(" in cpp, cpp
 
 
 @pytest.mark.parametrize(
@@ -1046,15 +1111,17 @@ def test_tcvt_dynamic_validity_contract(tmp_path, backend_type, dst_dtype, satur
             _emit_pto(DynamicCast, passes.MemoryPlanner.PTOAS)
         return
 
+    native = find_ptoas_binary() is not None
     with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
         _ir.compile(
             DynamicCast,
             output_dir=str(tmp_path),
             backend_type=backend_type,
-            skip_ptoas=find_ptoas_binary() is None,
+            skip_ptoas=not native,
             dump_passes=False,
         )
-    mlir = (tmp_path / "ptoas/kernel.pto").read_text()
+    mlir_path = "ptoas/kernel.pto" if native else "kernels/aiv/kernel.pto"
+    mlir = (tmp_path / mlir_path).read_text()
     tcvt = _sole_line(mlir, "pto.tcvt")
     assert "v_col=?" in tcvt and "tcvt_src_view" not in tcvt, tcvt
 
