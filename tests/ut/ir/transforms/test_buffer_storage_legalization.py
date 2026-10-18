@@ -511,6 +511,59 @@ def test_view_created_inside_loop_still_observes_old_input_data():
     assert _base(storage.assigns["old_view"].var) == original
 
 
+@pytest.mark.parametrize("planner", _PLANNERS)
+def test_phi_view_loop_initializer_preserves_the_view_read_after_loop(planner, pass_verification_instruments):
+    """A phi rebase propagates through aliases without losing an isolated loop copy."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a_gm: pl.Tensor[[4, 8], pl.FP32],
+            b_gm: pl.Tensor[[4, 8], pl.FP32],
+            out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+            flag: pl.Scalar[pl.BOOL],
+        ) -> pl.Tensor[[4, 8], pl.FP32]:
+            a: pl.Tile[[4, 8], pl.FP32, pl.Mem.Vec] = pl.tile.load(a_gm, [0, 0], [4, 8])
+            b: pl.Tile[[4, 8], pl.FP32, pl.Mem.Vec] = pl.tile.load(b_gm, [0, 0], [4, 8])
+            if flag:
+                then_value: pl.Tile[[4, 8], pl.FP32, pl.Mem.Vec] = pl.tile.add(a, 1.0)
+                chosen = pl.yield_(then_value)
+            else:
+                else_value: pl.Tile[[4, 8], pl.FP32, pl.Mem.Vec] = pl.tile.mul(b, 2.0)
+                chosen = pl.yield_(else_value)
+            viewed: pl.Tile[[4, 8], pl.FP32, pl.Mem.Vec] = pl.tile.reshape(chosen, [4, 8])
+            renamed: pl.Tile[[4, 8], pl.FP32, pl.Mem.Vec] = viewed
+            for _i, (current,) in pl.range(0, 3, init_values=(renamed,)):
+                updated: pl.Tile[[4, 8], pl.FP32, pl.Mem.Vec] = pl.tile.add(current, 1.0)
+                carried = pl.yield_(updated)
+            observed: pl.Tile[[4, 8], pl.FP32, pl.Mem.Vec] = pl.tile.add(viewed, carried)
+            return pl.tile.store(observed, [0, 0], out)
+
+    with passes.PassContext(pass_verification_instruments, memory_planner=planner, enable_buffer_ir=True):
+        after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(Before))
+        ir.assert_structural_equal(passes.materialize_semantic_aliases()(after), after)
+    storage = _Storage(after)
+    _assert_canonical_arms(storage)
+    assert len(storage.loops) == 1
+    loop = storage.loops[0]
+    phi = storage.branches[0].return_vars[0]
+    assert _base(storage.assigns["viewed"].var) == _base(phi)
+    assert _base(storage.assigns["renamed"].var) == _base(phi)
+    assert _base(loop.iter_args[0]) != _base(phi), "the loop clobbered its independently live initializer"
+    entry_value = loop.iter_args[0].initValue
+    assert isinstance(entry_value, ir.Var)
+    entry = next(stmt for stmt in storage.statements if stmt.var.unique_id == entry_value.unique_id)
+    assert isinstance(entry.value, ir.Call) and entry.value.op.name == _MOVE
+    assert _base(entry.value.args[0]) == _base(phi), "the entry copy reads the phi's abandoned buffer"
+    assert _base(storage.assigns["updated"].var) == _base(loop.iter_args[0])
+    observed = storage.assigns["observed"].value
+    assert isinstance(observed, ir.Call)
+    assert [_base(value) for value in observed.args] == [_base(phi), _base(loop.return_vars[0])]
+    _verify_storage(after)
+
+
 def test_prior_read_does_not_isolate_a_local_top_level_accumulator():
     program = pl.parse_program("""
 @pl.program

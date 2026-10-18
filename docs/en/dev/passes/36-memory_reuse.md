@@ -67,7 +67,54 @@ program_optimized = reuse_pass(program)
 5. **Accumulator if-phi coalescing** (`TopDownRetargeter::CoalesceAccumulatorIfPhis`): `LowerPipelineLoops` peels a stage-2 K-loop into `if`-phis whose live branch is an in-place `matmul_acc` (on the accumulator buffer) and whose dead `if k==0` branch is a fresh `matmul` seed on a *different* Acc buffer. Left alone, step 7 would try to reconcile them with an `acc→acc tile.move` — a second co-live L0C buffer (overflow) that ptoas also rejects (no legal Acc→Acc `tmov`). This step identifies the in-place-accumulator branch by its `reuses_input` producer and retargets the *other* branch's seed onto the accumulator buffer, so both branches share it and no move is emitted (matching `mad_acc`'s shared-`%dst` semantics). Scoped to `Acc`; the retarget is **mandatory** (a declined retarget is an `INTERNAL_CHECK`, never a move — no legal Acc→Acc move exists). It bypasses the *global* dead-at-assign liveness check (which would false-decline on the legitimate post-if phi consumer), but only after verifying the two preconditions branch exclusivity actually needs: (a) the seed producer is a `Call` lexically **inside** the branch (a pre-if value yielded through the branch runs unconditionally and would clobber the accumulator the sibling in-place branch reads), and (b) a **branch-scoped** `IsTargetDeadAtAssign` (bounded to stop at the enclosing `if`) finds no same-branch tail read of the accumulator buffer. When either fails, the phi remains uncoalesced and step 7 fails loudly rather than manufacturing unsupported Acc→Acc IR
 
    **Direction of travel (long horizon).** The shape this step repairs is the *hand-peeled* split-K idiom. `tile.matmul_acc(acc, lhs, rhs, init_cond=(k == 0))` expresses the same reduction on one buffer and needs no repair, and [`AutoTileMatmulL0`](18-auto_tile_matmul_l0.md) now generates that form (head-peeling the bias K-loop, which has no `init_cond` operand), so no compiler-generated IR reaches this step any more. It is kept for the peels in author source — pypto-lib alone has 95 of them — and retiring it would need that migration to land first. Prefer `init_cond` in new code; do not expect this step to disappear soon
-6. **Identity-copy buffer normalization** (`NormalizeIdentityCopyBuffersMutator`, runs on **both sides** of step 7): after step 5 retargets an accumulator if-phi, a downstream bare-`Var` SSA identity copy of the (now-moved) return_var can still carry the pre-coalesce buffer (e.g. `c: …mem_acc_17 = c_phi` after `c_phi` moved to `mem_acc_5`). An `x = y` copy (value a bare `Var`, not a `Call`) is a pure rename and must alias `y`'s buffer, so this single forward pass retypes such a copy's LHS to the RHS's MemRef and substitutes the LHS's downstream uses. No-op when no mismatch exists. It runs on both sides of the yield fixup because both strand such a rename, from opposite directions. **Before**, because a carry rename such as `lag2 = lag1` only lands on lag1's buffer here, which step 7 must see to order the carry writebacks against each other — against the pre-normalization buffers every rename still sits on a buffer of its own and no conflict is visible. **After**, because step 7's own IfStmt fixup repoints a phi return_var onto the canonical branch buffer and strands that phi's downstream rename the same way. The mutator is idempotent, so whichever run finds nothing is a no-op. The same pass also re-anchors an **in-place** `Call`'s output (`ReanchorInplaceOutput`, e.g. `tile.matmul_acc` / `tile.gather_row`) onto its reused input's buffer — but the **before** run skips an input that is an `IfStmt` return_var, whose buffer step 7 has yet to choose. Anchoring onto that stale buffer pins the producer to storage step 7 abandons; step 7 then takes it as the canonical target for the *next* phi in the chain and reconciles the sibling arm with a same-space `tile.move` no target can lower, while the **after** run re-anchors the producer back and leaves the phi buffer unwritten on the taken arm. Two conditionals over one in-place tile — what `pl.unroll(2)` around an `if` produces — are enough to reach it
+6. **Semantic alias buffer normalization** (`NormalizeIdentityCopyBuffersMutator`,
+   runs on **both sides** of step 7): retargeting can leave a result's declared
+   MemRef stale even after its operand was substituted. Normalize all required
+   alias relationships in one forward walk, substituting repaired results into
+   downstream uses:
+
+   | Alias category | Required result storage |
+   | -------------- | ----------------------- |
+   | Bare SSA alias `x = y` | Current source's exact MemRef window |
+   | Registered `output_reuses_input` result | Exact window of the registered writeback input |
+   | Registered first-input buffer-aliasing operation | Current first input's allocation, offset, and slot identity, plus the operation-relative offset; retain the result extent |
+   | Tensor/DistributedTensor For/While arguments and returns | Current initializer's exact window, including on zero-trip loops |
+
+   These rules apply to shaped results with MemRefs, including tile and tensor
+   writebacks. Bare SSA renames follow the complete source type without copying
+   data. Call-result retyping preserves the result's shape, dtype,
+   view/distribution metadata, and follows the current input's memory space for
+   tile results. An explicit writeback contract takes precedence over first-input
+   inheritance. The first-input buffer-alias predicate requires both
+   `OutputMemoryInheritsInput()` and `IsInplaceSafe()`; memory-space inheritance
+   alone does not establish a buffer alias.
+   `ReanchorAliasingOutput` handles the call categories through their registered
+   contracts, including writing operations such as `assemble`; it does not
+   classify all buffer aliases as metadata-only views. Real non-in-place
+   `tile.transpose` and independent `tile.extract` results are excluded.
+
+   Tensor loop-boundary repair runs in both legacy Tile and Buffer IR modes,
+   preserving boundary shape, view metadata, and distributed-window identity.
+   Independent yielded tensors are not retargeted. Tile carries retain their
+   separate canonical-buffer alignment and yield transfers in step 7.
+
+   Relative view offsets are recomputed from the operation and added to the
+   current input offset once. Compare the complete physical window, including
+   extent and pipeline-slot metadata: the base can remain unchanged while its
+   window or slot changes. Apply the same window rule when `RetypeApplier`
+   follows planned input rewrites. The forward substitutions repair arbitrary
+   alias chains without fixed-point iteration and make normalization idempotent.
+
+   The **before** walk makes carry aliases such as `lag2 = lag1` visible to step
+   7's parallel writeback ordering. This pre-yield-fixup form seeds unresolved
+   `IfStmt` results and propagates their status through bare aliases and both
+   call categories and tensor loop boundaries, even if an intermediate
+   result already has the same MemRef. Calls depending on an unresolved phi are
+   not anchored to its provisional window. Otherwise a later phi could choose a
+   producer's temporary buffer as its canonical destination, leaving that buffer
+   unwritten when the producer is re-anchored after fixup. The **after** walk
+   repairs all aliases once step 7 has selected canonical phi storage. Either
+   walk is a no-op when no mismatch exists.
 7. **Yield fixup**: Fix MemRef mismatches in control flow return variables. Acc→Acc copies are not legal, so a residual mismatched Acc carry is an internal error rather than a `tile.move`:
    - **ForStmt**: Ensure all 4 loop-carry variables (initValue, iter_arg, yield value, return_var) share the same MemRef. Inserts `tile.move` before yield if MemRefs differ. `pl.yield_` rebinds every carry **simultaneously**, but the copies realizing it run in sequence, so they are ordered against each other rather than emitted in iter_arg order: a copy that reads a byte range another copy writes runs first. Without that ordering a shift register collapses — for `lag2 = lag1; lag1 = v`, writing lag1's buffer first makes lag2 read the *new* lag1 and the loop carries `lag2 == lag1` ([#2481](https://github.com/hw-native-sys/pypto/issues/2481)). A swap (`cur, prev = prev, cur`) has no valid order at all, so one member is copied into a fresh scratch buffer ahead of both writebacks and its own writeback reads the scratch; that allocation is hoisted onto the function-body head like every other. Carries whose buffers *overlap* — most often two carries seeded from one tile, which makes them one buffer — cannot be saved by any order and are rejected here with a `CHECK`, where the carries still have names
    - **IfStmt**: Patch return_vars to the canonical (then-branch) MemRef, and give any arm whose yield value lives on a different buffer a `tile.move` into that buffer, so every path through the `if` writes the phi. An arm's yield value may be the enclosing loop's `IterArg` — `if cond: acc = f(acc)` leaves a bare `yield acc_iter` on the other arm — so arms are matched with `AsVarLike`, not `As<Var>`: `IterArg` carries its own `ObjectKind`, and skipping it left the phi buffer unwritten on that path while the return_var was still patched onto the sibling arm's buffer, feeding the loop carry stale data ([#2481](https://github.com/hw-native-sys/pypto/issues/2481))
@@ -278,7 +325,7 @@ Pass MemoryReuse();
 - `ApplyMemRefSharing` updates MemRef pointers via `MemRefSharingMutator`
 - `TopDownRetargeter::CoalesceAccumulatorIfPhis` coalesces peeled loop-carried accumulator `if`-phis by retargeting the dead-branch seed onto the in-place accumulator buffer, so `YieldFixupMutator` never emits an illegal `acc→acc tile.move` (see Algorithm step 5)
 - `YieldFixupMutator` fixes ForStmt/IfStmt yield/return_var MemRef mismatches after reuse (inserts `tile.move` when legal; rejects residual Acc→Acc mismatches)
-- `NormalizeIdentityCopyBuffersMutator` reconciles bare-`Var` SSA identity copies whose LHS/RHS buffers diverged after accumulator if-phi coalescing (see Algorithm step 6)
+- `NormalizeIdentityCopyBuffersMutator` maintains bare SSA, registered writeback-result, and first-input buffer aliases after retargeting; `ReanchorAliasingOutput` follows current input windows through downstream call chains (see Algorithm step 6)
 - `UsedMemRefCollector` gathers still-referenced MemRef pointers after sharing
 - `RemoveUnusedAllocStatements` filters out redundant `tile.alloc` statements from `SeqStmts`
 
@@ -304,6 +351,6 @@ passes.def("memory_reuse", &pass::MemoryReuse, "Memory reuse optimization");
   - `tile.col_expand_mul` — output must not alias the broadcast vector
   - widening `tile.cast` — output must not alias the (narrower) input
   - a forbidden operand reached through a VIEW is still honored (physical-buffer resolution)
-- Tests view operation MemRef sharing preservation
+- Tests semantic alias chains after writeback retargeting, including view offsets, same-allocation window changes, pipeline slots, unresolved if-phis, and normalization idempotence
 - Tests redundant alloc statement removal
 - Tests control flow lifetime analysis (nested IfStmt in ForStmt, branch variable sharing)

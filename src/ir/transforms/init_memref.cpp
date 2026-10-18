@@ -738,9 +738,6 @@ class InitMemRefMutator : public IRMutator {
       additional_offset = ComputeViewByteOffset(call, source->GetType());
     }
 
-    // Accumulate: total_offset = parent.byte_offset + additional_offset
-    ExprPtr total_offset = AddByteOffsets(parent_memref->byte_offset_, additional_offset);
-
     auto source_ms = ExtractMemorySpaceFromType(source->GetType());
 
     // Keep ordinary aliases/reshapes at the parent's physical range. A slice
@@ -761,20 +758,9 @@ class InitMemRefMutator : public IRMutator {
       }
     }
 
-    // For pure aliases (no offset change, same size), share the SAME MemRef shared_ptr
-    // to preserve base_ Ptr identity. MemoryReuse builds sharing groups by base_ Ptr —
-    // variables sharing the same base_ are merged into one lifetime group.
-    bool is_pure_alias = (view_size == parent_memref->size_);
-    if (is_pure_alias) {
-      if (auto const_offset = As<ConstInt>(additional_offset)) {
-        is_pure_alias = (const_offset->value_ == 0);
-      } else {
-        is_pure_alias = false;
-      }
-    }
-    MemRefPtr view_memref = is_pure_alias
-                                ? parent_memref
-                                : std::make_shared<MemRef>(parent_memref->base_, total_offset, view_size);
+    // Full aliases share the exact MemRef; subviews retain the source's slots
+    // while narrowing the window. Later reanchoring uses the same construction.
+    MemRefPtr view_memref = MakeAliasingMemRef(parent_memref, additional_offset, view_size, op->span_);
     if (non_dense_source) non_dense_view_memrefs_.insert(view_memref);
 
     std::optional<MemRefPtr> view_opt = view_memref;

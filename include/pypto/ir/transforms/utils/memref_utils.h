@@ -501,6 +501,17 @@ inline ExprPtr AddByteOffsets(const ExprPtr& lhs, const ExprPtr& rhs) {
   return std::make_shared<Add>(lhs, rhs, DataType::INDEX, Span::unknown());
 }
 
+/// Derive an alias window from its current source, preserving allocation-slot identity.
+/// The offset is relative to the source, never the alias's previous absolute offset.
+inline MemRefPtr MakeAliasingMemRef(const MemRefPtr& source, const ExprPtr& relative_offset, uint64_t size,
+                                    const Span& span = Span::unknown()) {
+  INTERNAL_CHECK(source) << "Internal error: alias source must carry a MemRef";
+  auto zero = As<ConstInt>(relative_offset);
+  if (zero && zero->value_ == 0 && size == source->size_) return source;
+  return std::make_shared<MemRef>(source->base_, AddByteOffsets(source->byte_offset_, relative_offset), size,
+                                  span, source->is_pinned_, source->slot_count_, source->slot_index_);
+}
+
 /// Create a multiply expression: lhs * rhs.
 /// Folds ConstInt * ConstInt into a single ConstInt.
 inline ExprPtr MulByteOffsets(const ExprPtr& lhs, const ExprPtr& rhs) {

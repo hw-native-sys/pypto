@@ -65,13 +65,57 @@ its own fresh MemRef. This pass closes that gap:
    sibling branch would clobber an observable value on the path where the
    continuation does not execute.
 3. **Normalize semantic identity chains**
-   (`NormalizeIdentityCopyBuffersMutator`): make bare SSA copies share their
-   source allocation and make every registered in-place result share its reused
-   input allocation. This closes lowering-created type drift before any memory
-   planner observes lifetimes or PTOAS emits tile handles.
+   (`NormalizeIdentityCopyBuffersMutator`): maintain every required alias relation
+   after retargeting, rather than repairing one producer in isolation. Bare SSA
+   aliases follow their source, registered `output_reuses_input` results follow
+   the specified writeback input, and registered first-input buffer-aliasing
+   operations follow their current first input. A single forward walk substitutes
+   each repaired result into downstream uses, so a writeback result followed by
+   `transpose_view`, `reshape`, or `slice` stays on the correct storage throughout
+   the chain; no fixed-point iteration is needed. This closes lowering-created
+   type drift before any memory planner observes lifetimes or PTOAS emits tile
+   handles.
 
-The pass is a no-op when there is nothing to retarget (`Compute` returns no
-rewrites), and skips `Orchestration` functions (no TileType variables).
+These rules cover shaped results with MemRefs, including tile and tensor
+writebacks. Bare SSA renames follow the complete source type without copying
+data; call-result retyping preserves result shape, dtype, view/distribution
+metadata. An explicit `output_reuses_input` contract takes precedence over
+first-input inheritance. The first-input buffer-alias predicate requires both
+`OutputMemoryInheritsInput()` and `IsInplaceSafe()`; inheriting the memory space
+alone does not establish a buffer alias.
+Writeback results inherit the current writeback input's exact MemRef window.
+First-input aliases retain their result extent and derive their window from the
+current input allocation and byte offset plus the operation's relative view
+offset, applied once; they also inherit the input's pipeline slot identity and,
+for tile results, memory space. Recomputing the relative offset from the
+operation, rather than adding it to a stale absolute offset, makes normalization
+idempotent and handles changes within the same allocation as well as changes of
+allocation. Buffer aliasing is a storage contract: `tile.assemble` also follows
+its first input even though it writes data. Real non-in-place `tile.transpose` and independent
+`tile.extract` results keep their own storage.
+
+In both legacy Tile and Buffer IR modes, `TensorType`/`DistributedTensorType`
+For/While arguments and returns are mutable views of the current initializer.
+Normalization aligns their storage while preserving each boundary result's
+shape, view metadata, and distributed-window identity, including on zero-trip
+loops. Independently produced yielded tensors keep their own storage. Tile
+carries retain their separate canonical-buffer and yield-fixup rules, including
+explicit transfers when a yielded tile needs to reach the carry buffer.
+
+The pre-yield-fixup form of normalization seeds unresolved `IfStmt` results and
+propagates that status through bare aliases, writeback results, and first-input
+aliases, including through tensor loop arguments and returns. None of the
+dependent calls is anchored to that provisional window.
+Once the control-flow boundary is resolved, the following normalization walk
+repairs the whole chain. Buffer IR also uses this deferred form before indexing
+old-value observations and after loop-entry isolation, while branch storage is
+still provisional; normalization after boundary resolution needs no deferred
+seed. See [MemoryReuse step 6](36-memory_reuse.md#algorithm) for the normalization
+walks around yield fixup.
+
+The pass skips orchestration-like functions, including graph bodies. In other
+functions, alias normalization still runs when `Compute` returns no retargeting
+rewrites; it can repair existing type drift independently.
 
 ## Relationship to codegen
 
@@ -99,6 +143,13 @@ destinations before `PYPTO`, `DSA_RP`, or `PTOAS` performs memory planning:
    yield. Remove allocations made unused by producer retargeting. Branch copies
    and the existing For-carry fixups run before all three planners; `PYPTO`
    reconciles any new mismatch after reuse, retaining the declared phi target.
+
+Branch planning propagates required aliases in the same forward walk between
+successive phi storage choices, so later phis see current windows rather than
+abandoned ones. For/While carries follow their current initializers before the
+body is visited, and loop results follow those canonical carries afterward,
+including the zero-iteration path. Handle counts follow planned allocation
+changes and rollback, keeping optional producer retargeting conservative.
 
 Trailing yields inside transparent `SplitAivScopeStmt` and `RuntimeScopeStmt`
 wrappers are supported. Transfers stay inside the same scope immediately before

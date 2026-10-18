@@ -63,7 +63,44 @@ program_optimized = reuse_pass(program)
 5. **累加器 if-phi 合并**（`TopDownRetargeter::CoalesceAccumulatorIfPhis`）：`LowerPipelineLoops` 会把 stage-2 的 K 循环剥离成 `if`-phi，其活跃分支是就地累加的 `matmul_acc`（位于累加器缓冲区），而失效的 `if k==0` 分支是位于*不同* Acc 缓冲区上的全新 `matmul` seed。若不处理，步骤 7 会尝试用 `acc→acc tile.move` 协调二者 —— 产生第二个同时存活的 L0C 缓冲区（溢出），且 ptoas 也会拒绝（不存在合法的 Acc→Acc `tmov`）。本步骤通过 `reuses_input` 的 producer 识别就地累加分支，并把*另一*分支的 seed 重定向到累加器缓冲区，使两个分支共享同一缓冲区、不再产生 move（符合 `mad_acc` 共享 `%dst` 的语义）。仅作用于 `Acc`；重定向是**强制的**（被拒绝的重定向会触发 `INTERNAL_CHECK`，绝不退化为 move —— 因为不存在合法的 Acc→Acc move）。它会跳过*全局* dead-at-assign 活跃性检查（否则会因 if 之后合法的 phi 消费者而误判拒绝），但仅在验证分支互斥真正所需的两个前提之后：(a) seed 的 producer 是词法上位于该分支**内部**的 `Call`（经由分支透传的 if 前值会无条件执行，从而破坏 sibling 就地分支所读取的累加器），以及 (b) **限定分支范围** 的 `IsTargetDeadAtAssign`（在所属 `if` 处停止）确认分支内 seed 之后没有对累加器缓冲区的尾部读取。任一前提不满足时，该 phi 保持未合并，步骤 7 会明确失败，而不会生成不受支持的 Acc→Acc IR
 
    **长期演进方向。** 本步骤修复的是*手写剥离*式 split-K 写法。`tile.matmul_acc(acc, lhs, rhs, init_cond=(k == 0))` 用同一块 buffer 表达同一个归约，无需任何修复；[`AutoTileMatmulL0`](18-auto_tile_matmul_l0.md) 现在直接生成该形式（对没有 `init_cond` 操作数的 bias K-loop 则采用 head-peel），因此已不再有编译器生成的 IR 走到本步骤。保留它是为了作者源码中的剥离写法 —— 仅 pypto-lib 就有 95 处 —— 要移除它必须先完成这些源码的迁移。新代码请优先使用 `init_cond`；但不要期待本步骤会在近期消失
-6. **恒等拷贝缓冲区归一化**（`NormalizeIdentityCopyBuffersMutator`，在步骤 7 **前后各运行一次**）：在步骤 5 重定向累加器 if-phi 后，对（已被移动的）return_var 的下游裸 `Var` SSA 恒等拷贝可能仍携带合并前的缓冲区（例如 `c_phi` 移到 `mem_acc_5` 后，`c: …mem_acc_17 = c_phi`）。`x = y` 拷贝（值为裸 `Var` 而非 `Call`）是纯重命名、必须与 `y` 共用缓冲区，因此本次单向前向遍历把这类拷贝的 LHS 重定型到 RHS 的 MemRef，并替换 LHS 的下游使用。无不一致时为空操作。它在 yield 修复前后各跑一次，因为两侧都会从相反方向让这类重命名滞留。**之前**：`lag2 = lag1` 这类携带值重命名要到这里才落到 lag1 的缓冲区上，而步骤 7 必须看到这一点才能让携带值回写之间正确排序——若按归一化之前的缓冲区来看，每个重命名都还在各自的缓冲区上，冲突根本不可见。**之后**：步骤 7 自身的 IfStmt 修复会把 phi 的 return_var 重指到规范分支缓冲区上，从而以同样的方式让该 phi 的下游重命名滞留。该 mutator 是幂等的，因此没有发现不一致的那一次就是空操作。同一遍还会把**就地** `Call` 的输出（`ReanchorInplaceOutput`，例如 `tile.matmul_acc` / `tile.gather_row`）重锚到其复用输入的缓冲区上 —— 但**之前**那一次会跳过输入为 `IfStmt` return_var 的情形，因为该 phi 的缓冲区要到步骤 7 才确定。锚到这个尚未落定的缓冲区，会把 producer 钉在步骤 7 即将废弃的存储上：步骤 7 随后会把它当作链上*下一个* phi 的规范目标，用任何目标都无法下降的同空间 `tile.move` 去协调另一分支；而**之后**那一次又会把 producer 重锚回去，导致被选中分支下 phi 缓冲区从未被写入。对同一个就地 tile 连续两个条件分支（即 `pl.unroll(2)` 包住一个 `if` 所产生的形状）即可触发
+6. **语义别名缓冲区归一化**（`NormalizeIdentityCopyBuffersMutator`，在步骤 7
+   **前后各运行一次**）：重定向后，即使操作数引用已经替换，结果声明中的 MemRef
+   仍可能陈旧。单次前向遍历统一维护所有必需的别名关系，并把修正后的结果替换到
+   下游使用中：
+
+   | 别名类别 | 结果必须使用的存储 |
+   | -------- | ------------------ |
+   | 裸 SSA 别名 `x = y` | 当前 source 的完整 MemRef 窗口 |
+   | 注册了 `output_reuses_input` 的结果 | 注册的写回输入的完整窗口 |
+   | 注册的首输入 buffer 别名操作 | 当前第一个输入的 allocation、偏移、slot 身份，加上操作的相对偏移；保留结果窗口大小 |
+   | Tensor/DistributedTensor 的 For/While 参数和返回值 | 当前 initializer 的完整窗口，也涵盖零次迭代路径 |
+
+   这些规则适用于带 MemRef 的 shaped result，包括 tile 和 tensor 写回。裸 SSA
+   重命名直接跟随 source 的完整类型，不复制数据。调用结果重定型保留结果的
+   shape、dtype、view/distribution 元数据；tile 结果的 memory space 跟随当前
+   输入。显式写回契约优先于首输入继承。首输入 buffer 别名判定要求同时满足
+   `OutputMemoryInheritsInput()` 和 `IsInplaceSafe()`；只继承 memory space
+   并不意味着共享 buffer。`ReanchorAliasingOutput` 根据注册契约处理两类调用，
+   也包括 `assemble` 这类写数据的操作，不会把所有 buffer 别名都当作纯元数据 view。
+   真正搬运数据、不能原地执行的 `tile.transpose` 和独立的 `tile.extract` 结果
+   不属于修复对象。
+
+   Tensor 循环边界修复在 legacy Tile 和 Buffer IR 两种模式下都运行，保留边界的
+   shape、view 元数据和分布式窗口身份，不重定向独立产生的 yield tensor。
+   Tile carry 仍使用单独的规范缓冲区对齐和步骤 7 中的 yield 传输。
+
+   View 相对偏移从操作重新计算，并且只加到当前输入偏移上一次。比较完整物理窗口，
+   包括窗口大小和流水线 slot 元数据：base 不变时窗口或 slot 也可能改变。
+   `RetypeApplier` 跟随计划中的输入重写时也采用相同的窗口规则。前向替换可以修复
+   任意长的别名链，无需不动点迭代，并保持归一化幂等。
+
+   **之前**那次遍历让 `lag2 = lag1` 这类 carry 别名对步骤 7 的并行写回排序可见。
+   这一 yield 修复前使用的形式会把未决 `IfStmt` 结果加入初始集合，并沿裸别名及
+   两类调用和 tensor 循环边界传播未决状态，即使中间结果的 MemRef
+   已经相同也要继续传递。依赖未决 phi 的调用不会被锚定到其临时窗口。否则，后续
+   phi 可能把 producer 的临时缓冲区选作规范目标，而修复后 producer 重新锚定会使
+   该缓冲区在所选路径上未被写入。**之后**那次遍历在步骤 7 选定 phi 的规范存储后
+   修复所有别名。任一次遍历没有发现不一致时都为空操作。
 7. **Yield 修复**：修复控制流返回变量的 MemRef 不一致。Acc→Acc 拷贝不合法，因此残留的不匹配 Acc 循环携带值会触发内部错误，而不是生成 `tile.move`：
    - **ForStmt**：确保 4 个循环携带变量（initValue、iter_arg、yield value、return_var）共享同一个 MemRef。若 MemRef 不同则在 yield 前插入 `tile.move`。`pl.yield_` 是**同时**重新绑定所有携带值，但实现它的拷贝是顺序执行的，因此这些拷贝之间要互相排序，而不是按 iter_arg 顺序发射：读取了另一条拷贝所写字节范围的拷贝先执行。缺少这一排序会让移位寄存器塌缩——对 `lag2 = lag1; lag1 = v`，先写 lag1 的缓冲区会让 lag2 读到*新的* lag1，循环携带的变成 `lag2 == lag1`（[#2481](https://github.com/hw-native-sys/pypto/issues/2481)）。交换（`cur, prev = prev, cur`）则不存在任何合法顺序，因此把其中一方先拷进一块新的暂存缓冲区、其回写再从暂存区读取；该分配像其他分配一样被提升到函数体首部。若两个携带值的缓冲区**重叠**——最常见的是两个携带值由同一个 tile 初始化，从而变成同一块缓冲区——任何顺序都无法挽救，在这里用 `CHECK` 直接报错，此时携带值还带着名字
    - **IfStmt**：把 return_vars 修补到规范缓冲区（then 分支），并为 yield 值位于其他缓冲区的分支插入一条写入该缓冲区的 `tile.move`，使经过该 `if` 的每条路径都写入 phi。分支的 yield 值可能是外层循环的 `IterArg`——`if cond: acc = f(acc)` 会让另一分支只剩裸的 `yield acc_iter`——因此分支用 `AsVarLike` 而非 `As<Var>` 匹配：`IterArg` 有自己的 `ObjectKind`，漏掉它会让该路径上的 phi 缓冲区从未被写入，而 return_var 仍被修补到兄弟分支的缓冲区上，于是循环携带值被喂入陈旧数据（[#2481](https://github.com/hw-native-sys/pypto/issues/2481)）
@@ -266,7 +303,7 @@ Pass MemoryReuse();
 - `ApplyMemRefSharing` 通过 `MemRefSharingMutator` 更新 MemRef 指针
 - `TopDownRetargeter::CoalesceAccumulatorIfPhis` 通过把失效分支的 seed 重定向到就地累加器缓冲区，合并被剥离的循环携带累加器 `if`-phi，使 `YieldFixupMutator` 不再产生非法的 `acc→acc tile.move`（见算法步骤 5）
 - `YieldFixupMutator` 修复 ForStmt/IfStmt 在复用后的 yield/return_var MemRef 不一致（合法时插入 `tile.move`；拒绝残留的 Acc→Acc 不一致）
-- `NormalizeIdentityCopyBuffersMutator` 协调累加器 if-phi 合并后 LHS/RHS 缓冲区不一致的裸 `Var` SSA 恒等拷贝（见算法步骤 6）
+- `NormalizeIdentityCopyBuffersMutator` 在重定向后维护裸 SSA 别名、注册的写回结果别名及首输入 buffer 别名；`ReanchorAliasingOutput` 让下游调用链跟随当前输入窗口（见算法步骤 6）
 - `UsedMemRefCollector` 收集共享后仍被引用的 MemRef 指针
 - `RemoveUnusedAllocStatements` 从 `SeqStmts` 中过滤掉冗余的 `tile.alloc` 语句
 
@@ -291,6 +328,6 @@ passes.def("memory_reuse", &pass::MemoryReuse, "Memory reuse optimization");
   - `tile.col_expand_mul` —— 输出不得 alias 广播向量
   - 升精度 `tile.cast` —— 输出不得 alias（更窄的）输入
   - 经 VIEW 间接到达的禁止操作数也被遵守（物理缓冲区解析）
-- 测试切片操作的 MemRef 共享保持
+- 测试写回重定向后的语义别名链，包括 view 偏移、同一 allocation 内的窗口变化、流水线 slot、未决 if-phi 和归一化幂等
 - 测试冗余 alloc 语句移除
 - 测试控制流生命周期分析（ForStmt 内嵌套 IfStmt、分支变量共享）

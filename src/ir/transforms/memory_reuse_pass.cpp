@@ -921,10 +921,13 @@ class TopDownRetargeter {
   std::vector<RewriteJournalEntry> rewrite_journal_;
   std::set<VarPtr> visiting_;  // cycle guard
   std::map<const Var*, size_t> storage_handle_counts_;
+  std::map<const Var*, const Var*> branch_storage_handle_bases_;
   std::set<const Var*> pinned_branch_bases_;
   uint64_t branch_storage_counter_ = 0;
 
   void BuildAnalysis(const StmtPtr& func_body, bool index_branch_storage = false) {
+    storage_handle_counts_.clear();
+    branch_storage_handle_bases_.clear();
     DefMapVisitor def_v;
     def_v.Run(func_body);
     defs_ = std::move(def_v.defs);
@@ -950,7 +953,11 @@ class TopDownRetargeter {
       auto def = defs_.find(var);
       if (def != defs_.end() && def->second.kind == VarDef::kIfReturn) return;
       auto tile = GetTileTypeWithMemRef(var->GetType());
-      if (tile) ++storage_handle_counts_[GetDefinedMemRef(tile)->base_.get()];
+      if (tile) {
+        const auto* base = GetDefinedMemRef(tile)->base_.get();
+        ++storage_handle_counts_[base];
+        branch_storage_handle_bases_[var.get()] = base;
+      }
     };
     for (const auto& [var, def] : defs_) {
       (void)def;
@@ -990,13 +997,47 @@ class TopDownRetargeter {
     RetargetAssign(var, def->second, target, memory, /*check_liveness=*/false);
   }
 
+  /// Keep required aliases current between successive phi decisions. Waiting
+  /// until RetypeApplier would let a later phi choose an abandoned view window.
+  void FollowBranchStorageAlias(const VarPtr& result, const VarPtr& source, const CallPtr& call = nullptr) {
+    auto output = CurrentTileType(result);
+    auto input = source ? CurrentTileType(source) : nullptr;
+    if (!output || !input) return;
+    auto target = GetDefinedMemRef(input);
+    if (call && !op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size())) {
+      target = MakeAliasingMemRef(target, ComputeViewByteOffset(call, input), GetDefinedMemRef(output)->size_,
+                                  result->span_);
+    }
+    if (!SamePhysicalWindow(GetDefinedMemRef(output), target) ||
+        output->GetMemorySpace() != input->GetMemorySpace()) {
+      PlanRewrite(result, target, input->GetMemorySpace());
+    }
+  }
+
+  template <typename LoopPtr>
+  void VisitBranchStorageLoop(const LoopPtr& loop, std::vector<StmtPtr>* allocations) {
+    for (const auto& argument : loop->iter_args_) {
+      FollowBranchStorageAlias(argument, AsVarLike(argument->initValue_));
+    }
+    VisitBranchStorage(loop->body_, allocations);
+    for (size_t i = 0; i < loop->return_vars_.size() && i < loop->iter_args_.size(); ++i) {
+      // A zero-trip loop returns its initializer, not its body's yield storage.
+      FollowBranchStorageAlias(loop->return_vars_[i], loop->iter_args_[i]);
+    }
+  }
+
   void VisitBranchStorage(const StmtPtr& stmt, std::vector<StmtPtr>* allocations) {
     if (auto seq = As<SeqStmts>(stmt)) {
       for (const auto& child : seq->stmts_) VisitBranchStorage(child, allocations);
+    } else if (auto assign = As<AssignStmt>(stmt)) {
+      auto source = alias_source_.find(assign->var_);
+      if (source != alias_source_.end()) {
+        FollowBranchStorageAlias(assign->var_, source->second, As<Call>(assign->value_));
+      }
     } else if (auto loop = As<ForStmt>(stmt)) {
-      VisitBranchStorage(loop->body_, allocations);
+      VisitBranchStorageLoop(loop, allocations);
     } else if (auto loop = As<WhileStmt>(stmt)) {
-      VisitBranchStorage(loop->body_, allocations);
+      VisitBranchStorageLoop(loop, allocations);
     } else if (auto scope = As<ScopeStmt>(stmt)) {
       VisitBranchStorage(scope->body_, allocations);
     } else if (auto branch = As<IfStmt>(stmt)) {
@@ -1833,6 +1874,23 @@ class TopDownRetargeter {
     return true;
   }
 
+  /// Keep optional branch-producer eligibility conservative as aliases move.
+  /// Each handle contributes once, even when its original descriptor was stale.
+  void UpdateBranchStorageHandle(const VarPtr& var, const TypePtr& type) {
+    auto tracked = branch_storage_handle_bases_.find(var.get());
+    if (tracked == branch_storage_handle_bases_.end()) return;
+    auto tile = GetTileTypeWithMemRef(type);
+    if (!tile) return;
+    const auto* base = GetDefinedMemRef(tile)->base_.get();
+    if (base == tracked->second) return;
+    auto& previous_count = storage_handle_counts_[tracked->second];
+    INTERNAL_CHECK_SPAN(previous_count > 0, var->span_)
+        << "Internal error: branch storage handle count must remain positive";
+    --previous_count;
+    ++storage_handle_counts_[base];
+    tracked->second = base;
+  }
+
   /// IterArg keys are stored under their `Var` base via static_pointer_cast;
   /// `rewrites_` keying compares shared_ptr control blocks, not static types,
   /// so `RetypeApplier`'s ForStmt handler can find the IterArg's planned
@@ -1842,6 +1900,7 @@ class TopDownRetargeter {
   /// attempt's checkpoint, including successful nested attempts.
   void PlanRewrite(const VarPtr& var, const MemRefPtr& target, std::optional<MemorySpace> target_memory) {
     auto new_type = CloneTypeWithMemRef(var->GetType(), target, target_memory);
+    UpdateBranchStorageHandle(var, new_type);
     auto previous = rewrites_.find(var);
     rewrite_journal_.push_back(RewriteJournalEntry{
         var, previous == rewrites_.end() ? std::nullopt : std::optional<TypePtr>(previous->second)});
@@ -1853,6 +1912,7 @@ class TopDownRetargeter {
     while (rewrite_journal_.size() > checkpoint) {
       auto entry = std::move(rewrite_journal_.back());
       rewrite_journal_.pop_back();
+      UpdateBranchStorageHandle(entry.var, entry.previous.value_or(entry.var->GetType()));
       if (entry.previous.has_value()) {
         rewrites_[entry.var] = *entry.previous;
       } else {
@@ -2008,32 +2068,23 @@ class RetypeApplier : public IRMutator {
     auto sub = var_substitution_.find(in_var);
     if (sub == var_substitution_.end()) return nullptr;  // input not retargeted
     auto out_mr_opt = GetTypeMemRef(op->var_->GetType());
-    auto in_old_opt = GetTypeMemRef(in_var->GetType());
     auto in_new_opt = GetTypeMemRef(sub->second->GetType());
-    if (!out_mr_opt || !in_old_opt || !in_new_opt) return nullptr;
+    if (!out_mr_opt || !in_new_opt) return nullptr;
     const auto& out_mr = *out_mr_opt;
-    const auto& in_old = *in_old_opt;
     const auto& in_new = *in_new_opt;
-    // Use the ORIGINAL (pre-mutation) types: a view inherited its input's buffer
-    // iff its output base equalled the input base in the input IR.  Fire only
-    // when the view inherited AND the input actually moved to another buffer.
-    // (tile.transpose is already excluded by IsBufferAliasingViewOp above — it
-    // inherits the memory space but permutes into a fresh buffer.)
-    if (out_mr->base_.get() != in_old->base_.get() || in_new->base_.get() == in_old->base_.get()) {
-      return nullptr;
-    }
-    ExprPtr additional = ComputeViewByteOffset(orig_call, in_var->GetType());
-    ExprPtr total_offset = AddByteOffsets(in_new->byte_offset_, additional);
-    auto add0 = As<ConstInt>(additional);
-    const bool pure_alias = add0 && add0->value_ == 0 && out_mr->size_ == in_new->size_;
-    MemRefPtr new_mr =
-        pure_alias ? in_new
-                   : std::make_shared<MemRef>(in_new->base_, total_offset, out_mr->size_, out_mr->span_);
+    // The registered alias contract also holds when only the source's offset,
+    // extent or slot changed, or the output already carried a stale descriptor.
+    auto additional = ComputeViewByteOffset(orig_call, sub->second->GetType());
+    auto new_mr = MakeAliasingMemRef(in_new, additional, out_mr->size_, out_mr->span_);
     // OutputMemoryInheritsInput also requires the view's memory space to follow its
     // input: if the retarget moved across memory spaces, carry the new space too.
     std::optional<MemorySpace> new_memory;
     if (auto in_new_tile = GetTileTypeWithMemRef(sub->second->GetType())) {
       new_memory = in_new_tile->GetMemorySpace();
+    }
+    auto output_tile = As<TileType>(op->var_->GetType());
+    if (SamePhysicalWindow(out_mr, new_mr) && (!output_tile || output_tile->GetMemorySpace() == new_memory)) {
+      return nullptr;
     }
     auto new_type = CloneTypeWithMemRef(op->var_->GetType(), new_mr, new_memory);
     auto follow_var = std::make_shared<Var>(op->var_->name_hint_, new_type, op->var_->span_);
@@ -2095,12 +2146,13 @@ class RetypeApplier : public IRMutator {
       if (auto found = rewrites_.find(argument); found != rewrites_.end()) {
         argument_type = found->second;
       }
-      auto initial_tile = GetTileTypeWithMemRef(initial->GetType());
-      auto argument_tile = GetTileTypeWithMemRef(argument_type);
-      if (initial_tile && argument_tile &&
-          !SamePhysicalWindow(GetDefinedMemRef(initial_tile), GetDefinedMemRef(argument_tile))) {
-        argument_type = CloneTypeWithMemRef(argument_type, GetDefinedMemRef(initial_tile),
-                                            initial_tile->GetMemorySpace());
+      auto initial_shaped = As<ShapedType>(initial->GetType());
+      auto argument_shaped = As<ShapedType>(argument_type);
+      if (initial_shaped && argument_shaped && initial_shaped->memref_ && argument_shaped->memref_ &&
+          (!SamePhysicalWindow(*initial_shaped->memref_, *argument_shaped->memref_) ||
+           initial_shaped->GetMemorySpace() != argument_shaped->GetMemorySpace())) {
+        argument_type =
+            CloneTypeWithMemRef(argument_type, initial_shaped->memref_, initial_shaped->GetMemorySpace());
       }
       if (argument_type != argument->GetType() || initial != argument->initValue_) {
         auto updated =
@@ -2119,11 +2171,12 @@ class RetypeApplier : public IRMutator {
       if (auto found = rewrites_.find(result); found != rewrites_.end()) {
         result_type = found->second;
       }
-      auto result_tile = GetTileTypeWithMemRef(result_type);
-      if (initial_tile && result_tile &&
-          !SamePhysicalWindow(GetDefinedMemRef(initial_tile), GetDefinedMemRef(result_tile))) {
+      auto result_shaped = As<ShapedType>(result_type);
+      if (initial_shaped && result_shaped && initial_shaped->memref_ && result_shaped->memref_ &&
+          (!SamePhysicalWindow(*initial_shaped->memref_, *result_shaped->memref_) ||
+           initial_shaped->GetMemorySpace() != result_shaped->GetMemorySpace())) {
         result_type =
-            CloneTypeWithMemRef(result_type, GetDefinedMemRef(initial_tile), initial_tile->GetMemorySpace());
+            CloneTypeWithMemRef(result_type, initial_shaped->memref_, initial_shaped->GetMemorySpace());
       }
       if (result_type != result->GetType()) {
         var_substitution_[result] = std::make_shared<Var>(result->name_hint_, result_type, result->span_);
@@ -5137,7 +5190,7 @@ class StripPipelineMembershipMutator : public IRMutator {
   }
 };
 
-/// Reconcile bare-Var SSA identity copies whose LHS/RHS buffers diverged.
+/// Reconcile required storage aliases after producer/control-flow retyping.
 ///
 /// An AssignStmt whose value is a bare Var (`x = y`, not a Call) is a pure SSA
 /// rename — `x` must alias `y`'s buffer.  CoalesceAccumulatorIfPhis retargets an
@@ -5147,14 +5200,15 @@ class StripPipelineMembershipMutator : public IRMutator {
 /// Codegen would then store from the stale buffer.  This single forward pass
 /// retypes every such copy's LHS to its RHS's MemRef and substitutes the LHS's
 /// downstream uses, so the whole rename chain follows.  A no-op when no identity
-/// copy has a buffer mismatch (the common case).
+/// copy has a buffer mismatch (the common case). Registered writeback results
+/// and first-input buffer aliases obey the same forward-propagation rule.
 class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
  public:
   NormalizeIdentityCopyBuffersMutator() = default;
 
   /// `unsettled` seeds the IfStmt return_vars whose buffer YieldFixup has not
-  /// chosen yet; the traversal grows it with their bare-Var renames.  See
-  /// `ReanchorInplaceOutput` for why anchoring onto one is wrong.
+  /// chosen yet; the traversal grows it with every required alias. See
+  /// `ReanchorAliasingOutput` for why anchoring onto one is wrong.
   explicit NormalizeIdentityCopyBuffersMutator(std::set<const Var*> unsettled)
       : unsettled_(std::move(unsettled)) {}
 
@@ -5163,6 +5217,29 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
     return it != subst_.end() ? it->second : op;
   }
 
+  ExprPtr VisitExpr_(const IterArgPtr& op) override {
+    auto found = var_remap_.find(op.get());
+    if (found != var_remap_.end()) return found->second;
+    auto visited = As<IterArg>(StorageBoundaryMutator::VisitExpr_(op));
+    INTERNAL_CHECK_SPAN(visited, op->span_) << "Internal error: IterArg visit must yield an IterArg";
+    if (!AsTensorTypeLike(visited->GetType())) return visited;
+    // GM loop carries are mutable references: codegen binds their handles to
+    // the initializer, including on zero-trip loops. A renamed initializer may
+    // have moved even when this carry's own type has not changed.
+    if (auto type = TensorBoundaryType(visited->GetType(), visited->initValue_)) {
+      visited = std::make_shared<IterArg>(visited->name_hint_, type, visited->initValue_, visited->span_);
+    }
+    if (IsUnsettled(AsVarLike(op->initValue_)) || IsUnsettled(AsVarLike(visited->initValue_))) {
+      unsettled_.insert(op.get());
+      unsettled_.insert(visited.get());
+    }
+    var_remap_[op.get()] = visited;
+    return visited;
+  }
+
+  StmtPtr VisitStmt_(const ForStmtPtr& op) override { return NormalizeTensorLoop(op); }
+  StmtPtr VisitStmt_(const WhileStmtPtr& op) override { return NormalizeTensorLoop(op); }
+
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     // Only bare-Var identity copies are pure renames; Call producers are not.
     auto src_var = AsVarLike(op->value_);
@@ -5170,45 +5247,75 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
       auto new_src = AsVarLike(VisitExpr(op->value_));  // follow prior substitutions
       // A rename of an unsettled value denotes that same storage, so it is just as
       // unsettled: `tmp = phi` then `t = <in-place>(tmp, ...)` would otherwise walk
-      // straight past the guard in ReanchorInplaceOutput and anchor onto the phi's
+      // straight past the guard in ReanchorAliasingOutput and anchor onto the phi's
       // stale buffer through the alias.
       if (IsUnsettled(src_var) || IsUnsettled(new_src)) {
         unsettled_.insert(op->var_.get());
       }
-      auto lhs_tile = new_src ? GetTileTypeWithMemRef(op->var_->GetType()) : nullptr;
-      auto rhs_tile = new_src ? GetTileTypeWithMemRef(new_src->GetType()) : nullptr;
-      if (lhs_tile && rhs_tile &&
-          !SamePhysicalWindow(GetDefinedMemRef(lhs_tile), GetDefinedMemRef(rhs_tile))) {
+      auto lhs = std::dynamic_pointer_cast<const ShapedType>(op->var_->GetType());
+      auto rhs = new_src ? std::dynamic_pointer_cast<const ShapedType>(new_src->GetType()) : nullptr;
+      if (lhs && rhs && lhs->memref_ && rhs->memref_ &&
+          (!SamePhysicalWindow(*lhs->memref_, *rhs->memref_) ||
+           lhs->GetMemorySpace() != rhs->GetMemorySpace())) {
         auto new_lhs = std::make_shared<Var>(op->var_->name_hint_, new_src->GetType(), op->var_->span_);
         if (IsUnsettled(op->var_)) unsettled_.insert(new_lhs.get());
         subst_[op->var_] = new_lhs;
         return std::make_shared<AssignStmt>(new_lhs, new_src, op->span_);
       }
     }
-    // An in-place accumulator Call (GetOutputReusesInputArg, e.g. tile.matmul_acc)
-    // is not a bare rename, but its output MemRef must alias its reused input's.
-    // Retargeting and pipeline/control-flow lowering can expose a stale output
-    // type; normalize it even when the input itself was not substituted during
-    // this traversal (the non-divisor K-peel matmul_acc tail is one example).
-    if (auto reanchored = ReanchorInplaceOutput(op)) return reanchored;
+    // Required aliases must follow the current input even when another mutator
+    // changed it earlier. Normalize views in this same walk so a writeback
+    // repair cannot leave its downstream views on the previous buffer.
+    if (auto reanchored = ReanchorAliasingOutput(op)) return reanchored;
     return IRMutator::VisitStmt_(op);
   }
 
  private:
-  /// Re-anchor an in-place op's output onto its reused input's buffer, preserving
-  /// the output's tile metadata (shape/dtype/space) and swapping only the MemRef.
-  /// This also repairs a producer/output mismatch introduced by control-flow or
-  /// pipeline lowering even when the input itself was not substituted in this
-  /// traversal. Returns nullptr when the allocation already agrees.
-  ///
+  TypePtr TensorBoundaryType(const TypePtr& type, const ExprPtr& source) {
+    auto target = AsTensorTypeLike(type);
+    auto input = source ? AsTensorTypeLike(source->GetType()) : nullptr;
+    if (!target || !input || !target->memref_ || !input->memref_ ||
+        (SamePhysicalWindow(*target->memref_, *input->memref_) &&
+         target->GetMemorySpace() == input->GetMemorySpace())) {
+      return nullptr;
+    }
+    return CloneTypeWithMemRef(type, input->memref_, input->GetMemorySpace());
+  }
+
+  template <typename LoopPtr>
+  StmtPtr NormalizeTensorLoop(const LoopPtr& op) {
+    auto visited = std::static_pointer_cast<const typename LoopPtr::element_type>(IRMutator::VisitStmt_(op));
+    auto result = MutableCopy(visited);
+    bool changed = false;
+    for (size_t i = 0; i < visited->iter_args_.size() && i < visited->return_vars_.size(); ++i) {
+      const auto& argument = visited->iter_args_[i];
+      const auto& return_var = visited->return_vars_[i];
+      if (!AsTensorTypeLike(return_var->GetType())) continue;
+      auto replacement = return_var;
+      if (auto type = TensorBoundaryType(return_var->GetType(), argument)) {
+        replacement = std::make_shared<Var>(return_var->name_hint_, type, return_var->span_);
+        subst_[op->return_vars_[i]] = replacement;
+        result->return_vars_[i] = replacement;
+        changed = true;
+      }
+      if (IsUnsettled(argument)) {
+        unsettled_.insert(op->return_vars_[i].get());
+        unsettled_.insert(replacement.get());
+      }
+    }
+    // Only the loop boundary aliases its initializer. Independently produced
+    // yielded tensors keep their own storage and are never retargeted here.
+    return changed ? result : visited;
+  }
+
   /// True when `var` denotes storage whose buffer YieldFixup has not chosen yet —
-  /// an IfStmt return_var seeded into `unsettled_`, or a bare-Var rename of one.
+  /// an IfStmt return_var seeded into `unsettled_`, or any required alias of one.
   [[nodiscard]] bool IsUnsettled(const VarPtr& var) const {
     return var != nullptr && unsettled_.count(var.get()) != 0;
   }
 
   /// Skips a reused input listed in `unsettled_` — an IfStmt return_var, or a
-  /// rename of one, on the pre-YieldFixup run.  A phi is not a tracked def in the
+  /// alias of one, on the pre-YieldFixup run. A phi is not a tracked def in the
   /// reuse analysis (see
   /// LifetimeAnalyzer's IfStmt handler), so it still carries its pre-reuse buffer
   /// here and YieldFixup chooses the real one in Step 4.  Anchoring onto the
@@ -5218,24 +5325,41 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
   /// can lower, while the post-fixup run silently re-anchors the producer back —
   /// leaving the phi buffer unwritten on the taken arm.  Two conditionals over
   /// one in-place tile (what `pl.unroll(2)` around an `if` produces) are enough.
-  StmtPtr ReanchorInplaceOutput(const AssignStmtPtr& op) {
+  /// Rebuild a registered writeback result or first-input alias from its current
+  /// source. Preserve result shape/dtype/view metadata, including TensorType and
+  /// DistributedTensorType writebacks. These are required aliases, not reuse
+  /// opportunities; allocating transpose/extract operations are excluded.
+  StmtPtr ReanchorAliasingOutput(const AssignStmtPtr& op) {
     auto call = As<Call>(op->value_);
     if (!call || !call->op_) return nullptr;
     auto reuse_idx = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size());
-    if (!reuse_idx.has_value()) return nullptr;
-    auto in_var = AsVarLike(call->args_[*reuse_idx]);
+    const bool is_view = op_predicates::IsBufferAliasingViewOp(call->op_->name_);
+    if (!reuse_idx && (!is_view || call->args_.empty())) return nullptr;
+    // An explicit writeback contract wins over memory-space inheritance.
+    auto in_var = AsVarLike(call->args_[reuse_idx ? *reuse_idx : 0]);
     if (!in_var) return nullptr;
     auto new_in = AsVarLike(VisitExpr(in_var));  // follow prior subst_ renames
     if (!new_in) return nullptr;
-    if (IsUnsettled(in_var) || IsUnsettled(new_in)) return nullptr;
-    auto lhs_tile = GetTileTypeWithMemRef(op->var_->GetType());
-    auto in_new_tile = GetTileTypeWithMemRef(new_in->GetType());
-    if (!lhs_tile || !in_new_tile ||
-        SamePhysicalWindow(GetDefinedMemRef(lhs_tile), GetDefinedMemRef(in_new_tile))) {
+    if (IsUnsettled(in_var) || IsUnsettled(new_in)) {
+      // A view or another writeback cannot hide an unresolved phi from the
+      // next writer in the chain. YieldFixup must choose that storage first.
+      unsettled_.insert(op->var_.get());
       return nullptr;
     }
-    auto new_type = CloneTypeWithMemRef(op->var_->GetType(), GetDefinedMemRef(in_new_tile),
-                                        in_new_tile->GetMemorySpace());
+    auto lhs = std::dynamic_pointer_cast<const ShapedType>(op->var_->GetType());
+    auto input = std::dynamic_pointer_cast<const ShapedType>(new_in->GetType());
+    if (!lhs || !input || !lhs->memref_ || !input->memref_) return nullptr;
+    auto target = *input->memref_;
+    if (!reuse_idx) {
+      // Derive only the view-relative offset. A writeback's transfer offset
+      // selects what it writes; its result still denotes the whole destination.
+      auto relative = ComputeViewByteOffset(call, new_in->GetType());
+      target = MakeAliasingMemRef(target, relative, (*lhs->memref_)->size_, (*lhs->memref_)->span_);
+    }
+    if (SamePhysicalWindow(*lhs->memref_, target) && lhs->GetMemorySpace() == input->GetMemorySpace()) {
+      return nullptr;
+    }
+    auto new_type = CloneTypeWithMemRef(op->var_->GetType(), target, input->GetMemorySpace());
     auto new_lhs = std::make_shared<Var>(op->var_->name_hint_, new_type, op->var_->span_);
     subst_[op->var_] = new_lhs;
     auto recursed = As<AssignStmt>(IRMutator::VisitStmt_(op));
@@ -5261,7 +5385,7 @@ class IfPhiReturnVarCollector : public IRVisitor {
 
 /// The pre-YieldFixup half of the identity-copy normalization bracket: identical
 /// to the plain run except that an in-place producer is never anchored onto a phi
-/// whose buffer YieldFixup has yet to choose (`ReanchorInplaceOutput`).
+/// whose buffer YieldFixup has yet to choose (`ReanchorAliasingOutput`).
 StmtPtr NormalizeIdentityCopyBuffersBeforeYieldFixup(const StmtPtr& body) {
   IfPhiReturnVarCollector collector;
   collector.VisitStmt(body);
@@ -5299,7 +5423,9 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
   const auto* ctx = PassContext::Current();
   if (ctx != nullptr && ctx->GetEnableBufferIR()) {
     // Resolve identity/view lineage before indexing old-value observations.
-    new_body = NormalizeIdentityCopyBuffersMutator().VisitStmt(new_body);
+    // Branch storage is still provisional here: every dependent alias must
+    // remain unsettled until CanonicalizeBranchStorage/YieldFixup selects it.
+    new_body = NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
     new_body = RetypeApplier({}).VisitStmt(new_body);
     LoopInputIsolation isolation;
     isolation.Plan(new_body, func->params_);
@@ -5308,7 +5434,7 @@ FunctionPtr TransformMaterializeSemanticAliases(const FunctionPtr& func) {
                             std::move(isolation.entries));
       new_body = applier.VisitStmt(new_body);
       new_body = InsertAllocsIntoBody(new_body, isolation.allocations);
-      new_body = NormalizeIdentityCopyBuffersMutator().VisitStmt(new_body);
+      new_body = NormalizeIdentityCopyBuffersBeforeYieldFixup(new_body);
     }
     new_body = RetypeApplier({}).VisitStmt(new_body);
   }

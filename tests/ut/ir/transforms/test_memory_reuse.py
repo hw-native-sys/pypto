@@ -8007,6 +8007,423 @@ class TestCapacityGatedReuse:
             passes.allocate_memory_addr()(after)
 
 
+class TestAliasingOutputPropagation:
+    """Every semantic alias follows the current input window after storage rewrites."""
+
+    @pytest.mark.parametrize("buffer_ir", [False, True], ids=["legacy_storage", "buffer_ir"])
+    def test_gather_view_chain_follows_reanchored_result(self, buffer_ir, pass_verification_instruments):
+        """Repairing a DPS result must repair all following metadata views (#3027)."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                pool: pl.Tensor[[16, 32], pl.FP16, pl.MemRef("mem_pool", 0, 1024)],
+                out: pl.Out[pl.Tensor[[8, 64], pl.FP16, pl.MemRef("mem_out", 0, 1024)]],
+            ) -> pl.Tensor[[8, 64], pl.FP16]:
+                current: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 1024)
+                _stale: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 1024)
+                seed: pl.Tile[[16, 32], pl.FP16, pl.MemRef(current, 0, 1024), pl.Mem.Mat] = pl.tile.load(
+                    pool, [0, 0], [16, 32], target_memory=pl.Mem.Mat
+                )
+                gathered: pl.Tile[[16, 32], pl.FP16, pl.MemRef(_stale, 0, 1024), pl.Mem.Mat] = (
+                    pl.tile.gather_row(seed, pool, [0, 0], [0, 0], [16, 32])
+                )
+                transposed: pl.Tile[[32, 16], pl.FP16, pl.MemRef(_stale, 0, 1024), pl.Mem.Mat] = (
+                    pl.tile.transpose_view(gathered)
+                )
+                reshaped: pl.Tile[[8, 64], pl.FP16, pl.MemRef(_stale, 0, 1024), pl.Mem.Mat] = pl.tile.reshape(
+                    transposed, [8, 64]
+                )
+                return pl.tile.store(reshaped, [0, 0], out)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                pool: pl.Tensor[[16, 32], pl.FP16, pl.MemRef("mem_pool", 0, 1024)],
+                out: pl.Out[pl.Tensor[[8, 64], pl.FP16, pl.MemRef("mem_out", 0, 1024)]],
+            ) -> pl.Tensor[[8, 64], pl.FP16]:
+                current: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 1024)
+                _stale: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 1024)
+                seed: pl.Tile[[16, 32], pl.FP16, pl.MemRef(current, 0, 1024), pl.Mem.Mat] = pl.tile.load(
+                    pool, [0, 0], [16, 32], target_memory=pl.Mem.Mat
+                )
+                gathered: pl.Tile[[16, 32], pl.FP16, pl.MemRef(current, 0, 1024), pl.Mem.Mat] = (
+                    pl.tile.gather_row(seed, pool, [0, 0], [0, 0], [16, 32])
+                )
+                transposed: pl.Tile[[32, 16], pl.FP16, pl.MemRef(current, 0, 1024), pl.Mem.Mat] = (
+                    pl.tile.transpose_view(gathered)
+                )
+                reshaped: pl.Tile[[8, 64], pl.FP16, pl.MemRef(current, 0, 1024), pl.Mem.Mat] = (
+                    pl.tile.reshape(transposed, [8, 64])
+                )
+                return pl.tile.store(reshaped, [0, 0], out)
+
+        with passes.PassContext(pass_verification_instruments, enable_buffer_ir=buffer_ir):
+            after = passes.materialize_semantic_aliases()(Before)
+            # BufferIR also removes the now-unused stale allocation.
+            expected = passes.materialize_semantic_aliases()(Expected) if buffer_ir else Expected
+            ir.assert_structural_equal(without_call_memrefs(after), without_call_memrefs(expected))
+            memrefs = _collect_named_tile_memrefs(after, {"seed", "gathered", "transposed", "reshaped"})
+            for name, memref in memrefs.items():
+                assert _same_base_address(memref, memrefs["seed"]), name
+            # Re-derivation must be stable instead of accumulating old absolute offsets.
+            ir.assert_structural_equal(passes.materialize_semantic_aliases()(after), after)
+
+    def test_same_allocation_slice_uses_current_parent_offset_once(self):
+        """A same-base DPS repair propagates its new offset through mixed alias kinds."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                inp: pl.Tensor[[8, 16], pl.FP32, pl.MemRef("mem_inp", 0, 512)],
+                out: pl.Out[pl.Tensor[[32, 1], pl.INT16, pl.MemRef("mem_out", 0, 64)]],
+            ) -> pl.Tensor[[32, 1], pl.INT16]:
+                storage: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 1024)
+                seed: pl.Tile[[8, 16], pl.FP32, pl.MemRef(storage, 512, 512), pl.Mem.Vec] = pl.tile.load(
+                    inp, [0, 0], [8, 16], target_memory=pl.Mem.Vec
+                )
+                updated: pl.Tile[[8, 16], pl.FP32, pl.MemRef(storage, 0, 512), pl.Mem.Vec] = (
+                    pl.tile.fillpad_inplace(seed)
+                )
+                row: pl.Tile[[1, 16], pl.FP32, pl.MemRef(storage, 192, 64), pl.Mem.Vec] = pl.tile.slice(
+                    updated, [1, 16], [3, 0]
+                )
+                reshaped: pl.Tile[[16, 1], pl.FP32, pl.MemRef(storage, 192, 64), pl.Mem.Vec] = (
+                    pl.tile.reshape(row, [16, 1])
+                )
+                reinterpreted: pl.Tile[[32, 1], pl.INT16, pl.MemRef(storage, 192, 64), pl.Mem.Vec] = (
+                    pl.tile.reinterpret_view(reshaped, pl.INT16)
+                )
+                valid: pl.Tile[[32, 1], pl.INT16, pl.MemRef(storage, 192, 64), pl.Mem.Vec] = (
+                    pl.tile.set_validshape(reinterpreted, 8, 1)
+                )
+                renamed: pl.Tile[[32, 1], pl.INT16, pl.MemRef(storage, 192, 64), pl.Mem.Vec] = valid
+                return pl.tile.store(renamed, [0, 0], out)
+
+        after = passes.materialize_semantic_aliases()(Before)
+        memrefs = _collect_named_tile_memrefs(
+            after, {"seed", "updated", "row", "reshaped", "reinterpreted", "valid", "renamed"}
+        )
+        for name, memref in memrefs.items():
+            assert memref.base_ is memrefs["seed"].base_, f"{name} changed allocation"
+            assert isinstance(memref.byte_offset_, ir.ConstInt)
+            expected_offset, expected_size = (512, 512) if name in {"seed", "updated"} else (704, 64)
+            assert (memref.byte_offset_.value, memref.size_) == (expected_offset, expected_size), name
+        # Preserve the dtype and valid-shape metadata of each individual view.
+        function = after.get_function("kernel")
+        assert function is not None and isinstance(function.body, ir.SeqStmts)
+        valid = next(
+            stmt.var
+            for stmt in function.body.stmts
+            if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint == "valid"
+        )
+        assert isinstance(valid.type, ir.TileType) and valid.type.dtype == DataType.INT16
+        assert valid.type.tile_view is not None
+        valid_shape = valid.type.tile_view.valid_shape
+        assert len(valid_shape) == 2
+        for dim, expected in zip(valid_shape, (8, 1)):
+            assert isinstance(dim, ir.ConstInt) and dim.value == expected
+        ir.assert_structural_equal(passes.materialize_semantic_aliases()(after), after)
+
+    def test_loop_retarget_updates_view_when_only_parent_window_changes(self):
+        """A reload retarget within one allocation still moves its off-chain slice."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                inp: pl.Tensor[[8, 16], pl.FP32, pl.MemRef("mem_inp", 0, 512)],
+                row_out: pl.Out[pl.Tensor[[1, 16], pl.FP32, pl.MemRef("mem_row_out", 0, 64)]],
+                out: pl.Out[pl.Tensor[[8, 16], pl.FP32, pl.MemRef("mem_out", 0, 512)]],
+            ) -> pl.Tensor[[8, 16], pl.FP32]:
+                storage: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 1024)
+                seed: pl.Tile[[8, 16], pl.FP32, pl.MemRef(storage, 512, 512), pl.Mem.Vec] = pl.tile.load(
+                    inp, [0, 0], [8, 16], target_memory=pl.Mem.Vec
+                )
+                for _i, (_carry,) in pl.range(2, init_values=(seed,)):
+                    reloaded: pl.Tile[[8, 16], pl.FP32, pl.MemRef(storage, 0, 512), pl.Mem.Vec] = (
+                        pl.tile.load(inp, [0, 0], [8, 16], target_memory=pl.Mem.Vec)
+                    )
+                    row: pl.Tile[[1, 16], pl.FP32, pl.MemRef(storage, 192, 64), pl.Mem.Vec] = pl.tile.slice(
+                        reloaded, [1, 16], [3, 0]
+                    )
+                    _observed_row = pl.tile.store(row, [0, 0], row_out)
+                    final: pl.Tile[[8, 16], pl.FP32, pl.MemRef(storage, 512, 512), pl.Mem.Vec] = pl.yield_(
+                        reloaded
+                    )
+                return pl.tile.store(final, [0, 0], out)
+
+        after = passes.materialize_semantic_aliases()(Before)
+        memrefs = _collect_named_tile_memrefs(after, {"seed", "reloaded", "row"})
+        # Prove the retarget happened without an allocation-identity change.
+        assert _same_base_address(memrefs["seed"], memrefs["reloaded"])
+        row = memrefs["row"]
+        assert row.base_ is memrefs["seed"].base_
+        assert isinstance(row.byte_offset_, ir.ConstInt) and row.byte_offset_.value == 704
+        assert row.size_ == 64
+        ir.assert_structural_equal(passes.materialize_semantic_aliases()(after), after)
+
+    @pytest.mark.parametrize("runtime_slot", [False, True], ids=["constant_slot", "runtime_slot"])
+    def test_slice_and_reshape_preserve_source_slot_identity(self, runtime_slot):
+        """Both initialization and late repair retain slot identity on correct windows."""
+        slots = pl.MemRef(slots=2)
+
+        @pl.program
+        class ConstantSlot:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                inp: pl.Tensor[[8, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                seed: pl.Tile[[8, 16], pl.FP32, slots[1], pl.Mem.Vec] = pl.tile.load(
+                    inp, [0, 0], [8, 16], target_memory=pl.Mem.Vec
+                )
+                row = pl.tile.slice(seed, [1, 16], [3, 0])
+                reshaped = pl.tile.reshape(row, [16, 1])
+                return pl.tile.store(reshaped, [0, 0], out)
+
+        @pl.program
+        class RuntimeSlot:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                inp: pl.Tensor[[8, 16], pl.FP32],
+                slot_index: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                seed: pl.Tile[[8, 16], pl.FP32, slots[slot_index], pl.Mem.Vec] = pl.tile.load(
+                    inp, [0, 0], [8, 16], target_memory=pl.Mem.Vec
+                )
+                row = pl.tile.slice(seed, [1, 16], [3, 0])
+                reshaped = pl.tile.reshape(row, [16, 1])
+                return pl.tile.store(reshaped, [0, 0], out)
+
+        initialized = passes.init_mem_ref()(RuntimeSlot if runtime_slot else ConstantSlot)
+        function = initialized.get_function("kernel")
+        assert function is not None and isinstance(function.body, ir.SeqStmts)
+        index = function.params[1] if runtime_slot else ir.ConstInt(1, DataType.INDEX, function.span)
+        initial_memrefs = _collect_named_tile_memrefs(initialized, {"seed", "row", "reshaped"})
+        for name, memref in initial_memrefs.items():
+            assert memref.slot_count_ == 2, f"InitMemRef lost the slot count on {name}"
+            assert memref.slot_index_ is not None
+            if runtime_slot:
+                assert memref.slot_index_ is index
+            else:
+                assert isinstance(memref.slot_index_, ir.ConstInt) and memref.slot_index_.value == 1
+
+        # Simulate a later type rebuild dropping only slots, without moving bytes.
+        replacements: dict[int, ir.Var] = {}
+        for stmt in function.body.stmts:
+            if not isinstance(stmt, ir.AssignStmt) or stmt.var.name_hint not in {"row", "reshaped"}:
+                continue
+            old_type = stmt.var.type
+            assert isinstance(old_type, ir.TileType) and old_type.memref is not None
+            old_memref = old_type.memref
+            incomplete = ir.MemRef(old_memref.base_, old_memref.byte_offset_, old_memref.size_, stmt.span)
+            new_type = ir.TileType(
+                old_type.shape, old_type.dtype, incomplete, old_type.tile_view, old_type.memory_space
+            )
+            replacements[stmt.var.unique_id] = ir.Var(stmt.var.name_hint, new_type, stmt.var.span)
+
+        class _ForgetViewSlots(ir.IRMutator):
+            def visit_var(self, op):
+                return replacements.get(op.unique_id, op)
+
+        drifted = _ForgetViewSlots().visit_program(initialized)
+        drifted_memrefs = _collect_named_tile_memrefs(drifted, {"row", "reshaped"})
+        for name, memref in drifted_memrefs.items():
+            assert memref.slot_count_ == 1 and memref.slot_index_ is None
+            assert _same_base_address(memref, initial_memrefs[name])
+            assert memref.size_ == initial_memrefs[name].size_
+
+        after = passes.materialize_semantic_aliases()(drifted)
+        memrefs = _collect_named_tile_memrefs(after, {"seed", "row", "reshaped"})
+        for name, memref in memrefs.items():
+            assert memref.base_ is memrefs["seed"].base_
+            assert memref.slot_count_ == 2, f"{name} lost the allocation's slot count"
+            assert memref.slot_index_ is not None
+            if runtime_slot:
+                assert memref.slot_index_ is index
+            else:
+                assert isinstance(memref.slot_index_, ir.ConstInt) and memref.slot_index_.value == 1
+            expected_offset: ir.Expr = ir.Mul(
+                index, ir.ConstInt(512, DataType.INDEX, function.span), DataType.INDEX, function.span
+            )
+            if name != "seed":
+                expected_offset = ir.Add(
+                    expected_offset,
+                    ir.ConstInt(192, DataType.INDEX, function.span),
+                    DataType.INDEX,
+                    function.span,
+                )
+            difference = Analyzer().simplify(
+                ir.Sub(memref.byte_offset_, expected_offset, DataType.INDEX, function.span)
+            )
+            assert isinstance(difference, ir.ConstInt) and difference.value == 0, name
+            assert memref.size_ == (512 if name == "seed" else 64)
+        ir.assert_structural_equal(passes.materialize_semantic_aliases()(after), after)
+
+    def test_data_moving_transpose_and_extract_keep_independent_buffers(self):
+        """Repaired DPS inputs must not turn allocating consumers into aliases."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                inp: pl.Tensor[[8, 16], pl.FP32, pl.MemRef("mem_inp", 0, 512)],
+                out: pl.Out[pl.Tensor[[16, 8], pl.FP32, pl.MemRef("mem_out", 0, 512)]],
+                out_extract: pl.Out[pl.Tensor[[4, 16], pl.FP32, pl.MemRef("mem_out_extract", 0, 256)]],
+            ) -> pl.Tensor[[16, 8], pl.FP32]:
+                current: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 512)
+                stale: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 512)
+                transpose_storage: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 512)
+                extract_storage: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 256)
+                scratch_storage: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 512)
+                seed: pl.Tile[[8, 16], pl.FP32, pl.MemRef(current, 0, 512), pl.Mem.Vec] = pl.tile.load(
+                    inp, [0, 0], [8, 16], target_memory=pl.Mem.Vec
+                )
+                updated: pl.Tile[[8, 16], pl.FP32, pl.MemRef(stale, 0, 512), pl.Mem.Vec] = (
+                    pl.tile.fillpad_inplace(seed)
+                )
+                scratch: pl.Tile[[8, 16], pl.FP32, pl.MemRef(scratch_storage, 0, 512), pl.Mem.Vec] = (
+                    pl.tile.create([8, 16], pl.FP32, target_memory=pl.Mem.Vec)
+                )
+                transposed: pl.Tile[[16, 8], pl.FP32, pl.MemRef(transpose_storage, 0, 512), pl.Mem.Vec] = (
+                    pl.tile.transpose(updated, 0, 1, scratch)
+                )
+                extracted: pl.Tile[[4, 16], pl.FP32, pl.MemRef(extract_storage, 0, 256), pl.Mem.Vec] = (
+                    pl.tile.extract(updated, 0, 0, [4, 16], target_memory=pl.Mem.Vec)
+                )
+                _extract_result = pl.tile.store(extracted, [0, 0], out_extract)
+                return pl.tile.store(transposed, [0, 0], out)
+
+        original = _collect_named_tile_memrefs(Before, {"transposed", "extracted", "scratch"})
+        after = passes.materialize_semantic_aliases()(Before)
+        memrefs = _collect_named_tile_memrefs(
+            after, {"seed", "updated", "transposed", "extracted", "scratch"}
+        )
+        assert memrefs["updated"].base_ is memrefs["seed"].base_
+        for name, old_memref in original.items():
+            assert memrefs[name].base_ is old_memref.base_, f"{name} unexpectedly became an alias"
+            assert memrefs[name].base_ is not memrefs["updated"].base_
+
+    @pytest.mark.parametrize("views_on_canonical", [False, True], ids=["pending_views", "canonical_views"])
+    @pytest.mark.parametrize("buffer_ir", [False, True], ids=["legacy_storage", "buffer_ir"])
+    def test_unsettled_phi_propagates_through_view_and_rename(
+        self, views_on_canonical, buffer_ir, pass_verification_instruments
+    ):
+        """A view of a pending phi must not choose storage for the next DPS producer."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                pool: pl.Tensor[[16, 32], pl.FP16, pl.MemRef("mem_pool", 0, 1024)],
+                cond: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 32], pl.FP16, pl.MemRef("mem_out", 0, 1024)]],
+            ) -> pl.Tensor[[16, 32], pl.FP16]:
+                current: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 1024)
+                pending: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 1024)
+                pending_next: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 1024)
+                seed: pl.Tile[[16, 32], pl.FP16, pl.MemRef(current, 0, 1024), pl.Mem.Mat] = pl.tile.load(
+                    pool, [0, 0], [16, 32], target_memory=pl.Mem.Mat
+                )
+                if cond < 1:
+                    first: pl.Tile[[16, 32], pl.FP16, pl.MemRef(current, 0, 1024), pl.Mem.Mat] = (
+                        pl.tile.gather_row(seed, pool, [0, 0], [0, 0], [16, 32])
+                    )
+                    phi: pl.Tile[[16, 32], pl.FP16, pl.MemRef(pending, 0, 1024), pl.Mem.Mat] = pl.yield_(
+                        first
+                    )
+                else:
+                    phi: pl.Tile[[16, 32], pl.FP16, pl.MemRef(pending, 0, 1024), pl.Mem.Mat] = pl.yield_(seed)
+                viewed: pl.Tile[[16, 32], pl.FP16, pl.MemRef(pending, 0, 1024), pl.Mem.Mat] = pl.tile.reshape(
+                    phi, [16, 32]
+                )
+                renamed: pl.Tile[[16, 32], pl.FP16, pl.MemRef(pending, 0, 1024), pl.Mem.Mat] = viewed
+                if cond < 2:
+                    second: pl.Tile[[16, 32], pl.FP16, pl.MemRef(current, 0, 1024), pl.Mem.Mat] = (
+                        pl.tile.gather_row(renamed, pool, [0, 0], [0, 0], [16, 32])
+                    )
+                    result: pl.Tile[[16, 32], pl.FP16, pl.MemRef(pending_next, 0, 1024), pl.Mem.Mat] = (
+                        pl.yield_(second)
+                    )
+                else:
+                    result: pl.Tile[[16, 32], pl.FP16, pl.MemRef(pending_next, 0, 1024), pl.Mem.Mat] = (
+                        pl.yield_(renamed)
+                    )
+                final_view: pl.Tile[[16, 32], pl.FP16, pl.MemRef(pending_next, 0, 1024), pl.Mem.Mat] = (
+                    pl.tile.reshape(result, [16, 32])
+                )
+                return pl.tile.store(final_view, [0, 0], out)
+
+        input_program = Before
+        if views_on_canonical:
+            canonical = _collect_named_tile_memrefs(Before, {"seed"})["seed"]
+            replacements: dict[int, ir.Var] = {}
+
+            class _SeedViewTypes(ir.IRMutator):
+                def visit_var(self, op):
+                    if op.name_hint not in {"viewed", "renamed"}:
+                        return op
+                    if op.unique_id not in replacements:
+                        old_type = op.type
+                        assert isinstance(old_type, ir.TileType)
+                        new_type = ir.TileType(
+                            old_type.shape,
+                            old_type.dtype,
+                            canonical,
+                            old_type.tile_view,
+                            old_type.memory_space,
+                        )
+                        replacements[op.unique_id] = ir.Var(op.name_hint, new_type, op.span)
+                    return replacements[op.unique_id]
+
+            input_program = _SeedViewTypes().visit_program(Before)
+
+        with passes.PassContext(pass_verification_instruments, enable_buffer_ir=buffer_ir):
+            after = passes.memory_reuse()(passes.materialize_semantic_aliases()(input_program))
+        _assert_if_phi_arms_write_the_phi_buffer(after)
+        memrefs = _collect_named_tile_memrefs(
+            after, {"seed", "first", "viewed", "renamed", "second", "final_view"}
+        )
+
+        class _AliasWindowChecker(ir.IRVisitor):
+            def visit_assign_stmt(self, stmt):  # type: ignore[override]
+                value = stmt.value
+                if isinstance(value, ir.Var):
+                    source = value
+                elif isinstance(value, ir.Call) and value.op.name in {
+                    ir.get_op("tile.gather_row").name,
+                    ir.get_op("tile.reshape").name,
+                }:
+                    source = value.args[0]
+                else:
+                    return super().visit_assign_stmt(stmt)
+                output_memref, source_memref = _carry_memref(stmt.var), _carry_memref(source)
+                assert output_memref is not None and source_memref is not None
+                assert _same_base_address(output_memref, source_memref), stmt.var.name_hint
+                super().visit_assign_stmt(stmt)
+
+        function = after.get_function("kernel")
+        assert function is not None
+        _AliasWindowChecker().visit_stmt(function.body)
+        if not buffer_ir:
+            for name, memref in memrefs.items():
+                assert _same_base_address(memref, memrefs["seed"]), f"{name} left the written L1 buffer"
+        assert "pl.tile.move(" not in after.as_python(), "phi repair emitted an unlowerable Mat->Mat move"
+
+
 class TestChainedInPlaceIfPhis:
     """An in-place producer must never be anchored onto an unsettled `if` phi.
 

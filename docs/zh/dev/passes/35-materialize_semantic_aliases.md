@@ -56,12 +56,43 @@ program = passes.materialize_semantic_aliases()(program)
    `if` 之后都不能存在绕过 phi 的独立读取；否则在 continuation 不执行的 sibling
    路径上，重定向后的 producer 会覆盖仍可观察的值。
 3. **规范化语义 identity chain**（`NormalizeIdentityCopyBuffersMutator`）：让 bare SSA
-   copy 与 source 共享 allocation，并让每个注册的 in-place result 与其 reused input
-   共享 allocation。这样可在任何 memory planner 观察 lifetime 或 PTOAS 发射 tile
-   handle 之前消除 lowering 引入的类型漂移。
+   alias 跟随 source，让注册了 `output_reuses_input` 的结果跟随指定的写回输入，
+   让注册的首输入 buffer 别名操作跟随当前的第一个输入。目标是在重定向后统一维护
+   所有必需的别名关系，而不是孤立修正某个 producer。单次前向遍历会把每个修正后的
+   结果替换到下游使用中，因此写回结果后接 `transpose_view`、`reshape` 或 `slice`
+   时，整条链始终使用正确的存储，无需不动点迭代。这样可在任何 memory planner
+   观察 lifetime 或 PTOAS 发射 tile handle 之前消除 lowering 引入的类型漂移。
 
-当没有可重定向的内容时（`Compute` 返回空）本 pass 是 no-op，并跳过
-`Orchestration` 函数（无 TileType 变量）。
+这些规则覆盖带 MemRef 的 shaped result，包括 tile 和 tensor 写回。裸 SSA 重命名
+直接跟随 source 的完整类型，不复制数据；调用结果重定型保留结果的 shape、dtype、
+view/distribution 元数据。显式 `output_reuses_input` 契约优先于首输入继承。
+首输入 buffer 别名判定要求同时满足 `OutputMemoryInheritsInput()` 和
+`IsInplaceSafe()`；只继承 memory space 并不意味着共享 buffer。
+写回结果继承当前写回输入的完整 MemRef
+窗口。首输入别名保留结果的窗口大小，使用当前输入的 allocation、字节偏移，加上
+由操作计算的 view 相对偏移构造窗口；相对偏移只应用一次，同时继承输入的流水线
+slot 身份；tile 结果还会跟随输入的 memory space。从操作重新计算相对偏移，
+而不是在陈旧的绝对偏移上累加，使归一化保持幂等，并能处理同一 allocation 内部
+的窗口变化与跨 allocation 变化。Buffer 别名是一种存储契约：`tile.assemble`
+虽然会写数据，结果也必须跟随第一个输入。真正搬运数据、不能原地执行的
+`tile.transpose` 和独立的 `tile.extract` 结果保持自己的存储。
+
+在 legacy Tile 和 Buffer IR 两种模式下，`TensorType`/`DistributedTensorType`
+的 For/While 参数和返回值都是当前 initializer 的可变 view。归一化会对齐它们的
+存储，同时保留各边界结果的 shape、view 元数据和分布式窗口身份，也涵盖零次
+迭代路径。独立产生的 yield tensor 保留自己的存储。Tile carry 仍使用单独的
+规范缓冲区及 yield 修复规则；yield tile 需要写入 carry 缓冲区时会插入显式传输。
+
+yield 修复前使用的归一化形式会把未决 `IfStmt` 结果加入初始集合，并沿裸别名、
+写回结果和首输入别名传播未决状态，也会经过 tensor 循环参数和返回值继续传播。
+所有依赖它的调用都不会被锚定到临时窗口。
+控制流边界确定后，后续归一化遍历再修复整条链。Buffer IR 在索引旧值观测之前，
+以及隔离循环入口之后，也使用这一延迟形式，因为分支存储尚未确定；边界确定后的
+归一化无需延迟处理集合。yield 修复前后的归一化遍历见
+[MemoryReuse 算法步骤 6](36-memory_reuse.md#算法)。
+
+本 pass 跳过 orchestration 类函数，包括 graph body。其他函数即使 `Compute`
+没有返回重定向改写，仍会执行别名归一化，独立修复已有的类型漂移。
 
 ## 与 codegen 的关系
 
@@ -85,6 +116,11 @@ program = passes.materialize_semantic_aliases()(program)
 4. 在其余分支的 yield 前插入显式 `tile.move`，并移除 producer 重定向后不再
    使用的分配。分支复制和已有的 For carry 修复会在三种规划器之前执行；
    `PYPTO` 在复用后修复新增的不一致，同时保留已声明的 phi 目标。
+
+分支规划会在同一次前向遍历中，在相邻 phi 的存储选择之间传播必需别名，使后续
+phi 看到当前窗口，而不是已废弃的窗口。For/While carry 在访问循环体之前跟随
+当前 initializer，循环结果在访问之后跟随这些规范 carry，涵盖零次迭代路径。
+存储句柄计数随计划中的分配变化及回滚同步更新，使可选的 producer 重定向保持保守。
 
 支持透明作用域 `SplitAivScopeStmt` 和 `RuntimeScopeStmt` 中的末尾 yield。
 传输保留在同一作用域内，紧邻 yield 之前；嵌套控制流区域的 yield 不会被替换。
