@@ -37,7 +37,7 @@ class Ascend950Handler : public BackendHandler {
   static const Ascend950Handler& Instance();
 
   [[nodiscard]] std::string GetPtoTargetArch() const override { return "a5"; }
-  [[nodiscard]] std::string GetLaunchSpecCoreCountMethod() const override { return "set_core_num"; }
+  [[nodiscard]] std::string GetLaunchSpecCoreCountMethod() const override;
   [[nodiscard]] std::string GetDefaultSimPlatform() const override { return "a5sim"; }
   [[nodiscard]] std::vector<std::string> GetExtraPtoasFlags() const override { return {"--pto-arch", "a5"}; }
   // A5 supports both legacy logical FP4 and packed FP4E2M1X2; INT4/UINT4/HF4 stay rejected.

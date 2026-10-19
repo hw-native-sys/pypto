@@ -1801,6 +1801,23 @@ def multi_chip_orch_names(transformed_program: _ir_core.Program) -> list[str]:
     return orch_names if len(orch_names) > 1 else []
 
 
+def _codegen_pass_context(runtime: _passes.RuntimeKind) -> _passes.PassContext:
+    """Bind codegen's runtime ABI while retaining the caller's other pass options."""
+    current = _passes.PassContext.current()
+    if current is None:
+        return _passes.PassContext([], runtime=runtime)
+    return _passes.PassContext(
+        current.get_instruments(),
+        verification_level=current.get_verification_level(),
+        diagnostic_phase=current.get_diagnostic_phase(),
+        disabled_diagnostics=current.get_disabled_diagnostics(),
+        memory_planner=current.get_memory_planner(),
+        enable_pypto_l0c_double_buffer=current.get_enable_pypto_l0c_double_buffer(),
+        runtime=runtime,
+        enable_buffer_ir=current.get_enable_buffer_ir(),
+    )
+
+
 def generate(
     transformed_program: _ir_core.Program,
     output_dir: str,
@@ -1917,7 +1934,10 @@ def _generate_with_distributed(
 
     # 1. L3 HOST orchestrator → orchestration/host_orch.py
     cg = _codegen_core.DistributedCodegen()
-    orch_code = cg.generate(transformed_program)
+    # Builtin launch specs are selected by the backend handler through
+    # PassContext, so the explicit codegen runtime must reach this C++ call too.
+    with _codegen_pass_context(runtime):
+        orch_code = cg.generate(transformed_program)
     result_files["orchestration/host_orch.py"] = orch_code
     result_files.update(_materialize_builtin_next_levels(cg.get_builtin_next_level_specs(), runtime))
 
@@ -2016,6 +2036,13 @@ def _materialize_builtin_next_levels(
             "kernel_name": spec.entry_symbol + "_kernel",
             "template_package": spec.template_dir[1:],
             "runtime": _passes.runtime_kind_to_name(runtime),
+            # HBG orchestration has a host-only context; TMR uses its runtime
+            # context. Templates must select the API of their compiled runtime.
+            "orchestration_context_accessor": (
+                "current_orch_context"
+                if runtime == _passes.RuntimeKind.HOST_BUILD_GRAPH
+                else "current_runtime"
+            ),
         }
         variables.update(spec.template_vars)
         for template in sorted(templates_dir.iterdir(), key=lambda item: item.name):
@@ -2315,7 +2342,7 @@ def _generate_single_chip(
     # Orchestration + config
     if orch_func is not None:
         try:
-            with _profiling_stage(prof, "orchestration_codegen"):
+            with _profiling_stage(prof, "orchestration_codegen"), _codegen_pass_context(runtime):
                 orch_result = _codegen_core.generate_orchestration(transformed_program, orch_func)
             result_files[f"orchestration/{orch_func.name}.cpp"] = (
                 f"// Orchestration Function: {orch_func.name}\n"

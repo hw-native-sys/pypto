@@ -76,6 +76,17 @@ REGISTER_ORCHESTRATION_OP("tensor.slice", TensorSliceHandler);
 #include "orchestration_api.h"
 ```
 
+运行时 SDK 从 `build_config.py` 提供包含路径和辅助源文件。
+HBG 的编排 API 位于 `src/common/host_build_graph/host/orchestration/`；
+Graph 代码还会包含 `host_build_graph/host/graph_boundary_match.h`。
+内建入口模板通过 `current_orch_context()` 访问 HBG 上下文（Context），
+通过 `current_runtime()` 访问 TensorMap/RingBuffer 上下文。
+
+启动数量也遵循所选运行时 ABI：HBG 在两种架构上都使用 `set_block_num()`，
+而 A5 TensorMap/RingBuffer 使用 `set_core_num()`。后端处理器从
+`PassContext.runtime` 读取这个选择。Python 后端在普通编排和内建规格生成期间，
+为请求的运行时建立临时上下文，保留调用方的其他 Pass 选项，并在结束后恢复原上下文。
+
 ### 阶段 2–3：入口点
 
 ```cpp

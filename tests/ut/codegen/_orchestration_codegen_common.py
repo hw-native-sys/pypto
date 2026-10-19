@@ -10,15 +10,81 @@
 """Shared helpers for the orchestration-codegen test files."""
 
 import difflib
+import os
 import re
+import runpy
+import shutil
+import subprocess
 import textwrap
+from pathlib import Path
 
+import pytest
 from pypto import backend, codegen, passes
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import ir
 
 SELF_ALIAS_RE = re.compile(r"\bauto\s+(\w+)\s*=\s*\1\s*;")
+
+
+def _runtime_include_args(
+    repo_root: Path, *, runtime_name: str = "host_build_graph", arch: str = "a2a3"
+) -> list[str]:
+    """Resolve orchestration headers from the pinned runtime's build metadata."""
+    src = repo_root / "runtime" / "src"
+    runtime_dir = src / arch / "runtime" / runtime_name
+    config_path = runtime_dir / "build_config.py"
+    if not config_path.is_file():
+        pytest.skip("runtime submodule not checked out")
+    config = runpy.run_path(str(config_path))["BUILD_CONFIG"]["orchestration"]
+    # Runtime shims must precede shared headers: their Tensor alias selects the
+    # runtime under test. Searching every directory can select another runtime's
+    # types.h and hide an ABI mismatch. The src root supports prefixed includes.
+    paths = [runtime_dir / path for path in config["include_dirs"]]
+    paths.extend(
+        (
+            src / "common" / "task_interface",
+            src / "common",
+            src / arch / "platform" / "include",
+            src / "common" / "platform" / "include",
+            src,
+        )
+    )
+    return [f"-I{path}" for path in paths]
+
+
+def _assert_orchestration_compiles(
+    main_cpp: Path, *, runtime_name: str = "host_build_graph", arch: str = "a2a3"
+) -> None:
+    """Type-check generated orchestration against the checked-out runtime."""
+    repo_root = Path(__file__).resolve().parents[3]
+    assert main_cpp.is_file(), f"no orchestration emitted at {main_cpp}"
+    include_args = _runtime_include_args(repo_root, runtime_name=runtime_name, arch=arch)
+    candidates = (os.environ.get("CXX"), "g++-15", "g++", "c++")
+    compiler = next(
+        (found for name in candidates if name and (found := shutil.which(name))),
+        None,
+    )
+    if compiler is None:
+        pytest.skip("no C++ compiler available")
+    result = subprocess.run(
+        [
+            compiler,
+            "-std=c++17",
+            "-fsyntax-only",
+            "-Werror=deprecated-declarations",
+            *include_args,
+            str(main_cpp),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    # With a checked-out runtime and its declared include paths, missing headers
+    # are compatibility failures too; skipping would hide a stale generated path.
+    assert result.returncode == 0, (
+        f"generated orchestration does not compile against {arch}/{runtime_name}:\n{result.stderr}"
+    )
 
 
 def assert_code_equal(actual: str, expected: str) -> None:

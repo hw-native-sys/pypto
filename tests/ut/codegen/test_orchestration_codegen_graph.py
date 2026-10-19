@@ -19,9 +19,10 @@ The assertions that matter most are the ones covering silent failures. A
 boundary scalar converted to an integer loses the parameter origin the runtime
 uses to track it, and the value is frozen at its first-call number on every
 later replay. Preserve the runtime's InheritableScalar wrapper instead.
+
+Runtime-header integration checks also cover builtin orchestration templates.
 """
 
-import os
 import re
 import shutil
 import subprocess
@@ -30,8 +31,14 @@ from pathlib import Path
 from unittest import mock
 
 import pypto.language as pl
+import pypto.language.distributed as pld
 import pytest
-from _orchestration_codegen_common import _out_of_scope_tensor_refs
+from _orchestration_codegen_common import (
+    _assert_orchestration_compiles,
+    _out_of_scope_tensor_refs,
+    _runtime_include_args,
+)
+from pypto.backend import BackendType, pto_backend
 from pypto.ir.compile import compile as ir_compile
 from pypto.pypto_core import passes
 
@@ -212,38 +219,6 @@ def test_artifact_targets_the_graph_runtime(artifacts):
 # ---------------------------------------------------------------------------
 
 
-def _runtime_include_args(repo_root: Path) -> list[str]:
-    """``-I`` flags for the a2a3 host_build_graph orchestration headers.
-
-    The same directories, in the same order, that simpler's own kernel compiler
-    puts on an orchestration TU: ``get_orchestration_include_dirs`` followed by
-    the runtime's ``build_config`` ``orchestration.include_dirs``. Handing the
-    compiler every directory that holds a header instead lets a runtime that is
-    not under test shadow the one that is -- ``common/hierarchical/types.h``
-    wins over ``host_build_graph/types.h`` and drags in
-    ``task_interface/buffer.h``, whose global ``Tensor`` then collides with the
-    runtime's own ``Tensor`` alias. The tree root comes last, for the includes
-    spelled with a directory prefix (``common/host_phase_kind.h``).
-    """
-    src = repo_root / "runtime" / "src"
-    runtime_dir = src / "a2a3" / "runtime" / "host_build_graph"
-    return [
-        f"-I{path}"
-        for path in (
-            runtime_dir / "runtime",
-            runtime_dir / "orchestration",
-            runtime_dir / "common",
-            src / "a2a3" / "runtime",
-            src / "common" / "host_build_graph",
-            src / "common" / "task_interface",
-            src / "common",
-            src / "a2a3" / "platform" / "include",
-            src / "common" / "platform" / "include",
-            src,
-        )
-    ]
-
-
 def test_generated_orchestration_compiles_against_the_pinned_runtime(artifact_root):
     """Type-check the emitted file — the only check that covers the graph ABI.
 
@@ -259,46 +234,71 @@ def test_generated_orchestration_compiles_against_the_pinned_runtime(artifact_ro
     _assert_orchestration_compiles(artifact_root / "orchestration" / "main.cpp")
 
 
-def _assert_orchestration_compiles(main_cpp: Path) -> None:
-    """Type-check generated orchestration against the checked-out runtime."""
-    repo_root = Path(__file__).resolve().parents[3]
-    assert main_cpp.is_file(), f"no orchestration emitted at {main_cpp}"
+@pytest.mark.parametrize(
+    "runtime", [passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER, passes.RuntimeKind.HOST_BUILD_GRAPH]
+)
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
+def test_collective_builtins_compile_against_runtime(tmp_path, runtime, ascend_backend):
+    """Compile actual builtin specs, including their runtime-specific launch API."""
 
-    if not (repo_root / "runtime" / "src" / "a2a3" / "runtime" / "host_build_graph").is_dir():
-        pytest.skip("runtime submodule not checked out")
-    candidates = (os.environ.get("CXX"), "g++-15", "g++", "c++")
-    compiler = next(
-        (found for name in candidates if name and (found := shutil.which(name))),
-        None,
-    )
-    if compiler is None:
-        pytest.skip("no C++ compiler available")
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            inp: pld.DistributedTensor[[8, 64], pl.FP32],
+            data: pld.DistributedTensor[[8, 64], pl.FP32],
+            signal: pld.DistributedTensor[[4, 8], pl.INT32],
+            counts: pld.DistributedTensor[[4, 1], pl.INT32],
+            recv: pld.DistributedTensor[[4, 1], pl.INT32],
+        ):
+            return data
 
-    result = subprocess.run(
-        [
-            compiler,
-            "-std=c++17",
-            "-fsyntax-only",
-            "-Werror=deprecated-declarations",
-            *_runtime_include_args(repo_root),
-            str(main_cpp),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode == 0:
-        return
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            input_buf = pld.alloc_window_buffer(8 * 64 * pl.FP32.get_byte())
+            data_buf = pld.alloc_window_buffer(8 * 64 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * 8 * pl.INT32.get_byte())
+            counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            inp = pld.window(input_buf, [8, 64], dtype=pl.FP32)
+            data = pld.window(data_buf, [8, 64], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [4, 8], dtype=pl.INT32)
+            counts = pld.window(counts_buf, [4, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [4, 1], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(inp, data, signal, counts, recv, device=r)
+            pld.tensor.all_to_all_v(inp, data, signal, counts, recv, core_num=4)
+            pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, core_num=4)
+            return 0
 
-    # A missing header means this environment's include layout differs from the
-    # one the flags above assume — not a codegen defect, so do not fail on it.
-    # Anything the compiler blames on the generated file is.
-    if "fatal error:" in result.stderr and str(main_cpp) not in result.stderr.split("fatal error:")[0][-200:]:
-        pytest.skip(f"runtime headers not resolvable here: {result.stderr.strip().splitlines()[0]}")
-    blamed = [line for line in result.stderr.splitlines() if "error:" in line]
-    raise AssertionError(
-        "generated orchestration does not compile against the pinned runtime:\n" + "\n".join(blamed[:15])
+    with passes.PassContext([]):
+        program = passes.materialize_comm_domain_scopes()(Prog)
+        program = passes.lower_host_tensor_collectives()(program)
+        program = passes.materialize_dist_tensor_ctx()(program)
+        program = passes.derive_call_directions()(program)
+        program = passes.classify_iter_arg_carry()(passes.materialize_runtime_scopes()(program))
+    # Deliberately disagree with generate(runtime=...) to cover propagation to
+    # C++ builtin-spec generation, rather than choosing the method in the test.
+    outer_runtime = (
+        passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
+        if runtime == passes.RuntimeKind.HOST_BUILD_GRAPH
+        else passes.RuntimeKind.HOST_BUILD_GRAPH
     )
+    with passes.PassContext([], runtime=outer_runtime):
+        files = pto_backend.generate(program, str(tmp_path), skip_ptoas=True, runtime=runtime)
+        current_context = passes.PassContext.current()
+        assert current_context is not None
+        assert current_context.get_runtime() == outer_runtime
+    arch = "a5" if ascend_backend == BackendType.Ascend950 else "a2a3"
+    for variant in ("all_to_all_v__fp32", "allreduce__sum__fp32"):
+        entry_cpp = tmp_path / f"{variant}.cpp"
+        entry_cpp.write_text(
+            files[f"next_levels/builtin.tensor.{variant}/orchestration/builtin_tensor_{variant}.cpp"]
+        )
+        _assert_orchestration_compiles(
+            entry_cpp, runtime_name=passes.runtime_kind_to_name(runtime), arch=arch
+        )
 
 
 @pl.program
@@ -644,8 +644,8 @@ def test_graph_scalar_declarations_and_forwarding_execute_against_runtime(tmp_pa
     source.write_text(
         f"""#include <cassert>
 #include "types.h"
-#include "host_build_graph/graph_config.h"
-#include "host_build_graph/graph_boundary_match.h"
+#include "graph_config.h"
+#include "host_build_graph/host/graph_boundary_match.h"
 {config_preamble}
 
 int main() {{

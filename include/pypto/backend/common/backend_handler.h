@@ -147,8 +147,10 @@ class BackendHandler {
   /**
    * @brief Method name used on `launch_spec` to set the per-task core count.
    *
-   * Different runtimes expose different APIs for the same concept
-   * (Ascend910: "set_block_num"; Ascend950: "set_core_num").
+   * The active PassContext selects the runtime ABI. HBG uses "set_block_num"
+   * on both architectures; TensorMap/RingBuffer uses "set_block_num" on
+   * Ascend910 and "set_core_num" on Ascend950. No context means the default
+   * TensorMap/RingBuffer runtime.
    */
   [[nodiscard]] virtual std::string GetLaunchSpecCoreCountMethod() const = 0;
 

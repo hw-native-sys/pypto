@@ -111,7 +111,7 @@ void submit_all_to_all_v_kernel(const ChipTaskArgs &orch_args) {
   // multi-peer stride regime) - the deterministic complement of the kernel's
   // block -> (peer, lane) mapping, so the assignment is observable from the log.
   const int32_t lanes_per_peer = admitted_blocks >= nranks ? admitted_blocks / nranks : 0;
-  if (current_runtime()->ops->log_timing != nullptr) {
+  if ({{orchestration_context_accessor}}()->ops->log_timing != nullptr) {
     // Take the min in 64-bit: signal_stride is only bounded from below (by the
     // admission check above), so narrowing it first could report a wrong or
     // even negative lane count. The result is <= admitted_blocks, so the

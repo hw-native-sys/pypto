@@ -155,7 +155,7 @@ std::string GenerateIncludes(bool include_optional, bool include_vector, bool in
   // `orchestration_api.h` does not reach the shim on its own.
   oss << "#include \"tensor.h\"\n";
   if (include_graph) {
-    oss << "#include \"host_build_graph/graph_boundary_match.h\"\n";
+    oss << "#include \"host_build_graph/host/graph_boundary_match.h\"\n";
   }
   oss << "\n";
   return oss.str();
