@@ -20,6 +20,7 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
@@ -64,6 +65,26 @@ std::optional<size_t> ReturnedParamIndex(const FunctionPtr& func, const ProgramP
 ///         and is not a wrapper resolvable through its inner call; otherwise
 ///         one entry per return position (nullopt = not a param writeback).
 std::vector<std::optional<size_t>> ReturnedParamIndices(const FunctionPtr& func, const ProgramPtr& program);
+
+/// One declared return position, retaining its value independently of storage lineage.
+struct ReturnedValueBinding {
+  /// Callee-scoped source expression, or nullptr when its source is unknown.
+  /// May be an analysis-only tuple projection. Never substitute this expression
+  /// directly into another function: resolve its storage or materialize an output first.
+  ExprPtr value;
+  /// Declared return type, retained even when the source or storage is unknown.
+  TypePtr type;
+  /// Complete-parameter writeback, if known; nullopt does not erase the returned value.
+  std::optional<size_t> param_index;
+};
+
+/// Preserve every declared return slot before classifying parameter writebacks.
+///
+/// Retains original ReturnStmt expressions, expanding a single forwarded tuple
+/// only for multiple flat declared returns. A single declared TupleType stays
+/// one slot. Wrappers without an explicit return use their unique returning
+/// inner call when recognizable; otherwise their typed slots remain unknown.
+std::vector<ReturnedValueBinding> AnalyzeReturnedValues(const FunctionPtr& func, const ProgramPtr& program);
 
 /// Read the return->param map straight off @p func's ReturnStmt.
 ///

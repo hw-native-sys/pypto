@@ -2551,8 +2551,170 @@ class PeerFuncRewriter : public IRMutator {
 
 using GroupAbiArgIndices = std::unordered_map<const Expr*, int32_t>;
 
+using CalleeOutputSummaries =
+    std::unordered_map<const Function*, std::vector<return_lineage::ReturnedValueBinding>>;
+
+// Preserve output identity before asking whether its storage aliases a Group
+// parameter. An unknown param_index is still a real producer output: it must
+// be materialized by tensor-to-tile lowering, not silently captured by a peer.
+// Summaries are callee-relative and shared across Groups; producer instances
+// and SSA definitions are indexed separately for each Group call site.
+class GroupOutputBindings {
+ public:
+  struct Output {
+    FunctionPtr callee;
+    size_t position = 0;
+    const return_lineage::ReturnedValueBinding* binding;
+  };
+
+  GroupOutputBindings(const FunctionPtr& group, ProgramPtr program, CalleeOutputSummaries& summaries)
+      : program_(std::move(program)), summaries_(summaries) {
+    BuildDefMap(FlattenBody(group->body_), definitions_);
+    class CallCollector : public IRVisitor {
+     public:
+      explicit CallCollector(GroupOutputBindings& owner) : owner_(owner) {}
+
+     protected:
+      void VisitExpr_(const CallPtr& call) override {
+        owner_.RecordProducer(call, call->op_);
+        IRVisitor::VisitExpr_(call);
+      }
+      void VisitExpr_(const SubmitPtr& submit) override {
+        owner_.RecordProducer(submit, submit->op_);
+        IRVisitor::VisitExpr_(submit);
+      }
+
+     private:
+      GroupOutputBindings& owner_;
+    } collector(*this);
+    collector.VisitStmt(group->body_);
+  }
+
+  const Output* Find(const ExprPtr& expr) {
+    if (!expr) return nullptr;
+    if (auto it = outputs_.find(expr.get()); it != outputs_.end()) {
+      return it->second;
+    }
+    // A provisional miss guards malformed cyclic definitions. Alias prefixes
+    // are compressed so repeated arguments do not rescan their SSA chains.
+    std::vector<const Expr*> path;
+    ExprPtr current = expr;
+    const Output* output = nullptr;
+    while (current) {
+      if (auto it = outputs_.find(current.get()); it != outputs_.end()) {
+        output = it->second;
+        break;
+      }
+      outputs_.emplace(current.get(), nullptr);
+      path.push_back(current.get());
+      if (auto var = AsVarLike(current)) {
+        auto it = definitions_.find(var.get());
+        auto definition = it != definitions_.end() ? As<AssignStmt>(it->second) : nullptr;
+        current = definition ? definition->value_ : nullptr;
+      } else if (auto projection = As<TupleGetItemExpr>(current)) {
+        auto source = TupleSource(projection->tuple_);
+        if (auto tuple = As<MakeTuple>(source)) {
+          const auto pos = projection->index_;
+          current = pos >= 0 && static_cast<size_t>(pos) < tuple->elements_.size()
+                        ? tuple->elements_[static_cast<size_t>(pos)]
+                        : nullptr;
+        } else {
+          output = At(source, projection->index_);
+          break;
+        }
+      } else {
+        // A direct single-result call has output position zero. A whole
+        // multi-result tuple intentionally has no single output identity.
+        auto it = producers_.find(current.get());
+        if (it != producers_.end() && it->second.outputs.size() == 1) output = At(current, 0);
+        break;
+      }
+    }
+    for (const auto* item : path) outputs_[item] = output;
+    return output;
+  }
+
+ private:
+  struct Producer {
+    std::vector<Output> outputs;
+  };
+
+  void RecordProducer(const ExprPtr& call, const OpPtr& op) {
+    if (producers_.count(call.get())) return;
+    auto global = As<GlobalVar>(op);
+    auto callee = global ? program_->GetFunction(global->name_) : nullptr;
+    if (!callee) return;
+    auto it = summaries_.find(callee.get());
+    if (it == summaries_.end()) {
+      it = summaries_.emplace(callee.get(), return_lineage::AnalyzeReturnedValues(callee, program_)).first;
+    }
+    std::vector<Output> outputs;
+    outputs.reserve(it->second.size());
+    for (size_t i = 0; i < it->second.size(); ++i) outputs.push_back({callee, i, &it->second[i]});
+    producers_.emplace(call.get(), Producer{std::move(outputs)});
+  }
+
+  const Output* At(const ExprPtr& expr, int64_t position) const {
+    if (!expr || position < 0) return nullptr;
+    auto it = producers_.find(expr.get());
+    if (it == producers_.end() || static_cast<size_t>(position) >= it->second.outputs.size()) {
+      return nullptr;
+    }
+    // A plain Call returning one TupleType has one logical output, but its
+    // tuple[i] selects an element inside that output. Submit instead wraps
+    // each declared output in an outer tuple alongside its TaskId.
+    if (As<Call>(expr) && it->second.outputs.size() == 1 &&
+        As<TupleType>(it->second.outputs[0].binding->type)) {
+      return nullptr;
+    }
+    size_t pos = static_cast<size_t>(position);
+    return &it->second.outputs[pos];
+  }
+
+  ExprPtr TupleSource(ExprPtr expr) {
+    std::vector<const Expr*> path;
+    auto finish = [&](const ExprPtr& source) {
+      for (const auto* item : path) tuple_sources_[item] = source;
+      return source;
+    };
+    while (expr) {
+      if (auto it = tuple_sources_.find(expr.get()); it != tuple_sources_.end()) {
+        return finish(it->second);
+      }
+      tuple_sources_.emplace(expr.get(), nullptr);
+      path.push_back(expr.get());
+      if (auto var = AsVarLike(expr)) {
+        auto it = definitions_.find(var.get());
+        auto definition = it != definitions_.end() ? As<AssignStmt>(it->second) : nullptr;
+        expr = definition ? definition->value_ : nullptr;
+      } else if (auto projection = As<TupleGetItemExpr>(expr)) {
+        auto source = TupleSource(projection->tuple_);
+        auto tuple = As<MakeTuple>(source);
+        if (!tuple || projection->index_ < 0 ||
+            static_cast<size_t>(projection->index_) >= tuple->elements_.size()) {
+          return finish(nullptr);
+        }
+        expr = tuple->elements_[static_cast<size_t>(projection->index_)];
+      } else {
+        return finish(expr);
+      }
+    }
+    return finish(nullptr);
+  }
+
+  ProgramPtr program_;
+  CalleeOutputSummaries& summaries_;
+  std::unordered_map<const Var*, StmtPtr> definitions_;
+  std::unordered_map<const Expr*, Producer> producers_;
+  // Producer vectors are immutable after construction, so cached pointers
+  // retain the exact call-site/output identity for this Group's lifetime.
+  std::unordered_map<const Expr*, const Output*> outputs_;
+  std::unordered_map<const Expr*, ExprPtr> tuple_sources_;
+};
+
 GroupAbiArgIndices BuildGroupAbiArgIndices(const FunctionPtr& group, const WrapperCallInfo& aic,
-                                           const WrapperCallInfo& aiv, const ProgramPtr& program) {
+                                           const WrapperCallInfo& aiv, const ProgramPtr& program,
+                                           GroupOutputBindings& outputs) {
   class ArgExprCollector : public IRVisitor {
    public:
     std::vector<ExprPtr> exprs;
@@ -2577,6 +2739,11 @@ GroupAbiArgIndices BuildGroupAbiArgIndices(const FunctionPtr& group, const Wrapp
   // Trace whole projections as well as SSA variables. A tuple has no single
   // parameter root, but each selected complete-parameter writeback does.
   // The lineage utility excludes views and fresh buffers from these aliases.
+  // Preserve output identities before resolving their storage, including
+  // outputs with no parameter lineage. Reuse the expression tracer for the
+  // binding itself so full type/view checks and tuple boundaries stay in one
+  // place rather than tracing a substituted source with weaker checks.
+  for (const auto& expr : collector.exprs) outputs.Find(expr);
   auto indices =
       return_lineage::TraceExprsToParamIndices(collector.exprs, group->body_, group->params_, program);
   GroupAbiArgIndices result;
@@ -2596,11 +2763,30 @@ GroupAbiArgIndices BuildGroupAbiArgIndices(const FunctionPtr& group, const Wrapp
 // to the Group and must not become a captured free variable in the adapter.
 class GroupAbiArgSubstituter : public IRMutator {
  public:
-  GroupAbiArgSubstituter(const GroupAbiArgIndices& indices, const std::vector<VarPtr>& params) {
+  GroupAbiArgSubstituter(const GroupAbiArgIndices& indices, std::vector<VarPtr>& params) {
     for (const auto& [expr, index] : indices) {
       var_remap_.emplace(expr, params[static_cast<size_t>(index)]);
     }
+    // A fresh Tensor[n] still carries the original Group's n until its type
+    // is visited. Publish the final type-remapped Var into the signature before
+    // substituting arguments, so every use names that exact parameter identity.
+    // All initial mappings are seeded first to support forward shape references.
+    for (auto& param : params) {
+      auto final_param = As<Var>(VisitExpr(param));
+      INTERNAL_CHECK_SPAN(final_param != nullptr, param->span_)
+          << "Internal error: Group adapter parameter remapped to a non-Var expression";
+      param = std::move(final_param);
+    }
+    for (const auto& [expr, index] : indices) {
+      var_remap_[expr] = params[static_cast<size_t>(index)];
+    }
   }
+
+  explicit GroupAbiArgSubstituter(const std::unordered_map<const Var*, ExprPtr>& substitutions) {
+    for (const auto& [var, value] : substitutions) var_remap_.emplace(var, value);
+  }
+
+  TypePtr RemapType(const TypePtr& type) { return RemapTypeViaVisitor(type); }
 
  protected:
   ExprPtr VisitExpr_(const TupleGetItemExprPtr& op) override {
@@ -2614,7 +2800,8 @@ class GroupAbiArgSubstituter : public IRMutator {
 FunctionPtr BuildGroupAbiAdapter(const FunctionPtr& group, const WrapperCallInfo& member,
                                  const std::string& adapter_name,
                                  const std::unordered_map<std::string, std::string>& peer_renames,
-                                 const GroupAbiArgIndices& canonical_arg_indices) {
+                                 const GroupAbiArgIndices& canonical_arg_indices,
+                                 GroupOutputBindings& outputs) {
   const auto& callee = member.inner_callee;
   const auto& call = member.inner_call;
   INTERNAL_CHECK(group != nullptr && callee != nullptr && call != nullptr)
@@ -2630,21 +2817,46 @@ FunctionPtr BuildGroupAbiAdapter(const FunctionPtr& group, const WrapperCallInfo
     adapter_params.push_back(fresh);
   }
   GroupAbiArgSubstituter substitute_arg(canonical_arg_indices, adapter_params);
+  std::unordered_set<const Var*> parameter_set;
+  for (const auto& param : adapter_params) parameter_set.insert(param.get());
 
   // Bind every original member parameter to the corresponding Group call-site
   // expression, rewritten onto the adapter's fresh canonical parameters.
   std::unordered_map<const Var*, ExprPtr> member_to_adapter;
   for (size_t i = 0; i < callee->params_.size(); ++i) {
-    member_to_adapter.emplace(callee->params_[i].get(), substitute_arg.VisitExpr(call->args_[i]));
+    auto argument = substitute_arg.VisitExpr(call->args_[i]);
+    var_collectors::VarDefUseCollector uses;
+    uses.VisitExpr(argument);
+    for (const auto* var : uses.var_uses_ordered) {
+      if (parameter_set.count(var)) continue;
+      if (auto output = outputs.Find(call->args_[i])) {
+        CHECK_SPAN(false, call->span_)
+            << "Group '" << group->name_ << "' member '" << callee->name_ << "' argument " << i
+            << " consumes output " << output->position << " of producer '" << output->callee->name_
+            << "' without a caller-visible output binding. Materialize Tensor results with "
+               "ConvertTensorToTileOps or declare an explicit Out parameter; device-computed scalar "
+               "results require an explicit tensor output.";
+      }
+      CHECK_SPAN(false, call->span_) << "Cannot bind Group '" << group->name_ << "' member '" << callee->name_
+                                     << "' argument " << i << ": Group-local value '" << var->name_hint_
+                                     << "' has no output or parameter binding";
+    }
+    member_to_adapter.emplace(callee->params_[i].get(), std::move(argument));
   }
   auto cloned = DeepClone(callee->body_, member_to_adapter);
   StmtPtr adapter_body = cloned.cloned_body;
   if (!peer_renames.empty()) {
     adapter_body = PeerFuncRewriter(peer_renames).VisitStmt(adapter_body);
   }
+  GroupAbiArgSubstituter substitute_member(member_to_adapter);
+  std::vector<TypePtr> return_types;
+  return_types.reserve(callee->return_types_.size());
+  for (const auto& type : callee->return_types_) {
+    return_types.push_back(substitute_member.RemapType(type));
+  }
 
   return std::make_shared<Function>(adapter_name, std::move(adapter_params), group->param_directions_,
-                                    callee->return_types_, std::move(adapter_body), callee->span_,
+                                    std::move(return_types), std::move(adapter_body), callee->span_,
                                     callee->func_type_, callee->level_, callee->role_, callee->attrs_,
                                     callee->requires_runtime_binding_, callee->ir_stage_);
 }
@@ -2747,6 +2959,7 @@ NormalizedGroups NormalizeHandWrittenGroupAbis(const ProgramPtr& program,
   std::unordered_set<std::string> used_names;
   std::unordered_map<std::string, FunctionPtr> replacements;
   std::vector<FunctionPtr> adapters;
+  CalleeOutputSummaries output_summaries;
   for (const auto& func : functions) used_names.insert(func->name_);
 
   for (const auto& group : functions) {
@@ -2793,12 +3006,22 @@ NormalizedGroups NormalizeHandWrittenGroupAbis(const ProgramPtr& program,
     const std::unordered_map<std::string, std::string> peer_renames = {{aic.inner_callee->name_, aic_name},
                                                                        {aiv.inner_callee->name_, aiv_name}};
 
-    // Compute aliases before cloning either member. Adapter substitution and
-    // no_dep remapping must agree even when the preceding member permutes its
-    // tuple writebacks or is launched through Submit.
-    auto canonical_arg_indices = BuildGroupAbiArgIndices(group, aic, aiv, program);
-    auto normalized_aic = BuildGroupAbiAdapter(group, aic, aic_name, peer_renames, canonical_arg_indices);
-    auto normalized_aiv = BuildGroupAbiAdapter(group, aiv, aiv_name, peer_renames, canonical_arg_indices);
+    // First retain every producer return position, including non-parameter
+    // results. Only then resolve each consumer argument to the storage supplied
+    // at that call site. Tensor lowering has already made computed results
+    // explicit Out parameters; missing carriers are diagnosed before cloning.
+    GroupOutputBindings output_bindings(group, program, output_summaries);
+    auto canonical_arg_indices = BuildGroupAbiArgIndices(group, aic, aiv, program, output_bindings);
+    std::unordered_map<std::string, std::string> callee_renames = {{aic.inner_callee->name_, aic_name},
+                                                                   {aiv.inner_callee->name_, aiv_name}};
+    auto mutable_group = MutableCopy(group);
+    mutable_group->body_ =
+        GroupMemberCallRewriter(std::move(callee_renames), group->params_, canonical_arg_indices)
+            .VisitStmt(group->body_);
+    auto normalized_aic =
+        BuildGroupAbiAdapter(group, aic, aic_name, peer_renames, canonical_arg_indices, output_bindings);
+    auto normalized_aiv =
+        BuildGroupAbiAdapter(group, aiv, aiv_name, peer_renames, canonical_arg_indices, output_bindings);
     if (needs_dual_aiv_dispatch) normalized_aiv = WithDualAivDispatch(normalized_aiv);
     if (exclusive_pair) {
       replacements[aic_name] = normalized_aic;
@@ -2808,12 +3031,6 @@ NormalizedGroups NormalizeHandWrittenGroupAbis(const ProgramPtr& program,
       adapters.push_back(normalized_aiv);
     }
 
-    std::unordered_map<std::string, std::string> callee_renames = {{aic.inner_callee->name_, aic_name},
-                                                                   {aiv.inner_callee->name_, aiv_name}};
-    auto mutable_group = MutableCopy(group);
-    mutable_group->body_ =
-        GroupMemberCallRewriter(std::move(callee_renames), group->params_, std::move(canonical_arg_indices))
-            .VisitStmt(group->body_);
     replacements[group->name_] = mutable_group;
   }
 

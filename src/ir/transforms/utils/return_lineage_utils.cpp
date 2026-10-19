@@ -22,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -681,6 +682,73 @@ std::optional<size_t> ReturnedParamIndex(const FunctionPtr& func, const ProgramP
 
 std::vector<std::optional<size_t>> ReturnedParamIndices(const FunctionPtr& func, const ProgramPtr& program) {
   return ReturnedParamIndicesImpl(func, program);
+}
+
+std::vector<ReturnedValueBinding> AnalyzeReturnedValues(const FunctionPtr& func, const ProgramPtr& program) {
+  if (!func) return {};
+  std::vector<ReturnedValueBinding> result;
+  result.reserve(func->return_types_.size());
+  for (const auto& type : func->return_types_) result.push_back({nullptr, type, std::nullopt});
+  if (result.empty()) return result;
+
+  TraceQueryGuard query_guard;
+  auto ret = func->body_ ? FindFirstReturn(func->body_) : nullptr;
+  if (ret && !ret->value_.empty()) {
+    const auto& values = ret->value_;
+    auto tuple_type = values.size() == 1 ? As<TupleType>(values[0]->GetType()) : nullptr;
+    if (result.size() > 1 && tuple_type && tuple_type->types_.size() == result.size()) {
+      // A forwarded tuple describes several flat return positions, but its
+      // original expression remains the source of every analysis projection.
+      for (size_t i = 0; i < result.size(); ++i) {
+        result[i].value =
+            std::make_shared<TupleGetItemExpr>(values[0], static_cast<int>(i), values[0]->span_);
+      }
+    } else {
+      for (size_t i = 0; i < std::min(values.size(), result.size()); ++i) result[i].value = values[i];
+    }
+  } else if (func->body_ && program && IsWrapperType(func->func_type_)) {
+    CallPtr returning_call;
+    FunctionPtr returning_callee;
+    bool ambiguous = false;
+    for (const auto& info : CollectInnerCalls(func, program)) {
+      if (info.inner_callee->return_types_.size() != result.size()) continue;
+      if (returning_call) {
+        ambiguous = true;
+        break;
+      }
+      returning_call = info.inner_call;
+      returning_callee = info.inner_callee;
+    }
+    if (returning_call && !ambiguous) {
+      // A Submit's transient Call view also includes the trailing TaskId.
+      // Keep only the callee's declared return positions, without fabricating
+      // an SSA variable or treating that launch handle as a kernel output.
+      auto tuple_type = As<TupleType>(returning_call->GetType());
+      if (result.size() == 1 &&
+          structural_equal(returning_call->GetType(), returning_callee->return_types_[0])) {
+        result[0].value = returning_call;
+      } else if (result.size() > 1 && tuple_type && tuple_type->types_.size() >= result.size()) {
+        for (size_t i = 0; i < result.size(); ++i) {
+          result[i].value =
+              std::make_shared<TupleGetItemExpr>(returning_call, static_cast<int>(i), returning_call->span_);
+        }
+      } else if (result.size() == 1 && tuple_type && tuple_type->types_.size() == 2) {
+        auto task_id_type = As<ScalarType>(tuple_type->types_[1]);
+        if (task_id_type && task_id_type->dtype_ == DataType::TASK_ID &&
+            structural_equal(tuple_type->types_[0], returning_callee->return_types_[0])) {
+          result[0].value = std::make_shared<TupleGetItemExpr>(returning_call, 0, returning_call->span_);
+        }
+      }
+    }
+  }
+
+  // Unknown lineage is storage information, not a missing return position.
+  // Preserve the callee-local value and type even for fresh or partial buffers.
+  auto param_indices = ReturnedParamIndicesImpl(func, program);
+  for (size_t i = 0; i < std::min(param_indices.size(), result.size()); ++i) {
+    result[i].param_index = param_indices[i];
+  }
+  return result;
 }
 
 std::vector<std::optional<size_t>> TraceToParamIndices(const std::vector<VarPtr>& vars, const StmtPtr& body,

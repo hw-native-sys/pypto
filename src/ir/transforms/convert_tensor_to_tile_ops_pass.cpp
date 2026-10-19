@@ -47,6 +47,7 @@
 #include "pypto/ir/transforms/utils/narrow_loop_carry.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/result_alias_utils.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
@@ -2603,17 +2604,50 @@ std::optional<ReturnedAssembleLoopRewrite> RewriteReturnedAssembleLoopToStore(
   return std::nullopt;
 }
 
-/**
- * @brief Transform an InCore function: insert loads, convert ops, insert stores
- *
- * @param func The InCore function to transform
- * @return Transformed function with tile ops, plus the number of added output params
- */
+// A return position and an output parameter are different identities: a
+// wrapper may need private output parameters which it does not itself return.
+struct AddedOutputBinding {
+  size_t param_index;
+};
+using AddedOutputBindings = std::vector<AddedOutputBinding>;
+using AddedOutputMap = std::unordered_map<std::string, AddedOutputBindings>;
+
 struct IncoreTransformResult {
   FunctionPtr func;
-  size_t num_added_outputs;
+  AddedOutputBindings added_outputs;
 };
 
+struct ReturnOutputBinding {
+  size_t return_index;
+  TypePtr original_type;
+  ExprPtr value;
+  std::optional<size_t> storage_index;
+};
+
+// A returned GM allocation becomes caller-owned storage. Removing its local
+// allocation preserves the one-buffer identity instead of copying the result
+// into a second allocation or confusing it with a kernel input.
+class ReturnedAllocationRewriter : public IRMutator {
+ public:
+  explicit ReturnedAllocationRewriter(const std::unordered_map<const Var*, VarPtr>& outputs)
+      : outputs_(outputs) {
+    for (const auto& [source, output] : outputs) var_remap_.emplace(source, output);
+  }
+
+ protected:
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    if (outputs_.count(op->var_.get()) != 0 && IsOp(As<Call>(op->value_), "tensor.create")) {
+      return SeqStmts::Flatten({}, op->span_);
+    }
+    return IRMutator::VisitStmt_(op);
+  }
+
+ private:
+  const std::unordered_map<const Var*, VarPtr>& outputs_;
+};
+
+// Lower a kernel body and bind every newly materialized output to an explicit
+// parameter, retaining the kernel's InCore/AIC/AIV function type.
 IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   auto& conv_registry = OpConversionRegistry::GetInstance();
   auto& op_registry = OpRegistry::GetInstance();
@@ -2634,6 +2668,86 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   if (canonical_body != staged_body &&
       AnalyzeParamAccess(FlattenToStmts(canonical_body), func->params_).HasMixedStores()) {
     canonical_body = staged_body;
+  }
+
+  // Save every logical return before lowering can change its storage identity.
+  // In particular, tensor.create is otherwise promoted to tile.create, which
+  // would turn an existing GM store destination into a tile and require a
+  // second output buffer at the return.
+  ReturnStmtPtr return_stmt;
+  for (const auto& stmt : FlattenToStmts(canonical_body)) {
+    if (auto ret = As<ReturnStmt>(stmt)) return_stmt = ret;
+  }
+  std::vector<ReturnOutputBinding> outputs;
+  if (return_stmt) {
+    outputs.reserve(return_stmt->value_.size());
+    for (size_t i = 0; i < return_stmt->value_.size(); ++i) {
+      outputs.push_back({i, func->return_types_[i], return_stmt->value_[i], std::nullopt});
+    }
+  }
+
+  std::vector<VarPtr> new_params = func->params_;
+  std::vector<ParamDirection> new_param_directions = func->param_directions_;
+  std::vector<TypePtr> new_return_types;
+  AddedOutputBindings added_outputs;
+  const size_t output_start = func->params_.size() - transform_utils::TrailingCommCtxParamCount(func);
+  auto add_output = [&](const TypePtr& type) {
+    const size_t param_index = output_start + added_outputs.size();
+    auto param = std::make_shared<Var>(MakeOutParamName(added_outputs.size()), type, return_stmt->span_);
+    // Append now and rotate the unchanged CommCtx suffix once at the end.
+    new_params.push_back(param);
+    new_param_directions.push_back(ParamDirection::Out);
+    added_outputs.push_back({param_index});
+    return param;
+  };
+
+  class AllocationCollector : public IRVisitor {
+   public:
+    std::vector<VarPtr> vars;
+    std::vector<StmtPtr> storage_definitions;
+
+   protected:
+    void VisitStmt_(const AssignStmtPtr& op) override {
+      auto call = As<Call>(op->value_);
+      if (IsOp(call, "tensor.create") && As<TensorType>(op->var_->GetType())) {
+        vars.push_back(op->var_);
+      }
+      // Prove GM identity using only aliases and explicit storage writes.
+      // Indexing a flattened definition list deliberately excludes loop carry
+      // init edges: a functional accumulator may return a new tile even when
+      // the loop was seeded by this allocation. Such values must retain tile
+      // promotion and receive their output store after lowering.
+      const bool gm_write = IsOp(call, "tile.store") || IsOp(call, "tensor.write") ||
+                            IsOp(call, "tensor.assemble") || IsOp(call, "tensor.expand_clone");
+      if (AsVarLike(op->value_) || As<TupleGetItemExpr>(op->value_) || As<MakeTuple>(op->value_) ||
+          gm_write) {
+        storage_definitions.push_back(op);
+      }
+      IRVisitor::VisitStmt_(op);
+    }
+  } allocations;
+  allocations.VisitStmt(canonical_body);
+  if (!allocations.vars.empty() && !outputs.empty()) {
+    std::vector<VarPtr> roots = func->params_;
+    roots.insert(roots.end(), allocations.vars.begin(), allocations.vars.end());
+    std::vector<ExprPtr> returned_values;
+    returned_values.reserve(outputs.size());
+    for (const auto& output : outputs) returned_values.push_back(output.value);
+    const auto storage_body = SeqStmts::Flatten(allocations.storage_definitions, span);
+    const auto indices =
+        return_lineage::TraceExprsToParamIndices(returned_values, storage_body, roots, nullptr);
+    std::unordered_map<const Var*, VarPtr> allocation_outputs;
+    for (const auto& index : indices) {
+      if (!index || *index < func->params_.size()) continue;
+      const auto& allocation = roots[*index];
+      auto [it, inserted] = allocation_outputs.emplace(allocation.get(), nullptr);
+      if (inserted) it->second = add_output(allocation->GetType());
+    }
+    // Only complete, type/view-preserving aliases resolve to an allocation
+    // root. All returns of that allocation share this one caller-owned Out.
+    if (!allocation_outputs.empty()) {
+      canonical_body = ReturnedAllocationRewriter(allocation_outputs).VisitStmt(canonical_body);
+    }
   }
 
   // Pre-scan: collect consumer memory space requirements (e.g. tensor.slice → tensor.matmul
@@ -2679,7 +2793,6 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   auto body_stmts = FlattenToStmts(canonical_body);
 
   // Separate return statement from body (will be replaced in Phase 3)
-  ReturnStmtPtr return_stmt;
   std::vector<StmtPtr> non_return_stmts;
   for (const auto& stmt : body_stmts) {
     if (auto ret = As<ReturnStmt>(stmt)) {
@@ -2694,462 +2807,340 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   auto transformed = FlattenToStmts(mutated);
   new_stmts.insert(new_stmts.end(), transformed.begin(), transformed.end());
 
-  // Phase 3: Add output params + tile.store for return values
-  std::vector<VarPtr> new_params = func->params_;
-  std::vector<ParamDirection> new_param_directions = func->param_directions_;
-  std::vector<TypePtr> new_return_types;
-  size_t num_added_outputs = 0;
+  // Refresh the saved return bindings with the rewritten GM outputs and
+  // converted computations. Data dependencies are not storage aliases.
+  if (return_stmt) {
+    for (auto& output : outputs) {
+      output.value = mutator.VisitExpr(return_stmt->value_[output.return_index]);
+    }
+  }
+
+  class TileRootCollector : public IRVisitor {
+   public:
+    std::vector<VarPtr> vars;
+
+   protected:
+    void VisitStmt_(const AssignStmtPtr& op) override {
+      if (As<TileType>(op->var_->GetType()) && !AsVarLike(op->value_)) {
+        vars.push_back(op->var_);
+      }
+      IRVisitor::VisitStmt_(op);
+    }
+  } tile_roots;
+  auto indexed_body = SeqStmts::Flatten(new_stmts, span);
+  tile_roots.VisitStmt(indexed_body);
+  std::vector<VarPtr> storage_roots = new_params;
+  storage_roots.insert(storage_roots.end(), tile_roots.vars.begin(), tile_roots.vars.end());
+  std::vector<ExprPtr> returned_values;
+  returned_values.reserve(outputs.size());
+  for (const auto& output : outputs) returned_values.push_back(output.value);
+  auto storage_indices =
+      return_lineage::TraceExprsToParamIndices(returned_values, indexed_body, storage_roots, nullptr);
+  for (size_t i = 0; i < outputs.size(); ++i) outputs[i].storage_index = storage_indices[i];
+
+  std::unordered_map<const Expr*, ExprPtr> stored_values;
 
   if (return_stmt) {
     std::vector<ExprPtr> new_return_exprs;
-    // The exit stores and the Out params they write exist because of this
-    // `return`, so they are attributed to it rather than to the `def` line.
     const auto& ret_span = return_stmt->span_;
-
-    // Process each return value
-    for (size_t i = 0; i < return_stmt->value_.size(); ++i) {
-      auto ret_expr = mutator.VisitExpr(return_stmt->value_[i]);
-
-      // Check if the return value is a tile (was converted from tensor)
-      auto tile_type = As<TileType>(ret_expr->GetType());
-      if (tile_type) {
-        // Find the original tensor type from the function's return types
-        auto orig_tensor_type = As<TensorType>(func->return_types_[i]);
-        INTERNAL_CHECK_SPAN(orig_tensor_type, func->span_)
-            << "Internal error: return type " << i << " should be TensorType but got "
-            << func->return_types_[i]->TypeName();
-
-        // Add output tensor parameter
-        std::string out_name = MakeOutParamName(num_added_outputs);
-
-        auto out_type = orig_tensor_type;
-        auto out_param = std::make_shared<Var>(out_name, out_type, ret_span);
-        new_params.push_back(out_param);
-        new_param_directions.push_back(ParamDirection::Out);
-
-        if (auto loop_rewrite = RewriteReturnedAssembleLoopToStore(new_stmts, ret_expr, out_param,
-                                                                   orig_tensor_type, op_registry)) {
-          new_stmts[loop_rewrite->stmt_index] = loop_rewrite->new_for_stmt;
-          if (loop_rewrite->dead_init_stmt_index.has_value()) {
-            new_stmts.erase(new_stmts.begin() +
-                            static_cast<std::ptrdiff_t>(*loop_rewrite->dead_init_stmt_index));
-          }
-          new_return_types.push_back(orig_tensor_type);
-          new_return_exprs.push_back(loop_rewrite->new_return_var);
-          ++num_added_outputs;
+    for (const auto& binding : outputs) {
+      auto ret_expr = binding.value;
+      if (auto tile_type = As<TileType>(ret_expr->GetType())) {
+        const Expr* identity =
+            binding.storage_index ? storage_roots[*binding.storage_index].get() : ret_expr.get();
+        if (auto stored = stored_values.find(identity); stored != stored_values.end()) {
+          new_return_types.push_back(stored->second->GetType());
+          new_return_exprs.push_back(stored->second);
           continue;
         }
-
-        // Insert tile.store(tile, zeros, out_param)
-        auto offsets = MakeZeroOffsets(tile_type->shape_.size(), ret_span);
-        auto store_call = op_registry.Create("tile.store", {ret_expr, offsets, out_param}, ret_span);
-
-        auto store_var =
-            std::make_shared<Var>(MakeStoreResultName(num_added_outputs), store_call->GetType(), ret_span);
-        new_stmts.push_back(std::make_shared<AssignStmt>(store_var, store_call, ret_span));
-
-        new_return_types.push_back(store_call->GetType());
-        new_return_exprs.push_back(store_var);
-        ++num_added_outputs;
-      } else {
-        // Non-tile return values pass through
-        new_return_types.push_back(ret_expr->GetType());
-        new_return_exprs.push_back(ret_expr);
+        auto orig_tensor_type = As<TensorType>(binding.original_type);
+        INTERNAL_CHECK_SPAN(orig_tensor_type, func->span_)
+            << "Internal error: return type " << binding.return_index << " should be TensorType but got "
+            << binding.original_type->TypeName();
+        auto out_param = add_output(orig_tensor_type);
+        ExprPtr stored;
+        if (auto rewrite = RewriteReturnedAssembleLoopToStore(new_stmts, ret_expr, out_param,
+                                                              orig_tensor_type, op_registry)) {
+          new_stmts[rewrite->stmt_index] = rewrite->new_for_stmt;
+          if (rewrite->dead_init_stmt_index.has_value()) {
+            new_stmts.erase(new_stmts.begin() + static_cast<std::ptrdiff_t>(*rewrite->dead_init_stmt_index));
+          }
+          stored = rewrite->new_return_var;
+        } else {
+          auto offsets = MakeZeroOffsets(tile_type->shape_.size(), ret_span);
+          auto store = op_registry.Create("tile.store", {ret_expr, offsets, out_param}, ret_span);
+          auto result = std::make_shared<Var>(MakeStoreResultName(added_outputs.size() - 1), store->GetType(),
+                                              ret_span);
+          new_stmts.push_back(std::make_shared<AssignStmt>(result, store, ret_span));
+          stored = result;
+        }
+        stored_values.emplace(identity, stored);
+        new_return_types.push_back(stored->GetType());
+        new_return_exprs.push_back(stored);
+        continue;
       }
-    }
 
-    // Build new return statement
+      new_return_types.push_back(ret_expr->GetType());
+      new_return_exprs.push_back(ret_expr);
+    }
     auto new_return = MutableCopy(return_stmt);
     new_return->value_ = std::move(new_return_exprs);
     new_stmts.push_back(std::move(new_return));
   } else {
-    // Void function (e.g. cross-core producer): add empty return
     INTERNAL_CHECK_SPAN(func->return_types_.empty(), func->span_)
         << "Internal error: function '" << func->name_ << "' has no ReturnStmt but declares "
         << func->return_types_.size() << " return type(s) — possible malformed IR";
     new_stmts.push_back(std::make_shared<ReturnStmt>(std::vector<ExprPtr>{}, span));
   }
-
+  std::rotate(new_params.begin() + static_cast<std::ptrdiff_t>(output_start),
+              new_params.begin() + static_cast<std::ptrdiff_t>(func->params_.size()), new_params.end());
+  std::rotate(new_param_directions.begin() + static_cast<std::ptrdiff_t>(output_start),
+              new_param_directions.begin() + static_cast<std::ptrdiff_t>(func->params_.size()),
+              new_param_directions.end());
   UpgradeWrittenTensorParamDirections(new_stmts, new_params, new_param_directions);
 
   auto new_body = SeqStmts::Flatten(std::move(new_stmts), span);
   auto new_func = std::make_shared<Function>(func->name_, new_params, new_param_directions, new_return_types,
-                                             new_body, span, FunctionType::InCore, func->level_, func->role_,
+                                             new_body, span, func->func_type_, func->level_, func->role_,
                                              EraseCachePolicyAttr(func->attrs_),
                                              func->requires_runtime_binding_, func->ir_stage_);
 
-  return {new_func, num_added_outputs};
+  return {new_func, std::move(added_outputs)};
 }
 
 // ============================================================================
-// Wrapper forward propagation: Spmd/Group wrappers produced by
-// OutlineClusterScopes are transparent 1:1 forwarders from their params to a
-// single inner InCore call. When the InCore callee gains output params
-// (Phase 1), the wrapper must mirror those params on its own signature and
-// forward them to the inner call, instead of synthesising tensor.create in
-// the wrapper body. Orchestration codegen's BuildWrapperReorderedParams
-// relies on every inner-call Var arg resolving to a wrapper param.
+// Output propagation. Every call site receives its own output storage. A
+// Group/Spmd exposes that storage as private Out parameters; orchestration
+// allocates it before calling the wrapper. Logical returns remain unchanged.
 // ============================================================================
 
-/// Find the first Call in a stmt tree whose callee is a transformed InCore
-/// function (listed in `incore_added_outputs` with >0 added outputs). Used to
-/// pre-size the wrapper's new Out params before the mutator runs.
-class ForwardedCallFinder : public IRVisitor {
+// One incremental substitution per call site keeps shape instantiation linear
+// in its argument/output types. Rebuilding a full substitution map for every
+// shape expression would multiply the argument and output counts.
+class CallTypeSubstituter : public IRMutator {
  public:
-  explicit ForwardedCallFinder(const std::unordered_map<std::string, size_t>& incore_added_outputs)
-      : incore_added_outputs_(incore_added_outputs) {}
-
-  [[nodiscard]] const CallPtr& GetFound() const { return found_; }
-
-  void VisitExpr_(const CallPtr& op) override {
-    if (!found_) {
-      auto gv = std::dynamic_pointer_cast<const GlobalVar>(op->op_);
-      if (gv) {
-        auto it = incore_added_outputs_.find(gv->name_);
-        if (it != incore_added_outputs_.end() && it->second > 0) {
-          found_ = op;
-          return;
-        }
-      }
-    }
-    IRVisitor::VisitExpr_(op);
-  }
-
- private:
-  const std::unordered_map<std::string, size_t>& incore_added_outputs_;
-  CallPtr found_;
+  void Bind(const VarPtr& param, const ExprPtr& argument) { var_remap_[param.get()] = argument; }
+  TypePtr RemapType(const TypePtr& type) { return RemapTypeViaVisitor(type); }
 };
 
-/// Mutator that rewrites a wrapper's forwarding call: append the
-/// pre-allocated `new_output_vars_` (wrapper-level Out params) to the call's
-/// arg list and update the call's return type to match the transformed
-/// InCore callee. Does NOT insert tensor.create — the allocation is the
-/// responsibility of the wrapper's caller. Recurses through nested control
-/// flow via IRMutator's base behavior, so forwarded calls inside ForStmt /
-/// IfStmt / WhileStmt bodies are handled correctly.
-class WrapperForwardMutator : public TypePropagatingMutator {
+class OutputParameterRewriter : public TypePropagatingMutator {
  public:
-  WrapperForwardMutator(const std::unordered_map<std::string, size_t>& incore_added_outputs,
-                        const std::unordered_map<std::string, FunctionPtr>& transformed_incore_funcs,
-                        std::vector<VarPtr> new_output_vars)
-      : incore_added_outputs_(incore_added_outputs),
-        transformed_incore_funcs_(transformed_incore_funcs),
-        new_output_vars_(std::move(new_output_vars)) {}
+  OutputParameterRewriter(const AddedOutputMap& added_outputs,
+                          const std::unordered_map<std::string, FunctionPtr>& functions,
+                          FunctionPtr wrapper = nullptr)
+      : added_outputs_(added_outputs), functions_(functions), wrapper_(std::move(wrapper)) {
+    if (wrapper_) {
+      params_ = wrapper_->params_;
+      directions_ = wrapper_->param_directions_;
+      output_start_ = params_.size() - transform_utils::TrailingCommCtxParamCount(wrapper_);
+    }
+  }
 
-  [[nodiscard]] bool applied() const { return applied_; }
+  std::vector<VarPtr> params() const {
+    auto params = params_;
+    std::rotate(params.begin() + static_cast<std::ptrdiff_t>(output_start_),
+                params.begin() + static_cast<std::ptrdiff_t>(wrapper_->params_.size()), params.end());
+    return params;
+  }
+  std::vector<ParamDirection> directions() const {
+    auto directions = directions_;
+    std::rotate(directions.begin() + static_cast<std::ptrdiff_t>(output_start_),
+                directions.begin() + static_cast<std::ptrdiff_t>(wrapper_->params_.size()), directions.end());
+    return directions;
+  }
+  const AddedOutputBindings& outputs() const { return outputs_; }
 
  protected:
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
-    // Pin this Var's address for the pass so a freed-then-reused address cannot
-    // alias a stale var_remap_ entry (see TypePropagatingMutator::RetainVar).
     RetainVar(op->var_);
-    auto new_value = VisitExpr(op->value_);
-    auto call = As<Call>(new_value);
-    if (!call) return HandlePassThroughAssign(op, new_value);
-    auto global_var = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
-    if (!global_var) return HandlePassThroughAssign(op, new_value);
+    auto value = VisitExpr(op->value_);
+    std::vector<StmtPtr> prefix;
+    value = RewriteCall(value, prefix);
+    auto result = HandlePassThroughAssign(op, value);
+    if (prefix.empty()) return result;
+    prefix.push_back(result);
+    return SeqStmts::Flatten(std::move(prefix), op->span_);
+  }
 
-    auto it = incore_added_outputs_.find(global_var->name_);
-    if (it == incore_added_outputs_.end() || it->second == 0) {
-      return HandlePassThroughAssign(op, new_value);
-    }
-
-    INTERNAL_CHECK_SPAN(!applied_, call->span_)
-        << "Wrapper forward propagation saw more than one forwarded call; outlining invariant violated";
-    INTERNAL_CHECK_SPAN(it->second == new_output_vars_.size(), call->span_)
-        << "Wrapper new-output count mismatch: callee added " << it->second << ", wrapper prepared "
-        << new_output_vars_.size();
-
-    auto incore_func_it = transformed_incore_funcs_.find(global_var->name_);
-    INTERNAL_CHECK_SPAN(incore_func_it != transformed_incore_funcs_.end(), call->span_)
-        << "Internal error: transformed InCore function not found: " << global_var->name_;
-    const auto& incore_func = incore_func_it->second;
-
-    std::vector<ExprPtr> new_args = call->args_;
-    for (const auto& v : new_output_vars_) {
-      new_args.push_back(v);
-    }
-
-    TypePtr new_return_type;
-    if (incore_func->return_types_.empty()) {
-      new_return_type = nullptr;
-    } else if (incore_func->return_types_.size() == 1) {
-      new_return_type = incore_func->return_types_[0];
-    } else {
-      new_return_type = std::make_shared<TupleType>(incore_func->return_types_);
-    }
-
-    // Preserve the original call's attrs_ (e.g. kAttrDumpVars from
-    // pl.dump_tag / dumps=) through the arg-appending rewrite — mirrors the
-    // base IRMutator and the Submit path below. The appended outputs do not
-    // rename existing arg Vars, so a verbatim attr copy keeps any dump/dep Var
-    // references valid. Fall back to UnknownType for a void-return callee so the
-    // rewritten Call's type_ stays identical to the prior 4-arg ctor path.
-    auto new_call = std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->attrs_,
-                                           new_return_type ? new_return_type : GetUnknownType(), call->span_);
-
-    auto new_assign_var = std::make_shared<Var>(op->var_->name_hint_, new_return_type, op->var_->span_);
-    std::shared_ptr<AssignStmt> new_assign = MutableCopy(op);
-    new_assign->var_ = new_assign_var;
-    new_assign->value_ = new_call;
-    var_remap_[op->var_.get()] = new_assign_var;
-    applied_ = true;
-    StmtPtr result = new_assign;
-    return result;
+  StmtPtr VisitStmt_(const EvalStmtPtr& op) override {
+    auto value = VisitExpr(op->expr_);
+    std::vector<StmtPtr> prefix;
+    value = RewriteCall(value, prefix);
+    if (prefix.empty() && value == op->expr_) return op;
+    auto result = MutableCopy(op);
+    result->expr_ = value;
+    if (prefix.empty()) return result;
+    prefix.push_back(result);
+    return SeqStmts::Flatten(std::move(prefix), op->span_);
   }
 
  private:
-  const std::unordered_map<std::string, size_t>& incore_added_outputs_;
-  const std::unordered_map<std::string, FunctionPtr>& transformed_incore_funcs_;
-  std::vector<VarPtr> new_output_vars_;
-  bool applied_ = false;
+  ExprPtr MakeStorage(const VarPtr& output, CallTypeSubstituter& arguments, const Span& span,
+                      size_t local_index, std::vector<StmtPtr>& prefix) {
+    auto type = arguments.RemapType(output->GetType());
+    auto tensor = As<TensorType>(type);
+    CHECK_SPAN(tensor != nullptr, span)
+        << "Cannot materialize output parameter '" << output->name_hint_
+        << "': only ordinary GM Tensor outputs can be allocated at this call site";
+    if (wrapper_) {
+      size_t position = output_start_ + outputs_.size();
+      auto param = std::make_shared<Var>(MakeOutParamName(outputs_.size()), type, span);
+      params_.push_back(param);
+      directions_.push_back(ParamDirection::Out);
+      // This can be an internal producer output; it adds no logical wrapper return.
+      outputs_.push_back({position});
+      return param;
+    }
+    auto shape = MakeShapeTuple(tensor->shape_, span);
+    TensorLayout layout = tensor->tensor_view_ ? tensor->tensor_view_->layout : TensorLayout::ND;
+    auto create = OpRegistry::GetInstance().Create("tensor.create", {shape},
+                                                   {{"dtype", tensor->dtype_}, {"layout", layout}}, span);
+    auto var = std::make_shared<Var>(MakeOutParamName(local_index), create->GetType(), span);
+    prefix.push_back(std::make_shared<AssignStmt>(var, create, span));
+    return var;
+  }
+
+  std::vector<std::pair<std::string, std::any>> RewriteAttrs(
+      const std::vector<std::pair<std::string, std::any>>& source, size_t prefix_size, size_t old_size,
+      size_t new_size, const Span& span) const {
+    auto attrs = source;
+    const size_t inserted = new_size - old_size;
+    for (auto& [key, value] : attrs) {
+      if (key == kAttrArgDirections) {
+        auto* dirs = std::any_cast<std::vector<ArgDirection>>(&value);
+        INTERNAL_CHECK_SPAN(dirs != nullptr && dirs->size() == old_size, span)
+            << "Internal error: malformed arg_directions while materializing kernel outputs";
+        dirs->insert(dirs->begin() + static_cast<std::ptrdiff_t>(prefix_size), inserted,
+                     ArgDirection::OutputExisting);
+      } else if (key == kAttrArgDirectionOverrides) {
+        auto* indices = std::any_cast<std::vector<int32_t>>(&value);
+        INTERNAL_CHECK_SPAN(indices != nullptr, span)
+            << "Internal error: malformed arg_direction_overrides while materializing kernel outputs";
+        for (auto& index : *indices) {
+          INTERNAL_CHECK_SPAN(index >= 0 && static_cast<size_t>(index) < old_size, span)
+              << "Internal error: output argument override is out of range";
+          if (static_cast<size_t>(index) >= prefix_size) index += static_cast<int32_t>(inserted);
+        }
+      }
+    }
+    return attrs;
+  }
+
+  ExprPtr RewriteCall(const ExprPtr& value, std::vector<StmtPtr>& prefix) {
+    auto call = As<Call>(value);
+    auto submit = As<Submit>(value);
+    if (!call && !submit) return value;
+    auto op = call ? call->op_ : submit->op_;
+    auto global = As<GlobalVar>(op);
+    if (!global) return value;
+    auto function = functions_.find(global->name_);
+    if (function == functions_.end()) return value;
+    const auto& callee = function->second;
+    auto added = added_outputs_.find(global->name_);
+    if (added == added_outputs_.end()) return value;
+    const auto& bindings = added->second;
+    const auto& old_args = call ? call->args_ : submit->args_;
+    const Span& span = value->span_;
+    const size_t ctx = transform_utils::TrailingCommCtxParamCount(callee);
+    const size_t old_param_count = callee->params_.size() - bindings.size();
+    CHECK_SPAN(old_args.size() >= ctx && old_args.size() <= old_param_count, span)
+        << "Call to '" << global->name_ << "' has incompatible arguments before output materialization";
+    const size_t supplied = old_args.size() - ctx;
+    const size_t original_nonctx = old_param_count - ctx;
+    CHECK_SPAN(!call || old_args.size() == old_param_count, span)
+        << "Call to '" << global->name_ << "' must supply every original parameter";
+    // A Group's shared payload must also name outputs omitted by an inner
+    // Submit, even when this pass added no new outputs to that callee.
+    if (bindings.empty() && (!wrapper_ || supplied == original_nonctx)) return value;
+
+    std::vector<ExprPtr> args(old_args.begin(), old_args.begin() + static_cast<std::ptrdiff_t>(supplied));
+    CallTypeSubstituter arguments;
+    for (size_t i = 0; i < supplied; ++i) arguments.Bind(callee->params_[i], old_args[i]);
+    const size_t new_nonctx = callee->params_.size() - ctx;
+    for (size_t i = 0; i < ctx; ++i) {
+      arguments.Bind(callee->params_[new_nonctx + i], old_args[supplied + i]);
+    }
+    size_t local_index = 0;
+    // Fill the old omitted-Out gap BEFORE the newly inserted output params.
+    // Otherwise the first new output would incorrectly bind an old Out param.
+    for (size_t i = supplied; i < original_nonctx; ++i) {
+      CHECK_SPAN(callee->param_directions_[i] == ParamDirection::Out, span)
+          << "Cannot materialize omitted non-Out parameter " << i << " of '" << global->name_ << "'";
+      auto storage = MakeStorage(callee->params_[i], arguments, span, local_index++, prefix);
+      args.push_back(storage);
+      arguments.Bind(callee->params_[i], storage);
+    }
+    for (const auto& binding : bindings) {
+      INTERNAL_CHECK_SPAN(binding.param_index == args.size() && binding.param_index < new_nonctx, span)
+          << "Internal error: added output parameter positions do not precede the CommCtx suffix";
+      auto storage =
+          MakeStorage(callee->params_[binding.param_index], arguments, span, local_index++, prefix);
+      args.push_back(storage);
+      arguments.Bind(callee->params_[binding.param_index], storage);
+    }
+    args.insert(args.end(), old_args.begin() + static_cast<std::ptrdiff_t>(supplied), old_args.end());
+    const auto& attrs = call ? call->attrs_ : submit->attrs_;
+    auto new_attrs = RewriteAttrs(attrs, supplied, old_args.size(), args.size(), span);
+    // Return types, like newly allocated outputs, belong to this caller's
+    // shape variables rather than the callee's scalar parameter identities.
+    std::vector<TypePtr> types;
+    types.reserve(callee->return_types_.size() + (submit ? 1 : 0));
+    for (const auto& type : callee->return_types_) types.push_back(arguments.RemapType(type));
+    if (call) {
+      TypePtr result_type = types.empty()       ? GetUnknownType()
+                            : types.size() == 1 ? types[0]
+                                                : std::make_shared<TupleType>(types);
+      return std::make_shared<Call>(call->op_, std::move(args), call->kwargs_, std::move(new_attrs),
+                                    result_type, span);
+    }
+    // Callee return arity is unchanged; retain Submit's extra TaskId position.
+    TypePtr result_type = submit->GetType();
+    if (auto tuple = As<TupleType>(result_type);
+        tuple && tuple->types_.size() == callee->return_types_.size() + 1) {
+      types.push_back(tuple->types_.back());
+      result_type = std::make_shared<TupleType>(std::move(types));
+    }
+    return std::make_shared<Submit>(submit->op_, std::move(args), submit->deps_, submit->kwargs_,
+                                    std::move(new_attrs), result_type, span, submit->core_num_,
+                                    submit->sync_start_, submit->allow_early_resolve_, submit->predicate_);
+  }
+
+  const AddedOutputMap& added_outputs_;
+  const std::unordered_map<std::string, FunctionPtr>& functions_;
+  FunctionPtr wrapper_;
+  std::vector<VarPtr> params_;
+  std::vector<ParamDirection> directions_;
+  AddedOutputBindings outputs_;
+  size_t output_start_ = 0;
 };
 
 struct WrapperTransformResult {
   FunctionPtr func;
-  size_t num_added_outputs;
+  AddedOutputBindings added_outputs;
 };
 
-/// Propagate a transformed InCore's added output params through a Spmd/Group
-/// wrapper: mirror them on the wrapper's signature and forward them to the
-/// inner call. Returns {func, 0} if the wrapper does not forward to any
-/// transformed InCore callee.
 WrapperTransformResult PropagateOutputsThroughWrapper(
-    const FunctionPtr& func, const std::unordered_map<std::string, size_t>& incore_added_outputs,
-    const std::unordered_map<std::string, FunctionPtr>& transformed_incore_funcs) {
-  ForwardedCallFinder finder(incore_added_outputs);
-  finder.VisitStmt(func->body_);
-  const auto& target_call = finder.GetFound();
-  if (!target_call) return {func, 0};
-
-  auto gv = std::dynamic_pointer_cast<const GlobalVar>(target_call->op_);
-  INTERNAL_CHECK_SPAN(gv != nullptr, target_call->span_)
-      << "Internal error: forwarded call op is not a GlobalVar";
-  auto added_outputs_it = incore_added_outputs.find(gv->name_);
-  INTERNAL_CHECK_SPAN(added_outputs_it != incore_added_outputs.end(), target_call->span_)
-      << "Internal error: missing added-output metadata for forwarded callee " << gv->name_;
-  auto transformed_incore_func_it = transformed_incore_funcs.find(gv->name_);
-  INTERNAL_CHECK_SPAN(transformed_incore_func_it != transformed_incore_funcs.end(), target_call->span_)
-      << "Internal error: missing transformed InCore function for forwarded callee " << gv->name_;
-  size_t num_added = added_outputs_it->second;
-  const auto& incore_func = transformed_incore_func_it->second;
-
-  // Mirror the InCore's appended Out params on the wrapper: same type, Out
-  // direction. Names are scoped to the wrapper so the clone is safe.
-  std::vector<VarPtr> new_params = func->params_;
-  std::vector<ParamDirection> new_dirs = func->param_directions_;
-  std::vector<VarPtr> new_output_vars;
-  new_output_vars.reserve(num_added);
-  size_t orig_incore_param_count = incore_func->params_.size() - num_added;
-  for (size_t i = 0; i < num_added; ++i) {
-    const auto& out_param = incore_func->params_[orig_incore_param_count + i];
-    auto new_var = std::make_shared<Var>(out_param->name_hint_, out_param->GetType(), func->span_);
-    new_params.push_back(new_var);
-    new_dirs.push_back(ParamDirection::Out);
-    new_output_vars.push_back(new_var);
-  }
-
-  WrapperForwardMutator mutator(incore_added_outputs, transformed_incore_funcs, new_output_vars);
-  auto new_body = mutator.VisitStmt(func->body_);
-  // Outlined Spmd/Group wrappers always forward via an `out = self.kernel(x, ...);
-  // return out` AssignStmt — WrapperForwardMutator rewrites that shape. If
-  // ForwardedCallFinder found a target call but the mutator failed to apply,
-  // the wrapper's signature has been mirrored but its inner call was not
-  // updated — a silent mis-rewrite. Fail fast instead.
-  INTERNAL_CHECK_SPAN(mutator.applied(), target_call->span_)
-      << "Wrapper forward propagation identified a forwarded call in " << func->name_
-      << " but could not rewrite it (call not in AssignStmt RHS form expected by outlining invariant)";
-
-  // Keep wrapper's declared returns. The forwarded inner call may be rewritten
-  // to pass extra output tensors, but non-transparent wrappers can still
-  // construct additional return values (e.g. scalar + tensor tuples). Forcing
-  // wrapper return_types_ to match the inner callee can invalidate existing
-  // TupleGetItem users at call-sites.
-  std::vector<TypePtr> new_return_types = func->return_types_;
-  auto new_func = std::make_shared<Function>(func->name_, new_params, new_dirs, new_return_types, new_body,
-                                             func->span_, func->func_type_, func->level_, func->role_,
-                                             func->attrs_, func->requires_runtime_binding_, func->ir_stage_);
-  return {new_func, num_added};
+    const FunctionPtr& func, const AddedOutputMap& added_outputs,
+    const std::unordered_map<std::string, FunctionPtr>& functions) {
+  OutputParameterRewriter mutator(added_outputs, functions, func);
+  auto body = mutator.VisitStmt(func->body_);
+  if (body == func->body_ && mutator.outputs().empty()) return {func, {}};
+  auto result = MutableCopy(func);
+  result->params_ = mutator.params();
+  result->param_directions_ = mutator.directions();
+  result->body_ = body;
+  // Internal output buffers never extend the user's logical return tuple.
+  return {result, mutator.outputs()};
 }
 
-// ============================================================================
-// CallSiteUpdateMutator: updates call sites in orchestration/opaque functions.
-// For each call to a transformed InCore function or a wrapper that has
-// absorbed output params, inserts tensor.create for each output param and
-// appends them as extra arguments.
-// ============================================================================
-
-class CallSiteUpdateMutator : public TypePropagatingMutator {
- public:
-  CallSiteUpdateMutator(const std::unordered_map<std::string, size_t>& incore_added_outputs,
-                        const std::unordered_map<std::string, FunctionPtr>& transformed_incore_funcs,
-                        const OpRegistry& op_registry)
-      : incore_added_outputs_(incore_added_outputs),
-        transformed_incore_funcs_(transformed_incore_funcs),
-        op_registry_(op_registry) {}
-
- protected:
-  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
-    // Pin this Var's address for the pass so a freed-then-reused address cannot
-    // alias a stale var_remap_ entry (see TypePropagatingMutator::RetainVar).
-    RetainVar(op->var_);
-    auto new_value = VisitExpr(op->value_);
-    auto call = As<Call>(new_value);
-
-    // Submit (pl.submit inside pl.manual_scope) is a sibling call-like kind;
-    // route it through the same appended-Out allocation as Call, preserving
-    // Submit-ness and its TASK_ID-augmented return type
-    // (.claude/rules/pass-submit-awareness.md).
-    if (!call) {
-      if (auto submit = As<Submit>(new_value)) return HandleSubmitCallSite(op, submit);
-      // Non-call or non-GlobalVar: propagate type change
-      return HandlePassThroughAssign(op, new_value);
-    }
-    auto global_var = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
-    if (!global_var) return HandlePassThroughAssign(op, new_value);
-
-    // Not a transformed InCore function: propagate type change
-    auto it = incore_added_outputs_.find(global_var->name_);
-    if (it == incore_added_outputs_.end() || it->second == 0) {
-      return HandlePassThroughAssign(op, new_value);
-    }
-
-    // This call targets a transformed InCore function — add output tensor args
-    size_t num_outputs = it->second;
-    auto incore_func_it = transformed_incore_funcs_.find(global_var->name_);
-    INTERNAL_CHECK_SPAN(incore_func_it != transformed_incore_funcs_.end(), call->span_)
-        << "Internal error: transformed InCore function not found: " << global_var->name_;
-    const auto& incore_func = incore_func_it->second;
-
-    std::vector<StmtPtr> stmts;
-    std::vector<ExprPtr> extra_args;
-    size_t orig_param_count = incore_func->params_.size() - num_outputs;
-
-    for (size_t i = 0; i < num_outputs; ++i) {
-      const auto& out_param = incore_func->params_[orig_param_count + i];
-      auto out_tensor_type = As<TensorType>(out_param->GetType());
-      INTERNAL_CHECK_SPAN(out_tensor_type, call->span_) << "Internal error: output param is not TensorType";
-
-      auto shape_tuple = MakeShapeTuple(out_tensor_type->shape_, call->span_);
-      TensorLayout layout = out_tensor_type->tensor_view_.has_value() ? out_tensor_type->tensor_view_->layout
-                                                                      : TensorLayout::ND;
-      std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", out_tensor_type->dtype_},
-                                                                     {"layout", layout}};
-      auto create_call = op_registry_.Create("tensor.create", {shape_tuple}, create_kwargs, call->span_);
-
-      auto out_var = std::make_shared<Var>(MakeOutParamName(i), create_call->GetType(), call->span_);
-      stmts.push_back(std::make_shared<AssignStmt>(out_var, create_call, op->span_));
-      extra_args.push_back(out_var);
-    }
-
-    std::vector<ExprPtr> new_args = call->args_;
-    new_args.insert(new_args.end(), extra_args.begin(), extra_args.end());
-
-    TypePtr new_return_type;
-    if (incore_func->return_types_.empty()) {
-      new_return_type = nullptr;
-    } else if (incore_func->return_types_.size() == 1) {
-      new_return_type = incore_func->return_types_[0];
-    } else {
-      new_return_type = std::make_shared<TupleType>(incore_func->return_types_);
-    }
-
-    // Preserve attrs_ (e.g. kAttrDumpVars) through the arg-appending rewrite —
-    // mirrors the base IRMutator and the Submit path below. Appended outputs do
-    // not rename existing arg Vars, so a verbatim attr copy stays valid. Fall
-    // back to UnknownType for a void-return callee so the rewritten Call's type_
-    // stays identical to the prior 4-arg ctor path.
-    auto new_call = std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->attrs_,
-                                           new_return_type ? new_return_type : GetUnknownType(), call->span_);
-
-    auto new_assign_var = std::make_shared<Var>(op->var_->name_hint_, new_return_type, op->var_->span_);
-    auto new_assign = MutableCopy(op);
-    new_assign->var_ = new_assign_var;
-    new_assign->value_ = new_call;
-    stmts.push_back(std::move(new_assign));
-    var_remap_[op->var_.get()] = new_assign_var;
-
-    return SeqStmts::Flatten(std::move(stmts), op->span_);
-  }
-
-  // Submit variant of the call-site update. The appended outputs are Out
-  // *params* (inputs the callee writes) mirroring existing declared returns,
-  // not additional returns, so the Submit's own result tuple —
-  // Tuple[<callee returns>..., TASK_ID] — is unchanged; only args_ grows and
-  // Submit-ness / deps_ / kwargs_ / attrs_ are preserved. The result var keeps
-  // its type, so no var remap.
-  //
-  // Because this forwards an arg for every param it appends, the Submit leaves
-  // here with coverage still *exact* — this pass does not open the
-  // args_.size() < params_.size() gap that Submit::args_ (include/pypto/ir/expr.h)
-  // permits. Forwarding is deliberate: a caller-allocated Out arg lets
-  // orchestration codegen alias the return-tuple element straight to the arg
-  // instead of synthesising a runtime add_output.
-  StmtPtr HandleSubmitCallSite(const AssignStmtPtr& op, const SubmitPtr& submit) {
-    auto global_var = std::dynamic_pointer_cast<const GlobalVar>(submit->op_);
-    if (!global_var) return HandlePassThroughAssign(op, submit);
-
-    auto it = incore_added_outputs_.find(global_var->name_);
-    if (it == incore_added_outputs_.end() || it->second == 0) {
-      return HandlePassThroughAssign(op, submit);
-    }
-
-    size_t num_outputs = it->second;
-    auto incore_func_it = transformed_incore_funcs_.find(global_var->name_);
-    INTERNAL_CHECK_SPAN(incore_func_it != transformed_incore_funcs_.end(), submit->span_)
-        << "Internal error: transformed InCore function not found: " << global_var->name_;
-    const auto& incore_func = incore_func_it->second;
-
-    std::vector<StmtPtr> stmts;
-    std::vector<ExprPtr> extra_args;
-    size_t orig_param_count = incore_func->params_.size() - num_outputs;
-    for (size_t i = 0; i < num_outputs; ++i) {
-      const auto& out_param = incore_func->params_[orig_param_count + i];
-      auto out_tensor_type = As<TensorType>(out_param->GetType());
-      INTERNAL_CHECK_SPAN(out_tensor_type, submit->span_) << "Internal error: output param is not TensorType";
-      auto shape_tuple = MakeShapeTuple(out_tensor_type->shape_, submit->span_);
-      TensorLayout layout = out_tensor_type->tensor_view_.has_value() ? out_tensor_type->tensor_view_->layout
-                                                                      : TensorLayout::ND;
-      std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", out_tensor_type->dtype_},
-                                                                     {"layout", layout}};
-      auto create_call = op_registry_.Create("tensor.create", {shape_tuple}, create_kwargs, submit->span_);
-      auto out_var = std::make_shared<Var>(MakeOutParamName(i), create_call->GetType(), submit->span_);
-      stmts.push_back(std::make_shared<AssignStmt>(out_var, create_call, op->span_));
-      extra_args.push_back(out_var);
-    }
-
-    std::vector<ExprPtr> new_args = submit->args_;
-    new_args.insert(new_args.end(), extra_args.begin(), extra_args.end());
-
-    // Note: 7-arg Submit ctor order is (op, args, deps, kwargs, attrs, type, span).
-    auto new_submit =
-        std::make_shared<Submit>(submit->op_, std::move(new_args), submit->deps_, submit->kwargs_,
-                                 submit->attrs_, submit->GetType(), submit->span_, submit->core_num_,
-                                 submit->sync_start_, submit->allow_early_resolve_, submit->predicate_);
-    auto new_assign = MutableCopy(op);
-    new_assign->value_ = new_submit;
-    stmts.push_back(std::move(new_assign));
-    return SeqStmts::Flatten(std::move(stmts), op->span_);
-  }
-
- private:
-  const std::unordered_map<std::string, size_t>& incore_added_outputs_;
-  const std::unordered_map<std::string, FunctionPtr>& transformed_incore_funcs_;
-  const OpRegistry& op_registry_;
-};
-
-/**
- * @brief Update call sites in orchestration/opaque functions.
- */
-FunctionPtr UpdateCallSites(const FunctionPtr& func,
-                            const std::unordered_map<std::string, size_t>& incore_added_outputs,
-                            const std::unordered_map<std::string, FunctionPtr>& transformed_incore_funcs) {
-  CallSiteUpdateMutator mutator(incore_added_outputs, transformed_incore_funcs, OpRegistry::GetInstance());
-  auto new_body = mutator.VisitStmt(func->body_);
-  if (new_body.get() == func->body_.get()) return func;
-  auto new_func = MutableCopy(func);
-  new_func->body_ = new_body;
-  return new_func;
+FunctionPtr UpdateCallSites(const FunctionPtr& func, const AddedOutputMap& added_outputs,
+                            const std::unordered_map<std::string, FunctionPtr>& functions) {
+  OutputParameterRewriter mutator(added_outputs, functions);
+  auto body = mutator.VisitStmt(func->body_);
+  if (body == func->body_) return func;
+  auto result = MutableCopy(func);
+  result->body_ = body;
+  return result;
 }
 
 }  // namespace
@@ -3158,61 +3149,78 @@ namespace pass {
 
 Pass ConvertTensorToTileOps() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
-    // Phase 1: Transform InCore functions
-    std::unordered_map<std::string, size_t> incore_added_outputs;
-    std::unordered_map<std::string, FunctionPtr> transformed_incore_funcs;
+    // Phase 1: explicit AIC/AIV kernels use the same output materialization
+    // as generic InCore kernels, while keeping their selected core type.
+    AddedOutputMap all_added_outputs;
+    std::unordered_map<std::string, FunctionPtr> all_transformed_funcs;
     std::vector<FunctionPtr> functions_phase1;
-
     for (const auto& [gvar, func] : program->functions_) {
-      if (func->func_type_ == FunctionType::InCore) {
+      if (IsInCoreType(func->func_type_) && !func->HasAttr(kAttrExternalSource) &&
+          !func->requires_runtime_binding_) {
         auto result = TransformIncoreFunction(func);
-        incore_added_outputs[func->name_] = result.num_added_outputs;
-        transformed_incore_funcs[func->name_] = result.func;
+        all_added_outputs.emplace(func->name_, std::move(result.added_outputs));
+        all_transformed_funcs.emplace(func->name_, result.func);
         functions_phase1.push_back(result.func);
       } else {
+        all_added_outputs.emplace(func->name_, AddedOutputBindings{});
+        all_transformed_funcs.emplace(func->name_, func);
         functions_phase1.push_back(func);
       }
     }
 
-    // Phase 2a: Propagate added output params through Spmd/Group wrappers so
-    // they remain transparent 1:1 forwarders of their params to the inner
-    // call (an invariant relied on by orchestration codegen).
-    std::unordered_map<std::string, size_t> wrapper_added_outputs;
-    std::unordered_map<std::string, FunctionPtr> transformed_wrapper_funcs;
-    std::vector<FunctionPtr> functions_phase2a;
-    functions_phase2a.reserve(functions_phase1.size());
-    for (const auto& func : functions_phase1) {
-      if (IsWrapperType(func->func_type_)) {
-        auto result = PropagateOutputsThroughWrapper(func, incore_added_outputs, transformed_incore_funcs);
-        functions_phase2a.push_back(result.func);
-        if (result.num_added_outputs > 0) {
-          wrapper_added_outputs[func->name_] = result.num_added_outputs;
-          transformed_wrapper_funcs[func->name_] = result.func;
-        }
-      } else {
-        functions_phase2a.push_back(func);
+    // Phase 2a: build the wrapper call graph once, then propagate in postorder.
+    // An outer Spmd must see its Group's new outputs regardless of name order.
+    class WrapperCalleeCollector : public IRVisitor {
+     public:
+      std::vector<std::string> names;
+
+     protected:
+      void VisitExpr_(const CallPtr& op) override {
+        Record(op->op_);
+        IRVisitor::VisitExpr_(op);
       }
+      void VisitExpr_(const SubmitPtr& op) override {
+        Record(op->op_);
+        IRVisitor::VisitExpr_(op);
+      }
+
+     private:
+      void Record(const OpPtr& op) {
+        if (auto global = As<GlobalVar>(op); global && seen_.insert(global->name_).second) {
+          names.push_back(global->name_);
+        }
+      }
+      std::unordered_set<std::string> seen_;
+    };
+    std::unordered_map<std::string, std::vector<std::string>> wrapper_callees;
+    for (const auto& func : functions_phase1) {
+      if (!IsWrapperType(func->func_type_)) continue;
+      WrapperCalleeCollector collector;
+      collector.VisitStmt(func->body_);
+      wrapper_callees.emplace(func->name_, std::move(collector.names));
     }
+    std::unordered_map<std::string, int> wrapper_state;
+    auto propagate_wrapper = [&](auto&& self, const std::string& name) -> void {
+      auto edges = wrapper_callees.find(name);
+      if (edges == wrapper_callees.end() || wrapper_state[name] == 2) return;
+      const auto& func = all_transformed_funcs.at(name);
+      CHECK_SPAN(wrapper_state[name] != 1, func->span_)
+          << "Recursive Group/Spmd wrappers cannot propagate output parameters";
+      wrapper_state[name] = 1;
+      for (const auto& callee : edges->second) self(self, callee);
+      auto result = PropagateOutputsThroughWrapper(func, all_added_outputs, all_transformed_funcs);
+      all_added_outputs[name] = std::move(result.added_outputs);
+      all_transformed_funcs[name] = result.func;
+      wrapper_state[name] = 2;
+    };
+    for (const auto& func : functions_phase1) propagate_wrapper(propagate_wrapper, func->name_);
 
-    // Phase 2b: Update call sites in orchestration/opaque functions. The
-    // callee map covers both transformed InCore functions and wrappers that
-    // absorbed their output params.
-    std::unordered_map<std::string, size_t> all_added_outputs = incore_added_outputs;
-    all_added_outputs.insert(wrapper_added_outputs.begin(), wrapper_added_outputs.end());
-    std::unordered_map<std::string, FunctionPtr> all_transformed_funcs = transformed_incore_funcs;
-    all_transformed_funcs.insert(transformed_wrapper_funcs.begin(), transformed_wrapper_funcs.end());
-
+    // Phase 2b: allocate each exposed output at the orchestration call site.
     std::vector<FunctionPtr> functions_phase2b;
-    functions_phase2b.reserve(functions_phase2a.size());
-    for (const auto& func : functions_phase2a) {
-      // Skip InCore (rewritten in Phase 1) and every Spmd/Group (rewritten in
-      // Phase 2a when forwarding a transformed InCore; otherwise nothing to
-      // forward because ForwardedCallFinder rejects callees that gained zero
-      // Out params). The postcondition check in PropagateOutputsThroughWrapper
-      // turns any finder/mutator mismatch into a hard INTERNAL_CHECK rather
-      // than a silent mis-rewrite.
-      if (func->func_type_ == FunctionType::InCore || func->func_type_ == FunctionType::Spmd ||
-          func->func_type_ == FunctionType::Group) {
+    functions_phase2b.reserve(functions_phase1.size());
+    for (const auto& source : functions_phase1) {
+      const auto& func = all_transformed_funcs.at(source->name_);
+      if (IsInCoreType(func->func_type_) || IsWrapperType(func->func_type_)) {
         functions_phase2b.push_back(func);
       } else {
         functions_phase2b.push_back(UpdateCallSites(func, all_added_outputs, all_transformed_funcs));

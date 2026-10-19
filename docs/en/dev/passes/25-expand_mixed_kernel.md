@@ -34,15 +34,31 @@ members to that Group signature and rewrites both inner `Call` or `Submit` nodes
 to forward the complete list. Unused parameters remain valid wrapper arguments;
 each cloned body still references only the values from its original call.
 
-Member results that write back a complete Group parameter are rebound to that
-parameter in the shared ABI. This includes SSA aliases and reordered tuple
-results from `Call` or `Submit`, including direct `pair[i]` arguments and
-projections through Group-local tuple aliases or nested tuples. `pl.no_dep`
-follows the same expression mapping to retain its canonical argument position.
-Return tracing respects a `Submit`'s omitted runtime-allocated outputs and
-trailing communication contexts. Callee return maps are shared across Groups
-for one normalization run, then cleared. Views, slices, and newly allocated
-buffers are not complete-parameter writeback aliases.
+The pass first records every producer return position, its callee-scoped SSA
+expression, type, and optional output-parameter binding. `GroupOutputBindings`
+then follows the consumer's SSA aliases and tuple projections to a particular
+producer call and return position. Only after identifying that output does it
+resolve the actual storage passed at the call site and bind it to the shared
+Group parameter list. Producer-local SSA variables are never copied into a
+consumer body.
+
+Computed Tensor results have already been materialized by
+[`ConvertTensorToTileOps`](11-convert_tensor_to_tile_ops.md) as explicit `Out`
+parameters and stores. That pass exposes internal output storage through Group
+parameters and allocates it in the outer caller, even when the Group does not
+return it. Existing complete-parameter writebacks reuse their original storage.
+This also covers reordered `Call`/`Submit` tuple results, direct `pair[i]`
+arguments, and projections through local tuple aliases or nested tuples.
+`pl.no_dep` uses the same mapping. Submit's omitted-output gap and trailing
+communication contexts are respected. Callee summaries are shared for one
+normalization run and then discarded. Views and slices are not treated as
+complete-parameter aliases; a result with no caller-visible carrier is diagnosed
+instead of producing a free variable. Device-computed scalar returns require an
+explicit Tensor output under the existing kernel-return contract.
+
+This binding does not insert a cross-core handshake. Hand-written Group members
+run concurrently; their existing synchronization protocol must order a producer
+store before a consumer load.
 
 When both member kernels are exclusive to the Group, their names are preserved.
 If either kernel has another call site, the pass creates a Group-private adapter
