@@ -39,8 +39,10 @@ parameter in the shared ABI. This includes SSA aliases and reordered tuple
 results from `Call` or `Submit`, including direct `pair[i]` arguments and
 projections through Group-local tuple aliases or nested tuples. `pl.no_dep`
 follows the same expression mapping to retain its canonical argument position.
-Views, slices, and newly allocated buffers
-are not complete-parameter writeback aliases.
+Return tracing respects a `Submit`'s omitted runtime-allocated outputs and
+trailing communication contexts. Callee return maps are shared across Groups
+for one normalization run, then cleared. Views, slices, and newly allocated
+buffers are not complete-parameter writeback aliases.
 
 When both member kernels are exclusive to the Group, their names are preserved.
 If either kernel has another call site, the pass creates a Group-private adapter

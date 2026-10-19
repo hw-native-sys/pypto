@@ -25,6 +25,19 @@ namespace pypto {
 namespace ir {
 namespace return_lineage {
 
+/// Share callee return maps across queries into one unchanged Program.
+///
+/// Nesting is allowed; the outermost scope clears the cache on exit. End the
+/// scope before changing callee bodies or querying a different Program, since
+/// a function's lineage can depend on other functions in that Program.
+class ScopedTraceCache {
+ public:
+  ScopedTraceCache();
+  ~ScopedTraceCache();
+  ScopedTraceCache(const ScopedTraceCache&) = delete;
+  ScopedTraceCache& operator=(const ScopedTraceCache&) = delete;
+};
+
 /// Trace the first value of @p func's topmost ReturnStmt back to a Param.
 ///
 /// Follows SSA rebinds (var-to-var assigns, For/While iter args and

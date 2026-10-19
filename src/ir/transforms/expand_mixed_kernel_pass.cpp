@@ -2736,6 +2736,9 @@ struct NormalizedGroups {
 
 NormalizedGroups NormalizeHandWrittenGroupAbis(const ProgramPtr& program,
                                                const std::vector<FunctionPtr>& functions) {
+  // Every Group queries the same immutable program. Reused members need one
+  // callee analysis for this whole normalization, not one per private adapter.
+  return_lineage::ScopedTraceCache lineage_cache;
   KernelCallCounter call_counter;
   for (const auto& func : functions) {
     if (func && func->body_) call_counter.VisitStmt(func->body_);

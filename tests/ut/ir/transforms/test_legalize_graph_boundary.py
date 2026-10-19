@@ -1572,6 +1572,60 @@ class TestBoundaryLegality:
         with pytest.raises(ValueError, match="returns a value it computed"):
             _legalize_outlined(Before)
 
+    @pytest.mark.parametrize("ctx_count", [0, 1, 2])
+    @pytest.mark.parametrize("omit_output", [False, True])
+    @pytest.mark.parametrize("return_input", [False, True])
+    @pytest.mark.parametrize("assign_projection", [False, True])
+    def test_submit_return_provenance_skips_runtime_output_gap(
+        self, ctx_count, omit_output, return_input, assign_projection
+    ):
+        """A materialized ctx suffix cannot stand in for a runtime-created Out.
+
+        Build the post-MaterializeDistTensorCtx IR directly: the callee has
+        [input, output, *ctxs], while an omitted-output Submit passes
+        [input, *ctxs]. Both direct and assigned tuple projections must reject
+        output provenance but retain the caller-supplied input/Out provenance.
+        """
+        span = ir.Span.unknown()
+        tensor_type = ir.TensorType([4], ir.DataType.FP32)
+        ctx_type = ir.CommCtxType.get()
+        source = ir.Var("source", tensor_type, span)
+        output = ir.Var("output", tensor_type, span)
+        ctxs = [ir.Var(f"ctx_{i}", ctx_type, span) for i in range(ctx_count)]
+        stage = ir.Function(
+            "stage",
+            [(source, ir.ParamDirection.In), (output, ir.ParamDirection.Out), *ctxs],
+            [tensor_type, tensor_type],
+            ir.ReturnStmt([output, source], span),
+            span,
+            ir.FunctionType.InCore,
+        )
+        graph_source = ir.Var("source", tensor_type, span)
+        graph_output = ir.Var("output", tensor_type, span)
+        graph_ctxs = [ir.Var(f"ctx_{i}", ctx_type, span) for i in range(ctx_count)]
+        args = [graph_source, *([] if omit_output else [graph_output]), *graph_ctxs]
+        pair_type = ir.TupleType([tensor_type, tensor_type, ir.ScalarType(ir.DataType.TASK_ID)])
+        pair = ir.Var("pair", pair_type, span)
+        launch = ir.Submit(ir.GlobalVar("stage"), args, [], pair_type, span)
+        projection = ir.TupleGetItemExpr(pair, int(return_input), span)
+        statements: list[ir.Stmt] = [ir.AssignStmt(pair, launch, span)]
+        returned: ir.Expr = projection
+        if assign_projection:
+            returned = ir.Var("result", tensor_type, span)
+            statements.append(ir.AssignStmt(returned, projection, span))
+        statements.append(ir.ReturnStmt([returned], span))
+        graph = ir.Function(
+            "layer", args, [tensor_type], ir.SeqStmts(statements, span), span, ir.FunctionType.Graph
+        )
+        before = ir.Program([stage, graph], "submit_gap", span)
+
+        with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+            if omit_output and not return_input:
+                with pytest.raises(ValueError, match="returns a value it computed"):
+                    passes.legalize_graph_boundary()(before)
+            else:
+                ir.assert_structural_equal(passes.legalize_graph_boundary()(before), before)
+
     def test_launch_in_a_loop_counts_per_iteration(self):
         """A lexical count would wave 2000 launches past the runtime's 1024 limit."""
 

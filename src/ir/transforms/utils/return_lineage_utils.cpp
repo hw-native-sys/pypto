@@ -43,10 +43,17 @@ namespace {
 
 using op_predicates::IsBuiltinOp;
 
-CallPtr AsCallOrSubmitView(const ExprPtr& expr) {
-  if (auto call = As<Call>(expr)) return call;
-  if (auto submit = As<Submit>(expr)) return SubmitToCallView(submit);
-  return nullptr;
+// Borrow the original operands without allocating a Call view for each tuple
+// projection. Submit keeps its original compact argument list and result type.
+struct CallLikeView {
+  OpPtr op;
+  const std::vector<ExprPtr>* args = nullptr;
+};
+
+CallLikeView AsCallLike(const ExprPtr& expr) {
+  if (auto call = As<Call>(expr)) return {call->op_, &call->args_};
+  if (auto submit = As<Submit>(expr)) return {submit->op_, &submit->args_};
+  return {};
 }
 
 using ParamIndexMap = std::unordered_map<const Var*, size_t>;
@@ -127,14 +134,20 @@ class BodyIndexCollector : public IRVisitor {
 };
 
 // Cross-function memo + cycle guard, shared by the recursive tracer. The
-// per-function result depends only on the callee body, so a thread_local
-// cache bounds total work to one body walk per distinct function reached
-// from the outermost function or batched-var query (cleared when it unwinds).
+// Results depend on the callee and its callees in an unchanged Program. The
+// thread_local cache bounds work to one body walk per distinct function reached
+// from the outermost function, batched query, or explicit cache scope.
 struct TraceContext {
   std::vector<const Function*> call_stack;
   std::unordered_set<const Function*> active_functions;
   std::unordered_map<const Function*, std::vector<std::optional<size_t>>> memo;
+  std::unordered_map<const Function*, size_t> trailing_ctx_counts;
   size_t query_depth = 0;
+
+  void ClearCache() {
+    memo.clear();
+    trailing_ctx_counts.clear();
+  }
 };
 
 TraceContext& Ctx() {
@@ -144,15 +157,24 @@ TraceContext& Ctx() {
 
 // Keep callee maps alive while a batch traces several independent Vars. A
 // nested function query must not clear maps still needed by the outer batch.
-struct TraceQueryGuard {
-  TraceQueryGuard() : ctx(Ctx()) { ++ctx.query_depth; }
-  ~TraceQueryGuard() {
-    --ctx.query_depth;
-    if (ctx.query_depth == 0 && ctx.call_stack.empty()) ctx.memo.clear();
-  }
+using TraceQueryGuard = ScopedTraceCache;
 
-  TraceContext& ctx;
-};
+// Map a callee parameter back to its actual argument using Submit::args_'s
+// prefix / omitted-Out gap / CommCtx suffix contract. Call's full coverage is
+// the gap==0 case; wrapper Call views use this same compact-list mapping.
+ExprPtr ParamArgument(const CallLikeView& call, const FunctionPtr& callee, size_t param_index) {
+  if (!call.args || param_index >= callee->params_.size()) return nullptr;
+  const auto& args = *call.args;
+  auto& counts = Ctx().trailing_ctx_counts;
+  auto [it, inserted] = counts.try_emplace(callee.get(), 0);
+  if (inserted) it->second = transform_utils::TrailingCommCtxParamCount(callee);
+  const size_t ctx_count = it->second;
+  if (args.size() < ctx_count || args.size() > callee->params_.size()) return nullptr;
+  const size_t prefix = args.size() - ctx_count;
+  if (param_index < prefix) return args[param_index];
+  if (param_index < callee->params_.size() - ctx_count) return nullptr;
+  return args[param_index - (callee->params_.size() - args.size())];
+}
 
 std::vector<std::optional<size_t>> ReturnedParamIndicesImpl(const FunctionPtr& func,
                                                             const ProgramPtr& program);
@@ -202,9 +224,9 @@ ExprPtr ResolveTupleElement(const ExprPtr& tuple, int64_t position, const BodyIn
     return pos < make_tuple->elements_.size() ? make_tuple->elements_[pos] : nullptr;
   }
 
-  auto call = AsCallOrSubmitView(source);
-  if (!call || IsBuiltinOp(call->op_->name_)) return nullptr;
-  auto callee = program ? program->GetFunction(call->op_->name_) : nullptr;
+  auto call = AsCallLike(source);
+  if (!call.args || IsBuiltinOp(call.op->name_)) return nullptr;
+  auto callee = program ? program->GetFunction(call.op->name_) : nullptr;
   if (!callee) return nullptr;
   // A single TupleType return has one return position, not one position per
   // tuple element. Its nested element ABI is outside the flat return map.
@@ -212,7 +234,7 @@ ExprPtr ResolveTupleElement(const ExprPtr& tuple, int64_t position, const BodyIn
   const auto& ret_map = CachedReturnedParamIndices(callee, program);
   if (pos >= ret_map.size() || !ret_map[pos]) return nullptr;
   size_t mapped = ret_map[pos].value();  // NOLINT(bugprone-unchecked-optional-access)
-  return mapped < call->args_.size() ? call->args_[mapped] : nullptr;
+  return ParamArgument(call, callee, mapped);
 }
 
 // Tuple aliases and nested projections can share arbitrarily long prefixes.
@@ -238,9 +260,6 @@ ExprPtr ResolveTupleSource(ExprPtr expr, const BodyIndexCollector& index, const 
     } else if (auto projection = As<TupleGetItemExpr>(expr)) {
       expr = ResolveTupleElement(projection->tuple_, projection->index_, index, program, memo);
     } else {
-      // Cache Submit's Call view once; rebuilding it for every projection
-      // would repeatedly copy the complete argument vector.
-      if (auto submit = As<Submit>(expr)) return finish(SubmitToCallView(submit));
       return finish(expr);
     }
   }
@@ -323,14 +342,15 @@ VarLineage TraceVar(const Var* var, const BodyIndexCollector& index, const Param
       return finish(lineage.root, lineage.returned_type);
     }
 
-    if (auto call = AsCallOrSubmitView(value)) {
-      const std::string& op_name = call->op_->name_;
+    if (auto call = AsCallLike(value); call.args) {
+      const auto& args = *call.args;
+      const std::string& op_name = call.op->name_;
       // Builtin output-side ops bind a fresh SSA var to an existing buffer, so
       // the result inherits that argument's param lineage.
-      if (auto aliased = op_predicates::BuiltinWritebackArgIndex(call->op_, call->args_.size())) {
-        auto arg_var = AsVarLike(call->args_[*aliased]);
+      if (auto aliased = op_predicates::BuiltinWritebackArgIndex(call.op, args.size())) {
+        auto arg_var = AsVarLike(args[*aliased]);
         if (!arg_var) {
-          auto lineage = TraceExpr(call->args_[*aliased], index, param_indices, program, memo);
+          auto lineage = TraceExpr(args[*aliased], index, param_indices, program, memo);
           return finish(lineage.root, lineage.returned_type);
         }
         var = arg_var.get();
@@ -360,11 +380,11 @@ VarLineage TraceVar(const Var* var, const BodyIndexCollector& index, const Param
         const auto& ret_map = CachedReturnedParamIndices(callee, program);
         if (ret_map.size() != 1 || !ret_map[0]) return finish(nullptr);
         size_t mapped = ret_map[0].value();  // NOLINT(bugprone-unchecked-optional-access)
-        if (mapped >= call->args_.size()) return finish(nullptr);
-        auto arg_var = AsVarLike(call->args_[mapped]);
+        auto source = ParamArgument(call, callee, mapped);
+        auto arg_var = AsVarLike(source);
         path.back().second = true;
         if (!arg_var) {
-          auto lineage = TraceExpr(call->args_[mapped], index, param_indices, program, memo);
+          auto lineage = TraceExpr(source, index, param_indices, program, memo);
           return finish(lineage.root, lineage.returned_type);
         }
         var = arg_var.get();
@@ -448,7 +468,7 @@ std::vector<std::optional<size_t>> ExpandForwardedTupleVar(const Var* tuple_var,
   // Walk SSA var-to-var aliases down to the statement that defines the tuple.
   const Var* var = tuple_var;
   std::unordered_set<const Var*> seen;
-  CallPtr call;
+  CallLikeView call;
   while (var) {
     if (!seen.insert(var).second) return {};
     auto def_it = index.var_def.find(var);
@@ -462,12 +482,12 @@ std::vector<std::optional<size_t>> ExpandForwardedTupleVar(const Var* tuple_var,
     if (auto make_tuple = As<MakeTuple>(value)) {
       return TraceIndexedExprsToParamIndices(make_tuple->elements_, index, param_indices, program);
     }
-    call = AsCallOrSubmitView(value);
+    call = AsCallLike(value);
     break;
   }
-  if (!call || IsBuiltinOp(call->op_->name_)) return {};
+  if (!call.args || IsBuiltinOp(call.op->name_)) return {};
 
-  auto callee = program ? program->GetFunction(call->op_->name_) : nullptr;
+  auto callee = program ? program->GetFunction(call.op->name_) : nullptr;
   if (!callee) return {};
   auto inner_map = ReturnedParamIndicesImpl(callee, program);
   if (inner_map.empty()) return {};
@@ -476,7 +496,7 @@ std::vector<std::optional<size_t>> ExpandForwardedTupleVar(const Var* tuple_var,
   for (size_t pos = 0; pos < inner_map.size(); ++pos) {
     if (!inner_map[pos]) continue;
     size_t mapped = inner_map[pos].value();  // NOLINT(bugprone-unchecked-optional-access)
-    if (mapped < call->args_.size()) forwarded_args[pos] = call->args_[mapped];
+    forwarded_args[pos] = ParamArgument(call, callee, mapped);
   }
   // Args may themselves be assemble / loop-carry chains, so trace them through
   // the same batch path as ordinary returns.
@@ -509,8 +529,7 @@ std::vector<std::optional<size_t>> MapWrapperReturnToParams(const FunctionPtr& w
   for (size_t pos = 0; pos < inner_map.size(); ++pos) {
     if (!inner_map[pos]) continue;
     size_t mapped = inner_map[pos].value();  // NOLINT(bugprone-unchecked-optional-access)
-    if (mapped >= returning_call->args_.size()) continue;
-    if (auto arg_var = AsVarLike(returning_call->args_[mapped])) {
+    if (auto arg_var = AsVarLike(ParamArgument(AsCallLike(returning_call), returning_callee, mapped))) {
       if (auto it = param_to_index.find(arg_var.get()); it != param_to_index.end()) {
         result[pos] = it->second;
       }
@@ -541,7 +560,7 @@ std::vector<std::optional<size_t>> ReturnedParamIndicesImpl(const FunctionPtr& f
     ~Guard() {
       ctx.active_functions.erase(function);
       ctx.call_stack.pop_back();
-      if (top_level && ctx.query_depth == 0) ctx.memo.clear();
+      if (top_level && ctx.query_depth == 0) ctx.ClearCache();
     }
   } guard{ctx, func.get(), is_top_level};
 
@@ -599,6 +618,14 @@ std::vector<std::optional<size_t>> TraceBodyExprsToParamIndices(const std::vecto
 }
 
 }  // namespace
+
+ScopedTraceCache::ScopedTraceCache() { ++Ctx().query_depth; }
+
+ScopedTraceCache::~ScopedTraceCache() {
+  auto& ctx = Ctx();
+  --ctx.query_depth;
+  if (ctx.query_depth == 0 && ctx.call_stack.empty()) ctx.ClearCache();
+}
 
 // Locate the topmost ReturnStmt. Fast path: a function body is normally a
 // SeqStmts whose last statement is the return. Split AIV kernels keep theirs

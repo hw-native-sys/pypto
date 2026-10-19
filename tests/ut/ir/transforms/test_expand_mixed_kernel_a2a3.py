@@ -720,6 +720,109 @@ def test_hand_written_group_rebinds_tuple_writeback_no_dep(use_submit):
     assert launches[1].attrs["arg_direction_overrides"] == [1]
 
 
+def test_hand_written_groups_share_callee_lineage_without_leaking_program_state():
+    """Shared return maps stay callee-relative and expire before the next Program.
+
+    All Groups share a producer that delegates to ``choose``. Alternating
+    call-site permutations must still yield different canonical bindings. Reuse
+    the exact producer node with a different ``choose`` body on the next pass
+    invocation so a cache escaping the normalization scope would be observable.
+    """
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType([16, 16], ir.DataType.FP32)
+    first = ir.Var("first", tensor_type, span)
+    second = ir.Var("second", tensor_type, span)
+    selected = ir.Var("selected", tensor_type, span)
+    producer = ir.Function(
+        "producer",
+        [(first, ir.ParamDirection.InOut), (second, ir.ParamDirection.InOut)],
+        [tensor_type],
+        ir.SeqStmts(
+            [
+                ir.AssignStmt(
+                    selected, ir.Call(ir.GlobalVar("choose"), [first, second], tensor_type, span), span
+                ),
+                ir.ReturnStmt([selected], span),
+            ],
+            span,
+        ),
+        span,
+        ir.FunctionType.AIC,
+    )
+    sink = ir.Var("sink", tensor_type, span)
+    consumer = ir.Function(
+        "consumer",
+        [(sink, ir.ParamDirection.InOut)],
+        [tensor_type],
+        ir.ReturnStmt([sink], span),
+        span,
+        ir.FunctionType.AIV,
+    )
+    groups: list[ir.Function] = []
+    for i in range(16):
+        params = [ir.Var("first", tensor_type, span), ir.Var("second", tensor_type, span)]
+        value = ir.Var("value", tensor_type, span)
+        result = ir.Var("result", tensor_type, span)
+        args = params if i % 2 == 0 else params[::-1]
+        groups.append(
+            ir.Function(
+                f"mixed_{i}",
+                [(param, ir.ParamDirection.InOut) for param in params],
+                [tensor_type],
+                ir.SeqStmts(
+                    [
+                        ir.AssignStmt(
+                            value, ir.Call(ir.GlobalVar("producer"), args, tensor_type, span), span
+                        ),
+                        ir.AssignStmt(
+                            result,
+                            ir.Call(
+                                ir.GlobalVar("consumer"),
+                                [value],
+                                {},
+                                {"arg_direction_overrides": [0]},
+                                tensor_type,
+                                span,
+                            ),
+                            span,
+                        ),
+                        ir.ReturnStmt([result], span),
+                    ],
+                    span,
+                ),
+                span,
+                ir.FunctionType.Group,
+            )
+        )
+
+    for selected_index in (0, 1):
+        choose_params = [ir.Var("first", tensor_type, span), ir.Var("second", tensor_type, span)]
+        choose = ir.Function(
+            "choose",
+            [(param, ir.ParamDirection.InOut) for param in choose_params],
+            [tensor_type],
+            ir.ReturnStmt([choose_params[selected_index]], span),
+            span,
+            ir.FunctionType.AIC,
+        )
+        before = ir.Program([choose, producer, consumer, *groups], "shared_members", span)
+        after = passes.expand_mixed_kernel()(before)
+        for i in range(len(groups)):
+            group = after.get_function(f"mixed_{i}")
+            adapter = after.get_function(f"mixed_{i}_aiv_adapter")
+            assert group is not None and adapter is not None
+            expected_index = selected_index if i % 2 == 0 else 1 - selected_index
+            ir.assert_structural_equal(adapter.body, ir.ReturnStmt([adapter.params[expected_index]], span))
+            assert "FREE_VAR" not in adapter.as_python()
+            launches = [
+                stmt.value
+                for stmt in ir.flatten_to_stmts(group.body)
+                if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call)
+            ]
+            assert all(list(call.args) == list(group.params) for call in launches)
+            assert launches[1].attrs["arg_direction_overrides"] == [expected_index]
+
+
 @pytest.mark.parametrize("producer_type", [pl.FunctionType.AIC, pl.FunctionType.AIV])
 @pytest.mark.parametrize("projection_index", [0, 1])
 @pytest.mark.parametrize("use_submit", [False, True])
