@@ -133,7 +133,7 @@ class DynValidShapeLoopIfElse:
 def _compile_and_codegen(program_cls, func_name: str) -> str:
     """Run pass pipeline + PTO codegen on a single function, return MLIR string."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
 
     pm = PassManager.get_strategy(OptimizationStrategy.Default)
     optimized = pm.run_passes(program_cls)
@@ -239,7 +239,7 @@ def test_loop_if_else_dyn_valid_shape_has_scf_if(loop_mlir: str):
 def _jit_device_mlir(jit_func, *args) -> str:
     """Lower a @pl.jit kernel and run PTO codegen on its device function."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
 
     program = jit_func.lower(*args)
     device_funcs = [f for f in program.functions.values() if f.func_type != ir.FunctionType.Orchestration]

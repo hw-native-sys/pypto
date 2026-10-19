@@ -167,7 +167,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
     *,
     operation: str,
     strategy: OptimizationStrategy = OptimizationStrategy.Default,
-    backend_type: BackendType = BackendType.Ascend910B,
+    backend_type: BackendType = BackendType.Ascend910,
     platform: str | None = None,
     verification_level: _passes.VerificationLevel | None = None,
     diagnostic_phase: _passes.DiagnosticPhase | None = None,
@@ -234,7 +234,7 @@ def _run_pass_pipeline(  # noqa: PLR0913
             "PlanMemory (--pto-level=level2) owns lifetime reuse and address assignment. "
             "MaterializeSemanticAliases still runs so semantics-required aliasing (loop-carried "
             "accumulators, in-place ops) is preserved as a shared tile_buf handle. The "
-            "Ascend910B load + tpop_from_aic in-place hazard guard and reserve-buffer base "
+            "Ascend910 load + tpop_from_aic in-place hazard guard and reserve-buffer base "
             "resolution are deferred to ptoas — verify on-device."
         )
 
@@ -287,7 +287,7 @@ def compile(  # noqa: PLR0913
     output_dir: str | None = None,
     strategy: OptimizationStrategy = OptimizationStrategy.Default,
     dump_passes: bool | PassDumpLevel = True,
-    backend_type: BackendType = BackendType.Ascend910B,
+    backend_type: BackendType = BackendType.Ascend910,
     skip_ptoas: bool = False,
     verification_level: _passes.VerificationLevel | None = None,
     diagnostic_phase: _passes.DiagnosticPhase | None = None,
@@ -334,7 +334,7 @@ def compile(  # noqa: PLR0913
             every ptoas pass under
             ``<output_dir>/ptoas_passes/<codegen-unit>/``. Default: False.
             Has no effect when ``skip_ptoas=True``.
-        backend_type: Backend type for passes and codegen (default: Ascend910B)
+        backend_type: Backend type for passes and codegen (default: Ascend910)
         skip_ptoas: Skip the ptoas compilation step and emit raw MLIR (.pto) files
             instead of compiled C++ kernel wrappers.
         emit_source_loc: When True, each generated ``.pto`` operation carries an

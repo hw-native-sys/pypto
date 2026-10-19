@@ -2200,7 +2200,7 @@ class TestScopeTransparentToSSA:
         from pypto.backend import BackendType  # noqa: PLC0415
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         try:
 
             @pl.program

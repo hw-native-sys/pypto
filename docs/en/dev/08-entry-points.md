@@ -113,7 +113,7 @@ from pypto.backend import BackendType
 from pypto.runtime import ExecutionMode
 
 ir.DistributedCompiledProgram.from_dir(
-    work_dir, backend_type=BackendType.Ascend910B, execution_mode=ExecutionMode.ONBOARD,
+    work_dir, backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.ONBOARD,
 )(*args, config=cfg)
 ```
 
@@ -138,7 +138,7 @@ from pypto.backend import BackendType
 from pypto.runtime import ExecutionMode
 
 cfg = dataclasses.replace(
-    cfg, backend_type=BackendType.Ascend910B, execution_mode=ExecutionMode.ONBOARD, device_id=0,
+    cfg, backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.ONBOARD, device_id=0,
 )
 ir.CompiledProgram.from_dir(work_dir)(*args, config=cfg)
 ```
@@ -159,8 +159,8 @@ replace `platform=` with both fields below:
 
 | Legacy `platform` | `backend_type` | `execution_mode` |
 | ----------------- | -------------- | ---------------- |
-| `"a2a3"` | `BackendType.Ascend910B` | `ExecutionMode.ONBOARD` |
-| `"a2a3sim"` | `BackendType.Ascend910B` | `ExecutionMode.SIM` |
+| `"a2a3"` | `BackendType.Ascend910` | `ExecutionMode.ONBOARD` |
+| `"a2a3sim"` | `BackendType.Ascend910` | `ExecutionMode.SIM` |
 | `"a5"` | `BackendType.Ascend950` | `ExecutionMode.ONBOARD` |
 | `"a5sim"` | `BackendType.Ascend950` | `ExecutionMode.SIM` |
 
@@ -179,7 +179,7 @@ arguments, so one config object drives both phases:
 from pypto.backend import BackendType
 from pypto.runtime import ExecutionMode, RunConfig
 
-config = RunConfig(backend_type=BackendType.Ascend910B, execution_mode=ExecutionMode.ONBOARD)
+config = RunConfig(backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.ONBOARD)
 compiled = ir.compile(program, **config.compile_kwargs())
 compiled(*tensors, config=config)
 ```
@@ -214,7 +214,7 @@ compiled = ir.compile(
 )
 ```
 
-The default remains Ascend910B + SIM. Compiled programs expose both target
+The default remains Ascend910 + SIM. Compiled programs expose both target
 properties; `from_dir(..., execution_mode=...)` overrides the persisted mode,
 and `from_dir(..., backend_type=...)` retains the persisted mode while updating
 the backend and derived platform. Either axis can be overridden independently

@@ -29,7 +29,7 @@ class ExecutionMode(Enum):
     SIM = auto()
 
 
-_ARCHES: tuple[BackendType, ...] = (BackendType.Ascend910B, BackendType.Ascend950)
+_ARCHES: tuple[BackendType, ...] = (BackendType.Ascend910, BackendType.Ascend950)
 
 
 def _arch_name(arch: BackendType) -> str:

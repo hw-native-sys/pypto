@@ -171,7 +171,7 @@ class PagedAttention:
 
 def test_tile_ops_codegen():
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
 
     program = PagedAttention
     pm = PassManager.get_strategy(OptimizationStrategy.Default)
@@ -225,7 +225,7 @@ def test_unaligned_tile_ops_codegen():
     """Test that unaligned paged attention emits dynamic-validShape alloc_tiles
     with explicit valid_row/valid_col operands."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
 
     program = UnalignedPagedAttention
     pm = PassManager.get_strategy(OptimizationStrategy.Default)

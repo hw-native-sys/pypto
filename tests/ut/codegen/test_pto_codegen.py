@@ -56,7 +56,7 @@ _TW = pl.dynamic("TW")
 def _setup_backend():
     """Configure PTO backend before each test."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     yield
     backend.reset_for_testing()
 
@@ -2766,7 +2766,7 @@ def test_compile_writes_orchestration_on_partial_codegen_failure(tmp_path, monke
             output_dir=str(output_dir),
             strategy=OptimizationStrategy.Default,
             dump_passes=False,
-            backend_type=BackendType.Ascend910B,
+            backend_type=BackendType.Ascend910,
             skip_ptoas=True,
         )
 
@@ -4136,7 +4136,7 @@ def test_gm_slot_buffer_regions_do_not_overlap_across_pipes():
     that ignored slot_num, hands pipe 1 an addptr pointing inside pipe 0's region.
     """
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
 
     @pl.program
     class TwoPipeProgram:
@@ -4204,7 +4204,7 @@ def test_annotated_scalar_index_expression_stores_an_i32_value():
             return out
 
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     lines = _get_mlir_lines(_generate_default_mlir(Prog))
 
     store = _single_line(lines, "pto.store ", startswith=True)

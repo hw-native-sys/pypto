@@ -173,7 +173,7 @@ torch.testing.assert_close(out, expected, rtol=1e-3, atol=1e-4)
 
 ## 另一个方向：太粗
 
-粒度不是单调的。单卡的核数是固定的 —— Ascend910B 上是 **48 个 vector 与 24 个 cube** —— 而一个任务占一个核。
+粒度不是单调的。单卡的核数是固定的 —— Ascend910 上是 **48 个 vector 与 24 个 cube** —— 而一个任务占一个核。
 
 ```text
 太多小任务                  合适                      太少大任务

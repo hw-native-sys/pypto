@@ -288,7 +288,7 @@ def test_phase_property_is_produced_after_inline_not_structural():
 
 def test_default_pipeline_accepts_pair_joined_by_inline_expansion():
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     try:
         PassManager.get_strategy(OptimizationStrategy.Default).run_passes(_inline_final_producer_program())
     finally:
@@ -297,7 +297,7 @@ def test_default_pipeline_accepts_pair_joined_by_inline_expansion():
 
 def test_default_pipeline_rejects_mismatch_after_inline_functions():
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     try:
         with pytest.raises(pypto.Error, match="AccStorePhaseValid"):
             PassManager.get_strategy(OptimizationStrategy.Default).run_passes(

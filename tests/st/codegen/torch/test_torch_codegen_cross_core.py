@@ -510,7 +510,7 @@ def _assert_split_aiv_lowered_and_codegen(transformed: _ir.Program, base_name: s
     tensor path — both funnel through the SAME lowering (tile.aiv_shard /
     tile.aic_gather folded into cross-core tpush/tpop by ExpandMixedKernel), so
     the post-pipeline invariants are identical. The caller must have already run
-    the Default pipeline under the active Ascend910B backend (the split_aiv /
+    the Default pipeline under the active Ascend910 backend (the split_aiv /
     GM-pipe-buffer path is 910B-gated); this helper leaves the backend untouched
     and returns the generated torch code.
 
@@ -593,13 +593,13 @@ def _run_split_aiv_default_and_check(
 ) -> None:
     """Run Default + codegen on a pl.split_aiv kernel and assert full e2e health.
 
-    Pinned to Ascend910B (the split_aiv / GM-pipe-buffer path is 910B-gated).
+    Pinned to Ascend910 (the split_aiv / GM-pipe-buffer path is 910B-gated).
     Asserts: pipeline survives Default; both AIC/AIV lanes exist and the split
     is folded (no surviving tile.aiv_shard / tile.aic_gather op); PTO codegen
     emits both lanes with no ``__FREE_VAR``; torch golden matches.
     """
     reset_for_testing()
-    set_backend_type(BackendType.Ascend910B)
+    set_backend_type(BackendType.Ascend910)
     try:
         transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
         code = _assert_split_aiv_lowered_and_codegen(transformed, base_name)
@@ -642,7 +642,7 @@ def test_split_aiv_fused_mixed_codegen_vs_golden(
     base_name: str,
     golden_fn,
 ):
-    """Explicit pl.split_aiv fused-mixed kernels compile end-to-end on Ascend910B.
+    """Explicit pl.split_aiv fused-mixed kernels compile end-to-end on Ascend910.
 
     The flatten fix lets a high-level split_aiv kernel (cube outside the loop,
     direct Acc-tile shard) survive all Default passes and codegen on both
@@ -713,7 +713,7 @@ def _golden_tensor_split_aiv_qk_pv(tensors: dict[str, torch.Tensor]) -> torch.Te
 def test_tensor_split_aiv_qk_pv_codegen_vs_golden():
     """Issue #1915: a high-level ``@pl.jit`` kernel that shards / gathers a *Tensor*
     (``pl.aiv_shard`` / ``pl.aic_gather``) inside a ``pl.split_aiv`` region compiles
-    end-to-end on Ascend910B and is numerically correct.
+    end-to-end on Ascend910 and is numerically correct.
 
     Asserts (mirroring the tile-ISA harness): both AIC/AIV lanes emit; the
     tensor.* shard/gather ops lower 1:1 to tile.* at ConvertTensorToTileOps and
@@ -733,7 +733,7 @@ def test_tensor_split_aiv_qk_pv_codegen_vs_golden():
     arg_order = ["q", "k", "v", "out"]
 
     reset_for_testing()
-    set_backend_type(BackendType.Ascend910B)
+    set_backend_type(BackendType.Ascend910)
     try:
         # @pl.jit compiles through the SAME Default pipeline (the specializer
         # rewrites the kernel into @pl.program source, then run_passes runs).
@@ -786,11 +786,11 @@ def _run_split_auto_golden(
     out_name: str,
     expected: torch.Tensor,
 ) -> None:
-    """Run the Default pipeline (Ascend910B) on an AUTO ``pl.split`` kernel +
+    """Run the Default pipeline (Ascend910) on an AUTO ``pl.split`` kernel +
     torch codegen and assert the lowered kernel is functionally correct against
     the golden."""
     reset_for_testing()
-    set_backend_type(BackendType.Ascend910B)
+    set_backend_type(BackendType.Ascend910)
     try:
         transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
         code = torch_codegen(transformed, check_shapes=True)

@@ -499,7 +499,7 @@ def store(
             floating-point results are non-deterministic. The destination must
             be zero-initialised before the kernel runs. Supported tile dtypes:
             fp32 / bf16 / fp16 / int32 / int16 / int8. bf16 atomic-add is
-            available on the Ascend910B (A2/A3) profile; it is not supported on
+            available on the Ascend910 (A2/A3) profile; it is not supported on
             A5, where an fp32 accumulator + cast is required instead.
         st_phase: Consumer-side unit-flag phase. A producer that finishes with
             ``acc_phase=pl.AccPhase.Final`` must be consumed by a store with

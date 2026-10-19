@@ -67,7 +67,7 @@ move. All are keyword-only — only `program` is positional.
 | `output_dir` | `None` | Where artifacts land; `None` means a fresh `<base>/<name>_<YYYYmmdd_HHMMSS>_<random>` per call, under `PYPTO_PROG_BUILD_DIR` or `build_output`. The timestamp is for reading; the random tail keeps concurrent compiles apart, so read `compiled.output_dir` rather than deriving it |
 | `strategy` | `Default` | The pass pipeline. `Default` is the only strategy |
 | `dump_passes` | `True` | IR snapshot after every pass — see below |
-| `backend_type` | `Ascend910B` | Target for passes and codegen (`Ascend910B` / `Ascend950`) |
+| `backend_type` | `Ascend910` | Target for passes and codegen (`Ascend910` / `Ascend950`) |
 | `platform` | `None` | Execution platform the artifact is built for; must match the worker that dispatches it |
 | `skip_ptoas` | `False` | Stop at `.pto` (MLIR) instead of building the device binary |
 | `verification_level` | `None` | `NONE` / `BASIC` / `ROUNDTRIP`; `None` defers to `PYPTO_VERIFY_LEVEL`, else `BASIC` |

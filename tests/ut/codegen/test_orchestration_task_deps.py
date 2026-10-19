@@ -206,7 +206,7 @@ def test_cross_scope_task_id_is_hoisted_for_set_dependencies():
             return b
 
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
         transformed = passes.derive_call_directions()(P)
         code = _generate_orch_from_transformed_program(transformed)
@@ -250,7 +250,7 @@ def test_cross_scope_plain_auto_call_captures_task_id_when_hoisted():
             return out
 
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
         transformed = passes.derive_call_directions()(P)
         transformed = passes.auto_derive_task_dependencies(analyze_auto_scopes=True)(transformed)
@@ -292,7 +292,7 @@ def test_compiler_derived_deps_for_fire_and_forget_call_capture_task_id_when_hoi
             return out
 
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     # This intentionally models a lowered fire-and-forget output-existing
     # producer shape. Source-level code should normally read the returned
     # post-call tensor, but codegen still has to handle this IR form because
@@ -315,7 +315,7 @@ def test_compiler_derived_deps_for_mixed_group_call_capture_task_id_when_hoisted
     """MixedKernels producers must capture TaskIds when compiler deps use their output."""
 
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
 
     @pl.program
     class P:
@@ -376,7 +376,7 @@ def test_compiler_derived_deps_for_fixed_trip_loop_fan_in_capture_task_ids():
     """Fixed-trip loop producers should fan in all iteration TaskIds to a later consumer."""
 
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
 
     @pl.program
     class P:
@@ -426,7 +426,7 @@ def test_compiler_derived_deps_for_dynamic_trip_loop_fan_in_falls_back():
     """Dynamic-trip loop fan-in should fall back instead of allocating vectors."""
 
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
 
     @pl.program
     class P:
@@ -471,7 +471,7 @@ def test_compiler_derived_deps_for_dynamic_trip_tensor_carrier_falls_back():
     """Dynamic-trip tensor carriers should fall back instead of allocating vectors."""
 
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
 
     @pl.program
     class P:
@@ -524,7 +524,7 @@ def test_descending_parallel_loop_emits_descending_cpp_loop():
     """
 
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
 
     def build(start, stop, step):
         @pl.program
@@ -577,7 +577,7 @@ def test_zero_step_loop_emits_a_terminating_condition():
     """
 
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
 
     @pl.program
     class P:
@@ -609,7 +609,7 @@ def test_compiler_derived_deps_for_dynamic_parallel_tensor_carriers_share_phase_
     """Dynamic parallel tensor producers in one phase should share one dummy barrier."""
 
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
 
     @pl.program
     class P:
@@ -695,7 +695,7 @@ def test_compiler_derived_deps_for_dynamic_trip_tuple_output_tensor_carrier_fall
     """Dynamic-trip tuple-output tensor carriers should fall back instead of allocating vectors."""
 
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
 
     @pl.program
     class P:
@@ -746,7 +746,7 @@ def test_compiler_auto_manual_scope_is_not_tied_to_function_name():
     """
 
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
 
     @pl.program
     class P:
@@ -1254,7 +1254,7 @@ def test_spmd_submit_aic_direct_dispatch():
     """spmd_submit of a directly-declared AIC (cube) kernel routes through the
     direct dispatch path: rt_submit_aic_task + launch spec (910B)."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
 
     @pl.program
     class P:
@@ -1368,7 +1368,7 @@ def test_compiler_dep_carry_array_sized_by_outer_loop_trip_count():
     use ``EvalConstTripCount`` of the outer loop for compiler-dep carries.
     """
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
 
     M, N = 4, 8
 
@@ -1481,7 +1481,7 @@ def test_user_written_task_dummy_with_in_scope_dep_still_wires():
             return b
 
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     pm = PassManager.get_strategy(OptimizationStrategy.Default)
     code = _generate_orch_code(pm.run_passes(P))
 

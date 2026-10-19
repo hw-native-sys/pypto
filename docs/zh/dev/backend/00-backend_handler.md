@@ -7,7 +7,7 @@
 早期版本的 PyPTO 在 pass 与 codegen 中直接根据 `backend::BackendType` 做分支：
 
 ```cpp
-if (backend::GetBackendType() != backend::BackendType::Ascend910B) { ... }
+if (backend::GetBackendType() != backend::BackendType::Ascend910) { ... }
 ```
 
 这种写法导致每新增一种后端，都要去整个代码库里翻这些散落的 `if`，并且为每一处
@@ -46,8 +46,8 @@ if (backend::GetBackendType() != backend::BackendType::Ascend910B) { ... }
 
 ## 接口
 
-| 方法 | 用途 | Ascend910B | Ascend950 |
-| ---- | ---- | ---------- | --------- |
+| 方法 | 用途 | Ascend910 | Ascend950 |
+| ---- | ---- | --------- | --------- |
 | `GetPtoTargetArch()` | `module attributes {pto.target_arch = "..."}` | `"a2a3"` | `"a5"` |
 | `GetLaunchSpecCoreCountMethod()` | `launch_spec` 上设置核数的运行时 API 名 | `"set_block_num"` | `"set_core_num"` |
 | `GetDefaultSimPlatform()` | 默认仿真平台名 | `"a2a3sim"` | `"a5sim"` |

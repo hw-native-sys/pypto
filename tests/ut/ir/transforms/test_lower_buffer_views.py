@@ -184,7 +184,7 @@ class ReshapedLoad:
 """)
 
 
-@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
 @pytest.mark.parametrize("planner", _PLANNERS)
 @pytest.mark.parametrize(
     "planned,dtype_name",
@@ -211,7 +211,7 @@ def test_automatic_views_compile_without_new_allocations_or_data_copies(
         pytest.skip("PTOAS is not available")
     source, output = tmp_path / "lowered_views.pto", tmp_path / "lowered_views.cpp"
     source.write_text(text)
-    arch = "a2" if ascend_backend == BackendType.Ascend910B else "a5"
+    arch = "a2" if ascend_backend == BackendType.Ascend910 else "a5"
     _run_ptoas(
         str(source), str(output), [f"--pto-arch={arch}", f"--pto-level={'level3' if addressed else 'level2'}"]
     )
@@ -289,14 +289,14 @@ def _compile(tmp_path: Path, program: ir.Program, backend: BackendType, addresse
         pytest.skip("PTOAS is not available")
     source, output = tmp_path / "window.pto", tmp_path / "window.cpp"
     source.write_text(text)
-    arch = "a2" if backend == BackendType.Ascend910B else "a5"
+    arch = "a2" if backend == BackendType.Ascend910 else "a5"
     _run_ptoas(
         str(source), str(output), [f"--pto-arch={arch}", f"--pto-level={'level3' if addressed else 'level2'}"]
     )
     return text
 
 
-@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
 @pytest.mark.parametrize("planner", _PLANNERS)
 def test_slice_and_assemble_become_use_site_windows(
     tmp_path: Path, ascend_backend: BackendType, planner: passes.MemoryPlanner
@@ -319,7 +319,7 @@ def test_slice_and_assemble_become_use_site_windows(
     assert "valid [" in text and "pto.tmov ins(" in text
 
 
-@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
 def test_runtime_slice_offset_stays_an_operand_of_its_window(
     tmp_path: Path, ascend_backend: BackendType
 ) -> None:
@@ -342,7 +342,7 @@ def test_runtime_window_overlapping_its_planned_destination_fails_closed(
         _lower_default(_window_program("RuntimeWindow"), planner)
 
 
-@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
 @pytest.mark.parametrize("planner", _PLANNERS)
 # NarrowedValid shares one handle: the load states its full extents, then
 # set_validshape narrows them, then the sum states its own.
@@ -376,7 +376,7 @@ def test_rank_reducing_slice_is_rejected_even_when_type_inference_pads_to_rank_t
         _lower_default(ColumnSlice, planner)
 
 
-@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
 @pytest.mark.parametrize("valid", ["[16, cols]", "[rows, 32]", "[rows, cols]"])
 @pytest.mark.parametrize("operation", ["pl.add(window, window)", "pl.add(window, loaded)", "pl.exp(window)"])
 def test_runtime_valid_window_arithmetic_compiles(
@@ -402,7 +402,7 @@ class WindowArithmetic:
     assert "pto.subview" in text and "pto.set_validshape" in text
 
 
-@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
 @pytest.mark.parametrize("valid", ["[16, cols]", "[rows, 32]", "[rows, cols]"])
 @pytest.mark.parametrize("source", ["loaded", "window"])
 def test_runtime_valid_assemble_compiles(
@@ -430,7 +430,7 @@ class RuntimeAssemble:
     assert "pto.tmov ins(" in text
 
 
-@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
 @pytest.mark.parametrize("planner", _PLANNERS)
 def test_assemble_preserves_a_partially_valid_target(
     tmp_path: Path, ascend_backend: BackendType, planner: passes.MemoryPlanner

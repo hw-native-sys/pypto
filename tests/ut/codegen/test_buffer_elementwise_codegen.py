@@ -22,7 +22,7 @@ from pypto.pypto_core import codegen
 
 _SPAN = ir.Span.unknown()
 _PLANNERS = [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
-_BACKENDS = [BackendType.Ascend910B, BackendType.Ascend950]
+_BACKENDS = [BackendType.Ascend910, BackendType.Ascend950]
 _NATIVE = [
     "tadd",
     "tsub",

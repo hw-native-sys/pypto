@@ -42,7 +42,7 @@ def _assert_single_mat_handoff(pto: str, min_consumers: int = 1) -> str:
 
 
 @pytest.mark.parametrize("b_trans", [False, True])
-@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
 def test_auto_split_mat_staging(tmp_path, ascend_backend, b_trans):
     """AutoTile's K loop consumes the gathered operand without a Mat->Mat move."""
     vn, vk = (256, 128) if b_trans else (128, 256)
@@ -77,13 +77,13 @@ def test_auto_split_mat_staging(tmp_path, ascend_backend, b_trans):
     files = list(tmp_path.rglob("*.pto"))
     assert files
     pto = "\n".join(path.read_text() for path in files)
-    _assert_single_mat_handoff(pto, min_consumers=2 if ascend_backend == BackendType.Ascend910B else 1)
+    _assert_single_mat_handoff(pto, min_consumers=2 if ascend_backend == BackendType.Ascend910 else 1)
     if find_ptoas_binary() is not None:
         assert list((tmp_path / "kernels").rglob("*.cpp"))
 
 
 @pytest.mark.parametrize("split_mode", [pl.SplitMode.NONE, pl.SplitMode.UP_DOWN])
-@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
 def test_explicit_vec_to_mat_qk_pv(tmp_path, ascend_backend, split_mode):
     """An authored NZ Vec->Mat boundary needs no copy, even without K tiling (#2992)."""
 
@@ -141,7 +141,7 @@ def test_explicit_vec_to_mat_qk_pv(tmp_path, ascend_backend, split_mode):
 
 @pytest.mark.parametrize("slot_num", [1, 2])
 @pytest.mark.parametrize("place_first", [False, True])
-@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
 def test_two_retained_mat_operands_require_two_fifo_slots(tmp_path, ascend_backend, slot_num, place_first):
     """Two gathers before either placement cannot share a one-slot ring."""
 
@@ -208,7 +208,7 @@ def test_two_retained_mat_operands_require_two_fifo_slots(tmp_path, ascend_backe
 
 
 @pytest.mark.parametrize("third_pop, slot_num", [(False, 2), (True, 2), (True, 3)])
-@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
 def test_reverse_consumption_preserves_fifo_prefix(tmp_path, ascend_backend, third_pop, slot_num):
     """Finishing the second tile first must not release the first tile's slot."""
 
@@ -285,7 +285,7 @@ def test_reverse_consumption_preserves_fifo_prefix(tmp_path, ascend_backend, thi
         assert list((tmp_path / "kernels").rglob("*.cpp"))
 
 
-@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
 def test_nested_handoff_cannot_release_an_enclosing_fifo_tile(tmp_path, ascend_backend):
     """A nested last-use finalizer must not free past an enclosing live pop."""
 

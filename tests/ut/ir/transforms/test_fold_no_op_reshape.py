@@ -30,9 +30,9 @@ from pypto.backend import BackendType
 
 @pytest.fixture(autouse=True)
 def _setup_backend():
-    """Configure Ascend910B backend; the MemoryReuse hazard guard needs one."""
+    """Configure Ascend910 backend; the MemoryReuse hazard guard needs one."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     yield
     backend.reset_for_testing()
 

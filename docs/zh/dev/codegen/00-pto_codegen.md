@@ -147,7 +147,7 @@ class MyKernel:
 output_dir = compile(
     MyKernel,
     strategy=OptimizationStrategy.Default,
-    backend_type=BackendType.Ascend910B,
+    backend_type=BackendType.Ascend910,
 )
 ```
 
@@ -425,7 +425,7 @@ tile 调用 `set_validshape`。
 保留；`PTOAS` 模式由 ptoas `PlanMemory`（level2 强制要求、拒绝任何 `addr`
 操作数）完成生命周期复用与地址分配。
 
-> **注意：** `PTOAS` 模式跳过了 `MemoryReuse` 里的 Ascend910B `load + tpop_from_aic`
+> **注意：** `PTOAS` 模式跳过了 `MemoryReuse` 里的 Ascend910 `load + tpop_from_aic`
 > 原地写冒险守卫,以及 `AllocateMemoryAddr` 的 reserve-buffer 基址解析,这些交由
 > ptoas 处理。`compile()` 会输出告警 —— 相关 kernel 请上机验证。
 

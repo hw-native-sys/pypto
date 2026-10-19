@@ -209,7 +209,7 @@ GM traffic for the intermediate disappears from the kernel.
 
 ## The other direction: too coarse
 
-Granularity is not monotone. A single card has a fixed number of cores — on Ascend910B,
+Granularity is not monotone. A single card has a fixed number of cores — on Ascend910,
 **48 vector and 24 cube** — and a task occupies one of them.
 
 ```text

@@ -70,8 +70,8 @@ Register(DiagnosticCheck::MyCheck,
 
 `BackendHandler` 暴露：
 
-| 方法 | Ascend910B | Ascend950 |
-| ---- | ---------- | --------- |
+| 方法 | Ascend910 | Ascend950 |
+| ---- | --------- | --------- |
 | `GetGmAccessGranularityBytes()` | 512 | 128 |
 | `GetL2CacheLineBytes()` | 512 | 512 |
 | `GetRecommendedInnermostDimBytes()` | 512 | 128 |
@@ -96,7 +96,7 @@ Buffer lowering 之后，同一检查也处理 `buffer.load` 与 `buffer.store`�
 
 > **源 span 限制：** span 为流水线后 IR 文本位置（`<string>:line:col`），并非原始 DSL `pl.at` / 切片表达式，也未命名控制内层维度的 chunk 常量。回溯到用户源代码并命名内层维度常量需要将 DSL 源 span 通过 parser/IR 传递到 tile op 上——目前 `TileType`、`Call` op、`Span` 都未携带该元数据（issue #1305 第 2/3 项）。
 
-示例：stderr 摘要 + `perf_hints.log` 内容（`examples/intermediate/05_assemble.py`，Ascend910B）。注意前两行——op、span、dtype、最内层尺寸与内存空间完全相同，仅靠传输规模区分：
+示例：stderr 摘要 + `perf_hints.log` 内容（`examples/intermediate/05_assemble.py`，Ascend910）。注意前两行——op、span、dtype、最内层尺寸与内存空间完全相同，仅靠传输规模区分：
 
 ```text
 # stderr：

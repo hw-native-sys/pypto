@@ -58,7 +58,7 @@ values to repeated targets).
 (``mask_pattern=<int>`` + ``dst``), the column-wise inverse of the mask-form
 gather: each compact ``input`` row is written into the mask-selected columns of
 the wider ``dst`` (``dst.cols == input.cols * stride``). The form runs on the
-A2/A3 backend (``BackendType.Ascend910B``); A5 (``Ascend950``) rejects it, so
+A2/A3 backend (``BackendType.Ascend910``); A5 (``Ascend950``) rejects it, so
 ``TestScatterMaskForm`` carries a ``platforms`` marker restricting it to the
 A2/A3 ids. Column selection mirrors gather: P0101
 hits even columns (``0::2``), P1010 hits odd columns (``1::2``).

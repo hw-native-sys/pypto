@@ -141,7 +141,7 @@ def put(  # noqa: PLR0913
     ``atomic`` (:class:`ir.AtomicType`) selects plain-store vs atomic-add and is
     packed as an ``int`` attr; ``Add`` requires an fp32/bf16/fp16/int32/int16/int8
     destination (the hardware atomic-add dtypes), and a bf16 destination is
-    Ascend910B-only (checked by the ``AtomicAddDtypeValid`` verifier).
+    Ascend910-only (checked by the ``AtomicAddDtypeValid`` verifier).
     Side-effect only — the result is an
     ``UnknownType`` Call. The verifier requires ``dst`` to be a
     :class:`ir.DistributedTensorType`; ``src`` may be either that or a plain

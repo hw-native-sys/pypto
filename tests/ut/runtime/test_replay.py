@@ -250,7 +250,7 @@ def test_replay_routes_l3_through_distributed_compiled_program(tmp_path: Path) -
     ):
         replay(work_dir, a, b, config=RunConfig(platform="a2a3sim"), rebuild_from_pto=False, recompile=False)
     from_dir.assert_called_once_with(
-        work_dir, backend_type=BackendType.Ascend910B, execution_mode=ExecutionMode.SIM
+        work_dir, backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.SIM
     )
     ec.assert_not_called()  # single-chip path must not be taken for L3
     compiled = from_dir.return_value
@@ -636,8 +636,8 @@ def test_cli_standalone_missing_golden_still_raises(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("platform", "backend", "mode"),
     [
-        ("a2a3", BackendType.Ascend910B, ExecutionMode.ONBOARD),
-        ("a2a3sim", BackendType.Ascend910B, ExecutionMode.SIM),
+        ("a2a3", BackendType.Ascend910, ExecutionMode.ONBOARD),
+        ("a2a3sim", BackendType.Ascend910, ExecutionMode.SIM),
         ("a5", BackendType.Ascend950, ExecutionMode.ONBOARD),
         ("a5sim", BackendType.Ascend950, ExecutionMode.SIM),
     ],

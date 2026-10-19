@@ -521,7 +521,7 @@ def main():
         program,
         strategy=ir.OptimizationStrategy.Default,
         dump_passes=True,
-        backend_type=BackendType.Ascend910B,
+        backend_type=BackendType.Ascend910,
     )
     print(f"Output: {output_dir}")
 

@@ -8,7 +8,7 @@ Earlier revisions of PyPTO branched on `backend::BackendType` directly inside
 passes and codegen:
 
 ```cpp
-if (backend::GetBackendType() != backend::BackendType::Ascend910B) { ... }
+if (backend::GetBackendType() != backend::BackendType::Ascend910) { ... }
 ```
 
 Every new backend therefore required hunting for these scattered conditionals
@@ -49,8 +49,8 @@ to global state.
 
 ## Interface
 
-| Method | Purpose | Ascend910B | Ascend950 |
-| ------ | ------- | ---------- | --------- |
+| Method | Purpose | Ascend910 | Ascend950 |
+| ------ | ------- | --------- | --------- |
 | `GetPtoTargetArch()` | `module attributes {pto.target_arch = "..."}` | `"a2a3"` | `"a5"` |
 | `GetLaunchSpecCoreCountMethod()` | runtime API name on `launch_spec` | `"set_block_num"` | `"set_core_num"` |
 | `GetDefaultSimPlatform()` | default simulator platform | `"a2a3sim"` | `"a5sim"` |

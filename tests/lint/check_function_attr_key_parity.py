@@ -11,7 +11,7 @@ Script to check that reserved ``Function.attrs`` keys are declared once per laye
 
 Each key is a contract between a writer pass and a reader that may sit on the other side of the
 C++/Python boundary -- ``split_aiv`` is stamped by ``ScopeOutliner`` and read by ``MemoryReuse`` to
-gate an Ascend910B in-place hazard guard; ``dual_aiv_dispatch`` is stamped in ``src/ir/transforms``
+gate an Ascend910 in-place hazard guard; ``dual_aiv_dispatch`` is stamped in ``src/ir/transforms``
 and read by both codegens and by the torch debug emitter. A key spelled as a bare literal at each of
 those sites has no single point of rename: a writer renamed without its readers leaves every reader
 silently reading an absent attr, which reads as "feature off" rather than as an error.

@@ -410,7 +410,7 @@ def _load_meta(meta_path: Path, *, filename: str, schema: int) -> dict[str, Any]
 
     # Strict enum-member lookup, not getattr(): ``getattr(BackendType, "mro")``
     # resolves to a bound method and would sail through as a bogus backend.
-    raw_backend = meta.get("backend_type", "Ascend910B")
+    raw_backend = meta.get("backend_type", "Ascend910")
     backend_type = BackendType.__members__.get(raw_backend) if isinstance(raw_backend, str) else None
     if backend_type is None:
         raise _bad(f"'backend_type' must be one of {sorted(BackendType.__members__)}, got {raw_backend!r}")
@@ -942,7 +942,7 @@ class CompiledProgram(_RuntimeFacade):
         program: Program | None,
         output_dir: str,
         *,
-        backend_type: BackendType = BackendType.Ascend910B,
+        backend_type: BackendType = BackendType.Ascend910,
         platform: str | None = None,
         execution_mode: ExecutionMode | None = None,
         _param_infos: list[_ParamInfo] | None = None,

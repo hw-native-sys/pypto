@@ -53,7 +53,7 @@ PyPTO IR 变换的参考文档，按阅读顺序组织。实际执行顺序请�
 | 22 | [ResolveBackendOpLayouts](22-resolve_backend_op_layouts.md) | 修正逐元素算子所需的后端 tile layout |
 | 23 | [LowerAutoVectorSplit](23-lower_auto_vector_split.md) | 把 AUTO `pl.split` 的混合 InCore 函数转换为显式 `split_aiv` 形式 |
 | 24 | [ExpandMixedKernel](24-expand_mixed_kernel.md) | 把混合 InCore 函数拆分为独立的 AIC（Cube）与 AIV（Vector）kernel |
-| 25 | [InjectGMPipeBuffer](25-inject_gm_pipe_buffer.md) | 为经 GM 路由的跨核 pipe 注入 `__gm_pipe_buffer` workspace（Ascend910B） |
+| 25 | [InjectGMPipeBuffer](25-inject_gm_pipe_buffer.md) | 为经 GM 路由的跨核 pipe 注入 `__gm_pipe_buffer` workspace（Ascend910） |
 | 26 | [SplitVectorKernel](26-split_vector_kernel.md) | 标记 split 属性并处理不拆分的双 AIV 路径 |
 | 27 | [StampTfreeSplit](27-stamp_tfree_split.md) | 把每个跨核 tpop 的 split 与 pipe id 复制到与之配对的 tfree 上 |
 | 28 | [NormalizeReturnOrder](28-normalize_return_order.md) | 把每个 InCore 函数的返回元组重排为规范顺序 |

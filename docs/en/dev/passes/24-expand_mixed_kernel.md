@@ -117,7 +117,7 @@ bridge tile has to stay NZ. The ZN view belongs to the `Mat → Right` `tile.mov
 the cube side makes after the pop, which is one step later than this table
 describes — the same split the a2a3 table below spells out.
 
-Ascend910B (a2a3) — cross-core transfer goes through GM → Mat, and Mat only supports the NZ layout. Both Left and Right destinations use NZ at the transfer boundary; the final Left/Right layout is resolved by the subsequent `Mat → Left/Right` `tile.move` (MTE1):
+Ascend910 (a2a3) — cross-core transfer goes through GM → Mat, and Mat only supports the NZ layout. Both Left and Right destinations use NZ at the transfer boundary; the final Left/Right layout is resolved by the subsequent `Mat → Left/Right` `tile.move` (MTE1):
 
 | Direction | Push/Pop TileView (blayout, slayout) | Name |
 | --------- | ------------------------------------ | ---- |
@@ -292,7 +292,7 @@ block without reordering independent `tpop` chains. When AIC must post-process a
 same-side `tile.move` (for example Mat -> Left/Right/Bias), the generated `system.tfree_to_aiv(...)` is rewritten to
 free the canonical popped tile value and can be delayed past that carrier chain.
 
-For Ascend910B (a2a3), mixed kernels with **no function split mode** (`split` unset or `SplitMode.None`) are also
+For Ascend910 (a2a3), mixed kernels with **no function split mode** (`split` unset or `SplitMode.None`) are also
 supported. In that case the pass keeps a single AIV kernel body, marks it for **dual AIV dispatch**, and later lowering
 emits a runtime `subblock_idx` branch: AIV lane 0 executes the original body, while AIV lane 1 replays the cross-core
 handshakes with tile-producing replay work forced to `valid_shape=[0, 0]`, and visible `tile.store` writes suppressed.
@@ -312,7 +312,7 @@ work — dropping lane-1 stores would be a miscompile.
 - Input IR must have InCore scopes outlined (run `OutlineIncoreScopes` first)
 - Tile ops must be flattened to 2D (run `FlattenTileNdTo2D` first)
 - Tile memory space must be inferred (run `InferTileMemorySpace` first)
-- Cross-core fractal TileView assignment is supported on Ascend950 and Ascend910B backends
+- Cross-core fractal TileView assignment is supported on Ascend950 and Ascend910 backends
 
 **When to use**: Run after `InferTileMemorySpace` when InCore functions may contain both Cube and Vector tile operations.
 
@@ -364,7 +364,7 @@ Phase 2 — Expand each InCore function F:
   5a. Assign fractal TileView to all boundary tpop result types and pre-tpush tile.move ops
       via BuildCrossCoreTransferView:
       - Ascend950: Left→NZ, Right→ZN, Mat/Vec→preserve
-      - Ascend910B: Left→NZ, Right→NZ (Mat only supports NZ), Mat/Vec→preserve
+      - Ascend910: Left→NZ, Right→NZ (Mat only supports NZ), Mat/Vec→preserve
   6. Repair loop-carried state on both bodies
      - Strip dead iter_args whose carried values are unused on this side —
        uses include the while condition, and close over the loop's own yield,
@@ -383,7 +383,7 @@ Phase 2 — Expand each InCore function F:
  11. If the split bodies use cross-core tile ops and do not already contain setup,
       derive reserve/import/initialize_pipe prologues and prepend them
  12. Create AIC function (no return) and AIV function (original return)
-     - On Ascend910B no-split mixed kernels, tag the generated AIV with dual-dispatch metadata
+     - On Ascend910 no-split mixed kernels, tag the generated AIV with dual-dispatch metadata
        so later lowering launches the same AIV kernel on both vector lanes and rewrites the secondary lane's tile
        replay path to `valid_shape=[0, 0]`
  13. If a non-Group caller still needs the original function name

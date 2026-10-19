@@ -260,7 +260,7 @@ class Program:
         # Keep the original loop for carry tracking; Default also exercises
         # the ordinary snapshot alias left after folding a one-iteration loop.
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         program = passes.convert_to_ssa()(program)
         generate_code = _generate_orch_code
     if trip_count is None or trip_count > 1 or (trip_count == 1 and consume_fresh):
@@ -307,7 +307,7 @@ class Program:
 """)
 
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     program = passes.convert_to_ssa()(program)
     if capture_fresh:
         with pytest.raises(ValueError, match="allocation from a closed runtime scope"):
@@ -343,7 +343,7 @@ def test_loop_carry_read_rejects_allocation_closed_by_previous_iteration(trip_co
             return out
 
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     program = passes.convert_to_ssa()(Program)
     if trip_count > 1:
         with pytest.raises(ValueError, match="allocation from a closed runtime scope"):

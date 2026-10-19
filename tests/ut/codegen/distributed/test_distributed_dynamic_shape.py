@@ -27,7 +27,7 @@ NR = pl.dynamic("NR")
 @pytest.fixture(autouse=True)
 def _setup_backend():
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     yield
     backend.reset_for_testing()
 

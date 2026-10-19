@@ -97,7 +97,7 @@ def _generated(root: Path, kind: BuildKind) -> None:
         params=[],
         num_return_types=0,
         platform="a2a3sim",
-        backend_type="Ascend910B",
+        backend_type="Ascend910",
     )
     if kind is BuildKind.SINGLE_CHIP:
         _chip(root)

@@ -80,7 +80,7 @@ inline std::optional<uint64_t> StaticPhysicalAllocationBytes(const ShapedTypePtr
     if (extents.size() < 2) return std::nullopt;
     // Bare pass tests historically support allocation without configuring a
     // backend. Use the strictest alignment among the current backends rather
-    // than guessing low: Ascend910B INT32 accumulators occupy 32 physical M
+    // than guessing low: Ascend910 INT32 accumulators occupy 32 physical M
     // rows, while every other currently supported combination uses 16.
     const int64_t fallback_alignment = type->dtype_ == DataType::INT32 ? 32 : 16;
     const int64_t alignment = handler ? handler->GetL0cMAlignment(type->dtype_) : fallback_alignment;

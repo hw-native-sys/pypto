@@ -464,7 +464,7 @@ inline constexpr const char* kAttrDualAivDispatch = "dual_aiv_dispatch";
  * ``LowerAutoVectorSplit`` (pass 23) on the functions it lowers. Read by
  * ``SplitVectorKernel`` (pass 26, to stamp ``dual_aiv_dispatch`` without
  * re-halving an already-lowered body), ``MemoryReuse`` (pass 36 — it gates the
- * Ascend910B ``tile.load`` + ``tpop_from_aic`` in-place hazard guard) and
+ * Ascend910 ``tile.load`` + ``tpop_from_aic`` in-place hazard guard) and
  * ``VerifyAivSplit`` (provenance for the boundary-op checks). Never stripped.
  *
  * ``MemoryReuse`` keys on this marker rather than on ``Function::GetSplitMode``

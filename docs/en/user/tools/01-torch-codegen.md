@@ -121,7 +121,7 @@ Use this mode to verify pass-expanded IR (including mixed-kernel and cross-core 
 
 ```python
 reset_for_testing()
-set_backend_type(BackendType.Ascend910B)  # or BackendType.Ascend950
+set_backend_type(BackendType.Ascend910)  # or BackendType.Ascend950
 try:
     transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
     code = torch_codegen(transformed, check_shapes=True)

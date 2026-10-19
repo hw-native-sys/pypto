@@ -165,13 +165,13 @@ def stub_device_runner():
 def ascend_backend(request):
     """Configure an Ascend backend for the duration of a test, then reset.
 
-    Use either as a plain fixture (defaults to ``Ascend910B``) or via
+    Use either as a plain fixture (defaults to ``Ascend910``) or via
     ``pytest.mark.parametrize("ascend_backend", [...], indirect=True)`` to
     cycle through multiple backends. Replaces the per-test
     ``backend.reset_for_testing()`` + ``backend.set_backend_type(...)`` pair
     that is otherwise duplicated across pass / codegen tests.
     """
-    backend_type = getattr(request, "param", BackendType.Ascend910B)
+    backend_type = getattr(request, "param", BackendType.Ascend910)
     _backend.reset_for_testing()
     _backend.set_backend_type(backend_type)
     try:

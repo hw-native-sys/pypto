@@ -9,7 +9,7 @@
    `tile.get_subblock_idx()`。本 pass 不动函数体，只在函数属性上打 `split`（对 AIV
    函数另加 `dual_aiv_dispatch`）。
 
-2. **无拆分双 AIV 派发** —— 在 Ascend910B（任何
+2. **无拆分双 AIV 派发** —— 在 Ascend910（任何
    `BackendHandler::RequiresNoSplitDualAivDispatch()` 返回 `true` 的后端）上，当
    `ExpandMixedKernel` 判断混合核不可拆分时，会给 AIV 函数打 `dual_aiv_dispatch=True`。
    本 pass 据此把函数体包装为按 lane 的 `if subblock_idx == 0 ... else` 重放，使
@@ -81,7 +81,7 @@ per-lane 形态（由上游 `LowerAutoVectorSplit` + `ExpandMixedKernel` 达成�
       assert 函数级拆分模式已设且非 None  (INTERNAL_CHECK)
       attrs = WithSplitAttrs(func, mode, is_aiv)            # split（AIV 另加 dual_aiv_dispatch）
   elif RequiresNoSplitDualAivSync(func):
-      # Ascend910B 无拆分双 AIV 派发（正交路径）。
+      # Ascend910 无拆分双 AIV 派发（正交路径）。
       ProcessNoSplitDualAivFunction(func)
   else:
       原样透传
@@ -90,7 +90,7 @@ per-lane 形态（由上游 `LowerAutoVectorSplit` + `ExpandMixedKernel` 达成�
 ## 算法 —— 无拆分双 AIV 派发
 
 `ProcessNoSplitDualAivFunction` 仅当 `RequiresNoSplitDualAivSync(func)` 为真时触发
-——后端为 Ascend910B（或任何 `BackendHandler::RequiresNoSplitDualAivDispatch()` 返回
+——后端为 Ascend910（或任何 `BackendHandler::RequiresNoSplitDualAivDispatch()` 返回
 真的后端），函数为 AIV，且 `attrs["dual_aiv_dispatch"]` 为真。
 
 ```text
@@ -148,7 +148,7 @@ def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]):
 pass 之后，`attrs` 增加 `dual_aiv_dispatch=True`；`z_vec` 保持 `[8, 128]`（不再折半），
 且恰有一个 `get_subblock_idx`。
 
-### 示例 2 —— Ascend910B 无拆分双 AIV 派发
+### 示例 2 —— Ascend910 无拆分双 AIV 派发
 
 提炼自 `test_no_split_dual_dispatch_producer_replays_compute_and_tpush_on_lane1`。
 AIV 函数带 `dual_aiv_dispatch=True`（由 `ExpandMixedKernel` 为无拆分混合核设置），无
@@ -208,7 +208,7 @@ Pass SplitVectorKernel();
 - `WithSplitAttrs` —— split_aiv 分支上打 `split`（AIV 另加 `dual_aiv_dispatch`）。
 - `RequiresNoSplitDualAivSync` / `ProcessNoSplitDualAivFunction` /
   `BuildNoSplitLane1ReplayStmts` / `RebuildLane1CallWithZeroValidShape` /
-  `IsNoSplitSharedPipeSetupCall` —— Ascend910B 无拆分路径。
+  `IsNoSplitSharedPipeSetupCall` —— Ascend910 无拆分路径。
 
 **属性**：`include/pypto/ir/transforms/pass_properties.h`
 

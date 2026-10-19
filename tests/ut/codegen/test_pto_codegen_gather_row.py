@@ -68,7 +68,7 @@ def _build_program(*, transpose: bool):
 def _codegen_incore(program) -> str:
     """Run the Default pipeline + PTO codegen, returning the InCore kernel's MLIR."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     pm = PassManager.get_strategy(OptimizationStrategy.Default)
     optimized = pm.run_passes(program)
     gen = codegen.PTOCodegen()

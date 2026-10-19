@@ -23,7 +23,7 @@ from pypto.runtime import RunConfig
 
 def _compile(program, auto_deps):
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     pm = PassManager.get_strategy(OptimizationStrategy.Default, analyze_auto_scopes_for_deps=auto_deps)
     result = pm.run_passes(program)
     return result, _generate_orch_code(result)
@@ -187,7 +187,7 @@ def test_codegen_rejects_dynamic_launch_when_legalization_was_omitted():
             return out
 
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     program = passes.normalize_return_order()(passes.convert_to_ssa()(Program))
     with pytest.raises(pypto.InternalError, match="Run LegalizeSpmdLaunches"):
         _generate_orch_code(program)

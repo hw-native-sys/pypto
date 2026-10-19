@@ -3792,7 +3792,7 @@ def test_tile_select_rank_3_falls_back_to_tsel_and_survives_the_pipeline(
 @pytest.mark.parametrize(
     ("ascend_backend", "expected_scratch"),
     [
-        (BackendType.Ascend910B, ((1, 128), pl.FP16)),
+        (BackendType.Ascend910, ((1, 128), pl.FP16)),
         (BackendType.Ascend950, ((1, 32), pl.UINT8)),
     ],
     indirect=["ascend_backend"],
@@ -3807,7 +3807,7 @@ def test_tile_select_takes_the_tsels_scratch_geometry_from_the_backend(ascend_ba
     assert expected_scratch in _select_scratch_shapes(After)
 
 
-@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B], indirect=True, ids=["a2a3"])
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910], indirect=True, ids=["a2a3"])
 def test_tile_select_rejects_8bit_on_a2a3_where_no_instruction_exists(ascend_backend):
     """A2/A3 has no 8-bit select at all, so say so instead of emitting dead IR.
 

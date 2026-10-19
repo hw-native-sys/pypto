@@ -135,7 +135,7 @@ contracts/expands by two where that dtype remains.
 
 End-to-end 4-bit execution is backend-gated. Ascend950 in-core accepts packed
 `pl.FP4E2M1X2`; logical `pl.FP4` / `INT4` / `UINT4` / `HF4` are rejected by
-in-core codegen. Ascend910B/A2A3 rejects every FP4-family in-core dtype because
+in-core codegen. Ascend910/A2A3 rejects every FP4-family in-core dtype because
 its isolated FP16↔INT4 conversion has no matching packed load/store carrier ABI.
 See [FP4](../../dev/fp4.md) for cast samples (`FP4E2M1X2`→BF16 / FP8), units, and
 `#2754`-class stride guidance.
@@ -352,7 +352,7 @@ it — which is a race, not a diagnostic.
 
 Not every `pl.cast` is one instruction. Whether a `(src, dst)` pair maps to a single
 hardware `pto.tcvt` or expands into a chain depends on the target: `INT32 -> FP16` is one
-instruction on Ascend910B and lowers to `INT32 -> FP32 -> FP16` on Ascend950. Each hop
+instruction on Ascend910 and lowers to `INT32 -> FP32 -> FP16` on Ascend950. Each hop
 costs a `tcvt`, and where an intermediate is narrower than the source the result can
 differ from a directly rounded conversion by one ULP of the destination. This is expected
 behaviour, not a defect — see

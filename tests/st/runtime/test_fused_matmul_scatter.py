@@ -13,7 +13,7 @@ GM rows fused in one ``CORE_GROUP`` scope.
 A single ``pl.matmul`` writes its FP32 result into a scope-local
 ``create_tensor`` (``kv_final``); a per-row loop then casts each row and
 scatters it to a **distinct, strided** GM row of ``cache`` (row ``b * CACHE``).
-On Ascend910B this lowers to an AIC cube kernel (the matmul, storing ``kv_final``
+On Ascend910 this lowers to an AIC cube kernel (the matmul, storing ``kv_final``
 to GM) and an AIV vector kernel (the scatter, reading ``kv_final`` back from GM).
 
 Two independent codegen bugs corrupted the output (both fixed in this change):

@@ -141,7 +141,7 @@ grep -n 'pto.tcvt' build_output/<case>/ptoas/<kernel>.pto
 | `uint32` | `int16`, `uint16`, `uint8` | `int8`(3) |
 | `uint8` | `fp16`, `uint16` | `hf8`(2), `int8`(2), `fp8e4m3`(3), `fp8e5m2`(3), `fp4`(4) |
 
-### Ascend910B (a2a3)
+### Ascend910 (a2a3)
 
 | 源类型 | 原生（1 条指令） | 展开链（n 条指令） |
 | ------ | ---------------- | ------------------ |

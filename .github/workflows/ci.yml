@@ -2193,7 +2193,7 @@ jobs:
     # (syncall, sync_set_wait, split parity incl. split_aiv, tpush/grouped-tfree
     # valid-shape, split-reduce parity) — pytest deselects them under --platform=a5,
     # so listing them would only add collection noise; and test_fused_matmul_scatter.py,
-    # whose test cases hardcode `get_backend_type() -> Ascend910B`, so under
+    # whose test cases hardcode `get_backend_type() -> Ascend910`, so under
     # --platform=a5 it would compile for 910B and run on A5 silicon. Widen this
     # list once those are made arch-agnostic.
     #

@@ -162,7 +162,7 @@ class TestBasic:
         ("backend_type", "expected_acc_bytes"),
         [
             pytest.param(None, 16384, id="unconfigured-safe-fallback"),
-            pytest.param(BackendType.Ascend910B, 16384, id="ascend910b"),
+            pytest.param(BackendType.Ascend910, 16384, id="ascend910b"),
             pytest.param(BackendType.Ascend950, 8192, id="ascend950"),
         ],
     )
@@ -217,7 +217,7 @@ class TestBasic:
         another — see `GetSliceAccumulatorGeometry`.
         """
         _backend.reset_for_testing()
-        _backend.set_backend_type(BackendType.Ascend910B)
+        _backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -671,7 +671,7 @@ class TestSliceView:
         without going through ``pto.subview``).
         """
         _backend.reset_for_testing()
-        _backend.set_backend_type(BackendType.Ascend910B)
+        _backend.set_backend_type(BackendType.Ascend910)
 
         printed = ir.python_print(passes.init_mem_ref()(self._acc_column_window_program(128)))
         assert "pl.tile.alloc(pl.Mem.Acc, 16384)" in printed
@@ -696,7 +696,7 @@ class TestSliceView:
         column windows read as disjoint by lifetime/overlap analysis.
         """
         _backend.reset_for_testing()
-        _backend.set_backend_type(BackendType.Ascend910B)
+        _backend.set_backend_type(BackendType.Ascend910)
 
         printed = ir.python_print(passes.init_mem_ref()(self._acc_column_window_program(0)))
         assert re.search(
@@ -714,7 +714,7 @@ class TestSliceView:
         (MemoryReuse rejects two such windows carried through one loop).
         """
         _backend.reset_for_testing()
-        _backend.set_backend_type(BackendType.Ascend910B)
+        _backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -774,7 +774,7 @@ class TestSliceView:
         (0 * 256 + 8) * 4 = 32, envelope (15 * 256 + 15 + 1) * 4 = 15424.
         """
         _backend.reset_for_testing()
-        _backend.set_backend_type(BackendType.Ascend910B)
+        _backend.set_backend_type(BackendType.Ascend910)
 
         printed = ir.python_print(passes.init_mem_ref()(self._acc_column_window_program(8, window_cols=16)))
         assert re.search(
@@ -794,7 +794,7 @@ class TestSliceView:
         ``t * 64 * 256 * 4`` — a different address for every non-zero ``t``.
         """
         _backend.reset_for_testing()
-        _backend.set_backend_type(BackendType.Ascend910B)
+        _backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -840,7 +840,7 @@ class TestSliceView:
         row-major 15872 bytes.
         """
         _backend.reset_for_testing()
-        _backend.set_backend_type(BackendType.Ascend910B)
+        _backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -1273,7 +1273,7 @@ class TestPtoLevel3Scratch:
         [(pl.INT32, 192), (pl.UINT32, 192), (pl.INT16, 448), (pl.UINT16, 448)],
     )
     def test_a2a3_ci_scratch_is_allocated_by_width(self, dtype, expected_cols):
-        after = self._run(self._ci_program(dtype), BackendType.Ascend910B)
+        after = self._run(self._ci_program(dtype), BackendType.Ascend910)
         ci = self._calls(after, ir.get_op("tile.ci").name)
         assert len(ci) == 1 and len(ci[0].args) == 3
         tmp = cast(ir.TileType, ci[0].args[2].type)
@@ -1283,7 +1283,7 @@ class TestPtoLevel3Scratch:
 
     def test_a5_and_ptoas_planner_keep_ci_implicit(self):
         a5 = self._run(self._ci_program(), BackendType.Ascend950)
-        ptoas = self._run(self._ci_program(), BackendType.Ascend910B, planner=passes.MemoryPlanner.PTOAS)
+        ptoas = self._run(self._ci_program(), BackendType.Ascend910, planner=passes.MemoryPlanner.PTOAS)
         assert len(self._calls(a5, ir.get_op("tile.ci").name)[0].args) == 2
         assert len(self._calls(ptoas, ir.get_op("tile.ci").name)[0].args) == 2
 
@@ -1298,7 +1298,7 @@ class TestPtoLevel3Scratch:
                 seq: pl.Tile[[1, 64], pl.INT32, pl.Mem.Vec] = pl.tile.ci(0, [1, 64], dtype=pl.INT32, tmp=tmp)
                 return seq
 
-        after = self._run(Before, BackendType.Ascend910B)
+        after = self._run(Before, BackendType.Ascend910)
         ci = self._calls(after, ir.get_op("tile.ci").name)[0]
         creates = self._calls(after, ir.get_op("tile.create").name)
         assert len(ci.args) == 3
@@ -1335,7 +1335,7 @@ class TestPtoLevel3Scratch:
         [(pl.FP32, pl.INT16, 1024), (pl.FP16, pl.INT16, 64), (pl.FP16, pl.INT8, 160)],
     )
     def test_a2a3_narrowing_cast_scratch(self, src_dtype, dst_dtype, expected_bytes):
-        after = self._run(self._cast_program(src_dtype, dst_dtype), BackendType.Ascend910B)
+        after = self._run(self._cast_program(src_dtype, dst_dtype), BackendType.Ascend910)
         cast_call = self._calls(after, ir.get_op("tile.cast").name)[0]
         assert len(cast_call.args) == 2
         tmp = cast(ir.TileType, cast_call.args[1].type)
@@ -1349,7 +1349,7 @@ class TestPtoLevel3Scratch:
         Only the pairs `TcvtNeedsLevel3Scratch` lists get the emulated lowering;
         this one is a single native tcvt whichever saturation it carries.
         """
-        after = self._run(self._cast_program(pl.FP32, pl.FP16), BackendType.Ascend910B)
+        after = self._run(self._cast_program(pl.FP32, pl.FP16), BackendType.Ascend910)
         assert len(self._calls(after, ir.get_op("tile.cast").name)[0].args) == 1
 
     def test_a5_narrowing_cast_keeps_implicit_tmp_abi(self):
@@ -1358,7 +1358,7 @@ class TestPtoLevel3Scratch:
 
     def test_fp16_to_int4_has_no_level3_scratch(self):
         """FP16->INT4 uses native vconv without PTOAS level-3 tcvt tmp."""
-        after = self._run(self._cast_program(pl.FP16, pl.INT4), BackendType.Ascend910B)
+        after = self._run(self._cast_program(pl.FP16, pl.INT4), BackendType.Ascend910)
         assert len(self._calls(after, ir.get_op("tile.cast").name)[0].args) == 1
 
     @staticmethod
@@ -1415,14 +1415,14 @@ class TestPtoLevel3Scratch:
         touches. ``None`` and an explicit "on" are the same cast, so both check.
         """
         after = self._run(
-            self._saturating_cast_program(pl.FP16, pl.INT8, saturation_mode), BackendType.Ascend910B
+            self._saturating_cast_program(pl.FP16, pl.INT8, saturation_mode), BackendType.Ascend910
         )
         assert len(self._calls(after, ir.get_op("tile.cast").name)[0].args) == 1
         assert not self._calls(after, ir.get_op("tile.create").name)
 
     def test_a2a3_non_saturating_narrowing_cast_still_gets_scratch(self):
         """Opting out keeps the compiler-owned scratch the non-saturating helper needs."""
-        after = self._run(self._saturating_cast_program(pl.FP16, pl.INT8, "off"), BackendType.Ascend910B)
+        after = self._run(self._saturating_cast_program(pl.FP16, pl.INT8, "off"), BackendType.Ascend910)
         cast_call = self._calls(after, ir.get_op("tile.cast").name)[0]
         assert len(cast_call.args) == 2
         tmp = cast(ir.TileType, cast_call.args[1].type)
@@ -1433,7 +1433,7 @@ class TestPtoLevel3Scratch:
         """Only the compiler-generated scratch is dropped; an explicit tmp is the author's."""
         after = self._run(
             self._saturating_cast_program_with_tmp(pl.FP16, pl.INT8, "on"),
-            BackendType.Ascend910B,
+            BackendType.Ascend910,
         )
         cast_call = self._calls(after, ir.get_op("tile.cast").name)[0]
         assert len(cast_call.args) == 2
@@ -1466,7 +1466,7 @@ class TestPtoLevel3Scratch:
         ],
     )
     def test_a2a3_narrowing_cast_scratch_branches(self, rows, cols, expected_bytes):
-        after = self._run(self._narrowing_cast_program(rows, cols, pl.FP32, pl.INT16), BackendType.Ascend910B)
+        after = self._run(self._narrowing_cast_program(rows, cols, pl.FP32, pl.INT16), BackendType.Ascend910)
         cast_call = self._calls(after, ir.get_op("tile.cast").name)[0]
         assert len(cast_call.args) == 2
         tmp = cast(ir.TileType, cast_call.args[1].type)
@@ -1477,12 +1477,8 @@ class TestPtoLevel3Scratch:
         # FP32->INT16, cols=80 (tail-only): 32*((min(rows,255)-1)*(80/8)+ceil(16/8))
         # => 32*(254*10+2) = 81344 under PTOAS v0.60 makeTCvtTmpType.
         expected_bytes = 81344
-        after_255 = self._run(
-            self._narrowing_cast_program(255, 80, pl.FP32, pl.INT16), BackendType.Ascend910B
-        )
-        after_400 = self._run(
-            self._narrowing_cast_program(400, 80, pl.FP32, pl.INT16), BackendType.Ascend910B
-        )
+        after_255 = self._run(self._narrowing_cast_program(255, 80, pl.FP32, pl.INT16), BackendType.Ascend910)
+        after_400 = self._run(self._narrowing_cast_program(400, 80, pl.FP32, pl.INT16), BackendType.Ascend910)
 
         def scratch_bytes(prog):
             cast_call = self._calls(prog, ir.get_op("tile.cast").name)[0]
@@ -1514,7 +1510,7 @@ class TestPtoLevel3Scratch:
             ib.return_stmt(result)
         return ir.Program([f.get_result()], "sort_program", span)
 
-    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
     def test_sort32_dynamic_valid_col_gets_physical_shape_scratch(self, backend_type):
         after = self._run(self._sort_program(dynamic_valid_col=True), backend_type)
         sort32 = self._calls(after, ir.get_op("tile.sort32").name)[0]
@@ -1524,7 +1520,7 @@ class TestPtoLevel3Scratch:
         assert tmp.dtype == ir.DataType.FP32
         assert tmp.memref is not None
 
-    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
     def test_sort32_static_aligned_valid_col_needs_no_scratch(self, backend_type):
         after = self._run(self._sort_program(dynamic_valid_col=False), backend_type)
         assert len(self._calls(after, ir.get_op("tile.sort32").name)[0].args) == 2

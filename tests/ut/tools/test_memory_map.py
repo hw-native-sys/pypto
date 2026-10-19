@@ -177,9 +177,20 @@ def test_cross_base_overlap_is_flagged_as_conflict():
     assert not boxes["lhs"].view and not boxes["rhs"].view
 
 
+def test_backend_names_are_canonical_but_old_names_remain_readable():
+    assert memory_map.backend_names() == ["Ascend910", "Ascend950"]
+    assert memory_map.backend_instance("Ascend910B") is memory_map.backend_instance("Ascend910")
+
+
+@pytest.mark.parametrize("name", ["Ascend910", "Ascend910B"])
+def test_cli_accepts_both_ascend910_names(case: Path, name: str):
+    assert memory_map.main([str(case), "--backend", name]) == 0
+    assert memory_map.resolve_backend(_dump_of(case), name).name == "Ascend910"
+
+
 def test_backend_limits_come_from_the_backend_interface():
-    instance = backend.get_backend_instance(backend.BackendType.Ascend910B)
-    limits = memory_map.backend_limits("Ascend910B")
+    instance = backend.get_backend_instance(backend.BackendType.Ascend910)
+    limits = memory_map.backend_limits("Ascend910")
     assert limits["Vec"] == instance.get_mem_size(ir.MemorySpace.Vec)
     assert limits["Mat"] == instance.get_mem_size(ir.MemorySpace.Mat)
     assert "DDR" not in limits  # off-chip; never mapped
@@ -204,7 +215,7 @@ def test_backend_limits_cover_every_space_the_soc_describes():
         assert memory_map.backend_limits(name) == expected
 
     a5 = memory_map.backend_limits("Ascend950")
-    a2 = memory_map.backend_limits("Ascend910B")
+    a2 = memory_map.backend_limits("Ascend910")
     assert "Bias" in a5 and "Bias" in a2
     for space in ("LeftScale", "RightScale"):
         assert space in a5
@@ -229,18 +240,18 @@ def test_backend_falls_back_when_no_ptoas_output_exists(case: Path):
 
 def test_explicit_backend_overrides_detection(case: Path):
     _add_ptoas(case, "a5")
-    choice = memory_map.resolve_backend(_dump_of(case), "Ascend910B")
-    assert (choice.name, choice.detected) == ("Ascend910B", True)
+    choice = memory_map.resolve_backend(_dump_of(case), "Ascend910")
+    assert (choice.name, choice.detected) == ("Ascend910", True)
     with pytest.raises(ValueError, match="unknown backend"):
         memory_map.resolve_backend(_dump_of(case), "Ascend000")
 
 
 def test_render_scales_panels_by_the_backend_capacity(case: Path):
-    payload = _payload(memory_map.render(_dump_of(case), "Ascend910B"))
-    assert payload["backend"] == {"name": "Ascend910B", "arch": "a2a3", "detected": True}
+    payload = _payload(memory_map.render(_dump_of(case), "Ascend910"))
+    assert payload["backend"] == {"name": "Ascend910", "arch": "a2a3", "detected": True}
 
     spaces = {s["space"]: s for s in payload["functions"][0]["spaces"]}
-    expected = memory_map.backend_limits("Ascend910B")
+    expected = memory_map.backend_limits("Ascend910")
     assert spaces["Mat"]["limit"] == expected["Mat"]
     assert spaces["Mat"]["hwm"] == 4096
     assert spaces["Acc"]["bases"] == 1

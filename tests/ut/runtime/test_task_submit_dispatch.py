@@ -62,7 +62,7 @@ def _planner_case():
         get_name=lambda: "planner_case",
         get_program=lambda: object(),
         get_strategy=lambda: None,
-        get_backend_type=lambda: test_runner.BackendType.Ascend910B,
+        get_backend_type=lambda: test_runner.BackendType.Ascend910,
         get_memory_planner=lambda: None,
         get_enable_pypto_l0c_double_buffer=lambda: None,
         config=RunConfig(memory_planner=None),

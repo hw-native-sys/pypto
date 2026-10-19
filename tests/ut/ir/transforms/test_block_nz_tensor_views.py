@@ -66,7 +66,7 @@ def _run(program: ir.Program) -> ir.Program:
     return program
 
 
-def _emit_pto(program: ir.Program, backend_type=BackendType.Ascend910B) -> str:
+def _emit_pto(program: ir.Program, backend_type=BackendType.Ascend910) -> str:
     reset_for_testing()
     set_backend_type(backend_type)
     with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
@@ -473,7 +473,7 @@ def test_blocked_nz_strides_match_pto_isa():
     and the premise of the whole design is broken — hence a dedicated test.
     """
     reset_for_testing()
-    set_backend_type(BackendType.Ascend910B)
+    set_backend_type(BackendType.Ascend910)
     with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
         optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(NzMatmul)
     param_type = _nz_param(optimized)

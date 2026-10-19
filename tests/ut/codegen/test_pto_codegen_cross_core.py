@@ -356,7 +356,7 @@ class TestCrossCoreTpushTpopCodegen:
         setup with explicit AIC/AIV tpush/tpop ops.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         # backend.set_backend_type(BackendType.Ascend950)
 
         pipeline = passes.PassPipeline()
@@ -490,7 +490,7 @@ class TestCrossCoreTpushTpopCodegen:
         )
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         mlir_code = codegen.PTOCodegen().generate(ir.Program([func], "dynamic_tpop_program", span))
         tpop_line = next(line.strip() for line in mlir_code.splitlines() if "pto.tpop_from_aic" in line)
 
@@ -520,7 +520,7 @@ class TestCrossCoreTpushTpopCodegen:
         )
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         mlir_code = codegen.PTOCodegen().generate(ir.Program([func], "dynamic_tpop_static_row_program", span))
         lines = [line.strip() for line in mlir_code.splitlines()]
         tpop_line = next(line for line in lines if "pto.tpop_from_aic" in line)
@@ -545,7 +545,7 @@ class TestCrossCoreTpushTpopCodegen:
         func = ir.Function("empty_tpop", [], [], body, span, ir.FunctionType.AIV)
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         mlir_code = codegen.PTOCodegen().generate(ir.Program([func], "empty_tpop_program", span))
         tpop_line = next(line.strip() for line in mlir_code.splitlines() if "pto.tpop_from_aic" in line)
 
@@ -574,7 +574,7 @@ class TestCrossCoreTpushTpopCodegen:
         )
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         with pytest.raises(
             ValueError, match="tpop valid_shape operand must be integer or index type, got i1"
         ):
@@ -658,7 +658,7 @@ class TestCrossCoreTpushTpopCodegen:
         )
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         mlir_code = codegen.PTOCodegen().generate(ir.Program([func], "narrow_then_push_program", span))
 
         narrowed_alloc_lines = [
@@ -758,7 +758,7 @@ class TestCrossCoreTpushTpopCodegen:
         )
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         mlir_code = codegen.PTOCodegen().generate(
             ir.Program([producer, consumer], "partial_acc_to_vec_program", span)
         )
@@ -790,7 +790,7 @@ class TestCrossCoreTpushTpopCodegen:
         )
 
     def _row_narrowed_acc_push_program(
-        self, valid_rows, valid_cols, compact, split=0, rows=64, backend_type=BackendType.Ascend910B
+        self, valid_rows, valid_cols, compact, split=0, rows=64, backend_type=BackendType.Ascend910
     ):
         """One AIC function that pushes a row-narrowed Acc tile into the C2V FIFO.
 
@@ -1044,7 +1044,7 @@ class TestCrossCoreTpushTpopCodegen:
         )
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         mlir_code = codegen.PTOCodegen().generate(
             ir.Program([producer, consumer], "split_acc_to_vec_program", span)
         )
@@ -1176,7 +1176,7 @@ class TestCrossCoreTpushTpopCodegen:
         )
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         mlir_code = codegen.PTOCodegen().generate(ir.Program([func], "split_narrow_then_push_program", span))
 
         set_validshape_lines = [
@@ -1305,7 +1305,7 @@ class TestCrossCoreTpushTpopCodegen:
         )
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         mlir_code = codegen.PTOCodegen().generate(
             ir.Program([func], "dual_aiv_narrow_then_push_program", span)
         )
@@ -1427,7 +1427,7 @@ class TestCrossCoreTpushTpopCodegen:
         )
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         mlir_code = codegen.PTOCodegen().generate(
             ir.Program([func], "dual_aiv_zero_row_replay_program", span)
         )
@@ -1764,7 +1764,7 @@ class TestExpandMixedKernelCodegen:
             TILE_POLLING=tile_polling,
             KEEP_RESULT=keep_result,
             config=RunConfig(
-                backend_type=BackendType.Ascend910B,
+                backend_type=BackendType.Ascend910,
                 codegen_only=True,
                 save_kernels=True,
                 save_kernels_dir=str(tmp_path),
@@ -2087,7 +2087,7 @@ class TestExpandMixedKernelCodegen:
                 self.group_func()
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         try:
             transformed = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default).run_passes(
                 MultiplePipeSetup

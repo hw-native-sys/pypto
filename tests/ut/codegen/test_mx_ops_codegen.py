@@ -88,7 +88,7 @@ class TestMxMatmulCodegen:
                 pl.store(pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale), [0, 0], out)
 
         with pytest.raises(ValueError, match=r"matmul_mx.*only supported.*Ascend950.*a5.*a2a3"):
-            _run_default_pipeline(Program, BackendType.Ascend910B)
+            _run_default_pipeline(Program, BackendType.Ascend910)
 
     def test_mx_scale_load_accepts_provable_dynamic_offset(self):
         """Provable MX offsets become FloorDiv in IR; codegen sees floordivsi + maxsi."""
@@ -352,7 +352,7 @@ class TestMxMatmulCodegen:
                 pl.store(pl.load(src, [0, 0], [16, 64]), [0, 0], out)
 
         with pytest.raises(ValueError, match=r"(?:4-bit )?dtype .*not supported.*a2a3"):
-            _emit_incore_mlir(Program, BackendType.Ascend910B)
+            _emit_incore_mlir(Program, BackendType.Ascend910)
 
     @pytest.mark.parametrize("dtype", [pl.INT4, pl.UINT4, pl.HF4])
     def test_a5_rejects_non_fp4_four_bit_incore_abis(self, dtype):

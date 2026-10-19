@@ -25,7 +25,7 @@ namespace pypto {
 namespace backend {
 
 /**
- * @brief BackendHandler implementation for Ascend910B (a2a3).
+ * @brief BackendHandler implementation for Ascend910 (a2a3).
  *
  * Cross-core data is routed via GM, so the AIV side does not need a fractal
  * adapter; the GM-backed slot buffer must be injected by ExpandMixedKernel;

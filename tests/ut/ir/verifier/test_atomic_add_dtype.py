@@ -9,7 +9,7 @@
 """Tests for the AtomicAddDtypeValid property verifier.
 
 A bf16 atomic-add into global memory lowers to pto-isa ``SetAtomicAdd<bfloat16_t>``
--> ``set_atomic_bf16``, which the A2/A3 (Ascend910B) store pipe honours and the
+-> ``set_atomic_bf16``, which the A2/A3 (Ascend910) store pipe honours and the
 A5 (Ascend950) one does not. The distributed paths are the same mechanism, not
 parallel ones — pto-isa's comm ``TPut`` lands each chunk with
 ``TSTORE_IMPL<..., AtomicAdd>``, and remote_store emits a ``pto.tstore``
@@ -125,17 +125,17 @@ def test_bf16_atomic_add_rejected_on_ascend950(build, atomic):
     assert diags[0].rule_name == "AtomicAddDtypeValid"
     assert "bf16" in diags[0].message
     assert "a5" in diags[0].message
-    assert "Ascend910B" in diags[0].message
+    assert "Ascend910" in diags[0].message
 
 
 @pytest.mark.parametrize("build,atomic", _BUILDERS)
 def test_bf16_atomic_add_accepted_on_ascend910b(build, atomic):
     """The same programs are legal on A2/A3 (pto-isa set_atomic_bf16)."""
-    assert _verify(build(pl.BF16, atomic), BackendType.Ascend910B) == []
+    assert _verify(build(pl.BF16, atomic), BackendType.Ascend910) == []
 
 
 @pytest.mark.parametrize("build,atomic", _BUILDERS)
-@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
 def test_fp32_atomic_add_accepted_everywhere(build, atomic, backend_type):
     """Only bf16 varies by backend; fp32 atomic-add is legal on both profiles."""
     assert _verify(build(pl.FP32, atomic), backend_type) == []
@@ -169,7 +169,7 @@ def test_pipeline_accepts_bf16_atomic_put_on_ascend910b():
     """Regression guard against an over-strict check: the identical program
     compiles on the profile whose store pipe honours set_atomic_bf16."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     prog = _put_program(pl.BF16, pld.AtomicType.Add)
     PassManager.get_strategy(OptimizationStrategy.Default).run_passes(prog)
 
@@ -250,7 +250,7 @@ def test_tile_level_bf16_atomic_add_rejected_on_ascend950(op_name):
 
 @pytest.mark.parametrize("op_name", _TILE_LEVEL_OPS)
 def test_tile_level_bf16_atomic_add_accepted_on_ascend910b(op_name):
-    assert _verify(_tile_level_program(op_name, DataType.BF16, 1), BackendType.Ascend910B) == []
+    assert _verify(_tile_level_program(op_name, DataType.BF16, 1), BackendType.Ascend910) == []
 
 
 @pytest.mark.parametrize("op_name", _TILE_LEVEL_OPS)

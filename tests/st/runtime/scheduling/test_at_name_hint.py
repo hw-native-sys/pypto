@@ -59,7 +59,7 @@ class TestAtNameHint:
             ir.compile(
                 AtNameHintProgram,
                 output_dir=work_dir,
-                backend_type=BackendType.Ascend910B,
+                backend_type=BackendType.Ascend910,
                 dump_passes=False,
             )
 

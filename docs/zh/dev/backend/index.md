@@ -17,7 +17,7 @@ pass 从不对 `BackendType` 做分支判断。所有与架构相关的内容 �
 ```python
 from pypto import backend
 
-target = backend.get_backend_instance(backend.BackendType.Ascend910B)
+target = backend.get_backend_instance(backend.BackendType.Ascend910)
 names = target.get_registered_op_names()
 ```
 
@@ -47,3 +47,12 @@ names = target.get_registered_op_names()
 
 - [Pass、PassContext、PassPipeline 与 PassManager](../passes/00-pass_manager.md) —— handler 的来源。
 - [PTO ISA 参考](../../reference/index.md) —— handler 所抽象掉的硬件差异。
+
+## 后端名称
+
+A2/A3 后端使用 `BackendType.Ascend910`，A5 使用 `BackendType.Ascend950`。
+Python 和 C++ 中的 `BackendType.Ascend910B` 均保留为 `BackendType.Ascend910`
+的兼容别名，两个名称选择相同目标。规范的 `.name` 和新写入的产物元数据使用
+`Ascend910`。包含 `Ascend910B` 的旧产物仍可读取；较旧版本的 PyPTO 可能无法
+识别包含 `Ascend910` 的新产物。平台字符串（`a2a3`、`a2a3sim`、`a5`、
+`a5sim`）与枚举整数值保持不变。

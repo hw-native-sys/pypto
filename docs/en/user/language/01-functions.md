@@ -356,7 +356,7 @@ generation, so handing it `lower()`'s output would run the pipeline twice.
 
 ```python
 program = my_kernel.specialize(sample_x, sample_w, sample_out)
-ir.compile(program, output_dir="build/out", backend_type=BackendType.Ascend910B)
+ir.compile(program, output_dir="build/out", backend_type=BackendType.Ascend910)
 ```
 
 It takes no `config=`: no pass runs here, so a `RunConfig` would have nothing to

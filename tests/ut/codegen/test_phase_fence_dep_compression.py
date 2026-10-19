@@ -40,7 +40,7 @@ def _generate_orch_code(program) -> str:
 
 def _compile_program(program_cls) -> str:
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     pm = PassManager.get_strategy(OptimizationStrategy.Default)
     transformed = pm.run_passes(program_cls)
     return _generate_orch_code(transformed)
@@ -48,7 +48,7 @@ def _compile_program(program_cls) -> str:
 
 def _compile_program_with_auto_deps(program_cls) -> str:
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     pm = PassManager.get_strategy(
         OptimizationStrategy.Default,
         analyze_auto_scopes_for_deps=True,

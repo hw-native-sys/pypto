@@ -5641,7 +5641,7 @@ class TestConvertGatherOp:
     """Test conversion of tensor.gather (MVP: 2D + dim=-1).
 
     UT transforms conftest pins Ascend950 (A5), so the default path is the
-    full-tile flat-index lowering. A separate test switches to Ascend910B to
+    full-tile flat-index lowering. A separate test switches to Ascend910 to
     lock the legacy per-row loop.
     """
 
@@ -5800,7 +5800,7 @@ class TestConvertGatherOp:
     def test_gather_conversion_a2a3_per_row(self):
         """Non-A5 keeps the legacy per-row single-row gather loop."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         try:
 
             @pl.program

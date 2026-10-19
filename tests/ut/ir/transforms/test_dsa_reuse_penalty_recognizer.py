@@ -815,7 +815,7 @@ def test_dsa_rp_recognizes_l0_to_l1_route(ascend_backend):
 
 @pytest.mark.parametrize(
     ("ascend_backend", "expect_edge"),
-    [(BackendType.Ascend910B, False), (BackendType.Ascend950, True)],
+    [(BackendType.Ascend910, False), (BackendType.Ascend950, True)],
     indirect=["ascend_backend"],
 )
 def test_dsa_rp_uses_backend_memory_graph_for_acc_to_vec_route(ascend_backend, expect_edge):

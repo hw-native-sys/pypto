@@ -61,10 +61,16 @@ void BindBackend(nb::module_& m) {
                   "each recipe still restricts physical forms");
 
   // ========== BackendType enum ==========
-  nb::enum_<BackendType>(backend_mod, "BackendType",
-                         "Backend type for passes and codegen (use Instance internally)")
-      .value("Ascend910B", BackendType::Ascend910B, "910B backend (PTO assembly codegen)")
-      .value("Ascend950", BackendType::Ascend950, "950 PTO backend");
+  auto backend_type =
+      nb::enum_<BackendType>(backend_mod, "BackendType",
+                             "Backend type for passes and codegen (use Instance internally)")
+          .value("Ascend910", BackendType::Ascend910, "910 backend (A2/A3 PTO assembly codegen)")
+          .value("Ascend950", BackendType::Ascend950, "950 PTO backend");
+
+  // Register the old spelling as the same Python object. A second .value()
+  // creates a distinct nanobind enum member and breaks Python identity/equality.
+  backend_type.attr("Ascend910B") = backend_type.attr("Ascend910");
+  backend_type.attr("_member_map_")["Ascend910B"] = backend_type.attr("Ascend910");
 
   // ========== Mem class ==========
   nb::class_<Mem>(backend_mod, "Mem", "Memory component")
@@ -137,14 +143,14 @@ void BindBackend(nb::module_& m) {
            "PTO MLIR target arch attribute string (e.g. 'a2a3', 'a5')")
       .def("get_launch_spec_core_count_method", &BackendHandler::GetLaunchSpecCoreCountMethod,
            "Method name on launch_spec for setting core count "
-           "('set_block_num' on Ascend910B, 'set_core_num' on Ascend950)")
+           "('set_block_num' on Ascend910, 'set_core_num' on Ascend950)")
       .def("get_default_sim_platform", &BackendHandler::GetDefaultSimPlatform,
            "Default simulator platform name (e.g. 'a2a3sim', 'a5sim')")
       .def("get_extra_ptoas_flags", &BackendHandler::GetExtraPtoasFlags,
            "Extra flags appended to ptoas invocation for this backend")
       .def("honors_high_precision_algorithm", &BackendHandler::HonorsHighPrecisionAlgorithm,
            "Whether PTO-ISA selects a distinct algorithm from the precisionType attribute that "
-           "high_precision=True emits (ignored on Ascend910B)")
+           "high_precision=True emits (ignored on Ascend910)")
       .def("requires_gm_pipe_buffer", &BackendHandler::RequiresGMPipeBuffer,
            "Whether ExpandMixedKernel must inject the GM-backed pipe slot buffer")
       .def("supports_local_pipe_depth", &BackendHandler::SupportsLocalPipeDepth,

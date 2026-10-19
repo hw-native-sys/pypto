@@ -163,7 +163,7 @@ def put(
     and dtype as ``stage``.
 
     ``atomic=Add`` requires an fp32/bf16/fp16/int32/int16/int8 destination (the
-    hardware atomic-add dtypes); a bf16 destination is Ascend910B-only, checked
+    hardware atomic-add dtypes); a bf16 destination is Ascend910-only, checked
     by the ``AtomicAddDtypeValid`` verifier.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)

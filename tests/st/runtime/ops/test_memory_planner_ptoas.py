@@ -629,7 +629,7 @@ class TestMemoryPlannerPtoas:
         # kernel's ValueError as PartialCodegenError; the exact reason string is
         # pinned in tests/ut/codegen/test_multi_buffer_codegen.py.
         _backend.reset_for_testing()
-        _backend.set_backend_type(BackendType.Ascend910B)
+        _backend.set_backend_type(BackendType.Ascend910)
         with pytest.raises(PartialCodegenError):
             ir.compile(MultiBufferCoLiveProgram, memory_planner=MemoryPlanner.PTOAS)
 

@@ -307,7 +307,7 @@ def _jit_program(kernel):
 def _lower_to_auto_tile_input(program):
     """Run the Default prefix through LegalizeTileCast, stopping before AutoTile."""
     _backend.reset_for_testing()
-    _backend.set_backend_type(BackendType.Ascend910B)
+    _backend.set_backend_type(BackendType.Ascend910)
     for make_pass in (
         passes.inline_functions,
         passes.unroll_loops,
@@ -639,7 +639,7 @@ def test_already_padded_output_localizes_valid_shape_across_mn_grid():
     that panel is emitted by BuildSplitKGrid with a nonzero output offset.
     """
     _backend.reset_for_testing()
-    _backend.set_backend_type(BackendType.Ascend910B)
+    _backend.set_backend_type(BackendType.Ascend910)
 
     @pl.program
     class Before:
@@ -692,7 +692,7 @@ def test_already_padded_output_localizes_valid_shape_across_mn_grid():
 def test_symbolic_padded_output_localizes_valid_shape_across_mn_grid():
     """The sub-grid intersection remains symbolic when valid N is dynamic."""
     _backend.reset_for_testing()
-    _backend.set_backend_type(BackendType.Ascend910B)
+    _backend.set_backend_type(BackendType.Ascend910)
 
     @pl.program
     class Before:
@@ -763,7 +763,7 @@ def test_issue_2232_full_default_pipeline_allocates(kernel):
     from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
     _backend.reset_for_testing()
-    _backend.set_backend_type(BackendType.Ascend910B)
+    _backend.set_backend_type(BackendType.Ascend910)
     pass_manager = PassManager.get_strategy(OptimizationStrategy.Default)
     result = pass_manager.run_passes(_jit_program(kernel))
     assert result is not None
@@ -777,7 +777,7 @@ def test_predicated_full_default_pipeline_allocates():
     from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
     _backend.reset_for_testing()
-    _backend.set_backend_type(BackendType.Ascend910B)
+    _backend.set_backend_type(BackendType.Ascend910)
     pass_manager = PassManager.get_strategy(OptimizationStrategy.Default)
     for kernel in (issue_2232_repro_predicated, canonical_split_k_mn_predicated):
         result = pass_manager.run_passes(_jit_program(kernel))
@@ -789,7 +789,7 @@ def test_non_seed_predicate_leaves_the_reduction_untouched(capfd):
     against 0 is not evidence of a split-K seed, so the triplet is declined --
     loudly, with the same ``PH-AT-006`` the other unsupported placements use."""
     _backend.reset_for_testing()
-    _backend.set_backend_type(BackendType.Ascend910B)
+    _backend.set_backend_type(BackendType.Ascend910)
     before = _lower_to_auto_tile_input(OpaquePredicateBefore)
     after = passes.auto_tile_matmul_l0()(before)
 
@@ -811,7 +811,7 @@ def test_canonical_split_k_chooser_accounts_for_full_window_boxing(planner, sour
     from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
     _backend.reset_for_testing()
-    _backend.set_backend_type(BackendType.Ascend910B)
+    _backend.set_backend_type(BackendType.Ascend910)
     before = _lower_to_auto_tile_input(source)
     after_auto_tile = passes.auto_tile_matmul_l0()(before)
     printed = ir.python_print(after_auto_tile)
@@ -828,7 +828,7 @@ def test_canonical_split_k_boundary_codegen_uses_box_aligned_physical_width():
     from pypto.pypto_core import codegen  # noqa: PLC0415
 
     _backend.reset_for_testing()
-    _backend.set_backend_type(BackendType.Ascend910B)
+    _backend.set_backend_type(BackendType.Ascend910)
     optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
         _jit_program(canonical_split_k_n_boundary_retiles_k)
     )
@@ -889,7 +889,7 @@ def test_row_narrowed_matmul_declares_a_compact_accumulator_seed():
     ``InferTileMemorySpace`` re-deduces the call, whereas a kwarg is re-read.
     """
     _backend.reset_for_testing()
-    _backend.set_backend_type(BackendType.Ascend910B)
+    _backend.set_backend_type(BackendType.Ascend910)
 
     @pl.program
     class Before:

@@ -556,7 +556,7 @@ class PTOCodegen : public CodegenBase {
   /**
    * @brief Record the SSA name of the __gm_pipe_buffer function parameter
    *
-   * On Ascend910B (a2a3), the GM slot buffer is a function parameter used as
+   * On Ascend910 (a2a3), the GM slot buffer is a function parameter used as
    * intermediary for cross-core pipe communication. The codegen emits it as
    * a gm_slot_buffer operand in initialize_pipe instructions.
    */
@@ -738,7 +738,7 @@ class PTOCodegen : public CodegenBase {
   /**
    * @brief Return the GM slot buffer SSA region for one frontend pipe.
    *
-   * Ascend910B uses a single function parameter as the backing GM FIFO
+   * Ascend910 uses a single function parameter as the backing GM FIFO
    * workspace. Multiple frontend pipe ids in one function must point at
    * disjoint byte ranges within that parameter.
    */

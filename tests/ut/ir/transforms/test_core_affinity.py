@@ -42,9 +42,9 @@ from pypto.pypto_core import testing
 
 @pytest.fixture(autouse=True)
 def _setup_backend():
-    """Configure Ascend910B backend before each test and reset afterward."""
+    """Configure Ascend910 backend before each test and reset afterward."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     yield
     backend.reset_for_testing()
 

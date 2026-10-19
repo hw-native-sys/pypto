@@ -214,7 +214,7 @@ class DistributedCompiledProgram:
         program: Program | None,
         output_dir: str,
         *,
-        backend_type: BackendType = BackendType.Ascend910B,
+        backend_type: BackendType = BackendType.Ascend910,
         platform: str | None = None,
         execution_mode: ExecutionMode | None = None,
         distributed_config: DistributedConfig | None = None,

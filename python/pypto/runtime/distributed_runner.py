@@ -1736,7 +1736,7 @@ def execute_distributed_compiled(
         from pypto.runtime import ExecutionMode
 
         ir.DistributedCompiledProgram.from_dir(
-            work_dir, backend_type=BackendType.Ascend910B, execution_mode=ExecutionMode.ONBOARD,
+            work_dir, backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.ONBOARD,
         )(*args, config=cfg)
 
     Emits a :class:`DeprecationWarning`; behaviour is unchanged.

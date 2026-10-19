@@ -10,7 +10,7 @@
 """
 Compiler-driven L0 matmul tiling (AutoTileMatmulL0) -- the placement x K-strategy matrix.
 
-When a matmul's ``[M, N]`` output exceeds the cube accumulator L0c (128 KB on Ascend910B),
+When a matmul's ``[M, N]`` output exceeds the cube accumulator L0c (128 KB on Ascend910),
 AutoTileMatmulL0 tiles the output into ``[m, n]`` sub-tiles and **places** each one by where
 the result is consumed:
 

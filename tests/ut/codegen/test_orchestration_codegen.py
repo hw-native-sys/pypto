@@ -32,7 +32,7 @@ class TestOrchestration:
     def test_basic_structure(self):
         """Test codegen produces simpler runtime format: make_tensor_external, Arg, rt_submit_aiv_task."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class BasicProgram:
@@ -128,7 +128,7 @@ class TestOrchestration:
         """A runtime-allocated output's TensorCreateInfo carries shape/dtype
         only; no fill call survives on the emission path."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class CreateProgram:
@@ -165,7 +165,7 @@ class TestOrchestration:
         """tensor.read delegates access policy to get_tensor_data<T>() instead
         of dereferencing a host buffer directly."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class TensorReadProgram:
@@ -216,7 +216,7 @@ class TestOrchestration:
         both policies and can return stale or invalid data.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class InternalReadProgram:
@@ -254,7 +254,7 @@ class TestOrchestration:
     def test_config_file(self):
         """Test orchestration result contains kernel function metadata."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class ConfigProgram:
@@ -306,7 +306,7 @@ class TestOrchestration:
         the tensor args appear, in tensors-first order.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class ScalarKernelProgram:
@@ -342,7 +342,7 @@ class TestOrchestration:
     def test_independent_tasks(self):
         """Test codegen with independent tasks (no dependencies needed)."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class IndependentProgram:
@@ -396,7 +396,7 @@ class TestOrchestration:
         Formula: f = (a + b + 1)(a + b + 2) + (a + b)
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class VectorExampleProgram:
@@ -542,7 +542,7 @@ class TestOrchestration:
     def test_tuple_intermediate(self):
         """Test tuple return as intermediate tensors: kernel_pair -> kernel_add."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class TupleIntermediateProgram:
@@ -607,7 +607,7 @@ class TestOrchestration:
     def test_tuple_output(self):
         """Test tuple return as final output: all elements are external tensors."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class TupleOutputProgram:
@@ -655,7 +655,7 @@ class TestOrchestration:
     def test_four_element_tuple(self):
         """Test 4-element tuple unpacking with mixed shapes as intermediate."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class FourTupleProgram:
@@ -757,7 +757,7 @@ class TestOrchestration:
         precisely from the callee's ReturnStmt.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class InOutNotReturnedProgram:
@@ -829,7 +829,7 @@ class TestOrchestration:
         and read by a task placed after it, with the ``pl.create_tensor`` placed
         either before or inside the scope (issue #1697)."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class CrossScopeProgram:
@@ -948,7 +948,7 @@ class TestOrchestration:
             chain. The carry decl is now hoisted out and the copy collapses.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         N, M, W = 64, 512, 64
 
@@ -1078,7 +1078,7 @@ class TestOrchestration:
         (the hoist is gated on a manual-scope body). Guards against the hoist
         firing in ordinary AUTO-scope codegen."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         N, M, W = 64, 512, 64
 
@@ -1142,7 +1142,7 @@ class TestOrchestration:
         declared in this scope``). The copy now collapses onto the enclosing
         ``score``."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         N, M, W = 64, 2048, 8
 
@@ -1215,7 +1215,7 @@ class TestOrchestration:
         still collapses — exercised by the other #1713 tests; this guards the
         indent condition that distinguishes the two.)"""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         N, M, W = 64, 512, 64
 
@@ -1298,7 +1298,7 @@ class TestOrchestration:
         The phi decl is now hoisted to the enclosing scope (its init is the
         enclosing param/buffer), so the after-scope reader resolves it."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         N, M = 16, 256
 
@@ -1363,7 +1363,7 @@ class TestOrchestration:
     def test_tensor_create(self):
         """Test tensor.create generates TensorCreateInfo with shape/dtype."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class TensorCreateProgram:
@@ -1402,7 +1402,7 @@ class TestOrchestration:
         ``TensorCreateInfo`` ctor's trailing ``manual_dep`` argument.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class ManualDepProgram:
@@ -1446,7 +1446,7 @@ class TestOrchestration:
         The codegen should emit make_inout_param for these inplace tensors.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class InplaceProgram:
@@ -1548,7 +1548,7 @@ class TestOrchestration:
     def test_tensor_dim(self):
         """Test tensor.dim generates int64_t assignment with shape value."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class TensorDimProgram:
@@ -1598,7 +1598,7 @@ class TestOrchestrationOutputDeclaration:
         # pl.Tensor) still compiles — the missing-output-param warning is
         # non-fatal. The declared directions flow straight into the signature.
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class NoOutputParamProgram:
@@ -1631,7 +1631,7 @@ class TestOrchestrationOutputDeclaration:
 
     def test_written_param_declared_out_ok(self) -> None:
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class GoodProgram:
@@ -1666,7 +1666,7 @@ class TestOrchestrationOutputDeclaration:
         # A read-only param is fine as plain pl.Tensor even when consumed by a
         # kernel — only Out/InOut kernel args trigger the write check.
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class ReadOnlyProgram:

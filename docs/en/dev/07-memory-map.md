@@ -50,12 +50,12 @@ full.
 
 Which backend is decided in this order:
 
-1. `-b/--backend` — an explicit `BackendType` member name (`Ascend910B`, `Ascend950`).
+1. `-b/--backend` — an explicit `BackendType` member name (`Ascend910`, `Ascend950`).
 2. The case's `ptoas/*.pto` output, whose `pto.target_arch` attribute is matched
    against each backend's own `get_pto_target_arch()`. The mapping lives with
    the backends rather than being duplicated here, so a new backend needs no
    change to this tool.
-3. Otherwise `Ascend910B` is assumed, and the page labels the chip *assumed* so
+3. Otherwise `Ascend910` is assumed, and the page labels the chip *assumed* so
    the panel scales are not mistaken for measured ones.
 
 Capacities are read from the **current** source tree, not from whatever the dump

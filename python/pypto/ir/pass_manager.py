@@ -248,7 +248,7 @@ class PassManager:
             # lifetime reuse.
             passes.materialize_semantic_aliases,
             # MemoryReuse coalesces independent tile buffers by lifetime; on
-            # Ascend910B split-AIV it also avoids the load + tpop_from_aic in-place
+            # Ascend910 split-AIV it also avoids the load + tpop_from_aic in-place
             # hazard so a separate legalisation pass is no longer needed.
             passes.memory_reuse,
             passes.allocate_memory_addr,

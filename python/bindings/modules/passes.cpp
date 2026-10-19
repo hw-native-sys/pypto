@@ -141,7 +141,7 @@ void BindPass(nb::module_& m) {
       .value("AtomicAddDtypeValid", IRProperty::AtomicAddDtypeValid,
              "Every atomic-add write into GM (tile.store / tensor.assemble / pld.tensor.put / "
              "pld.tile.put / pld.tensor.remote_store / pld.tile.remote_store) targets a dtype the "
-             "backend store pipe can combine; a bf16 destination requires the Ascend910B (A2/A3) "
+             "backend store pipe can combine; a bf16 destination requires the Ascend910 (A2/A3) "
              "profile")
       .value("AccCompactValid", IRProperty::AccCompactValid,
              "Every tile.matmul_acc / tile.matmul_mx_acc accumulates into a CompactMode.normal "

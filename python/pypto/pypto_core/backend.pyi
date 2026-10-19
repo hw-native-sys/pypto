@@ -16,13 +16,14 @@ from pypto import ir
 class BackendType:
     """Backend type for passes and codegen."""
 
-    Ascend910B: BackendType
+    Ascend910: BackendType
+    Ascend910B: BackendType  # Compatibility alias of Ascend910.
     Ascend950: BackendType
     __members__: ClassVar[dict[str, BackendType]]
     """Every member, keyed by name — the canonical way to enumerate the enum."""
     @property
     def name(self) -> str:
-        """The member name (e.g. ``"Ascend910B"``)."""
+        """The member name (e.g. ``"Ascend910"``)."""
         ...
     @property
     def value(self) -> int:

@@ -14,7 +14,7 @@ same table:
 
 * ``SoC::GetMemoryGraph()`` (``src/backend/common/soc.cpp``) models the memory
   hierarchy for ``Backend::FindMemPath``. It is coarser than tmov legality --
-  it omits ``Acc -> Vec`` on Ascend910B, a move the pipeline emits and PTOAS
+  it omits ``Acc -> Vec`` on Ascend910, a move the pipeline emits and PTOAS
   accepts -- so it must not be used to decide whether a ``tile.move`` is legal.
 * ``IsTileMoveEverSupported`` (``src/ir/memref.cpp``) mirrors PTOAS's
   ``TMovOp::verify``, unioned over targets.
@@ -43,7 +43,7 @@ _SPACES = [
     MS.RightScale,
 ]
 
-_TARGETS = [backend.BackendType.Ascend910B, backend.BackendType.Ascend950]
+_TARGETS = [backend.BackendType.Ascend910, backend.BackendType.Ascend950]
 
 
 @pytest.fixture(autouse=True)
@@ -95,7 +95,7 @@ def test_targets_disagree_on_some_edges():
     Recorded so a future attempt to collapse these into one table has to
     confront the difference rather than average it away.
     """
-    a2a3 = _direct_edges(backend.BackendType.Ascend910B)
+    a2a3 = _direct_edges(backend.BackendType.Ascend910)
     backend.reset_for_testing()
     a5 = _direct_edges(backend.BackendType.Ascend950)
 

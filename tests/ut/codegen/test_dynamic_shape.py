@@ -138,7 +138,7 @@ def test_add_kernel_composite_dim_constant_declared():
     references an undefined ``%c2_index``.
     """
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     func = AddKernelCompositeDim.get_function("add_kernel")
     assert func is not None
     program = ir.Program([func], "test_add_kernel_composite", ir.Span.unknown())
@@ -160,7 +160,7 @@ def test_add_kernel_composite_dim_constant_declared():
 def test_add_kernel_dynamic_shape_pto_codegen():
     """Test PTO codegen generates correct signature and tensor views for dynamic shapes."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     func = AddKernelDynamic.get_function("add_kernel")
     assert func is not None
     program = ir.Program([func], "test_add_kernel", ir.Span.unknown())
@@ -185,7 +185,7 @@ def test_add_kernel_dynamic_shape_pto_codegen():
 def test_add_kernel_valid_shape_pto_codegen():
     """Test PTO codegen handles load with valid_shape: tile allocated from shapes, M/N as index scalars."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     func = AddKernelValidShape.get_function("add_kernel")
     assert func is not None
     program = ir.Program([func], "test_add_kernel_valid_shape", ir.Span.unknown())
@@ -226,7 +226,7 @@ def test_add_kernel_valid_shape_expr_pto_codegen():
     valid_shape element is an arbitrary expression (e.g. pl.min(...)), not just an ir::Var.
     """
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     func = AddKernelValidShapeExpr.get_function("add_kernel")
     assert func is not None
     program = ir.Program([func], "test_add_kernel_valid_shape_expr", ir.Span.unknown())
@@ -252,7 +252,7 @@ def test_add_kernel_valid_shape_expr_pto_codegen():
 def test_add_kernel_loop_dynamic_pto_codegen():
     """Test that tensor.dim result variable is correctly mapped to the MLIR shape arg."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     func = AddKernelLoopDynamic.get_function("add_kernel")
     assert func is not None
     program = ir.Program([func], "test_add_kernel_loop", ir.Span.unknown())
@@ -303,7 +303,7 @@ def test_type_only_valid_shape_symbol_becomes_a_kernel_argument():
     much later as an opaque ptoas 'expected SSA operand' parse error.
     """
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     func = AddKernelTypeOnlyValidShape.get_function("add_kernel")
     assert func is not None
     program = ir.Program([func], "test_type_only_valid_shape", ir.Span.unknown())

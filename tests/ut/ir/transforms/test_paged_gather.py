@@ -268,7 +268,7 @@ def test_paged_gather_survives_full_pipeline(is_trans):
     # A backend may already be configured by an earlier test in the session;
     # only set it when unconfigured so real set_backend_type failures still surface.
     if not is_backend_configured():
-        set_backend_type(BackendType.Ascend910B)
+        set_backend_type(BackendType.Ascend910)
     program = _build_program(is_trans=is_trans)
     pm = PassManager.get_strategy(OptimizationStrategy.Default)
     result = pm.run_passes(program)

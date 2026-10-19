@@ -509,7 +509,7 @@ cat /usr/local/Ascend/driver/version.info
 retesting.
 
 **Second, check that the chip series matches `-p`.** The wrong arch also surfaces as
-`507018` and looks convincingly like a compiler bug. `a2a3` covers `Ascend910B*` (A2) and
+`507018` and looks convincingly like a compiler bug. `a2a3` covers `Ascend910*` (A2) and
 `Ascend910_93*` (A3); `a5` covers `Ascend950*`:
 
 ```bash

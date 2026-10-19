@@ -165,9 +165,26 @@ def test_compile_persists_distributed_meta(compiled, tmp_path):
     assert shapes == [[128, 128], [128, 128], [128, 128]]
     assert meta["num_return_types"] == 1
     assert meta["platform"] == "a2a3sim"
-    assert meta["backend_type"] == "Ascend910B"
+    assert meta["backend_type"] == "Ascend910"
     assert meta["distributed_config"]["runtime"] == "tensormap_and_ringbuffer"
     assert meta["distributed_config"]["aicpu_thread_num"] == 0
+
+
+@pytest.mark.parametrize("backend_name", ["Ascend910", "Ascend910B"])
+def test_from_dir_accepts_ascend910_backend_names(compiled, tmp_path, backend_name):
+    """The shared metadata reader must also retain compatibility for L3 artifacts."""
+    meta_path = tmp_path / _DISTRIBUTED_META_FILENAME
+    meta = json.loads(meta_path.read_text())
+    meta["backend_type"] = backend_name
+    meta_path.write_text(json.dumps(meta))
+    persisted = meta_path.read_bytes()
+
+    reloaded = DistributedCompiledProgram.from_dir(tmp_path)
+
+    assert reloaded.backend_type is BackendType.Ascend910
+    assert reloaded.backend_type.name == "Ascend910"
+    assert reloaded.platform == "a2a3sim"
+    assert meta_path.read_bytes() == persisted
 
 
 def test_from_dir_round_trips_param_metadata(compiled, tmp_path):
@@ -430,8 +447,8 @@ def test_distributed_reload_rejects_legacy_or_kernel_metadata(compiled, tmp_path
 @pytest.mark.parametrize(
     ("persisted_backend", "target_backend", "target_name"),
     [
-        (BackendType.Ascend910B, BackendType.Ascend950, "a5"),
-        (BackendType.Ascend950, BackendType.Ascend910B, "a2a3"),
+        (BackendType.Ascend910, BackendType.Ascend950, "a5"),
+        (BackendType.Ascend950, BackendType.Ascend910, "a2a3"),
     ],
 )
 @pytest.mark.parametrize("persisted_mode", [None, ExecutionMode.SIM, ExecutionMode.ONBOARD])

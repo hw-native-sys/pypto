@@ -82,7 +82,7 @@ def test_device_kernel_rejects_descending_loop():
             return pl.store(acc, [0, 0], out)
 
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Descending)
 
     with pytest.raises(ValueError, match="must have a positive step"):
@@ -135,7 +135,7 @@ def test_sub_fractal_cube_tile_is_rejected_by_pypto(name, rows, cols, dtype, acc
             return pl.tile.store(acc, [0, 0], out)
 
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Prog)
 
     with pytest.raises(ValueError) as excinfo:
@@ -166,7 +166,7 @@ def test_fractal_sized_cube_tile_still_lowers():
             return pl.tile.store(acc, [0, 0], out)
 
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Prog)
     assert codegen.PTOCodegen().generate(optimized)
 
@@ -192,7 +192,7 @@ def test_sub_fractal_rows_are_accepted_where_pto_exempts_them():
             return pl.store(t, [0, 0], out)
 
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Prog)
     assert codegen.PTOCodegen().generate(optimized)
 
@@ -241,7 +241,7 @@ def test_sub_32_byte_flat_tile_is_reported_by_pypto(
             return pl.store(t, [0, 0], out)
 
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Prog)
 
     # Codegen must still succeed -- the diagnostic informs, it does not gate.
@@ -284,7 +284,7 @@ def test_32_byte_aligned_flat_tile_still_lowers(name, rows, cols, dtype):
             return pl.store(t, [0, 0], out)
 
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Prog)
     assert codegen.PTOCodegen().generate(optimized)
 
@@ -312,7 +312,7 @@ def test_device_kernel_accepts_ascending_loop():
             return pl.store(acc, [0, 0], out)
 
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Ascending)
 
     mlir = codegen.PTOCodegen().generate(optimized)
@@ -365,7 +365,7 @@ def test_orchestration_codegen_precondition_entry_point():
 def _finalize(program):
     """Run the codegen-entry passes, deliberately omitting NormalizeReturnOrder."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     return passes.classify_iter_arg_carry()(
         passes.materialize_runtime_scopes()(passes.derive_call_directions()(program))
     )

@@ -45,7 +45,7 @@ def _reset_backend():
     backend.reset_for_testing()
 
 
-def _run(prog, backend_type=BackendType.Ascend910B):
+def _run(prog, backend_type=BackendType.Ascend910):
     backend.reset_for_testing()
     backend.set_backend_type(backend_type)
     return PassManager.get_strategy(OptimizationStrategy.Default).run_passes(prog)
@@ -140,12 +140,12 @@ def _int_matmul_to_gm(out_dtype, *, pre_quant: float | None = SCALE, pre_relu=Fa
 class TestAccToMatPreQuant:
     """``tile.assemble`` — the Acc->Mat (``pto.tinsert``) writeback."""
 
-    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
     def test_int32_to_fp16_scale_is_supported(self, backend_type):
         """PTOAS 0.65 emits the typed scaled ``TINSERT`` on both backends."""
         _run(_int_matmul_to_mat(pl.FP16, pre_relu=True), backend_type)
 
-    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
     @pytest.mark.parametrize("mat_dtype", [pl.BF16, pl.INT8, pl.INT16])
     def test_unsupported_int32_targets_are_rejected(self, mat_dtype, backend_type):
         with pytest.raises(pypto.Error, match="FixpipeEpilogueValid") as excinfo:
@@ -154,7 +154,7 @@ class TestAccToMatPreQuant:
         assert "cannot be assembled" in message, message
         assert "Supported Mat targets from a 'int32' accumulator here are fp16" in message, message
 
-    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
     def test_unsupported_fp32_source_is_rejected(self, backend_type):
         with pytest.raises(pypto.Error, match="FixpipeEpilogueValid") as excinfo:
             _run(_float_matmul_to_mat(pl.FP16), backend_type)

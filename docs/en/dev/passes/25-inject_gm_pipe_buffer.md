@@ -1,10 +1,10 @@
 # InjectGMPipeBuffer Pass
 
-Injects the `__gm_pipe_buffer` workspace parameter for cross-core pipes on backends that route slot data through GM (currently Ascend910B). Runs immediately after `ExpandMixedKernel`.
+Injects the `__gm_pipe_buffer` workspace parameter for cross-core pipes on backends that route slot data through GM (currently Ascend910). Runs immediately after `ExpandMixedKernel`.
 
 ## Overview
 
-On Ascend910B, cross-core `tpush`/`tpop` rides through a shared GM buffer instead of a direct inter-core fabric. After `ExpandMixedKernel` has split mixed InCore functions into AIC/AIV pairs and prepended `aic_initialize_pipe` / `aiv_initialize_pipe`, this pass:
+On Ascend910, cross-core `tpush`/`tpop` rides through a shared GM buffer instead of a direct inter-core fabric. After `ExpandMixedKernel` has split mixed InCore functions into AIC/AIV pairs and prepended `aic_initialize_pipe` / `aiv_initialize_pipe`, this pass:
 
 1. Finds every function whose body issues `aic_initialize_pipe` or `aiv_initialize_pipe`.
 2. Adds a fresh `__gm_pipe_buffer` Out-tensor parameter to each such function.
@@ -23,7 +23,7 @@ The pass is **backend-gated** on `BackendHandler::RequiresGMPipeBuffer()`. Backe
 - Input IR must have AIC/AIV split with cross-core pipe setup already in place (run `ExpandMixedKernel` first).
 - Backend must report `RequiresGMPipeBuffer() == true`. Otherwise the pass is a no-op.
 
-**When to use**: Run after `ExpandMixedKernel` when targeting Ascend910B (or any backend that signals `RequiresGMPipeBuffer`). The default tile pipeline already places it in the correct slot.
+**When to use**: Run after `ExpandMixedKernel` when targeting Ascend910 (or any backend that signals `RequiresGMPipeBuffer`). The default tile pipeline already places it in the correct slot.
 
 > **Note**: This pass was extracted from `ExpandMixedKernel` to keep that pass focused on the AIC/AIV split logic and to scope the GM-workspace concern to a single, backend-gated transform.
 
@@ -66,7 +66,7 @@ Phase 3 — Inject tensor.create at Orchestration call sites:
 
 ## Example
 
-**Before** (after `ExpandMixedKernel`, Ascend910B):
+**Before** (after `ExpandMixedKernel`, Ascend910):
 
 ```python
 @pl.program
@@ -139,7 +139,7 @@ passes.def("inject_gm_pipe_buffer", &pass::InjectGMPipeBuffer,
            "Inject __gm_pipe_buffer workspace parameter for GM-routed cross-core pipes");
 ```
 
-**Tests**: covered transitively via `tests/ut/ir/transforms/test_expand_mixed_kernel_a2a3.py` (Ascend910B pipelines).
+**Tests**: covered transitively via `tests/ut/ir/transforms/test_expand_mixed_kernel_a2a3.py` (Ascend910 pipelines).
 
 ## Pass Properties
 

@@ -28,7 +28,7 @@ from pypto.pypto_core import codegen
 from .buffer_test_utils import statements
 
 _PLANNERS = (passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS)
-_BACKENDS = [BackendType.Ascend910B, BackendType.Ascend950]
+_BACKENDS = [BackendType.Ascend910, BackendType.Ascend950]
 pytestmark = pytest.mark.usefixtures("ascend_backend")
 
 
@@ -74,7 +74,7 @@ def _compile_native(tmp_path: Path, program: ir.Program, backend: BackendType, a
         pytest.skip("PTOAS is not available")
     source, output = tmp_path / "matrix.pto", tmp_path / "matrix.cpp"
     source.write_text(text)
-    arch = "a2" if backend == BackendType.Ascend910B else "a5"
+    arch = "a2" if backend == BackendType.Ascend910 else "a5"
     _run_ptoas(
         str(source), str(output), [f"--pto-arch={arch}", f"--pto-level={'level3' if addressed else 'level2'}"]
     )
@@ -160,7 +160,7 @@ def test_init_cond_selects_explicit_initializing_and_accumulating_writes(
     assert len(conditionals) == branches
     for branch in conditionals:
         assert branch.else_body is not None and not branch.return_vars
-    text = _compile_native(tmp_path, lowered, BackendType.Ascend910B, planner != passes.MemoryPlanner.PTOAS)
+    text = _compile_native(tmp_path, lowered, BackendType.Ascend910, planner != passes.MemoryPlanner.PTOAS)
     assert text.count("scf.if") == branches
 
 
@@ -283,7 +283,7 @@ def test_transposed_operand_relabels_its_mat_window_without_a_copy(
         assert len(addresses) == 2
     else:
         assert len(mats) == 2 and names["buffer.reshape"] == 1
-    text = _compile_native(tmp_path, lowered, BackendType.Ascend910B, addressed)
+    text = _compile_native(tmp_path, lowered, BackendType.Ascend910, addressed)
     assert text.count("pto.treshape") == (0 if addressed else 1)
 
 

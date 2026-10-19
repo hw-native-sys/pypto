@@ -107,7 +107,7 @@ class DynamicValidMatmulIfPhiProgram:
 
 def _ptoas_pto(program) -> str:
     reset_for_testing()
-    set_backend_type(BackendType.Ascend910B)
+    set_backend_type(BackendType.Ascend910)
     with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
         optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
     func = next(f for f in optimized.functions.values() if f.name == "kernel")
@@ -116,7 +116,7 @@ def _ptoas_pto(program) -> str:
 
 def _planner_pto(program, planner: passes.MemoryPlanner) -> str:
     reset_for_testing()
-    set_backend_type(BackendType.Ascend910B)
+    set_backend_type(BackendType.Ascend910)
     with passes.PassContext([], memory_planner=planner):
         optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
     func = next(f for f in optimized.functions.values() if f.name == "kernel")
@@ -258,7 +258,7 @@ def test_loop_carried_if_phi_shares_the_accumulator_handle():
 def test_loop_carried_if_phi_keeps_baked_addr_aliasing_under_pypto(enable_buffer_ir):
     """The carry shares storage in both Tile and Buffer IR."""
     reset_for_testing()
-    set_backend_type(BackendType.Ascend910B)
+    set_backend_type(BackendType.Ascend910)
     with passes.PassContext([], enable_buffer_ir=enable_buffer_ir):
         optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(LoopCarriedIfPhiProgram)
     func = next(f for f in optimized.functions.values() if f.name == "kernel")
@@ -309,7 +309,7 @@ class ColVectorCarryProgram:
 def _incore_ptoas_pto(program) -> str:
     """Emit PTO for a `pl.at`-outlined kernel under the PTOAS planner."""
     reset_for_testing()
-    set_backend_type(BackendType.Ascend910B)
+    set_backend_type(BackendType.Ascend910)
     with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
         optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
     incore = [f for f in optimized.functions.values() if f.func_type != pl.FunctionType.Orchestration]
@@ -380,7 +380,7 @@ def test_colvec_carry_is_written_back_under_pypto_planner():
     at the carry's address.
     """
     reset_for_testing()
-    set_backend_type(BackendType.Ascend910B)
+    set_backend_type(BackendType.Ascend910)
     optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(ColVectorCarryProgram)
     incore = [f for f in optimized.functions.values() if f.func_type != pl.FunctionType.Orchestration]
     mlir = codegen.PTOCodegen().generate(_ir.Program([incore[0]], incore[0].name, optimized.span))

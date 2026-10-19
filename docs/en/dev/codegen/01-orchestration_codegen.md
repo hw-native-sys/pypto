@@ -545,7 +545,7 @@ inside the branches instead.
 ```python
 from pypto import codegen, backend
 
-backend.set_backend_type(backend.BackendType.Ascend910B)
+backend.set_backend_type(backend.BackendType.Ascend910)
 result = codegen.generate_orchestration(MyProgram, orch_func)
 code = result.code
 

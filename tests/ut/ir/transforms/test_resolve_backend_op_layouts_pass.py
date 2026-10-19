@@ -16,9 +16,9 @@ from pypto.backend import BackendType
 
 
 def _run_pass(program):
-    """Run ResolveBackendOpLayouts with the Ascend910B backend active."""
+    """Run ResolveBackendOpLayouts with the Ascend910 backend active."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     try:
         return passes.resolve_backend_op_layouts()(program)
     finally:
@@ -40,7 +40,7 @@ def _run_pass_without_backend(program):
 class TestResolveBackendOpLayouts:
     """Test backend-driven layout repair for constrained tile ops.
 
-    On Ascend910B, elementwise tile ops on `[N, 1]` column vectors are
+    On Ascend910, elementwise tile ops on `[N, 1]` column vectors are
     repaired by reshaping to `[1, N]` row-major before the op and
     reshaping back to `[N, 1]` afterwards.
     """
@@ -385,7 +385,7 @@ class TestResolveBackendOpLayouts:
         family) or arity (the carry family) make a full DSL program awkward.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         try:
             assert backend.get_input_tile_layout(op_name, 0) == pl.TileLayout.row_major
         finally:
@@ -441,7 +441,7 @@ class Before:
         any of them to row-major would change what the operator computes.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         try:
             assert backend.get_input_tile_layout(op_name, 0) is None
             assert backend.get_input_tile_layout(op_name, 1) is None
@@ -620,7 +620,7 @@ class Before:
 
         `RewriteFunction` returns early when `BackendConfig::IsConfigured()`
         is false. The same `tile.abs` on a `[16, 1]` col-major vector that
-        gets repaired under Ascend910B must pass through unchanged when no
+        gets repaired under Ascend910 must pass through unchanged when no
         backend is selected.
         """
 

@@ -5082,7 +5082,7 @@ _E2E_M, _E2E_N, _E2E_K = 64, 64, 64
 
 
 def _e2e_kernel_text(fn):
-    """Lower ``fn`` for a2a3 (Ascend910B) and return (aic_body_text, aiv_body_text).
+    """Lower ``fn`` for a2a3 (Ascend910) and return (aic_body_text, aiv_body_text).
 
     a2a3 rather than this file's ambient Ascend950 because 910B is the backend
     where a no-split crossing is dual-AIV dispatched, i.e. where the lane rule in

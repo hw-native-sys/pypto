@@ -680,7 +680,7 @@ def lower_auto_vector_split() -> Pass:
 def inject_gm_pipe_buffer() -> Pass:
     """Create a backend-gated pass that injects ``__gm_pipe_buffer`` for cross-core pipes.
 
-    On backends whose cross-core pipe rides through GM (currently Ascend910B), adds a
+    On backends whose cross-core pipe rides through GM (currently Ascend910), adds a
     ``__gm_pipe_buffer`` Out-tensor parameter to functions that issue ``initialize_pipe``
     ops and propagates it through callers. Orchestration functions materialize the
     buffer locally via ``tensor.create`` instead of receiving it as a parameter. No-op

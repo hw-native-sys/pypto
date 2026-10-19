@@ -456,7 +456,7 @@ StmtPtr NormalizeLane1TensorYields(const StmtPtr& body, const std::vector<VarPtr
   return ReplaceReplayTerminalYield(body, loop_repair::MakeBody(stmts, yield->span_));
 }
 
-// Lane 1 still needs to replay cross-core handshakes so Ascend910B GM-backed
+// Lane 1 still needs to replay cross-core handshakes so Ascend910 GM-backed
 // pipes stay balanced. Tile-producing replay work is forced to static
 // valid_shape=0, letting PTO ops run as empty tiles while preserving the tpush /
 // tpop / tfree synchronization protocol. The only visible side effects we
@@ -789,7 +789,7 @@ Pass SplitVectorKernel() {
         }
       }
 
-      // No-split dual-AIV dispatch: the orthogonal Ascend910B path that replays
+      // No-split dual-AIV dispatch: the orthogonal Ascend910 path that replays
       // cross-core handshakes on lane 1 of a non-split AIV function. Untouched by
       // the convergence refactor.
       if (RequiresNoSplitDualAivSync(func)) {

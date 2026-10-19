@@ -280,7 +280,7 @@ class TestL0TilingEdgeCases:
 
     def test_int32_physical_accumulator_rows_force_n_tiling(self):
         """Issue #2232: an INT32 [16, 1152] accumulator occupies 32 physical
-        rows on Ascend910B, so it is 144 KiB and cannot remain one L0C tile.
+        rows on Ascend910, so it is 144 KiB and cannot remain one L0C tile.
 
         The logical 16-row calculation is only 72 KiB and therefore used to
         let the chooser return the full N while splitting K alone.

@@ -7,8 +7,8 @@ What is supported where, and the types you will meet in dumps but rarely write.
 PyPTO targets two Ascend generations. `backend_type` selects which at compile time, and it
 changes both the passes that run and the ISA that is emitted.
 
-| Feature | `Ascend910B` (A2/A3) | `Ascend950` (A5) |
-| ------- | -------------------- | ---------------- |
+| Feature | `Ascend910` (A2/A3) | `Ascend950` (A5) |
+| ------- | ------------------- | ---------------- |
 | Platform strings | `a2a3`, `a2a3sim` | `a5`, `a5sim` |
 | Mixed cube/vector scopes | Yes | Yes |
 | Cross-core ring (`pl.cross_core_slot`) | Yes | Yes |

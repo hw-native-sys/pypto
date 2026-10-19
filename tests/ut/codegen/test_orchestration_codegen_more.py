@@ -33,7 +33,7 @@ from pypto.pypto_core import DataType, ir
 class TestOrchestrationMore:
     """Orchestration codegen — additional core cases (continued)."""
 
-    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
     def test_runtime_scalar_or_in_orchestration_if(self, backend_type):
         """Issue #2984: a runtime OR must generate both orchestration task paths."""
         backend.reset_for_testing()
@@ -307,7 +307,7 @@ int main() {{
         (which produced ``'m' was not declared in this scope``).
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         K = 64
         SPMD_N = 16
@@ -370,7 +370,7 @@ int main() {{
         declaration (``'m_clamped' was not declared in this scope``).
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         K = 64
         SPMD_N = 16
@@ -427,7 +427,7 @@ int main() {{
         allocation sized from a clamped scalar breaks the same way.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         N = 16
         CAP = 128
@@ -478,7 +478,7 @@ int main() {{
         kernel calls inside loop body.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class ForViewProgram:
@@ -543,7 +543,7 @@ int main() {{
     def test_tensor_slice_with_valid_shape(self):
         """tensor.slice(valid_shape=...) should still emit a runtime tensor view."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class ValidShapeSliceProgram:
@@ -572,7 +572,7 @@ int main() {{
     def test_tensor_slice_with_drop_dims(self):
         """A scalar-indexed tensor slice emits a view followed by rank reduction."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class DropDimSliceProgram:
@@ -599,7 +599,7 @@ int main() {{
     def test_tensor_slice_drop_dims_preserves_dynamic_empty_view(self):
         """An out-of-bounds scalar index remains empty after its axis is removed."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class DynamicDropDimSliceProgram:
@@ -628,7 +628,7 @@ int main() {{
     def test_tensor_reshape_external_input(self):
         """tensor.reshape on an external orchestration input emits Tensor::reshape on ext_<name>."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class ReshapeExternalProgram:
@@ -650,7 +650,7 @@ int main() {{
     def test_tensor_reshape_after_slice(self):
         """slice -> reshape chain: reshape input is a local Tensor (no ext_ prefix)."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class ReshapeAfterSliceProgram:
@@ -681,7 +681,7 @@ int main() {{
     def test_tensor_transpose_external_input(self):
         """tensor.transpose on an external orchestration input emits Tensor::transpose on ext_<name>."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class TransposeExternalProgram:
@@ -701,7 +701,7 @@ int main() {{
     def test_tensor_transpose_negative_axis(self):
         """tensor.transpose with negative axis indices is normalized at codegen time."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class TransposeNegativeProgram:
@@ -721,7 +721,7 @@ int main() {{
     def test_tensor_transpose_after_slice(self):
         """slice -> transpose chain: transpose input is a local Tensor (no ext_ prefix)."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class TransposeAfterSliceProgram:
@@ -745,7 +745,7 @@ int main() {{
         """Cross-layout flip (ND→DN) lowers to runtime Tensor::transpose on the
         trailing pair (shapes + strides swapped, start_offset preserved)."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         ib = IRBuilder()
         with ib.function("orch_view", type=ir.FunctionType.Orchestration) as f:
@@ -768,7 +768,7 @@ int main() {{
     def test_tensor_view_identity_flip_aliases(self):
         """tensor.view with target == source layout emits a plain alias, not a transpose."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         ib = IRBuilder()
         with ib.function("orch_view_id", type=ir.FunctionType.Orchestration) as f:
@@ -787,7 +787,7 @@ int main() {{
     def test_tensor_view_shape_reinterpret_runs_through_default_pipeline(self):
         """ND shape-only views survive the default pipeline and emit reshape."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class ShapeViewProgram:
@@ -821,7 +821,7 @@ int main() {{
         passes / lowering use ``CHECK`` / ``CHECK_SPAN``.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         ib = IRBuilder()
         with ib.function("orch_view_bad", type=ir.FunctionType.Orchestration) as f:
@@ -881,7 +881,7 @@ int main() {{
         preserve a DN physical stride.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         span = ir.Span.unknown()
         dn_view = ir.TensorView(
@@ -908,7 +908,7 @@ int main() {{
     def test_if_statement(self):
         """Test if/else codegen with conditional scalar values."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class IfProgram:
@@ -958,7 +958,7 @@ int main() {{
         tuple_var_to_elements_ (all _tuple_tmp_N collapsed to _tuple_tmp).
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class MultipleTupleProgram:
@@ -1051,7 +1051,7 @@ int main() {{
         `oi = oi;` (NOP). The codegen should skip these.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class TupleForLoopProgram:
@@ -1130,7 +1130,7 @@ int main() {{
         """Loop-carried internal tensors should remain consumable after the loop."""
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class LoopCarriedStateProgram:
@@ -1186,7 +1186,7 @@ int main() {{
         inplace detection (2 arg slots, not 3).
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class ChunkedInplaceProgram:
@@ -1229,7 +1229,7 @@ int main() {{
         """tensor.assemble should lower to a pre-generated target view, not a host copy."""
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class AssembleViewProgram:
@@ -1271,7 +1271,7 @@ int main() {{
         """A source buffer assembled more than once must keep its standalone allocation."""
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class DuplicateAssembleProgram:
@@ -1313,7 +1313,7 @@ int main() {{
         """tensor.assemble should stay codegenable when the source is not a rewritten tensor.create."""
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class SliceAssembleProgram:
@@ -1345,7 +1345,7 @@ int main() {{
         its distinct identity regardless of name patterns.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class NumericSuffixProgram:
@@ -1398,7 +1398,7 @@ int main() {{
         """Repeated auto-generated output buffers should keep distinct emitted names."""
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class RepeatedAutoOutputProgram:
@@ -1445,7 +1445,7 @@ int main() {{
         """Alias for a kernel result that is never consumed downstream should be omitted."""
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class UnusedAliasProgram:
@@ -1479,7 +1479,7 @@ int main() {{
         """Each scope (function body, for body) batches its own alloc_tensors independently."""
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class MultiScopeAllocProgram:
@@ -1536,7 +1536,7 @@ int main() {{
         """More than 16 create_tensor in one scope are split into multiple alloc_tensors calls."""
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class ManyCreateProgram:
@@ -1621,7 +1621,7 @@ int main() {{
         in-place (its own alloc_tensors) rather than batched at scope entry.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         span = ir.Span.unknown()
         INDEX = DataType.INDEX
@@ -1696,7 +1696,7 @@ int main() {{
     def test_scalar_taskarg(self):
         """Scalar params read ChipTaskArgs scalar slots (0-indexed) via scalar<T>()."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class MultiScalarProgram:
@@ -1744,7 +1744,7 @@ int main() {{
         so both tasks should dump ``ext_a`` and neither should dump ``ext_b``.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class DumpTagProgram:
@@ -1796,7 +1796,7 @@ int main() {{
         (partial) dumps only ``.dump(...)``-marked tensors (here: none).
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class NoDumpTagProgram:
@@ -1835,7 +1835,7 @@ int main() {{
         falls back to whatever the runtime dump level dictates.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class StrayTagProgram:
@@ -1878,7 +1878,7 @@ int main() {{
         inlined call site. Codegen then emits the per-task ``.dump(...)``.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class InlineDumpTagProgram:
@@ -1934,7 +1934,7 @@ int main() {{
         the dump is still emitted for the right slot after inlining.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class InlineBodyVarDumpTagProgram:
@@ -1999,7 +1999,7 @@ int main() {{
         per-task dump still emits for the right slot.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class StackedInlineProgram:
@@ -2083,7 +2083,7 @@ int main() {{
         dump still emits at the orchestration entry.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class TwoLevelInlineDumpTagProgram:
@@ -2148,7 +2148,7 @@ int main() {{
         Guards against unintentional reorder in ``TaskDispatchPlan::Emit``.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class MixedOrderProgram:
@@ -2212,7 +2212,7 @@ int main() {{
         ``TaskDispatchPlan::Emit`` cannot silently reorder it.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class DepsOrderProgram:
@@ -2252,7 +2252,7 @@ int main() {{
         compile.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         m = pl.dynamic("M")
         n = pl.dynamic("N")
@@ -2315,7 +2315,7 @@ int main() {{
         runtime schedules as a full cluster with sub_block_id 0 / 1 per lane.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class SplitAivNoneProgram:

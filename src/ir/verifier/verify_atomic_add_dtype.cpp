@@ -119,7 +119,7 @@ class AtomicAddDtypeVisitor : public IRVisitor {
         DiagnosticSeverity::Error, "AtomicAddDtypeValid", /*error_code=*/1,
         "atomic-add into a bf16 global tensor is not supported on the '" + handler_->GetPtoTargetArch() +
             "' backend (function '" + func_name_ +
-            "'). bf16 atomic-add requires the Ascend910B (A2/A3) profile, whose store pipe honours "
+            "'). bf16 atomic-add requires the Ascend910 (A2/A3) profile, whose store pipe honours "
             "set_atomic_bf16. Accumulate into an fp32 tensor and cast to bf16 after the reduction "
             "instead.",
         call->span_);

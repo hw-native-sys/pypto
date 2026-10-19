@@ -751,7 +751,7 @@ def test_default_and_runtime_only_requests_share_cache(kernel, compile_calls):
         assert kernel.compile() is cached
     assert len(compile_calls) == 1
     kwargs = compile_calls[0][0]
-    assert kwargs["backend_type"] == BackendType.Ascend910B
+    assert kwargs["backend_type"] == BackendType.Ascend910
     assert kwargs["execution_mode"] is ExecutionMode.SIM
     assert "platform" not in kwargs
     assert kwargs["dump_passes"] is PassDumpLevel.NONE

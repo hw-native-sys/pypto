@@ -1,10 +1,10 @@
 # InjectGMPipeBuffer Pass
 
-为通过 GM 路由槽位数据的后端（当前为 Ascend910B）注入 `__gm_pipe_buffer` 工作区参数。该 Pass 紧随 `ExpandMixedKernel` 运行。
+为通过 GM 路由槽位数据的后端（当前为 Ascend910）注入 `__gm_pipe_buffer` 工作区参数。该 Pass 紧随 `ExpandMixedKernel` 运行。
 
 ## 概述
 
-在 Ascend910B 上，跨核 `tpush`/`tpop` 通过共享 GM 缓冲区中转，而不是直连的核间通道。在 `ExpandMixedKernel` 已经把 mixed InCore 函数拆分为 AIC/AIV 并 prepend `aic_initialize_pipe` / `aiv_initialize_pipe` 之后，本 Pass：
+在 Ascend910 上，跨核 `tpush`/`tpop` 通过共享 GM 缓冲区中转，而不是直连的核间通道。在 `ExpandMixedKernel` 已经把 mixed InCore 函数拆分为 AIC/AIV 并 prepend `aic_initialize_pipe` / `aiv_initialize_pipe` 之后，本 Pass：
 
 1. 找出每个函数体中包含 `aic_initialize_pipe` 或 `aiv_initialize_pipe` 的函数。
 2. 给上述每个函数追加一个新的 Out-tensor 参数 `__gm_pipe_buffer`。
@@ -23,7 +23,7 @@ codegen 负责：双向 `dir_mask=3` pipe 按一个共享双向工作区计量�
 - 输入 IR 已完成 AIC/AIV 拆分并带有跨核 pipe setup（先运行 `ExpandMixedKernel`）。
 - 后端报告 `RequiresGMPipeBuffer() == true`，否则本 Pass 为 no-op。
 
-**何时使用**：在 `ExpandMixedKernel` 之后，针对 Ascend910B（或任意上报 `RequiresGMPipeBuffer` 的后端）运行。默认 tile pipeline 已经把它放在正确的位置。
+**何时使用**：在 `ExpandMixedKernel` 之后，针对 Ascend910（或任意上报 `RequiresGMPipeBuffer` 的后端）运行。默认 tile pipeline 已经把它放在正确的位置。
 
 > **说明**：本 Pass 是从 `ExpandMixedKernel` 中拆分出来的，让原先的 Pass 聚焦于 AIC/AIV 拆分逻辑，把 GM 工作区这一关注点收敛到一个由后端门控的独立 transform。
 
@@ -65,7 +65,7 @@ program = inject_pass(program)
 
 ## 示例
 
-**Before**（`ExpandMixedKernel` 之后，Ascend910B）：
+**Before**（`ExpandMixedKernel` 之后，Ascend910）：
 
 ```python
 @pl.program
@@ -138,7 +138,7 @@ passes.def("inject_gm_pipe_buffer", &pass::InjectGMPipeBuffer,
            "Inject __gm_pipe_buffer workspace parameter for GM-routed cross-core pipes");
 ```
 
-**测试**：通过 `tests/ut/ir/transforms/test_expand_mixed_kernel_a2a3.py`（Ascend910B 流水线）传递性覆盖。
+**测试**：通过 `tests/ut/ir/transforms/test_expand_mixed_kernel_a2a3.py`（Ascend910 流水线）传递性覆盖。
 
 ## Pass 属性
 

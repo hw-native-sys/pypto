@@ -105,7 +105,7 @@
 /// When ``ChooseL0Tile`` returns ``m < M`` or ``n < N`` the ``[M, N]`` output
 /// Acc's physical footprint overflows L0c.  Capacity uses the backend's
 /// accumulator-row alignment, which may be stricter than the logical M shape
-/// (Ascend910B INT32 M=16 occupies 32 physical rows).  The operands are already
+/// (Ascend910 INT32 M=16 occupies 32 physical rows).  The operands are already
 /// Mat-resident, so only the output overflows. For fresh ``tile.matmul`` or
 /// ``tile.matmul_bias``, the pass emits a
 /// ``ceil(M/m) x ceil(N/n)`` grid and hands each ``[m_eff, n_eff]`` Acc result to

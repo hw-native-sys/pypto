@@ -75,7 +75,7 @@ def _choose_a2a3_fp32_dbc(m: int, n: int):
 def _printed_after_auto_tile(test_case: PTOTestCase, planner: MemoryPlanner) -> str:
     """Lower a device case through AutoTile so structural dbC assertions match compilation."""
     _backend.reset_for_testing()
-    _backend.set_backend_type(BackendType.Ascend910B)
+    _backend.set_backend_type(BackendType.Ascend910)
     program = test_case.get_program()
     with passes.PassContext(
         [],

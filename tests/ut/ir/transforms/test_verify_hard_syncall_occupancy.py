@@ -21,7 +21,7 @@ Either gap deadlocks on device (507018). The ``HardSyncallOccupancy`` verifier
 (produced by ``ExpandMixedKernel``, in ``GetVerifiedProperties()``) rejects both
 at compile time.
 
-Tests drive the full Default pipeline on Ascend910B (48 VECTOR / 24 CUBE cores).
+Tests drive the full Default pipeline on Ascend910 (48 VECTOR / 24 CUBE cores).
 """
 
 import pypto
@@ -34,9 +34,9 @@ TR = TC = 128
 
 
 def _run(program_cls) -> None:
-    """Compile a program through the Default pipeline on Ascend910B."""
+    """Compile a program through the Default pipeline on Ascend910."""
     backend.reset_for_testing()
-    backend.set_backend_type(backend.BackendType.Ascend910B)
+    backend.set_backend_type(backend.BackendType.Ascend910)
     pm = PassManager.get_strategy(OptimizationStrategy.Default)
     pm.run_passes(program_cls)
 

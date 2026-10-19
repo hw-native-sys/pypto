@@ -51,8 +51,9 @@ class BackendHandler;
  * @brief Backend type identifier for selecting backend instance
  */
 enum class BackendType {
-  Ascend910B,  ///< 910B backend (PTO assembly codegen)
-  Ascend950    ///< 950 PTO backend
+  Ascend910,              ///< 910 backend (A2/A3 PTO assembly codegen)
+  Ascend950,              ///< 950 PTO backend
+  Ascend910B = Ascend910  ///< Compatibility alias; prefer Ascend910
 };
 
 /**
@@ -70,7 +71,7 @@ const Backend* GetBackendInstance(BackendType type);
  * updating this function so diagnostics stay readable.
  *
  * @param type Backend type
- * @return Display name (e.g. "Ascend910B", "Ascend950")
+ * @return Display name (e.g. "Ascend910", "Ascend950")
  */
 std::string BackendTypeToString(BackendType type);
 
@@ -302,7 +303,7 @@ class Backend {
    * @brief Total physical core count of a given core type across the whole SoC.
    *
    * Sums the per-cluster core counts of the requested type, weighted by cluster
-   * and die multiplicities (e.g. Ascend910B: 48 VECTOR / 24 CUBE cores).
+   * and die multiplicities (e.g. Ascend910: 48 VECTOR / 24 CUBE cores).
    *
    * @param core_type Core type to count (VECTOR / CUBE)
    * @return Number of physical cores of that type (0 if none)

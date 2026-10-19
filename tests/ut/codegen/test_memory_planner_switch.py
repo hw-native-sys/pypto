@@ -177,7 +177,7 @@ def _run_pipeline(
     Returns the optimized program and the concrete list of executed pass names.
     """
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     with passes.PassContext([], memory_planner=memory_planner, enable_buffer_ir=enable_buffer_ir):
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
         optimized = pm.run_passes(program)

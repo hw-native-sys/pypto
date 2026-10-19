@@ -192,7 +192,7 @@ class RunConfig:
     Attributes:
         cache_config: Complete per-call persistent-cache policy. None uses process or environment defaults.
         arch: Target architecture, as the codegen backend that names it —
-            ``BackendType.Ascend910B`` (a2a3) or ``BackendType.Ascend950`` (a5).
+            ``BackendType.Ascend910`` (a2a3) or ``BackendType.Ascend950`` (a5).
         execution_mode: :class:`ExecutionMode.SIM` or ``ONBOARD``.
         platform: **Not a field** — the wire spelling of the two axes above
             (``"a2a3sim"`` / ``"a2a3"`` / ``"a5sim"`` / ``"a5"``), derived on
@@ -361,7 +361,7 @@ class RunConfig:
 
     __test__ = False  # Not a pytest test class
 
-    arch: BackendType = field(default_factory=lambda: BackendType.Ascend910B)
+    arch: BackendType = field(default_factory=lambda: BackendType.Ascend910)
     execution_mode: ExecutionMode = ExecutionMode.SIM
     device_id: int = 0
     rtol: float = 1e-5
@@ -456,7 +456,7 @@ class RunConfig:
         if type(self.arch) is not BackendType:
             raise TypeError(
                 f"RunConfig.arch must be a BackendType, got {type(self.arch).__name__} "
-                f"({self.arch!r}). Pass BackendType.Ascend910B / Ascend950, or use "
+                f"({self.arch!r}). Pass BackendType.Ascend910 / Ascend950, or use "
                 f"platform='a2a3sim' to set both axes from the wire spelling."
             )
         if type(self.execution_mode) is not ExecutionMode:
@@ -899,7 +899,7 @@ class CompileOptions:
     explicit target axes; caches and artifact metadata retain canonical platform strings.
     """
 
-    backend_type: BackendType = field(default_factory=lambda: BackendType.Ascend910B, kw_only=True)
+    backend_type: BackendType = field(default_factory=lambda: BackendType.Ascend910, kw_only=True)
     execution_mode: ExecutionMode = field(default=ExecutionMode.SIM, kw_only=True)
     strategy: OptimizationStrategy = field(default_factory=lambda: OptimizationStrategy.Default)
     dump_passes: bool | PassDumpLevel = False
@@ -1895,7 +1895,7 @@ def execute_compiled(  # noqa: PLR0913
         from pypto.runtime import ExecutionMode
 
         cfg = dataclasses.replace(
-            cfg, backend_type=BackendType.Ascend910B, execution_mode=ExecutionMode.ONBOARD, device_id=0,
+            cfg, backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.ONBOARD, device_id=0,
         )
         ir.CompiledProgram.from_dir(work_dir)(*args, config=cfg)
 

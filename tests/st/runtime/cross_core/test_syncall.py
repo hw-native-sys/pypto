@@ -26,7 +26,7 @@ barrier between the input loads and the compute. The barrier is a no-op for the
 numeric result (``out = a + b``) but exercises the full DSL -> pass pipeline ->
 codegen -> runtime path on device.
 
-``CORE_NUM`` is derived from the Ascend910B backend's SoC model (the same core
+``CORE_NUM`` is derived from the Ascend910 backend's SoC model (the same core
 description the compiler targets), so the launch always fills the AIV grid the
 codegen assumes. This test targets the a2a3 (910B) profile; the 950/a5 AIV
 count differs, so it is parametrized over the a2a3 platforms only.
@@ -67,7 +67,7 @@ def _aic_core_count(bk: backend.Backend) -> int:
 
 # Hard-form SYNCALL requires full AIV-core occupancy (see module docstring).
 # Derive the count from the 910B SoC model rather than hardcoding it.
-CORE_NUM = _aiv_core_count(backend.Backend910B.instance())  # 48 on Ascend910B
+CORE_NUM = _aiv_core_count(backend.Backend910B.instance())  # 48 on Ascend910
 TILE_ROWS = 128
 TILE_COLS = 128
 TOTAL_ROWS = CORE_NUM * TILE_ROWS  # 48 * 128 = 6144 on 910B

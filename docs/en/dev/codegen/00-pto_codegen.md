@@ -159,7 +159,7 @@ class MyKernel:
 output_dir = compile(
     MyKernel,
     strategy=OptimizationStrategy.Default,
-    backend_type=BackendType.Ascend910B,
+    backend_type=BackendType.Ascend910,
 )
 ```
 
@@ -454,7 +454,7 @@ three modes, so must-alias buffers survive. In `PTOAS` mode, ptoas `PlanMemory`
 (which `level2` requires, rejecting any `addr` operand) performs lifetime reuse
 and address assignment.
 
-> **Caveat:** `PTOAS` mode skips the Ascend910B `load + tpop_from_aic` in-place
+> **Caveat:** `PTOAS` mode skips the Ascend910 `load + tpop_from_aic` in-place
 > hazard guard (part of `MemoryReuse`) and reserve-buffer base resolution
 > (`AllocateMemoryAddr`); those are deferred to ptoas. `compile()` emits a
 > warning — verify affected kernels on-device.

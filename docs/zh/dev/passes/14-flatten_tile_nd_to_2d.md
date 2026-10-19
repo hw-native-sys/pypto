@@ -172,7 +172,7 @@ cube 通道上，不涉及 `ExpandMixedKernel` 的 AIC→AIV 边界。（该边�
 | ---- | ---- |
 | `M % 16 == 0` 且 `N % 16 == 0` | 父 tile 两个方向都必须是完整的 16×16 块，且页的列原点 `b*N` 必须块对齐，否则 `GetSliceAccumulatorGeometry` 会拒绝，`InitMemRef` 静默退回行主序算法 |
 | 4 字节累加器元素（FP32 / INT32） | 只有每元素 4 字节时，16×16 块才正好是 `kAccFractal`（1024）字节 |
-| `B*M*N*4` 能放进 `Acc` | 从后端读取（`GetMemSize(Acc)`），不写死 —— L0C 在 Ascend910B 上是 128 KB，在 950 上是 256 KB |
+| `B*M*N*4` 能放进 `Acc` | 从后端读取（`GetMemSize(Acc)`），不写死 —— L0C 在 Ascend910 上是 128 KB，在 950 上是 256 KB |
 | 无部分 `valid_shape` | 第 `b` 页的有效区域从 `b*N` 开始但只有 `N_valid` 宽，打包后的父 tile 没有单一有效矩形可以表达 |
 | `batch_count > 1` | `B == 1` 时两种打包都是同一块 `[M, N]` tile，因此现有快速路径逐字节不变 |
 

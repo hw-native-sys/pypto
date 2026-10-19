@@ -130,7 +130,7 @@ struct L0CostModel {
  * @brief Backend-specific behavior dispatch interface
  *
  * BackendHandler centralises every behavioural difference between backends
- * (e.g. Ascend910B vs Ascend950). Passes and codegen never branch on
+ * (e.g. Ascend910 vs Ascend950). Passes and codegen never branch on
  * BackendType directly; instead they invoke virtual methods on a handler
  * obtained from PassContext or from a Backend instance.
  *
@@ -160,7 +160,7 @@ class BackendHandler {
    * @brief Method name used on `launch_spec` to set the per-task core count.
    *
    * Different runtimes expose different APIs for the same concept
-   * (Ascend910B: "set_block_num"; Ascend950: "set_core_num").
+   * (Ascend910: "set_block_num"; Ascend950: "set_core_num").
    */
   [[nodiscard]] virtual std::string GetLaunchSpecCoreCountMethod() const = 0;
 
@@ -176,7 +176,7 @@ class BackendHandler {
    *
    * Some PTOAS releases require an explicit ISA selector even when the MLIR
    * module already carries a backend-specific target_arch attribute (e.g.
-   * Ascend910B needs ["--pto-arch", "a3"], Ascend950 needs
+   * Ascend910 needs ["--pto-arch", "a3"], Ascend950 needs
    * ["--pto-arch", "a5"]).
    */
   [[nodiscard]] virtual std::vector<std::string> GetExtraPtoasFlags() const = 0;
@@ -200,7 +200,7 @@ class BackendHandler {
    *
    * The attribute survives every layer — PyPTO writes it into the PTO IR and
    * PTOAS keeps it as a `HIGH_PRECISION` template argument — but only some
-   * PTO-ISA backends select a different algorithm from it. Ascend910B's
+   * PTO-ISA backends select a different algorithm from it. Ascend910's
    * `TDIV_IMPL` / `TLOG_IMPL` / `TREM_IMPL` / `TFMOD_IMPL` accept the template
    * parameter and never read it, so the request is silently dropped and the
    * result is bit-identical to the default algorithm.
@@ -219,7 +219,7 @@ class BackendHandler {
    * @brief Whether this backend needs the `__gm_pipe_buffer` injection in
    *        ExpandMixedKernelPass.
    *
-   * Ascend910B routes cross-core pipe data through a GM-backed slot buffer;
+   * Ascend910 routes cross-core pipe data through a GM-backed slot buffer;
    * Ascend950 uses on-chip cross-core hardware and does not need it.
    */
   [[nodiscard]] virtual bool RequiresGMPipeBuffer() const = 0;
@@ -259,7 +259,7 @@ class BackendHandler {
    * @brief Whether PyPTO/DSA-RP must materialize PTOAS level-3 explicit tmp
    *        scratch and emit static-valid codegen views.
    *
-   * True on Ascend910B (a2a3): InitMemRef appends compiler-owned scratch for
+   * True on Ascend910 (a2a3): InitMemRef appends compiler-owned scratch for
    * ops such as tile.ci / narrowing tile.cast / tile.sort32, and codegen
    * bridges explicit-tmp forms with static valid_shape. False on Ascend950:
    * PTOAS level-2 PlanMemory owns implicit tmp instead.
@@ -310,7 +310,7 @@ class BackendHandler {
    *
    * Ascend950 hardware cross-core pipe expects fractal layout at the boundary
    * (Left / Right / Mat -> NZ), so the AIV producer must convert.
-   * Ascend910B routes via UB -> GM -> Mat which accepts ND directly, so no
+   * Ascend910 routes via UB -> GM -> Mat which accepts ND directly, so no
    * adapter is needed.
    */
   [[nodiscard]] virtual bool RequiresVtoCFractalAdapt() const = 0;
@@ -319,7 +319,7 @@ class BackendHandler {
    * @brief Whether A2A3 split AIV wrappers must source the subblock id from
    *        the runtime context.
    *
-   * Only relevant on Ascend910B. Other backends always return false.
+   * Only relevant on Ascend910. Other backends always return false.
    */
   [[nodiscard]] virtual bool RequiresRuntimeSubblockBridge() const = 0;
 
@@ -327,7 +327,7 @@ class BackendHandler {
    * @brief Whether mixed kernels with no split mode (or `SplitMode::None`)
    *        must still be dispatched on both AIV lanes for cross-core sync.
    *
-   * On Ascend910B the AIC side performs cross-core pipe handshakes against
+   * On Ascend910 the AIC side performs cross-core pipe handshakes against
    * both AIVs, so a `no_split` mixed kernel cannot dispatch a single AIV
    * lane without deadlocking. ExpandMixedKernel marks such functions with the
    * `dual_aiv_dispatch` attribute so that downstream passes (notably
@@ -345,7 +345,7 @@ class BackendHandler {
    * Ascend950 pushes L0C straight into both lanes' UB with a dual-mode TMOV
    * (`DualModeSplitM` / `DualModeSplitN`) that hands each lane half of the
    * transported rows / cols, so the transported extent IS the lane partition.
-   * Ascend910B stages the tile through a GM slot, and each lane locates its own
+   * Ascend910 stages the tile through a GM slot, and each lane locates its own
    * band there from its popped extent, so the transported extent only has to
    * cover the rows the lanes read.
    */
@@ -358,7 +358,7 @@ class BackendHandler {
    * The only offset Acc->Mat path on A2/A3 is `pto.tinsert`, whose verifier
    * requires `src=f32, dst=f16/bf16` — it cannot keep f32 (PTOAS
    * `TInsertOp::verify`). So AutoTileMatmulL0's oversized chained-matmul result,
-   * when M/N-tiled into an L1/Mat scratch, must be bf16/f16 on Ascend910B; the
+   * when M/N-tiled into an L1/Mat scratch, must be bf16/f16 on Ascend910; the
    * pass folds a `tile.cast(result, bf16)` into the per-sub-tile assemble.
    *
    * Ascend950 (a5) `tinsert` accepts `dst=f32`, so the Mat scratch may stay f32
@@ -370,7 +370,7 @@ class BackendHandler {
    * @brief Whether this backend's store pipe honours a bf16 atomic-add into GM.
    *
    * A bf16 atomic-add lowers to `set_atomic_bf16`, honoured on the A2/A3 store
-   * path (Ascend910B) and not on the A5 one (Ascend950). Both arches'
+   * path (Ascend910) and not on the A5 one (Ascend950). Both arches'
    * `SetAtomicAdd<T>` helpers *do* list `bfloat16_t`, so that dispatch
    * static_assert is not the evidence; the pinned ST suite is. a2a3 covers
    * atomic-add into a bf16 destination (`tstore_acc2gm` case 60,
@@ -384,7 +384,7 @@ class BackendHandler {
    * *destination* dtype, so this also covers the cube path (fp32 Acc -> bf16 GM
    * via fix-pipe).
    *
-   * Ascend910B: true. Ascend950: false.
+   * Ascend910: true. Ascend950: false.
    */
   [[nodiscard]] virtual bool SupportsBf16AtomicAdd() const = 0;
 
@@ -396,7 +396,7 @@ class BackendHandler {
    * into a fixed destination set. pto-isa encodes this as the non-quant
    * `CheckAcc2gm` whitelist and ptoas as a `pto.tstore` verifier rule:
    *
-   *   Ascend910B (a2a3): INT32 / FP32 / FP16 / BF16
+   *   Ascend910 (a2a3): INT32 / FP32 / FP16 / BF16
    *   Ascend950  (a5)  : INT32 / FP32 / FP16 / BF16
    *
    * The two arches accept the same set today. The hook stays per-backend
@@ -465,7 +465,7 @@ class BackendHandler {
    * Encapsulates the per-backend rule for how to lay out the bridge tile
    * crossing the AIC/AIV boundary.
    *
-   * Ascend910B (a2a3): cross-core transfer goes through GM. Left/Right/Mat
+   * Ascend910 (a2a3): cross-core transfer goes through GM. Left/Right/Mat
    *   destinations all use NZ (col_major blayout, row_major slayout) because
    *   GM -> Mat transfer requires fractal layout. Vec destinations preserve
    *   the original view: the GM-backed C2V pop materialises through an ND
@@ -498,7 +498,7 @@ class BackendHandler {
    *
    * The hardware fetches at this granularity, so a tile innermost dimension
    * smaller than this value forces the bus to discard part of every fetch.
-   * Ascend910B: 512 bytes. Ascend950: 128 bytes.
+   * Ascend910: 512 bytes. Ascend950: 128 bytes.
    */
   [[nodiscard]] virtual uint32_t GetGmAccessGranularityBytes() const = 0;
 
@@ -506,7 +506,7 @@ class BackendHandler {
    * @brief L2 cache line size in bytes.
    *
    * A tile innermost dimension below this size leaves part of every cache
-   * line unused. Both Ascend910B and Ascend950 use 512-byte L2 cache lines.
+   * line unused. Both Ascend910 and Ascend950 use 512-byte L2 cache lines.
    */
   [[nodiscard]] virtual uint32_t GetL2CacheLineBytes() const = 0;
 
@@ -517,7 +517,7 @@ class BackendHandler {
    * Below this threshold the TileInnermostDimGranularity perf-hint check
    * (PH001) emits an advisory diagnostic.
    *
-   * On Ascend910B this equals the GM granularity (512 B); on Ascend950 it is
+   * On Ascend910 this equals the GM granularity (512 B); on Ascend950 it is
    * the GM granularity (128 B), with 512 B preferable to fully utilise the
    * L2 cache line but 128 B taken as the hard threshold for the hint.
    */

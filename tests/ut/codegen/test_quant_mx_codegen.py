@@ -246,7 +246,7 @@ class TestQuantMxCodegen:
                 _quant, _scale = pl.quant_mx(pl.load(src, [0, 0], [16, 64]), group_axis=1)
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Program)
         target = next(
             function for function in optimized.functions.values() if ir.is_incore_type(function.func_type)

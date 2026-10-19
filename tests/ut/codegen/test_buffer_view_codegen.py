@@ -75,7 +75,7 @@ def _program(addressed: bool, byte_offset: int) -> ir.Program:
     return ir.Program([function], "BufferViews", _SPAN)
 
 
-@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
 @pytest.mark.parametrize("addressed", [False, True])
 @pytest.mark.parametrize("byte_offset", [0, 64])
 def test_buffer_views_round_trip_and_emit_one_native_operation_per_call(
@@ -103,7 +103,7 @@ def test_buffer_views_round_trip_and_emit_one_native_operation_per_call(
     source = tmp_path / "buffer_views.pto"
     output = tmp_path / "buffer_views.cpp"
     source.write_text(text)
-    arch = "a2" if ascend_backend == BackendType.Ascend910B else "a5"
+    arch = "a2" if ascend_backend == BackendType.Ascend910 else "a5"
     _run_ptoas(
         str(source), str(output), [f"--pto-arch={arch}", f"--pto-level={'level3' if addressed else 'level2'}"]
     )
@@ -112,7 +112,7 @@ def test_buffer_views_round_trip_and_emit_one_native_operation_per_call(
     assert "TMOV(" not in cpp and "TEXTRACT(" not in cpp
 
 
-@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
 def test_narrowed_static_subview_emits_native_valid_extents(tmp_path: Path, ascend_backend: BackendType):
     root_type = ir.BufferType([8, 32], DataType.FP32, ir.MemorySpace.Vec)
     view_type = ir.BufferType([8, 32], DataType.FP32, ir.MemorySpace.Vec, valid_shape=[4, 16])
@@ -153,7 +153,7 @@ def test_narrowed_static_subview_emits_native_valid_extents(tmp_path: Path, asce
         pytest.skip("PTOAS is not available")
     source, output_file = tmp_path / "narrowed.pto", tmp_path / "narrowed.cpp"
     source.write_text(text)
-    arch = "a2" if ascend_backend == BackendType.Ascend910B else "a5"
+    arch = "a2" if ascend_backend == BackendType.Ascend910 else "a5"
     _run_ptoas(str(source), str(output_file), [f"--pto-arch={arch}", "--pto-level=level2"])
 
 

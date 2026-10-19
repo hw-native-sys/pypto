@@ -12,7 +12,7 @@ it **no longer halves any function body**:
    body untouched and only stamps `split` (+ `dual_aiv_dispatch` for AIV
    functions) on the function attrs.
 
-2. **No-split dual-AIV dispatch** — on Ascend910B (any backend whose
+2. **No-split dual-AIV dispatch** — on Ascend910 (any backend whose
    `BackendHandler::RequiresNoSplitDualAivDispatch()` returns `true`), when
    `ExpandMixedKernel` decides a mixed kernel cannot be split it tags the AIV
    function `dual_aiv_dispatch=True`. This pass wraps the body in a per-lane
@@ -93,7 +93,7 @@ for each function:
       assert function-level split mode is set and non-None  (INTERNAL_CHECK)
       attrs = WithSplitAttrs(func, mode, is_aiv)            # split (+ dual_aiv_dispatch for AIV)
   elif RequiresNoSplitDualAivSync(func):
-      # Ascend910B no-split dual-AIV dispatch (orthogonal path).
+      # Ascend910 no-split dual-AIV dispatch (orthogonal path).
       ProcessNoSplitDualAivFunction(func)
   else:
       pass through unchanged
@@ -102,7 +102,7 @@ for each function:
 ## Algorithm — no-split dual-AIV dispatch
 
 `ProcessNoSplitDualAivFunction` only fires when `RequiresNoSplitDualAivSync(func)`
-is true — the backend is Ascend910B (or any backend whose
+is true — the backend is Ascend910 (or any backend whose
 `BackendHandler::RequiresNoSplitDualAivDispatch()` returns true), the function is
 AIV, and `attrs["dual_aiv_dispatch"]` is true.
 
@@ -170,7 +170,7 @@ def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]):
 After the pass, `attrs` gains `dual_aiv_dispatch=True`; `z_vec` stays `[8, 128]`
 (NOT re-halved) and there is exactly one `get_subblock_idx`.
 
-### Example 2 — Ascend910B no-split dual-AIV dispatch
+### Example 2 — Ascend910 no-split dual-AIV dispatch
 
 Distilled from
 `test_no_split_dual_dispatch_producer_replays_compute_and_tpush_on_lane1`. The
@@ -232,7 +232,7 @@ Pass SplitVectorKernel();
   split_aiv arm.
 - `RequiresNoSplitDualAivSync` / `ProcessNoSplitDualAivFunction` /
   `BuildNoSplitLane1ReplayStmts` / `RebuildLane1CallWithZeroValidShape` /
-  `IsNoSplitSharedPipeSetupCall` — Ascend910B no-split path.
+  `IsNoSplitSharedPipeSetupCall` — Ascend910 no-split path.
 
 **Properties**: `include/pypto/ir/transforms/pass_properties.h`
 

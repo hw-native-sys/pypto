@@ -182,7 +182,7 @@ def remote_store(
         atomic: :class:`pld.AtomicType` selecting plain-store
             (``AtomicType.None_``, the default) vs atomic-add combine semantics
             on the peer's region (keyword-only). ``AtomicType.Add`` into a bf16
-            window requires the Ascend910B (A2/A3) profile, the same restriction
+            window requires the Ascend910 (A2/A3) profile, the same restriction
             :func:`pl.tile.store` carries.
 
     Returns:

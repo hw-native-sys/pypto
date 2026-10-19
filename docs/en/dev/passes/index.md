@@ -58,7 +58,7 @@ Keep the English and Chinese documentation synchronized.
 | 22 | [ResolveBackendOpLayouts](22-resolve_backend_op_layouts.md) | Repairs backend-required tile layouts for elementwise ops |
 | 23 | [LowerAutoVectorSplit](23-lower_auto_vector_split.md) | Converts AUTO `pl.split` mixed InCore functions into the explicit `split_aiv` form |
 | 24 | [ExpandMixedKernel](24-expand_mixed_kernel.md) | Splits mixed InCore functions into separate AIC (Cube) and AIV (Vector) kernels |
-| 25 | [InjectGMPipeBuffer](25-inject_gm_pipe_buffer.md) | Injects the `__gm_pipe_buffer` workspace for GM-routed cross-core pipes (Ascend910B) |
+| 25 | [InjectGMPipeBuffer](25-inject_gm_pipe_buffer.md) | Injects the `__gm_pipe_buffer` workspace for GM-routed cross-core pipes (Ascend910) |
 | 26 | [SplitVectorKernel](26-split_vector_kernel.md) | Stamps split attributes and handles the no-split dual-AIV path |
 | 27 | [StampTfreeSplit](27-stamp_tfree_split.md) | Copies each cross-core tpop's split and pipe id onto its matching tfree op |
 | 28 | [NormalizeReturnOrder](28-normalize_return_order.md) | Reorders every InCore function's return tuple into the canonical order |

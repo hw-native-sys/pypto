@@ -49,7 +49,7 @@ _LOC_RE = re.compile(r' loc\("((?:[^"\\]|\\.)*)":(\d+):(\d+)\)$')
 def _generate(program_cls, *, emit_source_loc: bool = True) -> str:
     """Run the Default pipeline and PTO codegen over the first function."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program_cls)
     funcs = list(optimized.functions.values())
     assert funcs, "Program has no functions"

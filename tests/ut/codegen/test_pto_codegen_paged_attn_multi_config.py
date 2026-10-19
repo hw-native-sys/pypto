@@ -441,7 +441,7 @@ _CONTEXT_LEN = BLOCK_SIZE * _MAX_NUM_BLOCKS_PER_REQ  # 128 tokens
 def test_paged_attention_multi_config_codegen():
     """Verify multi-config paged attention compiles and generates MLIR for all InCore functions."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
 
     program = build_paged_attention_multi_config_program(
         batch=_BATCH,

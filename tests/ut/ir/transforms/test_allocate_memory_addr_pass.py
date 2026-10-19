@@ -524,7 +524,7 @@ def test_allocated_memory_addr_verifier_errors_when_vec_exceeds_safe_cap():
     if was_configured:
         reset_for_testing()
     try:
-        set_backend_type(BackendType.Ascend910B)
+        set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:

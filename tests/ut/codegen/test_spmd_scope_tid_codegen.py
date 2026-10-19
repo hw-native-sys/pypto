@@ -72,7 +72,7 @@ class TestSpmdScopeTaskIdCodegen:
         the caller's scope, and a Function is a closed scope.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class P:
@@ -120,7 +120,7 @@ class TestSpmdScopeTaskIdCodegen:
         """A captured dispatch feeding a downstream ``deps=[tid]`` dispatch emits a
         ``TaskOutputTensors`` capture (``.task_id()``) and ``set_dependencies(...)``."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class P:
@@ -181,7 +181,7 @@ class TestSpmdScopeTaskIdCodegen:
         is unconsumed, so codegen must not require it to be bound to anything.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class P:
@@ -236,7 +236,7 @@ class TestSpmdScopeTaskIdCodegen:
         involved — a single dispatch reproduces it.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class P:
@@ -297,7 +297,7 @@ class TestSpmdScopeTaskIdCodegen:
         with the normal scalar path.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class P:
@@ -346,7 +346,7 @@ class TestSpmdScopeTaskIdCodegen:
         canonical 4-arg mixed dispatch.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class P:
@@ -406,7 +406,7 @@ class TestSpmdScopeTaskIdCodegen:
         ``deps=[tid0]`` from the captured producer TaskId.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class P:
@@ -473,7 +473,7 @@ class TestSpmdScopeTaskIdCodegen:
         ``pl.at``).
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class P:
@@ -504,7 +504,7 @@ class TestSpmdScopeTaskIdCodegen:
     def test_no_allow_early_resolve_omits_hint(self):
         """An ordinary captured Spmd dispatch never emits ``set_allow_early_resolve``."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class P:
@@ -544,7 +544,7 @@ class TestSpmdScopeTaskIdCodegen:
         wraps the call in ``pl.spmd`` (the failing scope).
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class P:
@@ -594,7 +594,7 @@ class TestSpmdScopeTaskIdCodegen:
         the explicit ``signal_ctx`` scalar for the DistributedTensor formal.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class P:

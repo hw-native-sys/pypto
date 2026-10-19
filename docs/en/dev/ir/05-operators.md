@@ -85,7 +85,7 @@ or compact mode. Their dtype contract does not inherit FP16 support from the
 native descriptor formatter. `add`/`mul` require FP16/FP32/INT32 operands.
 Automatic conversion and ordinary GM transfers support static rank-2
 FP16/BF16/FP32/INT32 descriptors; BF16 arithmetic requires a separate native
-recipe. Both Ascend910B and Ascend950 use these contracts.
+recipe. Both Ascend910 and Ascend950 use these contracts.
 
 The public `tile.full` wrapper accepts both numeric literals and parsed scalar
 constants, so positional and keyword fill values agree. Integer placeholders

@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Unit tests for the InjectGMPipeBuffer pass (Ascend910B-gated)."""
+"""Unit tests for the InjectGMPipeBuffer pass (Ascend910-gated)."""
 
 import pypto.language as pl
 import pytest
@@ -17,9 +17,9 @@ from pypto.backend import BackendType
 
 @pytest.fixture(autouse=True)
 def _setup_backend():
-    """Configure Ascend910B backend before each test and reset afterward."""
+    """Configure Ascend910 backend before each test and reset afterward."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     yield
     backend.reset_for_testing()
 

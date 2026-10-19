@@ -71,7 +71,7 @@ def _setup_backend_and_log_level():
     stderr assertions independent of ``PYPTO_LOG_LEVEL`` and of test order.
     """
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     set_log_level(LogLevel.WARN)
     yield
     backend.reset_for_testing()

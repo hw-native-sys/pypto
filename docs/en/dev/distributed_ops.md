@@ -280,7 +280,7 @@ to the `pto.tstore`, making the push a **combine** (`peer_region += src`) — th
 cross-rank twin of `tile.store`'s split-K accumulation, and what an all-to-all
 combine needs. Emitted only for `kAdd`, so plain pushes stay byte-identical.
 `kAdd` requires an fp32/bf16/fp16/int32/int16/int8 dtype -- the same hardware
-allow-list `tile.store` enforces -- and bf16 carries the same Ascend910B-only
+allow-list `tile.store` enforces -- and bf16 carries the same Ascend910-only
 restriction on top.
 
 `pld.tensor.put` (TPUT) has **no** tile-source form — its staging tile is a
@@ -359,7 +359,7 @@ transfer dim requires a matching static chunk (see above). `atomic` selects
 overwrite vs atomic-add (see `AtomicType`). `atomic=Add` additionally requires a
 `FP32/BF16/FP16/INT32/INT16/INT8` destination (the hardware atomic-add dtypes,
 since TPUT lands its chunks through the same store pipe as `tile.store`); a
-`BF16` destination is further restricted to the Ascend910B (A2/A3) profile by the
+`BF16` destination is further restricted to the Ascend910 (A2/A3) profile by the
 `AtomicAddDtypeValid` property verifier. The lowered `pld.tile.put` verifier
 requires the staging tile to **fit within** the flattened transfer in both
 **static** dims (it may be smaller — a chunk — but never larger; dynamic dims

@@ -23,7 +23,7 @@ _ROWS = pl.dynamic("ROWS")
 def _generate_mlir(program_cls) -> str:
     """Run PassManager and PTOCodegen on the given program, return MLIR string."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
 
     optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program_cls)
     funcs = list(optimized.functions.values())
@@ -103,7 +103,7 @@ class TestPrefetchPTOCodegen:
         layers silently passes one runtime value as another.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
             OrderedSyntheticArgsProgram
         )
@@ -218,7 +218,7 @@ class TestPrefetchCoreAffinity:
         side-effecting prefetch a second time.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(MixedPrefetchProgram)
 
@@ -286,7 +286,7 @@ class TestPrefetchBackendArtifact:
     @staticmethod
     def _generate(program_cls, output_dir, monkeypatch) -> dict[str, str]:
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program_cls)
         monkeypatch.setattr(
             pto_backend,

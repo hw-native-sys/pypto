@@ -18,7 +18,7 @@ Query a concrete backend to enumerate its actual operator registrations:
 ```python
 from pypto import backend
 
-target = backend.get_backend_instance(backend.BackendType.Ascend910B)
+target = backend.get_backend_instance(backend.BackendType.Ascend910)
 names = target.get_registered_op_names()
 ```
 
@@ -56,3 +56,13 @@ instruction mappings or claiming complete form coverage.
 
 - [Pass, PassContext, PassPipeline, and PassManager](../passes/00-pass_manager.md) — where the handler comes from.
 - [PTO ISA reference](../../reference/index.md) — the hardware differences the handlers abstract over.
+
+## Backend names
+
+Use `BackendType.Ascend910` for the A2/A3 backend and `BackendType.Ascend950`
+for A5. `BackendType.Ascend910B` remains a compatibility alias of
+`BackendType.Ascend910` in both Python and C++; both names select the same target.
+The canonical `.name` and newly written artifact metadata use `Ascend910`.
+Existing artifacts containing `Ascend910B` remain readable; older PyPTO releases
+may not recognize new artifacts containing `Ascend910`. Platform strings
+(`a2a3`, `a2a3sim`, `a5`, `a5sim`) and enum integer values are unchanged.

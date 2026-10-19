@@ -101,7 +101,7 @@ Ascend950（a5）——硬件跨核 pipe 直接按 fractal 布局传输数据：
 NZ。ZN 属于 cube 侧在 pop 之后所做的 `Mat → Right` `tile.move`，比本表描述的边界晚
 一步——与下面 a2a3 表格中写明的拆分相同。
 
-Ascend910B（a2a3）——跨核传输经过 GM → Mat，Mat 仅支持 NZ 布局。因此 Left 和 Right 目标在传输边界统一使用 NZ，最终的 Left/Right 布局由后续 `Mat → Left/Right` `tile.move`（MTE1）处理：
+Ascend910（a2a3）——跨核传输经过 GM → Mat，Mat 仅支持 NZ 布局。因此 Left 和 Right 目标在传输边界统一使用 NZ，最终的 Left/Right 布局由后续 `Mat → Left/Right` `tile.move`（MTE1）处理：
 
 | 方向 | Push/Pop TileView (blayout, slayout) | 名称 |
 | ---- | ------------------------------------ | ---- |
@@ -249,7 +249,7 @@ A5 拒绝显式本地深度，即使其值等于 `slot_num`，因为 PTOAS 的�
 `tile.tpop_from_aiv` 结果还需要做同侧 `tile.move`（例如 Mat -> Left/Right/Bias），
 则生成的 `system.tfree_to_aiv(...)` 会改写为释放 canonical 的 popped tile，并可被延后到这条 carrier 链之后。
 
-对于 Ascend910B（a2a3），该 Pass 也支持**没有函数级 split 模式**的 mixed kernel（`split` 未设置或为
+对于 Ascend910（a2a3），该 Pass 也支持**没有函数级 split 模式**的 mixed kernel（`split` 未设置或为
 `SplitMode.None`）。此时 Pass 会保留单个 AIV kernel body，并为其打上**双 AIV 派发**标记；后续 lowering
 会基于运行时 `subblock_idx` 插入分支：AIV lane 0 执行原始函数体，AIV lane 1 重放跨核握手，并将 tile-producing
 replay 路径强制为 `valid_shape=[0, 0]`，同时屏蔽可见的 `tile.store` 写回。这样
@@ -268,7 +268,7 @@ replay 路径强制为 `valid_shape=[0, 0]`，同时屏蔽可见的 `tile.store`
 - 输入 IR 必须已提取 InCore 作用域（需先运行 `OutlineIncoreScopes`）
 - Tile 操作必须已展平为 2D（需先运行 `FlattenTileNdTo2D`）
 - Tile 内存空间必须已推断（需先运行 `InferTileMemorySpace`）
-- 跨核 Fractal TileView 分配在 Ascend950 和 Ascend910B 后端均受支持
+- 跨核 Fractal TileView 分配在 Ascend950 和 Ascend910 后端均受支持
 
 **使用时机**：在 `InferTileMemorySpace` 之后运行，当 InCore 函数可能同时包含 Cube 和 Vector tile 操作时使用。
 
@@ -317,7 +317,7 @@ program_expanded = expand_pass(program)
      - 对于边界移动（Vector→Cube）：生成 tile.move 适配 fractal 布局，然后 tpush_to_aic(adapted_tile)
   5a. 通过 BuildCrossCoreTransferView 为所有边界 tpop 结果类型和 tpush 前的 tile.move 操作分配 fractal TileView：
       - Ascend950：Left→NZ，Right→ZN，Mat/Vec→保持原始
-      - Ascend910B：Left→NZ，Right→NZ（Mat 仅支持 NZ），Mat/Vec→保持原始
+      - Ascend910：Left→NZ，Right→NZ（Mat 仅支持 NZ），Mat/Vec→保持原始
   6. 修复两侧函数体中的循环携带状态
      - 删除在当前核心侧无用的 dead iter_args——"有用"包含 while 条件，并在循环自身的 yield 上做闭包，
        因此仅被用于喂给另一个存活槽位的 carry（多级 FIFO 轮转）会被保留
@@ -333,7 +333,7 @@ program_expanded = expand_pass(program)
  11. 如果拆分后的函数体包含跨核 tile 操作，且尚未带有 setup，
       则推导并 prepend reserve/import/initialize_pipe 前缀
  12. 创建 AIC 函数（无返回值）和 AIV 函数（原始返回值）
-     - 对于 Ascend910B 上的 no-split mixed kernel，为生成的 AIV 打上 dual-dispatch 元数据，
+     - 对于 Ascend910 上的 no-split mixed kernel，为生成的 AIV 打上 dual-dispatch 元数据，
        使后续 lowering 在两个 vector lane 上派发同一个 AIV kernel，并将第二个 lane 的 tile replay
        路径改写为 `valid_shape=[0, 0]`
  13. 如果满足以下任一条件，同时创建 Group 函数（调用 AIC 和 AIV）：

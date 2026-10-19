@@ -2703,7 +2703,7 @@ class TestInferTileMemorySpaceIterArgInherit:
         """
         # A backend is needed so the Mat tile.create carries the implicit NZ TileView,
         # matching the tile.assemble result type for the loop-carried reassignment.
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -2748,7 +2748,7 @@ class TestInferTileMemorySpaceIterArgInherit:
         the ``tile.create``, the inner from the outer iter-arg via ``AsVarLike``). Pins
         the recursive seeding the single-loop test does not reach.
         """
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -2805,7 +2805,7 @@ class TestInferTileMemorySpaceLoopCarriedOperand:
         target can execute -- and the property verifier stayed silent about it,
         so the violation only surfaced in the backend.
         """
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -2859,7 +2859,7 @@ class TestInferTileMemorySpaceLoopCarriedOperand:
         carry edge the load defaulted to Vec and the operand was routed
         GM -> UB -> L0B, putting a cube-only operand on the vector core.
         """
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -2950,7 +2950,7 @@ class TestInferTileMemorySpaceLoopCarriedOperand:
         operand reached `tile.matmul`'s Right slot with no memory space
         whatsoever.
         """
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -3008,12 +3008,12 @@ class TestLoopInvariantMatResidency:
 
     @staticmethod
     def _run_infer(program):
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         return passes.infer_tile_memory_space()(passes.convert_to_ssa()(program))
 
     @staticmethod
     def _run_tensor_infer(program):
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         program = passes.convert_to_ssa()(program)
         program = passes.convert_tensor_to_tile_ops()(program)
         program = passes.flatten_tile_nd_to_2d()(program)
@@ -3225,7 +3225,7 @@ class RetargetedBridgeAttrs:
 
         Before = passes.convert_to_ssa()(pl.parse_program(program.format(body=before_body)))
         Expected = passes.convert_to_ssa()(pl.parse_program(program.format(body=expected_body)))
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         ir.assert_structural_equal(passes.infer_tile_memory_space()(Before), Expected)
 
     def test_private_marker_stripped_when_function_has_no_tile_memory(self):
@@ -3257,7 +3257,7 @@ class MarkerOnlyScalarCall:
         Expected = passes.convert_to_ssa()(
             pl.parse_program(program.format(attrs='attrs={"residency_test_sentinel": 11}'))
         )
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         ir.assert_structural_equal(passes.infer_tile_memory_space()(Before), Expected)
 
     def test_tensor_matmul_stationary_lhs_loads_once(self):
@@ -3267,7 +3267,7 @@ class MarkerOnlyScalarCall:
         loop.  This is the load-once QK shape reported in #2077, reduced to two
         N tiles so the test stays compact.
         """
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -3317,7 +3317,7 @@ class MarkerOnlyScalarCall:
         GM->Mat load is invariant; the L0 staging remains in the inner
         pipeline.
         """
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:

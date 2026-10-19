@@ -467,7 +467,7 @@ static std::string MakeRemoteStoreCodegenPTO(const CallPtr& op, codegen::Codegen
       CHECK_SPAN(handler->SupportsBf16AtomicAdd(), op->span_)
           << "pld.tile.remote_store with atomic=AtomicType.Add into a bf16 window is not supported on the '"
           << handler->GetPtoTargetArch()
-          << "' backend; bf16 atomic-add requires the Ascend910B (A2/A3) profile. Accumulate into an fp32 "
+          << "' backend; bf16 atomic-add requires the Ascend910 (A2/A3) profile. Accumulate into an fp32 "
              "window and cast to bf16 after the reduction instead.";
     }
     tstore_line << " {atomicType = #pto<atomic_type atomic_add>}";

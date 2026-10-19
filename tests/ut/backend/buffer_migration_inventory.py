@@ -25,7 +25,7 @@ class MigrationStatus(Enum):
     RESTRICTED = "restricted"
 
 
-_TARGETS = frozenset({backend.BackendType.Ascend910B, backend.BackendType.Ascend950})
+_TARGETS = frozenset({backend.BackendType.Ascend910, backend.BackendType.Ascend950})
 
 
 @dataclass(frozen=True)

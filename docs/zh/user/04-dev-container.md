@@ -462,7 +462,7 @@ cat /usr/local/Ascend/driver/version.info
 的环境（运行时在 `runtime/docs/install.md` 里列出了它支持什么）；先把驱动和固件升级到配套版本再复测。
 
 **第二，确认芯片系列与 `-p` 一致。** 用错 arch 同样会以 `507018` 的形式出现，而且看起来非常像编译器
-bug。`a2a3` 覆盖 `Ascend910B*`（A2）和 `Ascend910_93*`（A3），`a5` 覆盖 `Ascend950*`：
+bug。`a2a3` 覆盖 `Ascend910*`（A2）和 `Ascend910_93*`（A3），`a5` 覆盖 `Ascend950*`：
 
 ```bash
 npu-smi info -t board -i 0 -c 0 | grep -iE 'Chip Name|NPU Name'

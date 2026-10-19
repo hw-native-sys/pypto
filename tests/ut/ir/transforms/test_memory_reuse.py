@@ -5879,7 +5879,7 @@ class TestStorageLayoutReuse:
 
 class TestAscend910BLoadTpopHazard:
     """MemoryReuse must not coalesce a writer that consumes a tile.load result
-    and a tile.tpop_from_aic value into the load's buffer on Ascend910B split-AIV
+    and a tile.tpop_from_aic value into the load's buffer on Ascend910 split-AIV
     functions — that in-place sharing is a silent hardware hazard.  This guard
     folds in the responsibility formerly owned by LegalizePTOBufferReuse.
     """
@@ -5917,7 +5917,7 @@ class TestAscend910BLoadTpopHazard:
 
     def test_ascend910b_split_aiv_does_not_reuse_load_buffer(self):
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         try:
             After = passes.memory_reuse()(self._build_program())
         finally:
@@ -5926,7 +5926,7 @@ class TestAscend910BLoadTpopHazard:
         bases = _collect_tile_memref_bases(After)
         assert "down_prev" in bases and "down_next" in bases, f"missing tile vars; got {bases}"
         assert bases["down_next"] != bases["down_prev"], (
-            "Ascend910B split-AIV: tile.add output must NOT reuse the tile.load buffer "
+            "Ascend910 split-AIV: tile.add output must NOT reuse the tile.load buffer "
             f"(load+tpop_from_aic hazard), but both bind to {bases['down_prev']}"
         )
 
@@ -5934,7 +5934,7 @@ class TestAscend910BLoadTpopHazard:
         """DSA-RP exports the load+tpop target hazard as an unrelaxable edge."""
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         try:
             with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA_RP, enable_buffer_ir=False):
                 after = passes.allocate_memory_addr()(
@@ -5947,7 +5947,7 @@ class TestAscend910BLoadTpopHazard:
         previous_offset, previous_size = ranges["down_prev"]
         next_offset, next_size = ranges["down_next"]
         assert previous_offset + previous_size <= next_offset or next_offset + next_size <= previous_offset, (
-            "Ascend910B split-AIV: DSA-RP must physically separate tile.add output "
+            "Ascend910 split-AIV: DSA-RP must physically separate tile.add output "
             f"{ranges['down_next']} from load buffer {ranges['down_prev']}"
         )
 
@@ -5997,7 +5997,7 @@ class TestAscend910BLoadTpopHazard:
         tpop value and MemoryReuse forms the in-place load touch.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         try:
             After = passes.memory_reuse()(self._build_loop_carried_program())
         finally:
@@ -6006,7 +6006,7 @@ class TestAscend910BLoadTpopHazard:
         bases = _collect_tile_memref_bases(After)
         assert "down_prev" in bases and "down_next" in bases, f"missing tile vars; got {bases}"
         assert bases["down_next"] != bases["down_prev"], (
-            "Ascend910B split-AIV: tile.add output must NOT reuse the tile.load buffer when the "
+            "Ascend910 split-AIV: tile.add output must NOT reuse the tile.load buffer when the "
             "tpop_from_aic operand arrives as a loop-carried IterArg, but both bind to "
             f"{bases['down_prev']}"
         )
@@ -6062,7 +6062,7 @@ class TestAscend910BLoadTpopHazard:
         completed buffer taint is in hand before the writer is classified.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         try:
             After = passes.memory_reuse()(self._build_back_edge_program())
         finally:
@@ -6071,7 +6071,7 @@ class TestAscend910BLoadTpopHazard:
         bases = _collect_tile_memref_bases(After)
         assert "down_prev" in bases and "down_next" in bases, f"missing tile vars; got {bases}"
         assert bases["down_next"] != bases["down_prev"], (
-            "Ascend910B split-AIV: tile.add output must NOT reuse the tile.load buffer when the "
+            "Ascend910 split-AIV: tile.add output must NOT reuse the tile.load buffer when the "
             "tpop_from_aic value reaches it across the loop back edge, but both bind to "
             f"{bases['down_prev']}"
         )
@@ -6253,7 +6253,7 @@ class TestForbidOutputAlias:
                 return seq
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         try:
             After = _run_pipeline(Before)
         finally:
@@ -6305,7 +6305,7 @@ class TestForbidOutputAlias:
                 return res
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         try:
             After = _run_pipeline(Before)
         finally:
@@ -6323,7 +6323,7 @@ class TestForbidOutputAlias:
             f"tile.sel output must not alias its tmp buffer, but both bind to {bases['dst']}"
         )
 
-    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
     def test_sel_output_may_reuse_dead_lhs(self, backend_type):
         """TSEL may reuse a dying lhs/rhs buffer; mask and tmp stay forbidden."""
 
@@ -6361,7 +6361,7 @@ class TestForbidOutputAlias:
         assert bases["dst"] != bases["mask"]
         assert bases["dst"] != bases["tmp"]
 
-    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
     def test_sels_output_may_reuse_dead_tmp(self, backend_type):
         """TSELS consumes tmp before dst writes on A2/A3; A5 leaves tmp unread."""
 
@@ -6404,7 +6404,7 @@ class TestForbidOutputAlias:
         assert bases["dst"] != bases["src"]
         assert bases["dst"] != bases["mask"]
 
-    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
     def test_written_workspace_does_not_inherit_a_buffer_a_preceding_op_reads(self, backend_type):
         """A workspace the intrinsic writes itself may not recycle a buffer.
 
@@ -6495,7 +6495,7 @@ class TestForbidOutputAlias:
                 return res
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         try:
             After = _run_pipeline(Before)
         finally:
@@ -6546,7 +6546,7 @@ class TestForbidOutputAlias:
                 return res
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         try:
             After = _run_pipeline(Before)
         finally:
@@ -6582,7 +6582,7 @@ class TestForbidOutputAlias:
                 return res
 
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         try:
             After = _run_pipeline(Before)
         finally:
@@ -6744,7 +6744,7 @@ class TestForbidOutputAlias:
     def test_narrowing_cast_source_is_disjoint(self, planner, width):
         """A2/A3 TCVT must not overwrite an unread source tail, including views."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -6776,7 +6776,7 @@ class TestForbidOutputAlias:
     def test_narrowing_cast_loop_carry_is_disjoint(self, planner):
         """Retargeting a cast onto a loop carry must preserve source separation."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -7174,7 +7174,7 @@ class TestCapacityGatedReuse:
         in distinct buffers — the depth-2 ping-pong. This is the ->2 address
         signature (the ``0 A 0 A`` stream) capacity-gated reuse produces."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         Before = self._two_stage_matmuls()
         After = passes.memory_reuse()(passes.init_mem_ref()(Before))
         bases = self._collect_bases(After, ("r0", "r1"))
@@ -7189,7 +7189,7 @@ class TestCapacityGatedReuse:
         capacity-pinned projection behaviour, preventing the overflow that blind
         separation would cause."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         # [128, 192] BF16 Right operand => 48 KB, so depth-2 (96 KB) overflows the 64 KB L0b.
         Before = self._two_stage_matmuls(a_shape=(16, 128), b_shape=(128, 192))
         After = passes.memory_reuse()(passes.init_mem_ref()(Before))
@@ -7205,7 +7205,7 @@ class TestCapacityGatedReuse:
         depth and the fix. Routed through the diagnostic channel and captured via a
         ``ReportInstrument``'s ``perf_hints.log`` — the serialization is no longer silent."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         Before = self._two_stage_matmuls(a_shape=(16, 128), b_shape=(128, 192))
         with passes.PassContext([passes.ReportInstrument(str(tmp_path))], enable_buffer_ir=False):
             passes.memory_reuse()(passes.init_mem_ref()(Before))
@@ -7225,7 +7225,7 @@ class TestCapacityGatedReuse:
     def test_dsa_rp_keeps_affordable_pipeline_stages_separate(self, tmp_path):
         """The strict DSA-RP solve preserves pipeline intent when it fits."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         Before = self._two_stage_matmuls()
 
         with passes.PassContext(
@@ -7243,7 +7243,7 @@ class TestCapacityGatedReuse:
     def test_dsa_rp_relaxes_pipeline_only_after_strict_no_fit(self, tmp_path):
         """A capacity-forced pipeline reuse emits PH-DSA-001 after actual overlap."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         Before = self._two_stage_matmuls(a_shape=(16, 128), b_shape=(128, 192))
 
         with passes.PassContext(
@@ -7267,7 +7267,7 @@ class TestCapacityGatedReuse:
         through 2 buffers (stage mod 2): r0 and r2 share, r1 is separate. This is the
         proper modulo-variable-expansion an all-or-nothing gate would miss."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -7336,7 +7336,7 @@ class TestCapacityGatedReuse:
         tagged the SAME (group, stage) map to the same ping-pong residue, so they merge
         — only *cross-stage* operands are kept apart."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -7385,7 +7385,7 @@ class TestCapacityGatedReuse:
         must stay separate. The fix compares the dense stage *ordinal* (0, 1) mod k,
         not the raw stage value — raw `2 mod 2 == 0 mod 2` would wrongly merge them."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -7444,7 +7444,7 @@ class TestCapacityGatedReuse:
         operands would correctly stay separated — the old conservative Sum(size)
         estimate over-counted a disjoint tile as its own buffer."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -7524,7 +7524,7 @@ class TestCapacityGatedReuse:
         """Same IR in => identical buffer assignment out (the direct depth-cap is
         order-free — no ratio-greedy merge ordering to diverge)."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         Before = self._two_stage_matmuls()
         first = self._collect_bases(passes.memory_reuse()(passes.init_mem_ref()(Before)), ("r0", "r1"))
         second = self._collect_bases(passes.memory_reuse()(passes.init_mem_ref()(Before)), ("r0", "r1"))
@@ -7541,7 +7541,7 @@ class TestCapacityGatedReuse:
         NOT the shed-loop `force_legacy` fallback branch, which needs a tagged,
         capacity-overflowing space to fire.)"""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -7593,7 +7593,7 @@ class TestCapacityGatedReuse:
         tests above. This guards the real tag production/consumption flow and that the
         gate yields a valid <=L0b allocation on a real pipeline."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Prog:
@@ -7641,7 +7641,7 @@ class TestCapacityGatedReuse:
         adjacency guarantee at depth > 2 that a distance-blind shed would break; it is
         why mod F is kept rather than recovered from a scalar ShedScore."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -7704,7 +7704,7 @@ class TestCapacityGatedReuse:
         co-resident/whole-space accuracy that the old Sum(size) estimate lacked. (The shed
         loop itself is exercised by the co-resident test, where a co-live tile forces it.)"""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -7778,7 +7778,7 @@ class TestCapacityGatedReuse:
         reserved_start accounting. (reserve_buffer lives in Vec for InCore functions;
         L0 — the #1475 L0b target — has no reserve region, so it is unaffected.)"""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class WithReserve:
@@ -7853,7 +7853,7 @@ class TestCapacityGatedReuse:
         B's depth as well. So the assertion below discriminates ``max_relief`` from the
         alternatives, not merely "some group shed"."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -7974,7 +7974,7 @@ class TestCapacityGatedReuse:
         assert allocation succeeds — we assert the branch's contract: the fallback re-runs exactly
         the legacy packing, which keeps the 4 co-live operands in distinct buffers."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -8048,7 +8048,7 @@ class TestCapacityGatedReuse:
         operation-specific passes may diagnose it earlier with more context.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:

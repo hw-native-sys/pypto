@@ -251,7 +251,7 @@ Codegen：经过标准 tile pipeline 之后 tile 是 2-D（height × width）；
 也是 all-to-all combine 就地累加各 rank 贡献所需要的。该 attr 仅在 `kAdd` 时发出，
 因此普通 push 的产物与之前逐字节一致。`kAdd` 要求 dtype 为
 fp32/bf16/fp16/int32/int16/int8 —— 与 `tile.store` 强制的硬件允许列表相同 ——
-bf16 在此之上还有 Ascend910B-only 限制。
+bf16 在此之上还有 Ascend910-only 限制。
 
 `pld.tensor.put`（TPUT）**没有** tile 源形式 —— 它的 staging tile 是中转缓冲而非
 数据源。推送计算值是 `remote_store` 的职责；推送无需装入片上的大块 GM 区域则是
@@ -315,7 +315,7 @@ full-slice `put` 要求 `dst` / `src` 形状一致；subregion `put` 允许完�
 不同,只要显式传输区域不越界（仅校验静态维）；任何动态传输维都需配套静态 chunk
 （见上）。`atomic` 选择覆盖还是原子加（见 `AtomicType`）。`atomic=Add` 还要求目标为
 `FP32/BF16/FP16/INT32/INT16/INT8`（硬件原子加 dtype——TPUT 与 `tile.store` 走同一条 store
-流水落盘）；其中 `BF16` 目标进一步由 `AtomicAddDtypeValid` 属性校验器限制为 Ascend910B（A2/A3）。下降出的
+流水落盘）；其中 `BF16` 目标进一步由 `AtomicAddDtypeValid` 属性校验器限制为 Ascend910（A2/A3）。下降出的
 `pld.tile.put` verifier 要求 staging tile 在两个
 **静态**维度上都**不超过**展平后的传输范围（可以更小 —— 即一个 chunk —— 但不能
 更大；动态维由 chunk 在运行时约束）。

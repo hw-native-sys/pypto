@@ -32,7 +32,7 @@ from pypto.runtime.tensor_spec import ScalarSpec
 # Pre-defined platform parameter lists for @pytest.mark.parametrize.
 #
 # A platform string is one of "a2a3", "a5", "a2a3sim", "a5sim".  The architecture
-# prefix selects the backend (Ascend910B / Ascend950) and the optional ``sim``
+# prefix selects the backend (Ascend910 / Ascend950) and the optional ``sim``
 # suffix toggles between simulator and on-board (real chip) execution.
 #
 # Filtering happens in two layers:
@@ -67,8 +67,8 @@ SIM_PLATFORMS = [pytest.param(p, id=p) for p in SIM_PLATFORM_IDS]
 ONBOARD_PLATFORMS = [pytest.param(p, id=p) for p in ONBOARD_PLATFORM_IDS]
 
 _PLATFORM_TO_BACKEND: dict[str, BackendType] = {
-    "a2a3": BackendType.Ascend910B,
-    "a2a3sim": BackendType.Ascend910B,
+    "a2a3": BackendType.Ascend910,
+    "a2a3sim": BackendType.Ascend910,
     "a5": BackendType.Ascend950,
     "a5sim": BackendType.Ascend950,
 }

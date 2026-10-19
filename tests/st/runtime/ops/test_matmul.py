@@ -200,7 +200,7 @@ def _printed_through_auto_tile(
 ) -> str:
     """Run the production tensor-to-tile prefix through AutoTile for structural checks."""
     _backend.reset_for_testing()
-    _backend.set_backend_type(BackendType.Ascend910B)
+    _backend.set_backend_type(BackendType.Ascend910)
     with passes.PassContext(
         [],
         memory_planner=planner,

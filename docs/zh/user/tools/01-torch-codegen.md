@@ -121,7 +121,7 @@ assert torch.allclose(out, golden_out, rtol=5e-2, atol=5e-2)
 
 ```python
 reset_for_testing()
-set_backend_type(BackendType.Ascend910B)  # 或 BackendType.Ascend950
+set_backend_type(BackendType.Ascend910)  # 或 BackendType.Ascend950
 try:
     transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
     code = torch_codegen(transformed, check_shapes=True)

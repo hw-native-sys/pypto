@@ -196,7 +196,7 @@ a `tile.store` drain) and the geometry is one L0C can address:
 | ----------- | --- |
 | `M % 16 == 0` and `N % 16 == 0` | Both parent extents must be whole 16×16 boxes, and the page's column origin `b*N` must be box-aligned, or `GetSliceAccumulatorGeometry` declines and `InitMemRef` silently falls back to row-major arithmetic |
 | 4-byte accumulator element (FP32 / INT32) | A 16×16 box is `kAccFractal` (1024) bytes only at 4 bytes per element |
-| `B*M*N*4` fits `Acc` | Read from the backend (`GetMemSize(Acc)`), not hard-coded — L0C is 128 KB on Ascend910B and 256 KB on 950 |
+| `B*M*N*4` fits `Acc` | Read from the backend (`GetMemSize(Acc)`), not hard-coded — L0C is 128 KB on Ascend910 and 256 KB on 950 |
 | no partial `valid_shape` | Page `b`'s valid region starts at `b*N` but is only `N_valid` wide; the packed parent has no single valid rectangle to describe that |
 | `batch_count > 1` | At `B == 1` both packings are the same `[M, N]` tile, so the existing fast paths are byte-identical and stay untouched |
 

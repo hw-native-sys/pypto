@@ -417,7 +417,7 @@ def test_a2a3_int32_to_fp16_stays_native():
             o: pl.Tensor[[16, 16], pl.FP16] = pl.create_tensor([16, 16], dtype=pl.FP16)
             return self.kernel(x, o)
 
-    after = _run(Before, BackendType.Ascend910B)
+    after = _run(Before, BackendType.Ascend910)
     pairs = _cast_pairs(after)
     assert pairs == [("int32", "fp16")], pairs
 
@@ -569,9 +569,9 @@ def test_resolve_arch_without_configured_backend_is_a_noop():
     [
         # HF8 exists only on a5; a2a3 has no path and must reject.
         (BackendType.Ascend950, "HF8", "FP32", [("hf8", "fp32")]),
-        (BackendType.Ascend910B, "HF8", "FP32", None),
+        (BackendType.Ascend910, "HF8", "FP32", None),
         # INT4 exists only on a2a3; a5 has no path and must reject.
-        (BackendType.Ascend910B, "FP16", "INT4", [("fp16", "int4")]),
+        (BackendType.Ascend910, "FP16", "INT4", [("fp16", "int4")]),
         (BackendType.Ascend950, "FP16", "INT4", None),
     ],
 )
@@ -649,7 +649,7 @@ def test_an_opt_out_applies_only_to_the_final_legalized_hop():
             c = pl.cast(t, pl.INT8, mode="trunc", saturation_mode=saturation_mode)
             return pl.store(c, [0, 0], out)
 
-    after = _run(Before, BackendType.Ascend910B)
+    after = _run(Before, BackendType.Ascend910)
     assert _cast_pairs(after) == [("fp32", "fp16"), ("fp16", "int8")]
     assert _saturation_modes(after) == [None, 0], "intermediate defaulted, final opted out"
 
@@ -669,7 +669,7 @@ def test_native_cast_keeps_its_saturation_unchanged():
             c = pl.cast(t, pl.INT8, mode="trunc", saturation_mode="off")
             return pl.store(c, [0, 0], out)
 
-    after = _run(Before, BackendType.Ascend910B)
+    after = _run(Before, BackendType.Ascend910)
     assert _cast_pairs(after) == [("fp16", "int8")]
     assert _saturation_modes(after) == [0]
 
@@ -694,7 +694,7 @@ def test_legalized_chain_keeps_a_caller_supplied_tmp_on_the_final_hop():
             c = pl.tile.cast(t, pl.INT8, mode="trunc", tmp=tmp)
             return pl.store(c, [0, 0], out)
 
-    after = _run(Before, BackendType.Ascend910B)
+    after = _run(Before, BackendType.Ascend910)
     assert _cast_pairs(after) == [("fp32", "fp16"), ("fp16", "int8")]
 
     class _ArityCollector(ir.IRVisitor):

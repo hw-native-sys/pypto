@@ -91,7 +91,7 @@ class _LeftoverPinCase(_Case):
         return "leftover_pin_case"
 
     def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
+        return BackendType.Ascend910
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +103,7 @@ def test_a_case_carries_no_backend_of_its_own():
     # Not "the default is 910B" — there is no such accessor to default.
     assert not hasattr(harness.PTOTestCase, "get_backend_type")
     with pytest.raises(TypeError):
-        _Case(backend_type=BackendType.Ascend910B)  # pyright: ignore[reportCallIssue]
+        _Case(backend_type=BackendType.Ascend910)  # pyright: ignore[reportCallIssue]
 
 
 def test_the_backend_is_derived_from_the_bound_platform():

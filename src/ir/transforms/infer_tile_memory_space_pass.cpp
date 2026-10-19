@@ -601,7 +601,7 @@ class MoveCollector : public IRVisitor {
         // target implements is PTOAS's `TMovOp::verify`, and PyPTO has no
         // faithful copy of it: `SoC::GetMemoryGraph()` models the memory
         // hierarchy for `FindMemPath`, not tmov legality, and omits edges this
-        // pipeline emits and PTOAS accepts (`Acc -> Vec` on Ascend910B). A
+        // pipeline emits and PTOAS accepts (`Acc -> Vec` on Ascend910). A
         // per-pair check here would reject working kernels.
         INTERNAL_CHECK_SPAN(IsTileMoveEverPossibleInto(allowed_spaces[0]), call->span_)
             << "Internal error: InferTileMemorySpace wants a tile.move into "

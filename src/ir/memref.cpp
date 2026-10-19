@@ -37,7 +37,7 @@ bool IsTileMoveEverSupported(MemorySpace src, MemorySpace dst) {
   // Deliberately NOT derived from `SoC::GetMemoryGraph()`. That graph models the
   // memory hierarchy for `Backend::FindMemPath` (which has no production
   // callers) and is not a tmov-legality table: it omits `Acc -> Vec` on
-  // Ascend910B, a move this pipeline emits and PTOAS accepts. The two agree on
+  // Ascend910, a move this pipeline emits and PTOAS accepts. The two agree on
   // the row that matters here -- nothing moves into `Acc` -- and
   // tests/ut/ir/test_memory_space.py pins that agreement.
   switch (src) {

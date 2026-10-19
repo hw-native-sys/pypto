@@ -70,8 +70,8 @@ Performance hints are best-effort advisory diagnostics that flag patterns likely
 
 `BackendHandler` exposes:
 
-| Method | Ascend910B | Ascend950 |
-| ------ | ---------- | --------- |
+| Method | Ascend910 | Ascend950 |
+| ------ | --------- | --------- |
 | `GetGmAccessGranularityBytes()` | 512 | 128 |
 | `GetL2CacheLineBytes()` | 512 | 512 |
 | `GetRecommendedInnermostDimBytes()` | 512 | 128 |
@@ -97,7 +97,7 @@ Hits are **deduplicated** by `(file, line, col, op, dtype, innermost_bytes, inne
 
 > **Source-span limitation:** the span is the post-pipeline IR-text location (`<string>:line:col`), not the originating DSL `pl.at` / slicing expression, and the controlling chunk constant is not named. Mapping back to user source and naming the inner-dim constant requires DSL source spans to be threaded through the parser/IR onto the tile op — that metadata is not yet carried on `TileType`, the `Call` op, or `Span` (issue #1305 asks 2/3).
 
-Example: console summary plus `perf_hints.log` content (from `examples/intermediate/05_assemble.py` on Ascend910B). Note the first two lines — same op, span, dtype, innermost size and memory space, separated only by volume:
+Example: console summary plus `perf_hints.log` content (from `examples/intermediate/05_assemble.py` on Ascend910). Note the first two lines — same op, span, dtype, innermost size and memory space, separated only by volume:
 
 ```text
 # stderr:

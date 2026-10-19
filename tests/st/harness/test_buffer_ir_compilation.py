@@ -66,7 +66,7 @@ def test_buffer_mode_has_a_distinct_cache_key_without_changing_ordinary_cases():
 )
 def test_actual_compile_paths_preserve_case_mode_and_planner(tmp_path, planner, in_pool, enabled):
     case = _case(planner, enabled)
-    tr._install_backend(BackendType.Ascend910B)
+    tr._install_backend(BackendType.Ascend910)
     if in_pool:
         work_dir = tmp_path / "pool"
         # This context lives on the parent thread and intentionally disagrees.

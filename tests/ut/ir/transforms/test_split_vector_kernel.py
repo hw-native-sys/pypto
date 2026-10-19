@@ -116,11 +116,11 @@ class TestSplitVectorKernelNoSplitPassthrough:
 
 
 class TestSplitVectorKernelNoSplitA2A3:
-    """Tests for Ascend910B no-split mixed-kernel dual-dispatch lowering."""
+    """Tests for Ascend910 no-split mixed-kernel dual-dispatch lowering."""
 
     def test_external_dual_dispatch_keeps_signature_only_body(self, tmp_path):
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         source = tmp_path / "external.cpp"
         source.write_text('extern "C" void kernel_entry(long long* args) { (void)args; }\n')
 
@@ -144,7 +144,7 @@ class TestSplitVectorKernelNoSplitA2A3:
 
     def test_external_split_stamps_dual_dispatch_without_body_rewrite(self, tmp_path):
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         source = tmp_path / "external.cpp"
         source.write_text('extern "C" void kernel_entry(long long* args) { (void)args; }\n')
 
@@ -168,7 +168,7 @@ class TestSplitVectorKernelNoSplitA2A3:
 
     def test_external_split_aiv_overrides_false_dual_dispatch_attr(self, tmp_path):
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
         source = tmp_path / "external.cpp"
         source.write_text('extern "C" void kernel_entry(long long* args) { (void)args; }\n')
 
@@ -192,7 +192,7 @@ class TestSplitVectorKernelNoSplitA2A3:
 
     def test_no_split_dual_dispatch_producer_replays_compute_and_tpush_on_lane1(self):
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -260,7 +260,7 @@ class TestSplitVectorKernelNoSplitA2A3:
         result shape instead of a second GM read.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -315,7 +315,7 @@ class TestSplitVectorKernelNoSplitA2A3:
         rewrite to a dynamic-valid empty ``tile.create`` instead (gh#1649).
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -383,7 +383,7 @@ class TestSplitVectorKernelNoSplitA2A3:
         the comparison would not pin which.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -438,7 +438,7 @@ class TestSplitVectorKernelNoSplitA2A3:
 
     def test_no_split_dual_dispatch_hoists_import_peer_buffer_and_pipe_init(self):
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -482,7 +482,7 @@ class TestSplitVectorKernelNoSplitA2A3:
 
     def test_no_split_dual_dispatch_consumer_keeps_only_tpop_tfree_on_lane1(self):
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -527,7 +527,7 @@ class TestSplitVectorKernelNoSplitA2A3:
 
     def test_no_split_dual_dispatch_lane1_replays_empty_tiles_after_tpop(self):
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -577,7 +577,7 @@ class TestSplitVectorKernelNoSplitA2A3:
 
     def test_no_split_dual_dispatch_lane1_loop_init_uses_empty_accumulator(self):
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:
@@ -650,7 +650,7 @@ class TestSplitVectorKernelNoSplitA2A3:
     def test_no_split_dual_dispatch_lane1_while_init_uses_empty_accumulator(self):
         """Cover lane1 replay for while-loop tile/scalar carried state."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Before:

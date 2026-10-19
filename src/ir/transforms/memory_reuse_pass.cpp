@@ -2669,10 +2669,10 @@ static bool LifetimesOverlap(const LifetimeInterval& a, const LifetimeInterval& 
 }
 
 // ---------------------------------------------------------------------------
-// Ascend910B split-AIV  load + tpop_from_aic  in-place hazard
+// Ascend910 split-AIV  load + tpop_from_aic  in-place hazard
 // ---------------------------------------------------------------------------
 //
-// On Ascend910B AIV functions with a non-None SplitMode, an op that consumes
+// On Ascend910 AIV functions with a non-None SplitMode, an op that consumes
 // BOTH a tile.load result (or a legal-view descendant of one) AND a
 // tile.tpop_from_aic value must not write its output into the same physical
 // buffer as the load result it reads.  Letting the writer's output reuse that
@@ -3046,7 +3046,7 @@ class WrittenWorkspaceCollector : public IRVisitor {
   std::unordered_set<const Var*> looping_bases_;
 };
 
-/// True only for Ascend910B AIV split-mode functions, which need the load +
+/// True only for Ascend910 AIV split-mode functions, which need the load +
 /// tpop_from_aic in-place hazard guard.  All other backends / function kinds
 /// reuse buffers freely.  Defensive against unit-test contexts that run
 /// MemoryReuse without a configured backend.
@@ -3088,7 +3088,7 @@ bool NeedsLoadTpopHazardGuard(const FunctionPtr& func) {
  * packer no longer processes intervals in program order, every pairwise gate
  * below (load+tpop hazard, no-alias) is checked in **both directions**.
  *
- * @param hazard  Ascend910B load + tpop_from_aic guard inputs.  Empty when the
+ * @param hazard  Ascend910 load + tpop_from_aic guard inputs.  Empty when the
  *                guard is inactive (non-910B / non-split-AIV), in which case the
  *                hazard check is a no-op and reuse behaviour is unchanged.
  * @param forbid_alias  Per-output forbidden-input map (ForbidAliasCollector):
@@ -3397,7 +3397,7 @@ ReuseMap IdentifyReuseOpportunities(
     return resolve_base(TileMemRefBase(root));
   };
 
-  // Ascend910B split-AIV hazard (directional): `writer` consumes a
+  // Ascend910 split-AIV hazard (directional): `writer` consumes a
   // tile.tpop_from_aic value and is defined exactly where the load-derived
   // `input` is last read, so placing writer's output on input's buffer forms the
   // in-place load+tpop touch.  `hazard` is empty off-910B, so this is a no-op.
@@ -5425,7 +5425,7 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
     return func;
   }
 
-  // Step 2: Identify reuse opportunities.  On Ascend910B split-AIV functions,
+  // Step 2: Identify reuse opportunities.  On Ascend910 split-AIV functions,
   // collect the load + tpop_from_aic hazard inputs so the reuse decision never
   // forms the hazardous in-place sharing (folds in the former
   // LegalizePTOBufferReuse responsibility).  Off-910B the inputs stay empty and

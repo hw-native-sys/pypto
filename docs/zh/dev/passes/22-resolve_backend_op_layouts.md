@@ -81,7 +81,7 @@ program = repair(program)
 
 ## 示例
 
-（改编自 `tests/ut/ir/transforms/test_resolve_backend_op_layouts_pass.py::test_rewrites_column_vector_add_through_row_major_reshape`，启用 Ascend910B 后端）
+（改编自 `tests/ut/ir/transforms/test_resolve_backend_op_layouts_pass.py::test_rewrites_column_vector_add_through_row_major_reshape`，启用 Ascend910 后端）
 
 **Before**：
 

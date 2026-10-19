@@ -10,7 +10,7 @@
 """Regression test (issue #1768): single-scope cube→vec fusion with a dynamic dim.
 
 A cube matmul feeding a vector epilogue, fused into ONE ``pl.spmd`` scope with a
-dynamic block count, makes ``InjectGMPipeBuffer`` (Ascend910B) inject a GM pipe
+dynamic block count, makes ``InjectGMPipeBuffer`` (Ascend910) inject a GM pipe
 buffer whose size is ``slot_size * (m // ROW_TILE)`` — a function of the dynamic
 token dim ``m``. Orchestration codegen used to hoist that buffer's
 ``alloc_tensors`` to the top of ``SIMPLER_SCOPE()``, *above* the body-local

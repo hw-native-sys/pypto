@@ -47,7 +47,7 @@ def _activate_a5() -> None:
 
 
 def _activate_a3() -> None:
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
 
 
 # ---------------------------------------------------------------------------

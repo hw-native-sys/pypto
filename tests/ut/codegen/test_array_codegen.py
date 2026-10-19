@@ -464,7 +464,7 @@ def _generate_pto(program_cls) -> str:
     from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
 
     pm = PassManager.get_strategy(OptimizationStrategy.Default)
     optimized = pm.run_passes(program_cls)
@@ -670,7 +670,7 @@ def _compile_orch(program_cls) -> str:
     from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
 
     pm = PassManager.get_strategy(OptimizationStrategy.Default)
     optimized = pm.run_passes(program_cls)

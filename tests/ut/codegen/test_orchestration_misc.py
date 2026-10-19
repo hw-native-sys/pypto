@@ -39,7 +39,7 @@ class TestTaskIsValidCodegen:
 
     def test_task_is_valid_emits_dot_is_valid(self):
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         ib = IRBuilder()
         with ib.function("orch", type=ir.FunctionType.Orchestration) as orch_f:
@@ -75,7 +75,7 @@ class TestTupleLineagePointerKeying:
 
     def test_same_name_tuple_vars_do_not_cross_wire_return_aliases(self):
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         t2d = ir.TensorType([16, 16], pl.FP32)
         tflat = ir.TensorType([256, 1], pl.FP32)
@@ -132,7 +132,7 @@ class TestUnregisteredOpError:
     def test_unregistered_tensor_op_raises_error(self):
         """Unregistered tensor op (tensor.full) in Orchestration must raise RuntimeError."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         ib = IRBuilder()
         with ib.function("orch", type=ir.FunctionType.Orchestration) as orch_f:
@@ -151,7 +151,7 @@ class TestUnregisteredOpError:
     def test_reinterpret_view_has_explicit_orchestration_error(self):
         """Runtime Tensor views cannot change dtype; direct users get an actionable error."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         ib = IRBuilder()
         with ib.function("orch", type=ir.FunctionType.Orchestration) as orch_f:
@@ -185,7 +185,7 @@ class TestLocalAllocWAWPromotion:
     def test_alloc_tensor_two_loops_gets_inout(self):
         """Two loops writing to the same alloc_tensors buffer must use add_inout."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class TwoLoopAllocProgram:
@@ -247,7 +247,7 @@ class TestLocalAllocWAWPromotion:
     def test_external_tensor_keeps_add_output(self):
         """Function parameter tensors with Out direction keep add_output."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class ExternalOutProgram:
@@ -285,7 +285,7 @@ class TestLocalAllocWAWPromotion:
         the parallel loop, causing the regression observed in Qwen3 decode.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class SingleParallelProgram:
@@ -330,7 +330,7 @@ class TestLocalAllocWAWPromotion:
         ``add_inout`` to keep the cross-loop WAW dependency.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class TwoParallelProgram:
@@ -400,7 +400,7 @@ class TestArgDirectionsCodegen:
         consumes them directly (bypassing the legacy ParamDirection mapping).
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class ArgDirProgram:
@@ -508,7 +508,7 @@ class TestNoOpAliasSkip:
     def test_form_a_direct_return_no_alias(self):
         """Control: `return self.kern(...)` — single return path, never tripped the bug."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class FormA:
@@ -537,7 +537,7 @@ class TestNoOpAliasSkip:
         """Control: `t = self.kern(...); return t` — single AssignStmt, handled by
         GenerateSingleReturnAlias's existing ``alias_name != out_arg`` guard."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class FormB:
@@ -572,7 +572,7 @@ class TestNoOpAliasSkip:
         LHS-name == RHS-name and drops the AssignStmt entirely.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class FormC:
@@ -616,7 +616,7 @@ class TestTupleReturnNoDepAliasing:
 
     def test_no_dep_on_tuple_out_param_preserves_alias(self):
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class TupleNoDepProgram:
@@ -700,7 +700,7 @@ class TestTupleReturnNameHintCollision:
 
     def test_same_name_hint_tuple_calls_keep_distinct_elements(self):
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         span = ir.Span.unknown()
         tensor_type = ir.TensorType([16, 16], DataType.FP32)
@@ -906,7 +906,7 @@ class TestScalarCarryPhiCodegen:
         a C++ compile error).
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         N, TILE = 16, 4
 
@@ -992,7 +992,7 @@ class TestScalarCarryPhiCodegen:
         declaration must emit the constant directly (``int64_t <carry> = 0;``).
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class LiteralSeededCarry:
@@ -1044,7 +1044,7 @@ class TestScalarCarryPhiCodegen:
         every use of the loop's return var emits the literal.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class TrivialLiteralCarry:
@@ -1091,7 +1091,7 @@ class TestScalarScopeOutputCodegen:
 
     def test_scope_scalar_is_emitted_from_its_expression(self):
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class ScopeScalarProg:

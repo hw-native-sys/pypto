@@ -12,7 +12,7 @@
 /**
  * @file inject_gm_pipe_buffer_pass.cpp
  * @brief Inject the __gm_pipe_buffer workspace parameter for cross-core pipes on backends
- *        that route slot data through GM (currently Ascend910B).
+ *        that route slot data through GM (currently Ascend910).
  *
  * On 910B, cross-core tpush/tpop rides through a shared GM buffer instead of a
  * direct inter-core fabric. This pass runs after ExpandMixedKernel has split

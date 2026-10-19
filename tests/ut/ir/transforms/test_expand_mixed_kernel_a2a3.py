@@ -24,9 +24,9 @@ from pypto.backend import BackendType
 
 @pytest.fixture(autouse=True)
 def _setup_backend():
-    """Configure Ascend910B backend before each test and reset afterward."""
+    """Configure Ascend910 backend before each test and reset afterward."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     yield
     backend.reset_for_testing()
 
@@ -552,9 +552,9 @@ def test_explicit_sync_core_type_routes_each_event_to_one_lane():
 
 
 def test_v2c_boundary_uses_nz_layout_on_a2a3():
-    """On Ascend910B, cross-core push needs no layout adaptation on the AIV side.
+    """On Ascend910, cross-core push needs no layout adaptation on the AIV side.
 
-    Ascend910B routes push/pop through ub -> gm -> mat. The ub -> gm transfer
+    Ascend910 routes push/pop through ub -> gm -> mat. The ub -> gm transfer
     uses ND layout directly, so no tile.move is needed before tpush_to_aic.
     The AIC tpop lands in Mat with NZ layout (col_major blayout), and a
     subsequent Mat -> Left tile.move resolves the final layout.
@@ -664,7 +664,7 @@ def test_v2c_boundary_uses_nz_layout_on_a2a3():
 
 
 def test_c2v_boundary_preserves_vec_pop_layout_on_a2a3():
-    """On Ascend910B, C2V Vec pops must stay in the final Vec layout.
+    """On Ascend910, C2V Vec pops must stay in the final Vec layout.
 
     The A2A3 GM-backed pipe consumer materializes the popped tile through an ND
     GlobalTensor. PTO-ISA does not support loading that ND buffer into an NZ

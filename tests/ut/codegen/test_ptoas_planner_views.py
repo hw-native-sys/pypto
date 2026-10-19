@@ -33,7 +33,7 @@ from pypto.pypto_core import codegen, passes
 
 def _run_passes(program, planner: passes.MemoryPlanner):
     reset_for_testing()
-    set_backend_type(BackendType.Ascend910B)
+    set_backend_type(BackendType.Ascend910)
     with passes.PassContext([], memory_planner=planner):
         return PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
 
@@ -261,7 +261,7 @@ def test_dsa_rp_writeback_preserves_nonzero_view_offset():
     """Physical placement shifts a view by its original relative byte offset."""
 
     reset_for_testing()
-    set_backend_type(BackendType.Ascend910B)
+    set_backend_type(BackendType.Ascend910)
     with passes.PassContext([], memory_planner=passes.MemoryPlanner.DSA_RP):
         optimized = passes.allocate_memory_addr()(
             passes.materialize_semantic_aliases()(passes.init_mem_ref()(NonzeroSubviewProgram))

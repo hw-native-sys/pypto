@@ -299,7 +299,7 @@ class SingleSlotDeclaration:
 def _codegen(program: ir.Program, planner: passes.MemoryPlanner) -> str:
     """Compile ``program``'s InCore kernel under ``planner`` and emit its PTO IR."""
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     with passes.PassContext([], memory_planner=planner):
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
         optimized = pm.run_passes(program)

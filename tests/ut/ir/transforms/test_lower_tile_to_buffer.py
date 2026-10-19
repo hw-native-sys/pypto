@@ -517,7 +517,7 @@ def test_distributed_loop_carries_fail_at_lowering_boundary(planner, kind, same_
     assert ir.serialize(program) == before
 
 
-@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
 @pytest.mark.parametrize("planner", _PLANNERS)
 @pytest.mark.parametrize(
     "dtype_name,mlir_type,operation",
@@ -589,7 +589,7 @@ class TypedTransfers:
         pytest.skip("PTOAS is not available")
     source, output = tmp_path / "typed.pto", tmp_path / "typed.cpp"
     source.write_text(text)
-    arch = "a2" if ascend_backend == BackendType.Ascend910B else "a5"
+    arch = "a2" if ascend_backend == BackendType.Ascend910 else "a5"
     level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
     _run_ptoas(str(source), str(output), [f"--pto-arch={arch}", f"--pto-level={level}"])
     assert output.is_file()
@@ -681,7 +681,7 @@ def test_selected_kernel_failure_is_not_retried_as_tile():
     assert seen == [True]
 
 
-@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
 @pytest.mark.parametrize("planner", _PLANNERS)
 def test_default_rollout_native_compilation(tmp_path, ascend_backend, planner):
     if find_ptoas_binary() is None:
@@ -691,16 +691,16 @@ def test_default_rollout_native_compilation(tmp_path, ascend_backend, planner):
     function = result.get_function("kernel")
     expected = (
         ir.FunctionIRStage.Buffer
-        if ascend_backend == BackendType.Ascend910B
+        if ascend_backend == BackendType.Ascend910
         else ir.FunctionIRStage.Functional
     )
     assert function is not None and function.ir_stage == expected
-    assert function.attrs["buffer_ir_selected"] == (ascend_backend == BackendType.Ascend910B)
+    assert function.attrs["buffer_ir_selected"] == (ascend_backend == BackendType.Ascend910)
     source, output = tmp_path / "default.pto", tmp_path / "default.cpp"
     source.write_text(
         codegen.PTOCodegen().generate(result, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
     )
-    arch = "a2" if ascend_backend == BackendType.Ascend910B else "a5"
+    arch = "a2" if ascend_backend == BackendType.Ascend910 else "a5"
     level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
     _run_ptoas(str(source), str(output), [f"--pto-level={level}", f"--pto-arch={arch}"])
     assert output.is_file()

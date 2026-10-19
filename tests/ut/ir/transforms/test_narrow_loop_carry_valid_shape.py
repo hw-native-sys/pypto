@@ -250,7 +250,7 @@ def _lower(kernel, stop_after="flatten_tile_nd_to_2d"):
     and yielding ``min(v, 64)``, and verification rejected it on the spot.
     """
     _backend.reset_for_testing()
-    _backend.set_backend_type(BackendType.Ascend910B)
+    _backend.set_backend_type(BackendType.Ascend910)
     program = _jit_program(kernel)
     for name in _TENSOR_PREFIX:
         program = getattr(passes, name)()(program)
@@ -546,7 +546,7 @@ def test_single_fractal_block_accumulator_still_reaches_codegen():
     from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
     _backend.reset_for_testing()
-    _backend.set_backend_type(BackendType.Ascend910B)
+    _backend.set_backend_type(BackendType.Ascend910)
     with passes.PassContext([]):
         lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
             _jit_program(single_fractal_block_acc)
@@ -576,7 +576,7 @@ def test_extent_computed_inside_the_loop_is_declined_loudly():
     assert _is_const(_valid_rows(_stored_tile_type(after)), M_TILE)
 
     _backend.reset_for_testing()
-    _backend.set_backend_type(BackendType.Ascend910B)
+    _backend.set_backend_type(BackendType.Ascend910)
     with pytest.raises(pypto.Error, match="AccCompactValid"):
         with passes.PassContext([]):
             PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
@@ -629,7 +629,7 @@ def test_default_pipeline_accepts_the_narrowed_carry(kernel):
     from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
     _backend.reset_for_testing()
-    _backend.set_backend_type(BackendType.Ascend910B)
+    _backend.set_backend_type(BackendType.Ascend910)
     pass_manager = PassManager.get_strategy(OptimizationStrategy.Default)
     result = pass_manager.run_passes(_jit_program(kernel))
 
@@ -650,7 +650,7 @@ def test_emitted_pto_stores_at_the_pitch_mad_wrote_at():
     from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
 
     _backend.reset_for_testing()
-    _backend.set_backend_type(BackendType.Ascend910B)
+    _backend.set_backend_type(BackendType.Ascend910)
     lowered = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
         _jit_program(create_tensor_seeded_acc)
     )

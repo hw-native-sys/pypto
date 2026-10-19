@@ -1192,7 +1192,7 @@ StmtPtr AdaptMxV2CPush(const EvalStmtPtr& stmt, const CallPtr& push, const MxV2C
 /// popped tile landed somewhere else: tests/st/runtime/cross_core
 /// test_multiple_pipes_nosplit returns 256/256 wrong values on board while
 /// passing on a5sim (which does not model the on-chip FIFO layout) and on
-/// Ascend910B (which needs no adapter: push/pop goes ub -> gm -> mat and takes
+/// Ascend910 (which needs no adapter: push/pop goes ub -> gm -> mat and takes
 /// ND directly).
 ///
 class AdaptManualVtoCPush : public IRMutator {
@@ -1622,7 +1622,7 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
           // V2C inserts the Vec tile into the Mat FIFO via TINSERT_IMPL<TInsertMode::NZ>.
           // A Right operand does end up ZN, but only after the cube side's own
           // Mat -> Right tile.move, one step past this boundary.
-          // On Ascend910B: don't need to adapt layout! push/pop will be ub -> gm -> mat, ub -> gm can
+          // On Ascend910: don't need to adapt layout! push/pop will be ub -> gm -> mat, ub -> gm can
           // directly use nd
           if (side == CoreSide::AIV && handler->RequiresVtoCFractalAdapt() && !is_mx_scale_boundary) {
             auto src_type = std::dynamic_pointer_cast<const TileType>(bm.source_tile->GetType());
@@ -2447,7 +2447,7 @@ class KernelCallCounter : public IRVisitor {
   std::unordered_map<std::string, size_t> counts_;
 };
 
-/// Ascend910B no-split cross-core pipes need both AIV sub-lanes to execute:
+/// Ascend910 no-split cross-core pipes need both AIV sub-lanes to execute:
 /// lane 0 performs the real work while SplitVectorKernel synthesizes a
 /// zero-valid-shape replay on lane 1 so every hardware pipe handshake is
 /// balanced. Auto-expanded mixed kernels are stamped in ExpandMixedFunction;

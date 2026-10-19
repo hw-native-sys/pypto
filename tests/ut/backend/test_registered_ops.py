@@ -13,7 +13,7 @@ import pytest
 from pypto import backend, ir
 
 
-@pytest.mark.parametrize("target", [backend.BackendType.Ascend910B, backend.BackendType.Ascend950])
+@pytest.mark.parametrize("target", [backend.BackendType.Ascend910, backend.BackendType.Ascend950])
 def test_backend_inventory_is_a_snapshot_including_legacy_entries(target):
     selected = backend.get_backend_instance(target)
     names = selected.get_registered_op_names()
@@ -38,7 +38,7 @@ def test_backend_inventory_is_a_snapshot_including_legacy_entries(target):
 
 
 def test_backend_inventory_preserves_architecture_exclusions():
-    a2a3 = set(backend.get_backend_instance(backend.BackendType.Ascend910B).get_registered_op_names())
+    a2a3 = set(backend.get_backend_instance(backend.BackendType.Ascend910).get_registered_op_names())
     a5 = set(backend.get_backend_instance(backend.BackendType.Ascend950).get_registered_op_names())
     mx_ops = {
         ir.get_op(name).name

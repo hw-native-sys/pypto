@@ -200,7 +200,7 @@ def _generate_orch_full_pipeline(
     ``test_array_codegen._generate_pto`` but targets the Orchestration function.
     """
     backend.reset_for_testing()
-    backend.set_backend_type(BackendType.Ascend910B)
+    backend.set_backend_type(BackendType.Ascend910)
     pm = PassManager.get_strategy(
         OptimizationStrategy.Default,
         analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,

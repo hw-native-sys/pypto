@@ -41,7 +41,7 @@ COMPUTE_FUNC_TYPES = frozenset({"AIC", "AIV", "InCore"})
 SPACE_ORDER = ("Vec", "Mat", "Left", "LeftScale", "Right", "RightScale", "Acc", "Bias")
 
 #: Used when the dump's target architecture cannot be determined.
-DEFAULT_BACKEND = "Ascend910B"
+DEFAULT_BACKEND = "Ascend910"
 
 _TEMPLATE = Path(__file__).parent / "templates" / "memory_map.html"
 _DATA_PLACEHOLDER = "/*__PYPTO_MEMORY_MAP_DATA__*/null"
@@ -107,7 +107,7 @@ class FunctionMap:
 class BackendChoice:
     """Which backend supplied the per-space capacities, and how it was picked."""
 
-    name: str  # BackendType member name, e.g. "Ascend910B"
+    name: str  # BackendType member name, e.g. "Ascend910"
     arch: str  # PTO target arch, e.g. "a2a3"
     detected: bool  # False when nothing identified the target and a default was assumed
 
@@ -438,15 +438,23 @@ def _classify_overlaps(boxes: list[Box]) -> None:
 
 
 def backend_names() -> list[str]:
-    """Every configurable :class:`BackendType` member name."""
-    return list(_backend.BackendType.__members__)
+    """Canonical backend names, with compatibility aliases omitted from the UI."""
+    return list(dict.fromkeys(member.name for member in _backend.BackendType.__members__.values()))
+
+
+def _backend_type(backend_name: str) -> _backend.BackendType:
+    """Resolve canonical names and compatibility aliases through the enum."""
+    backend_type = _backend.BackendType.__members__.get(backend_name)
+    if backend_type is None:
+        raise ValueError(f"unknown backend {backend_name!r}; known backends: {', '.join(backend_names())}")
+    return backend_type
 
 
 def backend_instance(backend_name: str) -> _backend.Backend:
     """Look up a backend singleton by :class:`BackendType` member name.
 
     Args:
-        backend_name: A :class:`BackendType` member name, e.g. ``"Ascend910B"``.
+        backend_name: A :class:`BackendType` member name, e.g. ``"Ascend910"``.
 
     Returns:
         The backend singleton.
@@ -454,10 +462,7 @@ def backend_instance(backend_name: str) -> _backend.Backend:
     Raises:
         ValueError: ``backend_name`` is not a known backend.
     """
-    backend_type = _backend.BackendType.__members__.get(backend_name)
-    if backend_type is None:
-        raise ValueError(f"unknown backend {backend_name!r}; known backends: {', '.join(backend_names())}")
-    return _backend.get_backend_instance(backend_type)
+    return _backend.get_backend_instance(_backend_type(backend_name))
 
 
 def backend_limits(backend_name: str) -> dict[str, int]:
@@ -469,7 +474,7 @@ def backend_limits(backend_name: str) -> dict[str, int]:
     high-water mark, which would render that panel permanently full.
 
     Args:
-        backend_name: A :class:`BackendType` member name, e.g. ``"Ascend910B"``.
+        backend_name: A :class:`BackendType` member name, e.g. ``"Ascend910"``.
 
     Returns:
         ``{space: capacity_bytes}``, excluding off-chip ``DDR``.
@@ -530,7 +535,7 @@ def resolve_backend(dump: Path, requested: str | None = None) -> BackendChoice:
         return backend_instance(name).get_handler().get_pto_target_arch()
 
     if requested is not None:
-        return BackendChoice(name=requested, arch=arch_of(requested), detected=True)
+        return BackendChoice(name=_backend_type(requested).name, arch=arch_of(requested), detected=True)
 
     arch = detect_target_arch(dump)
     if arch is not None:
@@ -682,6 +687,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "-b",
         "--backend",
+        type=lambda name: _backend_type(name).name,
         choices=backend_names(),
         help="backend whose memory capacities scale the panels "
         "(default: detected from the case's .pto target arch)",

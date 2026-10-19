@@ -633,7 +633,7 @@ Pass LegalizeTileCast();
  *
  * L0C legality uses the backend's physical accumulator-row alignment, which
  * may be stricter than the logical cube shape (for example, an INT32 M=16
- * result occupies 32 rows on Ascend910B).  When that physical ``[M, N]``
+ * result occupies 32 rows on Ascend910).  When that physical ``[M, N]``
  * footprint exceeds L0c, fresh ``tile.matmul`` and ``tile.matmul_bias`` calls
  * are M/N-tiled.  A result consumed by one output store uses direct-to-GM
  * placement; a result consumed entirely as a later matmul operand is assembled
@@ -846,7 +846,7 @@ Pass LowerAutoVectorSplit();
 /**
  * @brief Inject __gm_pipe_buffer workspace parameter for cross-core pipes
  *
- * Backend-gated (BackendHandler::RequiresGMPipeBuffer()). On Ascend910B the
+ * Backend-gated (BackendHandler::RequiresGMPipeBuffer()). On Ascend910 the
  * cross-core tpush/tpop path rides through a shared GM buffer; this pass adds
  * the workspace parameter and propagates it upward through callers, stopping
  * at Orchestration functions which materialize the buffer locally.

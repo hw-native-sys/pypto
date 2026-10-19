@@ -19,7 +19,7 @@ Validates on device the cases from examples/advanced/02_auto_tile_matmul.py:
     *fits* L0c (no M/N tiling); the ``pl.cast`` is folded into a single full-window Acc->Mat
     ``pto.tinsert``, so the bf16 downcast stays on the cube. full-K (K=64) and split-K (K=512).
   - **Loop-carried matmul_acc M/N tiling** -- issue #2232's INT8→INT32 ``[16, 1152]``
-    split-K reduction. Its physical 32-row accumulator is 144 KiB on Ascend910B, so AutoTile
+    split-K reduction. Its physical 32-row accumulator is 144 KiB on Ascend910, so AutoTile
     must place an output grid outside the source K loop rather than materialize the full Acc;
     a second non-issue shape exercises simultaneous M and N boundary tiles, and a larger
     source panel composes those boundaries with AutoTile's ordinary inner-K rewrite.
@@ -29,7 +29,7 @@ Validates on device the cases from examples/advanced/02_auto_tile_matmul.py:
     the floating FP32-bias cases are also covered on A5.
 
 Golden: torch. This is the on-device validation the unit / codegen / pto-verify checks cannot
-give (actual execution). Ascend910B (``a2a3``): the Mat-scratch / fits-L0c Acc->Mat lowering is
+give (actual execution). Ascend910 (``a2a3``): the Mat-scratch / fits-L0c Acc->Mat lowering is
 the 910B bf16 ``pto.tinsert`` FIXPIPE path (the f32 accumulator is downcast into the bf16
 scratch); the a5 f32 converting-``pto.tmov`` assemble is a separate lowering.
 """

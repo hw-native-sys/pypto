@@ -11,4 +11,4 @@ The hardware model and instruction semantics that PyPTO's generated code targets
 ## See Also
 
 - [SkewCrossCorePipeline Pass](../../dev/passes/29-skew_cross_core_pipeline.md) — the pass that software-pipelines cross-core loops onto this architecture.
-- [InjectGMPipeBuffer Pass](../../dev/passes/25-inject_gm_pipe_buffer.md) — the GM-routed cross-core pipe workspace on Ascend910B.
+- [InjectGMPipeBuffer Pass](../../dev/passes/25-inject_gm_pipe_buffer.md) — the GM-routed cross-core pipe workspace on Ascend910.

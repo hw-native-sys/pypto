@@ -40,7 +40,7 @@ class TestManualScopeCodegen:
         second. Matched by Var identity, not name.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class DumpPerSubmitProgram:
@@ -74,7 +74,7 @@ class TestManualScopeCodegen:
     def test_submit_runtime_out_after_materialized_comm_ctx_aliases_task_output(self):
         """Runtime Out aliases must ignore trailing materialized CommCtx args."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class SubmitRuntimeOutWithCtxProgram:
@@ -114,7 +114,7 @@ class TestManualScopeCodegen:
 
     def test_manual_scope_emits_manual_pto2_scope_and_task_id_capture(self):
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Prog:
@@ -151,7 +151,7 @@ class TestManualScopeCodegen:
 
     def test_manual_scope_emits_explicit_user_deps(self):
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Prog:
@@ -195,7 +195,7 @@ class TestManualScopeCodegen:
 
     def test_user_written_task_dummy_lowers_to_dummy_submit(self):
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         N_BRANCHES = 4
 
@@ -234,7 +234,7 @@ class TestManualScopeCodegen:
 
     def test_user_written_task_dummy_accepts_scalar_dep_codegen(self):
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Prog:
@@ -276,7 +276,7 @@ class TestManualScopeCodegen:
         # added to each consumer's fanin. It is submitted unconditionally — an
         # ``if (deps_count > 0)`` guard would statically elide it (issue #1976).
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Prog:
@@ -314,7 +314,7 @@ class TestManualScopeCodegen:
     def test_manual_scope_preserves_user_deps_without_compiler_deps(self):
         """Auto-deps: user deps stay intact while manual scopes are skipped."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Prog:
@@ -357,7 +357,7 @@ class TestManualScopeCodegen:
     def test_auto_scope_does_not_emit_task_id_capture(self):
         """Sanity: plain ``self.kernel(...)`` in auto scope stays fire-and-forget."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Prog:
@@ -390,7 +390,7 @@ class TestManualScopeCodegen:
         but matches the ``pl.at``-block programming style.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Prog:
@@ -441,7 +441,7 @@ class TestManualScopeCodegen:
         dependency for a later ``pl.at(..., deps=[tid])`` in the caller.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Prog:
@@ -491,7 +491,7 @@ class TestManualScopeCodegen:
         (auto OverlapMap) stays on.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Prog:
@@ -537,7 +537,7 @@ class TestManualScopeCodegen:
         path as user-written deps when AUTO-scope analysis is explicitly enabled.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Prog:
@@ -579,7 +579,7 @@ class TestManualScopeCodegen:
     def test_compiler_derived_deps_in_default_auto_scope_do_not_emit_set_dependencies(self):
         """Default auto_scope=True is skipped unless AUTO-scope analysis is enabled."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Prog:
@@ -612,7 +612,7 @@ class TestManualScopeCodegen:
     def test_compiler_derived_deps_in_default_auto_scope_emit_set_dependencies_when_enabled(self):
         """Default auto_scope=True can become MANUAL when analysis covers the body."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Prog:
@@ -653,7 +653,7 @@ class TestManualScopeCodegen:
     def test_compiler_derived_deps_for_plain_auto_call_do_not_capture_task_id_by_default(self):
         """pl.at-style ordinary calls stay fire-and-forget by default."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Prog:
@@ -685,7 +685,7 @@ class TestManualScopeCodegen:
     def test_compiler_derived_deps_for_plain_auto_call_capture_task_id_when_enabled(self):
         """pl.at-style ordinary calls are captured when deps need them."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Prog:
@@ -726,7 +726,7 @@ class TestManualScopeCodegen:
     def test_auto_scope_task_id_array_slot_dep_uses_scalar_snapshot(self):
         """A TaskId array slot read is a valid explicit dep in auto scope."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Prog:
@@ -786,7 +786,7 @@ class TestManualScopeCodegen:
         (stage2→stage1 within each iteration), absent everywhere else.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         M, N = 4, 8
         TILE_R, TILE_C = 32, 32
@@ -878,7 +878,7 @@ class TestManualScopeCodegen:
         loop dispatches tiles concurrently.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         M, N = 8, 4
         TILE_R, TILE_C = 32, 32
@@ -976,7 +976,7 @@ class TestManualScopeCodegen:
         enclosing-scope-valid, so the per-slot write threads through one array.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         N, LOOP, ROWS, COLS = 4, 2, 16, 256
         TILE = COLS // N
@@ -1073,7 +1073,7 @@ class TestManualScopeCodegen:
         clear user-facing CHECK — before codegen ever runs.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         ROWS, COLS = 128, 128
         TILE_R, TILE_C = 32, 32
@@ -1124,7 +1124,7 @@ class TestManualScopeCodegen:
         inside the parallel body.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         ROWS, COLS = 128, 128
         TILE_R, TILE_C = 32, 32
@@ -1179,7 +1179,7 @@ class TestManualScopeCodegen:
     def test_manual_scope_phase_fence_scalar_dep_does_not_emit_dummy_barrier(self):
         """Scalar TaskId deps remain on the legacy single-edge lowering path."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Prog:
@@ -1209,7 +1209,7 @@ class TestManualScopeCodegen:
     def test_manual_scope_phase_fence_mixed_deps_do_not_emit_dummy_barrier(self):
         """Mixed array + scalar deps are intentionally outside first-version scope."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         ROWS, COLS = 128, 128
         TILE_R, TILE_C = 32, 32
@@ -1265,7 +1265,7 @@ class TestManualScopeCodegen:
     def test_auto_scope_array_dep_does_not_emit_dummy_barrier(self):
         """Array deps outside manual_scope keep the existing explicit-deps lowering."""
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         ROWS, COLS = 128, 128
         TILE_R, TILE_C = 32, 32
@@ -1324,7 +1324,7 @@ class TestManualScopeCodegen:
             params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         M, N = 4, 4
         TILE_R, TILE_C = 32, 32
@@ -1402,7 +1402,7 @@ class TestManualScopeCodegen:
         first iteration contributes no edge.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         N_BRANCHES, N_STEPS = 4, 4
         TILE_M, BIG_N = 32, 32
@@ -1469,7 +1469,7 @@ class TestManualScopeCodegen:
         not leak back into the parent scope.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Prog:
@@ -1526,7 +1526,7 @@ class TestManualScopeCodegen:
         codegen path consumes a Submit's dump_vars from the kwarg surface.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class Prog:
@@ -1570,7 +1570,7 @@ class TestManualScopeCodegen:
         index past it.
         """
         backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
+        backend.set_backend_type(BackendType.Ascend910)
 
         @pl.program
         class GapProgram:

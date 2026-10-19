@@ -35,8 +35,8 @@ class TestRunConfigPlatformResolution:
     @pytest.mark.parametrize(
         ("platform", "expected_backend"),
         [
-            ("a2a3", BackendType.Ascend910B),
-            ("a2a3sim", BackendType.Ascend910B),
+            ("a2a3", BackendType.Ascend910),
+            ("a2a3sim", BackendType.Ascend910),
             ("a5", BackendType.Ascend950),
             ("a5sim", BackendType.Ascend950),
         ],
@@ -814,7 +814,7 @@ class TestRunConfigCompileForwarding:
     def test_a_backend_type_that_contradicts_the_platform_warns(self):
         """It was always discarded here; now it says so."""
         with pytest.warns(DeprecationWarning, match=r"backend_type=\.\.\.\) is deprecated"):
-            cfg = RunConfig(platform="a5sim", backend_type=BackendType.Ascend910B)
+            cfg = RunConfig(platform="a5sim", backend_type=BackendType.Ascend910)
 
         assert cfg.backend_type == BackendType.Ascend950
 
@@ -951,7 +951,7 @@ class TestOptionObjects:
         """The wire spelling stays constructible: 238 call sites use it."""
         cfg = RunConfig(platform="a2a3sim")
 
-        assert cfg.arch == BackendType.Ascend910B
+        assert cfg.arch == BackendType.Ascend910
         assert cfg.execution_mode is ExecutionMode.SIM
         assert cfg.platform == "a2a3sim"
 
@@ -1014,7 +1014,7 @@ class TestOptionObjects:
 
         with warnings.catch_warnings():
             warnings.simplefilter("error", DeprecationWarning)
-            assert dataclasses.replace(cfg, arch=BackendType.Ascend910B).platform == "a2a3"
+            assert dataclasses.replace(cfg, arch=BackendType.Ascend910).platform == "a2a3"
             assert dataclasses.replace(cfg, execution_mode=ExecutionMode.SIM).platform == "a5sim"
         with pytest.warns(DeprecationWarning, match=r"RunConfig\(platform="):
             assert dataclasses.replace(cfg, platform="a2a3sim").platform == "a2a3sim"
@@ -1031,7 +1031,7 @@ class TestOptionObjects:
         """
         from pypto.pypto_core import backend as backend_core  # noqa: PLC0415
 
-        for arch in (BackendType.Ascend910B, BackendType.Ascend950):
+        for arch in (BackendType.Ascend910, BackendType.Ascend950):
             handler_name = backend_core.get_backend_instance(arch).get_handler().get_pto_target_arch()
             assert RunConfig(arch=arch, execution_mode=ExecutionMode.ONBOARD).platform == handler_name
 
@@ -1166,7 +1166,7 @@ class TestExecuteOnDeviceDfxValidation:
         assert call_config.enable_chip_swimlane == 4
 
 
-@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
 @pytest.mark.parametrize("mode", [ExecutionMode.ONBOARD, ExecutionMode.SIM])
 def test_backend_type_and_execution_mode_match_legacy_target(backend_type, mode):
     """New callers must produce exactly the legacy compile/cache identity."""
@@ -1183,12 +1183,12 @@ def test_backend_type_and_execution_mode_match_legacy_target(backend_type, mode)
 
 def test_replace_backend_type_preserves_execution_mode():
     config = RunConfig(backend_type=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD)
-    changed = dataclasses.replace(config, backend_type=BackendType.Ascend910B)
+    changed = dataclasses.replace(config, backend_type=BackendType.Ascend910)
     assert changed.platform == "a2a3"
     assert config.platform == "a5"
     options = config.compile_options()
     assert dataclasses.replace(options, execution_mode=ExecutionMode.SIM).platform == "a5sim"
-    assert dataclasses.replace(options, platform="a2a3sim").backend_type == BackendType.Ascend910B
+    assert dataclasses.replace(options, platform="a2a3sim").backend_type == BackendType.Ascend910
     assert cast(Any, CompileOptions)("a5", options.strategy).execution_mode is ExecutionMode.ONBOARD
 
 
@@ -1209,8 +1209,8 @@ def test_compile_options_rejects_invalid_execution_mode(mode):
 @pytest.mark.parametrize(
     ("platform", "backend", "mode"),
     [
-        ("a2a3", BackendType.Ascend910B, ExecutionMode.ONBOARD),
-        ("a2a3sim", BackendType.Ascend910B, ExecutionMode.SIM),
+        ("a2a3", BackendType.Ascend910, ExecutionMode.ONBOARD),
+        ("a2a3sim", BackendType.Ascend910, ExecutionMode.SIM),
         ("a5", BackendType.Ascend950, ExecutionMode.ONBOARD),
         ("a5sim", BackendType.Ascend950, ExecutionMode.SIM),
     ],

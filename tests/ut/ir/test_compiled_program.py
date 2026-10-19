@@ -485,7 +485,7 @@ class TestCompileReturnsCompiledProgram:
         """platform='a5sim' should compile with the Ascend950 PTO backend."""
         import pypto.language as pl  # noqa: PLC0415
 
-        target = BackendType.Ascend950 if arch_name == "a5" else BackendType.Ascend910B
+        target = BackendType.Ascend950 if arch_name == "a5" else BackendType.Ascend910
         mode = ExecutionMode[mode_name]
         platform = arch_name + ("sim" if mode is ExecutionMode.SIM else "")
         options: dict[str, Any] = (
@@ -1110,7 +1110,24 @@ class TestCompiledMetaAndFromDir:
         assert {p["dtype"] for p in meta["params"]} == {"fp32"}
         assert meta["num_return_types"] == 1
         assert meta["platform"] == "a2a3sim"
-        assert meta["backend_type"] == "Ascend910B"
+        assert meta["backend_type"] == "Ascend910"
+
+    @pytest.mark.parametrize("backend_name", ["Ascend910", "Ascend910B"])
+    def test_from_dir_accepts_ascend910_backend_names(self, tmp_path, backend_name):
+        """Reload artifacts written before the rename without changing their metadata."""
+        CompiledProgram(_make_program_with_orchestration(), str(tmp_path), platform="a2a3sim")
+        meta_path = tmp_path / _COMPILED_META_FILENAME
+        meta = json.loads(meta_path.read_text())
+        meta["backend_type"] = backend_name
+        meta_path.write_text(json.dumps(meta))
+        persisted = meta_path.read_bytes()
+
+        reloaded = CompiledProgram.from_dir(tmp_path)
+
+        assert reloaded.backend_type is BackendType.Ascend910
+        assert reloaded.backend_type.name == "Ascend910"
+        assert reloaded.platform == "a2a3sim"
+        assert meta_path.read_bytes() == persisted
 
     def test_from_dir_round_trips_param_metadata(self, tmp_path):
         """from_dir reconstructs the same param metadata as the live compile."""
@@ -1125,7 +1142,7 @@ class TestCompiledMetaAndFromDir:
         assert _key(reloaded) == _key(live)
         assert reloaded.program is None  # reconstructed from disk, no live IR
         assert reloaded.platform == "a2a3sim"
-        assert reloaded.backend_type == BackendType.Ascend910B
+        assert reloaded.backend_type == BackendType.Ascend910
         assert reloaded.has_return is live.has_return
 
     def test_from_dir_output_indices_match_out_params(self, tmp_path):
@@ -1212,11 +1229,11 @@ class TestCompiledMetaAndFromDir:
     def test_from_dir_overrides_platform_and_backend(self, tmp_path):
         """Explicit platform / backend_type override the persisted defaults.
 
-        Both overrides differ from what was persisted (``a2a3sim`` / Ascend910B),
+        Both overrides differ from what was persisted (``a2a3sim`` / Ascend910),
         so an ignored override cannot pass by coincidence.
         """
         CompiledProgram(_make_program_with_orchestration(), str(tmp_path), platform="a2a3sim")
-        assert json.loads((tmp_path / _COMPILED_META_FILENAME).read_text())["backend_type"] == "Ascend910B"
+        assert json.loads((tmp_path / _COMPILED_META_FILENAME).read_text())["backend_type"] == "Ascend910"
 
         reloaded = CompiledProgram.from_dir(tmp_path, platform="a5sim", backend_type=BackendType.Ascend950)
         assert reloaded.platform == "a5sim"
@@ -1225,7 +1242,7 @@ class TestCompiledMetaAndFromDir:
         # Without overrides the persisted pair comes back unchanged.
         persisted = CompiledProgram.from_dir(tmp_path)
         assert persisted.platform == "a2a3sim"
-        assert persisted.backend_type == BackendType.Ascend910B
+        assert persisted.backend_type == BackendType.Ascend910
 
     def test_from_dir_keeps_the_fp4_x2_carrier_shape(self, tmp_path):
         """Packed FP4 shapes are persisted already converted, so the reload must not re-halve.
@@ -1749,8 +1766,8 @@ def test_parameter_metadata_rejects_non_string_layout(layout):
 @pytest.mark.parametrize(
     ("persisted_backend", "target_backend", "target_name"),
     [
-        (BackendType.Ascend910B, BackendType.Ascend950, "a5"),
-        (BackendType.Ascend950, BackendType.Ascend910B, "a2a3"),
+        (BackendType.Ascend910, BackendType.Ascend950, "a5"),
+        (BackendType.Ascend950, BackendType.Ascend910, "a2a3"),
     ],
 )
 @pytest.mark.parametrize("persisted_mode", [None, ExecutionMode.SIM, ExecutionMode.ONBOARD])

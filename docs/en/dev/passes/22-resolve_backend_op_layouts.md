@@ -81,7 +81,7 @@ Non-tile inputs (scalars, shapes) and inputs whose required layout is `nullopt` 
 
 ## Example
 
-(adapted from `tests/ut/ir/transforms/test_resolve_backend_op_layouts_pass.py::test_rewrites_column_vector_add_through_row_major_reshape`, with the Ascend910B backend active)
+(adapted from `tests/ut/ir/transforms/test_resolve_backend_op_layouts_pass.py::test_rewrites_column_vector_add_through_row_major_reshape`, with the Ascend910 backend active)
 
 **Before**:
 

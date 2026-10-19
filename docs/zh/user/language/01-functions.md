@@ -285,7 +285,7 @@ print("artifacts in:", compiled.output_dir)
 
 ```python
 program = my_kernel.specialize(sample_x, sample_w, sample_out)
-ir.compile(program, output_dir="build/out", backend_type=BackendType.Ascend910B)
+ir.compile(program, output_dir="build/out", backend_type=BackendType.Ascend910)
 ```
 
 它不接受 `config=`：这里不跑任何 Pass，`RunConfig` 没有可配置的东西。只有当每个张量参数都带完整形状注解时才能省略采样实参 —— 裸 `pl.Tensor` 没有形状可读。

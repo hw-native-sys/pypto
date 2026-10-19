@@ -60,7 +60,7 @@ def atomic_add_store_bf16(x: pl.Tensor, out: pl.Out[pl.Tensor]):
 
     A plain loaded Vec tile is atomic-added into a bf16 GM tensor. On A2/A3 this
     lowers to set_atomic_bf16() on the MTE3 store pipe. bf16 atomic-add is not
-    supported on A5, so this kernel targets the Ascend910B profile.
+    supported on A5, so this kernel targets the Ascend910 profile.
     """
     with pl.at(level=pl.Level.CORE_GROUP):
         x_tile = pl.load(x, [0, 0], [16, 16])

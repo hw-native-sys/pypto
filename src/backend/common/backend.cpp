@@ -49,20 +49,20 @@ namespace backend {
 
 const Backend* GetBackendInstance(BackendType type) {
   switch (type) {
-    case BackendType::Ascend910B:
+    case BackendType::Ascend910:
       return &Backend910B::Instance();
     case BackendType::Ascend950:
       return &Backend950::Instance();
     default:
-      CHECK(false) << "GetBackendInstance: unexpected BackendType (must be Ascend910B or Ascend950)";
+      CHECK(false) << "GetBackendInstance: unexpected BackendType (must be Ascend910 or Ascend950)";
       return nullptr;  // unreachable
   }
 }
 
 std::string BackendTypeToString(BackendType type) {
   switch (type) {
-    case BackendType::Ascend910B:
-      return "Ascend910B";
+    case BackendType::Ascend910:
+      return "Ascend910";
     case BackendType::Ascend950:
       return "Ascend950";
   }
