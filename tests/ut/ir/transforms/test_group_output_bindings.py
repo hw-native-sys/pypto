@@ -269,14 +269,17 @@ def test_raw_expand_reports_computed_output_without_caller_storage():
             result = self.consumer(fresh)
             return result
 
-    with pytest.raises(
-        ValueError,
-        match=(
-            "Group 'mixed' member 'consumer' argument 0 consumes output 0 of producer 'producer' "
-            "without a caller-visible output binding.*ConvertTensorToTileOps"
-        ),
-    ):
-        passes.expand_mixed_kernel()(passes.convert_to_ssa()(Before))
+    # This negative test intentionally omits conversion/output materialization;
+    # let ExpandMixedKernel diagnose it instead of checking its tile-only input contract.
+    with passes.PassContext([], passes.VerificationLevel.NONE):
+        with pytest.raises(
+            ValueError,
+            match=(
+                "Group 'mixed' member 'consumer' argument 0 consumes output 0 of producer 'producer' "
+                "without a caller-visible output binding.*ConvertTensorToTileOps"
+            ),
+        ):
+            passes.expand_mixed_kernel()(passes.convert_to_ssa()(Before))
 
 
 def test_existing_out_and_fresh_output_keep_independent_return_positions():

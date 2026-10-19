@@ -1120,8 +1120,13 @@ def test_hand_written_group_no_dep_rejects_projected_non_writeback_results(bound
         Before.name,
         Before.span,
     )
-    with pytest.raises(ValueError, match="Cannot map pl.no_dep argument 0 .* to a canonical Group parameter"):
-        _run_pipeline(before)
+    # Deliberately skip tensor-to-tile conversion to exercise ExpandMixedKernel's
+    # rejection of non-writeback results, before its tile-only precondition holds.
+    with passes.PassContext([], passes.VerificationLevel.NONE):
+        with pytest.raises(
+            ValueError, match="Cannot map pl.no_dep argument 0 .* to a canonical Group parameter"
+        ):
+            _run_pipeline(before)
 
 
 @pytest.mark.parametrize("boundary_kind", ["slice", "view", "fresh"])
@@ -1194,8 +1199,13 @@ def test_hand_written_group_no_dep_rejects_non_writeback_results(boundary_kind):
         Before.name,
         Before.span,
     )
-    with pytest.raises(ValueError, match="Cannot map pl.no_dep argument 0 .* to a canonical Group parameter"):
-        _run_pipeline(before)
+    # Deliberately skip tensor-to-tile conversion to exercise ExpandMixedKernel's
+    # rejection of non-writeback results, before its tile-only precondition holds.
+    with passes.PassContext([], passes.VerificationLevel.NONE):
+        with pytest.raises(
+            ValueError, match="Cannot map pl.no_dep argument 0 .* to a canonical Group parameter"
+        ):
+            _run_pipeline(before)
 
 
 def test_explicit_sync_core_type_routes_each_event_to_one_lane():
