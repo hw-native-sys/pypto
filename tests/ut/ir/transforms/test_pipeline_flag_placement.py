@@ -42,12 +42,30 @@ def test_flags_inside_pipeline_rejected_before_scheduling():
         passes.skew_cross_core_pipeline,
         passes.lower_pipeline_loops,
         passes.lower_pipeline_to_slots,
+        passes.canonicalize_io_order,
     ):
         pipeline = passes.PassPipeline()
         pipeline.add_pass(scheduler())
         with passes.PassContext([], passes.VerificationLevel.NONE, memory_planner=passes.MemoryPlanner.PTOAS):
             with pytest.raises(ValueError, match="cannot be used inside pl.pipeline"):
                 pipeline.run(FlaggedPipeline)
+
+
+@pytest.mark.parametrize("flag_name", ["set_flag", "wait_flag"])
+def test_standalone_io_canonicalization_rejects_flags_before_demotion(flag_name):
+    program = pl.parse_program(f"""
+@pl.program
+class FlaggedPipeline:
+    @pl.function(strict_ssa=True)
+    def main(self, x: pl.Tensor[[16, 16], pl.FP32], out: pl.Tensor[[16, 16], pl.FP32]):
+        for i in pl.pipeline(0, 4, stage=1):
+            tile = pl.tile.load(x, [0, 0], [16, 16])
+            pl.tile.store(tile, [0, 0], out)
+            pl.system.{flag_name}(pl.PipeType.MTE3, pl.PipeType.MTE2, 0)
+""")
+    with passes.PassContext([], passes.VerificationLevel.NONE):
+        with pytest.raises(ValueError, match="cannot be used inside pl.pipeline"):
+            passes.canonicalize_io_order()(program)
 
 
 def test_flags_in_ordinary_loop_are_allowed():
@@ -63,6 +81,7 @@ def test_flags_in_ordinary_loop_are_allowed():
     pipeline = passes.PassPipeline()
     pipeline.add_pass(passes.skew_cross_core_pipeline())
     assert pipeline.run(OrdinaryLoop) is not None
+    assert passes.canonicalize_io_order()(OrdinaryLoop) is OrdinaryLoop
 
 
 if __name__ == "__main__":

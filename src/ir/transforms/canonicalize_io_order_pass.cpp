@@ -36,6 +36,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/pipeline_loop_utils.h"
 #include "pypto/ir/transforms/utils/stmt_dependency_analysis.h"
 #include "pypto/ir/type.h"
 
@@ -499,6 +500,7 @@ Pass CanonicalizeIOOrder() {
     std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> new_functions;
     bool any_change = false;
     for (const auto& [gvar, func] : program->functions_) {
+      pipeline_loop::CheckExplicitFlagsOutsidePipeline(func->body_);
       // Validate the InOut-use discipline once per function: variable scopes
       // don't cross function boundaries, so a single walk over the function
       // body catches every violation that could affect any nested SeqStmts.

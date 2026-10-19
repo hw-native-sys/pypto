@@ -81,6 +81,7 @@ ready={store_1}                         发射 store_1
 
 | 约束 | 原因 |
 | ---- | ---- |
+| 显式 `system.set_flag` / `system.wait_flag` 必须位于 `pl.pipeline` 之外 | 重写前强制检查，即使独立调用并关闭验证也会拒绝；手工 flags 应使用普通循环 |
 | 函数必须满足 InOut-use 规约 | 数据流分析的可靠性前提（自 PR #1039 起为结构化不变式）；函数级检查未通过时跳过重排 |
 | 依赖图存在环时中止 | SSA 区域不应出现环；以 `INTERNAL_CHECK` 抛出 |
 

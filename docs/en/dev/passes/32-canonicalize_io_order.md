@@ -81,6 +81,7 @@ The reorder is a topological sort over the SSA def-use dependency graph, so it p
 
 | Constraint | Reason |
 | ---------- | ------ |
+| Explicit `system.set_flag` / `system.wait_flag` must be outside `pl.pipeline` | Checked before rewriting even for standalone invocation with verification disabled; use ordinary loops for manual flags |
 | Function must satisfy the InOut-use discipline | Required for sound dataflow analysis (structural invariant since PR #1039); per-function check skips reordering otherwise |
 | Aborts on cyclic dependency graph | Should be impossible for an SSA region; raised as `INTERNAL_CHECK` |
 
