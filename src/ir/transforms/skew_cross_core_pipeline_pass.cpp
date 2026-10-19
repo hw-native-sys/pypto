@@ -26,6 +26,7 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
@@ -37,6 +38,7 @@
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/pipeline_loop_utils.h"
+#include "pypto/ir/transforms/utils/software_pipeline.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -763,8 +765,17 @@ FunctionPtr TransformSkewCrossCorePipeline(const FunctionPtr& func) {
 namespace pass {
 
 Pass SkewCrossCorePipeline() {
-  return CreateFunctionPass(TransformSkewCrossCorePipeline, "SkewCrossCorePipeline",
-                            kSkewCrossCorePipelineProperties);
+  return CreateProgramPass(
+      [](const ProgramPtr& program) -> ProgramPtr {
+        auto planned = LowerJointSoftwarePipeline(program);
+        std::vector<FunctionPtr> functions;
+        functions.reserve(planned->functions_.size());
+        for (const auto& [name, func] : planned->functions_) {
+          functions.push_back(TransformSkewCrossCorePipeline(func));
+        }
+        return std::make_shared<Program>(functions, planned->name_, planned->span_);
+      },
+      "SkewCrossCorePipeline", kSkewCrossCorePipelineProperties);
 }
 
 }  // namespace pass

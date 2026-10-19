@@ -1916,7 +1916,8 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
     if (can_order) {
       std::vector<size_t> order(return_exprs.size());
       for (size_t i = 0; i < order.size(); ++i) order[i] = i;
-      std::stable_sort(order.begin(), order.end(), [&](size_t lhs, size_t rhs) {
+      // can_order already proved that every returned parameter index is unique.
+      std::sort(order.begin(), order.end(), [&](size_t lhs, size_t rhs) {
         return return_param_indices[lhs].value() < return_param_indices[rhs].value();
       });
       auto reorder = [&](auto& values) {

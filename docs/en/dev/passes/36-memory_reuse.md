@@ -198,6 +198,21 @@ Inside a loop that direction collapses. The back edge re-writes the workspace fr
 
 It is keyed on the registry rather than on operator names or a backend flag, and is **not** backend-gated: PyPTO cannot know which pipe a given intrinsic writes a workspace from, so every declared one is isolated. A5's TSELS happens to leave `tmp` untouched (it dups the scalar into a vector register via `vdup`), and paying a small buffer there is the price of not encoding per-intrinsic pipe knowledge in the pass. The same fact is consumed by DSA-RP as a `TargetHazard` separation, so both planners agree.
 
+Legacy reduction scratch recognized through `LaneInvariantArg::Scratch` in an
+actually lowered software pipeline has a narrower lifetime guard. A later
+allocation may reuse it only after the scratch's complete lifetime, including
+all drain uses, and when the allocation families have disjoint outermost-loop
+ranges. Thus a completed reduction can release its scratch to a later independent
+loop without changing stage depth or inserting a fence or copy in this pass.
+The capacity-relief retry runs only after the original layout overflows and
+before reducing pipeline depth. Layouts that fit retain their original allocation
+and synchronization behavior; backend alias synchronization still applies to
+newly feasible layouts. A shared parent loop, an earlier reader, unknown scope
+information, an explicit written workspace contract, or a `Submit` workspace use
+retains isolation. The extra
+scope analysis runs only for functions containing such lowered legacy scratch;
+ordinary and declined loops keep the existing policy.
+
 Without the guard, `pl.tile.select`-built clamps corrupt exactly element 0 of the compare source: the composite's synthesized workspace is born and dies inside one statement, which makes it the prime reuse candidate for the buffer the preceding `tile.cmps` is still reading.
 
 ## Example

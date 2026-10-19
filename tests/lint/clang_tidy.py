@@ -829,6 +829,10 @@ def main(argv: list[str] | None = None) -> int:
         # 5b. Lint source files (all enabled checks via compile database)
         if files:
             base_cmd = _build_clang_tidy_cmd(cc_path.parent, fix=args.fix)
+            # A compile database omits the compiler's implicit standard-library
+            # paths. Supply them for existing builds as well as standalone headers.
+            for path in _get_system_include_paths():
+                base_cmd.extend(["--extra-arg=-isystem", f"--extra-arg={path}"])
             _vprint(f"[clang-tidy] Base command: {base_cmd}")
             _vprint(f"[clang-tidy] Source files ({len(files)}): {files}")
             have_errors |= run_clang_tidy(

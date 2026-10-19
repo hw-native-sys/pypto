@@ -553,6 +553,7 @@ TypePtr DeduceTensorFullType(const std::vector<ExprPtr>& args,
 
 REGISTER_OP("tensor.read")
     .set_op_category("TensorOp")
+    .set_arg_effect(0, ArgEffect::Read)
     .set_description("Read a scalar value from a tensor at given indices")
     .add_argument("tensor", "Input tensor (TensorType)")
     .add_argument("indices", "Index dimensions (TupleType of ScalarType)")

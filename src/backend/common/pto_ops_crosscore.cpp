@@ -248,6 +248,30 @@ static std::string FormatInitializePipeAttrs(const CallPtr& op, int dir_mask, in
   return oss.str();
 }
 
+// A GM-entry FIFO carries the entry descriptor and synchronization only.
+// Ordinary TSTORE/TLOAD operations expose DMA effects and local destinations
+// to PTOAS, including fixed-address multi_tile_get operands.
+static std::string EntryType(codegen::PTOCodegen& codegen, const ir::TileTypePtr& tile,
+                             const char* kind = "tensor_view") {
+  auto rows = As<ir::ConstInt>(tile->shape_.at(0));
+  auto cols = As<ir::ConstInt>(tile->shape_.at(1));
+  INTERNAL_CHECK(rows && cols) << "GM-entry FIFO requires a static rank-two tile";
+  return std::string("!pto.") + kind + "<" + std::to_string(rows->value_) + "x" +
+         std::to_string(cols->value_) + "x" + codegen.GetTypeString(tile->dtype_) + ">";
+}
+
+static std::string PartitionEntry(codegen::PTOCodegen& codegen, const std::string& entry,
+                                  const ir::TileTypePtr& tile) {
+  auto zero = codegen.GetOrEmitConstant(int64_t{0}, DataType::INDEX);
+  auto rows = codegen.GetOrEmitConstant(As<ir::ConstInt>(tile->shape_.at(0))->value_, DataType::INDEX);
+  auto cols = codegen.GetOrEmitConstant(As<ir::ConstInt>(tile->shape_.at(1))->value_, DataType::INDEX);
+  auto view = codegen.NewNamedTemp("pipe_window");
+  codegen.Emit(view + " = pto.partition_view " + entry + ", offsets = [" + zero + ", " + zero +
+               "], sizes = [" + rows + ", " + cols + "] : " + EntryType(codegen, tile) + " -> " +
+               EntryType(codegen, tile, "partition_tensor_view"));
+  return view;
+}
+
 // tile.tpush_to_{aic,aiv}: Push a tile across cores (Cube<->Vector). `target`
 // is "aic" or "aiv" and selects both the emitted pto op name and diagnostics.
 static std::string MakeTpushCodegenPTO(const char* target, const CallPtr& op,
@@ -272,6 +296,19 @@ static std::string MakeTpushCodegenPTO(const char* target, const CallPtr& op,
 
   std::string tile_buf = codegen.GetExprAsCode(op->args_[0]);
   std::string tile_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  const int direction = std::string_view(target) == "aiv" ? 1 : 2;
+  if (auto entry_tile = codegen.GetGMPipeEntryType(op->GetKwarg<int>("id", 0), direction, false)) {
+    const auto type = EntryType(codegen, entry_tile);
+    auto entry = codegen.NewNamedTemp("push_entry");
+    codegen.Emit(entry + " = pto.talloc_to_" + target + " " + FormatFrontendPipeAttrs(op, split) + " -> " +
+                 type);
+    auto window = PartitionEntry(codegen, entry, entry_tile);
+    codegen.Emit("pto.tstore ins(" + tile_buf + " : " + tile_type + ") outs(" + window + " : " +
+                 EntryType(codegen, entry_tile, "partition_tensor_view") + ")");
+    codegen.Emit("pto.tpush_to_" + std::string(target) + "(" + entry + " : " + type + ") " +
+                 FormatFrontendPipeAttrs(op, split));
+    return "";
+  }
   const bool restore_valid_shape =
       EmitTpushTransportValidShape(target, op, codegen, tile_buf, tile_type, split);
 
@@ -312,6 +349,20 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
   std::string result_buf = codegen.GetCurrentResultTarget();
   INTERNAL_CHECK_SPAN(!result_buf.empty(), op->span_) << op_name << " requires assignment target (tile_buf)";
   std::string result_type = codegen.GetCurrentResultTileBufTypeString();
+  const int direction = std::string_view(target) == "aic" ? 1 : 2;
+  if (auto entry_tile = codegen.GetGMPipeEntryType(op->GetKwarg<int>("id", 0), direction, true)) {
+    auto entry = codegen.NewNamedTemp("pop_entry");
+    const auto type = EntryType(codegen, entry_tile);
+    codegen.Emit(entry + " = pto.tpop_from_" + target + " " + FormatFrontendPipeAttrs(op, split) + " -> " +
+                 type);
+    auto window = PartitionEntry(codegen, entry, entry_tile);
+    codegen.Emit("pto.tload ins(" + window + " : " + EntryType(codegen, entry_tile, "partition_tensor_view") +
+                 ") outs(" + result_buf + " : " + result_type + ")");
+    // Release is queued after the MTE2 read, independently of the later UB use.
+    codegen.Emit("pto.tfree_from_" + std::string(target) + "(" + entry + " : " + type + ") " +
+                 FormatFrontendPipeAttrs(op, split));
+    return "";
+  }
   auto [logical_row, logical_col] = codegen.GetCurrentResultTpopValidShapeOperands();
 
   // PTO's Cube->Vector FIFO copies the physical consumer box, at EVERY split.
@@ -481,13 +532,22 @@ static std::string MakeInitializePipeCodegenPTO(const char* target, const CallPt
   CHECK(dir_mask >= 0) << op_name << " requires 'dir_mask' attribute";
   CHECK(slot_size > 0) << op_name << " requires 'slot_size' attribute";
 
+  const int pipe_id = op->GetKwarg<int>("id", 0);
+  const bool consumer = (dir_mask == 1) == (std::string_view(target) == "aiv");
+  if (auto tile = codegen.GetGMPipeEntryType(pipe_id, dir_mask, consumer)) {
+    auto descriptor = codegen.EmitGMPipeEntryDescriptor(pipe_id, dir_mask, tile);
+    codegen.Emit("pto." + std::string(target) + "_initialize_pipe " +
+                 FormatInitializePipeAttrs(op, dir_mask, slot_size) + " (gm_slot_tensor = " + descriptor +
+                 " : " + EntryType(codegen, tile) + ")");
+    return "";
+  }
+
   std::string c2v_ssa = GetPipeBufOperandI32SSA(codegen, op->args_[0]);
   std::string v2c_ssa = GetPipeBufOperandI32SSA(codegen, op->args_[1]);
   CHECK(!c2v_ssa.empty() && !v2c_ssa.empty()) << op_name << ": failed to lower buffer operands to SSA names";
 
   std::ostringstream oss;
   oss << "pto." << target << "_initialize_pipe " << FormatInitializePipeAttrs(op, dir_mask, slot_size);
-  const int pipe_id = op->GetKwarg<int>("id", 0);
   EmitInitializePipeOperands(oss, codegen.GetGMSlotBufferSSAForPipe(pipe_id, dir_mask), c2v_ssa, v2c_ssa);
   codegen.Emit(oss.str());
 

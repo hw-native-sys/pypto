@@ -24,7 +24,13 @@ class PTOCodegen:
     def __init__(self) -> None:
         """Create a new PTO code generator."""
 
-    def generate(self, program: Program, emit_tile_addr: bool = True, emit_source_loc: bool = True) -> str:
+    def generate(
+        self,
+        program: Program,
+        emit_tile_addr: bool = True,
+        emit_source_loc: bool = True,
+        enable_software_pipeline: bool = False,
+    ) -> str:
         """Generate PTO assembly from PyPTO IR Program.
 
         Args:
@@ -37,6 +43,8 @@ class PTOCodegen:
                 with an MLIR ``loc("file":line:col)`` taken from the IR ``Span``,
                 so ptoas diagnostics name the user's source instead of a line in
                 the generated ``.pto``. When False, emit no locations.
+            enable_software_pipeline: Enable fixed-address multi-buffer regions
+                and canonical unsigned slot indices under the PyPTO planner.
 
         Returns:
             PTO assembly code string (.pto format) with instructions like tmul, tadd, FOR/ENDFOR, etc.

@@ -10,9 +10,9 @@ description: >-
   `localhost:5000/ci-py310` as root, which forced a root/ci-runner umask split on
   the shared ccache — running them on the host as ci-runner retires that.
 
-  The device jobs differ from the CPU ones in two inputs: `needs-device` (gate
-  CANN set_env.sh) and `install-toolchain` (gate the ptoas download + the
-  simpler build — the `--codegen-only` job needs neither).
+  `needs-device` gates CANN setup and `install-toolchain` gates the complete
+  device toolchain. CPU codegen tests can request only the pinned assembler
+  through `install-ptoas`, without building simpler or pto-isa.
 
   Each host describes its own layout in the runner's `.env` (the file in the
   runner application's root dir, which the runner service loads into every job it
@@ -43,8 +43,8 @@ description: >-
   is tempted to find an interpreter on its own; conda is the wrong answer, and
   the right one is to move the step after the bootstrap instead.
 
-  When install-toolchain is true, the calling job must define PTOAS_ROOT,
-  PTOAS_VERSION, PTOAS_SHA256_AARCH64, and PTOAS_SHA256_X86_64. Every caller
+  When install-toolchain or install-ptoas is true, the calling job must define
+  PTOAS_ROOT, PTOAS_VERSION, PTOAS_SHA256_AARCH64, and PTOAS_SHA256_X86_64. Every caller
   must also define the CMAKE_* and non-path CCACHE_* (MAXSIZE / UMASK)
   environment variables; they are read from the job environment here. The
   action selects the checksum that matches the actual host architecture.
@@ -87,11 +87,16 @@ inputs:
       When 'true' (the default) download ptoas and build+install simpler
       (./runtime) — everything the codegen -> device path needs. Simpler's own
       installer resolves the pinned pto-isa checkout (runtime/pto_isa.pin is the
-      single source of truth), so this action never clones it. The
-      `--codegen-only` job passes 'false': it never assembles, never touches
-      pto-isa and never runs simpler, so it only needs the pypto build.
+      single source of truth), so this action never clones it.
+      CPU jobs can pass 'false' and select only the assembler with install-ptoas.
     required: false
     default: 'true'
+  install-ptoas:
+    description: >-
+      Install the pinned PTOAS assembler without simpler or pto-isa when
+      install-toolchain is false. Full toolchain installs already include it.
+    required: false
+    default: 'false'
   pto-isa-commit:
     description: >-
       Pinned pto-isa commit (needs.toolchain.outputs.pto_isa_commit, read from
@@ -522,7 +527,7 @@ runs:
       # exist yet — which is how this step came to reach straight into
       # $CONDA_ROOT/envs/py310, giving every job a conda dependency, bundle ones
       # included, that this action's own runner contract says may be absent.
-      if: ${{ inputs.install-toolchain == 'true' }}
+      if: ${{ inputs.install-toolchain == 'true' || inputs.install-ptoas == 'true' }}
       shell: bash
       working-directory: ${{ inputs.checkout-path }}
       env:
