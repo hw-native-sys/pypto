@@ -296,10 +296,10 @@ class BufferKernelSupport : public IRVisitor {
       has_store = true;
       CheckTransferParameter(call, 2, false);
       CheckTransferTypes(call, false);
-      supported &= GetIntKwarg(call->kwargs_, "atomic", 0) == 0 &&
-                   GetIntKwarg(call->kwargs_, "st_phase", 0) == 0 &&
-                   !GetOptionalDoubleKwarg(call->kwargs_, "pre_quant") &&
-                   !GetKwargOr<bool>(call->kwargs_, "pre_relu", false);
+      supported &=
+          GetIntKwarg(call->kwargs_, "atomic", 0) == 0 && GetIntKwarg(call->kwargs_, "st_phase", 0) == 0 &&
+          !GetOptionalDoubleKwarg(call->kwargs_, "pre_quant") &&
+          !GetKwargOr<bool>(call->kwargs_, "pre_relu", false) && GetIntKwarg(call->kwargs_, "cache", 0) == 0;
     } else if (IsOp(call, "tile.reshape")) {
       const auto source = call->args_.empty() ? nullptr : As<TileType>(call->args_[0]->GetType());
       const auto destination = As<TileType>(call->GetType());

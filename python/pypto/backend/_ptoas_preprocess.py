@@ -12,6 +12,8 @@
 import re
 from bisect import bisect_left
 
+from pypto.backend._l2_hint import apply_l2_hints
+
 _IDENTIFIER_RE = re.compile(r"\b[A-Za-z_]\w*\b")
 _PTOAS_UB_POINTER_ALIAS_RE = re.compile(
     r"^\s*__(?:ubuf|cbuf)__\s+.+?\*\s*(?P<alias>[A-Za-z_]\w*)\s*="
@@ -110,6 +112,7 @@ def _restore_mgather_wrapper_operands(content: str) -> str:
 
 def preprocess_ptoas_output(content: str) -> str:
     """Prepare PTOAS output for embedding in PyPTO kernel wrappers."""
+    content = apply_l2_hints(content)
     lines = content.splitlines(keepends=True)
     filtered: list[str] = []
     for line in lines:

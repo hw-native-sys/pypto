@@ -29,7 +29,9 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
+from harness import st
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from pypto.pypto_core.passes import MemoryPlanner
 
 M = 32
 K = 64
@@ -57,6 +59,14 @@ SLOTNUM_SLOT_SIZE = SLOTNUM_DIM * SLOTNUM_DIM * 4
 SLOTNUM_SLOT_NUM = 4
 SLOTNUM_LOCAL_SLOT_NUM = 4
 SLOTNUM_BUFFER_SIZE = SLOTNUM_SLOT_SIZE * SLOTNUM_LOCAL_SLOT_NUM
+
+
+_LOAD_POLICIES = list(pl.CachePolicy)
+_STORE_POLICIES = [
+    policy
+    for policy in pl.CachePolicy
+    if policy not in (pl.CachePolicy.NOT_ALLOC_KEEP, pl.CachePolicy.NOT_ALLOC_DROP)
+]
 
 
 @pl.program
@@ -906,6 +916,337 @@ class TestCrossCore:
         """Explicit slot_num / local_slot_num: compile through full pipeline and verify correctness."""
         result = test_runner.run(ExplicitSlotNumTest())
         assert result.passed, f"Cross-core explicit slot_num failed: {result.error}"
+
+
+def _l2_hint_case(load_hint, store_hint, planner):
+    """Exercise explicit hints beside ordinary transfers inside a tile loop."""
+
+    @pl.jit.incore
+    def hinted_kernel(
+        x: pl.Tensor[[64, 32], pl.FP32],
+        y: pl.Tensor[[64, 32], pl.FP32],
+        out: pl.Out[pl.Tensor[[64, 32], pl.FP32]],
+    ) -> pl.Tensor[[64, 32], pl.FP32]:
+        for i, (out_iter,) in pl.range(2, init_values=(out,)):
+            a = pl.load(x, [i * 32, 0], [32, 32], cache=load_hint)
+            b = pl.load(y, [i * 32, 0], [32, 32])
+            updated = pl.store(pl.add(a, b), [i * 32, 0], out_iter, cache=store_hint)
+            out = pl.yield_(updated)
+        return out
+
+    @pl.jit
+    def hinted_add(
+        x: pl.Tensor[[64, 32], pl.FP32],
+        y: pl.Tensor[[64, 32], pl.FP32],
+        out: pl.Out[pl.Tensor[[64, 32], pl.FP32]],
+    ) -> pl.Tensor[[64, 32], pl.FP32]:
+        return hinted_kernel(x, y, out)
+
+    x = (torch.arange(64 * 32).reshape(64, 32) % 127 - 63).float()
+    y = (torch.arange(64 * 32).reshape(64, 32) % 31 - 15).float()
+    return st.case(
+        hinted_add,
+        x,
+        y,
+        torch.full_like(x, float("nan")),
+        name=f"l2_{load_hint.name}_{store_hint.name}_{planner.name}",
+        golden=lambda tensors: tensors["x"] + tensors["y"],
+        memory_planner=planner,
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+@pytest.mark.platforms("a5", "a5sim")
+@st.cases(
+    *[
+        _l2_hint_case(load_hint, store_hint, planner)
+        for load_hint in _LOAD_POLICIES
+        for store_hint in _STORE_POLICIES
+        for planner in (MemoryPlanner.PYPTO, MemoryPlanner.PTOAS)
+    ]
+)
+def test_l2_hints_preserve_results(case_run):
+    """Every A5 load/store hint pair preserves exact results."""
+    case_run.assert_passed()
+
+
+def _scope_rebind_case(policy, planner, explicit_default):
+    override = pl.CachePolicy.DEFAULT if explicit_default else None
+
+    @pl.jit
+    def scoped_rebind(x: pl.Tensor[[32, 32], pl.FP32], out: pl.Out[pl.Tensor[[32, 32], pl.FP32]]):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            pl.set_cache_policy(out, policy)
+            value = pl.add(x, x)
+            out = pl.assemble(out, value, [0, 0])
+            first = pl.load(out, [0, 0], [32, 32])
+            out = pl.store(pl.add(first, first), [0, 0], out)
+            second = pl.load(out, [0, 0], [32, 32], cache=override)
+            out = pl.store(second, [0, 0], out)
+        return out
+
+    name = f"l2_scope_rebind_{policy.name}_{explicit_default}_{planner.name}"
+    x = (torch.arange(32 * 32).reshape(32, 32) % 127 - 63).float()
+    case = st.case(
+        scoped_rebind,
+        x,
+        torch.full_like(x, float("nan")),
+        name=name,
+        golden=lambda tensors: tensors["x"] * 4,
+        memory_planner=planner,
+        rtol=0.0,
+        atol=0.0,
+    )
+    return pytest.param(policy, explicit_default, case, id=name)
+
+
+@pytest.fixture
+def _scope_rebind_run(_st_case, test_runner, tmp_path, monkeypatch):
+    # CI runs inline under --forked; keep its sources as well as batch artifacts.
+    monkeypatch.setattr(test_runner.config, "save_kernels", True)
+    monkeypatch.setattr(test_runner.config, "save_kernels_dir", str(tmp_path))
+    run = st.CaseRun(_st_case, test_runner.run(_st_case))
+    return run, run.work_dir or (tmp_path / _st_case.name)
+
+
+@pytest.mark.platforms("a5", "a5sim")
+@pytest.mark.parametrize(
+    "policy, explicit_default, _st_case",
+    [
+        _scope_rebind_case(policy, planner, explicit_default)
+        for policy in (
+            pl.CachePolicy.NORMAL_FIRST_VICTIM,
+            pl.CachePolicy.NORMAL_LAST_VICTIM,
+            pl.CachePolicy.NORMAL_PERSISTENT,
+        )
+        for planner in (MemoryPlanner.PYPTO, MemoryPlanner.PTOAS)
+        for explicit_default in (False, True)
+    ],
+)
+def test_scope_cache_policy_survives_gm_rebinding(_scope_rebind_run, policy, explicit_default):
+    """Check inherited ISA modes as well as values after assemble/store rebindings."""
+    _assert_scope_rebind_hints(_scope_rebind_run, policy, explicit_default)
+
+
+def _assert_scope_rebind_hints(scope_rebind_run, policy, explicit_default):
+    case_run, work_dir = scope_rebind_run
+    case_run.assert_passed()
+    sources = list((work_dir / "kernels").rglob("*.cpp"))
+    assert sources, "the compiled case must retain its kernel sources"
+    cpp = "\n".join(path.read_text() for path in sources)
+    hint = {
+        pl.CachePolicy.NORMAL_FIRST_VICTIM: "NormalFirstVictim",
+        pl.CachePolicy.NORMAL_LAST_VICTIM: "NormalLastVictim",
+        pl.CachePolicy.NORMAL_PERSISTENT: "NormalPersistent",
+    }[policy]
+    assert cpp.count(f"TLOAD<pto::TLoadL2Hint::{hint}>") == (1 if explicit_default else 2)
+    assert "TSTORE<pto::TStoreL2Hint" not in cpp, "scope policies govern reads only"
+
+
+def _scope_conditional_rebind_case(policy, planner, take_then):
+    @pl.jit
+    def scoped_conditional_rebind(
+        x: pl.Tensor[[32, 32], pl.FP32],
+        flags: pl.Tensor[[1], pl.INT32],
+        out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+    ):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            pl.set_cache_policy(out, policy)
+            if pl.read(flags, [0]) > 0:
+                out = pl.assemble(out, pl.add(x, x), [0, 0])
+            else:
+                value = pl.load(x, [0, 0], [32, 32])
+                out = pl.store(pl.add(value, pl.add(value, value)), [0, 0], out)
+            first = pl.load(out, [0, 0], [32, 32])
+            out = pl.store(pl.add(first, first), [0, 0], out)
+            second = pl.load(out, [0, 0], [32, 32])
+            out = pl.store(second, [0, 0], out)
+        return out
+
+    name = f"l2_scope_if_{take_then}_{policy.name}_{planner.name}"
+    x = (torch.arange(32 * 32).reshape(32, 32) % 127 - 63).float()
+    factor = 4 if take_then else 6
+    case = st.case(
+        scoped_conditional_rebind,
+        x,
+        torch.tensor([int(take_then)], dtype=torch.int32),
+        torch.full_like(x, float("nan")),
+        name=name,
+        golden=lambda tensors: tensors["x"] * factor,
+        memory_planner=planner,
+        rtol=0.0,
+        atol=0.0,
+    )
+    return pytest.param(policy, case, id=name)
+
+
+@pytest.mark.platforms("a5", "a5sim")
+@pytest.mark.parametrize(
+    "policy, _st_case",
+    [
+        _scope_conditional_rebind_case(policy, planner, take_then)
+        for policy in (
+            pl.CachePolicy.NORMAL_FIRST_VICTIM,
+            pl.CachePolicy.NORMAL_LAST_VICTIM,
+            pl.CachePolicy.NORMAL_PERSISTENT,
+        )
+        for planner in (MemoryPlanner.PYPTO, MemoryPlanner.PTOAS)
+        for take_then in (False, True)
+    ],
+)
+def test_scope_cache_policy_survives_conditional_gm_rebinding(_scope_rebind_run, policy):
+    """Both runtime branches retain the selected read mode after their GM merge."""
+    _assert_scope_rebind_hints(_scope_rebind_run, policy, False)
+
+
+def _scope_loop_rebind_case(policy, planner, explicit_default, use_while, steps):
+    override = pl.CachePolicy.DEFAULT if explicit_default else None
+
+    @pl.jit.inline
+    def for_rebind(
+        x: pl.Tensor[[32, 32], pl.FP32],
+        out: pl.Tensor[[32, 32], pl.FP32],
+        limit: pl.Scalar[pl.INT32],
+    ):
+        for i, (carried,) in pl.range(limit, init_values=(out,)):
+            updated = pl.assemble(carried, pl.add(carried, x), [0, 0])
+            out = pl.yield_(updated)
+        return out
+
+    @pl.jit.inline
+    def while_rebind(
+        x: pl.Tensor[[32, 32], pl.FP32],
+        out: pl.Tensor[[32, 32], pl.FP32],
+        limit: pl.Scalar[pl.INT32],
+    ):
+        for i, carried in pl.while_(init_values=(0, out)):
+            pl.cond(i < limit)
+            updated = pl.assemble(carried, pl.add(carried, x), [0, 0])
+            _i, out = pl.yield_(i + 1, updated)
+        return out
+
+    rebind = while_rebind if use_while else for_rebind
+
+    @pl.jit
+    def scoped_loop_rebind(
+        x: pl.Tensor[[32, 32], pl.FP32],
+        counts: pl.Tensor[[1], pl.INT32],
+        out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+    ):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            pl.set_cache_policy(out, policy)
+            out = pl.assemble(out, pl.add(x, x), [0, 0])
+            limit = pl.read(counts, [0])
+            out = rebind(x, out, limit)
+            second = pl.load(out, [0, 0], [32, 32], cache=override)
+            out = pl.store(pl.add(second, second), [0, 0], out)
+        return out
+
+    kind = "while" if use_while else "for"
+    name = f"l2_scope_loop_{kind}_{steps}_{policy.name}_{explicit_default}_{planner.name}"
+    x = (torch.arange(32 * 32).reshape(32, 32) % 127 - 63).float()
+    case = st.case(
+        scoped_loop_rebind,
+        x,
+        torch.tensor([steps], dtype=torch.int32),
+        torch.full_like(x, float("nan")),
+        name=name,
+        golden=lambda tensors: tensors["x"] * (4 + 2 * steps),
+        memory_planner=planner,
+        rtol=0.0,
+        atol=0.0,
+    )
+    return pytest.param(policy, explicit_default, case, id=name)
+
+
+@pytest.mark.platforms("a5", "a5sim")
+@pytest.mark.parametrize(
+    "policy, explicit_default, _st_case",
+    [
+        _scope_loop_rebind_case(policy, planner, explicit_default, use_while, steps)
+        for policy in (
+            pl.CachePolicy.NORMAL_FIRST_VICTIM,
+            pl.CachePolicy.NORMAL_LAST_VICTIM,
+            pl.CachePolicy.NORMAL_PERSISTENT,
+        )
+        for planner in (MemoryPlanner.PYPTO, MemoryPlanner.PTOAS)
+        for explicit_default in (False, True)
+        for use_while in (False, True)
+        for steps in (0, 2)
+    ],
+)
+def test_scope_cache_policy_survives_loop_results(_scope_rebind_run, policy, explicit_default):
+    """Check zero/multiple iterations and ISA hints after for/while GM results."""
+    _assert_scope_rebind_hints(_scope_rebind_run, policy, explicit_default)
+
+
+def _acc_store_cache_case(policy, planner, quantized, with_relu):
+    scale = 0.5 if quantized else None
+
+    @pl.jit.incore
+    def acc_store(
+        x: pl.Tensor[[16, 64], pl.FP16],
+        y: pl.Tensor[[32, 64], pl.FP16],
+        out: pl.Out[pl.Tensor[[16, 32], pl.FP16]],
+    ):
+        lhs = pl.load(x, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
+        rhs = pl.load(y, [0, 0], [32, 64], target_memory=pl.Mem.Mat)
+        acc = pl.matmul(
+            pl.tile.move(lhs, target_memory=pl.Mem.Left),
+            pl.tile.move(pl.tile.transpose_view(rhs), target_memory=pl.Mem.Right),
+        )
+        return pl.store(acc, [0, 0], out, cache=policy, pre_quant=scale, pre_relu=with_relu)
+
+    @pl.jit
+    def acc_writeback(
+        x: pl.Tensor[[16, 64], pl.FP16],
+        y: pl.Tensor[[32, 64], pl.FP16],
+        out: pl.Out[pl.Tensor[[16, 32], pl.FP16]],
+    ):
+        return acc_store(x, y, out)
+
+    def golden(tensors):
+        value = tensors["x"].float() @ tensors["y"].float().T
+        if with_relu:
+            value = torch.relu(value)
+        return (value * (0.5 if quantized else 1.0)).half()
+
+    name = f"l2_acc_{policy.name}_quant{quantized}_relu{with_relu}_{planner.name}"
+    case = st.case(
+        acc_writeback,
+        (torch.arange(16 * 64).reshape(16, 64) % 7 - 3).half(),
+        (torch.arange(32 * 64).reshape(32, 64) % 5 - 2).half(),
+        torch.full((16, 32), float("nan"), dtype=torch.float16),
+        name=name,
+        golden=golden,
+        memory_planner=planner,
+        rtol=0.0,
+        atol=0.0,
+    )
+    return pytest.param(policy, case, id=name)
+
+
+@pytest.mark.platforms("a5", "a5sim")
+@pytest.mark.parametrize(
+    "policy, _st_case",
+    [
+        _acc_store_cache_case(policy, planner, quantized, with_relu)
+        for policy in _STORE_POLICIES
+        for planner in (MemoryPlanner.PYPTO, MemoryPlanner.PTOAS)
+        for quantized in (False, True)
+        for with_relu in (False, True)
+    ],
+)
+def test_acc_store_cache_policy_is_honored_or_rejected(case_run, policy):
+    """Do not mistake a numerically correct ACC store for an honored cache hint."""
+    if policy in (pl.CachePolicy.DEFAULT, pl.CachePolicy.NORMAL_FIRST_VICTIM):
+        case_run.assert_passed()
+    else:
+        assert not case_run.passed, "unsupported ACC cache modes must fail before dispatch"
+        error = case_run.error or ""
+        assert "A5 ACC-to-GM store cache policy" in error, error
+        assert "PTO-ISA" in error and "l2Control" in error, error
 
 
 if __name__ == "__main__":
