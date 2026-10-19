@@ -11,7 +11,9 @@ result gets an explicit `Out` parameter and a `tile.store`; a complete return of
 a local GM allocation moves that allocation to the caller. Repeated aliases of
 the same result share storage. Existing parameter writebacks keep their binding.
 The selected InCore/AIC/AIV function type is preserved. Without a return type
-annotation, the original returned expression supplies its type.
+annotation, the original returned expression supplies its type. Before adding an
+`Out`, the pass rejects types that reference body-local dimensions: pass the
+extent as a scalar parameter or supply an explicit `Out` tensor instead.
 
 Allocations that need tensor-level staging keep their local Tile storage and get
 an exit store. This preserves Tensor-source assembly and local scalar updates
@@ -776,7 +778,7 @@ re-declared seed could not name it.
 | `TypePropagatingMutator` | Base IRMutator — propagates type changes through control flow |
 | `TensorToTileMutator` | IRMutator — converts tensor ops to tile ops via OpConversionRegistry |
 | `OutputParameterRewriter` | Propagates output parameters through wrappers or allocates them at orchestration call sites (Phase 2) |
-| `IncoreTileOpsVerifier` | IRVisitor — verifies no TensorType ops remain in InCore functions |
+| `IncoreTileOpsVerifier` | IRVisitor — checks Functional InCore/AIC/AIV bodies with the same external/runtime-bound exclusions as conversion |
 
 ## Scope
 

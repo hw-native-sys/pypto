@@ -1295,6 +1295,98 @@ def test_tensor_conversion_preserves_already_lowered_buffer_functions(function_t
         assert len(_all_builtin_calls(preserved, name)) == 1
 
 
+def _unannotated_dynamic_output_program(function_type, *, local_extent, gm_storage):
+    """Exercise both inferred exit stores and pre-lifted GM outputs at a real call site."""
+    span = ir.Span.unknown()
+    index_type = ir.ScalarType(ir.DataType.INDEX)
+    n = ir.Var("n", index_type, span)
+    source = ir.Var("source", ir.TensorType([32, 16], ir.DataType.FP32), span)
+    statements: list[ir.Stmt] = []
+    extent = n
+    if local_extent:
+        extent = ir.Var("local_extent", index_type, span)
+        # Even pure arithmetic is body-local until explicitly reconstructed in
+        # the caller. Copying this Var into an Out type would violate SSA scope.
+        statements.append(
+            ir.AssignStmt(
+                extent, ir.Add(n, ir.ConstInt(0, ir.DataType.INDEX, span), ir.DataType.INDEX, span), span
+            )
+        )
+    sliced = tensor_ops.slice(source, [extent, 16], [0, 0])
+    result = ir.Var("sliced", sliced.type, span)
+    statements.append(ir.AssignStmt(result, sliced, span))
+    if gm_storage:
+        allocation = tensor_ops.create([extent, 16], ir.DataType.FP32)
+        buffer = ir.Var("buffer", allocation.type, span)
+        tile = tile_ops.load(source, [0, 0], [extent, 16])
+        loaded = ir.Var("loaded", tile.type, span)
+        store = tile_ops.store(loaded, [0, 0], buffer)
+        result = ir.Var("stored", store.type, span)
+        statements.extend(
+            [
+                ir.AssignStmt(buffer, allocation, span),
+                ir.AssignStmt(loaded, tile, span),
+                ir.AssignStmt(result, store, span),
+            ]
+        )
+    statements.append(ir.ReturnStmt([result], span))
+    kernel = ir.Function("kernel", [n, source], [], ir.SeqStmts(statements, span), span, function_type)
+    caller_n = ir.Var("caller_n", index_type, span)
+    caller_source = ir.Var("caller_source", source.type, span)
+    caller_type = ir.TensorType([caller_n, 16], ir.DataType.FP32)
+    caller_result = ir.Var("result", caller_type, span)
+    caller = ir.Function(
+        "main",
+        [caller_n, caller_source],
+        [caller_type],
+        ir.SeqStmts(
+            [
+                ir.AssignStmt(
+                    caller_result,
+                    ir.Call(ir.GlobalVar("kernel"), [caller_n, caller_source], caller_type, span),
+                    span,
+                ),
+                ir.ReturnStmt([caller_result], span),
+            ],
+            span,
+        ),
+        span,
+        ir.FunctionType.Orchestration,
+    )
+    return ir.Program([kernel, caller], "unannotated_dynamic_output", span)
+
+
+@pytest.mark.parametrize("function_type", [ir.FunctionType.InCore, ir.FunctionType.AIC, ir.FunctionType.AIV])
+@pytest.mark.parametrize("gm_storage", [False, True], ids=["exit_store", "gm_allocation"])
+def test_inferred_output_rejects_body_local_dimensions(function_type, gm_storage):
+    """Reject invalid signatures before a local extent can escape into caller tensor.create."""
+    before = _unannotated_dynamic_output_program(function_type, local_extent=True, gm_storage=gm_storage)
+    with pytest.raises(ValueError, match="output type depends on body-local dimension 'local_extent'"):
+        passes.convert_tensor_to_tile_ops()(before)
+
+
+@pytest.mark.parametrize("function_type", [ir.FunctionType.InCore, ir.FunctionType.AIC, ir.FunctionType.AIV])
+@pytest.mark.parametrize("gm_storage", [False, True], ids=["exit_store", "gm_allocation"])
+def test_inferred_output_instantiates_scalar_parameter_dimensions(function_type, gm_storage):
+    """A signature-visible extent still maps to the caller's own scalar parameter."""
+    before = _unannotated_dynamic_output_program(function_type, local_extent=False, gm_storage=gm_storage)
+    after = passes.convert_tensor_to_tile_ops()(before)
+    kernel = _function(after, "kernel")
+    output_type = kernel.params[-1].type
+    assert isinstance(output_type, ir.TensorType)
+    assert output_type.shape[0].same_as(kernel.params[0])
+    caller = _function(after, "main")
+    allocations = _builtin_calls(caller, "tensor.create")
+    assert len(allocations) == 1
+    allocated_type = allocations[0].type
+    assert isinstance(allocated_type, ir.TensorType)
+    assert allocated_type.shape[0].same_as(caller.params[0])
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.SSAForm)
+    properties.insert(passes.IRProperty.UseAfterDef)
+    passes.run_verifier(properties)(after)
+
+
 def test_dynamic_computed_outputs_bind_to_the_adapters_scalar_parameter():
     """Remapping dynamic tensor types must retain the final canonical scalar's identity."""
     span = ir.Span.unknown()

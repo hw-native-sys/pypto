@@ -9,7 +9,8 @@
 本 pass 先记录每个逻辑返回值，再解析其存储来源。新计算的 Tensor 结果会新增显式
 `Out` 形参和 `tile.store`；完整返回的局部 GM 分配则移到调用者。同一结果的重复别名
 共用存储，已有参数的写回保留原绑定。转换后保留原有 InCore/AIC/AIV 函数类型。
-没有返回类型注解时，使用原始返回表达式的类型。
+没有返回类型注解时，使用原始返回表达式的类型。新增 `Out` 前会拒绝引用函数体局部
+尺寸变量的类型；这类尺寸应作为标量形参传入，或由调用者显式提供 `Out` Tensor。
 
 需要 Tensor 层暂存的分配保留局部 Tile 存储，在出口统一 store。这样既能暂存
 Tensor 源的 assemble，也能保留局部标量更新，避免引入不支持的 GM 操作或混用
@@ -692,7 +693,7 @@ for k0 in pl.pipeline(0, K, K_TILE, stage=2):
 | `TypePropagatingMutator` | 基类 IRMutator — 通过控制流传播类型变更 |
 | `TensorToTileMutator` | IRMutator — 通过 OpConversionRegistry 将 tensor op 转换为 tile op |
 | `OutputParameterRewriter` | 在包装函数中转发输出形参，或在编排调用点分配输出（阶段二） |
-| `IncoreTileOpsVerifier` | IRVisitor — 验证 InCore 函数中不再包含 TensorType 操作 |
+| `IncoreTileOpsVerifier` | IRVisitor — 检查 Functional InCore/AIC/AIV 函数体，与转换阶段一致地排除外部和 runtime-bound 函数 |
 
 ## 作用范围
 

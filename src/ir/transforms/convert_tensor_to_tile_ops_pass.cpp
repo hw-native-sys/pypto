@@ -76,6 +76,13 @@ std::string MakeStoreResultName(size_t index) {
   return auto_name::BuildName("ret" + std::to_string(index), "", "store");
 }
 
+// Conversion and its postcondition must cover exactly the same kernel bodies.
+bool ShouldConvertTensorToTileOps(const FunctionPtr& func) {
+  return func && func->body_ && func->ir_stage_ == FunctionIRStage::Functional &&
+         IsInCoreType(func->func_type_) && !func->HasAttr(kAttrExternalSource) &&
+         !func->requires_runtime_binding_;
+}
+
 CallPtr MarkCompilerMatBridge(const CallPtr& call, MemorySpace space) {
   if (!call || space != MemorySpace::Mat) return call;
   auto marked = MutableCopy(call);
@@ -2624,6 +2631,44 @@ struct ReturnOutputBinding {
   std::optional<size_t> storage_index;
 };
 
+// A caller allocates new outputs before entering this function, so their types
+// cannot depend on body-local SSA values. Do not speculate about data-dependent
+// extents: callers must supply an explicit Out or a signature-visible extent.
+class OutputTypeScopeValidator : public IRVisitor {
+ public:
+  OutputTypeScopeValidator(const FunctionPtr& func, const StmtPtr& body, const Span& span)
+      : function_name_(func->name_), span_(span) {
+    var_collectors::VarDefUseCollector collector;
+    collector.VisitStmt(body);
+    body_locals_ = std::move(collector.var_defs);
+  }
+
+  void Validate(const TypePtr& type) {
+    if (seen_types_.insert(type.get()).second) var_collectors::VisitTypeExprFields(*this, type);
+  }
+
+  void VisitExpr(const ExprPtr& expr) override {
+    // Output types can share shape-expression DAGs. Check each node once across
+    // all outputs rather than expanding the same dimensions per return slot.
+    if (expr && seen_exprs_.insert(expr.get()).second) IRVisitor::VisitExpr(expr);
+  }
+
+ protected:
+  void VisitVarLike_(const VarPtr& op) override {
+    CHECK_SPAN(body_locals_.count(op.get()) == 0, span_)
+        << "Cannot materialize output of '" << function_name_
+        << "': output type depends on body-local dimension '" << op->name_hint_
+        << "'. Pass the extent as a scalar parameter or provide an explicit Out tensor.";
+  }
+
+ private:
+  std::string function_name_;
+  Span span_;
+  std::unordered_set<const Var*> body_locals_;
+  std::unordered_set<const Type*> seen_types_;
+  std::unordered_set<const Expr*> seen_exprs_;
+};
+
 // A returned GM allocation becomes caller-owned storage. Removing its local
 // allocation preserves the one-buffer identity instead of copying the result
 // into a second allocation or confusing it with a kernel input.
@@ -2695,7 +2740,9 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   std::vector<TypePtr> new_return_types;
   AddedOutputBindings added_outputs;
   const size_t output_start = func->params_.size() - transform_utils::TrailingCommCtxParamCount(func);
+  OutputTypeScopeValidator output_types(func, canonical_body, return_stmt ? return_stmt->span_ : span);
   auto add_output = [&](const TypePtr& type) {
+    output_types.Validate(type);
     const size_t param_index = output_start + added_outputs.size();
     auto param = std::make_shared<Var>(MakeOutParamName(added_outputs.size()), type, return_stmt->span_);
     // Append now and rotate the unchanged CommCtx suffix once at the end.
@@ -3188,8 +3235,7 @@ Pass ConvertTensorToTileOps() {
       // Buffer kernels already carry explicit storage and separate data /
       // metadata effects; functional tensor-to-tile conversion must leave
       // their bodies and signatures intact.
-      if (func->ir_stage_ == FunctionIRStage::Functional && IsInCoreType(func->func_type_) &&
-          !func->HasAttr(kAttrExternalSource) && !func->requires_runtime_binding_) {
+      if (ShouldConvertTensorToTileOps(func)) {
         auto result = TransformIncoreFunction(func);
         all_added_outputs.emplace(func->name_, std::move(result.added_outputs));
         all_transformed_funcs.emplace(func->name_, result.func);
@@ -3455,7 +3501,7 @@ Pass ConvertTensorToTileOps() {
 namespace {
 
 /**
- * @brief Checks that InCore functions have no TensorType ops (only tile ops).
+ * @brief Checks converted InCore/AIC/AIV functions for surviving tensor ops.
  */
 class IncoreTileOpsVerifier : public IRVisitor {
  public:
@@ -3517,8 +3563,7 @@ class IncoreTileOpsPropertyVerifierImpl : public PropertyVerifier {
   void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
     if (!program) return;
     for (const auto& [gv, func] : program->functions_) {
-      if (!func || !func->body_) continue;
-      if (func->func_type_ != FunctionType::InCore) continue;
+      if (!ShouldConvertTensorToTileOps(func)) continue;
       IncoreTileOpsVerifier verifier(diagnostics);
       verifier.VisitStmt(func->body_);
     }
