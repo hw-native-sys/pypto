@@ -53,9 +53,11 @@ RewriteSimplifier::Impl::Impl(Analyzer* parent) : parent_(parent) {}
 ExprPtr RewriteSimplifier::Impl::VisitExpr(const ExprPtr& expr) {
   // Skip algebraic rewrite rules for float-typed expressions.
   // Integer-style identities (cancellation, associativity) are not
-  // semantics-preserving for floating-point (rounding, NaN).
+  // semantics-preserving for floating-point (rounding, NaN). Var/IterArg leaves
+  // still follow explicit bindings: substituting their known value changes no
+  // arithmetic and preserves the literal's dtype and signed zero.
   if (auto stype = std::dynamic_pointer_cast<const ScalarType>(expr->GetType());
-      stype && stype->dtype_.IsFloat()) {
+      stype && stype->dtype_.IsFloat() && !AsVarLike(expr)) {
     return expr;
   }
   return PreserveIntegerResultType(expr, ExprFunctor<ExprPtr>::VisitExpr(expr));

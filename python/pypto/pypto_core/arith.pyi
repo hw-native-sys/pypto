@@ -58,7 +58,8 @@ def extended_euclidean(a: int, b: int) -> tuple[int, int, int]:
 class RewriteSimplifier:
     """Simplifies integer/index expressions by applying algebraic rewrite rules.
 
-    Float-typed expressions are returned unchanged.
+    Float arithmetic is returned unchanged; float variables and IterArgs
+    still follow explicit value bindings.
     """
 
     def __init__(self) -> None:
@@ -293,7 +294,11 @@ class IntSetAnalyzer:
         ...
 
 class Analyzer:
-    """Coordinates all sub-analyzers for expression analysis and simplification."""
+    """Coordinates all sub-analyzers for expression analysis and simplification.
+
+    Boolean bindings support substitution without numeric ordering facts.
+    Float variables follow explicit bindings while float algebra stays unchanged.
+    """
 
     def __init__(self) -> None:
         """Create an Analyzer with all sub-analyzers."""

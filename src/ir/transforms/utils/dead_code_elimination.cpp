@@ -25,6 +25,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -125,6 +126,63 @@ namespace {
 using loop_repair::MakeBody;
 using RemovablePredicate = std::function<bool(const StmtPtr&)>;
 
+/// DCE must keep values referenced only by storage metadata alive. In particular,
+/// Simplify preserves allocated MemRef identities, so their byte offsets may
+/// still name a scalar whose ordinary uses were replaced by a constant. The
+/// shared type walker deliberately omits those offsets for SSA verification;
+/// add them here without changing that contract or rebuilding any MemRef.
+class DceVarDefUseCollector : public var_collectors::VarDefUseCollector {
+ public:
+  void VisitExpr(const ExprPtr& expr) override {
+    if (!expr) return;
+    // Covers operand and result types uniformly, including Submit's tuple type.
+    VisitTypeExprs(expr->GetType());
+    var_collectors::VarDefUseCollector::VisitExpr(expr);
+  }
+
+  void VisitStmt(const StmtPtr& stmt) override {
+    // Definition types are not visited by VarDefUseCollector: definitions must
+    // not themselves count as uses, but expressions embedded in their types do.
+    if (auto assign = As<AssignStmt>(stmt)) {
+      VisitTypeExprs(assign->var_->GetType());
+    } else if (auto loop = As<ForStmt>(stmt)) {
+      VisitBinderTypes(loop->iter_args_);
+      VisitBinderTypes(loop->return_vars_);
+    } else if (auto loop = As<WhileStmt>(stmt)) {
+      VisitBinderTypes(loop->iter_args_);
+      VisitBinderTypes(loop->return_vars_);
+    } else if (auto branch = As<IfStmt>(stmt)) {
+      VisitBinderTypes(branch->return_vars_);
+    }
+    var_collectors::VarDefUseCollector::VisitStmt(stmt);
+  }
+
+  void VisitTypeExprs(const TypePtr& type) {
+    // Types may be shared or recursively reference a Var carrying the same
+    // type. Visit each identity once per collection to bound this extra walk.
+    if (!type || !visited_types_.insert(type.get()).second) return;
+    if (auto tuple = As<TupleType>(type)) {
+      for (const auto& element : tuple->types_) VisitTypeExprs(element);
+      return;
+    }
+    var_collectors::VisitTypeExprFields(*this, type);
+    if (auto shaped = As<ShapedType>(type); shaped && shaped->memref_.has_value()) {
+      const auto& memref = *shaped->memref_;
+      if (memref && memref->byte_offset_) VisitExpr(memref->byte_offset_);
+    }
+  }
+
+ private:
+  template <typename Binders>
+  void VisitBinderTypes(const Binders& binders) {
+    for (const auto& binder : binders) {
+      if (binder) VisitTypeExprs(binder->GetType());
+    }
+  }
+
+  std::unordered_set<const Type*> visited_types_;
+};
+
 /// Collect live-root variables.
 ///
 /// A statement is a "live root" when it is NOT classified as a removal
@@ -136,7 +194,7 @@ void FindLiveRootsRecursiveImpl(const std::vector<StmtPtr>& stmts, const Removab
                                 std::unordered_set<const Var*>& live) {
   auto collect_expr_refs = [&](const ExprPtr& expr) {
     if (!expr) return;
-    var_collectors::VarDefUseCollector collector;
+    DceVarDefUseCollector collector;
     collector.VisitExpr(expr);
     live.insert(collector.var_uses.begin(), collector.var_uses.end());
   };
@@ -156,7 +214,7 @@ void FindLiveRootsRecursiveImpl(const std::vector<StmtPtr>& stmts, const Removab
                    std::dynamic_pointer_cast<const ReturnStmt>(stmt) ||
                    std::dynamic_pointer_cast<const YieldStmt>(stmt);
     if (is_leaf && !is_removable(stmt)) {
-      var_collectors::VarDefUseCollector collector;
+      DceVarDefUseCollector collector;
       collector.VisitStmt(stmt);
       auto all_refs = collector.GetAllVarRefs();
       live.insert(all_refs.begin(), all_refs.end());
@@ -344,9 +402,9 @@ void MarkBinderTypeRefsLive(const std::vector<StmtPtr>& stmts, std::unordered_se
     if (!var) {
       return;
     }
-    for (const Var* ref : var_collectors::CollectTypeVars(var->GetType())) {
-      live.insert(ref);
-    }
+    DceVarDefUseCollector collector;
+    collector.VisitTypeExprs(var->GetType());
+    live.insert(collector.var_uses.begin(), collector.var_uses.end());
   };
   auto mark_all = [&mark](const auto& binders) {
     for (const auto& binder : binders) {
@@ -399,18 +457,10 @@ std::vector<StmtPtr> EliminateDeadCodeCore(const std::vector<StmtPtr>& stmts,
   std::vector<std::unordered_set<const Var*>> assign_uses;
   assign_uses.reserve(all_assigns.size());
   for (const auto& assign : all_assigns) {
-    var_collectors::VarDefUseCollector collector;
+    DceVarDefUseCollector collector;
     collector.VisitExpr(assign->value_);
+    collector.VisitTypeExprs(assign->var_->GetType());
     auto uses = std::move(collector.var_uses);
-    // A Var can also be referenced from a TYPE, not just from an expression: a
-    // tile's valid_shape may be a per-lane extent over the region's subblock
-    // index (split_axis::LocalizeExplicitBoundaryValid). Those are real uses —
-    // the use-after-def verifier already walks type expr fields
-    // (verify_use_after_def.cpp) — so missing them here would delete the
-    // subblock-index binding and leave the type dangling.
-    for (const Var* ref : var_collectors::CollectTypeVars(assign->var_->GetType())) {
-      uses.insert(ref);
-    }
     assign_uses.emplace_back(std::move(uses));
   }
 
@@ -750,10 +800,9 @@ std::vector<StmtPtr> EliminateDeadYieldSlots(const std::vector<StmtPtr>& stmts) 
   std::vector<StmtPtr> cur = stmts;
   while (true) {
     // Collect every Var* that appears as a use anywhere in `cur`. The base
-    // visitor walks ScopeStmt attrs via VisitScopeAttrs and Submit::deps_
-    // through Call/Submit traversal, so all known reference channels are
-    // covered without extra plumbing.
-    var_collectors::VarDefUseCollector collector;
+    // visitor walks ScopeStmt attrs and Submit::deps_; the DCE-specific type
+    // walk also keeps a phi/carry used only by a slot index or byte offset.
+    DceVarDefUseCollector collector;
     for (const auto& s : cur) collector.VisitStmt(s);
 
     bool changed = false;

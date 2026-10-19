@@ -57,6 +57,7 @@
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/simplify.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -977,7 +978,7 @@ class InitMemRefMutator : public IRMutator {
  * @brief Initialize MemRef for all variables in a function
  *
  * This transformation:
- * 1. Normalizes statement structure (ensures SeqStmts)
+ * 1. Simplifies scalar constants and normalizes statement structure
  * 2. Materializes compiler-owned PTO scratch required by level3
  * 3. Initializes the MemRef field for all Var nodes
  * 4. Creates tile.alloc operations for non-DDR MemRefs (addr=-1, unallocated)
@@ -986,8 +987,11 @@ class InitMemRefMutator : public IRMutator {
  * Variables without memory_space default to DDR.
  */
 FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
-  // Step 1: Normalize statement structure to ensure SeqStmts
-  auto normalized_func = NormalizeStmtStructure(func);
+  // Lowering may introduce constant SSA aliases after the early Simplify pass.
+  // Normalize them with the shared transformation before building addresses,
+  // including when InitMemRef is invoked outside the default pipeline.
+  auto normalized_func =
+      NormalizeStmtStructure(transform_utils::SimplifyFunction(func, /*constants_only=*/true));
 
   const auto* ctx = PassContext::Current();
   const backend::Backend* target = nullptr;

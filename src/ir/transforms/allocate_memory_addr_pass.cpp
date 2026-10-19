@@ -317,9 +317,9 @@ class PinnedAllocCollector : public IRVisitor {
 
 /// Scalar Vars assigned exactly once, and to a constant, anywhere in a body.
 ///
-/// Simplify substitutes such a constant only at function-body top level, so one bound
-/// inside an `if`, loop, or `pl.spmd` body is still a Var when InitMemRef builds a
-/// view's offset from it (`r0 * 4`).
+/// InitMemRef normalizes constant origins before creating new MemRefs. Explicitly
+/// initialized or imported IR may still carry named constants in view offsets
+/// (`r0 * 4`), so address assignment also folds those relative offsets defensively.
 class ConstantScalarCollector : public IRVisitor {
  public:
   std::unordered_map<const Var*, ExprPtr> constants;
@@ -340,13 +340,11 @@ class ConstantScalarCollector : public IRVisitor {
 
 /// Every MemRef's offset relative to its buffer, with the body's scalar constants folded in.
 ///
-/// Folding is required, not an optimization. A symbolic address names SSA Vars, and no
-/// later pass remaps a MemRef's offset: once a `pl.spmd` body is outlined into its own
-/// kernel, the final Simplify sees `r0 = 0` at top level, substitutes it into the
-/// statements, and deletes the binding — leaving `base + r0 * 4` naming a Var nothing
-/// defines, which PTO codegen cannot materialize. A folded constant address has no such
-/// dependency. An offset that still names a runtime value (a loop variable, a scalar
-/// parameter) stays symbolic.
+/// Resolve compile-time address dependencies even for explicitly initialized or
+/// imported IR that did not pass through InitMemRef's constant normalization.
+/// The lookup table preserves MemRef identity while turning a named constant
+/// offset into a concrete address. An offset that still names a runtime value
+/// (a loop variable or scalar parameter) stays symbolic.
 RelativeMemRefOffsets FoldRelativeMemRefOffsets(const std::vector<MemRefWithSpace>& memrefs,
                                                 const StmtPtr& body) {
   ConstantScalarCollector collector;

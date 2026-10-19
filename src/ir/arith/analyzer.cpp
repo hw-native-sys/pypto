@@ -45,6 +45,15 @@ Analyzer::~Analyzer() = default;
 void Analyzer::Bind(const VarPtr& var, const ExprPtr& expr, bool allow_override) {
   ExprPtr simplified = rewrite_simplify(expr);
 
+  // Boolean bindings support substitution and logical folding, but have no
+  // numeric ordering contract: transitive_cmp.Bind builds a numeric Eq, which
+  // rejects BOOL operands. Check the variable's dtype rather than the literal
+  // kind so BOOL-typed ConstInt values and symbolic boolean aliases are covered.
+  if (GetScalarDtype(var) == DataType::BOOL) {
+    rewrite_simplify.Update(var, simplified);
+    return;
+  }
+
   // Propagate to all sub-analyzers.
   const_int_bound.Update(var, const_int_bound(simplified));
   modular_set.Update(var, modular_set(simplified));

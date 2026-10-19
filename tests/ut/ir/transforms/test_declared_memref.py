@@ -401,6 +401,68 @@ class TestSlots:
     a runtime value so a rotation needs no unrolling.
     """
 
+    @pytest.mark.parametrize("run_simplify", [False, True])
+    def test_nested_constant_slot_index_has_a_static_address(self, run_simplify):
+        """A named constant slot has the same address and metadata as a literal slot."""
+        buffers = pl.MemRef(slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                for _iteration in pl.range(2):
+                    base: pl.Scalar[pl.INDEX] = 2
+                    slot: pl.Scalar[pl.INDEX] = base - 1
+                    selected: pl.Tile[[16, 16], pl.FP32, buffers[slot], pl.Mem.Vec] = pl.load(
+                        a, [0, 0], [16, 16], target_memory=pl.Mem.Vec
+                    )
+                    _result = pl.store(selected, [0, 0], out)
+                return out
+
+        prepared = passes.convert_to_ssa()(Before)
+        if run_simplify:
+            prepared = passes.simplify()(prepared)
+        after = passes.init_mem_ref()(prepared)
+        selected = [memref for name, memref in _tile_memrefs(after).items() if name.startswith("selected")]
+        assert len(selected) == 1
+        assert _const_offset(selected[0]) == 16 * 16 * 4
+        assert isinstance(selected[0].slot_index_, ir.ConstInt)
+        assert selected[0].slot_index_.value == 1
+        assert selected[0].slot_count_ == 2
+
+    def test_simplify_preserves_a_runtime_slot_index(self):
+        """A rotating slot keeps its runtime index in both metadata and address."""
+        buffers = pl.MemRef(slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                for iteration in pl.range(2):
+                    slot: pl.Scalar[pl.INDEX] = iteration % 2
+                    selected: pl.Tile[[16, 16], pl.FP32, buffers[slot], pl.Mem.Vec] = pl.load(
+                        a, [0, 0], [16, 16], target_memory=pl.Mem.Vec
+                    )
+                    _result = pl.store(selected, [0, 0], out)
+                return out
+
+        simplified = passes.simplify()(passes.convert_to_ssa()(Before))
+        after = passes.init_mem_ref()(simplified)
+        selected = [memref for name, memref in _tile_memrefs(after).items() if name.startswith("selected")]
+        assert len(selected) == 1
+        assert selected[0].slot_index_ is not None
+        assert not isinstance(selected[0].slot_index_, ir.ConstInt)
+        assert not isinstance(selected[0].byte_offset_, ir.ConstInt)
+        assert selected[0].slot_count_ == 2
+
     def test_slots_are_one_allocation_at_distinct_offsets(self):
         """N slots become one allocation of N x slot, addressed by offset."""
         l0c = pl.MemRef(slots=2)

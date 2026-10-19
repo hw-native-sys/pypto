@@ -7,13 +7,15 @@
 `Simplify` 是一个函数级 Pass，依托 `arith::Analyzer` 就地重写 IR，主要做三类工作：
 
 1. **算术折叠**：在每个表达式叶子上执行（例如 `x + 0 → x`、`x * 1 → x`、`min(a, a) → a`，以及分析器能判定的比较）。
-2. **类型重建**：重新遍历 `TensorType`、`TileType`、`TupleType` 中嵌入的 shape 表达式，使内存中的 IR 与重新解析得到的结果一致。
-3. **标量绑定以辅助折叠 + DCE**：仅被赋值一次的标量 `Var` 会注册到分析器。在函数体顶层赋的常量会被完整绑定，其字面量向所有下游使用处传播；符号值，或循环/分支内部的常量，只贡献一个 `ConstIntBound`——足以折叠 `if expr == 0` 这类恒死的分支守卫，而不会把标量内联到使用点。残留的死绑定随后由保守的标量 DCE 删除。
+2. **类型重建**：重新遍历 `TensorType`、`TileType`、`TupleType` 中嵌入的表达式，包括 pinned 声明式 MemRef 的槽位下标，使内存中的 IR 与重新解析得到的结果一致。
+3. **标量绑定以辅助折叠 + DCE**：仅被赋值一次的标量 `Var` 会注册到分析器。可证明的常量会被完整绑定，其字面量向下游使用处传播，包括循环、分支和 SPMD 作用域内部。符号值只贡献一个 `ConstIntBound`——足以折叠 `if expr == 0` 这类恒死的分支守卫，而不会把标量内联到使用点。绑定限定在定义所在的区域内，残留的死绑定随后由保守的标量 DCE 删除。
 
 在 `pass_manager.py` 的 `Default` 策略中本 Pass 运行**两次**：
 
 - **SSA 后**（在 `ConvertToSSA` 之后、`FlattenCallExpr` 之前）：将闭包捕获的常量（如 `CHUNK_K: Scalar[INDEX] = 512`）传播进 shape 表达式与类型，使后续的 tile lowering Pass 看到的是字面量而不是变量。
-- **tile pipeline 末尾**（在 `DeriveCallDirections` 之后）：清理由内存空间推断、layout 解析等晚期 lowering 暴露出来的可折叠表达式。
+- **tile pipeline 末尾**（在 `MaterializeDistTensorCtx` 之后）：清理由内存空间推断、layout 解析等晚期 lowering 暴露出来的可折叠表达式。
+
+[InitMemRef](34-init_memref.md) 还会在入口处以**仅常量模式（constant-only mode）**调用共享的内部辅助函数，随后再规范化语句结构、构建地址。该模式将可证明的常量传播到表达式与类型元数据中，并删除死标量赋值，同时保留控制流、phi 和循环携带结构；它跳过恒等 `tensor.view` 折叠、非常量代数重写和死 yield 槽位裁剪。这样，即使直接调用 `InitMemRef`，也能折叠此前 lowering Pass 引入的常量，无需额外的流水线 Pass 或新的前置条件。独立的 `Simplify` Pass 仍执行下文介绍的完整行为。
 
 **需要 (Requires)**：无。
 
@@ -23,11 +25,14 @@
 
 `PassProperties` 为空（`include/pypto/ir/transforms/pass_properties.h` 中的 `kSimplifyProperties`）是有意为之：Simplify 足够保守，会保留调用方此前可能已经建立的所有属性（`SSAForm`、`NormalizedStmtStructure`、`IncoreTileOps` 等）——它只重写表达式、删除标量绑定，从不改变语句结构。
 
-整数及 INDEX 表达式重写保留声明的结果类型。若化简选中的操作数具有不同的整数类型，会保留转换（插入 cast，或折叠为对应类型的常量）。例如，结果声明为 INT32 的 `(index + 1) - 1` 会化简为 `cast(index, INT32)`。
+整数及 INDEX 表达式重写保留声明的结果类型。若化简选中的操作数具有不同的整数类型，会保留转换（插入 cast，或折叠为对应类型的常量）。例如，结果声明为 INT32 的 `(index + 1) - 1` 会化简为 `cast(index, INT32)`。打印器通过 `pl.const(value, dtype)` 保留非 INDEX 整数常量的类型，包括传播到嵌套 Call 参数中的常量。
+
+布尔绑定通过值代换生效，不参与数值排序分析；浮点绑定同样可以代入已知值，但浮点代数重写规则仍保持禁用，保留类型与带符号零。
 
 ## 使用时机
 
 - 在 SSA 转换之后、tile pipeline 检查类型/shape 之前，把标量常量传播进去。
+- 在 MemRef 初始化前，通过共享辅助函数的仅常量模式化简常量坐标与声明式槽位下标，使其生成具体的地址元数据，同时保持影响存储的控制流结构。
 - 在 tile pipeline 末尾作为清理 Pass，确保下游产物（打印的 IR、codegen）不会残留 `K + 0` 或 `idx * 1` 这类痕迹。
 - 任何会产生新表达式的 Pass 之后；Simplify 代价低且幂等，可以放心地防御性地插入。唯一的有界例外是超过 16 层的*嵌套*单次循环链 —— 此时再跑一次还会继续折叠，见[代换深度上限](#代换深度上限fold-b)。流水线中没有输入会达到该深度。
 
@@ -61,12 +66,12 @@ program_simplified = simplify_pass(program)
    - `VarPtr` / `IterArgPtr`：先按变量重映射表替换，再交给分析器化简。循环携带变量的使用点视为叶子节点：仅在循环头重建其类型与初值。在使用点重新处理携带变量的 MemRef 偏移可能产生新的未定义变量，尤其是在作用域独立的不同分支中。
    - `BinaryExpr` / `UnaryExpr`：先访问子节点，再折叠重建后的节点。
    - `CallPtr`：刷新结果 `type_`，让 shape 参数被折叠后的 Call 与重新解析得到的 Call 在结构上相等。
-   - `AssignStmt`：对不在 `multi_assigned_` 中的标量 LHS `Var`，把化简后的 RHS 注册到分析器。函数体顶层的 `ConstInt`/`ConstFloat`/`ConstBool` RHS 会被完整绑定（字面量代入下游使用点）；符号 RHS，或循环/分支内部的常量，只贡献一个 `ConstIntBound`，使恒死的分支守卫得以折叠而不会内联该标量。每个绑定都会被记录，以便所在区域的访问器在退出时解绑。
+   - `AssignStmt`：对不在 `multi_assigned_` 中的标量 LHS `Var`，把化简后的 RHS 注册到分析器。无论位于函数体顶层还是嵌套区域内，`ConstInt`/`ConstFloat`/`ConstBool` RHS 都会被完整绑定（字面量代入下游使用点）。符号 RHS 只贡献一个 `ConstIntBound`，使恒死的分支守卫得以折叠而不会内联该标量。每个绑定都会被记录，以便所在区域的访问器在退出时解绑。这不会把循环携带值绑定为其初值，也不会假定不同分支的结果相同。
    - `ForStmt`：在访问循环体前重建 `iter_args_`，使体内的引用对应到新的标识；如果 `start_` 与 `stop_` 都折叠为 `ConstInt` 且 `stop > start`，则在访问循环体期间把循环变量绑定到这一区间，退出时解绑；体内绑定的标量在访问结束后解绑；在访问体之后重建 `return_vars_`，让体内发现的折叠也反映到返回类型中。纯单次/零次循环还会被原地折叠 —— 见下文「控制流折叠」。
    - `IfStmt`：进入 `Analyzer::GetConstraintContext(cond)` 处理 then 分支，进入 `Not(cond)` 处理 else 分支；每个分支内绑定的标量会在该分支结束后解绑，以免泄漏到另一分支或越过 `IfStmt`。可由分析器证明的条件也会被折叠 —— 见下文「控制流折叠」。
    - `WhileStmt`：除没有循环边界外与 `ForStmt` 相同 —— 在访问条件与循环体前重建 `iter_args_`，在访问循环体前后快照并恢复 `var_remap_`，随后重建 `return_vars_`，并采用同样的区域化标量解绑方式。以循环头为准写入重映射表，确保类型或初值变化后，条件与循环体中的每处引用仍指向声明的节点。
    - `SpmdScopeStmt`：以同样的区域化标量解绑方式访问其语句体，并额外折叠 `core_num_`（如 `MAX // TILE` 这样的闭包算术，可能需要 SSA 之后再化简一次）。
-3. **类型重建**：`SimplifyType` 递归地处理 `TensorType`、`TileType`、`TupleType`，对每一个嵌入的表达式（shape、stride、valid_shape、start_offset、view 字段）调用 `SimplifyExpr`。当无变化时保留原对象，使往返一致性检查仍然便宜。
+3. **类型重建**：`SimplifyType` 递归地处理 `TensorType`、`TileType`、`TupleType`，对嵌入的表达式（shape、stride、valid_shape、start_offset、view 字段）调用 `SimplifyExpr`。`RemapPinnedMemRefExprs` 还会在 pinned 声明式分配的槽位下标转换为字节偏移之前化简该下标。非 pinned MemRef 保留指针身份，因为后续内存规划 Pass 依靠该身份跟踪共享存储；仅在其地址元数据中使用的标量定义也会在 DCE 中保持存活。类型无变化时保留原对象，使往返一致性检查仍然便宜。
 4. **标量 DCE + 死 yield 槽位裁剪**：mutator 完成后，`dce::EliminateDeadScalarAssignments` 在展平的函数体上运行，删除所有「全部使用都被折掉了」的标量 `AssignStmt`。该 DCE 是保守的：永远不会删除 Call 支撑的赋值，因为 IR 目前还没有纯度标注，`Call` 可能存在可观察的副作用。两次标量 DCE 之间由 `dce::EliminateDeadYieldSlots` 裁掉没有任何读者的 yield 槽位——`IfStmt` 中无人使用的 phi `return_vars_[i]`，以及 `ForStmt` / `WhileStmt` 中 `iter_args_[i]`（循环体内读）与 `return_vars_[i]`（循环后读）都未被使用的循环携带槽位——同时删除对应的 `YieldStmt` 槽位。跨两个 scope 复用同一个 Python 局部变量恰好会产生这种死携带：SSA 用前一个 scope 的值给第二个循环做初值，循环体每一轮都覆盖它，两端都没有人读。若保留下来，它会让前一个 scope 的值变成 live-out；对设备 scope 而言，这会迫使外提出的 kernel 返回一个 `Scalar`——参见 [08-outline_incore_scopes.md](09-outline_incore_scopes.md)。
 5. **循环状态修复**：如果 DCE 删除了任何语句，由 `loop_repair::MakeBody` 重新组装函数体，确保循环携带元信息（yield/return 映射）保持一致。
 
@@ -93,7 +98,7 @@ program_simplified = simplify_pass(program)
 
 对逃逸的 `return_vars[i]`，`LiftBodyToReturnVars` 不再记录 remap，而是在折叠点产出 `AssignStmt(return_vars[i], yielded_value[i])`。该赋值必须留在被提升的区域*内部*：yielded 值可能引用循环体内的局部 `Var`，无法外提到循环之后；而在 leak 语义下「最后一次迭代最后写入」恰好就是循环后读取所期望的值。
 
-SSA 形式下不存在逃逸：区域内定义的值不会在区域外被引用，且每个使用点都被其定义支配。由于流水线只在 `ConvertToSSA` 之后运行 Simplify（第 5 和第 46 位），该物化路径在流水线中不会触发 —— 它服务于直接对 pre-SSA IR 运行 Simplify 的调用方，而在那里上述别名赋值的顾虑并不成立，因为 SSA 转换仍会在其后运行。
+SSA 形式下不存在逃逸：区域内定义的值不会在区域外被引用，且每个使用点都被其定义支配。由于流水线只在 `ConvertToSSA` 之后运行 Simplify，该物化路径在流水线中不会触发 —— 它服务于直接对 pre-SSA IR 运行 Simplify 的调用方，而在那里上述别名赋值的顾虑并不成立，因为 SSA 转换仍会在其后运行。
 
 两种折叠在同一次 Pass 中可以叠加：当 Fold B 把 `loop_var → 0` 代入循环体后，类似 `if loop_var == 0` 的谓词会变成 `if 0 == 0` → `ConstBool(true)`，紧接着就被 Fold A 折掉，无需再跑一次 Simplify。
 
@@ -160,6 +165,28 @@ return acc
 ```
 
 `CHUNK_K__ssa_v0` 在其 `AssignStmt` 处被绑定到 `512`。所有下游引用——包括 `acc` 的 `TileType` 中嵌入的 shape——都在类型重建阶段折叠为字面量。已经死掉的绑定随后被 DCE 阶段删除。这正是「SSA 后」这一调度点的主要动机：诸如 `FlattenTileNdTo2D`、`InferTileMemorySpace` 等 tile lowering Pass 看到的将是具体的 shape 字面量，而不是不透明的标量 `Var`。
+
+### 嵌套区域内的常量
+
+**变换前**：
+
+```python
+for i in pl.range(0, 8):
+    base: pl.Scalar[pl.INDEX] = 32
+    fixed_row: pl.Scalar[pl.INDEX] = base * 2
+    view = pl.tile.slice(pool, [16, 16], [fixed_row, 0])
+    consume(view, i)
+```
+
+**变换后**：
+
+```python
+for i in pl.range(0, 8):
+    view = pl.tile.slice(pool, [16, 16], [64, 0])
+    consume(view, i)
+```
+
+分析器在循环体内证明 `base * 2` 为 `64`。代换通过所有算子的普通 Call 参数生效，并非 slice 的特殊处理。对于每行 16 列的行主序 FP32 pool，`InitMemRef` 此时能计算出 `ConstInt(4096)` 字节偏移，与作者直接写 `[64, 0]` 完全一致。声明式分配的常量槽位下标也通过类型元数据按同样方式化简。依赖运行时的坐标和循环携带值仍保持符号形式，除非能单独证明其为常量。
 
 ### 常量条件分支（Fold A）
 
@@ -327,5 +354,6 @@ def simplify() -> Pass:
 - 通过 `ForStmt` 分析器绑定实现的循环边界感知折叠。
 - 通过 `Analyzer::GetConstraintContext` 实现的 if 分支约束传播。
 - SSA 形式下的标量常量传播。
+- 循环、分支和 SPMD 作用域内的常量传播，包括带类型的 Call 参数和 pinned MemRef 槽位下标。
 - 通过循环仿射标量的 `ConstIntBound` 折叠死分支守卫。
 - 保守的标量 DCE —— 仅当所有使用都可折叠时才删除。

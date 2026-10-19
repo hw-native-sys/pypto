@@ -241,8 +241,7 @@ class TestRangeAwareSimplification:
             @pl.function
             def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
-                    y: pl.Scalar[pl.INT64] = 0
-                    pl.tensor.write(out, [i], y)
+                    pl.tensor.write(out, [i], pl.const(0, pl.INT64))
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
@@ -301,8 +300,7 @@ class TestRangeAwareSimplification:
             def main(self, out: pl.Tensor[[8, 4], pl.INT64]):
                 for i in pl.range(8):
                     for j in pl.range(4):
-                        y: pl.Scalar[pl.INT64] = 0
-                        pl.tensor.write(out, [i, j], y)
+                        pl.tensor.write(out, [i, j], pl.const(0, pl.INT64))
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
@@ -332,8 +330,7 @@ class TestIfBranchConstraint:
             def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
                     if i < 4:
-                        y: pl.Scalar[pl.INT64] = 0
-                        pl.tensor.write(out, [i], y)
+                        pl.tensor.write(out, [i], pl.const(0, pl.INT64))
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
@@ -360,11 +357,9 @@ class TestIfBranchConstraint:
             def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
                     if i < 4:
-                        y: pl.Scalar[pl.INT64] = 0
-                        pl.tensor.write(out, [i], y)
+                        pl.tensor.write(out, [i], pl.const(0, pl.INT64))
                     else:
-                        y2: pl.Scalar[pl.INT64] = 0
-                        pl.tensor.write(out, [i], y2)
+                        pl.tensor.write(out, [i], pl.const(0, pl.INT64))
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
@@ -390,11 +385,9 @@ class TestIfBranchConstraint:
             def main(self, out: pl.Tensor[[16], pl.INT64]):
                 for i in pl.range(16):
                     if i < 8:
-                        y: pl.Scalar[pl.INT64] = 0
-                        pl.tensor.write(out, [i], y)
+                        pl.tensor.write(out, [i], pl.const(0, pl.INT64))
                     else:
-                        z: pl.Scalar[pl.INT64] = 0
-                        pl.tensor.write(out, [i], z)
+                        pl.tensor.write(out, [i], pl.const(0, pl.INT64))
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
@@ -818,8 +811,7 @@ class TestControlFlow:
             def main(self, out: pl.Tensor[[8], pl.INT64]):
                 for i in pl.range(8):
                     if i < 4:
-                        y: pl.Scalar[pl.INT64] = 0
-                        pl.tensor.write(out, [i], y)
+                        pl.tensor.write(out, [i], pl.const(0, pl.INT64))
                         break
                     else:
                         y2: pl.Scalar[pl.INT64] = i
@@ -849,8 +841,7 @@ class TestControlFlow:
                 for i in pl.range(8):
                     with pl.at(level=pl.Level.CORE_GROUP):
                         if i < 4:
-                            y: pl.Scalar[pl.INT64] = 0
-                            pl.tensor.write(out, [i], y)
+                            pl.tensor.write(out, [i], pl.const(0, pl.INT64))
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
@@ -1116,6 +1107,292 @@ class TestScalarConstantPropagation:
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
+
+
+class TestNestedScalarConstantPropagation:
+    """Nested constants fold at every use without freezing runtime control flow."""
+
+    def test_nested_slice_and_assemble_origins(self):
+        """A nested alias chain folds for both reading and writing a window."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                cond: pl.Scalar[pl.BOOL],
+                source: pl.Tensor[[8, 8], pl.FP32],
+                out: pl.Tensor[[8, 8], pl.FP32],
+            ):
+                for _iteration in pl.range(2):
+                    if cond:
+                        base: pl.Scalar[pl.INDEX] = 1
+                        row: pl.Scalar[pl.INDEX] = base * 2
+                        alias: pl.Scalar[pl.INDEX] = row
+                        window = pl.tensor.slice(source, [4, 8], [alias, 0])
+                        _result = pl.tensor.assemble(out, window, [row, 0])
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                cond: pl.Scalar[pl.BOOL],
+                source: pl.Tensor[[8, 8], pl.FP32],
+                out: pl.Tensor[[8, 8], pl.FP32],
+            ):
+                for _iteration in pl.range(2):
+                    if cond:
+                        window = pl.tensor.slice(source, [4, 8], [2, 0])
+                        _result = pl.tensor.assemble(out, window, [2, 0])
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_nested_load_and_store_origins(self):
+        """Constant propagation also reaches transfer ops with different signatures."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, source: pl.Tensor[[8, 4], pl.FP32], out: pl.Tensor[[8, 4], pl.FP32]):
+                for _iteration in pl.range(2):
+                    row: pl.Scalar[pl.INDEX] = 4
+                    loaded = pl.tile.load(source, [row, 0], [4, 4], target_memory=pl.Mem.Vec)
+                    _result = pl.tile.store(loaded, [row, 0], out)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, source: pl.Tensor[[8, 4], pl.FP32], out: pl.Tensor[[8, 4], pl.FP32]):
+                for _iteration in pl.range(2):
+                    loaded = pl.tile.load(source, [4, 0], [4, 4], target_memory=pl.Mem.Vec)
+                    _result = pl.tile.store(loaded, [4, 0], out)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_nested_shape_updates_call_and_assignment_types(self):
+        """Folding a shape must update the Call and its binding together."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self):
+                for _iteration in pl.range(2):
+                    rows: pl.Scalar[pl.INDEX] = 4
+                    created: pl.Tensor[[rows, 8], pl.FP32] = pl.tensor.create([rows, 8], dtype=pl.FP32)
+                    _reshaped: pl.Tensor[[rows * 2, 4], pl.FP32] = pl.tensor.reshape(created, [rows * 2, 4])
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self):
+                for _iteration in pl.range(2):
+                    created: pl.Tensor[[4, 8], pl.FP32] = pl.tensor.create([4, 8], dtype=pl.FP32)
+                    _reshaped: pl.Tensor[[8, 4], pl.FP32] = pl.tensor.reshape(created, [8, 4])
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    @pytest.mark.parametrize("dtype", [pl.INT32, pl.INT64])
+    def test_nested_typed_constants_round_trip(self, dtype):
+        """Substituting a typed literal into a Call must preserve its dtype."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, out: pl.Tensor[[2], dtype]):
+                for i in pl.range(2):
+                    literal: pl.Scalar[dtype] = pl.const(7, dtype)
+                    derived: pl.Scalar[dtype] = literal
+                    pl.tensor.write(out, [i], derived)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, out: pl.Tensor[[2], dtype]):
+                for i in pl.range(2):
+                    pl.tensor.write(out, [i], pl.const(7, dtype))
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+        reparsed = pl.parse_program(ir.python_print(after))
+        ir.assert_structural_equal(reparsed, after)
+
+    @pytest.mark.parametrize("bool_as_int", [False, True])
+    def test_nested_float_and_bool_constants_round_trip(self, bool_as_int):
+        """Float and boolean literals retain their IR kinds and types after substitution."""
+        span = ir.Span.unknown()
+        true_value = ir.ConstInt(1, DataType.BOOL, span) if bool_as_int else ir.ConstBool(True, span)
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, floats: pl.Tensor[[2], pl.FP32], flags: pl.Tensor[[2], pl.BOOL]):
+                for i in pl.range(2):
+                    float_value: pl.Scalar[pl.FP32] = pl.const(3.5, pl.FP32)
+                    flag: pl.Scalar[pl.BOOL] = true_value
+                    pl.tensor.write(floats, [i], float_value)
+                    pl.tensor.write(flags, [i], flag)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, floats: pl.Tensor[[2], pl.FP32], flags: pl.Tensor[[2], pl.BOOL]):
+                for i in pl.range(2):
+                    pl.tensor.write(floats, [i], pl.const(3.5, pl.FP32))
+                    pl.tensor.write(flags, [i], true_value)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+        reparsed = pl.parse_program(ir.python_print(after))
+        ir.assert_structural_equal(reparsed, after)
+
+    def test_for_carry_does_not_fold_to_its_constant_initializer(self):
+        """A carry changes each iteration even when its first value is literal."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, out: pl.Tensor[[2], pl.INDEX]):
+                for i, (carry,) in pl.range(2, init_values=(pl.const(3, pl.INDEX),)):
+                    pl.tensor.write(out, [i], carry)
+                    next_value: pl.Scalar[pl.INDEX] = carry + 1
+                    _result = pl.yield_(next_value)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    def test_if_result_does_not_fold_to_one_branch_constant(self):
+        """Both branch-local constants fold, but the merged value stays dynamic."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, cond: pl.Scalar[pl.BOOL], out: pl.Tensor[[1], pl.INDEX]):
+                if cond:
+                    then_value: pl.Scalar[pl.INDEX] = 2
+                    selected = pl.yield_(then_value)
+                else:
+                    else_value: pl.Scalar[pl.INDEX] = 4
+                    selected = pl.yield_(else_value)
+                pl.tensor.write(out, [0], selected)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, cond: pl.Scalar[pl.BOOL], out: pl.Tensor[[1], pl.INDEX]):
+                if cond:
+                    selected = pl.yield_(pl.const(2, pl.INDEX))
+                else:
+                    selected = pl.yield_(pl.const(4, pl.INDEX))
+                pl.tensor.write(out, [0], selected)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_while_constants_fold_without_freezing_the_carry(self):
+        """A local constant folds while the while-condition still reads its carry."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, out: pl.Tensor[[4], pl.INDEX]):
+                for (carry,) in pl.while_(init_values=(pl.const(0, pl.INDEX),)):
+                    pl.cond(carry < 4)
+                    step: pl.Scalar[pl.INDEX] = 1
+                    pl.tensor.write(out, [carry], step)
+                    next_value: pl.Scalar[pl.INDEX] = carry + step
+                    _result = pl.yield_(next_value)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, out: pl.Tensor[[4], pl.INDEX]):
+                for (carry,) in pl.while_(init_values=(pl.const(0, pl.INDEX),)):
+                    pl.cond(carry < 4)
+                    pl.tensor.write(out, [carry], pl.const(1, pl.INDEX))
+                    next_value: pl.Scalar[pl.INDEX] = carry + 1
+                    _result = pl.yield_(next_value)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_allocated_offset_keeps_its_scalar_definition(self):
+        """A scalar used only by an allocated MemRef's offset must remain defined."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, source: pl.Tensor[[8, 8], pl.FP32]):
+                for _iteration in pl.range(2):
+                    offset: pl.Scalar[pl.INDEX] = 4
+                    view: pl.Tensor[[4, 8], pl.FP32, pl.MemRef("mem", offset * 32, 128)] = pl.tensor.slice(
+                        source, [4, 8], [0, 0]
+                    )
+                    pl.tensor.write(view, [0, 0], pl.const(1.0, pl.FP32))
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+        def view_memref(program: ir.Program) -> ir.MemRef:
+            function = next(iter(program.functions.values()))
+            loop = next(stmt for stmt in ir.flatten_to_stmts(function.body) if isinstance(stmt, ir.ForStmt))
+            view = next(
+                stmt.var
+                for stmt in ir.flatten_to_stmts(loop.body)
+                if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint == "view"
+            )
+            view_type = view.type
+            assert isinstance(view_type, ir.TensorType)
+            assert view_type.memref is not None
+            return view_type.memref
+
+        assert view_memref(after) is view_memref(Before)
+
+    def test_if_result_used_only_in_a_slot_index_survives(self):
+        """The selected slot is a live phi even when its only use is a type field."""
+        buffers = pl.MemRef(slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                cond: pl.Scalar[pl.BOOL],
+                source: pl.Tensor[[4, 4], pl.FP32],
+                out: pl.Tensor[[4, 4], pl.FP32],
+            ):
+                if cond:
+                    slot = pl.yield_(0)
+                else:
+                    slot = pl.yield_(1)
+                loaded: pl.Tile[[4, 4], pl.FP32, buffers[slot], pl.Mem.Vec] = pl.tile.load(
+                    source, [0, 0], [4, 4], target_memory=pl.Mem.Vec
+                )
+                _result = pl.tile.store(loaded, [0, 0], out)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    def test_for_result_used_only_in_a_slot_index_survives(self):
+        """A return slot keeps the loop's yielded value live through type metadata."""
+        buffers = pl.MemRef(slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, source: pl.Tensor[[4, 4], pl.FP32], out: pl.Tensor[[4, 4], pl.FP32]):
+                for _iteration, (_slot,) in pl.range(2, init_values=(pl.const(0, pl.INDEX),)):
+                    final_slot = pl.yield_(1)
+                loaded: pl.Tile[[4, 4], pl.FP32, buffers[final_slot], pl.Mem.Vec] = pl.tile.load(
+                    source, [0, 0], [4, 4], target_memory=pl.Mem.Vec
+                )
+                _result = pl.tile.store(loaded, [0, 0], out)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
 
 
 # ============================================================================
@@ -2162,11 +2439,9 @@ class TestDeadIfReturnVarsDCE:
             @pl.function(strict_ssa=True)
             def main(self, cond: pl.Scalar[pl.BOOL], out: pl.Tensor[[1], pl.INDEX]):
                 if cond:
-                    t1_0: pl.Scalar[pl.INDEX] = 1
-                    pl.tensor.write(out, [0], t1_0)
+                    pl.tensor.write(out, [0], pl.const(1, pl.INDEX))
                 else:
-                    t1_1: pl.Scalar[pl.INDEX] = 2
-                    pl.tensor.write(out, [0], t1_1)
+                    pl.tensor.write(out, [0], pl.const(2, pl.INDEX))
 
         ssa_form = passes.convert_to_ssa()(Before)
         after = passes.simplify()(ssa_form)

@@ -850,9 +850,7 @@ def test_allocate_memory_addr_keeps_symbolic_view_offset(planner):
     The view's offset ``row * 16 * 4`` cannot fold, so the address stays an
     expression. It must not collapse onto the buffer base: ``c`` reshapes the slice,
     and codegen addresses a reshape only through its own ``pto.alloc_tile addr``, so a
-    dropped offset makes ``c`` read row 0 whatever ``row`` is. The same symbolic
-    offset arises for a constant row under an ``if``, where Simplify does not
-    substitute it.
+    dropped offset makes ``c`` read row 0 whatever ``row`` is.
 
     Checked on the MemRefs directly: ``assert_structural_equal`` binds a MemRef as a
     Var and does not compare its offset.
@@ -899,12 +897,9 @@ def test_allocate_memory_addr_keeps_symbolic_view_offset(planner):
 def test_allocate_memory_addr_folds_constant_scalar_view_offset(planner):
     """A slice view whose row is a scalar bound to a constant gets a constant address.
 
-    ``r0 = 1`` stays a Var in the view's offset ``r0 * 16 * 4`` whenever Simplify
-    did not substitute it (a binding inside an ``if``, loop, or ``pl.spmd`` body).
-    The address must fold to ``base + 64`` here: a symbolic address would name ``r0``,
-    and once the body is outlined the final Simplify substitutes the constant into the
-    statements and deletes the binding without remapping MemRef offsets, leaving an
-    address that names an undefined Var.
+    InitMemRef normalizes ``r0 = 1`` before creating the slice's MemRef, so both
+    the slice and its reshape already carry relative offset 64. Address assignment
+    must retain that displacement when adding the allocation base on either planner.
     """
 
     @pl.program
@@ -925,7 +920,11 @@ def test_allocate_memory_addr_folds_constant_scalar_view_offset(planner):
             return r
 
     initialized = passes.init_mem_ref()(Before)
-    assert not isinstance(_tile_memrefs_by_name(initialized)["c"].byte_offset_, ir.ConstInt)
+    relative = _tile_memrefs_by_name(initialized)
+    for view in ("s", "c"):
+        offset = relative[view].byte_offset_
+        assert isinstance(offset, ir.ConstInt)
+        assert offset.value == 16 * 4
     with passes.PassContext([], memory_planner=planner):
         placed = _tile_memrefs_by_name(
             passes.allocate_memory_addr()(passes.materialize_semantic_aliases()(initialized))

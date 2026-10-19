@@ -93,7 +93,8 @@ void BindArith(nb::module_& m) {
   nb::class_<ir::arith::RewriteSimplifier>(
       arith, "RewriteSimplifier",
       "Simplifies integer/index expressions by applying algebraic rewrite rules.\n\n"
-      "Float-typed expressions are returned unchanged.")
+      "Float arithmetic is returned unchanged; float variables and IterArgs\n"
+      "still follow explicit value bindings.")
       .def(nb::init<>(), "Create a standalone RewriteSimplifier.")
       .def("__call__", &ir::arith::RewriteSimplifier::operator(), nb::arg("expr"),
            "Simplify an expression by applying rewrite rules.")
@@ -258,7 +259,8 @@ void BindArith(nb::module_& m) {
       .def_ro("int_set", &ir::arith::Analyzer::int_set, "IntSetAnalyzer sub-analyzer.")
       .def("bind", nb::overload_cast<const ir::VarPtr&, const ir::ExprPtr&, bool>(&ir::arith::Analyzer::Bind),
            nb::arg("var"), nb::arg("expr"), nb::arg("allow_override") = false,
-           "Bind a variable to an expression, propagating information to all sub-analyzers.")
+           "Bind a variable to an expression, updating substitution and numeric facts.\n"
+           "Boolean bindings update substitution only, without numeric ordering facts.")
       .def("bind", nb::overload_cast<const ir::VarPtr&, int64_t, int64_t, bool>(&ir::arith::Analyzer::Bind),
            nb::arg("var"), nb::arg("min_val"), nb::arg("max_val_exclusive"),
            nb::arg("allow_override") = false,
