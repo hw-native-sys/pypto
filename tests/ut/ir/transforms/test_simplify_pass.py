@@ -1450,6 +1450,61 @@ class Expected:
 
         assert view_memref(after) is view_memref(Before)
 
+    def test_allocated_memref_tracks_a_rebuilt_loop_carry(self):
+        """Imported allocated storage follows a new carry without freezing its address."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, source: pl.Tensor[[2, 8], pl.FP32]):
+                initial: pl.Scalar[pl.INDEX] = 0
+                seed: pl.Scalar[pl.INDEX] = initial
+                for _iteration, (carry,) in pl.range(2, init_values=(seed,)):
+                    view: pl.Tensor[[1, 8], pl.FP32, pl.MemRef("mem", carry * 32, 32)] = pl.tensor.slice(
+                        source, [1, 8], [carry, 0]
+                    )
+                    alias = view
+                    pl.tensor.write(view, [0, 0], pl.const(1.0, pl.FP32))
+                    pl.tensor.write(alias, [0, 1], pl.const(2.0, pl.FP32))
+                    next_value: pl.Scalar[pl.INDEX] = carry + 1
+                    _result = pl.yield_(next_value)
+
+        def loop_of(program: ir.Program) -> ir.ForStmt:
+            function = next(iter(program.functions.values()))
+            return next(stmt for stmt in ir.flatten_to_stmts(function.body) if isinstance(stmt, ir.ForStmt))
+
+        old_carry = loop_of(Before).iter_args[0]
+        after = passes.simplify()(Before)
+        loop = loop_of(after)
+        carry = loop.iter_args[0]
+        assert not carry.same_as(old_carry), "the initializer must actually rebuild the carry"
+        assert isinstance(carry.initValue, ir.ConstInt) and carry.initValue.value == 0
+
+        statements = ir.flatten_to_stmts(loop.body)
+        views = [
+            stmt.var.type
+            for stmt in statements
+            if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint in {"view", "alias"}
+        ]
+        assert len(views) == 2
+        view_type, alias_type = views
+        assert isinstance(view_type, ir.TensorType) and isinstance(alias_type, ir.TensorType)
+        memref = view_type.memref
+        assert memref is not None and not memref.is_pinned_
+        assert alias_type.memref is memref
+        assert isinstance(memref.byte_offset_, ir.Mul), "the address must remain iteration-dependent"
+        assert memref.byte_offset_.left.same_as(carry)
+        assert memref.slot_count_ == 1 and memref.size_ == 32
+
+        writes = [stmt.expr for stmt in statements if isinstance(stmt, ir.EvalStmt)]
+        assert len(writes) == 2
+        for write in writes:
+            assert isinstance(write, ir.Call)
+            assert write.op.name == ir.get_op("tensor.write").name
+            result_type, input_type = write.type, write.args[0].type
+            assert isinstance(result_type, ir.TensorType) and isinstance(input_type, ir.TensorType)
+            assert result_type.memref is memref and input_type.memref is memref
+
     def test_if_result_used_only_in_a_slot_index_survives(self):
         """The selected slot is a live phi even when its only use is a type field."""
         buffers = pl.MemRef(slots=2)

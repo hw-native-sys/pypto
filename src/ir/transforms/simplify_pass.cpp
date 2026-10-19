@@ -31,6 +31,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
@@ -287,6 +288,26 @@ StrippedYield StripTrailingYield(const StmtPtr& body, size_t return_var_count) {
   return {/*body=*/nullptr, yield_stmt->value_};
 }
 
+/// Rebind storage expressions without folding values or revisiting a mapped
+/// variable's type/initValue. A rebuilt IterArg is still a runtime value.
+class StorageVarRemapper : public IRMutator {
+ public:
+  explicit StorageVarRemapper(const std::unordered_map<const Expr*, ExprPtr>& remap) : remap_(remap) {}
+
+ protected:
+  ExprPtr VisitExpr_(const VarPtr& op) override {
+    auto it = remap_.find(op.get());
+    return it != remap_.end() ? it->second : op;
+  }
+
+  ExprPtr VisitExpr_(const IterArgPtr& op) override {
+    return VisitExpr_(std::static_pointer_cast<const Var>(op));
+  }
+
+ private:
+  const std::unordered_map<const Expr*, ExprPtr>& remap_;
+};
+
 class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
  public:
   SimplifyMutator(arith::Analyzer* analyzer, std::unordered_set<const Var*> multi_assigned,
@@ -313,12 +334,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     return VisitExpr_(std::static_pointer_cast<const Var>(op));
   }
 
-  ExprPtr VisitExpr_(const MemRefPtr& op) override {
-    // Keep resolved storage identities consistent between variables and Call
-    // result types. Pinned slot indices are simplified by the type rebuild;
-    // allocated offsets retain their scalar dependencies for DCE to preserve.
-    return op;
-  }
+  ExprPtr VisitExpr_(const MemRefPtr& op) override { return RebindAllocatedMemRef(op); }
 
   /// Refresh the Call's result type_ so the in-memory IR matches what a
   /// fresh parse would produce (needed for roundtrip structural equality).
@@ -800,6 +816,50 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     return !constants_only_ || IsConstScalar(folded) ? folded : expr;
   }
 
+  MemRefPtr RebindAllocatedMemRef(const MemRefPtr& memref) {
+    if (memref->is_pinned_ || var_remap_.empty()) return memref;
+    StorageVarRemapper remapper(var_remap_);
+    auto new_base = As<Var>(remapper.VisitExpr(memref->base_));
+    INTERNAL_CHECK_SPAN(new_base, memref->span_) << "Simplify: allocated MemRef base must remain a Var";
+    auto new_offset = memref->byte_offset_ ? remapper.VisitExpr(memref->byte_offset_) : nullptr;
+    auto new_index = memref->slot_index_;
+    if (new_index.has_value() && *new_index) new_index = remapper.VisitExpr(*new_index);
+    if (new_base == memref->base_ && new_offset == memref->byte_offset_ && new_index == memref->slot_index_) {
+      return memref;
+    }
+
+    // Recompute under the current var_remap_: loop headers add mappings and
+    // branch/loop exits restore them. Reuse a cached result only when its actual
+    // address expressions still match, with strict free-variable identities.
+    // This also lets Var and Call result types share one rebuilt MemRef even
+    // though rebinding an arithmetic address creates fresh expression nodes.
+    auto same_expr = [](const ExprPtr& lhs, const ExprPtr& rhs) {
+      return lhs == rhs || (lhs && rhs && structural_equal(lhs, rhs));
+    };
+    auto cached = rebound_memrefs_.find(memref);
+    if (cached != rebound_memrefs_.end()) {
+      const auto& previous = cached->second;
+      const bool same_index = new_index.has_value() == previous->slot_index_.has_value() &&
+                              (!new_index.has_value() || same_expr(*new_index, *previous->slot_index_));
+      if (new_base == previous->base_ && same_expr(new_offset, previous->byte_offset_) && same_index) {
+        return previous;
+      }
+    }
+    auto result = std::make_shared<MemRef>(memref->name_hint_, std::move(new_base), std::move(new_offset),
+                                           memref->size_, memref->span_, memref->is_pinned_,
+                                           memref->slot_count_, std::move(new_index));
+    rebound_memrefs_[memref] = result;
+    return result;
+  }
+
+  std::optional<MemRefPtr> SimplifyTypeMemRef(const std::optional<MemRefPtr>& memref, bool& changed) {
+    if (!memref.has_value()) return memref;
+    std::optional<MemRefPtr> rebound = RebindAllocatedMemRef(*memref);
+    changed = changed || rebound != memref;
+    return RemapPinnedMemRefExprs(
+        rebound, [this](const ExprPtr& expr) { return SimplifyExpr(expr); }, changed);
+  }
+
   std::vector<ExprPtr> SimplifyExprVec(const std::vector<ExprPtr>& vec, bool* changed) {
     return RebuildVec(vec, [this](const ExprPtr& e) { return SimplifyExpr(e); }, changed);
   }
@@ -820,8 +880,9 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
 
   /// Rebuild a TensorType or TileType with its shape, stride, valid_shape,
   /// start_offset and declared slot index passed through `SimplifyExpr`.
-  /// Resolved MemRefs retain their identity; their symbolic address uses must
-  /// remain live even when all ordinary expression uses have folded away.
+  /// Resolved MemRefs retain their identity unless a binder is rebuilt; shared
+  /// address rebinding then keeps their types coherent without folding runtime
+  /// offsets. Their remaining symbolic address uses must stay live for DCE.
   ///
   /// Nothing is assumed about the variables inside them. Being a shape or a
   /// valid_shape makes the *field* an extent; it does not make every free
@@ -832,8 +893,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     if (!type) return type;
     if (auto t = AsTensorTypeLike(type)) {
       bool changed = false;
-      auto new_memref = RemapPinnedMemRefExprs(
-          t->memref_, [this](const ExprPtr& expr) { return SimplifyExpr(expr); }, changed);
+      auto new_memref = SimplifyTypeMemRef(t->memref_, changed);
       auto new_shape = SimplifyExprVec(t->shape_, &changed);
       std::optional<TensorView> new_tv = t->tensor_view_;
       if (t->tensor_view_.has_value()) {
@@ -875,8 +935,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     }
     if (auto t = As<TileType>(type)) {
       bool changed = false;
-      auto new_memref = RemapPinnedMemRefExprs(
-          t->memref_, [this](const ExprPtr& expr) { return SimplifyExpr(expr); }, changed);
+      auto new_memref = SimplifyTypeMemRef(t->memref_, changed);
       auto new_shape = SimplifyExprVec(t->shape_, &changed);
       std::optional<TileView> new_tv = t->tile_view_;
       if (t->tile_view_.has_value()) {
@@ -1091,6 +1150,10 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   }
 
   std::unordered_set<const Var*> multi_assigned_;
+
+  // Owning keys keep source MemRefs alive across type rewrites and temporary
+  // control-flow clones; a recycled raw pointer must never hit this cache.
+  std::unordered_map<MemRefPtr, MemRefPtr> rebound_memrefs_;
 
   /// Escape analysis for the return vars of foldable control-flow statements.
   /// Owned by TransformSimplify, valid for this mutator's lifetime.
