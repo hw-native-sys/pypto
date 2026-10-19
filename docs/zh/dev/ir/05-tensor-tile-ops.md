@@ -147,6 +147,21 @@ implicit view 一致时会折叠为 `nullopt` —— 这与
 PyPTO 与 DSA-RP 规划器会落实该约束；如果显式 MemRef 绑定或手工构造的 IR 仍留下
 同地址 move，baked-address PTO codegen 会直接报错。
 
+### 共享存储与结果视图
+
+在 PTOAS 内存规划下，shape 或 layout 不同的变量可以共享一个 MemRef。每个变量
+仍保留自己的 `TileType`：共享存储不意味着变量的 shape 相同。对于普通 tile 输出，
+包括 tuple 输出和合并 `if` 分支结果的复制，codegen 会选择符合结果变量类型的
+目标视图。例如，`[32, 1]` 的结果与 `[1, 32]` 的 allocation 共享存储时，仍通过
+`[32, 1]` 的视图写入。后续使用该结果时继续使用选定的视图。
+
+需要新建目标视图时，codegen 在原存储上生成 `pto.treshape`，不增加 allocation。
+此时目标的有效 `valid_shape` 必须在编译时已知，因为 `pto.treshape` 没有传入
+运行时有效范围的 operand。已有类型兼容的绑定继续使用原路径，包括有效范围为
+动态值的情况。原地操作、显式视图操作和 `tile.set_validshape` 保留各自的绑定
+语义。此处理不增加任意 dtype 或 layout 转换的支持；既有算子及 PTO 视图的限制
+仍然适用。
+
 ### reshape 与有效区域（valid region）
 
 reshape 是零拷贝视图，无法凭空产生数据：`tensor.reshape` 与 `tile.reshape` 共用

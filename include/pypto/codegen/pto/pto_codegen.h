@@ -459,6 +459,19 @@ class PTOCodegen : public CodegenBase {
     std::shared_ptr<const ir::TileType> tile_type;  ///< Its TileType, MemRef resolved
   };
 
+  /// Resolve a preselected storage handle to the result variable's own physical
+  /// shape/configuration. The returned name and annotation always describe the
+  /// same SSA definition; this does not allocate or change the storage mapping.
+  [[nodiscard]] TupleOutput PrepareTileDestination(const ir::VarPtr& var, const std::string& storage,
+                                                   const std::string& op_name);
+
+  /// Define a typed, zero-copy view of an existing SSA. Backend view helpers
+  /// delegate here so all views register their definition and physical type.
+  std::string EnsureTileView(
+      const std::string& source, const std::string& source_type,
+      const std::shared_ptr<const ir::TileType>& tile_type, const std::string& name_hint,
+      std::optional<std::pair<std::string, std::string>> mutable_valid_shape = std::nullopt);
+
   /**
    * @brief Resolve and allocate every DPS destination of a multi-output call
    *
@@ -482,11 +495,13 @@ class PTOCodegen : public CodegenBase {
    * @param buf New result buffer SSA name
    */
   void SetCurrentResultBuf(const std::string& buf);
-  void RegisterTileBufType(const std::string& ssa_name, const std::string& type_string);
+  void RegisterTileBufType(const std::string& ssa_name, const std::string& type_string,
+                           const std::shared_ptr<const ir::TileType>& tile_type = nullptr);
   std::string GetSSATileBufType(const std::string& ssa_name) const;
   /// Record `ssa_name` as a tile *view* — the result of a `pto.subview` or a
   /// `pto.treshape`, which reinterprets another handle's bytes.
-  void RegisterTileViewName(const std::string& ssa_name);
+  /// Only a full-span treshape may pass its source; subviews keep a distinct origin.
+  void RegisterTileViewName(const std::string& ssa_name, const std::string& reshape_source = "");
   /// Whether `ssa_name` was emitted as a tile view.
   ///
   /// Most views carry static valid extents or are not rooted in a local
@@ -875,10 +890,11 @@ class PTOCodegen : public CodegenBase {
    * (deferred allocs via AllocNewTileBuf).
    */
   struct AllocTileFields {
-    std::string type_str;       ///< pto.tile_buf<...> type string
-    std::string addr_ssa;       ///< Optional addr operand SSA value
-    std::string valid_row_ssa;  ///< valid_row operand SSA value (always emitted)
-    std::string valid_col_ssa;  ///< valid_col operand SSA value (always emitted)
+    std::string type_str;                           ///< pto.tile_buf<...> type string
+    std::string addr_ssa;                           ///< Optional addr operand SSA value
+    std::string valid_row_ssa;                      ///< valid_row operand SSA value (always emitted)
+    std::string valid_col_ssa;                      ///< valid_col operand SSA value (always emitted)
+    std::shared_ptr<const ir::TileType> tile_type;  ///< Physical configuration of the declaration
   };
 
   /// One author-declared multi-slot allocation (`pl.MemRef(slots=N)`), lowered to
@@ -1045,9 +1061,16 @@ class PTOCodegen : public CodegenBase {
     };
     std::vector<ExtraAllocTile> extra_alloc_tiles;
     std::map<std::string, std::string> ssa_to_tile_buf_type;
+    // Original descriptor of each emitted tile SSA. ExtractTileTypeInfo applies
+    // the same effective layout / packed-type rules as its declaration. Only
+    // physical configuration is compared here: valid extents and padding have
+    // operation-specific semantics and need not equal the logical result's.
+    std::map<std::string, std::shared_ptr<const ir::TileType>> ssa_to_tile_type;
     std::map<std::string, SubviewMaterializationInfo> subview_materializations;
-    /// SSA names emitted as tile views (`pto.subview` / `pto.treshape`).
-    std::set<std::string> tile_view_names;
+    /// View SSA -> actual storage origin. Only full-span treshape inherits its
+    /// source's origin; subviews stay distinct because their window can differ.
+    /// This proves no-op copies without trusting IR MemRefs after phi rebinding.
+    std::map<std::string, std::string> tile_view_names;
     /// Handles whose runtime valid extents can be updated by pto.set_validshape.
     std::set<std::string> mutable_tile_names;
 
@@ -1162,6 +1185,7 @@ class PTOCodegen : public CodegenBase {
 
       extra_alloc_tiles.clear();
       ssa_to_tile_buf_type.clear();
+      ssa_to_tile_type.clear();
       subview_materializations.clear();
       tile_view_names.clear();
       mutable_tile_names.clear();

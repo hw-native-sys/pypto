@@ -159,6 +159,25 @@ must resolve to distinct addresses. The PyPTO and DSA-RP planners enforce this
 constraint, and baked-address PTO codegen reports an error if an explicit
 MemRef binding or hand-built IR still presents a same-address move.
 
+### Shared storage and result views
+
+Under PTOAS memory planning, variables with different shapes or layouts can
+share one MemRef. Each variable retains its own `TileType`: sharing storage
+does not make the variables' shapes identical. For ordinary tile outputs,
+including tuple outputs and copies that merge `if` branches, codegen selects a
+destination view matching the result variable's type. For example, a `[32, 1]`
+result sharing storage with a `[1, 32]` allocation is written through a
+`[32, 1]` view. Later uses of that result retain the selected view.
+
+When a new destination view is needed, codegen emits `pto.treshape` over the
+existing storage without adding an allocation. The destination's effective
+`valid_shape` must then be known at compile time, because `pto.treshape` has no
+runtime valid-extent operands. Existing compatible bindings, including those
+with dynamic valid extents, follow their original path. In-place operations,
+explicit view operations, and `tile.set_validshape` retain their own binding
+semantics. This handling does not add support for arbitrary dtype or layout
+conversions; the existing operation and PTO view restrictions still apply.
+
 ### Reshape and the valid region
 
 A reshape is a zero-copy view, so it cannot invent data: `tensor.reshape` and

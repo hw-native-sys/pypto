@@ -301,11 +301,16 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         } else {
           ret_name = AllocNewTileBuf(alloc_fields.type_str, return_var->name_hint_, alloc_fields.addr_ssa,
                                      alloc_fields.valid_row_ssa, alloc_fields.valid_col_ssa);
+          RegisterTileBufType(ret_name, alloc_fields.type_str, tile_type);
           // This head-declared handle is the phi buffer. Under PTOAS the branch
           // producers are re-bound to it (see emit_branch, fix #1956); mark it
           // emitted so their EmitAllocTileForVar dedups instead of re-declaring it.
           if (!emit_tile_addr_) fs_.emitted_tile_alloc_names.insert(ret_name);
         }
+        // Prepare before entering either branch: a phi destination view must
+        // dominate branch writes as well as reads after this scf.if. Branch
+        // producers and the synthetic tmov below share this exact target.
+        ret_name = PrepareTileDestination(return_var, ret_name, "if result").name;
         BindVarToMlir(return_var, ret_name);
         if (has_dynamic_valid_shape) {
           deferred_tile_valid_shapes.emplace_back(ret_name, std::move(logical_fields));

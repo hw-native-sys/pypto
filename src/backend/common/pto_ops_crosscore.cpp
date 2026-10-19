@@ -408,7 +408,7 @@ static std::string MakeTpopCodegenPTO(const char* target, const CallPtr& op,
     std::string logical_buf = codegen.NewNamedTemp("tpop_logical");
     codegen.Emit(logical_buf + " = pto.treshape " + transport_buf + " : " + result_type + " -> " +
                  logical_type);
-    codegen.RegisterTileBufType(logical_buf, logical_type);
+    codegen.RegisterTileBufType(logical_buf, logical_type, result_tile_type);
     codegen.SetCurrentResultBuf(logical_buf);
   }
 

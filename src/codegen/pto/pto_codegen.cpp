@@ -1054,7 +1054,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
 
     // Pre-populate type so body visitors (e.g., tile.reshape no-op check)
     // can query it before per-variable alloc_tile emission runs.
-    fs_.ssa_to_tile_buf_type[ssa_name] = type_str;
+    RegisterTileBufType(ssa_name, type_str, tile_type);
 
     // Also maintain fs_.memref_to_mlir for compatibility (first var per allocation)
     const ir::Var* base_ptr = memref->base_.get();
@@ -1568,6 +1568,7 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
 PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
     const std::shared_ptr<const ir::TileType>& tile_type, bool use_physical_valid_shape) {
   AllocTileFields fields;
+  fields.tile_type = tile_type;
 
   // Type string always uses dynamic valid dims (v_row=?, v_col=?); the actual
   // extent is conveyed via valid_row / valid_col operands below.
@@ -1915,7 +1916,7 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
 
   // In PTOAS mode several vars may share one handle (in-place aliasing); emit
   // the alloc_tile only once per handle so the shared buffer has a single def.
-  if (!fs_.emitted_tile_alloc_names.insert(tile_buf).second) {
+  if (IsTileViewName(tile_buf) || !fs_.emitted_tile_alloc_names.insert(tile_buf).second) {
     return;
   }
   fs_.tile_alloc_scope[tile_buf] = fs_.tile_alloc_scope_stack.back();
@@ -1940,7 +1941,7 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
   line << " : " << fields.type_str;
   Emit(line.str());
 
-  fs_.ssa_to_tile_buf_type[tile_buf] = fields.type_str;
+  RegisterTileBufType(tile_buf, fields.type_str, tile_type);
   RegisterMutableTileName(tile_buf);
 }
 
@@ -2117,7 +2118,7 @@ bool PTOCodegen::DeclareTileBufAtHead(const std::string& ssa_name, const AllocTi
   }
   fs_.extra_alloc_tiles.push_back(FunctionState::ExtraAllocTile{ssa_name, fields.type_str, fields.addr_ssa,
                                                                 fields.valid_row_ssa, fields.valid_col_ssa});
-  fs_.ssa_to_tile_buf_type[ssa_name] = fields.type_str;
+  RegisterTileBufType(ssa_name, fields.type_str, fields.tile_type);
   RegisterMutableTileName(ssa_name);
   fs_.tile_alloc_scope[ssa_name] = 0;
   return true;
@@ -2125,8 +2126,10 @@ bool PTOCodegen::DeclareTileBufAtHead(const std::string& ssa_name, const AllocTi
 
 void PTOCodegen::SetCurrentResultBuf(const std::string& buf) { fs_.current_result_buf = buf; }
 
-void PTOCodegen::RegisterTileBufType(const std::string& ssa_name, const std::string& type_string) {
+void PTOCodegen::RegisterTileBufType(const std::string& ssa_name, const std::string& type_string,
+                                     const std::shared_ptr<const ir::TileType>& tile_type) {
   fs_.ssa_to_tile_buf_type[ssa_name] = type_string;
+  if (tile_type) fs_.ssa_to_tile_type[ssa_name] = tile_type;
 }
 
 std::string PTOCodegen::GetSSATileBufType(const std::string& ssa_name) const {
@@ -2134,7 +2137,12 @@ std::string PTOCodegen::GetSSATileBufType(const std::string& ssa_name) const {
   return it != fs_.ssa_to_tile_buf_type.end() ? it->second : std::string{};
 }
 
-void PTOCodegen::RegisterTileViewName(const std::string& ssa_name) { fs_.tile_view_names.insert(ssa_name); }
+void PTOCodegen::RegisterTileViewName(const std::string& ssa_name, const std::string& reshape_source) {
+  const auto source = fs_.tile_view_names.find(reshape_source);
+  fs_.tile_view_names[ssa_name] = source != fs_.tile_view_names.end()
+                                      ? source->second
+                                      : (reshape_source.empty() ? ssa_name : reshape_source);
+}
 
 bool PTOCodegen::IsTileViewName(const std::string& ssa_name) const {
   return fs_.tile_view_names.count(ssa_name) > 0;
@@ -2146,6 +2154,82 @@ void PTOCodegen::RegisterMutableTileName(const std::string& ssa_name) {
 
 bool PTOCodegen::IsMutableTileName(const std::string& ssa_name) const {
   return fs_.mutable_tile_names.count(ssa_name) > 0;
+}
+
+std::string PTOCodegen::EnsureTileView(
+    const std::string& source, const std::string& source_type,
+    const std::shared_ptr<const ir::TileType>& tile_type, const std::string& name_hint,
+    std::optional<std::pair<std::string, std::string>> mutable_valid_shape) {
+  const std::string view_type = mutable_valid_shape ? GetTileBufTypeStringFromTileType(tile_type)
+                                                    : GetViewTileBufTypeStringFromTileType(tile_type);
+  // Equal dynamic types can still have independent live validity. Never reuse
+  // the source when initializing a mutable alias (e.g. fillpad's output).
+  if (!mutable_valid_shape && source_type == view_type) return source;
+  const std::string view = NewNamedTemp(name_hint);
+  RegisterTileBufType(view, view_type, tile_type);
+  RegisterTileViewName(view, source);
+  Emit(view + " = pto.treshape " + source +
+       (source_type.empty() ? "" : " : " + source_type + " -> " + view_type));
+  if (mutable_valid_shape) {
+    // TRESHAPE copies the address only; initialize the fresh handle's dynamic
+    // valid extents without mutating the source's metadata.
+    RegisterMutableTileName(view);
+    Emit("pto.set_validshape " + view + ", " + mutable_valid_shape->first + ", " +
+         mutable_valid_shape->second + " : " + view_type);
+  }
+  return view;
+}
+
+PTOCodegen::TupleOutput PTOCodegen::PrepareTileDestination(const ir::VarPtr& var, const std::string& storage,
+                                                           const std::string& op_name) {
+  const auto tile_type = ir::As<ir::TileType>(var->GetType());
+  INTERNAL_CHECK_SPAN(tile_type, var->span_) << "Internal error: tile destination requires a TileType";
+  TupleOutput output{storage, GetSSATileBufType(storage), var, tile_type};
+  if (emit_tile_addr_) return output;
+
+  const auto actual = fs_.ssa_to_tile_type.find(storage);
+  INTERNAL_CHECK_SPAN(actual != fs_.ssa_to_tile_type.end(), var->span_)
+      << "Internal error: missing physical type for tile destination " << storage;
+  const auto src = ExtractTileTypeInfo(*actual->second, GetTypeString(actual->second->dtype_));
+  const auto dst = ExtractTileTypeInfo(*tile_type, GetTypeString(tile_type->dtype_));
+  const bool same_space = actual->second->GetMemorySpace() == tile_type->GetMemorySpace();
+  // An alloc carries runtime valid operands while a view can have static valid
+  // dimensions. Padding is produced by fillpad itself. Neither difference means
+  // that a correctly shaped destination needs another reinterpretation.
+  if (same_space && src.dtype_str == dst.dtype_str && src.rows == dst.rows && src.cols == dst.cols &&
+      src.blayout == dst.blayout && src.slayout == dst.slayout && src.fractal == dst.fractal &&
+      src.compact == dst.compact) {
+    return output;
+  }
+
+  // Mirror the storage constraints of PTOAS treshape. FP4 Vec descriptors use
+  // an eight-bit packed carrier after ExtractTileTypeInfo halves one axis.
+  auto carrier_bits = [](const std::shared_ptr<const ir::TileType>& type) {
+    return type->dtype_ == DataType::FP4 && type->GetMemorySpace() == ir::MemorySpace::Vec
+               ? 8
+               : type->dtype_.GetBit();
+  };
+  const __int128 src_bits = static_cast<__int128>(src.rows) * src.cols * carrier_bits(actual->second);
+  const __int128 dst_bits = static_cast<__int128>(dst.rows) * dst.cols * carrier_bits(tile_type);
+  const bool src_boxed = src.slayout != ir::TileLayout::none_box;
+  const bool dst_boxed = dst.slayout != ir::TileLayout::none_box;
+  CHECK_SPAN(same_space && src_bits == dst_bits && src_boxed == dst_boxed, var->span_)
+      << op_name << " in PTOAS codegen cannot reinterpret shared destination storage from " << output.type_str
+      << " to " << GetTileBufTypeStringFromTileType(tile_type);
+  const auto view = ir::tile_view_semantics::GetEffectiveTileView(*tile_type);
+  CHECK_SPAN(!view.valid_shape.empty() &&
+                 std::all_of(view.valid_shape.begin(), view.valid_shape.end(),
+                             [](const ir::ExprPtr& dim) { return ir::As<ir::ConstInt>(dim) != nullptr; }),
+             var->span_)
+      << op_name
+      << " in PTOAS codegen requires compile-time static valid_shape on the destination "
+         "when reinterpreting a shared buffer";
+  // Emit in the current region and bind only this result at its definition.
+  // A global storage->view cache could leak a branch-local SSA into a sibling
+  // branch or the continuation. The canonical storage binding stays unchanged.
+  output.name = EnsureTileView(storage, output.type_str, tile_type, "dst_view");
+  output.type_str = GetSSATileBufType(output.name);
+  return output;
 }
 
 void PTOCodegen::RegisterSubviewMaterialization(const std::string& subview_ssa,
@@ -2335,7 +2419,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
         BindVarToMlir(op->var_, result_buf);
         std::string type_str = GetTileBufTypeStringFromTileType(tile_type);
         if (!type_str.empty()) {
-          fs_.ssa_to_tile_buf_type[result_buf] = type_str;
+          RegisterTileBufType(result_buf, type_str, tile_type);
         }
       } else if (alias_array_update_to_input) {
         // array.update_element: alias the result Var to the input array's SSA so
@@ -2355,7 +2439,35 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
       fs_.current_result_var = op->var_;
       fs_.current_result_buf = result_buf;
       fs_.current_result_tile_type = result_tile_type;
-      VisitExpr(op->value_);
+      bool elide_move = false;
+      if (!emit_tile_addr_ && result_tile_type && result_tile_type->memref_.has_value() &&
+          !is_set_validshape && !ir::IsOp(call, "tile.extract") &&
+          !ir::op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
+        // Views define their result from the input; extract already prepares
+        // an independent destination in its emitter. TPOP has no general-pool
+        // MemRef, and set_validshape must retain its mutable input handle.
+        std::string storage = result_buf;
+        if (ir::IsOp(call, "tile.move") && call->args_.size() == 1) {
+          const std::string source = GetExprAsCode(call->args_[0]);
+          const auto source_type = ir::GetTileTypeWithMemRef(call->args_[0]->GetType());
+          auto origin = [this](const std::string& ssa) {
+            const auto view = fs_.tile_view_names.find(ssa);
+            return view == fs_.tile_view_names.end() ? ssa : view->second;
+          };
+          // Record no-op identity before selecting a typed target. A view has
+          // another SSA name but can still denote exactly the same value and
+          // byte window; emitting a self-copy there is illegal on the hardware.
+          elide_move =
+              source == result_buf || (source_type && origin(source) == origin(result_buf) &&
+                                       ShareOneMemRefWindow(source_type, result_tile_type) &&
+                                       ir::structural_equal(ir::CloneTypeWithoutMemRef(source_type),
+                                                            ir::CloneTypeWithoutMemRef(result_tile_type)));
+          if (elide_move) storage = source;
+        }
+        const auto destination = PrepareTileDestination(op->var_, storage, call->op_->name_);
+        fs_.current_result_buf = destination.name;
+      }
+      if (!elide_move) VisitExpr(op->value_);
       // If codegen changed the result buffer (e.g., reshape allocated a new tile),
       // update variable mapping so subsequent references use the new buffer
       if (!fs_.current_result_buf.empty() && (is_set_validshape || fs_.current_result_buf != result_buf)) {
@@ -2512,8 +2624,9 @@ std::vector<PTOCodegen::TupleOutput> PTOCodegen::PrepareTupleOutputs(const ir::C
     // the `<var> = tuple[i]` AssignStmts that would otherwise emit them. The
     // emission is idempotent, so those AssignStmts then skip re-emitting.
     EmitAllocTileForVar(element_vars[i], tile_type);
-    outputs.push_back(TupleOutput{GetVarName(element_vars[i]), GetTileBufTypeStringFromTileType(tile_type),
-                                  element_vars[i], tile_type});
+    auto destination = PrepareTileDestination(element_vars[i], GetVarName(element_vars[i]), op->op_->name_);
+    BindVarToMlir(element_vars[i], destination.name);
+    outputs.push_back(std::move(destination));
   }
   return outputs;
 }

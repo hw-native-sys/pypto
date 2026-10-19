@@ -21,11 +21,14 @@ that handle is declared exactly once.
 # pyright: reportUndefinedVariable=false
 
 import re
+from pathlib import Path
 
 import pypto.language as pl
 import pytest
 from pypto import ir as _ir
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
+from pypto.backend._ptoas_locate import find_ptoas_binary
+from pypto.backend.pto_backend import _run_ptoas
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import codegen, passes
 
@@ -457,6 +460,190 @@ def test_post_if_view_reads_merged_phi_handle(program):
     if_line = _sole_line(mlir, "scf.if ")
     assert lines.index(phi_decl) < lines.index(if_line), mlir
     assert lines.index(view) > max(lines.index(ln) for ln in into_phi), mlir
+
+
+@pl.program
+class RowInitializedColumnCarryProgram:
+    """A column carry whose original allocation was defined as a row (#3017)."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        flag: pl.Scalar[pl.INT32],
+        out: pl.Out[pl.Tensor[[32, 1], pl.FP32]],
+    ) -> pl.Tensor[[32, 1], pl.FP32]:
+        row_base = pl.tile.full([1, 32], dtype=pl.FP32, value=0.0)
+        base = pl.tile.reshape(row_base, [32, 1])
+        for i, (carry,) in pl.range(2, init_values=(base,)):  # noqa: B007 - explicit carry binding
+            if flag != 0:
+                row = pl.reshape(carry, [1, 32])
+                updated = pl.add(row, 1.0)
+                column = pl.reshape(updated, [32, 1])
+                value = column
+            else:
+                value = carry
+            result = pl.yield_(value)
+        output = pl.store(result, [0, 0], out)
+        return output
+
+
+def _tile_buf_types(line: str) -> list[str]:
+    return re.findall(r"!pto\.tile_buf<[^>]+>", line)
+
+
+def _assert_tmov_operand_types(mlir: str) -> None:
+    """TMOV must preserve each SSA definition and copy matching tile geometry."""
+    definitions = {}
+    for line in mlir.splitlines():
+        match = re.match(r"\s*(%[A-Za-z0-9_]+) = pto\.(?:alloc_tile|treshape)\b", line)
+        if match:
+            definitions[match.group(1)] = _tile_buf_types(line)[-1]
+    moves = [line for line in mlir.splitlines() if "pto.tmov" in line]
+    assert moves, mlir
+    for move in moves:
+        source, destination = _tile_buf_types(move)
+        assert source == definitions[_ins_of(move)], move
+        assert destination == definitions[_outs_of(move)], move
+        for field in ("rows", "cols", "blayout", "slayout"):
+            pattern = rf"\b{field}=([^,>]+)"
+            assert _first_group(pattern, source) == _first_group(pattern, destination), move
+
+
+def test_row_initialized_column_carry_writes_a_view_of_its_original_storage():
+    """The loop write-back must reinterpret the row allocation before TMOV."""
+    mlir = _ptoas_pto(RowInitializedColumnCarryProgram)
+    _assert_tmov_operand_types(mlir)
+    root = _outs_of(_sole_line(mlir, "pto.texpands"))
+    root_alloc = _sole_line(mlir, f"{root} = pto.alloc_tile")
+    assert "rows=1, cols=32" in root_alloc and "v_row=?, v_col=?" in root_alloc, root_alloc
+    # Initializer, merged if result, and updated row are the only allocations.
+    assert mlir.count("= pto.alloc_tile") == 3, mlir
+
+    # Both the post-loop store and the loop write-back address the original bytes.
+    store_handle = _ins_of(_sole_line(mlir, "pto.tstore"))
+    assert f"{store_handle} = pto.treshape {root} " in mlir, mlir
+    writes_to_root = []
+    for move in (line for line in mlir.splitlines() if "pto.tmov" in line):
+        destination = _outs_of(move)
+        views = [line for line in mlir.splitlines() if f"{destination} = pto.treshape {root} " in line]
+        if views:
+            assert len(views) == 1, mlir
+            view = views[0]
+            assert _tile_buf_types(view)[0] == _tile_buf_types(root_alloc)[0], view
+            assert "rows=32, cols=1, v_row=32, v_col=1" in _tile_buf_types(view)[-1], view
+            writes_to_root.append(move)
+    assert len(writes_to_root) == 1, mlir
+
+
+def test_row_initialized_column_carry_keeps_baked_address_codegen():
+    mlir = _planner_pto(RowInitializedColumnCarryProgram, passes.MemoryPlanner.PYPTO)
+    assert "pto.treshape" not in mlir, mlir
+    assert "= pto.alloc_tile addr = " in mlir, mlir
+    _assert_tmov_operand_types(mlir)
+
+
+@pytest.mark.ptoas_compile
+def test_row_initialized_column_carry_assembles_with_ptoas(tmp_path: Path):
+    """PTOAS must accept the real loop write-back, beyond matching annotations."""
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    mlir = _ptoas_pto(RowInitializedColumnCarryProgram)
+    source, output = tmp_path / "column_carry.pto", tmp_path / "column_carry.cpp"
+    source.write_text(mlir)
+    _run_ptoas(str(source), str(output), ["--pto-arch=a2", "--pto-level=level2"])
+    assert "TMOV(" in output.read_text()
+
+
+def _move_to_shared_storage_program(
+    root_shape: tuple[int, int],
+    logical_shape: tuple[int, int],
+    *,
+    valid_shape: str = "full",
+) -> _ir.Program:
+    """Build the lowered shared-MemRef state without high-level layout repair."""
+    span = _ir.Span.unknown()
+    zero = _ir.ConstInt(0, pl.INDEX, span)
+    root_memref = _ir.MemRef(_ir.Var("root_base", _ir.PtrType(), span), zero, 128, span)
+    source_memref = _ir.MemRef(_ir.Var("source_base", _ir.PtrType(), span), zero, 128, span)
+    valid_rows = _ir.Var("valid_rows", _ir.ScalarType(pl.INDEX), span)
+    layout = _ir.TileLayout.col_major if logical_shape[1] == 1 else _ir.TileLayout.row_major
+    valid = [valid_rows, 1] if valid_shape == "dynamic" else [0, 0] if valid_shape == "zero" else None
+    view = _ir.TileView(valid_shape=valid, blayout=layout)
+    root_type = _ir.TileType(root_shape, pl.FP32, root_memref, None, _ir.MemorySpace.Vec)
+    source_type = _ir.TileType(logical_shape, pl.FP32, source_memref, view, _ir.MemorySpace.Vec)
+    destination_type = _ir.TileType(logical_shape, pl.FP32, root_memref, view, _ir.MemorySpace.Vec)
+    root = _ir.Var("root", root_type, span)
+    source = _ir.Var("source", source_type, span)
+    destination = _ir.Var("destination", destination_type, span)
+    output = _ir.Var("output", _ir.TensorType(logical_shape, pl.FP32), span)
+    stored = _ir.Var("stored", output.type, span)
+    offsets = _ir.MakeTuple([zero, zero], span)
+    body = _ir.SeqStmts(
+        [
+            _ir.AssignStmt(root, _ir.Call(_ir.Op("tile.create"), [], root_type, span), span),
+            _ir.AssignStmt(source, _ir.Call(_ir.Op("tile.create"), [], source_type, span), span),
+            _ir.AssignStmt(
+                destination,
+                _ir.Call(_ir.Op("tile.move"), [source], destination_type, span),
+                span,
+            ),
+            _ir.AssignStmt(
+                stored,
+                _ir.Call(_ir.Op("tile.store"), [destination, offsets, output], output.type, span),
+                span,
+            ),
+            _ir.ReturnStmt([stored], span),
+        ],
+        span,
+    )
+    params = [(output, _ir.ParamDirection.Out)]
+    if valid_shape == "dynamic":
+        params.append((valid_rows, _ir.ParamDirection.In))
+    function = _ir.Function("kernel", params, [output.type], body, span, _ir.FunctionType.InCore)
+    return _ir.Program([function], "SharedStorageMove", span)
+
+
+def _shared_storage_move_pto(program: _ir.Program) -> str:
+    reset_for_testing()
+    set_backend_type(BackendType.Ascend910)
+    return codegen.PTOCodegen().generate(program, emit_tile_addr=False)
+
+
+@pytest.mark.parametrize(
+    ("root_shape", "logical_shape"),
+    [((1, 32), (32, 1)), ((32, 1), (1, 32)), ((1, 32), (1, 32))],
+    ids=["row-storage-column-result", "column-storage-row-result", "matching-row-types"],
+)
+def test_shared_storage_move_uses_the_logical_destination_type(root_shape, logical_shape):
+    mlir = _shared_storage_move_pto(_move_to_shared_storage_program(root_shape, logical_shape))
+    _assert_tmov_operand_types(mlir)
+    assert mlir.count("= pto.alloc_tile") == 2, mlir
+    move = _sole_line(mlir, "pto.tmov")
+    assert _ins_of(_sole_line(mlir, "pto.tstore")) == _outs_of(move), mlir
+    if root_shape == logical_shape:
+        assert "pto.treshape" not in mlir, mlir
+    else:
+        view = _sole_line(mlir, "pto.treshape")
+        assert f"{_outs_of(move)} = pto.treshape %root " in view, mlir
+        rows, cols = logical_shape
+        assert f"rows={rows}, cols={cols}, v_row={rows}, v_col={cols}" in view, view
+
+
+def test_shared_storage_move_rejects_a_dynamic_valid_destination_view():
+    program = _move_to_shared_storage_program((1, 32), (32, 1), valid_shape="dynamic")
+    with pytest.raises(ValueError, match=r"tile\.move.*static valid_shape"):
+        _shared_storage_move_pto(program)
+
+
+def test_shared_storage_move_keeps_the_zero_valid_sentinel_dynamic():
+    program = _move_to_shared_storage_program((1, 32), (32, 1), valid_shape="zero")
+    mlir = _shared_storage_move_pto(program)
+    _assert_tmov_operand_types(mlir)
+    assert mlir.count("= pto.alloc_tile") == 2, mlir
+    view = _sole_line(mlir, "pto.treshape")
+    assert "rows=32, cols=1, v_row=?, v_col=?" in _tile_buf_types(view)[-1], view
+    assert "v_row=0" not in view and "v_col=0" not in view, view
+    assert f"{_outs_of(_sole_line(mlir, 'pto.tmov'))} = pto.treshape %root " in view, mlir
 
 
 if __name__ == "__main__":

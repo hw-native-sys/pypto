@@ -1012,8 +1012,8 @@ static void EmitTreshapeViewFromSsa(codegen::PTOCodegen& codegen, const std::str
   if (!result_type.empty()) {
     result_target = codegen.NewNamedTemp(temp_prefix);
     codegen.SetCurrentResultBuf(result_target);
-    codegen.RegisterTileBufType(result_target, result_type);
-    codegen.RegisterTileViewName(result_target);
+    codegen.RegisterTileBufType(result_target, result_type, codegen.GetCurrentResultTileType());
+    codegen.RegisterTileViewName(result_target, src);
   }
   std::ostringstream oss;
   oss << result_target << " = pto.treshape " << src;
@@ -1080,7 +1080,7 @@ static StaticValidTileView EmitStaticValidTileView(codegen::PTOCodegen& codegen,
       arg->span_)
       << "Internal error: grouped MX operand must carry static valid dimensions";
   const std::string view = codegen.NewNamedTemp(name_hint);
-  codegen.RegisterTileBufType(view, static_type);
+  codegen.RegisterTileBufType(view, static_type, tile_type);
   codegen.Emit(view + " = pto.treshape " + source + " : " + source_type + " -> " + static_type);
   return {view, static_type};
 }
@@ -1312,7 +1312,7 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
       oss << " : " << src_type << " -> " << view_type;
     }
     codegen.Emit(oss.str());
-    codegen.RegisterTileBufType(view_ssa, view_type);
+    codegen.RegisterTileBufType(view_ssa, view_type, codegen.GetCurrentResultTileType());
     codegen.RegisterTileViewName(view_ssa);
 
     // Lazy materialization fallback: a few downstream ops (e.g. pto.tcolexpandmul)
@@ -1442,8 +1442,9 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     if (!result_type.empty() && existing_type != result_type) {
       result_target = codegen.AllocNewTileBuf(result_type, "extract_buf");
       codegen.SetCurrentResultBuf(result_target);
-    } else if (!result_type.empty()) {
-      codegen.RegisterTileBufType(result_target, result_type);
+    }
+    if (!result_type.empty()) {
+      codegen.RegisterTileBufType(result_target, result_type, codegen.GetCurrentResultTileType());
     }
 
     std::ostringstream oss;
