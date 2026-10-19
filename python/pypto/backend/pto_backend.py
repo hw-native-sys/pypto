@@ -1200,27 +1200,20 @@ def _format_signature(directions: list[str]) -> str:
 
 def _generate_config_file(
     orch_func_name: str,
-    func_name_to_id: dict[str, int],
-    func_name_to_core_type: dict[str, _ir_core.CoreType],
-    func_name_to_signature: dict[str, list[str]] | None = None,
+    kernel_registrations: list[_codegen_core.KernelRegistration],
     orchestration_signature: list[str] | None = None,
     func_name_to_external_source: dict[str, str] | None = None,
     func_name_to_external_include_dirs: dict[str, tuple[str, ...]] | None = None,
     enable_sdma: bool = False,
     runtime: _passes.RuntimeKind = _passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
     host_tensor_indices: list[int] | None = None,
+    unshared_code_names: set[str] | None = None,
 ) -> str:
     """Generate kernel_config.py content.
 
-    ``func_name_to_signature`` maps each kernel name to its runtime
-    ``ArgDirection`` names ("IN"/"OUT"/"INOUT") for its tensor args, in
-    task-payload (tensors-first) order. Scalars are excluded: the CoreCallable
-    signature array is sized to CORE_MAX_TENSOR_ARGS (a per-tensor-arg list), so
-    each entry lines up 1:1 with a payload tensor. When present, each KERNELS
-    entry gains a ``"signature"`` field of ``ArgDirection`` members so the
-    runtime builds a non-empty CoreCallable signature — required for the tensor
-    dump to match the task payload tensor_count. Kernels without an entry fall
-    back to an empty signature (the pre-existing behavior).
+    Each registration carries a final tensor signature and a code name. Several
+    registrations may reference the same generated source with different tensor
+    directions. Scalars are excluded from runtime tensor signatures.
 
     ``orchestration_signature`` is the orchestration entry's per-tensor
     ``ArgDirection`` names ("IN"/"OUT"/"INOUT"), in ``orch_args`` tensor order
@@ -1235,6 +1228,9 @@ def _generate_config_file(
     ``func_name_to_external_include_dirs`` maps external kernel names to their
     ordered CCEC include search paths. Non-external kernels ignore this map.
 
+    ``unshared_code_names`` excludes builtin-template kernels from generated-code
+    sharing; their existing compilation/cache contract is preserved.
+
     ``enable_sdma`` records that at least one emitted kernel consumes the
     runtime-owned SDMA workspace.
 
@@ -1244,11 +1240,10 @@ def _generate_config_file(
     program compiled for one runtime never binds to a worker running another.
     """
     runtime_name = _passes.runtime_kind_to_name(runtime)
-    func_name_to_signature = func_name_to_signature or {}
     func_name_to_external_source = func_name_to_external_source or {}
     func_name_to_external_include_dirs = func_name_to_external_include_dirs or {}
     orchestration_signature = orchestration_signature or []
-    has_signatures = any(func_name_to_signature.values()) or bool(orchestration_signature)
+    has_signatures = any(r.signature for r in kernel_registrations) or bool(orchestration_signature)
 
     runtime_lines = [
         "RUNTIME_CONFIG = {",
@@ -1287,8 +1282,9 @@ def _generate_config_file(
         "KERNELS = [",
     ]
 
-    for name, func_id in sorted(func_name_to_id.items(), key=lambda x: x[1]):
-        core_type = func_name_to_core_type[name]
+    for registration in sorted(kernel_registrations, key=lambda r: r.func_id):
+        name, func_id = registration.code_name, registration.func_id
+        core_type = registration.core_type
         ct_str = "aiv" if core_type == _ir_core.CoreType.VECTOR else "aic"
         # External kernels are referenced in place at their original path so the
         # entry .cpp keeps its sibling files (relative #include "../..." resolve);
@@ -1306,7 +1302,12 @@ def _generate_config_file(
             include_dirs = func_name_to_external_include_dirs.get(name)
             if include_dirs:
                 entry += f', "extra_include_dirs": {list(include_dirs)!r}'
-        signature = func_name_to_signature.get(name)
+        if ext_source is None:
+            if name in (unshared_code_names or set()):
+                entry += ', "builtin": True'
+            else:
+                entry += f', "code_name": "{name}"'
+        signature = registration.signature
         if signature:
             entry += f', "signature": [{_format_signature(signature)}]'
         entry += "},"
@@ -2327,22 +2328,23 @@ def _generate_single_chip(
             codegen_free_kernels = {
                 f.name for f in transformed_program.functions.values() if _skips_pto_codegen(f)
             }
-            all_kernels_external = all(name in codegen_free_kernels for name in orch_result.func_name_to_id)
+            all_kernels_external = all(
+                r.code_name in codegen_free_kernels for r in orch_result.kernel_registrations
+            )
             if not skip_ptoas or all_kernels_external:
                 host_indices = (
                     _host_tensor_indices(orch_func) if runtime == _passes.RuntimeKind.HOST_BUILD_GRAPH else []
                 )
                 result_files["kernel_config.py"] = _generate_config_file(
                     orch_func.name,
-                    orch_result.func_name_to_id,
-                    orch_result.func_name_to_core_type,
-                    orch_result.func_name_to_signature,
+                    orch_result.kernel_registrations,
                     orch_result.orchestration_signature,
                     func_name_to_external_source,
                     func_name_to_external_include_dirs,
                     enable_sdma=any(_uses_sdma_workspace(func) for func in emitted_incore_funcs),
                     runtime=runtime,
                     host_tensor_indices=host_indices,
+                    unshared_code_names=codegen_free_kernels,
                 )
         except Exception as e:
             logger.error("Failed to generate orchestration '%s': %s", orch_func.name, e)

@@ -186,6 +186,7 @@ class PassManager:
             passes.outline_graph_scopes,
             passes.outline_incore_scopes,
             passes.outline_cluster_scopes,
+            passes.deduplicate_outlined_kernels,
             passes.convert_tensor_to_tile_ops,
             passes.optimize_orch_tensors,
         )

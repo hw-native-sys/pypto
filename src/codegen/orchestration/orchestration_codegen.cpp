@@ -24,6 +24,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -288,6 +289,24 @@ bool ReferencesIdentifier(const std::string& code, const std::string& name) {
 }  // namespace
 
 // Statement code generator for orchestration
+// Shared by the entry and Graph fragments: IDs describe the final tensor ABI,
+// while code_name identifies the binary compiled once for all registrations.
+class KernelRegistrations {
+ public:
+  int GetOrCreate(const std::string& name, CoreType core_type, std::vector<std::string> signature) {
+    auto key = std::make_tuple(name, core_type, signature);
+    const int id = static_cast<int>(entries.size());
+    auto [it, inserted] = ids_.try_emplace(std::move(key), id);
+    if (inserted) entries.push_back({id, name, core_type, std::move(signature)});
+    return it->second;
+  }
+
+  std::vector<KernelRegistration> entries;
+
+ private:
+  std::map<std::tuple<std::string, CoreType, std::vector<std::string>>, int> ids_;
+};
+
 class OrchestrationStmtCodegen : public CodegenBase {
  public:
   using ManualTaskIdBinding = std::variant<int, std::string, std::vector<std::string>>;
@@ -309,20 +328,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
     int64_t size;
   };
 
-  explicit OrchestrationStmtCodegen(const ProgramPtr& prog, std::map<std::string, int>* func_ids,
-                                    std::map<std::string, CoreType>* core_types,
-                                    std::map<std::string, std::vector<std::string>>* func_signatures,
-                                    int* next_id,
+  explicit OrchestrationStmtCodegen(const ProgramPtr& prog, KernelRegistrations* registrations,
                                     std::unordered_map<const Var*, std::string> param_to_emit_name,
                                     std::set<std::string> param_name_set,
                                     std::map<std::string, int> param_name_to_orch_index,
                                     std::map<std::string, int64_t> packed_fp4_axis,
                                     std::unordered_map<std::string, std::string> dist_param_to_ctx_param)
       : program_(prog),
-        func_name_to_id_(func_ids),
-        func_name_to_core_type_(core_types),
-        func_name_to_signature_(func_signatures),
-        next_func_id_(next_id),
+        registrations_(registrations),
         emit_name_map_(std::move(param_to_emit_name)),
         param_name_set_(std::move(param_name_set)),
         param_name_to_orch_index_(std::move(param_name_to_orch_index)),
@@ -2237,28 +2250,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return "";
   }
 
-  // Record a kernel's runtime ArgDirection signature, in task-payload order.
-  // The CoreCallable signature_[] array is sized to CORE_MAX_TENSOR_ARGS and is
-  // a per-tensor-arg direction list: scalars are NOT recorded. They live in a
-  // separate scalar-arg store (CORE_MAX_SCALAR_ARGS) and the runtime tensor
-  // dump skips SCALAR entries anyway, so excluding them keeps the recorded
-  // signature 1:1 with the payload tensors and bounds sig_count by the same
-  // CORE_MAX_TENSOR_ARGS cap that check_add_tensor_capacity enforces on the
-  // payload. Including scalars would inflate sig_count past CORE_MAX_TENSOR_ARGS
-  // and trip make_callable's "sig_count exceeds MaxSig" guard.
-  // func_id is name-deduped, so we record once per kernel (first call wins).
-  void RecordKernelSignature(const std::string& func_name, const std::vector<ParamEntry>& params) {
-    auto [it, inserted] = func_name_to_signature_->try_emplace(func_name);
-    if (!inserted) {
-      return;
-    }
-    it->second.reserve(params.size());
-    for (const auto& p : params) {
-      if (p.direction == ArgDirection::Scalar) {
-        continue;
+  // Compute the registration only after wrapper bridging and direction analysis.
+  // Scalar payloads have their own store and do not consume tensor signature slots.
+  int RegisterKernel(const std::string& name, CoreType core_type, const std::vector<ParamEntry>& params) {
+    std::vector<std::string> signature;
+    for (const auto& param : params) {
+      if (param.direction != ArgDirection::Scalar) {
+        signature.emplace_back(ArgDirectionToRuntimeName(param.direction));
       }
-      it->second.emplace_back(ArgDirectionToRuntimeName(p.direction));
     }
+    return registrations_->GetOrCreate(name, core_type, std::move(signature));
   }
 
   std::vector<ParamEntry> BuildTaskParams(const CallPtr& call, const FunctionPtr& callee_func) {
@@ -3633,12 +3634,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
 
     CoreType core_type = InferFunctionCoreType(callee_func);
-    (*func_name_to_core_type_)[callee_name] = core_type;
-
-    int func_id = GetOrCreateFuncId(callee_name, func_name_to_id_, next_func_id_);
 
     auto params = BuildTaskParams(call, callee_func);
-    RecordKernelSignature(callee_name, params);
+    int func_id = RegisterKernel(callee_name, core_type, params);
 
     // SPMD launch spec for pl.spmd_submit targeting an AIC/AIV kernel directly
     // (no Spmd-wrapper function). core_num/sync_start ride on the Submit and
@@ -3659,7 +3657,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   ///   boundary tensors' dataflow, which is why LegalizeGraphBoundary rejects a
   ///   Graph that returns a computed value.
   /// * The callee gets no kernel id. A Graph has no ``.cpp`` under ``kernels/``,
-  ///   so registering it in ``func_name_to_id_`` would put a phantom entry in
+  ///   so registering it in the kernel registrations would put a phantom entry in
   ///   ``kernel_config.py``'s KERNELS list pointing at a file that does not
   ///   exist.
   ///
@@ -3743,11 +3741,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     const std::string& callee_name = info.inner_callee->name_;
     CoreType core_type = InferFunctionCoreType(info.inner_callee);
-    (*func_name_to_core_type_)[callee_name] = core_type;
 
-    int func_id = GetOrCreateFuncId(callee_name, func_name_to_id_, next_func_id_);
     auto params = BuildWrapperReorderedParams(call, spmd_func, info.inner_call);
-    RecordKernelSignature(callee_name, params);
+    int func_id = RegisterKernel(callee_name, core_type, params);
 
     BuildSpmdCallDispatchPlan(call, spmd_func, info.inner_callee, callee_name, core_type, func_id,
                               std::move(params), capture_plain_task_id)
@@ -3770,14 +3766,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
       INTERNAL_CHECK(aiv_func != nullptr) << "Internal error: AIV function '" << info.aiv_name
                                           << "' not found for Group '" << group_name << "'";
 
-      (*func_name_to_core_type_)[info.aiv_name] = CoreType::VECTOR;
-      int aiv_id = GetOrCreateFuncId(info.aiv_name, func_name_to_id_, next_func_id_);
-
       // Reorder params from wrapper param order to inner kernel arg order.
       INTERNAL_CHECK(info.inner_call != nullptr && info.inner_callee != nullptr)
           << "Internal error: no inner call found in AIV-only Group '" << group_name << "'";
       auto params = BuildWrapperReorderedParams(call, group_func, info.inner_call, bridge);
-      RecordKernelSignature(info.aiv_name, params);
+      int aiv_id = RegisterKernel(info.aiv_name, CoreType::VECTOR, params);
 
       BuildAivOnlyGroupDispatchPlan(call, launch_func, group_name, aiv_func, aiv_id, std::move(params),
                                     capture_plain_task_id)
@@ -3797,18 +3790,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
     INTERNAL_CHECK_SPAN(aiv_func != nullptr, call->span_) << "Internal error: AIV function '" << info.aiv_name
                                                           << "' not found for Group '" << group_name << "'";
 
-    (*func_name_to_core_type_)[info.aic_name] = CoreType::CUBE;
-    (*func_name_to_core_type_)[info.aiv_name] = CoreType::VECTOR;
-
     // Reorder params from wrapper param order to inner kernel arg order.
     INTERNAL_CHECK(info.inner_call != nullptr && info.inner_callee != nullptr)
         << "Internal error: no inner call found in MixedKernels Group '" << group_name << "'";
     auto params = BuildWrapperReorderedParams(call, group_func, info.inner_call, bridge);
-    RecordKernelSignature(info.aic_name, params);
-    RecordKernelSignature(info.aiv_name, params);
-
-    int aic_id = GetOrCreateFuncId(info.aic_name, func_name_to_id_, next_func_id_);
-    int aiv_id = GetOrCreateFuncId(info.aiv_name, func_name_to_id_, next_func_id_);
+    int aic_id = RegisterKernel(info.aic_name, CoreType::CUBE, params);
+    int aiv_id = RegisterKernel(info.aiv_name, CoreType::VECTOR, params);
 
     BuildMixedGroupDispatchPlan(call, launch_func, group_name, aic_id, aiv_id, aiv_func, std::move(params),
                                 capture_plain_task_id)
@@ -4664,10 +4651,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   const ProgramPtr& program_;
-  std::map<std::string, int>* func_name_to_id_;
-  std::map<std::string, CoreType>* func_name_to_core_type_;
-  std::map<std::string, std::vector<std::string>>* func_name_to_signature_;
-  int* next_func_id_;
+  KernelRegistrations* registrations_;
   std::unordered_map<const Var*, std::string> emit_name_map_;
   // Only Graph boundary scalars are wrappers; body-local scalars hold values.
   std::unordered_map<const Var*, size_t> graph_scalar_params_;
@@ -4916,10 +4900,8 @@ std::string GenerateDynamicDimDefs(const std::vector<VarPtr>& params, const std:
 /// boundary parameter's origin through task argument forwarding. Converting it
 /// to an integer would freeze the recording invocation's value on every replay.
 std::string GenerateGraphFunctions(const ProgramPtr& program, const FunctionPtr& entry,
-                                   std::map<std::string, int>* func_name_to_id,
-                                   std::map<std::string, CoreType>* func_name_to_core_type,
-                                   std::map<std::string, std::vector<std::string>>* func_name_to_signature,
-                                   int* next_func_id, GraphConfigScalarSlots* static_scalar_slots) {
+                                   KernelRegistrations* registrations,
+                                   GraphConfigScalarSlots* static_scalar_slots) {
   std::ostringstream oss;
   const auto graph_functions = CollectReferencedGraphFunctions(program, entry);
   if (graph_functions.empty()) return "";
@@ -4976,8 +4958,7 @@ static std::vector<uint64_t> pypto_graph_boundary_layout(const GraphTaskArgs& ar
       emit_name_map[param.get()] = name;
       param_emit_names.insert(std::move(name));
     }
-    OrchestrationStmtCodegen body_codegen(program, func_name_to_id, func_name_to_core_type,
-                                          func_name_to_signature, next_func_id, std::move(emit_name_map),
+    OrchestrationStmtCodegen body_codegen(program, registrations, std::move(emit_name_map),
                                           /*param_name_set=*/{}, /*param_name_to_orch_index=*/{},
                                           /*packed_fp4_axis=*/{}, /*dist_param_to_ctx_param=*/{});
     body_codegen.SetTaskVarPrefix("g" + std::to_string(graph_index) + "_");
@@ -5061,10 +5042,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   CHECK(func != nullptr) << "Cannot generate orchestration for null function";
   VerifyOrchestrationCodegenPreconditions(program, func);
 
-  std::map<std::string, int> func_name_to_id;
-  std::map<std::string, CoreType> func_name_to_core_type;
-  std::map<std::string, std::vector<std::string>> func_name_to_signature;
-  int next_func_id = 0;
+  KernelRegistrations registrations;
 
   OrchestrationInfoCollector info_collector;
   info_collector.VisitStmt(func->body_);
@@ -5141,8 +5119,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
 
   std::ostringstream oss;
 
-  OrchestrationStmtCodegen stmt_codegen(program, &func_name_to_id, &func_name_to_core_type,
-                                        &func_name_to_signature, &next_func_id, std::move(emit_name_map),
+  OrchestrationStmtCodegen stmt_codegen(program, &registrations, std::move(emit_name_map),
                                         std::move(param_name_set), std::move(param_name_to_orch_index),
                                         std::move(packed_fp4_axis), std::move(dist_param_to_ctx_param));
   // Reserve every external reference before allocating NZ temporaries, even
@@ -5176,8 +5153,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   // boundary slots the entry must declare static for safe replay.
   GraphConfigScalarSlots graph_config_scalar_slots;
   const std::string graph_functions =
-      GenerateGraphFunctions(program, func, &func_name_to_id, &func_name_to_core_type,
-                             &func_name_to_signature, &next_func_id, &graph_config_scalar_slots);
+      GenerateGraphFunctions(program, func, &registrations, &graph_config_scalar_slots);
   stmt_codegen.SetGraphConfigScalarSlots(std::move(graph_config_scalar_slots));
   stmt_codegen.VisitStmt(func->body_);
 
@@ -5255,8 +5231,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   oss << "}\n\n";
   oss << "}  // extern \"C\"\n";
 
-  return OrchestrationResult{oss.str(), std::move(func_name_to_id), std::move(func_name_to_core_type),
-                             std::move(func_name_to_signature), std::move(orchestration_signature)};
+  return OrchestrationResult{oss.str(), std::move(registrations.entries), std::move(orchestration_signature)};
 }
 
 }  // namespace codegen

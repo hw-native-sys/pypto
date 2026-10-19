@@ -190,6 +190,12 @@ inline const PassProperties kOutlineIncoreScopesProperties{
 inline const PassProperties kOutlineClusterScopesProperties{
     .required = {IRProperty::SSAForm}, .produced = {IRProperty::SSAForm, IRProperty::ClusterOutlined}};
 
+inline const PassProperties kDeduplicateOutlinedKernelsProperties{
+    .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::ClusterOutlined,
+                 IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::ClusterOutlined,
+                 IRProperty::NormalizedStmtStructure}};
+
 // -- Hierarchy outlining pass -------------------------------------------------
 
 inline const PassProperties kOutlineHierarchyScopesProperties{

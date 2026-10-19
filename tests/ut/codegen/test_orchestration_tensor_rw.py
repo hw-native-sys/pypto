@@ -577,9 +577,9 @@ class TestTensorReadWriteOffsetCodegen:
         orch_result = _generate_orch_result(transformed)
         code = orch_result.code
         expected_ids = (
-            orch_result.func_name_to_id["cube_consumer"],
-            orch_result.func_name_to_id["vector_producer"],
-            orch_result.func_name_to_id["vector_producer"],
+            {r.code_name: r.func_id for r in orch_result.kernel_registrations}["cube_consumer"],
+            {r.code_name: r.func_id for r in orch_result.kernel_registrations}["vector_producer"],
+            {r.code_name: r.func_id for r in orch_result.kernel_registrations}["vector_producer"],
         )
 
         assert f"MixedKernels mixed_0 = {{{expected_ids[0]}, {expected_ids[1]}, {expected_ids[2]}}};" in code
@@ -617,9 +617,9 @@ class TestTensorReadWriteOffsetCodegen:
         orch_result = _generate_orch_result(transformed)
         code = orch_result.code
         expected_ids = (
-            orch_result.func_name_to_id[aic_funcs[0].name],
-            orch_result.func_name_to_id[aiv_funcs[0].name],
-            orch_result.func_name_to_id[aiv_funcs[0].name],
+            {r.code_name: r.func_id for r in orch_result.kernel_registrations}[aic_funcs[0].name],
+            {r.code_name: r.func_id for r in orch_result.kernel_registrations}[aiv_funcs[0].name],
+            {r.code_name: r.func_id for r in orch_result.kernel_registrations}[aiv_funcs[0].name],
         )
 
         assert f"MixedKernels mixed_0 = {{{expected_ids[0]}, {expected_ids[1]}, {expected_ids[2]}}};" in code
@@ -1231,11 +1231,13 @@ class TestTensorReadWriteOffsetCodegen:
         # dir_mask=3 is two rings: 2 * 4 slots * 512 B / sizeof(float) == 1024 elements.
         assert shape_values == ["1024"], code
         assert "rt_submit_task" in code, code
-        assert result.func_name_to_signature["cube_side"] == result.func_name_to_signature["vec_side"]
+        assert {r.code_name: r.signature for r in result.kernel_registrations}["cube_side"] == {
+            r.code_name: r.signature for r in result.kernel_registrations
+        }["vec_side"]
         expected_mixed = (
-            result.func_name_to_id["cube_side"],
-            result.func_name_to_id["vec_side"],
-            result.func_name_to_id["vec_side"],
+            {r.code_name: r.func_id for r in result.kernel_registrations}["cube_side"],
+            {r.code_name: r.func_id for r in result.kernel_registrations}["vec_side"],
+            {r.code_name: r.func_id for r in result.kernel_registrations}["vec_side"],
         )
         assert (
             f"MixedKernels mixed_0 = {{{expected_mixed[0]}, {expected_mixed[1]}, {expected_mixed[2]}}};"

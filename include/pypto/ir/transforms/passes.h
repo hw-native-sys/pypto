@@ -493,6 +493,9 @@ Pass OutlineHierarchyScopes();
  */
 Pass OutlineClusterScopes();
 
+/// Reuse closed outlined InCore kernels and exclusive Group bundles, preserving every dispatch.
+Pass DeduplicateOutlinedKernels();
+
 /**
  * @brief Outline Graph scopes into separate `FunctionType::Graph` functions
  *

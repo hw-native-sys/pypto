@@ -100,17 +100,16 @@ class TestQwen3JITLowering:
         assert "qwen3_decode" in names
 
         # OutlineIncoreScopes extracts each ``pl.at`` block into a separate
-        # InCore-class function. Expect one per name_hint in the kernel files.
+        # InCore-class function. Equivalent v/k and up/gate kernels share a
+        # definition after DeduplicateOutlinedKernels; their dispatches remain.
         expected_outlined_hints = {
             "rmsnorm",  # input_rmsnorm scope
             "post_rmsnorm",  # post_rmsnorm scope
             "q_proj",  # q_projection scope
             "k_proj",  # k_projection scope
-            "v_proj",  # v_projection scope
             "out_proj_residual",  # out_projection_residual scope (with split)
             "down_proj_residual",  # down_projection_residual scope (with split)
             "gate_proj",  # mlp_block first scope
-            "up_proj",  # mlp_block second scope
             "silu",  # mlp_block third scope
             "rope_kv_cache",  # rope_kv_cache_update scope
         }
@@ -118,6 +117,28 @@ class TestQwen3JITLowering:
             assert any(n.startswith(hint) or n == hint for n in names), (
                 f"Expected an outlined function for ``pl.at(name_hint='{hint}')``; got functions: {names}"
             )
+
+        class Calls(ir.IRVisitor):
+            def __init__(self):
+                super().__init__()
+                self.names = []
+
+            def visit_call(self, op):
+                if isinstance(op.op, ir.GlobalVar):
+                    self.names.append(op.op.name)
+                super().visit_call(op)
+
+            def visit_submit(self, op):
+                if isinstance(op.op, ir.GlobalVar):
+                    self.names.append(op.op.name)
+                super().visit_submit(op)
+
+        calls = Calls()
+        entry = post_pass.get_function("qwen3_decode")
+        assert entry is not None
+        calls.visit_function(entry)
+        assert calls.names.count("k_proj") == 2
+        assert calls.names.count("gate_proj") == 2
 
     def test_qwen3_decode_post_pass_has_orchestration_entry(self, post_pass):
         """The entry function lands as Orchestration after outlining."""

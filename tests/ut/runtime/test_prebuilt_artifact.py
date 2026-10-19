@@ -1406,5 +1406,33 @@ def test_generated_hit_checks_capabilities_of_ready_payload(tmp_path, fake_runti
     load.assert_not_called()
 
 
+def test_shared_binary_keeps_distinct_registrations(tmp_path, fake_runtime):
+    kernels = [
+        ({"func_id": 0, "name": "step", "signature": [Direction.IN]}, b"same code"),
+        ({"func_id": 1, "name": "step", "signature": [Direction.INOUT]}, b"same code"),
+    ]
+    _prebuilt.write_chip_binaries(
+        tmp_path,
+        "a2a3sim",
+        {"source": "main.cpp", "function_name": "entry"},
+        kernels,
+        b"orchestration",
+        "test_runtime",
+        {},
+    )
+    record = json.loads((tmp_path / _prebuilt.BINARY_MANIFEST).read_text())
+    assert record["kernels"][0]["binary"] == record["kernels"][1]["binary"]
+    assert len(list((tmp_path / "prebuilt").glob("kernel_*.bin"))) == 1
+    loaded = _prebuilt._read_chip(tmp_path, "a2a3sim", None)
+    assert [k["func_id"] for k in loaded["kernels"]] == [0, 1]
+    assert loaded["kernels"][0]["binary"] is loaded["kernels"][1]["binary"]
+    assert loaded["kernels"][0]["signature"] != loaded["kernels"][1]["signature"]
+    # Sharing cannot hide inconsistent integrity claims in a later reference.
+    record["kernels"][1]["binary"]["sha256"] = "0" * 64
+    (tmp_path / _prebuilt.BINARY_MANIFEST).write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="digest mismatch"):
+        _prebuilt._read_chip(tmp_path, "a2a3sim", None)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

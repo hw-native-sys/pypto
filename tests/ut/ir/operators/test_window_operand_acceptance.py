@@ -102,7 +102,7 @@ WINDOW_REJECT_BY_DESIGN = {
         "tensor.reinterpret_view"
     ).name: "no zero-copy dtype reinterpretation contract for window storage",
     # AIV/AIC split boundary ops are cube/vector-lane transfers, not GM reads; a window operand
-    # is out of scope and rejected upstream (docs/en/dev/passes/11-convert_tensor_to_tile_ops.md).
+    # is out of scope and rejected upstream (docs/en/dev/passes/12-convert_tensor_to_tile_ops.md).
     ir.get_op("tensor.aiv_shard").name: "cross-lane split boundary, not a GM read",
     ir.get_op("tensor.aic_gather").name: "cross-lane split boundary, not a GM read",
 }

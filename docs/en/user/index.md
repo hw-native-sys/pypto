@@ -87,7 +87,7 @@ corresponding material lives in the [developer documentation](../dev/index.md):
 
 | Topic | Current location |
 | ----- | ---------------- |
-| Mixed kernels (AIC + AIV in one function) | [LowerAutoVectorSplit](../dev/passes/23-lower_auto_vector_split.md), [ExpandMixedKernel](../dev/passes/24-expand_mixed_kernel.md), [TPUSH/TPOP](../reference/pto-isa/01-tpush_tpop.md) |
+| Mixed kernels (AIC + AIV in one function) | [LowerAutoVectorSplit](../dev/passes/24-lower_auto_vector_split.md), [ExpandMixedKernel](../dev/passes/25-expand_mixed_kernel.md), [TPUSH/TPOP](../reference/pto-isa/01-tpush_tpop.md) |
 | Performance hints and diagnostics | [Diagnostics](../dev/passes/92-diagnostics.md), [Compile Profiling](../dev/01-compile-profiling.md) |
 | Ring sizing | [Per-Task Ring Sizing](../dev/05-runtime-ring-sizing.md) |
 | External C++ kernels | [Integrating Hand-Written C++ Kernels](../dev/language/04-external-kernels.md) |

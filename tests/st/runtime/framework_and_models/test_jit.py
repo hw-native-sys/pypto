@@ -25,6 +25,7 @@ from pathlib import Path
 import pypto.language as pl
 import pytest
 import torch
+from pypto import ir
 from pypto.ir.compiled_program import CompiledProgram
 
 
@@ -180,6 +181,37 @@ def _persistent_process(root, platform, device_id, consume, connection, change_s
     finally:
         cache_logger.removeHandler(handler)
         connection.close()
+
+
+@pl.jit.inline
+def dedup_double_step(x: pl.Tensor[[16, 16], pl.FP32], out: pl.Tensor[[16, 16], pl.FP32]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        value = pl.load(x, [0, 0], [16, 16])
+        doubled = pl.add(value, value)
+        pl.store(doubled, [0, 0], out)
+    return out
+
+
+@pl.jit
+def dedup_double_twice(x: pl.Tensor[[16, 16], pl.FP32], out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]):
+    temporary = pl.create_tensor([16, 16], pl.FP32)
+    temporary = dedup_double_step(x, temporary)
+    out = dedup_double_step(temporary, out)
+    return out
+
+
+def test_deduplicated_inline_kernel_executes_twice(test_config):
+    """One code definition must still execute both dependent doubling tasks."""
+    x = torch.arange(256, dtype=torch.float32).reshape(16, 16)
+    out = torch.zeros_like(x)
+    lowered = dedup_double_twice.lower(x, out, config=test_config)
+    kernels = [
+        f for f in lowered.functions.values() if f.func_type in (ir.FunctionType.AIV, ir.FunctionType.AIC)
+    ]
+    assert len(kernels) == 1
+    dedup_double_twice(x, out, config=test_config)
+    if not test_config.codegen_only:
+        torch.testing.assert_close(out, x * 4)
 
 
 class TestJITExecution:

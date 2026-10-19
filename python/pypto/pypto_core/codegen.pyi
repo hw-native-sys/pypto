@@ -47,6 +47,18 @@ class PTOCodegen:
             >>> pto_code = cg.generate(program)
         """
 
+class KernelRegistration:
+    """Runtime tensor ABI and ID for a generated code unit."""
+
+    @property
+    def func_id(self) -> int: ...
+    @property
+    def code_name(self) -> str: ...
+    @property
+    def core_type(self) -> CoreType: ...
+    @property
+    def signature(self) -> list[str]: ...
+
 class OrchestrationResult:
     """Result of orchestration code generation."""
 
@@ -56,18 +68,8 @@ class OrchestrationResult:
         ...
 
     @property
-    def func_name_to_id(self) -> dict[str, int]:
-        """Kernel function name to func_id mapping."""
-        ...
-
-    @property
-    def func_name_to_core_type(self) -> dict[str, CoreType]:
-        """Kernel function name to core type mapping."""
-        ...
-
-    @property
-    def func_name_to_signature(self) -> dict[str, list[str]]:
-        """Kernel name to tensor-arg ArgDirection name list (scalars excluded), in task-payload order."""
+    def kernel_registrations(self) -> list[KernelRegistration]:
+        """Distinct runtime registrations, in func_id order; code may be shared."""
         ...
 
     @property
@@ -167,6 +169,7 @@ __all__ = [
     "BuiltinNextLevelSpec",
     "DistributedCodegen",
     "OrchestrationResult",
+    "KernelRegistration",
     "collect_vars_from_shape_expr",
     "generate_orchestration",
     "infer_function_core_type",

@@ -320,7 +320,7 @@ yields no value — no phi is materialized on the Acc tile.
 "Literal" covers **both** spellings a constant predicate arrives in: a DSL
 `init_cond=True`/`False` reaches the emitter as a BOOL-typed `ConstInt`, while a
 predicate an earlier pass folded reaches it as a `ConstBool` — which is what the
-generated `ko == 0` becomes when [`LowerPipelineLoops`](../passes/31-lower_pipeline_loops.md)
+generated `ko == 0` becomes when [`LowerPipelineLoops`](../passes/32-lower_pipeline_loops.md)
 replicates the K-loop *and* the enclosing loop is eliminated, so each replica's
 index is a literal. Both pick an arm outright, and an emitter that folded only
 one of the two would double the MADs of every K block it missed.
@@ -446,7 +446,7 @@ out of scope for this release (`pl.quant_mx` is MXFP8-only).
 | Shape-matched Mat→Scale `tmov` | Flat `[1,G]` must `treshape` to `[M,K/32]` (or B-side shape) first. |
 | Order | PyPTO emits Mat→scaling `tmov` in source order; PTOAS `PTOA5NormalizeTMovPass` reorders `tget_scale_addr` before it (ISA bind-then-fill). |
 | `#pto.layout` / mx load | `mx_a_zz` / `mx_b_nn` / …; codegen emits logical rank-2 `make_tensor_view` (PTOAS v0.60 InferPTOLayout / EmitC map the pack). |
-| Coverage | `pto.tmatmul.mx` / `.acc` / `.bias` + `pto.tget_scale_addr`; `pto.tquant.mx` via [LowerCompositeOps](../passes/13-lower_composite_ops.md). |
+| Coverage | `pto.tmatmul.mx` / `.acc` / `.bias` + `pto.tget_scale_addr`; `pto.tquant.mx` via [LowerCompositeOps](../passes/14-lower_composite_ops.md). |
 
 ### Tile-only GEMV family (A2/A3)
 

@@ -26,3 +26,8 @@ target_include_directories(pypto_structural_comparison_arena_test PRIVATE ${CMAK
 # Keep assert-based checks enabled in release builds as well.
 target_compile_options(pypto_structural_comparison_arena_test PRIVATE -UNDEBUG)
 add_test(NAME pypto_structural_comparison_arena_test COMMAND pypto_structural_comparison_arena_test)
+
+add_executable(pypto_bounded_kernel_index_test bounded_kernel_index_test.cpp)
+target_include_directories(pypto_bounded_kernel_index_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(pypto_bounded_kernel_index_test PRIVATE -UNDEBUG)
+add_test(NAME pypto_bounded_kernel_index_test COMMAND pypto_bounded_kernel_index_test)

@@ -58,8 +58,6 @@ inline ir::CallPtr AsCallOrSubmitView(const ir::ExprPtr& expr) {
 }
 std::string FormatConstIntValue(const ir::ConstIntPtr& c, const std::string& cpp_type);
 std::string FormatConstFloatValue(const ir::ConstFloatPtr& c, const std::string& cpp_type);
-int GetOrCreateFuncId(const std::string& func_name, std::map<std::string, int>* func_name_to_id,
-                      int* next_func_id);
 
 /// Constant-evaluate ``expr`` if it is a ``ConstInt``; returns ``nullopt``
 /// otherwise. Thin forward to ``ir::transform_utils::EvalConstInt``.

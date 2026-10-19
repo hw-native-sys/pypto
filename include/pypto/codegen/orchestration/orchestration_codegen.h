@@ -12,7 +12,6 @@
 #ifndef PYPTO_CODEGEN_ORCHESTRATION_ORCHESTRATION_CODEGEN_H_
 #define PYPTO_CODEGEN_ORCHESTRATION_ORCHESTRATION_CODEGEN_H_
 
-#include <map>
 #include <string>
 #include <vector>
 
@@ -23,20 +22,18 @@
 namespace pypto {
 namespace codegen {
 
-/**
- * @brief Result of orchestration code generation
- *
- * Contains generated C++ code and metadata about kernel functions.
- */
+/// One runtime registration. Several signatures can share the same generated code.
+struct KernelRegistration {
+  int func_id;
+  std::string code_name;
+  ir::CoreType core_type;
+  std::vector<std::string> signature;  ///< Tensor directions in payload order; scalars excluded.
+};
+
+/// Generated orchestration and its runtime registrations.
 struct OrchestrationResult {
-  std::string code;                                            ///< Generated C++ orchestration code
-  std::map<std::string, int> func_name_to_id;                  ///< Kernel function name -> ID mapping
-  std::map<std::string, ir::CoreType> func_name_to_core_type;  ///< Kernel function name -> core type
-  /// Kernel function name -> runtime ArgDirection name list ("IN"/"OUT"/
-  /// "INOUT"/"SCALAR"), in task-payload (tensors-first) order. Consumed by
-  /// kernel_config.py to set each CoreCallable signature so the runtime tensor
-  /// dump's per-subtask tensor-arg count matches the task payload tensor_count.
-  std::map<std::string, std::vector<std::string>> func_name_to_signature;
+  std::string code;
+  std::vector<KernelRegistration> kernel_registrations;
   /// Orchestration entry's per-tensor runtime ArgDirection names ("IN"/"OUT"/
   /// "INOUT"), in orch_args tensor order (declaration order, scalars skipped).
   /// This matches the orch tensor index the runtime uses in

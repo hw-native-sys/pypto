@@ -289,7 +289,7 @@ init 操作数。由于 `matmul_acc` 是原地操作（`set_output_reuses_input(
 
 「字面量」涵盖常量谓词到达 emitter 时的**两种**形态：DSL 写法 `init_cond=True`/
 `False` 到达时是 BOOL 类型的 `ConstInt`，而被更早的 pass 折叠过的谓词到达时是
-`ConstBool` —— 当 [`LowerPipelineLoops`](../passes/31-lower_pipeline_loops.md)
+`ConstBool` —— 当 [`LowerPipelineLoops`](../passes/32-lower_pipeline_loops.md)
 复制 K-loop *且*外层循环被消除、每个副本的索引成为字面量时，生成的 `ko == 0` 正是
 这种形态。两者都会直接选定一个分支；若 emitter 只折叠其中一种，未覆盖到的每个 K
 block 都会发出双倍 MAD。
@@ -392,7 +392,7 @@ A5 会把左侧显式 FP4→FP8 tile cast 展开为 FP4→BF16→FP32→FP8E4M3F
 | shape-matched Mat→Scale `tmov` | flat `[1,G]` 须先 `treshape` 到 `[M,K/32]`（或 B 侧 shape） |
 | 顺序 | PyPTO 按源序发 Mat→scaling `tmov`；PTOAS `PTOA5NormalizeTMovPass` 把 `tget_scale_addr` 重排到它前面（ISA bind-before-fill） |
 | `#pto.layout` / mx load | `mx_a_zz` / `mx_b_nn` / …；codegen 发射逻辑 rank-2 `make_tensor_view`（PTOAS v0.60 InferPTOLayout / EmitC 映射物理 pack） |
-| 本阶段覆盖 | `pto.tmatmul.mx` / `.acc` / `.bias` + `pto.tget_scale_addr`；`pto.tquant.mx` 见 [LowerCompositeOps](../passes/13-lower_composite_ops.md) |
+| 本阶段覆盖 | `pto.tmatmul.mx` / `.acc` / `.bias` + `pto.tget_scale_addr`；`pto.tquant.mx` 见 [LowerCompositeOps](../passes/14-lower_composite_ops.md) |
 
 ### 仅 Tile 的 GEMV 家族（A2/A3）
 

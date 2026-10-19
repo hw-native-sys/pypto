@@ -256,10 +256,10 @@ for extent in (TILE, 3 * TILE):
 | **报 DN layout-only shorthand 的 `ParserTypeError`** | `pl.Tensor[..., pl.DN]` —— 已移除，它把两套坐标系压进了一条注解 | 写源 shape、不带标记；在使用处用 `pl.transpose(x, -2, -1)` 导出 DN；或让它从产生 DN 的算子经切片/reshape 继承 |
 | **只有两个任务重叠时结果才出错** | 读写缓冲区声明成了 `In` 或 `Out` 而非 `InOut` | 按 kernel 实际行为声明方向 |
 | **读 `Out` 参数读到垃圾** | `Out` 承诺的是先写后读 | 若此前内容有意义，改用 `pl.InOut[...]` |
-| **本以为会隐式提升，却要求 `pl.cast`** | 没有隐式提升 | 补上 cast；多跳类型对见 [LegalizeTileCast](../../dev/passes/17-legalize_tile_cast.md) |
+| **本以为会隐式提升，却要求 `pl.cast`** | 没有隐式提升 | 补上 cast；多跳类型对见 [LegalizeTileCast](../../dev/passes/18-legalize_tile_cast.md) |
 | **两个本应相同的维度被当成互相独立** | 调了两次 `pl.dynamic("M")` | 只创建一次 `DynVar` 并复用该对象 |
 
-并非每个 `pl.cast` 都是一条指令。一对 `(src, dst)` 是映射到单条硬件 `pto.tcvt` 还是展开成一条链，取决于目标架构：`INT32 -> FP16` 在 Ascend910 上是一条指令，在 Ascend950 上会降为 `INT32 -> FP32 -> FP16`。每一跳花费一次 `tcvt`；当中间类型比源类型更窄时，结果可能与直接舍入的转换相差目标类型的 1 ULP。**这是预期行为，不是缺陷** —— 各架构的对照表见 [LegalizeTileCast](../../dev/passes/17-legalize_tile_cast.md)。
+并非每个 `pl.cast` 都是一条指令。一对 `(src, dst)` 是映射到单条硬件 `pto.tcvt` 还是展开成一条链，取决于目标架构：`INT32 -> FP16` 在 Ascend910 上是一条指令，在 Ascend950 上会降为 `INT32 -> FP32 -> FP16`。每一跳花费一次 `tcvt`；当中间类型比源类型更窄时，结果可能与直接舍入的转换相差目标类型的 1 ULP。**这是预期行为，不是缺陷** —— 各架构的对照表见 [LegalizeTileCast](../../dev/passes/18-legalize_tile_cast.md)。
 
 对 `Tensor` 和 `Tile` 输入，`pl.cast` 还接受仅关键字参数 `saturation_mode`（`"on"` / `"off"`，或 `1` / `0`）。`"on"` 把超出目标值域的结果钳制到该值域；`"off"` 保留目标平台的非饱和转换，其溢出行为由架构定义。**当目标类型是整数时，默认值是 `"on"`** —— 没有任何标准规定"转换到整数时溢出"应当产生什么，在两者之间"意外得到钳制"更安全，而且在 A2/A3 上它正是硬件原生支持的转换。**浮点**目标类型则保持原样：IEEE 规定窄化溢出产生无穷，除非你显式要求 `"on"`，PyPTO 与之保持一致。多跳 cast 只把该模式作用于最后一跳，即真正到达你所指定 dtype 的那一跳。
 
@@ -269,4 +269,4 @@ for extent in (TILE, 3 * TILE):
 - [内存与数据搬运](03-memory.md) —— 在这些类型所命名的空间之间搬运数据。
 - [算子](../ops/index.md) —— 哪些算子接受 `Tensor`、哪些接受 `Tile`。
 - [IR 类型](../../dev/ir/02-types.md) —— 这些注解所构建的 IR 层类型系统。
-- [LegalizeTileCast](../../dev/passes/17-legalize_tile_cast.md) —— 分架构的 cast 展开及其精度后果。
+- [LegalizeTileCast](../../dev/passes/18-legalize_tile_cast.md) —— 分架构的 cast 展开及其精度后果。

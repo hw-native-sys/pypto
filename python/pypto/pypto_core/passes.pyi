@@ -523,6 +523,9 @@ def convert_to_ssa() -> Pass:
 def outline_incore_scopes() -> Pass:
     """Create a pass that outlines InCore scopes."""
 
+def deduplicate_outlined_kernels() -> Pass:
+    """Reuse closed outlined kernels and exclusive Group bundles; preserve every dispatch."""
+
 def outline_cluster_scopes() -> Pass:
     """Create a pass that outlines Cluster scopes to Group and standalone Spmd scopes to Spmd."""
 
@@ -1106,6 +1109,7 @@ __all__ = [
     "convert_to_ssa",
     "outline_incore_scopes",
     "outline_cluster_scopes",
+    "deduplicate_outlined_kernels",
     "outline_hierarchy_scopes",
     "outline_graph_scopes",
     "convert_tensor_to_tile_ops",

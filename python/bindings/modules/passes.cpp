@@ -540,6 +540,9 @@ void BindPass(nb::module_& m) {
   passes.def("convert_to_ssa", &pass::ConvertToSSA, "Create an SSA conversion pass");
   passes.def("outline_incore_scopes", &pass::OutlineIncoreScopes,
              "Create a pass that outlines InCore scopes into separate functions");
+  passes.def("deduplicate_outlined_kernels", &pass::DeduplicateOutlinedKernels,
+             "Reuse closed outlined kernel definitions while preserving all dispatches");
+
   passes.def("outline_cluster_scopes", &pass::OutlineClusterScopes,
              "Create a pass that outlines Cluster scopes into Group functions "
              "and standalone Spmd scopes into Spmd functions");

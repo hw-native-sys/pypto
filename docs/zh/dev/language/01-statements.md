@@ -24,7 +24,7 @@ acc[t0 : t0 + R, :] = pl.matmul_acc(
 
 第一个 K 步只覆盖该窗口，后续步骤在该窗口内累加，其他窗口保留原值。
 编译器可将局部累加器中大小一致的行窗口打包为连续的 L0C 窗口；参见
-[累加器逻辑行窗口](../passes/14-flatten_tile_nd_to_2d.md#累加器逻辑行窗口)。
+[累加器逻辑行窗口](../passes/15-flatten_tile_nd_to_2d.md#累加器逻辑行窗口)。
 
 ### If 语句 (SSA 风格)
 
@@ -114,7 +114,7 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | `pl.spmd(N, optimizations=[pl.split(MODE)])` | `Spmd(InCore(split=MODE))` | split 提示作用于内层 InCore（两种形式均适用） |
 | `pl.spmd(N, optimizations=[pl.cross_core_slot(slot_num=N)])` | `Spmd(InCore(slot_num=N))` | 槽位数作用于内层 InCore（两种形式均适用），可与 `pl.split(MODE)` 组合 |
 | `pl.scope(mode=pl.ScopeMode.MANUAL)` / `pl.manual_scope()` | `Runtime(manual=true)` | orchestrator 的 MANUAL scope——由用户管理任务排序。两种 `auto_scope` 模式下都可用（它是依赖语义选择）。见[手工依赖原语](02-manual_dependencies.md#手工依赖原语) |
-| `pl.scope()` | `Runtime(manual=false)` | orchestrator 的 AUTO scope（`SIMPLER_SCOPE()`）。手写它需要 `@pl.function(auto_scope=False)`（默认 `auto_scope=True` 下由编译器决定 AUTO 放置）。见 [MaterializeRuntimeScopes](../passes/50-materialize_runtime_scopes.md) |
+| `pl.scope()` | `Runtime(manual=false)` | orchestrator 的 AUTO scope（`SIMPLER_SCOPE()`）。手写它需要 `@pl.function(auto_scope=False)`（默认 `auto_scope=True` 下由编译器决定 AUTO 放置）。见 [MaterializeRuntimeScopes](../passes/51-materialize_runtime_scopes.md) |
 
 `pl.scope(..., name_hint="label")` 和 `pl.manual_scope(name_hint="label")`
 接受可选的字符串字面量，默认值为 `""`。print/parse 精确保留该标签，包括空白和转义字符。
@@ -139,7 +139,7 @@ IR 结构相等和哈希契约，因此不会被规范化删除。与提取作�
 除非算术分析能证明个数为正，否则每个 Out/InOut Tensor 都必须由调用方提供。
 遗漏输出会产生包含 Tensor 名称和参数位置的编译错误。空路径保留返回 Tensor
 已有的内容，不执行初始化。参见
-[LegalizeSpmdLaunches](../passes/41-legalize_spmd_launches.md)。
+[LegalizeSpmdLaunches](../passes/42-legalize_spmd_launches.md)。
 
 可选 `optimizations=[...]`。各条目彼此正交，可在同一列表中组合
 （例如 `[pl.split(MODE), pl.cross_core_slot(slot_num=4)]`）：
@@ -151,10 +151,10 @@ IR 结构相等和哈希契约，因此不会被规范化删除。与提取作�
 
 `pl.cross_core_slot(slot_num=N, local_slot_num=L)` 还可设置 A2/A3 本地消费者深度
 （`1 <= L <= N`）。省略 `L` 时，reserve 仍按环深度分配。A5 不支持显式本地深度。
-详见 [ExpandMixedKernel](../passes/24-expand_mixed_kernel.md)。
+详见 [ExpandMixedKernel](../passes/25-expand_mixed_kernel.md)。
 
 > `pl.split(MODE, slot_num=N)` 是该槽位数的已废弃别名，会发出警告——参见
-> [ExpandMixedKernel](../passes/24-expand_mixed_kernel.md#覆盖槽位数slot_num)。
+> [ExpandMixedKernel](../passes/25-expand_mixed_kernel.md#覆盖槽位数slot_num)。
 
 示例参见 [作用域与放置](../../user/language/04-scopes.md)。
 

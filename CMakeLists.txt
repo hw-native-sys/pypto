@@ -238,6 +238,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/op_conversion_registry.cpp
     src/ir/transforms/outline_incore_scopes_pass.cpp
     src/ir/transforms/outline_cluster_scopes_pass.cpp
+    src/ir/transforms/deduplicate_outlined_kernels_pass.cpp
     src/ir/transforms/outline_hierarchy_scopes_pass.cpp
     src/ir/transforms/outline_graph_scopes_pass.cpp
     src/ir/transforms/expand_mixed_kernel_pass.cpp

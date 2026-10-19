@@ -65,8 +65,7 @@ def test_host_reads_and_writes_use_tensor_pool_indices():
 def test_hbg_manifest_retains_host_control_transfers():
     config = _generate_config_file(
         "main",
-        {},
-        {},
+        [],
         runtime=passes.RuntimeKind.HOST_BUILD_GRAPH,
         host_tensor_indices=host_tensor_indices(_main(HostControl)),
     )

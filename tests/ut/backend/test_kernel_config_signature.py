@@ -21,17 +21,29 @@ is checked for syntactic validity with ``compile`` (which does not execute the
 ``simpler.task_interface`` import).
 """
 
+from types import SimpleNamespace
+from typing import cast
+
 import pytest
 from pypto.backend.pto_backend import _generate_config_file
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core import passes
+from pypto.pypto_core.codegen import KernelRegistration
 
 
-def _base_inputs() -> dict:
+def _registration(**fields) -> KernelRegistration:
+    # Detached metadata fixture; native result records are read-only.
+    return cast(KernelRegistration, SimpleNamespace(**fields))
+
+
+def _base_inputs(signature=None) -> dict:
     return {
         "orch_func_name": "main",
-        "func_name_to_id": {"matmul_aic": 0},
-        "func_name_to_core_type": {"matmul_aic": _ir_core.CoreType.CUBE},
+        "kernel_registrations": [
+            _registration(
+                func_id=0, code_name="matmul_aic", core_type=_ir_core.CoreType.CUBE, signature=signature or []
+            )
+        ],
     }
 
 
@@ -44,8 +56,7 @@ class TestKernelConfigSignature:
     def test_signature_emitted_for_matmul(self) -> None:
         # The matmul AIC kernel takes a, b (inputs) and c (write target).
         text = _generate_config_file(
-            **_base_inputs(),
-            func_name_to_signature={"matmul_aic": ["IN", "IN", "INOUT"]},
+            **_base_inputs(["IN", "IN", "INOUT"]),
         )
         # ArgDirection import is present and the kernel carries the signature.
         assert "from simpler.task_interface import ArgDirection as _D" in text
@@ -63,7 +74,7 @@ class TestKernelConfigSignature:
         assert _is_valid_python(text)
 
     def test_empty_signature_map_is_noop(self) -> None:
-        text = _generate_config_file(**_base_inputs(), func_name_to_signature={})
+        text = _generate_config_file(**_base_inputs([]))
         assert "ArgDirection" not in text
         assert '"signature"' not in text
         assert _is_valid_python(text)
@@ -73,8 +84,7 @@ class TestKernelConfigSignature:
         # the CoreCallable signature is a per-tensor-arg list); the emitter
         # writes the directions verbatim, preserving tensors-first order.
         text = _generate_config_file(
-            **_base_inputs(),
-            func_name_to_signature={"matmul_aic": ["IN", "IN", "INOUT", "OUT"]},
+            **_base_inputs(["IN", "IN", "INOUT", "OUT"]),
         )
         assert '"signature": [_D.IN, _D.IN, _D.INOUT, _D.OUT]' in text
         # No SCALAR members are emitted for codegen-produced signatures.
@@ -86,12 +96,14 @@ class TestKernelConfigSignature:
         # only the kernel with directions gets a "signature" field.
         text = _generate_config_file(
             orch_func_name="main",
-            func_name_to_id={"k_with": 0, "k_without": 1},
-            func_name_to_core_type={
-                "k_with": _ir_core.CoreType.VECTOR,
-                "k_without": _ir_core.CoreType.VECTOR,
-            },
-            func_name_to_signature={"k_with": ["IN", "OUT"]},
+            kernel_registrations=[
+                _registration(
+                    func_id=0, code_name="k_with", core_type=_ir_core.CoreType.VECTOR, signature=["IN", "OUT"]
+                ),
+                _registration(
+                    func_id=1, code_name="k_without", core_type=_ir_core.CoreType.VECTOR, signature=[]
+                ),
+            ],
         )
         assert "from simpler.task_interface import ArgDirection as _D" in text
         assert text.count('"signature"') == 1
@@ -133,8 +145,7 @@ class TestOrchestrationConfigSignature:
 
     def test_orchestration_and_kernel_signatures_coexist(self) -> None:
         text = _generate_config_file(
-            **_base_inputs(),
-            func_name_to_signature={"matmul_aic": ["IN", "IN", "INOUT"]},
+            **_base_inputs(["IN", "IN", "INOUT"]),
             orchestration_signature=["IN", "OUT"],
         )
         # Both the ORCHESTRATION and the KERNELS entry carry a signature.
@@ -202,6 +213,21 @@ class TestRuntimeWireNames:
     def test_unknown_wire_name_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="Unknown runtime 'ringbuffer'"):
             passes.runtime_kind_from_name("ringbuffer")
+
+
+def test_multiple_registrations_reference_one_source():
+    registrations = [
+        _registration(func_id=i, code_name="shared", core_type=_ir_core.CoreType.VECTOR, signature=signature)
+        for i, signature in enumerate([["IN"], ["INOUT"]])
+    ]
+    text = _generate_config_file("main", registrations)
+    assert text.count('"code_name": "shared"') == 2
+    assert text.count('"shared.cpp"') == 2
+    assert '"func_id": 0' in text and '"func_id": 1' in text
+    assert "[_D.IN]" in text and "[_D.INOUT]" in text
+    builtin_text = _generate_config_file("main", registrations, unshared_code_names={"shared"})
+    assert '"code_name"' not in builtin_text
+    assert _is_valid_python(text) and _is_valid_python(builtin_text)
 
 
 if __name__ == "__main__":

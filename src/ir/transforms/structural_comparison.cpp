@@ -11,6 +11,7 @@
 
 #include "pypto/ir/transforms/structural_comparison.h"
 
+#include <algorithm>
 #include <any>
 #include <array>
 #include <cstddef>
@@ -48,6 +49,7 @@
 #include "pypto/ir/transforms/utils/signature_symbols.h"
 #include "pypto/ir/type.h"
 #include "utils/structural_comparison_arena.h"
+#include "utils/structural_inspection.h"
 
 namespace pypto::ir {
 namespace {
@@ -119,6 +121,11 @@ class Projection {
     Run(root);
   }
 
+  void Inspect(const FunctionPtr& function, structural_comparison_detail::Inspection* inspection) {
+    inspection_ = inspection;
+    Run(function);
+  }
+
   [[nodiscard]] result_type InitResult() const { return {}; }
   void PushFieldName(const char* name) { path_.emplace_back(name); }
   void PopFieldName() { path_.pop_back(); }
@@ -158,6 +165,14 @@ class Projection {
   }
 
  private:
+  bool IsBodyContext() const {
+    if (std::find(path_.begin(), path_.end(), "body") == path_.end()) return false;
+    for (const auto& field : path_) {
+      if (field == "attrs" || field == "kwargs" || field == "type" || field == "return_types") return false;
+    }
+    return true;
+  }
+
   std::string CurrentPath() const {
     std::string path = "root";
     for (const auto& part : path_) {
@@ -172,6 +187,10 @@ class Projection {
   }
 
   Id Intern(std::string tag, std::string atom = "", Fields fields = {}) {
+    if (inspection_) {
+      inspection_->weight += 1 + tag.size() + atom.size() + fields.size();
+      for (const auto& field : fields) inspection_->weight += field.first.size();
+    }
     return collecting_ ? 0 : arena_.Intern(std::move(tag), std::move(atom), std::move(fields));
   }
 
@@ -386,6 +405,9 @@ class Projection {
       auto [it, inserted] = free_ids_.emplace(var.get(), free_ids_.size());
       binding = {"free_mapped", it->second};
     }
+    if (inspection_ && !collecting_ && found == bindings_.end()) {
+      inspection_->free_variables.push_back(var);
+    }
     path_.emplace_back("type");
     Fields fields{{"type", Value(var->GetType())}};
     path_.pop_back();
@@ -444,7 +466,11 @@ class Projection {
         use_parent_ = kForever;
       }
     }
-    auto& cache = node_cache_[definition ? 1 : 0];
+    // Inspection must observe both uses when one DAG node appears in executable
+    // code and in metadata: the latter reference cannot be rewritten. Equality
+    // and binding verification retain their original two-cache behavior.
+    const size_t context = inspection_ && !collecting_ && !IsBodyContext() ? 2 : 0;
+    auto& cache = node_cache_[context + (definition ? 1 : 0)];
     auto cached = cache.find(node.get());
     if (cached != cache.end()) {
       if (verify_bindings_ && collecting_ && As<Stmt>(node)) Unsupported("SharedStatement");
@@ -452,6 +478,7 @@ class Projection {
       use_parent_ = saved_parent;
       return cached->second;
     }
+    if (inspection_ && !collecting_) inspection_->nodes.push_back(node);
     if (depth_ >= 512) Unsupported("DepthLimitExceeded");
     if (!active_.insert(node.get()).second) Unsupported("CyclicStructure");
     ++depth_;
@@ -525,6 +552,7 @@ class Projection {
     if (depth_ >= 512) Unsupported("DepthLimitExceeded");
     if (!active_.insert(type.get()).second) Unsupported("CyclicStructure");
     ++depth_;
+    if (inspection_ && !collecting_) inspection_->types.push_back(type);
     Id result = DispatchType(type);
     if (use_id != kForever) use_postorder_.push_back(use_id);
     use_parent_ = saved_parent;
@@ -569,6 +597,10 @@ class Projection {
       return Type(value);
     } else if constexpr (std::is_base_of_v<Op, T>) {
       if (!value) Unsupported("NullOperator");
+      if (inspection_ && !collecting_) {
+        const bool body_callee = !path_.empty() && path_.back() == "op" && IsBodyContext();
+        inspection_->operators.emplace_back(value, body_callee);
+      }
       return Intern(value->TypeName(), value->name_, {{"kind", Value(value->GetKind())}});
     } else {
       Unsupported("UnsupportedPointerField");
@@ -674,6 +706,7 @@ class Projection {
     Unsupported("UnsupportedAttributeType: " + DemangleTypeName(value.type().name()));
   }
 
+  structural_comparison_detail::Inspection* inspection_ = nullptr;
   Arena& arena_;
   bool map_free_;
   bool verify_bindings_ = false;
@@ -697,7 +730,7 @@ class Projection {
   std::unordered_set<const Var*> implicit_allocations_;
   std::unordered_set<const Var*> implicit_storage_;
   std::unordered_set<const Var*> definitions_;
-  std::array<std::unordered_map<const IRNode*, Id>, 2> node_cache_;
+  std::array<std::unordered_map<const IRNode*, Id>, 4> node_cache_;
   std::unordered_map<const ir::Type*, Id> type_cache_;
   std::unordered_set<const void*> active_;
   std::vector<std::string> path_;
@@ -722,6 +755,14 @@ uint64_t HashStructure(const Root& root, bool map_free) {
 }
 
 }  // namespace
+
+structural_comparison_detail::Inspection structural_comparison_detail::Inspect(const FunctionPtr& function) {
+  Arena arena;
+  Projection projection(arena, false);
+  Inspection inspection;
+  projection.Inspect(function, &inspection);
+  return inspection;
+}
 
 void verify_structural_bindings(const IRNodePtr& node) {
   Arena arena;

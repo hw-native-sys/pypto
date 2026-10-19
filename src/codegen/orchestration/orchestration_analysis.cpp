@@ -73,14 +73,6 @@ std::string FormatConstFloatValue(const ConstFloatPtr& c, const std::string& cpp
   return std::to_string(v);  // double
 }
 
-int GetOrCreateFuncId(const std::string& func_name, std::map<std::string, int>* func_name_to_id,
-                      int* next_func_id) {
-  if (func_name_to_id->find(func_name) == func_name_to_id->end()) {
-    (*func_name_to_id)[func_name] = (*next_func_id)++;
-  }
-  return (*func_name_to_id)[func_name];
-}
-
 int64_t ComputeGMPipeWorkspaceElements(const ProgramPtr& program, const FunctionPtr& root_func) {
   std::map<std::pair<int, int>, int> slot_size_by_pipe;
   std::map<std::pair<int, int>, int> slot_count_by_pipe;

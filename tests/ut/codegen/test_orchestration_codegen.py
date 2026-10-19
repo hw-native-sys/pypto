@@ -283,13 +283,13 @@ class TestOrchestration:
 
         result = _generate_orch_result(ConfigProgram)
 
-        assert "kernel_add" in result.func_name_to_id
-        assert "kernel_add" in result.func_name_to_core_type
+        assert "kernel_add" in {r.code_name for r in result.kernel_registrations}
+        assert "kernel_add" in {r.code_name for r in result.kernel_registrations}
 
         # The kernel's ArgDirection signature is exported so kernel_config.py can
         # build a non-empty CoreCallable signature (issue #1458 — required for
         # the runtime tensor dump to match the task payload tensor_count).
-        signature = result.func_name_to_signature["kernel_add"]
+        signature = {r.code_name: r.signature for r in result.kernel_registrations}["kernel_add"]
         # a, b, output are all tensors -> 3 tensor directions, no SCALAR. The
         # CoreCallable signature is a per-tensor-arg list, so scalars are excluded.
         assert "SCALAR" not in signature
@@ -333,7 +333,7 @@ class TestOrchestration:
 
         result = _generate_orch_result(ScalarKernelProgram)
 
-        signature = result.func_name_to_signature["kernel_add_scalar"]
+        signature = {r.code_name: r.signature for r in result.kernel_registrations}["kernel_add_scalar"]
         # 2 tensor args (a, output); the scalar literal is not recorded.
         assert "SCALAR" not in signature
         assert len(signature) == 2
