@@ -2381,14 +2381,67 @@ class TestTensorReinterpretViewIR:
         with pytest.raises(ValueError, match="does not support target dtype"):
             tensor.reinterpret_view(self._var([8, 16], DataType.FP32), DataType.INT4)
 
-    def test_fp4_byte_alias_is_not_enabled_for_tensors(self):
-        with pytest.raises(ValueError, match="only supports FP8 reinterpretation"):
-            tensor.reinterpret_view(self._var([32, 256], DataType.UINT8), DataType.FP4E2M1X2)
+    @pytest.mark.parametrize(
+        ("source_dtype", "target_dtype"),
+        [
+            (DataType.UINT8, DataType.FP4E2M1X2),
+            (DataType.INT8, DataType.FP4E2M1X2),
+            (DataType.FP4E2M1X2, DataType.UINT8),
+            (DataType.FP4E2M1X2, DataType.INT8),
+        ],
+    )
+    def test_fp4_byte_alias_preserves_partial_valid_shape(self, source_dtype, target_dtype):
+        # InCore lowers these tensor aliases to the same checked UB aliases as
+        # the tile API; both extents still count one-byte carriers.
+        view = ir.TensorView([], ir.TensorLayout.ND, valid_shape=[16, 128], pad=ir.PadValue.zero)
+        call = tensor.reinterpret_view(self._var([32, 256], source_dtype, view), target_dtype)
+        assert isinstance(call.type, ir.TensorType)
+        assert call.type.tensor_view is not None
+        assert _const_int_values(call.type.tensor_view.valid_shape) == [16, 128]
+        assert call.type.tensor_view.pad == ir.PadValue.zero
 
     def test_rejects_strided_tensor(self):
         view = ir.TensorView([32, 1], ir.TensorLayout.ND)
         with pytest.raises(ValueError, match="only supports packed tensors"):
             tensor.reinterpret_view(self._var([8, 16], DataType.FP32, view), DataType.INT16)
+
+    @pytest.mark.parametrize(
+        ("source_dtype", "target_dtype"),
+        [
+            (DataType.FP4E2M1X2, DataType.UINT8),
+            (DataType.UINT8, DataType.FP4E2M1X2),
+            (DataType.FP4E2M1X2, DataType.INT8),
+            (DataType.INT8, DataType.FP4E2M1X2),
+        ],
+    )
+    def test_fp4e2m1x2_byte_alias_preserves_shape(self, source_dtype, target_dtype):
+        call = tensor.reinterpret_view(self._var([4, 64], source_dtype), target_dtype)
+
+        assert isinstance(call.type, ir.TensorType)
+        assert call.type.dtype == target_dtype
+        assert self._shape_values(call.type) == [4, 64]
+
+    @pytest.mark.parametrize(
+        ("source_dtype", "target_dtype"),
+        [
+            (DataType.FP4E2M1X2, DataType.UINT8),
+            (DataType.UINT8, DataType.FP4E2M1X2),
+            (DataType.FP4E2M1X2, DataType.INT8),
+            (DataType.INT8, DataType.FP4E2M1X2),
+        ],
+    )
+    @pytest.mark.parametrize("shape", [[2, 128], [256]])
+    def test_fp4e2m1x2_byte_alias_rejects_shape_change(self, source_dtype, target_dtype, shape):
+        with pytest.raises(ValueError, match="FP4E2M1X2 aliases require the same shape"):
+            tensor.reinterpret_view(self._var([4, 64], source_dtype), target_dtype, shape=shape)
+
+    def test_rejects_logical_fp4_reinterpret(self):
+        with pytest.raises(ValueError, match="does not support source dtype"):
+            tensor.reinterpret_view(self._var([4, 64], DataType.FP4), DataType.UINT8)
+
+    def test_rejects_fp4e2m1x2_to_bf16_reinterpret(self):
+        with pytest.raises(ValueError, match="FP4E2M1X2 aliases"):
+            tensor.reinterpret_view(self._var([4, 64], DataType.FP4E2M1X2), DataType.BF16)
 
 
 class TestTensorReinterpretViewDSL:

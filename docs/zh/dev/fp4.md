@@ -61,10 +61,12 @@ def decode_bytes(
 `TCVT`。GM 输入仍采用 UINT8 字节寻址（本例为 `row * 256`）；不会生成 FP4 GM
 partition 或软件 nibble 解码序列。
 
-alias 仅接受 UINT8 → FP4E2M1X2，要求二维 packed row-major Vec tile、
+同 shape 的 alias 接受 FP4E2M1X2 ↔ UINT8 / INT8，要求二维 packed row-major Vec tile、
 `slayout=none_box`、无显式 stride，且 tile `start_offset` 为零。显式 `shape`
 必须与源 shape 完全相同。carrier `valid_shape` 保留，随后 cast 展开其末轴。
-逆向 alias、逻辑 FP4 alias、tensor alias 及通过此 alias 改变 shape 均被拒绝。
+需要改变 shape 时，先 reshape 字节视图，再解释回 FP4E2M1X2 后 cast；每次 alias
+都必须保持输入 shape 和连续存储。InCore tensor alias 降低到同一 tile 路径。
+逻辑 FP4 alias、原生 packed-FP4 reshape 和 orchestration tensor alias 仍被拒绝。
 GM load 可使用非零偏移；它与 UB tile 的 `start_offset` 不同。
 
 源 tile 必须具有显式地址的内存引用（MemRef），其字节跨度必须等于静态 carrier
@@ -74,10 +76,10 @@ GM load 可使用非零偏移；它与 UB tile 的 `start_offset` 不同。
 为静态值；GM load 仍可使用运行时偏移。
 
 **PTOAS 0.65 足以支持 PYPTO 和 DSA_RP 内存规划器**：两者生成有显式地址的
-类型 alias，并通过 A5 逐位测试。此 alias 会拒绝 PTOAS 内存规划器，因为 0.65
+类型 alias。此 alias 会拒绝 PTOAS 内存规划器，因为 0.65
 的 `pto.treshape` 不支持 packed FP4。其他 reinterpret-view dtype 保持原有
-规划器支持。本路径不修复通用 typed FP4 GM partition 偏移、不引入 PackFp4、
-不增加 tensor alias。
+规划器支持。本路径不修复通用 typed FP4 GM partition 偏移，也不引入 PackFp4。
+InCore tensor alias 会下降为同样经过检查的 UB alias。
 
 ## Cast 策略（Ascend950）
 
@@ -135,7 +137,7 @@ def fp4x2_to_fp8(
 | 手写 `pl.FP4E2M1X2` | ✅ | packed 路径的首选前端；**仅 ND** |
 | 无 PackFp4 的逻辑 `pl.FP4` | ❌ | In-core PTO codegen 拒绝 nibble 单位的 GM view；请使用 carrier 尺寸的 `FP4E2M1X2` |
 | 打包 GM view 保留 carrier 单位 | ✅ | PTOAS v0.67 负责 DMA 转换（ND） |
-| UINT8 → FP4E2M1X2 UB alias | ✅ | 二维 packed row-major Vec；carrier shape 不变；仅 PYPTO / DSA_RP |
+| FP4E2M1X2 ↔ UINT8/INT8 UB alias | ✅ | InCore tensor / tile；二维 packed row-major Vec；carrier shape 不变；仅 PYPTO / DSA_RP |
 | `FP4E2M1X2` ↔ BF16 cast | ✅ | 静默原生 hop；结果 stride 重建为连续 |
 | `FP4E2M1X2` → FP8\* cast | ⚠️ | Warning；更推荐 LUT / 主机 |
 | `FP4` ↔ `FP4E2M1X2` cast | ❌ | 拒绝 |

@@ -63,12 +63,13 @@ XOR, `part_*`, broadcasting, different valid regions, and direct distributed
 window operands are not covered by this rule because their current lowering or
 combination contracts require separate handling.
 
-`pl.reinterpret_view(data, dtype, *, shape=None)` dispatches to the equivalent `pl.tensor` or `pl.tile` operator and returns the same kind. It is a zero-copy view over exactly the same bytes. General reinterpretation supports signed/unsigned 8/16/32/64-bit integers, FP16, BF16, and FP32; MX lowering additionally permits only the byte-identical INT8↔FP8E4M3FN and UINT8↔FP8E8M0 pairs. With no `shape`, ND/row-major scales the last axis and DN/col-major scales the penultimate axis by the source/target byte-width ratio. An explicit shape must be byte-equivalent and fully static unless it is provably identical to the auto-inferred shape; a partial `valid_shape` only permits that auto-equivalent shape. Zero/null padding metadata is preserved, while dtype-dependent max/min padding is cleared. The initial executable path supports packed ND in-core tensors and packed flat (`none_box`) row/col-major tiles; DN tensor inference is available but Tensor-to-Tile lowering rejects it, and orchestration tensors are unsupported.
+`pl.reinterpret_view(data, dtype, *, shape=None)` dispatches to the equivalent `pl.tensor` or `pl.tile` operator and returns the same kind. It is a zero-copy view over exactly the same bytes. General reinterpretation supports signed/unsigned 8/16/32/64-bit integers, FP16, BF16, and FP32; MX lowering additionally permits only the byte-identical INT8↔FP8E4M3FN and UINT8↔FP8E8M0 pairs; packed FP4 additionally permits only FP4E2M1X2↔UINT8/INT8. With no `shape`, ND/row-major scales the last axis and DN/col-major scales the penultimate axis by the source/target byte-width ratio. An explicit shape must be byte-equivalent and fully static unless it is provably identical to the auto-inferred shape; a partial `valid_shape` only permits that auto-equivalent shape. Zero/null padding metadata is preserved, while dtype-dependent max/min padding is cleared. The initial executable path supports packed ND in-core tensors and packed flat (`none_box`) row/col-major tiles; DN tensor inference is available but Tensor-to-Tile lowering rejects it, and orchestration tensors are unsupported.
 
-UINT8 → FP4E2M1X2 is an additional **tile-only** byte alias for Ascend950:
-2D packed row-major Vec, unchanged carrier shape and byte size, with PYPTO or
-DSA_RP memory planning. PTOAS planning, tensor aliases, reverse aliases, and
-explicit reshaping are rejected for this pair. See [FP4 UB decoding](../fp4.md#decode-a-uint8-carrier-through-a-ub-alias-ascend950)
+FP4E2M1X2 ↔ UINT8/INT8 aliases on Ascend950 preserve carrier shape and byte
+size. InCore tensors and tiles lower to dense address-backed 2D row-major Vec
+storage with static UB offsets, using PYPTO or DSA_RP memory planning.
+PTOAS planning and orchestration tensor aliases are unsupported. Reshape the
+byte view separately before aliasing back. See [FP4 UB decoding](../fp4.md#decode-a-uint8-carrier-through-a-ub-alias-ascend950)
 for the contract and usage example.
 
 **Example:**
@@ -124,7 +125,12 @@ On Ascend950, `quant_mx` and `matmul_mx` may share the same InCore mixed task.
 The compiler transports both quantized data and the FP8E8M0 scale directly over
 V2C while retaining the scale's logical fractal-32 layout.
 
-`tile.reshape` preserves dtype, element count, and the source's valid region (see below); `tile.reinterpret_view(data, dtype, *, shape=None)` changes dtype while preserving exact byte size. Without `shape`, it scales the physically contiguous axis using the source/target dtype byte widths and tile layout. Under PTOAS memory planning, it lowers to the aliasing PTO `treshape` primitive for both same-shape and width-changing views, except the UINT8→FP4E2M1X2 alias: PTOAS 0.65 rejects that dtype in `treshape`, so this pair requires PYPTO or DSA_RP.
+`tile.reshape` preserves dtype, element count, and the source's valid region (see below); `tile.reinterpret_view(data, dtype, *, shape=None)` changes dtype while preserving exact byte size. Without `shape`, it scales the physically contiguous axis using the source/target dtype byte widths and tile layout. Under PTOAS memory planning, it lowers to the aliasing PTO `treshape` primitive for both same-shape and width-changing views, except packed FP4E2M1X2↔UINT8/INT8 aliases: PTOAS 0.65 rejects that dtype in `treshape`, so these pairs require PYPTO or DSA_RP.
+
+Packed `FP4E2M1X2` byte aliases require PYPTO or DSA_RP for tiles; PTOAS 0.65
+rejects FP4 `treshape`. InCore tensor reinterpret operations lower to tile
+aliases and require the same planners; orchestration tensors remain unsupported.
+See [FP4](../fp4.md) for the carrier-unit contract and supported alias paths.
 
 ### Result view of `tile.move`
 

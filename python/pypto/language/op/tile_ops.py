@@ -2474,10 +2474,10 @@ def reinterpret_view(
 ) -> Tile:
     """Reinterpret a tile over the same bytes with a different dtype.
 
-    UINT8 -> FP4E2M1X2 preserves the carrier shape and requires a packed
-    2D row-major Vec tile. Explicit shape changes are rejected. On A5,
-    PYPTO and DSA_RP memory planning support this UB alias; PTOAS planning
-    is unsupported with PTOAS 0.65.
+    FP4E2M1X2 <-> UINT8/INT8 preserves the carrier shape and requires a
+    dense address-backed 2D row-major Vec tile with a static UB offset.
+    Reshape the byte view separately before aliasing back. On A5, PYPTO
+    and DSA_RP support these aliases; PTOAS 0.65 planning is unsupported.
 
     Args:
         data: Input tile.
