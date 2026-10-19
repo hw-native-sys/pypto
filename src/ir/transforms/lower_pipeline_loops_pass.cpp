@@ -340,14 +340,15 @@ class LowerPipelineMutator : public IRMutator {
         sub_map[op->iter_args_[j].get()] = (k == 0) ? initial_iter_substitutes[j] : prev_yields[j];
       }
       auto cloned = DeepClone(body, sub_map, /*clone_def_vars=*/true);
-      auto [cloned_stmts, cloned_yields] = SplitBodyYield(cloned.cloned_body);
+      // Tag the complete clone: PTOAS dbC replaces accumulator Vars, including
+      // references in its yield and hence the next clone's carry substitutions.
+      PipelineMembershipTagger tagger(group, static_cast<int32_t>(k), loop_double_buffers_c, acc_slot_base);
+      auto [cloned_stmts, cloned_yields] = SplitBodyYield(tagger.VisitStmt(cloned.cloned_body));
       INTERNAL_CHECK_SPAN(cloned_yields.size() == op->iter_args_.size(), sp)
           << "Internal error: loop body must yield " << op->iter_args_.size() << " values for iter_args, got "
           << cloned_yields.size();
       // Tag this clone's tile definitions with (group, stage=k) so MemoryReuse
       // keeps the F clones' buffers apart (explicit ping-pong constraint).
-      PipelineMembershipTagger tagger(group, static_cast<int32_t>(k), loop_double_buffers_c, acc_slot_base);
-      cloned_stmts = tagger.VisitStmt(cloned_stmts);
       clones.push_back(cloned_stmts);
       prev_yields = std::move(cloned_yields);
     }

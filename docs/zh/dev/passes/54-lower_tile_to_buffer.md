@@ -228,6 +228,10 @@ buffer.add(loaded_buffer, loaded_buffer, doubled_buffer)
 重叠生命周期、针对全部历史使用者的操作级 no-alias 约束以及目标平台 hazard
 都会阻止不安全复用。逻辑 pipeline group 保持独立，因此连续 dbC 网格跨越
 Buffer IR 边界不会增加物理存储需求。该转换仍只支持静态槽位索引。
+当覆盖存储会改变较小槽位成员的稠密行步长时，改变形状的重解释会被拒绝：
+独立子视图不能代替对源字节的 reshape。请使用统一物理形状或 PyPTO Tile 流水线。
+不同物理形状的 Mat 槽位也会被拒绝，因为原生 Mat-to-Left/Right 移动不支持其覆盖子视图；
+统一物理形状并设置边界有效尺寸仍受支持。
 在提升槽位/视图定义之前，lowering 对原 Tile 调度运行与 Tile codegen 共享的安全分析。
 受 PTOAS #1519 影响的多槽位预取循环即使使用常量槽位索引也会被拒绝。
 编译器已证明为新鲜 Acc 的 dbC stage 保留已有例外；直线槽位复用不变。

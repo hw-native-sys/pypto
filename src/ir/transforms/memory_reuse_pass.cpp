@@ -2943,10 +2943,9 @@ class HazardInputCollector : public IRVisitor {
   /// escapes `reads_tpop` and its output may be coalesced onto `l`'s buffer.
   ///
   /// Two traversals suffice, and a third could never add anything: the base
-  /// sets are complete after the first pass.  `tpop_bases_` only ever takes a
-  /// `tile.tpop_from_aic` def, which is order-independent; `load_derived_bases_`
-  /// additionally takes view outputs, and a view shares its source's base, so
-  /// marking one inserts a base that is already present.  Only the *Var* sets
+  /// sets are complete after the first pass: the load and tpop definitions are
+  /// order-independent, and their zero-copy views share the source's base, so
+  /// marking a view inserts a base that is already present. Only the *Var* sets
   /// grow in the second pass, and those propagate in program order within it.
   /// Both traversals are O(N), so the collector stays linear.
   void Run(const StmtPtr& body) {
@@ -2955,7 +2954,9 @@ class HazardInputCollector : public IRVisitor {
   }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
-    if (GetTileTypeWithMemRef(op->var_->GetType())) {
+    // Cross-core pops and their views intentionally have no general-pool
+    // MemRef. Their provenance still participates in the target hazard guard.
+    if (As<TileType>(op->var_->GetType())) {
       if (auto call = As<Call>(op->value_)) {
         // AsVarLike, not As<Var>: an operand may be an enclosing loop's IterArg
         // — the loop-carry shape of `tile.add(x, c_iter)` / `tile.matmul_acc(
@@ -2966,7 +2967,7 @@ class HazardInputCollector : public IRVisitor {
         for (const auto& arg : call->args_) {
           if (auto v = AsVarLike(arg)) input_vars.push_back(v);
         }
-        // load_derived closure: within one traversal defs precede uses, so a
+        // View provenance closure: within one traversal defs precede uses, so a
         // view's source is already classified by the time we reach the view;
         // a source that only becomes tainted across a loop back edge is picked
         // up by the second traversal (see `Run`).
@@ -2974,10 +2975,8 @@ class HazardInputCollector : public IRVisitor {
           MarkLoadDerived(op->var_);
         } else if (IsLegalTileViewOp(call->op_)) {
           for (const VarPtr& in : input_vars) {
-            if (IsLoadDerived(in)) {
-              MarkLoadDerived(op->var_);
-              break;
-            }
+            if (IsLoadDerived(in)) MarkLoadDerived(op->var_);
+            if (IsTpop(in)) MarkTpop(op->var_);
           }
         }
         if (IsOp(call, "tile.tpop_from_aic")) MarkTpop(op->var_);
@@ -3254,8 +3253,9 @@ bool NeedsLoadTpopHazardGuard(const FunctionPtr& func) {
   if (func->func_type_ != FunctionType::AIV) return false;
   if (!backend::BackendConfig::IsConfigured()) return false;
   const auto* ctx = PassContext::Current();
-  if (ctx == nullptr) return false;
-  if (!ctx->GetBackendHandler()->RequiresSplitLoadTpopWorkaround()) return false;
+  // Codegen also consumes these constraints after the pass context has exited.
+  const auto* handler = ctx ? ctx->GetBackendHandler() : backend::GetBackend()->GetHandler();
+  if (!handler->RequiresSplitLoadTpopWorkaround()) return false;
   // A split AIV function needs the guard. The split may be signalled either as a
   // function-level mode (single-mode / standalone kernels carry ``split``) or
   // ONLY as the mode-agnostic ``split_aiv`` marker — multi-mode explicit

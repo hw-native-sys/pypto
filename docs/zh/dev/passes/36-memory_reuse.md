@@ -210,6 +210,9 @@ MemoryReuse 掌管所有 buffer 合并决策，因此它从源头上阻止这种
 carry 同时也打破了程序序，因此收集器会对函数体遍历**两次**。污染某条 carry buffer 的 producer 可能位于它所污染的那个 use **之后**——例如 `w = tile.add(l, carry); p = tile.tpop_from_aic(); yield p`，从第 1 次迭代起 `w` 就读到了 tpop 值，但单次前向遍历在见到 `p` 之前就已经对 `w` 完成了分类。第三次遍历不会带来任何新信息：第一次遍历后 base 集合即已完备（`tile.tpop_from_aic` 的定义与顺序无关，而 view 与其 source 共享 base），因此第二次遍历中只有 `Var` 集合会增长，且它们在该次遍历内部按程序序传播。两次遍历均为 O(N)。
 
 该 guard 由 `BackendHandler::RequiresSplitLoadTpopWorkaround()`（仅 Ascend910 为 true）以及函数为 split-AIV 这两个条件门控；在其他任何 backend / 函数类型下输入集合为空，复用行为不变。writer 仍可自由复用任何**非** load buffer —— 只有 load + tpop 的原地组合会被拒绝。（该 guard 此前由独立的 `LegalizePTOBufferReuse` pass 在事后拆分 buffer 来实现，现已并入 MemoryReuse。）
+共享分配分析也为没有 MemRef 的 tile 及其零复制视图保留 TPOP 来源信息。pass 执行结束后，codegen
+从已配置的 backend 获取相同的目标守卫，不要求活动的 PassContext；显式多缓冲区域复用
+因此也保持这一约束。
 
 ## 被写工作区危害 {#written-workspace-hazard}
 

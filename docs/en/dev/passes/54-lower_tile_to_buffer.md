@@ -286,6 +286,12 @@ provides the covering geometry. Smaller Acc tiles use compatible zero-offset
 subviews; repeated slot/descriptor pairs share one handle. Buffer verification
 tracks the selected slot's byte window, including aliases of boundary views.
 Dynamic slot indices remain unsupported by this conversion recipe.
+Shape-changing relabels of smaller slot members are rejected when covering
+storage would change their dense row pitch. Independent subviews are not a
+replacement for a reshape of the source bytes. Use uniform physical slot
+shapes or the PyPTO Tile pipeline. Mixed physical Mat slot shapes are also
+rejected because native Mat-to-Left/Right moves do not support their covering
+subviews; uniform shapes with boundary valid extents remain supported.
 
 Before slot/view definitions are hoisted, lowering runs the same source-schedule
 safety analysis as Tile codegen. Multi-slot prefetch loops affected by

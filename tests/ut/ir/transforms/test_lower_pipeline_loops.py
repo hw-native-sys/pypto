@@ -21,7 +21,11 @@ import re
 
 import pypto.language as pl
 import pytest
-from pypto import ir, passes
+from pypto import backend, ir, passes
+from pypto.backend._ptoas_locate import find_ptoas_binary
+from pypto.backend.pto_backend import _run_ptoas
+from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+from pypto.pypto_core import codegen
 
 
 def _run_pass(program: ir.Program) -> ir.Program:
@@ -721,6 +725,74 @@ def test_explicit_ptoas_dbc_caller_owned_memref_is_user_error():
     with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
         with pytest.raises(ValueError, match="must not carry an explicit MemRef"):
             passes.lower_pipeline_loops()(Before)
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+@pytest.mark.parametrize("dbc", [False, True])
+@pytest.mark.parametrize("trip_count", [3, 4])
+def test_explicit_dbc_yielded_accumulator_keeps_ssa(planner, dbc, trip_count, tmp_path):
+    """Retyping a fresh stage result must also replace detached carry yields."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            a: pl.Tensor[[16, 16], pl.BF16],
+            b: pl.Tensor[[16, 16], pl.BF16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            am = pl.load(a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            bm = pl.load(b, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            lhs = pl.move(am, target_memory=pl.Mem.Left)
+            rhs = pl.move(bm, target_memory=pl.Mem.Right)
+            seed = pl.matmul(lhs, rhs)
+            for i, (carry, out_i) in pl.pipeline(
+                trip_count, stage=2, init_values=(seed, out), attrs={"pipeline_double_buffer_c": True}
+            ):
+                product = pl.matmul(lhs, rhs)
+                stored = pl.store(product, [0, 0], out_i)
+                final, out_s = pl.yield_(product, stored)
+            return pl.store(final, [0, 0], out_s)
+
+    backend.reset_for_testing()
+    backend.set_backend_type(backend.BackendType.Ascend910)
+
+    class ConfigureDbc(ir.IRMutator):
+        def visit_for_stmt(self, op):
+            return ir.ForStmt(
+                op.loop_var,
+                op.start,
+                op.stop,
+                op.step,
+                op.iter_args,
+                op.body,
+                op.return_vars,
+                op.span,
+                op.kind,
+                {**op.attrs, "pipeline_double_buffer_c": dbc},
+            )
+
+    configured = ConfigureDbc().visit_program(Before)
+    properties = passes.IRPropertySet()
+    properties.insert(passes.IRProperty.SSAForm)
+    properties.insert(passes.IRProperty.UseAfterDef)
+    properties.insert(passes.IRProperty.TypeChecked)
+    with passes.PassContext([], memory_planner=planner):
+        passes.PropertyVerifierRegistry.verify_or_throw(properties, configured)
+        lowered = passes.lower_pipeline_loops()(configured)
+        passes.PropertyVerifierRegistry.verify_or_throw(properties, lowered)
+        assert "FREE_VAR" not in ir.python_print(lowered)
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(configured)
+        assert "FREE_VAR" not in ir.python_print(optimized)
+    mlir = codegen.PTOCodegen().generate(optimized, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    source, output = tmp_path / "yielded_accumulator.pto", tmp_path / "yielded_accumulator.cpp"
+    source.write_text(mlir)
+    level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
+    _run_ptoas(str(source), str(output), ["--pto-arch=a2", f"--pto-level={level}"])
+    assert output.is_file()
 
 
 if __name__ == "__main__":
