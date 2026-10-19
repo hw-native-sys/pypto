@@ -143,8 +143,10 @@ void BindBackend(nb::module_& m) {
       .def("get_pto_target_arch", &BackendHandler::GetPtoTargetArch,
            "PTO MLIR target arch attribute string (e.g. 'a2a3', 'a5')")
       .def("get_launch_spec_core_count_method", &BackendHandler::GetLaunchSpecCoreCountMethod,
-           "Method name on launch_spec for setting core count "
-           "('set_block_num' on Ascend910, 'set_core_num' on Ascend950)")
+           "Launch-count setter selected by the active PassContext runtime: "
+           "HostBuildGraph uses 'set_block_num' on both backends; TensorMap/RingBuffer "
+           "uses 'set_block_num' on Ascend910 and 'set_core_num' on Ascend950. "
+           "Without an active PassContext, TensorMap/RingBuffer is assumed.")
       .def("get_default_sim_platform", &BackendHandler::GetDefaultSimPlatform,
            "Default simulator platform name (e.g. 'a2a3sim', 'a5sim')")
       .def("get_extra_ptoas_flags", &BackendHandler::GetExtraPtoasFlags,
