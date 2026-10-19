@@ -372,13 +372,11 @@ class PassManager:
         ctx = passes.PassContext.current()
         # The construction-time planner fixes the pass list: DSA_RP drops
         # MemoryReuse, while PTOAS drops MemoryReuse + AllocateMemoryAddr.
-        # Planner-gated pass behaviour
-        # (AutoTileMatmulL0's dbC=2) reads the planner again at execution time, so
-        # run_passes re-asserts the run-time planner still matches this one — otherwise a
-        # PassManager built outside PTOAS but run inside a PTOAS context would keep
-        # MemoryReuse yet still select dbC=2, coalescing the two co-live L0C accumulators
-        # into one shrunk single-buffer tile (see _check_planner_consistency).
-        self._construction_planner = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
+        # Address assignment and codegen also consult the execution-time planner.
+        # Reject a different planner at run time rather than combining its policy
+        # with the wrong pass list (see _check_planner_consistency). Automatic
+        # L0C double buffering remains disabled under every planner.
+        self._construction_planner = ctx.get_memory_planner() if ctx else passes.get_default_memory_planner()
         self._construction_buffer_ir = ctx.get_enable_buffer_ir() if ctx else True
         skipped_mem_planning_passes: tuple[str, ...]
         if self._construction_planner == passes.MemoryPlanner.PTOAS:
@@ -434,7 +432,7 @@ class PassManager:
         IR mode also fixes which storage verifiers are present and must match.
         """
         ctx = passes.PassContext.current()
-        run_planner = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
+        run_planner = ctx.get_memory_planner() if ctx else passes.get_default_memory_planner()
         run_buffer_ir = ctx.get_enable_buffer_ir() if ctx else True
         if run_buffer_ir != self._construction_buffer_ir:
             raise RuntimeError(
@@ -571,12 +569,11 @@ class PassManager:
         # so callers' diagnostic intent isn't reset.
         outer_instruments = list(ctx.get_instruments()) if ctx else []
         level = ctx.get_verification_level() if ctx else passes.get_default_verification_level()
-        # Propagate the outer memory planner AND the legacy-PYPTO dbC=2 opt-in: a nested
-        # PassContext otherwise resets them to the binding defaults, which silently
-        # disables planner-gated pass behaviour (AutoTileMatmulL0's dbC=2 tile
-        # selection reads GetMemoryPlanner() + GetEnablePyptoL0cDoubleBuffer()
-        # *during* pass execution) whenever the pipeline dumps IR.
-        mplan = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
+        # Preserve allocation ownership while dumping: resetting a nested
+        # context to the default would run DSA-RP over a pipeline constructed
+        # for PYPTO or PTOAS. Forward the compatibility flag too, although it
+        # no longer enables automatic L0C double buffering.
+        mplan = ctx.get_memory_planner() if ctx else passes.get_default_memory_planner()
         dbc_flag = ctx.get_enable_pypto_l0c_double_buffer() if ctx else False
         runtime = ctx.get_runtime() if ctx else passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
         buffer_ir = ctx.get_enable_buffer_ir() if ctx else True
@@ -629,7 +626,7 @@ class PassManager:
         # Propagate the outer memory planner, the legacy-PYPTO dbC=2 opt-in and the
         # runtime ABI (see run_passes) so profiling doesn't silently reset them and
         # disable planner- or runtime-gated behaviour.
-        mplan = ctx.get_memory_planner() if ctx else passes.MemoryPlanner.PYPTO
+        mplan = ctx.get_memory_planner() if ctx else passes.get_default_memory_planner()
         dbc_flag = ctx.get_enable_pypto_l0c_double_buffer() if ctx else False
         runtime = ctx.get_runtime() if ctx else passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
         buffer_ir = ctx.get_enable_buffer_ir() if ctx else True

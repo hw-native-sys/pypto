@@ -11,7 +11,7 @@
 
 With the PTOAS planner, `MemoryReuse` + `AllocateMemoryAddr` are skipped and ptoas
 `PlanMemory` owns on-chip placement (--pto-level=level2). Two things that the
-default PyPTO planner hides then have to be emitted correctly:
+in-tree planners hide then have to be emitted correctly:
 
 * `system.reserve_buffer(base=AUTO)` never gets a resolved base, so PTO must emit
   ptoas's `auto = true` form (base absent) instead of the manual `base = <n>` one.

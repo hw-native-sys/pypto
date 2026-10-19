@@ -173,6 +173,12 @@ per-slot 标记，而非又一个 `can_share` 门——`can_share` 是 O(M²) �
 代价由作者承担：pin 是用容量换并行度，pin 过头的 kernel 会在 `AllocateMemoryAddr` 处硬报错，
 而不是被静默合并回去。
 
+create 保留其存储占用，包括通过循环携带值（loop carry）和 SSA 别名的读写。
+规范 Acc carry 若在所属循环的首次迭代由 fresh MAD 初始化，且空 seed 没有独立使用、
+只有一个已证明的初始化生产者，则可合并两者的生命周期。完整 seed/carry 区间仍与
+其他独立占用者检查冲突；带初始化条件的 `matmul_acc` 不会豁免存储重叠检查。
+单一 phi family 的源复用已有的已证明别名关系；其完整生命周期并集仍会与独立绑定值冲突。
+
 **重叠检查。** 独立绑定到**同一槽位**的两个 tile 不得同时存活——那不是复用，而是后写的数据
 摧毁了先前 tile 仍需要的内容。该检查按**槽位**而非按分配进行：`pl.MemRef(slots=N)` 声明中位于
 *不同*槽位的两个 tile 本来就应该同时存活（这正是 ping-pong 的用途），只有落在同一槽位的 tile

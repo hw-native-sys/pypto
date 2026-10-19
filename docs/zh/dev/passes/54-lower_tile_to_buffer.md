@@ -52,8 +52,9 @@ block/subblock 查询使用已有 Buffer 配方。
 `transpose_view`、`matmul` 和 `matmul_acc`。FP16/BF16/FP32 输入以 FP32 累加，
 INT8 输入以 INT32 累加。常量或运行时 `init_cond` 选择初始化或累加写入。
 较宽的 Acc valid 区域通过同一存储上的乘积视图写入。矩阵区域 carry 必须保持
-同一存储别名；任意矩阵 carry 复制、MX、FIFO、槽位、缩放/量化写回和 workspace
-操作仍不在默认范围。Torch 调试模拟分形布局及共享的已寻址矩阵存储，保留
+同一存储别名；任意矩阵 carry 复制、MX、FIFO、缩放/量化写回和 workspace
+操作仍不在默认范围。静态无地址槽位可通过下述显式配方使用，但仍不属于默认
+全 kernel 选择范围。Torch 调试模拟分形布局及共享的已寻址矩阵存储，保留
 转置重标记和乘积视图；部分有效乘积之外仅完整未触及的 Acc box 保证保留。
 
 A5 在默认流水线保持 Tile，待取得运行时验收后再开放。
@@ -128,7 +129,10 @@ PTOAS 省略 `buffer.alloc` 的第二个操作数。地址规划器只传入一�
 不会建立额外的分配身份。第二次遍历将 Tile 使用替换为 Buffer 句柄，并改写支持的调用。
 映射仅存在于 pass 内部，输出 IR 不携带转换旁表。
 
-已有存储定义决定分配位置。转换不新增临时空间、不分配地址、不插入隐式传输。
+已寻址存储保持现有分配位置。无地址单 buffer 的定义按词法首次使用顺序放在其源 Tile
+使用点的最低公共语句祖先处。已提升的指针声明不能将循环局部 buffer 生命周期扩展至
+整个函数，否则 PTOAS 无法复用顺序使用的累加器。显式 multi-buffer region 保留共享的
+支配性前导定义。转换不新增临时空间、不分配地址、不插入隐式传输。
 完全相同的自复制会被移除。Tensor 返回别名规范化为已有 GM 参数，
 同时保留参数方向和编排 ABI。
 
@@ -216,6 +220,21 @@ buffer.add(loaded_buffer, loaded_buffer, doubled_buffer)
 ```
 
 ## 矩阵存储与 cube 转换 {#matrix-storage-and-cube-recipes}
+
+静态、无地址的多槽位存储保留为 `buffer.alloc_multi` 与显式的
+`buffer.get_slot`；相反 dbC stage 不会变成可相互覆盖的独立分配。
+在丢弃 Tile 分配信息前，转换使用与 Tile codegen 相同的多缓冲复用规划器。
+类型兼容且保守生命周期不相交的 region 共享一个 Buffer SSA handle；
+重叠生命周期、针对全部历史使用者的操作级 no-alias 约束以及目标平台 hazard
+都会阻止不安全复用。逻辑 pipeline group 保持独立，因此连续 dbC 网格跨越
+Buffer IR 边界不会增加物理存储需求。该转换仍只支持静态槽位索引。
+在提升槽位/视图定义之前，lowering 对原 Tile 调度运行与 Tile codegen 共享的安全分析。
+受 PTOAS #1519 影响的多槽位预取循环即使使用常量槽位索引也会被拒绝。
+编译器已证明为新鲜 Acc 的 dbC stage 保留已有例外；直线槽位复用不变。
+内部新鲜 Acc 证明标记在该检查之后与仅用于存储的 pipeline membership 一起消费，
+不会被转发到 Buffer 操作。
+静态物理 region 分配放在函数入口，支配所有 slot view，即使逻辑声明早于
+首个存活使用者；slot/view 定义仍留在原始声明位置。
 
 Mat、Left、Right 和 Acc Tile 在 `BufferType` 中保留已确定的分形布局（`blayout`、
 `slayout`、`fractal`、`compact`）。它们的物理范围已经是完整的分形块，而分形窗口没有
@@ -323,7 +342,14 @@ Mat 到 Left/Right 的拷贝与 extract、matmul/matmul_acc 以及 Acc store。
 GM load/store 保留匹配的元素类型，不插入转换。`add`/`mul` 支持 FP16/FP32/INT32；
 BF16 传输支持不代表算术支持。
 
-辅助函数调用、其他布局、多槽位和其他操作转换由后续迁移切片补齐。
+静态无地址多槽分配保留为带 `MultiBufferType` 的 `buffer.alloc_multi`，
+并通过 `buffer.get_slot` 显式选择槽位。PTOAS 接收一个 `pto.alloc_multi_tile`
+区域，因此 dbC 的相反阶段保持物理分离，不会变成可独立复用的分配。
+所有成员必须具有一致的槽数、槽大小和静态字节偏移；完整槽描述符提供覆盖形状。
+较小的 Acc tile 使用兼容的零偏移子视图，重复的槽位/描述符共享句柄。
+Buffer 验证跟踪槽位字节窗口及边界视图的别名。
+
+辅助函数调用、其他布局、动态槽位和其他操作转换由后续迁移切片补齐。
 显式底层转换对未支持形式报错；正常流水线将未支持的完整 kernel 保留为 Tile。
 
 二进制序列化保留显式表示和函数阶段。当前 Python 诊断打印器不支持 Buffer DSL 解析往返。

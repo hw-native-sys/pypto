@@ -19,14 +19,30 @@ def _plan_with_dsa_rp(program):
         return passes.allocate_memory_addr()(initialized)
 
 
-def _recognized_edges(program) -> set[tuple[str, str, int]]:
-    """Inspect recognizer output before placement or solver tie-breaking."""
-    initialized = passes.init_mem_ref()(program)
-    function = next(iter(initialized.functions.values()))
+def _edge_set(function, reference_enumeration: bool) -> set[tuple[str, str, int]]:
     return {
         (edge["first_name"], edge["second_name"], edge["cost"])
-        for edge in testing.recognize_dsa_reuse_penalties(function)
+        for edge in testing.recognize_dsa_reuse_penalties(
+            function, reference_enumeration=reference_enumeration
+        )
     }
+
+
+def _recognized_edges(program) -> set[tuple[str, str, int]]:
+    """Inspect recognizer output before placement or solver tie-breaking.
+
+    The compiler enumerates candidate pairs with a lifetime sweep indexed by
+    access resource, which visits far fewer pairs than the all-pairs
+    specification of the same promotion policy. Every case in this file checks
+    that the two agree, so the optimization cannot silently drop a relation.
+    """
+    initialized = passes.init_mem_ref()(program)
+    function = next(iter(initialized.functions.values()))
+    edges = _edge_set(function, reference_enumeration=False)
+    assert edges == _edge_set(function, reference_enumeration=True), (
+        "indexed sweep and all-pairs enumeration disagree"
+    )
+    return edges
 
 
 def _recognized_pairs(program) -> set[frozenset[str]]:
@@ -101,8 +117,11 @@ def test_dsa_rp_recognizes_cross_pipe_war(ascend_backend):
             next_value = pl.load(input_b, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
             return pl.store(next_value, [0, 0], output)
 
+    # `prior` and `_consumed` are the source and result of one add. `prior`'s
+    # only maximal access is that add's own read, so overlapping the two is an
+    # in-place aliasing question for the operation's contract, not an optional
+    # reuse the allocator may price.
     assert _recognized_edges(Before) == {
-        ("prior", "_consumed", 1),
         ("prior", "next_value", 1),
         ("_consumed", "next_value", 1),
     }
@@ -166,6 +185,143 @@ def test_dsa_rp_preserves_not_inplace_safe_semantic_separation():
 
     ranges = _tile_ranges(_plan_with_dsa_rp(Before))
     assert not _overlap(ranges["source"], ranges["result"])
+
+
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
+def test_dsa_rp_narrowing_cast_respects_target_alias_contract(ascend_backend):
+    """Permit safe A5 same-base narrowing without weakening A2/A3 separation.
+
+    The FP32 input plus BF16 result exceed the A2A3 Vec capacity when disjoint,
+    so A2/A3 must reject this shape rather than silently alias an unread tail.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            input_a: pl.Tensor[[128, 256], pl.FP32],
+            output: pl.Tensor[[128, 256], pl.BF16],
+        ) -> pl.Tensor[[128, 256], pl.BF16]:
+            source = pl.load(input_a, [0, 0], [128, 256], target_memory=pl.Mem.Vec)
+            result = pl.cast(source, target_type=pl.BF16)
+            return pl.store(result, [0, 0], output)
+
+    if ascend_backend == BackendType.Ascend910:
+        with pytest.raises(ValueError, match=r"Vec buffer usage \(196608 bytes\) exceeds platform limit"):
+            _plan_with_dsa_rp(Before)
+        return
+
+    ranges = _tile_ranges(_plan_with_dsa_rp(Before))
+    assert ranges["source"][0] == ranges["result"][0]
+    assert ranges["result"][1] < ranges["source"][1]
+
+
+@pytest.mark.parametrize(
+    "first_row,second_row,may_alias",
+    [(0, 0, True), (16, 16, False), (0, 16, False)],
+    ids=["base-aligned", "shifted", "same-root-mixed-offsets"],
+)
+@pytest.mark.parametrize("enable_buffer_ir", [False, True])
+def test_dsa_rp_inplace_reuse_respects_operand_view_starts(
+    ascend_backend, first_row, second_row, may_alias, enable_buffer_ir
+):
+    """Equal allocation bases do not make shifted views exact in-place operands."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            source_tensor: pl.Tensor[[64, 64], pl.FP32],
+            output: pl.Tensor[[48, 64], pl.FP32],
+        ) -> pl.Tensor[[48, 64], pl.FP32]:
+            source = pl.load(source_tensor, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
+            first = pl.tile.slice(source, [48, 64], [first_row, 0])
+            second = pl.tile.slice(source, [48, 64], [second_row, 0])
+            result = pl.add(first, second)
+            return pl.store(result, [0, 0], output)
+
+    # Buffer lowering guards the whole parent of every window, even at offset
+    # zero: packed output geometry need not match the inherited input pitch.
+    # Tile IR retains its established base-aligned in-place opportunity.
+    may_alias = may_alias and not enable_buffer_ir
+    with passes.PassContext(
+        [], memory_planner=passes.MemoryPlanner.DSA_RP, enable_buffer_ir=enable_buffer_ir
+    ):
+        initialized = passes.init_mem_ref()(Before)
+        plan = testing.get_dsa_allocation_plan(next(iter(initialized.functions.values())))
+        placed = passes.allocate_memory_addr()(initialized)
+    assert bool(plan["same_base_or_disjoint"]) == may_alias
+    ranges = _tile_ranges(placed)
+    if may_alias:
+        assert ranges["source"][0] == ranges["result"][0]
+    else:
+        assert not _overlap(ranges["source"], ranges["result"])
+
+
+def test_dsa_rp_select_reuses_value_storage_under_capacity_pressure(ascend_backend):
+    """A missing TSEL access contract must not add a sixth 32-KiB live tile."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            input_a: pl.Tensor[[8, 1024], pl.FP32],
+            input_b: pl.Tensor[[8, 1024], pl.FP32],
+            output: pl.Tensor[[8, 1024], pl.FP32],
+        ) -> pl.Tensor[[8, 1024], pl.FP32]:
+            keep_a = pl.load(input_a, [0, 0], [8, 1024], target_memory=pl.Mem.Vec)
+            keep_b = pl.load(input_a, [0, 0], [8, 1024], target_memory=pl.Mem.Vec)
+            keep_c = pl.load(input_a, [0, 0], [8, 1024], target_memory=pl.Mem.Vec)
+            left = pl.load(input_a, [0, 0], [8, 1024], target_memory=pl.Mem.Vec)
+            right = pl.load(input_b, [0, 0], [8, 1024], target_memory=pl.Mem.Vec)
+            mask = pl.tile.cmp(left, right, cmp_type=0)
+            scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+            selected = pl.tile.sel(mask, left, right, scratch)
+            result_a = pl.add(selected, keep_a)
+            result_b = pl.add(result_a, keep_b)
+            result = pl.add(result_b, keep_c)
+            return pl.store(result, [0, 0], output)
+
+    ranges = _tile_ranges(_plan_with_dsa_rp(Before))
+    assert ranges["selected"][0] in (ranges["left"][0], ranges["right"][0])
+    for forbidden in ("mask", "scratch"):
+        assert not _overlap(ranges["selected"], ranges[forbidden])
+
+
+def test_dsa_rp_select_written_workspace_keeps_prior_storage_separate(ascend_backend):
+    """TSEL writes tmp independently of its SSA result, including in a loop."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            input_a: pl.Tensor[[8, 64], pl.FP32],
+            input_b: pl.Tensor[[8, 64], pl.FP32],
+            output: pl.Tensor[[8, 64], pl.FP32],
+        ) -> pl.Tensor[[8, 64], pl.FP32]:
+            prior = pl.load(input_a, [0, 0], [8, 64], target_memory=pl.Mem.Vec)
+            saved = pl.store(prior, [0, 0], output)
+            for _ in pl.range(2):
+                left = pl.load(input_a, [0, 0], [8, 64], target_memory=pl.Mem.Vec)
+                right = pl.load(input_b, [0, 0], [8, 64], target_memory=pl.Mem.Vec)
+                mask = pl.tile.cmp(left, right, cmp_type=0)
+                scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                selected = pl.tile.sel(mask, left, right, scratch)
+                _loop_saved = pl.store(selected, [0, 0], saved)
+            return saved
+
+    initialized = passes.init_mem_ref()(Before)
+    plan = testing.get_dsa_allocation_plan(next(iter(initialized.functions.values())))
+    assert any(
+        {first, second} == {"prior", "scratch"} and "target_hazard" in reasons
+        for first, second, reasons in plan["separations"]
+    )
+    ranges = _tile_ranges(_plan_with_dsa_rp(Before))
+    assert not _overlap(ranges["prior"], ranges["scratch"])
 
 
 def test_dsa_rp_preserves_tile_move_semantic_separation():
@@ -678,7 +834,14 @@ def test_no_access_operation_has_no_exact_pipe(ascend_backend):
 
 @pytest.mark.parametrize(
     "op_name",
-    ["tile.matmul_acc", "tile.gemv_acc", "tile.batch_matmul_acc", "tile.tquant_mx_raw", "tile.tmov_x2zz"],
+    [
+        "tile.matmul_acc",
+        "tile.gemv_acc",
+        "tile.batch_matmul_acc",
+        "tile.tquant_mx_raw",
+        "tile.tmov_x2zz",
+        "tile.sel",
+    ],
 )
 def test_executable_ops_declare_functional_access(op_name):
     """Executable ops expose their complete read/write contract to the recognizer."""
@@ -819,7 +982,13 @@ def test_dsa_rp_recognizes_l0_to_l1_route(ascend_backend):
     indirect=["ascend_backend"],
 )
 def test_dsa_rp_uses_backend_memory_graph_for_acc_to_vec_route(ascend_backend, expect_edge):
-    """Acc-to-Vec is an A5 FIX route; A2/A3 must conservatively skip it."""
+    """Acc-to-Vec is an A5 FIX route; A2/A3 must conservatively skip it.
+
+    The probe is the later inbound load rather than the move's own consumer:
+    `_moved`'s write is ordered before that consumer's read, so the read is its
+    only maximal access. An unsupported route leaves `_moved` unpenalized
+    entirely, which is what distinguishes the two targets.
+    """
 
     @pl.program
     class Before:
@@ -841,7 +1010,7 @@ def test_dsa_rp_uses_backend_memory_graph_for_acc_to_vec_route(ascend_backend, e
             later = pl.load(later_input, [0, 0], [16, 16], target_memory=pl.Mem.Vec)
             return pl.store(later, [0, 0], output)
 
-    pair = frozenset(("_moved", "_consumed"))
+    pair = frozenset(("_moved", "later"))
     assert (pair in _recognized_pairs(Before)) is expect_edge
 
 

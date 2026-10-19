@@ -124,6 +124,7 @@ def test_compile_pto_module_enables_per_unit_pass_dump(tmp_path, monkeypatch) ->
         "module {}",
         "vector_kernel",
         str(tmp_path),
+        MemoryPlanner.DSA_RP,
         dump_ptoas_passes=True,
     )
 

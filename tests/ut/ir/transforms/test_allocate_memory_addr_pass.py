@@ -25,6 +25,14 @@ from pypto.backend import (
 from .storage_test_utils import without_call_memrefs
 
 
+@pytest.fixture
+def legacy_allocator(pass_verification_instruments):
+    """Pin sequential-address expectations without changing DSA/default tests."""
+    with passes.PassContext(pass_verification_instruments, memory_planner=passes.MemoryPlanner.PYPTO):
+        yield
+
+
+@pytest.mark.usefixtures("legacy_allocator")
 def test_allocate_memory_addr_simple():
     """Simple function: Vec tiles get 32-byte aligned addresses at offsets 0 and 16384."""
 
@@ -67,6 +75,7 @@ def test_allocate_memory_addr_simple():
     ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
+@pytest.mark.usefixtures("legacy_allocator")
 def test_allocate_memory_addr_multiple_tiles():
     """Three tiles each get their own MemRef at 32-byte aligned offsets 0, 16384, 32768."""
 
@@ -114,6 +123,7 @@ def test_allocate_memory_addr_multiple_tiles():
     ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
+@pytest.mark.usefixtures("legacy_allocator")
 def test_allocate_memory_addr_resolves_auto_reserve_buffer_before_tiles():
     """AUTO reserve_buffer should consume the low address range before tile allocation."""
 
@@ -178,6 +188,7 @@ def test_allocate_memory_addr_rejects_overlapping_reserve_buffer_ranges():
         passes.allocate_memory_addr()(program)
 
 
+@pytest.mark.usefixtures("legacy_allocator")
 def test_allocate_memory_addr_reuses_right_buffer_when_moves_sink_to_consumer():
     """Right buffers should share one address window when matmul moves do not overlap."""
 
@@ -297,6 +308,7 @@ def test_allocate_memory_addr_dsa_rp_accepts_singleton_return_body():
     ir.assert_structural_equal(after, initialized)
 
 
+@pytest.mark.usefixtures("legacy_allocator")
 def test_allocate_memory_addr_allocs_are_prepended_to_body():
     """Alloc statements are prepended as direct children of the top-level SeqStmts before tile ops."""
 
@@ -340,6 +352,7 @@ def test_allocate_memory_addr_allocs_are_prepended_to_body():
     ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
+@pytest.mark.usefixtures("legacy_allocator")
 def test_allocate_memory_addr_raw_pointer_uniqueness():
     """Each unique MemRef gets its own alloc with distinct addresses (no reuse)."""
 
@@ -388,6 +401,7 @@ def test_allocate_memory_addr_raw_pointer_uniqueness():
     ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
+@pytest.mark.usefixtures("legacy_allocator")
 def test_allocated_memory_addr_verifier_passes_after_add_alloc():
     """After init_mem_ref + allocate_memory_addr, non-DDR memrefs have valid (non-negative) addresses."""
 
@@ -556,7 +570,7 @@ def test_allocated_memory_addr_verifier_errors_when_vec_exceeds_safe_cap():
             set_backend_type(prior_type)
 
 
-def _overflowing_mat_program(buffer_name):
+def _overflowing_mat_program(buffer_name, reserve_size=524288):
     """AIC function reserving 512KB under ``buffer_name`` plus one 8192-byte Mat
     tile above it — Mat high-water 532480 > the 524288 limit.
 
@@ -579,7 +593,7 @@ def _overflowing_mat_program(buffer_name):
             input_a: pl.Tensor[[64, 64], pl.BF16],
             out_0: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
         ) -> pl.Tensor[[64, 64], pl.FP32]:
-            _ = pl.reserve_buffer(name=buffer_name, size=524288)
+            _ = pl.reserve_buffer(name=buffer_name, size=reserve_size)
             tile_a: pl.Tile[[64, 64], pl.BF16] = pl.load(
                 input_a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat
             )
@@ -599,12 +613,10 @@ def _overflowing_mat_program(buffer_name):
 def _overflow_message(program):
     """Run init_mem_ref + allocate_memory_addr and return the capacity diagnostic.
 
-    A reserve-buffer overflow is caught by AllocateMemoryAddresses' own in-pass
-    ``CHECK`` (it owns the only exact footprint), which raises ``pypto::ValueError``
-    -> a builtin ``ValueError``. That is a different exception type from the
-    ``AllocatedMemoryAddr`` verifier's ``pypto.Error`` used by the tile-only
-    overflow test above — the two checks report the same condition through
-    different mechanisms, so each test asserts the type its own path raises.
+    The default DSA-RP planner rejects this no-fit problem in the allocation
+    pass and preserves the reserve-buffer attribution in its ``ValueError``.
+    The tile-only test above instead exercises the post-pass verifier's
+    ``pypto.Error`` path, so each test asserts the exception type it reaches.
     """
     program = passes.init_mem_ref()(program)
     pipeline = passes.PassPipeline()
@@ -630,6 +642,20 @@ def test_overflow_diagnostic_attributes_the_cross_core_pipe_ring(ascend_backend)
     # explicitly based buffer or an alignment gap makes the floor exceed the
     # summed sizes, and the floor is what this overflow was charged.
     assert "The first 524288 bytes of that space are reserved by system.reserve_buffer" in message
+    assert "cross-core pipe ring" in message
+    assert "pl.cross_core_slot(slot_num=N)" in message
+
+
+def test_overflowing_reserve_is_reported_as_capacity_error(ascend_backend):
+    """A reserve prefix larger than the pool is a user allocation error.
+
+    DSA-RP considers a reserved range beyond the pool capacity an invalid input.
+    AllocateMemoryAddr must diagnose the capacity overflow before invoking the
+    solver, preserving the actionable reserve-buffer attribution.
+    """
+    message = _overflow_message(_overflowing_mat_program("kernel_v2c_slot_buffer", reserve_size=1048576))
+    assert re.search(r"Mat buffer usage \(1056768 bytes\) exceeds platform limit \(524288 bytes\)", message)
+    assert "The first 1048576 bytes of that space are reserved by system.reserve_buffer" in message
     assert "cross-core pipe ring" in message
     assert "pl.cross_core_slot(slot_num=N)" in message
 
@@ -687,11 +713,12 @@ def test_overflow_diagnostic_omits_ring_note_for_an_unrelated_space(ascend_backe
     assert "reserved by system.reserve_buffer" not in message
 
 
+@pytest.mark.usefixtures("legacy_allocator")
 def test_allocate_memory_addr_uses_default_policy_without_backend():
     """Test that AllocateMemoryAddr falls back to DefaultMemoryAllocatorPolicy when no backend is configured.
 
     Without a backend, the pass should still produce correct 32-byte aligned
-    addresses using the default policy (skip DDR, sort by id, 32-byte alignment).
+    addresses using the default policy (skip DDR and use 32-byte alignment).
     """
     was_configured = is_backend_configured()
     if was_configured:
@@ -1014,6 +1041,7 @@ def test_allocate_memory_addr_resolves_aic_reserve_buffer_in_mat_space():
     ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
+@pytest.mark.usefixtures("legacy_allocator")
 def test_allocate_memory_addr_honors_explicit_reserve_buffer_base():
     """An explicit reserve_buffer base= is honored verbatim and bounds tile placement.
 

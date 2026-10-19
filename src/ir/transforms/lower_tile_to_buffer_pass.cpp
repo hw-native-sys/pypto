@@ -50,6 +50,9 @@
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/buffer_ir_selection.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
+#include "pypto/ir/transforms/utils/multi_buffer_reuse.h"
+#include "pypto/ir/transforms/utils/multi_buffer_schedule.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/property_verifier_registry.h"
 
@@ -175,10 +178,14 @@ class StorageIndex : public IRVisitor {
     if (auto tile = variable ? As<TileType>(variable->GetType()) : nullptr;
         tile && !windows.count(tile.get()) && types_.insert(tile.get()).second) {
       auto memory = GetDefinedMemRef(tile);
-      CHECK_SPAN(memory && memory->base_ && !memory->is_pinned_ && memory->slot_count_ == 1 &&
-                     !memory->slot_index_.has_value(),
+      const bool static_slots = memory && !addressed_ && memory->slot_count_ > 1 && memory->slot_index_ &&
+                                As<ConstInt>(*memory->slot_index_);
+      CHECK_SPAN(memory && memory->base_ &&
+                     (static_slots ||
+                      (!memory->is_pinned_ && memory->slot_count_ == 1 && !memory->slot_index_.has_value())),
                  expr->span_)
-          << "LowerTileToBuffer: tile storage must be planned; multi-slot storage needs its own recipe";
+          << "LowerTileToBuffer: tile storage must be planned; only static addressless multi-slot storage "
+             "has a lowering recipe";
       auto offset = As<ConstInt>(memory->byte_offset_);
       CHECK_SPAN(offset && offset->value_ >= 0, expr->span_)
           << "LowerTileToBuffer: expected a static nonnegative storage window address";
@@ -190,11 +197,57 @@ class StorageIndex : public IRVisitor {
 
   // Each member participates in a fixed number of indexed scans, O(N log N).
   // The resulting aliases are ordinary SSA definitions, not an IR side table.
-  void Finalize() {
+  void Finalize(const FunctionPtr& function) {
+    if (!addressed_) {
+      // Slot/view definitions are hoisted by this lowering. Check the source
+      // Tile schedule first: static indices do not make a prefetched region
+      // safe under PTOAS, and hoisting must not bypass Tile codegen's guard.
+      PtoasMultiBufferLoopSafety safety;
+      if (function->body_) safety.VisitStmt(function->body_);
+      for (const auto& [base, storage] : roots) {
+        CHECK_SPAN(safety.bases.count(base) == 0, storage.members.front().span)
+            << "LowerTileToBuffer: allocation '" << base->name_hint_
+            << "' cannot be lowered to a PTOAS multi-buffer region because "
+            << kUnsafePtoasMultiBufferLoopReason << ". Compile with the default PyPTO memory planner.";
+      }
+    }
     for (auto& [base, storage] : roots) FinalizeRoot(base, storage);
+    // Plan against the original Tile IR, before lowering loses its allocation
+    // lifetimes and operation-level no-alias facts. Use the same planner as
+    // Tile codegen; the result is materialized as ordinary shared Buffer SSA.
+    using RegionKey = std::tuple<MatrixKey, int, uint64_t>;
+    std::map<const Var*, RegionKey> regions;
+    for (const auto& [base, storage] : roots) {
+      if (const auto multi = As<MultiBufferType>(storage.handle->GetType())) {
+        regions.emplace(
+            base, std::make_tuple(MakeMatrixKey(0, multi->element_type_),
+                                  static_cast<int>(multi->element_type_->memory_space_), multi->slot_count_));
+      }
+    }
+    for (const auto& [base, owner] : PlanMultiBufferReuse(function, regions)) {
+      auto& storage = roots.at(base);
+      INTERNAL_CHECK_SPAN(!storage.definitions.empty(), function->span_)
+          << "Internal error: multi-buffer region has no allocation";
+      if (base == owner) {
+        // Allocation declaration order need not match value lifetime order.
+        // Static region handles dominate every get_slot, including aliases
+        // declared earlier than the first live occupant of the shared region.
+        region_prologue.push_back(storage.definitions.front());
+        storage.definitions.erase(storage.definitions.begin());
+        continue;
+      }
+      const auto& shared = roots.at(owner).handle;
+      const std::unordered_map<const Var*, VarPtr> remap{{storage.handle.get(), shared}};
+      storage.definitions.erase(storage.definitions.begin());
+      for (auto& definition : storage.definitions) {
+        definition = transform_utils::Substitute(definition, remap);
+      }
+      storage.handle = shared;
+    }
   }
 
   std::unordered_map<const Var*, BufferStorage> roots;
+  std::vector<StmtPtr> region_prologue;
   std::unordered_map<const TileType*, VarPtr> handles;
   std::unordered_map<const Call*, VarPtr> write_views;
   // Tiles that are use-site windows of another handle (slices and their
@@ -300,6 +353,10 @@ class StorageIndex : public IRVisitor {
           << "Internal error: a planned tile's memory space differs from its allocation";
     }
     const auto capacity = static_cast<uint64_t>(size->value_);
+    if (storage.members.front().memory->slot_count_ > 1) {
+      FinalizeMultiRoot(base, storage, capacity, span);
+      return;
+    }
     // Address placement rebases each member. Only a full-capacity member can
     // establish the origin; guessing the minimum interior address loses bytes.
     std::optional<int64_t> origin = addressed_ ? std::nullopt : std::optional<int64_t>(0);
@@ -487,6 +544,78 @@ class StorageIndex : public IRVisitor {
             static_cast<int>(type->compact_)};
   }
 
+  // Keep the allocation as one explicit region: separate addressless allocs
+  // would let PTOAS reuse opposite stages and erase the dbC contract.
+  void FinalizeMultiRoot(const Var* base, BufferStorage& storage, uint64_t capacity, const Span& span) {
+    const auto& first = storage.members.front().memory;
+    const auto count = first->slot_count_;
+    const auto slot_bytes = first->size_;
+    CHECK_SPAN(slot_bytes > 0 && capacity % slot_bytes == 0 && capacity / slot_bytes == count, span)
+        << "LowerTileToBuffer: multi-slot capacity must equal slot count times slot size";
+    BufferTypePtr cover;
+    for (const auto& member : storage.members) {
+      const auto& memory = member.memory;
+      const auto index = memory->slot_index_ ? As<ConstInt>(*memory->slot_index_) : nullptr;
+      const auto offset = As<ConstInt>(memory->byte_offset_);
+      CHECK_SPAN(
+          memory->slot_count_ == count && memory->size_ == slot_bytes && index && index->value_ >= 0 &&
+              index->value_ < count && offset &&
+              static_cast<uint64_t>(offset->value_) == static_cast<uint64_t>(index->value_) * slot_bytes,
+          member.span)
+          << "LowerTileToBuffer: multi-slot members require consistent static slot windows";
+      if (backend::PhysicalBufferBytes(member.descriptor) == slot_bytes &&
+          member.descriptor->valid_shape_ == member.descriptor->shape_) {
+        cover = member.descriptor;
+      }
+    }
+    CHECK_SPAN(cover, span) << "LowerTileToBuffer: multi-slot storage needs a full-slot descriptor";
+    auto multi = std::make_shared<MultiBufferType>(cover, count);
+    storage.handle = std::make_shared<Var>(base->name_hint_ + "_buffers", multi, span);
+    auto allocation = OpRegistry::GetInstance().CreateInternal("buffer.alloc_multi", {}, {}, multi, span);
+    storage.definitions.push_back(std::make_shared<AssignStmt>(storage.handle, allocation, span));
+    std::map<int64_t, VarPtr> slots;
+    std::map<MatrixKey, VarPtr> views;
+    for (const auto& member : storage.members) {
+      const auto slot_index = As<ConstInt>(member.memory->slot_index_.value_or(nullptr));
+      INTERNAL_CHECK_SPAN(slot_index, member.span) << "Internal error: validated static slot is missing";
+      const auto index = slot_index->value_;
+      auto [slot, inserted] = slots.emplace(index, nullptr);
+      if (inserted) {
+        slot->second = std::make_shared<Var>(base->name_hint_ + "_slot", cover, span);
+        auto get = OpRegistry::GetInstance().CreateInternal(
+            "buffer.get_slot", {storage.handle, std::make_shared<ConstInt>(index, DataType::INDEX, span)}, {},
+            span);
+        storage.definitions.push_back(std::make_shared<AssignStmt>(slot->second, get, span));
+      }
+      const auto key = MakeMatrixKey(index, member.descriptor);
+      auto [view, new_view] = views.emplace(key, slot->second);
+      if (new_view && !structural_equal(cover, member.descriptor)) {
+        if (cover->shape_ == member.descriptor->shape_) {
+          view->second = Define(storage, "_view", "buffer.reshape", {slot->second}, member.descriptor, span);
+        } else {
+          std::vector<ExprPtr> zeros{std::make_shared<ConstInt>(0, DataType::INDEX, span),
+                                     std::make_shared<ConstInt>(0, DataType::INDEX, span)};
+          std::vector<ExprPtr> args{slot->second, std::make_shared<MakeTuple>(zeros, span)};
+          // Vec windows state their valid rectangle explicitly. Acc views use
+          // the static descriptor instead, and require the two-operand form.
+          if (member.descriptor->memory_space_ == MemorySpace::Vec) {
+            std::vector<ExprPtr> valid;
+            for (const auto extent : member.descriptor->valid_shape_) {
+              valid.push_back(std::make_shared<ConstInt>(extent, DataType::INDEX, span));
+            }
+            args.push_back(std::make_shared<MakeTuple>(valid, span));
+          }
+          view->second = Define(storage, "_view", "buffer.subview", args, member.descriptor, span);
+        }
+      }
+      if (member.tile) {
+        handles.emplace(member.tile.get(), view->second);
+      } else {
+        write_views.emplace(member.write_view, view->second);
+      }
+    }
+  }
+
   // Fractal descriptors have no byte-view form. Addressed planners already
   // placed every window, so each distinct window is its own allocation at its
   // final effective address; windows sharing an address alias exactly as the
@@ -559,11 +688,124 @@ class StorageIndex : public IRVisitor {
   std::unordered_map<const Var*, CallPtr> declarations_;
 };
 
-class TileToBufferMutator : public IRMutator {
+// InitMemRef hoists pointer declarations, not the lifetimes of the values they
+// back. Re-emitting addressless descriptors at those declarations makes PTOAS
+// treat unrelated loop-local accumulators as function-wide storage. Find the
+// lowest common statement ancestor of each root's uses and place its static
+// definitions there. Binary lifting bounds all queries by O(N log N), including
+// deeply nested IR. Explicit multi-buffer regions keep their shared prologue.
+class StorageDefinitionSites : public IRVisitor {
  public:
-  explicit TileToBufferMutator(const StorageIndex& storage) : storage_(storage) {}
+  void VisitStmt(const StmtPtr& stmt) override {
+    if (!stmt) return;
+    const size_t parent = current_;
+    current_ = statements_.size();
+    statements_.push_back(stmt.get());
+    depths_.push_back(current_ == 0 ? 0 : depths_[parent] + 1);
+    std::vector<size_t> ancestors{parent};
+    for (size_t level = 1; (size_t{1} << level) <= depths_.back(); ++level) {
+      const size_t previous = ancestors.back();
+      ancestors.push_back(level - 1 < parents_[previous].size() ? parents_[previous][level - 1] : 0);
+    }
+    parents_.push_back(std::move(ancestors));
+    IRVisitor::VisitStmt(stmt);
+    current_ = parent;
+  }
+
+  [[nodiscard]] std::map<const Stmt*, std::vector<StmtPtr>> Plan(const StorageIndex& storage) const {
+    std::map<const Stmt*, std::vector<StmtPtr>> result;
+    // Definition order follows the source's first use, not pointer order.
+    std::map<size_t, const Var*> ordered;
+    for (const auto& [base, range] : uses_) {
+      const auto root = storage.roots.find(base);
+      if (root != storage.roots.end() && !As<MultiBufferType>(root->second.handle->GetType())) {
+        ordered.emplace(first_use_order_.at(base), base);
+      }
+    }
+    for (const auto& [order, base] : ordered) {
+      const auto& range = uses_.at(base);
+      const auto site = statements_[CommonAncestor(range.first, range.second)];
+      const auto& definitions = storage.roots.at(base).definitions;
+      result[site].insert(result[site].end(), definitions.begin(), definitions.end());
+    }
+    return result;
+  }
 
  protected:
+  void VisitVarLike_(const VarPtr& var) override {
+    const auto memory = GetTypeMemRef(var->GetType());
+    if (!As<TileType>(var->GetType()) || !memory || !(*memory)->base_) return;
+    auto [entry, inserted] = uses_.emplace((*memory)->base_.get(), std::make_pair(current_, current_));
+    if (inserted) first_use_order_.emplace((*memory)->base_.get(), first_use_order_.size());
+    if (!inserted) {
+      entry->second.first = std::min(entry->second.first, current_);
+      entry->second.second = std::max(entry->second.second, current_);
+    }
+  }
+  void VisitExpr_(const IterArgPtr& var) override { VisitVarLike_(var); }
+  void VisitStmt_(const ForStmtPtr& loop) override { VisitLoop(loop); }
+  void VisitStmt_(const WhileStmtPtr& loop) override { VisitLoop(loop); }
+
+ private:
+  template <typename LoopPtr>
+  void VisitLoop(const LoopPtr& loop) {
+    for (const auto& argument : loop->iter_args_) VisitExpr(argument->initValue_);
+    IRVisitor::VisitStmt_(loop);
+  }
+
+  [[nodiscard]] size_t CommonAncestor(size_t left, size_t right) const {
+    if (depths_[left] < depths_[right]) std::swap(left, right);
+    size_t difference = depths_[left] - depths_[right];
+    for (size_t level = 0; difference != 0; ++level, difference >>= 1) {
+      if (difference & 1) left = parents_[left][level];
+    }
+    if (left == right) return left;
+    for (size_t level = parents_[left].size(); level-- > 0;) {
+      const size_t a = level < parents_[left].size() ? parents_[left][level] : 0;
+      const size_t b = level < parents_[right].size() ? parents_[right][level] : 0;
+      if (a != b) {
+        left = a;
+        right = b;
+      }
+    }
+    return parents_[left][0];
+  }
+
+  size_t current_ = 0;
+  std::vector<const Stmt*> statements_;
+  std::vector<size_t> depths_;
+  std::vector<std::vector<size_t>> parents_;
+  std::map<const Var*, std::pair<size_t, size_t>> uses_;
+  std::map<const Var*, size_t> first_use_order_;
+};
+
+class TileToBufferMutator : public IRMutator {
+ public:
+  TileToBufferMutator(const StorageIndex& storage, std::map<const Stmt*, std::vector<StmtPtr>> definitions,
+                      bool addressless)
+      : storage_(storage), definitions_(std::move(definitions)), addressless_(addressless) {}
+
+  StmtPtr VisitStmt(const StmtPtr& stmt) override {
+    auto lowered = IRMutator::VisitStmt(stmt);
+    if (const auto entry = definitions_.find(stmt.get()); entry != definitions_.end()) {
+      auto body = entry->second;
+      body.push_back(lowered);
+      return SeqStmts::Flatten(std::move(body), stmt->span_);
+    }
+    return lowered;
+  }
+
+ protected:
+  StmtPtr VisitStmt_(const SeqStmtsPtr& sequence) override {
+    // The base mutator dispatches children directly through StmtFunctor,
+    // bypassing our placement wrapper. Re-enter VisitStmt for every child and
+    // flatten inserted definition prefixes so region yields remain terminators.
+    std::vector<StmtPtr> body;
+    body.reserve(sequence->stmts_.size());
+    for (const auto& statement : sequence->stmts_) body.push_back(VisitStmt(statement));
+    return SeqStmts::Flatten(std::move(body), sequence->span_);
+  }
+
   ExprPtr VisitExpr_(const VarPtr& var) override {
     if (As<TileType>(var->GetType())) return Handle(var);
     auto alias = tensor_aliases_.find(var.get());
@@ -840,8 +1082,15 @@ class TileToBufferMutator : public IRMutator {
     INTERNAL_CHECK_SPAN(call->op_, call->span_) << "Internal error: device call has no operator";
     // Pipeline membership only constrains storage planning, whose result is
     // already fixed in the MemRefs (AllocateMemoryAddr strips it; PTOAS keeps
-    // it). Every other attribute still needs an explicit conversion contract.
-    CHECK_SPAN(StripAttr(call->attrs_, kPipelineMembershipAttr).empty(), call->span_)
+    // it). The fresh-Acc proof marker is likewise consumed by the shared
+    // schedule check before lowering; it has no Buffer operation semantics.
+    // Only fresh MAD kinds can carry that proof. Every other attribute still
+    // needs an explicit conversion contract.
+    auto remaining_attrs = StripAttr(call->attrs_, kPipelineMembershipAttr);
+    if (IsOp(call, "tile.matmul") || IsOp(call, "tile.matmul_bias")) {
+      remaining_attrs = StripAttr(remaining_attrs, kCompilerPtoasDbCStageAttr);
+    }
+    CHECK_SPAN(remaining_attrs.empty(), call->span_)
         << "LowerTileToBuffer: device-call attributes require an explicit conversion contract";
     for (const auto& [logical, physical] : {std::pair{"tile.get_block_idx", "buffer.get_block_idx"},
                                             std::pair{"tile.get_block_num", "buffer.get_block_num"},
@@ -856,6 +1105,9 @@ class TileToBufferMutator : public IRMutator {
       INTERNAL_CHECK_SPAN(result, call->span_) << "Internal error: allocation has no pointer definition";
       auto found = storage_.roots.find(result.get());
       if (found == storage_.roots.end()) return Empty(call->span_);
+      if (addressless_ && !As<MultiBufferType>(found->second.handle->GetType())) {
+        return Empty(call->span_);
+      }
       return std::make_shared<SeqStmts>(found->second.definitions, call->span_);
     }
     if (IsOp(call, "tile.create")) {
@@ -1135,6 +1387,8 @@ class TileToBufferMutator : public IRMutator {
   }
 
   const StorageIndex& storage_;
+  const std::map<const Stmt*, std::vector<StmtPtr>> definitions_;
+  const bool addressless_;
   std::unordered_map<const TileType*, VarPtr> window_handles_;
   std::unordered_map<const Var*, std::pair<VarPtr, MakeTuplePtr>> window_origins_;
   YieldContext* yield_context_ = nullptr;
@@ -1170,10 +1424,25 @@ ProgramPtr TransformProgram(const ProgramPtr& program) {
     }
     StorageIndex storage(addressed);
     storage.VisitStmt(function->body_);
-    storage.Finalize();
-    TileToBufferMutator mutator(storage);
+    storage.Finalize(function);
+    std::map<const Stmt*, std::vector<StmtPtr>> definitions;
+    if (!addressed) {
+      StorageDefinitionSites sites;
+      sites.VisitStmt(function->body_);
+      definitions = sites.Plan(storage);
+    }
+    TileToBufferMutator mutator(storage, std::move(definitions), !addressed);
     auto lowered = std::make_shared<Function>(*function);
     lowered->body_ = mutator.VisitStmt(function->body_);
+    if (!storage.region_prologue.empty()) {
+      auto body = std::move(storage.region_prologue);
+      if (const auto sequence = As<SeqStmts>(lowered->body_)) {
+        body.insert(body.end(), sequence->stmts_.begin(), sequence->stmts_.end());
+      } else {
+        body.push_back(lowered->body_);
+      }
+      lowered->body_ = std::make_shared<SeqStmts>(std::move(body), function->span_);
+    }
     lowered->ir_stage_ = FunctionIRStage::Buffer;
     functions.push_back(std::move(lowered));
   }

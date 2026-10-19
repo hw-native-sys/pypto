@@ -39,6 +39,23 @@ def legacy_storage_context(pass_verification_instruments):
         yield
 
 
+def _planner_context(planner):
+    """Preserve the verification fixture while selecting a test's planner policy."""
+    current = passes.PassContext.current()
+    if current is None:
+        return passes.PassContext([], memory_planner=planner)
+    return passes.PassContext(
+        current.get_instruments(),
+        current.get_verification_level(),
+        current.get_diagnostic_phase(),
+        current.get_disabled_diagnostics(),
+        planner,
+        current.get_enable_pypto_l0c_double_buffer(),
+        current.get_runtime(),
+        enable_buffer_ir=current.get_enable_buffer_ir(),
+    )
+
+
 def _run_pipeline(program: ir.Program) -> ir.Program:
     """Run init_mem_ref + materialize_semantic_aliases + memory_reuse pipeline.
 
@@ -47,7 +64,8 @@ def _run_pipeline(program: ir.Program) -> ir.Program:
     memory_reuse in the real pipeline — compose all three here so these unit
     tests exercise the same combined transformation.
     """
-    return passes.memory_reuse()(passes.materialize_semantic_aliases()(passes.init_mem_ref()(program)))
+    with _planner_context(passes.MemoryPlanner.PYPTO):
+        return passes.memory_reuse()(passes.materialize_semantic_aliases()(passes.init_mem_ref()(program)))
 
 
 def _collect_allocated_tile_ranges(program: ir.Program) -> dict[str, tuple[int, int]]:
@@ -7060,6 +7078,12 @@ class TestCapacityGatedReuse:
     results (not loads), so the legacy load-only guard never protected them either.
     """
 
+    @pytest.fixture(autouse=True)
+    def _legacy_planner_policy(self):
+        """This class tests the legacy MemoryReuse capacity gate by default."""
+        with _planner_context(passes.MemoryPlanner.PYPTO):
+            yield
+
     @staticmethod
     def _collect_bases(program: ir.Program, names: tuple[str, ...]) -> dict[str, ir.Var]:
         """MemRef ``base_`` of each named Right operand in the result IR."""
@@ -8559,6 +8583,203 @@ class TestChainedInPlaceIfPhis:
         assert not re.search(r"pto\.tmov ins\([^)]*loc=mat[^)]*\) outs\([^)]*loc=mat[^)]*\)", pto), (
             f"codegen emitted a same-space Mat->Mat pto.tmov:\n{pto}"
         )
+
+
+@pytest.mark.parametrize("overlap", [False, True], ids=["distinct-slots", "same-slot"])
+def test_declared_readable_creates_keep_overlap_validation(overlap):
+    """Writes through two create handles must not silently clobber a live value."""
+    slots = pl.MemRef(slots=2)
+    second_slot = 0 if overlap else 1
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            x: pl.Scalar[pl.FP32],
+            y: pl.Scalar[pl.FP32],
+            out: pl.Out[pl.Tensor[[1], pl.FP32]],
+        ) -> pl.Tensor[[1], pl.FP32]:
+            first: pl.Tile[[64, 64], pl.FP32, slots[0], pl.Mem.Vec] = pl.tile.create(
+                [64, 64], dtype=pl.FP32, target_memory=pl.Mem.Vec
+            )
+            pl.tile.write(first, [0, 0], x)
+            second: pl.Tile[[64, 64], pl.FP32, slots[second_slot], pl.Mem.Vec] = pl.tile.create(
+                [64, 64], dtype=pl.FP32, target_memory=pl.Mem.Vec
+            )
+            pl.tile.write(second, [0, 0], y)
+            first_value = pl.tile.read(first, [0, 0])
+            second_value = pl.tile.read(second, [0, 0])
+            pl.tensor.write(out, [0], first_value + second_value)
+            return out
+
+    if overlap:
+        with pytest.raises(ValueError, match="bound to the same slot.*live at the same time"):
+            _run_pipeline(Before)
+    else:
+        after = _run_pipeline(Before)
+        ranges = _collect_allocated_tile_ranges(after)
+        assert ranges["first"][0] != ranges["second"][0]
+
+
+@pytest.mark.parametrize("overlap", [False, True], ids=["distinct-slots", "same-slot"])
+def test_declared_readable_create_carries_keep_overlap_validation(overlap):
+    """A carry is another handle for its initializer, not fresh storage."""
+    slots = pl.MemRef(slots=2)
+    second_slot = 0 if overlap else 1
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            x: pl.Scalar[pl.FP32],
+            y: pl.Scalar[pl.FP32],
+            out: pl.Out[pl.Tensor[[1], pl.FP32]],
+        ) -> pl.Tensor[[1], pl.FP32]:
+            first: pl.Tile[[64, 64], pl.FP32, slots[0], pl.Mem.Vec] = pl.tile.create(
+                [64, 64], dtype=pl.FP32, target_memory=pl.Mem.Vec
+            )
+            second: pl.Tile[[64, 64], pl.FP32, slots[second_slot], pl.Mem.Vec] = pl.tile.create(
+                [64, 64], dtype=pl.FP32, target_memory=pl.Mem.Vec
+            )
+            for _, (a, b) in pl.range(2, init_values=(first, second)):
+                pl.tile.write(a, [0, 0], x)
+                pl.tile.write(b, [0, 0], y)
+                av = pl.tile.read(a, [0, 0])
+                bv = pl.tile.read(b, [0, 0])
+                pl.tensor.write(out, [0], av + bv)
+                final_a, final_b = pl.yield_(a, b)
+            return out
+
+    if overlap:
+        with pytest.raises(ValueError, match="bound to the same slot.*live at the same time"):
+            _run_pipeline(Before)
+    else:
+        _run_pipeline(Before)
+
+
+def test_declared_create_used_only_as_accumulator_initializer_is_legal():
+    """An empty carry seed need not outlive its first initializing MAD."""
+    slots = pl.MemRef(slots=2)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            lhs: pl.Tile[[16, 16], pl.BF16, pl.Mem.Left],
+            rhs: pl.Tile[[16, 16], pl.BF16, pl.Mem.Right],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            seed: pl.Tile[[16, 16], pl.FP32, slots[0], pl.Mem.Acc] = pl.tile.create(
+                [16, 16], dtype=pl.FP32, target_memory=pl.Mem.Acc
+            )
+            for i, (acc,) in pl.range(2, init_values=(seed,)):
+                product = pl.tile.matmul_acc(acc, lhs, rhs, init_cond=i == 0)
+                final = pl.yield_(product)
+            return pl.tile.store(final, [0, 0], out)
+
+    after = _run_pipeline(Before)
+    ranges = _collect_allocated_tile_ranges(after)
+    assert ranges["seed"][0] == ranges["product"][0]
+
+
+def test_declared_initialized_accumulator_still_occupies_its_slot():
+    """An initializing MAD does not erase the live storage of its carry."""
+    slots = pl.MemRef(slots=2)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            lhs: pl.Tile[[16, 16], pl.BF16, pl.Mem.Left],
+            rhs: pl.Tile[[16, 16], pl.BF16, pl.Mem.Right],
+            out: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+        ) -> pl.Tensor[[16, 32], pl.FP32]:
+            seed: pl.Tile[[16, 16], pl.FP32, slots[0], pl.Mem.Acc] = pl.tile.create(
+                [16, 16], dtype=pl.FP32, target_memory=pl.Mem.Acc
+            )
+            for i, (acc,) in pl.range(2, init_values=(seed,)):
+                product = pl.tile.matmul_acc(acc, lhs, rhs, init_cond=i == 0)
+                final = pl.yield_(product)
+            other: pl.Tile[[16, 16], pl.FP32, slots[0], pl.Mem.Acc] = pl.tile.matmul(lhs, rhs)
+            out = pl.tile.store(final, [0, 0], out)
+            return pl.tile.store(other, [0, 16], out)
+
+    with pytest.raises(ValueError, match="bound to the same slot.*live at the same time"):
+        _run_pipeline(Before)
+
+
+def test_declared_peeled_accumulator_keeps_its_seed_lifetime():
+    """The fresh first MAD and empty seed must retain their union lifetime."""
+    slots = pl.MemRef(slots=2)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            lhs: pl.Tile[[16, 16], pl.BF16, pl.Mem.Left],
+            rhs: pl.Tile[[16, 16], pl.BF16, pl.Mem.Right],
+            out: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+        ) -> pl.Tensor[[16, 32], pl.FP32]:
+            seed: pl.Tile[[16, 16], pl.FP32, slots[0], pl.Mem.Acc] = pl.tile.create(
+                [16, 16], dtype=pl.FP32, target_memory=pl.Mem.Acc
+            )
+            for i, (acc,) in pl.range(2, init_values=(seed,)):
+                if i == 0:
+                    first: pl.Tile[[16, 16], pl.FP32, slots[0], pl.Mem.Acc] = pl.tile.matmul(lhs, rhs)
+                    product = pl.yield_(first)
+                else:
+                    next_value = pl.tile.matmul_acc(acc, lhs, rhs)
+                    product = pl.yield_(next_value)
+                final = pl.yield_(product)
+            other: pl.Tile[[16, 16], pl.FP32, slots[0], pl.Mem.Acc] = pl.tile.matmul(lhs, rhs)
+            out = pl.tile.store(final, [0, 0], out)
+            return pl.tile.store(other, [0, 16], out)
+
+    with pytest.raises(ValueError, match="bound to the same slot.*live at the same time"):
+        _run_pipeline(Before)
+
+
+def test_declared_phi_create_family_still_conflicts_with_independent_value():
+    """Merging mutually exclusive phi sources must retain their live footprint."""
+    slots = pl.MemRef(slots=2)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            flag: pl.Scalar[pl.BOOL],
+            x: pl.Scalar[pl.FP32],
+            out: pl.Out[pl.Tensor[[1], pl.FP32]],
+        ) -> pl.Tensor[[1], pl.FP32]:
+            outer: pl.Tile[[64, 64], pl.FP32, slots[0], pl.Mem.Vec] = pl.tile.create(
+                [64, 64], dtype=pl.FP32, target_memory=pl.Mem.Vec
+            )
+            pl.tile.write(outer, [0, 0], x)
+            if flag:
+                then_value: pl.Tile[[64, 64], pl.FP32, slots[0], pl.Mem.Vec] = pl.tile.create(
+                    [64, 64], dtype=pl.FP32, target_memory=pl.Mem.Vec
+                )
+                pl.tile.write(then_value, [0, 0], x)
+                value = pl.yield_(then_value)
+            else:
+                else_value: pl.Tile[[64, 64], pl.FP32, slots[0], pl.Mem.Vec] = pl.tile.create(
+                    [64, 64], dtype=pl.FP32, target_memory=pl.Mem.Vec
+                )
+                pl.tile.write(else_value, [0, 0], x)
+                value = pl.yield_(else_value)
+            a = pl.tile.read(outer, [0, 0])
+            b = pl.tile.read(value, [0, 0])
+            pl.tensor.write(out, [0], a + b)
+            return out
+
+    with pytest.raises(ValueError, match="bound to the same slot.*live at the same time"):
+        _run_pipeline(Before)
 
 
 if __name__ == "__main__":

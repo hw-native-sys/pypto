@@ -192,6 +192,15 @@ The cost is the author's to manage: pinning trades capacity for parallelism, and
 over-pinned kernel surfaces as a hard `AllocateMemoryAddr` overflow rather than being
 silently coalesced back.
 
+Creates retain their storage occupancy, including reads and writes through loop
+carries and SSA aliases. A canonical Acc carry initialized by a fresh MAD on its
+own loop's first iteration may share that initializing producer's lifetime, but
+only when the empty seed has no independent uses and has one proven initializer.
+The complete seed/carry interval is retained against unrelated occupants; an
+initializing `matmul_acc` is not an exemption from storage-overlap validation.
+Single-family phi sources use the existing proven alias relation; their full
+union lifetime still conflicts with independently bound values.
+
 **Overlap check.** Two tiles independently bound to the **same slot** must not be live at
 the same time — that is not reuse, it is the later write destroying data the earlier tile
 still needs. The check is per slot, not per allocation: two tiles on *different* slots of a

@@ -409,12 +409,12 @@ tile 调用 `set_validshape`。
 
 物理 `addr` 由谁分配，通过 `memory_planner` 选项选择
 （`ir.compile(..., memory_planner=passes.MemoryPlanner.PYPTO | DSA_RP | PTOAS)`，
-默认 `PYPTO`）。它同时作用于 pass 流水线（经 `PassContext`）与 codegen：
+默认 `DSA_RP`）。它同时作用于 pass 流水线（经 `PassContext`）与 codegen：
 
 | 模式 | 流水线 | `pto.alloc_tile` | `pto.reserve_buffer` | ptoas |
 | ---- | ------ | ---------------- | -------------------- | ----- |
-| `PYPTO`（默认） | 运行 `MaterializeSemanticAliases` + `MemoryReuse` + `AllocateMemoryAddr` | 发射 `addr = <const>`（来自 `MemRef.byte_offset_`） | `auto = false, base = <const>` | `--pto-level=level3`（信任已烘焙地址） |
-| `DSA_RP` | 运行 `MaterializeSemanticAliases` + `AllocateMemoryAddr`；跳过 `MemoryReuse` | 发射进程内 canonical-greedy DSA-RP 的 `addr = <const>` | `auto = false, base = <const>` | `--pto-level=level3`（信任已烘焙地址） |
+| `PYPTO` | 运行 `MaterializeSemanticAliases` + `MemoryReuse` + `AllocateMemoryAddr` | 发射 `addr = <const>`（来自 `MemRef.byte_offset_`） | `auto = false, base = <const>` | `--pto-level=level3`（信任已烘焙地址） |
+| `DSA_RP`（默认） | 运行 `MaterializeSemanticAliases` + `AllocateMemoryAddr`；跳过 `MemoryReuse` | 发射进程内 canonical-greedy DSA-RP 的 `addr = <const>` | `auto = false, base = <const>` | `--pto-level=level3`（信任已烘焙地址） |
 | `PTOAS` | 运行 `MaterializeSemanticAliases`；**跳过** `MemoryReuse` + `AllocateMemoryAddr` | 省略 `addr`（`PTOCodegen.generate(emit_tile_addr=False)`） | `auto = true`（不带 `base`） | `--pto-level=level2`（ptoas `PlanMemory` 做复用 + 定址） |
 
 内存规划拆成两个 pass：**`MaterializeSemanticAliases`** 把**语义强制**的别名
@@ -461,9 +461,20 @@ scf.for %i = %c0_index to %c4_index step %c1_index {
 
 `PlanMultiBufferRegions` 在遍历函数体之前判定适用性；ptoas 无法描述的形态（各槽位 tile 形状
 不一致、各槽位声明的 valid shape 不一致、循环内有两个槽位同时活跃、内存空间不属于
-Vec / Mat / Acc、valid shape 是运行期值、某个槽位作为 phi 被带出 `if` 或循环、槽位数不在
+Vec / Mat / Acc、valid shape 是运行期值、while 携带的槽位或运行期索引的 if/for phi、槽位数不在
 ptoas 的 `[2, 16]` 内）会报 `ValueError` 并指明具体形态，因为回退成逐槽位
 `alloc_tile` 会让 ptoas 有机会把这些槽位规划到同一块内存上。
+
+类型兼容且生命周期先后相接的声明，只有在共享分配分析也允许别名时才能复用同一物理区域：
+定义操作的 `forbid_alias` 输入和目标特有的 hazard 都要与曾占用该区域的每个逻辑分配核对。
+最早空闲但不兼容的区域不会挡住其他安全的空闲区域。来自 load 的区域使用独立复用池；
+循环中写入的工作区不进入可复用池。显式 no-alias 对端按物理区域所有者建立索引，
+包括该区域复用前的逻辑占用者。
+槽位 handle 的身份还包含静态有效尺寸，因此同一槽位、相同物理形状但有效尺寸不同的边界
+视图，会得到不同的 `pto.subview` 结果。
+Acc 子视图必须保持物理行数（L0C 列步长），Buffer IR 也遵守这一要求；缩小列数或有效行数
+不会改变该步长。常量槽位的 `if` phi 在进入任一分支前选取区域槽位，即使首个生产者位于
+分支内部。若改为提升普通 tile 分配，就会使 phi 脱离其声明的区域。
 
 **每轮迭代只用一个槽位。** 共活槽位被拒绝，不是因为 ptoas 无法为它*定型*，而是无法为它
 *同步*。这类形态中有两种出过错：

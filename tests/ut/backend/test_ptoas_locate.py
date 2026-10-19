@@ -311,7 +311,9 @@ def test_older_version_still_leaves_the_generated_pto(tmp_path, monkeypatch):
     out = tmp_path / "out"
 
     with pytest.raises(RuntimeError, match=rf"requires PTOAS >= {PTOAS_MIN_VERSION}"):
-        pto_backend._compile_pto_module("module {}", "kernel_a", str(out))
+        pto_backend._compile_pto_module(
+            "module {}", "kernel_a", str(out), memory_planner=pto_backend._passes.get_default_memory_planner()
+        )
 
     assert (out / "ptoas" / "kernel_a.pto").read_text() == "module {}"
     assert _calls(ptoas) == ["--version"]

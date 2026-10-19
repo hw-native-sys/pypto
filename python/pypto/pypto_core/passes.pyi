@@ -182,6 +182,9 @@ class DiagnosticCheckRegistry:
 def get_default_diagnostic_phase() -> DiagnosticPhase:
     """Get the default diagnostic phase (from PYPTO_WARNING_LEVEL env var, default: PrePipeline)."""
 
+def get_default_memory_planner() -> MemoryPlanner:
+    """Get the default on-chip memory planner."""
+
 def get_verified_properties() -> IRPropertySet:
     """Get the set of properties automatically verified during compilation."""
 
@@ -294,17 +297,16 @@ class PassContext:
         verification_level: VerificationLevel = VerificationLevel.BASIC,
         diagnostic_phase: DiagnosticPhase = DiagnosticPhase.PRE_PIPELINE,
         disabled_diagnostics: DiagnosticCheckSet = ...,  # default: {UnusedControlFlowResult}
-        memory_planner: MemoryPlanner = MemoryPlanner.PYPTO,
+        memory_planner: MemoryPlanner = MemoryPlanner.DSA_RP,
         enable_pypto_l0c_double_buffer: bool = False,
         runtime: RuntimeKind = RuntimeKind.TENSORMAP_AND_RINGBUFFER,
         enable_buffer_ir: bool = True,
     ) -> None:
         """Create a PassContext with instruments and pass configuration (incl. memory planner).
 
-        ``enable_pypto_l0c_double_buffer`` opts the legacy ``PYPTO`` planner in
-        to chooser-emitted L0C double-buffering (dbC=2; experimental, default
-        off). It has no effect under ``DSA_RP`` or ``PTOAS``, which enable
-        chooser dbC=2 automatically.
+        ``enable_pypto_l0c_double_buffer`` is retained for compatibility but
+        has no effect: automatic dbC is disabled for all planners. Explicit
+        buffering declarations are preserved.
 
         ``runtime`` selects the target Simpler runtime ABI; its wire name is
         what lands in ``RUNTIME_CONFIG["runtime"]`` in the generated
@@ -348,7 +350,7 @@ class PassContext:
         ...
 
     def get_enable_pypto_l0c_double_buffer(self) -> bool:
-        """Whether chooser-emitted dbC=2 is enabled under legacy PYPTO."""
+        """Return the stored legacy flag; automatic dbC remains disabled."""
         ...
 
     def get_instruments(self) -> list[PassInstrument]:
@@ -467,8 +469,9 @@ def lower_pipeline_to_slots() -> Pass:
     ``iter_args`` are untouched, so no remainder dispatch is needed.
 
     Self-gated on ``memory_planner=PTOAS``: only that planner's codegen path emits
-    a ptoas multi-buffer region today, so under the default PyPTO planner the pass
-    returns every function untouched. The gate tracks that codegen limitation, not
+    a ptoas multi-buffer region today, so under either in-tree planner (default
+    ``DSA_RP`` or legacy ``PYPTO``) the pass returns every function untouched.
+    The gate tracks that codegen limitation, not
     a ptoas one — an addressed region synchronizes identically at level3, and
     widening the gate is follow-up work in the address allocator. Loops it
     declines — an unsupported
@@ -995,6 +998,13 @@ class l0_tile_chooser:
         AStationary = 1
         BStationary = 2
 
+    class DbcEmissionRoute(Enum):
+        """Concrete output-grid schedule used to realize L0C double buffering."""
+
+        Unsupported = 0
+        PipelinedInner = 1
+        UnrolledGrid = 2
+
     class L0TileConfig:
         """Inputs to choose_l0_tile: problem dims + hardware + realizable-mask gates.
 
@@ -1029,6 +1039,11 @@ class l0_tile_chooser:
         allow_a_stationary: bool
         allow_b_stationary: bool
         allow_double_buffer_c: bool
+        full_k_dbc_route: l0_tile_chooser.DbcEmissionRoute
+        reduction_iterations: int
+        reduction_pipeline_stages: int
+        split_k_dbc_route: l0_tile_chooser.DbcEmissionRoute
+        allow_unrolled_dbc_m_boundary: bool
         c_read: bool
         bw_a: float
         bw_b: float
@@ -1056,6 +1071,7 @@ class l0_tile_chooser:
         stationarity: l0_tile_chooser.Stationarity
         os_holds_a: bool
         double_buffer_c: bool
+        dbc_emission_route: l0_tile_chooser.DbcEmissionRoute
         perf_hint: str
 
     @staticmethod
@@ -1076,6 +1092,7 @@ __all__ = [
     "get_verified_properties",
     "get_default_verification_level",
     "get_default_diagnostic_phase",
+    "get_default_memory_planner",
     "get_default_verify_properties",
     "get_structural_properties",
     "verify_properties",

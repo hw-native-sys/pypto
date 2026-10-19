@@ -235,6 +235,10 @@ enum class MemoryPlanner {
   DsaRP = 2,  ///< In-tree DSA with automatically recognized reuse penalties.
 };
 
+inline constexpr MemoryPlanner kDefaultMemoryPlanner = MemoryPlanner::DsaRP;
+
+[[nodiscard]] constexpr MemoryPlanner GetDefaultMemoryPlanner() { return kDefaultMemoryPlanner; }
+
 /**
  * @brief Which Simpler runtime ABI a compilation targets.
  *
@@ -290,15 +294,12 @@ class PassContext {
    *        DiagnosticCheck enum (default: UnusedControlFlowResult).
    *        Performance hints are on by default; disable individual hints by
    *        adding their DiagnosticCheck values here.
-   * @param memory_planner Who plans on-chip buffer memory (default: PyPTO).
+   * @param memory_planner Who plans on-chip buffer memory (default: DsaRP).
    *        DsaRP replaces MemoryReuse with in-tree capacity-constrained DSA-RP.
    *        PtoAS skips PyPTO address allocation so ptoas PlanMemory owns it.
-   * @param enable_pypto_l0c_double_buffer Opt the legacy PyPTO planner in to
-   *        chooser-emitted L0C double-buffering (dbC=2; default: false,
-   *        experimental). No effect under DsaRP or PtoAS, which enable chooser
-   *        dbC=2 automatically. When true, AutoTileMatmulL0 may emit two co-live
-   *        L0C accumulators and the legacy PyPTO allocator preserves the
-   *        ping-pong where capacity permits.
+   * @param enable_pypto_l0c_double_buffer Legacy compatibility flag (default:
+   *        false). Automatic dbC is disabled for every planner regardless of
+   *        this flag. Explicit buffering declarations are preserved.
    * @param runtime Which Simpler runtime ABI to target (default:
    *        TensorMapAndRingBuffer). Passes that must legalize IR for a specific
    *        runtime switch on this rather than inspecting codegen options.
@@ -309,7 +310,7 @@ class PassContext {
                        VerificationLevel verification_level = VerificationLevel::Basic,
                        DiagnosticPhase diagnostic_phase = DiagnosticPhase::PrePipeline,
                        DiagnosticCheckSet disabled_diagnostics = {DiagnosticCheck::UnusedControlFlowResult},
-                       MemoryPlanner memory_planner = MemoryPlanner::PyPTO,
+                       MemoryPlanner memory_planner = kDefaultMemoryPlanner,
                        bool enable_pypto_l0c_double_buffer = false, RuntimeKind runtime = kDefaultRuntimeKind,
                        bool enable_buffer_ir = true);
 
@@ -370,9 +371,7 @@ class PassContext {
   [[nodiscard]] MemoryPlanner GetMemoryPlanner() const;
 
   /**
-   * @brief Whether chooser-emitted L0C double-buffering (dbC=2) is enabled under
-   *        the legacy PyPTO planner. Off by default (experimental). No effect
-   *        under DsaRP or PtoAS.
+   * @brief Return the stored legacy flag; automatic dbC remains disabled.
    */
   [[nodiscard]] bool GetEnablePyptoL0cDoubleBuffer() const;
 

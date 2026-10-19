@@ -409,9 +409,10 @@ class TestMakeCacheKey:
         assert len(set(keys)) == len(keys), f"planner must split the cache key, got {keys}"
 
     def test_dbc_double_buffer_flag_splits_legacy_pypto_key(self):
-        """The legacy-PyPTO dbC=2 opt-in changes AutoTileMatmulL0/MemoryReuse output,
-        so a kernel compiled with it off must not reuse that artifact when later
-        called with it on."""
+        """Retain the conservative legacy-PyPTO key split for compatibility.
+
+        The flag no longer enables automatic L0C double buffering.
+        """
         key_off = self._make_key(
             param_names=["a"],
             tensor_shapes={"a": (8, 8)},
@@ -429,8 +430,8 @@ class TestMakeCacheKey:
         assert key_off != key_on, "dbC=2 opt-in must split the cache key"
 
     @pytest.mark.parametrize("planner", [MemoryPlanner.DSA_RP, MemoryPlanner.PTOAS])
-    def test_dbc_double_buffer_flag_does_not_split_automatic_planner_key(self, planner):
-        """DSA_RP and PTOAS enable dbC automatically, so the legacy-PyPTO flag is inert."""
+    def test_dbc_double_buffer_flag_does_not_split_non_pypto_planner_key(self, planner):
+        """The legacy-PyPTO flag is inert for both other planners."""
         kwargs: dict[str, Any] = {
             "param_names": ["a"],
             "tensor_shapes": {"a": (8, 8)},
@@ -449,6 +450,18 @@ class TestMakeCacheKey:
         assert off.compile_opts is not None and on.compile_opts is not None
         assert ("buffer_ir_version", 0) in off.compile_opts
         assert ("buffer_ir_version", 6) in on.compile_opts
+
+    def test_dbc_double_buffer_flag_does_not_split_unresolved_default_key(self):
+        """A None planner means DSA_RP, so the legacy-only flag is inert."""
+        kwargs: dict[str, Any] = {
+            "param_names": ["a"],
+            "tensor_shapes": {"a": (8, 8)},
+            "tensor_dtypes": {"a": DataType.FP32},
+            "memory_planner": None,
+        }
+        key_off = self._make_key(**kwargs, enable_pypto_l0c_double_buffer=False)
+        key_on = self._make_key(**kwargs, enable_pypto_l0c_double_buffer=True)
+        assert key_off == key_on
 
     def test_runtime_splits_key(self):
         """The runtime is baked into the artifact's ``kernel_config.py`` and decides
@@ -480,8 +493,8 @@ class TestResolveRuntime:
 class TestResolveMemoryPlanner:
     """The planner the JIT keys on must match the one ``ir.compile()`` will use."""
 
-    def test_defaults_to_pypto(self):
-        assert _resolve_memory_planner(None) == MemoryPlanner.PYPTO
+    def test_defaults_to_dsa_rp(self):
+        assert _resolve_memory_planner(None) == MemoryPlanner.DSA_RP
 
     @pytest.mark.parametrize("planner", [MemoryPlanner.DSA_RP, MemoryPlanner.PTOAS])
     def test_reads_the_active_pass_context(self, planner):
@@ -490,7 +503,7 @@ class TestResolveMemoryPlanner:
         call reuse a PYPTO-compiled artifact."""
         with passes.PassContext([], memory_planner=planner):
             assert _resolve_memory_planner(None) == planner
-        assert _resolve_memory_planner(None) == MemoryPlanner.PYPTO
+        assert _resolve_memory_planner(None) == MemoryPlanner.DSA_RP
 
 
 def test_buffer_ir_cache_option_follows_active_context():

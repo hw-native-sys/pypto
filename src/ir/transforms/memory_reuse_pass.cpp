@@ -2570,30 +2570,33 @@ class LifetimeAnalyzer : public IRVisitor {
     loop_scopes_.push_back({loop_start, loop_end});
   }
 
-  /// Resolve a loop carry's init to the variable that actually owns the buffer.
+  /// Resolve a loop carry or return value to the tracked allocation root.
   ///
   /// A nested loop seeds its carry from the *enclosing* loop's IterArg, and an
   /// IterArg is an alias of its own init rather than a definition in its own
   /// right -- like return_vars, iter-args are deliberately absent from
   /// `ordered_defs_` / `var_def_order_`, so they carry no lifetime of their own.
-  /// Walking the carry chain to the first non-IterArg therefore lands on the
-  /// AssignStmt-defined tile whose buffer the whole loop nest shares, which is
-  /// the variable a use of any return_var in that nest has to keep alive.
+  /// Walking IterArg init links and previously registered return-var links lands
+  /// on the AssignStmt-defined tile whose buffer the loop chain shares. This is
+  /// needed both for nested loops and for consecutive update loops.
   ///
-  /// Returns nullptr when the chain does not end at a tracked carrier; the
-  /// caller then records no mapping, exactly as before.
-  [[nodiscard]] VarPtr ResolveCarryInitCarrier(const ExprPtr& init_value) const {
-    auto var = AsVarLike(init_value);
-    // An init is always defined before its own loop, so the chain is acyclic in
-    // well-formed IR; the visited set bounds it anyway rather than hanging.
+  [[nodiscard]] std::optional<VarPtr> ResolveTrackedAllocationRoot(const ExprPtr& value) const {
+    auto var = AsVarLike(value);
     std::set<const Var*> seen;
-    while (var) {
-      auto iter_arg = As<IterArg>(var);
-      if (!iter_arg) return var;
-      if (!seen.insert(var.get()).second) return nullptr;
-      var = AsVarLike(iter_arg->initValue_);
+    while (var && var_def_order_.count(var) == 0) {
+      INTERNAL_CHECK_SPAN(seen.insert(var.get()).second, var->span_)
+          << "Internal error: cycle in loop return-variable allocation provenance at '" << var->name_hint_
+          << "'";
+      if (auto iter_arg = As<IterArg>(var)) {
+        var = AsVarLike(iter_arg->initValue_);
+        continue;
+      }
+      const auto mapped = return_var_to_init_var_.find(var);
+      if (mapped == return_var_to_init_var_.end()) return std::nullopt;
+      var = mapped->second;
     }
-    return nullptr;
+    if (!var || var_def_order_.count(var) == 0) return std::nullopt;
+    return var;
   }
 
   void RegisterReturnVars(const std::vector<IterArgPtr>& iter_args, const std::vector<VarPtr>& return_vars) {
@@ -2607,9 +2610,12 @@ class LifetimeAnalyzer : public IRVisitor {
       // We do NOT register return_vars in ordered_defs_ -- they must not
       // participate in sharing group computation, which would inflate
       // group lifetimes and block unrelated reuse opportunities.
-      auto init_var = ResolveCarryInitCarrier(iter_args[i]->initValue_);
-      if (init_var && var_def_order_.count(init_var)) {
-        return_var_to_init_var_[rv] = init_var;
+      if (auto root = ResolveTrackedAllocationRoot(iter_args[i]->initValue_)) {
+        // Store the canonical root, not merely the immediate loop return. A
+        // sequence of update loops commonly feeds one loop's return_var into
+        // the next loop. Keeping a one-hop mapping drops uses of the final
+        // return because intermediate return_vars are deliberately untracked.
+        return_var_to_init_var_[rv] = *root;
       }
     }
   }
@@ -2625,17 +2631,14 @@ class LifetimeAnalyzer : public IRVisitor {
       return;
     }
 
-    // If var is a loop return_var, redirect the use to its initValue var.
-    // YieldFixup will alias the return_var to the initValue's MemRef,
-    // so keeping the initValue live prevents premature buffer reuse.
-    auto it = return_var_to_init_var_.find(var);
-    const VarPtr& target = (it != return_var_to_init_var_.end()) ? it->second : var;
-
-    if (!var_def_order_.count(target)) {
-      return;
-    }
+    // If var is a loop return_var, redirect the use through any sequence of
+    // loop returns to the tracked allocation root. YieldFixup aliases every
+    // return value to that buffer, so the root must remain live until the final
+    // return's last read.
+    const auto target = ResolveTrackedAllocationRoot(var);
+    if (!target) return;
     // operator[] default-inserts 0 for missing keys; use_order is always >= 0.
-    var_raw_last_use_[target] = std::max(var_raw_last_use_[target], use_order);
+    var_raw_last_use_[*target] = std::max(var_raw_last_use_[*target], use_order);
   }
 
   /**
@@ -2955,7 +2958,12 @@ class HazardInputCollector : public IRVisitor {
   }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
-    if (GetTileTypeWithMemRef(op->var_->GetType())) {
+    // Any tile-typed def can carry taint, with or without a MemRef of its own.
+    // `tile.tpop_from_aic` reads the cross-core ring rather than an allocation,
+    // so after InitMemRef its result has no MemRef. Requiring one here dropped
+    // the tpop taint exactly on the pipeline the hazard guard exists for, and
+    // the guard then produced no separation at all.
+    if (As<TileType>(op->var_->GetType())) {
       if (auto call = As<Call>(op->value_)) {
         // AsVarLike, not As<Var>: an operand may be an enclosing loop's IterArg
         // — the loop-carry shape of `tile.add(x, c_iter)` / `tile.matmul_acc(
@@ -3065,6 +3073,7 @@ class HazardInputCollector : public IRVisitor {
 // the *physical buffer* it ends up on (following both reuse-map reassignment and
 // VIEW inheritance) and blocks the output from landing there — see the use site.
 using ForbidAliasMap = AllocationForbidAliasMap;
+using SameBaseOrDisjointAliasMap = AllocationSameBaseOrDisjointMap;
 
 class ForbidAliasCollector : public IRVisitor {
  public:
@@ -3092,7 +3101,14 @@ class ForbidAliasCollector : public IRVisitor {
     if (const auto get_item = As<TupleGetItemExpr>(op->value_)) {
       if (const VarPtr tuple = AsVarLike(get_item->tuple_)) {
         const auto pending = tuple_forbidden_.find(tuple.get());
-        if (pending != tuple_forbidden_.end()) RecordForOutput(op->var_, pending->second);
+        if (pending != tuple_forbidden_.end()) {
+          RecordForOutput(op->var_, pending->second, &forbidden_, &tuple_forbidden_);
+        }
+        const auto same_base = tuple_same_base_or_disjoint_.find(tuple.get());
+        if (same_base != tuple_same_base_or_disjoint_.end()) {
+          RecordForOutput(op->var_, same_base->second, &same_base_or_disjoint_,
+                          &tuple_same_base_or_disjoint_);
+        }
       }
     }
 
@@ -3101,7 +3117,9 @@ class ForbidAliasCollector : public IRVisitor {
       if (reg.IsRegistered(call->op_->name_)) {
         const auto& entry = reg.GetEntry(call->op_->name_);
         std::vector<VarPtr> forbidden_inputs;
+        std::set<size_t> forbidden_indices;
         auto forbid_arg = [&](size_t i) {
+          forbidden_indices.insert(i);
           if (i < call->args_.size()) {
             if (auto v = AsVarLike(call->args_[i])) forbidden_inputs.push_back(v);
           }
@@ -3133,7 +3151,19 @@ class ForbidAliasCollector : public IRVisitor {
           const auto source = GetTypeMemRef(call->args_[1]->GetType()).value_or(nullptr);
           if (target && source && target->base_ != source->base_) forbid_arg(1);
         }
-        RecordForOutput(op->var_, forbidden_inputs);
+        std::vector<VarPtr> same_base_or_disjoint_inputs;
+        if (entry.IsInplaceSafe() &&
+            entry.GetExecutionMemoryAccessEvidence() == ExecutionMemoryAccessEvidence::Functional) {
+          for (size_t i = 0; i < call->args_.size(); ++i) {
+            if (forbidden_indices.count(i) != 0) continue;
+            if (auto input = AsVarLike(call->args_[i]); input && As<TileType>(input->GetType())) {
+              same_base_or_disjoint_inputs.push_back(std::move(input));
+            }
+          }
+        }
+        RecordForOutput(op->var_, forbidden_inputs, &forbidden_, &tuple_forbidden_);
+        RecordForOutput(op->var_, same_base_or_disjoint_inputs, &same_base_or_disjoint_,
+                        &tuple_same_base_or_disjoint_);
         // tile.transpose is registered not_inplace_safe(), so its output is
         // already forbidden from aliasing any input above (pto.ttrans writes
         // dst directly from src on the scalar path — dst == src corrupts).
@@ -3142,25 +3172,30 @@ class ForbidAliasCollector : public IRVisitor {
     IRVisitor::VisitStmt_(op);
   }
 
-  ForbidAliasMap Take() { return std::move(forbidden_); }
+  ForbidAliasMap TakeForbidden() { return std::move(forbidden_); }
+  SameBaseOrDisjointAliasMap TakeSameBaseOrDisjoint() { return std::move(same_base_or_disjoint_); }
 
  private:
-  void RecordForOutput(const VarPtr& output, const std::vector<VarPtr>& forbidden_inputs) {
-    if (!output || forbidden_inputs.empty()) return;
+  void RecordForOutput(const VarPtr& output, const std::vector<VarPtr>& inputs,
+                       std::map<const Var*, std::vector<VarPtr>>* recorded_by_output,
+                       std::map<const Var*, std::vector<VarPtr>>* pending_by_tuple) {
+    if (!output || inputs.empty()) return;
     if (As<TupleType>(output->GetType())) {
-      tuple_forbidden_[output.get()] = forbidden_inputs;
+      (*pending_by_tuple)[output.get()] = inputs;
       return;
     }
     if (!As<TileType>(output->GetType())) return;
     const auto rep_it = member_to_rep_.find(output.get());
     const Var* out_key = rep_it != member_to_rep_.end() ? rep_it->second : output.get();
-    auto& recorded = forbidden_[out_key];
-    recorded.insert(recorded.end(), forbidden_inputs.begin(), forbidden_inputs.end());
+    auto& recorded = (*recorded_by_output)[out_key];
+    recorded.insert(recorded.end(), inputs.begin(), inputs.end());
   }
 
   ForbidAliasMap forbidden_;
   const BufferViewAnalysis* views_;
+  SameBaseOrDisjointAliasMap same_base_or_disjoint_;
   std::map<const Var*, std::vector<VarPtr>> tuple_forbidden_;
+  std::map<const Var*, std::vector<VarPtr>> tuple_same_base_or_disjoint_;
   std::map<const Var*, const Var*> member_to_rep_;  ///< sharing-group member -> representative
 };
 
@@ -3325,6 +3360,132 @@ struct BoundMember {
   int last_use_point;
 };
 
+/// Track storage uses through carry/SSA aliases without recursively visiting
+/// initializer expressions at every use. Each alias resolves once to its lexical
+/// initializer, keeping nested-loop traversal O(N log N). A first-iteration
+/// fresh MAD may initialize an empty Acc carry; later-iteration reads then refer
+/// to that produced value, not to the initial empty seed. The seed's complete
+/// storage lifetime is transferred to that producer, never discarded.
+class NonInitializerUseCollector : public IRVisitor {
+ public:
+  std::set<const Var*> used;
+  std::map<const Var*, const Var*> initialized_by;
+  std::map<const Var*, size_t> seed_producers;
+
+ protected:
+  void VisitVarLike_(const VarPtr& var) override {
+    used.insert(var.get());
+    if (const auto source = aliases_.find(var.get());
+        source != aliases_.end() && later_iterations_.count(source->second.owner) == 0) {
+      used.insert(source->second.source);
+    }
+  }
+  void VisitExpr_(const IterArgPtr& var) override { VisitVarLike_(var); }
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (const auto source = AsVarLike(op->value_)) {
+      aliases_[op->var_.get()] = AliasFor(source);
+    }
+    if (const auto call = As<Call>(op->value_)) definitions_[op->var_.get()] = call;
+    VisitExpr(op->value_);
+  }
+  void VisitStmt_(const IfStmtPtr& op) override {
+    VisitExpr(op->condition_);
+    VisitStmt(op->then_body_);
+    const auto owner = FirstIterationOwner(op->condition_);
+    const bool added = owner && later_iterations_.insert(owner).second;
+    if (op->else_body_) VisitStmt(*op->else_body_);
+    if (added) later_iterations_.erase(owner);
+    RecordInitializingPhi(op, owner);
+  }
+  void VisitStmt_(const ForStmtPtr& op) override {
+    loops_.emplace(op->loop_var_.get(), op.get());
+    BindInitializers(op, op.get());
+    VisitExpr(op->start_);
+    VisitExpr(op->stop_);
+    VisitExpr(op->step_);
+    VisitStmt(op->body_);
+    loops_.erase(op->loop_var_.get());
+  }
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    BindInitializers(op, nullptr);
+    VisitExpr(op->condition_);
+    VisitStmt(op->body_);
+  }
+
+ private:
+  struct Alias {
+    const Var* source;
+    const ForStmt* owner;
+  };
+
+  [[nodiscard]] Alias AliasFor(const VarPtr& var) const {
+    const auto source = aliases_.find(var.get());
+    return source == aliases_.end() ? Alias{var.get(), nullptr} : source->second;
+  }
+
+  [[nodiscard]] const ForStmt* FirstIterationOwner(const ExprPtr& predicate) const {
+    const auto equal = As<Eq>(predicate);
+    if (!equal) return nullptr;
+    for (const auto& [index, start] :
+         {std::pair{equal->left_, equal->right_}, std::pair{equal->right_, equal->left_}}) {
+      const auto variable = AsVarLike(index);
+      const auto expected = variable ? loops_.find(variable.get()) : loops_.end();
+      if (expected != loops_.end() && structural_equal(start, expected->second->start_)) {
+        return expected->second;
+      }
+    }
+    return nullptr;
+  }
+
+  // Normalized branch bodies have a direct trailing yield. Do not recursively
+  // rescan nested branches: an unrecognized initialization stays conservative.
+  [[nodiscard]] CallPtr YieldedProducer(const StmtPtr& body) const {
+    const auto sequence = As<SeqStmts>(body);
+    const auto yield = As<YieldStmt>(sequence && !sequence->stmts_.empty() ? sequence->stmts_.back() : body);
+    if (!yield || yield->value_.size() != 1) return nullptr;
+    const auto var = AsVarLike(yield->value_[0]);
+    const auto definition = var ? definitions_.find(var.get()) : definitions_.end();
+    return definition == definitions_.end() ? nullptr : definition->second;
+  }
+
+  void RecordInitializingPhi(const IfStmtPtr& op, const ForStmt* owner) {
+    if (!owner || !op->else_body_) return;
+    const auto first = YieldedProducer(op->then_body_);
+    const auto next = YieldedProducer(*op->else_body_);
+    if (!first || !IsOp(first, "tile.matmul") || !next || !IsOp(next, "tile.matmul_acc")) return;
+    const auto carry = AsVarLike(next->args_[0]);
+    const auto alias = carry ? aliases_.find(carry.get()) : aliases_.end();
+    if (alias == aliases_.end() || alias->second.owner != owner) return;
+    const auto seed = alias->second.source;
+    const auto definition = definitions_.find(seed);
+    if (definition == definitions_.end() || !IsOp(definition->second, "tile.create")) return;
+    const auto sequence = As<SeqStmts>(op->then_body_);
+    const auto yield = As<YieldStmt>(sequence ? sequence->stmts_.back() : op->then_body_);
+    const auto producer = AsVarLike(yield->value_[0]);
+    const auto seed_memory = GetTypeMemRef(seed->GetType());
+    const auto first_memory = GetTypeMemRef(producer->GetType());
+    if (!seed_memory || !first_memory || !SamePhysicalWindow(*seed_memory, *first_memory)) return;
+    initialized_by.emplace(producer.get(), seed);
+    ++seed_producers[seed];
+  }
+
+  template <typename LoopPtr>
+  void BindInitializers(const LoopPtr& op, const ForStmt* owner) {
+    for (const auto& argument : op->iter_args_) {
+      if (const auto source = AsVarLike(argument->initValue_)) {
+        aliases_[argument.get()] = {AliasFor(source).source, owner};
+      }
+      // A computed initializer is a value use, not just a storage binding.
+      if (!AsVarLike(argument->initValue_)) VisitExpr(argument->initValue_);
+    }
+  }
+
+  std::map<const Var*, Alias> aliases_;
+  std::map<const Var*, const ForStmt*> loops_;
+  std::map<const Var*, CallPtr> definitions_;
+  std::set<const ForStmt*> later_iterations_;
+};
+
 /// Group the tiles a user *independently bound* to each pinned buffer.
 ///
 /// A tile whose defining op inherits its source's buffer (a view, an in-place
@@ -3405,13 +3566,64 @@ class IndependentlyBoundCollector : public IRVisitor {
 /// be quadratic in the member count — which grows with the IR once a binding
 /// inside a loop body is unrolled.
 void ValidateDeclaredAllocs(const StmtPtr& body, const std::set<const Var*>& pinned_bases,
-                            const std::map<const Var*, std::pair<int, int>>& var_liveness) {
+                            const std::map<const Var*, std::pair<int, int>>& var_liveness,
+                            const std::map<const Var*, std::set<int>>& phi_family_ids) {
   if (pinned_bases.empty()) return;
+  NonInitializerUseCollector uses;
+  uses.VisitStmt(body);
   IndependentlyBoundCollector collector(pinned_bases, var_liveness);
   collector.VisitStmt(body);
 
+  // Replace an empty seed by its one proven initializing producer, retaining
+  // the seed's entire carry lifetime against every independent occupant. Do
+  // not merge multiple producers through a reused seed or skip any readable
+  // seed. This is a value-alias proof, not an exemption from storage occupancy.
+  std::map<const Var*, const Var*> seed_aliases;
+  for (const auto& [producer, seed] : uses.initialized_by) {
+    if (uses.used.count(seed) == 0 && uses.seed_producers.at(seed) == 1) seed_aliases.emplace(seed, producer);
+  }
+
   for (auto& [slot, members] : collector.by_slot) {
     const Var* base = slot.base;
+    std::set<const Var*> present;
+    for (const auto& member : members) present.insert(member.var.get());
+    std::vector<BoundMember> values;
+    for (auto member : members) {
+      if (const auto alias = seed_aliases.find(member.var.get());
+          alias != seed_aliases.end() && present.count(alias->second)) {
+        continue;
+      }
+      const auto seed = uses.initialized_by.find(member.var.get());
+      if (seed != uses.initialized_by.end() && seed_aliases.count(seed->second) &&
+          present.count(seed->second)) {
+        const auto& interval = var_liveness.at(seed->second);
+        member.def_point = std::min(member.def_point, interval.first);
+        member.last_use_point = std::max(member.last_use_point, interval.second);
+      }
+      values.push_back(std::move(member));
+    }
+    members = std::move(values);
+    // Branch-local sources of one phi are the same value on mutually exclusive
+    // paths, not independent live occupants. Reuse the lifetime analysis's
+    // proven families and retain their full union interval against other tiles.
+    // Only single-family members are collapsed: transitive union of different
+    // return slots through a multi-family source would invent unsafe aliases.
+    std::map<int, BoundMember> families;
+    std::vector<BoundMember> independent;
+    for (const auto& member : members) {
+      auto ids = phi_family_ids.find(member.var.get());
+      if (ids == phi_family_ids.end() || ids->second.size() != 1) {
+        independent.push_back(member);
+        continue;
+      }
+      auto [family, fresh] = families.emplace(*ids->second.begin(), member);
+      if (!fresh) {
+        family->second.def_point = std::min(family->second.def_point, member.def_point);
+        family->second.last_use_point = std::max(family->second.last_use_point, member.last_use_point);
+      }
+    }
+    for (const auto& [id, member] : families) independent.push_back(member);
+    members = std::move(independent);
     std::sort(members.begin(), members.end(),
               [](const BoundMember& a, const BoundMember& b) { return a.def_point < b.def_point; });
     for (size_t i = 1; i < members.size(); ++i) {
@@ -5897,7 +6109,8 @@ AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& fun
     static_cast<void>(size);
     result.declared_allocation_bases.insert(base);
   }
-  ValidateDeclaredAllocs(func->body_, result.declared_allocation_bases, lifetimes.var_liveness);
+  ValidateDeclaredAllocs(func->body_, result.declared_allocation_bases, lifetimes.var_liveness,
+                         lifetimes.phi_family_ids);
 
   result.needs_load_tpop_hazard_guard = NeedsLoadTpopHazardGuard(func);
   if (result.needs_load_tpop_hazard_guard) {
@@ -5918,7 +6131,8 @@ AllocationConstraintAnalysis AnalyzeAllocationConstraints(const FunctionPtr& fun
   if (context && context->GetEnableBufferIR() && IsBufferIRSelected(func)) views.emplace(func->body_);
   ForbidAliasCollector forbid_collector(lifetimes.var_sharing_groups, views ? &*views : nullptr);
   forbid_collector.VisitStmt(func->body_);
-  result.forbid_alias = forbid_collector.Take();
+  result.forbid_alias = forbid_collector.TakeForbidden();
+  result.same_base_or_disjoint_alias = forbid_collector.TakeSameBaseOrDisjoint();
   return result;
 }
 

@@ -1377,6 +1377,7 @@ TypePtr DeduceTileSelType(const std::vector<ExprPtr>& args,
 
 REGISTER_OP("tile.sel")
     .set_op_category("TileOp")
+    .functional_execution_memory_access()
     .set_description(
         "Per-element selection between two tiles using a predicate mask tile. "
         "Maps to the TSEL hardware intrinsic.")
@@ -1384,6 +1385,11 @@ REGISTER_OP("tile.sel")
     .add_argument("lhs", "Source tile 0, selected where mask is true (TileType)")
     .add_argument("rhs", "Source tile 1, selected where mask is false (TileType)")
     .add_argument("tmp", "Scratch tile required by TSEL (TileType UINT32 [1, 16] on A2/A3)")
+    // A2/A3 copies each row's mask address into tmp before set_cmpmask.
+    // Declare that write separately from the value reads: dead lhs/rhs may
+    // alias dst, but scratch must retain the written-workspace hazard guard.
+    .set_arg_effect(3, ArgEffect::Write)
+    .set_workspace_arg(3)
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_input_memory(2, MemorySpace::Vec)
