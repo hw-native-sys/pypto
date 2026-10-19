@@ -14,6 +14,7 @@ import importlib
 import json
 import shutil
 import stat
+from glob import escape
 from pathlib import Path, PurePosixPath
 from types import ModuleType
 from typing import Any, cast
@@ -160,6 +161,16 @@ def _build_outputs(config: ModuleType) -> set[Path]:
         if not entry.get("external", False)
         for suffix in (".o", ".so")
     }
+    # Generated raw outputs include the 24-hex code digest. Match only that
+    # compiler-owned naming contract, including stale digests inherited from
+    # GENERATED. Configured inputs always win over an output-shaped filename.
+    digest_pattern = "[0-9a-f]" * 24
+    for kernel in config.KERNELS:
+        if kernel.get("external") or kernel.get("builtin") or not kernel.get("code_name"):
+            continue
+        source = Path(kernel["source"])
+        for suffix in (".o", ".so"):
+            sidecars.update(source.parent.glob(f"{escape(source.stem)}_{digest_pattern}{suffix}"))
     return sidecars - sources
 
 
@@ -178,7 +189,7 @@ def _prune_build_outputs(chip: Path) -> None:
 
 
 def ready_spec(directory: Path, generated: ArtifactSpec, *, metadata_only: bool = False) -> ArtifactSpec:
-    """Declare every final binary and child manifest before looking up READY."""
+    """Declare READY manifests before compilation determines shared binary paths."""
     from ._artifact_sources import read_kernel_config  # noqa: PLC0415
 
     required = set(generated.required_files) | {BINARY_MANIFEST}
@@ -207,7 +218,10 @@ def ready_spec(directory: Path, generated: ArtifactSpec, *, metadata_only: bool 
         cache = prefix / "cache"
         required = {p for p in required if p not in sidecars and not Path(p).is_relative_to(cache)}
         required.update(str(prefix / path) for path in (BINARY_MANIFEST, "prebuilt/orchestration.bin"))
-        required.update(str(prefix / "prebuilt" / f"kernel_{i}.bin") for i in range(len(config.KERNELS)))
+        # Binary sharing is known only after compilation, whereas this spec is
+        # also used to look up READY before compiling. Each child manifest names
+        # its actual binary files; prepare_prebuilt validates every reference
+        # before publication, and the artifact inventory protects them on load.
     return ArtifactSpec(
         ArtifactState.BINARY_READY,
         generated.build_kind,

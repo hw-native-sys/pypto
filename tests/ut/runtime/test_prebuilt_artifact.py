@@ -540,12 +540,13 @@ def test_readonly_ready_hit_survives_generated_slot_loss(tmp_path, fake_runtime,
 
 def test_orphan_ready_rejects_ambiguous_valid_stages(tmp_path, fake_runtime):
     store = ArtifactStore(tmp_path / "cache", private_root=tmp_path / "private")
+    kind = BuildKind.DISTRIBUTED
 
     def packaged(root):
-        _generated(root, BuildKind.SINGLE_CHIP)
-        package_generated_sources(root, BuildKind.SINGLE_CHIP)
+        _generated(root, kind)
+        package_generated_sources(root, kind)
 
-    published = store.get_or_build(_key(), _spec(), packaged)
+    published = store.get_or_build(_key(), _spec(kind), packaged)
     assert published.handle is not None
     generated = published.handle
     runtime = ArtifactRuntime(store, generated, "a2a3sim", tmp_path / "run")
@@ -554,15 +555,15 @@ def test_orphan_ready_rejects_ambiguous_valid_stages(tmp_path, fake_runtime):
     alternative = tmp_path / "alternative"
     shutil.copytree(first_ready, alternative)
     (alternative / "artifact_manifest.json").unlink()
-    metadata = json.loads((alternative / "kernel_config.json").read_text())
-    metadata["kernels"].append({**metadata["kernels"][0], "func_id": 8, "name": "second"})
-    (alternative / "kernel_config.json").write_text(json.dumps(metadata))
+    # Binary count no longer changes the READY contract. Different chip sets
+    # still produce distinct stages under one key and must remain ambiguous.
+    shutil.copytree(alternative / "next_levels/left", alternative / "next_levels/extra")
+    metadata = json.loads((alternative / "distributed_meta.json").read_text())
+    metadata["distributed_config"]["device_ids"].append(2)
+    (alternative / "distributed_meta.json").write_text(json.dumps(metadata))
     binary = json.loads((alternative / "binary_manifest.json").read_text())
-    second = {**binary["kernels"][0], "func_id": 8, "name": "second"}
-    second["binary"] = {**second["binary"], "path": "prebuilt/kernel_1.bin"}
-    binary["kernels"].append(second)
+    binary["chips"].append("extra")
     (alternative / "binary_manifest.json").write_text(json.dumps(binary))
-    shutil.copyfile(alternative / "prebuilt/kernel_0.bin", alternative / "prebuilt/kernel_1.bin")
     second_spec = _prebuilt.ready_spec(alternative, generated.spec, metadata_only=True)
     assert second_spec != runtime.handle.spec
     second_ready = store.get_or_build(
@@ -629,15 +630,18 @@ def test_orphan_ready_candidate_limit_stops_directory_iteration(tmp_path, monkey
         assert result.reason is not None and "Too many READY candidates" in result.reason
 
 
-def test_ready_spec_enumerates_all_child_binaries(tmp_path, fake_runtime):
+def test_ready_spec_requires_child_manifests_and_inventories_binaries(tmp_path, fake_runtime):
     store, generated = _publish(tmp_path, BuildKind.DISTRIBUTED)
     runtime = ArtifactRuntime(store, generated, "a2a3sim", tmp_path / "run")
     runtime.load()
     required = set(runtime.handle.spec.required_files)
+    inventory = _artifact_manifest.read_manifest(runtime.directory, runtime.handle.key, runtime.handle.spec)
+    files = {entry["path"] for entry in inventory["files"]}
     assert "binary_manifest.json" in required
     for name in ("left", "right"):
-        for file in ("binary_manifest.json", "prebuilt/kernel_0.bin", "prebuilt/orchestration.bin"):
+        for file in ("binary_manifest.json", "prebuilt/orchestration.bin"):
             assert f"next_levels/{name}/{file}" in required
+        assert f"next_levels/{name}/prebuilt/kernel_0.bin" in files
 
 
 def test_altered_handle_fails_before_source_execution(tmp_path, fake_runtime):
@@ -1432,6 +1436,88 @@ def test_shared_binary_keeps_distinct_registrations(tmp_path, fake_runtime):
     (tmp_path / _prebuilt.BINARY_MANIFEST).write_text(json.dumps(record))
     with pytest.raises(ValueError, match="digest mismatch"):
         _prebuilt._read_chip(tmp_path, "a2a3sim", None)
+
+
+@pytest.mark.parametrize("kind", list(BuildKind))
+@pytest.mark.parametrize("packaged", [False, True])
+def test_shared_binary_promotes_and_restores_with_distinct_signatures(
+    tmp_path, fake_runtime, monkeypatch, kind, packaged
+):
+    store = ArtifactStore(tmp_path / "cache", private_root=tmp_path / "private")
+    digest = "a" * 24
+
+    def generated(root):
+        _generated(root, kind)
+        for chip in _prebuilt.chip_directories(root, kind).values():
+            config_path = chip / "kernel_config.py"
+            config_path.write_text(
+                config_path.read_text()
+                + "\nKERNELS[0]['code_name'] = 'kernel'\n"
+                + "KERNELS.append(dict(KERNELS[0], func_id=8, signature=[D.INOUT, D.OUT]))\n"
+            )
+            # Stale hashed outputs can also be inherited from GENERATED.
+            _write(chip / f"kernels/kernel_{'b' * 24}.o", "inherited raw output")
+        if packaged:
+            package_generated_sources(root, kind)
+
+    built = store.get_or_build(_key(), _spec(kind), generated)
+    assert built.handle is not None
+    compile_ = fake_runtime.runner._compile_and_assemble.side_effect
+
+    def with_hashed_outputs(root, platform, **kwargs):
+        compile_(root, platform, **kwargs)
+        for extension in ("o", "so"):
+            _write(root / f"kernels/kernel_{digest}.{extension}", "raw compiler output")
+        _write(root / "extern/input.o", "external input")
+
+    fake_runtime.runner._compile_and_assemble.side_effect = with_hashed_outputs
+    runtime = ArtifactRuntime(store, built.handle, "a2a3sim", tmp_path / "run")
+    chips = runtime.load()
+    assert runtime.handle.spec.state is ArtifactState.BINARY_READY
+    assert store.lookup(runtime.handle.key, runtime.handle.spec).status is LookupStatus.HIT
+    for chip in _prebuilt.chip_directories(runtime.directory, kind).values():
+        assert len(list((chip / "prebuilt").glob("kernel_*.bin"))) == 1
+        assert not list((chip / "kernels").glob("kernel_*.o"))
+        assert not list((chip / "kernels").glob("kernel_*.so"))
+        assert (chip / "extern/input.o").read_text() == "external input"
+    for callable_, _, _ in chips.values():
+        children = callable_["children"]
+        assert [child[0] for child in children] == [7, 8]
+        assert children[0][1]["binary"] is children[1][1]["binary"]
+        assert children[0][1]["signature"] != children[1][1]["signature"]
+
+    fake_runtime.runner._compile_and_assemble.side_effect = AssertionError("unexpected compilation")
+    monkeypatch.setattr(
+        "pypto.runtime._artifact_sources.read_kernel_config", Mock(side_effect=AssertionError)
+    )
+    readonly = ArtifactStore(store.root, readonly=True)
+    restored = restore_artifact(readonly, runtime.handle, tmp_path / "readonly")
+    assert restored._artifact_runtime.load() == chips
+    # Shared files remain protected by the READY inventory even though the
+    # pre-compilation spec cannot predict their count or filenames.
+    next(runtime.directory.rglob("kernel_0.bin")).unlink()
+    assert readonly.lookup(runtime.handle.key, runtime.handle.spec).status is LookupStatus.INVALID
+
+
+def test_hashed_sidecar_pruning_preserves_configured_and_unrelated_inputs(tmp_path):
+    source = tmp_path / "kernel[0].cpp"
+    output = tmp_path / f"kernel[0]_{'a' * 24}.o"
+    configured = tmp_path / f"kernel[0]_{'b' * 24}.so"
+    unrelated = tmp_path / "kernel[0]_notes.o"
+    external = tmp_path / "external.cpp"
+    external_binary = tmp_path / f"external_{'c' * 24}.o"
+    for path in (source, output, configured, unrelated, external, external_binary):
+        path.write_bytes(b"input or compiler output")
+    config: Any = ModuleType("_pruning_config")
+    config.KERNELS = [
+        dict(source=str(source), code_name="kernel"),
+        dict(source=str(configured), external=True),
+        dict(source=str(external), code_name="external", external=True),
+    ]
+    config.ORCHESTRATION = dict(source=str(tmp_path / "main.cpp"))
+    outputs = _prebuilt._build_outputs(config)
+    assert output in outputs
+    assert not {source, configured, unrelated, external, external_binary}.intersection(outputs)
 
 
 if __name__ == "__main__":

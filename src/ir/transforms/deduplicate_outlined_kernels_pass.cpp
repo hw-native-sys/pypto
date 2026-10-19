@@ -9,8 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include <algorithm>
 #include <any>
+#include <cstddef>
 #include <map>
 #include <memory>
 #include <set>
@@ -20,12 +20,19 @@
 #include <vector>
 
 #include "pypto/core/logging.h"
+#include "pypto/ir/core.h"
+#include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/structural_comparison.h"
+#include "pypto/ir/type.h"
 #include "utils/bounded_kernel_index.h"
 #include "utils/structural_inspection.h"
 
@@ -95,8 +102,9 @@ class CalleeRewriter : public IRMutator {
       auto kwargs = submit->kwargs_;
       bool changed = RewritePeer(submit->op_, kwargs);
       if (callee == submit->op_ && !changed && args == submit->args_ && deps == submit->deps_ &&
-          core_num == submit->core_num_ && predicate == submit->predicate_)
+          core_num == submit->core_num_ && predicate == submit->predicate_) {
         return submit;
+      }
       return std::make_shared<Submit>(callee, args, deps, kwargs, submit->attrs_, submit->GetType(),
                                       submit->span_, core_num, submit->sync_start_,
                                       submit->allow_early_resolve_, predicate);
@@ -258,14 +266,16 @@ ProgramPtr Deduplicate(const ProgramPtr& program) {
     if (callers[name].empty() || !admitted(name)) continue;
     if (item.function->func_type_ == FunctionType::InCore) {
       if (group_members.count(name) || !item.callees.empty() || !item.peers.empty() ||
-          !peer_users[name].empty())
+          !peer_users[name].empty()) {
         continue;
+      }
       units.push_back({{name}, item.function, item.inspection.weight});
       continue;
     }
     if (item.function->func_type_ != FunctionType::Group || group_members.count(name) ||
-        !item.peers.empty() || !peer_users[name].empty())
+        !item.peers.empty() || !peer_users[name].empty()) {
       continue;
+    }
     Unit unit{{name}, nullptr, item.inspection.weight};
     std::set<std::string> members;
     bool valid = true;
@@ -285,15 +295,18 @@ ProgramPtr Deduplicate(const ProgramPtr& program) {
     }
     if (!valid || members.empty()) continue;
     for (const auto& member : members) {
-      for (const auto& peer : info.at(member).peers)
+      for (const auto& peer : info.at(member).peers) {
         if (!members.count(peer)) valid = false;
-      for (const auto& user : peer_users[member])
+      }
+      for (const auto& user : peer_users[member]) {
         if (!members.count(user)) valid = false;
+      }
     }
     if (!valid) continue;
     Names roles{{name, "unit_root"}};
-    for (size_t i = 1; i < unit.names.size(); ++i)
+    for (size_t i = 1; i < unit.names.size(); ++i) {
       roles.emplace(unit.names[i], "member_" + std::to_string(i - 1));
+    }
     std::vector<FunctionPtr> normalized;
     unit.weight = 0;
     for (const auto& original : unit.names) {

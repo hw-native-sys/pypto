@@ -16,8 +16,10 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/type.h"
 
 namespace pypto::ir::structural_comparison_detail {
 
