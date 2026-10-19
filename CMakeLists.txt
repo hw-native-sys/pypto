@@ -378,6 +378,7 @@ set(PYPTO_SOURCES
     src/backend/950/backend_950_ops.cpp
     src/backend/common/backend.cpp
     src/backend/common/backend_config.cpp
+    src/backend/common/backend_handler.cpp
     src/backend/common/backend_registry.cpp
     src/backend/common/buffer_elementwise_recipes.cpp
     src/backend/common/buffer_view_semantics.cpp

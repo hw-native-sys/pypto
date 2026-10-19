@@ -24,6 +24,8 @@
 namespace pypto {
 namespace backend {
 
+class Backend;
+
 /**
  * @brief The (src, dst) dtype pairs an architecture converts in one `pto.tcvt`.
  *
@@ -531,29 +533,29 @@ class BackendHandler {
    * @brief L0a (Left) on-chip SRAM capacity, in bytes.
    *
    * Used by ChooseL0Tile to bound `m * k * bytes_a` (per buffer when
-   * double-buffered). Must match the AIC-core `MemorySpace::Left` size in the
-   * SoC config; encoded here so passes do not depend on the SoC walker.
+   * double-buffered). Reads the owning backend's SoC through Backend::GetMemSize(),
+   * so passes and memory allocation share a single capacity source.
    */
-  [[nodiscard]] virtual uint32_t GetL0aCapacityBytes() const = 0;
+  [[nodiscard]] virtual uint32_t GetL0aCapacityBytes() const;
 
   /**
    * @brief L0b (Right) on-chip SRAM capacity, in bytes.
    */
-  [[nodiscard]] virtual uint32_t GetL0bCapacityBytes() const = 0;
+  [[nodiscard]] virtual uint32_t GetL0bCapacityBytes() const;
 
   /**
    * @brief L0c (Acc) on-chip SRAM capacity, in bytes.
    */
-  [[nodiscard]] virtual uint32_t GetL0cCapacityBytes() const = 0;
+  [[nodiscard]] virtual uint32_t GetL0cCapacityBytes() const;
 
   /**
    * @brief Bias-table on-chip SRAM capacity, in bytes.
    *
    * Used by AutoTileMatmulL0 to cap the N extent of ``tile.matmul_bias``
-   * output tiles. Must match the AIC-core ``MemorySpace::Bias`` size in the
-   * SoC config and the PTO ISA Mat-to-Bias transfer limit.
+   * output tiles. Reads the owning backend's AIC-core ``MemorySpace::Bias`` capacity
+   * from its SoC config.
    */
-  [[nodiscard]] virtual uint32_t GetBiasCapacityBytes() const = 0;
+  [[nodiscard]] virtual uint32_t GetBiasCapacityBytes() const;
 
   /**
    * @brief Whether the PTO ISA can transfer this dtype pair from Mat to Bias.
@@ -571,10 +573,10 @@ class BackendHandler {
    * @brief Mat (L1) on-chip SRAM capacity, in bytes.
    *
    * Used by passes that need a conservative per-core capacity gate without
-   * walking the global Backend SoC object. This keeps pass-level backend
-   * decisions on the BackendHandler / PassContext path.
+   * walking the SoC themselves. The shared accessor reads the owning backend,
+   * independently of the globally configured compilation target.
    */
-  [[nodiscard]] virtual uint64_t GetMatCapacityBytes() const = 0;
+  [[nodiscard]] virtual uint64_t GetMatCapacityBytes() const;
 
   /**
    * @brief Cube fractal alignment in *elements* for L0 tile dimensions.
@@ -632,6 +634,16 @@ class BackendHandler {
    * reference for the duration of a pass.
    */
   [[nodiscard]] virtual const TcvtAdjacency& GetTcvtAdjacency() const = 0;
+
+ protected:
+  /// The backend must outlive this handler. Built-in handlers bind to their
+  /// backend singleton; never use the global compilation target for capacities.
+  explicit BackendHandler(const Backend& backend) : backend_(backend) {}
+
+ private:
+  [[nodiscard]] uint32_t GetCapacityBytes32(ir::MemorySpace memory_space) const;
+
+  const Backend& backend_;
 };
 
 }  // namespace backend

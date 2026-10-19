@@ -157,6 +157,9 @@ const SoC& Create910BSoC() {
 }
 
 // ========== 950 SoC Factory ==========
+// Per-core capacities follow pto-isa include/pto/common/buffer_limits.hpp under
+// PTO_NPU_ARCH_A5. The handler's tiling queries read these same SoC values;
+// notably, A5's larger L0C allows larger tiles than A2/A3's accumulator.
 
 const SoC& Create950SoC() {
   // Singleton instance for 950 backend

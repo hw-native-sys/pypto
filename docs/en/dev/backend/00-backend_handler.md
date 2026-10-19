@@ -67,12 +67,27 @@ to global state.
 | `GetL0cMAlignment(dtype)` | physical M-row alignment shared by L0C tiling, dbC capacity, and allocation | 32 for INT32; otherwise 16 | 16 |
 | `BuildCrossCoreTransferView(dest, view)` | layout at cross-core transfer boundary | NZ for Mat/Left/Right; preserve for Vec | NZ for Mat/Left/Right; preserve for Vec (a5 hardware also requires fractal at the boundary) |
 
+## Memory capacity source
+
+The shared implementations of `GetL0aCapacityBytes()`, `GetL0bCapacityBytes()`,
+`GetL0cCapacityBytes()`, `GetBiasCapacityBytes()`, and `GetMatCapacityBytes()` read
+`Backend::GetMemSize()` on the handler's owning backend. The SoC is the single
+source for these per-core capacities; handlers do not repeat numeric limits or
+multiply them by core/die counts. Explicit backend queries work even when no
+global target is configured, or when a different target is active.
+
+The existing C++ and Python capacity methods remain available. Alignment rules,
+minimum tile dimensions, and cost-model parameters remain separate from capacity.
+
 ## Adding a new backend
 
 1. Create `Backend<Arch>` in `src/backend/<arch>/backend_<arch>.cpp` (subclass
    `Backend`). Add the source to `CMakeLists.txt`.
 2. Implement `Backend<Arch>Handler` in
    `src/backend/<arch>/backend_<arch>_handler.cpp` (subclass `BackendHandler`).
+   Initialize its base with the owning backend reference, which must outlive the
+   handler. Built-in handlers use their backend singleton; backend constructors
+   must not request the handler while that singleton is being initialized.
 3. Override `Backend<Arch>::GetHandler()` to return your handler singleton.
 4. Append the new backend to `BackendType` and to the factory switch in
    `src/backend/common/backend.cpp` (`GetBackendInstance` and

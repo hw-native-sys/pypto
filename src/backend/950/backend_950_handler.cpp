@@ -13,6 +13,7 @@
 
 #include <initializer_list>
 
+#include "pypto/backend/950/backend_950.h"
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
@@ -21,6 +22,8 @@
 
 namespace pypto {
 namespace backend {
+
+Ascend950Handler::Ascend950Handler() : BackendHandler(Backend950::Instance()) {}
 
 const Ascend950Handler& Ascend950Handler::Instance() {
   static const Ascend950Handler instance;

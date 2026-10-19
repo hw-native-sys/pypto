@@ -140,15 +140,6 @@ class Ascend950Handler : public BackendHandler {
   [[nodiscard]] uint32_t GetL2CacheLineBytes() const override { return 512; }
   [[nodiscard]] uint32_t GetRecommendedInnermostDimBytes() const override { return 128; }
 
-  // L0 capacity (matches Create950SoC AIC core memory layout; grounded in the pto-isa
-  // hardware reference include/pto/common/buffer_limits.hpp under PTO_NPU_ARCH_A5:
-  // L0A/L0B 64 KB, L0C 256 KB (2x a2a3), Mat/CB 512 KB). These are CORRECT for a5 and
-  // are what already make a5 tile differently from a2a3 (bigger accumulator -> bigger
-  // tiles / fewer M/N splits). Only the ROOFLINE CONSTANTS below are still a2a3-derived.
-  [[nodiscard]] uint32_t GetL0aCapacityBytes() const override { return 64ULL * 1024; }
-  [[nodiscard]] uint32_t GetL0bCapacityBytes() const override { return 64ULL * 1024; }
-  [[nodiscard]] uint32_t GetL0cCapacityBytes() const override { return 256ULL * 1024; }
-  [[nodiscard]] uint32_t GetBiasCapacityBytes() const override { return 4ULL * 1024; }
   [[nodiscard]] bool SupportsMatToBiasMove(const DataType& source_dtype,
                                            const DataType& bias_dtype) const override {
     return (source_dtype == DataType::INT32 && bias_dtype == DataType::INT32) ||
@@ -156,7 +147,6 @@ class Ascend950Handler : public BackendHandler {
             (source_dtype == DataType::FP32 || source_dtype == DataType::FP16 ||
              source_dtype == DataType::BF16));
   }
-  [[nodiscard]] uint64_t GetMatCapacityBytes() const override { return 512ULL * 1024; }
 
   // a5 roofline cost-model constants -- FULLY a5-sim-CALIBRATED (all 7; raw work-cycle fit;
   // no a5 device, so a5-sim is the ground truth). Recipe (a5_cost_model_device_task.md): fit
@@ -203,7 +193,7 @@ class Ascend950Handler : public BackendHandler {
   }
 
  private:
-  Ascend950Handler() = default;
+  Ascend950Handler();
 };
 
 }  // namespace backend

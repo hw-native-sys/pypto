@@ -132,24 +132,18 @@ class Ascend910BHandler : public BackendHandler {
   [[nodiscard]] uint32_t GetL2CacheLineBytes() const override { return 512; }
   [[nodiscard]] uint32_t GetRecommendedInnermostDimBytes() const override { return 512; }
 
-  // L0 capacity (matches Create910BSoC AIC core memory layout).
-  [[nodiscard]] uint32_t GetL0aCapacityBytes() const override { return 64ULL * 1024; }
-  [[nodiscard]] uint32_t GetL0bCapacityBytes() const override { return 64ULL * 1024; }
-  [[nodiscard]] uint32_t GetL0cCapacityBytes() const override { return 128ULL * 1024; }
-  [[nodiscard]] uint32_t GetBiasCapacityBytes() const override { return 1ULL * 1024; }
   [[nodiscard]] bool SupportsMatToBiasMove(const DataType& source_dtype,
                                            const DataType& bias_dtype) const override {
     return (source_dtype == DataType::INT32 && bias_dtype == DataType::INT32) ||
            (bias_dtype == DataType::FP32 &&
             (source_dtype == DataType::FP32 || source_dtype == DataType::FP16));
   }
-  [[nodiscard]] uint64_t GetMatCapacityBytes() const override { return 512ULL * 1024; }
   [[nodiscard]] int GetL0cMAlignment(const DataType& accumulator_dtype) const override {
     return accumulator_dtype == DataType::INT32 ? 32 : GetL0FractalAlignment();
   }
 
  private:
-  Ascend910BHandler() = default;
+  Ascend910BHandler();
 };
 
 }  // namespace backend
