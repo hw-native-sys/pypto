@@ -1613,6 +1613,77 @@ jobs:
         with:
           checkout-path: dist-checkout
 
+  ptoas-backend-parity:
+    # Run both backends on identical PTO and compare the actual linked device
+    # binaries, while independently checking both results against CPU goldens.
+    needs: [changes, toolchain, pre-commit, clang-tidy]
+    if: needs.changes.outputs.docs_only != 'true'
+    permissions:
+      contents: read
+    runs-on: [self-hosted, linux, "${{ matrix.runner }}"]
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: a2a3
+            runner: npu
+          - platform: a5
+            runner: npu-a5
+    defaults:
+      run:
+        working-directory: backend-parity-checkout
+    env:
+      PTOAS_ROOT: ${{ github.workspace }}/backend-parity-checkout/ptoas-bin
+      PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
+      PTOAS_SHA256_AARCH64: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      PTOAS_SHA256_X86_64: ${{ needs.toolchain.outputs.ptoas_sha256_x86_64 }}
+      CMAKE_BUILD_PARALLEL_LEVEL: 16
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_MAXSIZE: 30G
+      CCACHE_UMASK: '000'
+      AUDIT_PLATFORM: ${{ matrix.platform }}
+    steps:
+      - name: Fetch composite action definitions
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/actions
+          clean: false
+          persist-credentials: false
+
+      - name: Setup CI job
+        uses: ./.github/actions/setup-ci-job
+        with:
+          checkout-path: backend-parity-checkout
+          needs-device: 'true'
+          toolchain: bundle
+          pip-cache-name: pip-backend-parity
+          pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
+
+      - name: Compare backends and execute both against goldens
+        timeout-minutes: 30
+        run: |
+          source activate.sh
+          test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
+          task-submit --device "$DEVICE_ID" --timeout 1800 --max-time 1800 \
+            --run "cd $GITHUB_WORKSPACE/backend-parity-checkout && source activate.sh && python tests/ci/compare_ptoas_backends.py \
+              --platform $AUDIT_PLATFORM --execute --device=\$TASK_DEVICE --output build/backend-parity"
+
+      - name: Upload backend sources, objects, ELF files and comparisons
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ptoas-backend-parity-${{ matrix.platform }}
+          path: backend-parity-checkout/build/backend-parity
+          retention-days: 7
+
+      - name: Kill orphaned task-submit tasks
+        if: always()
+        uses: ./.github/actions/kill-orphaned-tasks
+        with:
+          checkout-path: backend-parity-checkout
+
   pypto-lib-compile:
     # Compile all formal library entrypoints without executing device code.
     # A2/A3 extern wrappers import CANN devkit headers, available on npu hosts.

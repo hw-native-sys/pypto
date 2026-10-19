@@ -842,3 +842,37 @@ PTO 后端为每个 ptoas 生成的 InCore 函数添加包装器，以供运行�
 - [IR 构建器 (Builder)](../ir/06-builder.md): 以编程方式构造 IR
 - [操作符组织](../ir/05-operators.md): Tile 操作详情
 - [PTOAS Op 状态矩阵](../ptoas-op-status.md): 每个 PTOAS op 的前端 / ST 覆盖状态
+
+## PTOAS 后端对比
+
+`tests/ci/compare_ptoas_backends.py` 使用固定版本的 PTOAS，对比 `emitc` 和
+`vpto` 后端。测试覆盖逐元素算术、归约、循环累加、部分有效形状，以及
+FP16 输入、FP32 输出的矩阵乘法，每个用例均使用 PyPTO 和 PTOAS 两种内存规划。
+脚本仅在审计期间选择后端，常规 PyPTO 编译继续使用 PTOAS 的默认后端。
+
+```bash
+python tests/ci/compare_ptoas_backends.py --platform a2a3 --output build/backend-parity
+# In a device session, also validate both backends against deterministic CPU goldens:
+python tests/ci/compare_ptoas_backends.py --platform a5 --execute --device 0 --output build/backend-parity-a5
+```
+
+每次运行使用新的输出目录。即使不传 `--execute`，构建主机也需要固定版本的
+runtime、PTO-ISA、PTOAS 和目标 CANN 工具链。审计在相同源文件路径编译两个后端，
+绕过 JIT 缓存复用，要求非空的 PTO 输入和内核清单一致。
+
+PTOAS v0.65 的 EmitC 输出 C++，VPTO 输出内嵌 AICore 原生对象的主机对象。
+直接给 PyPTO 添加 `--pto-backend=vpto` 会在按 C++ 文本读取 ELF 时失败。
+审计使用实验性适配器：提取原生设备对象，将生成函数体替换为外部声明，再将原生对象
+与 PyPTO 的常规运行时入口包装器链接。EmitC 仅提供参考函数签名，其实现函数体在
+VPTO 构建前已被移除。适配器仅用于审计，没有为生产编译路径添加 VPTO 支持。
+PTOAS 自行控制原生后端的编译参数，报告中明确记录了适配器要求。
+`summary.json` 记录编译与执行错误、编译命令、SHA-256、大小、完整 ELF 是否一致、
+可执行节（executable section）是否一致及其大小、可分配节（allocated section）是否一致，
+以及运行时实际上传的 `.text` 载荷是否逐字节一致。
+对象文件、链接后的 ELF、运行时载荷、源代码差异、反汇编和十六进制差异一并保留。
+
+二进制差异属于测量结果，本身不会导致审计失败。两个后端均能编译、输入与内核清单一致，
+且请求的黄金结果验证通过时，审计通过。声明二进制完全相同前应检查全部一致性字段：
+调试数据可以改变完整 ELF 而不改变代码；常量数据或零初始化存储可以改变可分配映像，
+而不改变可执行节。本测试集一致不代表所有算子、模型或性能场景均等价。
+`ptoas-backend-parity` CI 任务在 A2/A3 和 A5 设备上执行审计，后端失败时仍上传证据。VPTO 不支持的下降路径保持为失败，不标记为跳过。

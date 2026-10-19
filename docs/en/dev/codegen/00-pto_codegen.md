@@ -897,3 +897,47 @@ The PTO backend wraps each ptoas-generated InCore function for runtime dispatch.
 - [IR Builder](../ir/06-builder.md): Constructing IR programmatically
 - [Operator Organization](../ir/05-operators.md): Block operation details
 - [PTOAS Op Status Matrix](../ptoas-op-status.md): Frontend / ST coverage per PTOAS op
+
+## PTOAS backend comparison
+
+`tests/ci/compare_ptoas_backends.py` audits the pinned PTOAS `emitc` and `vpto`
+backends on elementwise arithmetic, reduction, loop-carried accumulation,
+partial valid shapes, and FP16-to-FP32 matmul. Each case runs with both PyPTO
+and PTOAS memory planning. The script selects the backend only inside the audit;
+normal PyPTO compilation continues to use the PTOAS default.
+
+```bash
+python tests/ci/compare_ptoas_backends.py --platform a2a3 --output build/backend-parity
+# In a device session, also validate both backends against deterministic CPU goldens:
+python tests/ci/compare_ptoas_backends.py --platform a5 --execute --device 0 --output build/backend-parity-a5
+```
+
+Use a fresh output directory for each run. The build host needs the pinned
+runtime, PTO-ISA, PTOAS, and target CANN toolchain even without `--execute`.
+PTOAS v0.65 returns C++ for EmitC and a host fat object containing a native
+AICore object for VPTO. Passing `--pto-backend=vpto` directly to PyPTO therefore
+fails when its C++ reader decodes the ELF. The audit uses an experimental adapter:
+it extracts the native device object, replaces the generated function bodies with
+external declarations, and links the native object with PyPTO's usual runtime
+entry wrapper. EmitC supplies reference signatures only; its implementation
+bodies are removed from the VPTO build. This adapter is confined to the audit
+and does not add production VPTO support.
+
+The audit compiles both wrappers at the same source path and bypasses JIT reuse.
+PTOAS controls the native backend's own compiler flags. The audit requires
+identical nonempty PTO inputs and kernel inventories. `summary.json` records compilation/execution failures,
+compiler commands, SHA-256 hashes, sizes, whole-ELF equality, executable-section
+equality and sizes, allocated-section equality, and equality of the exact
+`.text` payload uploaded by the runtime. Objects, linked ELF files, runtime payloads, source and
+disassembly/hex dump diffs are retained beside it.
+
+Binary differences are measurements and do not alone fail the audit. An audit
+passes when both backends compile, the inputs and inventories match, and any
+requested golden executions pass. The VPTO result records its adapter requirement. Check all equality fields before
+claiming identical binary output: debug data can change a full ELF without
+changing code; constant data or zero-initialized storage can change an allocated
+image without changing executable sections. Equality on this corpus does not
+establish equivalence for every operator, model, or performance workload.
+The `ptoas-backend-parity` CI jobs run the audit on A2/A3 and A5 devices and
+upload the evidence even when a backend fails. Unsupported VPTO lowerings remain
+failures in the report rather than skips.
