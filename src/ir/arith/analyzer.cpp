@@ -28,6 +28,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
@@ -83,6 +84,7 @@ void Analyzer::Unbind(const VarPtr& var) {
   modular_set.Unbind(var);
   rewrite_simplify.Update(var, nullptr);
   transitive_cmp.Unbind(var);
+  int_set.Unbind(var);
 }
 
 ExprPtr Analyzer::Simplify(const ExprPtr& expr, int steps) {
@@ -125,6 +127,14 @@ bool Analyzer::CanProve(const ExprPtr& cond) {
 
   if (auto cb = As<ConstBool>(simplified)) return cb->value_;
   if (auto ci = As<ConstInt>(simplified)) return ci->value_ != 0;
+
+  // Declared-format floating-point rounding is not modeled by integer bounds.
+  // Leave floating comparisons explicit instead of proving them from raw doubles.
+  if (auto binary = As<BinaryExpr>(simplified)) {
+    auto lhs_type = As<ScalarType>(binary->left_->GetType());
+    auto rhs_type = As<ScalarType>(binary->right_->GetType());
+    if ((lhs_type && lhs_type->dtype_.IsFloat()) || (rhs_type && rhs_type->dtype_.IsFloat())) return false;
+  }
 
   // Recursively handle logical And: both sides must be provable.
   if (auto op = As<And>(simplified)) {

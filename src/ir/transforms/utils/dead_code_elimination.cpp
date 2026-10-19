@@ -380,6 +380,10 @@ std::vector<StmtPtr> FilterDeadCodeImpl(const std::vector<StmtPtr>& stmts,
         auto copy = MutableCopy(graph);
         copy->body_ = new_body;
         new_scope = copy;
+      } else if (auto comm = std::dynamic_pointer_cast<const CommDomainScopeStmt>(stmt)) {
+        auto copy = MutableCopy(comm);
+        copy->body_ = new_body;
+        new_scope = copy;
       } else {
         INTERNAL_CHECK(false) << "Unhandled ScopeStmt subtype in DCE: " << scope_stmt->TypeName();
       }
@@ -619,6 +623,11 @@ StmtPtr RebuildScopeWithBody(const std::shared_ptr<const ScopeStmt>& scope_stmt,
   }
   if (auto runtime = std::dynamic_pointer_cast<const RuntimeScopeStmt>(scope_stmt)) {
     auto copy = MutableCopy(runtime);
+    copy->body_ = new_body;
+    return copy;
+  }
+  if (auto comm = std::dynamic_pointer_cast<const CommDomainScopeStmt>(scope_stmt)) {
+    auto copy = MutableCopy(comm);
     copy->body_ = new_body;
     return copy;
   }

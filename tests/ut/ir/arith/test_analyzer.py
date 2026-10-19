@@ -96,6 +96,55 @@ class TestBindRange:
 
 
 class TestBindExpr:
+    def test_symbolic_interval_analyzer_unbind(self):
+        local_analyzer = Analyzer()
+        source = make_var("source")
+        local_analyzer.int_set.bind(source, ci(1), ci(4))
+        local_analyzer.int_set.unbind(source)
+        interval = local_analyzer.int_set(source)
+        assert interval.min_value is source
+        assert interval.max_value is source
+
+    def test_float_comparison_nan_negation_stays_explicit(self):
+        local_analyzer = Analyzer()
+        nan = ir.ConstFloat(float("nan"), DataType.FP32, S)
+        zero = ir.ConstFloat(0.0, DataType.FP32, S)
+        condition = ir.Not(ir.Lt(nan, zero, BOOL, S), BOOL, S)
+        ir.assert_structural_equal(local_analyzer.simplify(condition), condition)
+        assert not local_analyzer.can_prove(condition)
+
+    @pytest.mark.parametrize("use_range", [False, True])
+    def test_unbind_clears_symbolic_intervals(self, use_range):
+        local_analyzer = Analyzer()
+        source = make_var("source")
+        condition = ir.Ge(source, ci(0), BOOL, S)
+        if use_range:
+            local_analyzer.bind(source, 1, 4)
+        else:
+            local_analyzer.bind(source, ci(1))
+        assert local_analyzer.can_prove(condition)
+
+        local_analyzer.unbind(source)
+        assert not local_analyzer.can_prove(condition)
+        interval = local_analyzer.int_set(source)
+        assert interval.min_value is source
+        assert interval.max_value is source
+
+    @pytest.mark.parametrize(
+        ("dtype", "value"),
+        [(DataType.FP16, 1.0001), (DataType.FP32, 1.00000001), (DataType.BF16, 1.001)],
+    )
+    @pytest.mark.parametrize("compare", [ir.Eq, ir.Ne, ir.Lt, ir.Le, ir.Gt, ir.Ge])
+    def test_float_comparisons_preserve_unmodeled_rounding(self, dtype, value, compare):
+        """Both values round to 1 in their declared format; raw doubles differ."""
+        local_analyzer = Analyzer()
+        source = ir.Var("source", ir.ScalarType(dtype), S)
+        local_analyzer.bind(source, ir.ConstFloat(value, dtype, S))
+        condition = compare(source, ir.ConstFloat(1.0, dtype, S), BOOL, S)
+        assert not isinstance(local_analyzer.simplify(condition), ir.ConstBool)
+        assert not local_analyzer.can_prove(condition)
+        assert not local_analyzer.can_prove(ir.Not(condition, BOOL, S))
+
     @pytest.mark.parametrize("dtype", [DataType.FP16, DataType.FP32, DataType.BF16])
     @pytest.mark.parametrize("value", [0.0, -0.0, 1.25])
     def test_bind_float_literal_and_alias(self, dtype, value):
@@ -426,8 +475,9 @@ class TestConstraintContext:
         with analyzer.constraint_context(ir.Gt(f, cf_one, BOOL, S)):
             assert analyzer.const_int_bound(f).min_value == 1
             assert analyzer.can_prove(ir.Ge(f, cf_two, BOOL, S)) is False
-            # The relaxed bound is still a bound: weaker facts stay provable.
-            assert analyzer.can_prove(ir.Ge(f, cf_half, BOOL, S)) is True
+            # Integer interval information is retained, but it must not decide
+            # floating comparisons without declared-format rounding semantics.
+            assert analyzer.can_prove(ir.Ge(f, cf_half, BOOL, S)) is False
 
     def test_nested_constraints(self):
         analyzer.bind(x, 0, 100)

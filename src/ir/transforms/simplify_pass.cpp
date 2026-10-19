@@ -480,6 +480,14 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
         // and lets the re-visit below bind the body's scalars on identities
         // distinct from anything in the surrounding scope.
         auto cloned = DeepClone(op->body_, sub_map, /*clone_def_vars=*/true);
+        // The pre-pass indexes original Var identities. Carry its exclusion to
+        // fresh definitions so cloning cannot make a reassigned scalar bindable.
+        std::vector<const Var*> cloned_multi_assigned;
+        for (const auto& [original, fresh] : cloned.var_map) {
+          if (multi_assigned_.count(original) && multi_assigned_.insert(fresh.get()).second) {
+            cloned_multi_assigned.push_back(fresh.get());
+          }
+        }
 
         // Snapshot var_remap_ around the cloned-body visit. MaybeRebuildVar
         // inserts entries keyed by the cloned-body's defining-Var raw pointers
@@ -507,6 +515,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
           FoldBDepthGuard fold_guard(fold_b_depth_);
           unrolled_body = VisitStmt(cloned.cloned_body);
         }
+        for (const auto* var : cloned_multi_assigned) multi_assigned_.erase(var);
 
         var_remap_ = std::move(baseline_remap);
         return LiftBodyToReturnVars(unrolled_body, op->return_vars_, op.get());

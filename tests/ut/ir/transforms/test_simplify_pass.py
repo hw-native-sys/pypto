@@ -1112,6 +1112,105 @@ class TestScalarConstantPropagation:
 class TestNestedScalarConstantPropagation:
     """Nested constants fold at every use without freezing runtime control flow."""
 
+    def test_branch_interval_does_not_escape_to_a_later_guard(self):
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, cond: pl.Scalar[pl.BOOL], x: pl.Scalar[pl.INDEX], out: pl.Tensor[[1], pl.INDEX]):
+                if cond:
+                    x = 1
+                if 0 <= x:
+                    pl.tensor.write(out, [0], x)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    def test_single_trip_clone_preserves_multiple_assignments(self):
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INDEX], out: pl.Tensor[[2], pl.INDEX]):
+                for i in pl.range(2):
+                    for _j in pl.range(1):
+                        x: pl.Scalar[pl.INDEX] = 1
+                        x = n
+                        pl.tensor.write(out, [i], x)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, n: pl.Scalar[pl.INDEX], out: pl.Tensor[[2], pl.INDEX]):
+                for i in pl.range(2):
+                    x: pl.Scalar[pl.INDEX] = 1
+                    x = n
+                    pl.tensor.write(out, [i], x)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    @pytest.mark.parametrize("value", [1.00000001, -1.00000001])
+    def test_float_rounding_keeps_both_branches(self, value):
+        span = ir.Span.unknown()
+        literal = ir.ConstFloat(value, DataType.FP32, span)
+        rounded = ir.ConstFloat(1.0 if value > 0 else -1.0, DataType.FP32, span)
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, out: pl.Tensor[[2], pl.INDEX]):
+                for i in pl.range(2):
+                    x: pl.Scalar[pl.FP32] = literal
+                    if x == rounded:
+                        pl.tensor.write(out, [i], pl.const(1, pl.INDEX))
+                    else:
+                        pl.tensor.write(out, [i], pl.const(2, pl.INDEX))
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, out: pl.Tensor[[2], pl.INDEX]):
+                for i in pl.range(2):
+                    if literal == rounded:
+                        pl.tensor.write(out, [i], pl.const(1, pl.INDEX))
+                    else:
+                        pl.tensor.write(out, [i], pl.const(2, pl.INDEX))
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_comm_domain_rebuilds_after_scalar_and_yield_slot_dce(self):
+        before = pl.parse_program("""
+@pl.program
+class Before:
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def main(self, cond: pl.Scalar[pl.BOOL], out: pl.Tensor[[2], pl.INDEX]):
+        with pl._dump.comm_domain(name="domain", devices=[0, 1], slots=[]):
+            for i in pl.range(2):
+                value: pl.Scalar[pl.INDEX] = 1
+                pl.tensor.write(out, [i], value)
+            if cond:
+                pl.tensor.write(out, [0], pl.const(2, pl.INDEX))
+                unused = pl.yield_(1)
+            else:
+                pl.tensor.write(out, [0], pl.const(3, pl.INDEX))
+                unused = pl.yield_(2)
+""")
+        expected = pl.parse_program("""
+@pl.program
+class Expected:
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def main(self, cond: pl.Scalar[pl.BOOL], out: pl.Tensor[[2], pl.INDEX]):
+        with pl._dump.comm_domain(name="domain", devices=[0, 1], slots=[]):
+            for i in pl.range(2):
+                pl.tensor.write(out, [i], pl.const(1, pl.INDEX))
+            if cond:
+                pl.tensor.write(out, [0], pl.const(2, pl.INDEX))
+            else:
+                pl.tensor.write(out, [0], pl.const(3, pl.INDEX))
+""")
+        after = passes.simplify()(before)
+        ir.assert_structural_equal(after, expected)
+
     def test_nested_slice_and_assemble_origins(self):
         """A nested alias chain folds for both reading and writing a window."""
 

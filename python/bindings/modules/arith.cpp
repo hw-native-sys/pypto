@@ -93,7 +93,7 @@ void BindArith(nb::module_& m) {
   nb::class_<ir::arith::RewriteSimplifier>(
       arith, "RewriteSimplifier",
       "Simplifies integer/index expressions by applying algebraic rewrite rules.\n\n"
-      "Float arithmetic is returned unchanged; float variables and IterArgs\n"
+      "Float arithmetic and comparisons are preserved; float variables and IterArgs\n"
       "still follow explicit value bindings.")
       .def(nb::init<>(), "Create a standalone RewriteSimplifier.")
       .def("__call__", &ir::arith::RewriteSimplifier::operator(), nb::arg("expr"),
@@ -238,6 +238,8 @@ void BindArith(nb::module_& m) {
            "Compute symbolic interval for an expression.")
       .def("update", &ir::arith::IntSetAnalyzer::Update, nb::arg("var"), nb::arg("int_set"),
            "Update a variable's symbolic interval.")
+      .def("unbind", &ir::arith::IntSetAnalyzer::Unbind, nb::arg("var"),
+           "Remove a variable's interval, restoring its symbolic point [var, var].")
       .def("bind", &ir::arith::IntSetAnalyzer::Bind, nb::arg("var"), nb::arg("min_val"),
            nb::arg("max_val_exclusive"),
            "Bind a variable to a half-open symbolic range [min_val, max_val_exclusive).")

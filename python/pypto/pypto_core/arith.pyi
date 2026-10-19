@@ -58,7 +58,7 @@ def extended_euclidean(a: int, b: int) -> tuple[int, int, int]:
 class RewriteSimplifier:
     """Simplifies integer/index expressions by applying algebraic rewrite rules.
 
-    Float arithmetic is returned unchanged; float variables and IterArgs
+    Float arithmetic and comparisons are preserved; float variables and IterArgs
     still follow explicit value bindings.
     """
 
@@ -285,6 +285,10 @@ class IntSetAnalyzer:
         """Update a variable's symbolic interval."""
         ...
 
+    def unbind(self, var: Var) -> None:
+        """Remove a variable's interval, restoring its symbolic point [var, var]."""
+        ...
+
     def bind(self, var: Var, min_val: Expr, max_val_exclusive: Expr) -> None:
         """Bind a variable to a half-open symbolic range [min_val, max_val_exclusive)."""
         ...
@@ -297,7 +301,7 @@ class Analyzer:
     """Coordinates all sub-analyzers for expression analysis and simplification.
 
     Boolean bindings support substitution without numeric ordering facts.
-    Float variables follow explicit bindings while float algebra stays unchanged.
+    Float variables follow explicit bindings while float arithmetic and comparisons stay explicit.
     """
 
     def __init__(self) -> None:

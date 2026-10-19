@@ -29,6 +29,8 @@ Integer and INDEX rewrites preserve the expression's declared result dtype. If s
 
 Boolean bindings use value substitution without numeric ordering analysis; floating-point bindings also substitute known values while leaving floating-point algebraic rewrite rules disabled, preserving dtype and signed zero.
 
+Floating-point comparisons remain explicit until rounding to the declared format is modeled; raw `ConstFloat` doubles must not decide a branch. Scoped unbinding clears symbolic intervals as well as concrete bounds and substitutions. Single-trip cloning carries the original multi-assignment exclusions onto fresh variables, and scalar/yield-slot DCE preserves communication-domain scope fields when rebuilding their bodies.
+
 ## When to Use
 
 - After SSA conversion to propagate scalar constants into types/shapes before the tile pipeline inspects them.

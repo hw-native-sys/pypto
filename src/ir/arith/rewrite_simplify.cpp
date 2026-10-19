@@ -60,6 +60,17 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr(const ExprPtr& expr) {
       stype && stype->dtype_.IsFloat() && !AsVarLike(expr)) {
     return expr;
   }
+  // Comparisons return BOOL, so the result-type guard above does not cover them.
+  // ConstFloat stores a double that may round differently in its declared dtype;
+  // preserve these comparisons until format-aware rounding is modeled. Negation
+  // patterns can also construct and fold comparisons, and must preserve NaNs.
+  auto binary = As<BinaryExpr>(expr);
+  if (auto negation = As<Not>(expr)) binary = As<BinaryExpr>(negation->operand_);
+  if (binary) {
+    auto lhs_type = As<ScalarType>(binary->left_->GetType());
+    auto rhs_type = As<ScalarType>(binary->right_->GetType());
+    if ((lhs_type && lhs_type->dtype_.IsFloat()) || (rhs_type && rhs_type->dtype_.IsFloat())) return expr;
+  }
   return PreserveIntegerResultType(expr, ExprFunctor<ExprPtr>::VisitExpr(expr));
 }
 
