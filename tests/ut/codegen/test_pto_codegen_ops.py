@@ -5492,7 +5492,7 @@ class TestFenceCodegen:
 
 
 class TestPipeBarrierCodegen:
-    """Tests that pl.system.bar_* lower to pto.barrier on the expected pipe."""
+    """The unified and compatibility APIs emit the same native PTO barriers."""
 
     def _generate_mlir(self, program_cls) -> str:
         backend.reset_for_testing()
@@ -5507,7 +5507,7 @@ class TestPipeBarrierCodegen:
         return codegen_instance.generate(single)
 
     def test_bar_all_emits_pipe_all_barrier(self):
-        """pl.system.bar_all() emits pto.barrier <PIPE_ALL>."""
+        """The ALL form emits pto.barrier <PIPE_ALL>."""
 
         @pl.program
         class Prog:
@@ -5518,7 +5518,7 @@ class TestPipeBarrierCodegen:
                 out: pl.Tensor[[16, 16], pl.FP32],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
-                pl.system.bar_all()
+                pl.system.barrier(pipe=pl.PipeType.ALL)
                 updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(tile, [0, 0], out)
                 return updated
 
@@ -5526,7 +5526,7 @@ class TestPipeBarrierCodegen:
         assert "pto.barrier <PIPE_ALL>" in mlir, f"pto.barrier <PIPE_ALL> not found in MLIR:\n{mlir}"
 
     def test_bar_v_emits_pipe_v_barrier(self):
-        """pl.system.bar_v() emits pto.barrier <PIPE_V>."""
+        """The V form emits pto.barrier <PIPE_V>."""
 
         @pl.program
         class Prog:
@@ -5537,7 +5537,7 @@ class TestPipeBarrierCodegen:
                 out: pl.Tensor[[16, 16], pl.FP32],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
-                pl.system.bar_v()
+                pl.system.barrier(pipe=pl.PipeType.V)
                 updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(tile, [0, 0], out)
                 return updated
 
@@ -5545,7 +5545,7 @@ class TestPipeBarrierCodegen:
         assert "pto.barrier <PIPE_V>" in mlir, f"pto.barrier <PIPE_V> not found in MLIR:\n{mlir}"
 
     def test_bar_m_emits_pipe_m_barrier(self):
-        """pl.system.bar_m() emits pto.barrier <PIPE_M>."""
+        """The M form emits pto.barrier <PIPE_M>."""
 
         @pl.program
         class Prog:
@@ -5556,12 +5556,44 @@ class TestPipeBarrierCodegen:
                 out: pl.Tensor[[16, 16], pl.FP32],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
-                pl.system.bar_m()
+                pl.system.barrier(pipe=pl.PipeType.M)
                 updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(tile, [0, 0], out)
                 return updated
 
         mlir = self._generate_mlir(Prog)
         assert "pto.barrier <PIPE_M>" in mlir, f"pto.barrier <PIPE_M> not found in MLIR:\n{mlir}"
+
+    @pytest.mark.parametrize("pipe, legacy_name", [("V", "bar_v"), ("M", "bar_m"), ("ALL", "bar_all")])
+    def test_legacy_barriers_have_identical_codegen(self, pipe, legacy_name):
+        source = """
+import pypto.language as pl
+
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        x: pl.Tensor[[16, 16], pl.FP32],
+        out: pl.Tensor[[16, 16], pl.FP32],
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+        BARRIER_CALL
+        return pl.store(tile, [0, 0], out)
+"""
+        legacy = pl.parse_program(source.replace("BARRIER_CALL", f"pl.system.{legacy_name}()"))
+        unified = pl.parse_program(
+            source.replace("BARRIER_CALL", f"pl.system.barrier(pipe=pl.PipeType.{pipe})")
+        )
+
+        legacy_mlir = self._generate_mlir(legacy)
+        unified_mlir = self._generate_mlir(unified)
+
+        assert f"pto.barrier <PIPE_{pipe}>" in unified_mlir
+        assert "pto.set_flag" not in unified_mlir
+        assert "pto.wait_flag" not in unified_mlir
+        assert [strip_loc(line) for line in legacy_mlir.splitlines()] == [
+            strip_loc(line) for line in unified_mlir.splitlines()
+        ]
 
 
 def _cmo_cacheinvalid_line(mlir: str) -> str:

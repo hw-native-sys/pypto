@@ -611,11 +611,19 @@ flat gather, valid-region semantics, tile layouts, and mask patterns.
 **Location**: `src/ir/op/sync_ops/` — `sync.cpp` (barriers), `task.cpp` (TaskId), `launch.cpp` (launch-shape queries)
 **Python API**: `from pypto.ir.op import system`
 
+The public Python barrier API is `pl.system.barrier(*, pipe)`, accepting only
+`pl.PipeType.V`, `M`, and `ALL`. It constructs the existing zero-operand IR
+operators below; there is no new `system.barrier` IR operator or `pipe` IR attr.
+The Python IR printer emits `pl.system.barrier(pipe=...)` with the corresponding
+enum member. The `bar_v()`, `bar_m()`, and `bar_all()` Python wrappers remain
+compatibility shorthands. Barriers use no event slot, and
+`ALL` orders all pipelines on the current core, not arrivals across cores.
+
 | Operation | Description | Kwargs |
 | --------- | ----------- | ------ |
-| `system.bar_all` | Global barrier (lowers to `pto.barrier <PIPE_ALL>`) | None |
-| `system.bar_v` | Vector barrier (lowers to `pto.barrier <PIPE_V>`) | None |
-| `system.bar_m` | Matrix barrier (lowers to `pto.barrier <PIPE_M>`) | None |
+| `system.bar_all` | Current-core all-pipeline barrier; Python `barrier(pipe=pl.PipeType.ALL)` (lowers to `pto.barrier <PIPE_ALL>`) | None |
+| `system.bar_v` | Vector pipeline barrier; Python `barrier(pipe=pl.PipeType.V)` (lowers to `pto.barrier <PIPE_V>`) | None |
+| `system.bar_m` | Matrix pipeline barrier; Python `barrier(pipe=pl.PipeType.M)` (lowers to `pto.barrier <PIPE_M>`) | None |
 | `system.fence` | Memory barrier over global memory (lowers to `pto.fence.barrier_all #pto.fence_scope<gm>`) | None |
 | `system.cacheinvalid` | Invalidate the cache line containing a tensor sub-region's base address. Args: `tensor`, `shapes` (N-D), `offsets` (N-D). Every region size — a single element included — lowers to `pto.partition_view` + `pto.cmo.cacheinvalid %payload_view single_cache_line : !pto.partition_tensor_view<...>`; `shapes` does not make it walk every cache line. The no-argument form invalidates all GM. | None |
 | `system.syncall` | Cross-core all-participant barrier (`pto::SYNCALL`). Attr `mode` `"hard"` (FFTS, no operands) or `"soft"` (GM-polling, operands) | `core_type` (`"aiv_only"` \| `"aic_only"` \| `"mix"`), `mode` (`"hard"` \| `"soft"`) |

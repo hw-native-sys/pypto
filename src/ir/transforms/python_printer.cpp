@@ -1257,6 +1257,20 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
   // Operations are stored with internal names like "tensor.adds" or "tile.matmul"
   // and are printed in parseable format like "pl.tensor.adds"
   std::string op_name = op->op_->name_;
+  // Keep the existing barrier IR while presenting its parameterized public
+  // API. The native ops have no operands or kwargs; retain the legacy call
+  // spelling for noncanonical calls rather than silently dropping metadata.
+  const char* barrier_pipe = nullptr;
+  if (op->args_.empty() && op->kwargs_.empty()) {
+    if (IsOp(op, "system.bar_v")) {
+      barrier_pipe = "V";
+    } else if (IsOp(op, "system.bar_m")) {
+      barrier_pipe = "M";
+    } else if (IsOp(op, "system.bar_all")) {
+      barrier_pipe = "ALL";
+    }
+  }
+  if (barrier_pipe) op_name = "system.barrier";
   if (IsOp(op, "pld.tensor.alloc_window_buffer")) {
     // SSA renames the bound Var without changing the allocation's logical name.
     op_name = "_dump.alloc_window_buffer";
@@ -1339,6 +1353,13 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
     }
     stream_ << "}";
   };
+
+  if (barrier_pipe) {
+    stream_ << "pipe=" << prefix_ << ".PipeType." << barrier_pipe;
+    print_serialized_attrs(/*need_comma=*/true);
+    stream_ << ")";
+    return;
+  }
 
   // Flag IR keeps the event as either an attribute or the sole dynamic
   // operand. Print the public src/dst/event order explicitly; generic Call

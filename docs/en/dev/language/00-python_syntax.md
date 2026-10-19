@@ -379,9 +379,9 @@ pl.create_tensor([64], dtype=pl.FP32)       # Promoted from tensor
 # System operations (synchronization primitives)
 pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
 pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
-pl.system.bar_v()                        # Vector barrier
-pl.system.bar_m()                        # Matrix barrier
-pl.system.bar_all()                      # Global barrier
+pl.system.barrier(pipe=pl.PipeType.V)     # Vector pipeline barrier
+pl.system.barrier(pipe=pl.PipeType.M)     # Matrix pipeline barrier
+pl.system.barrier(pipe=pl.PipeType.ALL)   # All pipelines on the current core
 
 # Cross-core operations (TPUSH/TPOP protocol)
 pl.tpush_to_aic(tile0, split=0, id=0)        # Vector → Cube push on pipe 0
@@ -402,6 +402,15 @@ pl.aiv_initialize_pipe(pl.const(0, pl.INT32), peer, dir_mask=2, slot_size=512, i
 # a5 -> slot_size * slot_num.
 pl.aic_initialize_pipe(pl.const(0, pl.INT32), buf, dir_mask=2, slot_size=512, slot_num=16, local_slot_num=4)
 ```
+
+`pl.system.barrier(*, pipe)` requires a `pl.PipeType.V`, `M`, or `ALL` member.
+It orders preceding and following work on the selected pipeline(s), without
+using an event slot. `ALL` covers the current core, not other cores; use
+`pl.system.syncall(...)` for a cross-core barrier. The existing `bar_v()`,
+`bar_m()`, and `bar_all()` wrappers remain compatible, while the Python IR
+printer always emits the corresponding `barrier(pipe=...)` spelling. Internal
+IR operator names and native barrier lowering remain unchanged. The separate
+`set_flag` / `wait_flag` calls retain their directional pipeline-event semantics.
 
 #### Cross-path arguments on unified ops
 
