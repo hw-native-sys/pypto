@@ -10,7 +10,15 @@ Each logical return is recorded before resolving its storage. A computed Tensor
 result gets an explicit `Out` parameter and a `tile.store`; a complete return of
 a local GM allocation moves that allocation to the caller. Repeated aliases of
 the same result share storage. Existing parameter writebacks keep their binding.
-The selected InCore/AIC/AIV function type is preserved.
+The selected InCore/AIC/AIV function type is preserved. Without a return type
+annotation, the original returned expression supplies its type.
+
+Allocations that need tensor-level staging keep their local Tile storage and get
+an exit store. This preserves Tensor-source assembly and local scalar updates
+instead of introducing unsupported GM operations or mixed store channels.
+Only complete returned allocations needed by explicit GM memory operations
+are lifted before lowering. Functions already at the Buffer IR stage are left
+unchanged.
 
 New output parameters propagate through Group/Spmd wrappers to orchestration or
 opaque callers, where `tensor.create` allocates their storage. Internal Group
@@ -774,6 +782,7 @@ re-declared seed could not name it.
 
 | Function type | Action |
 | ------------- | ------ |
-| InCore / AIC / AIV | Converted (tensor ops → tile ops); Phase 1 may add `Out` params; core type preserved |
+| Functional InCore / AIC / AIV | Converted (tensor ops → tile ops); Phase 1 may add `Out` params; core type preserved |
+| Any Buffer-stage function | Unchanged; its explicit storage and data/metadata effects are already lowered |
 | Spmd / Group | Exposes storage required by each inner call as private `Out` params (Phase 2a) |
 | Orchestration / Opaque | Call sites updated — `tensor.create` inserted for each new `Out` param (Phase 2b) |

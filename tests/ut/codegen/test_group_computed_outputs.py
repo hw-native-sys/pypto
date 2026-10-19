@@ -18,6 +18,7 @@ import re
 
 import pypto.language as pl
 import pytest
+import torch
 from pypto import backend, ir
 from pypto.backend import BackendType, pto_backend
 from pypto.ir import OptimizationStrategy, PassManager
@@ -161,6 +162,32 @@ def test_group_computed_tensor_output_full_codegen(tmp_path):
     assert allocated is not None, orchestration
     assert re.search(rf"\.add_output\(\s*{re.escape(allocated[1])}\s*\)", orchestration), orchestration
     assert "FREE_VAR" not in after.as_python()
+    assert all("FREE_VAR" not in content for content in files.values())
+
+
+def test_recompiling_a_lowered_jit_program_preserves_buffer_stage(tmp_path):
+    """The documented compile(kernel.lower(...)) path must accept already lowered kernels."""
+
+    @pl.jit
+    def add_kernel(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
+        with pl.at(level=pl.Level.CORE_GROUP):
+            left = pl.load(a, [0, 0], [16, 16])
+            right = pl.load(b, [0, 0], [16, 16])
+            pl.store(pl.add(left, right), [0, 0], out)
+        return out
+
+    inputs = [torch.zeros((16, 16), dtype=torch.float32) for _ in range(3)]
+    lowered = add_kernel.lower(*inputs)
+    kernels = [function for function in lowered.functions.values() if ir.is_incore_type(function.func_type)]
+    assert kernels and all(function.ir_stage == ir.FunctionIRStage.Buffer for function in kernels)
+
+    # ir.compile() runs Default again on this input. Emit its artifacts without
+    # invoking PTOAS or a device, just as the first compilation's codegen did.
+    after = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(lowered)
+    files = pto_backend.generate(after, str(tmp_path), skip_ptoas=True)
+    assert "orchestration/add_kernel.cpp" in files
+    pto = "\n".join(content for path, content in files.items() if path.endswith(".pto"))
+    assert "pto.tadd" in pto and "pto.tstore" in pto
     assert all("FREE_VAR" not in content for content in files.values())
 
 

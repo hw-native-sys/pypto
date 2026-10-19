@@ -9,6 +9,12 @@
 本 pass 先记录每个逻辑返回值，再解析其存储来源。新计算的 Tensor 结果会新增显式
 `Out` 形参和 `tile.store`；完整返回的局部 GM 分配则移到调用者。同一结果的重复别名
 共用存储，已有参数的写回保留原绑定。转换后保留原有 InCore/AIC/AIV 函数类型。
+没有返回类型注解时，使用原始返回表达式的类型。
+
+需要 Tensor 层暂存的分配保留局部 Tile 存储，在出口统一 store。这样既能暂存
+Tensor 源的 assemble，也能保留局部标量更新，避免引入不支持的 GM 操作或混用
+不同的写回通道。只有显式 GM 内存操作所需且完整返回的分配才在降级前提升。
+已经处于 Buffer IR 阶段的函数保持不变。
 
 新增输出形参经 Group/Spmd 包装函数逐层转发，由外层编排/不透明调用者通过
 `tensor.create` 分配。Group 内部输出不必属于 Group 的逻辑返回 tuple。
@@ -692,6 +698,7 @@ for k0 in pl.pipeline(0, K, K_TILE, stage=2):
 
 | 函数类型 | 操作 |
 | -------- | ---- |
-| InCore / AIC / AIV | 转换（tensor ops → tile ops）；阶段一可能新增 `Out` 参数；保留 core 类型 |
+| Functional InCore / AIC / AIV | 转换（tensor ops → tile ops）；阶段一可能新增 `Out` 参数；保留 core 类型 |
+| 任意 Buffer 阶段函数 | 保持不变；显式存储及 data/metadata 效果已经完成降级 |
 | Spmd / Group | 将各内部调用所需的存储提升为私有 `Out` 形参（阶段二a） |
 | Orchestration / Opaque | 更新调用点 —— 为每个新增 `Out` 参数插入 `tensor.create`（阶段二b） |

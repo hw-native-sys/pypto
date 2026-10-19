@@ -2682,7 +2682,11 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
   if (return_stmt) {
     outputs.reserve(return_stmt->value_.size());
     for (size_t i = 0; i < return_stmt->value_.size(); ++i) {
-      outputs.push_back({i, func->return_types_[i], return_stmt->value_[i], std::nullopt});
+      const auto& value = return_stmt->value_[i];
+      // Unannotated functions can carry a return value without declared
+      // return_types. Preserve its original type before conversion as well.
+      const auto& type = i < func->return_types_.size() ? func->return_types_[i] : value->GetType();
+      outputs.push_back({i, type, value, std::nullopt});
     }
   }
 
@@ -2705,8 +2709,24 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
    public:
     std::vector<VarPtr> vars;
     std::vector<StmtPtr> storage_definitions;
+    std::vector<ExprPtr> gm_uses;
 
    protected:
+    void VisitExpr_(const CallPtr& op) override {
+      // Pre-lift only storage that an explicit memory operation requires in
+      // GM. Tensor-level local updates retain tile staging and one exit store.
+      if (IsOp(op, "tile.store") && op->args_.size() > 2) {
+        gm_uses.push_back(op->args_[2]);
+      } else if (IsOp(op, "tile.load") && !op->args_.empty()) {
+        gm_uses.push_back(op->args_[0]);
+      } else if (IsOp(op, "tensor.expand_clone") && op->args_.size() == 2) {
+        // This converter supplies its own GM loads/stores and requires both
+        // source and destination to remain TensorType.
+        gm_uses.insert(gm_uses.end(), op->args_.begin(), op->args_.end());
+      }
+      IRVisitor::VisitExpr_(op);
+    }
+
     void VisitStmt_(const AssignStmtPtr& op) override {
       auto call = As<Call>(op->value_);
       if (IsOp(call, "tensor.create") && As<TensorType>(op->var_->GetType())) {
@@ -2736,10 +2756,20 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
     const auto storage_body = SeqStmts::Flatten(allocations.storage_definitions, span);
     const auto indices =
         return_lineage::TraceExprsToParamIndices(returned_values, storage_body, roots, nullptr);
+    // Storage identity alone does not require a GM parameter. Ordinary local
+    // allocations, including Tensor-level updates and control-flow aliases,
+    // keep their original promotion and receive one output store after lowering.
+    const auto gm_indices =
+        return_lineage::TraceExprsToParamIndices(allocations.gm_uses, storage_body, roots, nullptr);
+    std::unordered_set<const Var*> gm_roots;
+    for (const auto& index : gm_indices) {
+      if (index && *index >= func->params_.size()) gm_roots.insert(roots[*index].get());
+    }
     std::unordered_map<const Var*, VarPtr> allocation_outputs;
     for (const auto& index : indices) {
       if (!index || *index < func->params_.size()) continue;
       const auto& allocation = roots[*index];
+      if (gm_roots.count(allocation.get()) == 0) continue;
       auto [it, inserted] = allocation_outputs.emplace(allocation.get(), nullptr);
       if (inserted) it->second = add_output(allocation->GetType());
     }
@@ -3155,8 +3185,11 @@ Pass ConvertTensorToTileOps() {
     std::unordered_map<std::string, FunctionPtr> all_transformed_funcs;
     std::vector<FunctionPtr> functions_phase1;
     for (const auto& [gvar, func] : program->functions_) {
-      if (IsInCoreType(func->func_type_) && !func->HasAttr(kAttrExternalSource) &&
-          !func->requires_runtime_binding_) {
+      // Buffer kernels already carry explicit storage and separate data /
+      // metadata effects; functional tensor-to-tile conversion must leave
+      // their bodies and signatures intact.
+      if (func->ir_stage_ == FunctionIRStage::Functional && IsInCoreType(func->func_type_) &&
+          !func->HasAttr(kAttrExternalSource) && !func->requires_runtime_binding_) {
         auto result = TransformIncoreFunction(func);
         all_added_outputs.emplace(func->name_, std::move(result.added_outputs));
         all_transformed_funcs.emplace(func->name_, result.func);
@@ -3194,7 +3227,7 @@ Pass ConvertTensorToTileOps() {
     };
     std::unordered_map<std::string, std::vector<std::string>> wrapper_callees;
     for (const auto& func : functions_phase1) {
-      if (!IsWrapperType(func->func_type_)) continue;
+      if (func->ir_stage_ == FunctionIRStage::Buffer || !IsWrapperType(func->func_type_)) continue;
       WrapperCalleeCollector collector;
       collector.VisitStmt(func->body_);
       wrapper_callees.emplace(func->name_, std::move(collector.names));
@@ -3220,7 +3253,8 @@ Pass ConvertTensorToTileOps() {
     functions_phase2b.reserve(functions_phase1.size());
     for (const auto& source : functions_phase1) {
       const auto& func = all_transformed_funcs.at(source->name_);
-      if (IsInCoreType(func->func_type_) || IsWrapperType(func->func_type_)) {
+      if (func->ir_stage_ == FunctionIRStage::Buffer || IsInCoreType(func->func_type_) ||
+          IsWrapperType(func->func_type_)) {
         functions_phase2b.push_back(func);
       } else {
         functions_phase2b.push_back(UpdateCallSites(func, all_added_outputs, all_transformed_funcs));
@@ -3263,7 +3297,7 @@ Pass ConvertTensorToTileOps() {
       };
       std::unordered_map<std::string, CallerFacts> facts_by_name;
       for (const auto& func : functions_phase2b) {
-        if (func->func_type_ == FunctionType::InCore) continue;
+        if (func->ir_stage_ == FunctionIRStage::Buffer || func->func_type_ == FunctionType::InCore) continue;
 
         CallerFacts f;
         for (size_t i = 0; i < func->params_.size(); ++i) {
@@ -3328,7 +3362,9 @@ Pass ConvertTensorToTileOps() {
       while (changed) {
         changed = false;
         for (auto& func : functions_phase2b) {
-          if (func->func_type_ == FunctionType::InCore) continue;
+          if (func->ir_stage_ == FunctionIRStage::Buffer || func->func_type_ == FunctionType::InCore) {
+            continue;
+          }
           auto facts_it = facts_by_name.find(func->name_);
           if (facts_it == facts_by_name.end()) continue;
           const CallerFacts& facts = facts_it->second;
@@ -3400,6 +3436,7 @@ Pass ConvertTensorToTileOps() {
     // layout/compact metadata. Reconcile converted yields with their carries
     // before TypeCheck and AccCompactValid run (issue #2470).
     for (auto& func : functions_phase2b) {
+      if (func->ir_stage_ == FunctionIRStage::Buffer) continue;
       func = narrow_loop_carry::NarrowAccCarries(func);
     }
 

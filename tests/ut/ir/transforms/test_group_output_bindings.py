@@ -59,6 +59,21 @@ def _builtin_calls(function: ir.Function, name: str) -> list[ir.Call]:
     ]
 
 
+def _all_builtin_calls(function: ir.Function, name: str) -> list[ir.Call]:
+    """Include unassigned scalar writes as well as assignment RHS calls."""
+    calls: list[ir.Call] = []
+    op_name = ir.get_op(name).name
+
+    class CollectCalls(ir.IRVisitor):
+        def visit_call(self, op: ir.Call) -> None:
+            if op.op.name == op_name:
+                calls.append(op)
+            super().visit_call(op)
+
+    CollectCalls().visit_function(function)
+    return calls
+
+
 def _lower(program: ir.Program) -> ir.Program:
     return passes.convert_tensor_to_tile_ops()(passes.convert_to_ssa()(program))
 
@@ -624,7 +639,8 @@ def test_omitted_existing_out_precedes_added_output_and_comm_ctx(add_fresh_outpu
     assert len({value.unique_id for value in creates}) == len(creates)
 
 
-def test_returned_local_allocation_and_aliases_reuse_one_output_buffer():
+@pytest.mark.parametrize("store_shapes", [None, [16, 16]], ids=["implicit_shape", "explicit_shape"])
+def test_returned_local_allocation_and_aliases_reuse_one_output_buffer(store_shapes):
     """Promoting a stored GM allocation must not add a second allocation, copy or output for its alias."""
 
     @pl.program
@@ -635,7 +651,7 @@ def test_returned_local_allocation_and_aliases_reuse_one_output_buffer():
         ) -> tuple[pl.Tensor[[16, 16], pl.FP16], pl.Tensor[[16, 16], pl.FP16]]:
             buffer = pl.tensor.create([16, 16], dtype=pl.FP16)
             tile = pl.load(x, [0, 0], [16, 16])
-            stored = pl.store(tile, [0, 0], buffer)
+            stored = pl.store(tile, [0, 0], buffer, shapes=store_shapes)
             alias = stored
             return stored, alias
 
@@ -708,6 +724,14 @@ def test_returned_local_allocation_and_aliases_reuse_one_output_buffer():
     producer = _function(after, "producer")
     stores = _builtin_calls(producer, "tile.store")
     assert len(stores) == 1
+    assert len(stores[0].args) == (3 if store_shapes is None else 4)
+    if store_shapes is not None:
+        shape = stores[0].args[3]
+        assert isinstance(shape, ir.MakeTuple)
+        assert len(shape.elements) == 2
+        for extent in shape.elements:
+            assert isinstance(extent, ir.ConstInt)
+            assert extent.value == 16
     assert stores[0].args[2].same_as(producer.params[1])
     definitions = {
         statement.var.unique_id: statement.value
@@ -846,6 +870,429 @@ def test_nested_spmd_group_outputs_propagate_in_call_graph_order(outer_sorts_fir
     assert len(outer_call.args) == 4
     assert not outer_call.args[2].same_as(outer_call.args[3])
     _expand(lowered)
+
+
+def test_returned_local_assemble_stages_tensor_parameter_source():
+    """A returned local assemble must retain the staging path that loads its Tensor source."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, x: pl.Tensor[[32], pl.FP32]) -> pl.Tensor[[32], pl.FP32]:
+            buffer = pl.tensor.create([32], dtype=pl.FP32)
+            assembled = pl.tensor.assemble(buffer, x, [0])
+            return assembled
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, x: pl.Tensor[[32], pl.FP32]) -> pl.Tensor[[32], pl.FP32]:
+            result = self.kernel(x)
+            return result
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self, x: pl.Tensor[[32], pl.FP32], out: pl.Out[pl.Tensor[[32], pl.FP32]]
+        ) -> pl.Tensor[[32], pl.FP32]:
+            buffer = pl.tile.create([32], dtype=pl.FP32)
+            source = pl.load(x, [0], [32], [32], target_memory=pl.Mem.Vec)
+            assembled = pl.tile.assemble(buffer, source, [0])
+            stored = pl.store(assembled, [0], out)
+            return stored
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, x: pl.Tensor[[32], pl.FP32]) -> pl.Tensor[[32], pl.FP32]:
+            out = pl.tensor.create([32], dtype=pl.FP32, layout=pl.TensorLayout.ND)
+            result = self.kernel(x, out)
+            return result
+
+    lowered = _lower(Before)
+    ir.assert_structural_equal(lowered, Expected)
+    kernel = _function(lowered, "kernel")
+    assert kernel.func_type == ir.FunctionType.InCore
+    assert len(kernel.params) == 2
+    assert not _all_builtin_calls(kernel, "tensor.assemble")
+    assert not _all_builtin_calls(kernel, "tensor.create")
+    assert len(_all_builtin_calls(kernel, "tile.create")) == 1
+    assert len(_all_builtin_calls(kernel, "tile.assemble")) == 1
+    stores = _all_builtin_calls(kernel, "tile.store")
+    assert len(stores) == 1
+    assert stores[0].args[2].same_as(kernel.params[-1])
+    assert len(_builtin_calls(_function(lowered, "main"), "tensor.create")) == 1
+
+
+@pytest.mark.parametrize("write_through_alias", [False, True])
+def test_scalar_updated_local_assemble_retains_tile_staging(write_through_alias):
+    """An unassigned scalar write, including through an alias, stays on-chip before one exit store."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def direct(
+            self,
+            x: pl.Tensor[[32], pl.FP32],
+            y: pl.Tensor[[32], pl.FP32],
+            index: pl.Scalar[pl.INDEX],
+            value: pl.Scalar[pl.FP32],
+        ) -> pl.Tensor[[32], pl.FP32]:
+            buffer = pl.tensor.create([32], dtype=pl.FP32)
+            computed = pl.add(x, y)
+            buffer = pl.tensor.assemble(buffer, computed, [0])
+            pl.tensor.write(buffer, [index], value)
+            return buffer
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def alias(
+            self,
+            x: pl.Tensor[[32], pl.FP32],
+            y: pl.Tensor[[32], pl.FP32],
+            index: pl.Scalar[pl.INDEX],
+            value: pl.Scalar[pl.FP32],
+        ) -> pl.Tensor[[32], pl.FP32]:
+            buffer = pl.tensor.create([32], dtype=pl.FP32)
+            computed = pl.add(x, y)
+            buffer = pl.tensor.assemble(buffer, computed, [0])
+            target = buffer
+            pl.tensor.write(target, [index], value)
+            return buffer
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def direct(
+            self,
+            x: pl.Tensor[[32], pl.FP32],
+            y: pl.Tensor[[32], pl.FP32],
+            index: pl.Scalar[pl.INDEX],
+            value: pl.Scalar[pl.FP32],
+            out: pl.Out[pl.Tensor[[32], pl.FP32]],
+        ) -> pl.Tensor[[32], pl.FP32]:
+            buffer = pl.tile.create([32], dtype=pl.FP32)
+            x_tile = pl.load(x, [0], [32], [32])
+            y_tile = pl.load(y, [0], [32], [32])
+            computed = pl.tile.add(x_tile, y_tile)
+            assembled = pl.tile.assemble(buffer, computed, [0])
+            pl.tile.write(assembled, [index], value)
+            stored = pl.store(assembled, [0], out)
+            return stored
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def alias(
+            self,
+            x: pl.Tensor[[32], pl.FP32],
+            y: pl.Tensor[[32], pl.FP32],
+            index: pl.Scalar[pl.INDEX],
+            value: pl.Scalar[pl.FP32],
+            out: pl.Out[pl.Tensor[[32], pl.FP32]],
+        ) -> pl.Tensor[[32], pl.FP32]:
+            buffer = pl.tile.create([32], dtype=pl.FP32)
+            x_tile = pl.load(x, [0], [32], [32])
+            y_tile = pl.load(y, [0], [32], [32])
+            computed = pl.tile.add(x_tile, y_tile)
+            assembled = pl.tile.assemble(buffer, computed, [0])
+            target = assembled
+            pl.tile.write(target, [index], value)
+            stored = pl.store(assembled, [0], out)
+            return stored
+
+    name = "alias" if write_through_alias else "direct"
+    lowered = _lower(_select(Before, (name,)))
+    ir.assert_structural_equal(_function(lowered, name), _function(Expected, name))
+    kernel = _function(lowered, name)
+    assert len(kernel.params) == 5
+    assert kernel.param_directions[-1] == ir.ParamDirection.Out
+    assert not _all_builtin_calls(kernel, "tensor.create")
+    assert not _all_builtin_calls(kernel, "tensor.assemble")
+    assert not _all_builtin_calls(kernel, "tensor.write")
+    assert len(_all_builtin_calls(kernel, "tile.create")) == 1
+    assert len(_all_builtin_calls(kernel, "tile.assemble")) == 1
+    writes, stores = _all_builtin_calls(kernel, "tile.write"), _all_builtin_calls(kernel, "tile.store")
+    assert len(writes) == len(stores) == 1
+    assert isinstance(writes[0].args[0].type, ir.TileType)
+    assert stores[0].args[2].same_as(kernel.params[-1])
+
+
+def test_scalar_updated_tensor_source_assemble_reaches_vector_expansion():
+    """The supported 2D staging flow reaches Expand with its scalar write and one final GM store."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[1, 32], pl.FP32],
+            index: pl.Scalar[pl.INDEX],
+            value: pl.Scalar[pl.FP32],
+        ) -> pl.Tensor[[1, 32], pl.FP32]:
+            buffer = pl.tensor.create([1, 32], dtype=pl.FP32)
+            assembled = pl.tensor.assemble(buffer, x, [0, 0])
+            alias = assembled
+            pl.tensor.write(alias, [0, index], value)
+            return assembled
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            x: pl.Tensor[[1, 32], pl.FP32],
+            index: pl.Scalar[pl.INDEX],
+            value: pl.Scalar[pl.FP32],
+        ) -> pl.Tensor[[1, 32], pl.FP32]:
+            result = self.kernel(x, index, value)
+            return result
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[1, 32], pl.FP32],
+            index: pl.Scalar[pl.INDEX],
+            value: pl.Scalar[pl.FP32],
+            out: pl.Out[pl.Tensor[[1, 32], pl.FP32]],
+        ) -> pl.Tensor[[1, 32], pl.FP32]:
+            buffer = pl.tile.create([1, 32], dtype=pl.FP32)
+            source = pl.load(x, [0, 0], [1, 32], [1, 32], target_memory=pl.Mem.Vec)
+            assembled = pl.tile.assemble(buffer, source, [0, 0])
+            alias = assembled
+            pl.tile.write(alias, [0, index], value)
+            stored = pl.store(assembled, [0, 0], out)
+            return stored
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            x: pl.Tensor[[1, 32], pl.FP32],
+            index: pl.Scalar[pl.INDEX],
+            value: pl.Scalar[pl.FP32],
+        ) -> pl.Tensor[[1, 32], pl.FP32]:
+            out = pl.tensor.create([1, 32], dtype=pl.FP32, layout=pl.TensorLayout.ND)
+            result = self.kernel(x, index, value, out)
+            return result
+
+    lowered = _lower(Before)
+    ir.assert_structural_equal(lowered, Expected)
+    after = _expand(passes.flatten_tile_nd_to_2d()(lowered))
+    kernel = _function(after, "kernel")
+    assert kernel.func_type == ir.FunctionType.AIV
+    assert kernel.param_directions == [ir.ParamDirection.In] * 3 + [ir.ParamDirection.Out]
+    for name in ("tensor.assemble", "tensor.write", "tensor.create"):
+        assert not _all_builtin_calls(kernel, name)
+    assert len(_all_builtin_calls(kernel, "tile.assemble")) == 1
+    writes, stores = _all_builtin_calls(kernel, "tile.write"), _all_builtin_calls(kernel, "tile.store")
+    assert len(writes) == len(stores) == 1
+    assert isinstance(writes[0].args[0].type, ir.TileType)
+    assert stores[0].args[2].same_as(kernel.params[-1])
+    assert len(_builtin_calls(_function(after, "main"), "tensor.create")) == 1
+
+
+def test_scalar_write_through_if_join_retains_both_local_tiles():
+    """A phi that may select either allocation requires staging for both roots, including the return."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self, condition: pl.Scalar[pl.BOOL], value: pl.Scalar[pl.FP32]
+        ) -> pl.Tensor[[1, 32], pl.FP32]:
+            first = pl.tensor.create([1, 32], dtype=pl.FP32)
+            second = pl.tensor.create([1, 32], dtype=pl.FP32)
+            if condition:
+                selected = pl.yield_(first)
+            else:
+                selected = pl.yield_(second)
+            pl.tensor.write(selected, [0, 0], value)
+            return first
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            condition: pl.Scalar[pl.BOOL],
+            value: pl.Scalar[pl.FP32],
+            out: pl.Out[pl.Tensor[[1, 32], pl.FP32]],
+        ) -> pl.Tensor[[1, 32], pl.FP32]:
+            first = pl.tile.create([1, 32], dtype=pl.FP32)
+            second = pl.tile.create([1, 32], dtype=pl.FP32)
+            if condition:
+                selected = pl.yield_(first)
+            else:
+                selected = pl.yield_(second)
+            pl.tile.write(selected, [0, 0], value)
+            stored = pl.store(first, [0, 0], out)
+            return stored
+
+    lowered = _lower(Before)
+    ir.assert_structural_equal(lowered, Expected)
+    after = _expand(lowered)
+    kernel = _function(after, "kernel")
+    assert len(_all_builtin_calls(kernel, "tile.create")) == 2
+    assert len(_all_builtin_calls(kernel, "tile.write")) == 1
+    assert len(_all_builtin_calls(kernel, "tile.store")) == 1
+    assert not _all_builtin_calls(kernel, "tensor.write")
+
+
+def test_if_join_staging_does_not_block_independent_explicit_gm_output():
+    """Ambiguous alias uses must not force an unrelated explicit GM allocation onto the tile path."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[1, 32], pl.FP32],
+            condition: pl.Scalar[pl.BOOL],
+            value: pl.Scalar[pl.FP32],
+        ) -> tuple[pl.Tensor[[1, 32], pl.FP32], pl.Tensor[[1, 32], pl.FP32]]:
+            first = pl.tensor.create([1, 32], dtype=pl.FP32)
+            second = pl.tensor.create([1, 32], dtype=pl.FP32)
+            if condition:
+                selected = pl.yield_(first)
+            else:
+                selected = pl.yield_(second)
+            pl.tensor.write(selected, [0, 0], value)
+            independent = pl.tensor.create([1, 32], dtype=pl.FP32)
+            source = pl.load(x, [0, 0], [1, 32])
+            stored = pl.store(source, [0, 0], independent)
+            return first, stored
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[1, 32], pl.FP32],
+            condition: pl.Scalar[pl.BOOL],
+            value: pl.Scalar[pl.FP32],
+            independent: pl.Out[pl.Tensor[[1, 32], pl.FP32]],
+            first_out: pl.Out[pl.Tensor[[1, 32], pl.FP32]],
+        ) -> tuple[pl.Tensor[[1, 32], pl.FP32], pl.Tensor[[1, 32], pl.FP32]]:
+            first = pl.tile.create([1, 32], dtype=pl.FP32)
+            second = pl.tile.create([1, 32], dtype=pl.FP32)
+            if condition:
+                selected = pl.yield_(first)
+            else:
+                selected = pl.yield_(second)
+            pl.tile.write(selected, [0, 0], value)
+            source = pl.load(x, [0, 0], [1, 32])
+            stored = pl.store(source, [0, 0], independent)
+            first_stored = pl.store(first, [0, 0], first_out)
+            return first_stored, stored
+
+    lowered = _lower(Before)
+    ir.assert_structural_equal(lowered, Expected)
+    after = _expand(lowered)
+    kernel = _function(after, "kernel")
+    assert len(kernel.params) == 5
+    assert len(_all_builtin_calls(kernel, "tile.create")) == 2
+    assert not _all_builtin_calls(kernel, "tensor.create")
+    stores = _all_builtin_calls(kernel, "tile.store")
+    assert len(stores) == 2
+    assert [store.args[2] for store in stores] == list(kernel.params[-2:])
+    assert all(isinstance(store.args[2].type, ir.TensorType) for store in stores)
+
+
+@pytest.mark.parametrize("kernel_name", ["incore", "aiv"])
+def test_unannotated_computed_tensor_return_infers_output_storage(kernel_name):
+    """A nonempty return without an annotation still gains one inferred Tensor Out and exit store."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def incore(self, x: pl.Tensor[[32], pl.FP32], y: pl.Tensor[[32], pl.FP32]):
+            fresh = pl.add(x, y)
+            return fresh
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def aiv(self, x: pl.Tensor[[32], pl.FP32], y: pl.Tensor[[32], pl.FP32]):
+            fresh = pl.add(x, y)
+            return fresh
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def incore(
+            self,
+            x: pl.Tensor[[32], pl.FP32],
+            y: pl.Tensor[[32], pl.FP32],
+            out: pl.Out[pl.Tensor[[32], pl.FP32]],
+        ) -> pl.Tensor[[32], pl.FP32]:
+            x_tile = pl.load(x, [0], [32], [32])
+            y_tile = pl.load(y, [0], [32], [32])
+            fresh = pl.tile.add(x_tile, y_tile)
+            stored = pl.store(fresh, [0], out)
+            return stored
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def aiv(
+            self,
+            x: pl.Tensor[[32], pl.FP32],
+            y: pl.Tensor[[32], pl.FP32],
+            out: pl.Out[pl.Tensor[[32], pl.FP32]],
+        ) -> pl.Tensor[[32], pl.FP32]:
+            x_tile = pl.load(x, [0], [32], [32])
+            y_tile = pl.load(y, [0], [32], [32])
+            fresh = pl.tile.add(x_tile, y_tile)
+            stored = pl.store(fresh, [0], out)
+            return stored
+
+    before = _select(Before, (kernel_name,))
+    assert not _function(before, kernel_name).return_types
+    lowered = _lower(before)
+    kernel = _function(lowered, kernel_name)
+    ir.assert_structural_equal(kernel, _function(Expected, kernel_name))
+    assert len(kernel.return_types) == 1
+    assert isinstance(kernel.return_types[0], ir.TensorType)
+    assert kernel.param_directions == [ir.ParamDirection.In, ir.ParamDirection.In, ir.ParamDirection.Out]
+    assert len(_all_builtin_calls(kernel, "tile.add")) == 1
+    stores = _all_builtin_calls(kernel, "tile.store")
+    assert len(stores) == 1 and stores[0].args[2].same_as(kernel.params[-1])
+    assert _function(_expand(lowered), kernel_name).func_type == ir.FunctionType.AIV
+
+
+@pytest.mark.parametrize("function_type", [ir.FunctionType.AIC, ir.FunctionType.AIV])
+def test_tensor_conversion_preserves_already_lowered_buffer_functions(function_type):
+    """CTT must skip final Buffer bodies instead of querying functional effects for buffer.alloc."""
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType([16, 32], ir.DataType.FP32)
+    descriptor = ir.BufferType([16, 32], ir.DataType.FP32, ir.MemorySpace.Vec)
+    source, output = ir.Var("source", tensor_type, span), ir.Var("output", tensor_type, span)
+    buffer = ir.Var("buffer", descriptor, span)
+    offsets = ir.MakeTuple([ir.ConstInt(0, ir.DataType.INDEX, span)] * 2, span)
+    valid = ir.MakeTuple(
+        [ir.ConstInt(16, ir.DataType.INDEX, span), ir.ConstInt(32, ir.DataType.INDEX, span)], span
+    )
+    allocation = ir.Call(ir.get_op("buffer.alloc"), [ir.MakeTuple([], span)], {}, None, descriptor, span)
+    load = ir.Call(ir.get_op("buffer.load"), [source, offsets, valid, buffer], {}, None, ir.VoidType(), span)
+    store = ir.Call(
+        ir.get_op("buffer.store"), [buffer, offsets, valid, output], {}, None, ir.VoidType(), span
+    )
+    kernel = ir.Function(
+        "kernel",
+        [source, (output, ir.ParamDirection.Out)],
+        [tensor_type],
+        ir.SeqStmts(
+            [
+                ir.AssignStmt(buffer, allocation, span),
+                ir.EvalStmt(load, span),
+                ir.EvalStmt(store, span),
+                ir.ReturnStmt([output], span),
+            ],
+            span,
+        ),
+        span,
+        type=function_type,
+        ir_stage=ir.FunctionIRStage.Buffer,
+    )
+    before = ir.Program([kernel], "already_lowered_buffer", span)
+    after = passes.convert_tensor_to_tile_ops()(before)
+    ir.assert_structural_equal(after, before)
+    preserved = _function(after, "kernel")
+    assert preserved.same_as(kernel)
+    assert preserved.ir_stage == ir.FunctionIRStage.Buffer
+    assert preserved.func_type == function_type
+    for name in ("buffer.alloc", "buffer.load", "buffer.store"):
+        assert len(_all_builtin_calls(preserved, name)) == 1
 
 
 def test_dynamic_computed_outputs_bind_to_the_adapters_scalar_parameter():
