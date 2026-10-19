@@ -2636,8 +2636,8 @@ struct ReturnOutputBinding {
 // extents: callers must supply an explicit Out or a signature-visible extent.
 class OutputTypeScopeValidator : public IRVisitor {
  public:
-  OutputTypeScopeValidator(const FunctionPtr& func, const StmtPtr& body, const Span& span)
-      : function_name_(func->name_), span_(span) {
+  OutputTypeScopeValidator(const FunctionPtr& func, const StmtPtr& body, Span span)
+      : function_name_(func->name_), span_(std::move(span)) {
     var_collectors::VarDefUseCollector collector;
     collector.VisitStmt(body);
     body_locals_ = std::move(collector.var_defs);
