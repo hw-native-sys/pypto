@@ -633,7 +633,9 @@ Exactly one event form is present: a literal `event_id` in `[0, 7]`, or one
 `ScalarType(INDEX)` operand whose runtime value must stay in that range.
 `core_type` is optional `"aic"` / `"aiv"` IR metadata for mixed-kernel placement.
 Codegen emits `pto.set_flag` / `pto.wait_flag`, or the `_dyn` variants for an
-INDEX operand. The calls do not represent cross-core synchronization.
+INDEX operand. A dynamic operand folded to a constant remains an operand and
+still emits the `_dyn` form; IR printing preserves it with `pl._dump.call`.
+The calls do not represent cross-core synchronization.
 The `PipelineLoopValid` verifier rejects either call inside a `ForKind::Pipeline`
 loop before pipeline scheduling. The scheduling passes also reject this placement
 when optional IR verification is disabled. Explicit flags work in ordinary loops.

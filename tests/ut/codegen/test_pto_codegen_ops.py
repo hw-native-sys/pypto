@@ -5279,6 +5279,45 @@ def test_pipeline_flags_codegen_static_and_dynamic():
     assert "pto.wait_flag_dyn [#pto.pipe<PIPE_V>, #pto.pipe<PIPE_MTE3>, %" in mlir
 
 
+def test_pipeline_flags_folded_dynamic_event_round_trip():
+    """Folding an INDEX event must preserve the dynamic form through IR dumps."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.AIV)
+        def kernel(self, x: pl.Tensor[[16], pl.FP32]) -> pl.Tensor[[16], pl.FP32]:
+            event_id: pl.Scalar[pl.INDEX] = pl.const(3, pl.INDEX)
+            pl.system.set_flag(pl.PipeType.MTE2, pl.PipeType.V, event_id, core_type=pl.KernelType.AIV)
+            pl.system.wait_flag(pl.PipeType.MTE2, pl.PipeType.V, event_id, core_type=pl.KernelType.AIV)
+            return x
+
+    # Simplify substitutes a ConstInt operand; it does not turn it into the
+    # static event_id attribute. RoundtripInstrument must preserve that choice.
+    folded = passes.simplify()(Prog)
+    replayed = pl.parse_program(folded.as_python())
+    ir.assert_structural_equal(folded, replayed)
+    replayed_func = next(iter(replayed.functions.values()))
+    assert isinstance(replayed_func.body, ir.SeqStmts)
+    calls = [stmt.expr for stmt in replayed_func.body.stmts if isinstance(stmt, ir.EvalStmt)]
+    assert len(calls) == 2
+    for call in calls:
+        assert isinstance(call, ir.Call)
+        assert len(call.args) == 1
+        assert isinstance(call.args[0], ir.ConstInt)
+        assert call.args[0].value == 3
+        assert "event_id" not in call.kwargs
+
+    optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(replayed)
+    func = next(iter(optimized.functions.values()))
+    mlir = codegen.PTOCodegen().generate(ir.Program([func], func.name, optimized.span))
+    assert "pto.set_flag_dyn [#pto.pipe<PIPE_MTE2>, #pto.pipe<PIPE_V>, %" in mlir
+    assert "pto.wait_flag_dyn [#pto.pipe<PIPE_MTE2>, #pto.pipe<PIPE_V>, %" in mlir
+    assert 'pto.set_flag["' not in mlir
+    assert 'pto.wait_flag["' not in mlir
+
+
 class TestSyncAllCodegen:
     """Tests that pl.system.syncall lowers to pto.syncall (hard/FFTS form)."""
 

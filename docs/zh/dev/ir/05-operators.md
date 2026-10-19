@@ -573,7 +573,8 @@ UINT32 + INT32 → INT32 (signed precedence)
 事件形式必须恰好选择一种：`[0, 7]` 内的常量 `event_id`，或一个运行时值也须在
 该范围内的 `ScalarType(INDEX)` 操作数。可选 `core_type` 是混合核放置所需的
 `"aic"` / `"aiv"` IR 元数据。代码生成对应 `pto.set_flag` / `pto.wait_flag`，
-动态 INDEX 操作数则生成 `_dyn` 形式。这些调用不表示跨核同步。
+动态 INDEX 操作数则生成 `_dyn` 形式。动态操作数即使被折叠为常量，仍作为操作数
+生成 `_dyn` 形式；IR 打印通过 `pl._dump.call` 保留这一表示。这些调用不表示跨核同步。
 `PipelineLoopValid` 验证器会在流水线调度前拒绝 `ForKind::Pipeline` 循环中的
 任一操作。即使关闭可选 IR 验证，调度 pass 也会拒绝这种放置方式；普通循环可以使用显式 flag。
 

@@ -1096,7 +1096,12 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   const bool storage_call = std::exchange(force_recorded_call_, false) || HasStorageType(op->GetType()) ||
                             std::any_of(op->args_.begin(), op->args_.end(),
                                         [&](const ExprPtr& arg) { return HasStorageType(arg->GetType()); });
-  if (!storage_call &&
+  // Simplify can fold a dynamic flag operand to ConstInt without changing the
+  // operation to its static form. The public API treats constants as static
+  // event_id attributes, so use the lossless dump to preserve this operand.
+  const bool folded_flag = (IsOp(op, "system.set_flag") || IsOp(op, "system.wait_flag")) &&
+                           op->args_.size() == 1 && As<ConstInt>(op->args_[0]);
+  if (!storage_call && !folded_flag &&
       (!distributed_type || (comm_domain_depth_ == 0 && !distributed_type->window_buffer_.has_value()))) {
     PrintCall(op);
     return;
