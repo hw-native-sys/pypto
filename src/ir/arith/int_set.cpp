@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/arith/const_fold.h"
 #include "pypto/ir/expr.h"
@@ -164,6 +165,26 @@ ExprPtr SymFloorDiv(const ExprPtr& a, const ExprPtr& b, Analyzer* parent) {
 
 using Interval = IntSet;
 
+/// Symbolic interval endpoints describe mathematical values before an operand
+/// conversion. A narrowing conversion needs concrete, representable endpoints;
+/// otherwise its wrapping can invalidate the interval or reverse a divisor's sign.
+bool IntervalPreservesDtype(const Interval& interval, DataType operand_dtype, DataType result_dtype) {
+  const bool preserves_domain = operand_dtype.IsUnsignedInt() == result_dtype.IsUnsignedInt() &&
+                                operand_dtype.GetBit() <= result_dtype.GetBit();
+  for (const auto& bound : {interval.min_value, interval.max_value}) {
+    if (auto ci = As<ConstInt>(bound)) {
+      if (!detail::ConstIntFitsDtype(ci->value_, ci->dtype()) ||
+          !detail::ConstIntFitsDtype(ci->value_, operand_dtype) ||
+          !detail::ConstIntFitsDtype(ci->value_, result_dtype)) {
+        return false;
+      }
+    } else if (!preserves_domain) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /// [a.min + b.min, a.max + b.max]
 Interval CombineAdd(const Interval& a, const Interval& b, Analyzer* p) {
   return {SymAdd(a.min_value, b.min_value, p), SymAdd(a.max_value, b.max_value, p)};
@@ -271,6 +292,9 @@ class IntSetAnalyzer::Impl : public ExprFunctor<IntSet> {
   // --- Leaf nodes ---
 
   IntSet VisitExpr_(const ConstIntPtr& op) override {
+    // Out-of-range stored literals can change sign during lowering, including
+    // when a widening Cast forwards this interval to a surrounding operation.
+    if (!detail::ConstIntFitsDtype(op->value_, op->dtype())) return IntSet::Everything();
     return IntSet::SinglePoint(std::static_pointer_cast<const Expr>(op));
   }
 
@@ -315,11 +339,26 @@ class IntSetAnalyzer::Impl : public ExprFunctor<IntSet> {
   }
 
   IntSet VisitExpr_(const FloorDivPtr& op) override {
-    return CombineFloorDiv(VisitExpr(op->left_), VisitExpr(op->right_), parent_);
+    const DataType dtype = GetScalarDtype(op);
+    if (!detail::FloorDivModOperandsFitDtype(op->left_, op->right_, dtype)) return IntSet::Everything();
+    auto a = VisitExpr(op->left_);
+    auto b = VisitExpr(op->right_);
+    if (!IntervalPreservesDtype(a, GetScalarDtype(op->left_), dtype) ||
+        !IntervalPreservesDtype(b, GetScalarDtype(op->right_), dtype)) {
+      return IntSet::Everything();
+    }
+    return CombineFloorDiv(a, b, parent_);
   }
 
   IntSet VisitExpr_(const FloorModPtr& op) override {
-    return CombineFloorMod(VisitExpr(op->left_), VisitExpr(op->right_), parent_);
+    const DataType dtype = GetScalarDtype(op);
+    if (!detail::FloorDivModOperandsFitDtype(op->left_, op->right_, dtype)) return IntSet::Everything();
+    auto a = VisitExpr(op->left_);
+    auto b = VisitExpr(op->right_);
+    // The divisor may be inferred from a bound variable instead of a literal.
+    // Its emitted value must stay positive before establishing [0, d - 1].
+    if (!IntervalPreservesDtype(b, GetScalarDtype(op->right_), dtype)) return IntSet::Everything();
+    return CombineFloorMod(a, b, parent_);
   }
 
   IntSet VisitExpr_(const FloatDivPtr& /*op*/) override { return IntSet::Everything(); }
@@ -372,7 +411,11 @@ class IntSetAnalyzer::Impl : public ExprFunctor<IntSet> {
     DataType src_dtype = GetScalarDtype(op->operand_);
     DataType dst_dtype = GetScalarDtype(std::static_pointer_cast<const Expr>(op));
     if (dst_dtype.GetBit() >= src_dtype.GetBit() && dst_dtype.IsInt() == src_dtype.IsInt()) {
-      return VisitExpr(op->operand_);
+      auto interval = VisitExpr(op->operand_);
+      // Bound expressions may use a wider dtype than the source operation.
+      // Widening must preserve the source's wrapping before forwarding them.
+      if (!IntervalPreservesDtype(interval, src_dtype, dst_dtype)) return IntSet::Everything();
+      return interval;
     }
     return IntSet::Everything();
   }

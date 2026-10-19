@@ -220,6 +220,70 @@ class TestIntSetDivMod:
         assert_is_const_int(s.max_value, 7)
 
 
+class TestIntSetWrappedDivisors:
+    @pytest.mark.parametrize("op", [ir.FloorDiv, ir.FloorMod])
+    @pytest.mark.parametrize("dtype,bits", [(DataType.INT8, 8), (DataType.INT16, 16), (DataType.INT32, 32)])
+    def test_wrapped_literal_cannot_establish_nonnegative_result(self, op, dtype, bits):
+        lhs = ir.Var("value", ir.ScalarType(dtype), S)
+        rhs = ir.ConstInt((1 << bits) - 3, dtype, S)
+        expr = op(lhs, rhs, dtype, S)
+        assert IntSetAnalyzer()(expr).is_everything()
+        ana = Analyzer()
+        ana.bind(lhs, 1, 3)
+        assert ana.int_set(expr).is_everything()
+        # Both 1 // -3 and 1 % -3 are negative. The symbolic fallback must not
+        # override the conservative constant bounds and remove a runtime branch.
+        assert not ana.can_prove(ir.Ge(expr, ir.ConstInt(0, dtype, S), BOOL, S))
+
+    @pytest.mark.parametrize("op", [ir.FloorDiv, ir.FloorMod])
+    @pytest.mark.parametrize("divisor_kind", ["wide_literal", "widen_wrapped_literal", "bound_wide_var"])
+    def test_divisor_conversion_cannot_hide_wrapped_sign(self, op, divisor_kind):
+        dtype = DataType.INT32
+        lhs = ir.Var("value", ir.ScalarType(dtype), S)
+        rhs = ir.Var("divisor", ir.ScalarType(INT), S)
+        ana = Analyzer()
+        ana.bind(lhs, 1, 3)
+        if divisor_kind == "wide_literal":
+            divisor = ci(2**32 - 3)
+        elif divisor_kind == "widen_wrapped_literal":
+            divisor = ir.Cast(ir.ConstInt(253, DataType.INT8, S), dtype, S)
+        else:
+            ana.int_set.update(rhs, IntSet.single_point(ci(2**32 - 3)))
+            divisor = rhs
+        expr = op(lhs, divisor, dtype, S)
+        assert ana.int_set(expr).is_everything()
+        assert not ana.can_prove(ir.Ge(expr, ir.ConstInt(0, dtype, S), BOOL, S))
+
+    def test_widening_cast_preserves_source_interval_width(self):
+        """Valid i8 operands produce 240, which wraps to -16 before widening."""
+        for combine, rhs_value in ((ir.Add, 120), (ir.Mul, 2)):
+            dtype = DataType.INT32
+            lhs = ir.Var("lhs", ir.ScalarType(DataType.INT8), S)
+            rhs = ir.Var("rhs", ir.ScalarType(DataType.INT8), S)
+            value = ir.Var("value", ir.ScalarType(dtype), S)
+            ana = Analyzer()
+            ana.int_set.update(lhs, IntSet.single_point(ci(120)))
+            ana.int_set.update(rhs, IntSet.single_point(ci(rhs_value)))
+            divisor = ir.Cast(combine(lhs, rhs, DataType.INT8, S), dtype, S)
+            zero = ir.ConstInt(0, dtype, S)
+            assert not ana.can_prove(ir.Ge(divisor, zero, BOOL, S))
+            expr = ir.FloorMod(value, divisor, dtype, S)
+            assert ana.int_set(expr).is_everything()
+            assert not ana.can_prove(ir.Ge(expr, zero, BOOL, S))
+
+    @pytest.mark.parametrize("op", [ir.FloorDiv, ir.FloorMod])
+    @pytest.mark.parametrize("dtype", [DataType.INT8, DataType.INDEX])
+    def test_in_range_divisor_preserves_useful_symbolic_bounds(self, op, dtype):
+        lhs = ir.Var("value", ir.ScalarType(dtype), S)
+        expr = op(lhs, ir.ConstInt(3, dtype, S), dtype, S)
+        ana = Analyzer()
+        ana.bind(lhs, 0, 8)
+        result = ana.int_set(expr)
+        assert_is_const_int(result.min_value, 0)
+        assert_is_const_int(result.max_value, 2)
+        assert ana.can_prove(ir.Ge(expr, ir.ConstInt(0, dtype, S), BOOL, S))
+
+
 # ============================================================================
 # Symbolic bounds (the key feature)
 # ============================================================================

@@ -1484,6 +1484,35 @@ class TestConstantIfCollapse:
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
+    def test_narrow_floormod_keeps_reachable_negative_branch(self):
+        """INT8 253 is -3 at runtime, so x=1 reaches the negative-remainder arm.
+
+        IntSet must not use the raw positive literal to prove the remainder
+        non-negative and discard the observable write in the else branch.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Scalar[pl.INT8], out: pl.Tensor[[1], pl.INT8]):
+                if x % pl.const(253, pl.INT8) >= pl.const(0, pl.INT8):
+                    pl.tensor.write(out, [0], pl.const(11, pl.INT8))
+                else:
+                    pl.tensor.write(out, [0], pl.const(22, pl.INT8))
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Scalar[pl.INT8], out: pl.Tensor[[1], pl.INT8]):
+                if pl.const(0, pl.INT8) <= x % pl.const(253, pl.INT8):
+                    pl.tensor.write(out, [0], pl.const(11, pl.INT8))
+                else:
+                    pl.tensor.write(out, [0], pl.const(22, pl.INT8))
+
+        after = passes.simplify()(Before)
+        # Preserve the FloorMod condition and both writes, allowing Ge -> Le.
+        ir.assert_structural_equal(after, Expected)
+
     def test_keeps_unprovable_condition(self):
         """`if i == 0` with i ∈ [0, 8): polarity unknown — IfStmt preserved."""
 
