@@ -25,6 +25,14 @@ from pypto.backend import (
 from .storage_test_utils import without_call_memrefs
 
 
+@pytest.fixture
+def legacy_allocator(pass_verification_instruments):
+    """Pin sequential-address expectations without changing DSA/default tests."""
+    with passes.PassContext(pass_verification_instruments, memory_planner=passes.MemoryPlanner.PYPTO):
+        yield
+
+
+@pytest.mark.usefixtures("legacy_allocator")
 def test_allocate_memory_addr_simple():
     """Simple function: Vec tiles get 32-byte aligned addresses at offsets 0 and 16384."""
 
@@ -67,6 +75,7 @@ def test_allocate_memory_addr_simple():
     ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
+@pytest.mark.usefixtures("legacy_allocator")
 def test_allocate_memory_addr_multiple_tiles():
     """Three tiles each get their own MemRef at 32-byte aligned offsets 0, 16384, 32768."""
 
@@ -114,6 +123,7 @@ def test_allocate_memory_addr_multiple_tiles():
     ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
+@pytest.mark.usefixtures("legacy_allocator")
 def test_allocate_memory_addr_resolves_auto_reserve_buffer_before_tiles():
     """AUTO reserve_buffer should consume the low address range before tile allocation."""
 
@@ -178,6 +188,7 @@ def test_allocate_memory_addr_rejects_overlapping_reserve_buffer_ranges():
         passes.allocate_memory_addr()(program)
 
 
+@pytest.mark.usefixtures("legacy_allocator")
 def test_allocate_memory_addr_reuses_right_buffer_when_moves_sink_to_consumer():
     """Right buffers should share one address window when matmul moves do not overlap."""
 
@@ -297,6 +308,7 @@ def test_allocate_memory_addr_dsa_rp_accepts_singleton_return_body():
     ir.assert_structural_equal(after, initialized)
 
 
+@pytest.mark.usefixtures("legacy_allocator")
 def test_allocate_memory_addr_allocs_are_prepended_to_body():
     """Alloc statements are prepended as direct children of the top-level SeqStmts before tile ops."""
 
@@ -340,6 +352,7 @@ def test_allocate_memory_addr_allocs_are_prepended_to_body():
     ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
+@pytest.mark.usefixtures("legacy_allocator")
 def test_allocate_memory_addr_raw_pointer_uniqueness():
     """Each unique MemRef gets its own alloc with distinct addresses (no reuse)."""
 
@@ -388,6 +401,7 @@ def test_allocate_memory_addr_raw_pointer_uniqueness():
     ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
+@pytest.mark.usefixtures("legacy_allocator")
 def test_allocated_memory_addr_verifier_passes_after_add_alloc():
     """After init_mem_ref + allocate_memory_addr, non-DDR memrefs have valid (non-negative) addresses."""
 
@@ -699,6 +713,7 @@ def test_overflow_diagnostic_omits_ring_note_for_an_unrelated_space(ascend_backe
     assert "reserved by system.reserve_buffer" not in message
 
 
+@pytest.mark.usefixtures("legacy_allocator")
 def test_allocate_memory_addr_uses_default_policy_without_backend():
     """Test that AllocateMemoryAddr falls back to DefaultMemoryAllocatorPolicy when no backend is configured.
 
@@ -1026,6 +1041,7 @@ def test_allocate_memory_addr_resolves_aic_reserve_buffer_in_mat_space():
     ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
+@pytest.mark.usefixtures("legacy_allocator")
 def test_allocate_memory_addr_honors_explicit_reserve_buffer_base():
     """An explicit reserve_buffer base= is honored verbatim and bounds tile placement.
 

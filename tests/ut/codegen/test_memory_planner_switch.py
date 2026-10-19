@@ -1097,17 +1097,26 @@ def test_dsa_rp_loop_carry_is_in_place_with_resolved_address():
     ), f"DSA_RP must place the loop-carried input and output at one physical address:\n{mlir}"
 
 
-def test_dsa_rp_consecutive_loop_return_keeps_carried_buffer_live():
+@pytest.mark.parametrize("enable_buffer_ir", [False, True], ids=["tile", "buffer"])
+def test_dsa_rp_consecutive_loop_return_keeps_carried_buffer_live(enable_buffer_ir):
     """A later load must not overwrite a carry returned through two loops."""
 
-    optimized, _ = _run_pipeline(passes.MemoryPlanner.DSA_RP, ConsecutiveLoopCarriedAdd)
+    optimized, _ = _run_pipeline(
+        passes.MemoryPlanner.DSA_RP, ConsecutiveLoopCarriedAdd, enable_buffer_ir=enable_buffer_ir
+    )
     mlir = _codegen(optimized, emit_tile_addr=True)
     alloc_lines = [line for line in mlir.splitlines() if "pto.alloc_tile" in line]
-    seed_alloc = next(line for line in alloc_lines if "%seed" in line)
-    residual_alloc = next(line for line in alloc_lines if "%residual" in line)
-    seed_addr = seed_alloc.split("addr =")[1].split()[0]
-    residual_addr = residual_alloc.split("addr =")[1].split()[0]
-    assert seed_addr != residual_addr, (
+    # Buffer lowering names handles after allocation roots rather than source
+    # tiles. Follow the two loads' real destination operands in either IR mode.
+    loads = [line for line in mlir.splitlines() if "pto.tload " in line]
+    assert len(loads) == 2, mlir
+    load_handles = [line.split("outs(")[1].split(":")[0].strip() for line in loads]
+    constants = dict(re.findall(r"(%\w+) = arith.constant (\d+) : i64", mlir))
+    addresses = {
+        line.split("=")[0].strip(): int(constants[line.split("addr =")[1].split()[0]]) for line in alloc_lines
+    }
+    seed_addr, residual_addr = (addresses[handle] for handle in load_handles)
+    assert abs(seed_addr - residual_addr) >= 64 * 64 * 4, (
         f"the load after the second loop must not clobber its still-live carried result:\n{mlir}"
     )
 

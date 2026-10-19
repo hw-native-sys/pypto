@@ -230,21 +230,34 @@ AllocationPlan BuildDsaAllocationPlan(const FunctionPtr& func) {
   for (size_t output = 0; output < intervals.size(); ++output) {
     const auto candidates = constraints.same_base_or_disjoint_alias.find(intervals[output].variable.get());
     if (candidates == constraints.same_base_or_disjoint_alias.end()) continue;
+    std::map<size_t, bool> base_aligned_inputs;
     for (const VarPtr& operand : candidates->second) {
       const auto memref = GetTypeMemRef(operand->GetType());
       if (!memref.has_value() || !memref.value()) continue;
       const auto input = base_to_index.find(memref.value()->base_.get());
       if (input == base_to_index.end() || input->second == output) continue;
-      if (intervals[input->second].memory_space != intervals[output].memory_space ||
-          intervals[input->second].last_use_point != intervals[output].def_point) {
+      const auto carrier = GetTypeMemRef(intervals[input->second].variable->GetType());
+      const bool base_aligned = carrier.has_value() && carrier.value() &&
+                                CompareBaseAddress(memref.value(), carrier.value()) == AddressRelation::kSame;
+      // The solver relates allocation bases, not individual view starts. A
+      // shifted or unproved view cannot use same-base in-place reuse: equal
+      // root addresses would still stagger the operation's input and output.
+      // Check every operand of this root before accepting it; another operand
+      // at offset zero must not override a shifted view read by the same op.
+      const auto [entry, inserted] = base_aligned_inputs.emplace(input->second, base_aligned);
+      if (!inserted) entry->second = entry->second && base_aligned;
+    }
+    for (const auto& [input, base_aligned] : base_aligned_inputs) {
+      if (!base_aligned || intervals[input].memory_space != intervals[output].memory_space ||
+          intervals[input].last_use_point != intervals[output].def_point) {
         continue;
       }
-      size_t first = input->second;
+      size_t first = input;
       size_t second = output;
       if (second < first) std::swap(first, second);
       if (separation_reasons.count({first, second}) != 0) continue;
       same_base_or_disjoint_pairs.emplace(first, second);
-      plan.read_before_write_inputs.insert(input->second);
+      plan.read_before_write_inputs.insert(input);
     }
   }
 

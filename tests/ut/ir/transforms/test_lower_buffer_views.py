@@ -302,6 +302,8 @@ def test_slice_and_assemble_become_use_site_windows(
 ) -> None:
     program = _window_program("StaticWindow")
     addressed = planner != passes.MemoryPlanner.PTOAS
+    # Both in-tree planners must now preserve legal operation-boundary reuse;
+    # DSA_RP must not introduce a staggered overlap with the slice's source.
     lowered = _lower_default(program, planner)
     windows = _calls(lowered, "buffer.subview")
     # Slice window and assemble window, each with an explicit valid clause.
@@ -326,6 +328,7 @@ def test_runtime_slice_offset_stays_an_operand_of_its_window(
 
 
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
 def test_runtime_window_destination_is_separated_from_parent(
     tmp_path: Path,
     ascend_backend: BackendType,

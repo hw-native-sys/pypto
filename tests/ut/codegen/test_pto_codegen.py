@@ -1039,7 +1039,9 @@ def test_scalar_pointer_load_store_ptoas(tmp_path, dtype):
 
     if find_ptoas_binary() is None:
         pytest.skip("PTOAS is not available")
-    cpp = pto_backend._compile_pto_module(mlir, "scalar_copy", str(tmp_path))
+    cpp = pto_backend._compile_pto_module(
+        mlir, "scalar_copy", str(tmp_path), memory_planner=passes.get_default_memory_planner()
+    )
     assert "scalar_copy" in cpp
 
 
@@ -1122,7 +1124,9 @@ def _run_scalar_ptoas_on_cpu(
     if compiler is None:
         pytest.skip("No C++ compiler is available")
 
-    cpp = pto_backend._compile_pto_module(mlir, function_name, str(tmp_path))
+    cpp = pto_backend._compile_pto_module(
+        mlir, function_name, str(tmp_path), memory_planner=passes.get_default_memory_planner()
+    )
     cpp = _preprocess_ptoas_output(cpp)
     source = f"""
 #include <cstdint>
@@ -3862,7 +3866,9 @@ def test_pto_codegen_tensor_dim_in_parameter_shape(extent_kind, axis):
 def test_tensor_dim_unsigned_constant_extent_ptoas(tmp_path, dtype):
     """Unsigned constant extents must become INDEX without an invalid cast."""
     span = ir.Span.unknown()
-    tensor_type = ir.TensorType([ir.ConstInt(8, dtype, span), 16], DataType.FP32)
+    tensor_type = ir.TensorType(
+        [ir.ConstInt(8, dtype, span), ir.ConstInt(16, DataType.INDEX, span)], DataType.FP32
+    )
     ib = IRBuilder()
     with ib.function("unsigned_dim", type=ir.FunctionType.InCore) as f:
         source = f.param("source", tensor_type)
@@ -3873,7 +3879,9 @@ def test_tensor_dim_unsigned_constant_extent_ptoas(tmp_path, dtype):
     assert not re.search(r"arith.index_cast[^\n]*: ui\d+ to index", mlir)
     if find_ptoas_binary() is None:
         pytest.skip("PTOAS is not available")
-    cpp = pto_backend._compile_pto_module(mlir, "unsigned_dim", str(tmp_path))
+    cpp = pto_backend._compile_pto_module(
+        mlir, "unsigned_dim", str(tmp_path), memory_planner=passes.get_default_memory_planner()
+    )
     assert "unsigned_dim" in cpp
 
 

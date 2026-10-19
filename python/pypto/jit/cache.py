@@ -194,11 +194,11 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
             changes the placement and whether physical addresses are baked
             into the artifact; without it, compiling one kernel under multiple
             planners would hand a later call the wrong artifact.
-        enable_pypto_l0c_double_buffer: Effective legacy-PYPTO chooser dbC=2
-            (L0C double-buffer) opt-in resolved from the active ``PassContext``.
-            Included for ``PYPTO`` because it changes AutoTileMatmulL0 output
-            and allocation. Canonicalized to false for ``DSA_RP`` and ``PTOAS``,
-            which enable dbC=2 automatically regardless of this flag.
+        enable_pypto_l0c_double_buffer: Legacy compatibility flag resolved from
+            the active ``PassContext``. Automatic L0C double buffering is
+            disabled for every planner. The existing conservative key split
+            is retained for explicit ``PYPTO``; other planners, including an
+            unresolved default, canonicalize the legacy-only flag to false.
         runtime: Effective Simpler runtime ABI resolved from the active
             ``PassContext``. Included in the key because it is baked into the
             artifact's ``kernel_config.py`` and decides which worker can bind

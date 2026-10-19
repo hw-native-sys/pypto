@@ -50,6 +50,25 @@ class DsaReusePenaltyEdge(TypedDict):
     second_name: str
     cost: int
 
+class DsaAllocationInterval(TypedDict):
+    """One allocation's lifetime and operation-boundary reuse eligibility."""
+
+    name: str
+    size: int
+    def_point: int
+    last_use_point: int
+    read_before_write_input: bool
+
+class DsaAllocationPlan(TypedDict):
+    """Internal compiler allocation facts before DSA placement."""
+
+    intervals: list[DsaAllocationInterval]
+    separations: list[tuple[str, str, list[str]]]
+    same_base_or_disjoint: list[tuple[str, str]]
+
+def get_dsa_allocation_plan(function: Function) -> DsaAllocationPlan:
+    """Return DSA lifetimes, hard separations, and in-place relations without placement."""
+
 def raise_value_error(message: str) -> NoReturn:
     """Raise a ValueError from C++ for testing error handling"""
 

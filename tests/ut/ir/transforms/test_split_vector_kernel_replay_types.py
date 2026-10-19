@@ -324,7 +324,11 @@ class Before:
     # Explicit store results retain the common join type, while the destination
     # can carry a different caller-local symbol or physical extent.
     extent = function.params[1] if symbolic else ir.ConstInt(32, pl.INDEX, function.span)
-    destination = ir.Var("b", ir.TensorType([extent, 16], pl.FP32), function.params[3].span)
+    destination = ir.Var(
+        "b",
+        ir.TensorType([extent, ir.ConstInt(16, pl.INDEX, function.span)], pl.FP32),
+        function.params[3].span,
+    )
     call = store.value
     args = list(call.args)
     args[2] = destination
@@ -518,7 +522,7 @@ class Before:
 
         then_body, else_body = rebuild_tile(original.then_body), rebuild_tile(original.else_body)
     else:
-        join_type = ir.TensorType([extent, 16], pl.FP32)
+        join_type = ir.TensorType([extent, ir.ConstInt(16, pl.INDEX, function.span)], pl.FP32)
         destination = ir.Var("b", ir.TensorType([32, 16], pl.FP32), function.span)
         params[3] = (destination, function.param_directions[3])
 

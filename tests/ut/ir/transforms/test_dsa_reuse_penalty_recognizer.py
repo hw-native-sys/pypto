@@ -187,11 +187,12 @@ def test_dsa_rp_preserves_not_inplace_safe_semantic_separation():
     assert not _overlap(ranges["source"], ranges["result"])
 
 
-def test_dsa_rp_inplace_safe_narrowing_cast_is_same_base_or_disjoint(ascend_backend):
-    """A narrowing cast may reuse its input at the same base, but not staggered.
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
+def test_dsa_rp_narrowing_cast_respects_target_alias_contract(ascend_backend):
+    """Permit safe A5 same-base narrowing without weakening A2/A3 separation.
 
     The FP32 input plus BF16 result exceed the A2A3 Vec capacity when disjoint,
-    so this also covers the model-sized case that requires safe in-place reuse.
+    so A2/A3 must reject this shape rather than silently alias an unread tail.
     """
 
     @pl.program
@@ -206,9 +207,46 @@ def test_dsa_rp_inplace_safe_narrowing_cast_is_same_base_or_disjoint(ascend_back
             result = pl.cast(source, target_type=pl.BF16)
             return pl.store(result, [0, 0], output)
 
+    if ascend_backend == BackendType.Ascend910:
+        with pytest.raises(ValueError, match=r"Vec buffer usage \(196608 bytes\) exceeds platform limit"):
+            _plan_with_dsa_rp(Before)
+        return
+
     ranges = _tile_ranges(_plan_with_dsa_rp(Before))
     assert ranges["source"][0] == ranges["result"][0]
     assert ranges["result"][1] < ranges["source"][1]
+
+
+@pytest.mark.parametrize(
+    "first_row,second_row,may_alias",
+    [(0, 0, True), (16, 16, False), (0, 16, False)],
+    ids=["base-aligned", "shifted", "same-root-mixed-offsets"],
+)
+def test_dsa_rp_inplace_reuse_respects_operand_view_starts(ascend_backend, first_row, second_row, may_alias):
+    """Equal allocation bases do not make shifted views exact in-place operands."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            source_tensor: pl.Tensor[[64, 64], pl.FP32],
+            output: pl.Tensor[[48, 64], pl.FP32],
+        ) -> pl.Tensor[[48, 64], pl.FP32]:
+            source = pl.load(source_tensor, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
+            first = pl.tile.slice(source, [48, 64], [first_row, 0])
+            second = pl.tile.slice(source, [48, 64], [second_row, 0])
+            result = pl.add(first, second)
+            return pl.store(result, [0, 0], output)
+
+    initialized = passes.init_mem_ref()(Before)
+    plan = testing.get_dsa_allocation_plan(next(iter(initialized.functions.values())))
+    assert bool(plan["same_base_or_disjoint"]) == may_alias
+    ranges = _tile_ranges(_plan_with_dsa_rp(Before))
+    if may_alias:
+        assert ranges["source"][0] == ranges["result"][0]
+    else:
+        assert not _overlap(ranges["source"], ranges["result"])
 
 
 def test_dsa_rp_preserves_tile_move_semantic_separation():

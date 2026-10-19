@@ -372,12 +372,10 @@ class PassManager:
         ctx = passes.PassContext.current()
         # The construction-time planner fixes the pass list: DSA_RP drops
         # MemoryReuse, while PTOAS drops MemoryReuse + AllocateMemoryAddr.
-        # Planner-gated pass behaviour
-        # (AutoTileMatmulL0's dbC=2) reads the planner again at execution time, so
-        # run_passes re-asserts the run-time planner still matches this one — otherwise a
-        # PassManager built outside PTOAS but run inside a PTOAS context would keep
-        # MemoryReuse yet still select dbC=2, coalescing the two co-live L0C accumulators
-        # into one shrunk single-buffer tile (see _check_planner_consistency).
+        # Address assignment and codegen also consult the execution-time planner.
+        # Reject a different planner at run time rather than combining its policy
+        # with the wrong pass list (see _check_planner_consistency). Automatic
+        # L0C double buffering remains disabled under every planner.
         self._construction_planner = ctx.get_memory_planner() if ctx else passes.get_default_memory_planner()
         self._construction_buffer_ir = ctx.get_enable_buffer_ir() if ctx else True
         skipped_mem_planning_passes: tuple[str, ...]
@@ -571,11 +569,10 @@ class PassManager:
         # so callers' diagnostic intent isn't reset.
         outer_instruments = list(ctx.get_instruments()) if ctx else []
         level = ctx.get_verification_level() if ctx else passes.get_default_verification_level()
-        # Propagate the outer memory planner AND the legacy-PYPTO dbC=2 opt-in: a nested
-        # PassContext otherwise resets them to the binding defaults, which silently
-        # disables planner-gated pass behaviour (AutoTileMatmulL0's dbC=2 tile
-        # selection reads GetMemoryPlanner() + GetEnablePyptoL0cDoubleBuffer()
-        # *during* pass execution) whenever the pipeline dumps IR.
+        # Preserve allocation ownership while dumping: resetting a nested
+        # context to the default would run DSA-RP over a pipeline constructed
+        # for PYPTO or PTOAS. Forward the compatibility flag too, although it
+        # no longer enables automatic L0C double buffering.
         mplan = ctx.get_memory_planner() if ctx else passes.get_default_memory_planner()
         dbc_flag = ctx.get_enable_pypto_l0c_double_buffer() if ctx else False
         runtime = ctx.get_runtime() if ctx else passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER

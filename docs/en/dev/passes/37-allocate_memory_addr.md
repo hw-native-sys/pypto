@@ -92,7 +92,12 @@ and a conservative half-open lifetime. The problem has:
   execution, the final input read may share the operation boundary with the
   output write, but the allocations must either share a base address or be
   disjoint. A shared base permits safe unequal-size operations such as
-  narrowing casts; staggered overlap remains forbidden;
+  A5 narrowing casts; staggered overlap remains forbidden. Target-specific
+  no-alias rules take precedence: A2/A3 narrowing casts require disjoint source
+  and result storage even at the same operation boundary. An input view must
+  provably start at its allocation carrier's base; a shifted or unknown offset
+  keeps that root live through the write. Every input view of the same root
+  must satisfy this condition, not just one of them;
 - **soft unit-weight pairs** for lifetime-compatible physical reuse that the
   built-in recognizer identifies as a cross-resource WAR or WAW handoff; and
 - a hard arena-capacity bound. Capacity and correctness are never traded for a
