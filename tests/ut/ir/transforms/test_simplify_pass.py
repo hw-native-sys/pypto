@@ -1505,6 +1505,74 @@ class Expected:
             assert isinstance(result_type, ir.TensorType) and isinstance(input_type, ir.TensorType)
             assert result_type.memref is memref and input_type.memref is memref
 
+    def test_if_result_storage_tracks_a_rebuilt_nested_loop_carry(self):
+        """A retained branch result must share its yielded views' rebound storage."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, source: pl.Tensor[[2, 8], pl.FP32], cond: pl.Scalar[pl.BOOL]):
+                for _outer in pl.range(2):
+                    initial: pl.Scalar[pl.INDEX] = 0
+                    seed: pl.Scalar[pl.INDEX] = initial
+                    for _inner, (carry,) in pl.range(2, init_values=(seed,)):
+                        view: pl.Tensor[[1, 8], pl.FP32, pl.MemRef("mem", carry * 32, 32)] = pl.tensor.slice(
+                            source, [1, 8], [carry, 0]
+                        )
+                        if cond:
+                            then_view = view
+                            selected = pl.yield_(then_view)
+                        else:
+                            else_view = view
+                            selected = pl.yield_(else_view)
+                        pl.tensor.write(selected, [0, 0], pl.const(1.0, pl.FP32))
+                        next_value: pl.Scalar[pl.INDEX] = carry + 1
+                        _result = pl.yield_(next_value)
+
+        def inner_loop(program: ir.Program) -> ir.ForStmt:
+            function = next(iter(program.functions.values()))
+            outer = next(stmt for stmt in ir.flatten_to_stmts(function.body) if isinstance(stmt, ir.ForStmt))
+            return next(stmt for stmt in ir.flatten_to_stmts(outer.body) if isinstance(stmt, ir.ForStmt))
+
+        original_loop = inner_loop(Before)
+        old_carry = original_loop.iter_args[0]
+        old_branch = next(
+            stmt for stmt in ir.flatten_to_stmts(original_loop.body) if isinstance(stmt, ir.IfStmt)
+        )
+        after = passes.simplify()(Before)
+        loop = inner_loop(after)
+        carry = loop.iter_args[0]
+        assert not carry.same_as(old_carry)
+        assert isinstance(carry.initValue, ir.ConstInt) and carry.initValue.value == 0
+
+        statements = ir.flatten_to_stmts(loop.body)
+        branch = next(stmt for stmt in statements if isinstance(stmt, ir.IfStmt))
+        result = branch.return_vars[0]
+        assert not result.same_as(old_branch.return_vars[0]), "the phi definition must adopt its rebound type"
+        result_type = result.type
+        assert isinstance(result_type, ir.TensorType) and result_type.memref is not None
+        memref = result_type.memref
+        assert isinstance(memref.byte_offset_, ir.Mul)
+        assert memref.byte_offset_.left.same_as(carry), "the phi still names the discarded carry"
+        assert branch.else_body is not None
+        for body in (branch.then_body, branch.else_body):
+            yielded = next(stmt for stmt in ir.flatten_to_stmts(body) if isinstance(stmt, ir.YieldStmt))
+            yielded_type = yielded.value[0].type
+            assert isinstance(yielded_type, ir.TensorType)
+            assert yielded_type.memref is memref
+
+        write = next(stmt.expr for stmt in statements if isinstance(stmt, ir.EvalStmt))
+        assert isinstance(write, ir.Call)
+        assert write.args[0].same_as(result), "the consumer must reference the rebuilt phi definition"
+        write_type = write.type
+        assert isinstance(write_type, ir.TensorType) and write_type.memref is memref
+
+        properties = passes.IRPropertySet()
+        properties.insert(passes.IRProperty.SSAForm)
+        properties.insert(passes.IRProperty.UseAfterDef)
+        diagnostics = passes.PropertyVerifierRegistry.verify(properties, after)
+        assert not diagnostics, [diagnostic.message for diagnostic in diagnostics]
+
     def test_if_result_used_only_in_a_slot_index_survives(self):
         """The selected slot is a live phi even when its only use is a type field."""
         buffers = pl.MemRef(slots=2)

@@ -673,15 +673,24 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
       return LiftBodyToReturnVars(kept, op->return_vars_, op.get());
     }
 
+    // Branch-local mappings were discarded, but the merged result's own type
+    // must still follow enclosing binder rebuilds (for example an allocated
+    // offset naming a rebuilt loop carry). Rebuild under the common baseline,
+    // as ForStmt/WhileStmt do, so later leaf uses resolve to the same new binder.
+    bool return_vars_changed = false;
+    auto new_return_vars = RebuildVec(
+        op->return_vars_, [this](const auto& var) { return MaybeRebuildVar(var); }, &return_vars_changed);
+
     bool changed = (new_condition.get() != op->condition_.get()) ||
                    (new_then.get() != op->then_body_.get()) ||
                    (new_else.has_value() != op->else_body_.has_value()) ||
-                   (new_else.has_value() && new_else->get() != op->else_body_->get());
+                   (new_else.has_value() && new_else->get() != op->else_body_->get()) || return_vars_changed;
     if (!changed) return op;
     auto result = MutableCopy(op);
     result->condition_ = new_condition;
     result->then_body_ = new_then;
     result->else_body_ = new_else;
+    result->return_vars_ = std::move(new_return_vars);
     return result;
   }
 

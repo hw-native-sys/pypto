@@ -70,7 +70,7 @@ program_simplified = simplify_pass(program)
    - `CallPtr`：刷新结果 `type_`，让 shape 参数被折叠后的 Call 与重新解析得到的 Call 在结构上相等。
    - `AssignStmt`：对不在 `multi_assigned_` 中的标量 LHS `Var`，把化简后的 RHS 注册到分析器。无论位于函数体顶层还是嵌套区域内，`ConstInt`/`ConstFloat`/`ConstBool` RHS 都会被完整绑定（字面量代入下游使用点）。符号 RHS 只贡献一个 `ConstIntBound`，使恒死的分支守卫得以折叠而不会内联该标量。每个绑定都会被记录，以便所在区域的访问器在退出时解绑。这不会把循环携带值绑定为其初值，也不会假定不同分支的结果相同。
    - `ForStmt`：在访问循环体前重建 `iter_args_`，使体内的引用对应到新的标识；如果 `start_` 与 `stop_` 都折叠为 `ConstInt` 且 `stop > start`，则在访问循环体期间把循环变量绑定到这一区间，退出时解绑；体内绑定的标量在访问结束后解绑；在访问体之后重建 `return_vars_`，让体内发现的折叠也反映到返回类型中。纯单次/零次循环还会被原地折叠 —— 见下文「控制流折叠」。
-   - `IfStmt`：进入 `Analyzer::GetConstraintContext(cond)` 处理 then 分支，进入 `Not(cond)` 处理 else 分支；每个分支内绑定的标量会在该分支结束后解绑，以免泄漏到另一分支或越过 `IfStmt`。可由分析器证明的条件也会被折叠 —— 见下文「控制流折叠」。
+   - `IfStmt`：进入 `Analyzer::GetConstraintContext(cond)` 处理 then 分支，进入 `Not(cond)` 处理 else 分支；每个分支内绑定的标量会在该分支结束后解绑，以免泄漏到另一分支或越过 `IfStmt`。保留分支时，在共同的基线映射下重建 `return_vars_`，使结果类型跟随外层变量的重建，同时不引入分支内部的定义。可由分析器证明的条件也会被折叠 —— 见下文「控制流折叠」。
    - `WhileStmt`：除没有循环边界外与 `ForStmt` 相同 —— 在访问条件与循环体前重建 `iter_args_`，在访问循环体前后快照并恢复 `var_remap_`，随后重建 `return_vars_`，并采用同样的区域化标量解绑方式。以循环头为准写入重映射表，确保类型或初值变化后，条件与循环体中的每处引用仍指向声明的节点。
    - `SpmdScopeStmt`：以同样的区域化标量解绑方式访问其语句体，并额外折叠 `core_num_`（如 `MAX // TILE` 这样的闭包算术，可能需要 SSA 之后再化简一次）。
 3. **类型重建**：`SimplifyType` 递归地处理 `TensorType`、`TileType`、`TupleType`，对嵌入的表达式（shape、stride、valid_shape、start_offset、view 字段）调用 `SimplifyExpr`。`RemapPinnedMemRefExprs` 还会在 pinned 声明式分配的槽位下标转换为字节偏移之前化简该下标。非 pinned MemRef 在内部变量未被重映射时保留指针身份；若循环 carry 等变量被重建，其 base、字节偏移和保留的槽位下标会同步重绑，不经过分析器常量折叠，并通过共享缓存确保变量与 Call 类型使用同一个新 MemRef。仅在地址元数据中使用的标量定义仍会在 DCE 中保持存活。类型无变化时保留原对象，使往返一致性检查仍然便宜。
