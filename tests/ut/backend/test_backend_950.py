@@ -184,17 +184,17 @@ class TestBackend950L0Tiling:
         backend = Backend950.instance()
         handler = backend.get_handler()
 
-        assert handler.get_l0a_capacity_bytes() == 64 * 1024
-        assert handler.get_l0b_capacity_bytes() == 64 * 1024
-        assert handler.get_l0c_capacity_bytes() == 256 * 1024
-        assert handler.get_bias_capacity_bytes() == 4 * 1024
-        assert handler.get_mat_capacity_bytes() == 512 * 1024
+        assert handler.get_capacity_bytes(ir.MemorySpace.Left) == 64 * 1024
+        assert handler.get_capacity_bytes(ir.MemorySpace.Right) == 64 * 1024
+        assert handler.get_capacity_bytes(ir.MemorySpace.Acc) == 256 * 1024
+        assert handler.get_capacity_bytes(ir.MemorySpace.Bias) == 4 * 1024
+        assert handler.get_capacity_bytes(ir.MemorySpace.Mat) == 512 * 1024
 
-        assert handler.get_l0a_capacity_bytes() == backend.get_mem_size(ir.MemorySpace.Left)
-        assert handler.get_l0b_capacity_bytes() == backend.get_mem_size(ir.MemorySpace.Right)
-        assert handler.get_l0c_capacity_bytes() == backend.get_mem_size(ir.MemorySpace.Acc)
-        assert handler.get_bias_capacity_bytes() == backend.get_mem_size(ir.MemorySpace.Bias)
-        assert handler.get_mat_capacity_bytes() == backend.get_mem_size(ir.MemorySpace.Mat)
+        assert handler.get_capacity_bytes(ir.MemorySpace.Left) == backend.get_mem_size(ir.MemorySpace.Left)
+        assert handler.get_capacity_bytes(ir.MemorySpace.Right) == backend.get_mem_size(ir.MemorySpace.Right)
+        assert handler.get_capacity_bytes(ir.MemorySpace.Acc) == backend.get_mem_size(ir.MemorySpace.Acc)
+        assert handler.get_capacity_bytes(ir.MemorySpace.Bias) == backend.get_mem_size(ir.MemorySpace.Bias)
+        assert handler.get_capacity_bytes(ir.MemorySpace.Mat) == backend.get_mem_size(ir.MemorySpace.Mat)
 
     def test_l0_fractal_alignment_default(self):
         handler = Backend950.instance().get_handler()

@@ -297,18 +297,10 @@ void CheckExplicitL0OperandCapacity(const VarPtr& operand, const TileTypePtr& ti
   const auto required = utils::StaticPhysicalAllocationBytes(tile, expected_space, handler);
   if (!required) return;  // This targeted diagnostic requires an exact static footprint.
 
-  uint64_t capacity = 0;
-  switch (expected_space) {
-    case MemorySpace::Left:
-      capacity = handler->GetL0aCapacityBytes();
-      break;
-    case MemorySpace::Right:
-      capacity = handler->GetL0bCapacityBytes();
-      break;
-    default:
-      INTERNAL_UNREACHABLE_SPAN(operand->span_)
-          << "Internal error: explicit matmul operand capacity check only accepts Left or Right";
-  }
+  INTERNAL_CHECK_SPAN(expected_space == MemorySpace::Left || expected_space == MemorySpace::Right,
+                      operand->span_)
+      << "Internal error: explicit matmul operand capacity check only accepts Left or Right";
+  const uint64_t capacity = handler->GetCapacityBytes(expected_space);
   if (capacity == 0 || *required <= capacity) return;
 
   // This is a user-authored scheduling error, not an internal pass invariant.
@@ -1017,9 +1009,17 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   cfg.M = static_cast<int>(M);
   cfg.N = static_cast<int>(N);
   cfg.K = static_cast<int>(K);
-  cfg.l0a_bytes = handler->GetL0aCapacityBytes();
-  cfg.l0b_bytes = handler->GetL0bCapacityBytes();
-  cfg.l0c_bytes = handler->GetL0cCapacityBytes();
+  const uint64_t l0a_bytes = handler->GetCapacityBytes(MemorySpace::Left);
+  const uint64_t l0b_bytes = handler->GetCapacityBytes(MemorySpace::Right);
+  const uint64_t l0c_bytes = handler->GetCapacityBytes(MemorySpace::Acc);
+  // The general capacity API is 64-bit; the L0 chooser still uses 32-bit limits.
+  // Keep that local representation from silently truncating future SoC data.
+  INTERNAL_CHECK_SPAN(std::max({l0a_bytes, l0b_bytes, l0c_bytes}) <= std::numeric_limits<uint32_t>::max(),
+                      assign->span_)
+      << "Internal error: SoC capacity exceeds the L0 tile chooser's uint32_t limits";
+  cfg.l0a_bytes = static_cast<uint32_t>(l0a_bytes);
+  cfg.l0b_bytes = static_cast<uint32_t>(l0b_bytes);
+  cfg.l0c_bytes = static_cast<uint32_t>(l0c_bytes);
   const auto cost_model = handler->GetL0CostModel();
   cfg.bw_a = cost_model.bw_l0a;
   cfg.bw_b = cost_model.bw_l0b;
@@ -1057,10 +1057,10 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   }
   int single_bias_max_n = 0;
   if (is_bias) {
-    const uint32_t bias_bytes = handler->GetBiasCapacityBytes();
+    const uint64_t bias_bytes = handler->GetCapacityBytes(MemorySpace::Bias);
     INTERNAL_CHECK_SPAN(bias_bytes > 0, assign->span_)
         << "Internal error: backend reports a zero-byte bias table";
-    const uint64_t max_bias_n = static_cast<uint64_t>(bias_bytes) / bytes_c;
+    const uint64_t max_bias_n = bias_bytes / bytes_c;
     if (max_bias_n < static_cast<uint64_t>(handler->GetMinL0TileDim())) {
       hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-011",
                          "tile.matmul_bias: the backend bias table cannot hold one minimum-width "
@@ -2498,7 +2498,7 @@ std::optional<std::pair<std::vector<StmtPtr>, VarPtr>> TryFoldMatScratch(const M
   INTERNAL_CHECK_SPAN(result_ty, sp) << "Internal error: matmul result is not a TileType";
   // Necessary capacity gate: the Mat scratch alone must fit. The allocator still
   // performs the full live-range/packing check later.
-  const uint64_t mat_capacity = handler ? handler->GetMatCapacityBytes() : 0;
+  const uint64_t mat_capacity = handler ? handler->GetCapacityBytes(MemorySpace::Mat) : 0;
   const uint64_t scratch_bytes =
       static_cast<uint64_t>(t.M) * static_cast<uint64_t>(t.N) * DTypeBytes(scratch_dtype);
   if (mat_capacity > 0 && scratch_bytes > mat_capacity) {
@@ -2924,7 +2924,7 @@ std::unordered_set<const ForStmt*> BuildPipelineDbCPlan(const FunctionPtr& func)
   if (!policy) return {};
 
   const auto* handler = ctx ? ctx->GetBackendHandler() : pypto::backend::GetBackend()->GetHandler();
-  const uint64_t l0c_bytes = handler ? handler->GetL0cCapacityBytes() : 0;
+  const uint64_t l0c_bytes = handler ? handler->GetCapacityBytes(MemorySpace::Acc) : 0;
   if (!handler || l0c_bytes == 0) return {};
 
   AccFootprintCollector footprint(*policy, handler);
@@ -3152,7 +3152,7 @@ class AutoTileMutator : public IRMutator {
           // oversized [M, N] into one impossible full-window assemble here).
           const auto* bh_ctx = PassContext::Current();
           const auto* bh = bh_ctx ? bh_ctx->GetBackendHandler() : pypto::backend::GetBackend()->GetHandler();
-          const uint64_t l0c_bytes = bh ? bh->GetL0cCapacityBytes() : 0;
+          const uint64_t l0c_bytes = bh ? bh->GetCapacityBytes(MemorySpace::Acc) : 0;
           const auto acc_bytes = src_acc && m_ci && n_ci
                                      ? utils::StaticPhysicalAllocationBytes(src_ty, MemorySpace::Acc, bh)
                                      : std::optional<uint64_t>{};

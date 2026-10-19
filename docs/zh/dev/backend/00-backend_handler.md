@@ -66,14 +66,16 @@ if (backend::GetBackendType() != backend::BackendType::Ascend910) { ... }
 
 ## 内存容量来源
 
-`GetL0aCapacityBytes()`、`GetL0bCapacityBytes()`、`GetL0cCapacityBytes()`、
-`GetBiasCapacityBytes()` 和 `GetMatCapacityBytes()` 的共享实现调用 handler 所属后端的
-`Backend::GetMemSize()`。SoC 是这些单核容量（per-core capacity）的唯一来源；handler
-不再重复保存数值，也不会乘以核数或 die 数。即使尚未配置全局目标，或者当前配置了另一种
-后端，显式查询该后端的 handler 仍能返回正确容量。
+`BackendHandler::GetCapacityBytes(memory_space)` 调用 handler 所属后端的
+`Backend::GetMemSize()`。SoC 是容量的唯一来源；handler 不重复保存数值，也不乘以核数
+或 die 数。查询返回一个匹配内存组件的字节容量，类型为 `uint64_t`；SoC 未建模该空间
+时返回 `0`。若多个核都有该空间，返回第一个匹配组件的容量。未建模不表示硬件没有该内存。
 
-已有 C++ 和 Python 容量接口继续保留。对齐规则、最小 tile 维度和成本模型参数仍与容量
-分别维护。
+L0A、L0B、L0C、Bias、L1 分别使用 `MemorySpace::Left`、`Right`、`Acc`、`Bias`、`Mat`。
+同一个接口也能查询 `Vec` 和 scale 内存。Python 接口为
+`handler.get_capacity_bytes(memory_space)`。两种语言原有的五个独立容量方法均由该统一查询
+替代。即使尚未配置全局目标，或者当前配置了另一种后端，显式查询该后端的 handler 仍能
+返回正确容量。对齐规则、最小 tile 维度和成本模型参数仍与容量分别维护。
 
 ## 新增后端流程
 

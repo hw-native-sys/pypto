@@ -157,14 +157,12 @@ class TestGlobalHandlerAccessor:
 
         # In particular, Acc and Bias differ between architectures. Reading the
         # active target instead of this handler's owner would return wrong limits.
-        for query, memory_space in (
-            (handler.get_l0a_capacity_bytes, _ir_core.MemorySpace.Left),
-            (handler.get_l0b_capacity_bytes, _ir_core.MemorySpace.Right),
-            (handler.get_l0c_capacity_bytes, _ir_core.MemorySpace.Acc),
-            (handler.get_bias_capacity_bytes, _ir_core.MemorySpace.Bias),
-            (handler.get_mat_capacity_bytes, _ir_core.MemorySpace.Mat),
-        ):
-            assert query() == backend.get_mem_size(memory_space)
+        for memory_space in _ir_core.MemorySpace.__members__.values():
+            assert handler.get_capacity_bytes(memory_space) == backend.get_mem_size(memory_space)
+        # Scale memories distinguish an unmodeled space from a modeled A5 space.
+        expected_scale = 4096 if queried_backend == _backend_core.BackendType.Ascend950 else 0
+        assert handler.get_capacity_bytes(_ir_core.MemorySpace.LeftScale) == expected_scale
+        assert handler.get_capacity_bytes(_ir_core.MemorySpace.ScalarLocal) == 0
         assert _backend_core.is_backend_configured() == (configured_backend is not None)
         if configured_backend is not None:
             assert _backend_core.get_backend_type() == configured_backend

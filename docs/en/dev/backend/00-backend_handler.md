@@ -69,15 +69,21 @@ to global state.
 
 ## Memory capacity source
 
-The shared implementations of `GetL0aCapacityBytes()`, `GetL0bCapacityBytes()`,
-`GetL0cCapacityBytes()`, `GetBiasCapacityBytes()`, and `GetMatCapacityBytes()` read
-`Backend::GetMemSize()` on the handler's owning backend. The SoC is the single
-source for these per-core capacities; handlers do not repeat numeric limits or
-multiply them by core/die counts. Explicit backend queries work even when no
-global target is configured, or when a different target is active.
+`BackendHandler::GetCapacityBytes(memory_space)` reads `Backend::GetMemSize()`
+on the handler's owning backend. The SoC is the single source for capacities;
+handlers do not repeat numeric limits or multiply them by core/die counts.
+The query returns one matching memory component's byte capacity as `uint64_t`,
+or `0` when the SoC does not model that space. For a space present on multiple
+cores, it returns the first matching component's capacity. An unmodeled space
+is not evidence that the hardware lacks that memory.
 
-The existing C++ and Python capacity methods remain available. Alignment rules,
-minimum tile dimensions, and cost-model parameters remain separate from capacity.
+Pass `MemorySpace::Left`, `Right`, `Acc`, `Bias`, or `Mat` for L0A, L0B, L0C,
+Bias, or L1, respectively. The same API also queries `Vec` and the scale memories.
+Python exposes `handler.get_capacity_bytes(memory_space)`. This unified query
+replaces the five separate L0A/L0B/L0C/Bias/Mat capacity methods in both languages.
+Explicit backend queries work even when no global target is configured, or when
+a different target is active. Alignment rules, minimum tile dimensions, and
+cost-model parameters remain separate from capacity.
 
 ## Adding a new backend
 

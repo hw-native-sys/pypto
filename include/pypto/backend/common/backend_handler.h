@@ -530,32 +530,14 @@ class BackendHandler {
   // ---------------------------------------------------------------------------
 
   /**
-   * @brief L0a (Left) on-chip SRAM capacity, in bytes.
+   * @brief Capacity of one memory component in the owning SoC, in bytes.
    *
-   * Used by ChooseL0Tile to bound `m * k * bytes_a` (per buffer when
-   * double-buffered). Reads the owning backend's SoC through Backend::GetMemSize(),
-   * so passes and memory allocation share a single capacity source.
+   * Delegates to Backend::GetMemSize() without multiplying by core/die counts
+   * or consulting the global target. For spaces present on multiple cores,
+   * returns the first matching component's capacity. Returns 0 when the SoC
+   * does not model the space; this does not imply that the hardware lacks it.
    */
-  [[nodiscard]] virtual uint32_t GetL0aCapacityBytes() const;
-
-  /**
-   * @brief L0b (Right) on-chip SRAM capacity, in bytes.
-   */
-  [[nodiscard]] virtual uint32_t GetL0bCapacityBytes() const;
-
-  /**
-   * @brief L0c (Acc) on-chip SRAM capacity, in bytes.
-   */
-  [[nodiscard]] virtual uint32_t GetL0cCapacityBytes() const;
-
-  /**
-   * @brief Bias-table on-chip SRAM capacity, in bytes.
-   *
-   * Used by AutoTileMatmulL0 to cap the N extent of ``tile.matmul_bias``
-   * output tiles. Reads the owning backend's AIC-core ``MemorySpace::Bias`` capacity
-   * from its SoC config.
-   */
-  [[nodiscard]] virtual uint32_t GetBiasCapacityBytes() const;
+  [[nodiscard]] uint64_t GetCapacityBytes(ir::MemorySpace memory_space) const;
 
   /**
    * @brief Whether the PTO ISA can transfer this dtype pair from Mat to Bias.
@@ -568,15 +550,6 @@ class BackendHandler {
    */
   [[nodiscard]] virtual bool SupportsMatToBiasMove(const DataType& source_dtype,
                                                    const DataType& bias_dtype) const = 0;
-
-  /**
-   * @brief Mat (L1) on-chip SRAM capacity, in bytes.
-   *
-   * Used by passes that need a conservative per-core capacity gate without
-   * walking the SoC themselves. The shared accessor reads the owning backend,
-   * independently of the globally configured compilation target.
-   */
-  [[nodiscard]] virtual uint64_t GetMatCapacityBytes() const;
 
   /**
    * @brief Cube fractal alignment in *elements* for L0 tile dimensions.
@@ -641,8 +614,6 @@ class BackendHandler {
   explicit BackendHandler(const Backend& backend) : backend_(backend) {}
 
  private:
-  [[nodiscard]] uint32_t GetCapacityBytes32(ir::MemorySpace memory_space) const;
-
   const Backend& backend_;
 };
 

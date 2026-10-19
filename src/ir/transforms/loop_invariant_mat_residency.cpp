@@ -1020,11 +1020,9 @@ class LoopInvariantTileLoadHoister : public IRMutator {
   [[nodiscard]] std::optional<uint64_t> Capacity(MemorySpace space) const {
     switch (space) {
       case MemorySpace::Mat:
-        return handler_->GetMatCapacityBytes();
       case MemorySpace::Left:
-        return handler_->GetL0aCapacityBytes();
       case MemorySpace::Right:
-        return handler_->GetL0bCapacityBytes();
+        return handler_->GetCapacityBytes(space);
       default:
         return std::nullopt;
     }

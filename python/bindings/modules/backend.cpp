@@ -173,18 +173,10 @@ void BindBackend(nb::module_& m) {
       .def("get_l2_cache_line_bytes", &BackendHandler::GetL2CacheLineBytes, "L2 cache line size in bytes")
       .def("get_recommended_innermost_dim_bytes", &BackendHandler::GetRecommendedInnermostDimBytes,
            "Recommended minimum innermost-dim size, in bytes, for tile ops touching GM")
-      .def("get_l0a_capacity_bytes", &BackendHandler::GetL0aCapacityBytes,
-           "L0a (Left) on-chip SRAM capacity in bytes")
-      .def("get_l0b_capacity_bytes", &BackendHandler::GetL0bCapacityBytes,
-           "L0b (Right) on-chip SRAM capacity in bytes")
-      .def("get_l0c_capacity_bytes", &BackendHandler::GetL0cCapacityBytes,
-           "L0c (Acc) on-chip SRAM capacity in bytes")
-      .def("get_bias_capacity_bytes", &BackendHandler::GetBiasCapacityBytes,
-           "Bias-table on-chip SRAM capacity in bytes")
+      .def("get_capacity_bytes", &BackendHandler::GetCapacityBytes, nb::arg("memory_space"),
+           "Capacity of one memory component in the owning SoC, in bytes; 0 for an unmodeled space")
       .def("supports_mat_to_bias_move", &BackendHandler::SupportsMatToBiasMove, nb::arg("source_dtype"),
            nb::arg("bias_dtype"), "Whether the backend supports this Mat-to-Bias tile.move dtype pair")
-      .def("get_mat_capacity_bytes", &BackendHandler::GetMatCapacityBytes,
-           "Mat (L1) on-chip SRAM capacity in bytes")
       .def("get_l0_fractal_alignment", &BackendHandler::GetL0FractalAlignment,
            "Cube fractal alignment in elements for L0 tile dimensions m, n, k")
       .def("get_l0c_m_alignment", &BackendHandler::GetL0cMAlignment, nb::arg("accumulator_dtype"),

@@ -50,7 +50,7 @@ struct L0TileConfig {
   int N = 0;
   int K = 0;
 
-  // L0 capacities in bytes (typically read from BackendHandler::GetL0?CapacityBytes).
+  // L0 capacities in bytes (typically read from BackendHandler::GetCapacityBytes).
   uint32_t l0a_bytes = 0;
   uint32_t l0b_bytes = 0;
   uint32_t l0c_bytes = 0;
