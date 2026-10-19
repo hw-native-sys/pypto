@@ -24,7 +24,6 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
-#include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/tile_conversion_utils.h"
 #include "pypto/ir/type.h"
 #include "src/ir/transforms/lower_composite/lower_composite_builder.h"
@@ -278,13 +277,8 @@ ExprPtr LowerTensorAllToAllVRule(const CallPtr& call, const std::vector<ExprPtr>
                   then_body.NotEq(dest_var, comm.my_rank, span),
                   [&](LoweringBuilder& ready_body) {
                     auto offsets = tile_conversion_utils::MakeSignalOffsets(dest_var, span);
-                    auto ready_wait =
-                        MutableCopy(reg.Create("pld.system.wait", {signal, offsets, one_i32},
-                                               {{"cmp", static_cast<int>(WaitCmp::kGe)}}, span));
-                    // This wait protects the peer's reset, not a local read of
-                    // peer-published data. Keep TWAIT's signal-line polling,
-                    // without a whole-GM acquire before each outgoing transfer.
-                    ready_wait->attrs_.emplace_back("comm_wait_acquire", false);
+                    auto ready_wait = reg.Create("pld.system.wait", {signal, offsets, one_i32},
+                                                 {{"cmp", static_cast<int>(WaitCmp::kGe)}}, span);
                     ready_body.Bind("aav_dest_ready", ready_wait, span);
                   },
                   /*else_fn=*/nullptr, span);

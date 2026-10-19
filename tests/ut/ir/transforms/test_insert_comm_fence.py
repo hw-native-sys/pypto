@@ -50,38 +50,6 @@ def _apply(program):
         return passes.insert_comm_fence()(program)
 
 
-def _mark_ready_waits(program: ir.Program, acquire: object) -> ir.Program:
-    """Attach the compiler-only attr to generation-one readiness waits."""
-
-    class MarkReadyWait(ir.IRMutator):
-        def visit_call(self, op: ir.Call) -> ir.Expr:
-            if op.op.name == ir.get_op("pld.system.wait").name:
-                expected = op.args[2]
-                if isinstance(expected, ir.ConstInt) and expected.value == 1:
-                    return ir.set_call_attrs(op, {**op.attrs, "comm_wait_acquire": acquire})
-            return super().visit_call(op)
-
-    return MarkReadyWait().visit_program(program)
-
-
-def _call_names(node: ir.Program | ir.Stmt) -> list[str]:
-    class CallNames(ir.IRVisitor):
-        def __init__(self) -> None:
-            super().__init__()
-            self.names: list[str] = []
-
-        def visit_call(self, op: ir.Call) -> None:
-            self.names.append(op.op.name)
-            super().visit_call(op)
-
-    collector = CallNames()
-    if isinstance(node, ir.Program):
-        collector.visit_program(node)
-    else:
-        collector.visit_stmt(node)
-    return collector.names
-
-
 def test_window_store_then_notify():
     @pl.program
     class Before:
@@ -628,75 +596,6 @@ def test_notify_wait_read_handshake():
             pl.write(out, [0, 0], val)
 
     ir.assert_structural_equal(_apply(Before), Expected)
-
-
-@pytest.mark.parametrize("acquire", [False, True])
-def test_control_wait_preserves_poll_and_publish_fence(acquire):
-    # Readiness protects a remote receiver's reset, rather than acquiring data
-    # for this sender. Only the generic whole-GM acquire may be omitted.
-    @pl.program
-    class Before:
-        @pl.function(type=pl.FunctionType.InCore)
-        def f(
-            self,
-            inp: pl.Tensor[[1, N], pl.FP32],
-            dst: pld.DistributedTensor[[1, N], pl.FP32],
-            signal: pld.DistributedTensor[[2, 1], pl.INT32],
-            peer: pl.Scalar[pl.INT32],
-        ):
-            stage = pl.load(inp, [0, 0], [1, N])
-            pld.system.wait(signal=signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
-            pld.tile.put(dst, peer, inp, stage)
-            pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
-
-    after = _apply(_mark_ready_waits(Before, acquire))
-    expected = ["tile.load", "pld.system.wait"]
-    if acquire:
-        expected.append("system.cacheinvalid")
-    expected.extend(["pld.tile.put", "system.fence", "pld.system.notify"])
-    assert _call_names(after) == [ir.get_op(name).name for name in expected]
-    ir.assert_structural_equal(_apply(after), after)
-    ir.assert_structural_equal(pl.parse_program(ir.python_print(after)), after)
-
-
-@pytest.mark.parametrize("with_acquire", [False, True])
-def test_control_wait_loop_does_not_hide_ordinary_acquire(with_acquire):
-    # Two control waits need no after-loop CMO. Mixing a normal completion wait
-    # into the same loop must still get exactly one CMO outside that loop.
-    completion = 2 if with_acquire else 1
-
-    @pl.program
-    class Before:
-        @pl.function(type=pl.FunctionType.InCore)
-        def f(self, signal: pld.DistributedTensor[[2, 1], pl.INT32]):
-            for peer in pl.range(2):
-                pld.system.wait(signal=signal, offsets=[peer, 0], expected=1, cmp=pld.WaitCmp.Ge)
-                pld.system.wait(signal=signal, offsets=[peer, 0], expected=completion, cmp=pld.WaitCmp.Ge)
-
-    marked = _mark_ready_waits(Before, False)
-    after = _apply(marked)
-    invalidate_name = ir.get_op("system.cacheinvalid").name
-    assert _call_names(after).count(invalidate_name) == int(with_acquire)
-    if with_acquire:
-        func = after.get_function("f")
-        assert func is not None
-        assert isinstance(func.body, ir.SeqStmts)
-        loop = next(stmt for stmt in func.body.stmts if isinstance(stmt, ir.ForStmt))
-        assert invalidate_name not in _call_names(loop.body)
-    else:
-        ir.assert_structural_equal(after, marked)
-
-
-@pytest.mark.parametrize("acquire", [0, "false"])
-def test_control_wait_acquire_attr_requires_bool(acquire):
-    @pl.program
-    class Before:
-        @pl.function(type=pl.FunctionType.InCore)
-        def f(self, signal: pld.DistributedTensor[[1, 1], pl.INT32]):
-            pld.system.wait(signal=signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
-
-    with pytest.raises(TypeError, match="comm_wait_acquire.*expected bool"):
-        _apply(_mark_ready_waits(Before, acquire))
 
 
 def test_pure_wait_loop_gets_single_whole_gm_cacheinvalid():

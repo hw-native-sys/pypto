@@ -1088,30 +1088,34 @@ def test_all_to_all_v_resets_counts_before_atomic_publication():
     assert isinstance(epilogue.args[3], ir.ConstInt) and epilogue.args[3].value == -2
 
 
-def test_all_to_all_v_destination_wait_preserves_final_acquire_and_put_release():
-    """Control-only readiness waits must not flush GM before every send."""
+def test_all_to_all_v_waits_preserve_acquires_and_put_release():
+    """Readiness and completion waits retain the standard acquire behavior."""
     lowered = passes.lower_composite_ops()(_build_all_to_all_v_before())
-    waits = _collect_barrier_calls(lowered).waits
-    assert waits[0].attrs.get("comm_wait_acquire") is False
-    assert "comm_wait_acquire" not in waits[1].attrs
 
     reparsed = pl.parse_program(ir.python_print(lowered))
     ir.assert_structural_equal(lowered, reparsed)
-    assert _collect_barrier_calls(reparsed).waits[0].attrs.get("comm_wait_acquire") is False
 
     fenced = passes.insert_comm_fence()(reparsed)
     calls = [value for value in _probe_stmts(fenced).values if isinstance(value, ir.Call)]
     invalidations = [
         call for call in calls if call.op.name == ir.get_op("system.cacheinvalid").name and not call.args
     ]
-    assert len(invalidations) == 2, "only entry reset and final payload acquire need whole-GM invalidation"
+    assert len(invalidations) == 3, "entry reset, readiness wait, and completion wait must invalidate GM"
     put_position = next(i for i, call in enumerate(calls) if call.op.name == ir.get_op("pld.tile.put").name)
     assert calls[put_position + 1].op.name == ir.get_op("system.fence").name, (
         "outgoing payload must retain its release fence"
     )
-    final_wait = _collect_barrier_calls(fenced).waits[1]
+    ready_wait, final_wait = _collect_barrier_calls(fenced).waits
     positions = {id(call): i for i, call in enumerate(calls)}
-    assert positions[id(invalidations[0])] < positions[id(final_wait)] < positions[id(invalidations[1])]
+    assert calls[positions[id(ready_wait)] + 1] is invalidations[1]
+    assert (
+        positions[id(invalidations[0])]
+        < positions[id(ready_wait)]
+        < positions[id(invalidations[1])]
+        < put_position
+        < positions[id(final_wait)]
+        < positions[id(invalidations[2])]
+    )
 
 
 def test_all_to_all_v_in_host_orchestrator_is_left_for_host_collective_lowering():
