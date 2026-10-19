@@ -5176,6 +5176,196 @@ class SharedSuffix:
         assert after_vp.split == ir.SplitMode.UP_DOWN
 
 
+class TestWhileNestedAliasTraversal:
+    """Scalar while wrappers must preserve nested alias rules and their safety checks."""
+
+    def test_scalar_while_retargets_nested_mat_carry(self):
+        """An inner For's reload still writes directly into its Mat carry buffer."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                pool: pl.Tensor[[16, 32], pl.FP16],
+                waves: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 32], pl.FP16]],
+            ) -> pl.Tensor[[16, 32], pl.FP16]:
+                seed = pl.tile.load(pool, [0, 0], [16, 32], target_memory=pl.Mem.Mat)
+                for (wave,) in pl.while_(init_values=(0,)):
+                    pl.cond(wave < waves)
+                    for _i, (_carry,) in pl.range(2, init_values=(seed,)):
+                        replacement = pl.tile.load(pool, [0, 0], [16, 32], target_memory=pl.Mem.Mat)
+                        result = pl.yield_(replacement)
+                    _used = pl.tile.extract(result, 0, 0, [16, 32], target_memory=pl.Mem.Left)
+                    _wave_out = pl.yield_(wave + 1)
+                return out
+
+        after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(Before))
+        refs = _collect_named_tile_memrefs(after, {"seed", "replacement"})
+        assert _same_base_address(refs["seed"], refs["replacement"]), (
+            f"scalar while hid the nested For's Mat carry retarget:\n{after.as_python()}"
+        )
+        _assert_carry_yield_lands_in_its_buffer(after)
+
+    def test_scalar_while_coalesces_accumulator_if_phi(self):
+        """A nested matmul/matmul_acc choice needs one written Acc destination."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 64], pl.BF16],
+                rhs: pl.Tensor[[64, 64], pl.BF16],
+                waves: pl.Scalar[pl.INDEX],
+                cond: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                lhs_mat = pl.tile.load(lhs, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
+                rhs_mat = pl.tile.load(rhs, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
+                sa = pl.tile.extract(lhs_mat, 0, 0, [16, 64], target_memory=pl.Mem.Left)
+                sb = pl.tile.extract(rhs_mat, 0, 0, [64, 64], target_memory=pl.Mem.Right)
+                for (wave,) in pl.while_(init_values=(0,)):
+                    pl.cond(wave < waves)
+                    previous = pl.tile.matmul(sa, sb)
+                    if cond < 1:
+                        fresh = pl.tile.matmul(sa, sb)
+                        merged = pl.yield_(fresh)
+                    else:
+                        accumulated = pl.tile.matmul_acc(previous, sa, sb)
+                        merged = pl.yield_(accumulated)
+                    _used = pl.tile.store(merged, [0, 0], out)
+                    _wave_out = pl.yield_(wave + 1)
+                return out
+
+        after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(Before))
+        refs = _collect_named_tile_memrefs(after, {"previous", "fresh", "accumulated"})
+        for name in ("fresh", "accumulated"):
+            assert _same_base_address(refs["previous"], refs[name]), (
+                f"scalar while hid accumulator phi coalescing for {name}:\n{after.as_python()}"
+            )
+        _assert_if_phi_arms_write_the_phi_buffer(after)
+
+    @pytest.mark.parametrize("buffer_ir", [False, True], ids=["legacy_storage", "buffer_ir"])
+    def test_zero_trip_while_preserves_external_payload(self, buffer_ir, pass_verification_instruments):
+        """Work inside a zero-trip scalar while cannot displace an external payload."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                inp: pl.Tensor[[8, 16], pl.FP32],
+                original_out: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
+                out: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
+            ) -> tuple[pl.Tensor[[8, 16], pl.FP32], pl.Tensor[[8, 16], pl.FP32]]:
+                seed = pl.tile.load(inp, [0, 0], [8, 16], target_memory=pl.Mem.Vec)
+                for (wave,) in pl.while_(init_values=(0,)):
+                    pl.cond(wave < 0)
+                    for _i, (carry,) in pl.range(2, init_values=(seed,)):
+                        replacement = pl.tile.add(carry, carry)
+                        result = pl.yield_(replacement)
+                    _used = pl.tile.store(result, [0, 0], out)
+                    _wave_out = pl.yield_(wave + 1)
+                original = pl.tile.store(seed, [0, 0], original_out)
+                return original, out
+
+        with passes.PassContext(pass_verification_instruments, enable_buffer_ir=buffer_ir):
+            initialized = passes.init_mem_ref()(Before)
+            original_seed = _collect_named_tile_memrefs(initialized, {"seed"})["seed"]
+            after = passes.materialize_semantic_aliases()(initialized)
+
+        function = after.get_function("kernel")
+        assert function is not None and isinstance(function.body, ir.SeqStmts)
+        loop = next(stmt for stmt in function.body.stmts if isinstance(stmt, ir.WhileStmt))
+        assert len(loop.iter_args) == 1
+        assert isinstance(loop.iter_args[0].initValue, ir.ConstInt)
+        assert loop.iter_args[0].initValue.value == 0
+        assert isinstance(loop.condition, ir.Lt)
+        assert loop.condition.left.same_as(loop.iter_args[0])
+        assert isinstance(loop.condition.right, ir.ConstInt) and loop.condition.right.value == 0
+        assert not any(isinstance(stmt, ir.ForStmt) for stmt in function.body.stmts)
+        assert isinstance(loop.body, ir.SeqStmts)
+        inner = next(stmt for stmt in loop.body.stmts if isinstance(stmt, ir.ForStmt))
+        assert isinstance(inner.body, ir.SeqStmts)
+        assert any(
+            isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint == "replacement"
+            for stmt in inner.body.stmts
+        )
+        seed = _collect_named_tile_memrefs(after, {"seed"})["seed"]
+        assert _same_base_address(seed, original_seed)
+        original_store = next(
+            stmt
+            for stmt in function.body.stmts
+            if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint == "original"
+        )
+        assert isinstance(original_store.value, ir.Call)
+        observed = _carry_memref(original_store.value.args[0])
+        assert observed is not None and _same_base_address(observed, seed)
+
+    def test_nested_mat_carry_preserves_old_value_read_after_reload(self):
+        """Reaching an inner For must not bypass its existing old-value liveness check."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                pool: pl.Tensor[[16, 32], pl.FP16],
+                waves: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 32], pl.FP16]],
+            ) -> pl.Tensor[[16, 32], pl.FP16]:
+                seed = pl.tile.load(pool, [0, 0], [16, 32], target_memory=pl.Mem.Mat)
+                for (wave,) in pl.while_(init_values=(0,)):
+                    pl.cond(wave < waves)
+                    for _i, (carry,) in pl.range(2, init_values=(seed,)):
+                        replacement = pl.tile.load(pool, [0, 0], [16, 32], target_memory=pl.Mem.Mat)
+                        _old = pl.tile.extract(carry, 0, 0, [16, 32], target_memory=pl.Mem.Left)
+                        result = pl.yield_(replacement)
+                    _used = pl.tile.extract(result, 0, 0, [16, 32], target_memory=pl.Mem.Left)
+                    _wave_out = pl.yield_(wave + 1)
+                return out
+
+        after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(Before))
+        refs = _collect_named_tile_memrefs(after, {"seed", "replacement"})
+        assert not ir.MemRef.may_alias(refs["seed"], refs["replacement"]), (
+            "the reload would overwrite the old carry before its extract"
+        )
+
+    def test_simultaneously_live_nested_mat_carries_remain_distinct(self):
+        """Two carried results consumed after the inner For need independent storage."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                pool: pl.Tensor[[32, 32], pl.FP16],
+                waves: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 32], pl.FP16]],
+            ) -> pl.Tensor[[16, 32], pl.FP16]:
+                seed_a = pl.tile.load(pool, [0, 0], [16, 32], target_memory=pl.Mem.Mat)
+                seed_b = pl.tile.load(pool, [16, 0], [16, 32], target_memory=pl.Mem.Mat)
+                for (wave,) in pl.while_(init_values=(0,)):
+                    pl.cond(wave < waves)
+                    for _i, (_carry_a, _carry_b) in pl.range(2, init_values=(seed_a, seed_b)):
+                        replacement_a = pl.tile.load(pool, [0, 0], [16, 32], target_memory=pl.Mem.Mat)
+                        replacement_b = pl.tile.load(pool, [16, 0], [16, 32], target_memory=pl.Mem.Mat)
+                        result_a, result_b = pl.yield_(replacement_a, replacement_b)
+                    _used_a = pl.tile.extract(result_a, 0, 0, [16, 32], target_memory=pl.Mem.Left)
+                    _used_b = pl.tile.extract(result_b, 0, 0, [16, 32], target_memory=pl.Mem.Left)
+                    _wave_out = pl.yield_(wave + 1)
+                return out
+
+        after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(Before))
+        refs = _collect_named_tile_memrefs(after, {"seed_a", "seed_b", "replacement_a", "replacement_b"})
+        assert not ir.MemRef.may_alias(refs["seed_a"], refs["seed_b"])
+        assert not ir.MemRef.may_alias(refs["replacement_a"], refs["replacement_b"]), (
+            "the second reload would overwrite the first carried result"
+        )
+
+
 class TestStructuralShapeEquality:
     """Structural-equality tile compatibility.
 

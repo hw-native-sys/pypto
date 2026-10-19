@@ -51,7 +51,9 @@ its own fresh MemRef. This pass closes that gap:
    `iter_arg`'s canonical MemRef as the target and push it onto the yielded value
    and its producer chain (following in-place `output-reuses-input` ops and
    view inputs). `IfStmt` return values are retargeted into both branch yields,
-   then the collected type rewrites are applied.
+   then the collected type rewrites are applied. The traversal descends through
+   `WhileStmt` bodies, so an enclosing scalar while does not hide nested For
+   carries from the existing retargeting and liveness checks.
 2. **Normalize peeled accumulator phis**: visit nested `IfStmt` nodes in
    post-order and recognize both direct in-place accumulator producers and
    branch-local loops carried by an accumulator seeded outside that branch.
@@ -63,7 +65,8 @@ its own fresh MemRef. This pass closes that gap:
    direct `tile.matmul_acc` or a branch-local loop, its reused input and every
    bare/metadata alias must have no independent post-`if` read; otherwise the
    sibling branch would clobber an observable value on the path where the
-   continuation does not execute.
+   continuation does not execute. This post-order traversal also descends through
+   `WhileStmt` bodies without changing the accumulator coalescing conditions.
 3. **Normalize semantic identity chains**
    (`NormalizeIdentityCopyBuffersMutator`): maintain every required alias relation
    after retargeting, rather than repairing one producer in isolation. Bare SSA

@@ -45,7 +45,8 @@ program = passes.materialize_semantic_aliases()(program)
 1. **自顶向下重定向**（`TopDownRetargeter`）：对每个 `ForStmt`，取每个 `iter_arg`
    的规范 MemRef 作为目标，推送到 yield 值及其 producer 链上（跟随原地
    `output-reuses-input` 算子与 view 输入）。`IfStmt` 的返回值被推送到两个分支的
-   yield，然后应用收集到的类型改写。
+   yield，然后应用收集到的类型改写。遍历会进入 `WhileStmt` 的循环体，因此外层
+   标量 while 不会使嵌套 For carry 绕过既有的重定向及活跃性检查。
 2. **规范化 peeled accumulator phi**：按后序访问嵌套 `IfStmt`，同时识别直接的
    in-place accumulator producer，以及由分支外 accumulator seed 驱动的分支内
    loop。当且仅当一个分支是 accumulator continuation 时，把另一个分支的局部
@@ -54,7 +55,8 @@ program = passes.materialize_semantic_aliases()(program)
    在 seed 分支剩余部分必须已 dead。无论 continuation 是直接的
    `tile.matmul_acc` 还是分支内 loop，它复用的 input 及所有 bare/metadata alias 在
    `if` 之后都不能存在绕过 phi 的独立读取；否则在 continuation 不执行的 sibling
-   路径上，重定向后的 producer 会覆盖仍可观察的值。
+   路径上，重定向后的 producer 会覆盖仍可观察的值。后序遍历也会进入 `WhileStmt`
+   的循环体，累加器合并条件保持不变。
 3. **规范化语义 identity chain**（`NormalizeIdentityCopyBuffersMutator`）：让 bare SSA
    alias 跟随 source，让注册了 `output_reuses_input` 的结果跟随指定的写回输入，
    让注册的首输入 buffer 别名操作跟随当前的第一个输入。目标是在重定向后统一维护

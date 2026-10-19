@@ -1370,6 +1370,8 @@ class TopDownRetargeter {
     } else if (auto for_stmt = As<ForStmt>(stmt)) {
       PropagateFromForStmt(for_stmt);
       VisitForStmts(for_stmt->body_);
+    } else if (auto while_stmt = As<WhileStmt>(stmt)) {
+      VisitForStmts(while_stmt->body_);
     } else if (auto if_stmt = As<IfStmt>(stmt)) {
       VisitForStmts(if_stmt->then_body_);
       if (if_stmt->else_body_.has_value()) VisitForStmts(if_stmt->else_body_.value());
@@ -1410,6 +1412,8 @@ class TopDownRetargeter {
       for (const auto& s : seq->stmts_) VisitIfPhisForAccumulator(s);
     } else if (auto for_stmt = As<ForStmt>(stmt)) {
       VisitIfPhisForAccumulator(for_stmt->body_);
+    } else if (auto while_stmt = As<WhileStmt>(stmt)) {
+      VisitIfPhisForAccumulator(while_stmt->body_);
     } else if (auto if_stmt = As<IfStmt>(stmt)) {
       // Coalesce nested accumulator phis before their enclosing K-window phi.
       // Otherwise a later child rewrite can overwrite the outer target and
