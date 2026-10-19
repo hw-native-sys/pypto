@@ -24,6 +24,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -97,9 +98,19 @@ bool HasStaticValidShape(const std::shared_ptr<const ir::TileType>& tile_type);
 void RequireStaticValidShapeForPtoas(const std::shared_ptr<const ir::TileType>& tile_type,
                                      std::string_view op_name, std::string_view role, const ir::Span& span);
 std::string GetTileViewTypeAnnotation(const ir::ExprPtr& expr, codegen::PTOCodegen& codegen);
+/// Explicit validity for a mutable reshape alias. Both fields name emitted
+/// index SSA operands in physical tile coordinates (including FP4 packing).
+struct MutableTileViewShape {
+  std::string rows;
+  std::string cols;
+};
+/// Reuse a matching static view or create a typed alias of expr's storage.
+/// Supplying mutable_valid_shape requires a mutable local source and always
+/// creates a fresh handle, then initializes its independent runtime validity.
 std::string EnsureTileViewSsa(const ir::ExprPtr& expr,
                               const std::shared_ptr<const ir::TileType>& view_tile_type,
-                              codegen::PTOCodegen& codegen, const std::string& temp_prefix);
+                              codegen::PTOCodegen& codegen, const std::string& temp_prefix,
+                              std::optional<MutableTileViewShape> mutable_valid_shape = std::nullopt);
 std::string EnsureStaticViewTileSsa(const ir::ExprPtr& expr, codegen::PTOCodegen& codegen,
                                     const std::string& temp_prefix);
 void EmitInsOutsWithViewTypes(codegen::PTOCodegen& codegen, std::string_view pto_op_name,

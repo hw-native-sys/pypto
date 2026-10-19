@@ -51,6 +51,14 @@ handle. This includes allocations declared at function entry for `if/else` resul
 Slice and other non-mutable view inputs retain the static-valid lowering;
 the existing restrictions on updating their validity still apply.
 
+The shared `EnsureTileViewSsa` helper handles typed alias creation and explicit
+runtime-validity initialization. Callers supply the initial extents in physical
+tile coordinates; choosing the full extent remains part of fillpad's semantics.
+An initialized mutable alias always receives a fresh handle, even if its type
+matches the source: their current runtime extents can differ. Existing static
+view callers keep their original behavior. Fillpad uses this helper only on the
+PTOAS planner path; PYPTO and DSA_RP retain their address-backed lowering.
+
 To extend this guard, add `@pytest.mark.ptoas_compile` to a regression test under
 `tests/ut/codegen/`. The test must assert the relevant generated-code semantics
 and actually invoke PTOAS compilation; the marker only selects tests. CI discovers
@@ -68,7 +76,9 @@ The six basic cases compare the full `[64, 64]` output against a reference: the 
 48 rows retain the input, and the last 16 rows contain zero, positive infinity,
 or negative infinity. Six more cases cover padding followed by static/runtime
 validity updates and another fill through the original padded alias. Four additional
-cases exercise both paths of an `if/else` result before padding and narrowing. This
+cases exercise both paths of an `if/else` result before padding and narrowing.
+Two further cases repeat the same padding mode after narrowing, checking that
+equal source/destination types still retain independent valid extents. This
 complements the compilation guard with simulator numerical coverage; it does not
 establish on-device correctness for every view
 composition covered by the compilation tests.

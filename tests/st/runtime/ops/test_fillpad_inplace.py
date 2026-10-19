@@ -106,6 +106,18 @@ def fillpad_then_narrow_dynamic(
 
 
 @pl.jit
+def fillpad_then_narrow_same_mode(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+    """Repeating zero padding must restore validity without widening the source."""
+    with pl.at(level=pl.Level.CORE_GROUP):
+        src = pl.load(x, [0, 0], [64, 64], valid_shape=[48, 64])
+        padded = pl.tile.fillpad_inplace(src, pad_value=pl.PadValue.zero)
+        _narrowed = pl.tile.set_validshape(padded, 32, 48)
+        repadded = pl.tile.fillpad_inplace(padded, pad_value=pl.PadValue.zero)
+        pl.store(repadded, [0, 0], out)
+    return out
+
+
+@pl.jit
 def fillpad_branch_then_narrow(
     x: pl.Tensor, out: pl.Out[pl.Tensor], rows: pl.Scalar[pl.INDEX], cols: pl.Scalar[pl.INDEX]
 ):
@@ -127,6 +139,7 @@ def _fillpad_narrow_cases():
         (fillpad_then_narrow_static, (32, 48)),
         (fillpad_then_narrow_dynamic, (32, 48)),
         (fillpad_then_narrow_dynamic, (56, 48)),
+        (fillpad_then_narrow_same_mode, (32, 48)),
         (fillpad_branch_then_narrow, (16, 48)),
         (fillpad_branch_then_narrow, (56, 48)),
     ):
@@ -135,10 +148,14 @@ def _fillpad_narrow_cases():
         x = torch.arange(1, 48 * 64 + 1, dtype=torch.float32).reshape(48, 64)
         padded = torch.zeros(64, 64, dtype=torch.float32)
         padded[:48, :] = x
-        expected = torch.full((64, 64), float("inf"), dtype=torch.float32)
+        fill_value = 0.0 if kernel is fillpad_then_narrow_same_mode else float("inf")
+        expected = torch.full((64, 64), fill_value, dtype=torch.float32)
         expected[:rows, :cols] = padded[:rows, :cols]
-        dynamic = kernel is not fillpad_then_narrow_static
-        kind = "branch" if kernel is fillpad_branch_then_narrow else "dynamic" if dynamic else "static"
+        dynamic = kernel in (fillpad_then_narrow_dynamic, fillpad_branch_then_narrow)
+        if kernel is fillpad_then_narrow_same_mode:
+            kind = "same_mode"
+        else:
+            kind = "branch" if kernel is fillpad_branch_then_narrow else "dynamic" if dynamic else "static"
         scalar_args = bounds if dynamic else ()
         yield st.case(
             kernel,

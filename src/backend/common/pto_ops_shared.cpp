@@ -430,12 +430,23 @@ std::string GetTileViewTypeAnnotation(const ir::ExprPtr& expr, codegen::PTOCodeg
 
 std::string EnsureTileViewSsa(const ir::ExprPtr& expr,
                               const std::shared_ptr<const ir::TileType>& view_tile_type,
-                              codegen::PTOCodegen& codegen, const std::string& temp_prefix) {
+                              codegen::PTOCodegen& codegen, const std::string& temp_prefix,
+                              std::optional<MutableTileViewShape> mutable_valid_shape) {
   INTERNAL_CHECK(view_tile_type) << "Internal error: EnsureTileViewSsa requires a TileType view";
-  const std::string view_type = codegen.GetViewTileBufTypeStringFromTileType(view_tile_type);
+  const std::string view_type = mutable_valid_shape
+                                    ? codegen.GetTileBufTypeStringFromTileType(view_tile_type)
+                                    : codegen.GetViewTileBufTypeStringFromTileType(view_tile_type);
   std::string current_ssa = codegen.GetExprAsCode(expr);
   const std::string current_type = codegen.GetExprTypeAnnotation(expr);
-  if (!current_type.empty() && current_type == view_type) {
+  if (mutable_valid_shape) {
+    INTERNAL_CHECK_SPAN(codegen.IsMutableTileName(current_ssa), expr->span_)
+        << "Internal error: a mutable tile view requires a locally mutable source";
+    INTERNAL_CHECK_SPAN(!mutable_valid_shape->rows.empty() && !mutable_valid_shape->cols.empty(), expr->span_)
+        << "Internal error: a mutable tile view requires both initial valid extents";
+  }
+  // Equal dynamic types do not imply equal live validity. Reusing a mutable
+  // source here would overwrite the extent that the operation still reads.
+  if (!mutable_valid_shape && !current_type.empty() && current_type == view_type) {
     return current_ssa;
   }
   std::string view_ssa = codegen.NewNamedTemp(temp_prefix);
@@ -447,6 +458,13 @@ std::string EnsureTileViewSsa(const ir::ExprPtr& expr,
     oss << " : " << current_type << " -> " << view_type;
   }
   codegen.Emit(oss.str());
+  if (mutable_valid_shape) {
+    // TRESHAPE copies the address only. Its dynamic-valid destination starts
+    // at zero, so initialize the new handle without modifying its source.
+    codegen.RegisterMutableTileName(view_ssa);
+    codegen.Emit("pto.set_validshape " + view_ssa + ", " + mutable_valid_shape->rows + ", " +
+                 mutable_valid_shape->cols + " : " + view_type);
+  }
   return view_ssa;
 }
 

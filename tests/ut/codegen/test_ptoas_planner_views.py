@@ -911,5 +911,48 @@ def test_zero_valid_sentinel_treshape_keeps_a_dynamic_valid():
     )
 
 
+@pytest.mark.ptoas_compile
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+def test_fillpad_same_mode_after_validshape_update(tmp_path: Path, backend_type: BackendType):
+    """Equal tile types must not merge independently initialized valid extents."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self, x: pl.Tensor[[48, 64], pl.FP32], out: pl.Out[pl.Tensor[[64, 64], pl.FP32]]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            src = pl.load(x, [0, 0], [64, 64], valid_shape=[48, 64])
+            padded = pl.tile.fillpad_inplace(src, pad_value=pl.PadValue.zero)
+            _narrowed = pl.tile.set_validshape(padded, 32, 48)
+            # The source handle is still narrowed even though its SSA type did
+            # not change. A second zero fill needs its own full-valid result.
+            repadded = pl.tile.fillpad_inplace(padded, pad_value=pl.PadValue.zero)
+            return pl.store(repadded, [0, 0], out)
+
+    reset_for_testing()
+    set_backend_type(backend_type)
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Program)
+    mlir = codegen.PTOCodegen().generate(optimized, emit_tile_addr=False)
+    fillpads = [strip_loc(line) for line in mlir.splitlines() if "pto.tfillpad" in line]
+    assert len(fillpads) == 2, mlir
+    first_dst = re.search(r"outs\((%[\w.$]+)", fillpads[0])
+    second_src = re.search(r"ins\((%[\w.$]+)", fillpads[1])
+    second_dst = re.search(r"outs\((%[\w.$]+)", fillpads[1])
+    assert first_dst and second_src and second_dst, mlir
+    assert first_dst[1] == second_src[1] != second_dst[1], mlir
+    src_type, dst_type = _tile_buf_types(fillpads[1])
+    assert src_type == dst_type, fillpads[1]
+    assert "pad=1>" in dst_type and "v_row=?, v_col=?" in dst_type, dst_type
+    narrowed = f"pto.set_validshape {second_src[1]}, %c32_index, %c48_index : {src_type}"
+    initialized = f"pto.set_validshape {second_dst[1]}, %c64_index, %c64_index : {dst_type}"
+    assert narrowed in mlir and initialized in mlir, mlir
+    assert mlir.index(narrowed) < mlir.index(initialized) < mlir.index(fillpads[1]), mlir
+    assert f"ins({second_dst[1]} : {dst_type})" in _sole_line(mlir, "pto.tstore"), mlir
+    assert mlir.count("= pto.alloc_tile") == 1, mlir
+    _compile_fillpad(mlir, tmp_path, passes.MemoryPlanner.PTOAS)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
