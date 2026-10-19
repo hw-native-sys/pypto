@@ -53,7 +53,11 @@ its own fresh MemRef. This pass closes that gap:
    view inputs). `IfStmt` return values are retargeted into both branch yields,
    then the collected type rewrites are applied. The traversal descends through
    `WhileStmt` bodies, so an enclosing scalar while does not hide nested For
-   carries from the existing retargeting and liveness checks.
+   carries from the existing retargeting and liveness checks. Before changing a
+   producer's destination, check independent reads of the target's physical
+   window that can recur through an enclosing loop, including reads outside the
+   inner For's lexical lifetime. Binding a loop initializer to a carry is not
+   itself an independent data observation.
 2. **Normalize peeled accumulator phis**: visit nested `IfStmt` nodes in
    post-order and recognize both direct in-place accumulator producers and
    branch-local loops carried by an accumulator seeded outside that branch.

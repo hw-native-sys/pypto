@@ -46,7 +46,9 @@ program = passes.materialize_semantic_aliases()(program)
    的规范 MemRef 作为目标，推送到 yield 值及其 producer 链上（跟随原地
    `output-reuses-input` 算子与 view 输入）。`IfStmt` 的返回值被推送到两个分支的
    yield，然后应用收集到的类型改写。遍历会进入 `WhileStmt` 的循环体，因此外层
-   标量 while 不会使嵌套 For carry 绕过既有的重定向及活跃性检查。
+   标量 while 不会使嵌套 For carry 绕过既有的重定向及活跃性检查。改变 producer 的
+   目标之前，还会检查通过外层循环可重复的目标物理窗口独立读取，包括内层 For 的
+   词法生命周期之外的读取。仅把 initializer 绑定为 carry 不算独立的数据观测。
 2. **规范化 peeled accumulator phi**：按后序访问嵌套 `IfStmt`，同时识别直接的
    in-place accumulator producer，以及由分支外 accumulator seed 驱动的分支内
    loop。当且仅当一个分支是 accumulator continuation 时，把另一个分支的局部

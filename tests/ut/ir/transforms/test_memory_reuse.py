@@ -5369,6 +5369,7 @@ class TestWhileNestedAliasTraversal:
 class TestWhileAccumulatorAliasSafety:
     """Accumulator phi coalescing must account for old handles across while iterations."""
 
+    @pytest.mark.parametrize("nested_for", [False, True], ids=["direct_phi", "for_carry_phi"])
     @pytest.mark.parametrize("buffer_ir", [False, True], ids=["legacy_storage", "buffer_ir"])
     @pytest.mark.parametrize(
         "accumulator_scope, handle_scope",
@@ -5376,7 +5377,27 @@ class TestWhileAccumulatorAliasSafety:
         ids=["external_acc_external_handle", "external_acc_local_handle", "recreated_acc_local_handle"],
     )
     def test_accumulator_phi_respects_while_backedge_observations(
-        self, accumulator_scope, handle_scope, buffer_ir, pass_verification_instruments
+        self, accumulator_scope, handle_scope, buffer_ir, nested_for, pass_verification_instruments
+    ):
+        self._check_accumulator_phi_backedge(
+            accumulator_scope, handle_scope, buffer_ir, nested_for, pass_verification_instruments
+        )
+
+    def test_for_carry_preserves_external_handle_with_stale_memref(self, pass_verification_instruments):
+        """A stale descriptor must not hide the external accumulator's actual storage."""
+        self._check_accumulator_phi_backedge(
+            "outside", "outside", False, True, pass_verification_instruments, stale_alias=True
+        )
+
+    def _check_accumulator_phi_backedge(
+        self,
+        accumulator_scope,
+        handle_scope,
+        buffer_ir,
+        nested_for,
+        pass_verification_instruments,
+        *,
+        stale_alias=False,
     ):
         """A local alias still observes an external value on the next iteration."""
         definitions: dict[str, list[str]] = {"outside": [], "inside": []}
@@ -5384,6 +5405,13 @@ class TestWhileAccumulatorAliasSafety:
         definitions[handle_scope].append("old_value = previous")
         outside_definitions = "".join(f"        {line}\n" for line in definitions["outside"])
         inside_definitions = "".join(f"            {line}\n" for line in definitions["inside"])
+        for_header = (
+            "            for _i, (carry,) in pl.range(2, init_values=(previous,)):\n" if nested_for else ""
+        )
+        for_yield = "                loop_result = pl.yield_(merged)\n" if nested_for else ""
+        indent = "    " if nested_for else ""
+        accumulator_input = "carry" if nested_for else "previous"
+        result = "loop_result" if nested_for else "merged"
         before = pl.parse_program(f"""
 @pl.program
 class Before:
@@ -5403,23 +5431,52 @@ class Before:
             pl.cond(wave < waves)
 {inside_definitions}            snapshot = pl.tile.move(old_value, target_memory=pl.Mem.Vec)
             _observed = pl.tile.store(snapshot, [0, 0], observed)
-            if cond < 1:
-                fresh = pl.tile.matmul(other_sa, sb)
-                merged = pl.yield_(fresh)
-            else:
-                accumulated = pl.tile.matmul_acc(previous, sa, sb)
-                merged = pl.yield_(accumulated)
-            _used = pl.tile.store(merged, [0, 0], out)
+{for_header}{indent}            if cond < 1:
+{indent}                fresh = pl.tile.matmul(other_sa, sb)
+{indent}                merged = pl.yield_(fresh)
+{indent}            else:
+{indent}                accumulated = pl.tile.matmul_acc({accumulator_input}, sa, sb)
+{indent}                merged = pl.yield_(accumulated)
+{for_yield}            _used = pl.tile.store({result}, [0, 0], out)
             _wave_out = pl.yield_(wave + 1)
         return out
 """)
         recreated = accumulator_scope == "inside"
         with passes.PassContext(pass_verification_instruments, enable_buffer_ir=buffer_ir):
             initialized = passes.init_mem_ref()(before)
+            if stale_alias:
+                replacements: dict[int, ir.Var] = {}
+
+                class _DriftAliasDescriptor(ir.IRMutator):
+                    def visit_var(self, op):
+                        if op.name_hint != "old_value":
+                            return super().visit_var(op)
+                        if op.unique_id not in replacements:
+                            tile_type = op.type
+                            assert isinstance(tile_type, ir.TileType) and tile_type.memref is not None
+                            stale_base = ir.Var("stale_acc", ir.PtrType(), op.span)
+                            stale_memref = ir.MemRef(stale_base, 8192, tile_type.memref.size_, op.span)
+                            stale_type = ir.TileType(
+                                tile_type.shape,
+                                tile_type.dtype,
+                                stale_memref,
+                                tile_type.tile_view,
+                                tile_type.memory_space,
+                            )
+                            replacements[op.unique_id] = ir.Var(op.name_hint, stale_type, op.span)
+                        return replacements[op.unique_id]
+
+                initialized = _DriftAliasDescriptor().visit_program(initialized)
             if buffer_ir and not recreated:
                 # Acc has no same-space copy to preserve the independently live
-                # old value. Buffer legalization must reject the divergent phi.
-                with pytest.raises(ValueError, match="divergent Acc branch results to be coalesced"):
+                # old value: either loop-input isolation or phi legalization
+                # must reject the unsupported transfer before it can clobber it.
+                message = (
+                    "cannot preserve an independently live loop input"
+                    if nested_for
+                    else "divergent Acc branch results to be coalesced"
+                )
+                with pytest.raises(ValueError, match=message):
                     passes.materialize_semantic_aliases()(initialized)
                 return
             after = passes.materialize_semantic_aliases()(initialized)

@@ -272,6 +272,7 @@ class DefMapVisitor : public IRVisitor {
   std::map<const Stmt*, std::set<VarPtr>> reads;
   std::map<const Stmt*, std::set<VarPtr>> writes;
   std::map<const Stmt*, std::set<VarPtr>> condition_reads;
+  std::map<const Stmt*, std::set<VarPtr>> observation_reads;
   std::vector<StmtPtr> loops;  // ForStmt/WhileStmt in lexical preorder
   StmtPtr root;
 
@@ -340,9 +341,7 @@ class DefMapVisitor : public IRVisitor {
     VisitExpr(op->start_);
     VisitExpr(op->stop_);
     VisitExpr(op->step_);
-    for (const auto& iter_arg : op->iter_args_) {
-      VisitExpr(iter_arg->initValue_);
-    }
+    VisitLoopInitializers(op);
 
     RegisterLoopBindings(op, VarDef::kForReturn, op);
     for_stack_.push_back(op);
@@ -358,7 +357,7 @@ class DefMapVisitor : public IRVisitor {
 
   void VisitStmt_(const WhileStmtPtr& loop) override {
     loops.push_back(loop);
-    for (const auto& argument : loop->iter_args_) VisitExpr(argument->initValue_);
+    VisitLoopInitializers(loop);
     RegisterLoopBindings(loop, VarDef::kWhileReturn, for_stack_.empty() ? nullptr : for_stack_.back());
     reading_condition_ = true;
     VisitExpr(loop->condition_);
@@ -374,10 +373,20 @@ class DefMapVisitor : public IRVisitor {
   void VisitVarLike_(const VarPtr& op) override {
     if (current_stmt_) reads[current_stmt_.get()].insert(op);
     if (reading_condition_) condition_reads[current_stmt_.get()].insert(op);
+    if (!reading_initializer_ && current_stmt_) observation_reads[current_stmt_.get()].insert(op);
     IRVisitor::VisitVarLike_(op);
   }
 
  private:
+  template <typename LoopPtr>
+  void VisitLoopInitializers(const LoopPtr& loop) {
+    for (const auto& argument : loop->iter_args_) {
+      reading_initializer_ = AsVarLike(argument->initValue_) != nullptr;
+      VisitExpr(argument->initValue_);
+    }
+    reading_initializer_ = false;
+  }
+
   template <typename LoopPtr>
   void RegisterLoopBindings(const LoopPtr& loop, VarDef::Kind return_kind, const ForStmtPtr& nearest_for) {
     for (size_t i = 0; i < loop->iter_args_.size(); ++i) {
@@ -409,6 +418,7 @@ class DefMapVisitor : public IRVisitor {
 
   StmtPtr current_stmt_;
   bool reading_condition_ = false;
+  bool reading_initializer_ = false;
   std::vector<ForStmtPtr> for_stack_;
   size_t next_order_ = 0;
 };
@@ -966,6 +976,7 @@ class TopDownRetargeter {
   std::map<size_t, ReachableEventIndex> physical_access_index_;
   std::map<const Var*, VersionedReachableEventIndex> alias_read_index_;
   std::map<const Var*, ReachableEventIndex> recurring_alias_read_index_;
+  std::map<size_t, ReachableEventIndex> recurring_physical_read_index_;
   std::map<VarPtr, TypePtr> rewrites_;
   std::vector<RewriteJournalEntry> rewrite_journal_;
   std::set<VarPtr> visiting_;  // cycle guard
@@ -990,7 +1001,7 @@ class TopDownRetargeter {
     reverse_stmt_end_order_ = std::move(reverse_v.stmt_end_order);
     BuildAliasFamilies();
     BuildAccessIndexes(def_v.reads, def_v.writes);
-    BuildRecurringAliasReadIndex(def_v.reads, def_v.condition_reads, def_v.loops);
+    BuildRecurringReadIndexes(def_v.reads, def_v.condition_reads, def_v.observation_reads, def_v.loops);
     if (!index_branch_storage) return;
 
     // Count distinct storage handles once, including incoming handles with no
@@ -1270,10 +1281,12 @@ class TopDownRetargeter {
   /// active loop stack for the outermost loop entered after each handle's
   /// definition. Each loop is pushed/popped once; event indexing and queries
   /// remain O(N log N), with no per-phi subtree or ancestor scans.
-  void BuildRecurringAliasReadIndex(const std::map<const Stmt*, std::set<VarPtr>>& reads,
-                                    const std::map<const Stmt*, std::set<VarPtr>>& condition_reads,
-                                    const std::vector<StmtPtr>& loops) {
+  void BuildRecurringReadIndexes(const std::map<const Stmt*, std::set<VarPtr>>& reads,
+                                 const std::map<const Stmt*, std::set<VarPtr>>& condition_reads,
+                                 const std::map<const Stmt*, std::set<VarPtr>>& observation_reads,
+                                 const std::vector<StmtPtr>& loops) {
     recurring_alias_read_index_.clear();
+    recurring_physical_read_index_.clear();
     std::vector<std::pair<size_t, const std::set<VarPtr>*>> ordered_reads;
     ordered_reads.reserve(reads.size());
     for (const auto& [stmt, vars] : reads) {
@@ -1285,6 +1298,21 @@ class TopDownRetargeter {
     // Half-open lexical intervals [begin, end) of the currently enclosing loops.
     std::vector<std::pair<size_t, size_t>> loop_stack;
     std::map<const Var*, std::vector<std::pair<size_t, size_t>>> recurring_events;
+    std::map<size_t, std::vector<std::pair<size_t, size_t>>> physical_events;
+    std::map<size_t, const std::set<VarPtr>*> observations_by_position;
+    for (const auto& [stmt, vars] : observation_reads) {
+      observations_by_position.emplace(stmt_order_.at(stmt), &vars);
+    }
+    auto record_physical = [&](const VarPtr& var, const std::pair<size_t, size_t>& interval) {
+      // Semantic aliases may still carry stale physical metadata before the
+      // first normalization. Protect their canonical allocation as well.
+      for (const auto& handle : {var, ResolveAliasRoot(var)}) {
+        if (auto tile = GetTileTypeWithMemRef(handle->GetType())) {
+          auto component = memref_component_.find(GetDefinedMemRef(tile).get());
+          if (component != memref_component_.end()) physical_events[component->second].push_back(interval);
+        }
+      }
+    };
     size_t next_loop = 0;
     for (const auto& [position, vars] : ordered_reads) {
       // A loop's own initializer is evaluated outside its recurrence. Its
@@ -1306,6 +1334,12 @@ class TopDownRetargeter {
                       [](size_t definition, const auto& interval) { return definition < interval.first; });
         if (recurring != loop_stack.end()) {
           recurring_events[ResolveAliasRoot(var).get()].push_back(*recurring);
+          // Naming storage as a carry initializer does not by itself observe
+          // its payload. Preserve the safe reload-only Mat carry retarget.
+          const auto observations = observations_by_position.find(position);
+          if (observations != observations_by_position.end() && observations->second->count(var) != 0) {
+            record_physical(var, *recurring);
+          }
         }
       }
     }
@@ -1316,12 +1350,17 @@ class TopDownRetargeter {
       for (const auto& var : vars) {
         const auto def = defs_.find(var);
         if (def == defs_.end() || def->second.order < begin) {
-          recurring_events[ResolveAliasRoot(var).get()].emplace_back(begin, stmt_end_order_.at(loop) + 1);
+          const auto interval = std::make_pair(begin, stmt_end_order_.at(loop) + 1);
+          recurring_events[ResolveAliasRoot(var).get()].push_back(interval);
+          record_physical(var, interval);
         }
       }
     }
     for (auto& [root, events] : recurring_events) {
       recurring_alias_read_index_[root].Build(std::move(events));
+    }
+    for (auto& [component, events] : physical_events) {
+      recurring_physical_read_index_[component].Build(std::move(events));
     }
   }
 
@@ -2074,15 +2113,25 @@ class TopDownRetargeter {
                                                          if_begin->second);
   }
 
-  /// Is target's physical window untouched after the definition and before the
-  /// nearest loop (or caller-supplied branch boundary) completes? The dual
-  /// lexical ordering excludes mutually exclusive sibling arms without walking
-  /// ancestor chains or rescanning subtrees.
+  /// Is target's physical window untouched after the definition, including
+  /// observations reached through an enclosing-loop backedge? Check recurrence
+  /// before the nearest-loop/branch suffix so For-carry retargeting cannot
+  /// overwrite old values before the accumulator-phi coalescer runs. The dual
+  /// lexical ordering excludes mutually exclusive sibling arms.
   bool IsTargetDeadAfterDefinition(const VarDef& def, const MemRefPtr& target,
                                    const Stmt* stop_at = nullptr) {
     if (!target || !def.definition_stmt) return false;
     auto component = memref_component_.find(target.get());
     if (component == memref_component_.end()) return false;
+    // Preserve the legacy destructive contract inside a carry's own ForStmt.
+    // Only an enclosing loop can add the independent next-entry observation
+    // that this guard protects before For-carry producer retargeting.
+    const size_t recurrence_begin = def.nearest_for ? stmt_order_.at(def.nearest_for.get()) : def.order;
+    auto recurring = recurring_physical_read_index_.find(component->second);
+    if (recurrence_begin != 0 && recurring != recurring_physical_read_index_.end() &&
+        recurring->second.HasAfter(0, recurrence_begin - 1, def.order)) {
+      return false;
+    }
     auto accesses = physical_access_index_.find(component->second);
     if (accesses == physical_access_index_.end()) return true;
 
