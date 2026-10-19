@@ -237,6 +237,10 @@ Both classifications are keyed on `Var` identity. An operand takes one extra ste
 A carry also breaks program order, so the collector walks the body **twice**. The producer that taints a carry's buffer may stand *after* the use it taints — `w = tile.add(l, carry); p = tile.tpop_from_aic(); yield p` reads a tpop value in `w` from iteration 1 onwards, but a single forward walk classifies `w` before it has seen `p`. A third traversal could add nothing: the base sets are complete after the first walk (a `tile.tpop_from_aic` def is order-independent, and a view shares its source's base), so only the `Var` sets grow in the second, and those propagate in program order within it. Both walks are O(N).
 
 The guard is gated by `BackendHandler::RequiresSplitLoadTpopWorkaround()` (true only for Ascend910) and the function being split-AIV; on every other backend / function kind the inputs are empty and reuse behaviour is unchanged. The writer is still free to reuse any **non**-load buffer — only the load + tpop in-place combination is rejected. (This guard previously lived in a dedicated `LegalizePTOBufferReuse` pass that split the buffer after the fact; it now folds into MemoryReuse.)
+The shared allocation analysis retains TPOP provenance through zero-copy views,
+even for tiles without a MemRef. After pass execution, codegen obtains the same target guard from the
+configured backend rather than requiring an active pass context. Explicit
+multi-buffer region reuse therefore preserves the guard too.
 
 ## Written-workspace hazard
 

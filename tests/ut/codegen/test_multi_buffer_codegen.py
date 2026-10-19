@@ -24,6 +24,8 @@ does not emit — so the baked-address ``pto.alloc_tile`` path stays.
 # pyright: reportUndefinedVariable=false
 
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pypto.language as pl
@@ -62,6 +64,183 @@ TOUCHING_C = pl.MemRef(slots=2)
 MIXED_VALID_VIEWS = pl.MemRef(slots=2)
 BRANCH_SLOTS = pl.MemRef(slots=2)
 WORKSPACE_SLOTS = pl.MemRef(slots=2)
+PHI_SLOTS = pl.MemRef(slots=2)
+RESHAPE_SLOTS = pl.MemRef(slots=2)
+MAT_SLOTS = pl.MemRef(slots=2)
+HAZARD_INPUT = pl.MemRef(slots=2)
+HAZARD_OUTPUT = pl.MemRef(slots=2)
+
+
+@pl.program
+class SplitAivSlotHazard:
+    @pl.function(type=pl.FunctionType.AIC)
+    def cube(self, a: pl.Tensor[[16, 128], pl.BF16], b: pl.Tensor[[128, 128], pl.BF16]):
+        pl.func_attr({"split": pl.SplitMode.UP_DOWN})
+        peer = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="vector")
+        pl.aic_initialize_pipe(dir_mask=1, slot_size=8192, c2v_consumer_buf=peer)
+        lhs = pl.load(a, [0, 0], [16, 128], target_memory=pl.Mem.Mat)
+        rhs = pl.load(b, [0, 0], [128, 128], target_memory=pl.Mem.Mat)
+        left = pl.move(lhs, target_memory=pl.Mem.Left)
+        right = pl.move(rhs, target_memory=pl.Mem.Right)
+        acc = pl.matmul(left, right)
+        pl.tpush_to_aiv(acc, split=1)
+
+    @pl.function(type=pl.FunctionType.AIV)
+    def vector(
+        self, a: pl.Tensor[[8, 128], pl.FP32], out: pl.Out[pl.Tensor[[8, 128], pl.FP32]]
+    ) -> pl.Tensor[[8, 128], pl.FP32]:
+        pl.func_attr({"split_aiv": True})
+        pipe = pl.reserve_buffer(name="c2v_slot_buffer", size=32768, base=0x10000)
+        pl.aiv_initialize_pipe(dir_mask=1, slot_size=8192, c2v_consumer_buf=pipe)
+        loaded: pl.Tile[[8, 128], pl.FP32, HAZARD_INPUT[0], pl.Mem.Vec] = pl.load(a, [0, 0], [8, 128])
+        popped: pl.Tile[[8, 128], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=1)
+        summed: pl.Tile[[8, 128], pl.FP32, HAZARD_OUTPUT[0], pl.Mem.Vec] = pl.add(loaded, popped)
+        out = pl.store(summed, [0, 0], out)
+        pl.tfree_to_aic(popped)
+        return out
+
+
+@pl.program
+class SplitAivViewedSlotHazard:
+    @pl.function(type=pl.FunctionType.AIV)
+    def vector(
+        self, a: pl.Tensor[[8, 128], pl.FP32], out: pl.Out[pl.Tensor[[8, 128], pl.FP32]]
+    ) -> pl.Tensor[[8, 128], pl.FP32]:
+        pl.func_attr({"split_aiv": True})
+        pipe = pl.reserve_buffer(name="c2v_slot_buffer", size=32768, base=0x10000)
+        pl.aiv_initialize_pipe(dir_mask=1, slot_size=8192, c2v_consumer_buf=pipe)
+        loaded: pl.Tile[[8, 128], pl.FP32, HAZARD_INPUT[0], pl.Mem.Vec] = pl.load(a, [0, 0], [8, 128])
+        popped: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=1)
+        viewed = pl.reshape(popped, [8, 128])
+        summed: pl.Tile[[8, 128], pl.FP32, HAZARD_OUTPUT[0], pl.Mem.Vec] = pl.add(loaded, viewed)
+        out = pl.store(summed, [0, 0], out)
+        pl.tfree_to_aic(popped)
+        return out
+
+
+@pl.program
+class LiveIncomingSlotPhi:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        flag: pl.Scalar[pl.BOOL],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        x: pl.Tile[[64, 64], pl.FP32, PHI_SLOTS[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+        if flag:
+            r = pl.yield_(x)
+        else:
+            y: pl.Tile[[64, 64], pl.FP32, PHI_SLOTS[1], pl.Mem.Vec] = pl.add(x, 1.0)
+            r = pl.yield_(y)
+        z = pl.add(x, r)
+        return pl.store(z, [0, 0], out)
+
+
+@pl.program
+class ChainedLiveSlotPhis:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        flag: pl.Scalar[pl.BOOL],
+        select: pl.Scalar[pl.BOOL],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        x: pl.Tile[[64, 64], pl.FP32, PHI_SLOTS[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+        if flag:
+            first = pl.yield_(x)
+        else:
+            y: pl.Tile[[64, 64], pl.FP32, PHI_SLOTS[1], pl.Mem.Vec] = pl.add(x, 1.0)
+            first = pl.yield_(y)
+        if select:
+            second = pl.yield_(first)
+        else:
+            second = pl.yield_(x)
+        if select:
+            third = pl.yield_(second)
+        else:
+            third = pl.yield_(second)
+        z = pl.add(x, third)
+        return pl.store(z, [0, 0], out)
+
+
+@pl.program
+class SlotPhiAfterCompletedLoop:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        flag: pl.Scalar[pl.BOOL],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        for i in pl.range(2):
+            pre: pl.Tile[[64, 64], pl.FP32, PHI_SLOTS[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+            out = pl.store(pre, [0, 0], out)
+        if flag:
+            x: pl.Tile[[64, 64], pl.FP32, PHI_SLOTS[0], pl.Mem.Vec] = pl.tile.full([64, 64], pl.FP32, 1.0)
+            r = pl.yield_(x)
+        else:
+            y: pl.Tile[[64, 64], pl.FP32, PHI_SLOTS[0], pl.Mem.Vec] = pl.tile.full([64, 64], pl.FP32, 2.0)
+            r = pl.yield_(y)
+        return pl.store(r, [0, 0], out)
+
+
+@pl.program
+class SlotProducerAfterCompletedLoop:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        for i in pl.range(2):
+            pre: pl.Tile[[64, 64], pl.FP32, PHI_SLOTS[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+            out = pl.store(pre, [0, 0], out)
+        post: pl.Tile[[64, 64], pl.FP32, PHI_SLOTS[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+        return pl.store(post, [0, 0], out)
+
+
+@pl.program
+class SmallerSlotReshape:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 64], pl.FP32],
+        out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        cover_out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> tuple[pl.Tensor[[16, 64], pl.FP32], pl.Tensor[[64, 64], pl.FP32]]:
+        cover: pl.Tile[[64, 64], pl.FP32, RESHAPE_SLOTS[0], pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+        cover_out = pl.store(cover, [0, 0], cover_out)
+        small: pl.Tile[[32, 32], pl.FP32, RESHAPE_SLOTS[1], pl.Mem.Vec] = pl.load(a, [0, 0], [32, 32])
+        reshaped = pl.reshape(small, [16, 64])
+        out = pl.store(reshaped, [0, 0], out)
+        return out, cover_out
+
+
+@pl.program
+class SmallerMatSlotMove:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[64, 64], pl.BF16],
+        b: pl.Tensor[[64, 16], pl.BF16],
+        out: pl.Out[pl.Tensor[[64, 16], pl.FP32]],
+    ) -> pl.Tensor[[64, 16], pl.FP32]:
+        right_mat = pl.load(b, [0, 0], [64, 16], target_memory=pl.Mem.Mat)
+        right = pl.move(right_mat, target_memory=pl.Mem.Right)
+        big: pl.Tile[[64, 64], pl.BF16, MAT_SLOTS[0], pl.Mem.Mat] = pl.load(
+            a, [0, 0], [64, 64], target_memory=pl.Mem.Mat
+        )
+        left0 = pl.move(big, target_memory=pl.Mem.Left)
+        acc0 = pl.matmul(left0, right)
+        out = pl.store(acc0, [0, 0], out)
+        small: pl.Tile[[32, 64], pl.BF16, MAT_SLOTS[1], pl.Mem.Mat] = pl.load(
+            a, [0, 0], [32, 64], target_memory=pl.Mem.Mat
+        )
+        left1 = pl.move(small, target_memory=pl.Mem.Left)
+        acc1 = pl.matmul(left1, right)
+        return pl.store(acc1, [0, 0], out)
 
 
 @pl.program
@@ -646,6 +825,117 @@ def _tile_memrefs(program: ir.Program) -> dict[str, ir.MemRef]:
 
 class TestPtoasPlannerEmitsMultiBuffer:
     """Under the ptoas planner a slotted declaration becomes one region."""
+
+    @pytest.mark.parametrize("codegen_context", [False, True])
+    @pytest.mark.parametrize("through_view", [False, True])
+    def test_split_aiv_reuse_preserves_memrefless_tpop_hazard(self, codegen_context, through_view, tmp_path):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910)
+        before = SplitAivSlotHazard
+        if through_view:
+            cube = before.get_function("cube")
+            vector = SplitAivViewedSlotHazard.get_function("vector")
+            assert cube is not None and vector is not None
+            before = ir.Program([cube, vector], "SplitAivSlotViewHazard", before.span)
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+            planned = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(before)
+        vector = planned.get_function("vector")
+        assert vector is not None
+        text = ir.python_print(ir.Program([vector], "vector", planned.span))
+        popped = next(line for line in text.splitlines() if " = pl.tile.tpop_from_aic" in line)
+        assert "MemRef" not in popped and "mem_vec" not in popped, text
+        if through_view:
+            assert "pl.tile.reshape" in text, text
+        if codegen_context:
+            with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS):
+                mlir = codegen.PTOCodegen().generate(planned, emit_tile_addr=False)
+        else:
+            # pytest's autouse fixture keeps a PassContext active. A fresh
+            # interpreter exercises compile()'s real post-context boundary.
+            script = """
+import sys
+from pypto import backend, ir
+from pypto.pypto_core import codegen
+backend.set_backend_type(backend.BackendType.Ascend910)
+program = ir.deserialize(sys.stdin.buffer.read())
+assert isinstance(program, ir.Program)
+print(codegen.PTOCodegen().generate(program, emit_tile_addr=False))
+"""
+            result = subprocess.run(
+                [sys.executable, "-c", script], input=ir.serialize(planned), capture_output=True, check=True
+            )
+            mlir = result.stdout.decode()
+        assert len(_lines(mlir, "pto.alloc_multi_tile")) == 2, mlir
+        gets = _lines(mlir, "pto.multi_tile_get")
+        assert len(gets) == 2, mlir
+        regions = [line.split("pto.multi_tile_get ", 1)[1].split("[", 1)[0] for line in gets]
+        assert regions[0] != regions[1], mlir
+        self._native_compile(mlir, BackendType.Ascend910, tmp_path)
+
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
+    def test_phi_preserves_live_incoming_slot(self, backend_type, tmp_path):
+        mlir = _codegen(LiveIncomingSlotPhi, passes.MemoryPlanner.PTOAS, backend_type=backend_type)
+        gets = _lines(mlir, "pto.multi_tile_get")
+        assert len(gets) == 2, mlir
+        incoming = gets[0].split(" = ", 1)[0]
+        branch = gets[1].split(" = ", 1)[0]
+        scalar_add = _lines(mlir, "pto.tadds")
+        assert len(scalar_add) == 1 and f"outs({branch}" in scalar_add[0], mlir
+        final_add = _lines(mlir, "pto.tadd ")
+        assert len(final_add) == 1 and f"ins({incoming}, {incoming}" not in final_add[0], mlir
+        assert len(_lines(mlir, "pto.tmov")) == 2, mlir
+        self._native_compile(mlir, backend_type, tmp_path)
+
+    def test_chained_phis_preserve_actual_bindings_not_inherited_slot(self, tmp_path):
+        mlir = _codegen(ChainedLiveSlotPhis, passes.MemoryPlanner.PTOAS)
+        incoming = _lines(mlir, "pto.multi_tile_get")[0].split(" = ", 1)[0]
+        moves = _lines(mlir, "pto.tmov")
+        assert len(moves) == 6, mlir
+        assert all(f"outs({incoming}" not in move for move in moves), mlir
+        self._native_compile(mlir, BackendType.Ascend910, tmp_path)
+
+    def test_phi_slot_selection_dominates_after_finished_loop(self, tmp_path):
+        mlir = _codegen(SlotPhiAfterCompletedLoop, passes.MemoryPlanner.PTOAS)
+        gets = _lines(mlir, "pto.multi_tile_get")
+        assert len(gets) == 2 and gets[0].split(" = ")[0] != gets[1].split(" = ")[0], mlir
+        assert mlir.index(gets[1]) < mlir.index("scf.if"), mlir
+        self._native_compile(mlir, BackendType.Ascend910, tmp_path)
+
+    def test_slot_producer_reselects_after_finished_loop(self, tmp_path):
+        mlir = _codegen(SlotProducerAfterCompletedLoop, passes.MemoryPlanner.PTOAS)
+        gets = _lines(mlir, "pto.multi_tile_get")
+        assert len(gets) == 2 and gets[0].split(" = ")[0] != gets[1].split(" = ")[0], mlir
+        self._native_compile(mlir, BackendType.Ascend910, tmp_path)
+
+    def test_buffer_rejects_non_dense_slot_reshape(self):
+        with pytest.raises(ValueError, match="reshaping a smaller multi-slot member.*row pitch"):
+            _codegen(SmallerSlotReshape, passes.MemoryPlanner.PTOAS, buffer_ir=True)
+
+    @pytest.mark.parametrize("program", [SmallerSlotReshape, SmallerMatSlotMove])
+    def test_dense_tile_controls_remain_native_supported(self, program, tmp_path):
+        mlir = _codegen(program, passes.MemoryPlanner.PYPTO)
+        self._native_compile(mlir, BackendType.Ascend910, tmp_path, level="level3")
+
+    @pytest.mark.parametrize("buffer_ir", [False, True])
+    @pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
+    def test_mixed_mat_slot_move_is_actionable_error(self, buffer_ir, backend_type):
+        with pytest.raises(ValueError, match="mixed Mat slot geometry.*Mat-to-Left/Right moves"):
+            _codegen(
+                SmallerMatSlotMove,
+                passes.MemoryPlanner.PTOAS,
+                buffer_ir=buffer_ir,
+                backend_type=backend_type,
+            )
+
+    @staticmethod
+    def _native_compile(mlir, backend_type, tmp_path, level="level2"):
+        if find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+        source, output = tmp_path / "regression.pto", tmp_path / "regression.cpp"
+        source.write_text(mlir)
+        arch = "a2" if backend_type == BackendType.Ascend910 else "a5"
+        _run_ptoas(str(source), str(output), [f"--pto-arch={arch}", f"--pto-level={level}"])
+        assert output.is_file()
 
     @pytest.mark.parametrize(
         "program, regions",

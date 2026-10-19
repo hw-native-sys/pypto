@@ -269,6 +269,12 @@ class StorageIndex : public IRVisitor {
       if (auto tile = As<TileType>(assign->var_->GetType())) windows.insert(tile.get());
     }
     if (auto call = As<Call>(assign->value_);
+        call && (IsOp(call, "tile.reshape") || IsOp(call, "tile.reinterpret_view"))) {
+      if (auto source = As<TileType>(call->args_[0]->GetType())) {
+        slot_relabel_sources_.emplace(As<TileType>(assign->var_->GetType()).get(), source);
+      }
+    }
+    if (auto call = As<Call>(assign->value_);
         call && (IsOp(call, "tile.slice") || IsOp(call, "tile.assemble"))) {
       const auto& source = IsOp(call, "tile.slice") ? call->args_[0] : ExprPtr(assign->var_);
       if (auto tile = As<TileType>(source->GetType())) window_sources_.insert(tile.get());
@@ -575,6 +581,27 @@ class StorageIndex : public IRVisitor {
       }
     }
     CHECK_SPAN(cover, span) << "LowerTileToBuffer: multi-slot storage needs a full-slot descriptor";
+    for (const auto& member : storage.members) {
+      // Independent subviews of a covering slot preserve its row pitch, not
+      // the dense source-to-result mapping of a shape-changing relabel.
+      const auto source = slot_relabel_sources_.find(member.tile.get());
+      if (source == slot_relabel_sources_.end()) continue;
+      const auto descriptor = StorageDescriptor(source->second, member.span);
+      const bool changes_shape = descriptor->shape_ != member.descriptor->shape_;
+      const auto padded_rows = [&](const BufferTypePtr& type) {
+        return type->shape_[0] > 1 && type->shape_[1] != cover->shape_[1];
+      };
+      CHECK_SPAN(!changes_shape || (!padded_rows(descriptor) && !padded_rows(member.descriptor)), member.span)
+          << "LowerTileToBuffer: reshaping a smaller multi-slot member would change its covering row "
+             "pitch; use uniform physical slot shapes or compile with the PyPTO Tile pipeline";
+    }
+    CHECK_SPAN(
+        cover->memory_space_ != MemorySpace::Mat ||
+            std::all_of(storage.members.begin(), storage.members.end(),
+                        [&](const auto& member) { return member.descriptor->shape_ == cover->shape_; }),
+        span)
+        << "LowerTileToBuffer: mixed Mat slot geometry is unsupported by Mat-to-Left/Right moves; use "
+           "uniform physical Mat tile shapes with valid extents for boundaries";
     auto multi = std::make_shared<MultiBufferType>(cover, count);
     storage.handle = std::make_shared<Var>(base->name_hint_ + "_buffers", multi, span);
     auto allocation = OpRegistry::GetInstance().CreateInternal("buffer.alloc_multi", {}, {}, multi, span);
@@ -691,6 +718,7 @@ class StorageIndex : public IRVisitor {
   // byte-root relabel, so in addressed storage they get their own allocation.
   std::unordered_set<const TileType*> window_sources_;
   std::unordered_set<const TileType*> types_;
+  std::unordered_map<const TileType*, TileTypePtr> slot_relabel_sources_;
   std::unordered_map<const Var*, CallPtr> declarations_;
 };
 

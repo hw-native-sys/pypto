@@ -1770,6 +1770,12 @@ void PTOCodegen::PlanMultiBufferRegions(const FunctionPtr& func) {
       candidate.mixed_geometry |= components.rows != baseline.rows || components.cols != baseline.cols;
     }
     if (!candidate.blocker.empty()) continue;
+    if (candidate.mixed_geometry && first_type->GetMemorySpace() == ir::MemorySpace::Mat) {
+      candidate.blocker =
+          "mixed Mat slot geometry requires a covering subview that Mat-to-Left/Right moves do not "
+          "support; use uniform physical Mat tile shapes (with valid extents for boundaries)";
+      continue;
+    }
     for (const auto& [tile_var, tile_type] : candidate.slot_tiles) {
       const auto components = ExtractTileTypeInfo(*tile_type, GetTypeString(tile_type->dtype_));
       if (components.rows != max_rows || components.cols != max_cols) continue;
@@ -2005,6 +2011,16 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
   INTERNAL_CHECK_SPAN(mlir_it != fs_.var_to_mlir.end(), tile_var->span_)
       << "Tile var " << tile_var->name_hint_ << " not found in fs_.var_to_mlir";
   std::string tile_buf = mlir_it->second;
+  const auto memref = ir::GetDefinedMemRef(tile_type);
+  if (GetMultiBufferRegion(memref) && fs_.emitted_tile_alloc_names.count(tile_buf) != 0) {
+    const auto scope = fs_.tile_alloc_scope.find(tile_buf);
+    if (scope == fs_.tile_alloc_scope.end() || fs_.active_tile_alloc_scopes.count(scope->second) == 0) {
+      // Pre-binding by slot identity is function-wide; its declaration is not.
+      // Select the same physical slot again for a new sibling-region producer.
+      tile_buf = NewNamedTemp(tile_var->name_hint_);
+      BindVarToMlir(tile_var, tile_buf);
+    }
+  }
 
   // In PTOAS mode several vars may share one handle (in-place aliasing); emit
   // the alloc_tile only once per handle so the shared buffer has a single def.
@@ -2202,6 +2218,14 @@ std::string PTOCodegen::TryGetSharedTileBufHandle(const std::shared_ptr<const ir
       return "";
     }
     return shared_handle;
+  }
+  // Uniform identities need the same dominance guarantee as mixed views.
+  // A handle selected in a completed sibling region is not in scope here.
+  if (fs_.emitted_tile_alloc_names.count(it->second) != 0) {
+    const auto scope = fs_.tile_alloc_scope.find(it->second);
+    if (scope == fs_.tile_alloc_scope.end() || fs_.active_tile_alloc_scopes.count(scope->second) == 0) {
+      return "";
+    }
   }
   return it->second;
 }
