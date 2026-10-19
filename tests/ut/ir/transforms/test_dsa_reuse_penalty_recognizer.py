@@ -222,7 +222,10 @@ def test_dsa_rp_narrowing_cast_respects_target_alias_contract(ascend_backend):
     [(0, 0, True), (16, 16, False), (0, 16, False)],
     ids=["base-aligned", "shifted", "same-root-mixed-offsets"],
 )
-def test_dsa_rp_inplace_reuse_respects_operand_view_starts(ascend_backend, first_row, second_row, may_alias):
+@pytest.mark.parametrize("enable_buffer_ir", [False, True])
+def test_dsa_rp_inplace_reuse_respects_operand_view_starts(
+    ascend_backend, first_row, second_row, may_alias, enable_buffer_ir
+):
     """Equal allocation bases do not make shifted views exact in-place operands."""
 
     @pl.program
@@ -239,14 +242,86 @@ def test_dsa_rp_inplace_reuse_respects_operand_view_starts(ascend_backend, first
             result = pl.add(first, second)
             return pl.store(result, [0, 0], output)
 
-    initialized = passes.init_mem_ref()(Before)
-    plan = testing.get_dsa_allocation_plan(next(iter(initialized.functions.values())))
+    # Buffer lowering guards the whole parent of every window, even at offset
+    # zero: packed output geometry need not match the inherited input pitch.
+    # Tile IR retains its established base-aligned in-place opportunity.
+    may_alias = may_alias and not enable_buffer_ir
+    with passes.PassContext(
+        [], memory_planner=passes.MemoryPlanner.DSA_RP, enable_buffer_ir=enable_buffer_ir
+    ):
+        initialized = passes.init_mem_ref()(Before)
+        plan = testing.get_dsa_allocation_plan(next(iter(initialized.functions.values())))
+        placed = passes.allocate_memory_addr()(initialized)
     assert bool(plan["same_base_or_disjoint"]) == may_alias
-    ranges = _tile_ranges(_plan_with_dsa_rp(Before))
+    ranges = _tile_ranges(placed)
     if may_alias:
         assert ranges["source"][0] == ranges["result"][0]
     else:
         assert not _overlap(ranges["source"], ranges["result"])
+
+
+def test_dsa_rp_select_reuses_value_storage_under_capacity_pressure(ascend_backend):
+    """A missing TSEL access contract must not add a sixth 32-KiB live tile."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            input_a: pl.Tensor[[8, 1024], pl.FP32],
+            input_b: pl.Tensor[[8, 1024], pl.FP32],
+            output: pl.Tensor[[8, 1024], pl.FP32],
+        ) -> pl.Tensor[[8, 1024], pl.FP32]:
+            keep_a = pl.load(input_a, [0, 0], [8, 1024], target_memory=pl.Mem.Vec)
+            keep_b = pl.load(input_a, [0, 0], [8, 1024], target_memory=pl.Mem.Vec)
+            keep_c = pl.load(input_a, [0, 0], [8, 1024], target_memory=pl.Mem.Vec)
+            left = pl.load(input_a, [0, 0], [8, 1024], target_memory=pl.Mem.Vec)
+            right = pl.load(input_b, [0, 0], [8, 1024], target_memory=pl.Mem.Vec)
+            mask = pl.tile.cmp(left, right, cmp_type=0)
+            scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+            selected = pl.tile.sel(mask, left, right, scratch)
+            result_a = pl.add(selected, keep_a)
+            result_b = pl.add(result_a, keep_b)
+            result = pl.add(result_b, keep_c)
+            return pl.store(result, [0, 0], output)
+
+    ranges = _tile_ranges(_plan_with_dsa_rp(Before))
+    assert ranges["selected"][0] in (ranges["left"][0], ranges["right"][0])
+    for forbidden in ("mask", "scratch"):
+        assert not _overlap(ranges["selected"], ranges[forbidden])
+
+
+def test_dsa_rp_select_written_workspace_keeps_prior_storage_separate(ascend_backend):
+    """TSEL writes tmp independently of its SSA result, including in a loop."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            input_a: pl.Tensor[[8, 64], pl.FP32],
+            input_b: pl.Tensor[[8, 64], pl.FP32],
+            output: pl.Tensor[[8, 64], pl.FP32],
+        ) -> pl.Tensor[[8, 64], pl.FP32]:
+            prior = pl.load(input_a, [0, 0], [8, 64], target_memory=pl.Mem.Vec)
+            saved = pl.store(prior, [0, 0], output)
+            for _ in pl.range(2):
+                left = pl.load(input_a, [0, 0], [8, 64], target_memory=pl.Mem.Vec)
+                right = pl.load(input_b, [0, 0], [8, 64], target_memory=pl.Mem.Vec)
+                mask = pl.tile.cmp(left, right, cmp_type=0)
+                scratch = pl.tile.create([1, 16], dtype=pl.UINT32, target_memory=pl.Mem.Vec)
+                selected = pl.tile.sel(mask, left, right, scratch)
+                _loop_saved = pl.store(selected, [0, 0], saved)
+            return saved
+
+    initialized = passes.init_mem_ref()(Before)
+    plan = testing.get_dsa_allocation_plan(next(iter(initialized.functions.values())))
+    assert any(
+        {first, second} == {"prior", "scratch"} and "target_hazard" in reasons
+        for first, second, reasons in plan["separations"]
+    )
+    ranges = _tile_ranges(_plan_with_dsa_rp(Before))
+    assert not _overlap(ranges["prior"], ranges["scratch"])
 
 
 def test_dsa_rp_preserves_tile_move_semantic_separation():
@@ -759,7 +834,14 @@ def test_no_access_operation_has_no_exact_pipe(ascend_backend):
 
 @pytest.mark.parametrize(
     "op_name",
-    ["tile.matmul_acc", "tile.gemv_acc", "tile.batch_matmul_acc", "tile.tquant_mx_raw", "tile.tmov_x2zz"],
+    [
+        "tile.matmul_acc",
+        "tile.gemv_acc",
+        "tile.batch_matmul_acc",
+        "tile.tquant_mx_raw",
+        "tile.tmov_x2zz",
+        "tile.sel",
+    ],
 )
 def test_executable_ops_declare_functional_access(op_name):
     """Executable ops expose their complete read/write contract to the recognizer."""

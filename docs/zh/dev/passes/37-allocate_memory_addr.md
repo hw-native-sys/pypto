@@ -88,6 +88,10 @@ buffer，带有字节大小、对齐和保守的半开生命周期。问题包�
   handoff，则加入**单位权重软边**；
 - 硬 arena 容量。容量与正确性绝不会为了降低复用代价而放宽。
 
+`tile.sel` 显式声明值操作数的读取、结果写入和 scratch 写入。DSA-RP 可以让结果复用
+最后一次使用的值操作数基址，但 mask 和 scratch 仍受 no-alias 约束。scratch 还保留
+跨循环迭代的 written-workspace hazard 约束；访问证据不会覆盖这些正确性约束。
+
 ### 识别 handoff
 
 只有当较早分配的访问尚未被保证在较晚分配的首次写入之前完成时，复用才值得计费。

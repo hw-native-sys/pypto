@@ -103,6 +103,12 @@ and a conservative half-open lifetime. The problem has:
 - a hard arena-capacity bound. Capacity and correctness are never traded for a
   lower reuse cost.
 
+`tile.sel` declares its value reads, result write, and scratch write explicitly.
+DSA-RP may reuse a final-use value operand's base for the result, but the mask
+and scratch remain no-alias operands. Scratch also retains the written-workspace
+hazard constraints, including across loop iterations; access evidence never
+overrides those correctness constraints.
+
 ### Recognizing a handoff
 
 Reuse is safe to charge only when the earlier allocation's accesses are not
