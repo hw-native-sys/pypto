@@ -5366,6 +5366,124 @@ class TestWhileNestedAliasTraversal:
         )
 
 
+class TestWhileAccumulatorAliasSafety:
+    """Accumulator phi coalescing must account for old handles across while iterations."""
+
+    @pytest.mark.parametrize("buffer_ir", [False, True], ids=["legacy_storage", "buffer_ir"])
+    @pytest.mark.parametrize(
+        "accumulator_scope, handle_scope",
+        [("outside", "outside"), ("outside", "inside"), ("inside", "inside")],
+        ids=["external_acc_external_handle", "external_acc_local_handle", "recreated_acc_local_handle"],
+    )
+    def test_accumulator_phi_respects_while_backedge_observations(
+        self, accumulator_scope, handle_scope, buffer_ir, pass_verification_instruments
+    ):
+        """A local alias still observes an external value on the next iteration."""
+        definitions: dict[str, list[str]] = {"outside": [], "inside": []}
+        definitions[accumulator_scope].append("previous = pl.tile.matmul(sa, sb)")
+        definitions[handle_scope].append("old_value = previous")
+        outside_definitions = "".join(f"        {line}\n" for line in definitions["outside"])
+        inside_definitions = "".join(f"            {line}\n" for line in definitions["inside"])
+        before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, lhs: pl.Tensor[[32, 64], pl.BF16],
+               rhs: pl.Tensor[[64, 64], pl.BF16], waves: pl.Scalar[pl.INDEX],
+               cond: pl.Scalar[pl.INDEX],
+               observed: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+               out: pl.Out[pl.Tensor[[16, 64], pl.FP32]]) -> pl.Tensor[[16, 64], pl.FP32]:
+        lhs_mat = pl.tile.load(lhs, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
+        other_lhs_mat = pl.tile.load(lhs, [16, 0], [16, 64], target_memory=pl.Mem.Mat)
+        rhs_mat = pl.tile.load(rhs, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
+        sa = pl.tile.extract(lhs_mat, 0, 0, [16, 64], target_memory=pl.Mem.Left)
+        other_sa = pl.tile.extract(other_lhs_mat, 0, 0, [16, 64], target_memory=pl.Mem.Left)
+        sb = pl.tile.extract(rhs_mat, 0, 0, [64, 64], target_memory=pl.Mem.Right)
+{outside_definitions}        for (wave,) in pl.while_(init_values=(0,)):
+            pl.cond(wave < waves)
+{inside_definitions}            snapshot = pl.tile.move(old_value, target_memory=pl.Mem.Vec)
+            _observed = pl.tile.store(snapshot, [0, 0], observed)
+            if cond < 1:
+                fresh = pl.tile.matmul(other_sa, sb)
+                merged = pl.yield_(fresh)
+            else:
+                accumulated = pl.tile.matmul_acc(previous, sa, sb)
+                merged = pl.yield_(accumulated)
+            _used = pl.tile.store(merged, [0, 0], out)
+            _wave_out = pl.yield_(wave + 1)
+        return out
+""")
+        recreated = accumulator_scope == "inside"
+        with passes.PassContext(pass_verification_instruments, enable_buffer_ir=buffer_ir):
+            initialized = passes.init_mem_ref()(before)
+            if buffer_ir and not recreated:
+                # Acc has no same-space copy to preserve the independently live
+                # old value. Buffer legalization must reject the divergent phi.
+                with pytest.raises(ValueError, match="divergent Acc branch results to be coalesced"):
+                    passes.materialize_semantic_aliases()(initialized)
+                return
+            after = passes.materialize_semantic_aliases()(initialized)
+
+        refs = _collect_named_tile_memrefs(after, {"previous", "old_value", "fresh", "accumulated"})
+        assert _same_base_address(refs["previous"], refs["old_value"])
+        if recreated:
+            for name in ("fresh", "accumulated"):
+                assert _same_base_address(refs["previous"], refs[name]), after.as_python()
+            _assert_if_phi_arms_write_the_phi_buffer(after)
+        else:
+            assert not ir.MemRef.may_alias(refs["previous"], refs["fresh"]), (
+                f"the fresh branch would clobber next iteration's old-value read:\n{after.as_python()}"
+            )
+
+    @pytest.mark.parametrize("read_initial", [False, True], ids=["carry_only", "independent_initial_read"])
+    def test_while_carry_tracks_initializer_alias_family(self, read_initial):
+        """Reading the initializer independently must block reuse through its While iter-arg."""
+        observation = (
+            "            snapshot = pl.tile.move(initial, target_memory=pl.Mem.Vec)\n"
+            "            _observed = pl.tile.store(snapshot, [0, 0], observed)\n"
+            if read_initial
+            else ""
+        )
+        before = pl.parse_program(f"""
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, lhs: pl.Tensor[[32, 64], pl.BF16],
+               rhs: pl.Tensor[[64, 64], pl.BF16], waves: pl.Scalar[pl.INDEX],
+               cond: pl.Scalar[pl.INDEX],
+               observed: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+               out: pl.Out[pl.Tensor[[16, 64], pl.FP32]]) -> pl.Tensor[[16, 64], pl.FP32]:
+        lhs_mat = pl.tile.load(lhs, [0, 0], [16, 64], target_memory=pl.Mem.Mat)
+        other_lhs_mat = pl.tile.load(lhs, [16, 0], [16, 64], target_memory=pl.Mem.Mat)
+        rhs_mat = pl.tile.load(rhs, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
+        sa = pl.tile.extract(lhs_mat, 0, 0, [16, 64], target_memory=pl.Mem.Left)
+        other_sa = pl.tile.extract(other_lhs_mat, 0, 0, [16, 64], target_memory=pl.Mem.Left)
+        sb = pl.tile.extract(rhs_mat, 0, 0, [64, 64], target_memory=pl.Mem.Right)
+        initial = pl.tile.matmul(sa, sb)
+        for current, wave in pl.while_(init_values=(initial, 0)):
+            pl.cond(wave < waves)
+            if cond < 1:
+                fresh = pl.tile.matmul(other_sa, sb)
+                merged = pl.yield_(fresh)
+            else:
+                accumulated = pl.tile.matmul_acc(current, sa, sb)
+                merged = pl.yield_(accumulated)
+{observation}            _used = pl.tile.store(merged, [0, 0], out)
+            _final, _wave_out = pl.yield_(merged, wave + 1)
+        return out
+""")
+        after = passes.materialize_semantic_aliases()(passes.init_mem_ref()(before))
+        refs = _collect_named_tile_memrefs(after, {"initial", "fresh", "accumulated"})
+        if read_initial:
+            assert not ir.MemRef.may_alias(refs["initial"], refs["fresh"]), (
+                f"the fresh branch would overwrite the independently read initializer:\n{after.as_python()}"
+            )
+        else:
+            for name in ("fresh", "accumulated"):
+                assert _same_base_address(refs["initial"], refs[name]), after.as_python()
+            _assert_if_phi_arms_write_the_phi_buffer(after)
+
+
 class TestStructuralShapeEquality:
     """Structural-equality tile compatibility.
 

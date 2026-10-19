@@ -250,13 +250,13 @@ class SnapshotAssembleSources : public IRMutator {
 
 /// Describes where a TileType Var is defined.
 struct VarDef {
-  enum Kind { kAssign, kIfReturn, kForReturn, kIterArg, kUnknown };
+  enum Kind { kAssign, kIfReturn, kForReturn, kWhileReturn, kIterArg, kUnknown };
   Kind kind = kUnknown;
   StmtPtr assign_stmt;   // AssignStmt (for kAssign)
-  StmtPtr control_stmt;  // IfStmt/ForStmt (for kIfReturn/kForReturn)
+  StmtPtr control_stmt;  // IfStmt/ForStmt/WhileStmt defining a control-flow result
   StmtPtr definition_stmt;
   ForStmtPtr nearest_for;
-  size_t return_idx = 0;  // index into return_vars_ (for kIfReturn/kForReturn)
+  size_t return_idx = 0;  // index into control-flow return_vars_ or iter_args_
   IterArgPtr iter_arg;    // for kIterArg
   size_t order = 0;       // lexical statement order of the definition
 };
@@ -271,6 +271,8 @@ class DefMapVisitor : public IRVisitor {
   std::map<const Stmt*, size_t> stmt_end_order;
   std::map<const Stmt*, std::set<VarPtr>> reads;
   std::map<const Stmt*, std::set<VarPtr>> writes;
+  std::map<const Stmt*, std::set<VarPtr>> condition_reads;
+  std::vector<StmtPtr> loops;  // ForStmt/WhileStmt in lexical preorder
   StmtPtr root;
 
   void Run(const StmtPtr& body) {
@@ -278,7 +280,8 @@ class DefMapVisitor : public IRVisitor {
     VisitStmt(body);
     for (auto& [var, def] : defs) {
       (void)var;
-      if (def.kind == VarDef::kIfReturn || def.kind == VarDef::kForReturn) {
+      if (def.kind == VarDef::kIfReturn || def.kind == VarDef::kForReturn ||
+          def.kind == VarDef::kWhileReturn) {
         def.order = stmt_end_order.at(def.control_stmt.get());
       }
     }
@@ -332,61 +335,35 @@ class DefMapVisitor : public IRVisitor {
   }
 
   void VisitStmt_(const ForStmtPtr& op) override {
+    loops.push_back(op);
     VisitExpr(op->loop_var_);
     VisitExpr(op->start_);
     VisitExpr(op->stop_);
     VisitExpr(op->step_);
     for (const auto& iter_arg : op->iter_args_) {
-      VisitExpr(buffer_storage_ ? iter_arg->initValue_ : iter_arg);
+      VisitExpr(iter_arg->initValue_);
     }
 
-    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
-      auto ia = op->iter_args_[i];
-      if (!As<TileType>(ia->GetType())) continue;
-      VarDef d;
-      d.kind = VarDef::kIterArg;
-      d.control_stmt = op;
-      d.definition_stmt = op;
-      d.nearest_for = op;
-      d.return_idx = i;
-      d.iter_arg = ia;
-      d.order = stmt_order.at(op.get());
-      defs[std::static_pointer_cast<const Var>(ia)] = d;
-    }
-    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
-      const auto& rv = op->return_vars_[i];
-      if (!As<TileType>(rv->GetType())) continue;
-      VarDef d;
-      d.kind = VarDef::kForReturn;
-      d.control_stmt = op;
-      d.definition_stmt = op;
-      d.nearest_for = op;
-      d.return_idx = i;
-      d.order = stmt_order.at(op.get());
-      defs[rv] = d;
-    }
+    RegisterLoopBindings(op, VarDef::kForReturn, op);
     for_stack_.push_back(op);
     VisitStmt(op->body_);
     for_stack_.pop_back();
   }
 
   void VisitExpr_(const IterArgPtr& argument) override {
-    if (buffer_storage_) {
-      VisitVarLike_(argument);
-    } else {
-      IRVisitor::VisitExpr_(argument);
-    }
+    // The initializer is read at loop entry. A bound carry reads the current
+    // iteration's value, not its initializer's old logical version again.
+    VisitVarLike_(argument);
   }
 
   void VisitStmt_(const WhileStmtPtr& loop) override {
-    if (!buffer_storage_) {
-      IRVisitor::VisitStmt_(loop);
-      return;
-    }
+    loops.push_back(loop);
     for (const auto& argument : loop->iter_args_) VisitExpr(argument->initValue_);
+    RegisterLoopBindings(loop, VarDef::kWhileReturn, for_stack_.empty() ? nullptr : for_stack_.back());
+    reading_condition_ = true;
     VisitExpr(loop->condition_);
+    reading_condition_ = false;
     VisitStmt(loop->body_);
-    for (const auto& result : loop->return_vars_) VisitExpr(result);
   }
 
   void VisitStmt_(const InCoreScopeStmtPtr& op) override { VisitStmt(op->body_); }
@@ -396,12 +373,42 @@ class DefMapVisitor : public IRVisitor {
 
   void VisitVarLike_(const VarPtr& op) override {
     if (current_stmt_) reads[current_stmt_.get()].insert(op);
+    if (reading_condition_) condition_reads[current_stmt_.get()].insert(op);
     IRVisitor::VisitVarLike_(op);
   }
 
  private:
-  const bool buffer_storage_ = PassContext::Current() && PassContext::Current()->GetEnableBufferIR();
+  template <typename LoopPtr>
+  void RegisterLoopBindings(const LoopPtr& loop, VarDef::Kind return_kind, const ForStmtPtr& nearest_for) {
+    for (size_t i = 0; i < loop->iter_args_.size(); ++i) {
+      const auto& argument = loop->iter_args_[i];
+      if (!As<TileType>(argument->GetType())) continue;
+      VarDef def;
+      def.kind = VarDef::kIterArg;
+      def.control_stmt = loop;
+      def.definition_stmt = loop;
+      def.nearest_for = nearest_for;
+      def.return_idx = i;
+      def.iter_arg = argument;
+      def.order = stmt_order.at(loop.get());
+      defs[argument] = def;
+    }
+    for (size_t i = 0; i < loop->return_vars_.size(); ++i) {
+      const auto& result = loop->return_vars_[i];
+      if (!As<TileType>(result->GetType())) continue;
+      VarDef def;
+      def.kind = return_kind;
+      def.control_stmt = loop;
+      def.definition_stmt = loop;
+      def.nearest_for = nearest_for;
+      def.return_idx = i;
+      def.order = stmt_order.at(loop.get());
+      defs[result] = def;
+    }
+  }
+
   StmtPtr current_stmt_;
+  bool reading_condition_ = false;
   std::vector<ForStmtPtr> for_stack_;
   size_t next_order_ = 0;
 };
@@ -958,6 +965,7 @@ class TopDownRetargeter {
   std::map<const MemRef*, size_t> memref_component_;
   std::map<size_t, ReachableEventIndex> physical_access_index_;
   std::map<const Var*, VersionedReachableEventIndex> alias_read_index_;
+  std::map<const Var*, ReachableEventIndex> recurring_alias_read_index_;
   std::map<VarPtr, TypePtr> rewrites_;
   std::vector<RewriteJournalEntry> rewrite_journal_;
   std::set<VarPtr> visiting_;  // cycle guard
@@ -982,6 +990,7 @@ class TopDownRetargeter {
     reverse_stmt_end_order_ = std::move(reverse_v.stmt_end_order);
     BuildAliasFamilies();
     BuildAccessIndexes(def_v.reads, def_v.writes);
+    BuildRecurringAliasReadIndex(def_v.reads, def_v.condition_reads, def_v.loops);
     if (!index_branch_storage) return;
 
     // Count distinct storage handles once, including incoming handles with no
@@ -1255,6 +1264,67 @@ class TopDownRetargeter {
     for (auto& [root, events] : alias_events) alias_read_index_[root].Build(std::move(events));
   }
 
+  /// A read of an older handle can repeat after an IfStmt through an enclosing
+  /// loop's backedge, even when that read lexically precedes the IfStmt. Sweep
+  /// the read sites and preorder loop intervals once, then binary-search the
+  /// active loop stack for the outermost loop entered after each handle's
+  /// definition. Each loop is pushed/popped once; event indexing and queries
+  /// remain O(N log N), with no per-phi subtree or ancestor scans.
+  void BuildRecurringAliasReadIndex(const std::map<const Stmt*, std::set<VarPtr>>& reads,
+                                    const std::map<const Stmt*, std::set<VarPtr>>& condition_reads,
+                                    const std::vector<StmtPtr>& loops) {
+    recurring_alias_read_index_.clear();
+    std::vector<std::pair<size_t, const std::set<VarPtr>*>> ordered_reads;
+    ordered_reads.reserve(reads.size());
+    for (const auto& [stmt, vars] : reads) {
+      ordered_reads.emplace_back(stmt_order_.at(stmt), &vars);
+    }
+    std::sort(ordered_reads.begin(), ordered_reads.end(),
+              [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+
+    // Half-open lexical intervals [begin, end) of the currently enclosing loops.
+    std::vector<std::pair<size_t, size_t>> loop_stack;
+    std::map<const Var*, std::vector<std::pair<size_t, size_t>>> recurring_events;
+    size_t next_loop = 0;
+    for (const auto& [position, vars] : ordered_reads) {
+      // A loop's own initializer is evaluated outside its recurrence. Its
+      // header reads therefore see only loops with strictly earlier headers.
+      while (next_loop < loops.size() && stmt_order_.at(loops[next_loop].get()) < position) {
+        const auto* loop = loops[next_loop++].get();
+        const size_t begin = stmt_order_.at(loop);
+        while (!loop_stack.empty() && loop_stack.back().second <= begin) loop_stack.pop_back();
+        loop_stack.emplace_back(begin, stmt_end_order_.at(loop) + 1);
+      }
+      while (!loop_stack.empty() && loop_stack.back().second <= position) loop_stack.pop_back();
+      for (const auto& var : *vars) {
+        const auto def = defs_.find(var);
+        const auto recurring =
+            def == defs_.end()
+                ? loop_stack.begin()  // Incoming handles predate even a root loop at order zero.
+                : std::upper_bound(
+                      loop_stack.begin(), loop_stack.end(), def->second.order,
+                      [](size_t definition, const auto& interval) { return definition < interval.first; });
+        if (recurring != loop_stack.end()) {
+          recurring_events[ResolveAliasRoot(var).get()].push_back(*recurring);
+        }
+      }
+    }
+    // While conditions, unlike initializers, are evaluated again at the same
+    // header. Preserve observations of older handles on that loop's backedge.
+    for (const auto& [loop, vars] : condition_reads) {
+      const size_t begin = stmt_order_.at(loop);
+      for (const auto& var : vars) {
+        const auto def = defs_.find(var);
+        if (def == defs_.end() || def->second.order < begin) {
+          recurring_events[ResolveAliasRoot(var).get()].emplace_back(begin, stmt_end_order_.at(loop) + 1);
+        }
+      }
+    }
+    for (auto& [root, events] : recurring_events) {
+      recurring_alias_read_index_[root].Build(std::move(events));
+    }
+  }
+
   [[nodiscard]] bool IsInside(const StmtPtr& inner, const StmtPtr& outer) const {
     if (!inner || !outer) return false;
     auto inner_order = stmt_order_.find(inner.get());
@@ -1283,6 +1353,13 @@ class TopDownRetargeter {
       }
       if (def.kind == VarDef::kForReturn) {
         auto loop = As<ForStmt>(def.control_stmt);
+        if (loop && def.return_idx < loop->iter_args_.size()) {
+          alias_source_[var] = std::static_pointer_cast<const Var>(loop->iter_args_[def.return_idx]);
+        }
+        continue;
+      }
+      if (def.kind == VarDef::kWhileReturn) {
+        auto loop = As<WhileStmt>(def.control_stmt);
         if (loop && def.return_idx < loop->iter_args_.size()) {
           alias_source_[var] = std::static_pointer_cast<const Var>(loop->iter_args_[def.return_idx]);
         }
@@ -1970,10 +2047,9 @@ class TopDownRetargeter {
     }
   }
 
-  /// True when a branch-local accumulator loop's external seed is read after
-  /// the enclosing IfStmt through a path other than the IfStmt return value.
-  /// Such a read observes the pre-loop value on the sibling path, so placing
-  /// that sibling's producer in the seed's window would be a clobber.
+  /// True when the reused input is independently observed after the IfStmt,
+  /// either in its lexical suffix or on a later enclosing-loop iteration.
+  /// Retargeting the fresh branch must not add a write visible to that observer.
   bool HasIndependentExternalUseAfterIf(const IfStmtPtr& if_stmt, const VarPtr& if_return,
                                         const AccumulatorTarget& target) {
     if (!target.reused_input) return false;
@@ -1984,11 +2060,17 @@ class TopDownRetargeter {
     if (primary_end == stmt_end_order_.end() || root_end == stmt_end_order_.end()) {
       return true;
     }
-    auto reads = alias_read_index_.find(ResolveAliasRoot(target.reused_input).get());
-    if (reads == alias_read_index_.end()) return false;
+    const auto* alias_root = ResolveAliasRoot(target.reused_input).get();
     auto if_begin = stmt_order_.find(if_stmt.get());
     if (if_begin == stmt_order_.end()) return true;
-    return reads->second.HasAfterFromHandleDefinedBefore(primary_end->second + 1, root_end->second,
+    auto recurring = recurring_alias_read_index_.find(alias_root);
+    if (recurring != recurring_alias_read_index_.end() &&
+        recurring->second.HasAfter(0, if_begin->second, if_begin->second)) {
+      return true;
+    }
+    auto reads = alias_read_index_.find(alias_root);
+    return reads != alias_read_index_.end() &&
+           reads->second.HasAfterFromHandleDefinedBefore(primary_end->second + 1, root_end->second,
                                                          if_begin->second);
   }
 
@@ -2012,7 +2094,7 @@ class TopDownRetargeter {
     if (boundary_end == stmt_end_order_.end() || reverse_definition == reverse_stmt_order_.end()) {
       return false;
     }
-    if (def.kind == VarDef::kIfReturn || def.kind == VarDef::kForReturn) {
+    if (def.kind == VarDef::kIfReturn || def.kind == VarDef::kForReturn || def.kind == VarDef::kWhileReturn) {
       auto reverse_end = reverse_stmt_end_order_.find(def.definition_stmt.get());
       if (reverse_end == reverse_stmt_end_order_.end()) return false;
       return !accesses->second.HasAfter(def.order + 1, boundary_end->second, reverse_end->second);

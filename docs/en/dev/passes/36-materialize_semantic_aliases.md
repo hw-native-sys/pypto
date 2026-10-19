@@ -66,7 +66,13 @@ its own fresh MemRef. This pass closes that gap:
    bare/metadata alias must have no independent post-`if` read; otherwise the
    sibling branch would clobber an observable value on the path where the
    continuation does not execute. This post-order traversal also descends through
-   `WhileStmt` bodies without changing the accumulator coalescing conditions.
+   `WhileStmt` bodies. For/While carry arguments and results belong to their
+   initializer's alias family, so reading an initializer cannot bypass this
+   check through a carry name. Reads before the `if` also block coalescing when
+   an enclosing loop can repeat them after the branch. The recurrence index
+   considers loops entered after the read handle's definition; an accumulator
+   recreated inside the loop can still be coalesced safely. These queries use
+   precomputed alias and loop-interval indexes, retaining O(N log N) analysis.
 3. **Normalize semantic identity chains**
    (`NormalizeIdentityCopyBuffersMutator`): maintain every required alias relation
    after retargeting, rather than repairing one producer in isolation. Bare SSA

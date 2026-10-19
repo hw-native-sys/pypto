@@ -56,7 +56,11 @@ program = passes.materialize_semantic_aliases()(program)
    `tile.matmul_acc` 还是分支内 loop，它复用的 input 及所有 bare/metadata alias 在
    `if` 之后都不能存在绕过 phi 的独立读取；否则在 continuation 不执行的 sibling
    路径上，重定向后的 producer 会覆盖仍可观察的值。后序遍历也会进入 `WhileStmt`
-   的循环体，累加器合并条件保持不变。
+   的循环体。For/While 的 carry 参数及结果与 initializer 属于同一别名族，避免通过
+   carry 名称漏掉对 initializer 的独立读取。即使读取位于 `if` 之前，只要外层循环
+   能在分支之后再次执行该读取，也会阻止合并。重复读取索引只考虑在读取句柄定义之后
+   才进入的循环，因此每轮在循环体内重新生成的累加器仍可安全合并。别名和循环区间
+   索引均预先建立，分析复杂度保持 O(N log N)。
 3. **规范化语义 identity chain**（`NormalizeIdentityCopyBuffersMutator`）：让 bare SSA
    alias 跟随 source，让注册了 `output_reuses_input` 的结果跟随指定的写回输入，
    让注册的首输入 buffer 别名操作跟随当前的第一个输入。目标是在重定向后统一维护
