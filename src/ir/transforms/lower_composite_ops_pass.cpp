@@ -488,11 +488,11 @@ ExprPtr LowerTileTQuantMxRule(const CallPtr& call, const std::vector<ExprPtr>& a
 // function above + one row in ``kRules``; the mutator below needs no change.
 // A new ``pld.tensor.*`` collective must additionally be listed in
 // ``LowerCompositeOpsMutator::IsTensorCollective`` so it inherits the HOST
-// deferral, must barrier through ``LoweringBuilder::EmitBarrier`` so it shares
-// the self-clearing credit-barrier protocol instead of rolling a one-off
-// notify/wait pair, and must call ``EmitEpilogueReset`` exactly once with the
-// total credit count it issued so the signal returns to all-zero after the
-// call.
+// deferral. Use ``EmitBarrier`` for a full rendezvous, or ``EmitNotifyAll`` plus
+// call-local waits for split readiness (all_to_all_v); its final Ge(2) wait
+// still uses ``EmitWaitAll``. Call ``EmitEpilogueReset`` exactly once with the
+// total credits issued, retiring this call's credits while preserving any
+// early next-call credits.
 //
 // Today the rules are ``tile.sin`` / ``tile.cos``, ``tile.tquant_mx``,
 // ``tile.select``, and ``pld.tensor.*`` distributed collectives. Host-level

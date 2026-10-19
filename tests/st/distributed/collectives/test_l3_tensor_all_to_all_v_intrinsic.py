@@ -140,6 +140,113 @@ def _build_all_to_all_v_program(n_ranks: int, max_recv: int, size: int = SIZE):
     return host_orch
 
 
+def _build_all_to_all_v_reuse_program(n_ranks: int, max_recv: int, size: int, iterations: int):
+    """Repeat the intrinsic inside one InCore task, retaining all three windows."""
+    nr = n_ranks
+    total = nr * max_recv
+
+    @pl.jit.incore
+    def exchange_many(
+        inp: pl.Tensor[[total, size], pl.FP32],
+        counts: pl.Tensor[[iterations * nr, 1], pl.INT32],
+        out: pl.Out[pl.Tensor[[total, size], pl.FP32]],
+        recv_out: pl.Out[pl.Tensor[[iterations * nr, 1], pl.INT32]],
+        samples: pl.Out[pl.Tensor[[iterations * total, 2], pl.FP32]],
+        current_counts: pl.InOut[pl.Tensor[[nr, 1], pl.INT32]],
+        data: pl.InOut[pld.DistributedTensor[[total, size], pl.FP32]],
+        signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+        recv_counts: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+    ) -> tuple[
+        pl.Tensor[[total, size], pl.FP32],
+        pl.Tensor[[iterations * nr, 1], pl.INT32],
+        pl.Tensor[[iterations * total, 2], pl.FP32],
+    ]:
+        for step in pl.range(iterations):
+            for peer in pl.range(nr):
+                value = pl.read(counts, [step * nr + peer, 0])
+                pl.write(current_counts, [peer, 0], value)
+            result = pld.tensor.all_to_all_v(inp, data, signal, current_counts, recv_counts)
+            for src in pl.range(nr):
+                n_rows_i32 = pl.read(recv_counts, [src, 0])
+                pl.write(recv_out, [step * nr + src, 0], n_rows_i32)
+                n_rows = pl.cast(n_rows_i32, pl.INDEX)
+                for r in pl.range(n_rows):
+                    flat_row = src * max_recv + r
+                    head = pl.read(result, [flat_row, 0])
+                    tail = pl.read(result, [flat_row, size - 1])
+                    pl.write(samples, [step * total + flat_row, 0], head)
+                    pl.write(samples, [step * total + flat_row, 1], tail)
+                    for col in pl.range(0, size, 4096):
+                        valid = pl.min(4096, size - col)
+                        chunk = pl.load(result, [flat_row, col], [1, 4096], valid_shape=[1, valid])
+                        pl.store(chunk, [flat_row, col], out)
+        return out, recv_out, samples
+
+    @pl.jit
+    def chip_orch(
+        inp: pl.Tensor[[total, size], pl.FP32],
+        counts: pl.Tensor[[iterations * nr, 1], pl.INT32],
+        out: pl.Out[pl.Tensor[[total, size], pl.FP32]],
+        recv_out: pl.Out[pl.Tensor[[iterations * nr, 1], pl.INT32]],
+        samples: pl.Out[pl.Tensor[[iterations * total, 2], pl.FP32]],
+        current_counts: pl.InOut[pl.Tensor[[nr, 1], pl.INT32]],
+        data: pl.InOut[pld.DistributedTensor[[total, size], pl.FP32]],
+        signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+        recv_counts: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+    ) -> tuple[
+        pl.Tensor[[total, size], pl.FP32],
+        pl.Tensor[[iterations * nr, 1], pl.INT32],
+        pl.Tensor[[iterations * total, 2], pl.FP32],
+    ]:
+        return exchange_many(
+            inp,
+            counts,
+            out,
+            recv_out,
+            samples,
+            current_counts,
+            data,
+            signal,
+            recv_counts,
+        )
+
+    @pl.jit.host
+    def host_orch(
+        inputs: pl.Tensor[[nr, total, size], pl.FP32],
+        send_counts: pl.Tensor[[nr, iterations * nr, 1], pl.INT32],
+        outputs: pl.Out[pl.Tensor[[nr, total, size], pl.FP32]],
+        recv_outputs: pl.Out[pl.Tensor[[nr, iterations * nr, 1], pl.INT32]],
+        samples: pl.Out[pl.Tensor[[nr, iterations * total, 2], pl.FP32]],
+        current_counts: pl.InOut[pl.Tensor[[nr, nr, 1], pl.INT32]],
+    ) -> tuple[
+        pl.Tensor[[nr, total, size], pl.FP32],
+        pl.Tensor[[nr, iterations * nr, 1], pl.INT32],
+        pl.Tensor[[nr, iterations * total, 2], pl.FP32],
+    ]:
+        data_buf = pld.alloc_window_buffer(total * size * pl.FP32.get_byte())
+        signal_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
+        recv_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
+        for r in pl.range(pld.world_size()):
+            data = pld.window(data_buf, [total, size], dtype=pl.FP32)
+            sig = pld.window(signal_buf, [nr, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [nr, 1], dtype=pl.INT32)
+            chip_orch(
+                inputs[r],
+                send_counts[r],
+                outputs[r],
+                recv_outputs[r],
+                samples[r],
+                current_counts[r],
+                data,
+                sig,
+                recv,
+                device=r,
+            )
+        return outputs, recv_outputs, samples
+
+    return host_orch
+
+
 class TestL3TensorAllToAllVIntrinsic:
     """L3 distributed runtime: variable-size all-to-all via ``pld.tensor.all_to_all_v``."""
 
@@ -222,6 +329,71 @@ class TestL3TensorAllToAllVIntrinsic:
                         f"P={nr} rank={rank} src={src} row={k}: "
                         f"max diff = {(got_row - expected_row).abs().max().item()}"
                     )
+
+    @pytest.mark.parametrize(
+        ("n_ranks", "size"),
+        [(2, 65537), (4, 17)],
+        ids=["p2-wide", "p4-shared-cache-line"],
+    )
+    def test_all_to_all_v_reuses_windows(self, test_config, device_ids, n_ranks, size):
+        """Publish changing counts before each exchange reuses the same windows."""
+        if len(device_ids) < n_ranks:
+            pytest.skip(f"all_to_all_v P={n_ranks} needs {n_ranks} devices, got {device_ids}")
+
+        nr = n_ranks
+        mr = MAX_RECV
+        iterations = 64
+        total = nr * mr
+        inputs = torch.zeros((nr, total, size), dtype=torch.float32)
+        send_counts = torch.zeros((nr, iterations * nr, 1), dtype=torch.int32)
+        columns = torch.arange(size, dtype=torch.float32) % 10
+        count_cycle = [-2, 0, 1, mr, mr + 3, 2]
+        for src in range(nr):
+            for dest in range(nr):
+                for row in range(mr):
+                    inputs[src, dest * mr + row] = src * 1000 + dest * 100 + row * 10 + columns
+                for step in range(iterations):
+                    send_counts[src, step * nr + dest, 0] = count_cycle[
+                        (step + src + 2 * dest) % len(count_cycle)
+                    ]
+
+        outputs = torch.zeros_like(inputs)
+        recv_outputs = torch.zeros_like(send_counts)
+        samples = torch.zeros((nr, iterations * total, 2), dtype=torch.float32)
+        current_counts = torch.zeros((nr, nr, 1), dtype=torch.int32)
+        args = (inputs, send_counts, outputs, recv_outputs, samples, current_counts)
+        program = _build_all_to_all_v_reuse_program(nr, mr, size, iterations)
+        compiled = program.compile(
+            *args,
+            config=RunConfig(
+                platform=test_config.platform,
+                distributed_config=DistributedConfig(device_ids=device_ids[:nr], num_sub_workers=0),
+            ),
+        )
+        compiled(*args, config=RunConfig(platform=test_config.platform))
+
+        for step in range(iterations):
+            for rank in range(nr):
+                for src in range(nr):
+                    n_rows = _effective_rows(int(send_counts[src, step * nr + rank, 0]), mr)
+                    got_count = int(recv_outputs[rank, step * nr + src, 0])
+                    assert got_count == n_rows, (
+                        f"step={step} P={nr} rank={rank} src={src}: "
+                        f"recv_counts={got_count} != expected={n_rows}"
+                    )
+                    for row in range(n_rows):
+                        expected = inputs[src, rank * mr + row]
+                        got_sample = samples[rank, step * total + src * mr + row]
+                        assert torch.allclose(got_sample, expected[[0, size - 1]], atol=1e-5), (
+                            f"step={step} P={nr} rank={rank} src={src} row={row}: "
+                            f"head/tail={got_sample.tolist()} != {expected[[0, size - 1]].tolist()}"
+                        )
+                        if step == iterations - 1:
+                            got_row = outputs[rank, src * mr + row]
+                            assert torch.allclose(got_row, expected, atol=1e-5), (
+                                f"step={step} P={nr} rank={rank} src={src} row={row}: "
+                                f"max diff={(got_row - expected).abs().max().item()}"
+                            )
 
 
 def _effective_rows(count: int, max_recv: int) -> int:

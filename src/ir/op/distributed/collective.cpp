@@ -785,11 +785,11 @@ TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
   // skip the unwritten holes at the tail of each source's MAX_RECV slot.  The
   // hand-written builtin kernel fills it by pulling ONE scalar word per peer
   // from that peer's own ``send_counts`` window (non-cacheable ld_dev read,
-  // clamped reader-side); only the builtin rails avoid cross-rank writes into
-  // ``recv_counts``.  The InCore composite rail is unchanged by this
-  // redesign: it still publishes ``clamp(send_counts[dest], 0, MAX_RECV)``
-  // with ``pld.system.notify`` (Set) into every peer's
-  // ``recv_counts[my_rank, 0]``, i.e. a cross-rank write.
+  // clamped reader-side). The InCore composite rail atomically resets each
+  // receiver's own counts, rendezvous-barriers, then publishes the clamped
+  // count with AtomicAdd into every peer's recv_counts[my_rank, 0]. A second
+  // barrier completes the exchange. Using atomics for both phases prevents
+  // cache-line write-back from clobbering adjacent count or signal cells.
   auto recv_type = As<DistributedTensorType>(args[4]->GetType());
   CHECK(recv_type) << "pld.tensor.all_to_all_v recv_counts must be a DistributedTensor (window-bound), got "
                    << args[4]->GetType()->TypeName();
@@ -841,8 +841,9 @@ REGISTER_OP("pld.tensor.all_to_all_v")
         "rest: the hand-written builtin kernel pulls ONE scalar word per peer from "
         "that peer's own ``send_counts`` window after BARRIER A (a non-cacheable "
         "read) and clamps the value reader-side, while the InCore composite rail "
-        "publishes the clamped count into peer ``dest``'s ``recv_counts[my_rank, 0]`` "
-        "via ``pld.system.notify`` (Set).  "
+        "atomically resets receiver-owned counts, rendezvous-barriers, then publishes "
+        "the clamped count into peer ``dest``'s ``recv_counts[my_rank, 0]`` via "
+        "``pld.system.notify`` (AtomicAdd) before a completion barrier.  "
         "Returns the target window so the caller can read back via "
         "``tile.load`` — same pattern as the symmetric "
         "``pld.tensor.all_to_all`` intrinsic.")
@@ -853,8 +854,9 @@ REGISTER_OP("pld.tensor.all_to_all_v")
                   "Window-bound DistributedTensor [NR*MAX_RECV, SIZE] — staging area for exchange (InOut)")
     .add_argument("signal",
                   "Window-bound INT32 DistributedTensor [NR, 1] used as a credit-based cross-rank "
-                  "barrier (InOut); reusable across sequential calls (zero-initialise once; do not "
-                  "reset); calls inside for/while loops are not supported yet")
+                  "barrier (InOut); reusable across sequential calls and rank-uniform InCore "
+                  "for/while loops (zero-initialise once; do not reset). HOST orchestrators reject "
+                  "such loops because loop-carried comm-domain window lifetime management is not modeled")
     .add_argument("send_counts",
                   "INT32 Tensor [NR] or [NR, 1] — rows to send to each destination, read at "
                   "runtime and clamped to MAX_RECV (Input). On the HOST/CHIP builtin rails it "
@@ -877,7 +879,9 @@ REGISTER_OP("pld.tensor.all_to_all_v")
     // both: written by the notify phase and read by the wait phase.
     .set_arg_effect(1, ArgEffect::Write)
     .set_arg_effect(2, ArgEffect::ReadWrite)
-    .set_arg_effect(4, ArgEffect::Write)
+    // The InCore reset reads and atomically updates each receive count before
+    // publication, even though the final value overwrites its incoming value.
+    .set_arg_effect(4, ArgEffect::ReadWrite)
     .f_deduce_type(DeduceTensorAllToAllVType);
 
 // ============================================================================

@@ -7134,13 +7134,12 @@ class TestWindowSliceIncoreConversion:
 
     def test_all_to_all_v_keeps_send_counts_read_only(self):
         """``pld.tensor.all_to_all_v(input, target, signal, send_counts, recv_counts)``
-        lifts ``target`` and ``recv_counts`` to Out and ``signal`` to InOut, while
+        lifts ``target`` to Out and ``recv_counts`` and ``signal`` to InOut, while
         ``input`` and ``send_counts`` stay In.
 
-        ``recv_counts`` is deposited by a peer notify with ``Set``, which
-        overwrites the slot rather than accumulating into it, so like ``target``
-        it is written without being read. Only ``signal`` is both — notify writes
-        it, wait reads it back."""
+        The receiver-owned reset reads old ``recv_counts`` before atomic reset
+        and publication. ``target`` is written without being read; ``signal``
+        is written by notify and read by wait."""
         SIZE = 16
         nr = 2
         total = nr * 2
@@ -7170,7 +7169,7 @@ class TestWindowSliceIncoreConversion:
             "counts": ir.ParamDirection.In,
             "target": ir.ParamDirection.Out,
             "signal": ir.ParamDirection.InOut,
-            "recv_counts": ir.ParamDirection.Out,
+            "recv_counts": ir.ParamDirection.InOut,
         }
         for i, bp in enumerate(before_fn.params):
             want = expected_directions.get(bp.name_hint)

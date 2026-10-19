@@ -437,17 +437,15 @@ class DispatchAnalyzer : public IRVisitor {
       //                          to this pass's comm-domain scoping)
       INTERNAL_CHECK_SPAN(op->args_.size() == 6, op->span_)
           << "MaterializeCommDomainScopes: pld.tensor.all_to_all_v expects exactly 6 args";
-      // LowerCompositeOps' CheckAllReduceLoopUse guards the InCore path but
-      // never runs for a HOST-orch call (LowerCompositeOps just defers it
-      // there). This is the HOST-side equivalent, using repeating_scope_depth_
-      // (tracked across both ForStmt and WhileStmt — see the VisitStmt_
-      // overrides above).
+      // HOST-orch calls still need loop-carried comm-domain window lifetime
+      // management, even though the credit barrier supports rank-uniform
+      // InCore loops. Track HOST repetition across both ForStmt and WhileStmt
+      // with repeating_scope_depth_ (see the VisitStmt_ overrides above).
       CHECK_SPAN(repeating_scope_depth_ == 0, op->span_)
           << "pld.tensor.all_to_all_v is not supported inside a for/while loop in a HOST "
              "orchestrator yet: dynamic re-invocation needs loop-carried comm-domain window "
              "lifetime management this compiler does not model (the credit-based signal "
-             "itself is reusable across sequential calls). Same restriction LowerCompositeOps "
-             "enforces on the InCore path via CheckAllReduceLoopUse.";
+             "itself is reusable across sequential calls and rank-uniform InCore loops).";
       auto* data_alloc = ResolveWindowAlloc(op->args_[1], "pld.tensor.all_to_all_v", "target");
       auto* signal_alloc = ResolveWindowAlloc(op->args_[2], "pld.tensor.all_to_all_v", "signal");
       auto* recv_counts_alloc = ResolveWindowAlloc(op->args_[4], "pld.tensor.all_to_all_v", "recv_counts");

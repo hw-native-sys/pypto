@@ -29,7 +29,7 @@ namespace lower_composite {
 // Self-clearing credit barrier — the shared, stateless barrier-signal protocol
 // ============================================================================
 //
-// Every ``pld.tensor.*`` collective synchronises through one protocol:
+// Collectives share this credit accounting (full barriers shown):
 //
 //     Body:      barrier(1); barrier(2); ...; barrier(N)   # g counted within
 //                                                           # this call only
@@ -42,13 +42,14 @@ namespace lower_composite {
 //
 // ``AtomicAdd`` turns each cell into a credit counter: every notify is a
 // producer's ``+1``, and the epilogue is the sole consumer's ``-N``. Because
-// adds and subtracts are atomic and commutative, the signal is provably
-// all-zero again once every rank has finished its epilogue for a call — the
-// signal carries no state that outlives one call, so every call's ``g`` restarts
-// at 1 and no cross-call bookkeeping is needed. A slow rank can inflate a fast
-// rank's own next-call credit by at most 1 while it finishes the current call
-// (bounded skew), so the counter never overflows and a fast rank can never
-// observe a spurious pass.
+// adds and subtracts are atomic and commutative, the epilogue retires exactly
+// this call's credits while preserving any early next-call credits. The signal
+// is all-zero after every rank retires this call only if no next-call credits
+// have arrived. Every call's ``g`` restarts at 1 without a cross-call ledger.
+// InCore all_to_all_v separates readiness announcements from on-demand waits:
+// a zero-row edge lets a fast peer post both next-call credits before a slow
+// rank retires the current two (a cell may reach 4). AtomicAdd(-2) preserves
+// both early credits; the final Ge(2) wait and retirement use shared helpers.
 //
 // ``kGe`` (not ``kEq``) is load-bearing: a fast peer can advance a cell past the
 // value the waiting rank is looking for before that rank ever polls it, so an

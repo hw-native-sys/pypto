@@ -1055,21 +1055,30 @@ def all_to_all_v(
     AND finished consuming the previous invocation's receive window; Barrier B
     certifies every peer read this rank's counts and pushed its payload, so
     returning — and restaging counts for the next call — is safe. The InCore
-    composite rail instead publishes ``clamp(send_counts[dest], 0, MAX_RECV)``
-    into peer ``dest``'s ``recv_counts[my_rank, 0]`` via ``pld.system.notify``
-    (Set). Either way, after the call ``recv_counts[src, 0]`` tells this rank
+    composite rail atomically resets its own receive counts and announces
+    readiness to all peers. It then waits for each non-self destination before
+    publishing a positive ``clamp(send_counts[dest], 0, MAX_RECV)`` into that
+    destination's ``recv_counts[my_rank, 0]`` via ``pld.system.notify``
+    (AtomicAdd) and pushing payload; it need not wait for every destination
+    before starting a send. Zero-row destinations retain the receiver's reset
+    count without a publication or payload transfer. A final completion barrier
+    follows. Atomic updates prevent adjacent count cells from
+    clobbering each other through whole-cache-line write-back. Either way,
+    after the call ``recv_counts[src, 0]`` tells this rank
     how many rows ``src`` sent — which is also exactly how many were
     transferred — so use that count to know where to stop reading. This is the
     MPI_Alltoallv recvcounts side. A second call on the same windows must be
     ordered after the first call's local consumer: the receive window is
     overwritten in place.
 
-    The barrier ``signal`` is credit-based, not self-clearing: each call adds
+    The barrier ``signal`` uses self-clearing credits: each call adds
     +1 per round to every peer's slot (wait thresholds 1, then 2) and subtracts
     2 per local slot at the end — never a reset, and never "wait for 1 twice" —
     so back-to-back calls on the same buffer stay ordered. Zero-initialise it
-    once and do not reset it. Calls nested in ``for``/``while`` loops are still
-    rejected by the compiler.
+    once and do not reset it. InCore calls inside ``for``/``while`` loops are
+    supported when every rank executes the same collective sequence. HOST
+    orchestrators reject such loops because loop-carried comm-domain window
+    lifetime management is not modeled.
 
     Args:
         input: Flat 2D Tensor or DistributedTensor [NR*MAX_RECV, SIZE] with

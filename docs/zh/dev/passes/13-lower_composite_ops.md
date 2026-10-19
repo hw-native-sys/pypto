@@ -246,22 +246,21 @@ sin 与 cos 共用同一组多项式系数：cos 路径只在区间归约阶段�
 
 ## `pld.tensor.*` 分布式集合通信算子
 
-本 Pass 同时降级 `pld.tensor.*` 系列的窗口绑定 (window-bound) 分布式集合通信算子。每个集合通信算子都是一个组合 `Call`，展开为 notify / wait + 数据搬运序列，外加自清理尾声。数据搬运原语因算子而异：`allgather` 与 ring `allreduce` 使用 `pld.tile.put`（基于 TPUT 的推送，经 VEC staging tile 自动分块），`broadcast` 用 `pld.tile.get` 搬运窗口数据（GM→GM 拷贝），mesh `allreduce` 与 `reduce_scatter` 用 `pld.tile.remote_load` 把 peer chunk 拉进 UB tile。allreduce 与 reduce-scatter 都根据规约类型选择 `tile.add`、`tile.maximum`、`tile.minimum` 或 `tile.mul`。七条规则共享同一套**自清理信用屏障协议**（`LoweringBuilder::EmitBarrier` + `EmitEpilogueReset`）—— 参见下方[屏障-信号协议](#屏障-信号协议) —— 因此 `signal` buffer 可以在连续调用之间复用，甚至在 `for` / `while` / `if` 内部也可以。
+本 Pass 同时降级 `pld.tensor.*` 系列的窗口绑定 (window-bound) 分布式集合通信算子。每个集合通信算子都是一个组合 `Call`，展开为 notify / wait + 数据搬运序列，外加自清理尾声。数据搬运原语因算子而异：`allgather` 与 ring `allreduce` 使用 `pld.tile.put`（基于 TPUT 的推送，经 VEC staging tile 自动分块），`broadcast` 用 `pld.tile.get` 搬运窗口数据（GM→GM 拷贝），mesh `allreduce` 与 `reduce_scatter` 用 `pld.tile.remote_load` 把 peer chunk 拉进 UB tile。allreduce 与 reduce-scatter 都根据规约类型选择 `tile.add`、`tile.maximum`、`tile.minimum` 或 `tile.mul`。七条规则共享同一套**自清理信用屏障协议**（共享 notify/wait 助手 + `EmitEpilogueReset`）—— 参见下方[屏障-信号协议](#屏障-信号协议) —— 因此 `signal` buffer 可以在连续调用之间复用，甚至在 `for` / `while` / `if` 内部也可以。
 
 ### 屏障-信号协议
 
-每次调用发出 `N` 个屏障 —— 对每个 peer cell 做 `AtomicAdd(1)`，然后等待
-`Wait(>= g)`，其中 `g` 在**仅本次调用内部**向上计数（每次新调用都从 1 重新开始，
-由 `LoweringBuilder::EmitBarrier` 的调用局部 `barrier_count_` 实现）。主体之后，
-尾声（`LoweringBuilder::EmitEpilogueReset`）把本次调用的总信用 `N` 通过一次
-`AtomicAdd(-N)` 从每一个非 self cell 中减回去。由于原子加法与减法可交换，
-一旦所有 rank 都完成本次调用的尾声，signal 可证明地恢复为全零 —— 不存在
-跨调用状态需要管理，因此*下次*调用的同一个 signal 也从 generation 1 重新开始。
+每次调用使用 `AtomicAdd(1)` 信用和从 1 开始的调用局部 `Wait(>= g)` 阈值。
+`EmitBarrier` 将广播与完整 wait-all 配对；InCore `all_to_all_v` 则向所有对端广播
+就绪，按需等待各个接收非零行的非自身目标，再通过 `EmitWaitAll` 完成最终的 `Ge(2)` 等待。
+`EmitEpilogueReset` 用 `AtomicAdd(-N)` 退休每个非 self cell 中本次调用的 `N` 个
+信用，保留提前到达的下一次调用信用。存在零行 `all_to_all_v` 边时，快 peer 可在
+慢 rank 退休当前两个信用前发出下一轮的两个信用（cell 可达到 4）；减 2 后仍保留两者。
+只有所有 rank 已退休本次调用、且没有下一次调用信用到达时，signal 才为全零。
 
-`N` 可以是**运行时常量**（`pld.system.notify` 的 `value` 只需要 `ScalarType`），
-因此 mesh allreduce 的每块信用计数不需要是编译期常量 —— 与屏障计数本身不同，
-后者始终是小型编译期序列（`1`、`2`……），因为每个 `Wait` 的 `expected`
-必须在不知道外围（可能动态的）循环执行多少次的情况下就能解析。
+`N` 和循环内 wait 阈值都可以是**运行时标量**（`pld.system.notify` 的 `value` 只需
+`ScalarType`）：mesh allreduce 从循环索引推导各块的 generation。`EmitBarrier`
+在编译期计数其顶层调用；循环和拆分就绪的调度显式发射调用局部期望值。
 
 所有 wait 谓词都用 `kGe` 而非 `kEq`：快 peer 可能在慢 rank 轮询前就把
 cell 推过本次 wait 的期望值，因此相等判断会死锁。同理，`kSet` 绝对不能与
@@ -370,6 +369,8 @@ mesh 和 ring 降级均支持 FP16、FP32，以及任意正元素数量下的
 
 可变大小推送（`MPI_Alltoallv` 模式）。每个目的地通过同一个有界 2-D stage 传输 `clamp(send_counts[dest], 0, MAX_RECV)` 行；`target.shape[0] % NR == 0` 仍是负载约束，以便接收方按行 `s * MAX_RECV` 定位发送方 `s`。运行时行数是动态 partition-view 维，stage 本身仍是静态 chunk 上界。
 
+每个接收方先原子清零自己的 `recv_counts` 单元，并向所有对端宣布就绪。发送方在目标循环中逐个等待非自身目标的 generation-1 就绪信用，再使用 `AtomicAdd` 发布钳制后的正计数并推送载荷，无须等所有目标就绪后才开始发送。零行目标保留清零后的计数，不发布计数或传输载荷。generation 2 确认交换完成，尾声再减去两轮信用。清零与发布均保持原子更新，避免标量存储的整缓存行写回覆盖相邻计数或信号；逐目标的就绪等待在复用同一窗口时保护上次调用的消费方。
+
 ### `pld.tensor.barrier`
 
 纯同步，无数据搬运。展开为屏障（generation 1）加上其尾声（从每个非 self cell 减去 1）。
@@ -378,7 +379,7 @@ mesh 和 ring 降级均支持 FP16、FP32，以及任意正元素数量下的
 
 ### Signal buffer 约定
 
-每次调用发出 `N` 次屏障 — 向每个 peer cell 做 `AtomicAdd(1)`，再 `Wait(>= g)`，其中 `g` **只在该次调用内**递增（每次新调用经 `EmitBarrier` 的调用局部 `barrier_count_` 从 1 重新开始）。主体结束后，尾声（`EmitEpilogueReset`）用一次 `AtomicAdd(-N)` 从每个非 self cell 减去本次调用的总信用 `N`。原子加与减可交换，因此一旦每个 rank 完成尾声，signal 可证明再次全零 — 没有跨调用状态，下一次在同一 signal 上的调用也从 generation 1 开始。
+各调用使用从 1 开始的局部信用阈值。`EmitBarrier` 用于完整屏障；InCore `all_to_all_v` 将就绪广播与按需目标等待拆开，最终 `Ge(2)` 等待与减 2 收尾仍使用共享助手。`EmitEpilogueReset` 用 `AtomicAdd(-N)` 只退休本次调用的信用，保留提前到达的下一次调用信用。零行边可提前发出下一轮的两个信用，使 cell 达到 4；减 2 后仍保留这两个信用。所有 rank 退休本轮且没有下一轮信用到达时，signal 才为全零。
 
 所有分布式规则在 wait 谓词上都使用 `kGe` 而非 `kEq`。快的 peer 可能在慢 rank 第一次轮询前就把 cell 推进到超过阈值，此时 `kEq` 会死锁，`kGe` 不会。同理，`kSet` 绝不能与 `kAtomicAdd` 混用在同一组 cell 上。
 

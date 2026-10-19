@@ -46,12 +46,16 @@
  *     fence, however, is always an explicit `system.fence` op inserted here — the
  *     codegen must not embed it. (TODO: a first-class IR representation of the
  *     peer-region cacheinvalid would let the pass own the whole marker.)
- *   - after each **wait**: a no-arg (whole-GM) `system.cacheinvalid`. Batched:
+ *   - after each **acquiring wait**: a no-arg (whole-GM) `system.cacheinvalid`. Batched:
  *     a *pure wait-loop* (a for/while whose body contains only waits through
  *     seq/if nesting, with memory-inert control expressions) and a run of
  *     consecutive waits each share ONE whole-GM cacheinvalid after the loop/run
  *     instead of one after every wait — nothing memory-touching happens between
  *     the waits, so after the last is equivalent to after every wait.
+ *     Compiler-generated readiness waits may carry the boolean Call attr
+ *     `comm_wait_acquire=false`: they protect a peer's storage before a write,
+ *     rather than acquire peer-written payload. Their TWAIT remains, including
+ *     its signal-line polling, but they need no whole-GM consume invalidate.
  *   - **notify**: nothing.
  *
  * Example shapes (`cacheinvalid(peer)` shown in brackets is codegen-only, not IR):
@@ -113,6 +117,14 @@ CallPtr LeafCall(const StmtPtr& stmt) {
   return value ? As<Call>(value) : nullptr;
 }
 
+// Ordinary waits acquire peer-written data. A collective lowering may mark a
+// control-only readiness wait whose continuation does not consume that data.
+// Keep this in compiler Call attrs, not the public wait kwargs. GetAttr<bool>
+// validates the stored type; an integer/string must not silently disable CMO.
+bool IsAcquiringWait(const CallPtr& call) {
+  return call && IsOp(call, "pld.system.wait") && call->GetAttr<bool>("comm_wait_acquire", true);
+}
+
 // Classify a call-like statement (EvalStmt / AssignStmt). A submit is treated
 // conservatively as a publishing write for ordering; its launched task body is
 // not analysed here (and it has no single region to cacheinvalidate). Notifies
@@ -128,7 +140,7 @@ Effect StmtEffect(const StmtPtr& stmt) {
   if (!value) return Effect::kNone;
   if (auto call = As<Call>(value)) {
     if (op_predicates::IsPublishingWrite(call)) return Effect::kWrite;
-    if (IsOp(call, "pld.system.wait")) return Effect::kWait;
+    if (IsAcquiringWait(call)) return Effect::kWait;
     return Effect::kNone;
   }
   if (As<Submit>(value)) return Effect::kWrite;
@@ -483,7 +495,14 @@ class InsertCommMarkers : public IRMutator {
       if (ExprMayRead(while_->condition_)) return WaitPurity::kNotPure;
       return ClassifyWaitPurity(while_->body_);
     }
-    return IsLeafOp(stmt, "pld.system.wait") ? WaitPurity::kPureWithWait : WaitPurity::kNotPure;
+    auto call = LeafCall(stmt);
+    if (call && IsOp(call, "pld.system.wait")) {
+      // Signal-only waits do not need an acquire, even when they are the only
+      // leaves in a loop. In a mixed loop, ordinary waits still require the
+      // single invalidate after the loop.
+      return IsAcquiringWait(call) ? WaitPurity::kPureWithWait : WaitPurity::kPureNoWait;
+    }
+    return WaitPurity::kNotPure;
   }
 
   /// Set while visiting a pure wait-loop's body: suppresses the per-wait

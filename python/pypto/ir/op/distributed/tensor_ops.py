@@ -479,23 +479,25 @@ def all_to_all_v(
     window (non-cacheable read; no bulk transfer, so the ``[NR]`` INT32 vector
     is all the buffer needs) and clamps the value reader-side; the builtin
     exchange is gated by a two-round credit barrier (Barrier A before the pull,
-    Barrier B before return). The InCore composite rail publishes the clamped
-    count via ``pld.system.notify``. Powered
-    by LowerCompositeOps into a 2-phase push-based decomposition (push →
-    barrier), returning the target window. Each push transfers exactly
-    ``clamp(send_counts[dest], 0, MAX_RECV)`` rows — the transfer extent is the
-    runtime ``[rows, SIZE]``, so padding up to the capacity never crosses the
+    Barrier B before return). The InCore composite rail atomically resets local
+    counts and announces readiness to all peers, then waits for each non-self
+    destination before publishing a positive clamped count with AtomicAdd and
+    pushing payload. Zero-row counts remain zero from the receiver reset,
+    without a publication or transfer. A completion barrier precedes return.
+    Each push transfers exactly ``clamp(send_counts[dest], 0, MAX_RECV)`` rows —
+    the transfer extent is the runtime ``[rows, SIZE]``, so padding never crosses the
     wire; the caller reads back from the window with ``pl.load``, using
     ``recv_counts[src, 0]`` to know how many rows arrived.
 
     ``send_counts`` is read at runtime, so the counts may be data-dependent.
     The clamp is two-sided against the per-peer capacity ``MAX_RECV =
     target.shape[0] // NR``: a count above it is capped, and a **negative**
-    count is floored at ``0`` — so a negative ``send_counts[dest]`` publishes
+    count is floored at ``0`` — so a negative ``send_counts[dest]`` leaves
     ``recv_counts = 0`` rather than the negative value. The barrier signal is
-    credit-based (reusable across sequential calls; zero-initialise once and do
-    not reset it), and calls nested in ``for``/``while`` loops remain rejected
-    by the compiler.
+    credit-based (zero-initialise once and do not reset it) and reusable across
+    sequential calls. InCore calls support rank-uniform ``for``/``while`` loops;
+    HOST orchestrators reject such loops because loop-carried comm-domain window
+    lifetime management is not modeled.
 
     .. warning::
 

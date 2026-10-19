@@ -30,7 +30,7 @@ There are **fifteen ops** and **four ABI enums**:
 | `pld.tensor.reduce_scatter` | reduce and scatter chunks across ranks | `DistributedTensorType` (same as src) | builtin collective |
 | `pld.tensor.allgather` | gather data from all ranks via window | `DistributedTensorType` (same as src) | builtin collective |
 | `pld.tensor.all_to_all` | push-based symmetric personalized exchange — every rank pushes its per-destination chunks to every peer's window via `pld.tensor.put` (TPUT), returns window as result | `DistributedTensorType` (same as src) | composite / HOST builtin |
-| `pld.tensor.all_to_all_v` | variable-size all-to-all (MPI_Alltoallv) — pushes `clamp(send_counts[dest], 0, MAX_RECV)` rows per destination into a flat 2D staging window (transfer size is the runtime row count, so padding never crosses the wire), and fills `recv_counts[src, 0]` so the receiver knows which rows are valid — the builtin kernel pulls ONE word per peer from that peer's own `send_counts` window (scalar read; no fixed-width requirement) and clamps reader-side, gated by a two-round credit barrier; the composite rail publishes via `pld.system.notify` (Set); returns window as result (same window-as-result pattern as symmetric `all_to_all`) | `DistributedTensorType` (same as target) | composite / HOST builtin / CHIP builtin |
+| `pld.tensor.all_to_all_v` | variable-size all-to-all (MPI_Alltoallv) — pushes `clamp(send_counts[dest], 0, MAX_RECV)` rows per destination into a flat 2D staging window (transfer size is the runtime row count, so padding never crosses the wire), and fills `recv_counts[src, 0]` so the receiver knows which rows are valid — the builtin kernel pulls ONE word per peer from that peer's own `send_counts` window (scalar read; no fixed-width requirement) and clamps reader-side, gated by a two-round credit barrier; the composite rail atomically resets local counts, announces readiness to all peers, then waits for each destination before publishing nonzero counts via `pld.system.notify` (AtomicAdd) and pushing payload; a final barrier completes the exchange; returns window as result (same window-as-result pattern as symmetric `all_to_all`) | `DistributedTensorType` (same as target) | composite / HOST builtin / CHIP builtin |
 | `pld.system.notify` | signal a peer's slot | `Unknown` (side effect) | TNOTIFY |
 | `pld.system.wait` | block on own slot | `Unknown` (side effect) | TWAIT |
 | `pld.system.defer_wait` | defer this task's logical completion on a local counter | `Unknown` (side effect) | Simpler completion runtime (no PTOAS wait op) |
@@ -142,9 +142,9 @@ against the enum range so codegen can cast back without a second guard.
 ## Barrier-signal protocol
 
 Every `pld.tensor.*` collective (`allreduce`, `barrier`, `broadcast`,
-`reduce_scatter`, `allgather`, `all_to_all`) synchronises through one shared,
+`reduce_scatter`, `allgather`, `all_to_all`, `all_to_all_v`) synchronises through one shared,
 **self-clearing credit barrier** built from `pld.system.notify` /
-`pld.system.wait` — except `all_to_all_v`'s builtin kernel, which uses the
+`pld.system.wait`. `all_to_all_v` uses the
 **two-round** variant described at the end of this section:
 
 ```text
@@ -159,14 +159,14 @@ Epilogue:  for src != my_rank:
 ```
 
 `AtomicAdd` turns each cell into a credit counter: every notify is a
-producer's `+1`, and the epilogue is the sole consumer's `-N`. Because adds
-and subtracts are atomic and commutative, the signal is provably all-zero
-again once every rank has finished its epilogue for a call — **the signal
-carries no state that outlives one call**, so every call's generation `g`
-restarts at 1 and no cross-call bookkeeping is required. A slow rank can
-inflate a fast rank's own next-call credit by at most 1 while it finishes the
-current call (bounded skew), so the counter never overflows and a fast rank
-can never observe a spurious pass.
+producer's `+1`, and the epilogue is the sole consumer's `-N`. Atomic
+subtraction retires this call's credits while preserving early next-call
+credits. The signal is all-zero after every rank retires this call only if
+no next-call credits have arrived; generation `g` restarts at 1 without a
+cross-call ledger. InCore `all_to_all_v` splits readiness announcements from
+on-demand destination waits, so a zero-row edge lets a fast peer post both
+next-call credits before a slow rank retires its current two. A cell may
+reach 4; `AtomicAdd(-2)` preserves both early credits.
 
 `Ge` (not `Eq`) is load-bearing: a fast peer can advance a cell past the value
 the waiting rank is looking for before that rank ever polls it, so an
@@ -178,14 +178,19 @@ advanced counter.
 `pld.system.notify`'s `value` only requires `ScalarType` — so a mesh
 allreduce's per-chunk credit count does not need to be known at compile time.
 
-`all_to_all_v`'s builtin kernel is the one **two-round** variant: its count
-pull requires the counts lifetime and the receive-window reuse to be protected
-across calls, so it runs Barrier A (`+1` / wait `Ge(1)`) before the pull and
-Barrier B (`+1` / wait `Ge(2)`) after the push, then subtracts 2 per local
-slot in a single `AtomicAdd(-2)` epilogue — never a reset, so an early credit
-from the next invocation is preserved. It is likewise reusable across
-sequential calls. Its InCore composite rail keeps the one-round self-clearing
-protocol above.
+`all_to_all_v` uses a **two-round** variant on both builtin and InCore
+composite rails. The builtin protects the counts lifetime and receive-window
+reuse across calls with Barrier A (`+1` / wait `Ge(1)`) before the count pull
+and Barrier B (`+1` / wait `Ge(2)`) after the payload push. The InCore rail
+atomically resets its own receive counts and announces readiness to every
+peer. It then waits for each non-self destination at `Ge(1)` before publishing
+a nonzero clamped count and pushing that destination's payload; it does not
+wait for all destinations before starting the first send. Zero-row counts
+remain zero from the receiver reset, without a publication. Barrier B
+(`Ge(2)`) completes the exchange. Both rails subtract 2 per local slot in a
+single `AtomicAdd(-2)` epilogue — never a signal reset, so an early credit
+from the next invocation is preserved. The signal is reusable across
+sequential calls.
 
 **Constraints:**
 
@@ -194,12 +199,13 @@ protocol above.
 | One signal must not be shared between mesh (`[NR, 1]`) and ring (`[2*(NR-1), NR]`) allreduce | Mesh addresses `[rank, 0]`; ring addresses `[row, rank]` — a shape mismatch, checked at lowering time |
 | A call aborted mid-flight (error / timeout) leaves the signal non-zero | Credits leak; recover via a host-side reset (`reset_persistent_windows`) before the next dispatch |
 
-Because the protocol is call-local and the signal always starts a call at
-all-zero, collectives are legal inside `for` / `while` / `if` — each call is a
-closed cycle, so the same compile-time `expected` values are reused every
-iteration. The only remaining requirement is rank-uniform execution (inherent
-to any barrier): rank-divergent control flow deadlocks, surfaced by `TWAIT`'s
-spin-count assert.
+Because the protocol is call-local, InCore collectives support rank-uniform
+`for` / `while` / `if` — each call is a closed cycle, so the same compile-time
+`expected` values are reused every iteration. Rank-divergent control flow
+deadlocks, surfaced by `TWAIT`'s spin-count assert.
+For `all_to_all_v`, loop support is InCore-only: HOST orchestrators still
+reject `for` / `while` calls because loop-carried comm-domain window lifetime
+management is not modeled.
 
 ## Op reference
 
@@ -455,9 +461,15 @@ clamp(send_counts_of[src][my_rank], 0, MAX_RECV)`). The exchange is gated by a
 **two-round credit barrier**: Barrier A (before the pull) certifies every rank
 staged its counts and finished consuming the previous invocation's receive
 window; Barrier B (after the push) certifies every peer read this rank's counts
-and pushed before it returns. The InCore composite rail instead publishes the
-already-clamped count into peer `dest`'s `recv_counts[my_rank, 0]` via
-`pld.system.notify` (Set). The push transfers exactly that many rows — the
+and pushed before it returns. The InCore composite rail atomically resets its
+own receive counts and announces readiness to all peers. For each non-self
+destination it waits for that destination's readiness before publishing a
+positive clamped count into `recv_counts[my_rank, 0]` via `pld.system.notify`
+(AtomicAdd) and pushing payload. A zero-row destination keeps the receiver's
+reset value without a count publication or payload transfer. A final `Ge(2)`
+barrier completes the exchange. Both reset and publication use
+atomics: scalar stores would flush an entire cache line and could overwrite a
+neighboring count or signal. The push transfers exactly that many rows — the
 transfer shape is the runtime `[rows, SIZE]`, not the compile-time capacity —
 so padding rows never cross the wire. After the call the receiver uses
 `recv_counts[src, 0]` to identify the valid rows; the remainder of its capacity
@@ -573,10 +585,9 @@ control-vs-control is a notify racing a count publish). The kernel derives
 size), so the block layout is always consistent with the devices actually
 running — no exact `signal.shape[0]` == device-count requirement and no
 per-`MAX_RECV` variant mangling. Not supported inside a `for`/`while` loop in
-`host_orch` yet — a compiler limitation (`MaterializeCommDomainScopes` rejects
-it up front; the same restriction `LowerCompositeOps` enforces on the InCore
-path), not a property of the signal: the credit barrier is reusable across
-sequential calls.
+`host_orch` yet — `MaterializeCommDomainScopes` rejects it because loop-carried
+comm-domain window lifetime management is not modeled. The credit barrier is
+reusable across sequential calls, and InCore calls support rank-uniform loops.
 
 ### `pld.tensor.allreduce`
 

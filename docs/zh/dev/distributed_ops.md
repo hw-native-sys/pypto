@@ -27,7 +27,7 @@ TPUT/TGET 在该侧只需要一段可读/可写的*本地* GM 区域。窗口绑
 | `pld.tensor.reduce_scatter` | 跨 rank 规约并分散 | `DistributedTensorType`（同 src） | builtin collective |
 | `pld.tensor.allgather` | 从所有 rank 收集数据到窗口 | `DistributedTensorType`（同 src） | builtin collective |
 | `pld.tensor.all_to_all` | 基于推送的对称个性化交换——每个 rank 通过 `pld.tensor.put`（TPUT）将自己的各目标 block 推送到每个对等方的窗口中，返回窗口作为结果 | `DistributedTensorType`（同 src） | composite / HOST builtin |
-| `pld.tensor.all_to_all_v` | 变长 all-to-all（MPI_Alltoallv）——按每个目标推送 `clamp(send_counts[dest], 0, MAX_RECV)` 行，写入平面 2D 暂存窗口（传输大小是运行时行数，因此填充不会经过链路），并填充 `recv_counts[src, 0]` 使接收方知道哪些行有效——builtin 内核从每个对端自己的 `send_counts` 窗口中读取自己所需的**一个字**（标量读取，无固定宽度要求）并在读取方做钳制，由两轮信用屏障守护；composite 通路则用 `pld.system.notify`（Set）发布；返回窗口作为结果（与对称 `all_to_all` 相同的窗口即结果模式） | `DistributedTensorType`（与 target 相同） | composite / HOST builtin / CHIP builtin |
+| `pld.tensor.all_to_all_v` | 变长 all-to-all（MPI_Alltoallv）——按每个目标推送 `clamp(send_counts[dest], 0, MAX_RECV)` 行，写入平面 2D 暂存窗口（传输大小是运行时行数，因此填充不会经过链路），并填充 `recv_counts[src, 0]` 使接收方知道哪些行有效——builtin 内核从每个对端自己的 `send_counts` 窗口中读取自己所需的**一个字**（标量读取，无固定宽度要求）并在读取方做钳制，由两轮信用屏障守护；composite 通路先原子清零本地计数并向所有对端宣布就绪，再逐目标等待就绪，用 `pld.system.notify`（AtomicAdd）发布非零计数并推送载荷，最后通过屏障完成交换；返回窗口作为结果（与对称 `all_to_all` 相同的窗口即结果模式） | `DistributedTensorType`（与 target 相同） | composite / HOST builtin / CHIP builtin |
 | `pld.system.notify` | 给 peer 的槽位发信号 | `Unknown`（副作用） | TNOTIFY |
 | `pld.system.wait` | 在自身槽位上阻塞 | `Unknown`（副作用） | TWAIT |
 | `pld.system.defer_wait` | 让本任务的逻辑完成等待本地 counter | `Unknown`（副作用） | Simpler completion runtime（无 PTOAS wait op） |
@@ -128,9 +128,9 @@ deducer 会校验打包的 `int` 落在枚举范围内,使 codegen 无需二次�
 ## 屏障-信号协议
 
 每个 `pld.tensor.*` 集合通信算子（`allreduce`、`barrier`、`broadcast`、
-`reduce_scatter`、`allgather`、`all_to_all`）都使用同一个**自清理信用屏障**
+`reduce_scatter`、`allgather`、`all_to_all`、`all_to_all_v`）都使用同一个**自清理信用屏障**
 （self-clearing credit barrier）进行同步，该屏障由 `pld.system.notify` /
-`pld.system.wait` 构建：
+`pld.system.wait` 构建。`all_to_all_v` 使用本节末尾描述的**两轮**变体：
 
 ```text
 Body:      barrier(1); barrier(2); ...; barrier(N)   # g 在本次调用内计数
@@ -144,12 +144,12 @@ Epilogue:  for src != my_rank:
 ```
 
 `AtomicAdd` 把每个 cell 变成一个信用计数器：每次 notify 是生产者的 `+1`，尾声
-（epilogue）是唯一消费者的 `-N`。由于加法与减法是原子的且可交换，一旦所有 rank
-都完成本次调用的尾声，signal 可证明地恢复为全零 —— **signal 不携带任何超出
-单次调用生命周期的状态**，因此每次调用的 generation `g` 都从 1 重新开始，无需
-跨调用记账。慢 rank 在完成当前调用的过程中最多会让快 rank 自己的下次调用
-信用膨胀 1（有界 skew），因此计数器不会溢出，快 rank 也永远不会观察到虚假
-通过。
+（epilogue）是唯一消费者的 `-N`。原子减法只退休本次调用的信用，保留提前到达的
+下一次调用信用。所有 rank 退休本次调用后，只有在没有下一次调用信用到达时，
+signal 才为全零；generation `g` 仍从 1 重新开始，无需跨调用账本。InCore
+`all_to_all_v` 将就绪广播与按需的目标等待拆开，因此零行边允许快 peer 在慢 rank
+退休本轮两个信用之前发出下一轮的两个信用。cell 可达到 4；`AtomicAdd(-2)`
+会保留这两个提前到达的信用。
 
 `Ge`（而非 `Eq`）是关键负载：快 peer 可能在慢 rank 轮询前就把 cell 推到期望值
 之上，因此相等等待会永久阻塞。同理，`Set` 绝对不能与 `AtomicAdd` 混用在同一个
@@ -159,11 +159,14 @@ cell 上 —— set 可能会覆盖已经被推高的计数器。
 `value` 只需要 `ScalarType` —— 因此 mesh allreduce 的每块信用计数不需要在编译期
 已知。
 
-`all_to_all_v` 的 builtin 内核是唯一的**两轮**变体：其计数拉取需要保护计数的
-生命周期与接收窗口的复用，因此它在拉取前执行 Barrier A（`+1` / 等待 `Ge(1)`），
-在推送后执行 Barrier B（`+1` / 等待 `Ge(2)`），最后对每个本地槽位做一次
-`AtomicAdd(-2)` 收尾——从不重置，因此下一次调用提前到达的信用会被保留。它同样
-可在连续多次调用间复用；其 InCore composite 通路仍采用上述单轮自清理协议。
+`all_to_all_v` 的 builtin 与 InCore composite 通路都使用**两轮**变体。builtin
+在计数拉取前执行 Barrier A（`+1` / 等待 `Ge(1)`），在载荷推送后执行 Barrier B
+（`+1` / 等待 `Ge(2)`），以保护跨调用的计数生命周期与接收窗口复用。InCore
+通路先原子清零自身接收计数并向所有对端宣布就绪，再逐个等待非自身目标的
+`Ge(1)` 就绪信用，然后发布非零钳制计数并推送该目标的载荷；首次发送前不需要
+等待所有目标。零行计数保留接收方清零后的值，无须发布。Barrier B（`Ge(2)`）
+确认交换完成。两条通路都对每个本地槽位做一次 `AtomicAdd(-2)` 收尾
+——从不重置信号，因此下一次调用提前到达的信用会被保留。信号可跨顺序调用复用。
 
 **约束：**
 
@@ -172,10 +175,11 @@ cell 上 —— set 可能会覆盖已经被推高的计数器。
 | 同一个 signal 不能在 mesh（`[NR, 1]`）和 ring（`[2*(NR-1), NR]`）allreduce 之间共享 | mesh 寻址 `[rank, 0]`；ring 寻址 `[row, rank]` —— 形状不匹配，在降级时检查 |
 | 调用在中途被中止（错误/超时）会留下 signal 为非零 | 信用泄漏；在下一次 dispatch 之前通过 host 端重置（`reset_persistent_windows`）恢复 |
 
-由于协议是调用局部的，且 signal 在每次调用开始时始终为零，集合通信在 `for` /
-`while` / `if` 内都是合法的 —— 每次调用都是封闭循环，因此相同的编译期
-`expected` 值在每次迭代中复用。唯一的剩余要求是 rank 均匀执行（任何屏障的固有
-要求）：rank 分叉的控制流会死锁，由 `TWAIT` 的自旋计数断言暴露。
+由于协议是调用局部的，InCore 集合通信支持 rank 间一致执行的 `for` / `while` /
+`if` —— 每次调用都是封闭循环，因此相同的编译期 `expected` 值在每次迭代中复用。
+rank 分叉的控制流会死锁，由 `TWAIT` 的自旋计数断言暴露。
+`all_to_all_v` 的循环支持仅限 InCore：HOST 编排器仍会拒绝 `for` / `while`
+内的调用，因为编译器尚未建模循环携带的通信域窗口生命周期管理。
 
 ## 算子参考
 
@@ -395,8 +399,11 @@ CHIP 通路上，操作数是以函数参数的形式到达的，没有这样的
 整个交换由**两轮信用屏障**守护：Barrier A（拉取前）证明所有 rank 已暂存计数，
 且都已消费上一次调用的接收窗口；Barrier B（推送后）证明每个对端都已读完本 rank
 的计数并完成推送，方可返回。
-InCore composite 通路则把已经钳制过的计数通过 `pld.system.notify`（Set）写入
-对端 `dest` 的 `recv_counts[my_rank, 0]`。推送只传输这么多行——传输形状是运行时
+InCore composite 通路先原子清零本地接收计数，并向所有对端宣布就绪。对于每个非自身
+目标，先等待该目标就绪，再通过 `pld.system.notify`（AtomicAdd）把钳制后的正计数
+发布到其 `recv_counts[my_rank, 0]`，然后推送载荷。零行目标保留接收方清零后的值，
+无须发布计数或传输载荷。最后通过 `Ge(2)` 屏障确认交换完成。清零和发布均使用原子更新：标量存储会写回整条缓存行，可能覆盖相邻的
+计数或信号。推送只传输这么多行——传输形状是运行时
 的 `[rows, SIZE]`，而非编译期容量——因此填充行不会经过链路。调用结束之后接收方用
 `recv_counts[src, 0]` 识别有效行；其容量槽的其余部分根本不会被写入。窗口内存
 不*保证*清零，且可能在同一进程内残留，因此这些未触及的字节是未定义的。
@@ -488,8 +495,7 @@ notify/count 写入与内核读取竞争，control 与 control 之间是 notify 
 `signal.shape[0]` 与设备数**精确相等**的要求，也不再需要按 `MAX_RECV` 进行
 variant 混入。暂不支持在 `host_orch` 的 `for`/`while` 循环内调用——这是编译器的
 限制（动态重复调用需要循环携带的窗口生命周期管理，本编译器尚未建模），而不是
-信号本身的性质：信用屏障可跨顺序调用复用——与 `LowerCompositeOps` 在 InCore
-路径上强制的限制相同。
+信号本身的性质：信用屏障可跨顺序调用复用，InCore 调用支持 rank 间一致执行的循环。
 
 ### `pld.tensor.allreduce`
 
