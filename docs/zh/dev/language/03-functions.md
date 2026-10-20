@@ -125,6 +125,7 @@ Scalar 实参值也约束只出现在视图中的维度：声明有效尺寸为 
 `n - 1` 等依赖 Scalar 的复合视图表达式也会在代入实参后比较，覆盖有效尺寸、stride 和 offset。
 这也包含通过 `rows = 2*n` 等共享维度间接依赖 Scalar 的表达式。
 实参省略有效形状时使用物理形状，省略 offset 时使用零；依赖 Scalar 的 stride 约定需要实参具有显式 stride 元数据。
+JIT 专门化也会保留嵌套 `pl.Tuple` 参数注解，包括其中完整的 Tile 类型、动态符号和逐次调用的 constexpr 绑定。
 tuple 参数内的 Tile 也会递归检查相同的物理类型和视图约束。
 为 Tile 注解生成的动态维度声明名必须使用 Python 规范化后可赋值的合法标识符，不能是 Python 关键字，也不能覆盖 DSL 别名 `pl` 或 `pld`。
 内联（inlining）直接代入调用方的 Tile，无需复制，并保留其有效形状

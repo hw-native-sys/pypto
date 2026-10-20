@@ -3939,6 +3939,154 @@ class TestInlineFuncIntegration:
 class TestInlineTileAnnotations:
     """Typed inline Tile parameters keep their on-core contract (issue #3034)."""
 
+    @pytest.mark.parametrize("postponed", [False, True])
+    @pytest.mark.parametrize("nested", [False, True], ids=["flat", "nested_mixed"])
+    def test_tuple_tile_parameters_compile(self, postponed, nested):
+        """Tuple leaves retain independent Tile dimensions and the selected caller's type."""
+        ROWS = pl.dynamic("TUPLE_TILE_ROWS")
+        if nested:
+
+            def choose(
+                pair: pl.Tuple[
+                    pl.Tensor[[32, 64], pl.FP32],
+                    pl.Scalar[pl.INDEX],
+                    pl.Tuple[pl.Tile[[ROWS, 64], pl.FP32], pl.Tile[[ROWS, 64], pl.FP32]],
+                ],
+            ) -> pl.Tile:
+                return pair[2][1]
+
+            annotation = (
+                "pl.Tuple[pl.Tensor[[32, 64], pl.FP32], pl.Scalar[pl.INDEX], "
+                "pl.Tuple[pl.Tile[[ROWS, 64], pl.FP32], pl.Tile[[ROWS, 64], pl.FP32]]]"
+            )
+        else:
+
+            def choose(
+                pair: pl.Tuple[pl.Tile[[ROWS, 64], pl.FP32], pl.Tile[[ROWS, 64], pl.FP32]],
+            ) -> pl.Tile:
+                return pair[1]
+
+            annotation = "pl.Tuple[pl.Tile[[ROWS, 64], pl.FP32], pl.Tile[[ROWS, 64], pl.FP32]]"
+
+        raw = choose
+        if postponed:
+            raw = types.FunctionType(raw.__code__, {**raw.__globals__, "ROWS": ROWS}, raw.__name__)
+            raw.__annotations__ = {"pair": annotation, "return": "pl.Tile"}
+        choose = jit.inline(auto_scope=False)(raw)
+
+        if nested:
+
+            @jit.incore
+            def copy_incore(src: pl.Tensor[[32, 64], pl.FP32], dst: pl.Out[pl.Tensor[[32, 64], pl.FP32]]):
+                first = pl.load(src, [0, 0], [16, 64])
+                second = pl.load(src, [0, 0], [32, 64])
+                # Pyright cannot correlate the nested flag with the conditional helper signature.
+                selected = choose((src, pl.const(7, pl.INDEX), (first, second)))  # pyright: ignore[reportArgumentType]
+                result = pl.add(selected, second)
+                return pl.store(result, [0, 0], dst)
+
+        else:
+
+            @jit.incore
+            def copy_incore(src: pl.Tensor[[32, 64], pl.FP32], dst: pl.Out[pl.Tensor[[32, 64], pl.FP32]]):
+                first = pl.load(src, [0, 0], [16, 64])
+                second = pl.load(src, [0, 0], [32, 64])
+                selected = choose((first, second))
+                # Parsing this operation requires the returned leaf to keep the
+                # second Tile's concrete extent rather than the helper's ROWS.
+                result = pl.add(selected, second)
+                return pl.store(result, [0, 0], dst)
+
+        @jit
+        def entry(src: pl.Tensor[[32, 64], pl.FP32], dst: pl.Out[pl.Tensor[[32, 64], pl.FP32]]):
+            return copy_incore(src, dst)
+
+        compiled = entry.compile(
+            config=RunConfig(
+                backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.SIM, codegen_only=True
+            )
+        )
+        assert isinstance(compiled, CompiledProgram)
+
+    def test_tuple_factory_annotations_specialize_each_leaf_and_invalidate_cache(self):
+        """Erased factory values and distinct constexpr formals survive in separate Tuple leaves."""
+
+        def factory(columns):
+            FIRST = 8
+            SECOND = 8
+            VIEW = pl.TileView(valid_shape=[3, columns])
+
+            @jit.inline(auto_scope=False)
+            def choose(
+                pair: pl.Tuple[
+                    pl.Tile[[FIRST, columns], pl.FP32],
+                    pl.Tuple[pl.Tile[[SECOND, columns], pl.FP32, pl.Mem.Vec, VIEW]],
+                ],
+                FIRST: pl.constexpr,
+                SECOND: pl.constexpr,
+            ) -> pl.Tile:
+                return pair[1][0]
+
+            return choose
+
+        choose = factory(64)
+        assert not choose._func.__code__.co_freevars
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[16, 64], pl.FP32], dst: pl.Out[pl.Tensor[[16, 64], pl.FP32]]):
+            first = pl.load(src, [0, 0], [8, 64], valid_shape=[3, 64], target_memory=pl.Mem.Vec)
+            second = pl.load(src, [0, 0], [16, 64], valid_shape=[3, 64], target_memory=pl.Mem.Vec)
+            selected = choose((first, (second,)), 8, 16)
+            output = pl.store(selected, [0, 0], dst)
+            swapped = choose((second, (first,)), 16, 8)
+            return pl.store(swapped, [0, 0], output)
+
+        @jit
+        def entry(src: pl.Tensor[[16, 64], pl.FP32], dst: pl.Out[pl.Tensor[[16, 64], pl.FP32]]):
+            return copy_incore(src, dst)
+
+        config = RunConfig(
+            backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.SIM, codegen_only=True
+        )
+        source_hash = entry._get_source_hash()
+        persistent_digest = entry._persistent_source_digest()
+        compiled = entry.compile(config=config)
+        assert isinstance(compiled, CompiledProgram)
+        assert entry.compile(config=config) is compiled
+
+        choose = factory(128)
+        assert entry._get_source_hash() != source_hash
+        assert entry._persistent_source_digest() != persistent_digest
+        with pytest.raises(ValueError, match=r"Inline call to 'choose.*physical shape dimension\[1\]"):
+            entry.compile(config=config)
+
+    def test_tuple_tile_contract_is_checked_for_an_unused_leaf(self):
+        """The retained tuple signature reaches recursive validation before the helper disappears."""
+
+        @jit.inline(auto_scope=False)
+        def choose(pair: pl.Tuple[pl.Tile[[8, 64], pl.FP32], pl.Tile[[8, 64], pl.FP32]]) -> pl.Tile:
+            return pair[0]
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[16, 64], pl.FP32], dst: pl.Out[pl.Tensor[[16, 64], pl.FP32]]):
+            first = pl.load(src, [0, 0], [8, 64])
+            second = pl.load(src, [0, 0], [16, 64])
+            selected = choose((first, second))
+            return pl.store(selected, [0, 0], dst)
+
+        @jit
+        def entry(src: pl.Tensor[[16, 64], pl.FP32], dst: pl.Out[pl.Tensor[[16, 64], pl.FP32]]):
+            return copy_incore(src, dst)
+
+        with pytest.raises(
+            ValueError, match=r"Inline call to 'choose'.*parameter 'pair'.*tuple element\[1\].*physical shape"
+        ):
+            entry.compile(
+                config=RunConfig(
+                    backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.SIM, codegen_only=True
+                )
+            )
+
     @pytest.mark.parametrize("affine", [False, True])
     def test_immutable_tile_alias_return_compiles(self, affine):
         """A returned local alias can be consumed before inline expansion resolves generic dimensions."""

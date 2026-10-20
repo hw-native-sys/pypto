@@ -522,11 +522,13 @@ class CallParser:
                 args,
                 as_submit=as_submit,
             )
+            # Void inline wrappers can still carry independent placeholders.
+            # Defer their Tile contracts to expansion; format checks run in either mode.
             return_types = ir.deduce_call_return_type(
                 callee_params_for_return,
                 args_for_return,
                 return_types,
-                is_inline=func_obj.func_type == ir.FunctionType.Inline,
+                is_inline=bool(return_types) and func_obj.func_type == ir.FunctionType.Inline,
             )
             return_types = self.inline_argument_return_types(func_obj, args, return_types)
         return self.make_call_with_return_type(

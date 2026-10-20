@@ -3436,5 +3436,229 @@ class TestRenamedGeneratedFunction:
             specialize("_T", [ctx])
 
 
+class TestInlineTupleTileAnnotations:
+    def test_tensor_leaf_keeps_explicit_full_view_after_constexpr_shape_changes(self):
+        ROWS = 8
+        view = pl.TensorView(layout=pl.TensorLayout.ND, valid_shape=[8, 64])
+
+        def keep(
+            pair: pl.Tuple[pl.Tensor[[ROWS, 64], pl.FP32, view], pl.Tile[[8, 64], pl.FP32]],
+            ROWS: pl.constexpr,
+        ):
+            return pair[1]
+
+        ctx = build_specialize_context(
+            keep, "keep", "inline", None, {}, {}, [], auto_scope=False, constexpr_values={"ROWS": "16"}
+        )
+        program = pl.parse(specialize("_TestClass", [ctx]))
+        assert isinstance(program, ir.Program)
+        function = program.get_function("keep")
+        assert function is not None
+        pair = function.params[0].type
+        assert isinstance(pair, ir.TupleType)
+        tensor = pair.types[0]
+        assert isinstance(tensor, ir.TensorType)
+        assert isinstance(tensor.shape[0], ir.ConstInt) and tensor.shape[0].value == 16
+        assert tensor.tensor_view is not None
+        valid = tensor.tensor_view.valid_shape[0]
+        assert isinstance(valid, ir.ConstInt) and valid.value == 8
+
+    @pytest.mark.parametrize("spelling", ["dtype", "subscript", "constructor"])
+    def test_mixed_scalar_leaf_obeys_its_own_constexpr_dtype(self, spelling):
+        DTYPE = pl.FP32
+
+        if spelling == "subscript":
+
+            def keep(pair: pl.Tuple[pl.Tile[[8, 64], pl.FP32], pl.Scalar[DTYPE]], DTYPE: pl.constexpr):
+                return pair[0]
+
+        elif spelling == "dtype":
+
+            def keep(
+                pair: pl.Tuple[pl.Tile[[8, 64], pl.FP32], DTYPE],  # pyright: ignore[reportInvalidTypeForm]
+                DTYPE: pl.constexpr,
+            ):
+                return pair[0]
+
+        else:
+
+            def keep(
+                pair: pl.Tuple[pl.Tile[[8, 64], pl.FP32], pl.Scalar(DTYPE)],  # pyright: ignore[reportInvalidTypeForm]
+                DTYPE: pl.constexpr,
+            ):
+                return pair[0]
+
+        ctx = build_specialize_context(
+            keep,
+            "keep",
+            "inline",
+            None,
+            {},
+            {},
+            [],
+            auto_scope=False,
+            constexpr_values={"DTYPE": "pl.INDEX"},
+        )
+        program = pl.parse(specialize("_TestClass", [ctx]))
+        assert isinstance(program, ir.Program)
+        function = program.get_function("keep")
+        assert function is not None
+        pair = function.params[0].type
+        assert isinstance(pair, ir.TupleType)
+        scalar = pair.types[1]
+        assert isinstance(scalar, ir.ScalarType) and scalar.dtype == pl.INDEX
+
+    def test_parameterized_postponed_tuple_fingerprint_tracks_nested_view(self):
+        def keep(pair, ROWS):
+            return pair[1]
+
+        helper = types.FunctionType(
+            keep.__code__,
+            {**keep.__globals__, "VIEW": pl.TileView(valid_shape=[3, 64])},
+            keep.__name__,
+        )
+        helper.__annotations__ = {
+            "pair": "pl.Tuple[pl.Scalar[pl.INDEX], pl.Tile[[ROWS, 64], pl.FP32, VIEW]]",
+            "ROWS": "pl.constexpr",
+        }
+        before = tile_annotation_fingerprints(helper)
+        helper.__globals__["VIEW"] = pl.TileView(valid_shape=[2, 64])
+        assert tile_annotation_fingerprints(helper) != before
+
+    @pytest.mark.parametrize("postponed", [False, True])
+    def test_nested_tuple_preserves_mixed_types_and_dynamic_metadata(self, postponed):
+        rows = pl.dynamic("TUPLE_TILE_ROWS")
+        valid = pl.dynamic("TUPLE_VALID_ROWS")
+        view = pl.TileView(valid_shape=[valid, 64], stride=[64, 1], start_offset=valid.unwrap())
+
+        def keep(
+            pair: pl.Tuple[
+                pl.Scalar[pl.INDEX],
+                pl.Tuple[pl.Tensor[[8, 64], pl.FP32], pl.Tile[[rows, 64], pl.FP32, pl.Mem.Vec, view]],
+            ],
+        ):
+            return pair[1][1]
+
+        helper = keep
+        if postponed:
+            helper = types.FunctionType(
+                keep.__code__,
+                {**keep.__globals__, "rows": rows, "view": view, "TupleAlias": pl.Tuple},
+                keep.__name__,
+            )
+            helper.__annotations__ = {
+                "pair": "TupleAlias[pl.Scalar[pl.INDEX], TupleAlias[pl.Tensor[[8, 64], pl.FP32], "
+                "pl.Tile[[rows, 64], pl.FP32, pl.Mem.Vec, view]]]"
+            }
+        ctx = build_specialize_context(helper, "keep", "inline", None, {}, {}, [], auto_scope=False)
+        source = specialize("_TestClass", [ctx])
+        assert 'TUPLE_TILE_ROWS = pl.dynamic("TUPLE_TILE_ROWS")' in source
+        assert 'TUPLE_VALID_ROWS = pl.dynamic("TUPLE_VALID_ROWS")' in source
+        program = pl.parse(source)
+        assert isinstance(program, ir.Program)
+        function = program.get_function("keep")
+        assert function is not None
+        pair = function.params[0].type
+        assert isinstance(pair, ir.TupleType)
+        assert isinstance(pair.types[0], ir.ScalarType)
+        nested = pair.types[1]
+        assert isinstance(nested, ir.TupleType)
+        assert isinstance(nested.types[0], ir.TensorType)
+        tile = nested.types[1]
+        assert isinstance(tile, ir.TileType)
+        assert tile.tile_view is not None
+        assert isinstance(tile.tile_view.valid_shape[0], ir.Var)
+        assert tile.tile_view.valid_shape[0].name_hint == "TUPLE_VALID_ROWS"
+
+    def test_eager_tuple_factory_keeps_independent_values_and_distinct_formals(self):
+        FIRST, SECOND = 8, 16
+        SPACE = pl.Mem.Vec
+
+        def factory(cols):
+            view = pl.TileView(valid_shape=[3, cols], stride=[cols, 1], start_offset=0)
+
+            def keep(
+                pair: pl.Tuple[
+                    pl.Tile[[FIRST, cols], pl.FP32, SPACE, view],
+                    pl.Tuple[pl.Tile[[SECOND, cols], pl.FP32, view, SPACE], pl.Scalar[pl.INDEX]],
+                ],
+                FIRST: pl.constexpr,
+                SECOND: pl.constexpr,
+                SPACE: pl.constexpr,
+            ):
+                return pair[1][0]
+
+            return keep
+
+        helper = factory(64)
+        ctx = build_specialize_context(
+            helper,
+            "keep",
+            "inline",
+            None,
+            {},
+            {},
+            [],
+            auto_scope=False,
+            constexpr_values={"FIRST": "16", "SECOND": "8", "SPACE": "pl.Mem.Vec"},
+        )
+        program = pl.parse(specialize("_TestClass", [ctx]))
+        assert isinstance(program, ir.Program)
+        function = program.get_function("keep")
+        assert function is not None
+        pair = function.params[0].type
+        assert isinstance(pair, ir.TupleType)
+        nested = pair.types[1]
+        assert isinstance(nested, ir.TupleType)
+        for tile, rows in ((pair.types[0], 16), (nested.types[0], 8)):
+            assert isinstance(tile, ir.TileType)
+            assert isinstance(tile.shape[0], ir.ConstInt) and tile.shape[0].value == rows
+            assert isinstance(tile.shape[1], ir.ConstInt) and tile.shape[1].value == 64
+            assert tile.tile_view is not None
+            valid = tile.tile_view.valid_shape[0]
+            assert isinstance(valid, ir.ConstInt) and valid.value == 3
+            assert tile.memory_space == ir.MemorySpace.Vec
+        assert tile_annotation_fingerprints(helper) != tile_annotation_fingerprints(factory(128))
+
+    def test_postponed_tuple_alias_fingerprint_tracks_nested_contract_rebinding(self):
+        def keep(pair):
+            return pair[1]
+
+        helper = types.FunctionType(
+            keep.__code__,
+            {**keep.__globals__, "CONTRACT": pl.Tuple[pl.Scalar[pl.INDEX], pl.Tile[[8, 64], pl.FP32]]},
+            keep.__name__,
+        )
+        helper.__annotations__ = {"pair": "CONTRACT"}
+        before = tile_annotation_fingerprints(helper)
+        helper.__globals__["CONTRACT"] = pl.Tuple[pl.Scalar[pl.INDEX], pl.Tile[[16, 64], pl.FP32]]
+        assert tile_annotation_fingerprints(helper) != before
+
+    def test_incomplete_tuple_tile_leaf_has_clear_error(self):
+        def keep(pair: pl.Tuple[pl.Scalar[pl.INDEX], pl.Tile]):
+            return pair[1]
+
+        with pytest.raises(ValueError, match="Tuple annotation.*incomplete"):
+            build_specialize_context(keep, "keep", "inline", None, {}, {}, [], auto_scope=False)
+
+    def test_unsupported_tensor_subclass_in_tuple_is_not_rendered_as_plain_tensor(self):
+        def keep(pair: pl.Tuple[pld.DistributedTensor[[8, 64], pl.FP32], pl.Tile[[8, 64], pl.FP32]]):
+            return pair[1]
+
+        with pytest.raises(ValueError, match="Tuple annotation.*unsupported type.*path \\(0,\\)"):
+            build_specialize_context(keep, "keep", "inline", None, {}, {}, [], auto_scope=False)
+
+    def test_tuple_tile_annotation_remains_inline_only(self):
+        ctx = _make_ctx(
+            "keep",
+            "def keep(pair: pl.Tuple[pl.Tile[[8, 64], pl.FP32]]):\n    return pair[0]",
+            func_type="incore",
+            param_names=["pair"],
+            auto_scope=False,
+        )
+        ctx.py_globals = {"pl": pl}
+        assert "def keep(self, pair):" in specialize("_TestClass", [ctx])
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

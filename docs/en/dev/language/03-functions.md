@@ -162,6 +162,8 @@ substitution, including valid extents, strides, and offsets. This includes indir
 dependencies through shared dimensions such as `rows = 2*n`. An omitted actual
 valid shape uses its physical shape, and an omitted offset is zero. A
 Scalar-dependent stride contract requires explicit actual stride metadata.
+JIT specialization also retains nested `pl.Tuple` parameter annotations, including
+the complete Tile types, their dynamic symbols, and per-call constexpr bindings.
 The same physical and view checks apply recursively to Tiles in tuple parameters.
 Dynamic dimension names emitted from Tile annotations must use assignable Python
 identifiers in normalized spelling, must not be Python keywords, and must not
