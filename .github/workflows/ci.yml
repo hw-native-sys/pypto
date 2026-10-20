@@ -1556,12 +1556,11 @@ jobs:
           unset-ring: 'true'
 
       - name: Test distributed system tests
-        # The step clock includes both task-submit queueing and the device run.
-        # Keep enough headroom for a typical ~10-minute suite after waiting for
-        # a two-card slot; --max-time below still caps device execution at 30m,
-        # so leave the step budget above that or the runner kills the task
-        # before task-submit can report the cap cleanly.
-        timeout-minutes: 45
+        # task-submit --timeout is the total wait for queueing plus execution;
+        # allow 90 minutes while --max-time still caps device execution at 30m.
+        # Give the Actions step another five minutes so the client can report
+        # its timeout and clean up before the runner cancels the step.
+        timeout-minutes: 95
         # Mechanism B (multi-card): borrow 4 NPUs via `task-submit --device auto
         # --device-num 4` for the whole pytest run; $TASK_DEVICE is the lent set
         # (comma-separated), passed to --device. The job no longer pins an
@@ -1591,7 +1590,7 @@ jobs:
         # two and three ways.
         run: |
           source activate.sh
-          task-submit --device "$DEVICE_ID" --device-num 4 --timeout 3600 --max-time 1800 \
+          task-submit --device "$DEVICE_ID" --device-num 4 --timeout 5400 --max-time 1800 \
             --run "cd $GITHUB_WORKSPACE/dist-checkout && source activate.sh && python -m pytest tests/st/distributed -v -n 6 --device-group-size 2 --device=\$TASK_DEVICE --ignore=tests/st/distributed/test_l2_multi_orch.py"
 
       - name: Test multi-card cases outside tests/st/distributed
@@ -2264,7 +2263,10 @@ jobs:
           toolchain: bundle
 
       - name: mixed-kernel-tests-a5
-        timeout-minutes: 60
+        # The client waits up to 120m total for queueing plus execution, while
+        # --max-time independently caps device execution at 60m. Leave another
+        # five minutes for the client to report a timeout and clean up.
+        timeout-minutes: 125
         # Mechanism B: one task-submit card session wrapping a single pytest run
         # (no precompile pipeline), executed in-process on the borrowed card. The
         # suite is parametrized over the platform ids, so --platform=a5 selects
@@ -2275,14 +2277,16 @@ jobs:
           source activate.sh
           echo "[device] DEVICE_ID=$DEVICE_ID"
           test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
-          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 3600 \
+          task-submit --device "$DEVICE_ID" --timeout 7200 --max-time 3600 \
             --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && python -m pytest \
               tests/st/runtime/cross_core/test_cross_core.py \
               tests/st/runtime/ops/test_matmul.py::test_fp32_matmul_clears_inherited_hf32 \
               -v --forked --platform=a5 --device=\$TASK_DEVICE"
 
       - name: mx-tests-a5
-        timeout-minutes: 60
+        # Match the 120m total client wait, 60m device execution cap, and five
+        # extra minutes for reporting and cleanup used by mixed-kernel-tests-a5.
+        timeout-minutes: 125
         # Same card session shape as mixed-kernel-tests-a5. matmul_mx covers
         # host-prequant MXFP8 / FP4×FP8; quant_mx covers on-board TQUANT; the
         # staged case verifies the produced data and scale feed a later matmul.
@@ -2290,7 +2294,7 @@ jobs:
           source activate.sh
           echo "[device] DEVICE_ID=$DEVICE_ID"
           test -n "$DEVICE_ID" || { echo "DEVICE_ID is empty in the runner env"; exit 1; }
-          task-submit --device "$DEVICE_ID" --timeout 3600 --max-time 3600 \
+          task-submit --device "$DEVICE_ID" --timeout 7200 --max-time 3600 \
             --run "cd $GITHUB_WORKSPACE/a5-checkout && source activate.sh && python -m pytest \
               tests/st/runtime/ops/test_matmul_mx.py \
               tests/st/runtime/ops/test_quant_mx.py \
