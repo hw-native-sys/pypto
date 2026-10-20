@@ -1605,9 +1605,10 @@ def _fold_const_names(
     DTYPE]``) survives too.
 
     A helper's own ``pl.constexpr`` bindings take precedence over free names.
-    Substitute their already-rendered source before evaluating a parameter
-    annotation, so a Tile shape can refer to a constexpr parameter even when
-    that name is absent from the defining namespace.
+    Public DSL module/type aliases also become canonical paths, so ``p.Tile``
+    and ``Tile[..., MS.Vec]`` remain defined in the generated module. This
+    rewrites the source AST rather than rebuilding the type from shape/dtype;
+    trailing metadata such as TileView and MemRef must survive unchanged.
 
     The input AST is left untouched (a deep copy is transformed) because
     ``func_def`` is shared with the body specialization pass.
@@ -1617,9 +1618,31 @@ def _fold_const_names(
         def visit_Name(self, node: ast.Name) -> ast.expr:
             if constexpr_values and node.id in constexpr_values:
                 return ast.copy_location(ast.parse(constexpr_values[node.id], mode="eval").body, node)
-            return _fold_free_name(node.id, py_globals, node) or node
+            folded = _fold_free_name(node.id, py_globals, node)
+            if folded is not None:
+                return folded
+            path = _annotation_symbol_index().get(id(py_globals.get(node.id, _UNBOUND)))
+            return ast.copy_location(ast.parse(path, mode="eval").body, node) if path else node
 
     return _Folder().visit(copy.deepcopy(node))
+
+
+@functools.lru_cache(maxsize=1)
+def _annotation_symbol_index() -> dict[int, str]:
+    """Map public DSL symbol identities to paths available in generated annotations.
+
+    Unlike body-value folding, annotation rendering must also recognize module
+    and constructor aliases, including TileView/MemRef and memory-space enums.
+    Only exports of the canonical DSL modules qualify; arbitrary user objects
+    keep their original names and annotation-evaluation behavior.
+    """
+    paths: dict[int, str] = {}
+    for prefix, module_name in (("pl", "pypto.language"), ("pld", "pypto.language.distributed")):
+        namespace = importlib.import_module(module_name)
+        paths[id(namespace)] = prefix
+        for name in sorted(namespace.__all__):
+            paths.setdefault(id(getattr(namespace, name)), f"{prefix}.{name}")
+    return paths
 
 
 def _infer_return_type(
@@ -2197,19 +2220,25 @@ class Specializer:
         # Build decorator
         decorator = self._build_decorator(ctx)
 
-        # Non-tensor, non-scalar params with an evaluable typed annotation
-        # (e.g. ``tids: pl.Array[N, pl.TASK_ID]`` or an inline ``pl.Tile``) —
-        # fold constexpr and closure constants before evaluating the annotation.
-        #
-        # Keep the function's own namespace and a canonical ``pl`` fallback
-        # for names emitted by constant folding (e.g. ``DTYPE`` -> ``pl.BF16``
-        # when the function imports the DSL under another alias). As before,
-        # best-effort annotation evaluation has no Python builtins.
-        ann_globals: dict[str, Any] = {
+        # Evaluate original annotations in their own namespace. Folding a
+        # dtype first would introduce ``pl.BF16`` even when the user imports
+        # the DSL as ``p`` and binds an unrelated object to ``pl``.
+        canonical_globals: dict[str, Any] = {
             "pl": importlib.import_module("pypto.language"),
+            "pld": importlib.import_module("pypto.language.distributed"),
+            "__builtins__": {},
+        }
+        ann_globals: dict[str, Any] = {
+            **canonical_globals,
             **ctx.py_globals,
             "__builtins__": {},
         }
+        # Constexpr sources are compiler-rendered canonical expressions. Decode
+        # them separately before overriding the corresponding original names,
+        # so helper bindings win without replacing the user's module aliases.
+        ann_globals.update(
+            {name: _eval_annotation(value, canonical_globals) for name, value in ctx.constexpr_values.items()}
+        )
         scalar_dtype_strs = {
             name: _scalar_dtype_source(text, ann_globals) for name, text in scalar_dtype_strs.items()
         }
@@ -2219,15 +2248,14 @@ class Specializer:
                 continue
             if arg.arg in tensor_params or arg.arg in scalar_dtype_strs:
                 continue
-            annotation = _fold_const_names(arg.annotation, ctx.py_globals, ctx.constexpr_values)
-            ann_source = ast.unparse(annotation)
-            ann_obj = _eval_annotation(ann_source, ann_globals)
+            ann_obj = _eval_annotation(ast.unparse(arg.annotation), ann_globals)
             if isinstance(ann_obj, _LangArray) and ann_obj.extent is not None and ann_obj.dtype is not None:
                 extra_param_anns[arg.arg] = f"pl.Array[{ann_obj.extent}, {_array_dtype_str(ann_obj.dtype)}]"
             elif is_inline and isinstance(ann_obj, _LangTile):
                 # Keep the declared type; inlining substitutes the caller's
                 # actual Tile, including its valid shape, without a Tile copy.
-                extra_param_anns[arg.arg] = ann_source
+                annotation = _fold_const_names(arg.annotation, ctx.py_globals, ctx.constexpr_values)
+                extra_param_anns[arg.arg] = ast.unparse(annotation)
 
         params = self._build_params(
             all_param_names,

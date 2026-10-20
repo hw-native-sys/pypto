@@ -99,11 +99,14 @@ def keep_tile(tile: pl.Tile[[8, 64], pl.FP32, pl.MemorySpace.Vec]) -> pl.Tile:
 专门化（specialization）保留声明的形状、数据类型和内存空间，并折叠注解中引用的
 模块与闭包常量。如果延迟求值的注解引用 helper 自身的 `pl.constexpr` 参数，
 会先代入该调用的 constexpr 绑定，再求值注解；该绑定优先于模块或闭包中的同名常量。
-不同绑定会生成各自的 helper 专门化。
+不同绑定会生成各自的 helper 专门化。`p.Tile` 或直接导入的 `Tile` 等 DSL 别名
+会转换为规范的 `pl` 路径，并保留 `TileView`、`MemRef` 元数据；用户恰好定义了
+无关的同名变量 `pl`，也不会干扰生成结果。
 
-内联（inlining）直接代入调用方的 Tile，无需复制，并保留调用方的有效形状
-（valid shape）。这不会放宽对不兼容 Tile 实参的类型检查，也不会为设备派发接口
-增加 Tile 参数支持。
+`InlineFunctions` 在代入实参之前检查 Tile 的数据类型、物理维数与形状，以及双方
+已明确指定的内存空间是否冲突。泛型物理维度绑定到实参的物理尺寸，有效尺寸不参与
+这一检查。内联（inlining）直接代入调用方的 Tile，无需复制，并保留其有效形状
+（valid shape）。Tile 参数仅用于内联 helper，不会扩展到设备派发接口。
 
 ### 编译选项与诊断请求
 

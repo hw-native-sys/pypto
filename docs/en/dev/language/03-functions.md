@@ -121,11 +121,16 @@ module and closure constants in the annotation. When a postponed annotation
 uses the helper's own `pl.constexpr` parameter, that call's constexpr binding is
 substituted before the annotation is evaluated; it takes precedence over a
 same-named module or closure constant. Different bindings produce separate
-helper specializations.
+helper specializations. DSL aliases such as `p.Tile` or a directly imported
+`Tile` are rendered as canonical `pl` paths, preserving `TileView` and `MemRef`
+metadata. An unrelated user variable named `pl` does not affect this rendering.
 
-Inlining substitutes the caller's Tile without copying it, preserving the
-caller's valid shape. This does not relax type checking for incompatible Tile
-arguments or add Tile parameters to device dispatch interfaces.
+Before substituting arguments, `InlineFunctions` checks Tile dtype, physical
+rank and shape, and conflicting explicitly resolved memory spaces. Generic
+physical dimensions bind to the actual Tile's physical extents; valid extents
+do not constrain that check. Inlining substitutes the caller's Tile without
+copying it, preserving its valid shape. Tile parameters remain limited to
+inline helpers and are not added to device dispatch interfaces.
 
 ### Compile options and diagnostic requests
 

@@ -3937,6 +3937,40 @@ class TestInlineFuncIntegration:
 class TestInlineTileAnnotations:
     """Typed inline Tile parameters keep their on-core contract (issue #3034)."""
 
+    @pytest.mark.parametrize(
+        "shape, dtype, space, mismatch",
+        [
+            ([16, 64], pl.FP32, pl.Mem.Vec, "physical shape dimension"),
+            ([8, 64], pl.BF16, pl.Mem.Vec, "dtype"),
+            ([8, 64], pl.FP32, pl.Mem.Mat, "memory space"),
+        ],
+        ids=["shape", "dtype", "memory-space"],
+    )
+    def test_compile_rejects_conflicting_inline_tile(self, shape, dtype, space, mismatch):
+        """The default compile pipeline checks a Tile before erasing the helper."""
+
+        @jit.inline(auto_scope=False)
+        def keep_tile(tile: pl.Tile[[8, 64], pl.FP32, pl.Mem.Vec]) -> pl.Tile:
+            return tile
+
+        @jit.incore
+        def copy_incore(src: pl.Tensor[[16, 64], dtype]):
+            tile = pl.load(src, [0, 0], shape, target_memory=space)
+            _kept = keep_tile(tile)
+
+        @jit
+        def entry(src: pl.Tensor[[16, 64], dtype]):
+            copy_incore(src)
+
+        with pytest.raises(ValueError, match=f"Inline call to 'keep_tile' parameter 'tile': .*{mismatch}"):
+            entry.compile(
+                config=RunConfig(
+                    backend_type=BackendType.Ascend910,
+                    execution_mode=ExecutionMode.SIM,
+                    codegen_only=True,
+                )
+            )
+
     @staticmethod
     def _dynamic_entries():
         M = pl.dynamic("INLINE_TILE_ROWS")

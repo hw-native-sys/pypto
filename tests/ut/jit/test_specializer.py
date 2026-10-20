@@ -2165,6 +2165,34 @@ class TestArrayParamAnnotation:
         )
         assert "buf: pl.Array[4, pl.BF16]" in out
 
+    def test_array_module_alias_ignores_unrelated_pl_global(self):
+        """Evaluate DTYPE where written, before generated names use canonical ``pl``."""
+        src = """
+            def kernel(buf: p.Array[4, DTYPE]):
+                return buf
+        """
+        out = self._specialize_with_globals(
+            src,
+            ["buf"],
+            {},
+            py_globals={"p": pl, "pl": object(), "DTYPE": pl.BF16},
+        )
+        assert "buf: pl.Array[4, pl.BF16]" in out
+
+    def test_annotation_evaluation_respects_original_pl_binding(self):
+        """Canonical rendering must not make an invalid original annotation valid."""
+        src = """
+            def kernel(buf: pl.Array[4, DTYPE]):
+                return buf
+        """
+        out = self._specialize_with_globals(
+            src,
+            ["buf"],
+            {},
+            py_globals={"p": pl, "pl": object(), "DTYPE": pl.BF16},
+        )
+        assert "def kernel(self, buf):" in out
+
     def test_generated_source_is_parseable(self):
         """The generated source is syntactically valid Python and carries no
         bare (unannotated) parameter — the concrete regression guard."""
@@ -2281,6 +2309,90 @@ class TestInlineTileParamAnnotations:
         func = program.get_function("keep_tile")
         assert func is not None
         assert isinstance(func.params[0].type, ir.TileType)
+
+    @pytest.mark.parametrize(
+        "tile_name,view_name,memref_name,space_name",
+        [
+            ("p.Tile", "p.TileView", "p.MemRef", "p.Mem.Vec"),
+            ("Tile", "View", "Ref", "MS.Vec"),
+        ],
+    )
+    def test_aliases_render_canonically_without_losing_metadata(
+        self, tile_name, view_name, memref_name, space_name
+    ):
+        """Aliases disappear from generated source while the full Tile contract remains."""
+        ctx = _make_ctx(
+            "keep_tile",
+            f"""
+                def keep_tile(tile: {tile_name}[[8, 64], DTYPE,
+                              {memref_name}("tile_buffer", 64, 2048), {space_name},
+                              {view_name}(valid_shape=[3, 64], stride=[64, 1], start_offset=0,
+                                          pad=p.PadValue.zero, compact=p.CompactMode.normal)]):
+                    return tile
+            """,
+            func_type="inline",
+            param_names=["tile"],
+            auto_scope=False,
+        )
+        ctx.py_globals = {
+            "p": pl,
+            "pl": object(),
+            "Tile": pl.Tile,
+            "View": pl.TileView,
+            "Ref": pl.MemRef,
+            "MS": pl.Mem,
+            "DTYPE": pl.BF16,
+        }
+
+        source = specialize("_TestClass", [ctx])
+        assert "tile: pl.Tile[[8, 64], pl.BF16," in source
+        assert "pl.TileView(" in source and "pl.MemRef(" in source
+        program = pl.parse(source)
+        assert isinstance(program, ir.Program)
+        func = program.get_function("keep_tile")
+        assert func is not None
+        expected_type = ir.TileType(
+            [8, 64],
+            DataType.BF16,
+            memref=ir.MemRef("tile_buffer", 64, 2048),
+            tile_view=ir.TileView(
+                valid_shape=[3, 64],
+                stride=[64, 1],
+                start_offset=ir.ConstInt(0, DataType.INDEX, ir.Span.unknown()),
+                pad=ir.PadValue.zero,
+                compact=ir.CompactMode.normal,
+            ),
+            memory_space=ir.MemorySpace.Vec,
+        )
+        ir.assert_structural_equal(func.params[0].type, expected_type, enable_auto_mapping=True)
+
+    def test_constexpr_alias_annotation_ignores_unrelated_pl_global(self):
+        """Decode generated constexpr paths separately from the user's module bindings."""
+        ctx = _make_ctx(
+            "keep_tile",
+            """
+                def keep_tile(tile: p.Tile[[ROWS * 2, 64], DTYPE, SPACE],
+                              ROWS: p.constexpr, DTYPE: p.constexpr, SPACE: p.constexpr):
+                    return tile
+            """,
+            func_type="inline",
+            param_names=["tile", "ROWS", "DTYPE", "SPACE"],
+            auto_scope=False,
+        )
+        ctx.py_globals = {"p": pl, "pl": object(), "ROWS": 99, "DTYPE": pl.FP32, "SPACE": pl.Mem.Acc}
+        ctx.constexpr_values = {"ROWS": "4", "DTYPE": "pl.BF16", "SPACE": "pl.Mem.Vec"}
+
+        source = specialize("_TestClass", [ctx])
+        assert "tile: pl.Tile[[4 * 2, 64], pl.BF16, pl.Mem.Vec]" in source
+        program = pl.parse(source)
+        assert isinstance(program, ir.Program)
+        func = program.get_function("keep_tile")
+        assert func is not None
+        assert len(func.params) == 1
+        ir.assert_structural_equal(
+            func.params[0].type,
+            ir.TileType([8, 64], DataType.BF16, memory_space=ir.MemorySpace.Vec),
+        )
 
     @pytest.mark.parametrize("rows", [4, 8])
     @pytest.mark.parametrize("shadowed", [False, True])
