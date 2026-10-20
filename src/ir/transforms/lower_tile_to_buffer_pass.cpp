@@ -565,12 +565,95 @@ class StorageIndex : public IRVisitor {
   std::unordered_map<const Var*, CallPtr> declarations_;
 };
 
-class TileToBufferMutator : public IRMutator {
+// Addressless accumulator declarations must retain the lexical lifetime of
+// their producers. Hoisting every descriptor to the byte-root declaration can
+// make PTOAS reserve several full-L0C accumulators across a loop backedge even
+// though each is drained before the next MAD. Only sink a root when *all* its
+// references belong to one region; carries and cross-region aliases stay at
+// their original dominating declaration. This indexed traversal is O(N).
+class LocalAccumulatorIndex : public IRVisitor {
  public:
-  explicit TileToBufferMutator(const StorageIndex& storage, bool guarded_valid)
-      : storage_(storage), guarded_valid_(guarded_valid) {}
+  explicit LocalAccumulatorIndex(const StmtPtr& body) : region_(body.get()) {}
+
+  const Stmt* DefinitionSite(const Var* root) const {
+    auto found = uses_.find(root);
+    return found != uses_.end() && found->second.region ? found->second.first : nullptr;
+  }
+
+  void VisitStmt(const StmtPtr& stmt) override {
+    const auto* outer_region = region_;
+    const auto* outer_statement = statement_;
+    if (regions_.count(stmt.get())) region_ = stmt.get();
+    statement_ = stmt.get();
+    IRVisitor::VisitStmt(stmt);
+    statement_ = outer_statement;
+    region_ = outer_region;
+  }
 
  protected:
+  void VisitVarLike_(const VarPtr& var) override {
+    auto tile = As<TileType>(var->GetType());
+    if (!tile || tile->GetMemorySpace() != MemorySpace::Acc) return;
+    auto memory = GetDefinedMemRef(tile);
+    if (!memory || !memory->base_) return;
+    auto [entry, inserted] = uses_.try_emplace(memory->base_.get(), Use{region_, statement_});
+    if (!inserted && entry->second.region != region_) entry->second.region = nullptr;
+  }
+
+  void VisitExpr_(const IterArgPtr& argument) override { VisitVarLike_(argument); }
+  void VisitStmt_(const ForStmtPtr& loop) override {
+    regions_.insert(loop->body_.get());
+    for (const auto& argument : loop->iter_args_) VisitExpr(argument->initValue_);
+    IRVisitor::VisitStmt_(loop);
+  }
+  void VisitStmt_(const WhileStmtPtr& loop) override {
+    regions_.insert(loop->body_.get());
+    for (const auto& argument : loop->iter_args_) VisitExpr(argument->initValue_);
+    IRVisitor::VisitStmt_(loop);
+  }
+  void VisitStmt_(const IfStmtPtr& branch) override {
+    regions_.insert(branch->then_body_.get());
+    if (branch->else_body_) regions_.insert(branch->else_body_->get());
+    IRVisitor::VisitStmt_(branch);
+  }
+
+ private:
+  struct Use {
+    const Stmt* region;
+    const Stmt* first;
+  };
+  const Stmt* region_;
+  const Stmt* statement_ = nullptr;
+  std::unordered_set<const Stmt*> regions_;
+  std::unordered_map<const Var*, Use> uses_;
+};
+
+class TileToBufferMutator : public IRMutator {
+ public:
+  TileToBufferMutator(const StorageIndex& storage, bool guarded_valid,
+                      const LocalAccumulatorIndex* local_accumulators)
+      : storage_(storage), guarded_valid_(guarded_valid), local_accumulators_(local_accumulators) {}
+
+  StmtPtr VisitStmt(const StmtPtr& stmt) override {
+    auto lowered = IRMutator::VisitStmt(stmt);
+    auto prefix = local_definitions_.find(stmt.get());
+    if (prefix == local_definitions_.end()) return lowered;
+    auto definitions = std::move(prefix->second);
+    local_definitions_.erase(prefix);
+    definitions.push_back(lowered);
+    return std::make_shared<SeqStmts>(std::move(definitions), stmt->span_);
+  }
+
+ protected:
+  StmtPtr VisitStmt_(const SeqStmtsPtr& sequence) override {
+    // The base mutator dispatches children directly, bypassing VisitStmt's
+    // insertion hook. Route each child through it before flattening prefixes.
+    std::vector<StmtPtr> statements;
+    statements.reserve(sequence->stmts_.size());
+    for (const auto& statement : sequence->stmts_) statements.push_back(VisitStmt(statement));
+    return SeqStmts::Flatten(std::move(statements), sequence->span_);
+  }
+
   ExprPtr VisitExpr_(const VarPtr& var) override {
     if (As<TileType>(var->GetType())) return Handle(var);
     auto alias = tensor_aliases_.find(var.get());
@@ -928,6 +1011,14 @@ class TileToBufferMutator : public IRMutator {
       INTERNAL_CHECK_SPAN(result, call->span_) << "Internal error: allocation has no pointer definition";
       auto found = storage_.roots.find(result.get());
       if (found == storage_.roots.end()) return Empty(call->span_);
+      if (local_accumulators_) {
+        if (const auto* site = local_accumulators_->DefinitionSite(result.get())) {
+          auto& definitions = local_definitions_[site];
+          definitions.insert(definitions.end(), found->second.definitions.begin(),
+                             found->second.definitions.end());
+          return Empty(call->span_);
+        }
+      }
       return std::make_shared<SeqStmts>(found->second.definitions, call->span_);
     }
     if (IsOp(call, "tile.create")) {
@@ -1211,6 +1302,8 @@ class TileToBufferMutator : public IRMutator {
   std::unordered_map<const TileType*, std::pair<CallPtr, VarPtr>> deferred_windows_;
   std::unordered_map<const TileType*, VarPtr> use_windows_;
   std::vector<StmtPtr> use_definitions_;
+  const LocalAccumulatorIndex* local_accumulators_;
+  std::unordered_map<const Stmt*, std::vector<StmtPtr>> local_definitions_;
   std::unordered_map<const TileType*, VarPtr> window_handles_;
   std::unordered_map<const Var*, std::pair<VarPtr, MakeTuplePtr>> window_origins_;
   YieldContext* yield_context_ = nullptr;
@@ -1247,7 +1340,13 @@ ProgramPtr TransformProgram(const ProgramPtr& program) {
     StorageIndex storage(addressed);
     storage.VisitStmt(function->body_);
     storage.Finalize();
-    TileToBufferMutator mutator(storage, function->GetAttr<bool>(kAttrBufferIrSelected, false));
+    std::optional<LocalAccumulatorIndex> local_accumulators;
+    if (!addressed) {
+      local_accumulators.emplace(function->body_);
+      local_accumulators->VisitStmt(function->body_);
+    }
+    TileToBufferMutator mutator(storage, function->GetAttr<bool>(kAttrBufferIrSelected, false),
+                                local_accumulators ? &*local_accumulators : nullptr);
     auto lowered = std::make_shared<Function>(*function);
     lowered->body_ = mutator.VisitStmt(function->body_);
     lowered->ir_stage_ = FunctionIRStage::Buffer;

@@ -99,6 +99,54 @@ class ExplicitMatmul:
 """)
 
 
+@pytest.mark.parametrize("size,operand", [(448, "FP32"), (320, "FP32"), (512, "BF16")])
+@pytest.mark.parametrize("enable_buffer_ir", [False, True])
+def test_single_c_mn_grid_keeps_accumulator_declarations_local(
+    tmp_path: Path, size: int, operand: str, enable_buffer_ir: bool
+) -> None:
+    # These three geometries fit with a single, sequentially drained L0C tile.
+    # Prologue declarations incorrectly extend the independent stage lifetimes
+    # across the loop backedge and make native PTOAS request 160--256 KiB.
+    program = pl.parse_program(f"""
+@pl.program
+class SingleCGrid:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, a: pl.Tensor[[{size}, 64], pl.{operand}],
+               b: pl.Tensor[[64, {size}], pl.{operand}],
+               out: pl.Out[pl.Tensor[[{size}, {size}], pl.FP32]]
+    ) -> pl.Tensor[[{size}, {size}], pl.FP32]:
+        lhs = pl.load(a, [0, 0], [{size}, 64], target_memory=pl.MemorySpace.Mat)
+        rhs = pl.load(b, [0, 0], [64, {size}], target_memory=pl.MemorySpace.Mat)
+        return pl.store(pl.matmul(lhs, rhs), [0, 0], out)
+""")
+    with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=enable_buffer_ir):
+        lowered = PassManager(OptimizationStrategy.Default).run_passes(program)
+    if enable_buffer_ir:
+        kernel = lowered.get_function("kernel")
+        assert kernel is not None and isinstance(kernel.body, ir.SeqStmts)
+        # Loop-local MAD destinations must be declared in their loop. Unrolled
+        # boundary MADs legitimately keep function-scope declarations.
+        loops = [stmt for stmt in statements(lowered) if isinstance(stmt, ir.ForStmt)]
+        assert loops
+        for loop in loops:
+            assert isinstance(loop.body, ir.SeqStmts)
+            local_accumulators = {
+                stmt.var.name_hint
+                for stmt in loop.body.stmts
+                if isinstance(stmt, ir.AssignStmt)
+                and isinstance(stmt.var.type, ir.BufferType)
+                and stmt.var.type.memory_space == ir.MemorySpace.Acc
+            }
+            for stmt in loop.body.stmts:
+                if isinstance(stmt, ir.EvalStmt) and isinstance(stmt.expr, ir.Call):
+                    if stmt.expr.op.name == "buffer.matmul":
+                        destination = stmt.expr.args[-1]
+                        assert isinstance(destination, ir.Var)
+                        assert destination.name_hint in local_accumulators
+        assert any(d.memory_space == ir.MemorySpace.Acc for d, _ in _allocations(lowered))
+    _compile_native(tmp_path, lowered, BackendType.Ascend910, addressed=False)
+
+
 @pytest.mark.parametrize("ascend_backend", _BACKENDS, indirect=True)
 @pytest.mark.parametrize("planner", _PLANNERS)
 @pytest.mark.parametrize(
@@ -154,6 +202,21 @@ def test_init_cond_selects_explicit_initializing_and_accumulating_writes(
     branches: int,
 ) -> None:
     lowered = _lower(_conditional_accumulation(init_cond), planner)
+    if planner == passes.MemoryPlanner.PTOAS:
+        kernel = lowered.get_function("kernel")
+        assert kernel is not None and isinstance(kernel.body, ir.SeqStmts)
+        # The seed, carry and final store share storage across region boundaries.
+        # Unlike local temporaries, this declaration must continue to dominate
+        # the loop and both arms of a runtime initialization predicate.
+        assert (
+            sum(
+                isinstance(stmt, ir.AssignStmt)
+                and isinstance(stmt.var.type, ir.BufferType)
+                and stmt.var.type.memory_space == ir.MemorySpace.Acc
+                for stmt in kernel.body.stmts
+            )
+            == 1
+        )
     names = _call_names(lowered)
     assert (names["buffer.matmul"], names["buffer.matmul_acc"]) == (initializing, accumulating)
     conditionals = [statement for statement in statements(lowered) if isinstance(statement, ir.IfStmt)]
