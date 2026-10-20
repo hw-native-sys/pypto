@@ -33,21 +33,21 @@ host-orchestrator 中的 `pld.tensor.allreduce` 调用会跳过本 Pass：`Synth
 
 ```text
 src/ir/transforms/lower_composite/
-  lower_composite_builder.{h,cpp}   — per-call statement builder and control flow
-  lower_composite_common.{h,cpp}    — shared collective geometry and validation
-  lower_composite_rules.h          — CompositeLoweringFn and internal rule declarations
-  lower_composite_rules.cpp        — op-name -> rule dispatch table (kRules)
-  lower_composite_math.cpp         — sin/cos and their shared polynomial recipe
-  lower_composite_select.cpp       — select, scalar materialization and scratch binding
-  lower_composite_mx.cpp           — tquant_mx and its workspace/view construction
+  lower_composite_builder.{h,cpp}   — 单次调用的语句构造器与控制流
+  lower_composite_common.{h,cpp}    — 共享的集合通信几何计算与校验
+  lower_composite_rules.h          — CompositeLoweringFn 与内部规则声明
+  lower_composite_rules.cpp        — 算子名 -> 规则的分发表 (kRules)
+  lower_composite_math.cpp         — sin/cos 及其共享的多项式降级实现
+  lower_composite_select.cpp       — select、标量物化与临时缓冲区绑定
+  lower_composite_mx.cpp           — tquant_mx 及其工作区/视图构建
   lower_composite_{allreduce,allgather,reduce_scatter,broadcast,barrier,
                    all_to_all,all_to_all_v}.cpp
-                                  — one translation unit per collective
+                                  — 每个集合通信算子一个翻译单元 (translation unit)
 
 src/ir/transforms/lower_composite_ops_pass.cpp
-  LowerCompositeOpsMutator         — statement rewriting and tuple/variable remapping
-  TransformLowerCompositeOps       — per-function context and managed-collective deferral
-  LowerCompositeOps                — pass factory
+  LowerCompositeOpsMutator         — 语句改写及元组/变量重映射
+  TransformLowerCompositeOps       — 函数级上下文与托管集合通信的延后处理
+  LowerCompositeOps                — Pass 工厂
 ```
 
 `CompositeLoweringFn` 接收原始 `CallPtr`、已访问的操作数以及 `LoweringBuilder&`，
