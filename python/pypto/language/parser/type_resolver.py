@@ -163,6 +163,7 @@ _TYPE_KIND_NAMES: dict[type, str] = {
     ir.TileType: "Tile",
     ir.ScalarType: "Scalar",
     ir.ArrayType: "Array",
+    ir.RegType: "Reg",
 }
 
 
@@ -466,7 +467,7 @@ class TypeResolver:
         Returns:
             Type name string if recognized, None otherwise
         """
-        valid = ("Tensor", "Tile", "Scalar", "Array", "Tuple", "DistributedTensor")
+        valid = ("Tensor", "Tile", "Scalar", "Array", "Reg", "Tuple", "DistributedTensor")
         if isinstance(node, ast.Attribute) and node.attr in valid:
             return node.attr
         if isinstance(node, ast.Name) and node.id in valid:
@@ -583,6 +584,40 @@ class TypeResolver:
         if type_name == "Scalar":
             dtype = self.resolve_dtype(slice_value)
             return ir.ScalarType(dtype)
+
+        if type_name == "Reg":
+            if not isinstance(slice_value, ast.Tuple) or len(slice_value.elts) not in (2, 3):
+                raise ParserTypeError(
+                    "Reg requires [lanes, dtype, optional kind]", span=self._get_span(value)
+                )
+            shape_node, dtype_node = slice_value.elts[:2]
+            success, shape = self.expr_evaluator.try_eval_expr(shape_node)
+            if not success or not isinstance(shape, int) or isinstance(shape, bool):
+                raise ParserTypeError(
+                    "Reg lanes must be a static positive integer", span=self._get_span(shape_node)
+                )
+            kind = ir.RegKind.VecReg
+            if len(slice_value.elts) == 3:
+                kind_node = slice_value.elts[2]
+                # Canonical printer output resolves without a captured `pl`
+                # module, just like builtin dtype spellings. Aliases still use
+                # the compile-time evaluator rather than accepting arbitrary ints.
+                owner = kind_node.value if isinstance(kind_node, ast.Attribute) else None
+                is_reg_kind = (isinstance(owner, ast.Name) and owner.id == "RegKind") or (
+                    isinstance(owner, ast.Attribute) and owner.attr == "RegKind"
+                )
+                if (
+                    isinstance(kind_node, ast.Attribute)
+                    and is_reg_kind
+                    and kind_node.attr in ("VecReg", "MaskReg")
+                ):
+                    kind = ir.RegKind.VecReg if kind_node.attr == "VecReg" else ir.RegKind.MaskReg
+                else:
+                    success, resolved_kind = self.expr_evaluator.try_eval_expr(kind_node)
+                    if not success or not isinstance(resolved_kind, ir.RegKind):
+                        raise ParserTypeError("Reg kind must be a RegKind", span=self._get_span(kind_node))
+                    kind = resolved_kind
+            return ir.RegType(shape, self.resolve_dtype(dtype_node), kind)
 
         if type_name == "Array":
             # pl.Array[N, dtype] — N is an int literal, dtype is a DataType ref.

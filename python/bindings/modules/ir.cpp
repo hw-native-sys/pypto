@@ -409,6 +409,15 @@ void BindIR(nb::module_& m) {
   void_type_class.def_static("get", &GetVoidType, "Get the singleton VoidType instance");
   BindFields<VoidType>(void_type_class);
 
+  nb::enum_<RegKind>(ir, "RegKind", "Register descriptor kind")
+      .value("VecReg", RegKind::VecReg)
+      .value("MaskReg", RegKind::MaskReg);
+  auto reg_type_class = nb::class_<RegType, Type>(ir, "RegType", "Static logical register descriptor");
+  reg_type_class.def(nb::init<int64_t, DataType, RegKind>(), nb::arg("shape"), nb::arg("dtype"),
+                     nb::arg("kind"));
+  BindFields<RegType>(reg_type_class);
+  reg_type_class.def_prop_ro("lanes", &RegType::GetLanes);
+
   // ScalarType - const shared_ptr
   auto scalar_type_class = nb::class_<ScalarType, Type>(ir, "ScalarType", "Scalar type representation");
   scalar_type_class.def(nb::init<DataType>(), nb::arg("dtype"), "Create a scalar type");
@@ -1668,6 +1677,10 @@ void BindIR(nb::module_& m) {
              "Software-pipelined loop (pre-lowering user marker + transient post-lowering marker)")
       .export_values();
 
+  nb::enum_<HardwareLoopPolicy>(ir, "HardwareLoopPolicy", "Hardware loop intent")
+      .value("Auto", HardwareLoopPolicy::Auto)
+      .value("Require", HardwareLoopPolicy::Require);
+
   // ForStmt - const shared_ptr
   auto for_stmt_class = nb::class_<ForStmt, Stmt>(
       ir, "ForStmt", "For loop statement: for loop_var in range(start, stop, step): body");
@@ -1676,14 +1689,15 @@ void BindIR(nb::module_& m) {
       [](ForStmt* self, const VarPtr& loop_var, const ExprPtr& start, const ExprPtr& stop,
          const ExprPtr& step, const std::vector<IterArgPtr>& iter_args, const StmtPtr& body,
          const std::vector<VarPtr>& return_vars, const Span& span, ForKind kind,
-         const nb::object& attrs_or_none) {
+         const nb::object& attrs_or_none, HardwareLoopPolicy hardware_loop_policy) {
         auto attrs = ConvertAttrsFromPython(attrs_or_none);
-        new (self)
-            ForStmt(loop_var, start, stop, step, iter_args, body, return_vars, span, kind, std::move(attrs));
+        new (self) ForStmt(loop_var, start, stop, step, iter_args, body, return_vars, span, kind,
+                           std::move(attrs), {}, hardware_loop_policy);
       },
       nb::arg("loop_var"), nb::arg("start"), nb::arg("stop"), nb::arg("step"), nb::arg("iter_args"),
       nb::arg("body"), nb::arg("return_vars"), nb::arg("span"), nb::arg("kind") = ForKind::Sequential,
-      nb::arg("attrs") = nb::none(), "Create a for loop statement");
+      nb::arg("attrs") = nb::none(), nb::arg("hardware_loop_policy") = HardwareLoopPolicy::Auto,
+      "Create a for loop statement");
   BindFields<ForStmt>(for_stmt_class);
   // Custom attrs property: convert vector<pair<string, any>> to Python dict
   for_stmt_class.def_prop_ro(
@@ -1718,6 +1732,7 @@ void BindIR(nb::module_& m) {
              "Comm-domain scope (with orch.allocate_domain(...) wrapper for host_orch window buffers)")
       .value("SplitAiv", ScopeKind::SplitAiv, "Explicit AIV-split region (pl.split_aiv)")
       .value("Graph", ScopeKind::Graph, "Recordable orchestration region (pl.graph)")
+      .value("Reg", ScopeKind::Reg, "Register lexical region")
       .export_values();
 
   // SplitMode enum
@@ -1813,6 +1828,22 @@ void BindIR(nb::module_& m) {
       [kwargs_to_pydict](const std::shared_ptr<const ClusterScopeStmt>& self) {
         return kwargs_to_pydict(self->attrs_);
       },
+      scope_attrs_doc);
+
+  auto reg_scope_stmt_class =
+      nb::class_<RegScopeStmt, ScopeStmt>(ir, "RegScopeStmt", "Register lexical scope");
+  reg_scope_stmt_class.def(
+      "__init__",
+      [](RegScopeStmt* self, std::string name_hint, const StmtPtr& body, const Span& span,
+         std::vector<std::string> leading_comments, const nb::object& attrs) {
+        new (self) RegScopeStmt(std::move(name_hint), body, span, std::move(leading_comments),
+                                ConvertAttrsFromPython(attrs));
+      },
+      nb::arg("name_hint"), nb::arg("body"), nb::arg("span"),
+      nb::arg("leading_comments") = std::vector<std::string>{}, nb::arg("attrs") = nb::none());
+  BindFields<RegScopeStmt>(reg_scope_stmt_class);
+  reg_scope_stmt_class.def_prop_ro(
+      "attrs", [kwargs_to_pydict](const RegScopeStmtPtr& self) { return kwargs_to_pydict(self->attrs_); },
       scope_attrs_doc);
 
   // GraphScopeStmt

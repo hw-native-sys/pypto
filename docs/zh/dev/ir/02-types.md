@@ -21,6 +21,31 @@ float_type = ir.ScalarType(DataType.FP32)
 >
 > **注意：** `TASK_ID` 是一个不透明的 64-bit handle（类型代码 `0x50`），表示 runtime 的 `TaskId`。它**不是**数值类型——上面没有任何算术运算。`Scalar[TASK_ID]` 值由 `with pl.manual_scope():` 内的 `pl.submit(...)` 产生（它返回的二元组第二个元素命名 producer task）。Python 字面量 `None` 是 "暂无 producer" 的哨兵——它用作 TaskId 循环 iter_arg 的种子，也可作为 `deps=[None]` 条目；当 `None` 出现在 TaskId 位置时，会下沉为 [`system.task_invalid`](05-operators.md) builtin → `TaskId::invalid()`。TaskId 值通过 `pl.submit(...)` 的 `deps=[tid1, tid2]` kwarg 传入。codegen 把 `TASK_ID` 下沉为 `TaskId`。
 
+### 寄存器 IR 描述符
+
+`RegType(shape, dtype, kind)` 直接继承 `Type`。shape 是表示逻辑 lane 数的单个
+正整数，与物理向量宽度无关；`lanes` 直接返回该整数。`RegKind.VecReg` 禁止
+`BOOL`，`RegKind.MaskReg` 必须使用 `BOOL`。非法 shape、未知 dtype 和未知 kind 在构造或
+反序列化时立即失败。
+
+```python
+vector = ir.RegType(64, DataType.FP32, ir.RegKind.VecReg)
+mask = ir.RegType(64, DataType.BOOL, ir.RegKind.MaskReg)
+```
+
+标注形式为 `pl.Reg[64, pl.FP32]`（默认 VecReg）和
+`pl.Reg[64, pl.BOOL, pl.RegKind.MaskReg]`。这些描述符、无专属字段的
+`ir.RegScopeStmt(name_hint, body, span, leading_comments=[], attrs=None)` 和
+`ir.ForStmt.hardware_loop_policy` 属于 IR 基础设施，支持直接构造、visitor/mutator
+遍历、结构比较和二进制序列化。寄存器操作、`pl.reg_scope`、scope 完整 DSL 往返
+以及 VF 代码生成由后续改动实现。
+
+`HardwareLoopPolicy.Auto` 是新循环及缺少该字段的旧序列化循环的默认值。
+`Require` 是持久化的语义字段，不能被静默重置为 Auto；未知序列化 policy
+必须失败。本次基础设施改动不实现 hardware loop 分析或生成。
+
+`Simplify` 可消除已证明零次执行的 Sequential Require 循环，并返回初始携带值；非空 Require（包括单次循环）必须保留。
+
 ### 内部 Buffer 类型
 
 `BufferType` 描述最终设备 IR 中的可变片上缓冲区，直接继承 `Type`，

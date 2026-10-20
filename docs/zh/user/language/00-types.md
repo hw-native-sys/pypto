@@ -20,6 +20,15 @@ PyPTO 程序里每个值都带有类型，说明它住在哪里、元素有多�
 
 Shape 默认是静态的，在解析期检查。`pl.dynamic()` 让某一维退出这种检查，代价是编译器本可以从这个维度推出的一切。
 
+## 寄存器标注（IR 基础设施）
+
+`pl.Reg[L, dtype]` 描述具有静态正整数逻辑 lane 数 `L` 的寄存器值。
+可选第三项为 `pl.RegKind.VecReg`（默认值）或 `pl.RegKind.MaskReg`。
+MaskReg 必须使用 `pl.BOOL`，VecReg 禁止使用 BOOL。例如，
+`pl.Reg[64, pl.FP32]` 和 `pl.Reg[64, pl.BOOL, pl.RegKind.MaskReg]`
+都是合法标注。当前描述符支持 IR 构造和二进制序列化，尚不支持寄存器操作、
+scope DSL 执行或 VF 编译；参见[寄存器 IR 描述符](../../dev/ir/02-types.md#寄存器-ir-描述符)。
+
 ## Quickstart：读懂一个签名
 
 <!-- doctest: setup -->

@@ -18,6 +18,9 @@
 namespace pypto {
 namespace codegen {
 
+/// Reject persistent VF semantics whose lowering is not implemented yet.
+void VerifyVFInfrastructureCodegenPreconditions(const ir::ProgramPtr& program);
+
 /// Verify required IR properties before orchestration codegen.
 void VerifyOrchestrationCodegenPreconditions(const ir::ProgramPtr& program, const ir::FunctionPtr& func);
 

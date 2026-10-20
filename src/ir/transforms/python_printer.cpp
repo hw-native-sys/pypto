@@ -358,6 +358,7 @@ class IRPythonPrinter : public IRVisitor {
   void VisitStmt_(const RuntimeScopeStmtPtr& op) override;
   void VisitStmt_(const CommDomainScopeStmtPtr& op) override;
   void VisitStmt_(const GraphScopeStmtPtr& op) override;
+  void VisitStmt_(const RegScopeStmtPtr& op) override;
   void VisitStmt_(const SeqStmtsPtr& op) override;
   void VisitStmt_(const EvalStmtPtr& op) override;
   void VisitStmt_(const BreakStmtPtr& op) override;
@@ -723,6 +724,11 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
   if (auto multi_buffer = As<MultiBufferType>(type)) {
     return "pypto.ir.MultiBufferType(" + Print(multi_buffer->element_type_) + ", " +
            std::to_string(multi_buffer->slot_count_) + ")";
+  }
+  if (auto reg = As<RegType>(type)) {
+    return prefix_ + ".Reg[" + std::to_string(reg->shape_) + ", " + prefix_ + "." +
+           DataTypeToString(reg->dtype_) + ", " + prefix_ + ".RegKind." +
+           (reg->kind_ == RegKind::VecReg ? "VecReg" : "MaskReg") + "]";
   }
   if (auto scalar_type = As<ScalarType>(type)) {
     // Print as pl.Scalar[pl.INT64] for proper round-trip support
@@ -2071,6 +2077,8 @@ void IRPythonPrinter::VisitStmt_(const ReturnStmtPtr& op) {
 }
 
 void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
+  CHECK_SPAN(op->hardware_loop_policy_ == HardwareLoopPolicy::Auto, op->span_)
+      << "HardwareLoopPolicy.Require Python DSL printing is not supported yet; use serialization";
   // SSA-style for with pl.range() or pl.parallel() - no inline type annotations in unpacking
   stream_ << "for " << GetVarName(op->loop_var_.get());
 
@@ -2462,6 +2470,12 @@ void IRPythonPrinter::VisitStmt_(const ClusterScopeStmtPtr& op) {
   IncreaseIndent();
   PrintStmtBlock(op->body_);
   DecreaseIndent();
+}
+
+void IRPythonPrinter::VisitStmt_(const RegScopeStmtPtr& op) {
+  // PR1 has a binary IR fixture, but no scope DSL parser yet. Omitting this
+  // override would silently print the body without its register boundary.
+  CHECK_SPAN(false, op->span_) << "RegScopeStmt Python DSL printing is not supported yet; use serialization";
 }
 
 void IRPythonPrinter::VisitStmt_(const GraphScopeStmtPtr& op) {

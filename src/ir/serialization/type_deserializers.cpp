@@ -804,6 +804,20 @@ static IRNodePtr DeserializeForStmt(const msgpack::object& fields_obj, msgpack::
     }
   }
 
+  // Omission alone means legacy Auto. Do not use GetOptionalFieldObj here:
+  // it conflates explicit nil with absence, hiding corrupt semantic metadata.
+  HardwareLoopPolicy policy = HardwareLoopPolicy::Auto;
+  bool seen_policy = false;
+  for (uint32_t i = 0; i < fields_obj.via.map.size; ++i) {
+    const auto& entry = fields_obj.via.map.ptr[i];
+    if (entry.key.as<std::string>() != "hardware_loop_policy") continue;
+    CHECK(!seen_policy) << "Duplicate hardware_loop_policy";
+    seen_policy = true;
+    CHECK(entry.val.type == msgpack::type::POSITIVE_INTEGER && entry.val.via.u64 <= 1)
+        << "Unknown or malformed hardware_loop_policy";
+    policy = static_cast<HardwareLoopPolicy>(entry.val.via.u64);
+  }
+
   // Deserialize kind with backward compatibility (defaults to Sequential)
   ForKind kind = ForKind::Sequential;
   auto kind_obj = GetOptionalFieldObj(fields_obj, "kind", ctx);
@@ -828,7 +842,7 @@ static IRNodePtr DeserializeForStmt(const msgpack::object& fields_obj, msgpack::
       << "version (chunked loops can be expressed with manual tiling).";
 
   return std::make_shared<ForStmt>(loop_var, start, stop, step, iter_args, body, return_vars, span, kind,
-                                   std::move(attrs), DeserializeLeadingComments(fields_obj));
+                                   std::move(attrs), DeserializeLeadingComments(fields_obj), policy);
 }
 
 // Deserialize WhileStmt
@@ -941,6 +955,16 @@ static IRNodePtr DeserializeGraphScopeStmt(const msgpack::object& fields_obj, ms
   return std::make_shared<GraphScopeStmt>(std::move(name_hint), body, span,
                                           DeserializeLeadingComments(fields_obj),
                                           DeserializeScopeAttrs(fields_obj, ctx, zone));
+}
+
+static IRNodePtr DeserializeRegScopeStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
+                                         DeserializerContext& ctx) {
+  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
+  auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
+  auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
+  return std::make_shared<RegScopeStmt>(std::move(name_hint), body, span,
+                                        DeserializeLeadingComments(fields_obj),
+                                        DeserializeScopeAttrs(fields_obj, ctx, zone));
 }
 
 // Deserialize HierarchyScopeStmt
@@ -1364,6 +1388,7 @@ static TypeRegistrar _spmd_scope_stmt_registrar("SpmdScopeStmt", DeserializeSpmd
 static TypeRegistrar _split_aiv_scope_stmt_registrar("SplitAivScopeStmt", DeserializeSplitAivScopeStmt);
 static TypeRegistrar _runtime_scope_stmt_registrar("RuntimeScopeStmt", DeserializeRuntimeScopeStmt);
 static TypeRegistrar _comm_domain_scope_stmt_registrar("CommDomainScopeStmt", DeserializeCommDomainScopeStmt);
+static TypeRegistrar _reg_scope_stmt_registrar("RegScopeStmt", DeserializeRegScopeStmt);
 static TypeRegistrar _graph_scope_stmt_registrar("GraphScopeStmt", DeserializeGraphScopeStmt);
 static TypeRegistrar _seq_stmts_registrar("SeqStmts", DeserializeSeqStmts);
 static TypeRegistrar _eval_stmt_registrar("EvalStmt", DeserializeEvalStmt);

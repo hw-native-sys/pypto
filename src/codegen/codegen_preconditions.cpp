@@ -95,11 +95,32 @@ void VerifyCodegenTargetFunctionMatchesProgram(const ProgramPtr& program, const 
 
 }  // namespace
 
+void VerifyVFInfrastructureCodegenPreconditions(const ProgramPtr& program) {
+  INTERNAL_CHECK(program != nullptr) << "VF infrastructure check requires a program";
+  // PR1 persists these semantics but does not lower them. Check the whole tree
+  // before emitting anything: the base scope visitor would otherwise erase the
+  // register boundary and ordinary scf.for emission would ignore Require.
+  class VFInfrastructureChecker : public ir::IRVisitor {
+   public:
+    void VisitStmt_(const ir::RegScopeStmtPtr& op) override {
+      CHECK_SPAN(false, op->span_) << "RegScopeStmt code generation is not supported yet";
+    }
+    void VisitStmt_(const ir::ForStmtPtr& op) override {
+      CHECK_SPAN(op->hardware_loop_policy_ == ir::HardwareLoopPolicy::Auto, op->span_)
+          << "HardwareLoopPolicy.Require code generation is not supported yet";
+      ir::IRVisitor::VisitStmt_(op);
+    }
+  } checker;
+  checker.VisitProgram(program);
+}
+
 void VerifyOrchestrationCodegenPreconditions(const ProgramPtr& program, const FunctionPtr& func) {
   INTERNAL_CHECK(program != nullptr)
       << "Internal error: GenerateOrchestration preconditions — program must not be null";
   INTERNAL_CHECK(func != nullptr)
       << "Internal error: GenerateOrchestration preconditions — function must not be null";
+
+  VerifyVFInfrastructureCodegenPreconditions(program);
 
   // Codegen assumes hierarchy references resolved, explicit RuntimeScopeStmt
   // materialization, and a stamped iter_arg carry plan on every ForStmt.
@@ -128,6 +149,8 @@ void VerifyOrchestrationCodegenPreconditions(const ProgramPtr& program, const Fu
 void VerifyDistributedCodegenPreconditions(const ProgramPtr& program) {
   INTERNAL_CHECK(program != nullptr)
       << "Internal error: DistributedCodegen preconditions — program must not be null";
+
+  VerifyVFInfrastructureCodegenPreconditions(program);
 
   DistributedTensorUseCollector collector;
   collector.VisitProgram(program);

@@ -2281,5 +2281,44 @@ class TestTensorViewIntegration:
         assert tv.valid_shape[1].name_hint == "valid_n"
 
 
+@pytest.mark.parametrize(
+    "annotation,dtype,kind",
+    [
+        ("pl.Reg[64, pl.FP32]", DataType.FP32, "VecReg"),
+        ("pl.Reg[64, pl.INT32, pl.RegKind.VecReg]", DataType.INT32, "VecReg"),
+        ("pl.Reg[64, pl.BOOL, pl.RegKind.MaskReg]", DataType.BOOL, "MaskReg"),
+    ],
+)
+def test_reg_annotation(annotation, dtype, kind):
+    resolver = _make_resolver({"pl": pl})
+    result = resolver.resolve_type(ast.parse(annotation, mode="eval").body)
+    assert isinstance(result, ir.RegType)
+    assert result.shape == 64
+    assert result.dtype == dtype
+    assert result.kind == getattr(ir.RegKind, kind)
+    runtime = pl.Reg.__class_getitem__((64, dtype, getattr(pl.RegKind, kind)))
+    ir.assert_structural_equal(result, runtime)
+
+
+@pytest.mark.parametrize("shape", ["[64]", "True", "0", "-1", "1.5"])
+def test_reg_annotation_rejects_invalid_shape(shape):
+    resolver = _make_resolver({"pl": pl})
+    with pytest.raises((ParserTypeError, TypeError, ValueError)):
+        resolver.resolve_type(ast.parse(f"pl.Reg[{shape}, pl.FP32]", mode="eval").body)
+
+
+def test_reg_runtime_annotation_defaults_to_vector():
+    assert isinstance(pl.Reg[64, pl.FP32], ir.RegType)
+    with pytest.raises(TypeError, match="static positive integer"):
+        pl.Reg[True, pl.FP32]
+
+
+def test_canonical_reg_annotation_resolves_without_captured_module():
+    annotation = ast.parse("pl.Reg[64, pl.BOOL, pl.RegKind.MaskReg]", mode="eval").body
+    result = _make_resolver().resolve_type(annotation)
+    assert isinstance(result, ir.RegType)
+    assert result.kind == ir.RegKind.MaskReg
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

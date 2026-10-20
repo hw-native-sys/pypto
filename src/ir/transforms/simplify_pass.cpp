@@ -443,7 +443,10 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
       // The depth cap keeps a chain of nested single-trip loops from cloning
       // the remaining nest once per level (see kMaxNestedSingleTripFolds); past
       // it the loop falls through to the general path and stays a ForStmt.
-      if (trips == 1 && fold_b_depth_ < kMaxNestedSingleTripFolds) {
+      // Empty Require loops need no hardware evidence. Nonempty ones must
+      // survive for qualification, even when ordinary folding could unfold them.
+      if (trips == 1 && op->hardware_loop_policy_ == HardwareLoopPolicy::Auto &&
+          fold_b_depth_ < kMaxNestedSingleTripFolds) {
         // Exactly one iteration: substitute loop_var → start and each
         // iter_arg → its init value via DeepClone (matches the substitution
         // pattern used by LoopUnrollMutator in unroll_loops_pass.cpp), then

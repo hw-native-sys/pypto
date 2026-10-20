@@ -32,6 +32,7 @@
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
+#include "pypto/codegen/codegen_preconditions.h"
 #include "pypto/codegen/distributed/comm_layout.h"
 #include "pypto/codegen/gm_pipe_layout.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
@@ -736,6 +737,7 @@ void PTOCodegen::WarnIfHighPrecisionIgnored(const std::string& op_name, const st
 // ========================================================================
 
 std::string PTOCodegen::Generate(const ProgramPtr& program, bool emit_tile_addr, bool emit_source_loc) {
+  VerifyVFInfrastructureCodegenPreconditions(program);
   emit_tile_addr_ = emit_tile_addr;
   emit_source_loc_ = emit_source_loc;
   current_span_ = nullptr;

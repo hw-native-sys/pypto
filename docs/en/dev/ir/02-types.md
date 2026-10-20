@@ -21,6 +21,34 @@ float_type = ir.ScalarType(DataType.FP32)
 >
 > **Note:** `TASK_ID` is an opaque 64-bit handle (type code `0x50`) representing a runtime `TaskId`. It is **not** a numeric type — no arithmetic is defined on it. A `Scalar[TASK_ID]` value is produced by `pl.submit(...)` (the second tuple element it returns names the producer task) inside `with pl.manual_scope():` regions. The Python literal `None` is the "no producer yet" sentinel — it seeds a TaskId loop iter_arg and is accepted as a `deps=[None]` entry; in a TaskId position it lowers to the [`system.task_invalid`](05-operators.md#syncop-synchronization-operations) builtin → `TaskId::invalid()`. TaskId values are passed in the `deps=[tid1, tid2]` kwarg of `pl.submit(...)`. Codegen lowers `TASK_ID` to `TaskId`.
 
+### Register IR descriptors
+
+`RegType(shape, dtype, kind)` inherits directly from `Type`. Its shape is a
+single positive integer counting logical lanes, independent of the physical
+vector width. `lanes` aliases that integer. `RegKind.VecReg` rejects `BOOL`;
+`RegKind.MaskReg` requires `BOOL`. Invalid shapes, unknown dtypes and unknown kinds fail at
+construction or deserialization.
+
+```python
+vector = ir.RegType(64, DataType.FP32, ir.RegKind.VecReg)
+mask = ir.RegType(64, DataType.BOOL, ir.RegKind.MaskReg)
+```
+
+The annotation forms are `pl.Reg[64, pl.FP32]` (VecReg by default) and
+`pl.Reg[64, pl.BOOL, pl.RegKind.MaskReg]`. These descriptors, the fieldless
+`ir.RegScopeStmt(name_hint, body, span, leading_comments=[], attrs=None)`, and
+`ir.ForStmt.hardware_loop_policy` are IR infrastructure. Direct construction,
+visitor/mutator traversal, structural comparison and binary serialization are
+supported. Register operations, `pl.reg_scope`, complete scope DSL roundtrips
+and VF code generation are reserved for later changes.
+
+`HardwareLoopPolicy.Auto` is the default for new loops and old serialized
+loops that omit the field. `Require` is persistent semantic metadata; it must
+never silently become Auto. Unknown serialized policy values fail. Hardware
+loop analysis and emission are not implemented by this infrastructure change.
+Simplify may remove proven zero-trip Sequential Require loops and return initial
+carried values; nonempty Require loops, including single-trip loops, are preserved.
+
 ### Internal buffer types
 
 `BufferType` describes a mutable on-chip buffer in the final device IR. It

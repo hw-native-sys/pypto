@@ -32,6 +32,16 @@ graph rather than a compile error.
 Shapes are static by default and checked at parse time. `pl.dynamic()` opts a dimension
 out of that, at the cost of everything the compiler could have concluded from knowing it.
 
+## Register annotations (IR infrastructure)
+
+`pl.Reg[L, dtype]` describes a register value with a static positive logical lane
+count `L`. The optional third parameter is `pl.RegKind.VecReg` (the default) or
+`pl.RegKind.MaskReg`. MaskReg requires `pl.BOOL`; VecReg forbids it. For example,
+`pl.Reg[64, pl.FP32]` and `pl.Reg[64, pl.BOOL, pl.RegKind.MaskReg]` are valid
+annotations. These descriptors currently support IR construction and binary
+serialization. Register operations, scope DSL execution and VF compilation are
+not yet available; see [register IR descriptors](../../dev/ir/02-types.md#register-ir-descriptors).
+
 ## Quickstart: reading a signature
 
 <!-- doctest: setup -->

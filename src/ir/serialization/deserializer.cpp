@@ -16,9 +16,11 @@
 #include <initializer_list>
 #include <ios>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -61,14 +63,27 @@ TypeFields ReadRequiredTypeFields(const msgpack::object& obj, const std::string&
     CHECK(fields.count(key) != 0) << type_kind << " is missing required field '" << key << "'";
   }
   CHECK(fields.size() == required_fields.size())
-      << type_kind << " has unexpected fields; buffer types cannot contain storage identities or addresses";
+      << type_kind << " has unexpected fields in its type descriptor";
   return fields;
 }
 
 template <typename Integer>
 Integer ReadTypeInteger(const msgpack::object& obj, const std::string& field) {
   CHECK(obj.type == msgpack::type::POSITIVE_INTEGER || obj.type == msgpack::type::NEGATIVE_INTEGER)
-      << "Buffer type field '" << field << "' must be an integer";
+      << "Type field '" << field << "' must be an integer";
+  // Check the wire value before conversion: narrowing enums/dtypes can turn
+  // corrupt large integers into valid-looking descriptor values.
+  if (obj.type == msgpack::type::POSITIVE_INTEGER) {
+    CHECK(obj.via.u64 <= static_cast<uint64_t>(std::numeric_limits<Integer>::max()))
+        << "Type field '" << field << "' is out of range";
+  } else {
+    if constexpr (std::is_signed_v<Integer>) {
+      CHECK(obj.via.i64 >= std::numeric_limits<Integer>::min())
+          << "Type field '" << field << "' is out of range";
+    } else {
+      CHECK(false) << "Type field '" << field << "' is out of range";
+    }
+  }
   return obj.as<Integer>();
 }
 
@@ -428,6 +443,13 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
     // Decode final buffer descriptors before the legacy shape-expression path.
     // Every descriptor field is required; malformed blobs must not acquire
     // default dtypes, layouts, or storage identities during deserialization.
+    if (type_kind == "RegType") {
+      const auto fields = ReadRequiredTypeFields(obj, type_kind, {"type_kind", "shape", "dtype", "kind"});
+      return std::make_shared<RegType>(
+          ReadTypeInteger<int64_t>(fields.at("shape"), "shape"),
+          DataType(ReadTypeInteger<uint8_t>(fields.at("dtype"), "dtype")),
+          static_cast<RegKind>(ReadTypeInteger<uint8_t>(fields.at("kind"), "kind")));
+    }
     if (type_kind == "VoidType") {
       ReadRequiredTypeFields(obj, type_kind, {"type_kind"});
       return GetVoidType();

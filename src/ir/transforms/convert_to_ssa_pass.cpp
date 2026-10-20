@@ -447,7 +447,8 @@ class SSAConverter {
     if (kind == ObjectKind::InCoreScopeStmt || kind == ObjectKind::ClusterScopeStmt ||
         kind == ObjectKind::HierarchyScopeStmt || kind == ObjectKind::SpmdScopeStmt ||
         kind == ObjectKind::RuntimeScopeStmt || kind == ObjectKind::SplitAivScopeStmt ||
-        kind == ObjectKind::CommDomainScopeStmt || kind == ObjectKind::GraphScopeStmt) {
+        kind == ObjectKind::CommDomainScopeStmt || kind == ObjectKind::GraphScopeStmt ||
+        kind == ObjectKind::RegScopeStmt) {
       return ConvertScope(As<ScopeStmt>(s));
     }
     return s;
@@ -1069,6 +1070,7 @@ class SSAConverter {
     if (auto split_aiv = As<SplitAivScopeStmt>(op)) return rewrite(split_aiv);
     if (auto comm_domain = As<CommDomainScopeStmt>(op)) return rewrite(comm_domain);
     if (auto graph = As<GraphScopeStmt>(op)) return rewrite(graph);
+    if (auto reg = As<RegScopeStmt>(op)) return rewrite(reg);
     INTERNAL_UNREACHABLE_SPAN(op->span_) << "Unknown ScopeStmt subclass: " << op->TypeName();
     return op;
   }

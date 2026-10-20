@@ -1,0 +1,130 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+"""RegScope is a fieldless ScopeStmt with ordinary traversal and persistence."""
+
+import pytest
+from pypto import DataType, ir, passes
+from pypto.ir.printer import python_print
+
+
+def _scope():
+    span = ir.Span("reg_scope.py", 2, 1, 4, 8)
+    value = ir.ConstInt(1, DataType.INT32, span)
+    return ir.RegScopeStmt("vf", ir.EvalStmt(value, span), span, ["keep"], {"tag": "local"})
+
+
+def test_reg_scope_fields_and_roundtrip():
+    scope = _scope()
+    assert isinstance(scope, ir.ScopeStmt)
+    assert scope.scope_kind == ir.ScopeKind.Reg
+    assert ir.ScopeKind.Reg.value == 9
+    assert scope.name_hint == "vf"
+    assert scope.attrs == {"tag": "local"}
+    assert list(scope.leading_comments) == ["keep"]
+    assert not hasattr(scope, "captures")
+    restored = ir.deserialize(ir.serialize(scope))
+    assert isinstance(restored, ir.RegScopeStmt)
+    ir.assert_structural_equal(scope, restored)
+    assert ir.structural_hash(scope) == ir.structural_hash(restored)
+    assert ir.serialize(scope) == ir.serialize(restored)
+    other = ir.ClusterScopeStmt("vf", scope.body, scope.span)
+    assert not ir.structural_equal(scope, other)
+
+
+def test_reg_scope_visitor_and_mutator_preserve_metadata():
+    class Visitor(ir.IRVisitor):
+        def __init__(self):
+            super().__init__()
+            self.values = []
+
+        def visit_const_int(self, op):
+            self.values.append(op.value)
+
+    class Mutator(ir.IRMutator):
+        def visit_const_int(self, op):
+            return ir.ConstInt(op.value + 1, op.dtype, op.span)
+
+    scope = _scope()
+    visitor = Visitor()
+    visitor.visit_stmt(scope)
+    assert visitor.values == [1]
+    changed = Mutator().visit_stmt(scope)
+    assert isinstance(changed, ir.RegScopeStmt)
+    assert isinstance(changed.body, ir.EvalStmt)
+    assert isinstance(changed.body.expr, ir.ConstInt)
+    assert changed.body.expr.value == 2
+    assert changed.attrs == scope.attrs
+    assert list(changed.leading_comments) == ["keep"]
+    assert changed.span.filename == "reg_scope.py"
+    assert not ir.structural_equal(scope, changed)
+
+
+def test_flatten_call_expr_keeps_nested_calls_inside_reg_scope():
+    span = ir.Span.unknown()
+    scalar = ir.ScalarType(DataType.INT32)
+    inner = ir.Call(ir.Op("inner"), [], scalar, span)
+    outer = ir.Call(ir.Op("outer"), [inner], scalar, span)
+    result = ir.Var("result", scalar, span)
+    scope = ir.RegScopeStmt("vf", ir.AssignStmt(result, outer, span), span, ["keep"], {"tag": "local"})
+    program = ir.Program([ir.Function("main", [], [], scope, span)], "test", span)
+    with passes.PassContext([]):
+        after = passes.flatten_call_expr()(program)
+    body = next(iter(after.functions.values())).body
+    if isinstance(body, ir.SeqStmts):
+        assert len(body.stmts) == 1, "Nested calls must not escape the register scope"
+        body = body.stmts[0]
+    assert isinstance(body, ir.RegScopeStmt)
+    assert body.name_hint == "vf"
+    assert body.attrs == {"tag": "local"}
+    assert list(body.leading_comments) == ["keep"]
+    assert isinstance(body.body, ir.SeqStmts)
+    first, second = body.body.stmts
+    assert isinstance(first, ir.AssignStmt)
+    assert isinstance(second, ir.AssignStmt)
+    ir.assert_structural_equal(first.value, inner)
+    assert isinstance(second.value, ir.Call)
+    assert second.value.op.name == "outer"
+    ir.assert_structural_equal(second.value.args[0], first.var)
+    ir.assert_structural_equal(second.var, result)
+
+
+def test_reg_scope_text_printing_does_not_erase_boundary():
+    with pytest.raises(ValueError, match="RegScopeStmt.*not supported"):
+        python_print(_scope(), format=False)
+
+
+def test_reg_scope_rejects_unknown_serialized_node_kind():
+    payload = ir.serialize(_scope())
+    assert payload.count(b"RegScopeStmt") == 1
+    with pytest.raises(TypeError, match="Unknown|registered"):
+        ir.deserialize(payload.replace(b"RegScopeStmt", b"BadScopeStmt"))
+
+
+def test_reg_scope_builder_context_preserves_body_and_attrs():
+    builder = ir.IRBuilder()
+    span = ir.Span.unknown()
+    value = ir.ConstInt(7, DataType.INT32, span)
+    with builder.function("kernel", span=span) as function:
+        with builder.scope(ir.ScopeKind.Reg, span=span, name_hint="vf", attrs=[("tag", "local")]) as region:
+            builder.emit(ir.EvalStmt(value, span))
+    scope = region.get_result()
+    assert isinstance(scope, ir.RegScopeStmt)
+    assert scope.scope_kind == ir.ScopeKind.Reg
+    assert scope.name_hint == "vf"
+    assert scope.attrs == {"tag": "local"}
+    assert isinstance(scope.body, ir.EvalStmt)
+    ir.assert_structural_equal(scope.body.expr, value)
+    built = function.get_result()
+    assert built is not None
+    ir.assert_structural_equal(built.body, scope)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

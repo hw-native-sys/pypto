@@ -961,6 +961,22 @@ StmtPtr IRMutator::VisitStmt_(const GraphScopeStmtPtr& op) {
   return op;
 }
 
+StmtPtr IRMutator::VisitStmt_(const RegScopeStmtPtr& op) {
+  INTERNAL_CHECK_SPAN(op->body_, op->span_) << "RegScopeStmt has null body";
+  auto new_body = StmtFunctor<StmtPtr>::VisitStmt(op->body_);
+  INTERNAL_CHECK_SPAN(new_body, op->span_) << "RegScopeStmt body mutated to null";
+  // ``kAttrDumpVars`` (``pl.dump_tag`` / ``dumps=``) names Vars, so a
+  // Var-substituting pass must rewrite it like the InCore / Spmd handlers do.
+  auto [new_attrs, attrs_changed] = MutateScopeAttrs(op->attrs_);
+  if (new_body.get() != op->body_.get() || attrs_changed) {
+    auto result = MutableCopy(op);
+    result->body_ = std::move(new_body);
+    if (attrs_changed) result->attrs_ = std::move(new_attrs);
+    return result;
+  }
+  return op;
+}
+
 StmtPtr IRMutator::VisitStmt_(const HierarchyScopeStmtPtr& op) {
   INTERNAL_CHECK_SPAN(op->body_, op->span_) << "HierarchyScopeStmt has null body";
   auto new_body = StmtFunctor<StmtPtr>::VisitStmt(op->body_);

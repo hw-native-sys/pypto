@@ -398,6 +398,10 @@ StmtPtr IRBuilder::EndScope(const Span& end_span, std::vector<int64_t> devices,
       scope_stmt = std::make_shared<const RuntimeScopeStmt>(
           *manual, std::move(name_hint), body, combined_span, std::vector<std::string>{}, std::move(attrs));
       break;
+    case ScopeKind::Reg:
+      scope_stmt = std::make_shared<const RegScopeStmt>(std::move(name_hint), body, combined_span,
+                                                        std::vector<std::string>{}, std::move(attrs));
+      break;
     case ScopeKind::Graph:
       // The region name becomes the outlined Graph function's name, which
       // codegen turns into the emitted symbol and hence the runtime's graph

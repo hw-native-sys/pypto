@@ -318,6 +318,20 @@ class ScalarType(Type):
             dtype: Data type
         """
 
+class RegKind(enum.Enum):
+    VecReg = 0
+    MaskReg = 1
+
+class RegType(Type):
+    """Static logical register descriptor, independent of ShapedType storage."""
+
+    shape: Final[int]
+    lanes: Final[int]
+    dtype: Final[DataType]
+    kind: Final[RegKind]
+
+    def __init__(self, shape: int, dtype: DataType, kind: RegKind) -> None: ...
+
 class ShapedType(Type):
     """Base class for shaped types (tensors and tiles)."""
 
@@ -2122,6 +2136,10 @@ class ReturnStmt(Stmt):
         """
         ...
 
+class HardwareLoopPolicy(enum.Enum):
+    Auto = 0
+    Require = 1
+
 class ForStmt(Stmt):
     """For loop statement: for loop_var in range(start, stop, step): body."""
 
@@ -2149,6 +2167,9 @@ class ForStmt(Stmt):
     kind: Final[ForKind]
     """Loop kind (Sequential, Parallel, or Unroll)."""
 
+    hardware_loop_policy: Final[HardwareLoopPolicy]
+    """Persistent hardware-loop intent."""
+
     attrs: Final[dict[str, object]]
     """Loop-level attributes (key-value metadata)."""
 
@@ -2164,6 +2185,7 @@ class ForStmt(Stmt):
         span: Span,
         kind: ForKind = ForKind.Sequential,
         attrs: dict[str, object] | list[tuple[str, object]] | None = None,
+        hardware_loop_policy: HardwareLoopPolicy = HardwareLoopPolicy.Auto,
     ) -> None:
         """Create a for loop statement.
 
@@ -2240,6 +2262,9 @@ class ScopeKind(enum.Enum):
 
     Graph = 8
     """Recordable orchestration region (pl.graph, outlined into a Graph function)."""
+
+    Reg = 9
+    """Register lexical region."""
 
 class SplitMode(enum.Enum):
     """Split mode for cross-core data transfer."""
@@ -2398,6 +2423,18 @@ class GraphScopeStmt(ScopeStmt):
 
     def __init__(self, name_hint: str, *, body: Stmt, span: Span) -> None:
         """Create a Graph scope statement (``name_hint`` is the region name)."""
+
+class RegScopeStmt(ScopeStmt):
+    """Register lexical region with common ScopeStmt fields only."""
+
+    def __init__(
+        self,
+        name_hint: str,
+        body: Stmt,
+        span: Span,
+        leading_comments: list[str] = [],
+        attrs: dict[str, object] | list[tuple[str, object]] | None = None,
+    ) -> None: ...
 
 class HierarchyScopeStmt(ScopeStmt):
     """Hierarchy scope: distributed-hierarchy region."""
@@ -4289,6 +4326,7 @@ class IRVisitor:
     def visit_in_core_scope_stmt(self, op: InCoreScopeStmt) -> None: ...
     def visit_cluster_scope_stmt(self, op: ClusterScopeStmt) -> None: ...
     def visit_graph_scope_stmt(self, op: GraphScopeStmt) -> None: ...
+    def visit_reg_scope_stmt(self, op: RegScopeStmt) -> None: ...
     def visit_hierarchy_scope_stmt(self, op: HierarchyScopeStmt) -> None: ...
     def visit_spmd_scope_stmt(self, op: SpmdScopeStmt) -> None: ...
     def visit_split_aiv_scope_stmt(self, op: SplitAivScopeStmt) -> None: ...
@@ -4372,6 +4410,7 @@ class IRMutator:
     def visit_in_core_scope_stmt(self, op: InCoreScopeStmt) -> Stmt: ...
     def visit_cluster_scope_stmt(self, op: ClusterScopeStmt) -> Stmt: ...
     def visit_graph_scope_stmt(self, op: GraphScopeStmt) -> Stmt: ...
+    def visit_reg_scope_stmt(self, op: RegScopeStmt) -> Stmt: ...
     def visit_hierarchy_scope_stmt(self, op: HierarchyScopeStmt) -> Stmt: ...
     def visit_spmd_scope_stmt(self, op: SpmdScopeStmt) -> Stmt: ...
     def visit_split_aiv_scope_stmt(self, op: SplitAivScopeStmt) -> Stmt: ...

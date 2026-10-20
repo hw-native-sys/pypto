@@ -36,6 +36,14 @@
 namespace pypto {
 namespace ir {
 
+RegType::RegType(int64_t shape, DataType dtype, RegKind kind) : shape_(shape), dtype_(dtype), kind_(kind) {
+  CHECK(shape > 0) << "RegType shape must be a positive integer";
+  CHECK(DataTypeToString(dtype) != "UnknownType") << "RegType requires a known dtype";
+  CHECK(kind == RegKind::VecReg || kind == RegKind::MaskReg) << "Unknown RegKind";
+  CHECK(kind != RegKind::MaskReg || dtype == DataType::BOOL) << "MaskReg requires BOOL dtype";
+  CHECK(kind != RegKind::VecReg || dtype != DataType::BOOL) << "VecReg forbids BOOL dtype";
+}
+
 void detail::CheckValueType(const TypePtr& type, const Span& span, const char* context) {
   CHECK_SPAN(!type || type->GetKind() != ObjectKind::VoidType, span)
       << context << " cannot use VoidType: it represents no value; execute a void call with EvalStmt";

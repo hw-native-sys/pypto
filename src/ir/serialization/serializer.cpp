@@ -90,6 +90,7 @@ class FieldSerializerVisitor {
   result_type VisitLeafField(const FunctionType& field);
   result_type VisitLeafField(const FunctionIRStage& field);
   result_type VisitLeafField(const ForKind& field);
+  result_type VisitLeafField(const HardwareLoopPolicy& field);
   result_type VisitLeafField(const InlineLanguage& field);
 
   result_type VisitLeafField(const ScopeKind& field);
@@ -232,6 +233,7 @@ class IRSerializer::Impl {
     SERIALIZE_FIELDS(RuntimeScopeStmt);
     SERIALIZE_FIELDS(CommDomainScopeStmt);
     SERIALIZE_FIELDS(GraphScopeStmt);
+    SERIALIZE_FIELDS(RegScopeStmt);
     SERIALIZE_FIELDS(SeqStmts);
     SERIALIZE_FIELDS(EvalStmt);
     SERIALIZE_FIELDS(BreakStmt);
@@ -427,7 +429,11 @@ class IRSerializer::Impl {
     std::map<std::string, msgpack::object> type_map;
     type_map["type_kind"] = msgpack::object(type->TypeName(), zone);
 
-    if (auto scalar_type = As<ScalarType>(type)) {
+    if (auto reg = As<RegType>(type)) {
+      type_map["shape"] = msgpack::object(reg->shape_, zone);
+      type_map["dtype"] = msgpack::object(reg->dtype_.Code(), zone);
+      type_map["kind"] = msgpack::object(static_cast<uint8_t>(reg->kind_), zone);
+    } else if (auto scalar_type = As<ScalarType>(type)) {
       type_map["dtype"] = msgpack::object(scalar_type->dtype_.Code(), zone);
     } else if (type->GetKind() == ObjectKind::TensorType ||
                type->GetKind() == ObjectKind::DistributedTensorType) {
@@ -640,6 +646,10 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(const FunctionType& field
 }
 
 msgpack::object FieldSerializerVisitor::VisitLeafField(const FunctionIRStage& field) {
+  return msgpack::object(static_cast<uint8_t>(field), zone_);
+}
+
+msgpack::object FieldSerializerVisitor::VisitLeafField(const HardwareLoopPolicy& field) {
   return msgpack::object(static_cast<uint8_t>(field), zone_);
 }
 
