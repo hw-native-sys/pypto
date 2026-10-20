@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -202,6 +203,9 @@ class BufferKernelSupport : public IRVisitor {
   void VisitStmt_(const AssignStmtPtr& assign) override {
     IRVisitor::VisitStmt_(assign);
     if (!supported) return;
+    if (As<ScalarType>(assign->var_->GetType())) {
+      scalar_multiples_.emplace(assign->var_.get(), KnownAlignmentMultiple(assign->value_));
+    }
     if (IsMatrixType(assign->var_->GetType())) {
       ExprPtr source = assign->value_;
       if (auto call = As<Call>(source);
@@ -367,6 +371,49 @@ class BufferKernelSupport : public IRVisitor {
   }
 
  private:
+  static constexpr int64_t kWindowAlignmentBytes = 32;
+
+  // Cache scalar SSA facts and expression nodes once. Unknown values have no
+  // guaranteed factor beyond one; arithmetic preserves only proven multiples.
+  int64_t KnownAlignmentMultiple(const ExprPtr& expr) {
+    const auto cached = expression_multiples_.find(expr.get());
+    if (cached != expression_multiples_.end()) return cached->second;
+    int64_t multiple = 1;
+    if (const auto constant = As<ConstInt>(expr)) {
+      multiple = std::gcd(constant->value_ % kWindowAlignmentBytes, kWindowAlignmentBytes);
+    } else if (const auto var = AsVarLike(expr)) {
+      const auto found = scalar_multiples_.find(var.get());
+      if (found != scalar_multiples_.end()) multiple = found->second;
+    } else if (const auto cast = As<Cast>(expr)) {
+      const auto source = GetScalarDtype(cast->operand_);
+      const auto target = GetScalarDtype(cast);
+      const auto integer = [](DataType dtype) {
+        return dtype == DataType::INDEX || dtype.IsSignedInt() || dtype.IsUnsignedInt();
+      };
+      if (integer(source) && integer(target) && source.GetBit() >= 5 && target.GetBit() >= 5) {
+        multiple = KnownAlignmentMultiple(cast->operand_);
+      }
+    } else if (const auto binary = As<BinaryExpr>(expr);
+               binary && (As<Add>(expr) || As<Sub>(expr) || As<Mul>(expr))) {
+      const auto lhs = KnownAlignmentMultiple(binary->left_);
+      const auto rhs = KnownAlignmentMultiple(binary->right_);
+      multiple = As<Mul>(expr) ? std::gcd(lhs * rhs, kWindowAlignmentBytes) : std::gcd(lhs, rhs);
+    }
+    expression_multiples_.emplace(expr.get(), multiple);
+    return multiple;
+  }
+
+  std::optional<int64_t> WindowOffsetResidue(const ExprPtr& offset, int64_t stride_bytes) {
+    const auto stride = stride_bytes % kWindowAlignmentBytes;
+    if (const auto constant = As<ConstInt>(offset)) {
+      const auto residue =
+          (constant->value_ % kWindowAlignmentBytes + kWindowAlignmentBytes) % kWindowAlignmentBytes;
+      return residue * stride % kWindowAlignmentBytes;
+    }
+    if (KnownAlignmentMultiple(offset) * stride % kWindowAlignmentBytes == 0) return 0;
+    return std::nullopt;
+  }
+
   void CheckWindowCall(const CallPtr& call) {
     const bool slice = IsOp(call, "tile.slice");
     if (call->args_.size() < 3) {
@@ -383,6 +430,15 @@ class BufferKernelSupport : public IRVisitor {
       supported = false;
       return;
     }
+    // Explicit-valid slices and assemble destinations bypass slice
+    // canonicalization. Prove their byte address alignment independently,
+    // using the inherited parent pitch rather than the window's own width.
+    const auto row_bytes = views_.Get(call->args_[0]).row_bytes;
+    const auto row_residue =
+        row_bytes ? WindowOffsetResidue(offsets->elements_[0], *row_bytes) : std::nullopt;
+    const auto col_residue =
+        WindowOffsetResidue(offsets->elements_[1], static_cast<int64_t>(window->dtype_.GetBit() / 8));
+    supported &= row_residue && col_residue && (*row_residue + *col_residue) % kWindowAlignmentBytes == 0;
     for (size_t i = 0; i < 2; ++i) {
       const auto offset = As<ConstInt>(offsets->elements_[i]);
       const auto scalar = As<ScalarType>(offsets->elements_[i]->GetType());
@@ -593,6 +649,8 @@ class BufferKernelSupport : public IRVisitor {
   Region* region_ = nullptr;
   const std::vector<TypePtr>& return_types_;
   BufferViewAnalysis views_;
+  std::unordered_map<const Var*, int64_t> scalar_multiples_;
+  std::unordered_map<const Expr*, int64_t> expression_multiples_;
   std::unordered_map<const Var*, TileTypePtr> window_parents_;
   std::unordered_map<const Var*, ParamDirection> directions_;
   std::unordered_map<const Var*, VarPtr> tensor_aliases_;

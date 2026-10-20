@@ -994,6 +994,40 @@ class UnsupportedDynamic:
 
 
 @pytest.mark.parametrize("planner", _PLANNERS)
+@pytest.mark.parametrize("dtype,scale", [("FP16", 16), ("FP32", 8)])
+@pytest.mark.parametrize("kind", ["slice_valid", "slice_drop", "assemble"])
+@pytest.mark.parametrize("offset_kind", ["raw", "aligned", "misaligned", "constant"])
+def test_window_selection_proves_byte_alignment(planner, dtype, scale, kind, offset_kind):
+    offset = {
+        "raw": "col",
+        "aligned": "scaled + step",
+        "misaligned": "scaled + 1",
+        "constant": "1",
+    }[offset_kind]
+    if kind == "assemble":
+        body = f"""window = pl.tile.slice(whole, [16, 32], [0, 0])
+        value = pl.tile.assemble(whole, window, [row, {offset}])"""
+    else:
+        drop = ", drop_dims=[]" if kind == "slice_drop" else ""
+        body = f"value = pl.tile.slice(whole, [16, 32], [row, {offset}], valid_shape=[16, cols]{drop})"
+    program = pl.parse_program(f"""
+@pl.program
+class WindowAlignment:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64, 64], pl.{dtype}], row: pl.Scalar[pl.INDEX],
+               col: pl.Scalar[pl.INDEX], cols: pl.Scalar[pl.INDEX],
+               out: pl.Out[pl.Tensor[[64, 64], pl.{dtype}]]) -> pl.Tensor[[64, 64], pl.{dtype}]:
+        step = {scale}
+        scaled = col * step
+        whole = pl.load(x, [0, 0], [64, 64])
+        {body}
+        return pl.store(value, [0, 0], out)
+""")
+    expected = ir.FunctionIRStage.Buffer if offset_kind == "aligned" else ir.FunctionIRStage.Functional
+    assert _kernel(_lower(program, planner)).ir_stage == expected
+
+
+@pytest.mark.parametrize("planner", _PLANNERS)
 @pytest.mark.parametrize("valid_cols", ["16", "cols"])
 def test_standalone_valid_shape_setter_remains_tile(tmp_path, planner, valid_cols):
     program = pl.parse_program(f"""

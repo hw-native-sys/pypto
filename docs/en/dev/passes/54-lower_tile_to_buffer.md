@@ -62,8 +62,10 @@ bound once at each slice definition and reused when rebuilding a snapshot;
 a static child never makes its dynamic parent's storage range precise.
 Runtime bounds remain caller preconditions. Vector base addresses must be
 32-byte aligned: for FP32, a column offset such as `block * 8` preserves
-alignment. Unproven alignment is materialized by the earlier slice
-canonicalization pass and remains outside this default Buffer view recipe.
+alignment. Selection proves alignment from scalar SSA arithmetic and inherited
+row pitch for every slice and assemble destination, including slices with explicit
+valid shapes. Unproven alignment retains Tile IR; earlier slice canonicalization
+may materialize ordinary slices before selection.
 
 Static dense Vec reshape supports repeated views of one planned allocation. Static nonnegative MemRef offsets must be
 32-byte aligned. Lowering verifies allocation capacity and window bounds; a

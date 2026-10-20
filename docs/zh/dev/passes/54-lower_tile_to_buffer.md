@@ -45,8 +45,9 @@ block/subblock 查询使用已有 Buffer 配方。
 算术目标不能复用正在读取的窗口所属存储组。符号累计偏移在各 slice 定义点绑定一次，
 重建快照时复用；静态子窗口不能让动态父窗口的存储范围重新变得精确。
 动态边界仍是调用者前置条件。向量基址须按 32 字节对齐，例如 FP32 的列偏移
-`block * 8` 可以保持对齐。无法证明对齐的 slice 由更早的规范化 pass 物化，
-仍不属于默认 Buffer 视图配方。
+`block * 8` 可以保持对齐。选择器根据标量 SSA 算术与继承的行距证明每个 slice 和
+assemble 目标的对齐，包括带显式 valid shape 的 slice。无法证明对齐时保留 Tile IR；
+更早的 slice 规范化 pass 可以在选择前物化普通 slice。
 
 静态稠密 Vec reshape 支持同一已规划分配的多个视图。
 静态非负 MemRef 偏移必须按 32 字节对齐。lowering 验证分配容量及窗口边界；
