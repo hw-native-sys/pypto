@@ -1,5 +1,10 @@
 # AutoTileMatmulL0 Pass
 
+Automatic L0C double buffering is disabled for every planner, including the
+legacy `enable_pypto_l0c_double_buffer=True` opt-in. AutoTile selects the best
+single-C geometry using the full L0C capacity. Explicit buffering attributes
+are preserved; their lowering is not changed by this policy.
+
 L0 tiling for static 2D `tile.matmul`, `tile.matmul_acc`, and `tile.matmul_bias`: pick an L0 tile shape `(m, n, k)` from the active backend's L0 capacities and rewrite the call into a 2-stage pipelined K-loop with per-iter Mat→Left/Right `tile.extract`s. Capacity checks use the accumulator's physical L0C footprint, not just its logical shape. When that footprint exceeds L0c, the pass M/N-tiles a fresh plain or biased matmul, or the canonical frontend split-K create/pipeline/store chain, into `[m, n]` output sub-tiles.
 
 ## Overview
@@ -8,11 +13,11 @@ Mat-resident matmuls produced upstream by `ConvertTensorToTileOps` + [`FlattenTi
 
 An operand already placed in `Left` or `Right` is a manual L0 scheduling decision, so AutoTile does not silently replace or subdivide it. Legal manual tiles remain untouched. If one static operand by itself exceeds its backend space—for example an FP16 `Right[256, 256]` requiring 131072 bytes in a 65536-byte L0B—the pass instead fails at that operand with its variable name, physical shape, dtype, required/available bytes, and two fixes: keep the operand in `Mat` and pass it directly to the matmul so AutoTile can choose legal L0 tiles, or manually extract a smaller L0 tile. This early operation-specific error prevents the later allocator failure from being preceded by an irrelevant MemoryReuse fallback warning.
 
-The pass also handles an already-tiled form under the PyPTO memory planner: a user-authored static `pl.pipeline(stage=F)` (`F ≥ 2`, trip count divisible by `F`) with one `tile.matmul(Left, Right)` per iteration and a canonical loop-carried drain. The selected moving operand must be produced by a direct per-iteration Mat→L0 transfer, while the other matmul operand is defined outside the loop. AutoTile enables a two-slot L0C ping-pong only when a path-specific profitability gate passes and the conservative whole-function Acc footprint—including the physical stage multiplicity that pipeline lowering can request for other Acc producers—plus one extra slot for every eligible loop fits in L0C. A direct-to-GM `tile.store` requires at least four iterations. The cheaper Acc-to-Mat `tile.assemble` path requires at least eight iterations and an aligned Acc tile occupying at least one quarter of L0C; this admits the independently measured 32/40 KiB Mat-scratch wins while excluding the measured 8 KiB regression and 16 KiB tie on a 128 KiB L0C. Pipeline lowering then schedules depth-two `matmul, matmul, drain, drain` chunks, overlapping tile *i*'s FIXPIPE drain with tile *i+1*'s MAD. A deeper operand pipeline keeps its original stage membership (subject to the allocator's ordinary capacity gate), while Acc membership rotates over two slots. Multiple Acc values, additional stores, nested control flow, indirect uses, loop-carried operands, separately lowered tail groups, and non-canonical drain/yield chains remain unchanged. PTOAS is left unchanged because its planner already separates the reproduced loop's physical Acc placements and device timing showed no benefit from the source marker.
+Already-L0 pipelines are not automatically marked for accumulator double buffering. An explicit `pipeline_double_buffer_c` attribute remains a caller-owned scheduling decision and is preserved.
 
 **K-tiling vs M/N-tiling.** When the chooser returns `m == M` and `n == N` the output's **physical** allocation fits L0c, so only the K dimension is tiled (one K-loop). Ordinary capacity is `AlignUp(M, GetL0cMAlignment(dtype)) × N × bytes_c`; on Ascend910, for example, a logical INT32 `M = 16` accumulator occupies 32 physical rows. The canonical split-K path also passes its operand layouts' Mat-box granularity into the chooser: it charges `AlignUp(AlignUp(m, box_m), l0c_align_m) × AlignUp(n, box_n) × bytes_c`, plus the correspondingly boxed L0A/L0B panels, before selecting a tile. When the chooser returns `m < M` or `n < N`, the output would overflow L0c. The pass tiles the **output** into a `ceil(M/m) × ceil(N/n)` grid. For a fresh plain or biased matmul it computes and places every sub-tile directly; a biased matmul replaces a single-use full bias load, with only sibling loads between it and the matmul, by `[1, n]` window loads from the same effect-free observation region and applies each window once on the first K block of its output tile. Biased matmul currently requires M/N/K to satisfy the operands' boxed layout alignment; plain matmul retains its padded boundary support. For the canonical frontend split-K form, the pass clones the complete source K reduction for every output sub-tile. An oversized full `[M, N]` Acc is never materialized. The output tensor is chained through the per-sub-tile stores in SSA form (`out → out_t0 → out_t1 → …`).
 
-**One physical-size contract.** `ChooseL0Tile`, the existing-pipeline dbC capacity plan, and `InitMemRef` all use the same backend-aware L0C row-footprint helper. Canonical split-K additionally supplies its shared layout-aware Mat box alignment to `ChooseL0Tile`, so selection applies the same M/N padding that its load rebuilding will materialize before the common L0C row padding. A tile admitted by either planner is therefore allocated with the padded shape used by the capacity decision; two live padded accumulators cannot be assigned adjacent logical ranges that overlap physically.
+**One physical-size contract.** `ChooseL0Tile` and `InitMemRef` all use the same backend-aware L0C row-footprint helper. Canonical split-K additionally supplies its shared layout-aware Mat box alignment to `ChooseL0Tile`, so selection applies the same M/N padding that its load rebuilding will materialize before the common L0C row padding. A tile admitted by either planner is therefore allocated with the padded shape used by the capacity decision; two live padded accumulators cannot be assigned adjacent logical ranges that overlap physically.
 
 **Fits-L0c chained cast-fold.** A chained matmul whose `[M, N]` result *fits* L0c (no M/N tiling) but feeds a second matmul through a downcast — `c = matmul(a, b); cb = cast(c, bf16); d = matmul(cb, e)` — needs the bf16 intermediate in **Mat** (L1) for the consumer. Left alone, `tile.cast` lowers to a **Vector** `pto.tcvt` (a cube→vector→cube round-trip that overflows the Vec buffer at `[128, 128]`). Instead the pass folds the cast into a **single full-window** Acc→Mat `tile.assemble` — the same `MatScratchPlacer` as the oversized Mat-scratch path, but one `PlaceAt` at offset `(0, 0)` rather than a grid — so the downcast stays on the cube as a FIXPIPE `pto.tinsert`. This is a cast-peephole independent of K tiling: it fires whether the producer was left whole (`k == K`) or K-looped (`k < K`), and only when every use of the cast result is a matmul operand (a non-matmul consumer keeps the Vector cast). The fold also mirrors exactly what FIXPIPE can reproduce — an **`f32 → bf16/f16`** downcast whose round mode is **`rint`** (round-half-to-*even*), FIXPIPE's fixed tie rule — the same on A2/A3 and A5 (the pto-isa CPU reference narrows via `std::bfloat16_t` with no arch branch, and `pto.tinsert` carries no `rmode`; the backends differ only in the scratch dtype, not the rounding). A non-`f32` accumulator (e.g. an `int32` matmul result, which would need a scaled *dequant*), the cast's default **`round`** mode (round-half-*away*), or a directional/truncating mode (`none`/`floor`/`ceil`/`trunc`/`odd`) all keep the Vector `pto.tcvt` — the only path that honors the requested `rmode` — and the pass emits a `PH-AT-010` hint pointing at `mode="rint"`. The same guard (`CastFoldableToFixpipeMat`) gates the oversized Mat-scratch fold below. Oversized results never reach this peephole — their cast is folded per sub-tile by the M/N path above.
 
@@ -24,7 +29,7 @@ The pass also handles an already-tiled form under the PyPTO memory planner: a us
 
 **Invalidates**: nothing.
 
-**When to use**: Always, as part of the default tile-stage pipeline. The pass is a no-op when no Mat-resident matmul needs tiling or cast folding and no existing PyPTO-planned L0 pipeline qualifies for automatic accumulator double buffering.
+**When to use**: Always, as part of the default tile-stage pipeline. The pass is a no-op when no Mat-resident matmul needs tiling or cast folding.
 
 ## API
 
@@ -74,10 +79,10 @@ For each `tile.matmul`, `tile.matmul_acc`, or `tile.matmul_bias` in an InCore-ty
 
    **Placement (direct-store vs Mat-scratch).** Both grids hand each `[m, n]` Acc sub-tile to a `SubtilePlacer`. The **`DirectGmPlacer`** stores it to the DDR output (`tile.store`, above). The **`MatScratchPlacer`** instead keeps the whole `[M, N]` result on-chip in an L1/**Mat** scratch — created once with `tile.create(target_memory=Mat)` (whose implicit NZ TileView `col_major/row_major` is the matmul-operand layout), then each sub-tile is assembled in place via `tile.assemble(scratch, sub, [mi, ni])`. For the low-precision bf16/f16 scratch used by the chained path this Acc→Mat writeback lowers to FIXPIPE `pto.tinsert`; a supported same-dtype full-window assemble uses `pto.subview` + `pto.tmov`. The pass selects Mat-scratch when the matmul result's uses are **all** matmul-operand reads *and* the `[M, N]` scratch fits the backend handler's Mat capacity (`GetCapacityBytes(MemorySpace::Mat)`) — a conservative necessary-condition gate that keeps oversized chained matmuls on the deferred `PH-AT-006` path instead of emitting an impossible on-chip allocation (a full packed-peak check that also accounts for coexisting Mat tensors is a follow-up). On selection it remaps the result `Var` to the scratch so the consumer reads it on-chip. `tile.assemble`'s `set_output_memory_inherit_input()` makes the chain share one Mat base, so the assemble is in place (no unsupported Mat→Mat preservation copy). Both the split-K (unrolled, constant offsets) and full-K (pipelined, loop-variable offsets) grids drive either placer.
 
-   > **Legacy-PyPTO limitation — operand-stationary chained producers + L0 packing.** A chained-matmul (Mat-scratch) producer shares L0 with its consumer (sequential; the intermediate stays in L1, never DDR — the `L0C→L1→L0A` trip). An A/B-stationary producer pins one monolithic full-L0 operand buffer while a pipelined consumer needs multiple smaller buffers. The legacy PYPTO planner's `AllocateMemoryAddr` bump-stacks reuse classes and never subdivides a freed region (for example, reusing a 64 KB producer buffer for one 32 KB consumer slot wastes 32 KB, and the other slot spills → L0 overflow), so the pass forces Mat-scratch producers to **output-stationary only under that planner**. Enabling the experimental dbC opt-in can still expose this limitation on some output-stationary chains; one current reproducer requests 96 KB from a 64 KB L0B. `DSA_RP` and `PTOAS` already place buffers from their actual lifetimes, retain the chooser's operand-stationary schedule, and pack the consumer's smaller buffers into the released full-size range. Adding equivalent lifetime-aware subdivision to the legacy allocator is tracked by [issue #1908](https://github.com/hw-native-sys/pypto/issues/1908).
+   > **Legacy-PyPTO limitation — operand-stationary chained producers + L0 packing.** A chained-matmul (Mat-scratch) producer shares L0 with its consumer (sequential; the intermediate stays in L1, never DDR — the `L0C→L1→L0A` trip). An A/B-stationary producer pins one monolithic full-L0 operand buffer while a pipelined consumer needs multiple smaller buffers. The legacy PYPTO planner's `AllocateMemoryAddr` bump-stacks reuse classes and never subdivides a freed region (for example, reusing a 64 KB producer buffer for one 32 KB consumer slot wastes 32 KB, and the other slot spills → L0 overflow), so the pass forces Mat-scratch producers to **output-stationary only under that planner**. `DSA_RP` and `PTOAS` retain the chooser's operand-stationary schedule. This does not guarantee native allocator success for every buffer-size sequence; the known A2/A3 PTOAS chained-matmul limitation remains separate from this policy. Adding equivalent lifetime-aware subdivision to the legacy allocator is tracked by [issue #1908](https://github.com/hw-native-sys/pypto/issues/1908).
 7. **Rewrite the enclosing `SeqStmts`** — substitute uses of the original matmul's `Var` (K-only) or the consumer store's result (M/N) with the new `return_var`. Substitution is scoped to the `SeqStmts` that contains the rewrite, so it does not leak into sibling regions.
 
-8. **Recognize existing L0 pipelines** — independently of chooser-driven rewrites, inspect each static PyPTO-planned `ForKind::Pipeline` with `pipeline_stages=F ≥ 2` and a trip count divisible by `F`. Requiring complete groups avoids a separately lowered tail whose allocator placement can need another Acc slot. The loop's flat body must contain exactly one plain `tile.matmul` with static `Left`/`Right` operands; its selected moving operand must have a recognized direct per-iteration Mat→L0 producer, while the stationary operand is defined outside the loop. The body must also contain one canonical drain chain whose result is yielded back through its matching iter-arg: direct-to-GM `tile.store(acc, ..., iter_arg_i)` or Acc-to-Mat `tile.assemble(iter_arg_i, acc, ...)`. The direct path requires at least four iterations. The Mat-scratch path requires at least eight iterations and an aligned Acc footprint of at least `ceil(L0C/4)`, a separate conservative gate because its cheaper drain is not represented by the shared direct-GM roofline. Any other Acc definition/read or store-like operation defers the loop. Before attaching `pipeline_double_buffer_c=true` and `pipeline_overlap_stores=false`, the pass conservatively sums every static Acc value in the function. Ordinary cube accumulators count once because lowering serializes them; every other Acc producer is multiplied by the product of its enclosing source-pipeline stage depths, matching the physical memberships lowering may request. One additional aligned slot is then added for every profitable loop. All loops remain unchanged unless this post-lowering upper bound fits L0C, so enabling dbC cannot force another pipeline to shed buffering depth merely because its replicated Acc footprint was omitted. Explicitly attributed loops are left unchanged. For `F > 2`, lowering emits repeated depth-two `MMSS` chunks and rotates Acc memberships modulo two, while operand memberships retain depth `F`.
+8. **Preserve existing L0 pipelines** — automatic accumulator-buffer recognition is disabled before analysis. An explicit `pipeline_double_buffer_c` attribute remains unchanged.
 
 The pass is a `ProgramPass` and walks each function with an `IRMutator`; functions are returned unchanged when no rewrite fires (no `MutableCopy` cost for matmul-free programs).
 
@@ -103,44 +108,17 @@ held operand is pinned **single-buffered** across the moving grid (`k == K`) by
 a `ForKind::Sequential` outer loop in `BuildFullKPipelined`; a pipelined outer
 loop would require twice its full-L0 budget.
 
-**dbC=2** is the two-accumulator L0C ping-pong in which tile *i*'s FIXPIPE
-drain overlaps tile *i+1*'s MAD. It is enabled unconditionally for
-`memory_planner=DSA_RP` and `memory_planner=PTOAS`. The legacy `PYPTO`
-planner retains an experimental opt-in
-(`PassContext(enable_pypto_l0c_double_buffer=True)`, default off) because
-issue #1908 can still overflow operand buffers in chained Mat-scratch layouts.
-`BuildFullKPipelined` tags the moving loop with
-`kPipelineDoubleBufferCAttr`, and `CanonicalizeIOOrder` floats both stores
-below both matmuls (`matmul, matmul, store, store`) to make the two accumulator
-lifetimes co-live.
+**Automatic dbC selection is disabled.** `AutoTileMatmulL0` sets
+`allow_double_buffer_c=false` before invoking `ChooseL0Tile`, independently of
+the planner and the stored legacy flag. It also declines automatic recognition
+of existing L0 pipelines. It does not select at half capacity and then strip
+the buffering: the chooser searches its genuine single-C design space.
 
-The planners preserve that intent differently. For eligible PTOAS pipelines,
-[`LowerPipelineToSlots`](31-lower_pipeline_to_slots.md) expresses the stages as
-slots in one allocation; declined loops flow to
-[`LowerPipelineLoops`](32-lower_pipeline_loops.md), and PTOAS assigns the
-resulting stage buffers distinct offsets itself. `PYPTO` uses the flat depth-2
-`pipeline_membership` emitted by `LowerPipelineLoops`, and `MemoryReuse`'s
-capacity gate (#1475) keeps the buffers distinct to the affordable depth.
-`DSA_RP` also skips `MemoryReuse`; it represents pipeline-stage separations as
-hard constraints, runs its bounded strict search first, and relaxes only
-pipeline-intent separations to soft penalties if that search finds no
-capacity-fitting placement. dbC=2 requires full-K and at least two **full**
-tiles on the moving inner axis; the stationary outer axis may have one tile.
-The emitted loop orientation follows the chooser's stationarity/hoist decision,
-and a peeled partial boundary does not count as a ping-pong stage. Thus rows
-outer admits a 1×2 grid, while columns outer admits a 2×1 grid. The Mat-scratch
-(`Acc→Mat`, `tile.assemble`) drain is floated the same way. A
-`PassManager` built under one planner and run under another fails loudly
-because its pass list and chooser gates must agree. The cost-model formulas
-are gate-independent. See
-[`31-canonicalize_io_order.md`](33-canonicalize_io_order.md) for the co-live
-float and runtime validation of the distinct `{0, L0C/2}` offsets.
-
-The full-K and moving-inner restrictions above apply only to chooser-emitted M/N
-tiling. The separate existing-pipeline recognizer does not alter the chooser's
-design space: for the legacy PyPTO planner, it applies the same two-Acc mechanism
-to the canonical stationary-panel pattern after the conservative
-function-level Acc fit described above.
+The chooser API retains its dbC design points for explicit cost-model queries;
+its formulas and hardware constants are unchanged. Explicit buffering IR still
+uses the existing lowering paths. Separate physical slots alone do not prove
+that FIXPIPE draining overlaps compute or that the resulting tile geometry is
+profitable. This policy makes no new claim about explicit-buffer performance.
 
 > **This is a model-driven tile change, not a behavior-neutral refactor.** The roofline objective replaced an earlier traffic-minimizing closed-form chooser, so the selected `(m, n, k)` differs from before for MAD-bound shapes. The pre/post tiles for representative shapes are pinned in `test_l0_tile_chooser.py::TestL0TilingRooflineMigration`.
 

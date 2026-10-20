@@ -77,7 +77,7 @@ move. All are keyword-only — only `program` is positional.
 | `profiling` | `False` | Per-stage compile timing into `report/pipeline_profile.{txt,json}` |
 | `distributed_config` | `None` | Compile a HOST-level program per rank ([Distributed](../distributed/index.md)) |
 | `analyze_auto_scopes_for_deps` | `False` | Compiler-derived dependencies for AUTO scopes |
-| `enable_pypto_l0c_double_buffer` | `None` | L0C double buffering |
+| `enable_pypto_l0c_double_buffer` | `None` | Legacy compatibility flag; automatic L0C double buffering is disabled |
 | `emit_source_loc` | `None` | Carry DSL source locations into the emitted `.pto` |
 | `dump_ptoas_passes` | `False` | Also dump ptoas's own pass IR |
 | `runtime` | `None` | Simpler runtime ABI to target — `TENSORMAP_AND_RINGBUFFER` or `HOST_BUILD_GRAPH` (what `@pl.jit.graph` needs — [Functions](../language/01-functions.md)); `None` inherits the active `PassContext`. The worker must match it |

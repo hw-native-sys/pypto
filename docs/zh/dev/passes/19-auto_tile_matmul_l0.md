@@ -1,5 +1,9 @@
 # AutoTileMatmulL0 Pass
 
+所有 planner 均禁用自动 L0C 双缓冲，包括旧版
+`enable_pypto_l0c_double_buffer=True` 开关。AutoTile 使用完整 L0C 容量
+选择最佳 single-C tile。显式缓冲属性保持不变，其 lowering 不受此策略影响。
+
 针对静态 2D `tile.matmul`、`tile.matmul_acc` 与 `tile.matmul_bias` 进行 L0 切分：从当前 backend 的 L0 容量中挑选 L0 tile 形状 `(m, n, k)`，并把调用改写成一个 2 阶段流水化的 K-loop，每个迭代用 `tile.extract` 从 Mat 抽取 Left/Right 操作数。容量检查采用累加器在 L0C 中的物理占用，而不只是逻辑形状。该物理占用超过 L0c 时，本 pass 会对新的普通或带 bias 的 matmul，或前端规范的 split-K create/pipeline/store 链做 M/N 切分。
 
 ## 概览
@@ -8,11 +12,11 @@
 
 已经放入 `Left` 或 `Right` 的操作数表示程序员手工做出的 L0 调度决策，因此 AutoTile 不会静默替换或再次切分它；合法的手工 tile 保持不变。若一个静态操作数自身就超过 backend 对应空间的容量——例如 FP16 `Right[256, 256]` 需要 131072 字节，而 L0B 只有 65536 字节——本 pass 会在该操作数处报错，给出变量名、物理形状、dtype、所需/可用字节数以及两种修复方式：让操作数保留在 `Mat` 并直接传给 matmul，由 AutoTile 选择合法的 L0 tile；或手工抽取更小的 L0 tile。这个更早、面向具体算子的错误也避免了随后出现无关的 MemoryReuse 回退 warning。
 
-本 pass 在 PyPTO 内存规划器下也处理已经切好 L0 tile 的形式：用户编写的静态 `pl.pipeline(stage=F)`（`F ≥ 2`，且迭代数能被 `F` 整除），每次迭代恰有一个 `tile.matmul(Left, Right)`，且具有一条规范的循环携带 drain 链。选中的移动操作数必须由每次迭代中直接的 Mat→L0 传输产生，另一个矩阵乘操作数则定义在循环外。只有当对应 drain 路径的盈利性门限通过，且整个函数中 Acc 的保守占用量（包括 pipeline lowering 可能为其他 Acc 生产者请求的物理 stage 副本数）再加上每个合格循环的一块额外 slot 仍能放入 L0C 时，AutoTile 才启用两槽 L0C ping-pong。Direct-to-GM `tile.store` 至少需要四次迭代；更便宜的 Acc→Mat `tile.assemble` 路径至少需要八次迭代，且按分配规则对齐后的单块 Acc 必须至少占 L0C 的四分之一。在 128 KiB L0C 上，该门限会接纳两组独立实测获益的 32/40 KiB Mat-scratch case，同时排除实测回退的 8 KiB case 和打平的 16 KiB case。Pipeline lowering 随后按两级一组发射 `matmul, matmul, drain, drain`，使 tile *i* 的 FIXPIPE drain 与 tile *i+1* 的 MAD 重叠。更深的操作数流水线保留原有 stage membership（仍受分配器常规容量门限约束），而 Acc membership 在两块 slot 间轮转。若存在多个 Acc、额外 store、嵌套控制流、间接使用、循环携带的矩阵操作数、单独 lowering 的尾组，或非规范的 drain/yield 链，则保持不变。PTOAS 保持原样，因为其规划器已为复现循环分离物理 Acc，且设备计时未显示该源级标记带来收益。
+已有 L0 流水线不会被自动标记为累加器双缓冲。显式 `pipeline_double_buffer_c` 属性属于调用者的调度决定，保持不变。
 
 **K 切分 vs M/N 切分。** 当 chooser 返回 `m == M` 且 `n == N` 时，输出的**物理**分配能放进 L0c，因此只切分 K 维（一个 K-loop）。常规容量按 `AlignUp(M, GetL0cMAlignment(dtype)) × N × bytes_c` 计算；例如 Ascend910 上逻辑 `M = 16` 的 INT32 累加器会占用 32 个物理行。规范 split-K 路径还会把操作数布局的 Mat box 粒度传给 chooser，在选择 tile 前按 `AlignUp(AlignUp(m, box_m), l0c_align_m) × AlignUp(n, box_n) × bytes_c` 计入容量，并同样按补齐后的尺寸检查 L0A/L0B。当返回 `m < M` 或 `n < N` 时，输出会超过 L0c。由于操作数已经是 Mat-resident，*只有*输出溢出：本 pass 把**输出**切成 `ceil(M/m) × ceil(N/n)` 的 `[m, n]` 子块网格（边界处为部分块——`m`/`n` 不必整除 `M`/`N`）。新的普通或带 bias 的 matmul 直接逐子块计算和放置；带 bias 的 matmul 会把仅使用一次、且到 matmul 之间只有同层 load 的完整 bias load，替换为同一无 effect 观测区间内的 `[1,n]` 窗口 load，并且只在每个输出块的第一个 K block 上加一次 bias。对于前端规范的 split-K 形式，则为每个输出子块克隆完整的源 K 归约，使一块 `[m, n]` 累加器完成全部 K block 并 store 后，才开始下一块。因而不会实例化超大的完整 `[M, N]` Acc。输出张量以 SSA 形式在各子块 store 间串联（`out → out_t0 → out_t1 → …`）。
 
-**统一的物理大小契约。** `ChooseL0Tile`、已有流水线的 dbC 容量规划与 `InitMemRef` 共同使用同一个 backend-aware L0C 行占用 helper。规范 split-K 还把共享的 layout-aware Mat box 对齐传给 `ChooseL0Tile`，因此选择阶段会先应用与 load 重建一致的 M/N 补齐，再应用统一的 L0C 行补齐。chooser 或 dbC 规划接纳的 tile 会按容量判断使用的补齐形状分配；两个同时存活的补齐累加器不会被放到逻辑上相邻、但物理上重叠的地址区间。
+**统一的物理大小契约。** `ChooseL0Tile` 与 `InitMemRef` 共同使用同一个 backend-aware L0C 行占用 helper。规范 split-K 还把共享的 layout-aware Mat box 对齐传给 `ChooseL0Tile`，因此选择阶段会先应用与 load 重建一致的 M/N 补齐，再应用统一的 L0C 行补齐。任一内存规划器接纳的 tile 都按容量判断使用的补齐形状分配；两个同时存活的补齐累加器不会被放到逻辑上相邻、但物理上重叠的地址区间。
 
 **Fits-L0c 链式 cast-fold（cast 折叠）。** 当链式 matmul 的 `[M, N]` 结果*能放进* L0c（无需 M/N 切分），但经一次降精度后再喂给第二个 matmul —— `c = matmul(a, b); cb = cast(c, bf16); d = matmul(cb, e)` —— 消费者需要 bf16 中间值位于 **Mat**（L1）。若不处理，`tile.cast` 会 lower 成 **Vector** 的 `pto.tcvt`（一次 cube→vector→cube 往返，在 `[128, 128]` 形状下会撑爆 Vec buffer）。本 pass 改为把 cast 折叠成**一次整窗**的 Acc→Mat `tile.assemble` —— 与超大 Mat-scratch 路径用的是同一个 `MatScratchPlacer`，只是单次 `PlaceAt` 于偏移 `(0, 0)` 而非一个网格 —— 从而让降精度留在 cube 上，作为 FIXPIPE 的 `pto.tinsert`。这是一个与 K 切分无关的 cast-peephole：无论 producer 是保持整体（`k == K`）还是被 K-loop 切分（`k < K`）都会触发，且仅当 cast 结果的每一处使用都是矩阵乘操作数时才折叠（非矩阵乘消费者保留 Vector cast）。折叠还严格对齐 FIXPIPE 能复现的能力——即 **`f32 → bf16/f16`** 降精度、且舍入模式为 **`rint`**（就近、**取偶**），这是 FIXPIPE 固定的 tie 规则——A2/A3 与 A5 一致（pto-isa 的 CPU 参考实现用 `std::bfloat16_t` 降精度、无 arch 分支，且 `pto.tinsert` 不带 `rmode`；两个 backend 仅 scratch dtype 不同，舍入相同）。若源不是 `f32`（例如 `int32` 矩阵乘结果，需要带 scale 的 *dequant*）、为 cast 默认的 **`round`** 模式（就近、**远离零**），或为有方向/截断的模式（`none`/`floor`/`ceil`/`trunc`/`odd`），则都保留 Vector `pto.tcvt`——只有它才会遵循所请求的 `rmode`——并由本 pass 发出指向 `mode="rint"` 的 `PH-AT-010` 提示。同一道 gate（`CastFoldableToFixpipeMat`）也用于下面的超大 Mat-scratch 折叠。超大结果不会到达这个 peephole——它们的 cast 由上面的 M/N 路径逐子块折叠。
 
@@ -24,7 +28,7 @@
 
 **失效属性 (Invalidated)**：无。
 
-**何时使用**：一律在默认 tile 阶段流水线中运行。如果没有需要切分或折叠 cast 的 Mat-resident matmul，且没有符合自动累加器双缓冲条件的、由 PyPTO 规划的已有 L0 流水线，本 pass 是 no-op。
+**何时使用**：一律在默认 tile 阶段流水线中运行。如果没有需要切分或折叠 cast 的 Mat-resident matmul，本 pass 是 no-op。
 
 ## API
 
@@ -74,10 +78,10 @@ program_tiled = l0_tile_pass(program)
 
    **放置策略（direct-store vs Mat-scratch）。** 两种网格都把每个 `[m, n]` Acc 子块交给一个 `SubtilePlacer`。**`DirectGmPlacer`** 把它 store 到 DDR 输出（上文的 `tile.store`）。**`MatScratchPlacer`** 则把整个 `[M, N]` 结果保留在片上的 L1/**Mat** scratch 中——用 `tile.create(target_memory=Mat)` 创建一次（其隐式 NZ TileView `col_major/row_major` 即矩阵乘操作数布局），随后每个子块通过 `tile.assemble(scratch, sub, [mi, ni])` 就地组装。链式路径使用的 bf16/f16 低精度 scratch 会把该 Acc→Mat 回写 lower 成 FIXPIPE `pto.tinsert`；受支持的同 dtype 整窗 assemble 则使用 `pto.subview` + `pto.tmov`。当 matmul 结果的**所有**使用都是矩阵乘操作数读取、**且** `[M, N]` scratch 能放进 backend handler 的 Mat 容量（`GetCapacityBytes(MemorySpace::Mat)`）时，本 pass 才选择 Mat-scratch——这是一个保守的必要条件 gate，把超大的链式 matmul 留在延后的 `PH-AT-006` 路径上，而不是产生一个不可能的片上分配（同时考虑共存 Mat 张量的完整 packed-peak 检查为后续工作）。选中后把结果 `Var` 重映射到 scratch，使消费者在片上读取它。`tile.assemble` 的 `set_output_memory_inherit_input()` 让整条链共享同一个 Mat base，因此组装是就地的（不产生不受支持的 Mat→Mat 保留拷贝）。split-K（展开、常量偏移）与 full-K（流水化、循环变量偏移）网格都可驱动任一 placer。
 
-   > **旧版 PYPTO planner 的限制 —— operand-stationary 链式生产者 + L0 打包。** 链式 matmul（Mat-scratch）的生产者与其消费者共享 L0（顺序执行；中间结果留在 L1，绝不经 DDR —— `L0C→L1→L0A` 往返）。A/B-stationary 的生产者钉住一块占满 L0 的整块操作数缓冲，而流水化消费者需要多块较小缓冲。旧版 PYPTO planner 的 `AllocateMemoryAddr` 只是把复用类顺序堆叠、从不细分已释放区域（例如，一块 64 KB 生产者缓冲被复用给一块 32 KB 消费者 slot 会浪费 32 KB，另一块 slot 溢出 → L0 超限），因此本 pass 仅在该 planner 下强制 Mat-scratch 生产者使用 **output-stationary**。启用实验性 dbC opt-in 后，某些 output-stationary 链仍会暴露该限制；当前一个复现会在 64 KB L0B 上请求 96 KB。`DSA_RP` 与 `PTOAS` 已按实际生命周期放置缓冲，可保留 chooser 选出的 operand-stationary 调度，并把消费者的较小缓冲打包到已释放的整块范围中。为旧版 allocator 增加等价的按生命周期细分能力仍由 [issue #1908](https://github.com/hw-native-sys/pypto/issues/1908) 跟踪。
+   > **旧版 PYPTO planner 的限制 —— operand-stationary 链式生产者 + L0 打包。** 链式 matmul（Mat-scratch）的生产者与其消费者共享 L0（顺序执行；中间结果留在 L1，绝不经 DDR —— `L0C→L1→L0A` 往返）。A/B-stationary 的生产者钉住一块占满 L0 的整块操作数缓冲，而流水化消费者需要多块较小缓冲。旧版 PYPTO planner 的 `AllocateMemoryAddr` 只是把复用类顺序堆叠、从不细分已释放区域（例如，一块 64 KB 生产者缓冲被复用给一块 32 KB 消费者 slot 会浪费 32 KB，另一块 slot 溢出 → L0 超限），因此本 pass 仅在该 planner 下强制 Mat-scratch 生产者使用 **output-stationary**。`DSA_RP` 与 `PTOAS` 保留 chooser 选出的 operand-stationary 调度，但这不保证 native allocator 能处理任意缓冲大小序列；已知 A2/A3 PTOAS 链式 matmul 限制与本策略分开处理。为旧版 allocator 增加等价的按生命周期细分能力仍由 [issue #1908](https://github.com/hw-native-sys/pypto/issues/1908) 跟踪。
 7. **改写所在 `SeqStmts`** —— 把原 matmul 的 `Var`（K 切分）或消费 store 的结果（M/N 切分）用法改成新的 `return_var`。替换作用域只限当前 `SeqStmts`，不会泄漏到兄弟区域。
 
-8. **识别已有的 L0 流水线** —— 独立于 chooser 驱动的改写，检查每个由 PyPTO 规划、静态、`pipeline_stages=F ≥ 2` 且迭代数能被 `F` 整除的 `ForKind::Pipeline`。要求完整 stage 组可避免单独 lowering 的尾组需要额外 Acc slot。其平坦循环体必须恰有一个普通 `tile.matmul` 和静态 `Left`/`Right` 操作数；选中的移动操作数必须有一个可识别、直接的每迭代 Mat→L0 生产者，而固定操作数定义在循环外。循环体还必须包含一条规范 drain 链，其结果需通过匹配的 iter-arg yield 回去：direct-to-GM `tile.store(acc, ..., iter_arg_i)` 或 Acc→Mat `tile.assemble(iter_arg_i, acc, ...)`。Direct 路径至少需要四次迭代；Mat-scratch 路径至少需要八次迭代，且按分配规则对齐后的 Acc 占用至少为 `ceil(L0C/4)`。后者是独立的保守门限，因为共享的 direct-GM roofline 尚未表达其更便宜的 drain。存在任何其他 Acc 定义/读取或 store-like 操作时都不处理该循环。附加 `pipeline_double_buffer_c=true` 与 `pipeline_overlap_stores=false` 前，本 pass 会保守求和函数中的每个静态 Acc 值。普通 cube 累加器因 lowering 将其串行化而只计一份；其他 Acc 生产者则按其所有外层源 pipeline stage 深度的乘积计数，与 lowering 可能请求的物理 membership 数一致。随后为每个盈利循环增加一块按分配规则对齐的 slot。只有该 lowering 后上界能放入 L0C 时才同时启用这些循环，从而避免 dbC 因漏计其他流水线复制的 Acc 占用而迫使其降低 buffering depth。已有显式属性的循环保持不变。对于 `F > 2`，lowering 重复发射两级 `MMSS` 分组，并把 Acc membership 对 2 取模，而操作数 membership 仍保留深度 `F`。
+8. **保留已有 L0 流水线**——分析前即禁用自动累加器缓冲识别。显式 `pipeline_double_buffer_c` 属性保持不变。
 
 本 pass 是 `ProgramPass`，对每个函数走 `IRMutator`；当函数内没有触发任何改写时，返回原函数（不会发生 `MutableCopy` 开销）。
 
@@ -102,33 +106,15 @@ program_tiled = l0_tile_pass(program)
 （`k == K`），由 `BuildFullKPipelined` 的 `ForKind::Sequential` 外层循环实现；
 若外层流水化，则需要两倍的满 L0 预算。
 
-**dbC=2** 是双累加器 L0C ping-pong，即 tile *i* 的 FIXPIPE drain 与 tile
-*i+1* 的 MAD 重叠。它在 `memory_planner=DSA_RP` 与
-`memory_planner=PTOAS` 下自动开启。旧版 `PYPTO` planner 仍保留实验性显式
-开关（`PassContext(enable_pypto_l0c_double_buffer=True)`，默认关闭），因为
-issue #1908 在某些链式 Mat-scratch 布局下仍可能导致操作数缓冲溢出。
-`BuildFullKPipelined` 给移动循环加上 `kPipelineDoubleBufferCAttr`，
-`CanonicalizeIOOrder` 把两个 store 都浮到两个 matmul 之后
-（`matmul, matmul, store, store`），从而让两个累加器生命周期共存。
+**自动 dbC 选择已禁用。** `AutoTileMatmulL0` 在调用 `ChooseL0Tile`
+之前设置 `allow_double_buffer_c=false`，与 planner 及保存的旧版开关值无关。
+已有 L0 流水线的自动识别也已禁用。这不是在半容量下选定 tile 后删除缓冲，
+而是让 chooser 搜索真正的 single-C 设计空间。
 
-三种 planner 以不同方式保留该意图。对符合条件的 PTOAS 流水线，
-[`LowerPipelineToSlots`](31-lower_pipeline_to_slots.md) 把各 stage 表示成同一分配的
-slot；被拒绝的循环继续交给 [`LowerPipelineLoops`](32-lower_pipeline_loops.md)，
-PTOAS 自行把对应 stage buffer 放到不同 offset。`PYPTO` 使用
-`LowerPipelineLoops` 发出的扁平 depth-2 `pipeline_membership`，由
-`MemoryReuse` 的容量门控（#1475）在可负担深度内保持 buffer 分离。`DSA_RP`
-也跳过 `MemoryReuse`；它把流水线 stage 分离表示为硬约束，
-先运行有界严格搜索，仅当该搜索未找到满足容量的放置时才把流水线意图分离放宽为软
-惩罚。dbC=2 要求 full-K，且移动的内层轴至少有两个**完整** tile；固定的外层轴
-可以只有一个 tile。发射的循环方向遵循 chooser 的 stationarity/hoist 决策，
-peeled 的部分边界不计作 ping-pong stage。因此，以行作为外层时允许 1×2 网格，
-以列作为外层时允许 2×1 网格。Mat-scratch（`Acc→Mat`，`tile.assemble`）的
-drain 也以相同方式浮动。若 `PassManager` 在一个 planner
-下构造却在另一个下运行，会显式报错，因为 pass 列表与 chooser gate 必须一致。
-代价模型公式本身与 gate 无关。共存浮动与 `{0, L0C/2}` 不同 offset 的运行时验证
-见 [`31-canonicalize_io_order.md`](33-canonicalize_io_order.md)。
-
-上段的 full-K 与移动内层限制只适用于 chooser 发射的 M/N 切分。独立的已有流水线识别器不改变 chooser 的设计空间：它仅在 PyPTO 下，对上文的规范 stationary-panel 模式执行函数级 Acc 保守容量检查后复用相同的双 Acc 机制。
+chooser API 仍保留 dbC 设计点，供显式代价模型查询使用；公式和硬件常数不变。
+显式缓冲 IR 仍沿用现有 lowering 路径。不同的物理 slot 本身不能证明 FIXPIPE
+drain 与计算重叠，也不能证明所选 tile 形状具有性能优势。本策略不对显式缓冲
+性能作出新的承诺。
 
 > **这是模型驱动的 tile 选择变更，并非行为中立的重构。** roofline 目标替换了此前以流量最小化为目标的闭式 chooser，因此对 MAD-bound 形状所选的 `(m, n, k)` 与之前不同。代表性形状的前后 tile 在 `test_l0_tile_chooser.py::TestL0TilingRooflineMigration` 中固定下来。
 

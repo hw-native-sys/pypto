@@ -302,10 +302,9 @@ class PassContext:
     ) -> None:
         """Create a PassContext with instruments and pass configuration (incl. memory planner).
 
-        ``enable_pypto_l0c_double_buffer`` opts the legacy ``PYPTO`` planner in
-        to chooser-emitted L0C double-buffering (dbC=2; experimental, default
-        off). It has no effect under ``DSA_RP`` or ``PTOAS``, which enable
-        chooser dbC=2 automatically.
+        ``enable_pypto_l0c_double_buffer`` remains a stored compatibility
+        flag. Automatic dbC is disabled for every planner regardless of its
+        value; explicit buffering declarations are preserved.
 
         ``runtime`` selects the target Simpler runtime ABI; its wire name is
         what lands in ``RUNTIME_CONFIG["runtime"]`` in the generated
@@ -353,7 +352,7 @@ class PassContext:
         ...
 
     def get_enable_pypto_l0c_double_buffer(self) -> bool:
-        """Whether chooser-emitted dbC=2 is enabled under legacy PYPTO."""
+        """Return the stored legacy flag; automatic dbC remains disabled."""
         ...
 
     def get_instruments(self) -> list[PassInstrument]:
@@ -594,8 +593,8 @@ def auto_tile_matmul_l0() -> Pass:
     on-chip Mat scratch for chained matmul consumers; compatible
     f32-to-bf16/f16 ``rint`` casts fold into the FIXPIPE writeback.
 
-    Full-K grids support output-, A-, and B-stationary schedules. dbC=2 is
-    enabled automatically under DSA_RP and PTOAS and available as a legacy-PYPTO opt-in. Eligible calls
+    Full-K grids support output-, A-, and B-stationary schedules. Automatic
+    dbC is excluded before selection for all planners and legacy flag values. Eligible calls
     require static 2D operands with B in Mat and A in Mat or Vec. When the
     chooser returns the full ``(M, N, K)`` shape, no tiling rewrite is needed,
     although a chained result may still be remapped to Mat by the compatible
@@ -609,10 +608,8 @@ def auto_tile_matmul_l0() -> Pass:
     for those Mat-backed windows. An already-Bias-resident source remains one
     external full-N slot and is never N-tiled.
 
-    Under the PyPTO planner, a canonical static already-L0 pipeline containing
-    one stationary-panel ``tile.matmul`` and one direct store or assemble drain
-    may automatically use two L0C slots when its conservative post-lowering
-    Acc footprint fits.
+    Already-L0 pipelines are not automatically marked for accumulator double
+    buffering. Explicit buffering attributes are preserved.
     """
 
 def canonicalize_tile_slice() -> Pass:

@@ -82,13 +82,11 @@ inline constexpr const char* kPipelineOverlapStoresAttr = "pipeline_overlap_stor
 /// overlaps tile i+1's MAD. Under ``memory_planner=PTOAS``, InitMemRef keeps the
 /// co-live buffers distinct and ptoas places them. Under the PyPTO planner,
 /// ``LowerPipelineLoops`` adds a depth-2 pipeline membership and MemoryReuse
-/// preserves the pair. ``AutoTileMatmulL0`` sets the attr either when the chooser
-/// picked ``double_buffer_c`` (with the accumulator budgeted at L0C/2), or when it
-/// recognizes a user-authored pipeline containing one canonical directly drained
-/// L0 matmul whose path-specific trip-count/Acc-size gate is profitable and whose
-/// conservative whole-function Acc footprint still fits after adding the extra
-/// slot. Direct-to-GM ``tile.store`` and Acc-to-Mat ``tile.assemble`` have
-/// separate conservative admission thresholds. Consumed (stripped) by
+/// preserves the pair. Automatic dbC selection and existing-pipeline recognition
+/// in ``AutoTileMatmulL0`` are disabled. This attribute remains available for
+/// explicit scheduling intent and is preserved by AutoTile. Its downstream
+/// lowering is unchanged; the separate slots alone do not establish profitable
+/// compute/drain overlap. Consumed (stripped) by
 /// ``CanonicalizeIOOrder`` alongside ``pipeline_stages`` and
 /// ``pipeline_overlap_stores``.
 inline constexpr const char* kPipelineDoubleBufferCAttr = "pipeline_double_buffer_c";

@@ -2710,13 +2710,14 @@ def _resolve_enable_buffer_ir() -> bool:
 
 
 def _resolve_enable_pypto_l0c_double_buffer() -> bool:
-    """Resolve the legacy-PYPTO chooser dbC=2 opt-in for the cache key.
+    """Resolve the stored legacy dbC flag for the compatibility cache key.
 
     Like ``_resolve_memory_planner``, this flag is most often set by wrapping a
     call in ``with PassContext([], enable_pypto_l0c_double_buffer=True)``, which
     ``ir.compile()`` inherits. ``RunConfig`` does not carry this PassContext-only
-    flag, so the active context is the only source. ``make_cache_key`` ignores it
-    for DSA_RP and PTOAS, where dbC=2 is automatic.
+    flag, so the active context is the only source. Automatic dbC is disabled
+    under every planner regardless of this value. Existing cache-key handling
+    is retained for compatibility.
     """
     ctx = _passes.PassContext.current()
     return ctx.get_enable_pypto_l0c_double_buffer() if ctx is not None else False

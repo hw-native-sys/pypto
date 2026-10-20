@@ -210,6 +210,11 @@ using transform_utils::PreserveCallAttrs;
 
 constexpr const char* kPassName = "AutoTileMatmulL0";
 
+// One policy covers both chooser enumeration and existing-pipeline recognition.
+// Distinct Acc slots establish separation, not the compute/drain overlap needed
+// to justify shrinking a tile to half of L0C. Keep explicit buffering unchanged.
+constexpr bool kAutomaticDbcEnabled = false;
+
 ExprPtr MakeIndex(int64_t v, const Span& span) {
   return std::make_shared<ConstInt>(v, DataType::INDEX, span);
 }
@@ -1137,34 +1142,11 @@ std::optional<MatmulTiling> AnalyzeMatmul(
   // PTOAS retain the operand-stationary candidates.
   cfg.allow_a_stationary = !force_output_stationary;
   cfg.allow_b_stationary = !force_output_stationary;
-  // L0C double-buffering (dbC=2): the chooser budgets the accumulator at L0C/2 and
-  // scores the drain-hidden wall so tile i's FIXPIPE drain overlaps tile i+1's
-  // MAD. This needs two *co-live* L0C accumulators. Under PTOAS, MemoryReuse is
-  // skipped, InitMemRef keeps the buffers distinct, and ptoas assigns their
-  // physical offsets.
-  //
-  // DSA_RP enables dbC=2 automatically; the legacy PYPTO planner keeps it behind
-  // the PassContext opt-in because some chained Mat-scratch layouts still hit
-  // #1908's operand-buffer fragmentation. The pipeline-membership tagger gives the dbC accumulator
-  // a *flat depth-2* membership — only the moving (dbC) loop tags it; enclosing
-  // loops skip it since the cube serializes MADs. PYPTO's MemoryReuse uses that
-  // relation to keep two buffers, while DSA_RP initially exports it as a strict
-  // separation. DSA_RP places the resulting lifetimes without the legacy
-  // allocator's fragmentation. The co-live emit is gated on the chooser's
-  // `double_buffer_c` result below, which tags the moving loop with
-  // kPipelineDoubleBufferCAttr.
-  //
-  // KNOWN-FRAGILE (experimental): this reads the memory planner from the *mutable*
-  // mid-pipeline PassContext, so dbC=2 behaviour depends on run-time context state
-  // rather than an immutable IR property. A nested PassContext once silently reset
-  // it (fixed by propagating memory_planner + PassManager's fail-loud planner check),
-  // but the underlying smell remains. The durable design is a first-class co-live /
-  // no-coalesce Acc-buffer-pair IR property set once at emit and honoured by BOTH
-  // planners. Tracked as a follow-up.
-  const MemoryPlanner memory_planner = ctx ? ctx->GetMemoryPlanner() : MemoryPlanner::PyPTO;
-  const bool pypto_dbc =
-      memory_planner == MemoryPlanner::PyPTO && ctx && ctx->GetEnablePyptoL0cDoubleBuffer();
-  cfg.allow_double_buffer_c = memory_planner != MemoryPlanner::PyPTO || pypto_dbc;
+  // Exclude dbC before enumeration: every planner must select its genuine
+  // single-C optimum at the full L0C budget, not strip buffering from a tile
+  // already selected at half capacity. The legacy opt-in remains API-compatible
+  // but cannot override this policy.
+  cfg.allow_double_buffer_c = kAutomaticDbcEnabled;
   // tile.matmul_acc threads the caller's accumulator into the K-loop's
   // iter-arg, so each invocation reads C from L1 at start and writes back at
   // end (gamma_c = 2 in the chooser's traffic model).  Plain tile.matmul
@@ -2918,6 +2900,9 @@ std::optional<PipelineAccumulatorCandidate> AnalyzePipelineAccumulator(
 /// over-approximates liveness but guarantees that the loop-wide schedule change
 /// cannot turn a previously fitting function into an L0C overflow.
 std::unordered_set<const ForStmt*> BuildPipelineDbCPlan(const FunctionPtr& func) {
+  // The legacy recognizer is subject to the same policy as candidate selection.
+  // Do not inspect or annotate existing pipelines while automatic dbC is off.
+  if (!kAutomaticDbcEnabled) return {};
   const auto* ctx = PassContext::Current();
   const MemoryPlanner planner = ctx ? ctx->GetMemoryPlanner() : MemoryPlanner::PyPTO;
   // #2131 explicitly targets the PyPTO planner. PTOAS already gives the
