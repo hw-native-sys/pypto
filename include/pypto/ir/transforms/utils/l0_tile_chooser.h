@@ -159,15 +159,13 @@ struct L0TileConfig {
   // the chooser's.
   bool allow_padding = false;
 
-  // Allow a non-divisor final K block (K-boundary peel) -- valid ONLY for a
-  // 16-aligned K. The chosen k need not divide K, but K must be a multiple of
-  // align_k so the peeled tail K - floor(K/k)*k is itself 16-aligned (ptoas requires
-  // 16-aligned tile cols). When the full (16-aligned) K fits one L0a/L0b block the
-  // chooser returns k == K (single block, no loop); otherwise it tiles K and the pass
-  // peels the partial last block. A NON-16-aligned K admits no legal tile at all (any
-  // tail or whole-K block would have non-fractal cols): the chooser returns none and
-  // the pass skips the matmul with a PerfHint (PH-AT-007). When false the chooser
-  // walks k down to an aligned divisor of K (legacy — no K-boundary handling).
+  // Allow a non-divisor final K block (K-boundary peel). K and the chosen k
+  // must both obey align_k so the peeled tail K - floor(K/k)*k is aligned too.
+  // Callers derive this grid from emitted operand layouts (e.g. 32 for INT8,
+  // normally 16 for BF16/FP16). When full K fits, k == K needs no K loop;
+  // otherwise the pass peels the partial final block. Misaligned K admits no
+  // legal peeled candidate; AutoTile leaves it untouched with PH-AT-007.
+  // When false, enumeration admits only aligned divisors of K.
   bool allow_k_boundary = false;
 };
 

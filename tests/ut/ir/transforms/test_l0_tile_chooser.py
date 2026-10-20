@@ -595,16 +595,16 @@ def _legal_ks(m: int, n: int, cfg, a0: int, b0: int) -> list[int]:
     C++ EnumerateLegalKs. k is a real search axis: ceil(K/k)*ceil(k/kt) is not
     monotone in k when kt != align_k, so the largest legal k is not always best.
     A non-divisor k (the K-peel) is admitted only when K is itself align_k-aligned
-    (peel_ok); a non-16-aligned K has no legal k here and is rejected upstream.
+    (peel_ok); a misaligned K has no legal peeled k and is rejected upstream.
     """
     boxed_m = _cdiv(m, cfg.box_align_m) * cfg.box_align_m
     boxed_n = _cdiv(n, cfg.box_align_n) * cfg.box_align_n
     cap = min(a0 // boxed_m, b0 // boxed_n)  # max k fitting boxed L0a and L0b
-    k_problem = max(_cdiv(cfg.K, cfg.align_k) * cfg.align_k, cfg.min_k) if cfg.allow_padding else cfg.K
+    k_problem = _cdiv(max(cfg.K, cfg.min_k), cfg.align_k) * cfg.align_k if cfg.allow_padding else cfg.K
     k_hi = (min(cap, k_problem) // cfg.align_k) * cfg.align_k
     peel_ok = cfg.allow_k_boundary and cfg.K % cfg.align_k == 0
     ks = []
-    k = cfg.min_k
+    k = _cdiv(cfg.min_k, cfg.align_k) * cfg.align_k
     while k <= k_hi:
         if cfg.allow_padding or peel_ok or cfg.K % k == 0:  # non-divisor k only when peel_ok
             ks.append(k)
@@ -980,6 +980,50 @@ class TestL0TilingRooflineMigration:
             f"(old traffic closed-form picked {old_closed_form})"
         )
         assert _capacities_ok(r.m, r.n, r.k, cfg)
+
+
+@pytest.mark.parametrize("dbc", [False, True])
+@pytest.mark.parametrize("K", [96, 160])
+@pytest.mark.parametrize("min_k", [16, 48, 64])
+def test_k_alignment_is_not_offset_by_a_smaller_minimum(K, dbc, min_k):
+    """A lower bound is rounded onto the K grid, not used as its origin."""
+    cfg = _default_config(M=512, N=32, K=K)
+    cfg.bytes_a = cfg.bytes_b = 1
+    cfg.align_k = 32
+    cfg.min_k = min_k
+    cfg.l0c_align_m = 32
+    cfg.allow_k_boundary = True
+    cfg.allow_double_buffer_c = dbc
+    result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+    assert result.k >= min_k and result.k % 32 == 0
+    assert (K % result.k) % 32 == 0
+    assert _capacities_ok(result.m, result.n, result.k, cfg, dbc=result.double_buffer_c)
+    tile, stat, dbc_choice, cost = _brute_optimum(cfg)
+    assert (result.m, result.n, result.k, result.stationarity, result.double_buffer_c) == (
+        *tile,
+        _STAT_ENUM[stat],
+        dbc_choice,
+    )
+    assert result.estimated_cost_cycles == cost
+
+
+@pytest.mark.parametrize("min_k", [48, 80])
+def test_padded_k_upper_bound_covers_aligned_minimum(min_k):
+    """Padding must round the lower and upper search bounds onto the same grid."""
+    cfg = _default_config(M=16, N=32, K=16)
+    cfg.align_k = 32
+    cfg.min_k = min_k
+    cfg.allow_padding = True
+    result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+    assert result.k == _cdiv(min_k, cfg.align_k) * cfg.align_k
+    assert _capacities_ok(result.m, result.n, result.k, cfg)
+    tile, stat, dbc, cost = _brute_optimum(cfg)
+    assert (result.m, result.n, result.k, result.stationarity, result.double_buffer_c) == (
+        *tile,
+        _STAT_ENUM[stat],
+        dbc,
+    )
+    assert result.estimated_cost_cycles == cost
 
 
 if __name__ == "__main__":

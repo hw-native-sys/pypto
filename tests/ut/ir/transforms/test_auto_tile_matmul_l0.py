@@ -844,9 +844,19 @@ class TestAutoTileMatmulL0KOnly:
                 out = pl.store(c, [0, 0], out)
                 return out
 
-        printed = ir.python_print(passes.auto_tile_matmul_l0()(Before))
+        after = passes.auto_tile_matmul_l0()(Before)
+        printed = ir.python_print(after)
         assert "pl.tile.matmul_acc(" in printed
         assert "pl.tile.move(bias_mat, target_memory=pl.Mem.Bias)" in printed
+        # The biased head and accumulating tail share the selected K grid.
+        calls = _matmul_acc_calls(after)
+        assert calls
+        for call in calls:
+            lhs, rhs = call.args[1:3]
+            assert isinstance(lhs.type, ir.TileType) and isinstance(rhs.type, ir.TileType)
+            left_k, right_k = lhs.type.shape[1], rhs.type.shape[0]
+            assert isinstance(left_k, ir.ConstInt) and isinstance(right_k, ir.ConstInt)
+            assert left_k.value == right_k.value and left_k.value % 32 == 0
 
 
 def _torch_codegen_matches_matmul(program, m_dim, n_dim, k_dim):
@@ -4915,6 +4925,116 @@ class TestAutoTileMatmulL0FitsL0cCastFold:
             tcvt += mlir.count("pto.tcvt")
         assert tinsert >= 1, "the bf16 downcast must lower to the cube FIXPIPE pto.tinsert"
         assert tcvt == 0, "no Vector pto.tcvt — the cast is folded into the cube writeback"
+
+
+class TestAutoTileMatmulL0OperandKAlignment:
+    """The chooser's K grid comes from the emitted L0 operand layouts."""
+
+    @pytest.mark.parametrize("dbc", [False, True])
+    @pytest.mark.parametrize(
+        "planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP, passes.MemoryPlanner.PTOAS]
+    )
+    def test_int8_padded_n_problem_keeps_legal_k(self, planner, dbc):
+        """The sweep's logical N=400 case formerly selected illegal k=48.
+
+        This pass-only assertion isolates K alignment; correctness of the padded
+        output partitions belongs to the separate valid-output-bounds fix.
+        """
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[48, 96], pl.INT8],
+                b: pl.Tensor[[96, 400], pl.INT8],
+                out: pl.Out[pl.Tensor[[48, 400], pl.INT32]],
+            ) -> pl.Tensor[[48, 400], pl.INT32]:
+                at = pl.load(a, [0, 0], [48, 96], target_memory=pl.Mem.Mat)
+                bt = pl.load(b, [0, 0], [96, 416], valid_shape=[96, 400], target_memory=pl.Mem.Mat)
+                acc = pl.tile.matmul(at, bt)
+                return pl.store(acc, [0, 0], out)
+
+        with passes.PassContext([], memory_planner=planner, enable_pypto_l0c_double_buffer=dbc):
+            after = passes.auto_tile_matmul_l0()(Before)
+
+        class Matmuls(ir.IRVisitor):
+            def __init__(self):
+                super().__init__()
+                self.calls = []
+
+            def visit_call(self, op):
+                if op.op.name in {ir.get_op("tile.matmul").name, ir.get_op("tile.matmul_acc").name}:
+                    self.calls.append(op)
+                super().visit_call(op)
+
+        visitor = Matmuls()
+        visitor.visit_program(after)
+        calls = visitor.calls
+        assert calls
+        for call in calls:
+            start = int(call.op.name == ir.get_op("tile.matmul_acc").name)
+            lhs, rhs = call.args[start : start + 2]
+            assert isinstance(lhs.type, ir.TileType) and isinstance(rhs.type, ir.TileType)
+            left_k, right_k = lhs.type.shape[1], rhs.type.shape[0]
+            assert isinstance(left_k, ir.ConstInt) and isinstance(right_k, ir.ConstInt)
+            assert left_k.value == right_k.value and left_k.value % 32 == 0
+
+    @pytest.mark.parametrize("dtype", [pl.BF16, pl.FP16])
+    def test_sixteen_aligned_floating_point_k_still_tiles(self, dtype):
+        """Do not impose INT8's 32-element grid on BF16/FP16 K=80."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 80], dtype],
+                b: pl.Tensor[[80, 256], dtype],
+                out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+            ) -> pl.Tensor[[64, 256], pl.FP32]:
+                at = pl.load(a, [0, 0], [64, 80], target_memory=pl.Mem.Mat)
+                bt = pl.load(b, [0, 0], [80, 256], target_memory=pl.Mem.Mat)
+                acc = pl.tile.matmul(at, bt)
+                return pl.store(acc, [0, 0], out)
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
+            after = passes.auto_tile_matmul_l0()(Before)
+        calls = _matmul_acc_calls(after)
+        assert calls, "legal 16-aligned floating-point K must not be deferred"
+        for call in calls:
+            lhs = call.args[1]
+            assert isinstance(lhs.type, ir.TileType)
+            assert lhs.type.memory_space == ir.MemorySpace.Left
+            k = lhs.type.shape[1]
+            assert isinstance(k, ir.ConstInt) and k.value % 16 == 0
+
+    def test_misaligned_int8_source_k_is_not_retiled(self):
+        """K=80 cannot be split into 32-aligned full blocks and a legal tail."""
+        _backend.reset_for_testing()
+        _backend.set_backend_type(BackendType.Ascend910)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 80], pl.INT8],
+                b: pl.Tensor[[80, 256], pl.INT8],
+                out: pl.Out[pl.Tensor[[64, 256], pl.INT32]],
+            ) -> pl.Tensor[[64, 256], pl.INT32]:
+                at = pl.load(a, [0, 0], [64, 80], target_memory=pl.Mem.Mat)
+                bt = pl.load(b, [0, 0], [80, 256], target_memory=pl.Mem.Mat)
+                acc = pl.tile.matmul(at, bt)
+                return pl.store(acc, [0, 0], out)
+
+        with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
+            after = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(after, Before)
 
 
 if __name__ == "__main__":

@@ -432,6 +432,32 @@ def test_predicated_canonical_input_shape():
     assert "== 0)" in printed
 
 
+def _assert_int8_l0_k_alignment(program):
+    """Canonical rewrites must emit the native 32-element INT8 K box."""
+
+    class Operands(ir.IRVisitor):
+        def __init__(self):
+            super().__init__()
+            self.count = 0
+
+        def visit_call(self, op):
+            if op.op.name in {_TILE_MATMUL_OP, _TILE_MATMUL_ACC_OP}:
+                start = int(op.op.name == _TILE_MATMUL_ACC_OP)
+                lhs, rhs = op.args[start : start + 2]
+                assert isinstance(lhs.type, ir.TileType) and isinstance(rhs.type, ir.TileType)
+                assert lhs.type.memory_space == ir.MemorySpace.Left
+                assert rhs.type.memory_space == ir.MemorySpace.Right
+                left_k, right_k = lhs.type.shape[1], rhs.type.shape[0]
+                assert isinstance(left_k, ir.ConstInt) and isinstance(right_k, ir.ConstInt)
+                assert left_k.value == right_k.value and left_k.value % 32 == 0
+                self.count += 1
+            super().visit_call(op)
+
+    operands = Operands()
+    operands.visit_program(program)
+    assert operands.count > 0
+
+
 def test_issue_2232_loop_level_mn_tiling():
     """The full [16, 1152] accumulator disappears. AutoTile clones the source
     split-K loop once per output-N tile, narrows the GM loads, completes all
@@ -450,6 +476,7 @@ def test_issue_2232_loop_level_mn_tiling():
     # blocking after the enclosing loop has been output-tiled.
     assert "target_memory=pl.Mem.Right" in printed
     assert "pl.tile.matmul_acc(" in printed
+    _assert_int8_l0_k_alignment(after)
 
 
 def test_predicated_issue_2232_loop_level_mn_tiling():
@@ -468,6 +495,7 @@ def test_predicated_issue_2232_loop_level_mn_tiling():
     assert "target_memory=pl.Mem.Right" in printed
     assert "pl.tile.matmul_acc(" in printed
     assert "if " not in printed
+    _assert_int8_l0_k_alignment(after)
 
 
 def test_canonical_split_k_tiles_both_m_and_n_with_boundaries():

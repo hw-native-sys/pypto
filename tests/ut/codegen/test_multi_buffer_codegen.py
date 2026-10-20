@@ -658,5 +658,51 @@ def test_corrected_slot_preserves_native_dynamic_events(tmp_path, program):
         )
 
 
+@pytest.mark.parametrize("dbc", [False, True], ids=["single-C", "dbC-enabled"])
+@pytest.mark.parametrize("M,N,K", [(48, 416, 96), (512, 32, 96), (48, 416, 160)])
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
+def test_int8_auto_tile_k_matches_native_operand_boxing(M, N, K, dbc, backend_type, tmp_path):
+    """INT8 extracts and peeled K tails must obey the 32-element box.
+
+    Use fully valid N boxes here: padding-only output partitions are a separate
+    bug, so native coverage must isolate K legality from valid-output bounds.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[M, K], pl.INT8],
+            b: pl.Tensor[[K, N], pl.INT8],
+            out: pl.Out[pl.Tensor[[M, N], pl.INT32]],
+        ) -> pl.Tensor[[M, N], pl.INT32]:
+            at = pl.load(a, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+            bt = pl.load(b, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+            acc = pl.tile.matmul(at, bt)
+            return pl.store(acc, [0, 0], out)
+
+    backend.reset_for_testing()
+    backend.set_backend_type(backend_type)
+    with passes.PassContext(
+        [], memory_planner=passes.MemoryPlanner.PYPTO, enable_pypto_l0c_double_buffer=dbc
+    ):
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Before)
+    func = next(func for func in optimized.functions.values() if func.name == "kernel")
+    mlir = codegen.PTOCodegen().generate(ir.Program([func], func.name, optimized.span), emit_tile_addr=True)
+    left_k = re.findall(r"!pto.tile_buf<loc=left,[^>]*cols=(\d+)", mlir)
+    right_k = re.findall(r"!pto.tile_buf<loc=right,[^>]*rows=(\d+)", mlir)
+    assert left_k and right_k, mlir
+    assert all(int(k) % 32 == 0 for k in left_k + right_k), mlir
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
+    source = tmp_path / "int8_k_boxing.pto"
+    output = tmp_path / "int8_k_boxing.cpp"
+    source.write_text(mlir)
+    arch = "a2" if backend_type == BackendType.Ascend910 else "a5"
+    _run_ptoas(str(source), str(output), [f"--pto-arch={arch}", "--pto-level=level3", "--enable-insert-sync"])
+    assert output.is_file()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
