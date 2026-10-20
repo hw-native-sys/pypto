@@ -434,11 +434,13 @@ std::vector<VarPtr> CollectTensorShapeDynVars(const FunctionPtr& func) {
 //     not an unsupported Mat->Mat preservation copy);
 //   * `tile.tget_scale_addr` (`set_output_reuses_input(0)`): rebinds the scale
 //     tile address in place (ISA GetScaleAddr); outs() must alias dst_scale.
+//   * `tile.write`: tsetval updates input 0 and returns that exact tile. Follow
+//     its current SSA binding, which may be an independent control-flow phi.
 // The aliasing is gated below on the result and input actually sharing a base
 // memref, so it only triggers when memory reuse merged them in place.
 bool IsInPlaceInput0DpsOp(const ir::OpPtr& op) {
   return ir::IsOp(op, "tile.scatter") || ir::IsOp(op, "tile.scatter_mask") || ir::IsOp(op, "tile.assemble") ||
-         ir::IsOp(op, "tile.tget_scale_addr");
+         ir::IsOp(op, "tile.tget_scale_addr") || ir::IsOp(op, "tile.write");
 }
 
 bool ShareOneMemRefWindow(const std::shared_ptr<const TileType>& lhs,
@@ -482,8 +484,8 @@ bool ShareOneMemRefWindow(const std::shared_ptr<const TileType>& lhs,
 //     differ would silently drop one of them — `tile.fillpad_inplace` reuses its
 //     input's buffer but its result carries `pad`, which the input does not.
 //
-// A declared index naming a non-tile argument (`tile.store` / `tile.write`
-// declare index 2, a TensorType) drops out: GetTileTypeWithMemRef returns null.
+// A declared index naming a non-tile argument (`tile.store` declares index 2,
+// a TensorType) drops out: GetTileTypeWithMemRef returns null.
 bool ShouldAliasResultToInPlaceInput(const AssignStmtPtr& stmt) {
   auto call = As<ir::Call>(stmt->value_);
   if (!call || !call->op_) return false;

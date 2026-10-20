@@ -156,6 +156,28 @@ def test_selector_failure_is_not_empty_success(library):
         audit.select_entries(library, "a5")
 
 
+@pytest.mark.parametrize("include_kernel", [False, True])
+def test_cpu_reference_entries_do_not_count_as_compilation_coverage(library, include_kernel):
+    # These CPU-only self-tests can pass without compiling a PyPTO kernel.
+    entries = ["models/glm5_3_flash/weights.py", "models/glm5_3_flash/prefill_ref.py"]
+    if include_kernel:
+        entries.append("models/case.py")
+        (library / "models/case.py").write_text("from golden import run\nrun('ok', [])")
+    for entry in entries[:2]:
+        path = library / entry
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("raise SystemExit(0)\n")
+    selector = library / ".github/scripts/detect_changes.py"
+    selector.parent.mkdir(parents=True)
+    selector.write_text(f"print({' '.join(entries)!r})\n")
+
+    if include_kernel:
+        assert audit.select_entries(library, "a2a3") == ["models/case.py"]
+    else:
+        with pytest.raises(ValueError, match="No formal pypto-lib entries"):
+            audit.select_entries(library, "a2a3")
+
+
 @pytest.mark.parametrize(("kernel", "status"), [("ok", 0), ("bad", 1), ("truncated", 1)])
 def test_manifest_uses_library_selector(library, tmp_path, monkeypatch, kernel, status):
     selector = library / ".github/scripts/detect_changes.py"

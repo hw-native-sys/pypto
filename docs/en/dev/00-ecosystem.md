@@ -111,11 +111,11 @@ A library of real-world models and primitive tensor functions built **on top of*
 **Compiler CI coverage:** The `pypto-lib-compile` job compiles all formal runnable
 entries selected by pypto-lib's `.github/scripts/detect_changes.py --all`, using
 its platform ownership rules for A2/A3 and A5. Drafts and non-runnable helpers are
-excluded, including the CPU-only GLM weights round-trip test; helpers are exercised
-through their callers. Device-only entries are included because compilation needs
-no NPU. The adapter forces `golden.run` into compile-only mode, records direct
-compile calls, and requires PTOAS. Coverage includes frontend, passes, verification,
-codegen, and PTOAS.
+excluded, including the CPU-only GLM weights round-trip and prefill reference
+self-tests; helpers are exercised through their callers. Device-only entries are
+included because compilation needs no NPU. The adapter forces `golden.run` into
+compile-only mode, records direct compile calls, and requires PTOAS. Coverage
+includes frontend, passes, verification, codegen, and PTOAS.
 This does not build device binaries or check numerical results; `pypto-lib-model`
 provides the separate device smoke tests.
 

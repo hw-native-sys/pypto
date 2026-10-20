@@ -111,7 +111,7 @@ Python DSL → IR（不可变树）→ Pass Pipeline（20+ passes）→ CodeGen
 **编译器 CI 覆盖：** `pypto-lib-compile` job 编译 pypto-lib 的
 `.github/scripts/detect_changes.py --all` 选出的全部正式可运行入口，
 按库的平台归属规则分别覆盖 A2/A3 和 A5。排除草稿、不可独立运行的辅助模块，
-以及仅使用 CPU 的 GLM 权重往返测试；
+以及仅使用 CPU 的 GLM 权重往返测试和 prefill 参考实现自测；
 辅助模块通过调用它们的入口进行覆盖。编译不需要 NPU，因此仅支持真机的入口也会纳入。
 适配器强制 `golden.run` 使用仅编译模式（compile-only），同时记录直接编译调用，
 并强制执行 PTOAS，覆盖前端、passes、验证、代码生成和 PTOAS。
