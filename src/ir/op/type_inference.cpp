@@ -1902,6 +1902,19 @@ std::vector<TypePtr> DeduceCallReturnType(const std::vector<VarPtr>& callee_para
   const bool validate_inline_tiles = is_inline && return_types.empty();
   TypeVarMap var_map;
   std::vector<CallTypeBindingConstraint> constraints;
+  if (is_inline) {
+    CHECK(callee_params.size() == args.size())
+        << "DeduceCallReturnType: callee_params size (" << callee_params.size() << ") must match args size ("
+        << args.size() << ")";
+    // Scalar values are authoritative even when their only type occurrence is
+    // in a Tile view. Seed every argument first so parameter order cannot let
+    // metadata replace an actual value, including a caller-owned identity.
+    for (size_t i = 0; i < callee_params.size(); ++i) {
+      if (callee_params[i] && args[i] && As<ScalarType>(callee_params[i]->GetType())) {
+        var_map.emplace(callee_params[i].get(), args[i]);
+      }
+    }
+  }
   CollectCallTypeBindings(callee_params, args, var_map, constraints);
   // Void callees still consume their arguments: equal carrier geometry must
   // not let an E2M1 buffer reach an E1M2 body (or vice versa) without a cast.
@@ -1963,7 +1976,7 @@ std::vector<TypePtr> DeduceCallReturnType(const std::vector<VarPtr>& callee_para
     auto existing = transform_utils::Substitute(constraint.existing, var_map);
     auto candidate = transform_utils::Substitute(constraint.candidate, var_map);
     if (structural_equal(existing, candidate)) continue;
-    CHECK(ProveValidExtentEqual(existing, candidate) == ProofResult::kTrue)
+    CHECK_SPAN(ProveValidExtentEqual(existing, candidate) == ProofResult::kTrue, constraint.existing->span_)
         << "Dynamic type variable '" << constraint.var->name_hint_ << "' has conflicting bindings "
         << PythonPrint(existing) << " and " << PythonPrint(candidate) << " that are not provably equal at "
         << constraint.context << "; cross-function calls do not emit a runtime shape guard";

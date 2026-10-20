@@ -932,6 +932,120 @@ class TestInlineTileArgumentContracts:
 
         ir.assert_structural_equal(passes.inline_functions()(before), Expected)
 
+    @pytest.mark.parametrize("metadata", ["valid_shape", "stride", "start_offset"])
+    @pytest.mark.parametrize("returns_tile", [False, True], ids=["void", "returning"])
+    @pytest.mark.parametrize("scalar_last", [False, True], ids=["scalar-first", "scalar-last"])
+    @pytest.mark.parametrize("scalar_value", [3, 8], ids=["matching", "conflicting"])
+    def test_scalar_argument_controls_explicit_tile_view(
+        self, metadata, returns_tile, scalar_last, scalar_value
+    ):
+        """An actual Scalar value must agree with every declared Tile view occurrence."""
+        span = ir.Span("inline_scalar_view.py", 12, 1)
+        extent = ir.Var("extent", ir.ScalarType(pl.INDEX), span)
+        if metadata == "valid_shape":
+            formal_view = ir.TileView(valid_shape=[extent, 64])
+            actual_view = ir.TileView(valid_shape=[3, 64])
+            context = "valid shape"
+        elif metadata == "stride":
+            formal_view = ir.TileView(stride=[extent, 1])
+            actual_view = ir.TileView(stride=[3, 1])
+            context = "tile stride"
+        else:
+            formal_view = ir.TileView(start_offset=extent)
+            actual_view = ir.TileView(start_offset=3)
+            context = "tile start_offset"
+        formal_type = ir.TileType([8, 64], pl.FP32, tile_view=formal_view)
+        actual_type = ir.TileType([8, 64], pl.FP32, tile_view=actual_view)
+        tile = ir.Var("tile", formal_type, span)
+        source = ir.Var("source", actual_type, span)
+        value = ir.ConstInt(scalar_value, pl.INDEX, span)
+        params, args = ([tile, extent], [source, value]) if scalar_last else ([extent, tile], [value, source])
+        return_types = [formal_type] if returns_tile else []
+        helper = ir.Function(
+            "consume",
+            params,
+            return_types,
+            ir.ReturnStmt([tile] if returns_tile else [], span),
+            span,
+            ir.FunctionType.Inline,
+        )
+        call = ir.Call(ir.GlobalVar("consume"), args, actual_type if returns_tile else ir.UnknownType(), span)
+        body = (
+            ir.ReturnStmt([call], span)
+            if returns_tile
+            else ir.SeqStmts([ir.EvalStmt(call, span), ir.ReturnStmt([source], span)], span)
+        )
+        before = ir.Program(
+            [helper, ir.Function("main", [source], [actual_type], body, span)], "Before", span
+        )
+
+        if scalar_value != 3:
+            message = rf"Dynamic type variable 'extent'.*conflicting bindings 8 and 3.*{context}"
+            with pytest.raises(ValueError, match=message) as error:
+                ir.deduce_call_return_type(params, args, return_types, is_inline=True)
+            assert "inline_scalar_view.py:12:1" in str(error.value)
+            with pytest.raises(ValueError, match=message):
+                passes.inline_functions()(before)
+            # Surviving-call inference keeps its existing metadata-only binding policy.
+            legacy = ir.deduce_call_return_type(params, args, [formal_type])
+            ir.assert_structural_equal(legacy[0], actual_type)
+            return
+
+        inferred = ir.deduce_call_return_type(params, args, return_types, is_inline=True)
+        if returns_tile:
+            ir.assert_structural_equal(inferred[0], actual_type)
+        else:
+            assert inferred == []
+        expected = ir.Program(
+            [ir.Function("main", [source], [actual_type], ir.ReturnStmt([source], span), span)],
+            "Expected",
+            span,
+        )
+        ir.assert_structural_equal(passes.inline_functions()(before), expected)
+
+    @pytest.mark.parametrize("scalar_value", [2, 3], ids=["matching", "conflicting"])
+    def test_tile_view_constraint_uses_transitive_actual_scalar_value(self, scalar_value):
+        """A view M=4 must also agree with Tensor M=2*n and the actual scalar n."""
+        span = ir.Span.unknown()
+        scalar = ir.Var("n", ir.ScalarType(pl.INDEX), span)
+        rows = ir.Var("rows", ir.ScalarType(pl.INDEX), span)
+        tile_type = ir.TileType([8, 64], pl.FP32, tile_view=ir.TileView(valid_shape=[rows, 64]))
+        actual_type = ir.TileType([8, 64], pl.FP32, tile_view=ir.TileView(valid_shape=[4, 64]))
+        tile = ir.Var("tile", tile_type, span)
+        tensor = ir.Var("tensor", ir.TensorType([rows, 64], pl.FP32), span)
+        actual_tile = ir.Var("actual_tile", actual_type, span)
+        twice_scalar = ir.Mul(ir.ConstInt(2, pl.INDEX, span), scalar, pl.INDEX, span)
+        actual_tensor = ir.Var("actual_tensor", ir.TensorType([twice_scalar, 64], pl.FP32), span)
+        params = [tile, tensor, scalar]
+        args = [actual_tile, actual_tensor, ir.ConstInt(scalar_value, pl.INDEX, span)]
+        if scalar_value != 2:
+            with pytest.raises(
+                ValueError, match="Dynamic type variable 'rows'.*conflicting bindings 4 and .*3"
+            ):
+                ir.deduce_call_return_type(params, args, [], is_inline=True)
+            return
+        assert ir.deduce_call_return_type(params, args, [], is_inline=True) == []
+
+    def test_inline_scalar_identity_cannot_be_rebound_by_tile_view(self):
+        """A caller-owned scalar identity cannot silently become an unrelated valid extent."""
+        span = ir.Span.unknown()
+        extent = ir.Var("extent", ir.ScalarType(pl.INDEX), span)
+        tile = ir.Var(
+            "tile", ir.TileType([8, 64], pl.FP32, tile_view=ir.TileView(valid_shape=[extent, 64])), span
+        )
+        source = ir.Var(
+            "source", ir.TileType([8, 64], pl.FP32, tile_view=ir.TileView(valid_shape=[3, 64])), span
+        )
+        with pytest.raises(ValueError, match="Dynamic type variable 'extent'.*conflicting bindings"):
+            ir.deduce_call_return_type([extent, tile], [extent, source], [], is_inline=True)
+
+    def test_inline_scalar_binding_rejects_wrong_argument_count(self):
+        """The scalar prepass must reject malformed public calls before indexing arguments."""
+        span = ir.Span.unknown()
+        scalar = ir.Var("extent", ir.ScalarType(pl.INDEX), span)
+        with pytest.raises(ValueError, match="callee_params size.*must match args size"):
+            ir.deduce_call_return_type([scalar], [], [], is_inline=True)
+
     @pytest.mark.parametrize("last_rows", [8, 9], ids=["matching", "conflicting"])
     def test_void_shared_tile_constraint_checks_transitive_tensor_bindings(self, last_rows):
         """Every binding feeding the shared Tile dimension must agree, including dependencies."""

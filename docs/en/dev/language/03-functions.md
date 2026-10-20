@@ -152,6 +152,8 @@ do not constrain that check. Separate Tile arguments can bind their generic
 physical dimensions independently, including when the helper returns its Tile parameters.
 Dimensions shared with Tensor types, explicit Tile views, or Scalar parameters
 retain their shared constraints, including in helpers with no return value.
+Actual Scalar values also constrain view-only dimensions: `n=8` cannot match
+an actual valid extent of `3` when the declared valid extent is `n`.
 Inlining substitutes the caller's Tile without
 copying it, preserving its valid shape. Tile parameters remain limited to
 inline helpers and are not added to device dispatch interfaces.
